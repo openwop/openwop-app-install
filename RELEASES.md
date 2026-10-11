@@ -30,6 +30,17 @@ A release SHOULD be marked a required stop only when at least one holds:
 
 ## Version log
 
+### v0.4.0 — 2026-10-10
+- **Required stop:** no.
+- **Schema:** sqlite 49 / postgres 47 · **App migrations:** 22.
+- One day since v0.3.0 (80 commits, ADRs 0869–0872). No migrations, rolling-safe,
+  no breaking config. New: an hourly storage-growth gauge with optional trigger
+  knobs (`OPENWOP_STORAGE_GROWTH_GAUGE`, `OPENWOP_SURFACE_ROW_TRIGGER`,
+  `OPENWOP_VECTOR_*`); tenant-indexed kanban and authorization reads; the 44
+  Work-Twin `tmpl.*` templates ship as a chain pack; the v1 discovery builder is
+  deleted. v2 discovery advertises `multiAgent` only when its phase flags are set.
+- [CHANGELOG §0.4.0](./CHANGELOG.md#040--2026-10-10)
+
 ### v0.3.0 — 2026-10-09
 - **Required stop:** no.
 - **Schema:** sqlite 49 / postgres 47 · **App migrations:** 22.

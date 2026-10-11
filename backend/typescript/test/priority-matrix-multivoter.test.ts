@@ -2,46 +2,31 @@
  * Priority Matrix multi-voter scoring (ADR 0059) — ROUTE harness. Two members vote
  * independently; the ranking uses the aggregate; one member never overwrites the
  * other; switching mode is config-authority-gated; single-mode is unchanged.
+ *
+ * What turns it red (w15 probes, `priorityMatrixService.ts` / `routes.ts`): a vote key
+ * without the voterId (overwrite); the mean or median aggregator replaced; weighted voters
+ * aggregated unweighted; the "uniform weights ⇒ unweighted path" rule keyed on weight 1;
+ * `voterWeights` / `votingMode` dropped from the config-authority gate (RBAC); the 1..10
+ * weight range unchecked.
  */
 
-import http from 'node:http';
-import type { AddressInfo } from 'node:net';
-import { getSetCookies } from './headerCookies.js';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { createApp } from '../src/index.js';
-import { saveConfig } from '../src/host/featureToggles/service.js';
-import { getToggleDefault } from '../src/host/featureToggles/registry.js';
+import { bootPlanningApp, makeClient, enableToggle, uniqEmail, type Client } from './planningHarness.js';
+import { computePriority } from '../src/features/priority-matrix/scoring.js';
+import { CRITERIA_PRESETS } from '../src/features/priority-matrix/types.js';
 
-let BASE: string;
-let server: http.Server;
+let BASE = '';
+let closeApp: () => Promise<void>;
 let n = 0;
 
 beforeAll(async () => {
-  process.env.OPENWOP_STORAGE_DSN = 'memory://';
-  process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
-  process.env.OPENWOP_TEST_AUTH_ENABLED = 'true';
-  delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
-  const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
-  const d = getToggleDefault('priority-matrix');
-  if (d) await saveConfig({ ...d, status: 'on' }, 'test');
+  const h = await bootPlanningApp(); BASE = h.base; closeApp = h.close;
+  await enableToggle('priority-matrix', 'on');
 });
-afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
+afterAll(async () => { await closeApp(); });
 
-interface Res<T = any> { status: number; body: T }
-interface Client { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res>; patch: (p: string, b?: unknown) => Promise<Res>; put: (p: string, b?: unknown) => Promise<Res>; del: (p: string) => Promise<Res> }
-function client(): Client {
-  let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
-    const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
-    for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
-    return { status: res.status, body: out };
-  };
-  return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), patch: (p, b) => call('PATCH', p, b), put: (p, b) => call('PUT', p, b), del: (p) => call('DELETE', p) };
-}
-
-const uniqEmail = (who: string): string => `${who}-${Date.now()}-${n++}@acme.test`;
+const client = (): Client => makeClient(() => BASE);
+const W = CRITERIA_PRESETS.weighted;
 async function signup(c: Client, opts: { tenantId?: string } = {}): Promise<{ userId: string }> {
   const r = await c.post('/host/openwop-app/test/login', { email: uniqEmail('mv'), ...(opts.tenantId ? { tenantId: opts.tenantId } : {}) });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
@@ -78,9 +63,12 @@ describe('priority-matrix multi-voter (ADR 0059)', () => {
     const ownerView = (await owner.get(`${base}/ideas`)).body.ideas[0];
     expect(ownerView.voterCount).toBe(2);
     expect(ownerView.myScores.roi).toBe(8);            // owner sees their own vote
-    // Aggregate (mean of 8 and 2 = 5 on benefits) sits strictly between the two solo scores.
+    // Aggregate = the per-criterion MEAN of A and B (5 everywhere), which sits strictly
+    // between the two solo scores.
     const aggregate = ownerView.computedPriority;
-    expect(aggregate).toBeGreaterThan(0);
+    expect(aggregate).toBe(computePriority(W, { 'strategic-alignment': 5, roi: 5, urgency: 5, 'compliance-risk': 5, cost: 5 }));
+    expect(aggregate).toBeGreaterThan(computePriority(W, B));
+    expect(aggregate).toBeLessThan(computePriority(W, A));
     // Member's read sees their own low vote, same aggregate.
     const memberView = (await member.get(`${base}/ideas`)).body.ideas[0];
     expect(memberView.myScores.roi).toBe(2);
@@ -91,14 +79,30 @@ describe('priority-matrix multi-voter (ADR 0059)', () => {
     const tenantId = `org:mv-${Date.now()}-${n++}`;
     const owner = client();
     await signup(owner, { tenantId });
+    const m1 = client();
+    const m1User = await signup(m1, { tenantId });
+    const m2 = client();
+    const m2User = await signup(m2, { tenantId });
     const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
+    for (const u of [m1User, m2User]) {
+      await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: u.userId, roles: ['editor'] });
+    }
     const list = (await owner.post(L, { orgId, name: 'Median', presetId: 'weighted', votingMode: 'multi-voter', voteAggregation: 'median' })).body;
     expect(list.voteAggregation).toBe('median');
-    // (Single voter here just exercises the median path end-to-end without overwrite.)
     const base = `${L}/${encodeURIComponent(list.id)}`;
     const idea = (await owner.post(`${base}/ideas`, { title: 'Skewed' })).body;
-    const r = await owner.put(`${base}/ideas/${encodeURIComponent(idea.id)}/scores`, { scores: A });
-    expect(r.body.computedPriority).toBeGreaterThan(0);
+    // Skew: two high votes and one low. Median picks A on every criterion; the mean is
+    // pulled toward B (8,8,2 → 6; cost 2,2,8 → 4).
+    for (const [c, s] of [[owner, A], [m1, A], [m2, B]] as const) {
+      expect((await c.put(`${base}/ideas/${encodeURIComponent(idea.id)}/scores`, { scores: s })).status).toBe(200);
+    }
+    const median = (await owner.get(`${base}/ideas`)).body.ideas[0].computedPriority;
+    expect(median).toBe(computePriority(W, A));
+
+    expect((await owner.patch(base, { voteAggregation: 'mean' })).status).toBe(200);
+    const mean = (await owner.get(`${base}/ideas`)).body.ideas[0].computedPriority;
+    expect(mean).toBe(computePriority(W, { 'strategic-alignment': 6, roi: 6, urgency: 6, 'compliance-risk': 6, cost: 4 }));
+    expect(mean).not.toBe(median);
   });
 
   it('weighted voters shift the aggregate toward the heavier-weighted voter (ADR 0059)', async () => {

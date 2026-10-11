@@ -57,7 +57,8 @@ import { withRunLimit } from '../host/runLimitSeam.js';
 import { launchSubjectOf } from '../features/featureRoute.js';
 import { approvalGatesWithGroupRole, validateApproverResolvability } from '../host/approverResolution.js';
 import { listOrgs } from '../host/accessControlService.js';
-import { CROSS_HOST_CAUSATION_HOST_ID, isPhase3Enabled } from './discovery.js';
+import { CROSS_HOST_CAUSATION_HOST_ID } from './discovery.js';
+import { isPhase3Enabled } from '../host/multiAgentPhases.js';
 import { getEventLog } from '../executor/eventLog.js';
 import { runEtag, ifNoneMatchSatisfied, sendNegotiatedRunJson } from '../host/restTransport.js';
 import { detectAndRecordReplayDivergence } from '../executor/replayDivergence.js';
@@ -1289,8 +1290,14 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
       // run read. loadReadableRun enforces tenant (wildcard-operator + streamToken
       // escape hatches) and 404s a non-owned run — no cross-tenant existence oracle.
       const run = await loadReadableRun(req, storage, req.params.runId);
+      // ADR 0858 P4 correction — a FORK is not a composition child. `:fork`
+      // stamps `parentRunId` (the source) AND `forkMode`; a dispatched child
+      // carries `parentRunId` with `forkMode` unset (forkInterrupts.ts reads the
+      // same discriminator). spec/v2/core/runs.md §Diff and ancestry: a fork's
+      // ancestry parent MUST be null — its lineage is `sourceRunId` on the fork
+      // 201 and the snapshot's `parentRunId`, never a dispatch `cause`.
       const parent =
-        run.parentRunId !== undefined && run.parentRunId !== null
+        run.parentRunId !== undefined && run.parentRunId !== null && run.forkMode === undefined
           ? {
               runId: run.parentRunId,
               // Same-host parent on this single-host reference app: hostId

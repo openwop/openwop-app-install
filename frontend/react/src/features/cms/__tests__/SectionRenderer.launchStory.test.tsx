@@ -1,6 +1,16 @@
 /**
  * ADR 0762 — the launch-story treatments: the demo-gated intro film, example
  * prompts, drawn deep dives, and a stats band with its section head.
+ *
+ * The film player's own contract (preload="none", no native controls until
+ * play, CORS captions track) is pinned once, in videoSection.test.tsx (ADR
+ * 0843: one player). This file pins what is the HERO's: the demo gate, the
+ * openwop.dev film URLs, the visible caption describing it, the fade.
+ *
+ * Sabotage-witnessed (/grade-tests w17): removing the demo gate, changing the
+ * hero's described-by, keeping the play button visible while playing or after
+ * it ends, dropping the prompt links, drawing art for an unknown slug, and
+ * dropping the stats lede each turn a case red.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
@@ -12,7 +22,7 @@ vi.mock('../../../client/useDemoMode.js', () => ({ useDemoMode: () => demo.on })
 import { RenderSection } from '../SectionRenderer.js';
 import type { Section } from '../cmsClient.js';
 
-afterEach(() => { cleanup(); demo.on = false; });
+afterEach(() => { cleanup(); vi.restoreAllMocks(); demo.on = false; });
 
 const view = (section: Section) => render(<MemoryRouter><RenderSection section={section} mode="public" /></MemoryRouter>);
 const hero = (data: Record<string, unknown>): Section => ({ sectionId: 'h', type: 'hero', data: { heading: 'Build agents', ...data } });
@@ -29,15 +39,10 @@ describe('hero visual: film', () => {
     const { container } = view(hero({ visual: 'film', ctaLabel: 'Start', ctaUrl: '/chat' }));
     const video = container.querySelector<HTMLVideoElement>('.fp-hero--film video');
     expect(video).toBeTruthy();
-    expect(video!.getAttribute('preload')).toBe('none');
     expect(video!.getAttribute('src')).toMatch(/^https:\/\/openwop\.dev\/assets\/video\/openwop-intro\.mp4\?v=/);
     expect(video!.getAttribute('poster')).toMatch(/^https:\/\/openwop\.dev\//);
-    expect(video!.hasAttribute('controls')).toBe(false);
-    // Narrated: an English captions track, read cross-origin from openwop.dev.
-    expect(video!.getAttribute('crossorigin')).toBe('anonymous');
+    // Narrated: the hero's own captions file on openwop.dev.
     const track = video!.querySelector('track');
-    expect(track?.getAttribute('kind')).toBe('captions');
-    expect(track?.getAttribute('srclang')).toBe('en');
     expect(track?.getAttribute('src')).toMatch(/^https:\/\/openwop\.dev\/assets\/video\/openwop-intro\.en\.vtt\?v=/);
     // Described by its caption; the heading and CTA stay real content.
     const cap = container.querySelector('figcaption');
@@ -64,7 +69,6 @@ describe('hero visual: film', () => {
     expect(btn.classList.contains('fp-film__play--faded')).toBe(false);
     expect(btn.getAttribute('aria-hidden')).toBe('false');
     expect(btn.tabIndex).toBe(0);
-    play.mockRestore();
   });
 });
 
@@ -78,7 +82,7 @@ describe('columns layout: prompts', () => {
     expect(quotes).toEqual(['Ask finance before paying.', 'Stop if it spends more than $2.']);
     const links = screen.getAllByRole('link');
     expect(links.map((l) => l.getAttribute('href'))).toEqual(['/chat']);
-    expect(document.querySelectorAll('.fp-prompt__tag')).toHaveLength(2);
+    expect([...document.querySelectorAll('.fp-prompt__tag')].map((e) => e.textContent)).toEqual(['approval', 'budget cap']);
   });
 });
 

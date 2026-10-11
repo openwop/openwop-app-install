@@ -22,7 +22,6 @@ import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
-import { v1Advertisement } from './support/v1Advertisement.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { __resetEmailStore, createTemplate, createCampaign, sendCampaign, listSends, setSenderAddress, type EmailMessage, type EmailProvider } from '../src/features/email/emailService.js';
@@ -99,11 +98,14 @@ describe('Email: provider-status (DEF-4 / Deferred Phase B.1)', () => {
 });
 
 describe('Email: templates + campaigns CRUD (RBAC) + send route', () => {
-  it('is registered + advertises ctx.features.email', async () => {
+  it('is registered + composes the ctx.features.email surface', async () => {
     const { BACKEND_FEATURES } = await import('../src/features/index.js');
     expect(BACKEND_FEATURES.some((f) => f.id === 'email')).toBe(true);
-    // ADR 0812 — the v2 root carries no `hostExtensions.featureSurfaces` (ADR 0014) yet; read the v1 claim from its builder.
-    expect((await v1Advertisement()).hostExtensions?.featureSurfaces).toContain('host.sample.email');
+    // ADR 0812 P4: the `hostExtensions.featureSurfaces` advert went with the v1
+    // builder (the v2 root has no record for it, ADR 0858 ledger); the surface
+    // registry it was printed from is what is asserted now.
+    const { registeredFeatureSurfaceIds } = await import('../src/host/featureSurfaces.js');
+    expect(registeredFeatureSurfaceIds()).toContain('email');
   });
 
   it('owner CRUDs a template + campaign and sends (empty audience ⇒ 0 stats)', async () => {

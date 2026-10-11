@@ -6,16 +6,29 @@
  * (plus a notebook-facet corpus) and reports honest counts; the client used to
  * discard the body (zero consumers repo-wide) while the confirm's body was the
  * generic `cannotBeUndone`.
+ *
+ * Sabotage (w13 g3 probes): reading `facet === 'notebook'` instead of the
+ * server's `deletesCorpus` reds THE DEFECT + the NEGATIVE CONTROL; a blank
+ * cascade body reds the plain-project case; swapping or zeroing a receipt count
+ * reds "surfaces the backend counts"; dropping the corpus/dependents toast line,
+ * the dependents list, the zero filter, the failed-count sentence, the failure
+ * notice, the `disabled` busy state or the finally re-enable each reds its case.
+ * Ceiling: the `deletingRef` re-entry guard sits behind `disabled`, and jsdom
+ * never dispatches a click to a disabled button, so that second guard cannot be
+ * driven here (probe w13g3-del-ref-guard-off is vacuous by construction).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, fireEvent, act, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 
-const getProject = vi.fn();
-const deleteProject = vi.fn();
-const getDeletePreview = vi.fn();
-const confirmMock = vi.fn();
-const toastSuccess = vi.fn();
+import type { Project, DeleteProjectReceipt, ProjectDependentCounts } from '../projectsClient.js';
+import type { ConfirmOptions } from '../../../ui/confirm.js';
+
+const getProject = vi.fn<(id: string) => Promise<Project>>();
+const deleteProject = vi.fn<(id: string) => Promise<DeleteProjectReceipt>>();
+const getDeletePreview = vi.fn<(id: string) => Promise<ProjectDependentCounts>>();
+const confirmMock = vi.fn<(o: ConfirmOptions) => Promise<boolean>>();
+const toastSuccess = vi.fn<(m: string) => void>();
 
 vi.mock('../projectsClient.js', async (orig) => ({
   ...(await orig<Record<string, unknown>>()),
@@ -23,14 +36,22 @@ vi.mock('../projectsClient.js', async (orig) => ({
   deleteProject: (id: string) => deleteProject(id),
   getDeletePreview: (id: string) => getDeletePreview(id),
 }));
-vi.mock('../../../ui/confirm.js', () => ({ confirm: (o: unknown) => confirmMock(o) }));
+vi.mock('../../../ui/confirm.js', () => ({ confirm: (o: ConfirmOptions) => confirmMock(o) }));
 vi.mock('../../../ui/toast.js', () => ({ toast: { success: (m: string) => toastSuccess(m), error: vi.fn() } }));
 
 import { ProjectDetailPage } from '../ProjectDetailPage.js';
 
-const PROJECT = {
+const PROJECT: Project = {
   id: 'p1', tenantId: 't', orgId: 'org-1', name: 'Atlas', workflows: [], boardId: 'b1', canWrite: true,
-} as never;
+};
+
+/** The first confirm's body text (the page passes a plain string). */
+const confirmBody = (): string => {
+  const b = confirmMock.mock.calls[0]?.[0]?.body;
+  return typeof b === 'string' ? b : '';
+};
+/** The first success toast's text. */
+const toastText = (): string => toastSuccess.mock.calls[0]?.[0] ?? '';
 
 const settle = async (): Promise<void> => { await act(async () => { await new Promise((r) => setTimeout(r, 0)); }); };
 
@@ -54,19 +75,12 @@ async function clickDelete(): Promise<void> {
 describe('PROJ-UX-5 — confirm names the cascade', () => {
   it('a plain project confirm enumerates board / memory / schedules / chat history', async () => {
     await clickDelete();
-    const opts = confirmMock.mock.calls[0]?.[0] as { body?: string };
-    expect(opts.body).toMatch(/board/i);
-    expect(opts.body).toMatch(/memory/i);
-    expect(opts.body).toMatch(/schedules/i);
-    expect(opts.body).toMatch(/chat/i);
-    expect(opts.body).not.toMatch(/corpus/i); // no invented notebook claim
-  });
-
-  it('a project the backend says will lose its corpus names the ingested source corpus', async () => {
-    getProject.mockResolvedValue({ ...(PROJECT as object), deletesCorpus: true } as never);
-    await clickDelete();
-    const opts = confirmMock.mock.calls[0]?.[0] as { body?: string };
-    expect(opts.body).toMatch(/corpus/i);
+    const body = confirmBody();
+    expect(body).toMatch(/board/i);
+    expect(body).toMatch(/memory/i);
+    expect(body).toMatch(/schedules/i);
+    expect(body).toMatch(/chat/i);
+    expect(body).not.toMatch(/corpus/i); // no invented notebook claim (also the older-backend shape: the field is absent)
   });
 
   it('THE DEFECT — an ensure-provisioned notebook has NO facet and still gets the corpus warning', async () => {
@@ -75,14 +89,13 @@ describe('PROJ-UX-5 — confirm names the cascade', () => {
     // stamps `facet`. So this exact shape (a corpus that WILL be erased, no facet)
     // was warned about a board and some notes, and learned its sources were gone
     // from the success toast. Irreversible destruction disclosed after the fact.
-    getProject.mockResolvedValue({ ...(PROJECT as object), facet: undefined, deletesCorpus: true } as never);
+    getProject.mockResolvedValue({ ...PROJECT, deletesCorpus: true }); // NO `facet` key at all — the ensure-provisioned shape
     deleteProject.mockResolvedValue({ deleted: true, memoryEntriesCleared: 0, schedulesCleared: 0, conversationsDeleted: 1, notebookCorpusDeleted: true });
     await clickDelete();
-    const opts = confirmMock.mock.calls[0]?.[0] as { body?: string };
-    expect(opts.body, 'the warning must match what the delete actually does').toMatch(/corpus/i);
+    expect(confirmBody(), 'the warning must match what the delete actually does').toMatch(/corpus/i);
     // …and the toast, which is the channel that used to carry the whole
     // disclosure, is now a CONFIRMATION of something already consented to.
-    expect(toastSuccess.mock.calls[0]?.[0] as string).toMatch(/corpus/i);
+    expect(toastText()).toMatch(/corpus/i);
   });
 
   it('NEGATIVE CONTROL — a facet:notebook project whose corpus is NOT erased gets no corpus warning', async () => {
@@ -90,18 +103,10 @@ describe('PROJ-UX-5 — confirm names the cascade', () => {
     // either. A notebook-created project whose corpus predates the provenance
     // stamp loses auto-cleanup (an orphan, deliberately), and warning about a
     // destruction that will not happen is its own dishonesty.
-    getProject.mockResolvedValue({ ...(PROJECT as object), facet: 'notebook', deletesCorpus: false } as never);
+    getProject.mockResolvedValue({ ...PROJECT, facet: 'notebook', deletesCorpus: false });
     await clickDelete();
-    const opts = confirmMock.mock.calls[0]?.[0] as { body?: string };
-    expect(opts.body).not.toMatch(/corpus/i);
-  });
-
-  it('an older backend that omits the field falls back to the generic warning', async () => {
-    getProject.mockResolvedValue({ ...(PROJECT as object), deletesCorpus: undefined } as never);
-    await clickDelete();
-    const opts = confirmMock.mock.calls[0]?.[0] as { body?: string };
-    expect(opts.body).not.toMatch(/corpus/i);
-    expect(opts.body).toMatch(/board/i);
+    expect(confirmBody()).toMatch(/board/i); // the confirm DID run (not an empty body)
+    expect(confirmBody()).not.toMatch(/corpus/i);
   });
 });
 
@@ -109,17 +114,10 @@ describe('PROJ-UX-5 — the receipt has a reader', () => {
   it('surfaces the backend counts after a successful delete', async () => {
     await clickDelete();
     expect(toastSuccess).toHaveBeenCalledTimes(1);
-    const msg = toastSuccess.mock.calls[0]?.[0] as string;
-    expect(msg).toMatch(/1/);   // conversationsDeleted
-    expect(msg).toMatch(/4/);   // memoryEntriesCleared
-    expect(msg).toMatch(/2/);   // schedulesCleared
+    const msg = toastText();
+    // Each count in ITS slot — a digit-anywhere match let a swapped mapping pass.
+    expect(msg).toContain('chat conversations removed: 1; memory entries cleared: 4; schedules removed: 2.');
     expect(msg).not.toMatch(/corpus/i); // the plain project must not claim one
-  });
-
-  it('names the corpus when the backend reports notebookCorpusDeleted', async () => {
-    deleteProject.mockResolvedValue({ deleted: true, memoryEntriesCleared: 0, schedulesCleared: 0, conversationsDeleted: 1, notebookCorpusDeleted: true });
-    await clickDelete();
-    expect(toastSuccess.mock.calls[0]?.[0] as string).toMatch(/corpus/i);
   });
 
   it('a FAILED delete shows no receipt (negative control — no false success)', async () => {
@@ -134,7 +132,7 @@ describe('ADR 0839 D2 — the confirm and the receipt name what other features l
   it('names the non-zero dependents the server counted, and only those', async () => {
     getDeletePreview.mockResolvedValue({ canvases: 2, documents: 1, priorityLists: 0, teamLedger: 3 });
     await clickDelete();
-    const body = (confirmMock.mock.calls[0]?.[0] as { body?: string }).body ?? '';
+    const body = confirmBody();
     expect(body).toMatch(/2 canvases/);
     expect(body).toMatch(/1 document\b/);
     expect(body).toMatch(/team ledger/);
@@ -143,7 +141,7 @@ describe('ADR 0839 D2 — the confirm and the receipt name what other features l
 
   it('says nothing extra when there is nothing else to delete', async () => {
     await clickDelete();
-    const body = (confirmMock.mock.calls[0]?.[0] as { body?: string }).body ?? '';
+    const body = confirmBody();
     expect(body).not.toMatch(/other features/);
     expect(body).not.toMatch(/could not count/);
   });
@@ -151,7 +149,7 @@ describe('ADR 0839 D2 — the confirm and the receipt name what other features l
   it('a FAILED count is said as such — never rendered as "nothing else"', async () => {
     getDeletePreview.mockRejectedValue(new Error('503'));
     await clickDelete();
-    const body = (confirmMock.mock.calls[0]?.[0] as { body?: string }).body ?? '';
+    const body = confirmBody();
     expect(body).toMatch(/could not count/i);
   });
 
@@ -159,15 +157,15 @@ describe('ADR 0839 D2 — the confirm and the receipt name what other features l
     deleteProject.mockResolvedValue({ deleted: true, memoryEntriesCleared: 0, schedulesCleared: 0, conversationsDeleted: 0, dependentsDeleted: { canvases: 1, priorityLists: 2 } });
     await clickDelete();
     await waitFor(() => expect(toastSuccess).toHaveBeenCalled());
-    const msg = toastSuccess.mock.calls[0]?.[0] as string;
+    const msg = toastText();
     expect(msg).toMatch(/Also removed: 1 canvas and 2 priority lists/);
   });
 });
 
 describe('grade-ux row 25 B1 — one delete at a time, and the button says which step it is on', () => {
   it('a second click while the preview is pending does nothing; the button is busy and disabled', async () => {
-    let release: (v: unknown) => void = () => undefined;
-    getDeletePreview.mockReturnValue(new Promise((r) => { release = r; }));
+    let release: (v: ProjectDependentCounts) => void = () => undefined;
+    getDeletePreview.mockReturnValue(new Promise<ProjectDependentCounts>((r) => { release = r; }));
     render(<MemoryRouter initialEntries={['/projects/p1']}><ProjectDetailPage /></MemoryRouter>);
     await settle();
     await waitFor(() => expect(screen.getByRole('heading', { name: 'Atlas' })).toBeTruthy());

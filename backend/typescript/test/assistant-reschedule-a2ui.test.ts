@@ -15,11 +15,20 @@
  * Stub-ctx pattern (the assistant-loops convention): a real
  * `buildAssistantSurface` over the in-memory store + a controllable
  * `ctx.suspend` standing in for the executor's `makeSuspendFn`.
+ *
+ * Sabotage-witnessed (/grade-tests w11): a changed resumeKey or an added eventId
+ * field reds case 1; dropping the existing patch fields on merge reds case 2;
+ * clarifying without an eventId reds case 3; clarifying a patch that already has
+ * a start reds case 4; dropping `requireAfter` reds case 5.
  */
 
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import http from 'node:http';
-import { createApp } from '../src/index.js';
+import { beforeAll, describe, expect, it } from 'vitest';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { openStorage } from '../src/storage/index.js';
+import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
+import { initInMemorySurfaces } from '../src/host/inMemorySurfaces.js';
 import { buildAssistantSurface } from '../src/features/assistant/surface.js';
 import { __resetAssistantStore, listPendingActions } from '../src/features/assistant/assistantService.js';
 
@@ -27,20 +36,16 @@ const CATALOG_VERSION = '0.9.1';
 const CATALOG = new Set(['heading', 'text', 'field.text', 'field.date', 'field.select', 'field.checkbox', 'action.button']);
 
 describe('Assistant calendar.reschedule A2UI clarification (ADR 0051 §3/§5)', () => {
-  let server: http.Server;
   let nodes: (typeof import('../../../packs/feature.assistant.nodes/index.mjs'))['nodes'];
 
   beforeAll(async () => {
     process.env.OPENWOP_STORAGE_DSN = 'memory://';
-    const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-    await new Promise<void>((res) => {
-      server = app.listen(0, '127.0.0.1', res);
-    });
+    // Storage only — no createApp boot, no HTTP server: every case drives the node
+    // directly, and `enqueueActionWithApproval` seeds the assistant agent on demand.
+    initHostExtPersistence(await openStorage('memory://'));
+    initInMemorySurfaces({ dataDir: mkdtempSync(join(tmpdir(), 'openwop-resched-a2ui-')) });
     await __resetAssistantStore();
     nodes = (await import('../../../packs/feature.assistant.nodes/index.mjs')).nodes;
-  });
-  afterAll(async () => {
-    await new Promise<void>((res) => server.close(() => res()));
   });
 
   const enqueueAction = (ctx: unknown) => nodes['feature.assistant.nodes.enqueue-action'](ctx);

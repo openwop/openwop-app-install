@@ -10,6 +10,18 @@
  *
  * `DOCWF2-3` — the surface registered no `orgPolicy`, so the ADR 0832 floor asked
  * read tier of every writer.
+ *
+ * Sabotage-witnessed (grade-tests w14): dropping the read gate from documents.get,
+ * the run surface's reads, or the CRM e-sign exit; dropping the writers' method
+ * scopes or a method from the partition; a lax stale-base check; no revise
+ * idempotency key; dropping revise's write-tier check; ignoring the pinned e-sign
+ * version; and both source ratchets (an ungated version reader, a second raw writer)
+ * each turn a case red.
+ *
+ * Honest ceiling: revise's `canReadDocument` clause is a double guard no fixture can
+ * isolate — every `workspace:write` holder resolves `write` on every project
+ * (`projectsService.levelFor`), and user-owned documents have no subject resolver, so
+ * a caller who passes the write tier always passes the read gate.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -27,7 +39,8 @@ import { DOCUMENTS_GET_TOOL_ID, DOCUMENTS_REVISE_TOOL_ID } from '../src/features
 import {
   buildDocumentsSurface, DOCUMENTS_SURFACE_READS, DOCUMENTS_SURFACE_WRITERS,
 } from '../src/features/documents/surface.js';
-import { getDocument, listVersions } from '../src/features/documents/documentsService.js';
+import { getDocument, listVersions, addVersion } from '../src/features/documents/documentsService.js';
+import { renderTarget } from '../src/features/crm/signTargets.js';
 
 let BASE: string;
 let server: http.Server;
@@ -45,13 +58,21 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res { status: number; body: any }
+interface Res { status: number; body: Record<string, unknown> | undefined }
+/** A string field of a JSON body (fails loudly when the fixture call did not return it). */
+function field(r: Res, ...path: string[]): string {
+  let v: unknown = r.body;
+  for (const k of path) v = v && typeof v === 'object' ? (v as Record<string, unknown>)[k] : undefined;
+  if (typeof v !== 'string') throw new Error(`fixture: ${path.join('.')} missing in ${r.status} ${JSON.stringify(r.body)}`);
+  return v;
+}
 function client() {
   let cookie = '';
   const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) };
+    const json: unknown = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    return { status: res.status, body: json && typeof json === 'object' ? (json as Record<string, unknown>) : undefined };
   };
   return { get: (p: string) => call('GET', p), post: (p: string, b?: unknown) => call('POST', p, b), patch: (p: string, b?: unknown) => call('PATCH', p, b) };
 }
@@ -62,19 +83,19 @@ const SECRET = 'BOARD-ONLY: acquire Globex for 42M';
 async function fixture() {
   const tenantId = `org:a0838rg-${Date.now()}-${n++}`;
   const owner = client();
-  const ownerId = (await owner.post('/host/openwop-app/test/login', { email: uniq('own'), tenantId })).body.user.userId as string;
-  const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'PrivCo' })).body.orgId as string;
-  const projectId = (await owner.post('/host/openwop-app/projects', { orgId, name: 'Secret' })).body.id as string;
+  const ownerId = field(await owner.post('/host/openwop-app/test/login', { email: uniq('own'), tenantId }), 'user', 'userId');
+  const orgId = field(await owner.post('/host/openwop-app/orgs', { name: 'PrivCo' }), 'orgId');
+  const projectId = field(await owner.post('/host/openwop-app/projects', { orgId, name: 'Secret' }), 'id');
   const doc = await owner.post(DOC(orgId), { title: 'Merger plan', kind: 'note', format: 'markdown', ownerSubject: { kind: 'project', id: projectId } });
   expect(doc.status, JSON.stringify(doc.body)).toBe(201);
-  const documentId = doc.body.documentId as string;
+  const documentId = field(doc, 'documentId');
   expect((await owner.post(`${DOC(orgId)}/${documentId}/versions`, { content: SECRET })).status).toBe(201);
   expect((await owner.patch(`/host/openwop-app/projects/${projectId}/visibility`, { visibility: 'private' })).status).toBe(200);
   const viewer = client();
-  const viewerId = (await viewer.post('/host/openwop-app/test/login', { email: uniq('view'), tenantId })).body.user.userId as string;
+  const viewerId = field(await viewer.post('/host/openwop-app/test/login', { email: uniq('view'), tenantId }), 'user', 'userId');
   await createMember({ tenantId, orgId, subject: viewerId, displayName: 'V', roles: ['viewer'] });
   const editor = client();
-  const editorId = (await editor.post('/host/openwop-app/test/login', { email: uniq('edit'), tenantId })).body.user.userId as string;
+  const editorId = field(await editor.post('/host/openwop-app/test/login', { email: uniq('edit'), tenantId }), 'user', 'userId');
   await createMember({ tenantId, orgId, subject: editorId, displayName: 'E', roles: ['editor'] });
   return { tenantId, orgId, projectId, documentId, owner, ownerId, viewer, viewerId, editorId };
 }
@@ -84,7 +105,7 @@ describe('ADR 0838 D3 — the chat read tool asks the same gate as the HTTP door
     const f = await fixture();
     // Control: the HTTP door already refuses this caller.
     expect((await f.viewer.get(`${DOC(f.orgId)}/${f.documentId}`)).status).toBe(404);
-    const provider = createAgentToolProvider({ tenantId: f.tenantId, runId: 'run-rg-1', actingUserId: f.viewerId } as never);
+    const provider = createAgentToolProvider({ tenantId: f.tenantId, runId: 'run-rg-1', actingUserId: f.viewerId });
     const out = await provider.executeTool({ name: DOCUMENTS_GET_TOOL_ID, input: { documentId: f.documentId } });
     expect(out.content).not.toContain(SECRET);
     expect(out.isError).toBe(true);
@@ -93,7 +114,7 @@ describe('ADR 0838 D3 — the chat read tool asks the same gate as the HTTP door
 
   it('positive control: the owner reads it, and the result carries the version to base an edit on', async () => {
     const f = await fixture();
-    const provider = createAgentToolProvider({ tenantId: f.tenantId, runId: 'run-rg-2', actingUserId: f.ownerId } as never);
+    const provider = createAgentToolProvider({ tenantId: f.tenantId, runId: 'run-rg-2', actingUserId: f.ownerId });
     const out = await provider.executeTool({ name: DOCUMENTS_GET_TOOL_ID, input: { documentId: f.documentId } });
     const body = JSON.parse(out.content);
     expect(body.content).toBe(SECRET);
@@ -105,7 +126,7 @@ describe('ADR 0838 D3 — the chat read tool asks the same gate as the HTTP door
 describe('ADR 0838 D3 — the run surface reads through the same gate', () => {
   it('a run acting for the viewer cannot read or list the private project document', async () => {
     const f = await fixture();
-    const s = buildFeatureSurfaces({ tenantId: f.tenantId, runId: 'run-rg-3', actingUserId: f.viewerId } as never).documents!;
+    const s = buildFeatureSurfaces({ tenantId: f.tenantId, runId: 'run-rg-3', actingUserId: f.viewerId }).documents!;
     expect((await s.getDocument!({ orgId: f.orgId, documentId: f.documentId }) as { document: unknown }).document).toBeNull();
     const listed = await s.listDocuments!({ orgId: f.orgId }) as { documents: { documentId: string }[] };
     expect(listed.documents.map((d) => d.documentId)).not.toContain(f.documentId);
@@ -113,14 +134,14 @@ describe('ADR 0838 D3 — the run surface reads through the same gate', () => {
 
   it('positive control: a run acting for the owner reads it', async () => {
     const f = await fixture();
-    const s = buildFeatureSurfaces({ tenantId: f.tenantId, runId: 'run-rg-4', actingUserId: f.ownerId } as never).documents!;
+    const s = buildFeatureSurfaces({ tenantId: f.tenantId, runId: 'run-rg-4', actingUserId: f.ownerId }).documents!;
     expect((await s.getDocument!({ orgId: f.orgId, documentId: f.documentId }) as { document: { documentId: string } | null }).document?.documentId).toBe(f.documentId);
   });
 });
 
 describe('ADR 0838 D3 — surface writers ask write tier (DOCWF2-3)', () => {
   it('the method partition is closed-world', () => {
-    const methods = Object.keys(buildDocumentsSurface({ tenantId: 't-part' } as never)).sort();
+    const methods = Object.keys(buildDocumentsSurface({ tenantId: 't-part' })).sort();
     const classified = [...DOCUMENTS_SURFACE_READS, ...DOCUMENTS_SURFACE_WRITERS];
     expect(new Set(classified).size, 'a method is in both sets').toBe(classified.length);
     expect([...classified].sort()).toEqual(methods);
@@ -128,7 +149,7 @@ describe('ADR 0838 D3 — surface writers ask write tier (DOCWF2-3)', () => {
 
   it('a run acting for an org viewer cannot create or version a document', async () => {
     const f = await fixture();
-    const s = buildFeatureSurfaces({ tenantId: f.tenantId, runId: 'run-rg-5', actingUserId: f.viewerId } as never).documents!;
+    const s = buildFeatureSurfaces({ tenantId: f.tenantId, runId: 'run-rg-5', actingUserId: f.viewerId }).documents!;
     await expect(s.createDocument!({ orgId: f.orgId, title: 'x', kind: 'doc' })).rejects.toMatchObject({ code: 'forbidden_scope' });
     await expect(s.createDraftDocument!({ orgId: f.orgId, title: 'x', content: 'y' })).rejects.toMatchObject({ code: 'forbidden_scope' });
     await expect(s.addVersion!({ orgId: f.orgId, documentId: f.documentId, content: 'z' })).rejects.toMatchObject({ code: 'forbidden_scope' });
@@ -137,7 +158,7 @@ describe('ADR 0838 D3 — surface writers ask write tier (DOCWF2-3)', () => {
 
   it('positive control: a run acting for an org editor can', async () => {
     const f = await fixture();
-    const s = buildFeatureSurfaces({ tenantId: f.tenantId, runId: 'run-rg-6', actingUserId: f.editorId } as never).documents!;
+    const s = buildFeatureSurfaces({ tenantId: f.tenantId, runId: 'run-rg-6', actingUserId: f.editorId }).documents!;
     const out = await s.createDocument!({ orgId: f.orgId, title: 'ok', kind: 'doc' }) as { document: { documentId: string } };
     expect(out.document.documentId).toBeTruthy();
   });
@@ -145,7 +166,7 @@ describe('ADR 0838 D3 — surface writers ask write tier (DOCWF2-3)', () => {
 
 describe('ADR 0838 D5 — documents.revise is a checked edit', () => {
   const revise = (tenantId: string, actingUserId: string, input: Record<string, unknown>, runId = `run-rv-${n++}`) =>
-    createAgentToolProvider({ tenantId, runId, actingUserId } as never).executeTool({ name: DOCUMENTS_REVISE_TOOL_ID, input });
+    createAgentToolProvider({ tenantId, runId, actingUserId }).executeTool({ name: DOCUMENTS_REVISE_TOOL_ID, input });
 
   it('revises from the version it read; a stale base is a typed refusal naming the current version', async () => {
     const f = await fixture();
@@ -175,6 +196,24 @@ describe('ADR 0838 D5 — documents.revise is a checked edit', () => {
     const out = await revise(f.tenantId, f.viewerId, { documentId: f.documentId, baseVersionId: `${f.documentId}:1`, content: 'x' });
     expect(JSON.parse(out.content).error).toBe('not_found');
     expect((await getDocument(f.tenantId, f.orgId, f.documentId))?.currentVersionId).toBe(`${f.documentId}:1`);
+
+    // An ORG-scoped document (no ownerSubject) the viewer CAN read: only the write tier
+    // can refuse here, so this isolates revise's `workspace:write` check.
+    const orgDoc = await f.owner.post(DOC(f.orgId), { title: 'Org memo', kind: 'note', format: 'markdown' });
+    expect(orgDoc.status, JSON.stringify(orgDoc.body)).toBe(201);
+    const orgDocId = field(orgDoc, 'documentId');
+    expect((await f.owner.post(`${DOC(f.orgId)}/${orgDocId}/versions`, { content: 'org text' })).status).toBe(201);
+    expect((await f.viewer.get(`${DOC(f.orgId)}/${orgDocId}`)).status).toBe(200); // control: readable
+    const byViewer = await revise(f.tenantId, f.viewerId, { documentId: orgDocId, baseVersionId: `${orgDocId}:1`, content: 'viewer edit' });
+    expect(byViewer.isError).toBe(true);
+    expect(JSON.parse(byViewer.content).error).toBe('not_found');
+
+    // A member with no role (no read, no write) is refused the same way.
+    const nobodyId = `u-nobody-${n++}`;
+    await createMember({ tenantId: f.tenantId, orgId: f.orgId, subject: nobodyId, displayName: 'N', roles: [] });
+    const byNobody = await revise(f.tenantId, nobodyId, { documentId: orgDocId, baseVersionId: `${orgDocId}:1`, content: 'nobody edit' });
+    expect(JSON.parse(byNobody.content).error).toBe('not_found');
+    expect((await listVersions(f.tenantId, f.orgId, orgDocId)).map((v) => v.content)).toEqual(['org text']);
   });
 });
 
@@ -218,8 +257,6 @@ describe('ADR 0838 D3 — ratchet: every module that reads document versions imp
 
 describe('ADR 0838 D3 — the CRM e-sign document target is an exit too (grade-code H1)', () => {
   it('a requester who cannot read the document cannot send it to a signer; the owner can, and the request pins the version', async () => {
-    const { renderTarget } = await import('../src/features/crm/signTargets.js');
-    const { addVersion } = await import('../src/features/documents/documentsService.js');
     const f = await fixture();
     await expect(renderTarget(f.tenantId, f.orgId, { kind: 'document', id: f.documentId }, { reader: f.viewerId }))
       .rejects.toMatchObject({ httpStatus: 404 });

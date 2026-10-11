@@ -3,6 +3,15 @@
  * and (non-destructively) restore; a save is CHECKED against the loaded version;
  * approving names the version on screen; and the page says when the share link
  * serves an older approved version.
+ *
+ * Sabotage witnesses (grade-tests w14): swapped diff ids, no view panel, an
+ * unchecked save, restore not shown on screen, restore enabled while dirty, a
+ * generic stale_base message, approve while dirty, no version pin, the
+ * published-behind notice / chip hidden, approve-latest ignored, draft→final
+ * offered, no save announcement, write controls for a viewer, Approved offered
+ * without host:members:manage, final re-pinning the draft — each turns its case
+ * red. The lazy history panel is imported statically below, so no case depends
+ * on another having paid its cold load (shuffle-safe).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup, screen, fireEvent, waitFor, within } from '@testing-library/react';
@@ -30,7 +39,11 @@ vi.mock('../../../chat/artifacts/artifactClient.js', async (importOriginal) => {
 });
 
 import { DocumentDetailPage } from '../DocumentDetailPage.js';
+// Warm the React.lazy chunk at file load: the panel's cold import otherwise lands
+// on whichever case runs first, and the sync panel reads below depend on it.
+import '../DocumentVersionHistory.js';
 import { DocumentsApiError } from '../documentsClient.js';
+import { announce } from '../../../ui/announce.js';
 
 const AT = '2026-10-06T00:00:00Z';
 const v = (n: number, content: string) => ({ versionId: `d:${n}`, documentId: 'd', version: n, content, createdAt: AT });
@@ -78,8 +91,9 @@ describe('ADR 0838 D6 — version history', () => {
   it('restore is disabled while the editor holds unsaved text', async () => {
     renderPage();
     const box = await screen.findByRole('textbox');
+    const restore = await screen.findByRole('button', { name: 'Restore version 1' });
     fireEvent.change(box, { target: { value: 'unsaved' } });
-    expect((screen.getByRole('button', { name: 'Restore version 1' }) as HTMLButtonElement).disabled).toBe(true);
+    expect((restore as HTMLButtonElement).disabled).toBe(true);
   });
 });
 
@@ -120,7 +134,7 @@ describe('ADR 0838 D2 — approve what you see; say what the link shows', () => 
     api.patchDocument.mockResolvedValue({ status: 'approved', approvedVersionId: 'd:2' });
     renderPage();
     expect(await screen.findByText(/The share link shows version 1/)).toBeTruthy();
-    expect(screen.getByText('Published')).toBeTruthy();
+    expect(await screen.findByText('Published')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Approve latest version' }));
     await waitFor(() => expect(api.patchDocument).toHaveBeenCalledWith('o', 'd', { status: 'approved', approvedVersionId: 'd:2' }));
     await waitFor(() => expect(screen.queryByText(/The share link shows version 1/)).toBeNull());
@@ -136,7 +150,6 @@ describe('grade-ux row 24 — offer only what the server allows, and say what ha
   });
 
   it('a saved version is announced to assistive tech', async () => {
-    const { announce } = await import('../../../ui/announce.js');
     renderPage();
     fireEvent.change(await screen.findByRole('textbox'), { target: { value: 'new text' } });
     fireEvent.click(screen.getByRole('button', { name: /Save version/ }));
@@ -150,6 +163,8 @@ describe('grade-ux row 24 — a read-only member is not offered writes', () => {
     accessMock.scopes = ['workspace:read'];
     renderPage();
     expect(await screen.findByText(/You can read this document/)).toBeTruthy();
+    // The history panel is mounted (so Restore's absence is a real answer).
+    await screen.findByRole('button', { name: 'View version 1' });
     expect(screen.queryByRole('button', { name: /Save version/ })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Delete' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Restore version 1' })).toBeNull();

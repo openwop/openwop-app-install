@@ -22,6 +22,11 @@
  *     (WF-TWIN-3)
  * A test born green here would be vacuous; these were not.
  *
+ * Re-witnessed in w12: filing the grant under the HOME tenant, dropping the owner-is-linked
+ * check, dropping the PUT scope gate, reading the corpus in the dispatch tenant, restoring the
+ * `?? tenantId` ghost fallback, forcing `foundNothing` false, forcing the governance reason to
+ * `erasure_complete`, and restoring the raw-scope eraser each turn their case red.
+ *
  * @see docs/adr/0589-twin-tenancy-and-recall-audience.md
  */
 
@@ -36,16 +41,20 @@ import { getUser } from '../src/features/users/usersService.js';
 import { listSubjectNotes } from '../src/host/subjectMemory.js';
 import { grantTwin } from '../src/host/twinService.js';
 import { hostExtStorage } from '../src/host/hostExtPersistence.js';
+import { listGovernanceDecisions } from '../src/host/governanceDecisionLog.js';
+import { errorCodeOf } from './helpers/errorEnvelope.js';
 
 let BASE = '';
 let server: http.Server;
 let n = 0;
 
-interface Res<T = Record<string, any>> { status: number; body: T }
+interface Res<T> { status: number; body: T }
+interface TwinView { link: { userId: string } | null; grant: { scopes: string[] } | null }
+interface ErasureView { erasure: { failed: number; foundNothing: boolean; rowsTouched: number } }
 
 function client() {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<Res<any>> => {
+  const call = async <T,>(method: string, path: string, body?: unknown): Promise<Res<T>> => {
     const res = await fetch(`${BASE}${path}`, {
       method,
       headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) },
@@ -55,36 +64,36 @@ function client() {
     const single = res.headers.get('set-cookie');
     const setCookies: string[] = typeof h.getSetCookie === 'function' ? h.getSetCookie() : single ? [single] : [];
     for (const sc of setCookies) { const m = /(__session=[^;]+)/.exec(sc); if (m) cookie = m[1]!; }
-    return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) };
+    return { status: res.status, body: (res.status === 204 ? undefined : await res.json().catch(() => undefined)) as T };
   };
   return {
-    get: (p: string) => call('GET', p),
-    post: (p: string, b?: unknown) => call('POST', p, b),
-    put: (p: string, b?: unknown) => call('PUT', p, b),
-    del: (p: string) => call('DELETE', p),
+    get: <T = unknown>(p: string) => call<T>('GET', p),
+    post: <T = unknown>(p: string, b?: unknown) => call<T>('POST', p, b),
+    put: <T = unknown>(p: string, b?: unknown) => call<T>('PUT', p, b),
+    del: <T = unknown>(p: string) => call<T>('DELETE', p),
   };
 }
 type Client = ReturnType<typeof client>;
 
 async function signIn(c: Client, email: string): Promise<string> {
-  const r = await c.post('/host/openwop-app/test/login', { email });
+  const r = await c.post<{ user: { userId: string } }>('/host/openwop-app/test/login', { email });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  return r.body.user.userId as string;
+  return r.body.user.userId;
 }
 
 /** A REAL `ws:` shared workspace, created + owned + switched into through the
  *  routes. The switch is what makes active !== personal. */
 async function sharedWorkspace(c: Client): Promise<string> {
-  const ws = await c.post('/host/openwop-app/workspaces', { name: `Twin WS ${n++}` });
+  const ws = await c.post<{ workspaceId: string }>('/host/openwop-app/workspaces', { name: `Twin WS ${n++}` });
   expect(ws.status, JSON.stringify(ws.body)).toBe(201);
   expect(ws.body.workspaceId, 'must be a real shared workspace, not a personal tenant').toMatch(/^ws:/);
   const sw = await c.post(`/host/openwop-app/workspaces/${encodeURIComponent(ws.body.workspaceId)}/switch`);
   expect(sw.status, JSON.stringify(sw.body)).toBe(200);
-  return ws.body.workspaceId as string;
+  return ws.body.workspaceId;
 }
 
 async function joinAsMember(owner: Client, ws: string, joiner: Client, email: string, role: string): Promise<string> {
-  const invite = await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(ws)}/invites`, { email, role });
+  const invite = await owner.post<{ token: string }>(`/host/openwop-app/orgs/${encodeURIComponent(ws)}/invites`, { email, role });
   expect(invite.status, JSON.stringify(invite.body)).toBe(201);
   const userId = await signIn(joiner, email);
   const accepted = await joiner.post('/host/openwop-app/orgs/invitations/accept', { token: invite.body.token });
@@ -128,7 +137,7 @@ async function wsFixture(): Promise<{ owner: Client; member: Client; memberId: s
   const memberId = await joinAsMember(owner, ws, member, `tw-ws-member-${n++}@acme.test`, 'editor');
   const memberHome = (await getUser(memberId))!.tenantId;
   expect(memberHome, 'the fixture is worthless unless HOME really differs from ACTIVE').not.toBe(ws);
-  const r = await owner.post('/host/openwop-app/roster', { persona: 'Aide', agentRef: { agentId: 'core.openwop.agents.brief-writer' } });
+  const r = await owner.post<{ rosterId: string }>('/host/openwop-app/roster', { persona: 'Aide', agentRef: { agentId: 'core.openwop.agents.brief-writer' } });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return { owner, member, memberId, memberHome, ws, rosterId: r.body.rosterId };
 }
@@ -137,30 +146,34 @@ describe('WF-TWIN-1 — the consent grant is issuable inside a shared workspace'
   it('the linked member can actually consent, and the grant is filed under the WORKSPACE', async () => {
     const { owner, member, memberId, ws, rosterId } = await wsFixture();
 
-    const link = await owner.put(twin(rosterId), { userId: memberId });
+    const link = await owner.put<TwinView>(twin(rosterId), { userId: memberId });
     expect(link.status, JSON.stringify(link.body)).toBe(200);
-    expect(link.body.link.userId).toBe(memberId);
+    expect(link.body.link?.userId).toBe(memberId);
 
     // THE assertion. Before ADR 0589 this was a 404 from `twinService.ts:111-114`
     // — for an agent whose link the panel is rendering "Twin of you" for, right
     // above the button.
-    const g = await member.post(GRANTS, { agentId: rosterId, scopes: ['memory'] });
+    const g = await member.post<{ grant: { tenantId: string } }>(GRANTS, { agentId: rosterId, scopes: ['memory'] });
     expect(g.status, `the linked member must be able to consent; got ${JSON.stringify(g.body)}`).toBe(201);
     // Status alone is not enough — a 201 filed under the wrong tenant is the
     // ADR 0508 first-candidate-fix failure mode.
     expect(g.body.grant.tenantId, `the grant must be filed under the workspace (${ws})`).toBe(ws);
 
     // And it is readable back by the grantor, and visible on the agent link.
-    expect((await member.get(GRANTS)).body.grants.length).toBe(1);
-    expect((await owner.get(twin(rosterId))).body.grant.scopes).toEqual(['memory']);
+    expect((await member.get<{ grants: unknown[] }>(GRANTS)).body.grants.length).toBe(1);
+    expect((await owner.get<TwinView>(twin(rosterId))).body.grant?.scopes).toEqual(['memory']);
   });
 
   it('a NON-linked member still cannot consent (the widening did not open a door)', async () => {
-    const { owner, member, memberId, rosterId } = await wsFixture();
-    await owner.put(twin(rosterId), { userId: memberId });
+    const { owner, memberId, rosterId } = await wsFixture();
+    expect((await owner.put(twin(rosterId), { userId: memberId })).status).toBe(200);
     // The workspace OWNER is not the linked person — same fail-closed 404 as before.
-    expect((await owner.post(GRANTS, { agentId: rosterId, scopes: ['memory'] })).status).toBe(404);
-    expect(member).toBeDefined();
+    const refused = await owner.post(GRANTS, { agentId: rosterId, scopes: ['memory'] });
+    expect(refused.status).toBe(404);
+    expect(errorCodeOf(refused.body)).toBe('not_found');
+    // …and nothing was filed: the owner has issued no grant, and the agent shows none.
+    expect((await owner.get<{ grants: unknown[] }>(GRANTS)).body.grants).toEqual([]);
+    expect((await owner.get<TwinView>(twin(rosterId))).body.grant).toBe(null);
   });
 
   // TWIN-5 — moved here from `twin-route.test.ts`, where the GC-1 personalTenant
@@ -176,10 +189,13 @@ describe('WF-TWIN-1 — the consent grant is issuable inside a shared workspace'
     const ws = await sharedWorkspace(owner);
     const viewer = client();
     const viewerId = await joinAsMember(owner, ws, viewer, `tw-ws-viewer-${n++}@acme.test`, 'viewer');
-    const r = await owner.post('/host/openwop-app/roster', { persona: 'Aide', agentRef: { agentId: 'core.openwop.agents.brief-writer' } });
+    const r = await owner.post<{ rosterId: string }>('/host/openwop-app/roster', { persona: 'Aide', agentRef: { agentId: 'core.openwop.agents.brief-writer' } });
     expect(r.status).toBe(201);
     const res = await viewer.put(twin(r.body.rosterId), { userId: viewerId });
     expect(res.status, JSON.stringify(res.body)).toBe(403);
+    expect(errorCodeOf(res.body)).toBe('forbidden_scope');
+    // The refused write did not land.
+    expect((await owner.get<TwinView>(twin(r.body.rosterId))).body.link).toBe(null);
   });
 });
 
@@ -238,7 +254,7 @@ describe('WF-TWIN-3 — a DSAR from a shared workspace reaches the subject\'s pe
     // Precondition — the note really is in the HOME partition, not the workspace.
     expect((await listSubjectNotes(memberHome, { kind: 'user', id: memberId })).length).toBe(1);
 
-    const del = await owner.del(
+    const del = await owner.del<ErasureView>(
       `/host/openwop-app/consent/orgs/${encodeURIComponent(ws)}/subjects/${encodeURIComponent(memberId)}`,
     );
     expect(del.status, JSON.stringify(del.body)).toBe(200);
@@ -268,7 +284,7 @@ describe('WF-TWIN-3 — a DSAR from a shared workspace reaches the subject\'s pe
     await c.post(MEM, { content: 'Sensitive personal note.' });
     expect((await listSubjectNotes(home, { kind: 'user', id: userId })).length).toBe(1);
 
-    const del = await c.del(
+    const del = await c.del<ErasureView>(
       `/host/openwop-app/consent/orgs/${encodeURIComponent(home)}/subjects/${encodeURIComponent(userId)}`,
     );
     expect(del.status, JSON.stringify(del.body)).toBe(200);
@@ -279,7 +295,7 @@ describe('WF-TWIN-3 — a DSAR from a shared workspace reaches the subject\'s pe
 
   it('a fan-out that reaches NOTHING is not recorded as erasure_complete', async () => {
     const { owner, ws } = await wsFixture();
-    const del = await owner.del(
+    const del = await owner.del<ErasureView>(
       `/host/openwop-app/consent/orgs/${encodeURIComponent(ws)}/subjects/${encodeURIComponent('user:nobody-at-all')}`,
     );
     expect(del.status, JSON.stringify(del.body)).toBe(200);
@@ -287,5 +303,12 @@ describe('WF-TWIN-3 — a DSAR from a shared workspace reaches the subject\'s pe
     // found either, and `erasure_complete` is a claim the fan-out cannot support.
     expect(del.body.erasure.failed).toBe(0);
     expect(del.body.erasure.foundNothing, 'a zero-row fan-out must be distinguishable from a completed one').toBe(true);
+    // THE title claim: what the durable governance chain RECORDS. The response flag above
+    // could be right while the chain still said `erasure_complete` (w12 probe `sw-gov-reason`
+    // was vacuous before this read). The workspace is fresh, so this DSAR is its only erasure.
+    const erasures = (await listGovernanceDecisions(ws, { kind: 'retention' }))
+      .map((row) => (row.payload as { reason?: unknown } | undefined)?.reason)
+      .filter((reason): reason is string => typeof reason === 'string' && reason.startsWith('erasure_'));
+    expect(erasures, 'the chain records a found-nothing erasure, never erasure_complete').toEqual(['erasure_no_data_found']);
   });
 });

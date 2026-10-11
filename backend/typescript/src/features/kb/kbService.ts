@@ -2119,6 +2119,25 @@ function officeBytesMatchMime(mime: string, buffer: Buffer): boolean {
 }
 
 /**
+ * H61 — unpdf BUNDLES pdf.js (unpdf 1.6.2 → 5.6.205; latest 1.8.1 → 6.1.200),
+ * inside GHSA-hq66-cqwq-w95j (>=5.6.83 <6.2.108), and `npm audit` cannot see
+ * that copy. No unpdf release bundles a fixed pdf.js, so the KB hands unpdf
+ * the patched `pdfjs-dist` (a direct, exact dependency) through its own seam
+ * before the first parse; the vendored copy is then never loaded. The legacy
+ * build is the one that runs in Node. Pinned by `kb-vendored-pdfjs.test.ts`,
+ * which reads the version unpdf actually resolved.
+ */
+let unpdfReady: Promise<typeof import('unpdf')> | undefined;
+export function loadUnpdf(): Promise<typeof import('unpdf')> {
+  unpdfReady ??= (async () => {
+    const unpdf = await import('unpdf');
+    await unpdf.definePDFJSModule(() => import('pdfjs-dist/legacy/build/pdf.mjs'));
+    return unpdf;
+  })().catch((err: unknown) => { unpdfReady = undefined; throw err; });
+  return unpdfReady;
+}
+
+/**
  * Extract plain text from uploaded bytes by MIME — the SINGLE extraction owner for
  * file ingest (manual KB upload, media assets, and drive-sync). text/* + json/xml/
  * markdown decode as UTF-8; PDF via `unpdf`; DOCX via `mammoth`; PowerPoint / Excel /
@@ -2159,20 +2178,14 @@ async function extractTextFromBytes(tenantId: string, buffer: Buffer, contentTyp
   }
   if (TEXT_MIME.test(mime)) return buffer.toString('utf8');
   if (mime === 'application/pdf') {
-    const { extractText, getDocumentProxy } = await import('unpdf');
+    const { extractText, getDocumentProxy } = await loadUnpdf();
     // H61 — `isEvalSupported` defaults to TRUE in pdf.js, i.e. the parser may
     // evaluate strings as JavaScript "to improve performance of PDF functions"
     // (unpdf's own typings say so). The bytes here are an authenticated user's
-    // UPLOAD, and GHSA-hq66-cqwq-w95j against the bundled pdf.js is precisely
-    // "arbitrary JavaScript execution upon opening a malicious PDF" (CWE-79).
-    // Turning it off costs a little speed on function-heavy PDFs and removes
-    // the eval path entirely; text extraction does not need it.
-    //
-    // This does NOT close the advisory — unpdf 1.6.2 vendors pdf.js 5.6.205
-    // inside the vulnerable range and declares no `pdfjs-dist` dependency, so
-    // `npm audit` cannot see it at all (pinned by `kb-vendored-pdfjs.test.ts`).
-    // The officeparser PDF path is a SECOND copy this call cannot configure.
-    // Containment is worker isolation; this is the cheap half done today.
+    // UPLOAD, and GHSA-hq66-cqwq-w95j is precisely "arbitrary JavaScript
+    // execution upon opening a malicious PDF" (CWE-79). Text extraction does
+    // not need eval, so it stays off even on the patched pdf.js (loadUnpdf).
+    // The officeparser PDF path is a second copy (pinned by its override).
     const pdf = await getDocumentProxy(new Uint8Array(buffer), { isEvalSupported: false });
     const { text } = await extractText(pdf, { mergePages: true });
     return Array.isArray(text) ? text.join('\n') : text;

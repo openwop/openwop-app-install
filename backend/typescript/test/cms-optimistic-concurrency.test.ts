@@ -14,6 +14,11 @@
  * read→write window through injected seams (the mocked headless resolver / a
  * pass-through contentLocales hook) that perform the interleaved write
  * DETERMINISTICALLY inside the window.
+ *
+ * Sabotage-witnessed (grade-tests wave 16, w16g4-oc-*): disabling the service pin, the route
+ * forwarding it, the route's integer check, or making it mandatory each red their case;
+ * dropping the auto-translate merge's pin or its re-merge reds the machine-writer case;
+ * dropping the surface verb's pin or its one retry reds the workflow-writer case.
  */
 
 import http from 'node:http';
@@ -84,7 +89,18 @@ async function setToggle(id: 'cms-localization', status: 'on' | 'off'): Promise<
   if (d) await saveConfig({ ...d, status }, 'test');
 }
 
-interface Res<T = any> { status: number; headers: Headers; body: T }
+interface SectionBody { sectionId: string; type: string; data: Record<string, unknown>; localizations?: Record<string, Record<string, unknown>> }
+interface Body {
+  orgId?: string;
+  pageId?: string;
+  version?: number;
+  title?: string;
+  error?: string;
+  details?: { currentVersion?: number; expectedVersion?: number };
+  sections?: SectionBody[];
+  autoTranslated?: Record<string, number>;
+}
+interface Res { status: number; headers: Headers; body: Body }
 interface Client {
   get: (p: string) => Promise<Res>;
   post: (p: string, b?: unknown) => Promise<Res>;
@@ -100,7 +116,7 @@ function client(): Client {
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    const out = (res.status === 204 ? {} : await res.json().catch(() => ({}))) as Body; // wire JSON
     return { status: res.status, headers: res.headers, body: out };
   };
   return {
@@ -119,7 +135,7 @@ async function ownerOrg(): Promise<{ owner: Client; orgId: string; tenantId: str
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
-  return { owner, orgId: org.body.orgId, tenantId };
+  return { owner, orgId: org.body.orgId!, tenantId };
 }
 const u = (orgId: string, suffix = ''): string => `/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}${suffix}`;
 
@@ -133,32 +149,32 @@ describe('page PATCH expectedVersion precondition (CMSL-1)', () => {
       sections: [{ type: 'hero', data: { heading: 'Welcome' } }],
     });
     expect(created.status, JSON.stringify(created.body)).toBe(201);
-    const pageId: string = created.body.pageId;
-    const baseline = created.body; // version 1, one section
-    const sectionId: string = baseline.sections[0].sectionId;
+    const pageId = created.body.pageId!;
+    const baseVersion = created.body.version!; // version 1, one section
+    const sectionId = created.body.sections![0]!.sectionId;
 
     // Writer A (based on v1): adds a fr overlay, pinned to what it loaded.
     const a = await owner.patch(u(orgId, `/pages/${pageId}`), {
       sections: [{ sectionId, type: 'hero', data: { heading: 'Welcome' }, localizations: { fr: { heading: 'Bienvenue' } } }],
-      expectedVersion: baseline.version,
+      expectedVersion: baseVersion,
     });
     expect(a.status, JSON.stringify(a.body)).toBe(200);
-    expect(a.body.version).toBe(baseline.version + 1);
+    expect(a.body.version).toBe(baseVersion + 1);
 
     // Writer B (ALSO based on v1 — a stale tab): would clobber A's fr overlay.
     const b = await owner.patch(u(orgId, `/pages/${pageId}`), {
       sections: [{ sectionId, type: 'hero', data: { heading: 'Welcome' }, localizations: { es: { heading: 'Bienvenido' } } }],
-      expectedVersion: baseline.version,
+      expectedVersion: baseVersion,
     });
     expect(b.status, JSON.stringify(b.body)).toBe(409);
     expect(b.body.error).toBe('conflict');
-    expect(b.body.details?.currentVersion).toBe(baseline.version + 1);
-    expect(b.body.details?.expectedVersion).toBe(baseline.version);
+    expect(b.body.details?.currentVersion).toBe(baseVersion + 1);
+    expect(b.body.details?.expectedVersion).toBe(baseVersion);
 
     // The overlay written by A SURVIVED the stale writer.
     const after = await owner.get(u(orgId, `/pages/${pageId}`));
-    expect(after.body.sections[0].localizations?.fr?.heading).toBe('Bienvenue');
-    expect(after.body.sections[0].localizations?.es).toBeUndefined();
+    expect(after.body.sections?.[0]?.localizations?.fr?.heading).toBe('Bienvenue');
+    expect(after.body.sections?.[0]?.localizations?.es).toBeUndefined();
 
     // B retries with the FRESH pin (reload-and-reapply) → both overlays persist.
     const b2 = await owner.patch(u(orgId, `/pages/${pageId}`), {
@@ -167,8 +183,8 @@ describe('page PATCH expectedVersion precondition (CMSL-1)', () => {
     });
     expect(b2.status, JSON.stringify(b2.body)).toBe(200);
     const final = await owner.get(u(orgId, `/pages/${pageId}`));
-    expect(final.body.sections[0].localizations?.fr?.heading).toBe('Bienvenue');
-    expect(final.body.sections[0].localizations?.es?.heading).toBe('Bienvenido');
+    expect(final.body.sections?.[0]?.localizations?.fr?.heading).toBe('Bienvenue');
+    expect(final.body.sections?.[0]?.localizations?.es?.heading).toBe('Bienvenido');
   });
 
   it('a PATCH without expectedVersion stays accepted (optional precondition — API compat)', async () => {
@@ -198,14 +214,13 @@ describe('submit auto-translate merge is version-checked (the machine writer)', 
       sections: [{ type: 'hero', data: { heading: 'Welcome' } }],
     });
     expect(created.status).toBe(201);
-    const pageId: string = created.body.pageId;
-    const sectionId: string = created.body.sections[0].sectionId;
+    const pageId = created.body.pageId!;
+    const sectionId = created.body.sections![0]!.sectionId;
 
     // The interleaved HUMAN writer: while the provider "translates", a second
     // editor adds a fr overlay through the normal pinned PATCH. Deterministic —
     // the dispatch AWAITS the write before returning the translation.
-    const humanEditor = client();
-    // Same tenant/org membership: reuse the owner's cookie jar via a direct call.
+    // Same tenant/org membership: the owner's cookie jar is the second editor.
     mockResolve.mockResolvedValue(vi.fn(async () => {
       const fresh = await owner.get(u(orgId, `/pages/${pageId}`));
       const human = await owner.patch(u(orgId, `/pages/${pageId}`), {
@@ -215,7 +230,6 @@ describe('submit auto-translate merge is version-checked (the machine writer)', 
       expect(human.status, JSON.stringify(human.body)).toBe(200);
       return '{"heading":"XLATED"}';
     }));
-    void humanEditor; // (jar reuse: the owner client carries the session)
 
     // fr is deliberately NOT in supportedLocales' sweep target (pt-BR only), so
     // the sweep never drafts fr — the ONLY fr writer is the interleaved human.
@@ -225,8 +239,8 @@ describe('submit auto-translate merge is version-checked (the machine writer)', 
 
     const after = await owner.get(u(orgId, `/pages/${pageId}`));
     // Both writers' work survives: the human fr overlay AND the AI pt-BR draft.
-    expect(after.body.sections[0].localizations?.fr?.heading).toBe('Humain');
-    expect(after.body.sections[0].localizations?.['pt-BR']?.heading).toBe('XLATED');
+    expect(after.body.sections?.[0]?.localizations?.fr?.heading).toBe('Humain');
+    expect(after.body.sections?.[0]?.localizations?.['pt-BR']?.heading).toBe('XLATED');
   });
 });
 
@@ -243,15 +257,15 @@ describe('surface.updateSectionDraft is version-checked (the workflow writer)', 
       ],
     });
     expect(created.status).toBe(201);
-    const pageId: string = created.body.pageId;
-    const [secA, secB] = created.body.sections.map((s: { sectionId: string }) => s.sectionId);
+    const pageId = created.body.pageId!;
+    const [secA, secB] = created.body.sections!.map((s) => s.sectionId);
 
     // The concurrent editor writes an es overlay on section B DURING the
     // surface verb's settings read (the one await inside its window).
     seams.onGetSettings = async () => {
       const fresh = await owner.get(u(orgId, `/pages/${pageId}`));
       const r = await owner.patch(u(orgId, `/pages/${pageId}`), {
-        sections: fresh.body.sections.map((s: { sectionId: string; type: string; data: Record<string, unknown> }) =>
+        sections: fresh.body.sections!.map((s) =>
           s.sectionId === secB ? { ...s, localizations: { es: { heading: 'Dos' } } } : s),
         expectedVersion: fresh.body.version,
       });
@@ -275,8 +289,8 @@ describe('updatePage service-level pin (all callers that send it are covered)', 
   it('throws 409 conflict with currentVersion/expectedVersion details on a stale pin', async () => {
     const { owner, orgId, tenantId } = await ownerOrg();
     const created = await owner.post(u(orgId, '/pages'), { title: 'Svc', sections: [] });
-    const pageId: string = created.body.pageId;
-    const v1 = created.body.version as number;
+    const pageId = created.body.pageId!;
+    const v1 = created.body.version!;
     await updatePage(tenantId, orgId, pageId, { title: 'Bumped' }, 'user:a', { expectedVersion: v1 });
     await expect(
       updatePage(tenantId, orgId, pageId, { title: 'Stale' }, 'user:b', { expectedVersion: v1 }),

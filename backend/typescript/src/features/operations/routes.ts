@@ -517,18 +517,25 @@ export function registerOperationsRoutes(deps: RouteDeps): void {
       //
       // It must be the SAME serialization the discovery route serves, or the
       // digest would differ for reasons unrelated to drift. Both call
-      // `buildAdvertisement`; `JSON.stringify` of the same object is stable
+      // `buildV2Advertisement`; `JSON.stringify` of the same object is stable
       // because key order follows construction order.
+      //
+      // ADR 0812 P4 — CORRECTED: this used to digest the v1 document
+      // (`buildAdvertisement`) while `scripts/sign-attestation.mjs` digests a
+      // header-less `GET /.well-known/openwop`, which has been the v2 root
+      // since v1 retired (2026-10-04). Every valid attestation therefore read
+      // `discovery_drift` here. The v1 builder is deleted; both sides now read
+      // the one representation the host serves.
       const selfCommit = (await import('../../host/buildInfo.js')).buildCommit();
-      const { buildAdvertisement, readBundleSigningKeys } = await import('../../routes/discovery.js');
+      const { buildV2Advertisement, readBundleSigningKeys } = await import('../../routes/discovery.js');
       // WHD-18 — the discovery route makes the certification-evidence cache
       // current before it builds (the pointer depends on it), so this must too:
       // otherwise the two could build from different cache states and the digest
       // would differ for a reason that is not drift. Bounded; a no-op unless
       // `OPENWOP_CERT_BUNDLE_ORIGIN` is set.
       const { ensureCertificationEvidence } = await import('../../host/conformanceClaims.js');
-      await ensureCertificationEvidence(1, readBundleSigningKeys());
-      const advertisement = buildAdvertisement(deps.config, req);
+      await ensureCertificationEvidence(2, readBundleSigningKeys());
+      const advertisement = buildV2Advertisement(deps.config, req);
       const verdict = verifyAttestation(
         signed,
         { commit: selfCommit, discoveryDocument: JSON.stringify(advertisement) },

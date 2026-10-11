@@ -18,31 +18,43 @@
  * hundred lines up (`sharedImpactFailed`), which is why "the read failed" was a
  * three-line fix and not a redesign.
  *
- * These tests drive `SectionsEditor` directly: the four consequences are its
- * render decisions, and mounting the whole `CmsPage` to reach them would test
- * the org picker instead.
+ * These tests drive `SectionsEditor` directly for consequences 1–2 (its render
+ * decisions) and `resolveSharedRefs` for consequence 3 (the previews' helper,
+ * which `CmsPage` calls). Consequence 4 — the settings panel's list — is a
+ * `CmsPage` render and is NOT asserted here.
+ *
+ * Sabotage-witnessed (w17): the failed arm of the block label → "no longer
+ * exists"; the inherit note shown instead of the "do not remove" note; the
+ * missing arm → "unavailable"; Detach hidden for a resolved block; the block's
+ * label not the shared name; `resolveSharedRefs` dropping on a failed read,
+ * keeping a genuinely-gone block, or not substituting the shared `data`.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { render, screen, cleanup } from '@testing-library/react';
+import { render, screen, cleanup, within } from '@testing-library/react';
 
 vi.mock('../../../ui/toast.js', () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
 
 import { SectionsEditor } from '../SectionsEditor.js';
 import { resolveSharedRefs } from '../resolveSharedRefs.js';
+import type { Section, SharedSection } from '../cmsClient.js';
 
-const REF_SECTION = { sectionId: 's1', type: 'hero', data: {}, ref: { sharedSectionId: 'shsec:hdr' } };
-const SHARED = { sharedSectionId: 'shsec:hdr', name: 'Site header', type: 'hero', data: { heading: 'Ship faster' } };
+const REF_SECTION: Section = { sectionId: 's1', type: 'hero', data: {}, ref: { sharedSectionId: 'shsec:hdr' } };
+const SHARED: SharedSection = {
+  sharedSectionId: 'shsec:hdr', name: 'Site header', type: 'hero', data: { heading: 'Ship faster' },
+  version: 1, updatedAt: '2026-01-01T00:00:00.000Z',
+};
 
-const view = (props: Record<string, unknown>): void => {
-  render(
+const view = (props: { sharedSections: SharedSection[]; sharedFailed: boolean }): HTMLElement => {
+  const { container } = render(
     <SectionsEditor
-      sections={[REF_SECTION] as never}
+      sections={[REF_SECTION]}
       assets={[]}
       onChange={() => {}}
       onPickMedia={async () => null}
       {...props}
     />,
   );
+  return container;
 };
 
 afterEach(cleanup);
@@ -70,10 +82,11 @@ describe('CMS2-B5 — a failed shared-section read is not a deletion', () => {
   });
 
   it('a resolvable shared section renders its name and offers Detach (the other control)', () => {
-    view({ sharedSections: [SHARED], sharedFailed: false });
-    // `getAllBy` — the name appears on the block AND in the add-a-shared-section
-    // picker below it; the point of this arm is that it resolved at all.
-    expect(screen.getAllByText('Site header').length).toBeGreaterThan(0);
+    const container = view({ sharedSections: [SHARED], sharedFailed: false });
+    // Scoped to the BLOCK: the add-a-shared-section picker below it lists the
+    // name too, so an unscoped query passed even when the ref never resolved.
+    const block = container.querySelector<HTMLElement>('[data-section-id="s1"]')!;
+    expect(within(block).getByText('Site header')).toBeTruthy();
     expect(screen.getByRole('button', { name: /detach/i })).toBeTruthy();
     expect(screen.queryByText(/no longer exists/i)).toBeNull();
   });
@@ -83,8 +96,8 @@ describe('CMS2-B5 — the PREVIEW does not render the page as if the block were 
   // The third and most persuasive consequence of the same swallowed read: with
   // the ref block dropped from both previews, the editor SEES a headerless page.
   // Nothing else on the screen argues as hard for pressing Remove.
-  const REF = REF_SECTION as never;
-  const INLINE = { sectionId: 's2', type: 'prose', data: { markdown: 'Body.' } } as never;
+  const REF = REF_SECTION;
+  const INLINE: Section = { sectionId: 's2', type: 'richText', data: { text: 'Body.' } };
 
   it('keeps an unresolvable block when the list read FAILED', () => {
     const out = resolveSharedRefs([REF, INLINE], [], true);
@@ -99,7 +112,7 @@ describe('CMS2-B5 — the PREVIEW does not render the page as if the block were 
   });
 
   it('resolves to the shared content when the read succeeded', () => {
-    const out = resolveSharedRefs([REF], [SHARED as never], false);
+    const out = resolveSharedRefs([REF], [SHARED], false);
     expect(out).toHaveLength(1);
     expect(out[0]!.data).toEqual({ heading: 'Ship faster' });
   });

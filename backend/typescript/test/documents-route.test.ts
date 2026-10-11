@@ -4,6 +4,16 @@
  * version + template CRUD, idempotent version writes, the assemble validate/render
  * floor, cross-tenant IDOR (fail-closed), and the Sharing `document` resolver's
  * approved/final-only visibility.
+ *
+ * Gap ids asserted inline: DOCS-1, DOCS-2, DOCTPL-8, ADR 0838 D2, ADR 0055/0056/0057.
+ * Sabotage-witnessed (grade-tests w14): bypassing the documents toggle in `authz`,
+ * the idempotency-key lookup, the promote canvas-ownership guard / one-canvas 409 /
+ * canvas-deleted hook, the locate membership check, the DOCTPL-8 template check, the
+ * share resolver's status gate, the approval privilege, the status transition table,
+ * the stale canvas-map check, the render format check and the artifact-type binding
+ * check each red their named case. Not probed here: the canvas picker / canvas delete
+ * tenant filters and cross-tenant org scope live in shared host guards
+ * (`canvasSurface`, `requireOrgScope`) owned by other suites.
  */
 
 import http from 'node:http';
@@ -34,23 +44,54 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T }
-interface Client { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res>; patch: (p: string, b?: unknown) => Promise<Res>; del: (p: string) => Promise<Res> }
+// Response shapes — only the fields this file reads (no `any`: each call names its body).
+interface Res<T = unknown> { status: number; body: T }
+interface VersionBody { versionId: string; version: number; content: string; renderedMediaToken?: string }
+interface DocBody {
+  documentId: string; status: string; kind: string; currentVersionId?: string;
+  currentVersion?: VersionBody | null; promotedCanvasId?: string; templateId?: string; provenance?: { templateId?: string };
+}
+interface OrgBody { orgId: string }
+interface LoginBody { user: { userId: string } }
+interface PromoteBody { html: string; title: string; promotedCanvasId: string | null }
+interface TemplateBody { templateId: string; kind: string }
+interface AssembleBody { augmentedPrompt: string; outputSchema?: unknown }
+interface ListDocsBody { documents: DocBody[] }
+interface ListTemplatesBody { templates: TemplateBody[] }
+interface MintBody { token: string }
+interface SharedBody { resource: { content: string } }
+interface CanvasListBody { canvases: { canvasId: string; canvasTypeId: string; name?: string; updatedAt: string; state?: unknown }[] }
+interface CatalogBody { catalog: { catalogId: string }[] }
+interface MaterializeBody { documentId: string; created: boolean }
+interface ArtifactTypesBody { artifactTypes: { artifactTypeId: string; registrationSource?: string }[] }
+interface RenderBody { renderedMediaToken: string; sizeBytes: number; url: string; format: string }
+interface Client {
+  get: <T = unknown>(p: string) => Promise<Res<T>>;
+  post: <T = unknown>(p: string, b?: unknown) => Promise<Res<T>>;
+  patch: <T = unknown>(p: string, b?: unknown) => Promise<Res<T>>;
+  del: (p: string) => Promise<Res>;
+}
 function client(): Client {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
+  const call = async <T,>(method: string, path: string, body?: unknown): Promise<Res<T>> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
-    return { status: res.status, body: out };
+    const out: unknown = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    // The wire is untyped JSON; each call site names the shape it reads (a mismatch fails the assertions).
+    return { status: res.status, body: out as T };
   };
-  return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), patch: (p, b) => call('PATCH', p, b), del: (p) => call('DELETE', p) };
+  return {
+    get: <T,>(p: string) => call<T>('GET', p),
+    post: <T,>(p: string, b?: unknown) => call<T>('POST', p, b),
+    patch: <T,>(p: string, b?: unknown) => call<T>('PATCH', p, b),
+    del: (p: string) => call<unknown>('DELETE', p),
+  };
 }
 
 let n = 0;
 const uniqEmail = (who: string): string => `${who}-${Date.now()}-${n++}@acme.test`;
 async function signup(c: Client, opts: { tenantId?: string } = {}): Promise<{ userId: string }> {
-  const r = await c.post('/host/openwop-app/test/login', { email: uniqEmail('doc'), ...(opts.tenantId ? { tenantId: opts.tenantId } : {}) });
+  const r = await c.post<LoginBody>('/host/openwop-app/test/login', { email: uniqEmail('doc'), ...(opts.tenantId ? { tenantId: opts.tenantId } : {}) });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return r.body.user;
 }
@@ -60,7 +101,7 @@ async function ownerWithOrg(): Promise<{ owner: Client; orgId: string; tenantId:
   const owner = client();
   const tenantId = `org:test-${Date.now()}-${n++}`;
   await signup(owner, { tenantId });
-  const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await owner.post<OrgBody>('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
   return { owner, orgId: org.body.orgId, tenantId };
 }
@@ -70,7 +111,7 @@ async function ownerWithMember(role: string): Promise<{ owner: Client; member: C
   await signup(owner, { tenantId });
   const member = client();
   const memberUser = await signup(member, { tenantId });
-  const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await owner.post<OrgBody>('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
   const orgId = org.body.orgId;
   const add = await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: memberUser.userId, roles: [role] });
@@ -81,40 +122,48 @@ const D = (orgId: string, suffix = ''): string => `/host/openwop-app/documents/o
 
 describe('documents — toggle gating', () => {
   it('404s when the documents toggle is off', async () => {
-    await setToggle('documents', 'off');
+    // The toggle is GLOBAL: restore it in `finally`, or one red here cascades into
+    // every later case (observed in the w14 probe of this file).
     const { owner, orgId } = await ownerWithOrg();
-    expect((await owner.get(D(orgId, '/documents'))).status).toBe(404);
-    await setToggle('documents', 'on');
+    try {
+      await setToggle('documents', 'off');
+      expect((await owner.get(D(orgId, '/documents'))).status).toBe(404);
+    } finally {
+      await setToggle('documents', 'on');
+    }
+    // Positive control: the SAME request succeeds once the toggle is on, so the
+    // 404 above came from the toggle, not from the path or the caller.
+    expect((await owner.get(D(orgId, '/documents'))).status).toBe(200);
   });
 });
 
 describe('documents — document + version lifecycle', () => {
   it('creates a document, appends versions (current pointer + idempotency), and lists', async () => {
     const { owner, orgId } = await ownerWithOrg();
-    const created = await owner.post(D(orgId, '/documents'), { title: 'Acme SOW', kind: 'sow' });
+    const created = await owner.post<DocBody>(D(orgId, '/documents'), { title: 'Acme SOW', kind: 'sow' });
     expect(created.status, JSON.stringify(created.body)).toBe(201);
     const id = created.body.documentId;
     expect(created.body.status).toBe('draft');
 
-    const v1 = await owner.post(D(orgId, `/documents/${id}/versions`), { content: '# SOW v1', idempotencyKey: 'k1' });
+    const v1 = await owner.post<VersionBody>(D(orgId, `/documents/${id}/versions`), { content: '# SOW v1', idempotencyKey: 'k1' });
     expect(v1.status).toBe(201);
     expect(v1.body.version).toBe(1);
     expect(v1.body.versionId).toBe(`${id}:1`);
 
     // Same idempotency key ⇒ same version (no duplicate).
-    const v1again = await owner.post(D(orgId, `/documents/${id}/versions`), { content: 'IGNORED', idempotencyKey: 'k1' });
+    const v1again = await owner.post<VersionBody>(D(orgId, `/documents/${id}/versions`), { content: 'IGNORED', idempotencyKey: 'k1' });
     expect(v1again.status).toBe(201);
     expect(v1again.body.versionId).toBe(`${id}:1`);
     expect(v1again.body.content).toBe('# SOW v1');
 
-    const v2 = await owner.post(D(orgId, `/documents/${id}/versions`), { content: '# SOW v2' });
+    const v2 = await owner.post<VersionBody>(D(orgId, `/documents/${id}/versions`), { content: '# SOW v2' });
     expect(v2.body.version).toBe(2);
 
-    const got = await owner.get(D(orgId, `/documents/${id}`));
+    const got = await owner.get<DocBody>(D(orgId, `/documents/${id}`));
     expect(got.body.currentVersionId).toBe(`${id}:2`);
-    expect(got.body.currentVersion.content).toBe('# SOW v2');
+    expect(got.body.currentVersion?.content).toBe('# SOW v2');
 
-    const list = await owner.get(D(orgId, '/documents?kind=sow'));
+    const list = await owner.get<ListDocsBody>(D(orgId, '/documents?kind=sow'));
     expect(list.body.documents.length).toBe(1);
   });
 });
@@ -122,12 +171,12 @@ describe('documents — document + version lifecycle', () => {
 describe('documents — promote to rich document (ADR 0350 Phase 3)', () => {
   it('renders markdown→HTML and links a REAL owned canvas once (guarded, idempotent, no re-point)', async () => {
     const { owner, orgId, tenantId } = await ownerWithOrg();
-    const created = await owner.post(D(orgId, '/documents'), { title: 'Promote me', kind: 'prd' });
+    const created = await owner.post<DocBody>(D(orgId, '/documents'), { title: 'Promote me', kind: 'prd' });
     const id = created.body.documentId;
     await owner.post(D(orgId, `/documents/${id}/versions`), { content: '# Title\n\nA **para** with a [link](https://x.dev).' });
 
     // promote-html returns the current version rendered to HTML (markdown-it).
-    const html1 = await owner.post(D(orgId, `/documents/${id}/promote-html`), {});
+    const html1 = await owner.post<PromoteBody>(D(orgId, `/documents/${id}/promote-html`), {});
     expect(html1.status, JSON.stringify(html1.body)).toBe(200);
     expect(html1.body.html).toContain('<h1>Title</h1>');
     expect(html1.body.html).toContain('<strong>para</strong>');
@@ -140,12 +189,12 @@ describe('documents — promote to rich document (ADR 0350 Phase 3)', () => {
 
     // Link a REAL tenant-owned canvas.document (the client creates it first).
     await __putCanvasForTest({ canvasId: 'cv_rich_1', tenantId, canvasTypeId: 'canvas.document', name: 'Rich', state: { title: 'Rich', content: { type: 'doc', content: [] } }, version: 1 });
-    const linked = await owner.patch(D(orgId, `/documents/${id}`), { promotedCanvasId: 'cv_rich_1' });
+    const linked = await owner.patch<DocBody>(D(orgId, `/documents/${id}`), { promotedCanvasId: 'cv_rich_1' });
     expect(linked.status, JSON.stringify(linked.body)).toBe(200);
     expect(linked.body.promotedCanvasId).toBe('cv_rich_1');
 
     // Re-promote now reports the existing canvas (client short-circuits to it).
-    const html2 = await owner.post(D(orgId, `/documents/${id}/promote-html`), {});
+    const html2 = await owner.post<PromoteBody>(D(orgId, `/documents/${id}/promote-html`), {});
     expect(html2.body.promotedCanvasId).toBe('cv_rich_1');
 
     // Same id again = idempotent no-op; a DIFFERENT (real) canvas is rejected 409
@@ -159,9 +208,9 @@ describe('documents — promote to rich document (ADR 0350 Phase 3)', () => {
     // documents feature's onCanvasDeleted handler; fired by the canvas-editor
     // DELETE route after the row is gone). The doc is then re-promotable.
     await fireCanvasDeleted({ tenantId, canvasId: 'cv_rich_1', canvasTypeId: 'canvas.document' });
-    const afterDelete = await owner.get(D(orgId, `/documents/${id}`));
+    const afterDelete = await owner.get<DocBody>(D(orgId, `/documents/${id}`));
     expect(afterDelete.body.promotedCanvasId).toBeUndefined();
-    const relink = await owner.patch(D(orgId, `/documents/${id}`), { promotedCanvasId: 'cv_rich_2' });
+    const relink = await owner.patch<DocBody>(D(orgId, `/documents/${id}`), { promotedCanvasId: 'cv_rich_2' });
     expect(relink.status, JSON.stringify(relink.body)).toBe(200);
     expect(relink.body.promotedCanvasId).toBe('cv_rich_2');
   });
@@ -172,10 +221,10 @@ describe('documents — locate by bare documentId (ADR 0350 DOCS-2)', () => {
 
   it('resolves the org for a member (one point lookup) and 404s uniformly otherwise', async () => {
     const { owner, orgId, tenantId } = await ownerWithOrg();
-    const created = await owner.post(D(orgId, '/documents'), { title: 'Find me', kind: 'prd' });
+    const created = await owner.post<DocBody>(D(orgId, '/documents'), { title: 'Find me', kind: 'prd' });
     const id = created.body.documentId;
 
-    const found = await owner.get(L(id));
+    const found = await owner.get<OrgBody>(L(id));
     expect(found.status, JSON.stringify(found.body)).toBe(200);
     expect(found.body.orgId).toBe(orgId);
 
@@ -198,7 +247,7 @@ describe('documents — locate by bare documentId (ADR 0350 DOCS-2)', () => {
 describe('documents — templates + assemble', () => {
   it('rejects a missing required param and renders when provided', async () => {
     const { owner, orgId } = await ownerWithOrg();
-    const t = await owner.post(D(orgId, '/templates'), {
+    const t = await owner.post<TemplateBody>(D(orgId, '/templates'), {
       name: 'SOW template', kind: 'sow',
       promptBody: 'Draft a SOW for {{client}} covering {{scope}}.',
       parameters: { required: ['client', 'scope'], properties: { client: { type: 'string' }, scope: { type: 'string' } } },
@@ -210,7 +259,7 @@ describe('documents — templates + assemble', () => {
     const bad = await owner.post(D(orgId, `/templates/${tid}/assemble`), { params: { client: 'Acme' } });
     expect(bad.status).toBe(400);
 
-    const ok = await owner.post(D(orgId, `/templates/${tid}/assemble`), { params: { client: 'Acme', scope: 'a website' } });
+    const ok = await owner.post<AssembleBody>(D(orgId, `/templates/${tid}/assemble`), { params: { client: 'Acme', scope: 'a website' } });
     expect(ok.status, JSON.stringify(ok.body)).toBe(200);
     expect(ok.body.augmentedPrompt).toBe('Draft a SOW for Acme covering a website.');
     expect(ok.body.outputSchema).toBeTruthy();
@@ -218,10 +267,10 @@ describe('documents — templates + assemble', () => {
 
   it('DOCTPL-8 — create accepts a VALIDATED templateId link; a dangling one is refused', async () => {
     const { owner, orgId } = await ownerWithOrg();
-    const t = await owner.post(D(orgId, '/templates'), { name: 'Linked', kind: 'sow', promptBody: 'Write a SOW.' });
+    const t = await owner.post<TemplateBody>(D(orgId, '/templates'), { name: 'Linked', kind: 'sow', promptBody: 'Write a SOW.' });
     expect(t.status, JSON.stringify(t.body)).toBe(201);
 
-    const linked = await owner.post(D(orgId, '/documents'), { title: 'From template', kind: 'sow', templateId: t.body.templateId });
+    const linked = await owner.post<DocBody>(D(orgId, '/documents'), { title: 'From template', kind: 'sow', templateId: t.body.templateId });
     expect(linked.status, JSON.stringify(linked.body)).toBe(201);
     expect(linked.body.templateId, 'the "Use" path finally has a writer for the doc→template link').toBe(t.body.templateId);
     expect(linked.body.provenance?.templateId).toBe(t.body.templateId);
@@ -234,18 +283,22 @@ describe('documents — templates + assemble', () => {
 describe('documents — cross-tenant IDOR (fail-closed)', () => {
   it('a different tenant cannot read another tenant document (uniform 404)', async () => {
     const { owner, orgId } = await ownerWithOrg();
-    const created = await owner.post(D(orgId, '/documents'), { title: 'Secret', kind: 'prd' });
+    const created = await owner.post<DocBody>(D(orgId, '/documents'), { title: 'Secret', kind: 'prd' });
     const id = created.body.documentId;
+    // Positive control: the document EXISTS at this path for its owner.
+    expect((await owner.get(D(orgId, `/documents/${id}`))).status).toBe(200);
     const stranger = client();
     await signup(stranger, { tenantId: `org:other-${Date.now()}-${n++}` });
-    expect((await stranger.get(D(orgId, `/documents/${id}`))).status).toBe(404);
+    const leaked = await stranger.get(D(orgId, `/documents/${id}`));
+    expect(leaked.status).toBe(404);
+    expect(JSON.stringify(leaked.body), 'no content or title leaks with the 404').not.toContain('Secret');
   });
 });
 
 describe('documents — sharing resolver is approved/final-only', () => {
   it('refuses to mint a link for a draft, allows it once approved, and resolves the content', async () => {
     const { owner, orgId } = await ownerWithOrg();
-    const created = await owner.post(D(orgId, '/documents'), { title: 'Board agenda', kind: 'board-agenda' });
+    const created = await owner.post<DocBody>(D(orgId, '/documents'), { title: 'Board agenda', kind: 'board-agenda' });
     const id = created.body.documentId;
     await owner.post(D(orgId, `/documents/${id}/versions`), { content: '# Agenda\n- Item 1' });
 
@@ -256,12 +309,12 @@ describe('documents — sharing resolver is approved/final-only', () => {
 
     // Approve, then mint succeeds and resolves the content.
     await owner.patch(D(orgId, `/documents/${id}`), { status: 'approved' });
-    const mint = await owner.post(mintBase, { resourceType: 'document', resourceId: id });
+    const mint = await owner.post<MintBody>(mintBase, { resourceType: 'document', resourceId: id });
     expect(mint.status, JSON.stringify(mint.body)).toBe(201);
     const token = mint.body.token;
 
     const pub = client();
-    const shared = await pub.get(`/host/openwop-app/shared/${encodeURIComponent(token)}`);
+    const shared = await pub.get<SharedBody>(`/host/openwop-app/shared/${encodeURIComponent(token)}`);
     expect(shared.status, JSON.stringify(shared.body)).toBe(200);
     expect(shared.body.resource.content).toContain('# Agenda');
 
@@ -276,7 +329,7 @@ describe('documents — sharing resolver is approved/final-only', () => {
 describe('documents — approval is privileged (host:members:manage)', () => {
   it('an editor (workspace:write) can edit but NOT approve; an owner can', async () => {
     const { owner, member, orgId } = await ownerWithMember('editor');
-    const created = await member.post(D(orgId, '/documents'), { title: 'Proposal', kind: 'rfp' });
+    const created = await member.post<DocBody>(D(orgId, '/documents'), { title: 'Proposal', kind: 'rfp' });
     expect(created.status, JSON.stringify(created.body)).toBe(201);
     const id = created.body.documentId;
 
@@ -294,7 +347,7 @@ describe('documents — approval is privileged (host:members:manage)', () => {
 describe('documents — status state machine', () => {
   it('rejects an invalid status jump (draft → final) with 409', async () => {
     const { owner, orgId } = await ownerWithOrg();
-    const created = await owner.post(D(orgId, '/documents'), { title: 'Brief', kind: 'epic-brief' });
+    const created = await owner.post<DocBody>(D(orgId, '/documents'), { title: 'Brief', kind: 'epic-brief' });
     const id = created.body.documentId;
     // ADR 0838 D2 — approval pins a version, so the document needs content.
     expect((await owner.post(D(orgId, `/documents/${id}/versions`), { content: '# Brief' })).status).toBe(201);
@@ -312,6 +365,8 @@ describe('documents — ownerSubject is validated (not an arbitrary tag)', () =>
     const { owner, orgId } = await ownerWithOrg();
     const r = await owner.post(D(orgId, '/documents'), { title: 'Owned', kind: 'doc', ownerSubject: { kind: 'user', id: 'user:ghost' } });
     expect(r.status, JSON.stringify(r.body)).toBe(404);
+    // Refused, not created-then-reported: nothing was persisted.
+    expect((await owner.get<ListDocsBody>(D(orgId, '/documents'))).body.documents).toHaveLength(0);
   });
 });
 
@@ -320,7 +375,7 @@ describe('documents — canvas-sources picker (ADR 0314)', () => {
     const tenantId = `org:test-${Date.now()}-${n++}`;
     const owner = client();
     await signup(owner, { tenantId });
-    const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
+    const org = await owner.post<OrgBody>('/host/openwop-app/orgs', { name: 'Acme' });
     expect(org.status).toBe(201);
     const orgId = org.body.orgId;
 
@@ -329,7 +384,7 @@ describe('documents — canvas-sources picker (ADR 0314)', () => {
     // A foreign tenant's canvas MUST NOT leak into the picker.
     await createCanvasForTenant(`org:test-foreign-${Date.now()}-${n++}`, { canvasTypeId: 'canvas.slides', name: 'Foreign', initialState: {} });
 
-    const r = await owner.get(D(orgId, '/canvas-sources'));
+    const r = await owner.get<CanvasListBody>(D(orgId, '/canvas-sources'));
     expect(r.status, JSON.stringify(r.body)).toBe(200);
     const names = r.body.canvases.map((c: { name?: string }) => c.name);
     expect(names).toContain('Deck A');
@@ -350,11 +405,11 @@ describe('documents — canvas delete (ADR 0319 — Canvases folded in)', () => 
     const tenantId = `org:cdel-${Date.now()}-${n++}`;
     const owner = client();
     await signup(owner, { tenantId });
-    const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
+    const org = await owner.post<OrgBody>('/host/openwop-app/orgs', { name: 'Acme' });
     const orgId = org.body.orgId;
 
     const canvas = await createCanvasForTenant(tenantId, { canvasTypeId: 'canvas.drawing', name: 'Doomed', initialState: { shapes: [] } });
-    const listNames = async (): Promise<unknown[]> => (await owner.get(D(orgId, '/canvas-sources'))).body.canvases.map((c: { name?: string }) => c.name);
+    const listNames = async (): Promise<unknown[]> => (await owner.get<CanvasListBody>(D(orgId, '/canvas-sources'))).body.canvases.map((c: { name?: string }) => c.name);
     expect(await listNames()).toContain('Doomed');
     // Deletable from Documents even with no canvas TYPE toggle on (DATA-CV-3).
     expect((await owner.del(D(orgId, `/canvases/${canvas.canvasId}`))).status).toBe(204);
@@ -370,20 +425,20 @@ describe('documents — canvas delete (ADR 0319 — Canvases folded in)', () => 
 describe('documents — starter template catalog', () => {
   it('lists built-in starters, instantiates one as an editable template, and assembles it', async () => {
     const { owner, orgId } = await ownerWithOrg();
-    const cat = await owner.get(D(orgId, '/templates/catalog'));
+    const cat = await owner.get<CatalogBody>(D(orgId, '/templates/catalog'));
     expect(cat.status, JSON.stringify(cat.body)).toBe(200);
     const ids: string[] = cat.body.catalog.map((c: { catalogId: string }) => c.catalogId);
     expect(ids).toEqual(expect.arrayContaining(['seed.sow', 'seed.prd', 'seed.rfp', 'seed.epic-brief', 'seed.board-agenda']));
 
     // "catalog" is not captured as a template id (route-order check).
-    expect((await owner.get(D(orgId, '/templates'))).body.templates.length).toBe(0);
+    expect((await owner.get<ListTemplatesBody>(D(orgId, '/templates'))).body.templates.length).toBe(0);
 
-    const made = await owner.post(D(orgId, '/templates/from-catalog/seed.sow'));
+    const made = await owner.post<TemplateBody>(D(orgId, '/templates/from-catalog/seed.sow'));
     expect(made.status, JSON.stringify(made.body)).toBe(201);
     expect(made.body.kind).toBe('sow');
-    expect((await owner.get(D(orgId, '/templates'))).body.templates.length).toBe(1);
+    expect((await owner.get<ListTemplatesBody>(D(orgId, '/templates'))).body.templates.length).toBe(1);
 
-    const asm = await owner.post(D(orgId, `/templates/${made.body.templateId}/assemble`), { params: { client: 'Acme', scope: 'a rebrand' } });
+    const asm = await owner.post<AssembleBody>(D(orgId, `/templates/${made.body.templateId}/assemble`), { params: { client: 'Acme', scope: 'a rebrand' } });
     expect(asm.status, JSON.stringify(asm.body)).toBe(200);
     expect(asm.body.augmentedPrompt).toContain('Acme');
 
@@ -396,20 +451,20 @@ describe('documents — materialize from canvas (ADR 0056)', () => {
     const tenantId = `org:c2d-${Date.now()}-${n++}`;
     const c = client();
     await signup(c, { tenantId });
-    const org = await c.post('/host/openwop-app/orgs', { name: 'Acme' });
+    const org = await c.post<OrgBody>('/host/openwop-app/orgs', { name: 'Acme' });
     const orgId = org.body.orgId;
     await __putCanvasForTest({ canvasId: 'canvas:t1', tenantId, canvasTypeId: 'canvas.brief', name: 'Q3 Brief', state: { content: '# Brief\n\nGoals and scope.' } });
 
-    const r = await c.post(D(orgId, '/documents/from-canvas'), { canvasId: 'canvas:t1' });
+    const r = await c.post<MaterializeBody>(D(orgId, '/documents/from-canvas'), { canvasId: 'canvas:t1' });
     expect(r.status, JSON.stringify(r.body)).toBe(201);
     expect(r.body.created).toBe(true);
     const docId = r.body.documentId;
-    const doc = await c.get(D(orgId, `/documents/${docId}`));
+    const doc = await c.get<DocBody>(D(orgId, `/documents/${docId}`));
     expect(doc.body.kind).toBe('epic-brief'); // canvas.brief → epic-brief
-    expect(doc.body.currentVersion.content).toContain('# Brief');
+    expect(doc.body.currentVersion?.content).toContain('# Brief');
 
     // Idempotent: same canvas version → 200, same document, not created.
-    const again = await c.post(D(orgId, '/documents/from-canvas'), { canvasId: 'canvas:t1' });
+    const again = await c.post<MaterializeBody>(D(orgId, '/documents/from-canvas'), { canvasId: 'canvas:t1' });
     expect(again.status).toBe(200);
     expect(again.body.created).toBe(false);
     expect(again.body.documentId).toBe(docId);
@@ -417,7 +472,7 @@ describe('documents — materialize from canvas (ADR 0056)', () => {
     // Stale-mapping fix: deleting the materialized doc then re-materializing
     // re-creates a fresh document rather than 404-ing on the dangling mapping.
     expect((await c.del(D(orgId, `/documents/${docId}`))).status).toBe(204);
-    const recreated = await c.post(D(orgId, '/documents/from-canvas'), { canvasId: 'canvas:t1' });
+    const recreated = await c.post<MaterializeBody>(D(orgId, '/documents/from-canvas'), { canvasId: 'canvas:t1' });
     expect(recreated.status, JSON.stringify(recreated.body)).toBe(201);
     expect(recreated.body.created).toBe(true);
     expect(recreated.body.documentId).not.toBe(docId);
@@ -430,13 +485,13 @@ describe('documents — artifact-type binding + discovery + schema serving (ADR 
   it('lists types, validates the template binding, advertises host.artifactTypes, and serves schemas', async () => {
     const { owner, orgId } = await ownerWithOrg();
 
-    const at = await owner.get(D(orgId, '/artifact-types'));
+    const at = await owner.get<ArtifactTypesBody>(D(orgId, '/artifact-types'));
     expect(at.status, JSON.stringify(at.body)).toBe(200);
     expect(at.body.artifactTypes.map((t: { artifactTypeId: string }) => t.artifactTypeId)).toEqual(expect.arrayContaining(['doc.sow', 'doc.prd']));
     // ADR 0055 Phase 3: the vendored core.openwop.artifact-types pack registers at boot.
     const onePager = at.body.artifactTypes.find((t: { artifactTypeId: string; registrationSource?: string }) => t.artifactTypeId === 'doc.one-pager');
     expect(onePager, 'doc.one-pager from the artifact-type pack').toBeTruthy();
-    expect(onePager.registrationSource).toBe('pack');
+    expect(onePager?.registrationSource).toBe('pack');
 
     // A bound artifactTypeId MUST be registered (no opaque tags).
     expect((await owner.post(D(orgId, '/templates'), { name: 'X', kind: 'sow', promptBody: 'b', artifactTypeId: 'doc.bogus' })).status).toBe(400);
@@ -458,19 +513,19 @@ describe('documents — artifact-type binding + discovery + schema serving (ADR 
 describe('documents — render to PDF (ADR 0057)', () => {
   it('renders the current version to a PDF Media token; serves it; rejects unsupported formats', async () => {
     const { owner, orgId } = await ownerWithOrg();
-    const created = await owner.post(D(orgId, '/documents'), { title: 'Acme SOW', kind: 'sow' });
+    const created = await owner.post<DocBody>(D(orgId, '/documents'), { title: 'Acme SOW', kind: 'sow' });
     const id = created.body.documentId;
     await owner.post(D(orgId, `/documents/${id}/versions`), { content: '# Statement of Work\n\n- Deliverable 1\n- Deliverable 2\n\n| Item | Cost |\n| --- | --- |\n| Design | $10k |' });
 
-    const r = await owner.post(D(orgId, `/documents/${id}/render`), { format: 'pdf' });
+    const r = await owner.post<RenderBody>(D(orgId, `/documents/${id}/render`), { format: 'pdf' });
     expect(r.status, JSON.stringify(r.body)).toBe(201);
     expect(typeof r.body.renderedMediaToken).toBe('string');
     expect(r.body.sizeBytes).toBeGreaterThan(0);
     expect(r.body.url).toContain('/assets/');
 
     // The version now carries the token.
-    const ver = await owner.get(D(orgId, `/documents/${id}`));
-    expect(ver.body.currentVersion.renderedMediaToken).toBe(r.body.renderedMediaToken);
+    const ver = await owner.get<DocBody>(D(orgId, `/documents/${id}`));
+    expect(ver.body.currentVersion?.renderedMediaToken).toBe(r.body.renderedMediaToken);
 
     // The Media asset serves real PDF bytes.
     const served = await fetch(`${BASE}${r.body.url}`);
@@ -480,16 +535,16 @@ describe('documents — render to PDF (ADR 0057)', () => {
     expect(head).toBe('%PDF-');
 
     // slides → a PPTX (zip; bytes start with PK); does NOT overwrite the pdf token.
-    const sl = await owner.post(D(orgId, `/documents/${id}/render`), { format: 'slides' });
+    const sl = await owner.post<RenderBody>(D(orgId, `/documents/${id}/render`), { format: 'slides' });
     expect(sl.status, JSON.stringify(sl.body)).toBe(201);
     expect(sl.body.format).toBe('slides');
     const slBytes = await fetch(`${BASE}${sl.body.url}`);
     expect((slBytes.headers.get('content-type') ?? '')).toContain('presentationml');
     expect(Buffer.from(await slBytes.arrayBuffer()).subarray(0, 2).toString('latin1')).toBe('PK');
-    expect((await owner.get(D(orgId, `/documents/${id}`))).body.currentVersion.renderedMediaToken).toBe(r.body.renderedMediaToken);
+    expect((await owner.get<DocBody>(D(orgId, `/documents/${id}`))).body.currentVersion?.renderedMediaToken).toBe(r.body.renderedMediaToken);
 
     // sheet → CSV with the table cells.
-    const sh = await owner.post(D(orgId, `/documents/${id}/render`), { format: 'sheet' });
+    const sh = await owner.post<RenderBody>(D(orgId, `/documents/${id}/render`), { format: 'sheet' });
     expect(sh.status, JSON.stringify(sh.body)).toBe(201);
     const csv = await (await fetch(`${BASE}${sh.body.url}`)).text();
     expect(csv).toContain('Item');
@@ -498,7 +553,7 @@ describe('documents — render to PDF (ADR 0057)', () => {
     // Unsupported format → 400 (docx graduated to a real format in ADR 0400).
     expect((await owner.post(D(orgId, `/documents/${id}/render`), { format: 'wpd' })).status).toBe(400);
     // No content → 400.
-    const empty = await owner.post(D(orgId, '/documents'), { title: 'Empty', kind: 'doc' });
+    const empty = await owner.post<DocBody>(D(orgId, '/documents'), { title: 'Empty', kind: 'doc' });
     expect((await owner.post(D(orgId, `/documents/${empty.body.documentId}/render`), {})).status).toBe(400);
   });
 });

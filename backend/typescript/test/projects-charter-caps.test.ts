@@ -13,20 +13,25 @@
  * cap on the backend goes red here with the frontend value it must be matched
  * to. Failing this test means the editor is now promising a limit the server
  * does not honour — a save that reports success and quietly drops content.
+ *
+ * Witnessed (w13): each cap's `cleanString(…, N)` bumped and each `.slice(0, MAX_…)`
+ * removed in `parseCharter` turns the matching case red.
  */
-import http from 'node:http';
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { createApp } from '../src/index.js';
+import { describe, it, expect, beforeAll } from 'vitest';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { openStorage } from '../src/storage/index.js';
+import { initInMemorySurfaces } from '../src/host/inMemorySurfaces.js';
+import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { createProject, updateProject } from '../src/features/projects/projectsService.js';
 
-let server: http.Server;
-
+// Service level: the caps live in `parseCharter`, reached through `updateProject`. Only
+// persistence is needed — booting `createApp` cost ~10 s for a claim no route carries.
 beforeAll(async () => {
-  process.env.OPENWOP_STORAGE_DSN = 'memory://';
-  const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', res); });
+  initInMemorySurfaces({ dataDir: mkdtempSync(join(tmpdir(), 'openwop-charter-caps-')) });
+  initHostExtPersistence(await openStorage('memory://'));
 });
-afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
 /** MUST equal `CHARTER_LIMITS` in the frontend projects client, field for field. */
 const FRONTEND_CHARTER_LIMITS = {
@@ -66,7 +71,7 @@ describe('PRJ2-M5 — the charter caps the editor mirrors are the ones the serve
     expect(kept.charter?.goal).toBe(at);
 
     const cut = await updateProject(T, id, { charter: { goal: over } });
-    // The defect this pins: no error, no 400 — a 200 carrying less than was sent.
+    // Documented design (PRJC-DEBT-3), not a defect: no error, no 400 — a 200 carrying less than was sent.
     expect(cut.charter?.goal).toHaveLength(FRONTEND_CHARTER_LIMITS.goal);
   });
 

@@ -16,6 +16,10 @@
  *     validation);
  *   - a garbage completion (twice: initial + the ONE bounded repair) → the
  *     typed `translation_invalid` tool error, never success-with-empty.
+ *
+ * Sabotage (w16 probes): skipping `sanitizeSectionOverlay` reds case 1; skipping the
+ * repair dispatch, or letting `translation_invalid` fall through the tool's error
+ * mapping, reds case 2.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';

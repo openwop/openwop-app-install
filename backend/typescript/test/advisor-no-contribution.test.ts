@@ -13,8 +13,13 @@
  * advisor AND the synthesis turn — the very synthesis meant to report the absence.
  * The route legs below assert the exchange still SUCCEEDS, which is what keeps the
  * cadence marching.
+ *
+ * Sabotage-witnessed (/grade-tests w12): dropping the run-count clause, dropping the
+ * `trim()`, or removing `asText`'s no-contribution arm each reds its predicate case;
+ * persisting the raw completion, throwing on an empty one, or marking every turn
+ * silent reds the matching route case.
  */
-import { describe, expect, it, beforeAll, afterAll } from 'vitest';
+import { describe, expect, it, beforeAll, afterAll, vi } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
@@ -42,11 +47,9 @@ async function api<T = Record<string, unknown>>(path: string, init: RequestInit 
 async function openGateRun(workflowId: string): Promise<string> {
   await api('/host/openwop-app/workflows', { method: 'POST', body: JSON.stringify({ workflowId, nodes: [{ nodeId: 'gate', typeId: 'core.conversationGate', config: { prompt: 'x' } }], edges: [] }) });
   const runId = (await api<{ runId: string }>('/runs', { method: 'POST', body: JSON.stringify({ workflowId, inputs: { provider: 'mock', model: 'mock-1' }, tenantId: '_anon' }) })).body.runId;
-  for (let i = 0; i < 80; i++) {
-    await new Promise((r) => setTimeout(r, 20));
-    const s = (await api<{ status: string }>(`/runs/${runId}`)).body.status;
-    if (s.startsWith('waiting')) break;
-  }
+  await vi.waitFor(async () => {
+    expect((await api<{ status: string }>(`/runs/${runId}`)).body.status, 'the gate must open before the exchange').toMatch(/^waiting/);
+  }, { timeout: 5000, interval: 20 });
   return runId;
 }
 
@@ -55,11 +58,9 @@ interface Ev { type?: string; payload?: Record<string, unknown> }
 /** The last persisted `role:'agent'` turn — read from the DURABLE event log, which
  *  is the record that matters here (the exchange ack carries only a turn COUNT). */
 async function lastAgentTurn(runId: string): Promise<{ role?: string; content?: unknown; speakerId?: string } | undefined> {
-  for (let i = 0; i < 80; i++) {
-    await new Promise((r) => setTimeout(r, 20));
-    const st = (await api<{ status: string }>(`/runs/${runId}`)).body.status;
-    if (st.startsWith('waiting') || ['completed', 'failed', 'cancelled'].includes(st)) break;
-  }
+  await vi.waitFor(async () => {
+    expect((await api<{ status: string }>(`/runs/${runId}`)).body.status).toMatch(/^(waiting|completed|failed|cancelled)/);
+  }, { timeout: 5000, interval: 20 });
   const events = (await api<{ events?: Ev[] }>(`/runs/${runId}/debug-bundle`)).body.events ?? [];
   return events
     .filter((e) => e.type === 'conversation.exchanged')

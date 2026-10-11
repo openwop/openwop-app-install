@@ -11,10 +11,19 @@
  *            safety signals (taint banner, risk chip, recipient diff) and a summary
  *            refreshed from the LIVE (possibly edited) draft — the branch that did
  *            not exist alongside the composed / anon-surface-write ones.
+ *
+ * Sabotage-witnessed (/grade-tests w11): dropping the allowlist check reds the
+ * unknown-kind case; rejecting every kind reds the negative control; dropping the
+ * taint / edited reasons, the live-draft summary, the draft asset (reviewProjection)
+ * or `derivedFromUntrusted` from `projectActionCard` (actionApproval) reds COS-14.
  */
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { openStorage } from '../src/storage/index.js';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
+import { initInMemorySurfaces } from '../src/host/inMemorySurfaces.js';
 import type { Storage } from '../src/storage/storage.js';
 import { buildAssistantSurface } from '../src/features/assistant/surface.js';
 import {
@@ -26,6 +35,7 @@ import {
   listPendingActions,
 } from '../src/features/assistant/assistantService.js';
 import { createAssistantActionApproval, registerAssistantActionProjector } from '../src/host/approvalService.js';
+import { projectActionCard } from '../src/features/assistant/actionApproval.js';
 import { getReview } from '../src/host/reviewProjection.js';
 
 const TENANT = 't:cos-9-14';
@@ -35,23 +45,17 @@ beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   storage = await openStorage('memory://');
   initHostExtPersistence(storage);
-  // The real projector reads the typed PendingAction (the shape the feature
-  // registers at boot); registered here so `getReview` can enrich the row.
+  // The enqueue path seeds the assistant agent through the in-memory surfaces; without
+  // them every valid-kind enqueue failed for an unrelated reason (w11 finding).
+  initInMemorySurfaces({ dataDir: mkdtempSync(join(tmpdir(), 'openwop-cos-9-14-')) });
+  // The feature's REAL card projection (`projectActionCard`, what the boot-time
+  // projector returns for a reader with write authority). Before w11 this was a
+  // hand-built copy, so a field the real card dropped could not turn COS-14 red.
+  // The ADR 0862 viewer gate in the boot registration is outside this claim; the
+  // review here is read as an internal caller.
   registerAssistantActionProjector(async (t, id) => {
     const a = await getPendingAction(t, id);
-    if (!a) return null;
-    return {
-      actionId: a.actionId,
-      kind: a.kind,
-      draft: a.draft,
-      status: a.status,
-      payload: { ...(a.payload as { to?: unknown }).to !== undefined ? { to: (a.payload as { to?: unknown }).to } : {} },
-      ...(a.riskLevel !== undefined ? { riskLevel: a.riskLevel } : {}),
-      ...(a.reason !== undefined ? { reason: a.reason } : {}),
-      ...(a.recipientDiff !== undefined ? { recipientDiff: a.recipientDiff } : {}),
-      ...(a.derivedFromUntrusted !== undefined ? { derivedFromUntrusted: a.derivedFromUntrusted } : {}),
-      ...(a.editedAt !== undefined ? { editedAt: a.editedAt } : {}),
-    };
+    return a ? projectActionCard(a) : null;
   });
 });
 beforeEach(async () => { await __resetAssistantStore(); });
@@ -74,9 +78,11 @@ describe('COS-9 — the surface validates action `kind` at the ONE surface owner
     const err = await surf
       .enqueueAction!({ kind: 'nudge', draft: 'ping', payload: {} })
       .then(() => null, (e: unknown) => e as { code?: string; details?: { field?: string } });
-    if (err) {
-      expect(err.details?.field).not.toBe('kind');
-    }
+    // In this storage-only setup a valid kind enqueues: no error at all, and the row
+    // is stored under the kind it was given (the guard neither rejected nor recast it).
+    expect(err).toBeNull();
+    const rows = await listPendingActions(TENANT);
+    expect(rows.map((r) => [r.kind, r.draft])).toEqual([['nudge', 'ping']]);
   });
 });
 

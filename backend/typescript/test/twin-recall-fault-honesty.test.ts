@@ -10,6 +10,11 @@
  * The discrimination is the point, so both directions are pinned: a clean `false` still closes
  * SILENTLY (nothing to disclose about a feature nobody enabled), and a FAULT discloses only when
  * the person actually holds a grant.
+ *
+ * Sabotage witnesses (w12): deleting the `!on` early return reds the clean-false case (the link
+ * spy fires); `toggleUnreadable = false` reds BORN RED; deleting the fault-path no-grant return
+ * reds the no-grant case; re-throwing the link fault reds the correlated-outage case; a 0-arity
+ * sentinel that still fires the sink reds only the arity case.
  */
 import { describe, expect, it, beforeAll, afterEach, vi } from 'vitest';
 import { mkdtempSync } from 'node:fs';
@@ -18,13 +23,20 @@ import { join } from 'node:path';
 import { openStorage } from '../src/storage/index.js';
 import { initInMemorySurfaces } from '../src/host/inMemorySurfaces.js';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
+import * as twin from '../src/host/twinService.js';
+import { createRosterEntry } from '../src/host/rosterService.js';
+import { resolveBorrowedRecall } from '../src/features/twin/borrowedRecall.js';
+import type { ResolvedAssignment } from '../src/host/featureToggles/types.js';
 
 const T = 'tFaultHonesty';
 let AGENT = '';   // the roster id, minted in the seed (the resolver keys on it)
 const OWNER = 'user:0123456789abcdef0123456789abcdef';
 
-// The toggle resolver is the fault injection point.
-const resolveOne = vi.hoisted(() => vi.fn());
+// The toggle resolver is the fault injection point. Typed against the real signature so the
+// fixtures below must be production-shaped.
+const resolveOne = vi.hoisted(() => vi.fn<(id: string, subject: unknown) => Promise<ResolvedAssignment | null>>());
+const CLEAN_OFF: ResolvedAssignment = { id: 'twin-recall', status: 'off', enabled: false, variant: null };
+let seq = 0;
 vi.mock('../src/host/featureToggles/service.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/host/featureToggles/service.js')>();
   return { ...actual, resolveOne };
@@ -43,11 +55,9 @@ let storage: Awaited<ReturnType<typeof openStorage>>;
  *  agent that does not exist, which is itself the fail-closed behaviour, so the fixture must be
  *  real rather than stubbed. */
 async function seedLinkAndGrant(): Promise<string> {
-  const { linkTwin, grantTwin } = await import('../src/host/twinService.js');
-  const { createRosterEntry } = await import('../src/host/rosterService.js');
-  const entry = await createRosterEntry({ tenantId: T, persona: `Aide ${Math.random().toString(16).slice(2, 8)}`, agentRef: { agentId: 'a.b.c.d' } });
-  await linkTwin(storage, T, entry.rosterId, OWNER, OWNER);
-  await grantTwin(storage, T, entry.rosterId, OWNER, ['memory']);
+  const entry = await createRosterEntry({ tenantId: T, persona: `Aide ${seq++}`, agentRef: { agentId: 'a.b.c.d' } });
+  await twin.linkTwin(storage, T, entry.rosterId, OWNER, OWNER);
+  await twin.grantTwin(storage, T, entry.rosterId, OWNER, ['memory']);
   return entry.rosterId;
 }
 
@@ -61,11 +71,9 @@ describe('ADR 0666 D3 — "off" and "unreadable" are different answers', () => {
     // off, nothing further is read. That is what keeps the main path untouched by D3, and it is
     // the 1-durable-read cost claim for the common case. Asserted with a spy instead of a
     // fixture — faster, and it fails if anyone ever lets the off case fall through.
-    const twin = await import('../src/host/twinService.js');
     const linkSpy = vi.spyOn(twin, 'getTwinLink');
-    resolveOne.mockResolvedValue({ enabled: false });
+    resolveOne.mockResolvedValue(CLEAN_OFF);
     try {
-      const { resolveBorrowedRecall } = await import('../src/features/twin/borrowedRecall.js');
       expect(await resolveBorrowedRecall(T, 'any.agent', { callerUserId: OWNER })).toBeUndefined();
       expect(linkSpy, 'a cleanly-off toggle must not read the link at all').not.toHaveBeenCalled();
     } finally { linkSpy.mockRestore(); }
@@ -74,7 +82,6 @@ describe('ADR 0666 D3 — "off" and "unreadable" are different answers', () => {
   it('BORN RED — a FAULTED toggle read with a live grant degrades and FIRES the sink', async () => {
     AGENT = await seedLinkAndGrant();
     resolveOne.mockRejectedValue(new Error('toggle store down'));
-    const { resolveBorrowedRecall } = await import('../src/features/twin/borrowedRecall.js');
 
     const source = await resolveBorrowedRecall(T, AGENT, { callerUserId: OWNER });
     expect(source, 'a faulted read must NOT present as "not granted"').toBeTruthy();
@@ -92,13 +99,10 @@ describe('ADR 0666 D3 — "off" and "unreadable" are different answers', () => {
     // that does not exist, so it exited at `not-linked` and never reached the grant check at
     // all: deleting the no-grant early return would have left it green. The property is
     // "linked, but no grant ⇒ silence", so the fixture must actually be LINKED.
-    const { linkTwin } = await import('../src/host/twinService.js');
-    const { createRosterEntry } = await import('../src/host/rosterService.js');
-    const entry = await createRosterEntry({ tenantId: T, persona: `Aide nogrant ${Math.random().toString(16).slice(2, 8)}`, agentRef: { agentId: 'a.b.c.d' } });
-    await linkTwin(storage, T, entry.rosterId, OWNER, OWNER);   // linked…
+    const entry = await createRosterEntry({ tenantId: T, persona: `Aide nogrant ${seq++}`, agentRef: { agentId: 'a.b.c.d' } });
+    await twin.linkTwin(storage, T, entry.rosterId, OWNER, OWNER);   // linked…
     // …and deliberately NOT granted.
     resolveOne.mockRejectedValue(new Error('toggle store down'));
-    const { resolveBorrowedRecall } = await import('../src/features/twin/borrowedRecall.js');
     expect(await resolveBorrowedRecall(T, entry.rosterId, { callerUserId: OWNER })).toBeUndefined();
   });
 
@@ -109,10 +113,8 @@ describe('ADR 0666 D3 — "off" and "unreadable" are different answers', () => {
     // corpus could not be read. There is no owner. Silence is the only honest answer when the
     // grant cannot be established.
     resolveOne.mockRejectedValue(new Error('toggle store down'));
-    const twin = await import('../src/host/twinService.js');
     const spy = vi.spyOn(twin, 'getTwinLink').mockRejectedValue(new Error('hostext store down'));
     try {
-      const { resolveBorrowedRecall } = await import('../src/features/twin/borrowedRecall.js');
       expect(await resolveBorrowedRecall(T, 'any.agent', { callerUserId: OWNER })).toBeUndefined();
     } finally { spy.mockRestore(); }
   });
@@ -120,7 +122,6 @@ describe('ADR 0666 D3 — "off" and "unreadable" are different answers', () => {
   it('the arity contract survives the new branch (WF-TWIN-2 — do not re-narrow)', async () => {
     AGENT = await seedLinkAndGrant();
     resolveOne.mockRejectedValue(new Error('toggle store down'));
-    const { resolveBorrowedRecall } = await import('../src/features/twin/borrowedRecall.js');
     const source = await resolveBorrowedRecall(T, AGENT, { callerUserId: OWNER });
     // A 1-ary retriever is assignable and would silently swallow the sink — the GEN-RCL-1 shape.
     expect(source!.retrieve.length, 'the sentinel must DECLARE onSourceError').toBeGreaterThanOrEqual(2);

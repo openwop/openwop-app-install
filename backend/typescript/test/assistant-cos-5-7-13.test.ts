@@ -7,13 +7,25 @@
  *            persists NO job (today the route 200s with `{enabled:true}` over a
  *            job that can never fire); a valid-but-rare expression still enables
  *            (it is NOT rejected by a `computeNextFire`-style guard).
- *   COS-7  — the five remaining cross-tenant `.list()` scans read through the
- *            bounded per-tenant index (`listForTenantIndexed`) instead.
- *   COS-13 — `loops.ts` + `capability.ts` emit named observability events for
- *            loop enable/disable and a capability bootstrap failure.
+ *   COS-7  — the remaining cross-tenant `.list()` scans read through the
+ *            bounded per-tenant index (`listForTenantIndexed`) instead. Five when
+ *            filed; FOUR now — `listProjects` retired with the assistant:project
+ *            model (ADR 0820 §8 item 4). All four are asserted.
+ *   COS-13 — `loops.ts` emits named observability events for loop
+ *            enable/disable. (The capability bootstrap-failure event is asserted
+ *            in `assistant-cos-15.test.ts`, which forces that branch.)
+ *
+ * Sabotage-witnessed (/grade-tests w11): making the enableLoop cron guard reject
+ * every caller-supplied cron reds the two accept cases; un-mapping
+ * `schedule_horizon_exceeded` reds the 30-February case; a `.list()` scan in any
+ * of the four listers reds the COS-7 case; renaming either log event reds its case.
+ * Honest ceiling: removing ONLY the enableLoop `parseCron` guard leaves the
+ * unparseable-cron case green — `registerJob` (and `updateJob` on re-enable)
+ * refuse `invalid_cron` themselves with the same 400 and persist nothing, so the
+ * user-visible behaviour is double-guarded.
  */
 
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
@@ -23,6 +35,9 @@ import { DurableCollection } from '../src/host/hostExtPersistence.js';
 import {
   __resetAssistantStore,
   listPendingActions,
+  listDecisions,
+  listMeetings,
+  listStakeholders,
   enqueuePendingAction,
 } from '../src/features/assistant/assistantService.js';
 import { enableLoop, disableLoop } from '../src/features/assistant/loops.js';
@@ -71,6 +86,10 @@ async function captureStdout(fn: () => Promise<void>): Promise<string> {
 }
 
 describe('COS-5 — enableLoop validates the cron at the composition owner', () => {
+  // Each case reads/writes the per-loop job row; start every case from no jobs so
+  // the "persists NO job" witness holds in any order.
+  beforeEach(async () => { await resetScheduling(); });
+
   it('rejects an unparseable cron with a 400 and persists NO job', async () => {
     const enable = await jf<{ error?: string }>('/host/openwop-app/assistant/loops/drive-ingest/enable', {
       method: 'POST',
@@ -133,6 +152,21 @@ describe('COS-7 — the entity listers read through the bounded per-tenant index
       expect(rows.map((a) => a.draft)).toEqual(['hi A']);
       expect(indexedSpy).toHaveBeenCalled();
       expect(listSpy).not.toHaveBeenCalled();
+      // The other three COS-7 listers — each, on its own, reads the index and never scans.
+      for (const [name, read] of [
+        ['listDecisions', () => listDecisions('cos7-A')],
+        ['listMeetings', () => listMeetings('cos7-A')],
+        ['listStakeholders', () => listStakeholders('cos7-A')],
+      ] as const) {
+        // Warm first, as above: the one-time per-process `ensureTenantIndex` backfill
+        // legitimately scans once; the claim is about every read after it.
+        await read();
+        indexedSpy.mockClear();
+        listSpy.mockClear();
+        await read();
+        expect(indexedSpy, `${name} reads the per-tenant index`).toHaveBeenCalled();
+        expect(listSpy, `${name} never scans the whole collection`).not.toHaveBeenCalled();
+      }
     } finally {
       listSpy.mockRestore();
       indexedSpy.mockRestore();
@@ -150,6 +184,8 @@ describe('COS-13 — named observability on loop enable/disable', () => {
   });
 
   it('disableLoop emits a named event', async () => {
+    // Standalone: a job must exist for disable to act on (and so to log).
+    await enableLoop('default', 'calendar-ingest', { actingUserId: 'user:cos13', cronExpr: '0 7 * * *' });
     const out = await captureStdout(async () => {
       await disableLoop('default', 'calendar-ingest');
     });

@@ -100,6 +100,49 @@ describe('ADR 0866 — tenant index adoption', () => {
     expect(await c.reconcileTenantIndex({ windowMs: W, now: T0 })).toMatchObject({ repaired: 0, skipped: 1 });
   });
 
+  it('ADR 0872 D3: a row with no tenant blocks verification and resets a verified index', async () => {
+    const c = indexed();
+    await legacy().put({ id: 'ok', tenantId: 'tA' });
+    await legacy().put({ id: 'orphan', tenantId: '' });
+    await c.ensureTenantIndex(); // the backfill skips it rather than throwing
+    expect(await storage.kvGet(`hostextidx:${NAME}:tA:ok`)).not.toBeNull();
+    await c.reconcileTenantIndex({ windowMs: W, now: T0 });
+    expect(await c.reconcileTenantIndex({ windowMs: W, now: T0 + W })).toMatchObject({ skipped: 1, verified: false });
+
+    await storage.kvDelete(`hostext:${NAME}:orphan`);
+    expect(await c.reconcileTenantIndex({ windowMs: W, now: T0 + W + 1 })).toMatchObject({ verified: false }); // window restarted
+    expect(await c.reconcileTenantIndex({ windowMs: W, now: T0 + 2 * W + 1 })).toMatchObject({ verified: true });
+
+    await legacy().put({ id: 'late', tenantId: '' });
+    expect(await c.reconcileTenantIndex({ windowMs: W, now: T0 + 3 * W })).toMatchObject({ skipped: 1, verified: false, reset: true });
+  });
+
+  it('ADR 0872 D3: a lost CAS against a row with no tenant repairs nothing and does not throw', async () => {
+    const c = indexed();
+    await legacy().put({ id: 'r', tenantId: '' });
+    expect(await c.compareAndSwap({ id: 'r', tenantId: 'stale' }, { id: 'r', tenantId: 'tA' })).toBe(false);
+    expect(await storage.kvList(`hostextidx:${NAME}:`)).toEqual([]);
+  });
+
+  it('ADR 0872 D2: beforeReconcile runs under the slot lease before the pass, and its failure does not stop the pass', async () => {
+    const c = indexed();
+    const order: string[] = [];
+    registerTenantIndexAdoption(NAME, c, { beforeReconcile: async () => {
+      order.push('hook');
+      await legacy().put({ id: 'stamped-by-hook', tenantId: 'tA' });
+    } });
+    await reconcileTenantIndexesOnce(storage, T0);
+    await reconcileTenantIndexesOnce(storage, T0 + 5 * MIN); // same slot: no second hook run
+    expect(order).toEqual(['hook']);
+    expect(await storage.kvGet(`hostextidx:${NAME}:tA:stamped-by-hook`)).not.toBeNull(); // the pass saw it
+
+    __resetTenantIndexAdoptionRegistry();
+    registerTenantIndexAdoption(NAME, c, { beforeReconcile: async () => { throw new Error('boom'); } });
+    await legacy().put({ id: 'after-failure', tenantId: 'tA' });
+    await reconcileTenantIndexesOnce(storage, T0 + 60 * MIN);
+    expect(await storage.kvGet(`hostextidx:${NAME}:tA:after-failure`)).not.toBeNull();
+  });
+
   it('malformed verification metadata fails closed and can be repaired', async () => {
     const c = indexed();
     const k = `hostextidxmeta:${NAME}:adoption`;

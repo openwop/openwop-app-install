@@ -3272,6 +3272,25 @@ export async function openPostgresStorage(options: PostgresStorageOptions | stri
       );
       return rows.map((r) => ({ key: r.k, value: r.v }));
     },
+    async surfaceRowStats(minTenantRows) {
+      // ADR 0871 — `split_part` on ':' is safe: the tenant segment is
+      // encodeURIComponent'd (durableStore), so it never contains the delimiter.
+      // The range is the `hostsurf:` prefix in byte order, which the
+      // text_pattern_ops index serves.
+      const { rows } = await pool.query<{ family: string; tenants: number; max_rows: number; total_rows: string; over: number }>(
+        `SELECT fam AS family, count(*)::int AS tenants, max(n)::int AS max_rows,
+                sum(n)::bigint AS total_rows, count(*) FILTER (WHERE n >= $1)::int AS over
+           FROM (SELECT split_part(k, ':', 2) AS fam, split_part(k, ':', 3) AS t, count(*) AS n
+                   FROM host_ext_kv WHERE k ~>=~ 'hostsurf:' AND k ~<~ 'hostsurf;'
+                  GROUP BY 1, 2) s
+          GROUP BY fam ORDER BY fam`,
+        [minTenantRows],
+      );
+      return rows.map((r) => ({
+        family: r.family, tenants: r.tenants, maxTenantRows: r.max_rows,
+        totalRows: Number(r.total_rows), tenantsAtOrOver: r.over,
+      }));
+    },
     async kvCount(keyPrefix) {
       const escaped = keyPrefix.replace(/[\\%_]/g, '\\$&');
       const { rows } = await pool.query<{ n: number }>(

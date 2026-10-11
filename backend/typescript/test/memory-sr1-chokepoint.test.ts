@@ -15,9 +15,20 @@
  *   - substring, not regex   → a secret with metacharacters must still redact
  *   - descending length      → a long secret containing a short one redacts whole
  *   - 8-character floor      → a short secret must NOT shred unrelated content
+ *
+ * Sabotage-witnessed (w12 grade-tests): a marker without the secretId, a RegExp
+ * replacement, ascending sort, a floor of 1 or `>`, a replace-not-merge
+ * `registerRunSecret`, each dropped empty-input guard, a chokepoint that skips
+ * redaction or persists the raw input, an unconditional / never advert, an advert
+ * blind to the global fallback, a bare call in `bootstrap/nodes.ts`, and a
+ * placeholder run id at that call each turn a named case red.
  */
 
 import { describe, expect, it, beforeAll, afterEach } from 'vitest';
+import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { join, relative } from 'node:path';
+import { buildV2Advertisement } from '../src/routes/discovery.js';
+import { resolveBackendId, MEMORY_BACKEND } from '../src/host/surfaceBackends.js';
 import {
   redactRunSecretsForMemory,
   SR1_MIN_SECRET_LENGTH,
@@ -45,6 +56,7 @@ beforeAll(() => {
 
 afterEach(() => {
   clearRunSecrets('run-sr1');
+  clearRunSecrets('');
 });
 
 describe('SR-1 substitution rules (agent-memory.md §SR-1 reference-impl notes)', () => {
@@ -84,14 +96,13 @@ describe('SR-1 substitution rules (agent-memory.md §SR-1 reference-impl notes)'
     expect(redactRunSecretsForMemory('x abcdefgh y', { 'ok': atFloor })).toBe('x [REDACTED:ok] y');
   });
 
-  it('is idempotent — already-redacted content is unchanged', () => {
-    const once = redactRunSecretsForMemory('v=supersecretvalue', { 's': 'supersecretvalue' });
-    expect(redactRunSecretsForMemory(once, { 's': 'supersecretvalue' })).toBe(once);
-  });
-
-  it('an empty keyring is a no-op (a run that resolved nothing has nothing to redact)', () => {
-    expect(redactRunSecretsForMemory('plain content', {})).toBe('plain content');
-  });
+  // CUT (w12 grade-tests), each with the probe that proved the cover:
+  //  - `is idempotent` — w12g5-sr1-idempotent-redundant (a marker embedding the value)
+  //    turned the marker case above red too; for split/join, idempotence follows from
+  //    "the output no longer contains the plaintext", which that case asserts.
+  //  - `an empty keyring is a no-op` — w12g5-sr1-emptykeyring-redundant reddened
+  //    `an unknown runId degrades to a plain write` below, which drives the same empty
+  //    keyring through the real chokepoint.
 });
 
 describe('registerRunSecret — MERGES, never replaces', () => {
@@ -116,6 +127,9 @@ describe('registerRunSecret — MERGES, never replaces', () => {
     registerRunSecret('run-sr1', '', 'value-with-no-ref');
     registerRunSecret('', 'ref', 'value-with-no-run');
     expect(getRunSecrets('run-sr1')).toEqual({});
+    // The empty-runId call registers under run '' — reading 'run-sr1' alone could
+    // never see it (w12g5-sr1-empty-runid was vacuous before this line).
+    expect(getRunSecrets('')).toEqual({});
   });
 });
 
@@ -171,12 +185,12 @@ describe('writeMemoryEntryRedacted — the chokepoint, end to end', () => {
  * would pass an "absent" test. Only flipping the surface distinguishes them.
  */
 describe('agents.memoryBackends advert is derived from the memory surface', () => {
-  async function memoryBackends(): Promise<unknown> {
-    const { buildAdvertisement } = await import('../src/routes/discovery.js');
+  function memoryBackends(): unknown {
     const cfg = { port: 0, storageDsn: 'memory://', serviceName: 't', serviceVersion: '0', enableConsoleTracer: false };
-    const ad = buildAdvertisement(cfg);
-    const caps = (ad as { capabilities?: { agents?: { memoryBackends?: unknown } } }).capabilities;
-    return caps?.agents?.memoryBackends;
+    // ADR 0812 P4: the v2 `agents` record (the v1 builder is deleted); both
+    // majors spread the SAME `longTermMemoryDurable()` derivation.
+    const ad = buildV2Advertisement(cfg);
+    return (ad as { agents?: { memoryBackends?: unknown } }).agents?.memoryBackends;
   }
 
   /**
@@ -226,7 +240,6 @@ describe('agents.memoryBackends advert is derived from the memory surface', () =
   }
 
   it('is ABSENT on the non-durable default tier — no over-claim on a demo deploy', async () => {
-    const { resolveBackendId, MEMORY_BACKEND } = await import('../src/host/surfaceBackends.js');
     await withMemoryBackend(MEMORY_BACKEND, async () => {
       // Precondition, asserted rather than assumed: if this ever fails the
       // message names the resolution, not the advert.
@@ -234,13 +247,13 @@ describe('agents.memoryBackends advert is derived from the memory surface', () =
         resolveBackendId('memory'),
         'precondition: the memory surface must resolve to the in-memory default here',
       ).toBe(MEMORY_BACKEND);
-      expect(await memoryBackends(), 'a process-local tier is not a cross-run durable store').toBeUndefined();
+      expect(memoryBackends(), 'a process-local tier is not a cross-run durable store').toBeUndefined();
     });
   });
 
   it("is ['long-term'] when a durable memory backend is selected", async () => {
     await withMemoryBackend('durable', async () => {
-      expect(await memoryBackends()).toEqual(['long-term']);
+      expect(memoryBackends()).toEqual(['long-term']);
     });
   });
 
@@ -254,7 +267,7 @@ describe('agents.memoryBackends advert is derived from the memory surface', () =
     delete process.env.OPENWOP_SURFACE_MEMORY;
     process.env.OPENWOP_SURFACE_BACKEND = 'durable';
     try {
-      expect(await memoryBackends()).toEqual(['long-term']);
+      expect(memoryBackends()).toEqual(['long-term']);
     } finally {
       if (prevMemory === undefined) delete process.env.OPENWOP_SURFACE_MEMORY;
       else process.env.OPENWOP_SURFACE_MEMORY = prevMemory;
@@ -299,9 +312,7 @@ describe('SR-1 call-site ratchet — no bare writeMemoryEntry in a run context',
       'the CTI-1 foreign-tenant seed only. That row belongs to a synthetic tenant and carries no secret; redacting it against THIS run keyring would be meaningless.',
   };
 
-  it('every bare writeMemoryEntry( call site is accounted for', async () => {
-    const { readdirSync, readFileSync, statSync } = await import('node:fs');
-    const { join, relative } = await import('node:path');
+  it('every bare writeMemoryEntry( call site is accounted for', () => {
     const SRC = join(import.meta.dirname, '..', 'src');
 
     const files: string[] = [];
@@ -333,18 +344,20 @@ describe('SR-1 call-site ratchet — no bare writeMemoryEntry in a run context',
     expect([...callers].sort()).toEqual(Object.keys(ALLOWED).sort());
   });
 
-  it('the two run-context sites DO use the redacting form', async () => {
-    const { readFileSync } = await import('node:fs');
-    const { join } = await import('node:path');
+  it('the two run-context sites DO use the redacting form', () => {
     const SRC = join(import.meta.dirname, '..', 'src');
-    for (const [file, marker] of [
-      ['executor/executor.ts', 'run.runId'],
-      ['bootstrap/nodes.ts', 'ctx.runId'],
+    // The run id is matched as the chokepoint call's LAST argument. A bare
+    // `toContain('run.runId')` could not fail: that string occurs 137× in the
+    // executor and `ctx.runId` 44× in nodes.ts (w12g5-sr1-runid-arg was vacuous).
+    // `[^;]*` bounds the match to ONE call: a lazy `[\s\S]*?` ran past a sabotaged
+    // call to a later `, run.runId);` and stayed green.
+    for (const [file, runIdArg] of [
+      ['executor/executor.ts', /writeMemoryEntryRedacted\([^;]*,\s*run\.runId,?\s*\);/],
+      ['bootstrap/nodes.ts', /writeMemoryEntryRedacted\([^;]*,\s*ctx\.runId\s*\);/],
     ] as const) {
       const code = readFileSync(join(SRC, file), 'utf8').replace(/^\s*(\/\/|\*|\/\*).*$/gm, '');
       expect(code, `${file} MUST call the redacting form`).toContain('writeMemoryEntryRedacted(');
-      // ...and pass the run's id, not a placeholder.
-      expect(code, `${file} MUST pass ${marker} to the chokepoint`).toContain(marker);
+      expect(code, `${file} MUST pass the run's id as the chokepoint's runId`).toMatch(runIdArg);
     }
   });
 });

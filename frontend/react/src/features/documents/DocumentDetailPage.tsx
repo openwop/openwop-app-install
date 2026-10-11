@@ -130,9 +130,15 @@ export function DocumentDetailPage(): JSX.Element {
         // failure — a 500, offline — used to fold into the same card, telling
         // the user a document that exists doesn't (UX-DOC-6, P2 baseline).
         // Those now get a retryable failure state instead.
+        // Classify on the STATUS, not the message: the real client error is
+        // `DocumentsApiError('Document not found.', 404)` (the server's detail),
+        // so the old `/returned 40[34]$/` match never fired in production and
+        // every real 403/404 showed the retry card (grade-tests w14, TST-DOC-36).
+        // The suffix match stays for errors raised without a status.
         if (cancelled) return;
         const msg = e instanceof Error ? e.message : String(e);
-        if (/returned 40[34]$/.test(msg)) setNotFound(true);
+        const status = e instanceof DocumentsApiError ? e.status : undefined;
+        if (status === 403 || status === 404 || /returned 40[34]$/.test(msg)) setNotFound(true);
         else setLoadFailed(msg);
         setLoading(false);
       }

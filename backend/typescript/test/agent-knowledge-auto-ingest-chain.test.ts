@@ -11,6 +11,16 @@
  * same call the boot path makes — rather than a synthetic registry, because a
  * synthetic registry proves the shape of a fixture, not that the pack this repo
  * actually ships is discoverable, valid and expandable.
+ *
+ * "The pin site is GONE" is NOT re-asserted here: `workflow-pin-site-ratchet.test.ts`
+ * ("WF-KB-1: agent-knowledge no longer pins a definition at all") and
+ * `agent-knowledge-route.test.ts` ("resolves the §B auto-ingest workflow…",
+ * `getRegisteredWorkflow` undefined) both go red when a `registerWorkflow({...})` pin
+ * is added back to `features/agent-knowledge/feature.ts` (grade-tests w11 probes).
+ *
+ * Sabotage that turns this red (w11 probes): renaming the pack's `chainId` (cases
+ * 1-3); dropping the loader's `outputRole:'primary'` stamp (case 2); a
+ * `Math.random()` field in `buildChainBackedDefinition` (case 3).
  */
 import { beforeAll, describe, expect, it } from 'vitest';
 import {
@@ -64,19 +74,5 @@ describe('WF-KB-1 — agent-knowledge auto-ingest is chain-backed, not code-pinn
     const b = JSON.stringify(buildChainBackedDefinition(AUTO_INGEST_WORKFLOW_ID));
     expect(a).toBe(b);
     expect(a).not.toContain('subChainRef');
-  });
-
-  it('the feature module no longer imports the raw registry (the pin site is GONE, not moved)', async () => {
-    const { readFileSync } = await import('node:fs');
-    const { join } = await import('node:path');
-    // Comments are not code: the module's own docblock QUOTES the retired call to
-    // explain the migration, so an un-stripped scan reads the fix as the defect.
-    // (Local copy rather than an import — importing a sibling *.test.ts would
-    // re-run its suite inside this one.)
-    const src = readFileSync(join(__dirname, '..', 'src', 'features', 'agent-knowledge', 'feature.ts'), 'utf8')
-      .replace(/\/\*[\s\S]*?\*\//g, ' ')
-      .replace(/(^|[^:'"`\\])\/\/[^\n]*/g, '$1');
-    expect(/\bregisterWorkflow\s*\(/.test(src), 'no raw registerWorkflow call may return').toBe(false);
-    expect(/registerChainBackedWorkflow\s*\(/.test(src)).toBe(true);
   });
 });

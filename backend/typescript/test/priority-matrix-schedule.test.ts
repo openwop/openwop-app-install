@@ -2,6 +2,12 @@
  * Priority Matrix schedule derivation (ADR 0103) — pure unit tests for the six
  * states + the at-risk window + blocked + cancellation handling + the rollup. The
  * clock is injected (`nowMs`) so every case is deterministic.
+ *
+ * Sabotage-witnessed (grade-tests w15): dropping the end-of-day `+ DAY_MS - 1`,
+ * shrinking ATRISK_WINDOW_DAYS, removing the isBlocked / isCancelled early
+ * returns, inverting the on-time comparison, treating an unparseable date as
+ * scheduled, flipping worst-wins health, mis-counting a bucket, or switching the
+ * floor/ceil of dueInDays / overdueByDays each red a case below.
  */
 import { describe, expect, it } from 'vitest';
 import {
@@ -24,6 +30,8 @@ describe('deriveScheduleStatus — open ideas', () => {
     const r = deriveScheduleStatus({ ...open, targetDate: '2026-07-30' });
     expect(r.state).toBe('on-track');
     expect(r.dueInDays).toBeGreaterThan(ATRISK_WINDOW_DAYS);
+    // 2026-07-30 end-of-day − 2026-06-22T12:00Z = 38.5 days, floored.
+    expect(r.dueInDays).toBe(38);
   });
 
   it('at-risk inside the at-risk window', () => {
@@ -31,7 +39,7 @@ describe('deriveScheduleStatus — open ideas', () => {
     const target = new Date(NOW + 2 * DAY).toISOString().slice(0, 10);
     const r = deriveScheduleStatus({ ...open, targetDate: target });
     expect(r.state).toBe('at-risk');
-    expect(r.dueInDays).toBeLessThanOrEqual(ATRISK_WINDOW_DAYS);
+    expect(r.dueInDays).toBe(2);
   });
 
   it('at-risk when blocked even if the target is far off', () => {
@@ -42,7 +50,8 @@ describe('deriveScheduleStatus — open ideas', () => {
   it('behind when the target date has passed', () => {
     const r = deriveScheduleStatus({ ...open, targetDate: '2026-06-01' });
     expect(r.state).toBe('behind');
-    expect(r.overdueByDays).toBeGreaterThan(0);
+    // 2026-06-22T12:00Z − 2026-06-01 end-of-day = 20.5 days, rounded UP.
+    expect(r.overdueByDays).toBe(21);
   });
 
   it('counts the whole target day as on-time (date-only is end-of-day)', () => {
@@ -90,6 +99,6 @@ describe('rollupSchedule — worst-wins health', () => {
   it('otherwise on-track, with accurate counts', () => {
     const r = roll(['on-track', 'on-track', 'done-late', 'unscheduled']);
     expect(r.health).toBe('on-track');
-    expect(r).toMatchObject({ onTrack: 2, doneLate: 1, unscheduled: 1, total: 4 });
+    expect(r).toEqual({ behind: 0, atRisk: 0, onTrack: 2, doneLate: 1, doneEarly: 0, unscheduled: 1, total: 4, health: 'on-track' });
   });
 });

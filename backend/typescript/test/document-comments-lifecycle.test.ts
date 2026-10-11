@@ -4,6 +4,10 @@
  * is registered, then proves: (CMT-1) the `canvas_document` comment target
  * validator accepts a real canvas.document and rejects a wrong-type canvas;
  * (CMT-2/DATA-1) firing the canvas-deleted seam prunes the document's comments.
+ *
+ * Sabotage-witnessed (grade-tests w14): dropping the canvas-type gate, the
+ * `canvasId#threadId` split, the hook's type gate or prune call, the composite-thread
+ * match, the `#` prefix boundary, or the resolved title each turns a case red.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
@@ -42,8 +46,10 @@ async function makeCanvas(canvasTypeId: string): Promise<string> {
 describe('canvas.document comments (CMT-1 target validator)', () => {
   it('accepts a comment on a real canvas.document (title resolved)', async () => {
     const canvasId = await makeCanvas('canvas.document');
-    const { comment } = await createComment({ tenantId: TENANT, orgId: ORG, resourceType: 'canvas_document', resourceId: canvasId, body: 'nice paragraph', authorId: AUTHOR , caller: { subject: AUTHOR }});
+    const { comment, notify } = await createComment({ tenantId: TENANT, orgId: ORG, resourceType: 'canvas_document', resourceId: canvasId, body: 'nice paragraph', authorId: AUTHOR , caller: { subject: AUTHOR }});
     expect(comment.resourceId).toBe(canvasId);
+    // The notification names the document by the title the validator resolved from its state.
+    expect(notify.resourceTitle).toBe('Doc');
     expect((await listThreadOrFail(TENANT, ORG, 'canvas_document', canvasId, PREAUTHORIZED_CALLER))).toHaveLength(1);
   });
 
@@ -100,7 +106,7 @@ describe('canvas.document delete → comments prune (CMT-2 / DATA-1)', () => {
     await createComment({ tenantId: TENANT, orgId: ORG, resourceType: 'canvas_document', resourceId: inlineA, body: 'inline a', authorId: AUTHOR , caller: { subject: AUTHOR }});
     await createComment({ tenantId: TENANT, orgId: ORG, resourceType: 'canvas_document', resourceId: inlineB, body: 'inline b', authorId: AUTHOR , caller: { subject: AUTHOR }});
 
-    // A sibling canvas whose id shares a string prefix must NOT be swept.
+    // A sibling canvas's thread must NOT be swept.
     const sibling = await makeCanvas('canvas.document');
     await createComment({ tenantId: TENANT, orgId: ORG, resourceType: 'canvas_document', resourceId: sibling, body: 'sibling keep', authorId: AUTHOR , caller: { subject: AUTHOR }});
 
@@ -109,6 +115,11 @@ describe('canvas.document delete → comments prune (CMT-2 / DATA-1)', () => {
     expect(await listThreadOrFail(TENANT, ORG, 'canvas_document', canvasId, PREAUTHORIZED_CALLER)).toHaveLength(0);
     expect(await listThreadOrFail(TENANT, ORG, 'canvas_document', inlineA, PREAUTHORIZED_CALLER)).toHaveLength(0);
     expect(await listThreadOrFail(TENANT, ORG, 'canvas_document', inlineB, PREAUTHORIZED_CALLER)).toHaveLength(0);
+    expect(await listThreadOrFail(TENANT, ORG, 'canvas_document', sibling, PREAUTHORIZED_CALLER)).toHaveLength(1);
+
+    // Prefix boundary: deleting an id that is a strict STRING PREFIX of the sibling's
+    // id must not sweep the sibling — only `id` and `id#…` threads belong to it.
+    await fireCanvasDeleted({ tenantId: TENANT, canvasId: sibling.slice(0, -4), canvasTypeId: 'canvas.document' });
     expect(await listThreadOrFail(TENANT, ORG, 'canvas_document', sibling, PREAUTHORIZED_CALLER)).toHaveLength(1);
   });
 });

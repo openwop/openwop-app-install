@@ -4,6 +4,13 @@
  * editor-doc validator (malformed content → 422), optimistic-concurrency saves
  * (CAS → 409 on a stale version), cross-tenant IDOR (uniform 404), type pinning
  * (a drawing canvas is a 404 on the document routes), and delete.
+ *
+ * Saves are asserted on the PERSISTED canvas (a re-GET), not just the status: a
+ * stale or invalid write must leave the stored document unchanged.
+ * Sabotage-witnessed (grade-tests w14): unbinding the validator, a blank state with
+ * no content, dropping the type pin, the CAS expectedVersion, the tenant filter, the
+ * saved-content export, the format allowlist, the import size cap / required check,
+ * or the delete each turns a case red.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -32,14 +39,20 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T }
+/** The JSON bodies these routes return (canvas view, org, import result) — every field optional. */
+interface Body {
+  canvasId?: string; canvasTypeId?: string; version?: number; orgId?: string;
+  state?: { title?: string; content?: { type?: string; content?: { type?: string; content?: { text?: string }[] }[] } };
+  html?: string; warnings?: unknown;
+}
+interface Res { status: number; body: Body }
 function client() {
   let cookie = '';
   const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
-    return { status: res.status, body: out };
+    const out: unknown = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    return { status: res.status, body: out && typeof out === 'object' ? (out as Body) : {} };
   };
   const bin = async (path: string, body: unknown): Promise<{ status: number; contentType: string; text: string }> => {
     const res = await fetch(`${BASE}${path}`, { method: 'POST', headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, body: JSON.stringify(body) });
@@ -57,7 +70,7 @@ async function orgOwner(): Promise<{ c: ReturnType<typeof client>; orgId: string
   expect(r.status).toBe(201);
   const org = await c.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status).toBe(201);
-  return { c, orgId: org.body.orgId, tenantId };
+  return { c, orgId: org.body.orgId!, tenantId };
 }
 
 const docState = (title: string) => ({ title, content: { type: 'doc', content: [{ type: 'heading', attrs: { level: 1 }, content: [{ type: 'text', text: title }] }] } });
@@ -68,31 +81,43 @@ describe('document-editor routes (canvas.document)', () => {
     const created = await c.post(`${BASEPATH}/orgs/${orgId}/canvases`, { name: 'My Doc' });
     expect(created.status).toBe(201);
     expect(created.body.canvasTypeId).toBe('canvas.document');
-    const id = created.body.canvasId;
+    const id = created.body.canvasId!;
 
     const got = await c.get(`${BASEPATH}/orgs/${orgId}/canvases/${id}`);
     expect(got.status).toBe(200);
-    expect(got.body.state.content.type).toBe('doc');
+    expect(got.body.state?.content?.type).toBe('doc');
+    const v0 = got.body.version!;
 
-    const saved = await c.patch(`${BASEPATH}/orgs/${orgId}/canvases/${id}`, { state: docState('My Doc'), expectedVersion: got.body.version });
+    const saved = await c.patch(`${BASEPATH}/orgs/${orgId}/canvases/${id}`, { state: docState('My Doc'), expectedVersion: v0 });
     expect(saved.status).toBe(200);
-    // A stale expectedVersion → 409 (optimistic concurrency).
-    const stale = await c.patch(`${BASEPATH}/orgs/${orgId}/canvases/${id}`, { state: docState('again'), expectedVersion: got.body.version });
+    const afterSave = await c.get(`${BASEPATH}/orgs/${orgId}/canvases/${id}`);
+    expect(afterSave.body.version).toBe(v0 + 1);
+    expect(afterSave.body.state?.content?.content?.[0]?.type).toBe('heading');
+    expect(afterSave.body.state?.content?.content?.[0]?.content?.[0]?.text).toBe('My Doc');
+    // A stale expectedVersion → 409 (optimistic concurrency), and nothing is written.
+    const stale = await c.patch(`${BASEPATH}/orgs/${orgId}/canvases/${id}`, { state: docState('again'), expectedVersion: v0 });
     expect(stale.status).toBe(409);
+    const afterStale = await c.get(`${BASEPATH}/orgs/${orgId}/canvases/${id}`);
+    expect(afterStale.body.version).toBe(v0 + 1);
+    expect(afterStale.body.state?.title).toBe('My Doc');
   });
 
   it('rejects malformed PM-JSON with 422 (validator)', async () => {
     const { c, orgId } = await orgOwner();
     const created = await c.post(`${BASEPATH}/orgs/${orgId}/canvases`, { name: 'Bad' });
-    const id = created.body.canvasId;
+    const id = created.body.canvasId!;
     const bad = await c.patch(`${BASEPATH}/orgs/${orgId}/canvases/${id}`, { state: { title: 'Bad', content: 'not-a-doc' } });
     expect(bad.status).toBe(422);
+    // Nothing persisted: the stored canvas is still the blank document.
+    const after = await c.get(`${BASEPATH}/orgs/${orgId}/canvases/${id}`);
+    expect(after.body.version).toBe(created.body.version);
+    expect(after.body.state?.content?.type).toBe('doc');
   });
 
   it('does not leak another tenant\'s document (cross-tenant 404)', async () => {
     const a = await orgOwner();
     const created = await a.c.post(`${BASEPATH}/orgs/${a.orgId}/canvases`, { name: 'Private' });
-    const id = created.body.canvasId;
+    const id = created.body.canvasId!;
     const b = await orgOwner();
     const leak = await b.c.get(`${BASEPATH}/orgs/${b.orgId}/canvases/${id}`);
     expect(leak.status).toBe(404);
@@ -108,8 +133,8 @@ describe('document-editor routes (canvas.document)', () => {
   it('exports the saved document as PDF and Markdown (ADR 0334 4b)', async () => {
     const { c, orgId } = await orgOwner();
     const created = await c.post(`${BASEPATH}/orgs/${orgId}/canvases`, { name: 'Report' });
-    const id = created.body.canvasId;
-    await c.patch(`${BASEPATH}/orgs/${orgId}/canvases/${id}`, { state: docState('Report'), expectedVersion: created.body.version });
+    const id = created.body.canvasId!;
+    expect((await c.patch(`${BASEPATH}/orgs/${orgId}/canvases/${id}`, { state: docState('Report'), expectedVersion: created.body.version })).status).toBe(200);
 
     const pdf = await c.bin(`${BASEPATH}/orgs/${orgId}/canvases/${id}/export`, { format: 'pdf' });
     expect(pdf.status).toBe(200);
@@ -158,8 +183,9 @@ describe('document-editor routes (canvas.document)', () => {
   it('deletes a document (204)', async () => {
     const { c, orgId } = await orgOwner();
     const created = await c.post(`${BASEPATH}/orgs/${orgId}/canvases`, { name: 'Doomed' });
-    const del = await c.del(`${BASEPATH}/orgs/${orgId}/canvases/${created.body.canvasId}`);
+    const id = created.body.canvasId!;
+    const del = await c.del(`${BASEPATH}/orgs/${orgId}/canvases/${id}`);
     expect(del.status).toBe(204);
-    expect((await c.get(`${BASEPATH}/orgs/${orgId}/canvases/${created.body.canvasId}`)).status).toBe(404);
+    expect((await c.get(`${BASEPATH}/orgs/${orgId}/canvases/${id}`)).status).toBe(404);
   });
 });

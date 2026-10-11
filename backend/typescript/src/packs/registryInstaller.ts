@@ -329,22 +329,26 @@ export async function installPackFromRegistry(
     // ADR 0826 D2 — closed world, BEFORE anything reaches destDir: a pack gets
     // only the bytes it ships. A symlink here was a DATA-only pack's host-file read.
     assertClosedWorldPackTree(packRoot);
+    // ADR 0660 D3 — verify-one / install-another. `extractPackJsonFromTarball`
+    // returns the FIRST root `pack.json` entry, while `tar -xzf` lets the LAST
+    // one win on disk: so the signature AND the canonical-manifest gate can both
+    // validate bytes that are then overwritten. Re-hash what was STAGED, BEFORE
+    // destDir is touched: checking after the copy (as this used to) left a refused
+    // tarball's files installed and the prior install already deleted (grade-tests
+    // w10, TST-CMK-23). Scope: this binds `pack.json` only — `index.mjs` has no
+    // verified reference bytes, and is covered by the marker below.
+    const stagedPackJsonSha = createHash('sha256').update(readFileSync(join(packRoot, 'pack.json'))).digest('hex');
+    if (stagedPackJsonSha !== createHash('sha256').update(packJsonBytes).digest('hex')) {
+      throw new Error('pack_integrity_mismatch: the installed pack.json is not the bytes that were verified');
+    }
     if (existsSync(destDir)) {
       rmSync(destDir, { recursive: true, force: true });
     }
     mkdirSync(destDir, { recursive: true });
     copyAllowlistedFiles(packRoot, destDir);
+    // `copyAllowlistedFiles` is a byte copy, so what landed is what was staged
+    // and checked above; the marker records the landed hash.
     packJsonSha = createHash('sha256').update(readFileSync(join(destDir, 'pack.json'))).digest('hex');
-    // ADR 0660 D3 — verify-one / install-another. `extractPackJsonFromTarball`
-    // returns the FIRST root `pack.json` entry, while `tar -xzf` lets the LAST
-    // one win on disk: so the signature AND the canonical-manifest gate can both
-    // validate bytes that are then overwritten. Re-hash what actually landed.
-    // (`copyAllowlistedFiles` is a byte copy, so this cannot fail spuriously.)
-    // Scope: this binds `pack.json` only — `index.mjs` has no verified reference
-    // bytes to compare against, and is covered by the marker below, not a signature.
-    if (packJsonSha !== createHash('sha256').update(packJsonBytes).digest('hex')) {
-      throw new Error('pack_integrity_mismatch: the installed pack.json is not the bytes that were verified');
-    }
     const indexPath = join(destDir, 'index.mjs');
     if (existsSync(indexPath)) {
       indexMjsSha = createHash('sha256').update(readFileSync(indexPath)).digest('hex');

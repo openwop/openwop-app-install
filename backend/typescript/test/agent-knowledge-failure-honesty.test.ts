@@ -16,8 +16,15 @@
  *     THE MODEL'S REPLY ITSELF was the false empty — the widget layer had already
  *     learned this lesson (a `failed` flag, a `storedUnknown` counter, copy reading
  *     "This is a failed read, not an empty memory"); dispatch had not.
+ *
+ * Sabotage that turns this red (grade-tests w11 probes): not throwing for a missing agent
+ * (WF-AKM-3 case 1); dropping `unavailable` (case 2); a capability-ON agent's retriever not
+ * resolving (case 3); dropping the per-source `degraded.push` (WF-AKM-6 per-source case);
+ * an unconditional degradation notice (clean-retrieval anti-rot); a borrowed lane with no
+ * notice or a non-empty empty block; dispatch not pushing — or always pushing — the
+ * long-term-memory degradation (MEM-UX-14).
  */
-import { describe, it, expect, beforeAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterEach } from 'vitest';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -61,21 +68,17 @@ describe('WF-AKM-3 — the three states behind `undefined` are distinguished', (
     await upsertAgentProfile(T, 'bound-none-agent', { roleKey: 'analyst', autonomy: { specLevel: 'recommend' }, capabilities: ['knowledge'] });
     const res = await retrieveForAgent(T, 'bound-none-agent', 'anything');
     expect(res.hasResults).toBe(false);
-    // `undefined` (a resolved retriever that found nothing) or the explicit
-    // 'nothing-bound' reason — never 'agent-missing'/'capability-off'.
-    expect(res.unavailable === undefined || res.unavailable === 'nothing-bound').toBe(true);
+    // With the capability and the default `sources:['kb','memory']`, a retriever ALWAYS
+    // resolves, so `unavailable` is absent. (This used to accept 'nothing-bound' too — which
+    // is exactly what a capability-ON agent whose retriever stopped resolving reports.)
+    expect(res.unavailable).toBeUndefined();
+    expect(res.failedSources).toEqual([]);
   });
 });
 
 describe('WF-AKM-6 — the compose lanes report a fault instead of returning an empty string', () => {
-  it('a THROWING retriever no longer collapses into silence', async () => {
-    const block = await composeAgentKnowledgeContext(async () => {
-      throw new Error('kb backend down');
-    }, 'q');
-    expect(block).not.toBe('');
-    expect(block).toContain('DEGRADED');
-    expect(block).toContain('FAILED');
-  });
+  // The THROWING-retriever case lives in `agent-knowledge-context.test.ts` ("reports a
+  // retriever error to the model instead of swallowing it") — same call, superset asserts.
 
   it('a PER-SOURCE fault is reported alongside the chunks that did come back', async () => {
     const block = await composeAgentKnowledgeContext(async (_q, onSourceError) => {
@@ -96,7 +99,7 @@ describe('WF-AKM-6 — the compose lanes report a fault instead of returning an 
   });
 
   it('ANTI-ROT: an empty-but-successful retrieval still injects NOTHING', async () => {
-    expect(await composeAgentKnowledgeContext(async () => [], 'q')).toBe('');
+    // The chat-lane half is `agent-knowledge-context.test.ts` "returns empty string…".
     // RCL-6/RCL-UX-1 widened the borrowed compose to a struct; empty stays empty.
     expect((await composeBorrowedRecallContext(async () => [], 'q')).block).toBe('');
   });
@@ -111,6 +114,10 @@ describe('WF-AKM-6 — the compose lanes report a fault instead of returning an 
 });
 
 describe('MEM-UX-14 — a failed memory read reaches the MODEL, not just the log', () => {
+  // In afterEach, not at the end of each body: a failing assertion used to skip the reset
+  // and leak the registered agent into later cases.
+  afterEach(() => getAgentRegistry()._resetForTest());
+
   function register(agentId: string): void {
     getAgentRegistry().register({
       agentId,
@@ -132,7 +139,7 @@ describe('MEM-UX-14 — a failed memory read reaches the MODEL, not just the log
       return { content: 'done' };
     };
     return {
-      deps: { callAI, memory: { read, write: async () => {} }, memoryScope: 'tenant-a/mem' } as LiveDispatchDeps,
+      deps: { callAI, memory: { read, write: async () => {} }, memoryScope: 'tenant-a/mem' },
       saw: () => sawContent,
     };
   }
@@ -150,7 +157,6 @@ describe('MEM-UX-14 — a failed memory read reaches the MODEL, not just the log
     // The precise lie being closed: the model must not report an empty record.
     expect(saw).toContain('do NOT tell the user you have nothing on record');
     expect(saw).toContain('what do you know about me?'); // the task still gets through
-    getAgentRegistry()._resetForTest();
   });
 
   it('ANTI-ROT: a SUCCESSFUL empty read stays silent — an empty memory is not a failure', async () => {
@@ -158,6 +164,5 @@ describe('MEM-UX-14 — a failed memory read reaches the MODEL, not just the log
     const h = harness(async () => []);
     await runAgentDispatchLive({ agentId: 'clean.agent', task: 'hello' }, h.deps);
     expect(h.saw()).not.toContain('DEGRADED');
-    getAgentRegistry()._resetForTest();
   });
 });

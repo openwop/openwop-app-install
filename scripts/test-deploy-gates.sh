@@ -225,6 +225,7 @@ printf '%s' "$OLD" > "$REPO/build-meta/commit.txt"
 check "REFUSES a STALE stamp (Gate 4: commit.txt != HEAD)" 1 "$(run_preflight)"
 stamp_head
 
+
 # ── Gate 6: hosting rewrites cover the v2 wire (ADR 0614) ──────────────────
 # The fixture has no firebase.json, so every case above took the SKIP arm (a
 # compose/Render deploy). Give it one: first the 2026-09-06 shape — an adopter's
@@ -459,7 +460,7 @@ fi
 # Structural, same reasoning as the pin-drift case above: a runtime arm would
 # need a booted host and a ~2-minute lane. What matters is the contract — the
 # ratchet is CALLED from the certify block, and its failure stops the ship.
-certify_block=$(sed -n '/certified: \$(node -e/,/^fi$/p' "$ROOT/scripts/deploy.sh")
+certify_block=$(sed -n '/ADR 0869 — NO image bundle is built/,/^fi$/p' "$ROOT/scripts/deploy.sh")
 if grep -q 'check-conformance-major2.sh' <<<"$certify_block"; then
   ok "deploy.sh runs the conformance@major2 ratchet on the certify path"
 else
@@ -499,12 +500,13 @@ if grep -qE 'if \[ "\$DO_CERTIFY" -eq 1 \]; then' <<<"$certify_block"; then
 else
   bad "the major-2 ratchet is not guarded by DO_CERTIFY -eq 1 — --skip-certify would run a hard v2 gate"
 fi
-# Origin mode must not bypass it: the origin arm only announces, it never exits.
-origin_arm=$(sed -n '/elif \[ -n "\${OPENWOP_CERT_BUNDLE_ORIGIN:-}" \]; then/,/^  else$/p' "$ROOT/scripts/deploy.sh")
+# Neither evidence mode may bypass it: the no-image-bundle arm (ADR 0869, both
+# modes) only announces, it never exits.
+origin_arm=$(sed -n '/ADR 0869 — NO image bundle is built/,/# Runs in BOTH evidence modes/p' "$ROOT/scripts/deploy.sh")
 if [ -n "$origin_arm" ] && ! grep -qE '\bexit\b' <<<"$origin_arm"; then
-  ok "  ...and the origin-mode arm (no image bundle) falls through to it rather than exiting"
+  ok "  ...and the no-image-bundle arm (both modes) falls through to it rather than exiting"
 else
-  bad "the origin-mode certify arm is missing or exits — origin deploys would skip the major-2 ratchet"
+  bad "the no-image-bundle arm is missing or exits — deploys would skip the major-2 ratchet"
 fi
 
 # ── the peer-build window must SPAN the deploy, not a fixed guess ──────────
@@ -871,12 +873,14 @@ case "$(cat "$ROOT/scripts/deploy.sh")" in *"OPENWOP_STAMP_DEPLOYER=1 node"*) ok
 # when the lane cannot. Asserted on the source, because running the real lane
 # here would be a 10-minute conformance fleet inside a gate test.
 D_SRC="$(cat "$ROOT/scripts/deploy.sh")"
-case "$D_SRC" in *"npm run test:conformance -- --certify"*) ok "deploy.sh RUNS the certify lane on the deploy path" ;;
-  *) bad "deploy.sh does not run --certify — a deploy would ship whatever build-meta held" ;; esac
-case "$D_SRC" in *"the certify lane FAILED — refusing to ship"*) ok "deploy.sh REFUSES to ship when the certify lane fails" ;;
-  *) bad "deploy.sh does not refuse on a failed certify lane" ;; esac
-case "$D_SRC" in *"exited 0 but produced no stamp"*) ok "deploy.sh REFUSES when the lane exits 0 but writes nothing" ;;
-  *) bad "deploy.sh trusts the lane exit code instead of the artifact" ;; esac
+# ADR 0869 — the image bundle is NOT built in either mode (its stamp was served
+# only at the retired major 1). The pre-upload gate is the major-2 ratchet, and
+# it must still refuse to ship on a regression.
+if grep -qE '^[^#]*npm run test:conformance -- --certify' "$ROOT/scripts/deploy.sh"; then
+  bad "deploy.sh still runs the in-process --certify lane (ADR 0869: its stamp reaches no client and refuses every image-mode deploy)"
+else ok "deploy.sh builds no image bundle (ADR 0869)"; fi
+case "$D_SRC" in *"the major-2 lane regressed — refusing to ship"*) ok "deploy.sh REFUSES to ship when the major-2 ratchet regresses" ;;
+  *) bad "deploy.sh does not refuse on a major-2 ratchet regression" ;; esac
 case "$D_SRC" in *"--skip-certify"*) ok "deploy.sh offers --skip-certify (ABSENT pointer, never stale)" ;;
   *) bad "deploy.sh has no way to ship deliberately unclaimed" ;; esac
 # Every preflight exception must be REACHABLE through deploy.sh, which is the
@@ -906,12 +910,12 @@ case "$D_SRC" in *--allow-stale-certify*|*--keep-certify*) bad "deploy.sh has a 
 # above the real invocation and the ordering assertion reads backwards. This
 # check found that on its first run, which is the only reason it is not
 # silently comparing a comment to a command.
-CERT_LINE=$(grep -nE '^[^#]*npm run test:conformance -- --certify' "$ROOT/scripts/deploy.sh" | head -1 | cut -d: -f1)
+CERT_LINE=$(grep -nE '^[^#]*check-conformance-major2.sh' "$ROOT/scripts/deploy.sh" | head -1 | cut -d: -f1)
 DEPLOY_LINE=$(grep -nE '^[^#]*gcloud run deploy' "$ROOT/scripts/deploy.sh" | head -1 | cut -d: -f1)
 if [ -n "$CERT_LINE" ] && [ -n "$DEPLOY_LINE" ] && [ "$CERT_LINE" -lt "$DEPLOY_LINE" ]; then
-  ok "deploy.sh certifies before the backend upload (line $CERT_LINE < $DEPLOY_LINE)"
+  ok "deploy.sh runs the major-2 ratchet before the backend upload (line $CERT_LINE < $DEPLOY_LINE)"
 else
-  bad "deploy.sh certify step does not precede the upload (certify=$CERT_LINE upload=$DEPLOY_LINE)"
+  bad "deploy.sh major-2 ratchet does not precede the upload (ratchet=$CERT_LINE upload=$DEPLOY_LINE)"
 fi
 
 echo "== deploy.sh config parsing (DGATE-2) =="
@@ -1031,7 +1035,7 @@ fi
 # where the time is saved.
 fe_launch=$(grep -nE '^[^#]*FE_BUILD_PID=\$!' "$ROOT/scripts/deploy.sh" | head -1 | cut -d: -f1)
 fe_await=$(grep -nE '^await_frontend_build$' "$ROOT/scripts/deploy.sh" | head -1 | cut -d: -f1)
-fe_cert=$(grep -nE '^[^#]*npm run test:conformance -- --certify' "$ROOT/scripts/deploy.sh" | head -1 | cut -d: -f1)
+fe_cert=$(grep -nE '^[^#]*check-conformance-major2.sh' "$ROOT/scripts/deploy.sh" | head -1 | cut -d: -f1)
 if [ -n "$fe_launch" ] && [ -n "$fe_await" ] && [ -n "$fe_cert" ] && [ -n "$gcloud_line" ] \
    && [ "$fe_launch" -lt "$fe_cert" ] && [ "$fe_await" -lt "$gcloud_line" ]; then
   ok "deploy.sh builds the frontend during certify and awaits it before the backend ships (launch $fe_launch < certify $fe_cert; await $fe_await < deploy $gcloud_line)"
@@ -1197,10 +1201,11 @@ svc_json() { # svc_json <pool> <maxScale> <minScale> <tags-csv>
   local tags="" t; for t in $(printf '%s' "$4" | tr ',' ' '); do tags="$tags,{\"tag\":\"$t\",\"revisionName\":\"r-$t\"}"; done
   printf '{"spec":{"template":{"metadata":{"annotations":{"autoscaling.knative.dev/maxScale":"%s","autoscaling.knative.dev/minScale":"%s"}},"spec":{"containers":[{"env":[{"name":"OPENWOP_PG_POOL_MAX","value":"%s"}]}]}},"traffic":[{"revisionName":"live","percent":100}%s]},"status":{"traffic":[{"revisionName":"live","percent":100}]}}' "$2" "$3" "$1" "$tags"
 }
-PB() { ( cd "$REPO" && PATH="$FAKEBIN:$PATH" BASE="$STUB" OPENWOP_DEPLOY_SERVICE=svc OPENWOP_DEPLOY_PROJECT=p OPENWOP_DEPLOY_REGION=r \
-        OPENWOP_PG_MAX_CONNECTIONS=25 GCLOUD_FAKE_SERVICE_JSON="$1" bash "$ROOT/scripts/preflight-deploy.sh" >/dev/null 2>&1; echo $? ); }
-PBOUT() { ( cd "$REPO" && PATH="$FAKEBIN:$PATH" BASE="$STUB" OPENWOP_DEPLOY_SERVICE=svc OPENWOP_DEPLOY_PROJECT=p OPENWOP_DEPLOY_REGION=r \
-        OPENWOP_PG_MAX_CONNECTIONS=25 GCLOUD_FAKE_SERVICE_JSON="$1" bash "$ROOT/scripts/preflight-deploy.sh" 2>&1 ); }
+# Extra args after the JSON go to the preflight (e.g. --allow-tagged).
+PB() { local j="$1"; shift; ( cd "$REPO" && PATH="$FAKEBIN:$PATH" BASE="$STUB" OPENWOP_DEPLOY_SERVICE=svc OPENWOP_DEPLOY_PROJECT=p OPENWOP_DEPLOY_REGION=r \
+        OPENWOP_PG_MAX_CONNECTIONS=25 GCLOUD_FAKE_SERVICE_JSON="$j" bash "$ROOT/scripts/preflight-deploy.sh" "$@" >/dev/null 2>&1; echo $? ); }
+PBOUT() { local j="$1"; shift; ( cd "$REPO" && PATH="$FAKEBIN:$PATH" BASE="$STUB" OPENWOP_DEPLOY_SERVICE=svc OPENWOP_DEPLOY_PROJECT=p OPENWOP_DEPLOY_REGION=r \
+        OPENWOP_PG_MAX_CONNECTIONS=25 GCLOUD_FAKE_SERVICE_JSON="$j" bash "$ROOT/scripts/preflight-deploy.sh" "$@" 2>&1 ); }
 check "pg budget control: pool 4 × maxScale 3, no tags → 12 ≤ 22 PASSES" 0 "$(PB "$(svc_json 4 3 1 '')")"
 check "pg budget: pool 4 × maxScale 6 = 24 > 22 FAILS" 1 "$(PB "$(svc_json 4 6 1 '')")"
 check "pg budget: the 2026-09-05 shape (4 × 5 + five tags × 4 = 40) FAILS" 1 "$(PB "$(svc_json 4 5 1 'smoke,rlhi,v2p4,p4c,v2p5')")"
@@ -1208,9 +1213,19 @@ case "$(PBOUT "$(svc_json 4 5 1 'smoke,rlhi,v2p4,p4c,v2p5')")" in
   *"--remove-tags smoke,rlhi,v2p4,p4c,v2p5"*) ok "  ...and prints the exact remove-tags command" ;;
   *) bad "  ...but did not name the tags to remove" ;;
 esac
-check "pg budget: one tag that still fits (4 × 3 + 4 = 16) PASSES with a NOTE" 0 "$(PB "$(svc_json 4 3 1 'smoke')")"
-case "$(PBOUT "$(svc_json 4 3 1 'smoke')")" in *"NOTE      : 1 tagged revision"*) ok "  ...and the NOTE names the idle tag" ;; *) bad "  ...but no NOTE about the tag" ;; esac
-check "pg budget: minScale 0 → tags hold no idle instance (4 × 5 + 0 = 20) PASSES" 0 "$(PB "$(svc_json 4 5 0 'smoke,rlhi')")"
+# A tag that fits the budget is still refused by Gate 5b below, so these budget
+# cases keep it with --allow-tagged: they measure the arithmetic only.
+check "pg budget: one tag that still fits (4 × 3 + 4 = 16) PASSES with a NOTE" 0 "$(PB "$(svc_json 4 3 1 'smoke')" --allow-tagged)"
+case "$(PBOUT "$(svc_json 4 3 1 'smoke')" --allow-tagged)" in *"NOTE      : 1 tagged revision"*) ok "  ...and the NOTE names the idle tag" ;; *) bad "  ...but no NOTE about the tag" ;; esac
+check "pg budget: minScale 0 → tags hold no idle instance (4 × 5 + 0 = 20) PASSES" 0 "$(PB "$(svc_json 4 5 0 'smoke,rlhi')" --allow-tagged)"
+# ── Gate 5b (ADR 0866): a tagged revision refuses the deploy ──
+# A tag keeps an old revision running its daemons as an old-code writer, which
+# un-verifies the tenant index. The budget fits in every case here, so Gate 5b
+# is the only variable.
+check "Gate 5b: a leftover tag that fits the budget still REFUSES (ADR 0866)" 1 "$(PB "$(svc_json 4 3 1 'smoke')")"
+case "$(PBOUT "$(svc_json 4 3 1 'smoke')")" in *"--remove-tags smoke"*) ok "  ...and prints the remove-tags command" ;; *) bad "  ...but did not name the tag to remove" ;; esac
+check "Gate 5b: minScale 0 does not excuse a tag (the next request boots old code)" 1 "$(PB "$(svc_json 4 5 0 'smoke')")"
+check "Gate 5b: --allow-tagged keeps a deliberate tag" 0 "$(PB "$(svc_json 4 3 1 'smoke')" --allow-tagged)"
 check "pg budget: UNREADABLE service JSON FAILS (never guess a budget)" 1 "$(PB "")"
 # ADR 0867 — "pool" is per INSTANCE and sums every pg pool the process opens:
 # the Storage pool, plus the sql surface's when `sql=postgres` and pgvector's when
@@ -1741,7 +1756,7 @@ eqv "CLI previous-serving: unreadable input names nothing"    ""      "$(printf 
 D="$ROOT/scripts/deploy.sh"
 ln() { grep -nE "$1" "$D" | head -1 | cut -d: -f1; }
 l_hold=$(ln 'deploy-timing.mjs" hour-wait'); l_prev=$(ln 'deploy-timing.mjs" previous-serving'); l_build=$(ln '^  if ! gcloud run deploy ')
-l_verify=$(ln 'scripts/verify-deploy.sh" "\$\{VERIFY_ARGS'); l_del=$(ln 'gcloud run revisions delete "\$PREV_REVISION"'); l_cert=$(ln 'npm run test:conformance -- --certify')
+l_verify=$(ln 'scripts/verify-deploy.sh" "\$\{VERIFY_ARGS'); l_del=$(ln 'gcloud run revisions delete "\$PREV_REVISION"'); l_cert=$(ln '^[^#]*check-conformance-major2.sh')
 if [ -n "$l_hold" ] && [ -n "$l_build" ] && [ -n "$l_cert" ] && [ "$l_cert" -lt "$l_hold" ] && [ "$l_hold" -lt "$l_build" ]; then
   ok "the top-of-hour hold sits AFTER certify and BEFORE the build (a built revision left at 0% keeps an instance)"
 else bad "deploy.sh: hold is not between certify and the build (certify=$l_cert hold=$l_hold build=$l_build)"; fi

@@ -2,7 +2,6 @@
  * W-2 / RFC 0090 — the `verifier-gating` behavioral contract over HTTP. Boots the
  * real app with the verifier ladder enabled and exercises
  * POST /host/openwop-app/agents/verify-run:
- *   - discovery advertises executionModel.version 6 + verifier{supported,gating}
  *   - simulateVerdict 'pass' → commit (status 'completed'); agent.verified emitted
  *   - simulateVerdict 'fail' → commit BLOCKED (status != 'completed'); agent.verified
  *   - the agent.verified events are content-free (verifier-no-content-leak)
@@ -11,7 +10,6 @@
  * the reference host passes it non-vacuously under OPENWOP_REQUIRE_BEHAVIOR.
  */
 
-import { v1Advertisement } from './support/v1Advertisement.js';
 import { describe, expect, it, beforeAll, afterAll } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
@@ -43,19 +41,10 @@ interface VerifyResp {
 }
 
 describe('RFC 0090 — verifier-gating seam', () => {
-  it('advertises executionModel.version 6 + verifier{supported,gating}', async () => {
-    // ADR 0858 debt: this claim is on the v1 document only (the v2 family is ledgered), and
-    // since ADR 0812 P3c the header-less discovery read is v2, so it is read from the v1
-    // builder through the bridge until the family is projected.
-    const doc = await v1Advertisement() as {
-      multiAgent?: { executionModel?: { version?: number; verifier?: { supported?: boolean; gating?: boolean } } };
-      capabilities?: { multiAgent?: { executionModel?: { version?: number; verifier?: { supported?: boolean; gating?: boolean } } } };
-    };
-    const em = doc.multiAgent?.executionModel ?? doc.capabilities?.multiAgent?.executionModel;
-    expect(em?.version).toBe(6);
-    expect(em?.verifier?.supported).toBe(true);
-    expect(em?.verifier?.gating).toBe(true);
-  });
+  // ADR 0812 P4: the leg that read `multiAgent.executionModel.verifier` from the
+  // v1 builder is deleted with the builder. The v2 root has no `multiAgent`
+  // record (ADR 0858 ledger: BLOCKED), so no document makes that claim; the gate
+  // itself is still witnessed by the 404 leg below.
 
   it("commits on a 'pass' verdict and emits agent.verified", async () => {
     const res = await post({ simulateVerdict: 'pass' });

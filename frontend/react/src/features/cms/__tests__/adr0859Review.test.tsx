@@ -7,6 +7,12 @@
  *    Approve — the positive control.
  *  - D5: the pending notice says how many sections show live data.
  *  - The `forbidden` + `separation-of-duties` refusal maps to its own sentence.
+ *
+ * Sabotage-witnessed (/grade-tests w17): dropping the Approve filter, the
+ * withdraw label, the awaiting-approver line or the live-data count turns the
+ * matching case red; filtering Approve unconditionally reds the positive
+ * control; mapping every `forbidden` to `errSelfApproval` reds the copy case;
+ * dropping the inbox card's live-data line reds the last case.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, cleanup } from '@testing-library/react';
@@ -66,6 +72,7 @@ vi.mock('../../site/siteConfigClient.js', () => ({ getSiteConfig: vi.fn(async ()
 
 import { CmsPage } from '../CmsPage.js';
 import { CmsApiError, cmsErrorInfo } from '../cmsClient.js';
+import { ContentReviewContext } from '../../../notifications/ContentReviewContext.js';
 
 afterEach(() => { cleanup(); ui.review.awaitingAnotherApprover = true; });
 
@@ -109,8 +116,7 @@ describe('ADR 0859 D4 — the refusal has its own sentence', () => {
 });
 
 describe('ADR 0859 D5 — the inbox card discloses live-data sections (ADR 0594 D1)', () => {
-  it('renders the count as visible text, and nothing when there are none', async () => {
-    const { ContentReviewContext } = await import('../../../notifications/ContentReviewContext.js');
+  it('renders the count as visible text, and nothing when there are none', () => {
     const row = {
       approvalId: 'a1', rosterId: '', persona: '', workflowId: '', kind: 'content-publish' as const,
       orgId: 'o1', pageId: 'p1', pageTitle: 'Team', pageVersion: 2, proposal: 'Publish', status: 'pending' as const, createdAt: '2026-01-01T00:00:00Z',

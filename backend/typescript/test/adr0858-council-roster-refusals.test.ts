@@ -15,8 +15,13 @@
  *
  * Both are driven here through the same normative operations the suite uses
  * (run creation, the event poll, `resolveInterrupt`) at major 2.
+ *
+ * Sabotage-witnessed (/grade-tests w12): dropping the membership check, dropping
+ * `speakerId` from the refusal details, persisting the turn BEFORE the check (§B.3),
+ * or not persisting a member's turn reds the §B case; lifting the cap reds the
+ * oversized case; `<=` → `<` reds the at-cap case.
  */
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
 
@@ -86,8 +91,7 @@ describe('RFC 0239 §B — an off-roster resumed turn', () => {
     const created = await call('POST', '/runs', { workflowId: COUNCIL });
     expect(created.status).toBe(201);
     const runId = String(created.json['runId']);
-    for (let i = 0; i < 100 && !(await runStatus(runId)).startsWith('waiting'); i++) await new Promise((r) => setTimeout(r, 20));
-    expect(await runStatus(runId)).toMatch(/^waiting/);
+    await vi.waitFor(async () => expect(await runStatus(runId)).toMatch(/^waiting/), { timeout: 5000, interval: 20 });
 
     const refused = await resolve(runId, INTRUDER);
     expect(refused.status).toBe(422);

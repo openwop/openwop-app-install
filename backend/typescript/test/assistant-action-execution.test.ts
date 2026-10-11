@@ -7,9 +7,20 @@
  *     connection the Phase-D seam fails closed and the action lands `failed`
  *     — the run, not the assistant, is the single execution record;
  *   - `prepare-action-request` is deterministic (replay-stable request).
+ *
+ * Sabotages that turn it red (grade-tests w11): the confirm-action-send verdict forced to
+ * success (the send lands `sent`); the run-level `connections:['google']` opt-in dropped;
+ * `metadata.actingUserId` dropped (the run no longer acts AS the approver);
+ * `setPendingActionExecution` dropped; the nudge landing `failed`; CRLF / recipient
+ * filtering removed from the Gmail request; the reschedule eventId check removed; the
+ * post-approve block running on a reject.
+ *
+ * Overlap, kept on purpose pending a human dedupe call (both files are protected): the
+ * registration case below is also asserted, more strongly (with the send→confirm edge),
+ * by `assistant-chain-backed-workflows.test.ts`.
  */
 
-import { beforeAll, describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/index.js';
 import { __clearToggleStore } from '../src/host/featureToggles/service.js';
 import { __resetAssistantStore, getPendingAction } from '../src/features/assistant/assistantService.js';
@@ -17,6 +28,7 @@ import { enqueueActionWithApproval, decideActionViaApproval, contentHashOf } fro
 import { getRegisteredWorkflow } from '../src/host/workflowsRegistry.js';
 import { getChainBackedWorkflow } from '../src/host/chainBackedWorkflows.js';
 import { __hostExtStorage } from '../src/host/hostExtPersistence.js';
+import { upsertOAuthConnection } from '../src/features/connections/connectionsService.js';
 
 const TENANT = 'default';
 
@@ -30,14 +42,14 @@ beforeAll(async () => {
   nodes = (await import('../../../packs/feature.assistant.nodes/index.mjs')).nodes;
 });
 
+/** Waits for the run's terminal projection (an in-process `onRunTerminal` listener with no
+ *  awaitable hook — the honest ceiling is a condition poll), then returns the status seen.
+ *  A timeout falls through to the caller's assertion, which prints the status observed. */
 async function waitForStatus(actionId: string, statuses: string[], timeoutMs = 5000): Promise<string> {
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    const row = await getPendingAction(TENANT, actionId);
-    if (row && statuses.includes(row.status)) return row.status;
-    if (Date.now() > deadline) return row?.status ?? 'missing';
-    await new Promise((r) => setTimeout(r, 50));
-  }
+  await vi.waitFor(async () => {
+    expect(statuses).toContain((await getPendingAction(TENANT, actionId))?.status);
+  }, { timeout: timeoutMs, interval: 50 }).catch(() => undefined);
+  return (await getPendingAction(TENANT, actionId))?.status ?? 'missing';
 }
 
 /**
@@ -140,7 +152,12 @@ describe('execute-on-approve', () => {
     expect(row?.executionRunId).toBeUndefined(); // internal — no run dispatched
   });
 
-  it('an approved email.send dispatches the execution run AS the approver and fails closed without a connection', async () => {
+  it('an approved email.send dispatches the execution run AS the approver, and the verdict gate fails a refused send', async () => {
+    // The pre-dispatch credential check refuses an approver with no send-capable
+    // Google connection BEFORE any run (assistant-send-credential-precheck.test.ts),
+    // so this lane needs one. The token is fake: Gmail (or the sandbox's network
+    // refusal) rejects it, which is the refused send the verdict gate must fail.
+    await upsertOAuthConnection({ tenantId: TENANT, provider: 'google', userId: 'u-approver', tokens: { accessToken: 'at-fake', refreshToken: 'rt-fake', scopes: ['https://www.googleapis.com/auth/gmail.send'], expiresAt: new Date(Date.now() + 3_600_000).toISOString() } as never });
     const action = await enqueueActionWithApproval(TENANT, {
       kind: 'email.send',
       payload: { to: ['dana@example.com'] },
@@ -154,10 +171,11 @@ describe('execute-on-approve', () => {
 
     // The dispatched run carries the Option C run-level credential opt-in.
     const run = await __hostExtStorage()!.getRun(row!.executionRunId!);
-    expect((run?.configurable as Record<string, unknown> | undefined)?.connections).toEqual(['google']);
-    // No Google connection exists for this tenant/user, so nothing is
-    // injected; whatever the unauthenticated call yields (provider 401 or
-    // network refusal), the confirm-action-send verdict gate fails the run
+    expect(run?.configurable?.connections).toEqual(['google']);
+    // D2 — the execution acts AS the approving human (the Phase-D credential keys off this).
+    expect(run?.metadata?.actingUserId, 'the run acts AS the approver').toBe('u-approver');
+    // The connection's token is fake, so whatever the call yields (provider 401
+    // or network refusal), the confirm-action-send verdict gate fails the run
     // and the terminal projection marks the action failed — never sent.
     // The inner deadline is 10s against a 30s test budget, and the ORDER of those
     // two numbers is the fix. It used to wait 15_000 under the global

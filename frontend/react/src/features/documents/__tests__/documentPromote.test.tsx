@@ -4,6 +4,13 @@
  * markdown→HTML (server), converts via the lazy-imported document-editor schema,
  * creates + seeds a canvas, links it back, and navigates to the rich editor; an
  * already-promoted doc offers a link straight to the existing canvas.
+ *
+ * Sabotage witnesses (grade-tests w14): drop the `promotedCanvasId` link-back,
+ * seed it AFTER saving the canvas (order is asserted — link first is the
+ * idempotency guarantee), seed wrong content, navigate elsewhere, or offer the
+ * Promote button on an already-promoted doc — each turns its case red. The
+ * already-promoted case asserts the button's absence only AFTER the doc has
+ * loaded (the loading state has no button either).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup, screen, fireEvent, waitFor } from '@testing-library/react';
@@ -84,15 +91,16 @@ describe('ADR 0350 Phase 3 — promote to rich document', () => {
     // Linked FIRST (idempotency), then the canvas is seeded with the converted doc.
     expect(api.patchDocument).toHaveBeenCalledWith('org_1', 'doc_1', { promotedCanvasId: 'cv_new' });
     expect(canvas.saveCanvas).toHaveBeenCalledWith('org_1', 'cv_new', { title: 'My PRD', content: { type: 'doc', content: [] } }, 1);
+    expect(api.patchDocument.mock.invocationCallOrder[0]!).toBeLessThan(canvas.saveCanvas.mock.invocationCallOrder[0]!);
   });
 
   it('already promoted: offers a link straight to the existing canvas (no re-create)', async () => {
     api.getDocument.mockResolvedValue({ ...baseDoc, promotedCanvasId: 'cv_existing' });
     renderAt('/documents/doc_1?org=org_1');
 
-    // No promote button — instead a link to the existing rich document.
-    await waitFor(() => expect(screen.queryByRole('button', { name: 'Promote to rich document' })).toBeNull());
+    // A link to the existing rich document — and, once loaded, no promote button.
     const link = await screen.findByRole('link', { name: /Open the rich document/i });
+    expect(screen.queryByRole('button', { name: 'Promote to rich document' })).toBeNull();
     fireEvent.click(link);
     await waitFor(() => expect(screen.getByTestId('loc').textContent).toBe('/document-editor/cv_existing'));
     expect(canvas.createCanvas).not.toHaveBeenCalled();

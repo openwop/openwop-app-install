@@ -22,9 +22,16 @@
  *
  * The convene gate is asserted as a REFUSAL WITH AN EXIT (422 naming the field,
  * not a dead end): the test walks the exit the refusal prescribes.
+ *
+ * Sabotage-witnessed (/grade-tests w12), one probe per guard: null disclaimers,
+ * dropping `livingPersonaAckBy`, defaulting the seed escape hatch on, disabling
+ * `assertBoardConvenable`, keeping the ack on adoption, never / always
+ * re-attributing on edit, not inheriting the ack on an owner edit, either seat-count
+ * mistake, and each of the four `clearFabricatedLivingAcks` guards (kind, seed
+ * ownership, human attribution, attribution-absent) plus a clear that clears nothing.
  */
 
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { createRosterEntry } from '../src/host/rosterService.js';
@@ -38,9 +45,10 @@ const HUMAN = 'user:pat';
 let n = 0;
 
 beforeEach(async () => { initHostExtPersistence(await openStorage('memory://')); });
+afterEach(() => { vi.useRealTimers(); });
 
 async function advisor(): Promise<string> {
-  const entry = await createRosterEntry({ tenantId: T, persona: `Ada ${n++}`, agentRef: { kind: 'host' } as never });
+  const entry = await createRosterEntry({ tenantId: T, persona: `Ada ${n++}`, agentRef: { agentId: 'core.openwop.agents.brief-writer' } });
   return entry.rosterId;
 }
 
@@ -114,10 +122,16 @@ describe('ADVB-4 — the living-persona acknowledgement', () => {
   });
 
   it('a non-adopting owner edit leaves an existing ack and its attribution alone', async () => {
+    // Only Date is faked (storage timers stay real): the edit must happen at a LATER
+    // instant, or a re-stamp of `livingPersonaAckAt` would be indistinguishable.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
     const board = await createBoard(T, ORG, HUMAN, {
       name: `Owned ${n}`, advisors: [await advisor()], personaKind: 'living', livingPersonaAck: true,
     });
+    vi.setSystemTime(new Date('2026-01-01T00:00:05Z'));
     const edited = await updateBoard(T, HUMAN, board.boardId, { name: 'Renamed' });
+    expect(edited.updatedAt, 'positive control: the clock moved between create and edit').not.toBe(board.updatedAt);
     expect(edited.livingPersonaAck).toBe(true);
     expect(edited.livingPersonaAckBy).toBe(HUMAN);
     expect(edited.livingPersonaAckAt).toBe(board.livingPersonaAckAt);
@@ -160,10 +174,13 @@ describe('ADVB-4 — UN-fabricating the acks already in the store', () => {
       name: `Genuine ${n}`, advisors: [await advisor()], personaKind: 'living',
       livingPersonaAck: true, visibility: 'shared',
     });
-    // (c) a non-living seeded board — outside the scope entirely.
+    // (c) a non-living seeded board carrying an ack — outside the scope entirely. It
+    // carries the ack so the KIND guard (not the ack check) is what must skip it.
     const historical = await createBoard(T, ORG, SEED_ACTOR, {
-      name: `Historical ${n}`, advisors: [await advisor()], personaKind: 'historical', visibility: 'shared',
+      name: `Historical ${n}`, advisors: [await advisor()], personaKind: 'historical',
+      livingPersonaAck: true, visibility: 'shared',
     });
+    expect(historical.livingPersonaAck, 'the arm must be constructed: a non-living board WITH an ack').toBe(true);
 
     // (d) THE SHAPE THE SEED-OWNERSHIP GUARD EXISTS FOR: a board a human has
     // ADOPTED whose ack is unattributed (a pre-0588 row — adoption used to
@@ -210,7 +227,7 @@ describe('ADVB-4 — UN-fabricating the acks already in the store', () => {
     const humanAfter = await getBoard(T, HUMAN, human.boardId);
     expect(humanAfter.livingPersonaAck, "a human's own acknowledgement must never be cleared").toBe(true);
     expect(humanAfter.livingPersonaAckBy).toBe(HUMAN);
-    expect((await getBoard(T, HUMAN, historical.boardId)).personaKind).toBe('historical');
+    expect((await getBoard(T, HUMAN, historical.boardId)).livingPersonaAck, 'a non-living board is never un-fabricated').toBe(true);
 
     // Idempotent: a second pass finds nothing left to un-fabricate.
     expect(await clearFabricatedLivingAcks(T)).toBe(0);

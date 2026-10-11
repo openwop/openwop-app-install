@@ -6,6 +6,11 @@
  * the unified reviews list reached the SAME draft, recipients and event body through the
  * card projector, which never asked who was reading — and this branch's D3 widened the
  * reviews lane to the full payload. One gate, in the projector both lanes call.
+ *
+ * Sabotages that turn it red (grade-tests w11): the projector's withhold gate removed; its
+ * operator or personal-owner exit removed; the list or get path letting quorum eligibility
+ * override `canDecide:false`; each "unavailable" guard in `withAssistantActionView`
+ * (no projector / no action / no actionId) returning the un-gated review.
  */
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/index.js';

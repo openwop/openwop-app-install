@@ -8,6 +8,14 @@
  *   - unlink revokes the grant
  *
  * Phase 1 has NO cross-subject recall — this proves only the authorization layer.
+ * (The "borrowed recall gate" describe below drives the Phase 2 resolver for real.)
+ *
+ * Sabotage witnesses (w12, 21 probes): every gate the resolver and the routes carry — toggle,
+ * owner-only grant, idempotent revoke, unlink-revokes (via a RE-LINK read, because the GET masks
+ * the grant once the link is gone), audience (non-owner AND no-caller), mid-turn revocation, the
+ * once-per-dispatch closure flag (via a no-runId leg — with a runId the durable guard also
+ * suppresses it), the durable replay guard and its subject pushdown, the deny window + attempts
+ * fold, the reader's tenant filter and pushdown, and the onSourceError forwarding.
  *
  * @see docs/adr/0044-twin-cross-subject-recall.md
  */
@@ -23,6 +31,7 @@ import { resolveBorrowedRecall } from '../src/features/twin/borrowedRecall.js';
 import { __hostExtStorage } from '../src/host/hostExtPersistence.js';
 import { setProfileKnowledge } from '../src/features/profiles/profilesService.js';
 import { getKnowledgeBackend, setKnowledgeBackend } from '../src/host/knowledgeSurface.js';
+import { detailOf, errorCodeOf } from './helpers/errorEnvelope.js';
 
 let BASE: string;
 let server: http.Server;
@@ -42,34 +51,52 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T }
-interface Client { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res>; put: (p: string, b?: unknown) => Promise<Res>; del: (p: string) => Promise<Res> }
+interface Res<T> { status: number; body: T }
+interface Client {
+  get: <T = unknown>(p: string) => Promise<Res<T>>;
+  post: <T = unknown>(p: string, b?: unknown) => Promise<Res<T>>;
+  put: <T = unknown>(p: string, b?: unknown) => Promise<Res<T>>;
+  del: <T = unknown>(p: string) => Promise<Res<T>>;
+}
+/** The product's view shapes for the routes this file reads. */
+interface TwinView { link: { userId: string } | null; grant: { scopes: string[] } | null }
+interface GrantsView { grants: unknown[] }
+interface RemovedView { removed: boolean }
+interface LoginView { user: { userId: string } }
+interface RecallsView { recalls: Array<{ outcome: string; agentId?: string; chunks?: number }> }
 function client(): Client {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
+  const call = async <T,>(method: string, path: string, body?: unknown): Promise<Res<T>> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
     const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
-    return { status: res.status, body: out };
+    return { status: res.status, body: out as T };
   };
   return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), put: (p, b) => call('PUT', p, b), del: (p) => call('DELETE', p) };
 }
 
 const uniqEmail = (who: string): string => `${who}-${Date.now()}-${n++}@acme.test`;
 const enable = async (id: string, status: 'on' | 'off'): Promise<void> => { const d = getToggleDefault(id); if (d) await saveConfig({ ...d, status }, 'test'); };
+/** Run `fn` with twin-recall OFF and ALWAYS restore it — a red assertion inside must not leave
+ *  the toggle off for every later case in the file. */
+const withTwinOff = async (fn: () => Promise<void>): Promise<void> => {
+  await enable('twin-recall', 'off');
+  try { await fn(); } finally { await enable('twin-recall', 'on'); }
+};
 
 /** Owner (admin) + a member (the prospective twin) in one tenant, + a standing agent. */
-async function ownerMemberAgent(role = 'editor'): Promise<{ owner: Client; member: Client; memberId: string; rosterId: string; tenantId: string }> {
+async function ownerMemberAgent(role = 'editor'): Promise<{ owner: Client; ownerId: string; member: Client; memberId: string; rosterId: string; tenantId: string }> {
   const tenantId = `org:tw-${Date.now()}-${n++}`;
   const owner = client();
-  await owner.post('/host/openwop-app/test/login', { email: uniqEmail('tw-owner'), tenantId });
+  const o = await owner.post<LoginView>('/host/openwop-app/test/login', { email: uniqEmail('tw-owner'), tenantId });
   const member = client();
-  const m = await member.post('/host/openwop-app/test/login', { email: uniqEmail('tw-member'), tenantId });
-  const r = await owner.post('/host/openwop-app/roster', { persona: 'Aide', agentRef: { agentId: 'core.openwop.agents.brief-writer' } });
+  const m = await member.post<LoginView>('/host/openwop-app/test/login', { email: uniqEmail('tw-member'), tenantId });
+  const r = await owner.post<{ rosterId: string }>('/host/openwop-app/roster', { persona: 'Aide', agentRef: { agentId: 'core.openwop.agents.brief-writer' } });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await owner.post<{ orgId: string }>('/host/openwop-app/orgs', { name: 'Acme' });
   await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(org.body.orgId)}/members`, { displayName: 'M', subject: m.body.user.userId, roles: [role] });
-  return { owner, member, memberId: m.body.user.userId, rosterId: r.body.rosterId, tenantId };
+  expect(o.body.user.userId, 'the owner is a second real human').not.toBe(m.body.user.userId);
+  return { owner, ownerId: o.body.user.userId, member, memberId: m.body.user.userId, rosterId: r.body.rosterId, tenantId };
 }
 
 const twin = (id: string): string => `/host/openwop-app/agents/${encodeURIComponent(id)}/twin`;
@@ -77,10 +104,16 @@ const GRANTS = '/host/openwop-app/profiles/me/twin-grants';
 
 describe('twin — toggle gating', () => {
   it('404s when twin-recall is off', async () => {
-    await enable('twin-recall', 'off');
     const { owner, rosterId } = await ownerMemberAgent();
-    expect((await owner.get(twin(rosterId))).status).toBe(404);
-    await enable('twin-recall', 'on');
+    await withTwinOff(async () => {
+      const off = await owner.get(twin(rosterId));
+      expect(off.status).toBe(404);
+      // The TOGGLE's 404, not the owned-agent one.
+      expect(errorCodeOf(off.body)).toBe('not_found');
+      expect(detailOf(off.body, 'feature')).toBe('twin-recall');
+    });
+    // Positive control: the same caller + agent is served once the toggle is back on.
+    expect((await owner.get(twin(rosterId))).status).toBe(200);
   });
 });
 
@@ -89,40 +122,46 @@ describe('twin — link + grant authority', () => {
     const { owner, member, memberId, rosterId } = await ownerMemberAgent();
 
     // Admin links the agent to the member.
-    const link = await owner.put(twin(rosterId), { userId: memberId });
+    const link = await owner.put<TwinView>(twin(rosterId), { userId: memberId });
     expect(link.status, JSON.stringify(link.body)).toBe(200);
-    expect(link.body.link.userId).toBe(memberId);
+    expect(link.body.link?.userId).toBe(memberId);
 
     // A NON-linked user (the owner) cannot grant for this agent → 404 fail-closed.
     expect((await owner.post(GRANTS, { agentId: rosterId, scopes: ['memory'] })).status).toBe(404);
 
     // The linked member grants → 201, visible to them + on the agent link.
-    const g = await member.post(GRANTS, { agentId: rosterId, scopes: ['memory', 'knowledge'] });
+    const g = await member.post<{ grant: { scopes: string[] } }>(GRANTS, { agentId: rosterId, scopes: ['memory', 'knowledge'] });
     expect(g.status, JSON.stringify(g.body)).toBe(201);
     expect(g.body.grant.scopes).toEqual(['memory', 'knowledge']);
-    expect((await member.get(GRANTS)).body.grants.length).toBe(1);
-    expect((await owner.get(twin(rosterId))).body.grant.scopes).toEqual(['memory', 'knowledge']);
+    expect((await member.get<GrantsView>(GRANTS)).body.grants.length).toBe(1);
+    expect((await owner.get<TwinView>(twin(rosterId))).body.grant?.scopes).toEqual(['memory', 'knowledge']);
 
     // The member revokes → gone from the agent link's active grant. TWIN-UX-25:
     // the route now REPORTS `{removed}` at 200 instead of 404-ing a benign
     // idempotent re-revoke, so the SPA can suppress a misleading success notice.
-    const rev = await member.del(`${GRANTS}/${encodeURIComponent(rosterId)}`);
+    const rev = await member.del<RemovedView>(`${GRANTS}/${encodeURIComponent(rosterId)}`);
     expect(rev.status).toBe(200);
     expect(rev.body.removed).toBe(true);
     // Idempotent: a double-click reports `removed:false`, not a scary failure.
-    expect((await member.del(`${GRANTS}/${encodeURIComponent(rosterId)}`)).body.removed).toBe(false);
-    expect((await owner.get(twin(rosterId))).body.grant).toBe(null);
+    expect((await member.del<RemovedView>(`${GRANTS}/${encodeURIComponent(rosterId)}`)).body.removed).toBe(false);
+    expect((await owner.get<TwinView>(twin(rosterId))).body.grant).toBe(null);
 
     // Re-grant, then unlink (admin) — unlink must also revoke. TWIN-UX-3
     // (unlink lane): the route now reports `{removed}` at 200, mirroring the
     // revoke route above, instead of a 204 that made "unlinked a live twin"
     // and "there was nothing here" indistinguishable.
-    await member.post(GRANTS, { agentId: rosterId, scopes: ['memory'] });
-    const un = await owner.del(twin(rosterId));
+    expect((await member.post(GRANTS, { agentId: rosterId, scopes: ['memory'] })).status).toBe(201);
+    expect((await owner.get<TwinView>(twin(rosterId))).body.grant?.scopes).toEqual(['memory']);
+    const un = await owner.del<RemovedView>(twin(rosterId));
     expect(un.status).toBe(200);
     expect(un.body.removed).toBe(true);
-    expect((await owner.get(twin(rosterId))).body.link).toBe(null);
-    expect((await owner.get(twin(rosterId))).body.grant).toBe(null);
+    expect((await owner.get<TwinView>(twin(rosterId))).body.link).toBe(null);
+    // "unlink must also revoke" — read through a RE-LINK. While unlinked, the GET reports
+    // `grant: null` whatever the grant row says (it only reads a grant for a live link), so
+    // the line above cannot tell a revoked grant from a surviving one. Re-linking the SAME
+    // person exposes it: a grant that survived the unlink would show up active again.
+    expect((await owner.put(twin(rosterId), { userId: memberId })).status).toBe(200);
+    expect((await owner.get<TwinView>(twin(rosterId))).body.grant, 'the unlink must have revoked the grant').toBe(null);
   });
 
   // HIGH-1 — the stale-second-tab scenario. Two admin tabs both show the link;
@@ -143,12 +182,12 @@ describe('twin — link + grant authority', () => {
         .filter((r) => r.resource === `agent:${rosterId}`).length;
     const before = await unlinkRows();
 
-    const first = await owner.del(twin(rosterId));
+    const first = await owner.del<RemovedView>(twin(rosterId));
     expect(first.status).toBe(200);
     expect(first.body.removed).toBe(true);
     expect(await unlinkRows(), 'the REAL unlink must audit').toBe(before + 1);
 
-    const second = await owner.del(twin(rosterId));
+    const second = await owner.del<RemovedView>(twin(rosterId));
     expect(second.status).toBe(200);
     expect(second.body.removed).toBe(false);
     expect(await unlinkRows(), 'a no-op unlink must NOT fabricate an audit row').toBe(before + 1);
@@ -197,15 +236,15 @@ describe('twin — borrowed recall gate (Phase 2)', () => {
     expect(chunks.map((c) => c.content).join(' ')).toContain('cc finance on vendor contracts');
 
     // Revoke ⇒ the gate closes immediately (live re-check, no stamp — ADR 0044 §4).
-    expect((await member.del(`${GRANTS}/${encodeURIComponent(rosterId)}`)).body.removed).toBe(true);
+    expect((await member.del<RemovedView>(`${GRANTS}/${encodeURIComponent(rosterId)}`)).body.removed).toBe(true);
     expect(await resolveBorrowedRecall(tenantId, rosterId, { callerUserId: memberId })).toBeUndefined();
 
     // Re-grant, then turn the toggle off ⇒ closed (fail-closed).
     await member.post(GRANTS, { agentId: rosterId, scopes: ['memory'] });
     expect(await resolveBorrowedRecall(tenantId, rosterId, { callerUserId: memberId })).toBeDefined();
-    await enable('twin-recall', 'off');
-    expect(await resolveBorrowedRecall(tenantId, rosterId, { callerUserId: memberId })).toBeUndefined();
-    await enable('twin-recall', 'on');
+    await withTwinOff(async () => {
+      expect(await resolveBorrowedRecall(tenantId, rosterId, { callerUserId: memberId })).toBeUndefined();
+    });
   });
 
   // ADR 0589 §D2 — AUDIENCE. Before this, `BorrowedRecallResolver` was
@@ -213,7 +252,7 @@ describe('twin — borrowed recall gate (Phase 2)', () => {
   // member of the tenant addressing a granted twin received answers grounded in
   // one named person's private memory.
   it('a NON-OWNER caller gets no borrowed recall, and an unattributed dispatch gets none either', async () => {
-    const { owner, member, memberId, rosterId, tenantId } = await ownerMemberAgent();
+    const { owner, ownerId: otherId, member, memberId, rosterId, tenantId } = await ownerMemberAgent();
     await member.post(MEM, { content: 'I always cc finance on vendor contracts.' });
     expect((await owner.put(twin(rosterId), { userId: memberId })).status).toBe(200);
     expect((await member.post(GRANTS, { agentId: rosterId, scopes: ['memory'] })).status).toBe(201);
@@ -222,11 +261,8 @@ describe('twin — borrowed recall gate (Phase 2)', () => {
     // refusals below would pass against a gate that refuses everything).
     expect(await resolveBorrowedRecall(tenantId, rosterId, { callerUserId: memberId })).toBeDefined();
 
-    // Another human in the SAME tenant, addressing the SAME granted agent: denied.
-    const meRes = await owner.get('/host/openwop-app/users/me');
-    const otherId = meRes.body?.user?.userId ?? meRes.body?.userId;
-    expect(otherId, 'need a second real user id for the negative case').toBeTruthy();
-    expect(otherId).not.toBe(memberId);
+    // Another human in the SAME tenant (the workspace admin), addressing the SAME
+    // granted agent: denied.
     expect(await resolveBorrowedRecall(tenantId, rosterId, { callerUserId: otherId })).toBeUndefined();
 
     // No caller at all (an unattributed run/heartbeat): denied, not allowed.
@@ -248,7 +284,7 @@ describe('twin — borrowed recall gate (Phase 2)', () => {
     // Positive control on the SAME closure, before the revoke.
     expect((await retrieve!.retrieve('vendor contract finance')).length).toBeGreaterThan(0);
 
-    expect((await member.del(`${GRANTS}/${encodeURIComponent(rosterId)}`)).body.removed).toBe(true);
+    expect((await member.del<RemovedView>(`${GRANTS}/${encodeURIComponent(rosterId)}`)).body.removed).toBe(true);
     // The SAME already-handed-out closure now yields nothing.
     expect(await retrieve!.retrieve('vendor contract finance')).toEqual([]);
   });
@@ -261,8 +297,11 @@ describe('twin — borrowed recall gate (Phase 2)', () => {
   // (what retrieval actually used). Denied audience probes write a durable
   // `outcome:'denied'` row.
   describe('the consent audit row (RCL-3)', () => {
+    // Subject-pushed-down read. A host-global newest-500 window was ORDER-DEPENDENT: the two
+    // noise cases below plant 705 rows timestamped a minute in the FUTURE, so under
+    // --sequence.shuffle every case that ran after them read zero rows of its own.
     const recallRows = async (ownerId: string) =>
-      (await __hostExtStorage()!.listAudit({ actionPrefix: 'twin.recall', limit: 500 }))
+      (await __hostExtStorage()!.listAudit({ actionPrefix: 'twin.recall', resource: `user:${ownerId}`, limit: 500 }))
         .filter((r) => r.resource === `user:${ownerId}`);
 
     it('ONE ok row per dispatch — access-gated, tenant-stamped, resolve-time scopes, no double-write', async () => {
@@ -310,6 +349,19 @@ describe('twin — borrowed recall gate (Phase 2)', () => {
       const perTurn = (await recallRows(memberId)).filter((r) => (r.payload as { runId?: unknown }).runId === 'run-audit-1');
       expect(perTurn.length, 'turn 2 of the same conversation run is a genuine recall — its own row').toBe(2);
       expect(perTurn.map((r) => (r.payload as { dispatchId?: unknown }).dispatchId).sort()).toEqual(['turn:1', 'turn:2']);
+
+      // The CLOSURE flag, isolated. Every leg above carries a runId, so a second retrieval
+      // there is ALSO suppressed by the durable (runId, dispatchId) guard — deleting the flag
+      // left them green (w12 probe `rt-audit-once-flag`, vacuous). An ad-hoc dispatch with NO
+      // runId has no durable guard (`recallRowExists` only runs with a runId), so the flag is
+      // the only thing standing between two retrievals and two rows.
+      const noRunRows = async (): Promise<number> =>
+        (await recallRows(memberId)).filter((r) => r.outcome === 'ok' && (r.payload as { runId?: unknown }).runId === undefined).length;
+      const adhocBefore = await noRunRows();
+      const adhoc = await resolveBorrowedRecall(tenantId, rosterId, { callerUserId: memberId });
+      expect((await adhoc!.retrieve('vendor contract finance')).length).toBeGreaterThan(0);
+      await adhoc!.retrieve('vendor contract finance');
+      expect(await noRunRows(), 'one ad-hoc dispatch, two retrievals ⇒ ONE row').toBe(adhocBefore + 1);
     });
 
     // F2a — the guard must key on the SUBJECT, not a host-global window: the
@@ -352,11 +404,9 @@ describe('twin — borrowed recall gate (Phase 2)', () => {
     // rows, and a malicious member could truncate every grantor's reader).
     // Now rate-bounded per (tenant, agent, prober) with an honest aggregate.
     it('a deny flood writes ONE durable row; the next window row carries the suppressed count as `attempts`', async () => {
-      const { owner, member, memberId, rosterId, tenantId } = await ownerMemberAgent();
+      const { owner, ownerId: otherId, member, memberId, rosterId, tenantId } = await ownerMemberAgent();
       expect((await owner.put(twin(rosterId), { userId: memberId })).status).toBe(200);
       expect((await member.post(GRANTS, { agentId: rosterId, scopes: ['memory'] })).status).toBe(201);
-      const meRes = await owner.get('/host/openwop-app/users/me');
-      const otherId = meRes.body?.user?.userId ?? meRes.body?.userId;
       const deniedRows = async () => (await recallRows(memberId)).filter((r) => r.outcome === 'denied');
 
       // Five probes in quick succession — the 50-message-chat flood shape.
@@ -401,11 +451,9 @@ describe('twin — borrowed recall gate (Phase 2)', () => {
     });
 
     it('an audience-not-owner probe writes a durable DENIED row', async () => {
-      const { owner, member, memberId, rosterId, tenantId } = await ownerMemberAgent();
+      const { owner, ownerId: otherId, member, memberId, rosterId, tenantId } = await ownerMemberAgent();
       expect((await owner.put(twin(rosterId), { userId: memberId })).status).toBe(200);
       expect((await member.post(GRANTS, { agentId: rosterId, scopes: ['memory'] })).status).toBe(201);
-      const meRes = await owner.get('/host/openwop-app/users/me');
-      const otherId = meRes.body?.user?.userId ?? meRes.body?.userId;
       expect(await resolveBorrowedRecall(tenantId, rosterId, { callerUserId: otherId, runId: 'run-audit-deny' })).toBeUndefined();
       const denied = (await recallRows(memberId)).filter((r) => r.outcome === 'denied');
       expect(denied.length).toBe(1);
@@ -428,7 +476,7 @@ describe('twin — borrowed recall gate (Phase 2)', () => {
     const RECALLS = '/host/openwop-app/profiles/me/twin-recalls';
 
     it('returns the caller their OWN rows only — including denied probes — and withholds unstamped rows', async () => {
-      const { owner, member, memberId, rosterId, tenantId } = await ownerMemberAgent();
+      const { owner, ownerId: otherId, member, memberId, rosterId, tenantId } = await ownerMemberAgent();
       await member.post(MEM, { content: 'I always cc finance on vendor contracts.' });
       expect((await owner.put(twin(rosterId), { userId: memberId })).status).toBe(200);
       expect((await member.post(GRANTS, { agentId: rosterId, scopes: ['memory'] })).status).toBe(201);
@@ -436,8 +484,6 @@ describe('twin — borrowed recall gate (Phase 2)', () => {
       // One real recall + one denied probe.
       const retrieve = await resolveBorrowedRecall(tenantId, rosterId, { callerUserId: memberId, runId: 'run-reader-1' });
       expect((await retrieve!.retrieve('vendor contract finance')).length).toBeGreaterThan(0);
-      const meRes = await owner.get('/host/openwop-app/users/me');
-      const otherId = meRes.body?.user?.userId ?? meRes.body?.userId;
       expect(await resolveBorrowedRecall(tenantId, rosterId, { callerUserId: otherId })).toBeUndefined();
 
       // A legacy (pre-stamping) row without payload.tenantId — must be WITHHELD.
@@ -446,15 +492,15 @@ describe('twin — borrowed recall gate (Phase 2)', () => {
         resource: `user:${memberId}`, outcome: 'ok', payload: { agentId: rosterId, chunks: 1 },
       });
 
-      const mine = await member.get(RECALLS);
+      const mine = await member.get<RecallsView>(RECALLS);
       expect(mine.status).toBe(200);
-      const recalls = mine.body.recalls as Array<{ outcome: string; agentId?: string; chunks?: number }>;
+      const recalls = mine.body.recalls;
       expect(recalls.filter((r) => r.outcome === 'ok').length, 'the stamped ok row, not the unstamped legacy one').toBe(1);
       expect(recalls.filter((r) => r.outcome === 'denied').length).toBe(1);
       expect(recalls.every((r) => r.agentId === rosterId)).toBe(true);
 
       // Subject scoping: the OWNER (admin) is not the grantor — sees nothing.
-      const theirs = await owner.get(RECALLS);
+      const theirs = await owner.get<RecallsView>(RECALLS);
       expect(theirs.status).toBe(200);
       expect(theirs.body.recalls).toEqual([]);
     });
@@ -489,17 +535,21 @@ describe('twin — borrowed recall gate (Phase 2)', () => {
         });
       }
 
-      const mine = await member.get(RECALLS);
+      const mine = await member.get<RecallsView>(RECALLS);
       expect(mine.status).toBe(200);
-      const ok = (mine.body.recalls as Array<{ outcome: string }>).filter((r) => r.outcome === 'ok');
+      const ok = mine.body.recalls.filter((r) => r.outcome === 'ok');
       expect(ok.length, 'every eligible row survives the noise (no truncation)').toBe(7);
     });
 
     it('404s when the toggle is off (fail-closed like every twin surface)', async () => {
       const { member } = await ownerMemberAgent();
-      await enable('twin-recall', 'off');
-      expect((await member.get(RECALLS)).status).toBe(404);
-      await enable('twin-recall', 'on');
+      await withTwinOff(async () => {
+        const off = await member.get(RECALLS);
+        expect(off.status).toBe(404);
+        expect(detailOf(off.body, 'feature')).toBe('twin-recall');
+      });
+      // Positive control: the same reader is served once the toggle is back on.
+      expect((await member.get<RecallsView>(RECALLS)).body.recalls).toEqual([]);
     });
   });
 

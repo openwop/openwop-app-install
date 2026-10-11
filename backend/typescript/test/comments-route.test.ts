@@ -22,7 +22,6 @@ import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
-import { v1Advertisement } from './support/v1Advertisement.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { createPage, __resetCms } from '../src/features/cms/cmsService.js';
@@ -91,11 +90,14 @@ async function ownerWithPage(): Promise<{ owner: ReturnType<typeof client>; orgI
 const enableComments = async (status: 'on' | 'off'): Promise<void> => { const d = getToggleDefault('comments'); if (d) await saveConfig({ ...d, status }, 'test'); };
 
 describe('Comments: thread CRUD (RBAC) + IDOR + validation', () => {
-  it('is registered + advertises ctx.features.comments', async () => {
+  it('is registered + composes the ctx.features.comments surface', async () => {
     const { BACKEND_FEATURES } = await import('../src/features/index.js');
     expect(BACKEND_FEATURES.some((f) => f.id === 'comments')).toBe(true);
-    // ADR 0812 — the v2 root carries no `hostExtensions.featureSurfaces` (ADR 0014) yet; read the v1 claim from its builder.
-    expect((await v1Advertisement()).hostExtensions?.featureSurfaces).toContain('host.sample.comments');
+    // ADR 0812 P4: the `hostExtensions.featureSurfaces` advert went with the v1
+    // builder (the v2 root has no record for it, ADR 0858 ledger); the surface
+    // registry it was printed from is what is asserted now.
+    const { registeredFeatureSurfaceIds } = await import('../src/host/featureSurfaces.js');
+    expect(registeredFeatureSurfaceIds()).toContain('comments');
   });
 
   it('owner posts a comment + reply, lists the thread, resolves, deletes', async () => {

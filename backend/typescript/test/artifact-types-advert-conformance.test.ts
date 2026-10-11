@@ -28,38 +28,52 @@ import Ajv2020 from 'ajv/dist/2020.js';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { corpusSchema } from './support/corpusSchema.js';
-import { v1Advertisement } from './support/v1Advertisement.js';
+import type { AddressInfo } from 'node:net';
+import { readFileSync, readdirSync } from 'node:fs';
+import { createRequire } from 'node:module';
+import { dirname, join } from 'node:path';
 
 let server: http.Server;
+let BASE = '';
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 't', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((r) => { server = app.listen(0, '127.0.0.1', () => r()); });
+  await new Promise<void>((r) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; r(); }); });
 });
 afterAll(async () => { await new Promise<void>((r) => server.close(() => r())); });
 
 const advert = async (): Promise<Record<string, unknown>> => {
-  // ADR 0812 — the v2 root carries no `artifactTypes` record yet, so the v1 claim
-  // is read from its builder (`support/v1Advertisement.ts`), not the retiring wire.
-  const doc = await v1Advertisement();
-  // The document ROOT is canonical (RFC 0073) — read the arm a consumer reads first.
+  // ADR 0812 P4 — the SERVED root (header-less is the v2 document). This used to
+  // read the v1 builder, which is deleted; the v2 `artifactTypes` record carries
+  // the same `types` map (`artifactTypesAdvert()`).
+  const res = await fetch(`${BASE}/.well-known/openwop`);
+  expect(res.status).toBe(200);
+  const doc = (await res.json()) as Record<string, unknown>;
   return doc['artifactTypes'] as Record<string, unknown>;
 };
 
-const declared = (): Record<string, unknown> => {
-  // From the PACKAGE, not the vendored copy — a vendored copy can drift and
-  // certify the advert against a contract that no longer exists (RFC 0145 G2).
-  const caps = corpusSchema('capabilities.schema.json');
-  return (caps.properties ?? {})['artifactTypes'] as Record<string, unknown>;
+/** The v2 declaration of the family, from the PACKAGE, not the vendored copy — a
+ *  vendored copy can drift and certify the advert against a contract that no
+ *  longer exists (RFC 0145 G2). Compiled through the whole document so any
+ *  `$ref` inside the family resolves. */
+const compileDeclared = (ajv: Ajv2020): ReturnType<Ajv2020['compile']> => {
+  // The v2 schemas `$ref` their siblings by bare filename, so the one the family
+  // record references (`configurable.schema.json`) is registered beside it.
+  // Every sibling is registered, the way `adr0670-v2-advert-validates` does it.
+  const caps = corpusSchema('v2/capabilities.schema.json') as { $id?: string };
+  const dir = dirname(createRequire(`${process.cwd()}/`).resolve('@openwop/spec-artifacts/schemas/v2/capabilities.schema.json'));
+  for (const f of readdirSync(dir).filter((n) => n.endsWith('.json'))) {
+    try { ajv.addSchema(JSON.parse(readFileSync(join(dir, f), 'utf8')) as Record<string, unknown>); } catch { /* a malformed sibling is its own test's problem */ }
+  }
+  return ajv.compile({ $ref: `${caps.$id ?? ''}#/properties/artifactTypes` });
 };
 
 describe('artifactTypes advert conforms to its declared shape', () => {
-  it('leg 1: the LIVE advert validates against the vendored RFC 0144 declaration', async () => {
+  it('leg 1: the LIVE advert validates against the v2 declaration of the family', async () => {
     const emitted = await advert();
-    const ajv = new Ajv2020({ strict: false, allErrors: true });
-    const validate = ajv.compile(declared());
+    const validate = compileDeclared(new Ajv2020({ strict: false, allErrors: true }));
     const ok = validate(emitted);
     expect(
       ok,

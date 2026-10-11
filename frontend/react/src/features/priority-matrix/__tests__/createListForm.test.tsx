@@ -7,11 +7,27 @@
  *  - PM-G2: `listPresets()` was fetched, stored, passed as a prop and typed —
  *    and never read; the scoring-model select hard-coded all five options. The
  *    request was wasted and the list could drift from the backend's presets.
+ *  - PM4UX-1 (ADR 0842 D9): "New list" and the workspace picker are offered only
+ *    where the caller holds `workspace:write`.
+ *
+ * Sabotage-witnessed (w15 probes w15g4-*): dropping `setOrgsFailed(true)`, the
+ * orgsFailed/noWorkspaces ternary, the `ALL_PRESET_IDS` fallback, the preset label
+ * lookup, `setNoWritableOrg(...)` or the writable-org filter each reds its case.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, waitFor, act, fireEvent } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
-import type { CriteriaSet, PriorityList } from '../priorityMatrixClient.js';
+import type { CriteriaSet, PresetId, PriorityList } from '../priorityMatrixClient.js';
+
+const { Q3 } = vi.hoisted(() => {
+  const Q3: PriorityList = {
+    id: 'l1', tenantId: 'user:t1', orgId: 'org-1', name: 'Q3 ideas', boardId: 'b1',
+    criteriaSet: { presetId: 'weighted', aggregation: 'weighted-sum', criteria: [] },
+    votingMode: 'single', voteAggregation: 'mean',
+    createdBy: 'u1', createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-07-01T00:00:00.000Z',
+  };
+  return { Q3 };
+});
 
 const listOrgs = vi.fn();
 const listProjects = vi.fn();
@@ -24,7 +40,7 @@ vi.mock('../priorityMatrixClient.js', async (orig) => ({
   listProjects: () => listProjects(),
   listPresets: () => listPresets(),
   listLists: () => listLists(),
-  createList: vi.fn(async () => ({} as PriorityList)),
+  createList: vi.fn(async () => Q3),
   // ADR 0590 fixture completeness — the page ALSO reads the portfolio + peers;
   // unmocked they hit real fetch in jsdom, fail, and (post-PMX-8c honesty)
   // legitimately render "…could not be loaded" notices that collide with this
@@ -42,7 +58,7 @@ vi.mock('../../../client/accessClient.js', async (orig) => ({
 
 import { PriorityMatrixPage } from '../PriorityMatrixPage.js';
 
-const preset = (id: string): CriteriaSet => ({ presetId: id, aggregation: 'weighted-sum', criteria: [] } as unknown as CriteriaSet);
+const preset = (id: PresetId): CriteriaSet => ({ presetId: id, aggregation: 'weighted-sum', criteria: [] });
 
 /** The create form lives in a modal behind "New list", which only appears once
  *  at least one list exists — so seed one and open it. */
@@ -65,7 +81,7 @@ beforeEach(() => {
   listOrgs.mockResolvedValue([{ orgId: 'org-1', name: 'Acme' }]);
   listProjects.mockResolvedValue([]);
   listPresets.mockResolvedValue([preset('weighted'), preset('wsjf'), preset('rice'), preset('ice'), preset('value-effort')]);
-  listLists.mockResolvedValue([{ id: 'l1', name: 'Q3 ideas', orgId: 'org-1', criteriaSet: { presetId: 'weighted', aggregation: 'weighted-sum', criteria: [] } } as unknown as PriorityList]);
+  listLists.mockResolvedValue([Q3]);
 });
 afterEach(cleanup);
 
@@ -138,9 +154,11 @@ describe('PM4UX-1 (ADR 0842 D9): a list is offered only where it can be created'
     listOrgs.mockResolvedValue([{ orgId: 'org-1', name: 'Acme' }, { orgId: 'org-2', name: 'Beta' }]);
     getEffectiveAccess.mockImplementation(async (o: { orgId: string }) => ({ roles: [], scopes: o.orgId === 'org-1' ? ['workspace:read', 'workspace:write'] : ['workspace:read'], basis: 'member' }));
     await view();
+    // POSITIVE ANCHOR: `toEqual(['Acme'])`, not `not.toContain('Beta')` — the
+    // not-yet-loaded select (`['No workspaces']`) satisfied the absence-only form.
     await waitFor(() => {
       const ws = screen.getByLabelText(/workspace/i) as HTMLSelectElement;
-      expect(Array.from(ws.options).map((o) => o.textContent)).not.toContain('Beta');
+      expect(Array.from(ws.options).map((o) => o.textContent)).toEqual(['Acme']);
     });
   });
 });

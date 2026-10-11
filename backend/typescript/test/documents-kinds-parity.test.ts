@@ -9,6 +9,9 @@
  * The FE literal is parsed out of the source text (the access-header-parity
  * precedent) rather than imported — the backend build must not take a
  * dependency on the SPA workspace.
+ *
+ * Sabotage-witnessed (grade-tests w14): dropping `board-update` from the FE copy
+ * (the DOCT-5 incident) or swapping two backend kinds turns it red.
  */
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';

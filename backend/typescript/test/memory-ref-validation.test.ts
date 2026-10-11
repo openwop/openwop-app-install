@@ -15,9 +15,17 @@
  * error. So the accept-side of this file is DERIVED by invoking the real
  * ref-minting functions rather than by restating string literals: if a minter
  * changes shape, this test follows it instead of agreeing with a stale copy.
+ *
+ * Sabotage-witnessed (w12 grade-tests): narrowing the control-char class to NUL,
+ * splitting traversal on `/` only, raising the length cap, and dropping the list or
+ * get guard each red the reject cases; `segment.includes('..')` reds the in-segment
+ * `..` case; a 20-char cap reds the minted + fixture accept cases.
  */
 
 import { describe, expect, it, beforeAll } from 'vitest';
+import { mkdtempSync, readdirSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   isWellFormedMemoryRef,
   writeMemoryEntry,
@@ -34,7 +42,7 @@ import { personSubject } from '../src/host/subject.js';
 const TENANT = 'h49-ref-validation';
 
 beforeAll(() => {
-  initInMemorySurfaces({ dataDir: '.' });
+  initInMemorySurfaces({ dataDir: mkdtempSync(join(tmpdir(), 'openwop-h49-ref-')) });
 });
 
 /**
@@ -60,10 +68,10 @@ function mintedRefs(): { label: string; ref: string }[] {
 
 /** Every `agent.memoryRef` the vendored conformance fixtures declare — read
  *  from the fixture tree, so a newly vendored fixture is covered on arrival. */
-async function fixtureRefs(): Promise<string[]> {
-  const { readdirSync, readFileSync } = await import('node:fs');
-  const { join } = await import('node:path');
-  const dir = join(process.cwd(), '..', '..', 'conformance-fixtures');
+function fixtureRefs(): string[] {
+  // Resolved from this file, not `process.cwd()`, so the read does not depend on
+  // where vitest was launched from.
+  const dir = join(import.meta.dirname, '..', '..', '..', 'conformance-fixtures');
   const refs = new Set<string>();
   for (const f of readdirSync(dir).filter((n) => n.endsWith('.json'))) {
     const parsed: unknown = JSON.parse(readFileSync(join(dir, f), 'utf8'));
@@ -90,21 +98,18 @@ describe('CTI-1(1) — memoryRef shape validation ACCEPTS every ref the host min
     }
   });
 
-  it('accepts every memoryRef the vendored conformance fixtures declare', async () => {
-    const refs = await fixtureRefs();
+  it('accepts every memoryRef the vendored conformance fixtures declare', () => {
+    const refs = fixtureRefs();
     expect(refs.length, 'the vendored tree MUST declare memoryRefs, else this is vacuous').toBeGreaterThanOrEqual(4);
     for (const ref of refs) {
       expect(isWellFormedMemoryRef(ref), `fixture ref "${ref}" MUST be accepted`).toBe(true);
     }
   });
 
-  it('a minted ref round-trips through the real read path', async () => {
-    const ref = agentMemoryScope('roundtrip-agent');
-    await clearMemoryScope(TENANT, ref);
-    const row = await writeMemoryEntry(TENANT, ref, { content: 'hello', tags: [] });
-    expect((await listMemoryEntries(TENANT, ref)).map((r) => r.id)).toContain(row.id);
-    expect(await getMemoryEntry(TENANT, ref, row.id)).not.toBeNull();
-  });
+  // `a minted ref round-trips through the real read path` was CUT (w12 grade-tests):
+  // probe w12g5-mrv-roundtrip-redundant (list refuses every non-empty ref) turned it
+  // red together with the CONTROL case below, which carries the same "a well-formed
+  // ref is served by list/get" claim; the minted shapes' acceptance is the case above.
 });
 
 describe('CTI-1(1) — malformed refs fail CLOSED, never a permissive lookup', () => {

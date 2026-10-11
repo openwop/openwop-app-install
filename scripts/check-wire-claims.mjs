@@ -95,7 +95,18 @@ function constString(file, key) {
 
 const A2A = constArray('host/a2aProfile.ts', 'A2A_SUPPORTED_VERSIONS');
 const MCP = constArray('host/mcpProfile.ts', 'MCP_SUPPORTED_VERSIONS');
-const SUPPRESSION = constString('routes/discovery.ts', 'sideEffectSuppression');
+// ADR 0812 P4 deleted the v1 discovery document, the only place this host ever
+// stated `replay.sideEffectSuppression`; v2 deleted the field outright
+// (capabilities.md §Deleted fields; v2 `replay` is a family record). So the
+// source carries no literal any more, and `null` means "this host claims
+// nothing". The v1-only row below still reads N/A on a v2-only host; against a
+// document that is not v2-only, absence on both sides is consistent and a served
+// value the source no longer states is STALE.
+const SUPPRESSION = (() => {
+  const src = readFileSync(join(SRC, 'routes/discovery.ts'), 'utf8');
+  const m = /^\s*sideEffectSuppression:\s*'([^']+)',/m.exec(src);
+  return m ? m[1] : null;
+})();
 
 /**
  * RFC 0146 `contractProvenance.suiteVersion` — the one claim whose ABSENCE the
@@ -248,7 +259,7 @@ if (process.argv.includes('--emit-expected')) {
       // host's, which a fixture cannot know) and compares the CLAIMS document
       // for equality.
       ...(CLAIMS && !ORIGIN_MODE ? { conformance: { certificationBundleUrl: 'https://example.invalid/v1/host/openwop-app/conformance/certification-bundle' } } : {}),
-      replay: { sideEffectSuppression: SUPPRESSION },
+      ...(SUPPRESSION ? { replay: { sideEffectSuppression: SUPPRESSION } } : {}),
       a2a: { protocolVersions: A2A, preferredVersion: A2A[0] },
       mcp: { supported: true, protocolVersions: MCP },
     },
@@ -630,6 +641,17 @@ if (caps.a2a?.supported === true) {
 for (const [name, live, expected, opts] of checks) {
   if (opts?.v1Only && V2_ONLY) {
     console.log(`  ${name.padEnd(30)} ${NOT_IN_V2}`);
+    continue;
+  }
+  // No source claim (ADR 0812 P4): consistent only if the served document is
+  // silent too. A served value the source no longer states is a stale image.
+  if (opts?.v1Only && expected === null) {
+    if (live === undefined) {
+      console.log(`  ${name.padEnd(30)} N/A      (claimed nowhere: ADR 0812 P4 deleted the v1 document that stated it)`);
+    } else {
+      console.log(`  ${name.padEnd(30)} STALE    live=${JSON.stringify(live)}, but the source no longer states this field (ADR 0812 P4) — the running image predates it`);
+      failed++;
+    }
     continue;
   }
   // `mcp` is env-gated off in some postures; an absent slot is not a stale claim.

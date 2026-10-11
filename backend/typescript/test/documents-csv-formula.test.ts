@@ -4,14 +4,20 @@
  * The `sheet` export's own comment says the file "opens directly in
  * Excel/Sheets", and document content can be model-authored (all six documents
  * agent tools declare `contentTrust:'untrusted'`), so a cell that survives
- * verbatim with a leading `=` / `+` / `-` / `@` / tab is a formula the
- * operator's spreadsheet will execute. Two arms:
+ * verbatim with a leading `=` / `+` / `-` / `@` is a formula the operator's
+ * spreadsheet will execute. (`neutralizeFormulaTrigger` also covers a leading
+ * tab / CR, but neither can reach a cell start through markdown — table cells
+ * and fallback lines are trimmed — so that branch is not asserted here.) Two arms:
  *   1. formula triggers are neutralized (leading `'` — the spreadsheet
  *      text-literal marker);
  *   2. ordinary signed numbers are NOT mangled — `-42` must stay `-42`.
  *
  * Pure unit test — `renderMarkdownToCsv` takes markdown and returns bytes; no
  * app boot needed.
+ *
+ * Sabotage-witnessed (grade-tests w14): returning the cell unprefixed reds
+ * cases 1, 3, 4; dropping the signed-number exemption reds cases 2, 3; quoting
+ * BEFORE neutralizing reds case 4; a fallback lane that skips `csvCell` reds case 3.
  */
 import { describe, expect, it } from 'vitest';
 import { renderMarkdownToCsv } from '../src/features/documents/render.js';

@@ -9,6 +9,14 @@
  *     CAS-guarded implementation (exactly one winner; losers 409);
  *   - editing a still-pending draft stamps editedAt; decided actions refuse
  *     edits (re-draft, not edit).
+ *
+ * This file drives the ASSISTANT-ROUTE lane (`/assistant/pending-actions/:id/*`); the
+ * generic lanes are `assistant-approve-every-lane.test.ts` (ADR 0862 D1/D2). Sabotages that
+ * turn it red (grade-tests w11): taint never computed / always set; the approval attributed
+ * to `rosterId:'assistant'`; the card payload un-allowlisted; the hash requirement dropped;
+ * the EARLY pre-CAS hash check dropped (via the `decidedBy` assertion); the CAS's
+ * `changed:false` dropped; the reject projected as approved; `editedAt` / the `pending`
+ * edit gate dropped.
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -93,7 +101,7 @@ describe('enqueue → the single approval loop', () => {
     expect(approval!.rosterId).toBe(cos!.rosterId);
     expect(approval!.rosterId).not.toBe('assistant');
     expect(approval!.persona).toBe(cos!.persona);
-    expect(getRosterEntry(approval!.tenantId, approval!.rosterId)).resolves.not.toBeNull(); // resolves to a real entry
+    await expect(getRosterEntry(approval!.tenantId, approval!.rosterId)).resolves.not.toBeNull(); // resolves to a real entry
 
     // The "Waiting on me" surface sees it — same queue as run proposals.
     const inbox = await jf<{ items: Array<{ approvalId: string; actionId?: string }> }>('/host/openwop-app/approvals?status=pending');
@@ -148,11 +156,13 @@ describe('enqueue → the single approval loop', () => {
    * took no hash at all, so an action edited after the approver read it executed with the
    * new content and no indication.
    *
-   * The second half is the part that matters and is easy to get wrong: ADR 0473 §(d) puts
-   * the definitive check AFTER the CAS, so by the time a mismatch is found the approval is
-   * consumed and the action row is already marked `approved`. Reopening only ONE side
-   * leaves the other lying — an action marked approved that never executed and never
-   * reported failure. Both rows must come back to `pending`.
+   * CORRECTED (grade-tests w11): this used to say the refusal here comes from the post-CAS
+   * check, with both rows reopened. Since ADR 0862 D1 a SEQUENTIAL stale hash is refused by
+   * the EARLY, non-consuming check before the CAS — the approval is never resolved, which
+   * the `decidedBy` assertion below witnesses (with the early check removed the post-CAS
+   * check still answers 409 and reopens both rows, so status alone cannot tell them apart).
+   * The post-CAS two-sided reopen is witnessed by `assistant-approve-post-cas-check.test.ts`,
+   * which opens the early-check→CAS window on purpose.
    */
   it('a stale expectedContentHash is refused 409 and BOTH rows return to pending', async () => {
     const action = await enqueueActionWithApproval(TENANT, draftEmail());
@@ -175,9 +185,11 @@ describe('enqueue → the single approval loop', () => {
     // Both sides restored — neither may be left resolved.
     const afterAction = await getPendingAction(TENANT, action.actionId);
     expect(afterAction?.status, 'the action row must be back to pending, not left approved').toBe('pending');
-    const { getApproval } = await import('../src/host/approvalService.js');
     const afterApproval = await getApproval(action.approvalId!);
-    expect(afterApproval?.status, 'the approval must be reopened too').toBe('pending');
+    expect(afterApproval?.status, 'the approval must still be pending').toBe('pending');
+    // Refused BEFORE the CAS: the approval was never resolved (a consumed-then-reopened row
+    // keeps the `decidedBy` the CAS stamped).
+    expect(afterApproval?.decidedBy, 'refused before the CAS — the approval was never consumed').toBeUndefined();
 
     // …and the CURRENT hash is accepted, so this is a refusal to guess, not a dead end.
     const fresh = (await getPendingAction(TENANT, action.actionId))!;
@@ -246,7 +258,8 @@ describe('enqueue → the single approval loop', () => {
     // ADR 0662 D2 — the hash is of the EDITED row (the edit above changed the draft), which
     // is the point: approving the pre-edit hash is now refused.
     const freshRow = (await getPendingAction(TENANT, action.actionId))!;
-    await jf(`/host/openwop-app/assistant/pending-actions/${action.actionId}/approve`, { method: 'POST', body: JSON.stringify({ expectedContentHash: contentHashOf(freshRow) }) });
+    const approved = await jf(`/host/openwop-app/assistant/pending-actions/${action.actionId}/approve`, { method: 'POST', body: JSON.stringify({ expectedContentHash: contentHashOf(freshRow) }) });
+    expect(approved.status, 'the edited bytes approve, so the 409 below is the decided-state refusal').toBe(200);
     const postDecide = await jf(`/host/openwop-app/assistant/pending-actions/${action.actionId}`, {
       method: 'PATCH',
       body: JSON.stringify({ draft: 'too late', expectedContentHash: contentHashOf(freshRow) }),

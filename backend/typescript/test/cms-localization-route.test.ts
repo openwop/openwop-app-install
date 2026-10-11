@@ -4,12 +4,30 @@
  * settings, the base∉supported invariant, localization-key validation, and the
  * Accept-Language → Content-Language negotiated published read (exact / family /
  * default / malformed), published-only delivery, and per-org isolation.
+ *
+ * Sabotage-witnessed (grade-tests wave 16, w16g4-lr-*): the PUT toggle gate, the §A
+ * base∉supported invariant, base-keyed overlays, overlay URL sanitization, the
+ * Content-Language / Cache-Control / localizations-stripped delivery, base fallback, a
+ * strict Accept-Language parser (400), published-only by-slug, the translate route's
+ * ManagedProviderError → 503 arm, and the per-org settings key each turn a case red.
+ * The translate case MOCKS the headless resolver: without it the route never reached
+ * the ManagedProviderError arm (no provider in the test host) and accepted 200 or 503.
  */
 
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { getSetCookies } from './headerCookies.js';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+
+// The translate route's provider seam — mocked so the 503 arm is exercised deterministically
+// (and no real model is ever called from a developer machine that has a key in its env).
+vi.mock('../src/host/headlessAi.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/host/headlessAi.js')>();
+  return { ...actual, resolveHeadlessAi: vi.fn() };
+});
+
+import { resolveHeadlessAi } from '../src/host/headlessAi.js';
+import { ManagedProviderError } from '../src/providers/managedProvider.js';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
@@ -35,7 +53,20 @@ async function setLocalization(status: 'on' | 'off'): Promise<void> {
   if (d) await saveConfig({ ...d, status }, 'test');
 }
 
-interface Res<T = any> { status: number; headers: Headers; body: T }
+interface SectionBody { sectionId?: string; data: Record<string, unknown>; localizations?: Record<string, Record<string, unknown>> }
+interface Body {
+  user?: { userId: string };
+  orgId?: string;
+  pageId?: string;
+  slug?: string;
+  error?: string;
+  sections?: SectionBody[];
+  page?: { sections: SectionBody[] };
+  baseLocale?: string;
+  supportedLocales?: string[];
+  autoTranslateOnPublish?: boolean;
+}
+interface Res { status: number; headers: Headers; body: Body | undefined }
 interface Client {
   get: (p: string, headers?: Record<string, string>) => Promise<Res>;
   post: (p: string, b?: unknown) => Promise<Res>;
@@ -51,7 +82,7 @@ function client(): Client {
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    const out = res.status === 204 ? undefined : (await res.json().catch(() => undefined)) as Body | undefined; // wire JSON
     return { status: res.status, headers: res.headers, body: out };
   };
   return {
@@ -66,7 +97,7 @@ let n = 0;
 async function signup(c: Client, tenantId: string): Promise<{ userId: string }> {
   const r = await c.post('/host/openwop-app/test/login', { email: `loc-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  return r.body.user;
+  return r.body!.user!;
 }
 async function ownerOrg(): Promise<{ owner: Client; orgId: string }> {
   const tenantId = `org:loc-${Date.now()}-${n++}`;
@@ -74,7 +105,7 @@ async function ownerOrg(): Promise<{ owner: Client; orgId: string }> {
   await signup(owner, tenantId);
   const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
-  return { owner, orgId: org.body.orgId };
+  return { owner, orgId: org.body!.orgId! };
 }
 const u = (orgId: string, suffix = ''): string => `/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}${suffix}`;
 
@@ -85,10 +116,10 @@ async function publishLocalizedHome(owner: Client, orgId: string): Promise<strin
     sections: [{ type: 'hero', data: { heading: 'Welcome' }, localizations: { 'pt-BR': { heading: 'Bem-vindo' } } }],
   });
   expect(created.status, JSON.stringify(created.body)).toBe(201);
-  expect(created.body.sections[0].localizations['pt-BR'].heading).toBe('Bem-vindo');
-  const pub = await owner.post(u(orgId, `/pages/${created.body.pageId}/publish`));
+  expect(created.body?.sections?.[0]?.localizations?.['pt-BR']?.heading).toBe('Bem-vindo');
+  const pub = await owner.post(u(orgId, `/pages/${created.body?.pageId}/publish`));
   expect(pub.status, JSON.stringify(pub.body)).toBe(200);
-  return created.body.slug as string;
+  return created.body!.slug!;
 }
 
 describe('cms-localization — toggle gate + settings invariant', () => {
@@ -97,8 +128,8 @@ describe('cms-localization — toggle gate + settings invariant', () => {
     // GET is always available (returns the default skeleton).
     const def = await owner.get(u(orgId, '/language-settings'));
     expect(def.status).toBe(200);
-    expect(def.body.baseLocale).toBe('en');
-    expect(def.body.supportedLocales).toEqual([]);
+    expect(def.body?.baseLocale).toBe('en');
+    expect(def.body?.supportedLocales).toEqual([]);
 
     await setLocalization('off');
     expect((await owner.put(u(orgId, '/language-settings'), { supportedLocales: ['pt-BR'] })).status).toBe(404);
@@ -106,8 +137,8 @@ describe('cms-localization — toggle gate + settings invariant', () => {
     await setLocalization('on');
     const ok = await owner.put(u(orgId, '/language-settings'), { supportedLocales: ['pt-BR', 'es'], autoTranslateOnPublish: true });
     expect(ok.status, JSON.stringify(ok.body)).toBe(200);
-    expect(ok.body.supportedLocales).toEqual(['pt-BR', 'es']);
-    expect(ok.body.autoTranslateOnPublish).toBe(true);
+    expect(ok.body?.supportedLocales).toEqual(['pt-BR', 'es']);
+    expect(ok.body?.autoTranslateOnPublish).toBe(true);
   });
 
   it('rejects baseLocale ∈ supportedLocales (§A invariant) and invalid tags', async () => {
@@ -141,7 +172,7 @@ describe('cms-localization — localization-key validation', () => {
     });
     expect(created.status, JSON.stringify(created.body)).toBe(201);
     // The dangerous scheme is dropped in the overlay just as it is in base.
-    expect(created.body.sections[0].localizations['pt-BR'].url).toBe('');
+    expect(created.body?.sections?.[0]?.localizations?.['pt-BR']?.url).toBe('');
   });
 });
 
@@ -158,9 +189,10 @@ describe('cms-localization — negotiated published read', () => {
     expect(r.headers.get('vary')).toMatch(/Accept-Language/i);
     // Cookie-authed org-scoped read: a shared cache must never store it (fix A5).
     expect(r.headers.get('cache-control')).toBe('private, no-store');
-    expect(r.body.page.sections[0].data.heading).toBe('Bem-vindo');
+    expect(r.body?.page?.sections[0]?.data.heading).toBe('Bem-vindo');
     // Delivery strips the other locales — never exposes the localizations map.
-    expect(r.body.page.sections[0].localizations).toBeUndefined();
+    expect(r.body?.page?.sections[0]).toBeDefined();
+    expect(r.body?.page?.sections[0]?.localizations).toBeUndefined();
   });
 
   it('falls back to base data for a supported locale with no override, and to base for an unsupported one', async () => {
@@ -172,12 +204,12 @@ describe('cms-localization — negotiated published read', () => {
     // es IS supported but the section has no es override → base text, Content-Language es.
     const es = await owner.get(u(orgId, `/pages/by-slug/${slug}`), { 'accept-language': 'es' });
     expect(es.headers.get('content-language')).toBe('es');
-    expect(es.body.page.sections[0].data.heading).toBe('Welcome');
+    expect(es.body?.page?.sections[0]?.data.heading).toBe('Welcome');
 
     // de is unsupported → negotiate to base (en).
     const de = await owner.get(u(orgId, `/pages/by-slug/${slug}`), { 'accept-language': 'de' });
     expect(de.headers.get('content-language')).toBe('en');
-    expect(de.body.page.sections[0].data.heading).toBe('Welcome');
+    expect(de.body?.page?.sections[0]?.data.heading).toBe('Welcome');
   });
 
   it('NEVER 400s on a malformed Accept-Language — serves the base', async () => {
@@ -188,7 +220,7 @@ describe('cms-localization — negotiated published read', () => {
     const r = await owner.get(u(orgId, `/pages/by-slug/${slug}`), { 'accept-language': '!!!;;;q=zzz' });
     expect(r.status).toBe(200);
     expect(r.headers.get('content-language')).toBe('en');
-    expect(r.body.page.sections[0].data.heading).toBe('Welcome');
+    expect(r.body?.page?.sections[0]?.data.heading).toBe('Welcome');
   });
 
   it('serves localized content published-only (a draft is invisible by slug)', async () => {
@@ -199,13 +231,17 @@ describe('cms-localization — negotiated published read', () => {
       title: 'Draft', sections: [{ type: 'hero', data: { heading: 'Welcome' }, localizations: { 'pt-BR': { heading: 'Bem-vindo' } } }],
     });
     // Never published → by-slug 404, no localized leak.
-    const r = await owner.get(u(orgId, `/pages/by-slug/${created.body.slug}`), { 'accept-language': 'pt-BR' });
+    expect(created.status).toBe(201);
+    const r = await owner.get(u(orgId, `/pages/by-slug/${created.body?.slug}`), { 'accept-language': 'pt-BR' });
     expect(r.status).toBe(404);
   });
 });
 
 describe('cms-localization — AI translate-from-base (Phase 3)', () => {
   it('404s when the toggle is OFF; validates input; degrades to 503 when the provider is unavailable', async () => {
+    vi.mocked(resolveHeadlessAi).mockResolvedValue(async () => {
+      throw new ManagedProviderError('managed_unavailable', 'managed provider not configured');
+    });
     const { owner, orgId } = await ownerOrg();
     const payload = { sectionType: 'hero', data: { heading: 'Welcome' }, targetLocale: 'pt-BR' };
 
@@ -217,13 +253,11 @@ describe('cms-localization — AI translate-from-base (Phase 3)', () => {
     expect((await owner.post(u(orgId, '/translate-section'), { ...payload, sectionType: 'bogus' })).status).toBe(400);
     expect((await owner.post(u(orgId, '/translate-section'), { ...payload, targetLocale: 'not-a-locale' })).status).toBe(400);
 
-    // Managed provider is not configured in the test host → a CLEAN 503 (the
-    // editor degrades to manual translation), never a 500.
+    // The managed provider is unavailable → a CLEAN 503 (the editor degrades to manual
+    // translation), never a 500.
     const r = await owner.post(u(orgId, '/translate-section'), payload);
-    expect([200, 503]).toContain(r.status);
-    if (r.status === 200) {
-      expect(typeof r.body.overlay).toBe('object');
-    }
+    expect(r.status, JSON.stringify(r.body)).toBe(503);
+    expect(r.body?.error).toBe('host_capability_missing');
   });
 });
 
@@ -231,10 +265,14 @@ describe('cms-localization — per-org isolation', () => {
   it('language settings are per-org (org B does not see org A\'s locales)', async () => {
     await setLocalization('on');
     const { owner, orgId } = await ownerOrg();
-    await owner.put(u(orgId, '/language-settings'), { supportedLocales: ['pt-BR', 'fr'] });
+    const putA = await owner.put(u(orgId, '/language-settings'), { supportedLocales: ['pt-BR', 'fr'] });
+    expect(putA.status, JSON.stringify(putA.body)).toBe(200);
+    // Org A's own write landed — otherwise org B reading [] proves nothing.
+    expect((await owner.get(u(orgId, '/language-settings'))).body?.supportedLocales).toEqual(['pt-BR', 'fr']);
     // A second org under the SAME owner/tenant has its own (default) settings.
     const orgB = await owner.post('/host/openwop-app/orgs', { name: 'Beta' });
-    const sB = await owner.get(u(orgB.body.orgId, '/language-settings'));
-    expect(sB.body.supportedLocales).toEqual([]);
+    expect(orgB.status, JSON.stringify(orgB.body)).toBe(201);
+    const sB = await owner.get(u(orgB.body!.orgId!, '/language-settings'));
+    expect(sB.body?.supportedLocales).toEqual([]);
   });
 });

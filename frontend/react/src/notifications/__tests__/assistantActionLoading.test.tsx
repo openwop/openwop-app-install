@@ -1,7 +1,11 @@
 /** ADR 0862 D3 — an approver cannot act while the action fields are suspended.
  * The namespace is deliberately held back: a fields-only Suspense boundary
  * would leave a working Approve button beside a calendar card missing its time
- * and guests. Release it and the same card becomes reviewable and actionable. */
+ * and guests. Release it and the same card becomes reviewable and actionable.
+ *
+ * Sabotage-witnessed (wave 11): wrap `<AssistantActionFields>` in its own
+ * (fields-only) Suspense boundary in any of the three surfaces → that surface's
+ * case red. */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
@@ -42,6 +46,7 @@ import { ApprovalsInbox } from '../ApprovalsInbox.js';
 import { NeedsYouInbox } from '../NeedsYouInbox.js';
 import { ReviewCard } from '../../chat/reviews/ReviewCard.js';
 import type { ReviewRequest } from '../../chat/reviews/reviewClient.js';
+import type { PendingApproval } from '../../agents/approvalsClient.js';
 
 const action = {
   actionId: 'act:loading', kind: 'calendar.invite', draft: 'Invite Dana.',
@@ -52,7 +57,7 @@ const approval = {
   approvalId: 'ap-loading', rosterId: 'r-assistant', persona: 'Iris', workflowId: '',
   kind: 'assistant-action', actionId: action.actionId, proposal: 'Invite Dana',
   status: 'pending', createdAt: '2026-10-07T00:00:00Z', action,
-};
+} satisfies PendingApproval;
 const review: ReviewRequest = {
   reviewId: 'approval:ap-loading', source: 'approval', kind: 'assistant-action',
   status: 'pending', tenantId: 'default', requestedAt: '2026-10-07T00:00:00Z',

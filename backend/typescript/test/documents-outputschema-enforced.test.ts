@@ -15,10 +15,17 @@
  *
  * The failure is a TYPED error carrying the reason, which the agent loop's one bounded repair
  * feeds back — the same shape the param check in this tool already used.
+ *
+ * Sabotage-witnessed (grade-tests w14): skipping the `asm.outputSchema` gate reds the
+ * missing-key and not-JSON cases; skipping `validateAgainstSchema` reds the missing-key
+ * case; letting a JSON parse failure fall through to schema validation reds the not-JSON
+ * case; firing the gate unconditionally reds the no-schema scope control.
+ *
+ * BLOCKED-ON-PRODUCT (recorded, not loosened): the repair message lists EVERY required
+ * key (`agentTools.ts` "Required keys: …"), not only the missing ones, so the
+ * "names what is missing" assertion below holds because the full list includes it.
  */
-import http from 'node:http';
-import type { AddressInfo } from 'node:net';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { createAgentToolProvider } from '../src/host/agentToolProvider.js';
 import { DOCUMENTS_GENERATE_FROM_TEMPLATE_TOOL_ID } from '../src/features/documents/agentTools.js';
@@ -26,24 +33,23 @@ import { createTemplate, listDocumentsForTenant } from '../src/features/document
 import { createOrg, createMember } from '../src/host/accessControlService.js';
 
 const TENANT = 'default';
-let server: http.Server;
 let ORG = '';
+let seq = 0;
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
-  const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { void (server.address() as AddressInfo); res(); }); });
+  // createApp registers the documents agent tools the provider below resolves; no listener is needed.
+  await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   const org = await createOrg({ tenantId: TENANT, name: 'DocSchema Org', createdBy: 'user:owner' });
   ORG = org.orgId;
   // The acting user needs write scope in the org — the tool's authz gate is real and fired on
   // the first draft of this fixture, which is the gate working, not a defect.
   await createMember({ tenantId: TENANT, orgId: ORG, displayName: 'Owner', subject: 'user:owner', roles: ['admin'] });
 });
-afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
 const run = async (input: Record<string, unknown>): Promise<{ content: string; isError?: boolean }> =>
-  createAgentToolProvider({ tenantId: TENANT, runId: `run-docwf1-${Math.random().toString(16).slice(2, 8)}`, actingUserId: 'user:owner' })
+  createAgentToolProvider({ tenantId: TENANT, runId: `run-docwf1-${++seq}`, actingUserId: 'user:owner' })
     .executeTool({ name: DOCUMENTS_GENERATE_FROM_TEMPLATE_TOOL_ID, input });
 
 describe('DOCWF-1 — the outputSchema contract is enforced where it is reachable', () => {
@@ -65,9 +71,13 @@ describe('DOCWF-1 — the outputSchema contract is enforced where it is reachabl
 
   it('content that is not JSON at all is refused when a schema is declared', async () => {
     const tmpl = await createTemplate({ tenantId: TENANT, orgId: ORG, name: 'Schema prose', kind: 'sow', promptBody: 'Write it.', outputFormat: 'markdown', outputSchema: { type: 'object', required: ['scope'] }, createdBy: 'user:owner' });
+    const before = (await listDocumentsForTenant(TENANT)).length;
     const out = await run({ templateId: tmpl.templateId, orgId: ORG, contentMarkdown: '# Just prose, no JSON' });
     expect(out.isError).toBe(true);
-    expect(out.content).toMatch(/did not parse as JSON|outputSchema/);
+    expect(JSON.parse(out.content)).toMatchObject({ error: 'validation_error' });
+    // The PARSE failure is its own typed reason — not the schema-mismatch message.
+    expect(out.content).toMatch(/did not parse as JSON/);
+    expect(await listDocumentsForTenant(TENANT), 'no document may be created on a rejected generation').toHaveLength(before);
   });
 
   it('a satisfying payload still succeeds — the gate must not block valid work', async () => {
@@ -77,7 +87,9 @@ describe('DOCWF-1 — the outputSchema contract is enforced where it is reachabl
       contentMarkdown: JSON.stringify({ scope: 'build it', deliverables: ['a', 'b'] }),
     });
     expect(out.isError, out.content.slice(0, 300)).toBeFalsy();
-    expect(JSON.parse(out.content)).toMatchObject({ documentId: expect.any(String) });
+    const { documentId } = JSON.parse(out.content) as { documentId: string };
+    expect(documentId).toEqual(expect.any(String));
+    expect((await listDocumentsForTenant(TENANT)).some((d) => d.documentId === documentId), 'the valid draft is persisted').toBe(true);
   });
 
   it('a template with NO outputSchema is unaffected — prose still works', async () => {
@@ -86,5 +98,6 @@ describe('DOCWF-1 — the outputSchema contract is enforced where it is reachabl
     const tmpl = await createTemplate({ tenantId: TENANT, orgId: ORG, name: 'No schema', kind: 'sow', promptBody: 'Write it.', outputFormat: 'markdown', createdBy: 'user:owner' });
     const out = await run({ templateId: tmpl.templateId, orgId: ORG, contentMarkdown: '# Ordinary prose' });
     expect(out.isError, out.content.slice(0, 300)).toBeFalsy();
+    expect(JSON.parse(out.content)).toMatchObject({ documentId: expect.any(String) });
   });
 });

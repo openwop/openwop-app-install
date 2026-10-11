@@ -14,6 +14,11 @@
  *
  * The empty case must keep rendering nothing: a section that legitimately
  * matches no rows should stay silent, and these tests pin that too.
+ *
+ * Incident: #2926 (afc9c04d6). Sabotage-witnessed (/grade-tests w17): a
+ * `.catch` that sets `error` false reds the failed-read cases; dropping the
+ * `!r.ok` throw reds the non-2xx case; a success path that sets `error` true
+ * reds the empty cases.
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, cleanup, act } from '@testing-library/react';
@@ -24,44 +29,48 @@ vi.mock('react-i18next', () => ({
 vi.mock('../../../i18n/useFormat.js', () => ({ useFormat: () => ({ currency: (n: number) => String(n) }) }));
 
 import { RenderSection } from '../SectionRenderer.js';
+import type { Section } from '../cmsClient.js';
 
-const ENTITY_SECTION = {
-  type: 'entityList',
+const ENTITY_SECTION: Section = {
+  sectionId: 'sec:list', type: 'entityList',
   data: { tenantId: 't1', typeName: 'article', titleField: 'title', limit: 10 },
-} as never;
+};
 
-const PRODUCT_SECTION = {
-  type: 'productGrid',
+const PRODUCT_SECTION: Section = {
+  sectionId: 'sec:grid', type: 'productGrid',
   data: { storeOrgId: 'org1', productIds: ['p1'] },
-} as never;
+};
 
-const renderSection = async (section: unknown) => {
+const json = (body: unknown, status = 200): Response => new Response(JSON.stringify(body), { status });
+
+let fetchMock = vi.fn<typeof fetch>();
+
+const renderSection = async (section: Section) => {
   await act(async () => {
-    render(<RenderSection section={section as never} mode="public" />);
+    render(<RenderSection section={section} mode="public" />);
   });
 };
 
-afterEach(() => { cleanup(); vi.restoreAllMocks(); });
-beforeEach(() => { vi.stubGlobal('fetch', vi.fn()); });
+afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
+beforeEach(() => { fetchMock = vi.fn<typeof fetch>(); vi.stubGlobal('fetch', fetchMock); });
 
 describe('public entityList — a failed read must not delete the section', () => {
   it('says the section could not load instead of rendering nothing', async () => {
-    (globalThis.fetch as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('offline'));
+    fetchMock.mockRejectedValue(new TypeError('Failed to fetch'));
     await renderSection(ENTITY_SECTION);
     expect(screen.getByText(/Couldn’t load this section/i)).toBeTruthy();
   });
 
   it('SABOTAGE — a genuine empty result still renders nothing', async () => {
-    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
-      ok: true, json: async () => ({ entities: [] }),
-    });
+    fetchMock.mockResolvedValue(json({ entities: [] }));
     await renderSection(ENTITY_SECTION);
-    expect(screen.queryByText(/Couldn’t load this section/i)).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(screen.queryByText(/Couldn’t load/i)).toBeNull();
+    expect(document.body.textContent?.trim()).toBe('');
   });
 
   it('a non-2xx is a failure, not an empty list', async () => {
-    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: false, status: 500, json: async () => ({}) });
+    fetchMock.mockResolvedValue(json({}, 500));
     await renderSection(ENTITY_SECTION);
     expect(screen.getByText(/Couldn’t load this section/i)).toBeTruthy();
   });
@@ -69,16 +78,15 @@ describe('public entityList — a failed read must not delete the section', () =
 
 describe('public productGrid — a failed read must not delete the grid or its CTAs', () => {
   it('says the products could not load instead of rendering nothing', async () => {
-    (globalThis.fetch as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('offline'));
+    fetchMock.mockRejectedValue(new TypeError('Failed to fetch'));
     await renderSection(PRODUCT_SECTION);
     expect(screen.getByText(/Couldn’t load these products/i)).toBeTruthy();
   });
 
-  it('SABOTAGE — a genuine empty result still renders nothing', async () => {
-    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
-      ok: true, json: async () => ({ products: [] }),
-    });
+  it('SABOTAGE — a genuine empty product list still renders nothing', async () => {
+    fetchMock.mockResolvedValue(json({ products: [] }));
     await renderSection(PRODUCT_SECTION);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(screen.queryByText(/Couldn’t load these products/i)).toBeNull();
     expect(document.body.textContent?.trim()).toBe('');
   });

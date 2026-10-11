@@ -202,20 +202,19 @@ describe('ADR 0660 D3 — verify one artifact, install another', () => {
   });
 
   /**
-   * BLOCKED-ON-PRODUCT (grade-tests wave 10, g3) — `it.fails` asserts the CORRECT
-   * behaviour and is EXPECTED to fail until the installer is fixed.
+   * Was BLOCKED-ON-PRODUCT (grade-tests wave 10, g3) as `it.fails`; FIXED — the
+   * installer now re-hashes the STAGED pack.json before touching destDir, so this
+   * is a plain `it` again. What it pinned:
    *
-   * Defect: in `packs/registryInstaller.ts` the D3 re-hash runs AFTER
+   * Defect (fixed): in `packs/registryInstaller.ts` the D3 re-hash runs AFTER
    * `rmSync(destDir)` + `mkdirSync(destDir)` + `copyAllowlistedFiles(packRoot, destDir)`,
    * and the surrounding `finally` cleans only `stageDir`. So a REFUSED tarball
    * (a) leaves its HOSTILE `pack.json` + an unmarked `index.mjs` at
    * `<packDir>/<name>` — where `nodeCatalogBuilder` scans every dir holding a
    * `pack.json` — and (b) has already destroyed the previously good install.
-   * Fix: stage → verify the re-hash → only then swap into `destDir` (or roll back).
-   * When this goes GREEN-as-failing (i.e. `it.fails` reports a failure), the
-   * product is fixed: flip it to `it`.
+   * Fix: stage → verify the re-hash → only then swap into `destDir`.
    */
-  it.fails('BLOCKED-ON-PRODUCT: a refused duplicate-pack.json tarball leaves the prior install intact and lands nothing', async () => {
+  it('a refused duplicate-pack.json tarball leaves the prior install intact and lands nothing', async () => {
     // A good prior install at 0.9.0 (a different version, so the idempotency
     // marker does not short-circuit the second install).
     const prior = packJson('acme.widgets', '0.9.0', 'acme-key');

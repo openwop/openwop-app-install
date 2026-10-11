@@ -6,6 +6,12 @@
  *   - per-subject + per-tenant isolation (CTI-1)
  *   - delete is consistent and fail-closed
  *
+ * Sabotage-witnessed (w12 grade-tests): a `/`-joined scope, a list that reads the
+ * recall index instead of the durable store, a tenant-less note key, a wrong-subject
+ * delete reported as removed, `recallCleared` defaulting false, a cascade that
+ * counts without deleting, and a doubled length cap / an untrimmed empty check each
+ * turn a named case red.
+ *
  * @see docs/adr/0041-subject-memory.md
  */
 
@@ -52,8 +58,9 @@ describe('curated notes are durable', () => {
     await addSubjectNote(T, u, 'My timezone is US/Pacific.');
     expect(await countSubjectNotes(T, u)).toBe(2);
 
-    // Simulate a process restart: the in-memory recall index is gone, but the
-    // DurableCollection (source of truth) persists.
+    // Wipe the in-memory recall working set. This is NOT a full process restart
+    // (the note store here is itself an in-memory sqlite); what it proves is that
+    // the list reads the DURABLE note store, never the recall index.
     await clearMemoryScope(T, subjectMemoryScope(u));
 
     const notes = await listSubjectNotes(T, u);
@@ -106,7 +113,11 @@ describe('clearSubjectNotes (delete-subject cascade)', () => {
 describe('validation', () => {
   it('rejects empty + over-long notes', async () => {
     const u = user('val-1');
-    await expect(addSubjectNote(T, u, '   ')).rejects.toThrow();
-    await expect(addSubjectNote(T, u, 'x'.repeat(4001))).rejects.toThrow();
+    // The VALIDATION error specifically — a bare `.toThrow()` also passed on any
+    // unrelated throw (an uninitialised store, a cap).
+    await expect(addSubjectNote(T, u, '   ')).rejects.toMatchObject({ code: 'validation_error', message: expect.stringMatching(/non-empty string/) });
+    await expect(addSubjectNote(T, u, 'x'.repeat(4001))).rejects.toMatchObject({ code: 'validation_error', message: expect.stringMatching(/4000 characters or fewer/) });
+    // ...and neither attempt persisted anything.
+    expect(await listSubjectNotes(T, u)).toEqual([]);
   });
 });

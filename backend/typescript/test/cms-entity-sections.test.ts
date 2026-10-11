@@ -2,6 +2,11 @@
  * ADR 0407 Phase 2 — the entity-backed section builders (`entityList` /
  * `entityDetail`): structural validation only (reference-not-copy — the
  * productGrid model), bounded/clamped config, partial-mode tolerance.
+ *
+ * Sabotage-witnessed (/grade-tests w16): dropping the `Math.min(…, 24)` clamp, the
+ * `cleanOpaqueToken(termId)` guard, the asc/desc `sortDir` allowlist, the finite-number
+ * `limit` check, or the `!partial && !typeName` / `!entityId` throws in
+ * `validateSection` each turns the named case red.
  */
 import { describe, expect, it } from 'vitest';
 import { validateSections } from '../src/features/cms/cmsService.js';

@@ -7,6 +7,14 @@
  *   D2 per-locale publish state — a 'draft' locale is withheld from delivery
  *      (negotiation + overlays fall through the RFC 0103 chain); absent state
  *      is published (backward compatible). Toggle-gated on `cms-localization`.
+ *
+ * Sabotage-witnessed (/grade-tests w16): dropping the base-data, foreign-overlay or
+ * AI-stamp diff in `assertLocaleScopedSectionsPatch`, the title/tags chrome check,
+ * `denyIfTranslator`, the submit/translate grant checks, `/mine`'s self-scoping or
+ * its ungated read, the removal toggle exemption, the CMSL-7 supported-set check,
+ * the CMSL-8 offender scan, or the withheld set / tag validation in delivery reds
+ * the named case. Every translator 403 is asserted to be the GRANT guard's
+ * `forbidden_scope` (a 403 from another guard would otherwise satisfy it).
  */
 
 import http from 'node:http';
@@ -16,6 +24,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
+import { assertFlatErrorEnvelope, errorCodeOf } from './helpers/errorEnvelope.js';
 
 let BASE: string;
 let server: http.Server;
@@ -34,7 +43,29 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T }
+interface SectionBody {
+  sectionId: string; type: string; data: { heading?: string };
+  localizations?: Record<string, { heading?: string }>;
+  aiDrafted?: Record<string, string>;
+}
+interface GrantBody { subject: string; locales: string[] }
+/** The success-body fields this file reads (error bodies go through `assertFlatErrorEnvelope`). */
+interface Body {
+  user: { userId: string };
+  orgId: string; pageId: string; slug: string; title: string; version: number; tags?: string[];
+  sections: SectionBody[]; localePublishState?: Record<string, string>;
+  page: { sections: SectionBody[] };
+  grant: GrantBody | null; grants: GrantBody[];
+  baseLocale: string;
+}
+interface Res { status: number; body: Body }
+
+/** A refusal by the TRANSLATOR-GRANT guard specifically (not any 403). */
+function expectGrantDenied(r: Res, what: string): void {
+  expect(r.status, `${what}: ${JSON.stringify(r.body)}`).toBe(403);
+  expect(errorCodeOf(r.body), what).toBe('forbidden_scope');
+  expect(assertFlatErrorEnvelope(r.body, what).message, what).toMatch(/translator grant/i);
+}
 interface Client {
   get: (p: string, headers?: Record<string, string>) => Promise<Res>;
   post: (p: string, b?: unknown) => Promise<Res>;
@@ -50,8 +81,8 @@ function client(): Client {
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
-    return { status: res.status, body: out };
+    const out: unknown = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    return { status: res.status, body: out as Body };
   };
   return {
     get: (p, headers) => call('GET', p, undefined, headers),
@@ -78,7 +109,7 @@ async function ownerWithEditor(): Promise<{ owner: Client; editor: Client; edito
   const editorUser = await signup(editor, tenantId);
   const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
-  const orgId = org.body.orgId as string;
+  const orgId = org.body.orgId;
   const add = await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'T', subject: editorUser.userId, roles: ['editor'] });
   expect(add.status, JSON.stringify(add.body)).toBe(201);
   return { owner, editor, editorSubject: editorUser.userId, orgId };
@@ -100,11 +131,13 @@ describe('D1 — translator locale grants', () => {
     const { owner, editor, editorSubject, orgId } = await ownerWithEditor();
     const { pageId, sectionId } = await localizedDraft(owner, orgId);
 
-    // Grant management is admin-tier: the editor cannot set grants.
-    expect((await editor.put(u(orgId, '/locale-grants'), { subject: editorSubject, locales: ['pt-BR'] })).status).toBe(403);
+    // Grant management is admin-tier: the editor cannot set grants (the SCOPE guard, not a grant).
+    const self = await editor.put(u(orgId, '/locale-grants'), { subject: editorSubject, locales: ['pt-BR'] });
+    expect(self.status, JSON.stringify(self.body)).toBe(403);
+    expect(errorCodeOf(self.body)).toBe('forbidden_scope');
     const put = await owner.put(u(orgId, '/locale-grants'), { subject: editorSubject, locales: ['pt-BR'] });
     expect(put.status, JSON.stringify(put.body)).toBe(200);
-    expect(put.body.grant.locales).toEqual(['pt-BR']);
+    expect(put.body.grant!.locales).toEqual(['pt-BR']);
     expect((await owner.get(u(orgId, '/locale-grants'))).body.grants).toHaveLength(1);
 
     const page = (await editor.get(u(orgId, `/pages/${pageId}`))).body;
@@ -114,34 +147,40 @@ describe('D1 — translator locale grants', () => {
       sections: [{ sectionId, type: 'hero', data: page.sections[0].data, localizations: { ...page.sections[0].localizations, 'pt-BR': { heading: 'Bem-vindo!' } } }],
     });
     expect(okPatch.status, JSON.stringify(okPatch.body)).toBe(200);
-    expect(okPatch.body.sections[0].localizations['pt-BR'].heading).toBe('Bem-vindo!');
+    expect(okPatch.body.sections[0]!.localizations?.['pt-BR']?.heading).toBe('Bem-vindo!');
 
     // Base-data change: 403.
-    expect((await editor.patch(u(orgId, `/pages/${pageId}`), {
+    expectGrantDenied(await editor.patch(u(orgId, `/pages/${pageId}`), {
       sections: [{ sectionId, type: 'hero', data: { heading: 'HACKED' }, localizations: page.sections[0].localizations }],
-    })).status).toBe(403);
+    }), 'base-data change');
 
     // Foreign-locale overlay change: 403.
-    expect((await editor.patch(u(orgId, `/pages/${pageId}`), {
+    expectGrantDenied(await editor.patch(u(orgId, `/pages/${pageId}`), {
       sections: [{ sectionId, type: 'hero', data: page.sections[0].data, localizations: { ...page.sections[0].localizations, es: { heading: 'Hola' } } }],
-    })).status).toBe(403);
+    }), 'foreign-locale overlay');
 
     // Page chrome + structure: 403.
-    expect((await editor.patch(u(orgId, `/pages/${pageId}`), { title: 'New title' })).status).toBe(403);
-    expect((await editor.patch(u(orgId, `/pages/${pageId}`), { sections: [] })).status).toBe(403);
+    expectGrantDenied(await editor.patch(u(orgId, `/pages/${pageId}`), { title: 'New title' }), 'title change');
+    expectGrantDenied(await editor.patch(u(orgId, `/pages/${pageId}`), { sections: [] }), 'structure change');
+
+    // …and none of the refusals wrote: the persisted page still holds the base + es text.
+    const persisted = (await owner.get(u(orgId, `/pages/${pageId}`))).body;
+    expect(persisted.title).toBe('Home');
+    expect(persisted.sections[0]!.data.heading).toBe('Welcome');
+    expect(persisted.sections[0]!.localizations?.es?.heading).toBe('Bienvenido');
 
     // Workflow transitions: 403 (overlay-only grant).
-    expect((await editor.post(u(orgId, `/pages/${pageId}/submit`))).status).toBe(403);
+    expectGrantDenied(await editor.post(u(orgId, `/pages/${pageId}/submit`)), 'submit');
 
     // Base-content side doors are CLOSED too (review finding): page create
     // and every shared-section write are 403 for a grant-holder.
-    expect((await editor.post(u(orgId, '/pages'), { title: 'Rogue' })).status).toBe(403);
-    expect((await editor.post(u(orgId, '/shared-sections'), { name: 'Rogue', type: 'cta', data: { label: 'x' } })).status).toBe(403);
+    expectGrantDenied(await editor.post(u(orgId, '/pages'), { title: 'Rogue' }), 'page create');
+    expectGrantDenied(await editor.post(u(orgId, '/shared-sections'), { name: 'Rogue', type: 'cta', data: { label: 'x' } }), 'shared-section create');
 
-    // AI translate: granted locale OK-or-503 (provider absent), foreign 403.
+    // AI translate: granted locale OK-or-503 (provider absent — an honest ceiling), foreign 403.
     const xl = await editor.post(u(orgId, '/translate-section'), { sectionType: 'hero', data: { heading: 'Welcome' }, targetLocale: 'pt-BR' });
     expect([200, 503]).toContain(xl.status);
-    expect((await editor.post(u(orgId, '/translate-section'), { sectionType: 'hero', data: { heading: 'Welcome' }, targetLocale: 'es' })).status).toBe(403);
+    expectGrantDenied(await editor.post(u(orgId, '/translate-section'), { sectionType: 'hero', data: { heading: 'Welcome' }, targetLocale: 'es' }), 'foreign translate');
 
     // Empty locale list removes the grant → full editor behavior returns.
     const cleared = await owner.put(u(orgId, '/locale-grants'), { subject: editorSubject, locales: [] });
@@ -154,7 +193,7 @@ describe('D2 — per-locale publish state', () => {
   it('withholds a draft locale from delivery (RFC 0103 fallback) and restores on publish', async () => {
     const { owner, orgId } = await ownerWithEditor();
     const { pageId, slug } = await localizedDraft(owner, orgId);
-    await owner.post(u(orgId, `/pages/${pageId}/publish`));
+    expect((await owner.post(u(orgId, `/pages/${pageId}/publish`))).status).toBe(200);
 
     // Baseline: pt-BR served.
     const before = await owner.get(u(orgId, `/pages/by-slug/${slug}`), { 'accept-language': 'pt-BR' });
@@ -163,7 +202,7 @@ describe('D2 — per-locale publish state', () => {
     // Unpublish pt-BR → falls back to base; es unaffected.
     const un = await owner.post(u(orgId, `/pages/${pageId}/locales/pt-BR/unpublish`));
     expect(un.status, JSON.stringify(un.body)).toBe(200);
-    expect(un.body.localePublishState['pt-BR']).toBe('draft');
+    expect(un.body.localePublishState?.['pt-BR']).toBe('draft');
 
     const after = await owner.get(u(orgId, `/pages/by-slug/${slug}`), { 'accept-language': 'pt-BR' });
     expect(after.body.page.sections[0].data.heading).toBe('Welcome'); // withheld → base
@@ -210,8 +249,8 @@ describe('locale-grants/mine — the translator self-read (ADR 0592 §2 / CMSLU-
     // The grantee sees exactly their own grant.
     const mine = await editor.get(u(orgId, '/locale-grants/mine'));
     expect(mine.status).toBe(200);
-    expect(mine.body.grant.subject).toBe(editorSubject);
-    expect(mine.body.grant.locales).toEqual(['pt-BR']);
+    expect(mine.body.grant?.subject).toBe(editorSubject);
+    expect(mine.body.grant?.locales).toEqual(['pt-BR']);
 
     // A DIFFERENT member never sees the grantee's grant through /mine —
     // the read is self-scoped by construction (no subject parameter).
@@ -231,7 +270,7 @@ describe('locale-grants/mine — the translator self-read (ADR 0592 §2 / CMSLU-
     try {
       const mine = await editor.get(u(orgId, '/locale-grants/mine'));
       expect(mine.status, JSON.stringify(mine.body)).toBe(200);
-      expect(mine.body.grant.locales).toEqual(['es']);
+      expect(mine.body.grant?.locales).toEqual(['es']);
     } finally {
       if (loc) await saveConfig({ ...loc, status: 'on' }, 'test');
     }
@@ -244,8 +283,9 @@ describe('ADR 0592 §9 — grant lifecycle hygiene (CMSL-3 / CMSL-7 / CMSL-8)', 
     await owner.put(u(orgId, '/language-settings'), { supportedLocales: ['pt-BR'] });
     const bad = await owner.put(u(orgId, '/locale-grants'), { subject: editorSubject, locales: ['pt-BR', 'de'] });
     expect(bad.status, JSON.stringify(bad.body)).toBe(400);
-    expect(bad.body.details?.unsupported).toEqual(['de']);
-    expect(bad.body.details?.supportedLocales).toEqual(['pt-BR']);
+    const badEnv = assertFlatErrorEnvelope(bad.body, 'CMSL-7 refusal');
+    expect(badEnv.details?.unsupported).toEqual(['de']);
+    expect(badEnv.details?.supportedLocales).toEqual(['pt-BR']);
     // The configured locale alone is accepted.
     const ok = await owner.put(u(orgId, '/locale-grants'), { subject: editorSubject, locales: ['pt-BR'] });
     expect(ok.status, JSON.stringify(ok.body)).toBe(200);
@@ -258,14 +298,14 @@ describe('ADR 0592 §9 — grant lifecycle hygiene (CMSL-3 / CMSL-7 / CMSL-8)', 
     expect(put.status).toBe(200);
     const created = await owner.post(u(orgId, '/pages'), { title: 'Probe page', sections: [] });
     expect(created.status).toBe(201);
-    const pageId = created.body.pageId as string;
+    const pageId = created.body.pageId;
     const loc = getToggleDefault('cms-localization');
     expect(loc).toBeTruthy();
     if (loc) await saveConfig({ ...loc, status: 'off' }, 'test');
     try {
       // Enforcement still bites with the toggle OFF (the fail-closed default):
       // a title PATCH is outside the grant, so the translator 403s.
-      expect((await editor.patch(u(orgId, `/pages/${pageId}`), { title: 'x' })).status).toBe(403);
+      expectGrantDenied(await editor.patch(u(orgId, `/pages/${pageId}`), { title: 'x' }), 'title under toggle OFF');
       // …a NON-empty grant write stays toggle-gated (404)…
       expect((await owner.put(u(orgId, '/locale-grants'), { subject: editorSubject, locales: ['es'] })).status).toBe(404);
       // …but REMOVAL is exempt: the stranded member can be freed.
@@ -291,8 +331,9 @@ describe('ADR 0592 §9 — grant lifecycle hygiene (CMSL-3 / CMSL-7 / CMSL-8)', 
     // Changing base to `es` would orphan the es overlay AS base — refused.
     const refused = await owner.put(u(orgId, '/language-settings'), { baseLocale: 'es', supportedLocales: [] });
     expect(refused.status, JSON.stringify(refused.body)).toBe(409);
-    expect(refused.body.error).toBe('conflict');
-    expect(refused.body.details?.offenders?.[0]?.kind).toBe('page');
+    const refusedEnv = assertFlatErrorEnvelope(refused.body, 'CMSL-8 refusal');
+    expect(refusedEnv.error).toBe('conflict');
+    expect((refusedEnv.details?.offenders as Array<{ kind: string }> | undefined)?.[0]?.kind).toBe('page');
 
     // Remove the offending overlay → the change is accepted.
     const page = created.body;
@@ -328,19 +369,19 @@ describe('translator surface save — composed against the real route (review F1
     // The FIXED translator payload: sections + expectedVersion, nothing else.
     const ok = await editor.patch(u(orgId, `/pages/${pageId}`), { sections, expectedVersion: page.version });
     expect(ok.status, JSON.stringify(ok.body)).toBe(200);
-    expect(ok.body.sections[0].localizations['pt-BR'].heading).toBe('Salvo pela superfície');
+    expect(ok.body.sections[0]!.localizations?.['pt-BR']?.heading).toBe('Salvo pela superfície');
 
     // The PRE-correction SPA echo (title/tags PRESENT, values unchanged):
     // refused — this is the composed defect the mocked witness missed.
     const echo = await editor.patch(u(orgId, `/pages/${pageId}`), {
       title: ok.body.title, sections: ok.body.sections, tags: ok.body.tags ?? [], expectedVersion: ok.body.version,
     });
-    expect(echo.status, JSON.stringify(echo.body)).toBe(403);
+    expectGrantDenied(echo, 'title/tags echo');
 
     // And an ACTUAL title/tags change stays refused (the guard is intact —
     // the fix moved the SPA payload, never the guard).
-    expect((await editor.patch(u(orgId, `/pages/${pageId}`), { title: 'Hacked', sections: ok.body.sections, expectedVersion: ok.body.version })).status).toBe(403);
-    expect((await editor.patch(u(orgId, `/pages/${pageId}`), { tags: ['rogue'], sections: ok.body.sections, expectedVersion: ok.body.version })).status).toBe(403);
+    expectGrantDenied(await editor.patch(u(orgId, `/pages/${pageId}`), { title: 'Hacked', sections: ok.body.sections, expectedVersion: ok.body.version }), 'title change');
+    expectGrantDenied(await editor.patch(u(orgId, `/pages/${pageId}`), { tags: ['rogue'], sections: ok.body.sections, expectedVersion: ok.body.version }), 'tags change');
   });
 });
 
@@ -358,34 +399,34 @@ describe('translator narrowing covers the AI-provenance stamps (review F4)', () 
       }],
     });
     expect(created.status, JSON.stringify(created.body)).toBe(201);
-    const pageId = created.body.pageId as string;
+    const pageId = created.body.pageId;
     await owner.put(u(orgId, '/locale-grants'), { subject: editorSubject, locales: ['es'] });
     const page = (await editor.get(u(orgId, `/pages/${pageId}`))).body;
-    const sec = page.sections[0];
+    const sec = page.sections[0]!;
     expect(sec.aiDrafted).toEqual({ es: '2026-08-20T00:00:00.000Z', fr: '2026-08-20T00:00:00.000Z' });
 
     // STRIP fr's stamp (overlay unchanged) → 403: laundering the review signal.
     const strip = await editor.patch(u(orgId, `/pages/${pageId}`), {
-      sections: [{ ...sec, aiDrafted: { es: sec.aiDrafted.es } }],
+      sections: [{ ...sec, aiDrafted: { es: sec.aiDrafted!.es } }],
       expectedVersion: page.version,
     });
-    expect(strip.status, JSON.stringify(strip.body)).toBe(403);
+    expectGrantDenied(strip, 'strip fr stamp');
 
     // FORGE fr's stamp (different value) → 403.
     const forge = await editor.patch(u(orgId, `/pages/${pageId}`), {
       sections: [{ ...sec, aiDrafted: { ...sec.aiDrafted, fr: '2026-08-21T09:00:00.000Z' } }],
       expectedVersion: page.version,
     });
-    expect(forge.status, JSON.stringify(forge.body)).toBe(403);
+    expectGrantDenied(forge, 'forge fr stamp');
 
     // Their OWN granted locale: a human edit clears the es stamp → 200 (the
     // legitimate clear the FE performs on typing).
     const ok = await editor.patch(u(orgId, `/pages/${pageId}`), {
-      sections: [{ ...sec, localizations: { ...sec.localizations, es: { heading: 'Hola revisada' } }, aiDrafted: { fr: sec.aiDrafted.fr } }],
+      sections: [{ ...sec, localizations: { ...sec.localizations, es: { heading: 'Hola revisada' } }, aiDrafted: { fr: sec.aiDrafted!.fr } }],
       expectedVersion: page.version,
     });
     expect(ok.status, JSON.stringify(ok.body)).toBe(200);
     expect(ok.body.sections[0].aiDrafted).toEqual({ fr: '2026-08-20T00:00:00.000Z' });
-    expect(ok.body.sections[0].localizations.fr.heading).toBe('Salut'); // untouched
+    expect(ok.body.sections[0]!.localizations?.fr?.heading).toBe('Salut'); // untouched
   });
 });

@@ -1,6 +1,12 @@
 /**
  * Backend pmToMarkdown twin tests (ADR 0334 4b) — the server-authoritative
- * serializer used by the export route. Mirrors the FE twin's coverage.
+ * serializer the document-editor export route uses (of-record: it serializes the
+ * SAVED canvas, never client content). Mirrors the FE twin's coverage; the FE
+ * tests exercise a different module, so these are this module's only unit tests.
+ *
+ * Sabotage-witnessed (grade-tests w14): dropping the deletion-mark strike, the
+ * nested-list indent, the GFM separator, the heading level, or the link / math /
+ * embed / image serialization each turns its case red.
  */
 import { describe, it, expect } from 'vitest';
 import { pmToMarkdown, type PMNode } from '../pmToMarkdown.js';

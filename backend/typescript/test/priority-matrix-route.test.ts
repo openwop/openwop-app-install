@@ -8,10 +8,21 @@
  *     the list owner can
  *   - status move (column change) with no workflow side effect
  *   - planning session → agenda contains the top idea (documents OFF ⇒ inline md)
+ *
+ * Sabotage-witnessed (grade-tests w15): removing the lists-route toggle gate, the
+ * config-authority branch, the org-scope check or the write-scope check in
+ * `loadListScoped`; the bogus-project 404; the rank sort; the status move; the
+ * top-N slice; the agenda sort; the documents compose branch (both ways) and
+ * the agenda content written to it; skipping the session CAS write; the
+ * schedule-row cascade in `deleteList`; the terminal-lane classification; and
+ * the clear-schedule 404 — each turns a case below red.
+ * Ceiling: "without firing a workflow" is not witnessable here — a PM board
+ * column binds no workflow and `moveIdeaStatus` discards kanban's trigger.
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { bootPlanningApp, makeClient, enableToggle, uniqEmail, type Client } from './planningHarness.js';
+import { __pmStoresForErasure } from '../src/features/priority-matrix/priorityMatrixService.js';
 
 let BASE = '';
 let closeApp: () => Promise<void>;
@@ -48,10 +59,13 @@ const LOW = { 'strategic-alignment': 1, roi: 1, urgency: 1, 'compliance-risk': 1
 describe('priority-matrix — toggle gating', () => {
   it('404s when the toggle is off', async () => {
     await enable('off');
-    const c = client();
-    await signup(c);
-    expect((await c.get(L)).status).toBe(404);
-    await enable('on');
+    try {
+      const c = client();
+      await signup(c);
+      expect((await c.get(L)).status).toBe(404);
+    } finally {
+      await enable('on'); // never leak a disabled toggle into a later (shuffled) case
+    }
   });
 });
 
@@ -101,7 +115,7 @@ describe('priority-matrix — ideas + weighted ranking', () => {
     expect(ranked[0].computedPriority).toBeGreaterThan(ranked[1].computedPriority);
   });
 
-  it('moves an idea through statuses without firing a workflow', async () => {
+  it('moves an idea through statuses and the new column persists', async () => {
     const { owner, orgId } = await ownerWithOrg();
     const list = (await owner.post(L, { orgId, name: 'Flow', presetId: 'weighted' })).body;
     const base = `${L}/${encodeURIComponent(list.id)}`;
@@ -109,7 +123,9 @@ describe('priority-matrix — ideas + weighted ranking', () => {
     const moved = await owner.patch(`${base}/ideas/${encodeURIComponent(idea.id)}/status`, { columnId: 'in-process' });
     expect(moved.status, JSON.stringify(moved.body)).toBe(200);
     expect(moved.body.columnId).toBe('in-process');
-    expect(moved.body.lastRunId).toBeUndefined();
+    // Persisted, not just echoed: the ranked read sees the idea in its new column.
+    const ideas = (await owner.get(`${base}/ideas`)).body.ideas as Array<{ card: { id: string }; status: { columnId: string } }>;
+    expect(ideas.find((i) => i.card.id === idea.id)?.status.columnId).toBe('in-process');
   });
 });
 
@@ -128,6 +144,8 @@ describe('priority-matrix — config authority', () => {
     const newSet = { aggregation: 'weighted-sum', criteria: [{ name: 'Only one', weight: 9, direction: 'benefit' }] };
     // Editor may read but not rewrite the scoring model.
     expect((await member.patch(`${L}/${encodeURIComponent(list.id)}`, { criteriaSet: newSet })).status).toBe(403);
+    // …and the refused write did not land: the preset's five criteria are intact.
+    expect((await owner.get(`${L}/${encodeURIComponent(list.id)}`)).body.criteriaSet.criteria).toHaveLength(5);
     // Owner (creator) can.
     const ok = await owner.patch(`${L}/${encodeURIComponent(list.id)}`, { criteriaSet: newSet });
     expect(ok.status, JSON.stringify(ok.body)).toBe(200);
@@ -156,8 +174,9 @@ describe('priority-matrix — cross-org isolation (project-scoped lists)', () =>
     // The member can't even see it (no existence leak) and can't add an idea.
     expect((await member.get(base)).status).toBe(404);
     expect((await member.post(`${base}/ideas`, { title: 'sneak' })).status).toBe(404);
+    expect((await owner.get(`${base}/ideas`)).body.ideas, 'the refused idea was not created').toHaveLength(0);
     // It also doesn't show up in their index.
-    expect((await member.get(L)).body.lists.map((x: any) => x.id)).not.toContain(listB.id);
+    expect((await member.get(L)).body.lists.map((x: { id: string }) => x.id)).not.toContain(listB.id);
     // The owner (tenant owner ⇒ scope in every org) can.
     expect((await owner.get(base)).status).toBe(200);
   });
@@ -220,8 +239,12 @@ describe('priority-matrix — planning session', () => {
     expect(patched.body.id).toBe(created.id);
     expect((patched.body.agendaMarkdown as string).indexOf('Lesser idea')).toBeLessThan((patched.body.agendaMarkdown as string).indexOf('Top idea'));
 
-    // Still ONE session — reorder mutates in place, no proliferation.
-    expect((await owner.get(`${base}/sessions`)).body.sessions).toHaveLength(1);
+    // Still ONE session — reorder mutates in place, no proliferation — and the STORED
+    // row carries the new order (not just the PATCH response).
+    const stored = (await owner.get(`${base}/sessions`)).body.sessions as Array<{ id: string; agendaMarkdown: string }>;
+    expect(stored).toHaveLength(1);
+    expect(stored[0].id).toBe(created.id);
+    expect(stored[0].agendaMarkdown.indexOf('Lesser idea')).toBeLessThan(stored[0].agendaMarkdown.indexOf('Top idea'));
     // A non-existent session id → 404.
     expect((await owner.patch(`${base}/sessions/psession-nope`, { sort: 'title' })).status).toBe(404);
   });
@@ -239,6 +262,11 @@ describe('priority-matrix — planning session', () => {
       expect(session.status, JSON.stringify(session.body)).toBe(201);
       // Composed (ADR 0053): the agenda is also persisted as a board-agenda document.
       expect(session.body.agendaDocumentId).toBeTruthy();
+      // …and the document really holds the agenda.
+      const doc = await owner.get(`/host/openwop-app/documents/orgs/${encodeURIComponent(orgId)}/documents/${encodeURIComponent(session.body.agendaDocumentId)}`);
+      expect(doc.status, JSON.stringify(doc.body)).toBe(200);
+      expect(doc.body.kind).toBe('board-agenda');
+      expect(doc.body.currentVersion?.content).toContain('Doc-backed idea');
     } finally {
       await setDocs('off'); // restore — the inline-fallback test above asserts OFF
     }
@@ -314,6 +342,9 @@ describe('priority-matrix — schedule status (ADR 0103)', () => {
     // …but cannot SET or CLEAR it (needs workspace:write → 403).
     expect((await viewer.put(`${base}/ideas/${encodeURIComponent(idea.id)}/schedule`, { targetDate: '2999-01-01' })).status).toBe(403);
     expect((await viewer.del(`${base}/ideas/${encodeURIComponent(idea.id)}/schedule`)).status).toBe(403);
+    // The refused PUT did not land.
+    const afterViewer = await owner.get(`${base}/schedule`);
+    expect(afterViewer.body.ideas.find((i: ScheduleIdea) => i.cardId === idea.id)?.state).toBe('unscheduled');
     // The owner can.
     expect((await owner.put(`${base}/ideas/${encodeURIComponent(idea.id)}/schedule`, { targetDate: '2999-01-01' })).status).toBe(200);
 
@@ -322,8 +353,12 @@ describe('priority-matrix — schedule status (ADR 0103)', () => {
     const orgB = (await owner.post('/host/openwop-app/orgs', { name: 'OrgB' })).body.orgId;
     const listB = (await owner.post(L, { orgId: orgB, name: 'B-only', presetId: 'weighted' })).body;
     const baseB = `${L}/${encodeURIComponent(listB.id)}`;
+    // An idea that really lives in list B — otherwise the PUT 404s on "idea not in this
+    // list" whatever the org gate does.
+    const ideaB = (await owner.post(`${baseB}/ideas`, { title: 'B item' })).body;
+    expect(ideaB.id).toBeTruthy();
     expect((await viewer.get(`${baseB}/schedule`)).status).toBe(404);
-    expect((await viewer.put(`${baseB}/ideas/${encodeURIComponent(idea.id)}/schedule`, { targetDate: '2999-01-01' })).status).toBe(404);
+    expect((await viewer.put(`${baseB}/ideas/${encodeURIComponent(ideaB.id)}/schedule`, { targetDate: '2999-01-01' })).status).toBe(404);
   });
 
   it('cascades schedule rows on list delete (no stale state leaks into a new list)', async () => {
@@ -332,9 +367,13 @@ describe('priority-matrix — schedule status (ADR 0103)', () => {
     const base = `${L}/${encodeURIComponent(list.id)}`;
     const idea = (await owner.post(`${base}/ideas`, { title: 'Dated' })).body;
     expect((await owner.put(`${base}/ideas/${encodeURIComponent(idea.id)}/schedule`, { targetDate: '2999-01-01' })).status).toBe(200);
+    const { schedules } = __pmStoresForErasure();
+    const rowsFor = async (): Promise<number> => (await schedules.list()).filter((r) => r.listId === list.id).length;
+    expect(await rowsFor(), 'the schedule row exists before the delete').toBe(1);
     // Delete the list (cascades board, scores, schedules, votes, sessions).
     expect((await owner.del(base)).status).toBe(204);
-    // The schedule read is now 404 (list gone) — the row did not survive.
     expect((await owner.get(`${base}/schedule`)).status).toBe(404);
+    // The 404 above is the deleted LIST; the cascade claim is the STORED row.
+    expect(await rowsFor(), 'the schedule row did not survive the list delete').toBe(0);
   });
 });

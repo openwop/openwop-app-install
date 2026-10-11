@@ -13,15 +13,22 @@
  * All three arms are asserted, including the legitimate 404 hide: pinning only
  * the failure arm would stay green if the component regressed to "always show
  * the error", and pinning only the hide is what let this through the first time.
+ *
+ * Sabotage-witnessed (w12 grade-tests): showing the control on a null grant, an
+ * inverted `checked`, a swallowed load error, and a checkbox in the error branch
+ * each turn a named case red.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import { ProfileMemoryTab } from '../ProfileMemoryTab.js';
+import type { ExtractionGrant } from '../memoryExtractionClient.js';
 
-const getExtractionGrant = vi.fn();
+// Typed against the real client signature, so a fixture that drifts from
+// `ExtractionGrant` fails `tsc` rather than passing as an untyped mock.
+const getExtractionGrant = vi.fn<() => Promise<ExtractionGrant | null>>();
 
 vi.mock('../memoryExtractionClient.js', () => ({
-  getExtractionGrant: (...a: unknown[]) => getExtractionGrant(...a),
+  getExtractionGrant: () => getExtractionGrant(),
   setExtractionGrant: vi.fn(),
 }));
 
@@ -57,8 +64,9 @@ describe('ConsentToggle — a failed read is not an absent feature', () => {
     getExtractionGrant.mockResolvedValue({ granted: true, updatedAt: '2026-07-25' });
     render(<ProfileMemoryTab />);
     expect(await screen.findByText(CONSENT_LABEL)).toBeTruthy();
-    expect(screen.getByRole('checkbox')).toBeTruthy();
-    expect((screen.getByRole('checkbox') as HTMLInputElement).checked).toBe(true);
+    const box = screen.getByRole('checkbox');
+    expect(box).toBeInstanceOf(HTMLInputElement);
+    expect(box instanceof HTMLInputElement && box.checked).toBe(true);
   });
 
   it('a non-404 failure surfaces the control as UNKNOWN — never hidden', async () => {

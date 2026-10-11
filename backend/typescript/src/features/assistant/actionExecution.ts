@@ -35,6 +35,8 @@ import { runNoticeAudience } from '../../notifications/runNoticeAudience.js';
 import { sanitizeFreeText } from '../../byok/textRedaction.js';
 import { createLogger } from '../../observability/logger.js';
 import { decidePendingAction, setPendingActionExecution, type PendingAction, type PendingActionKind } from './assistantService.js';
+import { credentialStatusFor } from '../connections/connectionsService.js';
+import { getProvider } from '../connections/providerRegistry.js';
 
 const log = createLogger('features.assistant.execution');
 
@@ -123,11 +125,69 @@ function describeAction(action: PendingAction): string {
   return `${action.kind}: "${head}"${to ? ` → ${to}` : ''}`;
 }
 
-const EXEC_WORKFLOW_BY_KIND: Record<Exclude<PendingActionKind, 'nudge' | 'servicedesk.reply'>, string> = {
+type ProviderActionKind = Exclude<PendingActionKind, 'nudge' | 'servicedesk.reply'>;
+
+const EXEC_WORKFLOW_BY_KIND: Record<ProviderActionKind, string> = {
   'email.send': 'assistant.action.email-send',
   'calendar.invite': 'assistant.action.calendar-invite',
   'calendar.reschedule': 'assistant.action.calendar-reschedule',
 };
+
+/**
+ * The Google WRITE scope group each provider kind needs, by the registry's group
+ * key. The scope strings themselves stay in `providerRegistry.ts` (the SSoT the
+ * "Grant write access" consent requests); this map only says which group a kind
+ * uses, and what Google's consent screen calls it.
+ */
+const WRITE_GROUP_BY_KIND: Record<ProviderActionKind, { group: string; consentLine: string }> = {
+  'email.send': { group: 'gmail.send', consentLine: 'Send email on your behalf' },
+  'calendar.invite': { group: 'calendar.events', consentLine: 'View and edit events on all your calendars' },
+  'calendar.reschedule': { group: 'calendar.events', consentLine: 'View and edit events on all your calendars' },
+};
+
+function writeScopesForKind(kind: ProviderActionKind): string[] {
+  const { group } = WRITE_GROUP_BY_KIND[kind];
+  return getProvider('google')?.scopes.write?.find((g) => g.key === group)?.scopes ?? [];
+}
+
+/** Where a user manages their OWN connections (the profile tab renders `ConnectionsManager`). */
+const OWN_CONNECTIONS_PATH = '/profile?tab=connections';
+
+/**
+ * The approver's way out, in the words the UI uses. A failed send used to end in
+ * "Something went wrong. Check the server logs." while Google had named the cause
+ * exactly (`ACCESS_TOKEN_SCOPE_INSUFFICIENT`, MEASURED on prod run 8ed3c3e7,
+ * 2026-10-09). Each status gets numbered steps the user can follow without help.
+ * The labels match `features/connections/i18n/en.ts` ("Connect {{label}}",
+ * "Reconnect", "Grant write access").
+ */
+export function credentialFixSteps(kind: ProviderActionKind, status: 'missing' | 'expired' | 'insufficient_scope'): string {
+  const { consentLine } = WRITE_GROUP_BY_KIND[kind];
+  const what = kind === 'email.send' ? 'send email' : 'change your calendar';
+  const open = `1) open Profile → Connections (${OWN_CONNECTIONS_PATH})`;
+  const grant = `click “Grant write access”, then on Google's screen tick “${consentLine}” and click Continue`;
+  const retry = 'ask your assistant to do it again';
+  switch (status) {
+    case 'missing':
+      return `Google is not connected for your account. To fix it: ${open}; 2) click “Connect Google Workspace” and sign in; 3) on the new Google Workspace row, ${grant}; 4) ${retry}.`;
+    case 'expired':
+      return `your Google connection has expired. To fix it: ${open}; 2) on the Google Workspace row, click “Reconnect” and sign in; 3) if “Grant write access” then appears on that row, ${grant}; 4) ${retry}.`;
+    case 'insufficient_scope':
+      return `your Google connection is not allowed to ${what}. To fix it: ${open}; 2) on the Google Workspace row, ${grant}; 3) ${retry}.`;
+  }
+}
+
+/** The receipt reason for a run that DID dispatch and then failed. A 401/403 from
+ *  the provider is a credential problem the user can fix, so it gets the steps;
+ *  anything else keeps the bare status. Scopes can be revoked at Google after the
+ *  pre-dispatch check, which is why this path still needs them. */
+export function runFailureReason(kind: ProviderActionKind, run: { status: string; error?: { code: string; message: string } } | null): string {
+  if (!run) return 'the send run did not complete';
+  const http = run.error?.code === 'send_failed' ? /\bHTTP (401|403)\b/.exec(run.error.message)?.[1] : undefined;
+  if (http === '403') return `Google refused it (HTTP 403): ${credentialFixSteps(kind, 'insufficient_scope')}`;
+  if (http === '401') return `Google refused it (HTTP 401): ${credentialFixSteps(kind, 'expired')}`;
+  return `the send run ended \`${run.status}\``;
+}
 
 /**
  * Boot-time: register the three execution workflows CHAIN-BACKED (WF-COS-1),
@@ -296,7 +356,39 @@ export async function executeApprovedAction(
     return null;
   }
 
-  const workflowId = EXEC_WORKFLOW_BY_KIND[action.kind];
+  // The send's credential, checked BEFORE dispatch. The header above promised
+  // "fails closed when write re-consent was never granted", and nothing did: a
+  // read-only Google token went to Gmail, and Gmail refused it (prod run
+  // 8ed3c3e7, 2026-10-09). `credentialStatusFor` is the ONE answer the RFC 0199
+  // credential gate and the node's own token fetch share, so this cannot pass a
+  // connection the send would not get. No run is started on a refusal, so the
+  // receipt carries steps instead of a run link.
+  const requiredScopes = writeScopesForKind(action.kind);
+  let credential: Awaited<ReturnType<typeof credentialStatusFor>> | undefined;
+  try {
+    credential = await credentialStatusFor({
+      tenantId,
+      provider: 'google',
+      scopes: requiredScopes,
+      ...(decidedByUserId !== undefined ? { actingUserId: decidedByUserId } : {}),
+    });
+  } catch (err) {
+    // The check is the early, explainable refusal, not the authority: the run's
+    // own egress seam still resolves the credential and Google still decides. A
+    // failed CHECK therefore dispatches as before rather than failing a send that
+    // might be fine.
+    log.warn('action_execution_credential_check_failed', { actionId: action.actionId, error: err instanceof Error ? err.message : String(err) });
+  }
+  if (requiredScopes.length === 0 || (credential !== undefined && credential.status !== 'ok')) {
+    const status = credential === undefined || credential.status === 'ok' ? 'missing' : credential.status;
+    log.warn('action_execution_credential_refused', { actionId: action.actionId, kind: action.kind, status, requiredScopes });
+    await decidePendingAction(tenantId, action.actionId, { status: 'failed' });
+    await notifyActionFailed(tenantId, action, decidedByUserId, { reason: credentialFixSteps(action.kind, status) });
+    return null;
+  }
+
+  const kind: ProviderActionKind = action.kind;
+  const workflowId = EXEC_WORKFLOW_BY_KIND[kind];
   const runId = await startWorkflowRun(deps, {
     tenantId,
     workflowId,
@@ -335,10 +427,7 @@ export async function executeApprovedAction(
         // evidence, so this receipt DOES carry the `/runs/<id>` link. `run` may
         // be null here (the row vanished) — say `did not complete` rather than
         // inventing a status.
-        await notifyActionFailed(tenantId, action, decidedByUserId, {
-          reason: run ? `the send run ended \`${run.status}\`` : 'the send run did not complete',
-          runId,
-        });
+        await notifyActionFailed(tenantId, action, decidedByUserId, { reason: runFailureReason(kind, run), runId });
       }
     })().catch((err) => log.warn('action_terminal_projection_failed', { runId, error: String(err) }));
   });

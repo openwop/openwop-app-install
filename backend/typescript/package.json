@@ -1,6 +1,6 @@
 {
   "name": "@openwop/app-server",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "description": "OpenWOP application backend — Cloud Run TypeScript host implementing the v1.1 wire contract.",
   "type": "module",
@@ -52,6 +52,7 @@
     "markdown-it-footnote": "^4.0.0",
     "nodemailer": "^10.0.12",
     "officeparser": "^7.2.1",
+    "pdfjs-dist": "6.2.108",
     "pdfkit": "^0.19.1",
     "pg": "^8.20.0",
     "pg-connection-string": "2.14.0",

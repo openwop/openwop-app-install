@@ -35,6 +35,29 @@
  * the closed v2 record's key set, not by the helper. `adr0670-v2-advert-
  * validates` holds the full-schema validation; this file is about AGREEMENT
  * between two majors and two implementations, which that one cannot see.
+ *
+ * ADR 0812 P4 — THE V1 ORACLE IS GONE. `buildAdvertisement` is deleted, so the
+ * legs that compared each v2 facet with the corpus projection of its v1 owner
+ * (shared-facet equality, the v1 `supported`-seat census, the under-projection
+ * ledger) have nothing left to compare against and were removed. What survives
+ * is everything that needs no v1 document: the corpus oracle on literals, the
+ * local mirror's agreement with it (on the v2 document and on literal inputs),
+ * the v2 fixed point, the closed-record key set, the subChains owner, and the
+ * unspliceable-payload judgement (which reads the vendored v1 SCHEMA, not the
+ * builder). The two ledgers those removed legs held are recorded in ADR 0858
+ * as of ADR 0812 P4, so the open decisions are not lost with their detector:
+ *
+ *   Deliberate shape changes (v2 differs from projected v1 on purpose):
+ *     - aiProviders.authModes — v1 a per-provider MAP, v2 a flat mode
+ *       VOCABULARY; the map rides the `openwop-app.ai-providers` extension.
+ *     - aiProviders.selfHosted — v1 the LIST of self-hosted provider ids, v2 a
+ *       BOOLEAN; the ids ride `providers`.
+ *   Known under-projection (v1 facets with a declared v2 seat major 2 does not
+ *   fill; each needs a v2-shape decision):
+ *     aiProviders.byok, aiProviders.policies, aiProviders.imageGeneration,
+ *     aiProviders.videoGeneration, aiProviders.speechSynthesis,
+ *     aiProviders.realtimeVoice, aiProviders.maxInlineMediaBytes,
+ *     envelopes.reliability.
  */
 import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
@@ -44,7 +67,7 @@ import {
   stripSupported as corpusStripSupported,
   carriesUnspliceablePayload,
 } from '@openwop/openwop-conformance/src/lib/v2-projection.js';
-import { buildAdvertisement, buildV2Advertisement, stripSupported as hostStripSupported } from '../src/routes/discovery.js';
+import { buildV2Advertisement, stripSupported as hostStripSupported } from '../src/routes/discovery.js';
 import { MAX_SUB_CHAIN_DEPTH } from '../src/host/workflowChainPackLoader.js';
 import { loadConfigFromEnv } from '../src/index.js';
 
@@ -55,36 +78,6 @@ const isRec = (v: unknown): v is Rec => v !== null && typeof v === 'object' && !
 
 /** The four seats every v2 record carries that are NOT facets (`capabilities.md` §3). */
 const RECORD_ENVELOPE = new Set(['status', 'since', 'until', 'witness']);
-
-/**
- * Shared facets whose v2 value DELIBERATELY differs from the projected v1 value.
- * Each is a real shape change recorded in `discovery.ts`, not a tolerance: the
- * staleness leg below reds the moment an entry stops differing, so this list
- * cannot quietly outlive its reasons.
- */
-const DELIBERATE_SHAPE_CHANGES: Readonly<Record<string, string>> = {
-  'aiProviders.authModes': 'v1 is a per-provider MAP, v2 a flat mode VOCABULARY; the map rides the `openwop-app.ai-providers` extension',
-  'aiProviders.selfHosted': 'v1 is the LIST of self-hosted provider ids, v2 a BOOLEAN; the ids ride `providers`',
-};
-
-/**
- * v1 facets the v2 record DECLARES a seat for and this host does not fill.
- * Under-advertising, which `discovery.ts` itself calls "not the safe direction"
- * — but each needs a decision about its v2 shape, which is not this file's to
- * make. Pinned as a SHRINK-ONLY ledger so the set cannot grow unnoticed (a new
- * v1 facet with a v2 home reds here) and an entry that gets projected must be
- * deleted in the same change.
- */
-const KNOWN_UNPROJECTED: ReadonlySet<string> = new Set([
-  'aiProviders.byok',
-  'aiProviders.policies',
-  'aiProviders.imageGeneration',
-  'aiProviders.videoGeneration',
-  'aiProviders.speechSynthesis',
-  'aiProviders.realtimeVoice',
-  'aiProviders.maxInlineMediaBytes',
-  'envelopes.reliability',
-]);
 
 function readSchema(...segments: string[]): Rec {
   const parsed: unknown = JSON.parse(readFileSync(join(ROOT, 'schemas', ...segments), 'utf8'));
@@ -97,21 +90,6 @@ function schemaProperties(schema: Rec): Rec {
   return isRec(props) ? props : {};
 }
 
-function countSupportedSeats(value: unknown): number {
-  if (Array.isArray(value)) return value.reduce<number>((n, v) => n + countSupportedSeats(v), 0);
-  if (!isRec(value)) return 0;
-  return Object.entries(value).reduce((n, [k, v]) => n + (k === 'supported' ? 1 : 0) + countSupportedSeats(v), 0);
-}
-
-/** The v1 document carries each family twice — at the root and mirrored under `capabilities`. Either is the owner's output. */
-function v1FamilyRecord(v1: Rec, family: string): Rec | undefined {
-  const atRoot = v1[family];
-  if (isRec(atRoot)) return atRoot;
-  const caps = v1['capabilities'];
-  const mirrored = isRec(caps) ? caps[family] : undefined;
-  return isRec(mirrored) ? mirrored : undefined;
-}
-
 /** A v2 FAMILY record is an object carrying the record envelope — which excludes `implementation`, `extensions` and the metadata keys. */
 function v2Families(v2: Rec): [string, Rec][] {
   const out: [string, Rec][] = [];
@@ -121,17 +99,15 @@ function v2Families(v2: Rec): [string, Rec][] {
   return out;
 }
 
-function buildBoth(): { v1: Rec; v2: Rec } {
-  const config = loadConfigFromEnv();
-  return { v1: buildAdvertisement(config), v2: buildV2Advertisement(config) };
+function buildV2(): Rec {
+  return buildV2Advertisement(loadConfigFromEnv());
 }
 
 const ENV_KEYS = ['OPENWOP_CHAIN_SUBCHAINS', 'OPENWOP_TEST_TRIGGER_COMPACTION'] as const;
 const savedEnv = new Map<string, string | undefined>();
 
 beforeAll(() => {
-  // `buildAdvertisement` reads the storage tier (`workspaceAdvertisable`), so an
-  // unset DSN throws before a single facet is compared.
+  // The storage-family records read the configured tier.
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   for (const k of ENV_KEYS) savedEnv.set(k, process.env[k]);
 });
@@ -162,26 +138,15 @@ describe('WHD-7 — the corpus helper is really the thing being compared against
       inner: {},
     });
   });
-
-  it("this host's v1 document is a real workload for it — close to a hundred `supported` seats, none after", () => {
-    const { v1 } = buildBoth();
-    // ADR 0670 measured 168. The floor is a vacuity guard, not a census: what
-    // matters is that the comparison below is over a document that HAS seats.
-    // 100 → 90 in ADR 0858 P3: MEASURED 99 once v1's `queueBus.stream:
-    // {supported:false}` went with the shared storage builder (v1 is retired on
-    // prod, ADR 0812, so its seat count only falls from here).
-    expect(countSupportedSeats(v1)).toBeGreaterThan(90);
-    expect(countSupportedSeats(corpusStripSupported(v1))).toBe(0);
-  });
 });
 
 describe("WHD-7 — discovery.ts's local stripSupported() is a mirror of the corpus function", () => {
-  it('agrees on the whole v1 document this host actually serves', () => {
-    const { v1 } = buildBoth();
-    expect(hostStripSupported(v1)).toEqual(corpusStripSupported(v1));
+  it('agrees on the whole v2 document this host actually serves', () => {
+    const v2 = buildV2();
+    expect(hostStripSupported(v2)).toEqual(corpusStripSupported(v2));
   });
 
-  it('agrees on the inputs the v1 document does not happen to contain — arrays of records and required[]', () => {
+  it('agrees on the inputs the served document does not happen to contain — arrays of records and required[]', () => {
     // The mirror used to recurse into objects only. No advert value carries a
     // `supported` inside an array TODAY, which is exactly why the gap was
     // invisible: agreement on the inputs you have is not agreement.
@@ -195,66 +160,29 @@ describe("WHD-7 — discovery.ts's local stripSupported() is a mirror of the cor
   });
 });
 
-describe('WHD-7 — every family this host advertises at BOTH majors agrees with the corpus projection of its v1 record', () => {
+describe('WHD-7 — the v2 document under the corpus projection', () => {
   it('the v2 document is a fixed point of the projection — projecting it again changes nothing', () => {
     // The `supported: true` class. `adr0670` walks for the key; this asks the
     // corpus function the same question, so a change to what the corpus strips
     // (it already reaches into `required[]`) arrives here without an edit.
-    const { v2 } = buildBoth();
+    const v2 = buildV2();
     expect(corpusStripSupported(v2)).toEqual(v2);
   });
 
-  it('shared facets are EQUAL to the projected v1 facet, except the recorded shape changes', () => {
-    const { v1, v2 } = buildBoth();
-    const compared: string[] = [];
-    const familiesCompared = new Set<string>();
-    const drift: string[] = [];
-    const differing = new Set<string>();
-    for (const [family, record] of v2Families(v2)) {
-      const v1Record = v1FamilyRecord(v1, family);
-      if (v1Record === undefined) continue; // a v2-born family (`runList`, `packs`…) has nothing to agree with
-      const projected = corpusStripSupported(v1Record);
-      for (const [facet, v2Value] of Object.entries(record)) {
-        if (RECORD_ENVELOPE.has(facet) || !(facet in projected)) continue;
-        const id = `${family}.${facet}`;
-        compared.push(id);
-        familiesCompared.add(family);
-        if (JSON.stringify(v2Value) === JSON.stringify(projected[facet])) continue;
-        differing.add(id);
-        if (!(id in DELIBERATE_SHAPE_CHANGES)) {
-          drift.push(`${id}: v2 advertises ${JSON.stringify(v2Value)}, the corpus projection of the v1 record is ${JSON.stringify(projected[facet])}`);
-        }
-      }
-    }
-    expect(drift, `hand-written v2 facets that DISAGREE with their v1 owner — derive them, or record the shape change with its reason:\n${drift.join('\n')}`).toEqual([]);
-
-    // Non-vacuity, pinned to literals: an empty comparison passes the leg above.
-    // MEASURED on 3da7df376+: 29 shared facets across these 11 families.
-    expect(compared.length, `only ${compared.length} shared facets were compared: ${compared.join(', ')}`).toBeGreaterThanOrEqual(29);
-    expect([...familiesCompared]).toEqual(expect.arrayContaining([
-      'limits', 'webhooks', 'prompts', 'secrets', 'modelCapabilities', 'aiProviders',
-      'memory', 'envelopes', 'replay', 'feedback', 'workflowChainPacks',
-    ]));
-
-    // Staleness: an allowance that no longer differs is a licence nobody holds.
-    const stale = Object.keys(DELIBERATE_SHAPE_CHANGES).filter((id) => compared.includes(id) && !differing.has(id));
-    expect(stale, `these now AGREE with v1 — delete them from DELIBERATE_SHAPE_CHANGES: ${stale.join(', ')}`).toEqual([]);
-  });
-
-  it('a nested v1 facet arrives at major 2 projected, not copied — memory.compaction', () => {
-    // The default document has no v1 facet that is itself a `{supported, …}`
-    // record with payload AND has a v2 home, except this one, which is
-    // env-gated off. Turn it on so the nested arm is exercised by a real owner.
+  it('memory.compaction follows its owner at major 2 — projected when on, absent when off', () => {
+    // The nested `{supported, …}` arm, exercised by a real owner. Before ADR 0812
+    // P4 this compared with the v1 record; the v2 halves are what remain.
     process.env.OPENWOP_TEST_TRIGGER_COMPACTION = 'true';
-    const { v1, v2 } = buildBoth();
-    const v1Memory = v1FamilyRecord(v1, 'memory');
-    expect(isRec(v1Memory) && isRec(v1Memory['compaction']) && v1Memory['compaction']['supported'], 'the v1 owner must carry the nested seat, or this leg proves nothing').toBe(true);
-    const v2Memory = v2['memory'];
-    expect(isRec(v2Memory) ? v2Memory['compaction'] : undefined).toEqual({ trigger: 'both' });
+    const on = buildV2()['memory'];
+    expect(isRec(on) ? on['compaction'] : undefined).toEqual({ trigger: 'both' });
+    delete process.env.OPENWOP_TEST_TRIGGER_COMPACTION;
+    const off = buildV2()['memory'];
+    expect(isRec(off), 'the family itself stays — only the facet goes').toBe(true);
+    expect(isRec(off) && 'compaction' in off).toBe(false);
   });
 
   it('carries no facet the closed v2 record does not declare — the `deferredParameters` class', () => {
-    const { v1, v2 } = buildBoth();
+    const v2 = buildV2();
     const v2Schema = schemaProperties(readSchema('v2', 'capabilities.schema.json'));
     const leaked: string[] = [];
     let checked = 0;
@@ -264,60 +192,30 @@ describe('WHD-7 — every family this host advertises at BOTH majors agrees with
       // A family whose record moved behind a `$ref` would make `declared` empty
       // and every facet "leaked" — loud, which is the right way round.
       expect(Object.keys(declared), `${family}: the v2 schema declares no inline properties`).toEqual(expect.arrayContaining(['status', 'witness']));
-      const v1Record = v1FamilyRecord(v1, family);
       for (const facet of Object.keys(record)) {
         checked++;
         if (facet in declared) continue;
         const origin = facet === 'supported'
-          ? 'v2 retired the flag (RFC 0192): presence of the record is the claim — route the v1 record through stripSupported()'
-          : v1Record !== undefined && facet in v1Record
-            ? 'it IS on the v1 record, so this is a v1 facet copied across — no strip removes those, only a named pick does'
-            : 'the v2 record declares no such facet, and the v1 record does not carry it either';
+          ? 'v2 retired the flag (RFC 0192): presence of the record is the claim — route the owner through stripSupported()'
+          : 'the closed v2 record declares no such facet — pick the declared facets by name, never spread an owner';
         leaked.push(`${family}.${facet} — ${origin}`);
       }
     }
     expect(leaked, leaked.join('\n')).toEqual([]);
     expect(checked).toBeGreaterThan(60);
   });
-
-  it('under-projection is a shrink-only ledger — a v1 facet with a declared v2 seat that major 2 does not fill', () => {
-    const { v1, v2 } = buildBoth();
-    const v2Schema = schemaProperties(readSchema('v2', 'capabilities.schema.json'));
-    const found: string[] = [];
-    const nowProjected: string[] = [];
-    for (const [family, record] of v2Families(v2)) {
-      const v1Record = v1FamilyRecord(v1, family);
-      const familySchema = v2Schema[family];
-      if (v1Record === undefined || !isRec(familySchema)) continue;
-      const declared = schemaProperties(familySchema);
-      for (const facet of Object.keys(corpusStripSupported(v1Record))) {
-        if (!(facet in declared)) continue;
-        const id = `${family}.${facet}`;
-        if (facet in record) { if (KNOWN_UNPROJECTED.has(id)) nowProjected.push(id); } else found.push(id);
-      }
-    }
-    const unexpected = found.filter((id) => !KNOWN_UNPROJECTED.has(id));
-    expect(unexpected, `v1 advertises these, the v2 record has a seat for them, and major 2 says nothing — project them (through stripSupported) or, if the v2 shape genuinely needs a decision, add them to KNOWN_UNPROJECTED with that decision's owner: ${unexpected.join(', ')}`).toEqual([]);
-    expect(nowProjected, `these are projected now — delete them from KNOWN_UNPROJECTED: ${nowProjected.join(', ')}`).toEqual([]);
-    // The ledger is only evidence if the probe can see its entries at all.
-    expect(found.length, 'the probe found NONE of the known entries — it is not reading what it thinks it is').toBeGreaterThan(0);
-  });
 });
 
 describe('WHD-7 — workflowChainPacks.subChains, the fifth hand-written projection', () => {
-  it('is the v1 owner\'s record minus `supported` — maxDepth included', () => {
-    const { v1, v2 } = buildBoth();
-    const v1Record = v1FamilyRecord(v1, 'workflowChainPacks');
-    expect(isRec(v1Record) ? v1Record['subChains'] : undefined).toEqual({ supported: true, maxDepth: MAX_SUB_CHAIN_DEPTH });
+  it('is the owner\'s record minus `supported` — maxDepth included', () => {
+    const v2 = buildV2();
     const v2Record = v2['workflowChainPacks'];
     expect(isRec(v2Record) ? v2Record['subChains'] : undefined).toEqual({ maxDepth: MAX_SUB_CHAIN_DEPTH });
   });
 
   it('is WITHDRAWN at major 2 when the owner withdraws it — advertising a facet from-chain refuses is a false claim', () => {
     process.env.OPENWOP_CHAIN_SUBCHAINS = '0';
-    const { v1, v2 } = buildBoth();
-    const v1Record = v1FamilyRecord(v1, 'workflowChainPacks');
-    expect(isRec(v1Record) && 'subChains' in v1Record, 'the v1 owner must withdraw it, or this leg proves nothing').toBe(false);
+    const v2 = buildV2();
     const v2Record = v2['workflowChainPacks'];
     expect(isRec(v2Record), 'the family itself stays — only the facet goes').toBe(true);
     expect(isRec(v2Record) && 'subChains' in v2Record).toBe(false);
@@ -335,7 +233,7 @@ describe('WHD-7 — carriesUnspliceablePayload(): no advertised family is a bare
   });
 
   it('every family advertised at major 2 either splices, or names a seat for what it carried', () => {
-    const { v2 } = buildBoth();
+    const v2 = buildV2();
     const v1Schema = schemaProperties(readSchema('capabilities.schema.json'));
     const bare: string[] = [];
     let judged = 0;

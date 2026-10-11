@@ -10,6 +10,9 @@
  * ROUTE level, through `createApp`, because the registrations live in four different
  * features' `registerRoutes`; a service test would have to re-register them by hand and so
  * could not see a feature that forgot to.
+ *
+ * Witnessed (w13): renaming a registration key, or making any one feature's purge skip its
+ * delete, reds the cascade leg; widening the preview's scope to read reds the viewer leg.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -25,6 +28,7 @@ import { createList, getList } from '../src/features/priority-matrix/priorityMat
 import { createLedger, getLedger, listDeltas } from '../src/features/team-intent-ledger/ledgerStore.js';
 import { createDocument, getDocumentByIdForTenant } from '../src/features/documents/documentsService.js';
 import { getProject } from '../src/features/projects/projectsService.js';
+import { createMember } from '../src/host/accessControlService.js';
 
 let BASE = '';
 let server: http.Server;
@@ -44,24 +48,30 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res { status: number; body: any }
+/** Typed per call site: `T` names the body shape the leg reads; no `any`. */
+interface Res<T> { status: number; body: T }
 function client() {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
+  const call = async <T>(method: string, path: string, body?: unknown): Promise<Res<T>> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]!; }
-    return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) };
+    return { status: res.status, body: (res.status === 204 ? undefined : await res.json().catch(() => undefined)) as T };
   };
-  return { get: (p: string) => call('GET', p), post: (p: string, b?: unknown) => call('POST', p, b), del: (p: string) => call('DELETE', p) };
+  return {
+    get: <T>(p: string) => call<T>('GET', p),
+    post: <T>(p: string, b?: unknown) => call<T>('POST', p, b),
+    del: <T>(p: string) => call<T>('DELETE', p),
+  };
 }
+type Counts = Record<string, number>;
 
 const P = '/host/openwop-app/projects';
 
 async function projectWithDependents() {
   const c = client();
   expect((await c.post('/host/openwop-app/test/login', { email: `dep-${Date.now()}-${n++}@acme.test` })).status).toBe(201);
-  const orgId = (await c.post('/host/openwop-app/orgs', { name: 'Acme' })).body.orgId as string;
-  const created = await c.post(P, { orgId, name: 'Has dependents' });
+  const orgId = (await c.post<{ orgId: string }>('/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
+  const created = await c.post<{ id: string; tenantId: string }>(P, { orgId, name: 'Has dependents' });
   expect(created.status, JSON.stringify(created.body)).toBe(201);
   const project = (await getProject(created.body.tenantId, created.body.id))!;
   const tenantId = project.tenantId;
@@ -72,7 +82,7 @@ async function projectWithDependents() {
   const doc = await createDocument({ tenantId, orgId, title: 'Owned doc', kind: 'note', ownerSubject: owner, provenance: { producedBy: { kind: 'user', id: 'user:x' } }, createdBy: 'user:x' });
   // A control the cascade must NOT touch: an org document with no owner.
   const free = await createDocument({ tenantId, orgId, title: 'Org doc', kind: 'note', provenance: { producedBy: { kind: 'user', id: 'user:x' } }, createdBy: 'user:x' });
-  return { c, tenantId, project, canvas, list, ledger, doc, free };
+  return { c, tenantId, orgId, project, canvas, list, ledger, doc, free };
 }
 
 describe('ADR 0839 D2 — a project delete takes its dependents', () => {
@@ -81,19 +91,26 @@ describe('ADR 0839 D2 — a project delete takes its dependents', () => {
   });
 
   it('the delete preview names what will go, and a write is required to ask', async () => {
-    const { c, project } = await projectWithDependents();
-    const r = await c.get(`${P}/${project.id}/delete-preview`);
+    const { c, tenantId, orgId, project } = await projectWithDependents();
+    const r = await c.get<{ dependents: Counts }>(`${P}/${project.id}/delete-preview`);
     expect(r.status, JSON.stringify(r.body)).toBe(200);
     // teamLedger = the ledger row + its creation delta.
     expect(r.body.dependents).toEqual({ canvases: 1, documents: 1, entities: 0, priorityLists: 1, teamLedger: 2, teamLedgerSuggestions: 0 });
-    const stranger = client();
-    await stranger.post('/host/openwop-app/test/login', { email: `x-${Date.now()}-${n++}@acme.test` });
-    expect((await stranger.get(`${P}/${project.id}/delete-preview`)).status).toBe(404);
+    // A CO-TENANT org viewer: the project is org-visible, so they hold READ — and the preview
+    // still refuses them, because it needs WRITE. (A login in another tenant would 404 on
+    // existence and prove nothing about the scope — the w13 probe showed exactly that.)
+    const viewer = client();
+    const login = await viewer.post<{ user: { userId: string } }>('/host/openwop-app/test/login', { email: `x-${Date.now()}-${n++}@acme.test`, tenantId });
+    await createMember({ tenantId, orgId, subject: login.body.user.userId, displayName: 'V', roles: ['viewer'] });
+    expect((await viewer.get(`${P}/${project.id}`)).status, 'control: the viewer really can READ the project').toBe(200);
+    const refused = await viewer.get<{ error?: { code?: string } }>(`${P}/${project.id}/delete-preview`);
+    expect(refused.status, JSON.stringify(refused.body)).toBe(403);
+    expect(JSON.stringify(refused.body)).toContain('forbidden_scope');
   });
 
   it('BORN RED — the delete removes all four and reports them; an unowned row survives', async () => {
     const { c, tenantId, project, canvas, list, ledger, doc, free } = await projectWithDependents();
-    const del = await c.del(`${P}/${project.id}`);
+    const del = await c.del<{ dependentsDeleted: Counts }>(`${P}/${project.id}`);
     expect(del.status, JSON.stringify(del.body)).toBe(200);
     expect(del.body.dependentsDeleted).toEqual({ canvases: 1, documents: 1, entities: 0, priorityLists: 1, teamLedger: 2, teamLedgerSuggestions: 0 });
 

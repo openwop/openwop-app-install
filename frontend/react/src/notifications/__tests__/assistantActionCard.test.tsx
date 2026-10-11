@@ -11,6 +11,16 @@
  *    next approve binds to the NEW hash.
  *
  * `approvalErrorInfo` is NOT mocked — the reason→copy mapping is under test.
+ *
+ * Sabotage-witnessed (wave 11): skip the `event` rows, drop unknown keys, or bind a
+ * value to an href → D3 red; send no hash on claim (either inbox) or on edit, map
+ * `action_changed` to nothing, or skip the 409 re-read → D1/edit red; skip focus →
+ * focus case red; show the exclusive end or format the all-day date in the viewer's
+ * zone → all-day red (the zone is pinned so that half fails on any host); render a
+ * withheld card → withheld red; drop extras / the `""` marker → extras red.
+ * Double guards, recorded not "fixed": the edited hash reaches the card by BOTH the
+ * adopted edit response and the re-read; a non-pending id is refused by both the
+ * pending-list check and the absent card element.
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
@@ -32,17 +42,17 @@ const { toastSuccess, toastError, toastInfo } = vi.hoisted(() => ({
 }));
 vi.mock('../../ui/toast.js', () => ({ toast: { success: toastSuccess, error: toastError, info: toastInfo } }));
 
-import { ApprovalApiError } from '../../agents/approvalsClient.js';
+import { ApprovalApiError, type PendingApproval } from '../../agents/approvalsClient.js';
 import { ApprovalsInbox } from '../ApprovalsInbox.js';
 import { NeedsYouInbox } from '../NeedsYouInbox.js';
 
 const INVITE = {
   approvalId: 'ap-1',
   rosterId: 'r-cos', persona: 'Iris', workflowId: '',
-  kind: 'assistant-action' as const,
+  kind: 'assistant-action',
   actionId: 'act:1',
   proposal: 'calendar.invite: "Invite Dana"',
-  status: 'pending' as const,
+  status: 'pending',
   createdAt: '2026-10-07T00:00:00Z',
   action: {
     actionId: 'act:1',
@@ -61,7 +71,7 @@ const INVITE = {
       },
     },
   },
-};
+} satisfies PendingApproval;
 
 afterEach(cleanup);
 beforeEach(() => { vi.clearAllMocks(); listApprovalsByKind.mockResolvedValue([]); });
@@ -149,6 +159,7 @@ describe('UX Blocker — /inbox?approval=<id> lands ON the approval card', () =>
     render(<MemoryRouter><NeedsYouInbox focusApprovalId="ap-gone" onApprovalFocused={focused} /></MemoryRouter>);
     await screen.findByText('Q3 review');
     expect(focused).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(document.body);
   });
 });
 
@@ -156,10 +167,19 @@ describe('UX Blocker — an all-day invite shows the dates it covers', () => {
   it('formats a calendar date in UTC and shows the EXCLUSIVE end as the last day covered', async () => {
     const allDay = { ...INVITE, action: { ...INVITE.action, payload: { event: { summary: 'Offsite', start: { date: '2026-10-09' }, end: { date: '2026-10-10' } } } } };
     listApprovals.mockResolvedValue([allDay]);
-    render(<MemoryRouter><ApprovalsInbox /></MemoryRouter>);
-    await screen.findByText('Offsite');
-    // Both rows name the 9th: a one-day event, whatever the viewer's offset.
-    expect(screen.getAllByText(/Oct 9, 2026 \(all day\)/)).toHaveLength(2);
+    // Pin a NEGATIVE-offset viewer so the "format in UTC" half fails on any host
+    // (on a UTC runner a zone-less format would also read the 9th). Node re-reads
+    // TZ for Date and ICU on assignment; restored in finally.
+    const prevTZ = process.env.TZ;
+    process.env.TZ = 'America/New_York';
+    try {
+      render(<MemoryRouter><ApprovalsInbox /></MemoryRouter>);
+      await screen.findByText('Offsite');
+      // Both rows name the 9th: a one-day event, whatever the viewer's offset.
+      expect(screen.getAllByText(/Oct 9, 2026 \(all day\)/)).toHaveLength(2);
+    } finally {
+      if (prevTZ === undefined) delete process.env.TZ; else process.env.TZ = prevTZ;
+    }
   });
 });
 

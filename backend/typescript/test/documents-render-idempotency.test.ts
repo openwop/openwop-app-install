@@ -11,9 +11,13 @@
  *     per document).
  * Scratch exports (docx/epub/odt/latex) are TTL'd download-and-go and stay
  * per-call by design — this test does not cover them (stated non-coverage).
+ *
+ * Sabotage-witnessed (grade-tests w14): removing the `renderedTokens[format]`
+ * short-circuit reds the pdf, slides+sheet and F6 cases; removing the legacy-stamp
+ * branch reds LEGACY; merging the stale pre-render map instead of the fresh row reds
+ * F6; always rendering version 1 reds the per-version case.
  */
-import http from 'node:http';
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll } from 'vitest';
 import { createApp } from '../src/index.js';
 import { createOrg } from '../src/host/accessControlService.js';
 import {
@@ -23,16 +27,14 @@ import { listAssetsForTenant } from '../src/features/media/mediaService.js';
 
 const TENANT = 'org:doc-render-idem';
 let ORG = '';
-let server: http.Server;
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
-  const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', res); });
+  // createApp initialises persistence + the media store; renders run in-process, no listener.
+  await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   const org = await createOrg({ tenantId: TENANT, createdBy: 'u-1', name: 'Acme', ownerSubject: 'u-1' });
   ORG = org.orgId;
 });
-afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
 async function docWithContent(title: string): Promise<string> {
   const doc = await createDocument({ tenantId: TENANT, orgId: ORG, title, kind: 'doc', provenance: { producedBy: { kind: 'user', id: 'u-1' } }, createdBy: 'u-1' });

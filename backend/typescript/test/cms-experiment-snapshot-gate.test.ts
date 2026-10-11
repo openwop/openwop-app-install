@@ -20,6 +20,12 @@
  *      snapshot `'submit'` and the gate would refuse the one version it must
  *      allow. The `origin` promotion is what prevents that, and the
  *      "binds the APPROVED version" test below is what proves it.
+ *
+ * Sabotage-witnessed (/grade-tests w16): skipping `assertVariantSnapshotReviewed`
+ * (all origins, or only at START), refusing an unknown origin, dropping the
+ * dedupe-time `origin` PROMOTION in `snapshotPage`, ignoring the gate scope
+ * (`liveEditGateActive`), or resolving a null (holdout) versionId at START each
+ * reds the named cases.
  */
 
 import http from 'node:http';
@@ -31,6 +37,7 @@ import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { assignWeightedVariant } from '../src/host/variantAssignment.js';
 import * as cmsService from '../src/features/cms/cmsService.js';
+import { assertFlatErrorEnvelope } from './helpers/errorEnvelope.js';
 
 let BASE: string;
 let server: http.Server;
@@ -56,8 +63,16 @@ const setToggle = async (id: string, status: 'on' | 'off'): Promise<void> => {
 };
 const setGate = (status: 'on' | 'off'): Promise<void> => setToggle('cms-approval-gate', status);
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
-interface Res<T = any> { status: number; body: T }
+interface ApprovalRow { approvalId: string; kind?: string; pageId?: string }
+interface VersionRow { versionId: string; origin?: string; snapshot: { title: string } }
+interface Variant { key: string; versionId: string | null; weight: number }
+/** The success-body fields this file reads (error bodies go through `assertFlatErrorEnvelope`). */
+interface Body {
+  orgId: string; pageId: string; slug: string; status: string;
+  items: ApprovalRow[]; versions: VersionRow[];
+  experimentId: string; salt: string; variants: Variant[];
+}
+interface Res { status: number; body: Body }
 interface Client {
   get: (p: string) => Promise<Res>;
   post: (p: string, b?: unknown) => Promise<Res>;
@@ -72,8 +87,8 @@ function client(): Client {
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
-    return { status: res.status, body: out };
+    const out: unknown = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    return { status: res.status, body: out as Body };
   };
   return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), patch: (p, b) => call('PATCH', p, b) };
 }
@@ -86,7 +101,7 @@ async function ownerOrg(): Promise<{ c: Client; orgId: string }> {
   expect(login.status, JSON.stringify(login.body)).toBe(201);
   const org = await c.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
-  return { c, orgId: org.body.orgId as string };
+  return { c, orgId: org.body.orgId };
 }
 const cms = (orgId: string, s = ''): string => `/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}${s}`;
 const exps = (orgId: string, pageId: string, s = ''): string => cms(orgId, `/pages/${encodeURIComponent(pageId)}/experiments${s}`);
@@ -94,10 +109,10 @@ const exps = (orgId: string, pageId: string, s = ''): string => cms(orgId, `/pag
 const REJECTED = 'REJECTED CONTENT';
 const APPROVED = 'APPROVED CONTENT';
 
-async function pendingFor(c: Client, pageId: string): Promise<any> {
+async function pendingFor(c: Client, pageId: string): Promise<ApprovalRow | undefined> {
   const list = await c.get('/host/openwop-app/approvals?status=pending');
   expect(list.status).toBe(200);
-  return (list.body.items as any[]).find((a) => a.kind === 'content-publish' && a.pageId === pageId);
+  return list.body.items.find((a) => a.kind === 'content-publish' && a.pageId === pageId);
 }
 
 /**
@@ -112,13 +127,13 @@ async function pageWithRejectedAndApprovedSnapshots(
   await setGate('on');
   const created = await c.post(cms(orgId, '/pages'), { title: REJECTED, sections: [{ type: 'hero', data: { heading: REJECTED } }] });
   expect(created.status, JSON.stringify(created.body)).toBe(201);
-  const pageId = created.body.pageId as string;
+  const pageId = created.body.pageId;
 
   // Submit → a durable snapshot exists NOW, before any reviewer looks at it.
   expect((await c.post(cms(orgId, `/pages/${pageId}/submit`))).status).toBe(200);
   const first = await pendingFor(c, pageId);
   expect(first, 'submit must queue a content-publish approval').toBeTruthy();
-  const rej = await c.post(`/host/openwop-app/approvals/${first.approvalId}/reject`, { note: 'No.' });
+  const rej = await c.post(`/host/openwop-app/approvals/${first!.approvalId}/reject`, { note: 'No.' });
   expect(rej.status, JSON.stringify(rej.body)).toBe(200);
   expect((await c.get(cms(orgId, `/pages/${pageId}`))).body.status).toBe('draft');
 
@@ -127,14 +142,15 @@ async function pageWithRejectedAndApprovedSnapshots(
   expect(patched.status, JSON.stringify(patched.body)).toBe(200);
   expect((await c.post(cms(orgId, `/pages/${pageId}/submit`))).status).toBe(200);
   const second = await pendingFor(c, pageId);
-  const claim = await c.post(`/host/openwop-app/approvals/${second.approvalId}/claim`);
+  expect(second, 'the resubmit must queue a content-publish approval').toBeTruthy();
+  const claim = await c.post(`/host/openwop-app/approvals/${second!.approvalId}/claim`);
   expect(claim.status, JSON.stringify(claim.body)).toBe(200);
   const live = await c.get(cms(orgId, `/pages/${pageId}`));
   expect(live.body.status).toBe('published');
 
   const versions = await c.get(cms(orgId, `/pages/${pageId}/versions`));
   expect(versions.status).toBe(200);
-  const rows = versions.body.versions as Array<{ versionId: string; origin?: string; snapshot: { title: string } }>;
+  const rows = versions.body.versions;
   const rejected = rows.find((v) => v.snapshot.title === REJECTED);
   const approved = rows.find((v) => v.snapshot.title === APPROVED);
   expect(rejected, 'the REJECTED submit left a durable snapshot — that is the defect').toBeTruthy();
@@ -146,7 +162,7 @@ async function pageWithRejectedAndApprovedSnapshots(
   expect(rejected!.origin).toBe('submit');
   expect(approved!.origin).toBe('publish');
 
-  return { pageId, slug: live.body.slug as string, rejected: rejected!.versionId, approved: approved!.versionId };
+  return { pageId, slug: live.body.slug, rejected: rejected!.versionId, approved: approved!.versionId };
 }
 
 const twoWay = (name: string, versionId: string) => ({
@@ -164,10 +180,10 @@ describe('CMSA-11 — a variant cannot bind a snapshot that was never approved',
 
     const bad = await c.post(exps(orgId, pageId), twoWay('Rejected copy', rejected));
     expect(bad.status, JSON.stringify(bad.body)).toBe(409);
-    const details = bad.body?.error?.details ?? bad.body?.details;
-    expect(details.gate).toBe('cms-approval-gate');
-    expect(details.reason).toBe('unreviewed_snapshot');
-    expect(String(bad.body?.error?.message ?? bad.body?.message)).toMatch(/never approved/i);
+    const env = assertFlatErrorEnvelope(bad.body, 'create refusal');
+    expect(env.details?.gate).toBe('cms-approval-gate');
+    expect(env.details?.reason).toBe('unreviewed_snapshot');
+    expect(env.message).toMatch(/never approved/i);
 
     // THE control that a capture-time-only stamp would fail: the version the
     // reviewer actually approved is bindable. Without this the fix could refuse
@@ -189,8 +205,7 @@ describe('CMSA-11 — a variant cannot bind a snapshot that was never approved',
     await setGate('on');
     const start = await c.post(exps(orgId, pageId, `/${exp.body.experimentId}/start`));
     expect(start.status, JSON.stringify(start.body)).toBe(409);
-    const details = start.body?.error?.details ?? start.body?.details;
-    expect(details.reason).toBe('unreviewed_snapshot');
+    expect(assertFlatErrorEnvelope(start.body, 'start refusal').details?.reason).toBe('unreviewed_snapshot');
     expect((await c.get(exps(orgId, pageId, `/${exp.body.experimentId}`))).body.status).toBe('draft');
   });
 
@@ -286,7 +301,7 @@ describe('CMSA-11 — the controls: what the rule must NOT refuse', () => {
     }
     expect(vk, 'a visitor key must map to the candidate variant').toBeTruthy();
     const res = await fetch(`${BASE}/host/openwop-app/public/${encodeURIComponent(orgId)}/pages/${encodeURIComponent(slug)}?vk=${vk}`);
-    const body = await res.json() as any;
+    const body = (await res.json()) as { title?: string; experiment?: { variant?: string } };
     expect(res.status, JSON.stringify(body)).toBe(200);
     expect(body.title).toBe(REJECTED); // content a reviewer refused, live to the public
     expect(body.experiment?.variant).toBe('candidate');
@@ -305,6 +320,7 @@ describe('CMSA-11 — the controls: what the rule must NOT refuse', () => {
     expect(exp.status, JSON.stringify(exp.body)).toBe(201);
     const start = await c.post(exps(orgId, pageId, `/${exp.body.experimentId}/start`));
     expect(start.status, JSON.stringify(start.body)).toBe(200);
+    expect(start.body.status).toBe('running');
   });
 
   it('a PUBLISHED page is still experimentable under the gate — the page status is NOT gated', async () => {
@@ -317,5 +333,6 @@ describe('CMSA-11 — the controls: what the rule must NOT refuse', () => {
     expect(exp.status, JSON.stringify(exp.body)).toBe(201);
     const start = await c.post(exps(orgId, pageId, `/${exp.body.experimentId}/start`));
     expect(start.status, JSON.stringify(start.body)).toBe(200);
+    expect(start.body.status).toBe('running');
   });
 });

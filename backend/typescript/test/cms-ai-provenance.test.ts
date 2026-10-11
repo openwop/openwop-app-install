@@ -5,6 +5,16 @@
  * paths (PATCH round-trip, version snapshot → restore); a stamp never
  * outlives its overlay; absence = pre-fix row or human-authored (no
  * backfill, no claim).
+ *
+ * Sabotage-witnessed (w16, `w16g2-prov-*`): dropping the submit-merge stamp
+ * (`routes.ts` `ai[locale] = draftedAt`), the surface stamp, `cleanAiDrafted`'s
+ * orphan rule, `validateSection`'s `aiDrafted` carry, or the snapshot's copy of
+ * the stamp each turns its case red.
+ *
+ * Two assertions are CONTROLS, not witnessed claims: "a BASE-data patch carries
+ * no per-locale stamp" is double-guarded (a base-branch stamp names no overlay,
+ * so the orphan rule drops it), and "a human clear clears it" guards a server
+ * merge that does not exist today (the stamp is client-round-tripped).
  */
 
 import http from 'node:http';
@@ -22,7 +32,7 @@ import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { buildCmsSurface } from '../src/features/cms/surface.js';
-import { getPage } from '../src/features/cms/cmsService.js';
+import { getPage, type Page } from '../src/features/cms/cmsService.js';
 
 const mockResolve = vi.mocked(resolveHeadlessAi);
 
@@ -48,24 +58,30 @@ beforeEach(() => {
   mockResolve.mockResolvedValue(vi.fn(async () => '{"heading":"XLATED"}'));
 });
 
-interface Res<T = any> { status: number; body: T }
+interface Res<T> { status: number; body: T }
+/** The response views this file reads (a page, the submit echo, versions, an org). */
+type PageBody = Page & { autoTranslated?: Record<string, number> };
+interface VersionsBody { versions: Array<{ versionId: string }> }
 interface Client {
-  get: (p: string) => Promise<Res>;
-  post: (p: string, b?: unknown) => Promise<Res>;
-  put: (p: string, b?: unknown) => Promise<Res>;
-  patch: (p: string, b?: unknown) => Promise<Res>;
+  get: <T = PageBody>(p: string) => Promise<Res<T>>;
+  post: <T = PageBody>(p: string, b?: unknown) => Promise<Res<T>>;
+  put: <T = PageBody>(p: string, b?: unknown) => Promise<Res<T>>;
+  patch: <T = PageBody>(p: string, b?: unknown) => Promise<Res<T>>;
 }
+/** A surface verb's `{ updated }` result, read without a cast. */
+const wasUpdated = (out: unknown): boolean =>
+  typeof out === 'object' && out !== null && 'updated' in out && out.updated === true;
 function client(): Client {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
+  const call = async <T>(method: string, path: string, body?: unknown): Promise<Res<T>> => {
     const res = await fetch(`${BASE}${path}`, {
       method,
       headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) },
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
-    return { status: res.status, body: out };
+    const out: unknown = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    return { status: res.status, body: out as T };
   };
   return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), put: (p, b) => call('PUT', p, b), patch: (p, b) => call('PATCH', p, b) };
 }
@@ -74,9 +90,9 @@ let n = 0;
 async function ownerOrg(): Promise<{ owner: Client; orgId: string; tenantId: string }> {
   const tenantId = `org:prov-${Date.now()}-${n++}`;
   const owner = client();
-  const r = await owner.post('/host/openwop-app/test/login', { email: `prov-${Date.now()}-${n++}@acme.test`, tenantId });
+  const r = await owner.post<unknown>('/host/openwop-app/test/login', { email: `prov-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await owner.post<{ orgId: string }>('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status).toBe(201);
   return { owner, orgId: org.body.orgId, tenantId };
 }
@@ -99,9 +115,10 @@ describe('the machine writers stamp at write time', () => {
 
     const page = await owner.get(u(orgId, `/pages/${pageId}`));
     const s0 = page.body.sections[0];
-    expect(s0.localizations.es.heading).toBe('XLATED');
+    expect(s0.localizations?.es?.heading).toBe('XLATED');
     // The AI-drafted es overlay is stamped; the pre-existing HUMAN pt-BR is not.
-    expect(typeof s0.aiDrafted?.es).toBe('string');
+    // The stamp is the ISO instant the overlay was machine-drafted.
+    expect(Number.isNaN(Date.parse(s0.aiDrafted?.es ?? ''))).toBe(false);
     expect(s0.aiDrafted?.['pt-BR']).toBeUndefined();
   });
 
@@ -113,15 +130,15 @@ describe('the machine writers stamp at write time', () => {
     const sectionId = created.body.sections[0].sectionId;
 
     const surface = buildCmsSurface({ tenantId });
-    const out = await surface.updateSectionDraft!({ orgId, pageId, sectionId, locale: 'fr', data: { heading: 'Salut' } }) as { updated: boolean };
-    expect(out.updated).toBe(true);
+    const out = await surface.updateSectionDraft({ orgId, pageId, sectionId, locale: 'fr', data: { heading: 'Salut' } });
+    expect(wasUpdated(out)).toBe(true);
     const after = await getPage(tenantId, orgId, pageId);
     expect(after?.sections[0]?.localizations?.fr?.heading).toBe('Salut');
     expect(typeof after?.sections[0]?.aiDrafted?.fr).toBe('string');
 
     // A BASE-data patch through the same verb carries no per-locale stamp.
-    const out2 = await surface.updateSectionDraft!({ orgId, pageId, sectionId, data: { heading: 'Hello again' } }) as { updated: boolean };
-    expect(out2.updated).toBe(true);
+    const out2 = await surface.updateSectionDraft({ orgId, pageId, sectionId, data: { heading: 'Hello again' } });
+    expect(wasUpdated(out2)).toBe(true);
     const after2 = await getPage(tenantId, orgId, pageId);
     expect(after2?.sections[0]?.aiDrafted).toEqual({ fr: after?.sections[0]?.aiDrafted?.fr });
   });
@@ -187,7 +204,7 @@ describe('the stamp survives the copy paths and never outlives its overlay', () 
 
     // …and restoring the published version brings back overlay AND stamp
     // (restore replaces the snapshot verbatim — provenance is content-coupled).
-    const versions = await owner.get(u(orgId, `/pages/${pageId}/versions`));
+    const versions = await owner.get<VersionsBody>(u(orgId, `/pages/${pageId}/versions`));
     const v = versions.body.versions[0];
     expect(v, JSON.stringify(versions.body)).toBeTruthy();
     const restored = await owner.post(u(orgId, `/pages/${pageId}/restore/${v.versionId}`));

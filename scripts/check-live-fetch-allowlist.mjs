@@ -36,8 +36,16 @@ const LIST = join(FE, 'test-live-fetch-allowlist.txt');
  * 47 after wave 9: email campaignLogDeepLink + sendConfirm mock getProviderStatus;
  * runs emailErasedHintLink refuses the discovery read (runDetailIntegrity precedent).
  * 44 after wave 10 mocked marketplace failedReadStates, orgsFailedGuard and
- *   purchaseReturn (listMyOrders / listOrgs / effective access). */
-const CEILING = 44;
+ *   purchaseReturn (listMyOrders / listOrgs / effective access).
+ * 43 after wave 12: twin twinLinkNotOfferedOnFailedRead's mocks are typed and complete
+ *   (no live read left).
+ * 42 after wave 13: projects failuresAsAnswers mocks getDeletePreview and
+ *   ProjectStrategyChips (no live read left).
+ * 40 after wave 14: documents documentsFailedReads and documentsP2P3 mock
+ *   listPackCanvasTypes (no live read left).
+ * 37 after wave 17: cms CmsPage, honestyBatch and orgsFailedNotSubset mock
+ *   listMembers and the org-access / per-org reads (no live read left). */
+const CEILING = 37;
 
 const fail = (msg) => {
   console.error(`✗ check-live-fetch-allowlist: ${msg}`);

@@ -1,5 +1,5 @@
 /**
- * The org-edge defect in its most dangerous form: **the failure was invisible by
+ * HG-4 / ANN-UX-2 (#2968, #2974) — the org-edge defect in its most dangerous form: **the failure was invisible by
  * construction.**
  *
  * `pickerOrgs` prepends a SYNTHETIC Front-page scope for a site admin. So with
@@ -18,9 +18,15 @@
  * Both arms matter more than usual here: the Front-page scope stays USABLE on a
  * failed read, because blocking a superadmin out of the public homepage editor
  * would be a bigger lie than the one being fixed.
+ *
+ * Sabotage-witnessed (/grade-tests w17): hiding the orgsFailed Notice reds the
+ * site-admin disclosure; passing the raw `orgsFailed` to OrgSelectionState (the
+ * admin lock-out) reds the Front-page case; dropping it for everyone reds the
+ * non-admin case; feeding `null` for an empty list reds the zero-org case; a
+ * notice on any settled read reds the healthy case.
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
-import { render, cleanup, act } from '@testing-library/react';
+import { render, cleanup, act, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 
 const { listOrgs, listPages } = vi.hoisted(() => ({ listOrgs: vi.fn(), listPages: vi.fn() }));
@@ -28,6 +34,21 @@ const { getSiteConfig } = vi.hoisted(() => ({ getSiteConfig: vi.fn() }));
 vi.mock('../cmsClient.js', async (orig) => ({
   ...(await orig<typeof import('../cmsClient.js')>()),
   listOrgs, listPages,
+  // Once an org is selected the page makes its per-org reads. They are not this
+  // file's claim; unmocked they were live network calls (the file's old ADR 0661
+  // allowlist entry). Answered with the "nothing configured" shapes.
+  getLanguageSettings: vi.fn(async () => ({ baseLocale: 'en', supportedLocales: [], autoTranslateOnPublish: false })),
+  listSharedSections: vi.fn(async () => []),
+  listLocaleGrants: vi.fn(async () => []),
+}));
+vi.mock('../../../client/accessClient.js', async (orig) => ({
+  ...(await orig<typeof import('../../../client/accessClient.js')>()),
+  listMembers: vi.fn(async () => []),
+  getEffectiveAccess: vi.fn(() => new Promise<never>(() => {})), // "unknown" — the hook's failed-read state
+}));
+vi.mock('../../media/mediaClient.js', async (orig) => ({
+  ...(await orig<typeof import('../../media/mediaClient.js')>()),
+  listAssets: vi.fn(async () => []),
 }));
 // `getSiteConfig` lives in the SITE feature, not cms — mocking it on cmsClient
 // would silently do nothing and the site-admin arm would test the wrong path.
@@ -70,7 +91,10 @@ describe('a failed workspace read is never a silent subset', () => {
     getSiteConfig.mockResolvedValue({ enabled: true });
     listOrgs.mockRejectedValue(new Error('503'));
     await mount();
-    expect(document.body.textContent).toContain('Front page');
+    // The scope is offered in the picker AND the editor is not hidden behind the
+    // failed-organizations card (the picker option alone renders in both states).
+    expect(screen.getByRole('option', { name: 'Front page (public site)' })).toBeTruthy();
+    expect(document.body.textContent).not.toContain('Could not load your organizations');
   });
 
   it('NON-ADMIN: does not claim "No organizations — create one first"', async () => {
@@ -85,13 +109,8 @@ describe('a failed workspace read is never a silent subset', () => {
       'The page list was never requested. This is a failed read, not an empty organization list.',
     );
     expect(document.body.textContent).not.toContain('Pages belong to an organization.');
-  });
-
-  it('NON-ADMIN: does not sit on the skeleton either', async () => {
-    // `orgs` stays null on failure now, so the loading branch would spin forever
-    // if the failed branch were not tested above it.
-    listOrgs.mockRejectedValue(new Error('503'));
-    await mount();
+    // …and does not sit on the skeleton either: `orgs` stays null on failure, so
+    // the loading branch would spin forever if the failed branch did not win.
     expect(document.querySelector('.skeleton')).toBeNull();
   });
 
@@ -104,6 +123,8 @@ describe('a failed workspace read is never a silent subset', () => {
 
   it('a healthy read raises no warning', async () => {
     await mount();
+    // Settled, not merely early: the real organization is in the picker.
+    expect(screen.getByRole('option', { name: 'Acme' })).toBeTruthy();
     expect(document.body.textContent).not.toContain('this picker may be incomplete');
   });
 });

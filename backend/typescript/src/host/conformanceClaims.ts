@@ -307,20 +307,10 @@ function imageCertificationBundle(): Record<string, unknown> | undefined {
   return doc;
 }
 
-/**
- * The value for `capabilities.conformance.certificationBundleUrl`, or
- * `undefined` to OMIT the field.
- *
- * Gated on the BUNDLE being present, not on the claims file: RFC 0089 §D defines
- * the pointer as addressing a certification bundle, so advertising it while the
- * route would 404 is precisely the advertised-but-not-served defect the
- * container lane caught in `workflowChainPacks.hostExpansionSeam` — a claim the
- * artifact cannot honour.
- */
-export function certificationBundleUrl(origin: string): string | undefined {
-  if (servedBundle(1) === undefined) return undefined;
-  return `${origin.replace(/\/+$/, '')}${CERTIFICATION_BUNDLE_PATH}`;
-}
+// ADR 0812 P4: `certificationBundleUrl()` (the v1 root's pointer to the
+// image-mode bundle) is deleted with the v1 builder, its only caller. The
+// claims document's `evidence.bundlePath` is now the one surface naming that
+// bundle, and it hangs off the same `servedBundle(1)` predicate.
 
 /**
  * WHD-18 — the value for the MAJOR-2 root's `conformance.certificationBundleUrl`

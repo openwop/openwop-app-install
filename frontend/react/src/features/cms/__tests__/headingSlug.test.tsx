@@ -6,6 +6,10 @@
  * describe): the SPA and the prerender emit the same ids from the same text,
  * or fragment links resolve in one and not the other. Change one side's
  * algorithm and the other side's copy of these cases goes red.
+ *
+ * Sabotage-witnessed (/grade-tests w17): dropping the combining-mark strip, the
+ * 64-char cap, the `section` fallback or the edge trim reds a parity case;
+ * an un-slugged `<h2 id>` reds the anchor case.
  */
 import { describe, it, expect, afterEach } from 'vitest';
 import { render, screen, cleanup } from '@testing-library/react';

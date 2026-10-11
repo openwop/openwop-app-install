@@ -7,17 +7,23 @@
  *   - ADR 0855 D2: Dismiss asks why (optional) and sends it; a drift finding can
  *     be Sent back with a note, other kinds cannot; a failed send-back is said;
  *   - a failed read is said.
+ *
+ * Sabotage (w13 g3 probes): dropping `suggestionId` from the record body, the
+ * source link, the `canWrite` gate, the dismiss reason, the drift-only Send back,
+ * the empty-list `return null`, the read-failure flag, the send-back note, the
+ * action-failure message, or the always-mounted live region each reds its case.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, cleanup, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, cleanup, screen, fireEvent, waitFor, act } from '@testing-library/react';
 
 const h = vi.hoisted(() => ({ list: vi.fn(), dismiss: vi.fn(async () => undefined), sendBack: vi.fn(async () => undefined), record: vi.fn(async () => ({ documentId: 'd1', accepted: false })) }));
 vi.mock('../teamLedgerClient.js', async (orig) => ({ ...(await orig<Record<string, unknown>>()), listDecisionSuggestions: h.list, dismissDecisionSuggestion: h.dismiss, sendBackDriftSuggestion: h.sendBack, recordDecision: h.record }));
 vi.mock('../../../ui/toast.js', () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
 
 import { DecisionSuggestionsSection } from '../DecisionSuggestionsSection.js';
+import type { DecisionSuggestion } from '../teamLedgerClient.js';
 
-const S = { suggestionId: 's1', projectId: 'p1', title: 'Ship EU first', text: 'We agreed to ship the EU first.', source: { kind: 'message', ref: 'm1', link: '/chat?conversation=c1' }, suggestedBy: { kind: 'agent', id: 'suggester' }, status: 'open', createdAt: '2026-10-07T10:00:00Z' };
+const S: DecisionSuggestion = { suggestionId: 's1', projectId: 'p1', title: 'Ship EU first', text: 'We agreed to ship the EU first.', source: { kind: 'message', ref: 'm1', link: '/chat?conversation=c1' }, suggestedBy: { kind: 'agent', id: 'suggester' }, status: 'open', createdAt: '2026-10-07T10:00:00Z' };
 
 beforeEach(() => { h.list.mockReset(); h.dismiss.mockClear(); h.sendBack.mockReset(); h.record.mockClear(); h.list.mockResolvedValue([S]); });
 afterEach(cleanup);
@@ -53,7 +59,10 @@ describe('DecisionSuggestionsSection', () => {
   it('nothing when there are none; a failed read is said', async () => {
     h.list.mockResolvedValue([]);
     const { container } = render(<DecisionSuggestionsSection projectId="p1" canWrite isOwner onRecorded={() => undefined} />);
+    // Wait for the read to SETTLE, not merely be called: before it resolves the
+    // section is in its loading state, which also renders nothing.
     await waitFor(() => expect(h.list).toHaveBeenCalled());
+    await act(async () => { await h.list.mock.results[0]!.value; });
     expect(container.textContent).toBe('');
     cleanup();
     h.list.mockRejectedValue(new Error('503'));

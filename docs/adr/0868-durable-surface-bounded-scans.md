@@ -1,6 +1,6 @@
 # ADR 0868 — Durable surfaces read a page, not a whole key range
 
-Status: Accepted (implemented on this branch; production takes it on the next deploy, no env change)
+Status: implemented (#4650, merged `94a2b2f2b`; live in production since 2026-10-10 02:12Z, no env change)
 
 Date: 2026-10-09
 
@@ -127,11 +127,31 @@ every row; production's vector backend is pgvector).
 | Sabotage, each restored | claim page unbounded → 2 red; table reads all → 4 red; kv list tenant-wide → 1; purge global → 1; sqlite page via LIKE → 1; DLQ snapshot global → 1; telemetry removed → 1; count via kvList → 1; in-memory `localeCompare` → 1; Postgres inclusive cursor (`~>=~`) → 3; a `kvList` call added to `durableFs.ts` → ratchet red |
 | Related suites (durable*, storage-*, adr0858*, adr0867*, operations*, teardown*, destructive*, account*) | 46 files pass, 2 live-only skipped |
 
+## Implementation record
+
+| Step | Evidence |
+|---|---|
+| Merged | #4650 as `94a2b2f2b`, in a seven-PR merge train whose `npm run ci` passed (backend 2502 files, frontend 986/986); `main` = `7643ddb8e` |
+| Deployed | `7643ddb8e` on revision `openwop-app-backend-00925-gw8`, 2026-10-10 02:12Z, with `scripts/deploy.sh`; `verify-deploy.sh` read the commit on both halves; the major-2 conformance lane passed 197/197 |
+| Certified | the 2.45.30 major-2 bundle for `7643ddb8e` was signed and served at 03:12Z (805 rows) |
+| Superseded | `56711ab87` (v0.3.0, revision `00926-cvq`) replaced it at about 03:27Z and carries the same code |
+
+Nothing changed in the configuration: the three knobs keep their defaults until
+`surface_scan_heavy` shows a reason to move them.
+
 ## Open questions
 
 1. A per-tenant row quota (see Alternatives) — decide from `surface_scan_heavy`
    data, not before.
 2. Filtered table queries on large tables — if D4 reports them, move
    `tableStorage` to real tables with column indexes.
+
+   > **Triggers set 2026-10-10 — ADR 0871.** Questions 1 and 2 now have numeric
+   > triggers (T1: a tenant with ≥ 100,000 rows in one family, or ≥ 10
+   > `surface_scan_heavy` a day in one family; T2: ≥ 10 `table.query`
+   > `surface_scan_heavy` a day), an hourly `surface_rows_gauge` that shows growth
+   > below D4's threshold, and a re-check script,
+   > `node scripts/measure-storage-growth.mjs`. Zero `surface_scan_heavy` from
+   > 02:12Z to 12:31Z on 2026-10-10 was the first reading.
 3. ADR 0867's HNSW question is unchanged: pgvector's exact scan runs in the
    database and is not part of this.

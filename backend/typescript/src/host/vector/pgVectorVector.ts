@@ -28,6 +28,8 @@
  *   OPENWOP_VECTOR_PG_DIM   (required; embedding dimension, e.g. 1536)
  *   OPENWOP_VECTOR_PG_TABLE (default "host_vectors")
  *   OPENWOP_VECTOR_PG_POOL_MAX (default 10; counted by preflight-deploy.sh Gate 5)
+ *   OPENWOP_VECTOR_PG_STATEMENT_TIMEOUT_MS (default 30000, as the storage pool) — ADR 0871
+ *   OPENWOP_VECTOR_QUERY_WARN_MS (default 200) — `vector_query_slow` threshold, ADR 0871
  *
  * The extension is created on first use (`CREATE EXTENSION IF NOT EXISTS
  * vector`); on Cloud SQL the app's database user may create it. `main()` calls
@@ -38,6 +40,9 @@
 import type { BundleScope, VectorSurface } from '../inMemorySurfaces.js';
 import { registerSurfaceAdapter, resolveBackendId } from '../surfaceBackends.js';
 import { registerVectorTenantPurger, registerVectorNamespacePurger } from './vectorTenantPurge.js';
+import { createLogger } from '../../observability/logger.js';
+
+const log = createLogger('host.vector.pgvector');
 
 /** Minimal runner so the adapter is testable without a live pg client. */
 export type SqlRunner = (sql: string, params: unknown[]) => Promise<{ rows: Array<Record<string, unknown>> }>;
@@ -103,6 +108,50 @@ export function purgeNamespaceSql(table: string): string {
   return `DELETE FROM ${ident(table)} WHERE tenant = $1 AND namespace = $2`;
 }
 
+/**
+ * ADR 0871 — the HNSW trigger's inputs, aggregated over (tenant, namespace) in the
+ * database: how many namespaces hold vectors, the largest one's row count, the
+ * total, and how many namespaces hold at least `minNamespaceRows`. No tenant id
+ * leaves the database.
+ */
+export function namespaceStatsSql(table: string): string {
+  return `SELECT count(*)::int AS namespaces, coalesce(max(n), 0)::int AS max_rows, ` +
+    `coalesce(sum(n), 0)::bigint AS total_rows, count(*) FILTER (WHERE n >= $1)::int AS over ` +
+    `FROM (SELECT count(*) AS n FROM ${ident(table)} GROUP BY tenant, namespace) s`;
+}
+/** HNSW needs pgvector >= 0.5 and filtered ANN (`hnsw.iterative_scan`) >= 0.8. */
+export const EXTENSION_VERSION_SQL = `SELECT extversion FROM pg_extension WHERE extname = 'vector'`;
+
+export interface PgVectorStats {
+  namespaces: number;
+  maxNamespaceRows: number;
+  totalRows: number;
+  namespacesAtOrOver: number;
+  dim: number;
+  extversion: string | null;
+}
+
+export async function readPgVectorStatsWith(run: SqlRunner, table: string, dim: number, minNamespaceRows: number): Promise<PgVectorStats> {
+  const { rows } = await run(namespaceStatsSql(table), [minNamespaceRows]);
+  const r = rows[0] ?? {};
+  const v = await run(EXTENSION_VERSION_SQL, []);
+  return {
+    namespaces: Number(r['namespaces'] ?? 0),
+    maxNamespaceRows: Number(r['max_rows'] ?? 0),
+    totalRows: Number(r['total_rows'] ?? 0),
+    namespacesAtOrOver: Number(r['over'] ?? 0),
+    dim,
+    extversion: (v.rows[0]?.['extversion'] as string | undefined) ?? null,
+  };
+}
+
+/** ADR 0871 — a pgvector query at or over this many ms logs `vector_query_slow`. */
+export function vectorQueryWarnMs(): number {
+  const raw = process.env.OPENWOP_VECTOR_QUERY_WARN_MS;
+  const n = raw === undefined || raw.trim() === '' ? NaN : Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : 200;
+}
+
 interface VectorEntry { id: string; vector: number[]; metadata?: Record<string, unknown> }
 
 export interface PgVectorDeps { run: SqlRunner; dim: number; table?: string }
@@ -129,7 +178,12 @@ export function createPgVectorVector(scope: BundleScope, deps: PgVectorDeps): Ve
       const q = vector as number[];
       checkDim(q);
       const k = typeof topK === 'number' && topK > 0 ? topK : 10;
+      const started = Date.now();
       const { rows } = await deps.run(nearestSql(table), [toVectorLiteral(q), tenant, String(namespace ?? 'default'), k]);
+      // ADR 0871 — the query is an exact scan of the namespace; its latency is the
+      // HNSW trigger. No tenant or namespace in the line.
+      const ms = Date.now() - started;
+      if (ms >= vectorQueryWarnMs()) log.warn('vector_query_slow', { ms, k, matches: rows.length });
       return {
         matches: rows.map((r) => ({
           id: String(r.id),
@@ -156,6 +210,18 @@ export function createPgVectorVector(scope: BundleScope, deps: PgVectorDeps): Ve
 /** Set by `registerPgVectorAdapter` while pgvector is SELECTED: prepares the
  *  extension + table and runs one round trip. Null otherwise. */
 let bootCheck: (() => Promise<void>) | null = null;
+/** Set while pgvector is SELECTED: the ADR 0871 gauge's read. Null otherwise. */
+let statsProbe: ((minNamespaceRows: number) => Promise<PgVectorStats>) | null = null;
+
+/** ADR 0871 — the selected pgvector backend's size, or null when it is not selected. */
+export async function readPgVectorStats(minNamespaceRows: number): Promise<PgVectorStats | null> {
+  return statsProbe ? statsProbe(minNamespaceRows) : null;
+}
+
+/** Statement timeout for the vector pool, as the storage pool's (ADR 0871). */
+export function vectorStatementTimeoutMs(): number {
+  return poolMaxFromEnv('OPENWOP_VECTOR_PG_STATEMENT_TIMEOUT_MS', 30_000);
+}
 
 /** ADR 0867 — prove the selected pgvector backend works before taking traffic. */
 export async function verifyPgVectorBackend(): Promise<void> {
@@ -170,6 +236,7 @@ export function poolMaxFromEnv(name: string, fallback = 10): number {
 
 export function registerPgVectorAdapter(): void {
   bootCheck = null;
+  statsProbe = null;
   const dimRaw = process.env.OPENWOP_VECTOR_PG_DIM;
   const dsn = process.env.OPENWOP_VECTOR_PG_DSN;
   const table = process.env.OPENWOP_VECTOR_PG_TABLE || 'host_vectors';
@@ -179,7 +246,12 @@ export function registerPgVectorAdapter(): void {
     if (!runnerPromise) {
       runnerPromise = (async () => {
         const { Pool } = await import('pg');
-        const pool = new Pool({ connectionString: dsn, max: poolMaxFromEnv('OPENWOP_VECTOR_PG_POOL_MAX'), idleTimeoutMillis: 30_000 });
+        // ADR 0871 — statement_timeout: production runs this pool at 1, so one
+        // runaway exact scan would otherwise hold every vector operation.
+        const pool = new Pool({
+          connectionString: dsn, max: poolMaxFromEnv('OPENWOP_VECTOR_PG_POOL_MAX'), idleTimeoutMillis: 30_000,
+          statement_timeout: vectorStatementTimeoutMs(),
+        });
         await pool.query(CREATE_EXTENSION_SQL);
         await pool.query(createTableSql(table, Number(dimRaw)));
         const run: SqlRunner = (sql, params) => pool.query(sql, params as unknown[]).then((r) => ({ rows: r.rows }));
@@ -249,5 +321,7 @@ export function registerPgVectorAdapter(): void {
       const run = await getRunner();
       await run('SELECT 1', []);
     };
+    statsProbe = async (minNamespaceRows) =>
+      readPgVectorStatsWith(await getRunner(), table, Number(dimRaw), minNamespaceRows);
   }
 }

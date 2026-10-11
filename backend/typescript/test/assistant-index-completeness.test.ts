@@ -10,6 +10,13 @@
  *
  * This also witnesses the second half of the Blocker: the legacy backfill is now
  * gated on a DURABLE marker, so it runs once — not on every cold start.
+ *
+ * Sabotage witnesses (/grade-tests w11): reading the ADR 0029 index exclusively,
+ * or skipping the built-in tenant index's sentinel back-fill, turns the first two
+ * cases red; dropping the durable marker's gate or its write turns the third red.
+ * Recorded double guard: the isolation half of case 2 is enforced twice (the
+ * index slice is tenant-prefixed AND `listForTenantIndexed` re-checks each row's
+ * tenant), so removing either alone stays green.
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { initHostExtPersistence, __hostExtStorage } from '../src/host/hostExtPersistence.js';
@@ -78,7 +85,7 @@ describe('COS-4 — an un-indexed commitment is not invisible', () => {
     expect(briefing.topCommitments.map((c) => c.commitmentId)).toContain(commitment.commitmentId);
 
     const health = await buildAssistantHealth(T);
-    expect(health.commitments.open).toBeGreaterThanOrEqual(1);
+    expect(health.commitments.open).toBe(1); // fresh storage per test — exactly this row
   });
 
   it('stays tenant-isolated — the recovered row never leaks to another tenant', async () => {

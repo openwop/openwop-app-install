@@ -19,6 +19,10 @@
  *
  * The count is asserted as an EXACT equality, not a ceiling: `toBeLessThan(2)`
  * would also pass if the read stopped happening at all.
+ *
+ * Sabotage-witnessed (w12 grade-tests): a second mount effect re-reading the list in
+ * either tab, a tab that stops reading the list, and a tab that drops
+ * `recallOnlyCount` each turn a named case red.
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -68,11 +72,20 @@ describe('F5 — one request per memory-list load', () => {
     expect(LIST_URLS, `list URLs hit: ${JSON.stringify(LIST_URLS)}`).toHaveLength(1);
   });
 
+  // The disclosure copy itself (`memory/i18n/en.ts` recallOnlyDisclosure_other), not
+  // a bare /3/ that any digit on the page would satisfy.
+  const DISCLOSURE = /^3 more things were remembered from conversations/;
+
   it('NON-VACUITY: the disclosure the second request existed for is still rendered', async () => {
     // Without this, both assertions above would also pass if the count had simply
     // stopped being read — "one request" is only the right answer when that one
     // request still carries the value the second one went back for.
     render(<ProfileMemoryTab />);
-    expect(await screen.findByText(/3/)).toBeTruthy();
+    expect(await screen.findByText(DISCLOSURE)).toBeTruthy();
+  });
+
+  it('NON-VACUITY (agent tab): the same one request still carries the disclosure', async () => {
+    render(<AgentMemoryTab rosterId="host:some-agent" persona="Ada" />);
+    expect(await screen.findByText(DISCLOSURE)).toBeTruthy();
   });
 });

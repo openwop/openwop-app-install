@@ -34,7 +34,27 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
-const WORKSPACES = ['backend/typescript', 'frontend/react'];
+/**
+ * `omitDev` is the scope of each workspace's audit, and it is per-workspace on purpose.
+ *
+ * backend + frontend ship their `dependencies`; their devDependencies are build and
+ * test tooling, so `--omit=dev` is the honest production scope.
+ *
+ * clients/desktop (ADR 0181, the Electron shell) is the opposite shape: electron-builder
+ * REQUIRES `electron` in devDependencies, and the shell has NO `dependencies` at all. So
+ * `--omit=dev` there audits an empty tree. MEASURED 2026-10-10 on 51f5a323f: it reported
+ * `prod: 1` (the root package) and zero vulnerabilities, while the same lockfile carried
+ * eight high-severity packages including `electron` itself, the runtime every packaged
+ * app ships. That would be a check that cannot fail, so desktop audits ALL deps. The
+ * tooling that comes along (electron-builder and its chain) runs on the packager's
+ * machine and in no shipped artifact, but it is a small tree, and the alternative is to
+ * scan nothing.
+ */
+const WORKSPACES = [
+  { ws: 'backend/typescript', omitDev: true },
+  { ws: 'frontend/react', omitDev: true },
+  { ws: 'clients/desktop', omitDev: false },
+];
 const BLOCKING = new Set(['high', 'critical']);
 
 // Test seams (scripts/test-gate-tooling.sh): a fixture exceptions file and a
@@ -44,12 +64,12 @@ const cfg = JSON.parse(readFileSync(process.env.OPENWOP_AUDIT_EXCEPTIONS ?? join
 const exceptions = cfg.exceptions ?? [];
 
 /** `npm audit --json` exits non-zero when it finds anything — that is not an error. */
-function auditJson(ws) {
+function auditJson(ws, omitDev) {
   if (process.env.OPENWOP_AUDIT_REPORTS_DIR) {
     return JSON.parse(readFileSync(join(process.env.OPENWOP_AUDIT_REPORTS_DIR, `${ws.replace(/\//g, '__')}.json`), 'utf8'));
   }
   try {
-    return JSON.parse(execFileSync('npm', ['audit', '--omit=dev', '--json'], {
+    return JSON.parse(execFileSync('npm', ['audit', ...(omitDev ? ['--omit=dev'] : []), '--json'], {
       cwd: join(ROOT, ws), encoding: 'utf8', maxBuffer: 64 * 1024 * 1024,
     }));
   } catch (err) {
@@ -102,8 +122,8 @@ for (const e of exceptions) {
   }
 }
 
-for (const ws of WORKSPACES) {
-  const report = auditJson(ws);
+for (const { ws, omitDev } of WORKSPACES) {
+  const report = auditJson(ws, omitDev);
   const vulns = report.vulnerabilities ?? {};
 
   // VACUITY GUARD. A report that parses but carries no vulnerability map at all

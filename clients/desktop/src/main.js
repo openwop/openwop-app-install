@@ -27,8 +27,12 @@ const BRANDING = readBranding(
 
 // Self-test runs against an ISOLATED userData dir so a developer's saved host
 // never skips the setup-page leg (and the test never touches real settings).
+// `path.resolve`, not `path.join`: `npm run selftest` passes the RELATIVE
+// `selftest-out`, and `app.setPath` throws "Path must be absolute" at module
+// load, before the self-test's exit handling exists, so the shell hung
+// instead of exiting 0/1.
 if (process.env.OPENWOP_SHELL_SELFTEST === '1') {
-  app.setPath('userData', path.join(process.env.OPENWOP_SHELL_SELFTEST_DIR || process.cwd(), 'selftest-user-data'));
+  app.setPath('userData', path.resolve(process.env.OPENWOP_SHELL_SELFTEST_DIR || process.cwd(), 'selftest-user-data'));
 }
 
 const SETTINGS_PATH = () => path.join(app.getPath('userData'), 'settings.json');

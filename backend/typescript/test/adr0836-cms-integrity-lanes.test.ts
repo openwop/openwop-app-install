@@ -3,11 +3,19 @@
  * missed (AR-H1..H7, AR-M*), and the remaining D-decisions whose witnesses need
  * the new seams (`authorize`, `keepSchedule`, the surface floor). The headline
  * RED-on-`origin/main` witnesses are in `adr0836-cms-integrity.test.ts`.
+ *
+ * Sabotage (w16 probes, each red here): any of the three surface writers asking only
+ * `workspace:read`; `updateSectionDraft` writing into a shared ref or a locale with
+ * localization OFF; `updatePage` skipping `authorize` on its own read; the PATCH route
+ * keeping/cancelling a schedule for the wrong tier; `isLiveTierPage` ignoring a
+ * schedule; a blind legacy-marker delete; restore ignoring its pin; promote announcing
+ * `unpublished` or checking blockers after the restore; a case-sensitive or submit-time
+ * `[TODO]` check; an in-place edit skipping blockers; overlays counted as blockers.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { getSetCookies } from './headerCookies.js';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
@@ -43,7 +51,16 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T }
+interface Body {
+  user?: { userId: string };
+  orgId?: string;
+  pageId?: string;
+  version?: number;
+  scheduledPublishAt?: string;
+  scheduledPublishVersion?: number;
+  details?: { requiredScope?: string; reason?: string };
+}
+interface Res { status: number; body: Body | undefined }
 function client() {
   let cookie = '';
   const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
@@ -53,7 +70,7 @@ function client() {
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    const out = res.status === 204 ? undefined : (await res.json().catch(() => undefined)) as Body | undefined; // wire JSON
     return { status: res.status, body: out };
   };
   return {
@@ -69,7 +86,7 @@ let n = 0;
 async function signup(c: Client, tenantId: string): Promise<string> {
   const r = await c.post('/host/openwop-app/test/login', { email: `a0836l-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  return r.body.user.userId as string;
+  return r.body!.user!.userId;
 }
 const cms = (orgId: string, s = ''): string => `/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}${s}`;
 const seo = (orgId: string, pageId: string): string =>
@@ -86,7 +103,7 @@ async function team(): Promise<{ owner: Client; editor: Client; tenantId: string
   const viewerId = await signup(viewer, tenantId);
   const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
-  const orgId = org.body.orgId as string;
+  const orgId = org.body!.orgId!;
   for (const [subject, role] of [[editorId, 'editor'], [viewerId, 'viewer']] as const) {
     const add = await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: role, subject, roles: [role] });
     expect(add.status, JSON.stringify(add.body)).toBe(201);
@@ -111,7 +128,7 @@ describe('ADR 0836 D5 — surface writers need workspace:write (CMS2WF-2)', () =
     await expect(asViewer.cms!.updateSectionDraft!({ orgId: t.orgId, pageId: made.pageId, sectionId, data: { heading: 'x' } })).rejects.toMatchObject({ code: 'forbidden_scope' });
     await expect(asViewer.cms!.submitPage!({ orgId: t.orgId, pageId: made.pageId })).rejects.toMatchObject({ code: 'forbidden_scope' });
     // Reads stay at read tier.
-    await expect(asViewer.cms!.getDraftPage!({ orgId: t.orgId, pageId: made.pageId })).resolves.toBeDefined();
+    await expect(asViewer.cms!.getDraftPage!({ orgId: t.orgId, pageId: made.pageId })).resolves.toMatchObject({ page: { pageId: made.pageId } });
   });
 });
 
@@ -131,13 +148,17 @@ describe('ADR 0836 D10 — updateSectionDraft refuses what it cannot keep', () =
     const t = await team();
     const loc = getToggleDefault('cms-localization');
     await saveConfig({ ...loc!, status: 'off' }, 'test');
-    const p = await createPage({ tenantId: t.tenantId, orgId: t.orgId, title: 'Loc', sections: hero('Hello'), createdBy: t.ownerId });
-    const s = buildFeatureSurfaces({ tenantId: t.tenantId, runId: 'r', actingUserId: t.ownerId });
-    await expect(s.cms!.updateSectionDraft!({ orgId: t.orgId, pageId: p.pageId, sectionId: p.sections[0]!.sectionId, locale: 'es', data: { heading: 'Hola' } }))
-      .rejects.toMatchObject({ code: 'host_capability_disabled' });
-    // A base-data patch is not a translation: unaffected.
-    await expect(s.cms!.updateSectionDraft!({ orgId: t.orgId, pageId: p.pageId, sectionId: p.sections[0]!.sectionId, data: { heading: 'Hi' } }))
-      .resolves.toMatchObject({ updated: true });
+    try {
+      const p = await createPage({ tenantId: t.tenantId, orgId: t.orgId, title: 'Loc', sections: hero('Hello'), createdBy: t.ownerId });
+      const s = buildFeatureSurfaces({ tenantId: t.tenantId, runId: 'r', actingUserId: t.ownerId });
+      await expect(s.cms!.updateSectionDraft!({ orgId: t.orgId, pageId: p.pageId, sectionId: p.sections[0]!.sectionId, locale: 'es', data: { heading: 'Hola' } }))
+        .rejects.toMatchObject({ code: 'host_capability_disabled' });
+      // A base-data patch is not a translation: unaffected.
+      await expect(s.cms!.updateSectionDraft!({ orgId: t.orgId, pageId: p.pageId, sectionId: p.sections[0]!.sectionId, data: { heading: 'Hi' } }))
+        .resolves.toMatchObject({ updated: true });
+    } finally {
+      await saveConfig(loc!, 'test'); // the registered default (OFF today)
+    }
   });
 });
 
@@ -167,12 +188,12 @@ describe('ADR 0836 D3 — who keeps a scheduled publish', () => {
   it("an admin's edit re-pins and the sweep publishes the admin's new content", async () => {
     const t = await team();
     const r = await t.owner.post(cms(t.orgId, '/pages'), { title: 'Launch', sections: hero('v1') });
-    const id = r.body.pageId as string;
+    const id = r.body!.pageId!;
     expect((await t.owner.post(cms(t.orgId, `/pages/${encodeURIComponent(id)}/schedule`), { at: later() })).status).toBe(200);
     const edit = await t.owner.patch(cms(t.orgId, `/pages/${encodeURIComponent(id)}`), { sections: hero('v2 typo fixed') });
     expect(edit.status, JSON.stringify(edit.body)).toBe(200);
-    expect(edit.body.scheduledPublishAt).toBeTruthy();
-    expect(edit.body.scheduledPublishVersion).toBe(edit.body.version);
+    expect(edit.body?.scheduledPublishAt).toBeTruthy();
+    expect(edit.body?.scheduledPublishVersion).toBe(edit.body?.version);
     await processScheduledPublishes(Date.now() + 120_000);
     const live = await getPage(t.tenantId, t.orgId, id);
     expect(live?.status).toBe('published');
@@ -182,11 +203,11 @@ describe('ADR 0836 D3 — who keeps a scheduled publish', () => {
   it("an editor's edit cancels it, in the response the editor sees", async () => {
     const t = await team();
     const r = await t.owner.post(cms(t.orgId, '/pages'), { title: 'Launch', sections: hero('v1') });
-    const id = r.body.pageId as string;
+    const id = r.body!.pageId!;
     expect((await t.owner.post(cms(t.orgId, `/pages/${encodeURIComponent(id)}/schedule`), { at: later() })).status).toBe(200);
     const edit = await t.editor.patch(cms(t.orgId, `/pages/${encodeURIComponent(id)}`), { sections: hero('editor copy') });
     expect(edit.status, JSON.stringify(edit.body)).toBe(200);
-    expect(edit.body.scheduledPublishAt).toBeUndefined();
+    expect(edit.body?.scheduledPublishAt).toBeUndefined();
     await processScheduledPublishes(Date.now() + 120_000);
     expect((await getPage(t.tenantId, t.orgId, id))?.status).toBe('draft');
   });
@@ -194,11 +215,12 @@ describe('ADR 0836 D3 — who keeps a scheduled publish', () => {
   it("a SCHEDULED draft's SEO is admin tier (its SEO row does not move the pinned version) [AR-H4]", async () => {
     const t = await team();
     const r = await t.owner.post(cms(t.orgId, '/pages'), { title: 'Launch', sections: hero('v1') });
-    const id = r.body.pageId as string;
+    const id = r.body!.pageId!;
     expect((await t.editor.put(seo(t.orgId, id), { metaTitle: 'Editor may (unscheduled draft)' })).status).toBe(200);
     expect((await t.owner.post(cms(t.orgId, `/pages/${encodeURIComponent(id)}/schedule`), { at: later() })).status).toBe(200);
     const refused = await t.editor.put(seo(t.orgId, id), { canonicalUrl: 'https://elsewhere.example/' });
     expect(refused.status, JSON.stringify(refused.body)).toBe(403);
+    expect(refused.body?.details?.reason).toBe('live_tier');
   });
 });
 
@@ -249,9 +271,12 @@ describe('ADR 0836 D8 — restore', () => {
     const running = new DurableCollection<typeof exp>('cms:pageexperiment', (e) => e.experimentId);
     await running.put({ ...exp, status: 'running', startedAt: new Date().toISOString() });
     await promoteExperiment(p.tenantId, p.orgId, p.pageId, exp.experimentId, 'b', 'u');
-    await new Promise((r) => setTimeout(r, 20));
     expect((await getPage(p.tenantId, p.orgId, p.pageId))?.status).toBe('published');
-    expect(seen.filter((e) => e.pageId === p.pageId).map((e) => e.event)).not.toContain('unpublished');
+    // Wait for the REPUBLISH to be announced (the initial publish + this one) before
+    // asserting an absence; a fixed sleep let "nothing arrived yet" pass as "no unpublish".
+    const events = (): string[] => seen.filter((e) => e.pageId === p.pageId).map((e) => e.event);
+    await vi.waitFor(() => expect(events().filter((e) => e === 'published')).toHaveLength(2));
+    expect(events()).not.toContain('unpublished');
   });
 
   it('a promote whose winner carries a [TODO] is refused BEFORE the live page is touched [AR-H5]', async () => {

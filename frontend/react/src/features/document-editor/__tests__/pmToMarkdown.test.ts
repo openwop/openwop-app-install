@@ -1,6 +1,13 @@
 /**
  * pmToMarkdown tests (ADR 0334 Phase 4) — the ProseMirror-JSON → Markdown export
- * serializer over the Phase-1/2 schema.
+ * serializer over the Phase-1/2 schema, plus the Review-of-#1601 F1 fidelity rules
+ * (escaping, code+link, fences) and the 2026-07-10 grade-pass block-lead escaping.
+ *
+ * Sabotage (wave 14): drop `_` from the prose escaper, the code+link order, the
+ * inline fence widening or space padding, the code-block fence widening, the href
+ * paren escape, either block-lead escape, the paragraph-only scope of that escape,
+ * the deletion→strike export, the nested-list indent, or the table pipe escape →
+ * the named case goes red.
  */
 import { describe, it, expect } from 'vitest';
 import { pmToMarkdown } from '../pmToMarkdown.js';
@@ -133,15 +140,18 @@ describe('markdown fidelity (review F1)', () => {
       { type: 'paragraph', content: [{ type: 'text', text: 'a ` b', marks: [{ type: 'code' }] }] },
     ] });
     expect(tricky.trim()).toBe('``a ` b``');
+    // A span that STARTS with a backtick is padded so the fence stays a fence.
+    const leading = pmToMarkdown({ type: 'doc', content: [
+      { type: 'paragraph', content: [{ type: 'text', text: '`x', marks: [{ type: 'code' }] }] },
+    ] });
+    expect(leading.trim()).toBe('`` `x ``');
   });
 
   it('code blocks stay verbatim behind a fence longer than any embedded backtick run', () => {
     const md = pmToMarkdown({ type: 'doc', content: [
       { type: 'codeBlock', attrs: { language: 'md' }, content: [{ type: 'text', text: 'use ```js\ncode\n``` fences' }] },
     ] });
-    expect(md.startsWith('````md\n')).toBe(true);
-    expect(md).toContain('use ```js');
-    expect(md.trim().endsWith('````')).toBe(true);
+    expect(md).toBe('````md\nuse ```js\ncode\n``` fences\n````\n');
   });
 
   it('escapes parentheses in link hrefs so the link target cannot be truncated', () => {
@@ -175,7 +185,7 @@ describe('block-leading escaping (grade pass)', () => {
       { type: 'heading', attrs: { level: 2 }, content: [{ type: 'text', text: 'Real heading' }] },
       { type: 'bulletList', content: [{ type: 'listItem', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'real item' }] }] }] },
     ] });
-    expect(md).toContain('## Real heading');
-    expect(md).toContain('- real item');
+    // Exact: `toContain` would also accept an escaped `\- real item`.
+    expect(md).toBe('## Real heading\n\n- real item\n');
   });
 });

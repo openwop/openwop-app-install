@@ -14,14 +14,21 @@
  * ADDRESSED receipt specifically — `recipientUserId === the approver` — because
  * an assertion that merely counted `workflow.failed` rows would have passed
  * before the fix.
+ *
+ * Sabotages that turn it red (grade-tests w11): the receipt not addressed to the approver
+ * (`recipientUserId` dropped); its message reduced to the bare reason (no kind/recipient);
+ * the run link dropped; the terminal-projection receipt removed; a receipt emitted on a
+ * SUCCESSFUL nudge. The REJECTED case is a negative control: no single-line sabotage
+ * reaches it without first making the decide itself throw.
  */
-import { beforeAll, describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/index.js';
 import { __clearToggleStore } from '../src/host/featureToggles/service.js';
 import { __resetAssistantStore, getPendingAction } from '../src/features/assistant/assistantService.js';
 import { enqueueActionWithApproval, decideActionViaApproval, contentHashOf } from '../src/features/assistant/actionApproval.js';
 import { __hostExtStorage } from '../src/host/hostExtPersistence.js';
 import type { NotificationRecord } from '../src/types.js';
+import { upsertOAuthConnection } from '../src/features/connections/connectionsService.js';
 
 const TENANT = 'default';
 const APPROVER = 'u-approver-receipt';
@@ -31,16 +38,21 @@ beforeAll(async () => {
   await createApp({ port: 18991, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   await __clearToggleStore();
   await __resetAssistantStore();
+  // A send-capable (fake-token) connection, so the run DISPATCHES and fails at the
+  // provider: the receipt under test is the run-terminal one, which links the run.
+  // The no-connection refusal happens before any run and is pinned in
+  // assistant-send-credential-precheck.test.ts.
+  await upsertOAuthConnection({ tenantId: TENANT, provider: 'google', userId: APPROVER, tokens: { accessToken: 'at-fake', refreshToken: 'rt-fake', scopes: ['https://www.googleapis.com/auth/gmail.send'], expiresAt: new Date(Date.now() + 3_600_000).toISOString() } as never });
 });
 
+/** Condition polls on the real state: the terminal projection and the receipt are written
+ *  by an in-process `onRunTerminal` listener with no awaitable hook (the honest ceiling).
+ *  A timeout falls through to the caller's assertion, which prints what was observed. */
 async function waitForStatus(actionId: string, statuses: string[], timeoutMs = 20_000): Promise<string> {
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    const row = await getPendingAction(TENANT, actionId);
-    if (row && statuses.includes(row.status)) return row.status;
-    if (Date.now() > deadline) return row?.status ?? 'missing';
-    await new Promise((r) => setTimeout(r, 50));
-  }
+  await vi.waitFor(async () => {
+    expect(statuses).toContain((await getPendingAction(TENANT, actionId))?.status);
+  }, { timeout: timeoutMs, interval: 50 }).catch(() => undefined);
+  return (await getPendingAction(TENANT, actionId))?.status ?? 'missing';
 }
 
 /** The receipt, and ONLY the receipt: addressed rows for this approver. The
@@ -55,12 +67,10 @@ async function addressedReceipts(actionId: string): Promise<NotificationRecord[]
 }
 
 async function waitForReceipt(actionId: string, timeoutMs = 10_000): Promise<NotificationRecord[]> {
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    const found = await addressedReceipts(actionId);
-    if (found.length > 0 || Date.now() > deadline) return found;
-    await new Promise((r) => setTimeout(r, 50));
-  }
+  await vi.waitFor(async () => {
+    expect((await addressedReceipts(actionId)).length).toBeGreaterThan(0);
+  }, { timeout: timeoutMs, interval: 50 }).catch(() => undefined);
+  return addressedReceipts(actionId);
 }
 
 describe('AST-UX-1 — the approver is told when their approved action does not go out', () => {
@@ -73,7 +83,7 @@ describe('AST-UX-1 — the approver is told when their approved action does not 
     const decided = await decideActionViaApproval(TENANT, action.approvalId!, 'approved', { expectedContentHash: contentHashOf(action), decidedByUserId: APPROVER });
     expect(decided?.changed).toBe(true);
 
-    // No Google connection exists, so the Phase-D seam fails closed and the
+    // The fake token is refused at the provider and the
     // `confirm-action-send` verdict gate fails the run — the same lane
     // `assistant-action-execution.test.ts` already pins.
     expect(await waitForStatus(action.actionId, ['sent', 'failed'])).toBe('failed');

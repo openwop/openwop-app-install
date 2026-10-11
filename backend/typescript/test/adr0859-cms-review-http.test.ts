@@ -8,6 +8,15 @@
  *     mismatch in how a lane keys the decider would fail OPEN. Every refusal has a control.
  *   - D5: an entity section is disclosed on the row (ADR 0594 D1), and the disclosure clears.
  *   - D7: `/reviews` hides and refuses a content-publish row for a non-manager; the sweep runs.
+ *
+ * Sabotage (w16 probes, each red here): notifying every member, or the submitting
+ * manager, or re-notifying on a resubmit; dropping the decided notice, notifying the
+ * deciding submitter, or putting the reject reason in it; a separation-of-duties
+ * predicate that never matches, replaces instead of unions submitters, counts the other
+ * submitters as "someone else", locks out a sole approver, applies with the gate OFF or
+ * to a reject; dropping `awaitingAnotherApprover`; a resubmit that keeps a stale
+ * disclosure; `/reviews` scoped to `workspace:write`; no sweep at boot; a quorum gate
+ * that holds policy-less rows.
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -64,10 +73,11 @@ async function submitted(c: Client, orgId: string, title: string, sections: unkn
   return { pageId, approvalId: review.body.review.approvalId as string };
 }
 
-const noticesOf = async (c: Client, type: string): Promise<any[]> => {
+interface Notice { type: string; title: string; metadata?: { approvalId?: string; pageId?: string } }
+const noticesOf = async (c: Client, type: string): Promise<Notice[]> => {
   const r = await c.get('/host/openwop-app/notifications');
   expect(r.status).toBe(200);
-  return (r.body.notifications as any[]).filter((x) => x.type === type);
+  return (r.body.notifications as Notice[]).filter((x) => x.type === type);
 };
 
 describe('D3 — the reviewer is told, the author is told', () => {
@@ -77,7 +87,7 @@ describe('D3 — the reviewer is told, the author is told', () => {
     const { pageId, approvalId } = await submitted(t.editor, t.orgId, 'Pricing page');
     const forOwner = await noticesOf(t.owner, 'approval.content-review-requested');
     const forAdmin = await noticesOf(t.admin, 'approval.content-review-requested');
-    expect(forOwner.map((x) => x.metadata?.approvalId ?? x.title)).toHaveLength(1);
+    expect(forOwner).toHaveLength(1);
     expect(forAdmin).toHaveLength(1);
     expect(forAdmin[0].title).toContain('Pricing page');
     expect(await noticesOf(t.editor, 'approval.content-review-requested'), 'the submitter was told about their own submission').toHaveLength(0);
@@ -87,6 +97,13 @@ describe('D3 — the reviewer is told, the author is told', () => {
     expect((await t.editor.post(u(t.orgId, `/pages/${pageId}/submit`))).status).toBe(200);
     expect(await noticesOf(t.admin, 'approval.content-review-requested')).toHaveLength(1);
     expect((await getApproval(approvalId))?.status).toBe('pending');
+
+    // A MANAGER who submits is not told about their own submission either (the
+    // editor above is excluded by the audience already; this is the submitter rule).
+    const adminPage = await submitted(t.admin, t.orgId, 'Admin page');
+    const forPage = (xs: Notice[]): Notice[] => xs.filter((x) => x.metadata?.pageId === adminPage.pageId);
+    expect(forPage(await noticesOf(t.owner, 'approval.content-review-requested')), 'positive control').toHaveLength(1);
+    expect(forPage(await noticesOf(t.admin, 'approval.content-review-requested')), 'the submitting manager was told about their own submission').toHaveLength(0);
   });
 
   it('a decision notifies the submitter, and not the decider', async () => {
@@ -99,6 +116,16 @@ describe('D3 — the reviewer is told, the author is told', () => {
     expect(decided[0].title).toContain('Changes requested');
     expect(JSON.stringify(decided[0]), 'the reviewer\'s reason left the page read').not.toContain('Tighten the intro');
     expect(await noticesOf(t.admin, 'approval.content-review-decided')).toHaveLength(0);
+  });
+
+  it('a decider who also submitted is not told of their own decision; the other submitter is', async () => {
+    await enableToggle('cms-approval-gate', 'on');
+    const t = await team();
+    const { pageId, approvalId } = await submitted(t.owner, t.orgId, 'Co-submitted');
+    expect((await t.admin.post(u(t.orgId, `/pages/${pageId}/submit`))).status).toBe(200);
+    expect((await t.owner.post(`${APPROVALS}/${approvalId}/claim`)).status).toBe(200);
+    expect(await noticesOf(t.admin, 'approval.content-review-decided'), 'positive control: the other submitter').toHaveLength(1);
+    expect(await noticesOf(t.owner, 'approval.content-review-decided'), 'the decider was told of their own decision').toHaveLength(0);
   });
 });
 
@@ -137,6 +164,7 @@ describe('D4 — separation of duties under the gate', () => {
     expect((await t.editor.post(u(t.orgId, `/pages/${pageId}/submit`))).status).toBe(200);
     const self = await t.owner.post(`${APPROVALS}/${approvalId}/claim`);
     expect(self.status, `the editor's resubmit laundered the owner's self-approval: ${JSON.stringify(self.body)}`).toBe(403);
+    expect(self.body?.details?.reason).toBe('separation-of-duties');
   });
 
   it('when every manager has submitted, one of them can still approve (code grade CMSA2CD-3)', async () => {
@@ -208,7 +236,9 @@ describe('D7 — the witnesses that would let a fail-open edit ship green', () =
     const forAdmin = await t.admin.get('/host/openwop-app/reviews');
     expect(JSON.stringify(forAdmin.body), 'positive control: the manager sees it').toContain(approvalId);
     const act = await t.editor.post(`/host/openwop-app/reviews/${encodeURIComponent(`approval:${approvalId}`)}/actions/approve`, {});
-    expect(act.status, JSON.stringify(act.body)).toBeGreaterThanOrEqual(403);
+    // Existence-hiding: a row the caller may not see is a uniform 404, not a 403.
+    expect(act.status, JSON.stringify(act.body)).toBe(404);
+    expect(act.body?.error).toBe('not_found');
     expect((await t.admin.get(u(t.orgId, `/pages/${pageId}`))).body.status).toBe('in_review');
   });
 

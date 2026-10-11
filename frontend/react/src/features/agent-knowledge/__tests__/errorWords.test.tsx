@@ -9,6 +9,10 @@
  * used to render verbatim: "This collection is managed (synced from strategy);
  * edit the source instead." The two DELETE paths rendered `unbindCollection
  * returned 403`.
+ *
+ * Sabotage that turns this red (grade-tests w11 probes): dropping the `managed` branch of
+ * `knowledgeErrorMessage` (case 1); rendering `err.message` instead of the status mapping
+ * (case 2); not setting the success notice, or setting an error on success (case 3).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup, screen, fireEvent, waitFor } from '@testing-library/react';
@@ -27,10 +31,10 @@ const confirmMock = vi.hoisted(() => vi.fn(async (_opts: { title?: string }) => 
 vi.mock('../../../ui/confirm.js', () => ({ confirm: confirmMock }));
 
 import { AgentKnowledgePanel } from '../AgentKnowledgePanel.js';
-import { AgentKnowledgeRequestError } from '../agentKnowledgeClient.js';
+import { AgentKnowledgeRequestError, type AgentKnowledgeView } from '../agentKnowledgeClient.js';
 
 const MANAGED_EN = 'This collection is managed (synced from strategy); edit the source instead.';
-const VIEW = {
+const VIEW: AgentKnowledgeView = {
   agentId: 'a1', knowledgeEnabled: true, memoryWritable: false, noteCount: 0,
   collections: [{ collectionId: 'mgd-strategy-o1', orgId: 'o1', name: 'Strategy', documentCount: 0, chunkCount: 0, documents: [] }],
 };
@@ -73,6 +77,9 @@ describe('KB2UX-3 — agent-knowledge failures are localized sentences', () => {
     fireEvent.change(screen.getByLabelText('Document text'), { target: { value: 'Q4 goals' } });
     fireEvent.click(screen.getByRole('button', { name: /Add document/ }));
     await waitFor(() => expect(api.getAgentKnowledge).toHaveBeenCalledTimes(2));
+    // The notice it is titled for — this case used to stop at "no error", so dropping the
+    // success notice entirely left it green (grade-tests w11).
+    expect(await screen.findByText('Document ingested.')).toBeTruthy();
     expect(screen.queryByText(/kept in sync by another feature/)).toBeNull();
   });
 });

@@ -9,6 +9,7 @@
  * `core.openwop.http` from the published packs.
  */
 
+import { confidenceEscalationFloor, multiAgentPhaseGates } from '../host/multiAgentPhases.js';
 import { declaredRunCredentialRefs } from '../host/runCredentials.js';
 import { createHash } from 'node:crypto';
 import { getNodeRegistry } from '../executor/nodeRegistry.js';
@@ -181,29 +182,27 @@ const orchestratorSupervisorNode: NodeModule = {
   version: '1.0.0',
   async execute(ctx) {
     const cfg = (ctx.config ?? {}) as { mockDispatchPlan?: unknown; agentId?: unknown };
-    // Default plan when no mockDispatchPlan is configured: a single
-    // pass through the dispatch loop (one no-op next-worker decision +
-    // terminate). Lets the `conformance-dispatch-loop` fixture
-    // exercise the supervisor→dispatch round-trip without a fixture-
-    // declared plan. Fixtures that want richer behavior (specific
-    // child workflow ids, multi-pass dispatching) carry the plan
-    // explicitly in their config.
+    // Default plan when no mockDispatchPlan is configured: ONE `terminate`
+    // decision. Fixtures that want dispatch (specific child workflow ids,
+    // multi-pass dispatching) carry the plan explicitly in their config.
+    //
+    // ADR 0858 P4 correction (2026-10-10) — this used to be
+    // `[{ kind: 'next-worker', nextWorkerIds: [] }, terminate]`, kept by ADR
+    // 0725 for the v1 fixture-catalog prerequisite "emit next-worker then
+    // terminate" (RFC 0007 §D), knowingly recording a decision that
+    // `orchestrator-decision.schema.json` refuses (`nextWorkerIds` minItems 1).
+    // The corpus settled that mismatch at major 2: `v2-dispatch-loop` does NOT
+    // port the exact sequence ("the fixture catalog's prerequisite on the host's
+    // supervisor, not a rule the v2 text states") and DOES require every
+    // recorded decision to be exactly one OrchestratorDecision branch. A
+    // `next-worker` naming no worker is not a decision this host can make
+    // honestly — `conformance-dispatch-loop` supplies no child workflow — so the
+    // no-plan supervisor terminates. v1 is retired (ADR 0812), so the major-1
+    // `dispatchLoop` scenario that pinned the old pair can no longer reach this
+    // host.
     const plan = Array.isArray(cfg.mockDispatchPlan) && cfg.mockDispatchPlan.length > 0
       ? cfg.mockDispatchPlan
-      // ADR 0725 — REVERTED, and the reason is a corpus mismatch worth keeping
-      // written down. `orchestrator-decision.schema.json` requires
-      // `nextWorkerIds` to carry ≥1 entry, so this `next-worker` step records a
-      // schema-invalid payload; collapsing the plan to a single `terminate`
-      // fixes that and BREAKS a normative MUST — RFC 0007 §D: "host MUST emit
-      // next-worker then terminate in a loop topology"
-      // (`conformance-dispatch-loop`, whose fixture supplies NO child workflow,
-      // so there is no id that would both satisfy `minItems: 1` and dispatch).
-      // The MUST wins; `runOrchestrator.decided` stays admitted in
-      // `scripts/event-payload-violations-baseline.json` with this reason.
-      : [
-          { kind: 'next-worker', nextWorkerIds: [] },
-          { kind: 'terminate', reason: 'goal-reached' },
-        ];
+      : [{ kind: 'terminate', reason: 'goal-reached' }];
     // RFC 0006 §B + `runOrchestratorDecided` schema requires `agentId` on
     // every emission. The supervisor's agent identity is either declared
     // explicitly via `config.agentId` (fixtures may pin a specific identity
@@ -326,7 +325,8 @@ const dispatchNode: NodeModule = {
     // via `OPENWOP_MULTI_AGENT_EXECUTION_MODEL=true`. The flag must agree
     // with the discovery doc's advertisement (`routes/discovery.ts`); the
     // RFC's normative wire contract is "do not emit unless advertised."
-    const multiAgentEnabled = process.env.OPENWOP_MULTI_AGENT_EXECUTION_MODEL === 'true';
+    const phaseGates = multiAgentPhaseGates(); // host/multiAgentPhases.ts — the gates the v2 advert's version is derived from
+    const multiAgentEnabled = phaseGates.phase1;
     // RFC 0039 §A — Phase 2 confidence-floor escalation. When the host
     // advertises capabilities.multiAgent.executionModel.version >= 2 (signaled
     // here by the OPENWOP_MULTI_AGENT_EXECUTION_MODEL_PHASE_2=true env-flag
@@ -335,13 +335,8 @@ const dispatchNode: NodeModule = {
     // clarify-or-escalate interrupt before any dispatch.began event fires
     // for the named worker. The spec floor is 0.5 (max-entropy threshold);
     // operator-stricter policy comes from `confidenceEscalationFloor`.
-    const multiAgentPhase2Enabled = process.env.OPENWOP_MULTI_AGENT_EXECUTION_MODEL_PHASE_2 === 'true';
-    const confidenceFloor = (() => {
-      const raw = process.env.OPENWOP_MULTI_AGENT_CONFIDENCE_FLOOR;
-      const parsed = raw === undefined ? 0.5 : Number(raw);
-      if (!Number.isFinite(parsed) || parsed < 0.5 || parsed > 1.0) return 0.5;
-      return parsed;
-    })();
+    const multiAgentPhase2Enabled = phaseGates.phase2;
+    const confidenceFloor = confidenceEscalationFloor();
     const hasOutputMapping = (childWorkflowId: string): boolean => {
       const m = perWorkerOutputMappings?.[childWorkflowId] ?? defaultOutputMapping;
       return !!m && Object.keys(m).length > 0;
@@ -363,7 +358,7 @@ const dispatchNode: NodeModule = {
     // is recorded in the event and re-emitted verbatim on replay, never recomputed
     // (replay.md). Hosts on version < 5 omit the field; consumers ignore it per the
     // forward-compatibility contract.
-    const emitIteration = process.env.OPENWOP_MULTI_AGENT_EXECUTION_MODEL_PHASE_5 === 'true';
+    const emitIteration = phaseGates.phase5;
     const ITERATION_VAR = '__runOrchestratorIteration';
     let iterationCounter = emitIteration ? Number(ctx.variables?.get(ITERATION_VAR) ?? 0) : 0;
 

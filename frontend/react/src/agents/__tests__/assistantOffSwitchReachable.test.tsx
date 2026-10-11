@@ -10,6 +10,11 @@
  *
  * Four cases, because the gate is a UNION and each arm has to be shown to matter
  * independently — a single "it renders" case would pass with either arm deleted.
+ *
+ * Sabotage-witnessed (wave 11): gate on roleKey alone → case 1 red; on the
+ * capability alone → case 2 red; no gate → cases 3+4 red; count ANY capability
+ * as `assistant` → case 3 red; treat a failed profile read as capable → case 4
+ * red (RTL's async act flushes the profile promise before the absence checks).
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, cleanup, waitFor } from '@testing-library/react';
@@ -68,5 +73,6 @@ describe('AST-UX-2 — the loops/health control surface is capability-gated', ()
     const { container } = renderPanels('sales-rep');
     await waitFor(() => expect(getAgentProfile).toHaveBeenCalled());
     expect(container.querySelector('[data-testid="loops-panel"]')).toBeNull();
+    expect(container.querySelector('[data-testid="health-panel"]')).toBeNull();
   });
 });

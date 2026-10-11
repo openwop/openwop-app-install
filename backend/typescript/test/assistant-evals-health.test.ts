@@ -1,26 +1,35 @@
 /**
  * ADR 0029 / ADR 0023 §12 T8 — evals, health & the approvals index:
  *   - extraction eval: a labeled calendar corpus → precision/recall of the
- *     deterministic ingest leg (RFC 0081 scorecard-shaped result);
- *   - priority-scoring eval: profile fixtures → expected bucket ordering is
- *     stable across the three admin profiles;
+ *     deterministic ingest leg (RFC 0081 scorecard-shaped result: the stored
+ *     description set must EQUAL the labeled set — P = R = 1);
  *   - the health snapshot: approval/edit rates, citation coverage, stale
  *     commitments, taint share — computed on existing seams;
  *   - the approvals (tenant,status) index: list + card-dedup correctness
- *     across create → resolve → prune, tenant-isolated.
+ *     across create → resolve, tenant-isolated.
+ *
+ * (The priority-profile eval that used to live here was cut by /grade-tests w11 —
+ * `assistant-loops.test.ts`'s prioritization cases assert the same orderings with
+ * exact buckets, and the same sabotage turned both red.)
+ *
+ * What breaks it (sabotage-witnessed, w11): the ingest description template or
+ * the malformed-item skip; the stale / citation / accepted / edited / tainted
+ * counters in `health.ts`; the approvals index write or the card predicate.
+ * Recorded double guard: `listApprovals` filters by tenant on BOTH the index
+ * prefix and the row, so dropping either alone stays green.
  */
 
 import { beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import {
   __resetAssistantStore,
+  editPendingAction,
   listCommitments,
   upsertCommitmentBySource,
 } from '../src/features/assistant/assistantService.js';
 import { enqueueActionWithApproval, decideActionViaApproval, contentHashOf } from '../src/features/assistant/actionApproval.js';
 import { buildAssistantHealth } from '../src/features/assistant/health.js';
 import { buildAssistantSurface } from '../src/features/assistant/surface.js';
-import { prioritize, PRIORITY_PROFILES } from '../src/features/assistant/prioritization.js';
 import {
   createApproval,
   listApprovals,
@@ -60,40 +69,9 @@ describe('extraction eval (labeled corpus → precision/recall)', () => {
       features: { assistant: buildAssistantSurface({ tenantId: TENANT }) },
     });
     const stored = await listCommitments(TENANT);
-    const got = new Set(stored.map((c) => c.description));
-
-    // RFC 0081 scorecard shape: per-metric scores in [0,1].
-    const truePositives = [...got].filter((d) => expected.has(d)).length;
-    const scorecard = {
-      metrics: {
-        precision: truePositives / got.size,
-        recall: truePositives / expected.size,
-      },
-    };
-    expect(scorecard.metrics.precision).toBe(1);
-    expect(scorecard.metrics.recall).toBe(1);
-  });
-});
-
-describe('priority-scoring eval (profile fixtures)', () => {
-  it('bucket assignment is stable and ordered across the three admin profiles', () => {
-    const urgent = { senderImportance: 0.9, deadlineProximity: 0.95, projectPriority: 0.8, priorEngagement: 0.7 };
-    const ambient = { senderImportance: 0.2, deadlineProximity: 0.05, projectPriority: 0.3, priorEngagement: 0.2 };
-    const rank = { surface: 2, handle: 1, defer: 0 } as const;
-    for (const profile of Object.values(PRIORITY_PROFILES)) {
-      const hot = prioritize(urgent, profile);
-      const cold = prioritize(ambient, profile);
-      expect(hot.score).toBeGreaterThan(cold.score);
-      expect(rank[hot.bucket]).toBeGreaterThanOrEqual(rank[cold.bucket]);
-    }
-    // Profile semantics (prioritization.ts): `conservative` surfaces MORE
-    // (low bar — ask the human often); `aggressive` handles/defers more
-    // (high bar). A mid-priority item must surface under conservative at
-    // least as readily as under aggressive.
-    const mid = { senderImportance: 0.55, deadlineProximity: 0.5, projectPriority: 0.5, priorEngagement: 0.5 };
-    const aggressive = prioritize(mid, PRIORITY_PROFILES.aggressive);
-    const conservative = prioritize(mid, PRIORITY_PROFILES.conservative);
-    expect(rank[conservative.bucket]).toBeGreaterThanOrEqual(rank[aggressive.bucket]);
+    // RFC 0081 scorecard: precision = recall = 1 ⇔ the stored set EQUALS the labeled
+    // set (no extra row from a malformed item, no missed or re-worded one).
+    expect(stored.map((c) => c.description).sort()).toEqual([...expected].sort());
   });
 });
 
@@ -121,6 +99,10 @@ describe('health snapshot', () => {
     });
     await decideActionViaApproval(TENANT, a1.approvalId!, 'approved', { expectedContentHash: contentHashOf(a1), decidedByUserId: 'u1' });
     const a2 = await enqueueActionWithApproval(TENANT, { kind: 'nudge', payload: {}, draft: 'nudge two' });
+    // The principal edits the second draft before rejecting it, so editRate has a
+    // non-zero numerator (a 0 here was satisfied by any implementation).
+    const edited = await editPendingAction(TENANT, a2.actionId, { draft: 'nudge two (edited)', editedByUserId: 'u1' }, () => true);
+    expect(edited.ok).toBe(true);
     await decideActionViaApproval(TENANT, a2.approvalId!, 'rejected', {});
 
     const health = await buildAssistantHealth(TENANT);
@@ -130,10 +112,10 @@ describe('health snapshot', () => {
     expect(health.actions.sent).toBe(1);
     expect(health.actions.rejected).toBe(1);
     expect(health.actions.approvalRate).toBe(0.5);
-    expect(health.actions.editRate).toBe(0);
+    expect(health.actions.editRate).toBe(0.5);
     expect(health.actions.citationCoverage).toBe(0.5);
     expect(health.actions.taintedShare).toBe(0.5);
-    expect(health.loops.map((l) => l.loopId)).toContain('morning-briefing');
+    expect(health.loops.map((l) => l.loopId).sort()).toEqual(['calendar-ingest', 'drive-ingest', 'morning-briefing']);
   });
 });
 

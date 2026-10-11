@@ -30,6 +30,7 @@
  * @see scheduler.ts for the trigger-rule + condition evaluation.
  */
 
+import { multiAgentPhaseGates } from '../host/multiAgentPhases.js';
 import { NEGOTIATION_DECIDED_EVENT, type NegotiationRecorder } from '../host/negotiationDecided.js';
 import { runOption } from '../host/runOptions.js';
 import { runUnderWorkerContract } from '../storage/eventEraAdapter.js';
@@ -1299,7 +1300,7 @@ async function runOneNode(input: {
   // Gated on `OPENWOP_MULTI_AGENT_EXECUTION_MODEL_PHASE_4=true` — non-
   // Phase-4 hosts MUST NOT emit this event per the schema description on
   // `run-event-payloads.schema.json` §`replayDivergedAtRefusal`.
-  const phase4Enabled = process.env.OPENWOP_MULTI_AGENT_EXECUTION_MODEL_PHASE_4 === 'true';
+  const phase4Enabled = multiAgentPhaseGates().phase4;
   const isReplayFork = run.forkMode === 'replay' && typeof run.parentRunId === 'string';
 
   // Discriminated union — when `diverged: true`, `originalKind` is

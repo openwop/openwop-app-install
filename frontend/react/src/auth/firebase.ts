@@ -28,13 +28,13 @@
 // import() and pull it in on first auth use (sign-in, or the boot-time
 // onAuthChanged subscription). Types are `import type` only — erased at build,
 // so they add no runtime firebase reference to the entry chunk.
-import type { FirebaseApp } from 'firebase/app';
-import type { AuthCredential, User, Auth, TotpSecret, MultiFactorResolver } from 'firebase/auth';
+import type { FirebaseApp } from '@firebase/app';
+import type { AuthCredential, User, Auth, TotpSecret, MultiFactorResolver } from '@firebase/auth';
 import { setCurrentIdToken, registerIdTokenRefresher } from '../client/config.js';
 import i18n from '../i18n/index.js';
 
-/** The lazily-imported `firebase/auth` module namespace. */
-type AuthMod = typeof import('firebase/auth');
+/** The lazily-imported `@firebase/auth` module namespace. */
+type AuthMod = typeof import('@firebase/auth');
 
 // ─── redirect-flow state persistence ────────────────────────────
 // We use the redirect-based sign-in flow (not popup) to dodge the
@@ -190,7 +190,7 @@ async function ensureInitAsync(): Promise<Auth | null> {
   if (!cfg) return null;
   if (initPromise) return initPromise;
   initPromise = (async () => {
-    const [appMod, am] = await Promise.all([import('firebase/app'), import('firebase/auth')]);
+    const [appMod, am] = await Promise.all([import('@firebase/app'), import('@firebase/auth')]);
     authMod = am;
     app = appMod.initializeApp(cfg);
     auth = am.getAuth(app);

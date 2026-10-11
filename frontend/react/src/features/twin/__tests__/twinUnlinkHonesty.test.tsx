@@ -15,12 +15,21 @@
  *   3. MEDIUM-2 — the self-case confirm body is its own sentence
  *      (`unlinkConfirmBodySelf`), not a pronoun spliced into `{{name}}'s`
  *      ("revokes your's consent").
+ *
+ * Sabotage witnesses (w12): an unconditional notice either way reds the opposite unlink case;
+ * forcing the non-self body reds MEDIUM-2; turning the refetch failure into an action error
+ * reds the split case; letting a failed write fall through to the success notice reds the
+ * failed-revoke case.
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, cleanup, act, fireEvent } from '@testing-library/react';
+import type { AgentTwinView } from '../twinClient.js';
 
 const { getAgentTwin, unlinkTwin, revokeRecall, confirmMock } = vi.hoisted(() => ({
-  getAgentTwin: vi.fn(), unlinkTwin: vi.fn(), revokeRecall: vi.fn(), confirmMock: vi.fn(),
+  getAgentTwin: vi.fn<typeof import('../twinClient.js').getAgentTwin>(),
+  unlinkTwin: vi.fn<typeof import('../twinClient.js').unlinkTwin>(),
+  revokeRecall: vi.fn<typeof import('../twinClient.js').revokeRecall>(),
+  confirmMock: vi.fn<typeof import('../../../ui/confirm.js').confirm>(),
 }));
 import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
 vi.mock('../twinClient.js', async (orig) => ({
@@ -45,7 +54,7 @@ import { AgentTwinPanel } from '../AgentTwinPanel.js';
 const LINKED_TO_ME = {
   link: { userId: 'u-me', linkedBy: 'admin', linkedAt: '2026-01-01T00:00:00Z' },
   grant: { scopes: ['memory'], version: 1, grantedAt: '2026-01-02T00:00:00Z' },
-};
+} satisfies AgentTwinView;
 
 const mount = async (): Promise<void> => {
   render(<AgentTwinPanel rosterId="r1" persona="Ada" />);
@@ -59,7 +68,7 @@ const clickButton = async (name: RegExp): Promise<void> => {
 
 afterEach(cleanup);
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
   getAgentTwin.mockResolvedValue(LINKED_TO_ME);
   unlinkTwin.mockResolvedValue({ removed: true });
   revokeRecall.mockResolvedValue({ removed: true });
@@ -88,7 +97,7 @@ describe('MEDIUM-2 — the self-case confirm body', () => {
     await mount();
     await clickButton(/^Unlink$/);
     expect(confirmMock).toHaveBeenCalledTimes(1);
-    const body = String(confirmMock.mock.calls[0]![0].body);
+    const body = String(confirmMock.mock.calls[0]![0].body ?? '');
     expect(body).toContain('revokes your consent');
     // The broken splice this replaces: `{{name}}'s` filled with "your".
     expect(body).not.toContain('your’s');

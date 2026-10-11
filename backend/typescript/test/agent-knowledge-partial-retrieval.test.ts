@@ -16,11 +16,18 @@
  * surface `failedSources`. These tests pin BOTH halves — that a fault is
  * reported, and that a healthy-but-empty retrieval reports NOTHING, because an
  * over-eager flag would be the same defect with the opposite sign.
+ *
+ * Sabotage that turns this red (grade-tests w11 probes): dropping the KB catch's or the
+ * memory catch's `onSourceError` (THROWS / MEMORY / BOTH / node lane); not reporting an
+ * ABSENT backend (NO backend); reporting absence for a memory-only binding; reporting `kb`
+ * whenever a backend exists (both HEALTHY arms + PER CALL + node-lane healthy); capturing the
+ * backend at resolve time (PER CALL); calling the sink non-optionally (OPTIONAL); dropping
+ * `failedSources` from `surface.ts` (both node-lane cases).
  */
 
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { resolveSubjectKnowledgeRetrieve } from '../src/host/agentKnowledgeComposition.js';
-import { setKnowledgeBackend } from '../src/host/knowledgeSurface.js';
+import { setKnowledgeBackend, type KnowledgeBackend, type KnowledgeResult, type KnowledgeResultChunk } from '../src/host/knowledgeSurface.js';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -47,10 +54,10 @@ async function seedBoundAgent(): Promise<string> {
   const agentId = `agent-kb-${seeded++}`;
   await upsertAgentProfile(TENANT_SURFACE, agentId, {
     roleKey: 'kb-agent',
-    autonomy: { level: 'review', specLevel: 'recommend' },
+    autonomy: { specLevel: 'recommend' },
     capabilities: ['knowledge'],
     knowledge: { collectionIds: ['c1'] },
-  } as never);
+  });
   return agentId;
 }
 
@@ -59,8 +66,19 @@ function memoryPort(over: Partial<AgentMemoryPort> = {}): AgentMemoryPort {
     read: async () => [],
     write: async () => undefined,
     ...over,
-  } as unknown as AgentMemoryPort;
+  };
 }
+
+/** Production-shaped KB fixtures (`KnowledgeBackend` has ONE method; the result chunks are
+ *  full `KnowledgeResultChunk`s, so no cast hides a missing field). */
+const backend = (retrieve: KnowledgeBackend['retrieve']): KnowledgeBackend => ({ retrieve });
+const result = (chunks: KnowledgeResultChunk[]): KnowledgeResult => ({ chunks, sources: [], latencyMs: chunks.length ? 1 : 0, hasResults: chunks.length > 0 });
+const EMPTY = (): Promise<KnowledgeResult> => Promise.resolve(result([]));
+const THROWS = (msg: string) => async (): Promise<KnowledgeResult> => { throw new Error(msg); };
+const chunk = (content: string, documentTitle: string): KnowledgeResultChunk => ({
+  chunkId: `${documentTitle}-1`, content, headingPath: [], pageNumber: null, documentTitle,
+  assetId: 'd1', collectionId: 'c1', relevanceScore: 1, contentTrust: 'trusted',
+});
 
 /** Collect what the retriever reports, the way the preview services do. */
 async function retrieveWithReport(
@@ -78,9 +96,7 @@ beforeEach(() => { setKnowledgeBackend(null); });
 
 describe('KB-UX-3 — a faulted retrieval source is reported', () => {
   it('a KB backend that THROWS is reported as a failed source, not as an empty corpus', async () => {
-    setKnowledgeBackend({
-      retrieve: async () => { throw new Error('vector store unavailable'); },
-    } as never);
+    setKnowledgeBackend(backend(THROWS('vector store unavailable')));
 
     const { chunks, failedSources } = await retrieveWithReport(memoryPort());
 
@@ -91,7 +107,7 @@ describe('KB-UX-3 — a faulted retrieval source is reported', () => {
   });
 
   it('a MEMORY port that throws is reported the same way', async () => {
-    setKnowledgeBackend({ retrieve: async () => ({ chunks: [], sources: [], latencyMs: 0, hasResults: false }) } as never);
+    setKnowledgeBackend(backend(EMPTY));
 
     const { chunks, failedSources } = await retrieveWithReport(
       memoryPort({ read: async () => { throw new Error('memory store unavailable'); } }),
@@ -102,7 +118,7 @@ describe('KB-UX-3 — a faulted retrieval source is reported', () => {
   });
 
   it('BOTH faulting reports both — the sink is per-source, not a single boolean', async () => {
-    setKnowledgeBackend({ retrieve: async () => { throw new Error('down'); } } as never);
+    setKnowledgeBackend(backend(THROWS('down')));
 
     const { failedSources } = await retrieveWithReport(
       memoryPort({ read: async () => { throw new Error('down'); } }),
@@ -115,7 +131,7 @@ describe('KB-UX-3 — a faulted retrieval source is reported', () => {
     // Without this arm, a fix that reported "failed" unconditionally would pass
     // every assertion above while making "no matches" unreachable — the same
     // defect with the sign flipped.
-    setKnowledgeBackend({ retrieve: async () => ({ chunks: [], sources: [], latencyMs: 0, hasResults: false }) } as never);
+    setKnowledgeBackend(backend(EMPTY));
 
     const { chunks, failedSources } = await retrieveWithReport(memoryPort());
 
@@ -124,12 +140,7 @@ describe('KB-UX-3 — a faulted retrieval source is reported', () => {
   });
 
   it('a HEALTHY non-empty retrieval reports nothing and still returns its chunks', async () => {
-    setKnowledgeBackend({
-      retrieve: async () => ({
-        chunks: [{ content: 'a policy passage', documentTitle: 'PTO Policy', assetId: 'd1', contentTrust: 'trusted' }],
-        sources: [], latencyMs: 1, hasResults: true,
-      }),
-    } as never);
+    setKnowledgeBackend(backend(async () => result([chunk('a policy passage', 'PTO Policy')])));
 
     const { chunks, failedSources } = await retrieveWithReport(memoryPort());
 
@@ -177,12 +188,7 @@ describe('KB-UX-3 — a faulted retrieval source is reported', () => {
     const retrieve = resolveSubjectKnowledgeRetrieve(TENANT, BINDING, memoryPort(), 'user:u1');
     expect(retrieve).toBeTruthy();
 
-    setKnowledgeBackend({
-      retrieve: async () => ({
-        chunks: [{ content: 'late-bound passage', documentTitle: 'D', assetId: 'd1', contentTrust: 'trusted' }],
-        sources: [], latencyMs: 1, hasResults: true,
-      }),
-    } as never);
+    setKnowledgeBackend(backend(async () => result([chunk('late-bound passage', 'D')])));
 
     const failedSources: string[] = [];
     const out = await retrieve!('anything', (s) => failedSources.push(s));
@@ -193,7 +199,7 @@ describe('KB-UX-3 — a faulted retrieval source is reported', () => {
   it('the sink is OPTIONAL — dispatch/chat still call retrieve(query) and a fault stays swallowed', async () => {
     // The live-turn contract this composition exists to protect. If passing no
     // sink ever threw, every agent turn would fail on a KB blip.
-    setKnowledgeBackend({ retrieve: async () => { throw new Error('down'); } } as never);
+    setKnowledgeBackend(backend(THROWS('down')));
     const retrieve = resolveSubjectKnowledgeRetrieve(TENANT, BINDING, memoryPort(), 'user:u1');
     await expect(retrieve!('anything')).resolves.toEqual([]);
   });
@@ -212,10 +218,10 @@ describe('KB-UX-3 — a faulted retrieval source is reported', () => {
  */
 describe('KB-UX-3 / L7 — the workflow-node surface projects failedSources', () => {
   it('a faulted backend reaches the node as a failed SOURCE, not as an empty corpus', async () => {
-    setKnowledgeBackend({ retrieve: async () => { throw new Error('vector store unavailable'); } } as never);
+    setKnowledgeBackend(backend(THROWS('vector store unavailable')));
     const agentId = await seedBoundAgent();
 
-    const surface = buildAgentKnowledgeSurface({ tenantId: TENANT_SURFACE, runId: 'run:1' } as never);
+    const surface = buildAgentKnowledgeSurface({ tenantId: TENANT_SURFACE, runId: 'run:1' });
     const out = await surface.retrieve!({ agentId, query: 'anything' }) as {
       chunks: unknown[]; hasResults: boolean; failedSources: string[];
     };
@@ -225,10 +231,10 @@ describe('KB-UX-3 / L7 — the workflow-node surface projects failedSources', ()
   });
 
   it('a healthy empty retrieval still reports NO failed sources on the node lane', async () => {
-    setKnowledgeBackend({ retrieve: async () => ({ chunks: [], sources: [], latencyMs: 0, hasResults: false }) } as never);
+    setKnowledgeBackend(backend(EMPTY));
     const agentId = await seedBoundAgent();
 
-    const surface = buildAgentKnowledgeSurface({ tenantId: TENANT_SURFACE, runId: 'run:2' } as never);
+    const surface = buildAgentKnowledgeSurface({ tenantId: TENANT_SURFACE, runId: 'run:2' });
     const out = await surface.retrieve!({ agentId, query: 'anything' }) as {
       hasResults: boolean; failedSources: string[];
     };

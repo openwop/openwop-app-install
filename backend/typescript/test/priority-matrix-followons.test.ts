@@ -3,10 +3,20 @@
  *   - ADR 0060: portfolio normalization (list-relative + percentile)
  *   - ADR 0059: per-voter vote breakdown (config-authority gated)
  *   - ADR 0059: single→multi-voter vote seeding (scores survive the switch)
+ *
+ * Sabotage map (wave 15, `w15g1-fo-*`): the list-relative scale, the percentile
+ * DIRECTION (caught by the rank-order + middle value; the re-sort hid it before), the
+ * `none` default, the `/votes` config-authority gate, the multi-voter breakdown, and the
+ * single→multi seeding each turn a case red.
+ * CEILING: `planningHarness.ts` returns untyped JSON bodies (shared infra, 19 importers);
+ * the reads here are narrowed by annotated assignment, not casts.
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { bootPlanningApp, makeClient, enableToggle, uniqEmail, type Client } from './planningHarness.js';
+import type { PortfolioItem, VoteBreakdownEntry } from '../src/features/priority-matrix/priorityMatrixService.js';
+
+type Portfolio = { normalize: string; items: PortfolioItem[] };
 
 let BASE = '';
 let closeApp: () => Promise<void>;
@@ -47,18 +57,22 @@ describe('portfolio normalization (ADR 0060)', () => {
     await scoredIdea(owner, list.id, 'mid', MID);
     await scoredIdea(owner, list.id, 'low', LOW);
 
-    const raw = (await owner.get(`${L.replace('/lists', '')}/portfolio`)).body;
+    const raw: Portfolio = (await owner.get(`${L.replace('/lists', '')}/portfolio`)).body;
     expect(raw.normalize).toBe('none');
-    expect(raw.items[0].normalizedPriority).toBeUndefined();
+    expect(raw.items[0]!.normalizedPriority).toBeUndefined();
 
-    const rel = (await owner.get(`${L.replace('/lists', '')}/portfolio?normalize=list-relative`)).body;
+    const rel: Portfolio = (await owner.get(`${L.replace('/lists', '')}/portfolio?normalize=list-relative`)).body;
     expect(rel.normalize).toBe('list-relative');
-    expect(rel.items[0].normalizedPriority).toBe(100); // top of its list
-    expect(rel.items[0].title).toBe('top');
+    expect(rel.items.map((i) => i.title)).toEqual(['top', 'mid', 'low']);
+    expect(rel.items[0]!.normalizedPriority).toBe(100); // top of its list
+    expect(rel.items[1]!.normalizedPriority).toBeGreaterThan(0);
+    expect(rel.items[1]!.normalizedPriority).toBeLessThan(100);
 
-    const pct = (await owner.get(`${L.replace('/lists', '')}/portfolio?normalize=percentile`)).body;
-    expect(pct.items[0].normalizedPriority).toBe(100); // rank 1 of 3
-    expect(pct.items[2].normalizedPriority).toBe(0);   // rank 3 of 3
+    const pct: Portfolio = (await owner.get(`${L.replace('/lists', '')}/portfolio?normalize=percentile`)).body;
+    // The route re-sorts by the normalized value, so 100…0 alone would survive an
+    // inverted direction — the ORDER of the ideas is what carries the claim.
+    expect(pct.items.map((i) => i.title)).toEqual(['top', 'mid', 'low']);
+    expect(pct.items.map((i) => i.normalizedPriority)).toEqual([100, 50, 0]); // rank 1/2/3 of 3
   });
 });
 
@@ -66,7 +80,7 @@ describe('vote breakdown (ADR 0059) — config-authority gated', () => {
   it('owner sees per-voter scores; a co-tenant editor is 403', async () => {
     const tenantId = `org:fo-${Date.now()}-${n++}`;
     const owner = client();
-    await signup(owner, { tenantId });
+    const ownerUser = await signup(owner, { tenantId });
     const member = client();
     const memberUser = await signup(member, { tenantId });
     const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
@@ -79,7 +93,11 @@ describe('vote breakdown (ADR 0059) — config-authority gated', () => {
     const votesUrl = `${L}/${encodeURIComponent(list.id)}/ideas/${encodeURIComponent(idea.id)}/votes`;
     const ownerView = await owner.get(votesUrl);
     expect(ownerView.status, JSON.stringify(ownerView.body)).toBe(200);
-    expect(ownerView.body.votes).toHaveLength(2); // both voters
+    const votes: VoteBreakdownEntry[] = ownerView.body.votes;
+    // Both voters, each with THEIR OWN ballot.
+    expect(votes.map((v) => v.voterId).sort()).toEqual([ownerUser.userId, memberUser.userId].sort());
+    expect(votes.find((v) => v.voterId === ownerUser.userId)?.scores).toEqual(HIGH);
+    expect(votes.find((v) => v.voterId === memberUser.userId)?.scores).toEqual(LOW);
     // The editor (not creator, not org-admin) can't see the breakdown.
     expect((await member.get(votesUrl)).status).toBe(403);
   });
@@ -104,8 +122,8 @@ describe('single→multi-voter seeding (ADR 0059)', () => {
     expect(after.voterCount).toBe(1);
     expect(after.myScores.roi).toBe(10);
     // The breakdown shows exactly the creator's seeded vote.
-    const votes = (await owner.get(`${L}/${encodeURIComponent(list.id)}/ideas/${encodeURIComponent(idea)}/votes`)).body.votes;
+    const votes: VoteBreakdownEntry[] = (await owner.get(`${L}/${encodeURIComponent(list.id)}/ideas/${encodeURIComponent(idea)}/votes`)).body.votes;
     expect(votes).toHaveLength(1);
-    expect(votes[0].scores.roi).toBe(10);
+    expect(votes[0]!.scores.roi).toBe(10);
   });
 });

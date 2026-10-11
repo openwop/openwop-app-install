@@ -12,6 +12,12 @@
  * The existing test covers private-THEN-share; this covers share-THEN-private,
  * and the way back.
  *
+ * Double guards (w13, recorded ceiling): the KB per-collection door is gated by BOTH the
+ * service (`kbService.readableCollection`) and the mounted route guard
+ * (`kb/routes.ts` `assertCollectionSubjectReadable`), and the listing by both the route filter
+ * and `filterReadable`; sabotaging either alone leaves this file green. The STAMP legs, the
+ * member-read arm, the release-on-delete and the CPC-3 notify are each probe-witnessed.
+ *
  * @see docs/adr/0608-collaborative-projects-visibility-and-browser-cadence.md
  */
 
@@ -47,17 +53,28 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T }
-interface Client { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res>; patch: (p: string, b?: unknown) => Promise<Res>; del: (p: string) => Promise<Res> }
+/** Bodies default to `unknown`; a leg that reads a field names the shape at the call site. */
+interface Res<T = unknown> { status: number; body: T }
+interface Client {
+  get: <T = unknown>(p: string) => Promise<Res<T>>;
+  post: <T = unknown>(p: string, b?: unknown) => Promise<Res<T>>;
+  patch: <T = unknown>(p: string, b?: unknown) => Promise<Res<T>>;
+  del: <T = unknown>(p: string) => Promise<Res<T>>;
+}
 function client(): Client {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
+  const call = async <T>(method: string, path: string, body?: unknown): Promise<Res<T>> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
-    return { status: res.status, body: out };
+    const out: unknown = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    return { status: res.status, body: out as T };
   };
-  return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), patch: (p, b) => call('PATCH', p, b), del: (p) => call('DELETE', p) };
+  return {
+    get: <T = unknown>(p: string) => call<T>('GET', p),
+    post: <T = unknown>(p: string, b?: unknown) => call<T>('POST', p, b),
+    patch: <T = unknown>(p: string, b?: unknown) => call<T>('PATCH', p, b),
+    del: <T = unknown>(p: string) => call<T>('DELETE', p),
+  };
 }
 
 const P = '/host/openwop-app/projects';
@@ -70,16 +87,16 @@ async function privateCorpus() {
   const tenantId = `org:pkv-${Date.now()}-${n++}`;
   const owner = client();
   await owner.post('/host/openwop-app/test/login', { email: uniqEmail('pkv-owner'), tenantId });
-  const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'PrivCo' })).body.orgId;
-  const projectId = (await owner.post(P, { orgId, name: 'Secret' })).body.id;
-  const col = await owner.post(`${P}/${projectId}/knowledge/collections`, { orgId, name: 'Secret notes' });
+  const orgId = (await owner.post<{ orgId: string }>('/host/openwop-app/orgs', { name: 'PrivCo' })).body.orgId;
+  const projectId = (await owner.post<{ id: string }>(P, { orgId, name: 'Secret' })).body.id;
+  const col = await owner.post<{ collectionId: string }>(`${P}/${projectId}/knowledge/collections`, { orgId, name: 'Secret notes' });
   expect(col.status, JSON.stringify(col.body)).toBe(201);
   const collectionId: string = col.body.collectionId;
   const ing = await owner.post(`${P}/${projectId}/knowledge/collections/${collectionId}/documents`, {
     orgId, title: 'Merger plan', text: 'ACQUIRE ACME FOR 40M. Board only.',
   });
   expect(ing.status, JSON.stringify(ing.body)).toBe(201);
-  expect((await owner.patch(`${P}/${projectId}/visibility`, { visibility: 'private' })).body.visibility).toBe('private');
+  expect((await owner.patch<{ visibility: string }>(`${P}/${projectId}/visibility`, { visibility: 'private' })).body.visibility).toBe('private');
   return { tenantId, orgId, projectId, collectionId, owner };
 }
 
@@ -90,14 +107,14 @@ async function privateNotebookCorpus() {
   const tenantId = `org:pkv-nb-${Date.now()}-${n++}`;
   const owner = client();
   await owner.post('/host/openwop-app/test/login', { email: uniqEmail('pkv-nb-owner'), tenantId });
-  const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'PrivCo' })).body.orgId;
-  const projectId = (await owner.post(P, { orgId, name: 'SecretNB' })).body.id;
-  const ensure = await owner.post(`${NB}/${projectId}/ensure`);
+  const orgId = (await owner.post<{ orgId: string }>('/host/openwop-app/orgs', { name: 'PrivCo' })).body.orgId;
+  const projectId = (await owner.post<{ id: string }>(P, { orgId, name: 'SecretNB' })).body.id;
+  const ensure = await owner.post<{ collectionId: string }>(`${NB}/${projectId}/ensure`);
   expect(ensure.status, JSON.stringify(ensure.body)).toBe(200);
   const collectionId: string = ensure.body.collectionId;
   const ing = await owner.post(`${NB}/${projectId}/sources`, { title: 'Merger plan', text: 'ACQUIRE ACME FOR 40M. Board only.' });
   expect(ing.status, JSON.stringify(ing.body)).toBe(201);
-  expect((await owner.patch(`${P}/${projectId}/visibility`, { visibility: 'private' })).body.visibility).toBe('private');
+  expect((await owner.patch<{ visibility: string }>(`${P}/${projectId}/visibility`, { visibility: 'private' })).body.visibility).toBe('private');
   return { tenantId, orgId, projectId, collectionId, owner };
 }
 
@@ -108,21 +125,21 @@ async function privateCreatedNotebookCorpus() {
   const tenantId = `org:pkv-cn-${Date.now()}-${n++}`;
   const owner = client();
   await owner.post('/host/openwop-app/test/login', { email: uniqEmail('pkv-cn-owner'), tenantId });
-  const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'PrivCo' })).body.orgId;
-  const created = await owner.post(NB, { name: 'SecretCN', orgId });
+  const orgId = (await owner.post<{ orgId: string }>('/host/openwop-app/orgs', { name: 'PrivCo' })).body.orgId;
+  const created = await owner.post<{ notebook: { id: string }; collectionId: string }>(NB, { name: 'SecretCN', orgId });
   expect(created.status, JSON.stringify(created.body)).toBe(201);
   const projectId: string = created.body.notebook.id;
   const collectionId: string = created.body.collectionId;
   const ing = await owner.post(`${NB}/${projectId}/sources`, { title: 'Merger plan', text: 'ACQUIRE ACME FOR 40M. Board only.' });
   expect(ing.status, JSON.stringify(ing.body)).toBe(201);
-  expect((await owner.patch(`${P}/${projectId}/visibility`, { visibility: 'private' })).body.visibility).toBe('private');
+  expect((await owner.patch<{ visibility: string }>(`${P}/${projectId}/visibility`, { visibility: 'private' })).body.visibility).toBe('private');
   return { tenantId, orgId, projectId, collectionId, owner };
 }
 
 /** A real org VIEWER of the same org who is NOT a project member. */
 async function orgViewer(tenantId: string, orgId: string): Promise<Client & { userId: string }> {
   const viewer = client();
-  const viewerId = (await viewer.post('/host/openwop-app/test/login', { email: uniqEmail('pkv-viewer'), tenantId })).body.user.userId;
+  const viewerId = (await viewer.post<{ user: { userId: string } }>('/host/openwop-app/test/login', { email: uniqEmail('pkv-viewer'), tenantId })).body.user.userId;
   await createMember({ tenantId, orgId, subject: viewerId, displayName: 'V', roles: ['viewer'] });
   return Object.assign(viewer, { userId: viewerId as string });
 }
@@ -135,11 +152,11 @@ describe('CPC-2 — a private project\'s corpus is not readable through the KB d
     // Control: the project door already refuses, and the viewer really is an org reader.
     expect((await viewer.get(`${P}/${projectId}`)).status).toBe(404);
     expect((await viewer.get(`${P}/${projectId}/knowledge`)).status).toBe(404);
-    expect((await viewer.get(`${KB(orgId)}/collections`)).status).toBe(200); // org read works
+    expect((await viewer.get<{ collections: { collectionId: string }[] }>(`${KB(orgId)}/collections`)).status).toBe(200); // org read works
 
     // The KB door must now agree, on every lane that reaches the rows.
-    const list = await viewer.get(`${KB(orgId)}/collections`);
-    expect((list.body.collections as { collectionId: string }[]).map((c) => c.collectionId)).not.toContain(collectionId);
+    const list = await viewer.get<{ collections: { collectionId: string }[] }>(`${KB(orgId)}/collections`);
+    expect(list.body.collections.map((c) => c.collectionId)).not.toContain(collectionId);
     expect((await viewer.get(`${KB(orgId)}/collections/${collectionId}`)).status).toBe(404);
     expect((await viewer.get(`${KB(orgId)}/collections/${collectionId}/documents`)).status).toBe(404);
 
@@ -168,7 +185,7 @@ describe('CPC-2 — a private project\'s corpus is not readable through the KB d
     // guard must not be a one-way ratchet.
     const stranger = await orgViewer(tenantId, orgId);
     expect((await stranger.get(`${KB(orgId)}/collections/${collectionId}`)).status).toBe(404);
-    expect((await owner.patch(`${P}/${projectId}/visibility`, { visibility: 'org' })).body.visibility).toBe('org');
+    expect((await owner.patch<{ visibility: string }>(`${P}/${projectId}/visibility`, { visibility: 'org' })).body.visibility).toBe('org');
     expect((await stranger.get(`${KB(orgId)}/collections/${collectionId}`)).status).toBe(200);
   });
 
@@ -191,7 +208,7 @@ describe('CPC-2 — a private project\'s corpus is not readable through the KB d
     expect((await getCollection(tenantId, orgId, collectionId, PREAUTHORIZED_CALLER))?.boundSubject).toBeTruthy();
     expect((await owner.get(`${KB(orgId)}/collections/${collectionId}`)).status).toBe(200);
 
-    expect((await owner.del(`${P}/${projectId}`)).body.deleted).toBe(true);
+    expect((await owner.del<{ deleted: boolean }>(`${P}/${projectId}`)).body.deleted).toBe(true);
 
     expect((await getCollection(tenantId, orgId, collectionId, PREAUTHORIZED_CALLER))?.boundSubject).toBeUndefined();
     // The corpus outlives the project and stays reachable — it was never deleted.
@@ -205,24 +222,32 @@ describe('CPC-2 — a private project\'s corpus is not readable through the KB d
     // still an org resource; stamping on bind narrowed it retroactively AND made
     // a two-project collection hostage to whichever project was deleted first.
     const { tenantId, orgId, owner } = await privateCorpus();
-    const shared = await owner.post(`${KB(orgId)}/collections`, { name: 'Shared org corpus' });
+    const shared = await owner.post<{ collectionId: string }>(`${KB(orgId)}/collections`, { name: 'Shared org corpus' });
     expect(shared.status).toBe(201);
     const sharedId: string = shared.body.collectionId;
-    const other = (await owner.post(P, { orgId, name: 'Bindy' })).body.id;
+    const other = (await owner.post<{ id: string }>(P, { orgId, name: 'Bindy' })).body.id;
     expect([200, 201]).toContain((await owner.post(`${P}/${other}/knowledge/bindings`, { collectionId: sharedId })).status);
 
-    expect((await getCollection(tenantId, orgId, sharedId))?.boundSubject).toBeUndefined();
+    // Read the ROW (preauthorized): with no caller a stamped row reads `null`, so
+    // `?.boundSubject` would be undefined whether or not bind stamped it — the w13 grade
+    // found this leg could not fail.
+    expect((await getCollection(tenantId, orgId, sharedId, PREAUTHORIZED_CALLER))?.boundSubject).toBeUndefined();
+    // And through the door with the binding project PRIVATE: a bind-time stamp naming
+    // `other` would now refuse the org viewer. (While `other` is org-visible a stamp would
+    // still let them read, so a viewer check without this flip proved nothing.)
+    // Ceiling: no stamp-on-bind code path exists to sabotage — this guards its return.
+    expect((await owner.patch<{ visibility: string }>(`${P}/${other}/visibility`, { visibility: 'private' })).body.visibility).toBe('private');
     const viewer = await orgViewer(tenantId, orgId);
     expect((await viewer.get(`${KB(orgId)}/collections/${sharedId}`)).status).toBe(200);
   });
 
   it('an ordinary org collection (no project binding) is untouched by the guard', async () => {
     const { orgId, owner, tenantId } = await privateCorpus();
-    const plain = await owner.post(`${KB(orgId)}/collections`, { name: 'Plain org notes' });
+    const plain = await owner.post<{ collectionId: string }>(`${KB(orgId)}/collections`, { name: 'Plain org notes' });
     expect(plain.status).toBe(201);
     const viewer = await orgViewer(tenantId, orgId);
     expect((await viewer.get(`${KB(orgId)}/collections/${plain.body.collectionId}`)).status).toBe(200);
-    expect((await viewer.get(`${KB(orgId)}/collections`)).body.collections.some(
+    expect((await viewer.get<{ collections: { collectionId: string }[] }>(`${KB(orgId)}/collections`)).body.collections.some(
       (c: { collectionId: string }) => c.collectionId === plain.body.collectionId,
     )).toBe(true);
   });
@@ -237,7 +262,7 @@ describe('CPC-2 — a private project\'s corpus is not readable through the KB d
     expect((await getCollection(tenantId, orgId, collectionId, PREAUTHORIZED_CALLER))?.boundSubject).toEqual({ kind: 'project', id: projectId });
 
     // The KB door refuses the non-member on every lane, and the listing omits it.
-    expect((await viewer.get(`${KB(orgId)}/collections`)).body.collections
+    expect((await viewer.get<{ collections: { collectionId: string }[] }>(`${KB(orgId)}/collections`)).body.collections
       .map((c: { collectionId: string }) => c.collectionId)).not.toContain(collectionId);
     expect((await viewer.get(`${KB(orgId)}/collections/${collectionId}`)).status).toBe(404);
     expect((await viewer.get(`${KB(orgId)}/collections/${collectionId}/documents`)).status).toBe(404);
@@ -256,7 +281,7 @@ describe('CPC-2 — a private project\'s corpus is not readable through the KB d
     const viewer = await orgViewer(tenantId, orgId);
 
     expect((await getCollection(tenantId, orgId, collectionId, PREAUTHORIZED_CALLER))?.boundSubject).toEqual({ kind: 'project', id: projectId });
-    expect((await viewer.get(`${KB(orgId)}/collections`)).body.collections
+    expect((await viewer.get<{ collections: { collectionId: string }[] }>(`${KB(orgId)}/collections`)).body.collections
       .map((c: { collectionId: string }) => c.collectionId)).not.toContain(collectionId);
     expect((await viewer.get(`${KB(orgId)}/collections/${collectionId}`)).status).toBe(404);
     expect((await viewer.get(`${KB(orgId)}/collections/${collectionId}/documents`)).status).toBe(404);
@@ -269,21 +294,21 @@ describe('CPC-2 — a private project\'s corpus is not readable through the KB d
 
 describe('CPC-3 — flipping a shared project to private unbinds it from the advisors', () => {
   async function boardWithAdvisor(owner: Client, orgId: string) {
-    const r = await owner.post('/host/openwop-app/roster', { persona: 'Ada Lovelace', agentRef: { agentId: 'core.openwop.agents.brief-writer' } });
+    const r = await owner.post<{ rosterId: string }>('/host/openwop-app/roster', { persona: 'Ada Lovelace', agentRef: { agentId: 'core.openwop.agents.brief-writer' } });
     expect(r.status, JSON.stringify(r.body)).toBe(201);
     const rosterId: string = r.body.rosterId;
-    const b = await owner.post('/host/openwop-app/advisors/boards', { orgId, name: 'Council', advisors: [rosterId] });
+    const b = await owner.post<{ boardId: string }>('/host/openwop-app/advisors/boards', { orgId, name: 'Council', advisors: [rosterId] });
     expect(b.status, JSON.stringify(b.body)).toBe(201);
-    return { boardId: b.body.boardId as string, rosterId };
+    return { boardId: b.body.boardId, rosterId };
   }
 
   it('share-THEN-private unbinds the advisor; private-THEN-org re-binds it', async () => {
     const tenantId = `org:pkv3-${Date.now()}-${n++}`;
     const owner = client();
     await owner.post('/host/openwop-app/test/login', { email: uniqEmail('pkv3'), tenantId });
-    const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'ShareCo' })).body.orgId;
-    const projectId = (await owner.post(P, { orgId, name: 'Launch' })).body.id;
-    const collectionId: string = (await owner.post(`${P}/${projectId}/knowledge/collections`, { orgId, name: 'Launch notes' })).body.collectionId;
+    const orgId = (await owner.post<{ orgId: string }>('/host/openwop-app/orgs', { name: 'ShareCo' })).body.orgId;
+    const projectId = (await owner.post<{ id: string }>(P, { orgId, name: 'Launch' })).body.id;
+    const collectionId: string = (await owner.post<{ collectionId: string }>(`${P}/${projectId}/knowledge/collections`, { orgId, name: 'Launch notes' })).body.collectionId;
     const { boardId, rosterId } = await boardWithAdvisor(owner, orgId);
 
     // Share while the project is org-visible — the advisor is bound.
@@ -294,17 +319,22 @@ describe('CPC-3 — flipping a shared project to private unbinds it from the adv
 
     // NOW flip it private. The binding must be revoked — this is the arm the
     // existing `advisory-board-knowledge.test.ts` (private-THEN-share) cannot see.
-    expect((await owner.patch(`${P}/${projectId}/visibility`, { visibility: 'private' })).body.visibility).toBe('private');
+    expect((await owner.patch<{ visibility: string }>(`${P}/${projectId}/visibility`, { visibility: 'private' })).body.visibility).toBe('private');
     expect(await bound()).not.toContain(collectionId);
 
     // Positive control — the advisor's OTHER bindings and the board itself survive;
     // this is a targeted revoke, not a wipe.
-    const status = await owner.get(`/host/openwop-app/advisors/boards/${boardId}/shared-knowledge`);
-    expect(status.status).toBe(200);
+    const status = await owner.get<{ items: { kind: string; shared: boolean; count: number }[] }>(`/host/openwop-app/advisors/boards/${boardId}/shared-knowledge`);
+    expect(status.status, JSON.stringify(status.body)).toBe(200);
+    const projectItem = status.body.items.find((i) => i.kind === 'project');
+    // The STORED intent survives the revoke (it is what re-binds on the way back) …
+    expect(projectItem?.shared, 'the board still records the project kind as shared').toBe(true);
+    // … while the panel honestly reports that nothing is bound now.
+    expect(projectItem?.count).toBe(0);
 
     // And back: restoring `org` visibility re-binds, so stored intent stays honest
     // in BOTH directions rather than becoming a claim about nothing.
-    expect((await owner.patch(`${P}/${projectId}/visibility`, { visibility: 'org' })).body.visibility).toBe('org');
+    expect((await owner.patch<{ visibility: string }>(`${P}/${projectId}/visibility`, { visibility: 'org' })).body.visibility).toBe('org');
     expect(await bound()).toContain(collectionId);
   });
 });

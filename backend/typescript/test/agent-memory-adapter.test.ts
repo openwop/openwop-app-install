@@ -5,6 +5,13 @@
  * round-trip against `inMemorySurfaces`, cross-tenant isolation (CTI-1), a stable
  * per-agent namespace, and an end-to-end live dispatch where prior memory
  * persisted by the adapter reaches the next turn's prompt.
+ *
+ * Sabotage that turns this red (grade-tests w11 probes): a constant agent id in
+ * `agentMemoryScope` (scope cases); dropping `scrubSecretShaped` (SR-1); always-trusted
+ * `trustOf`, or ignoring the vector metadata's `contentTrust` (trust case); one shared
+ * tenant bucket in `memoryStore` (CTI-1); not recalling trusted memory, or not writing the
+ * turn summary back, in dispatch (live turn); a recency read returning nothing (round-trip —
+ * which is why `agent-memory-rag.test.ts` no longer repeats it).
  */
 
 import { afterEach, beforeAll, describe, expect, it } from 'vitest';
@@ -105,7 +112,8 @@ describe('createAgentMemoryPort — real store round-trip', () => {
     expect(saw).toContain('remembered fact: sky is teal');
     expect(saw).toContain('answer the question');
     // And the completed turn wrote a new summary back to the same scope.
+    // The summary itself (`summarizeForMemory`, `agentDispatch.ts`), not a row count.
     const after = await port.read(scope);
-    expect(after.length).toBeGreaterThan(1);
+    expect(after.some((e) => e.content.startsWith('Task: answer the question → Result: ') && e.content.includes('ok'))).toBe(true);
   });
 });

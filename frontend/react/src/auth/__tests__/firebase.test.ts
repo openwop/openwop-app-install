@@ -9,7 +9,7 @@ import { describe, it, expect, vi } from 'vitest';
  * sign-in error). The configured/redirect path needs real OAuth and is verified
  * manually against openwop-dev.
  *
- * "Never loads the SDK" is OBSERVED: `firebase/app` + `firebase/auth` are
+ * "Never loads the SDK" is OBSERVED: `@firebase/app` + `@firebase/auth` are
  * mocked with factories that record their own evaluation, so moving the
  * dynamic import above the `if (!cfg) return null` guard turns the
  * not-configured cases red.
@@ -21,8 +21,8 @@ import { describe, it, expect, vi } from 'vitest';
  * what guards that precondition.)
  */
 const sdk = vi.hoisted(() => ({ loads: [] as string[] }));
-vi.mock('firebase/app', () => { sdk.loads.push('firebase/app'); return {}; });
-vi.mock('firebase/auth', () => { sdk.loads.push('firebase/auth'); return {}; });
+vi.mock('@firebase/app', () => { sdk.loads.push('@firebase/app'); return {}; });
+vi.mock('@firebase/auth', () => { sdk.loads.push('@firebase/auth'); return {}; });
 
 import {
   isAuthConfigured,

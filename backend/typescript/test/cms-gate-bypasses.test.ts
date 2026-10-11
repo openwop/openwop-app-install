@@ -14,6 +14,15 @@
  *
  * Route-level, because both defects are in the wiring: a service-level test
  * drives `transitionPage` / `updatePage` directly and never sees either gate.
+ *
+ * Sabotage-witnessed (/grade-tests w16): removing the published-page PATCH gate,
+ * the system-site exemption, the resubmit re-pin, the repin pending guard, the
+ * pending-only filter in `findPendingContentApprovalForPage`, the shared-section
+ * gate, either live-edit state arm, or `liveEditGateActive`'s toggle read reds the
+ * named case. HONEST DOUBLE GUARD: `stale_review` is enforced twice (the pre-CAS
+ * read in `decideContentPublish` and the `expectedVersion` precondition in
+ * `transitionPage`, whose refusal re-opens the row); disabling either alone leaves
+ * "refuses to publish a page that changed…" green by design.
  */
 
 import http from 'node:http';
@@ -25,6 +34,7 @@ import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { SYSTEM_SITE_ORG } from '../src/host/systemSite.js';
 import { createContentApproval, getApproval, repinContentApproval, resolveApproval } from '../src/host/approvalService.js';
+import { assertFlatErrorEnvelope } from './helpers/errorEnvelope.js';
 
 let BASE: string;
 let server: http.Server;
@@ -47,8 +57,16 @@ const setGate = async (status: 'on' | 'off'): Promise<void> => {
   if (d) await saveConfig({ ...d, status }, 'test');
 };
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
-interface Res<T = any> { status: number; body: T }
+interface ApprovalRow { approvalId: string; kind?: string; pageId?: string; pageVersion?: number }
+interface SectionBody { type: string; data: { heading?: string } }
+interface PageRow { pageId: string; title: string; status: string }
+/** The success-body fields this file reads (error bodies go through `assertFlatErrorEnvelope`). */
+interface Body {
+  orgId: string; pageId: string; slug: string; status: string; title: string;
+  sections: SectionBody[]; items: ApprovalRow[]; pages: PageRow[];
+  personal: string; sharedSectionId: string;
+}
+interface Res { status: number; body: Body }
 interface Client {
   get: (p: string) => Promise<Res>;
   post: (p: string, b?: unknown) => Promise<Res>;
@@ -63,8 +81,8 @@ function client(): Client {
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
-    return { status: res.status, body: out };
+    const out: unknown = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    return { status: res.status, body: out as Body };
   };
   return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), patch: (p, b) => call('PATCH', p, b) };
 }
@@ -77,7 +95,7 @@ async function owner(): Promise<{ c: Client; orgId: string }> {
   expect(login.status, JSON.stringify(login.body)).toBe(201);
   const org = await c.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
-  return { c, orgId: org.body.orgId as string };
+  return { c, orgId: org.body.orgId };
 }
 const u = (orgId: string, s = ''): string => `/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}${s}`;
 
@@ -85,14 +103,21 @@ async function publishedPage(c: Client, orgId: string): Promise<string> {
   await setGate('off'); // publish directly, then turn the gate on for the test
   const r = await c.post(u(orgId, '/pages'), { title: 'Pricing 2026', sections: [{ type: 'hero', data: { heading: 'Old copy' } }] });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  const pageId = r.body.pageId as string;
+  const pageId = r.body.pageId;
   const pub = await c.post(u(orgId, `/pages/${pageId}/publish`));
   expect(pub.status, JSON.stringify(pub.body)).toBe(200);
   expect(pub.body.status).toBe('published');
   return pageId;
 }
 
-const heroOf = (page: any): unknown => (page.sections as any[]).find((s) => s.type === 'hero')?.data.heading;
+const heroOf = (page: Pick<Body, 'sections'>): unknown => page.sections.find((s) => s.type === 'hero')?.data.heading;
+
+/** One typed reader for the open content-publish row of a page (was two untyped copies). */
+async function pendingFor(c: Client, pageId: string): Promise<ApprovalRow | undefined> {
+  const list = await c.get('/host/openwop-app/approvals?status=pending');
+  expect(list.status).toBe(200);
+  return list.body.items.find((a) => a.kind === 'content-publish' && a.pageId === pageId);
+}
 
 describe('CMS2-B1 — PATCH was the third, ungated path to live content', () => {
   it('refuses to edit a PUBLISHED page in place while the gate is ON', async () => {
@@ -104,7 +129,7 @@ describe('CMS2-B1 — PATCH was the third, ungated path to live content', () => 
       sections: [{ type: 'hero', data: { heading: 'Rewritten live, unreviewed' } }],
     });
     expect(patch.status, JSON.stringify(patch.body)).toBe(409);
-    expect(JSON.stringify(patch.body)).toContain('cms-approval-gate');
+    expect(assertFlatErrorEnvelope(patch.body, 'PATCH refusal').details?.gate).toBe('cms-approval-gate');
 
     // …and the live page is untouched — the defect was a 200 that changed it.
     const live = await c.get(u(orgId, `/pages/${pageId}`));
@@ -127,7 +152,8 @@ describe('CMS2-B1 — PATCH was the third, ungated path to live content', () => 
     const { c, orgId } = await owner();
     await setGate('on');
     const r = await c.post(u(orgId, '/pages'), { title: 'Draft', sections: [{ type: 'hero', data: { heading: 'a' } }] });
-    const pageId = r.body.pageId as string;
+    expect(r.status, JSON.stringify(r.body)).toBe(201);
+    const pageId = r.body.pageId;
     const patch = await c.patch(u(orgId, `/pages/${pageId}`), { sections: [{ type: 'hero', data: { heading: 'b' } }] });
     expect(patch.status, JSON.stringify(patch.body)).toBe(200);
     expect(heroOf(patch.body)).toBe('b');
@@ -135,24 +161,19 @@ describe('CMS2-B1 — PATCH was the third, ungated path to live content', () => 
 });
 
 describe('CMS2-M1 — approve what you saw', () => {
-  const pendingFor = async (c: Client, pageId: string): Promise<any> => {
-    const list = await c.get('/host/openwop-app/approvals?status=pending');
-    expect(list.status).toBe(200);
-    return (list.body.items as any[]).find((a) => a.kind === 'content-publish' && a.pageId === pageId);
-  };
 
   it('refuses to publish a page that changed after it was submitted', async () => {
     await setGate('on');
     const { c, orgId } = await owner();
     const r = await c.post(u(orgId, '/pages'), { title: 'Pricing 2026', sections: [{ type: 'hero', data: { heading: 'Reviewed copy' } }] });
-    const pageId = r.body.pageId as string;
+    const pageId = r.body.pageId;
     const sub = await c.post(u(orgId, `/pages/${pageId}/submit`));
     expect(sub.status, JSON.stringify(sub.body)).toBe(200);
 
     const appr = await pendingFor(c, pageId);
     expect(appr, 'submit should queue a content-publish approval').toBeTruthy();
     // The row now carries WHAT is being approved, not just its name.
-    expect(typeof appr.pageVersion).toBe('number');
+    expect(typeof appr!.pageVersion).toBe('number');
 
     // The submitter edits the in-review page — allowed at admin tier, and the
     // reason the reviewer's card can no longer be trusted on its own.
@@ -163,7 +184,7 @@ describe('CMS2-M1 — approve what you saw', () => {
 
     const approve = await c.post(u(orgId, `/pages/${pageId}/approve`));
     expect(approve.status, JSON.stringify(approve.body)).toBe(409);
-    expect(JSON.stringify(approve.body)).toContain('stale_review');
+    expect(assertFlatErrorEnvelope(approve.body, 'approve refusal').details?.reason).toBe('stale_review');
 
     // The page did NOT go live, and the approval was not consumed — the
     // submitter can resubmit, and the reviewer can decide the real content.
@@ -176,8 +197,8 @@ describe('CMS2-M1 — approve what you saw', () => {
     await setGate('on');
     const { c, orgId } = await owner();
     const r = await c.post(u(orgId, '/pages'), { title: 'Clean', sections: [{ type: 'hero', data: { heading: 'Reviewed copy' } }] });
-    const pageId = r.body.pageId as string;
-    await c.post(u(orgId, `/pages/${pageId}/submit`));
+    const pageId = r.body.pageId;
+    expect((await c.post(u(orgId, `/pages/${pageId}/submit`))).status).toBe(200);
 
     const approve = await c.post(u(orgId, `/pages/${pageId}/approve`));
     expect(approve.status, JSON.stringify(approve.body)).toBe(200);
@@ -189,7 +210,7 @@ describe('CMS2-M1 — approve what you saw', () => {
     await setGate('on');
     const { c, orgId } = await owner();
     const r = await c.post(u(orgId, '/pages'), { title: 'Rejectable', sections: [{ type: 'hero', data: { heading: 'a' } }] });
-    const pageId = r.body.pageId as string;
+    const pageId = r.body.pageId;
     await c.post(u(orgId, `/pages/${pageId}/submit`));
     await c.patch(u(orgId, `/pages/${pageId}`), { sections: [{ type: 'hero', data: { heading: 'b' } }] });
 
@@ -200,10 +221,6 @@ describe('CMS2-M1 — approve what you saw', () => {
 });
 
 describe('CMS2-M1 fold-in — the remedy the 409 prescribes must actually work', () => {
-  const pendingFor = async (c: Client, pageId: string): Promise<any> => {
-    const list = await c.get('/host/openwop-app/approvals?status=pending');
-    return (list.body.items as any[]).find((a) => a.kind === 'content-publish' && a.pageId === pageId);
-  };
 
   it('a RESUBMIT re-pins the open approval, so an edited in-review page can still be published', async () => {
     // THE DEAD END THIS PINS. The first cut of M1 pinned the version at submit
@@ -216,9 +233,9 @@ describe('CMS2-M1 fold-in — the remedy the 409 prescribes must actually work',
     await setGate('on');
     const { c, orgId } = await owner();
     const r = await c.post(u(orgId, '/pages'), { title: 'Iterating', sections: [{ type: 'hero', data: { heading: 'v1' } }] });
-    const pageId = r.body.pageId as string;
+    const pageId = r.body.pageId;
     await c.post(u(orgId, `/pages/${pageId}/submit`));
-    const first = await pendingFor(c, pageId);
+    const first = (await pendingFor(c, pageId))!;
     expect(typeof first.pageVersion).toBe('number');
 
     await c.patch(u(orgId, `/pages/${pageId}`), { sections: [{ type: 'hero', data: { heading: 'v2, as the reviewer asked' } }] });
@@ -231,10 +248,10 @@ describe('CMS2-M1 fold-in — the remedy the 409 prescribes must actually work',
 
     // Still exactly ONE open row — re-pinned, not duplicated.
     const list = await c.get('/host/openwop-app/approvals?status=pending');
-    const rows = (list.body.items as any[]).filter((a) => a.kind === 'content-publish' && a.pageId === pageId);
+    const rows = list.body.items.filter((a) => a.kind === 'content-publish' && a.pageId === pageId);
     expect(rows).toHaveLength(1);
-    expect(rows[0].approvalId).toBe(first.approvalId);
-    expect(rows[0].pageVersion).toBeGreaterThan(first.pageVersion);
+    expect(rows[0]!.approvalId).toBe(first.approvalId);
+    expect(rows[0]!.pageVersion).toBeGreaterThan(first.pageVersion!);
 
     const approve = await c.post(u(orgId, `/pages/${pageId}/approve`));
     expect(approve.status, JSON.stringify(approve.body)).toBe(200);
@@ -246,14 +263,17 @@ describe('CMS2-M1 fold-in — the remedy the 409 prescribes must actually work',
     await setGate('on');
     const { c, orgId } = await owner();
     const r = await c.post(u(orgId, '/pages'), { title: 'Rejected then resubmitted', sections: [{ type: 'hero', data: { heading: 'a' } }] });
-    const pageId = r.body.pageId as string;
+    const pageId = r.body.pageId;
     await c.post(u(orgId, `/pages/${pageId}/submit`));
-    const before = await pendingFor(c, pageId);
+    const before = (await pendingFor(c, pageId))!;
     expect((await c.post(u(orgId, `/pages/${pageId}/reject`))).status).toBe(200);
 
-    await c.post(u(orgId, `/pages/${pageId}/submit`));
+    expect((await c.post(u(orgId, `/pages/${pageId}/submit`))).status).toBe(200);
     const after = await pendingFor(c, pageId);
-    expect(after.approvalId).not.toBe(before.approvalId);
+    expect(after, 'the resubmit must open a pending row').toBeTruthy();
+    expect(after!.approvalId).not.toBe(before.approvalId);
+    // …and the rejected row stays rejected (not reopened).
+    expect((await getApproval(before.approvalId))?.status).toBe('rejected');
   });
 
   it('repinContentApproval REFUSES a row that is no longer pending', async () => {
@@ -301,15 +321,18 @@ describe('CMS2-B1 fold-in — the reserved system-site org is not gated', () => 
     await c.post('/host/openwop-app/test/login', { email: `sa-${Date.now()}-${n++}@acme.test`, tenantId: `org:sysgate-${Date.now()}-${n++}` });
     const who = await c.get('/host/openwop-app/me/workspaces');
     expect(who.status, JSON.stringify(who.body)).toBe(200);
-    process.env.OPENWOP_SUPERADMIN_TENANTS = who.body.personal as string;
+    process.env.OPENWOP_SUPERADMIN_TENANTS = who.body.personal;
     try {
       const pages = await c.get(u(SYSTEM_SITE_ORG, '/pages'));
       expect(pages.status, JSON.stringify(pages.body)).toBe(200);
-      const home = (pages.body.pages as any[]).find((p) => p.status === 'published');
+      const home = pages.body.pages.find((p) => p.status === 'published');
       expect(home, 'the seeded system site should have a published page').toBeTruthy();
 
-      const patch = await c.patch(u(SYSTEM_SITE_ORG, `/pages/${home.pageId}`), { title: `${home.title}` });
+      // A REAL edit (the old body re-sent the unchanged title, so a 200 no-op passed).
+      const edited = `${home!.title} (edited)`;
+      const patch = await c.patch(u(SYSTEM_SITE_ORG, `/pages/${home!.pageId}`), { title: edited });
       expect(patch.status, JSON.stringify(patch.body)).toBe(200);
+      expect(patch.body.title).toBe(edited);
     } finally {
       delete process.env.OPENWOP_SUPERADMIN_TENANTS;
     }
@@ -341,22 +364,22 @@ async function sharedRefPage(c: Client, orgId: string): Promise<{ pageId: string
     name: 'Site footer', type: 'hero', data: { heading: 'Reviewed copy' },
   });
   expect(shared.status, JSON.stringify(shared.body)).toBe(201);
-  const sharedSectionId = shared.body.sharedSectionId as string;
+  const sharedSectionId = shared.body.sharedSectionId;
   const page = await c.post(u(orgId, '/pages'), {
     title: 'Home', sections: [{ type: 'hero', data: {}, ref: { sharedSectionId } }],
   });
   expect(page.status, JSON.stringify(page.body)).toBe(201);
   const pub = await c.post(u(orgId, `/pages/${page.body.pageId}/publish`));
   expect(pub.status, JSON.stringify(pub.body)).toBe(200);
-  return { pageId: page.body.pageId as string, slug: page.body.slug as string, sharedSectionId };
+  return { pageId: page.body.pageId, slug: page.body.slug, sharedSectionId };
 }
 
 /** What a real visitor is served — the delivery lane that resolves the ref. */
 async function liveHeading(orgId: string, slug: string): Promise<unknown> {
   const res = await fetch(`${BASE}/host/openwop-app/public/${encodeURIComponent(orgId)}/pages/${encodeURIComponent(slug)}`);
   expect(res.status, 'the public delivery lane must actually serve this page').toBe(200);
-  const body = (await res.json()) as any;
-  return (body.sections as any[])?.find((s) => s.type === 'hero')?.data?.heading;
+  const body = (await res.json()) as { sections?: SectionBody[] };
+  return body.sections?.find((s) => s.type === 'hero')?.data?.heading;
 }
 
 describe('CMSA-1 — shared sections were an ungated fourth lane to live content', () => {
@@ -370,11 +393,12 @@ describe('CMSA-1 — shared sections were an ungated fourth lane to live content
       data: { heading: 'Rewritten live, unreviewed' },
     });
     expect(patch.status, JSON.stringify(patch.body)).toBe(409);
-    expect(JSON.stringify(patch.body)).toContain('cms-approval-gate');
+    const env = assertFlatErrorEnvelope(patch.body, 'shared-section refusal');
+    expect(env.details?.gate).toBe('cms-approval-gate');
     // A refusal with no exit is the shape this batch is closing elsewhere — the
     // 409 must NAME the pages that block it.
-    expect(patch.body.details?.pages, JSON.stringify(patch.body)).toBeTruthy();
-    expect((patch.body.details.pages as any[]).map((p) => p.status)).toContain('published');
+    expect(env.details?.pages, JSON.stringify(patch.body)).toBeTruthy();
+    expect((env.details?.pages as PageRow[]).map((p) => p.status)).toContain('published');
 
     // …and the live page is untouched. The defect was a 200 that changed it.
     expect(await liveHeading(orgId, slug)).toBe('Reviewed copy');
@@ -386,14 +410,14 @@ describe('CMSA-1 — shared sections were an ungated fourth lane to live content
     // content they never read. Closing the WRITE closes the blindness.
     const { c, orgId } = await owner();
     const shared = await c.post(u(orgId, '/shared-sections'), { name: 'CTA', type: 'hero', data: { heading: 'Reviewed CTA' } });
-    const sharedSectionId = shared.body.sharedSectionId as string;
+    const sharedSectionId = shared.body.sharedSectionId;
     const page = await c.post(u(orgId, '/pages'), { title: 'Launch', sections: [{ type: 'hero', data: {}, ref: { sharedSectionId } }] });
     await setGate('on');
     expect((await c.post(u(orgId, `/pages/${page.body.pageId}/submit`))).status).toBe(200);
 
     const patch = await c.patch(u(orgId, `/shared-sections/${sharedSectionId}`), { data: { heading: 'Swapped under the reviewer' } });
     expect(patch.status, JSON.stringify(patch.body)).toBe(409);
-    expect((patch.body.details.pages as any[]).map((p) => p.status)).toContain('in_review');
+    expect((assertFlatErrorEnvelope(patch.body, 'in-review refusal').details?.pages as PageRow[]).map((p) => p.status)).toContain('in_review');
   });
 
   it('allows the same edit when only DRAFT pages reference it (the negative control)', async () => {
@@ -402,7 +426,7 @@ describe('CMSA-1 — shared sections were an ungated fourth lane to live content
     // what the review flow exists to let people work on.
     const { c, orgId } = await owner();
     const shared = await c.post(u(orgId, '/shared-sections'), { name: 'Draft-only', type: 'hero', data: { heading: 'a' } });
-    const sharedSectionId = shared.body.sharedSectionId as string;
+    const sharedSectionId = shared.body.sharedSectionId;
     await c.post(u(orgId, '/pages'), { title: 'Draft page', sections: [{ type: 'hero', data: {}, ref: { sharedSectionId } }] });
     await setGate('on');
     const patch = await c.patch(u(orgId, `/shared-sections/${sharedSectionId}`), { data: { heading: 'b' } });

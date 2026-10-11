@@ -5,6 +5,10 @@
  *     work (the architect's HIGH finding; a prior `onClick`-button did not).
  *  2. A canvas whose editor feature is OFF (no `href`) renders as a
  *     non-interactive cell — still no link, matching DATA-CV-3.
+ *
+ * Sabotage witnesses (grade-tests w14): a wrong href on any cell, the row's
+ * "Open" turned into a button, a link rendered for an editor-off canvas, or the
+ * off row's identity dropped — each turns its case red.
  */
 import { describe, it, expect, afterEach } from 'vitest';
 import { render, cleanup, screen } from '@testing-library/react';
@@ -38,10 +42,8 @@ describe('ADR 0350 — document + canvas cells are real links', () => {
     renderInRouter(<DocumentRow doc={doc} href="/documents/doc_1?org=org_1" onRemove={() => {}} />);
     const links = screen.getAllByRole('link').filter((a) => a.getAttribute('href') === '/documents/doc_1?org=org_1');
     // The whole-row identity link + the explicit "Open" affordance.
-    expect(links.length).toBeGreaterThanOrEqual(2);
-    // The Open affordance is styled as a link-button (a.btn — inherits the focus ring).
-    const openBtn = links.find((a) => a.className.includes('btn'));
-    expect(openBtn).toBeTruthy();
+    expect(links).toHaveLength(2);
+    expect(screen.getByRole('link', { name: 'Open' }).getAttribute('href')).toBe('/documents/doc_1?org=org_1');
   });
 
   it('CanvasDocCard links when a href is given', () => {
@@ -52,5 +54,8 @@ describe('ADR 0350 — document + canvas cells are real links', () => {
   it('CanvasDocRow with NO href (editor off) renders no navigation link', () => {
     renderInRouter(<CanvasDocRow canvas={canvas} typeName="Slide deck" Icon={FileTextIcon} onRemove={() => {}} />);
     expect(screen.queryByRole('link')).toBeNull();
+    // …and it is still a cell: named, and saying why it cannot open.
+    expect(screen.getByText('Launch deck')).toBeTruthy();
+    expect(screen.getByText('Off')).toBeTruthy();
   });
 });

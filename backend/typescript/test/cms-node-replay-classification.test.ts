@@ -12,6 +12,11 @@
  * `ai-invocation-log` and holds it back. The declaration buys floor membership, not service.
  * The ADR's first draft predicted the opposite and would have read the ratchet diff as a
  * regression.
+ *
+ * Sabotage-witnessed (grade-tests wave 16, w16g4-nr-*): flipping update-section-draft to
+ * `action` in pack.json reds leg 1; dropping it from MANIFEST_FAST_PATH_SERVED reds leg 2;
+ * serving translate-section, dropping it from the floor, or widening `isSideEffectingNode`
+ * to it reds leg 3; a lagging feature pin or the old "All role:action" copy reds leg 4.
  */
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';

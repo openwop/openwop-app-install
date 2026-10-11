@@ -10,11 +10,18 @@
  *     the CMSL-9 "nothing pins what the PATCH carries" hole, closed here).
  * A failed grant probe renders its own state, never "no access"
  * (absence-is-a-claim).
+ *
+ * Sabotage that turns it red (each probed in /grade-tests w17): pass
+ * `structure` true or offer the workflow verbs / Page tab / create bar / page
+ * menu on the translator surface; widen the locale tabs past the grant; drop
+ * the base read-only fieldset; map a failed probe to "no grant"; send the save
+ * without its pin, or with title/tags (Review F1).
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import type { ReactNode } from 'react';
+import type { Section } from '../cmsClient.js';
 
 vi.mock('../PublicPreviewFrame.js', () => ({
   PublicPreviewFrame: ({ children }: { children: ReactNode }) => <div data-testid="public-preview">{children}</div>,
@@ -29,7 +36,7 @@ vi.mock('../../../featureToggles/FeatureAccessContext.js', async (importOriginal
 const seams = vi.hoisted(() => ({
   myGrant: null as null | { subject: string; locales: string[]; updatedAt: string },
   myGrantRejects: false,
-  savedBodies: [] as Array<Record<string, unknown>>,
+  savedBodies: [] as Array<{ sections?: Section[]; expectedVersion?: number; title?: unknown; tags?: unknown }>,
 }));
 
 vi.mock('../cmsClient.js', () => {
@@ -63,7 +70,7 @@ vi.mock('../cmsClient.js', () => {
       return seams.myGrant;
     }),
     createPage: vi.fn(), deletePage: vi.fn(),
-    savePage: vi.fn(async (_orgId: string, _pageId: string, body: Record<string, unknown>) => {
+    savePage: vi.fn(async (_orgId: string, _pageId: string, body: { sections?: Section[]; expectedVersion?: number }) => {
       seams.savedBodies.push(body);
       return { ...page, version: page.version + 1 };
     }),
@@ -81,6 +88,8 @@ vi.mock('../cmsClient.js', () => {
   };
 });
 
+// ADR 0836 — the editor reads the caller's org access; a translator is not an org admin.
+vi.mock('../../../client/accessClient.js', async (orig) => ({ ...(await orig<Record<string, unknown>>()), listMembers: vi.fn(async () => []), getEffectiveAccess: vi.fn(async () => ({ roles: ['member'], scopes: ['workspace:read'], basis: 'member' })) }));
 vi.mock('../../media/mediaClient.js', () => ({
   listAssets: vi.fn(async () => []),
   uploadAsset: vi.fn(),
@@ -155,6 +164,15 @@ describe('translator surface — granted (narrowed editor)', () => {
     expect(screen.queryByRole('button', { name: /^submit$/i })).toBeNull();
     expect(screen.queryByRole('button', { name: /^publish$/i })).toBeNull();
 
+    // No structure verbs while the section is DRAWN. (Asserted before Edit: an
+    // open editor replaces the toolbar, so after the click these hold either way.)
+    expect(screen.getByRole('button', { name: 'Edit “Hi”' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /^Move .*up$/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: /^Delete/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: /^Duplicate/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: /^Drag to reorder/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: /^Add a section/ })).toBeNull();
+
     // A translator opens a section in place like anyone else; the card is narrowed.
     fireEvent.click(await screen.findByRole('button', { name: 'Edit “Hi”' }));
     // Locale tabs: base + the GRANTED locale only — fr is configured for the
@@ -171,16 +189,12 @@ describe('translator surface — granted (narrowed editor)', () => {
     // the ancestor fieldset disables everything inside it (HTML semantics).
     expect((heading.closest('fieldset') as HTMLFieldSetElement | null)?.disabled).toBe(true);
 
-    // No section-structure controls, no add-section, no Page tab, no history/schedule panels.
-    expect(screen.queryByRole('button', { name: /^Move .*up$/i })).toBeNull();
-    expect(screen.queryByRole('button', { name: /^Delete/ })).toBeNull();
-    expect(screen.queryByRole('button', { name: /^Drag to reorder/ })).toBeNull();
+    // No Page tab. This is the ONE gate for the title, tags, address, History and
+    // schedule controls: they render only in the Page mode, which a translator
+    // cannot reach (the checklist's onFix path needs a workflow action, and there
+    // is none). The inner `translatorSurface ? null :` guards around title/tags
+    // are a second guard behind this one (w17 probe tr-titleguard: vacuous).
     expect(screen.queryByRole('tab', { name: 'Page' })).toBeNull();
-    expect(screen.queryByRole('button', { name: /move up/i })).toBeNull();
-    expect(screen.queryByRole('button', { name: /remove section/i })).toBeNull();
-    expect(screen.queryByLabelText(/add section/i)).toBeNull();
-    expect(screen.queryByText(/history/i)).toBeNull();
-    expect(screen.queryByLabelText(/publish at/i)).toBeNull();
   });
 
   it('the save PATCH carries the expectedVersion pin (ADR 0592 §1)', async () => {
@@ -190,14 +204,16 @@ describe('translator surface — granted (narrowed editor)', () => {
     // Save appears once there is something to save: edit the granted overlay.
     fireEvent.click(await screen.findByRole('button', { name: 'Edit “Hi”' }));
     fireEvent.click(await screen.findByRole('tab', { name: /español/i }));
-    const editable = screen.getAllByRole('textbox').find((el) => !(el.closest('fieldset') as HTMLFieldSetElement | null)?.disabled) as HTMLInputElement;
-    fireEvent.change(editable, { target: { value: 'Hola' } });
+    fireEvent.change(await screen.findByDisplayValue('Hola'), { target: { value: 'Hola mundo' } });
     await waitFor(() => expect(screen.getByRole('button', { name: /^save$/i })).toBeTruthy());
     fireEvent.click(screen.getByRole('button', { name: /^save$/i }));
     await waitFor(() => expect(seams.savedBodies.length).toBe(1));
     // The pin is the LOADED version — the silent-clobber closer.
     expect(seams.savedBodies[0]?.expectedVersion).toBe(3);
-    expect(seams.savedBodies[0]?.sections).toBeTruthy();
+    // The edit landed in the GRANTED overlay; the base layer went back untouched.
+    const sent = seams.savedBodies[0]?.sections?.[0];
+    expect(sent?.localizations?.es).toMatchObject({ heading: 'Hola mundo' });
+    expect(sent?.data).toEqual({ heading: 'Hi' });
     // Review F1 (ADR 0592 §Corrections) — the translator payload must OMIT
     // title/tags entirely: the D1 guard 403s a grant-holder on PRESENCE of
     // those fields, so the old {title, sections, tags, pin} echo meant every
@@ -205,16 +221,5 @@ describe('translator surface — granted (narrowed editor)', () => {
     // blind spot: this mock never composed with the guard).
     expect('title' in (seams.savedBodies[0] ?? {})).toBe(false);
     expect('tags' in (seams.savedBodies[0] ?? {})).toBe(false);
-  });
-
-  it('renders NO title or tags editors in translator mode (capability ≠ permission — they could only 403)', async () => {
-    seams.myGrant = { subject: 'u2', locales: ['es'], updatedAt: '2026-01-01T00:00:00Z' };
-    renderTranslator('/cms/translate/o1/p1');
-    await waitFor(() => expect(screen.getByText(/\/landing · v3/)).toBeTruthy());
-    fireEvent.click(await screen.findByRole('button', { name: 'Edit “Hi”' }));
-    await waitFor(() => expect(screen.getByRole('tab', { name: /english.*base/i })).toBeTruthy());
-    // The page TITLE input (value 'Landing Page') and the tags input must not render.
-    expect(screen.queryByDisplayValue('Landing Page')).toBeNull();
-    expect(screen.queryByPlaceholderText(/add tag/i)).toBeNull();
   });
 });

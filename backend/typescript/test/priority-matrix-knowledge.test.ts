@@ -5,46 +5,31 @@
  *     (pm-idea docs) on submit, and re-indexed (not duplicated) on score/move
  *   - a PROJECT-scoped list + its ideas are NOT indexed (the RBAC carve-out)
  *   - deleteList evicts the list doc + every idea doc (the only idea-removal path)
+ *
+ * What turns it red (w15 probes): a wrong list/idea doc id or a skipped idea upsert;
+ * the collection losing its `managed` stamp; the kanban card-delete hook unregistered or
+ * not evicting; the board claim returning null or the kanban route ignoring it;
+ * `isShared` letting a project-scoped list through (the ADR 0100 visibility invariant);
+ * dropping the `## Scores` block; `reindexListIdeas` not running on a criteria change;
+ * `removeList` skipping the list doc or the idea docs.
  */
 
-import http from 'node:http';
-import type { AddressInfo } from 'node:net';
-import { getSetCookies } from './headerCookies.js';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { createApp } from '../src/index.js';
-import { saveConfig } from '../src/host/featureToggles/service.js';
-import { getToggleDefault } from '../src/host/featureToggles/registry.js';
+import { bootPlanningApp, makeClient, enableToggle, uniqEmail, type Client } from './planningHarness.js';
+import type { Criterion } from '../src/features/priority-matrix/types.js';
 
-let BASE: string;
-let server: http.Server;
+let BASE = '';
+let closeApp: () => Promise<void>;
 let n = 0;
 
 beforeAll(async () => {
-  process.env.OPENWOP_STORAGE_DSN = 'memory://';
-  process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
-  process.env.OPENWOP_TEST_AUTH_ENABLED = 'true';
-  delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
-  const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
+  const h = await bootPlanningApp(); BASE = h.base; closeApp = h.close;
   for (const id of ['priority-matrix', 'kb', 'projects']) await enableToggle(id);
 });
-afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
+afterAll(async () => { await closeApp(); });
 
-interface Res<T = any> { status: number; body: T }
-interface Client { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res>; patch: (p: string, b?: unknown) => Promise<Res>; put: (p: string, b?: unknown) => Promise<Res>; del: (p: string) => Promise<Res> }
-function client(): Client {
-  let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
-    const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
-    for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
-    return { status: res.status, body: out };
-  };
-  return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), patch: (p, b) => call('PATCH', p, b), put: (p, b) => call('PUT', p, b), del: (p) => call('DELETE', p) };
-}
-
-const uniqEmail = (who: string): string => `${who}-${Date.now()}-${n++}@acme.test`;
-const enableToggle = async (id: string): Promise<void> => { const d = getToggleDefault(id); if (d) await saveConfig({ ...d, status: 'on' }, 'test'); };
+const client = (): Client => makeClient(() => BASE);
+interface KbCollection { collectionId: string; managed?: string }
 const L = '/host/openwop-app/priority-matrix/lists';
 
 async function ownerWithOrg(): Promise<{ owner: Client; orgId: string }> {
@@ -60,7 +45,10 @@ async function ownerWithOrg(): Promise<{ owner: Client; orgId: string }> {
 async function kbDocIds(owner: Client, orgId: string): Promise<string[]> {
   const colId = `mgd-priority-matrix-${orgId}`;
   const docs = await owner.get(`/host/openwop-app/kb/orgs/${encodeURIComponent(orgId)}/collections/${encodeURIComponent(colId)}/documents`);
-  if (docs.status !== 200) return [];
+  // Only a MISSING collection is a legitimate empty. Any other non-200 used to read as
+  // "no docs", which satisfied every `not.toContain` below on a failed read.
+  if (docs.status === 404) return [];
+  expect(docs.status, JSON.stringify(docs.body)).toBe(200);
   return (docs.body.documents as Array<{ documentId: string }>).map((d) => d.documentId);
 }
 
@@ -79,7 +67,7 @@ describe('ADR 0100 P2 — priority matrix indexes lists + ideas', () => {
     expect(ids.filter((d) => d === `pm-idea:${idea.id}`)).toHaveLength(1); // upserted, not duplicated
 
     const cols = await owner.get(`/host/openwop-app/kb/orgs/${encodeURIComponent(orgId)}/collections`);
-    expect((cols.body.collections as Array<any>).find((c) => c.collectionId === `mgd-priority-matrix-${orgId}`)?.managed).toBe('priority-matrix');
+    expect((cols.body.collections as KbCollection[]).find((c) => c.collectionId === `mgd-priority-matrix-${orgId}`)?.managed).toBe('priority-matrix');
   });
 
   it('ADR 0667 D5(a) — deleting the CARD through kanban\'s own door EVICTS the idea doc', async () => {
@@ -114,11 +102,15 @@ describe('ADR 0100 P2 — priority matrix indexes lists + ideas', () => {
 
   it('does NOT index a PROJECT-scoped list or its ideas — the RBAC carve-out', async () => {
     const { owner, orgId } = await ownerWithOrg();
+    // A shared list in the same org first, so the managed collection EXISTS and the
+    // negative assertions below are made against a real 200 read (positive control).
+    const shared = (await owner.post(L, { orgId, name: 'Org priorities' })).body;
     const proj = (await owner.post('/host/openwop-app/projects', { orgId, name: 'Secret project' })).body;
     const list = (await owner.post(L, { orgId, name: 'Project priorities', projectId: proj.id })).body;
     const idea = (await owner.post(`${L}/${encodeURIComponent(list.id)}/ideas`, { title: 'Private idea' })).body;
 
     const ids = await kbDocIds(owner, orgId);
+    expect(ids, 'positive control: the shared list IS indexed').toContain(`pm-list:${shared.id}`);
     expect(ids).not.toContain(`pm-list:${list.id}`);
     expect(ids).not.toContain(`pm-idea:${idea.id}`);
   });
@@ -137,9 +129,17 @@ describe('ADR 0100 P2 — priority matrix indexes lists + ideas', () => {
     expect(doc.text).toContain('Strategic alignment: 9/10');
 
     // Re-weight criteria → recompute + re-index; the idea doc stays single + present.
-    const cs = { ...list.criteriaSet, criteria: list.criteriaSet.criteria.map((c: any) => ({ ...c, weight: c.id === 'roi' ? 10 : c.weight })) };
+    const priorityLine = (text: string): string | undefined => /Priority: [0-9.]+/.exec(text)?.[0];
+    const before = priorityLine(doc.text);
+    expect(before, 'precondition: the doc carries a priority').toBeTruthy();
+    const cs = { ...list.criteriaSet, criteria: (list.criteriaSet.criteria as Criterion[]).map((c) => ({ ...c, weight: c.id === 'roi' ? 10 : c.weight })) };
     expect((await owner.patch(base, { criteriaSet: cs })).status).toBe(200);
     expect((await kbDocIds(owner, orgId)).filter((d) => d === `pm-idea:${idea.id}`)).toHaveLength(1);
+    // REFRESHED, not merely present: the doc's priority is the re-ranked value.
+    const now = (await owner.get(`${base}/ideas`)).body.ideas[0].computedPriority as number;
+    const after = priorityLine((await owner.get(docPath)).body.text);
+    expect(after).not.toBe(before);
+    expect(after).toBe(`Priority: ${now.toFixed(2)}`);
   });
 
   it('deleteList evicts the list doc and all idea docs', async () => {
@@ -148,7 +148,7 @@ describe('ADR 0100 P2 — priority matrix indexes lists + ideas', () => {
     const idea = (await owner.post(`${L}/${encodeURIComponent(list.id)}/ideas`, { title: 'Temp idea' })).body;
     expect(await kbDocIds(owner, orgId)).toEqual(expect.arrayContaining([`pm-list:${list.id}`, `pm-idea:${idea.id}`]));
 
-    expect((await owner.del(`${L}/${encodeURIComponent(list.id)}`)).status === 204).toBe(true);
+    expect((await owner.del(`${L}/${encodeURIComponent(list.id)}`)).status).toBe(204);
     const ids = await kbDocIds(owner, orgId);
     expect(ids).not.toContain(`pm-list:${list.id}`);
     expect(ids).not.toContain(`pm-idea:${idea.id}`);

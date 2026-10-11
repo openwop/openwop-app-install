@@ -1,4 +1,6 @@
 /**
+ * ADR 0277 P2 (cohort reconcile) / docs/steward/UX_UPGRADE-advisory-board.md R3.
+ *
  * UX_UPGRADE low-tier R2 → advisory-board ROUND 3 — the two flagged silent
  * degradations, made OBSERVABLE with semantics unchanged.
  *
@@ -10,6 +12,11 @@
  * riskier than the defect. R3 keeps every documented behaviour (over-retain,
  * never over-remove; never fail the caller) and adds a NAMED warn event
  * (`shared_knowledge_read_degraded`, with the phase) so an operator can see it.
+ *
+ * Sabotage-witnessed (/grade-tests w12): removing the warn reds cases 1 and 3;
+ * rethrowing the read failure reds cases 1 and 3 (update fails; the delete's outer
+ * catch logs a different event); always warning reds case 2; mislabelling the
+ * delete phase, or skipping the row delete, reds case 3.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -43,7 +50,7 @@ vi.mock('../src/features/advisory-board/advisoryBoardKnowledgeService.js', async
 import { openStorage } from '../src/storage/index.js';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { createRosterEntry } from '../src/host/rosterService.js';
-import { createBoard, updateBoard, deleteBoard } from '../src/features/advisory-board/service.js';
+import { createBoard, updateBoard, deleteBoard, getBoard } from '../src/features/advisory-board/service.js';
 
 const T = 'tenant-ab-degraded';
 let n = 0;
@@ -58,8 +65,8 @@ beforeEach(async () => {
 });
 
 async function boardWithTwoAdvisors(): Promise<{ boardId: string; a: string; b: string; owner: string }> {
-  const a = (await createRosterEntry({ tenantId: T, persona: `Advisor A${n}`, agentRef: { kind: 'host' } as never })).rosterId;
-  const b = (await createRosterEntry({ tenantId: T, persona: `Advisor B${n}`, agentRef: { kind: 'host' } as never })).rosterId;
+  const a = (await createRosterEntry({ tenantId: T, persona: `Advisor A${n}`, agentRef: { agentId: 'core.openwop.agents.brief-writer' } })).rosterId;
+  const b = (await createRosterEntry({ tenantId: T, persona: `Advisor B${n}`, agentRef: { agentId: 'core.openwop.agents.brief-writer' } })).rosterId;
   n += 1;
   const owner = 'u-owner';
   const board = await createBoard(T, 'org-1', owner, { name: `Board ${n}`, advisors: [a, b] });
@@ -89,6 +96,7 @@ describe('R3 — the degraded reconcile read is DISCLOSED, and its semantics are
     const { boardId, owner } = await boardWithTwoAdvisors();
     sharedKnowledgeFails = true;
     await deleteBoard(T, owner, boardId);
+    await expect(getBoard(T, owner, boardId), 'the delete itself must still land').rejects.toMatchObject({ httpStatus: 404 });
     const phases = degradedEvents().map((f) => f?.phase);
     expect(phases).toContain('delete_cohort_reconcile');
   });

@@ -14,6 +14,9 @@
  * canonical helper is ever swapped back for a local copy, and it fails if the
  * wildcard exit is deleted.
  *
+ * Sabotage witnesses (w12): `wildcardOperator: false` in `requireTenantScope` reds both ALLOW
+ * cases; letting `requireOwnedAgent` pass an unknown id reds the 404 case.
+ *
  * @see docs/adr/0589-twin-tenancy-and-recall-audience.md
  */
 
@@ -23,23 +26,34 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
+import { detailOf, errorCodeOf } from './helpers/errorEnvelope.js';
 
 let server: http.Server;
 let BASE = '';
 
-/** `k-op:*` is the wildcard operator principal; `k-a:tenant-a` is the control. */
-const KEYS = 'k-op:*,k-a:tenant-a';
+/** `k-op:*` is the wildcard operator principal. */
+const KEYS = 'k-op:*';
 
-async function call(key: string, path: string, method = 'GET', body?: unknown): Promise<{ status: number; body: any }> {
+interface TwinView { link: { userId: string } | null; grant: unknown }
+
+async function call<T>(key: string, path: string, method = 'GET', body?: unknown): Promise<{ status: number; body: T }> {
   const res = await fetch(`${BASE}${path}`, {
     method,
     headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' },
     ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
   });
-  return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) };
+  return { status: res.status, body: (res.status === 204 ? undefined : await res.json().catch(() => undefined)) as T };
 }
 
-let rosterId = '';
+// One agent per case: the WRITE case links its agent, so a shared agent made the READ case's
+// `link === null` order-dependent (red under --sequence.shuffle).
+let readRosterId = '';
+let writeRosterId = '';
+async function mintAgent(persona: string): Promise<string> {
+  const r = await call<{ rosterId: string }>('k-op', '/host/openwop-app/roster', 'POST', { persona, agentRef: { agentId: 'core.openwop.agents.brief-writer' } });
+  expect(r.status, JSON.stringify(r.body)).toBe(201);
+  return r.body.rosterId;
+}
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -54,9 +68,8 @@ beforeAll(async () => {
   // A REAL agent in the operator's own tenant. Without it `requireOwnedAgent`
   // 404s BEFORE the scope gate and this whole file measures nothing — the
   // vacuity mode that a 'not 403' assertion is most prone to.
-  const r = await call('k-op', '/host/openwop-app/roster', 'POST', { persona: 'Aide', agentRef: { agentId: 'core.openwop.agents.brief-writer' } });
-  expect(r.status, JSON.stringify(r.body)).toBe(201);
-  rosterId = r.body.rosterId;
+  readRosterId = await mintAgent('Read Aide');
+  writeRosterId = await mintAgent('Write Aide');
 });
 afterAll(async () => {
   await new Promise<void>((res) => server.close(() => res()));
@@ -66,19 +79,27 @@ afterAll(async () => {
 
 describe('TWIN-5 — the twin admin lane uses the canonical tenant-scope gate', () => {
   it('a WILDCARD operator principal can READ the twin link of a real agent (200, not 403)', async () => {
-    const res = await call('k-op', `/host/openwop-app/agents/${encodeURIComponent(rosterId)}/twin`);
+    const res = await call<TwinView>('k-op', `/host/openwop-app/agents/${encodeURIComponent(readRosterId)}/twin`);
     expect(res.status, JSON.stringify(res.body)).toBe(200);
     expect(res.body.link).toBe(null);
   });
 
   it('and can WRITE it — the scope the local copy could never grant an operator', async () => {
-    const res = await call('k-op', `/host/openwop-app/agents/${encodeURIComponent(rosterId)}/twin`, 'PUT', { userId: 'user:some-person' });
+    const path = `/host/openwop-app/agents/${encodeURIComponent(writeRosterId)}/twin`;
+    const res = await call<TwinView>('k-op', path, 'PUT', { userId: 'user:some-person' });
     expect(res.status, JSON.stringify(res.body)).toBe(200);
-    expect(res.body.link.userId).toBe('user:some-person');
+    expect(res.body.link?.userId).toBe('user:some-person');
+    // The write PERSISTED — not just echoed.
+    const back = await call<TwinView>('k-op', path);
+    expect(back.status).toBe(200);
+    expect(back.body.link?.userId).toBe('user:some-person');
   });
 
   it('the 404 path is still ordered FIRST, so the two assertions above are not measuring it', async () => {
-    const res = await call('k-op', '/host/openwop-app/agents/no-such-agent/twin');
+    const res = await call<unknown>('k-op', '/host/openwop-app/agents/no-such-agent/twin');
     expect(res.status).toBe(404);
+    // The OWNED-AGENT 404 specifically (it carries the id), not the toggle's or an unmounted route's.
+    expect(errorCodeOf(res.body)).toBe('not_found');
+    expect(detailOf(res.body, 'id')).toBe('no-such-agent');
   });
 });

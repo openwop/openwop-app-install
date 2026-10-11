@@ -41,6 +41,7 @@
 
 import { randomUUID, createHash } from 'node:crypto';
 import { DurableCollection, countOrgHostExtRows } from './hostExtPersistence.js';
+import { registerTenantIndexAdoption } from './tenantIndexAdoption.js';
 import { createLogger } from '../observability/logger.js';
 import { clearActiveWorkspaceIfPointingAt } from './activeWorkspacePref.js';
 import { invalidateMcpCacheForPrincipal } from './mcpClientCache.js';
@@ -416,6 +417,37 @@ const members = new DurableCollection<OrgMember>(
   undefined,
   (m) => m.tenantId,
 );
+// ADR 0866 — the authorization resolvers read through the index only once an
+// hourly reconcile has verified it (see `tenantMembers`).
+registerTenantIndexAdoption('access-members', members);
+
+/** Every member row of one tenant, by the full scan. The authoritative read. */
+async function scanTenantMembers(tenantId: string): Promise<OrgMember[]> {
+  return (await members.list()).filter((m) => m.tenantId === tenantId);
+}
+
+/**
+ * ADR 0866 — one tenant's member rows through the tenant index once it is
+ * verified, else null. Every row it returns is a real row of that
+ * tenant, so a FOUND answer is right. A MISSING one is not authoritative: a
+ * caller that would deny, or fall to the demo owner bypass, on absence confirms
+ * with `scanTenantMembers` first (`indexedTenantMembers` is null when the index
+ * is not verified, so that caller scans once, not twice). Same rule as `isWorkspaceMember`: the index may
+ * say yes, never no. Same order as the scan (both sorted by member id).
+ */
+async function indexedTenantMembers(tenantId: string): Promise<OrgMember[] | null> {
+  if (!(await members.tenantIndexVerified())) return null;
+  try {
+    return (await members.listForTenantIndexed(tenantId)).filter((m) => m.tenantId === tenantId);
+  } catch {
+    return null; // index unavailable — callers fall back to the authoritative scan
+  }
+}
+
+/** For reads where a briefly missing row is harmless (a listing): no confirm. */
+async function tenantMembers(tenantId: string): Promise<OrgMember[]> {
+  return (await indexedTenantMembers(tenantId)) ?? scanTenantMembers(tenantId);
+}
 /**
  * ADR 0684 phase 5 — a POINT-READ index for workspace membership.
  *
@@ -890,8 +922,8 @@ export async function createMember(input: {
 }
 
 export async function listMembers(tenantId: string, orgId: string): Promise<OrgMember[]> {
-  return (await members.list())
-    .filter((m) => m.tenantId === tenantId && m.orgId === orgId)
+  return (await tenantMembers(tenantId))
+    .filter((m) => m.orgId === orgId)
     .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
 }
 
@@ -1927,7 +1959,6 @@ async function resolveEffectiveAccessDirect(
   opts: { memberId?: string; subject?: string; orgId?: string } = {},
 ): Promise<EffectiveAccess> {
   if (opts.memberId !== undefined || opts.subject !== undefined) {
-    const all = await members.list();
     // ADR 0006 Phase 2: when `orgId` is given, resolve the member IN THAT org —
     // a subject can be a member of several orgs with different roles, so authority
     // is per-(subject, org), not "first match in the tenant".
@@ -1938,12 +1969,13 @@ async function resolveEffectiveAccessDirect(
     // every tenant-level reader (developer-key admin, approvals SLA, promotion
     // approval, `/access/effective`).
     const orgId = opts.orgId ?? (opts.memberId === undefined && isSharedWorkspaceTenant(tenantId) ? tenantId : undefined);
-    const member = all.find(
-      (m) =>
-        m.tenantId === tenantId &&
-        (orgId === undefined || m.orgId === orgId) &&
-        (opts.memberId !== undefined ? m.memberId === opts.memberId : m.subject === opts.subject),
-    );
+    const isTarget = (m: OrgMember): boolean =>
+      m.tenantId === tenantId &&
+      (orgId === undefined || m.orgId === orgId) &&
+      (opts.memberId !== undefined ? m.memberId === opts.memberId : m.subject === opts.subject);
+    // ADR 0866 — a miss from the index is confirmed by the scan: absence here
+    // denies, or grants OWNER through the demo bypass below.
+    const member = (await indexedTenantMembers(tenantId))?.find(isTarget) ?? (await scanTenantMembers(tenantId)).find(isTarget);
     if (!member) {
       // Demo single-tenant exception: in demo mode the tenant is a one-principal
       // sandbox (tenant == principal — see file header + the tenant-owner branch
@@ -2083,12 +2115,13 @@ export async function hasDistinctScopeHolder(
 ): Promise<boolean> {
   try {
     const excluded = new Set<string>([excludeSubject, ...(opts.alsoExclude ?? [])]);
-    const [allMembers, allGroups, allCustom] = await Promise.all([
-      members.list(),
+    const [indexed, allGroups, allCustom] = await Promise.all([
+      indexedTenantMembers(tenantId),
       groups.list(),
       customRoles.list(),
     ]);
-    for (const m of allMembers) {
+    const holderIn = (rows: readonly OrgMember[]): boolean => {
+    for (const m of rows) {
       if (m.tenantId !== tenantId || (m.subject !== undefined && excluded.has(m.subject))) continue;
       if (opts.orgId !== undefined) {
         if (m.orgId !== opts.orgId) continue;
@@ -2108,6 +2141,11 @@ export async function hasDistinctScopeHolder(
       if (unionScopes(roles, customById).includes(scope)) return true;
     }
     return false;
+    };
+    // ADR 0866 — `false` grants the self-approval exemption, so the index may
+    // only answer `true`; a `false` is confirmed against the full scan.
+    if (indexed !== null && holderIn(indexed)) return true;
+    return holderIn(await scanTenantMembers(tenantId));
   } catch (err) {
     accessLog.error('hasDistinctScopeHolder failed — assuming a distinct approver exists', {
       tenantId,
@@ -2137,8 +2175,8 @@ async function resolveSubjectScopesUnionDirect(
   subject: string,
 ): Promise<{ scopes: Scope[]; basis: 'member' | 'none' }> {
   try {
-    const [allMembers, allGroups, allCustom] = await Promise.all([
-      members.list(),
+    const [indexed, allGroups, allCustom] = await Promise.all([
+      indexedTenantMembers(tenantId),
       groups.list(),
       customRoles.list(),
     ]);
@@ -2146,7 +2184,11 @@ async function resolveSubjectScopesUnionDirect(
     // tenant-wide; a sub-org row was a door (a Viewer minted a sub-org, owned it,
     // and the union handed them workspace management and `workspace:write`).
     const shared = isSharedWorkspaceTenant(tenantId);
-    const mine = allMembers.filter((m) => m.tenantId === tenantId && m.subject === subject && (!shared || isWorkspaceRootMembership(m)));
+    const isMine = (m: OrgMember): boolean => m.tenantId === tenantId && m.subject === subject && (!shared || isWorkspaceRootMembership(m));
+    // ADR 0866 — a partial answer from the index only narrows the union (fails
+    // closed); an EMPTY one is confirmed against the full scan before it denies.
+    let mine = indexed?.filter(isMine) ?? [];
+    if (mine.length === 0) mine = (await scanTenantMembers(tenantId)).filter(isMine);
     if (mine.length === 0) return { scopes: [], basis: 'none' };
     const scopeSet = new Set<Scope>();
     for (const m of mine) {

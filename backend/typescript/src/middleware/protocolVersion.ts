@@ -515,15 +515,6 @@ export function isProtocolRequest(req: Request): boolean {
 }
 
 /**
- * The major the negotiator stamped. ADR 0812 P3c: the ONLY remaining caller is
- * the v1 discovery representation in `routes/discovery.ts`, which P3c deletes;
- * everything else asks {@link isProtocolRequest}. Do not add a caller.
- */
-export function negotiatedMajor(req: Request): 1 | 2 {
-  return (req as Negotiated)[MAJOR] ?? 1;
-}
-
-/**
  * `<major>` or `<major>.<minor>`. The spec's §1.3 prose says the request header
  * "carries an integer major only", but every v2 conformance scenario and the
  * suite's own driver send `OpenWOP-Version: 2.0`, so both are accepted; a value

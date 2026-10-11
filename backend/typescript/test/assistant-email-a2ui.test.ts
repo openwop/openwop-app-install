@@ -14,11 +14,22 @@
  * Stub-ctx pattern (the assistant-loops convention): a real
  * `buildAssistantSurface` over the in-memory store + a controllable
  * `ctx.suspend` standing in for the executor's `makeSuspendFn`.
+ *
+ * Sabotage-witnessed (/grade-tests w11): a changed resumeKey or a dropped subject
+ * field reds case 1; ignoring the resumed subject reds case 2; interrupting a
+ * recipient-bearing email reds cases 3+4; loosening `parseEmailList` reds case 5;
+ * dropping `requireAfter` reds cases 6+7. Cases 6+7 are DOUBLE-guarded — the
+ * resumed recipients pass both `parseEmailList` and `missingEmailSendFields`'s
+ * regex — so loosening only the first leaves them green (an honest ceiling).
  */
 
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import http from 'node:http';
-import { createApp } from '../src/index.js';
+import { beforeAll, describe, expect, it } from 'vitest';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { openStorage } from '../src/storage/index.js';
+import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
+import { initInMemorySurfaces } from '../src/host/inMemorySurfaces.js';
 import { buildAssistantSurface } from '../src/features/assistant/surface.js';
 import { __resetAssistantStore, listPendingActions } from '../src/features/assistant/assistantService.js';
 
@@ -27,20 +38,16 @@ const CATALOG_VERSION = '0.9.1';
 const CATALOG = new Set(['heading', 'text', 'field.text', 'field.date', 'field.select', 'field.checkbox', 'action.button']);
 
 describe('Assistant email.send A2UI clarification (ADR 0051 §3/§5)', () => {
-  let server: http.Server;
   let nodes: (typeof import('../../../packs/feature.assistant.nodes/index.mjs'))['nodes'];
 
   beforeAll(async () => {
     process.env.OPENWOP_STORAGE_DSN = 'memory://';
-    const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-    await new Promise<void>((res) => {
-      server = app.listen(0, '127.0.0.1', res);
-    });
+    // Storage only — no createApp boot, no HTTP server: every case drives the node
+    // directly, and `enqueueActionWithApproval` seeds the assistant agent on demand.
+    initHostExtPersistence(await openStorage('memory://'));
+    initInMemorySurfaces({ dataDir: mkdtempSync(join(tmpdir(), 'openwop-email-a2ui-')) });
     await __resetAssistantStore();
     nodes = (await import('../../../packs/feature.assistant.nodes/index.mjs')).nodes;
-  });
-  afterAll(async () => {
-    await new Promise<void>((res) => server.close(() => res()));
   });
 
   const enqueueAction = (ctx: unknown) => nodes['feature.assistant.nodes.enqueue-action'](ctx);
@@ -159,5 +166,7 @@ describe('Assistant email.send A2UI clarification (ADR 0051 §3/§5)', () => {
       suspend: async () => ({ action: 'confirm', to: 'a@b.com\nBcc: evil@x.com' }),
     };
     await expect(enqueueAction(ctx)).rejects.toThrow(/recipient/);
+    // Rejected means nothing reached the approval queue.
+    expect((await listPendingActions('t-mail7')).length).toBe(0);
   });
 });

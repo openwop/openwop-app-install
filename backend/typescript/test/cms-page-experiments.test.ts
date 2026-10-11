@@ -1,7 +1,7 @@
 /**
  * CMS page experiments (ADR 0236 — campaign gap D1) — ROUTE + service harness.
  * Covers: the extracted shared bucketing helper (sticky determinism + rough
- * distribution + byte-identity with the toggle engine's assignVariant),
+ * distribution),
  * experiment validation (weights sum to 100, one-running-per-page, versions
  * must exist), the consent-gated public assignment seam (no vk ⇒ byte-identical
  * response; vk+consent ⇒ variant snapshot + additive stamp; holdout ⇒ published
@@ -9,6 +9,17 @@
  * publish, or restore → submit + honest `pendingApproval` under the approval
  * gate), the two-proportion results projection (incl. `insufficientSample`
  * honesty), and `cms.experiment.*` audit rows with payload.tenantId.
+ *
+ * Sabotage-witnessed (grade-tests wave 16, w16g4-px-*): a non-deterministic bucket reds the
+ * sticky case; a skewed weight walk reds the 50/50 case; a flipped z sign reds the pure-math
+ * and verdict cases; dropping the sum-to-100 / one-running rules reds validation; an
+ * always-present visitor key, a bypassed consent gate, or a non-degrading consent failure red
+ * the public-seam cases; ignoring the approval gate reds promote; honouring the client's
+ * claimed variant, counting pre-D3 stamps, or refusing stopped experiments reds the ANLWF-3 /
+ * ANL-18 cases; an unstamped tenantId reds the audit case.
+ * CUT (wave 16): "is byte-identical to the toggle engine assignVariant" — `assignVariant` is a
+ * one-line delegation to `assignWeightedVariant`, so the two can never differ (it stayed green
+ * under w16g4-px-distribution while the 50/50 case went red).
  */
 
 import http from 'node:http';
@@ -34,7 +45,6 @@ import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { __hostExtStorage } from '../src/host/hostExtPersistence.js';
 import { hasPendingApprovalForPage } from '../src/host/approvalService.js';
 import { assignWeightedVariant, bucketOf } from '../src/host/variantAssignment.js';
-import { assignVariant } from '../src/host/featureToggles/bucketing.js';
 import { twoProportionZ, findRunningExperiment, assignVariantForVisitor } from '../src/features/cms/pageExperimentsService.js';
 import { recordEvent, listEvents, __putRawEventForTests } from '../src/features/analytics/analyticsService.js';
 
@@ -61,7 +71,26 @@ async function setToggle(id: string, status: 'on' | 'off'): Promise<void> {
   if (d) await saveConfig({ ...d, status }, 'test');
 }
 
-interface Res<T = any> { status: number; body: T }
+// The success shapes these routes return. `res.json()` is untyped; this declares the contract
+// the assertions below check (a response that does not match fails those assertions).
+interface VariantRow {
+  key: string; versionId: string | null; weight: number;
+  sessions: number; conversions: number; conversionRate: number;
+  zScore: number | null; significant: boolean | null; insufficientSample: boolean;
+}
+interface ExperimentBody { experimentId: string; salt: string; status: string; variants: VariantRow[] }
+interface Body extends ExperimentBody {
+  orgId: string; pageId: string; slug: string; title: string;
+  versions: Array<{ versionId: string; snapshot: { title: string } }>;
+  experiments: ExperimentBody[];
+  sections: Array<{ data: Record<string, unknown> }>;
+  experiment?: { experimentId: string; variant?: string; status?: string };
+  pendingApproval: boolean;
+  page: { status: string; title: string } | null;
+  baselineKey: string;
+  unattributed: { legacy: number; dropped: number };
+}
+interface Res { status: number; body: Body }
 interface Client {
   get: (p: string) => Promise<Res>;
   post: (p: string, b?: unknown) => Promise<Res>;
@@ -77,7 +106,7 @@ function client(): Client {
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    const out = (res.status === 204 ? undefined : await res.json().catch(() => undefined)) as Body; // wire JSON (204/unparseable bodies are never read)
     return { status: res.status, body: out };
   };
   return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), patch: (p, b) => call('PATCH', p, b), del: (p) => call('DELETE', p) };
@@ -106,7 +135,7 @@ const pub = (orgId: string, s: string): string => `/host/openwop-app/public/${en
 async function pageWithHistory(owner: Client, orgId: string): Promise<{ pageId: string; slug: string; v1: string }> {
   const created = await owner.post(cms(orgId, '/pages'), { title: 'V1 Title', sections: [{ type: 'hero', data: { heading: 'Version One Heading' } }] });
   expect(created.status, JSON.stringify(created.body)).toBe(201);
-  const pageId = created.body.pageId as string;
+  const pageId = created.body.pageId;
   expect((await owner.post(cms(orgId, `/pages/${pageId}/publish`))).status).toBe(200); // snapshot v1
   expect((await owner.post(cms(orgId, `/pages/${pageId}/unpublish`))).status).toBe(200);
   const patched = await owner.patch(cms(orgId, `/pages/${pageId}`), { title: 'V2 Title', sections: [{ type: 'hero', data: { heading: 'Version Two Heading' } }] });
@@ -115,9 +144,9 @@ async function pageWithHistory(owner: Client, orgId: string): Promise<{ pageId: 
   expect(pub2.status, JSON.stringify(pub2.body)).toBe(200);
   const versions = await owner.get(cms(orgId, `/pages/${pageId}/versions`));
   expect(versions.status).toBe(200);
-  const v1 = (versions.body.versions as Array<{ versionId: string; snapshot: { title: string } }>).find((v) => v.snapshot.title === 'V1 Title');
+  const v1 = versions.body.versions.find((v) => v.snapshot.title === 'V1 Title');
   expect(v1, 'the v1 snapshot must exist').toBeTruthy();
-  return { pageId, slug: pub2.body.slug as string, v1: v1!.versionId };
+  return { pageId, slug: pub2.body.slug, v1: v1!.versionId };
 }
 
 /** 50/50 holdout-vs-snapshot experiment (control = holdout, legacy = v1). */
@@ -163,12 +192,6 @@ describe('variantAssignment — the extracted shared bucketing helper', () => {
     expect(a / total).toBeLessThan(0.6);
   });
 
-  it('is byte-identical to the toggle engine assignVariant (extraction, not a fork)', () => {
-    for (let i = 0; i < 200; i++) {
-      const unit = `unit-${i}`;
-      expect(assignWeightedVariant(unit, 'demo.experiment', 's1', variants)).toBe(assignVariant(unit, 'demo.experiment', 's1', variants));
-    }
-  });
 });
 
 describe('twoProportionZ — pure math', () => {
@@ -254,15 +277,15 @@ describe('public page read — consent-gated assignment seam', () => {
     const legacy = await anon.get(pub(orgId, `/pages/${slug}?vk=${encodeURIComponent(vkLegacy)}`));
     expect(legacy.status).toBe(200);
     expect(legacy.body.title).toBe('V1 Title'); // the snapshot's content
-    expect(legacy.body.sections[0].data.heading).toBe('Version One Heading');
+    expect(legacy.body.sections[0]?.data.heading).toBe('Version One Heading');
     expect(legacy.body.experiment).toEqual({ experimentId: e.experimentId, variant: 'legacy' });
     // sticky: same vk, same variant
-    expect((await anon.get(pub(orgId, `/pages/${slug}?vk=${encodeURIComponent(vkLegacy)}`))).body.experiment.variant).toBe('legacy');
+    expect((await anon.get(pub(orgId, `/pages/${slug}?vk=${encodeURIComponent(vkLegacy)}`))).body.experiment?.variant).toBe('legacy');
 
     // holdout: the LIVE published content, still stamped (tracked)
     const control = await anon.get(pub(orgId, `/pages/${slug}?vk=${encodeURIComponent(vkControl)}`));
     expect(control.body.title).toBe('V2 Title');
-    expect(control.body.sections[0].data.heading).toBe('Version Two Heading');
+    expect(control.body.sections[0]?.data.heading).toBe('Version Two Heading');
     expect(control.body.experiment).toEqual({ experimentId: e.experimentId, variant: 'control' });
 
     // an oversized vk is ignored (honest degradation, no exposure)
@@ -328,9 +351,9 @@ describe('promote winner — existing CMS verbs', () => {
     const promoted = await owner.post(exps(orgId, pageId, `/${e.experimentId}/promote`), { variantKey: 'legacy' });
     expect(promoted.status, JSON.stringify(promoted.body)).toBe(200);
     expect(promoted.body.pendingApproval).toBe(false);
-    expect(promoted.body.experiment.status).toBe('promoted');
-    expect(promoted.body.page.status).toBe('published');
-    expect(promoted.body.page.title).toBe('V1 Title');
+    expect(promoted.body.experiment?.status).toBe('promoted');
+    expect(promoted.body.page?.status).toBe('published');
+    expect(promoted.body.page?.title).toBe('V1 Title');
 
     // the winner is now the LIVE published page
     const anon = client();
@@ -356,7 +379,7 @@ describe('promote winner — existing CMS verbs', () => {
     expect(promoted.status).toBe(200);
     expect(promoted.body.pendingApproval).toBe(false);
     expect(promoted.body.page).toBeNull();
-    expect(promoted.body.experiment.status).toBe('promoted');
+    expect(promoted.body.experiment?.status).toBe('promoted');
     expect((await client().get(pub(orgId, `/pages/${slug}`))).body.title).toBe('V2 Title'); // untouched
   });
 
@@ -371,8 +394,8 @@ describe('promote winner — existing CMS verbs', () => {
       const promoted = await owner.post(exps(orgId, pageId, `/${e.experimentId}/promote`), { variantKey: 'legacy' });
       expect(promoted.status, JSON.stringify(promoted.body)).toBe(200);
       expect(promoted.body.pendingApproval).toBe(true);
-      expect(promoted.body.page.status).toBe('in_review'); // NOT live — the inbox decides
-      expect(promoted.body.experiment.status).toBe('promoted');
+      expect(promoted.body.page?.status).toBe('in_review'); // NOT live — the inbox decides
+      expect(promoted.body.experiment?.status).toBe('promoted');
       expect(await hasPendingApprovalForPage(tenantId, pageId)).toBe(true);
     } finally {
       await setToggle('cms-approval-gate', 'off');
@@ -406,7 +429,7 @@ describe('results — read-time projection over stamped events', () => {
     const e = (await owner.post(exps(orgId, pageId), fiftyFifty(v1))).body;
     await owner.post(exps(orgId, pageId, `/${e.experimentId}/start`));
 
-    const stamp = (variant: string) => ({ id: e.experimentId as string, variant });
+    const stamp = (variant: string) => ({ id: e.experimentId, variant });
     const ic = await keysOn(tenantId, orgId, pageId, 'control', 3, 'ic');
     const il = await keysOn(tenantId, orgId, pageId, 'legacy', 3, 'il');
     for (let i = 0; i < 3; i++) {
@@ -459,7 +482,7 @@ describe('results — read-time projection over stamped events', () => {
     await recordEvent({ tenantId, orgId, raw: { type: 'conversion', sessionKey: key, experiment: { id: e.experimentId, variant: 'legacy' } } });
 
     const r = await owner.get(exps(orgId, pageId, `/${e.experimentId}/results`));
-    const byKey = Object.fromEntries((r.body.variants as Array<{ key: string; sessions: number; conversions: number }>).map((v) => [v.key, v]));
+    const byKey = Object.fromEntries(r.body.variants.map((v) => [v.key, v]));
     // The forged stamp must NOT be honoured: the session was assigned control, so
     // its pageview and conversion belong to control and legacy sees nothing.
     expect(byKey.legacy.sessions, 'forged variant must receive no session').toBe(0);
@@ -503,7 +526,7 @@ describe('results — read-time projection over stamped events', () => {
 
     const r = await owner.get(exps(orgId, pageId, `/${e.experimentId}/results`));
     expect(r.status).toBe(200);
-    const byKey = Object.fromEntries((r.body.variants as Array<{ key: string; sessions: number; conversions: number }>).map((v) => [v.key, v]));
+    const byKey = Object.fromEntries(r.body.variants.map((v) => [v.key, v]));
     expect(byKey.legacy.conversions, 'the pre-D3 forged conversion must NOT count').toBe(0);
     expect(byKey.legacy.sessions).toBe(0);
     expect(byKey.control.sessions).toBe(1);
@@ -516,7 +539,7 @@ describe('results — read-time projection over stamped events', () => {
     await owner.post(exps(orgId, pageId, `/${e.experimentId}/stop`));
     await recordEvent({ tenantId, orgId, raw: { type: 'conversion', sessionKey: ck, experiment: { id: e.experimentId, variant: 'legacy' } } });
     const r2 = await owner.get(exps(orgId, pageId, `/${e.experimentId}/results`));
-    const byKey2 = Object.fromEntries((r2.body.variants as Array<{ key: string; sessions: number; conversions: number }>).map((v) => [v.key, v]));
+    const byKey2 = Object.fromEntries(r2.body.variants.map((v) => [v.key, v]));
     expect(byKey2.control.conversions, 'a late conversion from an assigned visitor still counts after Stop').toBe(1);
     expect(byKey2.legacy.conversions).toBe(0);
     expect(r2.body.unattributed).toEqual({ legacy: 1, dropped: 0 });
@@ -528,7 +551,7 @@ describe('results — read-time projection over stamped events', () => {
     const e = (await owner.post(exps(orgId, pageId), fiftyFifty(v1))).body;
     await owner.post(exps(orgId, pageId, `/${e.experimentId}/start`));
 
-    const stamp = (variant: string) => ({ id: e.experimentId as string, variant });
+    const stamp = (variant: string) => ({ id: e.experimentId, variant });
     // control: 40 sessions, 8 conversions (20%); legacy: 40 sessions, 20 (50%)
     const ck = await keysOn(tenantId, orgId, pageId, 'control', 40, 'c');
     const lk = await keysOn(tenantId, orgId, pageId, 'legacy', 40, 'l');
@@ -584,8 +607,10 @@ describe('audit — cms.experiment.* rows carry payload.tenantId', () => {
     await owner.post(exps(orgId, pageId, `/${e.experimentId}/start`));
     await owner.post(exps(orgId, pageId, `/${e.experimentId}/promote`), { variantKey: 'control' });
 
-    const rows = await storage().listAudit({ actionPrefix: 'cms.experiment.', limit: 100 });
+    // Scoped to THIS experiment's resource: every case appends to the one app's audit log.
+    const rows = await storage().listAudit({ actionPrefix: 'cms.experiment.', resource: e.experimentId, limit: 100 });
     const mine = rows.filter((r) => (r.payload as { experimentId?: string })?.experimentId === e.experimentId);
+    expect(mine.length).toBeGreaterThanOrEqual(3);
     const actions = mine.map((r) => r.action);
     expect(actions).toContain('cms.experiment.create');
     expect(actions).toContain('cms.experiment.start');

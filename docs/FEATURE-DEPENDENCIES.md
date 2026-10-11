@@ -10,7 +10,7 @@
 | Bucket | Count | Meaning |
 |---|---|---|
 | Declared (`dependsOn`) | 25 | real hard deps, disable-lock active |
-| Undeclared → always-on target | 98 | correctly undeclared — an always-on dep can never lock (ADR 0439) |
+| Undeclared → always-on target | 99 | correctly undeclared — an always-on dep can never lock (ADR 0439) |
 | **[1] Primitive** (undeclared → toggleable) | **0** | misfiled cross-cutting infra → **extract to a `host/` seam** |
 | **[2] Soft-read** (undeclared → toggleable) | **92** | domain read, target vacuous-when-off → **leave documented** (no lock) |
 | **[3] Hard-dep** (undeclared → toggleable) | **0** | target refuses when off → **declare `dependsOn`** |

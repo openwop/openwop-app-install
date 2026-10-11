@@ -32,6 +32,13 @@
  * same reasoning as `unpublish`), a `draft` page stays open, a page with no
  * overlay at the added locale stays open, and a WITHHELD locale stays open
  * (still not deliverable).
+ *
+ * Sabotage-witnessed (/grade-tests w16): emptying the language-settings route's
+ * `blockingLiveEditPages(…, candidates)` result, the family arm or its withheld
+ * guard in `reachableOverlayKeys`, the before/after diff, the empty-overlay key
+ * count, the shared-ref overlay read, the release-only configured-locale check,
+ * the withhold tag validation, the page-derived withheld set in `localizePage`,
+ * or `liveEditGateActive`'s toggle read each reds the named cases.
  */
 
 import http from 'node:http';
@@ -41,6 +48,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
+import { assertFlatErrorEnvelope, errorCodeOf } from './helpers/errorEnvelope.js';
 
 let BASE: string;
 let server: http.Server;
@@ -64,8 +72,19 @@ const setToggle = async (id: string, status: 'on' | 'off'): Promise<void> => {
 };
 const setGate = (status: 'on' | 'off'): Promise<void> => setToggle('cms-approval-gate', status);
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
-interface Res<T = any> { status: number; headers: Headers; body: T }
+interface SectionBody {
+  sectionId: string; type: string;
+  data: { heading?: string; label?: string };
+  localizations?: Record<string, { heading?: string; label?: string }>;
+}
+interface PageRow { title: string; status: string; locales?: string[] }
+/** The success-body fields this file reads (error bodies go through `assertFlatErrorEnvelope`). */
+interface Body {
+  orgId: string; pageId: string; slug: string; sharedSectionId: string;
+  sections: SectionBody[]; supportedLocales: string[];
+  items: Array<{ kind?: string }>;
+}
+interface Res { status: number; headers: Headers; body: Body }
 interface Client {
   get: (p: string, headers?: Record<string, string>) => Promise<Res>;
   post: (p: string, b?: unknown) => Promise<Res>;
@@ -81,8 +100,8 @@ function client(): Client {
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
-    return { status: res.status, headers: res.headers, body: out };
+    const out: unknown = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    return { status: res.status, headers: res.headers, body: out as Body };
   };
   return {
     get: (p, headers) => call('GET', p, undefined, headers),
@@ -100,7 +119,7 @@ async function owner(): Promise<{ c: Client; orgId: string; tenantId: string }> 
   expect(login.status, JSON.stringify(login.body)).toBe(201);
   const org = await c.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
-  return { c, orgId: org.body.orgId as string, tenantId };
+  return { c, orgId: org.body.orgId, tenantId };
 }
 const u = (orgId: string, s = ''): string => `/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}${s}`;
 
@@ -109,7 +128,8 @@ async function publicRead(orgId: string, slug: string, acceptLanguage: string): 
   const res = await fetch(`${BASE}/host/openwop-app/public/${encodeURIComponent(orgId)}/pages/${encodeURIComponent(slug)}`, {
     headers: { 'accept-language': acceptLanguage },
   });
-  return { status: res.status, headers: res.headers, body: await res.json().catch(() => undefined) };
+  const body: unknown = await res.json().catch(() => undefined);
+  return { status: res.status, headers: res.headers, body: body as Body };
 }
 
 const BASE_TEXT = 'Welcome';
@@ -128,23 +148,23 @@ async function publishedPageWithDormantOverlay(
     sections: [{ type: 'hero', data: { heading: BASE_TEXT }, localizations: { 'pt-BR': { heading: DORMANT_TEXT } } }],
   });
   expect(created.status, JSON.stringify(created.body)).toBe(201);
-  const pageId = created.body.pageId as string;
+  const pageId = created.body.pageId;
   // The overlay stored even though pt-BR is unconfigured — fact (a). If this
   // ever starts 400ing, the reachability argument changes and this witness must
   // be re-derived rather than deleted.
-  expect(created.body.sections[0].localizations['pt-BR'].heading).toBe(DORMANT_TEXT);
+  expect(created.body.sections[0]!.localizations?.['pt-BR']?.heading).toBe(DORMANT_TEXT);
   if (status === 'published') {
     expect((await c.post(u(orgId, `/pages/${pageId}/publish`))).status).toBe(200);
   } else if (status === 'in_review') {
     expect((await c.post(u(orgId, `/pages/${pageId}/submit`))).status).toBe(200);
   }
-  return { pageId, slug: created.body.slug as string };
+  return { pageId, slug: created.body.slug };
 }
 
-async function pendingContentApprovals(c: Client): Promise<any[]> {
+async function pendingContentApprovals(c: Client): Promise<Array<{ kind?: string }>> {
   const list = await c.get('/host/openwop-app/approvals?status=pending');
   expect(list.status).toBe(200);
-  return (list.body.items as any[]).filter((a) => a.kind === 'content-publish');
+  return list.body.items.filter((a) => a.kind === 'content-publish');
 }
 
 beforeAll(async () => { await setToggle('cms-localization', 'on'); });
@@ -170,18 +190,19 @@ describe('CMSA-10 — adding an org content locale is a PUBLISH of every dormant
     // the §A invariant 400 — `gate` is a discriminator only `liveEditRefusal`
     // sets (two mechanisms, one observable: assert the one only the mechanism
     // under test can produce).
-    expect(widen.body?.error?.details?.gate ?? widen.body?.details?.gate).toBe('cms-approval-gate');
-    const details = widen.body?.error?.details ?? widen.body?.details;
+    const env = assertFlatErrorEnvelope(widen.body, 'widening refusal');
+    expect(env.details?.gate).toBe('cms-approval-gate');
+    const details = env.details!;
     expect(details.addedLocales).toEqual(['pt-BR']);
     // `pageId` is high-entropy and the error envelope REDACTS it, so identity
     // is asserted on the fields an operator actually gets back (and that the
     // message repeats) — a `pageId` assertion here would be comparing two
     // redaction placeholders.
-    expect((details.pages as any[]).map((p) => [p.title, p.status, p.locales]))
+    expect((details.pages as PageRow[]).map((p) => [p.title, p.status, p.locales]))
       .toEqual([['Home', 'published', ['pt-BR']]]);
     // The refusal NAMES the exit (an admin must unpublish) — a gate whose 409
     // does not say what to do is the gate-with-no-exit shape.
-    expect(String(widen.body?.error?.message ?? widen.body?.message)).toMatch(/unpublish/i);
+    expect(env.message).toMatch(/unpublish/i);
 
     // The settings write did NOT land.
     const settings = await c.get(u(orgId, '/language-settings'));
@@ -207,8 +228,8 @@ describe('CMSA-10 — adding an org content locale is a PUBLISH of every dormant
     await setGate('on');
     const widen = await c.put(u(orgId, '/language-settings'), { supportedLocales: ['pt-BR'] });
     expect(widen.status, JSON.stringify(widen.body)).toBe(409);
-    const details = widen.body?.error?.details ?? widen.body?.details;
-    expect((details.pages as any[]).map((p) => [p.title, p.status])).toEqual([['Home', 'in_review']]);
+    const details = assertFlatErrorEnvelope(widen.body, 'widening refusal').details!;
+    expect((details.pages as PageRow[]).map((p) => [p.title, p.status])).toEqual([['Home', 'in_review']]);
   });
 
   it('a SHARED-section overlay blocks it too — delivery resolves the ref at read time', async () => {
@@ -231,8 +252,8 @@ describe('CMSA-10 — adding an org content locale is a PUBLISH of every dormant
       sections: [{ type: 'cta', data: {}, ref: { sharedSectionId: shared.body.sharedSectionId } }],
     });
     expect(created.status, JSON.stringify(created.body)).toBe(201);
-    const pageId = created.body.pageId as string;
-    const slug = created.body.slug as string;
+    const pageId = created.body.pageId;
+    const slug = created.body.slug;
     expect((await c.post(u(orgId, `/pages/${pageId}/publish`))).status).toBe(200);
 
     const before = await publicRead(orgId, slug, 'pt-BR');
@@ -242,8 +263,8 @@ describe('CMSA-10 — adding an org content locale is a PUBLISH of every dormant
     await setGate('on');
     const widen = await c.put(u(orgId, '/language-settings'), { supportedLocales: ['pt-BR'] });
     expect(widen.status, JSON.stringify(widen.body)).toBe(409);
-    const details = widen.body?.error?.details ?? widen.body?.details;
-    expect((details.pages as any[]).map((p) => [p.title, p.status])).toEqual([['Shared home', 'published']]);
+    const details = assertFlatErrorEnvelope(widen.body, 'widening refusal').details!;
+    expect((details.pages as PageRow[]).map((p) => [p.title, p.status])).toEqual([['Shared home', 'published']]);
 
     const after = await publicRead(orgId, slug, 'pt-BR');
     expect(after.body.sections[0].data.label).toBe('Go');
@@ -264,16 +285,16 @@ describe('CMSA-10 — the language-FAMILY arm (review F1)', () => {
       sections: [{ type: 'hero', data: { heading: BASE_TEXT }, localizations: { pt: { heading: DORMANT_TEXT } } }],
     });
     expect(created.status, JSON.stringify(created.body)).toBe(201);
-    const slug = created.body.slug as string;
+    const slug = created.body.slug;
     expect((await c.post(u(orgId, `/pages/${created.body.pageId}/publish`))).status).toBe(200);
     expect((await publicRead(orgId, slug, 'pt-BR')).body.sections[0].data.heading).toBe(BASE_TEXT);
 
     await setGate('on');
     const widen = await c.put(u(orgId, '/language-settings'), { supportedLocales: ['pt-BR'] });
     expect(widen.status, JSON.stringify(widen.body)).toBe(409);
-    const details = widen.body?.error?.details ?? widen.body?.details;
+    const details = assertFlatErrorEnvelope(widen.body, 'widening refusal').details!;
     expect(details.addedLocales).toEqual(['pt-BR']);
-    expect((details.pages as any[]).map((p) => [p.title, p.status])).toEqual([['Family', 'published']]);
+    expect((details.pages as PageRow[]).map((p) => [p.title, p.status])).toEqual([['Family', 'published']]);
 
     // And the family chain really is one-directional: with the gate OFF the
     // same widening serves the `pt` overlay under `Content-Language: pt-BR`.
@@ -299,7 +320,7 @@ describe('§C9 F2 — the family cure must not refuse a change that releases NOT
       title: 'Already family',
       sections: [{ type: 'hero', data: { heading: BASE_TEXT }, localizations: { pt: { heading: DORMANT_TEXT } } }],
     });
-    const slug = created.body.slug as string;
+    const slug = created.body.slug;
     expect((await c.post(u(orgId, `/pages/${created.body.pageId}/publish`))).status).toBe(200);
     expect((await c.put(u(orgId, '/language-settings'), { supportedLocales: ['pt'] })).status).toBe(200);
 
@@ -325,8 +346,8 @@ describe('§C9 F2 — the family cure must not refuse a change that releases NOT
       title: 'Withheld family',
       sections: [{ type: 'hero', data: { heading: BASE_TEXT }, localizations: { pt: { heading: DORMANT_TEXT } } }],
     });
-    const pageId = created.body.pageId as string;
-    const slug = created.body.slug as string;
+    const pageId = created.body.pageId;
+    const slug = created.body.slug;
     expect((await c.post(u(orgId, `/pages/${pageId}/publish`))).status).toBe(200);
     expect((await c.put(u(orgId, '/language-settings'), { supportedLocales: ['pt'] })).status).toBe(200);
     expect((await c.post(u(orgId, `/pages/${pageId}/locales/pt/unpublish`))).status).toBe(200);
@@ -356,8 +377,8 @@ describe('§C9 F2 — the family cure must not refuse a change that releases NOT
       title: 'Real comfort',
       sections: [{ type: 'hero', data: { heading: BASE_TEXT }, localizations: { pt: { heading: DORMANT_TEXT } } }],
     });
-    const pageId = created.body.pageId as string;
-    const slug = created.body.slug as string;
+    const pageId = created.body.pageId;
+    const slug = created.body.slug;
     expect((await c.post(u(orgId, `/pages/${pageId}/publish`))).status).toBe(200);
     // Withhold `pt` while it is NOT a configured locale — accepted, and it holds.
     expect((await c.post(u(orgId, `/pages/${pageId}/locales/pt/unpublish`))).status).toBe(200);
@@ -378,8 +399,8 @@ describe('§C9 F2 — the family cure must not refuse a change that releases NOT
       title: 'Narrowed',
       sections: [{ type: 'hero', data: { heading: BASE_TEXT }, localizations: { pt: { heading: DORMANT_TEXT } } }],
     });
-    const pageId = created.body.pageId as string;
-    const slug = created.body.slug as string;
+    const pageId = created.body.pageId;
+    const slug = created.body.slug;
     expect((await c.post(u(orgId, `/pages/${pageId}/publish`))).status).toBe(200);
     expect((await c.put(u(orgId, '/language-settings'), { supportedLocales: ['pt', 'pt-BR'] })).status).toBe(200);
     expect((await c.post(u(orgId, `/pages/${pageId}/locales/pt/unpublish`))).status).toBe(200);
@@ -409,10 +430,10 @@ describe('§C9 F2 — the family cure must not refuse a change that releases NOT
     await setGate('on');
     const widen = await c.put(u(orgId, '/language-settings'), { supportedLocales: ['pt-BR'] });
     expect(widen.status, JSON.stringify(widen.body)).toBe(409);
-    const details = widen.body?.error?.details ?? widen.body?.details;
+    const details = assertFlatErrorEnvelope(widen.body, 'widening refusal').details!;
     expect(details.matchedOverlayLocales).toEqual(['pt']);   // where the content IS
     expect(details.addedLocales).toEqual(['pt-BR']);          // what to withhold
-    const msg = String(widen.body?.error?.message ?? widen.body?.message);
+    const msg = assertFlatErrorEnvelope(widen.body, 'family refusal').message;
     expect(msg).toMatch(/`pt` translation content/);          // names the content's locale
     expect(msg).toMatch(/Withhold `pt-BR`/);                  // names the actionable one
   });
@@ -428,8 +449,8 @@ describe('§C9 F2 — the family cure must not refuse a change that releases NOT
       title: 'Family remedy',
       sections: [{ type: 'hero', data: { heading: BASE_TEXT }, localizations: { pt: { heading: DORMANT_TEXT } } }],
     });
-    const pageId = created.body.pageId as string;
-    const slug = created.body.slug as string;
+    const pageId = created.body.pageId;
+    const slug = created.body.slug;
     expect((await c.post(u(orgId, `/pages/${pageId}/publish`))).status).toBe(200);
     await setGate('on');
     expect((await c.put(u(orgId, '/language-settings'), { supportedLocales: ['pt-BR'] })).status).toBe(409);
@@ -480,8 +501,13 @@ describe('CMSA-10 — the refusal has a CHEAP exit, not just "unpublish the site
     const { c, orgId } = await owner();
     await setGate('off');
     const { pageId } = await publishedPageWithDormantOverlay(c, orgId);
-    expect((await c.post(u(orgId, `/pages/${pageId}/locales/not-a-locale/unpublish`))).status).toBe(400);
-    expect((await c.post(u(orgId, `/pages/${pageId}/locales/en/unpublish`))).status).toBe(400);
+    // The 400 must be the locale validator's, not any other 400 on the lane.
+    for (const tag of ['not-a-locale', 'en']) {
+      const r = await c.post(u(orgId, `/pages/${pageId}/locales/${tag}/unpublish`));
+      expect(r.status, JSON.stringify(r.body)).toBe(400);
+      expect(errorCodeOf(r.body)).toBe('validation_error');
+      expect(assertFlatErrorEnvelope(r.body, `withhold ${tag}`).message).toMatch(/not a valid non-base translation locale/);
+    }
   });
 });
 
@@ -524,6 +550,7 @@ describe('CMSA-10 — the controls: what the rule must NOT refuse', () => {
     await publishedPageWithDormantOverlay(c, orgId, 'draft');
     const widen = await c.put(u(orgId, '/language-settings'), { supportedLocales: ['pt-BR'] });
     expect(widen.status, JSON.stringify(widen.body)).toBe(200);
+    expect(widen.body.supportedLocales).toEqual(['pt-BR']); // the write landed
   });
 
   it('a published page with NO overlay at the added locale never blocks — the gate has an exit', async () => {
@@ -535,6 +562,7 @@ describe('CMSA-10 — the controls: what the rule must NOT refuse', () => {
     await setGate('on');
     const widen = await c.put(u(orgId, '/language-settings'), { supportedLocales: ['es'] });
     expect(widen.status, JSON.stringify(widen.body)).toBe(200);
+    expect(widen.body.supportedLocales).toEqual(['es']); // the write landed
   });
 
   it('an EMPTY overlay never blocks — it resolves to base, so it changes nothing for a reader', async () => {
@@ -554,6 +582,7 @@ describe('CMSA-10 — the controls: what the rule must NOT refuse', () => {
     await setGate('on');
     const widen = await c.put(u(orgId, '/language-settings'), { supportedLocales: ['es'] });
     expect(widen.status, JSON.stringify(widen.body)).toBe(200);
+    expect(widen.body.supportedLocales).toEqual(['es']); // the write landed
   });
 
   it('a WITHHELD locale never blocks — `localePublishState` still says draft, so nothing goes live', async () => {

@@ -3129,6 +3129,24 @@ export function openSqliteStorage(dbPath: string): Storage {
       ) as Array<{ k: string; v: string }>;
       return rows.map((r) => ({ key: r.k, value: r.v }));
     },
+    async surfaceRowStats(minTenantRows) {
+      // ADR 0871 — the Postgres aggregate, without split_part: `rest` is the key
+      // after `hostsurf:`; the family runs to its first ':' and the tenant to the next.
+      const rows = db.prepare(
+        `WITH r AS (SELECT substr(k, 10) AS rest FROM host_ext_kv WHERE k >= 'hostsurf:' AND k < 'hostsurf;'),
+              f AS (SELECT substr(rest, 1, instr(rest, ':') - 1) AS fam,
+                           substr(rest, instr(rest, ':') + 1) AS tail FROM r WHERE instr(rest, ':') > 0),
+              t AS (SELECT fam, CASE WHEN instr(tail, ':') > 0 THEN substr(tail, 1, instr(tail, ':') - 1) ELSE tail END AS tenant FROM f),
+              g AS (SELECT fam, tenant, count(*) AS n FROM t GROUP BY fam, tenant)
+         SELECT fam AS family, count(*) AS tenants, max(n) AS max_rows, sum(n) AS total_rows,
+                sum(CASE WHEN n >= ? THEN 1 ELSE 0 END) AS over
+           FROM g GROUP BY fam ORDER BY fam`,
+      ).all(minTenantRows) as Array<{ family: string; tenants: number; max_rows: number; total_rows: number; over: number }>;
+      return rows.map((r) => ({
+        family: r.family, tenants: r.tenants, maxTenantRows: r.max_rows,
+        totalRows: r.total_rows, tenantsAtOrOver: r.over,
+      }));
+    },
     async kvCount(keyPrefix) {
       const upper = prefixUpperBound(keyPrefix);
       const row = (upper === null

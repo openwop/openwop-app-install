@@ -633,6 +633,8 @@ flip of `V2_PROJECT_A2A` / `V2_PROJECT_MCP`.
 | P2 | Whole-family WHD-7 leg + `KNOWN_UNPROJECTED_FAMILIES` ledger (gated surfaces ON, sabotage-witnessed); move the oracle to the v2 seat list so it survives ADR 0812 P3c | red on a deleted family |
 | P3 | Project the PROJECT and PROJECT-WITH-DROPS families; re-point the batch-1 `test/support/v1Advertisement.ts` callers whose claim now has a v2 record; measure the major-2 conformance lane and fix or list its reds | lane ratchet; bridge caller count falls |
 | P4 | Host work behind the ledger: `refreshedAt` constants + a staleness ratchet; the `negotiation.decided` emitter; filtering the legacy profiles; the `workspace.updated` emitter; then project `a2a` / `mcp` / `workspace` and un-hold the 3 held tests. The A2A header-less card rule goes to the steward first. | held tests pass on v2 |
+| P4-s1 | `scheduling` projected (`cron`, `delayed`, `maxFutureHorizon`); `auth.subjectLinkKey` gated on both lanes (steward ruling); `workspace` and `multiAgent` re-dispositioned; `dispatch` and `featureSurfaces` recorded as seatless (§ "P4 slice: the v1-only families") | `feat/adr-0858-project-v1-only-families` |
+| P4-s2 | `multiAgent` projected from the runtime phase gates (unbroken-ladder version, `clarification` kind, level 6 withheld), the phase-3 predicate honours PHASE_5, `agents.dispatch: true` on CP-2; spec-steward rulings openwop-e2 2026-10-10 (§ "P4 slice 2") | `feat/adr-0858-multiagent-dispatch` |
 | P5 | Settle RFC 0228 for whatever stays ledgered (404 the operations, or project); re-certify major 2 on production; tell the steward which scenarios became applicable | bundle |
 
 ## Open questions
@@ -664,3 +666,249 @@ flip of `V2_PROJECT_A2A` / `V2_PROJECT_MCP`.
       did not cover? (corpus, not this host)
 
 > **Delivery correction 2026-10-09 (P3 blob):** a truncated S3 listing without a continuation token is a failure, not an exhausted page. The parser refuses missing/empty tokens, non-list documents and missing/invalid object sizes; regression tests retain a valid empty-page and decoded-token control. The configured production memory tier and the P5 shape deviations recorded above remain the limits of this claim.
+
+> **Correction 2026-10-10 (ADR 0812 P4 slice 1): the bridge is gone.** The
+> v1 builder (`buildAdvertisement`) and `test/support/v1Advertisement.ts` are
+> deleted, so the "bridge caller count falls" witness in P3 reached **zero**:
+> 22 callers (15 through the bridge, 7 direct) were re-pointed at the served v2
+> root, at the SSoT the v1 block was printed from, or had their v1-oracle leg
+> deleted (dispositions in ADR 0812 § "P4 slice 1"). Two consequences for this
+> ADR:
+> - **The WHD-7 v1-oracle ledgers move here**, because their detector is
+>   deleted. Facets the v2 schema has a seat for that the v2 root does not
+>   fill (formerly `KNOWN_UNPROJECTED` in `whd7-v2-projection-parity`):
+>   `aiProviders.byok`, `aiProviders.policies`, `aiProviders.imageGeneration`,
+>   `aiProviders.videoGeneration`, `aiProviders.speechSynthesis`,
+>   `aiProviders.realtimeVoice`, `aiProviders.maxInlineMediaBytes`,
+>   `envelopes.reliability`. Deliberate v1→v2 shape changes:
+>   `aiProviders.authModes` (per-provider map → mode vocabulary; the map rides
+>   the `openwop-app.ai-providers` extension) and `aiProviders.selfHosted`
+>   (id list → boolean; the ids ride `providers`). Nothing now reds when a new
+>   unprojected facet appears; the family-seat ledger
+>   (`adr0858-v2-family-seats`) is the remaining guard, at family granularity.
+> - **Claims with no v2 record that no served document makes now:**
+>   `hostExtensions.featureSurfaces`, `dispatch`, `multiAgent.executionModel`
+>   (ledgered BLOCKED), `scheduling` (UNDISPOSITIONED; projected by the P4
+>   slice below), `workspace` (BLOCKED).
+>   When any is projected, its record MUST read the source the tests now pin
+>   (`registeredFeatureSurfaceIds()`, `dispatchCapability()`,
+>   `workspaceAdvertisable()`, `MAX_FUTURE_HORIZON_ISO`).
+
+## P4 slice: the v1-only families (2026-10-10)
+
+After the v1 cut, four families had a schema seat in v2 but appeared in no
+served document: `dispatch`, `multiAgent`, `scheduling` and `workspace`. One more
+claim, `featureSurfaces`, had no seat. This slice measured each one against the
+vendored `schemas/v2/capabilities.schema.json`, `spec/v2/declaration.json` and
+`spec/v2/core/host-services.md`.
+
+- **`scheduling`: PROJECTED.** It goes in `v2HostServiceFamilies`, and every
+  facet comes from the code that honours it:
+  - `cron: true`. `cronSchedule.ts` computes `nextFireAt`. `host/scheduleDaemon.ts`
+    fires the job, and `index.ts` starts it on every boot. Jobs persist in a
+    `DurableCollection`, so they survive a restart. Each slot fires once
+    (ADR 0787 D1). Missed ticks collapse to a single recovery fire.
+  - `delayed: true`. A one-shot job is `ONE_SHOT_CRON` plus `firstFireAtMs`
+    (`schedulingService.ts`, ADR 0309 D1).
+  - `maxFutureHorizon` is `MAX_FUTURE_HORIZON_ISO` (`P366D`). It is the same
+    constant behind the `schedule_horizon_exceeded` refusal and its
+    `details.maxFutureHorizon` (`routes/scheduler.ts`).
+  - `calendar` is withheld, because no calendar-reference schedule exists.
+
+  **CORRECTION to the v1 record:** v1 gated `scheduling` on the test seam
+  because "no clock yet fires real runs". That stopped being true when the
+  daemon landed, so the gate was stale. Production never advertised the horizon
+  that the v0.3.0 notes describe.
+- **`workspace`: WITHHELD (re-measured, still blocked).** host-services.md
+  §workspace says the host MUST emit `workspace.updated` on each write or
+  delete. Nothing in `src/` emits it. Projecting the family needs that emitter
+  first, plus a check of the "snapshot at `run.started`" MUST. RFC 0228's
+  tension still applies: the routes are served while the family is not
+  advertised.
+- **`multiAgent`: HELD FOR THE SPEC STEWARD.** The seat's semantics are unclear
+  on two points:
+  1. A `version: 5` or `6` claim carries no `crossHostCausation`. That is
+     because `isPhase3Enabled()` reads only PHASE_3 and PHASE_4. The seat says
+     "version N MUST implement phases 1..N", and that version 3 MUST carry the
+     sub-block. Either the ladder is wrong, or the host should not claim 5 or 6.
+  2. It is unclear whether the vendor interrupt kind
+     `x-host-openwop-app-clarification` is a legal v2
+     `confidenceEscalationInterruptKind`. The seat's pattern admits it, but
+     RFC 0044 §C also requires a published kind-mapping document.
+
+  The verifier sub-block is not in question: the v2 `verifier` is
+  `{gating}` with no `supported` flag.
+- **`dispatch`: NO SEAT, not projected.** The v2 schema has no root
+  `dispatch` family, so the v1 fan-out block (`fanOutSupported`,
+  `fanOutPolicies`, `joinModes`, `onChildFailureModes`, `maxFanOut`,
+  `perItemInput`) has nowhere to go. The nearest seat is the boolean
+  `agents.dispatch` ("implements `core.dispatch` and honours CP-2"). v1 never
+  claimed it, so adding it would be a new claim rather than a projection. It is
+  listed for the steward. `dispatchCapability()` still gates the validator.
+- **`featureSurfaces`: NO SEAT, host-extension only.** `hostExtensions.
+  featureSurfaces` was a v1 root key. The v2 schema has no seat for it, and
+  neither the SPA nor the v2 spec reads it. **Recommendation: drop it.** It
+  needs no `/host/openwop-app/*` route. The registry
+  (`registeredFeatureSurfaceIds()`) is internal, and feature availability
+  already has a route (the feature-toggle read). If a client ever needs it,
+  publish it as an `openwop-app.*` discovery extension, not a new route.
+
+> **Correction 2026-10-10 (spec-steward ruling): `auth.subjectLinkKey` only
+> with BOTH lanes.** ADR 0812 P4 noted that v2 stated the key unconditionally,
+> which the schema allows. The steward ruled that the key is advertised only
+> when both the `saml` and `scim` lanes are. Three grounds:
+> - `spec/v2/core/identity.md` §3, "The link is a record": a link joins exactly
+>   two subjects, so a host with one lane forms none.
+> - Axiom 2: a field must not be a claim about nothing.
+> - RFC 0164 §A.3 and RFC 0165's `subject.keyClass` are both scoped to "when
+>   both … are advertised".
+>
+> `spec/v2/facets/auth.schema.json` does not enforce this, and the steward is
+> tracking that corpus gap. Until it is fixed, the guard is
+> `test/adr0858-p4-scheduling-and-link-key.test.ts`. It covers four cases:
+> neither lane, SAML only, SCIM only, and both. Emitting the key on one lane
+> fails two of them.
+
+**Witness:** `test/adr0858-p4-scheduling-and-link-key.test.ts`. It
+schema-validates the served `scheduling` record against its seat, asserts each
+facet against its source, and checks that the refusal echoes the advertised cap.
+Four deliberate breakages each failed it (2, 2, 1 and 4 failing tests):
+- the key emitted when either lane is present;
+- a literal horizon;
+- a `calendar` over-claim;
+- the record removed.
+
+`adr0858-v2-family-seats` drops `scheduling` from its ledger and carries the
+re-measured reasons for `workspace` and `multiAgent`.
+
+## P4 slice 2: `multiAgent` and `agents.dispatch` (2026-10-10, rulings openwop-e2)
+
+> **CORRECTION to P4 slice 1.** That slice held `multiAgent` for the spec
+> steward and recorded `dispatch` as having no seat. The steward ruled on both
+> (openwop-e2, 2026-10-10), and this slice implements the rulings.
+
+**Ruling 1: the version is the highest N for which every phase 1..N is
+implemented.** A claim of version 3 or higher REQUIRES `crossHostCausation`
+(`spec/v2/core/execution.md` level 3). Claiming 5 also requires phases 4 and
+5.
+- **One owner, `host/multiAgentPhases.ts`.** It holds the phase gates exactly as
+  the runtime reads them:
+  - phase 1: core.dispatch handoff events (`bootstrap/nodes.ts`);
+  - phase 2: escalation (`nodes.ts`);
+  - phase 3: `getRunAncestry` (`routes/runs.ts`);
+  - phase 4: `replay.divergedAtRefusal` (`executor/executor.ts`);
+  - phase 5: the persisted `iteration` counter (`nodes.ts`).
+
+  The runtime sites now read these gates, and the advert derives the version
+  from them by walking the ladder until the first gap. **v1's ladder was
+  separate from the runtime and more generous.** With only PHASE_5 set it
+  advertised 5, while the escalation and refusal-divergence gates (each still
+  reading its own flag) were off.
+- **The predicate fix.** `isPhase3Enabled` ignored PHASE_5. It now honours it,
+  and it moved into the module. PHASE_6 is not an env flag: v1 derived it from
+  PHASE_5 plus `OPENWOP_AGENT_VERIFIER_GATING`.
+- **Level 6 is not claimed.** `runVerifier` (`host/agentDispatch.ts`) runs only
+  when a verifier is injected, and the one injector is the `agents/verify-run`
+  conformance seam (`routes/agents.ts`). No production dispatch emits
+  `agent.verified`. Wiring a real critic is host work, and it should come with
+  its own ADR.
+- **Level 3 evidence:**
+  - the stable `CROSS_HOST_CAUSATION_HOST_ID`;
+  - getRunAncestry under the same gate;
+  - trace context propagated into MCP (`host/mcpClient.ts`) and A2A
+    (`host/a2aSurface.ts`) unconditionally;
+  - no event's `causationId` names a foreign event, so `causationHostId` is
+    never owed.
+- **Levels 2 and 5 also rely on prior work.** Level 2 includes memory scoping
+  across sub-runs, which v1 claimed and this slice did not re-audit. Level 5
+  `statefulResume` rests on `nodes.ts` persisting the counter in a run variable
+  (`dispatch-iteration-counter` covers the cross-pass case). The seam-only
+  `host/agentLoop.ts` is not the evidence for it.
+- **`crossChildMemoryConcurrency` is left absent.** That means the default,
+  `strict`, which v1 also implied. Not re-audited here.
+
+**Ruling 2: the interrupt kind.** The v2 `kind` is a closed enum, and vendor
+kinds travel as `custom` + `data.customKind`.
+- **First check, done:** the v2 root has never advertised `multiAgent`, so the
+  `x-host-openwop-app-clarification` value was never on a v2 wire. No code
+  emits that kind. Escalation suspends with `kind: 'clarification'`
+  (`nodes.ts`), so **no live dishonest claim existed at v2**. The v1 claim was
+  false, though: v1 advertised a kind it never emitted.
+- The advert now states `confidenceEscalationInterruptKind: 'clarification'`,
+  and a test drives core.dispatch to check that it matches the kind actually
+  emitted.
+- **Interrupts in general:**
+  - `interrupt.requested` already uses `custom` + `data.customKind`
+    (`executor/interruptRequestedPayload.ts`).
+  - The `node.suspended` / `interrupt.resolved` projection
+    (`storage/interruptKindProjection.ts`, ADR 0725) maps a non-enum kind to
+    `custom`, but carries the host spelling under `vendor.openwop-app.kind`,
+    not `data.customKind`.
+
+  Both are canonical at the `kind` level. Whether the event projection should
+  also set `data.customKind` is listed for the steward.
+
+**Ruling 3: `agents.dispatch`.**
+- **Claimed `true`:** the host implements `core.dispatch` (`bootstrap/nodes.ts`)
+  and honours CP-2. Each worker is a child run (`dispatchSubWorkflow`), and the
+  parent's registered definition and run are not touched.
+- **Witness:** a CP-2 test in `test/adr0858-p4-multiagent-dispatch.test.ts`.
+  Injecting a definition mutation into core.dispatch turns it red.
+- **The v1 fan-out descriptor is withheld.** These facets have no v2 seat:
+  `fanOutSupported`, `fanOutPolicies`, `joinModes`, `onChildFailureModes`,
+  `maxFanOut` and `perItemInput`. **This is a corpus gap the steward is
+  tracking.** The v2 root is closed, so there is no top-level `dispatch` block
+  and no `extensions.*` copy. `dispatchCapability()` still gates the
+  definition validator.
+
+**Witness:** `test/adr0858-p4-multiagent-dispatch.test.ts`, 13 tests:
+- the ladder cases, including the two gap cases, each validated against the
+  `multiAgent` seat;
+- level 6 withheld;
+- the phase-3 predicate;
+- the hostId;
+- the floor and kind against a real escalation;
+- `agents.dispatch` against its seat;
+- CP-2.
+
+Seven deliberate breakages each failed it:
+
+| Breakage | Tests failing |
+|---|---|
+| A ladder that counts flags | 2 |
+| The `x-host` kind | 1 |
+| A literal hostId | 1 |
+| A literal floor | 1 |
+| The predicate without PHASE_5 | 2 |
+| A definition mutation in core.dispatch | 1 |
+| `dispatch: false` | 1 |
+
+> **CORRECTION 2026-10-10 (same slice) — the projection made two v2 scenarios
+> applicable, and both found real host gaps.** `scripts/check-conformance-major2.sh`
+> on `origin/main` + this slice went 195 pass / 2 red (main alone 197 / 0). The
+> 13-test witness above validated the ADVERT; neither gap is in the advert.
+>
+> 1. **`v2-dispatch-loop` — a schema-invalid decision.** With no
+>    `mockDispatchPlan`, `core.orchestrator.supervisor` planned
+>    `[{kind:'next-worker', nextWorkerIds: []}, terminate]`. No
+>    `OrchestratorDecision` branch accepts an empty `nextWorkerIds`
+>    (`minItems: 1`). ADR 0725 had kept it knowingly, for the v1 catalog's
+>    "next-worker then terminate" prerequisite, and admitted
+>    `runOrchestrator.decided` to the payload baseline as a corpus mismatch. The
+>    v2 scenario settles that: it does not port the v1 pair, and it requires
+>    every decision to be exactly one branch. The no-plan supervisor now records
+>    a single `terminate` (`bootstrap/nodes.ts`). The baseline entry stays,
+>    because core.dispatch records the forward-compat `noop` kind a test hands
+>    it; its reason is rewritten.
+> 2. **`v2-run-fork-ancestry` — a fork reported as a composition child.**
+>    `getRunAncestry` (`routes/runs.ts`) turned ANY `parentRunId` into
+>    `{cause: 'core.subWorkflow'}`, and `:fork` stamps `parentRunId` with the
+>    source. `runs.md` §Diff and ancestry: a fork is not dispatched, so its
+>    parent MUST be `null`. The route now also requires `forkMode` to be unset,
+>    the discriminator `executor/forkInterrupts.ts` already uses.
+>
+> **Witness:** `test/adr0858-p4-conformance-gaps.test.ts`, 3 tests: the
+> dispatch-loop fixture's decisions against the v2 branches, a branch fork's
+> ancestry, and a control (a dispatched child keeps its parent). Reverting
+> each fix reds its leg with the lane's own message (`seq 4`,
+> `cause: core.subWorkflow`). An always-`null` route reds the control.

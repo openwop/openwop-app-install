@@ -3,6 +3,12 @@
  * (minted, guarded, code-owned), the façade round-trip, the convergence
  * payoff (generic entity query sees pages), the id-preserving migration, and
  * the one-directional dependency guard (entities never imports cms).
+ *
+ * Sabotage-witnessed (/grade-tests w16): dropping `assertNotSystemWrite`'s
+ * `type.system` check, the migration's skip-if-present read, the
+ * published→absent kernel-status derivation, or the `kind` scalar each reds the
+ * named case; adding any `../cms/` import to `features/entities` reds the
+ * boundary case.
  */
 import { readFileSync, readdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
@@ -11,7 +17,7 @@ import { beforeAll, describe, expect, it } from 'vitest';
 import { initHostExtPersistence, DurableCollection } from '../src/host/hostExtPersistence.js';
 import { openStorage } from '../src/storage/index.js';
 import {
-  createPage, getPage, listPages, transitionPage, migratePagesToKernel, CMS_PAGE_TYPE, type Page,
+  createPage, getPage, listPages, transitionPage, migratePagesToKernel, CMS_PAGE_TYPE,
 } from '../src/features/cms/cmsService.js';
 import {
   createEntity, deleteEntityType, getEntityType, getSystemEntity, queryEntities, updateEntityType,
@@ -65,6 +71,9 @@ describe('cms.page in the content kernel (ADR 0408 Phase C)', () => {
   });
 
   it('system guards: generic writes + type-admin mutations are blocked', async () => {
+    // Mint `cms.page` in T through the façade HERE: relying on an earlier case to have
+    // minted it made all three refusals fail as not_found / null / false under shuffle.
+    await createPage({ tenantId: T, orgId: ORG, title: 'Guard seed', slug: 'guard-seed', createdBy: 'u1' });
     await expect(createEntity({ tenantId: T, typeName: CMS_PAGE_TYPE, values: { title: 'x' }, createdBy: 'u1' }))
       .rejects.toThrow(/system type/);
     await expect(updateEntityType({ tenantId: T, name: CMS_PAGE_TYPE, patch: { status: 'draft' }, actor: 'u1' }))
@@ -74,18 +83,20 @@ describe('cms.page in the content kernel (ADR 0408 Phase C)', () => {
 
   it('migrates legacy cms:page rows id-preservingly and idempotently', async () => {
     // Seed a LEGACY row exactly as the pre-kernel store held it.
-    const legacy = new DurableCollection<Page>('cms:page', (p) => p.pageId);
     const legacyPage = {
       pageId: 'page-legacy-1', tenantId: 'tenant-legacy', orgId: 'org-legacy',
-      title: 'Old Faithful', slug: 'old-faithful', status: 'published',
+      title: 'Old Faithful', slug: 'old-faithful', status: 'published' as const,
       sections: [{ sectionId: 's1', type: 'richText', data: { text: 'vintage' } }],
       version: 3, createdBy: 'u0', updatedBy: 'u0',
       createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-02T00:00:00.000Z',
-    } as unknown as Page;
+    };
+    // Typed as the legacy row itself (not laundered into `Page`): the pre-kernel store
+    // held exactly these fields.
+    const legacy = new DurableCollection<typeof legacyPage>('cms:page', (p) => p.pageId);
     await legacy.put(legacyPage);
 
     const first = await migratePagesToKernel();
-    expect(first.migrated).toBeGreaterThanOrEqual(1);
+    expect(first.migrated).toBe(1); // the legacy collection holds exactly this row
     const again = await migratePagesToKernel();
     expect(again.migrated).toBe(0); // idempotent
 

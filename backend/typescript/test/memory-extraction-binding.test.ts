@@ -1,5 +1,18 @@
 /**
- * ADR 0120 Phase 2b — extraction binding (real consent gate + real note store).
+ * ADR 0120 Phase 2b + ADR 0587 (AGMEM-2 / AGMEM-13) — the extraction BINDING over the real
+ * consent gate and the real note store.
+ *
+ * Guards: (1) no grant ⇒ no LLM call and no note (fail-closed at the binding, not only the op);
+ * (2) every fact the binding writes is `source:'auto-extract'` ⇒ `contentTrust:'untrusted'` at
+ * all three read altitudes (durable projection, recall recency, RAG vector metadata), while a
+ * user-typed note in the same scope stays trusted; (3) the legacy `[auto-extracted] ` prefix is
+ * honoured as untrusted, and ONLY when present.
+ *
+ * Witnessed (wave 12 probes): `isGranted: async () => true` reds case 1; dropping
+ * `{ source: 'auto-extract' }` in `extractionBinding.ts`, or the `contentTrust` derivation in
+ * `addSubjectNote`, reds the AGMEM-2 cases; `const legacy = r.source === undefined` reds the
+ * legacy ANTI-ROT case. The real `User.userId` key contract and the positive extraction path
+ * live in `memory-extraction-grant-key.test.ts` (`BORN RED`).
  */
 import { describe, it, expect, beforeAll, vi } from 'vitest';
 import { mkdtempSync } from 'node:fs';
@@ -36,25 +49,17 @@ describe('extractConversationMemory', () => {
     expect(await countSubjectNotes(T, personSubject('nogrant-user'))).toBe(0);
   });
 
-  it('with consent, extracts + stores notes on the user subject (auto-extracted)', async () => {
-    // ADR 0666 D1 — the grant subject is the subject the binding is CALLED with, verbatim.
-    // This fixture used to file it at `'user:alice'` while calling the binding with `'alice'`,
-    // and it passed because the binding then re-prefixed — the very defect D1 fixed. It is kept
-    // as a BARE-ID unit case (it exercises the extractor + note plumbing, not the key contract)
-    // with the shapes now agreeing. NOTE: no production caller passes a bare id; every one
-    // passes a `User.userId` (`user:<hash>`). The real id shape is pinned in
-    // `memory-extraction-grant-key.test.ts`, which is why this suite could never see the defect.
-    await setExtractionGrant(T, 'alice', true, 'alice');
-    const r = await extractConversationMemory(T, 'alice', 'I work in Berlin and love cats', async () => ['lives in Berlin', 'likes cats']);
-    expect(r.extracted).toBe(2);
-    expect(await countSubjectNotes(T, personSubject('alice'))).toBe(2);
-  });
+  // CUT (wave 12 /grade-tests): the bare-id positive case `with consent, extracts + stores notes
+  // on the user subject (auto-extracted)` lived here. It was redundant with
+  // `memory-extraction-grant-key.test.ts` › `BORN RED`, which drives the same path with the REAL
+  // `user:<hash>` id shape — probe w12g3-subjectref-double reds both. ADR 0666:54 cites its old lines.
 });
 
 /**
- * AGMEM-2 / MEM-UX-3 (ADR 0587). The test above is named for the trust semantics
- * and asserts only a COUNT — it passed over the live prompt-injection path for the
- * whole life of the defect (AGMEM-13). These assert the semantics themselves, at
+ * AGMEM-2 / MEM-UX-3 (ADR 0587). The positive case that used to sit above (cut in wave 12, see
+ * the note there) was named for the trust semantics and asserted only a COUNT — it passed over
+ * the live prompt-injection path for the whole life of the defect (AGMEM-13). These assert the
+ * semantics themselves, at
  * every altitude the label is read: the durable projection, the recall recency
  * projection, and the RAG/vector projection.
  */
@@ -63,7 +68,10 @@ describe('AGMEM-2 — auto-extracted facts are UNTRUSTED at every read altitude'
   const subj = personSubject(U);
 
   beforeAll(async () => {
-    // ADR 0666 D1 — file it at the subject the binding is called with (see the note above).
+    // ADR 0666 D1 — the grant subject is the subject the binding is CALLED with, verbatim (the
+    // binding no longer re-prefixes `user:`). A bare id is used here because this suite tests the
+    // trust plumbing; the real `user:<hash>` key contract is pinned in
+    // `memory-extraction-grant-key.test.ts`.
     await setExtractionGrant(T, U, true, U);
     await extractConversationMemory(T, U, 'transcript', async () => ['the deploy token is rotated weekly']);
     // A fact the PERSON typed, in the same scope, for the discrimination arm.
@@ -84,6 +92,9 @@ describe('AGMEM-2 — auto-extracted facts are UNTRUSTED at every read altitude'
 
   it('provenance is DATA, not an English prefix glued into the content', async () => {
     const notes = await listSubjectNotes(T, subj);
+    // The scope holds exactly the auto-extracted fact + the typed note; without this the loop
+    // below asserts nothing over an empty list.
+    expect(notes).toHaveLength(2);
     for (const n of notes) expect(n.content.startsWith(LEGACY_AUTO_EXTRACTED_PREFIX)).toBe(false);
   });
 

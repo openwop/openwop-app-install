@@ -18,6 +18,15 @@
  * ADR 0024 Option-C posture, the `confirm-action-send` verdict gate, the ingest
  * volume cap, and byte-stable expansion — so an equivalence claim is a measured
  * fact rather than a reading of the diff.
+ *
+ * Sabotage-witnessed (/grade-tests w11): in `examples/workflow-chain-packs/assistant/pack.json`,
+ * `notify:false`, a POST reschedule, or a drive `pageSize` that disagrees with the cap
+ * each red their case; never stripping the auto-terminal outputRole
+ * (`chainBackedShape.ts`) reds the outputRole case; a `registerWorkflow(` call in
+ * loops.ts reds the pin-site case; a nonce in `buildChainBackedDefinition` reds the
+ * determinism case. Ceilings: the three action chains' `send → confirm` edge blocks
+ * are byte-identical, so no single-site pack edit can probe the edge assertion; and
+ * `EXEC_WORKFLOW_BY_KIND` is module-private, so the dispatch-id case must read source.
  */
 import { beforeAll, describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';

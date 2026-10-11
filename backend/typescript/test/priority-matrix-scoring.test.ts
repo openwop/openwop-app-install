@@ -1,9 +1,19 @@
 /**
- * Priority Matrix scoring engine (ADR 0058) — pure unit tests for the two
- * aggregation modes + cost-direction inversion + ranking.
+ * Priority Matrix scoring engine (ADR 0058 § Scoring model; engine hoisted to
+ * `host/weightedScoring.ts` by ADR 0534 P0) — exact-value unit tests for the
+ * weighted-sum and ratio aggregation modes.
+ *
+ * Guards: a `cost` criterion is inverted (11 − s) in weighted-sum, an unscored
+ * criterion contributes 0 rather than 11, ratio divides benefit by cost, and a
+ * ratio set with NO cost criterion degrades to the benefit aggregate.
+ * Sabotage-witnessed (grade-tests w15): dropping the inversion, the `s === 0`
+ * zero, the division, or the no-cost fallback in `computePriority` each red one
+ * case here. (The ratio cases also back PM2-B1 in priority-matrix-honesty.)
+ * Ranking order / 1-based rank is covered by priority-matrix-scoring-completeness
+ * legs 1-3 (rankByPriority sort + rank sabotages red them).
  */
 import { describe, expect, it } from 'vitest';
-import { computePriority, rankByPriority } from '../src/features/priority-matrix/scoring.js';
+import { computePriority } from '../src/features/priority-matrix/scoring.js';
 import { CRITERIA_PRESETS, type CriteriaSet } from '../src/features/priority-matrix/types.js';
 
 describe('computePriority — weighted-sum', () => {
@@ -38,20 +48,5 @@ describe('computePriority — ratio (WSJF/RICE family)', () => {
   it('degrades to the benefit aggregate when there is no cost dimension', () => {
     const set: CriteriaSet = { aggregation: 'ratio', criteria: [{ id: 'v', name: 'V', weight: 1, direction: 'benefit' }] };
     expect(computePriority(set, { v: 7 })).toBe(7);
-  });
-});
-
-describe('rankByPriority', () => {
-  it('orders items by priority descending and assigns 1-based ranks', () => {
-    const set = CRITERIA_PRESETS.weighted;
-    const items = [
-      { id: 'lo', s: { roi: 1, 'strategic-alignment': 1, urgency: 1, 'compliance-risk': 1, cost: 10 } },
-      { id: 'hi', s: { roi: 10, 'strategic-alignment': 10, urgency: 10, 'compliance-risk': 10, cost: 1 } },
-    ];
-    const ranked = rankByPriority(set, items, (i) => i.s);
-    expect(ranked[0].item.id).toBe('hi');
-    expect(ranked[0].rank).toBe(1);
-    expect(ranked[1].item.id).toBe('lo');
-    expect(ranked[0].priority).toBeGreaterThan(ranked[1].priority);
   });
 });

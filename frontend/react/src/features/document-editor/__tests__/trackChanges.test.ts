@@ -3,10 +3,18 @@
  * exercised directly on ProseMirror EditorStates (no DOM): insertion tracking,
  * deletion reconstruction (the architect's required correction), type-over,
  * v1-scope bail-outs, and accept/reject-all resolution.
+ *
+ * Sabotage (wave 14): skip the insertion mark, the deletion re-insert or its
+ * mark, the author, the batch position mapping, either bail guard (cross-block
+ * slice / non-ReplaceStep), the apply-back deletion mark or range check, or flip
+ * accept/reject strip → the named case goes red.
+ * Ceiling: "returns null for a no-op" is triple-guarded (no changed tr / no
+ * entries / no steps), so no single sabotage reds it.
  */
 import { describe, it, expect } from 'vitest';
 import { getSchema } from '@tiptap/core';
 import { EditorState } from '@tiptap/pm/state';
+import { ReplaceAroundStep } from '@tiptap/pm/transform';
 import { documentExtensions } from '../documentSchema.js';
 import { buildTrackTransaction, buildAcceptAll, buildRejectAll, buildApplyAsSuggestion } from '../trackChanges.js';
 
@@ -80,26 +88,31 @@ describe('buildTrackTransaction', () => {
 
   it('tracks a MULTI-STEP transaction mixing insert + delete — 6b-3', () => {
     const s0 = docState('hello world');
-    const tr = s0.tr.insertText('!', 6).delete(8, 13); // insert "!" after hello, delete " world" region
+    const tr = s0.tr.insertText('!', 6).delete(8, 13); // insert "!" after hello, then delete "world"
     const s1 = s0.apply(tr);
     const conv = buildTrackTransaction(s1, [tr], 'me');
     expect(conv).not.toBeNull();
     const s2 = s1.apply(conv!);
-    // both the inserted "!" (insertion) and the removed span (deletion) are tracked
-    const marks = runs(s2);
-    expect(marks.some(([txt, m]) => txt === '!' && m.includes('insertion'))).toBe(true);
-    expect(marks.some(([, m]) => m.includes('deletion'))).toBe(true);
+    // both the inserted "!" (insertion) and the removed "world" (deletion) are tracked, in place
+    expect(s2.doc.textContent).toBe('hello! world');
+    expect(runs(s2)).toEqual([['hello', []], ['!', ['insertion']], [' ', []], ['world', ['deletion']]]);
   });
 
   it('bails (untracked) on a non-ReplaceStep / cross-block edit — documented boundary', () => {
+    // Cross-block: a delete from inside "one" to inside "two" removes an OPEN slice.
+    const two = EditorState.create({ schema, doc: schema.node('doc', null, [
+      schema.node('paragraph', null, [schema.text('one')]),
+      schema.node('paragraph', null, [schema.text('two')]),
+    ]) });
+    const cross = two.tr.delete(3, 7);
+    expect(buildTrackTransaction(two.apply(cross), [cross], 'me')).toBeNull();
+
+    // Non-ReplaceStep: wrapping a paragraph in a blockquote is a ReplaceAroundStep.
     const s0 = docState('one');
-    // A paragraph split (Enter) crosses a block boundary on the deleted side / is structural.
-    const tr = s0.tr.split(2);
-    const s1 = s0.apply(tr);
-    // split's replaced range is empty (open insert), so it is either tracked-as-insert
-    // or bailed; either way it must not throw and must return a tr-or-null.
-    const conv = buildTrackTransaction(s1, [tr], 'me');
-    expect(conv === null || conv.docChanged !== undefined).toBe(true);
+    const wrap = s0.tr;
+    wrap.wrap(s0.doc.resolve(1).blockRange()!, [{ type: schema.nodes.blockquote! }]);
+    expect(wrap.steps[0]).toBeInstanceOf(ReplaceAroundStep);
+    expect(buildTrackTransaction(s0.apply(wrap), [wrap], 'me')).toBeNull();
   });
 
   it('returns null for a no-op / out-of-v1-scope edit', () => {

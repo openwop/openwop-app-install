@@ -29,6 +29,7 @@ import type { HandoffRecordV1 } from './handoff/handoffRecord.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { DurableCollection, publishHostExtEvent, subscribeHostExtEvent } from './hostExtPersistence.js';
 import { onWorkflowForked } from './workflowsRegistry.js';
+import { registerTenantIndexAdoption } from './tenantIndexAdoption.js';
 import { casRepoint } from './forkRepoint.js';
 import type { Subject } from './subject.js';
 import { registerSubjectEraser } from './subjectErasure.js';
@@ -86,6 +87,10 @@ export const KANBAN_CARD_SOURCES: ReadonlyArray<KanbanCardSource> = [
 export interface KanbanCard {
   id: string;
   boardId: string;
+  /** ADR 0872 D1 — the board's tenant, stamped on every write (the card tenant
+   *  index key). Absent only on rows written before ADR 0872; the hourly
+   *  `stampCardTenants` pass fills those in. */
+  tenantId?: string;
   columnId: string;
   title: string;
   description?: string;
@@ -591,7 +596,9 @@ export function workingColumnOf(board: KanbanBoard): KanbanColumn | undefined {
 }
 
 const boards = new DurableCollection<KanbanBoard>('kanban:board', (b) => b.id);
-const cards = new DurableCollection<KanbanCard>('kanban:card', (c) => c.id);
+// ADR 0872 — indexed by the stamped board tenant. An unstamped (legacy) row maps
+// to '' and gets no marker; it keeps the index unverified until it is stamped.
+const cards = new DurableCollection<KanbanCard>('kanban:card', (c) => c.id, undefined, (c) => c.tenantId ?? '');
 const workItems = new DurableCollection<KanbanWorkItem>(
   'kanban:work-item',
   (item) => item.workItemId,
@@ -625,6 +632,41 @@ const operationReceipts = new DurableCollection<KanbanOperationReceipt>(
   undefined,
   (entry) => entry.tenantId,
 );
+
+/** ADR 0872 D4 — one tenant's cards through the verified index, or `null` when
+ *  the index is not verified (or the indexed read fails): the caller then scans.
+ *  Only for reads where a missed card costs a delay, never a decision. */
+async function indexedTenantCards(tenantId: string): Promise<KanbanCard[] | null> {
+  if (!(await cards.tenantIndexVerified())) return null;
+  try { return await cards.listForTenantIndexed(tenantId); } catch { return null; }
+}
+
+/** The cards on any of `boardIds` (all owned by `tenantId`): indexed when verified. */
+async function cardsOnBoards(tenantId: string, boardIds: ReadonlySet<string>): Promise<KanbanCard[]> {
+  const rows = (await indexedTenantCards(tenantId)) ?? (await cards.list());
+  return rows.filter((c) => boardIds.has(c.boardId));
+}
+
+/** ADR 0872 D2 — stamp each legacy (unstamped) card with its board's tenant, by
+ *  CAS so a concurrent edit wins (the next hour retries). A card whose board is
+ *  gone cannot be stamped; it is counted, logged and left alone, and it keeps
+ *  the index unverified (D3). Runs before each hourly reconcile pass. */
+export async function stampCardTenants(): Promise<{ stamped: number; orphans: number }> {
+  const unstamped = (await cards.list()).filter((c) => !c.tenantId);
+  if (unstamped.length === 0) return { stamped: 0, orphans: 0 };
+  const tenantOfBoard = new Map((await boards.list()).map((b) => [b.id, b.tenantId]));
+  let stamped = 0;
+  let orphans = 0;
+  for (const card of unstamped) {
+    const tenantId = tenantOfBoard.get(card.boardId);
+    if (!tenantId) { orphans += 1; continue; }
+    if (await cards.compareAndSwap(card, { ...card, tenantId })) stamped += 1;
+  }
+  if (orphans > 0) log.warn('kanban_card_unstamped_orphans', { orphans, stamped });
+  return { stamped, orphans };
+}
+
+registerTenantIndexAdoption('kanban:card', cards, { beforeReconcile: async () => { await stampCardTenants(); } });
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -813,10 +855,20 @@ export async function deleteBoard(boardId: string): Promise<boolean> {
   return boards.delete(boardId);
 }
 
+const byColumnThenOrder = (a: KanbanCard, b: KanbanCard): number => a.columnId.localeCompare(b.columnId) || a.order - b.order;
+
+/** A board's cards, for display and the work loop (ADR 0872 D4: indexed once
+ *  verified; a missed card shows after the next hourly repair). A decision that
+ *  must see every card (dedupe, caps, repoint) uses {@link listCardsExact}. */
 export async function listCards(boardId: string): Promise<KanbanCard[]> {
-  return (await cards.list())
-    .filter((c) => c.boardId === boardId)
-    .sort((a, b) => a.columnId.localeCompare(b.columnId) || a.order - b.order);
+  const board = await boards.get(boardId);
+  const rows = board ? await cardsOnBoards(board.tenantId, new Set([boardId])) : (await cards.list()).filter((c) => c.boardId === boardId);
+  return rows.sort(byColumnThenOrder);
+}
+
+/** A board's cards from the full scan: never misses one (ADR 0872 D4). */
+export async function listCardsExact(boardId: string): Promise<KanbanCard[]> {
+  return (await cards.list()).filter((c) => c.boardId === boardId).sort(byColumnThenOrder);
 }
 
 export async function getCard(cardId: string): Promise<KanbanCard | null> {
@@ -834,8 +886,7 @@ export async function listBoardsWithCards(
     .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   const boardIds = new Set(tenantBoards.map((b) => b.id));
   const byBoard = new Map<string, KanbanCard[]>();
-  for (const card of await cards.list()) {
-    if (!boardIds.has(card.boardId)) continue;
+  for (const card of await cardsOnBoards(tenantId, boardIds)) {
     const arr = byBoard.get(card.boardId) ?? [];
     arr.push(card);
     byBoard.set(card.boardId, arr);
@@ -884,12 +935,15 @@ export async function createCard(input: {
   }
   const id = input.cardId ?? `card-${randomUUID()}`;
   const now = nowIso();
-  const siblings = (await cards.list()).filter(
-    (c) => c.boardId === input.boardId && c.columnId === input.columnId,
-  );
+  // ADR 0872 D1 — the card carries its board's tenant, so a board must exist.
+  const board = await boards.get(input.boardId);
+  if (!board) throw new Error(`kanban_board_not_found: ${input.boardId}`);
+  // Ordering only (D4): a missed sibling can only repeat an `order`.
+  const siblings = (await cardsOnBoards(board.tenantId, new Set([board.id]))).filter((c) => c.columnId === input.columnId);
   const card: KanbanCard = {
     id,
     boardId: input.boardId,
+    tenantId: board.tenantId,
     columnId: input.columnId,
     title: input.title,
     description: input.description,
@@ -1425,9 +1479,10 @@ async function applyKanbanCardPatchCommand(command: PatchKanbanCardCommand): Pro
     const next = applyKanbanCardPatch(card, command.patch);
     const at = nowIso();
     next.columnId = targetColumnId;
+    next.tenantId = board.tenantId; // ADR 0872 D1 — stamps a legacy row on its first edit
     if (moved || repositioned) {
-      const siblings = (await cards.list())
-        .filter((candidate) => candidate.boardId === board.id && candidate.columnId === targetColumnId && candidate.id !== card.id);
+      const siblings = (await cardsOnBoards(board.tenantId, new Set([board.id])))
+        .filter((candidate) => candidate.columnId === targetColumnId && candidate.id !== card.id);
       next.order = cardOrderAtAnchor(siblings, command.beforeCardId, command.afterCardId);
     }
     if (moved) {
@@ -1884,7 +1939,7 @@ export async function listCardsAssignedToUser(
   const boardById = new Map(tenantBoards.map((b) => [b.id, b]));
   const roles = new Set(roleKeys);
   const out: Array<KanbanCard & { boardName: string; columnName: string; terminal: boolean }> = [];
-  for (const card of await cards.list()) {
+  for (const card of await cardsOnBoards(tenantId, new Set(boardById.keys()))) {
     const board = boardById.get(card.boardId);
     if (!board) continue; // cross-tenant / orphaned — never leak
     const mine = card.assigneeId === userId || (card.assigneeRole ? roles.has(card.assigneeRole) : false);
@@ -2214,13 +2269,13 @@ export async function eraseSubjectKanban(tenantId: string, subjectKey: string): 
       (card.handoffBy !== undefined && forms.has(card.handoffBy))
       || card.handoff.decisions.some((d) => d.decidedBy !== undefined && forms.has(d.decidedBy)));
     if (!mine && noteTouches) {
-      const next: KanbanCard = { ...card, updatedAt: nowIso() };
+      const next: KanbanCard = { ...card, tenantId, updatedAt: nowIso() };
       delete next.handoff; delete next.handoffBy; delete next.handoffAt;
       await cards.put(next);
       continue;
     }
     if (!mine) continue;
-    const next: KanbanCard = { ...card, title: ERASED, updatedAt: nowIso() };
+    const next: KanbanCard = { ...card, tenantId, title: ERASED, updatedAt: nowIso() };
     if (next.assigneeId !== undefined && forms.has(next.assigneeId)) next.assigneeId = ERASED;
     if (next.createdBy !== undefined && forms.has(next.createdBy)) next.createdBy = ERASED;
     if (next.description !== undefined) next.description = ERASED;
@@ -2259,9 +2314,9 @@ onWorkflowForked('kanban', async (tenantId, from, to) => {
         ? { ...b, columns: b.columns.map((c) => (c.triggerWorkflowId === from ? { ...c, triggerWorkflowId: to } : c)) }
         : null))) n += 1;
     }
-    for (const card of await listCards(board.id)) {
+    for (const card of await listCardsExact(board.id)) { // a repoint must not miss a card (ADR 0872 D4)
       if (card.workflowId !== from) continue;
-      if (await casRepoint(cards, card.id, (c) => (c.workflowId === from ? { ...c, workflowId: to } : null))) n += 1;
+      if (await casRepoint(cards, card.id, (c) => (c.workflowId === from ? { ...c, tenantId: board.tenantId, workflowId: to } : null))) n += 1;
     }
   }
   for (const item of await workItems.listForTenantIndexed(tenantId)) {

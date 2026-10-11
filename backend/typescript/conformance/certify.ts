@@ -72,9 +72,16 @@ import {
 export const BUNDLE_FILE = 'certification-bundle.json';
 export const CLAIMS_FILE = 'conformance-claims.json';
 
-/** The public path the discovery pointer resolves to (`routes/discovery.ts`). */
-export const CERTIFICATION_BUNDLE_PATH = '/v1/host/openwop-app/conformance/certification-bundle';
-export const CONFORMANCE_CLAIMS_PATH = '/v1/host/openwop-app/conformance/claims';
+/**
+ * The public path the bundle is served at (`src/host/conformanceClaims.ts`).
+ *
+ * ADR 0812 P4 — CORRECTED: these were the `/v1/host/openwop-app/…` twins, so
+ * every claims document stamped `evidence.bundlePath` with an address a retired
+ * host answers 410. The route itself moved in P3b; this stamp did not, because
+ * `check-v1-reliance` does not scan `conformance/`.
+ */
+export const CERTIFICATION_BUNDLE_PATH = '/host/openwop-app/conformance/certification-bundle';
+export const CONFORMANCE_CLAIMS_PATH = '/host/openwop-app/conformance/claims';
 
 // ── the two transcribed helpers ────────────────────────────────────────────
 

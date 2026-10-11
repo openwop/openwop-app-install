@@ -6,7 +6,15 @@
  *  - one Monthly / Yearly switch (the store's labels) drives plans AND bundles;
  *  - a bundle no plan grants says it is sold separately;
  *  - AI credit packs appear only when the server lists priced ones;
- *  - unconfigured ⇒ no invented price, and an empty catalog says so.
+ *  - unconfigured ⇒ no invented price, no Monthly / Yearly switch without an
+ *    annual price, and an empty catalog says so.
+ *
+ * Sabotage-witnessed (w17): `makeLabel` ignoring the server map; Pro listing
+ * every feature instead of what it ADDS; defaulting to annual; bundles priced
+ * for 'monthly' regardless of the switch; dropping the annual note; inverting
+ * `standalone`; no "Included in"; a credits block with no packs; un-grouped
+ * credit counts; `isFreeTier` → false; the store URL; an invented price where
+ * "Let’s talk" belongs; `hasAnnual` forced true; no empty-catalog note.
  */
 import { describe, it, expect, afterEach, vi, beforeEach } from 'vitest';
 import { render, screen, cleanup, fireEvent, within } from '@testing-library/react';
@@ -16,12 +24,20 @@ import type { Section } from '../cmsClient.js';
 
 const PRICING: Section = { sectionId: 'p1', type: 'pricing', data: { heading: 'Plans' } };
 
-interface Payload { tiers: unknown[]; featureLabels?: Record<string, string>; creditPacks?: unknown[] }
-function mockReads(pricing: Payload, bundles: unknown[] = []): void {
+/** The two public billing reads' shapes (PricingSection's `PricingPayload` / `PublicBundle`). */
+interface PriceDisplayFixture { price?: string; cadence?: string; blurb?: string; priceAnnual?: string; cadenceAnnual?: string; annualNote?: string; highlighted?: boolean }
+interface TierFixture { tier: string; name: string; features?: '*' | string[]; limits?: Record<string, number>; display?: PriceDisplayFixture }
+interface BundleFixture { bundleId: string; label: string; features?: string[]; standalone?: boolean; priceDisplay?: PriceDisplayFixture }
+interface Payload { tiers: TierFixture[]; featureLabels?: Record<string, string>; creditPacks?: Array<{ credits: number; price: string; label?: string }> }
+
+const json = (body: unknown): Response =>
+  new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
+
+function mockReads(pricing: Payload, bundles: BundleFixture[] = []): void {
   vi.stubGlobal('fetch', vi.fn(async (url: unknown) => {
     const u = String(url);
-    if (u.includes('/public/pricing')) return { ok: true, status: 200, json: async () => pricing } as Response;
-    return { ok: true, status: 200, json: async () => ({ bundles }) } as Response;
+    if (u.includes('/public/pricing')) return json(pricing);
+    return json({ bundles });
   }));
 }
 
@@ -30,14 +46,14 @@ afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 const renderPricing = () => render(<MemoryRouter><RenderSection section={PRICING} mode="public" /></MemoryRouter>);
 
-const FREE = { tier: 'free', name: 'Free', features: ['docs', 'cdp'], display: { price: '$0', blurb: 'Free forever' } };
-const PRO = {
+const FREE: TierFixture = { tier: 'free', name: 'Free', features: ['docs', 'cdp'], display: { price: '$0', blurb: 'Free forever' } };
+const PRO: TierFixture = {
   tier: 'pro', name: 'Pro', features: ['docs', 'cdp', 'csm', 'advisory-board'], limits: { aiCreditsMonthly: 5000 },
   display: { price: '$39', cadence: '/mo', priceAnnual: '$390', cadenceAnnual: '/yr', annualNote: '2 months free', highlighted: true },
 };
-const ENTERPRISE = { tier: 'enterprise', name: 'Enterprise', features: '*', display: { blurb: 'Contact us' } };
+const ENTERPRISE: TierFixture = { tier: 'enterprise', name: 'Enterprise', features: '*', display: { blurb: 'Contact us' } };
 const LABELS = { docs: 'Docs', cdp: 'Customer data platform', csm: 'Customer success', 'advisory-board': 'Advisory board', 'job-search': 'Job search' };
-const BUNDLES = [
+const BUNDLES: BundleFixture[] = [
   { bundleId: 'agents', label: 'Agents', features: ['advisory-board'], priceDisplay: { price: '$29', cadence: '/mo', priceAnnual: '$290', cadenceAnnual: '/yr', blurb: 'AI advisory board' } },
   { bundleId: 'job-search', label: 'Job search', features: ['job-search'], standalone: true, priceDisplay: { price: '$19', cadence: '/mo', priceAnnual: '$190', cadenceAnnual: '/yr' } },
 ];

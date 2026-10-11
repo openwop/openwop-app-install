@@ -6,6 +6,13 @@
  * Born red on the pre-ADR engine: leg 1 measured `partial 6.67 > complete 6.00`
  * (the partially-scored idea ranked #1), `scoreCompleteness` did not exist, and
  * `rankByPriority` took no options argument.
+ *
+ * Sabotage-witnessed (grade-tests w15): removing completeness segregation, the
+ * majority bound, the default-OFF guard, the `> 0` scored test, the `complete`
+ * predicate or the `missing` ids each red a leg. D1c (the agent tool's
+ * `unscored`/`partiallyScored` projection) lives in priority-matrix-agent-tools
+ * ("D1c — on a WSJF list …"), which drives the REAL tool; the local rebuild of
+ * that projection here could not fail and was cut.
  */
 import { describe, expect, it } from 'vitest';
 import { computePriority, rankByPriority, scoreCompleteness } from '../src/host/weightedScoring.js';
@@ -36,16 +43,23 @@ describe('ADR 0667 D1 — completeness is first-class', () => {
       'the 3-of-4 idea must rank BELOW both complete ideas despite its higher score').toBe(3);
   });
 
-  it('leg 2: the bound — completeness-major does NOT apply when the complete cohort is tiny', () => {
-    // 1 complete among 4 incomplete: pinning it to #1 on completeness alone would be
-    // worse than today, so the ranking stays priority-major.
+  it('leg 2: the bound — completeness-major does NOT apply when complete items are a minority', () => {
+    // CORRECTED (grade-tests w15): this leg used ONE complete item among five, which BOTH
+    // guards refuse (1 < MIN_COMPLETE_COHORT, and 1 is not a majority), so removing either
+    // guard alone left it green. Two complete of five passes the cohort size and fails ONLY
+    // the majority test — so removing the majority clause pins them to #1/#2 and reds this.
+    //
+    // Ceiling, recorded for grade-code: MIN_COMPLETE_COHORT is unreachable logic. With
+    // completeCount = 1 the majority test already requires a list of one, where order is
+    // moot — so the cohort bound can never change an output and no fixture can witness it.
+    const weak = { value: 1, time: 1, risk: 1, 'job-size': 10 };
     const items = [
-      { id: 'weak-complete', s: { value: 1, time: 1, risk: 1, 'job-size': 10 } },
-      { id: 'p1', s: PARTIAL }, { id: 'p2', s: PARTIAL }, { id: 'p3', s: PARTIAL }, { id: 'p4', s: PARTIAL },
+      { id: 'weak-complete-1', s: weak }, { id: 'weak-complete-2', s: weak },
+      { id: 'p1', s: PARTIAL }, { id: 'p2', s: PARTIAL }, { id: 'p3', s: PARTIAL },
     ];
     const ranked = rankByPriority(WSJF, items, (i) => i.s, { completenessMajor: true });
-    expect(ranked.find((r) => r.item.id === 'weak-complete')!.rank,
-      'a lone weak complete idea must NOT be pinned to #1').toBeGreaterThan(1);
+    expect(ranked.filter((r) => r.item.id.startsWith('weak-complete')).map((r) => r.rank),
+      'a weak complete MINORITY stays priority-ordered (last), not pinned to the top').toEqual([4, 5]);
   });
 
   it('leg 3: the default is byte-identical to today, on a fixture where the bound does NOT mask it', () => {
@@ -99,31 +113,5 @@ describe('ADR 0667 D1 — completeness is first-class', () => {
     expect(scoreCompleteness(SET, { a: 5, b: 0 }).scored).toBe(1);
     expect(scoreCompleteness(SET, { a: 5, b: Number.NaN }).scored).toBe(1);
     expect(scoreCompleteness(SET, { a: 5, b: -3 }).scored).toBe(1);
-  });
-});
-
-/**
- * ADR 0667 D1c — the model-facing projection. `list-ranked-ideas` told the model
- * `unscored: true` for a 3-of-4-scored idea (the sentinel was keyed on
- * `priority === 0`), and reported a partially-scored idea's rank as settled.
- */
-describe('ADR 0667 D1c — the agent tool does not lie to the model', () => {
-  it('keys `unscored` on completeness, not on the overloaded priority number', () => {
-    // The projection shape, exercised directly: these are the two branches the tool
-    // takes. A 3-of-4-scored WSJF idea has priority EXACTLY 0 and must NOT be called
-    // unscored; it must be called partially scored.
-    const blankCost = scoreCompleteness(WSJF, { value: 10, time: 10, risk: 10 });
-    const untouched = scoreCompleteness(WSJF, {});
-    expect(computePriority(WSJF, { value: 10, time: 10, risk: 10 })).toBe(0);
-    expect(computePriority(WSJF, {})).toBe(0);
-
-    const project = (c: ReturnType<typeof scoreCompleteness>) => ({
-      ...(c.scored === 0 ? { unscored: true } : {}),
-      ...(c.complete ? {} : { partiallyScored: { scored: c.scored, declared: c.declared, missing: c.missing } }),
-    });
-    expect(project(untouched)).toMatchObject({ unscored: true });
-    expect(project(blankCost), 'a 3-of-4-scored idea is NOT unscored').not.toHaveProperty('unscored');
-    expect(project(blankCost).partiallyScored).toMatchObject({ scored: 3, declared: 4, missing: ['job-size'] });
-    expect(project(scoreCompleteness(WSJF, COMPLETE)), 'a complete idea carries neither flag').toEqual({});
   });
 });

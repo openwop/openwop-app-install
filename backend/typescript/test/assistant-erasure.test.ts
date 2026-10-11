@@ -12,8 +12,19 @@
  * deleted everything would pass an "is the PII gone?" test and destroy the org's
  * decision log, its task history and a live kanban card's back-reference — which
  * is why each store is asserted on BOTH halves: what went, and what stayed.
+ *
+ * Sabotage witnesses (/grade-tests w11): drop the stakeholder delete, the mention
+ * leg, the name-only `@` guard, the owner redaction, the commitment-match filter,
+ * the decision redaction, the attendee filter, the pending→rejected cancel, the
+ * scalar `payload.to` arm or its fold, the card-title hop, the null-card guard,
+ * the crm-contact arm, the eraser registration, the decide-time `erasedAt`
+ * refusal, or let the two DurableCollection declarations drift — each turns the
+ * named case red. Two guards are deliberately double (recorded, not probed red):
+ * the fail-closed early return (an empty tenant/subject also matches nothing
+ * downstream) and the tenant boundary (`listForTenantIndexed` AND the CAS
+ * tenant re-check).
  */
-import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createApp } from '../src/index.js';
@@ -98,6 +109,7 @@ describe('COS-1 — what erasure means, per store', () => {
     const rows = await listCommitments(TENANT);
     const erased = rows.find((c) => c.commitmentId === mentions.commitmentId);
     expect(erased?.description, 'the third party is named in this text — it must go').not.toContain(SUBJECT_EMAIL);
+    expect(erased?.description, 'redacted to the tombstone, not deleted').toBe(ERASED_VALUE);
     // …and a bystander row is untouched: this must not become a tenant-wide sweep.
     const kept = rows.find((c) => c.commitmentId === unrelated.commitmentId);
     expect(kept?.description).toBe('Prepare for "Team retro"');
@@ -270,10 +282,26 @@ describe('COS-1 — what erasure means, per store', () => {
     await eraseAssistantSubject(TENANT, SUBJECT_EMAIL);
     await eraseAssistantSubject(TENANT, SUBJECT_EMAIL);
     expect((await getCard(projected!.card!.id))!.title).toBe(ERASED_VALUE);
-    // A back-ref to a card the human deleted must not throw — the eraser runs on
-    // a compliance path where a throw is reported as a failed erasure.
-    await deleteCard(projected!.card!.id);
+  });
+
+  it('commitment: a back-ref to a card the human DELETED does not throw, and the row is still redacted', async () => {
+    // The deletion must happen BEFORE the erasure: once a commitment is redacted it
+    // no longer matches, so an erasure run after the delete never reaches the card
+    // hop at all (MEASURED /grade-tests w11 — the earlier form of this case could
+    // not fail). A throw here is reported as a FAILED erasure on a compliance path.
+    const board = await createBoard({ tenantId: TENANT, name: 'Work' });
+    const mine = await commit(TENANT, {
+      owner: { kind: 'email', address: SUBJECT_EMAIL },
+      description: 'Send Dana the Q3 numbers',
+      source: src('n'),
+      confidence: 0.9,
+    });
+    const projected = await projectCommitmentToBoard(TENANT, mine.commitmentId, { boardId: board.id });
+    expect(await deleteCard(projected!.card!.id)).toBe(true);
     await expect(eraseAssistantSubject(TENANT, SUBJECT_EMAIL)).resolves.toBeUndefined();
+    const after = await getCommitment(TENANT, mine.commitmentId);
+    expect(after!.description).toBe(ERASED_VALUE);
+    expect(after!.kanbanCardId, 'the back-ref is kept, not rewritten').toBe(projected!.card!.id);
   });
 
   it('pending action: a SCALAR `payload.to` is matched and cancelled, not just an array one', async () => {
@@ -316,7 +344,10 @@ describe('COS-1 — what erasure means, per store', () => {
       draft: 'Hi Dana.',
     });
     await eraseAssistantSubject(TENANT, SUBJECT_EMAIL);
-    expect((await getPendingAction(TENANT, pending.actionId))!.status).toBe('rejected');
+    const after = (await getPendingAction(TENANT, pending.actionId))!;
+    expect(after.status).toBe('rejected');
+    expect(after.payload).toEqual({});
+    expect(after.erasedAt).toBeTruthy();
   });
 
   it('SEND/ERASE symmetry: approving the SURVIVING approval row after an erasure does not dispatch', async () => {
@@ -350,11 +381,20 @@ describe('COS-1 — the eraser contract', () => {
   it('is IDEMPOTENT (the seam invokes it once per linked identity key)', async () => {
     await commit(TENANT, { owner: { kind: 'email', address: SUBJECT_EMAIL }, description: 'Ping Dana', source: src('d'), confidence: 0.5 });
     await upsertStakeholder(TENANT, { person: { kind: 'email', address: SUBJECT_EMAIL } });
-    await eraseAssistantSubject(TENANT, SUBJECT_EMAIL);
-    const first = JSON.stringify(await listCommitments(TENANT));
-    await eraseAssistantSubject(TENANT, SUBJECT_EMAIL);
-    await eraseAssistantSubject(TENANT, SUBJECT_EMAIL);
-    expect(JSON.stringify(await listCommitments(TENANT))).toBe(first);
+    // A repeat run that re-WROTE a row would only show through `updatedAt`, so move
+    // the clock between runs: a re-write then changes the bytes deterministically.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(new Date('2026-05-01T00:00:00.000Z'));
+      await eraseAssistantSubject(TENANT, SUBJECT_EMAIL);
+      const first = JSON.stringify(await listCommitments(TENANT));
+      vi.setSystemTime(new Date('2026-05-01T00:01:00.000Z'));
+      await eraseAssistantSubject(TENANT, SUBJECT_EMAIL);
+      await eraseAssistantSubject(TENANT, SUBJECT_EMAIL);
+      expect(JSON.stringify(await listCommitments(TENANT))).toBe(first);
+    } finally {
+      vi.useRealTimers();
+    }
     expect(await listStakeholders(TENANT)).toEqual([]);
   });
 
@@ -363,6 +403,11 @@ describe('COS-1 — the eraser contract', () => {
     await eraseAssistantSubject('', SUBJECT_EMAIL);
     await eraseAssistantSubject(TENANT, '');
     expect((await listCommitments(TENANT))[0]!.description).toBe('Ping Dana');
+    // Positive control: the fixture IS erasable, so the no-op above is the guard,
+    // not an unmatchable row. (Honest ceiling: the early return is defence in depth —
+    // an empty tenant scans an empty slice and an empty key matches no PersonRef.)
+    await eraseAssistantSubject(TENANT, SUBJECT_EMAIL);
+    expect((await listCommitments(TENANT))[0]!.description).toBe(ERASED_VALUE);
   });
 
   it('never crosses a tenant boundary', async () => {
@@ -370,6 +415,10 @@ describe('COS-1 — the eraser contract', () => {
     await commit(OTHER, { owner: { kind: 'email', address: SUBJECT_EMAIL }, description: 'Theirs', source: src('g'), confidence: 0.5 });
     await eraseAssistantSubject(TENANT, SUBJECT_EMAIL);
     expect((await listCommitments(OTHER))[0]!.description).toBe('Theirs');
+    // Positive control — this tenant's row WAS erased, so the bystander is not
+    // untouched merely because the eraser did nothing. (Double guard, recorded:
+    // `listForTenantIndexed` AND `casUpdateCommitment`'s tenant re-check.)
+    expect((await listCommitments(TENANT))[0]!.description).toBe(ERASED_VALUE);
   });
 
   it('matches BOTH PersonRef arms — a DSAR arrives as an address OR a contactId', async () => {

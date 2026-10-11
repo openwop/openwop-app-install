@@ -56,6 +56,12 @@ Two facts make this a Blocker rather than a typo:
    id. Inside the function that composes to `'user:alice'`, which matches, so the suite is green.
    No production caller can produce a bare id: every one passes a `User.userId`.
 
+   > **CORRECTED 2026-10-10 (/grade-tests wave 12):** the cited bare-id case (`with consent,
+   > extracts + stores notes on the user subject (auto-extracted)`) no longer exists — it was cut
+   > as redundant with `test/memory-extraction-grant-key.test.ts` › `BORN RED`, which drives the
+   > same path with the real `user:<hash>` id and went red under the same sabotage (doubling
+   > `user:` in `extractionBinding.ts`). The `:40-41` line reference above is historical.
+
 ### `PKWF-2` — erasure does not reach the vector recall index (Blocker)
 
 `eraseSubjectMemory` (`host/subjectMemory.ts:391-425`) deletes, per key form: the durable notes

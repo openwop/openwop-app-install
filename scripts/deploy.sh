@@ -29,13 +29,14 @@
 #   scripts/deploy.sh --backend-only
 #   scripts/deploy.sh --frontend-only
 #   scripts/deploy.sh --allow-unverified-live    # passed through to preflight
+#   scripts/deploy.sh --allow-tagged             # passed through (Gate 5b)
 #   scripts/deploy.sh --preflight-only           # stamp + gate, deploy nothing
 #   scripts/deploy.sh --publish-evidence         # after a VERIFIED backend deploy,
 #                                                # also run publish-evidence.sh (~10 min
 #                                                # load test) so the §D pointer is not
 #                                                # left PENDING for the new commit
-#   scripts/deploy.sh --skip-certify             # ship with the RFC 0089 §D
-#                                                # pointer ABSENT (never stale)
+#   scripts/deploy.sh --skip-certify             # skip the major-2 ratchet (emergency
+#                                                # only; ADR 0869: no image bundle is built)
 #   scripts/deploy.sh --retire-previous          # delete the superseded revision
 #                                                # after verify (ADR 0802; opt-in)
 #   scripts/deploy.sh --ignore-hour-window       # do NOT hold a backend build that
@@ -103,7 +104,7 @@ for arg in "$@"; do
     # 2026-09-11 — the gate gained an exception its only supported entry point
     # could not pass, so the documented escape hatch existed on paper and
     # `deploy: unknown argument` in practice.
-    --allow-unverified-live|--allow-pin-drift) PREFLIGHT_ARGS+=("$arg") ;;
+    --allow-unverified-live|--allow-pin-drift|--allow-tagged) PREFLIGHT_ARGS+=("$arg") ;;
     # Stamp + gate, then stop. Exists so the ordering above is testable without
     # an 8-minute build or a network round trip.
     --preflight-only) PREFLIGHT_ONLY=1 ;;
@@ -327,53 +328,34 @@ fi
 #   run fails or produces nothing → REFUSE to ship. A deploy that silently
 #                    degraded to "no claim" would teach nobody anything, and the
 #                    operator asked for a certified build.
+#
+# CORRECTED 2026-10-10 (ADR 0869): this lane no longer runs in either mode. The
+# stamp it produced was served only at MAJOR 1, which is retired; see the branch
+# below. What still gates the deploy is the major-2 ratchet. The rationale above
+# is kept for the record: it was right while major 1 was served.
 if [ "$DO_BACKEND" -eq 1 ]; then
-  BUNDLE="$ROOT/build-meta/certification-bundle.json"
-  CLAIMS="$ROOT/build-meta/conformance-claims.json"
   if [ "$DO_CERTIFY" -eq 0 ]; then
     echo
     echo "▶ certify: SKIPPED (--skip-certify) — the RFC 0089 §D pointer will be ABSENT, not stale"
-  elif [ -n "${OPENWOP_CERT_BUNDLE_ORIGIN:-}" ]; then
-    # ADR 0812 P3c — ORIGIN MODE builds no image bundle. The host serves the
-    # verified bundle read from OPENWOP_CERT_BUNDLE_ORIGIN (what publish-evidence
-    # cuts against the live service), and never this image's own (verify-deploy:
-    # "conformance claims document … withheld in origin mode"). Until the P3c fold
-    # this lane still certified MAJOR 1 (the in-process host served v1, so
-    # --target-major followed preferredVersion 1.1), and that is the only reason
-    # it passed. With v1 gone it certifies major 2, where the in-process host
-    # claims no profile (the claim needs the production posture: signing,
-    # tenant-B key, operator fixtures), so every deploy refused to ship
-    # (MEASURED 2026-10-08, claimedProfiles minItems). The gate this host needs
-    # on deploy day is the major-2 ratchet below, which still runs.
-    echo
-    echo "▶ certify: image bundle NOT built — origin mode (the served bundle comes from publish-evidence; ADR 0812 P3c)"
   else
+    # ADR 0869 — NO image bundle is built, in EITHER evidence mode. The image
+    # stamp is served and advertised only by the MAJOR-1 discovery builder
+    # (`certificationBundleUrl` → `servedBundle(1)`), and v1 is retired (ADR 0812
+    # P3c), so a stamp built here reaches no client. Origin mode already skipped
+    # it (the served bundle is publish-evidence's v3 cut). Image mode kept it,
+    # and its in-process emitter claims no profile at major 2, so every adopter
+    # deploy without --skip-certify REFUSED to ship (the minItems-1 failure).
+    # The pointer is absent, which RFC 0089 §D calls fully conformant. An adopter
+    # who wants served evidence sets OPENWOP_CERT_BUNDLE_ORIGIN and runs
+    # scripts/publish-evidence.sh after the deploy. The gate this build needs is
+    # the major-2 ratchet below, which still runs in both modes.
     echo
-    echo "▶ certify (ADR 0550 P4) — full conformance lane, strict, no quarantine (~10 min)"
-    # WHD-18: deploy.env's OPENWOP_CERT_BUNDLE_ORIGIN is exported above for the
-    # verify step, and the in-process host this lane boots would inherit it — and
-    # then try to read evidence from GCS (no metadata server here: a bounded 2 s
-    # stall per discovery read per minute) and serve none of its own. The gate
-    # measures the CODE, not the deployment's evidence origin, so unset it here.
-    if ! run_owned_certification "$ROOT/backend/typescript" env -u OPENWOP_CERT_BUNDLE_ORIGIN npm run test:conformance -- --certify; then
-      echo "deploy: the certify lane FAILED — refusing to ship." >&2
-      echo "        A certification stamp is a public claim; shipping without saying so" >&2
-      echo "        would degrade silently. Re-run, or ship deliberately unclaimed:" >&2
-      echo "          scripts/deploy.sh --skip-certify" >&2
-      exit 1
+    if [ -n "${OPENWOP_CERT_BUNDLE_ORIGIN:-}" ]; then
+      echo "▶ certify: image bundle NOT built — origin mode (the served bundle comes from publish-evidence; ADR 0812 P3c)"
+    else
+      echo "▶ certify: image bundle NOT built — image mode serves no major-2 evidence (ADR 0869); pointer absent, conformant."
+      echo "  To serve evidence: set OPENWOP_CERT_BUNDLE_ORIGIN in deploy.env, then run scripts/publish-evidence.sh after this deploy."
     fi
-    # Belt AND braces, because the lane's exit code is not the artifact. It
-    # exits non-zero for a failing scenario too, and it can succeed while
-    # writing nothing if the emitter refuses (schema rejection, emitter defect).
-    # The only question that matters here is whether the files exist.
-    if [ ! -f "$BUNDLE" ] || [ ! -f "$CLAIMS" ]; then
-      echo "deploy: the certify lane exited 0 but produced no stamp — refusing to ship." >&2
-      echo "        expected: $BUNDLE" >&2
-      echo "                  $CLAIMS" >&2
-      exit 1
-    fi
-    echo "  certified: $(node -e 'const c=require(process.argv[1]);process.stdout.write(`${c.claimedProfiles.length} profile(s) — ${c.claimedProfiles.join(", ")||"(none)"}`)' "$CLAIMS")"
-
   fi
   # Runs in BOTH evidence modes (ADR 0812 P3c moved it out of the image-certify
   # branch, so origin mode keeps it); only --skip-certify, the emergency escape,

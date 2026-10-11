@@ -15,6 +15,11 @@
  * that no row may "report in use externally" — while the rendered PDF/DOCX, the actual content,
  * kept serving from a PUBLIC token-authed route forever. Incomplete against the function's own
  * stated intent, not a missing nicety.
+ *
+ * Sabotage-witnessed (grade-tests w14): removing `assertNoRetentionHold` from `deleteDocument`,
+ * or moving it AFTER the rendered-asset purge, reds the DOCWF-2 case (the latter on the
+ * asset-survives line, not the throw); disabling the asset purge reds both DOCWF-3 cases;
+ * dropping the token filter reds the bystander case.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -49,15 +54,15 @@ async function seedDocWithRenderedAsset(title: string, token: string): Promise<s
   const doc = await createDocument({
     tenantId: TENANT, orgId: ORG, title, kind: 'sow', format: 'markdown', createdBy: 'user:owner',
     provenance: { producedBy: { kind: 'user', id: 'user:owner' } },
-  } as never);
+  });
   await addVersion(TENANT, ORG, doc.documentId, {
     content: '# body', producedBy: { kind: 'user', id: 'user:owner' }, renderedMediaToken: token,
-  } as never);
+  });
   // The rendered artefact the export path mints — served by the PUBLIC token route.
   await createAsset({
     tenantId: TENANT, orgId: ORG, name: `${title}.pdf`, contentType: 'application/pdf',
     sizeBytes: 10, storageRef: `ref-${token}`, serveToken: token, uploadedBy: 'user:owner',
-  } as never);
+  });
   return doc.documentId;
 }
 

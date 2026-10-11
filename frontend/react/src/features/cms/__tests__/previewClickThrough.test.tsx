@@ -7,6 +7,11 @@
  *     (the multi-instance discipline)
  *   - SectionsEditor lands a focusRequest on the RIGHT card: scrolls it,
  *     moves focus to it, and a repeat request (new nonce) re-fires
+ *
+ * Sabotage-witnessed (/grade-tests w17): rendering the wrapper without a
+ * callback, reporting the first section's id, dropping the focus call, keying
+ * the effect on sectionId instead of the request, or matching any card each
+ * red the case that claims it.
  */
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { render, cleanup, screen, fireEvent } from '@testing-library/react';
@@ -17,10 +22,13 @@ import type { Section } from '../cmsClient.js';
 
 const SECTIONS: Section[] = [
   { sectionId: 's-hero', type: 'hero', data: { heading: 'Welcome' } },
-  { sectionId: 's-prose', type: 'prose', data: { markdown: 'Body copy.' } },
+  { sectionId: 's-prose', type: 'richText', data: { text: 'Body copy.' } },
 ];
 
-afterEach(() => { cleanup(); vi.restoreAllMocks(); });
+// The focus cases replace scrollIntoView on the prototype (jsdom has none);
+// restoreAllMocks cannot undo a direct assignment, so restore it by hand.
+const realScrollIntoView = Element.prototype.scrollIntoView;
+afterEach(() => { cleanup(); vi.restoreAllMocks(); Element.prototype.scrollIntoView = realScrollIntoView; });
 
 describe('RenderSections click-through affordance', () => {
   it('renders NO wrapper and NO edit chip on the live-page path (no callback)', () => {
@@ -64,5 +72,6 @@ describe('SectionsEditor focusRequest landing', () => {
       <SectionsEditor sections={SECTIONS} assets={[]} onChange={() => {}} focusRequest={{ sectionId: 's-gone', nonce: 1 }} />,
     );
     expect(scroll).not.toHaveBeenCalled();
+    expect(document.activeElement?.getAttribute('data-section-id') ?? null).toBeNull(); // no card took focus
   });
 });

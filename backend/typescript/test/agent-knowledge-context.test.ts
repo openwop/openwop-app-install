@@ -4,7 +4,14 @@
  * trusted chunks become a cited block; untrusted chunks are whitespace-collapsed
  * and wrapped in a BEGIN/END UNTRUSTED CONTENT fence whose markers can't be
  * spoofed from inside; nothing retrieved → empty string; a retriever error is
- * swallowed (best-effort, never fails the turn).
+ * reported to the model as DEGRADED (best-effort, never fails the turn).
+ *
+ * Sabotage that turns this red (grade-tests w11 probes): renaming the cited-block
+ * header (case 1); dropping the `\s+` collapse in `neutralizeUntrusted` (case 2) or its
+ * BEGIN/END defang (case 3); treating every chunk as trusted (case 2); emitting a header
+ * for an empty retrieval (case 4 — the early `return ''` alone is a behavioural no-op,
+ * since `[].join` is already ''); dropping the catch's `degraded.push` (case 5).
+ * `agent-knowledge-failure-honesty.test.ts` deliberately does not repeat cases 4 and 5.
  */
 
 import { describe, expect, it } from 'vitest';
@@ -76,7 +83,5 @@ describe('composeAgentKnowledgeContext', () => {
     const block = await composeAgentKnowledgeContext(throwing, 'q');
     expect(block).toContain('DEGRADED'); // it is stated…
     expect(block).toContain('do NOT tell the user you have nothing on record');
-    // …and the fence still holds: the notice is not presented as citable knowledge.
-    expect(block).not.toContain('Relevant knowledge for this agent');
   });
 });

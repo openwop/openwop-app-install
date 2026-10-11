@@ -27,37 +27,26 @@ import { fileURLToPath } from 'node:url';
 const DISCOVERY = join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'routes', 'discovery.ts');
 
 describe('RFC 0140 — the replay side-effect-suppression advertisement', () => {
-  it('advertises `none`, not `recorded-outcome`', () => {
+  // ADR 0812 P4 deleted the v1 discovery document, which was the only place
+  // this host stated `sideEffectSuppression` (last value: `none`, withdrawn from
+  // `recorded-outcome` 2026-08-15 per the docblock above). v2 deleted the field
+  // outright (capabilities.md §Deleted fields): v2 `replay` is a family record.
+  // So the pin moves from "the value is `none`" to "no value is stated at all",
+  // and restoring `recorded-outcome` still means deleting this test.
+  it('states no suppression level, and never `recorded-outcome`', () => {
     const src = readFileSync(DISCOVERY, 'utf8');
-    // Match the ADVERTISED value: the object literal key, not the prose above
-    // it (the docblock names `recorded-outcome` repeatedly, on purpose).
-    const m = src.match(/^\s*sideEffectSuppression:\s*'([a-z-]+)',/m);
-    expect(m, 'no `sideEffectSuppression` literal found — this test would pass vacuously').not.toBeNull();
-    expect(m![1]).toBe('none');
+    // Match an object-literal KEY, not prose (comments may name the field).
+    expect(src).not.toMatch(/^\s*sideEffectSuppression:/m);
+    expect(src).not.toMatch(/^\s*[a-zA-Z]+:\s*'recorded-outcome'/m);
   });
 
-  it('the withdrawal carries its reason and its restore condition', () => {
-    // A bare value change is a fact; a value change with the ruling attached is
-    // reviewable. If someone flips this back, they have to confront both.
+  it('the v2 replay family is present, so the absence above is not vacuous', () => {
+    // If the builder moved out of this file, the two negative assertions above
+    // would pass against an unrelated file. Pin the family they are about.
     const src = readFileSync(DISCOVERY, 'utf8');
-    expect(src).toContain('WITHDRAWN 2026-08-15');
-    expect(src).toContain('safe and non-conformant');
-    // ADR 0572 Phase 3 landed (the derived floor IS the classifier now), so the
-    // restore condition this used to pin — "when Phase 2 lands" — is spent. The
-    // pin moves to what Phase 3 established is still MISSING, because a restore
-    // condition that has already been met stops being a condition.
-    expect(src).toContain('ADR 0572 PHASE 3');
-    // Requirement 5 is whole-run: the ratchet reaching zero is necessary and
-    // NOT sufficient, since the floor is manifest-only while requirement 5
-    // binds the catalogue. Pinning this stops the next reader restoring the
-    // advert on the strength of a good-looking number.
-    expect(src).toContain('NECESSARY BUT NOT SUFFICIENT');
-    // And the sharpest live counterexample, named rather than summarised: a
-    // node whose AI reach the build-time analysis cannot follow, so a replay of
-    // it THROWS instead of reproducing. (This pinned the metered media class
-    // until ADR 0572 P3's mid-phase correction moved that class to SERVED —
-    // a pin on a fixed problem is a pin that cannot fail.)
-    expect(src).toContain('core.agents.run');
+    expect(src).toMatch(/^\s*replay: \{$/m);
+    expect(src).toContain('modes: [...FORK_MODES]');
+    expect(src).toContain("effectSeamsManifest: V2_EFFECT_SEAMS_PATH");
   });
 
   it('the runtime guards the advert used to rest on are STILL present', () => {

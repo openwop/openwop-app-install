@@ -9,9 +9,16 @@
  *             the `/not enabled/i` English regex is dead — the toggle-off 404
  *             is matched on `code` + `details.feature`, and the translator
  *             grant denial is rebuilt from `details.grantedLocales`.
+ *
+ * Sabotage-witnessed (/grade-tests w17): a featureless not_found mapped to
+ * langNotEnabled, a re-joined grantedLocales list, or a mapped validation_error
+ * reds the cmsErrorInfo cases; a swallowed settings failure, or a notice on a
+ * successful read, reds CMSLU-6; navigating without the confirm result, a dirty
+ * predicate that ignores the page, or prompting on a clean page reds CMSLU-2;
+ * ignoring cmsErrorInfo in CmsLanguageSettings reds the save-error case.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, cleanup, fireEvent, waitFor, act } from '@testing-library/react';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import type { ReactNode } from 'react';
 
@@ -73,6 +80,16 @@ vi.mock('../cmsClient.js', async (importOriginal) => {
     confirmTranslationSource: vi.fn(),
   };
 });
+// Two shared reads the page makes through accessClient were live network calls
+// (the file's old ADR 0661 allowlist entry): CmsLanguageSettings lists members
+// for the grant picker, and useCmsOrgAccess reads the caller's effective access.
+// The access read stays PENDING — `canAdmin: null`, the hook's "unknown" state,
+// which is exactly what the failed live call used to produce, minus the race.
+vi.mock('../../../client/accessClient.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../client/accessClient.js')>()),
+  listMembers: vi.fn(async () => []),
+  getEffectiveAccess: vi.fn(() => new Promise<never>(() => {})),
+}));
 vi.mock('../../media/mediaClient.js', () => ({
   listAssets: vi.fn(async () => []), uploadAsset: vi.fn(), absoluteServeUrl: (u: string) => u,
 }));
@@ -107,6 +124,9 @@ describe('cmsErrorInfo — code-mapped error copy (CMSLU-7)', () => {
   it('maps the toggle-off 404 by code + details.feature (no English regex)', () => {
     const e = new CmsApiError('Contenido no habilitado.', 'not_found', 404, { feature: 'cms-localization' });
     expect(cmsErrorInfo(e)).toEqual({ key: 'langNotEnabled' });
+    // CONTROL — the same code WITHOUT the feature stamp is a plain not-found
+    // (a missing page), never the localization-toggle explanation.
+    expect(cmsErrorInfo(new CmsApiError('Page not found.', 'not_found', 404, {}))).toBeNull();
   });
   it('rebuilds the translator-grant specificity from details.grantedLocales', () => {
     const e = new CmsApiError('flattened by the envelope localizer', 'forbidden_scope', 403, { grantedLocales: ['pt-BR', 'es'] });
@@ -129,11 +149,15 @@ describe('failed language-settings read (CMSLU-6)', () => {
     // never "monolingual".
     // The only tabs are the editor's own modes: no locale tabs.
     expect(screen.queryAllByRole('tab').map((el) => el.textContent)).toEqual(['Edit', 'Preview', 'Page']);
+    expect(screen.queryByLabelText(/preview locale/i)).toBeNull(); // no invented locale set
   });
 
   it('renders NO notice when the read succeeds (the notice is failure-scoped)', async () => {
     renderDetail();
     await waitFor(() => expect(screen.getByText(/\/landing · v3/)).toBeTruthy());
+    // Settled, not merely early: the preview-locale selector renders only once
+    // the settings read landed with more than one locale.
+    await waitFor(() => expect(screen.getByLabelText(/preview locale/i)).toBeTruthy());
     expect(screen.queryByText(/language settings could not be read/i)).toBeNull();
   });
 });
@@ -150,6 +174,7 @@ describe('in-app dirty guard (CMSLU-2)', () => {
     fireEvent.change(screen.getByDisplayValue('Landing Page'), { target: { value: 'Landing Page!' } });
     fireEvent.click(screen.getByRole('button', { name: /back to pages/i }));
     await waitFor(() => expect(confirmSpy).toHaveBeenCalled());
+    await act(async () => {}); // let the declined confirm's `.then` run before judging
     // Declined → the editor is still open.
     expect(screen.getByText(/\/landing · v3/)).toBeTruthy();
 

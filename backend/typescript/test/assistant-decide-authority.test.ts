@@ -18,12 +18,20 @@
  * one route, because the defect was route↔route drift — a test bound to a single
  * route is exactly what missed it. The registration is made at boot by
  * `registerAssistantActionApproval`, so `createApp` is the wiring under test.
+ *
+ * Sabotages that turn it red (grade-tests w11): the write-authority check dropped; the
+ * no-identity refusal dropped; either request-level exit dropped; the gate refusing
+ * everyone; the roster-delete listener's two `continue`s or its reject removed. The
+ * source-count case is a SPELLING ratchet: its wildcard-operator half is also witnessed
+ * behaviourally by `assistant-approve-every-lane.test.ts` (dev-token is the wildcard
+ * principal, so dropping the threading 403s those lanes); its personal-owner half is the
+ * only guard on that threading.
  */
 
 import { beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { __clearToggleStore } from '../src/host/featureToggles/service.js';
-import { __resetAssistantStore, enqueuePendingAction, getPendingAction, listPendingActions } from '../src/features/assistant/assistantService.js';
+import { __resetAssistantStore, enqueuePendingAction, getPendingAction, listPendingActions, setPendingActionApproval } from '../src/features/assistant/assistantService.js';
 import { fireRosterMemberDeleted } from '../src/host/rosterLifecycle.js';
 import { enqueueActionWithApproval } from '../src/features/assistant/actionApproval.js';
 import { assertApprovalEligibility, getApproval } from '../src/host/approvalService.js';
@@ -164,7 +172,6 @@ describe('AST2-M2 — the roster-delete listener rejects ONLY the stranded ghost
       draft: 'Drafted by an agent that is now gone',
       payload: { to: ['dana@acme.test'] },
     });
-    const { setPendingActionApproval } = await import('../src/features/assistant/assistantService.js');
     await setPendingActionApproval(TENANT, stranded.actionId, 'appr:deleted-by-cascade');
 
     await fireRosterMemberDeleted({ tenantId: TENANT, rosterId: 'host:deleted-assistant' });

@@ -5,6 +5,11 @@
  * (never `200 {overlay:{}}` — the success-with-empty this retires); a repair
  * that lands returns the translation; the auto-translate sweep SKIPS an
  * invalid pair and keeps translating the rest.
+ *
+ * Sabotage (grade-tests w16): `second = first` (no repair call) reds the bounded
+ * -repair pair; mapping an unparseable completion to `{ ok: true, overlay: {} }`
+ * reds the 502, sweep-skip and degrade cases; dropping the F6 `conflict` flag or
+ * its retry reds the double-conflict case.
  */
 
 import http from 'node:http';
@@ -38,7 +43,7 @@ vi.mock('../src/features/cms/cmsService.js', async (importOriginal) => {
   };
 });
 
-import { resolveHeadlessAi } from '../src/host/headlessAi.js';
+import { resolveHeadlessAi, type HeadlessDispatch } from '../src/host/headlessAi.js';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
@@ -65,7 +70,18 @@ afterAll(async () => { await new Promise<void>((res) => server.close(() => res()
 
 beforeEach(() => { mockResolve.mockReset(); f6.conflictPinnedSaves = false; });
 
-interface Res<T = any> { status: number; body: T }
+/** The page / error-envelope / approvals-list fields these cases read. */
+interface Body {
+  pageId: string;
+  orgId: string;
+  overlay?: Record<string, unknown>;
+  autoTranslated?: Record<string, number>;
+  autoTranslateDegraded?: { capped?: boolean; errored?: boolean; invalid?: number; conflict?: boolean };
+  items?: Array<{ pageId?: string; proposal: string }>;
+  error?: string;
+  details?: { repairAttempted?: boolean; reason?: string };
+}
+interface Res<T = Body> { status: number; body: T }
 interface Client { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res>; put: (p: string, b?: unknown) => Promise<Res> }
 function client(): Client {
   let cookie = '';
@@ -76,7 +92,7 @@ function client(): Client {
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    const out = (res.status === 204 ? undefined : await res.json().catch(() => undefined)) as Body;
     return { status: res.status, body: out };
   };
   return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), put: (p, b) => call('PUT', p, b) };
@@ -96,7 +112,7 @@ const u = (orgId: string, s = ''): string => `/host/openwop-app/cms/orgs/${encod
 
 describe('POST /translate-section — typed failure + one bounded repair', () => {
   it('garbage twice → 502 translation_invalid after EXACTLY one repair (never 200 {overlay:{}})', async () => {
-    const dispatch = vi.fn(async () => 'I am sorry, I cannot produce JSON right now.');
+    const dispatch = vi.fn<HeadlessDispatch>(async () => 'I am sorry, I cannot produce JSON right now.');
     mockResolve.mockResolvedValue(dispatch);
     const { owner, orgId } = await ownerOrg();
     const r = await owner.post(u(orgId, '/translate-section'), { sectionType: 'hero', data: { heading: 'Hi' }, targetLocale: 'pt-BR' });
@@ -107,7 +123,7 @@ describe('POST /translate-section — typed failure + one bounded repair', () =>
   });
 
   it('garbage then valid → the repair lands and the route returns the overlay', async () => {
-    const dispatch = vi.fn()
+    const dispatch = vi.fn<HeadlessDispatch>()
       .mockResolvedValueOnce('Sure! Here is a friendly explanation instead of JSON.')
       .mockResolvedValueOnce('{"heading":"Olá"}');
     mockResolve.mockResolvedValue(dispatch);
@@ -117,16 +133,17 @@ describe('POST /translate-section — typed failure + one bounded repair', () =>
     expect(r.body.overlay).toEqual({ heading: 'Olá' });
     expect(dispatch).toHaveBeenCalledTimes(2);
     // The repair message is error-fed (carries the bad completion back).
-    const secondCall = dispatch.mock.calls[1]?.[0] as Array<{ role: string; content: string }>;
-    expect(secondCall.some((m) => m.role === 'assistant' && /friendly explanation/.test(m.content))).toBe(true);
+    const secondCall = dispatch.mock.calls[1]?.[0] ?? [];
+    expect(secondCall.some((m) => m.role === 'assistant' && typeof m.content === 'string' && /friendly explanation/.test(m.content))).toBe(true);
   });
 
   it('valid first output → one call, no repair', async () => {
-    const dispatch = vi.fn(async () => '{"heading":"Olá"}');
+    const dispatch = vi.fn<HeadlessDispatch>(async () => '{"heading":"Olá"}');
     mockResolve.mockResolvedValue(dispatch);
     const { owner, orgId } = await ownerOrg();
     const r = await owner.post(u(orgId, '/translate-section'), { sectionType: 'hero', data: { heading: 'Hi' }, targetLocale: 'pt-BR' });
     expect(r.status).toBe(200);
+    expect(r.body.overlay).toEqual({ heading: 'Olá' });
     expect(dispatch).toHaveBeenCalledTimes(1);
   });
 });
@@ -135,11 +152,11 @@ describe('auto-translate sweep — an invalid pair is SKIPPED, not fatal', () =>
   it('keeps translating after a translation_invalid pair and reports the invalid count', async () => {
     const { tenantId } = await ownerOrg();
     // Section A's heading provokes permanent garbage; section B translates fine.
-    const dispatch = vi.fn(async (messages: Array<{ content: string }>) => {
+    const dispatch = vi.fn<HeadlessDispatch>(async (messages) => {
       const text = messages.map((m) => m.content).join('\n');
       return /Poison/.test(text) ? 'nope, no JSON here' : '{"heading":"Olá"}';
     });
-    mockResolve.mockResolvedValue(dispatch as never);
+    mockResolve.mockResolvedValue(dispatch);
     const out = await autoTranslateMissingOverlays(tenantId, [
       { sectionId: 'a', type: 'hero', data: { heading: 'Poison' } },
       { sectionId: 'b', type: 'hero', data: { heading: 'Fine' } },
@@ -154,7 +171,7 @@ describe('auto-translate sweep — an invalid pair is SKIPPED, not fatal', () =>
 
 describe('ADR 0592 §9 (CMSL-5/CMSLU-14) — a degraded sweep is SURFACED, not silent', () => {
   it('unusable translations surface on the submit response AND the approval proposal', async () => {
-    const dispatch = vi.fn(async () => 'definitely not JSON, twice in a row');
+    const dispatch = vi.fn<HeadlessDispatch>(async () => 'definitely not JSON, twice in a row');
     mockResolve.mockResolvedValue(dispatch);
     const { owner, orgId } = await ownerOrg();
     const ok = await owner.put(u(orgId, '/language-settings'), { supportedLocales: ['pt-BR'], autoTranslateOnPublish: true });
@@ -167,25 +184,28 @@ describe('ADR 0592 §9 (CMSL-5/CMSLU-14) — a degraded sweep is SURFACED, not s
     expect(sub.body.autoTranslateDegraded).toEqual({ invalid: 1 });
     // …and the approval PROPOSAL (the reviewer's view).
     const list = await owner.get('/host/openwop-app/approvals?status=pending');
-    const appr = (list.body.items as Array<{ pageId?: string; proposal: string }>).find((a) => a.pageId === created.body.pageId);
+    const appr = (list.body.items ?? []).find((a) => a.pageId === created.body.pageId);
     expect(appr).toBeTruthy();
     expect(appr?.proposal).toMatch(/auto-translate incomplete/);
     expect(appr?.proposal).toMatch(/unusable output/);
   });
 
   it('a provider failure mid-sweep surfaces as errored', async () => {
-    const dispatch = vi.fn(async () => { throw new Error('provider exploded'); });
-    mockResolve.mockResolvedValue(dispatch as never);
+    const dispatch = vi.fn<HeadlessDispatch>(async () => { throw new Error('provider exploded'); });
+    mockResolve.mockResolvedValue(dispatch);
     const { owner, orgId } = await ownerOrg();
     await owner.put(u(orgId, '/language-settings'), { supportedLocales: ['pt-BR'], autoTranslateOnPublish: true });
     const created = await owner.post(u(orgId, '/pages'), { title: 'Errored', sections: [{ type: 'hero', data: { heading: 'Hi' } }] });
     const sub = await owner.post(u(orgId, `/pages/${created.body.pageId}/submit`));
     expect(sub.status).toBe(200); // best-effort: the submit still lands
     expect(sub.body.autoTranslateDegraded).toEqual({ errored: true });
+    const list = await owner.get('/host/openwop-app/approvals?status=pending');
+    const appr = (list.body.items ?? []).find((a) => a.pageId === created.body.pageId);
+    expect(appr?.proposal, 'the reviewer sees the degrade too').toMatch(/provider failed mid-sweep/);
   });
 
   it('a CLEAN sweep carries no degrade field (the signal is failure-scoped)', async () => {
-    const dispatch = vi.fn(async () => '{"heading":"Olá"}');
+    const dispatch = vi.fn<HeadlessDispatch>(async () => '{"heading":"Olá"}');
     mockResolve.mockResolvedValue(dispatch);
     const { owner, orgId } = await ownerOrg();
     await owner.put(u(orgId, '/language-settings'), { supportedLocales: ['pt-BR'], autoTranslateOnPublish: true });
@@ -200,7 +220,7 @@ describe('ADR 0592 §9 (CMSL-5/CMSLU-14) — a degraded sweep is SURFACED, not s
 
 describe('ADR 0592 §9 correction — the double-conflict discard is DISCLOSED (review F6)', () => {
   it('two merge conflicts drop the drafts but say so on the response and the proposal', async () => {
-    const dispatch = vi.fn(async () => '{"heading":"Olá"}');
+    const dispatch = vi.fn<HeadlessDispatch>(async () => '{"heading":"Olá"}');
     mockResolve.mockResolvedValue(dispatch);
     const { owner, orgId } = await ownerOrg();
     await owner.put(u(orgId, '/language-settings'), { supportedLocales: ['pt-BR'], autoTranslateOnPublish: true });
@@ -214,7 +234,7 @@ describe('ADR 0592 §9 correction — the double-conflict discard is DISCLOSED (
     expect(sub.body.autoTranslated).toBeUndefined();
     expect(sub.body.autoTranslateDegraded).toEqual({ conflict: true });
     const list = await owner.get('/host/openwop-app/approvals?status=pending');
-    const appr = (list.body.items as Array<{ pageId?: string; proposal: string }>).find((a) => a.pageId === created.body.pageId);
+    const appr = (list.body.items ?? []).find((a) => a.pageId === created.body.pageId);
     expect(appr?.proposal).toMatch(/auto-translate incomplete/);
     expect(appr?.proposal).toMatch(/drafts were discarded/);
   });

@@ -8,12 +8,24 @@
  *    the title, the description and followable links.
  * 3. `jsonLdBlocks` — one VideoObject per video section, from the same data.
  * 4. `sectionMarkdown` — the markdown twin.
+ *
+ * The full crawler markup of a video section (<figure>, poster <img>, title,
+ * description, both links) is pinned by `adr0384-section-html.test.ts` › "full-page
+ * golden", and heading emphasis by `public-site-aeo.test.ts` › "hero h1 and section
+ * h2 render <em>…" (the shared `head()`); this file keeps the video-only safety rule
+ * (no non-https link from a stored row) — grade-tests w16 cut the duplicate.
+ *
+ * Sabotage (grade-tests w16): `httpsMediaUrl` without the https check reds the
+ * http/poster cases; the crawler `https` helper as identity reds the never-links
+ * case; `embedUrl: youtube` reds the VideoObject case.
  */
 import { describe, expect, it } from 'vitest';
 import { validateSection, sanitizeSectionOverlay, type Section } from '../src/features/cms/cmsService.js';
 import { sectionHtml } from '../src/features/publishing/sectionHtml.js';
 import { sectionMarkdown } from '../src/features/publishing/sectionMarkdown.js';
 import { jsonLdBlocks, videoIsoDuration } from '../src/features/publishing/prerenderService.js';
+
+type JsonLdSeo = Parameters<typeof jsonLdBlocks>[0]['seo'];
 
 const GOOD = {
   heading: 'Why companies run it as their *own*',
@@ -92,20 +104,8 @@ describe('video section — validation', () => {
 });
 
 describe('video section — crawler render', () => {
-  const html = sectionHtml(video(GOOD), { assetBase: 'https://app.example.test' })!;
-
-  it('is a <figure> with the poster, title, description and links', () => {
-    expect(html).toContain('<figure>');
-    expect(html).toContain(`<img src="${GOOD.poster}" alt="${GOOD.title}"`);
-    expect(html).toContain(`<strong>${GOOD.title}</strong>`);
-    expect(html).toContain(`<p>${GOOD.description}</p>`);
-    expect(html).toContain(`<a href="${GOOD.src}" rel="noopener noreferrer">Watch the video (1:57)</a>`);
-    expect(html).toContain(`<a href="${GOOD.youtubeUrl}" rel="noopener noreferrer">Watch on YouTube</a>`);
-    expect(html).toContain('<em>own</em>'); // heading emphasis syntax
-  });
-
   it('never links a non-https URL that reached storage some other way', () => {
-    const raw = { sectionId: 's', type: 'video', data: { ...GOOD, src: 'javascript:alert(1)', youtubeUrl: 'http://x' } } as Section;
+    const raw: Section = { sectionId: 's', type: 'video', data: { ...GOOD, src: 'javascript:alert(1)', youtubeUrl: 'http://x' } };
     const out = sectionHtml(raw, { assetBase: 'https://app.example.test' })!;
     expect(out).not.toContain('javascript:');
     expect(out).not.toContain('Watch on YouTube');
@@ -114,7 +114,7 @@ describe('video section — crawler render', () => {
 
 describe('video section — VideoObject JSON-LD', () => {
   const page = (sections: Section[]) => ({ title: 'White label', updatedAt: '2026-10-06T00:00:00Z', slug: 'white-label', sections });
-  const seo = { title: 'T', description: 'D', canonicalUrl: 'https://app.example.test/p/white-label' } as never;
+  const seo: JsonLdSeo = { title: 'T', description: 'D', canonicalUrl: 'https://app.example.test/p/white-label', ogTitle: 'T', ogDescription: 'D', noindex: false };
 
   it('emits one VideoObject per video section', () => {
     const blocks = jsonLdBlocks({ seo, page: page([video(GOOD), video({ ...GOOD, title: 'Second', length: '1:15', uploadDate: '2026-10-02' })]), locale: 'en', baseUrl: 'https://app.example.test' });

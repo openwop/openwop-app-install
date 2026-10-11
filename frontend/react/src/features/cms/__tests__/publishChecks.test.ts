@@ -2,6 +2,12 @@
  * ADR 0828 phase 3 — the checks before Publish: a to-do marker blocks, missing
  * search and social settings and untranslated sections warn, and each finding
  * points at where it is fixed.
+ *
+ * Sabotage-witnessed (/grade-tests w17): breaking the TODO regex, scanning the
+ * whole page instead of each section, emitting the "no to-dos" ok always (or as
+ * a warn), flipping the author/description/social warns to ok, dropping the
+ * null-search-record guard, the withheld-locale skip, the per-locale count, or
+ * the title trim each turn a case red.
  */
 import { describe, it, expect } from 'vitest';
 import { publishChecks } from '../publishChecks.js';
@@ -14,7 +20,7 @@ const page = (over: Partial<Page> = {}): Page => ({
     { sectionId: 'sec:b', type: 'richText', data: { heading: 'Examples', text: '[TODO: one concrete example.]' } },
   ],
   ...over,
-} as Page);
+});
 const opts = { baseLocale: 'en', locales: ['en'] };
 const byId = (checks: ReturnType<typeof publishChecks>, id: string) => checks.find((c) => c.id === id);
 
@@ -22,6 +28,7 @@ describe('publishChecks', () => {
   it('a [TODO] marker anywhere in a section blocks, and points at that section', () => {
     const checks = publishChecks(page(), { noindex: false, metaDescription: 'Fine.' }, opts);
     expect(byId(checks, 'todo:sec:b')).toMatchObject({ level: 'block', sectionId: 'sec:b', fixOn: 'section' });
+    expect(byId(checks, 'todo:sec:a')).toBeUndefined();
     expect(byId(checks, 'todo')).toBeUndefined();
   });
 
@@ -44,7 +51,7 @@ describe('publishChecks', () => {
   });
 
   it('counts untranslated sections per locale, and skips a withheld locale', () => {
-    const p = page({ localePublishState: { fr: 'draft' } } as Partial<Page>);
+    const p = page({ localePublishState: { fr: 'draft' } });
     const checks = publishChecks(p, null, { baseLocale: 'en', locales: ['en', 'es', 'fr'] });
     expect(byId(checks, 'locale:es')).toMatchObject({ level: 'warn', values: { locale: 'es', count: 2, total: 2 } });
     expect(byId(checks, 'locale:fr')).toBeUndefined();

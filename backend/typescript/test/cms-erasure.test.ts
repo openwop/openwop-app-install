@@ -1,5 +1,12 @@
 /**
- * UX_UPGRADE-content ROUND 3 — the CMS zero-eraser known-open, closed.
+ * ADR 0592 §8 (CMSL-4 / CMSLWF-9) + UX_UPGRADE-content ROUND 3 — the CMS
+ * zero-eraser known-open, closed.
+ *
+ * Sabotage-witnessed (/grade-tests w16): dropping any `hit(...)` redaction arm in
+ * `eraseCmsSubject` (page createdBy/authorId, grant delete, grant updatedBy, shared
+ * section, language settings, experiments), widening `hit` past the subject's key
+ * forms, matching only the raw key form, or dropping the universal decidedBy/note
+ * walk in `applyApprovalRedactorsForSubject` turns the named case red.
  *
  * CMS registered no subject eraser and neither ratchet could see it (both bind
  * on a field named `userId`; CMS holds `authorId`/`createdBy`/`updatedBy`/
@@ -7,29 +14,33 @@
  * content; the subject's OWN locale grant is DELETED (an anonymized grant
  * would still grant, to nobody auditable).
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import http from 'node:http';
+import { describe, it, expect, beforeAll } from 'vitest';
 import { createApp } from '../src/index.js';
 import { createOrg } from '../src/host/accessControlService.js';
-import { createPage, getPage, putLocaleGrant, getLocaleGrant } from '../src/features/cms/cmsService.js';
-import { updateContentLanguageSettings } from '../src/host/contentLocales.js';
+import {
+  createPage, getPage, putLocaleGrant, getLocaleGrant, createSharedSection, listSharedSections, transitionPage,
+} from '../src/features/cms/cmsService.js';
+import { updateContentLanguageSettings, getContentLanguageSettings } from '../src/host/contentLocales.js';
+import { createExperiment, listExperiments } from '../src/features/cms/pageExperimentsService.js';
+import { queueContentApproval } from '../src/features/cms/contentApproval.js';
+import {
+  createApproval, findPendingContentApprovalForPage, resolveApproval, eraseApprovalSubject, listApprovals,
+} from '../src/host/approvalService.js';
 import { eraseCmsSubject, ERASED_SUBJECT } from '../src/features/cms/erasure.js';
 
 const T = 'org:cms-erase';
 let ORG = '';
-let server: http.Server;
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
-  const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', res); });
+  // createApp wires the stores + approval kinds; no HTTP server is needed (no case calls a route).
+  await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   const org = await createOrg({ tenantId: T, createdBy: 'u-1', name: 'Acme', ownerSubject: 'u-1' });
   ORG = org.orgId;
   // ADR 0592 §9 (CMSL-7) — grants are now validated against the configured
   // locale set, so the fixtures configure it first (production-shaped).
   await updateContentLanguageSettings(T, ORG, { supportedLocales: ['fr', 'es', 'pt-BR'] }, 'u-seed');
 });
-afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
 describe('R3 — CMS is erasable: attributions anonymize, the grant deletes, others untouched', () => {
   it('erases page attributions and deletes the subject grant; the keeper subject is untouched', async () => {
@@ -43,6 +54,7 @@ describe('R3 — CMS is erasable: attributions anonymize, the grant deletes, oth
     const mineAfter = await getPage(T, ORG, mine.pageId);
     expect(mineAfter!.createdBy).toBe(ERASED_SUBJECT);
     expect(mineAfter!.authorId).toBe(ERASED_SUBJECT);
+    expect(mineAfter!.updatedBy).toBe(ERASED_SUBJECT); // createPage stamps updatedBy = createdBy
     const theirsAfter = await getPage(T, ORG, theirs.pageId);
     expect(theirsAfter!.createdBy).toBe('u-keeper');                    // untouched polarity
     expect(await getLocaleGrant(T, ORG, 'u-erase-me')).toBeNull();      // the grant DELETES
@@ -63,12 +75,11 @@ describe('R3 — CMS is erasable: attributions anonymize, the grant deletes, oth
 // reads a store "covered" without one — these are the store-level truth).
 describe('ADR 0592 §8 — shared sections, language settings, experiments, rowsTouched, key forms', () => {
   it('anonymizes cms:sharedsection createdBy/updatedBy and reports rowsTouched', async () => {
-    const { createSharedSection, listSharedSections } = await import('../src/features/cms/cmsService.js');
     await createSharedSection(T, ORG, { name: 'Footer', type: 'cta', data: { label: 'Go', url: '/x' } }, 'u-shared-erase');
     await createSharedSection(T, ORG, { name: 'Header', type: 'cta', data: { label: 'Hi', url: '/y' } }, 'u-shared-keeper');
 
     const report = await eraseCmsSubject(T, 'u-shared-erase');
-    expect(report.rowsTouched).toBeGreaterThanOrEqual(1); // the SubjectEraseReport contract (WF-TWIN-3)
+    expect(report.rowsTouched).toBe(1); // the SubjectEraseReport contract (WF-TWIN-3): one shared row
 
     const all = await listSharedSections(T, ORG);
     const mine = all.find((s) => s.name === 'Footer');
@@ -79,17 +90,16 @@ describe('ADR 0592 §8 — shared sections, language settings, experiments, rows
   });
 
   it('anonymizes cms:langsettings.updatedBy (the census row moved from REVIEWED_EXEMPT — operator attribution IS a subject id)', async () => {
-    const { updateContentLanguageSettings, getContentLanguageSettings } = await import('../src/host/contentLocales.js');
-    await updateContentLanguageSettings(T, ORG, { supportedLocales: ['fr'] }, 'u-lang-erase');
+    // Re-saves the SAME locale set the fixture configured: narrowing it here made the
+    // grant cases above 400 (CMSL-7) whenever this case ran first under shuffle.
+    await updateContentLanguageSettings(T, ORG, { supportedLocales: ['fr', 'es', 'pt-BR'] }, 'u-lang-erase');
     await eraseCmsSubject(T, 'u-lang-erase');
     const s = await getContentLanguageSettings(T, ORG);
-    expect(s.supportedLocales).toEqual(['fr']);  // config kept — org data
+    expect(s.supportedLocales).toEqual(['fr', 'es', 'pt-BR']);  // config kept — org data
     expect(s.updatedBy).toBe(ERASED_SUBJECT);    // attribution gone
   });
 
   it('anonymizes cms:pageexperiment.createdBy', async () => {
-    const { createPage } = await import('../src/features/cms/cmsService.js');
-    const { createExperiment, listExperiments } = await import('../src/features/cms/pageExperimentsService.js');
     const page = await createPage({ tenantId: T, orgId: ORG, title: 'Exp page', createdBy: 'u-exp-keeper' });
     await createExperiment({
       tenantId: T, orgId: ORG, pageId: page.pageId, name: 'Hero test',
@@ -102,21 +112,17 @@ describe('ADR 0592 §8 — shared sections, language settings, experiments, rows
   });
 
   it('matches every subject-key FORM (a scoped `user:` DSAR key reaches raw-stored rows)', async () => {
-    const { createPage, getPage } = await import('../src/features/cms/cmsService.js');
     const raw = 'raw-form-subject';
     const page = await createPage({ tenantId: T, orgId: ORG, title: 'Forms page', createdBy: raw });
     // Erase by the SCOPED form — the raw-stored attribution must still be hit.
     const report = await eraseCmsSubject(T, `user:${raw}`);
-    expect(report.rowsTouched).toBeGreaterThanOrEqual(1);
+    expect(report.rowsTouched).toBe(1); // the one page row (createdBy + updatedBy on it)
     expect((await getPage(T, ORG, page.pageId))!.createdBy).toBe(ERASED_SUBJECT);
   });
 });
 
 describe('ADR 0592 §8 — content-publish reviewer redaction (CMSLWF-9 a)', () => {
   it('an erased REVIEWER\'s decidedBy + note are redacted on the resolved row; the proposal survives', async () => {
-    const { queueContentApproval } = await import('../src/features/cms/contentApproval.js');
-    const { createPage, transitionPage } = await import('../src/features/cms/cmsService.js');
-    const { findPendingContentApprovalForPage, resolveApproval, eraseApprovalSubject, listApprovals } = await import('../src/host/approvalService.js');
 
     const page = await createPage({ tenantId: T, orgId: ORG, title: 'Reviewed page', createdBy: 'u-author' });
     await transitionPage(T, ORG, page.pageId, 'submit', 'u-author');
@@ -143,7 +149,6 @@ describe('ADR 0592 §8 — content-publish reviewer redaction (CMSLWF-9 a)', () 
 // erased reviewer's id + attributed note survived DSAR on all other kinds.
 describe('ADR 0592 §8 correction — reviewer redaction is kind-INDEPENDENT (review F2)', () => {
   it('an erased decider is redacted on a NON-content-publish kind too (run-proposal)', async () => {
-    const { createApproval, resolveApproval, eraseApprovalSubject, listApprovals } = await import('../src/host/approvalService.js');
     const appr = await createApproval({
       tenantId: T,
       rosterId: 'roster:demo',

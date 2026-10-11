@@ -2,7 +2,14 @@
  * ADR 0314 — the creation gallery under test: canvas-type cards render only
  * for enabled toggles, creating a canvas lands in its editor, the From-canvas
  * picker materializes a real row (no raw-id input), and the project select
- * rides ownerSubject on document creation.
+ * rides ownerSubject on document creation. DOCNEW-1: off-toggle types stay
+ * visible as inert "Off" cards.
+ *
+ * Sabotage witnesses (grade-tests w14): every type enabled, off types hidden, no
+ * pack cards, no projectId / ownerSubject, no close, the wrong base path, the
+ * wrong canvas materialized, the WRONG document handed to `onCreated` (from a
+ * canvas or blank), and the empty picker drawn as a failure — each turns its
+ * case red.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup, fireEvent, screen, waitFor } from '@testing-library/react';
@@ -49,7 +56,7 @@ vi.mock('../../../canvas/canvasClient.js', async (importOriginal) => {
     listPackCanvasTypes: canvasApi.listPackCanvasTypes,
     createCanvasClient: (opts: { basePath: string }) => {
       canvasApi.basePaths.push(opts.basePath);
-      return { createCanvas: canvasApi.createCanvas } as unknown as ReturnType<typeof orig.createCanvasClient>;
+      return { createCanvas: canvasApi.createCanvas };
     },
   };
 });
@@ -59,6 +66,14 @@ vi.mock('../../projects/projectsClient.js', () => ({
 }));
 
 import { NewDocumentModal } from '../NewDocumentModal.js';
+import { CREATABLE_CANVAS_TYPES } from '../../../canvas/creatableTypes.js';
+import type { DocumentRecord } from '../documentsClient.js';
+
+const AT = '2026-07-01T10:00:00Z';
+const BLANK_DOC: DocumentRecord = {
+  documentId: 'doc-1', orgId: 'org1', kind: 'sow', format: 'markdown', title: 'SOW Alpha',
+  status: 'draft', ownerSubject: { kind: 'project', id: 'proj-1' }, createdAt: AT, updatedAt: AT,
+};
 
 afterEach(cleanup);
 beforeEach(() => {
@@ -69,7 +84,7 @@ beforeEach(() => {
   // properties would orphan the module's references.
   canvasApi.createCanvas.mockReset().mockResolvedValue({ canvasId: 'c-1', canvasTypeId: 'canvas.slides', state: {}, version: 1 });
   canvasApi.listPackCanvasTypes.mockReset().mockResolvedValue([]);
-  docsApi.createDocument.mockReset().mockResolvedValue({ documentId: 'doc-1' });
+  docsApi.createDocument.mockReset().mockResolvedValue(BLANK_DOC);
   docsApi.materializeFromCanvas.mockReset().mockResolvedValue({ documentId: 'doc-2', versionId: 'v1', created: true });
   docsApi.listCanvasSources.mockReset().mockResolvedValue({ canvases: [], total: 0 });
 });
@@ -97,7 +112,8 @@ describe('creation gallery (choose step)', () => {
     expect(screen.queryByRole('button', { name: /Campaign plan/ })).toBeNull();
     expect(screen.getByText('CAD model')).toBeTruthy();
     expect(screen.getByText('Campaign plan')).toBeTruthy();
-    expect(screen.getAllByText('Off').length).toBeGreaterThanOrEqual(2);
+    // Exactly the first-party types that are NOT on (slides + drawings are).
+    expect(screen.getAllByText('Off')).toHaveLength(CREATABLE_CANVAS_TYPES.length - 2);
     // The Write + Reuse groups are always present.
     expect(screen.getByRole('button', { name: /Text document/ })).toBeTruthy();
     expect(screen.getByRole('button', { name: /From a canvas/ })).toBeTruthy();
@@ -154,7 +170,7 @@ describe('from a canvas (the picker)', () => {
     fireEvent.click(await screen.findByRole('button', { name: /From a canvas/ }));
     fireEvent.click(await screen.findByRole('button', { name: /Q3 deck/ }));
     await waitFor(() => expect(docsApi.materializeFromCanvas).toHaveBeenCalledWith('org1', 'c-9'));
-    await waitFor(() => expect(onCreated).toHaveBeenCalled());
+    await waitFor(() => expect(onCreated).toHaveBeenCalledWith(expect.objectContaining({ documentId: 'doc-2' })));
   });
 
   it('shows the empty-state invitation when there are no canvases', async () => {
@@ -176,6 +192,6 @@ describe('blank document + project', () => {
     await waitFor(() => expect(docsApi.createDocument).toHaveBeenCalledWith('org1', {
       title: 'SOW Alpha', kind: 'sow', ownerSubject: { kind: 'project', id: 'proj-1' },
     }));
-    await waitFor(() => expect(onCreated).toHaveBeenCalled());
+    await waitFor(() => expect(onCreated).toHaveBeenCalledWith(expect.objectContaining({ documentId: 'doc-1' })));
   });
 });

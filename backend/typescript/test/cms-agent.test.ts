@@ -4,6 +4,11 @@
  * agents[]), tool-allowlisted to the feature's own workflow nodes (ctx.features
  * .cms via feature.cms.nodes). In this host the agent + nodes ARE the chat-
  * drivable path — there is no separate `content.translate` envelope seam.
+ *
+ * What breaks it (w16 probes): a pack edit that changes the localizer's persona or
+ * points it at another prompt reds case 1; allowlisting any tool outside
+ * `openwop:cms.*` reds case 2 (`agent-allowlist-resolution.test.ts` checks only that
+ * entries RESOLVE, not that they stay inside the feature).
  */
 
 import http from 'node:http';

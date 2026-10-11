@@ -14,6 +14,11 @@
     "`next-worker` carries `nextWorkerIds: []`, which `orchestrator-decision.schema.json` refuses (`minItems: 1`).",
     "The MUST wins over the schema nicety: collapsing the plan to a single `terminate` fixes the payload and REDS",
     "the scenario (measured 2026-09-18). Reported to the steward as a corpus mismatch; admitted here until it is settled.",
+    "2026-10-10 (ADR 0858 P4): the corpus SETTLED it \u2014 `v2-dispatch-loop` requires every decision to be one",
+    "OrchestratorDecision branch and does not port the v1 pair. The default plan is now a single `terminate`, so",
+    "this host's supervisor records no invalid decision. The type stays admitted because core.dispatch records",
+    "whatever decision it is handed, and `dispatch-iteration-counter.test.ts` hands it the forward-compat kind",
+    "`noop` (no branch accepts it). Measured on a targeted sample: `noop` is the only remaining violating shape.",
     "2026-09-29: `approval.overridden` DELETED \u2014 it now validates: stored in the closed v1 shape and projected onto the v2 alias at egress (approvalOverriddenProjection.ts, openwop#1742 follow-on)."
   ],
   "measured": "2026-09-18",

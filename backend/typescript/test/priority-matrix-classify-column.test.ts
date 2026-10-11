@@ -4,9 +4,13 @@
  * lane renamed to a non-English (or otherwise non-matching) label is still
  * excluded from schedule pressure (ADR 0103). Legacy boards with no
  * `terminalKind` fall back to the stable id / regex heuristic.
+ *
+ * Sabotage map (wave 15): each `terminalKind` arm, the stable `wont-do` id, the
+ * `abandon` regex arm, `completionColumnOf`'s `done` id and its not-cancelled filter
+ * (`w15g1-cc-*`) each turn a case below red.
  */
 import { describe, expect, it } from 'vitest';
-import { classifyColumn } from '../src/features/priority-matrix/priorityMatrixService.js';
+import { classifyColumn, completionColumnOf } from '../src/features/priority-matrix/priorityMatrixService.js';
 import type { KanbanBoard, KanbanColumn } from '../src/host/kanbanService.js';
 
 function board(columns: KanbanColumn[]): KanbanBoard {
@@ -21,6 +25,9 @@ describe('classifyColumn — structured terminalKind (CHATP-4)', () => {
       { id: 'open', name: 'Offen' },
       { id: 'cancelled-de', name: 'Abgebrochen', terminal: true, terminalKind: 'cancellation' },
       { id: 'done-de', name: 'Erledigt', terminal: true, terminalKind: 'completion' },
+      // A completion lane whose NAME matches the cancel regex: only the structured kind
+      // can classify it correctly (without one, "cancel" in the name would win).
+      { id: 'closed', name: 'Closed — not cancelled', terminal: true, terminalKind: 'completion' },
     ]);
     const cancel = classifyColumn(b, 'cancelled-de');
     expect(cancel.isTerminal).toBe(true);
@@ -29,6 +36,10 @@ describe('classifyColumn — structured terminalKind (CHATP-4)', () => {
     const done = classifyColumn(b, 'done-de');
     expect(done.isTerminal).toBe(true);
     expect(done.isCancelled).toBe(false); // terminalKind:'completion' is NOT a cancellation
+
+    const closed = classifyColumn(b, 'closed');
+    expect(closed.isTerminal).toBe(true);
+    expect(closed.isCancelled).toBe(false); // the structured kind beats a matching name
   });
 
   it('the default seeded lanes classify correctly via terminalKind', () => {
@@ -61,8 +72,6 @@ describe('classifyColumn — structured terminalKind (CHATP-4)', () => {
  * first, the stable seeded id next, and null when the board simply has no
  * completion lane (the caller refuses BEFORE minting anything).
  */
-import { completionColumnOf } from '../src/features/priority-matrix/priorityMatrixService.js';
-
 describe('completionColumnOf — renamed-board completion lane (PMX-2)', () => {
   it('a RENAMED completion lane with terminalKind resolves; the cancellation lane never does', () => {
     const b = board([

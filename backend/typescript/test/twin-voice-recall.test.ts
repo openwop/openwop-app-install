@@ -19,6 +19,9 @@
  * (`borrowedRecall.ts`), so the non-owner route leg here exercises the same
  * refusal path the unresolved caller takes.
  *
+ * Sabotage witnesses (w12): the session route passing `callerUserId: undefined` reds the owner
+ * leg; disabling the resolver's audience check reds the non-owner leg.
+ *
  * @see docs/adr/0044-twin-cross-subject-recall.md
  * @see docs/adr/0589-twin-tenancy-and-recall-audience.md
  */
@@ -58,15 +61,21 @@ afterAll(async () => {
   await new Promise<void>((res) => server.close(() => res()));
 });
 
-interface Res<T = any> { status: number; body: T }
-interface Client { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res>; put: (p: string, b?: unknown) => Promise<Res>; del: (p: string) => Promise<Res> }
+interface Res<T> { status: number; body: T }
+interface Client {
+  get: <T = unknown>(p: string) => Promise<Res<T>>;
+  post: <T = unknown>(p: string, b?: unknown) => Promise<Res<T>>;
+  put: <T = unknown>(p: string, b?: unknown) => Promise<Res<T>>;
+  del: <T = unknown>(p: string) => Promise<Res<T>>;
+}
+interface SessionView { realtime?: { instructions?: string } }
 function client(): Client {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
+  const call = async <T,>(method: string, path: string, body?: unknown): Promise<Res<T>> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
     const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
-    return { status: res.status, body: out };
+    return { status: res.status, body: out as T };
   };
   return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), put: (p, b) => call('PUT', p, b), del: (p) => call('DELETE', p) };
 }
@@ -82,8 +91,8 @@ describe('RCL-2 — voice-mint borrowed recall (granted owner vs non-owner)', ()
     const admin = client();
     await admin.post('/host/openwop-app/test/login', { email: `twv-admin-${Date.now()}-${n++}@acme.test`, tenantId });
     const member = client();
-    const m = await member.post('/host/openwop-app/test/login', { email: `twv-member-${Date.now()}-${n++}@acme.test`, tenantId });
-    const memberId = m.body.user.userId as string;
+    const m = await member.post<{ user: { userId: string } }>('/host/openwop-app/test/login', { email: `twv-member-${Date.now()}-${n++}@acme.test`, tenantId });
+    const memberId = m.body.user.userId;
     // A REGISTERED manifest agent (packs are not mounted in this harness) so
     // the voice mint composes its persona — the borrowed leg only composes for
     // a resolved, tenant-visible agent scaffold (`chatContext.ts`).
@@ -108,19 +117,21 @@ describe('RCL-2 — voice-mint borrowed recall (granted owner vs non-owner)', ()
     await setRealtimeConfig(tenantId, { provider: 'gemini-live', credentialRef: 'rt-twin-voice' });
 
     // OWNER opens the voice session scoped to the granted twin.
-    const mine = await member.post(`${RT}/session`, { agentId: rosterId });
+    const mine = await member.post<SessionView>(`${RT}/session`, { agentId: rosterId });
     expect(mine.status, JSON.stringify(mine.body)).toBe(200);
-    const myInstructions = (mine.body.realtime?.instructions ?? '') as string;
+    const myInstructions = mine.body.realtime?.instructions ?? '';
     expect(myInstructions, 'the owner note must reach the voice instructions').toContain('cc finance on vendor contracts');
     expect(myInstructions, 'borrowed content must be fenced in voice too').toContain('BEGIN UNTRUSTED CONTENT');
     // RCL-6 — the owner-naming preamble rides into the voice mint as well.
-    expect(myInstructions).toContain('shared memory');
+    expect(myInstructions).toMatch(/The items below were recalled from .+'s shared memory/);
 
     // NON-owner (the admin, same tenant, real authenticated caller): denied —
     // the instructions compose normally but carry none of the owner's corpus.
-    const theirs = await admin.post(`${RT}/session`, { agentId: rosterId });
+    const theirs = await admin.post<SessionView>(`${RT}/session`, { agentId: rosterId });
     expect(theirs.status, JSON.stringify(theirs.body)).toBe(200);
-    const theirInstructions = (theirs.body.realtime?.instructions ?? '') as string;
+    const theirInstructions = theirs.body.realtime?.instructions ?? '';
+    // Composed normally (the persona is there), so the absence below is a denial, not an empty mint.
+    expect(theirInstructions).toContain('PERSONA-MARKER-RCL2');
     expect(theirInstructions).not.toContain('cc finance on vendor contracts');
   });
 });

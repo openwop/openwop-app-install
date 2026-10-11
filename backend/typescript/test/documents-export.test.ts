@@ -4,7 +4,17 @@
  * lists, tables, code, blockquote, footnotes, images, hr), the tenant-checked
  * image resolver posture (host assets embed; external URLs degrade to linked
  * text, never fetched), the scratch-TTL storage split (no library row, no
- * renderedMediaToken stamp), and the widened route.
+ * renderedMediaToken stamp), and the widened route. P2–P4: EPUB / ODT / LaTeX
+ * structure, image posture and per-format content types; EPUB MathML via temml.
+ *
+ * Sabotage-witnessed (grade-tests w14, probes `w14g2-exp-*`): every renderer claim
+ * below goes red when its branch is broken (strike / footnote / image embed /
+ * external degrade / STORED mimetype / fence-aware split / footnote splice / ODT
+ * sizing / LaTeX escape + math passthrough / MathML + `properties="mathml"` /
+ * literal fallback for a malformed formula), and each route case reds when its
+ * RENDER_SPEC content type, the scratch-vs-library split, or the format guard
+ * changes. Byte determinism across TIME is NOT asserted here — see
+ * `documents-export-determinism.test.ts` (EPUB-DET-1).
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -14,7 +24,9 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
-import { renderMarkdownToDocx, probeImageDims } from '../src/features/documents/render.js';
+import {
+  renderMarkdownToDocx, probeImageDims, renderMarkdownToEpub, renderMarkdownToOdt, renderMarkdownToLatex, splitMarkdownChapters,
+} from '../src/features/documents/render.js';
 
 let BASE: string;
 let server: http.Server;
@@ -32,13 +44,19 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res { status: number; body: any }
+/** The response fields these cases read — typed, not `any` (w14 fixture honesty). */
+interface Body {
+  orgId?: string; documentId?: string; format?: string; sizeBytes?: number; url?: string;
+  renderedMediaToken?: string; currentVersion?: { renderedMediaToken?: string };
+  assets?: Array<{ name: string }>; error?: string; message?: string;
+}
+interface Res { status: number; body: Body }
 function client() {
   let cookie = '';
   const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) };
+    return { status: res.status, body: res.status === 204 ? {} : ((await res.json().catch(() => ({}))) as Body) };
   };
   return { get: (p: string) => call('GET', p), post: (p: string, b?: unknown) => call('POST', p, b) };
 }
@@ -55,7 +73,8 @@ async function ownerWithOrg() {
   expect(r.status).toBe(201);
   const org = await c.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status).toBe(201);
-  return { c, orgId: org.body.orgId as string };
+  expect(org.body.orgId, 'org create returned no orgId').toBeTruthy();
+  return { c, orgId: String(org.body.orgId) };
 }
 
 const RICH_MD = `# Title One
@@ -164,12 +183,18 @@ describe('documents render route — docx (ADR 0400 P1)', () => {
     expect(bytes.subarray(0, 2).toString('latin1')).toBe('PK');
 
     // The version pointer still belongs to PDF only.
+    // The claim is that a docx render stamps NO pointer — not merely a different one.
     const after = await c.get(D(orgId, `/documents/${id}`));
-    expect(after.body.currentVersion.renderedMediaToken).not.toBe(r.body.renderedMediaToken);
+    expect(after.status).toBe(200);
+    expect(after.body.currentVersion, 'document GET carries its current version').toBeTruthy();
+    expect(after.body.currentVersion?.renderedMediaToken).toBeUndefined();
 
     // No durable library row for the scratch export (PDF renders do create one).
+    // Status + array first: a failed list read would otherwise make the "no .docx row" check pass.
     const assets = await c.get(M(orgId, '/assets'));
-    const names = ((assets.body?.assets ?? []) as Array<{ name: string }>).map((a) => a.name);
+    expect(assets.status).toBe(200);
+    expect(Array.isArray(assets.body.assets)).toBe(true);
+    const names = (assets.body.assets ?? []).map((a) => a.name);
     expect(names.some((n) => n.endsWith('.docx'))).toBe(false);
   });
 
@@ -179,12 +204,13 @@ describe('documents render route — docx (ADR 0400 P1)', () => {
     await c.post(D(orgId, `/documents/${created.body.documentId}/versions`), { content: '# T' });
     const r = await c.post(D(orgId, `/documents/${created.body.documentId}/render`), { format: 'wpd' });
     expect(r.status).toBe(400);
+    expect(r.body.error).toBe('validation_error');
+    expect(String(r.body.message)).toContain('wpd');
   });
 });
 
 describe('renderMarkdownToEpub (ADR 0400 P2)', () => {
   it('produces a structurally valid EPUB3: STORED mimetype first, container, OPF, nav, chapters', async () => {
-    const { renderMarkdownToEpub } = await import('../src/features/documents/render.js');
     const buf = await renderMarkdownToEpub(RICH_MD, { title: 'My Book', identifier: 'urn:x:1', modifiedAt: '2026-07-17T00:00:00Z' });
     // mimetype must be the FIRST local file entry and uncompressed.
     expect(buf.subarray(0, 2).toString('latin1')).toBe('PK');
@@ -218,7 +244,6 @@ describe('renderMarkdownToEpub (ADR 0400 P2)', () => {
   // CONTENT stability, which is worth having) rather than renamed, so the gap
   // between a test's name and its reach stays on the record.
   it('is deterministic per version (same inputs ⇒ identical bytes) and embeds host images only', async () => {
-    const { renderMarkdownToEpub } = await import('../src/features/documents/render.js');
     const png = Buffer.from(PNG, 'base64');
     const opts = {
       title: 'D', identifier: 'urn:x:2', modifiedAt: '2026-07-17T00:00:00Z',
@@ -236,7 +261,6 @@ describe('renderMarkdownToEpub (ADR 0400 P2)', () => {
   });
 
   it('fence-aware chapter split never breaks inside a code fence', async () => {
-    const { splitMarkdownChapters } = await import('../src/features/documents/render.js');
     const chapters = splitMarkdownChapters('# A\n\n```\n# not a heading\n```\n\n## B\n\ntext');
     expect(chapters.map((c) => c.title)).toEqual(['A', 'B']);
     expect(chapters[0]!.markdown).toContain('# not a heading');
@@ -257,7 +281,6 @@ describe('documents render route — epub (ADR 0400 P2)', () => {
 
 describe('renderMarkdownToOdt (ADR 0400 P3)', () => {
   it('produces a structurally valid ODT: STORED mimetype first, manifest, styled content', async () => {
-    const { renderMarkdownToOdt } = await import('../src/features/documents/render.js');
     const buf = await renderMarkdownToOdt(RICH_MD, { title: 'Odt Doc' });
     expect(buf.subarray(30, 38).toString('latin1')).toBe('mimetype');
     expect(buf.readUInt16LE(8)).toBe(0); // STORED
@@ -279,7 +302,6 @@ describe('renderMarkdownToOdt (ADR 0400 P3)', () => {
   });
 
   it('embeds host images with sizing and degrades external URLs', async () => {
-    const { renderMarkdownToOdt } = await import('../src/features/documents/render.js');
     const png = Buffer.from(PNG, 'base64');
     const buf = await renderMarkdownToOdt('![in](/host/openwop-app/assets/tokZ)\n\n![out](https://x.com/y.png)\n', {
       resolveImage: async (src) => (src.includes('tokZ') ? { data: png, kind: 'png', width: 96, height: 48 } : null),
@@ -307,7 +329,6 @@ describe('documents render route — odt (ADR 0400 P3)', () => {
 
 describe('renderMarkdownToLatex (ADR 0400 P4)', () => {
   it('emits a standalone .tex with faithful structure and PRESERVED math', async () => {
-    const { renderMarkdownToLatex } = await import('../src/features/documents/render.js');
     const tex = await renderMarkdownToLatex(RICH_MD, { title: 'Paper & Co' });
     expect(tex).toContain('\\documentclass[11pt]{article}');
     expect(tex).toContain('\\begin{document}');
@@ -327,14 +348,12 @@ describe('renderMarkdownToLatex (ADR 0400 P4)', () => {
   });
 
   it('passes inline $…$ math through VERBATIM (the one faithful-math export)', async () => {
-    const { renderMarkdownToLatex } = await import('../src/features/documents/render.js');
     const tex = await renderMarkdownToLatex('The energy is $E = mc^2$ and $a_{n}$ terms.\n');
     expect(tex).toContain('$E = mc^2$'); // untouched — ^ and _ NOT escaped inside math
     expect(tex).toContain('$a_{n}$');
   });
 
   it('escapes LaTeX specials in body text but not $-delimited math', async () => {
-    const { renderMarkdownToLatex } = await import('../src/features/documents/render.js');
     const tex = await renderMarkdownToLatex('100% of a_b costs #5 & more; keep $x_1$ intact.\n');
     expect(tex).toContain('100\\% of a\\_b costs \\#5 \\& more');
     expect(tex).toContain('$x_1$');
@@ -356,7 +375,6 @@ describe('documents render route — latex (ADR 0400 P4)', () => {
 
 describe('EPUB MathML (ADR 0400 — temml)', () => {
   it('converts $$…$$ to MathML and flags the chapter with the mathml property', async () => {
-    const { renderMarkdownToEpub } = await import('../src/features/documents/render.js');
     const buf = await renderMarkdownToEpub('# Physics\n\nThe identity $$E = mc^2$$ is famous.\n', { title: 'M', modifiedAt: '2026-07-17T00:00:00Z' });
     const zip = await JSZip.loadAsync(buf);
     const ch = await zip.file('EPUB/chapter1.xhtml')!.async('string');
@@ -367,33 +385,17 @@ describe('EPUB MathML (ADR 0400 — temml)', () => {
     expect(opf).toMatch(/<item id="ch1"[^>]*properties="mathml"/);
   });
 
-  // EPUB-DET-1 — NOTE this "deterministic" claim is WEAKER than its name. Both
-  // generations happen back-to-back, so they almost always land in the same
-  // second, and JSZip's per-entry `new Date()` stamp cannot differ. MEASURED
-  // 2026-09-01: deleting BOTH `pinZipTimestamps` calls leaves this GREEN.
-  // The property is really asserted in `documents-export-determinism.test.ts`,
-  // which moves the clock a day between the two calls. Kept as-is (it covers
-  // CONTENT stability, which is worth having) rather than renamed, so the gap
-  // between a test's name and its reach stays on the record.
-  it('is deterministic (same version ⇒ identical bytes) with math present', async () => {
-    const { renderMarkdownToEpub } = await import('../src/features/documents/render.js');
-    const md = '# T\n\n$$\\frac{a}{b}$$ and $$x_n$$.\n';
-    const opts = { title: 'D', identifier: 'urn:x:9', modifiedAt: '2026-07-17T00:00:00Z' };
-    const a = await renderMarkdownToEpub(md, opts);
-    const b = await renderMarkdownToEpub(md, opts);
-    expect(Buffer.compare(a, b)).toBe(0);
-  });
-
   it('single-$ money is NOT math, and a malformed formula falls back to literal text', async () => {
-    const { renderMarkdownToEpub } = await import('../src/features/documents/render.js');
     const zip = await JSZip.loadAsync(await renderMarkdownToEpub('Costs $5 and $10 total. Broken $$\\frac{$$ here.\n', { modifiedAt: '2026-07-17T00:00:00Z' }));
     const ch = await zip.file('EPUB/chapter1.xhtml')!.async('string');
     expect(ch).toContain('$5 and $10'); // money untouched — single $ is never math
     expect(ch).not.toContain('<math'); // no valid formula in this doc
+    // The fallback half of the claim: the malformed formula survives as LITERAL text
+    // (w14: without this line, a fallback that returned '' stayed green).
+    expect(ch).toContain('$$\\frac{$$');
   });
 
   it('leaves $$ inside a code span/fence untouched (no math in code)', async () => {
-    const { renderMarkdownToEpub } = await import('../src/features/documents/render.js');
     const zip = await JSZip.loadAsync(await renderMarkdownToEpub('Inline `$$x$$` and\n\n```\n$$y$$\n```\n', { modifiedAt: '2026-07-17T00:00:00Z' }));
     const ch = await zip.file('EPUB/chapter1.xhtml')!.async('string');
     expect(ch).not.toContain('<math');

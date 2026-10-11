@@ -10,7 +10,12 @@
  * `POST /runs` (the real scheduler + `executeRun` + the real `ctx.features.assistant`
  * surface), forks the completed run in replay mode from the start, and counts the
  * `assistant.briefing` EMITS: exactly ONE. A fork that re-executed the node would emit a
- * second (sabotage-witnessed: drop both classification legs and this goes red).
+ * second (sabotage-witnessed: drop both classification legs and this goes red;
+ * /grade-tests w11 re-witnessed it by forcing `isSideEffectingNode` false for
+ * compose-briefing, and by dropping the surface's `notify` emit).
+ *
+ * Honest ceiling: `settle` polls the run row — the executor exposes no terminal hook
+ * this test can await.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -69,26 +74,22 @@ async function post(path: string, body: unknown): Promise<{ status: number; body
 const TERMINAL = new Set(['completed', 'failed', 'cancelled']);
 async function settle(runId: string): Promise<RunRecord | null> {
   let run: RunRecord | null = null;
-  for (let i = 0; i < 400; i++) {
+  await vi.waitFor(async () => {
     run = await storage.getRun(runId);
-    if (run && TERMINAL.has(run.status)) return run;
-    await new Promise((r) => setTimeout(r, 25));
-  }
+    if (!run || !TERMINAL.has(run.status)) throw new Error(`run ${runId} not terminal yet`);
+  }, { timeout: 10_000, interval: 25 });
   return run;
 }
 
-async function briefings(): Promise<number> {
-  return emits.briefing;
-}
-
 async function briefNodeOutputs(runId: string): Promise<unknown> {
-  const ev = (await storage.listEvents(runId)) as unknown as Array<{ type: string; payload?: { typeId?: string; outputs?: unknown; nodeId?: string } ; nodeId?: string }>;
-  return ev.find((e) => e.type === 'node.completed' && String(e.nodeId ?? '').endsWith('_brief'))?.payload?.outputs;
+  const ev = await storage.listEvents(runId);
+  const payload = ev.find((e) => e.type === 'node.completed' && String(e.nodeId ?? '').endsWith('_brief'))?.payload;
+  return payload && typeof payload === 'object' && 'outputs' in payload ? payload.outputs : undefined;
 }
 
 describe('assistant.loop.morning-briefing — REAL executor + replay fork', () => {
   it('runs to completion and notifies once; a replay fork from the start does NOT notify again', async () => {
-    const before = await briefings();
+    const before = emits.briefing;
     const start = await post('/runs', { workflowId: 'assistant.loop.morning-briefing', inputs: {} });
     expect(start.status, JSON.stringify(start.body)).toBe(201);
     const wireRunId = start.body.runId as string;
@@ -98,7 +99,7 @@ describe('assistant.loop.morning-briefing — REAL executor + replay fork', () =
     const runId = decoded.runId;
     const run = await settle(runId);
     expect(run?.status, `run did not complete: ${JSON.stringify(run)}`).toBe('completed');
-    expect(await briefings(), 'the loop\'s only product is the notification').toBe(before + 1);
+    expect(emits.briefing, 'the loop\'s only product is the notification').toBe(before + 1);
 
     const fork = await post(`/runs/${encodeURIComponent(wireRunId)}:fork`, { fromSeq: 0, mode: 'replay' });
     expect(fork.status, JSON.stringify(fork.body)).toBe(201);
@@ -108,9 +109,12 @@ describe('assistant.loop.morning-briefing — REAL executor + replay fork', () =
     const forkRunId = forkDecoded.runId;
     const forked = await settle(forkRunId);
     expect(forked?.status, `fork did not complete: ${JSON.stringify(forked)}`).toBe('completed');
-    expect(await briefings(), 'a replay fork re-briefed the principal').toBe(before + 1);
+    expect(emits.briefing, 'a replay fork re-briefed the principal').toBe(before + 1);
     // …and the fork's brief IS the source's recorded brief (served, not recomposed: a
-    // recomposed brief carries a fresh `generatedAt`).
-    expect(await briefNodeOutputs(forkRunId)).toEqual(await briefNodeOutputs(runId));
+    // recomposed brief carries a fresh `generatedAt`). Assert the source side is REAL
+    // first — two `undefined`s (no matching event) would otherwise compare equal.
+    const sourceBrief = await briefNodeOutputs(runId);
+    expect(sourceBrief, 'the source run must record the brief node\'s output').toMatchObject({ brief: { generatedAt: expect.any(String) } });
+    expect(await briefNodeOutputs(forkRunId)).toEqual(sourceBrief);
   });
 });

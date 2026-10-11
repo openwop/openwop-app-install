@@ -1,5 +1,8 @@
 /**
  * UX_UPGRADE-site R2-G10 — the `faq` + `quotes` public sections.
+ * Sabotage that turns it red: render faq items outside <details>/<summary>;
+ * drop the `name || role` byline guard; drop either empty-items guard; render
+ * the quote outside <blockquote>.
  *
  * Pinned behaviours: faq renders native <details>/<summary> (a real disclosure
  * per pair — keyboard/SR for free); quotes renders <figure>/<blockquote> with a
@@ -30,8 +33,10 @@ describe('faq section', () => {
     expect(screen.getByRole('heading', { name: 'FAQ' })).toBeTruthy();
     const groups = screen.getAllByRole('group'); // <details> maps to role=group
     expect(groups).toHaveLength(2);
-    expect(within(groups[0]!).getByText('How is pricing calculated?')).toBeTruthy();
-    expect(within(groups[0]!).getByText('Per workspace.')).toBeTruthy();
+    // The question is the disclosure's <summary> (its toggle); the answer is the body.
+    const summary = groups[0]!.querySelector('summary');
+    expect(summary?.textContent).toBe('How is pricing calculated?');
+    expect(within(groups[0]!).getByText('Per workspace.').closest('summary')).toBeNull();
   });
 
   it('renders nothing for an item-less faq (emptied overlay degrades silently)', () => {
@@ -53,9 +58,17 @@ describe('quotes section', () => {
     expect(screen.getByRole('heading', { name: 'Loved by teams' })).toBeTruthy();
     const figures = container.querySelectorAll('figure');
     expect(figures).toHaveLength(2);
+    expect(figures[0]!.querySelector('blockquote')?.textContent).toBe('It shipped our launch.');
+    expect(figures[1]!.querySelector('blockquote')?.textContent).toBe('Anonymous praise.');
     expect(within(figures[0]! as HTMLElement).getByText('Ana')).toBeTruthy();
     expect(within(figures[0]! as HTMLElement).getByText('CTO, Acme')).toBeTruthy();
     // The unattributed quote has NO figcaption at all.
     expect(figures[1]!.querySelector('figcaption')).toBeNull();
+  });
+
+  it('renders nothing for an item-less quotes section (emptied overlay degrades silently)', () => {
+    const { container } = renderSection({ sectionId: 'q2', type: 'quotes', data: { heading: 'Loved by teams', items: [{ quote: '' }] } });
+    expect(container.querySelector('figure')).toBeNull();
+    expect(screen.queryByRole('heading', { name: 'Loved by teams' })).toBeNull();
   });
 });

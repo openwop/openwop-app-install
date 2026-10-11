@@ -13,12 +13,15 @@
  * have nothing on record"), so fencing it would disarm the one thing it is for. A reader
  * trusting that docblock would have "fixed" it into uselessness, which is why the claim is
  * pinned here rather than only corrected in prose.
+ *
+ * Sabotage witnesses (w12): softening "FAILED read" reds case 1; a re-typed copy in
+ * agentDispatch reds case 2; wrapping the notice in `fenceUntrustedItems` reds case 3.
  */
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { degradationNotice } from '../src/host/agentKnowledgeComposition.js';
+import { composeBorrowedRecallContext, degradationNotice } from '../src/host/agentKnowledgeComposition.js';
 
 const SRC = join(dirname(fileURLToPath(import.meta.url)), '..', 'src');
 const DISPATCH = readFileSync(join(SRC, 'host', 'agentDispatch.ts'), 'utf8');
@@ -44,9 +47,18 @@ describe('RCLWF-4 — one owner for the degradation notice', () => {
     ).toBe(false);
   });
 
-  it('RCLWF-3 — the notice is NOT fenced, and the docblock no longer claims it is', () => {
-    // Behaviour: at the borrowed-recall site the notice is prepended OUTSIDE the fenced block.
-    expect(COMPOSITION).toMatch(/notice \? `\$\{notice\}\\n\\n\$\{fenced\}` : fenced/);
+  it('RCLWF-3 — the notice is NOT fenced, and the docblock no longer claims it is', async () => {
+    // Behaviour, not spelling: a PARTIAL fault composes both the notice and fenced chunks, and
+    // the notice must sit BEFORE (outside) the BEGIN marker. Fencing it reds this.
+    const { block } = await composeBorrowedRecallContext(async (_q, onErr) => {
+      onErr?.('kb');
+      return [{ content: 'owner note', kind: 'memory' as const }];
+    }, 'q');
+    const begin = block.indexOf('BEGIN UNTRUSTED CONTENT');
+    const notice = block.indexOf('this turn is DEGRADED');
+    expect(begin, 'the partial case must still fence its chunks').toBeGreaterThan(-1);
+    expect(notice, 'the notice must be present').toBeGreaterThan(-1);
+    expect(notice, 'the notice must sit OUTSIDE (before) the fence').toBeLessThan(begin);
     // Prose: the claim must not be ASSERTED. It may still appear QUOTED inside a correction
     // note — this repo's convention is "correct, don't rewrite", so the retired sentence is
     // deliberately preserved in the record. A bare `includes` here fired on my own correction

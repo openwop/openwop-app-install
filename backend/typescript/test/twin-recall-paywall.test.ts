@@ -5,6 +5,9 @@
  * served every twin route. The catalog test (`bundle-ids-are-toggle-ids`) proves
  * membership; this proves ENFORCEMENT through the HTTP boundary, with a positive
  * control (the same tenant is served once it owns the bundle).
+ *
+ * Sabotage witness (w12): renaming `twin-recall` back to `twin` in `distributions/bundles.json`
+ * reds both cases.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -14,6 +17,7 @@ import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { isSellableBundleFeature } from '../src/host/featureBundles.js';
 import { __resetBilling, processStripeEvent } from '../src/features/billing/billingService.js';
+import { detailOf, errorCodeOf } from './helpers/errorEnvelope.js';
 
 let server: http.Server;
 let BASE: string;
@@ -58,13 +62,20 @@ describe('ADR 0820 §1 — twin-recall is sold by the Agents bundle', () => {
 
   it('a free-plan tenant is refused with the plan 403, then served once Agents is owned', async () => {
     expect(cookie, 'test login must issue a session').not.toBe('');
-    expect((await grants()).status).toBe(403);
+    const refused = await grants();
+    expect(refused.status).toBe(403);
+    // The PLAN refusal for THIS feature (billing's entitlement guard), not some other 403.
+    const refusedBody: unknown = await refused.json();
+    expect(errorCodeOf(refusedBody)).toBe('forbidden');
+    expect(detailOf(refusedBody, 'feature')).toBe('twin-recall');
     await processStripeEvent('t-twin', {
       id: 'evt_twin_1', type: 'customer.subscription.created',
       data: { object: { id: 'sub_twin', status: 'active', metadata: { tenantId: 't-twin', bundleId: 'agents' }, items: { data: [{ price: { id: 'price_agents' } }] } } },
     });
     const served = await grants();
-    expect(served.status).not.toBe(403);
-    expect(served.status).toBeLessThan(500);
+    // Served means the route ran: 200 with the caller's (empty) grant list — a 404 or any
+    // other 4xx is not "served".
+    expect(served.status).toBe(200);
+    expect(await served.json()).toEqual({ grants: [] });
   });
 });

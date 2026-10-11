@@ -32,6 +32,7 @@ import { purgeTenantVectors } from './vector/vectorTenantPurge.js';
 import { clearTenantSecretCache } from '../byok/secretResolver.js';
 import { __runKvAgeOutOnce } from './kvAgeOut.js';
 import { reconcileTenantIndexesOnce } from './tenantIndexAdoption.js';
+import { runStorageGrowthGaugeOnce } from './storageGrowthGauge.js';
 import { eraseTenantOwnedUsage } from '../providers/managedProvider.js';
 import { getRetentionHold } from './retentionHold.js';
 
@@ -479,6 +480,9 @@ export function startRetentionSweepDaemon(deps: RetentionSweepDeps): RetentionSw
       // once a pass here has verified it.
       await reconcileTenantIndexesOnce(deps.storage).catch((err) =>
         log.warn('tenant index adoption tick error', { error: err instanceof Error ? err.message : String(err) }));
+      // ADR 0871 — storage growth, once per UTC hour across instances (read-only).
+      await runStorageGrowthGaugeOnce(deps.storage).catch((err) =>
+        log.warn('storage growth gauge tick error', { error: err instanceof Error ? err.message : String(err) }));
       if (process.env.OPENWOP_RETENTION_SWEEP_ENABLED !== 'true') return;
       await processRetentionSweep(deps);
       const pruneBefore = new Date(Date.now() - CLAIM_PRUNE_AGE_MS).toISOString();

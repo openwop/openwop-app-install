@@ -10,6 +10,14 @@
  *     ADR 0024 Phase D `config.connection` annotation; enable/disable
  *     registers/disables the RFC 0052 job with the enabling principal's
  *     `actingUserId` in job metadata (D2 actor discipline).
+ *
+ * What breaks it (sabotage-witnessed, /grade-tests w11): the status filter or the
+ * delete in the commitment store, a backfill that disturbs rows, the ingest cap /
+ * taint stamp / identity hash / malformed-item skip / drive URL, the briefing's
+ * at-risk window or its untrusted-source note, and the loop job's connection
+ * opt-in, roster attribution and unknown-loop 404. (The "morning-briefing is
+ * notify-on" case was cut as redundant with `assistant-chain-backed-workflows.test.ts`
+ * 'the briefing loop keeps notify:true …' — the same pack edit reds both.)
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -32,6 +40,7 @@ import { getChainBackedWorkflow } from '../src/host/chainBackedWorkflows.js';
 import { getJob, resetScheduling } from '../src/host/schedulingService.js';
 import { getRosterEntry } from '../src/host/rosterService.js';
 import { findAssistantAgent } from '../src/features/assistant/capability.js';
+import { composeBriefing } from '../src/features/assistant/briefing.js';
 
 let BASE: string;
 const TOKEN = 'dev-token';
@@ -90,28 +99,34 @@ describe('commitment secondary indexes (ADR 0029)', () => {
   });
 
   it('backfill is idempotent — double-running changes no indexed read', async () => {
-    const before = await listCommitments('t-ix-1');
+    // Self-contained (it used to read the previous case's `t-ix-1` rows, so it was
+    // red when run alone or shuffled). The reset also drops the durable marker, so
+    // the first backfill below really scans rather than skipping.
+    await __resetAssistantStore();
+    await upsertCommitmentBySource('t-ix-bf', { owner: { kind: 'self' }, description: 'backfilled', source: srcRef('bf') });
+    const before = await listCommitments('t-ix-bf');
+    expect(before).toHaveLength(1);
     await backfillCommitmentIndexes();
     await backfillCommitmentIndexes();
-    expect(await listCommitments('t-ix-1')).toEqual(before);
-    expect(before.length).toBe(1);
+    expect(await listCommitments('t-ix-bf')).toEqual(before);
   });
 });
 
 describe('ingest-commitments pack node (loops 1/6 perception leg)', () => {
   // Typed via the ambient pack declaration (test/feature-packs.d.ts).
   let nodes: (typeof import('../../../packs/feature.assistant.nodes/index.mjs'))['nodes'];
-  const TENANT = 't-ingest';
+  // One tenant PER CASE: the calendar case counts every stored row, so a shared
+  // tenant made it red whenever the drive case ran first (--sequence.shuffle).
 
   beforeAll(async () => {
     nodes = (await import('../../../packs/feature.assistant.nodes/index.mjs')).nodes;
   });
 
-  function ctxFor(inputs: Record<string, unknown>, config: Record<string, unknown>): unknown {
+  function ctxFor(tenantId: string, inputs: Record<string, unknown>, config: Record<string, unknown>): unknown {
     return {
       inputs,
       config,
-      features: { assistant: buildAssistantSurface({ tenantId: TENANT }) },
+      features: { assistant: buildAssistantSurface({ tenantId }) },
     };
   }
 
@@ -124,15 +139,16 @@ describe('ingest-commitments pack node (loops 1/6 perception leg)', () => {
   };
 
   it('ingests a calendar listing idempotently, capped, with untrusted taint stamped', async () => {
+    const TENANT = 't-ingest-cal';
     const run1 = await nodes['feature.assistant.nodes.ingest-commitments']!(
-      ctxFor({ body: calendarBody }, { sourceKind: 'calendar', maxItemsPerTick: 2 }),
+      ctxFor(TENANT, { body: calendarBody }, { sourceKind: 'calendar', maxItemsPerTick: 2 }),
     );
     expect(run1.status).toBe('success');
     expect(run1.outputs).toMatchObject({ created: 2, updated: 0, capped: true, sourceKind: 'calendar' });
 
     // Re-run with the same listing: updates in place, never duplicates.
     const run2 = await nodes['feature.assistant.nodes.ingest-commitments']!(
-      ctxFor({ body: calendarBody }, { sourceKind: 'calendar', maxItemsPerTick: 2 }),
+      ctxFor(TENANT, { body: calendarBody }, { sourceKind: 'calendar', maxItemsPerTick: 2 }),
     );
     expect(run2.outputs).toMatchObject({ created: 0, updated: 2 });
 
@@ -148,8 +164,9 @@ describe('ingest-commitments pack node (loops 1/6 perception leg)', () => {
 
   it('ingests a drive listing as review commitments', async () => {
     const driveBody = { files: [{ id: 'f-1', name: 'Q3 plan', modifiedTime: '2026-06-10T00:00:00Z', webViewLink: 'https://drive.google.com/f-1' }] };
+    const TENANT = 't-ingest-drive';
     const run = await nodes['feature.assistant.nodes.ingest-commitments']!(
-      ctxFor({ body: driveBody }, { sourceKind: 'drive', maxItemsPerTick: 10 }),
+      ctxFor(TENANT, { body: driveBody }, { sourceKind: 'drive', maxItemsPerTick: 10 }),
     );
     expect(run.outputs).toMatchObject({ created: 1, sourceKind: 'drive' });
     const stored = await listCommitments(TENANT);
@@ -161,7 +178,7 @@ describe('ingest-commitments pack node (loops 1/6 perception leg)', () => {
 
   it('skips malformed items rather than failing the tick', async () => {
     const run = await nodes['feature.assistant.nodes.ingest-commitments']!(
-      ctxFor({ body: { items: [{ id: '', summary: 'no id' }, { id: 'x' /* no summary */ }] } }, { sourceKind: 'calendar' }),
+      ctxFor('t-ingest-bad', { body: { items: [{ id: '', summary: 'no id' }, { id: 'x' /* no summary */ }] } }, { sourceKind: 'calendar' }),
     );
     expect(run.outputs).toMatchObject({ created: 0, skipped: 2 });
   });
@@ -187,7 +204,6 @@ describe('briefing composer (ADR 0023 §12 T3 — loop 5)', () => {
       dueAt: new Date(Date.now() + 30 * 86_400_000).toISOString(),
     });
 
-    const { composeBriefing } = await import('../src/features/assistant/briefing.js');
     const brief = await composeBriefing(TENANT);
     expect(brief.topCommitments.length).toBe(2);
     expect(brief.atRisk.map((i) => i.description)).toEqual(['Ship the Q3 plan']);
@@ -277,19 +293,19 @@ describe('loop routes (RFC 0052 activation surface)', () => {
   });
 
   it('serves the brief on one batched route (T3)', async () => {
+    // Seed the caller's tenant so a brief composed for the WRONG tenant (an empty one)
+    // cannot match.
+    await upsertCommitmentBySource('default', { owner: { kind: 'self' }, description: 'Brief route item', source: srcRef('brief-route') });
     const res = await jf<{ brief: { headline: string; topCommitments: unknown[]; awaitingApprovalCount: number } }>(
       '/host/openwop-app/assistant/briefing',
     );
     expect(res.status).toBe(200);
-    expect(typeof res.body.brief.headline).toBe('string');
-    expect(Array.isArray(res.body.brief.topCommitments)).toBe(true);
-    expect(typeof res.body.brief.awaitingApprovalCount).toBe('number');
-  });
-
-  it('the morning-briefing loop workflow is registered notify-on', () => {
-    const def = resolveWorkflow('assistant.loop.morning-briefing');
-    expect(def).toBeDefined();
-    expect(def!.nodes[0]?.typeId).toBe('feature.assistant.nodes.compose-briefing');
-    expect(def!.nodes[0]?.config?.notify).toBe(true);
+    // The route serves THE composed brief for the caller's tenant (API-key path →
+    // 'default'), not merely something brief-shaped.
+    const direct = await composeBriefing('default');
+    expect(res.body.brief.headline).toBe(direct.headline);
+    expect(direct.topCommitments.map((c) => c.description)).toContain('Brief route item');
+    expect(res.body.brief.topCommitments).toHaveLength(direct.topCommitments.length);
+    expect(res.body.brief.awaitingApprovalCount).toBe(direct.awaitingApprovalCount);
   });
 });

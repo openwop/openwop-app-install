@@ -10,6 +10,11 @@
  * shared-section lane safe. It is not: `createSharedSection`/`updateSharedSection` never
  * call `validateSection`, so the guard had never run there on EITHER axis — and
  * `resolveSharedRefs` serves one poisoned shared section into every referencing page.
+ *
+ * Sabotage-witnessed (grade-tests wave 16, w16g4-ta-*): removing the base-axis guard reds
+ * leg 1; the overlay-axis guard reds legs 2–6; each shared-section lane's guard (create/update
+ * × base/overlay) reds legs 3/4; dropping the page tenant from createPage / updatePage reds
+ * legs 5 / 6; making the rule stricter than "equal-or-absent" reds the parity assertions.
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
@@ -93,9 +98,9 @@ describe('ADR 0668 D1 — the tenant guard covers both axes', () => {
       tenantId: MINE, orgId: ORG, title: 'P2', createdBy: 'u1',
       sections: [{ type: 'entityList', data: { tenantId: MINE, typeName: 'product', titleField: 'name' }, localizations: { es: { titleField: 'nombre' } } }],
     });
-    const sec = page.sections[0] as never;
-    expect((resolveSection(sec, 'en', 'en') as Record<string, unknown>).tenantId).toBe(MINE);
-    expect((resolveSection(sec, 'es', 'en') as Record<string, unknown>).tenantId,
+    const sec = page.sections[0]!;
+    expect(resolveSection(sec, 'en', 'en').tenantId).toBe(MINE);
+    expect(resolveSection(sec, 'es', 'en').tenantId,
       'the es reader gets THIS workspace, not another').toBe(MINE);
   });
 

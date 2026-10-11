@@ -4,9 +4,15 @@
  * so it must be a decision, never a keystroke pause: the page says so up front,
  * autosave is off, Save asks first, and the admin-only schedule controls are not
  * offered. An admin keeps autosave (their save re-pins the schedule).
+ *
+ * Sabotage-witnessed (/grade-tests w17): dropping the warning Notice, the
+ * `knownNotAdmin` hide on "Cancel schedule", the scheduled-draft autosave guard,
+ * the confirm in `save`, or its `return false` each turn a non-admin case red;
+ * making any of those apply to an admin turns the admin case red. Time is fake:
+ * the "no autosave" window is advanced, not slept.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { render, screen, within, cleanup, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, within, cleanup, fireEvent, waitFor, act } from '@testing-library/react';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import type { ReactNode } from 'react';
 import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
@@ -28,7 +34,7 @@ const ui = vi.hoisted(() => {
   };
   return {
     page,
-    confirm: vi.fn(async () => true),
+    confirm: vi.fn(async (_opts: { title: string; body?: string; confirmLabel?: string }) => true),
     listVersions: vi.fn(async (): Promise<unknown[]> => []),
     rewriteSection: vi.fn(async (_org: string, input: { data: Record<string, unknown> }) => ({ ...input.data, text: 'Short body.' })),
     savePage: vi.fn(async (_org: string, _id: string, patch: Record<string, unknown>) => {
@@ -79,7 +85,7 @@ vi.mock('../../site/siteConfigClient.js', () => ({ getSiteConfig: vi.fn(async ()
 
 import { CmsPage } from '../CmsPage.js';
 
-afterEach(() => { cleanup(); ui.savePage.mockClear(); ui.confirm.mockClear(); ui.scopes = ['workspace:read', 'workspace:write']; });
+afterEach(() => { vi.useRealTimers(); cleanup(); ui.savePage.mockClear(); ui.confirm.mockClear(); ui.scopes = ['workspace:read', 'workspace:write']; });
 
 function renderDetail(): void {
   render(
@@ -105,15 +111,20 @@ describe('a scheduled draft, edited by a non-admin (ADR 0836 D3)', () => {
   });
 
   it('does not autosave; Save asks before cancelling the launch', async () => {
+    // Fake time that still advances, so Testing Library's polling keeps working;
+    // the autosave window (AUTOSAVE_MS = 1500) is then jumped, not slept.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
     renderDetail();
     await screen.findByText(/Saving changes cancels the schedule/);
     await edit();
-    await new Promise((r) => setTimeout(r, 2000));
+    await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
     expect(ui.savePage).not.toHaveBeenCalled();
     ui.confirm.mockResolvedValueOnce(false);
     fireEvent.click(screen.getByRole('button', { name: /^save$/i }));
     await waitFor(() => expect(ui.confirm).toHaveBeenCalledTimes(1));
-    expect((ui.confirm.mock.calls[0] as unknown as [{ title: string }])[0].title).toMatch(/cancel the scheduled publish/i);
+    expect(ui.confirm.mock.calls[0]![0].title).toMatch(/cancel the scheduled publish/i);
+    // Drain: a declined confirm must not reach savePage once save() resumes.
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
     expect(ui.savePage).not.toHaveBeenCalled();
   });
 });

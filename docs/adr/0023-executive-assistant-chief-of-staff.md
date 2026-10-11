@@ -597,6 +597,8 @@ wire touchpoint rides Accepted RFCs (0046/0047/0051/0052/0064/0079/0081/0093).
 | 7 Loop 7 — comms triage/drafting (draft-only) | drafter agent + `enqueue-action` shipped; send path needs ADR 0024 C | partial | ⏳ deploy-gated (write scopes) |
 | 8 Loop 8 — stakeholder cadence | `StakeholderProfile` + `upsertStakeholder` shipped; scheduled scan is a scheduler job | partial | ⏳ deploy-gated |
 
+> **CORRECTED 2026-10-09 (/grade-tests wave 11) — §12 T8 row:** the priority-profile eval no longer lives in `assistant-evals-health.test.ts` (now 3 cases, not 4). It duplicated the prioritization cases in `assistant-loops.test.ts`, which assert the same profile orderings with exact buckets and went red under the same sabotage.
+
 > **What "deploy-gated" means:** the orchestration *surface* every remaining loop
 > composes — the memory graph, the node/agent packs, the prioritization layer, the
 > Connections broker, and the user/agent board — is built and tested. Each remaining

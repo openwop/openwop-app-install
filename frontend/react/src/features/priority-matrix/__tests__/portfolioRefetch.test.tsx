@@ -6,9 +6,12 @@
  * 429-wall class). The loader now depends only on the stable inputs
  * (topN / normalize / federated / the destructured onError), so typing in the
  * filter fires ZERO additional portfolio reads.
+ *
+ * Sabotage-witnessed (w15g4-portfolio-deps): restoring `props` to `load`'s deps
+ * reds the call count.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, cleanup, fireEvent, waitFor, act } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import type { PriorityList } from '../priorityMatrixClient.js';
 
@@ -17,7 +20,7 @@ const mkList = (n: number): PriorityList => ({
   criteriaSet: { aggregation: 'weighted-sum', criteria: [{ id: 'impact', name: 'Impact', weight: 5, direction: 'benefit' }] },
   votingMode: 'single', voteAggregation: 'mean',
   createdBy: 'u1', createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-07-01T00:00:00.000Z',
-} as PriorityList);
+});
 
 const { listPortfolio } = vi.hoisted(() => ({
   listPortfolio: vi.fn(async () => ({ items: [], lists: [], normalize: 'none' as const })),
@@ -50,8 +53,12 @@ describe('PMX-7 — typing in the list filter must not refire GET /portfolio', (
     for (const q of ['g', 'gr', 'gro', 'grow', 'growt', 'growth']) {
       fireEvent.change(search, { target: { value: q } });
     }
-    // Let any (wrong) effect re-fires flush.
-    await new Promise((r) => setTimeout(r, 50));
+    // A (wrong) re-fire is synchronous inside fireEvent's act (`load()` calls
+    // listPortfolio before its first await); drain anyway, no fixed sleep.
+    await act(async () => { for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r)); });
+    // POSITIVE ANCHOR: the keystrokes reached the page (the "growth" filter
+    // matches no list) — an inert input would make "one call" trivially true.
+    expect(screen.queryByText('List 1')).toBeNull();
     expect(listPortfolio, 'a keystroke in the filter must not cost a network read').toHaveBeenCalledTimes(1);
   });
 });

@@ -8,6 +8,11 @@
  *
  * Route-level (cookie sessions through `createApp`), because authority is only
  * observable at the HTTP boundary.
+ *
+ * Sabotage (w16 probes): dropping the `status !== 'draft'` admin re-check in the
+ * delete route's `authorize` reds case 2; making it unconditional reds case 1;
+ * skipping `pages.delete` reds cases 1 and 3 (both read the page back); adding an
+ * approval-gate refusal to the delete reds case 3.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -32,7 +37,14 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T }
+interface Body {
+  user?: { userId: string };
+  orgId?: string;
+  pageId?: string;
+  error?: string;
+  details?: { requiredScope?: string };
+}
+interface Res { status: number; body: Body | undefined }
 function client() {
   let cookie = '';
   const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
@@ -42,7 +54,7 @@ function client() {
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    const out = res.status === 204 ? undefined : (await res.json().catch(() => undefined)) as Body | undefined; // wire JSON
     return { status: res.status, body: out };
   };
   return {
@@ -57,7 +69,7 @@ let n = 0;
 async function signup(c: Client, tenantId: string): Promise<{ userId: string }> {
   const r = await c.post('/host/openwop-app/test/login', { email: `del-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  return r.body.user;
+  return r.body!.user!;
 }
 const u = (orgId: string, s = ''): string => `/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}${s}`;
 
@@ -69,7 +81,7 @@ async function ownerWithEditor(): Promise<{ owner: Client; editor: Client; orgId
   const editorUser = await signup(editor, tenantId);
   const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
-  const orgId = org.body.orgId as string;
+  const orgId = org.body!.orgId!;
   const add = await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'E', subject: editorUser.userId, roles: ['editor'] });
   expect(add.status, JSON.stringify(add.body)).toBe(201);
   return { owner, editor, orgId };
@@ -78,8 +90,9 @@ async function ownerWithEditor(): Promise<{ owner: Client; editor: Client; orgId
 async function page(c: Client, orgId: string, title: string, publish: boolean): Promise<string> {
   const r = await c.post(u(orgId, '/pages'), { title, sections: [{ type: 'hero', data: { heading: title } }] });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  if (publish) expect((await c.post(u(orgId, `/pages/${encodeURIComponent(r.body.pageId)}/publish`))).status).toBe(200);
-  return r.body.pageId as string;
+  const pageId = r.body!.pageId!;
+  if (publish) expect((await c.post(u(orgId, `/pages/${encodeURIComponent(pageId)}/publish`))).status).toBe(200);
+  return pageId;
 }
 
 describe('CMS editor delete — live pages are admin tier (ADR 0748 correction)', () => {
@@ -87,6 +100,7 @@ describe('CMS editor delete — live pages are admin tier (ADR 0748 correction)'
     const { owner, editor, orgId } = await ownerWithEditor();
     const id = await page(owner, orgId, 'Draft one', false);
     expect((await editor.del(u(orgId, `/pages/${encodeURIComponent(id)}`))).status).toBe(204);
+    expect((await owner.get(u(orgId, `/pages/${encodeURIComponent(id)}`))).status).toBe(404);
   });
 
   it('an editor is refused a PUBLISHED page (403 host:members:manage) and the page survives', async () => {
@@ -94,7 +108,7 @@ describe('CMS editor delete — live pages are admin tier (ADR 0748 correction)'
     const id = await page(owner, orgId, 'Live one', true);
     const r = await editor.del(u(orgId, `/pages/${encodeURIComponent(id)}`));
     expect(r.status, JSON.stringify(r.body)).toBe(403);
-    expect(r.body.details?.requiredScope).toBe('host:members:manage');
+    expect(r.body?.details?.requiredScope).toBe('host:members:manage');
     expect((await owner.get(u(orgId, `/pages/${encodeURIComponent(id)}`))).status).toBe(200);
   });
 

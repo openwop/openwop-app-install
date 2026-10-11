@@ -3,6 +3,11 @@
  * translated (`sourceDigest`, server-owned), so a base edit makes it OUTDATED — the
  * Contentful/Sanity/Webflow capability this CMS lacked: an editor who rewrote the
  * English hero had no way to learn the Spanish one now said something else.
+ *
+ * Sabotage (grade-tests w16): letting the stamp's carry read the CLIENT's digest
+ * (`s.sourceDigest`) reds the SERVER-owned case; digesting every base key instead
+ * of the overlay's keys reds the review-M2 leg (an untouched `subheading` edit);
+ * removing the confirm-source gate refusal reds the gated-409 leg.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -37,28 +42,37 @@ const setToggle = async (id: string, status: 'on' | 'off'): Promise<void> => {
 };
 const setGate = (status: 'on' | 'off'): Promise<void> => setToggle('cms-approval-gate', status);
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
-interface Res<T = any> { status: number; headers: Headers; body: T }
+/** The page / status / error-envelope fields these cases read. */
+interface Body {
+  pageId: string;
+  orgId: string;
+  version: number;
+  sharedSectionId: string;
+  sections: Array<{ sectionId: string; localizations?: Record<string, Record<string, unknown>> }>;
+  error?: string;
+  details?: Record<string, unknown>;
+}
+interface Res<T = Body> { status: number; headers: Headers; body: T }
 interface Client {
-  get: (p: string, headers?: Record<string, string>) => Promise<Res>;
+  get: <T = Body>(p: string, headers?: Record<string, string>) => Promise<Res<T>>;
   post: (p: string, b?: unknown) => Promise<Res>;
   patch: (p: string, b?: unknown) => Promise<Res>;
   put: (p: string, b?: unknown) => Promise<Res>;
 }
 function client(): Client {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown, extra: Record<string, string> = {}): Promise<Res> => {
+  const call = async <T = Body>(method: string, path: string, body?: unknown, extra: Record<string, string> = {}): Promise<Res<T>> => {
     const res = await fetch(`${BASE}${path}`, {
       method,
       headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}), ...extra },
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    const out = (res.status === 204 ? undefined : await res.json().catch(() => undefined)) as T;
     return { status: res.status, headers: res.headers, body: out };
   };
   return {
-    get: (p, headers) => call('GET', p, undefined, headers),
+    get: <T = Body>(p: string, headers?: Record<string, string>) => call<T>('GET', p, undefined, headers),
     post: (p, b) => call('POST', p, b),
     patch: (p, b) => call('PATCH', p, b),
     put: (p, b) => call('PUT', p, b),
@@ -73,7 +87,7 @@ async function owner(): Promise<{ c: Client; orgId: string; tenantId: string }> 
   expect(login.status, JSON.stringify(login.body)).toBe(201);
   const org = await c.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
-  return { c, orgId: org.body.orgId as string, tenantId };
+  return { c, orgId: org.body.orgId, tenantId };
 }
 const u = (orgId: string, s = ''): string => `/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}${s}`;
 
@@ -87,12 +101,12 @@ async function pageWithEs(c: Client, orgId: string) {
     sections: [{ type: 'hero', data: { heading: 'Welcome', subheading: 'Hi', ctaUrl: 'https://a.test' }, localizations: { es: { heading: 'Bienvenido' } } }],
   });
   expect(created.status, JSON.stringify(created.body)).toBe(201);
-  return created.body as { pageId: string; sections: Array<{ sectionId: string }> };
+  return created.body;
 }
 const statusOf = async (c: Client, orgId: string, pageId: string) => {
-  const r = await c.get(u(orgId, `/pages/${pageId}/translation-status`));
+  const r = await c.get<{ locales: string[]; sections: Record<string, Record<string, string>>; counts: Record<string, Record<string, number>> }>(u(orgId, `/pages/${pageId}/translation-status`));
   expect(r.status, JSON.stringify(r.body)).toBe(200);
-  return r.body as { locales: string[]; sections: Record<string, Record<string, string>>; counts: Record<string, Record<string, number>> };
+  return r.body;
 };
 
 describe('ADR 0861 D6 — translation status', () => {
@@ -105,10 +119,13 @@ describe('ADR 0861 D6 — translation status', () => {
     expect(st.sections[sid]).toEqual({ es: 'current', fr: 'missing' });
     expect(st.counts.es).toEqual({ missing: 0, current: 1, outdated: 0, unknown: 0 });
 
-    // A base field the overlay does NOT override (review M2) — still current.
+    // A base field the overlay does NOT override (review M2) — still current. It must
+    // be a field that SURVIVES validation: the first version edited `ctaUrl`, which the
+    // hero validator drops without a `ctaLabel`, so the edit was a no-op (grade-tests w16).
     const p1 = (await getPage(tenantId, orgId, pageId))!;
-    const r1 = await c.patch(u(orgId, `/pages/${pageId}`), { sections: p1.sections.map((s) => ({ ...s, data: { ...s.data, ctaUrl: 'https://b.test' } })) });
+    const r1 = await c.patch(u(orgId, `/pages/${pageId}`), { sections: p1.sections.map((s) => ({ ...s, data: { ...s.data, subheading: 'Hello there' } })) });
     expect(r1.status, JSON.stringify(r1.body)).toBe(200);
+    expect((await getPage(tenantId, orgId, pageId))!.sections[0]!.data.subheading, 'precondition: the base really moved').toBe('Hello there');
     expect((await statusOf(c, orgId, pageId)).sections[sid]!.es).toBe('current');
 
     // The overridden text moves — outdated.
@@ -136,7 +153,7 @@ describe('ADR 0861 D6 — translation status', () => {
     const ok = await c.post(u(orgId, `/pages/${pageId}/sections/${encodeURIComponent(sid)}/locales/es/confirm-source`));
     expect(ok.status, JSON.stringify(ok.body)).toBe(200);
     expect(ok.body.version).toBe(before.version + 1);
-    expect(ok.body.sections[0].localizations).toEqual(before.sections[0]!.localizations);
+    expect(ok.body.sections[0]!.localizations).toEqual(before.sections[0]!.localizations);
     expect((await statusOf(c, orgId, pageId)).sections[sid]!.es).toBe('current');
 
     expect((await c.post(u(orgId, `/pages/${pageId}/sections/${encodeURIComponent(sid)}/locales/fr/confirm-source`))).status, 'no fr overlay').toBe(404);
@@ -148,12 +165,18 @@ describe('ADR 0861 D6 — translation status', () => {
     await c.patch(u(orgId, `/pages/${pageId}`), { sections: cur.sections.map((s) => ({ ...s, data: { ...s.data, subheading: 'Another editor' } })) });
     const stale = await c.post(u(orgId, `/pages/${pageId}/sections/${encodeURIComponent(sid)}/locales/es/confirm-source`), { expectedVersion: held });
     expect(stale.status, JSON.stringify(stale.body)).toBe(409);
+    expect(stale.body.error).toBe('conflict');
+    expect(stale.body.details?.gate, 'a version-pin refusal, not the gate').toBeUndefined();
 
     expect((await c.post(u(orgId, `/pages/${pageId}/publish`))).status).toBe(200);
     await setGate('on');
-    const gated = await c.post(u(orgId, `/pages/${pageId}/sections/${encodeURIComponent(sid)}/locales/es/confirm-source`));
-    expect(gated.status, JSON.stringify(gated.body)).toBe(409);
-    await setGate('off');
+    try {
+      const gated = await c.post(u(orgId, `/pages/${pageId}/sections/${encodeURIComponent(sid)}/locales/es/confirm-source`));
+      expect(gated.status, JSON.stringify(gated.body)).toBe(409);
+      expect(gated.body.details?.gate, 'the live-edit gate refusal').toBe('cms-approval-gate');
+    } finally {
+      await setGate('off');
+    }
   });
 
   it('the digest is SERVER-owned: a client-sent value is discarded', async () => {
@@ -190,7 +213,7 @@ describe('ADR 0861 D6 — translation status', () => {
     const shared = await c.post(u(orgId, '/shared-sections'), { name: 'Footer', type: 'hero', data: { heading: 'Footer' }, localizations: { es: { heading: 'Pie' } } });
     expect(shared.status, JSON.stringify(shared.body)).toBe(201);
     const created = await c.post(u(orgId, '/pages'), { title: 'Ref', sections: [{ type: 'hero', data: {}, ref: { sharedSectionId: shared.body.sharedSectionId } }] });
-    const sid = created.body.sections[0].sectionId as string;
+    const sid = created.body.sections[0]!.sectionId;
     expect((await statusOf(c, orgId, created.body.pageId)).sections[sid]).toEqual({ es: 'current' });
     expect((await c.patch(u(orgId, `/shared-sections/${shared.body.sharedSectionId}`), { data: { heading: 'New footer' } })).status).toBe(200);
     expect((await statusOf(c, orgId, created.body.pageId)).sections[sid]).toEqual({ es: 'outdated' });
@@ -212,7 +235,8 @@ describe('ADR 0861 D6 — stampSourceDigests rules', () => {
   });
   it('a removed overlay drops its stamp', () => {
     const prev = [{ sectionId: 'sec:1', localizations: { es: { heading: 'a' } }, sourceDigest: { es: '0123456789abcdef' } }];
-    const [s] = stampSourceDigests(prev, [{ ...base }]);
+    // The client echoes the old stamp back (the SPA round-trips the section whole).
+    const [s] = stampSourceDigests(prev, [{ ...base, sourceDigest: { es: '0123456789abcdef' } }]);
     expect(s!.sourceDigest).toBeUndefined();
   });
 });

@@ -695,6 +695,7 @@ cat > "$AUD/backend__typescript.json" <<'JSON'
 {"vulnerabilities":{"pkg-x":{"severity":"high","via":[{"source":1,"url":"https://github.com/advisories/GHSA-aaaa-aaaa-aaaa"},{"source":2,"url":"https://github.com/advisories/GHSA-bbbb-bbbb-bbbb"}]}}}
 JSON
 echo '{"vulnerabilities":{}}' > "$AUD/frontend__react.json"
+echo '{"vulnerabilities":{}}' > "$AUD/clients__desktop.json"
 ex() { # $1 = space-separated advisories to except
   python3 - "$AUD/ex.json" $1 <<'PY'
 import json,sys
@@ -708,6 +709,15 @@ check "$(aud)" "1" "check-audit FAILS when only ONE of a package's two advisorie
 grep -q "GHSA-bbbb-bbbb-bbbb" "$AUD/out" && ok "  ...and names the UNCOVERED advisory" || bad "  ...and names the UNCOVERED advisory"
 ex "GHSA-aaaa-aaaa-aaaa GHSA-bbbb-bbbb-bbbb"
 check "$(aud)" "0" "  ...and PASSES when both are excepted, with neither read as STALE"
+# clients/desktop is in scope (it was not audited at all before 2026-10-10).
+cat > "$AUD/clients__desktop.json" <<'JSON'
+{"vulnerabilities":{"electron":{"severity":"high","via":[{"source":3,"url":"https://github.com/advisories/GHSA-cccc-cccc-cccc"}]}}}
+JSON
+check "$(aud)" "1" "check-audit FAILS on an unexcepted high in clients/desktop"
+grep -q "clients/desktop: electron" "$AUD/out" && ok "  ...and names the desktop workspace" || bad "  ...and names the desktop workspace"
+# Desktop must audit ALL deps: electron is a devDependency and the shell has no
+# dependencies, so --omit=dev there scans an empty tree.
+grep -qE "ws: 'clients/desktop', omitDev: false" "$ROOT/scripts/check-audit.mjs" && ok "  ...and desktop is audited WITHOUT --omit=dev" || bad "  ...and desktop is audited WITHOUT --omit=dev"
 rm -rf "$AUD"
 
 echo "== merge-train lock (one train per shared worktree) =="

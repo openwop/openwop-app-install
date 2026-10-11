@@ -16,7 +16,17 @@
  * Covers: create (filed under the WORKSPACE), list (member B sees A's project),
  * write (B's patch lands in the shared partition), private-visibility withheld
  * from a non-member viewer, private-membership read regained (membership never
- * granting write), and the outsider / cross-workspace refusals.
+ * granting write), and the outsider / cross-workspace refusals. A refused
+ * write is asserted on the stored row too, not only on its status.
+ *
+ * Sabotage-witnessed (grade-tests w13): routing `tenantOf` through
+ * `req.personalTenant` (the HOME-vs-ACTIVE defect) reds cases 1–3; dropping the
+ * `visibility === 'org'` guard, matching the single-prefixed member ref, or
+ * granting `write` to a private member each reds case 3.
+ * HONEST CEILING — case 4 is a DOUBLE guard: the tenant partition
+ * (`getProject`'s tenant check) and org membership (`resolveEffectiveAccess`:
+ * no member row ⇒ zero scopes outside demo mode) each refuse the outsider on
+ * their own, so breaking either alone stays green (probe `sw-getproject-tenant`).
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -29,11 +39,17 @@ let BASE = '';
 let server: http.Server;
 let n = 0;
 
-interface Res<T = Record<string, any>> { status: number; body: T }
+interface Res<T> { status: number; body: T }
+/** The response fields this file reads — decoded ONCE at the JSON boundary. */
+interface ProjectBody { id: string; tenantId: string; orgId: string; name: string; canWrite?: boolean }
+interface ProjectList { projects: ProjectBody[] }
+interface LoginBody { user: { userId: string } }
+interface WorkspaceBody { workspaceId: string }
+interface InviteBody { token?: string }
 
 function client() {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<Res<any>> => {
+  const call = async <T>(method: string, path: string, body?: unknown): Promise<Res<T>> => {
     const res = await fetch(`${BASE}${path}`, {
       method,
       headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) },
@@ -43,13 +59,14 @@ function client() {
     const single = res.headers.get('set-cookie');
     const setCookies: string[] = typeof h.getSetCookie === 'function' ? h.getSetCookie() : single ? [single] : [];
     for (const sc of setCookies) { const m = /(__session=[^;]+)/.exec(sc); if (m) cookie = m[1]!; }
-    return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) };
+    const decoded: unknown = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    return { status: res.status, body: decoded as T };
   };
   return {
-    get: (p: string) => call('GET', p),
-    post: (p: string, b?: unknown) => call('POST', p, b),
-    patch: (p: string, b?: unknown) => call('PATCH', p, b),
-    del: (p: string) => call('DELETE', p),
+    get: <T = unknown>(p: string) => call<T>('GET', p),
+    post: <T = unknown>(p: string, b?: unknown) => call<T>('POST', p, b),
+    patch: <T = unknown>(p: string, b?: unknown) => call<T>('PATCH', p, b),
+    del: <T = unknown>(p: string) => call<T>('DELETE', p),
   };
 }
 type Client = ReturnType<typeof client>;
@@ -58,26 +75,26 @@ type Client = ReturnType<typeof client>;
  *  their own `user:` personal tenant exactly as Firebase OIDC would leave them.
  *  Returns the caller's `User.userId` (the subject member rows key on). */
 async function signIn(c: Client, email: string): Promise<string> {
-  const r = await c.post('/host/openwop-app/test/login', { email });
+  const r = await c.post<LoginBody>('/host/openwop-app/test/login', { email });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  return r.body.user.userId as string;
+  return r.body.user.userId;
 }
 
 /** A REAL `ws:` shared workspace, created + owned + switched into through the
  *  routes. The switch is what makes active !== personal — the whole point. */
 async function sharedWorkspace(c: Client): Promise<string> {
-  const ws = await c.post('/host/openwop-app/workspaces', { name: `Proj WS ${n++}` });
+  const ws = await c.post<WorkspaceBody>('/host/openwop-app/workspaces', { name: `Proj WS ${n++}` });
   expect(ws.status, JSON.stringify(ws.body)).toBe(201);
   expect(ws.body.workspaceId, 'must be a real shared workspace, not a personal tenant').toMatch(/^ws:/);
   const sw = await c.post(`/host/openwop-app/workspaces/${encodeURIComponent(ws.body.workspaceId)}/switch`);
   expect(sw.status, JSON.stringify(sw.body)).toBe(200);
-  return ws.body.workspaceId as string;
+  return ws.body.workspaceId;
 }
 
 /** Invite a second human into the workspace ROOT org (`orgId === tenantId`) and
  *  have them accept — the real two-member path. Returns the joiner's userId. */
 async function joinAsMember(owner: Client, ws: string, joiner: Client, email: string, role: string): Promise<string> {
-  const invite = await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(ws)}/invites`, { email, role });
+  const invite = await owner.post<InviteBody>(`/host/openwop-app/orgs/${encodeURIComponent(ws)}/invites`, { email, role });
   expect(invite.status, JSON.stringify(invite.body)).toBe(201);
   expect(invite.body.token, 'the dev/test invite path must expose the token').toBeTruthy();
 
@@ -118,7 +135,7 @@ describe('PRJC-5 — projects act in the tenant the gate authorized (shared `ws:
     await signIn(a, `proj-a-${n++}@acme.test`);
     const ws = await sharedWorkspace(a);
 
-    const created = await a.post(P, { orgId: ws, name: 'Shared-WS project' });
+    const created = await a.post<ProjectBody>(P, { orgId: ws, name: 'Shared-WS project' });
     expect(created.status, JSON.stringify(created.body)).toBe(201);
     // THE assertion — a status-only test cannot tell a home-tenant filing apart.
     expect(
@@ -135,24 +152,24 @@ describe('PRJC-5 — projects act in the tenant the gate authorized (shared `ws:
     const b = client();
     await joinAsMember(a, ws, b, `proj-b-${n++}@acme.test`, 'editor');
 
-    const created = await a.post(P, { orgId: ws, name: 'Visible To B' });
+    const created = await a.post<ProjectBody>(P, { orgId: ws, name: 'Visible To B' });
     expect(created.status, JSON.stringify(created.body)).toBe(201);
-    const id = created.body.id as string;
+    const id = created.body.id;
 
     // B reads the shared partition, not a private empty copy.
-    const list = await b.get(P);
+    const list = await b.get<ProjectList>(P);
     expect(list.status, JSON.stringify(list.body)).toBe(200);
     expect(
-      (list.body.projects ?? []).map((p: { id: string }) => p.id),
+      (list.body.projects ?? []).map((p) => p.id),
       "member B must see the org's projects, not a private copy",
     ).toContain(id);
     expect((await b.get(`${P}/${id}`)).status).toBe(200);
 
     // B (editor ⇒ workspace:write in the ws root org) writes; A sees the write.
-    const patched = await b.patch(`${P}/${id}`, { name: 'Renamed By B' });
+    const patched = await b.patch<ProjectBody>(`${P}/${id}`, { name: 'Renamed By B' });
     expect(patched.status, JSON.stringify(patched.body)).toBe(200);
     expect(patched.body.tenantId, "B's write must land in the workspace").toBe(ws);
-    expect((await a.get(`${P}/${id}`)).body.name).toBe('Renamed By B');
+    expect((await a.get<ProjectBody>(`${P}/${id}`)).body.name).toBe('Renamed By B');
   });
 
   it('private visibility: withheld from a non-member VIEWER; membership restores READ but never WRITE', async () => {
@@ -162,47 +179,49 @@ describe('PRJC-5 — projects act in the tenant the gate authorized (shared `ws:
     const viewer = client();
     const viewerId = await joinAsMember(a, ws, viewer, `proj-viewer-${n++}@acme.test`, 'viewer');
 
-    const created = await a.post(P, { orgId: ws, name: 'Private Room' });
+    const created = await a.post<ProjectBody>(P, { orgId: ws, name: 'Private Room' });
     expect(created.status, JSON.stringify(created.body)).toBe(201);
-    const id = created.body.id as string;
+    const id = created.body.id;
     expect((await a.patch(`${P}/${id}/visibility`, { visibility: 'private' })).status).toBe(200);
 
     // The non-member viewer: dropped from the list, uniform 404 on the GET.
-    expect((await viewer.get(P)).body.projects.map((p: { id: string }) => p.id)).not.toContain(id);
+    expect((await viewer.get<ProjectList>(P)).body.projects.map((p) => p.id)).not.toContain(id);
     expect((await viewer.get(`${P}/${id}`)).status).toBe(404);
 
     // Membership (the user: ref addProjectMember stores — the DOUBLE-prefixed
     // production shape) restores READ...
     expect((await a.post(`${P}/${id}/members`, { ref: `user:${viewerId}`, role: 'observer' })).status).toBe(201);
-    const got = await viewer.get(`${P}/${id}`);
+    const got = await viewer.get<ProjectBody>(`${P}/${id}`);
     expect(got.status, JSON.stringify(got.body)).toBe(200);
     expect(got.body.canWrite).toBe(false);
-    expect((await viewer.get(P)).body.projects.map((p: { id: string }) => p.id)).toContain(id);
+    expect((await viewer.get<ProjectList>(P)).body.projects.map((p) => p.id)).toContain(id);
     // ...but NEVER write (membership is descriptive, write stays org-authority).
     expect((await viewer.patch(`${P}/${id}`, { name: 'Nope' })).status).toBe(403);
+    expect((await a.get<ProjectBody>(`${P}/${id}`)).body.name, 'the refused write must not land').toBe('Private Room');
   });
 
   it('an OUTSIDER is refused, and a member of workspace B cannot see workspace A\'s projects', async () => {
     const a = client();
     await signIn(a, `proj-wsa-${n++}@acme.test`);
     const wsA = await sharedWorkspace(a);
-    const made = await a.post(P, { orgId: wsA, name: 'Secret To WS-A' });
+    const made = await a.post<ProjectBody>(P, { orgId: wsA, name: 'Secret To WS-A' });
     expect(made.status, JSON.stringify(made.body)).toBe(201);
-    const id = made.body.id as string;
+    const id = made.body.id;
 
     // A never-invited human stays in their personal tenant: uniform 404, and the
     // list shows nothing (no existence disclosure either way).
     const outsider = client();
     await signIn(outsider, `proj-outsider-${n++}@acme.test`);
     expect((await outsider.get(`${P}/${id}`)).status).toBe(404);
-    expect((await outsider.get(P)).body.projects.map((p: { name: string }) => p.name)).not.toContain('Secret To WS-A');
+    expect((await outsider.get<ProjectList>(P)).body.projects.map((p) => p.name)).not.toContain('Secret To WS-A');
 
     // A member of a DIFFERENT workspace: same refusals, asserted on content too.
     const b = client();
     await signIn(b, `proj-wsb-${n++}@acme.test`);
     await sharedWorkspace(b);
-    expect((await b.get(P)).body.projects.map((p: { name: string }) => p.name)).not.toContain('Secret To WS-A');
+    expect((await b.get<ProjectList>(P)).body.projects.map((p) => p.name)).not.toContain('Secret To WS-A');
     expect((await b.get(`${P}/${id}`)).status).toBe(404);
     expect((await b.patch(`${P}/${id}`, { name: 'Hijack' })).status).toBe(404);
+    expect((await a.get<ProjectBody>(`${P}/${id}`)).body.name, 'the refused write must not land').toBe('Secret To WS-A');
   });
 });

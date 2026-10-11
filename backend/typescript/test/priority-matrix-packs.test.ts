@@ -2,6 +2,14 @@
  * Priority Matrix packs (ADR 0058 Phase 4) — the node pack's behaviour over a
  * stubbed `ctx.features['priority-matrix']` surface + the agent pack manifest
  * loading (systemPromptRef + tool-allowlist). Mirrors agent-loader.test.ts.
+ *
+ * The node pack's export INVENTORY is not pinned here: `pack-manifest-impl-parity.test.ts`
+ * asserts index.mjs exports === pack.json nodes[] for every pack (a hard-coded 11-name
+ * list here was cut in /grade-tests w15 — the same removal reds both, probe pk-export).
+ *
+ * What turns it red (w15 probes): `ensurePriorityMatrix` not failing closed; submit-idea /
+ * score-idea not passing their args through; schedule-status dropping `rollup`; the
+ * analyst's allowlist losing score-idea; the Chief of Staff losing schedule-status.
  */
 import { describe, it, expect, beforeEach } from 'vitest';
 import { join } from 'node:path';
@@ -17,22 +25,6 @@ const AGENT_PACK = join(REPO_ROOT, 'packs', 'vendor.openwop-app.priority-matrix.
 const ASSISTANT_PACK = join(REPO_ROOT, 'packs', 'vendor.openwop-app.assistant.agents');
 
 describe('feature.priority-matrix.nodes — node pack', () => {
-  it('exports the eleven priority-matrix node fns (v1.3 adds the intake verbs, ADR 0232 §7)', () => {
-    expect(Object.keys(nodePack).sort()).toEqual([
-      'feature.priority-matrix.nodes.add-evidence',
-      'feature.priority-matrix.nodes.generate-agenda',
-      'feature.priority-matrix.nodes.get-intake',
-      'feature.priority-matrix.nodes.list-lists',
-      'feature.priority-matrix.nodes.list-portfolio',
-      'feature.priority-matrix.nodes.list-ranked-ideas',
-      'feature.priority-matrix.nodes.propose-scenario',
-      'feature.priority-matrix.nodes.schedule-status',
-      'feature.priority-matrix.nodes.score-idea',
-      'feature.priority-matrix.nodes.submit-idea',
-      'feature.priority-matrix.nodes.update-intake',
-    ]);
-  });
-
   it('fails closed with host_capability_missing when the surface is absent', async () => {
     const node = nodePack['feature.priority-matrix.nodes.list-lists'];
     await expect(node({ features: {} })).rejects.toMatchObject({ code: 'host_capability_missing' });
@@ -52,6 +44,7 @@ describe('feature.priority-matrix.nodes — node pack', () => {
 
     const submit = await nodePack['feature.priority-matrix.nodes.submit-idea']({ features, inputs: { listId: 'plist-1', title: 'Idea' } });
     expect(submit.status).toBe('success');
+    expect(submit.outputs).toEqual({ cardId: 'card-1', title: 'Idea', status: 'new' });
     expect(calls.submit).toEqual({ listId: 'plist-1', title: 'Idea' });
 
     const score = await nodePack['feature.priority-matrix.nodes.score-idea']({ features, inputs: { listId: 'plist-1', cardId: 'card-1', scores: { roi: 9 } } });

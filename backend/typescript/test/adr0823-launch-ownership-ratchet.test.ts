@@ -50,7 +50,7 @@ const FILES = tsFiles(SRC).map((f) => ({ rel: relative(SRC, f), src: code(f) }))
 const DIRECT_CATALOG_READS: Record<string, [number, string]> = {
   'host/resolveLaunchDefinition.ts': [1, 'IS the funnel — the read is paired with isWorkflowForeignTo'],
   'host/resolveRunDefinition.ts': [1, 'isWorkflowForeignTo(run.tenantId, …) runs before the read (D3)'],
-  'routes/workflows.ts': [1, 'IS the M7 read guard — isForeignOwned before the definition is returned'],
+  'routes/workflows.ts': [2, 'IS the M7 read guard — isForeignOwned before the definition is returned; the ADR 0870 availability read applies the same isForeignOwned and returns only demo/runnable flags'],
   'features/kicktodo-creator/routes.ts': [1, 'isForeignOwned is checked before the read'],
   'features/workflow-author/routes.ts': [1, 'fixed host id (WORKFLOW_AUTHOR_META_ID)'],
   'features/creative-briefs/routes.ts': [1, 'fixed host id (CREATIVE_BRIEFS_REEL_ID)'],

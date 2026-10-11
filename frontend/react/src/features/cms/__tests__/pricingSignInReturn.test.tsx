@@ -8,6 +8,11 @@
  *    `.signin-trigger` contract the pricing page relies on) and remember the
  *    store path, which is followed once the visitor is signed in;
  *  - SIGNED IN: plain links straight to the store, as before.
+ *
+ * Sabotage-witnessed (/grade-tests w17): a link for anonymous visitors, a
+ * forgotten rememberReturn, a renamed `.signin-trigger`, signed-in visitors
+ * treated as anonymous, an unfollowed return, a 4× TTL, a dropped store-prefix
+ * check, or a store-bound free tier each red the case that claims it.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';

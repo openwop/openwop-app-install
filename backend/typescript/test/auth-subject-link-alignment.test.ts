@@ -14,11 +14,13 @@
  * `openwop-auth-scim` DROPPED is `auth-subject-link.test.ts` "(i) DROP-arm A";
  * the conformance-seam posture ⇒ `true` is `auth-subject-link.test.ts` "(iii)".
  *
- * Discovery reads env per call, so the claim is a function of env + the v1
- * discovery BUILDER (no app boot, no HTTP): ADR 0812 — `subjectLinking` has no
- * v2 facet yet, so the v1 builder is read directly. THIS IS DEBT (ADR 0858):
- * re-point at the v2 `auth` record once projected; ADR 0812 P3c deletes the
- * builder and this read with it.
+ * Discovery reads env per call, so the claim is a function of env + the v2
+ * discovery builder (no app boot, no HTTP). ADR 0812 P4 re-pointed this from
+ * the deleted v1 builder. The v2 `auth` record has no `subjectLinking` flag and
+ * no `profiles` list: the claim is the PAIR of `saml` + `scim` lanes, which
+ * `advertisedAuthProfiles()` only emits together when the combined contract is
+ * active (RFC 0164's mandatory-both drop). `subjectLinkKey` is stated only
+ * with BOTH lanes (spec-steward ruling 2026-10-10, ADR 0858 § "P4 slice").
  *
  * Sabotage that turns it red: `subjectLinkService.ts` making the trust-root
  * check ignore `OPENWOP_SCIM_IDP_ENTITY_ID` reds the ALIGNED case (the seam
@@ -26,7 +28,8 @@
  * `OPENWOP_TEST_SCIM_URL`).
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { v1Advertisement } from './support/v1Advertisement.js';
+import { buildV2Advertisement } from '../src/routes/discovery.js';
+import { loadConfigFromEnv } from '../src/index.js';
 import { subjectLinkRealmAlignment } from '../src/host/auth/subjectLinkService.js';
 
 const SAML_ENV = {
@@ -38,9 +41,10 @@ const SAML_ENV = {
 const KEYS = [...Object.keys(SAML_ENV), 'OPENWOP_SAML_TENANT', 'OPENWOP_SCIM_TENANT', 'OPENWOP_SCIM_BEARER', 'OPENWOP_SCIM_IDP_ENTITY_ID', 'OPENWOP_TEST_SAML_IDP_URL', 'OPENWOP_TEST_SCIM_URL'];
 const prior: Record<string, string | undefined> = Object.fromEntries(KEYS.map((k) => [k, process.env[k]]));
 
-async function auth(): Promise<{ profiles?: string[]; subjectLinking?: boolean; subjectLinkKey?: string }> {
-  const doc = (await v1Advertisement()) as { capabilities?: { auth?: { profiles?: string[]; subjectLinking?: boolean; subjectLinkKey?: string } } };
-  return doc.capabilities?.auth ?? {};
+/** The v2 `auth` record, reduced to the lane names and the link key. */
+async function auth(): Promise<{ lanes: string[]; subjectLinkKey?: string }> {
+  const rec = buildV2Advertisement(loadConfigFromEnv())['auth'] as { lanes?: Array<{ lane: string }>; subjectLinkKey?: string } | undefined;
+  return { lanes: (rec?.lanes ?? []).map((l) => l.lane), ...(rec?.subjectLinkKey ? { subjectLinkKey: rec.subjectLinkKey } : {}) };
 }
 
 // Warm the builder's module graph once (a cold import of `src/index.js` can
@@ -66,17 +70,18 @@ describe('USERS-13 — subjectLinking is advertised only when the leaver deny ca
     });
     expect(subjectLinkRealmAlignment()).toEqual({ aligned: true, scimRealm: 'acme', samlRealm: 'acme' });
     const a = await auth();
-    expect(a.profiles).toEqual(expect.arrayContaining(['openwop-auth-saml', 'openwop-auth-scim']));
-    expect(a.subjectLinking).toBe(true);
+    // Both lanes together IS the subject-linking claim at v2.
+    expect(a.lanes).toEqual(expect.arrayContaining(['saml', 'scim']));
     expect(a.subjectLinkKey).toBe('opaque-idp');
   });
 
   it('one profile only ⇒ absent (unchanged §B rule)', async () => {
     Object.assign(process.env, { OPENWOP_SCIM_BEARER: 'b-0123456789abcdef', OPENWOP_SCIM_TENANT: 'acme' });
     const a = await auth();
-    expect(a.profiles).toContain('openwop-auth-scim');
-    expect(a.profiles).not.toContain('openwop-auth-saml');
-    expect('subjectLinking' in a).toBe(false);
-    expect('subjectLinkKey' in a).toBe(false);
+    expect(a.lanes).toContain('scim');
+    // One lane only: the pair that makes the subject-linking claim is absent.
+    expect(a.lanes).not.toContain('saml');
+    // …and so is the key: a one-lane host forms no link (steward ruling 2026-10-10).
+    expect(a).not.toHaveProperty('subjectLinkKey');
   });
 });

@@ -18,6 +18,147 @@ Commits by the `/cut-app-release` skill; required upgrade stops are tracked in
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-10-10
+
+One day since v0.3.0 (2026-10-09): 80 commits and four new architecture decision
+records (ADRs 0869–0872). A MINOR release: new capabilities, no schema or app
+migrations, no required stop, and nothing an operator must change.
+
+#### Upgrading from 0.3.0
+
+- **Required stop:** no (`releases.json`).
+- **Migrations:** none. Postgres schema stays **47**, SQLite **49**, app
+  migrations **22**.
+- **Rolling-safe:** yes. A 0.3.0 process may share the database during a rolling
+  deploy. Kanban cards a 0.3.0 process writes during the overlap are stamped with
+  their tenant on the next hourly tick (ADR 0872). Take a backup first as usual.
+- **New optional settings (ADR 0871), all with working defaults:**
+  `OPENWOP_STORAGE_GROWTH_GAUGE` (`false` turns the hourly gauge off; on by
+  default), `OPENWOP_SURFACE_ROW_TRIGGER` (default `100000` rows per tenant per
+  family), `OPENWOP_VECTOR_NAMESPACE_TRIGGER` (default `50000` vectors per
+  namespace), `OPENWOP_VECTOR_PG_STATEMENT_TIMEOUT_MS` (default `30000`) and
+  `OPENWOP_VECTOR_QUERY_WARN_MS` (default `200`).
+- **Discovery advertises `multiAgent` only when you switch it on.** It appears
+  when `OPENWOP_MULTI_AGENT_EXECUTION_MODEL` is set, and its
+  `executionModel.version` is the highest phase N with every
+  `…_PHASE_2`..`…_PHASE_N` flag also set; with phase 1 off the block is absent.
+  The `agents` family now carries `dispatch: true`. Check these flags if a client
+  relies on the `multiAgent` block.
+- **Image-mode deploys build no certification bundle** (ADR 0869). `deploy.sh`
+  without `OPENWOP_CERT_BUNDLE_ORIGIN` no longer refuses to ship for want of a
+  stamp; it still runs the major-2 ratchet. To serve evidence, set the origin and
+  run `publish-evidence.sh`.
+- **After upgrading:** `GET /readiness` → `200` and its `version` reads `0.4.0`.
+  Within an hour, the logs carry `surface_rows_gauge` lines; about three hours
+  after the first hourly tick, `tenant_index_verified collection=kanban:card`.
+
+### Added
+
+- **An hourly storage-growth gauge** (ADR 0871). Once per UTC hour, across all
+  instances, the host logs `surface_rows_gauge` (per durable surface family:
+  tenants, the largest tenant's rows, the total, tenants over the trigger) and,
+  with pgvector, `vector_rows_gauge` (namespaces, the largest, the total, the
+  pgvector version). No line carries a tenant id or a namespace. A pgvector
+  query of 200 ms or more logs `vector_query_slow`, and the vector pool now has
+  a 30 s `statement_timeout` (it had none). `scripts/measure-storage-growth.mjs`
+  reads the lines back and reports each trigger as CLEAR, TRIGGERED or
+  UNMEASURED.
+- **Work-Twin portfolio cards say which workflows are demos** (ADR 0870). A
+  workflow built on the demo AI node shows a "Demo" chip and a one-line
+  explanation, and Run now is disabled, with the reason, on a deployment that
+  cannot run it (sign-in posture). New non-normative route:
+  `GET /host/openwop-app/workflows/availability?ids=…`. ADR 0870 also plans
+  real-AI Work-Twin workflows; those decisions are still Proposed.
+- **Approved sends check Google permissions first.** An approved email or
+  calendar action now checks that the approver's Google connection is present,
+  current and allowed to write before it starts a run. If not, nothing runs and
+  the notice gives numbered steps to reconnect with write access. A send Google
+  refuses with `401`/`403` gives the same steps.
+
+### Changed
+
+- **Kanban card reads use a tenant index** (ADR 0872). Every card now records
+  its board's tenant, and once the hourly check has verified the index, board
+  views, the dashboard, "assigned to me" and card create/move read one tenant's
+  cards instead of every card. Creating a card on a board that does not exist
+  answers `kanban_board_not_found`. Cards whose board is gone are logged
+  (`kanban_card_unstamped_orphans`), never deleted, and keep reads on the full
+  scan.
+- **Authorization reads use the members index** (ADR 0866 D4). Access checks
+  read one tenant's members once the index is verified. A member the index lacks
+  is confirmed against the full scan before any deny, self-approval exemption or
+  demo-mode owner bypass, so the index can only say yes.
+- **The 44 Work-Twin `tmpl.*` templates are a chain pack** (ADR 0775 P2a–c).
+  They load from `vendor.openwop-app.workflows.work-twin-templates@1.0.0` under
+  their original ids, byte-identical, so past runs replay unchanged. They stay
+  hidden from `/builder` and the `/` picker. A host with
+  `OPENWOP_WORKFLOW_CHAIN_EXAMPLES=0` no longer has these ids.
+- **`scripts/preflight-deploy.sh` refuses a deploy while a Cloud Run revision is
+  tagged** (Gate 5b), and prints the `--remove-tags` command. `--allow-tagged`
+  keeps a deliberate tag.
+- **Image-mode `deploy.sh` builds no certification bundle** (ADR 0869); see
+  Upgrading.
+- **The desktop shell runs Electron 41** (was 39), closing the Electron
+  advisories.
+
+### Removed
+
+- **The v1 discovery builder** (ADR 0812 P4). `/.well-known/openwop` serves only
+  the v2 root, and the `Capabilities-Etag` header, which only the v1 response
+  set, is gone. The in-tree `tmpl.*` workflow catalog is deleted (see Changed).
+
+### Fixed
+
+- **Attestation verification reported `discovery_drift` on every v2 host.** It
+  re-digested the v1 document instead of the root actually served. The certify
+  stamp also pointed at the retired `/v1` bundle path.
+- v2 discovery advertises `scheduling` again (`cron`, `delayed`,
+  `maxFutureHorizon: P366D`). It had been missing from the v2 root since v1
+  retired, so the horizon the 0.3.0 notes announced was stated nowhere.
+  `workspace` is still not advertised: it is missing a required event (ADR
+  0858).
+- v2 discovery advertises `multiAgent` again. `executionModel.version` is now
+  the highest phase N with every phase 1..N switched on, so a gap in the phase
+  flags caps the claim. v1 could claim 5 with phases 2 to 4 off. The verifier
+  level (6) is not claimed. The escalation interrupt kind is `clarification`,
+  which is what the host emits; v1 named an `x-host-…` kind it never sent. The
+  phase-3 gate (getRunAncestry) now honours `…_PHASE_5`.
+- v2 discovery advertises `agents.dispatch: true`. `core.dispatch` runs
+  workers as child runs and never changes the parent's workflow graph. The v1
+  fan-out descriptor has no v2 seat, so it is withheld.
+- v2 discovery states `auth.subjectLinkKey` only when both the `saml` and
+  `scim` lanes are advertised. A host with one lane forms no links, so it
+  no longer claims a link key (spec-steward ruling 2026-10-10; matches v1).
+- **Reconnecting a Google connection left a dead duplicate "Needs reconnecting"
+  row.** A successful consent now retires the same person's inactive twin rows
+  for that provider. An active twin is left alone.
+- **A document that does not exist showed "Couldn't load" with a retry** instead
+  of "not found". The page now reads the error's status.
+- **In a collaborative document, one user's undo could undo another user's
+  edits** (ADR 0335). The editor's own undo history is now actually off, so only
+  the collaborative undo runs.
+- **`npm run selftest` in `clients/desktop` hung** instead of exiting 0 or 1
+  (a relative self-test directory). It now runs.
+
+### Security
+
+- **A refused registry pack deleted the good install it was replacing** (ADR
+  0660 D3). The installer re-checked `pack.json` only after removing the old
+  install and copying the new one, so a tampered tarball was refused with its
+  files already on disk. The check now runs on the staged bytes first.
+- **The three audit exceptions are closed, not renewed.** Knowledge-base PDF
+  parsing uses the patched `pdfjs-dist` 6.2.108 instead of unpdf's vendored
+  pdf.js (GHSA-hq66-cqwq-w95j). The SPA depends on `@firebase/app` and
+  `@firebase/auth` directly, which drops Firestore's `@grpc/grpc-js`
+  (GHSA-m9gg-hp2v-232j, GHSA-f596-whhp-79r4). `scripts/audit-exceptions.json` is
+  empty.
+- **Dependency updates close 17 of 20 open backend and frontend Dependabot
+  alerts** (lockfile only, every bump within its existing range): `fast-uri`,
+  `markdown-it`, `moment`, `source-map-js`, `mammoth`, `brace-expansion`,
+  `browserslist` and others. Three stay open: `vitest`/`@vitest/mocker`
+  (dev-only) and `katex` (low; the bundled copies are pinned by `mermaid` and
+  the math plugins).
+
 ## [0.3.0] — 2026-10-09
 
 Two weeks since v0.2.0 (2026-09-27): 1,549 commits and **108 architecture decision

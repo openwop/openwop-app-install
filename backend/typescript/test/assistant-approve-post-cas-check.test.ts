@@ -8,6 +8,9 @@
  * window on purpose: a partial mock of `resolveApproval` lands a peer edit immediately
  * before the real CAS runs. Without the post-CAS check, the approval would dispatch bytes
  * the approver never saw; with it, both rows return to `pending` and nothing executes.
+ *
+ * Sabotages that turn it red (grade-tests w11): the post-CAS hash check disabled; the
+ * approval-side reopen dropped; the action-side reopen leaving the row `approved`.
  */
 import { beforeAll, describe, expect, it, vi } from 'vitest';
 

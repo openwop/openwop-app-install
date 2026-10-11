@@ -21,11 +21,10 @@
  * "wrapper some call sites bypass" failure `persistence.md` §"The seat" names
  * for the era adapter, and it has the same shape here.
  *
- * MAJOR 1 IS UNTOUCHED. Every branch below is gated on `negotiatedMajor(req)
- * === 2`; under major 1 this middleware is a single comparison and a `next()`.
- * The v1 wire never carried a tenant-bound run id and never validated an
- * `Idempotency-Key` on format, and narrowing either would be a new refusal on a
- * shipped contract.
+ * VENDOR PATHS ARE UNTOUCHED. Every branch below is gated on
+ * `isProtocolRequest(req)` (ADR 0812 P3c replaced the `negotiatedMajor(req) ===
+ * 2` test, and P4 deleted `negotiatedMajor`); for the host dialect this
+ * middleware is a single comparison and a `next()`.
  */
 
 import type { NextFunction, Request, RequestHandler, Response } from 'express';

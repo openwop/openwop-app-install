@@ -7,6 +7,11 @@
  * language-family step as soon as `pt` left `supportedLocales` — and removing a locale
  * is the ungated "fail-safe" direction. One settings write published a withheld,
  * typically machine-drafted translation with no review row and `page.version` unmoved.
+ *
+ * Fixed by ADR 0861 D1 (`CMSL2WF-1`): the withheld set is `withheldLocales(page)`, a
+ * property of the PAGE. MEASURED RED on `90b75353b` (legs 1 and 2). Sabotage
+ * (grade-tests w16): deriving the set from `supportedLocales` again reds legs 1-2;
+ * stripping every family overlay reds the positive control (leg 3).
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';

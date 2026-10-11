@@ -17,9 +17,12 @@ import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, cleanup, act, fireEvent, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 
-const { createRun, getWorkflowRunInputs, listWorkflowSummaries, updateRosterEntry, listStoredRefs } = vi.hoisted(() => ({
+const { createRun, getWorkflowRunInputs, listWorkflowSummaries, updateRosterEntry, listStoredRefs, getWorkflowAvailability } = vi.hoisted(() => ({
   createRun: vi.fn(), getWorkflowRunInputs: vi.fn(),
   listWorkflowSummaries: vi.fn(), updateRosterEntry: vi.fn(), listStoredRefs: vi.fn(),
+  // ADR 0870 — the panel's availability read; an empty answer keeps the
+  // pre-0870 `known` path these tests exercise.
+  getWorkflowAvailability: vi.fn(async () => new Map()),
 }));
 vi.mock('../../byok/lib/byokClient.js', async (orig) => ({
   ...(await orig<typeof import('../../byok/lib/byokClient.js')>()), listStoredRefs,
@@ -29,7 +32,7 @@ vi.mock('../../client/runsClient.js', async (orig) => ({
 }));
 vi.mock('../../workflows/workflowsClient.js', async (orig) => ({
   ...(await orig<typeof import('../../workflows/workflowsClient.js')>()),
-  getWorkflowRunInputs, listWorkflowSummaries,
+  getWorkflowRunInputs, listWorkflowSummaries, getWorkflowAvailability,
 }));
 vi.mock('../rosterClient.js', async (orig) => ({
   ...(await orig<typeof import('../rosterClient.js')>()), updateRosterEntry,

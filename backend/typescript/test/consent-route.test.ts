@@ -22,7 +22,6 @@ import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
-import { v1Advertisement } from './support/v1Advertisement.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import type { ConsentPolicy, ConsentRecord } from '../src/features/consent/consentService.js';
@@ -79,11 +78,14 @@ async function ownerWithOrg(): Promise<{ owner: ReturnType<typeof client>; orgId
 const enableConsent = async (status: 'on' | 'off'): Promise<void> => { const d = getToggleDefault('consent'); if (d) await saveConfig({ ...d, status }, 'test'); };
 
 describe('Consent: registration + public + authed', () => {
-  it('is registered + advertises ctx.features.consent at /.well-known/openwop', async () => {
+  it('is registered + composes the ctx.features.consent surface', async () => {
     const { BACKEND_FEATURES } = await import('../src/features/index.js');
     expect(BACKEND_FEATURES.some((f) => f.id === 'consent')).toBe(true);
-    // ADR 0812 — the v2 root carries no `hostExtensions.featureSurfaces` (ADR 0014) yet; read the v1 claim from its builder.
-    expect((await v1Advertisement()).hostExtensions?.featureSurfaces).toContain('host.sample.consent');
+    // ADR 0812 P4: the `hostExtensions.featureSurfaces` advert went with the v1
+    // builder (the v2 root has no record for it, ADR 0858 ledger); the surface
+    // registry it was printed from is what is asserted now.
+    const { registeredFeatureSurfaceIds } = await import('../src/host/featureSurfaces.js');
+    expect(registeredFeatureSurfaceIds()).toContain('consent');
   });
 
   // CONS-2 — the public lane now mints its own `visitor:` identity and requires

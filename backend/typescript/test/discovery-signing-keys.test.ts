@@ -155,9 +155,11 @@ describe('the v2 root still validates with signingKeys published', () => {
  * mistake in rc.9 and corrected it in rc.11 (P4-SPEC-11); this test is what
  * stops this host from making it again.
  */
-describe('the key is published on BOTH roots', () => {
-  it('appears in the v1 advertisement and the v2 advertisement, identically', async () => {
-    const { buildAdvertisement, buildV2Advertisement } = await import('../src/routes/discovery.js');
+// ADR 0812 P4: the v1 root and its builder are deleted, so "both roots" is now
+// the one root this host serves; the v1 halves of these legs went with it.
+describe('the key is published on the root', () => {
+  it('appears in the v2 advertisement', async () => {
+    const { buildV2Advertisement } = await import('../src/routes/discovery.js');
     const { loadConfigFromEnv } = await import('../src/index.js');
     const entry = {
       keyId: 'openwop-app-self-2026-09-04', alg: 'ed25519',
@@ -165,16 +167,14 @@ describe('the key is published on BOTH roots', () => {
     };
     process.env[VAR] = JSON.stringify([entry]);
     const cfg = loadConfigFromEnv();
-    expect(buildAdvertisement(cfg)['signingKeys'], 'v1 root').toEqual([entry]);
     expect(buildV2Advertisement(cfg)['signingKeys'], 'v2 root').toEqual([entry]);
   });
 
-  it('is absent from BOTH roots when unconfigured — neither over-claims', async () => {
-    const { buildAdvertisement, buildV2Advertisement } = await import('../src/routes/discovery.js');
+  it('is absent from the root when unconfigured — no over-claim', async () => {
+    const { buildV2Advertisement } = await import('../src/routes/discovery.js');
     const { loadConfigFromEnv } = await import('../src/index.js');
     delete process.env[VAR];
     const cfg = loadConfigFromEnv();
-    expect(buildAdvertisement(cfg)['signingKeys']).toBeUndefined();
     expect(buildV2Advertisement(cfg)['signingKeys']).toBeUndefined();
   });
 });

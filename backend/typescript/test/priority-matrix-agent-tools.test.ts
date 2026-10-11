@@ -3,12 +3,25 @@
  * conversational tools resolve + enforce the same per-org RBAC as the
  * priority-matrix routes. Boots the REAL app (the ADR 0308 D2 registration seam
  * under test), mirroring app-builder-agent-tools.test.ts.
+ *
+ * Sabotage map (wave 15, `w15g1-at-*`): a renamed tool id / an allowlist drift, the
+ * subjectless FAIL-EMPTY arm, the toggle refusal, the acting-user + not-found gates,
+ * the ranked read, numeric-string coercion vs the range refusal, the D1c `unscored` /
+ * `partiallyScored` keying (re-keyed on priority 0, it reds the WSJF case), the PMXU-1
+ * `agent` / `workflow` / `human` stamps, and the ADR 0610 D3′ project gate on BOTH read
+ * tools each turn a case red.
+ * CEILING (PMX-15): the static SCHEMA_READ_EXEMPT_TOOLS entries are a rename tripwire —
+ * `schemaCarrying: true` exempts these tools anyway, so dropping an entry changes no
+ * behaviour; the completeness ratchet (schema-read-exemption-completeness) owns that.
  */
 import http from 'node:http';
 import { readFileSync } from 'node:fs';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
+import { getCard } from '../src/host/kanbanService.js';
+import { SCHEMA_READ_EXEMPT_TOOLS, isSchemaReadExempt } from '../src/host/toolResultTransform.js';
+import { buildPriorityMatrixSurface } from '../src/features/priority-matrix/surface.js';
 import { createAgentToolProvider, builtinAgentToolIds } from '../src/host/agentToolProvider.js';
 import {
   PM_LIST_LISTS_TOOL_ID, PM_RANKED_IDEAS_TOOL_ID, PM_SCHEDULE_STATUS_TOOL_ID,
@@ -17,7 +30,7 @@ import {
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { createOrg, createMember } from '../src/host/accessControlService.js';
-import { createList } from '../src/features/priority-matrix/priorityMatrixService.js';
+import { createList, submitIdea, getVoteBreakdown } from '../src/features/priority-matrix/priorityMatrixService.js';
 import { createProject, setProjectVisibility } from '../src/features/projects/projectsService.js';
 
 const TENANT = 'default';
@@ -73,6 +86,11 @@ describe('CFP-1 — priority-matrix read tools: toggle + acting-user gates', () 
 
   it('read tools FAIL EMPTY without an acting user', async () => {
     await setPm('on');
+    // A list that EXISTS, so the empty answer is a refusal and not an empty tenant
+    // (this case used to pass vacuously when it ran first).
+    const list = await createList(TENANT, orgId, 'u-1', { name: 'Exists for fail-empty' });
+    const control = await provider({ actingUserId: 'u-1' }).executeTool({ name: PM_LIST_LISTS_TOOL_ID, input: {} });
+    expect(control.content).toContain(list.id);
     const out = await provider().executeTool({ name: PM_LIST_LISTS_TOOL_ID, input: {} });
     expect(out.isError).toBeFalsy();
     expect(JSON.parse(out.content)).toEqual({ lists: [] });
@@ -80,10 +98,11 @@ describe('CFP-1 — priority-matrix read tools: toggle + acting-user gates', () 
 
   it('read tools fail closed (typed) when the toggle is off', async () => {
     await setPm('off');
-    const out = await provider({ actingUserId: 'u-1' }).executeTool({ name: PM_LIST_LISTS_TOOL_ID, input: {} });
-    expect(out.isError).toBe(true);
-    expect(JSON.parse(out.content)).toMatchObject({ error: 'feature_disabled' });
-    await setPm('on');
+    try {
+      const out = await provider({ actingUserId: 'u-1' }).executeTool({ name: PM_LIST_LISTS_TOOL_ID, input: {} });
+      expect(out.isError).toBe(true);
+      expect(JSON.parse(out.content)).toMatchObject({ error: 'feature_disabled' });
+    } finally { await setPm('on'); }
   });
 });
 
@@ -161,6 +180,50 @@ describe('R3 — score-idea takes numeric strings; ranked-ideas marks the unscor
     expect(scored.priority).toBeGreaterThan(0);
     expect(scored.unscored).toBeUndefined();    // …and never smeared onto a scored idea
   });
+
+  // ADR 0667 D1c — on a `weighted` list "priority 0" and "nothing scored" coincide, so the
+  // case above cannot tell the old keying from the new. A WSJF (ratio) list separates them:
+  // a blank job-size makes a 3-of-4-scored idea priority 0, and a partially scored idea
+  // can still carry a non-zero priority.
+  it('D1c — on a WSJF list, ranked-ideas keys unscored / partiallyScored on completeness, not on priority 0', async () => {
+    await setPm('on');
+    const list = await createList(TENANT, orgId, 'u-1', { name: 'D1c wsjf', presetId: 'wsjf' });
+    expect(list.criteriaSet.criteria.map((c) => c.id)).toEqual(['user-business-value', 'time-criticality', 'risk-reduction', 'job-size']);
+    const p = provider({ actingUserId: 'u-1' });
+    const capture = async (title: string): Promise<string> =>
+      (JSON.parse((await p.executeTool({ name: PM_SUBMIT_IDEA_TOOL_ID, input: { listId: list.id, title } })).content) as { cardId: string }).cardId;
+    const score = async (cardId: string, scores: Record<string, number>): Promise<void> => {
+      const out = await p.executeTool({ name: PM_SCORE_IDEA_TOOL_ID, input: { listId: list.id, cardId, scores } });
+      expect(out.isError, out.content).toBeFalsy();
+    };
+    const noJobSize = await capture('Cost of delay, no job size');
+    const partialNonZero = await capture('Partly scored, non-zero');
+    const complete = await capture('Fully scored');
+    const blank = await capture('Not scored');
+    await score(noJobSize, { 'user-business-value': 10, 'time-criticality': 10, 'risk-reduction': 10 });
+    await score(partialNonZero, { 'user-business-value': 8, 'time-criticality': 6, 'job-size': 3 });
+    await score(complete, { 'user-business-value': 8, 'time-criticality': 6, 'risk-reduction': 4, 'job-size': 3 });
+
+    type Row = { cardId: string; priority: number; unscored?: boolean; partiallyScored?: { scored: number; declared: number; missing: string[] } };
+    const ranked = await p.executeTool({ name: PM_RANKED_IDEAS_TOOL_ID, input: { listId: list.id } });
+    const ideas = (JSON.parse(ranked.content) as { ideas: Row[] }).ideas;
+    const row = (id: string): Row => ideas.find((i) => i.cardId === id)!;
+
+    // 3 of 4 scored, priority exactly 0 — NOT unscored (priority-0 keying lied here).
+    expect(row(noJobSize).priority).toBe(0);
+    expect(row(noJobSize).unscored).toBeUndefined();
+    expect(row(noJobSize).partiallyScored).toEqual({ scored: 3, declared: 4, missing: ['job-size'] });
+    // Partially scored with a NON-zero priority — still disclosed as partial.
+    expect(row(partialNonZero).priority).toBeGreaterThan(0);
+    expect(row(partialNonZero).unscored).toBeUndefined();
+    expect(row(partialNonZero).partiallyScored).toEqual({ scored: 3, declared: 4, missing: ['risk-reduction'] });
+    // Complete: neither flag.
+    expect(row(complete).unscored).toBeUndefined();
+    expect(row(complete).partiallyScored).toBeUndefined();
+    // Nothing scored: both.
+    expect(row(blank).unscored).toBe(true);
+    expect(row(blank).partiallyScored).toEqual({ scored: 0, declared: 4, missing: ['user-business-value', 'time-criticality', 'risk-reduction', 'job-size'] });
+  });
 });
 
 /**
@@ -180,12 +243,10 @@ describe('PMXU-1 — AI provenance stamped at the writer', () => {
     const sub = await p.executeTool({ name: PM_SUBMIT_IDEA_TOOL_ID, input: { listId: list.id, title: 'Agent-captured idea' } });
     expect(sub.isError).toBeFalsy();
     const { cardId } = JSON.parse(sub.content) as { cardId: string };
-    const { getCard } = await import('../src/host/kanbanService.js');
     expect((await getCard(cardId))?.source).toBe('agent');
 
     const score = await p.executeTool({ name: PM_SCORE_IDEA_TOOL_ID, input: { listId: list.id, cardId, scores: { roi: 8, urgency: 3, cost: 7 } } });
     expect(score.isError, score.content).toBeFalsy();
-    const { getVoteBreakdown } = await import('../src/features/priority-matrix/priorityMatrixService.js');
     const votes = await getVoteBreakdown(TENANT, list.id, cardId);
     expect(votes).toHaveLength(1);
     expect(votes[0]!.voterId).toBe('u-1');
@@ -195,13 +256,10 @@ describe('PMXU-1 — AI provenance stamped at the writer', () => {
   it('an idea submitted by the RUN SURFACE is source:workflow; a route/service write stays source:human', async () => {
     await setPm('on');
     const list = await createList(TENANT, orgId, 'u-1', { name: 'Provenance 2' });
-    const { buildPriorityMatrixSurface } = await import('../src/features/priority-matrix/surface.js');
     const surface = buildPriorityMatrixSurface({ tenantId: TENANT });
     const out = JSON.parse(JSON.stringify(await surface.submitIdea({ listId: list.id, title: 'Run-filed idea' }))) as { cardId: string };
-    const { getCard } = await import('../src/host/kanbanService.js');
     expect((await getCard(out.cardId))?.source).toBe('workflow');
 
-    const { submitIdea } = await import('../src/features/priority-matrix/priorityMatrixService.js');
     const humanCard = await submitIdea(TENANT, list.id, 'u-1', { title: 'Human idea' });
     expect((await getCard(humanCard.id))?.source).toBe('human');
   });
@@ -216,9 +274,11 @@ describe('PMXU-1 — AI provenance stamped at the writer', () => {
  */
 describe('PMX-15 — the two schema-carrying tool ids are compaction-exempt', () => {
   it('SCHEMA_READ_EXEMPT_TOOLS carries list-lists and list-ranked-ideas by their exported ids', async () => {
-    const { SCHEMA_READ_EXEMPT_TOOLS } = await import('../src/host/toolResultTransform.js');
     expect(SCHEMA_READ_EXEMPT_TOOLS).toContain(PM_LIST_LISTS_TOOL_ID);
     expect(SCHEMA_READ_EXEMPT_TOOLS).toContain(PM_RANKED_IDEAS_TOOL_ID);
+    // The behaviour the entries exist for: compaction skips both tools.
+    expect(isSchemaReadExempt(PM_LIST_LISTS_TOOL_ID)).toBe(true);
+    expect(isSchemaReadExempt(PM_RANKED_IDEAS_TOOL_ID)).toBe(true);
   });
 });
 
@@ -233,6 +293,9 @@ describe("ADR 0610 D3' — pm agent read tools honor the project membership gate
     const project = await createProject(TENANT, orgId, { name: 'Secret' });
     await setProjectVisibility(TENANT, project.id, 'private');
     const list = await createList(TENANT, orgId, 'u-1', { name: 'Secret backlog xyzzy', projectId: project.id });
+    // An idea on the private list, so a leaked ranked read is OBSERVABLE (the tool never
+    // emits the list name, and an empty list reads `{ ideas: [] }` either way).
+    await submitIdea(TENANT, list.id, 'u-1', { title: 'Hidden idea plover' });
     // A different org member with workspace:read who is NOT a project member.
     await createMember({ orgId, tenantId: TENANT, displayName: 'V', subject: 'u-2', roles: ['viewer'] });
 
@@ -248,8 +311,13 @@ describe("ADR 0610 D3' — pm agent read tools honor the project membership gate
     expect(viewerLists.some((l) => l.listId === list.id)).toBe(false);
     expect(viewerOut.content).not.toContain('Secret backlog xyzzy');
 
-    // ... and the ranked-ideas tool over that list does not leak it either.
+    // ... and the ranked-ideas tool over that list does not leak its ideas either
+    // (positive control: the owner's ranked read carries the idea).
+    const ownerRanked = await provider({ actingUserId: 'u-1' }).executeTool({ name: PM_RANKED_IDEAS_TOOL_ID, input: { listId: list.id } });
+    expect(ownerRanked.content).toContain('plover');
     const rankedOut = await provider({ actingUserId: 'u-2' }).executeTool({ name: PM_RANKED_IDEAS_TOOL_ID, input: { listId: list.id } });
-    expect(rankedOut.content).not.toContain('Secret backlog xyzzy');
+    expect(rankedOut.isError).toBeFalsy();
+    expect((JSON.parse(rankedOut.content) as { ideas: unknown[] }).ideas).toEqual([]);
+    expect(rankedOut.content).not.toContain('plover');
   });
 });

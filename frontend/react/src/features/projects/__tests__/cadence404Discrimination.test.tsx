@@ -7,6 +7,10 @@
  * Telling a user whose project was deleted to go fix their moderator sends them
  * hunting the wrong object. The client discriminates on
  * `body.details.moderatorRosterId`, which rides ONLY the roster arm.
+ *
+ * Sabotage (w13 g3 probes): collapsing the discriminator to `status === 404`
+ * reds case 2; mapping the roster arm to `cadenceProjectGone` reds case 1;
+ * mapping the project arm to the generic save error reds case 2.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, act, fireEvent } from '@testing-library/react';
@@ -26,11 +30,18 @@ vi.mock('../../../agents/rosterClient.js', async (orig) => ({
 }));
 
 import { ProjectChatTab } from '../ProjectChatTab.js';
+import type { Project } from '../projectsClient.js';
+import type { RosterEntry } from '../../../agents/rosterClient.js';
 
-const PROJECT = {
-  id: 'p1', tenantId: 't', orgId: 'org-1', name: 'Atlas', workflows: [],
-  members: [{ ref: 'agent:bot-1', role: 'observer', addedAt: 't1' }],
-} as never;
+const PROJECT: Project = {
+  id: 'p1', tenantId: 't', orgId: 'org-1', name: 'Atlas', workflows: [], boardId: 'b1',
+  members: [{ ref: 'agent:bot-1', role: 'observer', addedAt: '2026-01-01T00:00:00Z' }],
+};
+
+const ROSTER: RosterEntry[] = [{
+  rosterId: 'bot-1', persona: 'Bot One', agentRef: { agentId: 'bot' }, workflows: [], tenantId: 't', enabled: true,
+  createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z',
+}];
 
 /** The wire shape `projectsClient.asJson` throws — status + the parsed envelope. */
 const httpError = (status: number, details?: Record<string, unknown>): Error =>
@@ -44,7 +55,7 @@ const settle = async (): Promise<void> => { await act(async () => { await new Pr
 beforeEach(() => {
   updateChatCadence.mockReset();
   listRoster.mockReset();
-  listRoster.mockResolvedValue([{ rosterId: 'bot-1', persona: 'Bot One' }]);
+  listRoster.mockResolvedValue(ROSTER);
 });
 afterEach(cleanup);
 

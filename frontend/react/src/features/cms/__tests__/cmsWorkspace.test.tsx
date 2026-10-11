@@ -1,10 +1,24 @@
 /**
- * The page editor (ADR 0828): Edit, Preview and Page tabs; sections edit and
- * reorder in place on the page; drafts save themselves, a live page only on
- * request; undo, compare-and-take and AI rewrites work on the page's content.
+ * The page editor (ADR 0822 / ADR 0828): Edit, Preview and Page tabs; sections
+ * edit and reorder in place on the page; drafts save themselves, a live page
+ * only on request; undo, compare-and-take and AI rewrites work on the page's
+ * content.
+ *
+ * Sabotage that turns it red (each probed in /grade-tests w17): the autosave
+ * gate (`autosaveDraft`, and `opts.silent` for the toast), undo coalescing and
+ * the save-is-not-an-edit key check, the insert index, the `new:`→`sec:` editor
+ * id remap, the delete confirm (asked AND honoured), jump-selects-without-
+ * opening, Apply vs Discard on an AI proposal, `typedSlug`, the SEO-only save.
+ *
+ * Timing: every autosave case runs the 1.5 s `AUTOSAVE_MS` debounce on fake
+ * time (`runAutosave`), so none waits on the wall clock; the live-page case
+ * advances 10 s of fake time to prove no save ever fires. "Publish is last"
+ * can only red on an inverted order —
+ * `ACTIONS_FOR.draft` already lists publish last, so `orderedActions` is a
+ * no-op for a draft.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { render, screen, within, cleanup, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, within, cleanup, fireEvent, waitFor, act } from '@testing-library/react';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import type { ReactNode } from 'react';
 import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
@@ -71,8 +85,15 @@ vi.mock('../../publishing/publishingClient.js', () => seoApi);
 vi.mock('../../site/siteConfigClient.js', () => ({ getSiteConfig: vi.fn(async () => { throw new Error('forbidden'); }), putSiteConfig: vi.fn(), invalidateFrontPage: vi.fn() }));
 
 import { CmsPage } from '../CmsPage.js';
+import { toast } from '../../../ui/toast.js';
 
-afterEach(() => { cleanup(); ui.savePage.mockClear(); ui.confirm.mockClear(); seoApi.putSeo.mockClear(); seoApi.getSeo.mockClear(); ui.page.status = 'draft'; });
+afterEach(() => {
+  cleanup(); vi.useRealTimers();
+  ui.savePage.mockClear(); ui.confirm.mockClear(); ui.rewriteSection.mockClear(); ui.transition.mockClear();
+  seoApi.putSeo.mockClear(); seoApi.getSeo.mockClear();
+  vi.mocked(toast.success).mockClear(); vi.mocked(toast.error).mockClear();
+  ui.page.status = 'draft';
+});
 
 function renderDetail(): void {
   render(
@@ -84,6 +105,11 @@ function renderDetail(): void {
 const canvas = (): HTMLElement => screen.getByTestId('public-preview');
 const editing = (name: string): HTMLElement => screen.getByRole('group', { name: `Editing “${name}”` });
 const pagePanel = (): HTMLElement => screen.getByRole('tabpanel');
+/** Run the draft autosave (`AUTOSAVE_MS`, 1.5 s) on fake time: the case calls
+ *  `vi.useFakeTimers({ shouldAdvanceTime: true })` first; afterEach restores. */
+async function runAutosave(): Promise<void> {
+  await act(() => vi.advanceTimersByTimeAsync(2000));
+}
 async function openEditor(name: string): Promise<HTMLElement> {
   fireEvent.click(await within(await screen.findByTestId('public-preview', {}, { timeout: 3000 })).findByRole('button', { name: `Edit “${name}”` }));
   return editing(name);
@@ -95,7 +121,10 @@ describe('the page editor', () => {
     const card = await openEditor('Where it shows up');
     expect(within(card).getByDisplayValue('Where it shows up')).toBeTruthy();
     expect(within(card).queryByDisplayValue('The story we were sold')).toBeNull();
-    expect(within(canvas()).getByText('The story we were sold')).toBeTruthy();
+    // The other section is still DRAWN (its public h2), not a second editor —
+    // an open editor's head also prints the name, so plain text proves nothing.
+    expect(within(canvas()).getByRole('heading', { level: 2, name: 'The story we were sold' })).toBeTruthy();
+    expect(screen.getAllByRole('group', { name: /^Editing/ })).toHaveLength(1);
     fireEvent.click(within(card).getByRole('button', { name: 'Done' }));
     expect(screen.queryByRole('group', { name: /^Editing/ })).toBeNull();
   });
@@ -108,51 +137,70 @@ describe('the page editor', () => {
   });
 
   it('a draft saves itself shortly after an edit, without a toast or a click', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
     renderDetail();
     const card = await openEditor('The story we were sold');
     fireEvent.change(within(card).getByDisplayValue('The story we were sold'), { target: { value: 'The story I was sold' } });
     expect(screen.getByText('Unsaved changes')).toBeTruthy();
-    await waitFor(() => expect(ui.savePage).toHaveBeenCalledTimes(1), { timeout: 3000 });
+    await runAutosave();
+    await waitFor(() => expect(ui.savePage).toHaveBeenCalledTimes(1));
     const sent = ui.savePage.mock.calls[0]![2] as { sections: Array<{ data: { heading: string } }> };
     expect(sent.sections[0]!.data.heading).toBe('The story I was sold');
     await waitFor(() => expect(screen.getByText('All changes saved')).toBeTruthy());
+    expect(toast.success).not.toHaveBeenCalled();
+    expect(toast.error).not.toHaveBeenCalled();
   });
 
   it('a published page never saves itself: the status says Save updates the live page', async () => {
     ui.page.status = 'published';
     renderDetail();
     const card = await openEditor('The story we were sold');
+    // Fake only the timer the autosave effect would schedule, and run well past it.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     fireEvent.change(within(card).getByDisplayValue('The story we were sold'), { target: { value: 'Live edit' } });
     expect(screen.getByText(/save to update the live page/i)).toBeTruthy();
-    await new Promise((r) => setTimeout(r, 2000));
+    act(() => { vi.advanceTimersByTime(10_000); });
     expect(ui.savePage).not.toHaveBeenCalled();
+    vi.useRealTimers();
     fireEvent.click(screen.getByRole('button', { name: /^save$/i }));
     await waitFor(() => expect(ui.savePage).toHaveBeenCalledTimes(1));
   });
 
   it('"+" after a section inserts there, through the picker, and opens the new section', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
     renderDetail();
     fireEvent.click(await within(await screen.findByTestId('public-preview', {}, { timeout: 3000 })).findByRole('button', { name: 'Add a section after “The story we were sold”' }));
     fireEvent.click(within(screen.getByRole('dialog', { name: 'Add a section' })).getByRole('button', { name: /^Hero/ }));
     expect(screen.queryByRole('dialog', { name: 'Add a section' })).toBeNull();
-    const sent = await waitFor(() => { expect(ui.savePage).toHaveBeenCalled(); return ui.savePage.mock.calls[0]![2] as { sections: Array<{ type: string }> }; }, { timeout: 3000 });
+    await runAutosave();
+    const sent = await waitFor(() => { expect(ui.savePage).toHaveBeenCalled(); return ui.savePage.mock.calls[0]![2] as { sections: Array<{ type: string }> }; });
     expect(sent.sections.map((x) => x.type)).toEqual(['richText', 'hero', 'richText']);
     expect(screen.getByRole('group', { name: /^Editing/ })).toBeTruthy();
   });
 
   it('a new section stays open in its editor across the save that gives it its permanent id', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
     renderDetail();
     fireEvent.click(await within(await screen.findByTestId('public-preview', {}, { timeout: 3000 })).findByRole('button', { name: 'Add a section at the top' }));
     fireEvent.click(within(screen.getByRole('dialog', { name: 'Add a section' })).getByRole('button', { name: /^Hero/ }));
-    await waitFor(() => expect(ui.savePage).toHaveBeenCalled(), { timeout: 3000 });
+    await runAutosave();
+    await waitFor(() => expect(ui.savePage).toHaveBeenCalled());
     await waitFor(() => expect(screen.getByText('All changes saved')).toBeTruthy());
     expect(screen.getByRole('group', { name: /^Editing/ })).toBeTruthy();
   });
 
   it('Delete asks first, then removes the section from the page', async () => {
     renderDetail();
-    fireEvent.click(await within(await screen.findByTestId('public-preview', {}, { timeout: 3000 })).findByRole('button', { name: 'Delete “The story we were sold”' }));
-    await waitFor(() => expect(ui.confirm).toHaveBeenCalled());
+    const deleteBtn = async (): Promise<HTMLElement> => within(await screen.findByTestId('public-preview', {}, { timeout: 3000 })).findByRole('button', { name: 'Delete “The story we were sold”' });
+    // Declined: the section stays.
+    ui.confirm.mockResolvedValueOnce(false);
+    fireEvent.click(await deleteBtn());
+    await waitFor(() => expect(ui.confirm).toHaveBeenCalledTimes(1));
+    for (let i = 0; i < 5; i++) await act(async () => { await new Promise((r) => setImmediate(r)); });
+    expect(within(canvas()).getByText('The story we were sold')).toBeTruthy();
+    // Confirmed: it goes.
+    fireEvent.click(await deleteBtn());
+    await waitFor(() => expect(ui.confirm).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(within(canvas()).queryByText('The story we were sold')).toBeNull());
     expect(within(canvas()).getByText('Where it shows up')).toBeTruthy();
   });
@@ -176,7 +224,11 @@ describe('the page editor', () => {
   it('the Sections menu lists the sections and jumps without opening an editor', async () => {
     renderDetail();
     fireEvent.click(await screen.findByRole('button', { name: 'Jump to a section' }, { timeout: 3000 }));
-    fireEvent.click(await screen.findByRole('menuitem', { name: /Where it shows up/ }));
+    expect(await screen.findByRole('menuitem', { name: /The story we were sold/ })).toBeTruthy();
+    fireEvent.click(screen.getByRole('menuitem', { name: /Where it shows up/ }));
+    // Jumped: that section is now the selected one…
+    await waitFor(() => expect(canvas().querySelector('[data-section-id="sec:b"]')?.getAttribute('data-selected')).toBe('true'));
+    // …and no editor opened.
     expect(screen.queryByRole('group', { name: /^Editing/ })).toBeNull();
   });
 
@@ -208,10 +260,12 @@ describe('the page editor', () => {
   });
 
   it('an autosave adds no undo step: Undo still goes back to before the edit', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
     renderDetail();
     const card = await openEditor('The story we were sold');
     fireEvent.change(within(card).getByDisplayValue('The story we were sold'), { target: { value: 'Saved edit' } });
-    await waitFor(() => expect(screen.getByText('All changes saved')).toBeTruthy(), { timeout: 3000 });
+    await runAutosave();
+    await waitFor(() => expect(screen.getByText('All changes saved')).toBeTruthy());
     fireEvent.click(screen.getByRole('button', { name: 'Undo' }));
     expect(screen.getByDisplayValue('The story we were sold')).toBeTruthy();
     expect((screen.getByRole('button', { name: 'Undo' }) as HTMLButtonElement).disabled).toBe(true);
@@ -258,22 +312,26 @@ describe('the header', () => {
 
 describe('the Page tab', () => {
   it('cleans the address as it is typed and saves it with the page', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
     renderDetail();
     fireEvent.click(await screen.findByRole('tab', { name: 'Page' }, { timeout: 3000 }));
     const address = within(pagePanel()).getByLabelText(/address/i) as HTMLInputElement;
     fireEvent.change(address, { target: { value: 'My New Post!' } });
     expect(address.value).toBe('my-new-post-');
-    await waitFor(() => expect(ui.savePage).toHaveBeenCalled(), { timeout: 3000 });
+    await runAutosave();
+    await waitFor(() => expect(ui.savePage).toHaveBeenCalled());
     expect(ui.savePage.mock.calls[0]![2]).toMatchObject({ slug: 'my-new-post-' });
   });
 
   it('the description saves through the search and social record, keeping its other fields', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
     renderDetail();
     fireEvent.click(await screen.findByRole('tab', { name: 'Page' }, { timeout: 3000 }));
     const description = await within(pagePanel()).findByDisplayValue('Old description');
     fireEvent.change(description, { target: { value: 'A sharper description' } });
     expect(within(pagePanel()).getByText('21 / 160')).toBeTruthy();
-    await waitFor(() => expect(seoApi.putSeo).toHaveBeenCalledTimes(1), { timeout: 3000 });
+    await runAutosave();
+    await waitFor(() => expect(seoApi.putSeo).toHaveBeenCalledTimes(1));
     expect(seoApi.putSeo.mock.calls[0]![2]).toEqual({ metaDescription: 'A sharper description', noindex: false });
     expect(ui.savePage).not.toHaveBeenCalled();
   });

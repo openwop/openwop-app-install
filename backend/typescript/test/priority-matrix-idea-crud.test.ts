@@ -4,6 +4,11 @@
  *   - PATCH  /lists/:listId/ideas/:cardId          → edit title/description
  *   - DELETE /lists/:listId/ideas/:cardId          → delete (idempotent 404)
  *   - POST   /lists/:listId/ideas/:cardId/clone     → clone (copies single-mode scores)
+ *
+ * What turns it red (w15 probes, `priorityMatrixService.ts`): dropping the description
+ * write or the empty-title throw in `editIdea`; `deleteIdea` skipping `deleteCard` or
+ * answering true for a missing card; `cloneIdea` dropping the "(copy)" suffix, the
+ * description, the score copy, or the caller's title override.
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -87,7 +92,7 @@ describe('idea clone (ADR 0259)', () => {
     const c = client(); await signup(c);
     const listId = await newList(c);
     const a = (await c.post(`${L}/${encodeURIComponent(listId)}/ideas`, { title: 'Enterprise SSO', description: 'roll it out' })).body;
-    await c.put(`${L}/${encodeURIComponent(listId)}/ideas/${encodeURIComponent(a.id)}/scores`, { scores: HIGH });
+    expect((await c.put(`${L}/${encodeURIComponent(listId)}/ideas/${encodeURIComponent(a.id)}/scores`, { scores: HIGH })).status).toBe(200);
 
     const res = await c.post(`${L}/${encodeURIComponent(listId)}/ideas/${encodeURIComponent(a.id)}/clone`, {});
     expect(res.status, JSON.stringify(res.body)).toBe(201);
@@ -100,6 +105,8 @@ describe('idea clone (ADR 0259)', () => {
     expect(clone?.card.description).toBe('roll it out');
     // Single-mode scores are copied, so the clone is ranked with the same priority.
     const orig = ideas.find((r) => r.card.id === a.id);
+    // Non-zero first, so equality cannot be two UNSCORED ideas agreeing on 0.
+    expect(orig?.computedPriority ?? 0).toBeGreaterThan(0);
     expect(clone?.computedPriority).toBeCloseTo(orig?.computedPriority ?? -1, 5);
   });
 
@@ -110,5 +117,7 @@ describe('idea clone (ADR 0259)', () => {
     const res = await c.post(`${L}/${encodeURIComponent(listId)}/ideas/${encodeURIComponent(a.id)}/clone`, { title: 'Base — variant B' });
     expect(res.status).toBe(201);
     expect(res.body.title).toBe('Base — variant B');
+    // …and it is what was persisted, not just echoed.
+    expect((await listIdeas(c, listId)).find((r) => r.card.id === res.body.id)?.card.title).toBe('Base — variant B');
   });
 });

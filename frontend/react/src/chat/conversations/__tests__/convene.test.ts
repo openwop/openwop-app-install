@@ -1,5 +1,19 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import type { TFunction } from 'i18next';
+/**
+ * ADR 0140 G3 — the shared `@@` interceptors (`convene.ts`) every chat surface runs on the
+ * core submit pipeline. Guards: the board summon contract (resolve by handle → seat the
+ * council → attach the board → queue the cadence → route to the chair, ADR 0040); the
+ * ADR 0278 canonical-room redirect for a PURE summon in an EMPTY chat (and its fail-open);
+ * the ADR 0665 D1 (board) + ADR 0608 D9 / CPWF-4 (project) moderator REFUSALS — no silent
+ * chair substitution; and the 2026-10-02 fix that resolves advisors against the agent
+ * inventory, not only the picker's lossy list.
+ *
+ * Sabotage-witnessed (/grade-tests w12): each refusal guard, its scoping conjunct, the
+ * redirect + pure-summon test + fail-open catch, the `agent:` ref form, the no-advisors
+ * `handled`, the inventory skip/catch/resolve, the project bare-`@@` regex + guidance, and
+ * the chair's opener each turn a case red.
+ */
+import { describe, it, expect, vi, beforeEach, beforeAll } from 'vitest';
+import i18next from 'i18next';
 
 // Mock the data clients; keep detectBoardMention + planBoardroomTurns real (pure).
 const getBoardByHandle = vi.fn();
@@ -17,6 +31,19 @@ vi.mock('../../../client/agentsClient.js', () => ({ listAgents: () => listAgents
 
 import { buildBoardInterceptor, buildProjectConveneInterceptor, type ConveneDeps } from '../convene.js';
 import type { CoreSubmitContext } from '../../lib/chatSubmit.js';
+import type { AgentMentionEntry } from '../../lib/agentMentions.js';
+import type { BYOKActiveConfig } from '../../../byok/lib/useBYOKConfig.js';
+
+/** A full picker row — every field of the real type, no cast. */
+const entry = (agentId: string, displayName: string, slug = agentId): AgentMentionEntry => ({
+  agentId, slug, displayName, persona: displayName, description: 'd', packName: 'p', packVersion: '1', modelClass: 'std',
+});
+const CONFIG: BYOKActiveConfig = { provider: 'demo', model: 'm', credentialRef: 'r' };
+
+// A real i18next `t` in cimode: returns the namespaced key verbatim, so assertions read
+// `chat:<key>` without casting a stub to `TFunction`.
+const i18n = i18next.createInstance();
+beforeAll(async () => { await i18n.init({ lng: 'cimode', appendNamespaceToCIMode: true }); });
 
 // A `SubmitInterceptor` takes (text, attachments, ctx). These interceptors declare
 // only the first two — TS permits that — so ctx is genuinely unused here and the
@@ -24,20 +51,26 @@ import type { CoreSubmitContext } from '../../lib/chatSubmit.js';
 // and passing the real third argument keeps the test honest to the contract: if an
 // interceptor ever starts reading ctx, these tests exercise it instead of silently
 // handing it `undefined`.
-const ctx = {} as CoreSubmitContext;
+const ctx: CoreSubmitContext = {
+  config: CONFIG,
+  send: vi.fn(() => Promise.resolve()),
+  reset: vi.fn(),
+  cancel: vi.fn(() => Promise.resolve()),
+  emitSystem: vi.fn(),
+  runWorkflowMention: vi.fn(() => Promise.resolve()),
+  activeAgents: { activateAgent: vi.fn((e: AgentMentionEntry) => e.agentId), currentAgentId: '' },
+  agentEntries: [],
+};
 
 function deps(over: Partial<ConveneDeps> = {}): ConveneDeps {
   return {
-    agentEntries: [
-      { agentId: 'chair', slug: 'chair', displayName: 'Chair', modelClass: 'std' },
-      { agentId: 'adv1', slug: 'adv1', displayName: 'Adv 1', modelClass: 'std' },
-    ] as never,
+    agentEntries: [entry('chair', 'Chair'), entry('adv1', 'Adv 1')],
     activeAgents: { activateAgent: vi.fn((e: { agentId: string }) => e.agentId), switchTo: vi.fn() },
     cadenceStart: vi.fn(),
     send: vi.fn(() => Promise.resolve()),
-    config: { provider: 'demo', model: 'm', credentialRef: 'r' } as never,
+    config: CONFIG,
     emitSystem: vi.fn(),
-    t: ((k: string) => k) as unknown as TFunction,
+    t: i18n.t,
     attachBoard: vi.fn(() => Promise.resolve()),
     getSessionId: () => 'sess-1',
     conveneProjectId: null,
@@ -64,7 +97,8 @@ describe('buildBoardInterceptor', () => {
     expect(d.activeAgents.activateAgent).toHaveBeenCalledTimes(2); // chair + advisor
     expect(d.activeAgents.switchTo).toHaveBeenCalledWith('chair');
     expect(d.attachBoard).toHaveBeenCalledWith('sess-1', 'b1', ['agent:chair', 'agent:adv1']);
-    expect(d.cadenceStart).toHaveBeenCalled();
+    // The cadence is queued with a real plan, the trailing text as the topic, and the handle.
+    expect(d.cadenceStart).toHaveBeenCalledWith(expect.arrayContaining([expect.anything()]), CONFIG, 'go', 'myboard');
     expect(out).toEqual({ kind: 'route', activeAgentId: 'chair', boardSummoned: true });
   });
 
@@ -83,6 +117,9 @@ describe('buildBoardInterceptor', () => {
 
   it('a summon WITH a question stays in place even in an empty chat (the text must land here)', async () => {
     getBoardByHandle.mockResolvedValue({ boardId: 'b1', moderatorRosterId: 'r-chair', advisors: ['r-adv1'], turnPolicy: { rounds: 1, order: 'declared', synthesize: false } });
+    // The redirect WOULD succeed if taken — so staying in place is the interceptor's
+    // choice, not a fall-open from an unmocked ensure (which made this case vacuous).
+    ensureBoardChat.mockResolvedValue({ sessionId: 'subjc-canonical' });
     const open = vi.fn();
     const d = deps({ isSessionEmpty: () => true, openBoardConversation: open });
     const out = await buildBoardInterceptor(d)('@@myboard what should we ship?', undefined, ctx);
@@ -186,10 +223,7 @@ describe('advisors resolve against the inventory, not only the picker list', () 
     getBoardByHandle.mockResolvedValue(board);
     listAgents.mockResolvedValue(inventory);
     // The picker kept a twin under a different id for "Adv 1".
-    const d = deps({ agentEntries: [
-      { agentId: 'chair', slug: 'chair', displayName: 'Chair', modelClass: 'std' },
-      { agentId: 'adv1-twin', slug: 'adv1', displayName: 'Adv 1', modelClass: 'std' },
-    ] as never });
+    const d = deps({ agentEntries: [entry('chair', 'Chair'), entry('adv1-twin', 'Adv 1', 'adv1')] });
     await buildBoardInterceptor(d)('@@myboard go', undefined, ctx);
     expect(d.attachBoard).toHaveBeenCalledWith('sess-1', 'b1', ['agent:chair', 'agent:adv1']);
   });
@@ -215,7 +249,7 @@ describe('buildProjectConveneInterceptor', () => {
     const d = deps({ conveneProjectId: null });
     const out = await buildProjectConveneInterceptor(d)('@@ topic', undefined, ctx);
     expect(out).toEqual({ kind: 'handled' });
-    expect(d.emitSystem).toHaveBeenCalled();
+    expect(d.emitSystem).toHaveBeenCalledWith('chat:conveneNoProject');
     expect(d.send).not.toHaveBeenCalled();
   });
 
@@ -226,7 +260,7 @@ describe('buildProjectConveneInterceptor', () => {
     const out = await buildProjectConveneInterceptor(d)('@@ kick off', undefined, ctx);
     expect(out).toEqual({ kind: 'handled' });
     expect(getProject).toHaveBeenCalledWith('proj-1');
-    expect(d.send).toHaveBeenCalled(); // the chair's opener
+    expect(d.send).toHaveBeenCalledWith('kick off', CONFIG, { activeAgentId: 'chair' }); // the chair's opener
   });
 
   /**
@@ -269,7 +303,7 @@ describe('buildProjectConveneInterceptor', () => {
     const d = deps({ conveneProjectId: 'proj-1' });
     await buildProjectConveneInterceptor(d)('@@ kick off', undefined, ctx);
     expect(d.emitSystem).not.toHaveBeenCalledWith('chat:conveneModeratorUnavailable');
-    expect(d.send).toHaveBeenCalled();
+    expect(d.send).toHaveBeenCalledWith('kick off', CONFIG, { activeAgentId: 'chair' });
     expect(d.activeAgents.switchTo).toHaveBeenCalledWith('chair');
   });
 
@@ -282,7 +316,7 @@ describe('buildProjectConveneInterceptor', () => {
     const d = deps({ conveneProjectId: 'proj-1' });
     await buildProjectConveneInterceptor(d)('@@ go', undefined, ctx);
     expect(d.emitSystem).not.toHaveBeenCalledWith('chat:conveneModeratorUnavailable');
-    expect(d.send).toHaveBeenCalled();
+    expect(d.send).toHaveBeenCalledWith('go', CONFIG, { activeAgentId: 'adv1' });
   });
 
   it('does NOT fire for @@<handle> (lets the board interceptor take it)', async () => {

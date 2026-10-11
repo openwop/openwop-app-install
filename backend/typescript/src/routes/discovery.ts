@@ -1,5 +1,6 @@
 /**
- * /.well-known/openwop + /v1/openapi.json + Capabilities-Etag.
+ * /.well-known/openwop (the v2 root; ADR 0812 P4 deleted the v1 document) + the
+ * vendor OpenAPI document.
  *
  * Honest advertisement: only what this sample actually supports. Real
  * deployers update the capabilities block whenever they swap a stub
@@ -8,6 +9,7 @@
 
 import { oauthAdvertisementSnapshot, refreshOAuthAdvertisement } from '../features/connections/oauthAdvertisement.js';
 import { RUN_LIST } from '../host/runList.js';
+import { confidenceEscalationFloor, multiAgentExecutionModelVersion } from '../host/multiAgentPhases.js';
 import { MAX_FUTURE_HORIZON_ISO } from '../host/cronSchedule.js';
 import { secretRotationOverlapSeconds, SUPPORTED_SIGNATURE_ALGORITHMS } from '../host/webhookStandardWebhooks.js';
 import { advertisedHostEventTypes, hostEventsV2Enabled } from '../host/hostEventTypes.js';
@@ -17,10 +19,8 @@ import { DEFAULT_SERVICE_DESCRIPTION, DEFAULT_SERVICE_VENDOR, type AppConfig } f
 import { requestOrigin } from '../host/requestOrigin.js';
 import { streamBaseRecord } from '../host/streamBase.js';
 import { longTermMemoryDurable, memoryCapability } from '../host/memoryDimensions.js';
-import { contractProvenance } from '../host/contractProvenance.js';
 import { createLogger } from '../observability/logger.js';
 import {
-  certificationBundleUrl,
   certificationBundleUrlV2,
   conformanceClaims,
   ensureCertificationEvidence,
@@ -30,71 +30,55 @@ import {
   CERTIFICATION_BUNDLE_PATH,
   CONFORMANCE_CLAIMS_PATH,
 } from '../host/conformanceClaims.js';
-import { SUPPORTED_RUN_ENCODINGS, ifNoneMatchSatisfied } from '../host/restTransport.js';
-import { minClientVersion, preferredVersion, protocolVersions, VENDOR_ROOT, PROTOCOL_VERSION_V1, negotiatedMajor, advertisedPath } from '../middleware/protocolVersion.js';
+import { ifNoneMatchSatisfied } from '../host/restTransport.js';
+import { minClientVersion, preferredVersion, protocolVersions, VENDOR_ROOT, PROTOCOL_VERSION_V1, advertisedPath } from '../middleware/protocolVersion.js';
 import { EVENT_LOG_SCHEMA_VERSION } from '../storage/eventEra.js';
 import { INTERRUPT_TOKEN_ALGS } from '../host/interruptToken.js';
 import { defaultRetentionDays } from '../storage/runRetentionStamp.js';
-import { a2uiDeltaTransportEnabled } from '../host/a2uiSurfaceDelta.js';
 import { MAX_MULTI_PARTY_PARTICIPANTS } from '../host/multiPartyConversation.js';
 import { storageFamilyFacets, v2AdvertisedStorageFamilies } from '../host/storageFamilyAdvert.js';
-import { channelPresenceEnabled } from '../features/channels/routes.js';
-import { listCapabilities } from '../executor/runtimeCapabilities.js';
 import { RUN_DURATION_CEILING_MS } from '../executor/executor.js';
 import { demoMode } from '../host/demoMode.js';
 import { registerV2Extension, v2Extensions } from '../host/discoveryExtensions.js';
 import { hostI18nEnabled, hostDefaultLocale, hostSupportedLocales, hostContentLocales } from '../host/i18n/index.js';
 import type { Storage } from '../storage/storage.js';
-import { listHostSurfaces } from '../bootstrap/hostSurfaceRegistry.js';
-import { universalEnvelopeKinds } from '../host/envelopeAcceptor.js';
-import { evalSuiteEnabled } from '../host/workforceEval.js';
-import { MAX_INLINE_MEDIA_BYTES } from './mediaAssets.js';
 import { INPUT_MODALITIES } from '../aiProviders/aiProvidersHost.js';
 import { hostAdvertisedSelfHosted } from '../host/compatEndpoints.js';
-import { imageGenerationAdvertised, videoGenerationAdvertised, subscriptionAdvertisedProviders, advertisedProviderAuthModes, advertisedSubscriptionOnlyProviders } from '../aiProviders/aiProvidersHost.js';
-import { selfHostedRunnerAdvertised } from '../host/selfHostedRunner.js';
-import { getFsSandboxRoot } from '../host/inMemorySurfaces.js';
-import { workspaceAdvertisable } from '../host/workspaceReadiness.js';
+import { subscriptionAdvertisedProviders, advertisedSubscriptionOnlyProviders } from '../aiProviders/aiProvidersHost.js';
 import {
   SUBJECT_LINK_KEY,
-  subjectLinkRealmAlignment,
   samlProfileAdvertised,
   scimProfileAdvertised,
   combinedSubjectLinkingActive,
 } from '../host/auth/subjectLinkService.js';
 import { listLoadedConformanceFixtures } from '../host/index.js';
-import { conformanceNodesEnabled } from '../bootstrap/conformanceMockAgent.js';
 import { getPromptsHostConfig } from '../host/promptHostConfig.js';
 import { workflowChainPacksCapability } from '../host/workflowChainPackLoader.js';
 import { getEnvelopeReasoningConfig } from '../host/envelopeReasoningConfig.js';
 import { getModelCapabilityGateConfig } from '../host/modelCapabilityGateConfig.js';
-import { getEnvelopeReliabilityConfig } from '../host/envelopeReliabilityConfig.js';
 import { authorizationCapability, isAuthorizationEnforced, SCOPES_SUPPORTED } from '../host/protocolAuthorization.js';
 import { subWorkflowInputMappingHonoured } from '../host/capabilityOverlay.js';
-import { registeredFeatureSurfaceIds } from '../host/featureSurfaces.js';
 import { listArtifactTypes } from '../host/artifactTypes.js';
 import { triggerIngestionEnabled, streamCdcIngestionEnabled, inboundSigningEnabled, MAX_INGEST_BODY_BYTES } from '../host/triggerIngestionService.js';
 import { TRIGGER_DEAD_LETTER_MAX_PAGE_SIZE, TRIGGER_DEAD_LETTER_RETENTION_DAYS } from '../host/triggerBridgeService.js';
-import { purposePropagationEnabled } from '../features/destination-sync/destinationSyncService.js';
 import { dataResidencyAdvertised, dataResidencyRegions } from '../features/cdp/dataResidency.js';
 import { anonymousActorAdvertised, anonymousActorCapability } from '../host/anonymousActor.js';
 import { activationMode as proposalsActivationMode } from '../features/proposals/proposalsService.js';
 import { requiresBounds as goalsRequiresBounds } from '../features/goals/goalsService.js';
 import { uiPluginsCapability, uiPluginOperationsServed } from '../host/uiPluginRpc.js';
-import { dispatchCapability } from '../host/dispatchFanOut.js';
 import { presentationEnabled } from '../host/hostProfile.js';
 import { readOidcConfigFromEnv, OIDC_REVOCATION_WINDOW_S } from '../middleware/oidcVerifier.js';
 import { PRM_SEGMENT } from '../middleware/authChallenge.js';
 // RFC 0152/0153 §A — the version SSoTs. Imported so the advert is DERIVED
 // from the same constants the refusal/handshake paths read.
-import { A2A_PROFILES, A2A_SUPPORTED_VERSIONS, A2A_VERSIONS_REFRESHED_AT, a2aMinimumVersion, a2aV2Profiles, a2aV2RulesActive, advertisedA2AProtocolVersion, servedA2AVersions } from '../host/a2aProfile.js';
+import { A2A_VERSIONS_REFRESHED_AT, a2aMinimumVersion, a2aV2Profiles, a2aV2RulesActive, advertisedA2AProtocolVersion, servedA2AVersions } from '../host/a2aProfile.js';
 // RFC 0151 §A — the compensation SSoT. Same reason as the two above: the
 // ordering model advertised here is the one `compensationUnwind.ts` sorts by and
 // `workflowDefinitionValidation.ts` accepts at registration, because all three
 // read this constant rather than a literal of their own.
 import { seamsFloorServed } from './conformanceSeams.js';
 import { COMPENSATION_CAPABILITY } from '../host/compensationCapability.js';
-import { MCP_CURRENT_FEATURES, MCP_PROFILES, MCP_SUPPORTED_VERSIONS, MCP_VERSIONS_REFRESHED_AT, advertisedMcpProtocolVersion, mcpMinimumRevision, mcpV2Profiles } from '../host/mcpProfile.js';
+import { MCP_CURRENT_FEATURES, MCP_SUPPORTED_VERSIONS, MCP_VERSIONS_REFRESHED_AT, advertisedMcpProtocolVersion, mcpMinimumRevision, mcpV2Profiles } from '../host/mcpProfile.js';
 import {
   SAFE_FETCH_MAX_RESPONSE_BODY_BYTES,
   SAFE_FETCH_REQUEST_TIMEOUT_MS,
@@ -322,7 +306,15 @@ function v2AuthFamily(): Record<string, unknown> | null {
       witness: 'seam-gated',
       lanes,
       // RFC 0163 §B — the identifier the SAML and SCIM lanes are joined on.
-      subjectLinkKey: 'opaque-idp',
+      // Spec-steward ruling 2026-10-10: ONLY when BOTH lanes are advertised
+      // (identity.md §3, "The link is a record": a link joins exactly two
+      // subjects, so a one-lane host forms none; Axiom 2; RFC 0164 §A.3 and
+      // RFC 0165's `subject.keyClass` are scoped to "when both … are
+      // advertised"). v1 behaved the same way. The v2 auth facet schema does
+      // not enforce it (a corpus gap), so `adr0858-p4-*` is the guard.
+      ...(profiles.includes('openwop-auth-saml') && profiles.includes('openwop-auth-scim')
+        ? { subjectLinkKey: SUBJECT_LINK_KEY }
+        : {}),
     },
   };
 }
@@ -433,6 +425,63 @@ function v2AgentsFamily(): Record<string, unknown> {
       until: '2.1',
       witness: 'witnessable-gated',
       ...stripSupported(agentsCapability()),
+      // ADR 0858 P4 (spec-steward ruling openwop-e2 2026-10-10): `agents.dispatch`
+      // is the v2 home of the v1 `dispatch` claim. TRUE because the host
+      // implements `core.dispatch` (`bootstrap/nodes.ts`, registered on every
+      // boot) and honours CP-2: it starts each worker as a separate child run
+      // through `dispatchSubWorkflow` and never touches the parent's registered
+      // definition (`test/adr0858-p4-multiagent-dispatch.test.ts`). The v1
+      // fan-out descriptor (`dispatchCapability()`) has NO v2 seat and is
+      // withheld (a corpus gap the steward is tracking).
+      dispatch: true,
+    },
+  };
+}
+
+/**
+ * ADR 0858 P4 — `multiAgent` at major 2 (spec-steward ruling openwop-e2,
+ * 2026-10-10). `version` is the highest N whose phases 1..N are ALL on, read
+ * from the gates the runtime sites read (`host/multiAgentPhases.ts`); absent
+ * when phase 1 is off. Level 6 (verifier) is never claimed: only the
+ * verify-run seam injects a verifier.
+ *
+ * - `confidenceEscalationFloor` (v >= 2): the floor `nodes.ts` escalates at.
+ * - `confidenceEscalationInterruptKind: 'clarification'` (v >= 2): the kind
+ *   `nodes.ts` suspends with. v1 advertised `x-host-openwop-app-clarification`,
+ *   which was never emitted and is not a legal v2 kind (the v2 `kind` is a
+ *   closed enum; vendor kinds travel as `custom` + `data.customKind`).
+ * - `crossHostCausation` (v >= 3): the stable `CROSS_HOST_CAUSATION_HOST_ID`;
+ *   `ancestryEndpointSupported` because `routes/runs.ts` serves
+ *   getRunAncestry under the same phase-3 gate. No event's `causationId` names
+ *   a foreign event (causation ids are minted locally), so no event carries
+ *   `causationHostId`, which execution.md requires only for those.
+ * - `replayDeterminism` (v >= 4): `executor.ts` emits `replay.divergedAtRefusal`
+ *   on a replay fork under the phase-4 gate.
+ * - `statefulResume` (v >= 5): `nodes.ts` persists the iteration counter in a
+ *   run variable, so a resumed loop continues at the same `iteration`.
+ */
+function v2MultiAgentFamily(since: string, until: string): Record<string, unknown> {
+  const version = multiAgentExecutionModelVersion();
+  if (version === 0) return {};
+  return {
+    multiAgent: {
+      status: 'experimental',
+      since,
+      until,
+      witness: 'claims-check',
+      executionModel: {
+        version,
+        ...(version >= 2
+          ? { confidenceEscalationFloor: confidenceEscalationFloor(), confidenceEscalationInterruptKind: 'clarification' }
+          : {}),
+        ...(version >= 3
+          ? { crossHostCausation: { hostId: CROSS_HOST_CAUSATION_HOST_ID, ancestryEndpointSupported: true } }
+          : {}),
+        ...(version >= 4
+          ? { replayDeterminism: { llmCacheKeyRecipe: 'spec-rfc-0041', refusalDivergenceEmission: true } }
+          : {}),
+        ...(version >= 5 ? { statefulResume: true } : {}),
+      },
     },
   };
 }
@@ -467,11 +516,10 @@ function v2EnvelopesFamily(): Record<string, unknown> {
  * claim a kind, a floor or a mode the admission does not enforce.
  *
  * `kinds` lists `ui.a2ui-surface` alone: it is the only non-universal kind with
- * a major-2 admission path. `media.*` stays a v1 claim (the v1 root still lists
- * it) until something at major 2 admits it. The floor is 2, so a version-1
- * surface is below the floor and — under `warn` — validated against version 2.
- * v1 keeps its own floor of 1 (`buildAdvertisement`); the majors are separate
- * contracts. NEVER add `a2uiSurface.deltaTransport` here: RFC 0209 §D.15
+ * a major-2 admission path. `media.*` is not listed until something at major 2
+ * admits it (the v1 root that listed it is deleted, ADR 0812 P4). The floor is
+ * 2, so a version-1 surface is below the floor and — under `warn` — validated
+ * against version 2. NEVER add `a2uiSurface.deltaTransport` here: RFC 0209 §D.15
  * deprecates the delta frame for major 2 (a v2 host SHOULD NOT advertise it).
  */
 function v2EnvelopeCatalogFamilies(since: string, until: string): Record<string, unknown> {
@@ -581,96 +629,6 @@ function advertisedAuthProfiles(): string[] {
 }
 
 /**
- * `capabilities.auth.workloadIdentity` (RFC 0154 §A/§B, ADR 0556 P3) — emitted
- * iff the profile is configured, on the same per-request read as the OIDC block
- * so advert, middleware and seam can never disagree.
- *
- * Every value is DERIVED, none is a literal:
- *   - `schemes[]` comes from the configured trust roots, so a scheme can only be
- *     claimed by configuring a root that issues it. A literal list is how a host
- *     ends up advertising `mtls-san` with no client-certificate termination
- *     behind it — the advertised-but-unhonored posture the RFC calls the exact
- *     failure the profile prevents.
- *   - `senderConstraint[]` is what the host REQUIRES as proof-of-possession,
- *     which is `[]` by default. RFC 0154 §C makes the empty array meaningful
- *     rather than absent: it IS the explicit, policy-controlled bearer-fallback
- *     advertisement, and a bearer-verified identity is distinguishable from a
- *     key-bound one in the audit facts (`openwop.identity.sender_constraint`).
- *     mTLS and DPoP are NOT claimed — this host implements neither.
- *   - `delegation.maxChainDepth` is the bound `checkDelegation` actually
- *     enforces, read from the same config object.
- *
- * The subject → principal mapping §A requires a host to document lives in
- * `host/workloadIdentity.ts` (`principalIdFor`) and in ADR 0556 P3: an opaque
- * `workload:<scheme>:<salted-hash>` under a per-tenant rotatable salt, never the
- * presented subject.
- */
-function workloadIdentityCapability(): {
-  workloadIdentity: {
-    supported: true;
-    schemes: string[];
-    senderConstraint: string[];
-    delegation: { supported: true; maxChainDepth: number };
-  };
-} | Record<string, never> {
-  const cfg = readWorkloadIdentityConfigFromEnv();
-  if (!cfg) return {};
-  return {
-    workloadIdentity: {
-      supported: true,
-      schemes: advertisedWorkloadSchemes(cfg),
-      senderConstraint: [...cfg.senderConstraints],
-      delegation: { supported: true, maxChainDepth: cfg.maxChainDepth },
-    },
-  };
-}
-
-/** `capabilities.auth.oidc` sub-block (RFC 0010 §D) — emitted iff the verifier
- *  is configured, mirroring `advertisedAuthProfiles()` so profile + sub-block
- *  can never disagree. Read per-request (env-driven, like the profiles). */
-function oidcCapability(): { oidc: { supported: true; issuers: string[]; audience: string } } | Record<string, never> {
-  const cfg = readOidcConfigFromEnv();
-  if (!cfg) return {};
-  return { oidc: { supported: true, issuers: [cfg.issuer], audience: cfg.audience } };
-}
-
-/** `capabilities.auth.subjectLinking` (RFC 0159 §B / ADR 0613) — the SCIM⟷SAML
- *  combined leaver contract. Emitted `true` ONLY when BOTH `openwop-auth-saml`
- *  AND `openwop-auth-scim` are genuinely advertised, because the contract needs
- *  both lanes to exist: a host with only one profile has no cross-lane link to
- *  maintain, so claiming it would be a dishonest wire statement (the §B honesty
- *  rule; fails OPENWOP_REQUIRE_BEHAVIOR=true otherwise). DERIVED from the SAME
- *  `advertisedAuthProfiles()` the profiles list is built from, so the flag and
- *  the profiles can never disagree. */
-/** RFC 0163 §A adds `subjectLinkKey` — the CLASS of opaque, IdP-stable, non-PII
- *  identifier the two lanes are joined on — REQUIRED (schema `if`/`then` +
- *  auth-profiles MUST) whenever `subjectLinking:true`. It is DERIVED from
- *  `SUBJECT_LINK_KEY` (the same const the link path honours), so the advertised
- *  class and the class the host actually joins on cannot drift (§A.2 "advertise
- *  only the class you honour"). openwop-app links on externalId↔persistent-NameID
- *  ⇒ `opaque-idp`. */
-function subjectLinkingCapability(): { subjectLinking: true; subjectLinkKey: typeof SUBJECT_LINK_KEY } | Record<string, never> {
-  const profiles = advertisedAuthProfiles();
-  // USERS-13 — BOTH profiles AND realm alignment: a configured production SAML
-  // SP whose `OPENWOP_SAML_TENANT` differs from `OPENWOP_SCIM_TENANT` consults a
-  // deny realm the SCIM lanes never write, so the link cannot fire; advertising
-  // it would be a dishonest wire claim (the §B honesty rule). The boot log names
-  // the misalignment (`subject_link_realms_misaligned`, index.ts). When withheld,
-  // `subjectLinkKey` is withheld with it (RFC 0163 §A: the key is REQUIRED iff
-  // `subjectLinking:true`, and meaningless without it).
-  // RFC 0164 (ADR 0623): the `&& subjectLinkRealmAlignment().aligned` clause is
-  // now IMPLIED by `advertisedAuthProfiles()`, which already drops
-  // `openwop-auth-scim` whenever `!combinedSubjectLinkingActive()` (misaligned
-  // realms OR no shared trust root) — so when both profiles survive together the
-  // combined contract is necessarily active (and thus aligned). It is kept here as
-  // defense-in-depth (a single predicate guarding a false wire claim, even if a
-  // future refactor changes the profile-drop).
-  return profiles.includes('openwop-auth-saml') && profiles.includes('openwop-auth-scim') && subjectLinkRealmAlignment().aligned
-    ? { subjectLinking: true, subjectLinkKey: SUBJECT_LINK_KEY }
-    : {};
-}
-
-/**
  * RFC 0040 §D — this host's stable cross-host-causation `hostId`. Advertised in
  * `crossHostCausation.hostId` and echoed by `GET /v1/runs/{runId}/ancestry`
  * (the two MUST match). A real multi-host deployment overrides via env.
@@ -678,19 +636,7 @@ function subjectLinkingCapability(): { subjectLinking: true; subjectLinkKey: typ
 export const CROSS_HOST_CAUSATION_HOST_ID =
   process.env.OPENWOP_CROSS_HOST_CAUSATION_HOST_ID ?? 'openwop-workflow-engine';
 
-/**
- * RFC 0040 Phase 3 gate. Single source of truth shared by the discovery
- * advertisement (`crossHostCausation` + `version >= 3`) and the
- * `GET /v1/runs/{runId}/ancestry` endpoint gate, so the two never drift. The
- * ladder is additive — `phase4` implies `phase3` (a `version: 4` host MUST
- * implement Phase 3 too, per `capabilities.schema.json §...version`).
- */
-export function isPhase3Enabled(): boolean {
-  return (
-    process.env.OPENWOP_MULTI_AGENT_EXECUTION_MODEL_PHASE_3 === 'true' ||
-    process.env.OPENWOP_MULTI_AGENT_EXECUTION_MODEL_PHASE_4 === 'true'
-  );
-}
+// RFC 0040 phase-3 gate: moved to `host/multiAgentPhases.ts` (ADR 0858 P4).
 
 interface Deps {
   storage: Storage;
@@ -1062,6 +1008,21 @@ function v2HostServiceFamilies(since: string, until: string): Record<string, unk
     // and then omission is the only honest encoding of "never purged".
     deadLetter: rec(retention > 0 ? { retentionDays: retention } : {}),
     artifactTypes: rec({ types: artifactTypesAdvert() }),
+    // ADR 0858 P4 (2026-10-10) — `scheduling` (RFC 0052, host-services.md
+    // §scheduling). v1 gated this on the test seam because "no clock yet fires
+    // real runs"; that stopped being true when the wall-clock daemon landed
+    // (`host/scheduleDaemon.ts`, started unconditionally in `index.ts`). Each
+    // facet is one the host honours:
+    //   - `cron`: `cronSchedule.ts` computes `nextFireAt`; the daemon fires
+    //     durable jobs (`DurableCollection`, survives restart), fire-once per
+    //     slot (ADR 0787 D1), missed ticks collapse to one recovery fire.
+    //   - `delayed`: the one-shot cadence `ONE_SHOT_CRON` + `firstFireAtMs`
+    //     (`schedulingService.ts`, ADR 0309 D1); the first fire spends the job.
+    //   - `maxFutureHorizon`: the ONE constant the registration refusal
+    //     (`schedule_horizon_exceeded`, `details.maxFutureHorizon`, routes/
+    //     scheduler.ts) and the cadence search read (ADR 0787 D6).
+    //   - `calendar`: NOT advertised — no calendar-reference schedule exists.
+    scheduling: rec({ cron: true, delayed: true, maxFutureHorizon: MAX_FUTURE_HORIZON_ISO }),
     // ADR 0858 P3 storage slice — `storageFamilyFacets()` is the one builder for
     // both majors: unenforced v1 limits DROPPED, backends DERIVED per request
     // from `resolveBackendId()` and omitted where the backend has no enum value
@@ -1456,6 +1417,7 @@ export function buildV2Advertisement(config: AppConfig, req?: Request): Record<s
     })() : {}),
     ...(v2MemoryFamily() ?? {}),
     ...v2AgentsFamily(),
+    ...v2MultiAgentFamily(SINCE, EXPERIMENTAL_UNTIL),
     ...v2EnvelopesFamily(),
     ...v2EnvelopeCatalogFamilies(SINCE, EXPERIMENTAL_UNTIL),
     ...v2HostServiceFamilies(SINCE, EXPERIMENTAL_UNTIL),
@@ -1862,33 +1824,26 @@ export function registerDiscoveryRoutes(app: Express, _deps: Deps): void {
   });
 
   app.get('/.well-known/openwop', async (req, res) => {
-    // `capabilities.md` §1 — ONE resource, two representations, selected by the
-    // `OpenWOP-Version` request header (the negotiator in
-    // `middleware/protocolVersion.ts` has already decided which). No header ⇒
-    // `preferredVersion`'s major ⇒ the v1 document, unchanged.
-    const major = negotiatedMajor(req);
+    // `capabilities.md` §1 — the v2 root is the ONLY representation this host
+    // serves. ADR 0812 P4: the v1 document and its builder are deleted; a
+    // request naming another major is refused 406 by the negotiator before it
+    // reaches this handler, so there is no representation left to select.
+    //
     // WHD-18 — the pointer below is decided from the origin cache, so make it
     // current FIRST, inside this request (bounded to 2 s, and a Map lookup when
     // cached). Awaited on purpose: under Cloud Run's CPU throttling a refresh
     // started here and finished "later" may never finish (#3056). A no-op
     // unless `OPENWOP_CERT_BUNDLE_ORIGIN` is set; never throws.
-    await ensureCertificationEvidence(major === 2 ? 2 : 1, readBundleSigningKeys());
+    await ensureCertificationEvidence(2, readBundleSigningKeys());
     // RFC 0199 (ADR 0753 D11) — same pattern: make the `oauth` claim current
     // inside the request; the builders read the snapshot synchronously.
     await refreshOAuthAdvertisement();
-    const advertisement = major === 2 ? buildV2Advertisement(_deps.config, req) : buildAdvertisement(_deps.config, req);
-    const body = JSON.stringify(advertisement);
-    // Per representation: the two documents differ, so their validators differ
-    // and an `If-None-Match` carrying the v1 ETag does not 304 the v2 read.
+    const body = JSON.stringify(buildV2Advertisement(_deps.config, req));
+    // RFC 0165 §C.2 (ADR 0625): the validator is the standard `ETag`, and a
+    // matching `If-None-Match` answers `304` through the helper the RFC 0115 run
+    // route uses. `Capabilities-Etag` was a v1 header (`headers.md` §"Removed in
+    // v2") and went with the v1 representation.
     const etag = `"${createHash('sha256').update(body).digest('hex').slice(0, 16)}"`;
-    // `Capabilities-Etag` keeps its RFC negotiation-safety semantics through v1.x
-    // (deprecated, removeIn 2.0). RFC 0165 §C.2 (ADR 0625): the SAME validator
-    // is also the standard `ETag`, and a matching `If-None-Match` answers `304`
-    // through the helper the RFC 0115 run route uses. `headers.md` §"Removed in
-    // v2" removes it at the cut, so the v2 representation carries only `ETag`
-    // (the negotiator drops it on a major-2 response either way; setting it only
-    // under major 1 keeps the intent readable at the call site).
-    if (major === 1) res.set('Capabilities-Etag', etag);
     res.set('ETag', etag);
     res.set('Cache-Control', 'public, max-age=60');
     if (ifNoneMatchSatisfied(req, etag)) {
@@ -2102,1417 +2057,6 @@ export function registerDiscoveryRoutes(app: Express, _deps: Deps): void {
       ],
     });
   });
-}
-
-/** Exported for the ADR 0550 P3 attestation projection, which must digest the
- *  SAME advertisement this host serves. It calls this directly rather than
- *  fetching `/.well-known/openwop` over HTTP: a route that requests itself has
- *  to guess its own port (wrong under a random-port test boot, fragile behind a
- *  proxy) and burns a connection plus rate budget to learn what it already
- *  knows. Caught by the route test, which got a 500. */
-// H51 — `longTermMemoryDurable()` MOVED to `host/memoryDimensions.ts`, the RFC
-// 0080 §A/§C single source of truth. It was defined here by H49 for the
-// `agents.memoryBackends` advert alone; the §C degraded projection needs the
-// SAME answer, and two derivations of "is memory durable" would be two claims
-// about one subsystem whose disagreement no schema catches.
-
-export function buildAdvertisement(config: AppConfig, req?: Request): Record<string, unknown> {
-  // Honest advertise/enforce parity (capabilities.md): seam-only capabilities
-  // are advertised ONLY when their (test-seam) implementation is reachable. A
-  // default deploy claims only the production-wired surface — runTimeoutMs +
-  // workspace (real executor wiring / real CRUD endpoints). This mirrors the
-  // existing multiAgent/sandbox env-gating convention (a not-fully-wired
-  // capability OMITS itself by default rather than over-claim in
-  // /.well-known/openwop).
-  const seamEnabled = process.env.OPENWOP_TEST_SEAM_ENABLED === 'true';
-  // ADR 0858 P3 — the storage families' facets, shared with the v2 record.
-  const storageFacets = storageFamilyFacets();
-  // (`OPENWOP_TEST_TRIGGER_COMPACTION` is read by `memoryCapability()` — the
-  // RFC 0080 §A model owns every `capabilities.memory` gate now, so the local
-  // hoist would have been a second reader of the same switch.)
-  const phase5 = process.env.OPENWOP_MULTI_AGENT_EXECUTION_MODEL_PHASE_5 === 'true';
-  // RFC 0090 — execution-model version 6 (verifier turn + convergence). Additive
-  // on the ladder: v6 implies v1..v5, so it requires phase5 (the stateful loop)
-  // to be honest. Gated on OPENWOP_AGENT_VERIFIER_GATING; when set, the host runs
-  // the RFC 0090 verifier as a commit gate (host/agentDispatch.ts runVerifier) and
-  // serves POST /v1/host/openwop-app/agents/verify-run.
-  const phase6 = phase5 && process.env.OPENWOP_AGENT_VERIFIER_GATING === 'true';
-  const provenance = contractProvenance();
-  const signingKeys = readBundleSigningKeys();
-  const advertisement = {
-    protocolVersion: PROTOCOL_VERSION,
-    // RFC 0165 §A — a ROOT property (like `contractProvenance` below): not a
-    // capability family, not mirrored into the deprecated `capabilities` wrapper.
-    protocolVersions: [...protocolVersions()],
-    // `versioning.md` §1.1 — the header-less default, and through the overlap it
-    // MUST name the 1.x member. It ships in the SAME change as the `2.0` entry
-    // above, never after it: a `protocolVersions[]` carrying two majors with no
-    // `preferredVersion` makes every consumer following the documented
-    // `preferredVersion ?? max(protocolVersions[])` rule pick major 2, which is
-    // exactly the silent migration the overlap exists to prevent.
-    preferredVersion: preferredVersion(),
-    // RFC 0146 — which corpus revision this host implements against. A ROOT property
-    // (not a capability family, so it is deliberately outside `capabilities` and is not
-    // mirrored by the root spread below). Derived from the installed conformance
-    // package's CORPUS-STAMP.json, never a literal: a constant would satisfy the schema
-    // and drift on the first bump, reproducing the very defect the field detects.
-    // OMITTED entirely when the stamp is unreadable — silence is inapplicable, a guessed
-    // revision would be a false statement about the contract.
-    ...(provenance ? { contractProvenance: provenance } : {}),
-    // RFC 0168 §E.2 (corpus rc.11) — `signingKeys[]` is an optional v1.x
-    // additive root key as well as a v2 one, and it MUST be on both roots here.
-    // A certification bundle is v3 REGARDLESS of major: under the one-package
-    // decision a host measured at `--target-major 1` still emits a v3 bundle,
-    // and the Front door resolves that bundle's `signature.keyId` in whatever
-    // discovery document the host serves. Publishing only on the v2 root would
-    // leave every bundle from a `--target-major 1` run unattributable — which
-    // is the exact gap the key exists to close, reintroduced one major down.
-    // Same reader, same withhold-on-malformed rule; one key, both
-    // representations.
-    ...(signingKeys.length > 0 ? { signingKeys } : {}),
-    implementation: {
-      name: config.serviceName,
-      version: config.serviceVersion,
-      vendor: config.serviceVendor ?? DEFAULT_SERVICE_VENDOR,
-    },
-    // Host-extension feature surfaces a workflow node can call via
-    // `ctx.features.<id>` (ADR 0014). Non-normative (`host.sample.*`); advertised
-    // at the document root (RFC 0073) so a client/pack can discover them. Honest:
-    // only surfaces actually composed by an enabled-by-default-or-not feature
-    // appear (derived from the live feature-surface registry). Per-tenant
-    // register-time refusal (toggle off ⇒ refuse a workflow needing it) is the
-    // enforcement counterpart and rides the existing peerDependency machinery.
-    hostExtensions: {
-      featureSurfaces: registeredFeatureSurfaceIds().map((id) => `host.sample.${id}`),
-    },
-    // Per spec/v1/capabilities.md §3 — REQUIRED top-level fields.
-    // `supportedEnvelopes` is the AI Envelope kind catalog per RFC 0021
-    // (NOT the transport list — that's `supportedTransports` below).
-    // The 4 universal kinds are always advertised because the host
-    // implements the AIEnvelopeAcceptor (host/envelopeAcceptor.ts) which
-    // validates them against schemas/envelopes/<kind>.schema.json.
-    // RFC 0055 §C: the three OPTIONAL media.* kinds are advertised because
-    // the host ships their per-kind schemas + serves their assets
-    // (routes/mediaAssets.ts). They are NOT universal (not in
-    // universalEnvelopeKinds()) — a consumer that doesn't recognize them
-    // falls back to raw rendering.
-    // RFC 0102: `ui.a2ui-surface` is advertised because the host ships its
-    // per-kind schema (schemas/envelopes/ui.a2ui-surface.schema.json, byte-
-    // identical to core) AND the chat renderer actually renders the day-1
-    // catalog v0.9.1 (frontend/react/src/chat/a2ui/) — honest-advertisement
-    // per host-capabilities.md §"A2UI surface support" (fails closed under
-    // OPENWOP_REQUIRE_BEHAVIOR=true otherwise). Like media.*, it is NOT
-    // universal — an unrecognizing consumer falls back to store-without-render.
-    supportedEnvelopes: [...universalEnvelopeKinds(), 'media.image', 'media.audio', 'media.file', 'ui.a2ui-surface'],
-    schemaVersions: {
-      runEvent: 1,
-      capabilities: 1,
-      // RFC 0021 §C: schemaVersions[<universal-kind>] MUST be 1 when the
-      // host implements the per-kind schemas. The reference acceptor
-      // ships v1 of all 4 universals.
-      'clarification.request': 1,
-      'schema.request': 1,
-      'schema.response': 1,
-      error: 1,
-      // RFC 0055 §C media kinds (v1).
-      'media.image': 1,
-      'media.audio': 1,
-      'media.file': 1,
-      // RFC 0102 A2UI surface kind (v1).
-      'ui.a2ui-surface': 1,
-    },
-    limits: {
-      // Per capabilities.md §3 (CapabilityLimiter shape) — non-negative integers.
-      clarificationRounds: 5,
-      schemaRounds: 3,
-      envelopesPerTurn: 32,
-      maxNodeExecutions: 1000,
-      // RFC 0058 — wall-clock ceiling per run; upper bound for
-      // RunOptions.configurable.runTimeoutMs. Breach emits
-      // cap.breached{kind:'run-duration'} + error run_timeout.
-      //
-      // H97 — DERIVED, not duplicated. This line and `RUN_DURATION_CEILING_MS`
-      // used to be two independent literals that happened to both read
-      // `600_000`, while BOTH files carried a comment asserting they must
-      // agree — including, in `executor.ts`, the words "advertise/enforce must
-      // agree". Two comments declaring an invariant nothing enforced, on a
-      // WIRE-ADVERTISED limit: change the enforced ceiling and this document
-      // keeps promising the old number to every peer, which is a host
-      // advertising a limit it does not honour.
-      //
-      // It propagates further than the advert, too: `RUN_DISPATCH_LEASE_MS` is
-      // `RUN_DURATION_CEILING_MS + 120_000`, so the 12-minute crashed-executor
-      // recovery SLO moved with a constant nothing linked to the wire.
-      //
-      // Importing makes divergence UNREPRESENTABLE rather than merely tested —
-      // the same reason `A2A_PROFILES` is computed from
-      // `A2A_SUPPORTED_VERSIONS` instead of being kept in step by hand.
-      maxRunDurationMs: RUN_DURATION_CEILING_MS,
-      // RFC 0058 + RFC 0061 — ceiling on agent-loop iterations (orchestrator
-      // turns). Advertised ONLY under phase5, when host/agentLoop.ts's
-      // re-entrant loop (the surface that actually counts turns + breaches
-      // cap.breached{kind:'loop-iterations'}) is advertised. The linear-walk
-      // executeRun path does not count orchestrator turns, so claiming this
-      // unconditionally would over-advertise an unenforced bound.
-      ...(phase5 ? { maxLoopIterations: 100 } : {}),
-      // RFC 0094 §H — maximum REST request body size the host accepts.
-      // MUST equal the express.json default limit in src/index.ts
-      // (`express.json({ limit: '1mb' })` ⇒ 1 MiB; advertise/enforce must
-      // agree). The /v1/packs (50mb) and sample media (12mb) mounts are
-      // larger vendor-scoped carve-outs; the canonical surface enforces this
-      // value.
-      maxRequestBodyBytes: 1_048_576,
-    },
-    // RFC 0064 — per-tool authorization + rate-limit + content-free audit.
-    // This host demonstrates the contract through the
-    // `POST /v1/host/openwop-app/toolhooks/invoke` seam (host/toolHooks.ts); the
-    // live MCP `tools/call` path is not yet hooked. So advertise ONLY when
-    // the seam is reachable (OPENWOP_TEST_SEAM_ENABLED) — never over-claim
-    // toolHooks on a production deploy where no path emits the events.
-    ...(seamEnabled
-      ? {
-          toolHooks: {
-            supported: true,
-            prePostEvents: true,
-            perToolAuthorization: true,
-            perToolRateLimit: true,
-          },
-        }
-      : {}),
-    // RFC 0052 — time-based run initiation. The once-per-tick + missed-tick
-    // policy is demonstrated through the deterministic-clock
-    // `POST /v1/host/openwop-app/scheduling/tick` seam (host/schedulingService.ts);
-    // no clock yet fires real runs from the trigger node. Advertise ONLY when
-    // the seam is reachable. `delayed`/`calendar` honestly absent.
-    ...(seamEnabled
-      ? {
-          scheduling: {
-            supported: true,
-            cron: true,
-            // ADR 0787 D6 — the ONE constant the cadence search, the refusal and
-            // the model-facing tool prose all derive from.
-            maxFutureHorizon: MAX_FUTURE_HORIZON_ISO,
-          },
-        }
-      : {}),
-    // RFC 0059 — durable, {tenant, workspace}-scoped file layer (host/
-    // workspaceStore.ts). §C CRUD + If-Match/etag + maxFileBytes, §E WCT-1
-    // owner isolation + WSR-1 SR-1 redaction. Not `versioned` (latest-only).
-    //
-    // ADR 0551 P2 — READINESS-GATED. This was unconditional, which meant a
-    // `memory://` boot advertised a durable file layer backed by a store that
-    // dies with the process; `spec/v1/agent-workspace.md` §9 requires another
-    // host to observe the same snapshot, so on that profile the capability is
-    // genuinely absent. The predicate is `host/workspaceReadiness.ts`, whose
-    // only input is the SELECTED STORAGE ADAPTER's durability — see that file
-    // for why it is not a new "posture" concept.
-    ...(workspaceAdvertisable(config.storageDsn)
-      ? {
-          workspace: {
-            supported: true,
-            maxFileBytes: 65_536,
-          },
-        }
-      : {}),
-    // Kanban boards — sample host-extension (non-normative). Demonstrates
-    // the RFCS/0086 "named workflow agents" work surface: a card landing
-    // in a trigger column starts a workflow run (RFC 0086 §E keeps the
-    // board itself a host/vendor extension, not a normative protocol
-    // surface). Routes under `/v1/host/openwop-app/kanban/*`.
-    kanban: {
-      supported: true,
-      features: ['boards', 'columns', 'cards', 'card-move-trigger'],
-    },
-    // RFC 0117 — front-end plugin packs. Advertised at the discovery ROOT (§6).
-    // `isolation` is a schema const: `cross-origin-iframe` (in-process is a
-    // protocol-tier MUST NOT). `supported: true` is HONEST because the host serves
-    // the RFC 0238 per-plugin frame + ui-plugin/1 RPC (features/ui-plugins/routes.ts)
-    // and honors the closed allowlist + version-token concurrency. Read from the single
-    // source of truth (host/uiPluginRpc.ts) so advertise/serve can't drift.
-    // ADR 0168 — a CLIENT-PRESENTATION surface; withheld in OPENWOP_PROFILE=headless
-    // (co-gated: every ui-plugins route 404s when not presented), so a no-rendering-
-    // client deploy doesn't advertise an iframe-render capability it won't serve.
-    ...(presentationEnabled('uiPlugins') ? { uiPlugins: uiPluginsCapability() } : {}),
-    // RFC 0118 — parallel sub-workflow fan-out + join. Advertised at the discovery ROOT
-    // (§document-root). `fanOutSupported: true` + `"parallel"` in `fanOutPolicies` is HONEST
-    // because the host serves the dispatch/fanout witness seam (POST /v1/host/openwop-app/
-    // dispatch/fanout) running the real RFC 0118 join-fold + bounded-concurrency coordinator.
-    // Read from the single source of truth (host/dispatchFanOut.ts) so advertise/serve can't drift.
-    dispatch: dispatchCapability(),
-    // RFC 0083 durable trigger bridge (the deferred reference durable-delivery).
-    // The host runs the §B four-state machine + §C delivery model (dedup →
-    // retry → dead-letter → causation) for `queue`-source subscriptions — the
-    // Kanban card→run firing routes through it, emitting `trigger.delivery.
-    // attempted` on the delivered run (with `causationId` = the delivery id).
-    // Honest-advertisement note: the demo's run event log is run-scoped, so a
-    // run-LESS `trigger.subscription.state.changed` (operator pause, retry-
-    // exhaustion dead-letter — neither of which has a run) is recorded on the
-    // subscription + surfaced via `GET /v1/trigger-subscriptions[/{id}]`
-    // rather than emitted as a RunEvent. State + delivery attempts are durable
-    // (survive restart) per `hostExtPersistence`.
-    // RFC 0099 §F.3 — when external-event ingestion is wired (default; gate off
-    // via OPENWOP_TRIGGER_INGESTION_ENABLED=false), the host ALSO ingests
-    // webhook/email/form events → run (the `ingestion` sub-block + the widened
-    // `sources[]`). The sub-block is the honesty gate: a source listed in
-    // `ingestion.externalSources[]` MUST actually accept an external event,
-    // normalize it to a `TriggerEvent`, and start a run (`triggerIngestionService`).
-    // Absent ⇒ schedule/queue ingestion only (today's RFC 0083 behavior).
-    // ADR 0810 — the facets come from ONE function both majors read, so v1 and
-    // v2 cannot disagree about what this host's trigger bridge does.
-    triggerBridge: { supported: true, ...triggerBridgeFacets() },
-    // RFC 0128 (Draft) purpose-propagation — advertised ONLY when the capability flag is
-    // on (default off ⇒ honest-off). The advert is honest because the behavior IS honored:
-    // the host re-emits/narrows/never-widens the `permittedPurposes` label on OpenWOP-envelope
-    // onward hops (routes/purposePropagationSeam.ts + features/cdp/purposeLabels.ts) and
-    // fail-closes `[]`. This is the graduation witness posture (advertise the honored behavior);
-    // the flag is turned OFF in production until RFC 0128 is Accepted.
-    ...(purposePropagationEnabled() ? { purposePropagation: { supported: true, propagatesOnward: true } } : {}),
-    supportedTransports: ['rest', 'sse'],
-    stream: { modes: ['values', 'updates', 'messages', 'debug'] },
-    // Conformance fixtures loaded from in-tree `conformance/fixtures/`
-    // at boot. Each fixture id here is a workflowId the host can run
-    // via `POST /v1/runs { workflowId }` — the openwop conformance
-    // suite reads this top-level `fixtures` array (per
-    // `conformance/src/lib/fixtures.ts:80` — `c.fixtures`) at suite
-    // init to decide which fixture-gated scenarios apply to this
-    // host. Mirrors the SQLite reference host's discovery shape.
-    fixtures: listLoadedConformanceFixtures(),
-    // Host extension: is this the public SHOWCASE deployment (vs a clean /
-    // white-label install)? Drives the frontend's auto-seed gating + the
-    // "Showcase data" badge. Default false — clean out of the gate.
-    demoMode: demoMode(),
-    capabilities: {
-      // `openwop-auth-saml` (RFC 0050): the host validates SAML 2.0 assertions
-      // via its real ACS (`host/auth/samlValidationService`) over the
-      // `auth/saml/validate` seam — the full §A MUST list incl. the XSW
-      // signature-wrapping defense is honored (proven non-vacuously by
-      // `test/auth-saml.test.ts`), so the claim is honest (ADR 0002 finding C1).
-      // The live behavioral conformance leg gates on an operator-supplied
-      // synthetic IdP (`OPENWOP_TEST_SAML_IDP_URL`) and soft-skips otherwise.
-      //
-      // `openwop-auth-scim` (RFC 0050 §B): the host exposes SCIM `/scim/v2/{Users,
-      // Groups}` + the `auth/scim/provision` seam (`routes/authScim`), upserting
-      // RFC 0048 principals / group memberships and FAIL-CLOSED deactivation
-      // (a deactivated principal no longer resolves — proven by
-      // `test/auth-scim.test.ts`). Behavioral leg gates on `OPENWOP_TEST_SCIM_URL`.
-      //
-      // Advertised ONLY when the seam is actually reachable (review finding #10).
-      auth: { profiles: advertisedAuthProfiles(), ...oidcCapability(), ...workloadIdentityCapability(), ...subjectLinkingCapability() },
-      // RFC 0076 §B + the `http-client-ssrf-guard` invariant. `supported`
-      // covers BOTH outbound-HTTP surfaces this host exposes:
-      //   - the node/tool egress (`openwop:core.openwop.http.fetch` →
-      //     webResearchSurface.fetchBatch — SSRF-guarded, 256 KiB body cap);
-      //   - the pack-facing `ctx.http.safeFetch` (executor ctx → host/
-      //     connectionInjection.ts) — resolve→pin→connect via the shared
-      //     guarded lookup (webhookEgressGuard.ts), `Connection: upgrade`
-      //     refused, response body + wall-clock clamped.
-      // The advertised numbers ARE the enforced constants (imported from
-      // connectionInjection.ts — advertise/enforce agree by construction).
-      // `egressPolicy` (RFC 0079) is DELIBERATELY absent: audience binding is
-      // enforced in substance (host-curated apiHosts match + redirect:error on
-      // token-bearing calls) but the host does not emit `egress.decided`
-      // decision events, which `egressPolicy.supported: true` would claim.
-      httpClient: {
-        supported: true,
-        ssrfGuard: true,
-        maxResponseBodyBytes: SAFE_FETCH_MAX_RESPONSE_BODY_BYTES,
-        requestTimeoutMs: SAFE_FETCH_REQUEST_TIMEOUT_MS,
-        methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'],
-        safeFetch: { supported: true },
-      },
-      // RFC 0049 (`Draft`) role→scope authorization (ADR 0006 Phase 3).
-      // `supported` tracks ACTUAL enforcement on the protocol surface
-      // (runs/artifacts) + the `/v1/host/openwop-app/authorization/decide` seam —
-      // both gated on `OPENWOP_AUTHORIZATION_ENFORCEMENT`. Advertised
-      // `supported: true` ONLY when the host fail-closes on RFC 0049 scopes,
-      // so the claim is never a false authorization-oracle (the conformance leg
-      // `authorization-fail-closed.test.ts` runs non-vacuously iff this is on).
-      authorization: authorizationCapability(),
-      // RFC 0129 (Active) / ADR 0290 — data-residency admission control. Advertised
-      // ONLY when the operator opts in (`OPENWOP_DATA_RESIDENCY_ENABLED`) AND pins at
-      // least one region (`OPENWOP_DATA_RESIDENCY_REGIONS`). HONEST-OFF: default unset
-      // ⇒ NO `dataResidency` key (this host makes no residency promise and ignores any
-      // `residency.region` on a run-create). The claim is honest because the behavior
-      // IS honored — `POST /v1/runs` rejects `residency_unavailable` (422, no run) for
-      // an unadvertised region (routes/runs.ts + features/cdp/dataResidency.ts), which
-      // the `data-residency-admission` conformance witness verifies non-vacuously.
-      // Falsifiability scoping: admission-control is the tested MUST; physical byte-
-      // location is an operator SHOULD (out-of-band, not host-enforced).
-      ...(dataResidencyAdvertised() ? { dataResidency: { supported: true, regions: dataResidencyRegions() } } : {}),
-      // RFC 0132 (Draft) — anonymous-actor authorization for public agent surfaces.
-      // Advertised ONLY when the operator opts in (`OPENWOP_ANON_ACTOR_ENABLED`);
-      // HONEST-OFF by default ⇒ NO `anonymousActor` key (any public surface stays on
-      // the runless no-tools single-turn gateway, out of this RFC's scope).
-      // `failClosed` is const-true (an absent/unresolvable anon grant denies — never a
-      // default-on baseline). The advert lists BOTH tiers because the reference host
-      // behaviorally honors both: the widget gateway dispatches an anon read-tier tool
-      // turn over EXACTLY the surface's default-deny grant, and the sample seam
-      // (routes/anonSurfaceSeam.ts) honors the bounded-write-egress tier — HITL-gated
-      // writes + audience-bound, credential-free egress via `decideAnonToolCall`. The
-      // production widget uses read only by config choice, not a capability gap.
-      // (features/chat-widget/publicGateway.ts + host/anonymousActor.ts.) Mirrors the
-      // dataResidency honest-off/env-gated shape.
-      ...(anonymousActorAdvertised() ? { anonymousActor: anonymousActorCapability() } : {}),
-      secrets: {
-        supported: true,
-        scopes: ['tenant', 'user', 'run'],
-        resolution: 'host-managed',
-      },
-      // RFC 0095 §C — connection-pack support. `packsSupported` advertises that
-      // the host installs `kind:"connection"` packs and resolves an RFC 0045/0047
-      // `provider` string against installed `provider.id` values (the boot-time
-      // connectionPackLoader). The built-in ADR 0024 provider registry is the
-      // fallback catalog. The OAuth client secret stays host-side (ADR 0024 §7).
-      connections: {
-        supported: true,
-        packsSupported: true,
-      },
-      // Spec-shaped per `spec/v1/capabilities.md:126-163` + `host-capabilities.md §host.aiProviders`.
-      // Sample host wires three providers via raw fetch (see
-      // `providers/dispatch.ts`); each requires BYOK. Tool-calling is
-      // Anthropic-only for v1 (the only provider with a wired
-      // tool_use loop in `providers/dispatchAnthropicTools.ts`).
-      // Embeddings + image/video generation are NOT implemented — honestly
-      // advertised so packs that depend on those sub-caps don't load.
-      aiProviders: {
-        // RFC 0108 §A.1: `selfHosted` ⊆ `supported`, so the opaque `compat` class
-        // joins `supported` exactly when it is advertised (dark/[] otherwise).
-        // ADR 0757 — a configured subscription-only provider (GitHub Copilot) joins
-        // `supported` too: RFC 0067 requires `authModes` keys + `byok` ⊆ `supported`.
-        supported: ['anthropic', 'openai', 'google', 'minimax', ...hostAdvertisedSelfHosted(), ...advertisedSubscriptionOnlyProviders()],
-        // RFC 0121 §B.7 — `byok` + `authModes`. Each BYOK provider advertises its
-        // real `apiKey` mode; a provider advertises `subscription` ONLY when it has
-        // a CONFIGURED (lawful) subscription mechanism — which is ALWAYS none today
-        // (honest-off, deferred on RFC 0121 UQ1 / ToS-legal; the ADR 0121/selfHosted
-        // precedent). §B.7 invariant: a subscription provider is force-included in
-        // `byok`. By default `subscriptionAdvertisedProviders()` is `[]`, so no
-        // provider ever advertises `subscription` and `authModes` is `apiKey`-only.
-        // ADR 0182 Phase 1: with OPENWOP_SUBSCRIPTION_REQUIRE_LOGIN set, the set is
-        // additionally narrowed to providers with a detected local CLI login.
-        ...advertisedProviderAuthModes(),
-        // RFC 0108 §A — self-hosted / OpenAI-compatible provider class. DARK by
-        // default; lights up (`['compat']`) only when OPENWOP_COMPAT_PROVIDER_ENABLED
-        // + a reachable endpoint backs it (the §A.2 honesty rule). The id is opaque
-        // and non-URL (§A.3); the endpoint location never appears here (§D).
-        selfHosted: hostAdvertisedSelfHosted(),
-        policies: {
-          modes: ['disabled', 'optional', 'required', 'restricted'],
-          scopes: ['workspace', 'project', 'canvas-type'],
-          errorCode: 'provider_policy_denied',
-        },
-        toolCalling: { supported: true, providers: ['anthropic', 'openai', 'google'] },
-        embeddings: { supported: true },
-        // RFC 0116 — prompt-prefix cache. PROVIDER-SCOPED + key-gated: the host's
-        // ADR 0148 A2 ephemeral prefix caching is Anthropic-specific, and is only
-        // honestly advertisable where a real Anthropic provider is wired (a
-        // managed ANTHROPIC_API_KEY, or the test-seam witness env). On the
-        // MiniMax managed deployment neither is set ⇒ DARK (advertising Anthropic
-        // prefix-caching on a MiniMax host would be the dishonest claim). The
-        // cache is keyed by (tenant, cachePrefixId) for cross-tenant isolation;
-        // cachePrefixId is a cost hint only (replay-invariant).
-        ...(process.env.ANTHROPIC_API_KEY || process.env.OPENWOP_TEST_SEAM_ENABLED === 'true'
-          ? { promptPrefixCache: { supported: true, providers: ['anthropic'] as const } }
-          : {}),
-        // Derived from the single source of truth `INPUT_MODALITIES`
-        // (aiProvidersHost.ts) so the advertisement can never drift from what
-        // assertModalitiesAdvertised() actually accepts (ADR 0085 Phase 1 —
-        // kills the two-sources-of-truth honesty hazard). `audio` is advertised
-        // here exactly because the host accepts an `{type:'audio'}` ContentPart.
-        input: { modalities: [...INPUT_MODALITIES] },
-        imageGeneration: { supported: imageGenerationAdvertised() }, // ADR 0115 — true only when a provider is configured
-        videoGeneration: { supported: videoGenerationAdvertised() }, // ADR 0411 — honest-flip when a provider is wired
-        // RFC 0105 §B — speech synthesis (text-to-speech). The const string
-        // "supported" (the locked shape, parallel to imageGeneration); routable
-        // TTS providers are discovered via aiProviders.supported[] (minimax),
-        // NOT a sub-field. Host routes via the managed MiniMax T2A path.
-        speechSynthesis: 'supported',
-        // RFC 0106 §A — real-time voice. Advertised because the methods/events are
-        // WIRED (advertise+accept-in-lockstep — the ADR 0085 discipline), so the claim
-        // stays honest under OPENWOP_REQUIRE_BEHAVIOR. `transcription: "streaming"`
-        // = `ctx.callTranscriber` (P1/P2). `synthesis: "streaming"` (P3, requires
-        // `speechSynthesis: supported`) = `callSpeechSynthesizer({stream:true})` →
-        // `voice.synthesis_chunk` (§C). `turnDetection: "semantic"` (P1/P2) =
-        // callTranscriber emits `voice.endpoint_candidate` DISTINCT from
-        // `voice.turn_commit`. `bargeIn: "supported"` (P4) = the host emits the
-        // `voice.barge_in` → `voice.cancelled` lifecycle and cancels in-flight
-        // synthesis with NO partial leak (RFC 0106 §F `voice-bargein-no-partial-leak`),
-        // demonstrated by the barge-in seam (a live mic SESSION is host-internal per §E).
-        // HONESTY NOTE (updated ADR 0138): the `voice` feature now provides a PRODUCTION
-        // voice loop (`/v1/host/openwop-app/voice/session/*` → `callTranscriber`/`/speak`/
-        // `/barge-in`), so `bargeIn`/`transcription`/`synthesis` are exercised end-to-end, not
-        // only by the reference seam. `turnDetection: 'semantic'` reflects the emitted
-        // `voice.endpoint_candidate` event-taxonomy (the RFC 0106 §D wire shape) — NOT a
-        // server-side semantic VAD: the current transport commits a turn on the client's
-        // endpoint signal (utterance-buffered). A word-level streaming-ASR provider with real
-        // semantic endpointing (ADR 0138 W7a, e.g. Deepgram Flux) makes the detection real
-        // while keeping the same advertised shape. Survives OPENWOP_REQUIRE_BEHAVIOR — the
-        // gated scenarios drive the taxonomy non-vacuously.
-        // ADR 0168 — a CLIENT-PRESENTATION surface (browser mic capture); withheld in
-        // OPENWOP_PROFILE=headless (co-gated with the voice-feature route mount), so a
-        // no-rendering-client deploy doesn't advertise a mic capability it won't serve.
-        ...(presentationEnabled('realtimeVoice')
-          ? { realtimeVoice: { transcription: 'streaming', synthesis: 'streaming', turnDetection: 'semantic', bargeIn: 'supported' } }
-          : {}),
-        // RFC 0055 §C rule 2 — inline-vs-URL cap for media.* envelope payloads.
-        // Assets above this size are served by a tenant-scoped URL
-        // (GET /v1/host/openwop-app/assets/{token}) rather than inlined.
-        maxInlineMediaBytes: MAX_INLINE_MEDIA_BYTES,
-      },
-      // RFC 0122 — self-hosted runner (remote-driven local execution). Root-level
-      // capability block (sibling of aiProviders/connections/agents). HONEST-OFF:
-      // `supported:false` until RFC 0122 is Accepted (Phase 3) AND an operator opts
-      // in; the §19 seam is wired (soft-skip-proof) but the wire claim stays dark.
-      // `dispatchKinds:["model"]` = the ADR 0182 Phase-5 model-first arm.
-      selfHostedRunner: selfHostedRunnerAdvertised(),
-      // RFC 0005 (MAS Phase 4) — the host implements `core.conversationGate`
-      // (open/exchange/close) + honors the `conversation.*` suspend variants.
-      // Advertising obligates the full contract (capabilities.md §conversationPrimitive).
-      conversationPrimitive: true,
-      // RFC 0101 (ADR 0040 Phase 6) — multi-party group conversation. This host
-      // HONORS the normative shape on the existing RFC 0005 wire: a board-group
-      // conversation carries a participant ROSTER (the `agent:<id>` members of its
-      // `ConversationMeta`, snapshotted at `@@`-summon), every `role:'agent'` turn
-      // carries an explicit `speakerId` (the agent instance id;
-      // host/conversationExchange.ts), and a turn from a non-participant is
-      // rejected fail-closed (host/multiPartyConversation.ts). `supported:true` is
-      // an HONEST claim only because (2)+(3) are enforced — advertising it without
-      // honoring would fail OPENWOP_REQUIRE_BEHAVIOR=true. `maxParticipants` is the
-      // advisory-board cohort cap (ADR 0040 § fan-out caps).
-      multiPartyConversation: { supported: true, maxParticipants: MAX_MULTI_PARTY_PARTICIPANTS },
-      // RFC 0109 (ADR 0124 Phase 2d) — the host stamps `agent.model` ({provider, model})
-      // on the answering agent's conversation turn (conversationExchange `makeTurn`).
-      // `supported:true` is HONEST: the stamp ships (conversation-exchange resolves the
-      // provider/model and writes it non-secret; verbatim on :fork). RFC 0109 is Accepted.
-      conversationTurnModelProvenance: { supported: true },
-      // RFC 0110 (ADR 0126 Phase 4) — channel presence. HONEST gate: advertised ONLY when
-      // the operator opts in (`OPENWOP_CHANNEL_PRESENCE_ENABLED`) on a topology that can
-      // honor it; the host then emits the ephemeral `channel.presence` event over the
-      // membership-gated presence SSE. Default OFF ⇒ no advertisement (the demo's
-      // multi-instance default; per-instance presence would be correct-but-partial).
-      channelPresence: { supported: channelPresenceEnabled() },
-      // RFC 0103 / i18n.md (ADR 0064) — the host negotiates Accept-Language →
-      // Content-Language on its localizable content responses (the CMS read).
-      // OPERATOR-CONFIGURED (OPENWOP_I18N_LOCALES): a host that hasn't enabled
-      // localization advertises NOTHING here (advertise only what is honored).
-      // Per RFC 0103 §A, i18n.defaultLocale == the content baseLocale and the
-      // resolvable content locales are ⊆ i18n.supportedLocales.
-      ...(hostI18nEnabled()
-        ? { i18n: { supported: true, defaultLocale: hostDefaultLocale(), supportedLocales: hostSupportedLocales() } }
-        : {}),
-      // RFC 0103 §A — localized CONTENT delivery (ADR 0064 Phase 3). The host
-      // serves GET /v1/content/pages/{slug} (the system-site projection),
-      // negotiated. content.supported ⇒ i18n.supported; content.baseLocale ==
-      // i18n.defaultLocale; ({base} ∪ content.supportedLocales) ⊆ i18n.supportedLocales;
-      // baseLocale ∉ content.supportedLocales. Same operator gate as i18n.
-      ...(hostI18nEnabled()
-        ? { content: { supported: true, baseLocale: hostDefaultLocale(), supportedLocales: hostContentLocales() } }
-        : {}),
-      // RFC 0199 / RFC 0047 (ADR 0753 D11) — the v1 twin of the v2 `oauth` family,
-      // read from the same snapshot, so both representations make one claim.
-      ...(oauthAdvertisementSnapshot().advertised
-        ? { oauth: { supported: true, grants: ['authorization_code', 'refresh_token'], providers: oauthAdvertisementSnapshot().providers, credentialInterrupt: true } }
-        : {}),
-      interrupts: {
-        supported: true,
-        kinds: [
-          'approval', 'clarification', 'refinement', 'cancellation', 'external-event', 'conversation.start', 'conversation.exchange', 'conversation.close',
-          // RFC 0199 §C — raised by this host only while `oauth` is advertised.
-          ...(oauthAdvertisementSnapshot().advertised ? ['credential'] : []),
-        ],
-        // `interrupt-profiles.md` (FINAL v1) catalogs optional
-        // interrupt profiles. Sample claims only the profiles its
-        // implementation actually backs end-to-end today:
-        //
-        //   - `openwop-interrupt-parent-child` — cancel cascade is
-        //     wired in `routes/runs.ts` (walks `parentRunId`, cancels
-        //     children + invalidates their open interrupts) and the
-        //     `core.subWorkflow` node surfaces the child's open
-        //     interrupt as a parent-side suspension. Conformance
-        //     scenario `interrupt-parent-child-cascade.test.ts`
-        //     passes; INTEROP-MATRIX row updated to match.
-        //   - `openwop-interrupt-external-event` — `core.externalEvent`
-        //     typeId + `interrupts/{token}` correlation matching are
-        //     implemented; the `interrupt-external-event-correlation`
-        //     scenario passes.
-        //   - `openwop-interrupt-quorum` — multi-approver vote-counting
-        //     to `requiredApprovals` + `rejectionPolicy: 'majority'`,
-        //     backed by the durable `review:decision` ledger (ADR 0070;
-        //     identity from the authenticated user where present, else
-        //     the RFC 0093 capability-token `voter`; per-subject dedup).
-        //     The `interrupt-quorum-resolution` conformance scenario
-        //     passes against this host (3 accepts → completed; 2-of-3
-        //     reject → terminal non-completed), verified under
-        //     `OPENWOP_REQUIRE_BEHAVIOR=true`.
-        //
-        // Profiles NOT claimed (despite partial implementation):
-        // `openwop-interrupt-auth-required` (auth path bears it via Bearer
-        // enforcement but no signed-callback-token scoping yet).
-        //
-        // NOTE: the spec profile id for parent-cancel cascade is
-        // `openwop-interrupt-cascade-cancel` (per `interrupt-profiles.md
-        // §"openwop-interrupt-cascade-cancel"`). The conformance fixture
-        // happens to use a `parent-child-cancel` slug but the canonical
-        // profile id is the cascade-cancel one.
-        profiles: [
-          'openwop-interrupt-cascade-cancel',
-          'openwop-interrupt-external-event',
-          'openwop-interrupt-quorum',
-        ],
-      },
-      // ADR 0075 / RFC 0104 (Active) — portable HITL approver routing. This host
-      // resolves BOTH group and role approver refs (accessControl) against the
-      // run's fail-closed org and targets notifications (`audience` default =
-      // resolved eligibility union), enforced at resolve time exactly as
-      // `approversList` (interrupt.md §"Portable approver routing"). Advertise only
-      // the ref kinds actually honored — both, here.
-      interrupt: { approverRouting: { supported: true, refKinds: ['group', 'role'], audience: true } },
-      // `replay` mode (full deterministic re-execution from seq 0) IS
-      // supported: the engine re-executes the workflow and the host compares
-      // the observable run/node sequence against the source, emitting
-      // `replay.diverged` on a mismatch (replay.md §"Failure surfaces").
-      // `modes` is REQUIRED alongside `supported: true` (profiles.md
-      // §`openwop-replay-fork`) and lists only `replay`. `branch`
-      // (re-execution from an arbitrary `fromSeq` checkpoint) IS implemented
-      // host-side as of ADR 0326 P3b — the fork route rebuilds a resume
-      // snapshot from the copied event prefix, so the prefix no longer
-      // double-emits — but the advert flip is GATED on a clean branch-mode
-      // conformance witness (advertise only what conformance has proven;
-      // the flip trigger is recorded in ADR 0326). (CORRECTED, ADR 0751: this
-      // said mid-sequence replay 501s on `fromSeq > 0` — false since ADR 0637 —
-      // and that a suspended checkpoint 501s `fork_checkpoint_unsupported`,
-      // which ADR 0751 replaced by re-creating the gate on the fork.) `fork: false` is the
-      // legacy spelling of the advert limitation, kept for existing
-      // consumers.
-      // RFC 0140 — `sideEffectSuppression: 'recorded-outcome'` declares HOW this
-      // host discharges `replay.md` §"Determinism guarantees" caveat 1. It is an
-      // assurance declaration, never an opt-out: caveat 1 binds unconditionally,
-      // and `none` would mean "unprobeable here", not "allowed to re-fire".
-      //
-      // WITHDRAWN 2026-08-15 — `sideEffectSuppression` is now `none`, and that
-      // is a claim being removed, NOT a guarantee. Both mechanisms below are
-      // still in place and nothing escapes a replay; what changed is that this
-      // host can no longer demonstrate the stronger property the value asserts.
-      //
-      // The argument that used to sit here — reproduced beneath — held that the
-      // host qualified because it had BOTH halves:
-      //   (a) `executor/sideEffects.ts` + the `executor.ts` short-circuit serve
-      //       the SOURCE run's recorded outcome for a classified node (ADR 0341);
-      //   (b) `host/runEffectContext.ts` + `assertEffectAllowed()` at each seam,
-      //       so a node the classifier MISSED still cannot fire (ADR 0531).
-      //
-      // The spec steward has since ruled (upstream #999, suite 1.104.0) that
-      // requirements 1 and 2 are TWO obligations: (b) discharges "do not
-      // perform" and NOT "resolve the outcome". Only serving the source run's
-      // recorded outcome — keyed on `(sourceRunId, nodeId, attempt)` — is a
-      // discharge. **A throw-only path is safe and non-conformant**, and a
-      // generic seam error is not `replay_source_missing` and does not become
-      // it by also being safe.
-      //
-      // ADR 0572's measurement is why this is not merely theoretical: of the
-      // manifest typeIds in the requirement-4 floor, only a fraction were served
-      // by (a), plus the `ctx.callAI` class by the ADR 0326 invocation log
-      // (whose `replayInvocationsFromRunId` fallback DOES key on the source run
-      // — verified at `aiProviders/aiProvidersHost.ts:729-752`, not assumed).
-      // The rest reach (b) and would THROW where the advert promises
-      // reproduction.
-      //
-      // Rule 5 forbids advertising on classification alone because
-      // classification drifts invisibly — #2871 dropped 55 nodes with nothing
-      // going red, and ADR 0563 (blob-put) plus the ADR 0533 correction (ten
-      // `core.openwop.http.*` senders) each did it again. The honest reading is
-      // that the claim rested on an effect-sender inventory being complete, and
-      // that inventory is not self-verifying.
-      //
-      // WHERE THIS STANDS AFTER ADR 0572 PHASE 3 (2026-08-17). The derived
-      // manifest floor IS now the classifier — `isSideEffectingNode` consults
-      // `MANIFEST_FAST_PATH_SERVED`, so a pack node is protected by its own
-      // `role: "side-effect"` declaration instead of by someone remembering a
-      // regex. That moved the ratchet `undischarged 214 -> 43`. It is a large
-      // step and it is NOT the exit condition, for four separate reasons — do
-      // not restore the value on the strength of the number alone:
-      //
-      //   1. 43 undischarged floor typeIds can still fire. Requirement 5 is
-      //      WHOLE-RUN: no class may remain.
-      //   2. The floor is manifest-only by construction (ADR 0572 P1's scope
-      //      note) while requirement 5 binds the whole CATALOGUE, so "the
-      //      baseline reaches zero" is NECESSARY BUT NOT SUFFICIENT — a
-      //      correction to the exit condition as P2 stated it.
-      //   3. Requirement 6(b) needs a default-deny guard at EVERY host effect
-      //      seam. A served-set census cannot witness seam coverage.
-      //   4. Sharpest of the four: the `ai-opaque-not-invocation-logged` class,
-      //      23 typeIds wide. `core.agents.run` and the `aiEnvelope` nodes
-      //      reach AI through a host capability the build-time analysis cannot
-      //      follow, so they are held back and a replay of one THROWS at (b)
-      //      instead of reproducing. That is "safe and non-conformant" in the
-      //      spec's own words.
-      //
-      // The counter behind `GET /v1/host/sample/replay/effect-count` still sits
-      // on (b)'s allow branch, so the conformance scenario continues to probe
-      // the guarded seam itself rather than a bystander (ADR 0533).
-      replay: {
-        supported: true,
-        modes: ['replay', 'branch'],
-        fork: true,
-        sideEffectSuppression: 'none',
-      },
-      // RFC 0151 §A — generic compensation (Saga). What this claims, in §A's own
-      // words, is that the HOST orders, persists and retries the unwind, so a
-      // client can rely on it rather than hand-rolling one. ADR 0554 P0-P2 built
-      // exactly that: a durable obligation ledger, a `reverse-completion` unwind
-      // with retries and an RFC 0051 approval gate, the six §D events, and the
-      // §21 seams that let a black-box witness drive the REAL executor.
-      //
-      // The object is SPREAD from `host/compensationCapability.ts`, never
-      // re-typed. `compensation.md` §D pairs this advert with
-      // `RunSnapshot.compensationStatus` (non-advertiser MUST omit, advertiser
-      // MUST carry), and `routes/runs.ts` gates the projection on the SAME
-      // constant — so the pair cannot come apart, in either direction, without
-      // deleting the constant they share.
-      compensation: { ...COMPENSATION_CAPABILITY },
-      // RFC 0115 — Run Transport Economy. The host emits a strong,
-      // sequence-derived ETag and honors If-None-Match/304 on
-      // GET /v1/runs/{runId}, and negotiates Content-Encoding on run reads.
-      // `contentEncodings` is RUNTIME-DETECTED via the SAME constant the
-      // run-read handler uses (host/restTransport.ts), so the advert can never
-      // claim an encoding this Node build cannot serve (honest-witness rule).
-      // On Node < 22.15 (no zstd in node:zlib) this advertises `["gzip"]`.
-      restTransport: {
-        conditionalRunGet: true,
-        contentEncodings: SUPPORTED_RUN_ENCODINGS,
-      },
-      // RFC 0114 — A2UI surface delta transport. The recorded ui.a2ui-surface
-      // envelope stays FULL (unchanged schema); the host delivers RFC 6902 delta
-      // frames over the run-event stream to `?a2uiDelta=1` subscribers, full
-      // materialized otherwise. Advertised iff the host actually serves it —
-      // `a2uiDeltaTransportEnabled()` is the SINGLE gate shared with streams.ts
-      // (no advert/serving drift). Default OFF (dark in prod until an operator
-      // sets OPENWOP_A2UI_DELTA_TRANSPORT, or the test seam drives the witness).
-      ...(a2uiDeltaTransportEnabled() ? { a2uiSurface: { deltaTransport: true } } : {}),
-      // RFC 0056 — run feedback / annotations. The sample persists annotations
-      // in a per-run side-store and serves POST/GET /v1/runs/{runId}/annotations
-      // with secret-pattern + SR-1 redaction of correction/note.
-      feedback: {
-        supported: true,
-        targets: ['run', 'event', 'node'],
-        signals: ['rating', 'correction', 'label', 'flag'],
-      },
-      // Phase 1 of the multi-agent shift + RFC 0024 streaming. Sample
-      // host emits both `agent.reasoned` (closing) AND
-      // `agent.reasoning.delta` (streaming) events from the chat-responder
-      // (`vendor.openwop-app.chat-responder`) for managed-provider
-      // turns. Per-run override via `RunOptions.configurable.reasoningVerbosity`.
-      agents: agentsCapability(),
-      // RFC 0098 portability — TOP-LEVEL capability (sibling of `agents`, not
-      // nested). Host-sample seam `GET /v1/host/openwop-app/export` + `POST
-      // /v1/host/openwop-app/import[?dryRun=]`. Advertised when
-      // `OPENWOP_PORTABILITY_ENABLED=true`. openwop-app is the `import:true`
-      // non-vacuous graduation witness (RFC 0098 Active→Accepted): import
-      // rejects 422 a bundle carrying a literal credential value BEFORE applying
-      // (`export-bundle-no-credential-material`), and `dryRun:true` makes zero
-      // writes. `import:true ⟹ dryRun:true` (the schema if/then).
-      ...(process.env.OPENWOP_PORTABILITY_ENABLED === 'true'
-        ? {
-            portability: {
-              export: true,
-              import: true,
-              kinds: ['agent', 'pack', 'prompt-template', 'connection-ref', 'schedule', 'roster', 'org-chart'],
-              dryRun: true,
-            },
-          }
-        : {}),
-      // RFC 0026 — `provider.usage` event support. Reference host emits
-      // one `provider.usage` event per real LLM dispatch from
-      // `aiProvidersHost.ts` (callAI / callAIWithTools / callAIManaged).
-      // `costEstimates: true` because the dispatcher attaches advisory
-      // `costEstimateUsd` for models in its static rate-table snapshot;
-      // `currency: 'USD'` matches what `usageEmitter.ts` stamps.
-      providerUsage: {
-        supported: true,
-        costEstimates: true,
-        currency: 'USD',
-      },
-      // RFC 0027 — prompt-template resolution. Reference host loads
-      // host-resident PromptTemplate fixtures from
-      // `conformance-fixtures/prompt-templates/` (vendored from
-      // `conformance/fixtures/prompt-templates/` by `sync-fixtures.sh`)
-      // and exposes a `POST /v1/host/openwop-app/prompt/compose` test seam
-      // that drives the conformance suite's `prompt.composed`
-      // assertions. observability: 'full' is advertised so the
-      // capability-gated scenarios `prompt-composed-secret-redaction`
-      // and `prompt-composed-trust-marker` activate. The composed body
-      // redaction + trust-marker invariants are enforced by
-      // `composePromptTemplate()` in `host/promptCompose.ts`; the
-      // SECURITY invariants `prompt-composed-secret-redaction` and
-      // `prompt-composed-trust-marker` in `SECURITY/invariants.yaml`
-      // gate the conformance assertions.
-      // Sourced from `host/promptHostConfig.ts` so the discovery
-      // advertisement and the dispatch-time compose+resolve calls in
-      // `bootstrap/nodes.ts` can't drift apart. Production hosts
-      // override the single config module rather than editing two
-      // call sites.
-      prompts: { ...getPromptsHostConfig() },
-      // RFC 0013 (chain-pack expansion) + RFC 0124/WCP4 (per-run parameter
-      // deferral, Accepted #827). Read from the single source of truth in
-      // `host/workflowChainPackLoader.ts` (co-located with `expandChain`) so the
-      // advertisement can't drift from the implementation. `deferredParameters`
-      // is gated on the prompt-bearing rewrite precondition (prompts.supported +
-      // `variable` source). `hostExpansionSeam` is intentionally absent — this
-      // host serves neither `/v1/host/sample/workflow-chain:expand` nor
-      // `/v1/host/sample/chain/deferred-expand`, so those conformance scenarios
-      // soft-skip (host-expansion gates on `hostExpansionSeam` per
-      // openwop-conformance ≥1.51.0 / erratum #828; the deferred gated legs
-      // soft-skip on the 404). The deferred behavior is witnessed by the
-      // server-free deferred legs + this host's own gated runpath vitest.
-      workflowChainPacks: workflowChainPacksCapability(),
-      // RFC 0030 envelope-track advertisement. The universal-kind payload
-      // schemas (`schemas/envelopes/*.schema.json`) carry the OPTIONAL
-      // `reasoning` field per RFC 0030 §A. The reference host injects a
-      // system-prompt directive instructing the model to populate it when
-      // the dispatched `responseSchema` declares a top-level `reasoning`
-      // property — implemented by `host/envelopeDirective.ts` and wired
-      // into `aiProviders/aiProvidersHost.ts` `dispatchStructured()`.
-      // Default posture is `"advisory"` (suggestive); operators override
-      // via `OPENWOP_ENVELOPE_REASONING_DIRECTIVE` ∈ {`off`, `advisory`,
-      // `mandatory`}. The advertisement reads through the same accessor
-      // (`host/envelopeReasoningConfig.ts`) so what the host advertises
-      // and what it actually injects stay in lockstep.
-      //
-      // `tierOneSubsetCompliance: "warn"` is honest — the universal-kind
-      // schemas use OpenAI-strict-incompatible constraints (minLength /
-      // maxLength / minItems) that pre-date RFC 0030; the strict-mode
-      // static scenario surfaces violations under `"strict"` advertisement
-      // but soft-skips under `"warn"`. A future RFC may bring the
-      // universal-kind schemas into Tier-1 strict compliance.
-      envelopes: {
-        reasoning: (() => {
-          const cfg = getEnvelopeReasoningConfig();
-          return { supported: cfg.supported, promptDirective: cfg.promptDirective };
-        })(),
-        tierOneSubsetCompliance: TIER_ONE_SUBSET_COMPLIANCE,
-        // RFC 0032 §C envelope-reliability event vocabulary. The reference
-        // host emits four events end-to-end from `dispatchStructured()`'s
-        // retry loop (per-attempt failure classification → emit →
-        // truncation-routing-aware retry per RFC 0033 §A/§B/§C):
-        //   - envelope.retry.attempted (per RFC 0032 §B.1, on attempt ≥ 2)
-        //   - envelope.retry.exhausted (MUST-tier per RFC 0032 §C)
-        //   - envelope.refusal (MUST-tier per RFC 0032 §C)
-        //   - envelope.truncated (SHOULD-tier per RFC 0032 §B.4)
-        // The MAY-tier `envelope.recovery.applied` event IS advertised:
-        // dispatchStructured tries lenient parsing (markdown-fence
-        // strip, balanced-brace walker) before declaring a parse-error
-        // and emits the event when a recovery path engages (RFC 0032
-        // §B.6 + `envelopeReliabilityEmit.ts:tryLenientParse`). The
-        // remaining MAY-tier event (`envelope.nlToFormat.engaged`) is
-        // OMITTED until NL-to-Format fallback lands — that recovery
-        // strategy isn't implemented yet. The seam still accepts both
-        // for conformance shape assertions.
-        //
-        // RFC 0033 §E `distinguishesTruncation: true` — the retry loop
-        // inspects `finishReason: 'length'` and routes truncation through
-        // a budget-multiplied retry per `OPENWOP_ENVELOPE_RELIABILITY_
-        // TRUNCATION_MULTIPLIER` (default 2) WITHOUT applying the schema-
-        // correction fragment. Schema-violation continues to retry with
-        // the corrective fragment + unchanged budget per RFC 0033 §C.
-        //
-        // Operator circuit-breaker: `OPENWOP_ENVELOPE_RELIABILITY_END_TO_END
-        // =false` falls back to legacy undifferentiated retry (no events,
-        // no truncation routing) — the advertisement honors the toggle.
-        reliability: (() => {
-          const rel = getEnvelopeReliabilityConfig();
-          if (!rel.endToEndEnabled) {
-            return {
-              supported: true,
-              events: [],
-              maxRetryAttempts: rel.maxRetryAttempts,
-              completion: {
-                distinguishesTruncation: false,
-                truncationBudgetMultiplier: rel.truncationBudgetMultiplier,
-              },
-            };
-          }
-          return {
-            supported: true,
-            events: [
-              'envelope.retry.attempted',
-              'envelope.retry.exhausted',
-              'envelope.refusal',
-              'envelope.truncated',
-              'envelope.recovery.applied',
-              'envelope.nlToFormat.engaged',
-            ],
-            maxRetryAttempts: rel.maxRetryAttempts,
-            completion: {
-              distinguishesTruncation: true,
-              truncationBudgetMultiplier: rel.truncationBudgetMultiplier,
-            },
-          };
-        })(),
-      },
-      // RFC 0031 §E. The executor evaluates `NodeModule.requiredModelCapabilities`
-      // at dispatch-time against the host's configured default provider AND
-      // emits `model.capability.{substituted,insufficient}` events per
-      // RFC 0031 §D. `substitutionSupported: false` by default — the
-      // sample's `dispatchPlain()` doesn't yet intercept per-call provider
-      // selection; operators that wire the interception set
-      // OPENWOP_MODEL_CAPABILITY_SUBSTITUTION=true. `advertised[]` is the
-      // union of capabilities the host knows each provider in
-      // `aiProviders.supported[]` offers (per `host/modelCapabilityProbe.ts`).
-      modelCapabilities: (() => {
-        const cfg = getModelCapabilityGateConfig();
-        return {
-          supported: cfg.supported,
-          advertised: cfg.advertised,
-          substitutionSupported: cfg.substitutionSupported,
-        };
-      })(),
-      // RFC 0080 §A — the reconciled memory-capability model. The block is
-      // BUILT BY `host/memoryDimensions.ts`, which also computes the §C
-      // degraded projection `routes/agents.ts` stamps on the inventory, so the
-      // advertised model and the projected model are one derivation. Inlining
-      // it here again is what would let the two drift.
-      //
-      // H51 flipped `supported` false → true; the reasoning (and why `writable`
-      // is OMITTED rather than set false) lives on `memoryCapability()`.
-      memory: memoryCapability(),
-      // RFC 0023 §B.2 — capabilities.conformance.mockAgent. Advertised
-      // only when the conformance-only nodes are actually registered
-      // (conformanceNodesEnabled() — on for dev/test/conformance, off by
-      // default under NODE_ENV=production unless explicitly enabled). The
-      // registration in bootstrap/nodes.ts reads the SAME switch, so the
-      // advertisement can never claim a typeId the host didn't register.
-      // ADR 0550 P4 — RFC 0089 §D / `conformance-certification.md` §D: the ONE
-      // spec-defined pointer at this host's published certification evidence.
-      // `capabilities.schema.json` has carried the slot since RFC 0089; nothing
-      // new reaches the wire here beyond a URL.
-      //
-      // Advertised ONLY when the image actually carries a bundle
-      // (`host/conformanceClaims.ts` reads the `build-meta/` stamp; a source
-      // checkout has none and the field is omitted). Omission is fully
-      // conformant — §D says clients MUST tolerate its absence — while
-      // advertising a pointer whose route 404s is the advertised-but-not-served
-      // defect the container lane already caught once in
-      // `workflowChainPacks.hostExpansionSeam`.
-      conformance: {
-        mockAgent: conformanceNodesEnabled(),
-        ...(() => {
-          const url = certificationBundleUrl(req ? requestOrigin(req) : 'http://localhost:8080');
-          return url === undefined ? {} : { certificationBundleUrl: url };
-        })(),
-      },
-      // RFC 0025 — test-mode mirror namespace advertisement. The
-      // /v1/packs-test/* routes (routes/packs-test.ts) only mount when
-      // OPENWOP_PACKS_TEST_NAMESPACE_ENABLED=true; we advertise the
-      // capability only when the seam is mounted, so a conformance
-      // suite that finds the advertisement is guaranteed to find
-      // serving endpoints. The reference impl persists test-mode packs
-      // to a module-scoped in-memory Map distinct from the production
-      // catalog (which the reference doesn't even ship — production
-      // pack storage is delegated to packs.openwop.dev), so the §C
-      // isolation guarantee holds trivially. `catalogResetEndpoint`
-      // points at POST /v1/packs-test/reset for suite teardown.
-      ...(process.env.OPENWOP_PACKS_TEST_NAMESPACE_ENABLED === 'true'
-        ? {
-            packs: {
-              testMode: {
-                supported: true,
-                isolated: true,
-                catalogResetEndpoint: '/packs-test/reset',
-                scopes: ['core', 'vendor', 'community'] as const,
-              },
-            },
-          }
-        : {}),
-      // capabilities.schema.json §webhooks: full register/deliver surface —
-      // HMAC-signed deliveries (scheme `v1` per webhooks.md §"Signature
-      // algorithm versioning"), durable retry queue NOT advertised as the
-      // RFC 0083 trigger-bridge `durable` mode (the host's internal retry
-      // queue is best-effort-plus, not the four-state subscription model).
-      // RFC 0201 / ADR 0747 — the Standard Webhooks companion scheme and its
-      // rotation facet, from the same source as the v2 facet.
-      webhooks: {
-        supported: true,
-        signed: true,
-        signatureAlgorithms: [...SUPPORTED_SIGNATURE_ALGORITHMS],
-        secretRotation: { overlapSeconds: secretRotationOverlapSeconds() },
-        durable: false,
-      },
-      // RFC 0100 §1 — the `a2a` capability slot. Advertised ONLY when this host
-      // actually exposes itself as an A2A agent (OPENWOP_A2A_SERVER_ENABLED) —
-      // otherwise a cross-host caller would feature-detect an A2A surface that
-      // 404s. `durableTasks`/`pushNotifications` are honest only when
-      // the durable wiring (ADR 0035 / a2aTaskStore) is on
-      // (OPENWOP_A2A_DURABLE_TASKS); with it off this is the synchronous
-      // round-trip already specified — no regression, the async conformance
-      // subtests soft-skip. `streaming` is DECOUPLED from `durableTasks` onto its
-      // own `OPENWOP_A2A_STREAMING` flag (default off) so it advertises
-      // `false` here: openwop-conformance 1.34.0 ships no `tasks/resubscribe`
-      // gated subtest ("resubscribe" is comment-only), so `streaming:true` would
-      // be a vacuous claim that also commits us to a resubscribe re-attach we
-      // don't serve. The JSON-RPC server still serves resubscribe; flip the flag
-      // (a clean zero-witness follow-on) once that conformance subtest ships.
-      // `agentCardUrl` points at the GET-able static v0.3 AgentCard at
-      // `/.well-known/agent-card.json` (agents.ts) — a plain GET resolves it
-      // without a credential (public path), the honesty bar a JSON-RPC-only
-      // (POST `agent/getCard`) pointer can't meet. The base MUST be a cross-host-reachable
-      // backend origin (else `supported:true` is a dishonest advertisement —
-      // capabilities.md advertise-honestly): a dedicated
-      // `OPENWOP_A2A_PUBLIC_BASE_URL` override (custom-domain backends), else the
-      // forwarded request origin the caller actually reached us on. We do NOT
-      // reuse `OPENWOP_PUBLIC_BASE_URL` — that is the SPA/OAuth origin
-      // (oauthFlow.ts), and the SPA host only routes `/api/**` to this backend,
-      // not the bare `/v1/...` A2A path.
-      ...(process.env.OPENWOP_A2A_SERVER_ENABLED === 'true'
-        ? (() => {
-            const durable = process.env.OPENWOP_A2A_DURABLE_TASKS === 'true';
-            return {
-              a2a: {
-                supported: true,
-                agentCardUrl: a2aAgentCardUrl(req),
-                streaming: process.env.OPENWOP_A2A_STREAMING === 'true',
-                pushNotifications: durable,
-                durableTasks: durable,
-                // RFC 0152 §A — exact-version discovery (ADR 0552 P1 §A).
-                //
-                // Held back until now for a reason worth keeping: the RFC was
-                // Accepted, but this repo pinned conformance 1.73.0 whose
-                // `capabilities.schema.json` marked this slot
-                // `additionalProperties: false`. Advertising the spec-correct
-                // fields would have emitted a document any peer validating
-                // against the PINNED artifact refuses — correct per the spec,
-                // invalid per the artifact. The residue was pinned by a
-                // tripwire rather than a comment, and the tripwire fired the
-                // moment the pin moved to 1.106.0.
-                //
-                // DERIVED from `host/a2aProfile.ts`, never literals: the
-                // advertisement and the `A2A-Version` header refusal
-                // (`routes/agents.ts`) must not be able to disagree about what
-                // this host serves. A second spelling here is how an advert
-                // starts claiming a version the refusal path rejects.
-                protocolVersions: [...A2A_SUPPORTED_VERSIONS],
-                preferredVersion: advertisedA2AProtocolVersion(),
-                // ADR 0552 P2 — the named composition profiles, DERIVED from the
-                // same array. §A forbids listing `a2a-X.Y` in `profiles` without
-                // `X.Y` in `protocolVersions`; deriving makes that structurally
-                // true rather than test-enforced. Claiming `a2a-1.0` is the
-                // stronger statement of the two — it says the host meets
-                // §C's floor (a 1.0 Agent Card and the JSON-RPC binding at 1.0),
-                // which `a2a-card-runtime-consistency.test.ts` is the witness for.
-                profiles: [...A2A_PROFILES],
-              },
-            };
-          })()
-        : {}),
-      observability: {
-        otel: { namespace: 'openwop' },
-        // RFC 0034 — OTel collector test seam advertisement. The two test
-        // endpoints (GET /v1/host/openwop-app/test/otel/spans and POST
-        // /v1/host/openwop-app/test/debug-bundle/export) live in routes/testSeam.ts
-        // and only mount when OPENWOP_TEST_SEAM_ENABLED=true. We advertise the
-        // capability only when the seam is mounted, so a conformance suite
-        // that finds the advertisement is guaranteed to find serving endpoints.
-        // Hosts that don't enable the seam advertise nothing here; the
-        // envelope-reasoning-secret-redaction scenario's downstream-projection
-        // assertions then soft-skip per spec/v1/observability.md §"OTel
-        // collector test seam (RFC 0034)".
-        ...(process.env.OPENWOP_TEST_SEAM_ENABLED === 'true'
-          ? { testSeams: { otelScrape: true, debugBundleExport: true } }
-          : {}),
-      },
-      // RFC 0035 — sandbox-vm MVP advertisement. The node:vm-based
-      // sandbox executes synthetic misbehaving packs via the
-      // POST /v1/host/openwop-app/test/sandbox-{load,invoke} seams in
-      // routes/testSeam.ts. Advertised only when OPENWOP_TEST_SANDBOX_MVP=true
-      // is set — the MVP is conformance-only.
-      //
-      // CORRECTED 2026-08-18 (A+ audit). This sentence used to end "(production
-      // deployments use wasmtime/nsjail for real isolation)". That was FALSE,
-      // and it sat beside the sandbox advert where it reads as a statement
-      // about the host's security posture:
-      //
-      //   - ADR 0555 P2 records that nsjail and Firecracker are NOT available
-      //     on Cloud Run gen2. Production isolation is a FORKED NODE PROCESS
-      //     under `--permission` (isolation/childProcessAdapter.ts), not a VM
-      //     and not a jail.
-      //   - That adapter reports `network-denied: 'not-enforced'` — the Node 22
-      //     permission model has no network dimension — so the one guarantee a
-      //     jail would buy is precisely the one this host does not have. It is
-      //     pinned POSITIVELY by pack-isolation-escape.test.ts, which asserts
-      //     that `node:net` still connects.
-      //   - In production the adapter isolates an EMPTY population: untrusted
-      //     packs are refused before dispatch (fail-closed), so nothing
-      //     reaches it.
-      //
-      // `sandbox.supported` is therefore absent from the deployed wire, and it
-      // stays absent until the network invariant can be met — ADR 0555 P4,
-      // whose blocker is host evidence, not RFC 0035 adoption.
-      //
-      // The MVP proves 5 of 8 RFC 0035 §B failure-mode invariants by
-      // construction:
-      //   - host-fs-escape, host-env-leak, network-escape, host-process-escape
-      //     (node:vm context omits these globals → access throws)
-      //   - sandbox-timeout (vm.runInNewContext timeout option)
-      // The other 3 invariants either require a JS-runtime-specific test
-      // (sandbox-no-eval), graduate by construction (cross-pack-mutation —
-      // each invocation gets a fresh context), or need the host's
-      // allowedHostCalls config (capability-gate-respected — implemented
-      // via the Proxy host object).
-      ...(process.env.OPENWOP_TEST_SANDBOX_MVP === 'true'
-        ? {
-            sandbox: {
-              supported: true,
-              isolationModel: 'vm' as const,
-              wallClockLimitMs: 1000,
-              memoryLimitBytes: 16 * 1024 * 1024,
-              allowedHostCalls: ['fetch'] as const,
-            },
-          }
-        : {}),
-      // RFC 0037 Phase 1 — multi-agent execution model + handoff state
-      // machine. Env-gated so the reference workflow-engine advertises
-      // the capability only when the operator opts in; otherwise the
-      // existing RFC 0007/0022 dispatch loop runs without emitting
-      // `core.workflowChain.event` records (preserving the
-      // pre-RFC-0037 wire surface for back-compat). When advertised,
-      // every supervisor-driven `core.dispatch` invocation emits the
-      // 7 handoff state-machine transition events per
-      // `spec/v1/multi-agent-execution.md` §"Handoff state machine".
-      // RFC 0037 Phase 1 = version 1; RFC 0039 Phase 2 = version 2. Operator
-      // env-flags select the implemented ceiling: setting
-      // OPENWOP_MULTI_AGENT_EXECUTION_MODEL_PHASE_2=true requires
-      // OPENWOP_MULTI_AGENT_EXECUTION_MODEL=true too (Phase 2 builds on Phase
-      // 1). The confidenceEscalationFloor advertisement defaults to 0.5
-      // (the spec floor) and can be tightened via
-      // OPENWOP_MULTI_AGENT_CONFIDENCE_FLOOR=<n> per RFC 0039 §A.
-      // When NEITHER phase env-flag is set, the `multiAgent` block is
-      // OMITTED entirely — advertising `{supported: false, version: 1}` is
-      // honest-but-confusing ("version 1 of an unimplemented feature"); the
-      // capabilities.schema.json makes the block optional precisely so
-      // non-implementers can stay silent. Capability-gated conformance
-      // scenarios soft-skip on absence per the existing convention.
-      ...(process.env.OPENWOP_MULTI_AGENT_EXECUTION_MODEL === 'true'
-        ? (() => {
-            // RFC 0061 — version 5 (stateful agent-loop lifecycle). Ladder is
-            // additive: phase5 ⇒ phase4 ⇒ … ⇒ phase1. A `version: 5`
-            // advertisement is only honest when the re-entrant loop with the
-            // observable per-turn `iteration` counter (host/agentLoop.ts) +
-            // statefulResume are implemented.
-            // `phase5` is hoisted at the buildAdvertisement scope (also gates
-            // limits.maxLoopIterations); reuse it here.
-            const phase4 = process.env.OPENWOP_MULTI_AGENT_EXECUTION_MODEL_PHASE_4 === 'true' || phase5;
-            // The execution-model ladder is ADDITIVE: a host advertising
-            // version N MUST implement phases 1..N (capabilities.schema.json
-            // §multiAgent.executionModel.version). So a higher phase implies
-            // every lower phase — phase4 ⇒ phase3 ⇒ phase2 ⇒ phase1. RFC 0040
-            // Phase 3 (cross-host causation) is the rung between confidence
-            // escalation (Phase 2) and replay determinism (Phase 4); a
-            // `version: 4` advertisement is only honest when Phase 3 is
-            // implemented too (the ancestry endpoint + crossHostCausation).
-            const phase3 = isPhase3Enabled();
-            const phase2 = process.env.OPENWOP_MULTI_AGENT_EXECUTION_MODEL_PHASE_2 === 'true' || phase3;
-            const floorRaw = process.env.OPENWOP_MULTI_AGENT_CONFIDENCE_FLOOR;
-            const floor = (() => {
-              const parsed = floorRaw === undefined ? 0.5 : Number(floorRaw);
-              if (!Number.isFinite(parsed) || parsed < 0.5 || parsed > 1.0) return 0.5;
-              return parsed;
-            })();
-            // Version advertisement is the ceiling of phases the host
-            // implements per RFCS/0037-multi-agent-execution-model.md §"Phases".
-            const version = phase6 ? 6 : phase5 ? 5 : phase4 ? 4 : phase3 ? 3 : phase2 ? 2 : 1;
-            return {
-              multiAgent: {
-                executionModel: {
-                  supported: true,
-                  version,
-                  ...(phase2 ? { confidenceEscalationFloor: floor } : {}),
-                  // RFC 0044 §B — how this host's confidence escalation
-                  // surfaces. The wire RunStatus enum has NO
-                  // `waiting-clarification` (run-snapshot.schema.json), so
-                  // this host maps a clarify-kind suspension to
-                  // `waiting-input` (executor inferWaitingKind); the vendor
-                  // kind names that mapping honestly instead of claiming the
-                  // canonical `clarification` → `waiting-clarification`
-                  // status this wire cannot produce.
-                  ...(phase2 ? { confidenceEscalationInterruptKind: 'x-host-openwop-app-clarification' } : {}),
-                  // RFC 0040 §D — cross-host causation. A host advertising
-                  // version >= 3 MUST advertise this sub-block with
-                  // `supported: true` + a stable `hostId`; this host also
-                  // serves `GET /v1/runs/{runId}/ancestry` (Phase-3 §C).
-                  ...(phase3
-                    ? {
-                        crossHostCausation: {
-                          supported: true,
-                          hostId: CROSS_HOST_CAUSATION_HOST_ID,
-                          ancestryEndpointSupported: true,
-                        },
-                      }
-                    : {}),
-                  // RFC 0041 §D — replayDeterminism advertisement. Hosts
-                  // advertising `version: 4` MUST advertise this sub-block
-                  // with `supported: true` and
-                  // `refusalDivergenceEmission: true`. The LLM cache-key
-                  // recipe is the spec-canonical
-                  // `spec-rfc-0041` for the reference impl.
-                  ...(phase4
-                    ? {
-                        replayDeterminism: {
-                          supported: true,
-                          llmCacheKeyRecipe: 'spec-rfc-0041',
-                          refusalDivergenceEmission: true,
-                        },
-                      }
-                    : {}),
-                  // RFC 0061 §A/§D — version 5: a clarify/escalate suspend
-                  // resumes the loop at the same iteration with the snapshot
-                  // lineage + iteration counter intact (host/agentLoop.ts).
-                  ...(phase5 ? { statefulResume: true } : {}),
-                  // RFC 0090 §B — verifier turn + gating. A host advertising
-                  // `version: 6` MUST advertise this block; `gating: true` means a
-                  // `fail` verdict blocks the commit (merge/terminate) — the host
-                  // serves POST /v1/host/openwop-app/agents/verify-run to prove it.
-                  ...(phase6 ? { verifier: { supported: true, gating: true } } : {}),
-                },
-              },
-            };
-          })()
-        : {}),
-      runtimeCapabilities: listCapabilities(),
-      // Host surface registry — what `ctx.*` surfaces this host wires.
-      // The catalog endpoint cross-references this to mark each node
-      // as runnable-here or "needs host.X".
-      hostSurfaces: listHostSurfaces(),
-      // RFC 0014 — host.fs capability block (canonical spec shape).
-      // Mirrors the host-surface-registry advertisement so generic
-      // openwop clients can read the standard shape from
-      // `capabilities.fs.{supported,sandboxRoot,maxFileSizeBytes}`.
-      fs: (() => {
-        const root = getFsSandboxRoot();
-        if (!root) return { supported: false };
-        return {
-          supported: true,
-          sandboxRoot: root,
-          maxFileSizeBytes: 50 * 1024 * 1024, // 50 MiB
-        };
-      })(),
-      // RFC 0015 / 0016 — host.kvStorage + host.tableStorage. Facets from
-      // `storageFamilyFacets()`, the one builder for both majors (ADR 0858 P3):
-      // the v1 limits no backend enforced are gone.
-      kvStorage: { supported: true, ...storageFacets.kvStorage },
-      tableStorage: { supported: true, ...storageFacets.tableStorage },
-      // RFC 0053 — host.deadLetter. The RUN-level sink, deliberately distinct
-      // from `queueBus.deadLetterSupported` below (which dead-letters transport
-      // MESSAGES, not runs — the RFC calls out the confusion explicitly).
-      //
-      // Every terminally-failed run emits `run.dead_lettered` from the single
-      // terminal choke (`executor.emitTerminalFailure`) and stays fork-eligible
-      // — the fork route gates on ownership, never on status
-      // (`dead-letter-rfc0053.test.ts` pins both).
-      //
-      // `retentionDays` is RUNTIME-DERIVED from `defaultRetentionDays()`, the
-      // SAME function the retention sweeper reads, so the advert cannot drift
-      // from the behavior (the `restTransport.contentEncodings` honest-witness
-      // precedent). Run retention is operator OPT-IN and defaults to DISABLED,
-      // in which case there is no purge deadline at all — so the field is
-      // OMITTED rather than fabricated. The schema's `minimum: 1` makes
-      // omission the only honest encoding of "nothing is ever purged".
-      deadLetter: {
-        supported: true,
-        ...(defaultRetentionDays() > 0 ? { retentionDays: defaultRetentionDays() } : {}),
-      },
-      // RFC 0017 / 0018 / 0019 — host.queueBus, host.db.sql, host.db.vector,
-      // host.blobStorage. Backends DERIVED from the selected surface backend
-      // (ADR 0858 P3); the old `['sqlite']` / `['in-memory']` literals were false
-      // on a `durable` deployment, and `maxObjectBytes` was never enforced.
-      queueBus: { supported: true, ...storageFacets.queueBus },
-      sql: { supported: true, ...storageFacets.sql },
-      vectorStore: { supported: true, ...storageFacets.vectorStore },
-      blobStorage: { supported: true, ...storageFacets.blobStorage },
-      // RFC 0071/0075 — host artifact-type registry (ADR 0055).
-      //
-      // SHAPE CORRECTED 2026-08-10 (ADR 0537 follow-on). This advert emitted a
-      // `types` ARRAY of `{artifactTypeId, title, schemaUrl, export,
-      // registrationSource}` plus a top-level `schemaEndpoint`. Both were host
-      // inventions: `host-capabilities.md` §host.artifactTypes has specified since
-      // RFC 0075 that `types` is a **MAP keyed by artifactTypeId** whose entries
-      // carry `{validated, validation, schemaVersion, store, render, export}`.
-      // MEASURED against the RFC 0144 declaration: the old shape failed ajv on two
-      // counts — `additionalProperties: schemaEndpoint`, and `/types must be object`.
-      //
-      // The drift survived because the family was UNDECLARED: nothing in this repo,
-      // and nothing in the conformance suite, could compare the advert to its own
-      // normative prose. Declaring it found the divergence in a day.
-      //
-      // `schemaEndpoint` and the per-type `schemaUrl` are both DELIBERATELY GONE, on
-      // the same argument: `artifact-type-packs.md` §"Schema distribution" fixes the
-      // canonical URL as `{HostBase}/schemas/artifacts/{artifactTypeId}.schema.json`,
-      // which any consumer holding an artifactTypeId derives for itself. A discovery
-      // key carrying computable information is the `host.forms` mistake again.
-      // (Serving those URLs is unchanged — only advertising them stops.)
-      //
-      // `title` and `registrationSource` are dropped as outside the spec'd facet set.
-      // `registrationSource` is the one with a real argument for reinstatement — it
-      // distinguishes host-native (served URL is the ONLY resolution path, P1-3 MUST)
-      // from pack-backed (schema travels in the tarball) — but that belongs upstream
-      // as a declared facet, not re-added unilaterally to a family just declared.
-      artifactTypes: {
-        supported: true,
-        types: artifactTypesAdvert(),
-      },
-      // RFC 0137 — host.forms.contentPacks. Advertised ONLY now that the §F1
-      // trust boundary is honored: pack-authored strings and publicly-submitted
-      // values are fenced when they reach a model (`agentToolProvider`
-      // `contentTrust` declaration → `fenceUntrustedBlock`), and the forms
-      // surface cannot bypass React escaping (ratcheted). `capabilities.md`
-      // requires advertising only what is behaviorally honored, and
-      // OPENWOP_REQUIRE_BEHAVIOR=true fails a dishonest advert — so this line
-      // deliberately did NOT ship with the wire translation in #2971.
-      //
-      // SPELLING — plain is canonical; the dotted key is a deprecated mirror.
-      // CORRECTION (2026-08-09): the comment that stood here justified the
-      // dotted-only key on the premise that the RFC 0137 conformance helper
-      // "reads exactly `capabilities['host.forms']`", so an un-prefixed advert
-      // "would make the behavioral leg SOFT-SKIP". That premise EXPIRED.
-      // RFC 0137 gap G16 (RESOLVED 2026-08-05) settled the plain family name as
-      // the canonical discovery key — `capabilities.schema.json` declares 80+
-      // properties and ZERO dotted host.* keys, and the `host.` prefix is the
-      // capability IDENTIFIER notation (§headings, pack `peerDependencies`,
-      // `error.capability`), not the document key. The helper
-      // (`conformance/src/lib/formContentPacks.ts`) now resolves
-      // plain-root → dotted-root → plain-wrapper → dotted-wrapper, so this host
-      // was being found on the MIGRATION arm, not the canonical one.
-      // Emitting plain also ends this family's divergence from every other one
-      // this host advertises (`artifactTypes`, `blobStorage`, …).
-      // The dotted key is retained as a DEPRECATED mirror for the v1.x window —
-      // exactly the treatment this file already gives the `capabilities`
-      // wrapper below — because `host-capabilities.md:505` still SHOWS the
-      // dotted spelling in prose, so a reader implementing from that snippet
-      // would look for it. Drop the mirror once that prose is corrected.
-      forms: {
-        contentPacks: true,
-      },
-      /** @deprecated dotted mirror; remove once `host-capabilities.md` §host.forms shows the plain key. */
-      'host.forms': {
-        contentPacks: true,
-      },
-      // RFC 0019 — host.cache. No limit facet: none is enforced (ADR 0858 P3).
-      cache: { supported: true, ...storageFacets.cache },
-      // RFC 0020 — host-side MCP server composition. Sample host
-      // exposes workflows as MCP tools/resources/prompts when
-      // OPENWOP_MCP_SERVER_ENABLED=true. Endpoint:
-      // POST /v1/host/openwop-app/mcp (sample-vendor-namespaced).
-      //
-      // Wire shape (per spec/v1/mcp-integration.md §"Conformance +
-      // interop"): a top-level `mcp` slot with `supported: boolean`
-      // and (when supported) `serverUrls: string[]`. Sample-specific
-      // detail (transports, sampling/elicitation bridges) lives
-      // under `mcp.serverMount` so it's namespaced without breaking
-      // the canonical discoverability contract.
-      // RFC 0153 §A — exact-version discovery (ADR 0553 P1 §A). Same history
-      // as the `a2a` slot above: Accepted RFC, blocked by the PINNED 1.73.0
-      // schema's `additionalProperties: false`, released by the bump to
-      // 1.106.0 and detected by the `agrade-wire-blocked-residue` tripwire
-      // rather than by anyone remembering to re-check.
-      //
-      // DERIVED from `host/mcpProfile.ts`. `initializeVersionOutcome()` is what
-      // decides an actual `initialize` handshake, so a literal here could
-      // advertise a version the handshake refuses — the drift the ADR 0553 P1
-      // seam exists to prevent.
-      //
-      // ADR 0553 P2 — `profiles` + `features` join the advert, and they are the
-      // half that cannot be claimed without behaviour: `mcp-2026-07-28` means
-      // this document in full, and `features[]` names three MUSTs of the
-      // upstream revision. All four fields DERIVE from `host/mcpProfile.ts`,
-      // which is also what `selectMcpCodec` reads to decide which codec serves a
-      // request and what `server/discover` answers with — so the discovery
-      // document and the MCP discovery answer are two views of one fact and
-      // cannot disagree (RFC 0153 §B).
-      mcp: process.env.OPENWOP_MCP_SERVER_ENABLED === 'true'
-        ? {
-            supported: true,
-            // The unversioned vendor path: served on both sides of the ADR 0669 cut.
-            // The `/v1` spelling was a 410 waiting for retirement day.
-            serverUrls: [`${VENDOR_ROOT}/mcp`],
-            protocolVersions: [...MCP_SUPPORTED_VERSIONS],
-            preferredVersion: advertisedMcpProtocolVersion(),
-            profiles: [...MCP_PROFILES],
-            features: [...MCP_CURRENT_FEATURES],
-            serverMount: {
-              supported: true,
-              transports: ['streamable-http'] as const,
-              samplingBridge: true,
-              elicitationBridge: true,
-            },
-          }
-        : {
-            supported: false,
-            serverUrls: [],
-            serverMount: { supported: false },
-          },
-      // RFC 0078 — the read-only `GET /v1/tools` + `/v1/tools/{toolId}` portable
-      // tool-catalog projection (ADR 0087). Advertised ONLY when the MCP server is
-      // mounted (the catalog projects the `mcp` source — e.g. the notebook tools);
-      // the endpoints 404 + this is absent otherwise (honest, OPENWOP_REQUIRE_BEHAVIOR
-      // clean). `sources: ['mcp']` because that is the only source this host projects.
-      ...(process.env.OPENWOP_MCP_SERVER_ENABLED === 'true'
-        ? {
-            toolCatalog: {
-              supported: true,
-              sources: ['mcp'] as const,
-              // RFC 0112 — compact tool projection (`GET /v1/tools?view=compact`).
-              // The route ships ready, but the capability is advertised ONLY when
-              // OPENWOP_TOOLCATALOG_COMPACTVIEW=true — held dark until RFC 0112 is
-              // Accepted (honest-advert rule; the steward flips it on Accepted +
-              // the published 1.39.0 conformance scenario).
-              ...(process.env.OPENWOP_TOOLCATALOG_COMPACTVIEW === 'true'
-                ? { compactView: true }
-                : {}),
-            },
-          }
-        : {}),
-    },
-    extensions: {
-      // Sample-namespace extensions block. Clients tolerate absence.
-      'openwop-app.notes': 'This is the openwop reference application sample. Not production-hardened.',
-    },
-    // Governed-workforce surface (EP0) — EXPERIMENTAL host extension under the
-    // canonical `x-host-<host>-<key>` prefix (host-extensions.md). NOT a spec
-    // capability: it advertises the demo's Workforce entity + telemetry, gated
-    // so the published SDK/conformance never depend on it until the
-    // `openwop-workforce-governance` profile RFC lands. Booleans are honest
-    // against what the host actually implements today. ADR 0775 D8 — NOT
-    // read-only: a tenant PATCHes its own cutover status and migration journey.
-    'x-host-openwop-workforce': {
-      tier: 'experimental',
-      workforces: { supported: true, readOnly: false },
-      governance: { policyTags: true, refusalBoundaries: true, approvalGates: true },
-      // replay is genuinely supported (see `replay` family above). `evals` is an
-      // EXPERIMENTAL host-ext (a `live-shadow` eval of the workforce supervisor,
-      // POST …/workforces/:id/eval), gated on OPENWOP_AGENT_EVAL_SUITE_ENABLED —
-      // NOT the normative RFC 0081 `agents.evalSuite` surface (mode:"eval" run
-      // projection + GET /v1/runs/:id/eval-summary), which is a follow-up. So
-      // this stays under the experimental host-ext tier and does not set the
-      // normative `agents.evalSuite` capability. shadow-mode wire is honestly absent.
-      assurance: { replay: true, evals: evalSuiteEnabled(), shadow: false },
-      ...(evalSuiteEnabled()
-        ? {
-            eval: {
-              supported: true,
-              surface: 'host-ext',
-              mode: 'live-shadow',
-              suiteId: 'openwop-app.evals.invoice-exception',
-            },
-          }
-        : {}),
-      autonomyTiers: ['review', 'guided', 'auto'],
-    },
-  };
-  // RFC 0073 — capability families are document-root properties of the
-  // discovery response (capabilities.schema.json roots agents/secrets/etc.;
-  // there is no `capabilities` wrapper property). Emit them at the root
-  // canonically, and retain the nested `capabilities` object as a DEPRECATED
-  // backward-compat mirror for the v1.x migration window (removed once
-  // consumers migrate — see spec/v1/capabilities.md §"Document-root layout").
-  // No family key collides with a root field, so the spread is order-safe.
-  return { ...advertisement, ...advertisement.capabilities };
 }
 
 /** OpenAPI `paths`, keyed through `advertisedPath`: `/v1` keys are rewritten or dropped. */

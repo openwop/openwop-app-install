@@ -12,6 +12,10 @@
  * The OLD shape is simulated with the still-exported per-id door
  * (`resolveProjectAccess` + `getProject`), which is byte-for-byte what the old
  * route loop did — so the A/B runs on one tree with one storage.
+ *
+ * Sabotage-witnessed (grade-tests w13): dropping the per-org memo
+ * (`accessByOrg.set`) reds both cases; one global memo (ignoring the org) reds
+ * case 2's `read` level; a per-row re-`getProject` reds case 1's kvGet bound.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
@@ -86,13 +90,16 @@ describe('PRJC-2/PRJC-3 — measured storage-call costs of the list scan', () =>
 
     // …at a structurally different cost. The old loop scans the three access
     // collections once PER PROJECT (3N + the row list); the new one scans them
-    // ONCE for the single org. Reported for the tracker:
-    // eslint-disable-next-line no-console
-    console.log(`[PRJC-3 measurement] N=${N} projects, 1 org — OLD: kvList=${oldCost.kvList}, kvGet=${oldCost.kvGet} · NEW: kvList=${newCost.kvList}, kvGet=${newCost.kvGet}`);
-    expect(oldCost.kvList, 'old loop must show the O(N) collection-scan shape').toBeGreaterThanOrEqual(3 * N);
-    expect(newCost.kvList, 'new scan must be O(1) in collection scans (index slice + 3 access scans + slack)').toBeLessThanOrEqual(8);
-    // The per-project double row re-read is gone too (index reads each row once).
-    expect(newCost.kvGet).toBeLessThan(oldCost.kvGet);
+    // ONCE for the single org. MEASURED (CODEBASE-ASSESSMENT PRJC-3, N=50):
+    // OLD kvList=151, kvGet=151 · NEW kvList=4, kvGet=51.
+    const measured = `OLD ${JSON.stringify(oldCost)} · NEW ${JSON.stringify(newCost)}`;
+    expect(oldCost.kvList, `old loop must show the O(N) collection-scan shape — ${measured}`).toBeGreaterThanOrEqual(3 * N);
+    expect(newCost.kvList, `new scan must be O(1) in collection scans (index slice + 3 access scans + slack) — ${measured}`).toBeLessThanOrEqual(8);
+    // The per-project double row re-read is gone too: the index reads each row
+    // ONCE (N) plus the slice. A bound relative to the old loop (`< oldCost`)
+    // stayed green with one re-read per row back (~2N < 3N) — w13 probe
+    // `ls-reread` — so the bound is absolute.
+    expect(newCost.kvGet, `one row read per project, no per-row re-get — ${measured}`).toBeLessThanOrEqual(N + 3);
   });
 
   it('the memoization is per (caller, org) — a second org costs ONE more resolution, not N more', async () => {

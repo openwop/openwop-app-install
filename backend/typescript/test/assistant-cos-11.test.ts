@@ -13,6 +13,12 @@
  *
  * Both directions are witnessed per class (viewer vs editor vs non-member),
  * driving the real HTTP boundary + cookie session (the wiring, not a helper).
+ *
+ * Sabotage-witnessed (/grade-tests w11, `features/assistant/routes.ts`): dropping
+ * the `workspace:read` check in `wrapRead` reds all four work-graph cases;
+ * downgrading one route to the unscoped `wrap` reds that route's case; serving
+ * `/pending-actions` through `wrapRead` reds the viewer case. Allowed reads assert
+ * the collection body, not just a 200.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -42,6 +48,11 @@ const seat = async (principalId: string, roles: string[]): Promise<string> => {
 const get = async (path: string, cookie: string): Promise<{ status: number; text: string }> => {
   const res = await fetch(`${BASE}${path}`, { headers: { cookie } });
   return { status: res.status, text: await res.text() };
+};
+/** An allowed read: 200 AND the route's collection array in the body. */
+const expectCollection = (r: { status: number; text: string }, key: string): void => {
+  expect(r.status).toBe(200);
+  expect(Array.isArray((JSON.parse(r.text) as Record<string, unknown>)[key]), `body.${key} is an array`).toBe(true);
 };
 
 beforeAll(async () => {
@@ -80,8 +91,8 @@ describe('COS-11 — the work-graph reads gate on workspace:read', () => {
       const denied = await get(path, noReadCookie);
       expect(denied.status).toBe(403); // before the fix these reads were unscoped (200)
       expect(denied.text).toContain('forbidden_scope');
-      expect((await get(path, viewerCookie)).status).toBe(200); // a member reads normally
-      expect((await get(path, editorCookie)).status).toBe(200);
+      expectCollection(await get(path, viewerCookie), name); // a member reads normally
+      expectCollection(await get(path, editorCookie), name);
     });
   }
 });
@@ -95,6 +106,6 @@ describe('COS-11 — /pending-actions gates on workspace:write (a viewer cannot 
     expect(viewer.text).toContain('forbidden_scope');
     // The negative control: someone WITH write authority still reads normally, so
     // the gate is not refusing everyone.
-    expect((await get(`${A}/pending-actions`, editorCookie)).status).toBe(200);
+    expectCollection(await get(`${A}/pending-actions`, editorCookie), 'pendingActions');
   });
 });

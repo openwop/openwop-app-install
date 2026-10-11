@@ -26,6 +26,14 @@
  * that BOTH independent legs are present (the #2871 lesson: a fix that lands one
  * leg looks identical to a fix that landed both), and that the corrected
  * docblock's specific falsehood cannot come back.
+ *
+ * Sabotage-witnessed (wave 11): flip compose-briefing's manifest `role` or the
+ * `feature.ts` pin → leg 1 red; drop the typeId pattern → leg 2 red; drop it from
+ * `MANIFEST_FAST_PATH_SERVED` → the floor case red; an early return in
+ * `isSideEffectingNode` → the predicate / convergent cases red; a positive
+ * `replay/fork reads` restatement anywhere (even beside a banner's "DOES NOT")
+ * → the restatement case red. Leg 2 is a source-text check BY NECESSITY: the
+ * fast path answers first, so no behavioural call can isolate the pattern leg.
  */
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
@@ -142,7 +150,16 @@ describe('WF-COS-3 — the false replay claim is gone from the pack', () => {
     const prose = src.replace(/^\s*(?:\/\/|\*|\/\*\*?)\s?/gm, ' ').replace(/\s+/g, ' ');
     const offenders: string[] = [];
     for (const m of prose.matchAll(/replay\/fork\s+(?:read|reads)/g)) {
-      const before = prose.slice(Math.max(0, m.index - 220), m.index);
+      // SENTENCE-scoped, not a 220-char window (wave 11): a "DOES NOT" in a
+      // banner's opening clause sat within 220 chars of a later POSITIVE
+      // restatement and exempted it — a sabotage that rewrote banner 1 into the
+      // claim stayed green. `'. '` (not `'.'`) so `pack.json` never splits.
+      const sentenceStart = Math.max(
+        prose.lastIndexOf('. ', m.index),
+        prose.lastIndexOf('; ', m.index),
+        prose.lastIndexOf('? ', m.index),
+      ) + 2;
+      const before = prose.slice(Math.max(0, sentenceStart), m.index);
       if (/\bNOT\b|\bnot\b mean|used to|no longer|does NOT/.test(before)) continue;
       offenders.push(prose.slice(Math.max(0, m.index - 120), m.index + 90));
     }

@@ -16,6 +16,10 @@
  *
  * The legs assert SURVIVAL, not just the throw: a gate that refuses and destroys anyway is the
  * failure this exists to prevent, and a throw-only assertion cannot tell the two apart.
+ *
+ * Witnessed (w13): removing `assertNoRetentionHold` from `deleteProject`, or moving it after
+ * `deleteBoard`, reds the BORN RED leg; dropping the durable-notes clear reds the positive
+ * control; moving the hold before the existence check reds the missing-project leg.
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { mkdtempSync } from 'node:fs';
@@ -73,11 +77,11 @@ describe('PRJWF-1 — the legal hold gates the project delete cascade', () => {
     expect(await countSubjectNotes(T, projectSubject(p.id))).toBe(0);
   });
 
-  it('the hold is asserted BEFORE the first destructive step, not midway', async () => {
-    // Ordering matters: a hold checked after the board delete would leave a half-destroyed
-    // project behind a refusal. Asserted by destroying nothing on a held tenant, above — this
-    // leg pins the *reason* by checking a non-existent project is still a clean no-op under a
-    // hold rather than a throw, i.e. the guard sits after the existence check.
+  it('a missing project under a hold is a clean no-op — the guard sits after the existence check', async () => {
+    // "Before the first destructive step" is carried by the BORN RED leg's board assertion
+    // (moving the hold after `deleteBoard` reds it). This leg pins the other edge of the guard's
+    // position: it sits AFTER the existence check, so deleting a project that is already gone
+    // stays an idempotent `{ deleted: false }` under a hold instead of a RetentionHoldError.
     await setRetentionHold(T, 'litigation');
     await expect(deleteProject(T, 'project-does-not-exist')).resolves.toMatchObject({ deleted: false });
   });

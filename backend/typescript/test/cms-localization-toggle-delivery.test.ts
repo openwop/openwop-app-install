@@ -9,82 +9,90 @@
  * is OFF" (`test/cms-auto-translate.test.ts:158`) and asserts only that the submit-time
  * auto-translate sweep does not fire — a witness-shaped thing beside the claim that does
  * not witness it. This file witnesses the DELIVERY lane, which is what the claim was about.
+ *
+ * CORRECTED (grade-tests wave 16): legs 1 and 3 used to call `localizePage`, which is pure,
+ * synchronous and tenant-less — it cannot read a toggle, so "delivery ignores the toggle"
+ * could not fail there (the same witness-beside-the-claim shape this header names). They now
+ * drive the PUBLIC delivery lane, `publishingService.publicPageBySlug`, on a really published
+ * page. The old leg 2 ("no authored locales ⇒ base") was cut: it exercised the same
+ * `resolveSection` base branch as `cms-localization-route.test.ts` "falls back to base data…"
+ * (both red under w16g4-tgd-basepath / w16g4-lr-basepath), with no toggle dimension.
+ *
+ * Sabotage-witnessed (w16g4-*): making `publicPageBySlug` negotiate only while the toggle is
+ * ON reds legs 1 and 3; restoring the old "Accept-Language delivery" description reds leg 4.
  */
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { openStorage } from '../src/storage/index.js';
-import { saveConfig } from '../src/host/featureToggles/service.js';
+import { saveConfig, resolveOne } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
-import { resolveOne } from '../src/host/featureToggles/service.js';
-import { createPage, updateContentLanguageSettings, localizePage, getContentLanguageSettings } from '../src/features/cms/cmsService.js';
+import { createOrg } from '../src/host/accessControlService.js';
+import { createPage, transitionPage, updateContentLanguageSettings } from '../src/features/cms/cmsService.js';
+import { startCmsPublishSweep } from '../src/features/cms/publishSweep.js';
+import { publicPageBySlug } from '../src/features/publishing/publishingService.js';
 import { cmsFeature } from '../src/features/cms/feature.js';
 
-// The toggle default is registered inside `registerRoutes`, not at import time — a bare
-// import leaves `getToggleDefault` empty and every toggle leg vacuous (measured: it
-// returned undefined, and leg 4 passed against nothing).
+// CEILING (recorded): the toggle default is registered inside `registerRoutes`, not at
+// import time, and there is no other seam that registers it — so the feature's routes are
+// registered against a no-op app. `RouteDeps` needs a real Express app, config, storage and
+// host suite, none of which this claim uses, hence the one cast. Without this the toggle
+// legs are vacuous (measured: `getToggleDefault` returned undefined and leg 4 passed
+// against nothing). `registerRoutes` also starts the scheduled-publish sweep daemon;
+// `afterAll` stops it.
 const registerToggles = (): void => {
-  try { (cmsFeature as unknown as { registerRoutes: (d: unknown) => void }).registerRoutes({ app: { get() {}, post() {}, put() {}, patch() {}, delete() {}, use() {} } }); } catch { /* routes need a real app; the toggle default lands before they do */ }
+  const noop = (): void => undefined;
+  const deps = { app: { get: noop, post: noop, put: noop, patch: noop, delete: noop, use: noop } };
+  try { cmsFeature.registerRoutes(deps as unknown as Parameters<typeof cmsFeature.registerRoutes>[0]); } catch { /* a later registration may need a real app; the toggle defaults are registered by then */ }
 };
+afterAll(() => { startCmsPublishSweep().stop(); });
 
 const T = 'tTogDel';
-const ORG = 'org-1';
+let orgId = '';
+let slug = '';
 
 const setToggle = async (status: 'on' | 'off'): Promise<void> => {
   const d = getToggleDefault('cms-localization');
+  expect(d, 'the cms-localization toggle default must be registered').toBeTruthy();
   if (d) await saveConfig({ ...d, status }, 'test');
 };
+const deliver = (lang: string) => publicPageBySlug(orgId, slug, 'https://site.test', lang);
 
 beforeEach(async () => {
   const storage = await openStorage('memory://');
   initHostExtPersistence(storage);
   registerToggles();
-  await updateContentLanguageSettings(T, ORG, { baseLocale: 'en', supportedLocales: ['es'] }, 'u1');
-  await createPage({
-    tenantId: T, orgId: ORG, title: 'P', createdBy: 'u1',
+  orgId = (await createOrg({ tenantId: T, createdBy: 'u1', name: 'Acme' })).orgId;
+  await updateContentLanguageSettings(T, orgId, { baseLocale: 'en', supportedLocales: ['es'] }, 'u1');
+  const page = await createPage({
+    tenantId: T, orgId, title: 'P', createdBy: 'u1',
     sections: [{ type: 'richText', data: { text: 'english body' }, localizations: { es: { text: 'cuerpo espanol' } } }],
   });
+  const live = await transitionPage(T, orgId, page.pageId, 'publish', 'u1');
+  expect(live?.status, 'precondition: the page is really published').toBe('published');
+  slug = page.slug;
 });
 
 describe('ADR 0668 D4 — the toggle gates AUTHORING, not delivery', () => {
-  it('leg 1: with the toggle OFF, an authored es overlay is STILL SERVED', async () => {
+  it('leg 1: with the toggle OFF, an authored es overlay is STILL SERVED on the public lane', async () => {
     await setToggle('off');
     expect((await resolveOne('cms-localization', { tenantId: T }))?.enabled, 'precondition: really off').toBeFalsy();
-
-    const page = await createPage({
-      tenantId: T, orgId: ORG, title: 'P2', createdBy: 'u1',
-      sections: [{ type: 'richText', data: { text: 'english body' }, localizations: { es: { text: 'cuerpo espanol' } } }],
-    });
-    const settings = await getContentLanguageSettings(T, ORG);
-    const { page: served, locale } = localizePage(page, 'es', settings);
+    const { page, locale } = await deliver('es');
     expect(locale, 'delivery negotiates regardless of the toggle').toBe('es');
-    expect(JSON.stringify(served.sections),
+    expect(JSON.stringify(page.sections),
       'the overlay is served with the toggle OFF — "delivery byte-identical" was FALSE',
     ).toContain('cuerpo espanol');
   });
 
-  it('leg 2: the ADR 0064 qualifier IS true — no authored locales ⇒ base delivery', async () => {
-    await setToggle('off');
-    const plain = await createPage({
-      tenantId: T, orgId: ORG, title: 'P3', createdBy: 'u1',
-      sections: [{ type: 'richText', data: { text: 'english body' } }],
-    });
-    const settings = await getContentLanguageSettings(T, ORG);
-    const { page: served } = localizePage(plain, 'es', settings);
-    expect(JSON.stringify(served.sections)).toContain('english body');
-    expect(JSON.stringify(served.sections)).not.toContain('cuerpo espanol');
-  });
-
   it('leg 3: turning the toggle ON changes NOTHING about delivery (so leg 1 is about the toggle, not the fixture)', async () => {
-    const settings = await getContentLanguageSettings(T, ORG);
-    const page = await createPage({
-      tenantId: T, orgId: ORG, title: 'P4', createdBy: 'u1',
-      sections: [{ type: 'richText', data: { text: 'english body' }, localizations: { es: { text: 'cuerpo espanol' } } }],
-    });
     await setToggle('off');
-    const off = JSON.stringify(localizePage(page, 'es', settings).page.sections);
+    const off = await deliver('es');
     await setToggle('on');
-    const on = JSON.stringify(localizePage(page, 'es', settings).page.sections);
-    expect(off, 'delivery is byte-identical ACROSS toggle states — which is not the claim that was made').toBe(on);
+    expect((await resolveOne('cms-localization', { tenantId: T }))?.enabled, 'precondition: really on').toBe(true);
+    const on = await deliver('es');
+    expect(on.locale).toBe('es');
+    expect(JSON.stringify(off.page.sections),
+      'delivery is byte-identical ACROSS toggle states — which is not the claim that was made',
+    ).toBe(JSON.stringify(on.page.sections));
   });
 
   it('leg 4: the toggle description no longer advertises delivery', async () => {

@@ -56,6 +56,8 @@ import { copyWorkflowId, isServerMintedWorkflowId, mintUnique, workflowKind } fr
 import { createLogger } from '../observability/logger.js';
 import { getChainBackedWorkflow } from '../host/chainBackedWorkflows.js';
 import { resolveCallerDisplayName } from '../host/chatContext.js';
+import { assessWorkflowAvailability } from '../host/workflowDemoAvailability.js';
+import { getNodeRegistry } from '../executor/nodeRegistry.js';
 
 const log = createLogger('routes.workflows');
 
@@ -837,6 +839,32 @@ export function registerWorkflowRoutes(app: Express, deps: { hostSuite: HostAdap
   app.get('/host/openwop-app/workflows/stats', async (req, res, next) => {
     try {
       res.json(await aggregateFleetStats(deps.storage, tenantOf(req)));
+    } catch (err) { next(err); }
+  });
+
+  // ADR 0870 §Stopgap — demo-node availability for a portfolio's workflow ids.
+  // `?ids=a,b,c` (comma-separated; WORKFLOW_ID_PATTERN has no comma). Each id
+  // is read through the SAME catalog + tenant predicate as `GET /workflows/{id}`,
+  // so this reveals nothing that read does not. Malformed ids answer
+  // `known:false` rather than 400 — a stale portfolio row must not blank a page.
+  app.get('/host/openwop-app/workflows/availability', async (req, res, next) => {
+    try {
+      const raw = typeof req.query.ids === 'string' ? req.query.ids : '';
+      const ids = raw.split(',').map((s) => s.trim()).filter((s) => s.length > 0);
+      const tenantId = tenantOf(req);
+      const availability = await assessWorkflowAvailability(ids, {
+        readDefinition: async (workflowId) => {
+          if (!WORKFLOW_ID_PATTERN.test(workflowId)) return null;
+          // The predicate runs whether or not the catalog hits, so a foreign id
+          // and an unknown one cost the same reads (as resolveTenantWorkflow).
+          const foreign = await isForeignOwned(tenantId, req.principal, workflowId);
+          const wf = await deps.hostSuite.workflowCatalog.getWorkflow(workflowId);
+          if (!wf || foreign) return null;
+          return wf.definition as WorkflowDefinition;
+        },
+        isResolvable: (typeId) => getNodeRegistry().isResolvable(typeId),
+      });
+      res.json({ availability });
     } catch (err) { next(err); }
   });
 

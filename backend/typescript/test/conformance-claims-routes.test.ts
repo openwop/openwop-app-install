@@ -34,7 +34,6 @@ import { join } from 'node:path';
 
 import { createApp } from '../src/index.js';
 import { PUBLIC_PATH_PREFIXES } from '../src/middleware/auth.js';
-import { v1Advertisement } from './support/v1Advertisement.js';
 import {
   CERTIFICATION_BUNDLE_PATH,
   CONFORMANCE_CLAIMS_PATH,
@@ -91,18 +90,28 @@ afterAll(async () => {
   rmSync(stampDir, { recursive: true, force: true });
 });
 
-// ADR 0812 — the pointer is a MAJOR-1 claim (the v2 root deliberately omits it, last
-// leg below), so it is read from the v1 builder, which answers in both modes.
-const discovery = async (): Promise<Record<string, never>> =>
-  (await v1Advertisement()) as Record<string, never>;
+// ADR 0812 P4 — the discovery pointer to this (image-mode) bundle was a v1
+// root claim, and it went with the v1 builder. The v2 root never carries it
+// (last leg below), so the claims document's `evidence.bundlePath` is now the
+// ONE surface that names the bundle URL, and `pointer()` reads that. The
+// invariant is unchanged: whatever names the URL must be backed by a route that
+// serves the bundle.
+const pointer = async (): Promise<unknown> => {
+  const res = await fetch(`${base}${CONFORMANCE_CLAIMS_PATH}`);
+  if (res.status !== 200) return undefined;
+  return ((await res.json()) as { evidence?: { bundlePath?: unknown } }).evidence?.bundlePath;
+};
 
-const pointer = (doc: Record<string, never>): unknown =>
-  ((doc as { capabilities?: { conformance?: { certificationBundleUrl?: unknown } } }).capabilities ?? doc as never)
-    .conformance?.certificationBundleUrl;
+/** The served root's v2 pointer slot (header-less is the v2 document). */
+const v2Pointer = async (): Promise<unknown> => {
+  const doc = (await (await fetch(`${base}/.well-known/openwop`)).json()) as { conformance?: { certificationBundleUrl?: unknown } };
+  return doc.conformance?.certificationBundleUrl;
+};
 
 describe('ADR 0550 P4 — an UNSTAMPED build claims nothing, and says so with a 404', () => {
-  it('omits capabilities.conformance.certificationBundleUrl', async () => {
-    expect(pointer(await discovery())).toBeUndefined();
+  it('names no bundle URL anywhere', async () => {
+    expect(await pointer()).toBeUndefined();
+    expect(await v2Pointer()).toBeUndefined();
   });
 
   it('404s both public reads', async () => {
@@ -112,16 +121,18 @@ describe('ADR 0550 P4 — an UNSTAMPED build claims nothing, and says so with a 
 });
 
 describe('ADR 0550 P4 — a STAMPED build advertises and serves exactly what it stamped', () => {
-  it('advertises a pointer that resolves to the stamped bundle', async () => {
+  it('names a bundle path that resolves to the stamped bundle', async () => {
     const assembled = stampArtifacts(stampDir);
 
-    const url = pointer(await discovery());
-    expect(typeof url).toBe('string');
-    expect(String(url).endsWith(CERTIFICATION_BUNDLE_PATH)).toBe(true);
+    const url = await pointer();
+    // Exactly the unversioned route: the retired twin answers 410 (ADR 0812 P4).
+    expect(url).toBe(CERTIFICATION_BUNDLE_PATH);
 
-    // Follow the ADVERTISED url, not a hand-built one: that is the difference
+    // Follow the NAMED path, not a hand-built one: that is the difference
     // between "the pointer field is populated" and "the pointer resolves".
-    const res = await fetch(String(url).replace(/^https?:\/\/[^/]+/, base));
+    // ADR 0812 P4: the stamped path was the retired twin, which answers 410;
+    // following it is what caught that.
+    const res = await fetch(`${base}${String(url)}`);
     expect(res.status).toBe(200);
     const served = (await res.json()) as { bundleVersion: string; claimedProfiles: string[] };
     expect(served.bundleVersion).toBe('2');
@@ -183,7 +194,7 @@ describe('WHD-6 — nothing names the bundle URL unless the URL serves a bundle'
 
   async function expectNothingNamesTheUrl(posture: string): Promise<void> {
     expect((await fetch(`${base}${CERTIFICATION_BUNDLE_PATH}`)).status, `${posture}: the route itself`).toBe(404);
-    expect(pointer(await discovery()), `${posture}: discovery still advertises a URL that 404s`).toBeUndefined();
+    expect(await v2Pointer(), `${posture}: discovery advertises a URL that 404s`).toBeUndefined();
     const claims = await fetch(`${base}${CONFORMANCE_CLAIMS_PATH}`);
     expect(claims.status, `${posture}: /claims still publishes evidence.bundlePath over a 404`).toBe(404);
   }
@@ -191,7 +202,7 @@ describe('WHD-6 — nothing names the bundle URL unless the URL serves a bundle'
   it('PRECONDITION: the stamp from the legs above is live, so the postures below are a CHANGE', async () => {
     // Without this the three 404s below would also be satisfied by a test file
     // reordered so that nothing was ever stamped — green for the wrong reason.
-    expect(typeof pointer(await discovery())).toBe('string');
+    expect(typeof (await pointer())).toBe('string');
     expect((await fetch(`${base}${CERTIFICATION_BUNDLE_PATH}`)).status).toBe(200);
     expect((await fetch(`${base}${CONFORMANCE_CLAIMS_PATH}`)).status).toBe(200);
   });
@@ -219,7 +230,7 @@ describe('WHD-6 — nothing names the bundle URL unless the URL serves a bundle'
   });
 
   it('restoring the bundle restores all three — the gate is the bundle, not a latch', async () => {
-    expect(typeof pointer(await discovery())).toBe('string');
+    expect(typeof (await pointer())).toBe('string');
     expect((await fetch(`${base}${CERTIFICATION_BUNDLE_PATH}`)).status).toBe(200);
     expect((await fetch(`${base}${CONFORMANCE_CLAIMS_PATH}`)).status).toBe(200);
   });

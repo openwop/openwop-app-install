@@ -11,6 +11,16 @@
  * registered consumer deletes the WHOLE document on `unpublished`, so withholding one `es`
  * overlay of a docs page would have evicted a still-published page — English body included
  * — from the docs KB. This leg pins that the seam stays silent.
+ *
+ * Leg 4 is leg 3's positive control: a REAL unpublish of the same page must reach the seam.
+ * (grade-tests wave 16: leg 4 used to "unpublish" with `updatePage({status:'draft'} as never)`
+ * — `updatePage` has no status field, so it was a no-op — and passed only because the
+ * entities kernel emits `openwop-app.entities.entity-written` on ANY page write. The setup's
+ * "publish" was the same no-op, so every leg ran on a draft. Both now use `transitionPage`.)
+ *
+ * Sabotage-witnessed (w16g4-*): swapping the locale-state → event mapping reds legs 1–2;
+ * dropping `locale` from the payload reds legs 1–2; firing the lifecycle seam for a locale
+ * flip reds leg 3; dropping `unpublish` from LIFECYCLE_FOR_ACTION reds leg 4.
  */
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
@@ -19,7 +29,7 @@ import { onCmsPageLifecycle, __resetCmsPageLifecycleHooks } from '../src/host/cm
 import type { CmsPageLifecycleChange } from '../src/host/cmsPageLifecycle.js';
 import * as dispatcher from '../src/host/hostEventDispatcher.js';
 import {
-  createPage, updatePage, setLocalePublishState, updateContentLanguageSettings,
+  createPage, transitionPage, setLocalePublishState, updateContentLanguageSettings,
 } from '../src/features/cms/cmsService.js';
 
 const T = 'tLocEvt';
@@ -34,8 +44,7 @@ beforeEach(async () => {
   __resetCmsPageLifecycleHooks();
   emitted = []; lifecycle = [];
   vi.spyOn(dispatcher, 'emitHostEvent').mockImplementation(async (e) => {
-    const ev = e as unknown as { type: string; payload?: Record<string, unknown> };
-    emitted.push({ type: ev.type, payload: ev.payload ?? {} });
+    emitted.push({ type: e.type, payload: e.payload });
   });
   onCmsPageLifecycle('test-probe', async (e) => { lifecycle.push(e); });
   await updateContentLanguageSettings(T, ORG, { baseLocale: 'en', supportedLocales: ['es'] }, 'u1');
@@ -44,7 +53,8 @@ beforeEach(async () => {
     sections: [{ type: 'richText', data: { html: '<p>base</p>' }, localizations: { es: { html: '<p>hola</p>' } } }],
   });
   pageId = page.pageId;
-  await updatePage(T, ORG, pageId, { status: 'published' } as never, 'u1').catch(() => undefined);
+  const live = await transitionPage(T, ORG, pageId, 'publish', 'u1');
+  expect(live?.status, 'precondition: the page is really live').toBe('published');
   emitted = []; lifecycle = [];
 });
 afterEach(() => { vi.restoreAllMocks(); __resetCmsPageLifecycleHooks(); });
@@ -75,9 +85,10 @@ describe('ADR 0668 D2 — a locale flip emits on the webhook lane only', () => {
   });
 
   it('leg 4: a real page unpublish DOES still fire the lifecycle seam (leg 3 is not vacuous)', async () => {
-    await updatePage(T, ORG, pageId, { status: 'draft' } as never, 'u1').catch(() => undefined);
+    await transitionPage(T, ORG, pageId, 'unpublish', 'u1');
     // If nothing fires here, leg 3 proves nothing — the seam would be dead for every action.
-    expect(lifecycle.length + emitted.length,
-      'the seam and/or the event lane must still work for a real page transition').toBeGreaterThan(0);
+    // `fireCmsPageLifecycle` calls the first handler synchronously, so no drain is needed.
+    expect(lifecycle.map((e) => [e.pageId, e.event]),
+      'a real unpublish must reach the in-process lifecycle seam').toEqual([[pageId, 'unpublished']]);
   });
 });

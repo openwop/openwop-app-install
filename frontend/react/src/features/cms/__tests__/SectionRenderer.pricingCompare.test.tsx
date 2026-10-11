@@ -1,10 +1,21 @@
 /**
- * UX_UPGRADE-site G5 — the plan-comparison matrix under the pricing tier cards.
+ * UX_UPGRADE-site G5 / ADR 0391 (b) / ADR 0820 §7 — the plan-comparison matrix
+ * under the pricing tier cards (`PricingSection.tsx`), plus the card list it
+ * must agree with.
  *
  * The invariant worth a test is HONESTY, not layout: the table is built from the
  * same `tiers[].features` the cards render, so a ✓ in the matrix must mean the
  * tier card lists that feature — and a — must mean it doesn't. It must also stay
  * out of the way when there is nothing to compare (one tier, or no features).
+ * R2-G5 adds the usage-limit rows; R2-G7 / ADR 0820 §7 the Monthly / Yearly switch
+ * (the "no annual price ⇒ no switch" arm is asserted in
+ * `SectionRenderer.pricingPublicPage.test.tsx` › "never invents a price…").
+ *
+ * Sabotage-witnessed (w17): `featureRow` membership → any-feature; dropping the
+ * `'*'` arm of the row or the card; `featureList` without `Array.isArray` (the
+ * '*' crash); `FEATURE_CARD_CAP`; acronym upper-casing; `tiers.length < 2`; the
+ * rows/limitRows emptiness check; `fmt.number` on limits; a missing limit read
+ * as 0; `annual = period === 'annual' && priceAnnual`; the verbatim annual note.
  */
 import { describe, it, expect, afterEach, vi, beforeEach } from 'vitest';
 import { render, screen, cleanup, fireEvent, waitFor, within } from '@testing-library/react';
@@ -14,12 +25,24 @@ import type { Section } from '../cmsClient.js';
 
 const PRICING: Section = { sectionId: 'p1', type: 'pricing', data: { heading: 'Plans' } };
 
+/** The `/public/pricing` tier shape (PricingSection's `PublicTier`). */
+interface TierFixture {
+  tier: string;
+  name: string;
+  features?: '*' | string[];
+  limits?: Record<string, number>;
+  display?: { price?: string; cadence?: string; priceAnnual?: string; cadenceAnnual?: string; annualNote?: string; highlighted?: boolean };
+}
+
+const json = (body: unknown): Response =>
+  new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
+
 /** Stub the two public reads `PricingSection` makes (tiers + add-on bundles). */
-function mockPricing(tiers: unknown[]): void {
+function mockPricing(tiers: TierFixture[]): void {
   vi.stubGlobal('fetch', vi.fn(async (url: unknown) => {
     const u = String(url);
-    if (u.includes('/public/pricing')) return { ok: true, json: async () => ({ tiers }) } as Response;
-    return { ok: true, json: async () => ({ bundles: [] }) } as Response;
+    if (u.includes('/public/pricing')) return json({ tiers });
+    return json({ bundles: [] });
   }));
 }
 
@@ -129,18 +152,8 @@ describe('pricing comparison matrix', () => {
     expect(seatCells[1]!.textContent).toContain('25');
   });
 
-  // R2-G7 — the monthly/annual toggle. Additive: no annual price authored
-  // anywhere ⇒ no toggle (the Linear annual-only/single-price pattern stays).
-  it('renders NO billing toggle when no tier authors an annual price', async () => {
-    mockPricing([
-      { tier: 'free', name: 'Free', features: ['CRM'], display: { price: '$0', cadence: '/mo' } },
-      { tier: 'pro', name: 'Pro', features: ['CRM'], display: { price: '$29', cadence: '/mo' } },
-    ]);
-    renderPricing();
-    await screen.findByText('$29');
-    expect(screen.queryByRole('group', { name: 'Billing period' })).toBeNull();
-  });
-
+  // R2-G7 — the monthly/annual toggle (the no-annual ⇒ no-toggle arm lives in
+  // pricingPublicPage › "never invents a price…", which a forced switch reds).
   // ADR 0820 §7 (2026-10-07) — CORRECTED from "defaults to annual": the page now
   // opens on MONTHLY like the feature store a visitor lands in after "Choose",
   // and the switch is a radiogroup with the store's Monthly / Yearly labels.

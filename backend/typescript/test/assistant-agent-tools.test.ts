@@ -7,12 +7,25 @@
  * actions that fail TYPED and SUBMIT into the existing approval pipeline (never
  * send), gated on the SAME workspace:write authority the routes use. Boots the
  * REAL app (the `registerFeatureAgentTool` registration seam is what's under test).
+ *
+ * The tenant is SEEDED with a commitment and a pending action before any case runs, so
+ * the "fail EMPTY" reads can only return `[]` because they withheld the data — on an empty
+ * tenant they would return `[]` with the guard deleted (the w11 probe proved exactly that).
+ *
+ * Sabotages that turn it red (grade-tests w11): each read's `actingUserId` guard removed;
+ * each action's `acting_user_required` guard removed; the workspace:write check removed
+ * from enqueue-action; the blank-description check removed; the unknown-commitment null
+ * guard removed. HONEST CEILING — the unknown-`kind` refusal is double-guarded: the tool
+ * checks `ENQUEUEABLE_KINDS` and the surface owner re-checks the same SSoT (COS-9), so
+ * removing either alone still yields `validation_error` (probe `tools-kind-enum`).
+ * Overlap kept (both protected tripwires): the allowlist-resolution case is also asserted
+ * for every pack by `agent-allowlist-resolution.test.ts`.
  */
-import http from 'node:http';
 import { readFileSync } from 'node:fs';
-import type { AddressInfo } from 'node:net';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
+import { upsertCommitmentBySource } from '../src/features/assistant/assistantService.js';
+import { enqueueActionWithApproval } from '../src/features/assistant/actionApproval.js';
 import { createAgentToolProvider, builtinAgentToolIds } from '../src/host/agentToolProvider.js';
 import {
   ASSISTANT_LIST_COMMITMENTS_TOOL_ID,
@@ -37,14 +50,18 @@ const ALL_IDS = [
   ASSISTANT_ENQUEUE_ACTION_TOOL_ID,
 ];
 
-let server: http.Server;
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
-  const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { void (server.address() as AddressInfo); res(); }); });
+  await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
+  // Seed the tenant: a system turn must see NOTHING even though there is something to see.
+  await upsertCommitmentBySource(TENANT, {
+    owner: { kind: 'self' },
+    description: 'Seeded commitment',
+    source: { kind: 'manual', externalId: 'cfp-seed-1', contentHash: 'h-seed', capturedAt: '2026-01-01T00:00:00.000Z' },
+  });
+  await enqueueActionWithApproval(TENANT, { kind: 'nudge', payload: {}, draft: 'Seeded nudge' });
 });
-afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
 function provider(scope: { actingUserId?: string; runId?: string } = {}) {
   return createAgentToolProvider({ tenantId: TENANT, ...scope });
@@ -123,6 +140,22 @@ describe('CFP-1 — actions fail TYPED without an acting user', () => {
     const out = await provider().executeTool({ name: ASSISTANT_POPULATE_BOARD_TOOL_ID, input: { commitmentId: 'c1' } });
     expect(out.isError).toBe(true);
     expect(parse(out)).toMatchObject({ error: 'acting_user_required' });
+  });
+});
+
+describe('CFP-1 — actions need workspace:write (the routes\' predicate)', () => {
+  const stranger = provider({ actingUserId: 'u:cfp-stranger', runId: 'run-cfp-stranger' });
+
+  it('upsert-commitment, enqueue-action and populate-board refuse a non-member acting user (forbidden_scope)', async () => {
+    for (const [name, input] of [
+      [ASSISTANT_UPSERT_COMMITMENT_TOOL_ID, { description: 'Not mine to record' }],
+      [ASSISTANT_ENQUEUE_ACTION_TOOL_ID, { kind: 'email.send', draft: 'Not mine to send', payload: { to: 'x@example.com' } }],
+      [ASSISTANT_POPULATE_BOARD_TOOL_ID, { commitmentId: 'c1' }],
+    ] as const) {
+      const out = await stranger.executeTool({ name, input: { ...input } });
+      expect(out.isError, name).toBe(true);
+      expect(parse(out), name).toMatchObject({ error: 'forbidden_scope' });
+    }
   });
 });
 

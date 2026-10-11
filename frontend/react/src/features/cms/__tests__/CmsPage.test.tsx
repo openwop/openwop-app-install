@@ -8,14 +8,26 @@
  * FE-is-never-the-authority gate, ADR 0009), and enabled → renders the page
  * header + the org's fetched pages.
  *
- * Mocking mirrors CrmPage.test.tsx: `useFeatureAccess` is a hoisted mutable
- * stub, and the feature's `cmsClient.js` is fully mocked (it is the single
- * data-access seam shared by CmsPage + SectionsEditor + CmsLanguageSettings).
+ * `useFeatureAccess` answers OFF (the fresh-install shape) for EVERY case, so
+ * each case also re-proves "no gate". CmsPage does not read the feed at all
+ * today; the absence of a gate cannot be sabotaged by a one-line edit, so the
+ * always-on claim is an honest ceiling (incident witness, no anchor). The
+ * feature's `cmsClient.js` is fully mocked (the single data-access seam shared
+ * by CmsPage + SectionsEditor + CmsLanguageSettings), and so is every other
+ * client the page reaches — no live fetch (ADR 0661).
+ *
+ * Sabotage-witnessed (/grade-tests w17): emptying the page list, the schedule
+ * label, the history row / Restore, the site-admin check (both ways), the
+ * preview's sections, the menu labels, the resolved-vs-raw menu source, and
+ * the preview-links failed/empty states each turn their case red.
  */
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, within, cleanup, fireEvent, waitFor } from '@testing-library/react';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import type { ReactNode } from 'react';
+import type { Page, SharedSection } from '../cmsClient.js';
+import type { ShareLink } from '../../sharing/sharingClient.js';
+import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
 
 // The Public-preview iframe portals React into a fresh <iframe> document — a
 // real-browser pattern jsdom can't tear down cleanly. This is a CMS-logic test,
@@ -24,10 +36,20 @@ vi.mock('../PublicPreviewFrame.js', () => ({
   PublicPreviewFrame: ({ children }: { children: ReactNode }) => <div data-testid="public-preview">{children}</div>,
 }));
 
-const access = vi.hoisted(() => ({ value: { enabled: false, loading: false, variant: undefined as string | undefined } }));
 vi.mock('../../../featureToggles/FeatureAccessContext.js', () => ({
-  useFeatureAccess: () => access.value,
+  useFeatureAccess: () => makeFeatureAccess({ enabled: false, loading: false }),
 }));
+
+// The opened page + the org's shared sections. Case-local overrides are reset
+// in afterEach.
+const cms = vi.hoisted(() => {
+  const defaultPage: Page = {
+    pageId: 'p1', title: 'Landing Page', slug: 'landing', status: 'draft',
+    sections: [{ sectionId: 'sec:1', type: 'hero', data: { heading: 'Hi' } }],
+    version: 3, updatedAt: '2026-01-01T00:00:00Z',
+  };
+  return { defaultPage, page: defaultPage, shared: [] as SharedSection[] };
+});
 
 vi.mock('../cmsClient.js', () => ({
   SECTION_TYPES: ['hero', 'richText', 'image', 'cta', 'columns'],
@@ -44,18 +66,14 @@ vi.mock('../cmsClient.js', () => ({
   // outcome so a rejection is visible to the submitter. Enrichment: null ⇒
   // no notice, which is what every case below expects.
   getPageReview: vi.fn(async () => null),
-  getPage: vi.fn(async () => ({
-    pageId: 'p1', title: 'Landing Page', slug: 'landing', status: 'draft',
-    sections: [{ sectionId: 'sec:1', type: 'hero', data: { heading: 'Hi' } }],
-    version: 3, updatedAt: '2026-01-01T00:00:00Z',
-  })), createPage: vi.fn(), deletePage: vi.fn(), savePage: vi.fn(),
+  getPage: vi.fn(async () => cms.page), createPage: vi.fn(), deletePage: vi.fn(), savePage: vi.fn(),
   transition: vi.fn(), translateSection: vi.fn(),
   listVersions: vi.fn(async () => [
     { versionId: 'pver:1', version: 2, snapshot: { title: 'Landing Page', slug: 'landing', sections: [] }, publishedAt: '2026-01-01T00:00:00Z', publishedBy: 'u1' },
   ]), restoreVersion: vi.fn(),
   // ADR 0204 — scheduling + shared sections
   schedulePublish: vi.fn(), cancelSchedule: vi.fn(),
-  listSharedSections: vi.fn(async () => []), createSharedSection: vi.fn(),
+  listSharedSections: vi.fn(async () => cms.shared), createSharedSection: vi.fn(),
   updateSharedSection: vi.fn(), deleteSharedSection: vi.fn(),
   listSharedSectionPages: vi.fn(async () => []),
   // ADR 0205 — locale governance
@@ -73,7 +91,7 @@ vi.mock('../../media/mediaClient.js', () => ({
 }));
 
 // Preview links ride the sharing feature (ADR 0204 C3).
-const sharing = vi.hoisted(() => ({ listLinks: vi.fn(async () => [] as unknown[]) }));
+const sharing = vi.hoisted(() => ({ listLinks: vi.fn(async (): Promise<ShareLink[]> => []) }));
 vi.mock('../../sharing/sharingClient.js', () => ({
   createLink: vi.fn(), listLinks: sharing.listLinks, revokeLink: vi.fn(),
   sharedPageUrl: (token: string) => `/shared/${token}`,
@@ -85,7 +103,8 @@ vi.mock('../../sharing/sharingClient.js', () => ({
 // The Page tab reads and writes the page's search and social record.
 vi.mock('../../publishing/publishingClient.js', () => ({ getSeo: vi.fn(async () => null), putSeo: vi.fn(async (_o: string, _p: string, seo: unknown) => seo) }));
 // ADR 0836 — the editor reads the caller's org access (admin tier): an admin here.
-vi.mock('../../../client/accessClient.js', async (orig) => ({ ...(await orig<Record<string, unknown>>()), getEffectiveAccess: vi.fn(async () => ({ roles: ['owner'], scopes: ['workspace:read', 'workspace:write', 'host:members:manage'], basis: 'member' })) }));
+// `listMembers` (CmsLanguageSettings) is mocked too: left real it was a live fetch.
+vi.mock('../../../client/accessClient.js', async (orig) => ({ ...(await orig<Record<string, unknown>>()), listMembers: vi.fn(async () => []), getEffectiveAccess: vi.fn(async () => ({ roles: ['owner'], scopes: ['workspace:read', 'workspace:write', 'host:members:manage'], basis: 'member' })) }));
 vi.mock('../../site/siteConfigClient.js', () => ({
   getSiteConfig: vi.fn(async () => { throw new Error('forbidden'); }),
   putSiteConfig: vi.fn(),
@@ -115,31 +134,19 @@ const renderPage = () => render(
   </MemoryRouter>,
 );
 
-beforeEach(() => { access.value = { enabled: false, loading: false, variant: undefined }; });
-afterEach(cleanup);
+afterEach(() => { cleanup(); cms.page = cms.defaultPage; cms.shared = []; });
 
 describe('CmsPage (always-on, ADR 0027)', () => {
   it('renders REGARDLESS of the feature-access feed (retired toggle ⇒ absent id must not gate)', async () => {
-    access.value = { enabled: false, loading: false, variant: undefined }; // the fresh-install shape
-    renderPage();
-    await waitFor(() => expect(screen.getByText(/Page Builder/i)).toBeTruthy());
-    expect(screen.queryByText(/CMS is not enabled/i)).toBeNull();
-  });
-
-  it('renders the page header + fetched pages', async () => {
-    access.value = { enabled: true, loading: false, variant: undefined };
-    renderPage();
-    // The header renders once orgs resolve…
+    renderPage(); // the feed answers OFF — the fresh-install shape
     await waitFor(() => expect(screen.getByText(/Page Builder/i)).toBeTruthy());
     // …and the org's pages land after the async list fetch.
     await waitFor(() => expect(screen.getByText('Landing Page')).toBeTruthy());
-    // The gate copy is absent in the enabled state.
     expect(screen.queryByText(/CMS is not enabled/i)).toBeNull();
   });
 
   // CMSGAP-4 — the ADR 0206/0204/0205 editor panels render for a selected draft.
   it('opening a draft shows the History + Preview-links panels and the schedule control', async () => {
-    access.value = { enabled: true, loading: false, variant: undefined };
     renderPage();
     await waitFor(() => expect(screen.getByText('Landing Page')).toBeTruthy());
     fireEvent.click(screen.getByRole('button', { name: 'Landing Page' }));
@@ -166,7 +173,6 @@ describe('CmsPage (always-on, ADR 0027)', () => {
 // scope in the workspace picker; a non-superadmin never does.
 describe('CmsPage — Front-page scope (ADR 0027 collapse)', () => {
   it('hides the Front-page scope when the site-config probe 403s (non-superadmin)', async () => {
-    access.value = { enabled: true, loading: false, variant: undefined };
     renderPage();
     await waitFor(() => expect(screen.getByText(/Page Builder/i)).toBeTruthy());
     // getSiteConfig rejects (default mock) ⇒ no System optgroup / Front-page option.
@@ -174,7 +180,6 @@ describe('CmsPage — Front-page scope (ADR 0027 collapse)', () => {
   });
 
   it('offers the Front-page scope + the "show at /" switch to a super admin', async () => {
-    access.value = { enabled: true, loading: false, variant: undefined };
     vi.mocked(getSiteConfig).mockResolvedValueOnce({
       id: 'site', enabled: true, updatedBy: 'admin', updatedAt: '2026-01-01T00:00:00Z',
     });
@@ -197,7 +202,6 @@ describe('CmsPage — Front-page scope (ADR 0027 collapse)', () => {
  */
 describe('CmsPage — deep link renders the page\'s sections', () => {
   it('landing on /cms/p/:org/:pageId renders the section content in the Public preview', async () => {
-    access.value = { enabled: true, loading: false, variant: undefined };
     renderDeepLink();
     // The detail header proves the page loaded…
     await waitFor(() => expect(screen.getByText(/\/landing · v3/)).toBeTruthy());
@@ -208,13 +212,15 @@ describe('CmsPage — deep link renders the page\'s sections', () => {
   });
 
   it('the Sections menu names the sections too (the resolved, not the raw, list)', async () => {
-    access.value = { enabled: true, loading: false, variant: undefined };
+    // A by-reference block (ADR 0204 C4): its own data is empty, so only the
+    // RESOLVED list can name it after the shared section's heading.
+    cms.page = { ...cms.defaultPage, sections: [...cms.defaultPage.sections, { sectionId: 'sec:2', type: 'richText', data: {}, ref: { sharedSectionId: 'ss1' } }] };
+    cms.shared = [{ sharedSectionId: 'ss1', name: 'Footer', type: 'richText', data: { heading: 'Shared heading' }, version: 1, updatedAt: '2026-01-01T00:00:00Z' }];
     renderDeepLink();
     await waitFor(() => expect(screen.getByText(/\/landing · v3/)).toBeTruthy());
-    // The menu reads the resolved sections, so this asserts they survived the
-    // ref-resolution pass, not just that a box exists.
     fireEvent.click(screen.getByRole('button', { name: 'Jump to a section' }));
     expect(await screen.findByRole('menuitem', { name: /Hi/ })).toBeTruthy();
+    expect(await screen.findByRole('menuitem', { name: /Shared heading/ })).toBeTruthy();
   });
 });
 
@@ -226,7 +232,6 @@ describe('CmsPage — deep link renders the page\'s sections', () => {
  */
 describe('CmsPage — preview links: failed read vs genuinely none', () => {
   const openPanel = async (): Promise<void> => {
-    access.value = { enabled: true, loading: false, variant: undefined };
     renderDeepLink();
     await waitFor(() => expect(screen.getByText(/\/landing · v3/)).toBeTruthy());
     // The panels live on the settings panel's Page tab.

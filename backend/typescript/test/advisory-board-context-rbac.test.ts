@@ -23,6 +23,11 @@
  * `meta.injectedContextBlock` again, (2) reddens; if a later change simply stops
  * persisting the snapshot, (3) reddens and tells you (2) is no longer proving
  * anything.
+ *
+ * Sabotage-witnessed (/grade-tests w12): composing from the persisted snapshot, or
+ * resolving without the caller, reds the ADVB-1 case; counting authz-withheld refs
+ * into the shortfall reds it too (the M4 leak-in-a-new-form arm); not counting
+ * archived refs, always warning, or an unlabelled ledger entry reds the M4 case.
  */
 
 import http from 'node:http';
@@ -55,14 +60,19 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T }
-interface Client { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res>; patch: (p: string, b?: unknown) => Promise<Res> }
+interface Res<T> { status: number; body: T }
+type Body = Record<string, unknown>;
+interface Client {
+  get: <T = Body>(p: string) => Promise<Res<T>>;
+  post: <T = Body>(p: string, b?: unknown) => Promise<Res<T>>;
+  patch: <T = Body>(p: string, b?: unknown) => Promise<Res<T>>;
+}
 function client(): Client {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
+  const call = async <T>(method: string, path: string, body?: unknown): Promise<Res<T>> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    const out = (res.status === 204 ? {} : await res.json().catch(() => ({}))) as T;
     return { status: res.status, body: out };
   };
   return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), patch: (p, b) => call('PATCH', p, b) };
@@ -72,9 +82,9 @@ const A = '/host/openwop-app/advisors';
 const uniqEmail = (who: string): string => `${who}-${Date.now()}-${n++}@acme.test`;
 
 async function login(c: Client, tenantId: string): Promise<string> {
-  const r = await c.post('/host/openwop-app/test/login', { email: uniqEmail('abc'), tenantId });
+  const r = await c.post<{ user: { userId: string } }>('/host/openwop-app/test/login', { email: uniqEmail('abc'), tenantId });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  return r.body.user.userId as string;
+  return r.body.user.userId;
 }
 
 describe('ADVB-1 — the board planning-context block is re-resolved per CALLER', () => {
@@ -83,31 +93,31 @@ describe('ADVB-1 — the board planning-context block is re-resolved per CALLER'
     const curator = client();
     const curatorId = await login(curator, tenantId);
 
-    const org = await curator.post('/host/openwop-app/orgs', { name: 'Acme' });
+    const org = await curator.post<{ orgId: string }>('/host/openwop-app/orgs', { name: 'Acme' });
     expect(org.status, JSON.stringify(org.body)).toBe(201);
-    const orgId = org.body.orgId as string;
+    const orgId = org.body.orgId;
 
     // A creator-ONLY strategy: `scope:'user'` ⇒ `canSubjectReadStrategy` is
     // `subject === createdBy`. This is one of exactly two shapes where org
     // `workspace:write` (what the snapshot gate narrows on) diverges from the
     // real read predicate.
-    const strategy = await curator.post('/host/openwop-app/strategy', {
+    const strategy = await curator.post<{ id: string }>('/host/openwop-app/strategy', {
       orgId, scope: 'user', title: 'Nightjar', summary: SECRET_SUMMARY,
     });
     expect(strategy.status, JSON.stringify(strategy.body)).toBe(201);
 
-    const advisor = await curator.post('/host/openwop-app/roster', { persona: 'Ada Lovelace', agentRef: { agentId: 'core.openwop.agents.brief-writer' } });
+    const advisor = await curator.post<{ rosterId: string }>('/host/openwop-app/roster', { persona: 'Ada Lovelace', agentRef: { agentId: 'core.openwop.agents.brief-writer' } });
     expect(advisor.status, JSON.stringify(advisor.body)).toBe(201);
-    const board = await curator.post(`${A}/boards`, {
+    const board = await curator.post<{ boardId: string }>(`${A}/boards`, {
       orgId, name: 'Founders', advisors: [advisor.body.rosterId], personaKind: 'historical', visibility: 'shared',
       contextRefs: [{ kind: 'strategy', strategyId: strategy.body.id }],
     });
     expect(board.status, JSON.stringify(board.body)).toBe(201);
-    const boardId = board.body.boardId as string;
+    const boardId = board.body.boardId;
 
-    const opened = await curator.post(`${A}/boards/${encodeURIComponent(boardId)}/chat`);
+    const opened = await curator.post<{ sessionId: string }>(`${A}/boards/${encodeURIComponent(boardId)}/chat`);
     expect(opened.status, JSON.stringify(opened.body)).toBe(201);
-    const sessionId = opened.body.sessionId as string;
+    const sessionId = opened.body.sessionId;
 
     // (3) the anti-rot arm — the leak material really is in durable state.
     const meta = await getConversationMeta(tenantId, sessionId);
@@ -129,7 +139,7 @@ describe('ADVB-1 — the board planning-context block is re-resolved per CALLER'
     // curating and (before the fix) silently included in reading.
     const added = await curator.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: memberId, roles: ['viewer'] });
     expect([200, 201]).toContain(added.status);
-    const joined = await member.post(`${A}/boards/${encodeURIComponent(boardId)}/chat`);
+    const joined = await member.post<{ sessionId: string }>(`${A}/boards/${encodeURIComponent(boardId)}/chat`);
     expect(joined.status, JSON.stringify(joined.body)).toBe(200);
     expect(joined.body.sessionId).toBe(sessionId);
 
@@ -162,23 +172,25 @@ describe('M4 — a partially-resolved board context is reported, not served as c
     const tenantId = `org:m4-${Date.now()}-${n++}`;
     const c = client();
     const userId = await login(c, tenantId);
-    const org = await c.post('/host/openwop-app/orgs', { name: 'Acme' });
-    const orgId = org.body.orgId as string;
+    const org = await c.post<{ orgId: string }>('/host/openwop-app/orgs', { name: 'Acme' });
+    const orgId = org.body.orgId;
 
     const LIVE_SUMMARY = 'Nightingale — the surviving thesis';
-    const live = await c.post('/host/openwop-app/strategy', { orgId, title: 'Live', summary: LIVE_SUMMARY });
-    const doomed = await c.post('/host/openwop-app/strategy', { orgId, title: 'Doomed', summary: 'Vanishes' });
+    const live = await c.post<{ id: string }>('/host/openwop-app/strategy', { orgId, title: 'Live', summary: LIVE_SUMMARY });
+    const doomed = await c.post<{ id: string }>('/host/openwop-app/strategy', { orgId, title: 'Doomed', summary: 'Vanishes' });
     expect(live.status).toBe(201);
     expect(doomed.status).toBe(201);
 
-    const advisor = await c.post('/host/openwop-app/roster', { persona: 'Ada Lovelace', agentRef: { agentId: 'core.openwop.agents.brief-writer' } });
-    const board = await c.post(`${A}/boards`, {
+    const advisor = await c.post<{ rosterId: string }>('/host/openwop-app/roster', { persona: 'Ada Lovelace', agentRef: { agentId: 'core.openwop.agents.brief-writer' } });
+    expect(advisor.status, JSON.stringify(advisor.body)).toBe(201);
+    const board = await c.post<{ boardId: string }>(`${A}/boards`, {
       orgId, name: 'Partial', advisors: [advisor.body.rosterId], personaKind: 'historical', visibility: 'shared',
       contextRefs: [{ kind: 'strategy', strategyId: live.body.id }, { kind: 'strategy', strategyId: doomed.body.id }],
     });
     expect(board.status, JSON.stringify(board.body)).toBe(201);
-    const opened = await c.post(`${A}/boards/${encodeURIComponent(board.body.boardId)}/chat`);
-    const sessionId = opened.body.sessionId as string;
+    const opened = await c.post<{ sessionId: string }>(`${A}/boards/${encodeURIComponent(board.body.boardId)}/chat`);
+    expect(opened.status, JSON.stringify(opened.body)).toBe(201);
+    const sessionId = opened.body.sessionId;
 
     // Whole, before: both refs resolve, so nothing is reported. Without this arm
     // the assertion below could pass on a composer that always warns.
@@ -190,7 +202,7 @@ describe('M4 — a partially-resolved board context is reported, not served as c
     // mutated (un-archiving restores the context), so the ref outlives its target
     // and the block silently shrinks.
     const { archiveStrategy } = await import('../src/features/strategy/strategyService.js');
-    await archiveStrategy(tenantId, doomed.body.id as string, userId);
+    await archiveStrategy(tenantId, doomed.body.id, userId);
 
     const partial = await composeChatContext(tenantId, { conversationId: sessionId, callerUserId: userId, seedText: 'plan?' });
     expect(partial.degraded, 'a truncated grounding must say so').toContain('board_context_partial');

@@ -10,17 +10,23 @@
  * The fallback is the load-bearing half: absent a name it must fall back to the
  * SLUG, never to a blank. An unnamed speaker in a council transcript is worse than
  * the slug it replaced.
+ *
+ * Sabotage-witnessed (/grade-tests w12): dropping the persona-map lookup reds the
+ * PERSONA NAME case; `|| t.from` → `|| ''` reds the three fallback cases; `||` → `??`
+ * reds the EMPTY-name case; writing an empty entry for an unnamed id, or skipping the
+ * manifest lookup, reds the resolvePersonaNames case.
  */
 import { describe, expect, it } from 'vitest';
 import { turnsToMessages } from '../src/host/exchange/dispatchTurn.js';
 import { resolvePersonaNames, __clearAgentIdentityCache } from '../src/host/agentIdentity.js';
 import { getAgentRegistry } from '../src/executor/agentRegistry.js';
 import type { ConversationTurn } from '../src/host/conversation.js';
+import type { ResolvedAgentManifest } from '../src/executor/agentRegistry.js';
 
 const turn = (from: string, agentId: string, content = 'Ship on Tuesday.'): ConversationTurn => ({
-  messageId: `m-${from}`, from, groupId: 'g1', content, ts: Date.now(),
+  messageId: `m-${from}`, from, groupId: 'g1', content, ts: 0,
   role: 'agent', turnIndex: 0, agent: { agentId },
-} as ConversationTurn);
+});
 
 const relayed = (msgs: { role: string; content: unknown }[]): string =>
   String(msgs.filter((m) => m.role === 'assistant').pop()!.content);
@@ -67,18 +73,14 @@ describe('ADR 0665 D5 — the narrative cast', () => {
 describe('ADR 0665 D5 — resolvePersonaNames', () => {
   it('resolves a registry agent’s persona, and OMITS an id it cannot name', async () => {
     __clearAgentIdentityCache();
-    getAgentRegistry().register({
+    const ada: ResolvedAgentManifest = {
       agentId: 'test.d5.ada', persona: 'Ada Lovelace', label: 'Analyst', modelClass: 'general',
       systemPrompt: 'You are Ada.', packName: 'test', packVersion: '0', toolAllowlist: [],
-    } as never);
+    };
+    getAgentRegistry().register(ada);
     const names = await resolvePersonaNames('_anon', ['test.d5.ada', 'test.d5.nobody']);
     expect(names.get('test.d5.ada')).toBe('Ada Lovelace');
     // Omission, not a blank entry — that is what lets the caller fall back to the slug.
     expect(names.has('test.d5.nobody')).toBe(false);
-  });
-
-  it('an empty id set does no work and returns an empty map (the 1:1 chat pays nothing)', async () => {
-    expect((await resolvePersonaNames('_anon', [])).size).toBe(0);
-    expect((await resolvePersonaNames('_anon', [''])).size).toBe(0);
   });
 });

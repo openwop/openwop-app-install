@@ -15,11 +15,23 @@
  * standing in for the executor's `makeSuspendFn` (`executor/suspendSignal.ts`) —
  * the first call suspends (throws, as the SuspendSignal does), and the resume
  * re-invocation returns the recorded value inline.
+ *
+ * Sabotage-witnessed (/grade-tests w11): in `packs/feature.assistant.nodes/index.mjs`,
+ * dropping the `summary` field or turning the `time` select into free text reds
+ * case 1; always asking for `start` reds case 2; ignoring the resumed summary,
+ * fixing the duration at 30 min, or dropping attendees reds case 3; removing the
+ * 09:00 fallback reds case 4; removing the NaN-date guard reds case 5; clarifying a
+ * complete invite reds case 6. (The email.send no-clarify case lives in
+ * assistant-email-a2ui.test.ts.)
  */
 
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import http from 'node:http';
-import { createApp } from '../src/index.js';
+import { beforeAll, describe, expect, it } from 'vitest';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { openStorage } from '../src/storage/index.js';
+import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
+import { initInMemorySurfaces } from '../src/host/inMemorySurfaces.js';
 import { buildAssistantSurface } from '../src/features/assistant/surface.js';
 import { __resetAssistantStore } from '../src/features/assistant/assistantService.js';
 
@@ -30,22 +42,18 @@ const CATALOG_VERSION = '0.9.1';
 const CATALOG = new Set(['heading', 'text', 'field.text', 'field.date', 'field.select', 'field.checkbox', 'action.button']);
 
 describe('Assistant calendar.invite A2UI clarification (ADR 0051 §3/§5)', () => {
-  let server: http.Server;
   // Typed from the pack's ambient module declaration (test/feature-packs.d.ts) —
   // no `any`, no eslint-disable (mirrors the assistant-loops test pattern).
   let nodes: (typeof import('../../../packs/feature.assistant.nodes/index.mjs'))['nodes'];
 
   beforeAll(async () => {
     process.env.OPENWOP_STORAGE_DSN = 'memory://';
-    const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-    await new Promise<void>((res) => {
-      server = app.listen(0, '127.0.0.1', res);
-    });
+    // Storage only — no createApp boot, no HTTP server: every case drives the node
+    // directly, and `enqueueActionWithApproval` seeds the assistant agent on demand.
+    initHostExtPersistence(await openStorage('memory://'));
+    initInMemorySurfaces({ dataDir: mkdtempSync(join(tmpdir(), 'openwop-cal-a2ui-')) });
     await __resetAssistantStore();
     nodes = (await import('../../../packs/feature.assistant.nodes/index.mjs')).nodes;
-  });
-  afterAll(async () => {
-    await new Promise<void>((res) => server.close(() => res()));
   });
 
   // Resolved per-call (not hoisted) — `nodes` is populated in beforeAll.
@@ -205,21 +213,5 @@ describe('Assistant calendar.invite A2UI clarification (ADR 0051 §3/§5)', () =
     expect(suspendCalled).toBe(false);
     const pa = field(r, 'pendingAction') as { payload: { event: { summary?: string } } };
     expect(pa.payload.event.summary).toBe('Weekly sync');
-  });
-
-  it('email.send is unaffected by the calendar clarification branch', async () => {
-    let suspendCalled = false;
-    const ctx = {
-      features: { assistant: buildAssistantSurface({ tenantId: 't-cal4' }) },
-      inputs: { kind: 'email.send', draft: 'Hi', payload: { to: 'x@y.com' } },
-      suspend: async () => {
-        suspendCalled = true;
-        return {};
-      },
-    };
-    const r = await enqueueAction(ctx);
-    expect(suspendCalled).toBe(false);
-    const pa = field(r, 'pendingAction') as { status: string };
-    expect(pa.status).toBe('pending');
   });
 });

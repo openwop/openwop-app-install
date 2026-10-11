@@ -1,6 +1,6 @@
 # ADR 0775 — Agents, roster & workforces: one write authority, tenant-owned cutover state, and a permission gate that can see a roster agent
 
-Status: Accepted — P1 implemented (feature-loop 2026-10 row 5); P2–P4 open
+Status: Accepted — P1 implemented (feature-loop 2026-10 row 5); P2 in progress (P2a–P2c implemented: all 44 `tmpl.*` are chains; reachability decided: hidden; P2d blocked on a prod measurement); P3–P4 open
 
 Feature-loop 2026-10 row 5 (agents, roster & workforces, + agent author). Grade evidence:
 `docs/steward/WORKFLOWS-ASSESSMENT.md` § "Agents, roster & workforces" (`ARWF-1..14`,
@@ -298,7 +298,7 @@ endpoint contract changes.
 | Phase | Scope | Status |
 |---|---|---|
 | **P1** | D1–D8 (`ARWF-2..6`, `-9`, `-10`, `-12`, the `ARWF-1` ratchet), all architect findings | implemented |
-| P2 | `ARWF-1` conversion, **batched by category**. Each batch is one reviewable PR that does all four of: (i) ship the batch as workflow-chain pack(s) registered same-id via `registerChainBackedWorkflow`, with a `postProcess` that restores the bare node ids, so a pre-existing run `:fork`s def-identically (the replay note); (ii) make it reachable through the ownership index (`hostOwned`), after the open question below is decided; (iii) delete those entries from the in-tree module; (iv) LOWER the D6 ceiling by the batch size in the same commit. Composed flows move from `core.subWorkflow` `config.workflowId` to `subChainRef`. Batches: **P2a** meeting-ops, reporting, intake-triage, scheduling (16 `tmpl.*`). **P2b** approvals, knowledge, people, finance (16; carries the `approval-chase` → `single-approver` composition). **P2c** commercial, it, comms (12; carries `post-meeting-follow-up` → `action-extraction`). **P2d** the 15 legacy `openwop-app.agents.*`: `seed-data/exampleAgents.json` binds none of them, so first measure prod run references. With none, delete them, and archive-not-dispose them otherwise (replay law). Then delete both modules and drop the two getters from source A. `frontend/react/src/agents/roleTemplates.ts` stops hand-copying the ids. | open |
+| P2 | `ARWF-1` conversion, **batched by category**. Each batch is one reviewable PR that does all four of: (i) ship the batch as workflow-chain pack(s) registered same-id via `registerChainBackedWorkflow`, with a `postProcess` that restores the bare node ids, so a pre-existing run `:fork`s def-identically (the replay note); (ii) make it reachable through the ownership index (`hostOwned`), after the open question below is decided; (iii) delete those entries from the in-tree module; (iv) LOWER the D6 ceiling by the batch size in the same commit. Composed flows move from `core.subWorkflow` `config.workflowId` to `subChainRef`. Batches: **P2a** meeting-ops, reporting, intake-triage, scheduling (16 `tmpl.*`). **P2b** approvals, knowledge, people, finance (16; carries the `approval-chase` → `single-approver` composition). **P2c** commercial, it, comms (12; carries `post-meeting-follow-up` → `action-extraction`). *(CORRECTED 2026-10-10: that composition is meeting-ops, so P2a carried it. P2c has no composition.)* **P2d** the 15 legacy `openwop-app.agents.*`: `seed-data/exampleAgents.json` binds none of them, so first measure prod run references. With none, delete them, and archive-not-dispose them otherwise (replay law). Then delete both modules and drop the two getters from source A. `frontend/react/src/agents/roleTemplates.ts` stops hand-copying the ids. *(CORRECTED 2026-10-10: step (ii) is answered NO. The user decided the `tmpl.*` chains stay `internal` replay archives, not reachable (Open questions).)* | **P2a–P2c implemented** (§ P2 implementation record); P2d blocked on a prod measurement |
 | P3 | `ARWF-7` / `-13`: one dispatch policy resolver. Roster `enabled:false` and the `agentPolicyResolver` autonomy/approval/required-connection rules apply on every AUTONOMOUS entry (schedules, follow-ups, heartbeat fallback). User-initiated chat stays a test pane, as in Relevance AI. The run path also gets the persona scaffold and agent knowledge. Cross-instance registry eviction (D5 H2). Viewer-aware write affordances in the SPA. | open |
 | P4 | `ARWF-11`: an `If-Match` / version CAS on roster PATCH, user-agent PATCH and profile PUT (profile PUT becomes a merge, not a full replace), and a CAS in `recordHeartbeat` against a concurrent pause. `ARWF-8`: the workforce eval reads its agent and suite from the workforce, not `host.priya`. | open |
 
@@ -346,12 +346,17 @@ folded into the decisions above.
 
 ## Open questions
 
-- [ ] **P2 reachability (product call).** ADR 0190 §Phase 6 kept the `tmpl.*`
+- [x] **P2 reachability (product call).** ADR 0190 §Phase 6 kept the `tmpl.*`
   mock-AI templates OUT of the template gallery on purpose. Making them
   ownership-index reachable puts 44 deterministic mock-AI flows in every tenant's
   `/builder` list. The doctrine requires reachability; the product may prefer
   converting the ten Work-Twin portfolios to real-AI chains and retiring the
   mocks. Decide before P2a.
+  **ANSWERED 2026-10-10, the user's decision: hidden.** The `tmpl.*` chains stay
+  `internal: true` (RFC 0135) as replay archives. They are not made reachable in
+  `/builder` or the `/` picker, and get no `hostOwned` registration. The real-AI
+  Work-Twin chains, and the demo stopgap until then, are a separate ADR. That ADR
+  is not this one, so P2 step (ii) closes here with no code.
 
 - [ ] Should *running* an agent (dispatch, chat) require more than tenant membership?
   This is a product call, and it covers the whole chat lane.
@@ -386,3 +391,115 @@ the fix is a row tombstone (P4). `ARCD-4`: a roster scan per chat turn / voice c
 UX follow-ups `ARUX-7b/-8/-9/-12/-13/-17/-18` are filed with reasons in
 `docs/steward/UX-ASSESSMENT.md`.
 
+
+## P2 implementation record
+
+### P2a — meeting-ops, reporting, intake-triage, scheduling (16 `tmpl.*`), 2026-10-10
+
+Measured at `51f5a323f` before the change: 44 `tmpl.*` + 15 `openwop-app.agents.*` =
+59 in-tree definitions, D6 ceilings 44 / 15. After: **28 + 15 = 43**, ceilings
+**28** / 15.
+
+| Step | What shipped |
+|---|---|
+| (i) chain pack | `examples/workflow-chain-packs/work-twin-templates/pack.json` (`vendor.openwop-app.workflows.work-twin-templates@1.0.0`), 16 chains, chainId = the original `tmpl.*` id. It was GENERATED from the live in-tree definitions, not hand-copied. Every node is exactly pinned (`local.sample.demo.mock-ai@0.1.0`, `core.approvalGate@1.0.0`, `core.subWorkflow@1.0.0`). `post-meeting-follow-up` composes `action-extraction` through RFC 0133 `subChainRef` + `subChains[]`, and the host-default bind restores `config.workflowId` to the same child id. |
+| (i) same-id registration | `registerWorkflowTemplateChains()` (`host/workflowTemplates.ts`), called from `registerBackendFeatures` before the CBW-1 bind sweep. Its `postProcess`, `restoreTemplateShape`, strips the expansion prefix from node ids and edge endpoints and drops `metadata` / `configurableSchema`. **Each expansion is byte-identical to the deleted in-tree definition**: `revisionHashOf` matches 16/16 golden hashes measured before deletion. So the revision row the registration records IS every historical run's `definitionRevision` pin, and such a run now resolves `resolvedFrom: 'revision'` (it used to resolve the head). |
+| (ii) reachability | **Decided 2026-10-10 (the user): hidden, as replay archives. No reachability work.** Every chain is `internal: true` (RFC 0135). That keeps today's posture exactly: out of the `/builder` gallery and the `/` picker, as ADR 0190 §Phase 6 decided. It also keeps them out of the zero-config tenant seed. `seedWorkflows.ts` seeds every zero-config, non-internal chain into every tenant, and these chains take no parameters, so leaving `internal` off would have answered the product question by side effect. Answering it later is one flag per chain plus, for ownership-index visibility, `hostOwned` on the registration. |
+| (iii) delete | The 16 entries are gone from `WORKFLOW_TEMPLATES`. `WORKFLOW_TEMPLATE_CHAIN_IDS` names them. `test/workflow-templates.test.ts` still pins 11 × 4 across the in-tree remainder plus the chain ids, with no id in both. |
+| (iv) ratchet | D6 `WORKFLOW_TEMPLATES` ceiling 44 → **28**, same commit. |
+
+**Witness:** `backend/typescript/test/work-twin-template-chains.test.ts`. It boots the real app and checks golden-hash identity, the pinned-revision resolve, the composition bind, `internal`, exact pins, and real-executor runs (one to completion, one to its gate under the bare node id). Three sabotages each fail the expected cases: dropping `restoreTemplateShape` (4 red), dropping the boot call (6 red), and one chain `internal:false` (1 red).
+
+**Trade-offs and residuals (recorded, not hidden):**
+- The restored definition does not carry `metadata.expandedFrom.nodePins`, so
+  `runInsert`'s node-pin-mismatch stamp has nothing to compare for these demo workflows.
+  Byte identity was chosen over it, because replay is the law and the stamp is
+  diagnostics. The pins are still enforced at pack load (ADR 0766 D2).
+- The pack loads from the image-vendored `examples/` root. It is in no
+  `OPENWOP_INSTALL_PACKS` pin, so **no registry publish is needed for prod**. A host
+  that sets `OPENWOP_WORKFLOW_CHAIN_EXAMPLES=0` loses these 16 ids. Every ADR 0472
+  chain-backed migration (kicktodo loops, notebooks, MCP projections) already has that
+  caveat. A `tmpl.*` id on such a host now 404s where it used to resolve. If that
+  matters, publish the pack to packs.openwop.dev and pin it.
+- On an `OPENWOP_DEPLOY_POSTURE=auth` host, `mock-ai` is not registered (LEAK-3), so
+  neither the old nor the new definition can dispatch. This batch does not change that.
+
+### P2b — approvals, knowledge, people, finance (16 `tmpl.*`), 2026-10-10
+
+The same generator (appending to the pack) and `restoreTemplateShape`. Golden
+hashes were measured at `0b45e04ec` before deletion, and 16/16 match.
+`finance.approval-chase` composes `approvals.single-approver` through `subChainRef`.
+The template catalog test's shape assertions (allowed node types, one primary,
+approvals gated, closed composition) moved to the chain test, over the pack. The
+unused `composedFlow` helper was deleted. Ceiling 28 → **12**. In-tree total 43 → **27**.
+Sabotage: rebinding `approval-chase` to `dual-approver` in the pack fails the hash
+and composition cases (2 red). Dropping one P2b id from the registration list fails
+the list-equality and pack cases (2 red).
+
+### P2c — commercial, it, comms (12 `tmpl.*`), 2026-10-10
+
+Golden hashes were measured at `452795789`, and 12/12 match. With the ceiling at 0,
+`WORKFLOW_TEMPLATES`, `getWorkflowTemplate` and its catalog source-A branch
+(`host/index.ts`) are **deleted**, and `getWorkflowTemplate()` has left the D6 return
+set. The D6 ceiling became a check that the catalog cannot return to that module.
+`host/workflowTemplates.ts` now holds only `WORKFLOW_TEMPLATE_CHAIN_IDS` (44),
+`restoreTemplateShape` and `registerWorkflowTemplateChains`. It no longer
+contains a `WorkflowDefinition`. In-tree total 27 → **15** (all `openwop-app.agents.*`).
+
+Consumers: none were changed. `seed-data/exampleAgents.json` (the ten twins'
+portfolios + todo triggers) and `frontend/react/src/agents/roleTemplates.ts` bind
+the same ids, now resolved chain-backed. `test/workflow-templates.test.ts` pins that
+every id they bind is in the library. `AgentWorkflowPortfolioPanel` starts runs by
+id through the workflow catalog, and `getChainBackedWorkflow` answers there.
+(`features/documents` `tmpl.parameters…` hits are a local variable named `tmpl`,
+not workflow ids.) The end-to-end consumer witness is
+`test/agents-example-data.test.ts`: the heartbeat run of `tmpl.it.incident-triage`
+completes through the pack. Sabotage: removing that chain from the pack fails it
+(plus the scheduler `:trigger` case and the library/pack equality, 3 red); a new
+in-tree definition source in source A fails the D6 return-set case; a seed
+portfolio binding `tmpl.it.incident-nope` fails the consumer case.
+
+### P2d — the 15 `openwop-app.agents.*`: BLOCKED on the measurement
+
+**Measurement attempted 2026-10-10 ~12:20Z, read-only, and STOPPED: no safe route
+exists without new credentials.** The release queue showed no deploy or certify
+running (slot 10, a local train, was gating). What was checked:
+
+- `GET /v1/runs?workflowId=<id>` (`routes/runs.ts`) filters across tenants only
+  for a WILDCARD principal (`tenants: ['*']`). A superadmin cookie session is
+  not one: `isSuperadmin` grants on an allowlist, but the run list still scopes
+  to `req.tenantId`. A wildcard principal comes only from an
+  `OPENWOP_API_KEYS` entry written `<key>:*` (ADR 0561), and prod runs with
+  `OPENWOP_API_KEYS=""` (`middleware/auth.ts` docblock, DEPLOY.md). No HTTP read
+  through the app can answer a cross-tenant count.
+- No script under `scripts/` counts runs by workflow id.
+- Direct SQL (the `scripts/job-search-prod-probes.sql` precedent: `gcloud sql
+  connect … < file`) would answer it. That is a connection outside the app's pool,
+  and it needs DB credentials this session does not hold. Not improvised.
+
+**Access that would unblock it (operator's choice):**
+1. *Preferred, one read-only DB connection:* an operator with Cloud SQL access
+   runs, off-peak and not during a deploy or certify (the budget is 100
+   `max_connections`, per the 2026-10-02 correction):
+   `SELECT workflow_id, count(*) FROM runs WHERE workflow_id IN ('openwop-app.agents.lead-routing', …the 15 ids in host/exampleWorkflows.ts…) GROUP BY 1;`
+   Match the EXACT 15 ids, not a `LIKE 'openwop-app.agents.%'` prefix:
+   `seed-data/workforces.json` names other `openwop-app.agents.*` ids
+   (`invoice-extract`, `triage-classify`, …) that are not among the 15.
+2. *Through the app:* a temporary `<key>:*` entry in `OPENWOP_API_KEYS`
+   (`scripts/update-env.sh`, which mints a revision), then 15 paginated
+   `GET /v1/runs?workflowId=…&limit=200` reads, then remove the key. This is an
+   env change and a cross-tenant credential, so it needs the user's approval.
+
+With zero references: delete the 15 and `exampleWorkflows.ts`. Otherwise migrate
+them the P2a way (internal, byte-identical: archive, not dispose). Then delete
+`exampleWorkflows.ts` (its `exampleWorkflowsForRole` backs `exampleDataSeed.ts`'s
+legacy fallback), the frontend `roleTemplates.ts` hand-copy of those ids, and the
+`RunsIndexPage` demo list. Either way, `getExampleWorkflow()` leaves the D6 return set.
+
+| Phase | Commit | Witness |
+|---|---|---|
+| P2a | `0b45e04ec` | `test/work-twin-template-chains.test.ts`, `test/workflow-templates.test.ts`, `test/catalog-source-a-literal-ratchet.test.ts` |
+| P2b | `452795789` | same three; ceiling 28 → 12 |
+| P2c | `d29d18227` | same three + `test/agents-example-data.test.ts` (consumer run); catalog deleted, ceiling 0 |
+| (ii) | — | answered by the user 2026-10-10: hidden (no code) |
+| P2d | — | blocked: prod run-reference count needs access (above) |

@@ -16,6 +16,14 @@
  * ownership link alone is not enough: `SHAREABLE_STATUSES` is
  * `['approved','final']`, so an `approved` document would stay on the PUBLIC
  * share surface after its owner asked to be erased.
+ *
+ * Sabotage-witnessed (grade-tests w14): skipping the version/template anonymize
+ * or the doc count reds the first case; keeping `approved` or the approval pin reds
+ * the unpublish case; matching ANY user producer reds the negative control; writing
+ * non-matching rows reds idempotency; erasing in another tenant, or dropping the
+ * version/template tenant filters, reds the cross-tenant case; not registering the
+ * eraser reds the wiring case. The doc-level outer tenant filter is double-guarded
+ * by `mutateDocument`'s fresh-row check (honest ceiling: neither alone can red).
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import http from 'node:http';
@@ -23,10 +31,11 @@ import { createApp } from '../src/index.js';
 import { createOrg } from '../src/host/accessControlService.js';
 import { createUser } from '../src/features/users/usersService.js';
 import {
-  createDocument, getDocument, listDocuments, addVersion, listVersions,
-  SHAREABLE_STATUSES, updateDocument,
+  createDocument, getDocument, addVersion, listVersions,
+  SHAREABLE_STATUSES, updateDocument, createTemplate, getTemplate,
 } from '../src/features/documents/documentsService.js';
 import { eraseDocumentSubject, ERASED_SUBJECT } from '../src/features/documents/erasure.js';
+import { eraseSubject } from '../src/host/subjectErasure.js';
 
 const TENANT = 'org:doc-erase';
 // Real user rows: `resolveOwnerSubject` refuses an `ownerSubject` whose user is
@@ -49,14 +58,14 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-const aDoc = (createdBy: string, extra: Record<string, unknown> = {}) =>
+const aDoc = (createdBy: string, extra: { ownerSubject?: { kind: 'user'; id: string } } = {}) =>
   createDocument({
     tenantId: TENANT, orgId: ORG, title: `doc-${Math.round(performance.now() * 1000)}`,
     kind: 'note', format: 'markdown',
     provenance: { producedBy: { kind: 'user', id: createdBy } },
     createdBy,
     ...extra,
-  } as never);
+  });
 
 describe('DOC2-B1 — erasure reaches documents, and anonymizes rather than deletes', () => {
   it('removes the subject id from documents, versions and templates while KEEPING the content', async () => {
@@ -64,13 +73,14 @@ describe('DOC2-B1 — erasure reaches documents, and anonymizes rather than dele
     await addVersion(TENANT, ORG, doc.documentId, {
       content: 'the org needs this text to survive',
       producedBy: { kind: 'user', id: SUBJECT },
-    } as never);
+    });
+    const tmpl = await createTemplate({ tenantId: TENANT, orgId: ORG, name: 'Their template', kind: 'note', promptBody: 'Write it.', createdBy: SUBJECT });
 
-    // DOCT-4 / WF-DOC-8 — the eraser REPORTS what it touched (doc + version =
-    // at least 2), so the DSAR seam's `foundNothing` wrong-tenant tell can see
-    // this feature instead of a void-return opt-out.
+    // DOCT-4 / WF-DOC-8 — the eraser REPORTS what it touched (doc + version +
+    // template = at least 3), so the DSAR seam's `foundNothing` wrong-tenant tell
+    // can see this feature instead of a void-return opt-out.
     const report = await eraseDocumentSubject(TENANT, SUBJECT);
-    expect(report.rowsTouched).toBeGreaterThanOrEqual(2);
+    expect(report.rowsTouched).toBeGreaterThanOrEqual(3);
 
     const after = await getDocument(TENANT, ORG, doc.documentId);
     expect(after, 'the document itself must NOT be deleted — it is org content').toBeTruthy();
@@ -81,6 +91,10 @@ describe('DOC2-B1 — erasure reaches documents, and anonymizes rather than dele
     expect(vs.length, 'versions survive').toBeGreaterThan(0);
     expect(vs[0]?.content, 'and keep their content').toContain('the org needs this text');
     expect(vs[0]?.producedBy.id, 'but not their author').toBe(ERASED_SUBJECT);
+
+    const t = await getTemplate(TENANT, ORG, tmpl.templateId);
+    expect(t, 'the template survives').toBeTruthy();
+    expect(t?.createdBy, 'and loses its author identifier').toBe(ERASED_SUBJECT);
   });
 
   it('unpublishes a document the subject OWNED — dropping the link is not enough', async () => {
@@ -145,10 +159,16 @@ describe('DOC2-B1 — erasure reaches documents, and anonymizes rather than dele
     const foreign = await createDocument({
       tenantId: 'org:doc-erase-2', orgId: other.orgId, title: 'foreign', kind: 'note', format: 'markdown',
       provenance: { producedBy: { kind: 'user', id: SUBJECT } }, createdBy: SUBJECT,
-    } as never);
+    });
+    // A version and a template too, so EACH of the eraser's three tenant filters is observable.
+    await addVersion('org:doc-erase-2', other.orgId, foreign.documentId, { content: 'foreign text', producedBy: { kind: 'user', id: SUBJECT } });
+    const foreignTmpl = await createTemplate({ tenantId: 'org:doc-erase-2', orgId: other.orgId, name: 'Foreign template', kind: 'note', promptBody: 'Write it.', createdBy: SUBJECT });
     const report = await eraseDocumentSubject(TENANT, SUBJECT);
     const after = await getDocument('org:doc-erase-2', other.orgId, foreign.documentId);
     expect(after?.createdBy, 'the same person in a DIFFERENT tenant is out of scope').toBe(SUBJECT);
+    const foreignVs = await listVersions('org:doc-erase-2', other.orgId, foreign.documentId);
+    expect(foreignVs.map((v) => v.producedBy.id), 'foreign versions keep their author').toEqual([SUBJECT]);
+    expect((await getTemplate('org:doc-erase-2', other.orgId, foreignTmpl.templateId))?.createdBy, 'foreign templates keep their author').toBe(SUBJECT);
     // DOCT-4 — and the report says NOTHING was touched here (the tell the
     // WF-PRJ-3 wrong-tenant class rides on): this run had no in-tenant rows
     // for the subject left un-erased by earlier tests in this file, so a
@@ -163,11 +183,9 @@ describe('DOC2-B1 — the eraser is actually WIRED, not merely written', () => {
     // original defect. `createApp` above registers the features, so by now the
     // documents eraser must be reachable through the host seam — assert via the
     // observable effect rather than by re-importing our own function.
-    const { eraseSubject } = await import('../src/host/subjectErasure.js');
     const doc = await aDoc(SUBJECT);
     await eraseSubject(TENANT, SUBJECT);
     const after = await getDocument(TENANT, ORG, doc.documentId);
     expect(after?.createdBy, 'the HOST fan-out must reach documents').toBe(ERASED_SUBJECT);
-    expect(await listDocuments(TENANT, ORG), 'and must not have deleted anything').toBeTruthy();
   });
 });

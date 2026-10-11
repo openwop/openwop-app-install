@@ -299,6 +299,8 @@ halves — and D1's intent.
 | P4 — D4 non-contribution | `82554d622` | `backend/typescript/test/advisor-no-contribution.test.ts` (7 legs) + `conversationTransport.test.ts` (2 legs) |
 | P4 — D5 cast names | `81c1ea3ef` | `backend/typescript/test/advisor-cast-names.test.ts` — 6 legs |
 
+> **CORRECTED 2026-10-10 (/grade-tests w12):** `advisor-cast-names.test.ts` now has **5** legs. The leg "an empty id set does no work…" was cut because a probe showed it could not fail: removing the early return still yields an empty map, so it asserted a result rather than the work it named. The other five legs are sabotage-witnessed.
+
 ### What implementation changed about the decision
 
 **D4 needed a mechanism the decision text did not name.** The ADR said "typed", and typing it

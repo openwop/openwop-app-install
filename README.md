@@ -1,4 +1,4 @@
-> **Published white-label install bundle.** Auto-synced from `openwop/openwop-app` (source `56711ab87`). Clone or download the release zip, then follow **[WHITE-LABEL.md](./frontend/react/WHITE-LABEL.md)** to deploy your own. Generated — PRs here are not merged; development happens upstream.
+> **Published white-label install bundle.** Auto-synced from `openwop/openwop-app` (source `bff1945f0`). Clone or download the release zip, then follow **[WHITE-LABEL.md](./frontend/react/WHITE-LABEL.md)** to deploy your own. Generated — PRs here are not merged; development happens upstream.
 
 # openwop-app — OpenWOP Application
 

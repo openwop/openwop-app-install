@@ -17,7 +17,7 @@ import { OpenwopError } from '../../types.js';
 import { cleanString } from '../../host/boundedStrings.js';
 import { resolveOne } from '../../host/featureToggles/service.js';
 import {
-  createBoard, deleteBoard, getBoard, listCards, getCard, createCard, moveCard,
+  createBoard, deleteBoard, getBoard, listCards, listCardsExact, getCard, createCard, moveCard,
   updateCardFields, deleteCard, registerCardDeleteHook, registerBoardDeleteGuard,
   isTerminalColumn, type KanbanBoard, type KanbanCard, type KanbanCardSource,
 } from '../../host/kanbanService.js';
@@ -607,7 +607,7 @@ export async function submitIdea(
   }
   const title = cleanString(body.title, 200);
   if (!title) throw new OpenwopError('validation_error', 'Field `title` is required.', 400, { field: 'title' });
-  if ((await listCards(list.boardId)).length >= IDEAS_CAP) {
+  if ((await listCardsExact(list.boardId)).length >= IDEAS_CAP) {
     throw new OpenwopError('validation_error', `This list already has the maximum ${IDEAS_CAP} ideas.`, 400, { cap: IDEAS_CAP });
   }
   // A fresh idea lands in the `New` column. Columns carry no triggerWorkflowId, so
@@ -622,7 +622,7 @@ export async function submitIdea(
   });
   // PMX-D3 (ADR 0590) — post-write cap re-check, fail-closed self-compensation
   // (see addPeer for the mechanism + the tie-order caveat).
-  if ((await listCards(list.boardId)).length > IDEAS_CAP) {
+  if ((await listCardsExact(list.boardId)).length > IDEAS_CAP) {
     await deleteCard(card.id);
     throw new OpenwopError('validation_error', `This list already has the maximum ${IDEAS_CAP} ideas.`, 400, { cap: IDEAS_CAP });
   }
@@ -814,7 +814,7 @@ export async function cloneIdea(
   if (!list) throw new OpenwopError('not_found', 'Priority list not found.', 404, { listId });
   const orig = await getCard(cardId);
   if (!orig || orig.boardId !== list.boardId) throw new OpenwopError('not_found', 'Idea not found in this list.', 404, { cardId });
-  if ((await listCards(list.boardId)).length >= IDEAS_CAP) {
+  if ((await listCardsExact(list.boardId)).length >= IDEAS_CAP) {
     throw new OpenwopError('validation_error', `This list already has the maximum ${IDEAS_CAP} ideas.`, 400, { cap: IDEAS_CAP });
   }
   const title = cleanString(body?.title, 200) || cleanString(`${orig.title} (copy)`, 200);
@@ -829,7 +829,7 @@ export async function cloneIdea(
   // F3 / PMX-D3 (ADR 0590 correction) — the FOURTH pre-check-then-create cap
   // instance (the review's probe produced 1001 cards): same fail-closed
   // post-write re-check as submitIdea.
-  if ((await listCards(list.boardId)).length > IDEAS_CAP) {
+  if ((await listCardsExact(list.boardId)).length > IDEAS_CAP) {
     await deleteCard(card.id);
     throw new OpenwopError('validation_error', `This list already has the maximum ${IDEAS_CAP} ideas.`, 400, { cap: IDEAS_CAP });
   }

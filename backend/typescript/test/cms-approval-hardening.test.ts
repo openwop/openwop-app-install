@@ -23,6 +23,14 @@
  *     this kind, the one behavior protecting `in_review` from `system:sla-expiry`.
  *   - `CMSAU-4` — machine-draft provenance is DERIVED from durable stamps, so it
  *     must survive a resubmit rather than being rebuilt empty.
+ *
+ * Sabotage-witnessed (w16, `w16g2-hard-*`, 19 probes): the transition pin, the
+ * unpinned refuse + self-repin, reject-is-never-version-blocked, the SLA kind
+ * classification, `aiDraftedLocales` derive + repin, the header-lane note, the
+ * promote arm's closure note + unconditional queue, the repin forge guard, the
+ * SEO / locale-release / shared-section live-edit gates (incl. the `in_review`
+ * arm and the `approve or reject` remedy), the losing-decide truth, the
+ * name-only rename, and the DRAFT / WITHHOLD arms that must stay open.
  */
 
 import http from 'node:http';
@@ -35,6 +43,7 @@ import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { createContentApproval, getApproval, getContentApprovalHandler, repinContentApproval } from '../src/host/approvalService.js';
 import { kindHasRejectSideEffects } from '../src/host/approvalDecision.js';
 import * as cmsService from '../src/features/cms/cmsService.js';
+import type { PendingApproval } from '../src/host/approvalService.js';
 
 let BASE: string;
 let server: http.Server;
@@ -58,25 +67,28 @@ const setToggle = async (id: string, status: 'on' | 'off'): Promise<void> => {
 };
 const setGate = (status: 'on' | 'off'): Promise<void> => setToggle('cms-approval-gate', status);
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
-interface Res<T = any> { status: number; body: T }
+interface Res<T> { status: number; body: T }
+/** An error envelope's fields, merged into the page view most routes here return. */
+interface ErrBody { error?: string; message?: string; details?: { phase?: string; reason?: string } }
+type PageBody = cmsService.Page & ErrBody & { pendingApproval?: boolean; experimentId?: string; sharedSectionId?: string };
+interface SeoBody { seo: { metaTitle?: string; canonicalUrl?: string } }
 interface Client {
-  get: (p: string) => Promise<Res>;
-  post: (p: string, b?: unknown) => Promise<Res>;
-  patch: (p: string, b?: unknown) => Promise<Res>;
-  put: (p: string, b?: unknown) => Promise<Res>;
+  get: <T = PageBody>(p: string) => Promise<Res<T>>;
+  post: <T = PageBody>(p: string, b?: unknown) => Promise<Res<T>>;
+  patch: <T = PageBody>(p: string, b?: unknown) => Promise<Res<T>>;
+  put: <T = PageBody>(p: string, b?: unknown) => Promise<Res<T>>;
 }
 function client(): Client {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
+  const call = async <T>(method: string, path: string, body?: unknown): Promise<Res<T>> => {
     const res = await fetch(`${BASE}${path}`, {
       method,
       headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) },
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
-    return { status: res.status, body: out };
+    const out: unknown = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    return { status: res.status, body: out as T };
   };
   return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), patch: (p, b) => call('PATCH', p, b), put: (p, b) => call('PUT', p, b) };
 }
@@ -85,47 +97,52 @@ let n = 0;
 async function owner(): Promise<{ c: Client; orgId: string; tenantId: string; userId: string }> {
   const tenantId = `org:cmsah-${Date.now()}-${n++}`;
   const c = client();
-  const login = await c.post('/host/openwop-app/test/login', { email: `cmsah-${Date.now()}-${n++}@acme.test`, tenantId });
+  const login = await c.post<{ user: { userId: string } }>('/host/openwop-app/test/login', { email: `cmsah-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(login.status, JSON.stringify(login.body)).toBe(201);
-  const org = await c.post('/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await c.post<{ orgId: string }>('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
-  return { c, orgId: org.body.orgId as string, tenantId, userId: login.body.user.userId as string };
+  return { c, orgId: org.body.orgId, tenantId, userId: login.body.user.userId };
 }
 const u = (orgId: string, s = ''): string => `/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}${s}`;
 
-async function pendingFor(c: Client, pageId: string): Promise<any> {
-  const list = await c.get('/host/openwop-app/approvals?status=pending');
+async function pendingFor(c: Client, pageId: string): Promise<PendingApproval | undefined> {
+  const list = await c.get<{ items: PendingApproval[] }>('/host/openwop-app/approvals?status=pending');
   expect(list.status).toBe(200);
-  return (list.body.items as any[]).find((a) => a.kind === 'content-publish' && a.pageId === pageId);
+  return list.body.items.find((a) => a.kind === 'content-publish' && a.pageId === pageId);
+}
+/** The row the test just made pending — a missing one is a setup failure. */
+async function mustPend(c: Client, pageId: string): Promise<PendingApproval> {
+  const a = await pendingFor(c, pageId);
+  expect(a, 'a content-publish review must be pending').toBeTruthy();
+  return a!;
 }
 
 describe('CMSA-3 — the approve-what-you-saw pin is a PRECONDITION, not a check-then-act read', () => {
   it('refuses the publish when the page moved between the pin check and the transition', async () => {
-    const { c, orgId } = await owner();
+    const { c, orgId, tenantId } = await owner();
     await setGate('on');
     const created = await c.post(u(orgId, '/pages'), { title: 'Launch', sections: [{ type: 'hero', data: { heading: 'Reviewed' } }] });
-    const pageId = created.body.pageId as string;
+    const pageId = created.body.pageId;
     expect((await c.post(u(orgId, `/pages/${pageId}/submit`))).status).toBe(200);
-    const appr = await pendingFor(c, pageId);
-    expect(appr).toBeTruthy();
+    const appr = await mustPend(c, pageId);
 
     // The stale snapshot the handler's own read returns — i.e. the read that
     // happened BEFORE the admin's edit landed. Everything else is real: the
     // store, the route, the CAS, and `transitionPage`'s own fresh read.
-    const preEdit = await cmsService.getPage(appr.tenantId ?? '', orgId, pageId)
-      ?? (await c.get(u(orgId, `/pages/${pageId}`))).body;
+    const preEdit = await cmsService.getPage(tenantId, orgId, pageId);
+    expect(preEdit, 'the stored pre-edit row').toBeTruthy();
 
     // The admin edit lands (legal — an in_review page is editable at admin tier).
     const patched = await c.patch(u(orgId, `/pages/${pageId}`), { sections: [{ type: 'hero', data: { heading: 'Rewritten after review' } }] });
     expect(patched.status, JSON.stringify(patched.body)).toBe(200);
-    expect(patched.body.version).toBeGreaterThan(preEdit.version);
+    expect(patched.body.version).toBeGreaterThan(preEdit!.version);
 
     const spy = vi.spyOn(cmsService, 'getPage').mockImplementation(async (_t, _o, p) => {
-      if (p === pageId) return preEdit as any; // the pre-edit read
+      if (p === pageId) return preEdit; // the pre-edit read
       return null;
     });
     try {
-      const claim = await c.post(`/host/openwop-app/approvals/${appr.approvalId}/claim`);
+      const claim = await c.post<ErrBody>(`/host/openwop-app/approvals/${appr.approvalId}/claim`);
       expect(claim.status, JSON.stringify(claim.body)).toBe(409);
       // WITHOUT these two the test is VACUOUS. If the spy never intercepted the
       // handler's read, the pre-CAS staleness check would fire instead and
@@ -150,9 +167,9 @@ describe('CMSA-3 — the approve-what-you-saw pin is a PRECONDITION, not a check
     const { c, orgId } = await owner();
     await setGate('on');
     const created = await c.post(u(orgId, '/pages'), { title: 'Steady', sections: [{ type: 'hero', data: { heading: 'Reviewed' } }] });
-    const pageId = created.body.pageId as string;
+    const pageId = created.body.pageId;
     await c.post(u(orgId, `/pages/${pageId}/submit`));
-    const appr = await pendingFor(c, pageId);
+    const appr = await mustPend(c, pageId);
     const claim = await c.post(`/host/openwop-app/approvals/${appr.approvalId}/claim`);
     expect(claim.status, JSON.stringify(claim.body)).toBe(200);
     expect((await c.get(u(orgId, `/pages/${pageId}`))).body.status).toBe('published');
@@ -164,13 +181,13 @@ describe('CMSA-7 — an UNPINNED review refuses once and pins itself, instead of
     const { c, orgId, tenantId } = await owner();
     await setGate('on');
     const created = await c.post(u(orgId, '/pages'), { title: 'Legacy', sections: [{ type: 'hero', data: { heading: 'a' } }] });
-    const pageId = created.body.pageId as string;
+    const pageId = created.body.pageId;
     await c.post(u(orgId, `/pages/${pageId}/submit`));
     // Reproduce a pre-pin row: same shape the deploy left behind, no pageVersion.
     const legacy = await createContentApproval({ tenantId, orgId, pageId, pageTitle: 'Legacy', proposal: 'Publish' });
     expect(legacy.pageVersion).toBeUndefined();
 
-    const first = await c.post(`/host/openwop-app/approvals/${legacy.approvalId}/claim`);
+    const first = await c.post<ErrBody>(`/host/openwop-app/approvals/${legacy.approvalId}/claim`);
     expect(first.status, JSON.stringify(first.body)).toBe(409);
     expect(first.body?.details?.reason).toBe('unpinned_review');
     expect((await c.get(u(orgId, `/pages/${pageId}`))).body.status).toBe('in_review'); // did NOT fall through
@@ -191,7 +208,7 @@ describe('CMSA-7 — an UNPINNED review refuses once and pins itself, instead of
     const { c, orgId, tenantId } = await owner();
     await setGate('on');
     const created = await c.post(u(orgId, '/pages'), { title: 'Legacy reject', sections: [{ type: 'hero', data: { heading: 'a' } }] });
-    const pageId = created.body.pageId as string;
+    const pageId = created.body.pageId;
     await c.post(u(orgId, `/pages/${pageId}/submit`));
     const legacy = await createContentApproval({ tenantId, orgId, pageId, pageTitle: 'Legacy reject', proposal: 'Publish' });
     const rej = await c.post(`/host/openwop-app/approvals/${legacy.approvalId}/reject`, { note: 'Not yet' });
@@ -223,10 +240,10 @@ describe('CMSAU-4 — machine-draft provenance is derived from durable stamps, s
       sections: [{ type: 'hero', data: { heading: 'Hello' }, localizations: { es: { heading: 'Hola' } }, aiDrafted: { es: new Date().toISOString() } }],
     });
     expect(created.status, JSON.stringify(created.body)).toBe(201);
-    const pageId = created.body.pageId as string;
+    const pageId = created.body.pageId;
     expect((await c.post(u(orgId, `/pages/${pageId}/submit`))).status).toBe(200);
 
-    const appr = await pendingFor(c, pageId);
+    const appr = await mustPend(c, pageId);
     expect(appr.aiDraftedLocales, 'the reviewer must be told the page carries machine drafts').toEqual(['es']);
 
     // RESUBMIT — the defect this closes: the one-shot English note was rebuilt
@@ -234,18 +251,18 @@ describe('CMSAU-4 — machine-draft provenance is derived from durable stamps, s
     // repin OVERWROTE the disclosure, presenting the same unreviewed machine
     // drafts as provenance-clean.
     expect((await c.post(u(orgId, `/pages/${pageId}/submit`))).status).toBe(200);
-    const after = await pendingFor(c, pageId);
+    const after = await mustPend(c, pageId);
     expect(after.approvalId, 'a resubmit repins the ONE open row').toBe(appr.approvalId);
     expect(after.aiDraftedLocales).toEqual(['es']);
 
     // …and it CLEARS honestly once a human replaces the drafts (the mirror
     // defect: stale disclosure outliving the content).
     const live = await c.get(u(orgId, `/pages/${pageId}`));
-    const human = (live.body.sections as any[]).map((s) => ({ ...s, aiDrafted: undefined }));
+    const human = live.body.sections.map((s) => ({ ...s, aiDrafted: undefined }));
     expect((await c.patch(u(orgId, `/pages/${pageId}`), { sections: human })).status).toBe(200);
     expect((await c.post(u(orgId, `/pages/${pageId}/submit`))).status).toBe(200);
-    expect((await pendingFor(c, pageId)).aiDraftedLocales).toBeUndefined();
-    expect((await getApproval((await pendingFor(c, pageId)).approvalId))?.tenantId).toBe(tenantId);
+    expect((await mustPend(c, pageId)).aiDraftedLocales).toBeUndefined();
+    expect((await getApproval((await mustPend(c, pageId)).approvalId))?.tenantId).toBe(tenantId);
   });
 });
 
@@ -254,7 +271,7 @@ describe('CMSAU-5 / CMSA-9 — a rejection reaches the submitter with a reason',
     const { c, orgId } = await owner();
     await setGate('on');
     const created = await c.post(u(orgId, '/pages'), { title: 'Needs work', sections: [{ type: 'hero', data: { heading: 'a' } }] });
-    const pageId = created.body.pageId as string;
+    const pageId = created.body.pageId;
     await c.post(u(orgId, `/pages/${pageId}/submit`));
 
     // The CMS header lane used to build its decide ctx without reading the body,
@@ -263,7 +280,7 @@ describe('CMSAU-5 / CMSA-9 — a rejection reaches the submitter with a reason',
     expect(rej.status, JSON.stringify(rej.body)).toBe(200);
     expect(rej.body.status).toBe('draft');
 
-    const review = await c.get(u(orgId, `/pages/${pageId}/review`));
+    const review = await c.get<{ review: { status: string; note?: string; decidedBy?: string; resolvedAt?: string } }>(u(orgId, `/pages/${pageId}/review`));
     expect(review.status, JSON.stringify(review.body)).toBe(200);
     expect(review.body.review.status).toBe('rejected');
     expect(review.body.review.note).toBe('Pricing table is out of date.');
@@ -274,7 +291,7 @@ describe('CMSAU-5 / CMSA-9 — a rejection reaches the submitter with a reason',
   it('reports a page that was never submitted as having no review', async () => {
     const { c, orgId } = await owner();
     const created = await c.post(u(orgId, '/pages'), { title: 'Fresh', sections: [{ type: 'hero', data: { heading: 'a' } }] });
-    const review = await c.get(u(orgId, `/pages/${created.body.pageId}/review`));
+    const review = await c.get<{ review: unknown }>(u(orgId, `/pages/${created.body.pageId}/review`));
     expect(review.status).toBe(200);
     expect(review.body.review).toBeNull();
   });
@@ -285,15 +302,15 @@ describe('CMSA-2c / CMSA-4 — the experiment-promote lane', () => {
   async function experimentSetup(c: Client, orgId: string): Promise<{ pageId: string; experimentId: string; versionId: string }> {
     await setGate('off');
     const created = await c.post(u(orgId, '/pages'), { title: 'Exp', sections: [{ type: 'hero', data: { heading: 'v1' } }] });
-    const pageId = created.body.pageId as string;
+    const pageId = created.body.pageId;
     expect((await c.post(u(orgId, `/pages/${pageId}/publish`))).status).toBe(200);
-    const versions = await c.get(u(orgId, `/pages/${pageId}/versions`));
-    const versionId = (versions.body.versions as any[])[0].versionId as string;
+    const versions = await c.get<{ versions: Array<{ versionId: string }> }>(u(orgId, `/pages/${pageId}/versions`));
+    const versionId = versions.body.versions[0]!.versionId;
     const exp = await c.post(u(orgId, `/pages/${pageId}/experiments`), {
       name: 'Headline', variants: [{ key: 'control', versionId: null, weight: 50 }, { key: 'B', versionId, weight: 50 }],
     });
     expect(exp.status, JSON.stringify(exp.body)).toBe(201);
-    const experimentId = exp.body.experimentId as string;
+    const experimentId = exp.body.experimentId!;
     expect((await c.post(u(orgId, `/pages/${pageId}/experiments/${experimentId}/start`))).status).toBe(200);
     return { pageId, experimentId, versionId };
   }
@@ -307,7 +324,7 @@ describe('CMSA-2c / CMSA-4 — the experiment-promote lane', () => {
     expect((await c.post(u(orgId, `/pages/${pageId}/submit`))).status).toBe(200);
     expect(await pendingFor(c, pageId)).toBeTruthy();
 
-    const appr = await pendingFor(c, pageId);
+    const appr = await mustPend(c, pageId);
     const promote = await c.post(u(orgId, `/pages/${pageId}/experiments/${experimentId}/promote`), { variantKey: 'B' });
     expect(promote.status, JSON.stringify(promote.body)).toBe(200);
     expect(promote.body.pendingApproval).toBe(false);
@@ -334,7 +351,7 @@ describe('CMSA-2c / CMSA-4 — the experiment-promote lane', () => {
     expect(promote.body.pendingApproval).toBe(true);
     const row = await pendingFor(c, pageId);
     expect(row, 'a submit always queues — never conditionally on a re-read toggle').toBeTruthy();
-    expect(typeof row.pageVersion, 'and it is pinned, so the decision is version-checked').toBe('number');
+    expect(typeof row?.pageVersion, 'and it is pinned, so the decision is version-checked').toBe('number');
   });
 });
 
@@ -368,7 +385,7 @@ describe('ADR 0593 class enumeration — SEO metadata was the SECOND read-time i
     const { c, orgId } = await owner();
     await setGate('off');
     const created = await c.post(u(orgId, '/pages'), { title: 'Pricing', sections: [{ type: 'hero', data: { heading: 'a' } }] });
-    const pageId = created.body.pageId as string;
+    const pageId = created.body.pageId;
     expect((await c.post(u(orgId, `/pages/${pageId}/publish`))).status).toBe(200);
     // The ungated write lands — proving the lane REACHES the store, so the
     // refusal below is a refusal and not a broken route.
@@ -378,7 +395,7 @@ describe('ADR 0593 class enumeration — SEO metadata was the SECOND read-time i
     const blocked = await c.put(seo(orgId, pageId), { metaTitle: 'Rewritten live, unreviewed' });
     expect(blocked.status, JSON.stringify(blocked.body)).toBe(409);
     expect(JSON.stringify(blocked.body)).toContain('cms-approval-gate');
-    const after = await c.get(seo(orgId, pageId));
+    const after = await c.get<SeoBody>(seo(orgId, pageId));
     expect(after.body.seo.metaTitle).toBe('Reviewed title');
   });
 
@@ -388,6 +405,7 @@ describe('ADR 0593 class enumeration — SEO metadata was the SECOND read-time i
     const created = await c.post(u(orgId, '/pages'), { title: 'Draft', sections: [{ type: 'hero', data: { heading: 'a' } }] });
     const ok = await c.put(seo(orgId, created.body.pageId), { metaTitle: 'Fine' });
     expect(ok.status, JSON.stringify(ok.body)).toBe(200);
+    expect((await c.get<SeoBody>(seo(orgId, created.body.pageId))).body.seo.metaTitle).toBe('Fine');
   });
 });
 
@@ -410,9 +428,9 @@ describe('the losing concurrent decide is told the truth', () => {
     await setGate('on');
 
     const created = await c.post(u(orgId, '/pages'), { title: 'Raced', sections: [{ type: 'hero', data: { heading: 'a' } }] });
-    const pageId = created.body.pageId as string;
+    const pageId = created.body.pageId;
     await c.post(u(orgId, `/pages/${pageId}/submit`));
-    const appr = await pendingFor(c, pageId);
+    const appr = await mustPend(c, pageId);
 
     // The winner's decide lands through the ordinary route.
     expect((await c.post(`/host/openwop-app/approvals/${appr.approvalId}/claim`)).status).toBe(200);
@@ -448,7 +466,7 @@ describe('F1 — the SEO gate must cover `in_review`, not only `published`', () 
     const { c, orgId } = await owner();
     await setGate('on');
     const created = await c.post(u(orgId, '/pages'), { title: 'Launch', sections: [{ type: 'hero', data: { heading: 'a' } }] });
-    const pageId = created.body.pageId as string;
+    const pageId = created.body.pageId;
     expect((await c.put(seo(orgId, pageId), { metaTitle: 'Reviewed head', canonicalUrl: 'https://acme.test/launch' })).status).toBe(200);
     expect((await c.post(u(orgId, `/pages/${pageId}/submit`))).status).toBe(200);
 
@@ -457,17 +475,13 @@ describe('F1 — the SEO gate must cover `in_review`, not only `published`', () 
     expect(JSON.stringify(blocked.body)).toContain('cms-approval-gate');
 
     // …and the approve does NOT ship a canonical the reviewer never saw.
-    const appr = await pendingFor(c, pageId);
+    const appr = await mustPend(c, pageId);
     expect((await c.post(`/host/openwop-app/approvals/${appr.approvalId}/claim`)).status).toBe(200);
-    expect((await c.get(seo(orgId, pageId))).body.seo.canonicalUrl).toBe('https://acme.test/launch');
+    expect((await c.get<SeoBody>(seo(orgId, pageId))).body.seo.canonicalUrl).toBe('https://acme.test/launch');
   });
-
-  it('still allows the SEO write on a DRAFT page (the arm that must stay open)', async () => {
-    const { c, orgId } = await owner();
-    await setGate('on');
-    const created = await c.post(u(orgId, '/pages'), { title: 'Draft head', sections: [{ type: 'hero', data: { heading: 'a' } }] });
-    expect((await c.put(seo(orgId, created.body.pageId), { metaTitle: 'Fine' })).status).toBe(200);
-  });
+  // The DRAFT arm that must stay open is the class-enumeration block's negative
+  // control above ("allows the SEO write on a DRAFT page while the gate is ON");
+  // its byte-identical twin here was cut in w16 (both red under `w16g2-hard-draft-open`).
 });
 
 describe('F2 — releasing a withheld locale on a PUBLISHED page is a publish', () => {
@@ -486,10 +500,10 @@ describe('F2 — releasing a withheld locale on a PUBLISHED page is a publish', 
         aiDrafted: { es: new Date().toISOString() },
       }],
     });
-    const pageId = created.body.pageId as string;
+    const pageId = created.body.pageId;
     expect((await c.post(u(orgId, `/pages/${pageId}/locales/es/unpublish`))).status).toBe(200);
     expect((await c.post(u(orgId, `/pages/${pageId}/publish`))).status).toBe(200);
-    return { pageId, slug: created.body.slug as string };
+    return { pageId, slug: created.body.slug };
   }
 
   /** What an `Accept-Language: es` visitor is actually served. */
@@ -498,8 +512,8 @@ describe('F2 — releasing a withheld locale on a PUBLISHED page is a publish', 
       headers: { 'accept-language': 'es' },
     });
     expect(res.status).toBe(200);
-    const body = (await res.json()) as any;
-    return (body.sections as any[])?.find((s) => s.type === 'hero')?.data?.heading;
+    const body = (await res.json()) as { sections?: Array<{ type: string; data?: { heading?: unknown } }> };
+    return body.sections?.find((s) => s.type === 'hero')?.data?.heading;
   }
 
   it('refuses the release while the gate is ON — the withheld overlay stays withheld', async () => {
@@ -526,10 +540,13 @@ describe('F2 — releasing a withheld locale on a PUBLISHED page is a publish', 
     const created = await c.post(u(orgId, '/pages'), {
       title: 'Live', sections: [{ type: 'hero', data: { heading: 'en' }, localizations: { es: { heading: 'es' } } }],
     });
-    const pageId = created.body.pageId as string;
+    const pageId = created.body.pageId;
     expect((await c.post(u(orgId, `/pages/${pageId}/publish`))).status).toBe(200);
+    expect(await servedEs(orgId, created.body.slug), 'released before the withhold').toBe('es');
     await setGate('on');
     expect((await c.post(u(orgId, `/pages/${pageId}/locales/es/unpublish`))).status).toBe(200);
+    // …and the withhold took effect for a real reader.
+    expect(await servedEs(orgId, created.body.slug)).toBe('en');
   });
 
   it('allows the release on a DRAFT page while the gate is ON (the negative control)', async () => {
@@ -541,8 +558,11 @@ describe('F2 — releasing a withheld locale on a PUBLISHED page is a publish', 
       title: 'Draft loc', sections: [{ type: 'hero', data: { heading: 'en' }, localizations: { es: { heading: 'es' } } }],
     });
     await c.post(u(orgId, `/pages/${created.body.pageId}/locales/es/unpublish`));
+    expect((await c.get(u(orgId, `/pages/${created.body.pageId}`))).body.localePublishState?.es).toBe('draft');
     await setGate('on');
     expect((await c.post(u(orgId, `/pages/${created.body.pageId}/locales/es/publish`))).status).toBe(200);
+    // Released: the `draft` hold is gone (absent = published, the compat encoding).
+    expect((await c.get(u(orgId, `/pages/${created.body.pageId}`))).body.localePublishState?.es).toBeUndefined();
   });
 });
 
@@ -556,14 +576,14 @@ describe('F3 / F9 — the shared-section refusal names a verb that exists, and r
     const { c, orgId } = await owner();
     await setGate('off');
     const shared = await c.post(u(orgId, '/shared-sections'), { name: 'Nav', type: 'hero', data: { heading: 'a' } });
-    const sharedSectionId = shared.body.sharedSectionId as string;
+    const sharedSectionId = shared.body.sharedSectionId!;
     const live = await c.post(u(orgId, '/pages'), { title: 'Live page', sections: [{ type: 'hero', data: {}, ref: { sharedSectionId } }] });
     expect((await c.post(u(orgId, `/pages/${live.body.pageId}/publish`))).status).toBe(200);
     const reviewing = await c.post(u(orgId, '/pages'), { title: 'Reviewed page', sections: [{ type: 'hero', data: {}, ref: { sharedSectionId } }] });
     await setGate('on');
     expect((await c.post(u(orgId, `/pages/${reviewing.body.pageId}/submit`))).status).toBe(200);
 
-    const blocked = await c.patch(u(orgId, `/shared-sections/${sharedSectionId}`), { data: { heading: 'b' } });
+    const blocked = await c.patch<ErrBody>(u(orgId, `/shared-sections/${sharedSectionId}`), { data: { heading: 'b' } });
     expect(blocked.status, JSON.stringify(blocked.body)).toBe(409);
     const msg = String(blocked.body.message);
     expect(msg, 'the live page names unpublish').toMatch(/"Live page".*unpublish/s);
@@ -578,7 +598,7 @@ describe('F3 / F9 — the shared-section refusal names a verb that exists, and r
     const { c, orgId } = await owner();
     await setGate('off');
     const shared = await c.post(u(orgId, '/shared-sections'), { name: 'Old name', type: 'hero', data: { heading: 'a' } });
-    const sharedSectionId = shared.body.sharedSectionId as string;
+    const sharedSectionId = shared.body.sharedSectionId!;
     const page = await c.post(u(orgId, '/pages'), { title: 'Live', sections: [{ type: 'hero', data: {}, ref: { sharedSectionId } }] });
     expect((await c.post(u(orgId, `/pages/${page.body.pageId}/publish`))).status).toBe(200);
     await setGate('on');
@@ -587,5 +607,10 @@ describe('F3 / F9 — the shared-section refusal names a verb that exists, and r
     // …but the CONTENT write is still refused (the control that keeps the
     // allowance from becoming a hole).
     expect((await c.patch(u(orgId, `/shared-sections/${sharedSectionId}`), { data: { heading: 'b' } })).status).toBe(409);
+    // The rename landed and the content did not move.
+    const list = await c.get<{ sharedSections: Array<{ sharedSectionId: string; name: string; data: { heading?: unknown } }> }>(u(orgId, '/shared-sections'));
+    const row = list.body.sharedSections.find((r) => r.sharedSectionId === sharedSectionId);
+    expect(row?.name).toBe('New name');
+    expect(row?.data.heading).toBe('a');
   });
 });

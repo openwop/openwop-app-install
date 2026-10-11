@@ -13,15 +13,22 @@
  *
  * Three arms: the option is offered and selected; an unrelated edit does not send
  * the field at all; and a deliberate change still does.
+ *
+ * Tracked as M3 in ADR 0588 (board-of-advisors assessment remediation).
+ * Sabotage-witnessed (/grade-tests w12): dropping the out-of-cohort option or its label
+ * reds arm 1; sending the field unconditionally reds the rename arm; `chairChanged = false`
+ * reds the change + clear arms; `chair || undefined` reds the clear arm.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, waitFor, act, fireEvent } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
+import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
+import type { AdvisoryBoard, OrgRef, RosterMember } from '../advisoryBoardClient.js';
 
-const listBoards = vi.fn();
-const listOrgs = vi.fn();
-const listRoster = vi.fn();
-const updateBoard = vi.fn();
+const listBoards = vi.fn<() => Promise<AdvisoryBoard[]>>();
+const listOrgs = vi.fn<() => Promise<OrgRef[]>>();
+const listRoster = vi.fn<() => Promise<RosterMember[]>>();
+const updateBoard = vi.fn<(id: string, patch: Record<string, unknown>) => Promise<Partial<AdvisoryBoard>>>();
 
 const { FeatureDisabledError } = vi.hoisted(() => {
   class FeatureDisabledError extends Error {}
@@ -44,24 +51,25 @@ vi.mock('../advisoryBoardClient.js', async (orig) => ({
   listRoster: () => listRoster(),
   getSharedKnowledge: vi.fn(async () => []),
   createBoard: vi.fn(async () => ({})),
-  updateBoard: (id: string, patch: unknown) => updateBoard(id, patch),
+  updateBoard: (id: string, patch: Record<string, unknown>) => updateBoard(id, patch),
   deleteBoard: vi.fn(async () => {}),
   ensureBoardChat: vi.fn(async () => ({ sessionId: 's' })),
 }));
 vi.mock('../../../ui/toast.js', () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
 vi.mock('../../../featureToggles/FeatureAccessContext.js', () => ({
-  useFeatureAccess: () => ({ enabled: true, locked: false, loading: false, status: 'on' as const, isBeta: false, variant: null, entitled: true, resolutionFailed: false }),
+  useFeatureAccess: () => makeFeatureAccess(),
 }));
 
 import { AdvisoryBoardPage } from '../AdvisoryBoardPage.js';
 
 /** A board whose chair is NOT one of its advisors — the legal shape the picker
  *  could not represent. */
-const BOARD = {
+const BOARD: AdvisoryBoard = {
   boardId: 'b1', tenantId: 't', orgId: 'org-1', name: 'Founders', handle: 'founders',
   advisors: ['r-advisor'], moderatorRosterId: 'r-chair',
-  visibility: 'private' as const, personaKind: 'historical' as const,
-  createdBy: 'user:me', createdAt: '', updatedAt: '',
+  visibility: 'private', personaKind: 'historical',
+  turnPolicy: { rounds: 1, order: 'declared', synthesize: true },
+  createdBy: 'user:me', createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z', disclaimer: null,
 };
 
 beforeEach(() => {
@@ -69,8 +77,8 @@ beforeEach(() => {
   listOrgs.mockResolvedValue([{ orgId: 'org-1', name: 'Acme' }]);
   listBoards.mockResolvedValue([BOARD]);
   listRoster.mockResolvedValue([
-    { rosterId: 'r-advisor', persona: 'The Economist', agentId: 'a1' },
-    { rosterId: 'r-chair', persona: 'The Registrar', agentId: 'a2' },
+    { rosterId: 'r-advisor', persona: 'The Economist' },
+    { rosterId: 'r-chair', persona: 'The Registrar' },
   ]);
   updateBoard.mockResolvedValue({});
 });
@@ -105,7 +113,7 @@ describe('M3 — an out-of-cohort chair survives an unrelated edit', () => {
     await openEdit();
     fireEvent.change(screen.getByLabelText(/board name/i), { target: { value: 'War Council' } });
     await save();
-    const patch = updateBoard.mock.calls[0]![1] as Record<string, unknown>;
+    const patch = updateBoard.mock.calls[0]![1];
     expect(patch.name).toBe('War Council');
     // An OMITTED key is `updateBoard`'s "leave unchanged". Sending `null` here is
     // what deleted the chair; sending `'r-chair'` would work today but would also
@@ -119,13 +127,13 @@ describe('M3 — an out-of-cohort chair survives an unrelated edit', () => {
     const select = await openEdit();
     fireEvent.change(select, { target: { value: 'r-advisor' } });
     await save();
-    expect((updateBoard.mock.calls[0]![1] as Record<string, unknown>).moderatorRosterId).toBe('r-advisor');
+    expect(updateBoard.mock.calls[0]![1].moderatorRosterId).toBe('r-advisor');
   });
 
   it('and clearing it deliberately still clears it', async () => {
     const select = await openEdit();
     fireEvent.change(select, { target: { value: '' } });
     await save();
-    expect((updateBoard.mock.calls[0]![1] as Record<string, unknown>).moderatorRosterId).toBeNull();
+    expect(updateBoard.mock.calls[0]![1].moderatorRosterId).toBeNull();
   });
 });

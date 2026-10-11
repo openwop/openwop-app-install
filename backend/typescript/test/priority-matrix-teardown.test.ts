@@ -16,6 +16,12 @@
  *
  * The discriminator (a prescribed fix can be an attack): a SECOND tenant's PM
  * rows must survive the first tenant's purge byte-identical.
+ *
+ * Sabotage-witnessed (grade-tests w15): unregistering the purge hook, dropping
+ * any one of the score / schedule / vote / intake sweeps in
+ * `purgeTenantPriorityMatrix`, or widening its list walk past the tenant each
+ * turn a case red. (Its score-change sweep is NOT witnessed here and is not
+ * claimed: those rows carry `tenantId`, so the generic walk removes them too.)
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { bootPlanningApp, makeClient, enableToggle, uniqEmail, type Client } from './planningHarness.js';
@@ -85,7 +91,7 @@ describe('PMXWF-1 — teardown purges the five tenant-unresolvable PM overlay co
     const beforeA = await overlayRowCounts(a.listIds);
     expect(beforeA).toEqual({ scores: 1, votes: 1, schedules: 1, intakes: 1, evidence: 1 });
     const beforeB = await overlayRowCounts(b.listIds);
-    expect(beforeB.scores).toBe(1);
+    expect(beforeB).toEqual({ scores: 1, votes: 1, schedules: 1, intakes: 1, evidence: 1 });
 
     await purgeTenantHostExt(a.tenantId);
 

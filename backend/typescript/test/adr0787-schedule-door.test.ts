@@ -273,14 +273,16 @@ describe('ADR 0787 D6 — the door refuses a cadence that cannot fire (400, neve
     expect(never.body.error).toBe('schedule_horizon_exceeded');
   });
 
-  it('discovery advertises the horizon the host now honours', async () => {
-    const { buildAdvertisement } = await import('../src/routes/discovery.js');
-    const ad = buildAdvertisement({ port: 0, storageDsn: 'memory://', serviceName: 't', serviceVersion: '0', enableConsoleTracer: false });
-    type Sched = { scheduling?: { maxFutureHorizon?: string } };
-    // v1 roots carry it at the top level (the deprecated `capabilities` wrapper may mirror it).
-    const sched = (ad as Sched).scheduling ?? (ad as { capabilities?: Sched }).capabilities?.scheduling;
-    expect(sched, 'the tick seam is on in this file, so scheduling must be advertised').toBeDefined();
-    expect(sched?.maxFutureHorizon).toBe('P366D');
+  it('the horizon refusal names the horizon the host honours', async () => {
+    // ADR 0812 P4 — this read `scheduling.maxFutureHorizon` from the v1 builder,
+    // which is deleted; the v2 root has no `scheduling` record (ADR 0858 ledger).
+    // The refusal is the surface that still states the horizon, so it is
+    // asserted there, against a schedule that can never fire inside it.
+    const { writer } = await workspace();
+    const res = await writer.post(S, { cronExpr: '0 0 31 2 *', workflowId: 'wf.a' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('schedule_horizon_exceeded');
+    expect(res.body.details?.maxFutureHorizon).toBe('P366D');
   });
 });
 

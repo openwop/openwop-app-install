@@ -1,5 +1,14 @@
 /**
- * ADR 0120 Phase 2 — consent-gated extraction op (fail-closed).
+ * ADR 0120 Phase 2 — the consent-gated extraction op, at the unit layer (deps injected).
+ *
+ * Guards: no grant ⇒ no LLM call and no write (FAIL-CLOSED); facts are trimmed, blanks dropped,
+ * and at most MAX_FACTS (10) written, in order; an empty transcript is skipped before the LLM.
+ * Trust is NOT this op's job — the binding stamps `source:'auto-extract'` ⇒ untrusted, pinned
+ * in `memory-extraction-binding.test.ts` (AGMEM-2).
+ *
+ * Witnessed (wave 12 probes): removing the `isGranted` gate, the `.trim()` map, the blank
+ * filter, the `.slice(0, MAX_FACTS)` cap, changing MAX_FACTS, or the empty-transcript check
+ * each reds its case.
  */
 import { describe, it, expect, vi } from 'vitest';
 import { runMemoryExtraction, type ExtractionDeps } from '../src/features/memory-auto-extract/extractionOp.js';
@@ -24,18 +33,19 @@ describe('runMemoryExtraction', () => {
     expect(extractSpy).not.toHaveBeenCalled(); // no LLM call without consent
   });
 
-  it('with consent, extracts + writes each fact (untrusted, via addNote)', async () => {
+  it('with consent, extracts + writes each trimmed, non-blank fact via addNote', async () => {
     const d = deps(true, ['likes cats', 'lives in Berlin', '  ', 'works in design']);
     const r = await runMemoryExtraction('t', 'user:a', 'chat text', d);
-    expect(r.extracted).toBe(3); // blank filtered
+    expect(r).toEqual({ extracted: 3, skipped: null }); // blank filtered
     expect(d.written).toEqual(['likes cats', 'lives in Berlin', 'works in design']);
   });
 
   it('caps the number of facts written', async () => {
     const d = deps(true, Array.from({ length: 25 }, (_, i) => `fact ${i}`));
     const r = await runMemoryExtraction('t', 'user:a', 'x', d);
-    expect(r.extracted).toBeLessThanOrEqual(10);
-    expect(d.written.length).toBeLessThanOrEqual(10);
+    // EXACTLY the first ten, in order — `<= 10` passed at 0, at 9, or for any smaller cap.
+    expect(r).toEqual({ extracted: 10, skipped: null });
+    expect(d.written).toEqual(Array.from({ length: 10 }, (_, i) => `fact ${i}`));
   });
 
   it('skips empty conversation', async () => {

@@ -3,6 +3,9 @@
  * (a validated { formId } REFERENCE, orgId as editor convenience) and rejects
  * a form section without a formId. Pins the gap the live E2E caught: the
  * section type existed only in the FRONTEND union at first.
+ *
+ * Sabotage-witnessed (/grade-tests w16): dropping the `!partial && !formId` throw reds
+ * case 2; dropping the `...(formId ? { formId } : {})` keep reds case 1.
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { openSqliteStorage } from '../src/storage/sqlite/index.js';

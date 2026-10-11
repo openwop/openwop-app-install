@@ -12,6 +12,12 @@
  * inputSchema `description`. So the pin is DERIVATION — the tool now builds its
  * enum from `PRIORITY_PROFILES` — and this test asserts the derivation held,
  * which no restatement of the literal list could.
+ *
+ * Sabotage-witnessed (wave 11): restate the enum or the description as a literal
+ * list → case 1 red; drop the `?? balanced` guard (crash) or default to another
+ * profile → case 2 red; score every profile as balanced → case 3 red. Case 2
+ * drives the TOOL's `run` with an untyped string — the path a model takes — so no
+ * cast stands in for the model's input.
  */
 import { beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
@@ -28,7 +34,22 @@ beforeAll(async () => {
   await createApp({ port: 18995, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   await __clearToggleStore();
   await __resetAssistantStore();
+  // Seeded once for every case. The crash needed at least one open commitment —
+  // the scorer only runs when there is something to score, which is why an
+  // empty workspace hid it. Every dueAt is in the past, so deadlineProximity is
+  // pinned at 1 under any clock (the +1 year clock-shift lane included).
+  for (const [i, desc] of ['Send Dana the Q3 numbers', 'Draft the renewal note', 'Book the venue'].entries()) {
+    await upsertCommitmentBySource(TENANT, {
+      description: desc,
+      owner: { kind: 'email', address: 'me@acme.test' },
+      source: { kind: 'gmail', externalId: `m-${i}`, contentHash: `h${i}`, capturedAt: new Date(1754000000000 + i * 1000).toISOString() },
+      dueAt: new Date(1754000000000 + i * 86_400_000).toISOString(),
+      confidence: 0.5 + i * 0.15,
+    });
+  }
 });
+
+type Brief = { topCommitments: Array<{ score: number }> };
 
 describe('AST2-M1 — the profile the model is offered is the profile that exists', () => {
   it('the tool enum IS the SSoT key set, not a restatement of it', () => {
@@ -47,25 +68,18 @@ describe('AST2-M1 — the profile the model is offered is the profile that exist
   });
 
   it('an unknown profile degrades to balanced instead of throwing', async () => {
-    // The crash needed at least one open commitment — the scorer only runs when
-    // there is something to score, which is why an empty workspace hid it.
-    for (const [i, desc] of ['Send Dana the Q3 numbers', 'Draft the renewal note', 'Book the venue'].entries()) {
-      await upsertCommitmentBySource(TENANT, {
-        description: desc,
-        owner: { kind: 'email', address: 'me@acme.test' },
-        source: { kind: 'gmail', externalId: `m-${i}`, contentHash: `h${i}`, capturedAt: new Date(1754000000000 + i * 1000).toISOString() },
-        dueAt: new Date(1754000000000 + i * 86_400_000).toISOString(),
-        confidence: 0.5 + i * 0.15,
-      });
-    }
-
-    const brief = await composeBriefing(TENANT, { profile: 'deadline' as never });
-    expect(brief.topCommitments.length).toBeGreaterThan(0);
+    // The model's path: the tool `run` hands the surface an untyped string.
+    const tool = builtinAgentTool('openwop:assistant.compose-briefing');
+    expect(tool, 'the compose-briefing tool should be registered').toBeTruthy();
+    const res = await tool!.run({ profile: 'deadline' }, { tenantId: TENANT, actingUserId: 'user:profile-test' });
+    expect(res.isError).toBeFalsy();
+    const { brief } = JSON.parse(res.content) as { brief: Brief | null };
+    expect(brief?.topCommitments.length).toBeGreaterThan(0);
 
     // Degrading means degrading to the DEFAULT, not to some other ordering:
     // the same input under `balanced` must give the same scores.
     const baseline = await composeBriefing(TENANT, { profile: 'balanced' });
-    expect(brief.topCommitments.map((c: { score: number }) => c.score)).toEqual(baseline.topCommitments.map((c: { score: number }) => c.score));
+    expect(brief!.topCommitments.map((c) => c.score)).toEqual(baseline.topCommitments.map((c: { score: number }) => c.score));
   });
 
   it('a REAL profile still changes the scoring (the negative control)', async () => {

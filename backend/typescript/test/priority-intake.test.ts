@@ -5,11 +5,27 @@
  *   - merge: overlays union onto the canonical, duplicate marked + moved wont-do
  *   - promote-to-project (PM side) + promote-to-initiative (strategy side, with
  *     the canonical priority-idea link + intake promotedTo stamp + done lane)
+ *
+ * Sabotage map (wave 15, `w15g1-in-*`): sourceChannel / estimatedValue / url-scheme
+ * validation, evidence delete, the merge union / evidence re-key / mergedInto mark /
+ * wont-do move / self-merge refusal, BOTH ghost-card guards (canonical + duplicate),
+ * the promote stamp, the initiative link / strategyId / move, the surface evidence read,
+ * the STRAT-PM1 card-exists guard, the PMX-5 reference lanes (url, doc ref, submission
+ * id) vs the scrubbed label, the PMX-2 move, the F1/F2 compensations, the F3 re-check.
+ * Each turns its case red. The surface "no promote verb" rule is owned by the exact-verb
+ * RATCHET in adr0842-priority-matrix-access.test.ts.
  */
 
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { bootPlanningApp, makeClient, enableToggle, type Client } from './planningHarness.js';
 import { buildPriorityMatrixSurface } from '../src/features/priority-matrix/surface.js';
+import { DurableCollection } from '../src/host/hostExtPersistence.js';
+import { addIdeaEvidence, listIdeaEvidence } from '../src/features/priority-matrix/intake.js';
+import { getList } from '../src/features/priority-matrix/priorityMatrixService.js';
+
+/** The `GET …/ideas` row fields these cases read (the harness body is untyped JSON). */
+type IdeaRow = { card: { id: string; title: string; columnId: string }; status: { columnId: string; terminal: boolean } };
+type LinkRow = { kind: string; cardId?: string };
 
 /** The surface contract returns `Record<string, unknown>`; the JSON round-trip
  *  narrows it to the test's expected shape without a type assertion. */
@@ -39,9 +55,9 @@ async function setup(): Promise<{ c: ReturnType<typeof client>; orgId: string; t
   const listId = (await c.post(`${PM}/lists`, { orgId, name: 'Bets', presetId: 'weighted' })).body.id;
   await c.post(`${PM}/lists/${encodeURIComponent(listId)}/ideas`, { title: 'Expand to EU', description: 'The EU push' });
   await c.post(`${PM}/lists/${encodeURIComponent(listId)}/ideas`, { title: 'EU expansion (dupe)' });
-  const ideas = (await c.get(`${PM}/lists/${encodeURIComponent(listId)}/ideas`)).body.ideas;
-  const cardA = ideas.find((r: any) => r.card.title === 'Expand to EU').card.id;
-  const cardB = ideas.find((r: any) => r.card.title === 'EU expansion (dupe)').card.id;
+  const ideas: IdeaRow[] = (await c.get(`${PM}/lists/${encodeURIComponent(listId)}/ideas`)).body.ideas;
+  const cardA = ideas.find((r) => r.card.title === 'Expand to EU')!.card.id;
+  const cardB = ideas.find((r) => r.card.title === 'EU expansion (dupe)')!.card.id;
   return { c, orgId, tenantId, listId, cardA, cardB };
 }
 
@@ -80,8 +96,8 @@ describe('idea intake + evidence (ADR 0232)', () => {
     expect(canonical.body.evidence).toHaveLength(1);          // evidence moved over
     const dupe = await c.get(`${PM}/lists/${listId}/ideas/${cardB}/intake`);
     expect(dupe.body.intake.mergedInto).toBe(cardA);
-    const ideas = (await c.get(`${PM}/lists/${listId}/ideas`)).body.ideas;
-    expect(ideas.find((r: any) => r.card.id === cardB).card.columnId).toBe('wont-do');
+    const ideas: IdeaRow[] = (await c.get(`${PM}/lists/${listId}/ideas`)).body.ideas;
+    expect(ideas.find((r) => r.card.id === cardB)?.card.columnId).toBe('wont-do');
   });
 
   it('rejects a merge whose canonical or duplicate card is not on the list — no ghost overlay written (grade-code F1)', async () => {
@@ -94,6 +110,10 @@ describe('idea intake + evidence (ADR 0232)', () => {
     expect((await c.get(`${PM}/lists/${listId}/ideas/not-a-real-card/intake`)).body.intake).toBeNull();
     // A bogus DUPLICATE id is rejected the same way.
     expect((await c.post(`${PM}/lists/${listId}/ideas/${cardA}/merge`, { duplicateCardId: 'nope' })).status).toBe(404);
+    // …and wrote NOTHING: the route's own move-null 404 would mask a bypassed duplicate
+    // guard, so read the rows that bypass would write (cardA has no intake in setup()).
+    expect((await c.get(`${PM}/lists/${listId}/ideas/nope/intake`)).body.intake).toBeNull();
+    expect((await c.get(`${PM}/lists/${listId}/ideas/${cardA}/intake`)).body.intake).toBeNull();
     // The real duplicate was never touched (still a live idea, not mergedInto).
     expect((await c.get(`${PM}/lists/${listId}/ideas/${cardB}/intake`)).body.intake).toBeNull();
   });
@@ -118,18 +138,20 @@ describe('promotion (ADR 0232 §5)', () => {
     const r = await c.post(`${S}/${s.id}/initiatives/from-idea`, { listId, cardId: cardA });
     expect(r.status, JSON.stringify(r.body)).toBe(201);
     expect(r.body.initiativeId).toBeTruthy();
-    expect(r.body.strategy.initiatives.map((i: any) => i.title)).toContain('Expand to EU');
-    expect(r.body.strategy.links.some((l: any) => l.kind === 'priority-idea' && l.cardId === cardA)).toBe(true);
+    const initiatives: Array<{ title: string }> = r.body.strategy.initiatives;
+    const links: LinkRow[] = r.body.strategy.links;
+    expect(initiatives.map((i) => i.title)).toContain('Expand to EU');
+    expect(links.some((l) => l.kind === 'priority-idea' && l.cardId === cardA)).toBe(true);
     const intake = await c.get(`${PM}/lists/${listId}/ideas/${cardA}/intake`);
     expect(intake.body.intake.promotedTo.kind).toBe('initiative');
     expect(intake.body.intake.promotedTo.strategyId).toBe(s.id);
-    const ideas = (await c.get(`${PM}/lists/${listId}/ideas`)).body.ideas;
-    expect(ideas.find((x: any) => x.card.id === cardA).card.columnId).toBe('done');
+    const ideas: IdeaRow[] = (await c.get(`${PM}/lists/${listId}/ideas`)).body.ideas;
+    expect(ideas.find((x) => x.card.id === cardA)?.card.columnId).toBe('done');
   });
 });
 
 describe('intake node verbs (ADR 0232 §7 / STRAT-PM1)', () => {
-  it('get/update-intake + add-evidence run over the surface; NO promote verb exists', async () => {
+  it('get/update-intake + add-evidence run over the surface; a ghost card fails closed', async () => {
     const { tenantId, listId, cardA } = await setup();
     const surface = buildPriorityMatrixSurface({ tenantId });
 
@@ -148,10 +170,8 @@ describe('intake node verbs (ADR 0232 §7 / STRAT-PM1)', () => {
     expect(got.intake?.requester).toBe('analyst');
     expect(got.evidence).toHaveLength(1);
 
-    // The architect ruling: NO promote verb on the surface (authority-granting
-    // action stays human/route-only).
-    expect((surface as Record<string, unknown>).promoteIdea).toBeUndefined();
-    expect((surface as Record<string, unknown>).promoteToProject).toBeUndefined();
+    // The architect ruling (NO promote verb on the surface) is pinned by the exact-verb
+    // RATCHET in adr0842-priority-matrix-access.test.ts (w15g1-d1-ratchet).
 
     // code-review STRAT-PM1: the card-exists guard lives in the service, so a
     // run-driven write to a GHOST card fails closed (no orphaned overlay row).
@@ -224,22 +244,17 @@ describe('PMX-2 — promote reports its move + the double-promote window leaves 
     expect(res.status, JSON.stringify(res.body)).toBe(201);
     expect(res.body.moved).toBe(true);
     expect(res.body.movedToColumnId).toBe('done');
-    const idea = (await c.get(`${PM}/lists/${listId}/ideas`)).body.ideas.find((r: any) => r.card.id === cardA);
-    expect(idea.status.columnId).toBe('done');
-    expect(idea.status.terminal).toBe(true);
+    const ideas: IdeaRow[] = (await c.get(`${PM}/lists/${listId}/ideas`)).body.ideas;
+    const idea = ideas.find((r) => r.card.id === cardA);
+    expect(idea?.status.columnId).toBe('done');
+    expect(idea?.status.terminal).toBe(true);
   });
-
-  it('two CONCURRENT promotes: exactly one 201, one 409, and exactly ONE project exists', async () => {
-    const { c, orgId, listId, cardB } = await setup();
-    const before = (await c.get(`/host/openwop-app/projects?orgId=${encodeURIComponent(orgId)}`)).body.projects.length;
-    const [r1, r2] = await Promise.all([
-      c.post(`${PM}/lists/${listId}/ideas/${cardB}/promote-to-project`),
-      c.post(`${PM}/lists/${listId}/ideas/${cardB}/promote-to-project`),
-    ]);
-    expect([r1.status, r2.status].sort()).toEqual([201, 409]);
-    const after = (await c.get(`/host/openwop-app/projects?orgId=${encodeURIComponent(orgId)}`)).body.projects.length;
-    expect(after - before, 'the losing promote must compensate its minted project').toBe(1);
-  });
+  // The former "two CONCURRENT promotes" case was cut (wave 15): memory:// never
+  // interleaves the two handlers, so it stayed green with assertNotPromoted removed, with
+  // markPromoted's CAS bypassed and with the compensation removed (w15g1-in-pmx2-assertnot,
+  // -in-markpromoted-cas, -in-f1-comp). Its parts are owned by priority-matrix-honesty
+  // ("two concurrent stamps: one resolves, one 409s"; "refuses a SECOND, different
+  // promotion") and the deterministic F1 case below.
 });
 
 /**
@@ -256,12 +271,11 @@ describe('PMX-2 — promote reports its move + the double-promote window leaves 
  */
 describe('F1/F2 — a lost promote stamp AFTER minting compensates the target (deterministic)', () => {
   const failPromoteStamp = async (): Promise<{ restore: () => void }> => {
-    const { DurableCollection } = await import('../src/host/hostExtPersistence.js');
     const original = DurableCollection.prototype.compareAndSwap;
     const spy = vi.spyOn(DurableCollection.prototype, 'compareAndSwap').mockImplementation(
-      async function (this: unknown, expected: unknown, next: unknown) {
-        if (next && typeof next === 'object' && 'promotedTo' in (next as Record<string, unknown>)) return false;
-        return original.call(this as never, expected as never, next as never);
+      async function (this: DurableCollection<unknown>, expected: unknown, next: unknown) {
+        if (next !== null && typeof next === 'object' && 'promotedTo' in next) return false;
+        return original.call(this, expected, next);
       },
     );
     return { restore: () => spy.mockRestore() };
@@ -292,7 +306,8 @@ describe('F1/F2 — a lost promote stamp AFTER minting compensates the target (d
     } finally { restore(); }
     const after = (await c.get(`${S}/${s.id}`)).body;
     expect(after.initiatives, 'the minted initiative must be compensated away').toHaveLength(0);
-    expect(after.links.some((l: any) => l.kind === 'priority-idea' && l.cardId === cardA), 'the link must be compensated away').toBe(false);
+    const afterLinks: LinkRow[] = after.links;
+    expect(afterLinks.some((l) => l.kind === 'priority-idea' && l.cardId === cardA), 'the link must be compensated away').toBe(false);
     expect((await c.get(`${PM}/lists/${listId}/ideas/${cardA}/intake`)).body.intake?.promotedTo).toBeUndefined();
     // Recovery: the cap slot came back — the same promote now succeeds and reports its move.
     const ok = await c.post(`${S}/${s.id}/initiatives/from-idea`, { listId, cardId: cardA });
@@ -313,9 +328,7 @@ describe('F1/F2 — a lost promote stamp AFTER minting compensates the target (d
 describe('F3 — concurrent evidence adds cannot exceed the per-idea cap', () => {
   it('at cap−1, two concurrent adds never exceed 50 and converge to exactly the cap', async () => {
     const { tenantId, listId, cardA } = await setup();
-    const { addIdeaEvidence, listIdeaEvidence } = await import('../src/features/priority-matrix/intake.js');
-    const orgIdOf = (await import('../src/features/priority-matrix/priorityMatrixService.js')).getList;
-    const list = await orgIdOf(tenantId, listId);
+    const list = await getList(tenantId, listId);
     const add = (i: number) => addIdeaEvidence({
       tenantId, orgId: list!.orgId, listId, cardId: cardA, actor: 'u-cap',
       kind: 'url', ref: `https://ev.example.test/${i}`,

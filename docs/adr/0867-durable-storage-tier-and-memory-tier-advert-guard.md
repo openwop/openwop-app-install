@@ -271,6 +271,13 @@ complete. Implementation status does not stand in for those receipts.
    on every restart by construction, which is the defect.
 2. ANN for pgvector: HNSW with `hnsw.iterative_scan`, once a tenant's namespace
    is large enough for the exact scan to matter. Not before measuring.
+
+   > **Trigger set 2026-10-10 — ADR 0871.** "Large enough" is now a number: one
+   > (tenant, namespace) with ≥ 50,000 vectors, or ≥ 20 `vector_query_slow` (a query
+   > ≥ 200 ms) a day. Before this the adapter logged neither. The hourly
+   > `vector_rows_gauge` also reports the pgvector version, because
+   > `hnsw.iterative_scan` needs ≥ 0.8. The vector pool now has a
+   > `statement_timeout` (30 s), which it lacked.
 3. Durable table and vector queries scan a tenant's whole keyspace (the
    `host_ext_kv` prefix-scan class). Measure p95 after Phase 1 before calling it
    done at scale.

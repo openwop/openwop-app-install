@@ -4,6 +4,14 @@
  *   - peer CRUD (service) + peer-mutation RBAC (route: non-superadmin → 403)
  *   - buildFederatedPortfolio merges + tags source + ranks + is fail-soft (injected fetcher)
  *   - GET /portfolio/federated with no peers == local-only (all source 'local')
+ *
+ * Sabotage map (wave 15, `w15g1-fd-*`): the streaming cap, origin-only + the SSRF arm,
+ * the merge sort / source tag / fail-soft error / topN slice, the concurrency bound (1
+ * and unbounded), the per-user and shared credential arms, the cache hit, single-flight,
+ * the identity in the cache key, the ok-only cache filter, the TTL≤0 bypass (now driven
+ * concurrently — sequentially an expired entry hid it), credential-rotation busting, the
+ * superadmin gates on peer add + tenant credential, the per-user credential lane, the
+ * token68 grammar, and the addPeer post-write cap re-check each turn a case red.
  */
 
 import http from 'node:http';
@@ -16,7 +24,7 @@ import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import {
   validateBaseUrl, addPeer, listPeers, deletePeer, buildFederatedPortfolio, readCapped,
   setPeerCredential, resolvePeerToken, resolvePeerCredential, cachedPeerFetch,
-  __resetFederationStore, type FederatedPeer, type PeerFetcher, type PeerFetchResult,
+  __resetFederationStore, type FederatedPeer, type FederatedItem, type PeerStatus, type PeerFetcher, type PeerFetchResult,
 } from '../src/features/priority-matrix/federationService.js';
 import { __resetFanoutCache } from '../src/features/priority-matrix/federationCache.js';
 import type { PortfolioItem } from '../src/features/priority-matrix/priorityMatrixService.js';
@@ -25,6 +33,17 @@ const item = (cardId: string, priority: number, listName = 'L'): PortfolioItem =
   listId: 'l1', listName, votingMode: 'single', scoringModel: 'weighted',
   cardId, title: cardId, status: 'New', computedPriority: priority, inListRank: 1,
 });
+
+/** Let every already-started async chain run to its next real wait (no wall-clock). */
+async function drain(): Promise<void> {
+  for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+}
+/** A promise the test opens by hand — an inner fetch that stays pending until told. */
+function gate(): { wait: Promise<void>; open: () => void } {
+  let open!: () => void;
+  const wait = new Promise<void>((r) => { open = r; });
+  return { wait, open };
+}
 
 function streamOf(text: string): ReadableStream<Uint8Array> {
   const bytes = new TextEncoder().encode(text);
@@ -106,14 +125,13 @@ describe('federation — buildFederatedPortfolio (injected fetcher)', () => {
     let peak = 0;
     const fetcher: PeerFetcher = async (peer) => {
       inFlight += 1; peak = Math.max(peak, inFlight);
-      await new Promise((r) => setTimeout(r, 5)); // hold the slot so overlap is observable
+      await new Promise((r) => setImmediate(r)); // yield the slot; every worker enters before any returns
       inFlight -= 1;
       return { ok: true, items: [item(`${peer.id}-x`, 1)] };
     };
     const out = await buildFederatedPortfolio([item('l', 5)], many, 100, { tenantId: 't' }, fetcher);
 
-    expect(peak).toBeGreaterThan(1);          // concurrent — a sequential loop would peak at 1 (was ~150s worst case)
-    expect(peak).toBeLessThanOrEqual(6);      // bounded by PEER_FETCH_CONCURRENCY (no 18-way burst)
+    expect(peak).toBe(6);                     // concurrent AND bounded by PEER_FETCH_CONCURRENCY — a sequential loop peaks at 1, an unbounded fan-out at 18
     expect(out.peers).toHaveLength(18);       // every peer attempted, fail-soft
     expect(out.peers.map((p) => p.peerId)).toEqual(many.map((p) => p.id)); // status stays in peer order
   });
@@ -136,20 +154,23 @@ beforeAll(async () => {
 });
 afterAll(async () => { delete process.env.OPENWOP_BYOK_EPHEMERAL; await new Promise<void>((res) => server.close(() => res())); });
 
+interface Res<T> { status: number; body: T }
 function client() {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown) => {
+  async function call<T>(method: string, path: string, body?: unknown): Promise<Res<T>> {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
-    return { status: res.status, body: out as any };
-  };
+    // JSON is untyped at the wire; each call site names the body it expects.
+    const out = (res.status === 204 ? undefined : await res.json().catch(() => undefined)) as T;
+    return { status: res.status, body: out };
+  }
   return {
-    get: (p: string) => call('GET', p),
-    post: (p: string, b?: unknown) => call('POST', p, b),
-    put: (p: string, b?: unknown) => call('PUT', p, b),
+    get: <T>(p: string) => call<T>('GET', p),
+    post: <T>(p: string, b?: unknown) => call<T>('POST', p, b),
+    put: <T>(p: string, b?: unknown) => call<T>('PUT', p, b),
   };
 }
+type Login = { user: { userId: string } };
 
 describe('federation — credential resolution precedence (ADR 0062)', () => {
   it('per-user > tenant-shared > env (BYOK-enveloped) + reports identity tier', async () => {
@@ -224,6 +245,17 @@ describe('federation — fan-out cache (ADR 0061 #3)', () => {
       await cachedPeerFetch(peer, 5, { tenantId: 'tc' }, inner);
       await cachedPeerFetch(peer, 5, { tenantId: 'tc' }, inner);
       expect(calls).toBe(2); // no caching ⇒ every call hits inner
+      // CONCURRENT callers too: through the cache they would single-flight to one inner
+      // run (sequentially a TTL-0 entry is already expired, so that half alone cannot
+      // tell a bypass from a cache that expires instantly).
+      const g = gate();
+      let held = 0;
+      const slow = async (): Promise<PeerFetchResult> => { held++; await g.wait; return { ok: true, items: [item('b', 9)] }; };
+      const both = Promise.all([cachedPeerFetch(peer, 5, { tenantId: 'tc' }, slow), cachedPeerFetch(peer, 5, { tenantId: 'tc' }, slow)]);
+      await drain();
+      g.open();
+      await both;
+      expect(held).toBe(2);
     } finally { delete process.env.OPENWOP_PM_FED_CACHE_TTL_MS; }
   });
 
@@ -245,8 +277,12 @@ describe('federation — fan-out cache (ADR 0061 #3)', () => {
 
   it('single-flight coalesces concurrent callers into one inner run', async () => {
     let calls = 0;
-    const inner = async (): Promise<PeerFetchResult> => { calls++; await new Promise((r) => setTimeout(r, 20)); return { ok: true, items: [item('a', 9)] }; };
-    const results = await Promise.all(Array.from({ length: 8 }, () => cachedPeerFetch(peer, 5, { tenantId: 'tc' }, inner)));
+    const g = gate();
+    const inner = async (): Promise<PeerFetchResult> => { calls++; await g.wait; return { ok: true, items: [item('a', 9)] }; };
+    const all = Promise.all(Array.from({ length: 8 }, () => cachedPeerFetch(peer, 5, { tenantId: 'tc' }, inner)));
+    await drain(); // every caller has reached the cache while the first fetch is still pending
+    g.open();
+    const results = await all;
     expect(calls).toBe(1); // 8 concurrent callers, one upstream fetch
     expect(results.every((r) => r.ok)).toBe(true);
   });
@@ -255,28 +291,35 @@ describe('federation — fan-out cache (ADR 0061 #3)', () => {
 describe('federation — route RBAC', () => {
   it('a plain member cannot add a peer (superadmin only); federated read with no peers is local-only', async () => {
     const c = client();
-    const login = await c.post('/host/openwop-app/test/login', { email: `fed-${Date.now()}-${n++}@acme.test` });
+    const login = await c.post<Login>('/host/openwop-app/test/login', { email: `fed-${Date.now()}-${n++}@acme.test` });
     expect(login.status).toBe(201);
     // Non-superadmin add → 403.
     const add = await c.post('/host/openwop-app/priority-matrix/peers', { label: 'X', baseUrl: 'https://x.example.test' });
     expect(add.status).toBe(403);
     // Peer list is empty + readable.
-    expect((await c.get('/host/openwop-app/priority-matrix/peers')).body.peers).toEqual([]);
+    expect((await c.get<{ peers: FederatedPeer[] }>('/host/openwop-app/priority-matrix/peers')).body.peers).toEqual([]);
     // Federated portfolio with no peers == local-only (here: no lists ⇒ empty, no peer errors).
-    const fed = await c.get('/host/openwop-app/priority-matrix/portfolio/federated');
+    const fed = await c.get<{ items: FederatedItem[]; peers: PeerStatus[] }>('/host/openwop-app/priority-matrix/portfolio/federated');
     expect(fed.status).toBe(200);
     expect(fed.body.peers).toEqual([]);
-    expect(Array.isArray(fed.body.items)).toBe(true);
+    expect(fed.body.items).toEqual([]);
   });
 
   it('a member sets their OWN peer credential (204) but not the tenant-shared one (403, superadmin)', async () => {
     const tenantId = `org:cred-${Date.now()}-${n++}`;
     const c = client();
-    expect((await c.post('/host/openwop-app/test/login', { email: `cred-${Date.now()}-${n++}@acme.test`, tenantId })).status).toBe(201);
+    const login = await c.post<Login>('/host/openwop-app/test/login', { email: `cred-${Date.now()}-${n++}@acme.test`, tenantId });
+    expect(login.status).toBe(201);
+    const userId = login.body.user.userId;
     const peer = await addPeer(tenantId, 'admin', { label: 'East', baseUrl: 'https://east.example.test' });
     const url = `/host/openwop-app/priority-matrix/peers/${encodeURIComponent(peer.id)}/credential`;
     expect((await c.put(url, { token: 'mine', scope: 'user' })).status).toBe(204);   // own cred (c1)
+    // …stored under THIS member's identity, and only theirs.
+    expect(await resolvePeerCredential(peer, { tenantId, actingUserId: userId })).toEqual({ token: 'mine', identity: `u:${userId}` });
+    expect(await resolvePeerCredential(peer, { tenantId })).toEqual({ token: undefined, identity: 'none' });
     expect((await c.put(url, { token: 'shared', scope: 'tenant' })).status).toBe(403); // tenant cred = superadmin
+    // …and the refused shared credential was not stored.
+    expect(await resolvePeerCredential(peer, { tenantId })).toEqual({ token: undefined, identity: 'none' });
   });
 });
 

@@ -14,12 +14,15 @@
  * a predicate nobody calls is exactly the shape of gate this program keeps
  * finding — green, and connected to nothing. So the load-bearing assertions
  * here boot two REAL apps, one per profile, and read `/.well-known/openwop`.
- * Deleting the gate in `routes/discovery.ts` turns the memory leg red; deleting
- * the whole capability turns the sqlite leg red. Neither can pass vacuously,
- * because each asserts the OPPOSITE of the other on the same key.
+ *
+ * ADR 0812 P4 — CORRECTION. The advert legs read the v1 document's root
+ * `workspace` block, which the deleted v1 builder gated on this predicate. The
+ * v2 root has no `workspace` record (ADR 0858 ledger: BLOCKED), so on EITHER
+ * profile no served document claims the workspace today. The route legs now
+ * pin exactly that; the predicate keeps its two live callers (the boot warning
+ * and the fail-closed startup error). Projecting `workspace` at v2 MUST gate it
+ * on `workspaceAdvertisable()`, and then these legs flip back to opposites.
  */
-import { loadConfigFromEnv } from '../src/index.js';
-import { v1Advertisement } from './support/v1Advertisement.js';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -95,7 +98,7 @@ describe('ADR 0551 P2 — fail closed on request', () => {
 let memServer: http.Server;
 let memBase: string;
 let fileServer: http.Server;
-let fileDsnUsed = '';
+let fileBase: string;
 let tmp: string;
 
 beforeAll(async () => {
@@ -108,10 +111,9 @@ beforeAll(async () => {
 
   tmp = mkdtempSync(join(tmpdir(), 'owp-workspace-advert-'));
   const fileDsn = `sqlite://${join(tmp, 'workspace.db')}`;
-  fileDsnUsed = fileDsn;
   process.env.OPENWOP_STORAGE_DSN = fileDsn;
   const fileApp = await createApp({ port: 0, storageDsn: fileDsn, serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { fileServer = fileApp.listen(0, '127.0.0.1', () => res()); });
+  await new Promise<void>((res) => { fileServer = fileApp.listen(0, '127.0.0.1', () => { fileBase = `http://127.0.0.1:${(fileServer.address() as AddressInfo).port}`; res(); }); });
 }, 60_000);
 
 afterAll(async () => {
@@ -121,34 +123,27 @@ afterAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
 });
 
-/** The advertisement document. `workspace` sits at its ROOT, beside `kanban`
- *  and `dispatch` — NOT inside the nested `capabilities` object. Asserting the
- *  wrong path would make "absent" true everywhere and both legs below vacuous,
- *  which is why the shape is checked before the key is. */
-async function advertisement(storageDsn: string): Promise<Record<string, unknown>> {
-  // ADR 0858 debt: this claim is on the v1 document only (the v2 family is ledgered), and
-  // since ADR 0812 P3c the header-less discovery read is v2, so it is read from the v1
-  // builder through the bridge until the family is projected.
-  // The builder reads `config.storageDsn`, so each leg names its own boot's profile.
-  const body = await v1Advertisement({ ...loadConfigFromEnv(), storageDsn }) as Record<string, unknown>;
+/** The SERVED root of one boot (header-less is the v2 document). */
+async function advertisement(base: string): Promise<Record<string, unknown>> {
+  const res = await fetch(`${base}/.well-known/openwop`);
+  expect(res.status).toBe(200);
+  const body = (await res.json()) as Record<string, unknown>;
   expect(body.protocolVersion).toBeTruthy();
-  expect(body.capabilities).toBeTypeOf('object');
   return body;
 }
 
-describe('ADR 0551 P2 — /.well-known/openwop follows the readiness check', () => {
+describe('ADR 0551 P2 — /.well-known/openwop never over-claims the workspace', () => {
   it('a memory:// boot does NOT advertise the workspace', async () => {
-    const ad = await advertisement('memory://');
+    const ad = await advertisement(memBase);
     expect(ad.workspace).toBeUndefined();
-    // Sibling root keys are still there — the absence is the gate, not a
-    // truncated document.
-    expect(ad.kanban).toBeTruthy();
+    // Sibling records are still there — the absence is not a truncated document.
+    expect(ad.limits).toBeTruthy();
   });
 
-  it('a sqlite FILE boot DOES advertise it, with the same shape as before', async () => {
-    const ad = await advertisement(fileDsnUsed);
-    // The shape is unchanged — P2 gates the claim, it does not renegotiate it.
-    expect(ad.workspace).toEqual({ supported: true, maxFileBytes: 65_536 });
+  it('a sqlite FILE boot does not advertise it at v2 either (ledgered, ADR 0858)', async () => {
+    const ad = await advertisement(fileBase);
+    expect(ad.workspace).toBeUndefined();
+    expect(ad.limits).toBeTruthy();
   });
 
   it('the ENDPOINTS keep working on the profile that withholds the claim', async () => {

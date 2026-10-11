@@ -3,6 +3,10 @@
  * (the base text it translates changed after it was written) is said in words on
  * its tab's accessible name and as a chip, and "Mark up to date" re-stamps it.
  * A current overlay makes no such claim, and absent status renders nothing.
+ *
+ * Sabotage-witnessed (w17): the outdated arm of the tab's aria-label; the chip;
+ * `onConfirmSource(s.sectionId, active)` args; `disabled={confirming === …}`;
+ * the confirm button's `=== 'outdated'` gate; the chip gate read as `!== 'current'`.
  */
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { render, screen, cleanup, fireEvent } from '@testing-library/react';
@@ -36,7 +40,9 @@ describe('translation status in the sections editor', () => {
     fireEvent.click(screen.getByRole('button', { name: /mark the .* translation of this section up to date/i }));
     expect(confirm).toHaveBeenCalledWith('sec:1', 'es');
     // CMSL2UX-3 — in flight: disabled + "Marking…", so a double click is one write.
-    expect(screen.getByRole('button', { name: /mark the .* translation/i }).hasAttribute('disabled')).toBe(true);
+    const pending = screen.getByRole('button', { name: /mark the .* translation/i });
+    expect(pending.hasAttribute('disabled')).toBe(true);
+    expect(pending.textContent).toBe('Marking…');
   });
 
   it('a current overlay makes no outdated claim and offers no confirm', () => {

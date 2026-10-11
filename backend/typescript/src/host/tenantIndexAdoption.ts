@@ -38,21 +38,34 @@ export function adoptionWindowMs(): number {
 }
 
 type AdoptableTenantIndex = Pick<DurableCollection<unknown>, 'reconcileTenantIndex'>;
-const registrations = new Map<string, AdoptableTenantIndex>();
+interface Registration { collection: AdoptableTenantIndex; beforeReconcile?: () => Promise<void> }
+const registrations = new Map<string, Registration>();
 
-export function registerTenantIndexAdoption<T>(id: string, collection: DurableCollection<T>): void {
-  registrations.set(id, collection);
+/** `beforeReconcile` (ADR 0872 D2) runs under the same hourly slot, right before
+ *  the pass: a collection whose rows can lack a tenant stamps them here, so the
+ *  pass sees them. A row it cannot stamp keeps the index unverified (D3). */
+export function registerTenantIndexAdoption<T>(
+  id: string,
+  collection: DurableCollection<T>,
+  opts: { beforeReconcile?: () => Promise<void> } = {},
+): void {
+  registrations.set(id, { collection, ...(opts.beforeReconcile ? { beforeReconcile: opts.beforeReconcile } : {}) });
 }
 
 /** One pass over every registration. Fail-open per collection: one bad store never
  *  stops the tick, and a failed pass leaves the index unverified or as it was. */
 export async function reconcileTenantIndexesOnce(storage: Storage, now: number = Date.now()): Promise<void> {
   const slot = Math.floor(now / HOUR_MS);
-  for (const [id, collection] of registrations) {
+  for (const [id, { collection, beforeReconcile }] of registrations) {
     try {
       if (!(await claimSlot(storage, id, slot))) continue;
+      // A failed hook still lets the pass run: unstamped rows then keep the index unverified.
+      if (beforeReconcile) {
+        await beforeReconcile().catch((err) =>
+          log.warn('tenant_index_before_reconcile_failed', { collection: id, error: err instanceof Error ? err.message : String(err) }));
+      }
       const r = await collection.reconcileTenantIndex({ windowMs: adoptionWindowMs(), now });
-      if (r.reset) log.warn('tenant_index_unindexed_writer', { collection: id, repaired: r.repaired });
+      if (r.reset) log.warn('tenant_index_unindexed_writer', { collection: id, repaired: r.repaired, skipped: r.skipped });
       else if (r.verifiedNow) log.info('tenant_index_verified', { collection: id, repaired: r.repaired, skipped: r.skipped });
       // Every pass logs, so a silent hour means the tick stopped, not that nothing changed.
       log.info('tenant_index_reconciled', { collection: id, repaired: r.repaired, skipped: r.skipped, verified: r.verified });

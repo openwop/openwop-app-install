@@ -1,41 +1,38 @@
 /**
- * CMSGAP-5 — execute `cms.localize-and-submit` END TO END: the REAL expanded
- * definition (loader → expandChain), the REAL node implementations
- * (`packs/feature.cms.nodes/index.mjs`), and the REAL `ctx.features.cms`
- * surface over a booted app — only `ctx.callAI` is faked. A mini scheduler
- * walks the definition's edges with the same port semantics as
- * `buildNodeInputs` (sourceOutput → targetInput), and config `{{inputs.*}}`
- * tokens resolve from the run params — pinning exactly the wiring the chain
- * relies on (chain params ride CONFIG via the RFC 0013 Path-A expansion-freeze).
- * NOTE (2026-07-04): the historical "static node `inputs` are stripped" bug is
- * FIXED (ADR 0237 / CHAINX-5, PR #1228 — `validateWorkflowDefinition` preserves
- * `inputs` and the executor resolves `{{inputs.*}}` at runtime); this harness
- * asserts on config because params freeze there, not because inputs are dropped.
+ * CMSGAP-1 — the translator-grant narrowing (ADR 0205 D1) binds the WORKFLOW
+ * path: the `ctx.features.cms` surface a `cms.localize-and-submit` run calls,
+ * bound to a granted translator (`scope.actingUserId`), allows the granted
+ * locale overlay and 403s a foreign locale, a base-data write, submit and page
+ * create — exactly like the HTTP editor path. A SYSTEM run (no acting user) is
+ * unchanged.
  *
- * CMSGAP-1 — the same harness proves the translator-grant narrowing binds the
- * WORKFLOW path: with `scope.actingUserId` set to a granted translator, the
- * store step 403s for a foreign locale and submit-page 403s outright.
+ * Sabotage-witnessed (w16): disabling the overlay-locale check
+ * (`w16g2-chain-grant-overlay`), the submit check (`-submit`) or the create check
+ * (`-create`) in `features/cms/surface.ts` turns this case red.
+ *
+ * CORRECTION (w16, grade-tests): this file used to open with a CMSGAP-5 case that
+ * drove `cms.localize-and-submit` through a hand-rolled MINI-SCHEDULER (the edge
+ * walk + `{{inputs.*}}` resolution other `*-chain-execution` tests cite as their
+ * precedent). That case was cut as a superseded witness: `cms-chain-real-executor.test.ts`
+ * runs the same chain through the REAL executor and asserts every one of its claims
+ * (read→translate wiring, overlay persisted, `in_review`, ONE pending row). Both
+ * paired probes red both files (`w16g2-chain-store-locale-{mini,real}`,
+ * `w16g2-chain-surface-queue-{mini,real}`). The pattern itself lives on in the files
+ * that copied it.
  */
 
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { getSetCookies } from './headerCookies.js';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { buildFeatureSurfaces } from '../src/host/featureSurfaces.js';
-import { loadWorkflowChainPacks, getChain, expandChain, _resetChainRegistryForTest } from '../src/host/workflowChainPackLoader.js';
-import { hasPendingApprovalForPage } from '../src/host/approvalService.js';
-import { putLocaleGrant } from '../src/features/cms/cmsService.js';
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
+import { getPage, putLocaleGrant } from '../src/features/cms/cmsService.js';
 
 let BASE: string;
 let server: http.Server;
-let nodes: Record<string, (ctx: unknown) => Promise<{ status: string; outputs: Record<string, unknown>; error?: unknown }>>;
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -48,125 +45,52 @@ beforeAll(async () => {
   if (users) await saveConfig({ ...users, status: 'on' }, 'test');
   const loc = getToggleDefault('cms-localization');
   if (loc) await saveConfig({ ...loc, status: 'on' }, 'test');
-  _resetChainRegistryForTest();
-  const { errors } = loadWorkflowChainPacks({ roots: [join(__dirname, '..', '..', '..', 'examples', 'workflow-chain-packs')] });
-  expect(errors).toEqual([]);
-  // @ts-expect-error — untyped .mjs pack module (loaded the way the runtime does)
-  nodes = ((await import('../../../packs/feature.cms.nodes/index.mjs')) as { nodes: typeof nodes }).nodes;
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T }
-function client(): { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res>; put: (p: string, b?: unknown) => Promise<Res> } {
+interface Res<T> { status: number; body: T }
+interface Client {
+  post: <T>(p: string, b?: unknown) => Promise<Res<T>>;
+  put: (p: string, b?: unknown) => Promise<Res<unknown>>;
+}
+function client(): Client {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
+  const call = async <T>(method: string, path: string, body?: unknown): Promise<Res<T>> => {
     const res = await fetch(`${BASE}${path}`, {
       method,
       headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) },
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) };
+    const out: unknown = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    return { status: res.status, body: out as T };
   };
-  return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), put: (p, b) => call('PUT', p, b) };
+  return { post: (p, b) => call('POST', p, b), put: (p, b) => call('PUT', p, b) };
 }
 
 let n = 0;
-async function ownerOrg(): Promise<{ owner: ReturnType<typeof client>; orgId: string; tenantId: string }> {
+async function ownerOrg(): Promise<{ owner: Client; orgId: string; tenantId: string }> {
   const tenantId = `org:chx-${Date.now()}-${n++}`;
   const owner = client();
   const r = await owner.post('/host/openwop-app/test/login', { email: `chx-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(r.status).toBe(201);
-  const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await owner.post<{ orgId: string }>('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status).toBe(201);
   return { owner, orgId: org.body.orgId, tenantId };
 }
+/** A surface verb's `{ updated }` result, read without a cast. */
+const wasUpdated = (out: unknown): boolean =>
+  typeof out === 'object' && out !== null && 'updated' in out && out.updated === true;
 const u = (orgId: string, s = ''): string => `/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}${s}`;
 
-/** Resolve `{{inputs.name}}` config tokens from the run params — the harness
- *  equivalent of the executor's per-run variable interpolation. */
-function resolveConfig(config: Record<string, unknown> | undefined, params: Record<string, string>): Record<string, unknown> {
-  return Object.fromEntries(Object.entries(config ?? {}).map(([k, v]) => [
-    k,
-    typeof v === 'string' ? v.replace(/\{\{inputs\.([a-zA-Z0-9_]+)\}\}/g, (_m, name: string) => params[name] ?? '') : v,
-  ]));
-}
-
-/**
- * Walk the expanded definition in edge order with `buildNodeInputs` port
- * semantics: `edge.sourceOutput` picks a field off the upstream node's
- * outputs; `edge.targetInput` names the ctx.inputs key it lands on.
- */
-async function runChain(
-  params: Record<string, string>,
-  features: Record<string, unknown>,
-  callAI: (args: unknown) => Promise<{ content: string }>,
-): Promise<Record<string, { status: string; outputs: Record<string, unknown> }>> {
-  const chain = getChain('cms.localize-and-submit')!.chain;
-  const def = expandChain(chain, { params });
-  const outputs = new Map<string, Record<string, unknown>>();
-  const results: Record<string, { status: string; outputs: Record<string, unknown> }> = {};
-  for (const node of def.nodes) {
-    const inputs: Record<string, unknown> = {};
-    for (const e of def.edges ?? []) {
-      if (e.targetNodeId !== node.nodeId) continue;
-      const src = outputs.get(e.sourceNodeId) ?? {};
-      inputs[e.targetInput ?? 'input'] = e.sourceOutput ? src[e.sourceOutput] : src;
-    }
-    const impl = nodes[node.typeId];
-    expect(impl, `node impl for ${node.typeId}`).toBeTruthy();
-    const result = await impl!({ inputs, config: resolveConfig(node.config, params), features, callAI });
-    const short = node.nodeId.slice(node.nodeId.lastIndexOf('_') + 1);
-    results[short] = result as { status: string; outputs: Record<string, unknown> };
-    if (result.status !== 'success') break;
-    outputs.set(node.nodeId, result.outputs ?? {});
-  }
-  return results;
-}
-
 describe('cms.localize-and-submit — end-to-end execution', () => {
-  it('reads the draft, translates, stores the overlay, and submits — approval queued when gated', async () => {
-    const { owner, orgId, tenantId } = await ownerOrg();
-    await owner.put(u(orgId, '/language-settings'), { supportedLocales: ['pt-BR'] });
-    const created = await owner.post(u(orgId, '/pages'), { title: 'Chain Doc', sections: [{ type: 'hero', data: { heading: 'Welcome' } }] });
-    expect(created.status).toBe(201);
-    const pageId = created.body.pageId as string;
-    const sectionId = created.body.sections[0].sectionId as string;
-
-    const gate = getToggleDefault('cms-approval-gate');
-    if (gate) await saveConfig({ ...gate, status: 'on' }, 'test');
-    try {
-      const features = buildFeatureSurfaces({ tenantId, runId: 'run:chain-test' });
-      const results = await runChain(
-        { orgId, pageId, sectionId, targetLocale: 'pt-BR' },
-        features,
-        async () => ({ content: '{"heading":"Bem-vindo"}' }), // the ONLY fake
-      );
-
-      expect(results.read?.status).toBe('success');
-      expect((results.read?.outputs.sectionData as { heading?: string }).heading).toBe('Welcome');
-      expect(results.translate?.status).toBe('success');
-      expect((results.translate?.outputs.overlay as { heading?: string }).heading).toBe('Bem-vindo');
-      expect(results.store?.outputs.updated).toBe(true);
-      expect(results.submit?.outputs.submitted).toBe(true);
-
-      // The overlay persisted through the sanitized write path…
-      const page = await owner.get(u(orgId, `/pages/${pageId}`));
-      expect(page.body.status).toBe('in_review');
-      expect(page.body.sections[0].localizations['pt-BR'].heading).toBe('Bem-vindo');
-      // …and the human gate was queued, not bypassed.
-      expect(await hasPendingApprovalForPage(tenantId, pageId)).toBe(true);
-    } finally {
-      if (gate) await saveConfig({ ...gate, status: 'off' }, 'test');
-    }
-  });
-
   it('CMSGAP-1: a granted translator driving the chain is narrowed exactly like the editor path', async () => {
     const { owner, orgId, tenantId } = await ownerOrg();
     await owner.put(u(orgId, '/language-settings'), { supportedLocales: ['pt-BR', 'es'] });
-    const created = await owner.post(u(orgId, '/pages'), { title: 'Granted', sections: [{ type: 'hero', data: { heading: 'Welcome' } }] });
-    const pageId = created.body.pageId as string;
-    const sectionId = created.body.sections[0].sectionId as string;
+    const created = await owner.post<{ pageId: string; sections: Array<{ sectionId: string }> }>(u(orgId, '/pages'), { title: 'Granted', sections: [{ type: 'hero', data: { heading: 'Welcome' } }] });
+    expect(created.status).toBe(201);
+    const pageId = created.body.pageId;
+    const sectionId = created.body.sections[0]!.sectionId;
     await putLocaleGrant(tenantId, orgId, 'user:translator-1', ['pt-BR'], 'test');
     // A grant NARROWS a member (ADR 0205 D1); the translator is in the org, as the
     // HTTP editor path requires and the seam's org floor now does too (ADR 0832).
@@ -175,20 +99,26 @@ describe('cms.localize-and-submit — end-to-end execution', () => {
 
     // The run carries the translator's durable principal (scope.actingUserId).
     const features = buildFeatureSurfaces({ tenantId, runId: 'run:granted', actingUserId: 'user:translator-1' });
-    const cms = features.cms as Record<string, (args: Record<string, unknown>) => Promise<unknown>>;
+    const cms = features.cms!;
 
     // Granted locale: the overlay write is allowed…
     const ok = await cms.updateSectionDraft!({ orgId, pageId, sectionId, locale: 'pt-BR', data: { heading: 'Oi' } });
-    expect((ok as { updated: boolean }).updated).toBe(true);
+    expect(wasUpdated(ok)).toBe(true);
+    expect((await getPage(tenantId, orgId, pageId))?.sections[0]?.localizations?.['pt-BR']).toEqual({ heading: 'Oi' });
     // …a foreign locale is 403, base-data (no locale) is 403, and submit is 403.
     await expect(cms.updateSectionDraft!({ orgId, pageId, sectionId, locale: 'es', data: { heading: 'Hola' } })).rejects.toMatchObject({ httpStatus: 403 });
     await expect(cms.updateSectionDraft!({ orgId, pageId, sectionId, data: { heading: 'HACK' } })).rejects.toMatchObject({ httpStatus: 403 });
     await expect(cms.submitPage!({ orgId, pageId })).rejects.toMatchObject({ httpStatus: 403 });
     await expect(cms.createDraftPage!({ orgId, title: 'Rogue' })).rejects.toMatchObject({ httpStatus: 403 });
+    // None of the refused writes landed.
+    const afterRefusals = await getPage(tenantId, orgId, pageId);
+    expect(afterRefusals?.sections[0]?.localizations?.es).toBeUndefined();
+    expect(afterRefusals?.sections[0]?.data.heading).toBe('Welcome');
+    expect(afterRefusals?.status).toBe('draft');
 
     // A SYSTEM run (no actingUserId) is unchanged — no member, no grant.
-    const system = buildFeatureSurfaces({ tenantId, runId: 'run:system' }).cms as typeof cms;
+    const system = buildFeatureSurfaces({ tenantId, runId: 'run:system' }).cms!;
     const sys = await system.updateSectionDraft!({ orgId, pageId, sectionId, locale: 'es', data: { heading: 'Hola' } });
-    expect((sys as { updated: boolean }).updated).toBe(true);
+    expect(wasUpdated(sys)).toBe(true);
   });
 });

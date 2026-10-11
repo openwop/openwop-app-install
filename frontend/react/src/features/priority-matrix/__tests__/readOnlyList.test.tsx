@@ -2,6 +2,10 @@
  * PM4UX-1 / PM4UX-2 (ADR 0842 D9) — a member the server answers `canWrite:false` for is
  * offered no control whose only outcome is a 403 (DESIGN.md "403 ⇒ hidden"), and a
  * Matrix placement made from a partial score says so, as the List does.
+ *
+ * Sabotage-witnessed (w15g4-ro-*, -quadrant-*): every gated control (score inputs,
+ * status selects, idea form, edit/criteria/delete, row menus, edit-modal scoring
+ * mode, the read-only note, the Matrix partial chip) reds its case when ungated.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, cleanup, fireEvent } from '@testing-library/react';
@@ -20,7 +24,7 @@ const LIST = (): PriorityList => ({
   votingMode: 'single', voteAggregation: 'mean',
   createdBy: 'u1', createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-07-01T00:00:00.000Z',
   ...(viewer ? { viewer } : {}),
-} as PriorityList);
+});
 
 const IDEAS: RankedIdea[] = [
   { card: { id: 'c-full', title: 'Full idea', columnId: 'new' }, status: { columnId: 'new', columnName: 'New', terminal: false }, scores: { impact: 8, reach: 8, effort: 2 }, computedPriority: 8, rank: 1, completeness: { declared: 3, scored: 3, missing: [], complete: true } },

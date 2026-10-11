@@ -1,6 +1,7 @@
 # ADR 0029 — Assistant evals, operational health & indexed persistence
 
 **Status:** Accepted — **implemented + tested** (`assistant-evals-health.test.ts`, ADR 0023 §12 T8; commitments indexes landed with T2): extraction precision/recall eval (RFC 0081 scorecard shape), priority-profile eval, the health snapshot (`health.ts` + superadmin `GET /assistant/health` + admin card; connector counts deliberately omitted — cross-feature import, the Connections page owns them), and the approvals `(tenant,status)` index (the heartbeat hot path). **Deferred, honestly:** connections-by-provider + scheduler-job indexes (small per-tenant cardinality today), the 1e4-scale load tests (CI-flaky; revisit with a perf lane), the retention sweep (config stored, ADR 0028), and the draft-quality eval (deploy-gated with the LLM drafter).
+> **CORRECTED 2026-10-09 (/grade-tests wave 11):** the priority-profile eval is no longer in `assistant-evals-health.test.ts`. It was a weaker copy of the prioritization cases in `backend/typescript/test/assistant-loops.test.ts` (exact buckets per profile), and one sabotage of `prioritize`'s surface threshold turned both red, so the copy was cut. The orderings are still asserted, in `assistant-loops.test.ts`.
 **Date:** 2026-06-11
 **Depends on:** ADR 0023 (the graph + loops being measured), ADR 0024
 (connector failures being surfaced), ADR 0028 (the admin surface it joins).

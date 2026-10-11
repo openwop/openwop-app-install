@@ -162,6 +162,15 @@ export interface WebhookClaimOptions {
   excludeTenantIds?: readonly string[];
 }
 
+/** ADR 0871 — one durable surface family's size, aggregated over tenants. */
+export interface SurfaceFamilyRowStats {
+  family: string;
+  tenants: number;
+  maxTenantRows: number;
+  totalRows: number;
+  tenantsAtOrOver: number;
+}
+
 export interface Storage {
   // ── runs ──
   insertRun(run: RunRecord, opts?: InsertRunOptions): Promise<void>;
@@ -1514,6 +1523,15 @@ export interface Storage {
   /** ADR 0868 — the number of keys under `keyPrefix`, counted in the database
    *  (no values transferred). OPTIONAL: falls back to `kvList(...).length`. */
   kvCount?(keyPrefix: string): Promise<number>;
+  /**
+   * ADR 0871 — growth of the durable host surfaces, one row per family. Groups
+   * the `hostsurf:<family>:<encoded tenant>:` keys by family and tenant in the
+   * database and returns only aggregates: how many tenants hold rows, the largest
+   * tenant's row count, the total, and how many tenants hold at least
+   * `minTenantRows`. No tenant id leaves the database. OPTIONAL: the hourly
+   * gauge skips a backend without it.
+   */
+  surfaceRowStats?(minTenantRows: number): Promise<ReadonlyArray<SurfaceFamilyRowStats>>;
   /** Delete one key. Returns true if a row existed. */
   kvDelete(key: string): Promise<boolean>;
   /** Atomically set `key` to `next` iff its current stored value equals

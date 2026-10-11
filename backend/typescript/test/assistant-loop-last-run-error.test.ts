@@ -6,6 +6,9 @@
  * calendar loop failing most of its runs on a lapsed Google connection read "Last run 9:02"
  * beside a green "On". The status alone does not name the fix, so the run's typed
  * `error.code` rides with it — a code, never the message (provider text stays off the wire).
+ *
+ * Sabotage witnesses (/grade-tests w11): dropping the code projection, projecting
+ * the message, hard-wiring the status, or dropping the `status === 'failed'` gate.
  */
 import { randomUUID } from 'node:crypto';
 import { beforeAll, describe, expect, it } from 'vitest';
@@ -47,7 +50,14 @@ describe('the loop status names the failure', () => {
     const job = await enableLoop(TENANT, 'drive-ingest', { actingUserId: 'user:lre' });
     const runId = randomUUID();
     const now = new Date().toISOString();
-    const done: RunRecord = { runId, workflowId: 'assistant.loop.drive-ingest', tenantId: TENANT, status: 'completed', inputs: {}, metadata: {}, configurable: {}, createdAt: now, updatedAt: now };
+    // The completed run still carries an error record (e.g. a node that failed and
+    // was retried to success). Without it the "no code" assertion could not fail:
+    // the code projection is gated on `status === 'failed'`, and that gate is the
+    // claim (MEASURED /grade-tests w11: probe `lr-gate` stayed green on a run with no error).
+    const done: RunRecord = {
+      runId, workflowId: 'assistant.loop.drive-ingest', tenantId: TENANT, status: 'completed', inputs: {}, metadata: {}, configurable: {}, createdAt: now, updatedAt: now,
+      error: { code: 'connection_reauth_required', message: 'recovered on retry' },
+    };
     await storage.insertRun(done);
     await recordJobRun(job!.jobId, runId);
     const drive = (await listLoopStatuses(TENANT)).find((l) => l.loopId === 'drive-ingest');

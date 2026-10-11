@@ -11,6 +11,14 @@
  * So this file drives the GENERIC lanes over HTTP, and every arm asserts the
  * absence of execution as well as the status code — a 409 that still dispatched
  * would be the defect wearing a refusal.
+ *
+ * Sabotages that turn it red (grade-tests w11): the hash requirement dropped in
+ * `decideActionViaApproval`; the EARLY pre-CAS check dropped (the PEER EDIT case's
+ * `decidedBy` assertion — the post-CAS check alone still answers 409 with both rows
+ * pending); the claim / reviews lanes not forwarding the hash; the review projecting a
+ * wrong `contentHash`; the edit CAS ignoring the hash, its no-hash 400, or its response
+ * echoing the OLD hash; the edit's `pending` gate; reopen ignoring `executionRunId`; a
+ * quorum policy on the approval; the reject projected as approved.
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -98,7 +106,11 @@ describe('D1 — the inbox claim lane requires the hash', () => {
     });
     expect(r.status).toBe(409);
     expect(r.body.details?.reason).toBe('action_changed');
-    expect((await getApproval(action.approvalId!))?.status).toBe('pending');
+    const approval = await getApproval(action.approvalId!);
+    expect(approval?.status).toBe('pending');
+    // Refused by the EARLY check, before the CAS: never resolved. A consumed-then-reopened
+    // approval (the post-CAS path) keeps the `decidedBy` the CAS stamped.
+    expect(approval?.decidedBy, 'refused before the CAS — not consumed and reopened').toBeUndefined();
     const row = await getPendingAction(TENANT, action.actionId);
     expect(row?.status).toBe('pending');
     expect(row?.executionRunId).toBeUndefined();
@@ -118,6 +130,7 @@ describe('D1 — the inbox claim lane requires the hash', () => {
     const r = await jf(`/host/openwop-app/approvals/${action.approvalId}/reject`, { method: 'POST', body: '{}' });
     expect(r.status).toBe(200);
     expect((await getPendingAction(TENANT, action.actionId))?.status).toBe('rejected');
+    expect((await getApproval(action.approvalId!))?.status).toBe('rejected');
   });
 });
 

@@ -5,6 +5,10 @@
  * second-party content (the architect's finding 2). Pure dispatch unit with a
  * capturing `callAI`.
  *
+ * Sabotage witnesses (w12): routing borrowed items to the trusted knowledge block, dropping the
+ * delimiter neutralization, dropping the acting caller or owner name on the chat or run lane, and
+ * replacing the run lane's fault sentinel with `undefined` each turn their case red.
+ *
  * @see docs/adr/0044-twin-cross-subject-recall.md
  */
 
@@ -125,8 +129,10 @@ describe('twin Phase 2 — borrowed recall on the CONVERSATION (chat/voice) path
   });
 
   // RCL-1 — the chat-lane DENY case: a caller who is NOT the owner (and an
-  // absent caller) must compose nothing. Sabotage: hardcode the fake to grant
-  // unconditionally ⇒ red. Does NOT discriminate WHICH deny reason fired (the
+  // absent caller) must compose nothing. The refusal itself is the FAKE's; what
+  // this pins about the LANE is that it never INVENTS a caller — substituting a
+  // fallback identity for an absent one turns the unattributed leg red (w12
+  // probe `rf-chat-anon-fallback`). Does NOT discriminate WHICH deny reason fired (the
   // real resolver's reason taxonomy is pinned in twin-route.test.ts).
   it('a NON-owner (or unattributed) chat caller composes NO borrowed recall', async () => {
     register('twin.chat.deny');
@@ -168,8 +174,12 @@ describe('twin Phase 2 — borrowed recall on the RUN (agent-runner node) path',
     return { callAI, callAIWithTools, getSaw: () => saw };
   }
 
-  const nodeCtx = (over: Record<string, unknown>): NodeContext =>
-    ({ tenantId: 'tenant-run', runId: 'run-twin-1', inputs: {}, config: {}, configurable: {}, emit: async () => {}, ...over } as unknown as NodeContext);
+  // Production-shaped: every REQUIRED NodeContext field, no laundering cast (the old
+  // `as unknown as NodeContext` hid a missing nodeId/attempt/secrets).
+  const nodeCtx = (over: Partial<NodeContext>): NodeContext => ({
+    runId: 'run-twin-1', nodeId: 'agent-1', tenantId: 'tenant-run', inputs: {}, config: {}, configurable: {},
+    attempt: 1, secrets: {}, emit: async () => ({ eventId: 'e-1', sequence: 1 }), ...over,
+  });
 
   it('a GRANTED twin RUN recalls its owner memory into the dispatch — fenced', async () => {
     register('twin.run');

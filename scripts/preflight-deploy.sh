@@ -43,6 +43,7 @@
 # Usage:
 #   scripts/preflight-deploy.sh                        # check, then deploy by hand
 #   scripts/preflight-deploy.sh --allow-unverified-live
+#   scripts/preflight-deploy.sh --allow-tagged         # keep a tagged revision (Gate 5b)
 #   BASE=https://staging.example scripts/preflight-deploy.sh
 #
 # Exit 0 = safe to deploy.
@@ -52,11 +53,13 @@ set -uo pipefail
 BASE="${BASE:-https://app.openwop.dev}"
 ALLOW_UNVERIFIED=0
 ALLOW_PIN_DRIFT=0
+ALLOW_TAGGED=0
 BACKEND_ONLY=0
 for arg in "$@"; do
   case "$arg" in
     --allow-unverified-live) ALLOW_UNVERIFIED=1 ;;
     --allow-pin-drift) ALLOW_PIN_DRIFT=1 ;;
+    --allow-tagged) ALLOW_TAGGED=1 ;;
     # Forwarded by `deploy.sh --backend-only`. It narrows ONE gate — the Firebase
     # identity check (Gate 7), which protects a frontend half this deploy does not
     # have. Every other gate still applies.
@@ -391,6 +394,29 @@ if command -v gcloud >/dev/null 2>&1 && [ -n "${OPENWOP_DEPLOY_SERVICE:-}" ]; th
     echo "  \`gcloud run services describe\` returned no JSON: expired credentials (\`gcloud auth login\`), the wrong"
     echo "  project/region, or no permission on the service. Restore the read, then re-run — do not assume a breach."
     exit 1
+  fi
+  # ── Gate 5b (ADR 0866): no tagged revision carries into a deploy ──────────
+  # A tag keeps an old revision routable, and under minScale it keeps an instance
+  # running every daemon, indefinitely. That instance runs OLD CODE as a writer:
+  # it writes rows with no tenant-index marker, so ADR 0866's reconcile pass
+  # un-verifies the index and reads fall back to the full scan for up to an hour.
+  # The pass only detects such a writer after it writes; this gate is the
+  # prevention. No script adds a tag; DEPLOY.md's verify-by-tag flow removes it
+  # in the same step, so a tag still present here is a leftover. Gate 5 above
+  # already counts tags against the connection budget; this one refuses them
+  # outright unless the operator says the tag is wanted.
+  if [ "${ntags:-0}" -gt 0 ]; then
+    if [ "$ALLOW_TAGGED" -eq 1 ]; then
+      echo "  tags      : WAIVED $ntags tagged revision(s) ($tagnames) kept by --allow-tagged"
+    else
+      echo "  tags      : FAIL  $ntags tagged revision(s) ($tagnames) — each keeps an old revision running its daemons"
+      echo; echo "PREFLIGHT FAILED — remove the tags first:"
+      echo "  gcloud run services update-traffic $OPENWOP_DEPLOY_SERVICE --remove-tags $tagnames --region ${OPENWOP_DEPLOY_REGION:-us-central1} --project ${OPENWOP_DEPLOY_PROJECT:-openwop-dev}"
+      echo "  (or pass --allow-tagged if the tag is deliberate, e.g. a probe you are still running)"
+      exit 1
+    fi
+  else
+    echo "  tags      : OK    no tagged revisions"
   fi
 fi
 

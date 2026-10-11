@@ -11,13 +11,16 @@
  *   - the reroute must not DOUBLE-deliver webhooks: exactly ONE delivery row
  *     for the published event (the dispatcher's webhook leg rides the same
  *     `deliverHostExtEvent` seam CMS used to call directly).
+ *
+ * Sabotage-witnessed (/grade-tests w16): replacing `void emitHostEvent(...)` in
+ * `recordCmsAction` with a no-op reds both cases; emitting it twice reds case 2.
  */
 
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import type { Express } from 'express';
 import { getSetCookies } from './headerCookies.js';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
@@ -46,15 +49,16 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T }
+interface Res<T> { status: number; body: T }
+/** The response fields this file reads. */
+interface Body { orgId: string; pageId: string; bindingId: string; webhookId: string }
 interface Client {
-  get: (p: string) => Promise<Res>;
-  post: (p: string, b?: unknown) => Promise<Res>;
-  del: (p: string) => Promise<Res>;
+  post: (p: string, b?: unknown) => Promise<Res<Body>>;
+  del: (p: string) => Promise<Res<unknown>>;
 }
 function client(): Client {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
+  const call = async <T>(method: string, path: string, body?: unknown): Promise<Res<T>> => {
     const res = await fetch(`${BASE}${path}`, {
       method,
       headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) },
@@ -62,9 +66,9 @@ function client(): Client {
     });
     for (const c of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]; }
     const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
-    return { status: res.status, body: out };
+    return { status: res.status, body: out as T };
   };
-  return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), del: (p) => call('DELETE', p) };
+  return { post: (p, b) => call<Body>('POST', p, b), del: (p) => call<unknown>('DELETE', p) };
 }
 
 let n = 0;
@@ -92,16 +96,16 @@ describe('host.cms.page.* rides the ADR 0208 dispatcher (ADR 0592 §4)', () => {
     const pub = await owner.post(u(orgId, `/pages/${created.body.pageId}/publish`));
     expect(pub.status, JSON.stringify(pub.body)).toBe(200);
 
+    // The emit is `void` off the publish request — wait on the real condition, no fixed sleep.
     let matched: RunRecord | undefined;
-    for (let i = 0; i < 40 && !matched; i++) {
+    await vi.waitFor(async () => {
       const runs = await storage.listRuns({ tenantId, limit: 50 });
       matched = runs.find((r) => {
         const meta = r.metadata as { hostEvent?: { bindingId?: string } } | undefined;
         return meta?.hostEvent?.bindingId === binding.body.bindingId;
       });
-      if (!matched) await new Promise((r) => setTimeout(r, 25));
-    }
-    expect(matched, 'expected the CMS publish to start the bound workflow (metadata.hostEvent stamped)').toBeTruthy();
+      expect(matched, 'expected the CMS publish to start the bound workflow (metadata.hostEvent stamped)').toBeTruthy();
+    }, { timeout: 2000, interval: 20 });
     expect(matched?.workflowId).toBe(workflowId);
 
     await owner.del(`${BINDINGS}/${binding.body.bindingId}`);
@@ -113,31 +117,25 @@ describe('host.cms.page.* rides the ADR 0208 dispatcher (ADR 0592 §4)', () => {
     expect(sub.status, JSON.stringify(sub.body)).toBe(201);
 
     const created = await owner.post(u(orgId, '/pages'), { title: 'Once', sections: [] });
+    expect(created.status).toBe(201);
     const pub = await owner.post(u(orgId, `/pages/${created.body.pageId}/publish`));
     expect(pub.status).toBe(200);
 
     // Collect every delivery row enqueued for this subscription+page.
     const mine: string[] = [];
-    for (let i = 0; i < 40; i++) {
-      const claimed = await storage.claimDueWebhookDeliveries(`once-worker-${i}`, Date.now() + 1, 5000, 50);
+    let sweep = 0;
+    const claimMine = async (): Promise<void> => {
+      const claimed = await storage.claimDueWebhookDeliveries(`once-worker-${sweep++}`, Date.now() + 1, 5000, 50);
       for (const d of claimed) {
         if (d.subscriptionId === bareRunId(sub.body.webhookId) && d.eventType === 'openwop-app.cms.page-published' && d.payload.includes(created.body.pageId)) {
           mine.push(d.deliveryId);
         }
       }
-      if (mine.length > 0) {
-        // one settle round to catch a hypothetical second enqueue
-        await new Promise((r) => setTimeout(r, 100));
-        const extra = await storage.claimDueWebhookDeliveries('once-worker-final', Date.now() + 1, 5000, 50);
-        for (const d of extra) {
-          if (d.subscriptionId === bareRunId(sub.body.webhookId) && d.eventType === 'openwop-app.cms.page-published' && d.payload.includes(created.body.pageId)) {
-            mine.push(d.deliveryId);
-          }
-        }
-        break;
-      }
-      await new Promise((r) => setTimeout(r, 25));
-    }
+    };
+    await vi.waitFor(async () => { await claimMine(); expect(mine.length).toBeGreaterThan(0); }, { timeout: 2000, interval: 20 });
+    // Drain the microtask/IO queue, then sweep once more for a second enqueue.
+    for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+    await claimMine();
     expect(new Set(mine).size, `deliveries: ${JSON.stringify(mine)}`).toBe(1);
   });
 });

@@ -12,11 +12,17 @@
  * Each race is made DETERMINISTIC by doing the competing write inside the module the
  * route calls at the instant of the check (a partial mock), not by timing.
  * D5 — the prerender's hreflang names only locales the page serves.
+ *
+ * Sabotage-witnessed (/grade-tests w16): a blind put in place of `setLocalePublishState`'s
+ * `casPage`, dropping the sweep merge's `authorize` (left-review) check, the
+ * after-sweep queue guard, or the translated-from-base check, `updateContentLanguageSettings`
+ * skipping its CAS, or `localizePage` reporting every configured locale as `served`
+ * each reds the named case.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { getSetCookies } from './headerCookies.js';
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
@@ -74,8 +80,16 @@ const setToggle = async (id: string, status: 'on' | 'off'): Promise<void> => {
 };
 const setGate = (status: 'on' | 'off'): Promise<void> => setToggle('cms-approval-gate', status);
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
-interface Res<T = any> { status: number; headers: Headers; body: T }
+interface SectionBody { data: { heading?: string } }
+interface ApprovalRow { kind?: string; pageId?: string }
+/** The success-body fields this file reads. */
+interface Body {
+  orgId: string; pageId: string; slug: string;
+  sections: SectionBody[]; items: ApprovalRow[];
+  autoTranslated?: Record<string, number>;
+  autoTranslateDegraded?: { conflict?: boolean };
+}
+interface Res { status: number; headers: Headers; body: Body }
 interface Client {
   get: (p: string, headers?: Record<string, string>) => Promise<Res>;
   post: (p: string, b?: unknown) => Promise<Res>;
@@ -91,8 +105,8 @@ function client(): Client {
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
-    return { status: res.status, headers: res.headers, body: out };
+    const out: unknown = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    return { status: res.status, headers: res.headers, body: out as Body };
   };
   return {
     get: (p, headers) => call('GET', p, undefined, headers),
@@ -110,7 +124,7 @@ async function owner(): Promise<{ c: Client; orgId: string; tenantId: string }> 
   expect(login.status, JSON.stringify(login.body)).toBe(201);
   const org = await c.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
-  return { c, orgId: org.body.orgId as string, tenantId };
+  return { c, orgId: org.body.orgId, tenantId };
 }
 const u = (orgId: string, s = ''): string => `/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}${s}`;
 
@@ -119,17 +133,21 @@ async function publicRead(orgId: string, slug: string, acceptLanguage: string): 
   const res = await fetch(`${BASE}/host/openwop-app/public/${encodeURIComponent(orgId)}/pages/${encodeURIComponent(slug)}`, {
     headers: { 'accept-language': acceptLanguage },
   });
-  return { status: res.status, headers: res.headers, body: await res.json().catch(() => undefined) };
+  const body: unknown = await res.json().catch(() => undefined);
+  return { status: res.status, headers: res.headers, body: body as Body };
 }
 
 
-async function pendingFor(c: Client, pageId: string): Promise<any[]> {
+async function pendingFor(c: Client, pageId: string): Promise<ApprovalRow[]> {
   const list = await c.get('/host/openwop-app/approvals?status=pending');
   expect(list.status).toBe(200);
-  return (list.body.items as any[]).filter((a) => a.kind === 'content-publish' && JSON.stringify(a).includes(pageId));
+  return list.body.items.filter((a) => a.kind === 'content-publish' && a.pageId === pageId);
 }
 
 beforeAll(async () => { await setToggle('cms-localization', 'on'); });
+// The race hooks are module-level: a case that fails (or a code path that stops calling
+// the mocked function) before consuming its hook must not leak it into the next case.
+beforeEach(() => { hooks.onGateCheck = undefined; hooks.onSweep = undefined; });
 
 describe('ADR 0861 D2 — releasing a locale checks the gate on the written row', () => {
   it('an approve landing right after the check cannot carry the release onto the live page', async () => {
@@ -140,12 +158,13 @@ describe('ADR 0861 D2 — releasing a locale checks the gate on the written row'
       title: 'Release race',
       sections: [{ type: 'hero', data: { heading: 'Welcome' }, localizations: { es: { heading: 'RETENIDO' } } }],
     });
-    const { pageId, slug } = created.body as { pageId: string; slug: string };
+    const { pageId, slug } = created.body;
     expect((await c.post(u(orgId, `/pages/${pageId}/locales/es/unpublish`))).status).toBe(200);
     // The page is a DRAFT at the check (not refused); the publish lands right after it.
     hooks.onGateCheck = async () => { await transitionPage(tenantId, orgId, pageId, 'publish', 'user:other-admin'); };
     const release = await c.post(u(orgId, `/pages/${pageId}/locales/es/publish`));
     expect(release.status, JSON.stringify(release.body)).toBe(409);
+    expect(hooks.onGateCheck, 'the competing publish must have fired').toBeUndefined();
     const live = await getPage(tenantId, orgId, pageId);
     expect(live?.status).toBe('published');
     expect(live?.localePublishState?.es, 'the hold survives').toBe('draft');
@@ -159,7 +178,7 @@ describe('ADR 0861 D3 — the auto-translate merge lands only on the review it b
     await setGate('on');
     expect((await o.c.put(u(o.orgId, '/language-settings'), { supportedLocales: ['es'], autoTranslateOnPublish: true })).status).toBe(200);
     const created = await o.c.post(u(o.orgId, '/pages'), { title: 'Sweep race', sections: [{ type: 'hero', data: { heading: 'Welcome' } }] });
-    return { ...o, pageId: created.body.pageId as string, slug: created.body.slug as string };
+    return { ...o, pageId: created.body.pageId, slug: created.body.slug };
   };
 
   it('an approve during the sweep: the drafts are discarded (disclosed) and no review row opens for the live page', async () => {
@@ -167,6 +186,7 @@ describe('ADR 0861 D3 — the auto-translate merge lands only on the review it b
     hooks.onSweep = async () => { await transitionPage(tenantId, orgId, pageId, 'approve', 'user:reviewer'); };
     const submit = await c.post(u(orgId, `/pages/${pageId}/submit`));
     expect(submit.status, JSON.stringify(submit.body)).toBe(200);
+    expect(hooks.onSweep, 'the competing approve must have fired').toBeUndefined();
     expect(submit.body.autoTranslateDegraded?.conflict).toBe(true);
     const live = await getPage(tenantId, orgId, pageId);
     expect(live?.status).toBe('published');
@@ -183,6 +203,7 @@ describe('ADR 0861 D3 — the auto-translate merge lands only on the review it b
     };
     const submit = await c.post(u(orgId, `/pages/${pageId}/submit`));
     expect(submit.status, JSON.stringify(submit.body)).toBe(200);
+    expect(hooks.onSweep, 'the competing base edit must have fired').toBeUndefined();
     const page = await getPage(tenantId, orgId, pageId);
     expect(page?.sections[0]?.localizations?.es, 'translated from a base that no longer exists').toBeUndefined();
     expect(page?.status).toBe('in_review');
@@ -228,7 +249,7 @@ describe('ADR 0861 D5 — hreflang names only the locales this page serves', () 
       title: 'Hreflang',
       sections: [{ type: 'hero', data: { heading: 'Welcome' }, localizations: { es: { heading: 'Hola' }, fr: { heading: 'Bonjour' } } }],
     });
-    const { pageId, slug } = created.body as { pageId: string; slug: string };
+    const { pageId, slug } = created.body;
     expect((await c.post(u(orgId, `/pages/${pageId}/publish`))).status).toBe(200);
     const before = (await prerenderPage(orgId, slug, 'https://site.test', 'en'))!.html;
     expect(before, 'control: both configured locales advertised').toContain('hreflang="es"');

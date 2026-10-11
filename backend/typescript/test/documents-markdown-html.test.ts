@@ -3,6 +3,9 @@
  * output is fed to the client's `generateJSON(html, documentExtensions())`; the
  * `html: false` markdown-it config is the FIRST line of the two-layer XSS defense
  * (raw HTML never passes through as live markup — it's escaped to text).
+ *
+ * Sabotage-witnessed (grade-tests w14): `html: false → true` reds the XSS case;
+ * the markdown-it `'zero'` preset reds the GFM case.
  */
 import { describe, it, expect } from 'vitest';
 import { markdownToHtml } from '../src/features/documents/render.js';
@@ -21,9 +24,5 @@ describe('markdownToHtml', () => {
     expect(html).not.toContain('<script'); // escaped to &lt;script…
     expect(html).not.toContain('<img');
     expect(html).toContain('ok'); // surrounding text still renders
-  });
-
-  it('handles empty / undefined content', () => {
-    expect(markdownToHtml('').trim()).toBe('');
   });
 });

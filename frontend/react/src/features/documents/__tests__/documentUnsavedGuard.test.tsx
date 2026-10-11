@@ -10,6 +10,17 @@
  * Plus the promote divergence: promote used to convert the SAVED version while
  * the screen showed a diverged draft — it now saves the draft first, so what is
  * promoted is what the user sees.
+ *
+ * Sabotage witnesses (grade-tests w14): no guard on the back link, a guard that
+ * ignores the answer (leaves on cancel, or never leaves on confirm), promote that
+ * skips the save / always saves / saves AFTER the render read, and no guard on
+ * the rich-document link — each turns its case red. "Stays" is asserted after a
+ * drain, because `confirm` is called synchronously and the navigation would land
+ * in its `.then`.
+ * Honest ceiling (double guard): "clean → no dialog" is enforced twice — the
+ * link's `!dirty` early return AND `useConfirmDiscardUnsaved`'s own
+ * `if (!dirty) return true`. Removing either one alone leaves it green (probe
+ * w14g5-ug-back-nags-clean); the case pins the outcome, not which guard holds it.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup, screen, fireEvent, waitFor } from '@testing-library/react';
@@ -71,6 +82,10 @@ const baseDoc = {
   currentVersion: { versionId: 'v1', documentId: 'doc_1', version: 1, content: '# Hi', createdAt: '2026-07-11T00:00:00Z' },
 };
 
+async function drain(): Promise<void> {
+  for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+}
+
 async function loadDirty(): Promise<void> {
   renderAt('/documents/doc_1?org=org_1');
   const box = await screen.findByRole('textbox', { name: 'Document content (Markdown)' });
@@ -79,6 +94,7 @@ async function loadDirty(): Promise<void> {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  confirmMock.confirm.mockReset().mockResolvedValue(true); // drops any unconsumed once-value
   localStorage.clear();
   api.getDocument.mockResolvedValue(baseDoc);
   api.listVersions.mockResolvedValue([]);
@@ -96,6 +112,7 @@ describe('DOCTPL-1 — the in-app unsaved guard on the markdown editor', () => {
     await loadDirty();
     fireEvent.click(screen.getByRole('link', { name: /Back to documents/ }));
     await waitFor(() => expect(confirmMock.confirm).toHaveBeenCalledTimes(1));
+    await drain();
     // Still on the editor: no location probe rendered, the edited draft intact.
     expect(screen.queryByTestId('loc')).toBeNull();
     expect((screen.getByRole('textbox', { name: 'Document content (Markdown)' }) as HTMLTextAreaElement).value).toBe('# Hi — edited, unsaved');
@@ -142,6 +159,7 @@ describe('DOCTPL-1 — the in-app unsaved guard on the markdown editor', () => {
     await loadDirty();
     fireEvent.click(screen.getByRole('link', { name: /Open the rich document/ }));
     await waitFor(() => expect(confirmMock.confirm).toHaveBeenCalledTimes(1));
+    await drain();
     expect(screen.queryByTestId('loc')).toBeNull();
   });
 });

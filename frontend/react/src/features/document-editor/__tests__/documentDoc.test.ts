@@ -1,6 +1,12 @@
 /**
  * canvas.document doc-model tests (ADR 0334 Phase 1) — coercion (safe fallback to
- * an empty doc) and the `flow.headings` outline projection.
+ * an empty doc) and the `flow.headings` outline projection — plus the ADR 0363 P2
+ * a11y projector (doc → the shared `contentA11y` model: image alt + heading levels).
+ *
+ * Sabotage (wave 14): drop the `type === 'doc'` check, stringify a non-string
+ * title, key heading ids by outline position, drop the placeholder / level
+ * default, default a missing alt to non-empty, or flatten projected heading
+ * levels → the named case goes red.
  */
 import { describe, it, expect } from 'vitest';
 import { coerceDocument, documentHeadings, documentA11yIssues, EMPTY_DOC } from '../documentDoc.js';

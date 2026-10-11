@@ -14,10 +14,21 @@
  *    both indistinguishable from a real answer about this workspace.
  *  - PRJ2-M5: the charter caps are enforced by SILENT TRUNCATION on a
  *    full-replace PATCH that answers 200, so the editor now refuses the save.
+ *
+ * Sabotage-witnessed (wave 13, w13g4-faa-*): the `{mineFailed ? …}` notice, `mine` in
+ * `assignable`, `setActionError`→`setLoadError` on delete, the `loadError` early return,
+ * `orgsFailed` wiring, both `setAccessFailed` writes, the Save `disabled` overflow rule,
+ * the objective-count / goal-length overflow terms, the goal `maxLength`, and the
+ * objectives split in `onSave` each turn their case below red.
+ *
+ * No live fetch (ADR 0661): every read the rendered tree makes is mocked here,
+ * including `getDeletePreview` (the delete path's first read) and the Overview
+ * tab's strategy chips (another feature's read).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, waitFor, act, fireEvent } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
+import type { Project, ProjectCharter } from '../projectsClient.js';
 
 const listWorkflowSummaries = vi.fn();
 const listProjects = vi.fn();
@@ -40,7 +51,10 @@ vi.mock('../projectsClient.js', async (orig) => ({
   deleteProject: (id: string) => deleteProject(id),
   updateCharter: (id: string, c: unknown) => updateCharter(id, c),
   updateWorkflows: vi.fn(async () => ({})),
+  getDeletePreview: vi.fn(async () => ({ canvases: 0, documents: 0, entities: 0, priorityLists: 0, teamLedger: 0 })),
 }));
+// The Overview tab's strategy chips are another feature's read; not under test here.
+vi.mock('../../strategy/StrategyAlignment.js', async (orig) => ({ ...(await orig<Record<string, unknown>>()), ProjectStrategyChips: () => null }));
 vi.mock('../../../client/accessClient.js', async (orig) => ({
   ...(await orig<Record<string, unknown>>()),
   getEffectiveAccess: () => getEffectiveAccess(),
@@ -55,9 +69,9 @@ import { ProjectsPage } from '../ProjectsPage.js';
 import { ProjectDetailPage } from '../ProjectDetailPage.js';
 import { ProjectOverviewTab } from '../ProjectOverviewTab.js';
 
-const PROJECT = {
+const PROJECT: Project = {
   id: 'p1', tenantId: 't', orgId: 'org-1', name: 'Atlas', workflows: [], boardId: 'b1', canWrite: true,
-} as never;
+};
 
 const settle = async (): Promise<void> => { await act(async () => { await new Promise((r) => setTimeout(r, 0)); }); };
 
@@ -66,9 +80,9 @@ beforeEach(() => {
   listWorkflowSummaries.mockResolvedValue([{ workflowId: 'wf-mine', name: 'My real workflow' }]);
   listProjects.mockResolvedValue([]);
   listOrgs.mockResolvedValue([{ orgId: 'org-1', name: 'Acme' }]);
-  getEffectiveAccess.mockResolvedValue({ scopes: ['workspace:write'] });
+  getEffectiveAccess.mockResolvedValue({ roles: [], scopes: ['workspace:write'], basis: 'member' });
   getProject.mockResolvedValue(PROJECT);
-  deleteProject.mockResolvedValue({ ok: true });
+  deleteProject.mockResolvedValue({ deleted: true, memoryEntriesCleared: 0, schedulesCleared: 0, conversationsDeleted: 0 });
   updateCharter.mockResolvedValue(PROJECT);
 });
 afterEach(cleanup);
@@ -170,8 +184,8 @@ describe('PRJ2-M4 — the two reads that gate project creation', () => {
 });
 
 describe('PRJ2-M5 — the charter editor refuses a save the server would silently trim', () => {
-  const edit = async (charter?: unknown): Promise<void> => {
-    render(<MemoryRouter><ProjectOverviewTab project={{ ...(PROJECT as object), charter } as never} canWrite onSaved={() => {}} /></MemoryRouter>);
+  const edit = async (charter?: ProjectCharter): Promise<void> => {
+    render(<MemoryRouter><ProjectOverviewTab project={{ ...PROJECT, ...(charter ? { charter } : {}) }} canWrite onSaved={() => {}} /></MemoryRouter>);
     await settle();
     fireEvent.click(screen.getByRole('button', { name: /add a charter|^edit$/i }));
     await settle();

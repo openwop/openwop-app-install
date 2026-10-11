@@ -6,13 +6,19 @@
  * naming how many sections fall back. The public reader is untouched by this
  * feature (client-side resolution only — the delivery lanes keep their
  * negotiation tests).
+ *
+ * Sabotage-witnessed (/grade-tests w17): a non-shallow exact merge, no family
+ * lookup, a base preview marked fallen-back, a no-match overlay NOT marked
+ * fallen-back, an unstripped withheld overlay, leaked `localizations`, the
+ * page ignoring the selector, an empty withheld list or a missing withheld
+ * badge each red a case below.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, within, cleanup, fireEvent, waitFor } from '@testing-library/react';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import type { ReactNode } from 'react';
 import { resolvePreviewSection, resolvePreviewSections } from '../resolvePreviewLocale.js';
-import type { Section } from '../cmsClient.js';
+import type { LanguageSettings, Page, Section } from '../cmsClient.js';
 
 vi.mock('../PublicPreviewFrame.js', () => ({
   PublicPreviewFrame: ({ children }: { children: ReactNode }) => <div data-testid="public-preview">{children}</div>,
@@ -29,7 +35,7 @@ vi.mock('../cmsClient.js', () => ({
   assetUrl: (token: string) => `/asset/${token}`,
   listOrgs: vi.fn(async () => [{ orgId: 'o1', name: 'Org One' }]),
   listPages: vi.fn(async () => []),
-  getLanguageSettings: vi.fn(async () => ({ baseLocale: 'en', supportedLocales: ['es', 'fr'], autoTranslateOnPublish: false })),
+  getLanguageSettings: vi.fn(async () => ({ baseLocale: 'en', supportedLocales: ['es', 'fr'], autoTranslateOnPublish: false }) satisfies LanguageSettings),
   putLanguageSettings: vi.fn(),
   // ADR 0593 D4 (CMSAU-5) — the editor now reads the page's latest review
   // outcome so a rejection is visible to the submitter. Enrichment: null ⇒
@@ -43,7 +49,7 @@ vi.mock('../cmsClient.js', () => ({
     ],
     localePublishState: { fr: 'draft' },
     version: 1, updatedAt: '2026-01-01T00:00:00Z',
-  })),
+  }) satisfies Page),
   createPage: vi.fn(), deletePage: vi.fn(), savePage: vi.fn(),
   transition: vi.fn(), translateSection: vi.fn(),
   listVersions: vi.fn(async () => []), restoreVersion: vi.fn(),
@@ -98,6 +104,11 @@ describe('resolvePreviewSection — the normative merge, mirrored', () => {
     const r = resolvePreviewSection(sec({}), 'fr', 'en');
     expect(r.data.heading).toBe('Base');
     expect(r.fellBack).toBe(true);
+    // Overlays exist, but none for fr (exact or family): the LAST branch of the
+    // resolver, which no other case reaches.
+    const other = resolvePreviewSection(sec({ localizations: { es: { heading: 'Hola' } } }), 'fr', 'en');
+    expect(other.data).toEqual({ heading: 'Base' });
+    expect(other.fellBack).toBe(true);
   });
   it('review F5 — a WITHHELD locale resolves as delivery serves it: overlay stripped pre-merge, counted as fallback', () => {
     const out = resolvePreviewSections(

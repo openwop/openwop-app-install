@@ -12,6 +12,17 @@
  *  - D3 the planning-agenda Document of a project-bound list carried no
  *    `ownerSubject`, so a private project's top ideas read to every org viewer
  *    and outlived the project.
+ *
+ * Sabotage map (wave 15, `w15g1-*` probes, each turns its case red):
+ *  D2 `redactTrailFor` returns every row / redacts the reader's own row; the route skips
+ *     the config-authority branch.  D9 `withViewer` projects canWrite/canConfigure true.
+ *  D1 `readableLists`/`readList`/`writeList` arms, `listPortfolio` over every list, the
+ *     schedule/intake/agenda gates, the system-run arms, and an unclassified verb (RATCHET).
+ *  D3 the agenda Document's `ownerSubject`; D4 the tool's `level === 'none'` arm; D8 the
+ *  comment validator's project gate; D10 the strategy resolver's project gate; D7 the
+ *  cap comparison; D5 the kanban hook's intake / trail sweeps; PM4CD-1 the intake CAS.
+ *  CEILING: D5's PM door (`deleteIdea`) calls `deleteCard`, whose hook runs the same
+ *  sweeps — its own sweep lines are a double guard (`w15g1-d5-pm-door` stays green).
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -20,14 +31,17 @@ import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { createOrg, createMember } from '../src/host/accessControlService.js';
-import { createList, submitIdea, setIdeaScore, createPlanningSession } from '../src/features/priority-matrix/priorityMatrixService.js';
+import { createList, submitIdea, setIdeaScore, createPlanningSession, listSessions, getList, deleteIdea } from '../src/features/priority-matrix/priorityMatrixService.js';
+import type { PriorityList } from '../src/features/priority-matrix/types.js';
 import { buildPriorityMatrixSurface } from '../src/features/priority-matrix/surface.js';
-import { createProject, setProjectVisibility } from '../src/features/projects/projectsService.js';
+import { createProject, setProjectVisibility, resolveProjectAccess } from '../src/features/projects/projectsService.js';
+import { createComment } from '../src/features/comments/commentsService.js';
+import { resolvePriorityLinkTarget } from '../src/features/strategy/strategyService.js';
 import { getDocument, canReadDocument } from '../src/features/documents/documentsService.js';
 import { createAgentToolProvider } from '../src/host/agentToolProvider.js';
 import { PM_SUBMIT_IDEA_TOOL_ID } from '../src/features/priority-matrix/agentTools.js';
 import { registerSubjectAccessResolver, type SubjectAccessResolver } from '../src/host/subjectAccess.js';
-import { listIdeaScoreHistory } from '../src/features/priority-matrix/scoreHistory.js';
+import { listIdeaScoreHistory, type VisibleScoreChange } from '../src/features/priority-matrix/scoreHistory.js';
 import { getIdeaIntake, upsertIdeaIntake, addIdeaEvidence, listIdeaEvidence, markPromoted } from '../src/features/priority-matrix/intake.js';
 import { deleteCard } from '../src/host/kanbanService.js';
 import { DurableCollection } from '../src/host/hostExtPersistence.js';
@@ -37,9 +51,9 @@ let BASE: string;
 let server: http.Server;
 let n = 0;
 
-const toggle = async (id: string): Promise<void> => {
+const toggle = async (id: string, status: 'on' | 'off' = 'on'): Promise<void> => {
   const d = getToggleDefault(id);
-  if (d) await saveConfig({ ...d, status: 'on' }, 'test');
+  if (d) await saveConfig({ ...d, status }, 'test');
 };
 
 beforeAll(async () => {
@@ -54,23 +68,30 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T }
-interface Client { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res>; put: (p: string, b?: unknown) => Promise<Res> }
+interface Res<T> { status: number; body: T }
+interface Client {
+  get: <T>(p: string) => Promise<Res<T>>;
+  post: <T>(p: string, b?: unknown) => Promise<Res<T>>;
+  put: <T>(p: string, b?: unknown) => Promise<Res<T>>;
+}
 function client(): Client {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
+  async function call<T>(method: string, path: string, body?: unknown): Promise<Res<T>> {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    // JSON is untyped at the wire; each call site names the body it expects.
+    const out = (res.status === 204 ? undefined : await res.json().catch(() => undefined)) as T;
     return { status: res.status, body: out };
-  };
-  return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), put: (p, b) => call('PUT', p, b) };
+  }
+  return { get: <T>(p: string) => call<T>('GET', p), post: <T>(p: string, b?: unknown) => call<T>('POST', p, b), put: <T>(p: string, b?: unknown) => call<T>('PUT', p, b) };
 }
+type Viewer = { canWrite: boolean; canConfigure: boolean };
 async function signup(c: Client, tenantId: string): Promise<{ userId: string }> {
-  const r = await c.post('/host/openwop-app/test/login', { email: `pm842-${Date.now()}-${n++}@acme.test`, tenantId });
+  const r = await c.post<{ user: { userId: string } }>('/host/openwop-app/test/login', { email: `pm842-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return r.body.user;
 }
+const newOrg = async (c: Client): Promise<string> => (await c.post<{ orgId: string }>('/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
 
 const L = '/host/openwop-app/priority-matrix/lists';
 const A = { 'strategic-alignment': 9, roi: 9, urgency: 9, 'compliance-risk': 9, cost: 1 };
@@ -82,25 +103,25 @@ describe('ADR 0842 D2 — the score-change trail keeps multi-voter ballots secre
     const owner = client(); await signup(owner, tenantId);
     const voter = client(); const voterUser = await signup(voter, tenantId);
     const reader = client(); const readerUser = await signup(reader, tenantId);
-    const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
+    const orgId = await newOrg(owner);
     await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'V', subject: voterUser.userId, roles: ['editor'] });
     await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'R', subject: readerUser.userId, roles: ['editor'] });
 
-    const list = (await owner.post(L, { orgId, name: 'Council', presetId: 'weighted', votingMode: 'multi-voter', voteAggregation: 'mean' })).body;
+    const list = (await owner.post<PriorityList>(L, { orgId, name: 'Council', presetId: 'weighted', votingMode: 'multi-voter', voteAggregation: 'mean' })).body;
     const base = `${L}/${encodeURIComponent(list.id)}`;
-    const idea = (await owner.post(`${base}/ideas`, { title: 'Shared idea' })).body;
+    const idea = (await owner.post<{ id: string }>(`${base}/ideas`, { title: 'Shared idea' })).body;
     const ideaBase = `${base}/ideas/${encodeURIComponent(idea.id)}`;
     expect((await voter.put(`${ideaBase}/scores`, { scores: A })).status).toBe(200);
     expect((await reader.put(`${ideaBase}/scores`, { scores: B })).status).toBe(200);
-    // The trail is appended fire-and-forget; wait until both rows are durable.
-    for (let i = 0; i < 50 && (await listIdeaScoreHistory(tenantId, list.id, idea.id)).length < 2; i++) await new Promise((r) => setTimeout(r, 10));
+    // The trail is appended fire-and-forget (no hook to await); wait until both rows are durable.
+    await vi.waitFor(async () => expect(await listIdeaScoreHistory(tenantId, list.id, idea.id)).toHaveLength(2));
 
     // Control: the per-voter breakdown is refused to a non-config member.
     expect((await reader.get(`${ideaBase}/votes`)).status).toBe(403);
 
-    const r = await reader.get(`${ideaBase}/score-history`);
+    const r = await reader.get<{ history: VisibleScoreChange[] }>(`${ideaBase}/score-history`);
     expect(r.status).toBe(200);
-    const history = r.body.history as Array<Record<string, unknown>>;
+    const history = r.body.history;
     expect(history.length).toBe(2);
     const raw = JSON.stringify(history);
     expect(raw).not.toContain(voterUser.userId);
@@ -116,7 +137,7 @@ describe('ADR 0842 D2 — the score-change trail keeps multi-voter ballots secre
     expect(theirs[0]!.actor).toBeUndefined();
 
     // The list creator holds config authority and still sees the full trail.
-    const full = await owner.get(`${ideaBase}/score-history`);
+    const full = await owner.get<{ history: VisibleScoreChange[] }>(`${ideaBase}/score-history`);
     expect(JSON.stringify(full.body.history)).toContain(voterUser.userId);
   });
 });
@@ -127,16 +148,16 @@ describe('ADR 0842 D9 — list reads project what the caller may do', () => {
     const owner = client(); await signup(owner, tenantId);
     const editor = client(); const editorUser = await signup(editor, tenantId);
     const viewerC = client(); const viewerUser = await signup(viewerC, tenantId);
-    const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
+    const orgId = await newOrg(owner);
     await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'E', subject: editorUser.userId, roles: ['editor'] });
     await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'V', subject: viewerUser.userId, roles: ['viewer'] });
-    const list = (await owner.post(L, { orgId, name: 'Perms', presetId: 'weighted' })).body;
-    const one = async (c: Client) => (await c.get(`${L}/${encodeURIComponent(list.id)}`)).body.viewer;
+    const list = (await owner.post<PriorityList>(L, { orgId, name: 'Perms', presetId: 'weighted' })).body;
+    const one = async (c: Client): Promise<Viewer> => (await c.get<{ viewer: Viewer }>(`${L}/${encodeURIComponent(list.id)}`)).body.viewer;
     expect(await one(owner)).toEqual({ canWrite: true, canConfigure: true });
     expect(await one(editor)).toEqual({ canWrite: true, canConfigure: false });
     expect(await one(viewerC)).toEqual({ canWrite: false, canConfigure: false });
     // The index carries the same projection.
-    const idx = (await viewerC.get(L)).body.lists as Array<{ id: string; viewer: unknown }>;
+    const idx = (await viewerC.get<{ lists: Array<{ id: string; viewer: Viewer }> }>(L)).body.lists;
     expect(idx.find((l) => l.id === list.id)?.viewer).toEqual({ canWrite: false, canConfigure: false });
     // And the projection is not authority: the viewer's write is still refused at the door.
     expect((await viewerC.post(`${L}/${encodeURIComponent(list.id)}/ideas`, { title: 'x' })).status).toBe(403);
@@ -152,6 +173,10 @@ describe('ADR 0842 D1 — the run lane gates a human-started run like the HTTP d
     await createMember({ orgId: orgA, tenantId: T, displayName: 'Ed', subject: 'ed-a', roles: ['editor'] });
     listB = await createList(T, orgB, 'own', { name: 'Org B secret roadmap zebra' });
     ideaB = await submitIdea(T, listB.id, 'own', { title: 'B-only idea quokka' });
+    // Marker overlays on the org-B idea, so a leaked intake/evidence read is OBSERVABLE
+    // (with none, a leak and a refusal both read `{ intake: null, evidence: [] }`).
+    await upsertIdeaIntake({ tenantId: T, orgId: orgB, listId: listB.id, cardId: ideaB.id, actor: 'own', patch: { notes: 'B-intake-secret' } });
+    await addIdeaEvidence({ tenantId: T, orgId: orgB, listId: listB.id, cardId: ideaB.id, actor: 'own', kind: 'url', ref: 'https://b-secret.test' });
     await createList(T, orgA, 'own', { name: 'Org A roadmap' });
   });
 
@@ -192,8 +217,9 @@ describe('ADR 0842 D1 — the run lane gates a human-started run like the HTTP d
     expect(await s.addEvidence!({ listId: listB.id, cardId: ideaB.id, kind: 'url', ref: 'https://x.test' })).toEqual({ evidence: null });
     expect(await s.proposeScenario!({ listId: listB.id, sessionId: 'psession-x', name: 'n', selection: { mode: 'top-n', n: 1 } })).toEqual({ scenario: null });
     expect(await s.updateIntake!({ listId: 'plist-missing', cardId: ideaB.id, patch: { notes: 'x' } })).toEqual({ intake: null });
-    expect(await getIdeaIntake(listB.id, ideaB.id)).toBeNull();
-    expect(await listIdeaEvidence(listB.id, ideaB.id)).toEqual([]);
+    // …and wrote nothing: org B's overlays are exactly the seeded markers.
+    expect((await getIdeaIntake(listB.id, ideaB.id))?.notes).toBe('B-intake-secret');
+    expect((await listIdeaEvidence(listB.id, ideaB.id)).map((e) => e.ref)).toEqual(['https://b-secret.test']);
     await expect(s.generateAgenda!({ listId: listB.id, n: 1 })).rejects.toThrow(/not found/i);
   });
 
@@ -251,7 +277,6 @@ describe('ADR 0842 D8 — a comment thread on a private project\'s idea asks the
     await setProjectVisibility(T, project.id, 'private');
     const list = await createList(T, orgId, 'own', { name: 'Secret list', projectId: project.id });
     const idea = await submitIdea(T, list.id, 'own', { title: 'Hidden idea narwhal' });
-    const { createComment } = await import('../src/features/comments/commentsService.js');
     const post = (subject: string) => createComment({ tenantId: T, orgId, resourceType: 'priority_idea', resourceId: `${list.id}#${idea.id}`, body: 'hi', authorId: subject, caller: { subject } });
     await expect(post('viewer-2')).rejects.toThrow(/not found/i);
     await expect(post('own')).resolves.toBeDefined();
@@ -267,8 +292,6 @@ describe('ADR 0842 D10 — a strategy link to a private project\'s idea asks the
     await setProjectVisibility(T, project.id, 'private');
     const list = await createList(T, orgId, 'own', { name: 'Secret list' });
     const bound = await createList(T, orgId, 'own', { name: 'Bound list', projectId: project.id });
-    const { resolvePriorityLinkTarget } = await import('../src/features/strategy/strategyService.js');
-    const { getList } = await import('../src/features/priority-matrix/priorityMatrixService.js');
     const load = (id: string) => getList(T, id);
     const orgRead = async () => true; // the viewer DOES read the org
     expect((await resolvePriorityLinkTarget(bound.id, load, orgRead, { tenantId: T, callerSubject: 'viewer-3' })).readable).toBe(false);
@@ -284,9 +307,16 @@ describe('ADR 0842 D7 — the planning-session cap is enforced', () => {
     const orgId = (await createOrg({ tenantId: T, createdBy: 'own', name: 'Acme', ownerSubject: 'own' })).orgId;
     const list = await createList(T, orgId, 'own', { name: 'Cap' });
     await submitIdea(T, list.id, 'own', { title: 'One' });
-    for (let i = 0; i < 200; i++) await createPlanningSession(T, list.id, 'own', { mode: 'top-n', n: 1, name: `s${i}` });
-    await expect(createPlanningSession(T, list.id, 'own', { mode: 'top-n', n: 1 })).rejects.toThrow(/maximum 200 planning sessions/);
-  }, 60_000);
+    // The cap is not a Documents claim: with Documents OFF each session is the inline
+    // agenda only (was 200 Document composes + versions under a 60 s timeout).
+    await toggle('documents', 'off');
+    try {
+      for (let i = 0; i < 200; i++) await createPlanningSession(T, list.id, 'own', { mode: 'top-n', n: 1, name: `s${i}` });
+      await expect(createPlanningSession(T, list.id, 'own', { mode: 'top-n', n: 1 })).rejects.toThrow(/maximum 200 planning sessions/);
+      // "before doing any work": the refused call stored no 201st session.
+      expect(await listSessions(T, list.id)).toHaveLength(200);
+    } finally { await toggle('documents'); }
+  });
 });
 
 describe('ADR 0842 D5 — an idea delete takes its intake, evidence and score trail', () => {
@@ -298,7 +328,9 @@ describe('ADR 0842 D5 — an idea delete takes its intake, evidence and score tr
     await setIdeaScore(T, list.id, idea.id, 'own', { 'strategic-alignment': 5 });
     await upsertIdeaIntake({ tenantId: T, orgId, listId: list.id, cardId: idea.id, actor: 'own', patch: { requester: 'jane@acme.test' } });
     await addIdeaEvidence({ tenantId: T, orgId, listId: list.id, cardId: idea.id, actor: 'own', kind: 'url', ref: 'https://e.test', label: 'e' });
-    for (let i = 0; i < 50 && (await listIdeaScoreHistory(T, list.id, idea.id)).length < 1; i++) await new Promise((r) => setTimeout(r, 10));
+    // PRECONDITION — the fire-and-forget trail row has landed, so the `[]` below cannot
+    // pass merely because it never arrived.
+    await vi.waitFor(async () => expect(await listIdeaScoreHistory(T, list.id, idea.id)).toHaveLength(1));
     await deleteCard(idea.id); // the kanban door
     expect(await getIdeaIntake(list.id, idea.id)).toBeNull();
     expect(await listIdeaEvidence(list.id, idea.id)).toEqual([]);
@@ -308,8 +340,7 @@ describe('ADR 0842 D5 — an idea delete takes its intake, evidence and score tr
     const second = await submitIdea(T, list.id, 'own', { title: 'Doomed too' });
     await setIdeaScore(T, list.id, second.id, 'own', { 'strategic-alignment': 5 });
     await upsertIdeaIntake({ tenantId: T, orgId, listId: list.id, cardId: second.id, actor: 'own', patch: { requester: 'joe@acme.test' } });
-    for (let i = 0; i < 50 && (await listIdeaScoreHistory(T, list.id, second.id)).length < 1; i++) await new Promise((r) => setTimeout(r, 10));
-    const { deleteIdea } = await import('../src/features/priority-matrix/priorityMatrixService.js');
+    await vi.waitFor(async () => expect(await listIdeaScoreHistory(T, list.id, second.id)).toHaveLength(1));
     expect(await deleteIdea(T, list.id, second.id, 'own')).toBe(true);
     expect(await getIdeaIntake(list.id, second.id)).toBeNull();
     expect(await listIdeaScoreHistory(T, list.id, second.id)).toEqual([]);
@@ -348,7 +379,6 @@ describe('PM4CD-1 — an intake patch racing a promote never erases the promotio
 
 /** Swap the `project` subject-access resolver for one test, restoring the real one. */
 async function swapProjectResolver(fn: SubjectAccessResolver): Promise<() => Promise<void>> {
-  const { resolveProjectAccess } = await import('../src/features/projects/projectsService.js');
   registerSubjectAccessResolver('project', fn);
   return async () => {
     registerSubjectAccessResolver('project', async (tenantId, subject, caller) => resolveProjectAccess(tenantId, subject.id, caller));

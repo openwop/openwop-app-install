@@ -22,7 +22,7 @@ import Ajv2020 from 'ajv/dist/2020.js';
 import addFormats from 'ajv-formats';
 import { createApp } from '../src/index.js';
 import type { AppConfig } from '../src/index.js';
-import { buildAdvertisement, buildV2Advertisement } from '../src/routes/discovery.js';
+import { buildV2Advertisement } from '../src/routes/discovery.js';
 import { registeredBackendIds } from '../src/host/surfaceBackends.js';
 import { STORAGE_FAMILIES, v2AdvertisedStorageFamilies, storageFamilyFacets } from '../src/host/storageFamilyAdvert.js';
 
@@ -141,10 +141,9 @@ describe('ADR 0858 P3 — storage families: backend facets are derived per selec
     expect(rec(doc, 'blobStorage')['presignSupported']).toBe(true);
   });
 
-  it('the honoured facets hold on every backend, and the unenforced limits are dropped on both majors', () => {
+  it('the honoured facets hold on every backend, and the unenforced limits are dropped', () => {
     for (const env of [{}, { OPENWOP_SURFACE_BACKEND: 'durable' }]) {
       const v2 = withEnv(env);
-      const v1 = (buildAdvertisement(CONFIG)['capabilities'] ?? {}) as Rec;
       expect(rec(v2, 'kvStorage')).toMatchObject({ atomicIncrement: true, compareAndSwap: true });
       expect(rec(v2, 'tableStorage')).toMatchObject({ indexable: false, fullTextSearch: false });
       expect(rec(v2, 'queueBus')['deadLetterSupported']).toBe(true);
@@ -152,14 +151,9 @@ describe('ADR 0858 P3 — storage families: backend facets are derived per selec
       for (const [family, facets] of Object.entries(DROPPED)) {
         for (const facet of facets) {
           expect(rec(v2, family), `v2 ${family}.${facet}`).not.toHaveProperty(facet);
-          expect(rec(v1, family), `v1 ${family}.${facet}`).not.toHaveProperty(facet);
         }
       }
-      // One builder: the v1 record is the builder's facets plus `supported`.
-      for (const f of STORAGE_FAMILIES) {
-        const { status: _s, since: _si, until: _u, witness: _w, ...facets } = rec(v2, f);
-        expect(rec(v1, f), `v1 ${f}`).toEqual({ supported: true, ...facets });
-      }
+      // ADR 0812 P4: the v1-vs-v2 "one builder" leg went with the v1 builder.
     }
   });
 

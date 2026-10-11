@@ -5,18 +5,28 @@
  * 1,233 scheduled runs on a Google 403, one every 30 minutes, with nothing to stop
  * them. After `AUTH_PAUSE_AFTER` consecutive reconnect-class refusals the loop now
  * pauses itself and tells the person it acts as, once. Re-enabling clears it.
+ *
+ * Sabotage witnesses (/grade-tests w11): the pause threshold, the notify-once
+ * `job.enabled` guard, the success reset, the reconnect-code filter, the fork
+ * exclusion, the cron-trigger filter, the run-id dedupe, the bounded-ledger
+ * high-water mark, the panel's `autoPausedCode`, the notice recipient, and the
+ * re-enable health reset. Honest ceiling: "a run with no schedule" cannot be
+ * failed from inside `onLoopRunTerminal` — with no `schedule.jobId` there is no job
+ * to update (MEASURED: removing the whole schedule check reds only the manual-Run
+ * case). It stays as the contract statement.
  */
 import { randomUUID } from 'node:crypto';
 import { beforeAll, describe, expect, it, vi } from 'vitest';
 
-const emitted = vi.hoisted(() => [] as Array<Record<string, unknown>>);
+type EmittedNotice = Parameters<ReturnType<typeof import('../src/notifications/emitter.js')['getNotificationEmitter']>['emit']>[0];
+const emitted = vi.hoisted(() => [] as EmittedNotice[]);
 vi.mock('../src/notifications/emitter.js', async (importOriginal) => {
   const orig = await importOriginal<typeof import('../src/notifications/emitter.js')>();
   return {
     ...orig,
     getNotificationEmitter: () => {
       const real = orig.getNotificationEmitter();
-      return { ...real, emit: async (n: Parameters<typeof real.emit>[0]) => { emitted.push(n as unknown as Record<string, unknown>); return real.emit(n); } };
+      return { ...real, emit: async (n: Parameters<typeof real.emit>[0]) => { emitted.push(n); return real.emit(n); } };
     },
   };
 });
@@ -45,7 +55,7 @@ async function scheduledRun(tenantId: string, jobId: string, status: 'failed' | 
   await storage.insertRun(run);
   return runId;
 }
-const pausedNotices = () => emitted.filter((n) => (n.metadata as { assistantLoopAutoPaused?: boolean } | undefined)?.assistantLoopAutoPaused === true);
+const pausedNotices = () => emitted.filter((n) => n.metadata?.assistantLoopAutoPaused === true);
 
 describe('the loop pauses itself after repeated connection refusals', () => {
   it(`pauses on the ${AUTH_PAUSE_AFTER}th consecutive reconnect-class refusal, tells the owner ONCE, and the panel says why`, async () => {

@@ -15,6 +15,17 @@
  * `subjectId`, `managerSubjectId`) and NOT the bare field name `subject`, which
  * is the spelling this whole lane standardised on. The matcher widening is a
  * separate commit (the class); this file pins the instance.
+ *
+ * Witnessed (wave 12 probes): `if (forms.has(g.subject))` → `if (false)` reds the topic cases;
+ * exact-match instead of `subjectKeyForms` reds the bare-id cases; disabling or deleting the
+ * `grantedBy` re-attribution reds ACTOR; widening the scan past `${tenantId}:` (with the row
+ * re-check) reds ANTI-ROT; deleting `registerSubjectEraser(...)` reds WIRING.
+ *
+ * DOUBLE GUARDS (recorded, not assertable): the per-row `g.tenantId !== tenantId` re-check is
+ * shadowed by the `${tenantId}:` prefix scan, and the falsy-input early return is shadowed by
+ * that scan (`''` scans `':'`) and by `subjectKeyForms('')` (which can match no real grant).
+ * Removing either alone leaves every case green, so this file claims only that falsy input
+ * does not throw and does not erase.
  */
 import { describe, it, expect, beforeAll, beforeEach } from 'vitest';
 import { mkdtempSync } from 'node:fs';
@@ -31,6 +42,11 @@ import {
 } from '../src/features/memory-auto-extract/grantService.js';
 import { extractConversationMemory } from '../src/features/memory-auto-extract/extractionBinding.js';
 import { countSubjectNotes, eraseSubjectMemory } from '../src/host/subjectMemory.js';
+import { eraseSubject } from '../src/host/subjectErasure.js';
+// Importing the feature arms the module-scope `registerSubjectEraser(...)` exactly as the real
+// boot path does (`features/index.ts` → `feature.ts` → `routes.ts` → `grantService.ts`). Static,
+// so the module graph is not charged to the WIRING case's timeout.
+import '../src/features/memory-auto-extract/feature.js';
 import { personSubject } from '../src/host/subject.js';
 
 const T = 'grant-erase-tenant';
@@ -115,11 +131,7 @@ describe('AGMEM-4 — eraseExtractionGrants', () => {
    * This case drives the real `eraseSubject` fan-out instead.
    */
   it('WIRING: the host eraseSubject fan-out actually reaches this store', async () => {
-    // Importing the feature is what arms the module-scope registration on the real
-    // boot path (`features/index.ts` → `feature.ts` → `routes.ts` → `grantService.ts`).
-    await import('../src/features/memory-auto-extract/feature.js');
-    const { eraseSubject } = await import('../src/host/subjectErasure.js');
-
+    // The feature import at the top of this file armed the registration (real boot path).
     await setExtractionGrant(T, 'user:alice', true, 'alice');
     expect(await isExtractionGranted(T, 'user:alice')).toBe(true);
 
@@ -132,12 +144,16 @@ describe('AGMEM-4 — eraseExtractionGrants', () => {
     expect(await getExtractionGrant(T, 'user:alice')).toBeNull();
   });
 
-  it('is idempotent and fail-closed on falsy input', async () => {
+  it('is idempotent — a repeated erase and a falsy input are no-ops that do not throw', async () => {
+    // See the DOUBLE GUARDS note in the header: the falsy-input guard is not observable, so the
+    // claim here is only "no throw, nothing else erased".
     await setExtractionGrant(T, 'user:alice', true, 'alice');
+    await setExtractionGrant(T, 'user:bob', true, 'bob');
     await eraseExtractionGrants(T, 'user:alice');
     await eraseExtractionGrants(T, 'user:alice');
     await eraseExtractionGrants('', 'user:alice');
     await eraseExtractionGrants(T, '');
     expect(await getExtractionGrant(T, 'user:alice')).toBeNull();
+    expect(await isExtractionGranted(T, 'user:bob')).toBe(true);
   });
 });

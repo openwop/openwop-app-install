@@ -12,6 +12,12 @@
  * The contract: a refused tenant gets a chat WITHOUT the paid context, never an error.
  * Each refusal leg has a positive control (the same tenant, entitled) so it cannot
  * pass for the wrong reason.
+ *
+ * Sabotage-witnessed (/grade-tests w12): dropping each `boardSeamFeatureOn` /
+ * `strategyContextAllowed` gate reds its case, and so does turning a refusal into a THROW
+ * (that surfaces as `degraded: board_context` or a convene refusal — an error, not a plain
+ * chat). The convene-gate leg uses an UNCONVENABLE board (living, unacknowledged): on a
+ * convenable one `conveneRefusal` is null with or without the gate.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -23,6 +29,7 @@ import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { registerTenantEntitlementCheck } from '../src/host/entitlementSeam.js';
 import { OpenwopError } from '../src/types.js';
 import { composeChatContext } from '../src/host/chatContext.js';
+import { getBoard, __putBoardForTest } from '../src/features/advisory-board/service.js';
 
 let BASE: string;
 let server: http.Server;
@@ -51,7 +58,7 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T }
+interface Res { status: number; body: { user?: { userId: string }; orgId?: string; id?: string; rosterId?: string; boardId?: string; sessionId?: string } }
 interface Client { post: (p: string, b?: unknown) => Promise<Res> }
 function client(): Client {
   let cookie = '';
@@ -59,7 +66,7 @@ function client(): Client {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
     const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
-    return { status: res.status, body: out };
+    return { status: res.status, body: out ?? {} };
   };
   return { post: (p, b) => call('POST', p, b) };
 }
@@ -70,8 +77,8 @@ async function world() {
   clearRefusals();
   const owner = client();
   const tenantId = `org:g7-${Date.now()}-${n++}`;
-  const userId = (await owner.post('/host/openwop-app/test/login', { email: `g7-${Date.now()}-${n++}@acme.test`, tenantId })).body.user.userId as string;
-  const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'Acme' })).body.orgId as string;
+  const userId = (await owner.post('/host/openwop-app/test/login', { email: `g7-${Date.now()}-${n++}@acme.test`, tenantId })).body.user!.userId;
+  const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'Acme' })).body.orgId!;
   const strategy = await owner.post('/host/openwop-app/strategy', { orgId, scope: 'org', title: 'FY27', summary: SUMMARY });
   expect(strategy.status, JSON.stringify(strategy.body)).toBe(201);
   const advisor = await owner.post('/host/openwop-app/roster', { persona: 'Ada Lovelace', agentRef: { agentId: 'core.openwop.agents.brief-writer' } });
@@ -80,10 +87,11 @@ async function world() {
     contextRefs: [{ kind: 'strategy', strategyId: strategy.body.id }],
   });
   expect(board.status, JSON.stringify(board.body)).toBe(201);
-  const opened = await owner.post(`${A}/boards/${encodeURIComponent(board.body.boardId)}/chat`);
+  const opened = await owner.post(`${A}/boards/${encodeURIComponent(board.body.boardId!)}/chat`);
   expect(opened.status, JSON.stringify(opened.body)).toBe(201);
   const scratch = await owner.post(CHAT, { title: 'scratch' });
-  return { owner, tenantId, userId, boardId: board.body.boardId as string, sessionId: opened.body.sessionId as string, scratchId: (scratch.body.conversationId ?? scratch.body.sessionId ?? scratch.body.id) as string };
+  expect(scratch.status, JSON.stringify(scratch.body)).toBe(201);
+  return { owner, tenantId, userId, boardId: board.body.boardId!, sessionId: opened.body.sessionId!, scratchId: scratch.body.sessionId! };
 }
 
 const compose = (tenantId: string, conversationId: string, callerUserId: string) =>
@@ -110,6 +118,14 @@ describe('G7 — core chat drops the paid board / strategy context when the plan
     expect(out.systemPrompt).not.toContain(SUMMARY);
     expect(out.conveneRefusal).toBeNull();
     expect(out.degraded).not.toContain('board_context');
+
+    // The convene gate, made failable: an UNCONVENABLE board (living, no acknowledgement).
+    const b = await getBoard(w.tenantId, w.userId, w.boardId);
+    await __putBoardForTest({ ...b, personaKind: 'living' });
+    clearRefusals();
+    expect((await compose(w.tenantId, w.sessionId, w.userId)).conveneRefusal, 'control: entitled ⇒ the likeness gate refuses').not.toBeNull();
+    refuse('advisory-board', w.tenantId);
+    expect((await compose(w.tenantId, w.sessionId, w.userId)).conveneRefusal, 'refused ⇒ no board at all, so nothing to refuse').toBeNull();
   });
 
   it('advisory-board refused: core chat cannot PROMOTE a conversation into a boardroom', async () => {

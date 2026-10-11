@@ -24,7 +24,7 @@
  */
 import { createLogger } from '../../../observability/logger.js';
 import { createRosterEntry, listRoster } from '../../../host/rosterService.js';
-import { createBoard, listBoards, listCards, createCard, type KanbanCard } from '../../../host/kanbanService.js';
+import { createBoard, listBoards, listCardsExact, createCard, type KanbanCard } from '../../../host/kanbanService.js';
 import { applyGrants } from '../../../host/applyGrant.js';
 import { OpenwopError } from '../../../types.js';
 
@@ -136,7 +136,8 @@ export async function queueCampaignCard(tenantId: string, actor: string, now: nu
     throw new OpenwopError('internal_error', 'The career agent board is missing its To Do column.', 500, {});
   }
 
-  const existing = (await listCards(boardId)).find(
+  // Dedupe needs every card: a miss would mint a second campaign card (ADR 0872 D4).
+  const existing = (await listCardsExact(boardId)).find(
     (c) =>
       c.workflowId === CAREER_CAMPAIGN_CARD_WORKFLOW_ID &&
       !board.columns.find((col) => col.id === c.columnId)?.terminal,

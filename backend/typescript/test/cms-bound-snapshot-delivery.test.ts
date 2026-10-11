@@ -21,6 +21,11 @@
  * function's inputs include the inputs of everything it CALLS. §C8: and its
  * MATCHING rule. Here: and its SUBSTITUTION rule — what it serves need not be
  * what the page currently holds.
+ *
+ * Sabotage-witnessed (w16, `w16g2-snap-*`): dropping the bound snapshot from
+ * `deliverableSectionsForPage` (both F1 refusals), counting a DRAFT experiment as
+ * a delivery lane, emptying the §C2 widening scan's blocking set, disabling the
+ * CMSA-12 tenant guard (write + PATCH), and refusing the page's OWN tenant.
  */
 
 import http from 'node:http';
@@ -31,6 +36,8 @@ import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { assignWeightedVariant } from '../src/host/variantAssignment.js';
+import type { Page } from '../src/features/cms/cmsService.js';
+import type { PageExperiment } from '../src/features/cms/pageExperimentsService.js';
 
 let BASE: string;
 let server: http.Server;
@@ -55,25 +62,33 @@ const setGate = async (status: 'on' | 'off'): Promise<void> => {
   if (d) await saveConfig({ ...d, status }, 'test');
 };
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
-interface Res<T = any> { status: number; headers: Headers; body: T }
+interface Res<T> { status: number; headers: Headers; body: T }
+/** A gate refusal's details (the error envelope's `details`). */
+interface RefusalDetails { gate?: string; field?: string; section?: string; pages?: Array<{ pageId: string; title: string; status: string }> }
+interface ErrBody { error?: { details?: RefusalDetails } | string; details?: RefusalDetails }
+const detailsOf = (b: ErrBody): RefusalDetails | undefined =>
+  (typeof b.error === 'object' ? b.error.details : undefined) ?? b.details;
+type PageBody = Page & ErrBody;
+interface SharedBody { sharedSectionId: string; data: Record<string, unknown> }
+/** The anonymous delivery body. */
+interface DeliveryBody { experiment?: { variant: string }; sections: Array<{ type: string; data: Record<string, unknown> }> }
 interface Client {
-  get: (p: string) => Promise<Res>;
-  post: (p: string, b?: unknown) => Promise<Res>;
-  patch: (p: string, b?: unknown) => Promise<Res>;
-  put: (p: string, b?: unknown) => Promise<Res>;
+  get: <T = PageBody>(p: string) => Promise<Res<T>>;
+  post: <T = PageBody>(p: string, b?: unknown) => Promise<Res<T>>;
+  patch: <T = PageBody>(p: string, b?: unknown) => Promise<Res<T>>;
+  put: <T = PageBody>(p: string, b?: unknown) => Promise<Res<T>>;
 }
 function client(): Client {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
+  const call = async <T>(method: string, path: string, body?: unknown): Promise<Res<T>> => {
     const res = await fetch(`${BASE}${path}`, {
       method,
       headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) },
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
-    return { status: res.status, headers: res.headers, body: out };
+    const out: unknown = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    return { status: res.status, headers: res.headers, body: out as T };
   };
   return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), patch: (p, b) => call('PATCH', p, b), put: (p, b) => call('PUT', p, b) };
 }
@@ -82,17 +97,17 @@ let n = 0;
 async function ownerOrg(): Promise<{ c: Client; orgId: string }> {
   const tenantId = `org:snap-${Date.now()}-${n++}`;
   const c = client();
-  const login = await c.post('/host/openwop-app/test/login', { email: `snap-${Date.now()}-${n++}@acme.test`, tenantId });
+  const login = await c.post<unknown>('/host/openwop-app/test/login', { email: `snap-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(login.status, JSON.stringify(login.body)).toBe(201);
-  const org = await c.post('/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await c.post<{ orgId: string }>('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
-  return { c, orgId: org.body.orgId as string };
+  return { c, orgId: org.body.orgId };
 }
 const cms = (orgId: string, s = ''): string => `/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}${s}`;
 const exps = (orgId: string, pageId: string, s = ''): string => cms(orgId, `/pages/${encodeURIComponent(pageId)}/experiments${s}`);
 
 /** The anonymous variant read — a visitor key bucketed onto `candidate`. */
-async function publicVariantRead(orgId: string, slug: string, exp: any, acceptLanguage = 'en'): Promise<Res> {
+async function publicVariantRead(orgId: string, slug: string, exp: PageExperiment, acceptLanguage = 'en'): Promise<Res<DeliveryBody>> {
   let vk = '';
   for (let i = 0; i < 800 && !vk; i++) {
     const k = `vis-${i}`;
@@ -103,7 +118,8 @@ async function publicVariantRead(orgId: string, slug: string, exp: any, acceptLa
     `${BASE}/host/openwop-app/public/${encodeURIComponent(orgId)}/pages/${encodeURIComponent(slug)}?vk=${vk}`,
     { headers: { 'accept-language': acceptLanguage } },
   );
-  return { status: res.status, headers: res.headers, body: await res.json().catch(() => undefined) };
+  const body: unknown = await res.json().catch(() => undefined);
+  return { status: res.status, headers: res.headers, body: body as DeliveryBody };
 }
 
 /**
@@ -116,12 +132,12 @@ async function pageWithSnapshotOnlyContent(
   c: Client,
   orgId: string,
   seed: { sections: unknown[]; strippedSections: unknown[] },
-): Promise<{ pageId: string; slug: string; exp: any }> {
+): Promise<{ pageId: string; slug: string; exp: PageExperiment }> {
   await setGate('off');
   const created = await c.post(cms(orgId, '/pages'), { title: 'Landing', sections: seed.sections });
   expect(created.status, JSON.stringify(created.body)).toBe(201);
-  const pageId = created.body.pageId as string;
-  const slug = created.body.slug as string;
+  const pageId = created.body.pageId;
+  const slug = created.body.slug;
   expect((await c.post(cms(orgId, `/pages/${pageId}/publish`))).status).toBe(200); // snapshot A holds the payload
 
   // The live page moves on and DROPS the payload entirely.
@@ -130,11 +146,11 @@ async function pageWithSnapshotOnlyContent(
   expect(patched.status, JSON.stringify(patched.body)).toBe(200);
   expect((await c.post(cms(orgId, `/pages/${pageId}/publish`))).status).toBe(200);
 
-  const versions = await c.get(cms(orgId, `/pages/${pageId}/versions`));
-  const rows = versions.body.versions as Array<{ versionId: string; version: number }>;
+  const versions = await c.get<{ versions: Array<{ versionId: string; version: number }> }>(cms(orgId, `/pages/${pageId}/versions`));
+  const rows = versions.body.versions;
   const oldest = [...rows].sort((a, b) => a.version - b.version)[0]!;
 
-  const exp = await c.post(exps(orgId, pageId), {
+  const exp = await c.post<PageExperiment>(exps(orgId, pageId), {
     name: 'Snapshot arm',
     variants: [
       { key: 'control', versionId: null, weight: 50 },
@@ -142,7 +158,7 @@ async function pageWithSnapshotOnlyContent(
     ],
   });
   expect(exp.status, JSON.stringify(exp.body)).toBe(201);
-  const started = await c.post(exps(orgId, pageId, `/${exp.body.experimentId}/start`));
+  const started = await c.post<PageExperiment>(exps(orgId, pageId, `/${exp.body.experimentId}/start`));
   expect(started.status, JSON.stringify(started.body)).toBe(200);
   return { pageId, slug, exp: started.body };
 }
@@ -151,11 +167,11 @@ describe('F1a — a shared section referenced ONLY by a bound snapshot is an ung
   it('refuses the shared-section edit, and the variant visitor never sees the rewrite', async () => {
     const { c, orgId } = await ownerOrg();
     await setGate('off');
-    const shared = await c.post(cms(orgId, '/shared-sections'), {
+    const shared = await c.post<SharedBody>(cms(orgId, '/shared-sections'), {
       name: 'Global CTA', type: 'cta', data: { label: 'Go', url: '/agents' },
     });
     expect(shared.status, JSON.stringify(shared.body)).toBe(201);
-    const sharedSectionId = shared.body.sharedSectionId as string;
+    const sharedSectionId = shared.body.sharedSectionId;
 
     const { pageId, slug, exp } = await pageWithSnapshotOnlyContent(c, orgId, {
       sections: [
@@ -171,31 +187,31 @@ describe('F1a — a shared section referenced ONLY by a bound snapshot is an ung
     // you try" list the refusal points operators at, so it has to agree with
     // the gate or the remedy names the wrong pages: it now reports the page on
     // the strength of the BOUND SNAPSHOT's reference.
-    const using = await c.get(cms(orgId, `/shared-sections/${sharedSectionId}/pages`));
+    const using = await c.get<{ pages: Array<{ pageId: string }> }>(cms(orgId, `/shared-sections/${sharedSectionId}/pages`));
     expect(using.status).toBe(200);
-    expect((using.body.pages as any[]).map((p) => p.pageId)).toContain(pageId);
+    expect(using.body.pages.map((p) => p.pageId)).toContain(pageId);
 
     // …but a variant visitor is served it, right now.
     const before = await publicVariantRead(orgId, slug, exp);
     expect(before.status, JSON.stringify(before.body)).toBe(200);
     expect(before.body.experiment?.variant).toBe('candidate');
-    expect(before.body.sections.find((s: any) => s.type === 'cta')?.data.url).toBe('/agents');
+    expect(before.body.sections.find((s) => s.type === 'cta')?.data.url).toBe('/agents');
 
     await setGate('on');
     const rewrite = await c.patch(cms(orgId, `/shared-sections/${sharedSectionId}`), {
       data: { label: 'Claim your refund', url: 'https://evil.test' },
     });
     expect(rewrite.status, JSON.stringify(rewrite.body)).toBe(409);
-    const details = rewrite.body?.error?.details ?? rewrite.body?.details;
-    expect(details.gate).toBe('cms-approval-gate');
-    expect((details.pages as any[]).map((p) => [p.title, p.status])).toEqual([['Landing', 'published']]);
+    const details = detailsOf(rewrite.body);
+    expect(details?.gate).toBe('cms-approval-gate');
+    expect(details?.pages?.map((p) => [p.title, p.status])).toEqual([['Landing', 'published']]);
 
     // THE CLAIM — the visitor still gets the reviewed CTA, and no approval row
     // was created (this lane bypassed the inbox entirely).
     const after = await publicVariantRead(orgId, slug, exp);
-    expect(after.body.sections.find((s: any) => s.type === 'cta')?.data.url).toBe('/agents');
-    const pending = await c.get('/host/openwop-app/approvals?status=pending');
-    expect((pending.body.items as any[]).filter((a) => a.kind === 'content-publish')).toHaveLength(0);
+    expect(after.body.sections.find((s) => s.type === 'cta')?.data.url).toBe('/agents');
+    const pending = await c.get<{ items: Array<{ kind: string }> }>('/host/openwop-app/approvals?status=pending');
+    expect(pending.body.items.filter((a) => a.kind === 'content-publish')).toHaveLength(0);
   });
 
   it('UNGATED positive control — with the gate OFF the rewrite lands and reaches the visitor', async () => {
@@ -203,10 +219,10 @@ describe('F1a — a shared section referenced ONLY by a bound snapshot is an ung
     // itself would be unwitnessed.
     const { c, orgId } = await ownerOrg();
     await setGate('off');
-    const shared = await c.post(cms(orgId, '/shared-sections'), {
+    const shared = await c.post<SharedBody>(cms(orgId, '/shared-sections'), {
       name: 'Global CTA', type: 'cta', data: { label: 'Go', url: '/agents' },
     });
-    const sharedSectionId = shared.body.sharedSectionId as string;
+    const sharedSectionId = shared.body.sharedSectionId;
     const { slug, exp } = await pageWithSnapshotOnlyContent(c, orgId, {
       sections: [
         { type: 'hero', data: { heading: 'Landing' } },
@@ -219,7 +235,7 @@ describe('F1a — a shared section referenced ONLY by a bound snapshot is an ung
     });
     expect(rewrite.status, JSON.stringify(rewrite.body)).toBe(200);
     const after = await publicVariantRead(orgId, slug, exp);
-    expect(after.body.sections.find((s: any) => s.type === 'cta')?.data.url).toBe('https://evil.test');
+    expect(after.body.sections.find((s) => s.type === 'cta')?.data.url).toBe('https://evil.test');
   });
 
   it('a shared section referenced by NEITHER the live page nor any snapshot is still freely editable', async () => {
@@ -227,12 +243,15 @@ describe('F1a — a shared section referenced ONLY by a bound snapshot is an ung
     // that ever existed" — otherwise the gate refuses edits it does not govern.
     const { c, orgId } = await ownerOrg();
     await setGate('off');
-    const shared = await c.post(cms(orgId, '/shared-sections'), {
+    const shared = await c.post<SharedBody>(cms(orgId, '/shared-sections'), {
       name: 'Unused', type: 'cta', data: { label: 'Go', url: '/agents' },
     });
     await setGate('on');
-    const edit = await c.patch(cms(orgId, `/shared-sections/${shared.body.sharedSectionId}`), { data: { label: 'X', url: '/y' } });
+    const edit = await c.patch<SharedBody>(cms(orgId, `/shared-sections/${shared.body.sharedSectionId}`), { data: { label: 'X', url: '/y' } });
     expect(edit.status, JSON.stringify(edit.body)).toBe(200);
+    // The write landed (not merely a 200).
+    const list = await c.get<{ sharedSections: SharedBody[] }>(cms(orgId, '/shared-sections'));
+    expect(list.body.sharedSections.find((r) => r.sharedSectionId === shared.body.sharedSectionId)?.data.url).toBe('/y');
   });
 });
 
@@ -253,9 +272,9 @@ describe('F1b — the §C2 widening scan is blind to snapshot overlays', () => {
     await setGate('on');
     const widen = await c.put(cms(orgId, '/language-settings'), { supportedLocales: ['pt-BR'] });
     expect(widen.status, JSON.stringify(widen.body)).toBe(409);
-    const details = widen.body?.error?.details ?? widen.body?.details;
-    expect(details.gate).toBe('cms-approval-gate');
-    expect((details.pages as any[]).map((p) => p.title)).toEqual(['Landing']);
+    const details = detailsOf(widen.body);
+    expect(details?.gate).toBe('cms-approval-gate');
+    expect(details?.pages?.map((p) => p.title)).toEqual(['Landing']);
 
     const after = await publicVariantRead(orgId, slug, exp, 'pt-BR');
     expect(after.headers.get('content-language')).toBe('en');
@@ -287,12 +306,12 @@ describe('F1b — the §C2 widening scan is blind to snapshot overlays', () => {
       title: 'Draft arm',
       sections: [{ type: 'hero', data: { heading: 'Landing' }, localizations: { 'pt-BR': { heading: DORMANT } } }],
     });
-    const pageId = created.body.pageId as string;
+    const pageId = created.body.pageId;
     expect((await c.post(cms(orgId, `/pages/${pageId}/publish`))).status).toBe(200);
     expect((await c.post(cms(orgId, `/pages/${pageId}/unpublish`))).status).toBe(200);
     await c.patch(cms(orgId, `/pages/${pageId}`), { sections: [{ type: 'hero', data: { heading: 'Landing' } }] });
     expect((await c.post(cms(orgId, `/pages/${pageId}/publish`))).status).toBe(200);
-    const rows = (await c.get(cms(orgId, `/pages/${pageId}/versions`))).body.versions as Array<{ versionId: string; version: number }>;
+    const rows = (await c.get<{ versions: Array<{ versionId: string; version: number }> }>(cms(orgId, `/pages/${pageId}/versions`))).body.versions;
     const oldest = [...rows].sort((a, b) => a.version - b.version)[0]!;
     const exp = await c.post(exps(orgId, pageId), {
       name: 'Never started',
@@ -306,6 +325,9 @@ describe('F1b — the §C2 widening scan is blind to snapshot overlays', () => {
     await setGate('on');
     const widen = await c.put(cms(orgId, '/language-settings'), { supportedLocales: ['pt-BR'] });
     expect(widen.status, JSON.stringify(widen.body)).toBe(200);
+    // The widening was stored, not merely acknowledged.
+    const settings = await c.get<{ supportedLocales: string[] }>(cms(orgId, '/language-settings'));
+    expect(settings.body.supportedLocales).toContain('pt-BR');
   });
 });
 
@@ -335,15 +357,15 @@ describe('CMSA-12 (cross-tenant half) — an entity section may only name its OW
       sections: [{ type: 'entityList', data: { tenantId: 'org:someone-else', typeName: 'article', titleField: 'title' } }],
     });
     expect(foreign.status, JSON.stringify(foreign.body)).toBe(400);
-    const details = foreign.body?.error?.details ?? foreign.body?.details;
-    expect(details.field).toBe('tenantId');
-    expect(details.section).toBe('entityList');
+    const details = detailsOf(foreign.body);
+    expect(details?.field).toBe('tenantId');
+    expect(details?.section).toBe('entityList');
   });
 
   it('the page OWN tenant is still accepted — the guard is a tenant check, not a ban', async () => {
     const { c, orgId } = await ownerOrg();
-    const me = await c.get('/host/openwop-app/orgs');
-    const tenantId = (me.body.orgs as any[]).find((o) => o.orgId === orgId)?.tenantId;
+    const me = await c.get<{ orgs: Array<{ orgId: string; tenantId: string }> }>('/host/openwop-app/orgs');
+    const tenantId = me.body.orgs.find((o) => o.orgId === orgId)?.tenantId;
     expect(tenantId, 'the org row must expose its tenant').toBeTruthy();
     const ok = await c.post(cms(orgId, '/pages'), {
       title: 'Own embed',
@@ -361,5 +383,9 @@ describe('CMSA-12 (cross-tenant half) — an entity section may only name its OW
       sections: [{ type: 'entityDetail', data: { tenantId: 'org:someone-else', typeName: 'article', entityId: 'e1', titleField: 'title' } }],
     });
     expect(patched.status, JSON.stringify(patched.body)).toBe(400);
+    expect(detailsOf(patched.body)?.field).toBe('tenantId');
+    // …and the stored page is unchanged.
+    const page = await c.get(cms(orgId, `/pages/${created.body.pageId}`));
+    expect(page.body.sections.map((s) => s.type)).toEqual(['hero']);
   });
 });

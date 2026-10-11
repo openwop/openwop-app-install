@@ -2,10 +2,18 @@
  * Executive Assistant loop layer (ADR 0023 Phases 2–5) — the thin graph/logic
  * node pack over ctx.features.assistant + the prioritization scorer + idempotent
  * board projection (Loop 3). Nodes run over a stub ctx (the csm-nodes pattern).
+ *
+ * What breaks it (sabotage-witnessed, /grade-tests w11): the surface threshold or
+ * profile ordering in `prioritize`, the overdue proximity, the commitment dedup
+ * key, and the projection's drift detection. Recorded double guard: the
+ * projection's back-ref reuse AND its "deleted card is dismissed" return are both
+ * backed by the CAS loop below them — a second projection whose back-ref names
+ * another card drops its own card and reports the winner (`reused`, or
+ * `dismissed` when the winner is gone) — so removing either guard alone stays
+ * green (MEASURED: probes `lo-reuse` / `lo-dismiss`).
  */
 
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import http from 'node:http';
+import { beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { buildAssistantSurface } from '../src/features/assistant/surface.js';
 import {
@@ -44,22 +52,16 @@ describe('Prioritization layer (pure — ADR 0023 §4)', () => {
 });
 
 describe('feature.assistant.nodes over a stub ctx', () => {
-  let server: http.Server;
   // Typed from the pack's ambient module declaration (test/feature-packs.d.ts) —
   // no `any`, no eslint-disable (mirrors the csm-nodes test pattern).
   let nodes: (typeof import('../../../packs/feature.assistant.nodes/index.mjs'))['nodes'];
 
   beforeAll(async () => {
     process.env.OPENWOP_STORAGE_DSN = 'memory://';
-    const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-    await new Promise<void>((res) => {
-      server = app.listen(0, '127.0.0.1', res);
-    });
+    // Boot only (storage + kanban + feature wiring). No HTTP listener — no case calls one.
+    await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
     await __resetAssistantStore();
     nodes = (await import('../../../packs/feature.assistant.nodes/index.mjs')).nodes;
-  });
-  afterAll(async () => {
-    await new Promise<void>((res) => server.close(() => res()));
   });
 
   const ctxFor = (tenantId: string, inputs: Record<string, unknown>) => ({ features: { assistant: buildAssistantSurface({ tenantId }) }, inputs });
@@ -151,8 +153,8 @@ describe('feature.assistant.nodes over a stub ctx', () => {
     const src = { kind: 'manual' as const, externalId: 'b1', contentHash: contentHashOf('b1'), capturedAt: '2026-06-10T00:00:00Z' };
     await upsertCommitmentBySource('t-brief', { owner: { kind: 'self' }, description: 'Open item', source: src });
     const brief = await nodes['feature.assistant.nodes.compose-briefing'](ctxFor('t-brief', {}));
-    const briefObj = field(brief, 'brief') as { topCommitments: unknown[] };
-    expect(briefObj.topCommitments.length).toBeGreaterThanOrEqual(1);
+    const briefObj = field(brief, 'brief') as { topCommitments: Array<{ description: string }> };
+    expect(briefObj.topCommitments.map((c) => c.description)).toContain('Open item');
 
     const enq = await nodes['feature.assistant.nodes.enqueue-action'](ctxFor('t-brief', { kind: 'email.send', draft: 'Hi', payload: { to: 'x@y.com' } }));
     const pa = field(enq, 'pendingAction') as { status: string };

@@ -900,6 +900,7 @@ unpiped, exit 0); all strategy / planning / priority-matrix suites plus
   `scheduled-agent-chats`, `node-inputs-expansion`, `run-input-interpolation`,
   `repair-stripped-workflow-inputs`, `reseed-rows-deferred`,
   `cms-chain-execution`, `workflow-chain-content-execution`.
+  > *Correction (2026-10-10, grade-tests w16):* the mini-scheduler case of `cms-chain-execution.test.ts` was CUT as a superseded witness; `cms-chain-real-executor.test.ts` (CMSLWF-3) runs the same chain through the real executor and is now its only execution witness. The file keeps only the CMSGAP-1 translator-grant case.
 - Approval-service neighbours (§Correction 4 touches core):
   `cms-approval-hardening`, `dealers-honesty` green.
 - **NOT re-run, and not claimed:** `npm run ci`,

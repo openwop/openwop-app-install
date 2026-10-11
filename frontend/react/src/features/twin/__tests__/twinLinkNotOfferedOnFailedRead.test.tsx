@@ -16,17 +16,32 @@
  *
  * Both arms are asserted: a failed read offers nothing, a successful read still
  * offers everything. The failure mode of this fix is a twin panel nobody can use.
+ *
+ * Sabotage witnesses (w12): resolving a failed read to an empty view reds the first two cases;
+ * letting the loading branch win reds the first; a retry that never refetches, or that lands
+ * back on the loading spinner, reds the retry case; a link button that is never enabled reds
+ * the last. (A former "does not sit on the loading branch" case was cut — the first case's
+ * positive `failed read` assertion reds under the same break.)
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, cleanup, act, fireEvent } from '@testing-library/react';
+import type { AgentTwinView } from '../twinClient.js';
 
-const { getAgentTwin, linkTwinToUser } = vi.hoisted(() => ({
-  getAgentTwin: vi.fn(), linkTwinToUser: vi.fn(),
+const { getAgentTwin, linkTwinToUser, getProfile } = vi.hoisted(() => ({
+  getAgentTwin: vi.fn<typeof import('../twinClient.js').getAgentTwin>(),
+  linkTwinToUser: vi.fn<typeof import('../twinClient.js').linkTwinToUser>(),
+  getProfile: vi.fn<typeof import('../../profiles/profilesClient.js').getProfile>(),
 }));
 import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
 vi.mock('../twinClient.js', async (orig) => ({
   ...(await orig<typeof import('../twinClient.js')>()),
   getAgentTwin, linkTwinToUser,
+}));
+// The linked person's display-name lookup: rejected, so the panel deterministically shows the
+// raw id (its documented fallback) instead of reaching the network.
+vi.mock('../../profiles/profilesClient.js', async (orig) => ({
+  ...(await orig<typeof import('../../profiles/profilesClient.js')>()),
+  getProfile,
 }));
 vi.mock('../../profiles/useMyIdentity.js', async (orig) => ({
   ...(await orig<typeof import('../../profiles/useMyIdentity.js')>()),
@@ -43,8 +58,8 @@ import { AgentTwinPanel } from '../AgentTwinPanel.js';
 const LINKED_TO_SOMEONE_ELSE = {
   link: { userId: 'u-other', linkedBy: 'admin', linkedAt: '2026-01-01T00:00:00Z' },
   grant: null,
-};
-const UNLINKED = { link: null, grant: null };
+} satisfies AgentTwinView;
+const UNLINKED = { link: null, grant: null } satisfies AgentTwinView;
 
 const mount = async (): Promise<void> => {
   render(<AgentTwinPanel rosterId="r1" persona="Ada" />);
@@ -56,9 +71,11 @@ const linkButton = (): HTMLElement | undefined =>
 
 afterEach(cleanup);
 beforeEach(() => {
-  vi.clearAllMocks();
+  // reset, not clear: an unconsumed `…Once` queue must not leak into the next case.
+  vi.resetAllMocks();
   getAgentTwin.mockResolvedValue(UNLINKED);
   linkTwinToUser.mockResolvedValue(UNLINKED);
+  getProfile.mockRejectedValue(new Error('no profile'));
 });
 
 describe('a failed twin read offers no link', () => {
@@ -73,14 +90,6 @@ describe('a failed twin read offers no link', () => {
     getAgentTwin.mockRejectedValue(new Error('503'));
     await mount();
     expect(linkButton()).toBeUndefined();
-    expect(linkTwinToUser).not.toHaveBeenCalled();
-  });
-
-  it('does not sit on the loading branch either', async () => {
-    // The bug this replaced: `view === null` meant both "loading" and "failed".
-    getAgentTwin.mockRejectedValue(new Error('503'));
-    await mount();
-    expect(document.body.textContent).not.toContain('Loading');
   });
 
   it('the retry recovers, and recovers into the REAL state', async () => {
@@ -90,6 +99,11 @@ describe('a failed twin read offers no link', () => {
     await mount();
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Try again' })); });
     expect(document.body.textContent).not.toContain('failed read, not an answer');
+    // Positively in the LINKED state — the loading spinner also has no failed text and no
+    // link button, so the two absences above could not tell recovery from a stuck spinner.
+    expect(document.body.textContent).not.toContain('Loading');
+    expect(document.body.textContent).toContain('Twin of');
+    expect(await screen.findByText('u-other')).toBeTruthy();
     expect(linkButton()).toBeUndefined(); // already linked — a different branch
   });
 

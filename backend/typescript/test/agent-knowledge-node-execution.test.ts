@@ -13,6 +13,16 @@
  *
  * This drives the REAL pack module (the `.mjs` this repo vendors into the image),
  * not a fixture, because a fixture proves the shape of the fixture.
+ *
+ * Sabotage that turns this red (grade-tests w11 probes): `role:"action"` in the manifest
+ * (leg 1); widening the typeId pattern to `(ingest|retrieve)` (leg 2 + the anti-rot); dropping
+ * ingest from `MANIFEST_FAST_PATH_SERVED` (floor case); trust from `readTrigger` only (THE
+ * DEFECT + monotone); always-untrusted (trusted anti-rot); passing the declared value through
+ * (closed-world); not reading the trigger body (shipped chain).
+ *
+ * HONEST CEILING (leg 2): `SIDE_EFFECTING_TYPE_PATTERNS` is module-private and
+ * `isSideEffectingNode` consults `MANIFEST_FAST_PATH_SERVED` FIRST, so no behavioural call can
+ * isolate the pattern leg — the source scan is its only observer without a product change.
  */
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';

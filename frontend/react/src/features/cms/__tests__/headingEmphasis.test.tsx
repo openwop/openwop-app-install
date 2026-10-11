@@ -1,3 +1,16 @@
+/**
+ * Display-headline emphasis (commit 3a4f8008a): a CMS heading marks one run
+ * with SINGLE asterisks — `Build workflows you can *rewind.*` — rendered as
+ * `<em class="fp-em">`, as React elements (never `dangerouslySetInnerHTML`,
+ * ADR 0009). Pinned: matched markers never reach the DOM text, the accessible
+ * name or the anchor id; `**bold**`, `2 * 3`, edge-whitespace runs and a lone
+ * `*` stay literal.
+ *
+ * Sabotage that turns it red: drop the `(?<!\*)`/`(?!\*)` or the whitespace
+ * lookarounds in `EMPHASIS`; render runs as plain text; slug the RAW heading
+ * for the anchor id (only a mid-word run tells those apart — `headingSlug`
+ * folds a `*` at a word edge into the same `-` it trims).
+ */
 import { afterEach, describe, expect, it } from 'vitest';
 import { cleanup, render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
@@ -60,6 +73,13 @@ describe('SectionRenderer heading emphasis', () => {
     expect(h2.id).toBe('runs-you-can-trust');
     expect(h2.querySelector('em')?.textContent).toBe('trust');
     expect(container.textContent).not.toContain('*');
+    cleanup();
+    // A mid-word run: the id is slugged from the VISIBLE text ('rerunnable'),
+    // not the raw heading ('re-run-nable').
+    // (Selected by element: jsdom's name algorithm pads the inline <em> with spaces.)
+    const mid = view({ sectionId: 'm', type: 'richText', data: { heading: 'Re*run*nable runs', text: 'Body.' } }).container.querySelector('h2')!;
+    expect(mid.textContent).toBe('Rerunnable runs');
+    expect(mid.id).toBe('rerunnable-runs');
     cleanup();
     view({ sectionId: 'c', type: 'cta', data: { heading: 'Start *today*', label: 'Go', url: '/signup' } });
     const cta = screen.getByRole('heading', { level: 2, name: 'Start today' });

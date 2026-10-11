@@ -18,6 +18,10 @@
  * FAILED resolve must keep, an honest EMPTY must clear. A test that only pinned
  * "keep" would pass a resolver that never clears anything, which is a different
  * bug (a board whose context refs are all removed keeps stale grounding).
+ *
+ * Sabotage-witnessed (/grade-tests w12): `ctx.failed ? undefined : ctx.block` → `ctx.block`
+ * reds (a); `→ ctx.block ?? undefined` reds (b); dropping `level === 'none'` reds the 404
+ * arm; re-admitting the body's `participants` reds the IMPOSTOR arm.
  */
 
 import http from 'node:http';
@@ -51,7 +55,7 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T }
+interface Res { status: number; body: { user?: { userId: string }; orgId?: string; id?: string; rosterId?: string; boardId?: string; sessionId?: string; agentRef?: { agentId: string }; error?: string } }
 interface Client { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res>; patch: (p: string, b?: unknown) => Promise<Res> }
 function client(): Client {
   let cookie = '';
@@ -59,7 +63,7 @@ function client(): Client {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
     const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
-    return { status: res.status, body: out };
+    return { status: res.status, body: out ?? {} };
   };
   return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), patch: (p, b) => call('PATCH', p, b) };
 }
@@ -71,7 +75,7 @@ const uniqEmail = (who: string): string => `${who}-${Date.now()}-${n++}@acme.tes
 async function login(c: Client, tenantId: string): Promise<string> {
   const r = await c.post('/host/openwop-app/test/login', { email: uniqEmail('abc'), tenantId });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  return r.body.user.userId as string;
+  return r.body.user!.userId;
 }
 
 interface World { owner: Client; tenantId: string; orgId: string; boardId: string; strategyId: string; agentRef: string }
@@ -81,7 +85,7 @@ async function world(visibility: 'shared' | 'private' = 'shared'): Promise<World
   const tenantId = `org:abc-${Date.now()}-${n++}`;
   await login(owner, tenantId);
   const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
-  const orgId = org.body.orgId as string;
+  const orgId = org.body.orgId!;
   const strategy = await owner.post('/host/openwop-app/strategy', { orgId, scope: 'org', title: 'FY26', summary: SUMMARY });
   expect(strategy.status, JSON.stringify(strategy.body)).toBe(201);
   const advisor = await owner.post('/host/openwop-app/roster', { persona: 'Ada Lovelace', agentRef: { agentId: 'core.openwop.agents.brief-writer' } });
@@ -90,13 +94,13 @@ async function world(visibility: 'shared' | 'private' = 'shared'): Promise<World
     contextRefs: [{ kind: 'strategy', strategyId: strategy.body.id }],
   });
   expect(board.status, JSON.stringify(board.body)).toBe(201);
-  return { owner, tenantId, orgId, boardId: board.body.boardId, strategyId: strategy.body.id, agentRef: `agent:${advisor.body.agentRef.agentId}` };
+  return { owner, tenantId, orgId, boardId: board.body.boardId!, strategyId: strategy.body.id!, agentRef: `agent:${advisor.body.agentRef!.agentId}` };
 }
 
 async function newSession(c: Client): Promise<string> {
   const r = await c.post(CHAT, { title: 'scratch' });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  return r.body.conversationId ?? r.body.sessionId ?? r.body.id;
+  return r.body.sessionId!;
 }
 
 describe('WF-BOA-3 — the summon lane gates on the BOARD and derives the speak-set', () => {
@@ -107,6 +111,7 @@ describe('WF-BOA-3 — the summon lane gates on the BOARD and derives the speak-
     const sessionId = await newSession(stranger);
     const attach = await stranger.post(`${CHAT}/${encodeURIComponent(sessionId)}/board`, { boardId });
     expect(attach.status, JSON.stringify(attach.body)).toBe(404);
+    expect(attach.body.error).toBe('not_found');
     expect((await getConversationMeta(tenantId, sessionId))?.boardId, 'no board provenance may be stamped').toBeUndefined();
   });
 

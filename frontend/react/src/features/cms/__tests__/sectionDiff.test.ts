@@ -2,6 +2,11 @@
  * CMSGAP-3 — unit coverage for the version-history diff engine (ADR 0206 B1).
  * Pure function; pins pairing-by-sectionId, base-field + per-locale overlay
  * comparison, and the added/removed/moved/changed classification.
+ *
+ * Sabotage-witnessed (/grade-tests w17): reporting equal fields, mislabelling
+ * added, never reporting moved, String()-ing objects, dropping the locale
+ * prefix, resetting the positional cursor, or ignoring the type when pairing
+ * by position each turn a case red.
  */
 import { describe, expect, it } from 'vitest';
 import { diffSections } from '../sectionDiff.js';
@@ -66,6 +71,14 @@ describe('diffSections', () => {
     const out = diffSections(version, draft, { pairByPosition: true });
     expect(out).toEqual([
       { sectionId: 'sec:new1', type: 'hero', kind: 'changed', fields: [{ key: 'heading', from: 'Seeded hi', to: 'Hi' }], toSectionId: 'sec:a' },
+      { sectionId: 'sec:c', type: 'hero', kind: 'added', fields: [] },
+    ]);
+    // By TYPE: a leftover of another type is skipped, not paired.
+    const body = (id: string): Section => ({ sectionId: id, type: 'richText', data: { text: 'Body' } });
+    const typed = diffSections([hero('sec:new1', 'Seeded hi'), body('sec:new2')], [hero('sec:a', 'Hi'), hero('sec:c', 'Mine'), body('sec:b')], { pairByPosition: true });
+    expect(typed).toEqual([
+      { sectionId: 'sec:new1', type: 'hero', kind: 'changed', fields: [{ key: 'heading', from: 'Seeded hi', to: 'Hi' }], toSectionId: 'sec:a' },
+      { sectionId: 'sec:new2', type: 'richText', kind: 'moved', fields: [], toSectionId: 'sec:b' },
       { sectionId: 'sec:c', type: 'hero', kind: 'added', fields: [] },
     ]);
   });

@@ -12,12 +12,30 @@
  *  - PM2-M2  an idea could be promoted twice, the second overwriting the first's provenance
  *  - PM2-M3  merge committed the overlays, then failed with "duplicate not found"
  *  - PM2-M5  no subject eraser over six subject-keyed collections
+ *
+ * PM2-B1 (the ratio engine) is witnessed by `priority-matrix-scoring-completeness.test.ts`
+ * "leg 4 (PMXWF-12)" and `priority-matrix-scoring.test.ts` "divides…"/"degrades…" — the
+ * three unit cases that used to sit here were moved out in /grade-tests w15 after the same
+ * three sabotages of `host/weightedScoring.ts` turned both files red.
+ *
+ * What turns each describe red (w15 probes):
+ *  - PM2-M2: DOUBLE-GUARDED by design — `assertNotPromoted` before the mint AND
+ *    `markPromoted`'s guard + `deleteProject` compensation after it. Removing either one
+ *    alone stays green (an honest ceiling); `markPromoted`'s guard alone is witnessed by
+ *    PMX-2 below.
+ *  - PM2-M5: dropping the eraser's vote delete, score/list redaction, or voterWeights
+ *    prune; dropping the `mine(listId)` tenant scope (cross-tenant case).
+ *  - PMX-2: dropping the CAS (`intakes.put` instead) or the stamp guard.
+ *  - PMX-3/4: dropping the peer redaction, its tenant scope, or the returned count.
+ *  - F4: dropping the `source` spread in single→multi seeding or in `cloneIdea`.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { bootPlanningApp, makeClient, enableToggle, uniqEmail, type Client } from './planningHarness.js';
-import { computePriority } from '../src/features/priority-matrix/scoring.js';
-import { CRITERIA_PRESETS, type CriteriaSet } from '../src/features/priority-matrix/types.js';
 import { eraseSubject } from '../src/host/subjectErasure.js';
+import { __pmStoresForErasure, setIdeaScore, updateList, cloneIdea } from '../src/features/priority-matrix/priorityMatrixService.js';
+import { markPromoted } from '../src/features/priority-matrix/intake.js';
+import { addPeer, listPeers } from '../src/features/priority-matrix/federationService.js';
+import { eraseSubjectPriorityMatrix } from '../src/features/priority-matrix/erasure.js';
 
 let BASE = '';
 let closeApp: () => Promise<void>;
@@ -43,45 +61,6 @@ const mkList = async (c: Client, orgId: string): Promise<string> => {
   expect(res.status, JSON.stringify(res.body)).toBe(201);
   return res.body.id;
 };
-
-describe('PM2-B1 — an unscored cost criterion cannot rank first', () => {
-  const wsjf: CriteriaSet = CRITERIA_PRESETS.wsjf;
-
-  it('an idea whose cost criterion is BLANK ranks last, not first', () => {
-    const costId = wsjf.criteria.find((c) => c.direction === 'cost')!.id;
-    const benefits = Object.fromEntries(wsjf.criteria.filter((c) => c.direction !== 'cost').map((c) => [c.id, 9]));
-    // `clampScore(undefined)` is 0, so an unscored cost contributed 0 to the numerator
-    // while its weight still counted — `costAgg <= 0` — and the old branch returned the
-    // raw BENEFIT aggregate. Three 9s and a blank job-size scored 9.00 and ranked #1,
-    // ahead of the same idea with a real job-size of 3 (9/3 = 3.00). The un-estimated
-    // idea outranked the estimated one, and this file's own engine docstring says the
-    // opposite. The matrix view already disagreed: it drops that idea in the
-    // "unscored, not placed" tray.
-    expect(computePriority(wsjf, benefits)).toBe(0);
-    expect(computePriority(wsjf, { ...benefits, [costId]: 3 })).toBe(3);
-    expect(computePriority(wsjf, { ...benefits, [costId]: 3 })).toBeGreaterThan(computePriority(wsjf, benefits));
-  });
-
-  it('a set that declares NO cost criterion still degrades to the benefit aggregate', () => {
-    // The documented fallback, and the case the old test pinned — it must keep working,
-    // which is what makes the fix a distinction rather than a blanket zero.
-    const benefitOnly: CriteriaSet = {
-      aggregation: 'ratio',
-      criteria: [
-        { id: 'value', name: 'Value', weight: 10, direction: 'benefit' },
-        { id: 'urgency', name: 'Urgency', weight: 10, direction: 'benefit' },
-      ],
-    };
-    expect(computePriority(benefitOnly, { value: 8, urgency: 6 })).toBe(7);
-  });
-
-  it('a fully scored ratio idea is unchanged (the negative control)', () => {
-    const costId = wsjf.criteria.find((c) => c.direction === 'cost')!.id;
-    const all = Object.fromEntries(wsjf.criteria.map((c) => [c.id, c.direction === 'cost' ? 2 : 8]));
-    expect(computePriority(wsjf, all)).toBe(4);
-    expect(costId).toBeTruthy();
-  });
-});
 
 describe('PM2-M2 — promotion is a one-way door', () => {
   it('refuses a SECOND, different promotion instead of overwriting the first', async () => {
@@ -123,11 +102,24 @@ describe('PM2-M5 — subject erasure, scoped to ONE tenant', () => {
     await c.post(`${L}/${listId}/ideas`, { title: 'Idea' });
     const cardId = (await c.get(`${L}/${listId}/ideas`)).body.ideas[0].card.id;
     expect((await c.put(`${L}/${listId}/ideas/${cardId}/scores`, { scores: { roi: 8 } })).status).toBe(200);
+    // Switching to multi-voter seeds the creator's VOTE from the score row (F4), so the
+    // subject now owns a vote row, a score row (updatedBy) and a voterWeights key.
+    const sw = await c.patch(`${L}/${listId}`, { votingMode: 'multi-voter', voterWeights: { [userId]: 3 } });
+    expect(sw.status, JSON.stringify(sw.body)).toBe(200);
+    const { votes, scores } = __pmStoresForErasure();
+    const voteOf = async () => (await votes.list()).find((v) => v.listId === listId && v.cardId === cardId && v.voterId === userId);
+    expect(await voteOf(), 'precondition: the subject has a vote').toBeTruthy();
+    expect((await scores.list()).find((r) => r.listId === listId && r.cardId === cardId)?.updatedBy, 'precondition').toBe(userId);
 
     await eraseSubject(tenantId, userId);
 
+    expect(await voteOf(), 'the subject\u2019s vote is deleted').toBeUndefined();
+    const score = (await scores.list()).find((r) => r.listId === listId && r.cardId === cardId);
+    expect(score, 'the score row is a business record — it survives').toBeTruthy();
+    expect(score!.updatedBy, 'only the person-link is severed').toBe('user:[erased]');
     const list = (await c.get(`${L}/${listId}`)).body;
     expect(list.createdBy).toBe('user:[erased]');
+    expect(list.voterWeights?.[userId], 'the voter weight keyed by the subject is pruned').toBeUndefined();
   });
 
   it('does NOT touch another tenant\u2019s child rows — they carry no tenantId at all', async () => {
@@ -135,6 +127,9 @@ describe('PM2-M5 — subject erasure, scoped to ONE tenant', () => {
     const b = await owner();
     const listA = await mkList(a.c, a.orgId);
     const listB = await mkList(b.c, b.orgId);
+    await a.c.post(`${L}/${listA}/ideas`, { title: 'A idea' });
+    const cardA = (await a.c.get(`${L}/${listA}/ideas`)).body.ideas[0].card.id;
+    expect((await a.c.put(`${L}/${listA}/ideas/${cardA}/scores`, { scores: { roi: 7 } })).status).toBe(200);
     await b.c.post(`${L}/${listB}/ideas`, { title: 'B idea' });
     const cardB = (await b.c.get(`${L}/${listB}/ideas`)).body.ideas[0].card.id;
     expect((await b.c.put(`${L}/${listB}/ideas/${cardB}/scores`, { scores: { roi: 8 } })).status).toBe(200);
@@ -146,12 +141,17 @@ describe('PM2-M5 — subject erasure, scoped to ONE tenant', () => {
     // (Asserting on the LIST row cannot see this: lists carry a tenantId and were already
     // filtered, which is why my first version of this test passed against the bug.)
     await eraseSubject(a.tenantId, b.userId);
+    // …and the positive control: the same eraser, run for A's OWN subject in A, does
+    // redact A's row — so "B untouched" cannot pass because the eraser did nothing.
+    await eraseSubject(a.tenantId, a.userId);
 
-    const { scores } = (await import('../src/features/priority-matrix/priorityMatrixService.js')).__pmStoresForErasure();
-    const bScore = (await scores.list()).find((r) => r.listId === listB && r.cardId === cardB);
+    const { scores } = __pmStoresForErasure();
+    const rows = await scores.list();
+    const aScore = rows.find((r) => r.listId === listA && r.cardId === cardA);
+    expect(aScore?.updatedBy, 'A\u2019s own row is redacted by A\u2019s erasure').toBe('user:[erased]');
+    const bScore = rows.find((r) => r.listId === listB && r.cardId === cardB);
     expect(bScore, 'B\u2019s score row should still exist').toBeTruthy();
     expect(bScore!.updatedBy, 'B\u2019s row must be untouched by A\u2019s erasure').toBe(b.userId);
-    expect(listA).toBeTruthy();
   });
 });
 
@@ -167,7 +167,6 @@ describe('PMX-2 — concurrent markPromoted: exactly one wins the one-way door',
     await c.post(`${L}/${listId}/ideas`, { title: 'Race me' });
     const cardId = (await c.get(`${L}/${listId}/ideas`)).body.ideas[0].card.id;
 
-    const { markPromoted } = await import('../src/features/priority-matrix/intake.js');
     const attempt = (id: string) => markPromoted({
       tenantId, orgId, listId, cardId, actor: 'u-race',
       promotedTo: { kind: 'project', id },
@@ -192,17 +191,16 @@ describe('PMX-3/PMX-4 — peer rows join the eraser; the eraser reports rowsTouc
     const { c, orgId, userId, tenantId } = await owner();
     const listId = await mkList(c, orgId);
     await c.post(`${L}/${listId}/ideas`, { title: 'Idea' });
-    const { addPeer, listPeers } = await import('../src/features/priority-matrix/federationService.js');
     await addPeer(tenantId, userId, { label: 'East', baseUrl: 'https://east.example.test' });
     // A SECOND tenant's peer by the same subject — must be untouched (the
     // cross-tenant discriminator, same construction as PM2-M5 above).
     const other = await owner();
     await addPeer(other.tenantId, userId, { label: 'West', baseUrl: 'https://west.example.test' });
 
-    const { eraseSubjectPriorityMatrix } = await import('../src/features/priority-matrix/erasure.js');
     const report = await eraseSubjectPriorityMatrix(tenantId, userId);
-    expect(report).toBeTruthy();
-    expect(report.rowsTouched).toBeGreaterThan(0);
+    // Exactly the rows this case created under the subject in THIS tenant: the list's
+    // `createdBy` and the peer's `createdBy` (the other tenant's peer is not counted).
+    expect(report.rowsTouched).toBe(2);
 
     const mine = await listPeers(tenantId);
     expect(mine[0]!.createdBy).toBe('user:[erased]');
@@ -224,11 +222,10 @@ describe('F4 — provenance survives the single→multi migration and the clone 
     const listId = await mkList(c, orgId);
     await c.post(`${L}/${listId}/ideas`, { title: 'Agent-scored' });
     const cardId = (await c.get(`${L}/${listId}/ideas`)).body.ideas[0].card.id;
-    const svc = await import('../src/features/priority-matrix/priorityMatrixService.js');
-    await svc.setIdeaScore(tenantId, listId, cardId, userId, { roi: 8 }, 'agent');
+    await setIdeaScore(tenantId, listId, cardId, userId, { roi: 8 }, 'agent');
 
-    await svc.updateList(tenantId, listId, { votingMode: 'multi-voter' }, userId);
-    const { votes } = svc.__pmStoresForErasure();
+    await updateList(tenantId, listId, { votingMode: 'multi-voter' }, userId);
+    const { votes } = __pmStoresForErasure();
     const seeded = (await votes.list()).find((v) => v.listId === listId && v.cardId === cardId);
     expect(seeded, 'the migration must seed the creator vote').toBeTruthy();
     expect(seeded!.source, 'the migrated vote must carry the agent stamp, not launder it').toBe('agent');
@@ -239,11 +236,10 @@ describe('F4 — provenance survives the single→multi migration and the clone 
     const listId = await mkList(c, orgId);
     await c.post(`${L}/${listId}/ideas`, { title: 'Agent-scored original' });
     const cardId = (await c.get(`${L}/${listId}/ideas`)).body.ideas[0].card.id;
-    const svc = await import('../src/features/priority-matrix/priorityMatrixService.js');
-    await svc.setIdeaScore(tenantId, listId, cardId, userId, { roi: 8 }, 'agent');
+    await setIdeaScore(tenantId, listId, cardId, userId, { roi: 8 }, 'agent');
 
-    const clone = await svc.cloneIdea(tenantId, listId, cardId, userId);
-    const { scores } = svc.__pmStoresForErasure();
+    const clone = await cloneIdea(tenantId, listId, cardId, userId);
+    const { scores } = __pmStoresForErasure();
     const copied = (await scores.list()).find((s) => s.listId === listId && s.cardId === clone.id);
     expect(copied, 'the clone must copy the single-mode score').toBeTruthy();
     expect(copied!.source, 'the copied score must carry the agent stamp, not mint a stampless row').toBe('agent');

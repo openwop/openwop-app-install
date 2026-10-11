@@ -77,7 +77,7 @@ function deployFixture(mode) {
   fs.writeFileSync(path.join(repo, 'scripts/deploy.env'), ['OPENWOP_DEPLOY_SERVICE=fixture','OPENWOP_DEPLOY_PROJECT=fixture','OPENWOP_DEPLOY_REGION=fixture','OPENWOP_DEPLOY_ACCOUNT=fixture','OPENWOP_DEPLOY_HOSTING_TARGET=fixture','OPENWOP_DEPLOY_FIREBASE_PROJECT=fixture','OPENWOP_DISTRIBUTION=openwop-app','BASE=http://invalid'].join('\n'));
   const calls = path.join(f.temp, 'provider.calls'), completed = path.join(f.temp, 'frontend.done'), certPid = path.join(f.temp, 'cert-child.pid');
   const scripts = {
-    npm: `#!/bin/bash\nif [ "$PWD" = "$TEST_REPO/frontend/react" ]; then\n [ "$OPENWOP_BUILD_COMMIT" = "$TEST_SHA" ] && [ "$OPENWOP_DISTRIBUTION" = openwop-app ] || exit 84\n case "$TEST_MODE" in frontend-fail|frontend-serial-fail) exit 7;; success) touch "$TEST_COMPLETED";exit 0;; *) exec "$TEST_NODE" "$TEST_LEADER";; esac\nelse\n case "$TEST_MODE" in certify-*) [ -z "\${OPENWOP_CERT_BUNDLE_ORIGIN+x}" ] || exit 85;; major2-*) [ "$OPENWOP_CERT_BUNDLE_ORIGIN" = fixture-origin ] || exit 86;; esac\n while [ ! -f "$TEST_BEAT" ]; do sleep 0.02; done\n case "$TEST_MODE" in certify-cancel|major2-cancel) sleep 2 & echo "$!" > "$TEST_CERT_PID";wait;; esac\n exit 9\nfi\n`,
+    npm: `#!/bin/bash\nif [ "$PWD" = "$TEST_REPO/frontend/react" ]; then\n [ "$OPENWOP_BUILD_COMMIT" = "$TEST_SHA" ] && [ "$OPENWOP_DISTRIBUTION" = openwop-app ] || exit 84\n case "$TEST_MODE" in frontend-fail|frontend-serial-fail) exit 7;; success) touch "$TEST_COMPLETED";exit 0;; *) exec "$TEST_NODE" "$TEST_LEADER";; esac\nelse\n case "$TEST_MODE" in image-*) [ -z "$OPENWOP_CERT_BUNDLE_ORIGIN" ] || exit 85;; major2-*) [ "$OPENWOP_CERT_BUNDLE_ORIGIN" = fixture-origin ] || exit 86;; esac\n while [ ! -f "$TEST_BEAT" ]; do sleep 0.02; done\n case "$TEST_MODE" in image-cancel|major2-cancel) sleep 2 & echo "$!" > "$TEST_CERT_PID";wait;; esac\n exit 9\nfi\n`,
     gcloud: '#!/bin/bash\necho "gcloud $*" >> "$TEST_CALLS"\n[ -f "$TEST_COMPLETED" ] || { echo frontend-not-done >&2; exit 98; }\nexit 97\n',
     firebase: '#!/bin/bash\necho "firebase $*" >> "$TEST_CALLS"\nexit 96\n',
   };
@@ -85,14 +85,15 @@ function deployFixture(mode) {
   const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, TEST_REPO: repo, TEST_MODE: mode, TEST_COMPLETED: completed, TEST_CALLS: calls, TEST_NODE: process.execPath, TEST_LEADER: f.leader, TEST_BEAT: f.beat, TEST_CERT_PID: certPid, TEST_SHA: checked('git', ['-C', repo, 'rev-parse', 'HEAD']), TMPDIR: f.temp };
   delete env.OPENWOP_CERT_BUNDLE_ORIGIN; delete env.OPENWOP_DEPLOY_FRONTEND_PARALLEL;
   if (mode === 'frontend-serial-fail') env.OPENWOP_DEPLOY_FRONTEND_PARALLEL = '0';
-  if (mode.startsWith('certify-')) env.OPENWOP_CERT_BUNDLE_ORIGIN = '';
+  // ADR 0869 — image mode (origin empty) builds no image bundle and still runs the major-2 ratchet.
+  if (mode.startsWith('image-')) env.OPENWOP_CERT_BUNDLE_ORIGIN = '';
   if (mode.startsWith('major2-')) env.OPENWOP_CERT_BUNDLE_ORIGIN = 'fixture-origin';
   return { ...f, repo, env, calls, completed, certPid };
 }
-for (const mode of ['frontend-fail', 'frontend-serial-fail', 'certify-fail', 'certify-cancel', 'major2-fail', 'major2-cancel', 'cancel', 'success', 'preflight', 'preflight-fail']) test(`actual deploy wrapper ${mode} honors build/write/cancellation boundary`, async () => {
+for (const mode of ['frontend-fail', 'frontend-serial-fail', 'image-fail', 'image-cancel', 'major2-fail', 'major2-cancel', 'cancel', 'success', 'preflight', 'preflight-fail']) test(`actual deploy wrapper ${mode} honors build/write/cancellation boundary`, async () => {
   const f = deployFixture(mode);
   const args = ['scripts/deploy.sh', '--ignore-hour-window'];
-  if (!mode.startsWith('certify-') && !mode.startsWith('major2-')) args.push('--skip-certify');
+  if (!mode.startsWith('image-') && !mode.startsWith('major2-')) args.push('--skip-certify');
   if (mode === 'preflight') args.push('--preflight-only');
   const p = launch('bash', args, { cwd: f.repo, env: f.env, detached: true });
   try {
@@ -105,7 +106,7 @@ for (const mode of ['frontend-fail', 'frontend-serial-fail', 'certify-fail', 'ce
       assert(fs.existsSync(f.completed)); assert.match(fs.readFileSync(f.calls, 'utf8'), /gcloud run deploy/);
       assert.match(result.output, /backend FAILED/); // Stub refuses first provider write; nothing external happens.
     } else assert(!fs.existsSync(f.calls), result.output);
-    if (mode === 'certify-fail') { assert.match(result.output, /certify lane FAILED/); await stopped(f); }
+    if (mode === 'image-fail') { assert.match(result.output, /image mode serves no major-2 evidence/); assert.doesNotMatch(result.output, /certify lane FAILED/); assert.match(result.output, /major-2 lane regressed/); await stopped(f); }
     if (mode === 'major2-fail') { assert.match(result.output, /major-2 lane regressed/); await stopped(f); }
     if (cancelledAt) { assert(Date.now() - cancelledAt < 1500, 'TERM was deferred until the foreground certification finished'); await stopped(f); }
     if (fs.existsSync(f.certPid)) {

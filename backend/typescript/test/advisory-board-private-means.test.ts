@@ -13,6 +13,10 @@
  *
  * (The recon for this iteration filed the opposite: that advisory-board uniquely had two
  * disagreeing rules while projects were consistent. Measured — projects do the same thing.)
+ *
+ * Sabotage-witnessed (/grade-tests w12): dropping `workspace:write ⇒ 'write'` reds case 1;
+ * dropping the `visibility === 'shared'` conjunct reds case 2; `if (false) return 'read'` on
+ * the shared line reds case 3; `if (!b) return 'read'` reds case 4.
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
@@ -41,25 +45,25 @@ beforeEach(async () => {
   writer = await seat('oidc:bd-writer', ['editor']);
   reader = await seat('oidc:bd-reader', ['viewer']);
   // A real advisor: `createBoard` validates the roster ids, so a synthetic one cannot be used.
-  advisorRosterId = (await createRosterEntry({ tenantId, persona: `Advisor ${Math.random().toString(16).slice(2)}`, agentRef: { agentId: 'agent:adv' }, roleKey: 'advisor' })).rosterId;
+  advisorRosterId = (await createRosterEntry({ tenantId, persona: 'Advisor', agentRef: { agentId: 'agent:adv' }, roleKey: 'advisor' })).rosterId;
 });
 
 describe('ADR 0665 D3 — what `private` actually means', () => {
   it('a workspace WRITER who is not the creator has authority over a private board', async () => {
-    const board = await createBoard(tenantId, tenantId, creator, { name: 'Sealed', visibility: 'private', advisors: [advisorRosterId] } as never);
+    const board = await createBoard(tenantId, tenantId, creator, { name: 'Sealed', visibility: 'private', advisors: [advisorRosterId] });
     // This is the documented rule, not a defect: visibility ≠ authority (ADR 0054 D5).
     expect(await resolveBoardAccess(tenantId, board.boardId, writer)).toBe('write');
-    // Non-vacuity: the creator obviously has access, so a pass above is not "everyone gets none".
-    expect(await resolveBoardAccess(tenantId, board.boardId, creator)).not.toBe('none');
+    // The creator is an editor too, so it is also `write`: visibility never demotes a writer.
+    expect(await resolveBoardAccess(tenantId, board.boardId, creator)).toBe('write');
   });
 
   it('a workspace READER who is not the creator does NOT — private still hides it from them', async () => {
-    const board = await createBoard(tenantId, tenantId, creator, { name: 'Sealed', visibility: 'private', advisors: [advisorRosterId] } as never);
+    const board = await createBoard(tenantId, tenantId, creator, { name: 'Sealed', visibility: 'private', advisors: [advisorRosterId] });
     expect(await resolveBoardAccess(tenantId, board.boardId, reader)).toBe('none');
   });
 
   it('the same reader DOES reach a shared board — so `private` is doing real work', async () => {
-    const board = await createBoard(tenantId, tenantId, creator, { name: 'Open', visibility: 'shared', advisors: [advisorRosterId] } as never);
+    const board = await createBoard(tenantId, tenantId, creator, { name: 'Open', visibility: 'shared', advisors: [advisorRosterId] });
     expect(await resolveBoardAccess(tenantId, board.boardId, reader)).toBe('read');
   });
 

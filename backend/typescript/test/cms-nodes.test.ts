@@ -7,6 +7,15 @@
  * built from the real host bundle — the get-page path reads the seeded
  * SYSTEM-SITE home (host:site / host-site / home), whose hero carries es/pt-BR
  * overlays, so locale resolution is observable end-to-end.
+ *
+ * Sabotage-witnessed (grade-tests wave 16, w16g4-n-*): serving an undeclared locale, ignoring
+ * the requested locale, or ignoring a withheld (`draft`) locale in the surface/localizePage
+ * reds the three get-page cases; a wrapper that reports refusals as success (or fails on
+ * everything) reds the CMS2-B4 trio; dropping the repair gate, the error-fed assistant turn,
+ * the empty-input short-circuit or the callAI capability check reds its case; a prompt that
+ * does not name the target language reds the translate case.
+ * CEILING: boots `createApp` — the get-page path reads the seeded system site through the
+ * registered host surface bundle, which only app boot composes.
  */
 
 import http from 'node:http';
@@ -18,8 +27,22 @@ import {
   createPage, getContentLanguageSettings, getPublishedBySlug, localizePage, setLocalePublishState, updateContentLanguageSettings,
 } from '../src/features/cms/cmsService.js';
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let pack: any;
+interface NodeSection { sectionId: string; sectionType: string; data: Record<string, unknown>; localizations?: unknown }
+interface NodeResult {
+  status: 'success' | 'failed';
+  outputs: {
+    page?: { sections: NodeSection[] } | null;
+    locale?: string | null;
+    overlay?: Record<string, unknown>;
+    targetLocale?: string;
+    updated?: boolean;
+  };
+  error?: { code: string };
+}
+type NodeFn = (ctx: unknown) => Promise<NodeResult>;
+interface CmsPack { getPage: NodeFn; translateSection: NodeFn; updateSectionDraft: NodeFn; submitPage: NodeFn }
+interface AiCall { messages: Array<{ role: string; content: string }> }
+let pack: CmsPack;
 let server: http.Server;
 
 // hero overlays seeded in host/systemSite.ts (assert real locale resolution).
@@ -42,9 +65,8 @@ const ctxFor = (inputs: Record<string, unknown>, callAI?: unknown) => ({
   ...(callAI ? { callAI } : {}),
 });
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const heroHeading = (page: any): unknown =>
-  page.sections.find((s: { sectionType: string }) => s.sectionType === 'hero')?.data.heading;
+const heroHeading = (page: NodeResult['outputs']['page']): unknown =>
+  page?.sections.find((s) => s.sectionType === 'hero')?.data.heading;
 
 describe('feature.cms.nodes', () => {
   // UX_UPGRADE-content R2 (CMS2-B2) — this test USED TO assert that asking for
@@ -79,7 +101,8 @@ describe('feature.cms.nodes', () => {
     );
     expect(out.outputs.locale).toBe('en');
     // The surface never leaks the per-locale overlays.
-    for (const s of out.outputs.page.sections) expect(s.localizations).toBeUndefined();
+    expect(out.outputs.page?.sections.length).toBeGreaterThan(0);
+    for (const s of out.outputs.page?.sections ?? []) expect(s.localizations).toBeUndefined();
   });
 
   it('…and serves the pt-BR overlay once the org DECLARES pt-BR', async () => {
@@ -125,8 +148,8 @@ describe('feature.cms.nodes', () => {
   });
 
   it('translate-section drafts an overlay from base data via the run-scoped provider', async () => {
-    const calls: Array<Record<string, unknown>> = [];
-    const callAI = async (req: Record<string, unknown>) => {
+    const calls: AiCall[] = [];
+    const callAI = async (req: AiCall) => {
       calls.push(req);
       return { content: '```json\n{"heading":"Olá mundo","ctaLabel":"Começar"}\n```' };
     };
@@ -138,13 +161,17 @@ describe('feature.cms.nodes', () => {
     expect(out.outputs.targetLocale).toBe('pt-BR');
     expect(out.outputs.overlay).toEqual({ heading: 'Olá mundo', ctaLabel: 'Começar' });
     // The prompt names the target language and carries the base JSON.
-    expect(String((calls[0]!.messages as Array<{ content: string }>)[0]!.content)).toContain('Hello world');
+    const prompt = calls[0]!.messages[0]!.content;
+    expect(prompt).toContain('Hello world');
+    // The prompt NAMES the target language (Intl display name — `Brazilian Portuguese` or
+    // `Portuguese (Brazil)` depending on ICU) next to the tag, not just the tag.
+    expect(prompt).toMatch(/Portuguese.*\(pt-BR\)/);
   });
 
   it('translate-section fails closed without a targetLocale', async () => {
     const out = await pack.translateSection(ctxFor({ data: { heading: 'x' } }, async () => ({ content: '{}' })));
     expect(out.status).toBe('failed');
-    expect(out.error.code).toBe('validation_error');
+    expect(out.error?.code).toBe('validation_error');
   });
 
   // ── CMS2-B4: a REFUSAL is not a success ──────────────────────────────────
@@ -162,7 +189,7 @@ describe('feature.cms.nodes', () => {
       orgId: SYSTEM_SITE_ORG, pageId: 'page:does-not-exist', sectionId: 's1', data: { heading: 'x' },
     }));
     expect(out.status).toBe('failed');
-    expect(out.error.code).toBe('not_found');
+    expect(out.error?.code).toBe('not_found');
     // The reason rides the ERROR CODE, asserted above — NOT `outputs`, which
     // `tarballLoader` discards on a non-success return. The first version of
     // this test asserted `outputs.updated === false` and passed only because it
@@ -173,7 +200,7 @@ describe('feature.cms.nodes', () => {
   it('submit-page FAILS on a refusal instead of reporting a review that never queued', async () => {
     const out = await pack.submitPage(ctxFor({ orgId: SYSTEM_SITE_ORG, pageId: 'page:does-not-exist' }));
     expect(out.status).toBe('failed');
-    expect(out.error.code).toBe('not_found');
+    expect(out.error?.code).toBe('not_found');
   });
 
   it('update-section-draft still SUCCEEDS on a real write (the negative control)', async () => {
@@ -207,8 +234,8 @@ describe('feature.cms.nodes', () => {
 // one node LATE as the store node's `empty` (misattributed locus).
 describe('translate-section — typed failure + one bounded repair (ADR 0592 §7)', () => {
   it('repairs once on garbage, then succeeds when the repair lands', async () => {
-    const calls: Array<Record<string, unknown>> = [];
-    const callAI = async (req: Record<string, unknown>) => {
+    const calls: AiCall[] = [];
+    const callAI = async (req: AiCall) => {
       calls.push(req);
       return calls.length === 1
         ? { content: 'I would be happy to translate that for you!' }
@@ -219,7 +246,7 @@ describe('translate-section — typed failure + one bounded repair (ADR 0592 §7
     expect(out.outputs.overlay).toEqual({ heading: 'Olá' });
     expect(calls.length).toBe(2);
     // The repair message is ERROR-FED: it carries the bad completion back.
-    const repairMessages = calls[1]!.messages as Array<{ role: string; content: string }>;
+    const repairMessages = calls[1]!.messages;
     expect(repairMessages.some((m) => m.role === 'assistant' && /happy to translate/.test(m.content))).toBe(true);
   });
 
@@ -228,7 +255,7 @@ describe('translate-section — typed failure + one bounded repair (ADR 0592 §7
     const callAI = async (req: unknown) => { calls.push(req); return { content: 'still not JSON' }; };
     const out = await pack.translateSection(ctxFor({ data: { heading: 'Hi' }, targetLocale: 'pt-BR' }, callAI));
     expect(out.status).toBe('failed');
-    expect(out.error.code).toBe('invalid_model_output');
+    expect(out.error?.code).toBe('invalid_model_output');
     expect(calls.length).toBe(2); // initial + ONE repair, bounded
   });
 

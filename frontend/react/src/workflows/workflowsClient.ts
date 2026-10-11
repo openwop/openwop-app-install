@@ -50,6 +50,30 @@ export async function listWorkflowSummaries(opts: { includeArchived?: boolean } 
   return ((await res.json()) as { workflows: WorkflowSummaryDTO[] }).workflows;
 }
 
+/** ADR 0870 §Stopgap — the host's answer to "is this a demo, and can it run
+ *  HERE?" (`GET /host/openwop-app/workflows/availability`). `demo` = the
+ *  definition (or a sub-workflow child) uses the sample mock-AI node;
+ *  `runnable:false` + `reason:'demo-node-unavailable'` = this deployment does
+ *  not register that node (the sign-in posture), so a run would fail. */
+export interface WorkflowAvailability {
+  workflowId: string;
+  known: boolean;
+  demo: boolean;
+  runnable: boolean;
+  reason?: 'demo-node-unavailable';
+}
+
+/** Availability for a set of ids, keyed by id. Throws on a non-OK response;
+ *  the portfolio falls back to its previous behaviour on failure. */
+export async function getWorkflowAvailability(workflowIds: readonly string[]): Promise<Map<string, WorkflowAvailability>> {
+  if (workflowIds.length === 0) return new Map();
+  const qs = `?ids=${workflowIds.map(encodeURIComponent).join(',')}`;
+  const res = await fetch(`${config.baseUrl}/host/openwop-app/workflows/availability${qs}`, fetchOpts({ headers: authedHeaders() }));
+  await assertSynced(res);
+  const rows = ((await res.json()) as { availability?: WorkflowAvailability[] }).availability ?? [];
+  return new Map(rows.map((r) => [r.workflowId, r]));
+}
+
 /** ADR 0369 lifecycle verbs. Non-OK throws with the server's error `reason`
  *  in the message (`workflow_referenced`, `workflow_untested`) so callers can
  *  localize by reason instead of parroting the English server string. */

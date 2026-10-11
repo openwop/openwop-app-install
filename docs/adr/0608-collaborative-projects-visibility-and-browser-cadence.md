@@ -362,6 +362,12 @@ existing `advisory-board-knowledge.test.ts:112-122` near-miss cannot see, since 
 tests private-THEN-share) **and** the way back. Sabotage-proved by removing the
 `notifyShareableKbSourceChanged` call: that case, and only it, goes red.
 
+> **CORRECTED 2026-10-10 (/grade-tests w12):** the `:112-122` range above is
+> stale. The /grade-tests w12 upgrade of `advisory-board-knowledge.test.ts`
+> (a typed client and the binding asserts on the share case) moved the
+> private-THEN-share case, "does NOT share a PRIVATE project KB — the visibility
+> carve-out", to `:140-150`. The case and the point made about it are unchanged.
+
 ### Residual
 
 Best-effort by design: a reconcile failure never fails the visibility write (both

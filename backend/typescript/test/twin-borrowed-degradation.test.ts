@@ -18,6 +18,10 @@
  * never searched is not a corpus that returned nothing") — lives in
  * `twin-route.test.ts` ("the real resolver FORWARDS onSourceError").
  *
+ * Sabotage witnesses (w12): the sink no longer flipping `failed` reds the ZERO-chunk and
+ * PARTIAL cases; an always-on notice reds the healthy leg of "no fault and no chunks"; dropping
+ * the dispatch lane's `includes` dedupe reds "not duplicated".
+ *
  * @see docs/adr/0589-twin-tenancy-and-recall-audience.md
  * @see docs/adr/0044-twin-cross-subject-recall.md
  */
@@ -81,6 +85,13 @@ describe('WF-TWIN-2 — a faulted borrowed read degrades honestly (chat/voice la
     expect(out.block).toBe('');
     expect(out.failed).toBe(false);
     expect(out.recalled).toBe(false);
+    // The non-empty healthy read is where a spurious notice would actually surface — the
+    // empty case above returns early before the notice is even computed.
+    const healthy = await composeBorrowedRecallContext(async () => [{ content: 'Prefers Friday reviews', kind: 'memory' as const }], 'cadence');
+    expect(healthy.block).toContain('Prefers Friday reviews');
+    expect(healthy.block, 'a healthy read must not carry the degradation notice').not.toContain('this turn is DEGRADED');
+    expect(healthy.failed).toBe(false);
+    expect(healthy.recalled).toBe(true);
   });
 
   // RCL-6 — the owner-naming preamble sits INSIDE the fence and is neutralized

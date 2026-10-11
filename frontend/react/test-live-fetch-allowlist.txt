@@ -41,15 +41,10 @@ src/chat/tabDeck/__tests__/TabChatDeck.test.tsx
 src/chrome/__tests__/Sidebar.lock.test.tsx
 src/chrome/__tests__/publicShellLiveRegion.test.tsx
 src/features/campaign-brief/__tests__/BriefValidation.test.tsx
-src/features/cms/__tests__/CmsPage.test.tsx
-src/features/cms/__tests__/honestyBatch.test.tsx
-src/features/cms/__tests__/orgsFailedNotSubset.test.tsx
 src/features/comments/__tests__/commentsDeepLink.test.tsx
 src/features/creative-briefs/__tests__/BriefLifecycle.test.tsx
 src/features/dashboard/__tests__/customizeUpgrade.test.tsx
 src/features/dashboard/__tests__/uxUpgradeAug.test.tsx
-src/features/documents/__tests__/documentsFailedReads.test.tsx
-src/features/documents/__tests__/documentsP2P3.test.tsx
 src/features/evals/__tests__/ArenaPage.test.tsx
 src/features/kicktodo-circles/__tests__/CirclesProposals.test.tsx
 src/features/kicktodo/__tests__/unknownNotEmpty.test.tsx
@@ -58,10 +53,8 @@ src/features/operations/__tests__/opsHealthHonesty.test.tsx
 src/features/podcasts/__tests__/orgsFailedNotEmpty.test.tsx
 src/features/projects/__tests__/charterUnsavedGuard.test.tsx
 src/features/projects/__tests__/deleteReceipt.test.tsx
-src/features/projects/__tests__/failuresAsAnswers.test.tsx
 src/features/strategy/__tests__/alignmentReads.test.tsx
 src/features/tutorials/__tests__/TutorialsPage.progress.test.tsx
-src/features/twin/__tests__/twinLinkNotOfferedOnFailedRead.test.tsx
 src/kanban/__tests__/boardMutationRefresh.test.tsx
 src/notifications/__tests__/contentReviewCard.test.tsx
 src/notifications/__tests__/liveTruthAndKinds.test.tsx

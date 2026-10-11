@@ -11,6 +11,16 @@
  *   C5 audit rows (`cms.*`) with `payload.tenantId` stamped;
  *   C6 governed surface verbs — getDraftPage/updateSectionDraft (draft-only)
  *      /submitPage (queues the approval when the gate is ON; no publish verb).
+ *
+ * Sabotage-witnessed (grade-tests wave 16, w16g4-pc-*): a wrong publish event type, an
+ * unscoped subscriber lookup (foreign tenant matches), or an unstamped audit tenantId red
+ * C1/C5; dropping the schedule route's gate 409, the sweep's publish or its gate-at-fire
+ * check red C2; serving raw refs or allowing a referenced delete reds C4; not queueing the
+ * approval or an unsanitized overlay link reds C6.
+ * HONEST DOUBLE GUARDS (recorded, not loosened): C6 "draft-only" is enforced twice in
+ * `surface.updateSectionDraft` (its own status check AND the `authorize` re-check inside
+ * `updatePage`), and C6 "sanitized" twice (`sanitizeSectionOverlay` AND `updatePage →
+ * validateSections`) — removing either one alone leaves this case green.
  */
 
 import http from 'node:http';
@@ -47,7 +57,25 @@ async function setToggle(id: string, status: 'on' | 'off'): Promise<void> {
   if (d) await saveConfig({ ...d, status }, 'test');
 }
 
-interface Res<T = any> { status: number; headers: Headers; body: T }
+interface SectionBody {
+  sectionId: string;
+  data: Record<string, unknown>;
+  ref?: { sharedSectionId: string };
+  localizations?: Record<string, Record<string, unknown>>;
+}
+// The success shapes these routes return. `res.json()` is untyped; this declares the contract
+// the assertions below check.
+interface Body {
+  orgId: string; pageId: string; slug: string; status: string; version: number;
+  scheduledPublishAt?: string;
+  versions: Array<{ versionId: string }>;
+  sharedSectionId: string;
+  sections: SectionBody[];
+  pages: Array<{ pageId: string }>;
+  page: { sections: SectionBody[] };
+}
+interface Res { status: number; headers: Headers; body: Body }
+interface DraftOut extends Record<string, unknown> { page: { status: string; sections: SectionBody[] } }
 interface Client {
   get: (p: string, headers?: Record<string, string>) => Promise<Res>;
   post: (p: string, b?: unknown) => Promise<Res>;
@@ -63,7 +91,7 @@ function client(): Client {
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    const out = (res.status === 204 ? undefined : await res.json().catch(() => undefined)) as Body; // wire JSON (204/unparseable bodies are never read)
     return { status: res.status, headers: res.headers, body: out };
   };
   return {
@@ -131,9 +159,10 @@ describe('C5 — audit rows', () => {
     const { owner, orgId, tenantId } = await ownerOrg();
     const { pageId } = await draftPage(owner, orgId);
     await owner.post(u(orgId, `/pages/${pageId}/publish`));
-    const rows = await storage().listAudit({ actionPrefix: 'cms.', limit: 50 });
+    // Scoped to THIS page's resource: every case appends to the one app's audit log.
+    const rows = await storage().listAudit({ actionPrefix: 'cms.', resource: pageId, limit: 50 });
     const mine = rows.filter((r) => (r.payload as { pageId?: string })?.pageId === pageId);
-    expect(mine.length).toBeGreaterThan(0);
+    expect(mine.map((r) => r.action)).toContain('cms.publish');
     for (const row of mine) expect((row.payload as { tenantId?: string }).tenantId).toBe(tenantId);
   });
 });
@@ -201,7 +230,7 @@ describe('C4 — shared sections', () => {
     const { owner, orgId } = await ownerOrg();
     const created = await owner.post(u(orgId, '/shared-sections'), { name: 'Footer CTA', type: 'cta', data: { label: 'Try it', url: '/signup', heading: 'Ready?' } });
     expect(created.status, JSON.stringify(created.body)).toBe(201);
-    const sharedSectionId = created.body.sharedSectionId as string;
+    const sharedSectionId = created.body.sharedSectionId;
     expect(sharedSectionId.startsWith('shsec:')).toBe(true);
 
     // A page inherits it by ref (no own content).
@@ -213,26 +242,26 @@ describe('C4 — shared sections', () => {
       ],
     });
     expect(page.status, JSON.stringify(page.body)).toBe(201);
-    const pageId = page.body.pageId as string;
-    const slug = page.body.slug as string;
-    expect(page.body.sections[1].ref.sharedSectionId).toBe(sharedSectionId);
+    const pageId = page.body.pageId;
+    const slug = page.body.slug;
+    expect(page.body.sections[1]?.ref?.sharedSectionId).toBe(sharedSectionId);
 
     // Impact list names the referencing page.
     const impact = await owner.get(u(orgId, `/shared-sections/${sharedSectionId}/pages`));
-    expect(impact.body.pages.map((p: any) => p.pageId)).toEqual([pageId]);
+    expect(impact.body.pages.map((p) => p.pageId)).toEqual([pageId]);
 
     // Delivery resolves the ref to the SHARED content.
     await owner.post(u(orgId, `/pages/${pageId}/publish`));
     const read = await owner.get(u(orgId, `/pages/by-slug/${slug}`));
     expect(read.status).toBe(200);
-    expect(read.body.page.sections[1].data.label).toBe('Try it');
+    expect(read.body.page.sections[1]?.data.label).toBe('Try it');
 
     // Editing the shared section changes what delivery serves (site-wide edit).
     const upd = await owner.patch(u(orgId, `/shared-sections/${sharedSectionId}`), { data: { label: 'Start now', url: '/signup', heading: 'Ready?' } });
     expect(upd.status).toBe(200);
     expect(upd.body.version).toBe(2);
     const read2 = await owner.get(u(orgId, `/pages/by-slug/${slug}`));
-    expect(read2.body.page.sections[1].data.label).toBe('Start now');
+    expect(read2.body.page.sections[1]?.data.label).toBe('Start now');
 
     // Deleting while referenced 409s.
     expect((await owner.del(u(orgId, `/shared-sections/${sharedSectionId}`))).status).toBe(409);
@@ -252,32 +281,38 @@ describe('C6 — governed surface verbs', () => {
   it('getDraftPage reads raw; updateSectionDraft is draft-only; submitPage queues the approval when gated; NO publish verb exists', async () => {
     const { owner, orgId, tenantId } = await ownerOrg();
     const { pageId } = await draftPage(owner, orgId, 'Draftable');
-    const surface = buildCmsSurface({ tenantId, runId: 'run:test' }) as Record<string, (args: Record<string, unknown>) => Promise<any>>;
+    const surface = buildCmsSurface({ tenantId, runId: 'run:test' });
 
-    expect(surface.publishPage).toBeUndefined(); // the rejected verb must not exist
+    expect('publishPage' in surface, 'the rejected verb must not exist').toBe(false);
     expect(typeof surface.submitPage).toBe('function');
 
-    const draft = await surface.getDraftPage!({ orgId, pageId });
+    const draft = (await surface.getDraftPage!({ orgId, pageId })) as DraftOut;
     expect(draft.page.status).toBe('draft');
-    const sectionId = draft.page.sections[0].sectionId as string;
-    expect(draft.page.sections[0].data.heading).toBe('Hi');
+    const sectionId = draft.page.sections[0]!.sectionId;
+    expect(draft.page.sections[0]!.data.heading).toBe('Hi');
 
     // Overlay a locale onto the draft (sanitized like an editor save). ADR 0836
     // D10 — a run-written overlay needs `cms-localization` ON, as the route does.
-    const loc = getToggleDefault('cms-localization');
-    await saveConfig({ ...loc!, status: 'on' }, 'test');
-    const upd = await surface.updateSectionDraft!({ orgId, pageId, sectionId, locale: 'pt-BR', data: { heading: 'Oi', url: 'javascript:alert(1)' } });
-    expect(upd.updated).toBe(true);
-    const viaRoute = await owner.get(u(orgId, `/pages/${pageId}`));
-    expect(viaRoute.body.sections[0].localizations['pt-BR'].heading).toBe('Oi');
-    expect(viaRoute.body.sections[0].localizations['pt-BR'].url ?? '').toBe(''); // sanitized
+    await setToggle('cms-localization', 'on');
+    try {
+      // A hero's link field is `ctaUrl` (it carries one only with a `ctaLabel`). The old
+      // fixture sent `url`, which a hero has no field for — dropped whatever the sanitizer
+      // did, so the "sanitized" assertion could not fail (w16g4-pc-store-sanitize, vacuous).
+      const upd = await surface.updateSectionDraft!({ orgId, pageId, sectionId, locale: 'pt-BR', data: { heading: 'Oi', ctaLabel: 'Ir', ctaUrl: 'javascript:alert(1)' } });
+      expect(upd.updated).toBe(true);
+      const overlay = (await owner.get(u(orgId, `/pages/${pageId}`))).body.sections[0]?.localizations?.['pt-BR'];
+      expect(overlay?.heading).toBe('Oi');
+      expect(overlay?.ctaLabel, 'the link field survived — so an empty URL is the sanitizer, not a dropped key').toBe('Ir');
+      expect(overlay?.ctaUrl).toBe(''); // javascript: scheme dropped
+    } finally {
+      await setToggle('cms-localization', 'off');
+    }
 
     // Submit with the gate ON queues the SAME approval as the editor submit.
     await setToggle('cms-approval-gate', 'on');
     try {
       const sub = await surface.submitPage!({ orgId, pageId });
-      expect(sub.submitted).toBe(true);
-      expect(sub.status).toBe('in_review');
+      expect(sub, JSON.stringify(sub)).toMatchObject({ submitted: true, status: 'in_review' });
       expect(await hasPendingApprovalForPage(tenantId, pageId)).toBe(true);
     } finally {
       await setToggle('cms-approval-gate', 'off');

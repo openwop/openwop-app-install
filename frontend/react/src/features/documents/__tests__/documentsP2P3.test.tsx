@@ -12,9 +12,22 @@
  *
  * Both arms asserted per the P1 rule: the failure renders the failure, AND the
  * genuine case still renders its real state.
+ *
+ * Sabotage witnesses (grade-tests w14): a failed projects read set to `[]`, a
+ * dead projects retry, the failure Notice shown always, a 500 folded to "not
+ * found", a 404 not folded, a detail retry that never reloads, or a disabled
+ * Download menu — each turns its case red. `listPackCanvasTypes` is mocked (the
+ * blanket access mock turns `canvas-packs` on; it was this file's only live
+ * fetch, ADR 0661).
+ *
+ * Was BLOCKED-ON-PRODUCT (w14, TST-DOC-36) as `it.fails`; FIXED. A REAL 404 did not
+ * reach "not found": the client throws `DocumentsApiError('Document not found.', 404)`
+ * (the server envelope carries a message), and `DocumentDetailPage` classified by
+ * the MESSAGE suffix `returned 40[34]`, so it rendered the retryable failure card.
+ * The page now classifies on `e.status` (403/404), as `FormsRouting` does.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, cleanup, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, cleanup, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 
 import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
@@ -45,7 +58,13 @@ vi.mock('../../../client/accessClient.js', async (importOriginal) => {
   return { ...orig, getEffectiveAccess: acc.getEffectiveAccess };
 });
 
+vi.mock('../../../canvas/canvasClient.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../canvas/canvasClient.js')>()),
+  listPackCanvasTypes: vi.fn(async () => []),
+}));
+
 import { DocumentsPage } from '../DocumentsPage.js';
+import { DocumentsApiError } from '../documentsClient.js';
 import { DocumentDetailPage } from '../DocumentDetailPage.js';
 
 const ORG = { orgId: 'org_1', name: 'Org One' };
@@ -67,7 +86,7 @@ beforeEach(() => {
   api.listTemplates.mockResolvedValue([]);
   api.getDocument.mockResolvedValue({ ...DOC, currentVersion: { version: 1, content: 'hello', createdAt: DOC.createdAt } });
   api.listVersions.mockResolvedValue([]);
-  acc.getEffectiveAccess.mockResolvedValue({ scopes: ['workspace:write'] });
+  acc.getEffectiveAccess.mockResolvedValue({ roles: [], scopes: ['workspace:write'], basis: 'member' });
   projectsApi.listProjects.mockResolvedValue([]);
 });
 afterEach(cleanup);
@@ -95,6 +114,8 @@ describe('P3 / UX-DOC-4 — assign modal projects-read honesty', () => {
     await openAssignModal();
     await waitFor(() => expect(screen.getByText(/no project$/i)).toBeTruthy());
     expect(screen.queryByText(/couldn’t load your projects/i)).toBeNull();
+    const options = within(screen.getByRole('dialog')).getAllByRole('option').map((o) => o.textContent);
+    expect(options).toEqual(['No project']);
   });
 });
 
@@ -108,7 +129,8 @@ function viewDetail(): void {
 
 describe('P2 / UX-DOC-6 — detail-page load failures', () => {
   it('a 500 renders a retryable failure card, NOT "not found"', async () => {
-    api.getDocument.mockRejectedValue(new Error('getDocument returned 500'));
+    // What the client throws for a 500 whose body carries a message.
+    api.getDocument.mockRejectedValue(new DocumentsApiError('Internal server error.', 500));
     viewDetail();
     await screen.findByText(/couldn’t load this document/i);
     expect(screen.queryByText(/document not found/i)).toBeNull();
@@ -118,9 +140,23 @@ describe('P2 / UX-DOC-6 — detail-page load failures', () => {
   });
 
   it('a 404 still folds to "not found" (no existence leak)', async () => {
+    // NOT representative of production: this is the client's fallback message,
+    // thrown only for a 40x with an EMPTY body. A real 404 carries the server's
+    // message — see the REAL-404 case below. Kept as the witness of the
+    // status-less message branch the page still honours.
     api.getDocument.mockRejectedValue(new Error('getDocument returned 404'));
     viewDetail();
     await screen.findByText(/document not found/i);
+    expect(screen.queryByText(/couldn’t load this document/i)).toBeNull();
+  });
+
+  // The REAL client error for a 404 (TST-DOC-36). It rendered the retryable
+  // failure card until `DocumentDetailPage` classified on `e.status`.
+  it('a REAL 404 (DocumentsApiError with the server message) folds to "not found"', async () => {
+    api.getDocument.mockRejectedValue(new DocumentsApiError('Document not found.', 404));
+    viewDetail();
+    // Exact title text: the failure card's BODY also ends "Document not found."
+    expect(await screen.findByText('Document not found')).toBeTruthy();
     expect(screen.queryByText(/couldn’t load this document/i)).toBeNull();
   });
 

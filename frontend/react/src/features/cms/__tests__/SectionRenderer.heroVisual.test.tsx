@@ -1,3 +1,20 @@
+/**
+ * CMS hero visual treatments and the `rows` columns layout (df88eb26d; the run
+ * ledger is ADR 0762, 38e41cca3; re-pinned after the facelift 3080f2f24, #4049).
+ * Guards: decorative art stays aria-hidden; an authored image keeps its alt and
+ * replaces the default art; an absent `visual` falls back to the workflow motif
+ * and `none` draws none; the run ledger shows the protocol's own event names
+ * with exactly one waiting row; `rows` is an unnumbered list of h3 claims.
+ *
+ * Sabotage-witnessed (/grade-tests w17): un-hiding the journey svg or the run
+ * ledger, dropping the image alt, defaulting to `none`, ignoring `none`,
+ * dropping the waiting row, and demoting the row titles from h3 each turn a
+ * case red.
+ *
+ * Ceiling: which motif rendered is observable in jsdom only through its
+ * stylesheet hook classes (`.fp-hero--*`, `.fp-hero__product`), so those
+ * class assertions are the claim, not incidental shape.
+ */
 import { afterEach, describe, expect, it } from 'vitest';
 import { cleanup, render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
@@ -59,7 +76,7 @@ describe('CMS columns layout: rows', () => {
   it('renders parallel statements as an unnumbered list of h3 + text', () => {
     const section: Section = { sectionId: 'r', type: 'columns', data: { heading: 'Open', layout: 'rows', columns: [{ title: 'You can leave.', text: 'Move hosts.' }, { title: 'You can see why.', text: 'Every event.' }] } };
     const { container } = render(<MemoryRouter><RenderSection section={section} mode="public" /></MemoryRouter>);
-    expect(container.querySelector('ul.fp-rows__list')).toBeTruthy();
+    expect(screen.getByRole('list').tagName).toBe('UL');
     expect(container.querySelector('.fp-step__num, ol')).toBeNull();
     expect(screen.getAllByRole('heading', { level: 3 }).map((h) => h.textContent)).toEqual(['You can leave.', 'You can see why.']);
   });

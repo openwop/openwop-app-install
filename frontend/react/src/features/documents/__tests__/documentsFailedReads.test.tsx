@@ -13,9 +13,18 @@
  *
  * So every describe below has BOTH arms: the failure renders the failure, AND a
  * real empty answer still renders the instructive empty state.
+ *
+ * Sabotage witnesses (grade-tests w14): pass `orgsFailed={false}`, swap the
+ * feature clauses, wire `retry` to a no-op (the retry case CLICKS it and needs a
+ * second `listOrgs` read — HV-1b), swallow the access or canvas failure, or raise
+ * either warning on a successful read — each turns its case red. The absence arms
+ * wait for the read they are about to judge (the empty list card renders only
+ * after the documents+canvases `.then`), never just for the first heading.
+ * `listPackCanvasTypes` is mocked: the blanket access mock turns `canvas-packs`
+ * on, and that was this file's only live fetch (ADR 0661).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, cleanup, screen } from '@testing-library/react';
+import { render, cleanup, screen, fireEvent, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 
 const access = vi.hoisted(() => ({ enabled: true }));
@@ -41,9 +50,18 @@ vi.mock('../../../client/accessClient.js', async (importOriginal) => {
   return { ...orig, getEffectiveAccess: acc.getEffectiveAccess };
 });
 
+vi.mock('../../../canvas/canvasClient.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../canvas/canvasClient.js')>()),
+  listPackCanvasTypes: vi.fn(async () => []),
+}));
+
 import { DocumentsPage } from '../DocumentsPage.js';
 
 const ORG = { orgId: 'org_1', name: 'Org One' };
+
+async function drain(): Promise<void> {
+  for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+}
 
 function view(): void {
   render(<MemoryRouter initialEntries={['/documents']}><DocumentsPage /></MemoryRouter>);
@@ -93,9 +111,14 @@ describe('UX-DOC-1 — a failed orgs read never borrows the "create one first" i
     api.listOrgs.mockRejectedValue(new Error('orgs_500'));
     view();
     await screen.findByText('Could not load your organizations');
-    // A dead end is not a designed error state.
+    // A dead end is not a designed error state — and the retry must RE-READ
+    // (HV-1b): heal the endpoint, click, and the page recovers.
     // The shared card's retry is labelled from the `ui` namespace ("Try again").
-    expect(screen.getByRole('button', { name: /try again/i })).toBeTruthy();
+    api.listOrgs.mockResolvedValue([ORG]);
+    fireEvent.click(screen.getByRole('button', { name: /try again/i }));
+    expect(await screen.findByText('No documents yet')).toBeTruthy();
+    expect(api.listOrgs).toHaveBeenCalledTimes(2);
+    expect(screen.queryByText('Could not load your organizations')).toBeNull();
   });
 });
 
@@ -110,7 +133,9 @@ describe('UX-DOC-3 — a failed permission check is not a denial', () => {
     // The other arm: a genuine denial must NOT claim the check failed.
     acc.getEffectiveAccess.mockResolvedValue({ roles: [], scopes: [], basis: 'none' });
     view();
-    await screen.findByRole('heading', { level: 2 });
+    await screen.findByText('No documents yet');
+    await waitFor(() => expect(acc.getEffectiveAccess).toHaveBeenCalled());
+    await drain();
     expect(screen.queryByText(/couldn't check your permissions/i)).toBeNull();
   });
 });
@@ -125,7 +150,8 @@ describe('UX-DOC-5 — a half-loaded list says which half is missing', () => {
   it('EMPTY: genuinely zero canvases raises no warning', async () => {
     api.listCanvasSources.mockResolvedValue({ canvases: [], total: 0 });
     view();
-    await screen.findByRole('heading', { level: 2 });
+    // Rendered only by the documents+canvases `.then` — the read this arm judges.
+    await screen.findByText('No documents yet');
     expect(screen.queryByText(/Canvases didn't load/i)).toBeNull();
   });
 });

@@ -12,7 +12,15 @@
  * untyped `.mjs` loaded from `~/.openwop-packs`, and the chains are builder-editable. So the
  * sentinel leg below feeds the real node a payload of poisoned keys and asserts that
  * nothing the card withheld reaches the request body.
+ *
+ * Sabotages that turn it red (grade-tests w11): `subject` dropped from the email card;
+ * `servicedesk.reply` given no card fields; `event` declared scalar; the invite node sending
+ * the whole payload; the email node writing a withheld field into a header. That last one
+ * was INVISIBLE to the first draft of the sentinel leg — the email body is base64url
+ * (`{raw}`), so a plaintext `includes` could never match; the leg now decodes it, with a
+ * positive control proving the decoded message is what is being read.
  */
+import { createRequire } from 'node:module';
 import { describe, expect, it } from 'vitest';
 import { cardFieldsFor } from '../src/features/assistant/actionApproval.js';
 import type { PendingActionKind } from '../src/features/assistant/assistantService.js';
@@ -65,7 +73,6 @@ describe('ADR 0662 D1 — the card covers what the executor consumes', () => {
     // The structural legs above can be satisfied by editing a table. This one runs the real
     // node: poison every payload key, build the request, and assert that any sentinel that
     // appears in the body corresponds to a field the card renders.
-    const { createRequire } = await import('node:module');
     const require = createRequire(import.meta.url);
     const nodePath = require.resolve('../../../packs/feature.assistant.nodes/index.mjs');
     const mod = (await import(nodePath)) as { prepareActionRequest?: (ctx: unknown) => Promise<unknown> };
@@ -86,7 +93,13 @@ describe('ADR 0662 D1 — the card covers what the executor consumes', () => {
       };
       const out = (await prepare!({ inputs: { action: { kind, payload, draft: 'draft text' } } })) as
         { status: string; outputs?: { body?: unknown } };
-      const body = JSON.stringify(out.outputs?.body ?? '');
+      const outBody = out.outputs?.body as { raw?: unknown } | undefined;
+      // The email request is a base64url RFC-822 message — decode it, or a sentinel smuggled
+      // into a header is invisible to this check.
+      const body = kind === 'email.send' && typeof outBody?.raw === 'string'
+        ? Buffer.from(outBody.raw.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8')
+        : JSON.stringify(outBody ?? '');
+      if (kind === 'email.send') expect(body, 'the decoded message is what is being checked').toContain('SENTINEL_SUBJECT');
       const shown = new Set(cardFieldsFor(kind).map((f) => f.field));
       // A field the card does NOT show must not appear in what the provider receives.
       expect(body.includes('SENTINEL_WITHHELD'), `${kind}: payload.secretNote is not on the card and must not reach the provider`).toBe(shown.has('secretNote'));

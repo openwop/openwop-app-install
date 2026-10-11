@@ -4,6 +4,9 @@
  * manufactured from a failed read, painted across rows that HAVE target dates.
  * The page now discriminates `'failed'` from "loaded empty" and states the
  * failure ("Schedule unavailable") per row + a retryable chip in the header.
+ *
+ * Sabotage-witnessed (w15): the row cell's `schedule === 'failed'` → false reds
+ * the "No date" absence; the header chip's branch → false reds the Retry.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, cleanup } from '@testing-library/react';
@@ -15,10 +18,10 @@ const LIST: PriorityList = {
   criteriaSet: { aggregation: 'weighted-sum', criteria: [{ id: 'impact', name: 'Impact', weight: 5, direction: 'benefit' }] },
   votingMode: 'single', voteAggregation: 'mean',
   createdBy: 'u1', createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-07-01T00:00:00.000Z',
-} as PriorityList;
+};
 
 const IDEAS: RankedIdea[] = [
-  { card: { id: 'c1', title: 'Dated idea', columnId: 'new' }, status: { columnId: 'new', columnName: 'New', terminal: false }, scores: { impact: 6 }, computedPriority: 6, rank: 1 },
+  { card: { id: 'c1', title: 'Dated idea', columnId: 'new' }, status: { columnId: 'new', columnName: 'New', terminal: false }, scores: { impact: 6 }, computedPriority: 6, rank: 1, completeness: { declared: 1, scored: 1, missing: [], complete: true } },
 ];
 
 vi.mock('../priorityMatrixClient.js', async (orig) => ({
@@ -50,6 +53,9 @@ describe('PMXU-4 — failed schedule read is stated, never claimed as "No date"'
     await screen.findByText('Dated idea');
     // The failure is stated (per-row cell + retryable header chip)…
     expect((await screen.findAllByText('Schedule unavailable')).length).toBeGreaterThan(0);
+    // …including the RETRYABLE header chip (the per-row cell alone satisfied the line above).
+    const retry = screen.getByRole('button', { name: /^retry$/i });
+    expect(retry.closest('.chip')?.textContent).toContain('Schedule unavailable');
     // …and the false "No date" claim is NOWHERE (born red: pre-fix every row
     // chipped `scheduleUnscheduled` = "No date" on a failed read).
     expect(screen.queryByText('No date')).toBeNull();

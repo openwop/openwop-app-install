@@ -6,14 +6,19 @@
  * does not include this feature.." — a paywall dressed as a failure, with a
  * doubled period. A locked feature is not a load error: it says so, links to
  * where it can be bought, and does not ask the server for a list it will refuse.
+ *
+ * Sabotage-witnessed (/grade-tests w12): fetching while locked, dropping the locked
+ * branch or its bundle link, skipping the fetch when entitled, and dropping the
+ * trailing-period trim each turn a case red.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { makeFeatureAccess } from '../../featureToggles/__testing__/makeFeatureAccess.js';
+import type { AdvisoryBoard } from '../../features/advisory-board/advisoryBoardClient.js';
 
 const access = vi.hoisted(() => ({ locked: false }));
-const listBoards = vi.hoisted(() => vi.fn());
+const listBoards = vi.hoisted(() => vi.fn<() => Promise<AdvisoryBoard[]>>());
 vi.mock('../../featureToggles/FeatureAccessContext.js', () => ({
   useFeatureAccess: () => makeFeatureAccess({ locked: access.locked, entitled: !access.locked }),
 }));
@@ -54,9 +59,16 @@ describe('the `@@` picker on a plan without boards', () => {
   });
 
   it('an entitled plan still loads and lists boards', async () => {
-    listBoards.mockResolvedValue([{ handle: 'titans', name: 'Living Titans', advisors: [1, 2] }]);
+    const titans: AdvisoryBoard = {
+      boardId: 'b-titans', tenantId: 't', orgId: 'org-1', name: 'Living Titans', handle: 'titans',
+      advisors: ['r-1', 'r-2'], visibility: 'shared', personaKind: 'historical',
+      turnPolicy: { rounds: 1, order: 'declared', synthesize: true },
+      createdBy: 'user:me', createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z', disclaimer: null,
+    };
+    listBoards.mockResolvedValue([titans]);
     render(picker());
     expect(await screen.findByText(/Living Titans/)).toBeTruthy();
+    expect(screen.getByText(/2 advisors/)).toBeTruthy();
     expect(listBoards).toHaveBeenCalledTimes(1);
   });
 

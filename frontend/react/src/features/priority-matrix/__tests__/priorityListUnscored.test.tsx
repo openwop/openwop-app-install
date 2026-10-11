@@ -17,6 +17,10 @@
  * priority number) selects the Unscored label, and a partially-scored idea shows its
  * number plus "n of m scored". The original text is preserved above rather than
  * rewritten, because the way this claim decayed IS the lesson.
+ *
+ * Sabotage-witnessed (w15): the `c.scored === 0` guard, the `c && !c.complete`
+ * partial guard, the rollup chip's sum gate and its onTrack/atRisk/behind field
+ * mapping each red a case below.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, cleanup } from '@testing-library/react';
@@ -28,7 +32,7 @@ const LIST: PriorityList = {
   criteriaSet: { aggregation: 'weighted-sum', criteria: [{ id: 'impact', name: 'Impact', weight: 5, direction: 'benefit' }] },
   votingMode: 'single', voteAggregation: 'mean',
   createdBy: 'u1', createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-07-01T00:00:00.000Z',
-} as PriorityList;
+};
 
 const IDEAS: RankedIdea[] = [
   // ADR 0667 D1c — `completeness` is what selects the label now, not the number.
@@ -91,8 +95,10 @@ describe('R3 — priority 0 renders as Unscored, never as a score', () => {
       </MemoryRouter>,
     );
     await screen.findByText('Blank idea');
-    // `scheduleRollupSummary` = "{{onTrack}} on track · {{atRisk}} at risk · {{behind}} behind"
-    expect(await screen.findByText(/on track.*at risk.*behind/)).toBeTruthy();
+    // `scheduleRollupSummary` = "{{onTrack}} on track · {{atRisk}} at risk · {{behind}} behind".
+    // The exact numbers, not a shape regex: PMX-11 was a FIELD-MAPPING defect, and
+    // `/on track.*at risk.*behind/` matched any numbers (NaN included).
+    expect(await screen.findByText('1 on track · 0 at risk · 0 behind')).toBeTruthy();
   });
 
   it('ADR 0667 D1c — a partially-scored idea shows its number AND "3 of 4 scored", never a bare number', async () => {

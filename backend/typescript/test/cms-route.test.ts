@@ -5,6 +5,17 @@
  * + by-slug published read (Phase 2), versioning + slug redirects (Phase 3), and
  * the three-tier RBAC (editor edits/submits, admin approves/publishes, viewer
  * read-only, cross-tenant fail-closed).
+ *
+ * Sabotage-witnessed (grade-tests wave 16, w16g4-r-*): an unsanitized CTA link, an
+ * un-suffixed slug collision or an un-bumped version reds Phase 1; a draft visible by slug
+ * reds Phase 2; no redirect on a published rename reds Phase 3 and the double-rename case;
+ * a write route at read scope reds RBAC; dropping the live-tier edit gate reds the editorial
+ * gate; `unpublish` not leaving `archived` reds the dead-end case; a version lookup without
+ * the pageId check reds the IDOR case; a redirect chain that is not collapsed reds the last.
+ * HONEST DOUBLE GUARD: lowering the approve ROUTE's scope alone leaves Phase 2 green — the
+ * review-decision handler re-enforces `host:members:manage` (w16g4-r-approve-scope).
+ * (wave 16 also removed `enableCms`: ADR 0027 retired the `cms` toggle, so it was a no-op
+ * called eight times as if it were setup — the first case asserts there is no such toggle.)
  */
 
 import http from 'node:http';
@@ -30,7 +41,21 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T }
+// The success shapes these routes return. `res.json()` is untyped; this declares the contract
+// the assertions below check.
+interface PageBody {
+  pageId: string; slug: string; title: string; status: string; version: number; publishedVersion?: number;
+  sections: Array<{ data: Record<string, unknown> }>;
+}
+interface Body extends PageBody {
+  user: { userId: string };
+  orgId: string;
+  error?: string;
+  versions: Array<{ versionId: string }>;
+  page: PageBody;
+  redirectedFrom?: string;
+}
+interface Res { status: number; body: Body }
 interface Client { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res>; patch: (p: string, b?: unknown) => Promise<Res>; del: (p: string) => Promise<Res>; snapshot: () => string }
 function client(initialCookie = ''): Client {
   let cookie = initialCookie;
@@ -38,7 +63,7 @@ function client(initialCookie = ''): Client {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     const sc = getSetCookies(res.headers);
     for (const ck of sc as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    const out = (res.status === 204 ? undefined : await res.json().catch(() => undefined)) as Body; // wire JSON (204/unparseable bodies are never read)
     return { status: res.status, body: out };
   };
   return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), patch: (p, b) => call('PATCH', p, b), del: (p) => call('DELETE', p), snapshot: () => cookie };
@@ -53,9 +78,6 @@ async function signup(c: Client, opts: { tenantId?: string } = {}): Promise<{ us
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return r.body.user;
 }
-// ADR 0027: CMS is always-on (no `cms` toggle), so this is a no-op kept so the
-// many `enableCms('on')` call sites below still read clearly as "ensure CMS on".
-const enableCms = async (status: 'on' | 'off'): Promise<void> => { const d = getToggleDefault('cms'); if (d) await saveConfig({ ...d, status }, 'test'); };
 
 async function ownerWithMember(role: string): Promise<{ owner: Client; member: Client; orgId: string }> {
   // Co-tenant owner + member: mint each into one shared explicit tenantId.
@@ -84,7 +106,6 @@ describe('cms — always-on (ADR 0027)', () => {
 
 describe('cms — pages + sections + slugs (Phase 1)', () => {
   it('creates a draft, validates sections, sanitizes content, uniques the slug', async () => {
-    await enableCms('on');
     const { owner, orgId } = await ownerWithMember('viewer');
 
     const page = await owner.post(u(orgId, '/pages'), {
@@ -101,9 +122,9 @@ describe('cms — pages + sections + slugs (Phase 1)', () => {
     expect(page.body.sections).toHaveLength(3);
     // richText is PLAIN TEXT, not HTML — the literal `<script>` is stored inert
     // (rendered as text), so there is no sanitizer to bypass and no `html` field.
-    expect(page.body.sections[1].data.html).toBeUndefined();
-    expect(page.body.sections[1].data.text).toBe('hello <script>alert(1)</script> world');
-    expect(page.body.sections[2].data.url).toBe(''); // dangerous scheme dropped
+    expect(page.body.sections[1]?.data.html).toBeUndefined();
+    expect(page.body.sections[1]?.data.text).toBe('hello <script>alert(1)</script> world');
+    expect(page.body.sections[2]?.data.url).toBe(''); // dangerous scheme dropped
 
     // A hero without its required heading → 400; an unknown type → 400.
     expect((await owner.post(u(orgId, '/pages'), { title: 'X', sections: [{ type: 'hero', data: {} }] })).status).toBe(400);
@@ -123,7 +144,6 @@ describe('cms — pages + sections + slugs (Phase 1)', () => {
 
 describe('cms — editorial workflow + by-slug (Phase 2)', () => {
   it('editor submits, admin approves/publishes; by-slug shows only published; illegal transitions 409', async () => {
-    await enableCms('on');
     const { owner, member, orgId } = await ownerWithMember('editor');
     const page = (await owner.post(u(orgId, '/pages'), { title: 'Blog Post' })).body;
 
@@ -156,7 +176,6 @@ describe('cms — editorial workflow + by-slug (Phase 2)', () => {
 
 describe('cms — versions + redirects (Phase 3)', () => {
   it('publish snapshots a version; slug change leaves a redirect; restore returns to draft', async () => {
-    await enableCms('on');
     const { owner, orgId } = await ownerWithMember('viewer');
     const page = (await owner.post(u(orgId, '/pages'), { title: 'Original', sections: [{ type: 'hero', data: { heading: 'V1' } }] })).body;
     await owner.post(u(orgId, `/pages/${encodeURIComponent(page.pageId)}/publish`));
@@ -164,7 +183,7 @@ describe('cms — versions + redirects (Phase 3)', () => {
     // A published version was snapshotted.
     const versions = await owner.get(u(orgId, `/pages/${encodeURIComponent(page.pageId)}/versions`));
     expect(versions.body.versions.length).toBeGreaterThanOrEqual(1);
-    const versionId = versions.body.versions[0].versionId;
+    const versionId = versions.body.versions[0]?.versionId;
 
     // Edit content, then change the slug on the published page → redirect recorded.
     await owner.patch(u(orgId, `/pages/${encodeURIComponent(page.pageId)}`), { sections: [{ type: 'hero', data: { heading: 'V2' } }] });
@@ -180,13 +199,12 @@ describe('cms — versions + redirects (Phase 3)', () => {
     const restored = await owner.post(u(orgId, `/pages/${encodeURIComponent(page.pageId)}/restore/${encodeURIComponent(versionId)}`));
     expect(restored.status, JSON.stringify(restored.body)).toBe(200);
     expect(restored.body.status).toBe('draft');
-    expect(restored.body.sections[0].data.heading).toBe('V1');
+    expect(restored.body.sections[0]?.data.heading).toBe('V1');
   });
 });
 
 describe('cms — RBAC', () => {
   it('viewer reads but cannot write (403); a cross-tenant non-member is fail-closed (404)', async () => {
-    await enableCms('on');
     const { owner, member, orgId } = await ownerWithMember('viewer');
     await owner.post(u(orgId, '/pages'), { title: 'Seed' });
     expect((await member.get(u(orgId, '/pages'))).status).toBe(200);
@@ -202,7 +220,6 @@ describe('cms — RBAC', () => {
 
 describe('cms — followup hardening', () => {
   it('editorial gate: an editor cannot edit a PUBLISHED page (403); admin can; unpublish reopens it', async () => {
-    await enableCms('on');
     const { owner, member, orgId } = await ownerWithMember('editor');
     const page = (await owner.post(u(orgId, '/pages'), { title: 'Live' })).body;
     const pid = encodeURIComponent(page.pageId);
@@ -228,7 +245,6 @@ describe('cms — followup hardening', () => {
   });
 
   it('archived is not a dead-end: unpublish reopens an archived page', async () => {
-    await enableCms('on');
     const { owner, orgId } = await ownerWithMember('viewer');
     const page = (await owner.post(u(orgId, '/pages'), { title: 'A' })).body;
     const pid = encodeURIComponent(page.pageId);
@@ -238,19 +254,17 @@ describe('cms — followup hardening', () => {
   });
 
   it("rejects restoring another page's version (cross-page IDOR → 404)", async () => {
-    await enableCms('on');
     const { owner, orgId } = await ownerWithMember('viewer');
     const a = (await owner.post(u(orgId, '/pages'), { title: 'A' })).body;
     const b = (await owner.post(u(orgId, '/pages'), { title: 'B' })).body;
     await owner.post(u(orgId, `/pages/${encodeURIComponent(a.pageId)}/publish`));
     await owner.post(u(orgId, `/pages/${encodeURIComponent(b.pageId)}/publish`));
-    const bVersion = (await owner.get(u(orgId, `/pages/${encodeURIComponent(b.pageId)}/versions`))).body.versions[0].versionId;
+    const bVersion = (await owner.get(u(orgId, `/pages/${encodeURIComponent(b.pageId)}/versions`))).body.versions[0]?.versionId;
     const cross = await owner.post(u(orgId, `/pages/${encodeURIComponent(a.pageId)}/restore/${encodeURIComponent(bVersion)}`));
     expect(cross.status).toBe(404);
   });
 
   it('redirects survive a double rename (chain collapse — old slug still resolves)', async () => {
-    await enableCms('on');
     const { owner, orgId } = await ownerWithMember('viewer');
     const page = (await owner.post(u(orgId, '/pages'), { title: 'Orig', slug: 'orig' })).body;
     const pid = encodeURIComponent(page.pageId);

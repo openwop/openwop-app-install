@@ -1,6 +1,7 @@
-import { describe, it, expect, vi, afterEach } from 'vitest';
-import { render, screen, cleanup, waitFor } from '@testing-library/react';
-import type { Project } from '../projectsClient.js';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { render, screen, cleanup, waitFor, act } from '@testing-library/react';
+import type { Project, listProjectMembers as ListProjectMembers } from '../projectsClient.js';
+import type { OrgMember } from '../../../client/accessClient.js';
 import { messages as en } from '../i18n/en.js';
 
 /**
@@ -17,21 +18,31 @@ const removeAria = (name: string): string => en.removeMemberAria.replace('{{name
  * non-writer (`canWrite={false}`) sees the roster read-only. The FE gate is a UX
  * hint — the backend still enforces — so this guards the affordance visibility,
  * not authority.
+ *
+ * Sabotage-witnessed (wave 13, w13g4-pma-*): ungating the Add card, the Remove button
+ * or the visibility toggle's `!canWrite`, ignoring a declined confirm, dropping the
+ * success acknowledgement, and confirming on the recovery path (`if (true)` and
+ * `v !== visibility`) each turn their case below red. The last one was VACUOUS until
+ * wave 13: the members read always answered `visibility: 'org'`, so the "private ->
+ * org" case actually clicked org -> org. The read now agrees with the prop.
  */
 const confirmMock = vi.fn(async (_opts: unknown) => true);
 const setProjectVisibilityMock = vi.fn<(id: string, v: string) => Promise<Project>>();
+const listProjectMembersMock = vi.fn<typeof ListProjectMembers>();
+const MEMBERS = [{ ref: 'user:u1', role: 'contributor' as const, addedAt: '2026-01-01T00:00:00Z' }];
+const ALICE: OrgMember = {
+  memberId: 'm1', orgId: 'o1', tenantId: 't', subject: 'u1', displayName: 'Alice',
+  roles: [], teamIds: [], createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z',
+};
 vi.mock('../../../ui/confirm.js', () => ({ confirm: (o: unknown) => confirmMock(o) }));
 vi.mock('../projectsClient.js', () => ({
-  listProjectMembers: vi.fn(async () => ({
-    members: [{ ref: 'user:u1', role: 'contributor', addedAt: '2026-01-01T00:00:00Z' }],
-    visibility: 'org',
-  })),
+  listProjectMembers: (id: string) => listProjectMembersMock(id),
   addProjectMember: vi.fn(),
   removeProjectMember: vi.fn(),
   setProjectVisibility: (id: string, v: string) => setProjectVisibilityMock(id, v),
 }));
 vi.mock('../../../client/accessClient.js', () => ({
-  listMembers: vi.fn(async () => [{ subject: 'u1', displayName: 'Alice' }]),
+  listMembers: vi.fn(async () => [ALICE]),
 }));
 vi.mock('../../../agents/rosterClient.js', () => ({
   listRoster: vi.fn(async () => []),
@@ -41,6 +52,7 @@ import { ProjectMembersTab } from '../ProjectMembersTab.js';
 
 const project: Project = { id: 'p1', tenantId: 't', orgId: 'o1', name: 'P', workflows: [], boardId: 'b1' };
 
+beforeEach(() => { listProjectMembersMock.mockReset(); listProjectMembersMock.mockResolvedValue({ members: MEMBERS, visibility: 'org' }); });
 afterEach(() => { cleanup(); confirmMock.mockReset(); confirmMock.mockResolvedValue(true); setProjectVisibilityMock.mockReset(); });
 
 describe('ProjectMembersTab — write-control gating (ADR 0063)', () => {
@@ -78,9 +90,11 @@ describe('visibility — confirm on narrowing, acknowledgement on success', () =
   it('org -> private ASKS first, and does nothing when the user declines', async () => {
     confirmMock.mockResolvedValueOnce(false);
     render(<ProjectMembersTab project={project} canWrite={true} onSaved={() => {}} />);
-    await screen.findByText(en.addToTeam);
+    await screen.findByText('Alice');
     (await screen.findByRole('button', { name: en.visibilityPrivate })).click();
     await waitFor(() => expect(confirmMock).toHaveBeenCalled());
+    // Let the declined confirm's continuation run before asserting it did nothing.
+    await act(async () => { for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r)); });
     // Declining is a real exit: the write never fires.
     expect(setProjectVisibilityMock).not.toHaveBeenCalled();
   });
@@ -89,7 +103,7 @@ describe('visibility — confirm on narrowing, acknowledgement on success', () =
     confirmMock.mockResolvedValueOnce(true);
     setProjectVisibilityMock.mockResolvedValueOnce({ ...project, visibility: 'private' });
     render(<ProjectMembersTab project={project} canWrite={true} onSaved={() => {}} />);
-    await screen.findByText(en.addToTeam);
+    await screen.findByText('Alice');
     (await screen.findByRole('button', { name: en.visibilityPrivate })).click();
     await waitFor(() => expect(setProjectVisibilityMock).toHaveBeenCalledWith('p1', 'private'));
     expect(await screen.findByText(en.visibilityNowPrivate)).toBeTruthy();
@@ -97,8 +111,12 @@ describe('visibility — confirm on narrowing, acknowledgement on success', () =
 
   it('private -> org does NOT confirm — a confirm on the recovery path is a tax on undoing', async () => {
     setProjectVisibilityMock.mockResolvedValueOnce({ ...project, visibility: 'org' });
+    // The server read must AGREE that the project is private: `load()` overwrites the
+    // prop with it, and a read answering 'org' turned this into an org -> org click.
+    listProjectMembersMock.mockResolvedValue({ members: MEMBERS, visibility: 'private' });
     render(<ProjectMembersTab project={{ ...project, visibility: 'private' }} canWrite={true} onSaved={() => {}} />);
-    await screen.findByText(en.addToTeam);
+    await screen.findByText('Alice');
+    expect(screen.getByRole('button', { name: en.visibilityPrivate }).getAttribute('aria-pressed')).toBe('true');
     (await screen.findByRole('button', { name: en.visibilityOrg })).click();
     await waitFor(() => expect(setProjectVisibilityMock).toHaveBeenCalledWith('p1', 'org'));
     expect(confirmMock).not.toHaveBeenCalled();

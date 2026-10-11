@@ -13,6 +13,10 @@
  * The honest terminal status is `suppressed` — "allowed without a human approval
  * gate; policy blocked egress, no send happened." It is excluded from BOTH the
  * numerator (accepted) and denominator (decided) of the oversight metrics.
+ *
+ * Sabotage-witnessed (/grade-tests w11): dropping the `suppressed` stamp in
+ * `actionExecution.ts` reds all three cases; counting `suppressed` as decided, or
+ * zeroing its count, in `health.ts` reds cases 2+3.
  */
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
@@ -29,6 +33,9 @@ const TENANT = 'default';
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
+  // Cost ceiling (w11, measured): the approve → execute dispatch needs the boot's
+  // `registerAssistantActionApproval(deps)` wiring. Storage-only setup leaves every
+  // row `approved` because execution never runs, so the claim needs createApp.
   await createApp({ port: 18991, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
 });
 

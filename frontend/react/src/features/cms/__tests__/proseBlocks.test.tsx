@@ -3,6 +3,10 @@
  * `> ` quote). KEEP IN LOCKSTEP with the backend prerender cases in
  * `backend/typescript/test/adr0384-section-html.test.ts` ("ADR 0813 sectionHtml
  * — prose blocks"): the SPA and the crawler HTML must agree on what a block is.
+ *
+ * Sabotage-witnessed (/grade-tests w17): a multi-line `###`, a partly-bulleted
+ * block, `1)` items or a newline-joined quote red the parser cases; plain-text
+ * list items, a mis-classed quote or an innerHTML subheading red the render case.
  */
 import { describe, it, expect, afterEach } from 'vitest';
 import { render, cleanup } from '@testing-library/react';

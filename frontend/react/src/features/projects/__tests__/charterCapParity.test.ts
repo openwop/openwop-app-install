@@ -16,7 +16,13 @@
  *
  * This file closes it from the frontend side, where reading the backend source
  * IS possible. It parses the constants out of the service rather than asserting
- * literals, so it tracks the real value instead of a copy of it.
+ * literals, so it tracks the real value instead of a copy of it. A parser miss
+ * THROWS (see `constant` / `cleanStringCap`), so no case can pass on nothing.
+ *
+ * Sabotage (w13 g3 probes, both directions): `MAX_OBJECTIVES` 20→21 or the
+ * objectives `cleanString(o, 200)` → 201 in the service reds "objective count";
+ * the service's milestone-title cap or the client's `milestones` reds "milestone
+ * count"; the service's brief cap or the client's `goal` reds "goal + brief".
  */
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
@@ -42,10 +48,6 @@ function cleanStringCap(field: string): number {
 }
 
 describe('PRJ2-M5 — the editor promises exactly the caps the server enforces', () => {
-  it('reads the backend source at all (the parser is not silently matching nothing)', () => {
-    expect(SRC).toContain('function parseCharter');
-  });
-
   it('objective count + per-objective length', () => {
     expect(CHARTER_LIMITS.objectives).toBe(constant('MAX_OBJECTIVES'));
     // The per-objective cap is the `cleanString(o, N)` inside the objectives map.

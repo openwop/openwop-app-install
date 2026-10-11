@@ -6,6 +6,10 @@
  * There is deliberately NO publish node (the Phase-C architecture ruling:
  * nodes draft and submit; humans publish). The pack loads from the in-tree
  * examples root like every shipped chain pack.
+ *
+ * Sabotage (grade-tests w16, pack edits): dropping a required param reds the load
+ * case; renaming the submit node to a `publish-page` typeId reds the no-publish case;
+ * an unresolved `{{inputs.pageId}}` token in the read node reds the Path-A case.
  */
 
 import { beforeAll, describe, expect, it } from 'vitest';

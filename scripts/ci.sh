@@ -1031,7 +1031,7 @@ fi
 #     block a release out of nowhere. Set OPENWOP_CI_AUDIT_STRICT=1 to make the
 #     moderate tier blocking too.
 audit_strict="${OPENWOP_CI_AUDIT_STRICT:-0}"
-step "deps: npm audit (production) — high/critical blocking, with expiring exceptions"
+step "deps: npm audit (backend+frontend production; desktop all deps) — high/critical blocking, with expiring exceptions"
 # Was a bare `npm audit --omit=dev --audit-level=high`. That is right until an
 # advisory has NO fix — then the gate is red forever, and a permanently-red gate
 # gets bypassed or quietly lowered, which is worse than the advisory. It is now a

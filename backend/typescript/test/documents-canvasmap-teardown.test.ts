@@ -7,13 +7,14 @@
  * with no `tenantId` field and no `tenantOf` on the collection, so both
  * teardown probes missed it and mappings survived tenant deletion permanently.
  * Born-red witnessed: with the field write reverted, the purge leaves the row.
+ * Re-witnessed (grade-tests w14): dropping `tenantId` from `canvasMap.put` reds the
+ * case; a purge that deletes ANY tenant-stamped row reds the wrong-tenant control.
  *
  * The row is written by the REAL producer (`materializeCanvasToDocument`),
  * never hand-shaped by this test — a hand-written fixture would test the
  * test's own shape, not the service's.
  */
-import http from 'node:http';
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll } from 'vitest';
 import { createApp } from '../src/index.js';
 import { createOrg } from '../src/host/accessControlService.js';
 import { __putCanvasForTest } from '../src/host/canvasSurface.js';
@@ -24,16 +25,14 @@ const TENANT = 'org:doc-canvasmap-a';
 const OTHER_TENANT = 'org:doc-canvasmap-b';
 let ORG = '';
 let OTHER_ORG = '';
-let server: http.Server;
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
-  const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', res); });
+  // Boot for persistence + the canvas/access seams; no HTTP is exercised, so no listen.
+  await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   ORG = (await createOrg({ tenantId: TENANT, createdBy: 'u-1', name: 'A', ownerSubject: 'u-1' })).orgId;
   OTHER_ORG = (await createOrg({ tenantId: OTHER_TENANT, createdBy: 'u-2', name: 'B', ownerSubject: 'u-2' })).orgId;
 });
-afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
 const canvasmapRows = async (): Promise<ReadonlyArray<{ key: string; value: string }>> =>
   hostExtStorage().kvList('hostext:documents:canvasmap:');

@@ -9,6 +9,13 @@
  *     blind `put` replaced it.
  *   - D2 (`CMSA2WF-2`) — two submits racing on one page minted two review rows.
  *   - D6 (`CMSA2WF-4`) — 100 resolved approvals of ANY kind pruned the page's last decision.
+ *
+ * Sabotage (w16 probes, each red here): `createPage` skipping the other-org check; reading
+ * the page's org from the kernel row's top-level column; a random (not per-cycle) review
+ * id; a review cycle that never advances; recording an actor's run cause; erasure that
+ * redacts a whole list or skips `submitterCauses`; pruning a page's newest decision, or
+ * keeping every row of a page; a CMS source naming `publicRead`/`neverPublic`; the
+ * entities type PATCH below the admin tier.
  */
 
 import { beforeAll, describe, expect, it } from 'vitest';
@@ -138,14 +145,14 @@ describe('D3/D4 — an actorless run records its cause apart from its submitter 
   it('the causing member narrows (submitterCauses) and is never a submitter (notified)', async () => {
     const tenantId = tenant();
     const p = await cmsService.createPage({ tenantId, orgId: 'org-a', title: 'By a run', createdBy: 'u-a' });
-    const caused = buildCmsSurface({ tenantId, orgScopeSubject: 'user:poster' } as Parameters<typeof buildCmsSurface>[0]);
+    const caused = buildCmsSurface({ tenantId, orgScopeSubject: 'user:poster' });
     await caused.submitPage!({ orgId: 'org-a', pageId: p.pageId });
     const [row] = (await listApprovals(tenantId, 'pending')).filter((r) => r.pageId === p.pageId);
     expect(row?.submitterCauses).toEqual(['user:poster']);
     expect(row?.submitters).toBeUndefined();
 
     const p2 = await cmsService.createPage({ tenantId, orgId: 'org-a', title: 'By an actor', createdBy: 'u-a' });
-    const acted = buildCmsSurface({ tenantId, actingUserId: 'user:actor', orgScopeSubject: 'user:poster' } as Parameters<typeof buildCmsSurface>[0]);
+    const acted = buildCmsSurface({ tenantId, actingUserId: 'user:actor', orgScopeSubject: 'user:poster' });
     await acted.submitPage!({ orgId: 'org-a', pageId: p2.pageId });
     const [row2] = (await listApprovals(tenantId, 'pending')).filter((r) => r.pageId === p2.pageId);
     expect(row2?.submitters).toEqual(['user:actor']);

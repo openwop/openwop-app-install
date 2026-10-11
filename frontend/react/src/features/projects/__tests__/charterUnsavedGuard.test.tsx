@@ -7,6 +7,12 @@
  * intercepted, and the negative controls: a CLEAN editor cancels and switches
  * tabs without nagging (a guard that always fires trains users to click through
  * it), and a declined confirm keeps the draft on screen.
+ *
+ * Sabotage (w13 g3 probes): dropping the `charterDirtyRef` check in `setTab` reds
+ * the two dirty tab cases; asking on every tab change reds the clean tab case;
+ * inverting `if (!ok) return` reds both dirty tab cases; an unguarded Cancel reds
+ * the dirty Cancel case; forcing the discard hook dirty reds both clean Cancel
+ * cases; a sticky "touched" flag reds the REVERTED case.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, fireEvent, act, waitFor } from '@testing-library/react';
@@ -28,10 +34,11 @@ vi.mock('../../../agents/rosterClient.js', () => ({ listRoster: vi.fn(async () =
 vi.mock('../../../ui/confirm.js', () => ({ confirm: (o: unknown) => confirmMock(o) }));
 
 import { ProjectDetailPage } from '../ProjectDetailPage.js';
+import type { Project } from '../projectsClient.js';
 
-const PROJECT = {
+const PROJECT: Project = {
   id: 'p1', tenantId: 't', orgId: 'org-1', name: 'Atlas', workflows: [], boardId: 'b1', canWrite: true,
-} as never;
+};
 
 const settle = async (): Promise<void> => { await act(async () => { await new Promise((r) => setTimeout(r, 0)); }); };
 

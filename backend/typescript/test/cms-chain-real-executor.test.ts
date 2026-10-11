@@ -1,11 +1,12 @@
 /**
  * ADR 0861 D7 / CMSLWF-3 — `cms.localize-and-submit` through the REAL executor.
  *
- * `cms-chain-execution.test.ts` drives this chain with a hand-rolled
- * mini-scheduler that re-implements edge/port semantics and `{{inputs.*}}`
- * interpolation itself — so it proves the NODES, not that the chain runs the
- * way production runs it. This file closes that gap. Everything is the
- * production path:
+ * `cms-chain-execution.test.ts` drove this chain with a hand-rolled
+ * mini-scheduler that re-implemented edge/port semantics and `{{inputs.*}}`
+ * interpolation itself — so it proved the NODES, not that the chain runs the
+ * way production runs it. This file closed that gap, and since w16 it is the
+ * chain's ONLY execution witness (the mini-scheduler case was cut as superseded
+ * by this one). Everything is the production path:
  *
  *   - instantiation: `POST /host/openwop-app/workflows/from-chain` (the
  *     builder's "Use template" — `expandChain → registerWorkflow →
@@ -21,6 +22,10 @@
  * Asserts after the run reaches `completed`: the pt-BR overlay is persisted on
  * the page, the page is `in_review`, and exactly ONE pending `content-publish`
  * approval row exists for the page.
+ *
+ * Sabotage-witnessed (w16): the update-section-draft node dropping its `locale`
+ * (`w16g2-chain-store-locale-real`, packs/feature.cms.nodes) and the surface's
+ * submit not queueing the approval (`w16g2-chain-surface-queue-real`).
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -28,7 +33,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { AiCallRequest, AiCallResult } from '../src/executor/types.js';
 import { bareRunId } from './support/bareRunId.js';
 
-const ai = vi.hoisted(() => ({ calls: [] as Array<Record<string, unknown>> }));
+const ai = vi.hoisted(() => ({ calls: [] as AiCallRequest[] }));
 vi.mock('../src/aiProviders/aiProvidersHost.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/aiProviders/aiProvidersHost.js')>();
   return {
@@ -40,7 +45,7 @@ vi.mock('../src/aiProviders/aiProvidersHost.js', async (importOriginal) => {
         // The model call is the only stand-in: the translation of `Welcome`,
         // plus a key `hero` does not declare (dropped by the sanitized write).
         callAI: async (req: AiCallRequest): Promise<AiCallResult> => {
-          ai.calls.push(req as unknown as Record<string, unknown>);
+          ai.calls.push(req);
           return { content: '{"heading":"Bem-vindo","notAHeroField":"x"}' };
         },
       };
@@ -55,6 +60,7 @@ import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { listApprovals } from '../src/host/approvalService.js';
 import type { Storage } from '../src/storage/storage.js';
 import type { RunRecord } from '../src/types.js';
+import type { Page } from '../src/features/cms/cmsService.js';
 
 let BASE: string;
 let server: http.Server;
@@ -76,17 +82,24 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T }
-function client(): { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res>; put: (p: string, b?: unknown) => Promise<Res> } {
+interface Res<T> { status: number; body: T }
+type PageBody = Page;
+interface Client {
+  get: <T = PageBody>(p: string) => Promise<Res<T>>;
+  post: <T = PageBody>(p: string, b?: unknown) => Promise<Res<T>>;
+  put: <T = PageBody>(p: string, b?: unknown) => Promise<Res<T>>;
+}
+function client(): Client {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
+  const call = async <T>(method: string, path: string, body?: unknown): Promise<Res<T>> => {
     const res = await fetch(`${BASE}${path}`, {
       method,
       headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) },
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) };
+    const out: unknown = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    return { status: res.status, body: out as T };
   };
   return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), put: (p, b) => call('PUT', p, b) };
 }
@@ -98,42 +111,42 @@ describe('cms.localize-and-submit — REAL executor (CMSLWF-3)', () => {
   it('from-chain → POST /runs → overlay persisted, page in_review, ONE pending content-publish row', async () => {
     const tenantId = `org:cmsrx-${Date.now()}`;
     const owner = client();
-    const login = await owner.post('/host/openwop-app/test/login', { email: `cmsrx-${Date.now()}@acme.test`, tenantId });
+    const login = await owner.post<unknown>('/host/openwop-app/test/login', { email: `cmsrx-${Date.now()}@acme.test`, tenantId });
     expect(login.status, JSON.stringify(login.body)).toBe(201);
-    const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
+    const org = await owner.post<{ orgId: string }>('/host/openwop-app/orgs', { name: 'Acme' });
     expect(org.status, JSON.stringify(org.body)).toBe(201);
-    const orgId = org.body.orgId as string;
+    const orgId = org.body.orgId;
 
     const lang = await owner.put(u(orgId, '/language-settings'), { supportedLocales: ['pt-BR'] });
     expect(lang.status, JSON.stringify(lang.body)).toBe(200);
     const created = await owner.post(u(orgId, '/pages'), { title: 'Chain Doc', sections: [{ type: 'hero', data: { heading: 'Welcome' } }] });
     expect(created.status, JSON.stringify(created.body)).toBe(201);
-    const pageId = created.body.pageId as string;
-    const sectionId = created.body.sections[0].sectionId as string;
+    const pageId = created.body.pageId;
+    const sectionId = created.body.sections[0]!.sectionId;
     expect(created.body.status).toBe('draft');
 
     // Instantiate the chain exactly as the builder's "Use template" does.
-    const inst = await owner.post('/host/openwop-app/workflows/from-chain', {
+    const inst = await owner.post<{ workflowId: string; warnings?: unknown[] }>('/host/openwop-app/workflows/from-chain', {
       chainId: 'cms.localize-and-submit',
       params: { orgId, pageId, sectionId, targetLocale: 'pt-BR' },
     });
     expect(inst.status, JSON.stringify(inst.body)).toBe(201);
     expect(inst.body.warnings ?? [], 'every feature.cms.nodes typeId must resolve on this host').toEqual([]);
-    const workflowId = inst.body.workflowId as string;
+    const workflowId = inst.body.workflowId;
 
     // Start it through the public run-create route (real scheduler + executor).
-    const start = await owner.post('/runs', { workflowId, inputs: {} });
+    const start = await owner.post<{ runId: string }>('/runs', { workflowId, inputs: {} });
     expect(start.status, JSON.stringify(start.body)).toBe(201);
     // The protocol answers a tenant-bound id; storage keys the bare one (ADR 0812).
-    const runId = bareRunId(start.body.runId as string);
+    const runId = bareRunId(start.body.runId);
     expect(runId).toBeTruthy();
 
-    let run: RunRecord | null = null;
-    for (let i = 0; i < 200; i++) {
-      run = await storage.getRun(runId);
-      if (run && TERMINAL.has(run.status)) break;
-      await new Promise((r) => setTimeout(r, 25));
-    }
+    // No hook to await the run's settle — poll the REAL condition (terminal status).
+    const run: RunRecord | null = await vi.waitFor(async () => {
+      const r = await storage.getRun(runId);
+      expect(TERMINAL.has(r?.status ?? '')).toBe(true);
+      return r;
+    }, { timeout: 5000, interval: 25 });
     expect(run?.status, `run did not complete: ${JSON.stringify(run)}`).toBe('completed');
     // The model was really consulted through ctx.callAI (the executor-built adapter).
     expect(ai.calls.length).toBe(1);
@@ -142,9 +155,9 @@ describe('cms.localize-and-submit — REAL executor (CMSLWF-3)', () => {
     // The overlay is persisted on the page for pt-BR (sanitized: undeclared key dropped)…
     const page = await owner.get(u(orgId, `/pages/${pageId}`));
     expect(page.status, JSON.stringify(page.body)).toBe(200);
-    expect(page.body.sections[0].localizations['pt-BR']).toEqual({ heading: 'Bem-vindo' });
+    expect(page.body.sections[0]!.localizations?.['pt-BR']).toEqual({ heading: 'Bem-vindo' });
     // …the base data is untouched…
-    expect(page.body.sections[0].data.heading).toBe('Welcome');
+    expect(page.body.sections[0]!.data.heading).toBe('Welcome');
     // …the page reached review…
     expect(page.body.status).toBe('in_review');
     // …and exactly ONE pending content-publish row exists for it.

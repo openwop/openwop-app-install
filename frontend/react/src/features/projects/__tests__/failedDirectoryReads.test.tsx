@@ -8,25 +8,34 @@
  *  - PRJ-G2: a failed workflow-summary read made every assigned non-built-in
  *    workflow `known === false`, which rendered a "local only" WARNING (a false
  *    claim it doesn't exist on the backend) AND disabled its Run button.
+ *
+ * Sabotage-witnessed (wave 13, w13g4-fdr-*): flipping `setOrgMembersFailed(true)` /
+ * `setRosterFailed(true)` in their catches, the `directoryUnavailable` option, `nameOf`'s
+ * displayName lookup, the `!known && mineFailed` branch, the Run `disabled` rule, the
+ * `!known` local-only branch, or the `mineById` name each turns its case below red.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, waitFor, act } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
+import type { Project, listProjectMembers as ListProjectMembers } from '../projectsClient.js';
+import type { listMembers as ListMembers, OrgMember } from '../../../client/accessClient.js';
+import type { listRoster as ListRoster } from '../../../agents/rosterClient.js';
+import type { listWorkflowSummaries as ListWorkflowSummaries, WorkflowSummaryDTO } from '../../../workflows/workflowsClient.js';
 
-const listProjectMembers = vi.fn();
-const listMembers = vi.fn();
-const listRoster = vi.fn();
-const listWorkflowSummaries = vi.fn();
+const listProjectMembers = vi.fn<typeof ListProjectMembers>();
+const listMembers = vi.fn<typeof ListMembers>();
+const listRoster = vi.fn<typeof ListRoster>();
+const listWorkflowSummaries = vi.fn<typeof ListWorkflowSummaries>();
 
 vi.mock('../projectsClient.js', async (orig) => ({
   ...(await orig<Record<string, unknown>>()),
-  listProjectMembers: () => listProjectMembers(),
+  listProjectMembers: (id: string) => listProjectMembers(id),
   addProjectMember: vi.fn(async () => ({})),
   updateWorkflows: vi.fn(async () => ({})),
 }));
 vi.mock('../../../client/accessClient.js', async (orig) => ({
   ...(await orig<Record<string, unknown>>()),
-  listMembers: () => listMembers(),
+  listMembers: (orgId: string) => listMembers(orgId),
 }));
 vi.mock('../../../agents/rosterClient.js', async (orig) => ({
   ...(await orig<Record<string, unknown>>()),
@@ -41,7 +50,15 @@ vi.mock('../../../ui/toast.js', () => ({ toast: { success: vi.fn(), error: vi.fn
 import { ProjectMembersTab } from '../ProjectMembersTab.js';
 import { ProjectWorkflowsTab } from '../ProjectWorkflowsTab.js';
 
-const PROJECT = { id: 'p1', orgId: 'org-1', name: 'Atlas' } as never;
+const PROJECT: Project = { id: 'p1', tenantId: 't', orgId: 'org-1', name: 'Atlas', workflows: [], boardId: 'b1' };
+const ADA: OrgMember = {
+  memberId: 'm1', orgId: 'org-1', tenantId: 't', subject: 'u-1', displayName: 'Ada Member',
+  roles: [], teamIds: [], createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z',
+};
+const MINE: WorkflowSummaryDTO = {
+  workflowId: 'wf-mine', kind: 'workflow', name: 'My workflow', nodeCount: 1,
+  createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z',
+};
 
 const membersView = async (): Promise<void> => {
   render(<MemoryRouter><ProjectMembersTab project={PROJECT} canWrite onSaved={() => undefined} /></MemoryRouter>);
@@ -57,10 +74,10 @@ const workflowsView = async (workflows: string[]): Promise<void> => {
 
 beforeEach(() => {
   for (const m of [listProjectMembers, listMembers, listRoster, listWorkflowSummaries]) m.mockReset();
-  listProjectMembers.mockResolvedValue({ members: [{ ref: 'user:u-1', role: 'editor' }], visibility: 'org' });
-  listMembers.mockResolvedValue([{ memberId: 'm1', orgId: 'org-1', tenantId: 't', subject: 'u-1', displayName: 'Ada Member', roles: [] }]);
+  listProjectMembers.mockResolvedValue({ members: [{ ref: 'user:u-1', role: 'contributor', addedAt: '2026-01-01T00:00:00Z' }], visibility: 'org' });
+  listMembers.mockResolvedValue([ADA]);
   listRoster.mockResolvedValue([]);
-  listWorkflowSummaries.mockResolvedValue([{ workflowId: 'wf-mine', name: 'My workflow' }]);
+  listWorkflowSummaries.mockResolvedValue([MINE]);
 });
 afterEach(cleanup);
 

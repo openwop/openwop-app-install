@@ -47,18 +47,19 @@ describe('ADR 0858 P3 — live-model fixtures follow the supervisor fact', () =>
     expect([...FIXTURES_REQUIRING_LIVE_MODEL_SUPERVISOR].sort()).toEqual(derived.sort());
   });
 
-  it('while the supervisor is a mock, neither major lists the live fixture', async () => {
+  it('while the supervisor is a mock, the root does not list the live fixture', async () => {
     const { SUPERVISOR_CALLS_LIVE_MODEL } = await import('../src/bootstrap/nodes.js');
-    const { buildAdvertisement, buildV2Advertisement } = await import('../src/routes/discovery.js');
+    const { buildV2Advertisement } = await import('../src/routes/discovery.js');
     const { loadConfigFromEnv } = await import('../src/index.js');
     expect(SUPERVISOR_CALLS_LIVE_MODEL, 'the documented state; flipping it is a decision, see nodes.ts').toBe(false);
     const config = loadConfigFromEnv();
-    for (const [major, doc] of [['v1', buildAdvertisement(config)], ['v2', buildV2Advertisement(config)]] as const) {
+    // ADR 0812 P4: the v1 leg went with the v1 builder; v2 is the only root.
+    for (const [major, doc] of [['v2', buildV2Advertisement(config)]] as const) {
       const listed = doc['fixtures'] as string[];
       expect(listed.length, `${major} fixtures[] is non-empty (else this leg is vacuous)`).toBeGreaterThan(10);
       expect(listed, `${major} fixtures[] must not claim ${LIVE} with a mock supervisor`).not.toContain(LIVE);
     }
-  }, 60_000); // two cold discovery builds; measured 8-15 s on a loaded machine
+  }, 60_000); // a cold discovery build; measured 8-15 s for two on a loaded machine
 
   it('non-vacuity: with the fact true, the live fixture IS listed (it is otherwise advertisable)', async () => {
     const { listLoadedConformanceFixtures } = await import('../src/host/index.js');

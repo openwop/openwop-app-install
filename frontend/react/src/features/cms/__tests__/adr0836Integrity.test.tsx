@@ -4,6 +4,13 @@
  *   URL parser resolves to `https://evil.com/`) is not rendered as a link.
  * - D6/D9: the two new refusals map to their own copy instead of the generic
  *   "no permission" / a bare server message.
+ *
+ * Sabotage-witnessed (/grade-tests w17): CtaLink back on the old `/^\/(?![/\\])/`
+ * regex → case 1 red; CtaLink never rendering an internal Link → case 2 red;
+ * `cmsErrorInfo` always `errLiveTier` / always `errPublishBlocked` → cases 3 / 4 red.
+ * The predicate's full vector table lives in
+ * `backend/typescript/test/adr0836-internal-href.test.ts`; this file is the only
+ * RENDER-level check that the CTA exit uses it.
  */
 import { describe, it, expect, afterEach } from 'vitest';
 import { render, screen, cleanup } from '@testing-library/react';

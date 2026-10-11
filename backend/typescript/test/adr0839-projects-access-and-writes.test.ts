@@ -13,7 +13,7 @@
  *  - D5: demo-clear deleted a person's project because its name matched a demo name.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openStorage } from '../src/storage/index.js';
@@ -26,6 +26,11 @@ import { ERASED_USER_REF } from '../src/host/subjectErasureRedaction.js';
 import { registerSubjectDependent, __swapSubjectDependentForTest } from '../src/host/subjectDependents.js';
 import { getBoard, subjectBoardId } from '../src/host/kanbanService.js';
 import { isVisibleToAsync } from '../src/host/conversationVisibility.js';
+import type { ConversationMeta } from '../src/host/conversationStore.js';
+import { createMember } from '../src/host/accessControlService.js';
+import { buildStrategySurface } from '../src/features/strategy/surface.js';
+import { createStrategy } from '../src/features/strategy/strategyService.js';
+import type { StrategyContextEntry } from '../src/features/strategy/types.js';
 
 // D4 needs a window between an edit's read and its write. `updateProject` awaits
 // `getRosterEntry` while validating a moderator; the hook runs inside that await.
@@ -115,16 +120,25 @@ describe('D1 — an absent caller is nobody, not the tenant owner', () => {
     expect(await resolveProjectAccess(T, p.id, 'user:stranger')).toBe('none');
   });
 
-  it('the strategy surface passes the run actor, never a hard-coded undefined', () => {
-    const src = readFileSync(new URL('../src/features/strategy/surface.ts', import.meta.url), 'utf8');
-    expect(src).not.toMatch(/resolveStrategy(Context|Health)\([^)]*,\s*undefined\s*,/);
+  it('the strategy surface passes the run actor, never a hard-coded undefined', async () => {
+    // BEHAVIOUR, not a source regex: a run whose actor can read an org-visible project gets
+    // that project in its strategy context. A hard-coded `undefined` actor is refused by
+    // `levelFor` (D1), so the link would silently drop out of every run's context.
+    const actor = 'user:strat-actor';
+    await createMember({ tenantId: T, orgId: ORG, subject: actor, displayName: 'Actor', roles: ['viewer'] });
+    const p = await createProject(T, ORG, { name: 'Linked work' });
+    await createStrategy(T, ORG, actor, { scope: 'org', title: 'North star', links: [{ kind: 'project', projectId: p.id }] });
+    const surface = buildStrategySurface({ tenantId: T, actingUserId: actor });
+    const out = (await surface.getStrategyContext!({ projectId: p.id })) as { strategies: StrategyContextEntry[] };
+    expect(out.strategies, 'the shared strategy linked to the project resolves').toHaveLength(1);
+    expect(out.strategies[0]!.linkedProjects.map((l) => l.id), 'the run actor reads the org-visible project').toEqual([p.id]);
   });
 });
 
 describe('D1 — the conversation gate hands the seam the PRINCIPAL when there is no canonical user', () => {
   it('an anonymous demo owner / an owk_ key is resolved by principal; no principal at all is refused', async () => {
     registerSubjectAccessResolver('board', async (_t, _s, caller) => (caller === 'session:owner' ? 'write' : 'none'));
-    const meta = { ownerSubject: { kind: 'board' as const, id: 'b1' } } as unknown as Parameters<typeof isVisibleToAsync>[0];
+    const meta: ConversationMeta = { conversationId: 'c-b1', tenantId: T, type: 'group', ownerSubject: { kind: 'board', id: 'b1' }, participants: [], createdAt: '', updatedAt: '' };
     expect(await isVisibleToAsync(meta, T, undefined, 'session:owner')).toBe(true);
     expect(await isVisibleToAsync(meta, T, undefined, 'session:stranger')).toBe(false);
     expect(await isVisibleToAsync(meta, T, undefined)).toBe(false);
@@ -205,6 +219,10 @@ describe('D5 — the creator stamp', () => {
     expect((await eraseSubjectProjects(T, 'user:u-hash-1')).rowsTouched).toBe(1);
     expect((await getProject(T, p.id))?.createdBy).toBe(ERASED_USER_REF);
     expect((await eraseSubjectProjects(T, 'user:u-hash-1')).rowsTouched, 'idempotent').toBe(0);
+    // The other key form: a BARE hash (the erasure seam adds the `user:` scope form).
+    const q = await createProject(T, ORG, { name: 'Mine too' }, 'user:u-hash-9');
+    expect((await eraseSubjectProjects(T, 'u-hash-9')).rowsTouched, 'bare-hash key').toBe(1);
+    expect((await getProject(T, q.id))?.createdBy).toBe(ERASED_USER_REF);
   });
 
   it('an AGENT-keyed DSAR never redacts a person\'s creator stamp (no tag bridging)', async () => {

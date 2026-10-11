@@ -4,6 +4,11 @@
  * `chip--ai` provenance chip (+ the tab's accessible-name arm), applying a
  * translation stamps the overlay, and typing into a stamped overlay clears
  * the stamp in the very onChange payload that carries the edit.
+ *
+ * Sabotage-witnessed (/grade-tests w17): hiding the chip or the tab's AI arm
+ * reds case 1; showing either for an unstamped overlay reds case 2; applying a
+ * translation without `origin: 'ai'` reds case 3; keeping the stamp on a human
+ * write reds case 4.
  */
 import { describe, it, expect, afterEach } from 'vitest';
 import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
@@ -57,7 +62,8 @@ describe('AI-draft provenance in the sections editor', () => {
     await waitFor(() => expect(changes.length).toBe(1));
     const next = changes[0]?.[0];
     expect(next?.localizations?.es?.heading).toBe('Hola nueva');
-    expect(typeof next?.aiDrafted?.es).toBe('string');
+    // The stamp is an ISO instant (its value is the wall clock, so assert its shape).
+    expect(Number.isNaN(Date.parse(next?.aiDrafted?.es ?? ''))).toBe(false);
   });
 
   it('a human edit of a stamped overlay CLEARS the stamp in the same payload', async () => {
@@ -65,7 +71,8 @@ describe('AI-draft provenance in the sections editor', () => {
     const s = baseSection({ aiDrafted: { es: '2026-08-20T00:00:00.000Z' } });
     renderEditor([s], (next) => changes.push(next));
     fireEvent.click(screen.getByRole('tab', { name: /AI-drafted/i }));
-    // Type into the overlay's heading field (the second Heading input — base is first).
+    // Type into the overlay's heading field — the base field holds 'Hi', so the
+    // only input showing 'Hola' is the es overlay.
     const inputs = screen.getAllByDisplayValue('Hola');
     fireEvent.change(inputs[0]!, { target: { value: 'Hola revisada' } });
     await waitFor(() => expect(changes.length).toBe(1));

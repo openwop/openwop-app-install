@@ -1,0 +1,1533 @@
+{
+  "name": "vendor.openwop-app.workflows.work-twin-templates",
+  "version": "1.0.0",
+  "kind": "workflow-chain",
+  "description": "The Work-Twin shared template library (ADR 0032 Phase 2.0), migrated off the in-tree `host/workflowTemplates.ts` catalog (ADR 0775 P2). chainIds keep the original `tmpl.<category>.<name>` ids, so the ten Work-Twin portfolios and every historical run resolve unchanged. Deterministic graphs over the demo `mock-ai` node, `core.approvalGate` and `core.subWorkflow` (composition rides RFC 0133 `subChainRef`). Every chain is `internal` (RFC 0135): these mock-AI flows stay out of the template gallery, the `/` picker and the zero-config seed, kept as replay archives (ADR 0775 P2 reachability, decided 2026-10-10; real-AI Work-Twin chains are a separate ADR). Resolves on hosts that register the demo `local.sample.demo.mock-ai` node (not the enterprise posture).",
+  "author": "openwop",
+  "license": "Apache-2.0",
+  "engines": {
+    "openwop": ">=1.0.0 <3.0.0"
+  },
+  "keywords": [
+    "Agents"
+  ],
+  "chains": [
+    {
+      "chainId": "tmpl.meeting-ops.meeting-brief",
+      "version": "1.0.0",
+      "label": "Meeting brief",
+      "description": "Assemble a pre-meeting brief from context.",
+      "internal": true,
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "gather-context",
+            "typeId": "local.sample.demo.mock-ai@0.1.0",
+            "name": "Gather Context"
+          },
+          {
+            "id": "draft-brief",
+            "typeId": "local.sample.demo.mock-ai@0.1.0",
+            "name": "Draft Brief"
+          }
+        ],
+        "edges": [
+          {
+            "from": "gather-context",
+            "to": "draft-brief"
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "tmpl.meeting-ops.attendee-dossier",
+      "version": "1.0.0",
+      "label": "Attendee dossier",
+      "description": "Build per-attendee background for a meeting.",
+      "internal": true,
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "resolve-attendees",
+            "typeId": "local.sample.demo.mock-ai@0.1.0",
+            "name": "Resolve Attendees"
+          },
+          {
+            "id": "draft-dossier",
+            "typeId": "local.sample.demo.mock-ai@0.1.0",
+            "name": "Draft Dossier"
+          }
+        ],
+        "edges": [
+          {
+            "from": "resolve-attendees",
+            "to": "draft-dossier"
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "tmpl.meeting-ops.action-extraction",
+      "version": "1.0.0",
+      "label": "Action extraction",
+      "description": "Extract action items from meeting notes.",
+      "internal": true,
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "read-notes",
+            "typeId": "local.sample.demo.mock-ai@0.1.0",
+            "name": "Read Notes"
+          },
+          {
+            "id": "extract-actions",
+            "typeId": "local.sample.demo.mock-ai@0.1.0",
+            "name": "Extract Actions"
+          }
+        ],
+        "edges": [
+          {
+            "from": "read-notes",
+            "to": "extract-actions"
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "tmpl.meeting-ops.post-meeting-follow-up",
+      "version": "1.0.0",
+      "label": "Post-meeting follow-up",
+      "description": "Extract actions, then draft a follow-up.",
+      "internal": true,
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "subChains": [
+        {
+          "ref": "tmpl.meeting-ops.action-extraction"
+        }
+      ],
+      "dag": {
+        "nodes": [
+          {
+            "id": "extract",
+            "typeId": "core.subWorkflow@1.0.0",
+            "name": "Extract",
+            "config": {
+              "waitForCompletion": true,
+              "onChildFailure": "fail-parent",
+              "subChainRef": "tmpl.meeting-ops.action-extraction"
+            }
+          },
+          {
+            "id": "draft-follow-up",
+            "typeId": "local.sample.demo.mock-ai@0.1.0",
+            "name": "Draft Follow Up"
+          }
+        ],
+        "edges": [
+          {
+            "from": "extract",
+            "to": "draft-follow-up"
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "tmpl.reporting.daily-summary",
+      "version": "1.0.0",
+      "label": "Daily summary",
+      "description": "Summarize the day across signals.",
+      "internal": true,
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "collect-signals",
+            "typeId": "local.sample.demo.mock-ai@0.1.0",
+            "name": "Collect Signals"
+          },
+          {
+            "id": "draft-summary",
+            "typeId": "local.sample.demo.mock-ai@0.1.0",
+            "name": "Draft Summary"
+          }
+        ],
+        "edges": [
+          {
+            "from": "collect-signals",
+            "to": "draft-summary"
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "tmpl.reporting.weekly-business-review",
+      "version": "1.0.0",
+      "label": "Weekly business review",
+      "description": "Aggregate the week into a WBR.",
+      "internal": true,
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "aggregate-week",
+            "typeId": "local.sample.demo.mock-ai@0.1.0",
+            "name": "Aggregate Week"
+          },
+          {
+            "id": "draft-wbr",
+            "typeId": "local.sample.demo.mock-ai@0.1.0",
+            "name": "Draft Wbr"
+          }
+        ],
+        "edges": [
+          {
+            "from": "aggregate-week",
+            "to": "draft-wbr"
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "tmpl.reporting.monthly-scorecard",
+      "version": "1.0.0",
+      "label": "Monthly scorecard",
+      "description": "Compute and narrate monthly metrics.",
+      "internal": true,
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "compute-metrics",
+            "typeId": "local.sample.demo.mock-ai@0.1.0",
+            "name": "Compute Metrics"
+          },
+          {
+            "id": "draft-scorecard",
+            "typeId": "local.sample.demo.mock-ai@0.1.0",
+            "name": "Draft Scorecard"
+          }
+        ],
+        "edges": [
+          {
+            "from": "compute-metrics",
+            "to": "draft-scorecard"
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "tmpl.reporting.quarterly-retrospective",
+      "version": "1.0.0",
+      "label": "Quarterly retrospective",
+      "description": "Synthesize a quarterly retro.",
+      "internal": true,
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "gather-quarter",
+            "typeId": "local.sample.demo.mock-ai@0.1.0",
+            "name": "Gather Quarter"
+          },
+          {
+            "id": "draft-retro",
+            "typeId": "local.sample.demo.mock-ai@0.1.0",
+            "name": "Draft Retro"
+          }
+        ],
+        "edges": [
+          {
+            "from": "gather-quarter",
+            "to": "draft-retro"
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "tmpl.intake-triage.request-classification",
+      "version": "1.0.0",
+      "label": "Request classification",
+      "description": "Classify an inbound request.",
+      "internal": true,
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "classify",
+            "typeId": "local.sample.demo.mock-ai@0.1.0",
+            "name": "Classify"
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "tmpl.intake-triage.priority-routing",
+      "version": "1.0.0",
+      "label": "Priority routing",
+      "description": "Score priority and route.",
+      "internal": true,
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "score-priority",
+            "typeId": "local.sample.demo.mock-ai@0.1.0",
+            "name": "Score Priority"
+          },
+          {
+            "id": "route",
+            "typeId": "local.sample.demo.mock-ai@0.1.0",
+            "name": "Route"
+          }
+        ],
+        "edges": [
+          {
+            "from": "score-priority",
+            "to": "route"
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "tmpl.intake-triage.required-field-completion",
+      "version": "1.0.0",
+      "label": "Required-field completion",
+      "description": "Detect and request missing fields.",
+      "internal": true,
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "detect-missing",
+            "typeId": "local.sample.demo.mock-ai@0.1.0",
+            "name": "Detect Missing"
+          },
+          {
+            "id": "request-fields",
+            "typeId": "local.sample.demo.mock-ai@0.1.0",
+            "name": "Request Fields"
+          }
+        ],
+        "edges": [
+          {
+            "from": "detect-missing",
+            "to": "request-fields"
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "tmpl.intake-triage.escalation-routing",
+      "version": "1.0.0",
+      "label": "Escalation routing",
+      "description": "Assess severity, confirm, then notify.",
+      "internal": true,
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "assess-severity",
+            "typeId": "local.sample.demo.mock-ai@0.1.0",
+            "name": "Assess Severity"
+          },
+          {
+            "id": "confirm-escalation",
+            "typeId": "core.approvalGate@1.0.0",
+            "name": "Confirm Escalation",
+            "config": {
+              "prompt": "Confirm escalation",
+              "title": "Escalate this request?"
+            }
+          },
+          {
+            "id": "notify-escalation",
+            "typeId": "local.sample.demo.mock-ai@0.1.0",
+            "name": "Notify Escalation"
+          }
+        ],
+        "edges": [
+          {
+            "from": "assess-severity",
+            "to": "confirm-escalation"
+          },
+          {
+            "from": "confirm-escalation",
+            "to": "notify-escalation"
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "tmpl.scheduling.availability-match",
+      "version": "1.0.0",
+      "label": "Availability match",
+      "description": "Propose slots from calendars.",
+      "internal": true,
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "read-calendars",
+            "typeId": "local.sample.demo.mock-ai@0.1.0",
+            "name": "Read Calendars"
+          },
+          {
+            "id": "propose-slots",
+            "typeId": "local.sample.demo.mock-ai@0.1.0",
+            "name": "Propose Slots"
+          }
+        ],
+        "edges": [
+          {
+            "from": "read-calendars",
+            "to": "propose-slots"
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "tmpl.scheduling.hold-creation",
+      "version": "1.0.0",
+      "label": "Hold creation",
+      "description": "Find a slot, confirm, then place a hold.",
+      "internal": true,
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "find-slot",
+            "typeId": "local.sample.demo.mock-ai@0.1.0",
+            "name": "Find Slot"
+          },
+          {
+            "id": "confirm-hold",
+            "typeId": "core.approvalGate@1.0.0",
+            "name": "Confirm Hold",
+            "config": {
+              "prompt": "Confirm calendar hold",
+              "title": "Place this hold?"
+            }
+          },
+          {
+            "id": "place-hold",
+            "typeId": "local.sample.demo.mock-ai@0.1.0",
+            "name": "Place Hold"
+          }
+        ],
+        "edges": [
+          {
+            "from": "find-slot",
+            "to": "confirm-hold"
+          },
+          {
+            "from": "confirm-hold",
+            "to": "place-hold"
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "tmpl.scheduling.prep-reminders",
+      "version": "1.0.0",
+      "label": "Prep reminders",
+      "description": "Compose a prep reminder.",
+      "internal": true,
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "compose-reminder",
+            "typeId": "local.sample.demo.mock-ai@0.1.0",
+            "name": "Compose Reminder"
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "tmpl.scheduling.no-response-chase",
+      "version": "1.0.0",
+      "label": "No-response chase",
+      "description": "Detect a stalled thread and draft a chase.",
+      "internal": true,
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "detect-no-response",
+            "typeId": "local.sample.demo.mock-ai@0.1.0",
+            "name": "Detect No Response"
+          },
+          {
+            "id": "draft-chase",
+            "typeId": "local.sample.demo.mock-ai@0.1.0",
+            "name": "Draft Chase"
+          }
+        ],
+        "edges": [
+          {
+            "from": "detect-no-response",
+            "to": "draft-chase"
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "tmpl.approvals.single-approver",
+      "version": "1.0.0",
+      "label": "Single approver",
+      "description": "One human approval before apply.",
+      "internal": true,
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "prepare",
+            "typeId": "local.sample.demo.mock-ai@0.1.0",
+            "name": "Prepare"
+          },
+          {
+            "id": "approve",
+            "typeId": "core.approvalGate@1.0.0",
+            "name": "Approve",
+            "config": {
+              "prompt": "Approve this action",
+              "title": "Approval required"
+            }
+          },
+          {
+            "id": "apply",
+            "typeId": "local.sample.demo.mock-ai@0.1.0",
+            "name": "Apply"
+          }
+        ],
+        "edges": [
+          {
+            "from": "prepare",
+            "to": "approve"
+          },
+          {
+            "from": "approve",
+            "to": "apply"
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "tmpl.approvals.dual-approver",
+      "version": "1.0.0",
+      "label": "Dual approver",
+      "description": "Two sequential approvals before apply.",
+      "internal": true,
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "prepare",
+            "typeId": "local.sample.demo.mock-ai@0.1.0",
+            "name": "Prepare"
+          },
+          {
+            "id": "approve-1",
+            "typeId": "core.approvalGate@1.0.0",
+            "name": "Approve 1",
+            "config": {
+              "prompt": "First approval",
+              "title": "Approval 1 of 2"
+            }
+          },
+          {
+            "id": "approve-2",
+            "typeId": "core.approvalGate@1.0.0",
+            "name": "Approve 2",
+            "config": {
+              "prompt": "Second approval",
+              "title": "Approval 2 of 2"
+            }
+          },
+          {
+            "id": "apply",
+            "typeId": "local.sample.demo.mock-ai@0.1.0",
+            "name": "Apply"
+          }
+        ],
+        "edges": [
+          {
+            "from": "prepare",
+            "to": "approve-1"
+          },
+          {
+            "from": "approve-1",
+            "to": "approve-2"
+          },
+          {
+            "from": "approve-2",
+            "to": "apply"
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "tmpl.approvals.manager-plus-compliance",
+      "version": "1.0.0",
+      "label": "Manager plus compliance",
+      "description": "Manager then compliance approval.",
+      "internal": true,
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "prepare",
+            "typeId": "local.sample.demo.mock-ai@0.1.0",
+            "name": "Prepare"
+          },
+          {
+            "id": "manager-approval",
+            "typeId": "core.approvalGate@1.0.0",
+            "name": "Manager Approval",
+            "config": {
+              "prompt": "Manager approval",
+              "title": "Manager sign-off"
+            }
+          },
+          {
+            "id": "compliance-approval",
+            "typeId": "core.approvalGate@1.0.0",
+            "name": "Compliance Approval",
+            "config": {
+              "prompt": "Compliance approval",
+              "title": "Compliance sign-off"
+            }
+          },
+          {
+            "id": "apply",
+            "typeId": "local.sample.demo.mock-ai@0.1.0",
+            "name": "Apply"
+          }
+        ],
+        "edges": [
+          {
+            "from": "prepare",
+            "to": "manager-approval"
+          },
+          {
+            "from": "manager-approval",
+            "to": "compliance-approval"
+          },
+          {
+            "from": "compliance-approval",
+            "to": "apply"
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "tmpl.approvals.threshold-based",
+      "version": "1.0.0",
+      "label": "Threshold-based approval",
+      "description": "Quorum approval (requiredApprovals) before apply.",
+      "internal": true,
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "prepare",
+            "typeId": "local.sample.demo.mock-ai@0.1.0",
+            "name": "Prepare"
+          },
+          {
+            "id": "quorum-approval",
+            "typeId": "core.approvalGate@1.0.0",
+            "name": "Quorum Approval",
+            "config": {
+              "prompt": "Quorum approval",
+              "title": "Threshold approval",
+              "requiredApprovals": 2
+            }
+          },
+          {
+            "id": "apply",
+            "typeId": "local.sample.demo.mock-ai@0.1.0",
+            "name": "Apply"
+          }
+        ],
+        "edges": [
+          {
+            "from": "prepare",
+            "to": "quorum-approval"
+          },
+          {
+            "from": "quorum-approval",
+            "to": "apply"
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "tmpl.knowledge.source-pack-assembly",
+      "version": "1.0.0",
+      "label": "Source pack assembly",
+      "description": "Retrieve and assemble a source pack.",
+      "internal": true,
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "retrieve-sources",
+            "typeId": "local.sample.demo.mock-ai@0.1.0",
+            "name": "Retrieve Sources"
+          },
+          {
+            "id": "assemble-pack",
+            "typeId": "local.sample.demo.mock-ai@0.1.0",
+            "name": "Assemble Pack"
+          }
+        ],
+        "edges": [
+          {
+            "from": "retrieve-sources",
+            "to": "assemble-pack"
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "tmpl.knowledge.comparison-summary",
+      "version": "1.0.0",
+      "label": "Comparison summary",
+      "description": "Compare items into a summary.",
+      "internal": true,
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "gather-items",
+            "typeId": "local.sample.demo.mock-ai@0.1.0",
+            "name": "Gather Items"
+          },
+          {
+            "id": "draft-comparison",
+            "typeId": "local.sample.demo.mock-ai@0.1.0",
+            "name": "Draft Comparison"
+          }
+        ],
+        "edges": [
+          {
+            "from": "gather-items",
+            "to": "draft-comparison"
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "tmpl.knowledge.faq-update",
+      "version": "1.0.0",
+      "label": "FAQ update",
+      "description": "Detect gaps and draft FAQ updates.",
+      "internal": true,
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "detect-gaps",
+            "typeId": "local.sample.demo.mock-ai@0.1.0",
+            "name": "Detect Gaps"
+          },
+          {
+            "id": "draft-faq-update",
+            "typeId": "local.sample.demo.mock-ai@0.1.0",
+            "name": "Draft Faq Update"
+          }
+        ],
+        "edges": [
+          {
+            "from": "detect-gaps",
+            "to": "draft-faq-update"
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "tmpl.knowledge.policy-summarization",
+      "version": "1.0.0",
+      "label": "Policy summarization",
+      "description": "Summarize a policy document.",
+      "internal": true,
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "read-policy",
+            "typeId": "local.sample.demo.mock-ai@0.1.0",
+            "name": "Read Policy"
+          },
+          {
+            "id": "summarize-policy",
+            "typeId": "local.sample.demo.mock-ai@0.1.0",
+            "name": "Summarize Policy"
+          }
+        ],
+        "edges": [
+          {
+            "from": "read-policy",
+            "to": "summarize-policy"
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "tmpl.people.onboarding-checklist",
+      "version": "1.0.0",
+      "label": "Onboarding checklist",
+      "description": "Build an onboarding checklist.",
+      "internal": true,
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "build-onboarding",
+            "typeId": "local.sample.demo.mock-ai@0.1.0",
+            "name": "Build Onboarding"
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "tmpl.people.offboarding-checklist",
+      "version": "1.0.0",
+      "label": "Offboarding checklist",
+      "description": "Build offboarding, confirm, then execute.",
+      "internal": true,
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "build-offboarding",
+            "typeId": "local.sample.demo.mock-ai@0.1.0",
+            "name": "Build Offboarding"
+          },
+          {
+            "id": "confirm-offboarding",
+            "typeId": "core.approvalGate@1.0.0",
+            "name": "Confirm Offboarding",
+            "config": {
+              "prompt": "Confirm offboarding",
+              "title": "Approve offboarding?"
+            }
+          },
+          {
+            "id": "execute-offboarding",
+            "typeId": "local.sample.demo.mock-ai@0.1.0",
+            "name": "Execute Offboarding"
+          }
+        ],
+        "edges": [
+          {
+            "from": "build-offboarding",
+            "to": "confirm-offboarding"
+          },
+          {
+            "from": "confirm-offboarding",
+            "to": "execute-offboarding"
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "tmpl.people.manager-nudge",
+      "version": "1.0.0",
+      "label": "Manager nudge",
+      "description": "Compose a manager nudge.",
+      "internal": true,
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "compose-nudge",
+            "typeId": "local.sample.demo.mock-ai@0.1.0",
+            "name": "Compose Nudge"
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "tmpl.people.leave-request-routing",
+      "version": "1.0.0",
+      "label": "Leave-request routing",
+      "description": "Assess leave, manager approval, then record.",
+      "internal": true,
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "assess-leave",
+            "typeId": "local.sample.demo.mock-ai@0.1.0",
+            "name": "Assess Leave"
+          },
+          {
+            "id": "manager-approval",
+            "typeId": "core.approvalGate@1.0.0",
+            "name": "Manager Approval",
+            "config": {
+              "prompt": "Approve leave request",
+              "title": "Leave approval"
+            }
+          },
+          {
+            "id": "record-leave",
+            "typeId": "local.sample.demo.mock-ai@0.1.0",
+            "name": "Record Leave"
+          }
+        ],
+        "edges": [
+          {
+            "from": "assess-leave",
+            "to": "manager-approval"
+          },
+          {
+            "from": "manager-approval",
+            "to": "record-leave"
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "tmpl.finance.close-checklist",
+      "version": "1.0.0",
+      "label": "Close checklist",
+      "description": "Build the period-close checklist.",
+      "internal": true,
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "build-close-checklist",
+            "typeId": "local.sample.demo.mock-ai@0.1.0",
+            "name": "Build Close Checklist"
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "tmpl.finance.support-collection",
+      "version": "1.0.0",
+      "label": "Support collection",
+      "description": "Identify and request missing support.",
+      "internal": true,
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "identify-missing-support",
+            "typeId": "local.sample.demo.mock-ai@0.1.0",
+            "name": "Identify Missing Support"
+          },
+          {
+            "id": "request-support",
+            "typeId": "local.sample.demo.mock-ai@0.1.0",
+            "name": "Request Support"
+          }
+        ],
+        "edges": [
+          {
+            "from": "identify-missing-support",
+            "to": "request-support"
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "tmpl.finance.variance-note-draft",
+      "version": "1.0.0",
+      "label": "Variance-note draft",
+      "description": "Compute variance and draft a note.",
+      "internal": true,
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "compute-variance",
+            "typeId": "local.sample.demo.mock-ai@0.1.0",
+            "name": "Compute Variance"
+          },
+          {
+            "id": "draft-note",
+            "typeId": "local.sample.demo.mock-ai@0.1.0",
+            "name": "Draft Note"
+          }
+        ],
+        "edges": [
+          {
+            "from": "compute-variance",
+            "to": "draft-note"
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "tmpl.finance.approval-chase",
+      "version": "1.0.0",
+      "label": "Approval chase",
+      "description": "Run a single-approver gate, then chase if pending.",
+      "internal": true,
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "subChains": [
+        {
+          "ref": "tmpl.approvals.single-approver"
+        }
+      ],
+      "dag": {
+        "nodes": [
+          {
+            "id": "request-approval",
+            "typeId": "core.subWorkflow@1.0.0",
+            "name": "Request Approval",
+            "config": {
+              "waitForCompletion": true,
+              "onChildFailure": "fail-parent",
+              "subChainRef": "tmpl.approvals.single-approver"
+            }
+          },
+          {
+            "id": "draft-chase",
+            "typeId": "local.sample.demo.mock-ai@0.1.0",
+            "name": "Draft Chase"
+          }
+        ],
+        "edges": [
+          {
+            "from": "request-approval",
+            "to": "draft-chase"
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "tmpl.commercial.account-brief",
+      "version": "1.0.0",
+      "label": "Account brief",
+      "description": "Assemble an account brief.",
+      "internal": true,
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "gather-account",
+            "typeId": "local.sample.demo.mock-ai@0.1.0",
+            "name": "Gather Account"
+          },
+          {
+            "id": "draft-brief",
+            "typeId": "local.sample.demo.mock-ai@0.1.0",
+            "name": "Draft Brief"
+          }
+        ],
+        "edges": [
+          {
+            "from": "gather-account",
+            "to": "draft-brief"
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "tmpl.commercial.next-step-draft",
+      "version": "1.0.0",
+      "label": "Next-step draft",
+      "description": "Assess stage and draft the next step.",
+      "internal": true,
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "assess-stage",
+            "typeId": "local.sample.demo.mock-ai@0.1.0",
+            "name": "Assess Stage"
+          },
+          {
+            "id": "draft-next-step",
+            "typeId": "local.sample.demo.mock-ai@0.1.0",
+            "name": "Draft Next Step"
+          }
+        ],
+        "edges": [
+          {
+            "from": "assess-stage",
+            "to": "draft-next-step"
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "tmpl.commercial.renewal-pack",
+      "version": "1.0.0",
+      "label": "Renewal pack",
+      "description": "Assemble a renewal pack.",
+      "internal": true,
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "gather-renewal",
+            "typeId": "local.sample.demo.mock-ai@0.1.0",
+            "name": "Gather Renewal"
+          },
+          {
+            "id": "assemble-pack",
+            "typeId": "local.sample.demo.mock-ai@0.1.0",
+            "name": "Assemble Pack"
+          }
+        ],
+        "edges": [
+          {
+            "from": "gather-renewal",
+            "to": "assemble-pack"
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "tmpl.commercial.risk-digest",
+      "version": "1.0.0",
+      "label": "Risk digest",
+      "description": "Scan and digest account risk.",
+      "internal": true,
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "scan-risk",
+            "typeId": "local.sample.demo.mock-ai@0.1.0",
+            "name": "Scan Risk"
+          },
+          {
+            "id": "draft-digest",
+            "typeId": "local.sample.demo.mock-ai@0.1.0",
+            "name": "Draft Digest"
+          }
+        ],
+        "edges": [
+          {
+            "from": "scan-risk",
+            "to": "draft-digest"
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "tmpl.it.incident-triage",
+      "version": "1.0.0",
+      "label": "Incident triage",
+      "description": "Classify and route an incident.",
+      "internal": true,
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "classify-incident",
+            "typeId": "local.sample.demo.mock-ai@0.1.0",
+            "name": "Classify Incident"
+          },
+          {
+            "id": "route-incident",
+            "typeId": "local.sample.demo.mock-ai@0.1.0",
+            "name": "Route Incident"
+          }
+        ],
+        "edges": [
+          {
+            "from": "classify-incident",
+            "to": "route-incident"
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "tmpl.it.kb-recommendation",
+      "version": "1.0.0",
+      "label": "KB recommendation",
+      "description": "Match and recommend a KB article.",
+      "internal": true,
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "match-kb",
+            "typeId": "local.sample.demo.mock-ai@0.1.0",
+            "name": "Match Kb"
+          },
+          {
+            "id": "recommend",
+            "typeId": "local.sample.demo.mock-ai@0.1.0",
+            "name": "Recommend"
+          }
+        ],
+        "edges": [
+          {
+            "from": "match-kb",
+            "to": "recommend"
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "tmpl.it.standard-request-routing",
+      "version": "1.0.0",
+      "label": "Standard request routing",
+      "description": "Classify a request, confirm, then fulfill.",
+      "internal": true,
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "classify-request",
+            "typeId": "local.sample.demo.mock-ai@0.1.0",
+            "name": "Classify Request"
+          },
+          {
+            "id": "confirm-provision",
+            "typeId": "core.approvalGate@1.0.0",
+            "name": "Confirm Provision",
+            "config": {
+              "prompt": "Confirm provisioning",
+              "title": "Approve standard request?"
+            }
+          },
+          {
+            "id": "route-fulfillment",
+            "typeId": "local.sample.demo.mock-ai@0.1.0",
+            "name": "Route Fulfillment"
+          }
+        ],
+        "edges": [
+          {
+            "from": "classify-request",
+            "to": "confirm-provision"
+          },
+          {
+            "from": "confirm-provision",
+            "to": "route-fulfillment"
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "tmpl.it.major-incident-update",
+      "version": "1.0.0",
+      "label": "Major-incident update",
+      "description": "Gather status and draft an update.",
+      "internal": true,
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "gather-status",
+            "typeId": "local.sample.demo.mock-ai@0.1.0",
+            "name": "Gather Status"
+          },
+          {
+            "id": "draft-update",
+            "typeId": "local.sample.demo.mock-ai@0.1.0",
+            "name": "Draft Update"
+          }
+        ],
+        "edges": [
+          {
+            "from": "gather-status",
+            "to": "draft-update"
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "tmpl.comms.announcement-draft",
+      "version": "1.0.0",
+      "label": "Announcement draft",
+      "description": "Draft an announcement.",
+      "internal": true,
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "gather-inputs",
+            "typeId": "local.sample.demo.mock-ai@0.1.0",
+            "name": "Gather Inputs"
+          },
+          {
+            "id": "draft-announcement",
+            "typeId": "local.sample.demo.mock-ai@0.1.0",
+            "name": "Draft Announcement"
+          }
+        ],
+        "edges": [
+          {
+            "from": "gather-inputs",
+            "to": "draft-announcement"
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "tmpl.comms.audience-adaptation",
+      "version": "1.0.0",
+      "label": "Audience adaptation",
+      "description": "Adapt a message to an audience.",
+      "internal": true,
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "analyze-audience",
+            "typeId": "local.sample.demo.mock-ai@0.1.0",
+            "name": "Analyze Audience"
+          },
+          {
+            "id": "adapt-message",
+            "typeId": "local.sample.demo.mock-ai@0.1.0",
+            "name": "Adapt Message"
+          }
+        ],
+        "edges": [
+          {
+            "from": "analyze-audience",
+            "to": "adapt-message"
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "tmpl.comms.faq-draft",
+      "version": "1.0.0",
+      "label": "FAQ draft",
+      "description": "Draft an FAQ from questions.",
+      "internal": true,
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "gather-questions",
+            "typeId": "local.sample.demo.mock-ai@0.1.0",
+            "name": "Gather Questions"
+          },
+          {
+            "id": "draft-faq",
+            "typeId": "local.sample.demo.mock-ai@0.1.0",
+            "name": "Draft Faq"
+          }
+        ],
+        "edges": [
+          {
+            "from": "gather-questions",
+            "to": "draft-faq"
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "tmpl.comms.all-hands-prep",
+      "version": "1.0.0",
+      "label": "All-hands prep",
+      "description": "Collect topics and draft an agenda.",
+      "internal": true,
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "collect-topics",
+            "typeId": "local.sample.demo.mock-ai@0.1.0",
+            "name": "Collect Topics"
+          },
+          {
+            "id": "draft-agenda",
+            "typeId": "local.sample.demo.mock-ai@0.1.0",
+            "name": "Draft Agenda"
+          }
+        ],
+        "edges": [
+          {
+            "from": "collect-topics",
+            "to": "draft-agenda"
+          }
+        ]
+      }
+    }
+  ]
+}

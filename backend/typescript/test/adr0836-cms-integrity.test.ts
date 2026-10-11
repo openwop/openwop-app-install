@@ -6,11 +6,19 @@
  * green on the fix. Route-level where authority is the question (it is only
  * observable at the HTTP boundary); service-level where the defect is in the
  * store or the sweep.
+ *
+ * Sabotage (w16 probes, each red here): a version capture deduping across tenants;
+ * a marker keyed by pageId alone; a CAS that swaps against the CURRENT row instead
+ * of the one the write was decided on; an edit that keeps a schedule it should
+ * cancel; an SEO / shared-section write without the live-tier check (or without
+ * its `live_tier` reason); a restore that does not record `unpublished`; a publish
+ * that skips the `[TODO]` blockers; a prerender memo that caches a request-derived
+ * origin or never caches; a string `replace` that expands `$'`.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { getSetCookies } from './headerCookies.js';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
@@ -37,7 +45,17 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T }
+interface Body {
+  user?: { userId: string };
+  orgId?: string;
+  pageId?: string;
+  slug?: string;
+  sharedSectionId?: string;
+  pages?: Array<{ slug: string }>;
+  sharedSections?: Array<{ sharedSectionId: string; data: { text?: string } }>;
+  details?: { requiredScope?: string; reason?: string };
+}
+interface Res { status: number; body: Body | undefined }
 function client() {
   let cookie = '';
   const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
@@ -47,7 +65,7 @@ function client() {
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    const out = res.status === 204 ? undefined : (await res.json().catch(() => undefined)) as Body | undefined; // wire JSON
     return { status: res.status, body: out };
   };
   return {
@@ -64,7 +82,7 @@ let n = 0;
 async function signup(c: Client, tenantId: string): Promise<{ userId: string }> {
   const r = await c.post('/host/openwop-app/test/login', { email: `a0836-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  return r.body.user;
+  return r.body!.user!;
 }
 const cms = (orgId: string, s = ''): string => `/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}${s}`;
 const seo = (orgId: string, pageId: string): string =>
@@ -78,7 +96,7 @@ async function ownerWithEditor(): Promise<{ owner: Client; editor: Client; orgId
   const editorUser = await signup(editor, tenantId);
   const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
-  const orgId = org.body.orgId as string;
+  const orgId = org.body!.orgId!;
   const add = await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'E', subject: editorUser.userId, roles: ['editor'] });
   expect(add.status, JSON.stringify(add.body)).toBe(201);
   return { owner, editor, orgId, tenantId };
@@ -87,8 +105,9 @@ async function ownerWithEditor(): Promise<{ owner: Client; editor: Client; orgId
 async function httpPage(c: Client, orgId: string, title: string, publish: boolean): Promise<string> {
   const r = await c.post(cms(orgId, '/pages'), { title, sections: [{ type: 'hero', data: { heading: title } }] });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  if (publish) expect((await c.post(cms(orgId, `/pages/${encodeURIComponent(r.body.pageId)}/publish`))).status).toBe(200);
-  return r.body.pageId as string;
+  const pageId = r.body!.pageId!;
+  if (publish) expect((await c.post(cms(orgId, `/pages/${encodeURIComponent(pageId)}/publish`))).status).toBe(200);
+  return pageId;
 }
 
 const hero = (heading: string) => [{ type: 'hero', data: { heading } }];
@@ -131,15 +150,26 @@ describe('ADR 0836 D4 — schedule markers are per tenant', () => {
 describe('ADR 0836 D1 — expectedVersion is a compare-and-set', () => {
   it('two concurrent saves pinned to the same version: exactly one lands', async () => {
     const p = await createPage({ tenantId: 't-cas836', orgId: 'o', title: 'Race', sections: hero('v1'), createdBy: 'u' });
-    const results = await Promise.allSettled([
-      updatePage(p.tenantId, p.orgId, p.pageId, { title: 'Writer one' }, 'u1', { expectedVersion: 1 }),
-      updatePage(p.tenantId, p.orgId, p.pageId, { title: 'Writer two' }, 'u2', { expectedVersion: 1 }),
-    ]);
-    const ok = results.filter((r) => r.status === 'fulfilled');
-    const conflicts = results.filter((r) => r.status === 'rejected' && (r.reason as { code?: string }).code === 'conflict');
-    expect(ok).toHaveLength(1);
-    expect(conflicts).toHaveLength(1);
-    expect((await getPage(p.tenantId, p.orgId, p.pageId))?.version).toBe(2);
+    // Deterministic interleave: writer one has READ version 1 (its `authorize` runs on
+    // that read) when writer two commits. Only the CAS can refuse writer one now — its
+    // version pin was checked against the same stale read.
+    let second: Promise<unknown> | undefined;
+    const first = updatePage(p.tenantId, p.orgId, p.pageId, { title: 'Writer one' }, 'u1', {
+      expectedVersion: 1,
+      authorize: async () => {
+        second = updatePage(p.tenantId, p.orgId, p.pageId, { title: 'Writer two' }, 'u2', { expectedVersion: 1 });
+        await second.catch(() => undefined);
+      },
+    });
+    const [one] = await Promise.allSettled([first]);
+    expect(second, 'writer two never ran — authorize did not run on writer one\'s read').toBeDefined();
+    const [two] = await Promise.allSettled([second!]);
+    expect(two.status).toBe('fulfilled');
+    expect(one.status).toBe('rejected');
+    expect((one as PromiseRejectedResult).reason).toMatchObject({ code: 'conflict' });
+    const after = await getPage(p.tenantId, p.orgId, p.pageId);
+    expect(after?.version).toBe(2);
+    expect(after?.title).toBe('Writer two');
   });
 });
 
@@ -166,8 +196,8 @@ describe('ADR 0836 D6 — editor writes that change a live page need the admin t
     const id = await httpPage(owner, orgId, 'Live seo', true);
     const r = await editor.put(seo(orgId, id), { canonicalUrl: 'https://elsewhere.example/', noindex: true });
     expect(r.status, JSON.stringify(r.body)).toBe(403);
-    expect(r.body.details?.requiredScope).toBe('host:members:manage');
-    expect(r.body.details?.reason).toBe('live_tier'); // the editor's copy keys on this
+    expect(r.body?.details?.requiredScope).toBe('host:members:manage');
+    expect(r.body?.details?.reason).toBe('live_tier'); // the editor's copy keys on this
     expect((await owner.put(seo(orgId, id), { metaTitle: 'Owner may' })).status).toBe(200);
   });
 
@@ -175,12 +205,15 @@ describe('ADR 0836 D6 — editor writes that change a live page need the admin t
     const { owner, editor, orgId } = await ownerWithEditor();
     const sh = await owner.post(cms(orgId, '/shared-sections'), { name: 'Footer', type: 'richText', data: { heading: 'Footer', text: 'Old' } });
     expect(sh.status, JSON.stringify(sh.body)).toBe(201);
-    const shId = sh.body.sharedSectionId as string;
+    const shId = sh.body!.sharedSectionId!;
     const pg = await owner.post(cms(orgId, '/pages'), { title: 'Uses footer', sections: [{ type: 'richText', ref: { sharedSectionId: shId }, data: {} }] });
     expect(pg.status, JSON.stringify(pg.body)).toBe(201);
-    expect((await owner.post(cms(orgId, `/pages/${encodeURIComponent(pg.body.pageId)}/publish`))).status).toBe(200);
+    expect((await owner.post(cms(orgId, `/pages/${encodeURIComponent(pg.body!.pageId!)}/publish`))).status).toBe(200);
     const r = await editor.patch(cms(orgId, `/shared-sections/${encodeURIComponent(shId)}`), { data: { heading: 'Footer', text: 'Hijacked CTA' } });
     expect(r.status, JSON.stringify(r.body)).toBe(403);
+    expect(r.body?.details?.reason).toBe('live_tier');
+    const kept = (await owner.get(cms(orgId, '/shared-sections'))).body?.sharedSections?.find((x) => x.sharedSectionId === shId);
+    expect(kept?.data.text).toBe('Old');
     // A rename changes nothing a reader sees: editor tier.
     expect((await editor.patch(cms(orgId, `/shared-sections/${encodeURIComponent(shId)}`), { name: 'Footer v2' })).status).toBe(200);
   });
@@ -196,8 +229,9 @@ describe('ADR 0836 D8 — restoring a version of a live page says the page went 
     await transitionPage(p.tenantId, p.orgId, p.pageId, 'publish', 'u');
     const [v] = await listVersions(p.tenantId, p.orgId, p.pageId);
     await restoreVersion(p.tenantId, p.orgId, p.pageId, v!.versionId, 'u');
-    await new Promise((r) => setTimeout(r, 20)); // lifecycle is fire-and-forget
-    expect(seen.filter((e) => e.pageId === p.pageId).map((e) => e.event)).toEqual(['published', 'unpublished']);
+    // The lifecycle is fire-and-forget and this handler runs after the boot-registered
+    // docs handler, so wait on the real condition rather than a fixed sleep.
+    await vi.waitFor(() => expect(seen.filter((e) => e.pageId === p.pageId).map((e) => e.event)).toEqual(['published', 'unpublished']));
   });
 });
 
@@ -218,7 +252,7 @@ describe('ADR 0836 D7 — the prerender memo never serves a request-derived orig
     const { owner, orgId } = await ownerWithEditor();
     await httpPage(owner, orgId, 'Home', true);
     const r = await owner.get(cms(orgId, '/pages'));
-    const slug = (r.body.pages as Array<{ slug: string }>)[0]!.slug;
+    const slug = r.body!.pages![0]!.slug;
     const evil = await prerenderPageCached(orgId, slug, 'https://evil.example', 'en');
     expect(evil?.html).toContain('evil.example');
     const next = await prerenderPageCached(orgId, slug, 'https://good.example', 'en');
@@ -228,7 +262,7 @@ describe('ADR 0836 D7 — the prerender memo never serves a request-derived orig
   it('a CONFIGURED base still caches (the fix must not cost prod its memo)', async () => {
     const { owner, orgId } = await ownerWithEditor();
     const id = await httpPage(owner, orgId, 'Cached', true);
-    const slug = ((await owner.get(cms(orgId, `/pages/${encodeURIComponent(id)}`))).body as { slug: string }).slug;
+    const slug = (await owner.get(cms(orgId, `/pages/${encodeURIComponent(id)}`))).body!.slug!;
     process.env.OPENWOP_PUBLIC_BASE_URL = 'https://configured.example';
     try {
       const first = await prerenderPageCached(orgId, slug, 'https://configured.example', 'en');
@@ -245,8 +279,8 @@ describe('ADR 0836 D7 — the prerender memo never serves a request-derived orig
     const { owner, orgId } = await ownerWithEditor();
     const r = await owner.post(cms(orgId, '/pages'), { title: "Price $' list", kind: 'post', sections: [{ type: 'richText', data: { heading: 'H', text: 'UNIQUE-BODY-MARKER' } }] });
     expect(r.status, JSON.stringify(r.body)).toBe(201);
-    expect((await owner.post(cms(orgId, `/pages/${encodeURIComponent(r.body.pageId)}/publish`))).status).toBe(200);
-    const out = await prerenderPageCached(orgId, r.body.slug, 'https://good.example', 'en');
+    expect((await owner.post(cms(orgId, `/pages/${encodeURIComponent(r.body!.pageId!)}/publish`))).status).toBe(200);
+    const out = await prerenderPageCached(orgId, r.body!.slug!, 'https://good.example', 'en');
     // The heading is exactly the escaped title. With a string replacement, `$'`
     // expanded to "everything after the match" — the whole body, inside <h1>.
     const h1 = /<header>\n<h1>([\s\S]*?)<\/h1>/.exec(out?.html ?? '')?.[1];

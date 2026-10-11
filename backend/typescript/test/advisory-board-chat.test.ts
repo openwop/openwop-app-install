@@ -8,6 +8,16 @@
  *     a cross-tenant stranger → 404
  *   - cohort reconcile: advisors added/removed on the board reflect on re-open
  *   - ownerSubject survives markAsBoardGroup re-stamps (the preserve fix)
+ *
+ * Sabotage-witnessed (/grade-tests w12): a non-deterministic session id or an
+ * always-201 reds the reuse + join cases; `canRead → true` reds the private-board
+ * case; dropping the org-scope gate reds the zero-role case; stamping every opener
+ * as owner reds the join case; skipping the delete's unbind or release reds the
+ * delete case; skipping the title refresh reds the rename case; skipping the
+ * participant-removal loop reds the cohort case.
+ * Double guard (an honest ceiling, not a gap): the route re-asserts `ownerSubject`
+ * on every stamp AND `composeBoardGroupMeta` preserves an existing one, so dropping
+ * either alone leaves line "ownerSubject toEqual board" green.
  */
 
 import http from 'node:http';
@@ -37,14 +47,20 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T }
-interface Client { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res>; patch: (p: string, b?: unknown) => Promise<Res>; del: (p: string) => Promise<Res> }
+interface Res<T> { status: number; body: T }
+type Body = Record<string, unknown>;
+interface Client {
+  get: <T = Body>(p: string) => Promise<Res<T>>;
+  post: <T = Body>(p: string, b?: unknown) => Promise<Res<T>>;
+  patch: <T = Body>(p: string, b?: unknown) => Promise<Res<T>>;
+  del: <T = Body>(p: string) => Promise<Res<T>>;
+}
 function client(): Client {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
+  const call = async <T>(method: string, path: string, body?: unknown): Promise<Res<T>> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    const out = (res.status === 204 ? {} : await res.json().catch(() => ({}))) as T;
     return { status: res.status, body: out };
   };
   return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), patch: (p, b) => call('PATCH', p, b), del: (p) => call('DELETE', p) };
@@ -54,14 +70,19 @@ const uniqEmail = (who: string): string => `${who}-${Date.now()}-${n++}@acme.tes
 const A = '/host/openwop-app/advisors';
 const CHAT = '/host/openwop-app/chat/sessions';
 
+interface Opened { sessionId: string }
+interface Messages { messages: Array<{ messageId: string }> }
+const BRIEF = 'core.openwop.agents.brief-writer';
+const CHATTER = 'core.openwop.agent-examples.chat';
+
 async function login(c: Client, tenantId: string): Promise<{ userId: string }> {
-  const r = await c.post('/host/openwop-app/test/login', { email: uniqEmail('abc'), tenantId });
+  const r = await c.post<{ user: { userId: string } }>('/host/openwop-app/test/login', { email: uniqEmail('abc'), tenantId });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return r.body.user;
 }
 
-async function makeAdvisor(c: Client, persona: string): Promise<string> {
-  const r = await c.post('/host/openwop-app/roster', { persona, agentRef: { agentId: 'core.openwop.agents.brief-writer' } });
+async function makeAdvisor(c: Client, persona: string, agentId = BRIEF): Promise<string> {
+  const r = await c.post<{ rosterId: string }>('/host/openwop-app/roster', { persona, agentRef: { agentId } });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return r.body.rosterId;
 }
@@ -73,9 +94,10 @@ async function setup(visibility: 'shared' | 'private' = 'shared'): Promise<{
   const tenantId = `org:abc-${Date.now()}-${n++}`;
   await login(owner, tenantId);
   const a = await makeAdvisor(owner, 'Ada Lovelace');
-  const b = await makeAdvisor(owner, 'Alan Turing');
-  const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
-  const board = await owner.post(`${A}/boards`, { orgId: org.body.orgId, name: 'Founders', advisors: [a, b], personaKind: 'historical', visibility });
+  // A DISTINCT chat agent, so the agent lineup can actually shrink and grow.
+  const b = await makeAdvisor(owner, 'Alan Turing', CHATTER);
+  const org = await owner.post<{ orgId: string }>('/host/openwop-app/orgs', { name: 'Acme' });
+  const board = await owner.post<{ boardId: string }>(`${A}/boards`, { orgId: org.body.orgId, name: 'Founders', advisors: [a, b], personaKind: 'historical', visibility });
   expect(board.status, JSON.stringify(board.body)).toBe(201);
   return { owner, tenantId, orgId: org.body.orgId, boardId: board.body.boardId, advisors: [a, b] };
 }
@@ -83,17 +105,17 @@ async function setup(visibility: 'shared' | 'private' = 'shared'): Promise<{
 describe('ADR 0278 — canonical board conversation', () => {
   it('opening twice yields the SAME conversation (deterministic, no per-summon instances)', async () => {
     const { owner, boardId } = await setup();
-    const one = await owner.post(`${A}/boards/${encodeURIComponent(boardId)}/chat`);
+    const one = await owner.post<Opened>(`${A}/boards/${encodeURIComponent(boardId)}/chat`);
     expect(one.status, JSON.stringify(one.body)).toBe(201);
-    const two = await owner.post(`${A}/boards/${encodeURIComponent(boardId)}/chat`);
+    const two = await owner.post<Opened>(`${A}/boards/${encodeURIComponent(boardId)}/chat`);
     expect(two.status).toBe(200); // GRADE-10 — honest REST: reuse is 200, only creation is 201
     expect(two.body.sessionId).toBe(one.body.sessionId);
   });
 
   it('an org member JOINS the shared board chat: same id, can read AND append; ownerSubject survives re-stamps', async () => {
     const { owner, tenantId, orgId, boardId } = await setup('shared');
-    const opened = await owner.post(`${A}/boards/${encodeURIComponent(boardId)}/chat`);
-    const sessionId = opened.body.sessionId as string;
+    const opened = await owner.post<Opened>(`${A}/boards/${encodeURIComponent(boardId)}/chat`);
+    const sessionId = opened.body.sessionId;
 
     // A second user in the SAME tenant, granted org membership (editor scope).
     const member = client();
@@ -101,15 +123,21 @@ describe('ADR 0278 — canonical board conversation', () => {
     await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: memberUser.userId, roles: ['editor'] });
 
     // Join = the member's open resolves the SAME conversation…
-    const joined = await member.post(`${A}/boards/${encodeURIComponent(boardId)}/chat`);
+    const joined = await member.post<Opened>(`${A}/boards/${encodeURIComponent(boardId)}/chat`);
     expect(joined.status, JSON.stringify(joined.body)).toBe(200); // reuse
     expect(joined.body.sessionId).toBe(sessionId);
     // …which they can READ and APPEND to (subject-access join, not participants).
-    expect((await member.get(`${CHAT}/${encodeURIComponent(sessionId)}/messages`)).status).toBe(200);
+    const messageId = `m-join-${n++}`;
     const append = await member.post(`${CHAT}/${encodeURIComponent(sessionId)}/messages`, {
-      messageId: `m-${Date.now()}`, role: 'user', content: JSON.stringify({ role: 'user', content: 'hello board' }),
+      messageId, role: 'user', content: JSON.stringify({ role: 'user', content: 'hello board' }),
     });
-    expect([200, 201]).toContain(append.status);
+    expect(append.status, JSON.stringify(append.body)).toBeGreaterThanOrEqual(200);
+    expect(append.status).toBeLessThan(300);
+    const memberRead = await member.get<Messages>(`${CHAT}/${encodeURIComponent(sessionId)}/messages`);
+    expect(memberRead.status).toBe(200);
+    expect(memberRead.body.messages.map((m) => m.messageId), 'the member reads back what they appended').toContain(messageId);
+    // …and it is the SAME conversation the owner sees, not a private copy.
+    expect((await owner.get<Messages>(`${CHAT}/${encodeURIComponent(sessionId)}/messages`)).body.messages.map((m) => m.messageId)).toContain(messageId);
 
     // The preserve fix: after BOTH opens re-ran markAsBoardGroup, the generic
     // owner binding is still on the meta (it was previously dropped on rebuild).
@@ -142,47 +170,52 @@ describe('ADR 0278 — canonical board conversation', () => {
   it('deleting the board unbinds shared knowledge and releases the conversation to the legacy gate (GRADE-13)', async () => {
     const { owner, tenantId, boardId, advisors: [a] } = await setup('shared');
     await owner.post(`/host/openwop-app/advisors/boards/${encodeURIComponent(boardId)}/shared-knowledge`, { kind: 'strategy', shared: true });
-    const opened = await owner.post(`${A}/boards/${encodeURIComponent(boardId)}/chat`);
-    const sessionId = opened.body.sessionId as string;
+    const opened = await owner.post<Opened>(`${A}/boards/${encodeURIComponent(boardId)}/chat`);
+    const sessionId = opened.body.sessionId;
     const { getAgentProfile } = await import('../src/host/agentProfileService.js');
     expect(((await getAgentProfile(tenantId, a!))?.knowledge?.collectionIds ?? []).length).toBeGreaterThan(0);
 
     const delRes = await owner.del(`${A}/boards/${encodeURIComponent(boardId)}`);
-    expect([200, 204]).toContain(delRes.status);
+    expect(delRes.status).toBe(204);
 
     // Bindings unbound (no other board shares strategy with this advisor)…
     expect((await getAgentProfile(tenantId, a!))?.knowledge?.collectionIds ?? []).toEqual([]);
     // …and the conversation fell back to the legacy owner gate: the CREATOR can
     // still read the transcript (previously 404 for everyone, forever).
-    expect((await owner.get(`${CHAT}/${encodeURIComponent(sessionId)}/messages`)).status).toBe(200);
+    const afterDelete = await owner.get<Messages>(`${CHAT}/${encodeURIComponent(sessionId)}/messages`);
+    expect(afterDelete.status).toBe(200);
+    expect(Array.isArray(afterDelete.body.messages)).toBe(true);
     const meta = await getConversationMeta(tenantId, sessionId);
     expect(meta?.ownerSubject).toBeUndefined();
   });
 
   it('re-opening after a board RENAME refreshes the stale rail title (GRADE-D7, title-source-guarded)', async () => {
     const { owner, tenantId, boardId } = await setup();
-    const opened = await owner.post(`${A}/boards/${encodeURIComponent(boardId)}/chat`);
-    const sessionId = opened.body.sessionId as string;
+    const opened = await owner.post<Opened>(`${A}/boards/${encodeURIComponent(boardId)}/chat`);
+    const sessionId = opened.body.sessionId;
     expect((await owner.patch(`${A}/boards/${encodeURIComponent(boardId)}`, { name: 'War Council' })).status).toBe(200);
-    await owner.post(`${A}/boards/${encodeURIComponent(boardId)}/chat`); // re-open → refresh
+    await owner.post<Opened>(`${A}/boards/${encodeURIComponent(boardId)}/chat`); // re-open → refresh
     const { hostExtStorage } = await import('../src/host/hostExtPersistence.js');
     expect((await hostExtStorage().getChatSession(tenantId, sessionId))?.title).toBe('War Council · board');
   });
 
   it('re-opening after a cohort change reconciles the agent participants both ways', async () => {
-    const { owner, tenantId, boardId, advisors: [a] } = await setup();
-    const opened = await owner.post(`${A}/boards/${encodeURIComponent(boardId)}/chat`);
-    const sessionId = opened.body.sessionId as string;
-    const before = (await getConversationMeta(tenantId, sessionId))?.participants.filter((p) => p.subjectRef.startsWith('agent:')) ?? [];
-    expect(before.length).toBeGreaterThan(0);
+    const { owner, tenantId, boardId, advisors: [a, b] } = await setup();
+    const agents = async (sessionId: string): Promise<string[]> =>
+      ((await getConversationMeta(tenantId, sessionId))?.participants ?? [])
+        .map((p) => p.subjectRef).filter((r) => r.startsWith('agent:')).sort();
+    const opened = await owner.post<Opened>(`${A}/boards/${encodeURIComponent(boardId)}/chat`);
+    const sessionId = opened.body.sessionId;
+    expect(await agents(sessionId)).toEqual([`agent:${CHATTER}`, `agent:${BRIEF}`].sort());
 
-    // Shrink the cohort to just `a`, re-open, and the lineup follows.
+    // Shrink the cohort to just `a`, re-open: the removed advisor leaves the lineup.
     expect((await owner.patch(`${A}/boards/${encodeURIComponent(boardId)}`, { advisors: [a] })).status).toBe(200);
-    await owner.post(`${A}/boards/${encodeURIComponent(boardId)}/chat`);
-    const after = (await getConversationMeta(tenantId, sessionId))?.participants.filter((p) => p.subjectRef.startsWith('agent:')) ?? [];
-    expect(after.length).toBeLessThanOrEqual(before.length);
-    // All advisors share one underlying chat agent in this harness, so assert by
-    // count, not id — the reconcile must not GROW the lineup after a shrink.
-    expect(after.length).toBeGreaterThan(0);
+    await owner.post<Opened>(`${A}/boards/${encodeURIComponent(boardId)}/chat`);
+    expect(await agents(sessionId)).toEqual([`agent:${BRIEF}`]);
+
+    // …and the other way: re-add `b`, re-open, and it is seated again.
+    expect((await owner.patch(`${A}/boards/${encodeURIComponent(boardId)}`, { advisors: [a, b] })).status).toBe(200);
+    await owner.post<Opened>(`${A}/boards/${encodeURIComponent(boardId)}/chat`);
+    expect(await agents(sessionId)).toEqual([`agent:${CHATTER}`, `agent:${BRIEF}`].sort());
   });
 });

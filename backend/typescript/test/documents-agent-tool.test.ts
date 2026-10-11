@@ -6,6 +6,23 @@
  * through the same owner) carries the anti-fabrication contract.
  * P1: the feature-registered builtin behaves draft-only, toggle-honest,
  * acting-user-required, org-RBAC'd — and actually writes the document.
+ *
+ * Order independence: the cases that exercise SOLE-org / SEVERAL-org resolution (no
+ * `orgId`) run in their own fresh tenant — the org count of the shared `default`
+ * tenant depends on which other cases ran first. Every other case passes `orgId`
+ * explicitly or refuses before org resolution; the toggle-off case restores the
+ * global toggle in `finally`.
+ *
+ * Sabotage-witnessed (grade-tests w14): dropping the write/read toggle checks, the
+ * acting-user check, the write or read RBAC, the sole-org rule (guessing), agent
+ * provenance, either idempotency key, the header one-lining, the To line, the
+ * email-draft kind, the ?org= deep-link, the required-param check, the unknown-template
+ * refusal, the template stamp, subject/body validation, the notify-me url floor, its
+ * recipient, its acting-user check, or the tool-grounded-commitments append each turns
+ * a case red. (The GENERIC-scaffold P0 case was cut as redundant with
+ * `voice-realtime.test.ts` "the no-persona scaffold keeps the caller identity anchor",
+ * which pins the bare prompt to `…${TOOL_GROUNDED_COMMITMENTS}` exactly — both red
+ * under the same sabotage.)
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -39,17 +56,16 @@ const setDocuments = async (status: 'on' | 'off'): Promise<void> => {
   if (d) await saveConfig({ ...d, status }, 'test');
 };
 
-async function runDraft(input: Record<string, unknown>, scope: { actingUserId?: string; agentProfileId?: string }): Promise<{ content: string; isError?: boolean }> {
-  const provider = createAgentToolProvider({ tenantId: TENANT, runId: 'run-adr0308', ...scope });
+let n = 0;
+/** A tenant no other case touches — for the cases whose claim is the tenant's org COUNT. */
+const freshTenant = (tag: string): string => `adr0308-${tag}-${n++}`;
+
+async function runDraft(input: Record<string, unknown>, scope: { actingUserId?: string; agentProfileId?: string }, tenantId: string = TENANT): Promise<{ content: string; isError?: boolean }> {
+  const provider = createAgentToolProvider({ tenantId, runId: 'run-adr0308', ...scope });
   return provider.executeTool({ name: DOCUMENTS_DRAFT_TOOL_ID, input });
 }
 
 describe('ADR 0308 P0 — the anti-fabrication contract rides every composed scaffold', () => {
-  it('generic (unscoped) scaffold carries TOOL_GROUNDED_COMMITMENTS', async () => {
-    const ctx = await composeChatContext(TENANT, {});
-    expect(ctx.systemPrompt).toContain(TOOL_GROUNDED_COMMITMENTS);
-  });
-
   it('agent-scoped scaffold carries it too (even when the persona misses)', async () => {
     const ctx = await composeChatContext(TENANT, { agentId: 'no-such-agent' });
     expect(ctx.systemPrompt).toContain(TOOL_GROUNDED_COMMITMENTS);
@@ -68,9 +84,13 @@ describe('ADR 0308 P1 — openwop:documents.draft (feature-registered deliverabl
 
   it('fails closed when the documents toggle is OFF (structured, not a throw)', async () => {
     await setDocuments('off');
-    const out = await runDraft({ title: 'T', contentMarkdown: 'Body' }, { actingUserId: 'u-1' });
-    expect(out.isError).toBe(true);
-    expect(JSON.parse(out.content)).toMatchObject({ error: 'feature_disabled' });
+    try {
+      const out = await runDraft({ title: 'T', contentMarkdown: 'Body' }, { actingUserId: 'u-1' });
+      expect(out.isError).toBe(true);
+      expect(JSON.parse(out.content)).toMatchObject({ error: 'feature_disabled' });
+    } finally {
+      await setDocuments('on');
+    }
   });
 
   it('requires a human-initiated turn (no acting user ⇒ no draft)', async () => {
@@ -82,22 +102,24 @@ describe('ADR 0308 P1 — openwop:documents.draft (feature-registered deliverabl
 
   it('creates a real DRAFT document + first version in the sole org, RBAC-checked', async () => {
     await setDocuments('on');
-    const org = await createOrg({ tenantId: TENANT, createdBy: 'u-writer', name: 'Acme', ownerSubject: 'u-writer' });
+    const tenantId = freshTenant('sole');
+    const org = await createOrg({ tenantId, createdBy: 'u-writer', name: 'Acme', ownerSubject: 'u-writer' });
     const out = await runDraft(
       { title: 'Q3 rollout uptime report', contentMarkdown: '## Uptime\n99.95% …' },
       { actingUserId: 'u-writer', agentProfileId: 'host:iris' },
+      tenantId,
     );
     expect(out.isError, out.content).toBeFalsy();
     const payload = JSON.parse(out.content) as { documentId: string; title: string; status: string };
     expect(payload.title).toBe('Q3 rollout uptime report');
     expect(payload.status).toBe('draft');
-    const docs = await listDocumentsForTenant(TENANT);
+    const docs = await listDocumentsForTenant(tenantId);
     const doc = docs.find((d) => d.documentId === payload.documentId);
     expect(doc?.orgId).toBe(org.orgId);
     expect(doc?.createdBy).toBe('u-writer');
     // Agent provenance — the draft says WHO produced it.
     expect(doc?.provenance.producedBy).toEqual({ kind: 'agent', id: 'host:iris' });
-    const versions = await listVersions(TENANT, org.orgId, payload.documentId);
+    const versions = await listVersions(tenantId, org.orgId, payload.documentId);
     expect(versions[0]?.content).toContain('99.95%');
   });
 
@@ -112,10 +134,14 @@ describe('ADR 0308 P1 — openwop:documents.draft (feature-registered deliverabl
 
   it('with several orgs and no orgId, asks instead of guessing', async () => {
     await setDocuments('on');
-    // Two orgs exist from the cases above — no orgId must NOT silently pick one.
-    const out = await runDraft({ title: 'T', contentMarkdown: 'B' }, { actingUserId: 'u-writer' });
+    // Two orgs the caller can write to — no orgId must NOT silently pick one.
+    const tenantId = freshTenant('multi');
+    await createOrg({ tenantId, createdBy: 'u-writer', name: 'One', ownerSubject: 'u-writer' });
+    await createOrg({ tenantId, createdBy: 'u-writer', name: 'Two', ownerSubject: 'u-writer' });
+    const out = await runDraft({ title: 'T', contentMarkdown: 'B' }, { actingUserId: 'u-writer' }, tenantId);
     expect(out.isError).toBe(true);
     expect(JSON.parse(out.content)).toMatchObject({ error: 'org_required' });
+    expect(await listDocumentsForTenant(tenantId)).toEqual([]);
   });
 });
 
@@ -152,9 +178,12 @@ describe('ADR 0308 P2 — openwop:email.draft (an email-draft Document; never se
 
   it('shares the deliverable governance: toggle-off fails closed; no acting user refuses', async () => {
     await setDocuments('off');
-    const off = await runEmailDraft({ subject: 'S', bodyMarkdown: 'B' }, { actingUserId: 'u-mailer' });
-    expect(JSON.parse(off.content)).toMatchObject({ error: 'feature_disabled' });
-    await setDocuments('on');
+    try {
+      const off = await runEmailDraft({ subject: 'S', bodyMarkdown: 'B' }, { actingUserId: 'u-mailer' });
+      expect(JSON.parse(off.content)).toMatchObject({ error: 'feature_disabled' });
+    } finally {
+      await setDocuments('on');
+    }
     const noUser = await runEmailDraft({ subject: 'S', bodyMarkdown: 'B' }, {});
     expect(JSON.parse(noUser.content)).toMatchObject({ error: 'acting_user_required' });
   });
@@ -233,10 +262,13 @@ describe('C2 (chat-first port) — openwop:documents.generate-from-template + ge
 
   it('fails closed when the documents toggle is OFF (structured, not a throw)', async () => {
     await setDocuments('off');
-    const out = await runGenerate({ templateId: 'tmpl:whatever', contentMarkdown: 'Body' }, { actingUserId: 'u-1' });
-    expect(out.isError).toBe(true);
-    expect(JSON.parse(out.content)).toMatchObject({ error: 'feature_disabled' });
-    await setDocuments('on');
+    try {
+      const out = await runGenerate({ templateId: 'tmpl:whatever', contentMarkdown: 'Body' }, { actingUserId: 'u-1' });
+      expect(out.isError).toBe(true);
+      expect(JSON.parse(out.content)).toMatchObject({ error: 'feature_disabled' });
+    } finally {
+      await setDocuments('on');
+    }
   });
 
   it('WF-DOC-5 — the READ tools honor the toggle too (a feature-off tenant is not agent-readable)', async () => {
@@ -259,10 +291,8 @@ describe('C2 (chat-first port) — openwop:documents.generate-from-template + ge
       await setDocuments('on');
     }
     // Polarity: with the toggle back on, the same read succeeds.
-    const provider = createAgentToolProvider({ tenantId: TENANT, actingUserId: 'u-read-toggle' });
     const ok = await runGetTemplate({ templateId, orgId }, { actingUserId: 'u-read-toggle' });
     expect(ok.isError, ok.content).toBeUndefined();
-    void provider;
   });
 
   it('requires a human-initiated turn (no acting user ⇒ no draft)', async () => {

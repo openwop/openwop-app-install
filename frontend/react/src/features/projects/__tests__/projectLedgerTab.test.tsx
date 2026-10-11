@@ -7,6 +7,15 @@
  *   - propose sends ONLY the lists that changed, and needs a reason;
  *   - "changed since you last looked" lists accepted changes after your last-seen version;
  *   - a failed load says so (never renders as "no ledger").
+ *
+ * Sabotage-witnessed (wave 13, w13g4-plt-*): the `canWrite` Start gate, the `failed`
+ * load state, `isOwner`, the stale-accept `confirm` + `if (ok)` gate, each
+ * `sameList` changed-only term, the reason requirement, the whole tool policy, the
+ * `if (ok) setWhy('')` keep-on-failure, `setNamesFailed`, the `resultVersion > seen`
+ * filter, the Mark-as-seen version, the legacy carry, `queueFirst`, and the
+ * author-name / field-label lookups each turn their case below red. Wave 13 found the
+ * stale-accept case could not fail on its decline half (the count was read before the
+ * declined branch ran) nor on "asks first" (never asserted); both are now awaited.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup, screen, fireEvent, waitFor, within } from '@testing-library/react';
@@ -21,6 +30,7 @@ const h = vi.hoisted(() => ({
   acceptLedgerChange: vi.fn(async () => undefined),
   rejectLedgerChange: vi.fn(async () => undefined),
   markSeen: vi.fn(async (_p: string, v: number) => v),
+  confirm: vi.fn(async (_o: unknown) => true),
 }));
 vi.mock('../teamLedgerClient.js', async (orig) => ({
   ...(await orig<Record<string, unknown>>()),
@@ -30,22 +40,26 @@ vi.mock('../teamLedgerClient.js', async (orig) => ({
   listDecisionSuggestions: vi.fn(async () => []),
 }));
 vi.mock('../../../auth/backendSession.js', () => ({ useBackendSession: () => ({ user: { userId: h.me } }) }));
-vi.mock('../../../ui/confirm.js', () => ({ confirm: vi.fn(async () => h.confirmAnswer) }));
+vi.mock('../../../ui/confirm.js', () => ({ confirm: (o: unknown) => h.confirm(o) }));
 vi.mock('../../../orgs/orgMembers.js', () => ({
   loadOrgMembers: vi.fn(async () => [{ memberId: 'm1', subject: 'user-mate', displayName: 'Mara Mate' }, { memberId: 'm2', subject: 'user-owner', displayName: 'Olu Owner' }]),
 }));
 
 import { ProjectLedgerTab } from '../ProjectLedgerTab.js';
+import { loadOrgMembers } from '../../../orgs/orgMembers.js';
 import type { Project } from '../projectsClient.js';
 
-const project = { id: 'p1', tenantId: 't', orgId: 'o', name: 'Launch', workflows: [], boardId: 'b' } as Project;
+const T0 = '2026-01-01T00:00:00Z';
+const project: Project = { id: 'p1', tenantId: 't', orgId: 'o', name: 'Launch', workflows: [], boardId: 'b' };
 const STATE = { goal: 'Ship the launch', objectives: ['EU live'], openQuestions: ['Date?'], inScope: ['EU'], outOfScope: ['APAC'], decisionDocumentIds: [] };
-const LEDGER = { ledgerId: 'tl1', ownerSubject: 'user-owner', version: 3, updatedAt: '' };
-const proposed = (over: Record<string, unknown> = {}) => ({ deltaId: 'd1', status: 'proposed', patch: { inScope: ['EU', 'UK'] }, why: 'UK added Monday', author: { kind: 'user', id: 'user-mate' }, baseVersion: 3, createdAt: '', ...over });
+const LEDGER = { ledgerId: 'tl1', ownerSubject: 'user-owner', version: 3, updatedAt: T0 };
+const proposed = (over: Record<string, unknown> = {}) => ({ deltaId: 'd1', status: 'proposed', patch: { inScope: ['EU', 'UK'] }, why: 'UK added Monday', author: { kind: 'user', id: 'user-mate' }, baseVersion: 3, createdAt: T0, ...over });
 
 beforeEach(() => {
   for (const f of [h.getTeamLedger, h.listLedgerDeltas, h.createTeamLedger, h.proposeLedgerChange, h.acceptLedgerChange, h.rejectLedgerChange, h.markSeen]) f.mockReset();
   h.markSeen.mockImplementation(async (_p: string, v: number) => v);
+  h.confirm.mockReset();
+  h.confirm.mockImplementation(async () => h.confirmAnswer);
   h.me = 'user-owner'; h.confirmAnswer = true;
   h.getTeamLedger.mockResolvedValue({ ledger: LEDGER, state: STATE });
   h.listLedgerDeltas.mockResolvedValue([]);
@@ -94,12 +108,21 @@ describe('ProjectLedgerTab', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Accept' }));
     await waitFor(() => expect(h.acceptLedgerChange).toHaveBeenCalledTimes(2));
     expect(h.acceptLedgerChange).toHaveBeenLastCalledWith('p1', 'd1', true);
+    // "Asks first": the rebased accept only follows a confirm the person answered.
+    expect(h.confirm).toHaveBeenCalledTimes(1);
 
-    cleanup(); h.acceptLedgerChange.mockReset(); h.confirmAnswer = false;
+    cleanup(); h.acceptLedgerChange.mockReset(); h.confirm.mockClear(); h.confirmAnswer = false;
     h.acceptLedgerChange.mockImplementationOnce(async () => { throw Object.assign(new Error('409'), { status: 409 }); });
     render(<ProjectLedgerTab project={project} canWrite />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Accept' }));
-    await waitFor(() => expect(h.acceptLedgerChange).toHaveBeenCalledTimes(1));
+    const accept = await screen.findByRole('button', { name: 'Accept' });
+    const loads = h.getTeamLedger.mock.calls.length;
+    fireEvent.click(accept);
+    // The first accept call is synchronous inside the click, so counting it proves
+    // nothing. Wait for the post-action refresh, which runs only after the declined
+    // confirm resolved and the stale branch returned — THEN count.
+    await waitFor(() => expect(h.getTeamLedger.mock.calls.length).toBe(loads + 1));
+    expect(h.confirm).toHaveBeenCalledTimes(1);
+    expect(h.acceptLedgerChange).toHaveBeenCalledTimes(1);
   });
 
   it('propose sends only the changed lists and needs a reason', async () => {
@@ -141,8 +164,7 @@ describe('ProjectLedgerTab', () => {
   });
 
   it('grade-ux row 25 B4 — a failed people-directory read is SAID, not shown as names', async () => {
-    const { loadOrgMembers } = await import('../../../orgs/orgMembers.js');
-    (loadOrgMembers as unknown as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('503'));
+    vi.mocked(loadOrgMembers).mockRejectedValueOnce(new Error('503'));
     render(<ProjectLedgerTab project={project} canWrite />);
     await screen.findByText(/people directory could not be loaded/);
   });
@@ -150,8 +172,8 @@ describe('ProjectLedgerTab', () => {
   it('lists what changed since your SERVER-side last-seen version; "Mark as seen" posts the current one', async () => {
     h.getTeamLedger.mockResolvedValue({ ledger: LEDGER, state: STATE, seenVersion: 2 });
     h.listLedgerDeltas.mockResolvedValue([
-      { deltaId: 'a2', status: 'accepted', patch: {}, why: 'Old change', author: { kind: 'user', id: 'x' }, baseVersion: 1, resultVersion: 2, createdAt: '' },
-      { deltaId: 'a3', status: 'accepted', patch: {}, why: 'Scope cut agreed', author: { kind: 'user', id: 'x' }, baseVersion: 2, resultVersion: 3, createdAt: '' },
+      { deltaId: 'a2', status: 'accepted', patch: {}, why: 'Old change', author: { kind: 'user', id: 'x' }, baseVersion: 1, resultVersion: 2, createdAt: T0 },
+      { deltaId: 'a3', status: 'accepted', patch: {}, why: 'Scope cut agreed', author: { kind: 'user', id: 'x' }, baseVersion: 2, resultVersion: 3, createdAt: T0 },
     ]);
     render(<ProjectLedgerTab project={project} canWrite />);
     expect(await screen.findByText(/Changed since you last looked/)).toBeTruthy();
@@ -165,7 +187,7 @@ describe('ProjectLedgerTab', () => {
     window.localStorage.setItem('team-ledger:seen:p1', '2');
     h.getTeamLedger.mockResolvedValue({ ledger: LEDGER, state: STATE, seenVersion: null });
     h.listLedgerDeltas.mockResolvedValue([
-      { deltaId: 'a3', status: 'accepted', patch: {}, why: 'Scope cut agreed', author: { kind: 'user', id: 'x' }, baseVersion: 2, resultVersion: 3, createdAt: '' },
+      { deltaId: 'a3', status: 'accepted', patch: {}, why: 'Scope cut agreed', author: { kind: 'user', id: 'x' }, baseVersion: 2, resultVersion: 3, createdAt: T0 },
     ]);
     render(<ProjectLedgerTab project={project} canWrite />);
     expect(await screen.findByText(/Changed since you last looked/)).toBeTruthy();

@@ -4,7 +4,14 @@
  *   - is idempotent (a second call creates nothing);
  *   - preseeds each advisor's RFC-0004 memory, which RECALLS in a convene
  *     (an advisor turn comes back `grounded: true` for a matching prompt);
- *   - gates on the `advisory-board` toggle (off ⇒ nothing seeded).
+ *   - gates on the `advisory-board` toggle (off ⇒ nothing seeded);
+ *   - heals the duplicate seeded advisors seen on production 2026-10-02 (the board
+ *     editor listed all eight twice and a convene found none) without losing a seat.
+ *
+ * Sabotage-witnessed (/grade-tests w12): `isNew = true` / dropping the handle skip reds
+ * idempotence; an empty memory loop or no `knowledge` capability reds recall; ignoring the
+ * toggle reds the off case; dropping `repointAdvisorOnBoards` reds seat-keeping; merging
+ * outside `heal`, or matching user-authored rows, reds the merge cases.
  */
 
 import http from 'node:http';
@@ -41,14 +48,14 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T }
+interface Res { status: number; body: { user?: { userId: string }; orgId?: string } }
 function client() {
   let cookie = '';
   const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
     const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
-    return { status: res.status, body: out };
+    return { status: res.status, body: out ?? {} };
   };
   return { post: (p: string, b?: unknown) => call('POST', p, b) };
 }
@@ -61,7 +68,7 @@ async function ownerTenant(): Promise<{ tenantId: string; userId: string }> {
   expect(login.status, JSON.stringify(login.body)).toBe(201);
   const org = await c.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status).toBe(201);
-  return { tenantId, userId: login.body.user.userId };
+  return { tenantId, userId: login.body.user!.userId };
 }
 
 describe('advisory-board seed', () => {
@@ -101,16 +108,16 @@ describe('advisory-board seed', () => {
     expect(chunks.some((c) => c.kind === 'memory')).toBe(true);
   });
 
-  it('surfaces advisors + cms-homepage in the demo-data status registry, and clears them', async () => {
+  it('surfaces advisors in the demo-data status registry, and clears them', async () => {
     const { tenantId } = await ownerTenant();
     const storage = __hostExtStorage();
     await seedAdvisoryBoards(tenantId, storage!, {});
 
     const steps = await exampleDataStatus(tenantId, storage!);
     const byId = new Map(steps.map((s) => [s.id, s]));
-    // The advisors row reports the 8 seeded advisors; cms-homepage is present (host-global).
+    // The advisors row reports the 8 seeded advisors. (The host-global cms-homepage row
+    // is example-data-seeder-registry.test.ts's claim, not this file's.)
     expect(byId.get('advisors')?.count).toBe(8);
-    expect(byId.get('cms-homepage')?.count).toBeGreaterThanOrEqual(1);
     expect(await countAdvisors(tenantId)).toBe(8);
 
     // Clearing removes the seeded advisors + boards (count returns to zero).
@@ -124,12 +131,16 @@ describe('advisory-board seed', () => {
   it('seeds nothing when the advisory-board toggle is off', async () => {
     const d = getToggleDefault('advisory-board');
     if (d) await saveConfig({ ...d, status: 'off' }, 'test');
-    const { tenantId } = await ownerTenant();
-    const storage = __hostExtStorage();
-    const r = await seedAdvisoryBoards(tenantId, storage!, {});
-    expect(r.skippedToggleOff).toBe(true);
-    expect(r.advisorsCreated).toBe(0);
-    if (d) await saveConfig({ ...d, status: 'on' }, 'test');
+    try {
+      const { tenantId } = await ownerTenant();
+      const storage = __hostExtStorage();
+      const r = await seedAdvisoryBoards(tenantId, storage!, {});
+      expect(r.skippedToggleOff).toBe(true);
+      expect(r.advisorsCreated).toBe(0);
+      expect(await countAdvisors(tenantId)).toBe(0);
+    } finally {
+      if (d) await saveConfig({ ...d, status: 'on' }, 'test');
+    }
   });
 });
 

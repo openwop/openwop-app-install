@@ -30,7 +30,10 @@ export function documentExtensions(opts?: { history?: boolean }): Extensions {
   return [
     StarterKit.configure({
       heading: { levels: [1, 2, 3, 4, 5, 6] },
-      ...(opts?.history === false ? { history: false } : {}),
+      // starter-kit 3 names it `undoRedo`; `{ history: false }` was silently ignored
+      // (it rode in through this spread, so tsc never saw it), and core undo ran
+      // next to yUndoPlugin in collab sessions (grade-tests w14, TST-DOC-23).
+      ...(opts?.history === false ? { undoRedo: false } : {}),
     }),
     Table.configure({ resizable: true }),
     TableRow,

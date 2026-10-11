@@ -10,6 +10,13 @@
  *   - provider unavailable → best-effort: submit still succeeds, no overlays;
  *   - existing overlays are never overwritten (missing-only);
  *   - the sweep is capped (AUTO_TRANSLATE_MAX_CALLS).
+ *
+ * Sabotage-witnessed (w16, `w16g2-axl-*`): forcing the toggle check true, ignoring
+ * the flag, renaming the proposal's AI-drafted note, dropping the cap, rethrowing
+ * from the end-to-end catch, not reporting persisted counts, translating EXISTING
+ * overlays (red only through the provider-call count — the merge's human-wins rule
+ * masks it otherwise), and throwing instead of flagging `errored` on a missing
+ * provider (red only through `autoTranslateDegraded` — the outer catch masks it).
  */
 
 import http from 'node:http';
@@ -30,6 +37,9 @@ import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { AUTO_TRANSLATE_MAX_CALLS } from '../src/features/cms/translate.js';
+import { updateContentLanguageSettings } from '../src/host/contentLocales.js';
+import type { Page } from '../src/features/cms/cmsService.js';
+import type { PendingApproval } from '../src/host/approvalService.js';
 
 const mockResolve = vi.mocked(resolveHeadlessAi);
 
@@ -62,23 +72,29 @@ async function setToggle(id: 'cms-localization' | 'cms-approval-gate', status: '
   if (d) await saveConfig({ ...d, status }, 'test');
 }
 
-interface Res<T = any> { status: number; headers: Headers; body: T }
+interface Res<T> { status: number; headers: Headers; body: T }
+/** The page view plus the submit echo's translation report and an error envelope. */
+type PageBody = Page & {
+  autoTranslated?: Record<string, number>;
+  autoTranslateDegraded?: { capped?: boolean; errored?: boolean; invalid?: number; conflict?: boolean };
+  error?: string;
+};
 interface Client {
-  get: (p: string, headers?: Record<string, string>) => Promise<Res>;
-  post: (p: string, b?: unknown) => Promise<Res>;
-  put: (p: string, b?: unknown) => Promise<Res>;
+  get: <T = PageBody>(p: string, headers?: Record<string, string>) => Promise<Res<T>>;
+  post: <T = PageBody>(p: string, b?: unknown) => Promise<Res<T>>;
+  put: <T = PageBody>(p: string, b?: unknown) => Promise<Res<T>>;
 }
 function client(): Client {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown, extra: Record<string, string> = {}): Promise<Res> => {
+  const call = async <T>(method: string, path: string, body?: unknown, extra: Record<string, string> = {}): Promise<Res<T>> => {
     const res = await fetch(`${BASE}${path}`, {
       method,
       headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}), ...extra },
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
-    return { status: res.status, headers: res.headers, body: out };
+    const out: unknown = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    return { status: res.status, headers: res.headers, body: out as T };
   };
   return {
     get: (p, headers) => call('GET', p, undefined, headers),
@@ -91,9 +107,9 @@ let n = 0;
 async function ownerOrg(): Promise<{ owner: Client; orgId: string; tenantId: string }> {
   const tenantId = `org:autoxl-${Date.now()}-${n++}`;
   const owner = client();
-  const r = await owner.post('/host/openwop-app/test/login', { email: `axl-${Date.now()}-${n++}@acme.test`, tenantId });
+  const r = await owner.post<unknown>('/host/openwop-app/test/login', { email: `axl-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await owner.post<{ orgId: string }>('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
   return { owner, orgId: org.body.orgId, tenantId };
 }
@@ -113,6 +129,8 @@ async function enableAutoTranslate(owner: Client, orgId: string, locales: string
 
 describe('autoTranslateOnPublish — submit-time sweep', () => {
   it('drafts missing overlays on submit, persists them, and reports counts', async () => {
+    const dispatch = translatingDispatch();
+    mockResolve.mockResolvedValue(dispatch);
     const { owner, orgId } = await ownerOrg();
     await enableAutoTranslate(owner, orgId, ['pt-BR', 'es']);
     const { pageId } = await draftPage(owner, orgId, [
@@ -126,13 +144,16 @@ describe('autoTranslateOnPublish — submit-time sweep', () => {
     expect(sub.body.status).toBe('in_review');
     // 2 sections × 2 locales − 1 existing overlay = 3 calls, missing-only.
     expect(sub.body.autoTranslated).toEqual({ 'pt-BR': 1, es: 2 });
+    // Missing-only at the SWEEP: the existing pt-BR overlay is never even sent to
+    // the provider (the merge would discard it anyway, so only the count shows it).
+    expect(dispatch.mock.calls.length).toBe(3);
 
     const page = await owner.get(u(orgId, `/pages/${pageId}`));
-    expect(page.body.sections[0].localizations['pt-BR'].heading).toBe('XLATED');
-    expect(page.body.sections[0].localizations.es.heading).toBe('XLATED');
+    expect(page.body.sections[0]!.localizations?.['pt-BR']?.heading).toBe('XLATED');
+    expect(page.body.sections[0]!.localizations?.es?.heading).toBe('XLATED');
     // The pre-existing human overlay is NEVER overwritten (missing-only).
-    expect(page.body.sections[1].localizations['pt-BR'].heading).toBe('Segundo');
-    expect(page.body.sections[1].localizations.es.heading).toBe('XLATED');
+    expect(page.body.sections[1]!.localizations?.['pt-BR']?.heading).toBe('Segundo');
+    expect(page.body.sections[1]!.localizations?.es?.heading).toBe('XLATED');
   });
 
   it('names the AI-drafted overlays in the approval proposal when the gate is ON', async () => {
@@ -146,8 +167,8 @@ describe('autoTranslateOnPublish — submit-time sweep', () => {
       expect(sub.status, JSON.stringify(sub.body)).toBe(200);
       expect(sub.body.autoTranslated).toEqual({ 'pt-BR': 1 });
 
-      const list = await owner.get('/host/openwop-app/approvals?status=pending');
-      const appr = (list.body.items as Array<{ pageId?: string; proposal: string }>).find((a) => a.pageId === pageId);
+      const list = await owner.get<{ items: PendingApproval[] }>('/host/openwop-app/approvals?status=pending');
+      const appr = list.body.items.find((a) => a.pageId === pageId);
       expect(appr, 'submit must queue a content approval').toBeTruthy();
       expect(appr?.proposal).toMatch(/1 AI-drafted pt-BR overlay pending review/);
     } finally {
@@ -167,7 +188,7 @@ describe('autoTranslateOnPublish — submit-time sweep', () => {
     expect(mockResolve).not.toHaveBeenCalled();
 
     const page = await owner.get(u(orgId, `/pages/${pageId}`));
-    expect(page.body.sections[0].localizations).toBeUndefined();
+    expect(page.body.sections[0]!.localizations).toBeUndefined();
   });
 
   it('does nothing when autoTranslateOnPublish is false', async () => {
@@ -193,6 +214,10 @@ describe('autoTranslateOnPublish — submit-time sweep', () => {
     expect(sub.status, JSON.stringify(sub.body)).toBe(200);
     expect(sub.body.status).toBe('in_review');
     expect(sub.body.autoTranslated).toBeUndefined();
+    // Disclosed, not silent: the sweep's own `errored` arm (not the end-to-end catch).
+    expect(sub.body.autoTranslateDegraded).toEqual({ errored: true });
+    const page = await owner.get(u(orgId, `/pages/${pageId}`));
+    expect(page.body.sections[0]!.localizations).toBeUndefined();
   });
 
   it('degrades to an untranslated submit when the merge-save cannot validate (best-effort end to end)', async () => {
@@ -214,13 +239,14 @@ describe('autoTranslateOnPublish — submit-time sweep', () => {
     // shipped looks exactly like this). The stored fr overlay now collides
     // with the base locale, so any validated sections save throws — the
     // sweep's merge-save included; the degrade contract below still holds.
-    const { updateContentLanguageSettings } = await import('../src/host/contentLocales.js');
     await updateContentLanguageSettings(tenantId, orgId, { baseLocale: 'fr', supportedLocales: ['pt-BR'], autoTranslateOnPublish: true }, 'test');
 
     const sub = await owner.post(u(orgId, `/pages/${pageId}/submit`));
     expect(sub.status, JSON.stringify(sub.body)).toBe(200); // submit NEVER fails on translation
     expect(sub.body.status).toBe('in_review');
     expect(sub.body.autoTranslated).toBeUndefined(); // nothing persisted → nothing reported
+    const page = await owner.get(u(orgId, `/pages/${pageId}`));
+    expect(page.body.sections[0]!.localizations?.['pt-BR']).toBeUndefined();
   });
 
   it('caps the sweep at AUTO_TRANSLATE_MAX_CALLS provider calls', async () => {
@@ -235,7 +261,7 @@ describe('autoTranslateOnPublish — submit-time sweep', () => {
     const sub = await owner.post(u(orgId, `/pages/${pageId}/submit`));
     expect(sub.status, JSON.stringify(sub.body)).toBe(200);
     expect(dispatch.mock.calls.length).toBe(AUTO_TRANSLATE_MAX_CALLS);
-    const total = Object.values(sub.body.autoTranslated as Record<string, number>).reduce((a, b) => a + b, 0);
+    const total = Object.values(sub.body.autoTranslated ?? {}).reduce((a, b) => a + b, 0);
     expect(total).toBe(AUTO_TRANSLATE_MAX_CALLS);
   });
 });

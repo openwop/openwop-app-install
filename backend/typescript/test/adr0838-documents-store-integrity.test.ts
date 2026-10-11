@@ -14,6 +14,13 @@
  *
  * D3 `DOCWF2-3` — the current-version pointer was a blind put, so a concurrent PATCH
  * (or an older addVersion finishing late) could move it backwards.
+ *
+ * Sabotage-witnessed (grade-tests w14): an owner predicate that ignores org, an
+ * owned-insert that converges instead of 409ing, a public view of the current (not
+ * approved) version, approved→final re-pinning, keeping the pin on demote, approving
+ * an empty document, skipping the legacy pin, a backward pointer move, a blind put in
+ * `mutateDocument`, ignoring the named approval version, a lax stale-base check, a
+ * retry at n+1 after a lost slot, and no pointer heal each turn a case red.
  */
 import http from 'node:http';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
@@ -22,6 +29,7 @@ import { createOrg } from '../src/host/accessControlService.js';
 import { buildDocumentsSurface } from '../src/features/documents/surface.js';
 import {
   createDocument, getDocument, addVersion, updateDocument, publicDocumentView, listVersions,
+  _putDocumentForTest, _putVersionForTest, __setBeforeDocSwapHook,
 } from '../src/features/documents/documentsService.js';
 
 const TENANT_A = 'org:adr0838-a';
@@ -68,7 +76,7 @@ describe('ADR 0838 D1 — a caller-supplied document id never overwrites another
   it('the run surface lane (caller-chosen documentId / idemBase) cannot take another tenant\'s row', async () => {
     const id = 'doc:adr0838-surface';
     await createDocument({ tenantId: TENANT_A, orgId: ORG_A, title: 'A via route', kind: 'doc', provenance: { producedBy: user('u-a') }, createdBy: 'u-a', documentId: id });
-    const surfaceB = buildDocumentsSurface({ tenantId: TENANT_B, runId: 'run-b' } as never);
+    const surfaceB = buildDocumentsSurface({ tenantId: TENANT_B, runId: 'run-b' });
     await expect(surfaceB.createDocument!({ orgId: ORG_B, title: 'stolen', kind: 'doc', documentId: id })).rejects.toMatchObject({ httpStatus: 409 });
     await expect(surfaceB.createDraftDocument!({ orgId: ORG_B, title: 'stolen', content: 'x', idemBase: 'adr0838-surface' })).rejects.toMatchObject({ httpStatus: 409 });
     expect((await getDocument(TENANT_A, ORG_A, id))?.title).toBe('A via route');
@@ -127,7 +135,6 @@ describe('ADR 0838 D2 — the public share serves the APPROVED version, not what
   it('a LEGACY approved row (no pin) keeps publishing its current text, and the next write pins it first', async () => {
     const doc = await createDocument({ tenantId: TENANT_A, orgId: ORG_A, title: 'Legacy', kind: 'doc', provenance: { producedBy: user('u-a') }, createdBy: 'u-a' });
     await addVersion(TENANT_A, ORG_A, doc.documentId, { content: 'legacy approved', producedBy: user('u-a') });
-    const { _putDocumentForTest } = await import('../src/features/documents/documentsService.js');
     const row = await getDocument(TENANT_A, ORG_A, doc.documentId);
     const legacy = { ...row!, status: 'approved' as const };
     delete (legacy as { approvedVersionId?: string }).approvedVersionId;
@@ -159,7 +166,6 @@ describe('ADR 0838 D4 / A2 — the current-version pointer only moves forward', 
   });
 
   it('a PATCH that read the row BEFORE a version landed does not roll the pointer back (deterministic interleave)', async () => {
-    const { __setBeforeDocSwapHook } = await import('../src/features/documents/documentsService.js');
     const doc = await createDocument({ tenantId: TENANT_A, orgId: ORG_A, title: 'Patch race', kind: 'doc', provenance: { producedBy: user('u-a') }, createdBy: 'u-a' });
     await addVersion(TENANT_A, ORG_A, doc.documentId, { content: 'one', producedBy: user('u-a') });
     let fired = false;
@@ -181,7 +187,6 @@ describe('ADR 0838 D4 / A2 — the current-version pointer only moves forward', 
   });
 
   it('an approval that read the row before a version landed pins the version it re-read, never a stale row', async () => {
-    const { __setBeforeDocSwapHook } = await import('../src/features/documents/documentsService.js');
     const doc = await createDocument({ tenantId: TENANT_A, orgId: ORG_A, title: 'Approve race', kind: 'doc', provenance: { producedBy: user('u-a') }, createdBy: 'u-a' });
     const v1 = await addVersion(TENANT_A, ORG_A, doc.documentId, { content: 'one', producedBy: user('u-a') });
     let fired = false;
@@ -214,18 +219,33 @@ describe('ADR 0838 D5 — a checked edit cannot land on text it did not read', (
   });
 
   it('a concurrent writer that has taken the next slot but not yet moved the pointer still makes the edit fail (no retry at n+1)', async () => {
-    const { _putVersionForTest } = await import('../src/features/documents/documentsService.js');
     const doc = await createDocument({ tenantId: TENANT_A, orgId: ORG_A, title: 'In flight', kind: 'doc', provenance: { producedBy: user('u-a') }, createdBy: 'u-a' });
-    const v1 = await addVersion(TENANT_A, ORG_A, doc.documentId, { content: 'one', producedBy: user('u-a') });
-    // Another writer's version 2 is inserted; its pointer move has not landed.
-    await _putVersionForTest({ versionId: `${doc.documentId}:2`, documentId: doc.documentId, tenantId: TENANT_A, orgId: ORG_A, version: 2, content: 'theirs', producedBy: user('u-b'), createdAt: new Date().toISOString() });
-    await expect(addVersion(TENANT_A, ORG_A, doc.documentId, { content: 'mine', producedBy: user('u-a'), baseVersionId: v1.versionId }))
-      .rejects.toMatchObject({ httpStatus: 409, details: { reason: 'stale_base' } });
-    expect((await listVersions(TENANT_A, ORG_A, doc.documentId)).map((v) => v.content)).not.toContain('mine');
+    await addVersion(TENANT_A, ORG_A, doc.documentId, { content: 'one', producedBy: user('u-a') });
+    const vrow = (n: number, content: string) => ({ versionId: `${doc.documentId}:${n}`, documentId: doc.documentId, tenantId: TENANT_A, orgId: ORG_A, version: n, content, producedBy: user('u-b'), createdAt: new Date().toISOString() });
+    // Version 2 exists with the pointer lagging at :1, so the checked save below heals
+    // the pointer first — and the swap hook lands ANOTHER writer's version 3 in that
+    // window: after the edit's base check (base :2 is the newest it saw), before its
+    // insert. Its slot (:3) is taken, and it must fail rather than retry at :4.
+    await _putVersionForTest(vrow(2, 'two'));
+    let fired = false;
+    __setBeforeDocSwapHook(async () => {
+      if (fired) return;
+      fired = true;
+      await _putVersionForTest(vrow(3, 'theirs'));
+    });
+    try {
+      await expect(addVersion(TENANT_A, ORG_A, doc.documentId, { content: 'mine', producedBy: user('u-a'), baseVersionId: `${doc.documentId}:2` }))
+        .rejects.toMatchObject({ httpStatus: 409, details: { reason: 'stale_base' } });
+    } finally {
+      __setBeforeDocSwapHook(undefined);
+    }
+    expect(fired).toBe(true);
+    const contents = (await listVersions(TENANT_A, ORG_A, doc.documentId)).map((v) => v.content);
+    expect(contents).not.toContain('mine');
+    expect(contents).toHaveLength(3);
   });
 
   it('a pointer left one behind (row inserted, pointer move lost) heals, so checked saves are not refused forever (grade-code H2)', async () => {
-    const { _putVersionForTest } = await import('../src/features/documents/documentsService.js');
     const doc = await createDocument({ tenantId: TENANT_A, orgId: ORG_A, title: 'Lagging', kind: 'doc', provenance: { producedBy: user('u-a') }, createdBy: 'u-a' });
     const v1 = await addVersion(TENANT_A, ORG_A, doc.documentId, { content: 'one', producedBy: user('u-a') });
     await _putVersionForTest({ versionId: `${doc.documentId}:2`, documentId: doc.documentId, tenantId: TENANT_A, orgId: ORG_A, version: 2, content: 'two', producedBy: user('u-a'), createdAt: new Date().toISOString() });

@@ -1,6 +1,9 @@
 # ADR 0812 — v1 after the cut: keep the compatibility shim, invert the canonical registration later, delete only on a product decision
 
-Status: **Accepted** (2026-10-04) — P0 in progress
+Status: **Accepted** (2026-10-04) — P0–P3c implemented; P4 slice 1 (the v1 discovery builder) implemented 2026-10-10; P3d and P4 slice 2 open
+
+> **Status line CORRECTED 2026-10-10.** It said "P0 in progress" through P3c
+> landing; the phase record below is the source of truth.
 
 > **DECIDED 2026-10-04 (product owner): drop v1 from the codebase.** P3's gate,
 > "is v1 support for white-label adopters a commitment?", is answered **no**. The
@@ -508,6 +511,27 @@ the 39 major-branch sites.
 >   major 2 until the lane sets the production posture its claim needs.
 >   Until then, they deploy with `--skip-certify`, and the RFC 0089 §D pointer
 >   is absent, which is conformant.
+>
+> > **ROOT CAUSE (2026-10-10, traced by the openwop steward).** "Claims NO
+> > profile" is a defect in the emitter, not a property of in-process major 2.
+> > `conformance/run.ts` `emitCertification` → `certify.ts`
+> > `assembleCertification` still writes a legacy bundleVersion "2" document,
+> > validated against `schemas/certification-bundle-v2.schema.json`
+> > (`claimedProfiles` minItems 1). Its claims come from `claimedProfilesFor`
+> > (`certify.ts:117`), which knows only the MAJOR-1 rules (`deriveProfiles`,
+> > `isCoreStandard`, `agentPlatformStatus`). A v2 discovery document matches
+> > none of them, so the list is empty. The production cut does not hit this
+> > because `publish-evidence.sh` runs the upstream CLI, which defaults to
+> > bundle v3 and uses `claimedProfilesForV2` at major 2.
+> >
+> > **Fix (open):** either retire the in-process emitter and run the upstream
+> > `openwop-conformance --certify --bundle-version 3 --target-major 2` against
+> > the in-process base URL, or port the emitter to v3 with the v2 rules. The
+> > suite package exports none of those helpers today. **Do NOT loosen the
+> > schema:** a bundle claiming nothing attests nothing. No corpus change is
+> > needed. Whether the in-process posture then earns
+> > `openwop-core-standard` is still bounded by the configuration-driven rows
+> > above.
 
 **Persisted and third-party data. The recommendations are open for the architect
 pass:**
@@ -615,6 +639,7 @@ this is cheap to do in P1.
 | P2b-3 | `/v1` stripped from 19 more protocol test files (`testCorpusV1Refs` 1287 → 1177). Two port patterns, both mirroring the SPA (`client/v2Wire.ts`): (A) a run id stays BOUND on protocol paths and is unbound with `test/support/bareRunId.ts` only where it crosses into a host-extension route or storage. Unbinding at create time would put bare ids back on protocol paths, which a host that has retired 1.x refuses with 400. (C′) `GET /runs/{id}/debug-bundle` is not a v2 operation; its home is the ADR 0654 vendor twin `/host/openwop-app/runs/{id}/debug-bundle`. **11 more files stay on `/v1` until P3:** v1-vs-v2 parity tests whose `/v1` calls are deliberate v1 legs (`adr0723`, `adr0712`, `adr0781`, `adr0807`, `idempotent-replay-v2-bound-id`, `v2-bulk-cancel`, `v2-event-sequence-zero-based`, `v2-origin-decoded-bound-id`, `v2-run-pause-resume`, `v2-sse-frame-runid-projection`, `v2-sse-values-snapshot`), which brings the P3 list to 31. **50 files remain for P2b-4.** One is a candidate host finding, not a test spelling: under a v2 `:fork`, `adr0751-fork-suspended-checkpoint` sees the forked gate's `createdAt` differ from the source's, while ADR 0262 ruling #2 says a fork inherits it. To be investigated before that file is ported. | P2b-3 PR |
 | P2b-4 | `/v1` stripped from 25 more protocol test files. The ports were semantic, not spelling changes: (A) more crossings into host/in-process lanes: event-log appends, `applyCostRollup`, channel appends, agent-tool inputs, redrive bodies, and storage reads written as `storage()`/casts; (E) the major-2 webhook body is `{ runId, event }` and stores the v2 vendor name (`openwop-app.crm.contact-created`); `connector.auth-expired` is hyphenated on the v2 wire; closed v2 payloads drop host fields (`artifactTypeId`→`artifactType`, `valid`, `pinned`), so those are asserted on the stored event or the host `debug-bundle`; and v2 resolves a cancelled run's gate as `409 interrupt_already_resolved`. **Security legs:** cross-tenant negatives now see v2's earlier `403 id_tenant_mismatch`, so `quorum-review` adds the attack that reaches the gates behind it (a foreign id re-bound to the attacker's own tenant), with a positive control. MEASURED under sabotage: a second tenant gate also holds. **CORRECTION to P2b-3's row:** the suspected v2 `:fork` `createdAt` defect is NOT real. The test's `appendMarker` wrote to the event log under the BOUND id; with the bare id `adr0751` passes 12/12. 23 files remain for P2b-5. `rfc0114-a2ui-delta-e2e` moves to the P3 list, because the delta frame is major-1 only by design (RFC 0209 §D.15). | P2b-4 PR |
 | P2b-5 | The last 21 portable protocol test files leave `/v1`, which completes P2b. New port shapes: a v2 snapshot carries no `interrupt`, so the token-redaction test asserts that NO snapshot carries the handle, for either scope, while the scope-checked host list still gives it to a responder; the v2 owner block is `{ tenant, subject }`, so the opaque id is witnessed on `subject.subjectId`; the v2 poll cursor is `afterSequence` (`lastSequence` is not a parameter); a run cancelled after it finished is `409`, so the key-preset probe uses a live run; the SPA persists BARE ids, so chat bubbles and conversation binds do too. Ported this way, three negatives stopped being vacuous (`not.toContain(theirs)`, and D5's foreign and non-conversation binds). `metrics-golden-telemetry` keeps the `/v1/runs` ROUTE LABEL, which is the internal route key until P3, not a request path. **Two host fixes the port exposed** (see Findings): the major-2 run list now carries `compensationStatus`, and an anonymous visitor's decoded bound id resolves. **34 files stay on `/v1` for P3** (v1 behaviour, v1-vs-v2 parity legs, minimal apps). | P2b-4/5 PR |
+| P4-1 | The v1 discovery builder (`buildAdvertisement`, ~1,400 lines) and its 22 bridge callers (ADR 0858 debt) are gone; `negotiatedMajor` deleted; `/.well-known/openwop` serves only the v2 root; two live defects fixed (attestation verify digested the v1 document, certify stamped a `/v1` bundle path). See § P4 slice 1 below. | `feat/adr-0812-v1-remnants` |
 
 ## Open questions
 
@@ -686,3 +711,109 @@ v2 arm, a vendor branch takes a path predicate.**
   collab's matcher took it as optional, so a retired host still opened sockets on
   the withdrawn path space. Witness: `test/adr0812-p3c-v1-upgrade-refused.test.ts`,
   which is red with the guard removed.
+
+## P4 slice 1: the v1 discovery builder (2026-10-10)
+
+**Measured on `origin/main` `51f5a323f` before the change.** The session note
+("the v1 discovery builder and ~21 callers through a v1 bridge") was close:
+- `buildAdvertisement` (`routes/discovery.ts`, 1,411 lines) had **two src
+  callers**: the discovery route's dead major-1 arm (`negotiatedMajor(req)`
+  can only be 2 on `/.well-known/openwop` behind the negotiator), and the
+  operations attestation verify (below).
+- **22 test callers**: 15 through `test/support/v1Advertisement.ts` and 7 that
+  imported the builder directly.
+- `check-v1-reliance`: testCorpusV1Refs 261, spaProtocolCallSites 0,
+  backendProtocolPathRefs 73, backendHostExtensionPathRefs 15,
+  backendVersionedOwnUrls 5 (baseline file still at the P0 values).
+
+**What changed.**
+- The builder, `negotiatedMajor`, the v1-only auth helpers
+  (`workloadIdentityCapability`, `oidcCapability`, `subjectLinkingCapability`),
+  17 now-unused imports, `certificationBundleUrl()` and the bridge file are
+  deleted. The discovery route has one representation; `Capabilities-Etag`
+  went with the v1 arm. The v2 `auth.subjectLinkKey` is now read from
+  `SUBJECT_LINK_KEY` instead of a literal (same value).
+- **Live defect 1: the attestation verify could never pass on a retired host.**
+  `operations/attestation/summary` re-digested `buildAdvertisement`, while
+  `scripts/sign-attestation.mjs` digests a header-less discovery GET, which
+  has been the v2 root since 2026-10-04. Every valid attestation read
+  `discovery_drift`. It now digests `buildV2Advertisement` with the major-2
+  evidence cache. Witness: `test/adr0812-p4-attestation-digests-served-root.test.ts`
+  signs the served bytes with a real key in the pinned keyring and requires
+  `valid`.
+- **Live defect 2: the claims document named a 410 address.**
+  `conformance/certify.ts` stamped `evidence.bundlePath` (and kept
+  `CONFORMANCE_CLAIMS_PATH`) as the `/v1/host/openwop-app/…` twin. The route
+  moved in P3b; this constant did not, because `check-v1-reliance` does not scan
+  `conformance/`. Now unversioned. Witness: `conformance-claims-routes` follows
+  the named path and requires it to equal `CERTIFICATION_BUNDLE_PATH`.
+- **Caller dispositions** (no authz, tenant or 401 leg was deleted):
+  - re-pointed at the SERVED v2 root or `buildV2Advertisement`:
+    `artifact-types-advert-conformance` (now validated against the v2 family
+    schema), `artifact-types-store-reachability`, `memory-sr1-chokepoint`
+    (`agents.memoryBackends`), `adr0858-live-model-fixture-advert`,
+    `discovery-signing-keys`, `adr0858-storage-family-backends`,
+    `auth-subject-link` + `auth-subject-link-alignment` (the v2 claim is the
+    `saml` + `scim` lane PAIR; v2 has no `subjectLinking` flag and states
+    `subjectLinkKey` unconditionally, which the v2 schema allows;
+    **CORRECTED 2026-10-10:** the spec steward ruled the key is stated only
+    with both lanes, and ADR 0858 § "P4 slice" implements it),
+    `discovery-root-mirror-parity` (leg 1 is now "the root has no wrapper"),
+    `steward/agrade-wire-blocked-residue` (served root, plus the built-but-not-
+    projected `v2A2aRecord`/`v2McpRecord` for a2a/mcp);
+  - re-pointed at the SSoT the v1 block was printed from, because the claim has
+    no v2 record but the source still gates behaviour: `dispatch-fanout-route`
+    (`dispatchCapability()`), the four `featureSurfaces` legs
+    (`registeredFeatureSurfaceIds()`), `adr0787-schedule-door` (the horizon is
+    asserted on the `schedule_horizon_exceeded` refusal's details);
+  - v1 oracle frozen: `discovery-v2-adapter-parity` pins the per-config values
+    that were proven equal to v1 on `51f5a323f`;
+  - v1-oracle legs deleted, ledgers moved to ADR 0858: `whd7-v2-projection-
+    parity` (shared-facet equality, the v1 seat census, the under-projection
+    ledger);
+  - advert leg deleted, behaviour leg kept: `verifier-gating-route`
+    (`multiAgent` is ledgered BLOCKED; the 404 gate leg stays).
+  - `workspace-readiness-advert` now pins that NO profile advertises
+    `workspace` at v2; projecting it must gate on `workspaceAdvertisable()`.
+
+**Claims no served document makes any more.** These were on the v1 root only
+and have no v2 record: `hostExtensions.featureSurfaces`, `dispatch`,
+`multiAgent.executionModel` (verifier), `scheduling.maxFutureHorizon`,
+`workspace`, `auth.workloadIdentity`/`auth.oidc` sub-blocks (the v2 lanes carry
+the same facts), and the image-mode `conformance.certificationBundleUrl`
+pointer. They were already invisible to clients since the cut; this slice stops
+tests from pretending otherwise. Each is in ADR 0858's ledger or listed there.
+
+**Left for P4 slice 2 (measured, not done here):**
+- **Orphaned exports.** With the builder gone, these have no src caller:
+  `listCapabilities`, `universalEnvelopeKinds`, `MAX_INLINE_MEDIA_BYTES`,
+  `selfHostedRunnerAdvertised`, `getFsSandboxRoot` (no test refs either), and
+  `registeredFeatureSurfaceIds`, `A2A_PROFILES`, `videoGenerationAdvertised`,
+  `advertisedProviderAuthModes` (test refs only). Each needs a delete-or-keep
+  call (some are SSoTs a future v2 record should read).
+- `cors.ts` still lists `Capabilities-Etag` in `Access-Control-Expose-Headers`
+  (harmless; nothing sets it now).
+- The image-mode major-1 certification bundle (`servedBundle(1)`, the
+  `certification-bundle` route, `ensureCertificationEvidence(1, …)`) is the
+  last v1 certify artifact. It belongs with #4663 (image-mode certify), not
+  here.
+- **`check-v1-reliance` to zero and a hard gate.** After this slice: test
+  corpus 261 (unchanged, these files had no `/v1` refs), backend protocol 73,
+  host-extension 15, versioned own URLs 5. The remaining refs are dominated by
+  the 410/308 front's own tests and the KEEP lines, which a hard gate at zero
+  would have to exempt by name. Proposed shape: count only lines without an
+  `ADR 0812 KEEP` marker, add `conformance/` and `sdk/` to the scan (the
+  P3d row; this slice found the `conformance/` miss), then flip to a hard
+  gate once the count is zero.
+
+**P3d: persisted data needs a migration, so it is designed here and not
+shipped.** The `POST:/v1/host/openwop-app/agents` `IdempotentEndpoint` key is
+the primary key AND an input to `request_digest`
+(`idempotentResponse.ts:106`). The recommendation above stands: KEEP the string
+as an opaque id. If it is ever renamed, the safe order is (1) a reader that
+accepts both keys for one retention window, (2) a migration rewriting
+`endpoint` and recomputing `request_digest` in both stores, in one transaction
+per store, (3) dropping the old reader after the idempotency TTL. A client
+retry spanning a non-atomic rename would re-execute a run create, which is why
+it is not a rename. `webhook_subscriptions.protocol_major` 1/null rows: a
+DELETE migration is still recommended and still open.

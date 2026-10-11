@@ -19,68 +19,55 @@
  * longer regress silently.
  *
  * `capabilities.md` §"Document-root layout" makes the ROOT canonical; the nested
- * `capabilities` object is a deprecated v1.x compatibility mirror. Both legs
- * below therefore describe a deliberate, temporary state — when the mirror is
- * finally dropped, leg 2 is the test to delete, and leg 1 stays.
+ * `capabilities` object was a deprecated v1.x compatibility mirror.
+ *
+ * ADR 0812 P4 — the mirror is GONE: it was a v1 construct, and the v1 builder
+ * is deleted. The v2 root has no `capabilities` wrapper at all, so the old
+ * leg 1 (root == wrapper) has nothing to compare and is replaced by a leg that
+ * the served root carries no wrapper. Leg 2 (no dotted family key) is a
+ * property of the served root and is kept, read from the v2 document.
  */
 import http from 'node:http';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
-import { v1Advertisement } from './support/v1Advertisement.js';
-
-/** The ONE dotted key this host still emits, and the only sanctioned exception.
- *  ADR 0537: `forms` is canonical; `host.forms` is a deprecated mirror kept only
- *  while `host-capabilities.md` §host.forms still SHOWS the dotted spelling in
- *  prose. Delete this entry together with the mirror in `routes/discovery.ts`. */
-const DOTTED_MIRROR_ALLOWLIST = new Set(['host.forms']);
+import type { AddressInfo } from 'node:net';
 
 let server: http.Server;
+let BASE = '';
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 't', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((r) => { server = app.listen(0, '127.0.0.1', () => r()); });
+  await new Promise<void>((r) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; r(); }); });
 });
 afterAll(async () => { await new Promise<void>((r) => server.close(() => r())); });
 
-// ADR 0812 — the `capabilities` wrapper is a MAJOR-1 construct (the v2 root has
-// none), so the v1 document is read from its builder, which answers in both modes.
-const discovery = async (): Promise<Record<string, unknown>> => v1Advertisement();
+/** The SERVED root (header-less is the v2 document). */
+const discovery = async (): Promise<Record<string, unknown>> => {
+  const res = await fetch(`${BASE}/.well-known/openwop`);
+  expect(res.status).toBe(200);
+  return (await res.json()) as Record<string, unknown>;
+};
 
-describe('RFC 0073 — every capability family is readable at the document ROOT', () => {
-  it('leg 1: every family in the deprecated wrapper is mirrored at the root, identically', async () => {
+describe('RFC 0073 — every capability family is at the document ROOT', () => {
+  it('leg 1: the served root has no `capabilities` wrapper — one arm, so no arm can diverge', async () => {
     const doc = await discovery();
-    const wrapper = doc['capabilities'] as Record<string, unknown> | undefined;
-    expect(wrapper && typeof wrapper === 'object', 'the v1.x compat wrapper is still emitted').toBe(true);
-
-    const families = Object.keys(wrapper ?? {});
-    // Non-vacuity: this host advertises dozens of families. A doc that lost its
-    // wrapper would otherwise pass leg 1 by iterating nothing.
-    expect(families.length, 'the wrapper must actually carry families').toBeGreaterThan(20);
-
-    const missingAtRoot = families.filter((k) => doc[k] === undefined);
-    expect(missingAtRoot, 'RFC 0073 makes the ROOT canonical — these families are wrapper-only').toEqual([]);
-
-    const divergent = families.filter((k) => JSON.stringify(doc[k]) !== JSON.stringify((wrapper ?? {})[k]));
-    expect(divergent, 'root and wrapper must be the same value, or a consumer gets a different answer per arm').toEqual([]);
+    expect(doc['capabilities'], 'a wrapper is a second arm a consumer could be satisfied by').toBeUndefined();
+    // Non-vacuity: the root does carry families.
+    const families = Object.entries(doc).filter(([, v]) => v !== null && typeof v === 'object' && typeof (v as Record<string, unknown>)['status'] === 'string');
+    expect(families.length).toBeGreaterThan(20);
   });
 
-  it('leg 2: no NEW dotted family key — plain is canonical (ADR 0537)', async () => {
+  it('leg 2: no dotted family key — plain is canonical (ADR 0537)', async () => {
     const doc = await discovery();
-    const wrapper = (doc['capabilities'] ?? {}) as Record<string, unknown>;
-    const dotted = Object.keys(wrapper).filter((k) => k.includes('.') && !DOTTED_MIRROR_ALLOWLIST.has(k));
+    const dotted = Object.keys(doc).filter((k) => k.includes('.'));
     expect(
       dotted,
-      'RFC 0137 G16: the PLAIN family name is the discovery key; `host.` is the capability IDENTIFIER notation (§headings, pack peerDependencies, error.capability). Add the plain key; do not extend the allowlist.',
+      'RFC 0137 G16: the PLAIN family name is the discovery key; `host.` is the capability IDENTIFIER notation (§headings, pack peerDependencies, error.capability). Add the plain key.',
     ).toEqual([]);
-
-    // The allowlisted mirror must still be paired with its plain form, so the
-    // exception can never become the only spelling a consumer can find.
-    for (const dottedKey of DOTTED_MIRROR_ALLOWLIST) {
-      if (wrapper[dottedKey] === undefined) continue; // already retired — fine
-      const plain = dottedKey.replace(/^host\./, '');
-      expect(doc[plain], `${dottedKey} is a MIRROR; the canonical ${plain} must be emitted at the root too`).toBeDefined();
-    }
+    // The v1 `host.forms` mirror was the one sanctioned exception; its plain
+    // form is what the v2 root carries.
+    expect(doc['forms']).toBeDefined();
   });
 });

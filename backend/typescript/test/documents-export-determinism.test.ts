@@ -6,6 +6,14 @@
  * UNPROTECTED. `documents-export.test.ts` already carries two tests named
  * "is deterministic (same inputs ⇒ identical bytes)", and MEASURED 2026-09-01:
  * deleting BOTH `pinZipTimestamps` calls leaves all 21 of them passing.
+ * (CORRECTED w14 grade-tests: the math-present one of those two was CUT as
+ * redundant — "EPUB: identical inputs a day apart" below uses math input too,
+ * and the same content-randomness sabotage, `w14g2-det-epub-random` /
+ * `w14g2-exp-epub-random`, turned both red. The per-version one remains,
+ * because it also carries images.)
+ *
+ * Sabotage-witnessed (w14): removing the EPUB pin reds cases 1, 3, 4; removing
+ * the ODT pin reds case 2; pinning to a constant reds cases 3 and 4.
  *
  * They cannot fail because of HOW the defect works. JSZip stamps each entry with
  * `new Date()` at write time, so two generations differ only when they straddle a

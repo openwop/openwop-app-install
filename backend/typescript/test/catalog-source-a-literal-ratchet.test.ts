@@ -14,7 +14,6 @@
  */
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { WORKFLOW_TEMPLATES } from '../src/host/workflowTemplates.js';
 import { EXAMPLE_WORKFLOWS } from '../src/host/exampleWorkflows.js';
 
 const ALLOWED = [
@@ -47,10 +46,11 @@ describe('catalog source-A literal ladder (ADR 0764 D6)', () => {
    * '…')`, so a by-id FUNCTION lookup was invisible to it: 44 `tmpl.*` and 15
    * `openwop-app.agents.*` in-tree definitions resolve through
    * `getWorkflowTemplate(id)` / `getExampleWorkflow(id)` while this ratchet
-   * stayed green. So pin the resolver's RETURN SET instead of one lookup shape:
-   * every `return { workflowId, definition: X }`, with where each `X` comes from.
-   * A new definition source fails here; so does a 45th template (P2 converts
-   * both modules to a chain pack and deletes them).
+   * stayed green. So pin the resolver's RETURN SET instead of one lookup
+   * shape: every `return { workflowId, definition: X }`, with where each `X`
+   * comes from. A new definition source fails here. P2 converts both modules to
+   * a chain pack and deletes them: P2c deleted `getWorkflowTemplate` and dropped
+   * it from this set, after all 44 `tmpl.*` moved to the work-twin-templates pack.
    */
   it('pins every definition source the resolver returns (ADR 0775 D6)', () => {
     const src = readFileSync('src/host/index.ts', 'utf8')
@@ -69,14 +69,16 @@ describe('catalog source-A literal ladder (ADR 0764 D6)', () => {
         'getChainBackedWorkflow()',
         'getExampleWorkflow()', // ARWF-1 quarantine — P2 deletes it
         'getRegisteredWorkflowAsync()',
-        'getWorkflowTemplate()', // ARWF-1 quarantine — P2 deletes it
         'import:agentMentionWorkflowDefinition',
       ].sort(),
     );
   });
 
-  it('the two quarantined in-tree catalogs only shrink (ADR 0775 D6)', () => {
-    expect(WORKFLOW_TEMPLATES.length, 'a new tmpl.* ships as a workflow-chain pack').toBeLessThanOrEqual(44);
+  it('the quarantined in-tree catalogs only shrink (ADR 0775 D6)', () => {
+    // ADR 0775 P2a/P2b/P2c took the tmpl.* ceiling 44 → 28 → 12 → 0 and P2c deleted
+    // the catalog. It must not come back as an export of that module.
+    const templates = readFileSync('src/host/workflowTemplates.ts', 'utf8');
+    expect(templates, 'a new tmpl.* ships as a workflow-chain pack').not.toMatch(/\bWORKFLOW_TEMPLATES\b|getWorkflowTemplate|WorkflowDefinition\s*=/);
     expect(EXAMPLE_WORKFLOWS.length, 'a new demo workflow ships as a workflow-chain pack').toBeLessThanOrEqual(15);
   });
 });

@@ -6,6 +6,13 @@
  * content-safety posture (ADR 0009) is: http(s)/mailto → an external <a>; an
  * internal `/path` → a router <Link>; anything else (javascript:, a
  * protocol-relative `//evil`, a `/\` backslash escape) DEGRADES to plain text.
+ *
+ * Sabotage-witnessed (w17): dropping `rel` on the inline <a>; `https?:` → `https:`;
+ * dropping `mailto:` or admitting `javascript:` in `isSafeHref` (CtaLink.tsx);
+ * dropping the `isInternal` <Link> arm; `(?![/\\])` → `(?![\\])` / `(?![/])` in
+ * `lib/internalHref.ts`. The predicate's full vector table is
+ * `backend/typescript/test/adr0836-internal-href.test.ts`; this file owns the
+ * rendered-markdown wiring.
  */
 import { describe, it, expect, afterEach } from 'vitest';
 import { render, screen, cleanup, within } from '@testing-library/react';
@@ -85,7 +92,7 @@ describe('SectionRenderer markdown safe-href guard (ADR 0009 / FP-5)', () => {
     // Exactly one anchor (the safe one); the unsafe label is inert text.
     const links = within(container).getAllByRole('link');
     expect(links).toHaveLength(1);
-    expect(links[0].getAttribute('href')).toBe('https://ok.example');
+    expect(links[0]!.getAttribute('href')).toBe('https://ok.example');
     expect(screen.getByText(/unsafe/)).toBeTruthy();
   });
 });

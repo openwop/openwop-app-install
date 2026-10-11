@@ -25,7 +25,6 @@ import { buildGraph, topologicalOrder } from '../executor/scheduler.js';
 import { getRegisteredWorkflowAsync } from './workflowsRegistry.js';
 import { getChainBackedWorkflow } from './chainBackedWorkflows.js';
 import { getExampleWorkflow } from './exampleWorkflows.js';
-import { getWorkflowTemplate } from './workflowTemplates.js';
 import { createConnectorInvoker } from './connectorInvoker.js';
 import { AGENT_MENTION_WORKFLOW_ID, agentMentionWorkflowDefinition } from './agentMentionWorkflows.js';
 import { conformanceNodesEnabled } from '../bootstrap/conformanceMockAgent.js';
@@ -663,14 +662,9 @@ export function createHostAdapterSuite(deps: { storage: Storage }): HostAdapterS
         // and survives restart (host/exampleWorkflows.ts explains why).
         const demo = getExampleWorkflow(workflowId);
         if (demo) return { workflowId, definition: demo };
-        // Shared work-twin template pack (ADR 0032 Phase 2.0) — a pinned
-        // module constant (host/workflowTemplates.ts), resolved here in catalog
-        // source A like the demo workflows so a twin portfolio that binds a
-        // `tmpl.*` id (directly or via `core.subWorkflow`) is runnable on every
-        // instance and survives restart/replay, NOT the in-memory builder
-        // registry below.
-        const template = getWorkflowTemplate(workflowId);
-        if (template) return { workflowId, definition: template };
+        // (ADR 0775 P2 — the Work-Twin `tmpl.*` templates no longer resolve here:
+        // they are chain-backed from the work-twin-templates pack and resolve
+        // through `getChainBackedWorkflow` above, same id.)
         // Builder-registered workflows. Resolved via the durable-backed
         // registry (ENG-3): a cache hit, else a storage read — so a run
         // re-dispatched by the sweeper on ANOTHER instance can still resolve a

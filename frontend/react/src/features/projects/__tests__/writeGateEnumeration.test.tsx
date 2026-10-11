@@ -20,11 +20,16 @@
  * Both directions matter and they point opposite ways: the workflows case asserts
  * a control is HIDDEN for a reader, the chat case asserts one is SHOWN. A gate test
  * that only ever asserts absence cannot tell a correct gate from a broken screen.
+ *
+ * Sabotage-witnessed (wave 13, w13g4-wge-*): `{canWrite ? …}` around Run now forced
+ * true (hidden case reds) or false (offered case reds); the chat button hidden for
+ * readers or for everyone; and the cadence editor's `&& canWrite` dropped.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, cleanup } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import type { Project } from '../projectsClient.js';
+import type { RosterEntry } from '../../../agents/rosterClient.js';
 import { messages as en } from '../i18n/en.js';
 
 // Mock the modules ProjectWorkflowsTab ACTUALLY imports (check-inert-mocks R2:
@@ -41,7 +46,10 @@ vi.mock('../../../workflows/workflowsClient.js', () => ({
 }));
 vi.mock('../../../client/runsClient.js', () => ({ createRun: vi.fn() }));
 vi.mock('../../../agents/rosterClient.js', () => ({
-  listRoster: vi.fn(async () => [{ rosterId: 'r1', persona: 'Ada', agentRef: { agentId: 'a1' } }]),
+  listRoster: vi.fn(async (): Promise<RosterEntry[]> => [
+    { rosterId: 'r1', persona: 'Ada', agentRef: { agentId: 'a1' }, workflows: [], tenantId: 't', enabled: true,
+      createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' },
+  ]),
 }));
 
 import { ProjectWorkflowsTab } from '../ProjectWorkflowsTab.js';
@@ -53,7 +61,7 @@ import { ProjectChatTab } from '../ProjectChatTab.js';
 const project: Project = {
   id: 'p1', tenantId: 't', orgId: 'o1', name: 'P', workflows: ['wf.alpha'], boardId: 'b1',
   members: [{ ref: 'agent:r1', role: 'lead', addedAt: '2026-01-01T00:00:00Z' }],
-} as Project;
+};
 
 afterEach(cleanup);
 
@@ -65,10 +73,12 @@ describe('canWrite pre-gate — the two controls the enumeration found wrong', (
 
   it('workflows: `Run now` is HIDDEN from a read-only member (was FALSIFIED)', async () => {
     render(<MemoryRouter><ProjectWorkflowsTab projectId="p1" workflows={['wf.alpha']} canWrite={false} onSaved={() => {}} /></MemoryRouter>);
-    // Wait for the row to exist first — otherwise the absence assertion is
+    // Wait for the LOADED row first — otherwise the absence assertion is
     // satisfied by a component that has simply not rendered yet, which is the
-    // vacuity shape that let the original gap through.
-    await screen.findByText('wf.alpha');
+    // vacuity shape that let the original gap through. ('wf.alpha' is the
+    // PRE-load label; after `listWorkflowSummaries` resolves the row reads 'Alpha'
+    // and is `known`, so only the canWrite gate can be hiding Run now.)
+    await screen.findByText('Alpha');
     expect(screen.queryByRole('button', { name: en.runNow })).toBeNull();
     // ...and `Unassign`, which WAS gated, is still gone — the control the old
     // single-control test would have caught.
@@ -86,7 +96,7 @@ describe('chat: the room is gated on READ, matching the server (CPC-4)', () => {
     render(<MemoryRouter><ProjectChatTab project={project} canWrite={false} onSaved={() => {}} /></MemoryRouter>);
     expect(await screen.findByRole('button', { name: new RegExp(en.openProjectChat) })).toBeTruthy();
     // The false copy is gone from the catalog entirely, in all four locales.
-    expect((en as Record<string, unknown>).openChatNeedsWrite).toBeUndefined();
+    expect('openChatNeedsWrite' in en).toBe(false);
   });
 
   it('but the CADENCE EDITOR stays write-gated — that one really is a PATCH', async () => {

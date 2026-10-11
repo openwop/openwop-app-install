@@ -64,7 +64,7 @@ describe('ADR 0667 D2 — RICE fidelity', () => {
     const rows = new DurableCollection<{ tenantId: string; id: string; criteriaSet: CriteriaSet }>('priority-matrix:list', (l) => `${l.tenantId}::${l.id}`);
     const raw = await rows.get(`tRice::${created.id}`);
     expect(raw, 'the row must exist for this leg to mean anything').toBeTruthy();
-    await rows.put({ ...(raw as { tenantId: string; id: string; criteriaSet: CriteriaSet }), criteriaSet: { ...RICE, aggregation: 'ratio' } });
+    await rows.put({ ...raw!, criteriaSet: { ...RICE, aggregation: 'ratio' } });
     expect((await rows.get(`tRice::${created.id}`))?.criteriaSet.aggregation, 'the stored row is the OLD shape').toBe('ratio');
 
     const read = await getList('tRice', created.id);

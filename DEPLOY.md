@@ -244,6 +244,24 @@ than one backend instance** safely — two instances see two divergent
 > `surface_scan_heavy` (`{op, family, rows, ms}`, no tenant id) is the signal that
 > a tenant's data has outgrown a scan — a filtered table query, an fs listing,
 > a durable vector/search/nosql read. Watch it before adding an index.
+>
+> **ADR 0871 (2026-10-10).** An hourly gauge logs how big the surfaces are, so
+> growth shows before `surface_scan_heavy` fires: `surface_rows_gauge` per durable
+> family and, with pgvector, `vector_rows_gauge` (with the extension version). A
+> pgvector query at or over the warn threshold logs `vector_query_slow`. All
+> optional:
+>
+> ```bash
+> OPENWOP_STORAGE_GROWTH_GAUGE=false             # turn the hourly gauge off (default on)
+> OPENWOP_SURFACE_ROW_TRIGGER=100000             # rows per tenant per family counted as "over" (T1)
+> OPENWOP_VECTOR_NAMESPACE_TRIGGER=50000         # vectors per namespace counted as "over" (T3)
+> OPENWOP_VECTOR_QUERY_WARN_MS=200               # vector_query_slow threshold
+> OPENWOP_VECTOR_PG_STATEMENT_TIMEOUT_MS=30000   # statement_timeout on the vector pool
+> ```
+>
+> Re-check the three deferred decisions with
+> `node scripts/measure-storage-growth.mjs --days 7` (exit 0 clear, 1 triggered,
+> 2 unmeasured).
 
 Each surface is selected through a backend seam
 (`backend/typescript/src/host/surfaceBackends.ts`); the wire shape is identical

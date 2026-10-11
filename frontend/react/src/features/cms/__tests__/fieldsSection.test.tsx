@@ -8,6 +8,11 @@
  * saves it; on a locale overlay the names are the base's and an empty value
  * inherits the base (it is not written); the frontend grammar is byte-identical
  * to the vendored schema pattern and repairs case and `_`.
+ *
+ * Sabotage that turns it red (each probed in /grade-tests w17): save an invalid
+ * name; write an empty overlay value; key the error id by index; Remove/Add
+ * focus; the 40-field cap; drift `FIELD_NAME_RE` / `CONTENT_LOCALE_RE` from the
+ * backend or schema; drop the `.cms-section-fields` wrapper or its CSS rule.
  */
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
@@ -135,5 +140,9 @@ describe('section fields register (RFCW-UX-10)', () => {
     const { container } = render(<SectionFields assets={[]} onChange={vi.fn()} section={{ sectionId: 's', type: 'fields', data: { a: '1' } }} />);
     expect(container.firstElementChild?.className).toBe('cms-section-fields');
     expect(container.querySelector('.cms-section-fields textarea')).toBeTruthy();
+    // …and the stylesheet carries the rule that hook exists for.
+    const here = dirname(fileURLToPath(import.meta.url));
+    const css = readFileSync(join(here, '..', '..', '..', 'styles', 'global.css'), 'utf8');
+    expect(css).toMatch(/\.cms-section-fields textarea\s*\{[^}]*font-family:\s*var\(--sans\)/);
   });
 });

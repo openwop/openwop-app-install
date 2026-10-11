@@ -10,13 +10,19 @@
  * This mirrors the agent lane's witness (`roster-lifecycle.test.ts`, ADR 0664 D1). The
  * reachability that makes it matter for people: `userIdFor` is deterministic, so re-provisioning
  * the same principal in the same tenant lands on the SAME memory namespace.
+ *
+ * Sabotage-witnessed (w12 grade-tests): skipping the namespace vector purge, skipping
+ * the recency clear, or skipping the durable-note delete each reds a leg; widening the
+ * note delete to the whole tenant, or the in-memory vector purge to the whole tenant
+ * bucket, reds the bystander leg; a non-deterministic `userIdFor` reds the anti-vacuity
+ * and BORN RED legs.
  */
 import { describe, expect, it, beforeAll } from 'vitest';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openStorage } from '../src/storage/index.js';
-import { initInMemorySurfaces } from '../src/host/inMemorySurfaces.js';
+import { initInMemorySurfaces, clearMemoryScope } from '../src/host/inMemorySurfaces.js';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import {
   addSubjectNote, eraseSubjectMemory, createSubjectMemoryPort, subjectMemoryScope, countSubjectNotes,
@@ -90,7 +96,13 @@ describe('ADR 0666 D2 — erasure reaches the recall index', () => {
 
     await eraseSubjectMemory(T, victim);
 
-    expect(JSON.stringify(await port.read(bScope, 'bystander')), 'the bystander survives').toContain('bystander-fact');
+    // Drop the bystander's process-local RECENCY rows first. `read` falls back to
+    // recency when the vector query is empty, so without this an over-purge of the
+    // bystander's VECTOR namespace still read 'bystander-fact' back from recency
+    // and stayed green (w12g5-vec-overpurge-vector was vacuous). Recency dies with
+    // the process anyway; the vector index is what survives, so it must hold here.
+    await clearMemoryScope(T, bScope);
+    expect(JSON.stringify(await port.read(bScope, 'bystander')), 'the bystander survives in the vector index').toContain('bystander-fact');
     expect(await countSubjectNotes(T, personSubject(bystander))).toBe(1);
   });
 });

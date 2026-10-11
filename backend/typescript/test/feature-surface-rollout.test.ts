@@ -10,7 +10,6 @@
 import http from 'node:http';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
-import { v1Advertisement } from './support/v1Advertisement.js';
 import { buildHostSurfaceBundle } from '../src/host/inMemorySurfaces.js';
 import { createCompany } from '../src/features/crm/crmEntitiesService.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
@@ -75,12 +74,13 @@ describe('ctx.features.crm — the second reference surface', () => {
   });
 });
 
-describe('discovery advertises feature surfaces', () => {
-  it('lists the composed surfaces at the document root', async () => {
-    // ADR 0812 — the v2 root carries no `hostExtensions.featureSurfaces` (ADR 0014) yet; read the v1 claim from its builder.
-    const ad = await v1Advertisement() as { hostExtensions?: { featureSurfaces?: string[] } };
-    const surfaces = ad.hostExtensions?.featureSurfaces ?? [];
-    expect(surfaces).toContain('host.sample.kb');
-    expect(surfaces).toContain('host.sample.crm');
+describe('the feature-surface registry', () => {
+  it('lists the composed surfaces', async () => {
+    // ADR 0812 P4: this read `hostExtensions.featureSurfaces` from the v1
+    // builder, which is deleted; the v2 root has no record for it (ADR 0858
+    // ledger). The registry the advert was printed from is asserted instead.
+    const { registeredFeatureSurfaceIds } = await import('../src/host/featureSurfaces.js');
+    expect(registeredFeatureSurfaceIds()).toEqual(expect.arrayContaining(['kb', 'crm']));
   });
 });
+

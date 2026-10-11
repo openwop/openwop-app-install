@@ -758,7 +758,12 @@ export class DurableCollection<T> {
     const storage = requireStorage();
     if ((await storage.kvGet(this.backfillKey)) !== null) return; // already backfilled
     for (const item of await this.list()) {
-      await storage.kvSet(this.idxKey(this.tenantOf(item), this.idOf(item)), this.markerValue(item));
+      // ADR 0872 D3 — a row with no tenant yet (a legacy row its owner stamps
+      // later) gets no marker; the reconcile pass keeps the index unverified
+      // until it is stamped, so no indexed read relies on this backfill for it.
+      const tenantId = this.tenantOf(item);
+      if (typeof tenantId !== 'string' || tenantId.length === 0) continue;
+      await storage.kvSet(this.idxKey(tenantId, this.idOf(item)), this.markerValue(item));
     }
     await storage.kvSet(this.backfillKey, '1'); // sentinel — backfill complete
   }
@@ -831,7 +836,14 @@ export class DurableCollection<T> {
     }
     let next = meta;
     let reset = false;
-    if (repaired > 0 && meta.verifiedAt !== undefined) {
+    if (skipped > 0) {
+      // ADR 0872 D3 — a row with no tenant has no marker and cannot get one, so
+      // every indexed read misses it. The index is not complete: restart the
+      // window (a writer that does not stamp is still live), so this pass never
+      // verifies, and a verified index is reset like on an unmarked row.
+      next = { since: new Date(passStart).toISOString() };
+      reset = meta.verifiedAt !== undefined;
+    } else if (repaired > 0 && meta.verifiedAt !== undefined) {
       next = { since: new Date(passStart).toISOString() };
       reset = true;
     } else if (meta.verifiedAt === undefined && passStart - Date.parse(meta.since) >= opts.windowMs) {
@@ -871,7 +883,8 @@ export class DurableCollection<T> {
       const current = await this.get(id);
       if (current === null) await requireStorage().kvDelete(this.idxKey(this.tenantOf(next), id)).catch(() => undefined);
       else {
-        await requireStorage().kvSet(this.idxKey(this.tenantOf(current), id), this.markerValue(current)).catch(() => undefined);
+        // ADR 0872 D3 — the winner may be a row with no tenant yet (no marker to repair).
+        if (this.tenantOf(current)) await requireStorage().kvSet(this.idxKey(this.tenantOf(current), id), this.markerValue(current)).catch(() => undefined);
         // ADR 0848 H2 — the marker pre-written for `next` lives under NEXT's tenant. When
         // the row that won belongs to another tenant, that marker pointed the loser's
         // tenant index at the winner's row, and `listForTenantIndexed` does not re-check

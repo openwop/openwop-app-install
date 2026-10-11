@@ -69,6 +69,22 @@ the panel's picker shows. Above 50 orgs it returns `null` and the summary omits
 the count rather than under-report it. No summary card: the four ADR 0864 cards
 are unchanged.
 
+**D4 — `access-members` adopts the same way (2026-10-10).** It already had
+`tenantOf` (ADR 0434) but its authorization resolvers still read every
+tenant's members: effective access, the scope union and the distinct-approver
+check, behind about 199 org-scope call sites. Those resolvers, and
+`listMembers`, now read one tenant's slice once the index is verified. These
+are authorization answers, so the index may say **yes, never no**: a member the
+index lacks is confirmed against the full scan before the resolver denies,
+grants the self-approval exemption (`hasDistinctScopeHolder` → false), or falls
+to the demo-mode owner bypass for a single-principal tenant. That bypass is the
+reason: a missed row there grants OWNER, not nothing. A partial union only
+narrows scopes, so only an empty one is confirmed. These stay on the scan:
+`listOwners` (the last-owner rule), `subjectHasMembershipStrict`,
+`listTenantMembers` (re-key sweeps), `twinsOf`/`deleteMember`/re-key writes,
+erasure, and the cross-tenant subject reads. `access-groups` and
+`access-custom-roles` are small config stores and still scan.
+
 ## Alternatives weighed
 
 - **Re-run the one-shot backfill on every boot.** It still misses a row the old
@@ -88,6 +104,7 @@ are unchanged.
 |---|---|---|
 | D1 | `host/hostExtPersistence.ts` (`tenantIndexVerified`, `reconcileTenantIndex`), `host/tenantIndexAdoption.ts`, the retention tick | `hostext-tenant-index-adoption.test.ts` (5). Sabotage: verifying on the first pass reds the deploy-overlap leg; dropping the reset reds the rollback leg. |
 | D2 | `features/connections/connectionsService.ts` (`tenantOf`, `tenantRows`) | `access-hub-summary-route.test.ts`: the same counts before and after verification, and a pass after a late pre-index write resets |
+| D4 | `host/accessControlService.ts` (`indexedTenantMembers`, `scanTenantMembers`, `tenantMembers`) | `access-members-index-adoption.test.ts` (4): a found member costs no scan; a member whose marker is missing resolves to its real roles (not the demo owner bypass), still counts as a distinct approver, and a non-member fails closed. Sabotage: removing each of the three scan confirmations reds its case. The miss cases first passed vacuously, because the one-time backfill re-marked the dropped row; the helper now warms it. 249 access-related files pass. |
 | D3 | `routes/compatEndpoints.ts` (`countReadableCompatEndpoints`), `features/access-hub/summary.ts`, SPA `accessSummary.ts` | route test: omitted with the gate off; equal to the sum of GET over every org in `/orgs`; another tenant counts 0. `accessSummaryView.test.ts` |
 
 The lease is one kv row per collection holding the last hour slot, taken by
@@ -99,9 +116,21 @@ destructive lane for the ADR 0657 census.
 
 - [ ] Other collections that read with `list()` + a tenant filter can adopt the
   same way. Each needs its own D2 split: reads move, teardown and uniqueness
-  checks stay.
-- [ ] A hold on tagged old revisions: D1 detects such a writer after the fact
-  (and un-verifies). It does not prevent one.
+  checks stay. `access-members` done (D4); `kanban:card` done (ADR 0872: cards
+  are stamped with their board's tenant first). Next by request-path cost (inventory
+  2026-10-10): `users:user` (its hot path is already a point read; a miss mints a
+  duplicate user, so lookups keep the scan on a miss), `documents:doc` (two collection instances, both need `tenantOf`),
+  `runartifact`, and `compensation:obligation` (tenant-prefixed ids, so
+  `listByPrefix` needs no adoption).
+- [x] A hold on tagged old revisions: D1 detects such a writer after the fact
+  (and un-verifies). It does not prevent one. **Closed by preflight Gate 5b
+  (2026-10-10):** `scripts/preflight-deploy.sh` refuses a deploy while any
+  revision is tagged, and prints the `--remove-tags` command. `--allow-tagged`
+  (passed through by `deploy.sh`) keeps a deliberate one. Witness:
+  `scripts/test-deploy-gates.sh` "Gate 5b" cases. Sabotage (no `exit 1`) reds
+  both refusal cases. The gate runs at deploy time only. A tag added between
+  deploys still runs old code until the next deploy, and D1's un-verify remains
+  the backstop.
 
 > **Integration correction 2026-10-09:** the hourly slot is not a lock for a pass that exceeds an hour. Verification now compares-and-swaps its exact starting metadata, so a delayed pass cannot overwrite a concurrent reset. Malformed timestamps are unverified and repaired conservatively. Regression witnesses cover both cases. Rollback visibility still has the documented one-tick exposure; erasure and uniqueness retain full scans.
 

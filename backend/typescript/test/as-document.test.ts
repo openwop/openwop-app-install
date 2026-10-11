@@ -1,5 +1,15 @@
 /**
- * ADR 0119 Phase 3 — export a conversation as a Document.
+ * ADR 0119 Phase 3 — export a conversation as a Document (`exportConversationAsDocument`).
+ *
+ * Guards the SERVICE contract: one `conversation-transcript` markdown document whose
+ * persisted title is the conversation's, with exactly one version carrying the rendered
+ * transcript, attributed to the exporting actor; and a typed `not_found` for a missing
+ * conversation. The tool lane (`chat-export-agent-tools.test.ts`) checks the session
+ * before calling here and reports its OWN payload title, so the persisted title and the
+ * service's not_found are asserted only in this file.
+ *
+ * Sabotage-witnessed (grade-tests w14): a constant title, a wrong kind, dropped
+ * transcript content, a wrong producer, or a non-not_found error code each turns a case red.
  */
 import { describe, it, expect, beforeAll } from 'vitest';
 import { mkdtempSync } from 'node:fs';
@@ -29,9 +39,14 @@ describe('exportConversationAsDocument', () => {
     const doc = await getDocument(T, ORG, documentId);
     expect(doc!.title).toBe('Roadmap');
     expect(doc!.kind).toBe('conversation-transcript');
+    expect(doc!.format).toBe('markdown');
+    expect(doc!.createdBy).toBe('user:alice');
+    expect(doc!.provenance.producedBy).toEqual({ kind: 'user', id: 'user:alice' });
     const versions = await listVersions(T, ORG, documentId);
-    expect(versions.length).toBeGreaterThanOrEqual(1);
-    expect(versions[versions.length - 1]!.content).toContain('the plan is bold');
+    expect(versions).toHaveLength(1);
+    expect(versions[0]!.content).toContain('what is the plan');
+    expect(versions[0]!.content).toContain('the plan is bold');
+    expect(versions[0]!.producedBy).toEqual({ kind: 'user', id: 'user:alice' });
   });
 
   it('404s a non-existent conversation', async () => {

@@ -2,6 +2,13 @@
  * documentSchema tests (ADR 0334 2b-3) — the closed extension set builds a valid
  * ProseMirror schema that includes the custom block nodes (math/chart/embed), so
  * the editable surface and the read-only renderer share one schema.
+ *
+ * Sabotage (wave 14): drop MathBlock / the comment mark's `inclusive:false` / the
+ * insertion+deletion marks from the closed set → the named case goes red.
+ * Ceiling: chart/embed atomicity is ALSO implied by their being content-less
+ * leaves (ProseMirror `isAtom = isLeaf || spec.atom`), so flipping `atom: true`
+ * alone is a behavioral no-op and cannot red the atom case (probe
+ * w14g4-schema-atom, vacuous by double guard).
  */
 import { describe, it, expect } from 'vitest';
 import { getSchema } from '@tiptap/core';
@@ -10,10 +17,7 @@ import { documentExtensions } from '../documentSchema.js';
 describe('documentExtensions', () => {
   it('builds a ProseMirror schema containing the custom block nodes', () => {
     const schema = getSchema(documentExtensions());
-    expect(schema.nodes.doc).toBeTruthy();
-    expect(schema.nodes.mathBlock).toBeTruthy();
-    expect(schema.nodes.chartBlock).toBeTruthy();
-    expect(schema.nodes.embedBlock).toBeTruthy();
+    expect(Object.keys(schema.nodes)).toEqual(expect.arrayContaining(['doc', 'mathBlock', 'chartBlock', 'embedBlock']));
   });
 
   it('registers the inline comment mark with a threadId attr (6b)', () => {

@@ -7,10 +7,19 @@
  *   - a chief-of-staff-shaped agent WITHOUT the capability does NOT;
  *   - Iris and Executive Operations both activate via their profiles;
  *   - the bootstrap default self-heals to a capability flag (back-compat).
+ *
+ * Sabotage-witnessed (/grade-tests w11, `features/assistant/capability.ts`):
+ * dropping the `capabilities.includes` filter reds cases 1+2; reversing
+ * `primaryOf`'s (createdAt, rosterId) order reds case 3; dropping the self-heal
+ * `activateAgentCapability` reds case 4 (its pre-flag roster-agent leg — a FRESH
+ * bootstrap is double-guarded, because the seed spec's profile already carries
+ * the capability). The idempotence line is double-guarded too:
+ * `ensureSeededAgentByRole` returns the existing roleKey entry, so removing the
+ * `findAssistantAgent` short-circuit still resolves the same agent.
  */
 
 import { getAgentProfile } from '../src/host/agentProfileService.js';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -82,8 +91,20 @@ describe('assistant capability — resolution is by capability, not roleKey', ()
 
   it('Iris AND Executive Operations both activate via their profiles', async () => {
     const t = 'tenant-cap-3';
-    const iris = await makeAgent(t, 'chief-of-staff', true);
-    const exec = await makeAgent(t, 'executive-ops', true);
+    // Exec is created EARLIER but sorts LATER by rosterId (`host:executive-ops-…` >
+    // `host:chief-of-staff-…`), so only the documented rule — earliest createdAt
+    // first, rosterId as tie-break — picks exec. Only `Date` is faked.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    let iris: RosterEntry;
+    let exec: RosterEntry;
+    try {
+      vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
+      exec = await makeAgent(t, 'executive-ops', true);
+      vi.setSystemTime(new Date('2026-01-01T00:01:00.000Z'));
+      iris = await makeAgent(t, 'chief-of-staff', true);
+    } finally {
+      vi.useRealTimers();
+    }
 
     const capable = await listCapabilityAgents(t, ASSISTANT_CAPABILITY);
     expect(new Set(capable.map((e) => e.rosterId))).toEqual(new Set([iris.rosterId, exec.rosterId]));
@@ -92,7 +113,7 @@ describe('assistant capability — resolution is by capability, not roleKey', ()
     const first = await findAssistantAgent(t);
     const second = await findAssistantAgent(t);
     expect(first?.rosterId).toBe(second?.rosterId);
-    expect([iris.rosterId, exec.rosterId]).toContain(first!.rosterId);
+    expect(first?.rosterId, 'the earliest-created capable agent is primary').toBe(exec.rosterId);
   });
 
   it('ensureAssistantAgent bootstraps the default holder and self-heals its capability flag', async () => {
@@ -115,5 +136,16 @@ describe('assistant capability — resolution is by capability, not roleKey', ()
 
     // Idempotent: a second ensure resolves the same agent by capability.
     expect((await ensureAssistantAgent(t)).rosterId).toBe(bootstrapped.rosterId);
+
+    // The SELF-HEAL leg proper: a tenant whose default-role agent predates the flag
+    // (a chief-of-staff roster entry whose profile does NOT carry the capability).
+    // The bootstrap must reuse that agent and stamp the capability onto it.
+    const legacyTenant = 'tenant-cap-5';
+    const legacy = await makeAgent(legacyTenant, 'chief-of-staff', false);
+    expect(await findAssistantAgent(legacyTenant)).toBeNull();
+    const healed = await ensureAssistantAgent(legacyTenant);
+    expect(healed.rosterId).toBe(legacy.rosterId);
+    expect((await getAgentProfile(legacyTenant, legacy.rosterId))?.capabilities).toContain(ASSISTANT_CAPABILITY);
+    expect((await findAssistantAgent(legacyTenant))?.rosterId).toBe(legacy.rosterId);
   });
 });

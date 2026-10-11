@@ -16,6 +16,14 @@
  *    "legacy rows fall back to position 0 when its name carries the provisioning
  *    prefix" — is GONE. A prefix match on a user-chosen name is not evidence of
  *    ownership, and it destroyed shared corpora named `Sources: <topic>`.
+ *
+ * Sabotage-witnessed (grade-tests w13), each leg red on its own probe: dropping
+ * the goal / brief / create-name / rename `refuseSecretShaped` call;
+ * `notebookCorpusToDelete` returning nothing (the stamped corpus survives);
+ * re-adding a binding-position-0 fallback in `deleteNotebook` (the legacy row's
+ * collection is erased); dropping either lane's `setNotebookCollectionId`; the
+ * workflows cap off by one; skipping the per-element check; and validating ids
+ * through `cleanString` (rejects the platform's own `agent-wf-<uuid>`).
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';

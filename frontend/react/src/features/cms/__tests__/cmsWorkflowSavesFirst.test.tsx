@@ -1,14 +1,21 @@
 /**
  * A workflow action acts on what the editor shows. `transition` publishes the
  * SAVED page and its reply replaced the editor state, so Publish with unsaved
- * edits published the old content and silently dropped the edits. The editor
- * now saves first, and a failed save stops the transition.
+ * edits published the old content and silently dropped the edits (fixed in
+ * f7b6a8053). The editor now saves first, and a failed save stops the
+ * transition. Also pins the ADR 0828 phase 3 review checklist: a blocking
+ * finding disables Publish, and "Show me" opens that section's editor.
+ *
+ * Sabotage that turns it red: drop `!(await save())` from `runAction`
+ * (CmsPage.tsx) — or ignore its result; drop `blocked` from the checklist's
+ * confirm `disabled`; make `onFix` stop calling `selectSection`.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, within, cleanup, fireEvent, waitFor } from '@testing-library/react';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import type { ReactNode } from 'react';
 import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
+import type { Page, Section } from '../cmsClient.js';
 
 vi.mock('../PublicPreviewFrame.js', () => ({
   PublicPreviewFrame: ({ children }: { children: ReactNode }) => <div>{children}</div>,
@@ -17,11 +24,11 @@ vi.mock('../../../featureToggles/FeatureAccessContext.js', () => ({
   useFeatureAccess: () => makeFeatureAccess({ enabled: true, loading: false }),
 }));
 const ui = vi.hoisted(() => {
-  const page = { pageId: 'p1', title: 'Old title', slug: 'p', status: 'draft', sections: [], version: 1, updatedAt: '2026-01-01T00:00:00Z' };
+  const page: Page = { pageId: 'p1', title: 'Old title', slug: 'p', status: 'draft', sections: [] as Section[], version: 1, updatedAt: '2026-01-01T00:00:00Z' };
   return {
     page,
     savePage: vi.fn(async (_org: string, _id: string, patch: { title?: string }) => ({ ...page, title: patch.title ?? page.title, version: 2 })),
-    transition: vi.fn(async () => ({ ...page, title: 'New title', status: 'published', version: 2 })),
+    transition: vi.fn(async (): Promise<Page> => ({ ...page, title: 'New title', status: 'published', version: 2 })),
   };
 });
 vi.mock('../../../ui/confirm.js', () => ({ confirm: vi.fn(async () => true) }));
@@ -53,8 +60,9 @@ vi.mock('../../publishing/publishingClient.js', () => ({ getSeo: vi.fn(async () 
 vi.mock('../../site/siteConfigClient.js', () => ({ getSiteConfig: vi.fn(async () => { throw new Error('forbidden'); }), putSiteConfig: vi.fn(), invalidateFrontPage: vi.fn() }));
 
 import { CmsPage } from '../CmsPage.js';
+import { toast } from '../../../ui/toast.js';
 
-afterEach(() => { cleanup(); ui.savePage.mockClear(); ui.transition.mockClear(); });
+afterEach(() => { cleanup(); ui.savePage.mockClear(); ui.transition.mockClear(); vi.mocked(toast.error).mockClear(); });
 
 async function editTitleThenPublish(): Promise<void> {
   render(
@@ -86,12 +94,15 @@ describe('a workflow action saves unsaved edits first', () => {
     ui.savePage.mockRejectedValueOnce(new Error('validation failed'));
     await editTitleThenPublish();
     await waitFor(() => expect(ui.savePage).toHaveBeenCalled(), { timeout: 3000 });
-    await new Promise((r) => setTimeout(r, 30));
+    // The failed save reports itself and returns false in the same chain that
+    // would call `transition` next — wait for the report, then drain.
+    await waitFor(() => expect(toast.error).toHaveBeenCalled());
+    for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
     expect(ui.transition).not.toHaveBeenCalled();
   });
 
   it('a to-do left in the text blocks Publish in the checklist, and Show me selects that section', async () => {
-    ui.page.sections = [{ sectionId: 'sec:t', type: 'richText', data: { heading: 'Examples', text: '[TODO: an example]' } }] as never;
+    ui.page.sections = [{ sectionId: 'sec:t', type: 'richText', data: { heading: 'Examples', text: '[TODO: an example]' } }];
     try {
       render(
         <MemoryRouter initialEntries={['/cms/p/o1/p1']}>
@@ -105,9 +116,11 @@ describe('a workflow action saves unsaved edits first', () => {
       expect(within(dialog).getByText(/A to-do is left in .Examples./)).toBeTruthy();
       fireEvent.click(within(dialog).getByRole('button', { name: /^Show me: A to-do is left in .Examples./ }));
       expect(screen.queryByRole('dialog', { name: 'Review before you go on' })).toBeNull();
+      // "Show me" opens that section in place.
+      expect(screen.getByRole('group', { name: 'Editing “Examples”' })).toBeTruthy();
       expect(ui.transition).not.toHaveBeenCalled();
     } finally {
-      ui.page.sections = [] as never;
+      ui.page.sections = [];
     }
   });
 });

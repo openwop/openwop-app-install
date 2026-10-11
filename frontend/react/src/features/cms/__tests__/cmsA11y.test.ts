@@ -1,3 +1,13 @@
+/**
+ * ADR 0363 P2 — the CMS page → ContentA11yModel projector (`cmsA11y.ts`): image
+ * and hero media are projected with their alt, hero/cta CTAs as link text, and
+ * a media-less image/hero section is ignored; the shared checker then flags the
+ * alt-less image and the generic CTA.
+ *
+ * Sabotage-witnessed (/grade-tests w17): dropping the `str(d.token)` or
+ * `str(d.imageToken)` guard reds case 3; dropping the hero CTA push or the hero
+ * alt reds cases 1+2; dropping the cta branch reds case 1.
+ */
 import { describe, it, expect } from 'vitest';
 import { cmsPageToA11yModel } from '../cmsA11y.js';
 import { checkContentA11y } from '../../../a11y/contentA11y.js';
@@ -6,7 +16,7 @@ import type { Section } from '../cmsClient.js';
 // `sectionId` is a free-form id, not a SectionType — but defaulting it to `type`
 // made TS infer the narrow union, so every real id ('s1', 's2', …) errored. The
 // annotation is the fix; the runtime values were always strings.
-const sec = (type: Section['type'], data: Record<string, unknown>, sectionId: string = type): Section => ({ sectionId, type, data } as Section);
+const sec = (type: Section['type'], data: Record<string, unknown>, sectionId: string = type): Section => ({ sectionId, type, data });
 
 describe('cmsPageToA11yModel', () => {
   it('projects image + hero images (with alt) and hero/cta link text; no headings/colors', () => {

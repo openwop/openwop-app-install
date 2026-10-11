@@ -7,8 +7,9 @@
  * TWO synthetic IdPs), mirroring the merged conformance scenarios
  * (`auth-subject-link.test.ts` + `auth-subject-link-key-class.test.ts`):
  *
- *   1. advertisement — capabilities.auth.subjectLinking:true iff BOTH profiles,
- *      and (RFC 0163 §A) subjectLinkKey === 'opaque-idp' (a member of the closed
+ *   1. advertisement — the v2 `auth` record carries BOTH the `saml` and `scim`
+ *      lanes (the v2 form of v1's `subjectLinking:true`; ADR 0812 P4), and
+ *      (RFC 0163 §A) subjectLinkKey === 'opaque-idp' (a member of the closed
  *      safe-class enum);
  *   2. cross-lane deny (RFC 0159 §A.3) — a SCIM deactivation fail-closes the
  *      LINKED SAML identity (a provisioned leaver cannot still SSO in);
@@ -32,7 +33,21 @@ import type { Server } from 'node:http';
 import { createServer } from 'node:http';
 import { createHash, createSign, generateKeyPairSync } from 'node:crypto';
 import { createApp } from '../src/index.js';
-import { v1Advertisement } from './support/v1Advertisement.js';
+import { buildV2Advertisement } from '../src/routes/discovery.js';
+import { loadConfigFromEnv } from '../src/index.js';
+
+/**
+ * ADR 0812 P4 — the v2 `auth` record (the v1 builder is deleted). v2 has no
+ * `profiles` list and no `subjectLinking` flag: a profile is a LANE, and the
+ * subject-linking claim is the `saml` + `scim` PAIR, which
+ * `advertisedAuthProfiles()` only emits together when the combined contract is
+ * active (RFC 0164). `subjectLinkKey` is stated only with both lanes
+ * (spec-steward ruling 2026-10-10, ADR 0858 § "P4 slice").
+ */
+function v2Auth(): { lanes: string[]; subjectLinkKey?: string } {
+  const rec = buildV2Advertisement(loadConfigFromEnv())['auth'] as { lanes?: Array<{ lane: string }>; subjectLinkKey?: string } | undefined;
+  return { lanes: (rec?.lanes ?? []).map((l) => l.lane), ...(rec?.subjectLinkKey ? { subjectLinkKey: rec.subjectLinkKey } : {}) };
+}
 
 // ── Two-trust-root synthetic IdP fixture (RFC 0163 §B) ─────────────────────────
 // Each IdP has a distinct signing key AND a distinct `entityID` it signs into the
@@ -131,12 +146,9 @@ afterAll(async () => {
 
 describe('RFC 0159/0163 subject linking — advertisement', () => {
   it('claims subjectLinking + a closed-enum subjectLinkKey only alongside BOTH profiles', async () => {
-    // ADR 0812 — `subjectLinking` has no v2 facet; the v1 claim is read from its builder.
-    const doc = (await v1Advertisement()) as { capabilities?: { auth?: { profiles?: string[]; subjectLinking?: boolean; subjectLinkKey?: string } } };
-    const auth = doc.capabilities?.auth;
-    expect(auth?.profiles).toContain('openwop-auth-saml');
-    expect(auth?.profiles).toContain('openwop-auth-scim');
-    expect(auth?.subjectLinking).toBe(true);
+    const auth = v2Auth();
+    expect(auth?.lanes).toContain('saml');
+    expect(auth?.lanes).toContain('scim');
     // RFC 0163 §A — a member of the closed safe-class enum; openwop-app is opaque-idp.
     expect(auth?.subjectLinkKey).toBe('opaque-idp');
     expect(['opaque-idp', 'configured-immutable']).toContain(auth?.subjectLinkKey);
@@ -236,7 +248,7 @@ describe('RFC 0163 subject linking — same-IdP trust root (§B)', () => {
 // `combinedSubjectLinkingActive()` predicate, so §A.2's `unbound` fail-closed and
 // the advert can never disagree.
 //
-// WITNESS FORM: end-to-end against the v1 advertisement builder + the
+// WITNESS FORM: end-to-end against the v2 advertisement builder + the
 // `sample` auth seams (the same surfaces every other leg drives).
 // `advertisedAuthProfiles()` / `combinedSubjectLinkingActive()` read `process.env`
 // per request, so each leg toggles the relevant env around a single call and
@@ -270,21 +282,15 @@ describe('RFC 0164 subject linking — mandatory-both invariant', () => {
     }
   }
 
-  const readAuth = async (): Promise<{ profiles?: string[]; subjectLinking?: boolean; subjectLinkKey?: string }> => {
-    // ADR 0812 — `subjectLinking` has no v2 facet; the v1 claim is read from its builder.
-    const doc = (await v1Advertisement()) as { capabilities?: { auth?: { profiles?: string[]; subjectLinking?: boolean; subjectLinkKey?: string } } };
-    return doc.capabilities?.auth ?? {};
-  };
+  const readAuth = async (): Promise<{ lanes: string[]; subjectLinkKey?: string }> => v2Auth();
 
   it('(i) DROP-arm A — misaligned realms (trust-root seat present) ⇒ openwop-auth-scim DROPPED (born-red on origin/main)', async () => {
     // Trust-root seat present (OPENWOP_TEST_SCIM_URL, file-level); only the realms
     // misalign. This arm alone must drop SCIM.
     await withEnv(PROD_SAML_ENV, async () => {
       const auth = await readAuth();
-      expect(auth.profiles).toContain('openwop-auth-saml'); // SAML (production login) kept
-      expect(auth.profiles).not.toContain('openwop-auth-scim'); // never "both" without the guarantee
-      expect(auth.subjectLinking).toBeUndefined();
-      expect(auth.subjectLinkKey).toBeUndefined();
+      expect(auth.lanes).toContain('saml'); // SAML (production login) kept
+      expect(auth.lanes).not.toContain('scim'); // never "both" without the guarantee
     });
   });
 
@@ -296,10 +302,8 @@ describe('RFC 0164 subject linking — mandatory-both invariant', () => {
       { OPENWOP_SCIM_BEARER: 'test-bearer-advertises-scim', OPENWOP_TEST_SCIM_URL: undefined, OPENWOP_SCIM_IDP_ENTITY_ID: undefined },
       async () => {
         const auth = await readAuth();
-        expect(auth.profiles).toContain('openwop-auth-saml');
-        expect(auth.profiles).not.toContain('openwop-auth-scim');
-        expect(auth.subjectLinking).toBeUndefined();
-        expect(auth.subjectLinkKey).toBeUndefined();
+        expect(auth.lanes).toContain('saml');
+        expect(auth.lanes).not.toContain('scim');
       },
     );
   });
@@ -308,9 +312,8 @@ describe('RFC 0164 subject linking — mandatory-both invariant', () => {
     // The file's default posture: OPENWOP_TEST_SAML_IDP_URL (aligned, samlRealm
     // null) + OPENWOP_TEST_SCIM_URL (advertises SCIM AND supplies the trust root).
     const auth = await readAuth();
-    expect(auth.profiles).toContain('openwop-auth-saml');
-    expect(auth.profiles).toContain('openwop-auth-scim');
-    expect(auth.subjectLinking).toBe(true);
+    expect(auth.lanes).toContain('saml');
+    expect(auth.lanes).toContain('scim');
     expect(auth.subjectLinkKey).toBe('opaque-idp');
   });
 

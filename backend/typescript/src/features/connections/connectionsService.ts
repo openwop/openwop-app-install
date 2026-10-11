@@ -302,7 +302,47 @@ export async function upsertOAuthConnection(input: {
   if (previousStatus !== undefined && previousStatus !== 'active' && previousStatus !== 'revoked') {
     await fireConnectionStatusChanged({ tenantId: input.tenantId, connectionId, provider: input.provider, status: 'active', previousStatus });
   }
+  await retireDeadTwins(connection);
   return connection;
+}
+
+/**
+ * A re-consent lands on ONE row per (tenant, provider, human, org), and
+ * `findByIdentity` picks the exact spelling of the human first. A dead twin of
+ * that row (the same human under the other spelling, or a duplicate a race left)
+ * was therefore never the row a consent updated: clicking "Reconnect" on it
+ * re-consented the OTHER row and left it `needs-reconsent` for good (MEASURED in
+ * prod 2026-10-10: two Google and two Gmail rows, one of each stuck however many
+ * times the user reconnected). It can never be revived and no resolve selects it
+ * (selection takes `active` rows only), so the consent that just succeeded
+ * retires it.
+ *
+ * Only NON-active twins: an active one still carries a working credential, and
+ * removing it is the user's call. The retire IS a revoke, so a sync pinned to the
+ * twin pauses as `connection-revoked` and its resume re-binds to this row, the
+ * existing ADR 0285 path. A failed retire is logged and leaves the twin as it was;
+ * the consent itself has already landed.
+ */
+async function retireDeadTwins(landed: Connection): Promise<void> {
+  if (landed.userId === undefined) return;
+  const ids = await actingUserIds(landed.tenantId, landed.userId);
+  const twins = (await tenantRows(landed.tenantId)).filter(
+    (c) =>
+      c.connectionId !== landed.connectionId &&
+      c.provider === landed.provider &&
+      (c.orgId ?? undefined) === (landed.orgId ?? undefined) &&
+      c.userId !== undefined &&
+      ids.has(c.userId) &&
+      c.status !== 'active',
+  );
+  for (const twin of twins) {
+    try {
+      await revokeConnection(landed.tenantId, twin.connectionId);
+      log.info('connection_dead_twin_retired', { connectionId: twin.connectionId, keptConnectionId: landed.connectionId, provider: landed.provider, status: twin.status });
+    } catch (err) {
+      log.warn('connection_dead_twin_retire_failed', { connectionId: twin.connectionId, error: err instanceof Error ? err.message : String(err) });
+    }
+  }
 }
 
 /** The row a completed consent lands (ADR 0780 D3.1: a fresh `generation` every time). */

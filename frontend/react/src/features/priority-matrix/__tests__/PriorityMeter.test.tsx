@@ -1,7 +1,12 @@
 /**
- * PriorityMeter (portfolio design pass) — the ranking meter's fill must be
- * proportional to value/max, clamp to [0,1], survive max=0 (an all-zero view
- * must not divide by zero), and mute the zero value's ink.
+ * PriorityMeter (ADR 0060 portfolio ranking meter, #1819 design pass) — the
+ * ranking meter's fill must be proportional to value/max, clamp to [0,1], survive
+ * max=0 (an all-zero view must not divide by zero), and mute the zero value's ink.
+ *
+ * Sabotage-witnessed (w15g4-meter-*): dropping the `max > 0` guard (NaN width),
+ * the [0,1] clamp, the zero-ink class or the formatted value each reds its case.
+ * Ceiling: "muted ink" is visual; the `pm-meter__value--zero` class is the only
+ * jsdom-observable proxy for it.
  */
 import { describe, it, expect, afterEach } from 'vitest';
 import { render, screen, cleanup } from '@testing-library/react';

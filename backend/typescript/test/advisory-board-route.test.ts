@@ -9,6 +9,12 @@
  *     a `shared` board is visible; cross-tenant IDOR is fail-closed (404)
  *   - owner-only update/delete
  *   - `@@<handle>` resolution: by-handle → cohort, visibility-gated, 404 unknown
+ *
+ * Sabotage-witnessed (/grade-tests w12): dropping `requireFeatureEnabled` on the list
+ * route, the empty-cohort / unknown-advisor / living-ack checks, `canRead`, the
+ * tenant-prefixed `getBoard` read, the owner checks on update + delete, the seed-actor
+ * adoption gate + its `createdBy` re-stamp, the by-handle `canRead`, and each
+ * strategy/project contextRef validation each turn a case here red.
  */
 
 import http from 'node:http';
@@ -38,7 +44,14 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T }
+/** Typed views of the bodies this file reads. `res.json()` is untyped, so each call
+ *  names the shape it expects instead of laundering through `any`. */
+interface ErrBody { error: string; message: string }
+interface UserBody { user: { userId: string } }
+interface BoardBody { boardId: string; handle: string; name: string; advisors: string[]; disclaimer: string | null; contextRefs?: unknown[]; livingPersonaAck?: boolean }
+interface IdBody { id: string; orgId: string; rosterId: string }
+type Body = Partial<ErrBody & UserBody & BoardBody & IdBody & { boards: BoardBody[]; strategies: Array<{ id: string; title: string }> }>;
+interface Res { status: number; body: Body }
 interface Client { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res>; patch: (p: string, b?: unknown) => Promise<Res>; del: (p: string) => Promise<Res> }
 function client(): Client {
   let cookie = '';
@@ -46,7 +59,7 @@ function client(): Client {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
     const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
-    return { status: res.status, body: out };
+    return { status: res.status, body: out ?? {} };
   };
   return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), patch: (p, b) => call('PATCH', p, b), del: (p) => call('DELETE', p) };
 }
@@ -55,14 +68,14 @@ const uniqEmail = (who: string): string => `${who}-${Date.now()}-${n++}@acme.tes
 async function signup(c: Client, opts: { tenantId?: string } = {}): Promise<{ userId: string }> {
   const r = await c.post('/host/openwop-app/test/login', { email: uniqEmail('ab'), ...(opts.tenantId ? { tenantId: opts.tenantId } : {}) });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  return r.body.user;
+  return r.body.user!;
 }
 const enable = async (id: string, status: 'on' | 'off'): Promise<void> => { const d = getToggleDefault(id); if (d) await saveConfig({ ...d, status }, 'test'); };
 
 async function makeAdvisor(c: Client, persona: string): Promise<string> {
   const r = await c.post('/host/openwop-app/roster', { persona, agentRef: { agentId: 'core.openwop.agents.brief-writer' } });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  return r.body.rosterId;
+  return r.body.rosterId!;
 }
 
 /** A tenant owner client + 2 advisor roster agents + a fresh org. */
@@ -73,7 +86,7 @@ async function ownerWithAdvisors(): Promise<{ owner: Client; userId: string; adv
   const b = await makeAdvisor(owner, 'Boaz');
   const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
-  return { owner, userId: u.userId, advisors: [a, b], orgId: org.body.orgId };
+  return { owner, userId: u.userId, advisors: [a, b], orgId: org.body.orgId! };
 }
 
 const B = '/host/openwop-app/advisors/boards';
@@ -81,10 +94,17 @@ const B = '/host/openwop-app/advisors/boards';
 describe('advisory-board — toggle gating', () => {
   it('404s when the toggle is off', async () => {
     await enable('advisory-board', 'off');
-    const owner = client();
-    await signup(owner);
-    expect((await owner.get(B)).status).toBe(404);
-    await enable('advisory-board', 'on');
+    try {
+      const owner = client();
+      await signup(owner);
+      const r = await owner.get(B);
+      expect(r.status).toBe(404);
+      // The FEATURE refusal, not an unmounted route (which would also be a 404).
+      expect(r.body.error).toBe('not_found');
+      expect(r.body.message).toMatch(/Board of Advisors is not enabled/);
+    } finally {
+      await enable('advisory-board', 'on');
+    }
   });
 });
 
@@ -98,15 +118,26 @@ describe('advisory-board — create + validate', () => {
     expect(r.body.disclaimer).toMatch(/simulated/i);
     const list = await owner.get(B);
     expect(list.body.boards).toHaveLength(1);
-    const got = await owner.get(`${B}/${encodeURIComponent(r.body.boardId)}`);
+    const got = await owner.get(`${B}/${encodeURIComponent(r.body.boardId!)}`);
     expect(got.status).toBe(200);
     expect(got.body.name).toBe('Founders Board');
   });
 
   it('rejects an empty cohort (400) and a cross-tenant advisor (404)', async () => {
     const { owner, orgId } = await ownerWithAdvisors();
-    expect((await owner.post(B, { orgId, name: 'Empty', advisors: [] })).status).toBe(400);
-    expect((await owner.post(B, { orgId, name: 'Foreign', advisors: ['host:advisory:not-mine'] })).status).toBe(404);
+    // A REAL advisor that exists — in another tenant. Roster ids derive from the persona
+    // (`host:<slug>`), so it needs a persona this tenant does NOT have, or the id would
+    // name this tenant's own 'Ada' and the 201 would be correct.
+    const foreign = await ownerWithAdvisors();
+    const foreignOnly = await makeAdvisor(foreign.owner, 'Zenobia');
+    const empty = await owner.post(B, { orgId, name: 'Empty', advisors: [] });
+    expect(empty.status, JSON.stringify(empty.body)).toBe(400);
+    expect(empty.body.error).toBe('validation_error');
+    const cross = await owner.post(B, { orgId, name: 'Foreign', advisors: [foreignOnly] });
+    expect(cross.status, JSON.stringify(cross.body)).toBe(404);
+    expect(cross.body.error).toBe('not_found');
+    // Neither was created.
+    expect((await owner.get(B)).body.boards).toEqual([]);
   });
 
   it('gates a living-persona board on the acknowledgement (422 without it)', async () => {
@@ -128,7 +159,7 @@ describe('advisory-board — visibility + IDOR', () => {
     const memberUser = await signup(member, { tenantId });
     const a = await makeAdvisor(owner, 'Ada');
     const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
-    const orgId = org.body.orgId;
+    const orgId = org.body.orgId!;
     await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: memberUser.userId, roles: ['editor'] });
 
     const priv = await owner.post(B, { orgId, name: 'Private', advisors: [a], visibility: 'private' });
@@ -138,9 +169,13 @@ describe('advisory-board — visibility + IDOR', () => {
 
     // The member sees only the shared board; the private one 404s on direct read.
     const list = await member.get(B);
-    expect(list.body.boards.map((x: any) => x.name)).toEqual(['Shared']);
-    expect((await member.get(`${B}/${encodeURIComponent(priv.body.boardId)}`)).status).toBe(404);
-    expect((await member.get(`${B}/${encodeURIComponent(shared.body.boardId)}`)).status).toBe(200);
+    expect(list.body.boards!.map((x) => x.name)).toEqual(['Shared']);
+    const privRead = await member.get(`${B}/${encodeURIComponent(priv.body.boardId!)}`);
+    expect(privRead.status).toBe(404);
+    expect(privRead.body.error).toBe('not_found');
+    const sharedRead = await member.get(`${B}/${encodeURIComponent(shared.body.boardId!)}`);
+    expect(sharedRead.status).toBe(200);
+    expect(sharedRead.body.name).toBe('Shared');
   });
 
   it('a cross-tenant stranger cannot see a board (404, fail-closed)', async () => {
@@ -148,9 +183,13 @@ describe('advisory-board — visibility + IDOR', () => {
     const board = await owner.post(B, { orgId, name: 'Secret', advisors, visibility: 'shared' });
     const stranger = client();
     await signup(stranger);
-    // Fail-closed either way: the board isn't in the stranger's tenant (404), or
-    // they lack workspace:read there (403). Both deny; neither reveals the board.
-    expect([403, 404]).toContain((await stranger.get(`${B}/${encodeURIComponent(board.body.boardId)}`)).status);
+    // The stranger OWNS their own tenant, so `workspace:read` passes and the only
+    // thing standing between them and the board is the tenant-prefixed read: 404,
+    // with nothing about the board in the body.
+    const res = await stranger.get(`${B}/${encodeURIComponent(board.body.boardId!)}`);
+    expect(res.status, JSON.stringify(res.body)).toBe(404);
+    expect(res.body.error).toBe('not_found');
+    expect(JSON.stringify(res.body)).not.toContain('Secret');
   });
 
   it('only the owner can update or delete a board', async () => {
@@ -161,15 +200,17 @@ describe('advisory-board — visibility + IDOR', () => {
     const memberUser = await signup(member, { tenantId });
     const a = await makeAdvisor(owner, 'Ada');
     const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
-    await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(org.body.orgId)}/members`, { displayName: 'M', subject: memberUser.userId, roles: ['editor'] });
+    await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(org.body.orgId!)}/members`, { displayName: 'M', subject: memberUser.userId, roles: ['editor'] });
     const board = await owner.post(B, { orgId: org.body.orgId, name: 'Shared', advisors: [a], visibility: 'shared' });
-    const bid = board.body.boardId;
-    // Member can read (shared) but not mutate.
-    expect((await member.patch(`${B}/${encodeURIComponent(bid)}`, { name: 'Hijack' })).status).toBe(403);
-    expect((await member.del(`${B}/${encodeURIComponent(bid)}`)).status).toBe(403);
+    const path = `${B}/${encodeURIComponent(board.body.boardId!)}`;
+    // Member can read (shared) but not mutate — and the refusals changed nothing.
+    expect((await member.patch(path, { name: 'Hijack' })).status).toBe(403);
+    expect((await member.del(path)).status).toBe(403);
+    expect((await owner.get(path)).body.name).toBe('Shared');
     // Owner can.
-    expect((await owner.patch(`${B}/${encodeURIComponent(bid)}`, { name: 'Renamed' })).body.name).toBe('Renamed');
-    expect((await owner.del(`${B}/${encodeURIComponent(bid)}`)).status).toBe(204);
+    expect((await owner.patch(path, { name: 'Renamed' })).body.name).toBe('Renamed');
+    expect((await owner.del(path)).status).toBe(204);
+    expect((await owner.get(path)).status).toBe(404);
   });
 
   it('a demo-seeded board is adopted by the first user to edit it (then owner-only again)', async () => {
@@ -180,10 +221,10 @@ describe('advisory-board — visibility + IDOR', () => {
     const memberUser = await signup(member, { tenantId });
     const a = await makeAdvisor(adopter, 'Ada');
     const org = await adopter.post('/host/openwop-app/orgs', { name: 'Acme' });
-    await adopter.post(`/host/openwop-app/orgs/${encodeURIComponent(org.body.orgId)}/members`, { displayName: 'M', subject: memberUser.userId, roles: ['editor'] });
+    await adopter.post(`/host/openwop-app/orgs/${encodeURIComponent(org.body.orgId!)}/members`, { displayName: 'M', subject: memberUser.userId, roles: ['editor'] });
     // Seeded the way the demo provisioners stamp boards: a synthetic `demo:*`
     // actor no caller identity ever matches — pre-fix, permanently uneditable.
-    const seeded = await createBoardService(tenantId, org.body.orgId, 'demo:advisory-seed', { name: 'Seeded Council', advisors: [a], visibility: 'shared' });
+    const seeded = await createBoardService(tenantId, org.body.orgId!, 'demo:advisory-seed', { name: 'Seeded Council', advisors: [a], visibility: 'shared' });
     const path = `${B}/${encodeURIComponent(seeded.boardId)}`;
     // First edit by a signed-in tenant user succeeds and ADOPTS the board.
     const renamed = await adopter.patch(path, { name: 'My Council' });
@@ -207,7 +248,7 @@ describe('advisory-board — @@<handle> resolution (for the AI chat)', () => {
     const a = await makeAdvisor(owner, 'Ada');
     const b = await makeAdvisor(owner, 'Boaz');
     const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
-    const orgId = org.body.orgId;
+    const orgId = org.body.orgId!;
     await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: memberUser.userId, roles: ['editor'] });
 
     const shared = await owner.post(B, { orgId, name: 'Council', advisors: [a, b], visibility: 'shared' });
@@ -215,17 +256,21 @@ describe('advisory-board — @@<handle> resolution (for the AI chat)', () => {
     expect(shared.status).toBe(201);
 
     // Owner resolves the shared board by handle → the advisor cohort.
-    const r = await owner.get(`${B}/by-handle/${encodeURIComponent(shared.body.handle)}`);
+    const r = await owner.get(`${B}/by-handle/${encodeURIComponent(shared.body.handle!)}`);
     expect(r.status, JSON.stringify(r.body)).toBe(200);
     expect(r.body.advisors).toEqual([a, b]);
     expect(r.body.disclaimer).toMatch(/simulated/i);
 
     // Unknown handle → 404.
-    expect((await owner.get(`${B}/by-handle/does-not-exist`)).status).toBe(404);
+    const unknown = await owner.get(`${B}/by-handle/does-not-exist`);
+    expect(unknown.status).toBe(404);
+    expect(unknown.body.error).toBe('not_found');
 
     // A co-tenant member resolves the SHARED board but not the PRIVATE one.
-    expect((await member.get(`${B}/by-handle/${encodeURIComponent(shared.body.handle)}`)).status).toBe(200);
-    expect((await member.get(`${B}/by-handle/${encodeURIComponent(priv.body.handle)}`)).status).toBe(404);
+    expect((await member.get(`${B}/by-handle/${encodeURIComponent(shared.body.handle!)}`)).body.advisors).toEqual([a, b]);
+    const hidden = await member.get(`${B}/by-handle/${encodeURIComponent(priv.body.handle!)}`);
+    expect(hidden.status).toBe(404);
+    expect(hidden.body.error).toBe('not_found');
   });
 });
 
@@ -243,21 +288,26 @@ describe('advisory-board — strategy context (ADR 0079 Phase 5)', () => {
     expect(board.contextRefs).toHaveLength(1);
 
     // preview resolves the strategy (RBAC-filtered for the caller)
-    const preview = await owner.get(`${B}/${encodeURIComponent(board.boardId)}/strategy-context`);
+    const preview = await owner.get(`${B}/${encodeURIComponent(board.boardId!)}/strategy-context`);
     expect(preview.status, JSON.stringify(preview.body)).toBe(200);
-    expect(preview.body.strategies.map((x: any) => x.id)).toContain(s.id);
-    expect(preview.body.strategies[0].title).toBe('Win FY26');
+    expect(preview.body.strategies!.map((x) => x.id)).toContain(s.id);
+    expect(preview.body.strategies![0]!.title).toBe('Win FY26');
 
     // an unreadable / absent strategy ref is rejected at board-save (404)
     const bad = await owner.post(B, { name: 'Bad', orgId, advisors, contextRefs: [{ kind: 'strategy', strategyId: 'strategy-does-not-exist' }] });
     expect(bad.status).toBe(404);
+    expect(bad.body.error).toBe('not_found');
 
     // an UNKNOWN ref kind is rejected (400); a valid 'project' kind with a bogus id
     // is not-found (404) — project context is now a supported kind (ADR 0100).
     const badKind = await owner.post(B, { name: 'Bad2', orgId, advisors, contextRefs: [{ kind: 'banana', strategyId: 'x' }] });
     expect(badKind.status).toBe(400);
+    expect(badKind.body.error).toBe('validation_error');
     const badProject = await owner.post(B, { name: 'Bad3', orgId, advisors, contextRefs: [{ kind: 'project', projectId: 'project-does-not-exist' }] });
     expect(badProject.status).toBe(404);
+    expect(badProject.body.error).toBe('not_found');
+    // None of the rejected boards was persisted.
+    expect((await owner.get(B)).body.boards!.map((x) => x.name)).toEqual(['Founders']);
   });
 
   it('carries readable PROJECT contextRefs (ADR 0100 — project context parity)', async () => {
@@ -276,14 +326,15 @@ describe('advisory-board — strategy context (ADR 0079 Phase 5)', () => {
     const tenantId = `org:abs-${Date.now()}-${n++}`;
     const owner = client(); await signup(owner, { tenantId });
     const member = client(); const memberUser = await signup(member, { tenantId });
-    const orgA = (await owner.post('/host/openwop-app/orgs', { name: 'Alpha' })).body.orgId;
-    const orgB = (await owner.post('/host/openwop-app/orgs', { name: 'Bravo' })).body.orgId;
+    const orgA = (await owner.post('/host/openwop-app/orgs', { name: 'Alpha' })).body.orgId!;
+    const orgB = (await owner.post('/host/openwop-app/orgs', { name: 'Bravo' })).body.orgId!;
     await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgA)}/members`, { displayName: 'M', subject: memberUser.userId, roles: ['editor'] });
     const adv = await makeAdvisor(member, 'Cleo');
     // an org-scoped strategy in org B (the member can't read it)
     const sB = (await owner.post(S, { orgId: orgB, title: 'Secret plan', scope: 'org' })).body;
     // the member builds a board in org A but tries to attach the org-B strategy → 404
     const res = await member.post(B, { name: 'Member board', orgId: orgA, advisors: [adv], contextRefs: [{ kind: 'strategy', strategyId: sB.id }] });
-    expect(res.status).toBe(404);
+    expect(res.status, JSON.stringify(res.body)).toBe(404);
+    expect(res.body.error).toBe('not_found');
   });
 });

@@ -4,19 +4,28 @@
  *
  * Born red: deleting a card through `deleteCard` left every PM overlay behind and left
  * the deleted idea's KB doc serving; `boardDeleteClaim` did not exist.
+ *
+ * What turns it red (w15 probes): unregistering the PM card-delete hook or dropping its
+ * score sweep (leg 1); `deleteIdea` skipping `deleteCard` (leg 2); the board claim
+ * returning null (leg 4) or claiming every board (leg 6); `deleteBoard` refusing a
+ * claimed board (legs 5 and 7).
+ *
+ * (A former "leg 3 — a card on an unowned board is a clean no-op" was cut in /grade-tests
+ * w15: `deleteCard` swallows every hook error, so even a PM hook that THROWS on a foreign
+ * board leaves it green — probe w15g2-kc-leg3-throw. Nothing PM-side could fail it; leg 6
+ * carries the "an unowned board is not claimed" half.)
  */
 import { beforeEach, describe, expect, it } from 'vitest';
-import { initHostExtPersistence, DurableCollection } from '../src/host/hostExtPersistence.js';
+import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { openStorage } from '../src/storage/index.js';
-import { deleteCard, deleteBoard, boardDeleteClaim, getCard } from '../src/host/kanbanService.js';
+import { deleteCard, deleteBoard, boardDeleteClaim, getCard, getBoard, createBoard } from '../src/host/kanbanService.js';
 import {
-  createList, submitIdea, setIdeaScore, deleteIdea, listRankedIdeas,
-  registerPriorityMatrixKanbanHooks, getList,
+  createList, submitIdea, setIdeaScore, deleteIdea, deleteList, listRankedIdeas,
+  registerPriorityMatrixKanbanHooks, getList, __pmStoresForErasure,
 } from '../src/features/priority-matrix/priorityMatrixService.js';
 
 const T = 'tCoOwn';
-interface ScoreRow { listId: string; cardId: string }
-const scoreRows = new DurableCollection<ScoreRow>('priority-matrix:score', (s) => `${s.listId}::${s.cardId}`);
+const scoreRow = (listId: string, cardId: string) => __pmStoresForErasure().scores.get(`${listId}::${cardId}`);
 
 let listId = '';
 let boardId = '';
@@ -36,10 +45,10 @@ beforeEach(async () => {
 
 describe('ADR 0667 D5(a) — a kanban-side card delete runs PM\'s cascade', () => {
   it('leg 1: the score overlay is gone after deleting through KANBAN\'s door', async () => {
-    expect(await scoreRows.get(`${listId}::${cardId}`), 'precondition: the overlay exists').toBeTruthy();
+    expect(await scoreRow(listId, cardId), 'precondition: the overlay exists').toBeTruthy();
     await deleteCard(cardId);
     expect(await getCard(cardId), 'the card itself is gone').toBeFalsy();
-    expect(await scoreRows.get(`${listId}::${cardId}`), 'and so is the overlay it stranded before').toBeFalsy();
+    expect(await scoreRow(listId, cardId), 'and so is the overlay it stranded before').toBeFalsy();
   });
 
   it('leg 2: the hook is IDEMPOTENT and does not recurse — PM\'s own deleteIdea still works', async () => {
@@ -47,17 +56,13 @@ describe('ADR 0667 D5(a) — a kanban-side card delete runs PM\'s cascade', () =
     // deleteIdea back (three of deleteCard's five callers are PM's own).
     const ok = await deleteIdea(T, listId, cardId, 'u1');
     expect(ok).toBe(true);
-    expect(await scoreRows.get(`${listId}::${cardId}`)).toBeFalsy();
-    // Running the door again is harmless.
-    await deleteCard(cardId);
+    // Asserted BEFORE running the door again — a second deleteCard would otherwise
+    // delete a card deleteIdea had left behind and hide it (w15 probe kc-leg2-delcard).
+    expect(await getCard(cardId), 'deleteIdea removed the card').toBeFalsy();
+    expect(await scoreRow(listId, cardId)).toBeFalsy();
     expect(await listRankedIdeas(T, listId)).toEqual([]);
-  });
-
-  it('leg 3: a card on a board NO priority list owns is a clean no-op', async () => {
-    const { createBoard, createCard } = await import('../src/host/kanbanService.js');
-    const foreign = await createBoard({ tenantId: T, name: 'Plain board', createdBy: 'u1' } as never);
-    const c = await createCard({ boardId: (foreign as { id: string }).id, title: 'Not an idea', createdBy: 'u1' } as never);
-    await expect(deleteCard((c as { id: string }).id)).resolves.toBe(true);
+    // Running the door again is harmless: nothing left to delete.
+    await expect(deleteCard(cardId)).resolves.toBe(false);
   });
 });
 
@@ -73,17 +78,16 @@ describe('ADR 0667 D5(b) — the board claim protects the list, without bricking
     // teardown (purgeTenantKanban), the roster cascade, projects and PM's own
     // `deleteList` would all be unable to complete — a gate with no exit.
     await expect(deleteBoard(boardId)).resolves.toBe(true);
+    expect(await getBoard(boardId), 'the claimed board really is gone').toBeNull();
   });
 
   it('leg 6: a board nothing claims is not falsely claimed', async () => {
-    const { createBoard } = await import('../src/host/kanbanService.js');
-    const foreign = await createBoard({ tenantId: T, name: 'Plain board', createdBy: 'u1' } as never);
-    expect(await boardDeleteClaim((foreign as { id: string }).id)).toBeNull();
+    const foreign = await createBoard({ tenantId: T, name: 'Plain board' });
+    expect(await boardDeleteClaim(foreign.id)).toBeNull();
   });
 
   it('leg 7: PM\'s own list delete still works end to end (the claim never blocks the owner)', async () => {
-    const { deleteList } = await import('../src/features/priority-matrix/priorityMatrixService.js');
-    await expect(deleteList(T, listId, 'u1')).resolves.not.toThrow();
+    await expect(deleteList(T, listId, 'u1')).resolves.toBe(true);
     expect(await getList(T, listId)).toBeNull();
   });
 });

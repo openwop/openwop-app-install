@@ -321,8 +321,6 @@ describe('ADR 0550 P4 — the runtime reader publishes only what was stamped', (
 
       expect(mod.conformanceClaims()).toBeUndefined();
       expect(mod.servedBundle(1)).toBeUndefined();
-      // The pointer is gated on the BUNDLE, so an unstamped image advertises none.
-      expect(mod.certificationBundleUrl('https://example.test')).toBeUndefined();
 
       const assembled = assembleCertification(inputsFor(allFloorFiles()));
       mkdirSync(dir, { recursive: true });
@@ -333,15 +331,16 @@ describe('ADR 0550 P4 — the runtime reader publishes only what was stamped', (
       // `servedBundle(1)`, the one mode-aware predicate every surface goes through.
       const served = mod.servedBundle(1);
       expect(served?.source === 'image' ? served.doc['bundleVersion'] : undefined).toBe('2');
-      expect(mod.certificationBundleUrl('https://example.test/')).toBe(
-        'https://example.test/host/openwop-app/conformance/certification-bundle',
-      );
+      // ADR 0812 P4 — the v1 discovery pointer (`certificationBundleUrl`) is
+      // deleted with the v1 builder; the claims document names the bundle, and
+      // must name the UNVERSIONED route (the `/v1` twin answers 410).
+      expect((mod.conformanceClaims() as { evidence?: { bundlePath?: string } } | undefined)?.evidence?.bundlePath)
+        .toBe('/host/openwop-app/conformance/certification-bundle');
 
       // A v1 bundle cannot express dispositions, so serving it through a pointer
       // that promises v2 evidence would be a claim the artifact cannot support.
       writeFileSync(join(dir, 'certification-bundle.json'), JSON.stringify({ bundleVersion: '1' }));
       expect(mod.servedBundle(1)).toBeUndefined();
-      expect(mod.certificationBundleUrl('https://example.test')).toBeUndefined();
 
       // A claims document missing its structural fields is not "claims nothing";
       // it is not a claims document, and must not be served as one.

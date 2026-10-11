@@ -7,12 +7,22 @@
  * content + an honest Content-Language; a supported-but-unauthored locale (it)
  * negotiates to it yet falls back to base per-section. (It was `fr` until the
  * seed gained a French overlay — the test is about the fallback, not the locale.)
+ *
+ * Sabotage-witnessed (w16, `w16g2-cd-*`): dropping `Vary: Accept-Language` or the
+ * public `Cache-Control`, the slug-format 400, the unknown-slug 404, the
+ * unadvertised-family 404, the host locale set (every negotiation case), and the
+ * withheld-locale removal from the negotiable set.
+ * Honest ceiling: the per-section overlay STRIP for a withheld locale is
+ * double-guarded here — the locale is also removed from negotiation, so the reader
+ * negotiates `en` and never reads the overlay (`w16g2-cd-withheld-strip` vacuous).
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
-import { DEFAULT_HERO_HEADINGS } from '../src/host/systemSite.js';
+import { DEFAULT_HERO_HEADINGS, SYSTEM_SITE_ORG, SYSTEM_SITE_TENANT } from '../src/host/systemSite.js';
+import { getPublishedBySlug, setLocalePublishState } from '../src/features/cms/cmsService.js';
+import { getContentLanguageSettings, updateContentLanguageSettings } from '../src/host/contentLocales.js';
 
 let BASE: string;
 let server: http.Server;
@@ -99,8 +109,12 @@ describe('GET /content/pages/:slug — normative delivery (RFC 0103)', () => {
   });
 
   it('404s an unknown slug and 400s a malformed one', async () => {
-    expect((await fetch(`${BASE}/content/pages/does-not-exist`, { headers: V2 })).status).toBe(404);
-    expect((await fetch(`${BASE}/content/pages/Bad_Slug`, { headers: V2 })).status).toBe(400);
+    const missing = await fetch(`${BASE}/content/pages/does-not-exist`, { headers: V2 });
+    expect(missing.status).toBe(404);
+    expect(((await missing.json()) as { error?: unknown }).error).toBe('not_found');
+    const bad = await fetch(`${BASE}/content/pages/Bad_Slug`, { headers: V2 });
+    expect(bad.status).toBe(400);
+    expect(((await bad.json()) as { error?: unknown }).error).toBe('validation_error');
   });
 
   it('advertises §A-coherent capabilities.i18n + content (operator-configured)', async () => {
@@ -142,11 +156,9 @@ describe('ADR 0592 §9 — public-lane cache/withholding honesty (CMSL-6)', () =
   });
 
   it('per-locale WITHHOLDING applies on the public lane (a withheld locale falls back to base, no leakage)', async () => {
-    const { SYSTEM_SITE_TENANT, SYSTEM_SITE_ORG } = await import('../src/host/systemSite.js');
-    const { getPublishedBySlug, setLocalePublishState } = await import('../src/features/cms/cmsService.js');
-    const { updateContentLanguageSettings } = await import('../src/host/contentLocales.js');
     const hit = await getPublishedBySlug(SYSTEM_SITE_TENANT, SYSTEM_SITE_ORG, 'home');
     expect(hit).toBeTruthy();
+    const priorSettings = await getContentLanguageSettings(SYSTEM_SITE_TENANT, SYSTEM_SITE_ORG);
     // The system org needs stored settings for the withhold write to validate.
     await updateContentLanguageSettings(SYSTEM_SITE_TENANT, SYSTEM_SITE_ORG, { supportedLocales: ['es', 'pt-BR'] }, 'test');
     await setLocalePublishState(SYSTEM_SITE_TENANT, SYSTEM_SITE_ORG, hit!.page.pageId, 'pt-BR', 'draft', 'test');
@@ -160,6 +172,10 @@ describe('ADR 0592 §9 — public-lane cache/withholding honesty (CMSL-6)', () =
       expect(heroHeading(es.body)).toBe(ES_HEADING);
     } finally {
       await setLocalePublishState(SYSTEM_SITE_TENANT, SYSTEM_SITE_ORG, hit!.page.pageId, 'pt-BR', 'published', 'test');
+      // Leave the system org's settings as the boot left them (order-independence).
+      await updateContentLanguageSettings(SYSTEM_SITE_TENANT, SYSTEM_SITE_ORG, {
+        baseLocale: priorSettings.baseLocale, supportedLocales: priorSettings.supportedLocales,
+      }, 'test');
     }
   });
 });

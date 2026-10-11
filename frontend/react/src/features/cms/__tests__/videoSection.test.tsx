@@ -7,6 +7,14 @@
  * CORS read; the long description is screen-reader-only and describes the
  * video; a YouTube link only when authored; a non-https source never renders
  * a player. The editor offers every field.
+ *
+ * Sabotage-witnessed (w17): `preload="auto"`; `controls` always on; no `play()`
+ * on click; a credentialed / missing `crossOrigin`; `srcLang` ≠ en; the
+ * description dropped from `aria-describedby`; a YouTube link or captions track
+ * rendered when not authored; no `rel` on the YouTube link; `httpsOnly`
+ * admitting http; the editor writing `length` under another key; the YouTube
+ * field removed. (`load` is never called by product code — that assertion is a
+ * cheap negative, not a witnessed guard; `preload="none"` is the real one.)
  */
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { render, screen, cleanup, fireEvent } from '@testing-library/react';

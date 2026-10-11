@@ -26,6 +26,11 @@
  *      content — and no new ok audit row is written. The fork still completes
  *      (revocation degrades recall; it does not fail the run).
  *
+ * Sabotage witnesses (w12): declaring the node `sideEffecting` (the fork is served from the log
+ * and never re-reads), ignoring a grant's `revoked` status, and dropping the acting caller from
+ * the run lane's resolver call each turn this red. CEILING: `waitTerminal` polls every 150 ms —
+ * the run has no settle hook a test can await.
+ *
  * What this does NOT discriminate: RFC 0041 divergence EVENT emission (leg 3
  * asserts the live-miss consequence, not the event), and `mode:'branch'`
  * forks (replay-mode only).
@@ -70,15 +75,21 @@ afterAll(async () => {
   await new Promise<void>((res) => server.close(() => res()));
 });
 
-interface Res<T = any> { status: number; body: T }
-interface Client { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res>; put: (p: string, b?: unknown) => Promise<Res>; del: (p: string) => Promise<Res> }
+interface Res<T> { status: number; body: T }
+interface Client {
+  get: <T = unknown>(p: string) => Promise<Res<T>>;
+  post: <T = unknown>(p: string, b?: unknown) => Promise<Res<T>>;
+  put: <T = unknown>(p: string, b?: unknown) => Promise<Res<T>>;
+  del: <T = unknown>(p: string) => Promise<Res<T>>;
+}
+interface RunView { runId: string; status?: string }
 function client(): Client {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
+  const call = async <T,>(method: string, path: string, body?: unknown): Promise<Res<T>> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
     const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
-    return { status: res.status, body: out };
+    return { status: res.status, body: out as T };
   };
   return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), put: (p, b) => call('PUT', p, b), del: (p) => call('DELETE', p) };
 }
@@ -92,8 +103,8 @@ const OWNER_FACT = 'cc finance on vendor contracts';
 async function waitTerminal(c: Client, runId: string, timeoutMs = 20_000): Promise<string> {
   const t0 = Date.now();
   for (;;) {
-    const r = await c.get(`/runs/${encodeURIComponent(runId)}`);
-    const status = r.body?.status as string | undefined;
+    const r = await c.get<RunView | undefined>(`/runs/${encodeURIComponent(runId)}`);
+    const status = r.body?.status;
     if (status && ['completed', 'failed', 'cancelled'].includes(status)) return status;
     if (Date.now() - t0 > timeoutMs) throw new Error(`run ${runId} not terminal after ${timeoutMs}ms (last: ${status})`);
     await new Promise((res) => setTimeout(res, 150));
@@ -108,8 +119,8 @@ describe('PROBE-RCL-2 — grant → run → revoke → :fork re-resolves recall 
     const admin = client();
     await admin.post('/host/openwop-app/test/login', { email: `twf-admin-${Date.now()}-${n++}@acme.test`, tenantId });
     const member = client();
-    const m = await member.post('/host/openwop-app/test/login', { email: `twf-member-${Date.now()}-${n++}@acme.test`, tenantId });
-    const memberId = m.body.user.userId as string;
+    const m = await member.post<{ user: { userId: string } }>('/host/openwop-app/test/login', { email: `twf-member-${Date.now()}-${n++}@acme.test`, tenantId });
+    const memberId = m.body.user.userId;
 
     // A registered manifest agent + roster entry (packs are not mounted here).
     getAgentRegistry().register({
@@ -132,7 +143,7 @@ describe('PROBE-RCL-2 — grant → run → revoke → :fork re-resolves recall 
 
     // ── Leg 1: the SOURCE run (created by the OWNER ⇒ actingUserId = owner). ──
     programMock('run', [{ content: 'SOURCE-ANSWER' }]); // exactly ONE entry — exhausted after this run
-    const created = await member.post('/runs', {
+    const created = await member.post<RunView>('/runs', {
       workflowId: 'openwop-app.agent-mention',
       // The REGISTRY id (dispatch resolves the manifest by it); the node's
       // reverse roster scan maps it to `rosterId` = the twin-link key.
@@ -143,7 +154,7 @@ describe('PROBE-RCL-2 — grant → run → revoke → :fork re-resolves recall 
       // first): major 2's `configurable` is closed and versioned (ADR 0812 P2b).
     });
     expect([200, 201, 202], JSON.stringify(created.body)).toContain(created.status);
-    const sourceRunId = created.body.runId as string;
+    const sourceRunId = created.body.runId;
     expect(await waitTerminal(member, sourceRunId)).toBe('completed');
     const sourcePrompt = promptOf();
     expect(sourcePrompt, 'the source prompt must carry the borrowed owner note').toContain(OWNER_FACT);
@@ -151,9 +162,9 @@ describe('PROBE-RCL-2 — grant → run → revoke → :fork re-resolves recall 
     expect(await okRowsFor(sourceRunId), 'the source recall is audited under its runId').toBe(1);
 
     // ── Leg 2: fork with the grant INTACT (forked BY the owner). ──
-    const fork1 = await member.post(`/runs/${encodeURIComponent(sourceRunId)}:fork`, { fromSeq: 0, mode: 'replay' });
+    const fork1 = await member.post<RunView>(`/runs/${encodeURIComponent(sourceRunId)}:fork`, { fromSeq: 0, mode: 'replay' });
     expect(fork1.status, JSON.stringify(fork1.body)).toBe(201);
-    const fork1Id = fork1.body.runId as string;
+    const fork1Id = fork1.body.runId;
     expect(await waitTerminal(member, fork1Id)).toBe('completed');
     // The node RE-EXECUTED (the fact the old docblock denied): the fork's live
     // re-read really read the corpus, so it honestly audits under ITS runId.
@@ -165,7 +176,7 @@ describe('PROBE-RCL-2 — grant → run → revoke → :fork re-resolves recall 
     // invocation log. (The previous `promptOf()` equality was
     // non-discriminating: an unexhausted queue serving a live call on the
     // same prompt would also have left the last-seen prompt byte-identical.)
-    const fork1Events = await member.get(`/runs/${encodeURIComponent(fork1Id)}/events/poll?fromSeq=0&limit=500`);
+    const fork1Events = await member.get<{ events: unknown[] }>(`/runs/${encodeURIComponent(fork1Id)}/events/poll?fromSeq=0&limit=500`);
     expect(fork1Events.status).toBe(200);
     expect(
       JSON.stringify(fork1Events.body.events),
@@ -176,10 +187,10 @@ describe('PROBE-RCL-2 — grant → run → revoke → :fork re-resolves recall 
     expect(promptOf()).toBe(sourcePrompt);
 
     // ── Leg 3: REVOKE, then fork again. ──
-    expect((await member.del(`${GRANTS}/${encodeURIComponent(rosterId)}`)).body.removed).toBe(true);
-    const fork2 = await member.post(`/runs/${encodeURIComponent(sourceRunId)}:fork`, { fromSeq: 0, mode: 'replay' });
+    expect((await member.del<{ removed: boolean }>(`${GRANTS}/${encodeURIComponent(rosterId)}`)).body.removed).toBe(true);
+    const fork2 = await member.post<RunView>(`/runs/${encodeURIComponent(sourceRunId)}:fork`, { fromSeq: 0, mode: 'replay' });
     expect(fork2.status, JSON.stringify(fork2.body)).toBe(201);
-    const fork2Id = fork2.body.runId as string;
+    const fork2Id = fork2.body.runId;
     // Revocation DEGRADES recall — it must not fail the fork.
     expect(await waitTerminal(member, fork2Id)).toBe('completed');
     // The re-executed node re-resolved recall LIVE, found the grant revoked,

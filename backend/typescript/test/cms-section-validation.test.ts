@@ -1,6 +1,13 @@
 /**
  * CMS section validation (ADR 0027 front-page enrichment) — the new optional
  * fields + the `safeLink` CTA guard. Pure unit test over `validateSection`.
+ *
+ * Guards: `safeLink` keeps internal paths and explicit http(s)/mailto URLs and
+ * drops `javascript:` plus the protocol-relative `//` and `/\` open-redirect
+ * shapes (a stored-XSS / open-redirect vector on a public page); a CTA url never
+ * survives without its label; hero `visual` and column `layout` are closed sets.
+ * Sabotage (grade-tests w16): `isInternalHref(s)` → `s.startsWith('/')` reds the
+ * protocol-relative case; returning the raw string reds the `javascript:` case.
  */
 import { describe, expect, it } from 'vitest';
 import { validateSection } from '../src/features/cms/cmsService.js';

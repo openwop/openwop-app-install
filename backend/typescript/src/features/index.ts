@@ -17,6 +17,7 @@ import { registerFeatureDependencies, registerFeaturePacks, registerFeatureRecom
 import { retireToggleOverrides } from '../host/featureToggles/service.js';
 import { registerFeatureSurface } from '../host/featureSurfaces.js';
 import { registerChainBackedWorkflow, validateChainBackedSubChainBinds } from '../host/chainBackedWorkflows.js';
+import { registerWorkflowTemplateChains } from '../host/workflowTemplates.js';
 import type { RouteDeps } from '../routes/registerAllRoutes.js';
 import type { BackendFeature, PackRef } from './types.js';
 import { crmFeature } from './crm/feature.js';
@@ -375,6 +376,7 @@ export function registerBackendFeatures(deps: RouteDeps): void {
   registerLegacyDefsChainBacked(kicktodoCreatorBuiltinWorkflows); // ADR 0472 P4 TERMINAL (challenge-factory + lesson-batch; RFC 0133 sub-chain host-default binds subChainRef→same-id child)
   registerLegacyDefsChainBacked(kicktodoIntegrationsBuiltinWorkflows); // ADR 0472 P4
   registerLegacyDefsChainBacked(kicktodoAccountabilityBuiltinWorkflows); // ADR 0472 P4
+  registerWorkflowTemplateChains(); // ADR 0775 P2 — migrated Work-Twin tmpl.* templates (same id, byte-identical shape)
   // CBW-1 — after every chain-backed registration above, verify each host-default
   // subChainRef→workflowId bind resolves to a workflow actually registered same-id
   // (a declared-but-unregistered sibling, or an external ref this host never

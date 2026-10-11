@@ -2,46 +2,29 @@
  * Priority Matrix portfolio (ADR 0060) — ROUTE harness. Cross-list rollup across a
  * workspace's readable lists: merged + ranked by priority, topN respected, source
  * list + in-list rank surfaced, and cross-org lists excluded (no leak).
+ *
+ * What turns it red (w15 probes): `buildPortfolio` not sorting (the LOW list is created
+ * FIRST, so insertion order is the wrong order) or sorting ascending; `topN` not applied;
+ * `inListRank` not carried; `readableLists` dropping its per-org readability check
+ * (the cross-org leak).
  */
 
-import http from 'node:http';
-import type { AddressInfo } from 'node:net';
-import { getSetCookies } from './headerCookies.js';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { createApp } from '../src/index.js';
-import { saveConfig } from '../src/host/featureToggles/service.js';
-import { getToggleDefault } from '../src/host/featureToggles/registry.js';
+import { bootPlanningApp, makeClient, enableToggle, uniqEmail, type Client } from './planningHarness.js';
 
-let BASE: string;
-let server: http.Server;
+let BASE = '';
+let closeApp: () => Promise<void>;
 let n = 0;
 
 beforeAll(async () => {
-  process.env.OPENWOP_STORAGE_DSN = 'memory://';
-  process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
-  process.env.OPENWOP_TEST_AUTH_ENABLED = 'true';
-  delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
-  const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
-  const d = getToggleDefault('priority-matrix');
-  if (d) await saveConfig({ ...d, status: 'on' }, 'test');
+  const h = await bootPlanningApp(); BASE = h.base; closeApp = h.close;
+  await enableToggle('priority-matrix', 'on');
 });
-afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
+afterAll(async () => { await closeApp(); });
 
-interface Res<T = any> { status: number; body: T }
-interface Client { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res>; put: (p: string, b?: unknown) => Promise<Res> }
-function client(): Client {
-  let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
-    const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
-    for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
-    return { status: res.status, body: out };
-  };
-  return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), put: (p, b) => call('PUT', p, b) };
-}
-
-const uniqEmail = (who: string): string => `${who}-${Date.now()}-${n++}@acme.test`;
+const client = (): Client => makeClient(() => BASE);
+interface PortfolioItem { title: string; listName: string; inListRank: number; scoringModel: string; computedPriority: number }
+interface Portfolio { items: PortfolioItem[]; lists: Array<{ name: string }> }
 async function signup(c: Client, opts: { tenantId?: string } = {}): Promise<{ userId: string }> {
   const r = await c.post('/host/openwop-app/test/login', { email: uniqEmail('pf'), ...(opts.tenantId ? { tenantId: opts.tenantId } : {}) });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
@@ -64,30 +47,35 @@ describe('priority-matrix portfolio (ADR 0060)', () => {
     const owner = client();
     await signup(owner);
     const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
-    await listWithScoredIdea(owner, orgId, 'List A', 'Top across all', HIGH);
+    // LOW first: ranking has to beat insertion order to put List A's idea on top.
     await listWithScoredIdea(owner, orgId, 'List B', 'Bottom across all', LOW);
+    await listWithScoredIdea(owner, orgId, 'List A', 'Top across all', HIGH);
 
-    const pf = await owner.get(P);
-    expect(pf.status, JSON.stringify(pf.body)).toBe(200);
-    expect(pf.body.lists).toHaveLength(2);
-    expect(pf.body.items).toHaveLength(2);
+    const res = await owner.get(P);
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    const pf = res.body as Portfolio;
+    expect(pf.lists).toHaveLength(2);
+    expect(pf.items).toHaveLength(2);
     // Merged + ranked by priority: the HIGH idea from List A leads.
-    expect(pf.body.items[0].title).toBe('Top across all');
-    expect(pf.body.items[0].listName).toBe('List A');
-    expect(pf.body.items[0].inListRank).toBe(1);
-    expect(pf.body.items[0].scoringModel).toBe('weighted');
-    expect(pf.body.items[0].computedPriority).toBeGreaterThan(pf.body.items[1].computedPriority);
+    expect(pf.items[0].title).toBe('Top across all');
+    expect(pf.items[0].listName).toBe('List A');
+    expect(pf.items[0].inListRank).toBe(1);
+    expect(pf.items[0].scoringModel).toBe('weighted');
+    expect(pf.items[0].computedPriority).toBeGreaterThan(pf.items[1].computedPriority);
+    expect(pf.items[1].title).toBe('Bottom across all');
+    expect(pf.items[1].inListRank).toBe(1);
   });
 
   it('respects topN', async () => {
     const owner = client();
     await signup(owner);
     const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
-    await listWithScoredIdea(owner, orgId, 'L1', 'i1', HIGH);
     await listWithScoredIdea(owner, orgId, 'L2', 'i2', LOW);
-    const pf = await owner.get(`${P}?topN=1`);
-    expect(pf.body.items).toHaveLength(1);
-    expect(pf.body.lists).toHaveLength(2); // the rollup still reports both contributing lists
+    await listWithScoredIdea(owner, orgId, 'L1', 'i1', HIGH);
+    const pf = (await owner.get(`${P}?topN=1`)).body as Portfolio;
+    expect(pf.items).toHaveLength(1);
+    expect(pf.items[0].title, 'topN keeps the TOP item, not the first inserted').toBe('i1');
+    expect(pf.lists).toHaveLength(2); // the rollup still reports both contributing lists
   });
 
   it('excludes a list in an org the caller cannot read (no cross-org leak)', async () => {
@@ -102,8 +90,8 @@ describe('priority-matrix portfolio (ADR 0060)', () => {
     await listWithScoredIdea(owner, orgA, 'A-list', 'visible', HIGH);
     await listWithScoredIdea(owner, orgB, 'B-list', 'hidden', HIGH);
 
-    const pf = await member.get(P); // member reads only org A
-    expect(pf.body.lists.map((l: any) => l.name)).toEqual(['A-list']);
-    expect(pf.body.items.map((i: any) => i.title)).toEqual(['visible']);
+    const pf = (await member.get(P)).body as Portfolio; // member reads only org A
+    expect(pf.lists.map((l) => l.name)).toEqual(['A-list']);
+    expect(pf.items.map((i) => i.title)).toEqual(['visible']);
   });
 });

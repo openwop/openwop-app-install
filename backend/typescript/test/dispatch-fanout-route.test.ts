@@ -2,7 +2,8 @@
  * RFC 0118 — the live parallel-fan-out witness over HTTP. Boots the real app with
  * OPENWOP_TEST_SEAM_ENABLED=true and proves the witness is non-vacuous against the fixed
  * conformance seam the pinned suite drives:
- *   - the (v1) discovery document advertises dispatch.fanOutSupported + "parallel" in fanOutPolicies
+ *   - the dispatch capability (the SSoT `validateDispatchFanOutConfig` and the
+ *     campaign orchestrator read) declares fanOutSupported + "parallel"
  *   - POST /host/sample/dispatch/fanout (the canonical conformance path) joins a wait-all/
  *     collect fan-out with joinOutcome:'satisfied', children[] of the right length, mergeOrder[]
  *   - the product path /host/openwop-app/dispatch/fanout serves the same handler
@@ -13,7 +14,7 @@ import { describe, expect, it, beforeAll, afterAll } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
-import { v1Advertisement } from './support/v1Advertisement.js';
+import { dispatchCapability } from '../src/host/dispatchFanOut.js';
 
 let BASE: string;
 let server: http.Server;
@@ -36,11 +37,12 @@ afterAll(async () => {
 });
 
 describe('RFC 0118 — live parallel-fan-out witness', () => {
-  it('advertises dispatch.fanOutSupported + parallel at the discovery root', async () => {
-    // ADR 0812 — the v2 root has no `dispatch` record yet; the v1 claim is read from its builder.
-    const doc = await v1Advertisement() as {
-      dispatch?: { supported?: boolean; fanOutSupported?: boolean; fanOutPolicies?: string[]; joinModes?: string[]; onChildFailureModes?: string[]; maxFanOut?: number; perItemInput?: boolean };
-    };
+  it('declares dispatch.fanOutSupported + parallel in the dispatch capability', () => {
+    // ADR 0812 P4 — this read the `dispatch` block of the v1 document, whose
+    // builder is deleted; the v2 root has no `dispatch` record. The block was
+    // printed from `dispatchCapability()`, which the definition validator still
+    // reads at registration, so the facts are asserted at that source.
+    const doc = { dispatch: dispatchCapability() as { supported?: boolean; fanOutSupported?: boolean; fanOutPolicies?: string[]; joinModes?: string[]; onChildFailureModes?: string[]; maxFanOut?: number; perItemInput?: boolean } };
     expect(doc.dispatch?.fanOutSupported).toBe(true);
     expect(doc.dispatch?.fanOutPolicies).toContain('parallel');
     // RFC 0126 is Accepted (openwop#826) → the host now advertises per-item input

@@ -10,6 +10,12 @@
  *     instance was down publishes NOTHING (no resurrect-then-yank, no
  *     content live past its embargo)
  *   - leaving published (archive) consumes a pending unpublish schedule
+ *
+ * Sabotage (grade-tests w16): adding the approval-gate check to
+ * `POST …/schedule-unpublish` reds the asymmetry case; deleting the window-elapsed
+ * branch in `publishSweep.ts` reds the window case (it is asserted BETWEEN the two
+ * lanes and via `publishedAt`, because the resurrect-then-yank path ends in the same
+ * final draft state — the first version of this case could not tell them apart).
  */
 
 import http from 'node:http';
@@ -42,7 +48,19 @@ async function setToggle(id: string, status: 'on' | 'off'): Promise<void> {
   if (d) await saveConfig({ ...d, status }, 'test');
 }
 
-interface Res<T = any> { status: number; body: T }
+/** The page / error-envelope fields these cases read. */
+interface Body {
+  pageId: string;
+  orgId: string;
+  status: string;
+  publishedAt?: string;
+  scheduledPublishAt?: string;
+  scheduledUnpublishAt?: string;
+  error?: string;
+  message?: string;
+  details?: Record<string, unknown>;
+}
+interface Res<T = Body> { status: number; body: T }
 interface Client {
   get: (p: string) => Promise<Res>;
   post: (p: string, b?: unknown) => Promise<Res>;
@@ -57,7 +75,7 @@ function client(): Client {
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) };
+    return { status: res.status, body: (res.status === 204 ? undefined : await res.json().catch(() => undefined)) as Body };
   };
   return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), del: (p) => call('DELETE', p) };
 }
@@ -89,11 +107,17 @@ describe('set-time legality', () => {
   it('409s on a plain draft; 400s on bad/past dates; 200s on a published page', async () => {
     const { owner, orgId } = await ownerOrg();
     const draft = await draftPage(owner, orgId);
-    expect((await owner.post(u(orgId, `/pages/${draft}/schedule-unpublish`), { at: future(60_000) })).status).toBe(409);
+    const onDraft = await owner.post(u(orgId, `/pages/${draft}/schedule-unpublish`), { at: future(60_000) });
+    expect(onDraft.status).toBe(409);
+    expect(onDraft.body.details?.status, 'refused for being a plain draft').toBe('draft');
 
     const pub = await publishedPage(owner, orgId);
-    expect((await owner.post(u(orgId, `/pages/${pub}/schedule-unpublish`), { at: 'nope' })).status).toBe(400);
-    expect((await owner.post(u(orgId, `/pages/${pub}/schedule-unpublish`), { at: '2020-01-01T00:00:00Z' })).status).toBe(400);
+    const bad = await owner.post(u(orgId, `/pages/${pub}/schedule-unpublish`), { at: 'nope' });
+    expect(bad.status).toBe(400);
+    expect(bad.body.details?.at).toBe('nope');
+    const past = await owner.post(u(orgId, `/pages/${pub}/schedule-unpublish`), { at: '2020-01-01T00:00:00Z' });
+    expect(past.status).toBe(400);
+    expect(past.body.message).toMatch(/future/);
     const at = future(60_000);
     const ok = await owner.post(u(orgId, `/pages/${pub}/schedule-unpublish`), { at });
     expect(ok.status, JSON.stringify(ok.body)).toBe(200);
@@ -109,7 +133,9 @@ describe('set-time legality', () => {
     const pageId = await draftPage(owner, orgId);
     const pubAt = future(60_000);
     expect((await owner.post(u(orgId, `/pages/${pageId}/schedule`), { at: pubAt })).status).toBe(200);
-    expect((await owner.post(u(orgId, `/pages/${pageId}/schedule-unpublish`), { at: future(30_000) })).status).toBe(400); // before publish
+    const early = await owner.post(u(orgId, `/pages/${pageId}/schedule-unpublish`), { at: future(30_000) }); // before publish
+    expect(early.status).toBe(400);
+    expect(early.body.details?.scheduledPublishAt, 'refused for preceding the paired publish').toBe(pubAt);
     const ok = await owner.post(u(orgId, `/pages/${pageId}/schedule-unpublish`), { at: future(120_000) });
     expect(ok.status, JSON.stringify(ok.body)).toBe(200);
     expect(ok.body.scheduledPublishAt).toBe(pubAt); // the pair coexists
@@ -122,6 +148,7 @@ describe('set-time legality', () => {
     try {
       const ok = await owner.post(u(orgId, `/pages/${pub}/schedule-unpublish`), { at: future(60_000) });
       expect(ok.status, JSON.stringify(ok.body)).toBe(200); // publish-direction gate; unpublish is fail-safe
+      expect(ok.body.scheduledUnpublishAt).toBeTruthy();
     } finally {
       await setToggle('cms-approval-gate', 'off');
     }
@@ -149,10 +176,13 @@ describe('the sweep unpublish lane', () => {
 
     // Both fire times pass before the next tick (the instance was "down").
     await processScheduledPublishes(Date.now() + 10_000);
+    expect((await owner.get(u(orgId, `/pages/${pageId}`))).body.status,
+      'the publish lane must not resurrect an elapsed window').toBe('draft');
     await processScheduledUnpublishes(Date.now() + 10_000);
 
     const page = await owner.get(u(orgId, `/pages/${pageId}`));
     expect(page.body.status).toBe('draft'); // never resurrected past its window
+    expect(page.body.publishedAt, 'never published — not published-then-unpublished').toBeUndefined();
     expect(page.body.scheduledPublishAt).toBeUndefined();
     expect(page.body.scheduledUnpublishAt).toBeUndefined();
   });

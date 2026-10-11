@@ -182,8 +182,9 @@ function dropStaleCorpusSuite(why) {
 // So: the same rule as above, applied without the escape hatch that rule has.
 // `corpus-suite.txt` can be re-derived here, so absence is a fallback. These
 // cannot, so DELETION IS THE ONLY HONEST ACTION — every run of this script
-// removes them, and `scripts/deploy.sh` re-produces them with a real certify
-// run (or ships without, deliberately, via `--skip-certify`). Absent ⇒ this
+// removes them. Since ADR 0869 `scripts/deploy.sh` no longer re-produces them:
+// the image stamp was served only at the retired major 1, so it stays ABSENT,
+// and served evidence comes from `publish-evidence.sh` (origin mode). Absent ⇒ this
 // build publishes no claim, which is fully conformant per RFC 0089 §D. Stale ⇒
 // this build publishes someone else's evidence as its own.
 for (const f of ['certification-bundle.json', 'conformance-claims.json']) {
@@ -192,7 +193,7 @@ for (const f of ['certification-bundle.json', 'conformance-claims.json']) {
   rmSync(stale, { force: true });
   console.warn(
     `write-build-commit: REMOVED build-meta/${f} — a certification stamp cannot be re-derived here, ` +
-      'and a stale one publishes another commit\'s evidence. `scripts/deploy.sh` re-runs --certify; ' +
-      'without that the RFC 0089 §D pointer ships ABSENT, which is honest.',
+      'and a stale one publishes another commit\'s evidence. Since ADR 0869 no image stamp is rebuilt; ' +
+      'served evidence comes from scripts/publish-evidence.sh (origin mode), else the RFC 0089 §D pointer is ABSENT, which is honest.',
   );
 }

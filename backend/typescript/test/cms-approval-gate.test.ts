@@ -7,6 +7,17 @@
  * row through the shared decision core — so page-decide ≡ inbox-decide. The toggle
  * now gates only the direct `publish` bypass (ON ⇒ publish must go through the
  * review; OFF ⇒ an admin may publish directly, which clears the pending row).
+ *
+ * Sabotage-witnessed (w16, `w16g2-gate-*`): not queueing on submit, dropping the
+ * publish-bypass gate or its pending-row cleanup, routing reject to approve,
+ * dropping the no-row 409, the handler's `host:members:manage` check (the
+ * editor case asserts `requiredScope`, because separation of duties would also
+ * 403 that editor), the delete cascade + resolved-row prune, the decide-arm
+ * backstop and its system attribution, and the restore cascade each red a case.
+ *
+ * Honest ceiling: "one open approval per page" is DOUBLE-guarded — the pending
+ * lookup in `queueContentApproval` and the ADR 0859 D2 deterministic review id
+ * (a storage CAS) each keep it to one row, so neither is failable alone.
  */
 
 import http from 'node:http';
@@ -16,7 +27,8 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
-import { createContentApproval, getApproval } from '../src/host/approvalService.js';
+import { createContentApproval, getApproval, type PendingApproval } from '../src/host/approvalService.js';
+import type { Page } from '../src/features/cms/cmsService.js';
 import { AUDIT_KIND_GOVERNANCE_DECISION, listChain } from '../src/host/auditChainService.js';
 
 let BASE: string;
@@ -40,22 +52,29 @@ const setGate = async (status: 'on' | 'off'): Promise<void> => {
   if (d) await saveConfig({ ...d, status }, 'test');
 };
 
-interface Res<T = any> { status: number; body: T }
-interface Client { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res>; del: (p: string) => Promise<Res> }
+interface Res<T> { status: number; body: T }
+/** An error envelope's fields, merged into the page view every route here returns. */
+interface ErrBody { error?: string; message?: string; details?: { gate?: string; reason?: string; requiredScope?: string } }
+type PageBody = Page & ErrBody;
+interface Client {
+  get: <T = PageBody>(p: string) => Promise<Res<T>>;
+  post: <T = PageBody>(p: string, b?: unknown) => Promise<Res<T>>;
+  del: (p: string) => Promise<Res<unknown>>;
+}
 function client(): Client {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
+  const call = async <T>(method: string, path: string, body?: unknown): Promise<Res<T>> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
-    return { status: res.status, body: out };
+    const out: unknown = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    return { status: res.status, body: out as T };
   };
   return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), del: (p) => call('DELETE', p) };
 }
 
 let n = 0;
 async function signup(c: Client, tenantId: string): Promise<{ userId: string }> {
-  const r = await c.post('/host/openwop-app/test/login', { email: `appr-${Date.now()}-${n++}@acme.test`, tenantId });
+  const r = await c.post<{ user: { userId: string } }>('/host/openwop-app/test/login', { email: `appr-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return r.body.user;
 }
@@ -65,7 +84,7 @@ async function ownerWithMember(role: string): Promise<{ owner: Client; member: C
   await signup(owner, tenantId);
   const member = client();
   const memberUser = await signup(member, tenantId);
-  const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await owner.post<{ orgId: string }>('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
   const orgId = org.body.orgId;
   const add = await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: memberUser.userId, roles: [role] });
@@ -77,12 +96,12 @@ const u = (orgId: string, s = ''): string => `/host/openwop-app/cms/orgs/${encod
 async function draft(owner: Client, orgId: string, title = 'Home'): Promise<string> {
   const r = await owner.post(u(orgId, '/pages'), { title, sections: [{ type: 'hero', data: { heading: 'Hi' } }] });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  return r.body.pageId as string;
+  return r.body.pageId;
 }
-async function pendingFor(c: Client, pageId: string): Promise<any> {
-  const list = await c.get('/host/openwop-app/approvals?status=pending');
+async function pendingFor(c: Client, pageId: string): Promise<PendingApproval | undefined> {
+  const list = await c.get<{ items: PendingApproval[] }>('/host/openwop-app/approvals?status=pending');
   expect(list.status).toBe(200);
-  return (list.body.items as any[]).find((a) => a.kind === 'content-publish' && a.pageId === pageId);
+  return list.body.items.find((a) => a.kind === 'content-publish' && a.pageId === pageId);
 }
 /** ADR 0593 D2 — how many GOVERNANCE_DECISION entries this tenant's
  *  tamper-evident chain holds. The wedge's durable half was that EVERY decide
@@ -105,7 +124,7 @@ describe('cms editorial approval — ONE decision path (submit always queues)', 
       expect(sub.body.status).toBe('in_review');
       const appr = await pendingFor(owner, pageId);
       expect(appr, 'a content-publish approval should be queued').toBeTruthy();
-      expect(appr.orgId).toBe(orgId);
+      expect(appr?.orgId).toBe(orgId);
     });
   }
 
@@ -127,7 +146,7 @@ describe('cms editorial approval — ONE decision path (submit always queues)', 
     const pageId = await draft(owner, orgId);
     await owner.post(u(orgId, `/pages/${pageId}/submit`));
     const appr = await pendingFor(owner, pageId);
-    const claim = await owner.post(`/host/openwop-app/approvals/${appr.approvalId}/claim`);
+    const claim = await owner.post<{ status: string }>(`/host/openwop-app/approvals/${appr!.approvalId}/claim`);
     expect(claim.status, JSON.stringify(claim.body)).toBe(200);
     expect(claim.body.status).toBe('approved');
     expect(await status(owner, orgId, pageId)).toBe('published');
@@ -138,21 +157,30 @@ describe('cms editorial approval — ONE decision path (submit always queues)', 
     const { owner, orgId } = await ownerWithMember('viewer');
     const pageId = await draft(owner, orgId);
     await owner.post(u(orgId, `/pages/${pageId}/submit`));
+    const appr = await pendingFor(owner, pageId);
+    expect(appr).toBeTruthy();
     const rej = await owner.post(u(orgId, `/pages/${pageId}/reject`));
     expect(rej.status, JSON.stringify(rej.body)).toBe(200);
     expect(rej.body.status).toBe('draft');
     expect(await pendingFor(owner, pageId)).toBeUndefined();
+    // The SHARED row was resolved as a rejection (not approved, not deleted).
+    expect((await getApproval(appr!.approvalId))?.status).toBe('rejected');
   });
 
   it('submit is idempotent — one open approval per page', async () => {
     await setGate('on');
     const { owner, orgId } = await ownerWithMember('viewer');
     const pageId = await draft(owner, orgId);
-    await owner.post(u(orgId, `/pages/${pageId}/submit`));
-    await owner.post(u(orgId, `/pages/${pageId}/submit`)); // re-submit 409s, no 2nd approval
-    const list = await owner.get('/host/openwop-app/approvals?status=pending');
-    const mine = (list.body.items as any[]).filter((a) => a.kind === 'content-publish' && a.pageId === pageId);
-    expect(mine.length).toBe(1);
+    expect((await owner.post(u(orgId, `/pages/${pageId}/submit`))).status).toBe(200);
+    const first = await pendingFor(owner, pageId);
+    expect(first).toBeTruthy();
+    // A re-submit of an in_review page is LEGAL (`submit.from` includes
+    // `in_review`) — it repins the open row rather than opening a second one.
+    const again = await owner.post(u(orgId, `/pages/${pageId}/submit`));
+    expect(again.status, JSON.stringify(again.body)).toBe(200);
+    const list = await owner.get<{ items: PendingApproval[] }>('/host/openwop-app/approvals?status=pending');
+    const mine = list.body.items.filter((a) => a.kind === 'content-publish' && a.pageId === pageId);
+    expect(mine.map((a) => a.approvalId)).toEqual([first!.approvalId]);
   });
 
   it('an editor (workspace:write, no host:members:manage) can submit but not decide', async () => {
@@ -169,8 +197,11 @@ describe('cms editorial approval — ONE decision path (submit always queues)', 
     const denied = await member.post(u(orgId, `/pages/${pageId}/approve`));
     expect(denied.status).toBe(403);
     // …and even with the id, the editor cannot decide it via the inbox.
-    const claim = await member.post(`/host/openwop-app/approvals/${appr.approvalId}/claim`);
+    const claim = await member.post<ErrBody>(`/host/openwop-app/approvals/${appr!.approvalId}/claim`);
     expect(claim.status).toBe(403);
+    // The ORG-ROLE refusal, not separation of duties (this editor submitted the
+    // page, so a self-approval refusal would also be a 403).
+    expect(claim.body.details?.requiredScope).toBe('host:members:manage');
     expect(await status(owner, orgId, pageId)).toBe('in_review');
   });
 
@@ -180,6 +211,9 @@ describe('cms editorial approval — ONE decision path (submit always queues)', 
     const pageId = await draft(owner, orgId); // never submitted → no row
     const approve = await owner.post(u(orgId, `/pages/${pageId}/approve`));
     expect(approve.status).toBe(409);
+    expect(approve.body.error).toBe('conflict');
+    expect(approve.body.message).toMatch(/no pending review/);
+    expect(await status(owner, orgId, pageId)).toBe('draft');
   });
 
   it('direct publish is a bypass and 409s when the gate is ON', async () => {
@@ -189,6 +223,7 @@ describe('cms editorial approval — ONE decision path (submit always queues)', 
     const pub = await owner.post(u(orgId, `/pages/${pageId}/publish`));
     expect(pub.status).toBe(409);
     expect(pub.body.details?.gate).toBe('cms-approval-gate');
+    expect(await status(owner, orgId, pageId)).toBe('draft'); // nothing published
   });
 
   it('direct publish is allowed when the gate is OFF and clears any pending review', async () => {
@@ -231,9 +266,9 @@ describe('cms editorial approval — ONE decision path (submit always queues)', 
     // the author can read it, and a deleted page has no author left to read it — the
     // closure itself is on the governance chain). So the row is GONE: the claim is a
     // 404 and nothing comes back to life.
-    const claim = await owner.post(`/host/openwop-app/approvals/${appr.approvalId}/claim`);
+    const claim = await owner.post(`/host/openwop-app/approvals/${appr!.approvalId}/claim`);
     expect(claim.status, JSON.stringify(claim.body)).toBe(404);
-    expect(await getApproval(appr.approvalId)).toBeNull();
+    expect(await getApproval(appr!.approvalId)).toBeNull();
     expect(await pendingFor(owner, pageId)).toBeUndefined();
   });
 
@@ -245,7 +280,7 @@ describe('cms editorial approval — ONE decision path (submit always queues)', 
     const { owner, orgId, tenantId } = await ownerWithMember('viewer');
     const pageId = await draft(owner, orgId);
     await owner.post(u(orgId, `/pages/${pageId}/submit`));
-    const appr = await pendingFor(owner, pageId);
+    expect(await pendingFor(owner, pageId)).toBeTruthy();
 
     // Simulate a producer whose cascade failed: drop the page WITHOUT the
     // cascade (the raw service delete the route wraps is what carries it, so we
@@ -256,13 +291,13 @@ describe('cms editorial approval — ONE decision path (submit always queues)', 
     // failed cascade leaves behind: a PENDING review for a page that no longer exists.
     expect((await owner.del(u(orgId, `/pages/${pageId}`))).status).toBe(204);
     const stranded = await createContentApproval({ tenantId, orgId, pageId, pageTitle: 'Stranded', pageVersion: 1, proposal: 'Publish' });
-    appr.approvalId = stranded.approvalId;
+    const appr = { approvalId: stranded.approvalId };
     expect((await getApproval(appr.approvalId))?.status).toBe('pending');
 
     const before = await governanceEntryCount(tenantId);
-    const first = await owner.post(`/host/openwop-app/approvals/${appr.approvalId}/claim`);
+    const first = await owner.post<ErrBody>(`/host/openwop-app/approvals/${appr.approvalId}/claim`);
     expect(first.status, JSON.stringify(first.body)).toBe(409);
-    expect(first.body?.details?.reason).toBe('review_closed');
+    expect(first.body.details?.reason).toBe('review_closed');
     const closed = await getApproval(appr.approvalId);
     expect(closed?.status).toBe('rejected');
     expect(closed?.note).toContain('deleted');
@@ -288,9 +323,9 @@ describe('cms editorial approval — ONE decision path (submit always queues)', 
     const { owner, orgId } = await ownerWithMember('viewer');
     const pageId = await draft(owner, orgId);
     await owner.post(u(orgId, `/pages/${pageId}/submit`)); // submit snapshots a version
-    const versions = await owner.get(u(orgId, `/pages/${pageId}/versions`));
+    const versions = await owner.get<{ versions: Array<{ versionId: string }> }>(u(orgId, `/pages/${pageId}/versions`));
     expect(versions.status, JSON.stringify(versions.body)).toBe(200);
-    const versionId = (versions.body.versions as any[])[0]?.versionId;
+    const versionId = versions.body.versions[0]?.versionId;
     expect(versionId, 'submit must have snapshotted a version to restore').toBeTruthy();
     expect(await pendingFor(owner, pageId)).toBeTruthy();
 
