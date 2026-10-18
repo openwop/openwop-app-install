@@ -10,6 +10,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
+import { PageHeader } from '../../ui/PageHeader.js';
 import { ShieldIcon } from '../../ui/icons/index.js';
 import { StateCard } from '../../ui/StateCard.js';
 import { Notice } from '../../ui/Notice.js';
@@ -44,10 +45,7 @@ export function AdminOverviewPage(): JSX.Element {
 
   return (
     <div className="page" data-walkthrough="admin-kicktodo.page">
-      <header className="page-header">
-        <h1 className="page-header__title">{t('overviewTitle')}</h1>
-        <p className="page-header__lede">{t('overviewLede')}</p>
-      </header>
+      <PageHeader title={t('overviewTitle')} lede={t('overviewLede')} />
 
       {/* The one genuinely-admin surface: the Safety & approvals queue. */}
       <section className="surface-card" aria-label={t('needsYouHeading')}>

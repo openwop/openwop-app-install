@@ -2,6 +2,10 @@
  * RunDrawer (§7.2.5 / CV-17) — direct coverage (grade-pass 2026-07-12):
  * hidden without an overlay, summary counts, expandable per-node payloads,
  * and the 4000-char payload bound.
+ *
+ * Sabotage that turns it red: rendering without an overlay, counting every
+ * status as 1 (the fixture has TWO completed + one failed), an `aria-expanded`
+ * that does not follow the toggle, raw-id rows, un-pretty JSON, or no bound.
  */
 import { describe, it, expect, beforeEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
@@ -12,13 +16,17 @@ const st = () => useBuilderStore.getState();
 
 beforeEach(() => {
   useBuilderStore.setState({
-    nodes: [{ id: 'n1', kind: 'transform', name: 'Extract totals', position: { x: 0, y: 0 }, config: {} }],
+    nodes: [
+      { id: 'n1', kind: 'transform', name: 'Extract totals', position: { x: 0, y: 0 }, config: {} },
+      { id: 'n2', kind: 'transform', name: 'Sum rows', position: { x: 0, y: 120 }, config: {} },
+      { id: 'n3', kind: 'transform', name: 'Post report', position: { x: 0, y: 240 }, config: {} },
+    ],
     edges: [], selectedNodeIds: [], selectedNodeId: null, past: [], future: [], overlay: null,
   });
 });
 
-const ev = (type: string, payload?: unknown) => ({
-  eventId: 'e', runId: 'r1', type, nodeId: 'b1', payload, timestamp: '2026-07-12T20:00:00Z', sequence: 1, schemaVersion: 3,
+const ev = (type: string, payload?: unknown, nodeId = 'b1') => ({
+  eventId: 'e', runId: 'r1', type, nodeId, payload, timestamp: '2026-07-12T20:00:00Z', sequence: 1, schemaVersion: 3,
 });
 
 describe('RunDrawer', () => {
@@ -28,16 +36,20 @@ describe('RunDrawer', () => {
   });
 
   it('summarizes per-status counts and expands to payload rows', () => {
-    st().startOverlay('r1', { b1: 'n1' });
-    st().applyRunEvent(ev('node.completed', { out: 42 }));
+    st().startOverlay('r1', { b1: 'n1', b2: 'n2', b3: 'n3' });
+    st().applyRunEvent(ev('node.completed', { out: 42 }, 'b1'));
+    st().applyRunEvent(ev('node.completed', { out: 7 }, 'b2'));
+    st().applyRunEvent(ev('node.failed', { error: 'boom' }, 'b3'));
     render(<RunDrawer />);
     const head = screen.getByRole('button', { name: /Run/ });
-    expect(head.textContent).toContain('1 completed');
+    expect(head.textContent).toContain('2 completed · 1 failed');
     expect(head.getAttribute('aria-expanded')).toBe('false');
     fireEvent.click(head);
+    expect(head.getAttribute('aria-expanded')).toBe('true');
     expect(screen.getByText('Extract totals')).toBeTruthy();
+    expect(screen.getByText('Post report')).toBeTruthy();
     // The terminal payload is behind a disclosure, pretty-printed.
-    fireEvent.click(screen.getByText('Payload'));
+    fireEvent.click(screen.getAllByText('Payload')[0]!);
     expect(screen.getByText(/"out": 42/)).toBeTruthy();
   });
 

@@ -18,10 +18,26 @@
  * refuses to emit `toPrune` unless it is.
  *
  * Each test below is a WITNESS: it fails against the pre-ADR-0605 code.
+ *
+ * Probe notes (grade-tests w23, recorded so the next reader does not re-derive them):
+ *  - DOUBLE GUARD on route 1. If `readJson` stopped throwing, the four per-provider
+ *    "an HTML error page behind a 200" cases would STILL pass: `listingArray` /
+ *    `driveListingFiles` refuse the resulting `undefined` with the same 502. They witness
+ *    the CLASS (either layer), not `readJson`. The unique `readJson` witnesses are "the
+ *    thrown error names the cause" and the mid-pagination case (probe
+ *    w23g1-dd-readjson-kind reds exactly those plus google).
+ *  - Two cases overlap others and are KEPT as protected incident witnesses: "the
+ *    refusal survives the DIFF" (= the google proxy case + the `complete:false` arm of
+ *    "prunes ONLY when completeness is literally true") and "does not change diffFolder"
+ *    (= that case's `complete:true` arm, and `knowledge-sync.test.ts:46`).
+ *  - CORRECTED 2026-10-11: "the tripwire is NOT vacuous" was itself vacuous — its regex
+ *    matched the DECLARATION `function diffFolder(`, so it stayed green with the owner's
+ *    call removed (probe w23g1-dd-tripwire-owner). Both tripwire cases now match CALLS.
  */
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { Response } from 'undici';
 import { openStorage } from '../src/storage/index.js';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 
@@ -32,17 +48,28 @@ import {
   diffFolder, diffFolderListing, syncDocumentId,
   type RemoteFile, type SyncFileState,
 } from '../src/features/knowledge-sync/knowledgeSyncService.js';
-import type { Storage } from '../src/storage/storage.js';
+import type { KnowledgeFetchDeps } from '../src/host/knowledgeSourceFetch.js';
 
 const mFetch = vi.mocked(brokeredFetch);
-const deps = { storage: {} as Storage, tenantId: 't1', actingUserId: 'user:a', orgId: 'org1' };
+type Brokered = Awaited<ReturnType<typeof brokeredFetch>>;
+/** `brokeredFetch` is mocked, so the storage is never read — but it is a REAL one. */
+let deps: KnowledgeFetchDeps;
 
-/** A transport-SUCCESS whose body is arbitrary text. */
-const sentRaw = (body: string) =>
-  ({ outcome: 'sent' as const, res: { ok: true, status: 200, text: async () => body } as unknown as Response });
-const sent = (body: unknown) => sentRaw(JSON.stringify(body));
+/** A transport-SUCCESS whose body is arbitrary text — a real `Response`, typed. A
+ *  GETTER, because a `Response` body reads once and `mockResolvedValue` hands the SAME
+ *  result to every page of a paginated listing. */
+const sentRaw = (body: string): Brokered => ({
+  outcome: 'sent',
+  get res() { return new Response(body, { status: 200 }); },
+  provenance: { connectionId: 'c1', provider: 'test' },
+});
+const sent = (body: unknown): Brokered => sentRaw(JSON.stringify(body));
 
-beforeAll(async () => { initHostExtPersistence(await openStorage('memory://')); });
+beforeAll(async () => {
+  const storage = await openStorage('memory://');
+  initHostExtPersistence(storage);
+  deps = { storage, tenantId: 't1', actingUserId: 'user:a', orgId: 'org1' };
+});
 beforeEach(() => mFetch.mockReset());
 afterEach(() => vi.clearAllMocks());
 
@@ -62,13 +89,13 @@ describe('KSC-1 — a success status with an unparseable body must THROW, never 
     ['box', 'root'],
   ] as const) {
     it(`${provider}: an HTML error page behind a 200 is a typed failure, not an empty folder`, async () => {
-      mFetch.mockResolvedValue(sentRaw('<html><body>Gateway timeout</body></html>') as never);
+      mFetch.mockResolvedValue(sentRaw('<html><body>Gateway timeout</body></html>'));
       await expect(listFolder(deps, provider, folder)).rejects.toMatchObject({ httpStatus: 502 });
     });
   }
 
   it('the thrown error names the cause rather than reporting success-with-empty', async () => {
-    mFetch.mockResolvedValue(sentRaw('not json at all') as never);
+    mFetch.mockResolvedValue(sentRaw('not json at all'));
     await expect(listFolder(deps, 'google', 'F')).rejects.toThrow(/not JSON/i);
   });
 
@@ -76,7 +103,7 @@ describe('KSC-1 — a success status with an unparseable body must THROW, never 
     // The fix must not turn "the folder really is empty" into a failure — that
     // case is legitimate and MUST still prune. This is the discrimination the
     // whole finding is about.
-    mFetch.mockResolvedValue(sent({ files: [] }) as never);
+    mFetch.mockResolvedValue(sent({ files: [] }));
     const out = await listFolder(deps, 'google', 'F');
     expect(out).toEqual({ files: [], complete: true });
   });
@@ -89,7 +116,7 @@ describe('KSC-3 — the file cap truncates the listing, so it is NOT complete', 
     const files = Array.from({ length: MAX_LIST_FILES + 200 }, (_v, i) => ({
       id: `f${i}`, name: `f${i}.txt`, mimeType: 'text/plain', modifiedTime: 'r1',
     }));
-    mFetch.mockResolvedValue(sent({ files }) as never);
+    mFetch.mockResolvedValue(sent({ files }));
     const out = await listFolder(deps, 'google', 'F');
     expect(out.files).toHaveLength(MAX_LIST_FILES);
     expect(out.complete).toBe(false);
@@ -120,14 +147,14 @@ describe('KSC-5 — a page chain that cannot be followed leaves the listing inco
   it('google: exhausting the page budget with a token still pending is NOT complete', async () => {
     // Every page hands back another token, so the loop runs out of budget while
     // the provider still has files to give.
-    mFetch.mockResolvedValue(sent({ files: [{ id: 'f', name: 'f', mimeType: 'text/plain', modifiedTime: 'r' }], nextPageToken: 'MORE' }) as never);
+    mFetch.mockResolvedValue(sent({ files: [{ id: 'f', name: 'f', mimeType: 'text/plain', modifiedTime: 'r' }], nextPageToken: 'MORE' }));
     const out = await listFolder(deps, 'google', 'F');
     expect(out.complete).toBe(false);
     expect(out.incompleteReason).toBe('page_budget');
   });
 
   it('dropbox: has_more=true with an unusable cursor is a short listing, not the folder end', async () => {
-    mFetch.mockResolvedValueOnce(sent({ entries: [{ '.tag': 'file', id: 'id:1', name: 'a.txt', rev: 'r1' }], has_more: true, cursor: 42 }) as never);
+    mFetch.mockResolvedValueOnce(sent({ entries: [{ '.tag': 'file', id: 'id:1', name: 'a.txt', rev: 'r1' }], has_more: true, cursor: 42 }));
     const out = await listFolder(deps, 'dropbox', 'root');
     expect(out.files).toHaveLength(1);
     expect(out.complete).toBe(false);
@@ -140,7 +167,7 @@ describe('KSC-5 — a page chain that cannot be followed leaves the listing inco
     mFetch.mockResolvedValueOnce(sent({
       value: [{ id: 'i1', name: 'A', file: { mimeType: 'text/plain' }, lastModifiedDateTime: 'r1' }],
       '@odata.nextLink': 'https://evil.example.com/next',
-    }) as never);
+    }));
     const out = await listFolder(deps, 'microsoft-graph', 'root');
     expect(out.files.map((f) => f.fileId)).toEqual(['i1']);
     expect(out.complete).toBe(false);
@@ -152,8 +179,8 @@ describe('KSC-5 — a page chain that cannot be followed leaves the listing inco
     // The partial-prune route. Before, page 2 lost its token and the loop broke,
     // handing the runner page 1 as if it were the folder.
     mFetch
-      .mockResolvedValueOnce(sent({ files: [{ id: 'f1', name: 'A', mimeType: 'text/plain', modifiedTime: 'r1' }], nextPageToken: 'P2' }) as never)
-      .mockResolvedValueOnce(sentRaw('<html>502</html>') as never);
+      .mockResolvedValueOnce(sent({ files: [{ id: 'f1', name: 'A', mimeType: 'text/plain', modifiedTime: 'r1' }], nextPageToken: 'P2' }))
+      .mockResolvedValueOnce(sentRaw('<html>502</html>'));
     await expect(listFolder(deps, 'google', 'F')).rejects.toMatchObject({ httpStatus: 502 });
   });
 });
@@ -173,6 +200,7 @@ describe('diffFolderListing — the one composition owner, fail-closed by constr
     // to say. The test is `=== true`, not `!complete`, precisely so these cases
     // land on the safe side rather than deleting the customer's documents.
     for (const bogus of [undefined, null, 'true', 1, {}]) {
+      // DELIBERATE cast: the claim is about input that is NOT of the type.
       const listing = { files: [], complete: bogus } as unknown as { files: RemoteFile[]; complete: boolean };
       expect(diffFolderListing('S', listing, states).toPrune).toEqual([]);
     }
@@ -224,23 +252,23 @@ describe('KSC-1 (R1) — a 200 carrying no listing is NOT an empty folder', () =
 
   for (const [provider, folder] of PROVIDERS) {
     it(`${provider}: an empty JSON object is refused, not read as a drained folder`, async () => {
-      mFetch.mockResolvedValue(sent({}) as never);
+      mFetch.mockResolvedValue(sent({}));
       await expect(listFolder(deps, provider, folder)).rejects.toMatchObject({ httpStatus: 502 });
     });
 
     it(`${provider}: a 200 carrying an ERROR envelope is refused`, async () => {
-      mFetch.mockResolvedValue(sent({ error: { code: 403, message: 'insufficient scope' } }) as never);
+      mFetch.mockResolvedValue(sent({ error: { code: 403, message: 'insufficient scope' } }));
       await expect(listFolder(deps, provider, folder)).rejects.toMatchObject({ httpStatus: 502 });
     });
 
     it(`${provider}: an interposing proxy's {"status":"ok"} is refused`, async () => {
-      mFetch.mockResolvedValue(sent({ status: 'ok' }) as never);
+      mFetch.mockResolvedValue(sent({ status: 'ok' }));
       await expect(listFolder(deps, provider, folder)).rejects.toMatchObject({ httpStatus: 502 });
     });
   }
 
   it('a listing whose array field is present but NOT an array is refused', async () => {
-    mFetch.mockResolvedValue(sent({ entries: 'nope' }) as never);
+    mFetch.mockResolvedValue(sent({ entries: 'nope' }));
     await expect(listFolder(deps, 'dropbox', 'root')).rejects.toMatchObject({ httpStatus: 502 });
   });
 
@@ -255,19 +283,19 @@ describe('KSC-1 (R1) — a 200 carrying no listing is NOT an empty folder', () =
    * boundary" rejected once already.
    */
   it('google: a Drive file list that OMITS an empty `files` is an honest empty folder', async () => {
-    mFetch.mockResolvedValue(sent({ kind: 'drive#fileList' }) as never);
+    mFetch.mockResolvedValue(sent({ kind: 'drive#fileList' }));
     expect(await listFolder(deps, 'google', 'F')).toEqual({ files: [], complete: true });
   });
 
   it('google: the `kind` discriminator is actually REQUESTED, or it can never arrive', async () => {
-    mFetch.mockResolvedValue(sent({ files: [] }) as never);
+    mFetch.mockResolvedValue(sent({ files: [] }));
     await listFolder(deps, 'google', 'F');
     expect(decodeURIComponent(String(mFetch.mock.calls[0]![1].url))).toContain('kind,nextPageToken,files(');
   });
 
   it('the refusal survives the DIFF: an unreadable listing deletes nothing', async () => {
     // The consequence, end to end. Before, this exact body pruned every known file.
-    mFetch.mockResolvedValue(sent({ status: 'ok' }) as never);
+    mFetch.mockResolvedValue(sent({ status: 'ok' }));
     await expect(listFolder(deps, 'google', 'F')).rejects.toMatchObject({ httpStatus: 502 });
     // …and had it somehow yielded a listing, the composition owner still refuses
     // to act on one that cannot vouch for itself.
@@ -303,8 +331,8 @@ describe('ADR 0605 R1 — Box may not infer completeness from its own page size'
       ...Array.from({ length: 500 }, (_v, i) => ({ type: 'folder', id: `d${i}`, name: `d${i}` })),
     ];
     mFetch
-      .mockResolvedValueOnce(sent({ entries: fullPage }) as never)   // full page, no total_count
-      .mockResolvedValueOnce(sent({ entries: [{ type: 'file', id: 'tail', name: 'tail.txt', etag: 'e' }] }) as never);
+      .mockResolvedValueOnce(sent({ entries: fullPage }))   // full page, no total_count
+      .mockResolvedValueOnce(sent({ entries: [{ type: 'file', id: 'tail', name: 'tail.txt', etag: 'e' }] }));
     const out = await listFolder(deps, 'box', 'root');
     expect(mFetch).toHaveBeenCalledTimes(2);                 // it did NOT stop at page 1
     expect(out.files.map((f) => f.fileId)).toContain('tail'); // and the tail file is present
@@ -343,12 +371,15 @@ describe('ADR 0605 R1 — only `diffFolderListing` may call `diffFolder`', () =>
 
   /** The ONE module allowed to call it: the composition owner's own file. */
   const OWNER = 'features/knowledge-sync/knowledgeSyncService.ts';
+  /** A CALL of `diffFolder`, not its declaration (`function diffFolder(` is not a call —
+   *  matching it made the non-vacuity case below pass with no call at all). */
+  const CALLS_DIFF_FOLDER = /(?<!function\s+)\bdiffFolder\s*\(/;
 
   it('no other src/ module calls the unguarded diff', () => {
     const src = join(__dirname, '..', 'src');
     const offenders = walk(src)
       .map((p) => ({ rel: relative(src, p).split(sep).join('/'), text: stripComments(readFileSync(p, 'utf8')) }))
-      .filter((f) => f.rel !== OWNER && /\bdiffFolder\s*\(/.test(f.text))
+      .filter((f) => f.rel !== OWNER && CALLS_DIFF_FOLDER.test(f.text))
       .map((f) => f.rel);
     expect(offenders).toEqual([]);
   });
@@ -358,6 +389,6 @@ describe('ADR 0605 R1 — only `diffFolderListing` may call `diffFolder`', () =>
     // file the rule exempts, so an `expect([]).toEqual([])` that could never fail
     // is impossible here.
     const owner = stripComments(readFileSync(join(__dirname, '..', 'src', OWNER), 'utf8'));
-    expect(/\bdiffFolder\s*\(/.test(owner)).toBe(true);
+    expect(CALLS_DIFF_FOLDER.test(owner)).toBe(true);
   });
 });

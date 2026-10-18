@@ -40,8 +40,13 @@ describe('cadProjection', () => {
   it('returns a finite identity projection for empty input (no NaN from Math.min([]))', () => {
     const { sx, sy, scale } = cadProjection([]);
     expect(Number.isFinite(scale)).toBe(true);
-    expect(Number.isFinite(sx(0))).toBe(true);
-    expect(Number.isFinite(sy(0))).toBe(true);
+    // Identity = unit scale, origin at the left pad / bottom pad, y flipped
+    // (literals: CAD_PAD 18, CAD_H 240 → bottom 222).
+    expect(scale).toBe(1);
+    expect(sx(0)).toBeCloseTo(18, 6);
+    expect(sx(10)).toBeCloseTo(28, 6);
+    expect(sy(0)).toBeCloseTo(222, 6);
+    expect(sy(10)).toBeCloseTo(212, 6);
   });
 });
 

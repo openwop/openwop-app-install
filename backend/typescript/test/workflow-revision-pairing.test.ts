@@ -18,12 +18,6 @@ const ALLOWLIST: Record<string, string> = {
   'host/seedWorkflows.ts': 'seed/sample defs — re-seeded idempotently, not tenant history',
   'host/workflowAuthorSeed.ts': 'seed/sample defs',
   'host/demoWalkthroughsSeed.ts': 'seed defs + lifecycle-only unarchive',
-  'features/agent-knowledge/feature.ts': 'boot registration (same-id guarded)',
-  'features/assistant/loops.ts': 'boot registration',
-  'features/assistant/actionExecution.ts': 'boot registration',
-  'features/kicktodo-core/conveneTurnWorkflow.ts': 'boot registration (same-id guarded)',
-  'features/scheduled-agent-chats/scheduledChatTurnWorkflow.ts': 'boot registration (same-id guarded)',
-  'features/channels/channelTurnWorkflow.ts': 'boot registration (same-id guarded)',
   'features/crm/gmailSyncService.ts': 'UNOWNED system instantiation (no ownership row ⇒ no revision lane)',
   // RFC 0142 leg B. Registers a throwaway one-node definition under the
   // conformance-only tenant so the witness can start a REAL run; env-gated and
@@ -33,6 +27,17 @@ const ALLOWLIST: Record<string, string> = {
   // its first run, which is the ratchet working.
   'routes/artifactTypeSeam.ts': 'conformance seam — throwaway def under the conformance tenant, env-gated',
 };
+
+/** Comments are not code. Both legs matched the RAW text, so a docblock that QUOTES the
+ *  retired call (every pin-site drain writes one: "this used to hand a literal to the
+ *  raw `registerWorkflow()`") kept a drained module "registering" — five allowlist
+ *  entries (agent-knowledge, assistant ×2, scheduled-chat turn, channel turn) were
+ *  stale and green that way, measured 2026-10-14 in the KickTodo workflows grade.
+ *  Line comments are stripped only after start-of-line or whitespace, so a `//` inside
+ *  a URL string is left alone. */
+function stripComments(src: string): string {
+  return src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|\s)\/\/.*$/gm, '$1');
+}
 
 function walk(dir: string, out: string[] = []): string[] {
   for (const entry of readdirSync(dir)) {
@@ -48,7 +53,7 @@ describe('workflow revision pairing (ADR 0474 ratchet)', () => {
     const offenders: string[] = [];
     for (const file of walk(SRC)) {
       const rel = relative(SRC, file);
-      const text = readFileSync(file, 'utf8');
+      const text = stripComments(readFileSync(file, 'utf8'));
       // Call sites only — strip the import lines so `registerWorkflow as X` doesn't count.
       const body = text.split('\n').filter((l) => !/^\s*import\b/.test(l) && !/^\s*export \{/.test(l)).join('\n');
       const registers = /\b(registerWorkflow|registerWorkflowDurable|reRegisterWorkflow)\(/.test(body);
@@ -62,7 +67,7 @@ describe('workflow revision pairing (ADR 0474 ratchet)', () => {
   it('the allowlist carries no stale entries', () => {
     const stale = Object.keys(ALLOWLIST).filter((rel) => {
       try {
-        const text = readFileSync(join(SRC, rel), 'utf8');
+        const text = stripComments(readFileSync(join(SRC, rel), 'utf8'));
         const body = text.split('\n').filter((l) => !/^\s*import\b/.test(l)).join('\n');
         return !/\b(registerWorkflow|registerWorkflowDurable|reRegisterWorkflow)\(/.test(body);
       } catch {

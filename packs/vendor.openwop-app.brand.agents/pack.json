@@ -1,6 +1,6 @@
 {
   "name": "vendor.openwop-app.brand.agents",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "kind": "node",
   "description": "Brand & Guardrails feature agent pack — a manifest agent (the Brand Steward) whose tools are the registered openwop:brand.* chat tools (list-brands, resolve-voice, compliance-check) sharing the brand routes' workspace access. It explains a workspace's brand voice and audits content for compliance (banned phrases, formality, per-channel rules) from the AI chat. Tool-allowlisted to the Brand feature surface only.",
   "author": "OpenWOP App",

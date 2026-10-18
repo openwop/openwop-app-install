@@ -32,13 +32,6 @@ import { assetServeHeaders } from '../host/assetServeHeaders.js';
 
 const log = createLogger('routes.mediaAssets');
 
-/** RFC 0055 §C rule 2 — inline-vs-URL cap advertised on aiProviders. Default
- *  256 KiB (matches the schema default); operators widen via env. Files at or
- *  below this go inline (`dataBase64`) in the chat message — replay-safe by
- *  construction; larger files upload here and are referenced by URL. */
-export const MAX_INLINE_MEDIA_BYTES = process.env.OPENWOP_MAX_INLINE_MEDIA_BYTES
-  ? Math.max(0, Number(process.env.OPENWOP_MAX_INLINE_MEDIA_BYTES) || 0)
-  : 262144;
 
 // Cap a stored asset at 8 MiB of base64 (~6 MiB binary) so the demo's store
 // can't be flooded by a single request. Kept in lockstep with the scoped

@@ -12,12 +12,15 @@
  *    the coach does not, so the composer says that and points to the note;
  *  - the preview shows what the PARTICIPANT will read (server-humanized lines),
  *    never the participant's plan — that stays owner-only by design;
- *  - a refused command (off-lane, more than five) is shown with the server's
- *    message, never swallowed into a generic error.
+ *  - a refused dry run is shown as its REASON — an incomplete command (named by
+ *    position), a lost coach grant, an off-lane command, or the transport
+ *    failure it is — in localized copy keyed on the server's code, never the
+ *    server's English text and never swallowed into a generic error (CM-2).
  */
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
+import type { TFunction } from 'i18next';
 import { Button } from '../../ui/Button.js';
 import { DataTable, type DataColumn } from '../../ui/DataTable.js';
 import { StateCard } from '../../ui/StateCard.js';
@@ -26,10 +29,14 @@ import { PageHeader } from '../../ui/PageHeader.js';
 import { TextareaField, SelectField, TextField } from '../../ui/Field.js';
 import { UserIcon } from '../../ui/icons/index.js';
 import { formatDate } from '../../i18n/format.js';
+import { useAuth } from '../../auth/useAuth.js';
+import { SignInButton } from '../../auth/SignInButton.js';
+import { loadErrorMessage } from '../../client/loadErrorMessage.js';
 import {
   getCaseload,
   dryRunProposal,
   createProposal,
+  CoachRequestError,
   type CaseloadRow,
   type RevisionCommand,
 } from '../../client/kicktodoCirclesClient.js';
@@ -49,27 +56,51 @@ function toCommand(d: Draft): RevisionCommand {
   }
 }
 
+
+/** CM-2 — the dry run's failure, as the reason the server gave (by status +
+ *  envelope code), in localized copy. "Outside the lanes" only when it IS. */
+function previewFailureMessage(t: TFunction<'kicktodo-circles'>, err: unknown): string {
+  if (err instanceof CoachRequestError) {
+    if (err.status === 422) return t('coachPreviewOffLane');
+    if (err.status === 400 && err.code === 'validation_error') {
+      return err.failedIndex !== null
+        ? t('coachPreviewInvalidCommand', { n: err.failedIndex + 1 })
+        : t('coachPreviewInvalid');
+    }
+    if (err.status === 404) return t('coachPreviewNoAccess');
+  }
+  return loadErrorMessage(t, err);
+}
+
 export function CoachConsolePage() {
   const { t } = useTranslation('kicktodo-circles');
+  // CM-2 — the site-tier signed-out card (the CirclesPage `anonymous`
+  // precedent): a visitor sees what the console is and a sign-in action, and
+  // the page makes NO caseload read. `authPending` holds the read until the
+  // auth SDK has resolved, so a restoring session never flashes signed-out.
+  const { user, loading: authLoading, isConfigured } = useAuth();
+  const authPending = isConfigured && authLoading;
+  const anonymous = isConfigured && !authLoading && !user;
   const [rows, setRows] = useState<CaseloadRow[] | null>(null);
   const [error, setError] = useState(false);
   const [selected, setSelected] = useState<string | null>(null);
   const [note, setNote] = useState('');
   const [drafts, setDrafts] = useState<Draft[]>([]);
   const [preview, setPreview] = useState<string[] | null>(null);
-  const [previewError, setPreviewError] = useState<string | null>(null);
+  const [previewError, setPreviewError] = useState<unknown>(null);
   const [sendError, setSendError] = useState<string | null>(null);
   const [sent, setSent] = useState(false);
   const [busy, setBusy] = useState(false);
 
   const reload = useCallback(async () => {
+    if (anonymous || authPending) return;
     try {
       setError(false);
       setRows(await getCaseload());
     } catch {
       setError(true);
     }
-  }, []);
+  }, [anonymous, authPending]);
   useEffect(() => { void reload(); }, [reload]);
 
   const current = useMemo(() => rows?.find((r) => r.circleId === selected) ?? null, [rows, selected]);
@@ -86,7 +117,7 @@ export function CoachConsolePage() {
       const out = await dryRunProposal(current.circleId, drafts.map(toCommand));
       setPreview(out.lines);
     } catch (err) {
-      setPreviewError(err instanceof Error ? err.message : String(err));
+      setPreviewError(err);
     } finally {
       setBusy(false);
     }
@@ -131,12 +162,26 @@ export function CoachConsolePage() {
         lede={t('coachLede')}
         actions={<Link className="btn-ghost btn-sm" to="/circles">{t('coachBackToCircles')}</Link>}
       />
-      {error && <Notice variant="error" announce={t('coachLoadError')}>{t('coachLoadError')}</Notice>}
-      {!error && rows === null && <StateCard loading title={t('coachTitle')} />}
-      {!error && rows !== null && rows.length === 0 && (
-        <StateCard icon={<UserIcon />} title={t('coachEmptyTitle')} body={t('coachEmptyBody')} />
+      {anonymous && (
+        <StateCard
+          icon={<UserIcon aria-hidden />}
+          title={t('coachSignedOutTitle')}
+          body={t('coachSignedOutBody')}
+          action={<SignInButton />}
+        />
       )}
-      {!error && rows !== null && rows.length > 0 && (
+      {/* CS-4 — a load failure always carries its retry (the CirclesPage KTX-1 precedent). */}
+      {!anonymous && error && (
+        <Notice variant="error" announce={t('coachLoadError')}>
+          {t('coachLoadError')}{' '}
+          <Button variant="quiet" size="sm" onClick={() => void reload()}>{t('common:retry')}</Button>
+        </Notice>
+      )}
+      {!anonymous && !error && rows === null && <StateCard loading title={t('coachTitle')} />}
+      {!anonymous && !error && rows !== null && rows.length === 0 && (
+        <StateCard icon={<UserIcon aria-hidden />} title={t('coachEmptyTitle')} body={t('coachEmptyBody')} />
+      )}
+      {!anonymous && !error && rows !== null && rows.length > 0 && (
         <DataTable<CaseloadRow>
           columns={columns}
           rows={rows}
@@ -224,7 +269,9 @@ export function CoachConsolePage() {
             <Button variant="quiet" size="sm" disabled={busy || drafts.length === 0} onClick={() => void onPreview()}>{t('coachPreviewCta')}</Button>
             <Button size="sm" disabled={busy || !note.trim()} onClick={() => void onSend()}>{t('coachSendCta')}</Button>
           </div>
-          {previewError && <Notice variant="error" announce={t('coachPreviewError', { message: previewError })}>{t('coachPreviewError', { message: previewError })}</Notice>}
+          {previewError !== null && (
+            <Notice variant="error" announce={previewFailureMessage(t, previewError)}>{previewFailureMessage(t, previewError)}</Notice>
+          )}
           {preview && (
             <div>
               <h3 className="u-fs-13 muted">{t('coachPreviewHeading')}</h3>

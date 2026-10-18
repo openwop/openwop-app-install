@@ -1,16 +1,28 @@
 /**
  * ADR 0082 — Insights meta-workflows rebuilt on REAL nodes (no mock-ai).
  *
- * Verifies (a) closed-world validity (no invented/typo'd typeIds) for the 3 meta-workflows,
- * (b) NO `mock-ai` placeholder survives + the real source nodes (workday/bigquery/LLM) are
- * present, (c) they register as catalog built-ins, and (d) the config→schedule reconciliation
- * (cron registers a deterministic job; absent cron removes it).
+ * Verifies (a) the real source/LLM/draft/notify nodes are present, (b) PROBE-DOC-4 — every
+ * node binds the config its implementation hard-requires (WF-DOC-3), (c) ADR 0599 §5 — no
+ * chain is zero-config (the demo seeder exclusion), (d) every chain is a connected graph,
+ * (e) they register CHAIN-BACKED under the stable ids, (f) the config→schedule
+ * reconciliation (a cron registers a deterministic job; an absent cron removes it), and
+ * (g) PROBE-IS-8 — the outputRole curation (ADR 0600 §4).
+ *
+ * Sabotage-witnessed (/grade-tests w20): dropping a required binding, emptying `required`,
+ * re-pointing an edge, registering two of three chains, skipping `deleteJob`, putting the
+ * cron into the job id, not clearing the auto-terminal primary, an insertion-order suffix
+ * match, and shipping a `secondary` role each red a case.
+ *
+ * CUT (/grade-tests w20): the closed-world "%s references only real typeIds" table and the
+ * "NO … mock-ai" case. Both are strictly covered by `insights-suite-governance.test.ts` ›
+ * "every node in every meta-workflow is on the reviewed allowlist (closed world)" — any
+ * typeId off that allowlist (a typo, mock-ai) reds there; probes w20g1-m-typo-cover and
+ * w20g1-m-mockai-cover were witnessed red.
  */
 
 import { describe, expect, it, beforeAll } from 'vitest';
-import { createApp } from '../src/index.js';
-import { ensureNodesRegistered } from '../src/bootstrap/nodes.js';
-import { runnableNodeTypeIds, findUnknownTypeIds } from '../src/host/nodeCatalogBuilder.js';
+import { openStorage } from '../src/storage/index.js';
+import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { getChainBackedWorkflow, _resetChainBackedWorkflowsForTest } from '../src/host/chainBackedWorkflows.js';
 import { registerInsightsMetaWorkflows } from '../src/features/insights-suite/metaWorkflows.js';
 import { listJobs } from '../src/host/schedulingService.js';
@@ -30,40 +42,7 @@ const talentPrepDefinition = buildInsightsMetaWorkflow(TALENT_PREP_ID);
 const insightsBuiltinWorkflows = [weeklyVarianceDefinition, anniversaryDraftDefinition, talentPrepDefinition];
 import { applyConfig, weeklyScheduleJobId, __resetInsightsSuiteStore, type InsightsSuiteConfig } from '../src/features/insights-suite/insightsSuiteService.js';
 
-// Real typeIds that ship in feature/vendor packs but may not be MOUNTED in this minimal
-// test process (so they're absent from runnableNodeTypeIds here). They are confirmed-real
-// — tolerated so the closed-world check still catches a genuine TYPO.
-const KNOWN_REAL_DEPS = new Set([
-  'feature.insights-suite.nodes.variance-compute',
-  'feature.insights-suite.nodes.talent-score',
-  'feature.notifications.nodes.notify',
-  'core.ai.chatCompletion',
-  'knowledge.retrieve',
-]);
-
-describe('ADR 0082 — closed-world validity (no invented typeIds)', () => {
-  beforeAll(() => ensureNodesRegistered());
-  const defs = [
-    ['weekly-variance', weeklyVarianceDefinition],
-    ['anniversary-draft', anniversaryDraftDefinition],
-    ['talent-prep', talentPrepDefinition],
-  ] as const;
-
-  it.each(defs)('%s references only real typeIds', (_name, def) => {
-    const legal = runnableNodeTypeIds();
-    const unknown = findUnknownTypeIds(def, legal).filter((t) => !KNOWN_REAL_DEPS.has(t));
-    expect(unknown, `invented/typo'd typeIds: ${unknown.join(', ')}`).toEqual([]);
-  });
-});
-
 describe('ADR 0082 — no mock-ai; real source/analysis/LLM nodes', () => {
-  it('NO meta-workflow references local.sample.demo.mock-ai (the fake-analysis fix)', () => {
-    for (const def of insightsBuiltinWorkflows) {
-      for (const n of def.nodes) {
-        expect(n.typeId, `${def.workflowId}.${n.nodeId} must not be mock-ai`).not.toBe('local.sample.demo.mock-ai');
-      }
-    }
-  });
   it('talent + anniversary pull from the real Workday source; anniversary drafts via a real LLM', () => {
     expect(talentPrepDefinition.nodes.some((n) => n.typeId === 'core.workday.query')).toBe(true);
     expect(anniversaryDraftDefinition.nodes.some((n) => n.typeId === 'core.workday.query')).toBe(true);
@@ -189,8 +168,9 @@ describe('ADR 0082 — no mock-ai; real source/analysis/LLM nodes', () => {
 
 describe('ADR 0082 — built-in registration + config→schedule', () => {
   beforeAll(async () => {
-    process.env.OPENWOP_STORAGE_DSN = 'memory://';
-    await createApp({ port: 18248, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
+    // The cheapest layer that carries both claims: the chain registry is loaded at module
+    // top, and `applyConfig`/`listJobs` need only host-ext persistence (no app boot).
+    initHostExtPersistence(await openStorage('memory://'));
     await __resetInsightsSuiteStore();
   });
 
@@ -200,8 +180,8 @@ describe('ADR 0082 — built-in registration + config→schedule', () => {
     // Same stable ids (chainId === the original) resolve in catalog source A via the
     // chain-backed registry now, so scheduler/trigger ignition + replay are unchanged.
     expect(getChainBackedWorkflow(WEEKLY_VARIANCE_ID)?.workflowId).toBe(WEEKLY_VARIANCE_ID);
-    expect(getChainBackedWorkflow('openwop-app.insights.anniversary-draft')).toBeTruthy();
-    expect(getChainBackedWorkflow('openwop-app.insights.talent-prep')).toBeTruthy();
+    expect(getChainBackedWorkflow(ANNIVERSARY_DRAFT_ID)?.workflowId).toBe(ANNIVERSARY_DRAFT_ID);
+    expect(getChainBackedWorkflow(TALENT_PREP_ID)?.workflowId).toBe(TALENT_PREP_ID);
   });
 
   it('applyConfig with a cron registers a deterministic weekly-variance job; absent cron removes it', async () => {

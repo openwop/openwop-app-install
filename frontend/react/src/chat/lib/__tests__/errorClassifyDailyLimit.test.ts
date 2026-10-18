@@ -11,7 +11,8 @@ describe('classifyChatError — the managed daily limit', () => {
   it('names the limit and offers BYOK, whatever the carrier code', () => {
     for (const code of ['internal_error', 'provider_rate_limited', 'conversation_exchange_failed']) {
       const k = classifyChatError({ code, message: 'Agent tool turn failed: Daily limit reached (50000 tokens).', reason: 'daily_limit_reached' });
-      expect(k.action?.kind).toBe('reconfigure-byok');
+      expect(k.title, code).toBe("Today's free allowance is used up");
+      expect(k.action?.kind, code).toBe('reconfigure-byok');
       expect(k.detail).not.toContain('Agent tool turn failed');
     }
   });
@@ -22,8 +23,14 @@ describe('classifyChatError — the managed daily limit', () => {
     expect(k.detail).toBe('Agent tool turn failed: boom');
   });
 
+  // Twin of errorClassify.test.ts "maps provider rate-limit / unavailable /
+  // timeout to a retry action" (same code); kept here because this file's claim is
+  // the boundary: WITHOUT the daily reason, a burst stays the retryable
+  // rate-limit card, not the "allowance used up" one.
   it('keeps an upstream burst limit retryable', () => {
-    expect(classifyChatError({ code: 'provider_rate_limited', message: 'x' }).action?.kind).toBe('retry');
+    const k = classifyChatError({ code: 'provider_rate_limited', message: 'x' });
+    expect(k.title).toBe('Rate limited');
+    expect(k.action?.kind).toBe('retry');
   });
 });
 

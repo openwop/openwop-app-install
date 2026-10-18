@@ -10,9 +10,14 @@
  * cost**, and on a spend dashboard it is the one number that asserts the model
  * was FREE. A self-hosted or newly-added model with millions of tokens read as
  * costing nothing, and sorted as the cheapest row on the page.
+ *
+ * Breaks if: the unpriced cell renders a currency, the incomplete-cost warning
+ * stops counting unpriced rows, unknown sorts as cheap, or a known cost is hidden
+ * (probes w24g1-ua-unpriced-render / -warning-count / -unpriced-sort / -priced-render).
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, cleanup, act, within, fireEvent } from '@testing-library/react';
+import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
 
 const { fetchUsageRollup, listOrgs, useFeatureAccess } = vi.hoisted(() => ({
   fetchUsageRollup: vi.fn(), listOrgs: vi.fn(), useFeatureAccess: vi.fn(),
@@ -30,19 +35,26 @@ vi.mock('../../../featureToggles/FeatureAccessContext.js', async (orig) => ({
 }));
 
 import { UsageDashboardPage } from '../UsageDashboardPage.js';
+import type { UsageRollupRow } from '../../../client/usageAnalyticsClient.js';
 
-const PRICED = { provider: 'openai', model: 'gpt-4o', inputTokens: 1_000_000, outputTokens: 1_000_000, calls: 10, costUsd: 12.5 };
-const UNPRICED = { provider: 'mystery', model: 'mystery-model-9000', inputTokens: 5_000_000, outputTokens: 5_000_000, calls: 99 };
+const PRICED: UsageRollupRow = { provider: 'openai', model: 'gpt-4o', inputTokens: 1_000_000, outputTokens: 1_000_000, calls: 10, costUsd: 12.5, updatedAt: '2026-01-01T00:00:00.000Z' };
+const UNPRICED: UsageRollupRow = { provider: 'mystery', model: 'mystery-model-9000', inputTokens: 5_000_000, outputTokens: 5_000_000, calls: 99, updatedAt: '2026-01-01T00:00:00.000Z' };
 
-const mount = async (): Promise<void> => {
+/** Mount and wait until the rollup has RENDERED (a named model row), so absence
+ *  assertions cannot pass against a page that has not loaded yet. */
+const mount = async (model = 'mystery-model-9000'): Promise<void> => {
   render(<UsageDashboardPage />);
-  await act(async () => {});
+  await screen.findByText(model);
+};
+const costCell = (model: string): string | null => {
+  const cells = within(screen.getByText(model).closest('tr')!).getAllByRole('cell');
+  return cells[cells.length - 1]!.textContent;
 };
 
 afterEach(cleanup);
 beforeEach(() => {
   vi.clearAllMocks();
-  useFeatureAccess.mockReturnValue({ status: 'on', enabled: true, isBeta: false, variant: null, entitled: true, locked: false, loading: false, resolutionFailed: false });
+  useFeatureAccess.mockReturnValue(makeFeatureAccess());
   listOrgs.mockResolvedValue([{ orgId: 'o1', name: 'Acme' }]);
   fetchUsageRollup.mockResolvedValue([PRICED, UNPRICED]);
 });
@@ -69,12 +81,12 @@ describe('UA-G1 — unknown cost is not zero cost', () => {
   it('still shows a real cost for a priced model', async () => {
     // The failure mode of this fix is hiding costs we DO know.
     await mount();
-    expect(document.body.textContent).toContain('12.5');
+    expect(costCell('gpt-4o')).toBe('$12.50');
   });
 
   it('says nothing about incompleteness when every model is priced', async () => {
     fetchUsageRollup.mockResolvedValue([PRICED]);
-    await mount();
+    await mount('gpt-4o');
     expect(document.body.textContent).not.toContain('no rate on file');
   });
 
@@ -94,8 +106,8 @@ describe('UA-G1 — unknown cost is not zero cost', () => {
     // A priced model with no tokens really did cost nothing — that is a fact,
     // not a fallback, and it must survive.
     fetchUsageRollup.mockResolvedValue([{ ...PRICED, inputTokens: 0, outputTokens: 0, calls: 0, costUsd: 0 }]);
-    await mount();
-    expect(document.body.textContent).toContain('$0.00');
+    await mount('gpt-4o');
+    expect(costCell('gpt-4o')).toBe('$0.00');
     expect(document.body.textContent).not.toContain('no rate on file');
   });
 });

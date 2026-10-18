@@ -63,61 +63,74 @@ const CLAIM_BEARING: Record<string, string[]> = {
   'canvas/HistoryModal.tsx': ['rowsFailed'],
 };
 
-/** Sentinels for which `[]` really IS the honest resolution (none remain). */
-const SENTINELS: Record<string, string[]> = {
-  // `view` moved OFF the resolve-to-empty shape — see the write-affordance
-  // assertion below. This is the one where the empty state unlocked a button.
-  'features/twin/AgentTwinPanel.tsx': [],
-  // `grants` moved OFF the resolve-to-`[]` shape — see the consent-dashboard
-  // assertion below for why that shape was wrong on this one page.
-  'features/twin/ProfileTwinGrantsTab.tsx': [],
-  // All six moved OFF the resolve-to-`[]` shape (the completion of #2596's
-  // correction): each of their empty states instructs or makes a claim, so each
-  // now uses a distinct `<x>Failed` state — asserted by CLAIM_BEARING above.
-  'walkthroughs/WalkthroughsPage.tsx': [],
-  'features/projects/ProjectsPage.tsx': [],
-  'features/projects/ProjectMembersTab.tsx': [],
-  'features/priority-matrix/PriorityMatrixPage.tsx': [],
-  'features/priority-matrix/PriorityListPage.tsx': [],
-  'canvas/HistoryModal.tsx': [],
-  // `orgs` is handled by a dedicated `orgsFailed` branch rather than by
-  // resolving the sentinel — see the separate assertion below for why.
-  'features/capability-firewall/FirewallRulesPage.tsx': [],
-};
+/**
+ * The sentinel's resolution, measured from the SOURCE rather than listed here.
+ *
+ * Every state that used to resolve to `prev ?? []` moved to a distinct
+ * `<x>Failed` flag (see CLAIM_BEARING above and the per-page cases below). So
+ * "every loading sentinel it owns is resolved on failure" now means: every
+ * `const [xFailed, setXFailed] = useState(false)` the file declares is SET on a
+ * failure path (a `setXFailed(true)` inside a catch) and CLEARED on success
+ * (`setXFailed(false)`). Until /grade-tests w50 this case looped over a
+ * hand-kept SENTINELS map whose entries were all `[]`, so its nine instances
+ * asserted nothing; dropping `setLoadFailed(true)` from a catch stayed green
+ * (probe `pl-proj-settrue`).
+ */
+const stripComments = (src: string): string =>
+  src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+
+/** Declared `[xFailed, setXFailed] = useState(false)` pairs, from the source. */
+function failedFlags(src: string): Array<{ flag: string; setter: string }> {
+  return [...src.matchAll(/const \[(\w+Failed), (set\w+Failed)\] = useState\(false\)/g)]
+    .map((m) => ({ flag: m[1]!, setter: m[2]! }));
+}
+
+/** A `setter(true)` whose nearest preceding `catch` is within the same short body. */
+function setOnFailurePath(code: string, setter: string): boolean {
+  for (const m of code.matchAll(new RegExp(`${setter}\\(true\\)`, 'g'))) {
+    const back = code.slice(Math.max(0, m.index - 200), m.index);
+    if (/catch\b/.test(back)) return true;
+  }
+  return false;
+}
 
 const read = (rel: string): string => readFileSync(join(SRC, rel), 'utf8');
 const setterOf = (state: string): string => `set${state[0]!.toUpperCase()}${state.slice(1)}`;
 
 describe('permanent-loading ratchet — the sentinel is resolved on failure', () => {
   it.each(SWEPT)('%s still resolves every loading sentinel it owns', (rel) => {
-    const src = read(rel);
-    for (const state of SENTINELS[rel] ?? []) {
-      const setter = setterOf(state);
-      // The fix shape: the failure path resolves the sentinel with
-      // `setX((prev) => prev ?? …)`. Its absence means a catch can once again
-      // leave `null` on screen as a permanent spinner.
-      expect(src, `${rel}: '${state}' no longer resolves its sentinel on failure`)
-        .toMatch(new RegExp(`${setter}\\(\\(prev\\) => prev \\?\\?`));
+    const code = stripComments(read(rel));
+    const flags = failedFlags(code);
+    expect(flags.length, `${rel}: declares no <x>Failed state at all`).toBeGreaterThan(0);
+    for (const { flag, setter } of flags) {
+      expect(setOnFailurePath(code, setter), `${rel}: '${flag}' is never set by a catch — a failure leaves the spinner`).toBe(true);
+      expect(code, `${rel}: '${flag}' never clears on success`).toMatch(new RegExp(`${setter}\\(false\\)`));
     }
+    expect(code, `${rel}: the mechanical \`prev ?? []\` shape returned`)
+      .not.toMatch(/set\w+\(\(prev\) => prev \?\? \[\]\)/);
   });
 
   it.each(Object.keys(CLAIM_BEARING))('%s uses a distinct failed state, never `prev ?? []`', (rel) => {
     const src = read(rel);
+    const code = stripComments(src);
     for (const flag of CLAIM_BEARING[rel]!) {
-      const setter = `set${flag[0]!.toUpperCase()}${flag.slice(1)}`;
+      const setter = setterOf(flag);
       expect(src, `${rel}: '${flag}' state is gone`).toMatch(new RegExp(`const \\[${flag}, ${setter}\\]`));
+      expect(setOnFailurePath(code, setter), `${rel}: '${flag}' is never set on a failure path`).toBe(true);
       expect(src, `${rel}: '${flag}' never resets on a successful retry`).toMatch(new RegExp(`${setter}\\(false\\)`));
+      // A failed branch BELOW the loading branch is decorative — the spinner wins.
+      // Unconditional: the failed branch must exist in the `x === null && xFailed`
+      // shape, and come before that same state's bare `x === null` loading branch.
+      const failed = new RegExp(`(\\w+) === null && ${flag}\\b`).exec(src);
+      expect(failed, `${rel}: no \`x === null && ${flag}\` failed branch`).not.toBeNull();
+      const state = failed![1]!;
+      const loadingAt = src.search(new RegExp(`\\b${state} === null(?! &&)`));
+      expect(loadingAt, `${rel}: no '${state} === null' loading branch`).toBeGreaterThan(-1);
+      expect(failed!.index, `${rel}: the '${flag}' branch is ordered below the loading branch`).toBeLessThan(loadingAt);
     }
     // The shape #2596 corrected must not come back anywhere in these files.
     expect(src, `${rel}: the mechanical \`prev ?? []\` shape returned`)
       .not.toMatch(/set\w+\(\(prev\) => prev \?\? \[\]\)/);
-    // A failed branch BELOW the loading branch is decorative — the spinner wins.
-    const failedAt = src.search(/=== null && \w+Failed/);
-    if (failedAt >= 0) {
-      const loadingAt = src.search(/=== null(?! && \w+Failed)/);
-      expect(failedAt, `${rel}: the failed branch is ordered below the loading branch`)
-        .toBeLessThan(loadingAt < 0 ? Number.MAX_SAFE_INTEGER : loadingAt);
-    }
   });
 
   it('the firewall keeps a DISTINCT failed state, not an empty list', () => {
@@ -161,6 +174,13 @@ describe('permanent-loading ratchet — the sentinel is resolved on failure', ()
     const src = read('features/capability-firewall/FirewallRulesPage.tsx');
     expect(src).toMatch(/const \[decisionsFailed, setDecisionsFailed\]/);
     expect(src).toMatch(/setDecisionsFailed\(false\)/);
+    // The catch must SET it (probe `pl-fw-dec-settrue`), and the render must check
+    // it BEFORE the "No decisions yet" empty branch, since the catch also writes
+    // `[]` (probe `pl-fw-dec-branch`).
+    expect(setOnFailurePath(stripComments(src), 'setDecisionsFailed')).toBe(true);
+    const failedBranch = src.indexOf(') : decisionsFailed ? (');
+    expect(failedBranch, 'the decisionsFailed render branch is gone').toBeGreaterThan(-1);
+    expect(failedBranch).toBeLessThan(src.indexOf(') : decisions.length === 0 ? ('));
   });
 
   it('the twin panel never resolves a failed read into a WRITE AFFORDANCE', () => {
@@ -182,18 +202,27 @@ describe('permanent-loading ratchet — the sentinel is resolved on failure', ()
     expect(src.indexOf('{loadFailed ?')).toBeGreaterThan(-1);
     expect(src.indexOf('{loadFailed ?')).toBeLessThan(src.indexOf(') : view === null ?'));
     // The retry shares the load path, so it cannot reintroduce the failure-as-
-    // loading state it exists to clear.
-    expect(src).toMatch(/const load = useCallback/);
+    // loading state it exists to clear — and THAT path's catch sets the flag
+    // (probe `pl-twin-settrue`; the act path's re-read sets it too, separately).
+    const loadStart = src.indexOf('const load = useCallback');
+    expect(loadStart).toBeGreaterThan(-1);
+    const loadEnd = src.indexOf('}, [rosterId', loadStart);
+    expect(loadEnd, 'could not find the end of the load callback').toBeGreaterThan(loadStart);
+    const loadBody = stripComments(src.slice(loadStart, loadEnd));
+    expect(setOnFailurePath(loadBody, 'setLoadFailed'), 'the load path\'s catch no longer sets loadFailed').toBe(true);
   });
 
   it('is not vacuous — it really read the files and found states to check', () => {
-    expect(SWEPT.length).toBeGreaterThanOrEqual(9);
-    // SENTINELS is empty BY DESIGN now: every state moved to a distinct failed
-    // flag, so non-vacuity is measured against the shape that replaced it. This
-    // check earned its keep — it caught `it.each` over an empty CLAIM_BEARING
-    // silently generating ZERO tests, which is the vacuity it exists to prevent.
-    const checked = Object.values(CLAIM_BEARING).flat().length;
-    expect(checked).toBeGreaterThanOrEqual(7);
-    for (const rel of SWEPT) expect(read(rel).length).toBeGreaterThan(500);
+    // Measured from the SOURCE, not from this file's own lists: the swept files
+    // declare 19 `<x>Failed` flags (2026-10-16). A scan that silently matched
+    // nothing — a renamed hook, a changed declaration shape — fails here instead
+    // of turning every case above into a loop over nothing. (It already caught
+    // `it.each` over an empty CLAIM_BEARING once.)
+    const flags = SWEPT.flatMap((rel) => failedFlags(stripComments(read(rel))).map((f) => `${rel}:${f.flag}`));
+    expect(flags.length).toBeGreaterThanOrEqual(19);
+    // Every claim-bearing flag named above is one the source really declares.
+    for (const [rel, names] of Object.entries(CLAIM_BEARING)) {
+      for (const n of names) expect(flags, `${rel}:${n} is not declared in the source`).toContain(`${rel}:${n}`);
+    }
   });
 });

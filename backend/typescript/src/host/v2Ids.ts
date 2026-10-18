@@ -33,7 +33,7 @@ import { dirname, join as joinPath } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { locateRepoSchemasDir } from './_repoPath.js';
-import { looksProjected, projectBoundId, unprojectBoundId } from './boundIdProjection.js';
+import { looksProjected, unprojectBoundId } from './boundIdProjection.js';
 
 /** `ids.schema.json#/$defs/opaque` — a host-minted segment: no `@`, no `/`, no whitespace. */
 export const V2_OPAQUE_ID = /^[A-Za-z0-9._~-]{16,128}$/;
@@ -301,8 +301,6 @@ const BOUND_KIND_REF = /ids\.schema\.json#\/\$defs\/(runId|interruptId|subscript
 /** Every response key the v2 schemas type as a tenant-bound id — all five kinds (ADR 0723). */
 export const V2_BOUND_ID_KEYS: ReadonlySet<string> = deriveRunIdKeys();
 const V2_RUN_ID_KEYS = V2_BOUND_ID_KEYS;
-/** Absolute URLs the create + fork responses hand back (`runs.md` §Create). */
-const V2_RUN_URL_KEYS: ReadonlySet<string> = new Set(['eventsUrl', 'statusUrl']);
 /** Every response key the v2 schemas type as a plain `tenantId` (`owner.tenant`, `subject.tenant`, `tenantId`) — projected like the segment of a bound id (ADR 0726). */
 export const V2_TENANT_FIELD_KEYS: ReadonlySet<string> = deriveKeysBoundTo(/ids\.schema\.json#\/\$defs\/tenantId$/, ['tenant', 'tenantId']);
 /** Depth bound: a run's `variables` / `metadata` bag is caller-supplied and unbounded. */
@@ -324,26 +322,11 @@ export function projectV2RunIds(value: unknown, tenant: string, depth = 0): unkn
       out[k] = v.map((e) => (typeof e === 'string' ? toWireRunId(e, tenant) : projectV2RunIds(e, tenant, depth + 1)));
     } else if (typeof v === 'string' && V2_TENANT_FIELD_KEYS.has(k)) {
       out[k] = toWireTenant(v);
-    } else if (typeof v === 'string' && V2_RUN_URL_KEYS.has(k)) {
-      // The v2 key of an operation is its v1 key without the `/v1` prefix
-      // (`versioning.md` §5), and the id inside the URL is the wire id.
-      // RFC 0184 §A.1 — the EMIT side. This spelled `encodeURIComponent`, i.e.
-      // `%2F`, which is the form that stranded every client following one of
-      // these links at our own front door on 2026-09-05 (see
-      // `host/boundIdProjection.ts`). A link is the spelling a host hands every
-      // client, so leaving it percent-encoded re-creates the outage for
-      // everyone downstream even once the accept side understands `~`.
-      //
-      // APPLY EXACTLY ONCE. `id` here is the segment from the *v1* URL — an
-      // unbound, percent-encoded id — so it is percent-decoded, bound, and then
-      // projected: one projection, on a value that has never been projected.
-      // The codec is deliberately not idempotent (escaping its own marker is
-      // what makes it injective), so a second application would silently yield
-      // a different id.
-      out[k] = v.replace(/\/v1\/runs\/([^/?#]+)/, (_whole, id: string) =>
-        `/runs/${projectBoundId(toWireRunId(decodeURIComponent(id), tenant))}`,
-      );
     } else {
+      // `eventsUrl` / `statusUrl` are NOT rewritten here: `runWireUrls` mints
+      // them final (ADR 0812 P4 slice 2b), and the codec is not idempotent, so a
+      // second projection would corrupt them. The leg that rewrote pre-slice
+      // `/v1/runs/<bare id>` ledger replays was deleted in ADR 0812 P4 slice 4.
       out[k] = projectV2RunIds(v, tenant, depth + 1);
     }
   }

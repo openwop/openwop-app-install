@@ -23,10 +23,27 @@
  *   3. the pause must have a LIVE EXIT. R1 already caught one cure in this batch
  *      that paused a source with no way back (Resume disabled, no
  *      `onConnectionRestored`), and repeating it would be the same wedge.
+ *
+ * Sabotage-witnessed (/grade-tests w23): unregistering the eraser; deleting instead of
+ * tombstoning `createdBy`; deleting instead of disabling the source; dropping the subject
+ * match, the tenant-prefixed scan, the tenant-level-connection exemption, the
+ * already-paused exemption or the sentinel guard; a re-erasure that rewrites an erased
+ * row (IDEMPOTENT, now with a clock advance so the rewrite is observable); and the
+ * runner's erased-creator refusal (both its presence and its `conn.userId` scope).
+ *
+ * HONEST CEILINGS (double guards, recorded rather than claimed):
+ *   - the eraser's `!tenantId || !subjectKey` early return cannot be witnessed: an empty
+ *     tenant scans prefix `:`, which no `<tenant>:<id>` key matches, and an empty subject
+ *     matches no row because `createSyncSource` never persists an empty `createdBy`
+ *     (probe `w23g2-se-empty-guard`, vacuous). The case still pins the OUTCOME.
+ *   - the per-row `s.tenantId !== tenantId` belt is shadowed by that same prefix scan
+ *     (`w23g2-se-tenant-belt-only`, vacuous); removing the prefix scan AND the belt
+ *     together (`w23g2-se-tenant-scope`) is what the cross-tenant case witnesses.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { hostExtStorage } from '../src/host/hostExtPersistence.js';
 
 vi.mock('../src/host/knowledgeSourceFetch.js', async (orig) => ({
   ...(await orig<Record<string, unknown>>()),
@@ -148,7 +165,7 @@ describe('KSC-21 — the DSAR eraser is WIRED, not merely written', () => {
     const after = await getSyncSource(tenantId, sourceId);
     expect(after?.createdBy, 'an ABSENT createdBy is the legacy shape the guard ignores').toBeDefined();
     // Prove the guard still bites, rather than inferring it from the field's value.
-    await expect(runKnowledgeSyncOnce({ storage: {} as never }, after!))
+    await expect(runKnowledgeSyncOnce({ storage: hostExtStorage() }, after!))
       .rejects.toThrow(/has been erased/i);
   });
 
@@ -161,12 +178,12 @@ describe('KSC-21 — the DSAR eraser is WIRED, not merely written', () => {
     const { sourceId } = await sourceOwnedBy(tenantId, me, me);
     await eraseKnowledgeSyncSubject(tenantId, me);
     const erased = await getSyncSource(tenantId, sourceId);
-    await expect(runKnowledgeSyncOnce({ storage: {} as never }, erased!))
+    await expect(runKnowledgeSyncOnce({ storage: hostExtStorage() }, erased!))
       .rejects.toThrow(/add the folder again with your own connected account/i);
 
     const other = await sourceOwnedBy(tenantId, 'user:someone', 'user:different');
     const drifted = await getSyncSource(tenantId, other.sourceId);
-    await expect(runKnowledgeSyncOnce({ storage: {} as never }, drifted!))
+    await expect(runKnowledgeSyncOnce({ storage: hostExtStorage() }, drifted!))
       .rejects.toThrow(/refusing to act as a different user/i);
   });
 });
@@ -217,7 +234,7 @@ describe('KSC-21 — the eraser\'s own failure modes', () => {
     expect(after?.pausedReason).toBeUndefined();
     // …and it must still RUN. A tombstone that broke this lane would be the pause
     // in a different costume.
-    await expect(runKnowledgeSyncOnce({ storage: {} as never }, after!)).resolves.toBeDefined();
+    await expect(runKnowledgeSyncOnce({ storage: hostExtStorage() }, after!)).resolves.toMatchObject({ ingested: 0, pruned: 0, failed: 0, errors: [] });
   });
 
   it('an ALREADY-paused source keeps its own reason (a revoked pause must not lose its reconnect instruction)', async () => {
@@ -247,7 +264,16 @@ describe('KSC-21 — the eraser\'s own failure modes', () => {
     // sabotage without these two lines).
     expect(first?.createdBy).toBe(ERASED_CREATOR);
     expect(first?.pausedReason).toBe('creator-erased');
-    await eraseKnowledgeSyncSubject(tenantId, me);
+    // Advance the clock before the second call: the only trace a re-erasure of an
+    // already-erased row would leave is a fresh `updatedAt`, which a same-millisecond
+    // second call cannot show (probe `w23g2-se-idempotent` was VACUOUS without this).
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(Date.parse(first!.updatedAt) + 60_000);
+      await eraseKnowledgeSyncSubject(tenantId, me);
+    } finally {
+      vi.useRealTimers();
+    }
     const second = await getSyncSource(tenantId, sourceId);
     expect(second).toEqual(first);
   });
@@ -305,7 +331,7 @@ describe('KSC-21 — the pause has a LIVE EXIT (the R1 wedge, not repeated)', ()
     // Resume re-arms the SCHEDULE; it does not re-authorise the CREDENTIAL, and the
     // run still refuses fail-closed. That is defence in depth, not a dead end —
     // the refusal names the real exit, which is re-binding with a live account.
-    await expect(runKnowledgeSyncOnce({ storage: {} as never }, resumed!))
+    await expect(runKnowledgeSyncOnce({ storage: hostExtStorage() }, resumed!))
       .rejects.toThrow(/add the folder again with your own connected account/i);
   });
 
@@ -325,6 +351,6 @@ describe('KSC-21 — the pause has a LIVE EXIT (the R1 wedge, not repeated)', ()
     const rebound = await sourceOwnedBy(tenantId, live, live);
     const source = await getSyncSource(tenantId, rebound.sourceId);
     expect(source?.status).toBe('active');
-    await expect(runKnowledgeSyncOnce({ storage: {} as never }, source!)).resolves.toBeDefined();
+    await expect(runKnowledgeSyncOnce({ storage: hostExtStorage() }, source!)).resolves.toMatchObject({ ingested: 0, pruned: 0, failed: 0, errors: [] });
   });
 });

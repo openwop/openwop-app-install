@@ -1,10 +1,12 @@
 /**
- * ADR 0127 Phase 1 — chat-widget config service (default-deny + token).
+ * ADR 0127 Phase 1 — chat-widget config service (default-deny + token). Breaks if a
+ * widget can be provisioned without a real domain allowlist or an agent, if a rotated
+ * token keeps resolving, or if a widget reads or lists across tenants.
  */
 import { describe, it, expect, beforeAll } from 'vitest';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { openStorage } from '../src/storage/index.js';
-import { provisionWidget, getWidget, patchWidget, rotateWidgetToken, deleteWidget } from '../src/features/chat-widget/widgetService.js';
+import { provisionWidget, getWidget, listWidgets, patchWidget, resolveWidgetByToken, rotateWidgetToken, deleteWidget } from '../src/features/chat-widget/widgetService.js';
 
 const T = 'wg-tenant';
 const ORG = 'org-wg';
@@ -24,6 +26,8 @@ describe('chat-widget config service', () => {
   it('DEFAULT-DENY: rejects an empty/missing allowedDomains', async () => {
     await expect(provisionWidget(T, ORG, 'u1', { agentId: 'support', allowedDomains: [] })).rejects.toMatchObject({ code: 'validation_error' });
     await expect(provisionWidget(T, ORG, 'u1', { agentId: 'support' })).rejects.toMatchObject({ code: 'validation_error' });
+    // A list of only blank entries is still empty after normalization.
+    await expect(provisionWidget(T, ORG, 'u1', { agentId: 'support', allowedDomains: ['  ', ''] })).rejects.toMatchObject({ code: 'validation_error' });
   });
 
   it('requires an agentId', async () => {
@@ -35,6 +39,9 @@ describe('chat-widget config service', () => {
     const rotated = await rotateWidgetToken(T, ORG, w.widgetId);
     expect(rotated.token).not.toBe(w.token);
     expect(rotated.token).toMatch(/^wgt_/);
+    // The old embed credential stops resolving; the new one resolves to this widget.
+    expect(await resolveWidgetByToken(w.token)).toBeNull();
+    expect((await resolveWidgetByToken(rotated.token))?.widgetId).toBe(w.widgetId);
   });
 
   it('patches + lists + deletes; isolates by tenant/org', async () => {
@@ -43,7 +50,11 @@ describe('chat-widget config service', () => {
     expect((await getWidget(T, ORG, w.widgetId))!.enabled).toBe(false);
     expect((await getWidget(T, ORG, w.widgetId))!.caps.maxSessionsPerDay).toBe(5);
     expect(await getWidget('other', ORG, w.widgetId)).toBeNull(); // tenant isolation
+    // Filter by id: other cases share T/ORG.
+    expect((await listWidgets(T, ORG)).some((x) => x.widgetId === w.widgetId)).toBe(true);
+    expect((await listWidgets('other', ORG)).some((x) => x.widgetId === w.widgetId)).toBe(false);
     await deleteWidget(T, ORG, w.widgetId);
     expect(await getWidget(T, ORG, w.widgetId)).toBeNull();
+    expect((await listWidgets(T, ORG)).some((x) => x.widgetId === w.widgetId)).toBe(false);
   });
 });

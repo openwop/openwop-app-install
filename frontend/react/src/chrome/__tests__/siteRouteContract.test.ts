@@ -13,9 +13,17 @@
  * Each case below therefore asserts the THROW and its MESSAGE, not merely a
  * falsy return. A message-pinned assertion is what reports a guard that starts
  * firing for the wrong reason.
+ *
+ * Sabotage that turns it red (w35 probes): count variants/overrides/percent wrongly;
+ * accept a relative path; default an omitted `auth` to optional; stop at the first
+ * violation; drop the tier check (the non-site fixtures are `auth:'optional'` with a
+ * relative path, so ONLY the tier check spares them); delete the import-time
+ * `assertSiteRouteContracts(...)` call in chrome/features.tsx (a violating route
+ * injected through the feature registry must fail the manifest AT IMPORT).
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
+import { createElement } from 'react';
 import {
   assertSiteRouteContract,
   assertSiteRouteContracts,
@@ -86,9 +94,12 @@ describe('site-route contract: public routes must be binary (ADR 0641 d12)', () 
   });
 
   it('ignores non-site tiers entirely', () => {
+    // Relative path + optional posture + partial rollout: every rule would fire on
+    // a site route, so only the tier check can let this through.
     const workspace: SiteRouteDeclaration = {
-      path: '/crm',
+      path: 'crm',
       tier: 'workspace',
+      auth: 'optional',
       toggle: { rolloutPercentage: 50 },
     };
     expect(() => assertSiteRouteContract(workspace)).not.toThrow();
@@ -144,7 +155,7 @@ describe('site-route contract: manifest-level reporting', () => {
       assertSiteRouteContracts([
         { path: '/today', tier: 'site', auth: 'required' },
         { path: '/discover', tier: 'site', auth: 'optional' },
-        { path: '/crm', tier: 'workspace', toggle: { rolloutPercentage: 50 } },
+        { path: 'crm', tier: 'workspace', auth: 'optional', toggle: { rolloutPercentage: 50 } },
       ]),
     ).not.toThrow();
   });
@@ -153,18 +164,41 @@ describe('site-route contract: manifest-level reporting', () => {
 describe('ADR 0641 phase 5 — the contract runs at manifest composition', () => {
   it('importing the manifest does not throw', async () => {
     // The assertion is at module scope in chrome/features.tsx, so a violating
-    // route fails at IMPORT. This case is what makes that call load-bearing
-    // rather than decorative: if someone deletes it, nothing else notices.
+    // route fails at IMPORT. This case pins that the REAL manifest is clean; the
+    // next case pins that the call is there at all.
     await expect(import('../features.js')).resolves.toBeDefined();
   });
 
-  it('the manifest resolves a site rail, empty or not', async () => {
+  it('a violating site route injected through the feature registry fails the manifest AT IMPORT', async () => {
+    // Without this, deleting the module-scope `assertSiteRouteContracts(...)` call
+    // left every case green (w35 probe `src-manifest-call`).
+    vi.resetModules();
+    vi.doMock('../../features/registry.js', async (importOriginal) => {
+      const real = await importOriginal<typeof import('../../features/registry.js')>();
+      return {
+        ...real,
+        featureRoutes: () => [
+          ...real.featureRoutes(),
+          { path: 'relative-probe', tier: 'site' as const, auth: 'optional' as const, archetype: 'standard-index' as const, element: createElement('div') },
+        ],
+      };
+    });
+    try {
+      await expect(import('../features.js')).rejects.toThrow(/site-route contract violation[\s\S]*must be absolute/);
+    } finally {
+      vi.doUnmock('../../features/registry.js');
+      vi.resetModules();
+    }
+  });
+
+  it('the manifest resolves a site rail', async () => {
     const { FEATURES } = await import('../features.js');
     const site = FEATURES.filter((f) => f.tier === 'site');
-    // Zero is the correct answer today. Asserted as a NUMBER rather than
-    // skipped, so the day a site route is added this case keeps meaning
-    // something instead of silently continuing to pass.
-    expect(Array.isArray(site)).toBe(true);
+    // Site routes ship today (kicktodo*, showcase — ADR 0641), so the rail is
+    // NOT empty (the old "zero is correct today" note was stale). The path
+    // loop below is a double guard: the import-time contract throws first, so a
+    // relative site path reds the import, not this loop (w35 `src-site-relative`).
+    expect(site.map((r) => r.path)).toContain('/showcase');
     for (const r of site) {
       expect(r.path.startsWith('/')).toBe(true);
     }

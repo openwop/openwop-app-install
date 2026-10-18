@@ -100,6 +100,14 @@ async function handlePayoutEvent(tenantId: string, event: ConnectStripeEvent): P
 async function applyAccountEvent(tenantId: string, event: ConnectStripeEvent): Promise<void> {
   const seller = await sellers.get(tenantId);
   if (!seller) return; // index row without a seller row — nothing to apply to
+  // grade-code CC2CD-6 — bindings are immutable, so an account this tenant held
+  // BEFORE re-onboarding still routes here. Its state must never overwrite the
+  // flags of the account the tenant uses now (that would let a dead account mark
+  // the live one chargeable, or the reverse).
+  if (event.account && seller.stripeAccountId !== event.account) {
+    log.warn('commerce-connect account event for a superseded account — ignored', { tenantId, account: event.account, current: seller.stripeAccountId, eventType: event.type });
+    return;
+  }
   const obj = ((event.data as { object?: unknown })?.object ?? {}) as Record<string, unknown>;
 
   if (event.type === 'account.application.deauthorized') {
@@ -300,7 +308,15 @@ async function handleDisputeEvent(event: ConnectStripeEvent, obj: Record<string,
   const paymentIntentId = typeof obj.payment_intent === 'string' ? obj.payment_intent : '';
   if (!disputeId || !paymentIntentId) return { handled: false };
   const idx = await orderIntentIndex.get(paymentIntentId);
-  if (!idx) return { handled: false }; // not a marketplace charge — billing's concern, not ours
+  if (!idx) {
+    // ADR 0877 (architect M10) — not a pack-marketplace charge. Billing ignores
+    // disputes, and a Connect STOREFRONT charge (a destination charge the platform
+    // fronts) lands here too, so this line is the only trace of a dispute the
+    // operator may have to fund. Logged, not silent; an exception-feed row and a
+    // storefront dispute ledger are a filed follow-up.
+    log.warn('dispute on a charge that is not a pack-marketplace order — not tracked in-app', { disputeId, paymentIntentId, eventType: event.type });
+    return { handled: false };
+  }
   const order = await orders.get(idx.orderId);
   if (!order) {
     log.warn('commerce-connect dispute event: intent indexed but order missing', { disputeId, paymentIntentId, orderId: idx.orderId }); // CC-3

@@ -62,6 +62,9 @@ function inputs(ctx) {
   return {
     accountId: typeof i.accountId === 'string' ? i.accountId : '',
     companyId: typeof i.companyId === 'string' ? i.companyId : '',
+    // ADR 0882 D2 — the org the fan-in was read from; the service checks it
+    // against the account's crmRef, and the run's person must be a writer there.
+    orgId: typeof i.orgId === 'string' ? i.orgId : '',
     name: typeof i.name === 'string' ? i.name : undefined,
     healthScore: typeof i.healthScore === 'number' ? i.healthScore : undefined,
     factors: Array.isArray(i.factors) ? i.factors : undefined,
@@ -145,7 +148,14 @@ function computeHealthFromCrm(deals, tasks, companyId, weights) {
     tasks: typeof weights?.tasks === 'number' && Number.isFinite(weights.tasks) ? weights.tasks : DEFAULT_WEIGHTS.tasks,
   };
   const openDeals = deals.filter((d) => d?.companyId === companyId && (d?.status ?? 'open') === 'open').length;
-  const openTasks = tasks.filter((t) => t?.companyId === companyId && t?.status !== 'done').length;
+  // ADR 0882 D4 (pre-code review HIGH-1) — a PLAY's own tasks are not evidence
+  // about the customer. Counting them let a renewal ladder pull an account under
+  // the at-risk line, which fired the rescue play, whose tasks pulled it further:
+  // the intervention corrupting the measurement it reacts to. They are reported
+  // (weight 0) so a reader still sees them, and never scored.
+  const isPlayTask = (t) => typeof t?.taskId === 'string' && t.taskId.startsWith('task:play:');
+  const openTasks = tasks.filter((t) => t?.companyId === companyId && t?.status !== 'done' && !isPlayTask(t)).length;
+  const playTasksOpen = tasks.filter((t) => t?.companyId === companyId && t?.status !== 'done' && isPlayTask(t)).length;
   const healthScore = Math.max(0, Math.min(100, Math.round(100 - openDeals * w.deals - openTasks * w.tasks)));
   // ADR 0582 §16 — ATTRIBUTION COVERAGE, so a measured zero is distinguishable
   // from an unattributable one. `Task.companyId` is OPTIONAL and the sibling
@@ -171,6 +181,7 @@ function computeHealthFromCrm(deals, tasks, companyId, weights) {
       { factor: 'dealsSeen', weight: 0, value: deals.length },
       { factor: 'tasksAttributed', weight: 0, value: tasksWithCompany },
       { factor: 'tasksSeen', weight: 0, value: tasks.length },
+      { factor: 'playTasksOpen', weight: 0, value: playTasksOpen },
     ],
   };
 }
@@ -219,6 +230,7 @@ export async function healthSet(ctx) {
     args.factors = i.factors;
     if (i.healthScore !== undefined) args.healthScore = i.healthScore;
     if (i.companyId) args.companyId = i.companyId;
+    if (i.orgId) args.orgId = i.orgId;
     // ADR 0582 §15 — REFUSE, do not invent. This used to default a missing
     // `method` to `'penalty-sum'`, which satisfied the service's "a breakdown
     // with no stated arithmetic is not interpretable" check by FABRICATING the
@@ -249,6 +261,9 @@ export async function healthSet(ctx) {
     args.healthScore = computed.healthScore;
     args.factors = computed.factors;
     args.companyId = i.companyId;
+    // ADR 0882 D2 — absent on a frozen pre-0882 copy; the service then records
+    // why it stopped measuring and refuses, rather than accepting an org-less set.
+    if (i.orgId) args.orgId = i.orgId;
     args.method = 'penalty-sum';
   } else if (i.healthScore !== undefined) {
     args.healthScore = i.healthScore;
@@ -268,9 +283,199 @@ export async function healthSet(ctx) {
   return { status: 'success', outputs: { account: out.account } };
 }
 
+/* ─── ADR 0882 D6 — playbooks (absorbs ADR 0568 §1) ─────────────────────── */
+
+const DEFAULT_AT_RISK_THRESHOLD = 70;
+
+function numberOr(v, fallback) {
+  return typeof v === 'number' && Number.isFinite(v) ? v : fallback;
+}
+
+/**
+ * `at-risk-check` — does a health change START a rescue play? The crossing is
+ * judged on the EVENT (previous ≥ T or absent, new < T); the account is also read
+ * NOW and must still be below T. The live read is a guard only: it can turn a
+ * crossing off, never on. Judging on live state would let a late run of an
+ * earlier non-crossing event (75→72, read live at 50) qualify alongside the event
+ * that really crossed, and the account would get two ladders. An unscored account
+ * never qualifies (unscored ≠ low, ADR 0582 §4).
+ */
+export async function atRiskCheck(ctx) {
+  const csm = ensureCsm(ctx);
+  const m = merged(ctx);
+  const hasEvent = !!(m.event && typeof m.event === 'object');
+  const payload = hasEvent ? (m.event.payload && typeof m.event.payload === 'object' ? m.event.payload : m.event) : {};
+  const accountId = (typeof payload.accountId === 'string' && payload.accountId) || (typeof m.accountId === 'string' ? m.accountId : '');
+  if (!accountId) {
+    throw Object.assign(new Error('feature.csm.nodes.at-risk-check requires an `accountId` (or an event payload carrying one)'), { code: 'validation_error' });
+  }
+  const threshold = numberOr(m.threshold, DEFAULT_AT_RISK_THRESHOLD);
+  const prev = typeof payload.previousScore === 'number' ? payload.previousScore : undefined;
+  const next = typeof payload.healthScore === 'number' ? payload.healthScore : undefined;
+  const out = await csm.getAccount({ accountId });
+  if (!out.account) {
+    throw Object.assign(new Error('CSM account not found for this tenant'), { code: 'not_found' });
+  }
+  const live = typeof out.account.healthScore === 'number' ? out.account.healthScore : undefined;
+  let reason;
+  if (live === undefined) reason = 'unscored';
+  else if (live >= threshold) reason = 'recovered';
+  else if (!hasEvent) reason = 'below-threshold';
+  else if (next === undefined) reason = 'event-unscored';
+  else if (next >= threshold) reason = 'no-crossing';
+  else if (prev !== undefined && prev < threshold) reason = 'already-at-risk';
+  else reason = 'crossed';
+  const qualifies = reason === 'crossed' || reason === 'below-threshold';
+  const transitionKey = typeof payload.changedAt === 'string' ? payload.changedAt : '';
+  return { status: 'success', outputs: { accountId, qualifies, reason, threshold, transitionKey } };
+}
+
+/** `renewals-due` — the renewal window, soonest first (overdue included, flagged). */
+export async function renewalsDue(ctx) {
+  const csm = ensureCsm(ctx);
+  const m = merged(ctx);
+  // A literal key set (pack↔surface arg parity): `undefined` reads as absent ⇒ 90.
+  const out = await csm.listRenewalsDue({ days: m.days });
+  const accounts = Array.isArray(out.accounts) ? out.accounts : [];
+  return {
+    status: 'success',
+    outputs: { asOf: out.asOf, days: out.days, accounts, accountIds: accounts.map((a) => a.accountId), count: accounts.length, any: accounts.length > 0 },
+  };
+}
+
+/** A short, stable, non-cryptographic digest — the id SHAPE, not a secret. Two
+ *  FNV-1a lanes with different offsets (64 bits): task ids share ONE global
+ *  keyspace, and a 32-bit digest made a cross-account collision plausible at
+ *  scale (CSM2CD-8). */
+function digest(parts) {
+  let a = 0x811c9dc5;
+  let b = 0x01000193 ^ 0x9e3779b9;
+  for (const ch of parts.join('\u0000')) {
+    const c = ch.codePointAt(0);
+    a = Math.imul(a ^ c, 0x01000193) >>> 0;
+    b = Math.imul(b ^ c, 0x01000193) >>> 0;
+  }
+  return a.toString(16).padStart(8, '0') + b.toString(16).padStart(8, '0');
+}
+
+const DAY_MS = 86_400_000;
+/** The surface's per-call read size (`MAX_PLAY_ACCOUNTS`) and this node's per-run ceiling. */
+const PLAY_TARGET_SLICE = 50;
+const MAX_PLAY_ACCOUNTS_PER_RUN = 500;
+function isoDay(ms) {
+  return new Date(ms).toISOString().slice(0, 10);
+}
+
+/**
+ * `create-play-tasks` — the play's effect: one CRM task per step per account,
+ * written through `ctx.features.crm.createTask`, so CRM's org/tenant floors, link
+ * validation and territory visibility all apply (never a parallel todo store).
+ *
+ * The id is deterministic: `task:play:<playId>:<digest(account, org, company)>:
+ * <cycleKey>:<i>`. A weekly runway re-run re-ENSURES the same ladder (an existing
+ * same-org row is returned unchanged and counts as ensured), and a relink to a
+ * different org/company starts a fresh ladder instead of colliding with the old
+ * one. A play task someone DELETED is re-created by the next run (stated, not a
+ * tombstone). Accounts with no CRM link are `skipped`; a floor refusal PROPAGATES.
+ * Nothing ensured ⇒ a typed failure, never success-with-empty. The output carries
+ * task and account ids only: no names, no assignee.
+ */
+export async function createPlayTasks(ctx) {
+  const csm = ensureCsm(ctx);
+  const crm = ctx.features && ctx.features.crm;
+  if (!crm || typeof crm.createTask !== 'function') {
+    throw Object.assign(new Error('host does not expose ctx.features.crm — a play writes CRM tasks'), { code: 'host_capability_missing', capability: 'host.sample.crm' });
+  }
+  const m = merged(ctx);
+  const playId = typeof m.playId === 'string' && /^[a-z0-9-]{1,40}$/.test(m.playId) ? m.playId : '';
+  if (!playId) throw Object.assign(new Error('feature.csm.nodes.create-play-tasks requires `playId` (lowercase, digits, dashes; ≤40)'), { code: 'validation_error' });
+  const steps = Array.isArray(m.steps) ? m.steps : [];
+  if (steps.length === 0 || steps.length > 10 || !steps.every((st) => st && typeof st.title === 'string' && st.title.trim())) {
+    throw Object.assign(new Error('feature.csm.nodes.create-play-tasks requires 1–10 `steps`, each with a `title`'), { code: 'validation_error' });
+  }
+  const cycle = m.cycle === 'renewal' || m.cycle === 'transition' ? m.cycle : 'run';
+  const ids = Array.isArray(m.accountIds) ? m.accountIds : (typeof m.accountId === 'string' && m.accountId ? [m.accountId] : []);
+  if (ids.length === 0) throw Object.assign(new Error('feature.csm.nodes.create-play-tasks requires `accountId` or `accountIds`'), { code: 'validation_error' });
+  const transitionKey = typeof m.transitionKey === 'string' ? m.transitionKey : '';
+  if (cycle === 'transition' && !transitionKey) {
+    throw Object.assign(new Error('feature.csm.nodes.create-play-tasks: cycle "transition" needs the event\'s `transitionKey`'), { code: 'validation_error' });
+  }
+  // CSM2CD-1 — the surface reads at most PLAY_TARGET_SLICE accounts per call; a
+  // book with more renewals due than that used to fail the WHOLE run (and create
+  // nothing) every week. Read in slices, under an overall ceiling that fails typed.
+  if (ids.length > MAX_PLAY_ACCOUNTS_PER_RUN) {
+    throw Object.assign(new Error(`feature.csm.nodes.create-play-tasks: ${ids.length} accounts exceeds the per-run ceiling of ${MAX_PLAY_ACCOUNTS_PER_RUN} — narrow the window`), { code: 'play_too_large' });
+  }
+  const targets = [];
+  for (let i = 0; i < ids.length; i += PLAY_TARGET_SLICE) {
+    const out = await csm.playTargets({ accountIds: ids.slice(i, i + PLAY_TARGET_SLICE) });
+    targets.push(...(out.targets ?? []));
+  }
+  const now = Date.now();
+  const tasks = [];
+  const skipped = [];
+  const refused = [];
+  for (const tg of targets) {
+    if (tg.missing) { skipped.push({ accountId: tg.accountId, reason: 'not-found' }); continue; }
+    if (tg.linkGone) { skipped.push({ accountId: tg.accountId, reason: 'crm-link-gone' }); continue; }
+    if (!tg.orgId || !tg.companyId) { skipped.push({ accountId: tg.accountId, reason: 'no-crm-link' }); continue; }
+    let cycleKey;
+    if (cycle === 'renewal') {
+      if (!tg.renewalDate) { skipped.push({ accountId: tg.accountId, reason: 'no-renewal-date' }); continue; }
+      cycleKey = String(tg.renewalDate).slice(0, 10);
+    } else if (cycle === 'transition') {
+      cycleKey = transitionKey;
+    } else {
+      cycleKey = String(ctx.runId ?? '');
+    }
+    const key = digest([tg.accountId, tg.orgId, tg.companyId]);
+    const renewalMs = tg.renewalDate ? Date.parse(tg.renewalDate) : NaN;
+    // CSM2CD-2 — ONE account's failure must not starve the rest. Accounts are
+    // processed soonest-renewal first, so an unconditional throw let the same
+    // broken account block every later one on every run. A record the person
+    // cannot see or a link CRM refuses is skipped with its code; a missing
+    // AUTHORITY is collected and fails the node after the loop (a floor refusal
+    // is never folded into "skipped").
+    try {
+    for (let i = 0; i < steps.length; i += 1) {
+      const st = steps[i];
+      let dueMs;
+      if (typeof st.daysBeforeRenewal === 'number' && Number.isFinite(renewalMs)) dueMs = Math.max(now, renewalMs - st.daysBeforeRenewal * DAY_MS);
+      else if (typeof st.dueInDays === 'number') dueMs = now + Math.max(0, st.dueInDays) * DAY_MS;
+      // A literal key set (pack↔surface arg parity); the surface reads an
+      // `undefined` dueDate/assignee as absent.
+      const out = await crm.createTask({
+        orgId: tg.orgId,
+        companyId: tg.companyId,
+        title: `${st.title.trim()} — ${tg.name}`,
+        taskId: `task:play:${playId}:${key}:${digest([cycleKey])}:${i}`,
+        dueDate: dueMs !== undefined ? isoDay(dueMs) : undefined,
+        assignee: tg.assignee || undefined,
+      });
+      tasks.push({ taskId: out.task && out.task.taskId, accountId: tg.accountId });
+    }
+    } catch (err) {
+      const code = err && typeof err === 'object' ? err.code : undefined;
+      if (code === 'forbidden_scope') refused.push({ accountId: tg.accountId, code });
+      else if (code === 'not_found' || code === 'validation_error') skipped.push({ accountId: tg.accountId, reason: code });
+      else throw err;
+    }
+  }
+  if (refused.length > 0) {
+    throw Object.assign(new Error(`feature.csm.nodes.create-play-tasks was refused for ${refused.length} account(s) (${refused.map((r) => r.accountId).join(', ')}): the run's person may not write tasks in their CRM org. ${tasks.length} task(s) were ensured for the others.`), { code: 'forbidden_scope' });
+  }
+  if (tasks.length === 0) {
+    throw Object.assign(new Error(`feature.csm.nodes.create-play-tasks ensured no task: ${skipped.map((x) => `${x.accountId} (${x.reason})`).join(', ')}`), { code: 'no_play_targets' });
+  }
+  return { status: 'success', outputs: { playId, tasks, skipped } };
+}
+
 export const nodes = {
   'feature.csm.nodes.health-read': healthRead,
   'feature.csm.nodes.health-set': healthSet,
+  'feature.csm.nodes.at-risk-check': atRiskCheck,
+  'feature.csm.nodes.renewals-due': renewalsDue,
+  'feature.csm.nodes.create-play-tasks': createPlayTasks,
 };
 
 export default nodes;

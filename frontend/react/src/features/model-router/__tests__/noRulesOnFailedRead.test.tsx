@@ -15,9 +15,14 @@
  *
  * Both polarities, because asserting only the ABSENCE of a sentence is vacuous —
  * a page that rendered nothing would satisfy it.
+ *
+ * Breaks if a failed read renders "No rules — every turn uses the fallback
+ * target", leaves the Rules section blank, or if a SUCCESSFUL zero-rule read
+ * loses the (then true) sentence.
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, cleanup, act } from '@testing-library/react';
+import type { StoredRouterConfig } from '../modelRouterClient.js';
 
 const { getRouterConfig, setRouterConfig, listOrgs } = vi.hoisted(() => ({
   getRouterConfig: vi.fn(), setRouterConfig: vi.fn(), listOrgs: vi.fn(),
@@ -29,13 +34,17 @@ vi.mock('../modelRouterClient.js', async (orig) => ({
 
 import { ModelRouterPage } from '../ModelRouterPage.js';
 
-const NO_RULES = {
+const NO_RULES: StoredRouterConfig = {
   enabled: true,
   config: { rules: [], fallback: { provider: 'openai', model: 'gpt-4o' } },
 };
 
+/** Render and wait until the config read was issued and settled (not one fixed
+ *  flush: the pre-load page ALSO shows "No rules", so a case must prove the read
+ *  arrived before trusting that line). */
 const mount = async (): Promise<void> => {
   render(<ModelRouterPage />);
+  await vi.waitFor(() => expect(getRouterConfig).toHaveBeenCalledWith('o1'));
   await act(async () => {});
 };
 
@@ -53,8 +62,8 @@ describe('MR-R2-1 — "no rules" is a claim, and a failed read may not make it',
     getRouterConfig.mockRejectedValue(new Error('503 upstream'));
     await mount();
 
-    // The honest signal stays.
-    expect(document.body.textContent).toContain('could not be read');
+    // The honest signal stays — the guard sentence specifically.
+    expect(await screen.findByText(/Editing is disabled because the current routing config could not be read/)).toBeTruthy();
     // THE DEFECT: this sentence rendered underneath that warning.
     expect(screen.queryByText(NO_RULES_LINE)).toBeNull();
   });
@@ -63,6 +72,9 @@ describe('MR-R2-1 — "no rules" is a claim, and a failed read may not make it',
     getRouterConfig.mockResolvedValue(NO_RULES);
     await mount();
 
+    // The "not configured" chip goes away only once a non-null read LANDS, so this
+    // proves the line below reflects the read and not the pre-load state.
+    await vi.waitFor(() => expect(screen.queryByText('not configured')).toBeNull());
     expect(screen.getByText(NO_RULES_LINE)).toBeTruthy();
     // Nothing failed, so nothing may say it did.
     expect(screen.queryByText(/rules could not be read/i)).toBeNull();
@@ -77,6 +89,7 @@ describe('MR-R2-1 — "no rules" is a claim, and a failed read may not make it',
     // CreatorInsightsPage: a failed read gets a sentence, not a blank.
     getRouterConfig.mockRejectedValue(new Error('503 upstream'));
     await mount();
+    expect(await screen.findByText(/rules could not be read/i)).toBeTruthy();
 
     const section = document.querySelector('section[aria-labelledby="mr-rules-h"]');
     expect(section).not.toBeNull();

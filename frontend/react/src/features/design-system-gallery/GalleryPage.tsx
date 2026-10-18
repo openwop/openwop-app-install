@@ -158,7 +158,7 @@ export function GalleryPage(): JSX.Element {
       <PageHeader eyebrow={t('eyebrow')} title={t('title')} lede={t('lede')} />
 
       <Section id="typography" title={t('typography')}>
-        <Specimen label="serif display / sans body / mono meta">
+        <Specimen label="display / sans body / mono meta">
           <div className="u-grid u-gap-1">
             <span className="dsg-type-display">Editorial voice</span>
             <span className="dsg-type-body">{t('typographyBody')}</span>

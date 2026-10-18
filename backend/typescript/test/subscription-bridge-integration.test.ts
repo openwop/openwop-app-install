@@ -14,6 +14,7 @@ import { openStorage } from '../src/storage/index.js';
 import { createProduct, listOrders, __resetCommerce, type Product } from '../src/features/commerce/commerceService.js';
 import { subscribeToProduct, registerSubscriptionRecurrence, __resetSubscriptions } from '../src/features/commerce/subscriptions.js';
 import { processStripeEvent } from '../src/features/billing/billingService.js';
+import { __platformChargeForTest } from '../src/features/commerce-connect/storefrontSettlement.js';
 
 const T = 'default';
 const ORG = 'org-bridge';
@@ -47,7 +48,7 @@ const invoicePaid = (eventId: string, invoiceId: string): Parameters<typeof proc
 describe('MERCH-E full recurrence bridge (mock Stripe)', () => {
   it('live subscribe → invoice.paid drives the next period order; re-delivery is idempotent', async () => {
     const p = await subProduct();
-    const { subscription } = await subscribeToProduct({ tenantId: T, orgId: ORG, createdBy: 'u', productId: p.productId, interval: 'monthly', stripeKey: 'sk_test_x' });
+    const { subscription } = await subscribeToProduct({ tenantId: T, orgId: ORG, createdBy: 'u', productId: p.productId, interval: 'monthly', charge: __platformChargeForTest('sk_test_x') });
     expect(subscription.paymentMode).toBe('live');               // Stripe subscription created
     expect(subscription.stripeSubscriptionId).toBe('sub_test');  // via the mock
     const [first] = await listOrders(T, ORG);

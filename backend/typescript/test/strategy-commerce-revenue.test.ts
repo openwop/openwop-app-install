@@ -1,5 +1,6 @@
 /**
- * commerce-revenue metric source (grade-code STRAT-PK1 hardening) — the KR sync
+ * commerce-revenue metric source (ADR 0231 §C3 · grade-code STRAT-GC1 / STRAT-PK1
+ * hardening) — the KR sync
  * must match commerce's OWN revenue definition and never write a meaningless
  * number to an executive KR:
  *   - count paid + fulfilled + partially_refunded order totals, NET the refunded
@@ -7,11 +8,18 @@
  *   - scope to ONE currency (source.query, or single-currency auto-detect);
  *   - a mixed-currency org with no configured currency SKIPS honestly rather
  *     than summing across currencies.
- * Regression for the two backend findings in the grade-code pass.
+ * Regression for the two backend findings in the grade-code pass. Each case reads
+ * back the CONFIRMED check-in the sync wrote (or that none was written) — the
+ * claim is about the executive KR, not the sync's own report.
+ *
+ * Sabotage witnesses (grade-tests w19, `w19g2-cr-*`): drop the partial-refund
+ * netting, count 'refunded' orders, sum across currencies when none is
+ * configured, or drop the `source.query` currency filter — each turns a case red.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { bootPlanningApp, makeClient, enableToggle, uniqEmail, type Client } from './planningHarness.js';
 import { buildStrategySurface } from '../src/features/strategy/surface.js';
+import { listCheckIns } from '../src/features/strategy/checkIns.js';
 
 let BASE = '';
 let closeApp: () => Promise<void>;
@@ -37,7 +45,7 @@ async function orderPaid(owner: Client, orgId: string, price: number, currency =
 }
 
 /** An owner + org + an ACTIVE org-scoped strategy with a commerce-revenue KR. */
-async function setup(query?: string): Promise<{ owner: Client; orgId: string; tenantId: string }> {
+async function setup(query?: string): Promise<{ owner: Client; orgId: string; tenantId: string; sid: string }> {
   const tenantId = `org:pk-${Date.now()}-${n++}`;
   const owner = client();
   expect((await owner.post('/host/openwop-app/test/login', { email: uniqEmail('pk'), tenantId })).status).toBe(201);
@@ -51,7 +59,7 @@ async function setup(query?: string): Promise<{ owner: Client; orgId: string; te
   // Activation gate is off by default → draft→active transitions directly, and
   // syncSourcedKrs only reconciles ACTIVE shared strategies.
   expect((await owner.patch(`${S}/${s.id}`, { status: 'active' })).status).toBe(200);
-  return { owner, orgId, tenantId };
+  return { owner, orgId, tenantId, sid: s.id as string };
 }
 
 async function syncValue(tenantId: string): Promise<{ synced?: number; skippedReason?: string }> {
@@ -63,7 +71,7 @@ async function syncValue(tenantId: string): Promise<{ synced?: number; skippedRe
 
 describe('commerce-revenue metric source (grade-code)', () => {
   it('nets partial refunds, excludes full refunds, auto-detects a single currency', async () => {
-    const { owner, orgId, tenantId } = await setup();
+    const { owner, orgId, tenantId, sid } = await setup();
     await orderPaid(owner, orgId, 100);                                   // +100 (paid)
     const partial = await orderPaid(owner, orgId, 100);                  // +100 then −30 = +70
     expect((await owner.post(c(orgId, `/orders/${encodeURIComponent(partial)}/partial-refund`), { amount: 30, refundKey: 'k1' })).status).toBe(200);
@@ -72,22 +80,30 @@ describe('commerce-revenue metric source (grade-code)', () => {
 
     const { synced } = await syncValue(tenantId);
     expect(synced).toBe(170); // 100 + (100 − 30) + 0
+    const rows = await listCheckIns(tenantId, sid);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ value: 170, status: 'confirmed', origin: 'sync' });
   });
 
   it('skips honestly when the org sells in multiple currencies with no currency configured', async () => {
-    const { owner, orgId, tenantId } = await setup();
+    const { owner, orgId, tenantId, sid } = await setup();
     await orderPaid(owner, orgId, 100, 'USD');
     await orderPaid(owner, orgId, 100, 'EUR');
     const { synced, skippedReason } = await syncValue(tenantId);
     expect(synced).toBeUndefined();
     expect(skippedReason, 'expected an ambiguous-currency skip').toContain('ambiguous_currency');
+    // The actual claim: NO number reached the executive KR.
+    expect(await listCheckIns(tenantId, sid), 'a cross-currency sum was written as a confirmed value').toHaveLength(0);
   });
 
   it('scopes to the currency named in source.query (cross-currency orders excluded)', async () => {
-    const { owner, orgId, tenantId } = await setup('USD');
+    const { owner, orgId, tenantId, sid } = await setup('USD');
     await orderPaid(owner, orgId, 100, 'USD');
     await orderPaid(owner, orgId, 999, 'EUR');
     const { synced } = await syncValue(tenantId);
     expect(synced).toBe(100);
+    const rows = await listCheckIns(tenantId, sid);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ value: 100, status: 'confirmed', origin: 'sync' });
   });
 });

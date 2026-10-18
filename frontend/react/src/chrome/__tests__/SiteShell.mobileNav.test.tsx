@@ -1,3 +1,15 @@
+/**
+ * ADR 0641 site shell — the phone rail (#4031, KickTodo public/first-use UX).
+ * The five repeat-use destinations render in PRODUCT order (`MOBILE_PRIMARY_PATHS`,
+ * not manifest order); every other site route lives in the More disclosure, which
+ * moves focus into the panel, traps Tab/Shift+Tab between the toggle and the panel,
+ * locks body scroll while open, and on Escape closes, restores scroll and returns
+ * focus to More. More reads active when the current route lives in its panel.
+ *
+ * Sabotage that turns it red: reorder MOBILE_PRIMARY_PATHS; break either wrap of the
+ * focus trap; skip the initial focus; leave body overflow hidden on close; drop the
+ * focus return on Escape; mark More active only while open.
+ */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
@@ -27,7 +39,8 @@ vi.mock('../../i18n/LanguageSwitcher.js', () => ({ LanguageSwitcher: () => <sele
 
 const { SiteShell } = await import('../SiteShell.js');
 
-afterEach(() => { cleanup(); vi.restoreAllMocks(); });
+// Reset the scroll lock even when a case fails mid-way, so it cannot leak.
+afterEach(() => { cleanup(); document.body.style.overflow = ''; });
 
 describe('SiteShell mobile navigation', () => {
   it('keeps the five repeat-use destinations in product order and moves the rest into More', () => {
@@ -41,7 +54,7 @@ describe('SiteShell mobile navigation', () => {
     expect(primary).toBeTruthy();
     expect(Array.from(primary?.querySelectorAll('a') ?? []).map((link) => link.getAttribute('href')))
       .toEqual(['/today', '/discover', '/plan', '/progress', '/guide']);
-    expect(primary?.querySelector('a[href="/today"]')?.classList.contains('is-active')).toBe(true);
+    expect(primary?.querySelector('a[href="/today"]')?.getAttribute('aria-current')).toBe('page');
 
     const more = screen.getByRole('button', { name: 'More' });
     fireEvent.click(more);

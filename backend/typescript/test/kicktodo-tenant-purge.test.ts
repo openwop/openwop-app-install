@@ -43,6 +43,20 @@ async function seatRowKeys(tenantId: string): Promise<string[]> {
   return rows.map((r) => r.key);
 }
 
+/** RAW probe of the hash-keyed `kicktodo-feed-tokens` keyspace: the rows whose
+ *  CONTENT `tenantId` is this tenant. `renderFeed` rejecting is NOT proof the
+ *  token row is gone — it also rejects once the tenant-prefixed consent row is
+ *  purged, so a surviving token row reads the same (w40 probe tp-feeds-skipped
+ *  stayed green against the renderFeed-only assertion). */
+async function feedRows(tenantId: string): Promise<number> {
+  let n = 0;
+  for (const { value } of await hostExtStorage().kvList('hostext:kicktodo-feed-tokens:')) {
+    const row: unknown = JSON.parse(value);
+    if (row && typeof row === 'object' && 'tenantId' in row && row.tenantId === tenantId) n += 1;
+  }
+  return n;
+}
+
 async function seedTenant(tenantId: string): Promise<{ token: string; circleId: string; enrollmentId: string }> {
   const draft = await createDraft({
     tenantId, title: 'Purge', summary: 's', outcome: 'o', durationDays: 2,
@@ -82,11 +96,13 @@ describe('tenant teardown reaches every KickTodo keyspace (KTD-1 retraction)', (
   it('purges HASH-KEYED feed tokens — the row the assessment wrongly called unreachable', async () => {
     const a = await seedTenant(A);
     await expect(renderFeed(a.token)).resolves.toContain('BEGIN:VCALENDAR'); // live before
+    expect(await feedRows(A), 'precondition: one token row to purge').toBe(1);
 
-    const result = await purgeTenantHostExt(A);
-    expect(result.deleted).toBeGreaterThan(0);
+    await purgeTenantHostExt(A);
 
-    // The hash-keyed token row is GONE — content-matched, not prefix-matched.
+    // The hash-keyed token row is GONE — content-matched, not prefix-matched —
+    // read from the keyspace itself, then the behavioural half.
+    expect(await feedRows(A)).toBe(0);
     await expect(renderFeed(a.token)).rejects.toBeInstanceOf(FeedDeniedError);
   });
 
@@ -122,6 +138,8 @@ describe('tenant teardown reaches every KickTodo keyspace (KTD-1 retraction)', (
 
     await expect(renderFeed(a.token)).rejects.toBeInstanceOf(FeedDeniedError); // purged
     await expect(renderFeed(b.token)).resolves.toContain('BEGIN:VCALENDAR');   // untouched
+    expect(await feedRows(A)).toBe(0);
+    expect(await feedRows(B)).toBe(1);
     expect((await verifierQuality(B)).sampled).toBe(1);
     expect(await liveHold(B, b.circleId, `user:buyer-${B}`)).not.toBeNull();
     // KTD-11 — the seat ledger is tenant-scoped too: A's rows are gone, B's stand.

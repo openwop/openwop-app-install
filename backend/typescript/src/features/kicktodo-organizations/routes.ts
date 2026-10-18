@@ -18,10 +18,12 @@ import {
   unlinkCohort,
   listCohortLinks,
   setBrandRef,
+  clearBrandRef,
   getBrandRef,
   orgReport,
   OrgProgramError,
   OrgProgramNotFoundError,
+  OrgLibraryConflictError,
 } from './orgProgramService.js';
 
 export const KICKTODO_ORG_PREFIX = '/host/openwop-app/kicktodo/org-programs';
@@ -33,6 +35,7 @@ type Handler = (req: Request, res: Response) => Promise<void>;
 function mapError(err: unknown): never {
   if (err instanceof OrgProgramError) throw new OpenwopError('validation_error', err.message, 422);
   if (err instanceof OrgProgramNotFoundError) throw new OpenwopError('not_found', 'Not found.', 404);
+  if (err instanceof OrgLibraryConflictError) throw new OpenwopError('conflict', err.message, 409);
   throw err;
 }
 
@@ -118,6 +121,13 @@ export const KICKTODO_ORG_ROUTES: ReadonlyArray<{ method: 'get' | 'post'; path: 
       const { orgId, tenantId } = await authorizeOrgScope(req, FEATURE, 'host:org:manage');
       const b = (req.body ?? {}) as Record<string, unknown>;
       try {
+        // Grade-data KTORG-D1 — `brandProfileId: null` clears the reference (the org
+        // must be deletable once its programme is wound down).
+        if (b.brandProfileId === null) {
+          await clearBrandRef(tenantId, orgId);
+          res.json({ saved: true, cleared: true });
+          return;
+        }
         await setBrandRef(tenantId, orgId, requireString(b.brandProfileId, 'brandProfileId'));
         res.json({ saved: true });
       } catch (err) {

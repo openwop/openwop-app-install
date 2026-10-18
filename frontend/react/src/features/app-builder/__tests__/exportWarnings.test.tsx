@@ -8,7 +8,7 @@
  * incomplete source and no way to learn which parts were incomplete.
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
-import { render, screen, cleanup, act, fireEvent } from '@testing-library/react';
+import { render, screen, cleanup, act, fireEvent, within } from '@testing-library/react';
 import { appBuilderDefinition } from '../definition.js';
 
 const { exportCanvasCode, toastSuccess } = vi.hoisted(() => ({
@@ -25,10 +25,13 @@ vi.mock('../../../ui/toast.js', async (orig) => {
 });
 // The toolbar self-gates on the code-export toggle; without this the buttons
 // render as their not-enabled state and nothing below exists.
-vi.mock('../../../featureToggles/FeatureAccessContext.js', async (orig) => ({
-  ...(await orig<typeof import('../../../featureToggles/FeatureAccessContext.js')>()),
-  useFeatureAccess: () => ({ status: 'on', enabled: true, isBeta: false, variant: null, entitled: true, locked: false, loading: false, resolutionFailed: false }),
-}));
+vi.mock('../../../featureToggles/FeatureAccessContext.js', async (orig) => {
+  const { makeFeatureAccess } = await import('../../../featureToggles/__testing__/makeFeatureAccess.js');
+  return {
+    ...(await orig<typeof import('../../../featureToggles/FeatureAccessContext.js')>()),
+    useFeatureAccess: () => makeFeatureAccess(),
+  };
+});
 
 const RESULT = { assetToken: 'tok', serveUrl: '/dl/tok', fileName: 'app.zip', fileCount: 9, sizeBytes: 1024 };
 const Extras = appBuilderDefinition.ToolbarExtras!;
@@ -53,8 +56,10 @@ describe('AB-G2 — the export says what it left out', () => {
       'themeColors.accent: unsupported gradient flattened to its first stop',
     ]);
     const dialog = screen.getByRole('dialog');
-    expect(dialog.textContent).toContain('"chart" has no react-tailwind equivalent');
-    expect(dialog.textContent).toContain('unsupported gradient flattened');
+    expect(within(dialog).getAllByRole('listitem').map((li) => li.textContent)).toEqual([
+      'screens[0].components[2]: "chart" has no react-tailwind equivalent — omitted',
+      'themeColors.accent: unsupported gradient flattened to its first stop',
+    ]);
     // A count-only summary is exactly what this replaces.
     expect(toastSuccess).not.toHaveBeenCalled();
   });
@@ -65,15 +70,19 @@ describe('AB-G2 — the export says what it left out', () => {
   });
 
   it('surfaces authoritative preflight notes alongside generator warnings', async () => {
-    await exportNow([], [{ code: 'actions_not_generated', message: '2 closed actions will not execute in react-tailwind output.' }]);
-    expect(screen.getByRole('dialog').textContent).toContain('2 closed actions will not execute');
+    await exportNow(['screens[0].components[2]: omitted'], [{ code: 'actions_not_generated', message: '2 closed actions will not execute in react-tailwind output.' }]);
+    // BOTH, preflight first — neither source may displace the other.
+    expect(within(screen.getByRole('dialog')).getAllByRole('listitem').map((li) => li.textContent)).toEqual([
+      '2 closed actions will not execute in react-tailwind output.',
+      'screens[0].components[2]: omitted',
+    ]);
     expect(toastSuccess).not.toHaveBeenCalled();
   });
 
   it('a clean export stays a toast — no dialog to dismiss', async () => {
     await exportNow([]);
     expect(screen.queryByRole('dialog')).toBeNull();
-    expect(toastSuccess).toHaveBeenCalled();
+    expect(toastSuccess).toHaveBeenCalledWith('Source exported — download started.');
   });
 
   it('dismissing the report clears it', async () => {
@@ -83,6 +92,13 @@ describe('AB-G2 — the export says what it left out', () => {
     const closes = screen.getAllByRole('button', { name: 'Close' });
     expect(closes).toHaveLength(2);
     await act(async () => { fireEvent.click(closes[1]!); });
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  it('the corner × dismisses the report too', async () => {
+    await exportNow(['screens[0].components[2]: omitted']);
+    const closes = screen.getAllByRole('button', { name: 'Close' });
+    await act(async () => { fireEvent.click(closes[0]!); });
     expect(screen.queryByRole('dialog')).toBeNull();
   });
 });

@@ -173,8 +173,11 @@ describe('ORGINV-UX-6 — the outcome of Accept is SPOKEN and focus is placed, n
     fireEvent.click(screen.getByRole('button', { name: /accept invitation/i }));
     await screen.findByText(/now a member of Acme/i);
     // User-initiated → assertive (a polite queue could swallow it behind other chatter).
-    expect(assertive()).not.toBe(before);
-    expect(assertive()).toContain('You have joined the organization');
+    // The announcement comes from a passive effect that can flush after findBy sees the DOM; wait for it.
+    await waitFor(() => {
+      expect(assertive()).not.toBe(before);
+      expect(assertive()).toContain('You have joined the organization');
+    });
     expect(polite()).not.toContain('You have joined');
     // The Accept button unmounted; focus must NOT be on <body>.
     const cta = screen.getByRole('link', { name: /open acme/i });
@@ -190,8 +193,10 @@ describe('ORGINV-UX-6 — the outcome of Accept is SPOKEN and focus is placed, n
     const before = assertive();
     fireEvent.click(screen.getByRole('button', { name: /accept invitation/i }));
     await screen.findByText(/already a member/i);
-    expect(assertive()).not.toBe(before);
-    expect(assertive()).toContain('You’re already a member');
+    await waitFor(() => {
+      expect(assertive()).not.toBe(before);
+      expect(assertive()).toContain('You’re already a member');
+    });
     await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('link', { name: /open acme/i })));
   });
 
@@ -205,8 +210,10 @@ describe('ORGINV-UX-6 — the outcome of Accept is SPOKEN and focus is placed, n
     const before = assertive();
     fireEvent.click(btn);
     await screen.findByText(/may be expired, revoked/i);
-    expect(assertive()).not.toBe(before);
-    expect(assertive()).toContain('The invitation may be expired, revoked, or issued to a different email address.');
+    await waitFor(() => {
+      expect(assertive()).not.toBe(before);
+      expect(assertive()).toContain('The invitation may be expired, revoked, or issued to a different email address.');
+    });
     // `loading` disabled the button (which drops focus); a retryable failure
     // hands it back so the keyboard user is one Enter from retrying.
     expect((btn as HTMLButtonElement).disabled).toBe(false);
@@ -254,8 +261,10 @@ describe('invitation accept — failure states (IN-G3/IN-G4)', () => {
     // The developer-facing string must not reach the page.
     expect(screen.queryByText(/returned 403/)).toBeNull();
     // ORGINV-UX-6 — the failure is SPOKEN (assertive: the user just acted).
-    expect(assertive()).not.toBe(before);
-    expect(assertive()).toContain('This invitation was sent to a different email address.');
+    await waitFor(() => {
+      expect(assertive()).not.toBe(before);
+      expect(assertive()).toContain('This invitation was sent to a different email address.');
+    });
     // ORGINV-UX-11 — the SAME account cannot succeed, so Accept stays disabled
     // and the recovery action lives IN the card, taking focus.
     expect((screen.getByRole('button', { name: /accept invitation/i }) as HTMLButtonElement).disabled).toBe(true);
@@ -453,8 +462,10 @@ describe('ADR 0564 D3 — Decline is a deliberate, confirmed act with a terminal
     const before = assertive();
     fireEvent.click(screen.getByRole('button', { name: /^decline$/i }));
     await screen.findByText(/you declined this invitation/i);
-    expect(assertive()).not.toBe(before);
-    expect(assertive()).toContain('You declined this invitation');
+    await waitFor(() => {
+      expect(assertive()).not.toBe(before);
+      expect(assertive()).toContain('You declined this invitation');
+    });
     expect(polite()).not.toContain('You declined');
     await waitFor(() => expect(document.activeElement).not.toBe(document.body));
     expect(document.activeElement?.textContent).toContain('You declined this invitation');
@@ -502,8 +513,10 @@ describe('ADR 0622 D7 — a self-set (unverified) address is refused with its ON
     // It is NOT the mismatch copy — the address matched; provenance failed.
     expect(screen.queryByText(/sent to a different email address/i)).toBeNull();
     expect(screen.queryByText(/returned 403/)).toBeNull();
-    expect(assertive()).not.toBe(before);
-    expect(assertive()).toContain('isn’t verified');
+    await waitFor(() => {
+      expect(assertive()).not.toBe(before);
+      expect(assertive()).toContain('isn’t verified');
+    });
     expect((screen.getByRole('button', { name: /accept invitation/i }) as HTMLButtonElement).disabled).toBe(true);
     expect((screen.getByRole('button', { name: /^decline$/i }) as HTMLButtonElement).disabled).toBe(true);
     await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('button', { name: /switch account/i })));

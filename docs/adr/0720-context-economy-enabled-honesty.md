@@ -62,7 +62,12 @@ is also no frontend consumer at all today — the projection is API-only — so 
 "operator-facing lie" framing was overstated twice over.)
 
 **And an existing test already pinned the correct contract**, on adjacent lines that make
-the intent unmistakable (`test/context-economy-caching.test.ts:53-57`):
+the intent unmistakable (`test/context-economy-caching.test.ts` › "a per-lever override beats the
+master (both directions)"):
+
+> **Correction 2026-10-12 (grade-tests wave 28):** this cited `:53-57`. The file was
+> restructured (per-case env restore), so the line numbers moved; it now cites the case title,
+> which is stable. The excerpt below is unchanged in substance.
 
 ```ts
 process.env.OPENWOP_CONTEXT_ECONOMY = '0';

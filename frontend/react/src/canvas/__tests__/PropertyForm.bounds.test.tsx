@@ -44,6 +44,11 @@ describe('DRAW-R4 — property widget bounds', () => {
     expect(onChange).not.toHaveBeenCalled();
   });
 
+  // DOUBLE GUARD (w46g2-pfb-blank-guard, vacuous by design): deleting the
+  // widget's `typeof val !== 'number'` early return changes nothing for
+  // `undefined`, because `clampNumber(undefined)` passes it through and
+  // `clamped !== val` stays false. The regression this case exists for — snapping
+  // a blank field to `min` — is witnessed by w46g2-pfb-blank-snap.
   it('blur passes a cleared (undefined) value through — never snaps blank to min', () => {
     const { onChange } = renderField({ name: 'size', type: 'number', label: 'Size', min: 0.5, max: 100 }, undefined);
     fireEvent.blur(screen.getByLabelText('Size'));

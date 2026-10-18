@@ -1,6 +1,8 @@
 /**
- * UX_UPGRADE-dashboard (2026-08-01) — Continue working deep-links each canvas
- * to its own editor route, not the generic list.
+ * UX_UPGRADE-dashboard (2026-08-01), ADR 0377 Wave 3 — Continue working
+ * deep-links each canvas to its own editor route, not the generic list. What
+ * breaks it: a row landing on `/documents` (or dropping `?org=`), so the
+ * "resume" tile resumes nothing.
  *
  * Split out of `uxUpgradeAug.test.tsx` (issue 4511). There it reached its
  * mocks with `vi.resetModules()` + `vi.doMock`, and the reset re-imported the
@@ -27,15 +29,18 @@ vi.mock('../../../featureToggles/FeatureAccessContext.js', () => ({
   useAllFeatureAccess: () => ({ loading: false }),
   useFeatureAccess: () => makeFeatureAccess({ enabled: true }),
 }));
-vi.mock('../useDashboardOrg.js', () => ({ useDashboardOrg: () => ({ orgId: 'org1', loading: false, error: null }) }));
+vi.mock('../useDashboardOrg.js', () => ({ useDashboardOrg: () => ({ orgId: 'org1', loading: false, error: false }) }));
+// Hoisted: vi.mock factories run before module-level consts exist.
+const { CANVASES } = vi.hoisted(() => {
+  const rows: import('../../documents/documentsClient.js').CanvasSourceRow[] = [
+    { canvasId: 'c1', canvasTypeId: 'canvas.slides', name: 'Deck', version: 1, updatedAt: '2026-08-01T00:00:00Z' },
+    { canvasId: 'c2', canvasTypeId: 'pack.custom', name: 'Pack thing', version: 1, updatedAt: '2026-07-31T00:00:00Z' },
+  ];
+  return { CANVASES: rows };
+});
 vi.mock('../../documents/documentsClient.js', () => ({
-  listCanvasSources: async () => ({
-    canvases: [
-      { canvasId: 'c1', canvasTypeId: 'canvas.slides', name: 'Deck', version: 1, updatedAt: '2026-08-01T00:00:00Z' },
-      { canvasId: 'c2', canvasTypeId: 'pack.custom', name: 'Pack thing', version: 1, updatedAt: '2026-07-31T00:00:00Z' },
-    ],
-    total: 2,
-  }),
+  listCanvasSources: async (): ReturnType<typeof import('../../documents/documentsClient.js')['listCanvasSources']> =>
+    ({ canvases: CANVASES, total: CANVASES.length }),
 }));
 
 const { default: Tile } = await import('../tiles/ContinueWorkingTile.js');

@@ -4,6 +4,12 @@
  *   structural change does not; Esc tucks the review away and J brings it back;
  *   a run step cited from the drawer attaches its run; ⌘. asks for the inline
  *   prompt.
+ *
+ * Sabotage that turns it red: revealing a STRUCTURAL op in the Inspector (op 0
+ * removes a step that IS on the sheet, so only the value-op rule keeps the Pair
+ * tab), not selecting the node, closeReview leaving the review open, J not
+ * reopening it, cite not switching to Pair, the inline ask target not
+ * recorded, the rail not opening on Inspect, or an ask not switching to Pair.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { useBuilderStore } from '../store/builderStore.js';
@@ -23,18 +29,19 @@ vi.mock('../pair/pairClient.js', () => ({
 const node = (id: string, config: Record<string, unknown> = {}): BuilderNode =>
   ({ id, kind: 'noop', name: id, position: { x: 0, y: 0 }, config });
 
-// op 0 is structural (a new step), op 1 is a value change on an existing node.
+// op 0 is structural (removes `b`, which IS on the sheet — so the node-exists
+// check cannot be what keeps the Pair tab), op 1 is a value change on `a`.
 const suggestion: WorkflowEditSuggestion = {
   id: 's', workflowId: 'wf', conversationId: 'c', requestedBy: 'u', baseRevision: 'r', summary: '',
   visibility: 'private', createdAt: '', updatedAt: '', opState: ['pending', 'pending'],
   ops: [
-    { op: { kind: 'addNode', nodeId: 'sg_s_1', typeId: 'core.noop', name: 'New' }, dependsOn: [], preimages: [{ path: 'nodes.sg_s_1', present: false }], gateSensitive: false, summary: 'Add New' },
+    { op: { kind: 'removeNode', nodeId: 'b' }, dependsOn: [], preimages: [{ path: 'nodes.b', present: true, value: { exists: true } }], gateSensitive: false, summary: 'Remove b' },
     { op: { kind: 'setConfig', nodeId: 'a', path: 'threshold', value: 50 }, dependsOn: [], preimages: [{ path: 'nodes.a.config.threshold', present: true, value: 40 }], gateSensitive: false, summary: 'threshold' },
   ],
 };
 
 function arrange(): void {
-  useBuilderStore.setState({ workflowId: 'wf', nodes: [node('a', { threshold: 40 })], edges: [], selectedNodeIds: [] });
+  useBuilderStore.setState({ workflowId: 'wf', nodes: [node('a', { threshold: 40 }), node('b')], edges: [], selectedNodeIds: [], selectedNodeId: null });
   usePairStore.setState({ conversationId: 'c', suggestion, opState: ['pending', 'pending'], focusedOp: null, tab: 'pair', reviewOpen: true });
 }
 
@@ -46,6 +53,7 @@ describe('P11 — stepping reveals value changes in the Inspector', () => {
     usePairStore.getState().step(1);
     expect(usePairStore.getState().focusedOp).toBe(0);
     expect(usePairStore.getState().tab).toBe('pair');
+    expect(useBuilderStore.getState().selectedNodeIds).toEqual([]);
 
     usePairStore.getState().step(1);
     expect(usePairStore.getState().focusedOp).toBe(1);

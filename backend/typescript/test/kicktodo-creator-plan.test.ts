@@ -17,7 +17,7 @@ import { validateArtifact } from '../src/host/artifactTypes.js';
 import { registerKicktodoCreatorArtifactTypes, CHALLENGE_PLAN_TYPE } from '../src/features/kicktodo-creator/artifactSchemas.js';
 import { validatePlan, draftFromPlan, PlanInvalidError, type ChallengePlan } from '../src/features/kicktodo-creator/planService.js';
 import { getChallenge, publishChallenge } from '../src/features/kicktodo-core/challengeService.js';
-import { createCandidate, getCandidate, setCandidateDraft, setCandidatePublished, __setCandidateWithdrawn } from '../src/features/kicktodo-creator/creatorService.js';
+import { createCandidate, getCandidate, setCandidateDraft, setCandidatePublished, supportedClaimIds, __setCandidateWithdrawn, type ResearchDossier } from '../src/features/kicktodo-creator/creatorService.js';
 import { publicationView, submitForPublication, PublicationGateError } from '../src/features/kicktodo-creator/publishService.js';
 
 const TENANT = 'tenant-plan';
@@ -44,7 +44,7 @@ beforeAll(async () => {
 
 describe('schema ↔ producer parity', () => {
   it('a real valid plan validates against the registered artifact schema', () => {
-    const v = validateArtifact(CHALLENGE_PLAN_TYPE, VALID as unknown as Record<string, unknown>);
+    const v = validateArtifact(CHALLENGE_PLAN_TYPE, { ...VALID });
     expect(v.registered).toBe(true);
     expect(v.valid, JSON.stringify(v.errors)).toBe(true);
   });
@@ -93,14 +93,14 @@ describe('ADR 0458 §2.2 correction — claimRefs are closed-world provenance', 
   });
 
   it('malformed refs are a structural defect, never a crash', () => {
-    const bad = { ...withRefs, days: [{ ...withRefs.days[0], claimRefs: ['', 3] }, ...withRefs.days.slice(1)] } as unknown as ChallengePlan;
+    // `validatePlan` takes `unknown` (model output) — the malformed refs need no cast.
+    const bad = { ...withRefs, days: [{ ...withRefs.days[0], claimRefs: ['', 3] }, ...withRefs.days.slice(1)] };
     expect(validatePlan(bad, { knownClaimIds: ['c-1'] }).map((d) => d.code)).toEqual(['claim-refs-malformed']);
   });
 
   it('re-grade KTF-EV-1 — the closed world is the SUPPORTED claim ids only', async () => {
-    const { supportedClaimIds } = await import('../src/features/kicktodo-creator/creatorService.js');
-    const dossier = {
-      questions: [], engines: ['brave'], recordedAt: new Date().toISOString(),
+    const dossier: ResearchDossier = {
+      questions: [], engines: ['brave'], recordedAt: '2026-07-19T00:00:00.000Z',
       sources: [{ url: 'https://example.org/a', domain: 'example.org', title: 'A', hash: 'h-a', engine: 'brave' }],
       claims: [
         { claimId: 'c-ok', text: 'supported', sourceHashes: ['h-a'] },
@@ -108,14 +108,14 @@ describe('ADR 0458 §2.2 correction — claimRefs are closed-world provenance', 
         { claimId: 'c-contra', text: 'verdict contradicts', sourceHashes: ['h-a'], support: [{ sourceHash: 'h-a', verdict: 'contradicts' }] },
       ],
       unsupportedClaimIds: ['c-unsup'],
-    } as unknown as Parameters<typeof supportedClaimIds>[0];
+    };
     expect(supportedClaimIds(dossier)).toEqual(['c-ok']);
     const plan: ChallengePlan = { ...VALID, days: [{ ...VALID.days[0], claimRefs: ['c-unsup'] }, ...VALID.days.slice(1)] };
     expect(validatePlan(plan, { knownClaimIds: supportedClaimIds(dossier) }).map((d) => d.code)).toEqual(['claim-ref-unknown']);
   });
 
   it('the artifact schema admits claimRefs (schema ↔ producer parity holds for the new field)', () => {
-    const v = validateArtifact(CHALLENGE_PLAN_TYPE, withRefs as unknown as Record<string, unknown>);
+    const v = validateArtifact(CHALLENGE_PLAN_TYPE, { ...withRefs });
     expect(v.valid, JSON.stringify(v.errors)).toBe(true);
   });
 
@@ -171,8 +171,13 @@ describe('publication grade fixes (KT-EXP-7/9 + KTEXP2-1)', () => {
   it('submitForPublication refuses a challenge that is not the candidate’s bound draft (KTEXP2-1)', async () => {
     const c = await createCandidate({ tenantId: TENANT, createdBy: 'u1', topic: 'productivity basics', audience: 'a', transformation: 't', durationDaysTarget: 7, dailyMinutesTarget: 20 });
     await setCandidateDraft(TENANT, c.id, 'chal:bound', 1);
-    // a mismatched challenge is rejected BEFORE any gate — the binding is authoritative
-    await expect(submitForPublication(TENANT, c.id, 'chal:OTHER', 1, 'u1')).rejects.toBeInstanceOf(PublicationGateError);
+    // a mismatched challenge is rejected BEFORE any gate — the binding is authoritative.
+    // The exact message matters: with the binding check gone, the missing
+    // 'chal:OTHER' draft throws the SAME error class ('Challenge draft not found'),
+    // so the class alone could never fail (w41 probe plan-binding-check).
+    const refused = submitForPublication(TENANT, c.id, 'chal:OTHER', 1, 'u1');
+    await expect(refused).rejects.toBeInstanceOf(PublicationGateError);
+    await expect(refused).rejects.toMatchObject({ gate: 'challenge', message: 'The submitted challenge does not match this candidate’s bound draft.' });
   });
 });
 
@@ -215,12 +220,9 @@ describe('draftFromPlan — the deterministic decomposition', () => {
 
   it('an invalid plan is refused with the full typed defect list — no partial draft', async () => {
     const bad = { ...VALID, days: [] };
-    await expect(draftFromPlan(TENANT, 'user:planner', bad)).rejects.toBeInstanceOf(PlanInvalidError);
-    try {
-      await draftFromPlan(TENANT, 'user:planner', bad);
-    } catch (err) {
-      expect((err as PlanInvalidError).defects.map((d) => d.code)).toContain('no-days');
-    }
+    const refused = draftFromPlan(TENANT, 'user:planner', bad);
+    await expect(refused).rejects.toBeInstanceOf(PlanInvalidError);
+    await expect(refused).rejects.toMatchObject({ defects: expect.arrayContaining([expect.objectContaining({ code: 'no-days' })]) });
   });
 });
 
@@ -232,6 +234,9 @@ describe('draftFromPlan — the deterministic decomposition', () => {
  * which the `as unknown as ChallengePlan` cast concealed from the compiler.
  */
 describe('GC-4 — validatePlan is total over malformed model output', () => {
+  // A non-object input is the specific `plan-not-object` defect (the totality claim
+  // below is asserted for every case; these three also pin their structural code).
+  const NOT_OBJECT = new Set(['null', 'a string', 'an array']);
   const cases: Array<[string, unknown]> = [
     ['null', null],
     ['a string', 'not a plan'],
@@ -250,9 +255,10 @@ describe('GC-4 — validatePlan is total over malformed model output', () => {
 
   for (const [label, input] of cases) {
     it(`returns defects (never throws) for ${label}`, () => {
-      let defects: ReturnType<typeof validatePlan>;
+      let defects: ReturnType<typeof validatePlan> = [];
       expect(() => { defects = validatePlan(input); }).not.toThrow();
-      expect(defects!.length).toBeGreaterThan(0);
+      expect(defects.length).toBeGreaterThan(0);
+      if (NOT_OBJECT.has(label)) expect(defects.map((d) => d.code)).toEqual(['plan-not-object']);
     });
   }
 

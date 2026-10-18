@@ -29,7 +29,7 @@ import {
   registerPlanProposalApprovalHandler,
   type PendingApproval,
 } from '../../host/approvalService.js';
-import { resolveProposal } from './cohortService.js';
+import { resolveProposal, ProposalBusyError } from './cohortService.js';
 import { CircleDeniedError } from './circleService.js';
 import { createLogger } from '../../observability/logger.js';
 
@@ -59,6 +59,8 @@ async function decidePlanProposal(
     if (err instanceof CircleDeniedError) {
       throw new OpenwopError('not_found', 'Approval not found.', 404, { approvalId });
     }
+    // KTA-4 — another decision on this proposal is mid-apply; the card stays pending.
+    if (err instanceof ProposalBusyError) throw new OpenwopError('conflict', err.message, 409, { approvalId });
     throw err;
   }
 

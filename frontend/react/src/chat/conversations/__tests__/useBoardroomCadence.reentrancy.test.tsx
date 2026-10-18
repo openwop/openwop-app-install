@@ -11,7 +11,7 @@ import { useBoardroomCadence } from '../useBoardroomCadence.js';
 import type { BoardroomTurn } from '../boardroomCadence.js';
 import type { BYOKActiveConfig } from '../../../byok/lib/useBYOKConfig.js';
 
-const CONFIG = { provider: 'mock', model: 'mock-1', credentialRef: 'managed:test' } as unknown as BYOKActiveConfig;
+const CONFIG: BYOKActiveConfig = { provider: 'mock', model: 'mock-1', credentialRef: 'managed:test' };
 const personaOf = (agentId: string) => `Persona ${agentId}`;
 const turn = (agentId: string): BoardroomTurn => ({ agentId, kind: 'advisor', round: 0 });
 
@@ -41,6 +41,10 @@ describe('useBoardroomCadence — re-entrancy (CS-GB-5)', () => {
     expect(send).toHaveBeenCalledTimes(1);
     expect(send.mock.calls[0]?.[2]?.activeAgentId).toBe('a');
     act(() => hook.result.current.cancel());
+    // DOUBLE GUARD (w44 re-cancel-queue): cancel() both empties the queue AND drops
+    // `active`; the effect returns on `!active` before reading the queue, so the
+    // queue clear alone cannot be witnessed here. The `active` copy is the one
+    // probed (re-cancel-active); the shared piece is `setActive(false)` in cancel().
     expect(hook.result.current.active).toBe(false);
     edge(); // a's own send settling — must NOT march advisor b
     expect(send).toHaveBeenCalledTimes(1);

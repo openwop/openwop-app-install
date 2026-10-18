@@ -10,12 +10,18 @@
  * understates it by the margin that matters: the interleave is the Node event
  * loop, so ONE instance serving concurrent chat turns already loses nearly
  * everything. `dispatchTurn.ts` fires this per turn, detached.
+ *
+ * What turns each leg red (wave-24 probes): ignoring the compareAndSwap result (legs
+ * 1-3); reading without the tenant prefix (leg 3); returning a row on CAS exhaustion
+ * instead of throwing, or logging the exhaustion below WARN (leg 4 — now behavioural:
+ * a forced-losing CAS must reject and persist nothing); the caller swallowing at debug
+ * (leg 5, structural — a behavioural witness would need a dispatched turn).
  */
-import { describe, it, expect, beforeAll } from 'vitest';
+import { describe, it, expect, beforeAll, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
+import { initHostExtPersistence, DurableCollection } from '../src/host/hostExtPersistence.js';
 import { openStorage } from '../src/storage/index.js';
 import { recordUsage, getUsageRollup } from '../src/features/usage-analytics/usageRollupService.js';
 
@@ -68,7 +74,19 @@ describe('ADR 0695 — concurrent increments are not lost', () => {
     expect(d[0]?.calls).toBe(10);
   });
 
-  it('leg 4 (structural): exhaustion THROWS — it must never return an unpersisted row', () => {
+  it('leg 4: exhaustion THROWS — it must never return an unpersisted row', async () => {
+    // Force every compare-and-swap to lose, with zero backoff, so exhaustion is REAL.
+    const cas = vi.spyOn(DurableCollection.prototype, 'compareAndSwap').mockResolvedValue(false);
+    const rnd = vi.spyOn(Math, 'random').mockReturnValue(0);
+    try {
+      await expect(recordUsage('uroll-x', { provider: 'p', model: 'm', inputTokens: 1, at: new Date().toISOString() }))
+        .rejects.toThrow(/usage rollup contention/);
+    } finally {
+      cas.mockRestore();
+      rnd.mockRestore();
+    }
+    expect(await getUsageRollup('uroll-x'), 'nothing was persisted').toEqual([]);
+
     const src = code(join(SRC, 'features', 'usage-analytics', 'usageRollupService.ts'));
     expect(src, 'the write goes through compareAndSwap').toContain('compareAndSwap');
     expect(src, 'a bare put would reintroduce the lost update').not.toMatch(/await rollups\.put\(/);

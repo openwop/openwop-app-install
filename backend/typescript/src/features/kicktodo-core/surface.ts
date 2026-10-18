@@ -1,10 +1,12 @@
 /**
  * `ctx.features.kicktodo-core` (ADR 0414 P4; ADR 0014) — the typed workflow
  * surface the `feature.kicktodo.nodes` pack calls. Thin adapters over the
- * feature services: authorization posture is the run's tenant trust (CTI-1);
- * participant-owned operations take an explicit `ownerSubject` the CALLING
- * workflow resolved (run metadata / trigger context) — pack nodes never invent
- * identity.
+ * feature services.
+ *
+ * ADR 0901 (DEC-1) — every method is bound to the RUN PRINCIPAL through
+ * `bindKicktodoSurface` (see `surfaceBinding.ts` for the lanes). The spec table
+ * below is the authority each method's HTTP twin applies; `personOnly` marks a
+ * method no host-authored job (daily-loop, reminder-loop) calls.
  */
 
 import type { BundleScope } from '../../host/inMemorySurfaces.js';
@@ -15,19 +17,50 @@ import { todayFor, submitCheckIn, applyMissedWindowPolicy } from './todayService
 import { evaluateEnrollment, freezeProgressEvidence, progressFor } from './progressService.js';
 import { applyRevisionCommands, buildPlanRevisionDisplay } from './replanService.js';
 import { enqueueKickbotCoachTurn } from './kickbotCoachTurnService.js';
+import { bindKicktodoSurface, type KicktodoSurfaceSpecs } from './surfaceBinding.js';
+
+/** ADR 0901 D4 — one spec per method. System-lane (host job) callers:
+ *  daily-loop → `materializeToday`, `evaluate`; reminder-loop →
+ *  `kickbotCoachTurn` (and integrations' `remindToday`). `applyMissedWindow` and
+ *  `freezeEvidence` have no route and stay system-callable (ADR 0901 §5). */
+export const KICKTODO_CORE_SURFACE_SPECS = {
+  listChallenges: { authority: 'none' },
+  catalogForLocale: { authority: 'none' },
+  kickbotCoachTurn: { subjectArg: 'ownerSubject', authority: 'none' },
+  enroll: { subjectArg: 'ownerSubject', authority: 'none', personOnly: true },
+  getEnrollment: { authority: 'enrollment', personOnly: true },
+  setSchedulePreference: { subjectArg: 'ownerSubject', authority: 'none', personOnly: true },
+  materializeToday: { authority: 'enrollment' },
+  today: { subjectArg: 'ownerSubject', authority: 'none', personOnly: true },
+  checkIn: { subjectArg: 'ownerSubject', authority: 'none', personOnly: true },
+  progress: { authority: 'enrollment', personOnly: true },
+  lifecycleStatus: { subjectArg: 'ownerSubject', authority: 'none', personOnly: true },
+  substitute: { subjectArg: 'ownerSubject', authority: 'none', personOnly: true },
+  applyRevisionCommands: { subjectArg: 'subject', authority: 'none', personOnly: true },
+  enrichPlanRevision: { authority: 'enrollment', personOnly: true },
+  applyMissedWindow: { authority: 'enrollment' },
+  freezeEvidence: { authority: 'enrollment' },
+  evaluate: { subjectArg: 'ownerSubject', authority: 'none' },
+} as const satisfies KicktodoSurfaceSpecs;
 
 export function buildKicktodoCoreSurface(scope: BundleScope): FeatureSurface {
   const tenant = scope.tenantId;
-  return {
+  return bindKicktodoSurface('kicktodo-core', scope, {
     listChallenges: async () => ({ challenges: await listPublished(tenant) }),
     // ADR 0689 — KickBot speaks first: enqueue ONE proactive guide turn into the
     // participant's own 1:1 (gated, idempotent per enrollment per local day /
     // per award). The reminder-loop's second node composes this.
-    kickbotCoachTurn: async (args) => await enqueueKickbotCoachTurn(tenant, {
+    // ADR 0901 D3 — a person-lane call names its person as the ONLY actor the
+    // minted job may carry. ALWAYS ON, whatever the binding toggle says: a job
+    // that acts as someone else is a privilege escalation, not a shadow-log
+    // case. (When enforced, the subject check has already made `ownerSubject`
+    // equal the person; the service re-asserts it at mint either way.)
+    kickbotCoachTurn: async (args, binding) => await enqueueKickbotCoachTurn(tenant, {
       ownerSubject: surfaceStr(args.ownerSubject),
       enrollmentId: surfaceStr(args.enrollmentId),
       occasion: surfaceOptStr(args.occasion) === 'award' ? 'award' : 'reminder',
       ...(surfaceOptStr(args.awardKind) ? { awardKind: surfaceOptStr(args.awardKind) } : {}),
+      ...(binding.person ? { boundActor: binding.person } : {}),
     }) as unknown as Record<string, unknown>,
     /** ADR 0430 P5 — the catalog negotiated for a CONTENT locale (independent
      *  of any UI locale); the served locale is returned so a caller can
@@ -139,5 +172,5 @@ export function buildKicktodoCoreSurface(scope: BundleScope): FeatureSurface {
       const result = await evaluateEnrollment(tenant, surfaceStr(args.enrollmentId), surfaceStr(args.ownerSubject));
       return result ? { ...result } : { enrollment: null };
     },
-  };
+  }, KICKTODO_CORE_SURFACE_SPECS);
 }

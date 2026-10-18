@@ -24,6 +24,7 @@
 import { agentStorageId } from '../executor/agentIdAliases.js';
 import type { AgentProfile, AgentCapabilityId } from '../types.js';
 import { DurableCollection } from './hostExtPersistence.js';
+import { CAS_RETRIES, entityEtag, staleWriteError } from './entityVersion.js';
 import { listRoster } from './rosterService.js';
 import type { ToolPermissions } from './agentToolPermissions.js';
 import { registerCredentialRefConsumer } from './credentialRefRegistry.js';
@@ -244,6 +245,83 @@ export async function upsertAgentProfile(
   return profile;
 }
 
+/** The governance-editor fields a profile PUT owns (ADR 0775 P4). A PUT that
+ *  omits one KEEPS the stored value (merge, not replace); `clear` names the ones
+ *  the caller explicitly emptied. `capabilities`, `memoryScope`, `knowledge` and
+ *  `twin` belong to other subsystems and are preserved by `buildAgentProfile`. */
+export const EDITOR_PROFILE_FIELDS = [
+  'department',
+  'configParameters',
+  'permissions',
+  'hitl',
+  'escalation',
+  'channels',
+  'adminControls',
+  'riskCompliance',
+  'requiredConnections',
+  'metrics',
+] as const;
+export type EditorProfileField = (typeof EDITOR_PROFILE_FIELDS)[number];
+
+/** A profile's content version (ADR 0775 P4). Any write, including another
+ *  subsystem's, moves it: a stale editor must re-read before overwriting. */
+export function agentProfileEtag(profile: AgentProfile): string {
+  return entityEtag(profile);
+}
+
+/**
+ * ADR 0775 P4 (`ARWF-11`) — the profile PUT: a MERGE onto the stored profile
+ * (an omitted editor field keeps its value; `clear` removes one), written by
+ * compare-and-swap. With `ifMatch`, a profile that changed since the caller read
+ * it is refused (409) instead of overwritten. Without it, a lost swap re-reads
+ * and re-merges, so a concurrent write by another subsystem is kept.
+ */
+export async function putAgentProfileMerged(
+  tenantId: string,
+  profileId: string,
+  input: AgentProfileInput,
+  opts: { ifMatch?: string; clear?: ReadonlySet<EditorProfileField> } = {},
+): Promise<AgentProfile> {
+  const clear = opts.clear ?? new Set<EditorProfileField>();
+  for (let attempt = 0; attempt < CAS_RETRIES; attempt += 1) {
+    const existing = await profiles.get(profileKey(tenantId, profileId));
+    // Defensive: never let a write silently re-own another tenant's profile.
+    const prior = existing && existing.tenantId === tenantId ? existing : undefined;
+    if (opts.ifMatch !== undefined && (!prior || agentProfileEtag(prior) !== opts.ifMatch)) {
+      throw staleWriteError('agent profile', prior ? agentProfileEtag(prior) : undefined);
+    }
+    const merged: AgentProfileInput = { ...input };
+    for (const field of EDITOR_PROFILE_FIELDS) {
+      if (merged[field] !== undefined || clear.has(field) || prior?.[field] === undefined) continue;
+      carryEditorField(merged, prior, field);
+    }
+    const next = buildAgentProfile(tenantId, profileId, merged, prior);
+    if (await profiles.compareAndSwap(existing ?? null, next)) return next;
+  }
+  throw staleWriteError('agent profile', undefined);
+}
+
+function carryEditorField<K extends EditorProfileField>(into: AgentProfileInput, from: AgentProfile, field: K): void {
+  into[field] = from[field];
+}
+
+/** Re-read, mutate, compare-and-swap (ADR 0775 P4) — for the single-field
+ *  subsystem writers, so none overwrites a concurrent profile edit. */
+async function casUpdateProfile(
+  tenantId: string,
+  profileId: string,
+  mutate: (existing: AgentProfile) => AgentProfile,
+): Promise<AgentProfile | null> {
+  for (let attempt = 0; attempt < CAS_RETRIES; attempt += 1) {
+    const existing = await getAgentProfile(tenantId, profileId);
+    if (!existing) return null;
+    const next = mutate(existing);
+    if (next === existing) return existing;
+    if (await profiles.compareAndSwap(existing, next)) return next;
+  }
+  throw staleWriteError('agent profile', undefined);
+}
+
 /** The ONE profile builder (residue-batch F-8: extracted so the capability
  *  create path can CAS-insert the SAME shape upsert writes — no second
  *  builder to drift). Preserves subsystem-owned fields from `prior`. */
@@ -370,12 +448,10 @@ export async function setAgentMemoryScope(
   memoryScope: NonNullable<AgentProfile['memoryScope']>,
   init: { roleKey: string; autonomy: AgentProfileInput['autonomy'] },
 ): Promise<AgentProfile> {
-  const existing = await getAgentProfile(tenantId, profileId);
-  if (!existing) return upsertAgentProfile(tenantId, profileId, { ...init, memoryScope });
-  if (existing.memoryScope === memoryScope) return existing;
-  const updated: AgentProfile = { ...existing, memoryScope, updatedAt: nowIso() };
-  await profiles.put(updated);
-  return updated;
+  const updated = await casUpdateProfile(tenantId, profileId, (existing) =>
+    existing.memoryScope === memoryScope ? existing : { ...existing, memoryScope, updatedAt: nowIso() },
+  );
+  return updated ?? upsertAgentProfile(tenantId, profileId, { ...init, memoryScope });
 }
 
 /** ADR 0373 — capabilities a TENANT may elect on their OWN agent.
@@ -457,28 +533,25 @@ export async function setAgentKnowledge(
   init: { roleKey: string; autonomy: AgentProfileInput['autonomy'] },
   opts: { activateCapability: boolean } = { activateCapability: true },
 ): Promise<AgentProfile> {
-  const existing = await getAgentProfile(tenantId, profileId);
-  if (!existing) {
-    // A first write on a profile-less agent is a grant by construction: without the
-    // capability the binding it is creating would retrieve nothing.
-    return upsertAgentProfile(tenantId, profileId, {
-      ...init,
-      capabilities: ['knowledge'],
-      knowledge: patch,
-    });
-  }
-  const merged: NonNullable<AgentProfile['knowledge']> = { ...(existing.knowledge ?? {}), ...patch };
-  const capabilities = !opts.activateCapability || (existing.capabilities ?? []).includes('knowledge')
-    ? existing.capabilities
-    : [...(existing.capabilities ?? []), 'knowledge' as const];
-  const updated: AgentProfile = {
-    ...existing,
-    ...(capabilities !== undefined ? { capabilities } : {}),
-    knowledge: merged,
-    updatedAt: nowIso(),
-  };
-  await profiles.put(updated);
-  return updated;
+  const updated = await casUpdateProfile(tenantId, profileId, (existing) => {
+    const merged: NonNullable<AgentProfile['knowledge']> = { ...(existing.knowledge ?? {}), ...patch };
+    const capabilities = !opts.activateCapability || (existing.capabilities ?? []).includes('knowledge')
+      ? existing.capabilities
+      : [...(existing.capabilities ?? []), 'knowledge' as const];
+    return {
+      ...existing,
+      ...(capabilities !== undefined ? { capabilities } : {}),
+      knowledge: merged,
+      updatedAt: nowIso(),
+    };
+  });
+  // A first write on a profile-less agent is a grant by construction: without the
+  // capability the binding it is creating would retrieve nothing.
+  return updated ?? upsertAgentProfile(tenantId, profileId, {
+    ...init,
+    capabilities: ['knowledge'],
+    knowledge: patch,
+  });
 }
 
 /** Set or clear the digital-twin LINK on an agent's profile (ADR 0044) — `twin`
@@ -491,11 +564,13 @@ export async function setAgentTwin(
   twin: AgentProfile['twin'] | null,
   init: { roleKey: string; autonomy: AgentProfileInput['autonomy'] },
 ): Promise<AgentProfile> {
-  let existing = await getAgentProfile(tenantId, profileId);
-  if (!existing) existing = await upsertAgentProfile(tenantId, profileId, init);
-  const updated: AgentProfile = { ...existing, updatedAt: nowIso() };
-  if (twin) updated.twin = twin; else delete updated.twin;
-  await profiles.put(updated);
+  if (!(await getAgentProfile(tenantId, profileId))) await upsertAgentProfile(tenantId, profileId, init);
+  const updated = await casUpdateProfile(tenantId, profileId, (existing) => {
+    const next: AgentProfile = { ...existing, updatedAt: nowIso() };
+    if (twin) next.twin = twin; else delete next.twin;
+    return next;
+  });
+  if (!updated) throw new Error(`agent profile vanished while linking a twin: ${profileId}`);
   return updated;
 }
 

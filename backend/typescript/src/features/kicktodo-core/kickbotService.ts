@@ -25,6 +25,9 @@ import { listRoster, createRosterEntry, type RosterEntry } from '../../host/rost
 import { ensureConversationMeta, subjectConversationId } from '../../host/conversationStore.js';
 import { hostExtStorage } from '../../host/hostExtPersistence.js';
 import { ensureUserAgentRegistered } from '../../routes/userAgents.js';
+import { broadcastAgentEviction } from '../../host/agentRegistryEviction.js';
+import { CAS_RETRIES } from '../../host/entityVersion.js';
+import type { UserAgentRecord } from '../../types.js';
 import { getAgentProfile, upsertAgentProfile, activateAgentCapability, setAgentMemoryScope, setAgentKnowledge } from '../../host/agentProfileService.js';
 import { KICKTODO_TODAY_TOOL_ID, KICKTODO_PROGRESS_TOOL_ID, KICKTODO_JOURNAL_TOOL_ID, KICKTODO_PLAN_TOOL_ID, KICKTODO_CONVENE_TOOL_ID, KICKTODO_REPLAN_TOOL_ID, KICKTODO_LOG_CHECKIN_TOOL_ID, clearConvenedSpecialistOverrides } from './agentTools.js';
 import { COACHING_CAPABILITY } from './coachingCapability.js';
@@ -59,27 +62,64 @@ export const KICKBOT_AGENT_ID = 'user.kicktodo-guide';
 /** The guide's system prompt — the ONE in-tree SSoT for its voice (no drift,
  *  no pack signing needed). Deliberately free of node typeIds / schema fields
  *  (LLM-exchange discipline): behavior/tools are governed by the profile + the
- *  tool allowlist, not by prose here. */
-const KICKBOT_GUIDE_PROMPT = [
+ *  tool allowlist. XCH-KB-1 — it names EVERY allowlisted tool by its exact
+ *  `openwop:` id (and no other), including the two ACTION tools `convene` and
+ *  `replan` with when NOT to use them; `kicktodo-kickbot-prompt-parity.test.ts`
+ *  pins prompt ↔ `KICKBOT_TOOL_ALLOWLIST` both ways.
+ *
+ *  Changing this text? Append the sha256 of the OLD text to
+ *  `KICKBOT_PRIOR_PROMPT_SHA256` (below) so tenants still on it are healed
+ *  (XCH-KB-2); the parity test's hash pin reds until you do. */
+export const KICKBOT_GUIDE_PROMPT = [
   'You are KickBot, the user\'s persistent KickTodo guide.',
   'You coordinate their plan, explain the next step in plain language, notice when',
   'the plan is no longer working, and help them recover WITHOUT shame. You never',
   'invent anything: before you coach, GROUND yourself in their real state with your',
-  'read tools — today\'s due actions, progress on each challenge, what\'s coming up on',
-  'their plan, their own journal notes, their engagement standing and the awards',
-  'they\'ve earned, a challenge\'s reviews, their accountability circles, any coach',
-  'plan-change proposals awaiting their decision, and their integration setup (which',
-  'calendar/wearable connections are active) — and speak only to what is there. You',
-  'celebrate real wins from their earned awards. You propose; the user decides. Domain',
-  'changes (enrolling, plan revisions, connecting a calendar/wearable) go through the',
-  'governed surfaces and are confirmed by the user on an inline card — you never change',
-  'anything silently. When they tell you they finished an action, you can log the',
-  'check-in for them: FIRST read `today`, find the EXACT action they mean, NAME it back',
-  '("I\'ll mark your morning run done — okay?"), and only call log-checkin with that',
-  'card\'s id — never guess a card, and pass their own words as the note. They approve',
-  'it on a card before anything is recorded, and a check-in can\'t be undone. Keep it',
+  'read tools — `openwop:kicktodo.today` (today\'s due actions), `openwop:kicktodo.progress`',
+  '(progress on each challenge), `openwop:kicktodo.plan` (what\'s coming up on their plan),',
+  '`openwop:kicktodo.journal` (their own journal notes), `openwop:kicktodo.engagement-summary`',
+  '(their engagement standing and the awards they\'ve earned), `openwop:kicktodo.community-reviews`',
+  '(a challenge\'s reviews), `openwop:kicktodo.circles` (their accountability circles),',
+  '`openwop:kicktodo.proposals` (coach plan-change proposals awaiting their decision) and',
+  '`openwop:kicktodo.integrations-status` (which calendar/wearable connections are active)',
+  '— and speak only to what is there. You celebrate real wins from their earned awards.',
+  'You propose; the user decides. Domain changes (enrolling, plan revisions, connecting a',
+  'calendar/wearable) go through the governed surfaces and are confirmed by the user on an',
+  'inline card — you never change anything silently.',
+  'When they ask to CHANGE their plan, use `openwop:kicktodo.replan` with their enrollment and',
+  'their request in their own words. It only covers four kinds of change — moving to another',
+  'time of day, swapping today\'s action for an alternative the challenge offers, turning a',
+  'missed stretch into recovery, or moving a day to another date inside the plan — and it only',
+  'PROPOSES: they approve the revision on an inline card, and nothing changes until they do.',
+  'Do NOT use it to add new activities, to enroll them, to connect a calendar/wearable, or',
+  'just to talk about the plan (read `openwop:kicktodo.plan` for that); never say a plan',
+  'changed until they have approved it.',
+  'When a question needs a specialist\'s judgment — personalizing their plan, a safety concern',
+  'like overload or an injury, checking claimed progress, or a supportive accountability',
+  'nudge — you may use `openwop:kicktodo.convene` to consult that specialist. A specialist only',
+  'advises and can never change anything; it posts its advice into this conversation later,',
+  'so tell them you have asked and never invent its answer. Do NOT convene for something your',
+  'read tools already answer, and never use it to make a change (plan changes go through',
+  '`openwop:kicktodo.replan`).',
+  'When they tell you they finished an action, you can log the check-in for them: FIRST',
+  'read `openwop:kicktodo.today`, find the EXACT action they mean, NAME it back',
+  '("I\'ll mark your morning run done — okay?"), and only call `openwop:kicktodo.log-checkin`',
+  'with that card\'s id — never guess a card, and pass their own words as the note. They',
+  'approve it on a card before anything is recorded, and a check-in can\'t be undone. Keep it',
   'short, kind, and concrete.',
 ].join(' ');
+
+/** XCH-KB-2 — sha256 of every guide prompt a PRIOR build shipped (measured from
+ *  this file's git history). A stored prompt in this set is a stale HOST default,
+ *  so the heal replaces it; any other non-current prompt is a user's PATCH edit
+ *  and is preserved. Append-only: when `KICKBOT_GUIDE_PROMPT` changes, add the
+ *  old hash here. */
+export const KICKBOT_PRIOR_PROMPT_SHA256: readonly string[] = [
+  'a8a85abfa38c85feed9a528c12ac9b1cdb74abbecc4ef0230c5588037852a25c', // 07b29167d..d48457f79 (2026-07-19..21)
+  'b52f611e2a7499e1a96e2154e3a44372fc5fb7e495e0e9e76dfb19a8fe4a7542', // af84ffde1 (2026-07-22)
+  '45ab5e9d1ae72cc67bd84777974d636c3dbb212ecf233864cdfa6a9cd6e4e51f', // 83daec735 (2026-07-22)
+  '782363ba4d1fd0cb26f9469c26c422beb476c1acf126e873f1c65a058af70aa9', // afd118cc9..fb7a2e689 (2026-07-22..09-12, pre-XCH-KB-1)
+];
 
 /** chat-first-port G6/G7 — the two participant-lane READ tools KickBot gains
  *  for the previously chat-orphaned engagement-summary + challenge-reviews
@@ -185,6 +225,72 @@ export function registerKickbotLifecycleHooks(): void {
   });
 }
 
+/** The branded agent's memory shape (host-owned — ADR 0442 P3: conversational
+ *  memory rides the PROFILE's per-user scope, never the record's long-term store). */
+const KICKBOT_MEMORY_SHAPE = { scratchpad: true, conversation: true, longTerm: false } as const;
+
+const sha256 = (text: string): string => createHash('sha256').update(text).digest('hex');
+const sameList = (a: readonly string[], b: readonly string[]): boolean => a.length === b.length && a.every((v, i) => v === b[i]);
+
+/**
+ * XCH-KB-2 — the host-owned fields of the KickBot agent record, as the CURRENT
+ * build defines them, applied over `record`. Returns null when nothing drifted.
+ *
+ * HOST-OWNED (healed):
+ *  - `toolAllowlist` — ALWAYS. It is KickBot's security posture: the ADR 0442 P4
+ *    tripwire pins the exact set (reads + convene + replan + the one approval-gated
+ *    write, no connection/egress tool). A stale set strands new tools; a widened
+ *    one would break the posture. The per-tenant way to vary an agent's tools is
+ *    the ADR 0104 allowlist OVERRIDE, a separate store this heal never touches.
+ *  - `systemPrompt` — only when the stored text is a PRIOR HOST default (its
+ *    sha256 is in `KICKBOT_PRIOR_PROMPT_SHA256`). Any other non-current text is a
+ *    user's PATCH edit and is preserved.
+ *  - `memoryShape` — the host's memory design (per-user recall rides the profile).
+ *
+ * USER-OWNED (never touched): `persona`, `label`, `description`, `modelClass`,
+ * `confidenceThreshold` (all editable through PATCH /agents/:id, and the rename
+ * lives on the roster entry), plus the immutable `agentId`/`tenantId`/`createdAt`.
+ */
+export function kickbotHostDefinitionDrift(record: UserAgentRecord): UserAgentRecord | null {
+  const promptIsStaleHostDefault =
+    record.systemPrompt !== KICKBOT_GUIDE_PROMPT && KICKBOT_PRIOR_PROMPT_SHA256.includes(sha256(record.systemPrompt));
+  const allowlistDrifted = !sameList(record.toolAllowlist ?? [], KICKBOT_TOOL_ALLOWLIST);
+  const m = record.memoryShape;
+  const memoryDrifted =
+    !m || m.scratchpad !== KICKBOT_MEMORY_SHAPE.scratchpad || m.conversation !== KICKBOT_MEMORY_SHAPE.conversation || m.longTerm !== KICKBOT_MEMORY_SHAPE.longTerm;
+  if (!promptIsStaleHostDefault && !allowlistDrifted && !memoryDrifted) return null;
+  return {
+    ...record,
+    ...(promptIsStaleHostDefault ? { systemPrompt: KICKBOT_GUIDE_PROMPT } : {}),
+    toolAllowlist: [...KICKBOT_TOOL_ALLOWLIST],
+    memoryShape: { ...KICKBOT_MEMORY_SHAPE },
+  };
+}
+
+/** XCH-KB-2 — heal a drifted KickBot agent record in place. Compare-and-swap on
+ *  the row that was read (the PATCH route's ADR 0775 P4 path): a concurrent user
+ *  edit makes the swap miss, and the heal re-reads and re-derives from the NEW
+ *  row, so it never overwrites that edit. No write at all when nothing drifted.
+ *  Fail-soft: a heal that cannot land is logged and retried on the next ensure —
+ *  it never blocks provisioning. */
+async function healKickbotAgentRecord(tenantId: string, first: UserAgentRecord): Promise<void> {
+  const storage = hostExtStorage();
+  let record: UserAgentRecord | null = first;
+  for (let attempt = 0; attempt < CAS_RETRIES && record; attempt += 1) {
+    const healed = kickbotHostDefinitionDrift(record);
+    if (!healed) return;
+    if (await storage.updateUserAgent(tenantId, healed, record)) {
+      // Live on this instance at once; other instances drop their copy and re-read.
+      await ensureUserAgentRegistered(storage, healed);
+      await broadcastAgentEviction(tenantId, KICKBOT_AGENT_ID);
+      log.info('kickbot_agent_record_healed', { tenantId, agentId: KICKBOT_AGENT_ID });
+      return;
+    }
+    record = await storage.getUserAgent(tenantId, KICKBOT_AGENT_ID);
+  }
+  if (record) log.warn('kickbot_agent_record_heal_contended', { tenantId, agentId: KICKBOT_AGENT_ID });
+}
+
 /** In-process single-flight per tenant (the ensureSeededAgentByRole pattern —
  *  the roster store has no unique role index). */
 const ensuring = new Map<string, Promise<KickBotInstance>>();
@@ -209,7 +315,14 @@ async function provision(tenantId: string): Promise<KickBotInstance> {
   //    would clobber a future edited record in the live registry. Guard on
   //    absence; the registry read-through (`hydrateUserAgentIntoRegistry`) covers
   //    a booted-before-create instance.
-  if (!(await hostExtStorage().getUserAgent(tenantId, KICKBOT_AGENT_ID))) {
+  //
+  //    XCH-KB-2 — but a record that EXISTS is no longer left alone forever: a
+  //    tenant provisioned by an older build kept that build's allowlist + prompt.
+  //    `healKickbotAgentRecord` rewrites ONLY the host-owned fields that drifted
+  //    (CAS on the row it read), and writes nothing when the record is current —
+  //    so the edited-registry guarantee above still holds on the steady state.
+  const existingAgent = await hostExtStorage().getUserAgent(tenantId, KICKBOT_AGENT_ID);
+  if (!existingAgent) {
     await ensureUserAgentRegistered(hostExtStorage(), {
       agentId: KICKBOT_AGENT_ID,
       tenantId,
@@ -219,9 +332,11 @@ async function provision(tenantId: string): Promise<KickBotInstance> {
       modelClass: 'chat',
       systemPrompt: KICKBOT_GUIDE_PROMPT,
       toolAllowlist: KICKBOT_TOOL_ALLOWLIST,
-      memoryShape: { scratchpad: true, conversation: true, longTerm: false },
+      memoryShape: KICKBOT_MEMORY_SHAPE,
       createdAt: new Date().toISOString(),
     });
+  } else {
+    await healKickbotAgentRecord(tenantId, existingAgent);
   }
 
   // 1. Roster identity — get-or-create by the stable ROLE (never the name).

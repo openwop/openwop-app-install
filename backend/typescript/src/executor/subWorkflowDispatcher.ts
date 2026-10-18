@@ -109,6 +109,9 @@ export interface SubWorkflowOpts {
    *  refs are names and are recorded on the child run record (replay-neutral).
    *  Never widened: only refs the PARENT already carries. */
   parentCredentialRefs?: readonly string[];
+  /** ADR 0903 — the parent run's `configurable.ai.provider` / `.model`, copied onto the
+   *  child's `configurable.ai` so its nodes that name no provider use the parent's choice. */
+  parentAi?: { provider: string; model?: string };
   /** ADR 0829 D2 — metadata stamped on the child run record at creation (the
    *  structured handoff record, under `openwop-handoff`). Written once with the
    *  run, so replay and `:fork` read it back; never recomputed. */
@@ -293,9 +296,10 @@ export async function dispatchSubWorkflow(
     status: 'pending',
     inputs: childInputs,
     metadata: { ...stripReservedRunMetadata(opts.childMetadata), ...(parentPerson ? { orgScopeSubject: parentPerson } : {}) },
-    configurable: opts.parentCredentialRefs && opts.parentCredentialRefs.length > 0
-      ? { credentialRefs: [...opts.parentCredentialRefs] }
-      : {},
+    configurable: {
+      ...(opts.parentCredentialRefs && opts.parentCredentialRefs.length > 0 ? { credentialRefs: [...opts.parentCredentialRefs] } : {}),
+      ...(opts.parentAi ? { ai: { ...opts.parentAi } } : {}),
+    },
     parentRunId: opts.parentRunId,
     createdAt: now,
     updatedAt: now,
@@ -331,7 +335,11 @@ export async function dispatchSubWorkflow(
   // misattributing to the `dispatching → failed` transition.
   let childRuntimeError: { code: string; message: string } | undefined;
   try {
-    await executeRun(storage, childRun, wf.definition, {});
+    // ADR 0903 D9 — the same provider policy every other run path passes. Without
+    // it the executor builds no AI adapter, so a child's nodes had no `ctx.callAI`
+    // (measured live 2026-10-18: every Campaign Studio channel child failed
+    // `capability_missing` once it got far enough to call a model).
+    await executeRun(storage, childRun, wf.definition, { policyResolver: hostSuite.providerPolicyResolver });
   } catch (err) {
     childRuntimeError = {
       code: 'child_runtime_error',

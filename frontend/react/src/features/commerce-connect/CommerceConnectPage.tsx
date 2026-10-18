@@ -8,7 +8,7 @@
 import { Button } from '../../ui/Button.js';
 import { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useSearchParams } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import { PageHeader } from '../../ui/PageHeader.js';
 import { StateCard } from '../../ui/StateCard.js';
 import { Skeleton } from '../../ui/Skeleton.js';
@@ -33,13 +33,20 @@ export function CommerceConnectPage(): JSX.Element {
   const [statsFailed, setStatsFailed] = useState(false);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
+  /** ADR 0877 (grade-ux CC2UX-5/6) — what the return from Stripe meant, said once:
+   *  `refresh` = the single-use link expired; `syncFailed` = the status shown is the
+   *  last one we had, not a fresh read from Stripe. */
+  const [arrival, setArrival] = useState<'refresh' | 'syncFailed' | null>(null);
 
   useEffect(() => {
     if (!access.enabled) { setLoading(false); return; }
     let live = true;
-    const returning = params.get('onboarding') === 'return';
+    const onboardingParam = params.get('onboarding');
+    const returning = onboardingParam === 'return';
+    const refreshing = onboardingParam === 'refresh';
+    if (refreshing) setArrival('refresh');
     const load = returning
-      ? syncSellerAccount().catch(() => getSellerAccount())
+      ? syncSellerAccount().catch(() => { if (live) setArrival('syncFailed'); return getSellerAccount(); })
       : getSellerAccount();
     void load.then(async (s) => {
       if (!live) return;
@@ -52,7 +59,7 @@ export function CommerceConnectPage(): JSX.Element {
     }).catch((e) => { if (live) setLoadError(e instanceof Error ? e.message : String(e)); }).finally(() => {
       if (!live) return;
       setLoading(false);
-      if (returning) setParams({}, { replace: true });
+      if (returning || refreshing) setParams({}, { replace: true });
     });
     return () => { live = false; };
   }, [access.enabled]); // eslint-disable-line react-hooks/exhaustive-deps -- params intentionally read once on entry
@@ -136,18 +143,33 @@ export function CommerceConnectPage(): JSX.Element {
   }
 
   const canResume = seller.onboardingState === 'pending' || seller.onboardingState === 'restricted';
+  // ADR 0877 D4 (grade-ux CC2UX-1) — a DEMO row is never a real account, even when
+  // it reads "Enabled". Starting onboarding again upgrades it to a live Stripe
+  // account when this host has a key (and says so honestly when it does not). This
+  // was the dead end a store owner reached from the "Connect Stripe" notice.
+  const isDemo = seller.mode === 'demo' && seller.onboardingState !== 'deauthorized';
+  const liveAndEnabled = seller.mode === 'live' && seller.onboardingState === 'enabled';
   return (
     <section className="u-grid u-gap-4" data-walkthrough="commerce-connect.page">
       <PageHeader
         eyebrow={t('eyebrow')} title={t('title')} lede={t('lede')}
         actions={
           <div className="action-bar u-gap-2">
-            {canResume ? <Button variant="primary" disabled={busy} onClick={onboard}>{busy ? t('starting') : t('resumeCta')}</Button> : null}
+            {isDemo
+              ? <Button variant="primary" disabled={busy} onClick={onboard}>{busy ? t('starting') : t('connectLiveCta')}</Button>
+              : canResume ? <Button variant="primary" disabled={busy} onClick={onboard}>{busy ? t('starting') : t('resumeCta')}</Button> : null}
             <Button variant="secondary" disabled={busy} onClick={sync}>{t('syncCta')}</Button>
           </div>
         }
       />
+      {arrival === 'refresh' ? <Notice variant="info">{t('linkExpiredNotice')}</Notice> : null}
+      {arrival === 'syncFailed' ? <Notice variant="warning" announce={t('syncFailedOnReturn')}>{t('syncFailedOnReturn')}</Notice> : null}
       {seller.mode === 'demo' ? <Notice variant="info">{t('demoNotice')}</Notice> : null}
+      {liveAndEnabled ? (
+        <Notice variant="success">
+          {t('storeLiveNotice')}{' '}<Link className="inline-link" to="/commerce">{t('backToStore')}</Link>
+        </Notice>
+      ) : null}
       {/* MKT-UX-13 — ANNOUNCED. `variant="warning"` is `role="status"`, which
           announces nothing on insertion, and this notice says the seller account
           was DISCONNECTED FROM THE PLATFORM — a money-state fact that silently

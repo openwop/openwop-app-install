@@ -54,7 +54,7 @@ async function openGallery(page: Page): Promise<void> {
   // scaffolding that grew here (retry-once → 3× reload → skip-loudly) was
   // treating the symptom; vendoring removed the network from the equation.
   const loaded = await page.evaluate(async () => {
-    const families = ['14px "Geist"', '14px "Geist Mono"', '14px "Instrument Serif"'];
+    const families = ['14px "Geist"', '14px "Geist Mono"', '600 14px "Bricolage Grotesque"'];
     await Promise.all(families.map((f) => document.fonts.load(f)));
     await document.fonts.ready;
     return families.every((f) => document.fonts.check(f));
@@ -210,20 +210,38 @@ test.describe('design-system — coarse pointer + forced colors', () => {
     await context.close();
   });
 
+  /* Forced colors (Windows High Contrast). The UA repaints controls in system
+   * colours; the only ways OUR CSS can defeat that are opting a control out
+   * (`forced-color-adjust: none`) or hiding it (opacity 0). Playwright's
+   * `toBeVisible` passes an opacity-0 or transparent-text button, so the first cut
+   * of this case could not fail on its own claim (wave 53 probe: opacity 0 +
+   * opt-out under forced colors stayed green). It now reads the computed style
+   * that decides it, and first proves the emulation took effect.
+   * The NAME half is also axe `button-name` in `a11y.spec.ts`
+   * ("a11y: /design-system (light)"); it stays here because forced colors is the
+   * state that case never renders. */
   test('forced colors: gallery controls stay visible and labeled', async ({ page }) => {
     await page.emulateMedia({ forcedColors: 'active', reducedMotion: 'reduce' });
     const res = await page.request.post(`${API}/test/login`, { data: { email: 'forced@e2e.test' } });
-    expect(res.status()).toBe(201);
+    expect(res.status(), await res.text()).toBe(201);
     await page.goto('/design-system');
     await expect(page.locator('[data-gallery="buttons"]')).toBeVisible({ timeout: 60_000 });
-    // Every button in the specimen row still hit-tests and carries a name —
-    // forced colors must never render an invisible or nameless control.
+    expect(await page.evaluate(() => matchMedia('(forced-colors: active)').matches), 'forced-colors emulation is not active').toBe(true);
     const buttons = page.locator('[data-gallery="buttons"] button');
-    const n = await buttons.count();
-    expect(n).toBeGreaterThan(4);
-    for (let i = 0; i < n; i++) {
+    // The buttons specimen row in GalleryPage.tsx: 5 variants + small/disabled/loading
+    // + the icon button + the with-glyph button.
+    await expect(buttons).toHaveCount(10);
+    const styles = await buttons.evaluateAll((els) => els.map((el) => {
+      const cs = getComputedStyle(el);
+      return { label: el.getAttribute('aria-label') ?? el.textContent?.trim() ?? '', adjust: cs.forcedColorAdjust, opacity: Number(cs.opacity) };
+    }));
+    for (const s of styles) {
+      expect(s.adjust, `"${s.label}" opts out of forced colors`).not.toBe('none');
+      expect(s.opacity, `"${s.label}" is transparent under forced colors`).toBeGreaterThan(0);
+    }
+    for (let i = 0; i < 10; i++) {
       await expect(buttons.nth(i)).toBeVisible();
-      expect((await buttons.nth(i).textContent())?.trim() || (await buttons.nth(i).getAttribute('aria-label'))).toBeTruthy();
+      await expect(buttons.nth(i)).toHaveAccessibleName(/\S/);
     }
   });
 });

@@ -200,6 +200,18 @@ export function runOwner(run: { tenantId: string; metadata?: Record<string, unkn
 }
 
 /**
+ * "Is this run this subject's?" — the ONE answer, for every read that shows a
+ * person their own runs (the home tiles' `listOwnRuns`, the task deck — ADR 0902
+ * D4). The owner block above decides (stamp, then anon markers, then legacy
+ * `actingUserId`), compared against the same opaque projection of the subject the
+ * stamp was minted from. The caller's own personal workspace (every run is theirs
+ * by construction) is the caller's decision, not this predicate's.
+ */
+export function isRunOwnedBy(run: { tenantId: string; metadata?: Record<string, unknown> | null }, subject: string): boolean {
+  return runOwner(run)?.principal === opaquePrincipal(subject);
+}
+
+/**
  * `spec/v2/core/identity.md` §1.1 "Shape" (RFC 0170 §A.1) — the major-2 owner
  * block: `{ tenant, workspace?, subject }`, CLOSED, `subject` REQUIRED,
  * `principal` and `principalKind` REMOVED (`subject.subjectId` and

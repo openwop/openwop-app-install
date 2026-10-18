@@ -27,7 +27,7 @@ import { Notice } from '../ui/Notice.js';
 import { AlertIcon, FlaskIcon, PlayIcon } from '../ui/icons/index.js';
 import type { ScheduledJob } from './scheduleClient.js';
 import type { KanbanBoard } from '../kanban/kanbanClient.js';
-import { writeErrorMessage } from './agentWriteAccess.js';
+import { writeErrorMessage, isStaleWrite, useAgentWriteAccess } from './agentWriteAccess.js';
 
 export function AgentWorkflowPortfolioPanel({
   entry,
@@ -41,6 +41,8 @@ export function AgentWorkflowPortfolioPanel({
   onChanged: () => void;
 }): JSX.Element {
   const { t } = useTranslation('agents');
+  // ADR 0775 P3 (`ARUX-18`) — a viewer sees the portfolio, not assign/remove controls.
+  const canWrite = useAgentWriteAccess();
   const [error, setError] = useState<string | null>(null);
   const [running, setRunning] = useState<string | null>(null);
   const [runPrompt, setRunPrompt] = useState<{ workflowId: string; name: string; variables: RunVariable[] } | null>(null);
@@ -49,10 +51,16 @@ export function AgentWorkflowPortfolioPanel({
   // ADR 0163 Phase 6 — the caller's REAL backend workflows (incl. ones created
   // from templates) are assignable, not just the hardcoded role-template options.
   const [mine, setMine] = useState<{ workflowId: string; name: string }[]>([]);
+  // ADR 0779 D7 (the EMPTY-ON-FAIL near-miss) — a failed read of the caller's
+  // workflows is NOT "this workflow is not on the host". With `availability` also
+  // unread, a real backend workflow used to fall to `isKnownWorkflow` and render
+  // "Local-only" + a disabled Run now. The failure is kept so the card can say it
+  // could not check, instead of asserting the workflow is local.
+  const [mineFailed, setMineFailed] = useState(false);
   useEffect(() => {
     void listWorkflowSummaries()
       .then((rows) => setMine(rows.map((r) => ({ workflowId: r.workflowId, name: r.name }))))
-      .catch(() => setMine([]));
+      .catch(() => { setMine([]); setMineFailed(true); });
   }, []);
   // ADR 0870 §Stopgap — the host says which cards are demos and whether they
   // can run on THIS deployment. `null` (not loaded / read failed) keeps the
@@ -76,10 +84,13 @@ export function AgentWorkflowPortfolioPanel({
 
   const setWorkflows = async (workflows: string[]) => {
     try {
-      await updateRosterEntry(entry.rosterId, { workflows });
+      // ADR 0775 P4 — the list was built from this copy of the entry; if the agent
+      // changed since, the server refuses and the panel reloads the current list.
+      await updateRosterEntry(entry.rosterId, { workflows }, { ifMatch: entry.etag });
       onChanged();
     } catch (err) {
-      setError(writeErrorMessage(err, t('common:error_forbidden')));
+      setError(writeErrorMessage(err, t('common:error_forbidden'), t('agentChangedReload')));
+      if (isStaleWrite(err)) onChanged();
     }
   };
 
@@ -170,6 +181,9 @@ export function AgentWorkflowPortfolioPanel({
           {entry.workflows.map((wfId) => {
             const avail = availability?.get(wfId);
             const known = avail ? avail.known : mineById.has(wfId) || isKnownWorkflow(wfId);
+            // Neither the host's availability nor the caller's workflow list was read:
+            // we do not know, so neither claim "local-only" nor disable Run now.
+            const unverified = !avail && !known && mineFailed;
             const demo = avail?.demo === true;
             const demoBlocked = avail?.reason === 'demo-node-unavailable';
             const blockedId = `agentportfolio-blocked-${entry.rosterId}-${wfId}`;
@@ -186,14 +200,18 @@ export function AgentWorkflowPortfolioPanel({
                     </span>
                   ) : null}
                 </div>
-                <div className="agentportfolio-purpose">{workflowPurpose(wfId) ?? (known ? '' : t('portfolioLocalDefault'))}</div>
+                <div className="agentportfolio-purpose">{workflowPurpose(wfId) ?? (known || unverified ? '' : t('portfolioLocalDefault'))}</div>
                 {demo ? <div className="muted u-fs-12">{t('portfolioDemoExplain')}</div> : null}
                 {demoBlocked ? (
                   <div id={blockedId} className="u-flex u-gap-1 u-items-center u-fs-12 u-text-warning">
                     <AlertIcon size={13} /> {t('portfolioDemoUnavailable')}
                   </div>
                 ) : null}
-                {!known ? (
+                {unverified ? (
+                  <div className="u-flex u-gap-1 u-items-center u-fs-12 u-text-warning">
+                    <AlertIcon size={13} /> {t('portfolioAvailabilityUnknown')}
+                  </div>
+                ) : !known ? (
                   <div className="u-flex u-gap-1 u-items-center u-fs-12 u-text-warning">
                     <AlertIcon size={13} /> {t('portfolioLocalOnly')}
                   </div>
@@ -207,15 +225,17 @@ export function AgentWorkflowPortfolioPanel({
                   <Button
                     variant="primary"
                     size="sm"
-                    disabled={!known || demoBlocked || running === wfId}
+                    disabled={(!known && !unverified) || demoBlocked || running === wfId}
                     aria-describedby={demoBlocked ? blockedId : undefined}
                     onClick={() => void onRunNow(wfId)}
                   >
                     {running === wfId ? t('portfolioRunning') : t('portfolioRunNow')}
                   </Button>
-                  <Button variant="secondary" size="sm" onClick={() => void setWorkflows(entry.workflows.filter((w) => w !== wfId))}>
-                    {t('portfolioUnassign')}
-                  </Button>
+                  {canWrite ? (
+                    <Button variant="secondary" size="sm" onClick={() => void setWorkflows(entry.workflows.filter((w) => w !== wfId))}>
+                      {t('portfolioUnassign')}
+                    </Button>
+                  ) : null}
                 </div>
               </div>
             );
@@ -224,6 +244,7 @@ export function AgentWorkflowPortfolioPanel({
         </>
       )}
 
+      {!canWrite ? <p className="muted u-fs-13 u-mt-3 u-mb-0">{t('viewerPanelReadOnly')}</p> : (
       <div className="agentportfolio-assign">
         <strong className="u-fs-14">{t('portfolioAssignHeading')}</strong>
         <div className="action-bar u-mt-2">
@@ -240,6 +261,7 @@ export function AgentWorkflowPortfolioPanel({
           <p className="muted u-fs-12 u-mt-2 u-mb-0">{t('portfolioDemoPickerHidden', { count: hiddenDemoCount })}</p>
         ) : null}
       </div>
+      )}
 
       {runPrompt ? (
         <RunInputsDialog

@@ -25,42 +25,40 @@
  * confines the LIVE turn exactly as the deterministic contract-check does, so a
  * convened specialist still cannot write domain state.
  *
- * @see src/features/scheduled-agent-chats/scheduledChatTurnWorkflow.ts — the pattern
+ * WHAT CHANGED AND WHY (the ADR 0701 / ADR 0703 drain, applied to the last product
+ * entry). This used to build an in-tree `WorkflowDefinition` literal and hand it to
+ * the raw `registerWorkflow` registrar — the one remaining PRODUCT entry in
+ * `test/workflow-pin-site-ratchet.test.ts`'s `PIN_SITE_QUARANTINE`, the shape
+ * `CLAUDE.md` § "Workflows — never hard-code" forbids: a code-pinned workflow is
+ * invisible to `/builder` and the `/` picker and is not tenant-editable.
+ *
+ * The graph now ships as `core.openwop.workflows.kicktodo-convene-turn`
+ * (`examples/workflow-chain-packs/kicktodo-convene-turn`) and registers CHAIN-BACKED
+ * under the SAME workflowId, so the convene tool's and the coach turn's scheduler
+ * jobs (`agentTools.ts`, `kickbotCoachTurnService.ts`) and every run stamp keep
+ * resolving. It is `internal: true` (ADR 0879 D9, the channel-turn precedent): it is
+ * infrastructure fired with programmatic params, not a gallery template.
+ *
+ * The per-job values still work because `registerChainBackedWorkflow` expands with
+ * `deferred: true` (RFC 0124): the chain's `parameters` become run-overridable
+ * `variables[]` under their BARE names, so the node still reads
+ * `{type:'variable', variableName:'agentId'}` and the job's `configurable` still
+ * drives it. The single node is the terminal, so expansion marks it
+ * `outputRole: 'primary'` — the role the literal declared.
+ *
+ * @see src/features/channels/channelTurnWorkflow.ts — the drained precedent (ADR 0703)
  * @see src/host/agentRunnerNode.ts — the gated agent-runner this wraps
  */
-import { registerWorkflow, getRegisteredWorkflow } from '../../host/workflowsRegistry.js';
-import { AGENT_RUNNER_TYPE_ID } from '../../host/agentRunnerNode.js';
-import type { WorkflowDefinition } from '../../executor/types.js';
+import { registerChainBackedWorkflow, getChainBackedWorkflow } from '../../host/chainBackedWorkflows.js';
 
 export const KICKTODO_CONVENE_TURN_WORKFLOW_ID = 'openwop-app.kicktodo.convene-turn';
 
 /** The host-owned managed key a convened specialist (autonomous, zero-BYOK) runs on. */
 export const KICKTODO_CONVENE_CREDENTIAL_REF = 'managed:openwop-free';
 
-const DEF: WorkflowDefinition = {
-  workflowId: KICKTODO_CONVENE_TURN_WORKFLOW_ID,
-  nodes: [{
-    nodeId: 'run',
-    typeId: AGENT_RUNNER_TYPE_ID,
-    inputs: {
-      agentId: { type: 'variable', variableName: 'agentId' },
-      task: { type: 'variable', variableName: 'task' },
-      credentialRef: { type: 'variable', variableName: 'credentialRef' },
-      // Post the specialist's reply back into KickBot's conversation as a turn.
-      conversationId: { type: 'variable', variableName: 'conversationId' },
-    },
-    outputRole: 'primary',
-  }],
-  variables: [
-    { name: 'agentId', type: 'string', description: 'The convened specialist to run.', required: true },
-    { name: 'task', type: 'string', description: 'The advisory task the specialist runs on.', required: true },
-    { name: 'credentialRef', type: 'string', description: 'The host-owned managed credential (no BYOK from a chat tool).', required: false },
-    { name: 'conversationId', type: 'string', description: 'KickBot conversation the advice posts into (ADR 0125 Phase 2c).', required: false },
-  ],
-  edges: [],
-};
-
 /** Register the convene turn-workflow once (idempotent — safe at every feature boot). */
 export function seedKicktodoConveneTurnWorkflow(): void {
-  if (!getRegisteredWorkflow(KICKTODO_CONVENE_TURN_WORKFLOW_ID)) registerWorkflow(DEF);
+  if (!getChainBackedWorkflow(KICKTODO_CONVENE_TURN_WORKFLOW_ID)) {
+    registerChainBackedWorkflow(KICKTODO_CONVENE_TURN_WORKFLOW_ID);
+  }
 }

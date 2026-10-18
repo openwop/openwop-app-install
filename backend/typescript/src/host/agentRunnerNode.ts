@@ -36,16 +36,23 @@
  * block in `execute`).
  */
 
+import { maybeCaptureExecuteTool } from './evals/toolBoundary.js';
 import type { NodeContext, NodeModule, NodeOutcome } from '../executor/types.js';
 import { handoffPromptBlock } from './handoff/handoffRecord.js';
 import { collectRunContextBlocks } from './runContextProviders.js';
-import { runAgentDispatchLive, AgentNotFoundError, type AgentEvent, type AgentKnowledgeRetrieve } from './agentDispatch.js';
+import { runAgentDispatchLive, AgentNotFoundError, type AgentEvent, type AgentKnowledgeRetrieve, type AgentMemoryPort } from './agentDispatch.js';
 import { createLogger } from '../observability/logger.js';
 import { createAgentToolProvider, builtinAgentToolIds } from './agentToolProvider.js';
 import { resolveAgentIdentity } from './agentIdentity.js';
 import { getBorrowedRecallResolver } from './twinRecallSurface.js';
+import { resolveAgentKnowledgeRetrieve } from './agentKnowledgeComposition.js';
+import { agentMemoryScope, createAgentMemoryPort } from './agentMemoryAdapter.js';
+import { autonomousDispatchVerdict } from './autonomousDispatchPolicy.js';
+import { currentEffectContext } from './runEffectContext.js';
 import { appendChatMessageLive } from './chatMessageBus.js';
 import { agentRef } from './conversationStore.js';
+import { authorizeRunConversationWrite } from './runConversationWrite.js';
+import { hostExtStorage } from './hostExtPersistence.js';
 import { buildLaneFirewall } from './laneFirewall.js';
 
 export const AGENT_RUNNER_TYPE_ID = 'local.openwop-app.agent-runner';
@@ -120,6 +127,45 @@ const agentRunnerNode: NodeModule = {
     // tenant/run-scoped (CTI-1). No second executor. ADR 0277 P2 — the profile
     // id scopes the knowledge tools to the agent's bound collections.
     const runnerIdentity = await resolveAgentIdentity(ctx.tenantId, agentId, { allowReverseScan: true });
+    // ADR 0775 P3e — a paused agent, or a workflow on its `never` list, does not
+    // run on its own INSIDE a workflow either: a trigger, webhook, event binding or
+    // kanban work item starts a workflow, and this node is where its agent acts.
+    // "On its own" = no acting person and no conversation. A run a person started
+    // (or a reply to a person's post, which carries its conversation) is the test
+    // pane and stays ungated, as chat does. The schedule and heartbeat lanes gate
+    // before the run exists; this is the same verdict, so the lanes agree.
+    //
+    // ADR 0775 P3f — `hitl` applies here too. The run already exists, so instead
+    // of filing a run-proposal (the schedule lane's answer, which would re-run
+    // every node before this one) the node pauses on the engine's own approval
+    // interrupt: durable, in the unified review inbox (ADR 0068), resolved by the
+    // ONE resolve path, expired fail-closed by the gate timeout. Approved, the
+    // node re-enters and the agent acts; anything else fails the node.
+    if (!ctx.actingUserId && !conversationId) {
+      const verdict = await autonomousDispatchVerdict(ctx.tenantId, runnerIdentity.rosterId ?? agentId, ctx.workflowId);
+      if (!verdict.allowed && verdict.reason === 'agent-paused') {
+        return { status: 'failure', retryable: false, error: { code: 'agent_paused', message: `agent '${agentId}' is paused; resume it to let it run on its own.` } };
+      }
+      if (!verdict.allowed && verdict.reason === 'policy-denied') {
+        return { status: 'failure', retryable: false, error: { code: 'policy_denied', message: `agent '${agentId}' is not allowed to run workflow '${ctx.workflowId}' (its never list).` } };
+      }
+      if (!verdict.allowed && verdict.reason === 'needs-approval') {
+        const suspend = ctx.suspend ?? ctx.interrupt;
+        if (!suspend) {
+          return { status: 'failure', retryable: false, error: { code: 'approval_required', message: `agent '${agentId}' needs approval to run workflow '${ctx.workflowId}', and this run cannot pause for one.` } };
+        }
+        const decision = await suspend({
+          kind: 'approval',
+          key: `agent-hitl:${verdict.entry.rosterId}`,
+          actions: ['approve', 'reject'],
+          prompt: `Let ${verdict.entry.persona} run workflow '${ctx.workflowId}'? It is on the agent's approval list.`,
+        });
+        const action = (decision as { action?: unknown } | null)?.action;
+        if (action !== 'approve' && action !== 'accept') {
+          return { status: 'failure', retryable: false, error: { code: 'approval_rejected', message: `running workflow '${ctx.workflowId}' as agent '${agentId}' was not approved.` } };
+        }
+      }
+    }
     // ADR 0324 scope-composer law — an actingUserId-gated tool (e.g. the KickTodo
     // today/progress reads a run-embedded agent offers, ADR 0459 P1) fails EMPTY
     // without the run's acting human. Thread `ctx.actingUserId` (stamped on
@@ -179,6 +225,28 @@ const agentRunnerNode: NodeModule = {
     // path (`twinRecallSurface.ts`, `borrowedRecall.ts`). Do NOT classify this
     // node side-effecting and do NOT "optimize" in a grant/run stamp: either
     // would freeze borrowed content past revocation.
+    // ADR 0775 P3c (`ARWF-13`, knowledge half) — the agent's OWN bound knowledge
+    // (cited KB docs + private memory), resolved exactly as the chat and the
+    // ad-hoc dispatch lane resolve it (`liveDispatchLane.ts`). Before this a
+    // scheduled turn, a follow-up and a heartbeat fallback answered without the
+    // knowledge the same agent cites in chat. Dispatch fences untrusted chunks.
+    // ADR 0775 P3e — the dispatch below also gets the port, so an agent that opts
+    // into long-term memory (`memoryShape.longTerm`) records its turn here as it
+    // does in chat (see `memoryWrite` there). Best-effort like
+    // borrowed recall: a resolution fault degrades to no block, never fails the turn.
+    let memory: AgentMemoryPort | undefined;
+    let knowledgeRetrieve: AgentKnowledgeRetrieve | undefined;
+    try {
+      memory = createAgentMemoryPort(ctx.tenantId);
+      knowledgeRetrieve = await resolveAgentKnowledgeRetrieve(
+        ctx.tenantId, runnerIdentity.profileId, memory, undefined,
+        ctx.actingUserId ? { subject: ctx.actingUserId } : undefined,
+      );
+    } catch (err) {
+      log.warn('agent_runner_knowledge_resolve_failed', {
+        tenantId: ctx.tenantId, agentId: runnerIdentity.profileId, error: err instanceof Error ? err.message : String(err),
+      });
+    }
     const borrowedResolver = getBorrowedRecallResolver();
     let borrowedRetrieve: AgentKnowledgeRetrieve | undefined;
     let borrowedOwnerName: string | undefined;
@@ -223,6 +291,11 @@ const agentRunnerNode: NodeModule = {
     // ADR 0831 P2 — context features attach to this run (e.g. the team ledger
     // version it was stamped with), each block already fenced by its provider.
     const contextBlocks = ctx.runId ? await collectRunContextBlocks({ tenantId: ctx.tenantId, runId: ctx.runId }) : [];
+    // ADR 0889 D9 — opt-in per agent: record the tool boundary so this run can be
+    // promoted to an eval case. Unchanged executor when capture is off (the default).
+    const executeTool = ctx.runId
+      ? await maybeCaptureExecuteTool(toolProvider.executeTool, { tenantId: ctx.tenantId, runId: ctx.runId, agentId: runnerIdentity.agentId, segment: ctx.nodeId, lane: 'run' })
+      : toolProvider.executeTool;
     try {
       const result = await runAgentDispatchLive(
         {
@@ -250,7 +323,7 @@ const agentRunnerNode: NodeModule = {
           callAI: ctx.callAI,
           callAIWithTools: ctx.callAIWithTools,
           resolveTool: toolProvider.resolveTool,
-          executeTool: toolProvider.executeTool,
+          executeTool,
           // ADR 0150 — gate the SENSITIVE tools on the run lane (see the hook build above).
           firewall,
           // ADR 0102 — resolve this standing agent's tool permissions for the
@@ -267,6 +340,14 @@ const agentRunnerNode: NodeModule = {
           // ADR 0044 Phase 2 — the granted twin's borrowed owner-corpus (undefined
           // for every non-twin agent; dispatch fences it into the untrusted block).
           // RCL-6 — the owner's name labels the fenced block (consented disclosure).
+          ...(knowledgeRetrieve ? { knowledgeRetrieve } : {}),
+          // ADR 0775 P3e — cross-run memory, the chat lane's scope and opt-in.
+          // One upserted entry per run node, none on a replay, always untrusted.
+          ...(memory ? {
+            memory,
+            memoryScope: agentMemoryScope(runnerIdentity.profileId),
+            memoryWrite: { id: `run:${ctx.runId}:${ctx.nodeId}`, skip: currentEffectContext()?.replaying === true, untrusted: true },
+          } : {}),
           ...(borrowedRetrieve ? { borrowedRetrieve } : {}),
           ...(borrowedOwnerName ? { borrowedOwnerName } : {}),
           ...(handoffNote ? { handoffNote } : {}),
@@ -290,7 +371,27 @@ const agentRunnerNode: NodeModule = {
       // deterministic `sched:<runId>` id ⇒ a re-run can't duplicate the turn) and
       // BEST-EFFORT (a conversation-write failure must NEVER fail the turn — the agent
       // already replied). The node runs live-once, so the append happens once.
-      if (conversationId) {
+      // ADR 0879 D7 — the append is a WRITE into someone's conversation, so it
+      // asks for authority over the target first (tenant, agent membership, the
+      // human behind the run). A refusal is "answered but did not post": the turn
+      // still succeeds with its output below, so replay is unchanged.
+      const verdict = conversationId
+        ? await authorizeRunConversationWrite(hostExtStorage(), {
+            tenantId: ctx.tenantId, conversationId, agentId,
+            actingUserId: ctx.actingUserId, orgScopeSubject: ctx.orgScopeSubject, personalTenant: ctx.personalTenant,
+          }).catch(() => ({ ok: false as const, reason: 'not_in_tenant' as const }))
+        : null;
+      if (conversationId && verdict && !verdict.ok) {
+        log.warn('run_conversation_write_refused', { runId: ctx.runId, tenantId: ctx.tenantId, conversationId, agentId, reason: verdict.reason });
+        // ADR 0879 D7 (team-lead decision) — a reply that may not be posted is a
+        // TYPED FAILURE, never a silent success: the run, and a schedule's
+        // "last run" status, say why nothing appeared in the conversation.
+        return {
+          status: 'failure',
+          error: { code: 'conversation_write_refused', message: `The reply was not posted to this conversation (${verdict.reason}).` },
+        };
+      }
+      if (conversationId && verdict?.ok) {
         try {
           // ADR 0154 FU-6 — append + live-delivery event so a channel's members
           // (and the poster who triggered the turn) see the reply without a refresh.

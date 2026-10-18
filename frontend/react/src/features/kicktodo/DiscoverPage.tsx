@@ -12,6 +12,7 @@ import { useTranslation } from 'react-i18next';
 import { ArrowRightIcon, FlagIcon, SearchIcon } from '../../ui/icons/index.js';
 import { StateCard } from '../../ui/StateCard.js';
 import { Notice } from '../../ui/Notice.js';
+import { Field, SelectField } from '../../ui/Field.js';
 import {
   listChallengesForLocale,
   type NegotiatedChallenge,
@@ -20,6 +21,7 @@ import {
   type ChallengeSummary,
   recommendedChallenges,
   type ChallengeRecommendation,
+  type Enrollment,
 } from '../../client/kicktodoClient.js';
 import { useAuth } from '../../auth/useAuth.js';
 
@@ -58,6 +60,10 @@ export function DiscoverPage() {
   const [enrolledIds, setEnrolledIds] = useState<Set<string>>(new Set());
   const { user } = useAuth();
   const [error, setError] = useState(false);
+  // PT-2 — the enrolment list only drives the "Enrolled" badges. Its failure
+  // must neither take the catalog down nor silently read as "not enrolled".
+  const [enrolledUnknown, setEnrolledUnknown] = useState(false);
+  const [reloadSequence, setReloadSequence] = useState(0);
   const [query, setQuery] = useState('');
   const [depth, setDepth] = useState<'all' | 'beginner' | 'intermediate' | 'advanced'>('all');
   const [timeBudget, setTimeBudget] = useState<TimeBudget>('all');
@@ -83,9 +89,14 @@ export function DiscoverPage() {
           setChallenges(publicList);
           setEnrolledIds(new Set());
           setRecommended([]);
+          setEnrolledUnknown(false);
           return;
         }
-        const [negotiated, mine, reco] = await Promise.all([listChallengesForLocale(contentLocale), listEnrollments(), recommendedChallenges()]);
+        const [negotiated, mine, reco] = await Promise.all([
+          listChallengesForLocale(contentLocale),
+          listEnrollments().then((rows) => ({ ok: true as const, rows })).catch(() => ({ ok: false as const, rows: [] as Enrollment[] })),
+          recommendedChallenges(),
+        ]);
         setRecommended(reco);
         setServedBy(Object.fromEntries(negotiated.map((n) => [n.challenge.id, n])));
         setChallenges(negotiated.map((n) => n.challenge));
@@ -93,12 +104,13 @@ export function DiscoverPage() {
         // challengeId@version — a published version bump (v1→v2) must not hide the
         // badge and invite a returning participant to re-enroll at v2 (a client-
         // surfaced duplicate). ChallengeDetail's `alreadyEnrolled` matches by id too.
-        setEnrolledIds(new Set(mine.map((e) => e.challengeId)));
+        setEnrolledIds(new Set(mine.rows.map((e) => e.challengeId)));
+        setEnrolledUnknown(!mine.ok);
       } catch {
         setError(true);
       }
     })();
-  }, [contentLocale, user]);
+  }, [contentLocale, user, reloadSequence]);
 
   const shown = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -138,61 +150,65 @@ export function DiscoverPage() {
       {/* The §4.5 collection canon filterbar (screen-polish: filters lived in
           the header's button-cluster). Goal search stays visible even for a
           small catalog: it teaches visitors what this collection is for. */}
-      <section className="kt-discover-search" aria-labelledby="discover-goal-label">
-        <div className="kt-discover-search__field">
-          <label id="discover-goal-label" className="kt-discover-search__label" htmlFor="discover-goal-search">{t('discoverSearchLabel')}</label>
-          <span className="kt-discover-search__control">
-            <SearchIcon size={19} aria-hidden />
-            <input id="discover-goal-search" type="search" className="ui-input" value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder={t('discoverSearchPlaceholder')} aria-describedby="discover-goal-hint" />
-          </span>
-          <small id="discover-goal-hint">{t('discoverSearchHint')}</small>
-        </div>
+      {/* PT-6 — the shared `ui/Field` primitives own the label↔control and
+          help wiring (the search keeps its icon via Field's render prop). */}
+      <section className="kt-discover-search" aria-label={t('discoverSearchLabel')}>
+        <Field className="kt-discover-search__field" label={t('discoverSearchLabel')} help={t('discoverSearchHint')}>
+          {(w) => (
+            <span className="kt-discover-search__control">
+              <SearchIcon size={19} aria-hidden />
+              <input {...w} type="search" className="ui-input" value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder={t('discoverSearchPlaceholder')} />
+            </span>
+          )}
+        </Field>
         <div className="kt-discover-search__filters">
           {hasTimeData && (
-            <label className="field">
-              <span className="field-label">{t('discoverTimeBudgetLabel')}</span>
-              <select className="filterbar-select" value={timeBudget} onChange={(e) => setTimeBudget(e.target.value as TimeBudget)}>
-                <option value="all">{t('discoverTimeBudgetAny')}</option>
-                <option value="10">{t('discoverTimeBudgetOption', { count: 10 })}</option>
-                <option value="20">{t('discoverTimeBudgetOption', { count: 20 })}</option>
-                <option value="30">{t('discoverTimeBudgetOption', { count: 30 })}</option>
-              </select>
-            </label>
+            <SelectField label={t('discoverTimeBudgetLabel')}
+              value={timeBudget} onChange={(e) => setTimeBudget(e.target.value as TimeBudget)}>
+              <option value="all">{t('discoverTimeBudgetAny')}</option>
+              <option value="10">{t('discoverTimeBudgetOption', { count: 10 })}</option>
+              <option value="20">{t('discoverTimeBudgetOption', { count: 20 })}</option>
+              <option value="30">{t('discoverTimeBudgetOption', { count: 30 })}</option>
+            </SelectField>
           )}
           {(challenges?.length ?? 0) > 1 && (
-            <label className="field">
-              <span className="field-label">{t('discoverDurationBudgetLabel')}</span>
-              <select className="filterbar-select" value={durationBudget} onChange={(e) => setDurationBudget(e.target.value as DurationBudget)}>
-                <option value="all">{t('discoverDurationBudgetAny')}</option>
-                <option value="14">{t('discoverDurationBudgetOption', { count: 14 })}</option>
-                <option value="30">{t('discoverDurationBudgetOption', { count: 30 })}</option>
-              </select>
-            </label>
+            <SelectField label={t('discoverDurationBudgetLabel')}
+              value={durationBudget} onChange={(e) => setDurationBudget(e.target.value as DurationBudget)}>
+              <option value="all">{t('discoverDurationBudgetAny')}</option>
+              <option value="14">{t('discoverDurationBudgetOption', { count: 14 })}</option>
+              <option value="30">{t('discoverDurationBudgetOption', { count: 30 })}</option>
+            </SelectField>
           )}
           {(challenges?.length ?? 0) > 4 && (challenges ?? []).some((c) => c.depthLevel) && (
-            <label className="field">
-              <span className="field-label">{t('depthFilterLabel')}</span>
-              <select className="filterbar-select" value={depth} onChange={(e) => setDepth(e.target.value as typeof depth)}>
-                <option value="all">{t('depthAll')}</option>
-                <option value="beginner">{t('depth_beginner')}</option>
-                <option value="intermediate">{t('depth_intermediate')}</option>
-                <option value="advanced">{t('depth_advanced')}</option>
-              </select>
-            </label>
+            <SelectField label={t('depthFilterLabel')}
+              value={depth} onChange={(e) => setDepth(e.target.value as typeof depth)}>
+              <option value="all">{t('depthAll')}</option>
+              <option value="beginner">{t('depth_beginner')}</option>
+              <option value="intermediate">{t('depth_intermediate')}</option>
+              <option value="advanced">{t('depth_advanced')}</option>
+            </SelectField>
           )}
-          <label className="field">
-            <span className="field-label">{t('contentLocaleLabel')}</span>
-            <select className="filterbar-select" value={contentLocale}
-              onChange={(e) => { setContentLocale(e.target.value); localStorage.setItem(CONTENT_LOCALE_KEY, e.target.value); }}>
-              {CONTENT_LOCALES.map((loc) => <option key={loc} value={loc}>{localeLabel(loc, i18n.language)}</option>)}
-            </select>
-          </label>
+          <SelectField label={t('contentLocaleLabel')} value={contentLocale}
+            onChange={(e) => { setContentLocale(e.target.value); localStorage.setItem(CONTENT_LOCALE_KEY, e.target.value); }}>
+            {CONTENT_LOCALES.map((loc) => <option key={loc} value={loc}>{localeLabel(loc, i18n.language)}</option>)}
+          </SelectField>
         </div>
       </section>
 
-      {error && <Notice variant="error">{t('loadChallengesError')}</Notice>}
+      {error && (
+        <Notice variant="error" announce={t('loadChallengesError')}>
+          {t('loadChallengesError')}{' '}
+          <Button variant="quiet" size="sm" onClick={() => setReloadSequence((n) => n + 1)}>{t('common:retry')}</Button>
+        </Notice>
+      )}
+      {enrolledUnknown && !error && challenges && challenges.length > 0 && (
+        <Notice variant="warning" announce={t('discoverEnrolledUnknown')}>
+          {t('discoverEnrolledUnknown')}{' '}
+          <Button variant="quiet" size="sm" onClick={() => setReloadSequence((n) => n + 1)}>{t('common:retry')}</Button>
+        </Notice>
+      )}
       {!challenges && !error && <StateCard loading title={t('discoverTitle')} />}
       {challenges && challenges.length === 0 && !error && (
         <StateCard icon={<FlagIcon aria-hidden />} title={t('discoverEmptyTitle')} body={t('discoverEmptyBody')} />

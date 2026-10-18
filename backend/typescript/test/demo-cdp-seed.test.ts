@@ -5,6 +5,10 @@
  * volume, identity stitching, consent (opted-out records), CDC + event syncs,
  * a segment-enrolled journey with a holdout, and scoped developer keys — seeded
  * idempotently and cleared with no orphans.
+ *
+ * Sabotage-witnessed (/grade-tests w38): every marketing opt-in forced on, the analytics
+ * idempotency guard bypassed, the clear skipping identity links / event schemas / developer keys,
+ * and the 20% holdout skip removed each turn the case red.
  */
 import { beforeAll, describe, expect, it } from 'vitest';
 import { mkdtempSync } from 'node:fs';
@@ -20,7 +24,9 @@ import { seedDemoCdp, clearDemoCdp, countDemoCdp } from '../src/host/demoCdpSeed
 import { listEventSchemas } from '../src/features/cdp/eventSchemaService.js';
 import { listConsent } from '../src/features/consent/consentService.js';
 import { listDestinationSyncs } from '../src/features/destination-sync/destinationSyncService.js';
-import { listEnrollments } from '../src/features/campaign-journeys/journeyService.js';
+import { listEnrollments, resolveSegment } from '../src/features/campaign-journeys/journeyService.js';
+import { demoCrmSegmentId } from '../src/host/seed-data/solsticeDemo.js';
+import { holdoutArm } from '../src/features/campaign-journeys/surface.js';
 import { listApiKeys } from '../src/features/developer-keys/apiKeyService.js';
 
 const analyticsStore = new DurableCollection<{ eventId: string; tenantId: string }>('analytics:event', (e) => e.eventId, undefined, (e) => e.tenantId);
@@ -66,6 +72,15 @@ describe('demo-cdp seeder', () => {
     expect(syncs.some((s) => s.syncMode === 'cdc')).toBe(true);
     const enrollments = await listEnrollments(tenantId, 'demo-cdp-welcome-series');
     expect(enrollments.length).toBeGreaterThan(0);
+    // The holdout: no control-arm member is enrolled, and the fixture really has
+    // one. A count comparison (enrolled < members) could not fail: enroll() also
+    // declines some members for its own reasons, so removing the seed's holdout
+    // skip kept the count below the segment (w38 probe ds-holdout-r2 was vacuous).
+    const { contactIds: segmentMembers } = await resolveSegment(tenantId, demoCrmSegmentId(tenantId, 'cafe-accounts'));
+    const control = segmentMembers.filter((id) => holdoutArm(id, 'demo-cdp-welcome-series', 20).arm === 'control');
+    expect(control.length).toBeGreaterThan(0);
+    const enrolledIds = new Set(enrollments.map((e) => e.contactId));
+    expect(control.filter((id) => enrolledIds.has(id))).toEqual([]);
 
     // Developer keys — 2 (one revoked); only hashes persist.
     const keys = (await listApiKeys(tenantId, { callerSubject: 'demo:cdp', isAdmin: true })).filter((k) => k.createdBy === 'demo:cdp');
@@ -86,6 +101,10 @@ describe('demo-cdp seeder', () => {
     expect((await listConsent(tenantId)).filter((c) => c.subjectKey.startsWith('demo-cdp-sess-'))).toHaveLength(0);
     expect((await listDestinationSyncs(tenantId)).filter((s) => s.name.startsWith('Demo — '))).toHaveLength(0);
     expect(await listEnrollments(tenantId, 'demo-cdp-welcome-series')).toHaveLength(0);
+    // …and the three stores the original clear leg never read (w38: their deletes were unguarded).
+    expect((await identityStore.listForTenantIndexed(tenantId)).filter((l) => l.sessionKey.startsWith('demo-cdp-sess-'))).toHaveLength(0);
+    expect(await listEventSchemas(tenantId)).toEqual([]);
+    expect((await listApiKeys(tenantId, { callerSubject: 'demo:cdp', isAdmin: true })).filter((k) => k.createdBy === 'demo:cdp')).toHaveLength(0);
 
     // Round-trips.
     const third = await seedDemoCdp(tenantId);

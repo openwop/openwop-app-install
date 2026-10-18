@@ -3,13 +3,17 @@ import { render, screen, cleanup } from '@testing-library/react';
 import { WorkflowInspector } from '../WorkflowInspector.js';
 import { useBuilderStore } from '../../store/builderStore.js';
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  useBuilderStore.setState({ name: '', defaultInputs: '{}' });
+});
 
 /**
- * Verifies the Field-primitive migration of WorkflowInspector: the workflow
+ * Field-primitive migration (#66, 308c0ec65) of WorkflowInspector: the workflow
  * name + default-inputs controls resolve by accessible label, reflect the
- * builder-store values, and the default-inputs help text renders via Field's
- * `help` slot.
+ * builder-store values, and the default-inputs help text is wired through
+ * Field's `help` slot (aria-describedby). Breaks if a control loses its label,
+ * stops reflecting the store, or the help is no longer described-by.
  */
 describe('WorkflowInspector forms (Field migration)', () => {
   it('renders store-backed, label-associated controls', () => {

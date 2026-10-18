@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/feature.profiles.nodes/1.1.1/get.output.json",
+  "$id": "https://packs.openwop.dev/feature.profiles.nodes/1.2.0/get.output.json",
   "title": "ProfilesGetOutput",
   "description": "One member's descriptive profile projection (tenant bookkeeping columns stripped; endorsements projected as `{ count, endorserUserIds }` \u2014 viewer-independent so a recorded output replays actor-free), or an EXPLICIT miss. `found` is the branch flag: a chain gates on `{ falsy found }` for a real id that is not in the tenant. A missing/empty `userId` never reaches this shape \u2014 it is a typed node failure.",
   "type": "object",
@@ -68,7 +68,7 @@
         }
       },
       "additionalProperties": true,
-      "description": "The projected profile, or null when `found` is false. Descriptive fields (`jobTitle`, `bio`, `availability`, \u2026) ride on `additionalProperties`; the pinned shape is the key + the endorsement projection."
+      "description": "The projected profile, or null when `found` is false. Capability fields (`jobTitle`, `department`, `availability`, \u2026) ride on `additionalProperties`; `bio`, `contact` and asset tokens are never recorded (ADR 0888 D2); the pinned shape is the key + the endorsement projection."
     },
     "found": {
       "type": "boolean",

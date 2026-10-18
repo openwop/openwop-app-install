@@ -1,13 +1,24 @@
 import { describe, it, expect } from 'vitest';
 import { FEATURES } from '../features.js';
+import { resolveNav, type AccessPredicate } from '../navConfig/resolveNav.js';
 
 /**
  * ADR 0196 Phase 2 (Gate B) — manifest wiring for the developer-tools gate.
  * The manual-test runner is an engineering surface: its nav entry must be
  * hidden unless the `developer-tools` toggle resolves enabled. Pure manifest
  * derivation (the adr0145 pattern) — a manifest edit that re-exposes the QA
- * runner to every production deploy is caught here.
+ * runner to every production deploy is caught here, and so is a resolver that
+ * stops honouring `nav.featureId` for it (the second case drives the REAL
+ * `resolveNav` over the REAL manifest, both toggle states).
+ *
+ * Sabotage that turns it red: dropping `featureId: 'developer-tools'` from the
+ * manual-tests route, moving it off the admin tier, or neutralising the
+ * feature-toggle hard gate in `resolveNav`.
  */
+const ADMIN = { admin: true, superadmin: false, scopes: [] as readonly string[] };
+const adminPaths = (access: AccessPredicate): string[] =>
+  resolveNav({ features: FEATURES, access, authority: ADMIN }).admin.flatMap((g) => g.items.map((i) => i.to));
+
 describe('ADR 0196 — developer-tools gating (manifest)', () => {
   it('/test nav rides the developer-tools toggle', () => {
     const t = FEATURES.find((r) => r.path === '/test');
@@ -15,5 +26,11 @@ describe('ADR 0196 — developer-tools gating (manifest)', () => {
     expect(t?.nav?.featureId).toBe('developer-tools');
     // Still admin-tier chrome — Gate B composes with (not replaces) the tier.
     expect(t?.tier).toBe('admin');
+  });
+
+  it('the resolved admin rail hides /test with developer-tools OFF and shows it with it ON', () => {
+    expect(adminPaths((id) => id !== 'developer-tools')).not.toContain('/test');
+    // Positive control: the same resolver, toggle ON, does list it on the admin rail.
+    expect(adminPaths(() => true)).toContain('/test');
   });
 });

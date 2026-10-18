@@ -6,6 +6,7 @@
 import { Button } from '../../ui/Button.js';
 import { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { PageHeader } from '../../ui/PageHeader.js';
 import { BuildingIcon } from '../../ui/icons/index.js';
 import { StateCard } from '../../ui/StateCard.js';
 import { Notice } from '../../ui/Notice.js';
@@ -95,13 +96,10 @@ export function OrgProgramsPage() {
 
   return (
     <div className="page" data-walkthrough="kicktodo-org-programs.page">
-      <header className="page-header">
-        <h1 className="page-header__title">{t('title')}</h1>
-        <p className="page-header__lede">{t('lede')}</p>
-      </header>
+      <PageHeader title={t('title')} lede={t('lede')} />
 
       {error && (
-        <Notice variant="error">
+        <Notice variant="error" announce={t('loadError')}>
           {t('loadError')}{' '}
           <Button variant="quiet" size="sm" onClick={() => void loadOrg(orgId)}>{t('common:retry')}</Button>
         </Notice>

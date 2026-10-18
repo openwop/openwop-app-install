@@ -11,29 +11,37 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { render, cleanup, screen, within } from '@testing-library/react';
-import { GlobalLiveRegion } from '../announce.js';
+import { GlobalLiveRegion, announce } from '../announce.js';
 import { Notice } from '../Notice.js';
 
 function mount(node: React.ReactNode): void {
   render(<><GlobalLiveRegion /><div data-testid="page">{node}</div></>);
 }
-const polite = (): string => document.querySelector('[aria-live="polite"]')?.textContent ?? '';
-const assertive = (): string => document.querySelector('[aria-live="assertive"]')?.textContent ?? '';
+// The SHELL regions by their test hook (announce.tsx documents it): a bare
+// `[aria-live="polite"]` would also match a Notice's own region.
+const polite = (): string => document.querySelector('[data-owp-live="polite"]')?.textContent ?? '';
+const assertive = (): string => document.querySelector('[data-owp-live="assertive"]')?.textContent ?? '';
 const page = (): ReturnType<typeof within> => within(screen.getByTestId('page'));
 
-beforeEach(() => { /* each render starts from a clean document */ });
+// The announcer's slots are module state that outlives a render: clear them so
+// every case starts silent whatever ran before it.
+beforeEach(() => {
+  announce('');
+  announce('', { assertive: true });
+});
 afterEach(cleanup);
 
 describe('Notice — opt-in announcement', () => {
   it('SPEAKS the given text through the app-shell region', () => {
     mount(<Notice variant="warning" announce="Showing the last known queue">Showing the last known queue</Notice>);
-    expect(polite()).toContain('Showing the last known queue');
+    expect(polite()).toBe('Showing the last known queue');
+    expect(assertive()).toBe('');
   });
 
   it('routes an ERROR to the assertive region, not the polite one', () => {
     mount(<Notice variant="error" announce="Payment failed">Payment failed</Notice>);
-    expect(assertive()).toContain('Payment failed');
-    expect(polite()).not.toContain('Payment failed');
+    expect(assertive()).toBe('Payment failed');
+    expect(polite()).toBe('');
   });
 
   it('speaks the ANNOUNCE text, not the children — children may be JSX or a raw error blob', () => {
@@ -42,8 +50,7 @@ describe('Notice — opt-in announcement', () => {
         <span>The refresh failed: ECONNRESET at 10.0.0.4:5432</span>
       </Notice>,
     );
-    expect(polite()).toContain('The refresh failed');
-    expect(polite()).not.toContain('ECONNRESET');
+    expect(polite()).toBe('The refresh failed');
   });
 
   it('DROPS its own live region when announcing — never two regions for one message', () => {
@@ -61,6 +68,6 @@ describe('Notice — opt-in announcement', () => {
     mount(<Notice variant="warning">Quiet</Notice>);
     const el = page().getByText('Quiet');
     expect(el.closest('[role="status"]')).not.toBeNull();
-    expect(polite()).not.toContain('Quiet');
+    expect(polite()).toBe('');
   });
 });

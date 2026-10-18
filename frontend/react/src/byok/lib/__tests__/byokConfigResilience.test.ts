@@ -7,15 +7,21 @@
  * lock in: the surface only reaches `needs-key` when the workspace GENUINELY has
  * nothing to bind — never because a request failed, never because a session
  * lapsed, and never while a usable key is sitting in the store.
+ *
+ * Witnessed by sabotage (grade-tests w48): e.g. the catch's `setStatus(... 'error')`
+ * → `'needs-key'`, dropping `if (background) return;`, the anonymous+cached branch,
+ * the grace retry, the StrictMode `mounted.current = true`, and the server-first order
+ * in `setConfig` each red the case named for them.
  */
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 import { renderHook, waitFor, act } from '@testing-library/react';
 import { StrictMode, createElement } from 'react';
+import type * as ByokClient from '../byokClient.js';
 
-const getActiveConfig = vi.fn();
-const putActiveConfig = vi.fn();
-const clearActiveConfig = vi.fn();
-const listStoredRefs = vi.fn();
+const getActiveConfig = vi.fn<typeof ByokClient.getActiveConfig>();
+const putActiveConfig = vi.fn<typeof ByokClient.putActiveConfig>();
+const clearActiveConfig = vi.fn<typeof ByokClient.clearActiveConfig>();
+const listStoredRefs = vi.fn<typeof ByokClient.listStoredRefs>();
 
 // ADR 0517 Phase E — the hook now refuses to conclude anything until the auth layer has
 // SETTLED, so every test must declare an identity. That is the point: reading
@@ -25,10 +31,10 @@ let subject: { status: 'pending' } | { status: 'anonymous' } | { status: 'user';
 vi.mock('../../../platform/useStorageSubject.js', () => ({ useStorageSubject: () => subject }));
 
 vi.mock('../byokClient.js', () => ({
-  getActiveConfig: (...a: unknown[]) => getActiveConfig(...a),
-  putActiveConfig: (...a: unknown[]) => putActiveConfig(...a),
-  clearActiveConfig: (...a: unknown[]) => clearActiveConfig(...a),
-  listStoredRefs: (...a: unknown[]) => listStoredRefs(...a),
+  getActiveConfig: (...a: Parameters<typeof ByokClient.getActiveConfig>) => getActiveConfig(...a),
+  putActiveConfig: (...a: Parameters<typeof ByokClient.putActiveConfig>) => putActiveConfig(...a),
+  clearActiveConfig: (...a: Parameters<typeof ByokClient.clearActiveConfig>) => clearActiveConfig(...a),
+  listStoredRefs: (...a: Parameters<typeof ByokClient.listStoredRefs>) => listStoredRefs(...a),
 }));
 
 const { useBYOKConfig, preferredRefForProvider, refsForProvider } = await import('../useBYOKConfig.js');
@@ -37,7 +43,12 @@ const LS_KEY = 'openwop-app.byok.activeConfig';
 const GOOGLE = { provider: 'google', model: 'gemini-3.1-flash-lite', credentialRef: 'byok:google' };
 
 /** An envelope with no binding — the shape every false prompt started from. */
-const empty = (anonymous = false) => ({ config: null, valid: false, anonymous });
+const empty = (anonymous = false): ByokClient.ActiveConfigEnvelope => ({ config: null, valid: false, anonymous });
+
+/** Flush pending React work (effects, resolved promises) without a wall-clock sleep. */
+const drain = async (): Promise<void> => {
+  for (let i = 0; i < 5; i++) await act(async () => { await Promise.resolve(); });
+};
 
 /** StrictMode invokes the mount effect twice, so two reads are expected WITHOUT a
  *  retry. Anything beyond that is the grace retry actually firing. */
@@ -45,12 +56,17 @@ const reAuthBaselineCalls = 2;
 
 beforeEach(() => {
   localStorage.clear();
-  vi.clearAllMocks();
+  // mockReset, not clearAllMocks: a queued `mockResolvedValueOnce` left by a case that
+  // failed early must not answer the next case under shuffle.
+  getActiveConfig.mockReset();
+  putActiveConfig.mockReset();
+  clearActiveConfig.mockReset();
+  listStoredRefs.mockReset();
   subject = { status: 'anonymous' };
-  putActiveConfig.mockImplementation(async (cfg: unknown) => ({ config: cfg, valid: true, anonymous: false }));
+  putActiveConfig.mockImplementation(async (cfg) => ({ config: cfg, valid: true, anonymous: false }));
   clearActiveConfig.mockResolvedValue(undefined);
 });
-afterEach(() => { vi.clearAllMocks(); });
+afterEach(() => { vi.useRealTimers(); });
 
 describe('ADR 0517 — a server-vouched binding just works', () => {
   it('renders ready and caches the binding for first paint next time', async () => {
@@ -229,15 +245,19 @@ describe('ADR 0517 fix C — the browser-local pointer migrates to the server', 
 
   it('migrates a HISTORICAL timestamped ref onto the binding', async () => {
     // The seven-row workspace: its cached pointer names a timestamped ref, which
-    // is still a perfectly good key. Adoption must recognise it.
-    const legacy = { ...GOOGLE, credentialRef: 'byok:google:1785358774187' };
+    // is still a perfectly good key. Adoption must recognise it, and keep THAT one:
+    // the cached ref is deliberately the OLDER of the two, so jumping to the newest
+    // stored ref (the fallback for a vanished ref) would rebind the chat to a
+    // different key than the one this browser was using.
+    const legacy = { ...GOOGLE, credentialRef: 'byok:google:1782080112882' };
     localStorage.setItem(LS_KEY, JSON.stringify(legacy));
     getActiveConfig.mockResolvedValue(empty(false));
     listStoredRefs.mockResolvedValue(['byok:google:1782080112882', 'byok:google:1785358774187']);
 
     const { result } = renderHook(() => useBYOKConfig());
     await waitFor(() => expect(result.current.status).toBe('ready'));
-    expect(result.current.config?.credentialRef).toBe('byok:google:1785358774187');
+    expect(result.current.config?.credentialRef).toBe('byok:google:1782080112882');
+    expect(putActiveConfig).toHaveBeenCalledWith({ ...GOOGLE, credentialRef: 'byok:google:1782080112882' });
   });
 
   it('re-points a cached ref whose key is gone at another key for the same provider', async () => {
@@ -300,7 +320,12 @@ describe('ADR 0517 — setConfig is server-first', () => {
     putActiveConfig.mockRejectedValue(new Error('credentialRef is not a stored BYOK secret'));
     await expect(act(async () => { await result.current.setConfig(GOOGLE); }))
       .rejects.toThrow(/not a stored BYOK secret/);
-    expect(result.current.status).not.toBe('ready');
+    // A rejected act() does not flush what was queued inside it; flush, so a
+    // ready-before-the-PUT paint (the regression) would be committed and seen.
+    await drain();
+    expect(result.current.status).toBe('needs-key');
+    expect(result.current.config).toBeNull();
+    expect(localStorage.getItem(LS_KEY)).toBeNull();
   });
 
   it('clears server-side too, so the pointer cannot resurrect from another device', async () => {
@@ -351,7 +376,7 @@ describe('ADR 0517 Phase E — the surface waits for auth, and heals when it lan
     listStoredRefs.mockResolvedValue([]);
 
     const { result } = renderHook(() => useBYOKConfig());
-    await new Promise((r) => setTimeout(r, 50));
+    await drain();
     expect(result.current.status).toBe('loading');
     expect(getActiveConfig).not.toHaveBeenCalled();
   });
@@ -374,16 +399,26 @@ describe('ADR 0517 Phase E — the surface waits for auth, and heals when it lan
     // restored token. Until it lands the backend legitimately answers
     // anonymous:true for a user who is about to be signed in — believing that
     // would be the same false alarm as the key wizard, one layer up.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
     localStorage.setItem(LS_KEY, JSON.stringify(GOOGLE));
     subject = { status: 'user', subject: 'user:abc' };
     getActiveConfig
       .mockResolvedValueOnce(empty(true))                                   // handshake still in flight
       .mockResolvedValue({ config: GOOGLE, valid: true, anonymous: false }); // it landed
-    listStoredRefs.mockResolvedValue(['byok:google']);
+    // The anonymous session sees NO secrets, so the heal path has nothing to adopt and
+    // only the grace retry can reach `ready`. (With the key visible on the first read
+    // the case healed via putActiveConfig and passed with the grace retry deleted.)
+    listStoredRefs
+      .mockResolvedValueOnce([])
+      .mockResolvedValue(['byok:google']);
 
     const { result } = renderHook(() => useBYOKConfig());
-    await waitFor(() => expect(result.current.status).toBe('ready'), { timeout: 4000 });
-    expect(result.current.status).not.toBe('session-expired');
+    await waitFor(() => expect(getActiveConfig).toHaveBeenCalledTimes(1));
+    await act(async () => { await vi.advanceTimersByTimeAsync(1300); });
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+    expect(getActiveConfig).toHaveBeenCalledTimes(2);
+    expect(putActiveConfig).not.toHaveBeenCalled();
+    expect(result.current.config).toMatchObject(GOOGLE);
   });
 
   it('the grace retry still FIRES after StrictMode — a cleanup-only guard kills it', async () => {
@@ -393,6 +428,7 @@ describe('ADR 0517 Phase E — the surface waits for auth, and heals when it lan
     // ITSELF, so count the calls rather than the end state: the end state can be
     // reached by other paths, which is why an earlier version of this test passed
     // against the bug.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
     localStorage.setItem(LS_KEY, JSON.stringify(GOOGLE));
     subject = { status: 'user', subject: 'user:abc' };
     getActiveConfig.mockResolvedValue(empty(true)); // never settles ⇒ retry is the only extra call
@@ -401,22 +437,26 @@ describe('ADR 0517 Phase E — the surface waits for auth, and heals when it lan
     renderHook(() => useBYOKConfig(), {
       wrapper: ({ children }) => createElement(StrictMode, null, children),
     });
-    // Wait past the 1.2s grace, then assert a retry happened at all.
-    await waitFor(
-      () => expect(getActiveConfig.mock.calls.length).toBeGreaterThan(reAuthBaselineCalls),
-      { timeout: 4000 },
-    );
+    await waitFor(() => expect(getActiveConfig).toHaveBeenCalledTimes(reAuthBaselineCalls));
+    // Advance past the 1.2s grace, then assert a retry happened at all.
+    await act(async () => { await vi.advanceTimersByTimeAsync(1300); });
+    await waitFor(() => expect(getActiveConfig.mock.calls.length).toBeGreaterThan(reAuthBaselineCalls));
   });
 
   it('still reports session-expired when the re-auth genuinely does not land', async () => {
     // The grace is ONE bounded retry, not an indefinite spinner. If the handshake
     // really failed, the honest answer is the sign-in card.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
     localStorage.setItem(LS_KEY, JSON.stringify(GOOGLE));
     subject = { status: 'user', subject: 'user:abc' };
     getActiveConfig.mockResolvedValue(empty(true));
     listStoredRefs.mockResolvedValue([]);
 
     const { result } = renderHook(() => useBYOKConfig());
-    await waitFor(() => expect(result.current.status).toBe('session-expired'), { timeout: 4000 });
+    await waitFor(() => expect(getActiveConfig).toHaveBeenCalledTimes(1));
+    await act(async () => { await vi.advanceTimersByTimeAsync(1300); });
+    await waitFor(() => expect(result.current.status).toBe('session-expired'));
+    // ONE bounded retry: the first read plus exactly one grace re-read.
+    expect(getActiveConfig).toHaveBeenCalledTimes(2);
   });
 });

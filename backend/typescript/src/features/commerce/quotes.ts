@@ -26,7 +26,9 @@ import { OpenwopError } from '../../types.js';
 import { cleanString, optionalCleanString } from '../../host/boundedStrings.js';
 import { recordCommerceAction } from './telemetry.js';
 import { resolvePrice, resolveSellable } from './pricing.js';
-import { getProduct, createOrder, assertQuoteSendGate, quantizeMoney, type Order } from './commerceService.js';
+import { getContact } from '../crm/contactsService.js';
+import { getProduct, createOrder, assertQuoteSendGate, quantizeMoney, MAX_LINE_QUANTITY, type Order } from './commerceService.js';
+import type { OrderSettlementStamp } from '../commerce-connect/storefrontSettlement.js';
 
 const nowIso = (): string => new Date().toISOString();
 const MAX = { lines: 200, note: 2000, perOrg: 5000, revisions: 50 } as const;
@@ -100,8 +102,13 @@ async function priceLines(tenantId: string, orgId: string, raw: QuoteLineInput[]
   const lines: QuoteLine[] = [];
   let currency = 'USD';
   for (const l of raw.slice(0, MAX.lines)) {
-    const qty = typeof l.quantity === 'number' && Number.isFinite(l.quantity) && l.quantity > 0 ? Math.trunc(l.quantity) : 0;
-    if (qty <= 0) continue;
+    // ADR 0875 D7 (+ grade-code COM2CD-9) — the ORDER rule, checked when the quote is
+    // written: a quote the buyer can accept must convert, and a quantity is never
+    // silently rewritten (1.5 used to become 1; 0 used to vanish from the quote).
+    const qty = l.quantity;
+    if (typeof qty !== 'number' || !Number.isInteger(qty) || qty < 1 || qty > MAX_LINE_QUANTITY) {
+      throw new OpenwopError('validation_error', `Each quote line quantity must be a whole number from 1 to ${MAX_LINE_QUANTITY}.`, 400, { field: 'quantity', productId: l.productId });
+    }
     const product = await getProduct(tenantId, orgId, String(l.productId));
     if (!product) throw new OpenwopError('validation_error', `Product not found: ${l.productId}`, 400, { productId: l.productId });
     if (lines.length > 0 && product.currency !== currency) {
@@ -142,6 +149,12 @@ export async function createQuote(input: {
 }): Promise<Quote> {
   const existing = await listQuotes(input.tenantId, input.orgId);
   if (existing.length >= MAX.perOrg) throw new OpenwopError('validation_error', `This org has the maximum ${MAX.perOrg} quotes.`, 409, { max: MAX.perOrg });
+  // ADR 0875 D9 — the contact check lives in the SERVICE, so the chat tool and the
+  // workflow surface ask what the HTTP route asks (the tool used to skip it).
+  if (input.contactId) {
+    const c = await getContact(input.contactId);
+    if (!c || c.tenantId !== input.tenantId) throw new OpenwopError('validation_error', 'contactId does not reference a contact in this tenant.', 400, { field: 'contactId' });
+  }
   const buyer = { ...(input.contactId ? { contactId: input.contactId } : {}), ...(input.companyId ? { companyId: input.companyId } : {}) };
   const { lines, currency } = await priceLines(input.tenantId, input.orgId, input.lines ?? [], buyer);
   const { subtotal, total } = totals(lines, currency);
@@ -228,7 +241,7 @@ export async function declineQuote(tenantId: string, orgId: string, quoteId: str
  * repricing: every product must still exist and be active. Expired quotes
  * refuse. The conversion order carries `priceSource:'quote'` lines.
  */
-export async function acceptQuote(tenantId: string, orgId: string, quoteId: string, opts: { actor?: string } = {}): Promise<{ quote: Quote; order: Order } | null> {
+export async function acceptQuote(tenantId: string, orgId: string, quoteId: string, opts: { actor?: string; /** ADR 0877 M5 (grade-code CC2CD-3) — the lane the conversion order is opened on; route-derived. */ settlement?: OrderSettlementStamp } = {}): Promise<{ quote: Quote; order: Order } | null> {
   const q = await getQuote(tenantId, orgId, quoteId);
   if (!q) return null;
   if (q.status === 'expired') throw new OpenwopError('validation_error', 'This quote has expired — ask for a fresh one.', 409, { status: 'expired' });
@@ -250,6 +263,7 @@ export async function acceptQuote(tenantId: string, orgId: string, quoteId: stri
     order = await createOrder({
       tenantId, orgId, createdBy: opts.actor ?? `quote:${quoteId}`,
       ...(q.contactId ? { contactId: q.contactId } : {}),
+      ...(opts.settlement ? { settlement: opts.settlement } : {}),
       lines: q.lines.map((l) => ({ productId: l.productId, quantity: l.quantity, unitPriceOverride: l.unitPrice })),
     });
   } catch (err) {

@@ -1,6 +1,12 @@
 /**
  * Material library (ADR 0388 P5) — closed-world catalog, safe-paint grammar,
  * deterministic recommendations, validator integration, twin parity.
+ *
+ * Sabotage-witnessed (/grade-tests w34): catalog paint grammar, library-wins
+ * precedence, each inline fallback field (color/metallic/roughness), keyword
+ * rules + the kind fallback, and the validator's materialId / emissive rules
+ * (asserted by error PATH). Parity passes vacuously only without the frontend
+ * tree (CAD-G4 — recorded ceiling).
  */
 import { describe, expect, it } from 'vitest';
 import { existsSync, readFileSync } from 'node:fs';
@@ -26,7 +32,7 @@ describe('cadMaterials', () => {
 
   it('resolveMaterial: library id wins over inline paint; inline is the fallback', () => {
     expect(resolveMaterial({ materialId: 'steel', color: '#ff0000', metallic: 0 })).toMatchObject({ color: '#8c96a0', metallic: 0.9 });
-    expect(resolveMaterial({ color: '#ff0000', metallic: 0.3 })).toMatchObject({ color: '#ff0000', metallic: 0.3 });
+    expect(resolveMaterial({ color: '#ff0000', metallic: 0.3, roughness: 0.7 })).toEqual({ color: '#ff0000', metallic: 0.3, roughness: 0.7 });
     expect(resolveMaterial({ materialId: 'no-such' })).toEqual({});
   });
 
@@ -36,16 +42,15 @@ describe('cadMaterials', () => {
     expect(recommendMaterial('table leg', 'cylinder')).toBe('wood-oak');
     expect(recommendMaterial(undefined, 'sphere')).toBe('plastic-blue');
     expect(recommendMaterial('mystery part', 'box')).toBe('steel');
-    expect(recommendMaterial('mounting bracket', 'box')).toBe(recommendMaterial('mounting bracket', 'box'));
   });
 
   it('validator: materialId closed-world; emissive must be #hex', () => {
     const base = { name: 'M', units: 'mm' };
-    const errs = (solid: unknown): number => validateCadDoc({ ...base, solids: [solid] } as never).errors.length;
-    expect(errs({ kind: 'box', width: 10, materialId: 'steel' })).toBe(0);
-    expect(errs({ kind: 'box', width: 10, materialId: 'vibranium' })).toBeGreaterThan(0);
-    expect(errs({ kind: 'box', width: 10, emissive: '#ff8800' })).toBe(0);
-    expect(errs({ kind: 'box', width: 10, emissive: 'url(evil)' })).toBeGreaterThan(0);
+    const paths = (solid: unknown): string[] => validateCadDoc({ ...base, solids: [solid] }).errors.map((e) => e.path);
+    expect(paths({ kind: 'box', width: 10, materialId: 'steel' })).toEqual([]);
+    expect(paths({ kind: 'box', width: 10, materialId: 'vibranium' })).toEqual(['solids[0].materialId']);
+    expect(paths({ kind: 'box', width: 10, emissive: '#ff8800' })).toEqual([]);
+    expect(paths({ kind: 'box', width: 10, emissive: 'url(evil)' })).toEqual(['solids[0].emissive']);
   });
 });
 

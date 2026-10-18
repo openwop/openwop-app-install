@@ -14,7 +14,7 @@ import { registerUcpBuyerRoutes } from './ucpBuyer/routes.js';
 import { registerCommerceAgentTools } from './agentTools.js';
 import { registerCommerceBuyerAgentTools } from './ucpBuyer/agentTools.js';
 import { registerToggleDefault } from '../../host/featureToggles/registry.js';
-import { buildCommerceSurface } from './surface.js';
+import { buildCommerceSurface, COMMERCE_SURFACE_POLICY } from './surface.js';
 import { setTransactionalEmailTransport } from './transactionalEmail.js';
 import { sendBrokeredTransactionalEmail } from '../email/brokeredProvider.js';
 import { startCommerceReservationSweep } from './reservationSweep.js';
@@ -125,11 +125,12 @@ export const commerceFeature: BackendFeature = {
     });
   },
   // ADR 0177 Phase 2 — `ctx.features.commerce` (products/orders reads + create-order).
-  surface: { id: 'commerce', build: buildCommerceSurface },
+  // ADR 0875 D5 — the writers ask what their HTTP doors ask (COMMERCE_SURFACE_POLICY).
+  surface: { id: 'commerce', build: buildCommerceSurface, orgPolicy: COMMERCE_SURFACE_POLICY },
   requiredPacks: [
-    { name: 'feature.commerce.nodes', version: '1.3.2' },
+    { name: 'feature.commerce.nodes', version: '1.5.0' },
     { name: 'vendor.openwop-app.commerce.agents', version: '1.2.2' },
-    { name: 'feature.commerce.buyer.nodes', version: '1.1.3' },
+    { name: 'feature.commerce.buyer.nodes', version: '1.2.0' },
     { name: 'vendor.openwop-app.commerce.buyer.agents', version: '1.0.4' },
   ],
   toggleDefault: {
@@ -146,4 +147,8 @@ export const commerceFeature: BackendFeature = {
   // (`../crm`), so E-Commerce cannot function without the CRM core (ADR 0194
   // disable-lock).
   dependsOn: ['crm'],
+  // ADR 0877 — SOFT: live storefront checkout for a non-operator tenant settles
+  // through its Commerce Connect account. With commerce-connect OFF the store is
+  // demo (no charge), never broken — so this is a recommendation, not a lock.
+  recommends: ['commerce-connect'],
 };

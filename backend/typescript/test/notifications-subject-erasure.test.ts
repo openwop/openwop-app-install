@@ -22,6 +22,7 @@ import { createPage, __resetCms } from '../src/features/cms/cmsService.js';
 import { createComment, listThread, __resetCommentsStore } from '../src/features/comments/commentsService.js';
 import { emitCommentNotification } from '../src/features/comments/notifications.js';
 import { PREAUTHORIZED_CALLER } from '../src/host/subjectAccess.js';
+import { createMember } from '../src/host/accessControlService.js';
 
 /** ADR 0659 D1 — `listThread` now answers `null` when the target is absent OR invisible.
  *  Every fixture here creates a real resource and is not testing that gate, so a null is
@@ -94,6 +95,8 @@ describe('CMNT-11 — per-subject notification erasure', () => {
     // someone else left, then that someone else exercises their erasure right.
     const T = 'cmt-erase-e2e';
     const page = await createPage({ tenantId: T, orgId: 'o1', title: 'Home', createdBy: 'owner' });
+    // ADR 0881 D3 — the page owner must be an org member to be notified at all.
+    await createMember({ tenantId: T, orgId: 'o1', displayName: 'Owner', subject: 'owner', roles: ['editor'] });
     const c = await createComment({ tenantId: T, orgId: 'o1', resourceType: 'cms_page', resourceId: page.pageId, body: 'a note', authorId: 'author' , caller: { subject: 'author' }});
     await emitCommentNotification(c.comment, c.notify);
     expect((await rows(T)).length, 'the notification must exist before erasure or this proves nothing').toBe(1);

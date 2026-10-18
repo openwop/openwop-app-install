@@ -164,7 +164,7 @@
           }
         },
         "pendingCommand": {
-          "description": "A single revision command (one of the schedule / substitute / recovery lane shapes) with EXACTLY ONE slot left unfilled — the slot whose key === `field.id`. On resume the participant's answer is written into that slot and the completed command becomes the sole entry of the applied revision's `commands`. XCH-KT-2: it is a PARTIAL lane command, so only `lane` is required — but the lane discriminator and the per-lane KEY SET are closed here (a typo'd key or unknown lane fails at composer-return time instead of only downstream at apply-time validateCommand). The apply-time closed-world validator remains the authority on the COMPLETED command.",
+          "description": "A single revision command (one of the schedule / substitute / recovery / move lane shapes) with EXACTLY ONE slot left unfilled — the slot whose key === `field.id`. On resume the participant's answer is written into that slot and the completed command becomes the sole entry of the applied revision's `commands`. XCH-KT-2: it is a PARTIAL lane command, so only `lane` is required — but the lane discriminator and the per-lane KEY SET are closed here (a typo'd key or unknown lane fails at composer-return time instead of only downstream at apply-time validateCommand). The apply-time closed-world validator remains the authority on the COMPLETED command.",
           "oneOf": [
             {
               "type": "object",

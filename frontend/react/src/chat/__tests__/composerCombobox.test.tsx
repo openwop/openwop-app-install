@@ -7,6 +7,9 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, cleanup, fireEvent, act } from '@testing-library/react';
 import { AgentMentionAutocomplete } from '../AgentMentionAutocomplete.js';
+import { ChatInput } from '../ChatInput.js';
+import type { AgentMentionEntry } from '../lib/agentMentions.js';
+import type { WorkflowMentionEntry } from '../lib/workflowMentions.js';
 
 // ChatInput mounts the audio recorder, which touches MediaRecorder (absent in jsdom).
 vi.mock('../hooks/useAudioRecorder.js', () => ({
@@ -16,16 +19,16 @@ vi.mock('../hooks/useAudioRecorder.js', () => ({
 // One owned workflow so the `/` picker has an option to highlight; no network.
 vi.mock('../lib/workflowMentions.js', async (orig) => ({
   ...(await orig<typeof import('../lib/workflowMentions.js')>()),
-  listWorkflowMentions: () => [{ workflowId: 'wf.daily', displayName: 'Daily report', slug: 'daily-report' }],
+  listWorkflowMentions: (): WorkflowMentionEntry[] => [{ workflowId: 'wf.daily', displayName: 'Daily report', slug: 'daily-report', description: '', toolName: 'daily_report' }],
   refreshWorkflowMentionCache: async () => undefined,
 }));
 
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
-const ENTRIES = [
-  { agentId: 'a1', slug: 'ada', displayName: 'Ada' },
-  { agentId: 'a2', slug: 'alan', displayName: 'Alan' },
-] as never;
+const entry = (agentId: string, slug: string, displayName: string): AgentMentionEntry => ({
+  agentId, slug, displayName, persona: displayName, description: '', packName: '', packVersion: '', modelClass: '',
+});
+const ENTRIES: readonly AgentMentionEntry[] = [entry('a1', 'ada', 'Ada'), entry('a2', 'alan', 'Alan')];
 
 describe('picker ↔ composer combobox wiring', () => {
   it('reports the highlighted option id, moves it with the arrows, and clears on close', () => {
@@ -63,7 +66,6 @@ describe('ChatInput composer — the combobox role (ADR 0770, row-1 gap)', () =>
   it('is a combobox whose aria-controls resolves to a REAL element, closed and open', async () => {
     // The sibling pickers read their directories over HTTP; answer empty.
     vi.stubGlobal('fetch', vi.fn(async () => new Response('[]', { status: 200, headers: { 'content-type': 'application/json' } })));
-    const { ChatInput } = await import('../ChatInput.js');
     const { getByRole, container } = render(<ChatInput onSend={vi.fn()} />);
     const ta = getByRole('combobox') as HTMLTextAreaElement;
     const controlled = (): Element | null => {

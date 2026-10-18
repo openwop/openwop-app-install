@@ -4,7 +4,7 @@
  * when no models are advertised. The capabilities client is mocked → pure test.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, cleanup, act } from '@testing-library/react';
 
 vi.mock('../../client/chatSessionsClient.js', () => ({ fetchModelCapabilities: vi.fn() }));
 import { fetchModelCapabilities, type ProviderCapabilities } from '../../client/chatSessionsClient.js';
@@ -15,22 +15,33 @@ const prov = (provider: string, models: Array<{ id: string; label: string }>): P
   ({ provider, capabilities: ['tools'], models: models.map((m) => ({ ...m, capabilities: [], recommended: false })) });
 
 beforeEach(() => mockCaps.mockReset());
+
+/** Settle signal: the capabilities read has resolved and its `.then` has run — an
+ *  absence asserted before this would pass in the (also empty) loading state. */
+async function settleCaps(): Promise<void> {
+  await waitFor(() => expect(mockCaps).toHaveBeenCalled());
+  await act(async () => {
+    await Promise.allSettled(mockCaps.mock.results.map((r) => r.value));
+    await Promise.resolve();
+  });
+}
 afterEach(cleanup);
 
 describe('ModelSwitcher (ADR 0124 Phase 2c)', () => {
   it('renders the advertised provider/model options + fires onChange', async () => {
-    mockCaps.mockResolvedValue([prov('anthropic', [{ id: 'opus', label: 'Opus' }]), prov('openai', [{ id: 'gpt', label: 'GPT' }])]);
-    const onChange = vi.fn();
+    // A fine-tune id carries colons of its own; only the FIRST colon splits provider from model.
+    mockCaps.mockResolvedValue([prov('anthropic', [{ id: 'opus', label: 'Opus' }]), prov('openai', [{ id: 'ft:gpt-4o:acme', label: 'GPT' }])]);
+    const onChange = vi.fn<(c: ModelChoice | null) => void>();
     render(<ModelSwitcher value={null} onChange={onChange} />);
     await waitFor(() => expect(screen.getByRole('combobox')).toBeTruthy());
     expect(screen.getByRole('option', { name: 'anthropic · Opus' })).toBeTruthy();
-    fireEvent.change(screen.getByRole('combobox'), { target: { value: 'openai:gpt' } });
-    expect(onChange).toHaveBeenCalledWith({ provider: 'openai', model: 'gpt' } satisfies ModelChoice);
+    fireEvent.change(screen.getByRole('combobox'), { target: { value: 'openai:ft:gpt-4o:acme' } });
+    expect(onChange).toHaveBeenCalledWith({ provider: 'openai', model: 'ft:gpt-4o:acme' } satisfies ModelChoice);
   });
 
   it('selecting the blank default clears the override (onChange null)', async () => {
     mockCaps.mockResolvedValue([prov('anthropic', [{ id: 'opus', label: 'Opus' }])]);
-    const onChange = vi.fn();
+    const onChange = vi.fn<(c: ModelChoice | null) => void>();
     render(<ModelSwitcher value={{ provider: 'anthropic', model: 'opus' }} onChange={onChange} />);
     await waitFor(() => expect(screen.getByRole('combobox')).toBeTruthy());
     fireEvent.change(screen.getByRole('combobox'), { target: { value: '' } });
@@ -40,7 +51,7 @@ describe('ModelSwitcher (ADR 0124 Phase 2c)', () => {
   it('renders NOTHING when the host advertises no models (graceful default)', async () => {
     mockCaps.mockResolvedValue([{ provider: 'anthropic', capabilities: [], models: [] }]);
     const { container } = render(<ModelSwitcher value={null} onChange={vi.fn()} />);
-    await waitFor(() => expect(mockCaps).toHaveBeenCalled());
+    await settleCaps();
     expect(container.querySelector('select')).toBeNull();
   });
 
@@ -63,7 +74,7 @@ describe('ModelSwitcher (ADR 0124 Phase 2c)', () => {
     // A managed/openwop-free provider isn't in the (post-honesty-fix) capabilities list.
     mockCaps.mockResolvedValue([prov('anthropic', [{ id: 'opus', label: 'Opus' }])]);
     const { container } = render(<ModelSwitcher value={null} onChange={vi.fn()} provider="openwop-free" />);
-    await waitFor(() => expect(mockCaps).toHaveBeenCalled());
+    await settleCaps();
     expect(container.querySelector('select')).toBeNull();
   });
 });

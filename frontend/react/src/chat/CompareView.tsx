@@ -14,6 +14,7 @@ import { useEffect, useMemo, useState, type CSSProperties } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Modal } from '../ui/Modal.js';
 import { StateCard } from '../ui/index.js';
+import { Button } from '../ui/Button.js';
 import { listChatSessions, listChatSessionMessages, type ChatSessionHeader, type ChatMessagePersisted } from '../client/chatSessionsClient.js';
 
 const PANE: CSSProperties = { flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 8, padding: 12, minHeight: 0 };
@@ -39,25 +40,51 @@ function Pane({ messages }: { messages: readonly ChatMessagePersisted[] }): JSX.
 
 export function CompareView({ currentSessionId, onClose }: { currentSessionId: string; onClose: () => void }): JSX.Element {
   const { t } = useTranslation('chat');
+  const { t: tc } = useTranslation('common');
   const [sessions, setSessions] = useState<ChatSessionHeader[]>([]);
   const [left, setLeft] = useState<ChatMessagePersisted[] | null>(null);
   const [rightId, setRightId] = useState<string>('');
   const [right, setRight] = useState<ChatMessagePersisted[] | null>(null);
+  // EMPTY-ON-FAIL-2 (ADR 0779 D7) — a failed transcript read is NOT an empty
+  // conversation. Each pane used to set its messages to [] on failure and render the
+  // empty-transcript "—". Each pane now keeps its own failed flag (checked first)
+  // and a retry counter that re-runs only that pane's read.
+  const [leftFailed, setLeftFailed] = useState(false);
+  const [rightFailed, setRightFailed] = useState(false);
+  const [leftAttempt, setLeftAttempt] = useState(0);
+  const [rightAttempt, setRightAttempt] = useState(0);
 
   useEffect(() => {
     let live = true;
     void listChatSessions().then((s) => { if (live) setSessions(s); }).catch(() => { if (live) setSessions([]); });
-    void listChatSessionMessages(currentSessionId).then((m) => { if (live) setLeft(m); }).catch(() => { if (live) setLeft([]); });
     return () => { live = false; };
   }, [currentSessionId]);
 
   useEffect(() => {
+    let live = true;
+    setLeft(null);
+    setLeftFailed(false);
+    void listChatSessionMessages(currentSessionId).then((m) => { if (live) setLeft(m); }).catch(() => { if (live) setLeftFailed(true); });
+    return () => { live = false; };
+  }, [currentSessionId, leftAttempt]);
+
+  useEffect(() => {
+    setRightFailed(false);
     if (!rightId) { setRight(null); return undefined; }
     let live = true;
     setRight(null);
-    void listChatSessionMessages(rightId).then((m) => { if (live) setRight(m); }).catch(() => { if (live) setRight([]); });
+    void listChatSessionMessages(rightId).then((m) => { if (live) setRight(m); }).catch(() => { if (live) setRightFailed(true); });
     return () => { live = false; };
-  }, [rightId]);
+  }, [rightId, rightAttempt]);
+
+  const failedPane = (retry: () => void): JSX.Element => (
+    <StateCard
+      announce
+      title={tc('loadFailedTitle')}
+      body={tc('loadFailedBody')}
+      action={<Button variant="secondary" size="sm" onClick={retry}>{tc('retry')}</Button>}
+    />
+  );
 
   const others = useMemo(() => sessions.filter((s) => s.sessionId !== currentSessionId), [sessions, currentSessionId]);
   const col: CSSProperties = { flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0, borderRight: '1px solid var(--rule)' };
@@ -67,14 +94,14 @@ export function CompareView({ currentSessionId, onClose }: { currentSessionId: s
       <div className="compareview-body">
         <div style={col}>
           <h3 className="u-fs-12 u-fw-600 u-p-2">{t('compareThis')}</h3>
-          {left === null ? <StateCard loading title={t('artifactLoading')} /> : <Pane messages={left} />}
+          {leftFailed ? failedPane(() => setLeftAttempt((n) => n + 1)) : left === null ? <StateCard loading title={t('artifactLoading')} /> : <Pane messages={left} />}
         </div>
         <div style={{ ...col, borderRight: 'none' }}>
           <select className="u-m-2" value={rightId} onChange={(e) => setRightId(e.target.value)} aria-label={t('compareWith')}>
             <option value="">{t('comparePick')}</option>
             {others.map((s) => <option key={s.sessionId} value={s.sessionId}>{s.title}</option>)}
           </select>
-          {rightId && right === null ? <StateCard loading title={t('artifactLoading')} /> : right ? <Pane messages={right} /> : null}
+          {rightId && rightFailed ? failedPane(() => setRightAttempt((n) => n + 1)) : rightId && right === null ? <StateCard loading title={t('artifactLoading')} /> : right ? <Pane messages={right} /> : null}
         </div>
       </div>
     </Modal>

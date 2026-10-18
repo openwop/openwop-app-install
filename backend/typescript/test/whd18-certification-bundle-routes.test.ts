@@ -3,16 +3,19 @@
  *
  * A real host (`createApp` + `app.listen`), a fake metadata server + GCS behind
  * the reader's injected fetch, and every surface that names the evidence probed
- * over HTTP: the major-1 root's pointer, the major-2 root's pointer, both bundle
- * routes, and `/claims`. The WHD-6 invariant is the thing under test — route,
- * pointer and claims hang off ONE predicate per major — now with a second source.
+ * over HTTP: the major-2 root's pointer and the major-2 bundle route. The WHD-6
+ * invariant is the thing under test — route and pointer hang off ONE predicate.
+ *
+ * ADR 0812 P4 slice 3 — the major-1 bundle route and `/claims` are DELETED with
+ * the in-process emitter whose image stamp they served. They are still probed,
+ * as 404s, so neither can come back unnoticed.
  *
  * The postures, each needed for a different reason:
- *   - UNSET: today's behaviour, exactly. A test that only covered the origin
- *     would pass against a change that broke every white-label adopter.
- *   - SET, nothing published: the image stamp is NOT served, even though it is
- *     sitting in `build-meta/`. That is the ADR 0735 point; a fallback here is
- *     the defect with a longer fuse.
+ *   - UNSET: every white-label adopter. Nothing is served, and a STALE image
+ *     stamp left in `build-meta/` (what the retired `--certify` used to write)
+ *     is served by nothing either.
+ *   - SET, nothing published: the stale stamp is NOT the fallback. That is the
+ *     ADR 0735 point; a fallback here is the defect with a longer fuse.
  *   - SET + a verified bundle per major: pointer at the right root only,
  *     following the ADVERTISED url returns the exact uploaded bytes.
  *   - SET + tampered / wrong-commit / misconfigured: all three surfaces absent.
@@ -28,14 +31,9 @@ import { join } from 'node:path';
 import { createApp } from '../src/index.js';
 import {
   CERTIFICATION_BUNDLE_MAJOR2_VENDOR_PATH,
-  CERTIFICATION_BUNDLE_PATH,
-  CONFORMANCE_CLAIMS_PATH,
   __resetCertificationEvidenceForTests,
 } from '../src/host/conformanceClaims.js';
 import { METADATA_TOKEN_URL, type FetchLike } from '../src/host/certificationEvidence.js';
-import { assembleCertification, writeCertification } from '../conformance/certify.js';
-import { requirementIdForFile } from '@openwop/openwop-conformance/src/lib/scenario-disposition.js';
-import { PROFILE_FLOOR_SCENARIOS } from '@openwop/openwop-conformance/src/lib/profiles.js';
 import { signBundleV3, witnessDigest, type BundleV3 } from '@openwop/openwop-conformance/src/lib/certification-bundle-v3.js';
 
 const FIXTURE_TEXT = readFileSync(join(__dirname, 'fixtures', 'certification-bundle-v3-27315b41c-major2.json'), 'utf8');
@@ -44,6 +42,9 @@ const OTHER_COMMIT = '1111111111111111111111111111111111111111';
 const BUCKET = 'openwop-dev-certification-bundles';
 const PREFIX = 'evidence';
 const ORIGIN_ENV = `gs://${BUCKET}/${PREFIX}`;
+/** The two routes ADR 0812 P4 slice 3 deleted — probed so they stay deleted. */
+const RETIRED_BUNDLE_PATH = '/host/openwop-app/conformance/certification-bundle';
+const RETIRED_CLAIMS_PATH = '/host/openwop-app/conformance/claims';
 const FIXTURE_KEY = { keyId: 'openwop-app-bundle-2', alg: 'ed25519', publicKey: 'WVhUJ8jHoQf9g9b8VPsfMS6kiOjUSbGdjbIAiemOVq4' };
 
 /**
@@ -98,23 +99,12 @@ const saved: Record<string, string | undefined> = {};
 const ENV_KEYS = ['OPENWOP_BUILD_META_DIR', 'OPENWOP_AUTH_DISABLE_COOKIES', 'OPENWOP_BUNDLE_SIGNING_KEYS', 'OPENWOP_CERT_BUNDLE_ORIGIN', 'OPENWOP_BUILD_COMMIT'];
 
 function stampImage(dir: string): void {
-  // The in-image, pre-deploy v2 pair — exactly what `deploy.sh`'s certify step
-  // leaves in `build-meta/`. Its presence is what makes the "not served in
-  // origin mode" legs a real statement rather than "nothing was there".
-  const floor = PROFILE_FLOOR_SCENARIOS['openwop-core-standard'];
-  if (floor === undefined) throw new Error('the suite defines no openwop-core-standard floor');
-  const files = [...floor.required, 'interrupt-basic.test.ts'];
-  writeCertification(dir, assembleCertification({
-    document: {
-      protocolVersion: '1.0', supportedEnvelopes: ['clarification.request'], schemaVersions: { 'ai-envelope': '1.0' },
-      limits: { clarificationRounds: 3, schemaRounds: 2, envelopesPerTurn: 4 }, supportedTransports: ['rest'],
-    },
-    discoveryUrl: 'http://127.0.0.1:1/.well-known/openwop',
-    states: new Map(files.map((f) => [f, 'passed' as const])),
-    ledger: files.map((f) => ({ requirementId: requirementIdForFile(f), disposition: 'executed-pass' as const, assertionCount: 2 })),
-    suiteVersion: '1.135.2', hostName: 'openwop-workflow-engine', hostVersion: '0.1.0',
-    requireBehavior: true, optedOut: ['openwop-production'], now: '2026-08-17T00:00:00.000Z',
-  }));
+  // A STALE image pair, as the retired in-process `--certify` left it in
+  // `build-meta/`. Hand-written: the emitter is gone, and what matters is only
+  // that the files are present, so the "served by nothing" legs below are a
+  // real statement rather than "nothing was there".
+  writeFileSync(join(dir, 'certification-bundle.json'), JSON.stringify({ bundleVersion: '2', claimedProfiles: ['openwop-core-standard'] }));
+  writeFileSync(join(dir, 'conformance-claims.json'), JSON.stringify({ claimsVersion: '1', claimedProfiles: ['openwop-core-standard'] }));
 }
 
 beforeAll(async () => {
@@ -164,20 +154,17 @@ const status = async (path: string): Promise<number> => (await fetch(`${base}${p
 
 async function expectNothingServed(posture: string): Promise<void> {
   expect(v2Pointer(await v2Doc()), `${posture}: major-2 pointer`).toBeUndefined();
-  expect(await status(CERTIFICATION_BUNDLE_PATH), `${posture}: major-1 route`).toBe(404);
+  expect(await status(RETIRED_BUNDLE_PATH), `${posture}: retired major-1 route`).toBe(404);
   expect(await status(CERTIFICATION_BUNDLE_MAJOR2_VENDOR_PATH), `${posture}: major-2 route`).toBe(404);
-  expect(await status(CONFORMANCE_CLAIMS_PATH), `${posture}: /claims`).toBe(404);
+  expect(await status(RETIRED_CLAIMS_PATH), `${posture}: retired /claims`).toBe(404);
 }
 
-describe('WHD-18 — OPENWOP_CERT_BUNDLE_ORIGIN UNSET is today\'s behaviour, exactly', () => {
-  it('the image stamp is served on the bundle route (v2 bundle, /claims 200); major 2 has neither pointer nor route', async () => {
+describe('WHD-18 — OPENWOP_CERT_BUNDLE_ORIGIN UNSET serves no evidence (ADR 0812 P4 slice 3)', () => {
+  it('a stale image stamp is served by NOTHING: no pointer, no route, retired routes 404, origin untouched', async () => {
     delete process.env.OPENWOP_CERT_BUNDLE_ORIGIN;
-    const res = await fetch(`${base}${CERTIFICATION_BUNDLE_PATH}`);
-    expect(res.status).toBe(200);
-    expect(((await res.json()) as { bundleVersion?: unknown }).bundleVersion).toBe('2');
-    expect(await status(CONFORMANCE_CLAIMS_PATH)).toBe(200);
-    expect(v2Pointer(await v2Doc())).toBeUndefined();
-    expect(await status(CERTIFICATION_BUNDLE_MAJOR2_VENDOR_PATH)).toBe(404);
+    // Precondition: the stale pair is really there.
+    expect(readdirSync(metaDir)).toEqual(expect.arrayContaining(['certification-bundle.json', 'conformance-claims.json']));
+    await expectNothingServed('origin unset, stale image stamp present');
     expect(objectReads, 'image mode must never touch the origin').toEqual([]);
   });
 });
@@ -187,11 +174,13 @@ describe('WHD-18 — origin SET', () => {
   afterAll(() => { delete process.env.OPENWOP_CERT_BUNDLE_ORIGIN; });
 
   it('nothing published → nothing served, and the IMAGE stamp in build-meta/ is NOT the fallback', async () => {
-    // Precondition: the image pair is really there (the UNSET case served it).
+    // Precondition: the stale image pair is really there.
     expect(readdirSync(metaDir)).toEqual(expect.arrayContaining(['certification-bundle.json', 'conformance-claims.json']));
     await expectNothingServed('origin set, bucket empty');
-    // It DID look — at this build's own keys — so the absence is an answer.
-    expect(objectReads).toEqual(expect.arrayContaining([keyFor(COMMIT, 1), keyFor(COMMIT, 2)]));
+    // It DID look — at this build's own major-2 key — so the absence is an
+    // answer. Nothing reads the major-1 key any more: its route is gone.
+    expect(objectReads).toEqual(expect.arrayContaining([keyFor(COMMIT, 2)]));
+    expect(objectReads).not.toContain(keyFor(COMMIT, 1));
   });
 
   it('a verified MAJOR-2 bundle → pointer at the major-2 root ONLY, resolving to the exact uploaded bytes', async () => {
@@ -208,10 +197,10 @@ describe('WHD-18 — origin SET', () => {
     // The /v1 twin serves the same document.
     expect(await (await fetch(`${base}${CERTIFICATION_BUNDLE_MAJOR2_VENDOR_PATH}`)).text()).toBe(FIXTURE_TEXT);
 
-    // Major 1 has nothing published, so its route serves nothing — the
-    // major-2 bundle is never offered through the major-1 route.
-    expect(await status(CERTIFICATION_BUNDLE_PATH)).toBe(404);
-    expect(await status(CONFORMANCE_CLAIMS_PATH), '/claims is withheld in origin mode (ADR 0735 record)').toBe(404);
+    // The retired major-1 route and /claims stay gone — the major-2 bundle is
+    // never offered through either.
+    expect(await status(RETIRED_BUNDLE_PATH)).toBe(404);
+    expect(await status(RETIRED_CLAIMS_PATH), '/claims is deleted (ADR 0812 P4 slice 3)').toBe(404);
   });
 
   // ADR 0812 P3c-0 — the "verified MAJOR-1 bundle → pointer at the major-1 root" leg was deleted with the major-1 root.
@@ -266,7 +255,7 @@ describe('WHD-18 — the advertised document still validates against the vendore
   const ROOT = join(__dirname, '..', '..', '..');
 
   async function compile(dir: string, rootFile: string) {
-    // The same dynamic-import form `conformance/certify.ts` uses, which types
+    // A dynamic import, which types
     // `ajv-formats`' default export without a cast.
     const { default: Ajv2020 } = await import('ajv/dist/2020.js');
     const { default: addFormats } = await import('ajv-formats');

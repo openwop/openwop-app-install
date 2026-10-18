@@ -31,15 +31,23 @@ afterAll(async () => {
 });
 
 /** ADR 0858 P3 slice 3 — the v2 root, read over the wire (the family is projected at major 2). */
-async function v2Root(): Promise<Record<string, any>> {
+async function v2Root(): Promise<Record<string, unknown>> {
   const r = await fetch(`${BASE}/.well-known/openwop`, { headers: { 'OpenWOP-Version': '2' } });
   expect(r.status).toBe(200);
-  return (await r.json()) as Record<string, any>;
+  return (await r.json()) as Record<string, unknown>;
 }
 
 async function jsonFetch<T = unknown>(path: string, init: RequestInit = {}): Promise<{ status: number; body: T }> {
   const res = await fetch(`${BASE}${path}`, { ...init, headers: { 'content-type': 'application/json', authorization: 'Bearer dev-token', ...(init.headers ?? {}) } });
   return { status: res.status, body: (await res.json()) as T };
+}
+
+/** Runs of the test workflow, read back through the protocol list. */
+async function runCount(): Promise<number> {
+  const r = await jsonFetch<{ runs?: unknown[] }>('/runs?workflowId=app.residency-admission-test&limit=200');
+  expect(r.status).toBe(200);
+  expect(Array.isArray(r.body.runs)).toBe(true);
+  return r.body.runs!.length;
 }
 
 describe('RFC 0129 data-residency admission gate (POST /runs)', () => {
@@ -56,6 +64,7 @@ describe('RFC 0129 data-residency admission gate (POST /runs)', () => {
   });
 
   it('admits an ADVERTISED region — proceeds, no residency rejection', async () => {
+    const before = await runCount();
     const res = await jsonFetch<{ runId?: string; error?: string }>('/runs', {
       method: 'POST',
       body: JSON.stringify({ workflowId: 'app.residency-admission-test', residency: { region: 'eu' } }),
@@ -63,9 +72,11 @@ describe('RFC 0129 data-residency admission gate (POST /runs)', () => {
     expect(res.status).toBe(201);
     expect(res.body.runId).toBeTruthy();
     expect(res.body.error).toBeUndefined();
+    expect(await runCount()).toBe(before + 1); // positive control for the count the reject case reads
   });
 
   it('rejects an UNADVERTISED region — 422 residency_unavailable, NO run created', async () => {
+    const before = await runCount();
     const res = await jsonFetch<{ runId?: string; error?: string; message?: string; details?: { requestedRegion?: string; availableRegions?: string[] } }>('/runs', {
       method: 'POST',
       body: JSON.stringify({ workflowId: 'app.residency-admission-test', residency: { region: 'antarctica' } }),
@@ -81,6 +92,8 @@ describe('RFC 0129 data-residency admission gate (POST /runs)', () => {
     expect(res.body.runId).toBeUndefined();
     expect(detailOf(res.body, 'requestedRegion')).toBe('antarctica');
     expect(detailOf(res.body, 'availableRegions')).toEqual(['eu', 'us']);
+    // "NO run created" read from the run store, not inferred from an absent runId.
+    expect(await runCount()).toBe(before);
   });
 
   it('with residency but NO region field, admits normally (nothing pinned)', async () => {

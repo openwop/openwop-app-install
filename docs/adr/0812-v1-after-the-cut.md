@@ -1,6 +1,6 @@
 # ADR 0812 — v1 after the cut: keep the compatibility shim, invert the canonical registration later, delete only on a product decision
 
-Status: **Accepted** (2026-10-04) — P0–P3c implemented; P4 slice 1 (the v1 discovery builder) implemented 2026-10-10; P3d and P4 slice 2 open
+Status: **Accepted** (2026-10-04) — P0–P3c implemented; P4 slice 1 (the v1 discovery builder) implemented 2026-10-10; P4 slice 2a (orphaned exports) and 2b (`check-v1-reliance` hard gate at zero) implemented 2026-10-15; P3d (the major-1 webhook rows) implemented 2026-10-16; P4 slice 3 (the image-mode certify emitter and its image-stamp routes, deleted) implemented 2026-10-16; P4 slice 4 (the projector's legacy `/v1/runs/` leg, deleted before its TTL ran out, at the user's call) implemented 2026-10-17; P4 slice 5 (`check-wire-claims`' image-mode claims arm and its deploy-gate cases, deleted) implemented 2026-10-17
 
 > **Status line CORRECTED 2026-10-10.** It said "P0 in progress" through P3c
 > landing; the phase record below is the source of truth.
@@ -640,6 +640,12 @@ this is cheap to do in P1.
 | P2b-4 | `/v1` stripped from 25 more protocol test files. The ports were semantic, not spelling changes: (A) more crossings into host/in-process lanes: event-log appends, `applyCostRollup`, channel appends, agent-tool inputs, redrive bodies, and storage reads written as `storage()`/casts; (E) the major-2 webhook body is `{ runId, event }` and stores the v2 vendor name (`openwop-app.crm.contact-created`); `connector.auth-expired` is hyphenated on the v2 wire; closed v2 payloads drop host fields (`artifactTypeId`→`artifactType`, `valid`, `pinned`), so those are asserted on the stored event or the host `debug-bundle`; and v2 resolves a cancelled run's gate as `409 interrupt_already_resolved`. **Security legs:** cross-tenant negatives now see v2's earlier `403 id_tenant_mismatch`, so `quorum-review` adds the attack that reaches the gates behind it (a foreign id re-bound to the attacker's own tenant), with a positive control. MEASURED under sabotage: a second tenant gate also holds. **CORRECTION to P2b-3's row:** the suspected v2 `:fork` `createdAt` defect is NOT real. The test's `appendMarker` wrote to the event log under the BOUND id; with the bare id `adr0751` passes 12/12. 23 files remain for P2b-5. `rfc0114-a2ui-delta-e2e` moves to the P3 list, because the delta frame is major-1 only by design (RFC 0209 §D.15). | P2b-4 PR |
 | P2b-5 | The last 21 portable protocol test files leave `/v1`, which completes P2b. New port shapes: a v2 snapshot carries no `interrupt`, so the token-redaction test asserts that NO snapshot carries the handle, for either scope, while the scope-checked host list still gives it to a responder; the v2 owner block is `{ tenant, subject }`, so the opaque id is witnessed on `subject.subjectId`; the v2 poll cursor is `afterSequence` (`lastSequence` is not a parameter); a run cancelled after it finished is `409`, so the key-preset probe uses a live run; the SPA persists BARE ids, so chat bubbles and conversation binds do too. Ported this way, three negatives stopped being vacuous (`not.toContain(theirs)`, and D5's foreign and non-conversation binds). `metrics-golden-telemetry` keeps the `/v1/runs` ROUTE LABEL, which is the internal route key until P3, not a request path. **Two host fixes the port exposed** (see Findings): the major-2 run list now carries `compensationStatus`, and an anonymous visitor's decoded bound id resolves. **34 files stay on `/v1` for P3** (v1 behaviour, v1-vs-v2 parity legs, minimal apps). | P2b-4/5 PR |
 | P4-1 | The v1 discovery builder (`buildAdvertisement`, ~1,400 lines) and its 22 bridge callers (ADR 0858 debt) are gone; `negotiatedMajor` deleted; `/.well-known/openwop` serves only the v2 root; two live defects fixed (attestation verify digested the v1 document, certify stamped a `/v1` bundle path). See § P4 slice 1 below. | `feat/adr-0812-v1-remnants` |
+| P4-2a | Six exports the v1 builder was the only caller of are deleted (`listCapabilities`, `universalEnvelopeKinds`, `MAX_INLINE_MEDIA_BYTES`, `selfHostedRunnerAdvertised`, `getFsSandboxRoot`, `videoGenerationAdvertised` + its test); three are kept on purpose; `Capabilities-Etag` leaves the CORS expose list. See § P4 slice 2a. | `refactor/adr0812-p4-slice2` |
+| P4-2b | `check-v1-reliance` gates this host's own `/v1` paths at zero (`ownV1PathRefs`, `backendVersionedOwnUrls`), with a ratcheted `ADR 0812 KEEP` marker for persisted keys (9); `runWireUrls` mints the final bound `/runs/<id>` URL. See § P4 slice 2b. | #4838 (`1d04b052d`) |
+| P3d | Migration (postgres 48, sqlite 50) deletes webhook subscriptions with `protocol_major` 1 or NULL and their PENDING deliveries; delivered/dead history stays. Production had 0 such rows. See § P3d record. | `feat/adr0812-p3d-v1-webhook-rows` |
+| P4-3 | The in-process certify emitter is deleted (`conformance/certify.ts`, `run.ts --certify`, which now exits 2 pointing at `publish-evidence.sh`), with the image-stamp reader (`servedBundle(1)`'s image arm, `conformanceClaims()`) and the two routes it fed (`/conformance/certification-bundle`, `/conformance/claims`). Both answered 404 in production before the change. The major-2 origin route is unchanged. Resolves the image-mode emitter OPEN item by deletion, per ADR 0869. See § P4 slice 3. | `feat/adr0812-image-certify-v3` |
+| P4-4 | The `projectV2RunIds` `eventsUrl`/`statusUrl` leg that rewrote pre-slice `/v1/runs/<bare id>` idempotency replays is deleted, with `V2_RUN_URL_KEYS`. Deleted early by the user's decision: 58 ledger rows still held the old spelling. A same-day follow-up re-mints replay links from the stored `runId`, so those rows no longer replay 410 links. See § P4 slice 4. | `chore/adr0812-drop-v1-runs-projector-leg` |
+| P4-5 | `check-wire-claims.mjs`'s image-mode claims arm is deleted (`shippedClaims()` / `CLAIMS`, its `--emit-expected` pointer, `canonicalJson`) with its seven `test-deploy-gates.sh` cases. Without an origin the check prints `certification evidence N/A`; origin mode, including `/claims` → 404, is unchanged. Deploy tooling only. See § P4 slice 5. | `chore/adr0812-wire-claims-image-arm` |
 
 ## Open questions
 
@@ -711,6 +717,93 @@ v2 arm, a vendor branch takes a path predicate.**
   collab's matcher took it as optional, so a retired host still opened sockets on
   the withdrawn path space. Witness: `test/adr0812-p3c-v1-upgrade-refused.test.ts`,
   which is red with the guard removed.
+
+## P3d record: the major-1 webhook rows (2026-10-16, openwop-app-38)
+
+**Measured first.** Read-only probe of production (`default_transaction_read_only`,
+counts only) on 2026-10-16: `webhooks` holds ONE subscription, `protocol_major`
+2, and zero rows at 1 or NULL. So the migration deletes nothing on
+`app.openwop.dev`. It exists for adopters' databases, where a subscription
+registered before the cut still looks registered and has received nothing since
+decision 2 (`enqueueDelivery` skips it and logs
+`webhook_v1_subscription_not_delivered`).
+
+**The migration** (postgres 48, sqlite 50) has the shape of an unsubscribe
+(`deleteWebhook`, WHD-16): the subscription row goes, its PENDING deliveries go
+with it, and delivered and dead rows stay as history. NULL is deleted along with
+1, because the column's own migration (postgres 42 / sqlite 45) defined NULL to
+read as major 1. Postgres runs both statements in one query string (one implicit
+transaction); sqlite wraps them in `db.transaction`.
+
+**Kept, deliberately:** the delivery-time skip for major 1 stays as defence in
+depth, and the `?? 1` readers stay. A white-label adopter can restore an old
+backup or rewind a migration, and a row that reappears must still receive
+nothing. The `IdempotentEndpoint` keys stay opaque ids (the P3d bullet above;
+`KEEP`-marked since P4 slice 2b).
+
+**Witness:** `test/adr0812-p3d-v1-webhook-rows-migration.test.ts`. On sqlite it
+seeds subscriptions at NULL, 1 and 2, each with pending, delivered and dead
+deliveries. It checks the exact surviving rows, and that a run on a database with
+no major-1 rows (and a re-run) is a no-op. The Postgres leg runs the full
+migration set into a scratch schema and then mig 48, against
+`OPENWOP_PG_TEST_DSN` (run green on a PGlite socket server); without the DSN it
+skips. Sabotaged red on BOTH stores two ways: dropping the NULL arm (NULL rows
+survive), and dropping the `status = 'pending'` filter (history lost).
+
+## P4 slice 2b: `check-v1-reliance` becomes a gate at zero (2026-10-15, openwop-app-38)
+
+**Measured first, on `d3495f816`.** The five per-layer counts this ratchet
+carried (SPA protocol/host-extension, backend protocol/host-extension, and
+the versioned self-URLs) counted every `/v1/` string. Of the backend's 70
+"protocol" refs (KEEP lines aside), 48 were not this host's paths: OpenAI,
+Anthropic, Gmail, GCS, Cohere, NetSuite and similar third-party APIs, and the
+pack registry's own `/v1/packs` layout, which no OpenWOP cut ever moves. Zero
+was unreachable, so the number meant nothing.
+
+**The gate.** One new metric, `ownV1PathRefs`, counts only `/v1` spellings of
+this host's OWN paths (`/v1/host/…`, or a first segment that is a v2
+protocol root, derived from `schemas/v2/path-manifest.json`) in shipped code:
+backend `src/`, its `sdk/` and `conformance/` runners (the P3d row's ask; the
+`conformance/` miss slice 1 found), and the SPA. Tests are excluded. It fails
+at ANY count above zero, not only on a rise. `backendVersionedOwnUrls` joins
+it at zero. The five old counts are retired. `testCorpusV1Refs` stays a
+ratchet: the 410/308 front's own tests must keep calling `/v1`.
+
+**KEEP marker.** A line carrying `ADR 0812 KEEP` is skipped by the scan and
+counted in `keptV1Lines`, which ratchets, so a new KEEP is a stated change
+and never a silent one. 9 today: the persisted `POST:/v1/runs` and
+`POST:/v1/host/openwop-app/agents` idempotency-key namespaces (P3d: a key,
+not a URL) and the recogniser for public-email links already sent.
+
+**Driven to zero in the same PR:**
+- `runWireUrls` mints the final `/runs/<bound id>` URL itself, binding with
+  the tenant the projector uses (`req.tenantId ?? 'default'`). It minted
+  `/v1/runs/<bare id>` and relied on `projectV2RunIds` rewriting it. The
+  projector's `/v1/runs/` leg STAYS, for one reason: idempotency-ledger rows
+  written before this slice hold that spelling and are replayed through it.
+  It does not match the new form, so a fresh URL is never projected twice
+  (the codec is not idempotent; pinned in `v2-identity.test.ts`). Delete that
+  leg once the idempotency TTL has passed since this deploy. *(CORRECTED
+  2026-10-17: deleted in P4 slice 4 BEFORE the TTL ran out, at the user's
+  call; see that section for what the remaining rows replay.)* Matching bare
+  `/runs/` in the projector instead was considered and REJECTED: it would also
+  rewrite a caller's run variable that happened to be keyed `statusUrl`.
+- The chat-tool eval path never went through the projector, so it used to
+  hand out a relative `/v1/runs/<bare>` link, which answers 410 since the cut.
+  It now gets the bound form.
+- `interrupt.callbackUrl` is unversioned (it never ships on major 2; dead text).
+- The OpenAPI `paths` keys are written unversioned; `advertisedPaths` no longer
+  strips a prefix that is not there. The output is unchanged.
+- Four log/diagnostic strings and one SQL comment drop `/v1`.
+
+Witnesses: `check-v1-reliance.test.ts` legs 7–10 (own paths in every quoting
+count; third-party and longer segments do not; KEEP skip + count; the real
+entry point exits 1 naming `file:line`). `adr0669-run-links-survive-cut` now
+pins that the URL's id IS the projected `runId`. Sabotaged red three ways:
+unbound id, `%2F` encoding, wrong tenant.
+
+The checker's "facts" block printed two hard-coded strings that went false at
+P3b/P3c ("v2 is a rewrite onto the v1 handlers"); corrected.
 
 ## P4 slice 1: the v1 discovery builder (2026-10-10)
 
@@ -817,3 +910,160 @@ per store, (3) dropping the old reader after the idempotency TTL. A client
 retry spanning a non-atomic rename would re-execute a run create, which is why
 it is not a rename. `webhook_subscriptions.protocol_major` 1/null rows: a
 DELETE migration is still recommended and still open.
+
+> **DONE 2026-10-16** (P3d record below): the DELETE shipped as postgres mig 48 /
+> sqlite 50. The table is `webhooks`, not `webhook_subscriptions`. Production
+> had 0 such rows.
+
+## P4 slice 2a: the orphaned exports (2026-10-15, openwop-app-38)
+
+Measured on `d3495f816`: each of the nine exports slice 1 listed has exactly
+one `src` file reference, its own definition.
+
+**Deleted (no caller anywhere, or a test that only pinned the function):**
+`listCapabilities`, `universalEnvelopeKinds`, `MAX_INLINE_MEDIA_BYTES`,
+`selfHostedRunnerAdvertised`, `getFsSandboxRoot`, and
+`videoGenerationAdvertised` with `test/video-gen-advertise.test.ts`.
+
+**Kept, with the reason:**
+- `registeredFeatureSurfaceIds()`: ten feature tests use it as their
+  registration witness, and ADR 0858 names it as the source a future
+  `hostExtensions.featureSurfaces` record MUST read.
+- `A2A_PROFILES`: the A2A profile SSoT, pinned by `a2a-profile.test.ts` and the
+  steward residue ledger.
+- `advertisedProviderAuthModes()`: still called in its own file (the BYOK
+  list derives from it).
+
+**Consequence that the deletion makes visible, not one it causes.** Three
+operator flags only ever fed the v1 advertisement, so they have changed
+nothing on the wire since the cut (2026-10-04):
+`OPENWOP_VIDEO_PROVIDER_ENABLED` (video dispatch never read it; the v2 root
+leaves `aiProviders.videoGeneration` unfilled, ADR 0858's ledger),
+`OPENWOP_MAX_INLINE_MEDIA_BYTES` (same, `aiProviders.maxInlineMediaBytes`) and
+`OPENWOP_SELF_HOSTED_RUNNER` / `_ACCEPTED` (RFC 0122 has no v2 record).
+`FEATURES.md`, `docs/steward/TODO.md` `OPS-4b` and `frontend/react/WHITE-LABEL.md`
+are corrected in the same PR. When ADR 0858 projects any of these facets, the
+record re-introduces its predicate next to the v2 projection, not here.
+`scripts/release-conformance.sh` still passes the self-hosted-runner pair; it
+is inert and harmless, and is left for the slice that projects RFC 0122.
+
+**`Capabilities-Etag`:** removed from `Access-Control-Expose-Headers`. Nothing
+sets it since P3c-0 (`rfc0165-owner-subject.test.ts` asserts it is absent; the
+standard `ETag` replaced it), and nothing in the SPA, `sdk/`, `conformance/` or
+the backend reads it, so no cross-origin reader loses anything.
+
+**Still open after 2a:** the `check-v1-reliance` hard gate (count only lines
+without an `ADR 0812 KEEP` marker, scan `conformance/` and `sdk/`, then flip),
+the image-mode major-1 certification bundle (#4663's root cause), and P3d.
+
+## P4 slice 3: the image-mode certify emitter (2026-10-16, openwop-app-50)
+
+**The "Fix (open)" in the P3c ROOT CAUSE block is resolved by DELETION, not by
+either option it named.** ADR 0869 had already shown that porting the emitter
+(to v3, or to the upstream CLI in-process) would produce an artifact nothing
+serves: the image stamp was served only at major 1, and major 1 is retired. Since
+ADR 0869, `deploy.sh` does not run the lane, so the emitter, its stamp reader and
+the routes that served that stamp were dead code. This slice deletes them.
+
+**Deleted:**
+- `conformance/certify.ts` (the bundle-v2 assembler with major-1-only
+  `claimedProfilesFor`) and `run.ts`'s certify mode (reporter + ledger sink,
+  forced no-quarantine, `OPENWOP_REQUIRE_BEHAVIOR`, `emitCertification`).
+  `--certify` is now REFUSED with exit 2 and a pointer to
+  `scripts/publish-evidence.sh`, rather than ignored. An old command running a
+  plain suite silently would read as a certification that never happened.
+- `host/conformanceClaims.ts`'s image half: the `build-meta/` stamp reader,
+  `conformanceClaims()`, `StampedClaims`, and the stamp/path constants.
+  `servedBundle()` is origin-only.
+- The routes `GET /host/openwop-app/conformance/certification-bundle` (major 1)
+  and `GET /host/openwop-app/conformance/claims`.
+- Tests that exercised only the emitter or the image stamp:
+  `conformance-claims.test.ts`, `conformance-claims-routes.test.ts`,
+  `certify-scrub-nonsecret-config.test.ts`, and the bundle half of
+  `adr0585-p2-recovery-bound-published.test.ts` (its discovery half stays).
+
+**Preconditions MEASURED in production before the change** (2026-10-16 ~04:05Z,
+`app.openwop.dev/api`, origin mode): `/conformance/certification-bundle` → 404
+("No verified major-1 … bundle"), `/conformance/claims` → 404 (withheld in
+origin mode). No client could have been reading either.
+
+**Unchanged, and pinned:** the major-2 origin route
+(`/host/openwop-app/conformance/certification-bundle/major-2`). Its origin-mode
+404 text is byte-identical to before (checked by diffing the string against
+`origin/main`), and its 200 still sends the exact verified bytes. In image mode
+(no origin), its 404 message now says no evidence origin is configured, instead
+of "no certified run was stamped into this artifact". `whd18-certification-bundle-routes.test.ts`
+now plants a STALE image pair in `build-meta/` and asserts that nothing serves
+it, in both modes. It also asserts that both deleted routes stay 404, and that
+the major-1 origin key is no longer read.
+
+**Where ADR 0585 P2's recovery bound is published now:** in the suite CLI's v3
+cut, as the `0158.bound-is-derived` row's `evidence.recoveryBounds`, supplied by
+`routes/durabilitySeam.ts` (pinned by `rfc0158-durability-seam.test.ts`). The
+deleted emitter's `recoveryBound` field reached no reader once its bundle was
+no longer built.
+
+**Still open after slice 3:** `check-wire-claims.mjs`'s image-mode claims arm and
+its `test-deploy-gates.sh` cases. They are dead because nothing writes the stamp
+(and `write-build-commit.mjs` deletes a stale one); with no stamp the arm SKIPs.
+Delete them in a deploy-tooling slice. *(The projector's legacy `/v1/runs/` leg,
+also listed here, was deleted in slice 4.)*
+*(Both are deleted in slice 5, below.)*
+
+## P4 slice 5: `check-wire-claims`' image-mode claims arm (2026-10-17, openwop-app-73)
+
+The last item slice 3 left open. `check-wire-claims.mjs` compared the deployed
+`/conformance/claims` document and the advertised bundle with a
+`build-meta/conformance-claims.json` stamp. Since slice 3, nothing writes that
+stamp, and `write-build-commit.mjs` deletes a stale one, so on every real run
+the arm printed `SKIP`. It could fire only on a stray file left in a checkout.
+Deleted: `shippedClaims()` and `CLAIMS`, the `else if (CLAIMS)` branch (the
+pointer, claims-equality, followable-URL and bundle-digest checks),
+`canonicalJson` (only that branch used it), and the stub pointer
+`--emit-expected` added when a stamp existed. The deploy-gate harness loses the
+seven cases that staged a stamp ("published claims arm (ADR 0550 P4)").
+
+Kept, unchanged: origin mode (the signed v3 bundle's binding and `/claims` →
+404, including the case that serves a stale `/claims` to prove that check can
+fail), and `write-build-commit`'s stale-stamp deletion case.
+
+Without `OPENWOP_CERT_BUNDLE_ORIGIN` in the env, the check now prints
+`certification evidence N/A (no OPENWOP_CERT_BUNDLE_ORIGIN in this run …)`
+instead of the old `conformance claims document SKIP`. A new deploy-gate case
+pins that row, and that no claims-document row runs. It reds when the row is
+mislabelled. `test-deploy-gates.sh`: 276 passed, 0 failed. Against production
+(read-only, prod 65346ee0f), the branch and `main` print the same rows apart
+from that one, and both exit 0.
+
+## P4 slice 4: the projector's legacy `/v1/runs/` leg (2026-10-17, openwop-app-38)
+
+`projectV2RunIds` no longer rewrites `eventsUrl` / `statusUrl`. Slice 2b made
+`runWireUrls` mint the final `/runs/<bound id>`, so the leg only ever matched
+idempotency-ledger rows written before 2b, which hold `/v1/runs/<bare id>`.
+`V2_RUN_URL_KEYS` and the `projectBoundId` import go with it.
+
+**Deleted before the TTL ran out, by the user's decision.** The plan was to
+wait for the 7-day TTL and a zero count. MEASURED read-only on production,
+2026-10-17 13:28Z: `idempotent_response` holds 74 `POST:/v1/runs` rows, and
+**58 still contain `/v1/runs/`**, the newest written 2026-10-15 18:10:59Z,
+so the last of them is pruned around 2026-10-22 18:11Z. Until then, a client
+that retries one of those exact creates with the same `Idempotency-Key` gets
+the stored links unrewritten: `/v1/runs/<bare id>`, which answers 410 since the
+cut. The run itself is unaffected, and its `runId` is still projected. Nothing
+else read the leg.
+
+*(CORRECTED 2026-10-17, follow-up the same day: the 410 replay above is FIXED.
+`POST /runs` replays now re-mint `eventsUrl` / `statusUrl` from the stored
+`runId` through `runWireUrls` (`remintRunWireUrls`, `routes/runs.ts`), instead
+of serving the stored URLs. So the remaining legacy rows (56 at 18:1xZ; every
+stored body has the measured shape `{ runId: <bare>, status, statusUrl,
+eventsUrl }`) replay links that resolve, and a row written since 2b replays the
+same URLs it was first answered with. No production data was rewritten. The
+in-app EVD-7 eval lane replays from the same ledger but only from `eval-once:`
+rows, all written after 2b, so it is untouched. Witness:
+`adr0812-p4-4-replay-remints-run-links.test.ts`, a planted pre-2b row plus a
+fresh-row control; reverting the route line reds the legacy leg only.)*
+
+Witness: `v2-identity.test.ts` now pins that a legacy `/v1/runs/` URL passes
+through byte-identical. The existing leg (a fresh `runWireUrls` URL is never
+re-projected) and `adr0669-run-links-survive-cut` are unchanged.

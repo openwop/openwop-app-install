@@ -141,6 +141,10 @@ export function ChannelSchedulePanel({ channelId, agents }: Props): JSX.Element 
                   <span className="muted u-fs-10">
                     {!known ? t('schedAgentRemoved') : s.enabled ? t('schedNextRun', { when: fmt(s.nextRunAt) }) : t('schedPaused')}
                   </span>
+                  {/* ADR 0879 D7 — a schedule never fails silently. */}
+                  {s.lastError && (
+                    <span className="u-fs-10 u-text-danger">{s.lastError.code === 'conversation_write_refused' ? t('schedLastRunNotPosted') : t('schedLastRunFailed', { reason: s.lastError.message })}</span>
+                  )}
                 </span>
                 {confirmingDeleteId === s.chatId ? (
                   <span className="u-flex u-items-center u-gap-1">

@@ -10,6 +10,10 @@ describe('mapCategory', () => {
     for (const g of ['data', 'ai', 'flow', 'control', 'integration'] as const) expect(mapCategory(g)).toBe(g);
   });
 
+  // CEILING: `chat` and `coordination` map to Control, which is ALSO the default,
+  // so deleting their explicit `case` is behaviour-identical — no test can see
+  // the explicitness for those two. `canvas` (→ Data) is observable, and the
+  // shared default is pinned by the 'unknown value' case below.
   it('maps each v2 spec value the palette has no group for, explicitly', () => {
     expect(mapCategory('canvas')).toBe('data');
     expect(mapCategory('chat')).toBe('control');

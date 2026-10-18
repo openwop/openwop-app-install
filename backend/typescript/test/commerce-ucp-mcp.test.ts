@@ -37,7 +37,7 @@ describe('UCP-over-MCP — registration + gating', () => {
     const search = findToolByName('ucp-catalog-search');
     expect(search?.mcpFeatureToggle).toBe('commerce-ucp');
     expect(search?.mcpRequiresAuth).toBe(true);
-    expect((search?.inputSchema as { required?: string[] }).required).toContain('orgId');
+    expect(search?.inputSchema).toMatchObject({ required: expect.arrayContaining(['orgId']) });
   });
 
   it('gates the tools: anonymous denied; authed+enabled allowed; authed+disabled denied', async () => {
@@ -45,12 +45,19 @@ describe('UCP-over-MCP — registration + gating', () => {
     const order = findToolByName('ucp-place-order')!;
 
     await enable('commerce-ucp', 'on');
-    expect(await isToolAllowed(search, anon)).toBe(false);        // anonymous → fail-closed
-    expect(await isToolAllowed(search, authed)).toBe(true);       // authed + UCP on
-    expect(await isToolAllowed(order, authed)).toBe(true);
+    try {
+      // Double guard: the anonymous check AND the RFC 0078 scope check (the anon principal
+      // holds no scope) both deny — removing `isAnonymousPrincipal` alone stays false.
+      expect(await isToolAllowed(search, anon)).toBe(false);        // anonymous → fail-closed
+      expect(await isToolAllowed(search, undefined)).toBe(false);   // no principal at all
+      expect(await isToolAllowed(search, authed)).toBe(true);       // authed + UCP on
+      expect(await isToolAllowed(order, authed)).toBe(true);
 
-    await enable('commerce-ucp', 'off');
-    expect(await isToolAllowed(search, authed)).toBe(false);      // UCP off → not exposed
-    expect(await isToolAllowed(order, authed)).toBe(false);
+      await enable('commerce-ucp', 'off');
+      expect(await isToolAllowed(search, authed)).toBe(false);      // UCP off → not exposed
+      expect(await isToolAllowed(order, authed)).toBe(false);
+    } finally {
+      await enable('commerce-ucp', 'on');
+    }
   });
 });

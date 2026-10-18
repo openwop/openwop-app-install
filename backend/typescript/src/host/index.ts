@@ -24,13 +24,15 @@ import { getNodeRegistry } from '../executor/nodeRegistry.js';
 import { buildGraph, topologicalOrder } from '../executor/scheduler.js';
 import { getRegisteredWorkflowAsync } from './workflowsRegistry.js';
 import { getChainBackedWorkflow } from './chainBackedWorkflows.js';
-import { getExampleWorkflow } from './exampleWorkflows.js';
 import { createConnectorInvoker } from './connectorInvoker.js';
 import { AGENT_MENTION_WORKFLOW_ID, agentMentionWorkflowDefinition } from './agentMentionWorkflows.js';
 import { conformanceNodesEnabled } from '../bootstrap/conformanceMockAgent.js';
 import { SUPERVISOR_CALLS_LIVE_MODEL } from '../bootstrap/nodes.js';
 import { implementedMemoryActions } from '../bootstrap/conformanceMemoryProbe.js';
 import { CONFORMANCE_STORAGE_PROBE_TYPE_ID } from '../bootstrap/conformanceStorageProbe.js';
+import { CONFORMANCE_TABLE_SCHEMA_PROBE_FIXTURE, CONFORMANCE_TABLE_SCHEMA_PROBE_TYPE_ID } from '../bootstrap/conformanceTableSchemaProbe.js';
+import { v2AdvertisedStorageFamilies } from './storageFamilyAdvert.js';
+import { listFixtureSuiteIds, loadConformanceEvalSuites, registerScriptedEvalAgent } from './evals/fixtureSuites.js';
 
 /**
  * Load conformance fixtures from the in-tree `conformance/fixtures/`
@@ -109,6 +111,14 @@ const conformanceFixtures = new Map<string, WorkflowDefinition>();
   }
 })();
 
+// ADR 0889 P5 — RFC 0244 eval-suite fixtures (`conformance-fixtures/eval-suites/`)
+// + the scripted agent they target. Both posture-gated inside the module.
+(function loadEvalSuiteFixtures(): void {
+  const dir = findConformanceFixturesDir();
+  if (dir) loadConformanceEvalSuites(dir);
+  registerScriptedEvalAgent();
+})();
+
 /**
  * Public — list loaded conformance fixture ids for `capabilities.fixtures`.
  *
@@ -168,9 +178,12 @@ function fixtureNeedsConformanceNodes(def: WorkflowDefinition): boolean {
   // id NOT behind that switch — it calls only the run tenant's own storage, so it
   // has its own (`storageProbeEnabled()`), and whether it resolves is what
   // decides its fixture, via the resolvability check in `fixtureIsAdvertisable`.
+  // RFC 0228 G4: `core.conformance.table-schema-probe` stands on the same footing
+  // (`tableSchemaProbeEnabled()`).
   return (def.nodes ?? []).some(
     (n) =>
       n.typeId !== CONFORMANCE_STORAGE_PROBE_TYPE_ID &&
+      n.typeId !== CONFORMANCE_TABLE_SCHEMA_PROBE_TYPE_ID &&
       (n.typeId.startsWith('core.conformance.') || n.typeId.startsWith('conformance.')),
   );
 }
@@ -345,9 +358,14 @@ export function listLoadedConformanceFixtures(supervisorCallsLiveModel: boolean 
     if (id === 'conformance-credential' && !oauthAdvertisementSnapshot().providers.some((p) => p.id === 'synthetic')) continue;
     // ADR 0858 P3 — a live-model fixture is withheld while the supervisor is a mock.
     if (!liveModelSupervisorRequirementMet(id, supervisorCallsLiveModel)) continue;
+    // RFC 0228 G4 (conformance/fixtures.md): "A host that does not advertise
+    // `tableStorage` MUST NOT advertise this fixture."
+    if (id === CONFORMANCE_TABLE_SCHEMA_PROBE_FIXTURE && !v2AdvertisedStorageFamilies().includes('tableStorage')) continue;
     if (fixtureIsAdvertisable(id, enabled, isResolvable)) advertised.push(id);
     else reportWithheldFixture(id, isResolvable);
   }
+  // ADR 0889 P5 — the eval-suite fixtures this host can run (posture-gated).
+  advertised.push(...listFixtureSuiteIds());
   return advertised.sort();
 }
 
@@ -656,12 +674,9 @@ export function createHostAdapterSuite(deps: { storage: Storage }): HostAdapterS
         // restart/replay, while the chain itself stays gallery-reachable + editable.
         const chainBacked = getChainBackedWorkflow(workflowId);
         if (chainBacked) return { workflowId, definition: chainBacked };
-        // Built-in demo role-workflows (the "AI coworkers" roster portfolios).
-        // Resolved here in catalog source A — NOT the in-memory builder
-        // registry — so a roster portfolio id is runnable on every instance
-        // and survives restart (host/exampleWorkflows.ts explains why).
-        const demo = getExampleWorkflow(workflowId);
-        if (demo) return { workflowId, definition: demo };
+        // (ADR 0775 P2d — the 15 legacy `openwop-app.agents.*` demo role-workflows
+        // no longer resolve here. Production had zero runs of any of them, so they
+        // were deleted, not archived; see the ADR's P2d record.)
         // (ADR 0775 P2 — the Work-Twin `tmpl.*` templates no longer resolve here:
         // they are chain-backed from the work-twin-templates pack and resolve
         // through `getChainBackedWorkflow` above, same id.)

@@ -20,6 +20,7 @@ vi.stubGlobal('fetch', fetchMock);
 
 import { __clearMeshCache, ensureMesh } from '../meshStore.js';
 import { Cad3dView } from '../Cad3dView.js';
+import type { CadSolidInput } from '../cad3d.js';
 
 const ORGS = { orgs: [{ orgId: 'org-a' }, { orgId: 'org-b' }] };
 
@@ -31,7 +32,9 @@ function stlBytes(): ArrayBuffer {
 }
 
 const json = (body: unknown, status = 200): Response =>
-  ({ ok: status < 400, status, json: async () => body, arrayBuffer: async () => stlBytes() }) as unknown as Response;
+  new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+/** The capability serve URL's canonical STL bytes. */
+const stl = (): Response => new Response(stlBytes());
 
 beforeEach(() => { fetchMock.mockReset(); __clearMeshCache(); });
 afterEach(cleanup);
@@ -42,11 +45,27 @@ describe('CAD2-M7 — the mesh read works from the SECOND org, and failure is no
       if (url.includes('/orgs') && !url.includes('/cad/')) return json(ORGS);
       if (url.includes('/cad/orgs/org-a/')) return json({ error: 'forbidden' }, 403);
       if (url.includes('/cad/orgs/org-b/meshes/')) return json({ assetId: 'm1', serveUrl: '/serve/m1', triangleCount: 1 });
-      if (url.includes('/serve/m1')) return json(null);
+      if (url.includes('/serve/m1')) return stl();
       throw new Error(`unexpected ${url}`);
     });
     ensureMesh('m1');
     await waitFor(() => expect(ensureMesh('m1').status).toBe('ready'));
+  });
+
+  it('a caller who is a member of NO listed org (every org 403s) gets an error, never a mesh', async () => {
+    // The same-tenant non-member: the tenant's org list is readable, but every
+    // org-scoped mesh read refuses. Each org is tried, and the result is the
+    // honest error — not a ready entry and not a stuck loading one.
+    const metaCalls: string[] = [];
+    fetchMock.mockImplementation(async (url: string) => {
+      if (url.includes('/orgs') && !url.includes('/cad/')) return json(ORGS);
+      if (url.includes('/cad/orgs/')) { metaCalls.push(url); return json({ error: 'forbidden' }, 403); }
+      throw new Error(`unexpected ${url}`);
+    });
+    ensureMesh('m3');
+    await waitFor(() => expect(ensureMesh('m3').status).toBe('error'));
+    expect(ensureMesh('m3').mesh).toBeUndefined();
+    expect(metaCalls.map((u) => u.match(/\/cad\/orgs\/([^/]+)\//)?.[1])).toEqual(['org-a', 'org-b']);
   });
 
   it('a failed org-list read is retried on the next load, not memoized for the session', async () => {
@@ -59,7 +78,7 @@ describe('CAD2-M7 — the mesh read works from the SECOND org, and failure is no
     fetchMock.mockImplementation(async (url: string) => {
       if (url.includes('/orgs') && !url.includes('/cad/')) return json(ORGS);
       if (url.includes('/cad/orgs/org-a/meshes/')) return json({ assetId: 'm2b', serveUrl: '/serve/m2b', triangleCount: 1 });
-      if (url.includes('/serve/m2b')) return json(null);
+      if (url.includes('/serve/m2b')) return stl();
       throw new Error(`unexpected ${url}`);
     });
     ensureMesh('m2b');
@@ -68,7 +87,7 @@ describe('CAD2-M7 — the mesh read works from the SECOND org, and failure is no
 });
 
 describe('CAD2-M5 — the placeholder box is DISCLOSED, never presented as the part', () => {
-  const meshSolid = { kind: 'mesh', assetRef: 'mesh-x', x: 0, y: 0, z: 0 } as never;
+  const meshSolid: CadSolidInput = { kind: 'mesh', assetRef: 'mesh-x', x: 0, y: 0, z: 0 };
 
   it('a failed mesh renders the failure badge (alert), not a silent cube', async () => {
     fetchMock.mockImplementation(async (url: string) => {
@@ -91,11 +110,12 @@ describe('CAD2-M5 — the placeholder box is DISCLOSED, never presented as the p
     fetchMock.mockImplementation(async (url: string) => {
       if (url.includes('/orgs') && !url.includes('/cad/')) return json(ORGS);
       if (url.includes('/meshes/')) return json({ assetId: 'mesh-x', serveUrl: '/serve/x', triangleCount: 1 });
-      if (url.includes('/serve/x')) return json(null);
+      if (url.includes('/serve/x')) return stl();
       throw new Error(`unexpected ${url}`);
     });
     render(<Cad3dView solids={[meshSolid]} label="scene" />);
     await waitFor(() => expect(screen.queryByText(/still loading/i)).toBeNull());
+    expect(screen.queryByRole('status')).toBeNull(); // the loading badge is role=status
     expect(screen.queryByRole('alert')).toBeNull();
   });
 });

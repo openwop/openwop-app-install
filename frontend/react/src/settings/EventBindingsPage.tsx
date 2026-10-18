@@ -45,6 +45,12 @@ export function EventBindingsPage(): JSX.Element {
   // fallback designed for one edge case (see below) turned page-wide.
   const [workflowsFailed, setWorkflowsFailed] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // EMPTY-ON-FAIL-8 (ADR 0779 D7) — a failed bindings read is NOT "No event bindings
+  // yet". The catch used to set `bindings` to [], so the empty card ("Create your
+  // first binding above") rendered beside the error. The read keeps its own flag:
+  // the error Notice says why, the list slot offers the retry, and the empty card
+  // needs a successful read.
+  const [bindingsFailed, setBindingsFailed] = useState(false);
   const [eventType, setEventType] = useState('');
   // ADR 0825 — the event-type suggestions come from the backend catalog. A failed
   // read is SAID, not shown as an empty list: free text still binds, but an empty
@@ -85,10 +91,11 @@ export function EventBindingsPage(): JSX.Element {
       ]);
       setBindings(b);
       setWorkflows(w);
+      setBindingsFailed(false);
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
-      setBindings([]);
+      setBindingsFailed(true);
     }
   }, []);
   useEffect(() => { void refresh(); }, [refresh]);
@@ -265,7 +272,9 @@ export function EventBindingsPage(): JSX.Element {
           </select>
         </div>
       ) : null}
-      {bindings === null ? (
+      {bindingsFailed ? (
+        <Button variant="secondary" size="sm" onClick={() => void refresh()}>{t('common:retry')}</Button>
+      ) : bindings === null ? (
         <SkeletonRows rows={3} columns={['25%', '25%', '15%', '20%', '15%']} />
       ) : bindings.length === 0 ? (
         <StateCard icon={<ZapIcon size={20} />} title={t('bindingsEmptyTitle')} body={t('bindingsEmptyBody')} />

@@ -22,6 +22,13 @@
  *    service-desk visitor lane switched back to `resolveOne`: both visitor cases fail
  *    (the first stops honouring the toggle; the second 404s a free-plan owner's
  *    visitors — the architect #5 hazard).
+ *
+ * w35 (grade-tests): the router legs each set their own config (they used to lean
+ * on the first leg's, so shuffle reddened the control and made toggle-off
+ * vacuous), stamp a REAL stored run and read it back, and the route refusals assert
+ * the PLAN refusal body, not just 403. Re-witnessed: the router/code-exec/widget
+ * gates disabled, the service-desk sub-toggle disabled, the visitor lane on
+ * `resolveOne`, the scheduled-chat stamp dropped, `evals` taken out of Governance.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -41,7 +48,7 @@ import { provisionWidget } from '../src/features/chat-widget/widgetService.js';
 import { mintPublicIntakeKey } from '../src/features/service-desk/widgetRoutes.js';
 import { setIntakeConfig } from '../src/features/service-desk/intake.js';
 import type { RunRecord } from '../src/types.js';
-import type { Storage } from '../src/storage/storage.js';
+import { openStorage } from '../src/storage/index.js';
 
 let server: http.Server;
 let BASE: string;
@@ -117,11 +124,20 @@ describe('ADR 0820 §8.2 — the moved ids are sellable; consent is not', () => 
   });
 });
 
+/** The 403 must be the PLAN refusal naming this feature (`entitlementGuard.ts`), not a scope 403. */
+async function expectPlanRefusal(path: string, featureId: string): Promise<void> {
+  const res = await authed(path);
+  const text = await res.text();
+  expect(res.status, text).toBe(403);
+  expect(text).toContain('does not include this feature');
+  expect(text).toContain(`"feature":"${featureId}"`);
+}
+
 describe('ADR 0820 §8.2 — operator routes refuse a free plan, serve an owner', () => {
   it('evals (Governance): leaderboard 403 → served after Governance', async () => {
     const orgId = await newOrg();
     const path = `/host/openwop-app/evals/orgs/${orgId}/leaderboard`;
-    expect((await authed(path)).status).toBe(403);
+    await expectPlanRefusal(path, 'evals');
     await own(T, 'governance');
     expect((await authed(path)).status).toBe(200);
   });
@@ -129,7 +145,7 @@ describe('ADR 0820 §8.2 — operator routes refuse a free plan, serve an owner'
   it('model-router (Governance): config 403 → served after Governance', async () => {
     const orgId = await newOrg();
     const path = `/host/openwop-app/model-router/orgs/${orgId}/config`;
-    expect((await authed(path)).status).toBe(403);
+    await expectPlanRefusal(path, 'model-router');
     await own(T, 'governance');
     expect((await authed(path)).status).toBe(200);
   });
@@ -137,7 +153,7 @@ describe('ADR 0820 §8.2 — operator routes refuse a free plan, serve an owner'
   it('scheduled agent chats (Agents): list 403 → served after Agents', async () => {
     const orgId = await newOrg();
     const path = `/host/openwop-app/scheduled-chats/orgs/${orgId}/chats`;
-    expect((await authed(path)).status).toBe(403);
+    await expectPlanRefusal(path, 'scheduled-agent-chats');
     await own(T, 'agents');
     expect((await authed(path)).status).toBe(200);
   });
@@ -145,7 +161,7 @@ describe('ADR 0820 §8.2 — operator routes refuse a free plan, serve an owner'
   it('chat widget (Support): operator list 403 → served after Support', async () => {
     const orgId = await newOrg();
     const path = `/host/openwop-app/chat-widget/orgs/${orgId}/widgets`;
-    expect((await authed(path)).status).toBe(403);
+    await expectPlanRefusal(path, 'chat-widget');
     await own(T, 'support');
     expect((await authed(path)).status).toBe(200);
   });
@@ -158,20 +174,30 @@ describe('ADR 0820 §8.2 — model-router degrades on the chat hot path, never e
     rules: [{ when: { kind: 'tokensOver', threshold: 10 }, target: { provider: 'anthropic', model: 'big' } }],
     fallback: { provider: 'anthropic', model: 'small' },
   };
-  const fakeRun = (): RunRecord => ({ runId: `run-${++evt}`, tenantId: TM, scopeId: ORG, metadata: {} } as unknown as RunRecord);
-  const recordingStorage = (): { storage: Storage; writes: unknown[] } => {
-    const writes: unknown[] = [];
-    return { writes, storage: { updateRun: async (_id: string, patch: unknown) => { writes.push(patch); } } as unknown as Storage };
-  };
-
-  it('plan-refused: resolveModelRoute returns null and the stamp leaves the run on its own model', async () => {
+  /** A REAL run in a real store: the stamp is read back from storage, not from a recorder. */
+  async function realRun(): Promise<{ storage: Awaited<ReturnType<typeof openStorage>>; run: RunRecord }> {
+    const storage = await openStorage('memory://');
+    const now = new Date().toISOString();
+    const run: RunRecord = {
+      runId: `run-reclass-${++evt}`, workflowId: 'wf.reclass', tenantId: TM, scopeId: ORG, status: 'running',
+      inputs: {}, metadata: {}, configurable: {}, createdAt: now, updatedAt: now,
+    };
+    await storage.insertRun(run);
+    return { storage, run };
+  }
+  // A spaced turn text: ~100 tokens, over the rule's 10-token threshold.
+  const TURN = 'please route this turn '.repeat(18);
+  beforeEach(async () => {
+    // Every case gets the SAME enabled config, so no case leans on another's setup.
     await setRouterConfig(TM, ORG, 'u1', cfg);
     await setRouterEnabled(TM, ORG, 'u1', true);
+  });
+
+  it('plan-refused: resolveModelRoute returns null and the stamp leaves the run on its own model', async () => {
     expect(await resolveModelRoute(TM, ORG, { tokenEstimate: 9000 }, 0)).toBeNull();
-    const run = fakeRun();
-    const { storage, writes } = recordingStorage();
-    await expect(maybeStampModelRoute(run, 'x'.repeat(400), storage)).resolves.toBeUndefined();
-    expect(writes).toEqual([]);
+    const { storage, run } = await realRun();
+    await expect(maybeStampModelRoute(run, TURN, storage)).resolves.toBeUndefined();
+    expect((await storage.getRun(run.runId))?.metadata['modelRoute']).toBeUndefined();
     expect(run.metadata['modelRoute']).toBeUndefined();
   });
 
@@ -179,15 +205,16 @@ describe('ADR 0820 §8.2 — model-router degrades on the chat hot path, never e
     await own(TM, 'governance');
     const decision = await resolveModelRoute(TM, ORG, { tokenEstimate: 9000 }, 0);
     expect(decision?.target).toEqual({ provider: 'anthropic', model: 'big' });
-    const run = fakeRun();
-    const { storage, writes } = recordingStorage();
-    await maybeStampModelRoute(run, 'x'.repeat(400), storage);
-    expect(writes).toHaveLength(1);
+    const { storage, run } = await realRun();
+    await maybeStampModelRoute(run, TURN, storage);
+    expect((await storage.getRun(run.runId))?.metadata['modelRoute']).toEqual({ provider: 'anthropic', model: 'big' });
     expect(run.metadata['modelRoute']).toEqual({ provider: 'anthropic', model: 'big' });
   });
 
   it('toggle-off (owned plan, tenant switched it off): degrades to null too', async () => {
     await own(TM, 'governance');
+    // Control in-case: with the toggle on, this exact state routes.
+    expect((await resolveModelRoute(TM, ORG, { tokenEstimate: 9000 }, 0))?.target).toEqual({ provider: 'anthropic', model: 'big' });
     await setTenantToggle('model-router', TM, 'off');
     try {
       expect(await resolveModelRoute(TM, ORG, { tokenEstimate: 9000 }, 0)).toBeNull();

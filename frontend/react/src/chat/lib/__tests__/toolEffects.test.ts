@@ -22,9 +22,16 @@ describe('useToolEffects (ADR 0784 P3)', () => {
     const { result, rerender } = renderHook(({ n }) => useToolEffects(n), { initialProps: { n: ['a', 'mcp_x'] } });
     await waitFor(() => expect(result.current.get('a')).toBe('read'));
     expect(result.current.has('mcp_x')).toBe(false);
+    // A duplicate name in the same render is not a new ask.
     rerender({ n: ['a', 'mcp_x', 'a'] });
     await act(async () => { await Promise.resolve(); });
     expect(asked).toEqual([['a', 'mcp_x']]);
+    // A FRESH mount runs the effect again — the unknown name, cached as unknown,
+    // must not be re-asked (a rerender with the same key never re-runs it).
+    const again = renderHook(() => useToolEffects(['mcp_x']));
+    await act(async () => { await Promise.resolve(); });
+    expect(asked).toEqual([['a', 'mcp_x']]);
+    expect(again.result.current.has('mcp_x')).toBe(false);
   });
 
   it('a failed read caches nothing, so a later render asks again', async () => {

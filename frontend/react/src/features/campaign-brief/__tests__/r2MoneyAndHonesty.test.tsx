@@ -14,6 +14,13 @@
  *    briefs fix, finally applied to the second tab).
  *  - CB-SP-1: the delete confirm discloses the finalized-campaign orphan ONLY
  *    when one exists; a probe failure degrades to the base body.
+ *
+ * Wave 30 (grade-tests): CB-SP-5's "validate never ran" read now follows its
+ * positive control (the save error is on screen) instead of a single flush; the
+ * fixture is a full typed row (no casts). CB-MONEY-2 is pinned `it.fails` below.
+ * Sabotage-witnessed: the exponent conversions both ways, the JPY render, the
+ * perChannel-preserving save, the Save&Validate abort, the orgs/personas failure
+ * cards, the delete disclosure (both polarities) and the rename shape/blank/Escape.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, fireEvent, act, within } from '@testing-library/react';
@@ -49,8 +56,8 @@ import { CampaignBriefPage } from '../CampaignBriefPage.js';
 const BRIEF: CampaignBrief = {
   id: 'brief-1', tenantId: 't', orgId: 'org-1', name: 'Spring launch', objective: 'Grow trials',
   personaIds: [], productName: 'Widget', productDescription: '', industryVertical: '',
-  channels: [{ type: 'email_sequence', enabled: false }] as CampaignBrief['channels'],
-  messaging: { primaryValueProp: '', proofPoints: [], ctaStrategy: '' } as CampaignBrief['messaging'],
+  channels: [{ type: 'email_sequence', enabled: false, config: {} }],
+  messaging: { primaryValueProp: '', toneOverride: '', proofPoints: [], ctaStrategy: '' },
   status: 'draft', kernelStale: false, createdBy: 'u', createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
 };
 
@@ -92,6 +99,24 @@ describe('CB-SP-3 — the budget exponent belongs to the currency', () => {
   });
 });
 
+// CB-MONEY-2 (BLOCKED-ON-PRODUCT, wave 30) — the editor shows the per-channel
+// allocations as RAW MINOR units (CampaignBriefPage `budgetPerChannel` line:
+// `${m}`), so a stored USD 150000 (= $1,500) reads "150000" — the 100× misread
+// CB-SP-3 fixed for the total. Correct: the same currency-exponent conversion as
+// the total. Fix direction: render `minorToMajorString(m, brief.budget?.currency)`
+// (or a locale currency format) in that line; then drop `.fails`.
+describe('CB-MONEY-2 — per-channel allocations render in major units', () => {
+  it.fails('a USD 150000-minor allocation reads 1500, not 150000', async () => {
+    listBriefs.mockResolvedValue([{ ...BRIEF, budget: { currency: 'USD', perChannel: { ad_variants: 150000 } } }]);
+    await openDetail();
+    // The allocation line rendered (setup reached the subject)…
+    const line = screen.getByText((_c, el) => el?.tagName === 'P' && /150000|1,?500/.test(el.textContent ?? ''));
+    // …and it carries the major amount, never the minor integer.
+    expect(line.textContent).not.toMatch(/150000/);
+    expect(line.textContent).toMatch(/1,?500/);
+  });
+});
+
 describe('CB-SP-4 — a save never wipes what the editor does not show', () => {
   it('an empty total preserves the invisible perChannel allocations', async () => {
     listBriefs.mockResolvedValue([{ ...BRIEF, budget: { perChannel: { ad_variants: 1000 } } }]);
@@ -112,10 +137,11 @@ describe('CB-SP-5 — a failed save aborts Save&Validate', () => {
     fireEvent.click(screen.getByRole('button', { name: /Save & validate/i }));
     await act(async () => {});
     expect(updateBrief).toHaveBeenCalled();
-    // The old code swallowed the failure and validated anyway — reporting on a
-    // document that is not the one on screen.
-    expect(validateBriefById).not.toHaveBeenCalled();
+    // Positive control FIRST: the failed save has settled and is on screen…
     expect(await screen.findByText('save exploded')).toBeTruthy();
+    // …and only then: the old code swallowed the failure and validated anyway —
+    // reporting on a document that is not the one on screen.
+    expect(validateBriefById).not.toHaveBeenCalled();
   });
 });
 

@@ -15,6 +15,7 @@
 
 import { sanitizeFreeText, sanitizeFreeTextDeep } from '../byok/textRedaction.js';
 import { maskPiiDeep, maskEmailsInText } from '../host/dataClassification.js';
+import { isLogReasonCode, type LogReasonCode } from './logReasonCodes.js';
 
 const LEVELS = ['debug', 'info', 'warn', 'error'] as const;
 type Level = (typeof LEVELS)[number];
@@ -36,11 +37,15 @@ const MASK_PII_HEURISTIC = process.env.OPENWOP_LOG_MASK_PII_HEURISTIC !== 'off';
 // `alcie@example.com` IS the diagnosis, and the hash of a typo correlates with nothing.
 const MASK_PII_VALUES = process.env.OPENWOP_LOG_MASK_PII_VALUES !== 'off';
 
+/** ADR 0900 D2 — `reasonCode` is typed to the closed vocabulary, so a literal outside
+ *  it fails `tsc`; `liftReasonCode` enforces the same rule at runtime for untyped bags. */
+export type LogFields = Record<string, unknown> & { reasonCode?: LogReasonCode };
+
 export interface Logger {
-  debug(msg: string, fields?: Record<string, unknown>): void;
-  info(msg: string, fields?: Record<string, unknown>): void;
-  warn(msg: string, fields?: Record<string, unknown>): void;
-  error(msg: string, fields?: Record<string, unknown>): void;
+  debug(msg: string, fields?: LogFields): void;
+  info(msg: string, fields?: LogFields): void;
+  warn(msg: string, fields?: LogFields): void;
+  error(msg: string, fields?: LogFields): void;
   child(component: string): Logger;
 }
 
@@ -60,6 +65,23 @@ function scrubFields(fields: Record<string, unknown> | undefined): Record<string
 }
 
 /**
+ * ADR 0900 D2 — take a TOP-LEVEL `reasonCode` out of the bag BEFORE the scrub and mask
+ * passes, and hand back what to write after them. A vocabulary member is written
+ * verbatim, so no PII declaration or heuristic can hash it. Anything else is dropped,
+ * never written, and flagged `reasonCodeRejected: true` so the misuse shows without its
+ * value. Nested `reasonCode` keys are ordinary fields.
+ */
+function liftReasonCode(fields: Record<string, unknown> | undefined): {
+  rest: Record<string, unknown> | undefined;
+  tail: { reasonCode: LogReasonCode } | { reasonCodeRejected: true } | undefined;
+} {
+  if (!fields || !Object.prototype.hasOwnProperty.call(fields, 'reasonCode')) return { rest: fields, tail: undefined };
+  const { reasonCode, ...rest } = fields;
+  if (reasonCode === undefined) return { rest, tail: undefined };
+  return { rest, tail: isLogReasonCode(reasonCode) ? { reasonCode } : { reasonCodeRejected: true } };
+}
+
+/**
  * CLNP-4 — the `msg` string gets the SAME two passes as `fields`, in the same order
  * (secret scrub, then the ADR 0733 value-shaped email mask). It used to get only the
  * scrub, so one address logged on one line came out masked under a field and verbatim
@@ -76,13 +98,23 @@ function scrubMsg(msg: string): string {
 function emit(level: Level, component: string, msg: string, fields?: Record<string, unknown>): void {
   if (!shouldEmit(level)) return;
   let line: string;
+  // Outside the try below because the catch branch writes `tail` too, so it guards
+  // itself: a throwing getter on the bag must not throw into the caller either.
+  let lifted: ReturnType<typeof liftReasonCode>;
+  try {
+    lifted = liftReasonCode(fields);
+  } catch {
+    lifted = { rest: undefined, tail: { reasonCodeRejected: true } };
+  }
+  const { rest, tail } = lifted;
   try {
     line = JSON.stringify({
       time: new Date().toISOString(),
       level,
       component,
       msg: scrubMsg(msg),
-      ...scrubFields(fields),
+      ...scrubFields(rest),
+      ...tail,
     });
   } catch (err) {
     // A logger must NEVER throw into its caller. A malformed `fields` (circular
@@ -102,6 +134,7 @@ function emit(level: Level, component: string, msg: string, fields?: Record<stri
       logFieldsError: ((m) => (MASK_PII && MASK_PII_VALUES ? maskEmailsInText(m) : m))(
         err instanceof Error ? err.message : String(err),
       ),
+      ...tail,
     });
   }
   if (level === 'error') {

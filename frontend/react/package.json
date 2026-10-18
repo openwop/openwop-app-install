@@ -1,6 +1,6 @@
 {
   "name": "@openwop/app-web",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "private": true,
   "type": "module",
   "description": "OpenWOP application frontend — React SPA consuming @openwop/openwop.",
@@ -9,7 +9,7 @@
   },
   "scripts": {
     "dev": "vite",
-    "build": "tsc --noEmit && node scripts/check-build-chain-split.mjs && node scripts/gen-event-codemap.mjs --check && node scripts/check-prompt-ref-defaults.mjs && node scripts/check-brand-resolver.mjs && node scripts/check-default-logo-parity.mjs && node scripts/check-css-tokens.mjs && node scripts/check-tsx-color-literals.mjs && node scripts/check-color-mix-space.mjs && node scripts/check-theme-stock.mjs && node scripts/check-dtcg-parity.mjs && node scripts/gen-design-tokens.mjs --check && node scripts/check-legacy-aliases.mjs && node scripts/check-typography-literals.mjs && node scripts/check-breakpoints.mjs && node scripts/check-admin-css-ownership.mjs && node scripts/check-unwrapped-buttons.mjs && node scripts/check-inline-styles.mjs && node scripts/check-spacing-literals.mjs && node scripts/check-failed-read-sentinels.mjs && node scripts/check-silent-write-failures.mjs && node scripts/check-live-regions.mjs && node scripts/check-failure-card-announce.mjs && node scripts/check-failure-card-recovery.mjs && node scripts/check-notice-announce.mjs && node scripts/check-aria-prohibited.mjs && node scripts/check-classnames.mjs && node scripts/check-orphan-classes.mjs && node scripts/check-i18n.mjs && node scripts/check-nav-destination-orphans.mjs && node scripts/check-hosting-wire-rewrites.cjs && vite build && node scripts/write-build-info.mjs && node scripts/check-built-css.mjs && node scripts/check-bundle-budget.mjs && node scripts/check-csp-script-hash.mjs",
+    "build": "tsc --noEmit && node scripts/check-build-chain-split.mjs && node scripts/gen-event-codemap.mjs --check && node scripts/check-prompt-ref-defaults.mjs && node scripts/check-brand-resolver.mjs && node scripts/check-default-logo-parity.mjs && node scripts/check-css-tokens.mjs && node scripts/check-tsx-color-literals.mjs && node scripts/check-color-mix-space.mjs && node scripts/check-theme-stock.mjs && node scripts/check-dtcg-parity.mjs && node scripts/gen-design-tokens.mjs --check && node scripts/check-legacy-aliases.mjs && node scripts/check-typography-literals.mjs && node scripts/check-breakpoints.mjs && node scripts/check-admin-css-ownership.mjs && node scripts/check-unwrapped-buttons.mjs && node scripts/check-inline-styles.mjs && node scripts/check-spacing-literals.mjs && node scripts/check-failed-read-sentinels.mjs && node scripts/check-silent-write-failures.mjs && node scripts/check-live-regions.mjs && node scripts/check-failure-card-announce.mjs && node scripts/check-failure-card-recovery.mjs && node scripts/check-notice-announce.mjs && node scripts/check-aria-prohibited.mjs && node scripts/check-classnames.mjs && node scripts/check-orphan-classes.mjs && node scripts/check-i18n.mjs && node scripts/check-nav-destination-orphans.mjs && node scripts/check-hosting-wire-rewrites.cjs && vite build && node scripts/write-build-info.mjs && node scripts/check-built-css.mjs && node scripts/check-bundle-budget.mjs && node scripts/check-sw-permanence.mjs && node scripts/check-csp-script-hash.mjs",
     "preview": "vite preview",
     "check:bundle-budget": "node scripts/check-bundle-budget.mjs",
     "typecheck": "tsc --noEmit",
@@ -33,7 +33,9 @@
     "test:e2e:serial": "playwright test --grep \"@serial|@advisory\" --workers=1",
     "smoke:live": "node scripts/smoke-live.mjs",
     "check:csp-runtime": "node scripts/check-csp-runtime.mjs",
-    "test:e2e:routes": "OPENWOP_E2E_ROUTES=1 playwright test feature-routes feature-gated",
+    "test:e2e:built": "playwright test -c playwright.built.config.ts",
+    "test:e2e:offline": "node scripts/build-offline-fixture.mjs --out node_modules/.cache/offline-e2e/A --variant A && node scripts/build-offline-fixture.mjs --out node_modules/.cache/offline-e2e/B --variant B && playwright test -c playwright.offline.config.ts",
+    "test:e2e:routes": "OPENWOP_E2E_ROUTES=1 playwright test feature-routes announcement-delivery",
     "prebuild": "node ../../scripts/gen-distribution.mjs",
     "check:hosting-wire-rewrites": "node scripts/check-hosting-wire-rewrites.cjs",
     "build:steward": "npm run build && node scripts/design-system-inventory.mjs --check && node scripts/check-hv-citations.mjs && node scripts/check-network-recorder-posture.mjs && node scripts/check-inert-mocks.mjs"
@@ -66,7 +68,7 @@
     "@xterm/xterm": "5.5.0",
     "@xyflow/react": "^12.10.2",
     "i18next": "^25.10.10",
-    "katex": "^0.17.0",
+    "katex": "^0.18.10",
     "mermaid": "^11.15.0",
     "qrcode": "1.5.4",
     "react": "^18.3.1",
@@ -103,9 +105,10 @@
     "typescript": "^5.6.0",
     "typescript-eslint": "^8.60.1",
     "vite": "^7.3.5",
-    "vitest": "^4.1.0"
+    "vitest": "^4.1.11"
   },
   "overrides": {
-    "esbuild": "^0.28.1"
+    "esbuild": "^0.28.1",
+    "katex": "$katex"
   }
 }

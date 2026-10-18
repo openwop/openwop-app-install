@@ -43,18 +43,25 @@ describe('states the inline strip could not express', () => {
 
 describe('scale behaviour — the reason this replaced a strip', () => {
   it('hides search below the floor and shows it above', () => {
-    const { rerender } = render(<TemplateGalleryBody items={items(3)} onUse={vi.fn()} />);
+    // AT the floor (6) — 3 vs 40 let the floor move anywhere in 4..40 unseen
+    // (w49 probe `tg-floor`). 5 hides, 6 shows.
+    const { rerender } = render(<TemplateGalleryBody items={items(5)} onUse={vi.fn()} />);
     expect(screen.queryByRole('searchbox')).toBeNull();
 
-    rerender(<TemplateGalleryBody items={items(40)} onUse={vi.fn()} />);
+    rerender(<TemplateGalleryBody items={items(6)} onUse={vi.fn()} />);
     expect(screen.getByRole('searchbox')).toBeTruthy();
   });
 
   it('filters by name, and a zero-match offers a way back', () => {
     render(<TemplateGalleryBody items={items(40)} onUse={vi.fn()} />);
     fireEvent.change(screen.getByRole('searchbox'), { target: { value: 'zzz-nothing' } });
-    // Never a blank region: a designed no-match with a clear action.
-    expect(screen.getByRole('button', { name: /clear filters/i })).toBeTruthy();
+    // Never a blank region: a designed no-match with a clear action…
+    expect(screen.queryAllByRole('button', { name: /use template/i })).toHaveLength(0);
+    // …that actually leads back: clearing restores the whole catalog (w49 probe
+    // `tg-clear` — a Clear that left the query in place stayed green).
+    fireEvent.click(screen.getByRole('button', { name: /clear filters/i }));
+    expect((screen.getByRole('searchbox') as HTMLInputElement).value).toBe('');
+    expect(screen.getAllByRole('button', { name: /use template/i })).toHaveLength(40);
   });
 
   it('offers the category facet only when there is more than one category', () => {
@@ -70,8 +77,11 @@ describe('picking', () => {
   it('hands the feature the id it supplied — the gallery never learns the domain type', () => {
     const onUse = vi.fn();
     render(<TemplateGalleryBody items={items(2)} onUse={onUse} />);
-    fireEvent.click(screen.getAllByRole('button', { name: /use template/i })[0]!);
-    expect(onUse).toHaveBeenCalledWith('t0');
+    // The SECOND card: clicking the first could not tell `item.id` from `visible[0].id`
+    // (w49 probe `tg-onuse`).
+    fireEvent.click(screen.getAllByRole('button', { name: /use template/i })[1]!);
+    expect(onUse).toHaveBeenCalledWith('t1');
+    expect(onUse).toHaveBeenCalledTimes(1);
   });
 
   it('disables the CTA while a create is in flight, so one click cannot become two', () => {

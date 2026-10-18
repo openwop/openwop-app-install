@@ -121,3 +121,14 @@ describe('CFP-1 — brand tools: authority + empty-without-acting-user', () => {
     expect(JSON.parse(out.content)).toMatchObject({ error: 'validation_error' });
   });
 });
+
+describe('BR2UX-3 — the Steward prompt says what the compliance tool does, no more', () => {
+  it('the tool is deterministic-only, and the prompt does not claim it judges tone', () => {
+    const prompt = readFileSync(new URL('../../../packs/vendor.openwop-app.brand.agents/prompts/brand-steward.md', import.meta.url), 'utf8');
+    const tool = createAgentToolProvider({ tenantId: TENANT }).resolveTool(BRAND_COMPLIANCE_CHECK_TOOL_ID);
+    expect(tool?.description).toMatch(/deterministic/i);
+    const section = prompt.slice(prompt.indexOf('**compliance-check**'), prompt.indexOf('## How to behave'));
+    expect(section).toMatch(/does NOT judge tone/);
+    expect(section).not.toMatch(/blends|with a tone judgement/i);
+  });
+});

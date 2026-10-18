@@ -80,8 +80,10 @@ export function classifyRow(text) {
   return NEGATED.test(text) ? 'negated' : 'bare';
 }
 
-/** The committed row floor. Raise it when the corpus genuinely grows. */
-export const FILE_ROW_FLOOR = 190;
+/** The committed row floor. Raise it when the corpus genuinely grows.
+ *  MEASURED 2026-10-16: 249 HV rows (checked + unchecked) across 94 UX_UPGRADE-*.md —
+ *  the floor is the measured population with no slack (/grade-tests w50, was 190). */
+export const FILE_ROW_FLOOR = 249;
 
 /**
  * Resolve the effective row floor, honouring an env override that may only ever

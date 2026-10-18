@@ -1,6 +1,17 @@
 # ADR 0706 — The Challenge Factory runs on the workspace's chosen AI provider (Gemini included); Google has no durable search lane to offer
 
 Status: **implemented** 2026-09-17 — Phase 1, the Phase 2 model leg, and the search-backed end-to-end run (§8 Phase E) all measured live
+
+> **CORRECTED 2026-10-17 (ADR 0903) — the pin this ADR kept as the factory default is removed.** On
+> the user's decision, no chain pins a default AI vendor any more: the
+> `provider`/`model` params of all 74 chains that defaulted to `anthropic` /
+> `claude-sonnet-4-6` (the KicktoDo factory included) carry no default, and no
+> node pack falls back to a named vendor. An unset value now follows the run's
+> own choice, then the workspace's active AI setting, then the host catalog's
+> default. Replay stays deterministic for the reason this ADR cared about: that
+> value is resolved ONCE per run and recorded on it (`run.metadata.aiDefault`),
+> and a `:fork` reads the recorded value instead of re-resolving it.
+
 Authors: Claude (session with David), from David's 2026-09-16 direction
 Relates: ADR 0505 (provider pin honesty), ADR 0498 (the `anthropic` default), ADR 0110 (headless AI default), ADR 0494 (multi-vendor search + claim entailment), ADR 0502 (durable search refuses synthetic evidence), ADR 0517 (duplicate BYOK keys), ADR 0458 (chat-first factory; §2.2 corrections merged in #3866 / #3867)
 

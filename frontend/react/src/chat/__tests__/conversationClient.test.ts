@@ -1,6 +1,11 @@
 /**
  * reconstructConversation — folds a run's conversation events into the ordered
  * thread (wire-native attribution; supersedes the #203 client-side labeling).
+ *
+ * RFC 0005 / ADR 0067 — this fold is the single source of truth for the rendered
+ * thread. What breaks it: dropping the opened/closed branches loses the system
+ * turns (case 1); keying on anything but `messageId` duplicates a replayed turn,
+ * and dropping the `turnIndex` sort renders out of order (case 2).
  */
 import { describe, it, expect } from 'vitest';
 import { reconstructConversation, type RunEvent, type ConversationTurn } from '../conversationClient.js';

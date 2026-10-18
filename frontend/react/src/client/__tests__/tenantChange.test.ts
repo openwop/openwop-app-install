@@ -3,9 +3,11 @@
  *   1. `fireAuthChanged()` notifies onAuthChange subscribers WITHOUT a token
  *      change (a workspace switch rebinds the tenant; the token is unchanged);
  *   2. the request-coalesce cache drops on the broadcast (tenant reads —
- *      agents/roster/boards — must not survive a switch).
+ *      agents/roster/boards — must not survive a switch), INCLUDING a load that
+ *      was already in flight when the switch fired (PLAN-DEFERRED D.3: the
+ *      generation counter hands it to its caller but never caches it).
  */
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { fireAuthChanged, onAuthChange } from '../config.js';
 import { cachedRead } from '../requestCache.js';
 
@@ -30,5 +32,16 @@ describe('tenant-change broadcast (Phase D)', () => {
     fireAuthChanged();
     const c = await cachedRead('phase-d-test', 60_000, loader);
     expect(c).toBe('v2'); // reloaded after the tenant change
+  });
+
+  it('a load in flight at the switch is handed to its caller but never cached', async () => {
+    let release!: (v: string) => void;
+    const p = cachedRead('phase-d-inflight', 60_000, () => new Promise<string>((r) => { release = r; }));
+    fireAuthChanged();
+    release('old-tenant');
+    expect(await p).toBe('old-tenant');
+    const loader = vi.fn(async () => 'new-tenant');
+    expect(await cachedRead('phase-d-inflight', 60_000, loader)).toBe('new-tenant');
+    expect(loader).toHaveBeenCalledTimes(1);
   });
 });

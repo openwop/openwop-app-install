@@ -25,6 +25,7 @@ import {
   getRosterEntry,
   listRoster,
   updateRosterEntry,
+  rosterEtag,
   PersonaCollisionError,
   type RosterAgentRef,
 } from '../host/rosterService.js';
@@ -40,6 +41,7 @@ import {
 } from '../host/heartbeatService.js';
 import type { RosterEntry } from '../host/rosterService.js';
 import { requireTenantWrite } from '../features/featureRoute.js';
+import { etagHeader, parseIfMatch } from '../host/entityVersion.js';
 
 function parseAgentRef(value: unknown): RosterAgentRef {
   if (!value || typeof value !== 'object') {
@@ -138,9 +140,12 @@ function parseAutonomyLevel(value: unknown): 'auto' | 'guided' | 'review' | unde
 function withHeartbeat(
   entry: RosterEntry,
   admin?: ResolvedHeartbeatConfig | null,
-): RosterEntry & { heartbeat: { effectiveIntervalMs: number; agentTurnFallback: boolean } } {
+): RosterEntry & { etag: string; heartbeat: { effectiveIntervalMs: number; agentTurnFallback: boolean } } {
   return {
     ...entry,
+    // ADR 0775 P4 — the version a later PATCH echoes as `If-Match`. In the body
+    // too, because the list view has no per-row header.
+    etag: rosterEtag(entry),
     heartbeat: {
       // ADR 0318 — honor the host-wide admin override so the chip is honest
       // (a global OFF or a cadence override changes the effective interval).
@@ -217,6 +222,7 @@ export function registerRosterRoutes(app: Express): void {
       if (!entry || entry.tenantId !== tenantOf(req)) {
         throw new OpenwopError('not_found', 'Roster entry not found.', 404, { rosterId: req.params.rosterId });
       }
+      res.setHeader('ETag', etagHeader(rosterEtag(entry)));
       res.json(withHeartbeat(entry, await resolveHeartbeatAdminConfig()));
     } catch (err) {
       next(err);
@@ -255,7 +261,7 @@ export function registerRosterRoutes(app: Express): void {
         avatarUrl: parseAvatarUrl(body.avatarUrl),
         heartbeatIntervalMs: parseHeartbeatIntervalMs(body.heartbeatIntervalMs),
         autonomyLevel,
-      });
+      }, { ifMatch: parseIfMatch(req.header('If-Match')) });
       // ADR 0493 — `roster.autonomyLevel` is the single autonomy source of truth.
       // When the PATCH sets it, keep the agent's profile autonomy (read by the
       // assistant + knowledge enforcement seams) in lockstep so no seam reads a
@@ -267,6 +273,7 @@ export function registerRosterRoutes(app: Express): void {
       if (!updated) {
         throw new OpenwopError('not_found', 'Roster entry not found.', 404, { rosterId: req.params.rosterId });
       }
+      res.setHeader('ETag', etagHeader(rosterEtag(updated)));
       res.json(withHeartbeat(updated, await resolveHeartbeatAdminConfig()));
     } catch (err) {
       // ADR 0414 M3-2 — ambiguous/impersonating mention handle → 409.

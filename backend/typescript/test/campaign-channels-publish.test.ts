@@ -5,6 +5,18 @@
  * is absent; org resolution from the brief; the real-surface delegation creating
  * DRAFT-only entities; replay idempotency (a re-run never duplicates); and tenant
  * isolation (the write keys on the scope tenant, never on args).
+ *
+ * Sabotage that turns it red: drop the `cms`/`email` capability check; resolve the
+ * org from anywhere but the brief; drop the cta mapping; let an empty sequence through;
+ * key the email idemBase on runId (EMWF-10); key the cms surface on a fixed tenant;
+ * make createPage's idempotent return refuse a replay (`ownedOrConflict`) — its prior-row
+ * read and create-conflict re-read are a double guard, each alone is masked; create one template for
+ * the whole sequence; write an invalid stage; stop stamping relative UTM URLs; let a
+ * typo'd platform dispatch to Meta.
+ *
+ * CCH-FORK-1 (BLOCKED-ON-PRODUCT, `it.fails` below): the landing-page node keys its
+ * page on `${runId}:${nodeId}`, so a `:fork` (new runId) mints a SECOND draft page —
+ * the EMWF-10 shape ADR 0655 D7 fixed for the email node only.
  */
 import { describe, it, expect, beforeEach, beforeAll, afterAll } from 'vitest';
 import { nodes as nodePack, appendUtm } from '../../../packs/feature.campaign-channels.nodes/index.mjs';
@@ -22,6 +34,25 @@ afterAll(async () => { await storage.close(); __resetHostExtPersistence(); });
 
 const publishLP = nodePack['feature.campaign-channels.nodes.publish-landing-page'];
 const publishEmail = nodePack['feature.campaign-channels.nodes.publish-email-sequence'];
+
+type Captured = Record<string, unknown>;
+type CapturedSection = { type: string; data: Record<string, unknown> };
+const sectionsOf = (c: Captured | undefined): CapturedSection[] => {
+  const secs = c?.sections;
+  if (!Array.isArray(secs)) throw new Error('no sections captured');
+  return secs.map((x: unknown) => {
+    if (typeof x === 'object' && x !== null && 'type' in x && typeof x.type === 'string' && 'data' in x && typeof x.data === 'object' && x.data !== null) {
+      return { type: x.type, data: { ...x.data } };
+    }
+    throw new Error(`malformed section: ${JSON.stringify(x)}`);
+  });
+};
+/** The created page id from a publish node's outputs (shape-checked, no cast). */
+const pageIdOf = (out: { outputs?: Record<string, unknown> }): string => {
+  const page = out.outputs?.page;
+  if (typeof page === 'object' && page !== null && 'pageId' in page && typeof page.pageId === 'string') return page.pageId;
+  throw new Error(`no page in outputs: ${JSON.stringify(out.outputs)}`);
+};
 
 const briefSurface = (orgId = 'o1') => ({
   assembleContext: async () => ({ found: true, brief: { id: 'b1', orgId }, kernel: { headline: 'H' } }),
@@ -58,16 +89,23 @@ describe('publish-landing-page — mapper + fail-closed', () => {
   });
 
   it('maps first section → hero, rest → richText (+ cta), and resolves orgId from the brief', async () => {
-    let captured: any;
-    const cms = { createDraftPage: async (a: any) => { captured = a; return { pageId: 'page:x', slug: 'pick-faster', status: 'draft', title: a.title }; } };
-    const out = await publishLP({ features: { cms, 'campaign-brief': briefSurface('org-7') }, inputs: { draft: landingDraft }, runId: 'r1', nodeId: 'n1' });
+    const calls: Captured[] = [];
+    const cms = { createDraftPage: async (a: Captured) => { calls.push(a); return { pageId: 'page:x', slug: 'pick-faster', status: 'draft', title: a.title }; } };
+    const ctx = { features: { cms, 'campaign-brief': briefSurface('org-7') }, inputs: { draft: landingDraft }, runId: 'r1', nodeId: 'n1' };
+    const out = await publishLP(ctx);
     expect(out.status).toBe('success');
-    expect(captured.orgId).toBe('org-7');
-    expect(captured.pageId).toBe('page:r1:n1'); // deterministic idem key
-    const types = captured.sections.map((s: any) => s.type);
-    expect(types).toEqual(['hero', 'richText', 'richText', 'cta']);
-    expect(captured.sections[0].data).toMatchObject({ heading: 'Pick faster', subheading: 'The fastest checkout.', ctaLabel: 'Get a demo' });
-    expect(captured.sections[3].data).toMatchObject({ label: 'Sign up' });
+    const captured = calls[0];
+    expect(captured?.orgId).toBe('org-7');
+    // Deterministic idem key: a re-run of the same node computes the SAME pageId, and
+    // it is anchored on the node. (Its runId component is CCH-FORK-1 — not pinned here.)
+    await publishLP(ctx);
+    expect(calls).toHaveLength(2);
+    expect(calls[1]?.pageId).toBe(captured?.pageId);
+    expect(String(captured?.pageId)).toMatch(/^page:(.+:)?n1(:.+)?$/);
+    const sections = sectionsOf(captured);
+    expect(sections.map((s) => s.type)).toEqual(['hero', 'richText', 'richText', 'cta']);
+    expect(sections[0]?.data).toMatchObject({ heading: 'Pick faster', subheading: 'The fastest checkout.', ctaLabel: 'Get a demo' });
+    expect(sections[3]?.data).toMatchObject({ label: 'Sign up' });
   });
 });
 
@@ -85,8 +123,8 @@ describe('publish-email-sequence — mapper + fail-closed', () => {
   });
 
   it('passes the emails + a deterministic idemBase through to the surface', async () => {
-    let captured: any;
-    const email = { createDraftCampaign: async (a: any) => { captured = a; return { campaignIds: ['c1', 'c2'], templateIds: ['t1', 't2'], steps: 2 }; } };
+    let captured: Captured = {};
+    const email = { createDraftCampaign: async (a: Captured) => { captured = a; return { campaignIds: ['c1', 'c2'], templateIds: ['t1', 't2'], steps: 2 }; } };
     const out = await publishEmail({ features: { email, 'campaign-brief': briefSurface('org-9') }, inputs: { draft: emailDraft, stage: 'lead', briefId: 'b-prov' }, runId: 'r2', nodeId: 'n2' });
     expect(out.status).toBe('success');
     expect(captured.orgId).toBe('org-9');
@@ -112,9 +150,15 @@ describe('real cms surface delegation — DRAFT-only + idempotent + tenant-isola
     // Replay: same deterministic pageId → same page, store unchanged.
     const second = await cms.createDraftPage({ orgId: 'o1', title: 'My Page', sections, pageId: 'page:run-A:n1' });
     expect(second.pageId).toBe(first.pageId);
+    // The SAME row returned, not re-written (slug unchanged). Double guard (honest
+    // ceiling): createPage's prior-row read AND its non-overwriting `pages.create`
+    // conflict re-read each return the existing row, so removing either alone stays
+    // green; both route through `ownedOrConflict`, which is what a probe can break.
+    expect(second.slug).toBe(first.slug);
     expect(await listPages('t1', 'o1')).toHaveLength(1);
     const stored = await getPage('t1', 'o1', String(first.pageId));
     expect(stored?.status).toBe('draft');
+    expect(stored?.slug).toBe(first.slug);
   });
 
   it('end-to-end: the publish node maps a full draft through the REAL surface without any section throwing', async () => {
@@ -123,10 +167,27 @@ describe('real cms surface delegation — DRAFT-only + idempotent + tenant-isola
     const cms = buildCmsSurface({ tenantId: 't1', runId: 'run-E2E' });
     const out = await publishLP({ features: { cms, 'campaign-brief': briefSurface('o1') }, inputs: { draft: landingDraft }, runId: 'run-E2E', nodeId: 'n1' });
     expect(out.status).toBe('success');
-    const stored = await getPage('t1', 'o1', (out.outputs as any).page.pageId);
+    const stored = await getPage('t1', 'o1', pageIdOf(out));
     expect(stored?.status).toBe('draft');
     expect(stored?.sections.map((s) => s.type)).toEqual(['hero', 'richText', 'richText', 'cta']);
     expect(stored?.sections[0].data).toMatchObject({ heading: 'Pick faster' });
+  });
+
+  // CCH-FORK-1 — BLOCKED-ON-PRODUCT. Correct behaviour: a `:fork` re-runs the node under a
+  // NEW runId with the same node + brief, and must reuse the draft page it already made
+  // (the EMWF-10 fix shape). Today the key carries the runId, so the fork mints a second
+  // page. Flip to `it` when the node anchors its key on nodeId + brief.
+  it.fails('CCH-FORK-1: a fork (new runId, same node + brief) reuses the same draft page', async () => {
+    const run = async (runId: string): Promise<string> => {
+      const cms = buildCmsSurface({ tenantId: 't1', runId });
+      const out = await publishLP({ features: { cms, 'campaign-brief': briefSurface('o1') }, inputs: { draft: landingDraft, briefId: 'b1' }, runId, nodeId: 'n1' });
+      expect(out.status, JSON.stringify(out)).toBe('success'); // setup guard: both runs publish
+      return pageIdOf(out);
+    };
+    const original = await run('run-FORK');
+    const forked = await run('run-FORK-fork');
+    expect(await listPages('t1', 'o1')).toHaveLength(1);
+    expect(forked).toBe(original);
   });
 
   it('keys the write on the scope tenant — a different tenant cannot see the page', async () => {
@@ -174,7 +235,8 @@ describe('real email surface delegation — one draft template+campaign per step
     const email = buildEmailSurface({ tenantId: 't1', runId: 'run-F' });
     await email.createDraftCampaign({ orgId: 'o1', name: 'Drip', emails: [emailDraft.emails[0]], stage: 'not-a-stage', idemBase: 'run-F:n1' });
     const cmps = await listCampaigns('t1', 'o1');
-    expect(cmps[0].audience.stage).toBeUndefined();
+    expect(cmps).toHaveLength(1);
+    expect(cmps[0]?.audience.stage).toBeUndefined();
   });
 });
 

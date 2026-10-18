@@ -61,8 +61,10 @@ describe('people-hr.offboarding 1.1.0 — structure (ADR 0617 D3)', () => {
     // belongs to the installing host, not the pack.
     // Pack 1.3.0 → 1.4.0 carried the ADR 0622 D3 onboarding rewire; this
     // chain's own version stays at its ADR 0617 D3 bump.
-    expect(entry().packVersion).toBe('1.5.2');
-    expect(entry().chain.version).toBe('1.2.2');
+    // Pack 1.5.2 → 1.6.0 and both chains one minor: ADR 0903 D7 dropped the
+    // provider/model defaults (the chain takes the run's AI default).
+    expect(entry().packVersion).toBe('1.6.0');
+    expect(entry().chain.version).toBe('1.3.0');
   });
 
   it('`trigger` is the SOLE root, a core.trigger.event on the user-deactivated host event, feeding the three entry nodes on a named port', () => {
@@ -138,8 +140,10 @@ describe('people-hr.onboarding 1.1.0 — structure (ADR 0622 D3): invite-host be
   const entry = () => getChain(ONB)!;
 
   it('pack + chain versions bumped with the behavioural change', () => {
-    expect(entry().packVersion).toBe('1.5.2');
-    expect(entry().chain.version).toBe('1.1.1');
+    // Pack 1.5.2 → 1.6.0 and both chains one minor: ADR 0903 D7 dropped the
+    // provider/model defaults (the chain takes the run's AI default).
+    expect(entry().packVersion).toBe('1.6.0');
+    expect(entry().chain.version).toBe('1.2.0');
   });
 
   it('`invite-host` (feature.orgs.nodes.invite) has EXACTLY ONE inbound edge — approve {truthy approved} — and ONE outbound into track on its own port', () => {

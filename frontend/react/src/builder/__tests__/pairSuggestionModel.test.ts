@@ -6,6 +6,11 @@
  *   - an op that needs a DROPPED addNode is `inapplicable`, never a dangling edge;
  *   - keeping an op keeps its pending dependencies first;
  *   - auto-keep never takes a structural or gate-sensitive op.
+ *
+ * Sabotage that turns it red: every op 'pending', no inapplicable-on-dropped
+ * dependency, keepOrder skipping dependencies, minted-node paths checked as
+ * stale, model-named ports trusted, unknown typeIds applied, kept ops still
+ * projected, or auto-keep taking a gate-sensitive / dependent / unselected op.
  */
 import { describe, expect, it } from 'vitest';
 import type { BuilderEdge, BuilderNode } from '../schema/workflow.js';
@@ -74,6 +79,23 @@ describe('ADR 0773 D5 — auto-keep is narrow by construction', () => {
     const statuses = liveOpStatuses(suggestion, { nodes, edges });
     expect(autoKeepable(suggestion, statuses, ['a'])).toEqual([2]);
     expect(autoKeepable(suggestion, statuses, [])).toEqual([]);
+  });
+
+  it('refuses a gate-sensitive VALUE op and a value op with dependencies, even on the selection', () => {
+    // Same kind (setConfig), same selected node: only the gateSensitive flag /
+    // the dependsOn list can exclude ops 1 and 2.
+    const s: WorkflowEditSuggestion = {
+      ...suggestion,
+      opState: ['pending', 'pending', 'pending'],
+      ops: [
+        { op: { kind: 'setConfig', nodeId: 'a', path: 'threshold', value: 50 }, dependsOn: [], preimages: [{ path: 'nodes.a.config.threshold', present: true, value: 40 }], gateSensitive: false, summary: 'plain' },
+        { op: { kind: 'setConfig', nodeId: 'a', path: 'gate', value: true }, dependsOn: [], preimages: [{ path: 'nodes.a.config.gate', present: false }], gateSensitive: true, summary: 'gated' },
+        { op: { kind: 'setConfig', nodeId: 'a', path: 'after', value: 1 }, dependsOn: [0], preimages: [{ path: 'nodes.a.config.after', present: false }], gateSensitive: false, summary: 'dependent' },
+      ],
+    };
+    const statuses = liveOpStatuses(s, { nodes, edges });
+    expect(statuses).toEqual(['pending', 'pending', 'pending']);
+    expect(autoKeepable(s, statuses, ['a'])).toEqual([0]);
   });
 });
 

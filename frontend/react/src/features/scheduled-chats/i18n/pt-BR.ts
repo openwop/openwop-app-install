@@ -22,6 +22,8 @@ export const messages = {
   toggleFailed: 'Não foi possível atualizar o chat agendado. Tente novamente.',
   disabled: 'Os chats agendados estão desativados neste espaço.',
   colNextRun: 'Próxima execução',
+  lastRunNotPosted: 'A última execução não conseguiu publicar a resposta na conversa. Verifique o agente e a conversa e retome.',
+  lastRunFailed: 'A última execução falhou: {{reason}}',
 
   // §4.5 collection kit — busca
   filterGroup: 'Filtrar chats agendados',

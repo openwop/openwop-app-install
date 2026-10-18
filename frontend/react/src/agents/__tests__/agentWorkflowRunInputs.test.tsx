@@ -12,17 +12,26 @@
  * assert this panel now matches it — and, just as importantly, that the degrade path
  * survives: a workflow whose contract cannot be READ must still run, because built-in
  * role templates have no stored definition and blocking them would be a regression.
+ *
+ * Red under: skipping the contract read or the prompt gate (`variables.length > 0`),
+ * dropping the collected inputs or the `configurable` key (ADR 0712 — a picked key
+ * must ride `configurable.ai.credentialRef`, never `inputs`), or failing closed on an
+ * unreadable contract (probes w32g3-agent-*).
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, cleanup, act, fireEvent, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
+import type { RosterEntry } from '../rosterClient.js';
 
 const { createRun, getWorkflowRunInputs, listWorkflowSummaries, updateRosterEntry, listStoredRefs, getWorkflowAvailability } = vi.hoisted(() => ({
-  createRun: vi.fn(), getWorkflowRunInputs: vi.fn(),
-  listWorkflowSummaries: vi.fn(), updateRosterEntry: vi.fn(), listStoredRefs: vi.fn(),
+  createRun: vi.fn<typeof import('../../client/runsClient.js').createRun>(),
+  getWorkflowRunInputs: vi.fn<typeof import('../../workflows/workflowsClient.js').getWorkflowRunInputs>(),
+  listWorkflowSummaries: vi.fn<typeof import('../../workflows/workflowsClient.js').listWorkflowSummaries>(),
+  updateRosterEntry: vi.fn<typeof import('../rosterClient.js').updateRosterEntry>(),
+  listStoredRefs: vi.fn<typeof import('../../byok/lib/byokClient.js').listStoredRefs>(),
   // ADR 0870 — the panel's availability read; an empty answer keeps the
   // pre-0870 `known` path these tests exercise.
-  getWorkflowAvailability: vi.fn(async () => new Map()),
+  getWorkflowAvailability: vi.fn<typeof import('../../workflows/workflowsClient.js').getWorkflowAvailability>(async () => new Map()),
 }));
 vi.mock('../../byok/lib/byokClient.js', async (orig) => ({
   ...(await orig<typeof import('../../byok/lib/byokClient.js')>()), listStoredRefs,
@@ -40,10 +49,11 @@ vi.mock('../rosterClient.js', async (orig) => ({
 
 const { AgentWorkflowPortfolioPanel } = await import('../AgentWorkflowPortfolioPanel.js');
 
-const entry = {
-  rosterId: 'r1', persona: 'Iris', role: 'chief-of-staff',
-  workflows: ['wf.seed.support-kb-answer'],
-} as unknown as Parameters<typeof AgentWorkflowPortfolioPanel>[0]['entry'];
+const entry: RosterEntry = {
+  rosterId: 'r1', persona: 'Iris', agentRef: { agentId: 'chief-of-staff' },
+  workflows: ['wf.seed.support-kb-answer'], tenantId: 't1', enabled: true, roleKey: 'chief-of-staff',
+  createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
+};
 
 const renderPanel = async () => {
   await act(async () => {
@@ -56,29 +66,28 @@ const renderPanel = async () => {
 };
 
 const clickRun = async () => {
-  const btn = screen.getAllByRole('button').find((b) => /run/i.test(b.textContent ?? ''));
-  expect(btn, 'fixture guard: a Run control must exist').toBeTruthy();
-  await act(async () => { fireEvent.click(btn!); });
+  // By accessible name — `disabled={!known}` would make a click on an inert button a no-op,
+  // so assert it is enabled before clicking (otherwise every case below is vacuous).
+  const btn = screen.getByRole('button', { name: 'Run now' }) as HTMLButtonElement;
+  expect(btn.disabled, 'fixture guard: the Run control must be live').toBe(false);
+  await act(async () => { fireEvent.click(btn); });
 };
 
 beforeEach(() => {
-  createRun.mockResolvedValue({ runId: 'run-1' });
+  createRun.mockResolvedValue({ runId: 'run-1', status: 'pending', eventsUrl: '/runs/run-1/events' });
+  listStoredRefs.mockResolvedValue([]);
   // The Run control is `disabled={!known}`, and `known` needs the workflow in the
   // summaries list — an empty list leaves the button inert and every assertion below
   // would pass vacuously against a click that did nothing.
-  listWorkflowSummaries.mockResolvedValue([{ workflowId: 'wf.seed.support-kb-answer', name: 'Answer from the knowledge base' }]);
+  listWorkflowSummaries.mockResolvedValue([{
+    workflowId: 'wf.seed.support-kb-answer', kind: 'workflow', name: 'Answer from the knowledge base',
+    nodeCount: 1, createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
+  }]);
   getWorkflowRunInputs.mockResolvedValue([]);
 });
 afterEach(() => { cleanup(); vi.clearAllMocks(); });
 
 describe('Run now collects the declared inputs first', () => {
-  it('READS the run-input contract before launching', async () => {
-    await renderPanel();
-    await clickRun();
-    // The defect was that this call never happened at all.
-    await waitFor(() => expect(getWorkflowRunInputs).toHaveBeenCalled());
-  });
-
   it('PROMPTS instead of launching when the workflow declares inputs', async () => {
     getWorkflowRunInputs.mockResolvedValue([
       { name: 'question', type: 'string', required: true, description: 'What to answer' },
@@ -88,6 +97,9 @@ describe('Run now collects the declared inputs first', () => {
     // The run must NOT have started — that is the whole bug.
     await waitFor(() => expect(screen.getByText(/What to answer/i)).toBeTruthy());
     expect(createRun, 'a workflow that asks for input must not launch without it').not.toHaveBeenCalled();
+    // (Absorbs the former "READS the run-input contract" case, which this one covers:
+    // probe w32g3-agent-no-read reddened both.) The read names THIS workflow.
+    expect(getWorkflowRunInputs).toHaveBeenCalledWith('wf.seed.support-kb-answer');
   });
 
   it('passes the collected values through to the run', async () => {
@@ -152,5 +164,8 @@ describe('Run now collects the declared inputs first', () => {
     await renderPanel();
     await clickRun();
     await waitFor(() => expect(createRun).toHaveBeenCalled());
+    // A PLAIN run: no inputs, and no input dialog was opened instead.
+    expect(createRun.mock.calls[0]![0].inputs).toEqual({});
+    expect(screen.queryByRole('dialog')).toBeNull();
   });
 });

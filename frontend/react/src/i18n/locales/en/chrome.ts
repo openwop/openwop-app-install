@@ -222,6 +222,9 @@ export const messages = {
   navLocked: 'Locked — unlock in the feature store',
   lockedFeatureTitle: 'This feature needs an upgrade',
   lockedFeatureNoStoreBody: 'It is not part of your current plan, and it is not currently available to buy. Ask a workspace administrator to enable it for you.',
+  offlineEntitlementTitle: 'You are offline',
+  offlineEntitlementBody: 'This page needs a connection to check that your workspace can use it. It will open as soon as you are back online.',
+  offlineEntitlementRetry: 'Try again',
   navTelemetryDisclosure: 'This workspace records anonymous navigation counts — which pages are opened, from which menu, and which locks are seen or opened — to guide its structure. No individual activity is stored.',
   navTelemetryDismiss: 'Dismiss the telemetry notice',
 } as const;

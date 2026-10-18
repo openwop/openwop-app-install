@@ -212,6 +212,14 @@ export interface ConsultInput {
    */
   isReplay?: boolean;
   /**
+   * ADR 0894 D7 — optional NARROWING filters. A caller whose grant context is
+   * caller-supplied (computer-use takes `applyContext` as node input) passes the
+   * session's org and opener, so only a grant that person issued in that org can
+   * authorise their session. Absent ⇒ unchanged behaviour for every other caller.
+   */
+  orgId?: string;
+  grantedBy?: string;
+  /**
    * JS-LANE-1 — the DISCOVERY scan hoisted, nothing else. A campaign run
    * consults once per submittable item with constant (subject, campaign), so
    * N items used to cost N tenant-wide scans returning the same candidates.
@@ -264,7 +272,9 @@ export async function consultApplyGrant(input: ConsultInput): Promise<GrantDecis
       )
     : await applyGrants.listByPrefix(`${input.tenantId}:`);
   const candidates = all.filter(
-    (g) => g.subjectId === input.subjectId && g.campaignId === input.campaignId,
+    (g) => g.subjectId === input.subjectId && g.campaignId === input.campaignId
+      && (input.orgId === undefined || g.orgId === input.orgId)
+      && (input.grantedBy === undefined || g.grantedBy === input.grantedBy),
   );
   if (candidates.length === 0) return REFUSED('no-grant');
 

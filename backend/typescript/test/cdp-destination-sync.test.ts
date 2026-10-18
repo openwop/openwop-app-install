@@ -10,7 +10,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
-import { applyFieldMap, selectChangedRecords } from '../src/features/destination-sync/destinationSyncService.js';
+import { applyFieldMap, selectChangedRecords, type DestinationSync } from '../src/features/destination-sync/destinationSyncService.js';
 
 describe('CDP-D pure primitives', () => {
   it('applyFieldMap renames present fields, skips absent ones', () => {
@@ -19,7 +19,9 @@ describe('CDP-D pure primitives', () => {
       { from: 'stage', to: 'lifecycle_stage' },
       { from: 'missing', to: 'nope' },
     ]);
-    expect(mapped).toEqual({ EMAIL: 'a@x.test', lifecycle_stage: 'lead' });
+    // toStrictEqual: `toEqual` ignores an `undefined`-valued key, so an emitted
+    // `nope: undefined` for the absent source field would pass it.
+    expect(mapped).toStrictEqual({ EMAIL: 'a@x.test', lifecycle_stage: 'lead' });
   });
 
   it('selectChangedRecords: first sync returns all + seeds the watermark to the max', () => {
@@ -37,9 +39,10 @@ describe('CDP-D pure primitives', () => {
   });
 
   it('selectChangedRecords: skips records missing the cursor field', () => {
-    const recs = [{ id: '1' }, { id: '2', updatedAt: '2026-05-01' }];
-    const r = selectChangedRecords(recs as any, undefined, 'updatedAt');
-    expect(r.changed.map((c: any) => c.id)).toEqual(['2']);
+    const recs: Record<string, unknown>[] = [{ id: '1' }, { id: '2', updatedAt: '2026-05-01' }];
+    const r = selectChangedRecords(recs, undefined, 'updatedAt');
+    expect(r.changed.map((c) => c.id)).toEqual(['2']);
+    expect(r.nextCursor).toBe('2026-05-01');
   });
 });
 
@@ -55,13 +58,18 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res { status: number; body: any }
+interface Body extends Partial<DestinationSync> {
+  syncs?: DestinationSync[]; mapped?: Record<string, unknown>;
+  count?: number; nextCursor?: string; payloads?: Record<string, unknown>[];
+  message?: string;
+}
+interface Res { status: number; body: Body }
 function client() {
   let cookie = '';
   const call = async (m: string, p: string, b?: unknown): Promise<Res> => {
     const res = await fetch(`${BASE}${p}`, { method: m, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(b !== undefined ? { body: JSON.stringify(b) } : {}) });
     for (const c of getSetCookies(res.headers) as string[]) { const mm = /(__session=[^;]+)/.exec(c); if (mm) cookie = mm[1]; }
-    return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) };
+    return { status: res.status, body: (res.status === 204 ? {} : await res.json().catch(() => ({}))) as Body };
   };
   return { get: (p: string) => call('GET', p), post: (p: string, b?: unknown) => call('POST', p, b) };
 }
@@ -79,10 +87,13 @@ describe('CDP-D destination-sync routes', () => {
     });
     expect(created.status, JSON.stringify(created.body)).toBe(201);
     expect(created.body.syncMode).toBe('cdc');
+    // read the config back (not just the write's own response)
+    const stored = await c.get(`/host/openwop-app/destination-sync/syncs/${created.body.syncId}`);
+    expect(stored.body.fieldMap).toEqual([{ from: 'email', to: 'EMAIL' }, { from: 'stage', to: 'status' }]);
 
     const dry = await c.post(`/host/openwop-app/destination-sync/syncs/${created.body.syncId}/dry-run`, { sample: { email: 'a@x.test', stage: 'customer', ignored: true } });
     expect(dry.status).toBe(200);
-    expect(dry.body.mapped).toEqual({ EMAIL: 'a@x.test', status: 'customer' });
+    expect(dry.body.mapped).toStrictEqual({ EMAIL: 'a@x.test', status: 'customer' });
   });
 
   it('rejects a duplicate destination field in the map', async () => {
@@ -90,6 +101,8 @@ describe('CDP-D destination-sync routes', () => {
     const c = await owner();
     const bad = await c.post('/host/openwop-app/destination-sync/syncs', { name: 'dup', fieldMap: [{ from: 'a', to: 'X' }, { from: 'b', to: 'X' }] });
     expect(bad.status).toBe(400);
+    expect(bad.body.message).toBe('duplicate destination field `X`.');
+    expect((await c.get('/host/openwop-app/destination-sync/syncs')).body.syncs).toEqual([]); // nothing persisted
   });
 
   it('prepare does NOT advance; an explicit advance (post-egress) commits the watermark', async () => {
@@ -99,7 +112,7 @@ describe('CDP-D destination-sync routes', () => {
       name: 'cdc', syncMode: 'cdc', cursorField: 'updatedAt', fieldMap: [{ from: 'email', to: 'EMAIL' }],
     })).body;
     const recs = [{ email: 'a@x', updatedAt: '2026-01-01' }, { email: 'b@x', updatedAt: '2026-02-01' }];
-    const P = `/host/openwop-app/destination-sync/syncs/${sync.syncId}`;
+    const P = `/host/openwop-app/destination-sync/syncs/${sync.syncId!}`;
 
     const first = await c.post(`${P}/prepare`, { records: recs });
     expect(first.body.count).toBe(2);
@@ -119,12 +132,18 @@ describe('CDP-D destination-sync routes', () => {
     expect((await c.post(`${P}/prepare`, { records: recs })).body.count).toBe(0);
     const third = await c.post(`${P}/prepare`, { records: [...recs, { email: 'c@x', updatedAt: '2026-03-01' }] });
     expect(third.body.count).toBe(1);
-    expect(third.body.payloads[0]).toEqual({ EMAIL: 'c@x' });
+    expect(third.body.payloads).toEqual([{ EMAIL: 'c@x' }]);
   });
 
   it('is toggle-gated (OFF ⇒ 404)', async () => {
-    await setToggle('destination-sync', 'off');
     const c = await owner();
-    expect((await c.get('/host/openwop-app/destination-sync/syncs')).status).toBe(404);
+    await setToggle('destination-sync', 'off');
+    try {
+      const r = await c.get('/host/openwop-app/destination-sync/syncs');
+      expect(r.status).toBe(404);
+      expect(r.body.message).toMatch(/Destination Sync/);
+    } finally {
+      await setToggle('destination-sync', 'on');
+    }
   });
 });

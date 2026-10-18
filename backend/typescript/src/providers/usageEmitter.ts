@@ -17,6 +17,8 @@
  * `buildProviderUsagePayloadFromTokens`, which never sees a raw response.
  */
 
+import { listProviders } from './catalog.js';
+
 /** Canonical RFC 0026 `providerUsage` payload shape. */
 export interface ProviderUsagePayload {
   provider: string;
@@ -98,7 +100,26 @@ const PREFIX_RATE_TABLE: ReadonlyArray<readonly [string, { input: number; output
   ['abab', { input: 0.2, output: 1.1 }],
 ];
 
+/**
+ * ADR 0889 post-merge review H2 — the model catalog (`providers.json`, the SSoT the
+ * model picker reads) prices every model it lists, per 1K tokens. The static tables
+ * above predate it and miss every current family (Claude 5, GPT-5.x, Gemini 3.x), so
+ * a cost ceiling keyed on this estimate could not fail for them. An EXACT catalog id
+ * wins; the tables remain the fallback for dated snapshots the catalog does not list.
+ */
+function catalogRate(model: string): { input: number; output: number } | undefined {
+  let providers: ReturnType<typeof listProviders>;
+  try { providers = listProviders(); } catch { return undefined; }
+  for (const p of providers) {
+    const m = p.models.find((x) => x.id === model);
+    if (m?.cost) return { input: m.cost.input * 1000, output: m.cost.output * 1000 };
+  }
+  return undefined;
+}
+
 function rateForModel(model: string): { input: number; output: number } | undefined {
+  const fromCatalog = catalogRate(model);
+  if (fromCatalog) return fromCatalog;
   const exact = RATE_TABLE[model];
   if (exact) return exact;
   let best: { input: number; output: number } | undefined;

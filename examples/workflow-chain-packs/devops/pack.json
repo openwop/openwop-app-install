@@ -1,6 +1,6 @@
 {
   "name": "core.openwop.workflows.devops",
-  "version": "1.0.5",
+  "version": "1.1.0",
   "kind": "workflow-chain",
   "description": "Real-work workflow pack (RFC 0013, ADR 0190 Phase 4) — the DevOps cluster: senior-style code review of a diff, changelog/release-notes drafting from a commit log, CI-failure diagnosis from a signature-verified webhook, and a stale-issue gardener over the public GitHub API. All four are ADVISORY — they analyze and notify in-app, never write to your repo or post comments (an authenticated GitHub write path would bind a connection behind an approval gate; deferred until the MCP-reach connection binding has a chain precedent). These chains do not run the Code Reviewer / Git Author AGENTS — those remain chat-drivable via the agents surface; the chains use short chain-local prompts over core.ai.chatCompletion. All tenant values are run parameters (replay-deterministic).",
   "author": "openwop",
@@ -10,7 +10,7 @@
   "chains": [
     {
       "chainId": "devops.pr-review",
-      "version": "1.0.1",
+      "version": "1.1.0",
       "label": "Diff Review (advisory)",
       "description": "Paste a diff (or pipe one from a webhook) and get a senior-style review — correctness, security, and test-coverage findings, each citing file and line, ranked by severity. Advisory only: it notifies you in-app and never posts to your repo.",
       "parameters": {
@@ -19,8 +19,8 @@
         "required": ["diffText"],
         "properties": {
           "diffText": { "type": "string", "description": "The unified diff to review." },
-          "provider": { "type": "string", "default": "anthropic", "description": "AI provider id for this chain's LLM nodes. Frozen into this chain's AI nodes when the workflow is created (ADR 0498 — a concrete provider is what keeps replay deterministic). Override at instantiation to use a different vendor or your own BYOK provider; whichever you pick, the workspace needs a key for it — the workflow will not fall back to another provider on its own." },
-          "model": { "type": "string", "default": "claude-sonnet-4-6", "description": "Model id for this chain's LLM nodes. Must be advertised by `provider` in the host catalog; override at instantiation." }
+          "provider": { "type": "string", "description": "AI provider id for this chain's model-calling nodes. Set it to fix a provider into those nodes when the workflow is created. Leave it unset and each run uses the run's chosen provider, else the workspace's AI setting, else the host's catalog default (ADR 0903); whichever is chosen is recorded on the run, so a replay or fork uses the same one. The workspace needs a key for the provider that runs." },
+          "model": { "type": "string", "description": "Model id for this chain's model-calling nodes. Must be offered by the provider in the host catalog. Leave it unset to use the provider's model from the same choice (ADR 0903)." }
         }
       },
       "capabilities": [],
@@ -42,7 +42,7 @@
     },
     {
       "chainId": "devops.release-notes",
-      "version": "1.0.1",
+      "version": "1.1.0",
       "label": "Release Notes Drafter",
       "description": "Turn a commit log (git log --oneline or richer) into a changelog entry and human-readable release notes — grouped by added/changed/fixed, with breaking changes called out first. Drafted to a notification; paste it wherever your release lives.",
       "parameters": {
@@ -52,8 +52,8 @@
         "properties": {
           "commitLog": { "type": "string", "description": "The commit log for the release range." },
           "audience": { "type": "string", "default": "users and operators", "description": "Who the release notes are written for." },
-          "provider": { "type": "string", "default": "anthropic", "description": "AI provider id for this chain's LLM nodes. Frozen into this chain's AI nodes when the workflow is created (ADR 0498 — a concrete provider is what keeps replay deterministic). Override at instantiation to use a different vendor or your own BYOK provider; whichever you pick, the workspace needs a key for it — the workflow will not fall back to another provider on its own." },
-          "model": { "type": "string", "default": "claude-sonnet-4-6", "description": "Model id for this chain's LLM nodes. Must be advertised by `provider` in the host catalog; override at instantiation." }
+          "provider": { "type": "string", "description": "AI provider id for this chain's model-calling nodes. Set it to fix a provider into those nodes when the workflow is created. Leave it unset and each run uses the run's chosen provider, else the workspace's AI setting, else the host's catalog default (ADR 0903); whichever is chosen is recorded on the run, so a replay or fork uses the same one. The workspace needs a key for the provider that runs." },
+          "model": { "type": "string", "description": "Model id for this chain's model-calling nodes. Must be offered by the provider in the host catalog. Leave it unset to use the provider's model from the same choice (ADR 0903)." }
         }
       },
       "capabilities": [],
@@ -75,7 +75,7 @@
     },
     {
       "chainId": "devops.ci-failure-explainer",
-      "version": "1.0.1",
+      "version": "1.1.0",
       "label": "CI Failure Explainer",
       "description": "Bind your CI's webhook via the trigger-subscriptions API (signature-verified host-side — the secret never leaves the host, RFC 0099 §F — before the run ever starts) and every failed run arrives as a diagnosis, not a wall of logs: the failing step, the probable cause, and the first thing to try. CI-specialized analysis — for generic webhook routing use the starter Verified Webhook Router.",
       "parameters": {
@@ -83,8 +83,8 @@
         "additionalProperties": false,
         "required": [],
         "properties": {
-          "provider": { "type": "string", "default": "anthropic", "description": "AI provider id for this chain's LLM nodes. Frozen into this chain's AI nodes when the workflow is created (ADR 0498 — a concrete provider is what keeps replay deterministic). Override at instantiation to use a different vendor or your own BYOK provider; whichever you pick, the workspace needs a key for it — the workflow will not fall back to another provider on its own." },
-          "model": { "type": "string", "default": "claude-sonnet-4-6", "description": "Model id for this chain's LLM nodes. Must be advertised by `provider` in the host catalog; override at instantiation." },
+          "provider": { "type": "string", "description": "AI provider id for this chain's model-calling nodes. Set it to fix a provider into those nodes when the workflow is created. Leave it unset and each run uses the run's chosen provider, else the workspace's AI setting, else the host's catalog default (ADR 0903); whichever is chosen is recorded on the run, so a replay or fork uses the same one. The workspace needs a key for the provider that runs." },
+          "model": { "type": "string", "description": "Model id for this chain's model-calling nodes. Must be offered by the provider in the host catalog. Leave it unset to use the provider's model from the same choice (ADR 0903)." },
           "webhookPath": { "type": "string", "default": "/ci-failure-explainer", "description": "URL path segment this workflow listens on (e.g. `ci-failure`)." }
         }
       },
@@ -111,7 +111,7 @@
     },
     {
       "chainId": "devops.stale-issues",
-      "version": "1.0.1",
+      "version": "1.1.0",
       "label": "Stale-Issue Gardener",
       "description": "Point it at a public GitHub repo and get a gardener's report over the least-recently-updated open issues: which look answered or obsolete (close candidates), which need a nudge, and a suggested comment for each. Advisory only — it never posts; works unauthenticated on public repos (private repos need a GitHub connection — coming later).",
       "parameters": {
@@ -120,8 +120,8 @@
         "required": ["repo"],
         "properties": {
           "repo": { "type": "string", "description": "The public GitHub repo as owner/name (e.g. openwop/openwop)." },
-          "provider": { "type": "string", "default": "anthropic", "description": "AI provider id for this chain's LLM nodes. Frozen into this chain's AI nodes when the workflow is created (ADR 0498 — a concrete provider is what keeps replay deterministic). Override at instantiation to use a different vendor or your own BYOK provider; whichever you pick, the workspace needs a key for it — the workflow will not fall back to another provider on its own." },
-          "model": { "type": "string", "default": "claude-sonnet-4-6", "description": "Model id for this chain's LLM nodes. Must be advertised by `provider` in the host catalog; override at instantiation." }
+          "provider": { "type": "string", "description": "AI provider id for this chain's model-calling nodes. Set it to fix a provider into those nodes when the workflow is created. Leave it unset and each run uses the run's chosen provider, else the workspace's AI setting, else the host's catalog default (ADR 0903); whichever is chosen is recorded on the run, so a replay or fork uses the same one. The workspace needs a key for the provider that runs." },
+          "model": { "type": "string", "description": "Model id for this chain's model-calling nodes. Must be offered by the provider in the host catalog. Leave it unset to use the provider's model from the same choice (ADR 0903)." }
         }
       },
       "capabilities": ["side-effectful"],

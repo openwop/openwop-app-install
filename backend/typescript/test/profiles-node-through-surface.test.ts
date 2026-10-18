@@ -41,6 +41,8 @@ import { openStorage } from '../src/storage/index.js';
 import { initHostExtPersistence, __resetHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { OpenwopError } from '../src/types.js';
 import { buildProfilesSurface } from '../src/features/profiles/surface.js';
+import { createUser } from '../src/features/users/usersService.js';
+import { registerSessionAuthority, __resetSessionAuthority } from '../src/host/sessionAuthority.js';
 import {
   __resetProfiles,
   getOrCreateProfile,
@@ -61,20 +63,29 @@ type NodeFn = (ctx: Record<string, unknown>) => Promise<{ status: string; output
 
 const manifest = JSON.parse(readFileSync(join(PACK_DIR, 'pack.json'), 'utf8')) as Manifest;
 const T = 'org:profiles-node-surface';
-const ALICE = 'user:pns-alice';
-const BOB = 'user:pns-bob';
+// Real users of T (the directory skips ORPHAN profiles — `listHomeDirectory`,
+// ADR 0888 PROF2CD-4 — so a profile with no owning user is not a member's row).
+let ALICE: string;
+let BOB: string;
 
 let nodes: Record<string, NodeFn>;
+/** ADR 0888 D3 — the run's acting user: a durable, active member of `T` (a run
+ *  with no acting user is refused, and that refusal has its own case below). */
+let ACTOR: string;
 
 /** A NodeContext the way the executor binds one: `inputs` + the feature
  *  surfaces built for the run's tenant scope (`buildFeatureSurfaces` → `ctx.features`). */
 function ctxFor(inputs: Record<string, unknown>): Record<string, unknown> {
-  return { inputs, config: {}, features: { profiles: buildProfilesSurface({ tenantId: T }) } };
+  return { inputs, config: {}, features: { profiles: buildProfilesSurface({ tenantId: T, actingUserId: ACTOR }) } };
 }
 
 beforeEach(async () => {
   initHostExtPersistence(await openStorage('memory://'));
   await __resetProfiles();
+  registerSessionAuthority(async () => ({ status: 'active', sessionEpoch: 0 }));
+  ACTOR = (await createUser({ tenantId: T, principalId: 'oidc:pns-actor', source: 'oidc' })).userId;
+  ALICE = (await createUser({ tenantId: T, principalId: 'oidc:pns-alice', source: 'oidc' })).userId;
+  BOB = (await createUser({ tenantId: T, principalId: 'oidc:pns-bob', source: 'oidc' })).userId;
   const mod = (await import(pathToFileURL(join(PACK_DIR, 'index.mjs')).href)) as { nodes: Record<string, NodeFn> };
   nodes = mod.nodes;
   await getOrCreateProfile(T, ALICE);
@@ -85,6 +96,7 @@ beforeEach(async () => {
 });
 
 afterEach(() => {
+  __resetSessionAuthority();
   __resetHostExtPersistence();
 });
 
@@ -128,17 +140,32 @@ describe('feature.profiles.nodes.get through the REAL surface (UPWF-1 / UPWF-3)'
   });
 
   it('the surface itself refuses an empty id with OpenwopError(validation_error, 400)', async () => {
-    const surface = buildProfilesSurface({ tenantId: T });
+    const surface = buildProfilesSurface({ tenantId: T, actingUserId: ACTOR });
     await expect(surface.getProfile!({})).rejects.toMatchObject({ code: 'validation_error', httpStatus: 400 });
     await expect(surface.getProfile!({ userId: '' })).rejects.toBeInstanceOf(OpenwopError);
     // …and a real miss is a typed empty, not a refusal.
     await expect(surface.getProfile!({ userId: 'user:nobody' })).resolves.toEqual({ profile: null, found: false });
   });
 
-  it('a foreign-tenant scope does not find the member (tenant-scoped read)', async () => {
-    const out = await nodes['feature.profiles.nodes.get']!({ inputs: { userId: ALICE }, config: {}, features: { profiles: buildProfilesSurface({ tenantId: 'org:someone-else' }) } });
-    expect(out.status).toBe('success');
-    expect(out.outputs).toEqual({ profile: null, found: false });
+  // CORRECTED (ADR 0888 D3): this read `{ found: false }` for a scope with NO
+  // acting user, which is the hole (`PR2WF-1`) — the surface served whatever
+  // tenant the run named. A foreign tenant is now a typed refusal for the actor,
+  // and a run with no actor is refused outright; both reach the chain as a node
+  // FAILURE carrying `forbidden_scope` + the reason, never a success.
+  it('a foreign-tenant scope is a typed forbidden_scope failure (the actor is not a member there)', async () => {
+    const out = await nodes['feature.profiles.nodes.get']!({ inputs: { userId: ALICE }, config: {}, features: { profiles: buildProfilesSurface({ tenantId: 'org:someone-else', actingUserId: ACTOR }) } });
+    expect(out.status).toBe('failure');
+    expect(out.error).toMatchObject({ code: 'forbidden_scope', details: { reason: 'not_a_member' } });
+  });
+
+  it('a run with NO acting user is a typed forbidden_scope failure on both nodes', async () => {
+    const features = { profiles: buildProfilesSurface({ tenantId: T }) };
+    for (const id of ['feature.profiles.nodes.get', 'feature.profiles.nodes.list']) {
+      const out = await nodes[id]!({ inputs: { userId: ALICE }, config: {}, features });
+      expect(out.status, id).toBe('failure');
+      expect(out.error, id).toMatchObject({ code: 'forbidden_scope', details: { reason: 'no_acting_user' } });
+      expect(out.outputs, id).toBeUndefined();
+    }
   });
 });
 
@@ -147,7 +174,9 @@ describe('feature.profiles.nodes.list through the REAL surface', () => {
     const out = await nodes['feature.profiles.nodes.list']!(ctxFor({}));
     expect(out.status).toBe('success');
     const profiles = out.outputs?.profiles as Array<Record<string, unknown>>;
-    expect(profiles.map((p) => p.userId).sort()).toEqual([ALICE, BOB].sort());
+    expect(profiles.map((p) => p.userId).sort()).toEqual([ALICE, BOB].sort()); // the actor never opened a profile
+    // ADR 0888 D2 — a recorded node output carries capability, never bio/contact/asset tokens.
+    expect(profiles.every((p) => !('bio' in p) && !('contact' in p) && !('avatarAssetToken' in p))).toBe(true);
     expect(profiles.every((p) => !('tenantId' in p) && !('updatedBy' in p))).toBe(true);
     const alice = profiles.find((p) => p.userId === ALICE)!;
     expect((alice.skills as Array<{ endorsements: unknown }>)[0]!.endorsements).toEqual({ count: 1, endorserUserIds: [BOB] });

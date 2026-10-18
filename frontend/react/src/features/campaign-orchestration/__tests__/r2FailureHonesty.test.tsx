@@ -12,12 +12,20 @@
  *  - CO-SP-7: the campaign's planned budget renders WITH its ISO currency —
  *    JPY proves the decimals derive from the currency, not a bare `/100`.
  *  - CO-SP-12: kernel-less briefs are listed but not selectable.
+ *
+ * Selection claims (CO-SP-4/12) are asserted through the SUBMIT
+ * (`finalizeBrief` argument), never `select.value`: a controlled <select> whose
+ * state matches no option displays the first enabled option, so a stale org-A
+ * briefId reads as org B's brief in the DOM (w31 probe rf-org-switch-reset was
+ * vacuous against the DOM read). Sabotage: restoring the `cur || …` selection
+ * without the reset reds CO-SP-4; preselecting `''` or `b[0]` reds CO-SP-12;
+ * mapping a failed ledger read to `[]` reds CO-SP-1.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 vi.mock('../CampaignLedgerSection.js', () => ({ CampaignLedgerSection: () => null })); // own tests: campaignLedgerSection.test.tsx
-import { render, screen, cleanup, fireEvent, act, within } from '@testing-library/react';
+import { render, screen, cleanup, fireEvent, act, within, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
-import type { AdDispatch, BriefRef, MarketingCampaign, OrgRef } from '../campaignStudioClient.js';
+import type { AdDispatch, BriefRef, MarketingCampaign, MessagingKernel, OrgRef } from '../campaignStudioClient.js';
 
 const listCampaigns = vi.fn();
 const listDispatches = vi.fn();
@@ -44,17 +52,25 @@ vi.mock('../../../ui/toast.js', () => ({ toast: { success: vi.fn(), error: vi.fn
 import { CampaignStudioPage } from '../CampaignStudioPage.js';
 
 const CAMPAIGN: MarketingCampaign = {
-  id: 'camp-1', name: 'Spring push', status: 'active', channels: ['ad_variants'], objective: 'Grow trials',
+  id: 'camp-1', tenantId: 't1', orgId: 'org-a', briefId: 'brief-a1', name: 'Spring push', status: 'active',
+  channels: ['ad_variants'], objective: 'Grow trials', personaIds: [], createdBy: 'u1',
   createdAt: '2026-07-01T08:00:00.000Z', updatedAt: '2026-07-02T08:00:00.000Z',
-} as MarketingCampaign;
+};
+
+const KERNEL: MessagingKernel = {
+  headline: 'h', supportingStatement: 's', proofPoints: ['p'], primaryCta: 'go', secondaryCta: 'see',
+  tone: 'warm', channelTones: {}, sourceDocIds: [], generatedAt: '2026-07-01T00:00:00.000Z',
+};
 
 const ORGS: OrgRef[] = [{ orgId: 'org-a', name: 'Acme' }, { orgId: 'org-b', name: 'Borealis' }];
+// The kernel-less draft is FIRST, so a "preselect the first brief" regression
+// would pick it and be caught by the submit assertion below.
 const BRIEFS_A: BriefRef[] = [
-  { id: 'brief-a1', name: 'Alpha brief', status: 'confirmed', kernel: { headline: 'h' } as NonNullable<BriefRef['kernel']> },
   { id: 'brief-a2', name: 'Draft brief', status: 'draft' }, // no kernel — not selectable
+  { id: 'brief-a1', name: 'Alpha brief', status: 'confirmed', kernel: KERNEL },
 ];
 const BRIEFS_B: BriefRef[] = [
-  { id: 'brief-b1', name: 'Boreal brief', status: 'confirmed', kernel: { headline: 'h' } as NonNullable<BriefRef['kernel']> },
+  { id: 'brief-b1', name: 'Boreal brief', status: 'confirmed', kernel: KERNEL },
 ];
 
 async function openPage(): Promise<void> {
@@ -121,8 +137,15 @@ describe('CO-SP-2/12 — the finalize picker is honest about briefs', () => {
     const dialog = await screen.findByRole('dialog');
     const notReady = await within(dialog).findByRole('option', { name: /Draft brief/ }) as HTMLOptionElement;
     expect(notReady.disabled).toBe(true);
-    const select = within(dialog).getByLabelText(/Brief/) as HTMLSelectElement;
-    expect(select.value).toBe('brief-a1');
+    // The preselection is STATE, so assert what the state does: the submit is
+    // enabled and finalizes the ready brief. (A DOM `select.value` read is not
+    // evidence — React's controlled <select> shows a fallback option when the
+    // state matches none.)
+    const submit = within(dialog).getByRole('button', { name: /^Finalize$/ }) as HTMLButtonElement;
+    await waitFor(() => expect(submit.disabled).toBe(false));
+    fireEvent.click(submit);
+    await waitFor(() => expect(finalizeBrief).toHaveBeenCalledTimes(1));
+    expect(finalizeBrief).toHaveBeenCalledWith('brief-a1');
   });
 });
 
@@ -152,8 +175,14 @@ describe('CO-SP-4 — switching org resets the brief selection', () => {
     fireEvent.change(within(dialog).getByLabelText(/Organization/), { target: { value: 'org-b' } });
     await act(async () => {});
     // The selection followed the org — it is org B's ready brief, never a
-    // leftover org A id that would finalize the wrong org's brief.
+    // leftover org A id that would finalize the wrong org's brief. The DOM value
+    // alone cannot prove that (a stale 'brief-a1' state matches no org-B option,
+    // so React displays brief-b1 anyway) — the submit is the evidence.
     expect(briefSelect.value).toBe('brief-b1');
+    fireEvent.click(within(dialog).getByRole('button', { name: /^Finalize$/ }));
+    await waitFor(() => expect(finalizeBrief).toHaveBeenCalledTimes(1));
+    expect(finalizeBrief).toHaveBeenCalledWith('brief-b1');
+    expect(finalizeBrief).not.toHaveBeenCalledWith('brief-a1');
   });
 });
 

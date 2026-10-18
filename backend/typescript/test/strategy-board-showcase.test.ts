@@ -12,6 +12,15 @@
  * Runs in demo mode so the seed actor + convener resolve to the tenant owner
  * (accessControlService §demo single-tenant exception) — the same posture a real
  * demo deployment runs under.
+ *
+ * Why it exists: ADR 0229 (the showcase seeder must compose strategy + priority-matrix +
+ * advisory-board into one linked set), ADR 0321 (a re-seed is a no-op; clear removes only
+ * the seeder's own entities) and ADR 0588 D1 (the board's context block is what a CONVENER
+ * receives, resolved per caller — this test was corrected there). The health verdict rule
+ * itself is unit-tested in `strategy-health.test.ts`; here it is a SEED-FIDELITY claim.
+ * /grade-tests wave 19 witnesses: dropping the idempotency skip, the strategy links, the
+ * board contextRefs, the clear's delete, or the off-track rule each turns this case red.
+ * Cost ceiling: `createApp` is required (host-ext storage + the advisor roster).
  */
 import http from 'node:http';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';

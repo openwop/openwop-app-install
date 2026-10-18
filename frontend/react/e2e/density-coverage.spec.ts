@@ -1,6 +1,6 @@
 import { test, expect, type Page } from '@playwright/test';
 import { expect as pwExpect, type APIRequestContext } from '@playwright/test';
-import { API, enableToggle } from './support/session.js';
+import { API } from './support/session.js';
 
 /**
  * Does `density: compact` actually compact the app? (ADR 0510 / DSA-007)
@@ -75,6 +75,12 @@ import { API, enableToggle } from './support/session.js';
  * then on seeding. Denied routes are now excluded and NAMED rather than folded
  * into a total that reads as coverage.
  *
+ * Sabotage (grade-tests wave 53): writing `.workflow-card-menu-btn`'s padding as
+ * `2px 8px` → red (the ratchet); denying `/runs` in AdminLayout → red (every route
+ * measured); rendering no kanban cards → red (board rows). The ratchet's env
+ * override `OPENWOP_DENSITY_STUCK_BASELINE` exists for a deliberate local
+ * re-measure only; the gate never sets it.
+ *
  * THE ASSERTION IS A RATCHET, not a target. `STUCK_BASELINE` may only fall: new
  * hardcoded spacing on a dense surface fails here. It is deliberately NOT zero,
  * because reaching zero is the very decision this evidence is meant to inform.
@@ -97,8 +103,8 @@ async function loginPersonal(ctx: APIRequestContext, email: string): Promise<voi
 /**
  * SEED YOUR OWN FIXTURES. The spec's first runs reported ~0 data rows and I
  * wrote that up as "the e2e seed populates nothing" — wrong framing. Specs in
- * this lane seed their OWN data (`collab-ct`, `announcement-delivery`,
- * `a11y` all do); mine simply never did, so it measured the chrome around empty
+ * this lane seed their OWN data (`announcement-delivery` and `a11y`
+ * do); mine simply never did, so it measured the chrome around empty
  * tables and the density question stayed unanswered. A dense surface is the
  * whole point, so make one.
  */
@@ -131,7 +137,7 @@ async function seedDenseBoard(ctx: APIRequestContext, cards: number): Promise<{ 
   return { seeded, boardId };
 }
 
-const ROUTES: Array<{ path: string; archetype: string; toggles?: string[] }> = [
+const ROUTES: Array<{ path: string; archetype: string }> = [
   { path: '/boards', archetype: 'seeded-dense' },
   { path: '/runs', archetype: 'data-dense-index' },
   { path: '/agents', archetype: 'standard-index' },
@@ -263,13 +269,24 @@ test.describe('compact density actually compacts (ADR 0510 / DSA-007)', () => {
     const denied: string[] = [];
     const perRoute: string[] = [];
 
+    let boardRows = -1;
     for (const route of ROUTES) {
-      for (const id of route.toggles ?? []) await enableToggle(context.request, id);
       await page.goto(route.path, { waitUntil: 'domcontentloaded' });
       // NOT `networkidle`: this app holds SSE streams open, so the network never
-      // goes idle and the wait burns the whole test budget before measuring
-      // anything. Settle on the paint instead.
-      await page.waitForTimeout(1200);
+      // goes idle. And NOT a fixed sleep (this was `waitForTimeout(1200)`): late
+      // content after the sleep was simply never measured. Settle on the page's
+      // own signals — the shell, then no loading placeholder left in <main>. The
+      // gallery's SPECIMENS are permanent skeletons / busy states, so anything
+      // inside `[data-gallery]` is not a loading signal.
+      await expect(page.locator('main#main-content')).toBeVisible({ timeout: 30_000 });
+      await expect(
+        page.locator('main :is(.skeleton, .skeleton-rows, [aria-busy="true"]):not([data-gallery] *)'),
+        `${route.path} never finished loading`,
+      ).toHaveCount(0, { timeout: 30_000 });
+      if (route.archetype === 'seeded-dense' && seeded > 0) {
+        // The seeded board's cards are the dense surface — wait until they ALL rendered.
+        await expect.poll(() => page.locator('.kb-card').count(), { timeout: 30_000 }).toBeGreaterThanOrEqual(seeded);
+      }
 
       // A DENY CARD RENDERS FINE AND MEASURES NOTHING. The first cut of this
       // spec quoted that trap and then walked into it: /runs answered with
@@ -277,12 +294,16 @@ test.describe('compact density actually compacts (ADR 0510 / DSA-007)', () => {
       // 191/21/3, which I published as evidence about a dense surface. Route
       // access is environmental, so a denied route is EXCLUDED and NAMED —
       // never silently folded into a total that then reads as coverage.
-      if (await page.getByText(/Administrator access required/i).count()) {
+      // The gallery RENDERS that same title as a specimen (the admin-shell section's
+      // "forbidden" state), so only a match OUTSIDE `[data-gallery]` is a deny card —
+      // matching it anywhere misreported /design-system as DENIED (wave 53).
+      if (await page.locator('main').getByText(/Administrator access required/i).and(page.locator(':not([data-gallery] *)')).count()) {
         denied.push(`${route.path} [${route.archetype}] — DENIED (admin tier; not measured)`);
         continue;
       }
 
       const m = await measure(page);
+      if (route.archetype === 'seeded-dense') boardRows = m.rows;
       if (m.elements < MIN_ELEMENTS) {
         skipped.push(`${route.path} (${m.elements} elements — below the ${MIN_ELEMENTS} evidence floor)`);
         continue;
@@ -316,6 +337,17 @@ test.describe('compact density actually compacts (ADR 0510 / DSA-007)', () => {
       ...(skipped.length ? [{ type: 'density-skipped', description: skipped.join(' | ') }] : []),
       ...(denied.length ? [{ type: 'density-denied', description: denied.join(' | ') }] : []),
     );
+
+    // EVERY route must be measured. A denied or under-floor route used to be
+    // skipped and NAMED — but skipping only LOWERS the stuck total, so the ratchet
+    // got EASIER exactly when coverage shrank (sabotage: denying /runs stayed
+    // green, wave 53). In this harness every route is reachable (header), so a
+    // newly denied or empty route is a red, not a quieter number.
+    expect(denied, 'route(s) answered with a deny card and were not measured').toEqual([]);
+    expect(skipped, 'route(s) rendered too little to measure').toEqual([]);
+    // The DENSE fixture actually rendered as rows (DENS-D-1: "seeded 24 · 0 rows"
+    // used to pass green — the row count was reported, never asserted).
+    expect(boardRows, 'the seeded board rendered no data rows').toBeGreaterThanOrEqual(seeded > 0 ? seeded : 1);
 
     // Vacuity guard: if every route fell under the floor we measured nothing, and
     // a green run would be a lie. Fail loudly instead.

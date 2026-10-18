@@ -1,6 +1,14 @@
+/**
+ * ADR 0140 P4 Decision 5 — the APG tablist strip of the multi-tab chat deck (a11y
+ * contract): role=tablist/tab, aria-selected on exactly the active tab, tab↔panel
+ * wiring by stable `tab-<sid>`/`tabpanel-<sid>` ids (they must survive reload), a
+ * roving tabindex, Delete/F2 keyboard paths with focus handed to the neighbour after
+ * a keyboard close, pin toggle, the G5 off-screen blocked-tab cue, the G6 pop-out and
+ * inline rename. Breaks if any role/state/focus rule or callback wiring is lost.
+ */
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
-import { TabStrip, tabButtonId, tabPanelId } from '../TabStrip.js';
+import { TabStrip } from '../TabStrip.js';
 
 function setup(overrides: Partial<Parameters<typeof TabStrip>[0]> = {}) {
   const props = {
@@ -28,9 +36,12 @@ describe('TabStrip — APG tablist (ADR 0140 P4)', () => {
     const tabs = screen.getAllByRole('tab');
     expect(tabs).toHaveLength(2);
     const a = tabs.find((el) => el.getAttribute('data-sid') === 'a')!;
+    const b = tabs.find((el) => el.getAttribute('data-sid') === 'b')!;
     expect(a.getAttribute('aria-selected')).toBe('true');
-    expect(a.id).toBe(tabButtonId('a'));
-    expect(a.getAttribute('aria-controls')).toBe(tabPanelId('a'));
+    expect(b.getAttribute('aria-selected')).toBe('false'); // exactly one selected
+    // Literal ids — the scheme is the claim (the deck's panels use the same ids).
+    expect(a.id).toBe('tab-a');
+    expect(a.getAttribute('aria-controls')).toBe('tabpanel-a');
   });
 
   it('roving tabindex: only the active tab is in the tab order', () => {
@@ -85,6 +96,9 @@ describe('TabStrip — APG tablist (ADR 0140 P4)', () => {
     expect(document.activeElement).toBe(screen.getByRole('tab'));
   });
 
+  // DOUBLE GUARD: the handler returns when the focused element is not role=tab AND
+  // when it has no data-sid; every non-tab control in the strip lacks both, so
+  // removing either alone stays green (w44 probe strip-delete-guard).
   it('Delete does NOT close when focus is not on a tab', () => {
     const p = setup();
     // Focus the new-tab button (a button, not a role=tab).
@@ -94,8 +108,7 @@ describe('TabStrip — APG tablist (ADR 0140 P4)', () => {
   });
 
   it('off-screen blocked tab surfaces an edge cue that scrolls it into view (G5)', () => {
-    const rect = (left: number, right: number): DOMRect =>
-      ({ left, right, top: 0, bottom: 30, width: right - left, height: 30, x: left, y: 0, toJSON: () => ({}) }) as DOMRect;
+    const rect = (left: number, right: number): DOMRect => new DOMRect(left, 0, right - left, 30);
     // viewport [0,100]; tab 'a' in view [0,80]; blocked tab 'b' past the right edge [200,280].
     const spy = vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function (this: Element) {
       if (this.classList?.contains('tabdeck-strip__scroll')) return rect(0, 100);
@@ -165,6 +178,8 @@ describe('TabStrip — APG tablist (ADR 0140 P4)', () => {
     expect(screen.getByRole('textbox', { name: 'Rename Title a' })).toBeTruthy();
   });
 
+  // DOUBLE GUARD: no dblclick handler without onRename, AND the input renders only
+  // when `onRename && renamingId === sid` (w44 probe strip-norename).
   it('no rename affordance (no input) when onRename is absent', () => {
     setup();
     fireEvent.doubleClick(screen.getByRole('tab', { name: 'Title a' }));

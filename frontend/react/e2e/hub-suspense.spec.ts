@@ -1,5 +1,5 @@
 import { test, expect, type APIRequestContext, type Page } from '@playwright/test';
-import { API, enableToggle } from './support/session.js';
+import { API } from './support/session.js';
 
 /**
  * Hub Suspense boundary — the hub's CHROME renders while its pane is still
@@ -45,7 +45,11 @@ import { API, enableToggle } from './support/session.js';
  *
  * WHAT MAKES IT BITE was measured by sabotage: deleting the `<Suspense>` from
  * `ModelsHubPage` turned the `models` test red on the guard below and left the
- * other three green. A test that cannot fail when you break the thing it tests
+ * other three green. Wave 53 re-measured it for EVERY hub: removing the pane
+ * boundary in AccessHubPage, ModelsHubPage, CampaignStudioHubPage and
+ * ChatDeploymentHubPage's TABBED branch turns exactly that hub's test red.
+ * ChatDeploymentHubPage's single-pane branch is NOT exercised (both of its panes
+ * are on by default, so the tabbed branch renders) — a known gap, not a claim. A test that cannot fail when you break the thing it tests
  * is worse than no test, so that probe is the reason to trust this one.
  *
  * What this does NOT prove: that the production build splits these panes into
@@ -104,9 +108,40 @@ const HUBS: Hub[] = [
  * (Shared `login()` requires a tenantId, so this stays local rather than
  * widening a helper eight other specs depend on.)
  */
-async function loginPersonal(ctx: APIRequestContext, email: string): Promise<void> {
+async function loginPersonal(ctx: APIRequestContext, email: string): Promise<string> {
   const res = await ctx.post(`${API}/test/login`, { data: { email } });
   expect(res.status(), `login ${email}: ${await res.text()}`).toBe(201);
+  const tenantId = ((await res.json()) as { user?: { tenantId?: string } }).user?.tenantId;
+  if (!tenantId) throw new Error(`login ${email} returned no tenant`);
+  return tenantId;
+}
+
+/**
+ * A PER-TENANT toggle override (README trap 4; the pair-canvas.spec.ts pattern).
+ * This spec used to flip the GLOBAL status of `chat-deployment` (default off) and
+ * four campaign toggles, and never put them back — changing what every parallel
+ * spec rendered (the admin rail among them). The override touches only this
+ * test's own personal tenant and is removed in `finally`.
+ */
+type ToggleConfig = Record<string, unknown> & { tenantOverrides?: Record<string, unknown> };
+async function readToggle(ctx: APIRequestContext, id: string): Promise<ToggleConfig> {
+  const get = await ctx.get(`${API}/feature-toggles/admin/configs/${encodeURIComponent(id)}`);
+  expect(get.status(), `read toggle ${id}: ${await get.text()}`).toBe(200);
+  return (await get.json()) as ToggleConfig;
+}
+async function setTenantOverride(ctx: APIRequestContext, id: string, tenantId: string, status: 'on' | null): Promise<void> {
+  const config = await readToggle(ctx, id);
+  const overrides = { ...(config.tenantOverrides ?? {}) };
+  if (status) overrides[tenantId] = { status };
+  else delete overrides[tenantId];
+  const put = await ctx.put(`${API}/feature-toggles/admin/configs/${encodeURIComponent(id)}`, {
+    data: { ...config, id, tenantOverrides: overrides },
+  });
+  expect(put.status(), `${status ? 'set' : 'clear'} ${id} override for ${tenantId}: ${await put.text()}`).toBe(200);
+  // The write LANDED (the PUT echoes the stored config), not merely returned 200.
+  const saved = (await put.json()) as ToggleConfig;
+  if (status) expect(saved.tenantOverrides?.[tenantId], `${id} override for ${tenantId} after the write`).toMatchObject({ status });
+  else expect(saved.tenantOverrides?.[tenantId], `${id} override for ${tenantId} after the clear`).toBeUndefined();
 }
 
 /**
@@ -134,45 +169,58 @@ test.describe('hub Suspense boundary (#2724)', () => {
     // failure and hides the other three, and the sabotage probe needs exactly one
     // hub to go red while the rest stay green.
     test(`${hub.id}: hub chrome renders while its pane is still loading`, async ({ page }) => {
-      await loginPersonal(page.request, `hub-suspense-${hub.id}@e2e.test`);
-      for (const id of hub.toggles) {
-        expect(await enableToggle(page.request, id), `${hub.id}: toggle '${id}' could not be enabled`).toBe(true);
+      const tenantId = await loginPersonal(page.request, `hub-suspense-${hub.id}@e2e.test`);
+      const applied: string[] = [];
+      try {
+        for (const id of hub.toggles) {
+          await setTenantOverride(page.request, id, tenantId, 'on');
+          applied.push(id);
+        }
+
+        await armModuleDelay(page);
+        await page.goto(hub.path);
+
+        // Wait for the hub's OWN header — proof the hub page itself has mounted and
+        // we are past the shell boundary. Until this appears the shell is legitimately
+        // showing its skeleton (the hub page is lazy too), which is not what we test.
+        // `.first()` = the HUB's header: a pane may render its own `.page-header`
+        // further down once it loads (Campaign Studio's brief pane does).
+        const hubHeader = page.locator('.page-header').first();
+        await expect(
+          hubHeader,
+          `${hub.id}: the hub page never mounted`,
+        ).toBeVisible({ timeout: 60_000 });
+
+        // Both facts in ONE tick, so "chrome present" and "pane suspended" are true
+        // SIMULTANEOUSLY rather than sequentially (the pane could otherwise resolve
+        // between two awaits and let a broken build slip through).
+        const snap = await page.evaluate(() => ({
+          suspended: !!document.querySelector('.state-card[aria-busy="true"]'),
+          header: !!document.querySelector('.page-header'),
+        }));
+
+        // THE GUARD. Only the hub's own <Suspense fallback> renders a busy card; the
+        // shell's fallback is an aria-hidden skeleton. If the boundary is missing,
+        // the pane's suspension escapes to the shell boundary and this is false.
+        expect(
+          snap.suspended,
+          `${hub.id}: no hub-owned busy card while the pane loaded — either the suspension escaped to the shell boundary, or the pane resolved before the snapshot`,
+        ).toBe(true);
+        expect(
+          snap.header,
+          `${hub.id}: the hub header was not on screen while its pane suspended`,
+        ).toBe(true);
+
+        // And it RECOVERS: the busy card goes away, the pane actually renders into
+        // the hub's tab panel, and the chrome is still intact. (This used to
+        // re-assert only the header, which was already visible.)
+        await page.unroute(/\.(t|j)sx?(\?.*)?$/);
+        await expect(page.locator('.state-card[aria-busy="true"]'), `${hub.id}: the pane never finished loading`).toHaveCount(0, { timeout: 60_000 });
+        await expect(page.locator('[role="tabpanel"]').first(), `${hub.id}: the pane rendered nothing`).not.toBeEmpty();
+        await expect(hubHeader).toBeVisible();
+      } finally {
+        for (const id of applied) await setTenantOverride(page.request, id, tenantId, null);
       }
-
-      await armModuleDelay(page);
-      await page.goto(hub.path);
-
-      // Wait for the hub's OWN header — proof the hub page itself has mounted and
-      // we are past the shell boundary. Until this appears the shell is legitimately
-      // showing its skeleton (the hub page is lazy too), which is not what we test.
-      await expect(
-        page.locator('.page-header'),
-        `${hub.id}: the hub page never mounted`,
-      ).toBeVisible({ timeout: 60_000 });
-
-      // Both facts in ONE tick, so "chrome present" and "pane suspended" are true
-      // SIMULTANEOUSLY rather than sequentially (the pane could otherwise resolve
-      // between two awaits and let a broken build slip through).
-      const snap = await page.evaluate(() => ({
-        suspended: !!document.querySelector('.state-card[aria-busy="true"]'),
-        header: !!document.querySelector('.page-header'),
-      }));
-
-      // THE GUARD. Only the hub's own <Suspense fallback> renders a busy card; the
-      // shell's fallback is an aria-hidden skeleton. If the boundary is missing,
-      // the pane's suspension escapes to the shell and this is false.
-      expect(
-        snap.suspended,
-        `${hub.id}: no hub-owned busy card while the pane loaded — either the suspension escaped to the shell boundary, or the pane resolved before the snapshot`,
-      ).toBe(true);
-      expect(
-        snap.header,
-        `${hub.id}: the hub header was not on screen while its pane suspended`,
-      ).toBe(true);
-
-      // And it recovers: the pane resolves and the chrome is still intact.
-      await page.unroute(/\.(t|j)sx?(\?.*)?$/);
-      await expect(page.locator('.page-header')).toBeVisible();
     });
   }
 });

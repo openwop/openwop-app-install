@@ -17,7 +17,7 @@ import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { signSession, COOKIE_TTL_SECONDS } from '../src/middleware/cookieSession.js';
-import { createWorkspace, createMember } from '../src/host/accessControlService.js';
+import { createWorkspace, createMember, createOrg } from '../src/host/accessControlService.js';
 import { upsertFromPrincipal } from '../src/features/users/usersService.js';
 
 let BASE: string;
@@ -25,6 +25,8 @@ let server: http.Server;
 let wsTenant: string;
 let editorCookie: string;
 let adminCookie: string;
+let editorUserId: string;
+let adminUserId: string;
 
 const PEOPLE = '/host/openwop-app/kicktodo/org-programs/admin/people';
 
@@ -32,10 +34,10 @@ const craftCookie = (userId: string, activeTenant: string, personalTenant: strin
   const now = Math.floor(Date.now() / 1000);
   return `__session=${signSession({ sid: randomBytes(12).toString('hex'), tenantId: activeTenant, tier: 'user', userId, personalTenant, iat: now, exp: now + COOKIE_TTL_SECONDS })}`;
 };
-const seatMember = async (principalId: string, roles: string[], personalTenant: string): Promise<string> => {
+const seatMember = async (principalId: string, roles: string[], personalTenant: string): Promise<{ cookie: string; userId: string }> => {
   const user = await upsertFromPrincipal({ tenantId: wsTenant, principalId, source: 'oidc' });
   await createMember({ tenantId: wsTenant, orgId: wsTenant, subject: user.userId, displayName: `Person ${principalId}`, roles });
-  return craftCookie(user.userId, wsTenant, personalTenant);
+  return { cookie: craftCookie(user.userId, wsTenant, personalTenant), userId: user.userId };
 };
 
 interface PeopleBody {
@@ -66,26 +68,34 @@ beforeAll(async () => {
   }
   const ws = await createWorkspace({ name: 'KT People', ownerSubject: 'oidc:people-owner' });
   wsTenant = ws.tenantId;
-  editorCookie = await seatMember('oidc:people-editor', ['editor'], 'ws:home-people-editor');
-  adminCookie = await seatMember('oidc:people-admin', ['admin'], 'ws:home-people-admin');
+  ({ cookie: editorCookie, userId: editorUserId } = await seatMember('oidc:people-editor', ['editor'], 'ws:home-people-editor'));
+  ({ cookie: adminCookie, userId: adminUserId } = await seatMember('oidc:people-admin', ['admin'], 'ws:home-people-admin'));
+  // The DEDUPE fixture: the editor is ALSO seated in a sub-org — two membership
+  // rows, ONE person. Without subject-dedupe the editor would count twice.
+  const sub = await createOrg({ tenantId: wsTenant, name: 'People sub-org', createdBy: 'user:setup' });
+  await createMember({ tenantId: wsTenant, orgId: sub.orgId, subject: editorUserId, displayName: 'Person oidc:people-editor (sub)', roles: ['editor'] });
+  // The ROLELESS fixture: a person whose only seat carries no role at all.
+  await createMember({ tenantId: wsTenant, orgId: wsTenant, subject: 'user:people-roleless', displayName: 'Person oidc:people-roleless', roles: [] });
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
 describe('ADR 0438 A4 — People & access aggregate lens', () => {
+  // TWIN: `kicktodo-authz-http.test.ts` › "GET …/org-programs/admin/people" ›
+  // "EDITOR member is REFUSED 403" (both red on w40g1-ppl-gate-gone /
+  // http-ppl-gate-gone). Kept as this file's own refusal control (protected).
   it('an editor (no manage) gets 403 forbidden_scope — not a leaky 404', async () => {
     const r = await call(editorCookie);
     expect(r.status).toBe(403);
     expect(String(r.body?.error ?? r.body?.code ?? '')).toContain('forbidden_scope');
+    expect(r.raw).toContain('Missing required scope: host:kicktodo:manage');
   });
 
   it('an admin gets the aggregate shape: role counts + per-org counts, honest consent posture', async () => {
     const r = await call(adminCookie);
     expect(r.status).toBe(200);
-    // Members: counts only. The two seated members (+ any workspace owner seat).
-    expect(r.body.members!.total).toBeGreaterThanOrEqual(2);
-    const roles = new Map(r.body.members!.byRole.map((x) => [x.role, x.count]));
-    expect(roles.get('editor')).toBeGreaterThanOrEqual(1);
-    expect(roles.get('admin')).toBeGreaterThanOrEqual(1);
+    // Members: counts only — PEOPLE, not rows. owner + editor (two seats, one
+    // person) + admin + roleless = 4 people.
+    expect(r.body.members!.total).toBe(4);
     // Orgs: aggregate row per org, with the lens fields and nothing person-shaped.
     expect(Array.isArray(r.body.orgs)).toBe(true);
     for (const org of r.body.orgs!) {
@@ -97,10 +107,14 @@ describe('ADR 0438 A4 — People & access aggregate lens', () => {
     // Grade-trio fix pins: counts are PEOPLE (subject-deduped), roleless people
     // ride a STRUCTURAL field (never an in-band '(none)' sentinel), and equal
     // counts tie-break deterministically by role name.
-    expect(typeof r.body.members!.rolelessCount).toBe('number');
+    expect(r.body.members!.rolelessCount).toBe(1);
     expect(JSON.stringify(r.body.members!.byRole)).not.toContain('(none)');
-    const sorted = [...r.body.members!.byRole].sort((a, b) => b.count - a.count || a.role.localeCompare(b.role));
-    expect(r.body.members!.byRole).toEqual(sorted);
+    // Equal counts (1 each — the editor's two seats count once) tie-break by role name.
+    expect(r.body.members!.byRole).toEqual([
+      { role: 'admin', count: 1 },
+      { role: 'editor', count: 1 },
+      { role: 'owner', count: 1 },
+    ]);
     // The B16 posture is declared, not silently omitted.
     expect(r.body.consent).toEqual({ cohortAggregatesGated: true });
   });
@@ -113,5 +127,9 @@ describe('ADR 0438 A4 — People & access aggregate lens', () => {
     expect(r.raw).not.toContain('subject');
     expect(r.raw).not.toContain('displayName');
     expect(r.raw).not.toContain('completionRate'); // no cohort OUTCOME aggregate here
+    // VALUES, not just key names: no member's subject id serializes under ANY key.
+    expect(r.raw).not.toContain(editorUserId);
+    expect(r.raw).not.toContain(adminUserId);
+    expect(r.raw).not.toContain('user:people-roleless');
   });
 });

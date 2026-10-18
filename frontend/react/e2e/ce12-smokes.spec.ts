@@ -2,15 +2,28 @@
  * CE-12 — the three manual smokes owed after the 2026-09-30 releases, as specs so
  * they are never "owed" again:
  *
- *  1. ApprovalCard, a decision that lost the race (ADR 0778 D10, #4233): the
- *     server answers 409 and the card says "resolved elsewhere" — never
- *     "Decision recorded".
+ *  1. The chat tools REVIEWS panel (`chat/reviews/ReviewInboxPanel`, the
+ *     smoke's "ApprovalCard" — corrected w53: this spec never renders
+ *     `interrupts/ApprovalCard.tsx`), a decision that lost the race (ADR 0778 D10,
+ *     #4233): the server answers 409 and the panel says "resolved elsewhere" —
+ *     never "Decision recorded". jsdom twin with a MOCKED 409:
+ *     `ReviewInboxPanel.test.tsx` "a 409 says "resolved elsewhere"…"; this is the
+ *     only run where the REAL backend produces the 409.
  *  2. Deleting a BOUND key on /access?tab=keys (ADR 0779 D7, #4234): the server
  *     refuses (409, live references), and a SEPARATE danger confirmation names the
  *     consumer. Cancelling it leaves the key in place.
  *  3. The chat header as a NON-ADMIN member (ADR 0779 D7, #4234): the provider
  *     card shows, but the "change" control (a workspace write the server refuses
  *     a member) is not offered. The owner of the same workspace does see it.
+ *     HONEST CEILING (w53): its UI half NEVER RUNS in this repo. Both e2e lanes
+ *     (ci.sh and e2e-routes.sh) boot with OPENWOP_FEATURE_TOGGLES_DEV_OPEN=true, which
+ *     makes every tenant a superadmin (`host/superadmin.ts` isSuperadminTenant), so the
+ *     case skips itself after its API half. Its twins carry the claim:
+ *     `src/byok/__tests__/byokReadOnly.test.tsx` ("the compact chat-header card offers a
+ *     member no "Change"" + its admin polarity) and
+ *     `backend/typescript/test/adr0711-byok-operator-gate.test.ts` (an editor is a
+ *     member and is refused the BYOK writes with `host:byok:manage` named). Kept, not
+ *     an A claim: it runs as written on any backend without DEV_OPEN.
  */
 import { test, expect, type APIRequestContext, type Browser } from '@playwright/test';
 import { API } from './support/session';
@@ -44,7 +57,7 @@ async function ownedWorkspaceWithChat(ctx: APIRequestContext, tag: string): Prom
 }
 
 test.describe('CE-12 smokes', () => {
-  test('ApprovalCard: a decision that lost the race says "resolved elsewhere" (ADR 0778 D10)', async ({ page }) => {
+  test('Reviews panel: a decision that lost the race says "resolved elsewhere" (ADR 0778 D10)', async ({ page }) => {
     // The owner of the workspace may decide its gates.
     await ownedWorkspaceWithChat(page.request, 'approval');
     const workflowId = `wf.ce12.approval.${uniq()}`;
@@ -125,7 +138,7 @@ test.describe('CE-12 smokes', () => {
     // `OPENWOP_FEATURE_TOGGLES_DEV_OPEN=true` (the standard e2e backend) makes EVERY tenant a
     // superadmin (`isSuperadminTenant`), and the UI rightly offers a superadmin "change" — so the
     // member half is only meaningful on a backend without dev-open. Say so; never pass vacuously.
-    test.skip(eff.superadmin === true, 'every tenant is superadmin on this backend (OPENWOP_FEATURE_TOGGLES_DEV_OPEN=true); run against one without it');
+    test.skip(eff.superadmin === true, 'SKIPS IN EVERY REPO LANE: OPENWOP_FEATURE_TOGGLES_DEV_OPEN=true makes every tenant superadmin, and a superadmin is rightly offered "change". The UI claim is carried by byokReadOnly.test.tsx + backend adr0711-byok-operator-gate.test.ts; run this against a backend without DEV_OPEN.');
 
     for (const [who, page, offered] of [['owner', ownerPage, 1], ['member', memberPage, 0]] as const) {
       await page.goto('/chat');

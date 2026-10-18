@@ -15,14 +15,54 @@
 
 import type { Express, Request, Response } from 'express';
 import { openSseChannel } from '../host/sseChannel.js';
-import { getCanvasForTenant } from '../host/canvasSurface.js';
+import { canvasWriteAllowed, getCanvasForTenant, type CanvasRecordView } from '../host/canvasSurface.js';
+import { resolveCanvasTypeAccess } from '../host/canvasTypeOwnership.js';
+import { assertOrgScope } from '../host/accessControlService.js';
+import { createLogger } from '../observability/logger.js';
+
+const log = createLogger('routes.presentRemote');
 import {
   presentOutlineFor,
   publishPresentNav,
   subscribePresentNav,
   verifyPresentRemoteToken,
   type PresentNavEvent,
+  type PresentRemoteClaims,
 } from '../host/presentRemote.js';
+
+/**
+ * ADR 0886 D3 — THE present-remote authorization, run by all four public routes.
+ * The token proves who minted it and where; it is not, on its own, a grant. A
+ * request is served only while every fact the MINT checked is still true:
+ *   1. signature + expiry (v2 claims: tenant, canvas, minter, org);
+ *   2. the canvas exists, its type has a present mode;
+ *   3. the type's owning feature is enabled for the tenant (toggle + plan);
+ *   4. the minter still passes the mint's own org gate — `assertOrgScope` with the
+ *      signed org, the exact call `requireOrgScope` made — so a token is never
+ *      valid at mint and dead at first use, or the reverse;
+ *   5. the minter may still WRITE the canvas (`canvasWriteAllowed`, ADR 0886 D1).
+ * Any failure is the uniform 404 (no canvas-id confirmation, no expiry/forgery
+ * distinction).
+ */
+async function authorizePresentRemote(token: string): Promise<{ claims: PresentRemoteClaims; canvas: CanvasRecordView } | null> {
+  const claims = verifyPresentRemoteToken(token);
+  if (!claims) return null; // verify logs its own reason
+  // SL2CD-6 — each refusal names its cause for the operator (never the caller:
+  // the response stays the uniform 404).
+  const refused = (reason: string): null => { log.info('present_remote_refused', { reason, canvasId: claims.canvasId }); return null; };
+  const canvas = await getCanvasForTenant(claims.tenantId, claims.canvasId);
+  if (!canvas) return refused('canvas_gone');
+  if (!presentOutlineFor(canvas.canvasTypeId, canvas.state as Record<string, unknown>)) return refused('no_present_mode');
+  const access = await resolveCanvasTypeAccess(canvas.canvasTypeId, { tenantId: claims.tenantId, userId: claims.userId });
+  if (!access.allowed) return refused('feature_off');
+  try {
+    await assertOrgScope(claims.tenantId, claims.userId, claims.orgId, 'workspace:write');
+  } catch {
+    return refused('minter_lost_org_write');
+  }
+  if (!(await canvasWriteAllowed(claims.tenantId, canvas, { subject: claims.userId }))) return refused('minter_lost_canvas_write');
+  return { claims, canvas };
+}
 
 const notFound = (res: Response): void => {
   res.status(404).json({ error: 'not_found', message: 'unknown or expired present session' });
@@ -32,17 +72,15 @@ const ACTIONS = new Set(['next', 'prev', 'goto', 'blank']);
 
 export function registerPresentRemoteRoutes(app: Express): void {
   app.get('/host/openwop-app/present/:token/outline', async (req: Request, res: Response) => {
-    const claims = verifyPresentRemoteToken(req.params.token ?? '');
-    if (!claims) { notFound(res); return; }
-    const canvas = await getCanvasForTenant(claims.tenantId, claims.canvasId);
-    const outline = canvas ? presentOutlineFor(canvas.canvasTypeId, canvas.state as Record<string, unknown>) : null;
-    if (!outline) { notFound(res); return; }
-    res.json(outline);
+    const auth = await authorizePresentRemote(req.params.token ?? '');
+    if (!auth) { notFound(res); return; }
+    res.json(presentOutlineFor(auth.canvas.canvasTypeId, auth.canvas.state as Record<string, unknown>));
   });
 
   app.post('/host/openwop-app/present/:token/command', async (req: Request, res: Response) => {
-    const claims = verifyPresentRemoteToken(req.params.token ?? '');
-    if (!claims) { notFound(res); return; }
+    const auth = await authorizePresentRemote(req.params.token ?? '');
+    if (!auth) { notFound(res); return; }
+    const { claims } = auth;
     const body = (req.body ?? {}) as { action?: unknown; index?: unknown };
     if (typeof body.action !== 'string' || !ACTIONS.has(body.action)) {
       res.status(400).json({ error: 'validation_error', message: `action must be one of: ${[...ACTIONS].join(', ')}` });
@@ -61,8 +99,9 @@ export function registerPresentRemoteRoutes(app: Express): void {
   });
 
   app.post('/host/openwop-app/present/:token/state', async (req: Request, res: Response) => {
-    const claims = verifyPresentRemoteToken(req.params.token ?? '');
-    if (!claims) { notFound(res); return; }
+    const auth = await authorizePresentRemote(req.params.token ?? '');
+    if (!auth) { notFound(res); return; }
+    const { claims } = auth;
     const body = (req.body ?? {}) as { current?: unknown };
     if (typeof body.current !== 'number' || !Number.isInteger(body.current) || body.current < 0 || body.current > 10_000) {
       res.status(400).json({ error: 'validation_error', message: 'current must be an integer frame index' });
@@ -74,8 +113,12 @@ export function registerPresentRemoteRoutes(app: Express): void {
 
   app.get('/host/openwop-app/present/:token/events', async (req: Request, res: Response, next) => {
     try {
-      const claims = verifyPresentRemoteToken(req.params.token ?? '');
-      if (!claims) { notFound(res); return; }
+      // Checked at CONNECT (ADR 0886 D3). The stream carries frame indices only,
+      // never deck content; one already open when access is lost runs until it
+      // closes (ADR 0886 OQ-3).
+      const auth = await authorizePresentRemote(req.params.token ?? '');
+      if (!auth) { notFound(res); return; }
+      const { claims } = auth;
       // The stream cap keys off the request (authed presenter → tenant bucket;
       // the anon phone → source-IP bucket) — the sseChannel convention.
       const channel = openSseChannel(req, res);

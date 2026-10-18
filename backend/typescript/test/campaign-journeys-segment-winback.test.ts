@@ -5,6 +5,15 @@
  * nextWorkerInputs), which the real core.dispatch fans out — proving the full
  * "per-member supervisor shape" ADR 0255 deferred, now sitting on the merged
  * executor arm. Pure node unit tests + an end-to-end plan → dispatch integration.
+ *
+ * Sabotage: projecting `nextWorkerInputs?.[0]` for every slot in core.dispatch
+ * reds the e2e case (all children get ct-1); dropping the shared params from a
+ * slot reds the pure + e2e cases.
+ *
+ * Ceiling (fixture honesty): `fakeSuite` and the `core.dispatch` ctx are cast
+ * `as never` — the real types are the 15-slot HostAdapterSuite and the full
+ * NodeContext, of which this test exercises only `workflowCatalog.getWorkflow`
+ * and the fields passed. Test-infra fakes, not production-shaped data.
  */
 import { describe, expect, it, beforeAll, afterEach } from 'vitest';
 import { segmentWinbackPlan } from '../../../packs/feature.campaign-journeys.nodes/index.mjs';
@@ -71,7 +80,8 @@ describe('ADR 0255 — end-to-end: plan → core.dispatch → per-contact childr
   beforeAll(() => {
     ensureNodesRegistered();
     setSubWorkflowDispatcher({ storage, hostSuite: fakeSuite, executeRun: fakeExecuteRun });
-    process.env.OPENWOP_DISPATCH_PER_ITEM_INPUT = 'true'; // RFC 0126 host honors per-item input
+    // RFC 0126 per-item input is advertised by default (`perItemInputSupported()` is
+    // `!== 'false'`), so no env write is needed — the old `= 'true'` was a no-op leak.
   });
   afterEach(() => { childInputs = []; });
 

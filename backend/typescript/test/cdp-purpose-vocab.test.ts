@@ -11,6 +11,13 @@
  *   - strict OFF (default) ⇒ capture is fail-open (accepted, warned);
  *   - the RFC 0128 opaque-string egress (`purposeLabels`) is UNCHANGED — a stored
  *     opaque label normalizes + re-emits verbatim regardless of the vocab/strict.
+ *   - the vocab routes are RBAC-gated: a same-tenant member with no scopes is refused 403.
+ *
+ * Sabotage-witnessed (/grade-tests w38): emptying the seed, dropping the sort, the seed
+ * disable/re-enable, `normalizeCode`'s empty check, `validatePurposes`' dedupe, the strict
+ * throw, a `strict:true` default, either capture hook (`recordConsent` / `mergeConsentCategories`),
+ * the boolean check on PUT strict, the public warning, and removing BOTH route guards on POST
+ * each turn a case below red.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -49,10 +56,11 @@ beforeEach(async () => { await __resetPurposeVocabStore(); await __resetConsentS
 
 describe('purposeVocabService — catalog + CRUD', () => {
   it('exposes the host-default seed vocabulary per tenant', async () => {
-    const v = await listPurposeVocab('t-seed');
-    for (const s of PURPOSE_VOCAB_SEED) expect(v).toContain(s);
-    expect(v).toEqual([...v].sort()); // sorted
-    expect(await isStrictPurposes('t-seed')).toBe(false); // strict off by default
+    expect(await isStrictPurposes('t-seed')).toBe(false); // strict off by default (fresh tenant)
+    // A custom code that sorts FIRST: the seed is already alphabetical, so without it an
+    // unsorted effective list would still read sorted (w38 probe `voc-sort` was vacuous).
+    await addPurposeCode('t-seed', 'aardvark');
+    expect(await listPurposeVocab('t-seed')).toEqual(['aardvark', 'analytics', 'billing', 'marketing', 'personalization', 'support']);
   });
 
   it('adds + removes a tenant purpose (custom + seed disable)', async () => {
@@ -120,14 +128,13 @@ describe('RFC 0128 opaque-string wire is UNCHANGED', () => {
     const stored = ['bespoke:x', 'legacy-code', 'analytics'];
     expect(normalizeLabel(stored)).toEqual(['analytics', 'bespoke:x', 'legacy-code']); // dedupe+sort only
     expect(reEmitLabel(stored)).toEqual(['analytics', 'bespoke:x', 'legacy-code']);     // carried verbatim
-    // undefined (unlabelled) and [] (no-onward-use) semantics untouched
-    expect(normalizeLabel(undefined)).toBeUndefined();
-    expect(normalizeLabel([])).toEqual([]);
+    // (undefined / [] semantics are pinned in cdp-purpose-labels.test.ts case 1 — not repeated here.)
   });
 });
 
 // ─────────────────────── HTTP surface (routes, RBAC, warnings) ───────────────
-interface Res<T = any> { status: number; body: T }
+interface VocabBody { purposes: string[]; strict: boolean; unknownPurposes?: string[]; orgId?: string; error?: string; message?: string }
+interface Res { status: number; body: VocabBody }
 function client(initialCookie = '') {
   let cookie = initialCookie;
   const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
@@ -139,19 +146,21 @@ function client(initialCookie = '') {
     const h = res.headers as { getSetCookie?: () => string[] };
     const sc = typeof h.getSetCookie === 'function' ? h.getSetCookie() : [];
     for (const c of sc) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    const out = (res.status === 204 ? {} : await res.json()) as VocabBody;
     return { status: res.status, body: out };
   };
   return { get: (p: string) => call('GET', p), post: (p: string, b?: unknown) => call('POST', p, b), put: (p: string, b?: unknown) => call('PUT', p, b), del: (p: string) => call('DELETE', p) };
 }
 let n = 0;
-async function ownerWithOrg(): Promise<{ owner: ReturnType<typeof client>; orgId: string }> {
+async function ownerWithOrg(): Promise<{ owner: ReturnType<typeof client>; orgId: string; tenantId: string }> {
   const owner = client();
-  const su = await owner.post('/host/openwop-app/test/login', { email: `pv-${Date.now()}-${n++}@acme.test` });
+  // An explicit shared tenant, so a second login into it is a co-tenant (the RBAC case).
+  const tenantId = `pv-ws-${Date.now()}-${n}`;
+  const su = await owner.post('/host/openwop-app/test/login', { email: `pv-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(su.status, JSON.stringify(su.body)).toBe(201);
   const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
-  return { owner, orgId: org.body.orgId };
+  return { owner, orgId: org.body.orgId!, tenantId };
 }
 
 describe('purpose-vocab HTTP routes', () => {
@@ -167,6 +176,24 @@ describe('purpose-vocab HTTP routes', () => {
     expect((await owner.del(`${B}/loyalty`)).body.purposes).not.toContain('loyalty');
     expect((await owner.put(`${B}/strict`, { strict: true })).body.strict).toBe(true);
     expect((await owner.put(`${B}/strict`, { strict: 'yes' })).status).toBe(400); // non-boolean rejected
+    // Persisted, not just echoed: a fresh read sees the mutations.
+    const after = await owner.get(B);
+    expect(after.body.purposes).not.toContain('loyalty');
+    expect(after.body.strict).toBe(true);
+  });
+
+  it('RBAC: a same-tenant member with no scopes is refused 403; the owner is not', async () => {
+    const { owner, orgId, tenantId } = await ownerWithOrg();
+    const B = `/host/openwop-app/consent/orgs/${orgId}/purpose-vocab`;
+    // A co-tenant: a second login into the SAME tenant holds zero scopes (no org role).
+    const member = client();
+    expect((await member.post('/host/openwop-app/test/login', { email: `pv-m-${Date.now()}-${n++}@acme.test`, tenantId })).status).toBe(201);
+    const denied = await member.post(B, { code: 'member-code' });
+    expect(denied.status).toBe(403);
+    expect(denied.body.error).toBe('forbidden_scope');
+    expect((await owner.get(B)).body.purposes).not.toContain('member-code'); // nothing written
+    // Positive control: the owner's identical write lands.
+    expect((await owner.post(B, { code: 'member-code' })).status).toBe(201);
   });
 
   it('public consent capture: non-strict warns; strict rejects (400)', async () => {
@@ -180,8 +207,11 @@ describe('purpose-vocab HTTP routes', () => {
     expect(warn.body.unknownPurposes).toEqual(['mystery']);
     // flip strict on, then the same capture is rejected 400
     await owner.put(`/host/openwop-app/consent/orgs/${orgId}/purpose-vocab/strict`, { strict: true });
-    const rej = await client().post(PUB, { categories: {}, purposes: ['mystery'] });
+    // Non-empty categories: an empty `categories` is refused 400 by `requireCategories` BEFORE
+    // the purpose hook runs, which made this leg vacuous (w38 probe `voc-capture-public`).
+    const rej = await client().post(PUB, { categories: { analytics: true }, purposes: ['mystery'] });
     expect(rej.status).toBe(400);
     expect(rej.body.error).toBe('validation_error');
+    expect(rej.body.message).toContain('strict-purpose mode');
   });
 });

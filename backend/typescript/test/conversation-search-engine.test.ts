@@ -1,7 +1,16 @@
 /**
  * ADR 0112 Phase 1 — conversation-search engine unit tests.
- * Tokenization parity + scoping + facets + drift-free self-heal, against the
+ * Text extraction + scoping + facets + drift-free self-heal, against the
  * in-memory `db.search` surface + a `memory://` chat store.
+ *
+ * Scoping is pinned at BOTH layers: the engine's visible-set post-filter
+ * (`searchConversations`) and the ADR 0043 visibility resolution in
+ * `searchVisibleConversations` — the ONE helper the route and the
+ * `openwop:conversations.search` agent tool share (XCH-HOLE-5).
+ *
+ * Breaks if: the visible-set post-filter, the visibility predicate call, the role
+ * facet, the title-hit loop, the empty-query guard or the freshness watermark
+ * regresses (sabotage probes w24g1-eng-* / -r2, /grade-tests wave 24).
  */
 import { describe, it, expect, beforeAll, beforeEach } from 'vitest';
 import { mkdtempSync } from 'node:fs';
@@ -9,9 +18,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { initInMemorySurfaces } from '../src/host/inMemorySurfaces.js';
 import { openStorage } from '../src/storage/index.js';
+import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
+import { ensureConversationMeta } from '../src/host/conversationStore.js';
 import type { Storage } from '../src/storage/storage.js';
 import {
   searchConversations,
+  searchVisibleConversations,
   extractText,
   __resetSearchEngine,
   type SearchScope,
@@ -50,6 +62,7 @@ function scope(extra: Partial<SearchScope> & Pick<SearchScope, 'visibleConversat
 beforeAll(async () => {
   initInMemorySurfaces({ dataDir: mkdtempSync(join(tmpdir(), 'openwop-convsearch-')) });
   storage = await openStorage('memory://');
+  initHostExtPersistence(storage); // conversation metas (ADR 0043) live in host-ext persistence
 });
 
 beforeEach(() => {
@@ -65,8 +78,9 @@ describe('extractText', () => {
   });
   it('joins a content parts array', () => {
     const c = JSON.stringify({ content: [{ type: 'text', text: 'alpha' }, { type: 'text', text: 'beta' }] });
-    expect(extractText(c)).toContain('alpha');
-    expect(extractText(c)).toContain('beta');
+    // Exact: a parts array must yield ONLY the text parts — not the `type` values
+    // (`toContain` passed with the `text` branch removed: "text alpha text beta").
+    expect(extractText(c)).toBe('alpha beta');
   });
   it('falls back to the raw string on malformed JSON', () => {
     expect(extractText('{not json')).toBe('{not json');
@@ -95,9 +109,23 @@ describe('searchConversations', () => {
 
   it('NEVER returns a conversation outside the visible set (scoping / no existence leak)', async () => {
     await seedConversation('c-private', 'Secret', [{ role: 'user', content: 'the codeword is platypus' }]);
-    // platypus exists, but the conversation is not in the caller's visible set.
+    // Index c-private FIRST (positive control), so the surface really holds its doc.
+    // Without this the conversation was never indexed and the post-filter under
+    // test never ran (wave-24 probe: vacuous).
+    expect(await searchConversations(storage, scope({ visibleConversationIds: ['c-private'] }), 'platypus')).toHaveLength(1);
+    // Now platypus is IN the index, but c-private is not in this caller's visible set.
     const hits = await searchConversations(storage, scope({ visibleConversationIds: ['c-other'] }), 'platypus');
     expect(hits).toHaveLength(0);
+  });
+
+  it('searchVisibleConversations hides a SAME-tenant non-participant conversation (ADR 0043)', async () => {
+    await seedConversation('c-owned', 'Owned', [{ role: 'user', content: 'the quokka plan' }]);
+    await ensureConversationMeta(TENANT, 'c-owned', { type: 'group', ownerUserId: 'u-owner' });
+    // Owner sees it (positive control) …
+    const own = await searchVisibleConversations(storage, TENANT, 'u-owner', 'quokka');
+    expect(own.map((h) => h.conversationId)).toEqual(['c-owned']);
+    // … a same-tenant user who is neither owner nor participant does not.
+    expect(await searchVisibleConversations(storage, TENANT, 'u-stranger', 'quokka')).toEqual([]);
   });
 
   it('applies the role facet', async () => {
@@ -126,7 +154,13 @@ describe('searchConversations', () => {
   });
 
   it('returns [] for an empty query', async () => {
-    const hits = await searchConversations(storage, scope({ visibleConversationIds: ['c-quarterly'] }), '   ');
+    // A title map is supplied so the guard is load-bearing: every title `includes('')`,
+    // so without the early return the title loop would emit a hit.
+    await seedConversation('c-empty-q', 'Empty query probe', [{ role: 'user', content: 'anything' }]);
+    const hits = await searchConversations(storage, scope({
+      visibleConversationIds: ['c-empty-q'],
+      titleById: new Map([['c-empty-q', 'Empty query probe']]),
+    }), '   ');
     expect(hits).toHaveLength(0);
   });
 

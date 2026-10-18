@@ -19,6 +19,12 @@
  *                  substring does not match. Over-erasure is unrecoverable, and
  *                  it is the failure mode the `forms:submission` PARTIAL_COVERAGE
  *                  entry explicitly refuses to risk.
+ *
+ * REGISTRATION (that the ADR 0381 fan-out actually CALLS this eraser) is not
+ * asserted here — these cases call the eraser directly. It is the job of the
+ * outer guard `test/subject-eraser-manifest.test.ts` 'nothing in the manifest is
+ * missing after createApp()', which pins `eraseCdpCollectedEvents` from
+ * `EXPECTED_SUBJECT_ERASERS` against a real boot (w38 probe w38g1-er-register).
  */
 
 import { beforeEach, describe, expect, it } from 'vitest';
@@ -74,13 +80,16 @@ describe('CONS-6 — the CDP ingest store is reachable by a DSAR', () => {
 
   it('is idempotent and no-ops on a falsy tenant or subject (never a global purge)', async () => {
     await put('e1', { sessionKey: 'sess-abc' });
+    // A BLANK identity value folds to '' — exactly what a blank subject folds to. Without
+    // the empty-subject guard a whitespace subject would erase this stranger's row.
+    await put('e-blank', { sessionKey: '   ' });
     await eraseCdpCollectedEvents('', 'sess-abc');
     await eraseCdpCollectedEvents(T, '');
     await eraseCdpCollectedEvents(T, '   ');
-    expect(await ids()).toEqual(['e1']);
+    expect(await ids()).toEqual(['e-blank', 'e1']);
     await eraseCdpCollectedEvents(T, 'sess-abc');
-    expect(await ids()).toEqual([]);
+    expect(await ids()).toEqual(['e-blank']);
     await eraseCdpCollectedEvents(T, 'sess-abc'); // idempotent: a re-run finds nothing and throws nothing
-    expect(await ids()).toEqual([]);
+    expect(await ids()).toEqual(['e-blank']);
   });
 });

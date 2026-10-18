@@ -3,6 +3,11 @@
  * merge fills fields + absorbs identifiers + relinks refs + tombstones source;
  * unmerge restores the source live with its OWN fields, identifiers, and refs, and
  * strips what the survivor absorbed. Resolution follows the reversal both ways.
+ *
+ * Sabotage-witnessed (/grade-tests w38): not clearing a filled field, not un-tombstoning the
+ * source, keeping the absorbed identifiers, not repointing deal refs, and removing the
+ * "already reversed" guard (asserted by its exact 409 message — `unmergeRestore` throws a
+ * DIFFERENT 409 on the same path, which made a bare `.toThrow()` vacuous) each turn it red.
  */
 import { beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
@@ -24,7 +29,7 @@ describe('CDP-B unmerge round-trip', () => {
     const survivor = await createContact({ tenantId, name: 'Survivor' }); // no email/company
     const source = await createContact({ tenantId, name: 'Source', email: 'src@x.test', company: 'Acme' });
     await addContactIdentifier(source.contactId, tenantId, { type: 'loyalty', value: 'L9' });
-    const deal = await createDeal({ tenantId, orgId, title: 'Deal-1', contactId: source.contactId, createdBy: 'tester', validateContact: async () => true } as any);
+    const deal = await createDeal({ tenantId, orgId, title: 'Deal-1', contactId: source.contactId, createdBy: 'tester', validateContact: async () => true, validateCompany: async () => true });
 
     // ── merge ──
     await mergeContacts(tenantId, survivor.contactId, source.contactId, 'tester');
@@ -37,7 +42,8 @@ describe('CDP-B unmerge round-trip', () => {
     expect((await getDeal(tenantId, orgId, deal.dealId))!.contactId).toBe(survivor.contactId);      // ref relinked
 
     // ── unmerge ──
-    const ev = (await listMergeEvents(tenantId))[0];
+    const ev = (await listMergeEvents(tenantId)).find((e) => e.sourceId === source.contactId)!;
+    expect(ev.survivorId).toBe(survivor.contactId);
     const res = await unmergeContacts(tenantId, ev.mergeEventId);
     expect(res.sourceId).toBe(source.contactId);
 
@@ -50,7 +56,11 @@ describe('CDP-B unmerge round-trip', () => {
     expect((await findContactByEmail(tenantId, 'src@x.test'))!.contactId).toBe(source.contactId); // resolves to SOURCE now
     expect((await getDeal(tenantId, orgId, deal.dealId))!.contactId).toBe(source.contactId);       // ref restored
 
-    // idempotent: a second unmerge is a conflict
-    await expect(unmergeContacts(tenantId, ev.mergeEventId)).rejects.toThrow();
+    // idempotent: a second unmerge is refused by the consumed-event guard — its OWN 409, not
+    // `unmergeRestore`'s "contacts changed" 409, which the same call would otherwise hit.
+    await expect(unmergeContacts(tenantId, ev.mergeEventId)).rejects.toMatchObject({
+      code: 'conflict',
+      message: 'This merge was already reversed.',
+    });
   });
 });

@@ -36,8 +36,7 @@ describe('screenOps.addScreen', () => {
     const a = base();
     const i = addScreen(a, 'Profile');
     expect(i).toBe(2);
-    expect(a.screens[2]).toMatchObject({ id: 'profile', route: '/profile', components: [] });
-    expect(a.screens[2]?.isInitial).toBeUndefined();
+    expect(a.screens[2]).toEqual({ id: 'profile', name: 'Profile', route: '/profile', components: [] });
   });
   it('marks the very first screen as home and enforces the cap', () => {
     const a: AppDoc = { name: 'A', screens: [] };
@@ -53,8 +52,8 @@ describe('screenOps.duplicateScreen', () => {
     const a = base();
     const i = duplicateScreen(a, 0);
     expect(i).toBe(1);
-    expect(a.screens[1]?.id).toBe('home-copy');
-    expect(a.screens[1]?.isInitial).toBeUndefined(); // single-home invariant
+    // No isInitial (single-home invariant); the route is RESTAMPED to the new id.
+    expect(a.screens[1]).toEqual({ id: 'home-copy', name: 'Home copy', route: '/home-copy', components: [{ type: 'text' }] });
     a.screens[1]!.components!.push({ type: 'badge' });
     expect(a.screens[0]?.components?.length).toBe(1); // deep clone
   });
@@ -63,9 +62,13 @@ describe('screenOps.duplicateScreen', () => {
 describe('screenOps.deleteScreen', () => {
   it('cascades connectors referencing the deleted screen', () => {
     const a = base();
+    // An UNRELATED connector must survive — without it, wiping every connector
+    // would satisfy the assertion (w36 probe).
+    a.screens.push({ id: 'x', name: 'X', components: [] });
+    a.connectors!.push({ from: 'home', to: 'x' });
     expect(deleteScreen(a, 1)).toBe(true);
-    expect(a.screens.map((s) => s.id)).toEqual(['home']);
-    expect(a.connectors).toEqual([]); // both referenced "about"
+    expect(a.screens.map((s) => s.id)).toEqual(['home', 'x']);
+    expect(a.connectors).toEqual([{ from: 'home', to: 'x' }]); // both "about" edges gone
   });
   it('reassigns home when the home screen is deleted', () => {
     const a = base();
@@ -140,23 +143,30 @@ describe('insertKitContent (ADR 0347 5a)', () => {
   it('inserts below the existing flow with remapped ids, nav, and connectors', () => {
     const app: AppDoc = {
       name: 'App',
-      screens: [{ id: 'home', name: 'Home', isInitial: true, y: 100, components: [] }, { id: 'kit-signin', name: 'Taken', y: 100, components: [] }],
+      // BOTH kit ids are taken, so both remap — an identity remap could not
+      // show that nav + connectors follow it (w36 probe).
+      screens: [
+        { id: 'home', name: 'Home', isInitial: true, y: 100, components: [] },
+        { id: 'kit-signin', name: 'Taken', y: 100, components: [] },
+        { id: 'kit-reset', name: 'Taken too', y: 60, components: [] },
+      ],
       connectors: [],
     };
-    insertKitContent(app, JSON.parse(JSON.stringify(kit)));
-    const ids = app.screens.map((s) => s.id);
-    expect(ids).toEqual(['home', 'kit-signin', 'kit-signin-2', 'kit-reset']);
-    const inserted = app.screens[2]!;
-    expect(inserted.isInitial).toBeUndefined();                    // ONE home stays
-    expect(inserted.route).toBe('/kit-signin-2');                  // route restamped
-    expect(inserted.y).toBeGreaterThan(100);                       // offset below
-    expect(inserted.components![0]!.props!.navigateTo).toBe('kit-reset'); // nav follows the remap
-    expect(app.connectors).toEqual([{ from: 'kit-signin-2', to: 'kit-reset', trigger: 'click' }]);
+    expect(insertKitContent(app, JSON.parse(JSON.stringify(kit)))).toBe(true);
+    expect(app.screens.map((s) => s.id)).toEqual(['home', 'kit-signin', 'kit-reset', 'kit-signin-2', 'kit-reset-2']);
+    // ONE home stays (isInitial dropped), route restamped, y offset below the
+    // lowest existing screen: max(100,100,60) + 520 + kit y 80 = 700.
+    expect(app.screens[3]).toEqual({
+      id: 'kit-signin-2', name: 'Sign in', route: '/kit-signin-2', x: 80, y: 700,
+      components: [{ type: 'link', props: { label: 'Reset', navigateTo: 'kit-reset-2' } }],
+    });
+    expect(app.screens[4]).toEqual({ id: 'kit-reset-2', name: 'Reset', route: '/kit-reset-2', x: 420, y: 700, components: [] });
+    expect(app.connectors).toEqual([{ from: 'kit-signin-2', to: 'kit-reset-2', trigger: 'click' }]);
   });
   it('never mutates the caller-shared kit definition', () => {
     const app: AppDoc = { name: 'A', screens: [], connectors: [] };
     const frozen = JSON.stringify(kit);
-    expect(insertKitContent(app, kit as never)).toBe(true);
+    expect(insertKitContent(app, kit)).toBe(true);
     expect(JSON.stringify(kit)).toBe(frozen);
   });
   it('rejects (doc untouched) when the insert would exceed the screen cap', () => {
@@ -168,5 +178,15 @@ describe('insertKitContent (ADR 0347 5a)', () => {
     const before = JSON.stringify(app);
     expect(insertKitContent(app, JSON.parse(JSON.stringify(kit)))).toBe(false);
     expect(JSON.stringify(app)).toBe(before);
+  });
+  it('accepts an insert that lands EXACTLY on the screen cap', () => {
+    // 58 + 2 = MAX_SCREENS (60) is legal; only 61+ is refused.
+    const app: AppDoc = {
+      name: 'Edge',
+      screens: Array.from({ length: 58 }, (_, i) => ({ id: `s${i}`, name: `S${i}`, components: [] })),
+      connectors: [],
+    };
+    expect(insertKitContent(app, JSON.parse(JSON.stringify(kit)))).toBe(true);
+    expect(app.screens).toHaveLength(60);
   });
 });

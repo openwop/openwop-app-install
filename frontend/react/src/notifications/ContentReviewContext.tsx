@@ -39,15 +39,14 @@ export function ContentReviewContext({ a }: { a: PendingApproval }): JSX.Element
   const canLink = Boolean(a.orgId && a.pageId);
   const hasAi = (a.aiDraftedLocales?.length ?? 0) > 0;
   const liveCount = a.liveReferenceSections?.length ?? 0;
-  if (!canLink && !hasAi && liveCount === 0 && typeof a.pageVersion !== 'number') return null;
+  const outdated = a.outdatedTranslationLocales ?? [];
+  const pageHref = `/cms/p/${encodeURIComponent(a.orgId ?? '')}/${encodeURIComponent(a.pageId ?? '')}`;
+  if (!canLink && !hasAi && liveCount === 0 && outdated.length === 0 && typeof a.pageVersion !== 'number') return null;
   return (
     <div className="u-flex u-items-center u-gap-2 u-wrap u-fs-12">
       {canLink && (
         // The affordance the whole gate depends on: read it, then decide it.
-        <Link
-          to={`/cms/p/${encodeURIComponent(a.orgId ?? '')}/${encodeURIComponent(a.pageId ?? '')}`}
-          className="u-flex u-items-center u-gap-1"
-        >
+        <Link to={pageHref} className="u-flex u-items-center u-gap-1">
           <ExternalLinkIcon size={12} />
           {t('approvalsOpenPage', { title: a.pageTitle ?? '' })}
         </Link>
@@ -82,6 +81,23 @@ export function ContentReviewContext({ a }: { a: PendingApproval }): JSX.Element
         <span className="muted u-flex u-items-center u-gap-1">
           <InfoIcon size={11} /> {t('approvalsLiveData', { count: liveCount })}
         </span>
+      )}
+      {outdated.length > 0 && (
+        // ADR 0861 D6 addendum (ADR 0859 OQ-1) — INFORMATION, never a block: the
+        // decide bar is unchanged. Derived server-side from the editor's own
+        // translation-status read, so the card and the editor say the same thing.
+        // It links to the page editor, where that status is shown (toolbar summary
+        // + per-section chips) — the editor has no separate translation tab.
+        // Wrapping text, not a chip, for the phone-width reason above.
+        canLink ? (
+          <Link to={pageHref} className="u-flex u-items-center u-gap-1">
+            <InfoIcon size={11} /> {t('approvalsOutdatedTranslations', { count: outdated.length, locales: outdated.join(', ') })}
+          </Link>
+        ) : (
+          <span className="muted u-flex u-items-center u-gap-1">
+            <InfoIcon size={11} /> {t('approvalsOutdatedTranslations', { count: outdated.length, locales: outdated.join(', ') })}
+          </span>
+        )
       )}
     </div>
   );

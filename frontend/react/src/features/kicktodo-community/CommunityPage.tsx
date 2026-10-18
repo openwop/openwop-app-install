@@ -11,9 +11,11 @@ import { useTranslation } from 'react-i18next';
 import { StarIcon } from '../../ui/icons/index.js';
 import { StateCard } from '../../ui/StateCard.js';
 import { Notice } from '../../ui/Notice.js';
+import { PageHeader } from '../../ui/PageHeader.js';
 import { TextField, TextareaField } from '../../ui/Field.js';
 import { handleRadiogroupKeyDown } from '../../ui/rovingTabs.js';
 import { loadErrorMessage } from '../../client/loadErrorMessage.js';
+import { formatNumber } from '../../i18n/format.js';
 import { listEnrollments, listChallenges, type Enrollment } from '../../client/kicktodoClient.js';
 import {
   getMyProfile,
@@ -48,7 +50,6 @@ function stateChip(state: CreatorProfile['state']): { key: string; cls: string }
 export function CommunityPage() {
   const { t } = useTranslation('kicktodo-community');
   const [loaded, setLoaded] = useState(false);
-  const [error, setError] = useState(false);
   // KTUX-10 — the classified page-load failure, so the top-level Notice tells
   // the user what actually went wrong (rate-limit vs. session vs. outage)
   // instead of one undifferentiated 'could not load'.
@@ -58,7 +59,16 @@ export function CommunityPage() {
   // overwrites the real one with empty strings. A failed ACTION must NOT hide it
   // (that would discard what the user just typed), so the two are tracked apart.
   const [loadFailed, setLoadFailed] = useState(false);
-  const [busy, setBusy] = useState(false);
+  // CM-3 — the profile save and each review composer own their busy flag, their
+  // failure copy (next to their own action, never the page-load "could not load
+  // community") and their success announcement. One shared `busy` used to
+  // disable every review's submit while any one was in flight.
+  const [saving, setSaving] = useState(false);
+  const [saveFailed, setSaveFailed] = useState(false);
+  const [saved, setSaved] = useState<'draft' | 'submitted' | null>(null);
+  const [reviewBusy, setReviewBusy] = useState<Record<string, boolean>>({});
+  const [reviewFailed, setReviewFailed] = useState<Record<string, boolean>>({});
+  const [reviewPosted, setReviewPosted] = useState<Record<string, boolean>>({});
   // Screen-polish: composers are COLLAPSED by default — a list where every row
   // is a permanently-open form read as a wall.
   const [writeOpen, setWriteOpen] = useState<Record<string, boolean>>({});
@@ -81,7 +91,6 @@ export function CommunityPage() {
 
   const reload = useCallback(async () => {
     try {
-      setError(false);
       setLoadFailed(false);
       const [p, es, cs] = await Promise.all([getMyProfile(), listEnrollments(), listChallenges().catch(() => [])]);
       setTitles(Object.fromEntries(cs.map((c) => [c.id, c.title])));
@@ -107,7 +116,6 @@ export function CommunityPage() {
       setReviewsByChallenge(byChallenge);
       setReviewLoadFailed(failed);
     } catch (e) {
-      setError(true);
       setLoadFailed(true);
       setLoadErr(e);
     } finally {
@@ -119,9 +127,18 @@ export function CommunityPage() {
     void reload();
   }, [reload]);
 
+  // CS-4 — Retry re-enters the loading state first, so the editor never renders
+  // blank fields over a profile that has not been re-fetched yet (KTUX-3).
+  const retry = () => {
+    setLoaded(false);
+    void reload();
+  };
+
   const onSave = async (submit: boolean) => {
     if (!handle.trim() || !displayName.trim()) return;
-    setBusy(true);
+    setSaving(true);
+    setSaveFailed(false);
+    setSaved(null);
     try {
       // ADR 0453 P2 — send only non-empty per-locale overlays (the backend also cleans).
       const cleanLoc: Record<string, { displayName?: string; bio?: string }> = {};
@@ -133,22 +150,26 @@ export function CommunityPage() {
       }
       await saveProfile({ handle, displayName, bio, ...(Object.keys(cleanLoc).length > 0 ? { localizations: cleanLoc } : {}) });
       if (submit) await submitMyProfile();
+      setSaved(submit ? 'submitted' : 'draft');
       await reload();
     } catch {
-      setError(true);
+      setSaveFailed(true);
     } finally {
-      setBusy(false);
+      setSaving(false);
     }
   };
 
   const onReview = async (challengeId: string, challengeVersion: number) => {
     const stars = rating[challengeId] ?? 0;
     if (stars < 1) return;
-    setBusy(true);
+    setReviewBusy((s) => ({ ...s, [challengeId]: true }));
+    setReviewFailed((s) => ({ ...s, [challengeId]: false }));
+    setReviewPosted((s) => ({ ...s, [challengeId]: false }));
     try {
       const body = reviewBody[challengeId];
       await writeReview({ challengeId, challengeVersion, rating: stars, ...(body ? { body } : {}) });
       setReviewDenied((s) => ({ ...s, [challengeId]: false }));
+      setReviewPosted((s) => ({ ...s, [challengeId]: true }));
       await reload();
     } catch (err) {
       // KTUX-2: ONLY a 403 is the proof gate. Reporting a 429/500/offline as
@@ -157,24 +178,28 @@ export function CommunityPage() {
       if (err instanceof CommunityRequestError && err.status === 403) {
         setReviewDenied((s) => ({ ...s, [challengeId]: true }));
       } else {
-        setError(true);
+        setReviewFailed((s) => ({ ...s, [challengeId]: true }));
       }
     } finally {
-      setBusy(false);
+      setReviewBusy((s) => ({ ...s, [challengeId]: false }));
     }
   };
 
   const chip = profile ? stateChip(profile.state) : null;
+  const savedMsg = saved === 'submitted' ? t('submittedNotice') : saved === 'draft' ? t('savedNotice') : null;
 
   return (
     <div className="page" data-walkthrough="kicktodo-community.page">
-      <header className="page-header">
-        <h1 className="page-header__title">{t('title')}</h1>
-        <p className="page-header__lede">{t('lede')}</p>
-      </header>
+      <PageHeader title={t('title')} lede={t('lede')} />
 
-      {error && <Notice variant="error">{loadErr ? loadErrorMessage(t, loadErr) : t('loadError')}</Notice>}
-      {!loaded && !error && <StateCard loading title={t('title')} />}
+      {/* CS-4 — a load failure always carries its retry (the CirclesPage KTX-1 precedent). */}
+      {loadFailed && (
+        <Notice variant="error" announce={loadErr ? loadErrorMessage(t, loadErr) : t('loadError')}>
+          {loadErr ? loadErrorMessage(t, loadErr) : t('loadError')}{' '}
+          <Button variant="quiet" size="sm" onClick={retry}>{t('common:retry')}</Button>
+        </Notice>
+      )}
+      {!loaded && !loadFailed && <StateCard loading title={t('title')} />}
 
       {loaded && !loadFailed && enrollments.length === 0 && (
         <StateCard
@@ -199,10 +224,26 @@ export function CommunityPage() {
                       {' '}{reviewLoadFailed.has(e.challengeId)
                         ? t('common:loadFailed')
                         : agg && agg.average !== null
-                          ? t('aggregate', { average: agg.average, count: agg.count })
+                          ? (
+                            // POLISH-KT-1 — the star is a Lucide icon, not a text
+                            // glyph; the visible "4.5 (12)" is hidden from AT and a
+                            // full sentence carries the rating for screen readers.
+                            <>
+                              <span aria-hidden="true">
+                                <StarIcon size={12} aria-hidden /> {t('aggregate', { average: formatNumber(agg.average, { maximumFractionDigits: 1 }), count: formatNumber(agg.count) })}
+                              </span>
+                              <span className="sr-only">{t('aggregateSr', { average: formatNumber(agg.average, { maximumFractionDigits: 1 }), count: agg.count })}</span>
+                            </>
+                          )
                           : t('aggregateFloor')}
                     </span>
                     {reviewDenied[e.challengeId] && <Notice variant="info">{t('proofDenied')}</Notice>}
+                    {reviewFailed[e.challengeId] && (
+                      <Notice variant="error" announce={t('reviewSubmitError')}>{t('reviewSubmitError')}</Notice>
+                    )}
+                    {reviewPosted[e.challengeId] && (
+                      <Notice variant="success" announce={t('reviewPosted')}>{t('reviewPosted')}</Notice>
+                    )}
                     <div className="action-bar">
                       <Button variant="quiet" size="sm"
                         aria-expanded={!!writeOpen[e.challengeId]}
@@ -250,8 +291,8 @@ export function CommunityPage() {
                       />
                       <Button
                         variant="primary"
-                        disabled={busy || (rating[e.challengeId] ?? 0) < 1}
-                        aria-busy={busy}
+                        disabled={!!reviewBusy[e.challengeId] || (rating[e.challengeId] ?? 0) < 1}
+                        aria-busy={!!reviewBusy[e.challengeId]}
                         onClick={() => void onReview(e.challengeId, e.challengeVersion)}
                       >
                         {t('submitReviewCta')}
@@ -312,13 +353,15 @@ export function CommunityPage() {
             ))}
           </details>
           <div className="action-bar">
-            <Button variant="quiet" disabled={busy || !handle.trim() || !displayName.trim()} aria-busy={busy} onClick={() => void onSave(false)}>
+            <Button variant="quiet" disabled={saving || !handle.trim() || !displayName.trim()} aria-busy={saving} onClick={() => void onSave(false)}>
               {t('saveDraftCta')}
             </Button>
-            <Button variant="primary" disabled={busy || !handle.trim() || !displayName.trim()} aria-busy={busy} onClick={() => void onSave(true)}>
+            <Button variant="primary" disabled={saving || !handle.trim() || !displayName.trim()} aria-busy={saving} onClick={() => void onSave(true)}>
               {t('submitCta')}
             </Button>
           </div>
+          {saveFailed && <Notice variant="error" announce={t('saveError')}>{t('saveError')}</Notice>}
+          {savedMsg && <Notice variant="success" announce={savedMsg}>{savedMsg}</Notice>}
         </section>
       )}
     </div>

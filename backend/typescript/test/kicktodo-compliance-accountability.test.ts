@@ -6,7 +6,8 @@
  * grantee, coach-caseload pointers, seat occupancy + holds, coach proposals the subject
  * authored or that are about their enrollments, and sessions they created) and ONE
  * retention-purger (coach proposals, `confidential-pii`, aged on `createdAt`). Circle
- * PRODUCT resources are retained by design. Separately: scheduling a session must ARM a
+ * PRODUCT resources are retained by design (a circle the subject OWNS is handed over
+ * or dissolved — KTACC-2, covered in `kicktodo-circle-end-of-life.test.ts`). Separately: scheduling a session must ARM a
  * scheduler job (the fire-at time is owned by the scheduling owner, not a poller).
  *
  * Rows are seeded through minimal DurableCollections over the REAL namespaces.
@@ -91,8 +92,17 @@ describe('kicktodo-accountability subject eraser', () => {
     // sessions: created by A, created by B
     await sessionCol().put({ tenantId: T, circleId: 'circ1', atIso: '2026-02-01T10:00:00.000Z', title: 't', createdBy: A, conversationId: 'cv', createdAt: FRESH });
     await sessionCol().put({ tenantId: T, circleId: 'circ1', atIso: '2026-02-02T10:00:00.000Z', title: 't', createdBy: B, conversationId: 'cv', createdAt: FRESH });
-    // other tenant: A grantee grant — must survive
+    // co-SUBJECT control for holds: B's hold must survive.
+    await holdCol().put({ tenantId: T, circleId: 'circ1', buyerSubject: B, heldAt: FRESH, expiresAt: FRESH });
+    // other tenant: A's rows in T2, in EVERY store — must all survive.
     await grantCol().put({ tenantId: T2, circleId: 'circ1', grantorSubject: OWNER, granteeSubject: A });
+    // (the grantee index is keyed `${subject}::${circleId}` with no tenant, so the
+    // co-tenant pointer lives on a different circle id)
+    await granteeIdxCol().put({ granteeSubject: A, circleId: 'circ9', tenantId: T2 });
+    await seatCol().put({ tenantId: T2, circleId: 'circ1', subject: A, claimedAt: FRESH });
+    await holdCol().put({ tenantId: T2, circleId: 'circ1', buyerSubject: A, heldAt: FRESH, expiresAt: FRESH });
+    await proposalCol().put({ id: 'p9', tenantId: T2, circleId: 'circ1', enrollmentId: 'enrZ', coachSubject: A, note: 'n', state: 'proposed', createdAt: FRESH });
+    await sessionCol().put({ tenantId: T2, circleId: 'circ1', atIso: '2026-02-01T10:00:00.000Z', title: 't', createdBy: A, conversationId: 'cv', createdAt: FRESH });
 
     const res = await eraseSubject(T, A);
     expect(res.failed).toBe(0);
@@ -111,10 +121,16 @@ describe('kicktodo-accountability subject eraser', () => {
     expect(await grantCol().get(`${T}::circ1::${B}`)).not.toBeNull();
     expect(await granteeIdxCol().get(`${B}::circ1`)).not.toBeNull();
     expect(await seatCol().get(`${T}::circ1::${B}`)).not.toBeNull();
+    expect(await holdCol().get(`${T}::circ1::${B}`)).not.toBeNull();
     expect(await proposalCol().get(`${T}::enrB::p3`)).not.toBeNull();
     expect(await sessionCol().get(`${T}::circ1::2026-02-02T10:00:00.000Z`)).not.toBeNull();
-    // other tenant intact
+    // other tenant intact — every store
     expect(await grantCol().get(`${T2}::circ1::${A}`)).not.toBeNull();
+    expect(await granteeIdxCol().get(`${A}::circ9`)).toMatchObject({ tenantId: T2 });
+    expect(await seatCol().get(`${T2}::circ1::${A}`)).not.toBeNull();
+    expect(await holdCol().get(`${T2}::circ1::${A}`)).not.toBeNull();
+    expect(await proposalCol().get(`${T2}::enrZ::p9`)).not.toBeNull();
+    expect(await sessionCol().get(`${T2}::circ1::2026-02-01T10:00:00.000Z`)).not.toBeNull();
   });
 
   it('is idempotent', async () => {
@@ -204,8 +220,11 @@ describe('kicktodo-accountability session scheduling discipline', () => {
     const job = await getJob(sessionReminderJobId(T, 'circA', row.atIso));
     expect(job).not.toBeNull();
     expect(job).toMatchObject({ tenantId: T, enabled: true });
-    // The fire-at time lives in the scheduler (one-shot, ~1h before the session).
+    // The fire-at time lives in the scheduler (one-shot, 1h before the session).
     expect(typeof job!.nextFireAt).toBe('number');
+    // Lead is measured from the REQUESTED instant (`future`); the stored `atIso` is
+    // normalised, so it is not the reference.
+    expect(job!.nextFireAt!).toBe(Date.parse(future) - 60 * 60 * 1000);
     expect(job!.nextFireAt!).toBeLessThan(Date.parse(row.atIso));
   });
 });

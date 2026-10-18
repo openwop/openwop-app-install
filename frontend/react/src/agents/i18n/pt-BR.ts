@@ -107,6 +107,9 @@ export const messages = {
   recurringSkipFeatureDisabled: 'o recurso dono deste agendamento está desativado neste espaço de trabalho',
   recurringSkipPlanLapsed: 'seu plano não inclui mais o recurso dono deste agendamento',
   recurringSkipActorInactive: 'a pessoa em nome de quem ele é executado foi desativada',
+  recurringSkipAgentPaused: 'o agente que o executa está pausado — retome o agente para retomar isto',
+  recurringSkipPolicyDenied: 'o agente não tem permissão para executar este fluxo de trabalho (está na lista de proibidos)',
+  recurringSkipAwaitingApproval: 'está aguardando aprovação — este fluxo de trabalho exige aprovação para este agente',
   recurringCadenceExhausted: 'Não vai disparar de novo — nenhum horário futuro corresponde a esta cadência',
   recurringSkipUnknown: 'nenhum motivo foi registrado',
   recurringSkipUnrecognized: 'um motivo foi registrado, mas este aplicativo não o reconhece',
@@ -177,6 +180,7 @@ export const messages = {
   portfolioRoleFallback: 'função',
   portfolioLocalDefault: 'Fluxo de trabalho local — atribuído a este agente.',
   portfolioLocalOnly: 'Apenas local — registre no host antes que ele possa ser executado a partir de um quadro ou agendamento.',
+  portfolioAvailabilityUnknown: 'Não foi possível verificar se este fluxo de trabalho está registrado no host. Executar agora tentará mesmo assim.',
   portfolioDemoChip: 'Demo',
   portfolioDemoExplain: 'Fluxo de trabalho de exemplo — suas etapas de IA retornam uma saída de demonstração pronta, não IA de verdade.',
   portfolioDemoUnavailable: 'Não é possível executar nesta implantação: as etapas de demonstração ficam desativadas em espaços de trabalho com login.',
@@ -385,6 +389,7 @@ export const messages = {
 
   // Profile panel
   profileSaved: 'Perfil salvo.',
+  agentChangedReload: 'Alguém alterou este agente depois que você o abriu. Recarregue para ver a alteração e faça sua edição de novo.',
   profileLoading: 'Carregando perfil…',
   // Guardrails (ADR 0493)
   guardrailsHeading: 'Salvaguardas',
@@ -474,6 +479,7 @@ export const messages = {
   viewerCannotCreateTitle: 'Você não pode criar agentes aqui',
   viewerCannotCreateBody: 'Você tem acesso de leitura a este espaço de trabalho. Criar ou duplicar um agente exige acesso de edição — peça a um administrador do espaço.',
   rosterEmptyViewerBody: 'Ainda não há agentes. Adicionar um exige acesso de edição a este espaço de trabalho — peça a um administrador.',
+  viewerPanelReadOnly: 'Você pode ver este agente. Alterá-lo exige acesso de edição a este espaço de trabalho — peça a um administrador.',
   dashCreateFromTemplate: 'Criar a partir de modelo',
   dashLoadingDemo: 'Carregando…',
   dashLoadExample: 'Carregar agentes de exemplo',
@@ -653,6 +659,7 @@ export const messages = {
   wsTabInstructions: 'Instruções',
   wsTabKnowledge: 'Conhecimento',
   wsTabMemory: 'Memória',
+  wsTabEvals: 'Avaliações',
   wsTabIntegrations: 'Integrações',
   wsTabActivity: 'Atividade',
   wsUpdatePinError: 'Não foi possível atualizar a fixação.',

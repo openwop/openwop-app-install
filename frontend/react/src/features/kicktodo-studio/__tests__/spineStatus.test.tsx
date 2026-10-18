@@ -36,22 +36,30 @@ describe('spineStatus', () => {
     expect(published.monitor).toBe('current');
   });
 
+  it('planned (no submission yet): plan done, publication current, monitoring not yet open', () => {
+    const s = spineStatus('planned', true, null);
+    expect(s.plan).toBe('done');
+    expect(s.publication).toBe('current');
+    expect(s.monitor).toBe('pending');
+  });
+
   it('a withdrawn candidate never shows a green publication — it is blocked', () => {
     const s = spineStatus('withdrawn', true, null);
     expect(s.publication).toBe('blocked');
-    expect(s.publication).not.toBe('done');
+    // Later stages are blocked too; earlier work the dossier backs stays done.
+    expect(s.plan).toBe('blocked');
+    expect(s.research).toBe('done');
   });
 });
 
 // Screen-polish hardening: an UNKNOWN candidate state fails CLOSED like
 // withdrawn — a future terminal state must never render a live spine.
-import { it as it2, expect as expect2, describe as describe2 } from 'vitest';
-describe2('spineStatus unknown-state honesty', () => {
-  it2('unknown states render blocked, never in-progress', () => {
+describe('spineStatus unknown-state honesty', () => {
+  it('unknown states render blocked, never in-progress', () => {
     const spine = spineStatus('some-future-state', false, null);
-    expect2(spine.research).toBe('blocked');
-    expect2(spine.plan).toBe('blocked');
-    expect2(spine.publication).toBe('blocked');
+    expect(spine.research).toBe('blocked');
+    expect(spine.plan).toBe('blocked');
+    expect(spine.publication).toBe('blocked');
   });
 });
 

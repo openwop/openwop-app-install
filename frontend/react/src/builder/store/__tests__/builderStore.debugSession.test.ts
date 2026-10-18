@@ -8,10 +8,10 @@ import { useBuilderStore } from '../builderStore.js';
 import type { SavedWorkflow } from '../../schema/workflow.js';
 
 const wfA: SavedWorkflow = {
-  id: 'wf-debug-a', name: 'A', version: '1.0.0', nodes: [], edges: [], createdAt: 'now', updatedAt: 'now',
+  id: 'wf-debug-a', name: 'A', version: '1.0.0', nodes: [], edges: [], createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
 };
 const wfB: SavedWorkflow = {
-  id: 'wf-debug-b', name: 'B', version: '1.0.0', nodes: [], edges: [], createdAt: 'now', updatedAt: 'now',
+  id: 'wf-debug-b', name: 'B', version: '1.0.0', nodes: [], edges: [], createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
 };
 const s = () => useBuilderStore.getState();
 const pin = (backendNodeId: string) => ({ backendNodeId, output: { marker: backendNodeId } });
@@ -33,6 +33,8 @@ describe('builderStore — debug session (ADR 0475)', () => {
   it('removeDebugPin collapses the session to null when the last pin goes (no source run)', () => {
     s().setDebugPin('n1', pin('n1'));
     s().setDebugPin('n2', pin('n2'));
+    // A second pin MERGES — it must not replace the first.
+    expect(Object.keys(s().debugSession!.pins).sort()).toEqual(['n1', 'n2']);
     s().removeDebugPin('n1');
     expect(Object.keys(s().debugSession!.pins)).toEqual(['n2']);
     s().removeDebugPin('n2');

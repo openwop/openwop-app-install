@@ -26,7 +26,7 @@ import {
   listCoupons, createCoupon, getCart, setCartItem, clearCart, checkoutCart,
   listStockMovements, commerceSummary, partialRefundOrder, listOrderRefunds, orderChargeTotal,
   ORDER_STATUSES, FULFILLMENT_STATUSES, type OrderStatus, type FulfillmentStatus, type Order,
-  getSavedPaymentMethod, captureSavedPmFromPaidIntent, listChildOrders, extendReservationForSca,
+  getSavedPaymentMethodForOrder, captureSavedPmFromPaidIntent, liveStripeKeyFor, MAX_LINE_QUANTITY, listChildOrders, extendReservationForSca,
 } from './commerceService.js';
 import { recordCommerceAction } from './telemetry.js';
 import { listPriceLists, createPriceList, updatePriceList, deletePriceList, resolvePrice, resolveSellable } from './pricing.js';
@@ -36,11 +36,16 @@ import { listAffiliates, createAffiliate, recordPayout, listPayouts, affiliateCo
 import { listProductFieldDefs, createProductFieldDef, deleteProductFieldDef } from './productFields.js';
 import { subscribeToProduct, listProductSubscriptions, cancelSubscription, runSubscriptionCycle } from './subscriptions.js';
 import { sendError } from '../../middleware/errorEnvelope.js';
+import { mintOneClickToken, verifyOneClickToken, ONE_CLICK_WINDOW_MS } from './oneClickToken.js';
+import { resolveStorefrontSettlement, settlementStamp } from '../commerce-connect/storefrontSettlement.js';
+import { resolveOne } from '../../host/featureToggles/service.js';
 
 const FEATURE = { toggleId: 'commerce', label: 'E-Commerce' };
 /** ADR 0296 — one-click money movement is operator OPT-IN (default off). Read
  *  per-request so tests and incremental env updates take effect immediately. */
 const offSessionEnabled = (): boolean => process.env.OPENWOP_COMMERCE_OFFSESSION_ENABLED === 'true';
+/** ADR 0875 D2 — an upsell is one add-on, not a bulk order on a stored card. */
+const ONE_CLICK_MAX_QUANTITY = 10;
 const BASE = '/host/openwop-app/commerce/orgs/:orgId';
 const log = createLogger('commerce');
 /** GEN-2d — the client order-idempotency key: the standard `Idempotency-Key` header,
@@ -207,13 +212,28 @@ export function registerCommerceRoutes(deps: RouteDeps): void {
     try {
       const ctx = await authz(req, 'workspace:write');
       const b = (req.body ?? {}) as Record<string, unknown>;
-      const stripeKey = await resolveSecret(STRIPE_KEY_REF);
-      const o = await markAsPaid(ctx.tenantId, ctx.orgId, req.params.orderId, requireString(b.paymentIntentId, 'paymentIntentId'), { stripeKey, actor: ctx.user.userId });
+      const stripeKey = await liveStripeKeyFor(ctx.tenantId); // ADR 0875 — an anon: store has no live payments to verify
+      const paymentIntentId = requireString(b.paymentIntentId, 'paymentIntentId');
+      // ADR 0877 (architect H1) — a DEMO-lane order (this store may not take live
+      // money: it has not connected Stripe) is settled the way a keyless host settles
+      // one: the owner records an offline payment. A `pi_` id is still verified with
+      // the host key, so ADR 0875 D3's binding holds on every lane.
+      const current = await getOrder(ctx.tenantId, ctx.orgId, req.params.orderId);
+      const lane = current?.settlement?.kind ?? (await resolveStorefrontSettlement(ctx.tenantId)).kind;
+      const offline = lane === 'demo' && !paymentIntentId.startsWith('pi_');
+      // ADR 0875 (grade-ux COM2UX-2) — on a live host an order is paid by ITS Stripe
+      // payment. A hand-recorded `manual:` id used to reach Stripe as an intent id and
+      // come back as a raw 502 "No such payment_intent"; refuse it as what it is.
+      if (stripeKey && !offline && !paymentIntentId.startsWith('pi_')) {
+        throw new OpenwopError('validation_error', 'This store takes live payments: an order is marked paid by its Stripe payment, not by hand.', 409, { code: 'live_payment_required' });
+      }
+      const verifyKey = offline ? null : stripeKey;
+      const o = await markAsPaid(ctx.tenantId, ctx.orgId, req.params.orderId, paymentIntentId, { stripeKey: verifyKey, actor: ctx.user.userId });
       if (!o) throw new OpenwopError('not_found', 'Order not found.', 404, { orderId: req.params.orderId });
-      res.json({ ...o, paymentVerification: stripeKey ? 'stripe' : 'none' });
+      res.json({ ...o, paymentVerification: verifyKey ? 'stripe' : 'none' });
     } catch (err) { next(err); }
   });
-  orderAction('refund', async (ctx, orderId) => refundOrder(ctx.tenantId, ctx.orgId, orderId, { actor: ctx.user.userId, stripeKey: await resolveSecret(STRIPE_KEY_REF) }));
+  orderAction('refund', async (ctx, orderId) => refundOrder(ctx.tenantId, ctx.orgId, orderId, { actor: ctx.user.userId, stripeKey: await liveStripeKeyFor(ctx.tenantId) }));
   // DEF-7 (ADR 0238) — a PARTIAL refund (a price adjustment; repeat-safe via `refundKey`).
   app.post(`${BASE}/orders/:orderId/partial-refund`, async (req, res, next) => {
     try {
@@ -222,7 +242,7 @@ export function registerCommerceRoutes(deps: RouteDeps): void {
       const amount = Number(b.amount);
       if (!Number.isFinite(amount) || amount <= 0) throw new OpenwopError('validation_error', 'A partial refund `amount` (> 0) is required.', 400, { field: 'amount' });
       const refundKey = requireString(b.refundKey, 'refundKey');
-      const o = await partialRefundOrder(ctx.tenantId, ctx.orgId, req.params.orderId, amount, { refundKey, actor: ctx.user.userId, stripeKey: await resolveSecret(STRIPE_KEY_REF) });
+      const o = await partialRefundOrder(ctx.tenantId, ctx.orgId, req.params.orderId, amount, { refundKey, actor: ctx.user.userId, stripeKey: await liveStripeKeyFor(ctx.tenantId) });
       if (!o) throw new OpenwopError('not_found', 'Order not found.', 404, { orderId: req.params.orderId });
       res.json(o);
     } catch (err) { next(err); }
@@ -370,13 +390,17 @@ export function registerCommerceRoutes(deps: RouteDeps): void {
       const org = await publicStoreOrg(req.params.orgId);
       const token = requireString((req.body ?? {} as Record<string, unknown>).token, 'token');
       await assertLiveLinkFor(token, 'commerce_quote', req.params.quoteId, req.params.orgId);
-      const out = await acceptQuote(org.tenantId, req.params.orgId, req.params.quoteId, { actor: 'public:quote-accept' });
+      // ADR 0877 D2 — the ONE charge gate: platform (operator tenants), the tenant's
+      // own Connect account, or demo. Never a bare key. Resolved BEFORE conversion so
+      // the order records the lane its checkout opens on (grade-code CC2CD-3).
+      const settlement = await resolveStorefrontSettlement(org.tenantId);
+      const out = await acceptQuote(org.tenantId, req.params.orgId, req.params.quoteId, { actor: 'public:quote-accept', settlement: settlementStamp(settlement) });
       if (!out) throw new OpenwopError('not_found', 'Quote not found.', 404, {});
-      const stripeKey = await resolveSecret(STRIPE_KEY_REF);
-      if (stripeKey) {
+      if (settlement.kind !== 'demo') {
         const base = publicBaseUrl(req);
         try {
-          const session = await createStripeOrderCheckoutSession(stripeKey, {
+          const session = await createStripeOrderCheckoutSession(settlement.charge, {
+            feeBaseMinor: toStripeMinorUnits(out.order.total, out.order.currency),
             lines: [
               { name: `Quote ${out.quote.quoteId} — ${out.order.items.length} item${out.order.items.length === 1 ? '' : 's'}`, amountMinor: toStripeMinorUnits(out.order.total, out.order.currency), currency: out.order.currency, quantity: 1 },
               ...taxShippingSessionLines(out.order), // DEF-1 — charge = goods + tax + shipping
@@ -417,14 +441,36 @@ export function registerCommerceRoutes(deps: RouteDeps): void {
     try {
       const ctx = await authz(req, 'workspace:write');
       const b = (req.body ?? {}) as Record<string, unknown>;
-      const stripeKey = await resolveSecret(STRIPE_KEY_REF).catch(() => null);
+      // ADR 0877 D2 — a live Stripe subscription only on a lane that may take money.
+      const settlement = await resolveStorefrontSettlement(ctx.tenantId).catch(() => null);
+      const charge = settlement && settlement.kind !== 'demo' ? settlement.charge : null;
       const idempotencyKey = idempotencyKeyOf(req, b);
-      const out = await subscribeToProduct({ tenantId: ctx.tenantId, orgId: ctx.orgId, createdBy: ctx.user.userId, productId: String(b.productId ?? ''), interval: b.interval, ...(typeof b.contactId === 'string' ? { contactId: b.contactId } : {}), ...(idempotencyKey ? { idempotencyKey } : {}), stripeKey });
+      // ADR 0875 D9 — the same contact check every order route makes (a foreign
+      // tenant's contact email must never reach a Stripe subscription).
+      const cid = optionalString(b.contactId);
+      if (cid) { const c = await getContact(cid); if (!c || c.tenantId !== ctx.tenantId) throw new OpenwopError('validation_error', 'contactId does not reference a contact in this tenant.', 400, { field: 'contactId' }); }
+      const out = await subscribeToProduct({ tenantId: ctx.tenantId, orgId: ctx.orgId, createdBy: ctx.user.userId, productId: String(b.productId ?? ''), interval: b.interval, ...(cid ? { contactId: cid } : {}), ...(idempotencyKey ? { idempotencyKey } : {}), charge });
       res.status(201).json(out);
     } catch (err) { next(err); }
   });
   app.post(`${BASE}/subscriptions/:subscriptionId/cycle`, async (req, res, next) => {
-    try { const ctx = await authz(req, 'workspace:write'); const order = await runSubscriptionCycle(ctx.tenantId, ctx.orgId, req.params.subscriptionId); if (!order) throw new OpenwopError('not_found', 'Active subscription not found.', 404, {}); res.json({ order }); }
+    try {
+      const ctx = await authz(req, 'workspace:write');
+      // ADR 0875 D9 (+ architect H2) — a manual cycle marks its order PAID with no
+      // payment check; it is the DEMO clock only. With a live key, or on a row that
+      // ever touched Stripe (incl. one degraded to demo by a failed Stripe call),
+      // the signed `invoice.paid` webhook is the only paid path.
+      const sub = (await listProductSubscriptions(ctx.tenantId, ctx.orgId)).find((x) => x.subscriptionId === req.params.subscriptionId);
+      // ADR 0877 (architect H1) — the manual cycle is the demo clock for a store on the
+      // DEMO lane (no Connect account yet), exactly as on a keyless host. A store that
+      // may take live money still refuses it (ADR 0875 D9 / H2).
+      if (sub && (sub.paymentMode === 'live' || sub.stripeSubscriptionId || sub.degradedFromLive || (await resolveStorefrontSettlement(ctx.tenantId)).kind !== 'demo')) {
+        throw new OpenwopError('validation_error', 'This subscription is billed by Stripe; its cycles are placed by the paid invoice, not by hand.', 409, { code: 'live_subscription' });
+      }
+      const order = await runSubscriptionCycle(ctx.tenantId, ctx.orgId, req.params.subscriptionId);
+      if (!order) throw new OpenwopError('not_found', 'Active subscription not found.', 404, {});
+      res.json({ order });
+    }
     catch (err) { next(err); }
   });
   app.delete(`${BASE}/subscriptions/:subscriptionId`, async (req, res, next) => {
@@ -493,7 +539,7 @@ export function registerCommerceRoutes(deps: RouteDeps): void {
       const rawBumps = Array.isArray(b.bumps) ? b.bumps.slice(0, 5) : [];
       for (const raw of rawBumps) {
         const productId = String((raw as { productId?: unknown })?.productId ?? '');
-        const quantity = Math.max(1, Math.trunc(Number((raw as { quantity?: unknown })?.quantity ?? 1)) || 1);
+        const quantity = Math.min(MAX_LINE_QUANTITY, Math.max(1, Math.trunc(Number((raw as { quantity?: unknown })?.quantity ?? 1)) || 1));
         if (productId) lines.push({ productId, quantity, origin: 'bump' });
       }
       // ADR 0294 P3 contract — the funnel provenance stamp, wired here (0296):
@@ -521,11 +567,17 @@ export function registerCommerceRoutes(deps: RouteDeps): void {
         contactId = contact?.contactId;
       } catch { /* best-effort — guest checkout must not depend on CRM */ }
 
+      // ADR 0877 D1/D2 — decided BEFORE the order exists, so the order records the
+      // lane it was opened on (M5) and the checkout below cannot pick a different one.
+      const settlement = await resolveStorefrontSettlement(tenantId);
       const order = await createOrder({
         // grade-code B6: NO PII in the actor — it lands in audit rows + webhook fan-out.
         // The contact link (below) carries identity; the actor stays opaque.
         tenantId, orgId: req.params.orgId, createdBy: 'public:guest',
         ...(contactId ? { contactId } : {}),
+        // ADR 0875 D1/D7 — a typed email proves nothing: price as anonymous; sell
+        // only what the storefront lists.
+        buyerVerified: false, activeOnly: true,
         ...(optionalString(b.couponCode) ? { couponCode: optionalString(b.couponCode)! } : {}),
         ...(b.shippingAddress && typeof b.shippingAddress === 'object' ? { shippingAddress: b.shippingAddress as Record<string, unknown> } : {}),
         ...(rawFunnel ? { funnelRef: rawFunnel } : {}),
@@ -535,11 +587,11 @@ export function registerCommerceRoutes(deps: RouteDeps): void {
         // only while the operator has one-click enabled.
         ...(b.savePaymentMethod === true && contactId && offSessionEnabled() ? { pmSaveRequested: true } : {}),
         ...(idempotencyKeyOf(req, b) ? { idempotencyKey: idempotencyKeyOf(req, b)! } : {}),
+        settlement: settlementStamp(settlement),
         lines,
       });
 
-      const stripeKey = await resolveSecret(STRIPE_KEY_REF);
-      if (stripeKey) {
+      if (settlement.kind !== 'demo') {
         const base = publicBaseUrl(req);
         try {
         // A coupon discount can't be a negative Stripe line — bill ONE aggregate
@@ -551,13 +603,16 @@ export function registerCommerceRoutes(deps: RouteDeps): void {
         // payment method; the webhook captures pm+customer ids on success.
         let customerId: string | undefined;
         if (order.pmSaveRequested) {
-          try { customerId = (await createStripeCustomer(stripeKey, { email })).customerId; }
+          try { customerId = (await createStripeCustomer(settlement.charge.key, { email })).customerId; }
           catch { /* consent is best-effort — the purchase must not fail on it */ }
         }
-        const session = await createStripeOrderCheckoutSession(stripeKey, {
+        const session = await createStripeOrderCheckoutSession(settlement.charge, {
+          feeBaseMinor: toStripeMinorUnits(order.total, order.currency), // ADR 0877 M8 — the fee is on goods, never tax/shipping
           lines: [...goodsLines, ...taxShippingSessionLines(order)], // DEF-1 — charge = goods + tax + shipping
           metadata: { orderId: order.orderId, tenantId, orgId: req.params.orgId },
-          successUrl: `${base}/store/${encodeURIComponent(req.params.orgId)}?order=${encodeURIComponent(order.orderId)}&paid=1`,
+          // ADR 0875 D2 — `oc` is the one-click capability: only the browser that
+          // completed THIS checkout lands on this URL.
+          successUrl: `${base}/store/${encodeURIComponent(req.params.orgId)}?order=${encodeURIComponent(order.orderId)}&paid=1&oc=${encodeURIComponent(mintOneClickToken(tenantId, req.params.orgId, order.orderId))}`,
           cancelUrl: `${base}/store/${encodeURIComponent(req.params.orgId)}?order=${encodeURIComponent(order.orderId)}&canceled=1`,
           ...(customerId ? { customerId, setupFutureUsage: 'off_session' as const } : {}),
         });
@@ -600,6 +655,27 @@ export function registerCommerceRoutes(deps: RouteDeps): void {
     } catch (err) { next(err); }
   });
 
+  // ── ADR 0877 D6 — which lane this store's checkout settles on, for the owner.
+  // `settlement` + `reason` come from the ONE charge gate; `connectAvailable` says
+  // whether the owner can onboard (the Commerce Connect toggle). The key never
+  // leaves the server.
+  app.get(`${BASE}/payments`, async (req, res, next) => {
+    try {
+      const ctx = await authz(req, 'workspace:read');
+      const s = await resolveStorefrontSettlement(ctx.tenantId);
+      // The SAME subject the charge gate resolves (tenant only): a per-user cohort
+      // must not tell an owner Connect is available while their store stays demo
+      // (grade-code CC2CD-9 / grade-ux CC2UX-4).
+      const connect = await resolveOne('commerce-connect', { tenantId: ctx.tenantId }).catch(() => null);
+      res.json({
+        settlement: s.kind,
+        ...(s.kind === 'demo' ? { reason: s.reason } : {}),
+        ...(s.kind === 'connect' ? { applicationFeePct: s.applicationFeePct } : {}),
+        connectAvailable: !!connect?.enabled,
+      });
+    } catch (err) { next(err); }
+  });
+
   // ── Revenue summary (gap plan §5C C9) — ONE read for the whole dashboard tab. ──
   app.get(`${BASE}/reports/summary`, async (req, res, next) => {
     try { const ctx = await authz(req, 'workspace:read'); res.json(await commerceSummary(ctx.tenantId, ctx.orgId)); } catch (err) { next(err); }
@@ -618,7 +694,9 @@ export function registerCommerceRoutes(deps: RouteDeps): void {
     try {
       const ctx = await authz(req, 'workspace:read');
       const rows = await payoutExportRows(ctx.tenantId, ctx.orgId);
-      const esc = (v: string): string => `"${v.replace(/"/g, '""')}"`;
+      // ADR 0875 D9 — a leading = + - @ (or tab/CR) makes a spreadsheet evaluate the
+      // cell; prefix a quote so an affiliate's name stays text (OWASP CSV injection).
+      const esc = (v: string): string => `"${(/^[=+\-@\t\r]/.test(v) ? `'${v}` : v).replace(/"/g, '""')}"`;
       const csv = ['code,name,currency,balance_owed,pending_payouts',
         ...rows.map((r: { code: string; name: string; currency: string; balanceOwed: number; pendingPayouts: number }) => [esc(r.code), esc(r.name), esc(r.currency), String(r.balanceOwed), String(r.pendingPayouts)].join(','))].join('\n');
       res.setHeader('content-type', 'text/csv; charset=utf-8');
@@ -647,14 +725,26 @@ export function registerCommerceRoutes(deps: RouteDeps): void {
       const org = await publicStoreOrg(req.params.orgId);
       const tenantId = org.tenantId;
       const orgId = req.params.orgId;
-      const b = (req.body ?? {}) as { productId?: unknown; quantity?: unknown; funnel?: unknown };
+      const b = (req.body ?? {}) as { productId?: unknown; quantity?: unknown; funnel?: unknown; oc?: unknown };
       const productId = requireString(b.productId, 'productId');
-      const quantity = Math.max(1, Math.trunc(Number(b.quantity ?? 1)) || 1);
+      const rawQty = b.quantity === undefined ? 1 : Number(b.quantity);
+      if (!Number.isInteger(rawQty) || rawQty < 1 || rawQty > ONE_CLICK_MAX_QUANTITY) {
+        throw new OpenwopError('validation_error', `quantity must be a whole number from 1 to ${ONE_CLICK_MAX_QUANTITY}.`, 400, { field: 'quantity' });
+      }
+      const quantity = rawQty;
 
+      // ADR 0875 D2 — the capability from the parent's success URL, bound to
+      // (tenant, org, order), inside the post-purchase window. Every refusal is
+      // the same 404 as an unknown order, so the route is no oracle.
       const parent = await getOrder(tenantId, orgId, req.params.orderId);
-      if (!parent || parent.status !== 'paid') throw new OpenwopError('not_found', 'Order not found.', 404, {});
+      if (!parent || parent.status !== 'paid' || !verifyOneClickToken(tenantId, orgId, parent.orderId, b.oc)
+        || Date.now() - Date.parse(parent.paidAt ?? parent.updatedAt ?? parent.createdAt) > ONE_CLICK_WINDOW_MS) {
+        throw new OpenwopError('not_found', 'Order not found.', 404, {});
+      }
       if (!parent.contactId) throw new OpenwopError('validation_error', 'This purchase has no saved payment profile.', 400, {});
-      const saved = await getSavedPaymentMethod(tenantId, orgId, parent.contactId);
+      // Architect B1 — only the method captured from THIS purchase, never "the
+      // contact's" card (the contact is whatever a typed email resolved to).
+      const saved = await getSavedPaymentMethodForOrder(tenantId, orgId, parent.orderId);
       if (!saved) throw new OpenwopError('validation_error', 'No saved payment method for this purchase.', 400, {});
 
       const children = await listChildOrders(tenantId, orgId, parent.orderId);
@@ -666,24 +756,36 @@ export function registerCommerceRoutes(deps: RouteDeps): void {
       const dup = children.find((c) => c.status !== 'canceled' && c.items.some((i) => i.productId === productId && i.origin === 'upsell'));
       if (dup) { res.status(200).json({ orderId: dup.orderId, status: dup.status, duplicate: true }); return; }
 
+      // ADR 0877 (architect H3) — the saved card was consented to under the PARENT's
+      // merchant (the platform, or the tenant's connected account). A child charged
+      // under a different lane would be a merchant-initiated charge the cardholder
+      // never agreed to, so a lane change since the parent is the uniform 404.
+      // A pre-0877 parent carries no stamp; every live one of those was platform.
+      const settlement = await resolveStorefrontSettlement(tenantId);
+      const parentLane = parent.settlement ?? { kind: 'platform' as const };
+      const now = settlementStamp(settlement);
+      if (now.kind !== parentLane.kind || now.destinationAccountId !== parentLane.destinationAccountId) {
+        throw new OpenwopError('not_found', 'Order not found.', 404, {});
+      }
       const rawFunnel = (b.funnel ?? undefined) as { funnelId?: unknown; stepId?: unknown } | undefined;
       const child = await createOrder({
-        tenantId, orgId, createdBy: 'public:one-click',
-        contactId: parent.contactId,
+        tenantId, orgId, createdBy: 'public:one-click', settlement: now,
+        contactId: parent.contactId, buyerVerified: false, activeOnly: true,
         parentOrderId: parent.orderId,
         // provenance: the explicit upsell step when supplied, else the parent's stamp
         ...(rawFunnel ? { funnelRef: rawFunnel } : parent.funnelRef ? { funnelRef: parent.funnelRef } : {}),
         lines: [{ productId, quantity, origin: 'upsell' }],
       });
 
-      const stripeKey = await resolveSecret(STRIPE_KEY_REF);
-      if (!stripeKey) {
+      if (settlement.kind === 'demo') {
         // Keyless demo posture — the child order exists, honestly unpaid.
         res.status(201).json({ orderId: child.orderId, status: child.status, mode: 'demo' });
         return;
       }
-      const outcome = await createStripeOffSessionPaymentIntent(stripeKey, {
+      const stripeKey = await liveStripeKeyFor(tenantId);
+      const outcome = await createStripeOffSessionPaymentIntent(settlement.charge, {
         customerId: saved.stripeCustomerId, paymentMethodId: saved.paymentMethodId,
+        feeBaseMinor: toStripeMinorUnits(child.total, child.currency),
         amountMinor: toStripeMinorUnits(orderChargeTotal(child), child.currency), currency: child.currency,
         metadata: { orderId: child.orderId, tenantId, orgId },
         idempotencyKey: `oneclick:${parent.orderId}:${productId}`,

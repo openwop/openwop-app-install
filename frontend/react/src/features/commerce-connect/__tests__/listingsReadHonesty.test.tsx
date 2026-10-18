@@ -17,6 +17,10 @@ vi.mock('../commerceConnectClient.js', async (orig) => {
 
 import { SellerListingsCard } from '../SellerListingsCard.js';
 
+// Exact copy (en): a regex would also pass on a partial or reworded claim.
+const FAILED = 'Your listings couldn\u2019t be loaded.';
+const EMPTY = 'No listings yet — price one of your packs below.';
+
 beforeEach(() => vi.clearAllMocks());
 afterEach(cleanup);
 
@@ -24,18 +28,19 @@ describe('CCX-R2-1 — seller listings honesty', () => {
   it('FAILED read: says listings could not be loaded (with retry), never "no listings yet"', async () => {
     api.listOwnListings.mockRejectedValue(new Error('listings_500'));
     render(<SellerListingsCard />);
-    expect(await screen.findByText(/couldn.t be loaded/i)).toBeTruthy();
-    expect(screen.queryByText(/no listings yet/i)).toBeNull();
+    expect(await screen.findByText(FAILED, { exact: false })).toBeTruthy();
+    expect(screen.queryByText(EMPTY)).toBeNull();
     // Retry recovers to the truthful empty state.
     api.listOwnListings.mockResolvedValue([]);
-    fireEvent.click(screen.getByRole('button', { name: /retry/i }));
-    expect(await screen.findByText(/no listings yet/i)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(await screen.findByText(EMPTY)).toBeTruthy();
+    expect(screen.queryByText(FAILED, { exact: false })).toBeNull();
   });
 
   it('TRUTHFUL empty: a real [] still says "no listings yet"', async () => {
     api.listOwnListings.mockResolvedValue([]);
     render(<SellerListingsCard />);
-    expect(await screen.findByText(/no listings yet/i)).toBeTruthy();
-    expect(screen.queryByText(/couldn.t be loaded/i)).toBeNull();
+    expect(await screen.findByText(EMPTY)).toBeTruthy();
+    expect(screen.queryByText(FAILED, { exact: false })).toBeNull();
   });
 });

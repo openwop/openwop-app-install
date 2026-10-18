@@ -8,9 +8,14 @@
  * This ratchet scans every `registerJob({ … })` call under `src/features/**`. A
  * call whose object literal does not name `featureId` must be listed below with
  * a reason. A NEW unstamped call fails until it stamps or is classified here.
- * (A listed file that later starts stamping does NOT fail — so a peer PR that
- * stamps one of these, e.g. scheduled-agent-chats in ADR 0820 §8.2, does not
- * collide with this list.)
+ * (A listed file that later starts stamping does NOT fail, so the list must be
+ * SHRUNK by hand when one does: wave 35 removed the two scheduled-agent-chats
+ * entries after ADR 0820 §8.2 stamped all three of their calls — while listed,
+ * dropping one of those stamps stayed green.)
+ *
+ * Sabotage witnesses (w35): deleting `featureId` from the CRM Gmail sync job, from
+ * `knowledgeSyncService` (an unlisted file — a NEW violator), or from a
+ * scheduled-agent-chats follow-up job reds "every unstamped call is classified".
  */
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
@@ -31,11 +36,6 @@ const UNSTAMPED_ALLOWED: Record<string, [number, string]> = {
   'features/kicktodo-core/enrollmentService.ts': [1, 'KickTodo distribution feature, not in a sellable bundle'],
   'features/kicktodo-integrations/calendarSyncService.ts': [1, 'KickTodo distribution feature, not in a sellable bundle'],
   'features/kicktodo-accountability/sessionService.ts': [1, 'KickTodo distribution feature, not in a sellable bundle'],
-  // Workstream A (ADR 0820 §8.2) gives scheduled-agent-chats a toggle and stamps
-  // these. Until then its turn workflow is feature-owned at the launch funnel
-  // (`scheduledChatTurnWorkflow.ts`), which gates them on read either way.
-  'features/scheduled-agent-chats/agentTools.ts': [2, 'stamped by ADR 0820 §8.2 (workstream A); gated at the funnel meanwhile'],
-  'features/scheduled-agent-chats/scheduledChatService.ts': [1, 'stamped by ADR 0820 §8.2 (workstream A); gated at the funnel meanwhile'],
 };
 
 function walk(dir: string): string[] {

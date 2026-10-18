@@ -5,10 +5,11 @@
  */
 
 import { Button } from '../ui/Button.js';
-import { useCallback, useEffect, useState } from 'react';
+import { Suspense, useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { confirm } from '../ui/confirm.js';
 import { handleTablistKeyDown } from '../ui/rovingTabs.js';
+import { useConfirmDiscardUnsaved } from '../ui/useUnsavedChangesWarning.js';
 import type { TFunction } from 'i18next';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { checkAgent, deleteRosterEntry, updateRosterEntry, getAgentProfile } from './rosterClient.js';
@@ -24,6 +25,8 @@ import { AgentVoicePanel } from './AgentVoicePanel.js';
 import { AgentTwinPanel } from '../features/twin/AgentTwinPanel.js';
 import { AgentKnowledgePanel } from '../features/agent-knowledge/AgentKnowledgePanel.js';
 import { AgentMemoryTab } from '../features/agent-knowledge/AgentMemoryTab.js';
+import { featureAgentWorkspaceTabs } from '../features/registry.js';
+import { useFeatureAccess } from '../featureToggles/FeatureAccessContext.js';
 import { AgentIntegrationsPanel } from './AgentIntegrationsPanel.js';
 import { AgentConnectionStatusPanel } from './AgentConnectionStatusPanel.js';
 import { AgentActivityTab } from './AgentActivityTab.js';
@@ -49,7 +52,7 @@ function formatHeartbeat(intervalMs: number | undefined, t: TFunction): string {
   return t('wsHeartbeatHours', { hours: hrs });
 }
 
-type TabKey = 'overview' | 'workflows' | 'board' | 'schedules' | 'instructions' | 'knowledge' | 'memory' | 'integrations' | 'activity';
+type TabKey = 'overview' | 'workflows' | 'board' | 'schedules' | 'instructions' | 'knowledge' | 'memory' | 'evals' | 'integrations' | 'activity';
 const TABS: ReadonlyArray<{ key: TabKey; labelKey: string }> = [
   { key: 'overview', labelKey: 'wsTabOverview' },
   { key: 'workflows', labelKey: 'wsTabWorkflows' },
@@ -61,6 +64,8 @@ const TABS: ReadonlyArray<{ key: TabKey; labelKey: string }> = [
   { key: 'knowledge', labelKey: 'wsTabKnowledge' },
   // ADR 0041 — the per-agent memory browser.
   { key: 'memory', labelKey: 'wsTabMemory' },
+  // ADR 0889 D8 — agent eval suites; shown only while the `evals` toggle is on.
+  { key: 'evals', labelKey: 'wsTabEvals' },
   { key: 'integrations', labelKey: 'wsTabIntegrations' },
   { key: 'activity', labelKey: 'wsTabActivity' },
 ];
@@ -84,20 +89,33 @@ export function AgentWorkspacePage(): JSX.Element {
   // Tab lives in the URL (?tab=board) so refresh / back / share preserve it.
   const [searchParams, setSearchParams] = useSearchParams();
   const tabParam = searchParams.get('tab');
-  const tab: TabKey = TABS.some((t) => t.key === tabParam) ? (tabParam as TabKey) : 'overview';
+  // ADR 0889 D8 — the Evals tab gates on the workspace's `evals` toggle.
+  // ADR 0630 — the tab comes from the feature registry, so a distribution that
+  // excludes `evals` has no tab to show (and never bundles the panel).
+  const evalsTab = featureAgentWorkspaceTabs().find((t) => t.featureId === 'evals' && t.key === 'evals');
+  const evalsOn = useFeatureAccess('evals').enabled && evalsTab !== undefined;
+  const visibleTabs = TABS.filter((t) => t.key !== 'evals' || evalsOn);
+  const tab: TabKey = visibleTabs.some((t) => t.key === tabParam) ? (tabParam as TabKey) : 'overview';
+  // ADR 0889 grade remediation (EVUX-5) — a feature tab reports unsaved edits
+  // through `onDirtyChange`; switching away asks first (the shared discard dialog).
+  const [tabDirty, setTabDirty] = useState(false);
+  const confirmLeaveTab = useConfirmDiscardUnsaved(tabDirty);
   const setTab = (next: TabKey): void => {
-    setSearchParams((prev) => {
-      const p = new URLSearchParams(prev);
-      if (next === 'overview') p.delete('tab');
-      else p.set('tab', next);
-      return p;
-    }, { replace: true });
+    void (async () => {
+      if (next !== tab && !(await confirmLeaveTab())) return;
+      if (next !== tab) setTabDirty(false);
+      setSearchParams((prev) => {
+        const p = new URLSearchParams(prev);
+        if (next === 'overview') p.delete('tab');
+        else p.set('tab', next);
+        return p;
+      }, { replace: true });
+    })();
   };
 
   // ADR 0038 — Knowledge + Memory are always-on (graduated off the toggle
-  // 2026-06-16); every tab is visible. The backend remains the authority
-  // (RBAC + IDOR + profile policy on each knowledge call).
-  const visibleTabs = TABS;
+  // 2026-06-16). The backend remains the authority (RBAC + IDOR + profile
+  // policy on each knowledge call). `visibleTabs` (above) drops only Evals.
 
   const refresh = useCallback(async () => {
     if (!rosterId) return;
@@ -387,8 +405,10 @@ export function AgentWorkspacePage(): JSX.Element {
         {visibleTabs.map((tabItem) => (
           <button
             key={tabItem.key}
+            id={`ws-tab-${tabItem.key}`}
             type="button"
             role="tab"
+            aria-controls="ws-tabpanel"
             aria-selected={tab === tabItem.key}
             tabIndex={tab === tabItem.key ? 0 : -1}
             className="tab"
@@ -399,6 +419,8 @@ export function AgentWorkspacePage(): JSX.Element {
         ))}
       </div>
 
+      {/* EVUX-20 — the strip's buttons control ONE panel that names the selected tab. */}
+      <div role="tabpanel" id="ws-tabpanel" aria-labelledby={`ws-tab-${tab}`}>
       {tab === 'overview' ? <OverviewTab view={view} onGoto={setTab} onCheckNow={canWrite ? () => void onCheckNow() : undefined} busy={busy} /> : null}
       {tab === 'workflows' ? <AgentWorkflowPortfolioPanel entry={entry} jobs={view.jobs} board={view.board} onChanged={() => void refresh()} /> : null}
       {tab === 'board' ? (view.board ? <AgentBoardPanel boardId={view.board.id} persona={entry.persona} avatarUrl={entry.avatarUrl} roleTheme={theme} workflows={entry.workflows} refreshSignal={boardRefresh} onChanged={() => void refresh()} /> : <NoBoard persona={entry.persona} />) : null}
@@ -411,6 +433,13 @@ export function AgentWorkspacePage(): JSX.Element {
       ) : null}
       {tab === 'knowledge' ? <AgentKnowledgePanel rosterId={entry.rosterId} persona={entry.persona} /> : null}
       {tab === 'memory' ? <AgentMemoryTab rosterId={entry.rosterId} persona={entry.persona} /> : null}
+      {/* ADR 0889 — the eval lane resolves the REGISTRY agent id (resolveAgentForTenant),
+          so the panel gets `agentRef.agentId`, never the rosterId (ADR 0763). */}
+      {tab === 'evals' && evalsTab ? (
+        <Suspense fallback={<StateCard title={t('common:loading')} loading />}>
+          {evalsTab.render({ agentId: entry.agentRef.agentId, persona: entry.persona, canWrite, onDirtyChange: setTabDirty })}
+        </Suspense>
+      ) : null}
       {tab === 'integrations' ? (
         <div className="u-flex u-flex-col u-gap-4">
           <AgentConnectionStatusPanel rosterId={entry.rosterId} />
@@ -430,6 +459,7 @@ export function AgentWorkspacePage(): JSX.Element {
           (superadmin-gated endpoint). Gating lives in
           `AssistantControlPanels` — see AST-UX-2 there. */}
       {tab === 'overview' ? <AssistantControlPanels rosterId={entry.rosterId} roleKey={entry.roleKey} persona={entry.persona} /> : null}
+      </div>
 
       <details className="u-mt-5">
         <summary className="muted u-fs-12 u-cursor-pointer">{t('wsAdvancedSummary')}</summary>

@@ -960,6 +960,15 @@ export function sourceDigestOf(base: Record<string, unknown>, overlay: Record<st
   return createHash('sha256').update(canonicalJson(picked)).digest('hex').slice(0, 16);
 }
 
+/** ADR 0861 D6 addendum — an overlay whose every overridden key equals the base
+ *  value is a COPY of the base (the editor's "Copy from base", or a translation
+ *  that echoed its input). It is evidence of nothing, so it is never stamped
+ *  `current`; only an explicit confirm can claim it. One differing key is a
+ *  translation — partial translation is the editor's claim to make. */
+function copiesBase(base: Record<string, unknown>, overlay: Record<string, unknown>): boolean {
+  return Object.keys(overlay).every((k) => canonicalJson(overlay[k]) === canonicalJson(base[k]));
+}
+
 export type TranslationStatus = 'missing' | 'current' | 'outdated' | 'unknown';
 
 /** ADR 0861 D6 — one locale's translation status for a section (or shared row). */
@@ -980,7 +989,10 @@ export function translationStatus(
  *  - an overlay identical to the stored one keeps whatever stamp it had — INCLUDING
  *    none (review H3: a legacy overlay stays `unknown` until someone writes or
  *    confirms it; stamping it here would mark it current on no evidence);
- *  - a new or changed overlay is stamped from the base it is being saved with;
+ *  - a new or changed overlay is stamped from the base it is being saved with —
+ *    UNLESS it is a copy of that base (`copiesBase`): "Copy from base" is not a
+ *    translation, so it stays `unknown` until the text changes or an editor
+ *    confirms it (ADR 0861 D6 addendum, owner decision 2026-10-11);
  *  - `confirm` re-stamps one (section, locale) without changing the overlay.
  * Client-sent digests are discarded: only `prev` is read.
  */
@@ -1002,7 +1014,7 @@ export function stampSourceDigests<S extends Pick<Section, 'sectionId' | 'data' 
       if (!confirming && unchanged) {
         const carried = old?.sourceDigest?.[locale];
         if (carried) digests[locale] = carried;
-      } else {
+      } else if (confirming || !copiesBase(s.data, overlay)) {
         digests[locale] = sourceDigestOf(s.data, overlay);
       }
     }

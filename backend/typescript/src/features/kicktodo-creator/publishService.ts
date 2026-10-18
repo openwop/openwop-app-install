@@ -20,12 +20,13 @@ import { createLogger } from '../../observability/logger.js';
 import {
   createChallengePublishApproval,
   getApproval,
+  redactApprovalProposal,
   resolveApproval,
   type PendingApproval,
 } from '../../host/approvalService.js';
 import { OpenwopError } from '../../types.js';
 import { getChallenge, publishChallenge } from '../kicktodo-core/challengeService.js';
-import { getCandidate, setCandidatePublished, anonymizeCreatorAuthor, ERASED_SUBJECT, claimSupportedBy, disputedSupport, type FactoryCandidate, type ResearchClaim } from './creatorService.js';
+import { getCandidate, setCandidatePublished, anonymizeCreatorAuthor, candidateIdsCreatedBy, ERASED_SUBJECT, claimSupportedBy, disputedSupport, type FactoryCandidate, type ResearchClaim } from './creatorService.js';
 import { REQUIRED_SIM_PERSONAS } from './lessonAssembly.js';
 import { registerSubjectEraser } from '../../host/subjectErasure.js';
 import { DurableCollection } from '../../host/hostExtPersistence.js';
@@ -236,6 +237,43 @@ function simulationFlagsNote(candidate: FactoryCandidate): string {
 }
 
 /**
+ * XCH-CV-2 — how much of the evidence was actually CHECKED, for the human who
+ * approves publication. claim-verify judges a claim against each source it
+ * cites, but skips a pair whose source text was never read and every pair past
+ * its ceiling; its `verifiedPairs` / `skippedPairs` counts were node outputs
+ * that never reached this approval, so the approver could not tell "every
+ * citation was checked" from "a third of them were".
+ *
+ * Derived from the RECORDED dossier (the SSoT), not plumbed from node outputs:
+ * a judged pair is a citation with a recorded verdict for that source
+ * (`claim.support`), and a citation with no verdict was not judged. This counts
+ * the pairs claim-verify skipped, plus any whose verdict `recordResearch`
+ * dropped because the source was not recorded — neither was checked against a
+ * stored source, so both belong in "not judged". A dossier with no verdicts on
+ * any claim predates verification (ADR 0494 P2b) and says so rather than
+ * reporting zero judged.
+ */
+export function evidenceCheckNote(candidate: FactoryCandidate): string {
+  const claims = candidate.dossier?.claims ?? [];
+  if (!candidate.dossier) return 'evidence check: no research dossier';
+  if (!claims.some((cl) => cl.support !== undefined)) {
+    return 'evidence check: not run (dossier recorded before source/claim verification; support is structural only)';
+  }
+  let judged = 0;
+  let notJudged = 0;
+  for (const cl of claims) {
+    for (const h of cl.sourceHashes) {
+      if (cl.support?.some((sp) => sp.sourceHash === h)) judged += 1;
+      else notJudged += 1;
+    }
+  }
+  const pairs = (n: number): string => `${n} source/claim pair${n === 1 ? '' : 's'}`;
+  return notJudged === 0
+    ? `evidence check: ${pairs(judged)} judged, all cited pairs checked`
+    : `evidence check: ${pairs(judged)} judged, ${notJudged} NOT judged (source unreadable or verification cap reached)`;
+}
+
+/**
  * Submit for publication: gates → rights decisions recorded → ONE approval on
  * the shared queue. Idempotent: a re-submit returns the existing pending act.
  */
@@ -271,7 +309,7 @@ export async function submitForPublication(
     proposal:
       `Publish challenge "${challenge.title}" v${challengeVersion} from factory candidate "${candidate.topic}" ` +
       `(risk tier: ${candidate.riskTier}; ${candidate.dossier?.sources.length ?? 0} sources; policy v${rights[0]?.policyVersion ?? DEFAULT_RIGHTS_POLICY.version}; ` +
-      `${simulationFlagsNote(candidate)}).`,
+      `${evidenceCheckNote(candidate)}; ${simulationFlagsNote(candidate)}).`,
     candidateId,
     challengeId,
     challengeVersion,
@@ -288,6 +326,11 @@ export async function submitForPublication(
     rightsDecisions: rights,
   };
   if (!(await publications.compareAndSwap(null, record))) {
+    // Code-grade KTF-PB-1 — a concurrent first submit won the publication row. The
+    // approval THIS call raised is now an orphan in the shared queue; close it as
+    // superseded (the governance chain records it as overtaken, not rejected).
+    await resolveApproval(approval.approvalId, { status: 'rejected', chainOutcome: 'superseded', note: 'superseded by a concurrent submit', decidedBy: submittedBy });
+    log.info('kicktodo_publication_submit_superseded', { candidateId, approvalId: approval.approvalId });
     const winner = await publications.get(`${tenantId}::${candidateId}`);
     if (winner) return winner;
   }
@@ -321,6 +364,8 @@ export async function completePublication(
 
   const candidate = await getCandidate(tenantId, candidateId);
   if (!candidate) throw new PublicationGateError('candidate', 'Candidate not found.');
+  // Code-grade (new) — a killed candidate is never published, whatever the queue says.
+  if (candidate.state === 'withdrawn') throw new PublicationGateError('candidate', 'The candidate was withdrawn; it cannot be published.');
   assertGates(candidate, record.rightsDecisions); // gates re-run at complete
 
   const approval = await getApproval(record.approvalId);
@@ -379,15 +424,21 @@ export async function decideChallengePublishApproval(
     const lock = await resolveApproval(approvalId, { status: 'rejected', decidedBy, ...(opts.note !== undefined ? { note: opts.note } : {}) });
     return lock ? { approval: lock.approval, changed: lock.changed } : null;
   }
+  const before = await publications.get(`${tenantId}::${approval.challengePublish.candidateId}`);
+  let done: PublicationRecord;
   try {
-    await completePublication(tenantId, approval.challengePublish.candidateId, decidedBy, opts.note);
+    done = await completePublication(tenantId, approval.challengePublish.candidateId, decidedBy, opts.note);
   } catch (err) {
     if (err instanceof SeparationOfDutiesError) throw new OpenwopError('forbidden', err.message, 403, {});
     if (err instanceof PublicationGateError) throw new OpenwopError('conflict', err.message, 409, { gate: err.gate });
     throw err;
   }
   const after = await getApproval(approvalId);
-  return { approval: after ?? approval, changed: true };
+  // Code-grade KTF-PB-3 — `changed` reports whether THIS call performed the act. A
+  // racer that completed first is returned idempotently by `completePublication`;
+  // claiming `changed: true` then audited `kicktodo.challenge.published` twice.
+  const performed = !before?.completedAt && done.completedBy === decidedBy;
+  return { approval: after ?? approval, changed: performed };
 }
 
 export async function getPublication(tenantId: string, candidateId: string): Promise<PublicationRecord | null> {
@@ -406,8 +457,22 @@ export async function getPublication(tenantId: string, candidateId: string): Pro
 // idempotent, no notifications.
 export async function eraseCreatorSubject(tenantId: string, subjectKey: string): Promise<void> {
   if (!tenantId || !subjectKey) return;
+  // KTFAC-3 — the publish card's `proposal` QUOTES the brief (`… from factory candidate
+  // "<topic>"`). The challenge-publish kind redactor only matches the SUBMITTER, and
+  // the creator need not be the submitter, so redact the cards of the creator's own
+  // candidates here — FIRST, while `createdBy` still finds them. Text only: the
+  // decision keeps the challenge, so a pending publish is NOT cancelled.
+  const created = new Set(await candidateIdsCreatedBy(tenantId, subjectKey));
+  if (created.size > 0) {
+    for (const p of await publications.listByPrefix(`${tenantId}::`)) {
+      if (p.tenantId === tenantId && created.has(p.candidateId)) {
+        await redactApprovalProposal(tenantId, p.approvalId, { cancelPending: false });
+      }
+    }
+  }
   await anonymizeCreatorAuthor(tenantId, subjectKey);
-  for (const p of await publications.list()) {
+  // Code-grade KTF-XC-1 — tenant-prefixed read, not a scan of every tenant.
+  for (const p of await publications.listByPrefix(`${tenantId}::`)) {
     if (p.tenantId !== tenantId) continue;
     let changed = false;
     const next = { ...p };

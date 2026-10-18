@@ -79,6 +79,14 @@ export function useCollab({ canvasId, enabled, attempt = 0 }: { canvasId: string
       // Cross-origin upgrade credential (see the header note). Best-effort:
       // a failed mint falls back to the cookie-only connect.
       let ticket: string | null = null;
+      // ADR 0886 D2 — a room is read-WRITE, so the backend refuses the ticket to
+      // a caller who can read the canvas but not write it, with a DISTINCT 403
+      // (`details.reason: 'collab_write_required'`). That is not a transport
+      // failure to retry: there is no room this person may join. Stay DISABLED so
+      // the editor runs its single-writer path (exactly as with `realtime-collab`
+      // off) instead of falling through to the cookie socket, which the backend
+      // refuses too, and surfacing "Live connect failed" over a readable canvas.
+      let writeRefused = false;
       try {
         const mintUrl = `${config.baseUrl}/host/openwop-app/canvas-collab/${encodeURIComponent(canvasId)}/ticket`;
         // Bounded: the mint runs BEFORE the provider (and its `failed` ceiling)
@@ -86,8 +94,12 @@ export function useCollab({ canvasId, enabled, attempt = 0 }: { canvasId: string
         // whole provision behind the chassis spinner (UX-B2).
         const resp = await fetch(mintUrl, fetchOpts({ method: 'POST', headers: authedHeaders(), signal: AbortSignal.timeout(10_000) }));
         if (resp.ok) ticket = ((await resp.json()) as { ticket?: string }).ticket ?? null;
+        else if (resp.status === 403) {
+          const body = (await resp.json().catch(() => ({}))) as { details?: { reason?: unknown } };
+          writeRefused = body.details?.reason === 'collab_write_required';
+        }
       } catch { /* cookie fallback */ }
-      if (disposed) return;
+      if (disposed || writeRefused) return;
       const ydoc = new Y.Doc();
       const awareness = new Awareness(ydoc);
       // Direct-to-backend, http(s)→ws(s); the room name (canvasId) is appended by

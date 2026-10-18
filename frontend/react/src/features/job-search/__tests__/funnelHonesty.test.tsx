@@ -6,11 +6,17 @@
  * rendering null as 0% would tell someone who has applied to nothing that their
  * approach is failing, which is the most discouraging possible lie told to the
  * person least able to evaluate it.
+ *
+ * w52: the genuine-zero case used `getAllByText(/0%/)`, which "20%" satisfied
+ * (fn-zero reddened only the denominator case); it now reads the Cold line
+ * itself. The order case refused a missing label (`indexOf` -1); approve asserts
+ * what was approved. Fixtures are typed against the client's own types.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
+import type { DraftRow, FollowUpRow, FunnelReport } from '../jobSearchClient.js';
 
-const EMPTY = {
+const EMPTY: FunnelReport = {
   reachedStage: { applied: 0, screening: 0, interviewing: 0, offer: 0 },
   responseRate: { numerator: 0, denominator: 0, rate: null },
   conversions: [],
@@ -21,7 +27,7 @@ const EMPTY = {
   pipelineFound: true,
 };
 
-const WITH_DATA = {
+const WITH_DATA: FunnelReport = {
   ...EMPTY,
   responseRate: { numerator: 2, denominator: 40, rate: 0.05 },
   warmVsCold: { warm: { numerator: 2, denominator: 3, rate: 0.667 }, cold: { numerator: 0, denominator: 37, rate: 0 } },
@@ -32,37 +38,26 @@ const WITH_DATA = {
   silent: 38,
 };
 
-const funnel = vi.fn(async () => EMPTY as unknown);
-const followUps = vi.fn(async () => [] as unknown[]);
-const drafts = vi.fn(async () => [] as unknown[]);
-const approve = vi.fn(async () => undefined);
+type Client = typeof import('../jobSearchClient.js');
+const { funnel, followUps, drafts, approve } = vi.hoisted(() => ({
+  funnel: vi.fn<() => Promise<FunnelReport>>(),
+  followUps: vi.fn<() => Promise<FollowUpRow[]>>(),
+  drafts: vi.fn<() => Promise<DraftRow[]>>(),
+  approve: vi.fn<Client['approveDraft']>(),
+}));
 
 vi.mock('../jobSearchClient.js', () => ({
   listOrgs: vi.fn(async () => [{ orgId: 'org-1', name: 'Acme' }]),
-  getFunnel: (...a: unknown[]) => funnel(...(a as [])),
-  getFollowUps: (...a: unknown[]) => followUps(...(a as [])),
-  getDrafts: (...a: unknown[]) => drafts(...(a as [])),
   // JSUX-FUN-2 (R3) — the page reads ONE bundle now; compose it from the same
   // three per-test fixtures so every existing arrangement keeps working.
-  getFunnelBundle: async (...a: unknown[]) => ({
-    report: await funnel(...(a as [])),
-    followUps: await followUps(...(a as [])),
-    drafts: await drafts(...(a as [])),
-  }),
+  getFunnelBundle: async () => ({ report: await funnel(), followUps: await followUps(), drafts: await drafts() }),
   completeFollowUp: vi.fn(async () => undefined),
-  approveDraft: (...a: unknown[]) => approve(...(a as [])),
+  approveDraft: approve,
 }));
 
 import { FunnelPage } from '../FunnelPage.js';
 
 describe('the scoreboard', () => {
-  it('a MISSING pipeline renders the named state, never a healthy empty funnel (grade-trio finding 9)', async () => {
-    funnel.mockResolvedValueOnce({ ...EMPTY, pipelineFound: false });
-    render(<FunnelPage />);
-    await screen.findByText(/pipeline was not found/i);
-    expect(screen.queryByText(/no employer action|silent/i)).toBeNull();
-  });
-
   beforeEach(() => {
     funnel.mockReset(); followUps.mockReset(); drafts.mockReset(); approve.mockReset();
     funnel.mockImplementation(async () => EMPTY);
@@ -71,6 +66,13 @@ describe('the scoreboard', () => {
     approve.mockImplementation(async () => undefined);
   });
   afterEach(cleanup);
+
+  it('a MISSING pipeline renders the named state, never a healthy empty funnel (grade-trio finding 9)', async () => {
+    funnel.mockResolvedValueOnce({ ...EMPTY, pipelineFound: false });
+    render(<FunnelPage />);
+    await screen.findByText(/pipeline was not found/i);
+    expect(screen.queryByText(/no employer action|silent/i)).toBeNull();
+  });
 
   it('never renders “not enough data” as 0%', async () => {
     render(<FunnelPage />);
@@ -85,7 +87,9 @@ describe('the scoreboard', () => {
     funnel.mockImplementation(async () => WITH_DATA);
     render(<FunnelPage />);
     await screen.findByText(/67%/);
-    expect(screen.getAllByText(/0%/).length, 'cold at 0/37 is genuinely zero').toBeGreaterThan(0);
+    // Read the COLD line itself — a bare /0%/ also matched greenhouse's "20%".
+    const cold = screen.getByText((_, el) => el?.tagName === 'SPAN' && (el.textContent ?? '').startsWith('Cold application:'));
+    expect(cold.textContent, 'cold at 0/37 is genuinely zero').toBe('Cold application: 0% (0/37)');
   });
 
   it('shows a board that never replies, with its denominator', async () => {
@@ -100,8 +104,12 @@ describe('the scoreboard', () => {
     const { container } = render(<FunnelPage />);
     await screen.findByText(/67%/);
     const text = container.textContent ?? '';
-    expect(text.indexOf('Through someone you know'), 'warm must precede the response-rate panel')
-      .toBeLessThan(text.indexOf('Response rate'));
+    const warmAt = text.indexOf('Through someone you know');
+    const responseAt = text.indexOf('Response rate');
+    // Both labels must be PRESENT — a missing one is -1, which is "less than" anything.
+    expect(warmAt).toBeGreaterThanOrEqual(0);
+    expect(responseAt).toBeGreaterThanOrEqual(0);
+    expect(warmAt, 'warm must precede the response-rate panel').toBeLessThan(responseAt);
   });
 
   it('states that drafts are never sent for you', async () => {
@@ -118,6 +126,8 @@ describe('the scoreboard', () => {
     render(<FunnelPage />);
     fireEvent.click(await screen.findByRole('button', { name: /^approve$/i }));
     await waitFor(() => expect(approve).toHaveBeenCalledTimes(1));
+    // The decision recorded is for THIS draft.
+    expect(approve).toHaveBeenCalledWith('org-1', 'deal:1', 'interview-reply');
     // The first version of this assertion was a loose negative on /sent/, which
     // matched the page's own lede ("Applications SENT is not the number that
     // matters") — a fuzzy negative flags the copy that agrees with it. Assert

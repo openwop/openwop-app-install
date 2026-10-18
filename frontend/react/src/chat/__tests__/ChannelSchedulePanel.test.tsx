@@ -6,7 +6,13 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor, fireEvent, cleanup } from '@testing-library/react';
 
-const { list, create, setEnabled, del } = vi.hoisted(() => ({ list: vi.fn(), create: vi.fn(), setEnabled: vi.fn(), del: vi.fn() }));
+type Client = typeof import('../../client/channelsClient.js');
+const { list, create, setEnabled, del } = vi.hoisted(() => ({
+  list: vi.fn<Client['listChannelScheduledPosts']>(),
+  create: vi.fn<Client['createChannelScheduledPost']>(),
+  setEnabled: vi.fn<Client['setChannelScheduledPostEnabled']>(),
+  del: vi.fn<Client['deleteChannelScheduledPost']>(),
+}));
 vi.mock('../../client/channelsClient.js', () => ({
   listChannelScheduledPosts: list,
   createChannelScheduledPost: create,
@@ -17,12 +23,15 @@ vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (k: string) => k }
 vi.mock('../../i18n/format.js', () => ({ formatWeekday: (d: number) => `wd${d}`, formatTime: () => '9:00 AM', formatDateTime: () => 'soon' }));
 
 import { ChannelSchedulePanel } from '../conversations/ChannelSchedulePanel.js';
+import type { ChannelScheduledPost } from '../../client/channelsClient.js';
+
+const CREATED: ChannelScheduledPost = { chatId: 'c1', agentId: 'a1', prompt: 'p', cronExpr: '0 9 * * *', conversationId: 'conv-1', enabled: true };
 
 beforeEach(() => {
   cleanup();
   list.mockReset(); create.mockReset(); setEnabled.mockReset(); del.mockReset();
   list.mockResolvedValue([]);
-  create.mockResolvedValue({ chatId: 'c1' });
+  create.mockResolvedValue(CREATED);
 });
 
 describe('ChannelSchedulePanel — cron composition (SCHED-1)', () => {
@@ -38,8 +47,9 @@ describe('ChannelSchedulePanel — cron composition (SCHED-1)', () => {
     fireEvent.click(screen.getByText('schedCreateCta'));
 
     await waitFor(() => expect(create).toHaveBeenCalled());
-    expect(create.mock.calls[0][0]).toBe('ch1');
-    expect(create.mock.calls[0][1]).toMatchObject({ agentId: 'a1', prompt: 'Standup summary', cronExpr: '30 14 * * 3' });
+    const [channelId, body] = create.mock.calls[0]!;
+    expect(channelId).toBe('ch1');
+    expect(body).toMatchObject({ agentId: 'a1', prompt: 'Standup summary', cronExpr: '30 14 * * 3' });
   });
 
   it('DAILY at the default time composes `0 9 * * *`', async () => {
@@ -49,7 +59,8 @@ describe('ChannelSchedulePanel — cron composition (SCHED-1)', () => {
     fireEvent.change(screen.getByLabelText('schedPromptLabel'), { target: { value: 'Digest' } });
     fireEvent.click(screen.getByText('schedCreateCta'));
     await waitFor(() => expect(create).toHaveBeenCalled());
-    expect(create.mock.calls[0][1].cronExpr).toBe('0 9 * * *');
+    const [, body] = create.mock.calls[0]!;
+    expect(body.cronExpr).toBe('0 9 * * *');
   });
 
   it('with NO channel-member agents, shows guidance and no create form', async () => {

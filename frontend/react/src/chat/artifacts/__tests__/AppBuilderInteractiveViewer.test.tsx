@@ -1,7 +1,9 @@
 /**
  * ADR 0305 Phase D — the interactive viewer: one screen at a time, navigateTo
  * tap-through via the delegated [data-cv-nav] handler, tab-strip fallback,
- * client-side theme override, and the empty state.
+ * client-side theme override, and the empty state. Plus ADR 0345 3b — the
+ * preview runtime wiring (state bindings, closed actions, frame-as-modal)
+ * through the real chassis + app-builder runtime + renderer.
  */
 import { describe, it, expect, afterEach } from 'vitest';
 import { render, cleanup, fireEvent, screen } from '@testing-library/react';
@@ -24,7 +26,9 @@ const mount = (app: Record<string, unknown>, theme?: 'light' | 'dark') =>
 
 describe('AppBuilderInteractiveViewer', () => {
   it('renders the initial screen only', () => {
-    const { container } = mount(APP);
+    // The isInitial screen is listed SECOND, so ignoring the home flag (and
+    // falling to frames[0]) shows the wrong screen.
+    const { container } = mount({ ...APP, screens: [APP.screens[1], APP.screens[0]] });
     expect(container.textContent).toContain('Open list');
     expect(container.textContent).not.toContain('The list body');
   });
@@ -45,9 +49,19 @@ describe('AppBuilderInteractiveViewer', () => {
   });
 
   it('a navigateTo pointing at a missing screen is a no-op', () => {
-    const { container } = mount({ ...APP, screens: [{ ...APP.screens[0], components: [{ type: 'button', props: { label: 'Broken', navigateTo: 'ghost' } }] }] });
+    // Two guards make this a no-op: the click handler refuses an unknown id, and
+    // the active screen falls back to frames[0] for an unknown activeId. The
+    // fixture starts on the SECOND screen, where the two outcomes differ — a
+    // fallback would land on HomeScreen.
+    const { container } = mount({
+      ...APP,
+      screens: [APP.screens[0], { id: 'list', name: 'ListScreen', components: [{ type: 'button', props: { label: 'Broken', navigateTo: 'ghost' } }] }],
+    });
+    fireEvent.click(screen.getByRole('tab', { name: 'ListScreen' }));
     fireEvent.click(container.querySelector('[data-cv-nav="ghost"]')!);
     expect(container.textContent).toContain('Broken');
+    expect(container.textContent).not.toContain('Open list');
+    expect(screen.getByRole('tab', { name: 'ListScreen' }).getAttribute('aria-selected')).toBe('true');
   });
 
   it('themeOverride swaps the doc theme client-side', () => {
@@ -58,7 +72,7 @@ describe('AppBuilderInteractiveViewer', () => {
   it('renders the empty state when the doc has no screens', () => {
     const { container } = mount({ name: 'Empty', screens: [] });
     expect(container.querySelector('.cv-viewer')).toBeNull();
-    expect(container.textContent?.length).toBeGreaterThan(0);
+    expect(container.textContent).toBe('This app design has no screens yet.');
   });
 });
 

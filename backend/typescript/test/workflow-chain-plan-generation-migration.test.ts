@@ -63,16 +63,26 @@ describe('plan-generation chain pack (RFC 0133 produced-variable pattern)', () =
       deferred: true,
       params: { candidateId: 'cand:1', topic: 'sleep', audience: 'busy pros', authorSubject: 'user:a1' },
     });
-    const names = (def.variables ?? []).map((v) => v.name);
+    const vars = def.variables ?? [];
     // The produced variable is emitted with its EXACT declared name (no expansion
-    // prefix) so the decompose node's {type:variable plan} read binds to it.
-    expect(names).toContain('plan');
-    // The 5 run-input parameters materialize (deferred mode) with the collision-free
+    // prefix) so the decompose node's {type:variable plan} read binds to it. It is
+    // run-produced, so it is never a required input and never carries a default
+    // (RFC 0133 §2 / SR-1 at-rest).
+    const plan = vars.find((v) => v.name === 'plan');
+    expect(plan).toMatchObject({ required: false });
+    expect(plan).not.toHaveProperty('defaultValue');
+    // All 5 run-input parameters materialize (deferred mode) with the collision-free
     // prefix — they are per-run, not frozen.
-    expect(names.some((n) => n.endsWith('_candidateId'))).toBe(true);
-    // decompose still reads the produced plan (the whole point of the produced-variable
-    // pattern — a value written to the bag with no typed output port).
-    const decompose = def.nodes.find((n) => n.nodeId.endsWith('decompose'))!;
-    expect(JSON.stringify(decompose.inputs)).toContain('"variableName":"plan"');
+    const paramVar = (p: string) => vars.find((v) => v.name !== p && v.name.endsWith(`_${p}`))?.name;
+    for (const p of ['candidateId', 'topic', 'audience', 'evidenceSummary', 'authorSubject']) {
+      expect(paramVar(p), `param ${p} did not materialize as a prefixed variable`).toBeDefined();
+    }
+    // generate reads its params from those variables, not from frozen literals.
+    const generate = def.nodes.find((n) => n.nodeId.endsWith('_generate'))!;
+    expect(generate.inputs?.candidateId).toEqual({ type: 'variable', variableName: paramVar('candidateId') });
+    // decompose reads the produced plan by its bare name (the whole point of the
+    // produced-variable pattern — a value written to the bag with no typed output port).
+    const decompose = def.nodes.find((n) => n.nodeId.endsWith('_decompose'))!;
+    expect(decompose.inputs?.plan).toEqual({ type: 'variable', variableName: 'plan' });
   });
 });

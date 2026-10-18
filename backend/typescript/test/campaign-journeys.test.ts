@@ -5,6 +5,14 @@
  *   - eligibility composes contact + email + consent + suppression;
  *   - the pack nodes stop honestly (already_enrolled / not_eligible) and
  *     resolve the contact from the trigger payload (ADR 0208).
+ *
+ * Shared-state discipline: enrollment cases clear the (global) ledger first;
+ * every case that counts contacts/segment members uses its OWN tenant, so
+ * shuffle order cannot change a count.
+ *
+ * Sabotage: enroll's CAS → plain put reds the CONCURRENCY case; inverting
+ * `outranks` reds the arbitration cases; dropping the consent/suppression gate
+ * reds the eligibility walk; un-capping resolveSegment reds the segment case.
  */
 
 import http from 'node:http';
@@ -15,6 +23,9 @@ import { buildCampaignJourneysSurface } from '../src/features/campaign-journeys/
 import { createContact } from '../src/features/crm/contactsService.js';
 import { addSuppression } from '../src/features/crm/suppressionService.js';
 import { createSegment } from '../src/features/crm/segmentsService.js';
+import { recordConsent, fullMarketingOptOut, setPolicy } from '../src/features/consent/consentService.js';
+import { saveConfig } from '../src/host/featureToggles/service.js';
+import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { mintToken, recordOpen, recordClick } from '../src/features/email/engagementService.js';
 import * as pack from '../../../packs/feature.campaign-journeys.nodes/index.mjs';
 
@@ -29,6 +40,9 @@ beforeAll(async () => {
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
 const T = 'user:journeys-test';
+let seq = 0;
+/** A tenant of the case's own — counts and segment membership cannot leak across cases. */
+const freshTenant = (): string => `user:journeys-${seq++}`;
 
 describe('ADR 0222 — enrollment guard', () => {
   it('enrolls once, blocks repeats, isolates tenants, resets explicitly', async () => {
@@ -139,20 +153,38 @@ describe('ADR 0299 — cross-journey priority arbitration (CDP-E)', () => {
 });
 
 describe('ADR 0222 — eligibility composite', () => {
-  it('walks every gate: missing → no email → suppressed → eligible', async () => {
-    expect(await checkEligibility(T, 'ct-missing')).toEqual({ eligible: false, reason: 'contact_not_found' });
-    const noMail = await createContact({ tenantId: T, name: 'NoMail' });
-    expect(await checkEligibility(T, noMail.contactId)).toEqual({ eligible: false, reason: 'no_email' });
-    const ada = await createContact({ tenantId: T, name: 'Ada', email: 'ada-j@example.com' });
-    const ok = await checkEligibility(T, ada.contactId);
-    expect(ok).toMatchObject({ eligible: true, email: 'ada-j@example.com', name: 'Ada' });
-    await addSuppression(T, 'ada-j@example.com', 'unsubscribed', 'test');
-    expect(await checkEligibility(T, ada.contactId)).toEqual({ eligible: false, reason: 'suppressed' });
+  it('walks every gate: missing → no email → consent → suppressed → eligible', async () => {
+    const TE = freshTenant();
+    // The consent gate only bites with consent enforcement ON (toggle off ⇒
+    // permissive, ADR 0819 §1); an opt-out-default policy keeps record-less
+    // contacts eligible so the other legs stay positive. Restored in `finally`
+    // (the campaign-audience-suppression precedent) — other cases need it off.
+    const d = getToggleDefault('consent');
+    expect(d, 'the consent toggle must be declared for the consent leg to mean anything').toBeTruthy();
+    await saveConfig({ ...d!, status: 'on' }, 'test');
+    try {
+      await setPolicy(TE, { defaultMode: 'opt-out' });
+      expect(await checkEligibility(TE, 'ct-missing')).toEqual({ eligible: false, reason: 'contact_not_found' });
+      const noMail = await createContact({ tenantId: TE, name: 'NoMail' });
+      expect(await checkEligibility(TE, noMail.contactId)).toEqual({ eligible: false, reason: 'no_email' });
+      // Consent: a contact who opted out of marketing email is ineligible.
+      const cy = await createContact({ tenantId: TE, name: 'Cy', email: 'cy-j@example.com' });
+      expect(await checkEligibility(TE, cy.contactId)).toMatchObject({ eligible: true }); // positive control
+      await recordConsent({ tenantId: TE, subjectKey: cy.contactId, categories: fullMarketingOptOut(), source: 'test' });
+      expect(await checkEligibility(TE, cy.contactId)).toEqual({ eligible: false, reason: 'consent' });
+      const ada = await createContact({ tenantId: TE, name: 'Ada', email: 'ada-j@example.com' });
+      const ok = await checkEligibility(TE, ada.contactId);
+      expect(ok).toEqual({ eligible: true, email: 'ada-j@example.com', name: 'Ada' });
+      await addSuppression(TE, 'ada-j@example.com', 'unsubscribed', 'test');
+      expect(await checkEligibility(TE, ada.contactId)).toEqual({ eligible: false, reason: 'suppressed' });
+    } finally {
+      await saveConfig(d!, 'test');
+    }
   });
 });
 
 describe('ADR 0222 — pack nodes over the surface', () => {
-  const surface = buildCampaignJourneysSurface({ tenantId: T } as never);
+  const surface = buildCampaignJourneysSurface({ tenantId: T });
   const ctx = (inputs: Record<string, unknown>, triggerData?: unknown) => ({
     features: { 'campaign-journeys': surface },
     inputs,
@@ -214,7 +246,7 @@ describe('ADR 0243 — journey-depth read verbs', () => {
     expect(none).toEqual({ opened: false, clicked: false, openCount: 0, clickCount: 0 });
   });
 
-  it('checkFrequency is within-cap when the contact has no sends in the window', async () => {
+  it('checkFrequency: zero sends in the window are within cap; a max ≤ 0 coerces to 1', async () => {
     const r = await checkFrequency(T, 'ct-quiet', 30, 3);
     expect(r).toEqual({ sentCount: 0, withinCap: true });
     // A max of 0 is coerced to 1; 0 sends < 1 → within cap.
@@ -222,27 +254,31 @@ describe('ADR 0243 — journey-depth read verbs', () => {
   });
 
   it('resolveSegment returns member ids, capped with a truncated flag', async () => {
-    await createContact({ tenantId: T, name: 'M1', email: 'm1-243@example.com', stage: 'customer' });
-    await createContact({ tenantId: T, name: 'M2', email: 'm2-243@example.com', stage: 'customer' });
-    const seg = await createSegment({ tenantId: T, name: 'Cust243', filters: [{ field: 'stage', op: 'eq', value: 'customer' }], createdBy: 'test' });
+    const TS = freshTenant();
+    const m1 = await createContact({ tenantId: TS, name: 'M1', email: 'm1-243@example.com', stage: 'customer' });
+    const m2 = await createContact({ tenantId: TS, name: 'M2', email: 'm2-243@example.com', stage: 'customer' });
+    await createContact({ tenantId: TS, name: 'NotMember', email: 'nm-243@example.com', stage: 'lead' });
+    const seg = await createSegment({ tenantId: TS, name: 'Cust243', filters: [{ field: 'stage', op: 'eq', value: 'customer' }], createdBy: 'test' });
 
-    const all = await resolveSegment(T, seg.segmentId);
-    expect(all.total).toBeGreaterThanOrEqual(2);
-    expect(all.contactIds.length).toBe(all.total);
+    const all = await resolveSegment(TS, seg.segmentId);
+    expect(all.total).toBe(2);
+    expect(new Set(all.contactIds)).toEqual(new Set([m1.contactId, m2.contactId]));
     expect(all.truncated).toBe(false);
 
     // A cap below the member count truncates + flags it (no silent drop).
-    const capped = await resolveSegment(T, seg.segmentId, 1);
-    expect(capped.contactIds.length).toBe(1);
+    const capped = await resolveSegment(TS, seg.segmentId, 1);
+    expect(capped.contactIds).toHaveLength(1);
+    expect([m1.contactId, m2.contactId]).toContain(capped.contactIds[0]);
     expect(capped.truncated).toBe(true);
-    expect(capped.total).toBeGreaterThanOrEqual(2);
+    expect(capped.total).toBe(2);
   });
 
   it('the pack nodes dispatch the verbs over the surface (engagement / frequency-gate / segment-members)', async () => {
-    const surface = buildCampaignJourneysSurface({ tenantId: T } as never);
+    const TN = freshTenant();
+    const surface = buildCampaignJourneysSurface({ tenantId: TN });
     const ctx = (inputs: Record<string, unknown>) => ({ features: { 'campaign-journeys': surface }, inputs });
 
-    const c = await createContact({ tenantId: T, name: 'NodeEng', email: 'nodeeng243@example.com' });
+    const c = await createContact({ tenantId: TN, name: 'NodeEng', email: 'nodeeng243@example.com' });
     const eng = await pack.engagement(ctx({ contactId: c.contactId }));
     expect(eng.status).toBe('success');
     expect(eng.outputs).toMatchObject({ opened: false, clicked: false, contactId: c.contactId });
@@ -251,10 +287,12 @@ describe('ADR 0243 — journey-depth read verbs', () => {
     expect(freq.status).toBe('success');
     expect(freq.outputs?.withinCap).toBe(true);
 
-    const seg = await createSegment({ tenantId: T, name: 'NodeSeg', filters: [{ field: 'stage', op: 'eq', value: 'lead' }], createdBy: 'test' });
+    // NodeEng defaults to stage 'lead', so it is the non-member control here.
+    const cust = await createContact({ tenantId: TN, name: 'NodeCust', email: 'nodecust243@example.com', stage: 'customer' });
+    const seg = await createSegment({ tenantId: TN, name: 'NodeSeg', filters: [{ field: 'stage', op: 'eq', value: 'customer' }], createdBy: 'test' });
     const members = await pack.segmentMembers(ctx({ segmentId: seg.segmentId }));
     expect(members.status).toBe('success');
-    expect(Array.isArray(members.outputs?.contactIds)).toBe(true);
+    expect(members.outputs).toEqual({ contactIds: [cust.contactId], total: 1, truncated: false });
 
     // Missing required inputs fail closed.
     expect((await pack.segmentMembers(ctx({}))).status).toBe('failed');

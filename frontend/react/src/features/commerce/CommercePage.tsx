@@ -40,6 +40,7 @@ import {
   CURRENCIES,
   type Org, type Product, type Order, type Quote, type PriceList, type CommerceSummary, type Coupon,
   type ProductFieldDef, type ProductFieldType,
+  getPaymentsReadiness, type PaymentsReadiness,
 } from './commerceClient.js';
 
 type Tab = 'products' | 'orders' | 'quotes' | 'pricing' | 'reports';
@@ -50,6 +51,45 @@ const TABS: Tab[] = ['products', 'orders', 'quotes', 'pricing', 'reports'];
 const ORDER_STATUSES = ['pending', 'paid', 'fulfilled', 'refunding', 'refunded', 'partially_refunded', 'canceled'] as const;
 const QUOTE_STATUSES = ['draft', 'sent', 'accepted', 'declined', 'expired'] as const;
 const PRODUCT_TYPES = ['physical', 'digital', 'service'] as const;
+
+/**
+ * ADR 0877 D6 — tell the owner which lane their checkout settles on. A store that
+ * has not connected Stripe takes DEMO orders on a live host (no card charged); an
+ * owner who never learns that sees "orders" that will never be paid. Nothing is
+ * rendered for the operator's own (platform) store or a keyless host, and a failed
+ * read renders nothing rather than a false "demo" claim.
+ */
+function PaymentsNotice({ orgId }: { orgId: string }): JSX.Element | null {
+  const { t } = useTranslation('commerce');
+  const [r, setR] = useState<PaymentsReadiness | null>(null);
+  useEffect(() => {
+    let live = true;
+    setR(null);
+    getPaymentsReadiness(orgId).then((x) => { if (live) setR(x); }).catch(() => { if (live) setR(null); });
+    return () => { live = false; };
+  }, [orgId]);
+  if (!r) return null;
+  if (r.settlement === 'connect') {
+    // grade-ux CC2UX-9 — never claim a "0%" fee from an absent field.
+    return <Notice variant="info">{r.applicationFeePct !== undefined ? t('paymentsConnectLive', { pct: r.applicationFeePct }) : t('paymentsConnectLiveNoFee')}</Notice>;
+  }
+  if (r.settlement !== 'demo' || r.reason === 'no_key' || r.reason === 'anon') return null;
+  const body = r.reason === 'connect_incomplete' ? t('paymentsDemoIncomplete')
+    : r.reason === 'connect_region' ? t('paymentsDemoRegion')
+    : r.reason === 'connect_disabled' && !r.connectAvailable ? t('paymentsDemoDisabled')
+    : t('paymentsDemoBody');
+  // grade-ux CC2UX-3 — the action names what the owner can actually do next: an
+  // account that exists needs FINISHING, not connecting, and a region the host
+  // cannot pay out to is not fixable on the Connect page at all (no link).
+  const action = r.reason === 'connect_region' ? null
+    : !r.connectAvailable ? <span>{t('paymentsAskOperator')}</span>
+    : <Link className="inline-link" to="/commerce-connect">{r.reason === 'connect_incomplete' ? t('paymentsFinishCta') : t('paymentsConnectCta')}</Link>;
+  return (
+    <Notice variant="warning">
+      <strong>{t('paymentsDemoTitle')}</strong>{' '}{body}{action ? ' ' : null}{action}
+    </Notice>
+  );
+}
 
 export function CommercePage(): JSX.Element {
   const { t } = useTranslation('commerce');
@@ -106,6 +146,7 @@ export function CommercePage(): JSX.Element {
             tabs would fetch for an organization nobody selected. */}
         {!orgId ? <Skeleton /> : (
         <>
+          <PaymentsNotice orgId={orgId} />
           {/* The ONE tablist primitive (DESIGN.md §5 — MUST NOT hand-roll a second
               role=tablist): roving tabindex + aria-controls/labelledby wiring. */}
           <Tabs
@@ -148,7 +189,10 @@ function ProductsTab({ orgId, focusId }: { orgId: string; focusId?: string | und
   const [loadError, setLoadError] = useState(false);
   // CM-R2-2 — the reload-after-action path must keep the honesty the initial
   // load has (the quotes section three screens down is the in-file precedent).
-  const reload = useCallback(() => { setLoadError(false); void listProducts(orgId).then(setProducts).catch(() => setLoadError(true)); }, [orgId]);
+  // CM-R2-2-WINDOW — a RETRY after a failed load clears the `[]` that load wrote,
+  // so the skeleton shows instead of a confident "No products" over a failed read
+  // (the MKT-UX-12 shape). A refetch after a successful action keeps the list.
+  const reload = useCallback(() => { if (loadError) setProducts(null); setLoadError(false); void listProducts(orgId).then(setProducts).catch(() => { setLoadError(true); setProducts((p) => p ?? []); }); }, [orgId, loadError]);
   // grade-code H2/H3: active-flag guard (last org wins, not last response) + a
   // distinct error state (not "no products").
   useEffect(() => { let active = true; setProducts(null); setLoadError(false); void listProducts(orgId).then((r) => { if (active) setProducts(r); }).catch(() => { if (active) { setLoadError(true); setProducts([]); } }); return () => { active = false; }; }, [orgId]);
@@ -499,7 +543,8 @@ function OrdersTab({ orgId }: { orgId: string }): JSX.Element {
   const [orders, setOrders] = useState<Order[] | null>(null);
   const [loadError, setLoadError] = useState(false);
   // CM-R2-2 — same reload-honesty fix as products (the quotes precedent).
-  const reload = useCallback(() => { setLoadError(false); void listOrders(orgId).then(setOrders).catch(() => setLoadError(true)); }, [orgId]);
+  // CM-R2-2-WINDOW — same retry window as products.
+  const reload = useCallback(() => { if (loadError) setOrders(null); setLoadError(false); void listOrders(orgId).then(setOrders).catch(() => { setLoadError(true); setOrders((o) => o ?? []); }); }, [orgId, loadError]);
   useEffect(() => { let active = true; setOrders(null); setLoadError(false); void listOrders(orgId).then((r) => { if (active) setOrders(r); }).catch(() => { if (active) { setLoadError(true); setOrders([]); } }); return () => { active = false; }; }, [orgId]);
 
   // Collection kit (§4.5 rule 13): gated search + status facet → separate memo.
@@ -659,10 +704,14 @@ function QuoteForm({ orgId, products, onDone }: { orgId: string; products: Produ
 
   const submit = useCallback(async () => {
     if (!productId) { toast.error(t('productRequired')); return; }
+    // ADR 0875 D7 (grade-ux COM2UX-5) — a quantity is a whole number from 1 to 10000;
+    // "0" or "abc" used to become 1 without a word.
+    const qty = Number(quantity);
+    if (!Number.isInteger(qty) || qty < 1 || qty > 10000) { toast.error(t('quantityInvalid')); return; }
     setBusy(true);
     try {
       await createQuote(orgId, {
-        lines: [{ productId, quantity: Number(quantity) || 1, ...(unitPrice.trim() !== '' && Number.isFinite(Number(unitPrice)) ? { unitPrice: Number(unitPrice) } : {}) }],
+        lines: [{ productId, quantity: qty, ...(unitPrice.trim() !== '' && Number.isFinite(Number(unitPrice)) ? { unitPrice: Number(unitPrice) } : {}) }],
         ...(note.trim() ? { note: note.trim() } : {}),
       });
       toast.info(t('created'));

@@ -19,31 +19,33 @@
  *
  * Both arms asserted: a failed read says unknown and surfaces the retry, and a
  * genuinely empty catalog still says empty.
+ *
+ * Sabotage witnesses (w40 probes): mapping a failed catalog read to `[]`, an
+ * error flag that ignores the factory read, an always-on error, gating the
+ * catalog on the factory read, or a no-op Retry each turn a case here red.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, cleanup, screen } from '@testing-library/react';
+import { render, cleanup, screen, fireEvent, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 
-const metrics = vi.hoisted(() => ({ getFactory: vi.fn() }));
-import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
+import type { FactoryMetrics } from '../../../client/kicktodoMetricsClient.js';
+import type { ChallengeSummary } from '../../../client/kicktodoClient.js';
+
+const metrics = vi.hoisted(() => ({ getFactory: vi.fn<() => Promise<FactoryMetrics>>() }));
 vi.mock('../../../client/kicktodoMetricsClient.js', async (importOriginal) => {
   const orig = await importOriginal<Record<string, unknown>>();
   return { ...orig, getFactory: metrics.getFactory };
 });
 
-const kt = vi.hoisted(() => ({ listChallenges: vi.fn() }));
+const kt = vi.hoisted(() => ({ listChallenges: vi.fn<() => Promise<ChallengeSummary[]>>() }));
 vi.mock('../../../client/kicktodoClient.js', async (importOriginal) => {
   const orig = await importOriginal<Record<string, unknown>>();
   return { ...orig, listChallenges: kt.listChallenges };
 });
 
-vi.mock('../../../featureToggles/FeatureAccessContext.js', () => ({
-  useFeatureAccess: () => makeFeatureAccess({ enabled: true, status: 'on', isBeta: false, variant: null, loading: false }),
-}));
-
 import { CatalogHealthPage } from '../CatalogHealthPage.js';
 
-const FACTORY = { candidatesByState: { intake: 2 }, publishRate: { value: 1, withheld: false } };
+const FACTORY: FactoryMetrics = { candidatesByState: { intake: 2 }, publishRate: { value: 1, contributors: 5 } };
 
 function view(): void {
   render(<MemoryRouter><CatalogHealthPage /></MemoryRouter>);
@@ -81,6 +83,11 @@ describe('UX-KTA-3 — the error + retry state is reachable at all', () => {
     metrics.getFactory.mockRejectedValue(new Error('factory_500'));
     view();
     expect(await screen.findByText(/Could not load content health/i)).toBeTruthy();
+    // …and its Retry actually re-reads and clears the error once the read heals.
+    metrics.getFactory.mockResolvedValue(FACTORY);
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    await waitFor(() => expect(screen.queryByText(/Could not load content health/i)).toBeNull());
+    expect(metrics.getFactory).toHaveBeenCalledTimes(2);
   });
 
   it('SUCCESS: no error Notice when both reads succeed', async () => {

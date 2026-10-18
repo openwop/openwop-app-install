@@ -46,6 +46,9 @@
 import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { declarePiiFields } from '../../host/dataClassification.js';
 import { registerSubjectEraser, registerSubjectKeyResolver } from '../../host/subjectErasure.js';
+import { subjectKeyForms } from '../../host/subjectErasureRedaction.js';
+import { onMemberAuthorityLost } from '../../host/accessControlService.js';
+import { clearTaskAssignee } from './entities/tasks.js';
 import { createLogger } from '../../observability/logger.js';
 import { resolveContactIdByIdentifier, normalizeIdentifierValue, type ContactIdentifier } from './contactIdentityService.js';
 import { resolveContactSurvivor, type Contact, type ContactKeyClaim } from './contactsService.js';
@@ -388,9 +391,25 @@ export async function resolveCrmSubjectKeys(tenantId: string, subjectKey: string
   return out;
 }
 
+/** ADR 0882 D4 — a task's member assignee (CSM plays write member subjects
+ *  there). Matched against every form of the subject key; the task is kept. */
+export async function eraseCrmTaskAssignees(tenantId: string, subjectKey: string): Promise<void> {
+  if (!tenantId || !subjectKey) return; // fail-closed — never a tenant-wide sweep
+  const { forms } = subjectKeyForms(subjectKey);
+  await clearTaskAssignee(tenantId, (a) => forms.has(a), false);
+}
+
 export function registerCrmErasure(): void {
   registerSubjectEraser(eraseCrmSubject);
   registerSubjectKeyResolver(resolveCrmSubjectKeys);
+  registerSubjectEraser(eraseCrmTaskAssignees);
+  // Not declared PII: a member subject is an opaque id (this module's own rule
+  // above), and declaring it would reclassify the whole `crm:task` store. The
+  // DSAR still reaches it through the eraser.
+  onMemberAuthorityLost('crm-task-assignee', async (lost) => {
+    if (lost.reason !== 'removed' || lost.orgId !== lost.tenantId) return 0;
+    return clearTaskAssignee(lost.tenantId, (a) => a === lost.subject, true);
+  });
 
   // Field-level declarations for the stores this module erases, following the
   // repo's existing reasoning: declare the person-identifying values and the free

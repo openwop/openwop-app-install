@@ -24,9 +24,18 @@
  * falsify is an arm nobody can safely delete later. The fourth test isolates the
  * probe arm by pre-warming `demoMode` successfully and failing only the banner's
  * own later read — the narrow real case where the two diverge.
+ *
+ * Absence is only asserted AFTER the reads settle (the demoMode status reads
+ * 'clean' and both capability reads were made) — never on a fixed sleep, which
+ * passes while the probe is still in flight. Copy is pinned as en literals.
+ *
+ * Sabotage that turns it red: a storage regex that never matches, dropping the
+ * announce effect, dropping the `probe === 'failed'` arm, rendering or speaking
+ * a durable host's `probe === 0`, mapping a failed read to 0, or adding a
+ * concrete durability claim to the "unknown" copy.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, cleanup, waitFor } from '@testing-library/react';
+import { render, screen, cleanup, waitFor, act } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 
 vi.mock('../../auth/useAuth.js', () => ({ useAuth: () => ({ user: null }) }));
@@ -48,6 +57,14 @@ const DURABLE = { capabilities: { hostSurfaces: [{ name: 'host.cache', supported
 
 const draw = () => render(<MemoryRouter><InMemoryHostBanner /></MemoryRouter>);
 
+/** Settle signal for a DURABLE host: demoMode resolved 'clean' and the banner's
+ *  own probe read has been made and drained. */
+async function settledDurable(): Promise<void> {
+  await waitFor(() => expect(demoMode.demoModeStatus()).toBe('clean'));
+  await waitFor(() => expect(getCapabilities).toHaveBeenCalledTimes(2));
+  await act(async () => { await Promise.all(getCapabilities.mock.results.map((r) => r.value)); });
+}
+
 beforeEach(() => {
   localStorage.clear();
   demoMode.clearDemoModeCache();
@@ -57,10 +74,12 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe('CAPUX-1 — the in-memory disclosure distinguishes unknown from off', () => {
-  it('in-memory host: discloses', async () => {
+  it('in-memory host: discloses — with the demo copy and the privacy link', async () => {
     getCapabilities.mockResolvedValue(IN_MEM);
     draw();
-    await waitFor(() => expect(screen.getByRole('status')).toBeTruthy());
+    await waitFor(() => expect(screen.getByRole('status').textContent).toContain('Anonymous demo session.'));
+    expect(screen.getByRole('status').textContent).not.toContain('Storage durability unknown.');
+    expect(screen.getByRole('link', { name: /Privacy & cookies/ }).getAttribute('href')).toBe('/privacy');
   });
 
   it('a FAILED read is ANNOUNCED — this region mounts with its content, so the live role alone says nothing', async () => {
@@ -68,21 +87,20 @@ describe('CAPUX-1 — the in-memory disclosure distinguishes unknown from off', 
     draw();
     await screen.findByRole('status');
     await waitFor(() => expect(vi.mocked(announce).mock.calls.length).toBeGreaterThan(0));
-    expect(String(vi.mocked(announce).mock.calls[0]?.[0] ?? '')).toContain('unknown');
+    expect(String(vi.mocked(announce).mock.calls[0]?.[0] ?? '')).toMatch(/^Storage durability unknown\. We couldn't read this host's storage configuration/);
   });
 
   it('a durable host announces NOTHING — the primitive must not fire when there is nothing to disclose', async () => {
     getCapabilities.mockResolvedValue(DURABLE);
     draw();
-    await new Promise((r) => setTimeout(r, 20));
+    await settledDurable();
     expect(vi.mocked(announce)).not.toHaveBeenCalled();
   });
 
   it('durable host: stays silent — silence is correct when we KNOW there is nothing to disclose', async () => {
     getCapabilities.mockResolvedValue(DURABLE);
     draw();
-    // Give the probe a chance to resolve, then assert nothing rendered.
-    await new Promise((r) => setTimeout(r, 20));
+    await settledDurable();
     expect(screen.queryByRole('status')).toBeNull();
   });
 
@@ -95,15 +113,20 @@ describe('CAPUX-1 — the in-memory disclosure distinguishes unknown from off', 
     getCapabilities.mockRejectedValue(new Error('network'));
     draw();
     const el = await screen.findByRole('status');
-    expect(el.textContent ?? '').toContain('unknown');
+    expect(el.textContent ?? '').toContain('Storage durability unknown.');
+    expect(el.textContent ?? '').not.toContain('not durable');
   });
 
   it('FAILED read: says the durability is unknown, rather than implying it by omission', async () => {
     getCapabilities.mockRejectedValue(new Error('network'));
     draw();
     const el = await screen.findByRole('status');
-    expect(el.textContent ?? '').toContain('unknown');
-    // And it must NOT assert either concrete claim it cannot support.
-    expect(el.textContent ?? '').not.toContain('in-memory');
+    expect(el.textContent ?? '').toContain('Storage durability unknown.');
+    // And it must NOT assert either concrete claim it cannot support: the
+    // non-durable copy ("Data on this host is not durable … in memory") or the
+    // demo copy.
+    expect(el.textContent ?? '').not.toContain('not durable');
+    expect(el.textContent ?? '').not.toContain('in memory');
+    expect(el.textContent ?? '').not.toContain('Anonymous demo session');
   });
 });

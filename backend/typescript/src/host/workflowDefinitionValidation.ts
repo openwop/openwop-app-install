@@ -19,7 +19,7 @@ import { OpenwopError } from '../types.js';
 import { parseNodeRef } from './chainPinRule.js';
 import type { EdgeDef, WorkflowDefinition } from '../executor/types.js';
 import { resolveCapabilityFlag, subWorkflowInputMappingHonoured } from './capabilityOverlay.js';
-import { dispatchCapability, validateDispatchFanOutConfig } from './dispatchFanOut.js';
+import { dispatchCapability, fanOutAdmissionRefusal, validateDispatchFanOutConfig } from './dispatchFanOut.js';
 import { normalizeEdgeCondition } from './edgeConditionMapping.js';
 import {
   COMPENSATION_ORDERING_MODEL,
@@ -132,7 +132,8 @@ export function checkMappingCapability(
           'validation_error',
           `Node '${node.nodeId}' (core.dispatch) joinPolicy.mode='${jp.mode}' is not one of ${JSON.stringify(cap.joinModes)}.`,
           400,
-          { nodeId: node.nodeId },
+          // RFC 0243: the refusal at load names the v2 seat the node lacks.
+          { nodeId: node.nodeId, requiredCapability: 'agents.fanOut.joinModes' },
         );
       }
       // RFC 0118 §seam amendment (openwop#789): the SECOND join axis (`onChildFailure`) is
@@ -146,7 +147,7 @@ export function checkMappingCapability(
           'validation_error',
           `Node '${node.nodeId}' (core.dispatch) joinPolicy.onChildFailure='${jp.onChildFailure}' is not one of ${JSON.stringify(cap.onChildFailureModes)} (this host does not implement in-flight child cancellation).`,
           400,
-          { nodeId: node.nodeId },
+          { nodeId: node.nodeId, requiredCapability: 'agents.fanOut.onChildFailureModes' },
         );
       }
       const fanOutErr = validateDispatchFanOutConfig(
@@ -164,7 +165,10 @@ export function checkMappingCapability(
         (cap.fanOutPolicies as readonly string[]).includes('parallel'),
       );
       if (fanOutErr) {
-        throw new OpenwopError('validation_error', `Node '${node.nodeId}' (core.dispatch) ${fanOutErr.message}.`, 400, { nodeId: node.nodeId });
+        throw new OpenwopError('validation_error', `Node '${node.nodeId}' (core.dispatch) ${fanOutErr.message}.`, 400, {
+          nodeId: node.nodeId,
+          ...(fanOutErr.requiredCapability ? { requiredCapability: fanOutErr.requiredCapability } : {}),
+        });
       }
       const workerDispatchModel = (cfg.workerDispatchModel ?? 'child-run') as unknown;
       if (typeof workerDispatchModel === 'string' && workerDispatchModel !== 'child-run') {
@@ -660,4 +664,32 @@ export function validateWorkflowDefinition(raw: unknown): WorkflowDefinition {
     def.settings = obj.settings as WorkflowDefinition['settings'];
   }
   return def;
+}
+
+/**
+ * RFC 0243 — the createRun half of the fan-out refusal. A host MUST refuse a
+ * workflow whose `core.dispatch` node pins what `agents.fanOut` does not admit
+ * when it loads it (`checkMappingCapability` above). If such a workflow is
+ * nonetheless readable, `createRun` naming it MUST answer `400 validation_error`
+ * with `details.requiredCapability` and create no run. A stored definition
+ * that predates a narrower advert, or a conformance fixture (loaded without
+ * registration validation, `host/index.ts`), is exactly that case, so
+ * `POST /runs` calls this before any run exists. Judged by
+ * `fanOutAdmissionRefusal`, the same owner the advert reads.
+ */
+export function assertDispatchFanOutAdmitted(
+  nodes: ReadonlyArray<{ nodeId?: string; typeId: string; config?: Record<string, unknown> }> | undefined,
+): void {
+  for (const node of nodes ?? []) {
+    if (node.typeId !== 'core.dispatch') continue;
+    const refusal = fanOutAdmissionRefusal(node.config ?? {});
+    if (refusal) {
+      throw new OpenwopError(
+        'validation_error',
+        `Node '${node.nodeId ?? ''}' (core.dispatch) pins a fan-out this host does not admit: ${refusal.message}.`,
+        400,
+        { nodeId: node.nodeId, requiredCapability: refusal.seat },
+      );
+    }
+  }
 }

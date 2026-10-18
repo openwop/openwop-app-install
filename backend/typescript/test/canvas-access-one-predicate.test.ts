@@ -46,10 +46,11 @@ import { CAMPAIGN_STUDIO_GET_DESIGN_TOOL_ID } from '../src/features/campaign-stu
 import { APP_BUILDER_GET_DESIGN_TOOL_ID } from '../src/features/app-builder/agentTools.js';
 import { dispatcherForTenant } from '../src/routes/uiPlugins.js';
 import { UI_PLUGIN_PROTOCOL } from '../src/host/uiPluginRpc.js';
-import { createLink } from '../src/features/sharing/sharingService.js';
+import { createLink, listLinks } from '../src/features/sharing/sharingService.js';
 import { buildAppBuilderSurface } from '../src/features/app-builder/surface.js';
 import { getNodeRegistry } from '../src/executor/nodeRegistry.js';
 import { MCP_NODE_PREFIX } from '../src/features/app-builder/mcpControlNodes.js';
+import type { NodeContext } from '../src/executor/types.js';
 
 let server: http.Server;
 let BASE = '';
@@ -68,15 +69,24 @@ beforeAll(async () => {
 }, 60_000);
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Client { userId: string; get: (p: string) => Promise<any>; post: (p: string, b?: unknown) => Promise<any>; patch: (p: string, b?: unknown) => Promise<any>; del: (p: string) => Promise<any> }
+interface Res<T> { status: number; body: T }
+interface ErrBody { error: string; message: string }
+interface Client {
+  userId: string;
+  get: <T>(p: string) => Promise<Res<T>>;
+  post: <T>(p: string, b?: unknown) => Promise<Res<T>>;
+  patch: <T>(p: string, b?: unknown) => Promise<Res<T>>;
+  del: <T>(p: string) => Promise<Res<T>>;
+}
 async function loginTo(tenantId: string, who: string): Promise<Client> {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<any> => {
+  const call = async <T>(method: string, path: string, body?: unknown): Promise<Res<T>> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]!; }
-    return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) };
+    const parsed: T = res.status === 204 ? JSON.parse('null') : await res.json().catch(() => undefined);
+    return { status: res.status, body: parsed };
   };
-  const r = await call('POST', '/host/openwop-app/test/login', { email: `${who}-${Date.now()}-${n++}@acme.test`, tenantId });
+  const r = await call<{ user: { userId: string } }>('POST', '/host/openwop-app/test/login', { email: `${who}-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return { userId: r.body.user.userId, get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), patch: (p, b) => call('PATCH', p, b), del: (p) => call('DELETE', p) };
 }
@@ -87,9 +97,9 @@ const P = '/host/openwop-app/projects';
 async function privateProject() {
   const tenantId = `org:cap-${Date.now()}-${n++}`;
   const a = await loginTo(tenantId, 'owner');
-  const orgId = (await a.post('/host/openwop-app/orgs', { name: 'Acme' })).body.orgId as string;
-  const projectId = (await a.post(P, { orgId, name: 'Secret' })).body.id as string;
-  expect((await a.patch(`${P}/${projectId}/visibility`, { visibility: 'private' })).body.visibility).toBe('private');
+  const orgId = (await a.post<{ orgId: string }>('/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
+  const projectId = (await a.post<{ id: string }>(P, { orgId, name: 'Secret' })).body.id;
+  expect((await a.patch<{ visibility: string }>(`${P}/${projectId}/visibility`, { visibility: 'private' })).body.visibility).toBe('private');
   const b = await loginTo(tenantId, 'nonmember');
   await createMember({ tenantId, orgId, subject: b.userId, displayName: 'B', roles: ['viewer'] });
   const canvas = async (canvasTypeId: string, name = 'Secret'): Promise<string> =>
@@ -98,24 +108,23 @@ async function privateProject() {
 }
 
 describe('agent tools read through the shared predicate', () => {
-  const cases: Array<[string, string]> = [
-    [CAD_GET_DESIGN_TOOL_ID, 'canvas.cad'],
-    [DRAWINGS_GET_DESIGN_TOOL_ID, 'canvas.drawing'],
-    [SLIDES_GET_DESIGN_TOOL_ID, 'canvas.slides'],
-    [CAMPAIGN_STUDIO_GET_DESIGN_TOOL_ID, 'canvas.campaign'],
-    [APP_BUILDER_GET_DESIGN_TOOL_ID, 'canvas.app-builder'],
-  ];
-  for (const [tool, type] of cases) {
-    it(`${tool}: the non-member gets not_found; the member reads it`, async () => {
-      const f = await privateProject();
-      const id = await f.canvas(type);
-      const asB = await createAgentToolProvider({ tenantId: f.tenantId, actingUserId: f.b.userId }).executeTool({ name: tool, input: { canvasId: id, orgId: f.orgId } });
-      expect(asB.isError, asB.content).toBe(true);
-      expect(JSON.parse(asB.content)).toMatchObject({ error: 'not_found' });
-      const asA = await createAgentToolProvider({ tenantId: f.tenantId, actingUserId: f.a.userId }).executeTool({ name: tool, input: { canvasId: id, orgId: f.orgId } });
-      expect(asA.isError, asA.content).toBeFalsy();
-    });
+  // Literal titles (one per tool) so a probe can name the ONE lane it breaks.
+  async function toolLane(tool: string, type: string): Promise<void> {
+    const f = await privateProject();
+    const id = await f.canvas(type, 'Secret');
+    const asB = await createAgentToolProvider({ tenantId: f.tenantId, actingUserId: f.b.userId }).executeTool({ name: tool, input: { canvasId: id, orgId: f.orgId } });
+    expect(asB.isError, asB.content).toBe(true);
+    expect(JSON.parse(asB.content)).toMatchObject({ error: 'not_found' });
+    expect(asB.content).not.toContain('"Secret"');
+    const asA = await createAgentToolProvider({ tenantId: f.tenantId, actingUserId: f.a.userId }).executeTool({ name: tool, input: { canvasId: id, orgId: f.orgId } });
+    expect(asA.isError, asA.content).toBeFalsy();
+    expect(asA.content).toContain('"Secret"'); // the member really read the design
   }
+  it('cad get-design: the non-member gets not_found; the member reads it', () => toolLane(CAD_GET_DESIGN_TOOL_ID, 'canvas.cad'));
+  it('drawings get-design: the non-member gets not_found; the member reads it', () => toolLane(DRAWINGS_GET_DESIGN_TOOL_ID, 'canvas.drawing'));
+  it('slides get-design: the non-member gets not_found; the member reads it', () => toolLane(SLIDES_GET_DESIGN_TOOL_ID, 'canvas.slides'));
+  it('campaign-studio get-design: the non-member gets not_found; the member reads it', () => toolLane(CAMPAIGN_STUDIO_GET_DESIGN_TOOL_ID, 'canvas.campaign'));
+  it('app-builder get-design: the non-member gets not_found; the member reads it', () => toolLane(APP_BUILDER_GET_DESIGN_TOOL_ID, 'canvas.app-builder'));
 });
 
 describe('ui-plugin RPC', () => {
@@ -159,24 +168,53 @@ describe('sharing mint', () => {
   });
 });
 
+describe('sharing owner list — ADR 0887 D2 reads at READ level, not publish level', () => {
+  it('a Viewer who can read an open project canvas sees its title; a private project canvas is withheld from a non-member', async () => {
+    const f = await privateProject();
+    const hiddenId = await f.canvas('canvas.app-builder', 'Hidden plan');
+    const openProject = (await f.a.post<{ id: string }>(P, { orgId: f.orgId, name: 'Open' })).body.id;
+    const openId = (await createCanvasForTenant(f.tenantId, { canvasTypeId: 'canvas.app-builder', name: 'Open plan', ownerSubject: { kind: 'project', id: openProject }, initialState: { name: 'Open plan' } })).canvasId;
+    await createLink(f.tenantId, f.orgId, f.a.userId, { resourceType: 'app_builder_canvas', resourceId: hiddenId });
+    await createLink(f.tenantId, f.orgId, f.a.userId, { resourceType: 'app_builder_canvas', resourceId: openId });
+    const asB = await listLinks(f.tenantId, f.orgId, f.b.userId);
+    const open = asB.find((l) => l.resourceId === openId)!;
+    const hidden = asB.find((l) => l.resourceId === hiddenId)!;
+    // B (an org Viewer) can READ the open project's canvas but could not PUBLISH it:
+    // read mode names it. Publish-level redaction would have withheld it (architect M3).
+    expect(open.cardRedacted).toBeUndefined();
+    expect(open.cardTitle).toBe('Open plan');
+    expect(hidden.cardRedacted).toBe(true);
+    expect(JSON.stringify(hidden)).not.toContain('Hidden plan');
+  });
+});
+
 describe('documents lanes', () => {
   const D = (orgId: string) => `/host/openwop-app/documents/orgs/${encodeURIComponent(orgId)}`;
 
   it('canvas-sources hides a private project canvas from a non-member, shows it to the member', async () => {
     const f = await privateProject();
     const id = await f.canvas('canvas.drawing', 'Hidden sketch');
-    const asB = await f.b.get(`${D(f.orgId)}/canvas-sources`);
+    const asB = await f.b.get<{ canvases: { canvasId: string }[] }>(`${D(f.orgId)}/canvas-sources`);
     expect(asB.status).toBe(200);
-    expect((asB.body.canvases as Array<{ canvasId: string }>).map((c) => c.canvasId)).not.toContain(id);
-    const asA = await f.a.get(`${D(f.orgId)}/canvas-sources`);
-    expect((asA.body.canvases as Array<{ canvasId: string }>).map((c) => c.canvasId)).toContain(id);
+    expect(asB.body.canvases.map((c) => c.canvasId)).not.toContain(id);
+    const asA = await f.a.get<{ canvases: { canvasId: string }[] }>(`${D(f.orgId)}/canvas-sources`);
+    expect(asA.status).toBe(200);
+    expect(asA.body.canvases.map((c) => c.canvasId)).toContain(id);
   });
 
   it('DELETE follows the ONE project policy: a viewer is refused, and workspace:write reaches every project (ADR 0054 D5)', async () => {
     const f = await privateProject();
     const id = await f.canvas('canvas.drawing');
     // A viewer outside the project: refused (scope first — never a delete).
-    expect((await f.b.del(`${D(f.orgId)}/canvases/${encodeURIComponent(id)}`)).status).toBe(403);
+    // DOUBLE GATE (recorded): the lane's shared predicate (`getCanvasForCaller`) never
+    // decides this case — B stops at the workspace:write floor, and C below is
+    // admitted by ADR 0054 D5 policy, so probe w47g1-cap-del-pred is vacuous BY
+    // DESIGN; the predicate itself is witnessed by the canvas-sources and
+    // listCanvasesForCaller cases (probe w47g1-cap-list-filter).
+    const refused = await f.b.del<ErrBody>(`${D(f.orgId)}/canvases/${encodeURIComponent(id)}`);
+    expect(refused.status).toBe(403);
+    expect(refused.body.error).toBe('forbidden_scope');
+    expect(refused.body.message).toMatch(/workspace:write/);
     expect(await getCanvasForTenant(f.tenantId, id)).not.toBeNull();
     // An org EDITOR outside the private project: allowed BY POLICY — `levelFor`
     // grants write on every project to workspace:write (membership only widens
@@ -185,6 +223,7 @@ describe('documents lanes', () => {
     const c = await loginTo(f.tenantId, 'editor');
     await createMember({ tenantId: f.tenantId, orgId: f.orgId, subject: c.userId, displayName: 'C', roles: ['editor'] });
     expect((await c.del(`${D(f.orgId)}/canvases/${encodeURIComponent(id)}`)).status).toBe(204);
+    expect(await getCanvasForTenant(f.tenantId, id)).toBeNull();
   });
 });
 
@@ -202,14 +241,14 @@ describe('app-builder workflow surface + MCP node', () => {
     const id = await f.canvas('canvas.app-builder');
     const node = await getNodeRegistry().resolve(`${MCP_NODE_PREFIX}get-design`);
     expect(node).toBeTruthy();
-    const ctx = (actingUserId: string) => ({
+    const ctx = (actingUserId: string): NodeContext => ({
       runId: 'mcp-run', nodeId: 'n', tenantId: f.tenantId, actingUserId, inputs: { canvasId: id },
       config: {}, configurable: {}, attempt: 1, secrets: {}, emit: async () => ({ eventId: '', sequence: 0 }),
     });
-    const asB = await node!.execute(ctx(f.b.userId) as never);
+    const asB = await node!.execute(ctx(f.b.userId));
     expect(asB).toMatchObject({ status: 'failure', error: { code: 'not_found' } });
-    const asA = await node!.execute(ctx(f.a.userId) as never);
-    expect(asA.status).toBe('success');
+    const asA = await node!.execute(ctx(f.a.userId));
+    expect(asA).toMatchObject({ status: 'success', outputs: { canvasId: id, version: 1 } });
   });
 });
 

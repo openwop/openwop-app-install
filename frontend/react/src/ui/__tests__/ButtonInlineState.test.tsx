@@ -3,7 +3,9 @@
  * Pins: variant→class mapping is EXACTLY the existing CSS vocabulary (adoption
  * is a no-visual-change refactor); type defaults to "button" (no accidental
  * form submit); loading disables + aria-busy with the label still visible;
- * InlineState failed announces and is never a silent muted paragraph.
+ * InlineState failed announces and is never a silent muted paragraph — and an
+ * announcing failure carries no role=alert of its own (DS-8: never two regions
+ * for one message).
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, cleanup } from '@testing-library/react';
@@ -16,7 +18,10 @@ vi.mock('../announce.js', async (importOriginal) => {
 });
 import { announce } from '../announce.js';
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.mocked(announce).mockReset();
+});
 
 describe('Button', () => {
   it('maps variants onto the existing class vocabulary', () => {
@@ -59,6 +64,10 @@ describe('InlineState', () => {
   it('failed announces assertively and renders the retry action', () => {
     render(<InlineState kind="failed" message="Could not load" announce="Could not load" action={<Button variant="quiet" size="sm">Retry</Button>} />);
     expect(vi.mocked(announce)).toHaveBeenCalledWith('Could not load', { assertive: true });
+    expect(vi.mocked(announce)).toHaveBeenCalledTimes(1);
+    // DS-8: an announcing InlineState carries NO live role of its own — a region
+    // AND the shell announcement would speak the failure twice.
+    expect(screen.queryByRole('alert')).toBeNull();
     expect(screen.getByText('Could not load')).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Retry' })).toBeTruthy();
   });
@@ -72,7 +81,9 @@ describe('InlineState', () => {
     const { rerender, container } = render(<InlineState kind="loading" />);
     expect(container.querySelector('[aria-busy="true"]')).toBeTruthy();
     rerender(<InlineState kind="empty" message="Nothing yet" />);
+    expect(screen.getByText('Nothing yet')).toBeTruthy();
     expect(container.querySelector('[role="alert"], [aria-busy]')).toBeNull();
+    expect(vi.mocked(announce)).not.toHaveBeenCalled();
   });
 
   it('EmptyRow spans the table', () => {

@@ -12,6 +12,7 @@
  * ACTION tool returns a typed error.
  */
 
+import { resolveFrozenAiDefault } from '../../host/runAiDefault.js';
 import { registerFeatureAgentTool } from '../../host/agentToolProvider.js';
 import { hasKicktodoManageAuthority } from '../featureRoute.js';
 import { startWorkflowRun, type StartRunDeps } from '../../host/runStarter.js';
@@ -23,10 +24,11 @@ import { probeProviderCapabilities } from '../../host/modelCapabilityProbe.js';
 import { listSecretRefs, resolveSecret } from '../../byok/secretResolver.js';
 import { isManagedRef, pickCredentialRef, refNamesProvider } from '../../aiProviders/credentialRefLadder.js';
 import { createLogger } from '../../observability/logger.js';
-import { createCandidate, getCandidate, listCandidates, ProhibitedTopicError } from './creatorService.js';
+import { candidateRunKey, createCandidate, getCandidate, listCandidates, ProhibitedTopicError } from './creatorService.js';
 import { getPublication, publicationView } from './publishService.js';
 import { ensureChallengeAuthor } from './challengeAuthorService.js';
 import { CHALLENGE_FACTORY_WORKFLOW_ID } from './builtinWorkflows.js';
+import { PLAN_DAILY_MINUTES, PLAN_DURATION_DAYS } from './planService.js';
 
 const log = createLogger('kicktodo.challenge-author-tools');
 
@@ -55,6 +57,11 @@ async function projectCandidate(tenantId: string, candidateId: string): Promise<
     id: c.id,
     topic: c.topic,
     audience: c.audience,
+    // XCH-CA-2 — the intake the creator agreed, so the agent reads it back
+    // rather than re-asking (and can see what a candidate made elsewhere holds).
+    transformation: c.transformation,
+    durationDaysTarget: c.durationDaysTarget,
+    dailyMinutesTarget: c.dailyMinutesTarget,
     state: c.state,
     riskTier: c.riskTier,
     hasDossier: Boolean(c.dossier),
@@ -101,12 +108,28 @@ export async function runFactoryRunTool(deps: StartRunDeps, input: Record<string
   const candidateIdInput = typeof input.candidateId === 'string' ? input.candidateId.trim() : '';
   const topic = typeof input.topic === 'string' ? input.topic.trim() : '';
   const audience = typeof input.audience === 'string' ? input.audience.trim() : '';
+  // XCH-CA-2 — the intake the prompt collects (transformation, duration, daily
+  // minutes) reaches the candidate instead of being replaced by hard-coded
+  // defaults. Bounds are the plan validator's own (PLAN_DURATION_DAYS /
+  // PLAN_DAILY_MINUTES), so an accepted target is one a plan can satisfy.
+  const transformation = typeof input.transformation === 'string' ? input.transformation.trim() : '';
+  const durationDays = intakeInt(input.durationDays, PLAN_DURATION_DAYS, 'durationDays');
+  const dailyMinutes = intakeInt(input.dailyMinutes, PLAN_DAILY_MINUTES, 'dailyMinutes');
+  // XCH-CA-1 — the checkpoint cadence the creator chose. Only the two cadences
+  // the executor honours exist (lessonAssembly.ts CheckpointCadence).
+  const cadenceRaw = typeof input.checkpointEvery === 'string' ? input.checkpointEvery.trim() : '';
+  if (cadenceRaw && cadenceRaw !== 'outline-only' && cadenceRaw !== 'batched') {
+    return { content: JSON.stringify({ error: 'validation_error', message: '`checkpointEvery` must be "batched" or "outline-only".' }), isError: true };
+  }
+  for (const v of [durationDays, dailyMinutes]) if (v !== undefined && typeof v !== 'number') return v;
   // Cheap, I/O-free argument validation runs BEFORE the adapter pre-flight so a
   // malformed call still gets the precise `validation_error` it deserves rather
   // than a config diagnosis that isn't its actual problem.
   if (!candidateIdInput && !topic) {
     return { content: JSON.stringify({ error: 'validation_error', message: 'Pass a `candidateId` or a `topic` to run the Factory.' }), isError: true };
   }
+  const imageArgs = imageArgsError(input);
+  if (imageArgs) return imageArgs;
   // PRE-FLIGHT (2026-07-25 incident). The Factory's research spine is fail-closed
   // on demo sources — `recordDossier` throws `StubSourceError` when any source
   // carries `engine: 'stub' | 'demo'`. With no live search adapter configured
@@ -143,8 +166,13 @@ export async function runFactoryRunTool(deps: StartRunDeps, input: Record<string
   // "nothing was created" contract as the search pre-flight, because the old
   // failure (KTF-AG-1) was a run that started, burned a candidate and died at
   // `extract-claims` with `byok_required`.
-  const ai = await resolveFactoryAi(deps, scope.tenantId, input);
+  const ai = await resolveFactoryAi(scope.tenantId, input);
   if ('error' in ai) return ai.error;
+  // KTF-LB-1 / XCH-CA-5 — lesson images only when the creator asked for them,
+  // pre-flighted like the AI leg so a media run cannot start and then die at
+  // the first lesson for want of an image key.
+  const image = await resolveFactoryImage(scope.tenantId, input);
+  if (image && 'error' in image) return image.error;
 
   // Resolve the candidate: an existing id, or create one from a topic.
   let candidateId: string;
@@ -156,14 +184,23 @@ export async function runFactoryRunTool(deps: StartRunDeps, input: Record<string
     candidateId = existing.id;
   } else if (topic) {
     try {
+      const intake = {
+        topic,
+        audience,
+        transformation,
+        durationDaysTarget: typeof durationDays === 'number' ? durationDays : 14,
+        dailyMinutesTarget: typeof dailyMinutes === 'number' ? dailyMinutes : 15,
+      };
+      // KTFAC-1 — nothing per-CALL reaches a tool (the tool dispatcher passes
+      // only the name and input; the provider call id is not threaded through), so the most
+      // stable key is the chat TURN's run id + the intake. A retried call in the
+      // same turn converges on one candidate; a new turn is a new ask and mints
+      // fresh. Runless callers (direct tests) keep the fresh-id behaviour.
       const created = await createCandidate({
         tenantId: scope.tenantId,
         createdBy: scope.actingUserId,
-        topic,
-        audience,
-        transformation: '',
-        durationDaysTarget: 14,
-        dailyMinutesTarget: 15,
+        ...intake,
+        ...(scope.runId ? { idempotencyKey: candidateRunKey(scope.runId, KICKTODO_FACTORY_RUN_TOOL_ID, intake) } : {}),
       });
       candidateId = created.id;
     } catch (err) {
@@ -192,15 +229,17 @@ export async function runFactoryRunTool(deps: StartRunDeps, input: Record<string
       topic: cand?.topic ?? topic,
       audience: cand?.audience ?? audience,
       authorSubject: scope.actingUserId,
+      ...(cadenceRaw ? { checkpointEvery: cadenceRaw } : {}),
       // ADR 0706 — the frozen binding rides the run record (replay-neutral):
       // the chain's `provider`/`model`/`credentialRef` params, which the four
       // LLM nodes and the lesson-batch child forward to `ctx.callAI`.
       ...ai.inputs,
+      ...(image ? image.inputs : {}),
     },
     // …and the ref is REGISTERED on the run so `prepareRunSecrets` resolves it
     // into the run's secret set — an input alone never reaches dispatch
-    // (`host/runCredentials.ts`).
-    configurable: ai.configurable,
+    // (`host/runCredentials.ts`). The image key, when there is one, joins it.
+    configurable: image ? mergeCredentialRefs(ai.configurable, image.inputs.imageCredentialRef) : ai.configurable,
     metadata: {
       actingUserId: scope.actingUserId,
       ...(scope.conversationId ? { chatSessionId: scope.conversationId } : {}),
@@ -212,11 +251,83 @@ export async function runFactoryRunTool(deps: StartRunDeps, input: Record<string
   }
   await surfaceDispatchedRun(scope, deps.storage, { runId, agentId: author.rosterId, workflowId: CHALLENGE_FACTORY_WORKFLOW_ID, workflowName: 'Challenge Factory' }, 'kicktodo-factory-run');
   log.info('challenge_factory_dispatched', { tenantId: scope.tenantId, candidateId, runId, provider: ai.inputs.provider, model: ai.inputs.model, aiSource: ai.source });
-  return { content: JSON.stringify({ runId, candidateId, provider: ai.inputs.provider, model: ai.inputs.model }) };
+  return { content: JSON.stringify({ runId, candidateId, provider: ai.inputs.provider, model: ai.inputs.model, checkpointEvery: cadenceRaw || 'batched', generateMedia: image !== null, ...(image ? { imageProvider: image.inputs.imageProvider } : {}) }) };
+}
+
+/** The image providers a creator may name for lesson images. The host's image
+ *  seam also accepts `mock` (test seam only), which is never offered here. */
+const FACTORY_IMAGE_PROVIDERS = ['openai', 'google', 'replicate'] as const;
+const FACTORY_IMAGE_DEFAULT_PROVIDER = 'openai';
+
+type FactoryImageResolution =
+  | { inputs: { generateMedia: true; imageProvider: string; imageCredentialRef: string } }
+  | { error: ToolResult };
+
+/**
+ * KTF-LB-1 / XCH-LB-6 — the lesson-image binding, or null when the creator did
+ * not ask for images. The image leg never borrows the chat provider: image
+ * generation is BYOK-only on this host (no managed image key), so the run needs
+ * a Secrets Vault key for the image provider, checked here with the same
+ * "nothing was created" contract as the AI pre-flight.
+ */
+async function resolveFactoryImage(tenantId: string, input: Record<string, unknown>): Promise<FactoryImageResolution | null> {
+  if (input.generateMedia !== true) return null;
+  const named = typeof input.imageProvider === 'string' ? input.imageProvider.trim() : '';
+  const provider = named || FACTORY_IMAGE_DEFAULT_PROVIDER;
+  const refuse = (why: string): FactoryImageResolution => ({
+    error: {
+      content: JSON.stringify({
+        error: 'image_credential_missing',
+        provider,
+        message:
+          `I can't build this challenge with lesson images yet: images are made with ${provider}, and ${why}. `
+          + `A workspace admin can add a ${provider} key in Settings → Secrets Vault, or you can run it without images. `
+          + NOTHING_CREATED,
+      }),
+      isError: true,
+    },
+  });
+  const refs = await listSecretRefs({ tenantId });
+  const pick = pickCredentialRef(provider, undefined, refs);
+  if (pick.ref === null || isManagedRef(pick.ref)) return refuse(`there's no ${provider} API key in the Secrets Vault`);
+  if (!(await resolveSecret(pick.ref, { tenantId }))) return refuse(`its key (${pick.ref}) can't be read right now`);
+  return { inputs: { generateMedia: true, imageProvider: provider, imageCredentialRef: pick.ref } };
+}
+
+/** The I/O-free half of the image arguments, checked with the other argument
+ *  validation before any pre-flight. */
+function imageArgsError(input: Record<string, unknown>): ToolResult | null {
+  const named = typeof input.imageProvider === 'string' ? input.imageProvider.trim() : '';
+  if (input.generateMedia !== undefined && typeof input.generateMedia !== 'boolean') {
+    return { content: JSON.stringify({ error: 'validation_error', message: '`generateMedia` must be true or false.' }), isError: true };
+  }
+  if (named && input.generateMedia !== true) {
+    return { content: JSON.stringify({ error: 'validation_error', message: 'Pass `imageProvider` only with `generateMedia: true`; on its own it would be ignored.' }), isError: true };
+  }
+  if (named && !(FACTORY_IMAGE_PROVIDERS as readonly string[]).includes(named)) {
+    return { content: JSON.stringify({ error: 'validation_error', message: `\`imageProvider\` must be one of ${FACTORY_IMAGE_PROVIDERS.join(', ')}.` }), isError: true };
+  }
+  return null;
+}
+
+/** Add one more BYOK ref to a run's `configurable.credentialRefs`. */
+function mergeCredentialRefs(configurable: Record<string, unknown>, ref: string): Record<string, unknown> {
+  const existing = Array.isArray(configurable.credentialRefs) ? configurable.credentialRefs.filter((r): r is string => typeof r === 'string') : [];
+  return { ...configurable, credentialRefs: existing.includes(ref) ? existing : [...existing, ref] };
+}
+
+/** An optional integer intake field: absent ⇒ undefined; present ⇒ the number,
+ *  or the typed `validation_error` naming the plan validator's bounds. */
+function intakeInt(raw: unknown, bounds: { min: number; max: number }, name: string): number | ToolResult | undefined {
+  if (raw === undefined || raw === null || raw === '') return undefined;
+  if (typeof raw !== 'number' || !Number.isInteger(raw) || raw < bounds.min || raw > bounds.max) {
+    return { content: JSON.stringify({ error: 'validation_error', message: `\`${name}\` must be a whole number from ${bounds.min} to ${bounds.max}.` }), isError: true };
+  }
+  return raw;
 }
 
 /** Where a factory run's frozen AI binding came from. */
-type FactoryAiSource = 'creator' | 'workspace-default' | 'chain-pin';
+type FactoryAiSource = 'creator' | 'workspace-default' | 'host-default';
 
 /** The frozen AI binding for one factory run, or the typed refusal. */
 type FactoryAiResolution =
@@ -234,9 +345,9 @@ const NOTHING_CREATED = 'Nothing was created and no run was started — your ide
  * dispatch with, and refuse (typed, creator-facing, "nothing was created") when
  * it cannot work:
  *
- *   1. binding: creator choice → workspace ADR 0110 default → the chain's own
- *      pinned defaults (read from the registered definition's `variables[]`,
- *      never duplicated here);
+ *   1. binding: creator choice → workspace ADR 0110 default → the host default
+ *      (ADR 0903: the workspace's active AI binding, else the catalog's
+ *      recommended provider — the chain no longer pins one);
  *   2. capability: the provider must advertise `structured-output` — every
  *      evidence node dispatches with a `responseSchema`, and the RFC 0031 gate
  *      is host-scoped (ADR 0505 correction) so it cannot protect a per-run
@@ -250,7 +361,7 @@ const NOTHING_CREATED = 'Nothing was created and no run was started — your ide
  * so the run uses exactly the key the pre-flight checked — not whichever
  * prefixed ref happens to sort first at dispatch.
  */
-async function resolveFactoryAi(deps: StartRunDeps, tenantId: string, input: Record<string, unknown>): Promise<FactoryAiResolution> {
+async function resolveFactoryAi(tenantId: string, input: Record<string, unknown>): Promise<FactoryAiResolution> {
   // A model or key named without a provider would be silently dropped and the
   // run would go ahead on the default — refuse instead, so the creator's words
   // are either honoured or rejected, never ignored (review of #3889, nit 6).
@@ -261,23 +372,22 @@ async function resolveFactoryAi(deps: StartRunDeps, tenantId: string, input: Rec
   const binding = await resolveIgnitionAiBinding(tenantId, { provider: input.provider, model: input.model, credentialRef: input.credentialRef });
   let provider = binding?.provider ?? '';
   let model = binding?.model ?? '';
-  let source: FactoryAiSource = binding?.source ?? 'chain-pin';
+  let source: FactoryAiSource = binding?.source ?? 'host-default';
   if (!binding) {
-    // The chain's pinned defaults are the SSoT for "no binding" — read them
-    // from the registered definition rather than restating them here.
-    const wf = await deps.hostSuite.workflowCatalog.getWorkflow(CHALLENGE_FACTORY_WORKFLOW_ID);
-    const vars = wf?.definition.variables ?? [];
-    const dflt = (name: string): string => {
-      const v = vars.find((x) => x.name === name);
-      return v && typeof v.defaultValue === 'string' ? v.defaultValue : '';
-    };
-    provider = dflt('provider');
-    model = dflt('model');
-    source = 'chain-pin';
+    // ADR 0903 — the factory chain no longer pins a vendor (its provider/model
+    // params carry no default). With no creator choice and no ADR 0110 default,
+    // use the SAME host default every other run gets: the workspace's active AI
+    // binding, else the catalog's recommended provider. Resolved here, at
+    // ignition, and passed explicitly — so the pre-flight checks the provider
+    // the run will actually use.
+    const host = await resolveFrozenAiDefault(tenantId);
+    provider = host?.provider ?? '';
+    model = host?.model ?? '';
+    source = 'host-default';
   }
   if (!provider) {
-    // No binding and no pinned default — the definition is not the factory we
-    // know. Refuse rather than start a run that resolves "undefined".
+    // No binding and no host default (an empty catalog). Refuse rather than
+    // start a run that resolves "undefined".
     return { error: { content: JSON.stringify({ error: 'ai_provider_unresolved', message: `I can't start the Challenge Factory: this workspace has no AI provider set for it. A workspace admin can set a default AI provider in Settings → Secrets Vault. ${NOTHING_CREATED}` }), isError: true } };
   }
 
@@ -393,7 +503,9 @@ export function registerKicktodoCreatorAgentTools(deps: StartRunDeps): void {
       description:
         'Run the Challenge Factory for a challenge concept: deep web research → evidence → a plan outline you approve on an '
         + 'inline card → validated decomposition → a challenge-publish approval for a DIFFERENT person to decide. Pass an '
-        + 'existing `candidateId`, OR a `topic` (and optional `audience`) to create the candidate and run it in one step. '
+        + 'existing `candidateId`, OR a `topic` (with the agreed `audience`, `transformation`, `durationDays` and `dailyMinutes`) to create the candidate and run it in one step. '
+        + 'Pass `checkpointEvery` as the creator chose: "batched" (the default — the build pauses for approval after each batch of lessons, at most four) or "outline-only" (approve the outline, then the lessons build without further stops). '
+        + 'Pass `generateMedia: true` ONLY when the creator asked for lesson images; it REQUIRES a Secrets Vault key for the image provider, otherwise it returns `image_credential_missing` and starts nothing. Do NOT offer images unprompted. '
         + 'The run NEVER publishes on its own. Returns the started `runId` + `candidateId`. '
         // The model narrates from this text, so the preconditions and the honest
         // limits of the return value belong IN it: a `runId` means the run STARTED,
@@ -414,9 +526,15 @@ export function registerKicktodoCreatorAgentTools(deps: StartRunDeps): void {
           candidateId: { type: 'string', description: 'An existing candidate to run the Factory for.' },
           topic: { type: 'string', description: 'A new challenge concept — creates the candidate, then runs the Factory.' },
           audience: { type: 'string', description: 'Who the challenge is for (optional; used when creating from a topic).' },
+          transformation: { type: 'string', description: 'What a participant will be able to do at the end that they cannot do now (used when creating from a topic).' },
+          durationDays: { type: 'integer', minimum: PLAN_DURATION_DAYS.min, maximum: PLAN_DURATION_DAYS.max, description: 'How many days the challenge runs (used when creating from a topic; default 14).' },
+          dailyMinutes: { type: 'integer', minimum: PLAN_DAILY_MINUTES.min, maximum: PLAN_DAILY_MINUTES.max, description: 'Roughly how many minutes per day (used when creating from a topic; default 15).' },
+          checkpointEvery: { type: 'string', enum: ['batched', 'outline-only'], description: 'The checkpoint cadence the creator chose. Omit for "batched".' },
           provider: { type: 'string', description: 'ONLY when the creator explicitly named an AI provider for this run (e.g. `google`). Otherwise omit — the workspace default applies.' },
           model: { type: 'string', description: 'ONLY with `provider`, when the creator named a specific model id. Otherwise omit.' },
           credentialRef: { type: 'string', description: 'ONLY with `provider`, when the creator named which Secrets Vault key to use. Otherwise omit.' },
+          generateMedia: { type: 'boolean', description: 'true ONLY when the creator asked for an image with each lesson. Images are reviewed at each lesson checkpoint. Omit otherwise.' },
+          imageProvider: { type: 'string', enum: [...FACTORY_IMAGE_PROVIDERS], description: 'ONLY with `generateMedia`, when the creator named an image provider. Otherwise omit (openai).' },
         },
         additionalProperties: false,
       },

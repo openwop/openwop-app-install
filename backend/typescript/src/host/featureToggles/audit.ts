@@ -26,7 +26,7 @@ import type { ToggleConfig } from './types.js';
 
 const log = createLogger('host.featureToggles.audit');
 
-export type ToggleAuditAction = 'feature-toggle.saved' | 'feature-toggle.reverted' | 'feature-toggle.tenant-enabled';
+export type ToggleAuditAction = 'feature-toggle.saved' | 'feature-toggle.reverted' | 'feature-toggle.tenant-enabled' | 'feature-toggle.tenant-disabled';
 
 /** The admin CHOICES of a stored row, reduced to what may live forever. */
 function choicesOf(cfg: ToggleConfig | null): Record<string, unknown> | null {
@@ -62,6 +62,9 @@ export async function recordToggleChange(input: {
   actingTenantId: string;
   before: ToggleConfig | null;
   after: ToggleConfig | null;
+  /** Why the change was made, when it came from a larger action (ADR 0892:
+   *  `bundle:<id>`). A static label, never person data: this row is permanent. */
+  reason?: string;
 }): Promise<void> {
   try {
     await hostExtStorage().appendAudit({
@@ -77,6 +80,7 @@ export async function recordToggleChange(input: {
         before: choicesOf(input.before),
         after: choicesOf(input.after),
         changedTenantOverrides: changedTenantDigests(input.id, input.before, input.after),
+        ...(input.reason ? { reason: input.reason } : {}),
       },
     });
   } catch (err) {

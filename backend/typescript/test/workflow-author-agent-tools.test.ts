@@ -11,17 +11,31 @@
  * (fail-typed without a user; registers through the shared validator/registry).
  *
  * Boots the REAL app — the ADR 0308 D2 registration seam is what's under test.
+ * Since ADR 0822 D1 the acting user is an Editor (every model write lane needs
+ * `workspace:write`); ADR 0791 made `draft` a SEARCH, not the whole catalog.
+ *
+ * Sabotage-witnessed (grade-tests w18, probes `w18g1-t-*`): dropping the tool
+ * registration, the `excluded` spread, the query / typeIds pass-through, the
+ * `get` fail-empty guard, the list or the by-id read, the validate
+ * pass-through or its typed missing-input error, the persist actor guard, its
+ * `/builder/` url, the closed-world check, the other-tenant / built-in conflict
+ * guards, the IDOR read guard, or the index's ownership filter turns a case red.
+ * Workflows here are PROMOTED after persist where a case claims isolation of
+ * the index: an authored draft is born transient, and `catalogVisible` would
+ * otherwise hide it from B a second time, masking a leak (w18 probe
+ * t-list-leak was vacuous on that alone).
  *
  * @see docs/chat-first-port/b1-workflow-author.md
  */
-import http from 'node:http';
 import { readFileSync } from 'node:fs';
-import type { AddressInfo } from 'node:net';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { createMember, createOrg } from '../src/host/accessControlService.js';
 import { createAgentToolProvider, builtinAgentToolIds } from '../src/host/agentToolProvider.js';
-import { registerWorkflow } from '../src/host/workflowsRegistry.js';
+import { registerWorkflow, getRegisteredWorkflowAsync, registerWorkflowDurable } from '../src/host/workflowsRegistry.js';
+import { getOwned } from '../src/host/workflowOwnership.js';
+import { withLifecycle } from '../src/host/workflowLifecycle.js';
+import { buildAuthoringCatalog } from '../src/features/workflow-author/workflowAuthorService.js';
 import { buildWorkflowAuthorSurface } from '../src/features/workflow-author/surface.js';
 import type { BundleScope } from '../src/host/inMemorySurfaces.js';
 import {
@@ -34,7 +48,6 @@ import {
 const TENANT = 'default';
 const USER = 'u-1';
 
-let server: http.Server;
 /** ADR 0822 D1 — every model write lane now carries the builder's
  *  `workspace:write` authority, so the acting user here is an Editor. */
 async function grantEditor(tenantId: string, subject: string): Promise<void> {
@@ -45,13 +58,13 @@ async function grantEditor(tenantId: string, subject: string): Promise<void> {
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
-  const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { void (server.address() as AddressInfo); res(); }); });
+  // The boot registers the feature (and its tools) through the real seam; no
+  // route here is called over HTTP, so no server is started.
+  await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   await grantEditor(TENANT, USER);
   await grantEditor('ws-owner-a', 'u-owner');
   await grantEditor('ws-intruder-b', 'u-owner');
 });
-afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
 function provider(scope: { actingUserId?: string; runId?: string } = {}) {
   return createAgentToolProvider({ tenantId: TENANT, ...scope });
@@ -110,6 +123,8 @@ describe('CFP-1 — draft: the closed-world catalog read, BY SEARCH (ADR 0791)',
     const { parsed } = await draft({ query: 'noop' });
     const noop = parsed.nodes.find((n) => n.typeId === 'core.noop');
     expect(noop, 'core.noop not found for "noop"').toBeDefined();
+    // "each with its full schemas": the entry IS the catalog entry, nothing elided.
+    expect(noop).toEqual(buildAuthoringCatalog().nodes.find((n) => n.typeId === 'core.noop'));
     expect(parsed.nodes.length).toBeLessThanOrEqual(10);
     expect(parsed.matched).toBeGreaterThanOrEqual(parsed.nodes.length);
   });
@@ -136,19 +151,13 @@ describe('CFP-1 — get: read-before-write (fail-empty without a human)', () => 
     expect(JSON.parse(out.content)).toMatchObject({ found: false, workflows: [] });
   });
 
-  it('with an acting user and no id, lists the registered-workflow index', async () => {
-    const out = await provider({ actingUserId: USER }).executeTool({ name: WORKFLOW_AUTHOR_GET_TOOL_ID, input: {} });
-    expect(out.isError).toBeFalsy();
-    expect(Array.isArray((JSON.parse(out.content) as { workflows: unknown[] }).workflows)).toBe(true);
-  });
-
   it('an unknown id is a structured not-found (never a throw)', async () => {
     const out = await provider({ actingUserId: USER }).executeTool({
       name: WORKFLOW_AUTHOR_GET_TOOL_ID,
       input: { workflowId: 'authored.does-not-exist' },
     });
     expect(out.isError).toBeFalsy();
-    expect(JSON.parse(out.content)).toMatchObject({ found: false });
+    expect(JSON.parse(out.content)).toEqual({ found: false });
   });
 });
 
@@ -229,6 +238,13 @@ const persist = (tenantId: string, id: string) =>
   tool(tenantId, OWNER).executeTool({ name: WORKFLOW_AUTHOR_PERSIST_TOOL_ID, input: { definition: noopWorkflow(id) } });
 const getById = (tenantId: string, id: string) =>
   tool(tenantId, OWNER).executeTool({ name: WORKFLOW_AUTHOR_GET_TOOL_ID, input: { workflowId: id } });
+/** The owner SAVES (promotes) its draft — the state in which only the ownership
+ *  filter keeps it out of another tenant's index. */
+const promote = async (id: string): Promise<void> => {
+  const def = await getRegisteredWorkflowAsync(id);
+  expect(def, `${id} must be registered before it is promoted`).not.toBeNull();
+  await registerWorkflowDurable(withLifecycle(def!, { transient: undefined }));
+};
 const index = async (tenantId: string): Promise<string[]> => {
   const out = await tool(tenantId, OWNER).executeTool({ name: WORKFLOW_AUTHOR_GET_TOOL_ID, input: {} });
   return (JSON.parse(out.content) as { workflows: { workflowId: string }[] }).workflows.map((w) => w.workflowId);
@@ -236,11 +252,18 @@ const index = async (tenantId: string): Promise<string[]> => {
 
 describe('B1/HIGH-2 — persist/get are scoped to the owning tenant', () => {
   const w1 = 'authored.owned-by-a';
+  // Setup lives in the hook, not in a case: under --sequence.shuffle a case that
+  // persisted w1 could run AFTER the cases that depend on it.
+  beforeAll(async () => {
+    const out = await persist(A, w1);
+    expect(out.isError, out.content).toBeFalsy();
+    expect(JSON.parse(out.content)).toMatchObject({ workflowId: w1 });
+    await promote(w1);
+  });
 
   it('tenant A persists w1 (records ownership)', async () => {
-    const out = await persist(A, w1);
-    expect(out.isError).toBeFalsy();
-    expect(JSON.parse(out.content)).toMatchObject({ workflowId: w1 });
+    expect(await getOwned(A, w1)).not.toBeNull();
+    expect(await getOwned(B, w1)).toBeNull();
   });
 
   it('tenant B CANNOT overwrite w1 — typed conflict (and A still owns the original)', async () => {
@@ -293,6 +316,7 @@ describe('B1/HIGH-2 — the meta-workflow SURFACE path enforces the same guards'
 
     const persisted = await sA.persistDraft({ definition: noopWorkflow(wSurf) });
     expect(persisted).toMatchObject({ workflowId: wSurf });
+    await promote(wSurf);
 
     await expect(sB.persistDraft({ definition: noopWorkflow(wSurf) })).rejects.toMatchObject({
       code: 'conflict',

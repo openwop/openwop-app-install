@@ -7,6 +7,21 @@
  * structured error feedback — all gated exactly like the HTTP editor path
  * (toggle, acting user, org RBAC). Boots the REAL app (the ADR 0308 D2
  * registration seam is what's under test).
+ *
+ * Authority (/grade-tests w34): `u-stranger` is a SAME-tenant non-member — the
+ * provider is pinned to TENANT and the sole org resolves — so the org-scope
+ * predicate, not a tenant guard, is what refuses it. Sabotage-witnessed: acting
+ * user, toggle, org RBAC, node kind check, the tool's own closed-world
+ * `validateCadDoc` stage, idempotency, CAS, baseVersion, provenance, fail-empty
+ * read, both type pins and the read version each turn a case red.
+ *
+ * W34-CAD-1 (BLOCKED-ON-PRODUCT, pinned `it.fails`): the render NODE drops an
+ * invalid field (`width: '80'`) or an unknown `units` and the tool then reports
+ * SUCCESS with a different model than the one authored — validation runs on the
+ * scrubbed payload. Each it.fails has a fix-probe that turns it red.
+ * W34-CAD-2 (grade-code, no test change): `resolveOrgScope` re-implements the
+ * route's `assertOrgScope` rather than calling it; the non-member case below
+ * witnesses behavioural parity today.
  */
 import http from 'node:http';
 import { readFileSync } from 'node:fs';
@@ -17,7 +32,7 @@ import { createAgentToolProvider, builtinAgentToolIds } from '../src/host/agentT
 import { CAD_GET_DESIGN_TOOL_ID, CAD_RENDER_TOOL_ID } from '../src/features/cad/agentTools.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
-import { createCanvasForTenant, getCanvasForTenant } from '../src/host/canvasSurface.js';
+import { createCanvasForTenant, getCanvasForTenant, listCanvasesForTenant } from '../src/host/canvasSurface.js';
 import { createOrg } from '../src/host/accessControlService.js';
 
 const TENANT = 'default';
@@ -80,10 +95,28 @@ describe('CFP-1 — cad render tool: gates, repair-loop errors, persistence', ()
 
   it('fails closed when the toggle is off (structured, not a throw)', async () => {
     await setCad('off');
-    const out = await provider({ actingUserId: 'u-1' }).executeTool({ name: CAD_RENDER_TOOL_ID, input: { model: VALID_MODEL } });
-    expect(out.isError).toBe(true);
-    expect(JSON.parse(out.content)).toMatchObject({ error: 'feature_disabled' });
-    await setCad('on');
+    try {
+      const out = await provider({ actingUserId: 'u-1' }).executeTool({ name: CAD_RENDER_TOOL_ID, input: { model: VALID_MODEL } });
+      expect(out.isError).toBe(true);
+      expect(JSON.parse(out.content)).toMatchObject({ error: 'feature_disabled' });
+      const read = await provider({ actingUserId: 'u-1' }).executeTool({ name: CAD_GET_DESIGN_TOOL_ID, input: { canvasId: 'canvas-x' } });
+      expect(read.isError).toBe(true);
+      expect(JSON.parse(read.content)).toMatchObject({ error: 'feature_disabled' });
+    } finally {
+      await setCad('on');
+    }
+  });
+
+  it('a same-tenant non-member is forbidden on both tools (the route\'s org-scope authority) and nothing is written', async () => {
+    const before = (await listCanvasesForTenant(TENANT)).length;
+    const stranger = provider({ actingUserId: 'u-stranger' });
+    const write = await stranger.executeTool({ name: CAD_RENDER_TOOL_ID, input: { model: VALID_MODEL } });
+    expect(write.isError).toBe(true);
+    expect(JSON.parse(write.content)).toMatchObject({ error: 'forbidden_scope' });
+    const read = await stranger.executeTool({ name: CAD_GET_DESIGN_TOOL_ID, input: { canvasId: 'canvas-x' } });
+    expect(read.isError).toBe(true);
+    expect(JSON.parse(read.content)).toMatchObject({ error: 'forbidden_scope' });
+    expect((await listCanvasesForTenant(TENANT)).length).toBe(before);
   });
 
   it('returns a validation error the model can act on (the repair loop)', async () => {
@@ -95,6 +128,35 @@ describe('CFP-1 — cad render tool: gates, repair-loop errors, persistence', ()
     const parsed = JSON.parse(out.content) as { error: string };
     expect(parsed.error).toBe('validation_error');
     expect(JSON.stringify(parsed)).toContain('dodecahedron');
+
+    // A model the NODE accepts but the closed-world validator refuses — the
+    // tool's own validateCadDoc stage, with the path the model can act on.
+    const neg = await provider({ actingUserId: 'u-1' }).executeTool({
+      name: CAD_RENDER_TOOL_ID,
+      input: { model: { units: 'mm', solids: [{ kind: 'box', width: -5, height: 10, depth: 10 }] } },
+    });
+    expect(neg.isError).toBe(true);
+    expect(JSON.parse(neg.content)).toMatchObject({ error: 'validation_error', errors: [{ path: 'solids[0].width' }] });
+  });
+
+  it.fails('W34-CAD-1: a non-numeric solid field is a typed validation_error, never silently dropped', async () => {
+    const out = await provider({ actingUserId: 'u-1' }).executeTool({
+      name: CAD_RENDER_TOOL_ID,
+      input: { model: { units: 'mm', solids: [{ kind: 'box', width: '80', height: 10, depth: 10 }] } },
+    });
+    expect(out.isError).toBe(true);
+    expect(JSON.parse(out.content)).toMatchObject({ error: 'validation_error' });
+    expect(out.content).toContain('width');
+  });
+
+  it.fails('W34-CAD-1: an unknown units value is a typed validation_error, never a silent fall-back to mm', async () => {
+    const out = await provider({ actingUserId: 'u-1' }).executeTool({
+      name: CAD_RENDER_TOOL_ID,
+      input: { model: { units: 'furlongs', solids: [{ kind: 'box', width: 10, height: 10, depth: 10 }] } },
+    });
+    expect(out.isError).toBe(true);
+    expect(JSON.parse(out.content)).toMatchObject({ error: 'validation_error' });
+    expect(out.content).toContain('units');
   });
 
   it('creates a real canvas.cad, normalized through the render node, with provenance', async () => {
@@ -129,6 +191,13 @@ describe('CFP-1 — cad render tool: gates, repair-loop errors, persistence', ()
     })).content) as { canvasId: string; version: number };
     expect(ok.canvasId).toBe(created.canvasId);
     expect(ok.version).toBeGreaterThan(created.version);
+    const stored = await getCanvasForTenant(TENANT, created.canvasId);
+    expect((stored?.state as { name?: string }).name).toBe('Bracket v2');
+    expect(stored?.version).toBe(ok.version);
+    // get-design reads back the NEW version (what the next CAS must cite).
+    const read = JSON.parse((await p.executeTool({ name: CAD_GET_DESIGN_TOOL_ID, input: { canvasId: created.canvasId } })).content) as { version: number; model: { name: string } };
+    expect(read.version).toBe(ok.version);
+    expect(read.model.name).toBe('Bracket v2');
 
     const stale = await p.executeTool({
       name: CAD_RENDER_TOOL_ID,
@@ -143,19 +212,39 @@ describe('CFP-1 — cad render tool: gates, repair-loop errors, persistence', ()
     const created = JSON.parse((await p.executeTool({ name: CAD_RENDER_TOOL_ID, input: { model: VALID_MODEL } })).content) as { canvasId: string };
     const out = await p.executeTool({ name: CAD_RENDER_TOOL_ID, input: { model: VALID_MODEL, canvasId: created.canvasId } });
     expect(out.isError).toBe(true);
+    // The error KIND, not just the hint: a CAS conflict also mentions get-design.
+    expect(JSON.parse(out.content)).toMatchObject({ error: 'validation_error' });
     expect(JSON.parse(out.content).message).toContain('get-design');
+  });
+
+  it('never overwrites a canvas of another type (type-pinned load on both tools)', async () => {
+    const drawingState = { title: 'Scene', width: 400, height: 300, shapes: [{ kind: 'rect', x: 10, y: 10, width: 50, height: 40, fill: 'tomato' }] };
+    const drawing = await createCanvasForTenant(TENANT, {
+      canvasTypeId: 'canvas.drawing', name: 'Scene', ownerSubject: { kind: 'user', id: 'u-1' }, initialState: drawingState,
+    });
+    const p = provider({ actingUserId: 'u-1' });
+    const read = await p.executeTool({ name: CAD_GET_DESIGN_TOOL_ID, input: { canvasId: drawing.canvasId } });
+    expect(read.isError).toBe(true);
+    expect(JSON.parse(read.content)).toMatchObject({ error: 'not_found' });
+    const write = await p.executeTool({ name: CAD_RENDER_TOOL_ID, input: { model: VALID_MODEL, canvasId: drawing.canvasId, baseVersion: 1 } });
+    expect(write.isError).toBe(true);
+    expect(JSON.parse(write.content)).toMatchObject({ error: 'not_found' });
+    const after = await getCanvasForTenant(TENANT, drawing.canvasId);
+    expect(after?.canvasTypeId).toBe('canvas.drawing');
+    expect(after?.version).toBe(1);
+    expect(after?.state).toEqual(drawingState);
   });
 });
 
 describe('CFP-1 — cad get-design: the canvas-state read path', () => {
   it('reads the current model + CAS version; cross-type and missing ids are not found', async () => {
     const p = provider({ actingUserId: 'u-1' });
-    const created = JSON.parse((await p.executeTool({ name: CAD_RENDER_TOOL_ID, input: { model: VALID_MODEL } })).content) as { canvasId: string };
+    const created = JSON.parse((await p.executeTool({ name: CAD_RENDER_TOOL_ID, input: { model: VALID_MODEL } })).content) as { canvasId: string; version: number };
     const out = await p.executeTool({ name: CAD_GET_DESIGN_TOOL_ID, input: { canvasId: created.canvasId } });
     expect(out.isError).toBeFalsy();
     const res = JSON.parse(out.content) as { version: number; model: { name: string } };
     expect(res.model.name).toBe('Bracket');
-    expect(res.version).toBeGreaterThanOrEqual(1);
+    expect(res.version).toBe(created.version);
 
     const missing = await p.executeTool({ name: CAD_GET_DESIGN_TOOL_ID, input: { canvasId: 'canvas-nope' } });
     expect(missing.isError).toBe(true);
@@ -172,7 +261,7 @@ describe('CFP-1 — cad get-design: the canvas-state read path', () => {
     const foreign = await createCanvasForTenant('other-tenant', {
       canvasTypeId: 'canvas.cad',
       name: 'Foreign',
-      initialState: { name: 'Foreign', units: 'mm', solids: [{ kind: 'box', x: 0, y: 0, z: 0, width: 10, height: 10, depth: 10 }] } as never,
+      initialState: { name: 'Foreign', units: 'mm', solids: [{ kind: 'box', x: 0, y: 0, z: 0, width: 10, height: 10, depth: 10 }] },
     });
     const out = await provider({ actingUserId: 'u-1' }).executeTool({ name: CAD_GET_DESIGN_TOOL_ID, input: { canvasId: foreign.canvasId } });
     expect(out.isError).toBe(true);

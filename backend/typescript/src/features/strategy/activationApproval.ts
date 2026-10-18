@@ -156,17 +156,23 @@ async function decideStrategyActivation(
     // approval refer to something that no longer exists. Close it with the reason; this
     // runs before the CAS, so nothing has been consumed (the R2 ordering lesson below).
     // No `decidedBy`: the approver did not choose this outcome.
-    if (approval.strategyContentDigest) {
-      if (bindingDigest(strategyBindingOf(current)) !== approval.strategyContentDigest) {
-        await resolveApproval(approvalId, {
-          status: 'rejected',
-          note: "The strategy's content or organization changed after it was submitted, so this review was closed. Re-submit it to activate.",
-        });
-        strategyMutated({ entity: 'strategy', verb: 'activation-withdrawn', tenantId, actor: decidedBy, strategyId, orgId, changed: ['binding'] });
-        throw new OpenwopError('conflict', "This strategy changed after it was submitted, so the activation cannot be applied. The review has been closed; it needs re-submitting.", 409, { strategyId, reason: 'content_changed' });
-      }
-    } else {
-      log.warn('strategy_activation_unbound_legacy', { tenantId, approvalId, strategyId });
+    // #4507 — a row with NO digest (queued before ADR 0845 D2) can no longer be
+    // approved: there is nothing to prove the approver saw what would activate. The
+    // status-only fallback that admitted it is gone (prod held 0 such rows); it is
+    // closed the same way a changed binding is.
+    if (!approval.strategyContentDigest || bindingDigest(strategyBindingOf(current)) !== approval.strategyContentDigest) {
+      const legacy = !approval.strategyContentDigest;
+      await resolveApproval(approvalId, {
+        status: 'rejected',
+        note: legacy
+          ? 'This review was submitted before activations recorded what was approved, so it was closed. Re-submit it to activate.'
+          : "The strategy's content or organization changed after it was submitted, so this review was closed. Re-submit it to activate.",
+      });
+      strategyMutated({ entity: 'strategy', verb: 'activation-withdrawn', tenantId, actor: decidedBy, strategyId, orgId, changed: ['binding'] });
+      throw new OpenwopError('conflict', legacy
+        ? 'This activation was submitted before reviews recorded what was approved, so it cannot be applied. The review has been closed; it needs re-submitting.'
+        : "This strategy changed after it was submitted, so the activation cannot be applied. The review has been closed; it needs re-submitting.",
+      409, { strategyId, reason: legacy ? 'unbound_legacy' : 'content_changed' });
     }
   }
 

@@ -1,7 +1,22 @@
 /**
  * ADR 0099 Phase 3 — the ctx.features['tool-output-compaction'].compact surface
- * (explicit mid-graph compaction) + its toggle gating.
+ * (explicit mid-graph compaction) + its toggle gating, and ADR 0680 D1 (mode and
+ * count args are REFUSED, never defaulted; the pack publishes the enum).
+ *
+ * Sabotages that turn it red (w22 probes): default the mode to `lossy`; drop the
+ * head pass-through; default an unknown mode; skip trim/lowercase; drop a mode
+ * from MODES; accept non-integer counts or floor them at 1; disable the
+ * featureSurfaces toggle gate either way; register the surface under another
+ * id; drop a mode from the pack's input-schema enum.
+ *
+ * Kernel behaviour the surface only forwards (non-JSON pass-through) lives in
+ * `tool-output-compaction-kernel.test.ts`; the requiredPacks version pin lives in
+ * `tool-output-compaction-node-catalog-parity.test.ts` ("the four version legs
+ * move together"), which derives it from the manifest.
  */
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, it, expect, beforeEach, beforeAll, afterAll } from 'vitest';
 import { openSqliteStorage } from '../src/storage/sqlite/index.js';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
@@ -24,8 +39,17 @@ const storage = openSqliteStorage(':memory:');
 const sparse = JSON.stringify({ items: [{ id: 1, tags: [], note: null }, { id: 2, tags: [], note: '' }] }, null, 2);
 
 interface CompactOut { output: string; mode: string; originalChars: number; compactedChars: number }
-const callCompact = (fn: (a: Record<string, unknown>) => Promise<unknown>, args: Record<string, unknown>) =>
-  fn(args) as Promise<CompactOut>;
+function isCompactOut(v: unknown): v is CompactOut {
+  if (!v || typeof v !== 'object') return false;
+  const o = v as Record<string, unknown>;
+  return typeof o.output === 'string' && typeof o.mode === 'string'
+    && typeof o.originalChars === 'number' && typeof o.compactedChars === 'number';
+}
+async function callCompact(fn: (a: Record<string, unknown>) => Promise<unknown>, args: Record<string, unknown>): Promise<CompactOut> {
+  const out = await fn(args);
+  if (!isCompactOut(out)) throw new Error(`compact returned a non-CompactOut shape: ${JSON.stringify(out)}`);
+  return out;
+}
 
 beforeAll(() => initHostExtPersistence(storage));
 afterAll(async () => storage.close());
@@ -68,11 +92,6 @@ describe('buildToolOutputCompactionSurface().compact', () => {
     expect((JSON.parse(out.output) as { items: unknown[] }).items).toHaveLength(4); // 2 + marker + 1
   });
 
-  it('non-JSON passes through untouched', async () => {
-    const out = await callCompact(surface.compact, { input: 'connection refused' });
-    expect(out.output).toBe('connection refused');
-  });
-
   // INVERTED by ADR 0680 D1a — this test PINNED THE DEFECT. It asserted that an unrecognised
   // mode silently becomes `lossless`, which is exactly the behaviour that turned a failed `off`
   // into a rewrite of bytes the caller asked to keep. Inverted rather than deleted, so the
@@ -82,12 +101,13 @@ describe('buildToolOutputCompactionSurface().compact', () => {
       .rejects.toMatchObject({ code: 'validation_error' });
   });
 
-  it('a failed `off` is REFUSED, not silently upgraded — the direction the filed row never probed', async () => {
+  it('case/whitespace slips of `off` resolve to off — never upgraded to lossless (the direction the filed row never probed)', async () => {
     // `off` on this lane means "do not touch my bytes" (a caller hashing/signing/diffing a
     // payload). Case and whitespace slips are exactly what a hand-authored config produces.
     for (const m of ['Off', 'OFF', ' off ']) {
       const out = await callCompact(surface.compact, { input: sparse, mode: m });
       expect(out.mode, `${JSON.stringify(m)} must resolve to off, never lossless`).toBe('off');
+      expect(out.output, `${JSON.stringify(m)}: off means the bytes are untouched`).toBe(sparse);
     }
   });
 
@@ -105,7 +125,7 @@ describe('buildToolOutputCompactionSurface().compact', () => {
     }
     // …but 0 stays LEGAL: `head:0` is tail-only elision. This is why the shared
     // `surfaceOptCount` (which floors at 1) could not be used verbatim.
-    await expect(callCompact(surface.compact, { input: sparse, mode: 'lossy', head: 0 })).resolves.toBeTruthy();
+    await expect(callCompact(surface.compact, { input: sparse, mode: 'lossy', head: 0 })).resolves.toMatchObject({ mode: 'lossy' });
   });
 });
 
@@ -131,13 +151,10 @@ describe('toggle gating (ctx.features gate)', () => {
 });
 
 describe('feature wiring', () => {
-  it('the feature registers the surface + the node pack', () => {
+  it('the feature registers the surface under its toggle id', () => {
+    // The surface id IS the toggle id the featureSurfaces gate resolves.
     expect(toolOutputCompactionFeature.surface?.id).toBe(ID);
-    expect(toolOutputCompactionFeature.requiredPacks).toEqual([
-      // ADR 0680 D1b bumped the pack for the new inputSchema; the pin moves in lockstep or
-      // replay resolvability breaks (RFC 0076) — version, pin and steward digest are ONE artifact.
-      { name: 'feature.tool-output-compaction.nodes', version: '1.2.1' },
-    ]);
+    expect(toolOutputCompactionFeature.toggleDefault?.id).toBe(ID);
   });
 });
 
@@ -152,10 +169,7 @@ describe('feature wiring', () => {
  * legal values — this repo's own non-negotiable read backwards.
  */
 describe('ADR 0680 D1b — the enum exists before the refusal does', () => {
-  it('the pack declares an inputSchema enumerating exactly the three legal modes', async () => {
-    const { readFileSync } = await import('node:fs');
-    const { join, dirname } = await import('node:path');
-    const { fileURLToPath } = await import('node:url');
+  it('the pack declares an inputSchema enumerating exactly the three legal modes', () => {
     const repo = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
     const packDir = join(repo, 'packs', 'feature.tool-output-compaction.nodes');
     const pack = JSON.parse(readFileSync(join(packDir, 'pack.json'), 'utf8')) as {

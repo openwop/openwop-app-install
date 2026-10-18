@@ -4,6 +4,14 @@
  *    catalog change can never orphan a template silently.
  * 2. The `app-builder.design` builtin is REAL (chatCompletion, not mock-ai),
  *    wires content→source into the render node, and per-screen reviews.
+ *
+ * Sabotage witnesses (grade-tests w36): the registered + raw + CATALOG_TYPES
+ * type lists each drifted, modelClass left on a node, the position clamp,
+ * slugging, reference remap and connector dedupe in render, deepen's thin-
+ * screen filter / deep copy / maxScreens clamp / schema-key filter, an extra
+ * model call in the contract repair, its temperature, its fed-back error text,
+ * the data-first read, research's soft-fail context, two audit findings, the
+ * live type list, and the kanban back-edge rule — each reds its case.
  */
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
@@ -12,6 +20,7 @@ import { join, dirname } from 'node:path';
 import { validateComponentTree } from '../../../host/canvasComponentCatalog.js';
 import { registerAppBuilderComponents, APP_BUILDER_CANVAS_TYPE, APP_BUILDER_COMPONENTS } from '../componentCatalog.js';
 import { SCREEN_TEMPLATES } from '../screenTemplates.js';
+import { validateAppDoc } from '../validateAppDoc.js';
 import {
   buildDesignWorkflowDefinition,
   buildPlanToKanbanWorkflowDefinition,
@@ -192,6 +201,8 @@ describe('app-builder.plan-to-kanban — editable core-work composition', () => 
       ],
     });
     expect(result.outputs.skippedBackReferences).toBe(1);
+    // The return edge adds NO dependency (it would make the plan cyclic).
+    expect((result.outputs.proposal as { items: Record<string, unknown>[] }).items[0]).not.toHaveProperty('dependsOnKeys');
   });
 });
 
@@ -266,7 +277,7 @@ describe('ADR 0325 nodes — research / deepen / audit', () => {
     expect(bad.outputs.warning).toContain('research unavailable');
     expect(bad.outputs.planContext).toBe('the prd text'); // grounding degrades, context survives
     const err = await research({ inputs: {}, config: {}, callAI: async () => { throw new Error('boom'); } });
-    expect(err.outputs.warning).toBeTruthy();
+    expect(err.outputs.warning).toContain('research unavailable');
   });
 
   it('deepen enriches only THIN screens through the render normalization gate', async () => {
@@ -329,7 +340,11 @@ describe('ADR 0325 nodes — research / deepen / audit', () => {
     expect(reqs.length).toBe(2); // exactly ONE repair
     expect(reqs[1]!.temperature).toBe(0);
     const retryMessages = reqs[1]!.messages ?? [];
-    expect(retryMessages.map((m) => m.content).join(' ')).toContain('personas'); // the exact contract error is fed back
+    // The exact contract error is fed back in the corrective USER turn (the
+    // assistant echo always contains 'personas', so checking the whole
+    // transcript proved nothing).
+    const corrective = retryMessages.filter((m) => m.role === 'user').at(-1)?.content ?? '';
+    expect(corrective).toContain('"personas" must be a JSON array');
     expect(retryMessages.some((m) => m.role === 'assistant')).toBe(true); // honest echo of the bad output
     expect(JSON.parse(res.outputs.content as string).personas[0].name).toBe('Repaired');
   });
@@ -417,15 +432,26 @@ describe('ADR 0325 nodes — research / deepen / audit', () => {
 
   it('render passes themeColors + dataSources THROUGH (the stripped-field seam class)', async () => {
     const { render } = await pack();
-    const res = await render({ inputs: { app: {
+    const app = {
       name: 'App',
       themeColors: { primary: '#1d4ed8', secondary: 'nonsense' },
       dataSources: [{ id: 'Products!', name: 'Products', fields: ['title'], rows: [{ title: 'X' }] }],
       screens: [{ id: 'home', name: 'H' }],
-    } } });
+    };
+    const res = await render({ inputs: { app } });
     const payload = res.outputs.artifact.payload as Record<string, unknown>;
-    expect(payload.themeColors).toEqual({ primary: '#1d4ed8' }); // invalid hex dropped
+    // ABR-RENDER-1: the invalid hex is CARRIED to the validator, not dropped.
+    // Dropping it reported success over a value the caller had sent.
+    expect(payload.themeColors).toEqual({ primary: '#1d4ed8', secondary: 'nonsense' });
     expect((payload.dataSources as { id: string }[])[0]!.id).toBe('products');
+    // With the host gate present it is a typed failure naming the field.
+    const validate = async (args: Record<string, unknown>) => {
+      const v = validateAppDoc(args.app);
+      return { ok: v.errors.length === 0, errors: v.errors, warnings: v.warnings };
+    };
+    const err = await render({ inputs: { app }, features: { 'app-builder': { validate } } }).then(() => null, (e: unknown) => e as { code?: string; message?: string });
+    expect(err?.code).toBe('app_doc_invalid');
+    expect(err?.message).toContain('themeColors.secondary');
   });
 
   it('the CATALOG_TYPES list matches the host catalog EXACTLY (both directions)', async () => {

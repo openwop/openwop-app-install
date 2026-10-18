@@ -11,7 +11,7 @@
  */
 import type { BundleScope } from '../../host/inMemorySurfaces.js';
 import { surfaceStr as str, surfaceOptStr as optStr, type FeatureSurface } from '../../host/featureSurfaces.js';
-import { updateCanvasForTenant, getCanvasForCaller } from '../../host/canvasSurface.js';
+import { updateCanvasForTenant, getCanvasForCaller, canvasWriteAllowed } from '../../host/canvasSurface.js';
 import { catalogTypeListForPrompt, projectComponentCatalog } from './componentCatalog.js';
 import { exportCanvas, isExportTarget } from './export/exportService.js';
 import { EXPORT_TARGETS } from './export/generators.js';
@@ -118,6 +118,10 @@ export function buildAppBuilderSurface(scope: BundleScope): FeatureSurface {
       const existing = await getCanvasForCaller(tenantId, canvasId, caller);
       if (!existing || existing.canvasTypeId !== 'canvas.app-builder') {
         throw new OpenwopError('not_found', `canvas '${canvasId}' not found`, 404);
+      }
+      // ADR 0886 D1 — WRITE on the owner, decided in the owner's org.
+      if (!(await canvasWriteAllowed(tenantId, existing, caller))) {
+        throw new OpenwopError('forbidden_scope', 'Missing required scope: workspace:write on the canvas owner', 403, { requiredScope: 'workspace:write' });
       }
       const res = await updateCanvasForTenant(tenantId, canvasId, app as never, {
         expectedVersion,

@@ -20,6 +20,7 @@ import { createLogger } from '../observability/logger.js';
 import type { BundleScope } from './inMemorySurfaces.js';
 import type { Storage } from '../storage/storage.js';
 import { publishChatMessageAppended } from './chatMessageBus.js';
+import { authorizeRunConversationWrite } from './runConversationWrite.js';
 
 const log = createLogger('host.chat');
 
@@ -108,6 +109,18 @@ export function createChatSurface(scope: BundleScope): ChatSurface {
       const storage = requireStorage();
       const now = new Date().toISOString();
       const sid = sessionId ?? `workflow-${tenantId}`;
+      // ADR 0879 D7 (S8) — a pack can address ANY session id, so a named target is a
+      // write into someone's conversation and needs the run's human to hold it. The
+      // per-tenant activity session (no `sessionId`) is the surface's own.
+      if (sessionId !== undefined) {
+        const verdict = await authorizeRunConversationWrite(storage, {
+          tenantId, conversationId: sid, mayCreate: true,
+          actingUserId: scope.actingUserId, orgScopeSubject: scope.orgScopeSubject, personalTenant: scope.personalTenant,
+        });
+        if (!verdict.ok) {
+          throw Object.assign(new Error(`host.chat: this run may not post to conversation "${sid}" (${verdict.reason}).`), { code: 'forbidden' });
+        }
+      }
       const messageId = messageIdFrom(idempotencyKey);
       const meta = citations !== undefined ? JSON.stringify({ citations }) : null;
       await append(storage, sid, mapRole(role), content, messageId, meta, now);

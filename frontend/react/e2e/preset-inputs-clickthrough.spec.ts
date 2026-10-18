@@ -16,11 +16,12 @@
  * look at — an assertion cannot tell you something looks wrong, only that it
  * moved.
  */
-import { test, expect, type APIRequestContext } from '@playwright/test';
+import { test, expect, type APIRequestContext, type Page } from '@playwright/test';
+import { serveFontsLocally } from './support/localFonts.js';
 
 const API = '/api/host/openwop-app';
 
-/** Same opt-in seam `collab-ct.spec.ts` uses for its visual harness. */
+/** The opt-in seam for capture-for-a-human harnesses (collab-ct.spec.ts used it until its deletion, 2026-10-17). */
 const SHOT_DIR = process.env.CT_SHOT_DIR ?? '';
 
 /** No explicit tenantId — see `support/session.ts` Trap 1: passing one makes the
@@ -35,33 +36,48 @@ async function loginPersonal(ctx: APIRequestContext, email: string): Promise<voi
  * (the density spec learned this the hard way: a spec that assumes the shared
  * seed populated something measures whatever happens to be there).
  *
- * `to` is a plain string (editable); `topic` is an RFC 0124 variable ref
- * (read-only) so both branches of the Inspector render in one page.
+ * `to` is a plain string (editable). With `withRef` (the default), a second node
+ * carries an RFC 0124 variable ref `topic` (read-only) so both branches of the
+ * Inspector render in one page.
+ *
+ * `withRef: false` makes `only` the SOLE input-carrying node. That is the case
+ * ADR 0524 Phase E0's `x-openwop-field-contract` header exists for: without the
+ * declaration, the server's whole-set heuristic (`preserveDroppedFields`) reads
+ * "no node carries inputs" as an old bundle and RESURRECTS the cleared input.
+ * With a second input-carrying node the heuristic never fires, so the header is
+ * not load-bearing — which is how CT-E2 used to pass with the header deleted
+ * (wave 53 probe w53g3-preset-no-field-contract: vacuous).
  */
-async function seedWorkflow(ctx: APIRequestContext, workflowId: string): Promise<void> {
+async function seedWorkflow(ctx: APIRequestContext, workflowId: string, { withRef = true }: { withRef?: boolean } = {}): Promise<void> {
+  const only = { nodeId: 'only', typeId: 'core.noop', config: {}, inputs: { to: 'someone@example.com' } };
   const res = await ctx.post(`${API}/workflows`, {
-    data: {
-      workflowId,
-      metadata: { name: 'Phase E click-through' },
-      nodes: [
-        {
-          nodeId: 'only',
-          typeId: 'core.noop',
-          config: {},
-          inputs: { to: 'someone@example.com' },
-        },
-        {
-          nodeId: 'refnode',
-          typeId: 'core.noop',
-          config: {},
-          inputs: { topic: { type: 'variable', variableName: 'topic' } },
-        },
-      ],
-      edges: [{ edgeId: 'e1', sourceNodeId: 'only', targetNodeId: 'refnode' }],
-      variables: [{ name: 'topic', type: 'string' }],
-    },
+    data: withRef
+      ? {
+        workflowId,
+        metadata: { name: 'Phase E click-through' },
+        nodes: [
+          only,
+          { nodeId: 'refnode', typeId: 'core.noop', config: {}, inputs: { topic: { type: 'variable', variableName: 'topic' } } },
+        ],
+        edges: [{ edgeId: 'e1', sourceNodeId: 'only', targetNodeId: 'refnode' }],
+        variables: [{ name: 'topic', type: 'string' }],
+      }
+      : {
+        workflowId,
+        metadata: { name: 'Phase E click-through (sole input)' },
+        nodes: [only, { nodeId: 'plain', typeId: 'core.noop', config: {} }],
+        edges: [{ edgeId: 'e1', sourceNodeId: 'only', targetNodeId: 'plain' }],
+      },
   });
   expect(res.status(), `seed ${workflowId}: ${await res.text()}`).toBe(201);
+}
+
+/** The editable preset row for `to`, and ITS Clear button — never a page-wide
+ *  `/clear/i` match, which could hit any other "Clear…" control on the builder. */
+function presetRow(page: Page) {
+  const value = page.getByLabel(/value for the .*to.* input/i);
+  const row = page.locator('.binspector-pinned-input-row', { has: value });
+  return { value, clear: row.getByRole('button', { name: 'Clear', exact: true }) };
 }
 
 async function readHead(ctx: APIRequestContext, workflowId: string) {
@@ -73,44 +89,33 @@ async function readHead(ctx: APIRequestContext, workflowId: string) {
 
 test.describe('ADR 0524 Phase E — preset inputs, through a browser', () => {
   test.slow();
+  // CT-E1 measures text WIDTH, so it needs the real Geist faces. The config
+  // fails the Google Fonts hosts fast (E2E-ORDER-1); serve the vendored copies.
+  test.beforeEach(async ({ page }) => { await serveFontsLocally(page); });
 
   /**
-   * §Correction — this was quarantined as failing, and the failure WAS real.
-   * Diagnosed and fixed: see `middleware/cors.ts`. Kept verbatim below because
-   * the evidence is the reason the bug was findable at all.
+   * History (2026-08-06): this case once failed for real. The client saved
+   * correctly, but `x-openwop-field-contract` made the save a PREFLIGHTED
+   * cross-origin request and the header was missing from
+   * `Access-Control-Allow-Headers`, so the browser blocked every builder save.
+   * Fixed in `middleware/cors.ts`.
    *
-   * MEASURED against a real backend + Chromium (2026-08-06). The client does
-   * everything correctly:
-   *   - one POST to `/host/openwop-app/workflows` is sent after the clear;
-   *   - it carries `x-openwop-field-contract` (so the ADR 0524 guard must treat
-   *     the omission as a deletion, not a bundle limitation);
-   *   - it targets the RIGHT workflowId and the right node ids
-   *     (`["only","refnode"]` — no re-minting);
-   *   - node `only` is sent with NO `inputs`.
-   * And 8 seconds later the server head still reads
-   *   `only.inputs = {to: 'someone@example.com'}`.
+   * In the merge gate the SPA calls same-origin `/api` (scripts/ci.sh), so NO
+   * preflight happens here and this case cannot see that CORS defect; it is
+   * pinned by `backend/typescript/test/cors-field-contract-header.test.ts`. What
+   * this case guards is the client save plus the server's deletion contract:
+   * the save DECLARES the field contract and omits the cleared input, and the
+   * head stays cleared after a reload.
    *
-   * The server guard is NOT the cause: it fires only on a WHOLE-SET omission,
-   * and `refnode` still carries `topic`, so `nodesCarryingInputs(next) === 1`.
-   *
-   * DIAGNOSED: `net::ERR_FAILED` on the POST while GETs to the same origin
-   * returned 200 — the signature of a CORS PREFLIGHT rejection, not an
-   * application error. `x-openwop-field-contract` (added in Phase E0) is a
-   * custom request header, so it makes the save a preflighted request, and it
-   * was missing from `Access-Control-Allow-Headers`. The browser blocked every
-   * builder save cross-origin, with no server-side trace because the request
-   * never arrived. Fixed in `middleware/cors.ts`; pinned by
-   * `test/cors-field-contract-header.test.ts`.
-   *
-   * Why this is quarantined rather than deleted or softened: it reproduces, it
-   * asserts exactly the behaviour the ADR 0523/0524/0525 program exists to
-   * deliver, and the store-level tests cannot see it. Deleting it would restore
-   * the false confidence that shipped Phase E.
+   * Sabotage-witnessed (wave 53): Clear not removing the input (CT-E2, CT-E4);
+   * the field-contract header dropped from the builder save (CT-E2, sole-input
+   * fixture); the value's accessible name broken (all three).
    */
   test('CT-E2: clearing the last preset input SURVIVES a save and reload', async ({ page, context }) => {
     const id = `phase-e-ct-${Date.now()}`;
     await loginPersonal(context.request, 'phase-e@e2e.test');
-    await seedWorkflow(context.request, id);
+    // SOLE input-carrying node: the case the field-contract header exists for.
+    await seedWorkflow(context.request, id, { withRef: false });
 
     // PRECONDITION, asserted rather than assumed: the seed really did persist an
     // input. Without this the "it stayed cleared" assertion below could pass
@@ -123,14 +128,18 @@ test.describe('ADR 0524 Phase E — preset inputs, through a browser', () => {
     // Watch the SAVE traffic. "Did it stay cleared?" has two very different
     // causes when it fails — the client never saved, or the server restored it —
     // and only the request stream distinguishes them.
-    const saves: Array<{ hasContract: boolean; savedAs: string | undefined; nodeIds: string[]; inputs: unknown }> = [];
+    type SavedBody = { workflowId?: string; nodes?: Array<{ nodeId: string; inputs?: Record<string, unknown> }> };
+    const parseSave = (raw: string | null): SavedBody => {
+      try { return JSON.parse(raw ?? '{}') as SavedBody; } catch { return {}; }
+    };
+    const isCleared = (inputs: Record<string, unknown> | undefined): boolean => inputs === undefined || Object.keys(inputs).length === 0;
+    const saves: Array<{ hasContract: boolean; savedAs: string | undefined; nodeIds: string[]; inputs: Record<string, unknown> | undefined }> = [];
     page.on('request', (req) => {
-      if (req.method() !== 'POST' || !req.url().includes('/host/openwop-app/workflows')) return;
-      let body: { nodes?: Array<{ nodeId: string; inputs?: unknown }> } = {};
-      try { body = JSON.parse(req.postData() ?? '{}'); } catch { /* non-JSON */ }
+      if (req.method() !== 'POST' || new URL(req.url()).pathname !== '/api/host/openwop-app/workflows') return;
+      const body = parseSave(req.postData());
       saves.push({
         hasContract: Boolean(req.headers()['x-openwop-field-contract']),
-        savedAs: (body as { workflowId?: string }).workflowId,
+        savedAs: body.workflowId,
         nodeIds: (body.nodes ?? []).map((n) => n.nodeId),
         inputs: body.nodes?.find((n) => n.nodeId === 'only')?.inputs,
       });
@@ -152,26 +161,36 @@ test.describe('ADR 0524 Phase E — preset inputs, through a browser', () => {
     // the label here doubles as proof that the visually-hidden label added in
     // Phase E actually names the control in a real browser, which jsdom cannot
     // establish.
-    const value = page.getByLabel(/value for the .*to.* input/i);
+    const { value, clear } = presetRow(page);
     await expect(value, 'the preset-input field never rendered in the builder').toBeVisible({ timeout: 10_000 });
 
-    await page.getByRole('button', { name: /clear/i }).first().click();
+    await clear.click();
     await expect(value).toHaveCount(0);
 
     // WAIT ON THE EVENT, NOT THE CLOCK. This was `waitForTimeout(8000)`, which
     // is both slow and a flake generator: too short on a loaded CI box and the
     // test fails for a reason that has nothing to do with the behaviour. The
-    // autosave is a 1.5s debounce, so wait for the SAVE RESPONSE itself.
+    // autosave is a 1.5s debounce, so wait for the SAVE RESPONSE itself — and
+    // for THIS workflow's save that no longer carries the input, not any POST.
     await page.waitForResponse(
-      (r) => r.request().method() === 'POST'
-        && r.url().includes('/host/openwop-app/workflows')
-        && r.status() === 201,
+      (r) => {
+        if (r.request().method() !== 'POST' || new URL(r.url()).pathname !== '/api/host/openwop-app/workflows' || r.status() !== 201) return false;
+        const body = parseSave(r.request().postData());
+        const node = body.nodes?.find((n) => n.nodeId === 'only');
+        return body.workflowId === id && !!node && isCleared(node.inputs);
+      },
       { timeout: 15_000 },
     );
-    await page.reload({ waitUntil: 'domcontentloaded' });
 
-    // eslint-disable-next-line no-console
-    console.log(`[CT-E2] saves observed: ${JSON.stringify(saves)}`);
+    // The client side of the contract, asserted rather than logged: the clearing
+    // save targeted THIS workflow, kept the node ids, sent no input for `only`,
+    // and DECLARED the field contract (without it the server restores the input).
+    const clearing = saves.filter((s) => s.savedAs === id && s.nodeIds.includes('only') && isCleared(s.inputs));
+    expect(clearing.length, `no clearing save observed: ${JSON.stringify(saves)}`).toBeGreaterThanOrEqual(1);
+    expect(clearing.every((s) => s.hasContract), `a clearing save omitted x-openwop-field-contract: ${JSON.stringify(clearing)}`).toBe(true);
+    expect([...clearing[0]!.nodeIds].sort()).toEqual(['only', 'plain']);
+
+    await page.reload({ waitUntil: 'domcontentloaded' });
 
     const after = await readHead(context.request, id);
     // eslint-disable-next-line no-console
@@ -192,17 +211,17 @@ test.describe('ADR 0524 Phase E — preset inputs, through a browser', () => {
     await page.locator('.builder-node').first().waitFor({ state: 'visible', timeout: 20_000 });
     await page.locator('.builder-node').first().click();
 
-    const value = page.getByLabel(/value for the .*to.* input/i);
+    const { value, clear } = presetRow(page);
     await expect(value).toBeVisible({ timeout: 10_000 });
 
     // Focus the field directly, type, then TAB to the next control and confirm
-    // it is the Clear button — a control reachable only by mouse is a keyboard
-    // trap in the middle of an editing flow.
+    // it is THIS row's Clear button — a control reachable only by mouse is a
+    // keyboard trap in the middle of an editing flow. (This used to check that
+    // the focused element's text contained "clear", which any control did.)
     await value.focus();
     await value.fill('typed@example.com');
     await page.keyboard.press('Tab');
-    const focusedText = await page.evaluate(() => document.activeElement?.textContent ?? '');
-    expect(focusedText.toLowerCase(), 'Tab from the value did not reach Clear').toContain('clear');
+    await expect(clear, 'Tab from the value did not reach its Clear button').toBeFocused();
 
     await page.keyboard.press('Enter');
     await expect(value).toHaveCount(0);
@@ -226,17 +245,31 @@ test.describe('ADR 0524 Phase E — preset inputs, through a browser', () => {
     await page.locator('.builder-node').first().waitFor({ state: 'visible', timeout: 20_000 });
     await page.locator('.builder-node').first().click();
 
-    const value = page.getByLabel(/value for the .*to.* input/i);
-    await expect(value).toBeVisible({ timeout: 10_000 });
+    const { value } = presetRow(page);
+    await expect(value).toHaveValue('someone@example.com', { timeout: 10_000 });
 
+    // Two independent measurements, both required: the browser's own overflow
+    // statement (scrollWidth > clientWidth) AND the rendered text's width in the
+    // input's computed font against the content box. Wave 53 found the original
+    // regression (the 1fr/2fr row grid) no longer truncates at 1280px — layout
+    // around it changed — so the case must not rely on one signal whose
+    // semantics for <input> it never proved.
     const fits = await value.evaluate((el) => {
       const i = el as HTMLInputElement;
-      return { scrollWidth: i.scrollWidth, clientWidth: i.clientWidth, value: i.value };
+      const cs = getComputedStyle(i);
+      const ctx = document.createElement('canvas').getContext('2d')!;
+      ctx.font = cs.font;
+      const content = i.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+      return { scrollWidth: i.scrollWidth, clientWidth: i.clientWidth, text: Math.ceil(ctx.measureText(i.value).width), content: Math.floor(content), value: i.value };
     });
     expect(
       fits.scrollWidth,
       `the value box is too narrow for its own content (${fits.value}): scrollWidth ${fits.scrollWidth} > clientWidth ${fits.clientWidth}`,
     ).toBeLessThanOrEqual(fits.clientWidth);
+    expect(
+      fits.text,
+      `the value's text (${fits.text}px) is wider than the box's content area (${fits.content}px): ${fits.value} is clipped`,
+    ).toBeLessThanOrEqual(fits.content);
   });
 
   // ── Screenshots for the judgements an assertion cannot make ───────────────
@@ -247,8 +280,8 @@ test.describe('ADR 0524 Phase E — preset inputs, through a browser', () => {
   // never go red. Six browser sessions of CI wall-clock on every run, for a
   // result nobody reads unless they went looking.
   //
-  // Gated on the SAME `CT_SHOT_DIR` seam `collab-ct.spec.ts` already uses for
-  // its visual harness, rather than inventing a second flag: one opt-in
+  // Gated on the `CT_SHOT_DIR` seam (collab-ct.spec.ts used it too until it
+  // was deleted 2026-10-17), rather than inventing a second flag: one opt-in
   // mechanism for "capture surfaces for a human", and the shot directory is the
   // caller's rather than a hardcoded path.
   //
@@ -277,7 +310,8 @@ test.describe('ADR 0524 Phase E — preset inputs, through a browser', () => {
         const node = page.locator('.builder-node').first();
         const reachable = await node.isVisible().catch(() => false);
         if (reachable) await node.click({ timeout: 5_000 }).catch(() => {});
-        await page.waitForTimeout(600);
+        // Settle on signals, not a sleep: fonts loaded, then two animation frames.
+        await page.evaluate(async () => { await document.fonts.ready; await new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r()))); });
         await page.screenshot({ path: `${SHOT_DIR}/phase-e-${label}-${theme}.png`, fullPage: false });
         // eslint-disable-next-line no-console
         console.log(`[capture ${label}/${theme}] canvas node reachable: ${reachable}`);

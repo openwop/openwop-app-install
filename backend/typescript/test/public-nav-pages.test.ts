@@ -6,6 +6,14 @@
  * compare) are listed; the `home` page is excluded (it is the brand link); a
  * DRAFT page never appears (published-only — no dishonest 404 link); and the
  * shape is `{ pages: [{ slug, title }] }`.
+ *
+ * The published list is memoized for `OPENWOP_PUBLIC_LIST_TTL_S` (60 s by
+ * default), so this file boots with the memo OFF: otherwise the draft leg reads
+ * the list the first leg cached and cannot fail (w35, measured vacuous). The draft
+ * leg's positive control publishes the same page and sees it appear, so its
+ * "absent" is not an unreachable page.
+ * Sabotage witnesses (w35): dropping the `home` exclusion reds leg 1; dropping the
+ * published-only filter reds leg 2.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -15,15 +23,21 @@ import { createApp } from '../src/index.js';
 let BASE: string;
 const ADMIN = { authorization: 'Bearer dev-token', 'content-type': 'application/json' };
 let server: Server;
+let savedTtl: string | undefined;
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
   process.env.OPENWOP_TEST_AUTH_ENABLED = 'true';
+  savedTtl = process.env.OPENWOP_PUBLIC_LIST_TTL_S;
+  process.env.OPENWOP_PUBLIC_LIST_TTL_S = '0';
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
 });
-afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
+afterAll(async () => {
+  if (savedTtl === undefined) Reflect.deleteProperty(process.env, 'OPENWOP_PUBLIC_LIST_TTL_S'); else process.env.OPENWOP_PUBLIC_LIST_TTL_S = savedTtl;
+  await new Promise<void>((res) => server.close(() => res()));
+});
 
 const admin = (method: string, path: string, body?: unknown) =>
   fetch(`${BASE}${path}`, { method, headers: ADMIN, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
@@ -52,8 +66,15 @@ describe('public-site nav list (ADR 0486)', () => {
     const created = await admin('POST', '/host/openwop-app/cms/orgs/host-site/pages', {
       title: 'Draft Nav Probe', slug: 'draft-nav-probe',
     });
-    expect(created.status).toBeLessThan(300);
+    expect(created.status).toBe(201);
+    const { pageId } = await created.json() as { pageId: string };
     const { pages } = await navList().then((r) => r.json()) as NavPages;
     expect(pages.map((p) => p.slug)).not.toContain('draft-nav-probe');
+
+    // POSITIVE control: the same page, once published, IS listed.
+    const published = await admin('POST', `/host/openwop-app/cms/orgs/host-site/pages/${pageId}/publish`);
+    expect(published.status).toBe(200);
+    const after = await navList().then((r) => r.json()) as NavPages;
+    expect(after.pages).toContainEqual({ slug: 'draft-nav-probe', title: 'Draft Nav Probe' });
   });
 });

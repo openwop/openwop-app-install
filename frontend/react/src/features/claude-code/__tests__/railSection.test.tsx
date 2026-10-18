@@ -7,7 +7,7 @@
  * `ClaudeCodeTerminalTab` reattaches at mount instead of showing the picker.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, cleanup, waitFor, within } from '@testing-library/react';
 import type { TerminalSession, DeviceView } from '../claudeCodeClient.js';
 
 const api = vi.hoisted(() => ({
@@ -25,12 +25,15 @@ const device: DeviceView = {
   deviceId: 'dev-1', tenantId: 't', subject: 'u', label: 'Laptop', platform: 'darwin', createdAt: '2026-10-01T00:00:00Z',
   consentVersion: '1', consentHash: 'h', status: 'active', online: true,
 };
+// An OFFLINE second device — with every device online, a constant "online"
+// label could not be told from the real mapping.
+const desktop: DeviceView = { ...device, deviceId: 'dev-2', label: 'Desktop', online: false };
 
 beforeEach(() => {
   localStorage.clear();
   api.listTerminals.mockReset();
   api.listDevices.mockReset();
-  api.listDevices.mockResolvedValue([device]);
+  api.listDevices.mockResolvedValue([device, desktop]);
 });
 afterEach(() => cleanup());
 
@@ -50,7 +53,8 @@ describe('liveSessions', () => {
     ];
     expect(liveSessions(all).map((s) => s.sessionId)).toEqual(['new', 'old']);
     const many = Array.from({ length: 15 }, (_, i) => term(`s${i}`, `2026-10-01T00:00:${String(i).padStart(2, '0')}Z`));
-    expect(liveSessions(many)).toHaveLength(10);
+    // The NEWEST ten survive, newest first (s14 … s5), not merely ten of them.
+    expect(liveSessions(many).map((s) => s.sessionId)).toEqual(['s14', 's13', 's12', 's11', 's10', 's9', 's8', 's7', 's6', 's5']);
   });
 });
 
@@ -58,14 +62,19 @@ describe('ClaudeCodeRailSection', () => {
   it('lists live sessions from the client with device + online hint, in one read each', async () => {
     api.listTerminals.mockResolvedValue([
       term('a', '2026-10-01T00:00:00Z'),
-      term('b', '2026-10-02T00:00:00Z'),
+      term('b', '2026-10-02T00:00:00Z', { deviceId: 'dev-2' }),
       term('x', '2026-10-03T00:00:00Z', { status: 'exited' }),
     ]);
     renderSection();
     const titles = await screen.findAllByText(/^Title /);
     expect(titles.map((el) => el.textContent)).toEqual(['Title b', 'Title a']);
-    expect(screen.getAllByRole('img', { name: 'Device online' })).toHaveLength(2);
-    expect(screen.getAllByText(/^Laptop · /)).toHaveLength(2);
+    // Each row carries ITS device's state: b is on the offline Desktop, a on the online Laptop.
+    const rowB = screen.getByRole('button', { name: /Title b/ });
+    const rowA = screen.getByRole('button', { name: /Title a/ });
+    expect(within(rowB).getByRole('img').getAttribute('aria-label')).toBe('Device offline');
+    expect(within(rowA).getByRole('img').getAttribute('aria-label')).toBe('Device online');
+    expect(within(rowB).getByText(/^Desktop · /)).toBeTruthy();
+    expect(within(rowA).getByText(/^Laptop · /)).toBeTruthy();
     expect(api.listTerminals).toHaveBeenCalledTimes(1);
     expect(api.listDevices).toHaveBeenCalledTimes(1);
   });

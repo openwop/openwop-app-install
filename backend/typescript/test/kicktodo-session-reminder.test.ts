@@ -9,6 +9,10 @@
  *  2. `sendSessionReminder` (the session-notify surface op the delivery node rides)
  *     notifies every LIVE grantee, SKIPS the coach, and respects each recipient's
  *     mute preference (ADR 0457) BEFORE emitting.
+ *
+ * Sabotages that turn this red (w41 probes): dropping the job's workflowId or
+ * its conversationId input; dropping the live-grant (`state === 'active'`),
+ * coach-skip or mute checks in sendSessionReminder; or the `cancelledAt` check.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
@@ -20,7 +24,7 @@ import { setNotificationMuteResolver } from '../src/host/notificationPolicy.js';
 import { resetScheduling } from '../src/host/schedulingService.js';
 import { processDueSchedules } from '../src/host/scheduleDaemon.js';
 import { createCircle, inviteToCircle, acceptGrant } from '../src/features/kicktodo-accountability/circleService.js';
-import { scheduleSession, sendSessionReminder, sessionReminderJobId, SESSION_REMINDER_WORKFLOW_ID } from '../src/features/kicktodo-accountability/sessionService.js';
+import { scheduleSession, cancelSession, sendSessionReminder, SESSION_REMINDER_WORKFLOW_ID } from '../src/features/kicktodo-accountability/sessionService.js';
 
 // Fake catalog: fires a run for whatever workflowId the job carries (the daemon
 // path we assert is the job → startWorkflowRun → inputs-seeded run wiring).
@@ -66,7 +70,6 @@ describe('scheduleSession arms a workflow-bearing reminder job the daemon fires 
     const session = await scheduleSession(T, circleId, COACH, new Date(atMs).toISOString(), 'Weekly check-in');
 
     // The armed job carries the workflowId (the KT-PORT-3 fix) + the context.
-    const jobId = sessionReminderJobId(T, circleId, session.atIso);
     // Fire the daemon well past the reminder's fire time.
     await processDueSchedules(deps, atMs + 60_000);
 
@@ -74,8 +77,6 @@ describe('scheduleSession arms a workflow-bearing reminder job the daemon fires 
     const fired = runs.filter((r) => r.workflowId === SESSION_REMINDER_WORKFLOW_ID);
     expect(fired).toHaveLength(1);
     expect(fired[0]!.inputs).toEqual({ circleId, atIso: session.atIso, conversationId: session.conversationId });
-    // (sanity — the reminder job id is deterministic and was the one armed)
-    expect(jobId).toContain(circleId);
   });
 });
 
@@ -83,11 +84,15 @@ describe('scheduleSession arms a workflow-bearing reminder job the daemon fires 
 describe('sendSessionReminder (ADR 0459 P3 — mute-respecting per recipient)', () => {
   const MUTED = 'user:sr-muted';
   const HEARD = 'user:sr-heard';
+  const PENDING = 'user:sr-pending'; // invited, never accepted — not a LIVE grantee
 
   async function remindersFor(): Promise<string[]> {
     const notifs = await storage.listNotifications({ tenantId: T });
     return notifs
-      .filter((n) => (n.metadata as Record<string, unknown>)?.category === 'kicktodo-session-reminder')
+      .filter((n) => {
+        const meta: Record<string, unknown> | undefined = n.metadata;
+        return meta?.category === 'kicktodo-session-reminder';
+      })
       .map((n) => n.recipientUserId)
       .filter((r): r is string => typeof r === 'string');
   }
@@ -96,6 +101,7 @@ describe('sendSessionReminder (ADR 0459 P3 — mute-respecting per recipient)', 
     const { circleId } = await makeCircle();
     await addLiveGrantee(circleId, MUTED);
     await addLiveGrantee(circleId, HEARD);
+    await inviteToCircle(T, circleId, COACH, PENDING, ['action-status']); // not accepted
     const atMs = Date.now() + 2 * 60 * 60 * 1000;
     const session = await scheduleSession(T, circleId, COACH, new Date(atMs).toISOString(), 'Session');
 
@@ -105,16 +111,26 @@ describe('sendSessionReminder (ADR 0459 P3 — mute-respecting per recipient)', 
     const res = await sendSessionReminder(T, { circleId, atIso: session.atIso, conversationId: session.conversationId });
     expect(res.notified).toBe(true);
 
-    const recipients = await remindersFor();
-    expect(recipients).toContain(HEARD);
-    expect(recipients).not.toContain(MUTED); // muted
-    expect(recipients).not.toContain(COACH); // the session host is skipped
+    // Exactly the one live, unmuted, non-host grantee: MUTED is muted, PENDING
+    // never accepted (not live), COACH hosts the session (skipped).
+    expect(await remindersFor()).toEqual([HEARD]);
   });
 
   it('an absent/cancelled session is an honest no-op (no delivery)', async () => {
     const { circleId } = await makeCircle();
     await addLiveGrantee(circleId, HEARD);
     const res = await sendSessionReminder(T, { circleId, atIso: '2030-01-01T00:00:00.000Z' });
+    expect(res).toEqual({ notified: false, reason: 'session-not-scheduled' });
+    expect(await remindersFor()).toEqual([]);
+  });
+
+  it('a CANCELLED session is an honest no-op (no delivery)', async () => {
+    const { circleId } = await makeCircle();
+    await addLiveGrantee(circleId, HEARD);
+    const atMs = Date.now() + 2 * 60 * 60 * 1000;
+    const session = await scheduleSession(T, circleId, COACH, new Date(atMs).toISOString(), 'Session');
+    await cancelSession(T, circleId, COACH, session.atIso);
+    const res = await sendSessionReminder(T, { circleId, atIso: session.atIso, conversationId: session.conversationId });
     expect(res).toEqual({ notified: false, reason: 'session-not-scheduled' });
     expect(await remindersFor()).toEqual([]);
   });

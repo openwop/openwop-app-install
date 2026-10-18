@@ -96,6 +96,8 @@ export const messages = {
   typeChannelActivity: 'Channel activity',
   typeCommentAdded: 'New comment',
   typeCommentReply: 'New reply',
+  typeCommentMention: 'Mention',
+  typeCommentResolved: 'Comment resolved',
   typeReviewRequested: 'Review requested',
   typeReviewDecided: 'Review decided',
 
@@ -272,6 +274,8 @@ export const messages = {
   approvalsAiDraftedTitle: 'These translations were drafted by a model and have not been reviewed by a person.',
   approvalsLiveData_one: '{{count}} live-data section, not frozen by approval',
   approvalsLiveData_other: '{{count}} live-data sections, not frozen by approval',
+  approvalsOutdatedTranslations_one: '{{count}} translation is outdated ({{locales}}), review it in the editor',
+  approvalsOutdatedTranslations_other: '{{count}} translations are outdated ({{locales}}), review them in the editor',
   rejectReasonLabel: 'Why are you sending this back?',
   rejectReasonPlaceholder: 'The editor sees this on the page. Optional, but a rejection with no reason is a dead end.',
   rejectSendLabel: 'Send back to draft',
@@ -285,6 +289,7 @@ export const messages = {
   approvalForbidden: 'You don’t have permission to decide this.',
   approvalGone: 'This item is no longer available.',
   approvalAlreadyDecided: 'Someone already decided this one.',
+  approvalAgentPaused: 'This agent is paused. Resume it, then approve again — the proposal is still waiting.',
   approvalStrategyChanged: "This strategy changed after it was submitted, so the review was closed. It needs submitting again.",
   approvalSelfApproval: "You submitted this, so another approver has to decide it.",
 } as const;

@@ -15,8 +15,7 @@
  * tracker rows it defeated.
  */
 import { describe, it, expect } from 'vitest';
-// @ts-expect-error — .mjs gate module, deliberately untyped: it runs under plain
-// node in CI with no build step, and a .d.ts would be a second source of truth.
+// Types: `scripts/hvCitations.d.mts` (declarations only, beside the script).
 import { EVIDENCE, NEGATED, rowBlock, classifyRow, resolveRowFloor, FILE_ROW_FLOOR } from '../../scripts/hvCitations.mjs';
 
 describe('sabotage 1 — a NEGATED citation must not self-certify', () => {
@@ -99,15 +98,11 @@ describe('sabotage 5 — the row floor may be RAISED but never lowered', () => {
   // OPENWOP_TEST_TYPES_BASELINE before it was made tighten-only — a sibling gate
   // I had hardened two days earlier and did not think to check.
   it('REFUSES a floor lower than the committed one', () => {
-    const r = resolveRowFloor('1');
-    expect(r.ok).toBe(false);
-    expect(r.error).toMatch(/LOWER/);
+    expect(resolveRowFloor('1')).toMatchObject({ ok: false, error: expect.stringMatching(/LOWER/) });
   });
 
   it('accepts a RAISED floor, so proving a higher one stays possible', () => {
-    const r = resolveRowFloor(String(FILE_ROW_FLOOR + 5));
-    expect(r.ok).toBe(true);
-    expect(r.floor).toBe(FILE_ROW_FLOOR + 5);
+    expect(resolveRowFloor(String(FILE_ROW_FLOOR + 5))).toMatchObject({ ok: true, floor: FILE_ROW_FLOOR + 5 });
   });
 
   it('falls back to the committed floor when unset or empty', () => {
@@ -119,7 +114,7 @@ describe('sabotage 5 — the row floor may be RAISED but never lowered', () => {
     // `Number('abc')` is NaN and `NaN < floor` is false — an unguarded version
     // would sail past the comparison and disable the floor entirely.
     for (const bad of ['abc', '-1', '3.5']) {
-      expect(resolveRowFloor(bad).ok, `${bad} must be refused`).toBe(false);
+      expect(resolveRowFloor(bad), `${bad} must be refused`).toMatchObject({ ok: false, error: expect.stringMatching(/is not a count/) });
     }
   });
 });

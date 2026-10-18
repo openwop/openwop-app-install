@@ -25,40 +25,12 @@
 # measurement run and does fetch in others, on an unchanged tree. So expect the
 # guard to surface further files for a while. Each is a one-line addition here,
 # and that is the mechanism working, not a regression.
-src/__tests__/failedReadDecisions.test.tsx  # racy: a fire-and-forget approvals read that may not fire before the test ends — witnessed in some full runs, not others, on an unchanged tree
-src/agents/__tests__/agentAuthorEntry.test.tsx
-src/builder/inspector/__tests__/Inspector.test.tsx
-src/builder/inspector/__tests__/presetInputsEditable.test.tsx
-src/canvas/__tests__/useCollab.test.tsx
-src/chat/__tests__/ChatInputVoiceControl.test.tsx
-src/chat/__tests__/MessageComments.test.tsx
-src/chat/__tests__/selectionRewrite.test.tsx
-src/chat/tabDeck/__tests__/TabChatDeck.p7.test.tsx
-src/chat/tabDeck/__tests__/TabChatDeck.persistence.test.tsx
-src/chat/tabDeck/__tests__/TabChatDeck.railDeepLink.test.tsx
-src/chat/tabDeck/__tests__/TabChatDeck.security.test.tsx
-src/chat/tabDeck/__tests__/TabChatDeck.test.tsx
-src/chrome/__tests__/Sidebar.lock.test.tsx
-src/chrome/__tests__/publicShellLiveRegion.test.tsx
-src/features/campaign-brief/__tests__/BriefValidation.test.tsx
+# (2026-10-16, /grade-tests w50: `failedReadDecisions.test.tsx` now stubs the dashboard tile bodies
+# (LazyMount), so its line is gone — 3/3 runs green with no allowlist entry, 0 audit lines.)
 src/features/comments/__tests__/commentsDeepLink.test.tsx
-src/features/creative-briefs/__tests__/BriefLifecycle.test.tsx
 src/features/dashboard/__tests__/customizeUpgrade.test.tsx
 src/features/dashboard/__tests__/uxUpgradeAug.test.tsx
 src/features/evals/__tests__/ArenaPage.test.tsx
-src/features/kicktodo-circles/__tests__/CirclesProposals.test.tsx
-src/features/kicktodo/__tests__/unknownNotEmpty.test.tsx
 src/features/marketplace/__tests__/buyScopeGate.test.tsx
-src/features/operations/__tests__/opsHealthHonesty.test.tsx
-src/features/podcasts/__tests__/orgsFailedNotEmpty.test.tsx
 src/features/projects/__tests__/charterUnsavedGuard.test.tsx
 src/features/projects/__tests__/deleteReceipt.test.tsx
-src/features/strategy/__tests__/alignmentReads.test.tsx
-src/features/tutorials/__tests__/TutorialsPage.progress.test.tsx
-src/kanban/__tests__/boardMutationRefresh.test.tsx
-src/notifications/__tests__/contentReviewCard.test.tsx
-src/notifications/__tests__/liveTruthAndKinds.test.tsx
-src/runs/__tests__/branchForkLiveEffectsConfirm.test.tsx
-src/runs/__tests__/eventReadHonesty.test.tsx
-src/runs/__tests__/runRefreshHonesty.test.tsx
-src/workforces/__tests__/unreadableSignals.test.tsx

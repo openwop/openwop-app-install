@@ -18,9 +18,17 @@
  * END-TO-END in `cad-mesh-routes.test.ts`, against a real stored mesh asset,
  * rather than a hand-built BomDoc here — the CSV a user downloads is the
  * artifact that carried the false claim.
+ *
+ * /grade-tests w34: the CAD2-R3 control (case 2) used to assert that an unknown
+ * field is silently DROPPED on a successful render — that certified defect
+ * W34-CAD-1 (closed-world doctrine: invalid model output is a typed failure,
+ * never a silent drop). It is now an `it.fails` asserting the correct outcome;
+ * a fix-probe (an unknown-key throw in `normalizeSolid`) turns it red. Expected
+ * texts are hand-derived; fixtures are typed `CadDimension`s (no laundering).
  */
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { formatDimension } from '../src/features/cad/cadDims.js';
+import { formatDimension, type CadDimension } from '../src/features/cad/cadDims.js';
 // Static import — the convention every other pack test uses (`adr0411-reel-node`,
 // `ai-exchange-round2`); a dynamic `await import` of an untyped .mjs is implicit-any.
 import { render } from '../../../packs/feature.cad.nodes/index.mjs';
@@ -47,24 +55,23 @@ describe('CAD2-B1 — the render node preserves every editable solid field', () 
     expect(solid.width).toBe(10);
   });
 
-  it('still refuses a field that is NOT a legal solid property (the control)', async () => {
-    // CORRECTED (review CAD2-R3): the first version probed with a STRING
-    // (`bogusField: 'nope'`) while the fix changed the NUMERIC allowlist — so it
-    // passed even against a blanket `for (const k of Object.keys(raw))`
-    // pass-through, proven by sabotage. A control has to be made of the same
-    // stuff as the thing it controls for.
-    const out = await render({
-      inputs: { model: { solids: [{ kind: 'box', width: 5, bogusNum: 7, bogusField: 'nope' }], units: 'mm' } },
-    });
-    const solid = out.outputs.artifact.payload.solids[0]! as Record<string, unknown>;
-    expect(solid.bogusNum, 'an unknown NUMERIC field must not ride the allowlist').toBeUndefined();
-    expect(solid.bogusField).toBeUndefined();
+  // CORRECTED (review CAD2-R3): the first version probed with a STRING
+  // (`bogusField: 'nope'`) while the fix changed the NUMERIC allowlist — a
+  // control has to be made of the same stuff as the thing it controls for.
+  // CORRECTED AGAIN (/grade-tests w34, W34-CAD-1): the control then asserted the
+  // unknown field was silently DROPPED on a successful render — the defect
+  // itself. The correct outcome is a typed refusal naming the field; pinned
+  // `it.fails` until the node rejects unknown keys (BLOCKED-ON-PRODUCT).
+  it.fails('W34-CAD-1: an unknown solid field is a typed validation_error, never silently dropped', async () => {
+    await expect(render({
+      inputs: { model: { solids: [{ kind: 'box', width: 5, bogusNum: 7 }], units: 'mm' } },
+    })).rejects.toMatchObject({ code: 'validation_error', message: expect.stringContaining('bogusNum') });
   });
 });
 
 describe('CAD2-B2 — a nominal is never displayed outside its own tolerance', () => {
-  const sym = (unit: string, tolA: number) =>
-    ({ kind: 'linear', unit, tolType: 'symmetric', tolA }) as never;
+  const sym = (unit: string, tolA: number): CadDimension =>
+    ({ kind: 'linear', solid: 0, unit, tolType: 'symmetric', tolA });
 
   it('inches: 1.4375 ±0.001 keeps enough places to sit inside the tolerance', () => {
     // Was `1.44 in ±0.001` — a display error of 0.0025, i.e. 2.5× the stated
@@ -77,6 +84,8 @@ describe('CAD2-B2 — a nominal is never displayed outside its own tolerance', (
 
   it('metres: 0.04052 ±0.0002 likewise', () => {
     const text = formatDimension(0.04052, sym('m', 0.0002), 'm');
+    // m keeps 5dp (the tolerance alone would only demand 4) — hand-derived.
+    expect(text).toBe('0.04052 m ±0.0002');
     const shown = Number(/^([\d.]+)/.exec(text)![1]);
     expect(Math.abs(shown - 0.04052)).toBeLessThanOrEqual(0.0002);
   });
@@ -84,11 +93,11 @@ describe('CAD2-B2 — a nominal is never displayed outside its own tolerance', (
   it('mm without a tolerance is unchanged at 2dp (the negative control)', () => {
     // Without this, "more precision" would be satisfied by printing raw floats
     // everywhere, which is a different readability defect.
-    expect(formatDimension(40.005, { kind: 'linear', unit: 'mm' } as never, 'mm')).toBe('40.01 mm');
+    expect(formatDimension(40.005, { kind: 'linear', solid: 0, unit: 'mm' }, 'mm')).toBe('40.01 mm');
   });
 
   it('angular still renders degrees', () => {
-    expect(formatDimension(45.123, { kind: 'angular' } as never, 'mm')).toBe('45.12°');
+    expect(formatDimension(45.123, { kind: 'angular', solid: 0 }, 'mm')).toBe('45.12°');
   });
 
   it('LIMIT tolerances land inside their own window (review CAD2-R1)', () => {
@@ -97,9 +106,13 @@ describe('CAD2-B2 — a nominal is never displayed outside its own tolerance', (
     // 10.002)` read as a ±10.001 tolerance, dp stayed at 2, and the nominal
     // rendered OUTSIDE its stated window — the same Blocker, surviving in the
     // one tolerance grammar that had no test.
-    const lim = (tolA: number, tolB: number) =>
-      ({ kind: 'diameter', unit: 'mm', tolType: 'limit', tolA, tolB }) as never;
+    const lim = (tolA: number, tolB: number): CadDimension =>
+      ({ kind: 'diameter', solid: 0, unit: 'mm', tolType: 'limit', tolA, tolB });
 
+    // No exact-text pin here: in float |10.002 − 10.001| is a hair over 1e-3, so
+    // ⌈−log10⌉ is 3 and the nominal renders `10.002` (measured) — at the window
+    // edge, inside it.
+    // The range is the claim; an exact string would pin float noise.
     const text = formatDimension(10.0015, lim(10.002, 10.001), 'mm');
     const shown = Number(/^([\d.]+)/.exec(text)![1]);
     expect(shown, `${text}: the nominal must sit inside its own limits`).toBeGreaterThanOrEqual(10.001);
@@ -117,7 +130,7 @@ describe('CAD2-B2 — a nominal is never displayed outside its own tolerance', (
     // toleranced mm dimension would be a readability regression affecting far
     // more drawings than the defect it fixed — and the labels render as bare
     // 8px SVG text with no width budget, so extra digits can collide.
-    const mm = (tolA: number) => ({ kind: 'linear', unit: 'mm', tolType: 'symmetric', tolA }) as never;
+    const mm = (tolA: number): CadDimension => ({ kind: 'linear', solid: 0, unit: 'mm', tolType: 'symmetric', tolA });
     expect(formatDimension(12.3456, mm(0.5), 'mm')).toBe('12.35 mm ±0.5');
     expect(formatDimension(12.3456, mm(0.05), 'mm')).toBe('12.35 mm ±0.05');
     expect(formatDimension(12.3456, mm(0.01), 'mm')).toBe('12.35 mm ±0.01');
@@ -135,7 +148,6 @@ describe('CAD2-R4 — the model-facing texts name every field the node preserves
     // by obedience rather than by a bug. Three hand-written texts describe this
     // payload, and nothing pinned them, so the fix could look complete while the
     // instruction that causes the loss stayed on the page.
-    const { readFileSync } = await import('node:fs');
     const read = (rel: string) => readFileSync(new URL(rel, import.meta.url), 'utf8');
     const prompt = read('../../../packs/vendor.openwop-app.cad.agents/prompts/cad-modeler.md');
     const pack = read('../../../packs/feature.cad.nodes/pack.json');

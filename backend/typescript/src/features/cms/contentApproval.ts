@@ -41,7 +41,7 @@ import { canonicalDecider } from '../../host/delegatedSubject.js';
 import { hasContentSectionResolver } from '../../host/contentDataSources.js';
 import { getNotificationEmitter } from '../../notifications/emitter.js';
 import { createLogger } from '../../observability/logger.js';
-import { assertNoPublishBlockers, deliverableSectionsForPage, getPage, resolveSharedRefs, transitionPage, type Page } from './cmsService.js';
+import { assertNoPublishBlockers, deliverableSectionsForPage, getContentLanguageSettings, getPage, pageTranslationStatus, resolveSharedRefs, transitionPage, type Page } from './cmsService.js';
 import { SYSTEM_SITE_ORG, SYSTEM_SITE_TENANT } from '../../host/systemSite.js';
 
 const log = createLogger('cms.contentApproval');
@@ -433,6 +433,7 @@ export async function queueContentApproval(
     ...new Set(page.sections.flatMap((s) => Object.keys(s.aiDrafted ?? {}))),
   ].sort();
   const liveReferenceSections = await liveReferenceSectionsOf(page);
+  const outdatedTranslationLocales = await outdatedTranslationLocalesOf(tenantId, orgId, page);
   const text = proposal ?? `Publish CMS page "${page.title}"`;
   const submitters = opts.submittedBy ? [opts.submittedBy] : [];
   const submitterCauses = opts.causedBy ? [opts.causedBy] : [];
@@ -448,6 +449,7 @@ export async function queueContentApproval(
     pageVersion: page.version,
     aiDraftedLocales,
     liveReferenceSections,
+    outdatedTranslationLocales,
     proposal: text,
     submitters,
     submitterCauses,
@@ -470,6 +472,7 @@ export async function queueContentApproval(
     pageVersion: page.version,
     ...(aiDraftedLocales.length > 0 ? { aiDraftedLocales } : {}),
     ...(liveReferenceSections.length > 0 ? { liveReferenceSections } : {}),
+    ...(outdatedTranslationLocales.length > 0 ? { outdatedTranslationLocales } : {}),
     ...(submitters.length > 0 ? { submitters } : {}),
     ...(submitterCauses.length > 0 ? { submitterCauses } : {}),
     proposal: text,
@@ -522,6 +525,19 @@ export async function liveReferenceSectionsOf(page: Page): Promise<Array<{ secti
     out.push({ sectionId: s.sectionId, type: s.type });
   }
   return out;
+}
+
+/**
+ * ADR 0861 D6 addendum (ADR 0859 OQ-1) — the configured locales with at least one
+ * outdated section translation. NO second computation: `pageTranslationStatus` is
+ * the function behind `GET …/translation-status`, the read the editor's status line
+ * and section chips render. Information for the reviewer only — nothing decides on it.
+ */
+export async function outdatedTranslationLocalesOf(tenantId: string, orgId: string, page: Page): Promise<string[]> {
+  const { supportedLocales } = await getContentLanguageSettings(tenantId, orgId);
+  if (supportedLocales.length === 0) return [];
+  const { counts } = await pageTranslationStatus(page, supportedLocales);
+  return supportedLocales.filter((l) => (counts[l]?.outdated ?? 0) > 0);
 }
 
 /**

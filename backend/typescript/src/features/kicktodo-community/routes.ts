@@ -10,6 +10,7 @@ import { OpenwopError } from '../../types.js';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
 import { callerSubject, tenantOf } from '../../host/requestSubject.js';
 import { requireFeatureEnabled, requireKicktodoManage, requireString } from '../featureRoute.js';
+import { registerKicktodoSignoffApprovals } from '../kicktodo-core/signoffApprovals.js';
 import { revenueProjectionFor } from '../kicktodo-commerce/entitlementService.js';
 import {
   upsertProfile,
@@ -22,10 +23,14 @@ import {
   aggregateRating,
   flagReview,
   resolveReviewFlag,
+  decideCommunityProfileApproval,
+  decideCommunityReviewApproval,
   creatorAnalytics,
   HandleTakenError,
+  ProfileConflictError,
   ProfileInvalidError,
   ReviewProofError,
+  ReviewConflictError,
   NotFoundError,
   SeparationOfDutiesError,
 } from './communityService.js';
@@ -46,6 +51,8 @@ async function gate(req: Request): Promise<void> {
 
 function mapError(err: unknown): never {
   if (err instanceof HandleTakenError) throw new OpenwopError('conflict', err.message, 409);
+  if (err instanceof ReviewConflictError) throw new OpenwopError('conflict', err.message, 409);
+  if (err instanceof ProfileConflictError) throw new OpenwopError('conflict', err.message, 409);
   if (err instanceof ProfileInvalidError) throw new OpenwopError('validation_error', err.message, 422);
   if (err instanceof ReviewProofError) throw new OpenwopError('forbidden', err.message, 403);
   if (err instanceof SeparationOfDutiesError) throw new OpenwopError('forbidden', err.message, 403);
@@ -196,6 +203,7 @@ export const KICKTODO_COMMUNITY_ROUTES: ReadonlyArray<{ method: 'get' | 'post'; 
           requireString(b.challengeId, 'challengeId'),
           requireString(b.reviewerSubject, 'reviewerSubject'),
           b.remove === true,
+          subjectOf(req),
         ));
       } catch (err) {
         mapError(err);
@@ -213,6 +221,10 @@ export const KICKTODO_COMMUNITY_ROUTES: ReadonlyArray<{ method: 'get' | 'post'; 
 ];
 
 export function registerKicktodoCommunityRoutes(deps: RouteDeps): void {
+  // Code-grade KTY-1 — the generic decision lane (inbox, approvals routes,
+  // decide-by-email) applies moderation outcomes to the profile / review itself.
+  registerKicktodoSignoffApprovals('community-profile', decideCommunityProfileApproval, { separateFrom: (a) => [a.community?.submittedBy, a.community?.refId] });
+  registerKicktodoSignoffApprovals('community-review', decideCommunityReviewApproval, { separateFrom: (a) => [a.community?.submittedBy, a.community?.refId.slice(a.community.refId.lastIndexOf('::') + 2)] });
   const app: Express = deps.app;
   const wrap = (h: Handler) => async (req: Request, res: Response, next: NextFunction) => {
     try {

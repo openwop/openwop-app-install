@@ -18,8 +18,23 @@ export interface IntentLedger {
   status: 'draft' | 'approved' | 'expired' | 'rejected';
   proposedBy: 'extractor' | 'user';
   approvedBy?: string;
+  approvedAt?: string;
+  /** ADR 0896 D1 — bumped by every write; a decision names the revision it reviewed. */
+  revision: number;
+  /** ADR 0896 D1 — the server's digest of the contract shown; a decision echoes it. */
+  digest: string;
   createdAt: string;
 }
+
+/** ADR 0896 D2 — what THIS viewer may do, from the predicates the writes enforce. */
+export interface MissionViewer { mayEdit: boolean; mayDecide: boolean }
+export interface MissionView { ledger: IntentLedger | null; viewer: MissionViewer }
+
+/** ADR 0896 D1 — the mission changed between the read and the decision (409
+ *  `ledger_changed`): the caller must show the new version before deciding again. */
+export class LedgerChangedError extends Error {}
+/** IL2UX-1 — the conversation is not visible to this caller, or not saved yet (404). */
+export class MissionNotFoundError extends Error {}
 
 export interface LedgerReckoning {
   goal: string;
@@ -38,15 +53,38 @@ const jsonHeaders = (): Record<string, string> => authedHeaders({ 'content-type'
 async function asJson<T>(res: Response, ctx: string): Promise<T> {
   if (!res.ok) {
     let detail = '';
-    try { detail = ((await res.json()) as { message?: string })?.message ?? ''; } catch { /* non-JSON */ }
+    let reason: unknown;
+    try {
+      const body = (await res.json()) as { message?: string; details?: { reason?: unknown } };
+      detail = body?.message ?? '';
+      reason = body?.details?.reason;
+    } catch { /* non-JSON */ }
+    if (res.status === 409 && reason === 'ledger_changed') throw new LedgerChangedError(detail);
+    if (res.status === 404) throw new MissionNotFoundError(detail);
     throw new Error(detail || `${ctx} returned ${res.status}`);
   }
   return (await res.json()) as T;
 }
 
-export async function getLedger(conversationId: string): Promise<IntentLedger | null> {
+export async function getLedger(conversationId: string): Promise<MissionView> {
   const res = await fetch(base(conversationId), fetchOpts({ headers: authedHeaders() }));
-  return (await asJson<{ ledger: IntentLedger | null }>(res, 'getLedger')).ledger;
+  const body = await asJson<{ ledger: IntentLedger | null; viewer?: MissionViewer }>(res, 'getLedger');
+  return { ledger: body.ledger, viewer: body.viewer ?? { mayEdit: false, mayDecide: false } };
+}
+
+/** ADR 0856 D2 — what a new draft in a project's conversation starts from: the team
+ *  ledger's goal + scope (untrusted text, shown as data) and the restrictions the
+ *  draft keeps (the server pre-fills them and refuses a draft that drops one). */
+export interface MissionPrefill {
+  goal?: string;
+  forbidden: string[];
+  requireApproval: string[];
+  sources: { kind: 'project'; id: string; name: string; inScope: string[]; outOfScope: string[] }[];
+}
+
+export async function getPrefill(conversationId: string): Promise<MissionPrefill | null> {
+  const res = await fetch(`${base(conversationId)}/prefill`, fetchOpts({ headers: authedHeaders() }));
+  return (await asJson<{ prefill: MissionPrefill | null }>(res, 'getPrefill')).prefill;
 }
 
 export interface DraftInput { goal: string; allowed?: string[]; forbidden?: string[]; requireApproval?: string[]; successCriteria?: string[]; expiresAtRelMs?: number }
@@ -62,8 +100,9 @@ export async function draftLedger(conversationId: string, input: DraftInput): Pr
 // chat scoped to the Chief of Staff, whose `openwop:intent-ledger.draft-contract`
 // tool authors the draft in-conversation for the owner to Approve here.
 
-export async function decideLedger(conversationId: string, decision: 'approve' | 'reject'): Promise<IntentLedger> {
-  const res = await fetch(`${base(conversationId)}/${decision}`, fetchOpts({ method: 'POST', headers: jsonHeaders() }));
+/** ADR 0896 D1 — approve what you saw: the decision names the version rendered. */
+export async function decideLedger(conversationId: string, decision: 'approve' | 'reject', reviewed: Pick<IntentLedger, 'ledgerId' | 'revision' | 'digest'>): Promise<IntentLedger> {
+  const res = await fetch(`${base(conversationId)}/${decision}`, fetchOpts({ method: 'POST', headers: jsonHeaders(), body: JSON.stringify({ ledgerId: reviewed.ledgerId, revision: reviewed.revision, digest: reviewed.digest }) }));
   return (await asJson<{ ledger: IntentLedger }>(res, 'decideLedger')).ledger;
 }
 

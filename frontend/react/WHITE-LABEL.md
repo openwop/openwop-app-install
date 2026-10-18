@@ -296,8 +296,10 @@ ships **Nora** in
 
 > **Protocol identifiers are NOT branding** and must stay: `core.openwop.*`
 > capability IDs, `/.well-known/openwop`, the `x-openwop-device-token` header,
-> `Capabilities-Etag`, and `anon:`/`user:` tenant prefixes are the OpenWOP wire
+> and `anon:`/`user:` tenant prefixes are the OpenWOP wire
 > protocol your host implements — not a product name. Leave them as-is.
+> (`Capabilities-Etag` used to be on this list; it was a v1 header, and major 2
+> uses the standard `ETag` — ADR 0812.)
 
 ### Note for the reference `app.openwop.dev` deploy
 
@@ -321,6 +323,15 @@ for it (the player reads it with `crossorigin="anonymous"`).
 
 The seeded **White label** page (`/p/white-label`, two openwop.dev films) is
 created only when `OPENWOP_DEMO_MODE=true`, so a clean install never shows it.
+
+### Optional feature bundles (off by default)
+
+Some product areas ship **off** so a white-label install starts lean: **CRM**,
+**Strategy**, **Priority matrix** and **Advisory board** (ADR 0892). For CRM: its sidebar group, routes and API stay hidden until you turn the
+`crm` toggle on. Enable it as a super admin in **Admin → Feature toggles**, either
+globally or for one workspace. Features that build on CRM (CSM, Email, Commerce,
+Territories, Job search) need it on first. Upgrading an install that already has
+CRM data keeps CRM on automatically (app migration 23).
 
 ---
 

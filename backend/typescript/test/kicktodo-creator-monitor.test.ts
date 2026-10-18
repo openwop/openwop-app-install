@@ -2,17 +2,22 @@
  * ADR 0415 P4 — monitoring + the kill switch:
  *
  *  - source-health checks run over the dossier with an INJECTED fetcher
- *    (ok / redirected / broken / unreachable), never editing content
+ *    (ok / redirected / broken / unreachable — each a real source), never editing
+ *    content, and the report is PERSISTED (read back via `getMonitorReport`)
  *  - the kill switch retires the published version (kicktodo-core refuses
  *    NEW enrollments; an ACTIVE enrollment keeps working) and withdraws the
  *    candidate with the audited reason
+ *
+ * Honest ceiling: "an ACTIVE enrollment keeps working" has no product branch that
+ * could break it today (`retireChallenge` never touches enrollments) — kept as the
+ * PRD §13 retirement-contract pin.
  */
 import { beforeAll, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
-import { createCandidate, recordResearch, sourceHash, setCandidateSimulation } from '../src/features/kicktodo-creator/creatorService.js';
+import { createCandidate, getCandidate, recordResearch, sourceHash, setCandidateSimulation } from '../src/features/kicktodo-creator/creatorService.js';
 import { submitForPublication, completePublication } from '../src/features/kicktodo-creator/publishService.js';
-import { checkSources, killSwitch } from '../src/features/kicktodo-creator/monitorService.js';
+import { checkSources, getMonitorReport, killSwitch } from '../src/features/kicktodo-creator/monitorService.js';
 import { createDraft, getChallenge } from '../src/features/kicktodo-core/challengeService.js';
 import { enroll, getEnrollment, ChallengeNotEnrollableError } from '../src/features/kicktodo-core/enrollmentService.js';
 import { registerGoalVerifier } from '../src/features/goals/goalVerifiers.js';
@@ -31,8 +36,11 @@ async function publishedCandidate() {
   });
   const good = { url: 'https://example.org/reading', domain: 'example.org', title: 'Reading study', hash: sourceHash('https://example.org/reading', 'Reading study'), engine: 'searx' };
   const dead = { url: 'https://example.org/gone', domain: 'example.org', title: 'Gone', hash: sourceHash('https://example.org/gone', 'Gone'), engine: 'searx' };
+  // Uncited (so the claims gate still passes): one the fetcher reports MOVED, one it THROWS for.
+  const moved = { url: 'https://example.org/moved', domain: 'example.org', title: 'Moved', hash: sourceHash('https://example.org/moved', 'Moved'), engine: 'searx' };
+  const unreachable = { url: 'https://example.org/unreachable', domain: 'example.org', title: 'Unreachable', hash: sourceHash('https://example.org/unreachable', 'Unreachable'), engine: 'searx' };
   await recordResearch(TENANT, cand.id, {
-    questions: [], sources: [good, dead],
+    questions: [], sources: [good, dead, moved, unreachable],
     claims: [{ claimId: 'c1', text: 'Reading before bed aids wind-down', sourceHashes: [good.hash] }],
   });
   const draft = await createDraft({
@@ -54,13 +62,24 @@ async function publishedCandidate() {
 describe('monitoring (injected fetcher)', () => {
   it('classifies ok / broken / unreachable without touching content', async () => {
     const { cand } = await publishedCandidate();
+    const dossierBefore = (await getCandidate(TENANT, cand.id))?.dossier;
     const report = await checkSources(TENANT, cand.id, async (url) => {
-      if (url.includes('gone')) return { status: 404, redirected: false };
-      return { status: 200, redirected: false };
+      if (url.endsWith('/unreachable')) throw new Error('connect ECONNREFUSED');
+      if (url.endsWith('/gone')) return { status: 404, redirected: false };
+      return { status: 200, redirected: url.endsWith('/moved') };
     });
-    expect(report?.findings).toHaveLength(2);
-    expect(report?.broken).toBe(1);
-    expect(report?.findings.find((f) => f.url.includes('gone'))?.health).toBe('broken');
+    const health = Object.fromEntries((report?.findings ?? []).map((f) => [f.url, [f.health, f.httpStatus]]));
+    expect(health).toEqual({
+      'https://example.org/reading': ['ok', 200],
+      'https://example.org/gone': ['broken', 404],
+      'https://example.org/moved': ['redirected', 200],
+      'https://example.org/unreachable': ['unreachable', undefined],
+    });
+    expect(report?.broken).toBe(2); // broken + unreachable count; redirected does not
+    // …never touching content: the dossier is exactly what it was.
+    expect((await getCandidate(TENANT, cand.id))?.dossier).toEqual(dossierBefore);
+    // …and the report is persisted, not just returned.
+    expect(await getMonitorReport(TENANT, cand.id)).toEqual(report);
   });
 });
 
@@ -73,7 +92,7 @@ describe('kill switch', () => {
 
     const withdrawn = await killSwitch(TENANT, cand.id, 'source integrity incident', 'user:operator');
     expect(withdrawn.state).toBe('withdrawn');
-    expect(withdrawn.riskSignals.join(' ')).toContain('source integrity incident');
+    expect(withdrawn.riskSignals).toContain('withdrawn: source integrity incident (by user:operator)');
 
     // The challenge version is retired — NEW enrollments are refused…
     expect((await getChallenge(TENANT, draft.id, 1))?.status).toBe('retired');

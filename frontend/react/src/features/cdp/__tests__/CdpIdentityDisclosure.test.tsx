@@ -9,9 +9,15 @@
  *    banner, or the disclosure becomes noise people learn to skip.
  *  - CDP-G3: `verifiedAt` rides every identifier. BOTH states render, because
  *    absence is the meaningful one (nobody confirmed this identifier).
+ *
+ * Sabotage-witnessed (/grade-tests w38): an always-on merge banner, the banner's `announce`
+ * dropped, the merged-away id dropped, the verified date or the `unverified` label dropped, the
+ * failed lookup keeping the old record, the masked notice gated off, and the phone / lead-source /
+ * customFields rows dropped each turn a case red.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { currentAnnouncements } from '../../../ui/announce.js';
+import { announce, currentAnnouncements } from '../../../ui/announce.js';
+import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
 import { render, screen, cleanup, waitFor, fireEvent, act } from '@testing-library/react';
 import type { GoldenRecord } from '../../../client/cdpClient.js';
 
@@ -24,8 +30,9 @@ vi.mock('../../../client/cdpClient.js', async (orig) => ({
     return resolved;
   }),
 }));
-vi.mock('../../../featureToggles/FeatureAccessContext.js', () => ({
-  useFeatureAccess: () => ({ enabled: true, locked: false, loading: false, status: 'on' as const, isBeta: false, variant: null, entitled: true, resolutionFailed: false }),
+vi.mock('../../../featureToggles/FeatureAccessContext.js', async (orig) => ({
+  ...(await orig<Record<string, unknown>>()),
+  useFeatureAccess: () => makeFeatureAccess(),
 }));
 
 import { CdpConsolePage } from '../CdpConsolePage.js';
@@ -46,7 +53,9 @@ async function lookUp(): Promise<void> {
   await waitFor(() => expect(screen.getByText('Ada Lovelace')).toBeTruthy());
 }
 
-beforeEach(() => { resolved = BASE; rejectNext = false; });
+// The announcer is module-level state with no reset of its own: clear it per case so a message
+// another case left behind can never satisfy an announcement assertion.
+beforeEach(() => { resolved = BASE; rejectNext = false; announce(''); });
 afterEach(cleanup);
 
 describe('CDP identity disclosure', () => {
@@ -67,7 +76,8 @@ describe('CDP identity disclosure', () => {
     // (by design) renders no role of its own. The old assertion pinned a
     // role=status that never spoke (mounted WITH content — the documented
     // Notice trap); this pins the words reaching the announcer.
-    expect(currentAnnouncements().polite).toMatch(/surviving record/i);
+    // The announcement comes from a passive effect that can flush after findBy sees the DOM; wait for it.
+    await waitFor(() => expect(currentAnnouncements().polite).toMatch(/surviving record/i));
   });
 
   it('renders the verified date when an identifier carries one', async () => {
@@ -76,7 +86,8 @@ describe('CDP identity disclosure', () => {
       identifiers: [{ type: 'loyalty', value: 'LOY-1', source: 'import', verifiedAt: '2026-03-04T10:00:00.000Z' }],
     };
     await lookUp();
-    expect(screen.getByText(/verified/i)).toBeTruthy();
+    // The DATE, not just the word (the year is locale-independent).
+    expect(screen.getByText(/verified .*2026/i)).toBeTruthy();
     expect(screen.queryByText(/unverified/i)).toBeNull();
   });
 
@@ -101,6 +112,7 @@ describe('R2 round-2 — lookup truth + disclosure parity', () => {
     fireEvent.click(screen.getByRole('button', { name: /resolve/i }));
     await waitFor(() => expect(screen.queryByText('Ada Lovelace')).toBeNull());
     // The error shows; the OLD record (and its resolvedBy chip) is gone.
+    expect(screen.getByText(/something went wrong/i)).toBeTruthy();
     expect(screen.queryByText(/LOY-1/)).toBeNull();
   });
 
@@ -120,8 +132,8 @@ describe('R2 round-2 — lookup truth + disclosure parity', () => {
     expect(screen.getByText('+1 555 0100')).toBeTruthy();
     expect(screen.getByText('CTO')).toBeTruthy();
     expect(screen.getByText('sam@acme.test')).toBeTruthy();
-    // leadSource absent → the LABEL still renders with an em-dash.
-    expect(screen.getByText(/lead source/i)).toBeTruthy();
+    // leadSource absent → the LABEL still renders, with an em-dash as its value.
+    expect(screen.getByText(/lead source/i).nextElementSibling?.textContent).toBe('—');
   });
 
   it('CD-SP-3: customFields render when present (agent-settable was invisible)', async () => {

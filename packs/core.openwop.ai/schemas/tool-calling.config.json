@@ -22,6 +22,6 @@
     },
     "toolChoice": { "description": "auto | required | none | { name: '<tool>' }" }
   },
-  "required": ["provider", "model", "tools"],
+  "required": ["tools"],
   "additionalProperties": true
 }

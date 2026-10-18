@@ -21,6 +21,7 @@ import type { BackendFeature } from '../types.js';
 import { registerVoiceRoutes } from './routes.js';
 import { registerRealtimeRoutes } from './realtime/routes.js';
 import { presentationEnabled } from '../../host/hostProfile.js';
+import { registerVoiceSessionErasure } from './voiceSession.js';
 
 export const voiceFeature: BackendFeature = {
   id: 'voice',
@@ -29,6 +30,9 @@ export const voiceFeature: BackendFeature = {
   // the discovery advert (discovery.ts realtimeVoice). The `voice` toggle still gates
   // access at request time in `full`; headless removes the surface entirely.
   registerRoutes: (deps) => {
+    // ADR 0893 — stored walkie rows name their opener; erasure must reach them
+    // even on a headless host that never mounts the routes.
+    registerVoiceSessionErasure();
     if (!presentationEnabled('realtimeVoice')) return;
     registerVoiceRoutes(deps);
     registerRealtimeRoutes(deps);

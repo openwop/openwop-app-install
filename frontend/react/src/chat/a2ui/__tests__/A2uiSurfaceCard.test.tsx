@@ -57,6 +57,7 @@ describe('A2uiSurfaceCard — catalog parse', () => {
   it('rejects a malformed component (missing required props)', () => {
     const p = parseSurface({ catalogVersion: A2UI_CATALOG_VERSION, surface: { components: [{ component: 'field.text' }] } });
     expect(p.ok).toBe(false);
+    if (!p.ok) expect(p.reason).toBe('"field.text" requires string `id` + `label`');
   });
 
   it('rejects an action.button without a confined target', () => {
@@ -64,6 +65,7 @@ describe('A2uiSurfaceCard — catalog parse', () => {
       { component: 'action.button', id: 'go', label: 'Go', action: { url: 'http://evil' } },
     ] } });
     expect(p.ok).toBe(false);
+    if (!p.ok) expect(p.reason).toBe('"action.button" requires `action.target` of "resume" | "exchange"');
   });
 });
 
@@ -108,15 +110,20 @@ describe('A2uiSurfaceCard — render + action', () => {
   });
 
   it('fails closed on an out-of-catalog component (no button, shows a notice)', () => {
-    renderCard({ catalogVersion: A2UI_CATALOG_VERSION, surface: { components: [{ component: 'script', text: 'alert(1)' }] } });
+    // The surface also carries a valid button, so a catalog that admitted `script`
+    // would render it — the absence below can fail.
+    renderCard({ catalogVersion: A2UI_CATALOG_VERSION, surface: { components: [
+      { component: 'script', text: 'alert(1)' },
+      { component: 'action.button', id: 'go', label: 'Go', action: { target: 'resume' } },
+    ] } });
     expect(screen.queryByRole('button')).toBeNull();
-    expect(screen.getByText(/could not be rendered safely/)).toBeTruthy();
+    expect(screen.getByText(/could not be rendered safely: component "script" is not in the host A2UI catalog \(v0\.9\.1\)/)).toBeTruthy();
   });
 
   it('fails closed on a catalog-version mismatch', () => {
     renderCard({ ...goodPayload, catalogVersion: '9.9.9' });
     expect(screen.queryByRole('button')).toBeNull();
-    expect(screen.getByText(/this host renders/i)).toBeTruthy();
+    expect(screen.getByText('This surface targets A2UI catalog v9.9.9; this host renders v0.9.1. It was not rendered.')).toBeTruthy();
   });
 
   it('disables the action until a required field is filled, with an accessible reason', () => {

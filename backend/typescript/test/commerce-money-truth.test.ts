@@ -21,21 +21,47 @@ import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import {
   createProduct, getProduct, updateProduct, createOrder, markAsPaid, refundOrder, updateFulfillment,
   partialRefundOrder, createCoupon, listStockMovements, getOrder, quantizeMoney,
-  orderChargeTotal, __resetCommerce,
+  orderChargeTotal, __resetCommerce, type Order,
 } from '../src/features/commerce/commerceService.js';
 import { OpenwopError } from '../src/types.js';
 import { subscribeToProduct, cancelSubscription, getProductSubscription, __resetSubscriptions } from '../src/features/commerce/subscriptions.js';
 import { setGovernancePolicy } from '../src/host/governanceService.js';
 import { resolveAp2Payment } from '../src/features/commerce/ucp/ap2.js';
 import * as stripeApi from '../src/features/billing/stripeApi.js';
+import { __platformChargeForTest } from '../src/features/commerce-connect/storefrontSettlement.js';
 
 const T = 'tenant-cm-r2';
 const ORG = 'org-cm-r2';
 const BY = 'user-cm-r2';
 
+
+/** ADR 0875 D3 — the refund exit re-reads the intent and requires it to be bound to
+ *  its order (metadata), so the intents these orders were paid with must answer as
+ *  Stripe would: succeeded, carrying their own order's metadata. */
+const boundIntents = new Map<string, string>();
+function bindIntents(): void {
+  vi.spyOn(stripeApi, 'getStripePaymentIntent').mockImplementation(async (_key: string, id: string) => {
+    const orderId = boundIntents.get(id) ?? '';
+    return { status: 'succeeded', amount: 0, currency: 'usd', metadata: { orderId, tenantId: T, orgId: ORG } };
+  });
+}
+
 let storage: Awaited<ReturnType<typeof openStorage>>;
 beforeAll(async () => { storage = await openStorage('memory://'); initHostExtPersistence(storage); });
-beforeEach(async () => { await __resetCommerce(); await __resetSubscriptions(); vi.restoreAllMocks(); });
+beforeEach(async () => { await __resetCommerce(); await __resetSubscriptions(); vi.restoreAllMocks(); bindIntents(); });
+
+/** A complete, typed order for the AP2 cross-check: goods 90 + tax 8 + shipping 5
+ *  = a charge of 103. Built whole (no `as` cast), so a field `resolveAp2Payment`
+ *  starts reading later cannot silently arrive as `undefined`. */
+function ap2Order(orderId: string, currency: string): Order {
+  const at = '2026-01-01T00:00:00.000Z';
+  return {
+    orderId, tenantId: T, orgId: ORG, items: [],
+    subtotal: 90, discount: 0, total: 90, taxTotal: 8, shippingCost: 5, currency,
+    status: 'pending', fulfillmentStatus: 'pending',
+    createdBy: BY, createdAt: at, updatedAt: at,
+  };
+}
 
 async function subscribableProduct(): Promise<string> {
   const p = await createProduct({
@@ -51,7 +77,8 @@ async function paidOrder(opts: { price?: number; currency?: string; shipping?: b
     price: opts.price ?? 100, currency: opts.currency ?? 'USD', inventory: 10,
   });
   const o = await createOrder({ tenantId: T, orgId: ORG, createdBy: BY, lines: [{ productId: p.productId, quantity: 1 }] });
-  await markAsPaid(T, ORG, o.orderId, 'pi_live_123', {});
+  await markAsPaid(T, ORG, o.orderId, `pi_live_123_${o.orderId}`, {});
+  boundIntents.set(`pi_live_123_${o.orderId}`, o.orderId);
   return { orderId: o.orderId };
 }
 
@@ -92,7 +119,7 @@ describe('CM-P2-B1 — a failed Stripe refund must not wedge the order', () => {
     // this is exactly the row the old code left behind on every failed refund.
     const realCas = storage.kvCompareAndSwap.bind(storage);
     const casSpy = vi.spyOn(storage, 'kvCompareAndSwap').mockImplementation(async (key, expected, next) => {
-      const row = JSON.parse(next) as { status?: string };
+      const row: { status?: string } = JSON.parse(next); // raw storage JSON (untyped by nature)
       if (key.includes(orderId) && row.status === 'paid') return { swapped: false, actual: expected };
       return realCas(key, expected, next);
     });
@@ -133,7 +160,7 @@ describe('CM-P2-B4 — fulfillment must not clobber a concurrent refund', () => 
     const realCas = storage.kvCompareAndSwap.bind(storage);
     let fired = false;
     vi.spyOn(storage, 'kvCompareAndSwap').mockImplementation(async (key, expected, next) => {
-      const row = JSON.parse(next) as { fulfillmentStatus?: string };
+      const row: { fulfillmentStatus?: string } = JSON.parse(next); // raw storage JSON
       if (!fired && key.includes(orderId) && row.fulfillmentStatus === 'shipped') {
         fired = true;
         await partialRefundOrder(T, ORG, orderId, 50, { refundKey: 'rk-1', actor: BY });
@@ -243,17 +270,23 @@ describe('CM-P2-M1 / M2 — coupons', () => {
   it('a free_shipping coupon actually waives the shipping the order is charged', async () => {
     // A flat shipping charge must actually EXIST, or "shipping is zero" proves nothing —
     // the first cut of this test passed against the unfixed code for exactly that reason.
+    // The policy is on the SHARED tenant T: reset it in `finally`, or every later
+    // case's orders silently carry $8 shipping (order dependence).
     await setGovernancePolicy(T, { commerce: { flatShippingMinor: 800 } }, 'test'); // $8 flat
-    await createCoupon({ tenantId: T, orgId: ORG, code: 'FREESHIP', type: 'free_shipping', value: 0, actor: BY });
-    const p = await createProduct({ tenantId: T, orgId: ORG, createdBy: BY, type: 'physical', name: 'Boxed', price: 90, currency: 'USD', inventory: 5, weightGrams: 500 });
-    const withShip = await createOrder({ tenantId: T, orgId: ORG, createdBy: BY, lines: [{ productId: p.productId, quantity: 1 }] });
-    const free = await createOrder({ tenantId: T, orgId: ORG, createdBy: BY, couponCode: 'FREESHIP', lines: [{ productId: p.productId, quantity: 1 }] });
+    try {
+      await createCoupon({ tenantId: T, orgId: ORG, code: 'FREESHIP', type: 'free_shipping', value: 0, actor: BY });
+      const p = await createProduct({ tenantId: T, orgId: ORG, createdBy: BY, type: 'physical', name: 'Boxed', price: 90, currency: 'USD', inventory: 5, weightGrams: 500 });
+      const withShip = await createOrder({ tenantId: T, orgId: ORG, createdBy: BY, lines: [{ productId: p.productId, quantity: 1 }] });
+      const free = await createOrder({ tenantId: T, orgId: ORG, createdBy: BY, couponCode: 'FREESHIP', lines: [{ productId: p.productId, quantity: 1 }] });
 
-    expect(withShip.shippingCost).toBe(8); // the control: shipping IS charged without it
-    expect(free.couponCode).toBe('FREESHIP');
-    expect(free.shippingCost ?? 0).toBe(0);
-    // …and the CHARGE is lower by exactly the shipping that was quoted without it.
-    expect(orderChargeTotal(free)).toBe(orderChargeTotal(withShip) - (withShip.shippingCost ?? 0));
+      expect(withShip.shippingCost).toBe(8); // the control: shipping IS charged without it
+      expect(free.couponCode).toBe('FREESHIP');
+      expect(free.shippingCost ?? 0).toBe(0);
+      // …and the CHARGE is lower by exactly the shipping that was quoted without it.
+      expect(orderChargeTotal(free)).toBe(orderChargeTotal(withShip) - (withShip.shippingCost ?? 0));
+    } finally {
+      await setGovernancePolicy(T, { commerce: {} }, 'test');
+    }
   });
 
   it('a fixed coupon captures its currency and does not cross currencies', async () => {
@@ -300,9 +333,7 @@ describe('CM-P2-I3 / I4 — currency handling', () => {
 });
 
 describe('CM-P2-M11 — an AP2 mandate authorizes the CHARGE', () => {
-  const order = {
-    orderId: 'ord-ap2', total: 90, taxTotal: 8, shippingCost: 5, currency: 'USD',
-  } as Parameters<typeof resolveAp2Payment>[1];
+  const order = ap2Order('ord-ap2', 'USD');
 
   it('a goods-only mandate does not settle an order with tax and shipping', () => {
     expect(() => resolveAp2Payment({ ap2_mandate: { amount: 90, currency: 'USD' } }, order))
@@ -325,7 +356,7 @@ describe('CM-P2-B2 — a failed live subscribe must not mark the first order PAI
     const productId = await subscribableProduct();
     vi.spyOn(stripeApi, 'createStripeSubscription').mockRejectedValue(new Error('stripe 429'));
 
-    const out = await subscribeToProduct({ tenantId: T, orgId: ORG, createdBy: BY, productId, interval: 'monthly', stripeKey: 'sk_x' });
+    const out = await subscribeToProduct({ tenantId: T, orgId: ORG, createdBy: BY, productId, interval: 'monthly', charge: __platformChargeForTest('sk_x') });
 
     // The whole paid fan-out (GMV, confirmation email, commission, entitlement grant)
     // hangs off this status. No money was collected, so it must not say paid.
@@ -346,7 +377,7 @@ describe('CM-P2-M8 — cancelling a subscription cancels it at the provider', ()
     const productId = await subscribableProduct();
     vi.spyOn(stripeApi, 'createStripeSubscription').mockResolvedValue({ subscriptionId: 'sub_live_1', customerId: 'cus_1' });
     const cancelSpy = vi.spyOn(stripeApi, 'cancelStripeSubscription').mockResolvedValue({ id: 'sub_live_1', status: 'canceled' });
-    const { subscription } = await subscribeToProduct({ tenantId: T, orgId: ORG, createdBy: BY, productId, interval: 'monthly', stripeKey: 'sk_x' });
+    const { subscription } = await subscribeToProduct({ tenantId: T, orgId: ORG, createdBy: BY, productId, interval: 'monthly', charge: __platformChargeForTest('sk_x') });
 
     const out = await cancelSubscription(T, ORG, subscription.subscriptionId, { stripeKey: 'sk_x' });
 
@@ -357,7 +388,7 @@ describe('CM-P2-M8 — cancelling a subscription cancels it at the provider', ()
   it('REFUSES a local-only cancel of a Stripe-linked subscription (charges would continue)', async () => {
     const productId = await subscribableProduct();
     vi.spyOn(stripeApi, 'createStripeSubscription').mockResolvedValue({ subscriptionId: 'sub_live_2', customerId: 'cus_2' });
-    const { subscription } = await subscribeToProduct({ tenantId: T, orgId: ORG, createdBy: BY, productId, interval: 'monthly', stripeKey: 'sk_x' });
+    const { subscription } = await subscribeToProduct({ tenantId: T, orgId: ORG, createdBy: BY, productId, interval: 'monthly', charge: __platformChargeForTest('sk_x') });
 
     await expect(cancelSubscription(T, ORG, subscription.subscriptionId, { stripeKey: null }))
       .rejects.toThrow(/bills through Stripe/i);
@@ -379,7 +410,7 @@ describe('review fold-ins (provider lanes)', () => {
   it('M-5: a subscription already cancelled at Stripe still completes locally', async () => {
     const productId = await subscribableProduct();
     vi.spyOn(stripeApi, 'createStripeSubscription').mockResolvedValue({ subscriptionId: 'sub_live_3', customerId: 'cus_3' });
-    const { subscription } = await subscribeToProduct({ tenantId: T, orgId: ORG, createdBy: BY, productId, interval: 'monthly', stripeKey: 'sk_x' });
+    const { subscription } = await subscribeToProduct({ tenantId: T, orgId: ORG, createdBy: BY, productId, interval: 'monthly', charge: __platformChargeForTest('sk_x') });
     // The response to the first cancel was lost; the retry finds it already gone.
     vi.spyOn(stripeApi, 'cancelStripeSubscription').mockRejectedValue(new Error('No such subscription: sub_live_3'));
 
@@ -390,7 +421,7 @@ describe('review fold-ins (provider lanes)', () => {
   it('M-5: a genuine provider failure still refuses (no silent local-only cancel)', async () => {
     const productId = await subscribableProduct();
     vi.spyOn(stripeApi, 'createStripeSubscription').mockResolvedValue({ subscriptionId: 'sub_live_4', customerId: 'cus_4' });
-    const { subscription } = await subscribeToProduct({ tenantId: T, orgId: ORG, createdBy: BY, productId, interval: 'monthly', stripeKey: 'sk_x' });
+    const { subscription } = await subscribeToProduct({ tenantId: T, orgId: ORG, createdBy: BY, productId, interval: 'monthly', charge: __platformChargeForTest('sk_x') });
     vi.spyOn(stripeApi, 'cancelStripeSubscription').mockRejectedValue(new Error('Stripe request failed: timed out.'));
 
     await expect(cancelSubscription(T, ORG, subscription.subscriptionId, { stripeKey: 'sk_x' })).rejects.toThrow(/timed out/i);
@@ -398,7 +429,7 @@ describe('review fold-ins (provider lanes)', () => {
   });
 
   it('I1: an AP2 mandate must state its currency, not just its amount', () => {
-    const order = { orderId: 'o', total: 90, taxTotal: 8, shippingCost: 5, currency: 'EUR' } as Parameters<typeof resolveAp2Payment>[1];
+    const order = ap2Order('o', 'EUR');
     expect(() => resolveAp2Payment({ ap2_mandate: { id: 'm3', amount: 103 } }, order))
       .toThrow(/must state the `currency`/i);
   });

@@ -98,6 +98,10 @@ export interface PendingApproval {
   /** ADR 0859 D5 (ADR 0594 D1) — sections that resolve LIVE at read time; the
    *  reviewer must be told their approval does not freeze what those show. */
   liveReferenceSections?: Array<{ sectionId: string; type: string }>;
+  /** ADR 0861 D6 addendum (ADR 0859 OQ-1) — configured locales with an OUTDATED
+   *  section translation at the pinned version. Information only: approving is
+   *  never blocked by it. */
+  outdatedTranslationLocales?: string[];
   /** Embedded card metadata for assistant-action rows (null if the action
    *  vanished). Absent for run-proposals. */
   action?: AssistantActionView | null;
@@ -167,6 +171,9 @@ export function approvalErrorInfo(e: unknown): { key: string; options?: Record<s
   if (reason === 'action_changed') return { key: 'assistantAction:actionChanged' };
   if (reason === 'content_hash_required') return { key: 'assistantAction:cardOutOfDate' };
   if (reason === 'separation-of-duties') return { key: 'approvalSelfApproval' };
+  // ADR 0775 P3 — the proposing agent was paused after it proposed; the approval
+  // stays pending (resume the agent, then approve). Not "already decided".
+  if (reason === 'agent_paused') return { key: 'approvalAgentPaused' };
   if (reason === 'review_closed') {
     return e.details?.subject === 'deleted'
       ? { key: 'approvalClosedPageDeleted' }

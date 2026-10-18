@@ -4,11 +4,14 @@
  * must not claim nothing is running); a hidden page does not poll; focus
  * re-reads. The client is mocked with a plain function (a cleared vi.fn whose
  * promise rejects fails the test under Vitest 4 even when handled).
+ * Breaks if a failed read clears the set, a hidden page polls, focus stops
+ * re-reading, the interval drifts from 20 s, or a disabled hook asks (w44 rc-*).
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { renderHook, waitFor, act } from '@testing-library/react';
 
-let impl: () => Promise<unknown> = async () => ({ conversations: [], truncated: false });
+type ListRunning = typeof import('../../../client/chatSessionsClient.js').listRunningConversations;
+let impl: ListRunning = async () => ({ conversations: [], truncated: false });
 let calls = 0;
 vi.mock('../../../client/chatSessionsClient.js', () => ({
   listRunningConversations: () => { calls++; return impl(); },
@@ -16,11 +19,12 @@ vi.mock('../../../client/chatSessionsClient.js', () => ({
 
 import { useRunningConversations } from '../useRunningConversations.js';
 
-const answer = (...ids: string[]) => async () => ({ conversations: ids.map((conversationId) => ({ conversationId, runs: 1 })), truncated: false });
+const answer = (...ids: string[]): ListRunning => async () => ({ conversations: ids.map((conversationId) => ({ conversationId, runs: 1 })), truncated: false });
 let visibility: DocumentVisibilityState = 'visible';
 
 beforeEach(() => {
   calls = 0;
+  impl = answer();
   visibility = 'visible';
   vi.spyOn(document, 'visibilityState', 'get').mockImplementation(() => visibility);
 });

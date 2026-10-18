@@ -1,6 +1,6 @@
 {
   "name": "core.openwop.workflows.campaign-channels",
-  "version": "1.0.2",
+  "version": "1.1.0",
   "kind": "workflow-chain",
   "description": "The five campaign channel child workflows (ADR 0157) — generate→approve DAGs the orchestration fans out over — migrated from the deprecated builtins (ADR 0472 P4). chainIds keep the original ids.",
   "keywords": [
@@ -12,7 +12,7 @@
   "chains": [
     {
       "chainId": "campaign-studio.channel.landing-page",
-      "version": "1.0.1",
+      "version": "1.1.0",
       "label": "Landing page",
       "description": "Generate a campaign landing page from the brief, then approve.",
       "parameters": {
@@ -22,6 +22,14 @@
           "briefId": {
             "type": "string",
             "description": "The campaign brief to generate this channel from."
+          },
+          "provider": {
+            "type": "string",
+            "description": "AI provider id for this chain's model-calling nodes (for example anthropic, openai, google). Fixed into those nodes when the workflow is created. Leave unset to keep the nodes' own default."
+          },
+          "model": {
+            "type": "string",
+            "description": "Model id for this chain's model-calling nodes. Must be offered by `provider` in the host catalog. Set it together with `provider`."
           }
         },
         "required": [
@@ -35,7 +43,9 @@
             "typeId": "feature.campaign-channels.nodes.generate@1.2.0",
             "inputs": {
               "briefId": "{{params.briefId}}",
-              "channel": "landing_page"
+              "channel": "landing_page",
+              "provider": "{{params.provider}}",
+              "model": "{{params.model}}"
             }
           },
           {
@@ -56,7 +66,7 @@
     },
     {
       "chainId": "campaign-studio.channel.ad-variants",
-      "version": "1.0.1",
+      "version": "1.1.0",
       "label": "Ad variants",
       "description": "Generate ad variants per platform, then approve — accept all or refine a platform set.",
       "parameters": {
@@ -66,6 +76,14 @@
           "briefId": {
             "type": "string",
             "description": "The campaign brief to generate this channel from."
+          },
+          "provider": {
+            "type": "string",
+            "description": "AI provider id for this chain's model-calling nodes (for example anthropic, openai, google). Fixed into those nodes when the workflow is created. Leave unset to keep the nodes' own default."
+          },
+          "model": {
+            "type": "string",
+            "description": "Model id for this chain's model-calling nodes. Must be offered by `provider` in the host catalog. Set it together with `provider`."
           }
         },
         "required": [
@@ -79,7 +97,9 @@
             "typeId": "feature.campaign-channels.nodes.generate@1.2.0",
             "inputs": {
               "briefId": "{{params.briefId}}",
-              "channel": "ad_variants"
+              "channel": "ad_variants",
+              "provider": "{{params.provider}}",
+              "model": "{{params.model}}"
             }
           },
           {
@@ -101,7 +121,7 @@
     },
     {
       "chainId": "campaign-studio.channel.email-sequence",
-      "version": "1.0.1",
+      "version": "1.1.0",
       "label": "Email sequence",
       "description": "Generate a campaign email sequence, then approve — accept all or refine specific emails.",
       "parameters": {
@@ -111,6 +131,14 @@
           "briefId": {
             "type": "string",
             "description": "The campaign brief to generate this channel from."
+          },
+          "provider": {
+            "type": "string",
+            "description": "AI provider id for this chain's model-calling nodes (for example anthropic, openai, google). Fixed into those nodes when the workflow is created. Leave unset to keep the nodes' own default."
+          },
+          "model": {
+            "type": "string",
+            "description": "Model id for this chain's model-calling nodes. Must be offered by `provider` in the host catalog. Set it together with `provider`."
           }
         },
         "required": [
@@ -124,7 +152,9 @@
             "typeId": "feature.campaign-channels.nodes.generate@1.2.0",
             "inputs": {
               "briefId": "{{params.briefId}}",
-              "channel": "email_sequence"
+              "channel": "email_sequence",
+              "provider": "{{params.provider}}",
+              "model": "{{params.model}}"
             }
           },
           {
@@ -146,7 +176,7 @@
     },
     {
       "chainId": "campaign-studio.channel.creative-briefs",
-      "version": "1.0.1",
+      "version": "1.1.0",
       "label": "Creative briefs",
       "description": "Generate creative briefs per format, then approve — accept all or refine a format.",
       "parameters": {
@@ -156,6 +186,14 @@
           "briefId": {
             "type": "string",
             "description": "The campaign brief to generate this channel from."
+          },
+          "provider": {
+            "type": "string",
+            "description": "AI provider id for this chain's model-calling nodes (for example anthropic, openai, google). Fixed into those nodes when the workflow is created. Leave unset to keep the nodes' own default."
+          },
+          "model": {
+            "type": "string",
+            "description": "Model id for this chain's model-calling nodes. Must be offered by `provider` in the host catalog. Set it together with `provider`."
           }
         },
         "required": [
@@ -169,7 +207,9 @@
             "typeId": "feature.campaign-channels.nodes.generate@1.2.0",
             "inputs": {
               "briefId": "{{params.briefId}}",
-              "channel": "creative_briefs"
+              "channel": "creative_briefs",
+              "provider": "{{params.provider}}",
+              "model": "{{params.model}}"
             }
           },
           {
@@ -191,7 +231,7 @@
     },
     {
       "chainId": "campaign-studio.channel.social-posts",
-      "version": "1.0.1",
+      "version": "1.1.0",
       "label": "Social posts",
       "description": "Generate social posts, then approve — accept all or refine specific posts.",
       "parameters": {
@@ -201,6 +241,14 @@
           "briefId": {
             "type": "string",
             "description": "The campaign brief to generate this channel from."
+          },
+          "provider": {
+            "type": "string",
+            "description": "AI provider id for this chain's model-calling nodes (for example anthropic, openai, google). Fixed into those nodes when the workflow is created. Leave unset to keep the nodes' own default."
+          },
+          "model": {
+            "type": "string",
+            "description": "Model id for this chain's model-calling nodes. Must be offered by `provider` in the host catalog. Set it together with `provider`."
           }
         },
         "required": [
@@ -214,7 +262,9 @@
             "typeId": "feature.campaign-channels.nodes.generate@1.2.0",
             "inputs": {
               "briefId": "{{params.briefId}}",
-              "channel": "social_posts"
+              "channel": "social_posts",
+              "provider": "{{params.provider}}",
+              "model": "{{params.model}}"
             }
           },
           {

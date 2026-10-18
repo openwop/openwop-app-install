@@ -8,31 +8,39 @@ import { describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import { handleTablistKeyDown, handleRadiogroupKeyDown } from '../rovingTabs.js';
 
-function Tabs({ disabledMiddle = false }: { disabledMiddle?: boolean }): JSX.Element {
+function Tabs({ disabledMiddle = false, onActivate }: { disabledMiddle?: boolean; onActivate?: () => void }): JSX.Element {
   return (
     <div role="tablist" onKeyDown={handleTablistKeyDown}>
-      <button type="button" role="tab" tabIndex={0}>One</button>
-      <button type="button" role="tab" tabIndex={-1} disabled={disabledMiddle}>Two</button>
-      <button type="button" role="tab" tabIndex={-1}>Three</button>
+      <button type="button" role="tab" tabIndex={0} onClick={onActivate}>One</button>
+      <button type="button" role="tab" tabIndex={-1} disabled={disabledMiddle} onClick={onActivate}>Two</button>
+      <button type="button" role="tab" tabIndex={-1} onClick={onActivate}>Three</button>
     </div>
   );
 }
 
 describe('handleTablistKeyDown', () => {
-  it('ArrowRight moves focus to the next tab', () => {
-    render(<Tabs />);
+  it('ArrowRight moves focus to the next tab, wraps from the last, and never activates (manual activation)', () => {
+    const onActivate = vi.fn();
+    render(<Tabs onActivate={onActivate} />);
     const tablist = screen.getByRole('tablist');
     const tabs = screen.getAllByRole('tab');
-    tabs[0].focus();
+    tabs[0]!.focus();
     fireEvent.keyDown(tablist, { key: 'ArrowRight' });
     expect(document.activeElement).toBe(tabs[1]);
+    // The wrap at the RIGHT end — only the left wrap was pinned (w49 probe `rt-right-wrap`).
+    tabs[2]!.focus();
+    fireEvent.keyDown(tablist, { key: 'ArrowRight' });
+    expect(document.activeElement).toBe(tabs[0]);
+    // Focus only: Enter/Space activate through the tab's own onClick, arrows never do
+    // (w49 probe `rt-manual` — a handler that clicked stayed green).
+    expect(onActivate).not.toHaveBeenCalled();
   });
 
   it('ArrowLeft from the first tab wraps to the last', () => {
     render(<Tabs />);
     const tablist = screen.getByRole('tablist');
     const tabs = screen.getAllByRole('tab');
-    tabs[0].focus();
+    tabs[0]!.focus();
     fireEvent.keyDown(tablist, { key: 'ArrowLeft' });
     expect(document.activeElement).toBe(tabs[2]);
   });
@@ -41,7 +49,7 @@ describe('handleTablistKeyDown', () => {
     render(<Tabs />);
     const tablist = screen.getByRole('tablist');
     const tabs = screen.getAllByRole('tab');
-    tabs[1].focus();
+    tabs[1]!.focus();
     fireEvent.keyDown(tablist, { key: 'End' });
     expect(document.activeElement).toBe(tabs[2]);
     fireEvent.keyDown(tablist, { key: 'Home' });
@@ -52,7 +60,7 @@ describe('handleTablistKeyDown', () => {
     render(<Tabs />);
     const tablist = screen.getByRole('tablist');
     const tabs = screen.getAllByRole('tab');
-    tabs[0].focus();
+    tabs[0]!.focus();
     fireEvent.keyDown(tablist, { key: 'a' });
     expect(document.activeElement).toBe(tabs[0]);
   });
@@ -61,7 +69,7 @@ describe('handleTablistKeyDown', () => {
     render(<Tabs disabledMiddle />);
     const tablist = screen.getByRole('tablist');
     const tabs = screen.getAllByRole('tab');
-    tabs[0].focus();
+    tabs[0]!.focus();
     fireEvent.keyDown(tablist, { key: 'ArrowRight' }); // Two is disabled → lands on Three
     expect(document.activeElement).toBe(tabs[2]);
   });
@@ -89,7 +97,7 @@ describe('handleRadiogroupKeyDown', () => {
     render(<Radios onPick={onPick} />);
     const group = screen.getByRole('radiogroup');
     const radios = screen.getAllByRole('radio');
-    radios[0].focus();
+    radios[0]!.focus();
     fireEvent.keyDown(group, { key: 'ArrowRight' });
     expect(document.activeElement).toBe(radios[1]);
     expect(onPick).toHaveBeenCalledWith(2); // the tablist handler would NOT select
@@ -100,7 +108,7 @@ describe('handleRadiogroupKeyDown', () => {
     render(<Radios onPick={onPick} />);
     const group = screen.getByRole('radiogroup');
     const radios = screen.getAllByRole('radio');
-    radios[0].focus();
+    radios[0]!.focus();
     fireEvent.keyDown(group, { key: 'ArrowLeft' });
     expect(document.activeElement).toBe(radios[2]);
     expect(onPick).toHaveBeenCalledWith(3);
@@ -111,7 +119,7 @@ describe('handleRadiogroupKeyDown', () => {
     render(<Radios onPick={onPick} />);
     const group = screen.getByRole('radiogroup');
     const radios = screen.getAllByRole('radio');
-    radios[0].focus();
+    radios[0]!.focus();
     fireEvent.keyDown(group, { key: 'x' });
     expect(onPick).not.toHaveBeenCalled();
   });

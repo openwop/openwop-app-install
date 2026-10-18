@@ -17,6 +17,15 @@
  * INS-4: the anniversary workflow's Workday resource is parameterizable via the
  *   `workdayResource` variable (wired to the node's `resource` input, which overrides the
  *   `serviceDates` config default), instead of being hard-coded.
+ *
+ * Sabotage-witnessed (/grade-tests w20): skipping the daemon's `featureId` gate reds the
+ * per-tenant-OFF and GLOBAL-off cases; blocking it unconditionally reds the GLOBAL-off
+ * (exempt tenant must fire) and ON cases; a wrong skip reason reds per-tenant-OFF; skipping
+ * the ingest gate reds the ingest case; dropping `featureId` from the job / subscription
+ * reds the same behavior cases (which is why the former shape case "stamps featureId on
+ * BOTH reconciled primitives" was cut — and "the scheduled fire carries the inputs", whose
+ * assertion `insights-suite-cron.test.ts` › "an armed schedule carries featureId + the
+ * inputs the chain needs" makes through the real route). Either INS-4 pack edit reds INS-4.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { openSqliteStorage } from '../src/storage/sqlite/index.js';
@@ -34,20 +43,19 @@ import { buildInsightsMetaWorkflow, ANNIVERSARY_DRAFT_ID } from '../src/features
 import {
   loadWorkflowChainPacks, defaultWorkflowChainPackRoots, _resetChainRegistryForTest,
 } from '../src/host/workflowChainPackLoader.js';
+import { createHostAdapterSuite } from '../src/host/index.js';
+import {
+  applyConfig, weeklyScheduleJobId, anniversaryTriggerSubscriptionId,
+  __resetInsightsSuiteStore, type InsightsSuiteConfig,
+} from '../src/features/insights-suite/insightsSuiteService.js';
 
 // ADR 0472 P2 — the anniversary meta-workflow migrated to a chain pack; build the MIGRATED def.
 _resetChainRegistryForTest();
 loadWorkflowChainPacks({ roots: defaultWorkflowChainPackRoots() });
 const anniversaryDraftDefinition = buildInsightsMetaWorkflow(ANNIVERSARY_DRAFT_ID);
 
-// A minimal valid insights-suite toggle config (the feature's real toggleDefault registers
-// only when the feature package loads; this unit test builds the literal directly).
-const toggle = (status: FeatureToggleStatus): ToggleConfig =>
-  ({ id: 'insights-suite', status, bucketUnit: 'tenant', salt: 'insights-suite' });
-import {
-  applyConfig, weeklyScheduleJobId, anniversaryTriggerSubscriptionId,
-  __resetInsightsSuiteStore, type InsightsSuiteConfig,
-} from '../src/features/insights-suite/insightsSuiteService.js';
+// The feature's REAL toggle default (also registered below), re-statused per case.
+const toggle = (status: FeatureToggleStatus): ToggleConfig => ({ ...insightsSuiteFeature.toggleDefault!, status });
 
 const cfg = (over: Partial<InsightsSuiteConfig> = {}): InsightsSuiteConfig => ({
   tenantId: 't1', principalUserId: 'u-ceo', businessUnits: ['TX'],
@@ -110,13 +118,6 @@ describe('INS-3 (ADR 0599 §6) — the owning-feature gate fires PER TENANT, at 
    *  CONSIDER it before any gate can be observed to skip it. */
   const dueNow = (): number => Date.now() + 8 * 24 * 60 * 60 * 1000;
 
-  it('stamps featureId on BOTH reconciled primitives', async () => {
-    const c = cfg();
-    await applyConfig(c);
-    expect((await getJob(weeklyScheduleJobId(c)))?.featureId).toBe('insights-suite');
-    expect((await getSubscription(anniversaryTriggerSubscriptionId(c)))?.featureId).toBe('insights-suite');
-  });
-
   it('a per-tenant override to OFF stops the fire — the direction the old listener missed ENTIRELY', async () => {
     // Global ON, this tenant explicitly OFF. The retired listener fired on a change
     // to the global `status` field only, so this narrowing tore down nothing and the
@@ -170,20 +171,16 @@ describe('INS-3 (ADR 0599 §6) — the owning-feature gate fires PER TENANT, at 
     expect(await firedRuns(weeklyScheduleJobId(c))).toBe(1);
   });
 
-  it('the scheduled fire carries the inputs the chain needs — planSource was read by NOTHING before', async () => {
-    const c = cfg();
-    await applyConfig(c);
-    expect((await getJob(weeklyScheduleJobId(c)))?.inputs).toEqual({ projectId: 'acme-analytics', businessUnit: 'TX' });
-  });
-
   it('trigger ingest is gated the same way — a disabled tenant\'s webhook starts no run', async () => {
     await saveConfig(toggleWithOverride('on', { 't-ingest': { status: 'off' } }), 'test');
     const c = cfg({ tenantId: 't-ingest' });
     await applyConfig(c);
+    // Real ingest deps: on the gated path the catalog is never reached; with the gate
+    // removed the real catalog has no such workflow and dead-letters — still not `skipped`.
     const res = await ingestExternalEvent(
-      { storage, hostSuite } as unknown as Parameters<typeof ingestExternalEvent>[0],
+      { storage, hostSuite: createHostAdapterSuite({ storage }) },
       anniversaryTriggerSubscriptionId(c),
-      { source: 'webhook', rawBody: JSON.stringify({ subjectId: 'subj-42', milestone: '10 years' }) } as Parameters<typeof ingestExternalEvent>[2],
+      { source: 'webhook', rawBody: JSON.stringify({ subjectId: 'subj-42', milestone: '10 years' }) },
     );
     expect(res.outcome).toBe('skipped');
     expect(res.reason).toBe('feature-disabled');

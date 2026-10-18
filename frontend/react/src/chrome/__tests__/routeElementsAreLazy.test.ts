@@ -21,6 +21,14 @@ import { join } from 'node:path';
  *
  * This reads the SOURCE rather than the module graph deliberately: importing
  * `features.tsx` here would tell us it evaluates, not how its elements got in.
+ * (Honest ceiling: the claim is about the IMPORT GRAPH; short of a real build,
+ * source is the layer that carries it.)
+ *
+ * Sabotage that turns it red: turn any `lazy(() => import(...))` route component
+ * into a static import (from ANY tree — /grade-tests w35 found the old deny-list
+ * missed `settings/`, `workforces/`, `orgs/`, …); make `prefetchChatTab` stop
+ * importing the chat chunk, or stop calling it from App.tsx; import a chat
+ * component into App.tsx / main.tsx.
  */
 // cwd-relative, matching `permanentLoadingRatchet.test.ts` — under the jsdom
 // environment `import.meta.url` is an http: URL, so fileURLToPath throws.
@@ -49,22 +57,19 @@ const ENTRY_MODULES = ['App.tsx', 'main.tsx'] as const;
 
 describe('feature-manifest route elements are code-split (ENG-4 / IDN-10)', () => {
   it('never statically imports a route component from a page/tree directory', () => {
-    // Static `import … from '../<dir>/…'` where <dir> is a page-bearing tree.
-    // ui/, featureTypes, and the registry are shared manifest infrastructure and
-    // are legitimately eager — the manifest cannot describe routes without them.
-    const PAGE_TREES = [
-      'chat', 'builder', 'runs', 'kanban', 'prompts', 'memory', 'byok',
-      'walkthroughs', 'agents', 'discovery', 'features',
-    ];
+    // An ALLOW-list, not a deny-list: any relative static import is suspect except
+    // `../ui/…` (icons + design system — shared manifest infrastructure the
+    // manifest cannot describe routes without). A deny-list of page trees silently
+    // passed an eager `../settings/AuditLogPage.js` (w35 probe `lazy-settings`).
     const offenders: string[] = [];
-    for (const m of code.matchAll(/^import\s+(?!type\b)([^;]+?)\s+from\s+'\.\.\/([^/']+)\/([^']+)'/gm)) {
-      const [, bound, dir, rest] = m;
-      if (!PAGE_TREES.includes(dir!)) continue;
+    for (const m of code.matchAll(/^import\s+(?!type\b)([^;]+?)\s+from\s+'(\.\.?\/[^']+)'/gm)) {
+      const [, bound, spec] = m;
+      if (spec!.startsWith('../ui/')) continue;
       // A named non-component import (a helper, a type-ish const) is fine; the
       // thing that costs is pulling a COMPONENT tree in. Components are
-      // PascalCase, so flag any PascalCase binding out of a page tree.
+      // PascalCase, so flag any PascalCase binding.
       if (/\b[A-Z][A-Za-z0-9]*\b/.test(bound!.replace(/[{}]/g, ''))) {
-        offenders.push(`import ${bound!.trim()} from '../${dir}/${rest}'`);
+        offenders.push(`import ${bound!.trim()} from '${spec}'`);
       }
     }
     expect(
@@ -82,7 +87,12 @@ describe('feature-manifest route elements are code-split (ENG-4 / IDN-10)', () =
     // (which is where every legacy `/?agent=` deep link lands).
     expect(code).not.toMatch(/^import\s*\{[^}]*\bChatTab\b[^}]*\}\s*from/m);
     expect(code).toMatch(/const\s+ChatTab\s*=\s*lazy\(\s*\(\)\s*=>\s*import\(/);
-    expect(code).toMatch(/export function prefetchChatTab\(\)/);
+    // The prefetch must actually warm the chat chunk, and the shell must call it.
+    expect(code).toMatch(/export function prefetchChatTab\(\): void \{[^}]*import\('\.\.\/chat\/ChatTab\.js'\)/);
+    // Raw text (not `strip`ped — App.tsx's JSX `{/* … */}` comments and glob
+    // strings confuse the naive stripper); the exact call shape rules out prose.
+    const app = readFileSync(join(process.cwd(), 'src', 'App.tsx'), 'utf8');
+    expect(app).toMatch(/useEffect\(\(\) => \{ prefetchChatTab\(\); \}, \[\]\);/);
   });
 
   it.each(ENTRY_MODULES)('%s does not statically import the chat tree back into the entry', (mod) => {

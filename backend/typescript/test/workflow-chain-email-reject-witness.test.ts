@@ -470,23 +470,21 @@ describe('WF-EM-5 — a gate whose rejection branch is terminal refuses non-deci
    * because a gate that quietly narrows its own denominator is the "ratchet
    * polices a spelling" failure this repo keeps re-learning.
    *
-   * All seven predate the email work and none of them mails anyone — csm-ops
-   * creates a CRM task, the kicktodo gates advance an authoring pipeline. They
-   * are ALSO not a straight copy of the email case: every kicktodo gate sets
-   * `maxRequestChangesIterations > 0`, which gives `request-changes` real
-   * semantics there (the handler keeps a loopback counter + feedback history for
-   * it), so the correct allowlist for those is NOT `['approve','reject']` and
-   * picking one is the owning feature's call. `defer`/`escalate` remain
-   * meaningless everywhere — that residual is real and is what this list records.
+   * DRAINED TO ZERO (KickTodo workflows grade, 2026-10-14). Seven entries were
+   * carried here: one csm-ops gate (retired by #3712) and six kicktodo gates
+   * (`challenge-factory:outline-approve`, `:gate-0`..`:gate-3`, `replan:approve`).
+   * The kicktodo six were held back on the stated ground that "every kicktodo gate
+   * sets `maxRequestChangesIterations > 0`", giving `request-changes` real
+   * semantics there. MEASURED against the packs, that was false: all six set
+   * `maxRequestChangesIterations: 0`, so `approve` / `reject` are the only real
+   * decisions and the email cure WAS a straight copy. Both packs now declare
+   * `actions: ["approve","reject"]` (factory 1.5.4, replan 1.0.3), and the
+   * behavioural leg below drives all six through the real gate + validator.
+   *
+   * Kept as an (empty) exact-match set so a NEW undeclared gate still has to be
+   * argued into it by name, rather than the population silently re-widening.
    */
-  const UNDECLARED_ALLOWED = new Set([
-    'openwop-app.kicktodo.challenge-factory:outline-approve',
-    'openwop-app.kicktodo.challenge-factory:gate-0',
-    'openwop-app.kicktodo.challenge-factory:gate-1',
-    'openwop-app.kicktodo.challenge-factory:gate-2',
-    'openwop-app.kicktodo.challenge-factory:gate-3',
-    'openwop-app.kicktodo.replan:approve',
-  ]);
+  const UNDECLARED_ALLOWED = new Set<string>();
 
   it('every such gate declares an allowlist (anti-vacuity: the population is non-empty)', () => {
     const gates = terminalRejectGates();

@@ -585,7 +585,22 @@ const NEW_BASELINE = readGateBaseline(
   // 161 → 154 (2026-10-06): ADR 0839 (feature loop 2026-10 row 25, grade-ux) made
   // the seven projects `error` Notices announce (Chat ×2, Overview ×3, gallery ×1,
   // Workflows ×1) and deleted their four cohort rows.
-  scanningRealTree ? 154 : 0,
+  // 154 → 153 (2026-10-12): SD2UX-3 (grade-ux, feature loop round 2 row 39, ADR 0878)
+  // wired `announce` onto `features/service-desk/SupportPage.tsx`'s `error` Notice —
+  // a failed reply, retry or assignment was silent to a screen reader. Row deleted.
+  // 153 → 132 (2026-10-15): A11Y-KT-1 (KickTodo grade-ux) wired `announce` onto 21
+  // error Notices across the kicktodo-* features (admin commerce ×3, circles ×2,
+  // engagement, metrics, org programs, seats, studio ×5, discover, guide ×2, journal,
+  // plan, today ×2), each speaking its localized string. 21 rows deleted.
+  // CommunityPage and PlanPage `moveError` stay (left to the i18n follow-up).
+  // 132 → 130 (2026-10-15): EMPTY-ON-FAIL-5/-6 (ADR 0779 D7) — the job-search
+  // ApplyGrantPage and JobListingsPage silent `error` Notices are gone: a failed
+  // read is now an announcing StateCard with Retry in place of the empty state.
+  // Both rows deleted.
+  // 130 → 129 (2026-10-17): CM-3/CS-4 (KickTodo wave 4H) — CommunityPage's `error`
+  // Notice is gone: the load failure is an announcing Notice with Retry gated on
+  // `loadFailed`, and save/review failures announce their own copy. Row deleted.
+  scanningRealTree ? 129 : 0,
 );
 /** (file, flag) -> the recorded ceiling. */
 const NEW_COHORT = new Map(LEGACY_SILENT_READ_SITES.map(([f, flag, n]) => [`${f}${SITE_SEP}${flag}`, n]));

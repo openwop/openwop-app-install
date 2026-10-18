@@ -18,11 +18,11 @@
  * @see docs/adr/0202-agent-native-channels.md (D3)
  */
 import { randomUUID } from 'node:crypto';
-import { DurableCollection } from '../../host/hostExtPersistence.js';
+import { DurableCollection, hostExtStorage } from '../../host/hostExtPersistence.js';
 import { onWorkflowForked } from '../../host/workflowsRegistry.js';
 import { casRepoint } from '../../host/forkRepoint.js';
 import { OpenwopError } from '../../types.js';
-import { registerJob, setJobEnabled, deleteJob, getJob } from '../../host/schedulingService.js';
+import { registerJob, setJobEnabled, deleteJob, getJob, updateJob } from '../../host/schedulingService.js';
 import { registerSubjectEraser, type SubjectEraseReport } from '../../host/subjectErasure.js';
 import { subjectKeyForms } from '../../host/subjectErasureRedaction.js';
 import { parseCron } from '../../host/cronSchedule.js';
@@ -84,7 +84,9 @@ function req(v: unknown, field: string): string {
 
 export interface ScheduledChatInput { agentId?: unknown; prompt?: unknown; conversationId?: unknown; cronExpr?: unknown; timezone?: unknown; workflowId?: unknown }
 
-export async function createScheduledChat(tenantId: string, scope: ScheduledChatScope, actor: string, input: ScheduledChatInput): Promise<ScheduledChat> {
+/** `firesFor` (ADR 0879 D7) — the creator in the SAME spelling the conversation
+ *  gate compares (`req.userId ?? principalId`); defaults to `actor`. Never from the body. */
+export async function createScheduledChat(tenantId: string, scope: ScheduledChatScope, actor: string, input: ScheduledChatInput, firesFor: string = actor, firesForPersonalTenant?: string): Promise<ScheduledChat> {
   const agentId = req(input.agentId, 'agentId');
   const prompt = req(input.prompt, 'prompt');
   const conversationId = req(input.conversationId, 'conversationId');
@@ -121,13 +123,32 @@ export async function createScheduledChat(tenantId: string, scope: ScheduledChat
     // tick has no user/BYOK, so it dispatches on the HOST-OWNED managed key. `prompt`
     // + `conversationId` are retained for the conversation-surfacing projection (2c/3).
     configurable: { agentId, task: prompt, prompt, conversationId, credentialRef: SCHEDULED_CHAT_CREDENTIAL_REF },
-    metadata: { kind: 'scheduled-agent-chat', chatId: chat.chatId },
+    // ADR 0879 D7 (architect C2) — the creator is the human this schedule fires for,
+    // so a user-chosen `workflowId` that posts into a conversation is checked against
+    // THEM at write time, not waved through as a system run.
+    metadata: { kind: 'scheduled-agent-chat', chatId: chat.chatId, orgScopeSubject: firesFor, ...(firesForPersonalTenant ? { personalTenant: firesForPersonalTenant } : {}) },
   });
   if (!reg.ok) {
     await chats.delete(keyOf(tenantId, scope, chat.chatId));
     throw new OpenwopError('validation_error', reg.error.message, 400, { code: reg.error.code });
   }
   return chat;
+}
+
+/** ADR 0879 D7 (grade-code CH2CD-2) — a schedule created before ADR 0879 has no
+ *  `orgScopeSubject` on its job, so its turn has no person behind it and the run-lane
+ *  write gate refuses the reply. Stamp the recorded creator once, inside the job CAS
+ *  (a job that already names one is untouched; an erased creator is never re-stamped).
+ *  Idempotent; runs at feature boot. Returns how many jobs it stamped. */
+export async function backfillScheduledChatSubjects(): Promise<number> {
+  let stamped = 0;
+  for (const chat of await chats.listByPrefix('')) {
+    if (!chat.createdBy || chat.createdBy === ERASED_SUBJECT) continue;
+    const next = await updateJob(jobIdOf(chat.chatId), (job) =>
+      typeof job.metadata?.orgScopeSubject === 'string' ? null : { mergeMetadata: { orgScopeSubject: chat.createdBy } });
+    if (next && next.metadata?.orgScopeSubject === chat.createdBy) stamped++;
+  }
+  return stamped;
 }
 
 export async function listScheduledChats(tenantId: string, scope: ScheduledChatScope): Promise<ScheduledChat[]> {
@@ -139,7 +160,14 @@ export async function listScheduledChats(tenantId: string, scope: ScheduledChatS
 }
 
 /** A scheduled chat + its live scheduler status (ADR 0125 Phase 3c). */
-export interface ScheduledChatWithStatus extends ScheduledChat { nextRunAt?: string; lastRunAt?: string }
+export interface ScheduledChatWithStatus extends ScheduledChat {
+  nextRunAt?: string;
+  lastRunAt?: string;
+  /** ADR 0879 D7 — the LAST fire failed (e.g. `conversation_write_refused`: the
+   *  reply could not be posted). Shown to the owner so a schedule never fails
+   *  silently. */
+  lastError?: { code: string; message: string };
+}
 
 /** The list enriched with each job's next/last fire time (joined from the scheduler —
  *  the single owner of fire timing; no parallel schedule state). */
@@ -147,10 +175,15 @@ export async function listScheduledChatsWithStatus(tenantId: string, scope: Sche
   const list = await listScheduledChats(tenantId, scope);
   return Promise.all(list.map(async (c) => {
     const job = await getJob(jobIdOf(c.chatId));
+    const lastRun = job?.lastRunId ? await hostExtStorage().getRun(job.lastRunId).catch(() => null) : null;
+    const lastError = lastRun && lastRun.tenantId === tenantId && lastRun.status === 'failed'
+      ? { code: String(lastRun.error?.code ?? 'failed'), message: String(lastRun.error?.message ?? 'The last run failed.') }
+      : undefined;
     return {
       ...c,
       ...(job?.nextFireAt != null ? { nextRunAt: new Date(job.nextFireAt).toISOString() } : {}),
       ...(job?.lastRunAt ? { lastRunAt: job.lastRunAt } : {}),
+      ...(lastError ? { lastError } : {}),
     };
   }));
 }

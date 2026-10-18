@@ -15,6 +15,11 @@
  *      token as the message — the whole point of TOCU-6. (The code itself is
  *      still shown deliberately, as the `<strong>` prefix, so an operator can
  *      report it; what must not happen is the code standing in for prose.)
+ *
+ * Sabotage witnesses (w43): each switch arm, the default, the plain-message
+ * precedence, the known-code envelope branch, the envelope `message` field, the
+ * non-JSON fallback, the card's use of `toolErrorText`, and deleting a catalog
+ * key each turn a case red.
  */
 import { describe, it, expect, afterEach } from 'vitest';
 import { render, cleanup, screen, fireEvent } from '@testing-library/react';
@@ -25,14 +30,14 @@ import type { AgentToolCall } from '../hooks/useChatSession.js';
 afterEach(cleanup);
 
 function call(over: Partial<AgentToolCall> = {}): AgentToolCall {
-  return {
+  const base: AgentToolCall = {
     callId: 'c1',
     toolName: 'openwop:documents.get',
     agentId: 'a1',
     startedAt: new Date(Date.now() - 1000).toISOString(),
     finishedAt: new Date().toISOString(),
-    ...over,
-  } as AgentToolCall;
+  };
+  return { ...base, ...over };
 }
 
 /** The real `t` for the `chat` namespace, so the assertions are about the
@@ -58,8 +63,9 @@ describe('tool-call error copy (TOCU-6 / review M9)', () => {
   });
 
   it('an UNKNOWN code falls back to the generic sentence, never a bare token', () => {
-    for (const code of ['tool_timeout', 'quota_exceeded', '', undefined]) {
-      const msg = toolErrorMessage(t, code as string | undefined);
+    const codes: Array<string | undefined> = ['tool_timeout', 'quota_exceeded', '', undefined];
+    for (const code of codes) {
+      const msg = toolErrorMessage(t, code);
       expect(msg).toBe(en.toolErrGeneric);
       expect(msg).not.toMatch(/^MISSING:/);
       if (code) expect(msg).not.toBe(code);

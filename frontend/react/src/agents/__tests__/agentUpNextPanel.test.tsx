@@ -9,19 +9,20 @@
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/react';
+import type { RankedCard, RankingResult } from '../workSelectionClient.js';
 
-const getBoardRanking = vi.fn();
-vi.mock('../workSelectionClient.js', () => ({
-  getBoardRanking: (...a: unknown[]) => getBoardRanking(...a),
+const { getBoardRanking } = vi.hoisted(() => ({
+  getBoardRanking: vi.fn<typeof import('../workSelectionClient.js')['getBoardRanking']>(),
 }));
+vi.mock('../workSelectionClient.js', () => ({ getBoardRanking }));
 
 const { AgentUpNextPanel } = await import('../AgentUpNextPanel.js');
 
-afterEach(() => { cleanup(); vi.clearAllMocks(); });
+afterEach(() => { cleanup(); vi.resetAllMocks(); });
 
-const ok = (r: unknown[]) => ({ kind: 'ok', ranked: r });
+const ok = (r: RankedCard[]): RankingResult => ({ kind: 'ok', ranked: r });
 
-const ranked = [
+const ranked: RankedCard[] = [
   {
     cardId: 'c1', title: 'Ship the thing', rank: 1, score: 8.2,
     why: [{ criterionId: 'ws.priority', criterion: 'Stated priority', value: 10 }],
@@ -91,7 +92,9 @@ describe('AgentUpNextPanel', () => {
     getBoardRanking.mockResolvedValue(ok([]));
     const { container } = render(<AgentUpNextPanel boardId="b1" />);
     await waitFor(() => expect(getBoardRanking).toHaveBeenCalled());
-    expect(container.textContent).toBe('');
+    // Wait for the RESOLUTION, not the call: the loading state renders the
+    // "Up next" header, so the empty string can only be the post-resolve state.
+    await waitFor(() => expect(container.textContent).toBe(''));
   });
 
   it('a FAILED read says so, instead of looking identical to "off" (UPN-2)', async () => {
@@ -100,7 +103,9 @@ describe('AgentUpNextPanel', () => {
     getBoardRanking.mockResolvedValue({ kind: 'error' });
     render(<AgentUpNextPanel boardId="b1" />);
 
-    await screen.findByRole('heading', { name: /up next/i });
-    expect(screen.getByRole('status').textContent, 'a failed read must be visible').toBeTruthy();
+    // The LOADING state carries the same heading and its own role=status
+    // skeleton, so wait for the failure COPY itself — only the error state has it.
+    expect(await screen.findByText("Couldn't load the work order. It'll retry shortly.")).toBeTruthy();
+    expect(screen.getByRole('heading', { name: /up next/i })).toBeTruthy();
   });
 });

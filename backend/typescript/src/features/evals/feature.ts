@@ -12,10 +12,22 @@
  */
 import type { BackendFeature } from '../types.js';
 import { registerEvalsRoutes } from './routes.js';
+import { registerAgentEvalTools } from '../../host/evals/agentTools.js';
+import { buildAgentEvalsSurface } from '../../host/evals/surface.js';
 
 export const evalsFeature: BackendFeature = {
   id: 'evals',
-  registerRoutes: (deps) => { registerEvalsRoutes(deps); },
+  registerRoutes: (deps) => {
+    registerEvalsRoutes(deps);
+    // ADR 0889 D8 — agent-eval chat tools (allowlisted by the Agent Author pack, never default-on).
+    registerAgentEvalTools();
+  },
+  // ADR 0889 WF-EV-11 — `ctx.features.evals` for `feature.evals.nodes.run-suite`.
+  // The id is the `evals` toggle id, so the seam gates the toggle too.
+  surface: { id: 'evals', build: buildAgentEvalsSurface },
+  requiredPacks: [
+    { name: 'feature.evals.nodes', version: '1.1.0' },
+  ],
   toggleDefault: {
     id: 'evals',
     label: 'Model evals',

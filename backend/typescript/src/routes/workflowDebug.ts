@@ -21,6 +21,7 @@
  * subgraph is `skipped`. Published/production launches NEVER read pins.
  */
 
+import { CALLER_LINKAGE_KEYS } from '../host/runLinkage.js';
 import type { Express, Request } from 'express';
 import type { Storage } from '../storage/storage.js';
 import type { HostAdapterSuite } from '../host/index.js';
@@ -31,6 +32,7 @@ import { getOwned } from '../host/workflowOwnership.js';
 import { getRegisteredWorkflowAsync } from '../host/workflowsRegistry.js';
 import { loadOwnedRun } from '../host/runAccess.js';
 import { resolveRunDefinition } from '../host/resolveRunDefinition.js';
+import { isAgentEvalRun } from '../host/evals/agentEvalRun.js';
 import { insertRunWithStartContext } from '../host/runInsert.js';
 import { withRunLimit } from '../host/runLimitSeam.js';
 import { launchSubjectOf } from '../features/featureRoute.js';
@@ -49,6 +51,7 @@ import {
   clearDebugPins,
 } from '../host/workflowDebugPins.js';
 import { createLogger } from '../observability/logger.js';
+import { mayReadRunPayload } from '../host/runPayloadAccess.js';
 
 const log = createLogger('routes.workflowDebug');
 
@@ -169,6 +172,12 @@ export function registerWorkflowDebugRoutes(app: Express, deps: { storage: Stora
       const run = await loadOwnedRun(req, deps.storage, runId, 'runs:read');
       if (run.workflowId !== workflowId) {
         throw new OpenwopError('validation_error', 'The run does not belong to this workflow.', 400, { runId });
+      }
+      // #4543 — prefill copies the run's node OUTPUTS into pins the caller can
+      // read back: an Editor may prefill only from a run they may read the
+      // payload of (their own, or any run when they administer the workspace).
+      if (!(await mayReadRunPayload(req, run))) {
+        throw new OpenwopError('forbidden', 'Only the run owner or a workspace admin can prefill pins from this run.', 403, { runId });
       }
       const events = await deps.storage.listEvents(runId, { fromSeq: -1, limit: 100_000 });
       // Fold ONLY the completed events: the full-prefix fold refuses (null) on
@@ -358,6 +367,13 @@ export function registerWorkflowDebugRoutes(app: Express, deps: { storage: Stora
             results.push({ runId: sourceRunId, error: 'not_redrivable' });
             continue;
           }
+          // WF-EV-10 — an eval run has no workflow to redrive (its workflowId is the
+          // synthetic `eval:<suite>@<version>`); `workflow_not_found` misdescribed it.
+          // Re-evaluate with a new eval run (configurable.baselineRunId to compare).
+          if (isAgentEvalRun(source)) {
+            results.push({ runId: sourceRunId, error: 'eval_run_not_redrivable' });
+            continue;
+          }
           // ADR 0823 D3 — a redrive MINTS a run, so it is re-authorized like a launch.
           const resolved = await resolveRunDefinition(source, deps.hostSuite.workflowCatalog, {
             relaunch: { operator: req.principal?.tenants?.includes('*') === true, subject: launchSubjectOf(req) },
@@ -402,6 +418,10 @@ export function registerWorkflowDebugRoutes(app: Express, deps: { storage: Stora
           // closed on `:fork`.
           const copiedMeta = { ...((source.metadata as Record<string, unknown> | undefined) ?? {}) };
           for (const k of ['debug', 'launch', 'pinned', 'actingUserId']) delete copiedMeta[k];
+          // ADR 0902 (TD2CD-2) — a redrive is the REDRIVER's own new run, not work
+          // the source's parent delegated: a copied linkage would file it under
+          // another member's run as delegated work.
+          for (const k of CALLER_LINKAGE_KEYS) delete copiedMeta[k];
           const run = buildRunRecord({
             workflowId: source.workflowId,
             tenantId: source.tenantId,

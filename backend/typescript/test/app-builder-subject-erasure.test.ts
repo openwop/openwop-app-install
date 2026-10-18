@@ -21,7 +21,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
 import {
-  createSyncBinding, getSyncBinding, getSyncBindingByWebhookId,
+  createSyncBinding, getSyncBinding, getSyncBindingByWebhookId, getSyncBindingView,
   eraseSyncBindingSubject, ERASED_SUBJECT,
 } from '../src/features/app-builder/syncBinding.js';
 
@@ -52,6 +52,8 @@ describe('AB2-M1 — erasure reaches the sync binding, and ONLY the attribution'
     const after = await getSyncBinding(TENANT, view.canvasId);
     expect(after, 'the binding row survives — it is org infrastructure').toBeTruthy();
     expect(after?.boundBy).toBe(ERASED_SUBJECT);
+    // ...and the read projection a user sees carries the tombstone too.
+    expect((await getSyncBindingView(TENANT, view.canvasId))?.boundBy).toBe(ERASED_SUBJECT);
 
     // The machine coordinates are untouched — this PINS the operator-decision
     // boundary. If a later pass decides erasure must also sever the repo
@@ -75,6 +77,9 @@ describe('AB2-M1 — erasure reaches the sync binding, and ONLY the attribution'
 
     await eraseSyncBindingSubject(TENANT, SUBJECT);
     const once = await getSyncBinding(TENANT, mine.view.canvasId);
+    // Idempotent BY CONSTRUCTION (an erased row no longer matches the subject
+    // filter, so the second pass writes nothing) — an honest ceiling, not a
+    // claim a sabotage can red on its own.
     await eraseSyncBindingSubject(TENANT, SUBJECT);
     expect(await getSyncBinding(TENANT, mine.view.canvasId)).toEqual(once);
 

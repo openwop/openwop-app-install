@@ -116,6 +116,14 @@ the storage pool's 30 s statement timeout bounds it.
    row. The other durable families are empty, so they log no line. The surface
    read took 4 ms. No `surface_scan_heavy` or `vector_query_slow` events. The
    week's reading is still owed (`STORAGE-GROWTH-1`, 2026-10-17).
+   **Week reading, 2026-10-17 01:2xZ (`--days 7`, prod on 60af60cb0):** CLEAR,
+   exit 0. `memory`: the largest tenant is still 10 rows, and the total grew
+   27 → 167 (more tenants, not bigger ones). `tableschema`: 1 row. Heavy scans 0,
+   `table.query` heavy 0.0/day, the largest vector namespace is 6, and slow vector
+   queries are 0.0/day. pgvector 0.8.5. Every trigger is three to four orders of
+   magnitude away (T1 fires at 100,000 rows per tenant), so all three decisions
+   stay deferred. Even at 6× a week, the total takes months to reach T1's
+   per-tenant bar. Next reading: 2026-11-16 (`STORAGE-GROWTH-2`).
 2. Whether to build a log-based metric and alert over these lines (needs a
    notification channel the operator chooses).
 3. The pgvector version on Cloud SQL, which the first `vector_rows_gauge` reports.

@@ -80,6 +80,21 @@ export function spineStatus(state: string, hasDossier: boolean, pub: Publication
   };
 }
 
+/** The side reads that can fail independently of the candidate itself. */
+type SideRead = 'publication' | 'monitor' | 'gates' | 'simulation' | 'lessons';
+
+/** A section whose read FAILED (not 404). Says so and offers a retry, instead of
+ *  rendering the section's empty-state copy as if the server had nothing (§4.6). */
+function SectionUnavailable({ onRetry }: { onRetry: () => void | Promise<void> }): JSX.Element {
+  const { t } = useTranslation('kicktodo-studio');
+  return (
+    <div className="action-bar">
+      <Notice variant="warning">{t('sectionUnavailable')}</Notice>
+      <Button variant="quiet" size="sm" onClick={() => void onRetry()}>{t('common:retry')}</Button>
+    </div>
+  );
+}
+
 export function CandidateWorkspacePage() {
   const { t } = useTranslation('kicktodo-studio');
   const navigate = useNavigate();
@@ -96,6 +111,10 @@ export function CandidateWorkspacePage() {
   const [simulation, setSimulation] = useState<SimulationVerdicts | null | undefined>(undefined);
   const [lessons, setLessons] = useState<LessonDayStatus[] | null | undefined>(undefined);
   const [error, setError] = useState(false);
+  // §4.6 — a side read that FAILED is not a side read that came back empty. The
+  // client returns `null` only for a 404; any other failure lands here, so the
+  // section says it is unavailable instead of claiming "no gate status yet".
+  const [failed, setFailed] = useState<ReadonlySet<SideRead>>(() => new Set());
   const [reason, setReason] = useState('');
   const [busy, setBusy] = useState(false);
   const [retireError, setRetireError] = useState(false);
@@ -103,14 +122,18 @@ export function CandidateWorkspacePage() {
   const reload = useCallback(async () => {
     try {
       setError(false);
+      const fails = new Set<SideRead>();
+      const side = <T,>(key: SideRead, read: Promise<T | null>): Promise<T | null> =>
+        read.catch(() => { fails.add(key); return null; });
       const [c, p, m, g, s, l] = await Promise.all([
         getCandidate(candidateId),
-        getPublication(candidateId).catch(() => null),
-        getMonitorReport(candidateId).catch(() => null),
-        getGateStatus(candidateId).catch(() => null),
-        getSimulationVerdicts(candidateId).catch(() => null),
-        getLessonStatus(candidateId).catch(() => null),
+        side('publication', getPublication(candidateId)),
+        side('monitor', getMonitorReport(candidateId)),
+        side('gates', getGateStatus(candidateId)),
+        side('simulation', getSimulationVerdicts(candidateId)),
+        side('lessons', getLessonStatus(candidateId)),
       ]);
+      setFailed(fails);
       setCandidate(c);
       setPublication(p);
       setMonitor(m);
@@ -218,7 +241,12 @@ export function CandidateWorkspacePage() {
         <Link className="btn-ghost btn-sm" to="/kicktodo/studio">{t('backToStudio')}</Link>
       </div>
 
-      {error && <Notice variant="error">{t('loadError')}</Notice>}
+      {error && (
+        <div className="action-bar">
+          <Notice variant="error" announce={t('loadError')}>{t('loadError')}</Notice>
+          <Button variant="quiet" size="sm" onClick={() => void reload()}>{t('common:retry')}</Button>
+        </div>
+      )}
       {candidate === undefined && !error && <StateCard loading title={t('workspaceTitle')} />}
       {candidate === null && !error && (
         <StateCard title={t('candidateNotFoundTitle')} body={t('candidateNotFoundBody')}
@@ -347,6 +375,7 @@ export function CandidateWorkspacePage() {
               distinct approver on complete; the FE never presents either as bypassable. */}
           <section id="cwp-publication" className="surface-card" aria-label={t('publicationHeading')}>
             <h2 className="u-fs-13 muted">{t('publicationHeading')}</h2>
+            {failed.has('publication') && <SectionUnavailable onRetry={reload} />}
             {publication && (
               <div className="action-bar">
                 <span className={publication.state === 'completed' ? 'chip chip--success' : 'chip'}>
@@ -363,7 +392,7 @@ export function CandidateWorkspacePage() {
                 separation-of-duties decision is made in the reviews inbox. This
                 section only STATES where things stand — a bespoke approve button
                 here would duplicate a first-class primitive (the audit's finding). */}
-            {candidate.state !== 'withdrawn' && candidate.state !== 'published' && (
+            {candidate.state !== 'withdrawn' && candidate.state !== 'published' && !failed.has('publication') && (
               <>
                 {!publication && !candidate.draft && (
                   <p className="muted u-fs-13">{t('publicationNeedsDraft')}</p>
@@ -388,6 +417,7 @@ export function CandidateWorkspacePage() {
           <section className="surface-card" aria-label={t('gateMatrixHeading')}>
             <h2 className="u-fs-13 muted">{t('gateMatrixHeading')}</h2>
             {gates === undefined ? <StateCard loading title={t('gateMatrixHeading')} />
+              : failed.has('gates') ? <SectionUnavailable onRetry={reload} />
               : gates === null ? <p className="muted u-fs-13">{t('gateMatrixEmpty')}</p>
               : (
                 <ul role="list" className="list-plain">
@@ -412,6 +442,7 @@ export function CandidateWorkspacePage() {
           <section className="surface-card" aria-label={t('simHeading')}>
             <h2 className="u-fs-13 muted">{t('simHeading')}</h2>
             {simulation === undefined ? <StateCard loading title={t('simHeading')} />
+              : failed.has('simulation') ? <SectionUnavailable onRetry={reload} />
               : !simulation || simulation.verdicts.length === 0 ? (
                 <p className="muted u-fs-13">{t('simEmpty')}</p>
               ) : (
@@ -449,7 +480,7 @@ export function CandidateWorkspacePage() {
               not an absence. */}
           <section id="cwp-monitor" className="surface-card" aria-label={t('monitorHeading')}>
             <h2 className="u-fs-13 muted">{t('monitorHeading')}</h2>
-            {monitor ? (
+            {failed.has('monitor') ? <SectionUnavailable onRetry={reload} /> : monitor ? (
               <div className="action-bar">
                 <span className={monitor.broken > 0 ? 'chip chip--danger' : 'chip chip--success'}>
                   {monitor.broken > 0 ? t('monitorBroken', { count: monitor.broken }) : t('monitorHealthy')}
@@ -478,7 +509,7 @@ export function CandidateWorkspacePage() {
                   {busy ? t('retiring') : t('retireCta')}
                 </Button>
               </div>
-              {retireError && <Notice variant="error">{t('retireError')}</Notice>}
+              {retireError && <Notice variant="error" announce={t('retireError')}>{t('retireError')}</Notice>}
             </section>
           )}
 
@@ -499,12 +530,12 @@ export function CandidateWorkspacePage() {
                 </Button>
                 <span className="muted u-fs-13">{t('applyOutlineHint')}</span>
               </div>
-              {outlineError && <Notice variant="error">{t('outlineError')}</Notice>}
+              {outlineError && <Notice variant="error" announce={t('outlineError')}>{t('outlineError')}</Notice>}
               {applyResult?.applied && (
                 <Notice variant="success" announce={t('applyOutlineOk', { version: applyResult.challengeVersion ?? '' })}>{t('applyOutlineOk', { version: applyResult.challengeVersion ?? '' })}</Notice>
               )}
               {applyResult?.publishedConflict && (
-                <Notice variant="error">{t('applyPublishedConflict')}</Notice>
+                <Notice variant="error" announce={t('applyPublishedConflict')}>{t('applyPublishedConflict')}</Notice>
               )}
               {applyResult && !applyResult.applied && applyResult.defects.length > 0 && (
                 <div className="surface-card" role="alert">
@@ -532,6 +563,7 @@ export function CandidateWorkspacePage() {
           <section className="surface-card" aria-label={t('dayStripHeading')}>
             <h2 className="u-fs-13 muted">{t('dayStripHeading')}</h2>
             {lessons === undefined ? <StateCard loading title={t('dayStripHeading')} />
+              : failed.has('lessons') ? <SectionUnavailable onRetry={reload} />
               : !lessons || lessons.length === 0 ? (
                 <p className="muted u-fs-13">{t('dayStripEmpty')}</p>
               ) : (

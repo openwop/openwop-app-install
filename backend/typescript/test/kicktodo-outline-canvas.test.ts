@@ -16,7 +16,16 @@
  *    revision and the re-derived draft; a plan-law violation returns defects
  *    with NO revision bump + an untouched draft; an already-published draft id
  *    is a typed conflict;
- *  - the ensure/apply routes are privileged authoring-family routes.
+ *
+ * The ensure/apply routes' AUTHZ is owned by kicktodo-authz-http.test.ts (GATED
+ * rows `POST …/outline` + `…/outline/apply`: EDITOR → 403 over HTTP, and the
+ * KTH-4 source ratchet). The source-string check that used to sit here was cut in
+ * w41 — probe w41g3-oc-route-gate-authzhttp reds both of those cases.
+ *
+ * Sabotage witnesses (w41 /grade-tests): the isRecovery / alternatives round
+ * trip, the single-frame + day-title structure checks, the terminal-candidate
+ * refusal, the derive path's revision stamp, the published-draft conflict, and
+ * draftFromPlan's PlanInvalidError (the plan-law case now calls derive).
  */
 import { beforeAll, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
@@ -30,7 +39,7 @@ import {
   CHALLENGE_OUTLINE_COMPONENTS,
   type OutlineDoc,
 } from '../src/features/kicktodo-creator/outlineDoc.js';
-import { validatePlan, type ChallengePlan } from '../src/features/kicktodo-creator/planService.js';
+import { validatePlan, PlanInvalidError, type ChallengePlan } from '../src/features/kicktodo-creator/planService.js';
 import {
   createCandidate,
   getCandidatePlan,
@@ -41,7 +50,6 @@ import {
 } from '../src/features/kicktodo-creator/creatorService.js';
 import { getLatest, publishChallenge } from '../src/features/kicktodo-core/challengeService.js';
 import { ensureCanvasForTenant, getCanvasForTenant, updateCanvasForTenant } from '../src/host/canvasSurface.js';
-import { KICKTODO_CREATOR_ROUTES } from '../src/features/kicktodo-creator/routes.js';
 
 const TENANT = 'tenant-outline';
 const AUTHOR = 'user:author';
@@ -85,6 +93,7 @@ function representativePlans(): ChallengePlan[] {
     base({ depthLevel: 'beginner' }),
     base({ achievements: [] }), // empty-achievements
     base({ days: [{ day: 1, stableActivityId: 's1', title: 'D1', actionInstruction: 'do', userFacingWhy: 'why', estimatedMinutes: 10, achievementIds: [], evidencePolicy: 'photo', isRecovery: false }] }),
+    base({ days: [{ day: 1, stableActivityId: 's1', title: 'D1', actionInstruction: 'do', userFacingWhy: 'why', estimatedMinutes: 10, achievementIds: ['a1'], evidencePolicy: 'attestation', claimRefs: ['c1', 'c2'] }] }), // provenance survives
     base({ days: [{ day: 1, stableActivityId: 's1', title: 'D1', actionInstruction: 'do', userFacingWhy: 'why', estimatedMinutes: 10, achievementIds: ['a1'], evidencePolicy: 'note', isRecovery: true, alternatives: [{ stableActivityId: 's1-alt', title: 'Alt', actionInstruction: 'alt', evidencePolicy: 'measurement' }] }] }),
   ];
 }
@@ -92,7 +101,7 @@ function representativePlans(): ChallengePlan[] {
 describe('plan⇄doc round-trip is lossless (ADR 0458 §2.3)', () => {
   it('plan → doc → plan deep-equals for representative plans', () => {
     for (const plan of representativePlans()) {
-      const back = outlineDocToPlan(planToOutlineDoc(plan) as unknown as Record<string, unknown>);
+      const back = outlineDocToPlan(planToOutlineDoc(plan));
       expect(back).toEqual(plan);
     }
   });
@@ -108,21 +117,22 @@ describe('plan⇄doc round-trip is lossless (ADR 0458 §2.3)', () => {
 
 describe('validateOutlineDoc is structure-only (ADR 0458 §2.3)', () => {
   it('accepts a plan-seeded doc AND a still-empty working draft', () => {
-    expect(validateOutlineDoc(planToOutlineDoc(VALID) as unknown as Record<string, unknown>).errors).toEqual([]);
+    expect(validateOutlineDoc(planToOutlineDoc(VALID)).errors).toEqual([]);
     const skeleton: OutlineDoc = { meta: { title: 'T', promise: 'P', audience: 'A', durationDays: 5, dailyMinutesBudget: 10 }, outcomes: [], achievements: [], frames: [{ id: 'outline', name: 'T', days: [] }] };
-    expect(validateOutlineDoc(skeleton as unknown as Record<string, unknown>).errors).toEqual([]);
+    expect(validateOutlineDoc(skeleton).errors).toEqual([]);
   });
 
   it('rejects malformed docs (missing meta, wrong frame id, extra frame, bad day node)', () => {
     expect(validateOutlineDoc({}).errors.length).toBeGreaterThan(0);
     const twoFrames = { ...planToOutlineDoc(VALID), frames: [planToOutlineDoc(VALID).frames[0], planToOutlineDoc(VALID).frames[0]] };
-    expect(validateOutlineDoc(twoFrames as unknown as Record<string, unknown>).errors.some((e) => e.path === 'frames')).toBe(true);
-    const badId = planToOutlineDoc(VALID) as unknown as { frames: { id: string }[] };
+    expect(validateOutlineDoc(twoFrames).errors.some((e) => e.path === 'frames')).toBe(true);
+    // Off-shape docs are built from a JSON copy (typed at the declaration — no cast).
+    const badId: { frames: { id: string }[] } = JSON.parse(JSON.stringify(planToOutlineDoc(VALID)));
     badId.frames[0].id = 'nope';
-    expect(validateOutlineDoc(badId as unknown as Record<string, unknown>).errors.some((e) => e.path === 'frames[0].id')).toBe(true);
-    const badDay = planToOutlineDoc(VALID) as unknown as { frames: { days: { props: Record<string, unknown> }[] }[] };
+    expect(validateOutlineDoc(badId).errors.some((e) => e.path === 'frames[0].id')).toBe(true);
+    const badDay: { frames: { days: { props: Record<string, unknown> }[] }[] } = JSON.parse(JSON.stringify(planToOutlineDoc(VALID)));
     delete badDay.frames[0].days[0].props.title;
-    expect(validateOutlineDoc(badDay as unknown as Record<string, unknown>).errors.some((e) => e.path.endsWith('.props.title'))).toBe(true);
+    expect(validateOutlineDoc(badDay).errors.some((e) => e.path.endsWith('.props.title'))).toBe(true);
   });
 });
 
@@ -155,7 +165,7 @@ describe('ensure is idempotent — never reseeds an existing canvas', () => {
     const second = await ensureCanvasForTenant(TENANT, canvasId, { canvasTypeId: CHALLENGE_OUTLINE_CANVAS_TYPE, initialState: planToOutlineDoc(VALID) });
     expect(second.canvasId).toBe(canvasId);
     const after = await getCanvasForTenant(TENANT, canvasId);
-    expect((after?.state as { meta: { title: string } }).meta.title).toBe('Edited');
+    expect(after?.state).toMatchObject({ meta: { title: 'Edited' } });
   });
 });
 
@@ -173,7 +183,7 @@ describe('apply is draft→validate→persist over the shared derive path', () =
     expect((await getCandidatePlan(TENANT, candidateId))!.revision).toBe(1);
     // Edit day 1's title in the canvas working draft.
     const canvas = await getCanvasForTenant(TENANT, canvasId);
-    const doc = JSON.parse(JSON.stringify(canvas!.state)) as OutlineDoc;
+    const doc: OutlineDoc = JSON.parse(JSON.stringify(canvas!.state));
     doc.frames[0].days[0].props.title = 'Edited Day One';
     await updateCanvasForTenant(TENANT, canvasId, doc, { merge: 'replace' });
     // Replicate the apply handler: read → docToPlan → validate → derive+bind.
@@ -194,13 +204,18 @@ describe('apply is draft→validate→persist over the shared derive path', () =
     const titleBefore = (await getLatest(TENANT, challengeId))?.activities[0]?.title;
     // Break the plan: empty the days tree (validatePlan will reject).
     const canvas = await getCanvasForTenant(TENANT, canvasId);
-    const doc = JSON.parse(JSON.stringify(canvas!.state)) as OutlineDoc;
+    const doc: OutlineDoc = JSON.parse(JSON.stringify(canvas!.state));
     doc.frames[0].days = [];
     await updateCanvasForTenant(TENANT, canvasId, doc, { merge: 'replace' });
     const plan = outlineDocToPlan((await getCanvasForTenant(TENANT, canvasId))!.state);
     const defects = validatePlan(plan);
     expect(defects.length).toBeGreaterThan(0);
-    // The apply handler stops here (no derive) — SSoT + draft untouched.
+    // The SHARED derive path refuses it too (typed, with the same defects) — the
+    // apply route checks first, but a caller reaching derive directly must not
+    // bump the revision or touch the draft either.
+    await expect(deriveAndBindCandidateDraft(TENANT, AUTHOR, candidateId, plan)).rejects.toSatisfy(
+      (err: unknown) => err instanceof PlanInvalidError && err.defects.length === defects.length,
+    );
     expect((await getCandidatePlan(TENANT, candidateId))!.revision).toBe(revBefore);
     expect((await getLatest(TENANT, challengeId))?.activities[0]?.title).toBe(titleBefore);
   });
@@ -233,17 +248,5 @@ describe('the served component catalog is the FE contract (drift-pin)', () => {
     expect(alt.acceptsChildren).not.toBe(true);
     expect(alt.props?.map((p) => p.name)).toEqual(['title', 'stableActivityId', 'actionInstruction', 'evidencePolicy']);
     expect(alt.props?.find((p) => p.name === 'evidencePolicy')).toMatchObject({ type: 'enum', options: ['attestation', 'note', 'photo', 'measurement'] });
-  });
-});
-
-describe('the outline routes are privileged authoring-family routes (per convention)', () => {
-  it('ensure + apply are in the creator route table and reach the shared gate', () => {
-    const keys = KICKTODO_CREATOR_ROUTES.map((r) => `${r.method} ${r.path}`);
-    expect(keys).toContain('post /host/openwop-app/kicktodo/creator/candidates/:id/outline');
-    expect(keys).toContain('post /host/openwop-app/kicktodo/creator/candidates/:id/outline/apply');
-    for (const suffix of ['/candidates/:id/outline', '/candidates/:id/outline/apply']) {
-      const route = KICKTODO_CREATOR_ROUTES.find((r) => r.method === 'post' && r.path.endsWith(suffix))!;
-      expect(String(route.handler), `${suffix} must reach requireKicktodoManage via gate`).toContain('gate');
-    }
   });
 });

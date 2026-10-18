@@ -122,6 +122,15 @@ destructive lane for the ADR 0657 census.
   duplicate user, so lookups keep the scan on a miss), `documents:doc` (two collection instances, both need `tenantOf`),
   `runartifact`, and `compensation:obligation` (tenant-prefixed ids, so
   `listByPrefix` needs no adoption).
+  > **Correction 2026-10-13 (ADR 0884 and the runartifact rejection): this ranking was by cost per
+  > request, and frequency decides it.** Adoption adds an hourly reconcile, about
+  > 720 full scans a month, so a collection adopts only when its request-path
+  > scans clearly exceed that. `documents:doc` was **rejected** (ADR 0884: about
+  > 18 request-path scans in 30 days, each under 70 ms). `runartifact` was
+  > **rejected** the same day in its own ADR (7 Library list GETs in 30 days, and run cascades
+  > delete its rows by raw SQL, which would orphan markers). `kanban:card` passed
+  > because its heartbeat scanned every ten minutes. Measure the 30-day request
+  > count before claiming the next one.
 - [x] A hold on tagged old revisions: D1 detects such a writer after the fact
   (and un-verifies). It does not prevent one. **Closed by preflight Gate 5b
   (2026-10-10):** `scripts/preflight-deploy.sh` refuses a deploy while any

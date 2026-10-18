@@ -20,6 +20,10 @@
  *      non-member. `adr0610-owner-subject-read-doors.test.ts` proves this for the
  *      first-party `canvas.app-builder` type only; no test combined a PACK canvas
  *      with the read gate. Mirrors that block's owner/member/non-member controls.
+ *
+ * TWINS (kept on purpose — both files are protected): `canvas-pack-editor.test.ts`'s
+ * CPKC-2 (a) and (b) assert the registry absence and the non-member 404 too; this
+ * file adds the ticket-mint, project-door, versions-door and over-block legs.
  */
 import http from 'node:http';
 import { cpSync, mkdtempSync } from 'node:fs';
@@ -87,13 +91,15 @@ afterAll(async () => {
   else process.env.OPENWOP_ARTIFACT_TYPE_PACKS_DIR = prevArtifactPacksDir;
 });
 
-interface Res<T = any> { status: number; body: T }
-function client(): { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res>; patch: (p: string, b?: unknown) => Promise<Res> } {
+interface Res<T> { status: number; body: T }
+interface ErrBody { error: string; message: string }
+type Call = <T>(p: string, b?: unknown) => Promise<Res<T>>;
+function client(): { get: Call; post: Call; patch: Call } {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
+  const call = async <T>(method: string, path: string, body?: unknown): Promise<Res<T>> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
-    for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]!; }
+    const out: T = res.status === 204 ? JSON.parse('null') : await res.json().catch(() => undefined);
     return { status: res.status, body: out };
   };
   return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), patch: (p, b) => call('PATCH', p, b) };
@@ -107,27 +113,27 @@ async function packCanvas(visibility: 'private' | 'org' = 'private') {
   const tenantId = `org:cpkc2-${Date.now()}-${n++}`;
   const owner = client();
   await owner.post('/host/openwop-app/test/login', { email: uniqEmail('own'), tenantId });
-  const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'PrivCo' })).body.orgId;
-  const projectId = (await owner.post(P, { orgId, name: 'Secret' })).body.id;
+  const orgId = (await owner.post<{ orgId: string }>('/host/openwop-app/orgs', { name: 'PrivCo' })).body.orgId;
+  const projectId = (await owner.post<{ id: string }>(P, { orgId, name: 'Secret' })).body.id;
   const canvas = await createCanvasForTenant(tenantId, {
     canvasTypeId: TYPE, name: 'Secret list',
     ownerSubject: { kind: 'project', id: projectId },
     initialState: validState('Secret list'),
   });
-  expect((await owner.patch(`${P}/${projectId}/visibility`, { visibility })).body.visibility).toBe(visibility);
+  expect((await owner.patch<{ visibility: string }>(`${P}/${projectId}/visibility`, { visibility })).body.visibility).toBe(visibility);
   return { tenantId, orgId, projectId, canvasId: canvas.canvasId, owner };
 }
 
 /** A real org VIEWER of the same org who is NOT a project member. */
 async function orgViewer(tenantId: string, orgId: string): Promise<ReturnType<typeof client> & { userId: string }> {
   const viewer = client();
-  const viewerId = (await viewer.post('/host/openwop-app/test/login', { email: uniqEmail('view'), tenantId })).body.user.userId;
+  const viewerId = (await viewer.post<{ user: { userId: string } }>('/host/openwop-app/test/login', { email: uniqEmail('view'), tenantId })).body.user.userId;
   await createMember({ tenantId, orgId, subject: viewerId, displayName: 'V', roles: ['viewer'] });
-  return Object.assign(viewer, { userId: viewerId as string });
+  return Object.assign(viewer, { userId: viewerId });
 }
 
-async function mintTicket(c: ReturnType<typeof client>, canvasId: string): Promise<Res> {
-  return c.post(`/host/openwop-app/canvas-collab/${encodeURIComponent(canvasId)}/ticket`);
+async function mintTicket(c: ReturnType<typeof client>, canvasId: string): Promise<Res<{ ticket?: string; error?: string }>> {
+  return c.post<{ ticket?: string; error?: string }>(`/host/openwop-app/canvas-collab/${encodeURIComponent(canvasId)}/ticket`);
 }
 
 describe('CPKC-2 (a) — a pack canvas type is EXCLUDED from real-time collab', () => {
@@ -142,8 +148,8 @@ describe('CPKC-2 (a) — a pack canvas type is EXCLUDED from real-time collab', 
   it('the collab ticket-mint 404s for a pack canvas EVEN with realtime-collab ON (registry exclusion, not the master toggle)', async () => {
     const tenantId = `org:cpkc2-mint-${Date.now()}-${n++}`;
     const owner = client();
-    await owner.post('/host/openwop-app/test/login', { email: uniqEmail('mint'), tenantId });
-    await owner.post('/host/openwop-app/orgs', { name: 'MintCo' });
+    await owner.post<unknown>('/host/openwop-app/test/login', { email: uniqEmail('mint'), tenantId });
+    await owner.post<unknown>('/host/openwop-app/orgs', { name: 'MintCo' });
 
     // POSITIVE CONTROL: the mint route DOES mint for a first-party collab type
     // (canvas.document, registered + document-editor + realtime-collab ON) — so the
@@ -155,7 +161,10 @@ describe('CPKC-2 (a) — a pack canvas type is EXCLUDED from real-time collab', 
 
     // THE INVARIANT: a fully pack-registered type is excluded ⇒ mint 404s.
     const pack = await createCanvasForTenant(tenantId, { canvasTypeId: TYPE, name: 'C', initialState: validState('C') });
-    expect((await mintTicket(owner, pack.canvasId)).status).toBe(404);
+    const refused = await mintTicket(owner, pack.canvasId);
+    expect(refused.status).toBe(404);
+    expect(refused.body).toMatchObject({ error: 'not_found' });
+    expect(refused.body.ticket).toBeUndefined();
   });
 });
 
@@ -164,26 +173,32 @@ describe('CPKC-2 (b) — a private-project pack canvas 404s for a non-member (AD
     const { tenantId, orgId, projectId, canvasId, owner } = await packCanvas('private');
     const viewer = await orgViewer(tenantId, orgId);
     // Control: the project door already refuses the viewer (so a 404 below is the gate).
-    expect((await viewer.get(`${P}/${projectId}`)).status).toBe(404);
+    expect((await viewer.get<unknown>(`${P}/${projectId}`)).status).toBe(404);
 
-    const leaked = await viewer.get(`${PACKBASE(orgId)}/${canvasId}`);
+    const leaked = await viewer.get<ErrBody>(`${PACKBASE(orgId)}/${canvasId}`);
     expect(leaked.status).toBe(404);
+    expect(leaked.body.error).toBe('not_found');
+    expect(leaked.body.message).toMatch(/^canvas '.+' not found$/); // the id itself is redacted by the error sanitizer
     expect(JSON.stringify(leaked.body ?? {})).not.toContain('Secret list');
     // The version-history door funnels through the SAME loadCanvas choke.
-    expect((await viewer.get(`${PACKBASE(orgId)}/${canvasId}/versions`)).status).toBe(404);
+    const versions = await viewer.get<ErrBody>(`${PACKBASE(orgId)}/${canvasId}/versions`);
+    expect(versions.status).toBe(404);
+    expect(versions.body.error).toBe('not_found');
 
     // Owner control: not a brick.
-    expect((await owner.get(`${PACKBASE(orgId)}/${canvasId}`)).status).toBe(200);
+    const own = await owner.get<{ canvasId: string; name: string }>(`${PACKBASE(orgId)}/${canvasId}`);
+    expect(own.status).toBe(200);
+    expect(own.body).toMatchObject({ canvasId, name: 'Secret list' });
   });
 
   it('a project MEMBER regains the read door; an ORG-visible project is unaffected (no over-block)', async () => {
     const { tenantId, orgId, projectId, canvasId, owner } = await packCanvas('private');
     const viewer = await orgViewer(tenantId, orgId);
-    expect((await owner.post(`${P}/${projectId}/members`, { ref: `user:${viewer.userId}`, role: 'observer' })).status).toBe(201);
-    expect((await viewer.get(`${PACKBASE(orgId)}/${canvasId}`)).status).toBe(200);
+    expect((await owner.post<unknown>(`${P}/${projectId}/members`, { ref: `user:${viewer.userId}`, role: 'observer' })).status).toBe(201);
+    expect((await viewer.get<unknown>(`${PACKBASE(orgId)}/${canvasId}`)).status).toBe(200);
 
     const open = await packCanvas('org');
     const stranger = await orgViewer(open.tenantId, open.orgId);
-    expect((await stranger.get(`${PACKBASE(open.orgId)}/${open.canvasId}`)).status).toBe(200);
+    expect((await stranger.get<unknown>(`${PACKBASE(open.orgId)}/${open.canvasId}`)).status).toBe(200);
   });
 });

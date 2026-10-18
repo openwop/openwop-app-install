@@ -51,7 +51,7 @@ export interface AssistantLoop {
   lastSkippedAt?: string;
   /** ADR 0787 — `feature-disabled` (the owning feature is off) and
    *  `no-next-fire` (the cadence has no further slot; NOT a dropped fire). */
-  lastSkipReason?: 'budget' | 'workflow-unresolved' | 'dispatch-error' | 'feature-disabled' | 'plan-lapsed' | 'actor-inactive' | 'no-next-fire';
+  lastSkipReason?: 'budget' | 'workflow-unresolved' | 'dispatch-error' | 'feature-disabled' | 'plan-lapsed' | 'actor-inactive' | 'agent-paused' | 'policy-denied' | 'awaiting-approval' | 'no-next-fire';
   /** ADR 0662 D3 / ADR 0862 — how `lastRunId` ENDED, and (when it failed) its typed error
    *  code. The server projected the status since it.14 and nothing rendered it, so a loop
    *  failing most of its runs read "Last run …" beside a green On. */

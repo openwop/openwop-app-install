@@ -5,14 +5,20 @@
  * mention does NOT switch agents (chatSubmit skips activation). Silent where `@`
  * means something else: channels, slash commands/workflows, `@@` boards, and
  * any `@token` that is not a known agent.
+ *
+ * Sabotages that turn it red (probed w28): the attachments branch swapped; the
+ * channel check dropped; the mid-text slash regex or the `@@` check removed.
+ * Honest double guard: `startsWith('/')` is masked by that regex for every
+ * real slash command (probed VACUOUS), so it has no leg of its own here.
  */
 import { render, screen, cleanup } from '@testing-library/react';
 import { describe, it, expect, vi, afterEach } from 'vitest';
 
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (k: string, o?: { name?: string }) => `${k}:${o?.name ?? ''}` }) }));
-const ENTRIES = [{ agentId: 'a.kai', slug: 'kai', displayName: 'Kai', description: '' }] as never;
-
 import { AgentHandoffHint } from '../AgentHandoffHint.js';
+import type { AgentMentionEntry } from '../lib/agentMentions.js';
+
+const ENTRIES: AgentMentionEntry[] = [{ agentId: 'a.kai', slug: 'kai', displayName: 'Kai', persona: 'Kai', description: '', packName: 'test', packVersion: '0.0.0', modelClass: 'chat' }];
 
 afterEach(cleanup);
 const hint = (text: string, hasAttachments = false, inChannel = false) =>

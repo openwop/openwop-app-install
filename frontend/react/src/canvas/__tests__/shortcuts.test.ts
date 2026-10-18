@@ -35,8 +35,10 @@ describe('parseCombo + eventMatches', () => {
 describe('mergeShortcuts', () => {
   it('drops extras that collide with defaults, keeps the rest', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-    const merged = mergeShortcuts([def('mod+z')], [def('mod+z'), def('mod+e')]);
-    expect(merged.map((s) => s.combo)).toEqual(['mod+z', 'mod+e']);
+    // The collision is on the NORMALIZED combo: 'shift+mod+z' spells the
+    // default 'mod+shift+z' differently and must still be dropped.
+    const merged = mergeShortcuts([def('mod+shift+z')], [def('shift+mod+z'), def('mod+e')]);
+    expect(merged.map((s) => s.combo)).toEqual(['mod+shift+z', 'mod+e']);
     expect(warn).toHaveBeenCalledTimes(1);
   });
   it('reserves mod+k for the global command palette', () => {
@@ -53,6 +55,7 @@ describe('dispatchShortcut', () => {
     const handled = dispatchShortcut(e, [
       { ...def('mod+z', () => ran.push('undo')), enabled: () => true },
       def('mod+y', () => ran.push('redo')),
+      def('mod+z', () => ran.push('second')), // a LATER match never runs
     ]);
     expect(handled).toBe(true);
     expect(ran).toEqual(['undo']);
@@ -88,7 +91,7 @@ describe('shifted-digit combos (§7.3 zoom keys)', () => {
 describe('AltGr layouts (grade-pass CVP-1)', () => {
   it("masks AltGraph out of mod/alt so produced characters ('[') match plain combos", () => {
     // A DE-layout AltGr+8 arrives as ctrl+alt with key '[' + AltGraph state.
-    const e = new KeyboardEvent('keydown', { key: '[', ctrlKey: true, altKey: true, modifierAltGraph: true } as KeyboardEventInit);
+    const e = new KeyboardEvent('keydown', { key: '[', ctrlKey: true, altKey: true, modifierAltGraph: true });
     expect(eventMatches(e, parseCombo('['))).toBe(true);
     // A REAL ctrl+alt chord (no AltGraph) still does not match plain '['.
     const chord = new KeyboardEvent('keydown', { key: '[', ctrlKey: true, altKey: true });

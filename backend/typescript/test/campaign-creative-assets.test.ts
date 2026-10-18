@@ -12,6 +12,15 @@
  *    renders via a stubbed delegate → assets created WITH lineage + outputs carry
  *    refs, maxImages clamp, and a mid-run budget-style failure keeps partial
  *    renders (`truncatedBy`).
+ *
+ * Sabotage-witnessed (/grade-tests w30): an open `generatedBy`, an unbounded
+ * prompt, `lineage: null` not clearing, the foreign-token tenant check, the MIME
+ * guard, the run-id `uploadedBy`, the maxImages cap (needs MORE briefs than the
+ * cap — with 3 briefs the loop bound hid it), discarding partial renders, a
+ * `serveUrl` re-emitted by the node or the surface, and the messaging context
+ * dropped from the prompt each turn a case red. The surface-output credential
+ * check is also held by `media-surface-credentials.test.ts`; it stays here as a
+ * protected MED2-R2 assertion.
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
@@ -157,6 +166,14 @@ describe('render-concepts node (ADR 0229 / D3)', () => {
     ],
   };
 
+  /** The node's success outputs (the pack is untyped `.mjs`). */
+  type RenderOutputs = {
+    count: number;
+    truncatedBy?: string;
+    concepts: Array<{ assetId: string; format: string; briefIndex: number; serveUrl?: unknown }>;
+  };
+  const outputsOf = (out: { outputs?: Record<string, unknown> }): RenderOutputs => (out.outputs ?? {}) as RenderOutputs;
+
   /** A run-shaped media surface stub recording created assets. */
   function mediaStub() {
     const created: Array<Record<string, unknown>> = [];
@@ -215,7 +232,7 @@ describe('render-concepts node (ADR 0229 / D3)', () => {
       inputs: { draft, orgId: 'o1', maxImages: 2 },
     });
     expect(out.status).toBe('success');
-    const o = out.outputs as Record<string, any>;
+    const o = outputsOf(out);
     expect(o.count).toBe(2); // maxImages clamps below the 3 briefs
     expect(genCalls).toHaveLength(2);
     expect(genCalls[0].n).toBe(1);
@@ -232,19 +249,21 @@ describe('render-concepts node (ADR 0229 / D3)', () => {
     // these very assets' media routes, could read the run and fetch the images
     // with no auth. The handle is enough: resolving it back to bytes goes
     // through the media route, which checks who is asking.
-    expect(o.concepts[0].assetId).toBe('masset:1');
-    expect(o.concepts[0].serveUrl, 'a recorded node output must not carry a byte credential').toBeUndefined();
-    expect(o.concepts[0].format).toBe('Social square');
-    expect(o.concepts[1].briefIndex).toBe(1);
+    expect(o.concepts[0]!.assetId).toBe('masset:1');
+    expect(o.concepts[0]!.serveUrl, 'a recorded node output must not carry a byte credential').toBeUndefined();
+    expect(o.concepts[0]!.format).toBe('Social square');
+    expect(o.concepts[1]!.briefIndex).toBe(1);
   });
 
   it('clamps maxImages to 3 and defaults to 1', async () => {
     const m = mediaStub();
     const gen = async () => ({ images: [{ url: '/host/openwop-app/assets/s', mimeType: 'image/png' }] });
     const one = await channelNodes[RENDER]({ callImageGenerator: gen, features: { media: m.surface }, inputs: { draft, orgId: 'o1' } });
-    expect((one.outputs as Record<string, any>).count).toBe(1);
-    const many = await channelNodes[RENDER]({ callImageGenerator: gen, features: { media: m.surface }, inputs: { draft, orgId: 'o1', maxImages: 99 } });
-    expect((many.outputs as Record<string, any>).count).toBe(3); // 3 briefs, cap 3
+    expect(outputsOf(one).count).toBe(1);
+    // FIVE briefs, so the cap (not the brief count) is what stops the loop.
+    const five = { briefs: [...draft.briefs, { format: 'Poster', sceneDescription: 'A poster' }, { format: 'Card', sceneDescription: 'A card' }] };
+    const many = await channelNodes[RENDER]({ callImageGenerator: gen, features: { media: m.surface }, inputs: { draft: five, orgId: 'o1', maxImages: 99 } });
+    expect(outputsOf(many).count).toBe(3);
   });
 
   it('a mid-run budget refusal keeps partial renders (truncatedBy, never discarded)', async () => {
@@ -260,9 +279,12 @@ describe('render-concepts node (ADR 0229 / D3)', () => {
       inputs: { draft, orgId: 'o1', maxImages: 3 },
     });
     expect(out.status).toBe('success');
-    const o = out.outputs as Record<string, any>;
+    const o = outputsOf(out);
     expect(o.count).toBe(1);
     expect(o.truncatedBy).toBe('provider_rate_limited');
+    // The ONE render that landed is kept as a real asset, not discarded.
+    expect(m.created).toHaveLength(1);
+    expect(o.concepts[0]!.assetId).toBe('masset:1');
   });
 
   it('fails on an empty creative-briefs draft and on an unresolvable org', async () => {

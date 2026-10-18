@@ -221,6 +221,12 @@ interface Props {
     onToggleReaction: (messageId: string, emoji: string, currentlyMine: boolean) => void;
     onEdit: (messageId: string, newText: string) => void;
     onDelete: (messageId: string) => void;
+    /** CH2UX-2/3 (ADR 0879) — `false` hides react + edit (the viewer's role is
+     *  read-only; a Viewer may still delete their OWN old posts). Absent = true. */
+    canWrite?: boolean;
+    /** ADR 0879 D3 — the channel owner or a workspace admin: may DELETE (never
+     *  edit) other people's messages. Absent = false. */
+    canModerate?: boolean;
   };
   /** ADR 0853 D2 — "Record as decision" on any message (present when the
    *  conversation's project has a team ledger). */
@@ -286,10 +292,15 @@ export function MessageFeed({
     };
   }, [mentionEntries, t]);
   const record = onRecordDecision ? { onRecordDecision } : {};
+  // ADR 0879 — edit is the AUTHOR's alone and needs write; delete is the author's
+  // or a moderator's (D2/D3); react and "ask for a source" (which drafts a post)
+  // need write. A read-only viewer is offered none of the writes it would be refused.
+  const canWrite = messageActions?.canWrite !== false;
+  const canModerate = messageActions?.canModerate === true;
   const channelActionsPair = useMemo(() => messageActions ? {
-    own: { canModify: true, onToggleReaction: messageActions.onToggleReaction, onEdit: messageActions.onEdit, onDelete: messageActions.onDelete, ...record },
-    other: { canModify: false, onToggleReaction: messageActions.onToggleReaction, onEdit: messageActions.onEdit, onDelete: messageActions.onDelete, ...(askSource ? { askSource } : {}), ...record },
-  } : undefined, [messageActions, askSource, onRecordDecision]); // eslint-disable-line react-hooks/exhaustive-deps
+    own: { canModify: canWrite, canDelete: true, canReact: canWrite, onToggleReaction: messageActions.onToggleReaction, onEdit: messageActions.onEdit, onDelete: messageActions.onDelete, ...record },
+    other: { canModify: false, canDelete: canModerate, canReact: canWrite, onToggleReaction: messageActions.onToggleReaction, onEdit: messageActions.onEdit, onDelete: messageActions.onDelete, ...(askSource && canWrite ? { askSource } : {}), ...record },
+  } : undefined, [messageActions, askSource, onRecordDecision, canWrite, canModerate]); // eslint-disable-line react-hooks/exhaustive-deps
   // "Stick to bottom" = the user is at (or within a threshold of) the bottom, so
   // new content should auto-follow. The moment they scroll up, this goes false and
   // streaming tokens stop yanking them down — a "Jump to latest" pill appears
@@ -489,7 +500,7 @@ export function MessageFeed({
         // post role:'user'; without knowing "me", theirs would render as
         // yours), attribution header on author change or a >5-minute gap
         // (consecutive-author grouping keeps the feed calm).
-        let channelProps: { channelAuthor?: { displayName: string; kind: 'user' | 'agent' | 'other' }; isOwn?: boolean; showAttribution?: boolean; channelActions?: { canModify: boolean; onToggleReaction: (messageId: string, emoji: string, currentlyMine: boolean) => void; onEdit: (messageId: string, newText: string) => void; onDelete: (messageId: string) => void } } = {};
+        let channelProps: { channelAuthor?: { displayName: string; kind: 'user' | 'agent' | 'other' }; isOwn?: boolean; showAttribution?: boolean; removedByName?: string; channelActions?: { canModify: boolean; onToggleReaction: (messageId: string, emoji: string, currentlyMine: boolean) => void; onEdit: (messageId: string, newText: string) => void; onDelete: (messageId: string) => void } } = {};
         if (authorDirectory && m.role !== 'workflow_run' && m.role !== 'system') {
           const isOwn = m.authorSubject !== undefined
             ? m.authorSubject === viewerSubjectRef
@@ -498,8 +509,15 @@ export function MessageFeed({
           const prev = i > 0 ? displayMessages[i - 1] : undefined;
           const gapMs = prev?.createdAt && m.createdAt ? Date.parse(m.createdAt) - Date.parse(prev.createdAt) : Number.POSITIVE_INFINITY;
           const sameAuthor = prev !== undefined && prev.authorSubject !== undefined && prev.authorSubject === m.authorSubject;
+          // ADR 0879 D2 — a moderator's delete is NAMED on the tombstone ("Removed by
+          // <name>"), never a silent vanish; the author's own delete stays "Message deleted".
+          const deletedBy = m.meta?.deletedBy;
+          const removedByName = deletedBy && m.meta?.deletedAt && deletedBy !== m.authorSubject
+            ? (authorDirectory.get(deletedBy)?.displayName ?? t('messageRemovedByModerator'))
+            : undefined;
           channelProps = {
             isOwn,
+            ...(removedByName ? { removedByName } : {}),
             ...(author && !isOwn ? { channelAuthor: author } : {}),
             showAttribution: !isOwn && author !== undefined && (!sameAuthor || gapMs > 5 * 60_000),
             // ADR 0195 D5 — affordances on every settled multi-party message;

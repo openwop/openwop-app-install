@@ -4,10 +4,16 @@
  * resolved to nothing in the conversation tool loop → the loop fell back to a streaming completion
  * and the model faked the tool call as leaked `<invoke>` text. These tests lock in that it resolves
  * + executes via the WASI sandbox + is honest-off when no runtime.
+ *
+ * `builtinAgentToolIds()` membership is covered by `agent-allowlist-resolution.test.ts`
+ * ("every allowlisted id is offerable…" — the Code Interpreter allowlists this id; probe
+ * w24g2-at-builtin-covering). CEILING: the WASI arm is asset-gated — it runs only where
+ * `vendor/python-3.12.0.wasm` is synced (CI/Docker); on a plain checkout the asset's absence
+ * ALSO makes honest-off hold, so `RUNTIME=off` is a second guard there, not the only one.
  */
 import { describe, it, expect, beforeEach, beforeAll } from 'vitest';
 import { existsSync } from 'node:fs';
-import { builtinAgentToolIds, createAgentToolProvider } from '../src/host/agentToolProvider.js';
+import { createAgentToolProvider } from '../src/host/agentToolProvider.js';
 import { wasmPath } from '../src/host/wasiSandbox.js';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { openStorage } from '../src/storage/index.js';
@@ -31,15 +37,12 @@ beforeEach(() => {
 });
 
 describe('code-exec as a builtin agent tool', () => {
-  it('is now a resolvable builtin (the fix — it was absent before)', () => {
-    expect(builtinAgentToolIds()).toContain(TOOL_ID);
-  });
-
   it('the agent tool provider resolves + describes it', () => {
     const provider = createAgentToolProvider({ tenantId: 't1' });
     const def = provider.resolveTool(TOOL_ID);
-    expect(def).toBeTruthy();
     expect(def?.name).toBe(TOOL_ID);
+    // the schema the MODEL sees: `code` is required (a missing one is refused before execution)
+    expect(def?.inputSchema).toMatchObject({ required: ['code'] });
   });
 
   it('honest-off: returns capability_not_provided when no runtime is enabled', async () => {
@@ -47,7 +50,7 @@ describe('code-exec as a builtin agent tool', () => {
     const provider = createAgentToolProvider({ tenantId: 't1' });
     const res = await provider.executeTool({ name: TOOL_ID, input: { code: 'print(1)' } });
     expect(res.isError).toBe(true);
-    expect(res.content).toContain('capability_not_provided');
+    expect((JSON.parse(res.content) as { error?: string }).error).toBe('capability_not_provided');
   });
 
   // Asset-gated: skip loudly on plain local checkouts (CI/Docker sync the wasm;

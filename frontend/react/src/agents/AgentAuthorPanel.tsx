@@ -17,13 +17,12 @@
 import { lazy, Suspense } from 'react';
 import { Button } from '../ui/Button.js';
 import { useTranslation } from 'react-i18next';
+import { AGENT_AUTHOR_AGENT_ID } from './agentAuthorId.js';
 
 const EmbeddedChatPanel = lazy(() =>
   import('../chat/EmbeddedChatPanel.js').then((m) => ({ default: m.EmbeddedChatPanel })),
 );
 
-/** The agent the wizard's describe-to-create scopes the chat to (ADR 0514 pack). */
-const AGENT_AUTHOR_AGENT_ID = 'vendor.openwop-app.agent-author.agents.agent-author';
 
 function AgentAuthorWelcome({ onPick }: { onPick: (text: string) => void }): JSX.Element {
   const { t } = useTranslation('agents');

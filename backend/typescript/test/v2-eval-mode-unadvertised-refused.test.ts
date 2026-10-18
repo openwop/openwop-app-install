@@ -50,17 +50,18 @@ async function runCount(): Promise<number> {
 
 const EVAL = { mode: 'eval', evalSuiteRef: 'https://conformance.openwop.dev/eval-suites/unadvertised-probe', agentId: 'conformance-eval-unadvertised-probe' };
 
-describe('#4318 — mode: eval on a host that does not advertise agents.evalSuite (major 2)', () => {
+// ADR 0889 (2026-10-14): this host now SERVES `mode: eval` (RFC 0081 + RFC 0244), so
+// the #4318 refusal no longer applies. What #4318 guarded still stands and is pinned
+// here: the handler follows the advert, an eval body is never run as an ordinary
+// workflow run, and a refused eval create leaves no run behind.
+describe('#4318 → ADR 0889 — mode: eval follows the advert (major 2)', () => {
   it('PREMISE: the predicate the handler reads agrees with the v2 discovery document the suite reads', async () => {
-    // The suite decides applicability from `/.well-known/openwop` `agents.evalSuite`;
-    // the handler decides from `hostSatisfies`. If the two ever disagree the host
-    // refuses what it advertises, or serves what it does not.
     const doc = await send('GET', '/.well-known/openwop', { 'OpenWOP-Version': '2.0' });
     expect(doc.status, doc.text.slice(0, 200)).toBe(200);
     const agents = doc.json['agents'] as Record<string, unknown> | undefined;
     expect(agents, 'the agents family is advertised, so the facet check below is not vacuous').toBeTypeOf('object');
     const advertised = agents?.['evalSuite'] !== undefined && agents?.['evalSuite'] !== null;
-    expect(advertised).toBe(false);
+    expect(advertised).toBe(true);
     expect(hostSatisfies('agents', ['evalSuite'])).toBe(advertised);
   });
 
@@ -69,21 +70,24 @@ describe('#4318 — mode: eval on a host that does not advertise agents.evalSuit
     expect(r.status, r.text.slice(0, 200)).toBe(201);
   });
 
-  it('a complete eval body is 422 capability_not_provided and creates no run', async () => {
+  it('an eval body naming an unknown suite is 404 and creates no run', async () => {
     const before = await runCount();
     const r = await send('POST', '/runs', V2, EVAL);
-    expect(r.status, r.text.slice(0, 200)).toBe(422);
-    expect(r.json['error']).toBe('capability_not_provided');
-    expect((r.json['details'] as Record<string, unknown> | undefined)?.['capability']).toBe('agents.evalSuite');
+    expect(r.status, r.text.slice(0, 200)).toBe(404);
     expect(await runCount()).toBe(before);
   });
 
-  it('an eval body that ALSO names a workflow is refused the same way — never a 201 ordinary run', async () => {
+  it('an eval body that ALSO names a workflow takes the eval branch — never a 201 ordinary run', async () => {
     const before = await runCount();
     const r = await send('POST', '/runs', V2, { ...EVAL, workflowId: 'conformance-noop' });
-    expect(r.status, r.text.slice(0, 200)).toBe(422);
-    expect(r.json['error']).toBe('capability_not_provided');
+    expect(r.status, r.text.slice(0, 200)).toBe(404);
     expect(await runCount()).toBe(before);
+  });
+
+  it('an eval body without evalSuiteRef is 400 naming the field', async () => {
+    const r = await send('POST', '/runs', V2, { mode: 'eval', agentId: 'x' });
+    expect(r.status, r.text.slice(0, 200)).toBe(400);
+    expect((r.json['details'] as Record<string, unknown> | undefined)?.['field']).toBe('evalSuiteRef');
   });
 
   it('CONTROL: a body with no workflowId and no eval mode keeps its 400 (the refusal is tied to mode, not to the missing id)', async () => {

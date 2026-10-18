@@ -5,6 +5,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import { buildFirewallHook, SENSITIVE_APPROVAL_TOOLS } from '../src/features/capability-firewall/firewallHook.js';
+import type { CapabilityRule } from '../src/features/capability-firewall/types.js';
 
 const CODE_EXEC = 'openwop:feature.code-exec.nodes.run';
 
@@ -37,13 +38,20 @@ describe('ADR 0150 — permission mode firewall gating', () => {
     expect(hook.evaluate([], 'openwop:knowledge.search').decision).toBe('allow');
   });
 
-  it('bypass only ever downgrades require-approval — never produces a leaked `require-approval`', () => {
-    // Structural invariant: the bypass/approved downgrade fires ONLY on `require-approval`
-    // (firewallHook.ts), so a `deny` is never touched (deny-precedence is unit-tested in the
-    // evaluator suite). Here we confirm bypass never *introduces* a require-approval.
-    const hook = buildFirewallHook({ rules: [], requireApprovalTools: SENSITIVE_APPROVAL_TOOLS, bypassApproval: true });
-    for (const t of [CODE_EXEC, 'openwop:core.files.write', 'openwop:knowledge.search']) {
-      expect(hook.evaluate([], t).decision).not.toBe('require-approval');
+  it('a hard deny rule wins in BOTH modes — bypass only ever downgrades require-approval', () => {
+    // The header claim: the bypass / already-approved downgrade fires ONLY on
+    // `require-approval` (firewallHook.ts), so a tenant `deny` survives safe, bypass AND an
+    // approval. (Before grade-tests w28 this case asserted only "not require-approval", which a
+    // deny→allow downgrade also satisfied.)
+    const deny: CapabilityRule = { id: 'deny-writes', description: '', when: { with: [{ safetyTier: 'write' }] }, verdict: 'deny', reason: 'no writes' };
+    for (const extra of [{ bypassApproval: false }, { bypassApproval: true }, { approvedTools: new Set([CODE_EXEC]) }, { bypassApproval: true, approvedTools: new Set([CODE_EXEC]) }]) {
+      const hook = buildFirewallHook({ rules: [deny], unknownToolPolicy: 'treat-as-risky', requireApprovalTools: SENSITIVE_APPROVAL_TOOLS, ...extra });
+      expect(hook.evaluate([], CODE_EXEC).decision, JSON.stringify(Object.keys(extra))).toBe('deny');
+    }
+    // …and on the rule-less hook, bypass never introduces a require-approval.
+    const open = buildFirewallHook({ rules: [], requireApprovalTools: SENSITIVE_APPROVAL_TOOLS, bypassApproval: true });
+    for (const t of [CODE_EXEC, 'openwop:knowledge.search']) {
+      expect(open.evaluate([], t).decision).not.toBe('require-approval');
     }
   });
 

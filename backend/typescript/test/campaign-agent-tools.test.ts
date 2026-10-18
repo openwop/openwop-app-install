@@ -13,14 +13,29 @@
  *     human, and honor the per-tenant toggle;
  *   - the run/generate tools ignite the registered workflow, fail TYPED without
  *     an acting human / with the toggle off / on bad input, and share the
- *     brief's org-scope predicate.
+ *     brief's org-scope predicate (a same-tenant non-member `u-2` gets EMPTY
+ *     reads and a typed `forbidden` on the actions).
+ *
+ * Both toggles DEFAULT OFF, so every case starts from both ON (`beforeEach`)
+ * and a toggle-off case restores in `finally` (wave 30: two cases passed only
+ * because an earlier case had turned the toggle on, and the "fails EMPTY
+ * without an acting human" cases would have passed for the toggle reason on
+ * another order).
+ *
+ * The "ids are in builtinAgentToolIds()" claim is owned by the CFP-1 tripwire
+ * `agent-allowlist-resolution.test.ts` (wave 30 cut the duplicate case here:
+ * un-registering the tools reds both files).
+ *
+ * Sabotage witnesses (wave 30): each tool's acting-user guard, toggle check,
+ * org-scope predicate (`hasOrgScope` → true), not-found, channel validation,
+ * workflow id, and the pack allowlist reds its named case.
  */
 import http from 'node:http';
 import { readFileSync } from 'node:fs';
 import type { AddressInfo } from 'node:net';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
-import { createAgentToolProvider, builtinAgentToolIds } from '../src/host/agentToolProvider.js';
+import { createAgentToolProvider } from '../src/host/agentToolProvider.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { createOrg } from '../src/host/accessControlService.js';
@@ -49,7 +64,7 @@ beforeAll(async () => {
   const brief = await createBrief(TENANT, orgId, 'u-1', {
     name: 'Launch',
     channels: [{ type: 'email_sequence', enabled: true, config: {} }],
-  } as Parameters<typeof createBrief>[3]);
+  });
   briefId = brief.id;
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
@@ -58,6 +73,17 @@ const setToggle = async (id: string, status: 'on' | 'off'): Promise<void> => {
   const d = getToggleDefault(id);
   if (d) await saveConfig({ ...d, status }, 'test');
 };
+beforeEach(async () => {
+  await setToggle('campaign-orchestration', 'on');
+  await setToggle('campaign-channels', 'on');
+});
+
+/** Run `fn` with one toggle OFF, restoring it even if an assertion throws. */
+async function withToggleOff(id: string, fn: () => Promise<void>): Promise<void> {
+  await setToggle(id, 'off');
+  try { await fn(); } finally { await setToggle(id, 'on'); }
+}
+
 const provider = (scope: { actingUserId?: string } = {}) => createAgentToolProvider({ tenantId: TENANT, ...scope });
 const exec = (name: string, input: Record<string, unknown>, scope: { actingUserId?: string } = {}) =>
   provider(scope).executeTool({ name, input });
@@ -80,17 +106,10 @@ describe('CFP-1 — the campaign packs allowlist EXACTLY the registered tool ids
       [CAMPAIGN_CHANNELS_LIST_TOOL_ID, CAMPAIGN_CHANNELS_GENERATE_TOOL_ID].sort(),
     );
   });
-  it('all four tools resolve into the offerable builtin surface', () => {
-    const ids = builtinAgentToolIds();
-    for (const id of [CAMPAIGN_ORCH_STATUS_TOOL_ID, CAMPAIGN_ORCH_RUN_TOOL_ID, CAMPAIGN_CHANNELS_LIST_TOOL_ID, CAMPAIGN_CHANNELS_GENERATE_TOOL_ID]) {
-      expect(ids).toContain(id);
-    }
-  });
 });
 
 describe('campaign-orchestration.status (read)', () => {
   it('grounds brief readiness for an acting human', async () => {
-    await setToggle('campaign-orchestration', 'on');
     const out = await exec(CAMPAIGN_ORCH_STATUS_TOOL_ID, { briefId }, { actingUserId: 'u-1' });
     expect(out.isError).toBeFalsy();
     const parsed = JSON.parse(out.content) as { brief: { hasKernel: boolean; enabledChannels: string[]; setup: { ready: boolean } } };
@@ -99,21 +118,26 @@ describe('campaign-orchestration.status (read)', () => {
     expect(parsed.brief.setup.ready).toBe(false); // no brand/persona/kb bound
   });
   it('fails EMPTY without an acting human', async () => {
+    // Toggle is ON (beforeEach) — the empty answer is the acting-user guard's.
     const out = await exec(CAMPAIGN_ORCH_STATUS_TOOL_ID, { briefId }, {});
     expect(out.isError).toBeFalsy();
-    expect(JSON.parse(out.content)).toMatchObject({ campaigns: [], brief: null });
+    expect(JSON.parse(out.content)).toEqual({ campaigns: [], brief: null });
   });
   it('fails EMPTY when the toggle is off', async () => {
-    await setToggle('campaign-orchestration', 'off');
-    const out = await exec(CAMPAIGN_ORCH_STATUS_TOOL_ID, { briefId }, { actingUserId: 'u-1' });
-    expect(JSON.parse(out.content)).toMatchObject({ brief: null });
-    await setToggle('campaign-orchestration', 'on');
+    await withToggleOff('campaign-orchestration', async () => {
+      const out = await exec(CAMPAIGN_ORCH_STATUS_TOOL_ID, { briefId }, { actingUserId: 'u-1' });
+      expect(JSON.parse(out.content)).toEqual({ campaigns: [], brief: null });
+    });
+  });
+  it('org-scope: a same-tenant non-member reads EMPTY (the brief is never projected)', async () => {
+    const out = await exec(CAMPAIGN_ORCH_STATUS_TOOL_ID, { briefId }, { actingUserId: 'u-2' });
+    expect(out.isError).toBeFalsy();
+    expect(JSON.parse(out.content)).toEqual({ campaigns: [], brief: null });
   });
 });
 
 describe('campaign-orchestration.run (action)', () => {
   it('ignites the orchestration workflow for an authorized human', async () => {
-    await setToggle('campaign-orchestration', 'on');
     const out = await exec(CAMPAIGN_ORCH_RUN_TOOL_ID, { briefId }, { actingUserId: 'u-1' });
     expect(out.isError).toBeFalsy();
     const parsed = JSON.parse(out.content) as { runId: string; workflowId: string };
@@ -126,11 +150,16 @@ describe('campaign-orchestration.run (action)', () => {
     expect(JSON.parse(out.content)).toMatchObject({ error: 'acting_user_required' });
   });
   it('fails TYPED when the toggle is off', async () => {
-    await setToggle('campaign-orchestration', 'off');
-    const out = await exec(CAMPAIGN_ORCH_RUN_TOOL_ID, { briefId }, { actingUserId: 'u-1' });
+    await withToggleOff('campaign-orchestration', async () => {
+      const out = await exec(CAMPAIGN_ORCH_RUN_TOOL_ID, { briefId }, { actingUserId: 'u-1' });
+      expect(out.isError).toBe(true);
+      expect(JSON.parse(out.content)).toMatchObject({ error: 'feature_disabled' });
+    });
+  });
+  it('org-scope: a same-tenant non-member is refused with a typed forbidden (no run)', async () => {
+    const out = await exec(CAMPAIGN_ORCH_RUN_TOOL_ID, { briefId }, { actingUserId: 'u-2' });
     expect(out.isError).toBe(true);
-    expect(JSON.parse(out.content)).toMatchObject({ error: 'feature_disabled' });
-    await setToggle('campaign-orchestration', 'on');
+    expect(JSON.parse(out.content)).toMatchObject({ error: 'forbidden' });
   });
   it('fails TYPED for an unknown brief', async () => {
     const out = await exec(CAMPAIGN_ORCH_RUN_TOOL_ID, { briefId: 'missing' }, { actingUserId: 'u-1' });
@@ -141,7 +170,6 @@ describe('campaign-orchestration.run (action)', () => {
 
 describe('campaign-channels.channels (read)', () => {
   it('lists the five channels + brief readiness for an acting human', async () => {
-    await setToggle('campaign-channels', 'on');
     const out = await exec(CAMPAIGN_CHANNELS_LIST_TOOL_ID, { briefId }, { actingUserId: 'u-1' });
     expect(out.isError).toBeFalsy();
     const parsed = JSON.parse(out.content) as { channels: { channel: string; workflowId: string }[]; brief: { hasKernel: boolean } };
@@ -152,14 +180,22 @@ describe('campaign-channels.channels (read)', () => {
     expect(parsed.brief.hasKernel).toBe(false);
   });
   it('fails EMPTY without an acting human', async () => {
+    // Toggle is ON (beforeEach) — the empty answer is the acting-user guard's.
     const out = await exec(CAMPAIGN_CHANNELS_LIST_TOOL_ID, { briefId }, {});
-    expect(JSON.parse(out.content)).toMatchObject({ channels: [] });
+    expect(out.isError).toBeFalsy();
+    expect(JSON.parse(out.content)).toEqual({ channels: [] });
+  });
+  it('org-scope: a same-tenant non-member gets the static catalog but NO brief readiness', async () => {
+    const out = await exec(CAMPAIGN_CHANNELS_LIST_TOOL_ID, { briefId }, { actingUserId: 'u-2' });
+    expect(out.isError).toBeFalsy();
+    const parsed = JSON.parse(out.content) as { channels: unknown[]; brief: unknown };
+    expect(parsed.channels).toHaveLength(5);
+    expect(parsed.brief).toBeNull();
   });
 });
 
 describe('campaign-channels.generate (action)', () => {
   it('ignites the channel workflow for an authorized human', async () => {
-    await setToggle('campaign-channels', 'on');
     const out = await exec(CAMPAIGN_CHANNELS_GENERATE_TOOL_ID, { briefId, channel: 'email_sequence' }, { actingUserId: 'u-1' });
     expect(out.isError).toBeFalsy();
     const parsed = JSON.parse(out.content) as { runId: string; channel: string; workflowId: string };
@@ -175,10 +211,15 @@ describe('campaign-channels.generate (action)', () => {
     expect(parsed.validChannels).toContain('landing_page');
   });
   it('fails TYPED when the toggle is off', async () => {
-    await setToggle('campaign-channels', 'off');
-    const out = await exec(CAMPAIGN_CHANNELS_GENERATE_TOOL_ID, { briefId, channel: 'email_sequence' }, { actingUserId: 'u-1' });
+    await withToggleOff('campaign-channels', async () => {
+      const out = await exec(CAMPAIGN_CHANNELS_GENERATE_TOOL_ID, { briefId, channel: 'email_sequence' }, { actingUserId: 'u-1' });
+      expect(out.isError).toBe(true);
+      expect(JSON.parse(out.content)).toMatchObject({ error: 'feature_disabled' });
+    });
+  });
+  it('org-scope: a same-tenant non-member is refused with a typed forbidden (no channel run)', async () => {
+    const out = await exec(CAMPAIGN_CHANNELS_GENERATE_TOOL_ID, { briefId, channel: 'social_posts' }, { actingUserId: 'u-2' });
     expect(out.isError).toBe(true);
-    expect(JSON.parse(out.content)).toMatchObject({ error: 'feature_disabled' });
-    await setToggle('campaign-channels', 'on');
+    expect(JSON.parse(out.content)).toMatchObject({ error: 'forbidden' });
   });
 });

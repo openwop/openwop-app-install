@@ -19,6 +19,7 @@ import {
 } from '../src/host/commerceShowcaseSeed.js';
 import { COMMERCE_SHOWCASE_ACTOR, SHOWCASE_COUPON } from '../src/host/seed-data/commerceShowcase.js';
 import { listProducts, listOrders, listCoupons, createProduct } from '../src/features/commerce/commerceService.js';
+import { resolveOne } from '../src/host/featureToggles/service.js';
 
 let server: http.Server;
 const TENANT = 'user:commerce-showcase-test';
@@ -43,10 +44,17 @@ async function setToggle(status: 'on' | 'off') {
 describe('commerce showcase seeder', () => {
   it('skips when the commerce toggle is off (and never flips it)', async () => {
     await setToggle('off');
-    const r = await seedCommerceShowcase(TENANT);
-    expect(r.created).toBe(0);
-    expect(r.details).toMatchObject({ skipped: 'commerce feature is off' });
-    expect(await countCommerceShowcase(TENANT)).toBe(0);
+    try {
+      const r = await seedCommerceShowcase(TENANT);
+      expect(r.created).toBe(0);
+      expect(r.details).toMatchObject({ skipped: 'commerce feature is off' });
+      // countCommerceShowcase is itself toggle-gated (it answers 0 whenever off), so read
+      // the stores directly — and assert the toggle is STILL off (never flipped).
+      expect((await resolveOne('commerce', { tenantId: TENANT }))?.enabled).toBe(false);
+      expect((await listProducts(TENANT, TENANT)).filter((p) => p.createdBy === COMMERCE_SHOWCASE_ACTOR)).toHaveLength(0);
+    } finally {
+      await setToggle('on');
+    }
   });
 
   it('seeds products + coupon + lifecycle orders through the service, idempotently, and clears only its own', async () => {

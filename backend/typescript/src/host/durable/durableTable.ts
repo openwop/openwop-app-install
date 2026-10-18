@@ -2,9 +2,12 @@
  * Durable table host surface (Phase 2) — `host.tableStorage` over `Storage`.
  *
  * One durable row per record (key `hostsurf:table:<tenant>:<table>::<id>`) and
- * a durable per-(tenant,table) schema registry, so the schema-on-first-insert
- * contract (RFC 0016 §B point 2) holds across instances and restarts — unlike
- * the in-memory impl, whose schema map is process-local.
+ * a durable per-(tenant,table) schema registry, so the declared schema
+ * (`createTable`, RFC 0228 G4; or, without it, the first insert's columns,
+ * RFC 0016 §B point 2) holds across instances and restarts — unlike the
+ * in-memory impl, whose schema map is process-local. insert, update and upsert
+ * refuse a row whose declared columns carry another type (storage.md
+ * §tableStorage: rows MUST conform to the declared schema).
  *
  * Method-for-method parity with `createTable` in inMemorySurfaces.ts, incl.
  * cursor pagination (base64(after_id)) and exact-match filters.
@@ -16,19 +19,12 @@
  * many rows, which `surface_scan_heavy` reports.
  */
 
-import type { BundleScope, TableSurface } from '../inMemorySurfaces.js';
+import { randomUUID } from 'node:crypto';
+import type { BundleScope, TableColType, TableSurface } from '../inMemorySurfaces.js';
 import { countPrefix, requireDurableStorage, scanPrefix, SCAN_BATCH } from './durableStore.js';
-import { tableQueryLimit } from '../inMemorySurfaces.js';
+import { assertRowConforms, declaredTableSchema, inferColType, sameTableSchema, tableQueryLimit } from '../inMemorySurfaces.js';
 
-type TableColType = 'string' | 'number' | 'boolean' | 'object';
 interface TableRow { id: string; [field: string]: unknown; }
-
-function inferColType(v: unknown): TableColType {
-  if (typeof v === 'string') return 'string';
-  if (typeof v === 'number') return 'number';
-  if (typeof v === 'boolean') return 'boolean';
-  return 'object';
-}
 
 const ROW_ROOT = 'hostsurf:table:';
 const SCHEMA_ROOT = 'hostsurf:tableschema:';
@@ -48,11 +44,31 @@ export function createDurableTable(scope: BundleScope): TableSurface {
   }
 
   return {
+    // RFC 0228 G4 — `createTable(name, schema)`. The registry write is one
+    // compare-and-swap (absent → declared), so two instances declaring the same
+    // table cannot both win; the loser compares by value.
+    async createTable({ table, columns }) {
+      const want = declaredTableSchema(columns);
+      const next = JSON.stringify(want);
+      const r = await storage().kvCompareAndSwap(schemaKey(table), null, next);
+      if (r.swapped) return { ok: true, created: true };
+      let have: Record<string, TableColType> | null = null;
+      try { have = r.actual ? (JSON.parse(r.actual) as Record<string, TableColType>) : null; } catch { have = null; }
+      if (!have || !sameTableSchema(have, want)) {
+        throw Object.assign(new Error(`Table '${String(table)}' is already declared with another schema`), {
+          code: 'table_schema_violation',
+        });
+      }
+      return { ok: true, created: false };
+    },
+
     async insert({ table, row }) {
-      const r = row as TableRow;
+      const r = { ...(row as Record<string, unknown>) } as TableRow;
+      // storage.md §tableStorage: insert → rowId. A row without one gets one.
+      if (r.id === undefined || r.id === null || r.id === '') r.id = randomUUID();
       const existing = await loadSchema(table);
       if (!existing) {
-        // First insert — declare the schema from this row's columns.
+        // No createTable — declare the schema from this first row's columns.
         const schema: Record<string, TableColType> = {};
         for (const [col, val] of Object.entries(r)) {
           if (col === 'id') continue;
@@ -60,18 +76,8 @@ export function createDurableTable(scope: BundleScope): TableSurface {
         }
         await storage().kvSet(schemaKey(table), JSON.stringify(schema));
       } else {
-        // Subsequent insert — every declared column MUST conform.
-        for (const [col, val] of Object.entries(r)) {
-          if (col === 'id') continue;
-          const declared = existing[col];
-          if (declared === undefined) continue; // new column — additive, allowed
-          const got = inferColType(val);
-          if (got !== declared) {
-            throw Object.assign(new Error(`Column '${col}' declared as '${declared}', got '${got}'`), {
-              code: 'table_schema_violation',
-            });
-          }
-        }
+        // Every declared column MUST conform; a new column is additive.
+        assertRowConforms(existing, r);
       }
       await storage().kvSet(rowKey(table, r.id), JSON.stringify({ ...r }));
       return { id: r.id };
@@ -81,6 +87,8 @@ export function createDurableTable(scope: BundleScope): TableSurface {
       const k = rowKey(table, id);
       const raw = await storage().kvGet(k);
       if (raw === null) return { updated: 0 };
+      const schema = await loadSchema(table);
+      if (schema) assertRowConforms(schema, (patch ?? {}) as Record<string, unknown>);
       const cur = JSON.parse(raw) as TableRow;
       await storage().kvSet(k, JSON.stringify({ ...cur, ...(patch as Record<string, unknown>) }));
       return { updated: 1 };
@@ -88,6 +96,8 @@ export function createDurableTable(scope: BundleScope): TableSurface {
 
     async upsert({ table, row }) {
       const r = row as TableRow;
+      const schema = await loadSchema(table);
+      if (schema) assertRowConforms(schema, r);
       const k = rowKey(table, r.id);
       const raw = await storage().kvGet(k);
       const existed = raw !== null;

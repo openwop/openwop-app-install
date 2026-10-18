@@ -6,11 +6,16 @@
  * branch was the first-run wizard. So a user whose session had merely lapsed was
  * told to add an API key they had already added, and adding it again minted a
  * duplicate secret. These pin each state to its own honest surface.
+ *
+ * Sabotage witnesses (w43): dropping the loading or error branch, the
+ * session-expired branch, the stored-refs seed, the error prop, or either side
+ * of `needsWizard` each turn a case red.
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, cleanup } from '@testing-library/react';
 
-const useBYOKConfig = vi.fn();
+import type { BYOKActiveConfig, UseBYOKConfigResult } from '../../byok/lib/useBYOKConfig.js';
+const useBYOKConfig = vi.fn<() => UseBYOKConfigResult>();
 import { makeFeatureAccess } from '../../featureToggles/__testing__/makeFeatureAccess.js';
 vi.mock('../../byok/lib/useBYOKConfig.js', () => ({ useBYOKConfig: () => useBYOKConfig() }));
 
@@ -22,7 +27,11 @@ vi.mock('../SessionExpiredCard.js', () => ({
   SessionExpiredCard: () => <div data-testid="session-expired" />,
 }));
 vi.mock('../ChatSidebar.js', () => ({ ChatSidebar: () => <div data-testid="chat" /> }));
-vi.mock('../BackendStatusCard.js', () => ({ BackendStatusCard: () => <div data-testid="backend-status" /> }));
+// The stub surfaces the `error` prop: the card jumps straight to "resting" on it
+// (BackendStatusCard.test), so an outage that never reaches the card is a lie.
+vi.mock('../BackendStatusCard.js', () => ({
+  BackendStatusCard: (p: { error?: string | null }) => <div data-testid="backend-status" data-error={p.error ?? ''} />,
+}));
 vi.mock('../../featureToggles/FeatureAccessContext.js', () => ({
   useFeatureAccess: () => makeFeatureAccess({ enabled: false }),
 }));
@@ -32,12 +41,13 @@ vi.mock('../../auth/useAuth.js', () => ({
 
 const { ChatTab } = await import('../ChatTab.js');
 
-const GOOGLE = { provider: 'google', model: 'gemini-3.1-flash-lite', credentialRef: 'byok:google' };
+const GOOGLE: BYOKActiveConfig = { provider: 'google', model: 'gemini-3.1-flash-lite', credentialRef: 'byok:google' };
 
-function state(over: Record<string, unknown>) {
+function state(over: Partial<UseBYOKConfigResult>): void {
   useBYOKConfig.mockReturnValue({
     config: null, status: 'needs-key', isValid: false, isLoading: false,
-    storedRefs: [], error: null, setConfig: vi.fn(), refresh: vi.fn(),
+    storedRefs: [], error: null, setConfig: vi.fn(async () => undefined), refresh: vi.fn(async () => undefined),
+    stored: true, signInRequired: false,
     ...over,
   });
 }
@@ -55,7 +65,7 @@ describe('ChatTab BYOK states (ADR 0517)', () => {
   it('loading → the status card, never the wizard', () => {
     state({ status: 'loading', isLoading: true });
     render(<ChatTab />);
-    expect(screen.getByTestId('backend-status')).toBeTruthy();
+    expect(screen.getByTestId('backend-status').getAttribute('data-error')).toBe('');
     expect(screen.queryByTestId('wizard')).toBeNull();
   });
 
@@ -64,7 +74,8 @@ describe('ChatTab BYOK states (ADR 0517)', () => {
     // user with a perfectly good key was talked into storing a second one.
     state({ status: 'error', error: 'backend unreachable' });
     render(<ChatTab />);
-    expect(screen.getByTestId('backend-status')).toBeTruthy();
+    // …and the outage itself reaches the card (which shows it and goes "resting").
+    expect(screen.getByTestId('backend-status').getAttribute('data-error')).toBe('backend unreachable');
     expect(screen.queryByTestId('wizard')).toBeNull();
   });
 

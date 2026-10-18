@@ -2,19 +2,38 @@
  * ADR 0420 (admin link surface) — the operator can see what is for sale, link a
  * published version to a product, and is never allowed to relink silently: the
  * server's 409 becomes an explicit "replace" choice, and unlink asks first.
+ *
+ * Sabotage witnesses (w40 probes): offering draft versions, dropping
+ * `replace: true` from the second call, treating the 409 as a generic error,
+ * unlinking without (or despite a declined) confirm, unlinking another product,
+ * collapsing a failed read into an empty one, or a no-op Retry each turn a case
+ * here red.
+ *
+ * Double guard (case 5, recorded): in the failed-catalog state the Link CTA and
+ * both selects are ALSO disabled by `products === null` / `challenges === null`
+ * / an empty selection, so the `productsFailed` / `challengesFailed` terms
+ * cannot be isolated here; the OUTCOME (nothing can be linked) is what is
+ * asserted, and it goes red when the whole gate is removed.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
+import type { ChallengeProductLink } from '../../../client/kicktodoLinksClient.js';
+import type { ChallengeSummary } from '../../../client/kicktodoClient.js';
+import type { Product } from '../../commerce/commerceClient.js';
+import type { ConfirmOptions } from '../../../ui/confirm.js';
 
+const LINKED: ChallengeProductLink = { tenantId: 't', productId: 'prod:2', challengeId: 'chal:b', challengeVersion: 2, createdBy: 'u', createdAt: '' };
+const LINKS: ChallengeProductLink[] = [{ tenantId: 't', productId: 'prod:1', challengeId: 'chal:a', challengeVersion: 1, createdBy: 'u', createdAt: '2026-09-01T00:00:00Z' }];
 const state = {
-  links: [{ tenantId: 't', productId: 'prod:1', challengeId: 'chal:a', challengeVersion: 1, createdBy: 'u', createdAt: '2026-09-01T00:00:00Z' }],
-  linkImpl: vi.fn(async (_input: unknown) => ({ tenantId: 't', productId: 'prod:2', challengeId: 'chal:b', challengeVersion: 2, createdBy: 'u', createdAt: '' })),
+  links: LINKS,
+  linkImpl: vi.fn(async (_input: unknown): Promise<ChallengeProductLink> => LINKED),
 };
 const reads = vi.hoisted(() => ({
-  listLinks: vi.fn(),
-  listChallenges: vi.fn(),
-  listProducts: vi.fn(),
+  listLinks: vi.fn<() => Promise<ChallengeProductLink[]>>(),
+  listChallenges: vi.fn<() => Promise<ChallengeSummary[]>>(),
+  listProducts: vi.fn<(orgId: string) => Promise<Product[]>>(),
+  confirm: vi.fn<(opts: ConfirmOptions) => Promise<boolean>>(),
 }));
 
 vi.mock('../../../client/kicktodoLinksClient.js', async (importOriginal) => {
@@ -33,7 +52,7 @@ vi.mock('../../commerce/commerceClient.js', () => ({
   listOrgs: vi.fn(async () => [{ orgId: 'org-1', name: 'KickTodo Store' }]),
   listProducts: reads.listProducts,
 }));
-vi.mock('../../../ui/confirm.js', () => ({ confirm: vi.fn(async () => true) }));
+vi.mock('../../../ui/confirm.js', () => ({ confirm: reads.confirm }));
 
 import { AdminPaidChallengesPage } from '../AdminPaidChallengesPage.js';
 import { LinkConflictError, unlinkChallengeProduct } from '../../../client/kicktodoLinksClient.js';
@@ -47,7 +66,9 @@ beforeEach(() => {
     { id: 'chal:c', version: 1, status: 'draft', title: 'Not yet', summary: '', outcome: '', durationDays: 7, activities: [] },
   ]);
   reads.listProducts.mockReset().mockResolvedValue([{ productId: 'prod:2', name: 'Deep Work — paid', type: 'digital', price: 9, currency: 'USD', variants: [], active: true, updatedAt: '' }]);
-  state.linkImpl.mockReset().mockResolvedValue({ tenantId: 't', productId: 'prod:2', challengeId: 'chal:b', challengeVersion: 2, createdBy: 'u', createdAt: '' });
+  state.linkImpl.mockReset().mockResolvedValue(LINKED);
+  reads.confirm.mockReset().mockResolvedValue(true);
+  vi.mocked(unlinkChallengeProduct).mockClear();
 });
 afterEach(cleanup);
 const view = () => render(<MemoryRouter><AdminPaidChallengesPage /></MemoryRouter>);
@@ -81,8 +102,26 @@ describe('AdminPaidChallengesPage', () => {
   it('unlink asks first and then removes the product’s link', async () => {
     view();
     await waitFor(() => screen.getByText(/Sleep Reset · v1/, { selector: 'td' }));
+    const readsBefore = reads.listLinks.mock.calls.length;
     fireEvent.click(screen.getByRole('button', { name: en.paidUnlinkCta }));
     await waitFor(() => expect(vi.mocked(unlinkChallengeProduct)).toHaveBeenCalledWith('prod:1'));
+    // Asked first: the destructive confirm carried the unlink copy.
+    expect(reads.confirm).toHaveBeenCalledTimes(1);
+    expect(reads.confirm).toHaveBeenCalledWith(expect.objectContaining({ title: en.paidUnlinkConfirmTitle, danger: true }));
+    // …and the list is re-read so the removed link is not still shown.
+    await waitFor(() => expect(reads.listLinks.mock.calls.length).toBeGreaterThan(readsBefore));
+  });
+
+  it('declining the unlink confirm leaves the link in place', async () => {
+    reads.confirm.mockResolvedValueOnce(false);
+    view();
+    await waitFor(() => screen.getByText(/Sleep Reset · v1/, { selector: 'td' }));
+    fireEvent.click(screen.getByRole('button', { name: en.paidUnlinkCta }));
+    // Positive control: the confirm WAS shown (so the click reached the handler).
+    await waitFor(() => expect(reads.confirm).toHaveBeenCalledTimes(1));
+    for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+    expect(vi.mocked(unlinkChallengeProduct)).not.toHaveBeenCalled();
+    expect(screen.getByText('prod:1')).toBeTruthy();
   });
 
   it('keeps failed link, challenge, and product reads distinct and retryable', async () => {

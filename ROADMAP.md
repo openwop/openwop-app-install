@@ -102,7 +102,7 @@ Each feature, when its turn comes, follows the same lifecycle. This roadmap only
 | 0174 | **Market Intelligence (completion — a workflow-library, NOT a package)** — records the already-shipped 10 `vendor.myndhyve.market-intel-*` node packs + the live `market-intel.digest` chain (ADR 0149/0163); adds ONE net-new node `market-intel-shift-detect` (extends insights-suite `variance-compute`) + a scheduled shift-digest chain; closed-loop via ADR 0039 proposals/goals — **no Learnings store/dashboard** (ADR 0082 law). Connectors superseded by provider-native web search (0101). | — (no toggle; packs decoupled) | 0149, 0163, 0082, 0084, 0011, 0039, 0052, 0034 | `vendor.myndhyve.market-intel-*` (+1 shift-detect) + chains | 🟢 Done (ADR 0174 implemented — shift-detect node + shift-digest chain 1.1.0; closed-loop = ADR 0039 composition, no net-new store; 2026-07-01) | Market Intelligence |
 | 0175 | **Messaging Gateway (Slack/Discord/Telegram) — a Connections+Triggers extension, NOT a package** — inbound leg already built (`connections/inboundWebhooks.ts`, Slack wired); adds Discord (Ed25519) + Telegram (secret-token) as additive `InboundProvider`s + host normalizers → RFC 0099 `TriggerEvent{source:webhook}` + ADR 0034 dispatch (`executeRun` already closes MyndHyve's M5 Partial); slash `/help /status /pair` host-local replies, `/run`→trigger→run. ⚠️ rejects first-class per-platform `TriggerEvent.source` (would need an RFC). | — (extends `connections`) | 0024, 0034, 0126 · RFC 0099/0083/0006 (Accepted) | RFC 0095 connection packs (discord/telegram) | 🟢 Done (ADR 0175 implemented Phases 1–3 — Discord+Telegram inbound, slash cmds, conversational resume via pickResumeInterrupt+resolveAndResume; 2026-07-01) | Messaging Gateway |
 | 0176 | **Subscriptions & Billing (reverses the explicit cut, additively)** — new `billing` package: subscription/plan state + a NET-NEW prepaid **AI-token balance ledger** (drawn down BEFORE the managed daily-cap); Stripe host-side via BYOK, **demo-mode default** (no key ⇒ no-op); Stripe webhook = an additive `InboundProvider` on the connections-inbound seam. Plan-tier gating = ONE central `resolveEntitlements` + usage-LIMITS as `GovernancePolicy` (0106/0077) + one opt-in guard — **never per-feature edits** (the blast-radius trap). Seats = org membership. **R-1 (MyndHyve cutover): every existing Stripe integration works day-1 against the existing account — no re-provisioning** (config-driven price catalog / no baked price IDs · Stripe-id-preserving state importer · webhook event-parity + `event.id` idempotency · hosted portal/checkout on the live account). Live mode is Phase-1, not deferred; demo-mode is only the fresh-OSS default. | `billing` | 0015, 0006, 0024, 0106, 0077 (+ orgs, managedProvider) | — (host-ext; Stripe connection pack) | 🟢 Done (ADR 0176 implemented Phases 1–3 + R-1 — billing package, token-balance ledger, config catalog, idempotent Stripe webhook, id-preserving importer, entitlement resolver+limits+guard, balance-before-cap enforcement seam, checkout session, FE panel; live Stripe SDK = operator last-mile; 2026-07-01) | Subscriptions & Billing |
-| 0177 | **E-Commerce (reverses the explicit cut, additively; Phase 1 = catalog + orders, payment demo-mode)** — new `commerce` package: Product (physical/digital/service + variants/SKU; images+downloads via **Media tokens**, the `/assets/:id/use` cap = the download-limit primitive), Order + lifecycle state machine (pending→paid→fulfilled→refunded→canceled + separate fulfillment axis) on real persistence, inventory decrement/restore. Customer = a CRM `contactId` link (no net-new Customer). Payment **demo-mode/external-intent** (`not_configured`, faithful — no capture). Coupons net-new. **Deferred:** affiliate/payout (1687 LOC), real Stripe capture+webhook, public storefront, multi-currency. | `commerce` | 0007, 0008, 0024, 0019, 0020, 0013, 0015, 0006 | `feature.commerce.{nodes,agents}` | 🟢 Done (ADR 0177 implemented Phases 1–3 — catalog + order lifecycle + inventory + CRM contact + demo-mode payment; ctx.features.commerce + node/agent packs + order-confirmation; coupons + public storefront; real-Stripe capture = operator last-mile; 2026-07-01) | E-Commerce |
+| 0177 | **E-Commerce (reverses the explicit cut, additively; Phase 1 = catalog + orders, payment demo-mode)** — new `commerce` package: Product (physical/digital/service + variants/SKU; images+downloads via **Media tokens**, the `/assets/:id/use` cap = the download-limit primitive), Order + lifecycle state machine (pending→paid→fulfilled→refunded→canceled + separate fulfillment axis) on real persistence, inventory decrement/restore. Customer = a CRM `contactId` link (no net-new Customer). Payment **demo-mode/external-intent** (`not_configured`, faithful — no capture). Coupons net-new. **Deferred:** affiliate/payout (1687 LOC), real Stripe capture+webhook, public storefront, multi-currency. | `commerce` | 0007, 0008, 0024, 0019, 0020, 0013, 0015, 0006 | `feature.commerce.{nodes,agents}` | 🟢 Done (ADR 0177 implemented Phases 1–3 — catalog + order lifecycle + inventory + CRM contact + demo-mode payment; ctx.features.commerce + node/agent packs + order-confirmation; coupons + public storefront; real-Stripe capture = operator last-mile; 2026-07-01. Live Stripe since 2026-10-06; trust boundaries hardened by ADR 0875, 2026-10-11) | E-Commerce |
 | 0178 | **UCP (Universal Commerce Protocol) server adapter** — EXTENDS `commerce`: a UCP-conformant Shopping surface (https://ucp.dev) that PROJECTS the commerce catalog/cart/checkout/orders so external AI agents can transact against an openwop-app merchant. Identity = Connections OAuth 2.0 (0024); payment = AP2 mandate → the commerce/billing intent (demo-mode default); rides the **A2A server (RFC 0100)** + **inbound MCP server (RFC 0020)** as UCP's built-in agent transports (ADR 0087 pattern). Merchant stays Merchant of Record; tenant-from-resource public surface. **No parallel order/auth/payment/transport** — pure protocol translation over commerce. Server (merchant) side only; the UCP **client** (shop external merchants) is a separate future capability. | `commerce-ucp` (gates the UCP surface; commerce unchanged) | 0177, 0024, 0176, 0100, 0020, 0013, 0007 | (rides MCP; A2A = generic commerce-agent reachability, out of scope; UCP-client node pack is the future client ADR) | 🟢 Done (ADR 0178 — all 4 phases; MCP transport shipped; A2A closed out-of-scope per /architect; AP2 demo-mode, 2026-07-01) | UCP (ucp.dev — net-new, 2026-07-01) |
 | 0188 | **UCP (Universal Commerce Protocol) buyer/client half** — EXTENDS `commerce` with the deferred outbound half of 0178: THIS host's agents/workflows **discover → search → cart → (HITL-approved) pay (AP2) → track** against **external** UCP merchants. **Composes, never builds:** the **outbound MCP client** (`host/mcpClient.ts` = RFC 0020's other half, `ctx.mcp.*`) for transport; **Connections** (the external merchant as a `reach:'mcp'\|'openapi'` provider manifest + BYOK credential, RFC 0095) for identity; the **tool-approval ledger + capability-firewall** (`mcpApproval:'always'` → `interrupt.approval`) as the mandatory HITL **spend gate** (NOT `managedBalanceHook` — that's AI-token metering); the **egress policy** (RFC 0079) for SSRF-guarded outbound. **Authors** typed AP2 `IntentMandate`/`CartMandate`/`PaymentMandate` beside the server's `ap2.ts`. **New `UcpPurchase` store** (buy-side — distinct direction from the sell-side `Order`, no fork). NO public surface (outbound/internal); NOT advertised on the OpenWOP wire. Highest-risk surface → money movement is **approval-gated + per-org capped, fail-closed**; live AP2 VC signing + settlement demo-mode-deferred. | `commerce-ucp-buyer` (OFF, tenant; independent of `commerce`/`commerce-ucp`) | 0177, 0178, 0024, 0176, 0010, 0007 · RFC 0020/0079/0093/0095 (Accepted) | `feature.commerce.buyer.{nodes,agents}` (discover/search/buildCart/checkout↯/trackOrder + Procurement concierge) | 🔵 Planned (ADR 0188 — Proposed; host-extension, no OpenWOP RFC) | UCP client (ucp.dev/AP2 — net-new, no MyndHyve baseline) |
 | 0271 | **Commerce Merchandising Program (umbrella)** — the conversion layer over the commerce transaction spine (ADR 0177 series): 5 sub-ADRs (MERCH-A…E) composing the catalog + `resolvePrice` + `host/variantAssignment` bucketing/z-test + `priority-matrix/scoring` + CRM segments + the one chat. Records the 7 boundary rulings (one price resolver, one bucketer, one ranking engine, CRM owns segments, chat = agent+node pack, order-decisions snapshot) that keep it from becoming a second stack. Companion: `docs/research/commerce-merchandising-gap-analysis.md`. Carries no code itself. | — (umbrella) | 0177, 0224, 0225, 0236, 0059, 0211, 0058 | — | 🔵 Planned (ADR 0271 — Proposed; host-ext, no RFC) | Commerce Merchandising |
@@ -858,8 +858,8 @@ meeting-ops templates (`tmpl.meeting-ops.*` in `host/workflowTemplates.ts`).
 |---|---|---|---|---|---|
 | 1 | **Structured handoffs** ([ADR 0829](docs/adr/0829-structured-handoff-record.md)) | Every transfer of work carries five fields: intent, decisions made, open questions, what was tried, confidence | `core.dispatch` loop, ADR 0075 interrupts, `RunHandoffMap` | Host extension first (`openwop-` prefixed keys, which the v2 event schema already admits); upstream RFC once the shape is proven | ✅ Shipped, always on (no toggle, 2026-10-07), incl. approval handoffs and channel cards; upstream RFC waits on its evidence bar |
 | 2 | **Team intent ledger** ([ADR 0831](docs/adr/0831-team-intent-ledger.md)) | A ledger scoped to a feature or campaign, shared by everyone on it, that agents read before acting and that decisions write back to | ADR 0136 ledger, ADR 0233 decision records, ADR 0126 channels | Host extension; no wire change | ✅ Shipped, always on (no toggle, 2026-10-07): projects, campaigns (linked project), features (labelled projects), channel and strategy views ([ADR 0852](docs/adr/0852-project-as-collaboration-container.md)) |
-| 3 | **Decision capture from informal channels** ([ADR 0853](docs/adr/0853-decision-capture.md)) | Decisions made in channel threads, Slack, and meeting notes land in the team ledger with a link to where they were made | ADR 0126, ADR 0175, `tmpl.meeting-ops.*` | Host extension; no wire change | 🟡 Shipped except the watching suggester (draft #4558, blocked on its eval); meeting templates do not yet report decisions |
-| 4 | **Drift detection and re-sync checkpoints** ([ADR 0855](docs/adr/0855-drift-detection-and-resync.md)) | Flags work that has moved away from the recorded intent and calls a realignment when enough change piles up | ADR 0136 P4 reckoning, item 2 | Host extension; advisory only | 🟡 Re-sync shipped; drift check built (draft #4564, blocked on its eval); PR diffs need a GitHub read connection |
+| 3 | **Decision capture from informal channels** ([ADR 0853](docs/adr/0853-decision-capture.md)) | Decisions made in channel threads, Slack, and meeting notes land in the team ledger with a link to where they were made | ADR 0126, ADR 0175, `tmpl.meeting-ops.*` | Host extension; no wire change | ✅ Shipped, incl. the watching suggester (#4558; eval met 2026-10-09) and `Decision:` lines in project documents (#4708) |
+| 4 | **Drift detection and re-sync checkpoints** ([ADR 0855](docs/adr/0855-drift-detection-and-resync.md)) | Flags work that has moved away from the recorded intent and calls a realignment when enough change piles up | ADR 0136 P4 reckoning, item 2 | Host extension; advisory only | 🟡 Re-sync and drift check shipped (#4564; eval met 2026-10-09 on a Sonnet-class model); pull-request checks shipped (#4710; eval met 2026-10-12, 5/5 flagged, 0/5 false flags) |
 
 ### 1. Structured handoffs
 
@@ -972,9 +972,10 @@ same day:
   optional tool policy on the team ledger that can only take tools away or put
   a person in front of them, enforced in the project's chats and bound channels
   after a security review
-  ([ADR 0856](docs/adr/0856-team-ledger-tool-policy.md), #4562). Not done: a
-  mission ledger drafted in a project chat is not yet pre-filled from the team
-  ledger (the policy applies at the tool gate either way).
+  ([ADR 0856](docs/adr/0856-team-ledger-tool-policy.md), #4562). A mission
+  drafted in a project chat or bound channel starts from the team ledger's goal
+  and tool restrictions and can only narrow them; dropping one is refused
+  (#4709).
 - Also shipped: the ledger rides into project chat context (#4530), and "what
   changed since you last looked" is kept on the server (#4532).
 
@@ -1000,7 +1001,7 @@ they never reach the ledger, the agents work from stale intent.
 agents on the next run within one confirmation step, with a link back to the
 original message.
 
-**Status 2026-10-07 — shipped except the watching agent.**
+**Status 2026-10-11 — shipped.**
 [ADR 0853](docs/adr/0853-decision-capture.md):
 - **Record as decision** on any chat or channel message opens a prefilled
   decision linked to the message; the owner can accept it in the same step
@@ -1011,12 +1012,16 @@ original message.
   WhatsApp connection (#4556), resolved approvals and clarifications (#4555),
   and any project run whose output reports `decisions` (#4557).
 
-Still open:
-- **The watching suggester** ("this looks like a decision") is built but held as
-  draft #4558 until its eval meets precision ≥ 0.8 and recall ≥ 0.5 against a
-  real model (`scripts/eval-decision-suggester.mts`; needs a provider key).
-- **Meeting-ops templates** do not yet return `decisions`, so meeting notes
-  reach the ledger only once a template reports them through the #4557 contract.
+- **The watching suggester** ("this looks like a decision") offers a person's
+  message in a project chat or bound channel as a possible decision; nothing is
+  recorded until someone does (#4558). Its eval merge gate was met on
+  2026-10-09 on Haiku 4.5: precision 0.94, recall 1.00 against ≥ 0.8 / ≥ 0.5.
+  Always on; the per-workspace daily budget is the cost control.
+
+- **Meeting notes** — a line that starts with `Decision:` in a project's
+  documents is offered as a possible decision, linked to the document (ADR 0853
+  D7, #4708). Model-free. The meeting-ops templates stay frozen replay archives
+  (ADR 0775 P2); a run that reports `decisions` also feeds in (#4557).
 
 ### 4. Drift detection and re-sync checkpoints
 
@@ -1038,19 +1043,29 @@ know whether that was a decision or a mistake. Today nothing tells them.
 **Done when.** In a seeded SDLC scenario, a change made without a recorded
 decision is flagged to its owner, and a change that cites a decision is not.
 
-**Status 2026-10-07 — re-sync shipped; the drift check is built and gated.**
+**Status 2026-10-12 — re-sync, the drift check and pull-request checks shipped.**
 [ADR 0855](docs/adr/0855-drift-detection-and-resync.md):
 - **Re-sync checkpoint** — when a project's members fall 5 accepted changes
   behind, or 10 proposals wait, the project chat gets one "what changed" summary,
   at most once a day (#4560).
 - **Drift check** — after a project run, compares what it produced with the
   ledger at the version it acted on; a difference is explained only if it cites
-  a decision really on the ledger. Unexplained ones become possible decisions
-  the owner can record, dismiss with a reason, or send back to whoever started
-  the run. Held as draft #4564 until its eval (seeded launch scenario: flag ≥ 0.9
-  of undecided changes, ≤ 0.1 false flags) runs against a real model.
-- **PR diffs** (ADR 0855 P5) need a GitHub read connection the app does not
-  have; GitHub publishing is write-only today.
+  a decision that really authorized the change; a decision the work breaks never
+  explains it. Unexplained ones become possible decisions the owner can record,
+  dismiss with a reason, or send back to whoever started the run (#4564). The
+  eval merge gate (seeded launch scenario: flag ≥ 0.9 of undecided changes,
+  ≤ 0.1 false flags) was met on 2026-10-09: 9/9 flagged, 0/9 false flags on a
+  Sonnet-class model. Running it for real found a bug (a contradicted decision
+  counted as an explanation) that the model-injected tests could not see; Haiku
+  could not meet the false-flag bar, so the check runs on the workspace's own
+  model (ADR 0855 § implementation record). Always on; the daily budget is the
+  cost control.
+- **Pull requests** (ADR 0855 P5) — *Check a pull request* on the Ledger tab
+  reads a PR's title, description and diff through a new read-only GitHub
+  connection and runs the same check; nothing is posted to GitHub. Its own eval
+  (10 pull-request cases, one with an injection in the PR description, same
+  bar) was met on 2026-10-12: 5/5 flagged, 0/5 false flags (#4710). Using it
+  needs a GitHub token with read access to pull requests and contents.
 
 ### Sequencing
 

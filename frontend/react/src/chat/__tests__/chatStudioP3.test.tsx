@@ -1,6 +1,9 @@
 /**
  * ADR 0768 P3 — live status (running) on tabs + rows, the `@@` board chip, and
  * reply duration derived from the conversation log's own turn timestamps.
+ * Breaks if an in-flight turn or unsettled run stops reading as running, the
+ * badge ranking changes, a reply time is estimated (no preceding user turn /
+ * out of order) or shown mid-stream, or the board chip leaks without the host.
  */
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi } from 'vitest';
@@ -25,12 +28,19 @@ import type { ConversationTurn } from '../conversationClient.js';
 import { TurnReceipt } from '../TurnReceipt.js';
 import { ChatInput } from '../ChatInput.js';
 
-const msg = (over: Partial<ChatMessage>): ChatMessage => ({ id: 'm', role: 'assistant', content: 'x', ...over } as ChatMessage);
+const msg = (over: Partial<ChatMessage>): ChatMessage => ({ id: 'm', role: 'assistant', content: 'x', createdAt: '2026-09-28T10:00:00Z', ...over });
+const runState = (status: WorkflowRunState['status']): WorkflowRunState => ({
+  slug: 'launch-plan', workflowName: 'Launch plan', workflowId: 'wf', runId: 'r1', status,
+  totalNodes: 1, completedNodeIds: [], nodeOutputs: {}, failedNodeIds: [], currentNodeName: null,
+  nodeNames: {}, startedAt: '2026-09-28T10:00:00Z',
+});
 
 describe('running tab state', () => {
   it('a pending/running workflow run marks the tab running', () => {
-    const run = msg({ id: 'r', role: 'workflow_run', workflowRun: { status: 'running' } as WorkflowRunState });
-    expect(deriveActivity([run], false).running).toBe(true);
+    const run = (status: WorkflowRunState['status']) => msg({ id: 'r', role: 'workflow_run', workflowRun: runState(status) });
+    expect(deriveActivity([run('running')], false).running).toBe(true);
+    expect(deriveActivity([run('pending')], false).running).toBe(true);
+    expect(deriveActivity([run('completed')], false).running).toBe(false);
     expect(deriveActivity([msg({})], true).running).toBe(true);
     expect(deriveActivity([msg({})], false).running).toBe(false);
   });
@@ -79,9 +89,10 @@ describe('@@ board chip', () => {
 
   it('seeds `@@` at the caret when the host enables it (Boards of Advisors on)', async () => {
     render(<ChatInput onSend={vi.fn()} boardSigil />);
-    fireEvent.change(textarea(), { target: { value: 'ask', selectionStart: 3 } });
+    // Caret mid-text (after "ask"), so insert-at-caret differs from append.
+    fireEvent.change(textarea(), { target: { value: 'ask kai', selectionStart: 3, selectionEnd: 3 } });
     fireEvent.click(screen.getByRole('button', { name: 'sigilBoardAria' }));
-    await waitFor(() => expect(textarea().value).toBe('ask @@'));
+    await waitFor(() => expect(textarea().value).toBe('ask @@ kai'));
   });
 
   it('is absent unless the host enables it', () => {

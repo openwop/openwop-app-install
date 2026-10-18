@@ -67,12 +67,20 @@ interface Props {
   channelAuthor?: { displayName: string; kind: 'user' | 'agent' | 'other' };
   isOwn?: boolean;
   showAttribution?: boolean;
+  /** ADR 0879 D2 — set when someone other than the author deleted this message
+   *  (the channel owner or an admin moderating): the tombstone names them. */
+  removedByName?: string;
   /** ADR 0195 D5 — multi-party message affordances: react (everyone), edit +
    *  delete (own messages). Present only on channel/group surfaces; the
    *  feedback thumbs are suppressed there (the D3b boundary ruling). */
   channelActions?: {
-    /** May this viewer edit/delete THIS message (own message)? */
+    /** May this viewer EDIT this message (own message, write role)? */
     canModify: boolean;
+    /** May this viewer DELETE it? Absent ⇒ `canModify` (the pre-ADR-0879 rule).
+     *  ADR 0879: the author always; the owner/an admin on others' posts. */
+    canDelete?: boolean;
+    /** May this viewer react? Absent ⇒ true. False for a read-only role. */
+    canReact?: boolean;
     onToggleReaction: (messageId: string, emoji: string, currentlyMine: boolean) => void;
     onEdit: (messageId: string, newText: string) => void;
     onDelete: (messageId: string) => void;
@@ -215,6 +223,7 @@ function ChannelMessageExtras({ message, actions }: {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState('');
   const mineByEmoji = new Map((message.reactions ?? []).map((r) => [r.emoji, r.mine]));
+  const canReact = actions.canReact !== false;
 
   if (editing) {
     const commit = (): void => {
@@ -248,7 +257,7 @@ function ChannelMessageExtras({ message, actions }: {
     <>
       {(message.reactions?.length ?? 0) > 0 && (
         <div className="msgbubble-reactions" role="group" aria-label={t('reactionsGroupAria')}>
-          {message.reactions!.map((r) => (
+          {message.reactions!.map((r) => canReact ? (
             <button
               key={r.emoji}
               type="button"
@@ -260,11 +269,17 @@ function ChannelMessageExtras({ message, actions }: {
               <span aria-hidden>{r.emoji}</span>
               <span className="msgbubble-reaction-count" aria-hidden>{r.count}</span>
             </button>
+          ) : (
+            // CH2UX-2 — a read-only viewer sees the counts, not a toggle it cannot use.
+            <span key={r.emoji} className={`msgbubble-reaction-chip is-static${r.mine ? ' is-mine' : ''}`} aria-label={t('reactionChipAria', { emoji: r.emoji, count: r.count })} role="img">
+              <span aria-hidden>{r.emoji}</span>
+              <span className="msgbubble-reaction-count" aria-hidden>{r.count}</span>
+            </span>
           ))}
         </div>
       )}
       <div className="message-actions msgbubble-actions">
-        {REACTION_EMOJI.map((emoji) => (
+        {canReact && REACTION_EMOJI.map((emoji) => (
           <button
             key={emoji}
             type="button"
@@ -292,31 +307,31 @@ function ChannelMessageExtras({ message, actions }: {
           </Button>
         ) : null}
         {actions.canModify && (
-          <>
-            <button
-              type="button"
-              className="msgbubble-action-btn"
-              onClick={() => { setDraft(messageText(message)); setEditing(true); }}
-              aria-label={t('editMessageAria')}
-            >
-              {tc('edit')}
-            </button>
-            <button
-              type="button"
-              className="msgbubble-action-btn"
-              onClick={() => actions.onDelete(message.id)}
-              aria-label={t('deleteMessageAria')}
-            >
-              {tc('delete')}
-            </button>
-          </>
+          <button
+            type="button"
+            className="msgbubble-action-btn"
+            onClick={() => { setDraft(messageText(message)); setEditing(true); }}
+            aria-label={t('editMessageAria')}
+          >
+            {tc('edit')}
+          </button>
+        )}
+        {(actions.canDelete ?? actions.canModify) && (
+          <button
+            type="button"
+            className="msgbubble-action-btn"
+            onClick={() => actions.onDelete(message.id)}
+            aria-label={t('deleteMessageAria')}
+          >
+            {tc('delete')}
+          </button>
         )}
       </div>
     </>
   );
 }
 
-function MessageBubbleInner({ message, onRegenerate, onFeedback, onBranchFrom, branchSeq, onReconfigureBYOK, channelAuthor, isOwn, showAttribution, channelActions }: Props): JSX.Element {
+function MessageBubbleInner({ message, onRegenerate, onFeedback, onBranchFrom, branchSeq, onReconfigureBYOK, channelAuthor, isOwn, showAttribution, removedByName, channelActions }: Props): JSX.Element {
   const { t } = useTranslation('chat');
   // Gate B (ADR 0196): the wire-shape inspector is an engineering surface —
   // present only when the `developer-tools` toggle resolves enabled. Context
@@ -371,13 +386,19 @@ function MessageBubbleInner({ message, onRegenerate, onFeedback, onBranchFrom, b
     // sideband degradation, meta.kind 'voice-degraded') must not look like a
     // benign /help note — they get the warning treatment AND role="alert" so
     // a screen-reader user hears the degradation when it streams in live.
-    const isWarning = message.meta?.kind === 'voice-degraded';
+    // VOX2UX-3 (ADR 0893 D4) — a call ended because its opener lost access is the
+    // same governance class, and must not read as a benign note either.
+    const kind = message.meta?.kind;
+    const isWarning = kind === 'voice-degraded' || kind === 'voice-revoked';
     // Track-3 i18n — a KNOWN meta.kind renders its localized string; the
     // stored (English) content stays the fallback for unknown kinds and
     // stale bundles, so nothing ever renders blank.
-    const text = isWarning
-      ? t('voiceDegradedNotice', { defaultValue: typeof message.content === 'string' ? message.content : '' })
-      : typeof message.content === 'string' ? message.content : '';
+    const stored = typeof message.content === 'string' ? message.content : '';
+    const text = kind === 'voice-degraded'
+      ? t('voiceDegradedNotice', { defaultValue: stored })
+      : kind === 'voice-revoked'
+        ? t('voiceRevokedNotice', { defaultValue: stored })
+        : stored;
     return (
       <div className={`alert ${isWarning ? 'warning' : 'info'} msgbubble-system`} {...(isWarning ? { role: 'alert' } : {})}>
         {text}
@@ -391,7 +412,7 @@ function MessageBubbleInner({ message, onRegenerate, onFeedback, onBranchFrom, b
   if (message.meta?.deletedAt) {
     return (
       <div className="msgbubble-row" style={{ justifyContent: alignEnd ? 'flex-end' : 'flex-start' }}>
-        <div className="msgbubble-tombstone">{t('messageDeleted')}</div>
+        <div className="msgbubble-tombstone">{removedByName ? t('messageRemovedBy', { name: removedByName }) : t('messageDeleted')}</div>
       </div>
     );
   }

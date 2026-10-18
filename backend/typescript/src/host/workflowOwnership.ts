@@ -69,6 +69,11 @@ export interface WorkflowOwnershipRecord {
    *  a machine-authored workflow does not stop being machine-authored because
    *  a human edited it. */
   authoredVia?: string;
+  /** ADR 0913 — a feature-owned label (`<feature>:<id>`, e.g. `bookai:<org>:<book>`)
+   *  stamped at `from-chain` so the feature can later find, and erase, exactly
+   *  the workflows (and through them the runs) it created for one subject.
+   *  STICKY like `authoredVia`: a later save omits it and MUST NOT erase it. */
+  subject?: string;
   /** ADR 0770 D3 — for a sub-chain child co-registered by `from-chain`: the
    *  revision hash of the definition the HOST minted. A later instantiation
    *  compares the head against it — equal ⇒ pristine, safe to refresh with a
@@ -104,6 +109,8 @@ export interface OwnershipMeta {
   mintedRevision?: string;
   /** ADR 0789 — set by the shared-definition fork lane; omitted meta preserves it. */
   forkedFrom?: string;
+  /** ADR 0913 — set by `from-chain` when the caller names a subject; omitted meta preserves it. */
+  subject?: string;
 }
 
 const store = new DurableCollection<WorkflowOwnershipRecord>(
@@ -158,6 +165,9 @@ export async function recordOwnership(
       ...((meta.forkedFrom ?? existing?.forkedFrom) !== undefined
         ? { forkedFrom: meta.forkedFrom ?? existing?.forkedFrom }
         : {}),
+      ...((meta.subject ?? existing?.subject) !== undefined
+        ? { subject: meta.subject ?? existing?.subject }
+        : {}),
       ...(existing?.forkedTo !== undefined ? { forkedTo: existing.forkedTo } : {}),
       ...(existing?.repointPending !== undefined ? { repointPending: existing.repointPending } : {}),
       nodeCount: meta.nodeCount,
@@ -185,6 +195,9 @@ export async function recordOwnership(
       : {}),
     ...((meta.forkedFrom ?? existing?.forkedFrom) !== undefined
       ? { forkedFrom: meta.forkedFrom ?? existing?.forkedFrom }
+      : {}),
+    ...((meta.subject ?? existing?.subject) !== undefined
+      ? { subject: meta.subject ?? existing?.subject }
       : {}),
     ...(existing?.forkedTo !== undefined ? { forkedTo: existing.forkedTo } : {}),
     ...(existing?.repointPending !== undefined ? { repointPending: existing.repointPending } : {}),
@@ -257,6 +270,18 @@ export async function listOwned(tenantId: string): Promise<WorkflowOwnershipReco
   const rows = await store.listByPrefix(tenantPrefix(tenantId));
   return rows.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
+
+/** ADR 0913 — the tenant's workflows carrying one feature subject label. A
+ *  per-tenant prefix read of the ownership rows (the same read the builder's
+ *  list makes on every load), never a cross-tenant scan. */
+export async function listOwnedBySubject(tenantId: string, subject: string): Promise<WorkflowOwnershipRecord[]> {
+  if (!subject) return [];
+  return (await listOwned(tenantId)).filter((r) => r.subject === subject);
+}
+
+/** ADR 0913 — the label grammar: a lowercase feature prefix, a colon, then an
+ *  id of up to 200 safe characters. Validated at the route boundary. */
+export const WORKFLOW_SUBJECT_PATTERN = /^[a-z][a-z0-9-]{0,31}:[A-Za-z0-9:._-]{1,200}$/;
 
 /** A workflow name unique among the tenant's owned workflows: returns `base`
  *  if free, else `base-2`, `base-3`, … — so instantiating the same template

@@ -4,10 +4,27 @@
  *   - resolve a customer by email (the seeded index kills the linear scan)
  *   - add a non-email identifier (phone) → resolve by it → same contact
  *   - normalization (phone punctuation, email case) resolves
- *   - merge: source's email resolves to the SURVIVOR (tombstone followed) + union
  *   - remove identifier → no longer resolves
  *   - toggle OFF ⇒ /cdp/identity/resolve 404 (backend authority)
  *   - tenant isolation: another tenant cannot resolve a foreign identifier
+ *
+ * Merge resolution lives in cdp-identity-merge-provenance.test.ts ("a CLEANLY merged
+ * email is re-pointed…", "an absorbed non-email identifier…" for the merge re-point;
+ * "a STALE index key…" for the tombstone-follow). The merge case that used to sit here
+ * was cut in w38: it could not fail — re-point AND tombstone-follow both delivered the
+ * survivor, and its probe stayed green while those provenance cases went red.
+ *
+ * Sabotage that reds it (w38 probes): dropping the toggle gate; phone normalization;
+ * stale-key deletion on identifier removal; the cookie → identity-link fallback; the
+ * identifier-type check at the write boundary.
+ *
+ * TRIPLE GUARD (honest ceiling) on tenant isolation: the index key is tenant-prefixed,
+ * `resolveContactIdByIdentifier` re-checks `row.tenantId`, and `resolveIdentity`
+ * re-checks `contact.tenantId` (the legacy email scan is tenant-scoped too). No single
+ * sabotage turns the isolation case red (w38 `ir-tenant`); it is kept with positive
+ * controls so it at least proves each tenant reaches its OWN record. The route has no
+ * org/member gate (the rolodex is tenant-wide), so a same-tenant non-member case does
+ * not apply here.
  */
 
 import http from 'node:http';
@@ -38,7 +55,10 @@ afterAll(async () => {
   await new Promise<void>((res) => server.close(() => res()));
 });
 
-interface Res<T = any> { status: number; body: T; headers: Headers }
+interface Res { status: number; body: unknown; headers: Headers }
+interface GoldenBody { contact: { contactId: string }; resolvedBy: { type: string; value: string } }
+const golden = (r: Res): GoldenBody => r.body as GoldenBody;
+const idOf = (r: Res): string => (r.body as { contactId: string }).contactId;
 interface Client {
   get: (p: string) => Promise<Res>;
   post: (p: string, b?: unknown) => Promise<Res>;
@@ -88,48 +108,27 @@ describe('CDP-A identity resolution', () => {
     const c = await owner();
     const created = await c.post('/host/openwop-app/crm/contacts', { name: 'Ada', email: 'Ada@Acme.TEST' });
     expect(created.status, JSON.stringify(created.body)).toBe(201);
-    const id = created.body.contactId;
+    const id = idOf(created);
 
     const byEmail = await resolve(c, 'email', 'ada@acme.test');
     expect(byEmail.status, JSON.stringify(byEmail.body)).toBe(200);
-    expect(byEmail.body.contact.contactId).toBe(id);
-    expect(byEmail.body.resolvedBy).toEqual({ type: 'email', value: 'ada@acme.test' });
+    expect(golden(byEmail).contact.contactId).toBe(id);
+    expect(golden(byEmail).resolvedBy).toEqual({ type: 'email', value: 'ada@acme.test' });
 
     const add = await c.post(`/host/openwop-app/crm/contacts/${id}/identifiers`, { type: 'phone', value: '+1 (555) 123-4567' });
     expect(add.status, JSON.stringify(add.body)).toBe(201);
 
     const byPhone = await resolve(c, 'phone', '+15551234567');
     expect(byPhone.status, JSON.stringify(byPhone.body)).toBe(200);
-    expect(byPhone.body.contact.contactId).toBe(id);
-  });
-
-  it('follows a merge tombstone: the source email resolves to the survivor + unions identifiers', async () => {
-    await setToggle('crm', 'on');
-    await setToggle('cdp', 'on');
-    const c = await owner();
-    const survivor = (await c.post('/host/openwop-app/crm/contacts', { name: 'S', email: 'survivor@acme.test' })).body;
-    const source = (await c.post('/host/openwop-app/crm/contacts', { name: 'D', email: 'source@acme.test' })).body;
-    await c.post(`/host/openwop-app/crm/contacts/${source.contactId}/identifiers`, { type: 'loyalty', value: 'LOY-9' });
-
-    const merged = await c.post(`/host/openwop-app/crm/contacts/${survivor.contactId}/merge`, { sourceContactId: source.contactId });
-    expect(merged.status, JSON.stringify(merged.body)).toBe(200);
-
-    // the source's email now resolves to the SURVIVOR (tombstone followed)
-    const bySourceEmail = await resolve(c, 'email', 'source@acme.test');
-    expect(bySourceEmail.status).toBe(200);
-    expect(bySourceEmail.body.contact.contactId).toBe(survivor.contactId);
-    // the source's loyalty id was absorbed
-    const byLoyalty = await resolve(c, 'loyalty', 'LOY-9');
-    expect(byLoyalty.status).toBe(200);
-    expect(byLoyalty.body.contact.contactId).toBe(survivor.contactId);
+    expect(golden(byPhone).contact.contactId).toBe(id);
   });
 
   it('removing an identifier stops resolving it', async () => {
     await setToggle('crm', 'on');
     await setToggle('cdp', 'on');
     const c = await owner();
-    const id = (await c.post('/host/openwop-app/crm/contacts', { name: 'R', email: 'r@acme.test' })).body.contactId;
-    await c.post(`/host/openwop-app/crm/contacts/${id}/identifiers`, { type: 'device', value: 'dev-1' });
+    const id = idOf(await c.post('/host/openwop-app/crm/contacts', { name: 'R', email: 'r@acme.test' }));
+    expect((await c.post(`/host/openwop-app/crm/contacts/${id}/identifiers`, { type: 'device', value: 'dev-1' })).status).toBe(201);
     expect((await resolve(c, 'device', 'dev-1')).status).toBe(200);
     const del = await c.del(`/host/openwop-app/crm/contacts/${id}/identifiers?type=device&value=dev-1`);
     expect(del.status, JSON.stringify(del.body)).toBe(200);
@@ -140,29 +139,46 @@ describe('CDP-A identity resolution', () => {
     await setToggle('crm', 'on');
     await setToggle('cdp', 'on');
     const c = await owner();
-    await c.post('/host/openwop-app/crm/contacts', { name: 'G', email: 'gate@acme.test' });
+    expect((await c.post('/host/openwop-app/crm/contacts', { name: 'G', email: 'gate@acme.test' })).status).toBe(201);
     expect((await resolve(c, 'email', 'gate@acme.test')).status).toBe(200);
     await setToggle('cdp', 'off');
-    expect((await resolve(c, 'email', 'gate@acme.test')).status).toBe(404);
-    await setToggle('cdp', 'on');
+    try {
+      const off = await resolve(c, 'email', 'gate@acme.test');
+      expect(off.status).toBe(404);
+      expect(off.body).toMatchObject({ error: 'not_found', message: 'CDP is not enabled for this tenant.' });
+    } finally {
+      await setToggle('cdp', 'on');
+    }
   });
 
   it('is tenant-isolated: another tenant cannot resolve a foreign identifier', async () => {
     await setToggle('crm', 'on');
     await setToggle('cdp', 'on');
+    // REAL records in BOTH tenants: the same email in each, plus an A-only identifier.
     const a = await owner();
-    await a.post('/host/openwop-app/crm/contacts', { name: 'Priv', email: 'priv@acme.test' });
+    const aId = idOf(await a.post('/host/openwop-app/crm/contacts', { name: 'Priv', email: 'priv@acme.test' }));
+    expect((await a.post(`/host/openwop-app/crm/contacts/${aId}/identifiers`, { type: 'loyalty', value: 'LOY-A-ONLY' })).status).toBe(201);
     const b = await owner();
-    expect((await resolve(b, 'email', 'priv@acme.test')).status).toBe(404);
+    const bId = idOf(await b.post('/host/openwop-app/crm/contacts', { name: 'Other', email: 'priv@acme.test' }));
+    expect(bId).not.toBe(aId);
+    // positive controls: each tenant reaches its OWN record by the shared email
+    expect(golden(await resolve(a, 'email', 'priv@acme.test')).contact.contactId).toBe(aId);
+    expect(golden(await resolve(b, 'email', 'priv@acme.test')).contact.contactId).toBe(bId);
+    expect(golden(await resolve(a, 'loyalty', 'LOY-A-ONLY')).contact.contactId).toBe(aId);
+    // B cannot reach A's identifier
+    const foreign = await resolve(b, 'loyalty', 'LOY-A-ONLY');
+    expect(foreign.status).toBe(404);
+    expect(foreign.body).toMatchObject({ error: 'not_found', message: 'No customer resolves to that identifier.' });
   });
 
   it('rejects an unknown identifier type at the write boundary', async () => {
     await setToggle('crm', 'on');
     await setToggle('cdp', 'on');
     const c = await owner();
-    const id = (await c.post('/host/openwop-app/crm/contacts', { name: 'X', email: 'x@acme.test' })).body.contactId;
+    const id = idOf(await c.post('/host/openwop-app/crm/contacts', { name: 'X', email: 'x@acme.test' }));
     const bad = await c.post(`/host/openwop-app/crm/contacts/${id}/identifiers`, { type: 'passport', value: 'P1' });
     expect(bad.status, JSON.stringify(bad.body)).toBe(400);
+    expect(bad.body).toMatchObject({ error: 'validation_error', message: "Unknown identifier type 'passport'." });
   });
 
   it('anon→known: a cookie/session key resolves to its linked contact (ADR 0263 P2)', async () => {
@@ -171,13 +187,13 @@ describe('CDP-A identity resolution', () => {
     const tenantId = `org:cdp-${Date.now()}-${n++}`;
     const c = client();
     await signup(c, tenantId);
-    const id = (await c.post('/host/openwop-app/crm/contacts', { name: 'Anon', email: 'anon@acme.test' })).body.contactId;
+    const id = idOf(await c.post('/host/openwop-app/crm/contacts', { name: 'Anon', email: 'anon@acme.test' }));
     // an anonymous analytics session (cookie) is later linked to the known contact
     const sessionKey = `sess-${Date.now()}-${n}`;
     await linkSession(tenantId, sessionKey, id, 'email-click');
     // resolve by cookie → the linked contact (read-only compose over the identity-link)
     const byCookie = await resolve(c, 'cookie', sessionKey);
     expect(byCookie.status, JSON.stringify(byCookie.body)).toBe(200);
-    expect(byCookie.body.contact.contactId).toBe(id);
+    expect(golden(byCookie).contact.contactId).toBe(id);
   });
 });

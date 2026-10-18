@@ -27,10 +27,10 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T }
+interface Res<T = unknown> { status: number; body: T }
 function client() {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
+  const call = async <T,>(method: string, path: string, body?: unknown): Promise<Res<T>> => {
     const res = await fetch(`${BASE}${path}`, {
       method,
       headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) },
@@ -38,9 +38,9 @@ function client() {
     });
     for (const c of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]; }
     const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
-    return { status: res.status, body: out };
+    return { status: res.status, body: out as T };
   };
-  return { get: (p: string) => call('GET', p), post: (p: string, b?: unknown) => call('POST', p, b) };
+  return { get: <T,>(p: string) => call<T>('GET', p), post: <T,>(p: string, b?: unknown) => call<T>('POST', p, b) };
 }
 
 let n = 0;
@@ -51,37 +51,52 @@ async function owner() {
   return c;
 }
 const enable = async (id: string) => { const d = getToggleDefault(id); if (d) await saveConfig({ ...d, status: 'on' }, 'test'); };
-const members = async (c: ReturnType<typeof client>, id: string) => (await c.get(`/host/openwop-app/crm/segments/${id}/members`)).body.members as { contactId: string }[];
+const members = async (c: ReturnType<typeof client>, id: string): Promise<string[]> =>
+  (await c.get<{ members: { contactId: string }[] }>(`/host/openwop-app/crm/segments/${id}/members`)).body.members.map((m) => m.contactId);
+async function contact(c: ReturnType<typeof client>, body: Record<string, string>): Promise<string> {
+  const r = await c.post<{ contactId: string }>('/host/openwop-app/crm/contacts', body);
+  expect(r.status).toBe(201);
+  return r.body.contactId;
+}
+async function segment(c: ReturnType<typeof client>, name: string, field: string, op: string, value: string): Promise<string> {
+  const r = await c.post<{ segmentId: string }>('/host/openwop-app/crm/segments', { name, filters: [{ field, op, value }] });
+  expect(r.status, JSON.stringify(r.body)).toBe(201);
+  return r.body.segmentId;
+}
 
 describe('CDP-C behavioral/calculated segment traits', () => {
   it('numeric ops over identifierCount select the right members', async () => {
     await enable('crm');
     const c = await owner();
-    const a = (await c.post('/host/openwop-app/crm/contacts', { name: 'A', email: 'a@x.test' })).body; // identifierCount = 1
-    const b = (await c.post('/host/openwop-app/crm/contacts', { name: 'B', email: 'b@x.test' })).body;
-    await c.post(`/host/openwop-app/crm/contacts/${b.contactId}/identifiers`, { type: 'phone', value: '+15550001' });
-    await c.post(`/host/openwop-app/crm/contacts/${b.contactId}/identifiers`, { type: 'loyalty', value: 'L1' }); // B = 3
+    const a = await contact(c, { name: 'A', email: 'a@x.test' }); // identifierCount = 1
+    const two = await contact(c, { name: 'Two', email: 't@x.test' });
+    await c.post(`/host/openwop-app/crm/contacts/${two}/identifiers`, { type: 'phone', value: '+15550002' }); // Two = 2 (the gte boundary)
+    const b = await contact(c, { name: 'B', email: 'b@x.test' });
+    await c.post(`/host/openwop-app/crm/contacts/${b}/identifiers`, { type: 'phone', value: '+15550001' });
+    await c.post(`/host/openwop-app/crm/contacts/${b}/identifiers`, { type: 'loyalty', value: 'L1' }); // B = 3
 
-    const seg = (await c.post('/host/openwop-app/crm/segments', { name: 'multi-id', filters: [{ field: 'identifierCount', op: 'gte', value: '2' }] })).body;
-    const ids = (await members(c, seg.segmentId)).map((m) => m.contactId);
-    expect(ids).toContain(b.contactId);
-    expect(ids).not.toContain(a.contactId);
+    const gte2 = await members(c, await segment(c, 'multi-id', 'identifierCount', 'gte', '2'));
+    expect([...gte2].sort()).toEqual([two, b].sort());
+    const lte1 = await members(c, await segment(c, 'single-id', 'identifierCount', 'lte', '1'));
+    expect(lte1).toEqual([a]);
   });
 
   it('daysSinceCreated recency: just-created contacts are < 1 day old, not > 0', async () => {
     await enable('crm');
     const c = await owner();
-    await c.post('/host/openwop-app/crm/contacts', { name: 'New', email: 'new@x.test' });
-    const fresh = (await c.post('/host/openwop-app/crm/segments', { name: 'fresh', filters: [{ field: 'daysSinceCreated', op: 'lt', value: '1' }] })).body;
-    const old = (await c.post('/host/openwop-app/crm/segments', { name: 'old', filters: [{ field: 'daysSinceCreated', op: 'gt', value: '0' }] })).body;
-    expect((await members(c, fresh.segmentId)).length).toBeGreaterThanOrEqual(1);
-    expect((await members(c, old.segmentId)).length).toBe(0);
+    const id = await contact(c, { name: 'New', email: 'new@x.test' });
+    expect(await members(c, await segment(c, 'fresh', 'daysSinceCreated', 'lt', '1'))).toEqual([id]);
+    expect(await members(c, await segment(c, 'old', 'daysSinceCreated', 'gt', '0'))).toEqual([]);
+    // the lt/lte boundary at age 0: strictly-less excludes, less-or-equal includes
+    expect(await members(c, await segment(c, 'neg', 'daysSinceCreated', 'lt', '0'))).toEqual([]);
+    expect(await members(c, await segment(c, 'zero', 'daysSinceCreated', 'lte', '0'))).toEqual([id]);
   });
 
   it('rejects a non-numeric value for a numeric op at the write boundary', async () => {
     await enable('crm');
     const c = await owner();
-    const bad = await c.post('/host/openwop-app/crm/segments', { name: 'bad', filters: [{ field: 'identifierCount', op: 'gt', value: 'lots' }] });
+    const bad = await c.post<{ message?: string }>('/host/openwop-app/crm/segments', { name: 'bad', filters: [{ field: 'identifierCount', op: 'gt', value: 'lots' }] });
     expect(bad.status, JSON.stringify(bad.body)).toBe(400);
+    expect(bad.body.message).toBe('filter.value must be numeric for op `gt`.');
   });
 });

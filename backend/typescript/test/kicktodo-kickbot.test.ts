@@ -21,6 +21,10 @@ import { createRosterEntry, getRosterEntry, listRoster, updateRosterEntry } from
 import { getBoard, deleteBoard } from '../src/host/kanbanService.js';
 import { getConversationMeta, subjectConversationId } from '../src/host/conversationStore.js';
 import { ensureKickBot, kickbotBoardId, KICKBOT_ROLE_KEY } from '../src/features/kicktodo-core/kickbotService.js';
+import { getAgentProfile, upsertAgentProfile } from '../src/host/agentProfileService.js';
+import { findCoachingAgent, COACHING_CAPABILITY } from '../src/features/kicktodo-core/coachingCapability.js';
+import { findAssistantAgent, listCapabilityAgents, ASSISTANT_CAPABILITY } from '../src/features/assistant/capability.js';
+import { getAgentRegistry } from '../src/executor/agentRegistry.js';
 
 const TENANT = 'tenant-kickbot';
 
@@ -36,7 +40,6 @@ afterEach(async () => {
   // ensureUserAgentRegistered writes the process-global AgentRegistry, which the
   // host-ext reset does NOT clear — reset it so a registered guide can't leak
   // into a later test in this file.
-  const { getAgentRegistry } = await import('../src/executor/agentRegistry.js');
   getAgentRegistry()._resetForTest();
 });
 
@@ -63,6 +66,9 @@ describe('ensureKickBot', () => {
   });
 
   it('is idempotent and concurrent-safe (one roster row), and forward-repairs a missing board', async () => {
+    // The three ensures share ONE in-flight provision (the single-flight map).
+    // Round-1 probe w41g2-kb-singleflight witnessed it: without the map the racing
+    // provisions do not converge, so the map is load-bearing, not an optimisation.
     const [a, b, c] = await Promise.all([ensureKickBot(TENANT), ensureKickBot(TENANT), ensureKickBot(TENANT)]);
     expect(a.rosterId).toBe(b.rosterId);
     expect(b.rosterId).toBe(c.rosterId);
@@ -106,8 +112,6 @@ describe('ensureKickBot', () => {
 describe('ensureKickBot — P1 profile + branded agentRef (ADR 0442)', () => {
   it('writes an AgentProfile with the coaching capability, review autonomy, resolvable BY capability', async () => {
     await ensureKickBot(TENANT);
-    const { getAgentProfile } = await import('../src/host/agentProfileService.js');
-    const { findCoachingAgent, COACHING_CAPABILITY } = await import('../src/features/kicktodo-core/coachingCapability.js');
 
     const profile = await getAgentProfile(TENANT, 'host:kickbot');
     expect(profile?.roleKey).toBe(KICKBOT_ROLE_KEY);
@@ -132,7 +136,6 @@ describe('ensureKickBot — P1 profile + branded agentRef (ADR 0442)', () => {
 
   it('is idempotent — a re-provision does NOT clobber user edits to autonomy/HITL', async () => {
     await ensureKickBot(TENANT);
-    const { getAgentProfile, upsertAgentProfile } = await import('../src/host/agentProfileService.js');
     // Simulate a governance edit through the profile PUT.
     await upsertAgentProfile(TENANT, 'host:kickbot', {
       roleKey: KICKBOT_ROLE_KEY,
@@ -145,12 +148,10 @@ describe('ensureKickBot — P1 profile + branded agentRef (ADR 0442)', () => {
     expect(profile?.hitl).toEqual(['everything']);          // edit survived
     expect(profile?.autonomy.specLevel).toBe('draft-only'); // edit survived
     // The capability survives too (upsert preserves it on omit).
-    const { COACHING_CAPABILITY } = await import('../src/features/kicktodo-core/coachingCapability.js');
     expect(profile?.capabilities).toContain(COACHING_CAPABILITY);
   });
 
   it('self-heals the coaching capability on a profile written by a pre-coaching build', async () => {
-    const { upsertAgentProfile, getAgentProfile } = await import('../src/host/agentProfileService.js');
     // A profile with NO coaching capability (simulating an older build).
     await upsertAgentProfile(TENANT, 'host:kickbot', {
       roleKey: KICKBOT_ROLE_KEY,
@@ -160,7 +161,6 @@ describe('ensureKickBot — P1 profile + branded agentRef (ADR 0442)', () => {
     await ensureKickBot(TENANT);
 
     const profile = await getAgentProfile(TENANT, 'host:kickbot');
-    const { COACHING_CAPABILITY } = await import('../src/features/kicktodo-core/coachingCapability.js');
     expect(profile?.capabilities).toContain(COACHING_CAPABILITY); // healed
     expect(profile?.hitl).toEqual(['plan-change']);               // untouched
   });
@@ -173,20 +173,18 @@ describe('ensureKickBot — P1 profile + branded agentRef (ADR 0442)', () => {
     const entry = await getRosterEntry(TENANT, before.rosterId);
     expect(entry?.persona).toBe('Coach Nova');                    // rename applied
     expect(entry?.agentRef?.agentId).toBe('user.kicktodo-guide'); // ref unchanged
-    const { getAgentProfile } = await import('../src/host/agentProfileService.js');
-    const { COACHING_CAPABILITY } = await import('../src/features/kicktodo-core/coachingCapability.js');
     const profile = await getAgentProfile(TENANT, before.rosterId);
     expect(profile?.capabilities).toContain(COACHING_CAPABILITY); // capability survives
   });
 
   it('create-on-absent: a re-provision does NOT re-register (clobber) an edited branded agent in the live registry', async () => {
     await ensureKickBot(TENANT);
-    const { getAgentRegistry } = await import('../src/executor/agentRegistry.js');
     // Simulate a PATCH /agents/:id edit that updated storage AND re-registered
     // the edited manifest into the in-process registry (the route does both).
     const live = getAgentRegistry().get('user.kicktodo-guide', TENANT);
-    expect(live).not.toBeNull();
-    getAgentRegistry().register({ ...live!, systemPrompt: 'EDITED GUIDE PROMPT' });
+    if (!live) throw new Error('the branded guide must be registered after provisioning');
+    expect(live.systemPrompt).not.toBe('EDITED GUIDE PROMPT'); // positive control: the default prompt
+    getAgentRegistry().register({ ...live, systemPrompt: 'EDITED GUIDE PROMPT' });
 
     await ensureKickBot(TENANT); // re-provision must NOT overwrite the registry
                                  // with the DEFAULT prompt (the create-on-absent guard).
@@ -196,23 +194,29 @@ describe('ensureKickBot — P1 profile + branded agentRef (ADR 0442)', () => {
 
   it('does not make KickBot a second assistant — findAssistantAgent is unaffected', async () => {
     await ensureKickBot(TENANT);
-    const { findAssistantAgent } = await import('../src/features/assistant/capability.js');
     // KickBot holds `coaching`, not `assistant`, so the assistant resolver is
     // not ambiguous (the C2 no-reuse decision).
     const assistant = await findAssistantAgent(TENANT);
     expect(assistant?.rosterId).not.toBe('host:kickbot');
+    // Non-vacuous: with no assistant in the tenant the line above holds trivially,
+    // so assert the resolver's OWN candidate set and the profile directly.
+    const profile = await getAgentProfile(TENANT, 'host:kickbot');
+    expect(profile?.capabilities).toContain(COACHING_CAPABILITY); // positive control: the profile was read
+    expect(profile?.capabilities).not.toContain(ASSISTANT_CAPABILITY);
+    expect((await listCapabilityAgents(TENANT, ASSISTANT_CAPABILITY)).map((e) => e.rosterId)).not.toContain('host:kickbot');
   });
 
   it('is tenant-isolated — a second tenant gets its own profile; cross-tenant read is null', async () => {
     await ensureKickBot(TENANT);
+    // Provisioning tenant 1 writes NOTHING readable from tenant 2.
+    expect(await getAgentProfile('tenant-kickbot-2', 'host:kickbot')).toBeNull();
     await ensureKickBot('tenant-kickbot-2');
-    const { getAgentProfile } = await import('../src/host/agentProfileService.js');
-    expect(await getAgentProfile('tenant-kickbot-2', 'host:kickbot')).not.toBeNull();
-    // A profile is scoped to its tenant (fail-closed cross-tenant read is the
-    // service's job; here we assert each tenant has its own row).
-    const p1 = await getAgentProfile(TENANT, 'host:kickbot');
+    // Tenant 2 gets its OWN governance profile, written under tenant 2 with the
+    // coaching capability + default HITL — the profile-create step itself, not a
+    // side effect of the later knowledge binding.
     const p2 = await getAgentProfile('tenant-kickbot-2', 'host:kickbot');
-    expect(p1?.tenantId).toBe(TENANT);
     expect(p2?.tenantId).toBe('tenant-kickbot-2');
+    expect(p2?.capabilities).toContain(COACHING_CAPABILITY);
+    expect(p2?.hitl).toEqual(['plan-change', 'enrollment']);
   });
 });

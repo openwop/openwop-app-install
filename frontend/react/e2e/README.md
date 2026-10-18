@@ -113,10 +113,16 @@ If you cannot make it fail, you have not written a test.
 ## Running by hand
 
 ```bash
-# 1. a backend with the test seams, on a free port
+# 1. a backend with the test seams, on a free port — the SAME pack env the gate
+#    uses (scripts/ci.sh, the e2e boot block): vendored node packs in a scratch
+#    dir, and the e2e FIXTURE chain packs instead of the examples
 cd backend/typescript && npm run build
+E2E_PACK_DIR="$(mktemp -d)"; for p in ../../packs/*/; do [ -f "$p/pack.json" ] && ln -s "$(cd "$p" && pwd)" "$E2E_PACK_DIR/"; done
 OPENWOP_TEST_AUTH_ENABLED=true OPENWOP_FEATURE_TOGGLES_DEV_OPEN=true \
 OPENWOP_DEMO_MODE=true OPENWOP_STORAGE_DSN=memory:// \
+OPENWOP_MOUNT_LOCAL_PACKS=false OPENWOP_PACK_DIR="$E2E_PACK_DIR" \
+OPENWOP_WORKFLOW_CHAIN_PACKS_DIR="$(cd ../../frontend/react/e2e/fixtures/chain-packs && pwd)" \
+OPENWOP_WORKFLOW_CHAIN_EXAMPLES=0 \
 OPENWOP_CORS_ORIGINS=http://localhost:5199 \
 OPENWOP_SESSION_SECRET=local-e2e-session-secret-at-least-32-characters-long \
 PORT=8099 node lib/index.js
@@ -128,6 +134,14 @@ VITE_OPENWOP_BASE_URL=http://localhost:8099 \
 VITE_OPENWOP_SSE_BASE_URL=http://localhost:8099 \
 OPENWOP_E2E_PORT=5199 npm run test:e2e
 ```
+
+**Copy the pack env, or specs that draw from templates red for an environmental
+reason.** The recipe here used to omit `OPENWOP_PACK_DIR` and
+`OPENWOP_WORKFLOW_CHAIN_PACKS_DIR`. Without them `pair-canvas.spec.ts:128`
+("the template never drew as ghosts") is red on pristine `main`, which on
+2026-10-15 was briefly reported as a main defect. It was not one: the gate passes
+it. When this block and `scripts/ci.sh` disagree, `ci.sh` is right. `OPENWOP_MOUNT_LOCAL_PACKS=false`
+also keeps this boot from re-pointing the shared `~/.openwop-packs` symlinks.
 
 `OPENWOP_E2E_PORT` gives a worktree its own Vite port. `reuseExistingServer` is
 **off** by default and that is deliberate — see the comment in
@@ -143,9 +157,14 @@ pass without executing its own code.
   and its result is ledgered but does **not** block the gate. It is quarantined,
   not skipped — a quarantine that stops a test executing is indistinguishable
   from deleting it.
-- **Four specs skip behind opt-in env vars** (`feature-routes`, `feature-gated`,
-  `collaborative-project`, `walkthrough-replay`). The file count overstates what
-  a default run executes.
+- **Three specs skip in the default gate.** `feature-routes` and
+  `announcement-delivery` need `OPENWOP_E2E_ROUTES=1` and run only through
+  `scripts/e2e-routes.sh` (`ci:full`); `collaborative-project` needs
+  `OPENWOP_E2E_COLLAB=1` and is red at Phase 3 on a product defect
+  (PROJ-CHAT-DEEPLINK-1: the project-chat deep link opens a blank chat). The
+  file count overstates what a default run executes. (`feature-gated`,
+  `walkthrough-replay` and `collab-ct` were deleted 2026-10-17 by /grade-tests
+  wave 53: redundant, never run, and red when run, respectively.)
 - **No screen-reader coverage.** `live-region.spec.ts` tests the announcement
   *precondition* against a real accessibility tree; what VoiceOver or NVDA
   actually *says* happens inside the AT process and no automated test reaches it.

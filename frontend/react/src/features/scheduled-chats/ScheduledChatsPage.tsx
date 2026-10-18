@@ -101,6 +101,15 @@ export function ScheduledChatsPage(): JSX.Element {
     // one "Active"; the rare enabled-but-unwired legacy row still reads "Inert".
     { key: 'status', header: t('colStatus'), render: (r) => {
       const st = !r.enabled ? { s: 'paused' as const, l: t('paused') } : r.workflowId ? { s: 'running' as const, l: t('active') } : { s: 'paused' as const, l: t('inert') };
+      // ADR 0879 D7 — a failed last run is shown, with its reason, never hidden.
+      if (r.lastError) {
+        return (
+          <span className="u-flex u-flex-col u-gap-0-5">
+            <StatusBadge status={st.s} label={st.l} />
+            <span className="u-fs-11 u-text-danger">{r.lastError.code === 'conversation_write_refused' ? t('lastRunNotPosted') : t('lastRunFailed', { reason: r.lastError.message })}</span>
+          </span>
+        );
+      }
       return <StatusBadge status={st.s} label={st.l} />;
     } },
     // ADR 0125 Phase 3c — the scheduler's next fire time (joined from the job).

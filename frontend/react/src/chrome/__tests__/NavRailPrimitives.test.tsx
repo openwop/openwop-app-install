@@ -1,3 +1,11 @@
+/**
+ * Shared nav-rail primitives (ADR 0510 — one section/item renderer for the
+ * workspace Sidebar and the admin rail). Guards what assistive technology sees:
+ * the section disclosure state (aria-expanded) and a collapsed list leaving the
+ * tree, the lock's localized accessible name, the badge, and the destination
+ * name surviving compact (icon-only) mode. The `sr-only` class read is the only
+ * jsdom-observable signal that the compact label is visually hidden (ceiling).
+ */
 import { afterEach, describe, expect, it } from 'vitest';
 import { cleanup, render, screen } from '@testing-library/react';
 import { SettingsIcon } from '../../ui/icons/index.js';
@@ -21,6 +29,7 @@ describe('shared navigation rail primitives', () => {
     expect(screen.getByRole('img', { name: 'Restricted' })).toBeTruthy();
     rerender(<NavRailItemContent classPrefix="admin-nav" icon={<SettingsIcon />} label="Settings" locked={false} lockedLabel="Restricted" badge="Beta" compact={false} />);
     expect(screen.getByText('Beta')).toBeTruthy();
+    expect(screen.queryByRole('img', { name: 'Restricted' })).toBeNull();
     rerender(<NavRailItemContent classPrefix="admin-nav" icon={<SettingsIcon />} label="Settings" locked lockedLabel="Restricted" badge="Beta" compact />);
     expect(screen.queryByRole('img', { name: 'Restricted' })).toBeNull();
     expect(screen.queryByText('Beta')).toBeNull();

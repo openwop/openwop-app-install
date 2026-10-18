@@ -7,6 +7,11 @@
  * STRAT-5: resolving a set of strategy ids (the advisory-board context path) that includes
  *   an archived/missing ref now emits `strategy_context_refs_dropped` so the silent
  *   context-vanishing is observable — without mutating the board (un-archive stays lossless).
+ *
+ * Sabotage (grade-tests w19, all witnessed): dropping `summary` from
+ * `declarePiiFields('strategy.record', …)` or declaring it `maskGloballyByFieldName:false` reds
+ * the STRAT-6 case; removing the archived / missing counters or renaming the log event reds the
+ * STRAT-5 positive case; logging unconditionally reds the clean-resolve negative case.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openSqliteStorage } from '../src/storage/sqlite/index.js';
@@ -31,7 +36,8 @@ beforeEach(async () => {
   initHostExtPersistence(openSqliteStorage(':memory:'));
   // G7 (ADR 0820 §8.1) — the context resolve now reads `resolveOne('strategy')`; this
   // unit harness boots no app, so register the feature's (default-on) toggle.
-  if (strategyFeature.toggleDefault) registerToggleDefault(strategyFeature.toggleDefault);
+  // ADR 0892: strategy is opt-in; enable it as an operator would.
+  if (strategyFeature.toggleDefault) registerToggleDefault({ ...strategyFeature.toggleDefault, status: 'on' });
   await __clearStrategies();
 });
 

@@ -6,9 +6,20 @@
  * collapsed to the placeholder and the card read "not configured yet" rather
  * than "pointing at a key that is gone" — which is how a dead realtime-voice
  * binding hid here for a month while every session mint returned 400.
+ *
+ * Every "stays quiet" case waits for the config read to SETTLE before asserting
+ * absence. The settle signal is the Save button: it is enabled only once
+ * `load === 'ready'`. An absence check made earlier passes on the loading state
+ * whatever the missing-ref rule does (grade-tests w48: the "provider off" case did).
+ *
+ * Sabotage that turns these red (RealtimeVoiceSettings.tsx): dropping either
+ * `refIsMissing` render, dropping `!storedRefs.includes(credentialRef)` or
+ * `needsKey` from `refIsMissing`.
  */
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
+import type { RealtimeConfig } from '../../chat/voice/voiceClient.js';
+import { getRealtimeConfig } from '../../chat/voice/voiceClient.js';
 import { RealtimeVoiceSettings } from '../RealtimeVoiceSettings.js';
 
 vi.mock('../../chat/voice/voiceClient.js', () => ({
@@ -16,46 +27,54 @@ vi.mock('../../chat/voice/voiceClient.js', () => ({
   setRealtimeConfig: vi.fn(),
 }));
 
-const { getRealtimeConfig } = await import('../../chat/voice/voiceClient.js') as unknown as {
-  getRealtimeConfig: ReturnType<typeof vi.fn>;
+const mockGet = vi.mocked(getRealtimeConfig);
+const answer = (c: RealtimeConfig): void => { mockGet.mockResolvedValue(c); };
+
+/** The config read has landed: Save is enabled only when `load === 'ready'` and,
+ *  for a provider that needs one, a key is selected. */
+const settled = async (): Promise<void> => {
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Save' })).toHaveProperty('disabled', false));
 };
 
-afterEach(() => { vi.clearAllMocks(); });
+beforeEach(() => { mockGet.mockReset(); });
 
 describe('RealtimeVoiceSettings — missing credentialRef', () => {
   it('names the dangling ref instead of rendering a blank select', async () => {
-    getRealtimeConfig.mockResolvedValue({ provider: 'gemini-live', credentialRef: 'google:myndhyve-key' });
+    answer({ provider: 'gemini-live', credentialRef: 'google:myndhyve-key' });
 
     render(<RealtimeVoiceSettings storedRefs={['google:personal']} />);
 
     // The broken value stays selected and is labelled, rather than silently
     // falling back to the "Select a stored key…" placeholder.
-    const option = await screen.findByRole('option', { name: /google:myndhyve-key.*missing/i });
+    const option = await screen.findByRole('option', { name: 'google:myndhyve-key — missing' });
     expect((option as HTMLOptionElement).selected).toBe(true);
   });
 
   it('explains the consequence in an error notice', async () => {
-    getRealtimeConfig.mockResolvedValue({ provider: 'gemini-live', credentialRef: 'google:myndhyve-key' });
+    answer({ provider: 'gemini-live', credentialRef: 'google:myndhyve-key' });
 
     render(<RealtimeVoiceSettings storedRefs={['google:personal']} />);
 
-    expect(await screen.findByText(/no longer exists/i)).toBeTruthy();
+    expect(await screen.findByText(/"google:myndhyve-key", but that key no longer exists/)).toBeTruthy();
   });
 
   it('stays quiet when the configured ref still exists', async () => {
-    getRealtimeConfig.mockResolvedValue({ provider: 'gemini-live', credentialRef: 'google:personal' });
+    answer({ provider: 'gemini-live', credentialRef: 'google:personal' });
 
     render(<RealtimeVoiceSettings storedRefs={['google:personal']} />);
 
-    await waitFor(() => expect(screen.getByRole('combobox', { name: /key/i })).toBeTruthy());
+    await settled();
+    expect((screen.getByRole('combobox', { name: 'API key' }) as HTMLSelectElement).value).toBe('google:personal');
     expect(screen.queryByText(/no longer exists/i)).toBeNull();
+    expect(screen.queryByRole('option', { name: /missing/ })).toBeNull();
   });
 
   it('stays quiet when the provider is off (no key needed)', async () => {
-    getRealtimeConfig.mockResolvedValue({ provider: 'off', credentialRef: 'google:myndhyve-key' });
+    answer({ provider: 'off', credentialRef: 'google:myndhyve-key' });
 
     render(<RealtimeVoiceSettings storedRefs={[]} />);
 
-    await waitFor(() => expect(screen.queryByText(/no longer exists/i)).toBeNull());
+    await settled();
+    expect(screen.queryByText(/no longer exists/i)).toBeNull();
   });
 });

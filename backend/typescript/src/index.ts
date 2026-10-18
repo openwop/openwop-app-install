@@ -11,6 +11,7 @@
  * Each substitute is pluggable — see src/host/index.ts and src/storage/.
  */
 
+import { startAgentRegistryEvictionListener } from './host/agentRegistryEviction.js';
 import express, { type Express } from 'express';
 import { createTracer, shutdownTracer } from './observability/tracer.js';
 import { createMetrics, shutdownMetrics } from './observability/metrics.js';
@@ -31,6 +32,7 @@ import { httpMetricsMiddleware } from './middleware/httpMetrics.js';
 import { authMiddleware, isPublicPath, sessionSecretConfigError } from './middleware/auth.js';
 import { workloadIdentityMiddleware } from './middleware/workloadIdentity.js';
 import { wireAuthorityRunStamping } from './host/authorityContext.js';
+import { wireRunAiDefaultStamping } from './host/runAiDefault.js';
 import { apiKeyRateLimitMiddleware, ipRateLimitMiddleware } from './middleware/rateLimit.js';
 import { a2aInterfaceErrorsMiddleware } from './middleware/a2aInterfaceErrors.js';
 import { corsMiddleware } from './middleware/cors.js';
@@ -527,6 +529,14 @@ export async function createApp(config: AppConfig): Promise<Express> {
   // packs (nodes: []) have no node typeId to lazily trigger, so this eager
   // pass is what makes them dispatchable + visible in the inventory.
   ensureAgentPackResolverInstalled(storage);
+  // ADR 0775 P3d (D5 H2) — drop a user agent another instance deleted or edited,
+  // so this instance re-reads it instead of serving the old one until restart.
+  // Fail-soft: without the listener an instance behaves as it did before.
+  try {
+    await startAgentRegistryEvictionListener();
+  } catch (err) {
+    console.warn('[openwop] agent registry eviction listener failed to start:', err instanceof Error ? err.message : String(err));
+  }
 
   // RFC 0028 §B prompt-pack boot-time loader. Scans the in-tree
   // `examples/packs/` plus any operator-managed dir
@@ -727,6 +737,7 @@ export async function createApp(config: AppConfig): Promise<Express> {
   // does not remint broader authority" falling out of the merge rather than
   // being re-checked at each call site.
   wireAuthorityRunStamping();
+  wireRunAiDefaultStamping(); // ADR 0903
 
   // CSRF Origin guard (2026-07 vuln-scan M4). AFTER auth so the public-path bypass
   // + principal are settled; guards cookie-authed unsafe methods against the CORS

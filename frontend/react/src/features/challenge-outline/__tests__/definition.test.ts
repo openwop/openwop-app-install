@@ -4,6 +4,13 @@
  * always yielding exactly one editable 'outline' frame so the tree surface is
  * never blank. Determinism (stable ids preserved, re-coercion idempotent) is the
  * property that keeps the collab CRDT from id-churn wars.
+ *
+ * The collab binding kind is pinned by `canvas/__tests__/collabTypes.test.ts`
+ * (derived from every definition), so it is not re-pinned here.
+ *
+ * Sabotage-witnessed (w52): dropping the seeded `stableActivityId` (case 1 and
+ * the idempotency case red); evidence fallback, string-list filter, day-index
+ * fallback, depthLevel allowlist, duration floor, frames cap, name derivation.
  */
 import { describe, expect, it } from 'vitest';
 import { coerceOutlineDoc, outlineFrameOps, OUTLINE_FRAME_ID } from '../types.js';
@@ -27,6 +34,9 @@ describe('coerceOutlineDoc', () => {
     expect(doc.frames).toHaveLength(1);
     expect(doc.frames[0]?.days[0]?.props.title).toBe('Wind down');
     expect(doc.frames[0]?.days[0]?.children[0]?.props.title).toBe('Read');
+    // The stable ids themselves — what keeps the CRDT from re-keying every node.
+    expect(doc.frames[0]?.days[0]?.props.stableActivityId).toBe('d1');
+    expect(doc.frames[0]?.days[0]?.children[0]?.props.stableActivityId).toBe('d1-alt');
   });
 
   it('falls back safely on an empty/garbage state', () => {
@@ -57,10 +67,15 @@ describe('coerceOutlineDoc', () => {
   });
 
   it('re-coercing the same doc is idempotent (no id churn through the CRDT)', () => {
-    const once = coerceOutlineDoc({ frames: [{ days: [{ type: 'day', props: { title: 'a' } }, { type: 'day', props: { title: 'b' } }] }] });
-    const twice = coerceOutlineDoc(once as unknown as Record<string, unknown>);
-    expect(twice.frames[0]?.days.map((d) => d.props.stableActivityId))
-      .toEqual(once.frames[0]?.days.map((d) => d.props.stableActivityId));
+    // One seeded id (must survive verbatim) and one minted (must not churn).
+    // Expected ids are literals, never derived from `coerceOutlineDoc` itself.
+    const once = coerceOutlineDoc({ frames: [{ days: [
+      { type: 'day', props: { title: 'a', stableActivityId: 's-a' } },
+      { type: 'day', props: { title: 'b' } },
+    ] }] });
+    const twice = coerceOutlineDoc({ ...once });
+    expect(once.frames[0]?.days.map((d) => d.props.stableActivityId)).toEqual(['s-a', 'day-2']);
+    expect(twice.frames[0]?.days.map((d) => d.props.stableActivityId)).toEqual(['s-a', 'day-2']);
   });
 });
 
@@ -72,7 +87,6 @@ describe('challengeOutlineDefinition', () => {
     expect(challengeOutlineDefinition.frames.homeFlag).toBeUndefined();
     expect(challengeOutlineDefinition.tree.rootKey).toBe('days');
     expect(challengeOutlineDefinition.tree.childrenKey).toBe('children');
-    expect(challengeOutlineDefinition.collab).toBe('elements');
     expect(challengeOutlineDefinition.docNameKey).toBe('name');
   });
 

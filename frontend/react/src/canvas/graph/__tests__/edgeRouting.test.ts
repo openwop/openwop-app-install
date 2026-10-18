@@ -47,26 +47,28 @@ describe('path builders emit valid, finite SVG', () => {
   it('straight', () => {
     expect(straightPath(s, t)).toBe('M 0 0 L 100 100');
   });
-  it('bezier is a cubic that starts at s and ends at t', () => {
-    const d = bezierPath(s, t, 'right', 'left');
-    expect(d.startsWith('M 0 0 C')).toBe(true);
-    expect(d.endsWith('100 100')).toBe(true);
-    expect(d).not.toMatch(/NaN|Infinity/);
+  it('bezier is a cubic that starts at s, ends at t, and leaves each port along its outward normal', () => {
+    // Asymmetric span 200×60: |st| = √43600 ≈ 208.81, control offset = half ≈ 104.40
+    // (inside the 40–200 clamp). Right port → c1 pushed +x; left port → c2 pushed −x.
+    expect(bezierPath({ x: 0, y: 0 }, { x: 200, y: 60 }, 'right', 'left')).toBe('M 0 0 C 104.4 0 95.6 60 200 60');
+    expect(bezierPath(s, t, 'right', 'left')).not.toMatch(/NaN|Infinity/);
   });
   it('step makes right angles (two mid vertices)', () => {
     const d = stepPath({ x: 0, y: 0 }, { x: 100, y: 40 }, 'right');
     expect(d).toBe('M 0 0 L 50 0 L 50 40 L 100 40');
   });
   it('orthogonal stubs off each port then bridges', () => {
-    const d = orthogonalPath({ x: 0, y: 0 }, { x: 200, y: 0 }, 'right', 'left');
-    expect(d.split('L').length).toBeGreaterThanOrEqual(4); // multiple segments
-    expect(d).not.toMatch(/NaN/);
+    // 24px stubs out of each port (0→24 rightward; 200→176 leftward), then one
+    // bend on the dominant (x) axis at the midpoint x = 100.
+    const d = orthogonalPath({ x: 0, y: 0 }, { x: 200, y: 80 }, 'right', 'left');
+    expect(d).toBe('M 0 0 L 24 0 L 100 0 L 100 80 L 176 80 L 200 80');
   });
 });
 
 describe('edgePath — dispatch + auto edges', () => {
   it('defaults to bezier with auto edges', () => {
-    expect(edgePath(box(0, 0), box(400, 0)).startsWith('M')).toBe(true);
+    // Auto right→left ports (100,30)→(400,30); span 300 → offset 150: a CUBIC, not a line.
+    expect(edgePath(box(0, 0), box(400, 0))).toBe('M 100 30 C 250 30 250 30 400 30');
   });
   it('honours explicit edges + routing', () => {
     const d = edgePath(box(0, 0, 100, 60), box(0, 400, 100, 60), { sourceEdge: 'bottom', targetEdge: 'top', routing: 'straight' });
@@ -86,14 +88,15 @@ describe('edgeMidpoint', () => {
 
 describe('gridLayout', () => {
   it('places N nodes in a √N grid, input order stable', () => {
-    const m = gridLayout(['a', 'b', 'c', 'd'], { w: 100, h: 100, gap: 20, originX: 0, originY: 0 });
+    // Non-square cells (100×50) so columns step by w+gap and rows by h+gap.
+    const m = gridLayout(['a', 'b', 'c', 'd'], { w: 100, h: 50, gap: 20, originX: 0, originY: 0 });
     expect(m.get('a')).toEqual({ x: 0, y: 0 });
     expect(m.get('b')).toEqual({ x: 120, y: 0 });
-    expect(m.get('c')).toEqual({ x: 0, y: 120 });
-    expect(m.get('d')).toEqual({ x: 120, y: 120 });
+    expect(m.get('c')).toEqual({ x: 0, y: 70 });
+    expect(m.get('d')).toEqual({ x: 120, y: 70 });
   });
   it('handles a single node', () => {
-    expect(gridLayout(['solo'], { w: 100, h: 100, originX: 10, originY: 10 }).get('solo')).toEqual({ x: 10, y: 10 });
+    expect(gridLayout(['solo'], { w: 100, h: 100, originX: 10, originY: 30 }).get('solo')).toEqual({ x: 10, y: 30 });
   });
 });
 
@@ -124,9 +127,13 @@ describe('contentBounds + fitView', () => {
     expect(pan).toEqual({ x: 450, y: 450 }); // (1000 - 100)/2
   });
   it('fitView zooms OUT to frame large content (never below 0.25)', () => {
-    const { zoom } = fitView({ minX: 0, minY: 0, maxX: 4000, maxY: 3000 }, 800, 600, 40);
-    expect(zoom).toBeGreaterThanOrEqual(0.25);
-    expect(zoom).toBeLessThan(1);
+    // 2000×1500 in 800×600 (margin 40): 720/2000 = 0.36 vs 520/1500 ≈ 0.3467 — the
+    // tighter axis wins, ABOVE the 0.25 floor (4000×3000 would hit the floor and
+    // prove nothing beyond the next case).
+    const { zoom, pan } = fitView({ minX: 0, minY: 0, maxX: 2000, maxY: 1500 }, 800, 600, 40);
+    expect(zoom).toBeCloseTo(0.3467, 4);
+    expect(pan.x).toBeCloseTo(53.33, 2); // (800 - 2000·z)/2
+    expect(pan.y).toBeCloseTo(40, 6);    // (600 - 1500·z)/2
   });
   it('fitView floors zoom at 0.25 for enormous content', () => {
     expect(fitView({ minX: 0, minY: 0, maxX: 100000, maxY: 100000 }, 800, 600).zoom).toBe(0.25);

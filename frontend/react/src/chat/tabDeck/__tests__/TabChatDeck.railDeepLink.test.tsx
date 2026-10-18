@@ -1,6 +1,9 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { render, screen, act } from '@testing-library/react';
+import { render, screen, act, within } from '@testing-library/react';
 import { MemoryRouter, useLocation } from 'react-router-dom';
+import type { UseChatSessionsResult } from '../../hooks/useChatSessions.js';
+import type { ChatSessionHeader } from '../../../client/chatSessionsClient.js';
+import type { BYOKActiveConfig } from '../../../byok/lib/useBYOKConfig.js';
 
 /**
  * ENG-14 — `?rail=` deep-link parity for the multi-tab deck.
@@ -10,14 +13,20 @@ import { MemoryRouter, useLocation } from 'react-router-dom';
  * a feature CTA that targets a rail (the Studio publication link → the reviews
  * inbox) still navigates and still renders a chat, so nothing looks broken —
  * the user just lands on whatever tab localStorage last held, and the CTA's
- * intent is gone. Nothing throws, so only a test pins it.
+ * intent is gone. Nothing throws, so only a test pins it. Breaks if `reviews` is not
+ * selected, `progress` does not open the Workbench Run tab, an unknown value blanks
+ * the rail, or the param is not stripped from the URL.
  */
 
 vi.mock('../TabSession.js', () => ({
   TabSession: ({ sessionId }: { sessionId: string }) => <div data-testid="tabsession" data-sid={sessionId} />,
 }));
-vi.mock('../../hooks/useChatSessions.js', () => ({
-  useChatSessions: () => ({ sessions: [], isLoading: false, error: null, markRead: vi.fn(), createSession: vi.fn(), rename: vi.fn(() => Promise.resolve()), remove: vi.fn(() => Promise.resolve()) }),
+vi.mock('../../hooks/useChatSessions.js', () => ({ useChatSessions: () => sessionsStub() }));
+vi.mock('../../conversations/useRunningConversations.js', () => ({ useRunningConversations: () => new Set<string>() }));
+vi.mock('../../reviews/reviewClient.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../reviews/reviewClient.js')>()),
+  listReviews: async () => [],
+  getReview: async () => { throw new Error('not used in this test'); },
 }));
 vi.mock('../../../auth/useAuth.js', () => ({
   useAuth: () => ({ user: null }),
@@ -25,7 +34,30 @@ vi.mock('../../../auth/useAuth.js', () => ({
 
 import { TabChatDeck } from '../TabChatDeck.js';
 
-const CONFIG = { provider: 'demo', model: 'demo-model', credentialRef: 'managed:demo' } as never;
+// Typed stand-ins for the deck's server reads (X4/X3): every UseChatSessionsResult
+// member, production-shaped rows, and the two other server reads the deck makes
+// (the reviews inbox poll and the running-conversations poll) — never live (ADR 0661).
+const row = (o: Partial<ChatSessionHeader> & { sessionId: string }): ChatSessionHeader => ({
+  tenantId: 't1', title: 'New chat', createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z', messageCount: 1, ...o,
+});
+function sessionsStub(over: Partial<UseChatSessionsResult> = {}): UseChatSessionsResult {
+  return {
+    sessions: [], isLoading: false, error: null,
+    refresh: vi.fn(async () => undefined),
+    createSession: vi.fn(async () => row({ sessionId: 'created' })),
+    openWith: vi.fn(async () => row({ sessionId: 'opened' })),
+    createConversation: vi.fn(async () => row({ sessionId: 'conversation' })),
+    openWorkspace: vi.fn(async () => null),
+    rename: vi.fn(async () => undefined),
+    remove: vi.fn(async () => undefined),
+    markRead: vi.fn(async () => undefined),
+    attachBoard: vi.fn(async () => undefined),
+    addParticipant: vi.fn(async () => undefined),
+    removeParticipant: vi.fn(async () => undefined),
+    ...over,
+  };
+}
+const CONFIG: BYOKActiveConfig = { provider: 'demo', model: 'demo-model', credentialRef: 'managed:demo' };
 
 beforeEach(() => { localStorage.clear(); });
 
@@ -33,23 +65,24 @@ async function renderAt(url: string): Promise<void> {
   await act(async () => {
     render(
       <MemoryRouter initialEntries={[url]}>
-        <TabChatDeck config={CONFIG} onReconfigureBYOK={vi.fn()} />
+        <TabChatDeck config={CONFIG} byokStored onReconfigureBYOK={vi.fn()} />
       </MemoryRouter>,
     );
   });
 }
 
-/** The rail tablist exposes which tab is selected; read it rather than internals. */
+/** The RAIL's tablist exposes which rail tab is selected; read it rather than
+ *  internals. Scoped to the rail: the chat-tab strip always has a selected tab too,
+ *  so an unscoped query could never come back empty. */
 function selectedRailTab(): string | null {
-  const selected = screen.queryAllByRole('tab', { selected: true });
+  const selected = within(screen.getByRole('tablist', { name: 'Chat tool tabs' })).queryAllByRole('tab', { selected: true });
   return selected.length > 0 ? (selected[0]!.textContent?.trim() ?? null) : null;
 }
 
 describe('TabChatDeck — ?rail= deep link (ENG-14)', () => {
-  it('selects the reviews rail when deep-linked, instead of the persisted default', async () => {
-    // Persist a DIFFERENT rail first, so a pass cannot come from the default
-    // happening to match — the deep link has to actually override it.
-    localStorage.setItem('openwop-app.chat.rail-tab', JSON.stringify('conversations'));
+  it('selects the reviews rail when deep-linked, instead of the Conversations default', async () => {
+    // The deck opens on Conversations by default, so a pass requires the deep link
+    // to actually move the selection.
     await renderAt('/chat?rail=reviews');
     expect(selectedRailTab()).toMatch(/review/i);
   });
@@ -58,16 +91,16 @@ describe('TabChatDeck — ?rail= deep link (ENG-14)', () => {
     // Runs moved out of the rail; the old deep link must still land somewhere
     // real — the right-hand Workbench, on Run — not be silently dropped.
     await renderAt('/chat?rail=progress');
-    const pane = screen.getByRole('complementary', { name: /workbench/i });
-    expect(pane).toBeTruthy();
+    screen.getByRole('complementary', { name: /workbench/i }); // throws if the Workbench is not open
     expect(screen.getByRole('tab', { name: /^run/i }).getAttribute('aria-selected')).toBe('true');
   });
 
   it('ignores an unknown rail value rather than selecting nothing', async () => {
     await renderAt('/chat?rail=not-a-real-rail');
     // The guard only accepts the deck's own LeftRailTab union, so an unknown
-    // value must leave the existing selection intact — not blank the rail.
-    expect(selectedRailTab()).not.toBeNull();
+    // value must leave the existing selection (the Conversations default) intact —
+    // not blank the rail.
+    expect(selectedRailTab()).toMatch(/conversations/i);
   });
 
   it('strips the param so reload/back/share does not re-trigger', async () => {
@@ -83,7 +116,7 @@ describe('TabChatDeck — ?rail= deep link (ENG-14)', () => {
       render(
         <MemoryRouter initialEntries={['/chat?rail=progress']}>
           <LocationSpy />
-          <TabChatDeck config={CONFIG} onReconfigureBYOK={vi.fn()} />
+          <TabChatDeck config={CONFIG} byokStored onReconfigureBYOK={vi.fn()} />
         </MemoryRouter>,
       );
     });

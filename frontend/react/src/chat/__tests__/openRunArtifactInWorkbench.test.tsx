@@ -7,8 +7,12 @@
  * filtered by run) and offers the Workbench only when one is confirmed for the
  * clicked node — never a button to nowhere, and never on a surface without a
  * Workbench.
+ *
+ * What breaks it: offering the Workbench for a different node's artifact (or the
+ * first one listed), opening something other than the confirmed artifact, or
+ * looking artifacts up on a surface with no Workbench.
  */
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
@@ -34,9 +38,14 @@ import { MessageFeed } from '../MessageFeed.js';
 import type { ChatMessage } from '../types.js';
 
 const run: ChatMessage = {
-  id: 'm-run', role: 'workflow_run', content: '',
+  id: 'm-run', role: 'workflow_run', content: '', createdAt: '2026-09-29T00:00:00Z',
   workflowRun: { slug: 'plan', workflowName: 'Plan', workflowId: 'wf', runId: 'run-7', status: 'completed', totalNodes: 1, completedNodeIds: ['draft'], nodeOutputs: {}, failedNodeIds: [], currentNodeName: null, nodeNames: {}, startedAt: '2026-09-29T00:00:00Z' },
-} as unknown as ChatMessage;
+};
+
+/** Let the feed's lookup settle: dynamic import → mocked read → state update. */
+async function drain(): Promise<void> {
+  await act(async () => { for (let i = 0; i < 5; i += 1) await new Promise((r) => setImmediate(r)); });
+}
 
 const base = { messages: [run], tenantId: 't', onResolveInterrupt: vi.fn(async () => undefined), onOpenWorkflowProgress: vi.fn(), focusedWorkflowMessageId: null };
 
@@ -63,6 +72,8 @@ describe('open a run artifact in the Workbench (ADR 0768 follow-up P2)', () => {
     fireEvent.click(screen.getByRole('button', { name: 'view-output' }));
     await screen.findByText('preview-only');
     await waitFor(() => expect(lookup.calls).toEqual(['run-7']));
+    await drain(); // the lookup's result has been applied before asserting absence
+    expect(screen.getByText('preview-only')).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'open-in-workbench' })).toBeNull();
   });
 
@@ -70,6 +81,7 @@ describe('open a run artifact in the Workbench (ADR 0768 follow-up P2)', () => {
     render(<MemoryRouter><MessageFeed {...base} /></MemoryRouter>);
     fireEvent.click(screen.getByRole('button', { name: 'view-output' }));
     await screen.findByText('preview-only');
+    await drain(); // a lookup, if one were started, has had time to land
     expect(lookup.calls).toEqual([]);
   });
 });

@@ -84,10 +84,10 @@ export function AgentDetailsEditor({
         description: description.trim(),
         heartbeatIntervalMs: heartbeatMs,
         autonomyLevel: autonomy,
-      });
+      }, { ifMatch: entry.etag }); // ADR 0775 P4 — refuse, don't overwrite, a concurrent edit
       onSaved();
     } catch (err) {
-      setError(writeErrorMessage(err, t('common:error_forbidden')));
+      setError(writeErrorMessage(err, t('common:error_forbidden'), t('agentChangedReload')));
       setSaving(false);
     }
   };

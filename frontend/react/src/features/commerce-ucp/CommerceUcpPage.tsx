@@ -20,7 +20,7 @@ import { useFeatureAccess } from '../../featureToggles/FeatureAccessContext.js';
 import { copyToClipboard } from '../../ui/copyToClipboard.js';
 import {
   listOrgs, listUcpClients, provisionUcpClient, deleteUcpClient, ucpPublicEndpoints,
-  UCP_SCOPES, type Org, type UcpClient, type UcpScope, type ProvisionedClient,
+  UCP_SCOPES, type Org, type UcpClient, type UcpScope, type ProvisionedClient, type UcpSettlement,
 } from './commerceUcpClient.js';
 
 export function CommerceUcpPage(): JSX.Element {
@@ -119,10 +119,11 @@ function ClientsCard({ orgId }: { orgId: string }): JSX.Element {
   }, [clients, query]);
 
   const [clientsError, setClientsError] = useState<string | null>(null);
+  const [settlement, setSettlement] = useState<UcpSettlement>('demo');
 
   const reload = useCallback(() => {
     void listUcpClients(orgId)
-      .then((c) => { setClients(c); setClientsError(null); })
+      .then((r) => { setClients(r.clients); setSettlement(r.settlement); setClientsError(null); })
       .catch((e) => setClientsError(e instanceof Error ? e.message : String(e)));
   }, [orgId]);
   useEffect(() => { setClients(null); setClientsError(null); reload(); }, [reload]);
@@ -142,6 +143,8 @@ function ClientsCard({ orgId }: { orgId: string }): JSX.Element {
             button still implies "you may provision here once ready". */}
         {clientsError ? null : <Button variant="primary" onClick={() => setCreating(true)}>{t('newClient')}</Button>}
       </div>
+
+      {settlement === 'refused_live' ? <Notice variant="warning">{t('liveRefusedNotice')}</Notice> : null}
 
       {secret ? (
         <div className="surface-card u-p-3 u-grid u-gap-2">

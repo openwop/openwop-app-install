@@ -4,13 +4,21 @@
  * `validateArtifact`) and `validateAppDoc` (the editor PATCH path). The two
  * gates agreeing is the phase's core invariant — a document the AI can emit
  * must be saveable by the editor, and vice versa.
+ *
+ * The "vice versa" half is ABR-GATES-1 (#4756): an unknown key is refused by
+ * BOTH gates (the per-path matrix lives in renderPreservesFacets.test.ts).
+ * Sabotage witnesses (grade-tests w36): WORD_RE admitting '-', the duplicate-
+ * model check, referenceTo, the adapterRef URL check, the navigate `to`
+ * requirement, BINDING_PATH_RE, ENV_KEY_RE, a per-definition node budget, the
+ * componentDefinitions catalog walk and each soft cross-reference warning —
+ * each reds its case below. (The ADR 0343 `migrateAppDoc` cases were cut in
+ * w36: the module has no production importer, so they guarded nothing.)
  */
 import { describe, it, expect, beforeAll } from 'vitest';
 import { validateArtifact } from '../../../host/artifactTypes.js';
 import { registerAppBuilderArtifactType } from '../artifactTypes.js';
 import { registerAppBuilderComponents } from '../componentCatalog.js';
 import { validateAppDoc } from '../validateAppDoc.js';
-import { migrateAppDoc, appDocVersion, APP_DOC_SCHEMA_VERSION } from '../migrations.js';
 
 beforeAll(() => {
   registerAppBuilderArtifactType();
@@ -110,6 +118,11 @@ describe('ADR 0343 — both gates accept the comprehensive document', () => {
     expect(validateArtifact('canvas.app-builder', legacy).valid).toBe(true);
     expect(validateAppDoc(legacy).errors).toEqual([]);
   });
+  it('an unknown top-level key is refused by BOTH gates (ABR-GATES-1 — the "vice versa" half)', () => {
+    const doc = { ...comprehensiveDoc(), script: 'x' };
+    expect(validateArtifact('canvas.app-builder', doc).valid).toBe(false);
+    expect(validateAppDoc(doc).errors).toEqual([expect.objectContaining({ path: 'script', code: 'unknown_prop' })]);
+  });
 });
 
 describe('ADR 0343 — hard structural mirrors (editor gate)', () => {
@@ -154,9 +167,18 @@ describe('ADR 0343 — hard structural mirrors (editor gate)', () => {
     expect(errorPaths(withFacet({ envRequirements: [{ key: 'api_key', purpose: 'x' }] }))).toContain('envRequirements[0].key');
   });
   it('counts componentDefinitions trees against the document node budget', () => {
-    const wide = Array.from({ length: 201 }, () => ({ type: 'divider' }));
-    const doc = withFacet({ componentDefinitions: [{ id: 'big', name: 'Big', root: { type: 'stack', children: wide } }] });
-    expect(validateAppDoc(doc).errors.some((e) => e.code === 'illegal_children')).toBe(true);
+    // Sized so ONLY the shared 2000-node budget can trip: no level exceeds the
+    // 200 per-level cap, the screen tree alone is 1510 nodes and the three
+    // definitions add 600 (a per-definition budget would never fire).
+    const dividers = (n: number): Record<string, unknown>[] => Array.from({ length: n }, () => ({ type: 'divider' }));
+    const doc = withFacet({
+      componentDefinitions: Array.from({ length: 3 }, (_, i) => ({ id: `d${i}`, name: `D${i}`, root: { type: 'stack', children: dividers(199) } })),
+    });
+    (doc.screens as Record<string, unknown>[])[0]!.components = Array.from({ length: 10 }, () => ({ type: 'stack', children: dividers(150) }));
+    const errs = validateAppDoc(doc).errors;
+    expect(errs.some((e) => e.path.startsWith('componentDefinitions[') && e.message.includes('exceeds 2000'))).toBe(true);
+    // Positive control: the same screen tree without the definitions is in budget.
+    expect(validateAppDoc({ ...doc, componentDefinitions: [] }).errors).toEqual([]);
   });
   it('validates componentDefinitions roots against the closed catalog', () => {
     const doc = withFacet({ componentDefinitions: [{ id: 'x', name: 'X', root: { type: 'holo-deck' } }] });
@@ -201,25 +223,5 @@ describe('ADR 0343 — soft cross-references (mid-edit states stay saveable)', (
     expect(paths).toContain('authProfile.guards[0].screenId');
     expect(paths).toContain('authProfile.guards[0].redirectTo');
     expect(paths).toContain('authProfile.guards[0].requiresRole');
-  });
-});
-
-describe('ADR 0343 — migration mechanism', () => {
-  it('a document without schemaVersion is v1 by definition and passes through untouched', () => {
-    const doc = { name: 'Old', screens: [] };
-    expect(appDocVersion(doc)).toBe(1);
-    const r = migrateAppDoc(doc);
-    expect(r.migrated).toBe(false);
-    expect(r.state).toBe(doc); // identity — not even a copy
-  });
-  it('a current-version document passes through untouched', () => {
-    const doc = comprehensiveDoc();
-    expect(migrateAppDoc(doc)).toEqual({ state: doc, migrated: false });
-  });
-  it('a FUTURE version is left alone (fail-open read; never truncate a newer writer)', () => {
-    const doc = { schemaVersion: APP_DOC_SCHEMA_VERSION + 5, name: 'From the future', screens: [] };
-    const r = migrateAppDoc(doc);
-    expect(r.migrated).toBe(false);
-    expect(r.state).toBe(doc);
   });
 });

@@ -213,4 +213,21 @@ export const messages = {
   fieldAvatar: 'Avatar',
   fieldEquipment: 'Équipement',
   fieldInterests: 'Centres d’intérêt',
+
+  // ADR 0888 D1 — the workspace directory is opt-in per person
+  wsShareTitle: 'Qui apparaît ici',
+  wsShareBodyNotShared: 'Cet espace de travail n’affiche que les personnes qui ont choisi d’y partager leur profil. Le vôtre n’y est pas partagé.',
+  wsShareBodyShared: 'Cet espace de travail n’affiche que les personnes qui ont choisi d’y partager leur profil. Le vôtre y est partagé.',
+  wsShareAction: 'Partager mon profil ici',
+  wsUnshareAction: 'Ne plus partager ici',
+  wsShareFailed: 'Impossible de modifier le partage. Réessayez.',
+  wsNoSharedTitle: 'Personne n’a encore partagé son profil ici',
+  wsNoSharedBody: 'Les membres de cet espace de travail apparaissent dès qu’ils y partagent leur profil.',
+  wsTruncated: 'Affichage des {{count}} premières personnes.',
+  wsEndorseHomeOnly: 'Les recommandations ne sont pas encore disponibles dans les espaces de travail partagés.',
+  wsShareDisclosure: 'Les membres de {{workspace}} verront votre nom, votre photo, votre poste, votre bio, votre localisation, vos liens, vos compétences et votre disponibilité. Vous pouvez arrêter le partage à tout moment.',
+  wsShareDisclosureUnnamed: 'Les membres de cet espace de travail verront votre nom, votre photo, votre poste, votre bio, votre localisation, vos liens, vos compétences et votre disponibilité. Vous pouvez arrêter le partage à tout moment.',
+  wsSharedToast: 'Votre profil est maintenant partagé avec cet espace de travail.',
+  wsUnsharedToast: 'Votre profil n’est plus partagé avec cet espace de travail.',
+  wsNoSharedBodyMine: 'Votre profil est partagé ici. Les autres apparaissent dès qu’ils partagent le leur.',
 } as const;

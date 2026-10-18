@@ -12,6 +12,8 @@
  */
 import { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { Button } from '../../ui/Button.js';
+import { PageHeader } from '../../ui/PageHeader.js';
 import { BarChartIcon } from '../../ui/icons/index.js';
 import { DataTable, type DataColumn } from '../../ui/DataTable.js';
 import { StateCard } from '../../ui/StateCard.js';
@@ -137,14 +139,18 @@ export function MetricsPage() {
 
   return (
     <div className="page" data-walkthrough="kicktodo-metrics.page">
-      <header className="page-header">
-        <h1 className="page-header__title">{t('title')}</h1>
-        <p className="page-header__lede">{t('lede')}</p>
-      </header>
+      <PageHeader title={t('title')} lede={t('lede')} />
 
       {asOf && <p className="muted u-fs-13">{t('asOfNote', { when: formatDate(asOf, { timeStyle: 'short' }) })}</p>}
 
-      {error && <Notice variant="error">{t('loadError')}</Notice>}
+      {/* CS-4 — a failed read offers its way back (DESIGN.md §4.6). The retry
+          drops `loaded` so the in-flight read shows loading, not empty tables. */}
+      {error && (
+        <div className="action-bar">
+          <Notice variant="error" announce={t('loadError')}>{t('loadError')}</Notice>
+          <Button variant="quiet" size="sm" onClick={() => { setLoaded(false); void reload(); }}>{t('common:retry')}</Button>
+        </div>
+      )}
       {!loaded && !error && <StateCard loading title={t('title')} />}
 
       {loaded && !error && (

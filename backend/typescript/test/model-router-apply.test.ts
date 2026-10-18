@@ -1,8 +1,14 @@
 /**
- * ADR 0130 Phase 3b — effectiveModelTarget (replay-safe stamped-route read).
+ * ADR 0130 Phase 3b / ADR 0610 D4 (MRC-2) / ADR 0124 Phase 3 — the dispatch-time
+ * READ of `run.metadata.modelRoute` (replayed verbatim on `:fork`) and the
+ * per-exchange model override layered over it.
+ *
+ * Breaks if a stamp naming a NON-routable vendor is dispatched (the exfil
+ * read-guard), if a stamp without a usable model overrides the run's own model,
+ * or if a partial stamp/override drops the field it did not name.
  */
 import { describe, it, expect } from 'vitest';
-import { effectiveModelTarget } from '../src/features/model-router/applyRoute.js';
+import { effectiveModelTarget, applyExchangeOverride } from '../src/features/model-router/applyRoute.js';
 
 describe('effectiveModelTarget', () => {
   it('returns the run target when no stamp', () => {
@@ -18,12 +24,16 @@ describe('effectiveModelTarget', () => {
       .toEqual({ provider: 'anthropic', model: 'big' });
   });
   it('ignores a malformed stamp', () => {
-    expect(effectiveModelTarget('anthropic', 'small', { modelRoute: { provider: 'x' } })).toEqual({ provider: 'anthropic', model: 'small' });
+    // A ROUTABLE provider with no / an empty model: the model check is the ONLY
+    // guard here (a non-routable provider would also be dropped by the ADR 0610
+    // read-guard, which hid this leg's check).
+    expect(effectiveModelTarget('anthropic', 'small', { modelRoute: { provider: 'openai' } })).toEqual({ provider: 'anthropic', model: 'small' });
+    expect(effectiveModelTarget('anthropic', 'small', { modelRoute: { provider: 'openai', model: '' } })).toEqual({ provider: 'anthropic', model: 'small' });
+    // Not an object at all — caught by the object check AND the model check (honest double guard).
     expect(effectiveModelTarget('anthropic', 'small', { modelRoute: 'nope' })).toEqual({ provider: 'anthropic', model: 'small' });
   });
 });
 
-import { applyExchangeOverride } from '../src/features/model-router/applyRoute.js';
 describe('applyExchangeOverride (ADR 0124 Phase 3 per-exchange switch)', () => {
   const base = { provider: 'anthropic', model: 'small' };
   it('no override → base unchanged', () => {

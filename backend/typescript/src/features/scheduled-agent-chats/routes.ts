@@ -24,6 +24,7 @@ import { resolveAgentForTenant } from '../../host/agentVisibility.js';
 import { getConversationMeta } from '../../host/conversationStore.js';
 import { isVisibleToAsync } from '../../host/conversationVisibility.js';
 import { assertChannelManage, isChannelAgentMember, getChannel } from '../channels/channelService.js';
+import { channelAuthorityOf } from '../../host/channelAuthority.js';
 import { canSeeScheduledChat, createScheduledChat, deleteScheduledChat, deleteScheduledChatsForAgent, getScheduledChat, listScheduledChatsWithStatus, setScheduledChatEnabled, SCHEDULED_AGENT_CHATS_TOGGLE, type ScheduledChat } from './scheduledChatService.js';
 
 const FEATURE = { toggleId: SCHEDULED_AGENT_CHATS_TOGGLE, label: 'Scheduled agent chats' } as const;
@@ -90,7 +91,13 @@ export function registerScheduledChatRoutes(deps: RouteDeps): void {
       if (!(await isVisibleToAsync(meta, tenantId, actingUserOf(req)))) {
         throw new OpenwopError('not_found', 'Conversation not found.', 404, { conversationId });
       }
-      res.status(201).json({ chat: await createScheduledChat(tenantId, { orgId }, user.userId, { ...body, agentId, conversationId }) });
+      // ADR 0879 D7 (architect C3) — a channel is posted to through the channel's own
+      // owner-gated schedule lane (below), never through an org schedule, which checks
+      // only that the caller can SEE the conversation (any member sees a public channel).
+      if (meta?.type === 'channel') {
+        throw new OpenwopError('validation_error', 'Schedule channel posts from the channel itself.', 400, { conversationId, code: 'channel_use_channel_schedule' });
+      }
+      res.status(201).json({ chat: await createScheduledChat(tenantId, { orgId }, user.userId, { ...body, agentId, conversationId }, actingUserOf(req) ?? user.userId, req.personalTenant) });
     } catch (err) { next(err); }
   });
 
@@ -156,7 +163,7 @@ export function registerScheduledChatRoutes(deps: RouteDeps): void {
   app.post(CH, async (req, res, next) => {
     try {
       const { tenantId, userId, channelId } = await channelCaller(req);
-      const meta = await assertChannelManage(tenantId, channelId, userId); // owner-gated
+      const meta = await assertChannelManage(tenantId, channelId, userId, await channelAuthorityOf(req)); // owner-or-admin + workspace:write (ADR 0879 D1/D3)
       const body = (req.body ?? {}) as Record<string, unknown>;
       const agentId = requireString(body.agentId, 'agentId').trim(); // canonical: check == store
       if (!isChannelAgentMember(meta, agentId)) {
@@ -164,7 +171,7 @@ export function registerScheduledChatRoutes(deps: RouteDeps): void {
       }
       // conversationId is FORCED to the channel — a channel schedule cannot target a
       // foreign conversation (any body conversationId is ignored).
-      const chat = await createScheduledChat(tenantId, { channelId }, userId, { ...body, agentId, conversationId: channelId });
+      const chat = await createScheduledChat(tenantId, { channelId }, userId, { ...body, agentId, conversationId: channelId }, req.userId ?? req.principal?.principalId ?? userId, req.personalTenant);
       res.status(201).json({ chat });
     } catch (err) { next(err); }
   });
@@ -172,7 +179,7 @@ export function registerScheduledChatRoutes(deps: RouteDeps): void {
   app.post(`${CH}/:chatId/pause`, async (req, res, next) => {
     try {
       const { tenantId, userId, channelId } = await channelCaller(req);
-      await assertChannelManage(tenantId, channelId, userId); // owner-gated
+      await assertChannelManage(tenantId, channelId, userId, await channelAuthorityOf(req)); // owner-or-admin + workspace:write (ADR 0879 D1/D3)
       const enabled = (req.body as { enabled?: unknown })?.enabled !== false;
       res.json({ chat: await setScheduledChatEnabled(tenantId, { channelId }, req.params.chatId, enabled) });
     } catch (err) { next(err); }
@@ -181,7 +188,7 @@ export function registerScheduledChatRoutes(deps: RouteDeps): void {
   app.delete(`${CH}/:chatId`, async (req, res, next) => {
     try {
       const { tenantId, userId, channelId } = await channelCaller(req);
-      await assertChannelManage(tenantId, channelId, userId); // owner-gated
+      await assertChannelManage(tenantId, channelId, userId, await channelAuthorityOf(req)); // owner-or-admin + workspace:write (ADR 0879 D1/D3)
       await deleteScheduledChat(tenantId, { channelId }, req.params.chatId);
       res.status(204).end();
     } catch (err) { next(err); }

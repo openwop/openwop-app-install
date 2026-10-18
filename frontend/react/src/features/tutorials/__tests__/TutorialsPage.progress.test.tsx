@@ -4,10 +4,26 @@
  * bleed A's done-set into B's localStorage key. The fix keys TutorialDetail by
  * tutorial id so the progress hook remounts; this test drives a direct A→B
  * route change inside one router and pins both keys.
+ *
+ * w52: fetch-free (the tutorials client is mocked — anonymous progress, content
+ * reads failing to the in-tree floor), and the wait for tutorial B no longer
+ * swallows its timeout: round 1's `.catch(() => undefined)` let "B's key is
+ * absent" pass when B had never rendered at all. Sabotage-witnessed: dropping
+ * `key={tutorial.id}` on TutorialDetail writes A's set under B's key.
  */
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { render, screen, fireEvent, cleanup } from '@testing-library/react';
 import { MemoryRouter, Routes, Route, useNavigate } from 'react-router-dom';
+
+type Client = typeof import('../tutorialsClient.js');
+const client = vi.hoisted(() => ({
+  fetchTutorialProgress: vi.fn<Client['fetchTutorialProgress']>(async () => ({ ok: true, persisted: false, rows: [] })),
+  saveTutorialProgress: vi.fn<Client['saveTutorialProgress']>(async () => ({ ok: true })),
+  fetchTutorials: vi.fn<Client['fetchTutorials']>(async () => ({ ok: false, degraded: false, tutorials: [] })),
+  fetchTutorial: vi.fn<Client['fetchTutorial']>(async () => ({ ok: false, tutorial: null })),
+}));
+vi.mock('../tutorialsClient.js', () => client);
+
 import { TutorialsPage } from '../TutorialsPage.js';
 
 afterEach(() => { cleanup(); localStorage.clear(); });
@@ -39,7 +55,10 @@ describe('TutorialsPage — progress isolation (GT-1)', () => {
 
     // jump DIRECTLY to tutorial B (same router, no list in between)
     fireEvent.click(screen.getByRole('button', { name: 'jump-to-b' }));
-    await screen.findByText('Build Your First Sales Funnel', { selector: 'h1, h2, h3, p, span, div' }, { timeout: 2000 }).catch(() => undefined);
+    // B must actually be on screen — a wait that returns quietly would let the
+    // "B's key is untouched" check pass with B never mounted.
+    expect(await screen.findByRole('heading', { name: 'Build Your First Sales Funnel' })).toBeTruthy();
+    expect(screen.queryByRole('heading', { name: 'Connect Your AI' })).toBeNull();
 
     // B's key must be untouched (absent or empty) and A's intact
     const bRaw = localStorage.getItem(keyOf(B));

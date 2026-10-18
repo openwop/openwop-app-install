@@ -34,13 +34,18 @@ let storage: Awaited<ReturnType<typeof openStorage>>;
 let merchantReply: Record<string, unknown> = { orderId: 'ext-1' };
 
 vi.mock('../src/host/egressPolicy.js', () => ({ assertEgressAllowed: async () => undefined }));
+// ADR 0875 D6 — the merchant call dials through undici's fetch with the pinned-
+// resolution dispatcher (not the global fetch), so the canned merchant rides there.
+vi.mock('undici', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('undici')>()),
+  fetch: async () => new Response(JSON.stringify(merchantReply), { status: 200, headers: { 'content-type': 'application/json' } }),
+}));
 
 beforeAll(async () => {
   storage = await openStorage('memory://');
   initHostExtPersistence(storage);
   process.env.OPENWOP_UCP_BUYER_ORG_CAP_MINOR = '100000000';
-  // Every merchant call answers from `merchantReply` — no network, no timing.
-  vi.stubGlobal('fetch', async () => new Response(JSON.stringify(merchantReply), { status: 200, headers: { 'content-type': 'application/json' } }));
+  // Every merchant call answers from `merchantReply` (the `undici` mock above) — no network, no timing.
 });
 beforeEach(async () => {
   await __resetUcpBuyer();

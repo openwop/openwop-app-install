@@ -21,19 +21,25 @@
  *
  * The card is driven through the REAL client functions it imports, never a
  * replica of its logic and never the hook directly.
+ *
+ * Sabotage that turns these red (CompatEndpointsCard.tsx): the `orgsFailed` branch
+ * removed; the zero-org branch removed; the zero-org state rendered as an announcing
+ * Notice; the create body's `orgId` blanked; the `if (!orgId) return` gate removed.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, waitFor, cleanup, act, fireEvent } from '@testing-library/react';
+import type * as PromptLibraryClient from '../../client/promptLibraryClient.js';
+import type * as CompatClient from '../lib/compatClient.js';
 
 const api = vi.hoisted(() => ({
-  listOrgs: vi.fn(),
-  listCompatEndpoints: vi.fn(),
+  listOrgs: vi.fn<typeof PromptLibraryClient.listOrgs>(),
+  listCompatEndpoints: vi.fn<typeof CompatClient.listCompatEndpoints>(),
   // The WRITE half (ORG-HON-2). `createCompatEndpoint` carries the organization
   // IN THE BODY (`{ orgId, label, baseUrl, … }`), so an empty one is not a 404 —
   // it is a POST that asks the backend to file a BYOK endpoint, key and all,
   // under no organization.
-  createCompatEndpoint: vi.fn(),
-  deleteCompatEndpoint: vi.fn(),
+  createCompatEndpoint: vi.fn<typeof CompatClient.createCompatEndpoint>(),
+  deleteCompatEndpoint: vi.fn<typeof CompatClient.deleteCompatEndpoint>(),
 }));
 vi.mock('../../client/promptLibraryClient.js', async (importOriginal) => {
   const orig = await importOriginal<Record<string, unknown>>();
@@ -59,8 +65,10 @@ const LOADING = 'Loading endpoints…';
 const busyRegion = (c: HTMLElement): Element | null => c.querySelector('[aria-busy="true"]');
 
 beforeEach(() => {
-  vi.clearAllMocks();
-  api.listCompatEndpoints.mockResolvedValue([]);
+  api.listOrgs.mockReset();
+  api.createCompatEndpoint.mockReset();
+  api.deleteCompatEndpoint.mockReset();
+  api.listCompatEndpoints.mockReset().mockResolvedValue([]);
 });
 afterEach(cleanup);
 
@@ -152,11 +160,12 @@ describe('compat endpoints — the org read is failed-vs-empty, and neither is "
     // write when there is an organization to write to. Without it, a card whose
     // create form is broken for everyone would satisfy them.
     api.createCompatEndpoint.mockResolvedValue({
-      id: 'e1', label: 'Local Ollama', baseUrl: 'https://vllm.internal/v1',
+      id: 'e1', orgId: 'o1', label: 'Local Ollama', baseUrl: 'https://vllm.internal/v1',
       hasKey: false, capabilities: { vision: false, tools: false, longContext: false },
+      createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
     });
     await attemptCreate();
     expect(api.createCompatEndpoint).toHaveBeenCalledTimes(1);
-    expect((api.createCompatEndpoint.mock.calls[0]?.[0] as { orgId: string }).orgId).toBe('o1');
+    expect(api.createCompatEndpoint.mock.calls[0]![0].orgId).toBe('o1');
   });
 });

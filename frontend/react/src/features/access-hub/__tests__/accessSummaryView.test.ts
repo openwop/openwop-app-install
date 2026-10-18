@@ -1,12 +1,24 @@
 /**
  * ADR 0864 — the projection from the summary to the console. The load-bearing
  * rule: a section the server omitted shows NO status and no card, never a 0.
+ *
+ * `t` is a real i18next instance over the feature's own `en` catalog, so the
+ * expectations are the rendered English — a key the view names that is missing
+ * from the catalog (or has no plural forms) renders the raw key and fails.
+ * Red if an omitted section draws a status/card (`w27g2-asv-omitted-endpoints`),
+ * the connection tone / scope axis / tab gating / banner choice / expired /
+ * firewall / members wiring breaks (`asv-*`), or a failed read draws anything.
  */
-import { describe, expect, it } from 'vitest';
-import type { TFunction } from 'i18next';
+import { beforeAll, describe, expect, it } from 'vitest';
+import i18next from 'i18next';
 import { accessSummaryView, type AccessSummary, type ConnectionCounts } from '../accessSummary.js';
+import { messages as en } from '../i18n/en.js';
 
-const t = ((raw: string, opts?: Record<string, unknown>) => { const key = raw.replace(/^access-hub:/, ''); return opts ? `${key}${JSON.stringify(opts)}` : key; }) as unknown as TFunction;
+const i18n = i18next.createInstance();
+beforeAll(async () => {
+  await i18n.init({ lng: 'en', ns: ['access-hub'], defaultNS: 'access-hub', resources: { en: { 'access-hub': en } }, interpolation: { escapeValue: false } });
+});
+const t = i18n.t; // i18next binds its member functions, so the detached `t` is safe
 const ALL = ['keys', 'connections', 'voice', 'endpoints', 'mcp', 'api-keys', 'orgs', 'capability-firewall'];
 const none: ConnectionCounts = { count: 0, needsReconnect: 0, reconnect: [] };
 
@@ -33,12 +45,12 @@ describe('accessSummaryView (ADR 0864)', () => {
     const v = accessSummaryView(full, 'workspace', ALL, t);
     expect(v.status).toEqual({
       keys: { meta: '2' },
-      connections: { meta: 'meta_issues{"count":1}', metaTone: 'attention' },
-      voice: { meta: 'meta_off' },
+      connections: { meta: '1 issue', metaTone: 'attention' },
+      voice: { meta: 'Off' },
       mcp: { meta: '0' },
       'api-keys': { meta: '4' },
       orgs: { meta: '1' },
-      'capability-firewall': { meta: 'meta_default' },
+      'capability-firewall': { meta: 'Default' },
       endpoints: { meta: '2' },
     });
   });
@@ -55,14 +67,20 @@ describe('accessSummaryView (ADR 0864)', () => {
   it('cards in design order; a broken connection tints its card and names itself in the banner', () => {
     const v = accessSummaryView(full, 'workspace', ALL, t);
     expect(v.cards.map((c) => c.key)).toEqual(['keys', 'connections', 'mcp', 'orgs']);
-    expect(v.cards[1]).toMatchObject({ value: 3, subTone: 'attention', sub: 'card_connections_issues{"count":1}' });
-    expect(v.cards[3]).toMatchObject({ label: 'card_members', value: 6 });
-    expect(v.banner?.title).toBe('banner_one_title{"name":"Google Drive"}');
+    expect(v.cards[1]).toMatchObject({ value: 3, subTone: 'attention', sub: '1 needs reconnecting' });
+    expect(v.cards[3]).toMatchObject({ label: 'Members', value: 6, sub: 'In 1 organization' });
+    expect(v.banner?.title).toBe('Google Drive needs reconnecting.');
   });
 
   it('several broken connections → a counted banner', () => {
-    const s: AccessSummary = { connections: { workspace: { count: 5, needsReconnect: 2, reconnect: [] }, personal: none } };
-    expect(accessSummaryView(s, 'workspace', ALL, t).banner?.title).toBe('banner_many_title{"count":2}');
+    // The server always names up to five (MAX_NAMED), so a real payload carries names:
+    // the COUNT, not an empty list, must be what picks the counted banner.
+    const reconnect = [
+      { connectionId: 'c1', displayName: 'Drive', provider: 'google' },
+      { connectionId: 'c2', displayName: 'Slack', provider: 'slack' },
+    ];
+    const s: AccessSummary = { connections: { workspace: { count: 5, needsReconnect: 2, reconnect }, personal: none } };
+    expect(accessSummaryView(s, 'workspace', ALL, t).banner?.title).toBe('2 connections need reconnecting.');
   });
 
   it('Personal scope reads the personal axis and draws no cards', () => {
@@ -80,7 +98,7 @@ describe('accessSummaryView (ADR 0864)', () => {
 
   it('expired API keys and stored firewall rules read as such', () => {
     const v = accessSummaryView({ apiKeys: { count: 3, expired: 1 }, firewall: { isDefault: false, rules: 2 } }, 'workspace', ALL, t);
-    expect(v.status['api-keys']).toEqual({ meta: 'meta_expired{"count":1}', metaTone: 'attention' });
-    expect(v.status['capability-firewall']).toEqual({ meta: 'meta_rules{"count":2}' });
+    expect(v.status['api-keys']).toEqual({ meta: '1 expired', metaTone: 'attention' });
+    expect(v.status['capability-firewall']).toEqual({ meta: '2 rules' });
   });
 });

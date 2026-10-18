@@ -1,4 +1,5 @@
 /**
+ * ADR 0684 phase 4 (the signed-out acquisition funnel), first link.
  * Measured on production 2026-09-15 (kicktodo-2, headless Chromium, `00027-drb`):
  * every Discover card rendered from the PUBLIC catalog linked to
  * `/discover/undefined`. The anonymous wire names the id `challengeId`
@@ -9,12 +10,19 @@
  * public-shaped body, renders the anonymous Discover branch, and asserts the
  * card hrefs carry the challenge id — the exact thing the API-level validation
  * pass could never see.
+ *
+ * Sabotage: map `id` from anything but `challengeId` in
+ * `publicChallengeToSummary` and both cases red.
  */
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { render, screen, cleanup, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 
 vi.mock('../../../auth/useAuth.js', () => ({ useAuth: () => ({ user: null, loading: false }) }));
+
+/** The public list body as the wire types it — `satisfies`, never a cast (a
+ *  bare cast is exactly what hid the incident's mismatch from tsc). */
+type PublicCatalogBody = { orgId: string; locale: string; challenges: PublicChallengeWire[] };
 
 const PUBLIC_BODY = {
   orgId: 'host-kicktodo',
@@ -23,7 +31,7 @@ const PUBLIC_BODY = {
     { challengeId: 'chal:demo-kicktodo-deep-work', version: 1, title: 'Deep Work', summary: 's', outcome: 'o', durationDays: 30, servedLocale: 'en', exactLocale: true, activities: [], depthLevel: 'intermediate' },
     { challengeId: 'chal:demo-kicktodo-sleep-reset', version: 1, title: 'Sleep Reset', summary: 's', outcome: 'o', durationDays: 21, servedLocale: 'en', exactLocale: true, activities: [] },
   ],
-};
+} satisfies PublicCatalogBody;
 
 import { publicChallengeToSummary, type PublicChallengeWire } from '../../../client/kicktodoClient.js';
 import { DiscoverPage } from '../DiscoverPage.js';
@@ -32,7 +40,7 @@ afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 describe('anonymous Discover — public catalog ids reach the card links', () => {
   it('publicChallengeToSummary maps the wire id to the card id and pins published', () => {
-    const wire = PUBLIC_BODY.challenges[0] as PublicChallengeWire;
+    const wire = PUBLIC_BODY.challenges[0]!;
     const summary = publicChallengeToSummary(wire);
     expect(summary.id).toBe('chal:demo-kicktodo-deep-work');
     expect(summary.status).toBe('published');
@@ -56,9 +64,11 @@ describe('anonymous Discover — public catalog ids reach the card links', () =>
     expect(screen.getByRole('combobox', { name: 'Challenge language' })).toBeTruthy();
     expect(screen.getByRole('link', { name: /Deep Work/ })).toBeTruthy();
     const hrefs = screen.getAllByRole('link').map((a) => a.getAttribute('href')).filter((h): h is string => !!h && h.startsWith('/discover/'));
-    expect(hrefs.length).toBeGreaterThanOrEqual(2);
-    expect(hrefs.some((h) => h.includes('undefined'))).toBe(false);
-    expect(hrefs).toContain(`/discover/${encodeURIComponent('chal:demo-kicktodo-deep-work')}`);
+    // Exactly one link per public challenge, each carrying its wire id.
+    expect([...hrefs].sort()).toEqual([
+      `/discover/${encodeURIComponent('chal:demo-kicktodo-deep-work')}`,
+      `/discover/${encodeURIComponent('chal:demo-kicktodo-sleep-reset')}`,
+    ]);
     // Anonymous branch only: the authenticated catalog and enrolments were never requested.
     const calls = fetchMock.mock.calls.map((c) => String(c[0]));
     expect(calls.some((u) => u.includes('/kicktodo/enrollments'))).toBe(false);

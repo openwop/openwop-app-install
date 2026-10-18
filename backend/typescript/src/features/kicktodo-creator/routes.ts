@@ -20,6 +20,9 @@ import {
   DraftAlreadyPublishedError,
   ProhibitedTopicError,
   StubSourceError,
+  IntakeTargetError,
+  MalformedClaimError,
+  CandidateClosedError,
   UnparsableSourceUrlError,
   type FactoryCandidate,
   type ResearchClaim,
@@ -111,6 +114,9 @@ export const KICKTODO_CREATOR_ROUTES: ReadonlyArray<{ method: 'get' | 'post'; pa
         if (err instanceof ProhibitedTopicError) {
           throw new OpenwopError('validation_error', err.message, 422, { signals: err.signals });
         }
+        if (err instanceof IntakeTargetError) {
+          throw new OpenwopError('validation_error', err.message, 400, { field: err.field, min: err.min, max: err.max });
+        }
         throw err;
       }
     },
@@ -171,6 +177,8 @@ export const KICKTODO_CREATOR_ROUTES: ReadonlyArray<{ method: 'get' | 'post'; pa
         res.json(c);
       } catch (err) {
         if (err instanceof StubSourceError) throw new OpenwopError('conflict', err.message, 409, { engines: err.engines });
+        if (err instanceof MalformedClaimError) throw new OpenwopError('validation_error', err.message, 400, { index: err.index });
+        if (err instanceof CandidateClosedError) throw new OpenwopError('conflict', err.message, 409, { state: err.state });
         // ARCH-2 — a source URL the host cannot parse is caller input, not a
         // server fault. Unmapped it became a 500, which told the caller
         // nothing about which of their sources was rejected.

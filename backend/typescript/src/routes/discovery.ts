@@ -8,13 +8,16 @@
  */
 
 import { oauthAdvertisementSnapshot, refreshOAuthAdvertisement } from '../features/connections/oauthAdvertisement.js';
+import { maxStreamAgeSec } from '../host/streamAgeCapability.js';
+import { defaultMaxAgeMs } from '../host/sseChannel.js';
+import { v2FanOutFacet } from '../host/dispatchFanOut.js';
 import { RUN_LIST } from '../host/runList.js';
 import { confidenceEscalationFloor, multiAgentExecutionModelVersion } from '../host/multiAgentPhases.js';
 import { MAX_FUTURE_HORIZON_ISO } from '../host/cronSchedule.js';
 import { secretRotationOverlapSeconds, SUPPORTED_SIGNATURE_ALGORITHMS } from '../host/webhookStandardWebhooks.js';
 import { advertisedHostEventTypes, hostEventsV2Enabled } from '../host/hostEventTypes.js';
 import { createHash } from 'node:crypto';
-import type { Express, Request, Response } from 'express';
+import type { Express, Request } from 'express';
 import { DEFAULT_SERVICE_DESCRIPTION, DEFAULT_SERVICE_VENDOR, type AppConfig } from '../index.js';
 import { requestOrigin } from '../host/requestOrigin.js';
 import { streamBaseRecord } from '../host/streamBase.js';
@@ -22,13 +25,10 @@ import { longTermMemoryDurable, memoryCapability } from '../host/memoryDimension
 import { createLogger } from '../observability/logger.js';
 import {
   certificationBundleUrlV2,
-  conformanceClaims,
   ensureCertificationEvidence,
   evidenceFromOrigin,
   servedBundle,
   CERTIFICATION_BUNDLE_MAJOR2_VENDOR_PATH,
-  CERTIFICATION_BUNDLE_PATH,
-  CONFORMANCE_CLAIMS_PATH,
 } from '../host/conformanceClaims.js';
 import { ifNoneMatchSatisfied } from '../host/restTransport.js';
 import { minClientVersion, preferredVersion, protocolVersions, VENDOR_ROOT, PROTOCOL_VERSION_V1, advertisedPath } from '../middleware/protocolVersion.js';
@@ -64,6 +64,7 @@ import { TRIGGER_DEAD_LETTER_MAX_PAGE_SIZE, TRIGGER_DEAD_LETTER_RETENTION_DAYS }
 import { dataResidencyAdvertised, dataResidencyRegions } from '../features/cdp/dataResidency.js';
 import { anonymousActorAdvertised, anonymousActorCapability } from '../host/anonymousActor.js';
 import { activationMode as proposalsActivationMode } from '../features/proposals/proposalsService.js';
+import { evalSuiteCapability } from '../host/evals/evalCapability.js';
 import { requiresBounds as goalsRequiresBounds } from '../features/goals/goalsService.js';
 import { uiPluginsCapability, uiPluginOperationsServed } from '../host/uiPluginRpc.js';
 import { presentationEnabled } from '../host/hostProfile.js';
@@ -430,10 +431,13 @@ function v2AgentsFamily(): Record<string, unknown> {
       // implements `core.dispatch` (`bootstrap/nodes.ts`, registered on every
       // boot) and honours CP-2: it starts each worker as a separate child run
       // through `dispatchSubWorkflow` and never touches the parent's registered
-      // definition (`test/adr0858-p4-multiagent-dispatch.test.ts`). The v1
-      // fan-out descriptor (`dispatchCapability()`) has NO v2 seat and is
-      // withheld (a corpus gap the steward is tracking).
+      // definition (`test/adr0858-p4-multiagent-dispatch.test.ts`).
       dispatch: true,
+      // RFC 0243 — the v2 seat for the v1 fan-out descriptor, projected from
+      // `dispatchCapability()` (`v2FanOutFacet`). The host runs RFC 0118
+      // parallel fan-out, so withholding the facet would claim it accepts only
+      // `sequential` and `reject`. Requires `dispatch: true` (above).
+      ...(v2FanOutFacet() ? { fanOut: v2FanOutFacet() } : {}),
     },
   };
 }
@@ -894,6 +898,12 @@ export function agentsCapability(): Record<string, unknown> {
     // escalation). Sample host-extension under `/v1/host/openwop-app/org-chart`;
     // tenant-scoped. Non-normative until RFC 0087 reaches Active.
     orgChart: { supported: true, installScope: 'tenant', departmentNesting: true, responsibilityView: true },
+    // RFC 0081 + RFC 0244 — agent eval suites (ADR 0889). `POST /runs
+    // {mode:"eval"}` runs a real eval projection (`host/evals/agentEvalRun.ts`)
+    // and `GET /runs/{id}/eval-summary` serves the scorecard. The facets come
+    // from the ONE builder (`evalSuiteCapability`), which adds the RFC 0244
+    // facets only once the vendored v2 schemas seat them (D7).
+    evalSuite: { supported: true, ...evalSuiteCapability() },
     // RFC 0096 reviewable-learning proposals — host-sample seam under
     // `/v1/host/openwop-app/proposals`. Advertised ONLY when
     // `OPENWOP_PROPOSALS_ENABLED=true` (advertise/enforce parity). `apply`
@@ -1313,6 +1323,10 @@ export function buildV2Advertisement(config: AppConfig, req?: Request): Record<s
       maxNodeExecutions: 1000,
       maxRunDurationMs: RUN_DURATION_CEILING_MS,
       maxRequestBodyBytes: 1_048_576,
+      // ADR 0897 D2 / RFC 0247 — the SAME predicate `host/sseChannel` bounds an
+      // opted-in wire stream by, so advert and behaviour cannot drift. Absent
+      // until the vendored v2 schema defines the member.
+      ...streamAgeLimit(),
     },
     // RFC 0199 (ADR 0753 D11) — `oauth`, with its `credentialInterrupt` facet, only
     // while `oauthAdvertised()` holds: the SAME predicate the credential gate and
@@ -1725,7 +1739,7 @@ export function buildV2Advertisement(config: AppConfig, req?: Request): Record<s
     // artifact; ADR 0735 makes the major-2 bundle a post-deploy CLI cut). A
     // pointer to a document that is not what the pointer promises is a false
     // claim; omission is fully conformant. Add it here only together with a
-    // reader that can serve a v3 bundle — `conformance-claims-routes.test.ts`
+    // reader that can serve a v3 bundle — `whd18-certification-bundle-routes.test.ts`
     // pins the absence so a projection refactor cannot leak the v1 pointer.
     //
     // WHD-18 (2026-09-21) — that reader now exists, and the pointer is added
@@ -1853,84 +1867,39 @@ export function registerDiscoveryRoutes(app: Express, _deps: Deps): void {
     res.type('application/json').send(body);
   });
 
-  // ── ADR 0550 P4 — the public exact-profile claims ──────────────────────────
+  // ── The public certification bundle (major 2, origin mode only) ────────────
   //
-  // Two reads, both UNAUTHENTICATED by design: a certification claim that only
-  // an authorized caller can fetch is not a public claim, and RFC 0089 §D's
-  // pointer is meant to be resolvable by "any third party (auditor, adopter,
-  // registry)". The bundle carries the discovery document (already public) and
-  // per-requirement dispositions; RFC 0148 §E forbids credentials in evidence
-  // and `conformance/certify.ts` scrubs the document with the environment sweep
-  // before writing it.
+  // UNAUTHENTICATED by design: a certification claim only an authorized caller
+  // can fetch is not a public claim, and RFC 0089 §D's pointer is meant to be
+  // resolvable by "any third party (auditor, adopter, registry)".
   //
-  // 404 when this build carries no stamp. That is the honest answer for a source
-  // boot or an image built without the certify step — and it is why the
-  // discovery pointer is gated on the same stamp: the advert and the route
-  // cannot disagree, because both read `host/conformanceClaims.ts`.
-  //
-  // WHD-6 — "both" was one short. THREE surfaces name this URL: the route, the
-  // discovery pointer, and the claims document below (`evidence.bundlePath` +
-  // `bundleSha256`). All three now hang off the ONE predicate the route itself
-  // uses, `certificationBundle() !== undefined` (renamed `servedBundle(1)` by
-  // WHD-18, which made it mode-aware) — so a claims stamp sitting
-  // beside a missing or unservable bundle (e.g. the suite CLI's `bundleVersion:
-  // '3'` dropped into `build-meta/`, which this reader refuses) is withheld
-  // instead of pointing a third party at a 404.
-  //
-  // WHD-18 — and a FOURTH surface now exists: the major-2 route. It hangs off the
-  // same predicate per major (`servedBundle(m)`), which in origin mode is "a
-  // verified object for this commit exists", and nothing else.
-  const serveBundle = async (major: 1 | 2, res: Response): Promise<void> => {
-    await ensureCertificationEvidence(major, readBundleSigningKeys());
-    const served = servedBundle(major);
+  // ADR 0812 P4 slice 3 — the major-1 route (`/conformance/certification-bundle`)
+  // and the `/conformance/claims` document are DELETED. Both served only the
+  // image stamp the in-process `--certify` emitter wrote; nothing has written it
+  // since ADR 0869, and the emitter is gone. What remains is the WHD-18 major-2
+  // route, which serves a verified origin object for this commit, or 404. The
+  // route and the discovery pointer hang off the ONE predicate `servedBundle(2)`
+  // (WHD-6), so they cannot disagree.
+  app.get(CERTIFICATION_BUNDLE_MAJOR2_VENDOR_PATH, async (_req, res) => {
+    await ensureCertificationEvidence(2, readBundleSigningKeys());
+    const served = servedBundle(2);
     if (served === undefined) {
       res.status(404).json({
         error: 'not_found',
         message: evidenceFromOrigin()
-          ? `No verified major-${major} certification bundle is published for this build yet. Evidence is cut against the DEPLOYED revision after it serves, then published out of the image (ADR 0735); until it verifies against this host's commit and signing keys, nothing is served (RFC 0089 §D: absence is conformant).`
-          : 'This build carries no conformance certification bundle. Absence is not a failed claim — it means no certified run was stamped into this artifact (ADR 0550 P4 / RFC 0089 §D).',
+          ? 'No verified major-2 certification bundle is published for this build yet. Evidence is cut against the DEPLOYED revision after it serves, then published out of the image (ADR 0735); until it verifies against this host\'s commit and signing keys, nothing is served (RFC 0089 §D: absence is conformant).'
+          : 'This host publishes no certification bundle: no evidence origin is configured (OPENWOP_CERT_BUNDLE_ORIGIN). Absence is not a failed claim (RFC 0089 §D); to publish, set the origin and run scripts/publish-evidence.sh after the deploy.',
       });
       return;
     }
-    // Image mode: immutable per artifact — a new bundle only arrives with a new
-    // image. Origin mode: immutable per KEY (the key is this build's commit),
-    // so the same five minutes is honest there too; a re-cut replaces the object
-    // and appears within the reader's positive TTL plus this.
+    // Immutable per KEY (the key is this build's commit); a re-cut replaces the
+    // object and appears within the reader's positive TTL plus this.
     res.set('Cache-Control', 'public, max-age=300');
-    if (served.source === 'image') {
-      res.json(served.doc);
-      return;
-    }
     // The EXACT bytes that verified. Re-serialising would be harmless to the
     // signature (it covers a digest of the rows, not the file) but it would
     // change the file's own sha256 — the digest `publish-evidence.sh` and a
     // third party compare against what was uploaded.
     res.type('application/json').send(served.bytes);
-  };
-
-  app.get(CERTIFICATION_BUNDLE_PATH, async (_req, res) => {
-    await serveBundle(1, res);
-  });
-
-  // ADR 0812 P3b — registered on the vendor path it is advertised at; the /v1 twin
-  // reaches it through the served-v1 shim (or the ADR 0806 forwarder when retired).
-  app.get(CERTIFICATION_BUNDLE_MAJOR2_VENDOR_PATH, async (_req, res) => {
-    await serveBundle(2, res);
-  });
-
-  app.get(CONFORMANCE_CLAIMS_PATH, (_req, res) => {
-    const claims = conformanceClaims();
-    if (claims === undefined) {
-      res.status(404).json({
-        error: 'not_found',
-        message: evidenceFromOrigin()
-          ? 'This host serves its evidence as the suite CLI\'s signed v3 bundle (ADR 0735), whose per-profile `certified` verdicts ARE the claim — re-derive them with `openwop-conformance --verify`. No separate claims document is published in this mode: the only claims derivation this host has runs at build time and binds the in-image bundle this mode no longer serves.'
-          : 'This build publishes no conformance claims: it carries no claims stamp, or no servable certification bundle to substantiate one (ADR 0550 P4 / RFC 0156 §E).',
-      });
-      return;
-    }
-    res.set('Cache-Control', 'public, max-age=300');
-    res.json(claims);
   });
 
   app.get('/openapi.json', (_req, res) => {
@@ -1950,39 +1919,39 @@ export function registerDiscoveryRoutes(app: Express, _deps: Deps): void {
       // ADR 0669: each key follows the cut (`advertisedPath`), so a v2 reader and a
       // post-retirement reader are never handed a `/v1` address that answers 410.
       paths: advertisedPaths({
-        '/v1/runs': { post: { summary: 'Create a run' } },
-        '/v1/runs/{runId}': { get: { summary: 'Fetch run snapshot' } },
-        '/v1/runs/{runId}/cancel': { post: { summary: 'Cancel a run' } },
-        '/v1/runs/{runId}:fork': { post: { summary: 'Fork a run from a sequence' } },
-        '/v1/runs/{runId}/events': { get: { summary: 'SSE event stream' } },
-        '/v1/runs/{runId}/events/poll': { get: { summary: 'Poll events (long-poll alternative to SSE)' } },
-        '/v1/runs/{runId}/interrupts/{nodeId}': { post: { summary: 'Resolve a node-scoped interrupt' } },
-        '/v1/interrupts/{token}': { post: { summary: 'Resolve an interrupt by signed token' } },
-        '/v1/webhooks': {
+        '/runs': { post: { summary: 'Create a run' } },
+        '/runs/{runId}': { get: { summary: 'Fetch run snapshot' } },
+        '/runs/{runId}/cancel': { post: { summary: 'Cancel a run' } },
+        '/runs/{runId}:fork': { post: { summary: 'Fork a run from a sequence' } },
+        '/runs/{runId}/events': { get: { summary: 'SSE event stream' } },
+        '/runs/{runId}/events/poll': { get: { summary: 'Poll events (long-poll alternative to SSE)' } },
+        '/runs/{runId}/interrupts/{nodeId}': { post: { summary: 'Resolve a node-scoped interrupt' } },
+        '/interrupts/{token}': { post: { summary: 'Resolve an interrupt by signed token' } },
+        '/webhooks': {
           get: { summary: 'List webhook subscriptions (refs only; no secret)' },
           post: { summary: 'Register a webhook subscription' },
         },
-        '/v1/webhooks/{subscriptionId}': { delete: { summary: 'Delete a webhook subscription' } },
-        '/v1/webhooks/{subscriptionId}/test': { post: { summary: 'Fire a signed test delivery to a webhook subscription' } },
-        '/v1/packs': { get: { summary: 'List installed packs' } },
+        '/webhooks/{subscriptionId}': { delete: { summary: 'Delete a webhook subscription' } },
+        '/webhooks/{subscriptionId}/test': { post: { summary: 'Fire a signed test delivery to a webhook subscription' } },
+        '/packs': { get: { summary: 'List installed packs' } },
 
         // RFC 0028 — prompt library. The reference host serves all
         // six routes via `routes/prompts.ts`. capabilities.prompts.
         // endpointsSupported is advertised as true; mutableLibrary as
-        // true. Read endpoints (GET /v1/prompts, GET /v1/prompts/{id},
-        // POST /v1/prompts:render) are gated on endpointsSupported;
+        // true. Read endpoints (GET /prompts, GET /prompts/{id},
+        // POST /prompts:render) are gated on endpointsSupported;
         // mutating endpoints (POST/PUT/DELETE) are additionally gated
         // on mutableLibrary.
-        '/v1/prompts': {
+        '/prompts': {
           get: { summary: 'List prompt templates (RFC 0028 §A)' },
           post: { summary: 'Create a user-source prompt template (RFC 0028 §A; requires mutableLibrary)' },
         },
-        '/v1/prompts/{templateId}': {
+        '/prompts/{templateId}': {
           get: { summary: 'Fetch a prompt template (RFC 0028 §A)' },
           put: { summary: 'Replace a user-source prompt template (RFC 0028 §A; requires mutableLibrary)' },
           delete: { summary: 'Delete a user-source prompt template (RFC 0028 §A; requires mutableLibrary)' },
         },
-        '/v1/prompts:render': {
+        '/prompts:render': {
           post: { summary: 'Render a prompt template with supplied variable bindings (RFC 0028 §A)' },
         },
 
@@ -2059,10 +2028,18 @@ export function registerDiscoveryRoutes(app: Express, _deps: Deps): void {
   });
 }
 
-/** OpenAPI `paths`, keyed through `advertisedPath`: `/v1` keys are rewritten or dropped. */
+/** OpenAPI `paths`, keyed through `advertisedPath`: a key the cut retired is dropped.
+ *  The keys are written unversioned since ADR 0812 P4 slice 2b; the `/v1` strip
+ *  that used to sit here had nothing left to strip. */
 function advertisedPaths<T>(paths: Record<string, T>): Record<string, T> {
   return Object.fromEntries(Object.entries(paths).flatMap(([k, v]) => {
-    const addr = advertisedPath(k.replace(/^\/v1(?=\/)/, ''));
+    const addr = advertisedPath(k);
     return addr ? [[addr, v] as const] : [];
   }));
+}
+
+/** ADR 0897 D2 — `limits.maxStreamAgeSec`, only while this host bounds opted-in streams. */
+function streamAgeLimit(): { maxStreamAgeSec?: number } {
+  const sec = maxStreamAgeSec(defaultMaxAgeMs());
+  return sec !== undefined ? { maxStreamAgeSec: sec } : {};
 }

@@ -1,3 +1,10 @@
+/**
+ * chatPersistence — the chat's localStorage seam (frontend enterprise-review
+ * Batch I; subject-scoped keys per ADR 0434 Phase 3 — anonymous, as here, is the
+ * bare key). Breaks it: a system-only placeholder session indexed into History,
+ * an unbounded (quota-blowing) or oldest-first index that drops the user's most
+ * recent chats, or a corrupt blob crashing the chat on boot.
+ */
 import { describe, it, expect, beforeEach } from 'vitest';
 import {
   loadSession, persistSession, readSessionIndex, sessionHeader, LOCAL_INDEX_MAX,
@@ -48,8 +55,16 @@ describe('chatPersistence', () => {
     expect(h.messageCount).toBe(1);
   });
 
-  it('bounds the index at LOCAL_INDEX_MAX entries', () => {
-    for (let i = 0; i < LOCAL_INDEX_MAX + 5; i++) persistSession(session({ id: `s${i}` }));
-    expect(readSessionIndex().length).toBe(LOCAL_INDEX_MAX);
+  it('bounds the index at LOCAL_INDEX_MAX entries, keeping the newest and dropping the oldest', () => {
+    // 55 inserts: an ODD count past the cap, size checked after every insert so
+    // an over-trim that later refills cannot pass.
+    for (let i = 0; i < LOCAL_INDEX_MAX + 5; i++) {
+      persistSession(session({ id: `s${i}` }));
+      expect(readSessionIndex().length).toBe(Math.min(i + 1, LOCAL_INDEX_MAX));
+    }
+    const ids = readSessionIndex().map((h) => h.sessionId);
+    expect(ids[0]).toBe('s54'); // newest first
+    expect(ids[ids.length - 1]).toBe('s5'); // oldest survivor
+    for (const dropped of ['s0', 's1', 's2', 's3', 's4']) expect(ids).not.toContain(dropped);
   });
 });

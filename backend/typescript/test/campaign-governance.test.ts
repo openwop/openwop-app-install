@@ -11,6 +11,14 @@
  *    the capability-firewall) enforces `adSpend.approvalThresholdMinor` via a
  *    `campaign-spend` PendingApproval keyed fork-stable, honors explicit
  *    actionPolicy `disabled`/`draft-only`, and lets an approved record through.
+ *
+ * Sabotage-witnessed (/grade-tests w30): dropping `objective` from the protected
+ * fields, the brief audit's `payload.tenantId`, the re-finalize version bump, the
+ * threshold check, the approved→allow leg, the pending-approval lookup, and the
+ * `disabled` / `draft-only` policy branches each turn a case red.
+ *
+ * Each B3 case uses its OWN tenant: `setGovernancePolicy` merges per field, so a
+ * shared tenant leaked case 2's `draft-only` into case 1 under shuffle.
  */
 
 import http from 'node:http';
@@ -49,14 +57,22 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T }
+/** The route bodies this suite reads (each field it touches is asserted). */
+interface Body {
+  orgId: string;
+  brief: { id: string; status: string; version: number };
+  versions: Array<{ version: number; snapshot: { objective?: string; status?: string } }>;
+  campaign: { id: string; version: number };
+  dispatches: unknown[];
+}
+interface Res { status: number; body: Body }
 interface Client { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res>; patch: (p: string, b?: unknown) => Promise<Res>; tenantId?: string }
 function client(): Client {
   let cookie = '';
   const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    const out = (res.status === 204 ? undefined : await res.json().catch(() => undefined)) as Body; // JSON boundary
     return { status: res.status, body: out };
   };
   return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), patch: (p, b) => call('PATCH', p, b) };
@@ -113,10 +129,10 @@ describe('B1/B4 — brief bookkeeping: audit, versions, protected-field re-appro
     // The PRE-edit revision is pinned.
     const versions = await owner.get(`${BRIEF}/${id}/versions`);
     expect(versions.status).toBe(200);
-    const v1 = versions.body.versions.find((v: any) => v.version === 1);
+    const v1 = versions.body.versions.find((v) => v.version === 1);
     expect(v1).toBeTruthy();
-    expect(v1.snapshot.objective).toBe('Grow subs');
-    expect(v1.snapshot.status).toBe('confirmed');
+    expect(v1!.snapshot.objective).toBe('Grow subs');
+    expect(v1!.snapshot.status).toBe('confirmed');
 
     // Audit rows landed with payload.tenantId (the governance-view contract).
     const rows = await storageOrThrow().listAudit({ actionPrefix: 'campaign.brief.', limit: 200 });
@@ -147,7 +163,7 @@ describe('B4/B5 — campaign versions + governance reads', () => {
 
     const versions = await owner.get(`${ORCH}/campaigns/${campaignId}/versions`);
     expect(versions.status).toBe(200);
-    expect(versions.body.versions.map((v: any) => v.version).sort()).toEqual([1, 2]);
+    expect(versions.body.versions.map((v) => v.version).sort()).toEqual([1, 2]);
 
     const dispatches = await owner.get(`${ORCH}/campaigns/${campaignId}/dispatches`);
     expect(dispatches.status).toBe(200);
@@ -161,7 +177,8 @@ describe('B4/B5 — campaign versions + governance reads', () => {
 });
 
 describe('B3 — ad-spend governance gate in the ads adapter', () => {
-  const TENANT = 'user:campaign-spend-test';
+  /** A fresh tenant per case: the policy row is merged per field, so a shared one leaks across cases. */
+  const freshTenant = (): string => `user:campaign-spend-${Date.now()}-${n++}`;
   const publishArgs = {
     platform: 'meta' as const,
     briefId: 'brief-spend-1',
@@ -173,6 +190,7 @@ describe('B3 — ad-spend governance gate in the ads adapter', () => {
   };
 
   it('at/above the threshold: requires a campaign-spend approval; approved → gate opens; below: passes straight through', async () => {
+    const TENANT = freshTenant();
     const adapter = makeAdsAdapter({ storage: storageOrThrow(), tenantId: TENANT, runId: 'run-1', actingUserId: 'user-1' });
     await setGovernancePolicy(TENANT, { adSpend: { approvalThresholdMinor: 5_000 } }, 'test');
 
@@ -204,6 +222,7 @@ describe('B3 — ad-spend governance gate in the ads adapter', () => {
   });
 
   it('explicit actionPolicy: disabled refuses; draft-only forces a preview; budget mutation honors the threshold', async () => {
+    const TENANT = freshTenant();
     const adapter = makeAdsAdapter({ storage: storageOrThrow(), tenantId: TENANT, runId: 'run-2', actingUserId: 'user-1' });
 
     await setGovernancePolicy(TENANT, { actionPolicy: { 'ads.publish': 'disabled' }, adSpend: {} }, 'test');

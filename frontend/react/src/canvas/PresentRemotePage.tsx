@@ -8,9 +8,9 @@
 import { Button } from '../ui/Button.js';
 import { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { StateCard, Notice } from '../ui/index.js';
+import { StateCard } from '../ui/index.js';
 import { config } from '../client/config.js';
-import { ChevronLeftIcon, ChevronRightIcon } from '../ui/icons/index.js';
+import { AlertIcon, ChevronLeftIcon, ChevronRightIcon } from '../ui/icons/index.js';
 
 interface OutlineFrame { name: string; notes?: string; skip?: boolean }
 interface Outline { title: string; frames: OutlineFrame[] }
@@ -23,6 +23,10 @@ export function PresentRemotePage({ token }: { token: string }): JSX.Element {
   const [current, setCurrent] = useState(0);
   const [connected, setConnected] = useState(false);
   const [expired, setExpired] = useState(false);
+  // Re-run the outline read (a transient failure, or a minter whose access came
+  // back): bumping this re-runs the load effect.
+  const [attempt, setAttempt] = useState(0);
+  const retry = useCallback(() => { setError(null); setExpired(false); setOutline(null); setLoading(true); setAttempt((n) => n + 1); }, []);
 
   const base = `/host/openwop-app/present/${encodeURIComponent(token)}`;
 
@@ -41,7 +45,7 @@ export function PresentRemotePage({ token }: { token: string }): JSX.Element {
       }
     })();
     return () => { live = false; };
-  }, [base, t]);
+  }, [base, t, attempt]);
 
   // Presenter position over the public SSE feed.
   useEffect(() => {
@@ -68,11 +72,19 @@ export function PresentRemotePage({ token }: { token: string }): JSX.Element {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(body),
-    }).catch(() => { /* the position feed shows whether it landed */ });
+    }).then((res) => {
+      // ADR 0886 D3 — the server re-checks the minter on EVERY command (left the
+      // org, lost access to the deck, feature off ⇒ uniform 404). The open SSE
+      // feed is only checked at connect, so it would keep saying "Connected"
+      // while every tap silently did nothing; the command's own 404 is the signal.
+      if (res.status === 404) setExpired(true);
+    }).catch(() => { /* network: the position feed shows whether it landed */ });
   }, [base]);
 
   if (loading) return <div className="cv-remote"><StateCard loading title={t('loading')} /></div>;
-  if (error || !outline || expired) return <div className="cv-remote"><Notice variant="error">{error ?? t('remoteExpired')}</Notice></div>;
+  // An ANNOUNCING StateCard (SL2UX-2): a Notice that mounts with its text
+  // already in place is never read out, and an expiry mid-show must be heard.
+  if (error || !outline || expired) return <div className="cv-remote"><StateCard announce icon={<AlertIcon />} title={error ?? t('remoteExpired')} action={<Button variant="secondary" onClick={retry}>{t('common:retry')}</Button>} /></div>;
 
   const frame = outline.frames[current];
 

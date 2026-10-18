@@ -15,14 +15,17 @@
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, cleanup, act, fireEvent } from '@testing-library/react';
+import type { Org, Promotion } from '../promotionsClient.js';
 
+type Client = typeof import('../promotionsClient.js');
+type Access = typeof import('../../../featureToggles/FeatureAccessContext.js')['useFeatureAccess'];
 const { listOrgs, listPromotions, createPromotion, updatePromotion, deletePromotion, useFeatureAccess } = vi.hoisted(() => ({
-  listOrgs: vi.fn(), listPromotions: vi.fn(),
+  listOrgs: vi.fn<Client['listOrgs']>(), listPromotions: vi.fn<Client['listPromotions']>(),
   // The three org-scoped WRITES this page can issue (ORG-HON-2).
-  createPromotion: vi.fn(), updatePromotion: vi.fn(), deletePromotion: vi.fn(),
+  createPromotion: vi.fn<Client['createPromotion']>(), updatePromotion: vi.fn<Client['updatePromotion']>(), deletePromotion: vi.fn<Client['deletePromotion']>(),
   // The real hook returns an OBJECT — controllable here so the toggle itself can
   // be driven, which is the thing no test in this feature used to do.
-  useFeatureAccess: vi.fn(() => makeFeatureAccess({ enabled: true, loading: false })),
+  useFeatureAccess: vi.fn<Access>(),
 }));
 import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
 vi.mock('../promotionsClient.js', async (orig) => ({
@@ -36,13 +39,16 @@ vi.mock('../../../featureToggles/FeatureAccessContext.js', async (orig) => ({
 
 import { PromotionsPage } from '../PromotionsPage.js';
 
-const ORG = { orgId: 'o1', name: 'Acme Store' };
+const ORG: Org = { orgId: 'o1', name: 'Acme Store' };
 // COMPLETE fixture. An incomplete one throws inside render (`reward.kind`), and
 // every assertion in the file then fails for a reason unrelated to the defect.
-const PROMO = {
+// Typed against the real `Promotion`: round 1 found `reward.kind: 'percent'`, which
+// is not a `RewardKind` ('percentage' | 'fixed') and passed only because the mocks
+// were untyped (it rendered through the FIXED branch).
+const PROMO: Promotion = {
   promotionId: 'p1', orgId: 'o1', name: 'Spring sale',
-  type: 'product_discount' as const,
-  reward: { kind: 'percent' as const, value: 10 },
+  type: 'product_discount',
+  reward: { kind: 'percentage', value: 10 },
   priority: 1, stackable: false, active: true,
   createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z',
 };
@@ -71,9 +77,9 @@ const attemptCreatePromotion = async (): Promise<void> => {
 
 afterEach(cleanup);
 beforeEach(() => {
-  vi.clearAllMocks();
-  // `clearAllMocks` does NOT drop a `mockReturnValue`, so the toggle is re-pinned
-  // per test rather than left to whatever the previous one set.
+  // mockReset, not clearAllMocks: a queued once-value or a previous case's
+  // implementation must never answer this case.
+  for (const m of [listOrgs, listPromotions, createPromotion, updatePromotion, deletePromotion, useFeatureAccess]) m.mockReset();
   useFeatureAccess.mockReturnValue(makeFeatureAccess({ enabled: true, loading: false }));
   listOrgs.mockResolvedValue([ORG]);
   listPromotions.mockResolvedValue({ promotions: [PROMO], usage: {} });
@@ -96,6 +102,8 @@ describe('a failed store read is not an empty store list', () => {
   it('never requested the promotions — the mechanism, not the symptom', async () => {
     listOrgs.mockRejectedValue(new Error('503'));
     await mount();
+    // Settled on the failure card first, so "not called" is not read while loading.
+    expect(document.body.textContent).toContain('Could not load your organizations');
     expect(listPromotions).not.toHaveBeenCalled();
   });
 
@@ -126,11 +134,15 @@ describe('a failed store read is not an empty store list', () => {
     expect(listPromotions).not.toHaveBeenCalled();
   });
 
-  it('the retry re-runs the store read', async () => {
+  it('the retry re-runs the store read and the page recovers', async () => {
     listOrgs.mockRejectedValueOnce(new Error('503')).mockResolvedValue([ORG]);
     await mount();
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Try again' })); });
     expect(listOrgs).toHaveBeenCalledTimes(2);
+    // Recovered: the create form and the store's promotions are back.
+    expect(await screen.findByLabelText(/Promotion name/)).toBeTruthy();
+    expect(await screen.findByText('Spring sale')).toBeTruthy();
+    expect(listPromotions).toHaveBeenCalledWith('o1');
   });
 });
 
@@ -176,7 +188,12 @@ describe('promotions — no organization, no write (ORG-HON-2)', () => {
     // by the card that says why — there is nothing left to disable.
     expect(screen.queryByRole('button', { name: 'Add promotion' })).toBeNull();
     expect(screen.queryByLabelText('Organization')).toBeNull();
-    // Guard two, the one that matters: the handler says no as well.
+    // DOUBLE GUARD, recorded honestly (wave 52): `add()`'s own `if (!orgId …)
+    // return` is NOT reachable from here — in this state the form is not rendered,
+    // so the gesture below finds no form and never calls `add()`. What this asserts
+    // is the OUTER guard (OrgSelectionState removes the form). The inner guard is
+    // an honest ceiling for a page test (probe w52g1-pf-add-orgguard was vacuous
+    // for exactly this reason); the outer one is probed by w52g1-pf-empty-order.
     await attemptCreatePromotion();
     expect(createPromotion).not.toHaveBeenCalled();
     // Pause/activate and delete are row-scoped and there is no table — the org
@@ -185,9 +202,10 @@ describe('promotions — no organization, no write (ORG-HON-2)', () => {
     expect(deletePromotion).not.toHaveBeenCalled();
   });
 
-  it('read FAILS: no write either — `orgId` is empty in that state too', async () => {
+  it('read FAILS: no write either — the form is gone in that state too', async () => {
     listOrgs.mockRejectedValue(new Error('503'));
     await mount();
+    expect(document.body.textContent).toContain('Could not load your organizations');
     // Same shape: the failure card replaces the form, so the empty combobox a
     // failed read used to leave behind is gone too.
     expect(screen.queryByLabelText('Organization')).toBeNull();

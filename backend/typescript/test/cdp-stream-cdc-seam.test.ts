@@ -4,6 +4,10 @@
  * { triggerEvent, deliveryEvent }; triggerEvent carries the source sub-object (op REQUIRED
  * for change; before/after; stream key), deliveryEvent is content-free (SR-1). Registered on
  * BOTH the reference-host route and the `/host/sample/...` alias; flag-off ⇒ 400 (soft-skip).
+ *
+ * Sabotage-witnessed (/grade-tests w38): leaking the envelope into the delivery event, the route's
+ * flag-gated source check, dropping the `/openwop-app` path, and the change `after` mapping each
+ * turn a case red.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -23,9 +27,15 @@ beforeAll(async () => {
 });
 afterAll(async () => { delete process.env.OPENWOP_TRIGGER_STREAM_CDC_ENABLED; await new Promise<void>((res) => server.close(() => res())); });
 
-async function ingest(path: string, body: unknown): Promise<{ status: number; body: any }> {
+interface SeamBody {
+  triggerEvent: { source: string; stream?: { partition?: number; key?: string }; change?: { op?: string; after?: unknown } };
+  deliveryEvent: Record<string, unknown> | null;
+  error?: string;
+  message?: string;
+}
+async function ingest(path: string, body: unknown): Promise<{ status: number; body: SeamBody }> {
   const res = await fetch(`${BASE}${path}`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${TOKEN}` }, body: JSON.stringify(body) });
-  return { status: res.status, body: await res.json().catch(() => undefined) };
+  return { status: res.status, body: (await res.json()) as SeamBody };
 }
 const SAMPLE = '/host/sample/trigger-bridge/ingest';
 const APP = '/host/openwop-app/trigger-bridge/ingest';
@@ -36,8 +46,8 @@ describe('CDP-1c stream/CDC ingest seam (RFC 0127 CDP-1b)', () => {
     const r = await ingest(SAMPLE, { source: 'stream', verification: { mode: 'none' }, stream: { topic: 'orders', partition: 2, offset: '900', key: 'k1', message: { note: secret } } });
     expect(r.status, JSON.stringify(r.body)).toBe(200);
     expect(r.body.triggerEvent.source).toBe('stream');
-    expect(r.body.triggerEvent.stream.partition).toBe(2);
-    expect(r.body.triggerEvent.stream.key).toBe('k1');
+    expect(r.body.triggerEvent.stream?.partition).toBe(2);
+    expect(r.body.triggerEvent.stream?.key).toBe('k1');
     expect(r.body.deliveryEvent).toBeTruthy();
     // SR-1: the message body never appears on the delivery event
     expect(JSON.stringify(r.body.deliveryEvent)).not.toContain(secret);
@@ -47,8 +57,8 @@ describe('CDP-1c stream/CDC ingest seam (RFC 0127 CDP-1b)', () => {
     const r = await ingest(SAMPLE, { source: 'change', verification: { mode: 'none' }, change: { op: 'update', table: 'contacts', changelogId: 'lsn-5', before: { s: 'lead' }, after: { s: 'customer' } } });
     expect(r.status, JSON.stringify(r.body)).toBe(200);
     expect(r.body.triggerEvent.source).toBe('change');
-    expect(r.body.triggerEvent.change.op).toBe('update');
-    expect(r.body.triggerEvent.change.after).toEqual({ s: 'customer' });
+    expect(r.body.triggerEvent.change?.op).toBe('update');
+    expect(r.body.triggerEvent.change?.after).toEqual({ s: 'customer' });
   });
 
   it('the reference-host /openwop-app path works too (both paths registered)', async () => {
@@ -59,8 +69,15 @@ describe('CDP-1c stream/CDC ingest seam (RFC 0127 CDP-1b)', () => {
 
   it('flag OFF ⇒ 400 on a stream POST (scenario soft-skips pre-impl)', async () => {
     delete process.env.OPENWOP_TRIGGER_STREAM_CDC_ENABLED;
-    const r = await ingest(SAMPLE, { source: 'stream', stream: { topic: 't', partition: 0, offset: '2', message: {} } });
-    process.env.OPENWOP_TRIGGER_STREAM_CDC_ENABLED = 'true';
+    let r: Awaited<ReturnType<typeof ingest>>;
+    try {
+      r = await ingest(SAMPLE, { source: 'stream', stream: { topic: 't', partition: 0, offset: '2', message: {} } });
+    } finally {
+      process.env.OPENWOP_TRIGGER_STREAM_CDC_ENABLED = 'true';
+    }
     expect(r.status).toBe(400);
+    // The route's SOURCE refusal (any malformed body is also a 400).
+    expect(r.body.error).toBe('validation_error');
+    expect(r.body.message).toContain('RFC 0127 flag');
   });
 });

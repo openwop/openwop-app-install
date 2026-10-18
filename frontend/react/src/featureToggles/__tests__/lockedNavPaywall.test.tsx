@@ -12,8 +12,6 @@ vi.mock('../paywallBeacon.js', () => ({ notePaywall: note }));
 vi.mock('../LockedState.js', () => ({ lockedTargets: () => Promise.resolve({ href: () => undefined, label: () => undefined }) }));
 
 import { useLockedNav } from '../lockedTargets.js';
-// ADR 0820 §7 — the lock page's export button read (its own tests: features/billing/__tests__/dataExport.test.tsx).
-vi.mock('../../features/billing/dataExportClient.js', () => ({ listExportableFeatures: vi.fn(async () => []), downloadFeatureExport: vi.fn() }));
 
 function Probe({ ids, onReady }: { ids: string[]; onReady: (go: Array<() => void>) => void }): JSX.Element {
   const lockedFor = useLockedNav((id) => id === 'crm' || id === 'twin-recall', 'Locked', 'palette');

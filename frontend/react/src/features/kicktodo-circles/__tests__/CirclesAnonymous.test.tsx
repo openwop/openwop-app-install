@@ -1,3 +1,12 @@
+/**
+ * Public/first-use UX closeout (#4031, df88eb26d) — a signed-out visitor to
+ * Circles sees the private-sharing explainer and a sign-in action, and the page
+ * makes NO tenant-scoped read.
+ *
+ * Breaks it: removing `if (anonymous) return` in `reload` fires listCircles /
+ * listEnrollments; dropping `!anonymous` from the header actions leaks the
+ * coach-console link; replacing the signed-out card loses the explainer.
+ */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
@@ -46,6 +55,9 @@ describe('CirclesPage signed out', () => {
     expect(screen.queryByRole('link', { name: en.coachOpenConsole })).toBeNull();
     expect(listCircles).not.toHaveBeenCalled();
     expect(listEnrollments).not.toHaveBeenCalled();
-    expect(screen.queryByText(en.loadError)).toBeNull();
+    // No `loadError` assertion: an anonymous `reload` returns before it can set
+    // `error`, so that Notice's `!anonymous` gate is a double guard that cannot be
+    // reached here (w42 probe circ-anon-error-gate, vacuous). The no-read
+    // guarantee above is the load-bearing check.
   });
 });

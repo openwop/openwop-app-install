@@ -2,9 +2,21 @@
  * ADR 0641 test-plan item 1 + decision 3 — tier→shell and posture→gate routing,
  * asserted at the DECISION level.
  *
- * These are the two pure predicates App.tsx's site branch is built from
- * (`shellForTier`, `siteWrapsAppGate`) plus the bootstrap predicate that
- * replaced `showPublic` (`tierIsSessionBearing`). The ADR says routing is
+ * App.tsx's site branch is built from ONE of these pure predicates
+ * (`siteWrapsAppGate`) plus the bootstrap predicate that replaced `showPublic`
+ * (`tierIsSessionBearing`).
+ *
+ * CORRECTED 2026-10-13 (/grade-tests w35): this header used to say App.tsx is also
+ * built from `shellForTier`. It is not — `shellForTier` and
+ * `tierRendersConsoleChrome` have ZERO product callers (only this file reads
+ * them). Their cases below test exported-but-unrouted code: a green result says
+ * nothing about which shell a tier gets or whether console chrome reaches a site
+ * route. Tracked as GT-TIERSHELL-DEAD-1 (/grade-code: delete the dead exports or
+ * route App.tsx through them). The "no console chrome on a site route" guarantee
+ * is held by `siteTier.gateOrdering.test.tsx` (GT-SITE-CHROME-1), not here.
+ *
+ * Sabotage that turns the LIVE cases red: default an omitted posture to optional;
+ * gate `optional`; make `site` sessionless. The ADR says routing is
  * "observable ONLY through the routing boundary", and a full render harness for
  * the branch lives with the component tests; what is pinned HERE is the logic
  * the branch delegates to, because that is where the conflation lived and where

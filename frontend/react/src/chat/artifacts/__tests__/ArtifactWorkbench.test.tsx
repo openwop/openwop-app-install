@@ -34,6 +34,9 @@ const REV: ArtifactRevision = {
   revisionId: 'rev1', artifactId: 'run-event:r:n', version: 1,
   content: 'Q3 variance was within plan.', createdBy: { kind: 'run', id: 'run1' }, createdAt: '2026-06-20T00:00:00.000Z',
 };
+/** An OLDER revision listed FIRST, so `revs[0]` is not the latest — the workbench
+ *  must pick `latestRevisionId` (rev1), not the head of the list. */
+const REV0: ArtifactRevision = { ...REV, revisionId: 'rev0', version: 0, content: 'Draft zero.' };
 
 beforeEach(() => { registerDefaultArtifactRenderers(); mockGet.mockReset(); mockRevs.mockReset(); mockRev.mockReset(); });
 afterEach(cleanup);
@@ -41,7 +44,7 @@ afterEach(cleanup);
 describe('ArtifactWorkbench (ART-2)', () => {
   it('loads the artifact + latest revision and renders the preview inside a dialog with the five tabs', async () => {
     mockGet.mockResolvedValueOnce(ART);
-    mockRevs.mockResolvedValueOnce([REV]);
+    mockRevs.mockResolvedValueOnce([REV0, REV]);
     mockRev.mockResolvedValueOnce(REV);
 
     render(<ArtifactWorkbench artifactId="run-event:r:n" onClose={() => {}} />);
@@ -51,7 +54,8 @@ describe('ArtifactWorkbench (ART-2)', () => {
     expect(screen.getByText('Quarterly Report')).toBeTruthy();                      // title
     expect(screen.getAllByRole('tab')).toHaveLength(5);                             // preview/raw/revisions/diff/provenance
     expect(mockGet).toHaveBeenCalledWith('run-event:r:n');
-    expect(mockRev).toHaveBeenCalledWith('run-event:r:n', 'rev1');                  // loaded the latest revision
+    expect(mockRev).toHaveBeenCalledTimes(1);
+    expect(mockRev).toHaveBeenCalledWith('run-event:r:n', 'rev1');                  // loaded the latest revision, not revs[0]
   });
 
   it('ADR 0128 Phase 5 — an interactive artifact exposes the ephemeral edit canvas (Edit → source textarea)', async () => {
@@ -79,6 +83,8 @@ describe('ArtifactWorkbench (ART-2)', () => {
     render(<ArtifactWorkbench artifactId="run-event:r:n" onClose={() => {}} />);
     // ART-7 — a load failure now surfaces friendly localized copy (not the raw
     // exception message); the point is an error renders, not a blank workbench.
-    expect(await screen.findByText(/could not load this artifact/i)).toBeTruthy();
+    expect(await screen.findByText('Could not load this artifact. Please try again.')).toBeTruthy();
+    expect(screen.queryByText(/artifact_unreachable/)).toBeNull(); // never the raw exception
+    expect(screen.queryByText('Quarterly Report')).toBeNull();
   });
 });

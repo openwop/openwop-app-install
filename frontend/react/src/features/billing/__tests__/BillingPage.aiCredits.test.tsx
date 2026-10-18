@@ -5,18 +5,24 @@
  *   - a leg the server returns as `null` is NOT rendered — no "0 of 0" bar that
  *     would read as an exhausted allowance — while a real leg is;
  *   - a failed read says so, and never renders as zero credits.
+ *
+ * Witnessed (wave 52): rendering a null leg as a 0-of-0 bar, a 0 used value, a
+ * blank attribution label, offering the meter to a member, or turning a failed
+ * read into a zero meter each turn a case red. The meter is `React.lazy`; the
+ * member case awaits the chunk itself (`settleLazy`) so its absence assertions
+ * cannot pass on a Suspense fallback when the file runs shuffled.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, cleanup } from '@testing-library/react';
+import { render, screen, cleanup, act } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
-import type { AiCreditMeter } from '../billingClient.js';
+import type { AiCreditMeter, Subscription, TokenBalance } from '../billingClient.js';
 
 const access = vi.hoisted(() => ({ current: { access: { basis: 'member', scopes: [] as string[] }, resolved: true } }));
 vi.mock('../billingClient.js', async (orig) => ({
   ...(await orig<Record<string, unknown>>()),
-  getSubscription: vi.fn(async () => ({ tenantId: 't', planTier: 'pro', status: 'active' })),
-  getBalance: vi.fn(async () => ({ tenantId: 't', purchasedTokensTotal: 0, totalAvailable: 0 })),
+  getSubscription: vi.fn(async (): Promise<Subscription> => ({ tenantId: 't', planTier: 'pro', status: 'active' })),
+  getBalance: vi.fn(async (): Promise<TokenBalance> => ({ tenantId: 't', purchasedTokensTotal: 0, totalAvailable: 0 })),
   getAiCredits: vi.fn(),
 }));
 vi.mock('../../../featureToggles/FeatureAccessContext.js', () => ({
@@ -45,7 +51,16 @@ const METER: AiCreditMeter = {
   otherCredits: 0,
 };
 
-beforeEach(() => { vi.clearAllMocks(); access.current = ADMIN; });
+/** Resolve the lazy meter chunk and let any mount effect run, so an absence check
+ *  is made after the meter WOULD have rendered — not while Suspense is pending. */
+const settleLazy = async (): Promise<void> => {
+  await act(async () => {
+    await import('../AiCreditMeter.js');
+    for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+  });
+};
+
+beforeEach(() => { vi.clearAllMocks(); mCredits.mockReset(); access.current = ADMIN; });
 afterEach(cleanup);
 
 describe('BillingPage — AI credit meter', () => {
@@ -75,6 +90,7 @@ describe('BillingPage — AI credit meter', () => {
     access.current = EDITOR;
     at();
     expect(await screen.findByText('Only workspace owners and admins can manage billing.')).toBeTruthy();
+    await settleLazy();
     expect(screen.queryByRole('heading', { name: 'AI credits' })).toBeNull();
     expect(mCredits).not.toHaveBeenCalled();
   });
@@ -84,5 +100,6 @@ describe('BillingPage — AI credit meter', () => {
     at();
     expect(await screen.findByText(/Could not load your AI credit usage\./)).toBeTruthy();
     expect(screen.queryByText('Purchased credits')).toBeNull();
+    expect(screen.queryByRole('heading', { name: 'AI credits' })).toBeNull();
   });
 });

@@ -17,7 +17,12 @@
  * correction must move no set MEMBERSHIP.
  *
  * Born red on all three: before ADR 0694, leg 1 widened successfully, leg 5 produced
- * an unreadable row, and leg 7 read `role:"action"`.
+ * an unreadable row, and leg 7 read `role:"action"`. (Leg 5 was later cut — the import
+ * call site is pinned by 6b; see the note above the import-lane describe.)
+ *
+ * Breaks if: the owner gate in `updateEntry` is removed or over-tightened, the import
+ * stops canonicalizing / defaulting `private` / honouring the bundle's visibility, the
+ * export stops carrying it, or a subject-less import is minted (probes w24g1-pv-*).
  */
 import { describe, it, expect, beforeAll, beforeEach } from 'vitest';
 import { readFileSync } from 'node:fs';
@@ -31,8 +36,10 @@ import { openStorage } from '../src/storage/index.js';
 import { createUserTemplate, clearUserTemplatesForTest } from '../src/host/promptStore.js';
 import { userIdFor } from '../src/features/users/usersService.js';
 import {
-  createEntry, listEntries, getEntry, updateEntry, readableBy, VALID_VISIBILITY,
+  createEntry, listEntries, listEntriesUnfiltered, getEntry, updateEntry,
 } from '../src/features/prompts/promptLibraryService.js';
+import { applyImport, buildExportBundle } from '../src/features/portability/portabilityService.js';
+import { createOrg } from '../src/host/accessControlService.js';
 import { MANIFEST_SIDE_EFFECT_FLOOR, MANIFEST_FAST_PATH_SERVED, MANIFEST_DECLARED_TYPE_IDS } from '../src/executor/sideEffectFloor.generated.js';
 import { isSideEffectingNode } from '../src/executor/sideEffects.js';
 
@@ -96,31 +103,13 @@ describe('ADR 0694 D1 — only the owner may change a private prompt visibility'
   });
 });
 
-describe('ADR 0694 D3 — an imported entry must be readable by the org it was imported into', () => {
-  it('leg 5: the raw-subject hazard — a non-canonical owner id would make the row readable by NOBODY', async () => {
-    seed('t5');
-    // This is the id space the import path used to stamp: the RAW request subject.
-    const raw = 'oidc:sub-abc';
-    const canonical = userIdFor(T, raw);
-    expect(canonical, 'the two id spaces genuinely differ — otherwise this leg is vacuous').not.toBe(raw);
-
-    // A row stamped with the RAW id is unreadable by its own owner's canonical id.
-    const bad = await createEntry(T, ORG, raw, { name: 'RawOwned', promptRef: 't5', visibility: 'private' });
-    expect(readableBy(bad, canonical), 'THE DEFECT: the owner cannot read their own row').toBe(false);
-    expect(await getEntry(T, ORG, bad.entryId, canonical)).toBeNull();
-
-    // Stamped canonically (what D3a now does), the owner can read it.
-    const good = await createEntry(T, ORG, canonical, { name: 'Canonical', promptRef: 't5', visibility: 'private' });
-    expect(readableBy(good, canonical)).toBe(true);
-  });
-
-  it('leg 6: the import default is org-visible, so a second member can read it', async () => {
-    seed('t6');
-    const e = await createEntry(T, ORG, OWNER, { name: 'Imported', promptRef: 't6', visibility: 'org' });
-    expect((await listEntries(T, ORG, OTHER)).map((r) => r.entryId), 'an org-visible import is visible to the org').toContain(e.entryId);
-    expect(VALID_VISIBILITY.has('org'), 'the allowlist the import validates against is the SAME exported set').toBe(true);
-  });
-});
+// Former legs 5 + 6 cut (/grade-tests wave 24): leg 5 restated `readableBy` on a
+// hand-built raw-owned row (the rule is red under w24g1-pl-readableBy-open in
+// prompt-library-service.test.ts; the import WIRING is leg 6b, red under
+// w24g1-pv-import-canonical), and leg 6 — titled "the import default is
+// org-visible", the superseded D3b draft — never touched the import lane (it
+// created `visibility:'org'` directly; covered by PLC-1's "org entries stay
+// org-visible" and leg 6d's round trip).
 
 describe('ADR 0694 D3 — the IMPORT LANE itself canonicalizes (wiring, not just the helper)', () => {
   it('leg 6b: a raw-subject import produces a row the canonical owner CAN read', async () => {
@@ -129,7 +118,6 @@ describe('ADR 0694 D3 — the IMPORT LANE itself canonicalizes (wiring, not just
     // PORTABILITY CALL SITE to the raw actor (the exact PLC-7 defect) left all 35
     // tests GREEN. Mechanism and wiring must be pinned separately; this leg drives
     // `applyImport` end-to-end so the CALL SITE cannot silently regress.
-    const { applyImport } = await import('../src/features/portability/portabilityService.js');
     const TB = 'pl-import-tenant';
     seed('tpl-import-1');
     const raw = 'oidc:importer-9';
@@ -158,8 +146,6 @@ describe('ADR 0694 D3 — the IMPORT LANE itself canonicalizes (wiring, not just
     // import to `org`, and the exporter did not carry `visibility` at all — so every
     // exported `private` prompt would have returned `org`-visible. A fix that creates
     // a fresh instance of the class it closes.
-    const { buildExportBundle, applyImport } = await import('../src/features/portability/portabilityService.js');
-    const { createOrg } = await import('../src/host/accessControlService.js');
     const TS = 'pl-rt-src';
     seed('tpl-rt');
     // The exporter walks `listOrgs(tenantId)` (portabilityService.ts:276), so the
@@ -189,7 +175,6 @@ describe('ADR 0694 D3 — the IMPORT LANE itself canonicalizes (wiring, not just
   });
 
   it('leg 6c: an import with no resolvable subject is refused, not minted unownable (D3c)', async () => {
-    const { applyImport } = await import('../src/features/portability/portabilityService.js');
     const TB = 'pl-import-tenant2';
     seed('tpl-import-2');
     const res = await applyImport(TB, 'import', {
@@ -200,7 +185,9 @@ describe('ADR 0694 D3 — the IMPORT LANE itself canonicalizes (wiring, not just
     const item = res.items.find((i) => i.ref === 'p2')!;
     expect(item.status, 'a subject-less import must SKIP rather than mint a row nobody can read').toBe('skipped');
     expect(String(item.message ?? '')).toMatch(/authenticated importer|no subject/i);
-    expect((await listEntries(TB, 'io2', undefined)).length, 'and nothing was written').toBe(0);
+    // UNFILTERED reader: the visibility-filtered `listEntries(…, undefined)` hid any
+    // wrongly minted PRIVATE row from an absent caller, so this could never fail.
+    expect((await listEntriesUnfiltered(TB, 'io2')).length, 'and nothing was written').toBe(0);
   });
 });
 

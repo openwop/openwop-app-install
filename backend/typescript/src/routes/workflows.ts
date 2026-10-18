@@ -19,14 +19,12 @@
 
 import type { Express, Request, Response } from 'express';
 import { OpenwopError } from '../types.js';
-import { deleteRegisteredWorkflow } from '../host/workflowsRegistry.js';
 import { validateWorkflowDefinition, WORKFLOW_ID_PATTERN } from '../host/workflowDefinitionValidation.js';
 import type { HostAdapterSuite } from '../host/index.js';
 import { tenantOf } from '../host/requestSubject.js';
 import { requireWorkflowWrite } from '../host/workflowWriteAuthority.js';
-import { recordOwnership, listOwned, getOwned, removeOwnership, uniqueOwnedName, isWorkflowForeignTo, PUBLIC_WORKFLOW_ID, isSharedWorkflowId } from '../host/workflowOwnership.js';
+import { recordOwnership, listOwned, getOwned, uniqueOwnedName, isWorkflowForeignTo, PUBLIC_WORKFLOW_ID, isSharedWorkflowId, WORKFLOW_SUBJECT_PATTERN } from '../host/workflowOwnership.js';
 import { forkSharedWorkflow, retryPendingRepoints, forkOfShared, CANVAS_PRISTINE_HEADER } from '../host/sharedWorkflowFork.js';
-import { hasJobForWorkflow } from '../host/schedulingService.js';
 import { lifecycleOf, withLifecycle } from '../host/workflowLifecycle.js';
 import { registerWorkflowComposeTool, registerWorkflowProposeTool, registerComposedWorkflowDecisionHandler } from '../host/workflowComposeTool.js';
 import { registerRunDiagnoseTool } from '../host/runDiagnoseTool.js';
@@ -43,6 +41,7 @@ import { pinMismatches } from '../host/chainPinRule.js';
 import { getChain, listChains, expandChain, reloadWorkflowChainPacks, chainRequirements, coRegisterSubChains, findMissingRequiredConfig, findUnfilledExpansionParams, SubChainError } from '../host/workflowChainPackLoader.js';
 import { validateChainBackedSubChainBinds } from '../host/chainBackedWorkflows.js';
 import { workflowRoomLive } from '../host/collab/workflowCollabResource.js';
+import { deleteTenantWorkflow } from '../host/tenantWorkflowDelete.js';
 import { assertNoDisabledPacks } from '../host/packEnablement.js';
 import { preserveDroppedFields, parseFieldContract, FIELD_CONTRACT_HEADER } from '../host/preserveDroppedFields.js';
 import { getProvider } from '../features/connections/providerRegistry.js';
@@ -667,40 +666,18 @@ export function registerWorkflowRoutes(app: Express, deps: { hostSuite: HostAdap
       if (!owned) {
         throw new OpenwopError('not_found', 'workflow not found', 404, { workflowId: id });
       }
-      // ADR 0789 — deleting a SHARED definition removes it from THIS tenant only.
-      // The row (and its revisions, which the deletion hooks would cascade by id
-      // for every tenant) belongs to every seeded tenant, and the runs the
-      // `hasRunForWorkflow` check below sees may be anyone's. The schedule guard
-      // still applies: a job of this tenant's firing against it must go first.
-      if (isSharedWorkflowId(id)) {
-        if (await hasJobForWorkflow(tenantOf(req), id)) {
-          throw new OpenwopError('conflict', 'A schedule fires against this workflow; delete the schedule (or archive the workflow) first.', 409, { workflowId: id, reason: 'workflow_scheduled' });
-        }
-        await removeOwnership(tenantOf(req), id);
-        res.json({ workflowId: id, removed: true });
-        return;
+      // ADR 0913 — the delete recipe lives in ONE host function, shared with the
+      // feature erasure seam (`eraseWorkflowSubject`), so the two cannot drift.
+      const outcome = await deleteTenantWorkflow(deps.storage, tenantOf(req), id);
+      if (!outcome.deleted) {
+        const r = outcome.reason;
+        if (r === 'not_owned') throw new OpenwopError('not_found', 'workflow not found', 404, { workflowId: id });
+        const message = r === 'workflow_referenced' ? 'This workflow has runs that replay against it; archive it instead of deleting.'
+          : r === 'workflow_scheduled' ? 'A schedule fires against this workflow; delete the schedule (or archive the workflow) first.'
+            : 'This workflow is in a live collaboration session; delete it after everyone leaves.';
+        throw new OpenwopError('conflict', message, 409, { workflowId: id, reason: r });
       }
-      // ADR 0369 — runs re-resolve their definition by id at replay/`:fork`
-      // (no per-run snapshot), so deleting a referenced definition orphans
-      // run history. Refuse and point at archive instead. (Precedent: Step
-      // Functions refuses to delete a version an alias references.)
-      if (await deps.storage.hasRunForWorkflow(id)) {
-        throw new OpenwopError('conflict', 'This workflow has runs that replay against it; archive it instead of deleting.', 409, { workflowId: id, reason: 'workflow_referenced' });
-      }
-      // RI-9 — refuse while a schedule fires against this definition (a deleted workflow
-      // would leave the job firing against a gone workflowId). Delete the schedule first.
-      if (await hasJobForWorkflow(tenantOf(req), id)) {
-        throw new OpenwopError('conflict', 'A schedule fires against this workflow; delete the schedule (or archive the workflow) first.', 409, { workflowId: id, reason: 'workflow_scheduled' });
-      }
-      // ADR 0481 (code-review H2) — deleting under a live room destroys the
-      // Y.Doc beneath connected editors (their autosave is suspended: silent
-      // total loss of everything typed after). Same lock as the sibling verbs.
-      if (await workflowRoomLive(id)) {
-        throw new OpenwopError('conflict', 'This workflow is in a live collaboration session; delete it after everyone leaves.', 409, { workflowId: id, reason: 'workflow_room_live' });
-      }
-      const removed = deleteRegisteredWorkflow(id, [tenantOf(req)]);
-      await removeOwnership(tenantOf(req), id);
-      res.json({ workflowId: id, removed });
+      res.json({ workflowId: id, removed: outcome.removed });
     } catch (err) {
       next(err);
     }
@@ -1119,10 +1096,15 @@ export function registerWorkflowRoutes(app: Express, deps: { hostSuite: HostAdap
   app.post('/host/openwop-app/workflows/from-chain', async (req, res, next) => {
     try {
       await requireWorkflowWrite(req); // ADR 0770 D1
-      const body = (req.body ?? {}) as { chainId?: unknown; params?: unknown; deferred?: unknown };
+      const body = (req.body ?? {}) as { chainId?: unknown; params?: unknown; deferred?: unknown; subject?: unknown };
       if (typeof body.chainId !== 'string') {
         throw new OpenwopError('validation_error', 'chainId is required.', 400, {});
       }
+      // ADR 0913 — an optional feature-owned label the caller can later erase by.
+      if (body.subject !== undefined && (typeof body.subject !== 'string' || !WORKFLOW_SUBJECT_PATTERN.test(body.subject))) {
+        throw new OpenwopError('validation_error', 'subject must look like `<feature>:<id>` (lowercase feature prefix, then up to 200 of [A-Za-z0-9:._-]).', 400, { field: 'subject' });
+      }
+      const subject = typeof body.subject === 'string' ? body.subject : undefined;
       const found = getChain(body.chainId);
       if (!found) {
         throw new OpenwopError('not_found', 'workflow chain not found', 404, { chainId: body.chainId });
@@ -1225,6 +1207,10 @@ export function registerWorkflowRoutes(app: Express, deps: { hostSuite: HostAdap
         name, nodeCount: def.nodes.length,
         ...(lc2.transient !== undefined ? { transient: lc2.transient } : {}),
         ...(lc2.archivedAt !== undefined ? { archivedAt: lc2.archivedAt } : {}),
+        // ADR 0913 — the parent only. Sub-chain children are shared across
+        // instantiations (their id keys on the chain version), so labelling one
+        // would let one subject's erasure delete another's child.
+        ...(subject ? { subject } : {}),
       });
       // R6 — surface node types not installed on this host (best-effort heads-up).
       const catalog = buildNodeCatalog();

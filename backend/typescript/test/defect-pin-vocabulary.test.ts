@@ -65,7 +65,12 @@ const KNOWN = new Map<string, 'correction' | 'pin'>([
   // the file no longer carries the vocabulary at all.
   // Live pins — real debt, tracked. Each asserts a shipped defect as correct.
   ['workflow-chain-market-intel-digest-execution.test.ts', 'pin'],
-  ['workflow-chain-campaign-journeys-execution.test.ts', 'pin'],
+  // REMOVED 2026-10-12 (grade-tests wave 31): `workflow-chain-campaign-journeys-
+  // execution.test.ts` no longer carries the vocabulary. Its ~200-line header
+  // described node `inputs` being dropped before execution as NOT FIXED; that
+  // defect was fixed (CHAINX-5 / ADR 0237 — declared inputs now win over run
+  // inputs), and wave 31 rewrote the header and removed the inert workaround
+  // keys. A retired pin, not a hidden one.
   // ADDED 2026-08-23 (ADR 0604). Both are ENUMERATION ratchets — they classify
   // every run-creation / tool-result caller site — and both classify the SAME
   // two live gaps as expected: the anonymous lane (`host/anonymousActor.ts`,
@@ -95,6 +100,13 @@ const KNOWN = new Map<string, 'correction' | 'pin'>([
   // reword until it passed; that is policing a spelling instead of the invariant, and it is
   // how a ratchet stops meaning anything. Registered instead.
   ['destructive-lane-census.test.ts', 'pin'],
+  // ADR 0879 / `CH2WF-4`, 2026-10-12 (feature loop row 40). A private channel's agent-turn
+  // runs are LISTED to every workspace member, because run reads are tenant-scoped
+  // (`host/runAccess.ts`). The file asserts that exposure as current behaviour so it
+  // cannot go stale, which is exactly a `pin`: a shipped gap blessed until the platform
+  // run-read decision for conversation-bound runs lands (same class as `DSHCD-9`). Closing
+  // `CH2WF-4` flips the assertion, removes this entry and lowers PIN_CEILING.
+  ['adr0879-ch2wf4-run-read-residue.test.ts', 'pin'],
 ]);
 
 /** Live pins may only SHRINK. Raising this means a new defect was pinned.
@@ -104,7 +116,12 @@ const KNOWN = new Map<string, 'correction' | 'pin'>([
  *  same change. Two independent ratchets both flagged the same missing hold gate, which is the
  *  system working, not redundancy to tune away. Closing `AGKM-11` lowers BOTH; nothing else
  *  should be added under either until it is. */
-const PIN_CEILING = 5;
+/*  RAISED 5 -> 6, 2026-10-12 (ADR 0879 / `CH2WF-4`). A NEW live defect was pinned on purpose:
+ *  the channels row found that a private channel's turn runs are listed to non-members
+ *  through the tenant-scoped run lane, could not fix it inside a feature PR (it is the
+ *  platform's run-read model), and chose a pinned, tracked residue over an unrecorded one.
+ *  This is debt, blessed knowingly; closing `CH2WF-4` lowers it back to 5. */
+const PIN_CEILING = 6;
 
 function walk(dir: string): string[] {
   const out: string[] = [];

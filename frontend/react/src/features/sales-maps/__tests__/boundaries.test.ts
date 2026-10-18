@@ -3,13 +3,26 @@
  * Guards the GENERATED worldBoundaries.ts (Natural Earth 110m): geometry sanity,
  * no Antarctica, and the alias matching that colours a country from a territory
  * named "United States" / "USA" as well as the canonical Natural Earth name.
+ *
+ * R2 SM2-B3: `resolveRegionId` is the ONE matcher — the page once grew a second, weaker
+ * one and reported a territory named "USA" as both shaded and "not shown".
+ * Sabotage-witnessed (wave 52): dropping the alias arm of `resolveRegionId`, dropping its
+ * `trim()`, dropping the canonical-name second pass in `matchValuesToRegions`, accepting an
+ * unknown explicit `regionId` (fail-open), and letting a name-match overwrite an explicit
+ * mapping in `regionValues` each turn a case red.
+ *
+ * (The `regionCentroid` case was cut in wave 52: the export had no product caller —
+ * `git grep regionCentroid` found only its definition and this test — so it guarded a
+ * dead subject. The export itself was removed from `boundaries.ts` in the same wave.)
  */
 import { describe, expect, it } from 'vitest';
-import { WORLD_REGIONS, matchValuesToRegions, regionValues, regionCentroid, resolveRegionId } from '../boundaries.js';
+import { WORLD_REGIONS, matchValuesToRegions, regionValues, resolveRegionId } from '../boundaries.js';
 
 describe('sales-maps world boundaries', () => {
-  it('is a real world set: 150+ countries, unique ids, no Antarctica', () => {
-    expect(WORLD_REGIONS.length).toBeGreaterThan(150);
+  it('is a real world set: all 176 vendored countries, unique ids, no Antarctica', () => {
+    // 176 = the measured `"id":` count in worldBoundaries.ts, matching its generator
+    // header ("176 countries"). A re-vendor that changes the set is a deliberate edit here.
+    expect(WORLD_REGIONS.length).toBe(176);
     expect(new Set(WORLD_REGIONS.map((r) => r.id)).size).toBe(WORLD_REGIONS.length);
     expect(WORLD_REGIONS.find((r) => r.id === 'ata')).toBeUndefined();
     expect(WORLD_REGIONS.some((r) => r.name.toLowerCase().includes('antarctica'))).toBe(false);
@@ -84,14 +97,5 @@ describe('sales-maps world boundaries', () => {
     // rule `regionValues` applies, so "mapped" and "placed" cannot disagree.
     expect(resolveRegionId({ name: 'EMEA North', regionId: 'deu' })).toBe('deu');
     expect(resolveRegionId({ name: 'Germany', regionId: 'not-a-region' })).toBeUndefined();
-  });
-
-  it('centroids land inside plausible bounds', () => {
-    const usa = WORLD_REGIONS.find((r) => r.id === 'usa');
-    expect(usa).toBeDefined();
-    const [lng, lat] = regionCentroid(usa!);
-    // vertex-mean centroid; Alaska + islands pull it west/north, so bounds are loose
-    expect(lng).toBeLessThan(-60);
-    expect(lat).toBeGreaterThan(20);
   });
 });

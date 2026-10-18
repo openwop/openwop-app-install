@@ -12,6 +12,13 @@
  *             yet" — the one thing it never means once a quota exists.
  *  - TER2-B2  a quota summed across periods with different currencies.
  *  - TER2-B3  an amount was saveable with no currency at all.
+ *
+ * Sabotage-witnessed (w52 /grade-tests, w52g2-rh-*): ignoring the quota mismatch,
+ * blanking the mismatch chip, dropping the sr-only reason or collapsing two reasons
+ * into one, a wrong percentage, falling back to the quota symbol for an unknown sum
+ * currency (and never labelling a known one), dropping the rep splits on save,
+ * blanking the mixed-quota chip, and the currency-required guard removed or applied
+ * to a zero amount each turn a case red.
  */
 import type * as React from 'react';
 import { describe, it, expect, vi, afterEach } from 'vitest';
@@ -61,8 +68,10 @@ describe('TER2-B1 — a quota/deal currency mismatch is stated, not averaged ove
   });
 
   it('names BOTH currencies — the reader has to know which is which', () => {
-    view(mismatched);
-    expect(screen.getAllByText(/JPY.*USD/).length).toBeGreaterThan(0);
+    const { container } = view(mismatched);
+    // Scoped to the CHIP: an unscoped /JPY.*USD/ was also satisfied by the sr-only
+    // ratio reason below, so deleting the chip stayed green (w52 round 1, vacuous).
+    expect(container.querySelector('.chip--warning')?.textContent).toBe('JPY vs USD quota');
   });
 
   it('the absent percentage carries its reason as TEXT, not a hover title', () => {
@@ -89,6 +98,9 @@ describe('TER2-B1 — a quota/deal currency mismatch is stated, not averaged ove
     for (const reason of ['no-quota', 'mixed-deal-currencies', 'mixed-quota-currencies'] as const) {
       const { container } = view(row({ attainment: null, coverage: null, ratioUnavailable: reason }));
       seen.add(container.querySelector('.sr-only')?.textContent ?? '');
+      // A null ratio (no quota / unknown target) is never rendered as a number —
+      // not 0%, not 100%, no percentage at all.
+      expect(container.textContent ?? '').not.toMatch(/\d%/);
       cleanup();
     }
     expect(seen.size).toBe(3);
@@ -125,15 +137,20 @@ describe('review fold-ins — defects the independent pass found in the fix', ()
     fireEvent.change(screen.getByLabelText(/quota amount/i), { target: { value: '9000' } });
     fireEvent.click(screen.getByRole('button', { name: /set quota/i }));
     await Promise.resolve();
-    expect(calls[0]?.[4]).toEqual([{ subjectId: 'user:a', amount: 4000 }]);
+    // The WHOLE save: territory, period, amount, currency — and the splits carried back.
+    expect(calls).toEqual([['t1', '2026-Q1', 9000, 'USD', [{ subjectId: 'user:a', amount: 4000 }]]]);
   });
 });
 
 describe('TER2-B2 — a quota summed across currencies is not one number', () => {
-  it('drops the quota symbol and says why', () => {
-    const { container } = view(row({ currency: undefined, quotaCurrencyMixed: true, attainment: null, coverage: null, ratioUnavailable: 'mixed-quota-currencies' }));
-    expect(screen.getByText(/mixed quota currencies/i)).toBeTruthy();
-    expect(cellWith(container, '10,000').textContent ?? '').not.toMatch(/\$|€|£/);
+  // Retitled w52: this case used to claim it "drops the quota symbol", but the
+  // unlabelled quota is a FIXTURE fact — the server sends no `currency` for a mixed
+  // quota, and no product code reads `quotaCurrencyMixed` to drop a symbol. That
+  // half (`not.toMatch(/\$|€|£/)` on the quota cell) could not fail and is removed;
+  // what the row itself decides is the chip.
+  it('flags a quota summed across currencies with the mixed-quota chip', () => {
+    view(row({ currency: undefined, quotaCurrencyMixed: true, attainment: null, coverage: null, ratioUnavailable: 'mixed-quota-currencies' }));
+    expect(screen.getByText('mixed quota currencies')).toBeTruthy();
   });
 });
 

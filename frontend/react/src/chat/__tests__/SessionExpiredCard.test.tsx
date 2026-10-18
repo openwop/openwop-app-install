@@ -7,17 +7,23 @@
  * key is still saved, offer sign-in as the primary action, and still leave an
  * escape hatch for someone who genuinely wants to set up a key. Untested copy is
  * how a fix like this quietly rots back into the thing it replaced.
+ *
+ * Sabotage witnesses (w43): swapping the body or title key, not calling
+ * `signIn.google`, unwiring `onUseWizard`, or ignoring `isConfigured` each turn
+ * one case red.
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
 
-const signInGoogle = vi.fn();
+import type { UseAuth } from '../../auth/useAuth.js';
+
+const signInGoogle = vi.fn<() => Promise<void>>();
 let isConfigured = true;
 vi.mock('../../auth/useAuth.js', () => ({
-  useAuth: () => ({
+  useAuth: (): UseAuth => ({
     user: null, loading: false, isConfigured,
-    signIn: { google: signInGoogle, github: vi.fn() },
-    signOut: vi.fn(),
+    signIn: { google: signInGoogle, github: vi.fn(async () => undefined) },
+    signOut: vi.fn(async () => undefined),
   }),
 }));
 

@@ -19,33 +19,39 @@
  *
  * The assertions target rendered TEXT and roles, not internal state, so they
  * survive a refactor of the state names and fail on the behaviour.
+ *
+ * Sabotage witnesses: wave-20 probes `w20g5-wf-*` (answer cleared before the await, the Ask
+ * failure in the card and not a toast, the composer cleared only on success, the hit lane leaving
+ * the composer alone + saving third-party, per-panel failure + retry busy/finally, the write
+ * toast, Ask not clearing another panel's failure).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
+import type * as Client from '../notebooksClient.js';
 
-const listSources = vi.fn();
-const listNotes = vi.fn();
-const listTransformations = vi.fn();
-const searchNotebook = vi.fn();
-const addNote = vi.fn();
+const listSources = vi.fn<typeof Client.listSources>();
+const listNotes = vi.fn<typeof Client.listNotes>();
+const listTransformations = vi.fn<typeof Client.listTransformations>();
+const searchNotebook = vi.fn<typeof Client.searchNotebook>();
+const addNote = vi.fn<typeof Client.addNote>();
 
 vi.mock('../notebooksClient.js', async (orig) => ({
   ...(await orig<Record<string, unknown>>()),
-  listSources: (...a: unknown[]) => listSources(...a),
-  listNotes: (...a: unknown[]) => listNotes(...a),
-  listTransformations: (...a: unknown[]) => listTransformations(...a),
-  searchNotebook: (...a: unknown[]) => searchNotebook(...a),
-  addNote: (...a: unknown[]) => addNote(...a),
+  listSources: (...a: Parameters<typeof Client.listSources>) => listSources(...a),
+  listNotes: (...a: Parameters<typeof Client.listNotes>) => listNotes(...a),
+  listTransformations: (...a: Parameters<typeof Client.listTransformations>) => listTransformations(...a),
+  searchNotebook: (...a: Parameters<typeof Client.searchNotebook>) => searchNotebook(...a),
+  addNote: (...a: Parameters<typeof Client.addNote>) => addNote(...a),
   listTransformationTemplates: vi.fn(async () => []),
   ensureNotebookChat: vi.fn(async () => ({ conversationId: 'c1' })),
   ensureNotebook: vi.fn(async () => NOTEBOOK_FIXTURE),
 }));
 
-/** Hoisted above the mock factory's use site by `const` at module scope is not
- *  enough under vi.mock hoisting, so the fixture lives in the factory's closure
- *  via this module-level binding declared with `var`-like hoisting semantics. */
-const NOTEBOOK_FIXTURE = {
+/** Read by the hoisted mock factory only LAZILY — inside `ensureNotebook`'s
+ *  implementation, which first runs at render time, long after this binding is
+ *  initialised. (Reading it eagerly in the factory body would hit the TDZ.) */
+const NOTEBOOK_FIXTURE: Client.Notebook = {
   id: 'nb1', tenantId: 't1', orgId: 'o1', name: 'Research', collectionId: 'col1',
   createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
 };
@@ -55,7 +61,7 @@ vi.mock('../../../ui/toast.js', () => ({ toast: { success: vi.fn(), error: vi.fn
 // exporting the inner component just for the test.
 import { ProjectSourcesPanel } from '../NotebooksPage.js';
 
-const hit = (chunkId: string, text: string, title: string) => ({
+const hit = (chunkId: string, text: string, title: string): Client.NotebookSearchHit => ({
   chunkId, documentId: `d-${chunkId}`, chunkIndex: 0, title, text, score: 0.9,
 });
 
@@ -69,6 +75,9 @@ const renderWorkspace = async () => {
 };
 
 beforeEach(() => {
+  // `mockReset` first: `clearAllMocks` (afterEach) keeps implementations, including any
+  // unconsumed `mockResolvedValueOnce`, which would leak into the next case.
+  for (const m of [listSources, listNotes, listTransformations, searchNotebook, addNote]) m.mockReset();
   listSources.mockResolvedValue([]);
   listNotes.mockResolvedValue([]);
   listTransformations.mockResolvedValue([]);
@@ -200,7 +209,7 @@ describe('NBU-2 — a failed list read resolves to a stated failure, never a per
     expect(screen.getByText(/no transformations yet/i)).toBeTruthy();
 
     // And there is a way out.
-    expect(screen.getAllByRole('button', { name: /try again/i }).length).toBeGreaterThanOrEqual(2);
+    expect(screen.getAllByRole('button', { name: /try again/i })).toHaveLength(2);
   });
 
   it('retry re-reads and clears that panel only', async () => {
@@ -209,7 +218,7 @@ describe('NBU-2 — a failed list read resolves to a stated failure, never a per
     await screen.findByText(/couldn't load your sources/i);
 
     listSources.mockResolvedValueOnce([
-      { documentId: 'd1', title: 'Recovered source', chunkCount: 3, createdAt: '2026-01-01T00:00:00.000Z', contextLevel: 'full', hasSummary: false },
+      { documentId: 'd1', title: 'Recovered source', source: { kind: 'text' }, chunkCount: 3, createdAt: '2026-01-01T00:00:00.000Z', contextLevel: 'full', hasSummary: false },
     ]);
     fireEvent.click(screen.getAllByRole('button', { name: /try again/i })[0]!);
 
@@ -288,7 +297,7 @@ describe('NBU-19 (ADR 0601 § Corrections / LOW-10) — a retry gives feedback i
     expect(retry().disabled).toBe(false);
 
     // A read that never settles — the in-flight window is the whole point.
-    let release: (v: unknown) => void = () => {};
+    let release: (v: Client.NotebookSource[]) => void = () => {};
     listSources.mockImplementationOnce(() => new Promise((r) => { release = r; }));
     fireEvent.click(retry());
 

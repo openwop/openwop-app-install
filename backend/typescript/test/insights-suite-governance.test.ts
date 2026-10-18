@@ -3,8 +3,17 @@
  *
  * Pins the invariants the prior phases produce: (a) talent data is confidential-pii
  * and subjectId is in the masking union; (b) a talent subjectId is masked in logs;
- * (c) STRUCTURAL no-auto-side-effect — every meta-workflow with a surfacing/egress node
- * has a core.approvalGate upstream, email.draft is draft-only, and no node can send.
+ * (c) STRUCTURAL no-auto-side-effect — the two chains that surface a broadcast or a
+ * DRAFT (weekly-variance, anniversary-draft) have a core.approvalGate upstream of their
+ * notify, email.draft is draft-only, and no node in any chain can send. `talent-prep`
+ * (pull → score → notify) has NO gate, by design: its notify is `self`-only and refuses
+ * without an acting user (ADR 0600 §5) — this header used to say "every meta-workflow",
+ * which the chains never satisfied.
+ *
+ * Sabotage-witnessed (/grade-tests w20): renaming the declared PII field reds (a) and
+ * both (b) cases; masking every key reds the no-over-masking case; re-pointing the
+ * gate→notify edge, retyping the anniversary gate, or adding `core.email.send` to a chain
+ * reds the matching (c) case; disabling `requireActingSubject` reds the ADR 0599 §7 case.
  *
  * Approval-required for the suite is enforced by the in-workflow core.approvalGate +
  * the structural never-send of core.email.draft — NOT governanceService.actionPolicyOf
@@ -23,6 +32,12 @@ import {
   loadWorkflowChainPacks, defaultWorkflowChainPackRoots, _resetChainRegistryForTest, listChains,
 } from '../src/host/workflowChainPackLoader.js';
 import type { WorkflowDefinition } from '../src/executor/types.js';
+import { registerInsightsSuiteRoutes } from '../src/features/insights-suite/routes.js';
+import { registerToggleDefault } from '../src/host/featureToggles/registry.js';
+import { saveConfig, __clearToggleStore } from '../src/host/featureToggles/service.js';
+import { insightsSuiteFeature } from '../src/features/insights-suite/feature.js';
+import { openSqliteStorage } from '../src/storage/sqlite/index.js';
+import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 
 // ADR 0472 P2 — the meta-workflows migrated to chain packs; build the MIGRATED defs.
 _resetChainRegistryForTest();
@@ -65,27 +80,13 @@ describe('ADR 0078 §4 — (a) classification', () => {
     expect(isPiiField('insights.talentSnapshot', 'subjectId')).toBe(true);
     expect(isKnownPiiFieldName('subjectId')).toBe(true); // → masked everywhere in logs
 
-    // ── ADR 0600 §7 (`ISC-14.3`) — the line below is a TAUTOLOGY, exhibited ──
-    // It read "VarianceReport is internal (no person fields) — not
-    // confidential-pii", which sounds like a classification guarantee and is
-    // not one. `classificationOf` returns `'internal'` for ANY entity with no
-    // declared PII fields (`host/dataClassification.ts`), and
-    // `insights.varianceReport` is NEVER DECLARED — this feature declares only
-    // `insights.talentSnapshot`. So the assertion passes for a reason that has
-    // nothing to do with the entity, and it would stay green if the real
-    // classification were wrong.
-    //
-    // PR-A (ADR 0599 §8 #8) left it rather than deleting it, because deleting it
-    // would remove the only written trace that the entity was never declared.
-    // The fix is neither: the tautology is DEMONSTRATED beside it with a name
-    // that certainly does not exist, so the next reader cannot mistake either
-    // line for coverage. Declaring the entity is a product decision (it has no
-    // PII fields to declare, which is the whole reason it is absent).
-    expect(classificationOf('insights.varianceReport')).toBe('internal');
-    expect(
-      classificationOf('definitely.not.a.registered.entity'),
-      'if THIS is not internal, the line above has started meaning something and the note beside it is stale',
-    ).toBe('internal');
+    // ADR 0600 §7 (`ISC-14.3`) — `insights.varianceReport` is NEVER DECLARED: this
+    // feature declares only `insights.talentSnapshot`. `classificationOf` returns
+    // 'internal' for ANY undeclared name, so no assertion about that entity's
+    // classification can fail here. The two tautological `expect`s that used to
+    // exhibit this were removed by /grade-tests w20 (a never-fail assertion counts as
+    // coverage it is not); declaring the entity is a product decision (it has no PII
+    // fields to declare, which is why it is absent).
   });
 });
 
@@ -129,6 +130,13 @@ describe('ADR 0078 §4 — (c) structural no-auto-side-effect', () => {
   it('anniversary-draft: an approvalGate exists and email is draft-only (never send)', () => {
     expect(hasNode(anniversaryDraftDefinition, 'core.approvalGate')).toBe(true);
     expect(hasNode(anniversaryDraftDefinition, 'core.email.draft')).toBe(true);
+    // Upstream, not merely present: draft → gate → notify (no surfacing before sign-off).
+    const draft = nodeIdOf(anniversaryDraftDefinition, 'core.email.draft');
+    const gate = nodeIdOf(anniversaryDraftDefinition, 'core.approvalGate');
+    const notify = nodeIdOf(anniversaryDraftDefinition, 'feature.notifications.nodes.notify');
+    const e = edges(anniversaryDraftDefinition);
+    expect(e.some((x) => x.sourceNodeId === draft && x.targetNodeId === gate), 'the draft must feed the approval gate').toBe(true);
+    expect(e.some((x) => x.sourceNodeId === gate && x.targetNodeId === notify), 'notify must sit behind the approval gate').toBe(true);
   });
 
   /**
@@ -191,12 +199,8 @@ describe('ADR 0078 §4 — (c) structural no-auto-side-effect', () => {
       + `(${INSIGHTS_CHAIN_IDS.join(', ')}). Confirm the new chain's nodes are on the reviewed allowlist, then bump this.`,
     ).toBe(EXPECTED_INSIGHTS_CHAINS);
     expect(checked, 'the walk found no nodes — this gate would pass over an empty corpus').toBeGreaterThan(9);
-  });
-
-  it('the allowlist itself contains no send-capable node typeId (the cheap tripwire, kept)', () => {
-    // Orthographic and known to be so. Retained BESIDE the closed world rather
-    // than in place of it: it costs one line and it is the check that fires
-    // fastest when someone reaches for the obvious wrong node.
+    // The cheap tripwire, kept BESIDE the closed world: a guard on edits to the list
+    // itself (orthographic, and known to be so) — no product change can red it.
     for (const typeId of REVIEWED_CHAIN_NODE_TYPES) {
       expect(/send|sendmail/i.test(typeId), `${typeId} must not be send-capable`).toBe(false);
     }
@@ -218,12 +222,6 @@ describe('ADR 0078 §4 — (c) structural no-auto-side-effect', () => {
  */
 describe('ADR 0599 §7 — the config gates refuse a request with no acting subject', () => {
   it('requireRead/requireWrite refuse before resolving access', async () => {
-    const { registerInsightsSuiteRoutes } = await import('../src/features/insights-suite/routes.js');
-    const { registerToggleDefault } = await import('../src/host/featureToggles/registry.js');
-    const { saveConfig, __clearToggleStore } = await import('../src/host/featureToggles/service.js');
-    const { insightsSuiteFeature } = await import('../src/features/insights-suite/feature.js');
-    const { openSqliteStorage } = await import('../src/storage/sqlite/index.js');
-    const { initHostExtPersistence } = await import('../src/host/hostExtPersistence.js');
     initHostExtPersistence(openSqliteStorage(':memory:'));
     registerToggleDefault(insightsSuiteFeature.toggleDefault!);
     await __clearToggleStore();
@@ -232,6 +230,9 @@ describe('ADR 0599 §7 — the config gates refuse a request with no acting subj
     // Capture the two handlers the feature registers, then invoke them with a
     // request carrying NO userId and NO principal — the shape the fail-open branch
     // needs. Anything other than a refusal means the gate is decorative.
+    // (The `never` casts: a two-method fake of Express + bare req/res literals —
+    // `Express`/`Request`/`Response` are far wider than this capture needs. Honest
+    // ceiling, recorded by /grade-tests w20.)
     const handlers: Record<string, (req: unknown, res: unknown, next: (e?: unknown) => void) => Promise<void>> = {};
     const app = {
       get: (path: string, h: never) => { handlers[`GET ${path}`] = h; },
@@ -242,14 +243,18 @@ describe('ADR 0599 §7 — the config gates refuse a request with no acting subj
     for (const key of ['GET /host/openwop-app/insights-suite/config', 'PUT /host/openwop-app/insights-suite/config']) {
       const handler = handlers[key];
       expect(handler, `${key} was not registered`).toBeTruthy();
-      let captured: { httpStatus?: number; code?: string } | undefined;
+      let captured: { httpStatus?: number; code?: string; message?: string } | undefined;
       await handler!(
         { tenantId: 'default', body: { principalUserId: 'u-ceo' } },
         { json: () => { throw new Error(`${key} answered a request with NO acting subject`); } },
-        (err?: unknown) => { captured = err as { httpStatus?: number; code?: string }; },
+        (err?: unknown) => { captured = err as { httpStatus?: number; code?: string; message?: string }; },
       );
       expect(captured?.httpStatus, `${key} did not refuse an unauthenticated request`).toBe(404);
       expect(captured?.code).toBe('not_found');
+      // The toggle gate runs FIRST and refuses with the same 404/not_found
+      // ("… is not enabled for this tenant."). The message names WHICH guard
+      // refused: `requireActingSubject`'s, not a toggle that failed to resolve.
+      expect(captured?.message, `${key} was refused by the toggle, not the subject guard`).toBe('Not found');
     }
   });
 });

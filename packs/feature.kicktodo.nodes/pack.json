@@ -1,7 +1,7 @@
 {
   "name": "feature.kicktodo.nodes",
-  "version": "1.30.3",
-  "description": "KickTodo node pack (ADR 0414 P4) — thin adapters over ctx.features.kicktodo-core for the participant loop: enroll, materialize today's actions, check in, freeze progress evidence, and evaluate judged completion through the standing-goals owner. Authorization, validation, CAS, and storage remain in the host services; nodes are role:action so replay reads recorded outputs. v1.1.0 adds the Challenge Factory research spine (ADR 0415 P1): research-frame, source-normalize, evidence-graph. v1.14.0 adds the ADR 0451 P4 referral-code node (resolve-or-mint the referrer's affiliate code for a paid challenge) v1.15.0 adds the ADR 0456 P4 lifecycle-status read node (enrolled + progress + completed, no freeze/judge). v1.16.0 adds the factory's terminal submit-publication step (ADR 0458 P1): raises the separation-of-duties publish approval — it never completes publication. v1.17.0 adds the factory's per-lesson media leg (ADR 0458 P2): lesson-media-persist promotes a generated image/video (host serve URL) to a durable…",
+  "version": "1.37.0",
+  "description": "KickTodo node pack (ADR 0414 P4) — thin adapters over the nine kicktodo-* ctx.features surfaces: the participant loop (enroll, today, check-in, progress evidence, judged completion), the Challenge Factory (research spine, claim extract/verify, plan generate/validate, decompose, lesson batches, simulations, submit-publication), replan, reminders, accountability, commerce, community, integrations, metrics and org reads. Authorization, validation, CAS and storage stay in the host services. Replay classification (v1.32.0, KT-PACK-REPLAY-1): role:\"action\" earns NO replay serving — nothing in the executor reads it. The seven nodes whose re-execution is observable (remind-today, session-reminder, kickbot-coach-turn, create-candidate, propose-plan-change, apply-revision-commands, calendar-sync) declare role:\"side-effect\" + side-effectful so a fork is served the recorded outcome. The remaining writers converge on re-execution (deterministic ids or upserts) and stay action.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
   "keywords": [
@@ -118,8 +118,10 @@
       "typeId": "feature.kicktodo.nodes.remind-today",
       "version": "1.0.0",
       "description": "Sends the participant's daypart reminder for today's pending headline action via the consent-gated integrations reminder path (ADR 0443 R1). Skips silently when the enrollment is missing, snoozed, or has nothing pending.",
-      "role": "action",
-      "capabilities": [],
+      "role": "side-effect",
+      "capabilities": [
+        "side-effectful"
+      ],
       "category": "chat",
       "label": "Send today's reminder",
       "inputSchemaRef": "schemas/remind-today.input.json",
@@ -130,8 +132,10 @@
       "typeId": "feature.kicktodo.nodes.kickbot-coach-turn",
       "version": "1.0.0",
       "description": "Enqueues ONE proactive turn of the participant's named guide (KickBot) into their own 1:1 conversation, about today's pending action or an earned award (ADR 0689). A fire-now job on the coach turn-workflow; gated on an active enrollment, something pending, and the participant's mute / quiet hours; idempotent per enrollment per local day (reminder) or per award. Skips honestly when nothing applies — a snoozed participant hears nothing.",
-      "role": "action",
-      "capabilities": [],
+      "role": "side-effect",
+      "capabilities": [
+        "side-effectful"
+      ],
       "category": "chat",
       "label": "KickBot speaks first",
       "inputSchemaRef": "schemas/kickbot-coach-turn.input.json",
@@ -178,11 +182,20 @@
       "typeId": "feature.kicktodo.nodes.lesson-batch-build",
       "version": "1.0.0",
       "label": "KickTodo Factory: Build Lesson Batch",
-      "description": "Iterate ONE checkpoint batch's day payloads (the acyclic executor can't express per-day nodes for a variable-length batch) and, per day, enrich the plan day into a participant-facing lesson via ctx.callAI against the creator surface's live lessonSchema, under a closed-world validator + ONE bounded error-fed repair (the plan-generate pattern — fails typed, never success-with-empty). Every lesson is grounded on the STRUCTURED evidence and must cite it: claimRefs may name only ids the evidence lists (ADR 0458 §2.2 correction). When generateMedia, generates a visual via ctx.callImageGenerator and persists it through the shared media leg (createAssetFromServeUrl → setLessonMedia). No ctx.callAI ⇒ fail closed. Inputs: { candidateId, authorSubject?, days (day-payload array), evidenceClaims?, generateMedia?, provider?, model?, credentialRef? } (credentialRef: ADR 0706 — the Secrets Vault ref NAME forwarded to ctx.callAI; absent ⇒ the dispatcher’s provider ladder). Output: { lessons (each with claimRefs), count, mediaCount }.",
+      "description": "Iterate ONE checkpoint batch's day payloads (the acyclic executor can't express per-day nodes for a variable-length batch) and, per day, enrich the plan day into a participant-facing lesson via ctx.callAI against the creator surface's live lessonSchema, under a closed-world validator + ONE bounded error-fed repair (the plan-generate pattern — fails typed, never success-with-empty). Every lesson is grounded on the STRUCTURED evidence and must cite it: claimRefs may name only ids the evidence lists (ADR 0458 §2.2 correction). When generateMedia, generates a visual via ctx.callImageGenerator from a fixed template over the VALIDATED lesson (title + steps), on its own image binding (imageProvider/imageModel/imageCredentialRef — never the chat provider), and persists it through the shared media leg (createAssetFromServeUrl → setLessonMedia); an empty image result when media was requested fails typed media_generation_empty. No ctx.callAI ⇒ fail closed. Inputs: { candidateId, authorSubject?, days (day-payload array), evidenceClaims?, generateMedia?, imageProvider?, imageModel?, imageCredentialRef?, provider?, model?, credentialRef? } (credentialRef: ADR 0706 — the Secrets Vault ref NAME forwarded to ctx.callAI; absent ⇒ the dispatcher’s provider ladder). Output: { lessons (each with claimRefs), count, mediaCount }; writes bag var lessonBatch (a typed kicktodo.challenge-lesson-batch envelope: each lesson beside its plan row) for the checkpoint gate.",
       "category": "integration",
       "role": "action",
       "capabilities": [],
       "x-paletteCategory": "ai"
+    },
+    {
+      "typeId": "feature.kicktodo.nodes.lesson-batch-preview",
+      "version": "1.0.0",
+      "label": "KickTodo Factory: Lesson Checkpoint Preview",
+      "description": "Pure: put the lesson batch a lesson-batch child produced (the parent's lessonBatchN bag variable) on the edge to the checkpoint gate as a typed kicktodo.challenge-lesson-batch artifact envelope, so the gate's preview shows each lesson beside its plan row (XCH-GATE-1). A missing or malformed batch fails typed lesson_batch_missing. Inputs: { lessonBatch }. Output: { artifact }.",
+      "category": "integration",
+      "role": "pure",
+      "capabilities": []
     },
     {
       "typeId": "feature.kicktodo.nodes.sim-collect",
@@ -217,8 +230,10 @@
       "label": "KickTodo: Calendar Sync",
       "description": "Replay-safe calendar sync for one enrollment via ctx.features.kicktodo-integrations.calendarSync (deterministic external ids — upsert, never duplicate; supersession deletes; consent + transport fail closed). Inputs: { ownerSubject, enrollmentId }. Output: { upserted, removed }.",
       "category": "integration",
-      "role": "action",
-      "capabilities": []
+      "role": "side-effect",
+      "capabilities": [
+        "side-effectful"
+      ]
     },
     {
       "typeId": "feature.kicktodo.nodes.engagement-summary",
@@ -242,7 +257,7 @@
       "typeId": "feature.kicktodo.nodes.plan-generate",
       "version": "1.0.0",
       "label": "KickTodo: Plan Generate",
-      "description": "Generate a ChallengePlan draft with the run-scoped provider (ctx.callAI) against the creator surface's live plan schema, judged AUTHORITATIVELY by validatePlan with ONE bounded error-fed repair (typed plan_invalid after; capability_missing without a provider). Receives the STRUCTURED evidence (evidenceClaims) and must cite it: every day's claimRefs is validated closed-world against the candidate's dossier (ADR 0458 §2.2 correction). Inputs: { candidateId, topic, audience?, evidenceSummary?, evidenceClaims?, provider?, model?, credentialRef? } (credentialRef: ADR 0706 — the Secrets Vault ref NAME forwarded to ctx.callAI; absent ⇒ the dispatcher’s provider ladder). Output: { plan }; writes bag var plan.",
+      "description": "Generate a ChallengePlan draft with the run-scoped provider (ctx.callAI) against the creator surface's live plan schema, judged AUTHORITATIVELY by validatePlan with ONE bounded error-fed repair (typed plan_invalid after; capability_missing without a provider). Receives the STRUCTURED evidence (evidenceClaims; absent ⇒ read from the creator surface for the candidate, the same dossier validatePlan judges against) and must cite it: every day's claimRefs is validated closed-world against the candidate's dossier (ADR 0458 §2.2 correction). Inputs: { candidateId, topic, audience?, evidenceSummary?, evidenceClaims?, provider?, model?, credentialRef? } (credentialRef: ADR 0706 — the Secrets Vault ref NAME forwarded to ctx.callAI; absent ⇒ the dispatcher’s provider ladder). Output: { plan, artifact } (artifact: the same plan as a typed kicktodo.challenge-plan envelope, so the outline approval gate previews an outline); writes bag var plan.",
       "category": "integration",
       "role": "action",
       "capabilities": [],
@@ -317,8 +332,10 @@
       "label": "KickTodo: Apply Revision Commands",
       "description": "The participant-replan applier (ADR 0459 P1): a thin adapter over ctx.features['kicktodo-core'].applyRevisionCommands that applies a VALIDATED, participant-approved plan revision (the ADR 0429 lanes — schedule preference / publisher-declared substitution / missed-window recovery) through the governed surface. Authorization, closed-world validation against the challenge version, and per-lane apply stay in the host; this node just forwards { enrollmentId, subject, commands } and surfaces the result. A refusal is a TYPED failure carrying the surface's failing command index (`failedIndex`) so the caller can point the participant at the exact command; host_capability_missing without the surface. Inputs: { enrollmentId, subject, commands }. Output: { applied, results? }.",
       "category": "integration",
-      "role": "action",
-      "capabilities": []
+      "role": "side-effect",
+      "capabilities": [
+        "side-effectful"
+      ]
     },
     {
       "typeId": "feature.kicktodo.nodes.enrich-plan-revision",
@@ -344,8 +361,10 @@
       "label": "KickTodo: Session Reminder",
       "description": "The cohort-session T-minus reminder delivery node (ADR 0459 P3): a thin adapter over the accountability session-notify surface op (ctx.features['kicktodo-accountability'].sendSessionReminder) that the one-shot scheduler job fires ~1h before a scheduled session, delivering the reminder into the circle's OWN conversation via the notification owner (mute-respecting per ADR 0457). Delivery, membership fan-out, and mute-respect stay in the host; this node forwards the context the armed job already carries. Typed failures; host_capability_missing without the surface. Inputs: { circleId, atIso, conversationId }. Output: { notified, reason? }.",
       "category": "integration",
-      "role": "action",
-      "capabilities": []
+      "role": "side-effect",
+      "capabilities": [
+        "side-effectful"
+      ]
     },
     {
       "typeId": "feature.kicktodo.nodes.list-challenges",
@@ -412,8 +431,10 @@
       "label": "KickTodo: Create Candidate",
       "description": "Create a challenge candidate (the factory's opening write) via ctx.features['kicktodo-creator'].createCandidate — the surface defaults createdBy to 'workflow'; authoring stays draft-side (publication remains gated by the separation-of-duties approval, see submit-publication). Inputs: { createdBy?, topic, audience, transformation, durationDaysTarget?, dailyMinutesTarget? }. Output: { candidate }.",
       "category": "integration",
-      "role": "action",
-      "capabilities": [],
+      "role": "side-effect",
+      "capabilities": [
+        "side-effectful"
+      ],
       "inputSchemaRef": "schemas/create-candidate.input.json",
       "x-ports": "single",
       "outputSchemaRef": "schemas/create-candidate.output.json"
@@ -484,8 +505,10 @@
       "label": "KickTodo: Propose Plan Change",
       "description": "Record a coach's plan-change PROPOSAL via ctx.features['kicktodo-accountability'].propose (ADR 0419: the surface is read+propose only — grant writes stay route-level with the acting participant; a proposal never applies itself). Inputs: { circleId, coachSubject, note }. Output: { proposal }.",
       "category": "integration",
-      "role": "action",
-      "capabilities": [],
+      "role": "side-effect",
+      "capabilities": [
+        "side-effectful"
+      ],
       "inputSchemaRef": "schemas/propose-plan-change.input.json",
       "x-ports": "single",
       "outputSchemaRef": "schemas/propose-plan-change.output.json"

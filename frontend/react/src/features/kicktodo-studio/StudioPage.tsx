@@ -37,6 +37,25 @@ import { CHALLENGE_AUTHOR_AGENT_ID } from './challengeAuthor.js';
 
 const TERMINAL = new Set(['published', 'killed', 'retired', 'withdrawn']);
 
+/** KTF-FE-1 — at most this many publication reads in flight at once. The creator
+ *  routes have no batched publication read (only `/candidates/:id/publication`),
+ *  so the per-candidate fan-out stays; this only bounds it, so a large in-play
+ *  portfolio cannot fire every read in the same instant against the per-IP read
+ *  budget. A batched endpoint is the real fix. */
+const PUBLICATION_READ_CONCURRENCY = 4;
+
+/** Run `fn` over `items` with at most `limit` calls in flight. */
+async function forEachBounded<T>(items: readonly T[], limit: number, fn: (item: T) => Promise<void>): Promise<void> {
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    while (next < items.length) {
+      const item = items[next++] as T;
+      await fn(item);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+}
+
 function stateChipClass(state: string): string {
   if (state === 'published') return 'chip chip--success';
   if (TERMINAL.has(state)) return 'chip chip--muted';
@@ -67,6 +86,9 @@ export function StudioPage() {
   const [error, setError] = useState(false);
   const [candidates, setCandidates] = useState<FactoryCandidate[]>([]);
   const [publications, setPublications] = useState<Record<string, PublicationState | null>>({});
+  // CS-4 — a publication read that FAILED is not one that came back empty (404 →
+  // null). `getPublication` throws on any other status; these ids say "unknown".
+  const [pubFailed, setPubFailed] = useState<ReadonlySet<string>>(() => new Set());
   const [statusFilter, setStatusFilter] = useState<'all' | 'in-progress' | 'published' | 'retired'>('all');
   const [query, setQuery] = useState('');
   // ADR 0461 — the Challenge Author profile (roster truth) behind the embedded
@@ -77,27 +99,38 @@ export function StudioPage() {
   // client-side state filter, which painted imprecise status).
   const [needsYou, setNeedsYou] = useState<NeedsYouRow[] | null | undefined>(undefined);
 
+  /** KTEXP-3 (grade-code): publication state only matters for candidates still in
+   *  play — fetched for the non-terminal set only, bounded (KTF-FE-1). Retryable
+   *  on its own, so recovering a failed publication read does not unmount the
+   *  page (and the embedded chat with it). */
+  const loadPublications = useCallback(async (cs: readonly FactoryCandidate[]) => {
+    const pubs: Record<string, PublicationState | null> = {};
+    const failedPubs = new Set<string>();
+    await forEachBounded(cs.filter((c) => !TERMINAL.has(c.state)), PUBLICATION_READ_CONCURRENCY, async (c) => {
+      try { pubs[c.id] = await getPublication(c.id); }
+      catch { failedPubs.add(c.id); }
+    });
+    setPublications(pubs);
+    setPubFailed(failedPubs);
+  }, []);
+
   const reload = useCallback(async () => {
     try {
       setError(false);
+      // A retry after a failed first read must show loading, not the empty
+      // portfolio the failed read left behind (`candidates` is still []).
+      setLoaded(false);
       const [cs, profile] = await Promise.all([listCandidates(), getChallengeAuthor()]);
       setCandidates(cs);
       setAuthor(profile);
       void getNeedsYou().then(setNeedsYou).catch(() => setNeedsYou(null));
-      // KTEXP-3 (grade-code): publication state only matters for candidates still
-      // in play — fetch it for the non-terminal set only, so an unbounded portfolio
-      // of published/retired candidates can't blow the per-IP read budget on load.
-      const pubs: Record<string, PublicationState | null> = {};
-      await Promise.all(cs.filter((c) => !TERMINAL.has(c.state)).map(async (c) => {
-        pubs[c.id] = await getPublication(c.id).catch(() => null);
-      }));
-      setPublications(pubs);
+      await loadPublications(cs);
     } catch {
       setError(true);
     } finally {
       setLoaded(true);
     }
-  }, []);
+  }, [loadPublications]);
   useEffect(() => { void reload(); }, [reload]);
 
   const portfolio = useMemo(() => {
@@ -135,7 +168,9 @@ export function StudioPage() {
           <div className="action-bar">
             <span className={stateChipClass(c.state)}>{stateLabel(c.state, t)}</span>
             <span className="chip chip--muted">{t('riskTier', { tier: c.riskTier })}</span>
-            {pub?.state && <span className="chip">{t('publication', { state: pubStateLabel(pub.state, t) })}</span>}
+            {pubFailed.has(c.id)
+              ? <span className="chip chip--warning">{t('publicationUnavailable')}</span>
+              : pub?.state && <span className="chip">{t('publication', { state: pubStateLabel(pub.state, t) })}</span>}
             <span className="studio-id" title={c.id}>{c.id}</span>
           </div>
           {c.riskSignals.length > 0 && <p className="muted u-fs-13">{t('riskSignals', { signals: c.riskSignals.join(', ') })}</p>}
@@ -153,7 +188,12 @@ export function StudioPage() {
         actions={<Link className="btn-ghost btn-sm" to="/kicktodo/studio/insights">{t('openInsights')}</Link>}
       />
 
-      {error && <Notice variant="error">{t('loadError')}</Notice>}
+      {error && (
+        <div className="action-bar">
+          <Notice variant="error" announce={t('loadError')}>{t('loadError')}</Notice>
+          <Button variant="quiet" size="sm" onClick={() => void reload()}>{t('common:retry')}</Button>
+        </div>
+      )}
       {!loaded && !error && <StateCard loading title={t('title')} />}
 
       {loaded && candidates.length === 0 && !error && (
@@ -234,6 +274,14 @@ export function StudioPage() {
           </section>
 
           <section aria-label={t('portfolioHeading')}>
+            {pubFailed.size > 0 && (
+              <div className="action-bar">
+                <Notice variant="warning" announce={t('publicationReadFailed', { count: pubFailed.size })}>
+                  {t('publicationReadFailed', { count: pubFailed.size })}
+                </Notice>
+                <Button variant="quiet" size="sm" onClick={() => void loadPublications(candidates)}>{t('common:retry')}</Button>
+              </div>
+            )}
             <div className="action-bar">
               <h2 className="kt-eyebrow">{t('portfolioHeading')}</h2>
               {/* KTUX-12 (§4.5 rule 13): search/filter appear only once the collection is big enough to need them. */}

@@ -10,6 +10,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
+import type { SegmentInsights } from '../src/features/crm/segmentsService.js';
 
 let BASE: string; let server: http.Server;
 beforeAll(async () => {
@@ -23,15 +24,15 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res { status: number; body: any }
+interface Res<T = unknown> { status: number; body: T }
 function client() {
   let cookie = '';
-  const call = async (m: string, p: string, b?: unknown): Promise<Res> => {
+  const call = async <T,>(m: string, p: string, b?: unknown): Promise<Res<T>> => {
     const res = await fetch(`${BASE}${p}`, { method: m, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(b !== undefined ? { body: JSON.stringify(b) } : {}) });
     for (const c of getSetCookies(res.headers) as string[]) { const mm = /(__session=[^;]+)/.exec(c); if (mm) cookie = mm[1]; }
-    return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) };
+    return { status: res.status, body: (res.status === 204 ? undefined : await res.json().catch(() => undefined)) as T };
   };
-  return { get: (p: string) => call('GET', p), post: (p: string, b?: unknown) => call('POST', p, b) };
+  return { get: <T,>(p: string) => call<T>('GET', p), post: <T,>(p: string, b?: unknown) => call<T>('POST', p, b) };
 }
 let n = 0;
 async function owner() { const c = client(); const r = await c.post('/host/openwop-app/test/login', { email: `ai-${Date.now()}-${n++}@a.test`, tenantId: `org:ai-${Date.now()}-${n++}` }); expect(r.status).toBe(201); return c; }
@@ -41,23 +42,35 @@ describe('CDP-C audience insights', () => {
   it('estimate, insights, and overlap over live membership', async () => {
     await enable('crm');
     const c = await owner();
-    await c.post('/host/openwop-app/crm/contacts', { name: 'C1', email: 'c1@x.test', stage: 'customer' });
-    await c.post('/host/openwop-app/crm/contacts', { name: 'C2', email: 'c2@x.test', stage: 'customer' });
-    await c.post('/host/openwop-app/crm/contacts', { name: 'L1', stage: 'lead' }); // no email
+    const mk = async (body: Record<string, string>): Promise<void> => { expect((await c.post('/host/openwop-app/crm/contacts', body)).status).toBe(201); };
+    await mk({ name: 'C1', email: 'c1@x.test', stage: 'customer' });
+    await mk({ name: 'C2', email: 'c2@x.test', stage: 'customer' });
+    await mk({ name: 'C3', stage: 'customer' }); // a customer with NO email — reachability must not count it
+    await mk({ name: 'L1', stage: 'lead' }); // no email
 
-    const customers = (await c.post('/host/openwop-app/crm/segments', { name: 'customers', filters: [{ field: 'stage', op: 'eq', value: 'customer' }] })).body;
-    const all = (await c.post('/host/openwop-app/crm/segments', { name: 'all', filters: [] })).body;
+    const seg = async (name: string, filters: unknown[]): Promise<string> => {
+      const r = await c.post<{ segmentId: string }>('/host/openwop-app/crm/segments', { name, filters });
+      expect(r.status).toBe(201);
+      return r.body.segmentId;
+    };
+    const customers = await seg('customers', [{ field: 'stage', op: 'eq', value: 'customer' }]);
+    const leads = await seg('leads', [{ field: 'stage', op: 'eq', value: 'lead' }]);
+    const all = await seg('all', []);
 
-    const est = await c.get(`/host/openwop-app/crm/segments/${customers.segmentId}/estimate`);
-    expect(est.body.size).toBe(2);
+    const est = await c.get<{ size: number }>(`/host/openwop-app/crm/segments/${customers}/estimate`);
+    expect(est.body.size).toBe(3);
 
-    const ins = await c.get(`/host/openwop-app/crm/segments/${customers.segmentId}/insights`);
-    expect(ins.body.size).toBe(2);
-    expect(ins.body.byStage.customer).toBe(2);
-    expect(ins.body.withEmail).toBe(2);
-    expect(ins.body.avgPropensity).toBeGreaterThan(0);
+    const ins = (await c.get<SegmentInsights>(`/host/openwop-app/crm/segments/${customers}/insights`)).body;
+    expect(ins.size).toBe(3);
+    expect(ins.byStage).toEqual({ customer: 3 });
+    expect(ins.withEmail).toBe(2);
+    // avgPropensity is a real per-member average: customers (stage score + an email
+    // identifier) outrank a lone email-less lead. An ordering, not a re-computation.
+    const leadIns = (await c.get<SegmentInsights>(`/host/openwop-app/crm/segments/${leads}/insights`)).body;
+    expect(ins.avgPropensity).toBeGreaterThan(leadIns.avgPropensity);
+    expect(Number(ins.avgPropensity.toFixed(2))).toBe(ins.avgPropensity); // rounded to 2 dp
 
-    const overlap = await c.get(`/host/openwop-app/crm/segments-overlap?a=${customers.segmentId}&b=${all.segmentId}`);
-    expect(overlap.body).toEqual({ sizeA: 2, sizeB: 3, intersection: 2 });
+    const overlap = await c.get(`/host/openwop-app/crm/segments-overlap?a=${customers}&b=${all}`);
+    expect(overlap.body).toEqual({ sizeA: 3, sizeB: 4, intersection: 3 });
   });
 });

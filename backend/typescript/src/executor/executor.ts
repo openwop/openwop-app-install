@@ -30,6 +30,7 @@
  * @see scheduler.ts for the trigger-rule + condition evaluation.
  */
 
+import { runAiDefaultFor } from '../host/runAiDefault.js';
 import { multiAgentPhaseGates } from '../host/multiAgentPhases.js';
 import { NEGOTIATION_DECIDED_EVENT, type NegotiationRecorder } from '../host/negotiationDecided.js';
 import { runOption } from '../host/runOptions.js';
@@ -702,6 +703,8 @@ async function runOneNode(input: {
         secrets: rawSecrets,
         // ADR 0712 — the run-level credential rung of the ladder.
         ...(runAiCredentialRef(run.configurable) ? { runCredentialRef: runAiCredentialRef(run.configurable) } : {}),
+        // ADR 0903 — what a node that names no provider/model falls back to.
+        runAiDefault: runAiDefaultFor(run.configurable as Record<string, unknown> | undefined, run.metadata as Record<string, unknown> | undefined),
         policyResolver,
         // RFC 0026 — let the host emit `provider.usage` into the run
         // event log right after each upstream LLM dispatch. Keeps the
@@ -850,6 +853,7 @@ async function runOneNode(input: {
       run.metadata && (run.metadata as Record<string, unknown>).triggerData !== undefined
         ? (run.metadata as Record<string, unknown>).triggerData
         : run.inputs,
+    workflowId: run.workflowId,
     attempt: input.attempt ?? 1, // ADR 0326 P3a — the span's node_attempt derives from this
     // RFC 0020 §D: propagate the run-level trust boundary onto every
     // node ctx. The MCP server mount (routes/mcp.ts) sets
@@ -937,6 +941,12 @@ async function runOneNode(input: {
     // broker keys per-user credentials + connections:use on THIS. Absent ⇒
     // system run ⇒ org/user connections fail closed (correct).
     ...(actingUserId ? { actingUserId } : {}),
+    // ADR 0879 D7 — the narrowing subject (the member who CAUSED a run that acts for
+    // nobody — a channel poster, a schedule's creator) and the run owner's personal
+    // tenant, both host-stamped reserved keys. The agent-runner's conversation write
+    // gate reads them; they grant nothing.
+    ...(typeof runMeta.orgScopeSubject === 'string' && runMeta.orgScopeSubject ? { orgScopeSubject: runMeta.orgScopeSubject } : {}),
+    ...(typeof runMeta.personalTenant === 'string' && runMeta.personalTenant ? { personalTenant: runMeta.personalTenant } : {}),
     // ADR 0189 — connect-to-continue is INTERACTIVE-only: a human chat session
     // created the run (chat transport stamps metadata.chatSessionId) and an
     // acting human exists. Headless runs never carry it, so connector
@@ -987,6 +997,7 @@ async function runOneNode(input: {
       runId: run.runId,
       ...(actingUserId ? { actingUserId } : {}),
       orgId: run.tenantId,
+      lane: 'chain', // ADR 0895 — sender, purpose and meter are bound on this lane
     }),
     messaging: makeMessagingAdapter({
       storage,

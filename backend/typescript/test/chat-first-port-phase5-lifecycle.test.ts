@@ -212,7 +212,10 @@ describe('D8 — service-desk ticket DSAR redacts requester/customer PII in plac
     expect(t?.messages[0]?.author).toBe('contact:[erased]'); // author shape preserved, id gone
     expect(t?.contactId).toBe('[erased]');             // CRM contact reference severed
     expect(t?.messages[1]?.body).toBe('happy to help, retry now'); // staff reply untouched
-    expect(t?.subject).toBe('card declined');          // structural fields survive
+    // CORRECTED (ADR 0878 D4, SD2-S4): this pinned the subject surviving as a
+    // "structural field". A WhatsApp subject IS the customer's first words (intake
+    // derives it from the message), so it is the PII under erasure, not structure.
+    expect(t?.subject).toBe('WhatsApp: [erased]');
   });
 
   it('erasing a staff subject scrubs their authored messages + createdBy, and is idempotent', async () => {
@@ -256,7 +259,7 @@ describe('D8 — service-desk ticket DSAR redacts requester/customer PII in plac
     expect(t?.messages[0]?.author).toBe('wa:[erased]');    // phone dropped, ref shape kept
     expect(t?.contactId).toBeUndefined();                  // no contactId invented on a first-contact ticket
     expect(t?.messages[1]?.body).toBe('looking into it');  // staff reply untouched
-    expect(t?.subject).toBe('where is my order');          // structure survives
+    expect(t?.subject).toBe('WhatsApp: [erased]');          // ADR 0878 D4 — the customer's words, not structure
 
     await eraseSubjectTickets(T, phone); // idempotent — sentinel no longer names the phone
     expect((await getTicket(T, ticket.ticketId))?.messages[0]?.author).toBe('wa:[erased]');

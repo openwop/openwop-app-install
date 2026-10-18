@@ -8,11 +8,18 @@
  *    first (with the CTA saying so), or a paid render is of stale text.
  *  - CRB-SP-4: `briefVersion` is stamped at render time; a render of an older
  *    version must say so, hardest on the Use-in-campaign handoff.
+ *
+ * /grade-tests w52 — witnessed by sabotage: removing the `key` on BriefDetail
+ * (SP-1), skipping onSaveFirst / its label (SP-3), forcing `stale` either way
+ * (SP-4), dropping the duration fact and emitting the facts line for a bare reel
+ * (SP-15 — the bare card is now checked for the line ELEMENT; a text match on
+ * the full fact string could not see an empty or partial line), and showing the
+ * direction chip at zero. Fixtures are typed against the client types (no casts).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, fireEvent, act } from '@testing-library/react';
 import { Link, MemoryRouter, Route, Routes } from 'react-router-dom';
-import type { CreativeBrief, CreativeRender } from '../creativeBriefsClient.js';
+import type { AdLayoutTemplate, CreativeBrief, CreativeRender } from '../creativeBriefsClient.js';
 
 const getBrief = vi.fn();
 const listBriefs = vi.fn();
@@ -51,22 +58,24 @@ vi.mock('../../../featureToggles/FeatureAccessContext.js', () => ({
 import { CreativeBriefsPage } from '../CreativeBriefsPage.js';
 
 function mkBrief(over: Partial<CreativeBrief> = {}): CreativeBrief {
-  return {
+  const base: CreativeBrief = {
     briefId: 'cb-1', orgId: 'org-1', title: 'Spring hero', assetType: 'still',
     sceneDescription: 'A field at dawn', directions: [], moodBoard: [],
-    status: 'review', version: 3, createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
-    ...over,
-  } as CreativeBrief;
+    status: 'review', version: 3, updatedAt: '2026-01-01T00:00:00.000Z',
+  };
+  return { ...base, ...over };
 }
 
-const TEMPLATE = { templateId: 'tp-1', platform: 'meta', format: 'feed', width: 1080, height: 1080, safeZones: [] };
+const TEMPLATE: AdLayoutTemplate = {
+  templateId: 'tp-1', version: 1, platform: 'meta', format: 'feed', width: 1080, height: 1080, safeZones: [], layers: [],
+};
 
 function mkRender(over: Partial<CreativeRender> = {}): CreativeRender {
-  return {
-    renderId: 'r-1', briefId: 'cb-1', orgId: 'org-1', templateId: 'tp-1', mediaAssetId: 'ma-1',
-    copy: { headline: 'H' }, warnings: [], createdAt: '2026-01-02T00:00:00.000Z',
-    ...over,
-  } as CreativeRender;
+  const base: CreativeRender = {
+    renderId: 'r-1', briefId: 'cb-1', briefVersion: 3, templateId: 'tp-1', templateVersion: 1, mediaAssetId: 'ma-1',
+    copy: { headline: 'H' }, warnings: [], compositeHash: 'hash-1', createdAt: '2026-01-02T00:00:00.000Z',
+  };
+  return { ...base, ...over };
 }
 
 function mount(initialPath: string): void {
@@ -128,8 +137,9 @@ describe('CRB-SP-3 — the render lane saves first when the form is dirty', () =
     await act(async () => {});
     // The save landed BEFORE the render — a paid render of stale text is the
     // defect.
-    expect(calls.indexOf('update')).toBeGreaterThanOrEqual(0);
-    expect(calls.indexOf('update')).toBeLessThan(calls.indexOf('render'));
+    expect(calls).toEqual(['update', 'render']);
+    // …and what was saved is the text on screen, not the stored brief.
+    expect(updateBrief).toHaveBeenCalledWith('org-1', 'cb-1', expect.objectContaining({ title: 'New headline direction' }));
   });
 });
 
@@ -152,19 +162,24 @@ describe('CRB-SP-4 — an old render says which version it came from', () => {
 describe('R3 CRB-SP-15 remainder — fetched-and-dropped facts render', () => {
   it('a reel render shows its configured duration/aspect/provider; absent facts render NO line', async () => {
     listRenders.mockResolvedValue([
-      mkRender({ renderId: 'r-reel', reel: { prompt: 'p', durationSeconds: 8, aspectRatio: '9:16', provider: 'veo' } } as Partial<CreativeRender>),
-      mkRender({ renderId: 'r-reel-bare', reel: { prompt: 'p' } } as Partial<CreativeRender>),
+      mkRender({ renderId: 'r-reel', reel: { prompt: 'p', durationSeconds: 8, aspectRatio: '9:16', provider: 'veo' } }),
+      mkRender({ renderId: 'r-reel-bare', reel: { prompt: 'p' } }),
     ]);
     mount('/creative-briefs/cb-1');
     await screen.findByDisplayValue('Spring hero');
-    expect(await screen.findByText('8s · 9:16 · veo')).toBeTruthy();
-    // The bare reel renders no facts line (absence honest, no fabricated defaults).
-    expect(screen.getAllByText(/8s · 9:16 · veo/).length).toBe(1);
+    const facts = await screen.findByText('8s · 9:16 · veo');
+    // Cards render in list order: [0] the configured reel, [1] the bare one.
+    const cards = Array.from(document.querySelectorAll('figure'));
+    expect(cards).toHaveLength(2);
+    expect(cards[0]!.contains(facts)).toBe(true);
+    // The bare reel renders NO facts line at all — not an empty one, not a
+    // partial one (the facts `<p>` is the only paragraph a render card has).
+    expect(cards[1]!.querySelector('p')).toBeNull();
   });
 
   it('the brief card shows its direction count; zero directions show no chip', async () => {
     listBriefs.mockResolvedValue([
-      mkBrief({ briefId: 'cb-1', title: 'Spring hero', directions: [{ label: 'A' }, { label: 'B' }] as CreativeBrief['directions'] }),
+      mkBrief({ briefId: 'cb-1', title: 'Spring hero', directions: [{ label: 'A' }, { label: 'B' }] }),
       mkBrief({ briefId: 'cb-3', title: 'Bare brief', directions: [] }),
     ]);
     mount('/creative-briefs');

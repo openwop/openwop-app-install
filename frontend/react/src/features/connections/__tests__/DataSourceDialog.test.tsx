@@ -2,6 +2,18 @@
  * ADR 0783 D1 — the SPA half of a data source. A writer can set and clear a
  * connection's base URL from its row; the host's refusal (its URL rule) is shown
  * beside the field; a Viewer is never offered the action.
+ *
+ * Refusals: a 400 shows the host's own URL-rule sentence; a 403 shows the shared
+ * localized "no permission" copy, never the server's words.
+ * Double guards (recorded, not probed alone): the racing Clear is refused by both
+ * `if (!busy)` and the `inFlight` ref; the base-URL trim is ALSO done by the
+ * platform — `<input type="url">` value sanitization strips leading/trailing
+ * whitespace (jsdom and browsers alike), so `save(value.trim())` → `save(value)`
+ * stayed green in wave 52 (w52g1-dsd-trim). The padded input in case 2 asserts the
+ * user-visible outcome (a trimmed URL is sent), which either guard delivers.
+ * Sabotage that turns it red: dropping `inFlight` (case 1), the 400 message
+ * (case 3), the forbidden branch (case 4), the close on save (cases 2, 5), or the
+ * Viewer/revoked gate (case 6).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { act, render, screen, fireEvent, waitFor, cleanup, within } from '@testing-library/react';
@@ -17,14 +29,14 @@ vi.mock('../connectionsClient.js', () => ({
 }));
 vi.mock('../../../client/accessClient.js', () => ({ getEffectiveAccess: vi.fn() }));
 vi.mock('../../../ui/toast.js', () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
-const accessState = vi.hoisted(() => ({ value: { access: { basis: 'member', scopes: ['workspace:write'] as string[] }, resolved: true } }));
+const accessState = vi.hoisted((): { value: { access: EffectiveAccess; resolved: boolean } } => ({ value: { access: { roles: [], basis: 'member', scopes: ['workspace:write'] }, resolved: true } }));
 vi.mock('../../../client/useEffectiveAccess.js', async (importOriginal) => {
   const real = await importOriginal<typeof import('../../../client/useEffectiveAccess.js')>();
   return { ...real, useEffectiveAccessState: () => accessState.value };
 });
 
 import { listProviders, listConnections, setDataSource, type Connection } from '../connectionsClient.js';
-import { getEffectiveAccess } from '../../../client/accessClient.js';
+import { getEffectiveAccess, type EffectiveAccess } from '../../../client/accessClient.js';
 import { ConnectionsManager } from '../ConnectionsManager.js';
 import { toast } from '../../../ui/toast.js';
 import { ApiError } from '../../../client/requestJson.js';
@@ -38,7 +50,8 @@ beforeEach(() => {
   vi.mocked(setDataSource).mockReset();
   vi.mocked(getEffectiveAccess).mockResolvedValue({ roles: [], scopes: [], basis: 'member' });
   vi.mocked(toast.success).mockReset();
-  accessState.value = { access: { basis: 'member', scopes: ['workspace:write'] }, resolved: true };
+  vi.mocked(toast.error).mockReset();
+  accessState.value = { access: { roles: [], basis: 'member', scopes: ['workspace:write'] }, resolved: true };
 });
 afterEach(cleanup);
 
@@ -49,7 +62,7 @@ const openDialog = async (): Promise<HTMLElement> => {
 
 describe('the data-source field (ADR 0783 D1)', () => {
   it('a pending save refuses repeated submission and racing clear/cancel, retaining focus', async () => {
-    vi.mocked(listConnections).mockResolvedValue([row({ dataSource: { baseUrl: 'https://acme.service-now.com/api', updatedAt: 'x' } })]);
+    vi.mocked(listConnections).mockResolvedValue([row({ dataSource: { baseUrl: 'https://acme.service-now.com/api', updatedAt: '2026-10-08T00:00:00Z' } })]);
     let finish = (): void => {};
     vi.mocked(setDataSource).mockReturnValue(new Promise<void>((resolve) => { finish = resolve; }));
     render(<ConnectionsManager />);
@@ -78,7 +91,7 @@ describe('the data-source field (ADR 0783 D1)', () => {
   it('a writer sets a base URL; the row then shows it', async () => {
     vi.mocked(listConnections)
       .mockResolvedValueOnce([row()])
-      .mockResolvedValue([row({ dataSource: { baseUrl: 'https://acme.service-now.com/api/now', updatedAt: 'x' } })]);
+      .mockResolvedValue([row({ dataSource: { baseUrl: 'https://acme.service-now.com/api/now', updatedAt: '2026-10-08T00:00:00Z' } })]);
     vi.mocked(setDataSource).mockResolvedValue();
     render(<ConnectionsManager />);
     const dialog = await openDialog();
@@ -103,8 +116,19 @@ describe('the data-source field (ADR 0783 D1)', () => {
     expect(screen.getByRole('dialog')).toBeTruthy();
   });
 
+  it("a 403 shows the shared no-permission copy, never the server's words", async () => {
+    vi.mocked(listConnections).mockResolvedValue([row()]);
+    vi.mocked(setDataSource).mockRejectedValue(new ApiError({ status: 403, statusText: 'Forbidden', url: '/x', body: { error: 'forbidden', message: 'server words' }, message: 'server words' }));
+    render(<ConnectionsManager />);
+    const dialog = await openDialog();
+    fireEvent.change(within(dialog).getByLabelText('Base URL'), { target: { value: 'https://acme.service-now.com/api' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }));
+    expect((await within(dialog).findByRole('alert')).textContent).toBe("You don't have permission to do that here. Ask an admin of this workspace for access.");
+    expect(screen.getByRole('dialog')).toBe(dialog);
+  });
+
   it('a configured source can be cleared', async () => {
-    vi.mocked(listConnections).mockResolvedValue([row({ dataSource: { baseUrl: 'https://acme.service-now.com/api', updatedAt: 'x' } })]);
+    vi.mocked(listConnections).mockResolvedValue([row({ dataSource: { baseUrl: 'https://acme.service-now.com/api', updatedAt: '2026-10-08T00:00:00Z' } })]);
     vi.mocked(setDataSource).mockResolvedValue();
     render(<ConnectionsManager />);
     const dialog = await openDialog();
@@ -112,16 +136,17 @@ describe('the data-source field (ADR 0783 D1)', () => {
     fireEvent.click(within(dialog).getByRole('button', { name: 'Stop using as a data source' }));
     await waitFor(() => expect(setDataSource).toHaveBeenCalledWith('c1', null));
     expect(toast.success).toHaveBeenCalledWith('My ServiceNow is no longer a data source.');
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
   });
 
   it('a Viewer is not offered the action, and neither is a revoked row', async () => {
-    accessState.value = { access: { basis: 'member', scopes: [] }, resolved: true };
+    accessState.value = { access: { roles: [], basis: 'member', scopes: [] }, resolved: true };
     vi.mocked(listConnections).mockResolvedValue([row()]);
     const { unmount } = render(<ConnectionsManager />);
     await screen.findByText('My ServiceNow');
     expect(screen.queryByRole('button', { name: 'Data source for My ServiceNow' })).toBeNull();
     unmount();
-    accessState.value = { access: { basis: 'member', scopes: ['workspace:write'] }, resolved: true };
+    accessState.value = { access: { roles: [], basis: 'member', scopes: ['workspace:write'] }, resolved: true };
     vi.mocked(listConnections).mockResolvedValue([row({ status: 'revoked' })]);
     render(<ConnectionsManager />);
     await screen.findByText('My ServiceNow');

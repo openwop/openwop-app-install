@@ -62,6 +62,9 @@ async function setup() {
   const mate = client();
   const mateId = (await mate.post('/host/openwop-app/test/login', { email: email('cb-mate'), tenantId })).body.user.userId as string;
   await createMember({ tenantId, orgId, subject: mateId, displayName: 'Mate', roles: ['viewer'] });
+  // ADR 0879 D1 — creating a channel needs `workspace:write`: the mate is an Editor of
+  // the WORKSPACE (and only a viewer of the project's org, the point of the case below).
+  await createMember({ tenantId, orgId: tenantId, subject: mateId, displayName: 'Mate', roles: ['editor'] });
   return { tenantId, orgId, owner, ownerId, mate, mateId, projectId: proj.id, L, channelId: ch.body.channel.conversationId as string };
 }
 const compose = (tenantId: string, conversationId: string, callerUserId: string) =>

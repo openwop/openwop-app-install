@@ -1,3 +1,10 @@
+/**
+ * ADR 0140 P4 — drag-drop reorder: `computeDropIndex` turns "drop X before/after Y"
+ * into the reducer's `reorder` toIndex, which is the FINAL index in the POST-REMOVAL
+ * array. Breaks if the removal adjustment is dropped (every left-to-right drag lands
+ * one slot too far right), if `side` is ignored, or if a no-op drop is reported as a
+ * move. Verified through the real reducer so the two halves cannot drift apart.
+ */
 import { describe, it, expect } from 'vitest';
 import { computeDropIndex } from '../dropIndex.js';
 import { tabDeckReducer, emptyTabDeck, type TabDeckState } from '../tabDeckModel.js';
@@ -33,12 +40,15 @@ describe('computeDropIndex — drag-drop ↔ reducer reorder', () => {
   });
 
   it('no-ops on self, unknown id, or a non-moving drop', () => {
+    // Self-drop is a DOUBLE GUARD: `fromSid === targetSid` returns early, and the
+    // `final === from` check would also return null (same index), so removing either
+    // one alone cannot red this line (w44 probe drop-self). `drop-nomove` probes the
+    // shared `final === from` piece.
     expect(computeDropIndex(order, 'a', 'a', 'before')).toBeNull();
     expect(computeDropIndex(order, 'a', 'zzz', 'before')).toBeNull();
     // 'a' dropped BEFORE 'b' is already 'a's position → no movement.
     expect(computeDropIndex(order, 'a', 'b', 'before')).toBeNull();
-    // 'a' dropped AFTER 'a's right neighbor 'b'... handled by 'before c' etc.; the
-    // direct "after the immediately-following" is a real move:
-    expect(computeDropIndex(order, 'b', 'a', 'after')).toBeNull(); // b after a == b's slot
+    // 'b' dropped AFTER 'a' is b's own slot → no movement.
+    expect(computeDropIndex(order, 'b', 'a', 'after')).toBeNull();
   });
 });

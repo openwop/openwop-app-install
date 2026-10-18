@@ -17,6 +17,8 @@ export const messages = {
   rtSave: "Enregistrer",
   rtSaving: "Enregistrement…",
   rtSaved: "Paramètres de voix en temps réel enregistrés.",
+  rtLoadFailed: "Les paramètres actuels de voix en temps réel n’ont pas pu être chargés ; ils ne peuvent pas être modifiés ici pour le moment.",
+  rtRetry: "Réessayer",
 
   // Fournisseur d’IA par défaut pour les médias (ADR 0110)
   aiDefaultTitle: 'Fournisseur d’IA par défaut pour les médias',
@@ -138,7 +140,6 @@ export const messages = {
   unscoped: 'Sans portée',
   noKeysTitle: 'Aucune clé d’API pour le moment',
   noKeysBody: 'Ajoutez une clé pour permettre au chat et aux nœuds de workflow d’appeler un fournisseur en votre nom. Les clés sont chiffrées au repos ; les nœuds les référencent par libellé.',
-  addFirstKey: 'Ajoutez votre première clé',
   keyCount_one: '{{count}} clé',
   keyCount_other: '{{count}} clés',
   addProviderKey: 'Ajouter une clé {{provider}}',

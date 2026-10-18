@@ -613,7 +613,13 @@ describe('the org-selection dependency edge', () => {
     expect(branchesLocally || delegates, `${rel} never branches on orgsFailed`).toBe(true);
     // The hook's effect is the only place the read happens, so a retry that does
     // not re-trigger it would restore the permanent skeleton it exists to remove.
-    expect(src, `${rel} has no retry wired to the org read`).toMatch(/retryOrgs/);
+    // WIRED, not merely named: `retry: retryOrgs` in the destructuring satisfied the
+    // old bare `/retryOrgs/` on its own, so `retry={() => undefined}` stayed green
+    // (w49 probe `ose-retry`). MEASURED 2026-10-15: 38 adopters pass
+    // `retry={retryOrgs}` to OrgSelectionState and 3 local-branch adopters wire
+    // `onClick={retryOrgs}` (AppBuilderHub, CompatEndpointsCard, SubjectKnowledgePanel).
+    expect(src, `${rel} destructures retryOrgs but never wires it to a control`)
+      .toMatch(/(?:retry|onClick)=\{retryOrgs\}/);
   });
 
   /**
@@ -648,7 +654,9 @@ describe('the org-selection dependency edge', () => {
     // count with no slack: slack in a floor is silent capacity for exactly the
     // regression the floor exists to catch.
     // 24 -> 31 with the SENTINEL_ORG_READS migration batch.
-    expect(delegating.length).toBeGreaterThanOrEqual(31);
+    // 31 -> 38 (2026-10-15, w49 /grade-tests): MEASURED 38 adopters render the
+    // component. The floor had sat at 31 — seven of silent capacity.
+    expect(delegating.length).toBeGreaterThanOrEqual(38);
   });
 
   it('the shared renderer keeps the order the pages delegated to it', () => {
@@ -709,7 +717,10 @@ describe('the org-selection dependency edge', () => {
     // a red run green.
     // 25 -> 32 with the SENTINEL_ORG_READS migration batch (commerce, documents,
     // email, evals, forms, production, publishing).
-    expect(ADOPTERS.length).toBeGreaterThanOrEqual(32);
+    // 32 -> 41 (2026-10-15, w49 /grade-tests): MEASURED 41 adopters. The floor had
+    // sat at 32 while the walk found 41, so an adopter dropping the hook import
+    // stayed green (probe `ose-floor`) — exactly the slack this comment forbids.
+    expect(ADOPTERS.length).toBeGreaterThanOrEqual(41);
   });
 
   /**
@@ -720,7 +731,8 @@ describe('the org-selection dependency edge', () => {
    */
   it('the delegation check actually recognises the delegated form', () => {
     const delegating = ADOPTERS.filter((rel) => delegatesOrgStates(code(rel)));
-    expect(delegating.length, 'no file reads as delegating — the shape check drifted').toBeGreaterThanOrEqual(31);
+    // 31 -> 38 (2026-10-15, w49): MEASURED 38 delegating adopters.
+    expect(delegating.length, 'no file reads as delegating — the shape check drifted').toBeGreaterThanOrEqual(38);
     // …and it is not just answering "true" to everything: a local-branch page
     // does not render the component at all, so it must NOT read as delegating.
     //

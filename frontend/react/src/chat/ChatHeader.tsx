@@ -216,9 +216,10 @@ export function ChatHeader({
         )}
         {/* ADR 0132 — per-conversation tool scope + approvals now lives at the
             COMPOSER (next to the web/tools modifiers — see ChatSidebar). */}
-        {/* ADR 0136 — the intent ledger / mission contract (self-gates on the
-            intent-ledger feature; renders nothing when off). */}
-        <IntentLedgerButton sessionId={session.id} {...(lastUserText ? { lastUserMessage: lastUserText } : {})} />
+        {/* ADR 0136 — the intent ledger / mission contract. IL2UX-1: only once the
+            conversation exists server-side (its first turn) — before that the
+            mission has nothing to attach to and the read is a 404. */}
+        {hasTurns && <IntentLedgerButton sessionId={session.id} {...(lastUserText ? { lastUserMessage: lastUserText } : {})} />}
         {/* ADR 0133 — the run/task deck (self-gates on the task-deck feature). */}
         <TaskDeckButton />
         {/* ADR 0154 Phase 2 — channel settings (rename · archive · members),

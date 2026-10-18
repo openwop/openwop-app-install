@@ -26,6 +26,7 @@ import {
   type DelegableAgent, type SpeakerSnapshot,
 } from './delegation.js';
 import { truncateFencedContent } from '../../../host/untrustedContent.js';
+import { voiceAuthorityHolds, type VoiceAuthorityLapse, type VoiceAuthoritySnapshot, type VoiceAuthorityVerdict } from '../voiceAuthority.js';
 
 /** TOCC-4 (ADR 0604) — the budget for a tool result spoken back into a LIVE
  *  realtime session. Applied with `truncateFencedContent`, NEVER a bare
@@ -34,6 +35,9 @@ import { truncateFencedContent } from '../../../host/untrustedContent.js';
  *  alone is ~230 chars), injecting an unterminated data-only fence into a live
  *  model session. */
 const SIDEBAND_RESULT_MAX_CHARS = 4000;
+/** OpenAI's realtime API root (a third-party path, not the OpenWOP wire) — ONE literal
+ *  for the sideband socket and the ADR 0893 hang-up, so both honor OPENAI_BASE_URL. */
+const OPENAI_REALTIME = `${(process.env.OPENAI_BASE_URL ?? 'https://api.openai.com').replace(/\/$/, '')}/v1/realtime`;
 
 const log = createLogger('features.voice.realtime.sideband');
 
@@ -58,6 +62,12 @@ export interface SidebandSession {
   boundAgentId?: string;
   /** Display persona of `boundAgentId`, stamped into attribution meta. */
   boundPersona?: string;
+  /** ADR 0893 D4 — the opener's authority, frozen at connect (`snapshotVoiceAuthority`).
+   *  Re-asked before every tool call, delegation and transcript write; absent ⇒ the
+   *  call holds no authority (fail-closed). Its `subject` is the D5 transcript author. */
+  authority?: VoiceAuthoritySnapshot;
+  /** ADR 0893 D4 — set once the authority lapsed; the live loop then ends the call. */
+  revoked?: VoiceAuthorityLapse;
 }
 
 /** CS-VX-3 (conversation-stack audit) — a sideband failure previously degraded
@@ -102,7 +112,10 @@ async function persistTranscript(s: SidebandSession, role: 'user' | 'assistant',
       ...(speaker ? { agentId: speaker } : {}),
       ...(role === 'assistant' && s.boundPersona ? { agentPersona: s.boundPersona } : {}),
     }),
-    authorSubject: null, createdAt: new Date().toISOString(),
+    // ADR 0893 D5 — a spoken USER turn is authored by the human on the call (the form a
+    // typed post stamps, `callerSubject(req)`), so DSAR post erasure reaches it and its
+    // speaker may edit/delete it like a typed row. Assistant turns stay author-less.
+    authorSubject: role === 'user' ? (s.authority?.subject ?? null) : null, createdAt: new Date().toISOString(),
   };
   await hostExtStorage().appendChatMessage(record);
   await hostExtStorage().updateChatSession(s.tenantId, s.conversationId, { messageCount: session.messageCount + 1, updatedAt: new Date().toISOString() });
@@ -115,6 +128,9 @@ async function persistTranscript(s: SidebandSession, role: 'user' | 'assistant',
 
 export interface SidebandDeps {
   persist: (s: SidebandSession, role: 'user' | 'assistant', text: string) => Promise<void>;
+  /** ADR 0893 D4 — does the call still hold its opener's authority? Defaults to the
+   *  shared `voiceAuthorityHolds` over the session's connect-time snapshot. */
+  authorize?: (s: SidebandSession) => Promise<VoiceAuthorityVerdict>;
   /** ADR 0304 D1 — spoken delegation (present only when the mint declared the tool):
    *  compose a target agent's full speaker snapshot + enumerate the delegable roster. */
   delegation?: {
@@ -122,7 +138,36 @@ export interface SidebandDeps {
     delegable: readonly DelegableAgent[];
   };
 }
-const DEFAULT_DEPS: SidebandDeps = { persist: persistTranscript };
+async function authorizeSession(s: SidebandSession): Promise<VoiceAuthorityVerdict> {
+  return s.authority ? voiceAuthorityHolds(s.authority) : { ok: false, reason: 'toggle_off' };
+}
+const DEFAULT_DEPS: SidebandDeps = { persist: persistTranscript, authorize: authorizeSession };
+
+/** ADR 0893 D4 (architect H1) — the frame that strips a revoked call: closing our
+ *  socket alone leaves the browser's WebRTC audio talking to a model that still
+ *  holds the persona and the workspace context, so the session is neutralised first. */
+const NEUTRAL_SESSION_UPDATE: Record<string, unknown> = { type: 'session.update', session: { instructions: 'This call has ended. Say only that the call has ended.', tools: [] } };
+
+/** Re-check the opener's authority; on a lapse mark the session revoked (the live
+ *  loop ends the call) and return the frames to send instead of the normal turn. */
+function revokedCallOutput(callId: string): Record<string, unknown> {
+  return { type: 'conversation.item.create', item: { type: 'function_call_output', call_id: callId, output: `[denied] ${JSON.stringify({ error: 'voice_session_revoked', message: 'the action was not performed: this call no longer has permission to act' })}` } };
+}
+
+async function refuseIfRevoked(s: SidebandSession, deps: SidebandDeps, callId?: string): Promise<Array<Record<string, unknown>> | null> {
+  const verdict = s.revoked ? { ok: false as const, reason: s.revoked } : await (deps.authorize ?? authorizeSession)(s);
+  if (verdict.ok) return null;
+  if (verdict.reason === 'authority_unavailable') {
+    // A store fault while re-checking: refuse THIS event (fail-closed), keep the call.
+    log.warn('voice_authority_unavailable', { tenantId: s.tenantId, callId: s.callId });
+    return callId ? [revokedCallOutput(callId), { type: 'response.create' }] : [];
+  }
+  if (!s.revoked) {
+    s.revoked = verdict.reason;
+    log.warn('voice_session_revoked', { tenantId: s.tenantId, callId: s.callId, reason: verdict.reason });
+  }
+  return [...(callId ? [revokedCallOutput(callId)] : []), NEUTRAL_SESSION_UPDATE];
+}
 
 interface SidebandEvent { type?: string; name?: string; arguments?: string; call_id?: string; transcript?: string }
 
@@ -149,10 +194,19 @@ function bindSpeaker(s: SidebandSession, agentId: string | undefined, persona: s
  * allowlist (no privilege union) and assistant turns attribute to the target.
  */
 export async function handleSidebandEvent(s: SidebandSession, evt: SidebandEvent, deps: SidebandDeps = DEFAULT_DEPS): Promise<Array<Record<string, unknown>>> {
+  // ADR 0893 D4 (grade-code VOX2CD-2) — once revoked, NOTHING may re-arm the session:
+  // a delegation auto-return would otherwise send the home persona's full
+  // instructions + tools over the neutral update. Only refusals go out.
+  if (s.revoked) {
+    return evt.type === 'response.function_call_arguments.done' && evt.call_id ? [revokedCallOutput(evt.call_id)] : [];
+  }
   const delegation = delegationStateOf(s.callId);
 
   if (evt.type === 'response.function_call_arguments.done' && evt.name && evt.call_id) {
     const args = ((): Record<string, unknown> => { try { return JSON.parse(evt.arguments ?? '{}'); } catch { return {}; } })();
+    // ADR 0893 D4 — the opener's authority is re-asked before ANY call, delegation included.
+    const refused = await refuseIfRevoked(s, deps, evt.call_id);
+    if (refused) return refused;
 
     // ── Spoken delegation (session control — never the tool bridge) ────────
     if (evt.name === DELEGATE_TOOL) {
@@ -245,8 +299,13 @@ export async function handleSidebandEvent(s: SidebandSession, evt: SidebandEvent
     return [speakerUpdate(delegation.home)];
   }
 
-  if (evt.type === 'conversation.item.input_audio_transcription.completed' && evt.transcript) { await deps.persist(s, 'user', evt.transcript); return []; }
-  if (evt.type === 'response.audio_transcript.done' && evt.transcript) { await deps.persist(s, 'assistant', evt.transcript); return []; }
+  // ADR 0893 D4 (architect H2) — a revoked opener's words stop landing in the conversation.
+  if ((evt.type === 'conversation.item.input_audio_transcription.completed' || evt.type === 'response.audio_transcript.done') && evt.transcript) {
+    const refused = await refuseIfRevoked(s, deps);
+    if (refused) return refused;
+    await deps.persist(s, evt.type === 'response.audio_transcript.done' ? 'assistant' : 'user', evt.transcript);
+    return [];
+  }
   return [];
 }
 
@@ -406,7 +465,7 @@ export function openSideband(
     delegation?: NonNullable<SidebandDeps['delegation']>;
   },
 ): void {
-  const url = `wss://api.openai.com/v1/realtime?call_id=${encodeURIComponent(s.callId)}`;
+  const url = `${OPENAI_REALTIME.replace(/^http/, 'ws')}?call_id=${encodeURIComponent(s.callId)}`;
   const ws = new (WebSocket as unknown as WSCtor)(url, { headers: { authorization: `Bearer ${apiKey}`, 'openai-beta': 'realtime=v1' } });
   const teardown = (): void => { sessions.delete(s.callId); clearRealtimeSessionTools(s.callId); clearDelegation(s.callId); clearHeldForCall(s.callId); };
   // ADR 0304 D1 — capture the HOME speaker so a delegation can be restored one-shot.
@@ -419,6 +478,7 @@ export function openSideband(
       ...(config.voice ? { voice: config.voice } : {}),
     });
   }
+  let revokeHandled = false; // ADR 0893 D4 — the call is ended once, on the first lapse
   ws.addEventListener('open', () => {
     ws.send(JSON.stringify(sessionUpdate(config)));
     // Phase G — seed prior turns as history items (session.update first so the
@@ -432,6 +492,7 @@ export function openSideband(
       let evt: SidebandEvent; try { evt = JSON.parse(String((e as MessageEvent).data)); } catch { return; }
       const out = await handleSidebandEvent(s, evt, deps);
       for (const o of out) if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(o));
+      if (s.revoked && !revokeHandled) { revokeHandled = true; await endRevokedCall(s, apiKey, ws); }
     } catch (err) {
       // ADR 0733: was `console.error`, which bypasses the sink — and THIS channel
       // carries transcripts, so a driver message here is the likeliest place for a
@@ -464,6 +525,26 @@ export function openSideband(
     teardown();
   });
   sessions.set(s.callId, ws);
+}
+
+/** ADR 0893 D4 (architect H1) — end a call whose opener lost authority. The neutral
+ *  `session.update` has already been sent; ask OpenAI to hang the call up (so the
+ *  browser's audio leg ends too — closing our socket alone would not), record a
+ *  REVOKED notice in the conversation, then close. Every step is best-effort and
+ *  logged: the tools are already refused, so a failed hang-up degrades to a mute
+ *  persona, never to authority. */
+async function endRevokedCall(s: SidebandSession, apiKey: string, ws: WebSocket): Promise<void> {
+  clearHeldForCall(s.callId); // a held approval of a revoked call is gone, not pending
+  try {
+    const res = await fetch(`${OPENAI_REALTIME}/calls/${encodeURIComponent(s.callId)}/hangup`, {
+      method: 'POST', headers: { authorization: `Bearer ${apiKey}` }, signal: AbortSignal.timeout(5_000),
+    });
+    if (!res.ok) log.warn('voice_revoked_hangup_failed', { callId: s.callId, status: res.status });
+  } catch (err) {
+    log.warn('voice_revoked_hangup_failed', { callId: s.callId, error: err instanceof Error ? err.message : String(err) });
+  }
+  await persistVoiceApprovalNotice(s, 'Voice call ended: this call no longer has permission to act in this workspace.', { kind: 'voice-revoked', reason: s.revoked });
+  try { ws.close(); } catch { /* already closing */ }
 }
 
 export function closeSideband(callId: string): void {

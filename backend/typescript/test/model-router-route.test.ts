@@ -1,5 +1,12 @@
 /**
- * ADR 0130 Phase 1 — the pure per-turn model-routing selector.
+ * ADR 0130 Phase 1 / ADR 0714 D1+D3 — the pure per-turn model-routing selector.
+ *
+ * Breaks if a rule stops matching (threshold, attachment, exact conversationKind),
+ * if an attachment turn is routed to a non-`vision-input` target on ANY lane (rule,
+ * cooldown, fallback), if cooldown stickiness stops applying inside its window or
+ * keeps applying after it, or if the selector stops being a pure function of its
+ * inputs (every case below pins an EXACT decision, so a non-deterministic or
+ * clock-reading selector reds them — the replay/fork property ADR 0130 relies on).
  */
 import { describe, it, expect } from 'vitest';
 import { routeTurn, type ModelRouterConfig, type CapabilityProbe } from '../src/features/model-router/routeTurn.js';
@@ -40,9 +47,8 @@ describe('routeTurn', () => {
     // name made ("NEVER routes an attachment turn to a non-vision target") is pinned by
     // the dedicated describe block below, on a fixture where the fallback is NOT.
     const d = routeTurn({ hasAttachment: true, tokenEstimate: 100 }, config, probe, 0);
-    expect(d).not.toBeNull();
-    expect(probe(d!.target.provider)).toContain('vision-input');
-    expect(d!.target).toMatchObject({ provider: 'anthropic' });
+    expect(d).toEqual({ reason: 'fallback', target: { provider: 'anthropic', model: 'default' } });
+    expect(probe(d!.target.provider)).toContain('vision-input'); // the invariant, stated
   });
 
   it('applies cooldown stickiness when the sticky target is still eligible', () => {
@@ -52,18 +58,14 @@ describe('routeTurn', () => {
 
   it('drops a sticky target that is no longer eligible (attachment + sticky non-vision)', () => {
     const d = routeTurn({ hasAttachment: true }, config, probe, 1000, { lastTarget: { provider: 'openai', model: 'no-vision' }, lastAtMs: 0 });
-    expect(d?.reason).not.toBe('cooldown'); // sticky non-vision is ineligible for an attachment turn
-    expect(d).not.toBeNull();
+    // sticky non-vision is ineligible for an attachment turn → the vision fallback
+    expect(d).toEqual({ reason: 'fallback', target: { provider: 'anthropic', model: 'default' } });
     expect(probe(d!.target.provider)).toContain('vision-input');
   });
 
   it('expires cooldown after the window', () => {
     const d = routeTurn({ tokenEstimate: 100 }, config, probe, 70_000, { lastTarget: { provider: 'google', model: 'sticky' }, lastAtMs: 0 });
-    expect(d?.reason).not.toBe('cooldown');
-  });
-
-  it('is deterministic', () => {
-    expect(routeTurn({ tokenEstimate: 9000 }, config, probe, 0)).toEqual(routeTurn({ tokenEstimate: 9000 }, config, probe, 0));
+    expect(d).toEqual({ reason: 'rule', target: { provider: 'openai', model: 'cheap' } });
   });
 });
 
@@ -143,6 +145,6 @@ describe('routeTurn — conversationKind rule (ADR 0130 Phase 6, the board model
 
   it('a channel does not match a group rule (exact kind match)', () => {
     const d = routeTurn({ tokenEstimate: 10, conversationKind: 'channel' }, cfg, probe, 0);
-    expect(d?.reason).toBe('fallback');
+    expect(d).toEqual({ target: { provider: 'minimax', model: 'small' }, reason: 'fallback' });
   });
 });

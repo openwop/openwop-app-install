@@ -17,12 +17,15 @@ import { collectSources } from '../sources.js';
 import { Workbench } from '../Workbench.js';
 import { TurnReceipt } from '../../TurnReceipt.js';
 import { WorkbenchActionsContext } from '../workbenchActions.js';
-import type { ChatMessage } from '../../types.js';
+import type { ChatMessage, Citation, ContentPart } from '../../types.js';
 
 afterEach(cleanup);
 
-const asst = (id: string, urls: string[]): ChatMessage => ({ id, role: 'assistant', content: 'x', createdAt: 't', meta: { provider: 'p', model: 'm', citations: urls.map((url) => ({ url, title: `T ${url}` })) } } as unknown as ChatMessage);
-const user = (id: string, parts: unknown[]): ChatMessage => ({ id, role: 'user', content: parts, createdAt: 't' } as unknown as ChatMessage);
+const asst = (id: string, urls: string[]): ChatMessage => ({
+  id, role: 'assistant', content: 'x', createdAt: 't',
+  meta: { provider: 'p', model: 'm', citations: urls.map((url): Citation => ({ url, title: `T ${url}` })) },
+});
+const user = (id: string, parts: ContentPart[]): ChatMessage => ({ id, role: 'user', content: parts, createdAt: 't' });
 
 describe('collectSources', () => {
   it('de-duplicates web sources by URL and counts each turn once', () => {
@@ -39,7 +42,10 @@ describe('collectSources', () => {
       user('u2', [{ type: 'file', mimeType: 'application/pdf', name: 'msa.pdf', url: '/f/1' }]),
     ]);
     expect(s.files).toEqual([{ name: 'msa.pdf', mimeType: 'application/pdf', url: '/f/1' }, { name: 'redlines', mimeType: 'image/png' }]);
-    expect(collectSources([asst('a', [])]).files).toEqual([]);
+    // An assistant turn whose content carries a file part (a generated asset) is
+    // NOT something the user sent.
+    const generated: ChatMessage = { id: 'a2', role: 'assistant', createdAt: 't', content: [{ type: 'file', mimeType: 'application/pdf', name: 'gen.pdf', url: '/f/9' }] };
+    expect(collectSources([generated]).files).toEqual([]);
   });
 
   it('its key changes only when the list changes', () => {
@@ -60,14 +66,15 @@ describe('Workbench Sources tab', () => {
     expect(screen.queryByRole('tab', { name: /workbenchTabSources/ })).toBeNull();
     cleanup();
     wb('run', collectSources([asst('a', ['https://a.test/'])]));
-    expect(screen.getByRole('tab', { name: /workbenchTabSources/ }).textContent).toContain('1');
+    const tab = screen.getByRole('tab', { name: /workbenchTabSources/ });
+    expect(tab.querySelector('.workbench-tab-badge')?.textContent).toBe('1');
   });
 
   it('renders the list, with each web source as an external link', () => {
     wb('sources', collectSources([asst('a', ['https://a.test/x'])]));
     const link = screen.getByRole('link', { name: 'T https://a.test/x' });
     expect(link.getAttribute('target')).toBe('_blank');
-    expect(link.getAttribute('rel')).toContain('noopener');
+    expect(link.getAttribute('rel')).toBe('noopener noreferrer');
   });
 
   it('says so plainly when selected with nothing to show', () => {
@@ -81,6 +88,10 @@ describe('receipt → Sources', () => {
   it('offers the Workbench only inside a shell that has one', () => {
     render(<TurnReceipt message={turn} />);
     fireEvent.click(screen.getByRole('button'));
+    // Positive control: the receipt IS expanded (its meta line shows), so the
+    // absence below is the gate, not a collapsed receipt.
+    expect(screen.getByRole('button', { name: 'receiptHide' }).getAttribute('aria-expanded')).toBe('true');
+    expect(screen.getByText('p/m')).toBeTruthy();
     expect(screen.queryByText('receiptOpenSources')).toBeNull();
   });
   it('opens the Sources tab from the expanded receipt', () => {

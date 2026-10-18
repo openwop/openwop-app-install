@@ -99,9 +99,21 @@ export function buildAssistantSurface(scope: BundleScope): FeatureSurface {
     getMeeting: async (args) => ({ meeting: projectOne(await getMeeting(tenantId, str(args.meetingId))) }),
     listMeetings: async () => ({ meetings: (await listMeetings(tenantId)).map(project) }),
     listStakeholders: async () => ({ stakeholders: (await listStakeholders(tenantId)).map(project) }),
-    listPendingActions: async (args) => ({
-      pendingActions: (await listPendingActions(tenantId, optStr(args.status) as 'pending' | undefined)).map(project),
-    }),
+    listPendingActions: async (args) => {
+      const all = await listPendingActions(tenantId, optStr(args.status) as 'pending' | undefined);
+      // ADR 0878 D6 — a run acting for a person lists an org's action (a support
+      // reply) only when that person may decide it. A run with no person stays
+      // tenant-trusted, as on every surface (the briefing loop).
+      const person = scope.actingUserId ?? scope.orgScopeSubject;
+      if (!person) return { pendingActions: all.map(project) };
+      const { mayActOnAction } = await import('./actionApproval.js');
+      // The personal-owner exit is the ACTOR's only — a causing member is answered by
+      // membership (ADR 0832 D3).
+      const actor = { spellings: [person], ...(scope.actingUserId && scope.personalTenant === tenantId ? { isPersonalOwner: true } : {}) };
+      const visible = [];
+      for (const a of all) if (await mayActOnAction(tenantId, a, actor)) visible.push(a);
+      return { pendingActions: visible.map(project) };
+    },
 
     // ── writes (role:action; idempotent where the service derives the key) ──
     upsertCommitment: async (args) => {

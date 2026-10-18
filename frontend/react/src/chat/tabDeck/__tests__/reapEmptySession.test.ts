@@ -1,8 +1,11 @@
 /**
- * reapEmptySession — the abandoned-empty-chat reap (deck close / re-key).
- * Pins the guards that keep it safe: only deck-minted ids, never mid-stream,
- * never a conversation with messages, and every failure path no-ops (a
- * lingering empty row is the pre-existing state, a wrong delete is data loss).
+ * reapEmptySession — the abandoned-empty-chat reap on deck close / re-key
+ * (ADR 0140, TabChatDeck `reapIfAbandoned`). Pins the guards that keep the hard
+ * delete safe: only deck-minted ids, never mid-stream, never a conversation with
+ * messages, and every failure path no-ops (a lingering empty row is the
+ * pre-existing state, a wrong delete is data loss). Breaks if `isFresh` or
+ * `isStreaming` is ignored, the message count is mis-compared, a failed count
+ * is read as "empty", or a failure resolves `true`.
  */
 import { describe, it, expect, vi } from 'vitest';
 import { reapEmptySession } from '../TabChatDeck.js';

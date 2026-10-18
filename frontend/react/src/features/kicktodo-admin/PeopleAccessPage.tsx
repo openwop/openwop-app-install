@@ -12,6 +12,7 @@ import { Button } from '../../ui/Button.js';
 import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
+import { PageHeader } from '../../ui/PageHeader.js';
 import { StateCard } from '../../ui/StateCard.js';
 import { Notice } from '../../ui/Notice.js';
 import { getAdminPeople, type AdminPeopleView } from '../../client/kicktodoOrgClient.js';
@@ -32,15 +33,12 @@ export function PeopleAccessPage(): JSX.Element {
       <div className="action-bar">
         <Link className="btn-ghost btn-sm" to="/admin/kicktodo">{t('backToConsole')}</Link>
       </div>
-      <header className="page-header">
-        <h1 className="page-header__title">{t('peopleTitle')}</h1>
-        <p className="page-header__lede">{t('peopleLede')}</p>
-      </header>
+      <PageHeader title={t('peopleTitle')} lede={t('peopleLede')} />
 
       {view === undefined && <StateCard loading title={t('peopleTitle')} />}
       {view === null && (
         <>
-          <Notice variant="error">{t('peopleError')}</Notice>
+          <Notice variant="error" announce={t('peopleError')}>{t('peopleError')}</Notice>
           <div className="action-bar">
             <Button variant="quiet" size="sm" onClick={() => void reload()}>{t('retry')}</Button>
           </div>

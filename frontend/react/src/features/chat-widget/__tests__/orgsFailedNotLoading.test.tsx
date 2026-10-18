@@ -28,16 +28,17 @@ vi.mock('../../../client/chatWidgetClient.js', async (orig) => ({
   ...(await orig<typeof import('../../../client/chatWidgetClient.js')>()),
   listOrgs, listWidgets,
 }));
-// No `useFeatureAccess` mock: `WidgetsPage` does not import it. `chat-widget`
-// graduated to always-on (ADR 0134, no `toggleDefault`), and the page's
-// hard-coded always-on `access` literal plus its unreachable not-enabled branch
-// are gone. A mock of a module the subject never imports is scenery that makes
-// a file look like it covers a gate.
+// No `useFeatureAccess` mock: `WidgetsPage` does not import it. CORRECTED (wave
+// 26): this used to say `chat-widget` has no toggle (ADR 0134) — stale; ADR 0820
+// §8.2 restored its `toggleDefault`, enforced server-side on the operator routes.
+// The page reads no toggle, so a hook mock here would be scenery that makes the
+// file look like it covers a gate.
 
 import { WidgetsPage } from '../WidgetsPage.js';
+import type { Widget } from '../../../client/chatWidgetClient.js';
 
 const ORG = { orgId: 'o1', name: 'Acme' };
-const WIDGET = { widgetId: 'w1', agentId: 'a1', allowedDomains: ['example.com'], enabled: true };
+const WIDGET: Widget = { widgetId: 'w1', agentId: 'a1', allowedDomains: ['example.com'], caps: {}, token: 'wgt_x', enabled: true };
 
 const mount = async (): Promise<void> => {
   render(<WidgetsPage />);
@@ -73,13 +74,8 @@ describe('a failed WORKSPACE read is not a loading widget list', () => {
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Try again' })); });
     expect(listOrgs).toHaveBeenCalledTimes(2);
     expect(document.body.textContent).not.toContain('Could not load your organizations');
-  });
-
-  it('a tenant that genuinely has no organizations is NOT reported as failed', async () => {
-    // The failure mode of this fix: a real empty tenant told its read broke.
-    listOrgs.mockResolvedValue([]);
-    await mount();
-    expect(document.body.textContent).not.toContain('Could not load your organizations');
+    // …and the page REACHED its content (not a skeleton that never resolves).
+    expect(document.body.textContent).toContain('example.com');
   });
 
   it('read SUCCEEDS with []: the zero-organization state, never an endless skeleton', async () => {
@@ -89,6 +85,8 @@ describe('a failed WORKSPACE read is not a loading widget list', () => {
     // from the honest side.
     listOrgs.mockResolvedValue([]);
     await mount();
+    // The failure mode of this fix: a real empty tenant told its read broke.
+    expect(document.body.textContent).not.toContain('Could not load your organizations');
     expect(document.body.textContent).toContain('No organizations');
     expect(document.body.textContent).toContain(
       'Chat widgets belong to an organization.',

@@ -5,17 +5,29 @@
  * were ALREADY in the public payload and the UI threw them away. The head is
  * the deliberate counterpart to the share viewer's `noindex` — a podcast is
  * meant to be found.
+ *
+ * Subject: `PublicPodcastPage` + `PodcastAudio` (ADR 0390 public distribution; ADR 0603
+ * PODU-1 / `L6` transcript a11y).
+ *
+ * Sabotage-witnessed (grade-tests w21, 24 probes): a head that never restores, a dropped
+ * show/episode feed URL, a wrong episode title, undated or unlabelled rows, a lost or
+ * inverted pager edge, a sibling read whose failure takes the page down, a 500 shown as
+ * "not published" (and a 404 shown as retryable), a dead Retry, an audio error with no
+ * notice, a Listen-on link for an unlinked directory or with the wrong href, an
+ * unbounded list / always-on Show-all, and each `L6` attribute made unconditional,
+ * unmeasured, mislabelled or document-global — each reds the case that claims it.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { fireEvent, render, screen, cleanup, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import type { PublicEpisode, PublicShow } from '../podcastsClient.js';
+import type { PodcastView } from '../podcastRoute.js';
 
 const getPublicShows = vi.fn();
 const getPublicShow = vi.fn();
 const getPublicEpisode = vi.fn();
 vi.mock('../podcastsClient.js', async (importOriginal) => ({
-  ...(await importOriginal<Record<string, unknown>>()),
+  ...(await importOriginal<typeof import('../podcastsClient.js')>()),
   getPublicShows: (...a: unknown[]) => getPublicShows(...a),
   getPublicShow: (...a: unknown[]) => getPublicShow(...a),
   getPublicEpisode: (...a: unknown[]) => getPublicEpisode(...a),
@@ -35,8 +47,8 @@ const ep = (slug: string, title: string, publishedAt: string, explicit = false):
 /** Newest-first, as the show read returns them. */
 const EPISODES = [ep('c', 'Third', '2026-07-20T00:00:00.000Z'), ep('b', 'Second', '2026-07-10T00:00:00.000Z', true), ep('a', 'First', '2026-07-01T00:00:00.000Z')];
 
-const view = (showSlug?: string, episodeSlug?: string) =>
-  ({ orgId: 'org:1', ...(showSlug ? { showSlug } : {}), ...(episodeSlug ? { episodeSlug } : {}) }) as Parameters<typeof PublicPodcastPage>[0]['view'];
+const view = (showSlug?: string, episodeSlug?: string): PodcastView =>
+  ({ orgId: 'org:1', ...(showSlug ? { showSlug } : {}), ...(episodeSlug ? { episodeSlug } : {}) });
 
 const renderPod = (v: ReturnType<typeof view>) =>
   render(<MemoryRouter><PublicPodcastPage view={v} /></MemoryRouter>);
@@ -186,7 +198,7 @@ describe('R2 SP-7 / PR2-4 — reach: episode-page feed autodiscovery + Listen on
     renderPod(view('the-pod'));
     await screen.findByText('The Pod');
     expect((screen.getByRole('link', { name: /apple podcasts/i }) as HTMLAnchorElement).href).toContain('podcasts.apple.com');
-    expect(screen.getByRole('link', { name: /spotify/i })).toBeTruthy();
+    expect((screen.getByRole('link', { name: /spotify/i }) as HTMLAnchorElement).href).toContain('open.spotify.com');
     expect(screen.queryByRole('link', { name: /amazon/i })).toBeNull(); // not linked → not offered
   });
 });
@@ -219,7 +231,7 @@ describe('R2 PR2-3 — the show page bounds its episode list (the leader pattern
 
 describe('L6 — the transcript panel\'s a11y plumbing', () => {
   const withTranscript = (over: Partial<PublicEpisode> = {}): PublicEpisode =>
-    ({ ...ep('a', 'First', '2026-07-01T00:00:00.000Z'), transcript: 'Line one.\n\nLine two.', ...over } as PublicEpisode);
+    ({ ...ep('a', 'First', '2026-07-01T00:00:00.000Z'), transcript: 'Line one.\n\nLine two.', ...over });
 
   /** jsdom reports 0 for both, so overflow is stubbed at the prototype. */
   const setOverflow = (scrolls: boolean): (() => void) => {

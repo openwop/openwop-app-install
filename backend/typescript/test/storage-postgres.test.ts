@@ -262,6 +262,7 @@ async function makeStorage(): Promise<Storage> {
     // throw if accessed.
     updateRun: async () => { throw new Error('not exercised'); },
     listRunsByParent: async () => { throw new Error('not exercised'); },
+    listRunSummaries: async () => { throw new Error('not exercised'); },
     countAuditRows: async () => { throw new Error('not exercised'); },
     listTenantActivity: async () => { throw new Error('not exercised'); },
     listHostExtTenantActivity: async () => { throw new Error('not exercised'); },
@@ -488,6 +489,7 @@ async function makeStorage(): Promise<Storage> {
     countChatSessionMessages: async () => 0,
     appendChatMessage: async () => { throw new Error('not exercised'); },
     updateChatMessageContent: async () => { throw new Error('not exercised'); },
+    redactChatMessagesByAuthor: async () => { throw new Error('not exercised'); },
     getChatMessageAuthor: async () => { throw new Error('not exercised'); },
     getChatMessage: async () => { throw new Error('not exercised'); },
     insertNotification: async () => { throw new Error('not exercised'); },

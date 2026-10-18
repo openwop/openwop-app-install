@@ -1,12 +1,11 @@
 /**
  * Role templates + workflow display metadata for the "AI coworkers" UX.
  *
- * Mirrors the backend's built-in example catalog (host/exampleWorkflows.ts): the
- * runnable workflow ids and their business-friendly names. The UI shows the
- * friendly names — raw ids stay out of first-use surfaces (PRD §16). Used by
- * the agent dashboard, workspace portfolio, and the create-agent wizard.
- *
- * Keep in sync with apps/.../backend/typescript/src/host/exampleWorkflows.ts.
+ * Names the Work-Twin `tmpl.*` workflows (chain-backed from the
+ * work-twin-templates pack, ADR 0775 P2) with their business-friendly names.
+ * The UI shows the friendly names — raw ids stay out of first-use surfaces
+ * (PRD §16). Used by the agent dashboard, workspace portfolio, and the
+ * create-agent wizard.
  */
 
 import { roleThemeForKey, ROLE_THEMES, type RoleTheme } from './roleTheme.js';

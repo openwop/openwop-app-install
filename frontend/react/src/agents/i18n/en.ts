@@ -109,6 +109,9 @@ export const messages = {
   recurringSkipFeatureDisabled: 'the feature that owns this schedule is turned off for this workspace',
   recurringSkipPlanLapsed: 'your plan no longer includes the feature that owns this schedule',
   recurringSkipActorInactive: 'the person it runs as has been deactivated',
+  recurringSkipAgentPaused: 'the agent it runs as is paused — resume the agent to resume this',
+  recurringSkipPolicyDenied: 'the agent is not allowed to run this workflow (it is on its never list)',
+  recurringSkipAwaitingApproval: 'it is waiting for approval — this workflow needs approval for this agent',
   recurringCadenceExhausted: 'Won\u2019t fire again — no future time matches this cadence',
   recurringSkipUnknown: 'no reason was recorded',
   recurringSkipUnrecognized: 'a reason was recorded, but this app does not recognize it',
@@ -179,6 +182,7 @@ export const messages = {
   portfolioRoleFallback: 'role',
   portfolioLocalDefault: 'Local workflow — assigned to this agent.',
   portfolioLocalOnly: 'Local-only — register on the host before it can run from a board or schedule.',
+  portfolioAvailabilityUnknown: 'Couldn’t check whether this workflow is registered on the host. Run now will try anyway.',
   portfolioDemoChip: 'Demo',
   portfolioDemoExplain: 'Sample workflow — its AI steps return canned demo output, not real AI.',
   portfolioDemoUnavailable: 'Can’t run on this deployment: demo steps are turned off for signed-in workspaces.',
@@ -387,6 +391,7 @@ export const messages = {
 
   // Profile panel
   profileSaved: 'Profile saved.',
+  agentChangedReload: 'Someone changed this agent after you opened it. Reload to see their change, then make your edit again.',
   profileLoading: 'Loading profile…',
   // Guardrails (ADR 0493 — folded into the Instructions tab)
   guardrailsHeading: 'Guardrails',
@@ -476,6 +481,7 @@ export const messages = {
   viewerCannotCreateTitle: 'You can\'t create agents here',
   viewerCannotCreateBody: 'You have view access to this workspace. Creating or forking an agent needs edit access — ask a workspace admin.',
   rosterEmptyViewerBody: 'No agents yet. Adding one needs edit access to this workspace — ask a workspace admin.',
+  viewerPanelReadOnly: 'You can view this agent. Changing it needs edit access to this workspace — ask a workspace admin.',
   dashCreateFromTemplate: 'Create from template',
   dashLoadingDemo: 'Loading…',
   dashLoadExample: 'Load example agents',
@@ -655,6 +661,7 @@ export const messages = {
   wsTabInstructions: 'Instructions',
   wsTabKnowledge: 'Knowledge',
   wsTabMemory: 'Memory',
+  wsTabEvals: 'Evals',
   wsTabIntegrations: 'Integrations',
   wsTabActivity: 'Activity',
   wsUpdatePinError: 'Could not update pin.',

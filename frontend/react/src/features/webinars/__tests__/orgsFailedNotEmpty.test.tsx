@@ -18,29 +18,33 @@
  * the assertions below are the SHARED strings: a page that re-grows its own copy
  * — or the old noun — goes red here, and so does a regression in the shared
  * frame itself.
+ *
+ * Sabotage-witnessed (/grade-tests w52): the empty clause in the failed card, an
+ * inert Retry, and dropping `load`'s `if (!orgId) return` (the gated events read
+ * would then fire with no organization) each turn a case red.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, fireEvent, act } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
+import type { MarketingEvent, OrgRef } from '../webinarsClient.js';
+import type { FormDef } from '../../forms/formsClient.js';
+import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
 
-const listOrgs = vi.fn();
-const listWebinarEvents = vi.fn();
+const listOrgs = vi.fn<() => Promise<OrgRef[]>>();
+const listWebinarEvents = vi.fn<(orgId: string) => Promise<MarketingEvent[]>>();
 
 vi.mock('../webinarsClient.js', async (orig) => ({
   ...(await orig<Record<string, unknown>>()),
   listOrgs: () => listOrgs(),
-  listWebinarEvents: () => listWebinarEvents(),
-  createWebinarEvent: vi.fn(async () => ({})),
-  syncWebinarEvent: vi.fn(async () => ({ outcome: 'synced' })),
-  bindWebinarForm: vi.fn(async () => ({})),
+  listWebinarEvents: (orgId: string) => listWebinarEvents(orgId),
 }));
 vi.mock('../../forms/formsClient.js', async (orig) => ({
   ...(await orig<Record<string, unknown>>()),
-  listForms: vi.fn(async () => []),
+  listForms: vi.fn(async (): Promise<FormDef[]> => []),
 }));
 vi.mock('../../../ui/toast.js', () => ({ toast: { success: vi.fn(), error: vi.fn(), info: vi.fn() } }));
 vi.mock('../../../featureToggles/FeatureAccessContext.js', () => ({
-  useFeatureAccess: () => ({ enabled: true, locked: false, loading: false, status: 'on' as const, isBeta: false, variant: null, entitled: true, resolutionFailed: false }),
+  useFeatureAccess: () => makeFeatureAccess(),
 }));
 
 import { WebinarsPage } from '../WebinarsPage.js';
@@ -81,6 +85,9 @@ describe('webinars — a failed organization read is not an empty account', () =
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Try again' })); });
     expect(listOrgs).toHaveBeenCalledTimes(2);
     expect(document.body.textContent).not.toContain(FAILED);
+    // …and the retried read lands: the org-scoped dashboard renders and reads org-1.
+    expect(screen.getByRole('button', { name: 'Track webinar' })).toBeTruthy();
+    expect(listWebinarEvents).toHaveBeenCalledWith('org-1');
   });
 
   it('read SUCCEEDS with []: the real zero-organization state, and it does not INSTRUCT', async () => {

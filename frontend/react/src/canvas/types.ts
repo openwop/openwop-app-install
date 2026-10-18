@@ -288,6 +288,9 @@ export interface ToolbarExtrasProps {
   canvasId: string;
   docName: string;
   dirty: boolean;
+  /** ADR 0886 D5 — the frame the editor has selected (frames-trait types only),
+   *  so a slot can act on "this slide" (slides' per-slide comment thread). */
+  activeFrame?: { id: string; name: string; /** In the SAVED doc (not added since the last save). */ saved?: boolean } | null;
 }
 
 export interface FramesTraitDef<Doc extends object, F extends FrameBase> {

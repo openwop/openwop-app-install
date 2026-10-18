@@ -45,7 +45,8 @@ import { declarePiiFields } from '../../host/dataClassification.js';
 import { registerRetentionPurger, purgeRowsByAge } from '../../host/retentionPurger.js';
 import { registerSubjectEraser } from '../../host/subjectErasure.js';
 import { createLogger } from '../../observability/logger.js';
-import { mutateDocument, type DocumentRecord, type DocumentVersion, type DocumentTemplate } from './documentsService.js';
+import { mutateDocument, deleteDocument, type DocumentRecord, type DocumentVersion, type DocumentTemplate } from './documentsService.js';
+import { getRetentionHold } from '../../host/retentionHold.js';
 
 const log = createLogger('features.documents.erasure');
 
@@ -70,12 +71,46 @@ const templates = new DurableCollection<DocumentTemplate>('documents:template', 
  *  REPORT, so a `void` return opted this feature out of the one telemetry
  *  channel that can distinguish "nothing to erase" from "erased in the wrong
  *  tenant". The count was already computed and logged; now it is returned. */
+/**
+ * ADR 0913 (Book AI P20) — document kinds whose owner's erasure DELETES them.
+ *
+ * The anonymize rule above is right for organization content. Some kinds are
+ * not that: a feature stores a person's own working material as host documents
+ * (Book AI's Writing-studio plans, kind `bookai-story-plan`), and the feature
+ * has decided erasing the person deletes it. Before this seam the feature had
+ * to delete them itself BEFORE this eraser ran — correctness then depended on
+ * eraser registration order, and a retry after this eraser had anonymized
+ * `createdBy` could no longer find whose they were.
+ *
+ * A registered kind is deleted (through `deleteDocument`, the one cascade:
+ * versions, rendered bytes, share links) when the subject created or owns it.
+ * Under a tenant legal hold `deleteDocument` refuses, so the document is
+ * anonymized instead, like any other kind: a hold must never be overridden by
+ * an erasure, and the identifier still goes.
+ */
+const deleteOnErasureKinds = new Set<string>();
+
+export function registerDocumentKindErasure(kind: string, mode: 'delete'): void {
+  if (mode === 'delete' && kind) deleteOnErasureKinds.add(kind);
+}
+
+/** Test seam. */
+export function resetDocumentKindErasureForTests(): void { deleteOnErasureKinds.clear(); }
+
 export async function eraseDocumentSubject(tenantId: string, subjectKey: string): Promise<{ rowsTouched: number }> {
   if (!subjectKey) return { rowsTouched: 0 };
   let touched = 0;
+  const held = deleteOnErasureKinds.size > 0 && (await getRetentionHold(tenantId)) !== null;
 
   for (const d of await docs.list()) {
     if (d.tenantId !== tenantId) continue;
+    if (!held && deleteOnErasureKinds.has(d.kind)) {
+      const theirs = d.createdBy === subjectKey || (d.ownerSubject?.kind === 'user' && d.ownerSubject.id === subjectKey);
+      if (theirs) {
+        if (await deleteDocument(tenantId, d.orgId, d.documentId)) touched += 1;
+        continue;
+      }
+    }
     // ADR 0838 A2 — through the service's ONE CAS writer, re-evaluated on the
     // fresh row, so an erasure never lands a stale row over a concurrent version
     // pointer advance or approval pin.

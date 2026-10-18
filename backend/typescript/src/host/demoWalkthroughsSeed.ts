@@ -18,7 +18,8 @@
  * The walkthrough IDs are UNCHANGED (`walkthrough.campaign-studio.first-brief`,
  * `walkthrough.chat.first-message`) so the existing referrers keep resolving —
  * the `connect-your-ai` + `campaign-studio-first-brief` tutorials, manual test
- * CHAT-01, and the walkthrough-replay e2e — once the tenant has seeded.
+ * CHAT-01 — once the tenant has seeded. (The walkthrough-replay e2e that
+ * also needed it was deleted 2026-10-17: it never ran; see ADR 0368.)
  *
  * IDEMPOTENT + non-destructive, like every seeder here: deterministic ids mean a
  * re-seed upserts the same ownership rows (never a "-2" duplicate), and `clear`

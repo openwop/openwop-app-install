@@ -9,11 +9,22 @@
  *      silent no-op that would strand a generated image between its two writes;
  *   4. the core.openwop.ai image-generate output schema is HONEST — it declares
  *      the runtime's `images[].url`, not the phantom `contentBase64`.
+ *
+ * w41 grade-tests: exact pack-version literals were replaced by the invariant —
+ * the shipped version equals kicktodo-core's `requiredPacks` pin. Sabotages that
+ * turn this file red: sim-verdict closed-world edits, the knownClaimIds
+ * `supported` filter, the unknown-claim defect, sim-collect's `.result` unwrap
+ * and garbage omit, batch day-object mapping, the media orgId default, and the
+ * image-generate `required: ['url']`.
  */
 import { describe, expect, it, beforeAll } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join, dirname } from 'node:path';
+import { Ajv2020, type ValidateFunction } from 'ajv/dist/2020.js';
+import { kicktodoCoreFeature } from '../src/features/kicktodo-core/feature.js';
+import { LESSON_JSON_SCHEMA } from '../src/features/kicktodo-creator/lessonAssembly.js';
+import { CHALLENGE_LESSON_BATCH_SCHEMA, CHALLENGE_LESSON_BATCH_TYPE } from '../src/features/kicktodo-creator/artifactSchemas.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(here, '../../..');
@@ -21,15 +32,23 @@ const AGENTS_PACK = join(REPO_ROOT, 'packs/vendor.openwop-app.kicktodo.agents');
 const NODES_PACK = join(REPO_ROOT, 'packs/feature.kicktodo.nodes');
 const AI_PACK = join(REPO_ROOT, 'packs/core.openwop.ai');
 
-const readJson = (p: string) => JSON.parse(readFileSync(p, 'utf8'));
+const readJson = (p: string): unknown => JSON.parse(readFileSync(p, 'utf8'));
+const compile = (schema: unknown): ValidateFunction => {
+  if (!schema || typeof schema !== 'object') throw new Error('schema is not an object');
+  return new Ajv2020({ strict: false }).compile(schema);
+};
+const pinnedVersion = (name: string): string | undefined =>
+  (kicktodoCoreFeature.requiredPacks ?? []).find((p) => p.name === name)?.version;
+interface AgentsPack { version: string; agents: Array<{ agentId: string; handoff?: { returnSchemaRef?: string } }> }
+interface NodesPack { version: string; nodes: Array<{ typeId: string; role?: string }> }
+interface AiPack { version: string }
+interface ImageOutputSchema { properties: { images: { items: { required: string[]; properties: Record<string, unknown> } } } }
 
 // ── 1. sim-verdict return schema ──────────────────────────────────────────
 describe('sim-verdict return schema (ADR 0458 P2)', () => {
-  let validate: (v: unknown) => boolean;
-  beforeAll(async () => {
-    const { default: Ajv2020 } = (await import('ajv/dist/2020.js')) as { default: new (o?: unknown) => { compile: (s: unknown) => (v: unknown) => boolean } };
-    const schema = readJson(join(AGENTS_PACK, 'schemas/sim-verdict.schema.json'));
-    validate = new Ajv2020({ strict: false }).compile(schema);
+  let validate: ValidateFunction;
+  beforeAll(() => {
+    validate = compile(readJson(join(AGENTS_PACK, 'schemas/sim-verdict.schema.json')));
   });
 
   it('accepts a clean pass with an empty findings array', () => {
@@ -81,44 +100,39 @@ describe('sim-verdict return schema (ADR 0458 P2)', () => {
 // ── 2. manifests parse + carry the P2 wiring ──────────────────────────────
 describe('touched pack manifests (ADR 0458 P2)', () => {
   it('the three sim agents return the sim-verdict schema (agents pack ≥ P2)', () => {
-    const pack = readJson(join(AGENTS_PACK, 'pack.json'));
-    // Version moved forward with ADR 0459 P1 (1.6.0 — replan-composer) and ADR 0463
-    // (1.7.0 — the plan-revision `clarification` arm); the P2 invariant this test
-    // guards is the sim agents' schema, pinned exactly below.
-    expect(pack.version).toBe('1.9.1');
+    const pack: AgentsPack = JSON.parse(readFileSync(join(AGENTS_PACK, 'pack.json'), 'utf8'));
+    // The shipped version is the one kicktodo-core pins (was an exact literal,
+    // chased 1.6.0 → 1.9.1); the P2 invariant is the sim agents' schema below.
+    expect(pack.version).toBe(pinnedVersion('vendor.openwop-app.kicktodo.agents'));
     const simIds = [
       'vendor.openwop-app.kicktodo.agents.sim-newcomer',
       'vendor.openwop-app.kicktodo.agents.sim-time-poor',
       'vendor.openwop-app.kicktodo.agents.sim-skeptic',
     ];
     for (const id of simIds) {
-      const agent = pack.agents.find((a: { agentId: string }) => a.agentId === id);
-      expect(agent, `${id} must be declared`).toBeDefined();
-      expect(agent.handoff?.returnSchemaRef).toBe('schemas/sim-verdict.schema.json');
+      const agent = pack.agents.find((a) => a.agentId === id);
+      expect(agent?.handoff?.returnSchemaRef, `${id} must be declared returning sim-verdict`).toBe('schemas/sim-verdict.schema.json');
     }
   });
 
   it('the four P2 factory nodes are declared (nodes pack ≥ P2)', () => {
-    const pack = readJson(join(NODES_PACK, 'pack.json'));
-    // Version moved forward with ADR 0459 (1.19.0 P1 apply-revision-commands +
-    // session-reminder; 1.20.0 grade-fix enrich-plan-revision), ADR 0463 (1.21.0
-    // replan-clarify), and the NP-KT-1 parity sweep (1.22.0, 17 surface wrappers);
-    // the P2 invariant here is that the four factory nodes still exist.
-    expect(pack.version).toBe('1.30.3');
+    const pack: NodesPack = JSON.parse(readFileSync(join(NODES_PACK, 'pack.json'), 'utf8'));
+    // The shipped version is the one kicktodo-core pins (was an exact literal,
+    // chased 1.19.0 → 1.30.3); the P2 invariant is that the four factory nodes exist.
+    expect(pack.version).toBe(pinnedVersion('feature.kicktodo.nodes'));
     for (const typeId of [
       'feature.kicktodo.nodes.lesson-media-persist',
       'feature.kicktodo.nodes.checkpoint-plan',
       'feature.kicktodo.nodes.lesson-batch-build',
       'feature.kicktodo.nodes.sim-collect',
     ]) {
-      const node = pack.nodes.find((n: { typeId: string }) => n.typeId === typeId);
-      expect(node, `${typeId} must be declared`).toBeDefined();
-      expect(node.role).toBe('action');
+      const node = pack.nodes.find((n) => n.typeId === typeId);
+      expect(node?.role, `${typeId} must be declared as an action node`).toBe('action');
     }
   });
 
   it('core.openwop.ai pack is bumped for the schema-honesty fix', () => {
-    const pack = readJson(join(AI_PACK, 'pack.json')) as { version: string };
+    const pack: AiPack = JSON.parse(readFileSync(join(AI_PACK, 'pack.json'), 'utf8'));
     // AT OR BEYOND, not exactly. The intent is "the schema-honesty bump happened",
     // and an equality pin asserts a MOMENT instead — it fails the next legitimate
     // bump and has to be chased forward by whoever trips it. (The nodes-pack pin
@@ -138,17 +152,24 @@ describe('touched pack manifests (ADR 0458 P2)', () => {
 describe('lesson-media-persist node (ADR 0458 P2)', () => {
   type NodeResult = { status: string; outputs?: Record<string, unknown>; error?: { code: string } };
   type Ctx = Record<string, unknown>;
+  type NodeFn = (ctx: Ctx) => Promise<NodeResult>;
   const packUrl = new URL('../../../packs/feature.kicktodo.nodes/index.mjs', import.meta.url).href;
 
-  async function node(): Promise<(ctx: Ctx) => Promise<NodeResult>> {
-    const m = (await import(packUrl)) as { nodes: Record<string, (ctx: Ctx) => Promise<NodeResult>> };
-    return m.nodes['feature.kicktodo.nodes.lesson-media-persist'];
+  async function packModule(): Promise<{ nodes: Record<string, NodeFn>; lessonMediaPersist: NodeFn }> {
+    const m: { nodes: Record<string, NodeFn>; lessonMediaPersist: NodeFn } = await import(packUrl);
+    return m;
+  }
+  async function node(): Promise<NodeFn> {
+    return (await packModule()).nodes['feature.kicktodo.nodes.lesson-media-persist'];
   }
 
   const validInputs = { candidateId: 'cand-1', day: 2, url: 'media:tok-abc', kind: 'image' };
 
-  it('is registered in the pack', async () => {
-    expect(typeof (await node())).toBe('function');
+  // Twin: every case below also fails if the typeId is unregistered; this one
+  // additionally pins the typeId to the lessonMediaPersist implementation.
+  it('is registered in the pack under its typeId, bound to the lessonMediaPersist implementation', async () => {
+    const m = await packModule();
+    expect(m.nodes['feature.kicktodo.nodes.lesson-media-persist']).toBe(m.lessonMediaPersist);
   });
 
   it('fails typed (host_capability_missing) when the media surface is absent', async () => {
@@ -203,7 +224,7 @@ describe('P2 factory spine nodes (ADR 0458 P2)', () => {
   const packUrl = new URL('../../../packs/feature.kicktodo.nodes/index.mjs', import.meta.url).href;
 
   async function nodes(): Promise<Record<string, (ctx: Ctx) => Promise<NodeResult>>> {
-    const m = (await import(packUrl)) as { nodes: Record<string, (ctx: Ctx) => Promise<NodeResult>> };
+    const m: { nodes: Record<string, (ctx: Ctx) => Promise<NodeResult>> } = await import(packUrl);
     return m.nodes;
   }
 
@@ -254,10 +275,9 @@ describe('P2 factory spine nodes (ADR 0458 P2)', () => {
       expect(bag.store.batch0).toEqual([PLAN.days[0]]);
       expect(bag.store.batch1).toEqual([PLAN.days[1]]);
       expect(bag.store.batch2).toEqual([]);
-      expect(typeof bag.store.planBrief).toBe('string');
-      expect(bag.store.planBrief as string).toContain('Day 1:');
+      expect(bag.store.planBrief).toEqual(expect.stringContaining('Day 1:'));
       // ADR 0458 §2.2 correction — with no evidence the skeptic's brief says so explicitly.
-      expect(bag.store.planEvidenceBrief as string).toContain('EVIDENCE: none recorded');
+      expect(bag.store.planEvidenceBrief).toEqual(expect.stringContaining('EVIDENCE: none recorded'));
     });
 
     it('ADR 0458 §2.2 correction — planEvidenceBrief carries the cited evidence and each day\'s claimRefs for the skeptic', async () => {
@@ -273,14 +293,15 @@ describe('P2 factory spine nodes (ADR 0458 P2)', () => {
       const evidenceClaims = [{ claimId: 'c-1', text: 'Dim evening light advances melatonin onset.', supported: true, sources: [{ title: 'Light study', url: 'https://example.org/light', domain: 'example.org' }] }];
       const out = await run({ inputs: { plan, checkpointEvery: 'batched', evidenceClaims }, features, variables: bag });
       expect(out.status).toBe('success');
-      const brief = bag.store.planEvidenceBrief as string;
+      const brief = bag.store.planEvidenceBrief;
+      if (typeof brief !== 'string') throw new Error('planEvidenceBrief must be written as a string');
       expect(brief).toContain('Day 1:');
       expect(brief).toContain('[c-1] Dim evening light advances melatonin onset.');
       expect(brief).toContain('https://example.org/light');
       expect(brief).toContain('Day 1: [c-1]');
       expect(brief).toContain('Day 2: (no claims cited)');
       // planBrief (the other two personas' task) is unchanged — no evidence dump.
-      expect(bag.store.planBrief as string).not.toContain('EVIDENCE');
+      expect(bag.store.planBrief).toEqual(expect.not.stringContaining('EVIDENCE'));
     });
 
     it('surfaces an outline-only plan as noLiveSlots with empty batches', async () => {
@@ -300,6 +321,8 @@ describe('P2 factory spine nodes (ADR 0458 P2)', () => {
 
   describe('lesson-batch-build', () => {
     const rawDays = [{ day: 1, title: 'Wind down', actionInstruction: 'Dim lights.', userFacingWhy: 'Melatonin.' }];
+    /** The host the node runs on: the creator surface serving the REAL lesson SSoT. */
+    const LESSON_HOST = { 'kicktodo-creator': { frameResearch: async () => ({}), lessonSchema: async () => ({ schema: LESSON_JSON_SCHEMA }) } };
     const goodLesson = { day: 1, title: 'Wind down', body: 'Dim the lights an hour before bed to let melatonin rise naturally.', steps: ['Dim lights', 'No screens'], claimRefs: [] };
     const EVIDENCE = [
       { claimId: 'c-1', text: 'Dim evening light advances melatonin onset.', supported: true, sources: [{ title: 'Light study', url: 'https://example.org/light', domain: 'example.org' }] },
@@ -324,11 +347,11 @@ describe('P2 factory spine nodes (ADR 0458 P2)', () => {
       const run = (await nodes())['feature.kicktodo.nodes.lesson-batch-build'];
       let calls = 0;
       const callAI = async () => { calls += 1; return { data: calls === 1 ? { day: 1, title: '', body: 'x', steps: [] } : goodLesson }; };
-      const out = await run({ inputs: { candidateId: 'c1', days: rawDays }, callAI });
+      const out = await run({ inputs: { candidateId: 'c1', days: rawDays }, features: LESSON_HOST, callAI });
       expect(out.status).toBe('success');
       expect(calls).toBe(2); // one bad shape, one repair
       expect(out.outputs?.count).toBe(1);
-      expect((out.outputs?.lessons as unknown[])[0]).toMatchObject({ day: 1, title: 'Wind down' });
+      expect(out.outputs?.lessons).toEqual([expect.objectContaining({ day: 1, title: 'Wind down' })]);
       expect(out.outputs?.mediaCount).toBe(0);
     });
 
@@ -341,7 +364,7 @@ describe('P2 factory spine nodes (ADR 0458 P2)', () => {
         prompts.push(String(req.messages?.[calls === 1 ? 0 : 2]?.content ?? ''));
         return { data: { ...goodLesson, claimRefs: ['c-9'] } };
       };
-      const out = await run({ inputs: { candidateId: 'c1', days: rawDays, evidenceClaims: EVIDENCE }, callAI });
+      const out = await run({ inputs: { candidateId: 'c1', days: rawDays, evidenceClaims: EVIDENCE }, features: LESSON_HOST, callAI });
       expect(out.status).toBe('failed');
       expect(out.error?.code).toBe('lesson_invalid');
       expect(calls).toBe(2);
@@ -364,13 +387,13 @@ describe('P2 factory spine nodes (ADR 0458 P2)', () => {
         callAI: async (req: { responseSchema?: unknown }) => { seen.responseSchema = req.responseSchema; return { data: { ...goodLesson, claimRefs: ['c-1'] } }; },
       });
       expect(out.status).toBe('success');
-      expect((out.outputs?.lessons as Array<{ claimRefs?: string[] }>)[0].claimRefs).toEqual(['c-1']);
-      expect((seen.responseSchema as { required?: string[] }).required).toContain('claimRefs');
+      expect(out.outputs?.lessons).toEqual([expect.objectContaining({ claimRefs: ['c-1'] })]);
+      expect(seen.responseSchema).toMatchObject({ required: expect.arrayContaining(['claimRefs']) });
     });
 
     it('re-grade KTF-EV-1 — a lesson citing a claim the EVIDENCE lists as UNSUPPORTED is lesson_invalid', async () => {
       const run = (await nodes())['feature.kicktodo.nodes.lesson-batch-build'];
-      const out = await run({ inputs: { candidateId: 'c1', days: rawDays, evidenceClaims: EVIDENCE }, callAI: async () => ({ data: { ...goodLesson, claimRefs: ['c-2'] } }) });
+      const out = await run({ inputs: { candidateId: 'c1', days: rawDays, evidenceClaims: EVIDENCE }, features: LESSON_HOST, callAI: async () => ({ data: { ...goodLesson, claimRefs: ['c-2'] } }) });
       expect(out.status).toBe('failed');
       expect(out.error?.code).toBe('lesson_invalid');
       expect(JSON.stringify(out.error)).toContain('c-2');
@@ -378,14 +401,14 @@ describe('P2 factory spine nodes (ADR 0458 P2)', () => {
 
     it('ADR 0458 §2.2 correction — with no evidence in scope a lesson must cite nothing', async () => {
       const run = (await nodes())['feature.kicktodo.nodes.lesson-batch-build'];
-      const out = await run({ inputs: { candidateId: 'c1', days: rawDays }, callAI: async () => ({ data: { ...goodLesson, claimRefs: ['c-1'] } }) });
+      const out = await run({ inputs: { candidateId: 'c1', days: rawDays }, features: LESSON_HOST, callAI: async () => ({ data: { ...goodLesson, claimRefs: ['c-1'] } }) });
       expect(out.status).toBe('failed');
       expect(out.error?.code).toBe('lesson_invalid');
     });
 
     it('typed-fails (lesson_invalid) when the repair still does not validate', async () => {
       const run = (await nodes())['feature.kicktodo.nodes.lesson-batch-build'];
-      const out = await run({ inputs: { candidateId: 'c1', days: rawDays }, callAI: async () => ({ data: { day: 1, title: '', body: 'x', steps: [] } }) });
+      const out = await run({ inputs: { candidateId: 'c1', days: rawDays }, features: LESSON_HOST, callAI: async () => ({ data: { day: 1, title: '', body: 'x', steps: [] } }) });
       expect(out.status).toBe('failed');
       expect(out.error?.code).toBe('lesson_invalid');
     });
@@ -395,7 +418,7 @@ describe('P2 factory spine nodes (ADR 0458 P2)', () => {
       const bind: Record<string, unknown>[] = [];
       const features = {
         media: { createAssetFromServeUrl: async () => ({ assetId: 'asset-1' }) },
-        'kicktodo-creator': { frameResearch: async () => ({}), setLessonMedia: async (a: Record<string, unknown>) => { bind.push(a); return {}; } },
+        'kicktodo-creator': { ...LESSON_HOST['kicktodo-creator'], setLessonMedia: async (a: Record<string, unknown>) => { bind.push(a); return {}; } },
       };
       const out = await run({
         inputs: { candidateId: 'c1', days: rawDays, generateMedia: true },
@@ -406,12 +429,159 @@ describe('P2 factory spine nodes (ADR 0458 P2)', () => {
       });
       expect(out.status).toBe('success');
       expect(out.outputs?.mediaCount).toBe(1);
-      expect((out.outputs?.lessons as Record<string, unknown>[])[0].mediaAssetId).toBe('asset-1');
+      expect(out.outputs?.lessons).toEqual([expect.objectContaining({ mediaAssetId: 'asset-1' })]);
       expect(bind[0]).toEqual({ candidateId: 'c1', day: 1, assetId: 'asset-1', kind: 'image' });
+    });
+
+    // XCH-LB-6 / XCH-BLIND-2 — the image leg runs on its OWN binding and a
+    // fixed template over the VALIDATED lesson. Sabotage: forwarding i.provider
+    // (the old code) puts 'anthropic' in req.provider and reds the first expect.
+    it('the image leg uses the image binding and never the chat provider; the prompt comes from the validated lesson', async () => {
+      const run = (await nodes())['feature.kicktodo.nodes.lesson-batch-build'];
+      const seen: Array<Record<string, unknown>> = [];
+      const out = await run({
+        inputs: {
+          candidateId: 'c1', days: rawDays, generateMedia: true,
+          provider: 'anthropic', model: 'claude-sonnet-4-6', credentialRef: 'anthropic',
+          imageProvider: 'google', imageModel: 'imagen-4', imageCredentialRef: 'google-images',
+        },
+        tenantId: 'tenant-1',
+        callAI: async () => ({ data: goodLesson }),
+        callImageGenerator: async (req: Record<string, unknown>) => { seen.push(req); return { images: [{ url: 'media:tok-1', mimeType: 'image/png' }] }; },
+        features: {
+          media: { createAssetFromServeUrl: async () => ({ assetId: 'asset-1' }) },
+          'kicktodo-creator': { ...LESSON_HOST['kicktodo-creator'], setLessonMedia: async () => ({}) },
+        },
+      });
+      expect(out.status).toBe('success');
+      expect(seen).toHaveLength(1);
+      expect(seen[0]).toMatchObject({ provider: 'google', model: 'imagen-4', credentialRef: 'google-images', n: 1 });
+      const prompt = String(seen[0]?.prompt);
+      expect(prompt).toContain(`"${goodLesson.title}"`);
+      for (const step of goodLesson.steps) expect(prompt).toContain(`- ${step}`);
+      // The raw day payload's free text never reaches the image model.
+      expect(prompt).not.toContain(rawDays[0]!.userFacingWhy);
+    });
+
+    it('with no image binding the leg sends no provider/model/credential (the host image default applies)', async () => {
+      const run = (await nodes())['feature.kicktodo.nodes.lesson-batch-build'];
+      const seen: Array<Record<string, unknown>> = [];
+      await run({
+        inputs: { candidateId: 'c1', days: rawDays, generateMedia: true, provider: 'anthropic', model: 'claude-sonnet-4-6' },
+        tenantId: 'tenant-1',
+        callAI: async () => ({ data: goodLesson }),
+        callImageGenerator: async (req: Record<string, unknown>) => { seen.push(req); return { images: [{ url: 'media:tok-1', mimeType: 'image/png' }] }; },
+        features: {
+          media: { createAssetFromServeUrl: async () => ({ assetId: 'asset-1' }) },
+          'kicktodo-creator': { ...LESSON_HOST['kicktodo-creator'], setLessonMedia: async () => ({}) },
+        },
+      });
+      expect(Object.keys(seen[0] ?? {}).sort()).toEqual(['n', 'prompt']);
+    });
+
+    // XCH-LB-7 — media was requested, so an empty image result is a typed
+    // failure, never a media-less lesson. Sabotage: restoring `if (url) {…}`
+    // returns success with mediaCount 0 and reds this.
+    it('an empty image result when media was requested fails typed (media_generation_empty) and binds nothing', async () => {
+      const run = (await nodes())['feature.kicktodo.nodes.lesson-batch-build'];
+      const bind: unknown[] = [];
+      const out = await run({
+        inputs: { candidateId: 'c1', days: rawDays, generateMedia: true },
+        tenantId: 'tenant-1',
+        callAI: async () => ({ data: goodLesson }),
+        callImageGenerator: async () => ({ images: [] }),
+        features: {
+          media: { createAssetFromServeUrl: async () => ({ assetId: 'asset-1' }) },
+          'kicktodo-creator': { ...LESSON_HOST['kicktodo-creator'], setLessonMedia: async (a: unknown) => { bind.push(a); return {}; } },
+        },
+      });
+      expect(out.status).toBe('failed');
+      expect(out.error?.code).toBe('media_generation_empty');
+      expect(bind).toEqual([]);
+    });
+
+    // XCH-GATE-1 / XCH-LB-3 — the batch the checkpoint gate shows: each lesson
+    // beside its plan row, as a typed envelope that VALIDATES against the
+    // registered artifact schema (the producer↔schema parity pin). Sabotage:
+    // dropping `plan` from the payload, or a lesson field the schema does not
+    // declare, reds the validation.
+    it('writes the lessonBatch envelope (lessons beside their plan rows) and it validates against the registered schema', async () => {
+      const run = (await nodes())['feature.kicktodo.nodes.lesson-batch-build'];
+      const bag = makeBag();
+      const days = [rawDays[0]!, { day: 2, title: 'Wake steady', actionInstruction: 'Wake at 7.', userFacingWhy: 'Rhythm.' }];
+      const out = await run({
+        inputs: { candidateId: 'c1', days }, features: LESSON_HOST, variables: bag,
+        callAI: async (req: { messages?: Array<{ content?: string }> }) => {
+          const day = Number(/"day":(\d+)/.exec(String(req.messages?.[0]?.content))?.[1]);
+          return { data: { ...goodLesson, day } };
+        },
+      });
+      expect(out.status).toBe('success');
+      const env = bag.store.lessonBatch as { artifactTypeId: string; title: string; payload: { lessons: Array<{ day: number; plan: unknown }>; count: number } };
+      expect(env.artifactTypeId).toBe(CHALLENGE_LESSON_BATCH_TYPE);
+      expect(env.title).toBe('Lessons for days 1–2');
+      expect(env.payload.lessons.map((l) => l.plan)).toEqual([
+        { title: 'Wind down', actionInstruction: 'Dim lights.', userFacingWhy: 'Melatonin.' },
+        { title: 'Wake steady', actionInstruction: 'Wake at 7.', userFacingWhy: 'Rhythm.' },
+      ]);
+      const validate = new Ajv2020({ strict: false }).compile(CHALLENGE_LESSON_BATCH_SCHEMA);
+      expect(validate(env.payload), JSON.stringify(validate.errors)).toBe(true);
+    });
+
+    it('lesson-batch-preview puts the envelope on the edge, and fails typed when the batch is missing', async () => {
+      const preview = (await nodes())['feature.kicktodo.nodes.lesson-batch-preview'];
+      const env = { artifactTypeId: CHALLENGE_LESSON_BATCH_TYPE, title: 't', payload: { lessons: [], count: 0, mediaCount: 0 } };
+      expect(await preview({ inputs: { lessonBatch: env } })).toEqual({ status: 'success', outputs: { artifact: env } });
+      for (const lessonBatch of [undefined, null, {}, { ...env, artifactTypeId: 'other' }, { ...env, payload: {} }]) {
+        const out = await preview({ inputs: { lessonBatch } });
+        expect(out.status).toBe('failed');
+        expect(out.error?.code).toBe('lesson_batch_missing');
+      }
+    });
+
+    // XCH-LB-4 — no prose fallback: the shape comes only from the creator surface.
+    it('fails closed (capability_missing) on a host without lessonSchema — never prompts a copied shape', async () => {
+      const run = (await nodes())['feature.kicktodo.nodes.lesson-batch-build'];
+      let called = false;
+      const out = await run({
+        inputs: { candidateId: 'c1', days: rawDays },
+        features: { 'kicktodo-creator': { frameResearch: async () => ({}) } },
+        callAI: async () => { called = true; return { data: goodLesson }; },
+      });
+      expect(out.status).toBe('failed');
+      expect(out.error?.code).toBe('capability_missing');
+      expect(called).toBe(false);
+    });
+
+    // XCH-LB-4 — the node's closed-world validator agrees with LESSON_JSON_SCHEMA
+    // at every bound it re-checks: the field set, body.minLength, title.minLength,
+    // steps.minItems. A schema edit the validator does not follow turns this red.
+    it('the node validator is pinned to LESSON_JSON_SCHEMA at every bound it re-checks', async () => {
+      const run = (await nodes())['feature.kicktodo.nodes.lesson-batch-build'];
+      const props = LESSON_JSON_SCHEMA.properties;
+      expect([...LESSON_JSON_SCHEMA.required].sort()).toEqual(Object.keys(props).sort());
+      const once = async (lesson: Record<string, unknown>) => (await run({
+        inputs: { candidateId: 'c1', days: rawDays }, features: LESSON_HOST, callAI: async () => ({ data: lesson }),
+      })).status;
+      const minBody = props.body.minLength;
+      expect(await once({ ...goodLesson, body: 'x'.repeat(minBody) })).toBe('success');
+      expect(await once({ ...goodLesson, body: 'x'.repeat(minBody - 1) })).toBe('failed');
+      expect(props.title.minLength).toBe(1);
+      expect(await once({ ...goodLesson, title: '' })).toBe('failed');
+      expect(props.steps.minItems).toBe(1);
+      expect(await once({ ...goodLesson, steps: [] })).toBe('failed');
+      expect(LESSON_JSON_SCHEMA.additionalProperties).toBe(false);
+      expect(await once({ ...goodLesson, extra: 1 })).toBe('failed');
+      for (const field of LESSON_JSON_SCHEMA.required) {
+        const { [field]: _dropped, ...rest } = goodLesson as Record<string, unknown>;
+        void _dropped;
+        expect(await once(rest), `missing ${field}`).toBe('failed');
+      }
     });
   });
 
   describe('sim-collect', () => {
+    interface RecordedVerdicts { candidateId: string; verdicts: Array<Record<string, unknown>> }
     const verdictBody = (v: string) => ({ verdict: v, findings: [], personaSummary: `${v} summary` });
 
     it('typed-fails when the creator surface is absent', async () => {
@@ -422,11 +592,11 @@ describe('P2 factory spine nodes (ADR 0458 P2)', () => {
 
     it('forwards a persona-tagged array of verbatim sim-verdict fields (never {summary,flags})', async () => {
       const run = (await nodes())['feature.kicktodo.nodes.sim-collect'];
-      let recorded: Record<string, unknown> | undefined;
+      let recorded: RecordedVerdicts | undefined;
       const features = {
         'kicktodo-creator': {
           frameResearch: async () => ({}),
-          recordSimulationVerdicts: async (a: Record<string, unknown>) => { recorded = a; return { state: 'reviewing', verdicts: [] }; },
+          recordSimulationVerdicts: async (a: RecordedVerdicts) => { recorded = a; return { state: 'reviewing', verdicts: [] }; },
         },
       };
       const out = await run({
@@ -443,7 +613,7 @@ describe('P2 factory spine nodes (ADR 0458 P2)', () => {
       expect(recorded?.candidateId).toBe('c1');
       // The exact array shape the creator surface + its factory test consume:
       // { sim (kebab persona), verdict, findings, personaSummary } — no summary/flags.
-      const verdicts = recorded?.verdicts as Record<string, unknown>[];
+      const verdicts = recorded?.verdicts ?? [];
       expect(verdicts.map((v) => v.sim).sort()).toEqual(['newcomer', 'skeptic', 'time-poor']);
       expect(verdicts.find((v) => v.sim === 'newcomer')).toEqual({ sim: 'newcomer', verdict: 'pass', findings: [], personaSummary: 'pass summary' });
       expect(verdicts.find((v) => v.sim === 'time-poor')).toEqual({ sim: 'time-poor', verdict: 'flag', findings: [], personaSummary: 'flag summary' });
@@ -453,19 +623,19 @@ describe('P2 factory spine nodes (ADR 0458 P2)', () => {
 
     it('omits a persona that returned nothing readable (fail-closed coverage upstream)', async () => {
       const run = (await nodes())['feature.kicktodo.nodes.sim-collect'];
-      let recorded: Record<string, unknown> | undefined;
+      let recorded: RecordedVerdicts | undefined;
       const features = {
-        'kicktodo-creator': { frameResearch: async () => ({}), recordSimulationVerdicts: async (a: Record<string, unknown>) => { recorded = a; return {}; } },
+        'kicktodo-creator': { frameResearch: async () => ({}), recordSimulationVerdicts: async (a: RecordedVerdicts) => { recorded = a; return {}; } },
       };
       await run({ inputs: { candidateId: 'c1', newcomer: verdictBody('pass'), skeptic: { garbage: true } }, features });
-      expect((recorded?.verdicts as Record<string, unknown>[]).map((v) => v.sim)).toEqual(['newcomer']);
+      expect(recorded?.verdicts.map((v) => v.sim)).toEqual(['newcomer']);
     });
   });
 });
 
 // ── 4. image-generate output schema honesty ───────────────────────────────
 describe('core.openwop.ai image-generate output schema is honest (ADR 0458 P2)', () => {
-  const schema = readJson(join(AI_PACK, 'schemas/image-generate.output.json'));
+  const schema: ImageOutputSchema = JSON.parse(readFileSync(join(AI_PACK, 'schemas/image-generate.output.json'), 'utf8'));
   const item = schema.properties.images.items;
 
   it('declares images[].url as required and NOT contentBase64', () => {
@@ -476,8 +646,7 @@ describe('core.openwop.ai image-generate output schema is honest (ADR 0458 P2)',
   });
 
   it('accepts the real runtime shape and rejects the old base64 shape', async () => {
-    const { default: Ajv2020 } = (await import('ajv/dist/2020.js')) as { default: new (o?: unknown) => { compile: (s: unknown) => (v: unknown) => boolean } };
-    const validate = new Ajv2020({ strict: false }).compile(schema);
+    const validate = compile(schema);
     expect(validate({ images: [{ url: 'media:tok-1', mimeType: 'image/png', metadata: { model: 'gpt-image-1' } }], usage: { images: 1 } })).toBe(true);
     expect(validate({ images: [{ contentBase64: 'aGk=' }] })).toBe(false);
   });

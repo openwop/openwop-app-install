@@ -1,16 +1,12 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/core.openwop.ai/1.4.1/chat-completion.config.json",
+  "$id": "https://packs.openwop.dev/core.openwop.ai/1.5.0/chat-completion.config.json",
   "title": "ChatCompletionConfig",
   "type": "object",
-  "required": [
-    "provider",
-    "model"
-  ],
   "properties": {
     "provider": {
       "type": "string",
-      "description": "AI provider id (e.g., `anthropic`, `openai`, `gemini`, `bedrock`, `vertex`). MUST be in `Capabilities.aiProviders.supported` for the run to dispatch."
+      "description": "AI provider id (e.g., `anthropic`, `openai`, `gemini`, `bedrock`, `vertex`). MUST be in `Capabilities.aiProviders.supported` for the run to dispatch. Optional on this host: unset, the host uses the run's chosen provider, else the workspace's AI setting, else its catalog default, fixed for the run (openwop-app ADR 0903)."
     },
     "model": {
       "type": "string",

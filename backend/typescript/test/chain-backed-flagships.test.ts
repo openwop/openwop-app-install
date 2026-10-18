@@ -40,7 +40,7 @@ describe('ADR 0472 P4 — Challenge Factory chain-backed behavior preservation',
   });
 
   it('build-0..3 sub-chain refs are rewritten to the SHARED same-id lesson-batch child', () => {
-    const builds = def.nodes.filter((n) => bare(n.nodeId).startsWith('build-'));
+    const builds = def.nodes.filter((n) => /^build-\d$/.test(bare(n.nodeId)));
     expect(builds).toHaveLength(4);
     for (const b of builds) {
       const cfg = b.config as Record<string, unknown>;
@@ -96,7 +96,9 @@ describe('ADR 0472 P4 — lesson-batch chain-backed (the sub-chain child)', () =
     const names = (def.variables ?? []).map((v) => v.name).sort();
     // ADR 0458 §2.2 correction (chain 1.1.0) — the child also receives the
     // structured evidence its lessons are grounded on and validated against.
-    expect(names).toEqual(['authorSubject', 'candidateId', 'credentialRef', 'days', 'evidenceClaims', 'generateMedia', 'model', 'provider']);
+    // Chain 1.3.0 (XCH-LB-6) — and its own image binding, separate from the chat one;
+    // 1.4.0 (XCH-GATE-1) — and the produced `lessonBatch` its parent's gate shows.
+    expect(names).toEqual(['authorSubject', 'candidateId', 'credentialRef', 'days', 'evidenceClaims', 'generateMedia', 'imageCredentialRef', 'imageModel', 'imageProvider', 'lessonBatch', 'model', 'provider']);
     expect(def.nodes[0]?.inputs?.days).toEqual({ type: 'variable', variableName: 'days' });
   });
 });

@@ -10,6 +10,9 @@
  * is observable. This witness pins the warn AND the preserved fail-open, and
  * that a valid / schema-less run stays silent (no false alarms).
  *
+ * Red under: dropping the `run_input_schema_uncompilable` warn, dropping the content
+ * de-dupe, or warning on a schema-less run (probes w32g3-obs-*).
+ *
  * The host logger is mocked here in isolation (this file never boots the app),
  * so the module-level logger in runInputValidation becomes the spy.
  */
@@ -38,10 +41,11 @@ describe('RIC-1 — uncompilable inputSchema fails open OBSERVABLY', () => {
     const errs = validateRunInputs(uncompilable('A'), { a: 1 });
     expect(errs).toBeNull(); // fail-open contract preserved
     expect(warn).toHaveBeenCalledTimes(1);
-    expect(warn).toHaveBeenCalledWith(
-      expect.stringMatching(/schema|uncompil/i),
-      expect.objectContaining({ error: expect.any(String) }),
-    );
+    // The EXACT event: Ajv's own notices ride the same `log.warn` (`ajv_schema_*`), so a
+    // loose /schema/ match would accept them in place of the RIC-1 warn.
+    expect(warn).toHaveBeenCalledWith('run_input_schema_uncompilable', {
+      error: expect.stringContaining('missing-A'),
+    });
   });
 
   it('warns at most ONCE per distinct schema CONTENT — even across fresh-deserialized objects (the published-launch path)', () => {

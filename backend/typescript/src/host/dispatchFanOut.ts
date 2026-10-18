@@ -177,6 +177,8 @@ export async function runParallelFanOut(args: {
 export interface DispatchValidationError {
   code: 'validation_error';
   message: string;
+  /** RFC 0243 — the v2 seat the refused config needs, for `details.requiredCapability`. */
+  requiredCapability?: FanOutSeat;
 }
 
 /**
@@ -195,7 +197,7 @@ export function validateDispatchFanOutConfig(
     return { code: 'validation_error', message: "joinPolicy is meaningful only when fanOutPolicy is 'parallel'" };
   }
   if (parallel && !fanOutSupported) {
-    return { code: 'validation_error', message: "fanOutPolicy 'parallel' requires capabilities.dispatch.fanOutSupported: true" };
+    return { code: 'validation_error', message: "fanOutPolicy 'parallel' requires capabilities.dispatch.fanOutSupported: true", requiredCapability: 'agents.fanOut' };
   }
   if (parallel && config.joinPolicy?.mode === 'quorum') {
     const q = config.joinPolicy.quorum;
@@ -254,5 +256,57 @@ export function dispatchCapability(): {
     onChildFailureModes: ['collect', 'absorb'],
     maxFanOut: HOST_MAX_FAN_OUT,
     perItemInput: perItemInputSupported(),
+  };
+}
+
+/** RFC 0243 — the `agents.fanOut` seats a refusal can name in `details.requiredCapability`. */
+export type FanOutSeat = 'agents.fanOut' | 'agents.fanOut.joinModes' | 'agents.fanOut.onChildFailureModes';
+
+/**
+ * RFC 0243 — what a `core.dispatch` config pins that this host does not admit,
+ * judged against `dispatchCapability()` (the same owner the v1 `dispatch` and v2
+ * `agents.fanOut` adverts read). Returns the seat it lacks, or null when admitted:
+ * `parallel` with no fan-out, a `joinPolicy.mode` outside `joinModes`, or a
+ * `joinPolicy.onChildFailure` outside `onChildFailureModes`. Only a `parallel`
+ * node pins a join (a `joinPolicy` without `parallel` is the RFC 0118 cross-field
+ * error `validateDispatchFanOutConfig` names, not a missing seat). An absent
+ * `mode` / `onChildFailure` is the default (`wait-all` / `collect`), both admitted.
+ */
+export function fanOutAdmissionRefusal(
+  config: Readonly<Record<string, unknown>>,
+  cap: ReturnType<typeof dispatchCapability> = dispatchCapability(),
+): { seat: FanOutSeat; message: string } | null {
+  if (config['fanOutPolicy'] !== 'parallel') return null;
+  if (!(cap.fanOutPolicies as readonly string[]).includes('parallel')) {
+    return { seat: 'agents.fanOut', message: "fanOutPolicy 'parallel' is not admitted: this host does not advertise agents.fanOut" };
+  }
+  const jp = config['joinPolicy'];
+  const join = jp !== null && typeof jp === 'object' && !Array.isArray(jp) ? (jp as Record<string, unknown>) : {};
+  if (typeof join['mode'] === 'string' && !(cap.joinModes as readonly string[]).includes(join['mode'])) {
+    return { seat: 'agents.fanOut.joinModes', message: `joinPolicy.mode '${join['mode']}' is not one of agents.fanOut.joinModes ${JSON.stringify(cap.joinModes)}` };
+  }
+  if (typeof join['onChildFailure'] === 'string' && !(cap.onChildFailureModes as readonly string[]).includes(join['onChildFailure'])) {
+    return { seat: 'agents.fanOut.onChildFailureModes', message: `joinPolicy.onChildFailure '${join['onChildFailure']}' is not one of agents.fanOut.onChildFailureModes ${JSON.stringify(cap.onChildFailureModes)}` };
+  }
+  return null;
+}
+
+/**
+ * RFC 0243 — the v2 `agents.fanOut` facet, projected from `dispatchCapability()`
+ * so the v1 `dispatch` advert, the v2 facet and both refusals read one owner.
+ * Every member is enforced by the code that reads it: `joinModes` and
+ * `onChildFailureModes` by `fanOutAdmissionRefusal` (load and createRun),
+ * `maxFanOut` by `runParallelFanOut`'s `effectiveConcurrency` clamp (the same
+ * `HOST_MAX_FAN_OUT`), and `perItemInput` by the `nextWorkerInputs` gate in
+ * `bootstrap/nodes.ts` (`perItemInputSupported()`). Absent when `parallel` is
+ * not among the policies, which this host never does today.
+ */
+export function v2FanOutFacet(cap: ReturnType<typeof dispatchCapability> = dispatchCapability()): Record<string, unknown> | null {
+  if (!(cap.fanOutPolicies as readonly string[]).includes('parallel')) return null;
+  return {
+    joinModes: [...cap.joinModes],
+    onChildFailureModes: [...cap.onChildFailureModes],
+    maxFanOut: cap.maxFanOut,
+    perItemInput: cap.perItemInput,
   };
 }

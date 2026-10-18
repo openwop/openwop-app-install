@@ -1,12 +1,23 @@
+import { createElement } from 'react';
 import { describe, it, expect } from 'vitest';
-import { chromeFor, isAdminPath, featureFor, navItemIsActive, WORKSPACE_NAV, ADMIN_NAV_GROUPS, NAV, GROUP_ORDER, FEATURES } from '../features.js';
+import { chromeFor, isAdminPath, featureFor, navItemIsActive, navGroups, WORKSPACE_NAV, ADMIN_NAV_GROUPS, NAV, GROUP_ORDER, FEATURES, type NavItem } from '../features.js';
+import type { FeatureRoute } from '../featureTypes.js';
 
 /**
  * The feature manifest is the single source of truth for routes, the
  * workspace/admin tier split, chrome, and nav-active state (frontend
  * enterprise-review Batch J). These cover the pure derivations so a manifest
- * edit that breaks routing/tiering is caught.
+ * edit that breaks routing/tiering is caught: path → feature resolution with
+ * react-router specificity, ADR 0487 (`/` vs `/dashboard`), `navItemIsActive`
+ * (end / prefix / notUnder / ADR 0139 activeFor aliases), and the ONE
+ * grouping/ordering primitive `navGroups` (ADR 0139).
  */
+const icon = (): null => null;
+const item = (over: Partial<NavItem> & { to: string }): NavItem => ({ group: 'Workspace', label: over.to, icon, hint: '', ...over });
+const route = (path: string, group: string, order?: number): FeatureRoute => ({
+  path, element: createElement('div'), tier: 'workspace', archetype: 'standard-index',
+  nav: { group, label: path, icon, hint: '', ...(order !== undefined ? { order } : {}) },
+});
 describe('feature manifest routing', () => {
   it('every admin parentPath resolves to a distinct visible admin destination', () => {
     const byPath = new Map(FEATURES.map((feature) => [feature.path, feature]));
@@ -24,19 +35,19 @@ describe('feature manifest routing', () => {
     // § Correction (2026-07-25, ADR 0487): '/' is the public marketing home; the
     // Dashboard owns '/dashboard'. The app-shell '/' route is RootRedirect (a
     // signed-in visitor → /dashboard; legacy '/?conversation=' → /chat).
-    expect(featureFor('/dashboard')).not.toBeNull();
+    expect(featureFor('/dashboard')?.path).toBe('/dashboard');
     expect(chromeFor('/dashboard')).not.toBe('chat'); // dashboard renders in default chrome
     expect(isAdminPath('/dashboard')).toBe(false);
     // '/' still resolves to a (non-admin, non-chat) feature route — RootRedirect.
-    expect(featureFor('/')).not.toBeNull();
+    expect(featureFor('/')?.path).toBe('/');
     expect(isAdminPath('/')).toBe(false);
-    expect(featureFor('/chat')).not.toBeNull();
+    expect(featureFor('/chat')?.path).toBe('/chat');
     expect(chromeFor('/chat')).toBe('chat');
     expect(isAdminPath('/chat')).toBe(false);
   });
 
   it('classifies /runs as an admin-tier route', () => {
-    expect(featureFor('/runs')).not.toBeNull();
+    expect(featureFor('/runs')?.path).toBe('/runs');
     expect(isAdminPath('/runs')).toBe(true);
   });
 
@@ -48,28 +59,32 @@ describe('feature manifest routing', () => {
 
   it('uses react-router specificity (static beats param)', () => {
     // A deep run path resolves to the run-detail feature, not a broader one.
-    const detail = featureFor('/runs/run-123');
-    expect(detail).not.toBeNull();
+    expect(featureFor('/runs/run-123')?.path).toBe('/runs/:runId');
+    // `/agents/:agentId` (workspace) is declared BEFORE `/agents/templates`
+    // (admin), so a first-match-in-manifest resolver would pick the param route.
+    expect(featureFor('/agents/templates')?.path).toBe('/agents/templates');
+    expect(isAdminPath('/agents/templates')).toBe(true);
+    expect(featureFor('/agents/agent-123')?.path).toBe('/agents/:agentId');
   });
 });
 
 describe('navItemIsActive', () => {
   it('exact match when end is set', () => {
-    expect(navItemIsActive({ to: '/', end: true } as never, '/')).toBe(true);
-    expect(navItemIsActive({ to: '/', end: true } as never, '/runs')).toBe(false);
+    expect(navItemIsActive(item({ to: '/', end: true }), '/')).toBe(true);
+    expect(navItemIsActive(item({ to: '/', end: true }), '/runs')).toBe(false);
   });
 
   it('prefix match when end is unset', () => {
-    expect(navItemIsActive({ to: '/agents' } as never, '/agents/abc')).toBe(true);
-    expect(navItemIsActive({ to: '/agents' } as never, '/agentsx')).toBe(false);
+    expect(navItemIsActive(item({ to: '/agents' }), '/agents/abc')).toBe(true);
+    expect(navItemIsActive(item({ to: '/agents' }), '/agentsx')).toBe(false);
   });
 
   it('respects notUnder exclusions', () => {
-    expect(navItemIsActive({ to: '/agents', notUnder: ['/agents/new'] } as never, '/agents/new')).toBe(false);
+    expect(navItemIsActive(item({ to: '/agents', notUnder: ['/agents/new'] }), '/agents/new')).toBe(false);
   });
 
   it('treats direct hub-child URLs as aliases of the visible hub destination', () => {
-    const hub = { to: '/access', activeFor: ['/keys', '/connections'] } as never;
+    const hub = item({ to: '/access', activeFor: ['/keys', '/connections'] });
     expect(navItemIsActive(hub, '/keys')).toBe(true);
     expect(navItemIsActive(hub, '/connections/oauth')).toBe(true);
     expect(navItemIsActive(hub, '/models')).toBe(false);
@@ -86,6 +101,11 @@ describe('nav registry — category + position ordering', () => {
     WORKSPACE_NAV.find((g) => g.label === groupLabel)?.items.map((i) => i.label) ?? [];
 
   it('groups are ordered by GROUP_ORDER (Pinned before Workspace before CRM)', () => {
+    // The manifest happens to DECLARE these groups in rank order, so the live
+    // rail alone cannot show the sort (w35: removing it stayed green). Declare
+    // them out of order, plus an unknown group, and read back literal order.
+    const synthetic = navGroups([route('/x', 'CRM'), route('/u', 'Not a category'), route('/w', 'Workspace'), route('/p', 'Pinned')]);
+    expect(synthetic.map((g) => g.id)).toEqual(['Pinned', 'Workspace', 'CRM', 'Not a category']);
     const order = WORKSPACE_NAV.map((g) => g.label);
     expect(order.indexOf('Pinned')).toBeLessThan(order.indexOf('Workspace'));
     expect(order.indexOf('Workspace')).toBeLessThan(order.indexOf('CRM'));
@@ -166,14 +186,11 @@ describe('nav registry — category + position ordering', () => {
   });
 
   it('an order-less item sorts after ordered ones (append-at-end preserved)', () => {
-    const ws = NAV.find((g) => g.label === 'Workspace')?.items ?? [];
-    const ordered = ws.filter((i) => i.order !== undefined).map((i) => i.label);
-    const unordered = ws.filter((i) => i.order === undefined).map((i) => i.label);
-    if (ordered.length && unordered.length) {
-      const lastOrdered = ws.findIndex((i) => i.label === ordered[ordered.length - 1]!);
-      const firstUnordered = ws.findIndex((i) => i.label === unordered[0]!);
-      expect(lastOrdered).toBeLessThan(firstUnordered);
-    }
+    // Unconditional: a synthetic group with ordered + order-less items in
+    // declaration order b(2), a(none), c(1), d(none) — order-less keep their
+    // declaration order, after every ordered item.
+    const [g] = navGroups([route('/b', 'Workspace', 2), route('/a', 'Workspace'), route('/c', 'Workspace', 1), route('/d', 'Workspace')]);
+    expect(g?.items.map((i) => i.to)).toEqual(['/c', '/b', '/a', '/d']);
   });
 });
 

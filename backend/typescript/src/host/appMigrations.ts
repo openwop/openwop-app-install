@@ -683,7 +683,113 @@ export const APP_MIGRATIONS: readonly AppMigration[] = [
       });
     },
   },
+  {
+    // ADR 0892 — CRM's compiled default moved `on` → `off` (an opt-in bundle). An
+    // install that already USES CRM but never saved a `crm` toggle row was riding
+    // the old default and would lose its CRM UI and API on upgrade, and any
+    // enabled CRM dependent (commerce, csm, …) would keep running with CRM off.
+    // So: when no `crm` row exists AND (any CRM contact exists OR a stored row
+    // enables a CRM dependent), write the CRM default with status `on`.
+    // Insert-if-absent, re-checked just before the write, so an admin's row (and
+    // a concurrent boot) always wins; a fresh install has neither and stays off.
+    version: 23,
+    name: 'grandfather-crm-on-for-existing-users',
+    async run(storage: Storage): Promise<void> {
+      const KEY = 'hostext:feature-toggle:crm';
+      if ((await storage.kvGet(KEY)) !== null) {
+        log.info('app_migration_crm_grandfather', { outcome: 'row-exists' });
+        return;
+      }
+      const hasContacts = await hasAnyKey(storage, 'hostext:crm:contact:');
+      let enabledDependent: string | null = null;
+      for (const id of CRM_DEPENDENT_TOGGLES) {
+        if (await storedToggleEnables(storage, id)) { enabledDependent = id; break; }
+      }
+      if (!hasContacts && enabledDependent === null) {
+        log.info('app_migration_crm_grandfather', { outcome: 'not-in-use' });
+        return;
+      }
+      const { crmFeature } = await import('../features/crm/feature.js');
+      const def = crmFeature.toggleDefault;
+      if (!def) throw new Error('crm toggleDefault missing');
+      const row = {
+        id: 'crm',
+        status: 'on',
+        bucketUnit: def.bucketUnit,
+        salt: def.salt,
+        ...(def.variants !== undefined ? { variants: def.variants } : {}),
+        updatedAt: new Date().toISOString(),
+        updatedBy: 'app-migration:23',
+        overriddenDefaultStatus: def.status,
+      };
+      if ((await storage.kvGet(KEY)) !== null) return; // first write wins
+      await storage.kvSet(KEY, JSON.stringify(row));
+      log.info('app_migration_crm_grandfather', { outcome: 'kept-on', hasContacts, enabledDependent });
+    },
+  },
+  {
+    // ADR 0892 (extension) — `strategy`, `priority-matrix` and `advisory-board` also
+    // moved `on` → `off` (ADR 0229 had made them default-on). Same shape as
+    // migration 23, per toggle: an install with data for that feature and no saved
+    // row keeps it on; a fresh install, or one with a saved row, is unchanged.
+    version: 24,
+    name: 'grandfather-planning-on-for-existing-users',
+    async run(storage: Storage): Promise<void> {
+      const targets: Array<{ id: string; dataPrefixes: string[]; load: () => Promise<{ toggleDefault?: { bucketUnit?: unknown; salt?: unknown; variants?: unknown; status: string } }> }> = [
+        { id: 'strategy', dataPrefixes: ['hostext:strategy:record:'], load: async () => (await import('../features/strategy/feature.js')).strategyFeature },
+        { id: 'priority-matrix', dataPrefixes: ['hostext:priority-matrix:list:'], load: async () => (await import('../features/priority-matrix/feature.js')).priorityMatrixFeature },
+        { id: 'advisory-board', dataPrefixes: ['hostext:advisory:board:'], load: async () => (await import('../features/advisory-board/feature.js')).advisoryBoardFeature },
+      ];
+      for (const t of targets) {
+        const key = `hostext:feature-toggle:${t.id}`;
+        if ((await storage.kvGet(key)) !== null) { log.info('app_migration_planning_grandfather', { id: t.id, outcome: 'row-exists' }); continue; }
+        let inUse = false;
+        for (const prefix of t.dataPrefixes) { if (await hasAnyKey(storage, prefix)) { inUse = true; break; } }
+        if (!inUse) { log.info('app_migration_planning_grandfather', { id: t.id, outcome: 'not-in-use' }); continue; }
+        const def = (await t.load()).toggleDefault;
+        if (!def) throw new Error(`${t.id} toggleDefault missing`);
+        const row = {
+          id: t.id,
+          status: 'on',
+          bucketUnit: def.bucketUnit,
+          salt: def.salt,
+          ...(def.variants !== undefined ? { variants: def.variants } : {}),
+          updatedAt: new Date().toISOString(),
+          updatedBy: 'app-migration:24',
+          overriddenDefaultStatus: def.status,
+        };
+        if ((await storage.kvGet(key)) !== null) continue; // first write wins
+        await storage.kvSet(key, JSON.stringify(row));
+        log.info('app_migration_planning_grandfather', { id: t.id, outcome: 'kept-on' });
+      }
+    },
+  },
 ];
+
+/** ADR 0892 — every toggle whose `dependsOn` closure reaches `crm` (pinned by
+ *  `app-migration-crm-grandfather.test.ts` against the live registry). */
+export const CRM_DEPENDENT_TOGGLES: readonly string[] = [
+  'csm', 'email', 'commerce', 'job-search', 'territories',
+  'discovery', 'promotions', 'recommendations', 'kicktodo-commerce',
+];
+
+async function hasAnyKey(storage: Storage, prefix: string): Promise<boolean> {
+  if (storage.kvListPage) return (await storage.kvListPage(prefix, { limit: 1 })).length > 0;
+  if (storage.kvCount) return (await storage.kvCount(prefix)) > 0;
+  return (await storage.kvList(prefix)).length > 0;
+}
+
+/** A stored toggle row enables its feature globally (`on`/`beta`, not killed) or
+ *  for at least one tenant. */
+async function storedToggleEnables(storage: Storage, id: string): Promise<boolean> {
+  const raw = await storage.kvGet(`hostext:feature-toggle:${id}`);
+  if (raw === null) return false;
+  let cfg: { status?: unknown; killed?: unknown; tenantOverrides?: Record<string, { status?: unknown }> };
+  try { cfg = JSON.parse(raw) as typeof cfg; } catch { return false; }
+  if (cfg.killed === true) return false;
+  if (cfg.status === 'on' || cfg.status === 'beta') return true;
+  return Object.values(cfg.tenantOverrides ?? {}).some((o) => o?.status === 'on' || o?.status === 'beta');
+}
 
 /** Highest version present in `migrations` (0 when empty). */
 export function latestAppMigration(migrations: readonly AppMigration[] = APP_MIGRATIONS): number {
@@ -733,6 +839,23 @@ export interface BackgroundAppJob {
 }
 
 export const BACKGROUND_APP_JOBS: readonly BackgroundAppJob[] = [
+  {
+    // ADR 0883 correction — the Appearance editor used to COPY the default font
+    // pairing into the app brand, so a host that had once picked "Editorial
+    // (default)" kept Instrument Serif after the default became Bricolage
+    // Grotesque. This drops that exact frozen copy; any other font choice is the
+    // operator's and stays. A background job, not an app migration: it needs the
+    // brand store, which a pre-listen migration cannot rely on. One read + one
+    // CAS write on one record; a concurrent super-admin edit wins (`concurrent-edit`)
+    // and the job stays pending, so the next boot re-checks.
+    id: 'clear-frozen-legacy-default-typography',
+    async run(): Promise<{ complete: boolean }> {
+      const { clearLegacyDefaultTypography } = await import('./systemBrand.js');
+      const r = await clearLegacyDefaultTypography();
+      log.info('app_bg_job_legacy_typography', { ...r });
+      return { complete: r.reason !== 'concurrent-edit' };
+    },
+  },
   {
     // ADR 0789 (ADR 0788 § Deferred) — retract the `wf.seed.*` OWNERSHIP rows of
     // chains that became RFC 0135 `internal` (the four zero-config MCP projection

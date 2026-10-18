@@ -178,8 +178,8 @@ export function createSubjectMemoryPort(tenantId: string): AgentMemoryPort {
       }
       return recency(scope);
     },
-    async write(scope: string, entry: { content: string; tags?: string[] }): Promise<void> {
-      await persistAndIndex(tenantId, vector, scope, { content: entry.content, tags: entry.tags ?? [] });
+    async write(scope: string, entry: { content: string; tags?: string[]; id?: string }): Promise<void> {
+      await persistAndIndex(tenantId, vector, scope, { content: entry.content, tags: entry.tags ?? [], ...(entry.id ? { id: entry.id } : {}) });
     },
   };
 }

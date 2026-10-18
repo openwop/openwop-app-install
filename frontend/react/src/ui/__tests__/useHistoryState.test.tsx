@@ -20,6 +20,13 @@ describe('useHistoryState', () => {
     expect(result.current.canRedo).toBe(true);
     act(() => result.current.redo());
     expect(result.current.state).toBe(2);
+    // …and the redo put its step back on the UNDO stack: walk all the way down
+    // (w49 probe `hs-redo-push` — a redo that dropped the push stayed green).
+    act(() => result.current.undo());
+    expect(result.current.state).toBe(1);
+    act(() => result.current.undo());
+    expect(result.current.state).toBe(0);
+    expect(result.current.canUndo).toBe(false);
   });
 
   it('a new set clears the redo stack', () => {

@@ -15,6 +15,15 @@ import { API } from './support/session.js';
  * The control case mints the MCP tab's "Read & act" scopes through the same
  * route and shows the read being refused — so the passing case is not passing
  * merely because this backend lets any key read.
+ *
+ * Every refusal is asserted by its OWN reason, not a bare status: a 403 from a
+ * different guard (the ADR 0795 D2 `key_scope_required` vendor gate, say) would
+ * otherwise satisfy an ADR 0800 D1 `key_cannot_manage_keys` assertion. The chosen
+ * lifetime is read back from the stored key, not from "expires <some date>".
+ *
+ * Breaks it (w53 probes, witnessed): the Run preset losing `runs:read`; the CLI
+ * preset losing `workspace:read`; the page not clearing the issued key on Done; the
+ * MCP-key label rule; a wrong lifetime sent for the chosen one.
  */
 
 async function loginPersonal(ctx: APIRequestContext, email: string): Promise<void> {
@@ -23,6 +32,18 @@ async function loginPersonal(ctx: APIRequestContext, email: string): Promise<voi
 }
 
 const RUN = { workflowId: 'openwop-app.uppercase', inputs: {} };
+const DAY_MS = 86_400_000;
+
+/** The parts of `GET …/developer-keys` this spec reads (the page's own list route). */
+interface KeyList { keys: Array<{ name: string; createdAt: string; expiresAt?: string }> }
+/** The host error envelope's `details.code`. */
+interface CodedError { details?: { code?: string } }
+
+/** ADR 0800 D1 — the refusal is THIS gate's, not some other 403. */
+async function expectKeyCannotManageKeys(res: Awaited<ReturnType<APIRequestContext['get']>>): Promise<void> {
+  expect(res.status()).toBe(403);
+  expect(((await res.json()) as CodedError).details?.code).toBe('key_cannot_manage_keys');
+}
 
 test.describe('API keys tab (ADR 0800)', () => {
   test.describe.configure({ timeout: 90_000 });
@@ -50,7 +71,9 @@ test.describe('API keys tab (ADR 0800)', () => {
       const create = await cli.post('/api/runs', { data: RUN });
       expect(create.status(), await create.text()).toBe(201);
       const { runId } = (await create.json()) as { runId: string };
-      expect((await cli.get(`/api/runs/${encodeURIComponent(runId)}`)).status()).toBe(200);
+      const read = await cli.get(`/api/runs/${encodeURIComponent(runId)}`);
+      expect(read.status()).toBe(200);
+      expect(await read.text(), 'the read returns THIS run').toContain(runId);
       expect((await cli.get(`/api/runs/${encodeURIComponent(runId)}/events/poll`)).status()).toBe(200);
       // A run key is protocol-only: the app's own routes ask a key for a
       // workspace scope it did not declare (ADR 0795 D2).
@@ -58,14 +81,18 @@ test.describe('API keys tab (ADR 0800)', () => {
       expect(vendor.status()).toBe(403);
       expect(((await vendor.json()) as { details?: { code?: string } }).details?.code).toBe('key_scope_required');
       // And the key cannot mint or list keys (ADR 0800 D1).
-      expect((await cli.post(`${API}/developer-keys`, { data: { name: 'wider' } })).status()).toBe(403);
-      expect((await cli.get(`${API}/developer-keys`)).status()).toBe(403);
+      await expectKeyCannotManageKeys(await cli.post(`${API}/developer-keys`, { data: { name: 'wider' } }));
+      await expectKeyCannotManageKeys(await cli.get(`${API}/developer-keys`));
     } finally {
       await cli.dispose();
     }
 
-    // Done removes the key from the page: it is shown once.
+    // Done removes the key from the page: it is shown once — and a reload of the
+    // list (what the page persists) never carries it either.
     await issued.getByRole('button', { name: 'Done' }).click();
+    await expect(page.getByText(token)).toHaveCount(0);
+    await page.reload();
+    await expect(page.locator('.mcp-key', { hasText: 'Laptop — CLI' })).toBeVisible();
     await expect(page.getByText(token)).toHaveCount(0);
   });
 
@@ -82,17 +109,27 @@ test.describe('API keys tab (ADR 0800)', () => {
     const row = page.locator('.mcp-key', { hasText: 'Terminal' });
     await expect(row).toContainText('CLI — act as me');
     await expect(row).toContainText(/expires /);
+    // "On the date chosen": the STORED expiry is 30 days after creation (± a day for
+    // the client/server clock split) — not merely "some expiry".
+    const listed = (await (await page.request.get(`${API}/developer-keys`)).json()) as KeyList;
+    const stored = listed.keys.find((k) => k.name === 'Terminal');
+    expect(stored?.expiresAt, 'the CLI key was stored with an expiry').toBeTruthy();
+    const days = (Date.parse(stored?.expiresAt ?? '') - Date.parse(stored?.createdAt ?? '')) / DAY_MS;
+    expect(Math.abs(days - 30), `stored lifetime ${days} days, chose 30`).toBeLessThan(1);
 
     const cli = await playwright.request.newContext({ ...(baseURL ? { baseURL } : {}), extraHTTPHeaders: { authorization: `Bearer ${token}`, 'OpenWOP-Version': '2' } });
     try {
       expect((await cli.get(`${API}/roster`)).status()).toBe(200);
       const create = await cli.post('/api/runs', { data: RUN });
       expect(create.status(), await create.text()).toBe(201);
-      expect((await cli.get(`${API}/developer-keys`)).status()).toBe(403);
+      await expectKeyCannotManageKeys(await cli.get(`${API}/developer-keys`));
       // In the URL instead of the header, the same key is refused (ADR 0795 D5).
       const bare = await playwright.request.newContext({ ...(baseURL ? { baseURL } : {}) });
       try {
-        expect((await bare.get(`/api/runs?apiKey=${encodeURIComponent(token)}`)).status()).toBe(401);
+        const inUrl = await bare.get(`/api/runs?apiKey=${encodeURIComponent(token)}`);
+        expect(inUrl.status()).toBe(401);
+        // THIS refusal (the D5 header-only rule), not a generic missing-credential 401.
+        expect(await inUrl.text()).toContain('not in the URL');
       } finally {
         await bare.dispose();
       }
@@ -114,7 +151,10 @@ test.describe('API keys tab (ADR 0800)', () => {
       const create = await cli.post('/api/runs', { data: RUN });
       expect(create.status(), await create.text()).toBe(201);
       const { runId } = (await create.json()) as { runId: string };
-      expect((await cli.get(`/api/runs/${encodeURIComponent(runId)}`)).status()).toBe(403);
+      const refused = await cli.get(`/api/runs/${encodeURIComponent(runId)}`);
+      expect(refused.status()).toBe(403);
+      // Refused for the missing protocol scope, not by some other guard.
+      expect(await refused.text()).toContain('runs:read');
     } finally {
       await cli.dispose();
     }

@@ -4,8 +4,14 @@
  *   G-03b restore, G-03e keep-edited, G-03f force ("Use the AI's") on a stale
  *   VALUE op only; G-05a an append batch keeps local decisions;
  *   G-03a the undo toast undoes exactly its keep; G-01d the ⌘K free-text row.
+ *
+ * Sabotage that turns it red: dropping the rename phrase or the narration
+ * pause, restore/keep-edited/force no-ops, forcing a STRUCTURAL op, an append
+ * that resets local decisions or marks every op landing, an undo that does not
+ * undo, a query source that does not unregister, or the template lane waiting
+ * on a chat conversation id.
  */
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useBuilderStore } from '../store/builderStore.js';
 import { templateConversationId, usePairStore } from '../pair/pairStore.js';
 import { describeEdits, narrationLine, startNarration } from '../pair/narrate.js';
@@ -13,6 +19,7 @@ import type { WorkflowEditSuggestion } from '../pair/suggestionModel.js';
 import type { BuilderNode } from '../schema/workflow.js';
 import { getQueryCommandSources, registerQueryCommandSource } from '../../ui/commandContributions.js';
 import { getToasts, dismiss } from '../../ui/toast.js';
+import { getSuggestion, suggestFromChain } from '../pair/pairClient.js';
 
 vi.mock('../persistence/backendStore.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../persistence/backendStore.js')>()),
@@ -39,6 +46,12 @@ const base: WorkflowEditSuggestion = {
   ],
 };
 
+beforeEach(() => {
+  // Module-level mocks: a queued Once from one case must not answer another.
+  vi.mocked(getSuggestion).mockReset();
+  vi.mocked(suggestFromChain).mockClear();
+});
+
 afterEach(() => {
   usePairStore.getState().reset();
   for (const t of getToasts()) dismiss(t.id);
@@ -62,14 +75,17 @@ describe('G-06a — narration', () => {
     vi.useFakeTimers();
     useBuilderStore.setState({ workflowId: 'wf', nodes: [node('a', 'A', { threshold: 40 })], edges: [], past: [], future: [] });
     const stop = startNarration();
-    usePairStore.setState({ conversationId: 'c', suggestion: base, opState: ['pending', 'pending'] });
-    usePairStore.getState().keep([0]);
-    await vi.advanceTimersByTimeAsync(2000);
-    expect(usePairStore.getState().narration).toEqual([]);
-    useBuilderStore.getState().updateNode('a', { name: 'Renamed by hand' });
-    await vi.advanceTimersByTimeAsync(2000);
-    expect(usePairStore.getState().narration).toHaveLength(1);
-    stop();
+    try {
+      usePairStore.setState({ conversationId: 'c', suggestion: base, opState: ['pending', 'pending'] });
+      usePairStore.getState().keep([0]);
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(usePairStore.getState().narration).toEqual([]);
+      useBuilderStore.getState().updateNode('a', { name: 'Renamed by hand' });
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(usePairStore.getState().narration).toHaveLength(1);
+    } finally {
+      stop();
+    }
   });
 });
 
@@ -89,18 +105,22 @@ describe('G-03b/e/f — restore, keep edited, use the AI\'s', () => {
   });
 
   it('"Use the AI\'s" forces a STALE value op, and refuses a structural one', () => {
-    useBuilderStore.setState({ workflowId: 'wf', nodes: [node('a', 'A', { threshold: 45 })], edges: [] });
+    // Both ops are STALE: the threshold moved, and a step with the suggested
+    // add's id is already on the sheet. So only the value-op rule (not the
+    // staleness check) can refuse the structural one.
+    useBuilderStore.setState({ workflowId: 'wf', nodes: [node('a', 'A', { threshold: 45 }), node('sg_s_1', 'Already here')], edges: [] });
     usePairStore.setState({ conversationId: 'c', suggestion: base, opState: ['pending', 'pending'] });
-    expect(usePairStore.getState().statuses()[0]).toBe('stale');
+    expect(usePairStore.getState().statuses()).toEqual(['stale', 'stale']);
     expect(usePairStore.getState().forceKeep(0).kept).toEqual([0]);
     expect(useBuilderStore.getState().nodes[0]!.config).toEqual({ threshold: 50 });
-    expect(usePairStore.getState().forceKeep(1).kept).toEqual([]); // addNode is never forceable
+    // addNode is never forceable: refused outright (not attempted and skipped).
+    expect(usePairStore.getState().forceKeep(1)).toEqual({ kept: [], skipped: [] });
+    expect(usePairStore.getState().opState[1]).toBe('pending');
   });
 });
 
 describe('G-05a — append batches', () => {
   it('a refresh with MORE ops keeps local decisions and marks the new ops as landing', async () => {
-    const { getSuggestion } = await import('../pair/pairClient.js');
     useBuilderStore.setState({ workflowId: 'wf', nodes: [node('a', 'A', { threshold: 40 })], edges: [] });
     usePairStore.setState({ conversationId: 'c', suggestion: { ...base, ops: [base.ops[0]!], opState: ['pending'] }, opState: ['dropped'] });
     vi.mocked(getSuggestion).mockResolvedValueOnce(base);
@@ -112,7 +132,6 @@ describe('G-05a — append batches', () => {
 
 describe('G-03a — the auto-keep undo toast', () => {
   it('auto-keep shows an Undo that restores exactly that keep', async () => {
-    const { getSuggestion } = await import('../pair/pairClient.js');
     useBuilderStore.setState({ workflowId: 'wf', nodes: [node('a', 'A', { threshold: 40 })], edges: [], selectedNodeIds: ['a'], past: [], future: [] });
     usePairStore.setState({ conversationId: 'c', autoKeep: true });
     vi.mocked(getSuggestion).mockResolvedValueOnce({ ...base, ops: [base.ops[0]!], opState: ['pending'] });
@@ -129,7 +148,7 @@ describe('G-03a — the auto-keep undo toast', () => {
 describe('G-01d — ⌘K free text', () => {
   it('a registered query source yields a row built from what was typed, and unregisters', () => {
     const run = vi.fn();
-    const off = registerQueryCommandSource('t', (q) => ({ id: 'ask', label: `Ask: ${q}`, hint: '', group: 'g', icon: (() => null) as never, run }));
+    const off = registerQueryCommandSource('t', (q) => ({ id: 'ask', label: `Ask: ${q}`, hint: '', group: 'g', icon: () => null, run }));
     expect(getQueryCommandSources()[0]!('add a branch')?.label).toBe('Ask: add a branch');
     off();
     expect(getQueryCommandSources()).toHaveLength(0);
@@ -138,7 +157,6 @@ describe('G-01d — ⌘K free text', () => {
 
 describe('G-10a — a template needs no chat conversation', () => {
   it('with no chat conversation (no provider), the template lane addresses its own suggestion', async () => {
-    const { suggestFromChain, getSuggestion } = await import('../pair/pairClient.js');
     useBuilderStore.setState({ workflowId: 'wf', nodes: [], edges: [] });
     usePairStore.setState({ conversationId: null });
     vi.mocked(getSuggestion).mockResolvedValueOnce(null);

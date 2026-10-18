@@ -5,19 +5,35 @@
  */
 import { authedHeaders, config, fetchOpts } from './config.js';
 
+/* KTP-1 — the closed unions the backend actually emits. These are HAND copies
+ * (the SPA bundle must never import backend source, and the host-ext surface
+ * has no generated client types), so `kicktodoWireParity.test.ts` reads the
+ * backend's own declarations (`kicktodo-core/types.ts`) and fails on any drift
+ * in either direction. A `string` here used to hide a renamed policy or state
+ * from every `===` comparison in the SPA. */
+export const EVIDENCE_POLICIES = ['attestation', 'note', 'photo', 'measurement'] as const;
+export type EvidencePolicy = (typeof EVIDENCE_POLICIES)[number];
+export const CHALLENGE_STATUSES = ['draft', 'published', 'retired'] as const;
+export type ChallengeStatus = (typeof CHALLENGE_STATUSES)[number];
+export const ENROLLMENT_STATES = ['active', 'snoozed', 'completed', 'abandoned', 'escalated'] as const;
+export type EnrollmentState = (typeof ENROLLMENT_STATES)[number];
+
 export interface ChallengeActivity {
   stableActivityId: string;
   day: number;
   title: string;
   instructions: string;
   estimatedMinutes?: number;
-  evidencePolicy: string;
+  /** `''` ONLY from `publicChallengeToSummary`, for an anonymous list served by
+   *  a backend older than the 2026-09-16 projection correction (policy absent
+   *  — rendered "shown after sign-in", never as the weakest policy). */
+  evidencePolicy: EvidencePolicy | '';
 }
 
 export interface ChallengeSummary {
   id: string;
   version: number;
-  status: string;
+  status: ChallengeStatus;
   title: string;
   summary: string;
   outcome: string;
@@ -32,7 +48,7 @@ export interface Enrollment {
   id: string;
   challengeId: string;
   challengeVersion: number;
-  state: string;
+  state: EnrollmentState;
   goalId: string;
   planRevision: number;
   timezone: string;
@@ -52,7 +68,7 @@ export interface TodayAction {
     cardId: string;
     stableActivityId: string;
     occurrenceDateLocal: string;
-    evidencePolicy: string;
+    evidencePolicy: EvidencePolicy;
     /** ADR 0429 — the publisher-declared alternative currently chosen. */
     substitutedActivityId?: string;
   };
@@ -68,7 +84,7 @@ export interface TodayView {
     enrollmentId: string;
     challengeId: string;
     challengeVersion: number;
-    state: string;
+    state: EnrollmentState;
     actions: TodayAction[];
     recovery?: { missed: number; mode: 'offer' | 'review' };
   }>;
@@ -87,7 +103,7 @@ export interface ProgressTraceRow {
 
 export interface ProgressView {
   enrollmentId: string;
-  state: string;
+  state: EnrollmentState;
   goalState: string | null;
   currentDay: number;
   durationDays: number;
@@ -177,7 +193,7 @@ export interface PublicChallengeWire {
    *  `evidencePolicy` is optional ONLY for a list served by a backend older
    *  than the 2026-09-16 correction; the page treats absence as "shown after
    *  sign-in", never as the weakest policy. */
-  activities: Array<Omit<ChallengeActivity, 'stableActivityId' | 'evidencePolicy'> & { evidencePolicy?: string }>;
+  activities: Array<Omit<ChallengeActivity, 'stableActivityId' | 'evidencePolicy'> & { evidencePolicy?: EvidencePolicy }>;
   depthLevel?: 'beginner' | 'intermediate' | 'advanced';
 }
 
@@ -345,6 +361,25 @@ export async function getToday(): Promise<TodayView> {
  *  satisfies `measurement`; `attestation` needs neither. */
 export interface CheckInEvidence { note?: string; measuredValue?: number }
 
+/** KTP-2 — why a check-in was refused, read from the HTTP status the route
+ *  (`kicktodo-core/routes.ts` POST /check-ins) actually returns:
+ *  422 `validation_error` = EvidenceRequiredError (the evidence is missing);
+ *  409 `conflict` = CheckInDeniedError('superseded') (a plan revision replaced
+ *  the action); 404 `not_found` = no such action (or not yours — uniform).
+ *  Anything else is `failed` (a transient/server failure: retrying may work). */
+export type CheckInRefusal = 'evidence-required' | 'superseded' | 'not-found' | 'failed';
+
+export class CheckInRefusedError extends Error {
+  constructor(public readonly refusal: CheckInRefusal, public readonly status: number) {
+    super(`check-in refused: ${refusal} (${status})`);
+    this.name = 'CheckInRefusedError';
+  }
+}
+
+export function checkInRefusalOf(status: number): CheckInRefusal {
+  return status === 422 ? 'evidence-required' : status === 409 ? 'superseded' : status === 404 ? 'not-found' : 'failed';
+}
+
 export async function checkIn(cardId: string, evidence?: CheckInEvidence): Promise<void> {
   const res = await fetch(`${B()}/check-ins`, {
     ...fetchOpts({}),
@@ -356,7 +391,7 @@ export async function checkIn(cardId: string, evidence?: CheckInEvidence): Promi
       ...(typeof evidence?.measuredValue === 'number' ? { measuredValue: evidence.measuredValue } : {}),
     }),
   });
-  await json(res);
+  if (!res.ok) throw new CheckInRefusedError(checkInRefusalOf(res.status), res.status);
 }
 
 export async function getProgress(enrollmentId: string): Promise<ProgressView> {
@@ -421,11 +456,29 @@ export interface PlanChange {
   toDate?: string;
 }
 
-/** A typed revision refusal — the server's message verbatim + failing index. */
+/** The day-move guard reasons the server can refuse with: `DayMoveDeniedError`
+ *  (`kicktodo-core/enrollmentService.ts`) plus `not-owner`, which the revision
+ *  pre-flight raises for a missing/foreign/non-active enrollment
+ *  (`replanService.ts`). Pinned to the backend by `kicktodoWireParity.test.ts`. */
+export const MOVE_REFUSAL_REASONS = ['bad-day', 'bad-date', 'window', 'past-day', 'checked-in', 'not-found', 'not-owner'] as const;
+export type MoveRefusalReason = (typeof MOVE_REFUSAL_REASONS)[number];
+
+/** A typed revision refusal. `message` is the server's text — kept for logs and
+ *  debugging, NEVER for display (it is English, and on a non-JSON failure it is
+ *  `revision request failed: 500`). Surfaces render localized copy keyed by
+ *  `reason` (when the server named a known move guard) or `status`.
+ *
+ *  PT-4: the route carries the guard reason ONLY as the message suffix
+ *  (`Command 0 (move) failed: window`) — there is no structured field — so it
+ *  is read from there against the closed {@link MOVE_REFUSAL_REASONS} set; an
+ *  unrecognised suffix is `undefined`, never guessed. */
 export class RevisionRefusedError extends Error {
-  constructor(message: string, public readonly failedIndex?: number) {
+  public readonly reason: MoveRefusalReason | undefined;
+  constructor(message: string, public readonly failedIndex?: number, public readonly status?: number, public readonly code?: string) {
     super(message);
     this.name = 'RevisionRefusedError';
+    const suffix = /failed: ([a-z-]+)$/.exec(message)?.[1];
+    this.reason = (MOVE_REFUSAL_REASONS as readonly string[]).includes(suffix ?? '') ? suffix as MoveRefusalReason : undefined;
   }
 }
 
@@ -438,7 +491,7 @@ async function revisionPost<T>(enrollmentId: string, path: string, commands: unk
   });
   if (!res.ok) {
     const body = (await res.json().catch(() => ({}))) as { error?: string; message?: string; details?: { failedIndex?: number } };
-    throw new RevisionRefusedError(body.message ?? body.error ?? `revision request failed: ${res.status}`, body.details?.failedIndex);
+    throw new RevisionRefusedError(body.message ?? body.error ?? `revision request failed: ${res.status}`, body.details?.failedIndex, res.status, body.error);
   }
   return (await res.json()) as T;
 }

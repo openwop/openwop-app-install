@@ -531,15 +531,19 @@ if [ "$CHECK_BACKEND" -eq 1 ]; then
           if [ "$AFTER_DEPLOY" -eq 1 ]; then
             echo "  stale revs  ACTION — superseded revision(s) fired scheduled jobs in the last ${STALE_REV_WINDOW_MIN}m"
             echo "              (expected right after a deploy: the old instance outlives its traffic, WHD-28)."
-            echo "              Delete them NOW, or they keep running scheduled jobs with OLD code:"
+            echo "              Do NOT delete the previous revision: deleting does not stop its instance (ADR 0802),"
+            echo "              it only removes the rollback target. It drains in ~1h; re-run verify-deploy.sh after that."
+            printf '%s\n' "$sr_stale" | while read -r n rev; do
+              echo "                $rev fired $n job(s) (draining; keep it as the rollback target)"
+            done
           else
             echo "  stale revs  FAILED — a NON-serving revision fired scheduled jobs in the last ${STALE_REV_WINDOW_MIN}m,"
             echo "              i.e. old code is running scheduled work (WHD-28). Delete it:"
             fail=1
+            printf '%s\n' "$sr_stale" | while read -r n rev; do
+              echo "                $rev fired $n job(s):  gcloud run revisions delete $rev --region $OPENWOP_DEPLOY_REGION --project $OPENWOP_DEPLOY_PROJECT --quiet"
+            done
           fi
-          printf '%s\n' "$sr_stale" | while read -r n rev; do
-            echo "                $rev fired $n job(s):  gcloud run revisions delete $rev --region $OPENWOP_DEPLOY_REGION --project $OPENWOP_DEPLOY_PROJECT --quiet"
-          done
         fi
       fi
     fi

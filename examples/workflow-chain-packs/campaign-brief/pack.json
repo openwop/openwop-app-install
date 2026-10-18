@@ -1,6 +1,6 @@
 {
   "name": "core.openwop.workflows.campaign-brief",
-  "version": "1.0.2",
+  "version": "1.1.0",
   "kind": "workflow-chain",
   "description": "Campaign-brief messaging-kernel + market-intel workflows, migrated from the deprecated builtins (ADR 0472 P4). chainIds keep the original ids; outputRoles restored at registration.",
   "keywords": [
@@ -12,7 +12,7 @@
   "chains": [
     {
       "chainId": "campaign-studio.messaging-kernel",
-      "version": "1.0.1",
+      "version": "1.1.0",
       "label": "Messaging kernel",
       "description": "Generate the campaign messaging kernel, then approve it — the foundation every channel echoes.",
       "parameters": {
@@ -25,6 +25,14 @@
           "briefId": {
             "type": "string",
             "description": "The campaign brief to generate the messaging kernel for."
+          },
+          "provider": {
+            "type": "string",
+            "description": "AI provider id for this chain's model-calling nodes (for example anthropic, openai, google). Fixed into those nodes when the workflow is created. Leave unset to keep the nodes' own default."
+          },
+          "model": {
+            "type": "string",
+            "description": "Model id for this chain's model-calling nodes. Must be offered by `provider` in the host catalog. Set it together with `provider`."
           }
         }
       },
@@ -34,7 +42,9 @@
             "id": "generate_kernel",
             "typeId": "feature.campaign-brief.nodes.generate-kernel@1.0.0",
             "inputs": {
-              "briefId": "{{params.briefId}}"
+              "briefId": "{{params.briefId}}",
+              "provider": "{{params.provider}}",
+              "model": "{{params.model}}"
             }
           },
           {
@@ -55,7 +65,7 @@
     },
     {
       "chainId": "campaign-studio.market-intel",
-      "version": "1.0.1",
+      "version": "1.1.0",
       "label": "Market intelligence",
       "description": "Extract voice-of-customer → angles → targeting, then approve the intel.",
       "parameters": {
@@ -73,6 +83,14 @@
           "platform": {
             "type": "string",
             "description": "Targeting platform: meta | google | linkedin | tiktok."
+          },
+          "provider": {
+            "type": "string",
+            "description": "AI provider id for this chain's model-calling nodes (for example anthropic, openai, google). Fixed into those nodes when the workflow is created. Leave unset to keep the nodes' own default."
+          },
+          "model": {
+            "type": "string",
+            "description": "Model id for this chain's model-calling nodes. Must be offered by `provider` in the host catalog. Set it together with `provider`."
           }
         }
       },
@@ -82,14 +100,18 @@
             "id": "extract_voc",
             "typeId": "feature.campaign-brief.nodes.extract-voc@1.0.0",
             "inputs": {
-              "briefId": "{{params.briefId}}"
+              "briefId": "{{params.briefId}}",
+              "provider": "{{params.provider}}",
+              "model": "{{params.model}}"
             }
           },
           {
             "id": "generate_angles",
             "typeId": "feature.campaign-brief.nodes.generate-angles@1.0.0",
             "inputs": {
-              "briefId": "{{params.briefId}}"
+              "briefId": "{{params.briefId}}",
+              "provider": "{{params.provider}}",
+              "model": "{{params.model}}"
             }
           },
           {
@@ -97,7 +119,9 @@
             "typeId": "feature.campaign-brief.nodes.build-targeting@1.0.0",
             "inputs": {
               "briefId": "{{params.briefId}}",
-              "platform": "{{params.platform}}"
+              "platform": "{{params.platform}}",
+              "provider": "{{params.provider}}",
+              "model": "{{params.model}}"
             }
           },
           {

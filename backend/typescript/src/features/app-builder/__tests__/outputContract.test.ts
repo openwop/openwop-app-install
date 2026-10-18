@@ -1,4 +1,12 @@
-/** ADR 0348 6b/6c/6d — export preflight, lineage, and OpenAPI generation. */
+/** ADR 0348 6b/6c/6d — export preflight, lineage, and OpenAPI generation, plus
+ *  the export-safety pins: AB-DATA-4 (CAS lineage append), AB-DATA-1 (lineage
+ *  purged on canvas delete), AB-CODE-6/F11 (inline-app structural gate) and
+ *  5b review V1/V2 (javascript: video src).
+ *  Sabotage witnesses (grade-tests w36): each preflight note disabled, the
+ *  OpenAPI date format / security / null-document rules changed, openapi.json
+ *  left out of the bundle, CAS replaced by put, the canvas-type check and the
+ *  delete target in the cleanup hook, the structural gate, the array guard,
+ *  safeUrl and the placeholder's hideOn class — each reds its case. */
 import { describe, it, expect, beforeAll } from 'vitest';
 import { preflightExport } from '../export/preflight.js';
 import { generateOpenApi } from '../export/openapiGen.js';
@@ -69,7 +77,7 @@ describe('openapi generation (6d)', () => {
 const entry = (n: number) => ({ canvasVersion: n, target: 'react-tailwind', fileCount: 3, sizeBytes: 100, hash: `h${n}`, assetToken: `t${n}`, exportedAt: '2026-07-10T00:00:00Z', warningCount: 0 });
 
 describe('export lineage (6c — side collection, never a canvas version bump)', () => {
-  it('appends per canvas, tenant-scoped, capped', async () => {
+  it('appends per canvas, tenant-scoped (the cap: exportLineageCap.test.ts)', async () => {
     await appendExportLineage('tA', 'cv1', entry(1));
     await appendExportLineage('tA', 'cv1', entry(2));
     await appendExportLineage('tB', 'cv1', entry(9));
@@ -110,12 +118,17 @@ describe('surface export structural gate (grade pass AB-CODE-6 — the F11 secur
     let node: Record<string, unknown> = { type: 'text', props: { text: 'leaf' } };
     for (let i = 0; i < 24; i++) node = { type: 'stack', props: {}, children: [node] };
     const deep = { name: 'Deep', screens: [{ id: 'home', name: 'Home', isInitial: true, components: [node] }] };
-    const surface = buildAppBuilderSurface({ tenantId: 'tE' } as never);
+    const surface = buildAppBuilderSurface({ tenantId: 'tE' });
     await expect(surface.export!({ target: 'react-tailwind', app: deep })).rejects.toThrow(/structurally invalid/);
   });
   it('an array is not an inline app model (the applyRepair guard, mirrored)', async () => {
-    const surface = buildAppBuilderSurface({ tenantId: 'tE' } as never);
-    await expect(surface.export!({ target: 'react-tailwind', app: [] })).rejects.toThrow();
+    const surface = buildAppBuilderSurface({ tenantId: 'tE' });
+    // An array is NOT taken as an inline model, so export falls to the stored-
+    // canvas path and refuses for the missing canvasId — not some later error.
+    await expect(surface.export!({ target: 'react-tailwind', app: [] })).rejects.toMatchObject({
+      code: 'invalid_request',
+      message: 'export needs `app` (inline model) or `canvasId`.',
+    });
   });
 });
 

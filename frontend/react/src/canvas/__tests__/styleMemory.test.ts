@@ -1,6 +1,8 @@
 /**
  * Style memory (ADR 0333 Phase 2) — last-used style per typeId:collection:kind,
- * filtered to the collection's styleKeys, session-ephemeral.
+ * filtered to the collection's styleKeys, session-ephemeral. What breaks: a
+ * geometry key remembered here would drop the next shape onto the last one's
+ * position; a store reachable by callers would let one edit rewrite the default.
  */
 import { describe, it, expect, beforeEach } from 'vitest';
 import { clearStyleMemory, recallStyle, rememberStyle } from '../styleMemory.js';

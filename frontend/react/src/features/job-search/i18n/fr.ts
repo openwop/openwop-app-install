@@ -198,7 +198,8 @@ export const messages = {
   verifyReferences: 'Références de vérification',
   verifyReferencesBody: 'Chaque fait ci-dessus est rattaché à un enregistrement. Ces références permettent au système de l’expéditeur de prouver lequel ; seules, elles ne signifient rien.',
   verifyFooter: 'Des faits, rien d’autre. Ce système n’atteste rien de subjectif : ni score d’adéquation, ni évaluation de la personne candidate.',
-  loadFailed: 'Impossible de charger les autorisations.',
+  grantsUnknownTitle: 'Impossible de vérifier votre autorisation de candidature automatique',
+  grantsUnknownBody: 'Vos autorisations n’ont pas pu être lues : nous ne pouvons donc pas savoir si quelque chose est envoyé en votre nom. Réessayez avant de vous fier à cette page.',
   issueFailed: 'Impossible d’émettre l’autorisation : {{message}}',
   revokeFailed: 'Impossible de révoquer l’autorisation.',
 } as const;

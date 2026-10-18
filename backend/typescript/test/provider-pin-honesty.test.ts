@@ -15,10 +15,12 @@
  *      secret prefixed with …") to a person who cannot act on them, and named
  *      neither of the two real exits.
  *
- * The pin itself is CORRECT and deliberate — ADR 0498 froze a concrete provider
- * because `providerKey` hashes provider+model into the invocation-log cache key,
- * so resolving per-dispatch would silently substitute a model on replay/fork.
- * This file guards the honesty of what we say about it, not the pin.
+ * ADR 0498 froze a concrete provider because `providerKey` hashes provider+model
+ * into the invocation-log cache key, so resolving per-dispatch would silently
+ * substitute a model on replay/fork. ADR 0903 (2026-10-17) removed the chains'
+ * `anthropic` pin but keeps that property: an unset provider is resolved ONCE
+ * per run and recorded on it, and a fork reads the recorded value. This file
+ * guards the honesty of what we say about it.
  */
 
 import { beforeAll, describe, expect, it } from 'vitest';
@@ -51,12 +53,18 @@ describe('pack descriptions of the provider pin', () => {
     expect(offenders.map((f) => f.replace(`${REPO}/`, ''))).toEqual([]);
   });
 
-  it('a pack that pins a provider says the workspace needs a key for it', () => {
-    // The substantive claim the new copy makes. Sampled on a pack known to pin.
+  // CORRECTED 2026-10-17 (ADR 0903) — the chains no longer pin `anthropic`. The
+  // copy must now describe what DOES happen: an unset provider follows the run's
+  // choice, then the workspace's AI setting, then the catalog default, recorded
+  // on the run so a replay uses the same one.
+  it('a chain\'s provider param describes the real fallback, and no pack still claims a pin', () => {
     const commerce = readFileSync(join(REPO, 'examples/workflow-chain-packs/commerce/pack.json'), 'utf8');
-    expect(commerce, 'fixture guard: this pack must still pin a provider').toContain('"default": "anthropic"');
-    expect(commerce).toContain('the workspace needs a key for it');
-    expect(commerce).toContain('will not fall back to another provider on its own');
+    expect(commerce, 'fixture guard: the param is still declared').toContain('"provider"');
+    expect(commerce).not.toContain('"default": "anthropic"');
+    expect(commerce).toContain("the workspace's AI setting");
+    expect(commerce).toContain('recorded on the run');
+    const stillClaimPin = files.filter((f) => readFileSync(f, 'utf8').includes('the workflow will not fall back to another provider on its own'));
+    expect(stillClaimPin.map((f) => f.replace(`${REPO}/`, ''))).toEqual([]);
   });
 });
 

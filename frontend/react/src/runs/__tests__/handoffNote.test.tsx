@@ -9,6 +9,11 @@
  *     opens the card; a chip without one stays inert (the sabotage leg); an
  *     escalation's note, which rides `node.suspended`, attaches to its
  *     escalation chip.
+ *
+ * Sabotages that turn it red (probed w28): `readHandoffNote` keeping malformed
+ * entries, an intent-less note, or an unknown producer claim; the intent rendered
+ * via `dangerouslySetInnerHTML`; a section dropped; the heading levels flattened;
+ * the chip losing its note, its toggle or its escalation attachment.
  */
 import { describe, it, expect, afterEach } from 'vitest';
 import { render, cleanup, screen, fireEvent } from '@testing-library/react';
@@ -30,7 +35,7 @@ const NOTE = {
 };
 
 const ev = (sequence: number, type: string, payload: Record<string, unknown>): RunEventDoc =>
-  ({ eventId: `e${sequence}`, runId: 'r', sequence, type, payload, timestamp: '2026-10-05T00:00:00Z' }) as unknown as RunEventDoc;
+  ({ eventId: `e${sequence}`, runId: 'r', sequence, type, payload, timestamp: '2026-10-05T00:00:00Z', schemaVersion: 1 });
 
 describe('readHandoffNote', () => {
   it('parses the bounded shape and drops malformed entries', () => {

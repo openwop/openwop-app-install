@@ -12,6 +12,13 @@
  *
  * Only the LLM dispatch (`ctx.callAI`) is canned — everything else is the
  * production composition (buildCampaignBriefSurface + buildKbSurface).
+ *
+ * Wave 30 (grade-tests): the `hooks` projection pin asserts TESTED-only + the
+ * minimal shape on its own org (it asserted only `Array.isArray` on an org with no
+ * hooks); the ingest sanity checks moved out of `beforeAll` into case 1 (a failing
+ * hook SKIPS cases instead of failing them). Sabotage-witnessed: the documentId
+ * citation read, the groundingPolicy + competitors projection keys, the strict
+ * coverage-none refusal and the tested-only filter.
  */
 import { beforeAll, describe, expect, it } from 'vitest';
 import { mkdtempSync, readFileSync } from 'node:fs';
@@ -58,11 +65,11 @@ describe('generate-kernel over the REAL kb surface (citation shape, KB-CODE-1 se
     });
     docIdA = a.documentId;
     docIdB = b.documentId;
-    expect(docIdA).toBeTruthy();
-    expect(docIdB).toBeTruthy();
   });
 
   it('the real kb surface emits `documentId` citations (the shape the node consumes)', async () => {
+    expect(docIdA).toBeTruthy();
+    expect(docIdB).toBeTruthy();
     const kb = buildKbSurface({ tenantId: TENANT });
     const r = (await kb.rag({ orgId: ORG, collectionId, query: 'FlashPick robotic picking grocery value proposition proof points', topK: 6 })) as {
       citations: Array<Record<string, unknown>>;
@@ -226,10 +233,21 @@ describe('generate-kernel over the REAL kb surface (citation shape, KB-CODE-1 se
   // top-level key gets its own explicit pin): TESTED-only, capped, minimal
   // projection. A channels-pack consumption test lands with the Phase 4 chain.
   it('ADR 0403 projection pin: assembleContext exposes a top-level `hooks` array (tested-only)', async () => {
-    const brief = await createBrief(TENANT, ORG, 'u1', { name: 'Hooks pin', productName: 'FlashPick' });
+    // Its OWN org, so no other case's hooks leak in under any order.
+    const HOOK_ORG = 'org-kbint-hooks';
+    const brief = await createBrief(TENANT, HOOK_ORG, 'u1', { name: 'Hooks pin', productName: 'FlashPick' });
+    const { emitted } = await emitCandidateHooks(TENANT, HOOK_ORG, 'angle-pin', [
+      { text: 'Pinned tested line', format: 'bold-claim' },
+      { text: 'Pinned candidate line', format: 'question' },
+    ], 'u1');
+    await promoteHook(TENANT, HOOK_ORG, emitted.find((h) => h.text === 'Pinned tested line')!.id, 'tested', 'perf:pin');
     const surface = buildCampaignBriefSurface({ tenantId: TENANT });
-    const asm = (await surface.assembleContext!({ briefId: brief.id })) as Record<string, unknown>;
+    const asm = (await surface.assembleContext!({ briefId: brief.id })) as { hooks?: Array<Record<string, unknown>> };
     expect(Array.isArray(asm.hooks), 'assembleContext must project `hooks` (ADR 0403 P2)').toBe(true);
+    // TESTED only — the candidate is unvetted model output and stays out.
+    expect(asm.hooks!.map((h) => h.text)).toEqual(['Pinned tested line']);
+    // Minimal projection: no status / metricRef / audit fields ride into prompts.
+    expect(Object.keys(asm.hooks![0]!).sort()).toEqual(['angleId', 'format', 'id', 'text']);
   });
 
   it('FU-CODE-1: stored competitors reach the channel-generation prompt through the REAL surface', async () => {

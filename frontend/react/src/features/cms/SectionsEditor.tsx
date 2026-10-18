@@ -1158,8 +1158,17 @@ export function SectionsEditor({ sections, assets, onChange, baseLocale = 'en', 
                      after it was written. Status as a word, never colour alone. */
                   <span className="chip chip--warning" title={t('translationOutdatedHint')}>{t('translationOutdatedChip')}</span>
                 ) : null}
+                {translationStatus?.[s.sectionId]?.[active] === 'unknown' && s.localizations?.[active] !== undefined ? (
+                  /* ADR 0861 D6 addendum — no evidence this overlay translates the
+                     current base: a "Copy from base" (never stamped) or a legacy
+                     row. The hint is real text for assistive tech, not a tooltip. */
+                  <span className="chip" title={t('translationUnknownHint')}>
+                    {t('translationUnknownChip')}
+                    <span className="sr-only"> — {t('translationUnknownHint')}</span>
+                  </span>
+                ) : null}
                 <span className="u-flex-1" />
-                {onConfirmSource && translationStatus?.[s.sectionId]?.[active] === 'outdated' && s.localizations?.[active] !== undefined ? (
+                {onConfirmSource && (translationStatus?.[s.sectionId]?.[active] === 'outdated' || translationStatus?.[s.sectionId]?.[active] === 'unknown') && s.localizations?.[active] !== undefined ? (
                   <Button
                     variant="quiet" className="u-w-auto"
                     disabled={confirming === `${s.sectionId}:${active}`}

@@ -261,9 +261,9 @@ const RESIDUAL_CLASSIFICATION: Record<string, { bucket: Bucket; reason: string }
   'kb:reindex': { bucket: 'REACHABLE_ROW_TENANTID', reason: 'row type ReindexJob carries a top-level tenantId field → jsonTenantId reaches it on purgeTenantRows' },
   'kb:veccache': { bucket: 'REACHABLE_ROW_TENANTID', reason: 'row type VecCacheRow carries a top-level tenantId field → jsonTenantId reaches it on purgeTenantRows' },
   'kicktodo-circle-index': { bucket: 'REACHABLE_ROW_TENANTID', reason: 'row type { circleId: string; tenantId: string } carries a top-level tenantId field → jsonTenantId reaches it on purgeTenantRows' },
-  'kicktodo-feed-tokens': { bucket: 'REACHABLE_ROW_TENANTID', reason: 'row type FeedRow carries a top-level tenantId field → jsonTenantId reaches it on purgeTenantRows' },
+  // kicktodo-feed-tokens / kicktodo-invites are AUTO-reachable since KickTodo wave
+  // 4C (KTX-D1) armed their `tenantOf` index; their map entries were removed.
   'kicktodo-grantee-index': { bucket: 'REACHABLE_ROW_TENANTID', reason: 'row type { granteeSubject: string; circleId: string; tenantId: string } carries a top-level tenantId field → jsonTenantId reaches it on purgeTenantRows' },
-  'kicktodo-invites': { bucket: 'REACHABLE_ROW_TENANTID', reason: 'row type InviteRow carries a top-level tenantId field → jsonTenantId reaches it on purgeTenantRows' },
   'knowledge-sync:filestate': { bucket: 'REACHABLE_ROW_TENANTID', reason: 'row type SyncFileState carries a top-level tenantId field → jsonTenantId reaches it on purgeTenantRows' },
   'navigation-settings:config': { bucket: 'REACHABLE_ROW_TENANTID', reason: 'row type StoredMenuConfig carries a top-level tenantId field → jsonTenantId reaches it on purgeTenantRows' },
   // notifications:prefs is AUTO-reachable — its composite key references

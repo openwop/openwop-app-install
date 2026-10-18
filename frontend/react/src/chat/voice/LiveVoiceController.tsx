@@ -163,13 +163,26 @@ function ProbePending({ onState }: { onState: (s: LiveVoiceState) => void }): JS
   return <></>;
 }
 
+/** VOX2UX-2 (feature loop row 47) — surface a walkie / boardroom failure once.
+ *  `useVoiceMode` captures start, transcription and spoken-reply failures in
+ *  `error`, but neither controller read it, so each ended in silence
+ *  ("Transcribing…" then idle). The realtime controller's RT-9a toast, shared. */
+function useToastOnError(error: string | null): void {
+  const lastRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (error && error !== lastRef.current) toast.error(error);
+    lastRef.current = error;
+  }, [error]);
+}
+
 function WalkieController({ agentId, conversationId, onSend, isSending, messages, onState }: ControllerProps): JSX.Element {
   const [onboarding, setOnboarding] = useState(false);
-  const { supported, phase, active, toggle, audioGraph } = useVoiceMode({
+  const { supported, phase, active, toggle, audioGraph, error } = useVoiceMode({
     ...(agentId ? { agentId } : {}),
     ...(conversationId ? { conversationId } : {}),
     onSend, isSending, lastAssistantText: lastAssistantText(messages),
   });
+  useToastOnError(error);
 
   // Stable onToggle (reads the live phase/toggle via refs) so lifting state up
   // doesn't recreate the callback every render → no parent churn.
@@ -199,7 +212,7 @@ function WalkieController({ agentId, conversationId, onSend, isSending, messages
  *  Each committed utterance summons the board (`@@<handle>`, when targeted) and
  *  every settled attributed assistant turn is voiced in its own agent's voice. */
 function BoardVoiceController({ agentId, conversationId, onSend, isSending, messages, onState, boardTarget, autoStart }: ControllerProps & { boardTarget?: VoiceTarget & { kind: 'board' }; autoStart?: boolean }): JSX.Element {
-  const { supported, phase, active, toggle, board, audioGraph } = useVoiceMode({
+  const { supported, phase, active, toggle, board, audioGraph, error } = useVoiceMode({
     ...(agentId ? { agentId } : {}),
     ...(conversationId ? { conversationId } : {}),
     onSend, isSending, lastAssistantText: lastAssistantText(messages),
@@ -207,6 +220,7 @@ function BoardVoiceController({ agentId, conversationId, onSend, isSending, mess
     messages,
     ...(boardTarget ? { boardHandle: boardTarget.handle } : {}),
   });
+  useToastOnError(error);
   const toggleRef = useRef(toggle); toggleRef.current = toggle;
   const onToggle = useCallback(() => { toggleRef.current(); }, []);
   // An explicit board pick came from a mic tap — start the boardroom immediately.

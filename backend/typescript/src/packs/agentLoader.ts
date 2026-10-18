@@ -23,8 +23,19 @@ import { SharedMetaAjv2020 } from './sharedMetaAjv.js';
 import { getAgentRegistry, type ResolvedAgentManifest, type AgentSchemaValidator } from '../executor/agentRegistry.js';
 import { classifyPackDir } from '../host/packTrust.js';
 import { createLogger } from '../observability/logger.js';
+import { INSTALLED_PACK_SUBDIRS } from './packContentDigest.js';
 
 const log = createLogger('packs.agentLoader');
+
+/**
+ * NP-EVAL-4 — whether an `evalSuiteRef` names a file the registry installer KEEPS
+ * (it copies only `INSTALLED_PACK_SUBDIRS`). Path confinement is `resolveRef`'s job;
+ * this only answers "would this file still be there after an install?".
+ */
+export function evalSuiteRefSurvivesInstall(ref: string): boolean {
+  const parts = ref.replace(/^\.\//, '').split('/');
+  return parts.length >= 2 && INSTALLED_PACK_SUBDIRS.has(parts[0] ?? '');
+}
 
 /** Compile a handoff JSON Schema into a validator at load (RFC 0003 §D). Throws
  *  if the schema is not a valid JSON Schema 2020-12 document (so the agent is
@@ -49,6 +60,7 @@ interface RawAgentManifest {
   modelClass?: unknown;
   systemPrompt?: unknown;
   systemPromptRef?: unknown;
+  evalSuiteRef?: unknown;
   toolAllowlist?: unknown;
   memoryShape?: unknown;
   confidence?: unknown;
@@ -277,12 +289,33 @@ export function loadAgentsFromManifest(packDir: string, opts: LoadAgentsOptions 
         }
       }
 
+      // RFC 0081 §A evalSuiteRef — resolved like systemPromptRef (path-confined), but a
+      // bad suite file costs only the suite, never the agent (ADR 0889 D2).
+      let evalSuite: unknown;
+      let evalSuiteRef: string | undefined;
+      if (typeof raw.evalSuiteRef === 'string' && raw.evalSuiteRef.length > 0) {
+        // NP-EVAL-4 — the registry installer keeps only INSTALLED_PACK_SUBDIRS, so a
+        // suite outside them loaded from a dev mount and silently vanished on install.
+        // Refuse it on BOTH lanes, so a mounted pack behaves as its installed copy will.
+        if (!evalSuiteRefSurvivesInstall(raw.evalSuiteRef)) {
+          log.warn('skipping pack eval suite outside an installed subdir', { packDir, agentId: raw.agentId, evalSuiteRef: raw.evalSuiteRef, expected: 'evals/<file>.json' });
+        } else {
+          try {
+            evalSuite = JSON.parse(readUtf8(resolveRef(packDir, raw.evalSuiteRef, 'evalSuiteRef'), 'evalSuiteRef'));
+            evalSuiteRef = raw.evalSuiteRef;
+          } catch (err) {
+            log.warn('skipping unreadable pack eval suite', { packDir, agentId: raw.agentId, evalSuiteRef: raw.evalSuiteRef, error: err instanceof Error ? err.message : String(err) });
+          }
+        }
+      }
+
       const resolved: ResolvedAgentManifest = {
         agentId: raw.agentId,
         persona: raw.persona,
         modelClass: raw.modelClass,
         systemPrompt,
         systemPromptRef,
+        ...(evalSuiteRef ? { evalSuiteRef, evalSuite } : {}),
         toolAllowlist: Array.isArray(raw.toolAllowlist) ? raw.toolAllowlist.filter((t): t is string => typeof t === 'string') : undefined,
         memoryShape: (raw.memoryShape && typeof raw.memoryShape === 'object') ? raw.memoryShape as ResolvedAgentManifest['memoryShape'] : undefined,
         confidence: (raw.confidence && typeof raw.confidence === 'object') ? raw.confidence as ResolvedAgentManifest['confidence'] : undefined,

@@ -1,6 +1,9 @@
 /**
  * ADR 0768 P1 — the three shared-seam upgrades: the Needs-you tray, the turn
- * receipt, and the composer sigil chips.
+ * receipt, and the composer sigil chips. Breaks if an open gate is missed,
+ * mis-ordered or mis-named in the tray (or Review does not hand focus to the
+ * inline card), a receipt hides a failed tool or invents a figure, or a chip
+ * seeds the wrong text / position.
  */
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi } from 'vitest';
@@ -24,30 +27,26 @@ vi.mock('../lib/workflowMentions.js', async (importOriginal) => ({
   refreshWorkflowMentionCache: vi.fn(async () => undefined),
 }));
 
-import type { ChatMessage } from '../types.js';
+import type { ChatMessage, WorkflowRunState } from '../types.js';
+import type { OpenInterrupt } from '../../client/interruptsClient.js';
 import { collectOpenInterrupts } from '../lib/openInterrupts.js';
 import { NeedsYouTray } from '../NeedsYouTray.js';
 import { TurnReceipt, summarizeTurn } from '../TurnReceipt.js';
 import { ChatInput } from '../ChatInput.js';
 
-function interrupt(id: string, nodeId: string) {
+function interrupt(id: string, nodeId: string): OpenInterrupt {
   return { interruptId: id, nodeId, kind: 'approval', data: {}, createdAt: '2026-09-28T10:00:00Z' };
 }
-function runMessage(id: string, interrupts: ReturnType<typeof interrupt>[]): ChatMessage {
-  return {
-    id,
-    role: 'workflow_run',
-    content: '',
-    activeInterrupts: interrupts,
-    workflowRun: {
-      slug: 'launch-plan', workflowName: 'Launch plan', workflowId: 'wf', runId: 'r1', status: 'running',
-      totalNodes: 5, completedNodeIds: [], nodeOutputs: {}, failedNodeIds: [], currentNodeName: null,
-      nodeNames: { send: 'Approve send' }, startedAt: '2026-09-28T10:00:00Z',
-    },
-  } as unknown as ChatMessage;
+function runMessage(id: string, interrupts: OpenInterrupt[]): ChatMessage {
+  const workflowRun: WorkflowRunState = {
+    slug: 'launch-plan', workflowName: 'Launch plan', workflowId: 'wf', runId: 'r1', status: 'running',
+    totalNodes: 5, completedNodeIds: [], nodeOutputs: {}, failedNodeIds: [], currentNodeName: null,
+    nodeNames: { send: 'Approve send' }, startedAt: '2026-09-28T10:00:00Z',
+  };
+  return { id, role: 'workflow_run', content: '', createdAt: '2026-09-28T10:00:00Z', activeInterrupts: interrupts, workflowRun };
 }
 function assistant(over: Partial<ChatMessage>): ChatMessage {
-  return { id: 'a1', role: 'assistant', content: 'done', ...over } as ChatMessage;
+  return { id: 'a1', role: 'assistant', content: 'done', createdAt: '2026-09-28T10:00:00Z', ...over };
 }
 const call = (callId: string, error?: { code: string }) => ({ callId, toolName: 'documents.get', agentId: 'iris', startedAt: '2026-09-28T10:00:00Z', ...(error ? { error } : {}) });
 
@@ -164,8 +163,9 @@ describe('composer sigil chips', () => {
 
   it('inserts `@` at the caret with a separating space', async () => {
     render(<ChatInput onSend={vi.fn()} />);
-    fireEvent.change(textarea(), { target: { value: 'ask', selectionStart: 3 } });
+    // Caret mid-text (after "ask"), so insert-at-caret differs from append.
+    fireEvent.change(textarea(), { target: { value: 'ask kai', selectionStart: 3, selectionEnd: 3 } });
     fireEvent.click(screen.getByRole('button', { name: 'sigilAgentAria' }));
-    await waitFor(() => expect(textarea().value).toBe('ask @'));
+    await waitFor(() => expect(textarea().value).toBe('ask @ kai'));
   });
 });

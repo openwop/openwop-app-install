@@ -757,6 +757,16 @@ gcloud run deploy openwop-app-backend \
 > builds could be matched to a commit but not to a session; this file closes
 > that gap. The label is optional: without it the stamp records the agent session id (`CLAUDE_CODE_SESSION_ID`), and only `deploy.sh` writes the file.
 
+> **CORRECTED 2026-10-16 (ADR 0869 + ADR 0812 P4 slice 3) — the block below is
+> history.** `deploy.sh` stopped running the in-process certify lane on
+> 2026-10-10 (ADR 0869), and P4 slice 3 deleted the lane itself
+> (`conformance/certify.ts`; `npm run test:conformance -- --certify` now exits 2
+> with a pointer to `scripts/publish-evidence.sh`) together with the two routes
+> that served its stamp (`/conformance/certification-bundle` and
+> `/conformance/claims`). The only served evidence is the major-2 v3 cut from
+> `scripts/publish-evidence.sh` (origin mode). `write-build-commit.mjs` still
+> deletes any stale pair, so a long-lived checkout cannot carry one into an image.
+
 > **The backend deploy now also CERTIFIES, and that adds ~10 minutes**
 > (ADR 0550 P4). `scripts/deploy.sh` runs the full conformance lane in strict,
 > no-quarantine mode and derives this build's public profile claims from the

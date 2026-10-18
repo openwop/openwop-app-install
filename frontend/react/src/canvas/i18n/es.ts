@@ -23,6 +23,8 @@ export const messages = {
   version: 'v{{n}}',
   unsaved: 'Sin guardar',
   liveLocked: 'No disponible durante una sesión de colaboración en vivo',
+  viewOnly: 'Puedes ver esto, pero no editarlo. Pide a alguien con permiso de edición que haga los cambios.',
+  noWriteAccess: 'No tienes permiso para cambiar esto.',
   live: 'En vivo',
   reconnecting: 'Reconectando…',
   liveCollaborators: 'Sesión en vivo — editando con {{names}}',

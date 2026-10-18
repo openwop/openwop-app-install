@@ -20,6 +20,11 @@
  * This repo already reads `frontend/react` from backend tests (access-header-parity and
  * others), so the cross-workspace check is idiomatic; the SSoT it needs — the registry
  * and RETIRED_TOGGLE_IDS — lives on this side.
+ *
+ * Sabotage witnesses (w35): renaming evals' hubTab featureId to 'evals-retired',
+ * adding `featureId: 'no-such-toggle'` to a hubTab that had none, and writing the
+ * retired id in DOUBLE quotes (which the first regex cannot read — it used to slip
+ * past) each red the parity case.
  */
 import { describe, expect, it } from 'vitest';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
@@ -46,8 +51,12 @@ function hubTabFeatureIds(): { file: string; id: string }[] {
   for (const file of walk(FE_SRC)) {
     const src = readFileSync(file, 'utf8');
     for (const m of src.matchAll(/hubTab:\s*\{([^}]*)\}/g)) {
-      const id = /featureId:\s*'([^']+)'/.exec(m[1] ?? '');
+      const body = m[1] ?? '';
+      const id = /featureId:\s*'([^']+)'/.exec(body);
       if (id?.[1]) found.push({ file: file.slice(FE_SRC.length + 1), id: id[1] });
+      // A featureId this check cannot read (double quotes, a constant) must not
+      // slip past it: report it under an id no toggle can ever register.
+      else if (/\bfeatureId\s*:/.test(body)) found.push({ file: file.slice(FE_SRC.length + 1), id: `<non-literal featureId: ${body.trim()}>` });
     }
   }
   return found;
@@ -58,7 +67,8 @@ describe('ADR 0719 — hub tabs cannot be gated on a toggle that does not exist'
     // Without this, a broken path or a regex drift would make the assertion below pass
     // over an EMPTY set — a check that cannot fail, which is the family this ADR is about.
     const ids = hubTabFeatureIds();
-    expect(ids.length, 'the walker must find real hubTab featureIds').toBeGreaterThan(0);
+    // MEASURED w35: 11 today. The floor sits just under it.
+    expect(ids.length, 'the walker must find real hubTab featureIds').toBeGreaterThanOrEqual(10);
   });
 
   it('every hubTab.featureId names a feature that REGISTERS a toggle default', () => {

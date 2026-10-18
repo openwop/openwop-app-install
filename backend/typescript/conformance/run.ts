@@ -35,13 +35,7 @@ import { tmpdir } from 'node:os';
 // `setupFiles` run before the test's imports.)
 import type { Storage } from '../src/storage/storage.js'; // type-only — erased, no runtime import
 import { conformanceTagFor, decideConformanceRoot, describeConformanceRoot } from './conformanceRoot.js';
-// TYPE-ONLY (erased). The value import is dynamic inside `emitCertification`,
-// because `./certify.js` pulls in `@openwop/openwop-conformance` — a
-// devDependency — and a static import would make the whole harness unloadable
-// wherever the suite is absent, for a path most runs never take.
-import type * as certifyModule from './certify.js';
 import { CONFORMANCE_BIND_HOST, CONFORMANCE_PORT_ENV, selectConformancePort } from './port.js';
-import { declaredRecoveryBoundMs, recoveryBoundTerms } from '../src/host/recoveryBound.js';
 import { MAJOR2_UNDECLARED_FAMILIES } from './major2Ledger.js';
 
 // The host's listen port is NOT a module constant (H17). It was `18080`, and
@@ -91,7 +85,7 @@ const OPTED_OUT_PROFILES = [
     //  auth.profiles + auth.oidc when OPENWOP_OIDC_* is set — which this boot
     //  sets above, pointed at the suite's synthetic issuer.)
     'openwop-discovery-auth-scoped', // no discovery.authScoped family
-    'openwop-audit-log-integrity', // no hash-chain / GET /v1/audit/verify
+    'openwop-audit-log-integrity', // no hash-chain / GET /audit/verify
     // (openwop-safefetch-live-audit REMOVED: httpClient.safeFetch is now
     //  advertised and ctx.http.safeFetch emits the durable content-free
     //  agent.toolCalled/toolReturned pair per invocation — host/
@@ -431,6 +425,20 @@ async function runAgainstExternalTarget(target: string): Promise<void> {
 }
 
 async function main(): Promise<void> {
+  // ADR 0812 P4 slice 3 — `--certify` is RETIRED here, and refused loudly rather
+  // than ignored: a silently-plain run under an old certify command would read
+  // as a certification that never happened. The in-process emitter wrote a
+  // bundle v2 whose claims knew only the major-1 rules, into an image stamp no
+  // route has served since v1 retired (ADR 0869). Certify the DEPLOYED service
+  // with `scripts/publish-evidence.sh` (the suite CLI, bundle v3, major 2).
+  if (process.argv.slice(2).includes('--certify')) {
+    // eslint-disable-next-line no-console
+    console.error(
+      '[conformance] --certify is retired (ADR 0812 P4 slice 3 / ADR 0869): this harness no longer emits a certification bundle. '
+        + 'Run scripts/publish-evidence.sh against the deployed service instead (openwop-conformance --certify --bundle-version 3).',
+    );
+    process.exit(2);
+  }
   const externalTarget = process.env.OPENWOP_CONFORMANCE_TARGET_URL?.trim();
   if (externalTarget) {
     await runAgainstExternalTarget(externalTarget);
@@ -546,33 +554,14 @@ async function main(): Promise<void> {
   // egress dispatcher, so its exact origin joins OPENWOP_WEBHOOK_ALLOW_ORIGINS
   // (assembled below, once every harness double's port is known) — NOT the
   // blanket OPENWOP_WEBHOOK_ALLOW_PRIVATE this line used to set. See WHD-19.
-  // ── REQUIRE_BEHAVIOR is a CLAIM, and only the certification lane makes it ──
-  //
-  // `behavior-gate.ts` states the contract: the DEFAULT skips a capability-gated
-  // scenario the host does not advertise, "reflecting what the host has
-  // implemented"; the flag "turn[s] missing advertisements into hard failures …
-  // useful for hosts that want to claim FULL COVERAGE".
-  //
-  // Setting it unconditionally made every run assert "this host implements all
-  // of v2". Nobody has started C.3 (identity) or C.6 (security defaults) here,
-  // so that assertion was FALSE — and the merge gate then failed the host for
-  // its own false claim. That is not strictness; a gate that cannot pass is a
-  // blocked pipeline, and the standing temptation is to make it green the easy
-  // way by quarantining the scenarios, which is excused evidence wearing a
-  // gate's clothes.
-  //
-  // So the claim is made where it is actually published: the CERTIFICATION run,
-  // whose bundle is the public statement. A plain run records `inapplicable`
-  // for surfaces this host does not advertise — the honest disposition — while
-  // every scenario for a surface it DOES advertise still runs and still must
-  // pass. That is a real merge gate: it catches regressions in what exists.
-  //
-  // Ruled 2026-09-04 by the corpus steward, citing the flag's own contract;
-  // `OPENWOP_OPTED_OUT_PROFILES` remains the way to declare a surface
-  // deliberately not implemented.
-  if (process.argv.slice(2).includes('--certify')) {
-    process.env.OPENWOP_REQUIRE_BEHAVIOR = 'true';    // honesty gate (RFC 0108 flip pass)
-  }
+  // `OPENWOP_REQUIRE_BEHAVIOR` stays UNSET in this harness: a plain run records
+  // `inapplicable` for surfaces the host does not advertise, while every
+  // scenario for a surface it DOES advertise still runs and must pass (ruled
+  // 2026-09-04 by the corpus steward, citing the flag's own contract). The
+  // claim-making run that set it was this file's in-process `--certify`, retired
+  // by ADR 0812 P4 slice 3; the public certification is now the suite CLI's
+  // signed v3 cut, which `scripts/publish-evidence.sh` runs with
+  // `--require-behavior` against the deployed service.
 
   // RFC 0137 form-content instantiation witness (openwop#885) — the seam
   // (routes/formContentSeam.ts) loads the conformance fixture TEMPLATES through
@@ -1030,40 +1019,6 @@ async function runSuite(baseUrl: string): Promise<void> {
   const filter = filterIdx >= 0 ? argv[filterIdx + 1] : undefined;
   const vitestArgs = ['vitest', 'run', '--config', configPath, '--no-file-parallelism'];
 
-  // ── ADR 0550 P4 — CERTIFY MODE ─────────────────────────────────────────────
-  //
-  // `--certify [outDir]` turns this run into the evidence behind a PUBLIC claim.
-  // Three things change, and each is a refusal rather than a feature:
-  //
-  //  1. The RFC 0148 §A ledger gets a sink and vitest gets a JSON reporter. A
-  //     bundle assembled from per-file pass/fail cannot tell `skipped` from
-  //     `inapplicable` from `blocked` — three claims with different consequences
-  //     — so without the ledger every unclassifiable file resolves to `blocked`
-  //     and nothing certifies. The ledger is what makes the claim possible AND
-  //     what makes it bounded.
-  //  2. The quarantine is REFUSED, not merely bypassed. `scenarioManifestSha256`
-  //     digests the scenario set that ran; certifying against an excluded set
-  //     would bind the claim to a manifest that omits exactly the scenarios the
-  //     host is failing, which is a smaller suite wearing the digest of a bigger
-  //     one. `OPENWOP_CONFORMANCE_NO_QUARANTINE=1` is forced here.
-  //  3. `OPENWOP_REQUIRE_BEHAVIOR=true` (RFC 0148 §B): an advertised capability
-  //     whose behavioral assertion cannot execute must FAIL, not soft-skip. A
-  //     claim derived from a permissive run is the vacuity the RFC exists to
-  //     close.
-  const certifyIdx = argv.indexOf('--certify');
-  const certifyOutDir =
-    certifyIdx < 0
-      ? undefined
-      : ((next) =>
-          next !== undefined && !next.startsWith('--')
-            ? resolve(next)
-            // Derived from THIS FILE's location, not from cwd. The rest of the
-            // runner assumes `cwd === backend/typescript` (see the
-            // `node_modules` resolve below), and that assumption is fine for a
-            // package script — but writing an artifact is the one place where
-            // being wrong puts a file OUTSIDE the repo, silently.
-            : resolve(import.meta.dirname, '..', '..', '..', 'build-meta'))(argv[certifyIdx + 1]);
-
   // ADR 0550 P1 — SHRINK-ONLY QUARANTINE.
   //
   // Until this phase, `test:conformance` was never wired into any gate. The
@@ -1082,13 +1037,6 @@ async function runSuite(baseUrl: string): Promise<void> {
   // to make something green.
   //
   // Run the truth with `OPENWOP_CONFORMANCE_NO_QUARANTINE=1`.
-  if (certifyOutDir !== undefined && process.env.OPENWOP_CONFORMANCE_NO_QUARANTINE !== '1') {
-    // Forced, not assumed: see the certify-mode note above — a quarantined run
-    // produces a manifest digest that does not describe the suite it claims.
-    process.env.OPENWOP_CONFORMANCE_NO_QUARANTINE = '1';
-    // eslint-disable-next-line no-console
-    console.log('[conformance] --certify: quarantine DISABLED (a certification manifest must digest the whole suite)');
-  }
   if (process.env.OPENWOP_CONFORMANCE_NO_QUARANTINE !== '1') {
     const { entries } = JSON.parse(
       readFileSync(resolve(import.meta.dirname, 'quarantine.json'), 'utf8'),
@@ -1107,21 +1055,6 @@ async function runSuite(baseUrl: string): Promise<void> {
     vitestArgs.push('src/scenarios/fixtures-valid.test.ts', 'src/scenarios/spec-corpus-validity.test.ts');
   }
   if (filter !== undefined) vitestArgs.push('--testNamePattern', filter);
-
-  // Certify-mode reporter + ledger sink, in a PER-RUN temp dir so two concurrent
-  // runs cannot read each other's ledger — the same isolation reasoning as the
-  // per-run pack dir above. Deliberately NOT deleted afterwards (the suite's own
-  // CLI does delete its equivalent): a certify run is rare and its raw vitest
-  // report is the first thing anyone wants when a profile unexpectedly fails to
-  // certify. The path is printed in the summary.
-  let certifyReport: string | undefined;
-  let certifyLedger: string | undefined;
-  if (certifyOutDir !== undefined) {
-    const dir = mkdtempSync(join(tmpdir(), 'owp-app-certify-'));
-    certifyReport = join(dir, 'vitest-report.json');
-    certifyLedger = join(dir, 'requirement-ledger.jsonl');
-    vitestArgs.push('--reporter=json', `--outputFile=${certifyReport}`);
-  }
 
   // Own PROCESS GROUP so the watchdog (below) can kill the whole tree: `npx`
   // spawns vitest as a grandchild, and killing only the direct child left an
@@ -1175,15 +1108,6 @@ async function runSuite(baseUrl: string): Promise<void> {
         : {}),
       OPENWOP_IMPLEMENTATION_NAME: 'openwop-workflow-engine',
       OPENWOP_IMPLEMENTATION_VERSION: '0.1.0',
-      ...(certifyLedger === undefined
-        ? {}
-        : {
-            OPENWOP_LEDGER_PATH: certifyLedger,
-            // RFC 0148 §B strict behavior. An advertised capability whose
-            // assertion cannot execute must fail rather than soft-skip; a claim
-            // derived from a permissive run is exactly the vacuity §B closes.
-            OPENWOP_REQUIRE_BEHAVIOR: 'true',
-          }),
     },
   });
 
@@ -1219,134 +1143,8 @@ async function runSuite(baseUrl: string): Promise<void> {
     clearTimeout(watchdog);
     // eslint-disable-next-line no-console
     console.log(`[conformance] suite exited with code ${code}`);
-    if (certifyOutDir === undefined || certifyReport === undefined || certifyLedger === undefined) {
-      process.exit(code ?? 1);
-      return;
-    }
-    // The suite's exit code is NOT the certification verdict, and conflating
-    // them would be the vacuity again in miniature: a failing scenario outside
-    // every claimed floor does not invalidate a claim, and a green run whose
-    // floor rows were never recorded does not substantiate one. The verdict
-    // comes from the ledger.
-    void emitCertification({ baseUrl, outDir: certifyOutDir, reportFile: certifyReport, ledgerFile: certifyLedger })
-      .then((certifyExit) => process.exit(certifyExit !== 0 ? certifyExit : (code ?? 1)))
-      .catch((err: unknown) => {
-        // eslint-disable-next-line no-console
-        console.error('[conformance] --certify FAILED to emit:', err);
-        process.exit(2);
-      });
+    process.exit(code ?? 1);
   });
-}
-
-/**
- * ADR 0550 P4 — read the run's evidence, assemble the RFC 0148 §C bundle, derive
- * the claims, and stamp both into `build-meta/`.
- *
- * Returns the exit code the CERTIFICATION deserves: 0 when the artifacts were
- * written, 2 when they could not be (a missing report, an emitter defect, a
- * schema rejection). It never invents a claim to avoid a non-zero exit —
- * `claimedProfiles: []` is a legitimate, publishable answer and is what an
- * honest host with unproven floors should say.
- */
-async function emitCertification(opts: {
-  baseUrl: string;
-  outDir: string;
-  reportFile: string;
-  ledgerFile: string;
-}): Promise<number> {
-  const certify = await import('./certify.js');
-  const repoRoot = resolve(import.meta.dirname, '..', '..', '..');
-
-  const discoveryUrl = `${opts.baseUrl.replace(/\/+$/, '')}/.well-known/openwop`;
-  const res = await fetch(discoveryUrl, { headers: { Accept: 'application/json' } });
-  if (!res.ok) {
-    // eslint-disable-next-line no-console
-    console.error(`[conformance] --certify: GET ${discoveryUrl} returned HTTP ${res.status}`);
-    return 2;
-  }
-  const document = (await res.json()) as Record<string, unknown>;
-
-  let report: certifyModule.VitestJsonReport;
-  try {
-    report = JSON.parse(readFileSync(opts.reportFile, 'utf8')) as certifyModule.VitestJsonReport;
-  } catch (err) {
-    // eslint-disable-next-line no-console
-    console.error(`[conformance] --certify: could not read the vitest JSON report at ${opts.reportFile}: ${String(err)}`);
-    return 2;
-  }
-
-  const states = certify.scenarioStatesFromReport(report);
-  const ledger = certify.readLedgerFile(opts.ledgerFile);
-  const suiteVersion = JSON.parse(
-    readFileSync(resolve('node_modules', '@openwop', 'openwop-conformance', 'package.json'), 'utf8'),
-  ).version as string;
-  const commitFile = join(repoRoot, 'build-meta', 'commit.txt');
-  const commit = existsSync(commitFile) ? readFileSync(commitFile, 'utf8').trim() : undefined;
-
-  const assembled = certify.assembleCertification({
-    document,
-    discoveryUrl,
-    states,
-    ledger,
-    suiteVersion,
-    hostName: 'openwop-workflow-engine',
-    hostVersion: '0.1.0',
-    requireBehavior: process.env.OPENWOP_REQUIRE_BEHAVIOR === 'true',
-    optedOut: [...OPTED_OUT_PROFILES, ...major2UndeclaredFamilies()],
-    ...(commit ? { commit } : {}),
-    secrets: [process.env.OPENWOP_API_KEY ?? API_KEY, SECONDARY_API_KEY, TENANT_B_API_KEY, ...(process.env.OPENWOP_TEST_LOW_SCOPE_KEY ? [process.env.OPENWOP_TEST_LOW_SCOPE_KEY] : [])],
-    // RFC 0158 §B / ADR 0585 P2 — publish the recovery bound as the per-class
-    // ARITHMETIC so a reader can recompute it, not as a total to be trusted.
-    // Read from the live module at emit time: a literal here would be the H97
-    // defect (two numbers agreeing by luck while comments assert they must).
-    recoveryBound: {
-      terms: { ...recoveryBoundTerms() },
-      classes: {
-        unleased: declaredRecoveryBoundMs('unleased'),
-        leased: declaredRecoveryBoundMs('leased'),
-      },
-    },
-  });
-
-  if (assembled.selfAudit.length > 0) {
-    // A bundle-wide rejection is an EMITTER defect, never an evidence state.
-    // Writing it anyway would publish a document the suite's own verifier
-    // refuses — a claim no consumer could check.
-    // eslint-disable-next-line no-console
-    console.error(
-      '[conformance] --certify: the assembled bundle FAILED the suite\'s own verifier (emitter defect):\n' +
-        assembled.selfAudit.map((r) => `  - [${r.kind}] ${r.detail}`).join('\n'),
-    );
-    return 2;
-  }
-
-  const valid = await certify.validateAgainstVendoredSchema(assembled.bundle, repoRoot);
-  if (!valid.ok) {
-    // eslint-disable-next-line no-console
-    console.error(`[conformance] --certify: bundle FAILED the VENDORED schema:\n${valid.errors}`);
-    return 2;
-  }
-
-  const { bundlePath, claimsPath } = certify.writeCertification(opts.outDir, assembled);
-  const t = assembled.claims.evidence.totals;
-  // eslint-disable-next-line no-console
-  console.log(
-    `[conformance] --certify: wrote ${bundlePath} + ${claimsPath}\n` +
-      `  suite ${suiteVersion}, ledger rows ${ledger.length}, scenario files ${states.size}\n` +
-      `  raw evidence retained: ${opts.reportFile} + ${opts.ledgerFile}\n` +
-      (assembled.redactedAt.length > 0
-        // Loud, because the likely cause is a secret reaching evidence rather
-        // than a routine scrub. RFC 0148 §E forbids credentials in a bundle;
-        // this says WHERE one was caught, which is a finding to chase.
-        ? `  ⚠ REDACTED ${assembled.redactedAt.length} field(s) carrying a configured secret or the conformance canary: ${assembled.redactedAt.slice(0, 8).join(', ')}${assembled.redactedAt.length > 8 ? ', …' : ''}\n`
-        : '  redactions: none (no configured secret reached the evidence)\n') +
-      `  executed-pass ${t.executedPass} / executed-fail ${t.executedFail} / skipped ${t.skipped} / inapplicable ${t.inapplicable} / blocked ${t.blocked}\n` +
-      `  CLAIMED  (${assembled.claims.claimedProfiles.length}): ${assembled.claims.claimedProfiles.join(', ') || '(none)'}\n` +
-      `  aliases  (${assembled.claims.aliases.length}): ${assembled.claims.aliases.join(', ') || '(none)'}\n` +
-      assembled.claims.notClaimed.map((n) => `  NOT CLAIMED  ${n.profile}: ${n.reason}\n`).join('') +
-      `  RFC 0156 §E permitted: ${assembled.claims.permittedClaims.join(', ') || '(none)'}\n`,
-  );
-  return 0;
 }
 
 main().catch((err) => {

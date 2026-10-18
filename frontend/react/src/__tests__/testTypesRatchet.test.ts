@@ -5,31 +5,28 @@
  * failure case — then the probes were thrown away, which protects nothing. Each
  * test below pins one shape the ratchet MUST refuse. See
  * `docs/steward/CODEBASE-ASSESSMENT.md` § Merge-gate tooling.
+ *
+ * The committed FILE_BASELINE moves every time a test type error is fixed, so no
+ * case pins today's number; they pass an explicit file baseline (181) and assert
+ * the decision logic. Types: `scripts/testTypesRatchet.d.mts`.
  */
 import { describe, it, expect } from 'vitest';
-// @ts-expect-error — .mjs gate script, deliberately untyped: it runs under plain
-// node in CI with no build step, and adding a .d.ts would be a second source of
-// truth for four function signatures.
 import { resolveBaseline, classifyTscResult, FILE_BASELINE } from '../../scripts/testTypesRatchet.mjs';
 
 describe('resolveBaseline — the override may tighten, never loosen (GATE-3)', () => {
   it('refuses a baseline HIGHER than the committed one', () => {
     // The shipped defect: OPENWOP_TEST_TYPES_BASELINE=99999 turned any red run
     // green AND printed "down 99797" as though it were progress.
-    const r = resolveBaseline('99999', 181);
-    expect(r.ok).toBe(false);
-    expect(r.error).toMatch(/HIGHER/);
+    expect(resolveBaseline('99999', 181)).toMatchObject({ ok: false, error: expect.stringMatching(/HIGHER/) });
   });
 
   it('accepts a LOWER baseline, so measuring a target still works', () => {
-    const r = resolveBaseline('150', 181);
-    expect(r.ok).toBe(true);
-    expect(r.baseline).toBe(150);
+    expect(resolveBaseline('150', 181)).toMatchObject({ ok: true, baseline: 150 });
   });
 
   it('refuses a non-count', () => {
     for (const bad of ['abc', '-1', '3.5']) {
-      expect(resolveBaseline(bad, 181).ok).toBe(false);
+      expect(resolveBaseline(bad, 181), bad).toMatchObject({ ok: false, error: expect.stringMatching(/is not a count/) });
     }
   });
 
@@ -40,16 +37,20 @@ describe('resolveBaseline — the override may tighten, never loosen (GATE-3)', 
 
   it('exports a baseline that is an exact measured count, not a round number', () => {
     // A padded baseline tolerates regressions it never mentions — the failure
-    // check-failed-read-sentinels had at 100 against a real 81.
-    expect(FILE_BASELINE % 10).not.toBe(0);
+    // check-failed-read-sentinels had at 100 against a real 81. This is the
+    // property the file can check without a tsc pass; the value itself moves.
+    expect(Number.isInteger(FILE_BASELINE)).toBe(true);
+    // 0 is the one round number that cannot be padded: there is no slack below it.
+    // Any other multiple of 10 is refused (wave 52 drove the real count to 0).
+    if (FILE_BASELINE !== 0) expect(FILE_BASELINE % 10).not.toBe(0);
+    expect(FILE_BASELINE).toBeGreaterThanOrEqual(0);
   });
 });
 
 describe('classifyTscResult — an unreadable result is never zero errors (GATE-2)', () => {
   it('refuses a spawn failure instead of reporting a clean codebase', () => {
     const r = classifyTscResult({ spawnFailed: true, spawnCode: 'ENOENT', output: '', status: 0 });
-    expect(r.ok).toBe(false);
-    expect(r.reason).toBe('spawn-failed');
+    expect(r).toMatchObject({ ok: false, reason: 'spawn-failed' });
   });
 
   it('refuses a PROJECT-LEVEL error — the missing-tsconfig shape that reported "down 201"', () => {
@@ -57,14 +58,12 @@ describe('classifyTscResult — an unreadable result is never zero errors (GATE-
       output: "error TS5058: The specified path does not exist: 'tsconfig.NOPE.json'.\n",
       status: 1,
     });
-    expect(r.ok).toBe(false);
-    expect(r.reason).toBe('project-level-error');
+    expect(r).toMatchObject({ ok: false, reason: 'project-level-error' });
   });
 
   it('refuses a non-zero exit with nothing parseable — the missing-binary shape that reported "down 202"', () => {
     const r = classifyTscResult({ output: "Error: Cannot find module '.../tsc'\n", status: 1 });
-    expect(r.ok).toBe(false);
-    expect(r.reason).toBe('unparseable');
+    expect(r).toMatchObject({ ok: false, reason: 'unparseable' });
   });
 
   it('COUNTS ordinary per-file diagnostics', () => {
@@ -74,8 +73,7 @@ describe('classifyTscResult — an unreadable result is never zero errors (GATE-
         'src/b.test.ts(9,4): error TS2345: Argument type mismatch.\n',
       status: 1,
     });
-    expect(r.ok).toBe(true);
-    expect(r.count).toBe(2);
+    expect(r).toMatchObject({ ok: true, count: 2 });
   });
 
   it('treats TS6133 as an ORDINARY diagnostic, not configuration', () => {
@@ -88,14 +86,11 @@ describe('classifyTscResult — an unreadable result is never zero errors (GATE-
       output: "src/x.test.tsx(26,27): error TS6133: 'url' is declared but its value is never read.\n",
       status: 1,
     });
-    expect(r.ok).toBe(true);
-    expect(r.count).toBe(1);
+    expect(r).toMatchObject({ ok: true, count: 1 });
   });
 
   it('accepts a genuinely clean run (exit 0, no diagnostics) as zero', () => {
-    const r = classifyTscResult({ output: '', status: 0 });
-    expect(r.ok).toBe(true);
-    expect(r.count).toBe(0);
+    expect(classifyTscResult({ output: '', status: 0 })).toMatchObject({ ok: true, count: 0 });
   });
 
   it('counts only the per-error lines, not summary or related-information lines', () => {
@@ -108,6 +103,6 @@ describe('classifyTscResult — an unreadable result is never zero errors (GATE-
         'Found 1 error in 1 file.\n',
       status: 1,
     });
-    expect(r.count).toBe(1);
+    expect(r).toMatchObject({ ok: true, count: 1 });
   });
 });

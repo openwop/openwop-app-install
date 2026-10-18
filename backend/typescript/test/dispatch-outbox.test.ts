@@ -417,6 +417,7 @@ describe('ADR 0551 P1 — forward migration onto a real pre-outbox database', ()
     // rotation columns).
     // ADR 0752 P2 (RFC 0215 §A.3): bumped to 48 (`webhook_deliveries.tenant_id`).
     // RFC 0173 §C.2 (suite 2.42.5): bumped to 49 (`invocation_log.presented_key`).
-    expect(LATEST_SCHEMA_VERSION).toBe(49);
+    // ADR 0812 P3d: bumped to 50 (drop the major-1 webhook subscriptions).
+    expect(LATEST_SCHEMA_VERSION).toBe(50);
   });
 });

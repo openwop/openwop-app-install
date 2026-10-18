@@ -20,13 +20,15 @@ import { frameOps } from '../../canvas/frameOps.js';
 import { treeOps } from '../../canvas/treeOps.js';
 import { SlideFrame, SlidesContentView } from '../../chat/artifacts/SlidesPreview.js';
 import { useRef, useState } from 'react';
-import { Modal, toast } from '../../ui/index.js';
-import { DownloadIcon, PlayIcon } from '../../ui/icons/index.js';
+import { Modal, StateCard, toast } from '../../ui/index.js';
+import { DownloadIcon, MessageSquareIcon, PlayIcon } from '../../ui/icons/index.js';
 import { authedHeaders, config, fetchOpts } from '../../client/config.js';
 import { asJson } from '../../canvas/canvasClient.js';
 import { MediaRefWidget } from '../media/MediaRefWidget.js';
 import { createLink, sharedPageUrl } from '../sharing/sharingClient.js';
 import type { ToolbarExtrasProps } from '../../canvas/types.js';
+import { useFeatureAccess } from '../../featureToggles/FeatureAccessContext.js';
+import { CommentsPanel } from '../comments/CommentsPanel.js';
 
 export type SlideLayout = 'title' | 'title-bullets' | 'section' | 'quote' | 'image' | 'blank' | 'blocks';
 export const SLIDE_LAYOUTS: readonly SlideLayout[] = ['title', 'title-bullets', 'section', 'quote', 'image', 'blank', 'blocks'];
@@ -152,6 +154,9 @@ export const slidesFrameOps = frameOps<SlidesDoc, EditorSlide>({
   key: 'slides',
   max: MAX_SLIDES,
   slugFallback: 'slide',
+  // ADR 0886 — per-slide comment threads key on the slide id, so a deleted
+  // slide's id must never be re-minted for a new slide.
+  uniqueIds: true,
   makeFrame: (id, name) => ({ id, name, layout: 'title-bullets' }),
 });
 
@@ -238,7 +243,7 @@ async function exportDeck(orgId: string, canvasId: string, format: SlidesExportF
 /** The Export toolbar slot — pptx/pdf via the capability-token download (the
  *  code-export delivery pattern). A dirty doc exports the SAVED version, so we
  *  hint rather than block (the preview convention). */
-function SlidesToolbarExtras({ orgId, canvasId, dirty }: ToolbarExtrasProps): JSX.Element {
+function SlidesToolbarExtras({ orgId, canvasId, dirty, activeFrame }: ToolbarExtrasProps): JSX.Element {
   const { t } = useTranslation('slides');
   const { t: tc } = useTranslation('canvas');
   const [format, setFormat] = useState<SlidesExportFormat>('pptx');
@@ -259,6 +264,16 @@ function SlidesToolbarExtras({ orgId, canvasId, dirty }: ToolbarExtrasProps): JS
     } finally {
       setExporting(false);
     }
+  };
+
+  // ADR 0886 D5 — per-slide comment threads ride the ONE comments feature
+  // (`canvas_slides`, `<canvasId>#<slideId>`). The control is ABSENT, not
+  // disabled, while `comments` is off (it ships OFF), so a deck never offers a
+  // door that only opens onto "not enabled".
+  const comments = useFeatureAccess('comments');
+  const [commentsFor, setCommentsFor] = useState<{ id: string; name: string; saved?: boolean } | null>(null);
+  const openComments = (): void => {
+    if (activeFrame) setCommentsFor(activeFrame);
   };
 
   const navigate = useNavigate();
@@ -352,6 +367,27 @@ function SlidesToolbarExtras({ orgId, canvasId, dirty }: ToolbarExtrasProps): JS
             </Button>
           </div>
         </Modal>
+      ) : null}
+      {commentsFor ? (
+        <Modal label={t('commentsOnSlide', { name: commentsFor.name })} onClose={() => setCommentsFor(null)} showClose>
+          <h2 className="cv-editor__panel-title">{t('commentsOnSlide', { name: commentsFor.name })}</h2>
+          {commentsFor.saved === false ? (
+            // SL2UX-3 — a slide added since the last save is not in the SAVED
+            // deck the thread resolves against; say so, instead of letting the
+            // panel's gone-state blame the person's access.
+            <StateCard icon={<MessageSquareIcon />} title={t('commentsSaveFirst')} />
+          ) : (
+            <>
+              {dirty ? <p className="muted">{t('commentsUnsavedNote')}</p> : null}
+              <CommentsPanel orgId={orgId} resourceType="canvas_slides" resourceId={`${canvasId}#${commentsFor.id}`} />
+            </>
+          )}
+        </Modal>
+      ) : null}
+      {comments.enabled && activeFrame ? (
+        <Button variant="quiet" size="sm" onClick={openComments}>
+          <MessageSquareIcon size={13} /> {t('comments')}
+        </Button>
       ) : null}
       <Button variant="secondary" size="sm" onClick={() => goPresent(presentPath)}>
         <PlayIcon size={13} /> {t('present')}

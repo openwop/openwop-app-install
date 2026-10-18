@@ -6,7 +6,7 @@
 /* ── Design-system gallery (ADR 0510 Phase 2, DSA-031) ─────────────────────
  * The /design-system engineering surface's type specimens — token-driven so
  * the gallery snapshots exercise the real scale, never inline literals. */
-.dsg-type-display { font-family: var(--serif); font-size: var(--text-display); }
+.dsg-type-display { font-family: var(--serif); font-weight: var(--weight-display); font-size: var(--text-display); }
 .dsg-type-body { font-size: var(--text-body); }
 .dsg-type-meta { font-family: var(--mono); font-size: var(--text-eyebrow); letter-spacing: 0.04em; }
 .dsg-admin-matrix { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-3); }

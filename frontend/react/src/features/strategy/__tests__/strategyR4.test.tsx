@@ -5,35 +5,51 @@
  * that a save says it worked, that a failure stops being claimed once it is over,
  * and that leaving a tab does not silently destroy a draft. Each `describe` names
  * its `SPU-` row so the tracker and the assertion cannot drift apart.
+ *
+ * Sabotage-witnessed (grade-tests w19, probes w19g5-r4-*, 45 probes): every case
+ * below went red under a single-edit break of the behavior it names (dropped
+ * `setError(null)`, toasts, `announce`, the leave guard and each dirty source,
+ * the focus effect and its tick, the combined-disclosure branch, the KR/objective
+ * group labels, the SPU-7 FeatureDisabled split, …).
+ *
+ * Cut in w19 as covered elsewhere (both cases went red under the same probe):
+ *  - SPU-9 "ONE blank title reads as a singular sentence" → strategyR3.test.tsx
+ *    "a blanked objective title blocks the save — the API is never called".
+ *  - ADR 0597 "says the edit withdrew…" / "the OVERVIEW editor reports it too" →
+ *    the §Correction 4 "…withdrawal disclosure IS the confirmation" cases below,
+ *    which make the same assertion and also pin the missing second toast.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { fireEvent, render, screen, cleanup, waitFor, act } from '@testing-library/react';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
-import type { Strategy } from '../strategyClient.js';
+import type * as Client from '../strategyClient.js';
+import type { Strategy, StrategyContextEntry } from '../strategyClient.js';
 
-const getStrategy = vi.fn();
-const listStrategies = vi.fn();
-const listProjects = vi.fn();
-const updateStrategy = vi.fn();
-const replaceLinks = vi.fn();
-const importObjectives = vi.fn();
-const getStrategyTimeline = vi.fn();
-const getStrategyDetailContext = vi.fn();
-const getStrategyContext = vi.fn();
-const toastSuccess = vi.fn();
+// Typed against the real client, so a fixture that does not match the wire shape
+// fails `tsc` instead of passing as a partial object.
+const getStrategy = vi.fn<typeof Client.getStrategy>();
+const listStrategies = vi.fn<typeof Client.listStrategies>();
+const listProjects = vi.fn<typeof Client.listProjects>();
+const updateStrategy = vi.fn<typeof Client.updateStrategy>();
+const replaceLinks = vi.fn<typeof Client.replaceLinks>();
+const importObjectives = vi.fn<typeof Client.importObjectives>();
+const getStrategyTimeline = vi.fn<typeof Client.getStrategyTimeline>();
+const getStrategyDetailContext = vi.fn<typeof Client.getStrategyDetailContext>();
+const getStrategyContext = vi.fn<typeof Client.getStrategyContext>();
+const toastSuccess = vi.fn<(m: string) => void>();
 
 vi.mock('../strategyClient.js', async (orig) => ({
   ...(await orig<Record<string, unknown>>()),
-  getStrategy: () => getStrategy(),
-  listStrategies: (...a: unknown[]) => listStrategies(...a),
+  getStrategy: (...a: Parameters<typeof Client.getStrategy>) => getStrategy(...a),
+  listStrategies: (...a: Parameters<typeof Client.listStrategies>) => listStrategies(...a),
   listProjects: () => listProjects(),
-  updateStrategy: (...a: unknown[]) => updateStrategy(...a),
-  getStrategyDetailContext: (...a: unknown[]) => getStrategyDetailContext(...a),
-  getStrategyContext: (...a: unknown[]) => getStrategyContext(...a),
+  updateStrategy: (...a: Parameters<typeof Client.updateStrategy>) => updateStrategy(...a),
+  getStrategyDetailContext: (...a: Parameters<typeof Client.getStrategyDetailContext>) => getStrategyDetailContext(...a),
+  getStrategyContext: (...a: Parameters<typeof Client.getStrategyContext>) => getStrategyContext(...a),
   listStrategyCheckIns: vi.fn(async () => []),
-  getStrategyTimeline: (...a: unknown[]) => getStrategyTimeline(...a),
-  replaceLinks: (...a: unknown[]) => replaceLinks(...a),
-  importObjectives: (...a: unknown[]) => importObjectives(...a),
+  getStrategyTimeline: (...a: Parameters<typeof Client.getStrategyTimeline>) => getStrategyTimeline(...a),
+  replaceLinks: (...a: Parameters<typeof Client.replaceLinks>) => replaceLinks(...a),
+  importObjectives: (...a: Parameters<typeof Client.importObjectives>) => importObjectives(...a),
 }));
 // ADR 0661 — a SECOND shape, distinct from "the factory missed an export": this
 // live fetch came from a SHARED cross-feature module (`orgs/orgMembers.ts`) that
@@ -44,7 +60,7 @@ vi.mock('../../../orgs/orgMembers.js', async (orig) => ({
   loadOrgMembers: vi.fn(async () => []),
 }));
 vi.mock('../../../ui/toast.js', () => ({ toast: { success: (m: string) => toastSuccess(m), error: vi.fn() } }));
-const confirmMock = vi.fn();
+const confirmMock = vi.fn<(o: unknown) => Promise<boolean>>();
 vi.mock('../../../ui/confirm.js', () => ({ confirm: (o: unknown) => confirmMock(o) }));
 
 import { currentAnnouncements } from '../../../ui/announce.js';
@@ -65,6 +81,9 @@ const STRATEGY: Strategy = {
   updatedAt: '2026-07-01T00:00:00.000Z',
 };
 
+/** A PATCH / import response: the full saved strategy plus the flags under test. */
+const saved = (flags: Partial<Strategy> = {}): Strategy => ({ ...structuredClone(STRATEGY), ...flags });
+
 const view = async (tab: string): Promise<void> => {
   render(
     <MemoryRouter initialEntries={[`/strategy/s1?tab=${tab}`]}>
@@ -81,9 +100,9 @@ beforeEach(() => {
   getStrategy.mockImplementation(async () => structuredClone(STRATEGY));
   listStrategies.mockResolvedValue([]);
   listProjects.mockResolvedValue([]);
-  updateStrategy.mockResolvedValue({});
-  replaceLinks.mockResolvedValue({});
-  importObjectives.mockResolvedValue({ imported: 2, skipped: [] });
+  updateStrategy.mockResolvedValue(saved());
+  replaceLinks.mockResolvedValue(saved());
+  importObjectives.mockResolvedValue({ imported: 2, skipped: [], strategy: saved() });
   getStrategyTimeline.mockResolvedValue([]);
   getStrategyDetailContext.mockResolvedValue(null);
   getStrategyContext.mockResolvedValue([]);
@@ -114,7 +133,7 @@ describe('SPU-3 — a failure stops being claimed once it is over (detail page)'
     // `onChanged()` — so clearing stale state inside `refresh()` would have
     // destroyed this notice at the moment it was raised. It is cleared by the
     // NEXT save instead, which is what these two arms pin.
-    updateStrategy.mockResolvedValueOnce({ autoRevertedToDraft: true, autoRevertedFields: ['objectives'] });
+    updateStrategy.mockResolvedValueOnce(saved({ autoRevertedToDraft: true, autoRevertedFields: ['objectives'] }));
     await view('objectives');
     await screen.findByDisplayValue('Grow pipeline');
 
@@ -159,7 +178,7 @@ describe('SPU-2 — a save that worked says so', () => {
   it('an AUTO-REVERTING save raises the disclosure INSTEAD of a plain "saved"', async () => {
     // Two strings in the polite queue would mean the second (less informative)
     // one describes the save; one message per save is the rule.
-    updateStrategy.mockResolvedValue({ autoRevertedToDraft: true, autoRevertedFields: ['objectives'] });
+    updateStrategy.mockResolvedValue(saved({ autoRevertedToDraft: true, autoRevertedFields: ['objectives'] }));
     await view('objectives');
     await screen.findByDisplayValue('Grow pipeline');
     fireEvent.click(screen.getByRole('button', { name: /^save$/i }));
@@ -185,7 +204,7 @@ describe('SPU-1 — the CSV import result reaches assistive tech', () => {
   });
 
   it('the skip REASONS are spoken, not just the counts', async () => {
-    importObjectives.mockResolvedValue({ imported: 1, skipped: [{ line: 4, reason: 'over the row cap' }] });
+    importObjectives.mockResolvedValue({ imported: 1, skipped: [{ line: 4, reason: 'over the row cap' }], strategy: saved() });
     await runImport();
     // The visible <Notice> lists the reasons; before this fix the only announced
     // string was the count summary, so the part the user must act on was silent.
@@ -274,7 +293,7 @@ describe('SPU-4 — leaving a tab does not silently destroy the draft', () => {
 
   it('the ALIGNMENT tab is guarded too — it is not an objectives-only rule', async () => {
     confirmMock.mockResolvedValue(false);
-    listProjects.mockResolvedValue([{ id: 'p1', name: 'Atlas', status: 'active' }]);
+    listProjects.mockResolvedValue([{ id: 'p1', name: 'Atlas', orgId: 'org-1', status: 'active' }]);
     await view('alignment');
     fireEvent.change(await screen.findByLabelText(/link a project/i), { target: { value: 'p1' } });
     fireEvent.click(screen.getByRole('button', { name: /add link/i }));
@@ -367,7 +386,7 @@ describe('SPU-5 — the timeline failure is announced AND recoverable', () => {
     // offered it since R2. A user whose timeline read 429s had to reload the page,
     // on a route CLAUDE.md already flags for read-budget fan-out.
     getStrategyTimeline.mockRejectedValueOnce(new Error('timeline 429'));
-    getStrategyTimeline.mockResolvedValue([{ kind: 'initiative', id: 'i1', title: 'Ship it', dueDate: '2026-09-01' }]);
+    getStrategyTimeline.mockResolvedValue([{ kind: 'initiative', id: 'i1', title: 'Ship it', dueDate: '2026-09-01', source: { strategyId: 's1', kind: 'initiative' } }]);
     await view('timeline');
     expect(await screen.findByText(/could not load the timeline/i)).toBeTruthy();
 
@@ -423,7 +442,12 @@ describe('SPU-6 — a failed priority-context resolve is disclosed, not shown as
   });
 
   it('a SUCCESSFUL resolve says nothing (the negative control)', async () => {
-    getStrategyDetailContext.mockResolvedValue({ id: 's1', linkedPriorities: [{ listId: 'l1', cardId: 'c1', title: 'Ship onboarding', rank: 3 }] });
+    const ctx: StrategyContextEntry = {
+      id: 's1', title: STRATEGY.title, scope: 'org', orgId: 'org-1', horizon: 'annual', period: { label: '2026' },
+      status: 'active', objectives: [], initiatives: [], linkedProjects: [],
+      linkedPriorities: [{ listId: 'l1', cardId: 'c1', title: 'Ship onboarding', rank: 3 }],
+    };
+    getStrategyDetailContext.mockResolvedValue(ctx);
     getStrategy.mockImplementation(async () => structuredClone(LINKED));
     await view('alignment');
     expect(await screen.findByText('Ship onboarding')).toBeTruthy();
@@ -466,17 +490,7 @@ describe('SPU-7 — the project-overview chips separate "toggle off" from "the r
 });
 
 describe('SPU-9 — the blocked-save copy is pluralized, in the case that actually happens', () => {
-  it('ONE blank title reads as a singular sentence, not "1 item(s) have"', async () => {
-    await view('objectives');
-    fireEvent.change(await screen.findByDisplayValue('Grow pipeline'), { target: { value: '' } });
-    fireEvent.click(screen.getByRole('button', { name: /^save$/i }));
-    // The single most likely case, on the error that BLOCKS a save. The call site
-    // always passed `{ count }` — the correct i18next key — but no `_one`/`_other`
-    // variants existed, so every locale fell back to the base string and fr/es/pt-BR
-    // got the verb agreement wrong too.
-    expect(await screen.findByText('1 item has an empty title. Fill it in, or remove it with the trash button — saving would delete it.')).toBeTruthy();
-  });
-
+  // The ONE-blank (singular) arm lives in strategyR3.test.tsx R3-A case 1 (w19 cut).
   it('TWO blank titles still read as a plural sentence (the other arm)', async () => {
     await view('objectives');
     fireEvent.change(await screen.findByDisplayValue('Grow pipeline'), { target: { value: '' } });
@@ -557,8 +571,9 @@ describe('SPU-11 — the error is brought to the user, not left off-screen above
     const holder = notice.closest('[tabindex="-1"]');
     expect(holder).not.toBeNull();
     await waitFor(() => expect(document.activeElement).toBe(holder));
+    // The announcement comes from a passive effect that can flush after findBy sees the DOM; wait for it.
+    await waitFor(() => expect(currentAnnouncements().assertive).toContain('strategy 500'));
     const afterFirst = currentAnnouncements().assertive;
-    expect(afterFirst).toContain('strategy 500');
 
     // The user does the only sensible thing: press Save again. Focus is now on
     // the button, and the server returns the SAME message.
@@ -616,27 +631,9 @@ describe('SPU-13 — the Check-ins panel explains its prerequisite instead of va
 });
 
 describe('ADR 0597 §Correction 4 residual — the withdrawn activation review reaches the screen', () => {
-  it('says the edit withdrew the pending submission', async () => {
-    updateStrategy.mockResolvedValue({ activationReviewClosed: true });
-    await view('objectives');
-    await screen.findByDisplayValue('Grow pipeline');
-    fireEvent.click(screen.getByRole('button', { name: /^save$/i }));
-    // PR-A shipped `activationReviewClosed: true` with NO SPA reader and filed it.
-    // The owner's own edit closes their own submission from an approver's inbox;
-    // a silent version of that is the STR2-M5 lesson repeated.
-    expect(await screen.findByText(/that review was withdrawn/i)).toBeTruthy();
-  });
-
-  it('the OVERVIEW editor reports it too — it also sends protected fields', async () => {
-    // `PROTECTED_FIELDS` is objectives / period / planningHorizon /
-    // accountableExecutive; Overview sends the last two. Wiring only the
-    // Objectives tab would have covered half the trigger surface.
-    updateStrategy.mockResolvedValue({ activationReviewClosed: true });
-    await view('overview');
-    fireEvent.click(await screen.findByRole('button', { name: /^save$/i }));
-    expect(await screen.findByText(/that review was withdrawn/i)).toBeTruthy();
-  });
-
+  // The two disclosure arms (Objectives + Overview) are asserted by the §Correction 4
+  // describe below, which also pins that no second toast fires (w19 cut). This
+  // over-fire control is the half only this describe holds.
   it('an ordinary save says nothing about reviews (the over-fire control)', async () => {
     await view('objectives');
     await screen.findByDisplayValue('Grow pipeline');
@@ -663,7 +660,7 @@ describe('ADR 0597 §Correction 4 residual — the withdrawn activation review r
  */
 describe('ADR 0598 §Correction 4 — a save that withdraws a review speaks ONCE', () => {
   it('the OVERVIEW withdrawal disclosure IS the confirmation — no second toast', async () => {
-    updateStrategy.mockResolvedValue({ activationReviewClosed: true });
+    updateStrategy.mockResolvedValue(saved({ activationReviewClosed: true }));
     await view('overview');
     fireEvent.click(await screen.findByRole('button', { name: /^save$/i }));
     expect(await screen.findByText(/that review was withdrawn/i)).toBeTruthy();
@@ -674,7 +671,7 @@ describe('ADR 0598 §Correction 4 — a save that withdraws a review speaks ONCE
   });
 
   it('the OBJECTIVES withdrawal disclosure IS the confirmation — no second toast', async () => {
-    updateStrategy.mockResolvedValue({ activationReviewClosed: true });
+    updateStrategy.mockResolvedValue(saved({ activationReviewClosed: true }));
     await view('objectives');
     await screen.findByDisplayValue('Grow pipeline');
     fireEvent.click(screen.getByRole('button', { name: /^save$/i }));
@@ -694,11 +691,11 @@ describe('ADR 0598 §Correction 4 — a save that withdraws a review speaks ONCE
    * Both flags come back on ONE response.
    */
   it('an auto-revert that ALSO withdraws the review renders ONE combined disclosure', async () => {
-    updateStrategy.mockResolvedValue({
+    updateStrategy.mockResolvedValue(saved({
       autoRevertedToDraft: true,
       autoRevertedFields: ['objectives'],
       activationReviewClosed: true,
-    });
+    }));
     await view('objectives');
     await screen.findByDisplayValue('Grow pipeline');
     const before = currentAnnouncements().polite;

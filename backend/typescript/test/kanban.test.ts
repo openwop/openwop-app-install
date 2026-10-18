@@ -9,7 +9,19 @@
  *   2. The REST routes (`/host/openwop-app/kanban/*`) against the sqlite
  *      memory backend: create board → add card → move card into the
  *      trigger column → a run is started (`triggeredRunId` returned) —
- *      plus tenant-scoped 404 on a foreign board.
+ *      plus tenant-scoped 404 on a board owned by ANOTHER tenant.
+ *
+ * Red under the w37g1-k-* probes (lane defaults, trigger directive, card patch,
+ * materialization identity/collision/dependency/redaction/dry-run/tenant,
+ * reorder, receipt purge/holds, board-change fan-out, the route trigger, delete,
+ * work-item board fence, the foreign-board fence and the SSE 404).
+ * Honest double guards (a single-guard sabotage stays green; the outer guard is named):
+ *  - same-column move: the command's no-op short-circuit AND `moved ?` both block a
+ *    trigger — the "with a field edit" leg below reaches `moved ?` alone;
+ *  - board delete: `deleteCard` also cascades each card's work items, so dropping the
+ *    board-level cascade alone stays green;
+ *  - invalid combined edit: the command re-validates the destination before writing,
+ *    behind the route's own column pre-check.
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -24,6 +36,7 @@ import {
   createBoard,
   createCard,
   deleteBoard,
+  getBoard,
   getCard,
   getWorkItem,
   listCards,
@@ -107,6 +120,13 @@ describe('kanban service (pure)', () => {
     const card = await createCard({ boardId: board.id, columnId: 'todo', title: 'x' });
     const result = await moveCard(card.id, 'todo');
     expect(result?.trigger).toBeNull();
+    // With a field edit in the same command the no-op short-circuit is bypassed, so
+    // only the "moved" test stands between this and a trigger.
+    const edited = await applyBoardCommand({
+      type: 'card.patch', tenantId: 't1', boardId: board.id, cardId: card.id, columnId: 'todo', patch: { title: 'y' },
+    });
+    expect(edited.card.title).toBe('y');
+    expect(edited.trigger).toBeNull();
   });
 
   it('lets a card-level workflowId override the column default', async () => {
@@ -200,10 +220,13 @@ describe('kanban service (pure)', () => {
       columnId: 'doing', afterCardId: undefined, patch: {},
     });
     expect((await listCards(board.id)).find((card) => card.id === one.id)?.columnId).toBe('doing');
+    // Both anchors given, both VALID in the card's own lane — only the
+    // either/or rule can refuse this (an anchor in another lane would be refused
+    // by the "not in the destination column" check instead).
     await expect(applyBoardCommand({
       type: 'card.patch', tenantId: 't1', boardId: board.id, cardId: two.id,
-      beforeCardId: one.id, afterCardId: three.id, patch: {},
-    })).rejects.toMatchObject({ code: 'kanban_position_invalid' });
+      beforeCardId: three.id, afterCardId: three.id, patch: {},
+    })).rejects.toMatchObject({ code: 'kanban_position_invalid', message: 'Choose either beforeCardId or afterCardId, not both.' });
   });
 
   it('removes durable operation receipts during tenant teardown', async () => {
@@ -337,8 +360,8 @@ describe('kanban routes (sqlite memory app)', () => {
         ...(init.headers ?? {}),
       },
     });
-    if (res.status === 204) return { status: 204, body: undefined as unknown as T };
-    return { status: res.status, body: (await res.json()) as T };
+    // JSON bodies are typed by each call site's view (`T`); a 204 has none.
+    return { status: res.status, body: (res.status === 204 ? undefined : await res.json()) as T };
   }
 
   it('advertises host.kanban in the discovery document', async () => {
@@ -387,9 +410,12 @@ describe('kanban routes (sqlite memory app)', () => {
     expect(typeof moved.body.triggeredRunId).toBe('string');
     expect((moved.body.triggeredRunId ?? '').length).toBeGreaterThan(0);
 
-    // Delete the card, then the board.
+    // Delete the card, then the board — and read back that both are gone.
     expect((await jsonFetch(`/host/openwop-app/kanban/cards/${card.body.id}`, { method: 'DELETE' })).status).toBe(204);
+    expect(await getCard(card.body.id)).toBeNull();
     expect((await jsonFetch(`/host/openwop-app/kanban/boards/${boardId}`, { method: 'DELETE' })).status).toBe(204);
+    expect(await getBoard(boardId)).toBeNull();
+    expect((await jsonFetch(`/host/openwop-app/kanban/boards/${boardId}`)).status).toBe(404);
   });
 
   it('projects redacted reusable WorkItems and manually dispatches through the normal workflow run path', async () => {
@@ -475,21 +501,51 @@ describe('kanban routes (sqlite memory app)', () => {
   });
 
   it('validates required fields', async () => {
-    const bad = await jsonFetch('/host/openwop-app/kanban/boards', {
+    const bad = await jsonFetch<{ error?: string; details?: { field?: string } }>('/host/openwop-app/kanban/boards', {
       method: 'POST',
       body: JSON.stringify({}),
     });
     expect(bad.status).toBe(400);
+    expect(bad.body).toMatchObject({ error: 'validation_error', details: { field: 'name' } });
   });
 
   it('404s an unknown board', async () => {
-    const res = await jsonFetch('/host/openwop-app/kanban/boards/board-does-not-exist');
+    const res = await jsonFetch<{ error?: string }>('/host/openwop-app/kanban/boards/board-does-not-exist');
     expect(res.status).toBe(404);
+    expect(res.body).toMatchObject({ error: 'not_found' });
+  });
+
+  it('404s a board owned by another tenant (no existence leak), and the owner tenant still has it', async () => {
+    // A REAL board in another tenant — the dev-token caller acts in `default`.
+    const foreign = await createBoard({ tenantId: 'kanban-route-foreign', name: 'Theirs' });
+    const read = await jsonFetch<{ error?: string }>(`/host/openwop-app/kanban/boards/${foreign.id}`);
+    expect(read.status).toBe(404);
+    expect(read.body).toMatchObject({ error: 'not_found', message: 'Board not found.' });
+    const del = await jsonFetch<{ error?: string }>(`/host/openwop-app/kanban/boards/${foreign.id}`, { method: 'DELETE' });
+    expect(del.status).toBe(404);
+    expect(del.body).toMatchObject({ error: 'not_found' });
+    // Positive controls: the board survives in its owner tenant, and the caller's
+    // own board IS readable through the same route.
+    expect((await getBoard(foreign.id))?.tenantId).toBe('kanban-route-foreign');
+    const own = await jsonFetch<{ id: string }>('/host/openwop-app/kanban/boards', { method: 'POST', body: JSON.stringify({ name: 'Mine' }) });
+    expect((await jsonFetch(`/host/openwop-app/kanban/boards/${own.body.id}`)).status).toBe(200);
   });
 
   it('the board SSE events endpoint 404s an unknown board (before opening a stream)', async () => {
-    const res = await jsonFetch('/host/openwop-app/kanban/boards/board-nope/events');
-    expect(res.status).toBe(404);
+    // Raw fetch + cancel: a regression that opened the stream must fail on the
+    // status, not hang on a body that never ends.
+    const ac = new AbortController();
+    const res = await fetch(`${BASE}/host/openwop-app/kanban/boards/board-nope/events`, {
+      headers: { authorization: `Bearer ${TOKEN}`, accept: 'text/event-stream' },
+      signal: ac.signal,
+    });
+    try {
+      expect(res.status).toBe(404);
+      expect(res.headers.get('content-type')).not.toContain('text/event-stream');
+    } finally {
+      await res.body?.cancel().catch(() => undefined);
+      ac.abort();
+    }
   });
 
   it('opens a text/event-stream for an owned board and pushes board.changed on a card create', async () => {

@@ -12,6 +12,7 @@ import { createStripeConnectCheckoutSession, toStripeMinorUnits, fromStripeMinor
 import {
   orders, orderSellerIndex, paidListings, sellers, payouts, feeConfigs,
   nowIso, clampFee, DEFAULT_FEE_PCT, platformRegion, orderIdFor,
+  STOREFRONT_FEE_PREFIX, clampStorefrontFee, DEFAULT_STOREFRONT_FEE_PCT,
   assertFoldEligibleTenant, ENTITLED_ORDER_STATUSES,
   type ConnectOrder, type SellerPayout, type OnboardingState,
 } from './stores.js';
@@ -39,6 +40,24 @@ export async function setApplicationFeePct(key: '__global__' | (string & {}), pc
   if (!Number.isFinite(pct)) throw new OpenwopError('validation_error', 'applicationFeePct must be a number.', 400, {});
   const applicationFeePct = clampFee(pct);
   await feeConfigs.put({ key, applicationFeePct, updatedAt: nowIso() });
+  return { key, applicationFeePct };
+}
+
+
+/** ADR 0877 Q1 — the STOREFRONT fee for a tenant's Connect sales: per-tenant
+ *  override → global → 2%; clamped 0–15% at read AND write (a corrupt row fails
+ *  closed to the bounds). Never the marketplace pack fee. */
+export async function getStorefrontFeePct(tenantId: string): Promise<number> {
+  const row = (await feeConfigs.get(`${STOREFRONT_FEE_PREFIX}${tenantId}`)) ?? (await feeConfigs.get(`${STOREFRONT_FEE_PREFIX}__global__`));
+  const pct = row?.applicationFeePct;
+  return clampStorefrontFee(typeof pct === 'number' && Number.isFinite(pct) ? pct : DEFAULT_STOREFRONT_FEE_PCT);
+}
+
+/** Operator (superadmin-route-gated) storefront fee config; clamped at write. */
+export async function setStorefrontFeePct(key: '__global__' | (string & {}), pct: number): Promise<{ key: string; applicationFeePct: number }> {
+  if (!Number.isFinite(pct)) throw new OpenwopError('validation_error', 'applicationFeePct must be a number.', 400, {});
+  const applicationFeePct = clampStorefrontFee(pct);
+  await feeConfigs.put({ key: `${STOREFRONT_FEE_PREFIX}${key}`, applicationFeePct, updatedAt: nowIso() });
   return { key, applicationFeePct };
 }
 

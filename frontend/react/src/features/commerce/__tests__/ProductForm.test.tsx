@@ -47,8 +47,8 @@ describe('ProductForm — edit mode customFields (ADR 0257)', () => {
     fireEvent.click(screen.getByText('save'));
 
     await waitFor(() => expect(updateProduct).toHaveBeenCalled());
-    expect(updateProduct.mock.calls[0][1]).toBe('p1');
-    expect((updateProduct.mock.calls[0][2] as { customFields: unknown }).customFields).toEqual({ sku: 'B2' });
+    expect(updateProduct.mock.calls[0]![1]).toBe('p1');
+    expect((updateProduct.mock.calls[0]![2] as { customFields: unknown }).customFields).toEqual({ sku: 'B2' });
     expect(createProduct).not.toHaveBeenCalled();
   });
 
@@ -59,7 +59,7 @@ describe('ProductForm — edit mode customFields (ADR 0257)', () => {
     fireEvent.click(screen.getByText('save'));
 
     await waitFor(() => expect(updateProduct).toHaveBeenCalled());
-    expect((updateProduct.mock.calls[0][2] as { customFields: unknown }).customFields).toEqual({});
+    expect((updateProduct.mock.calls[0]![2] as { customFields: unknown }).customFields).toEqual({});
   });
 
   it('locks the immutable type selector in edit mode (the PATCH route ignores type)', async () => {
@@ -88,7 +88,7 @@ describe('ProductForm — edit mode customFields (ADR 0257)', () => {
     fireEvent.click(screen.getByText('save'));
 
     await waitFor(() => expect(updateProduct).toHaveBeenCalled());
-    const body = updateProduct.mock.calls[0][2] as Record<string, unknown>;
+    const body = updateProduct.mock.calls[0]![2] as Record<string, unknown>;
     for (const k of ['description', 'variants', 'categories', 'dims', 'imageAssetTokens', 'type', 'currency']) {
       expect(k in body).toBe(false);
     }
@@ -101,7 +101,7 @@ describe('ProductForm — edit mode customFields (ADR 0257)', () => {
     fireEvent.click(screen.getByText('create'));
 
     await waitFor(() => expect(createProduct).toHaveBeenCalled());
-    expect('customFields' in (createProduct.mock.calls[0][1] as Record<string, unknown>)).toBe(false);
+    expect('customFields' in (createProduct.mock.calls[0]![1] as Record<string, unknown>)).toBe(false);
     expect(updateProduct).not.toHaveBeenCalled();
   });
 });

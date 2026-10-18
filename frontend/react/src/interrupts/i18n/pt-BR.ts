@@ -17,6 +17,8 @@ export const messages = {
   actionReject: 'Rejeitar',
   rejectConfirmTitle: 'Rejeitar e falhar a execução?',
   rejectConfirmBody: 'Rejeitar encerra a execução aqui. O que ela já gastou — uma consulta, uma chamada ao modelo, a sua revisão — não é recuperado, e a rejeição não pode ser desfeita.',
+  cuRejectConfirmTitle: 'Rejeitar esta ação e encerrar a sessão de navegador?',
+  cuRejectConfirmBody: 'O agente de navegador não realizará esta ação e a sessão termina aqui. O que ele já fez no site não é desfeito.',
   actionRequestChanges: 'Solicitar alterações',
   actionDefer: 'Adiar',
   actionEscalate: 'Escalonar',

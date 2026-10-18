@@ -2,6 +2,17 @@
 
 Status: Accepted
 
+> **CORRECTED 2026-10-17 (ADR 0903) — the pin this ADR described as correct and deliberate is removed.** On
+> the user's decision, no chain pins a default AI vendor any more: the
+> `provider`/`model` params of all 74 chains that defaulted to `anthropic` /
+> `claude-sonnet-4-6` (the KicktoDo factory included) carry no default, and no
+> node pack falls back to a named vendor. An unset value now follows the run's
+> own choice, then the workspace's active AI setting, then the host catalog's
+> default. Replay stays deterministic for the reason this ADR cared about: that
+> value is resolved ONCE per run and recorded on it (`run.metadata.aiDefault`),
+> and a `:fork` reads the recorded value instead of re-resolving it.
+
+
 Closes ADR 0502 §Open-2. Adds a correction note to **ADR 0498** and records a
 scope limitation in the RFC 0031 capability gate.
 

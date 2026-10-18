@@ -1,6 +1,6 @@
 {
   "name": "core.openwop.workflows.finance",
-  "version": "1.1.9",
+  "version": "1.2.0",
   "kind": "workflow-chain",
   "description": "Real-work workflow pack (RFC 0013, ADR 0149) — the Finance cluster: Invoice → AP Processing, Month-End Close Checklist, and Expense/Budget Approval + anomaly detection. Reasons with core.ai.chatCompletion; recommends ERP actions (validation + posting) provider-agnostically via core.openwop.connectors.erp-action (NetSuite when connected); every posting/reimbursement runs through a threshold core.chat.approvalGate. All tenant-specific values are run parameters (replay-deterministic). Resolves on hosts shipping the http + ai + chat + kb + integration packs. Published under core.openwop.workflows.* (openwop-team key).",
   "author": "openwop",
@@ -10,7 +10,7 @@
   "chains": [
     {
       "chainId": "finance.invoice-ap",
-      "version": "1.0.2",
+      "version": "1.1.0",
       "label": "Invoice → AP Processing",
       "description": "Extract invoice line items, validate against the PO/ledger in the ERP (provider-agnostic), run a threshold-based approval, then post the invoice and send a payment notification.",
       "parameters": {
@@ -22,8 +22,8 @@
           "vendorId": { "type": "string", "default": "", "description": "The ERP vendor id for a live vendor-bill post." },
           "billAmount": { "type": "string", "default": "", "description": "The invoice amount for a live post." },
           "invoiceText": { "type": "string", "description": "The invoice content (extracted text or a description)." },
-          "provider": { "type": "string", "default": "anthropic", "description": "AI provider id for this chain's LLM nodes. Frozen into this chain's AI nodes when the workflow is created (ADR 0498 — a concrete provider is what keeps replay deterministic). Override at instantiation to use a different vendor or your own BYOK provider; whichever you pick, the workspace needs a key for it — the workflow will not fall back to another provider on its own." },
-          "model": { "type": "string", "default": "claude-sonnet-4-6", "description": "Model id for this chain's LLM nodes. Must be advertised by `provider` in the host catalog; override at instantiation." }
+          "provider": { "type": "string", "description": "AI provider id for this chain's model-calling nodes. Set it to fix a provider into those nodes when the workflow is created. Leave it unset and each run uses the run's chosen provider, else the workspace's AI setting, else the host's catalog default (ADR 0903); whichever is chosen is recorded on the run, so a replay or fork uses the same one. The workspace needs a key for the provider that runs." },
+          "model": { "type": "string", "description": "Model id for this chain's model-calling nodes. Must be offered by the provider in the host catalog. Leave it unset to use the provider's model from the same choice (ADR 0903)." }
         }
       },
       "capabilities": ["side-effectful"],
@@ -51,7 +51,7 @@
     },
     {
       "chainId": "finance.month-end-close",
-      "version": "1.0.4",
+      "version": "1.1.0",
       "label": "Month-End Close Checklist",
       "description": "Orchestrate the close: build the task checklist, collect supporting docs from the knowledge base, draft variance notes, chase missing approvals, then produce a close-readiness report.",
       "parameters": {
@@ -63,8 +63,8 @@
           "orgId": { "type": "string", "description": "Org whose knowledge base holds the supporting docs." },
           "collectionId": { "type": "string", "description": "Knowledge-base collection id to search." },
           "query": { "type": "string", "description": "Supporting-docs search query (source node reads it from run inputs)." },
-          "provider": { "type": "string", "default": "anthropic", "description": "AI provider id for this chain's LLM nodes. Frozen into this chain's AI nodes when the workflow is created (ADR 0498 — a concrete provider is what keeps replay deterministic). Override at instantiation to use a different vendor or your own BYOK provider; whichever you pick, the workspace needs a key for it — the workflow will not fall back to another provider on its own." },
-          "model": { "type": "string", "default": "claude-sonnet-4-6", "description": "Model id for this chain's LLM nodes. Must be advertised by `provider` in the host catalog; override at instantiation." }
+          "provider": { "type": "string", "description": "AI provider id for this chain's model-calling nodes. Set it to fix a provider into those nodes when the workflow is created. Leave it unset and each run uses the run's chosen provider, else the workspace's AI setting, else the host's catalog default (ADR 0903); whichever is chosen is recorded on the run, so a replay or fork uses the same one. The workspace needs a key for the provider that runs." },
+          "model": { "type": "string", "description": "Model id for this chain's model-calling nodes. Must be offered by the provider in the host catalog. Leave it unset to use the provider's model from the same choice (ADR 0903)." }
         }
       },
       "capabilities": ["side-effectful"],
@@ -93,7 +93,7 @@
     },
     {
       "chainId": "finance.expense-approval",
-      "version": "1.0.2",
+      "version": "1.1.0",
       "label": "Expense / Budget Approval + Anomaly Detection",
       "description": "Check an expense against policy, run a duplicate/anomaly check, route through a threshold approval chain, then reimburse via the ERP and flag outliers.",
       "parameters": {
@@ -105,8 +105,8 @@
           "employeeId": { "type": "string", "default": "", "description": "The ERP employee id for a live expense-report post." },
           "expenseAmount": { "type": "string", "default": "", "description": "The reimbursement amount for a live post." },
           "expenseContext": { "type": "string", "description": "The expense to assess (amount, category, submitter, notes)." },
-          "provider": { "type": "string", "default": "anthropic", "description": "AI provider id for this chain's LLM nodes. Frozen into this chain's AI nodes when the workflow is created (ADR 0498 — a concrete provider is what keeps replay deterministic). Override at instantiation to use a different vendor or your own BYOK provider; whichever you pick, the workspace needs a key for it — the workflow will not fall back to another provider on its own." },
-          "model": { "type": "string", "default": "claude-sonnet-4-6", "description": "Model id for this chain's LLM nodes. Must be advertised by `provider` in the host catalog; override at instantiation." }
+          "provider": { "type": "string", "description": "AI provider id for this chain's model-calling nodes. Set it to fix a provider into those nodes when the workflow is created. Leave it unset and each run uses the run's chosen provider, else the workspace's AI setting, else the host's catalog default (ADR 0903); whichever is chosen is recorded on the run, so a replay or fork uses the same one. The workspace needs a key for the provider that runs." },
+          "model": { "type": "string", "description": "Model id for this chain's model-calling nodes. Must be offered by the provider in the host catalog. Leave it unset to use the provider's model from the same choice (ADR 0903)." }
         }
       },
       "capabilities": ["side-effectful"],

@@ -8,8 +8,14 @@
  *  - full refund REVOKES future access (new enrollment refused) while the
  *    EXISTING enrollment keeps converging (never stranded)
  *  - unlinked challenges stay free; entitlements are buyer-scoped reads
+ *
+ * DOUBLE GUARD (honest ceiling, grade-tests w40): "re-observing the same order
+ * changes nothing" is enforced TWICE in `reprocessOrder` — the same-orderId
+ * `continue` AND the ARCH-H1 `orderCreatedAt >= createdAt` `continue` (an order is
+ * never strictly newer than itself). Removing either alone is invisible here; the
+ * ARCH-H1 guard is the shared piece, witnessed by the re-purchase case below.
  */
-import { beforeAll, describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { registerGoalVerifier } from '../src/features/goals/goalVerifiers.js';
@@ -35,7 +41,11 @@ import {
   linkChallengeProduct,
   listEntitlementsFor,
   reprocessOrder,
+  revenueProjectionFor,
 } from '../src/features/kicktodo-commerce/entitlementService.js';
+import { enrollTierVerdict } from '../src/features/kicktodo-commerce/tierGuard.js';
+
+const PURCHASE_REQUIRED = 'This challenge requires a purchase. Complete checkout to enroll.';
 
 const T = 'tenant-kt-money';
 const ORG = 'org-kt-money';
@@ -70,6 +80,7 @@ describe('paid-challenge entitlement loop (ADR 0420 P1)', () => {
 
     // Gated before purchase.
     await expect(enroll({ tenantId: T, ownerSubject: BUYER, challengeId, challengeVersion: 1 })).rejects.toBeInstanceOf(EnrollDeniedError);
+    await expect(enroll({ tenantId: T, ownerSubject: BUYER, challengeId, challengeVersion: 1 })).rejects.toThrow(PURCHASE_REQUIRED);
 
     // Checkout → order → CAS pending→paid → the observer grants.
     const order = await createOrder({ tenantId: T, orgId: ORG, createdBy: BUYER, lines: [{ productId: product.productId, quantity: 1 }] });
@@ -95,7 +106,7 @@ describe('paid-challenge entitlement loop (ADR 0420 P1)', () => {
     expect((await getEnrollment(T, enrollment.id))?.state).toBe('active');
 
     // …but a DIFFERENT buyer without an entitlement is still refused.
-    await expect(enroll({ tenantId: T, ownerSubject: 'user:freeloader', challengeId, challengeVersion: 1 })).rejects.toBeInstanceOf(EnrollDeniedError);
+    await expect(enroll({ tenantId: T, ownerSubject: 'user:freeloader', challengeId, challengeVersion: 1 })).rejects.toThrow(PURCHASE_REQUIRED);
   });
 
   it('an unlinked challenge stays free', async () => {
@@ -109,15 +120,23 @@ describe('paid-challenge entitlement loop (ADR 0420 P1)', () => {
     const product = await createProduct({ tenantId: T, orgId: ORG, createdBy: BUYER, type: 'digital', name: 'Repurchase', price: 9 });
     await linkChallengeProduct(T, product.productId, challengeId, 1, 'user:publisher');
 
-    const first = await createOrder({ tenantId: T, orgId: ORG, createdBy: BUYER, lines: [{ productId: product.productId, quantity: 1 }] });
-    await markAsPaid(T, ORG, first.orderId, 'demo:pi-2');
     // ARCH-H1 re-points only on a STRICTLY newer createdAt; on a fast run both
     // orders can land in the same millisecond and the guard (correctly) keeps
-    // the first pointer. This test's claim needs a genuinely newer order —
-    // own the precondition instead of racing the clock.
-    await new Promise((r) => setTimeout(r, 2));
-    const second = await createOrder({ tenantId: T, orgId: ORG, createdBy: BUYER, lines: [{ productId: product.productId, quantity: 1 }] });
-    await markAsPaid(T, ORG, second.orderId, 'demo:pi-3');
+    // the first pointer. This test's claim needs a genuinely newer order — own
+    // the precondition with a faked Date (one second apart), not a real sleep.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    let first: Awaited<ReturnType<typeof createOrder>>;
+    let second: Awaited<ReturnType<typeof createOrder>>;
+    try {
+      vi.setSystemTime(Date.parse('2026-03-01T00:00:00.000Z'));
+      first = await createOrder({ tenantId: T, orgId: ORG, createdBy: BUYER, lines: [{ productId: product.productId, quantity: 1 }] });
+      await markAsPaid(T, ORG, first.orderId, 'demo:pi-2');
+      vi.setSystemTime(Date.parse('2026-03-01T00:00:01.000Z'));
+      second = await createOrder({ tenantId: T, orgId: ORG, createdBy: BUYER, lines: [{ productId: product.productId, quantity: 1 }] });
+      await markAsPaid(T, ORG, second.orderId, 'demo:pi-3');
+    } finally {
+      vi.useRealTimers();
+    }
     // The second purchase RE-POINTS the entitlement to the newest paying
     // order, so the FIRST order's refund cannot claw it back.
     expect((await getEntitlement(T, BUYER, challengeId, 1))?.orderId).toBe(second.orderId);
@@ -130,22 +149,18 @@ describe('paid-challenge entitlement loop (ADR 0420 P1)', () => {
 
 describe('KickBot Plus tier gate (ADR 0420 P2)', () => {
   it('a limit caps ACTIVE enrollments; unlimited (null) never blocks; the denial names the upgrade path', async () => {
-    const { enrollTierVerdict } = await import('../src/features/kicktodo-commerce/tierGuard.js');
     const T2 = 'tenant-tier';
     const who = 'user:tier-buyer';
     const a = await publishedChallengeIn(T2, 'Tier A');
-    const b = await publishedChallengeIn(T2, 'Tier B');
     await enroll({ tenantId: T2, ownerSubject: who, challengeId: a, challengeVersion: 1 });
 
     // Limit 1 → the second enrollment is refused with actionable copy.
     const denied = await enrollTierVerdict({ tenantId: T2, ownerSubject: who }, async () => 1);
-    expect(denied.ok).toBe(false);
-    if (!denied.ok) expect(denied.reason).toContain('KickBot Plus');
+    expect(denied).toEqual({ ok: false, reason: expect.stringContaining('KickBot Plus') });
 
     // Limit 2 → allowed; unlimited (null) → allowed.
     expect((await enrollTierVerdict({ tenantId: T2, ownerSubject: who }, async () => 2)).ok).toBe(true);
     expect((await enrollTierVerdict({ tenantId: T2, ownerSubject: who }, async () => null)).ok).toBe(true);
-    void b;
   });
 });
 
@@ -160,22 +175,32 @@ async function publishedChallengeIn(tenantId: string, title: string) {
 
 describe('challenge product type + revenue projection (ADR 0420 P3/P5)', () => {
   it('a challenge-typed product sells a challenge end-to-end; revenue counts are creator-scoped and PII-free', async () => {
-    const challengeId = await publishedChallengeIn(T, 'Typed Challenge');
-    const product = await createProduct({ tenantId: T, orgId: ORG, createdBy: 'user:creator', type: 'challenge', name: 'Typed Challenge', price: 19 });
+    // Its OWN tenant, so the counts never depend on the other cases' rows.
+    const T3 = 'tenant-kt-revenue';
+    const challengeId = await publishedChallengeIn(T3, 'Typed Challenge');
+    const product = await createProduct({ tenantId: T3, orgId: ORG, createdBy: 'user:creator', type: 'challenge', name: 'Typed Challenge', price: 19 });
     expect(product.type).toBe('challenge');
-    await linkChallengeProduct(T, product.productId, challengeId, 1, 'user:creator');
+    await linkChallengeProduct(T3, product.productId, challengeId, 1, 'user:creator');
 
-    const order = await createOrder({ tenantId: T, orgId: ORG, createdBy: 'user:typed-buyer', lines: [{ productId: product.productId, quantity: 1 }] });
-    await markAsPaid(T, ORG, order.orderId, 'demo:pi-typed');
-    expect((await getEntitlement(T, 'user:typed-buyer', challengeId, 1))?.state).toBe('active');
+    const order = await createOrder({ tenantId: T3, orgId: ORG, createdBy: 'user:typed-buyer', lines: [{ productId: product.productId, quantity: 1 }] });
+    await markAsPaid(T3, ORG, order.orderId, 'demo:pi-typed');
+    expect((await getEntitlement(T3, 'user:typed-buyer', challengeId, 1))?.state).toBe('active');
 
-    const { revenueProjectionFor } = await import('../src/features/kicktodo-commerce/entitlementService.js');
-    const revenue = await revenueProjectionFor(T, 'user:creator');
+    // A SECOND challenge by the same creator, bought by someone else: its
+    // entitlement must count against ITS row, never this one.
+    const otherId = await publishedChallengeIn(T3, 'Other Challenge');
+    const otherProduct = await createProduct({ tenantId: T3, orgId: ORG, createdBy: 'user:creator', type: 'challenge', name: 'Other Challenge', price: 7 });
+    await linkChallengeProduct(T3, otherProduct.productId, otherId, 1, 'user:creator');
+    const otherOrder = await createOrder({ tenantId: T3, orgId: ORG, createdBy: 'user:other-buyer', lines: [{ productId: otherProduct.productId, quantity: 1 }] });
+    await markAsPaid(T3, ORG, otherOrder.orderId, 'demo:pi-other');
+
+    const revenue = await revenueProjectionFor(T3, 'user:creator');
     const row = revenue.find((r) => r.challengeId === challengeId);
     expect(row?.activeEntitlements).toBe(1);
     expect(row?.revokedEntitlements).toBe(0);
+    expect(revenue.find((r) => r.challengeId === otherId)?.activeEntitlements).toBe(1);
     expect(JSON.stringify(revenue)).not.toContain('typed-buyer'); // counts only — no buyer PII
     // Another creator sees nothing of it.
-    expect((await revenueProjectionFor(T, 'user:other-creator')).find((r) => r.challengeId === challengeId)).toBeUndefined();
+    expect((await revenueProjectionFor(T3, 'user:other-creator')).find((r) => r.challengeId === challengeId)).toBeUndefined();
   });
 });

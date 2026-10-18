@@ -15,13 +15,24 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { evaluateGates } from '../src/features/kicktodo-creator/publishService.js';
-import type { ResearchClaim } from '../src/features/kicktodo-creator/creatorService.js';
+import type { FactoryCandidate, ResearchClaim, ResearchDossier } from '../src/features/kicktodo-creator/creatorService.js';
+import * as creatorService from '../src/features/kicktodo-creator/creatorService.js';
 import {
-  createCandidate, recordResearch, sourceHash, sourceDomain, UnparsableSourceUrlError,
+  createCandidate, recordResearch, sourceHash, sourceDomain, UnparsableSourceUrlError, StubSourceError,
 } from '../src/features/kicktodo-creator/creatorService.js';
 import { decideRights } from '../src/features/kicktodo-creator/publishService.js';
 
 const T = 'tenant-provenance';
+
+/** A present value, or a failed assertion naming it (no non-null `!`). */
+function must<V>(v: V | null | undefined, what: string): V {
+  if (v === null || v === undefined) throw new Error(`expected ${what}`);
+  return v;
+}
+/** The recorded candidate's dossier. */
+function dossierOf(c: FactoryCandidate | null): ResearchDossier {
+  return must(must(c, 'a recorded candidate').dossier, 'a recorded dossier');
+}
 
 async function candidate(): Promise<string> {
   const c = await createCandidate({
@@ -45,11 +56,11 @@ describe('research provenance (KTFULL-B7)', () => {
       claims: [],
     });
 
-    const stored = updated!.dossier!.sources[0]!;
-    expect(stored.domain).toBe('www.ted.com'); // derived from the URL, not the label
+    const sources = dossierOf(updated).sources;
+    expect(sources[0]?.domain).toBe('www.ted.com'); // derived from the URL, not the label
 
     // …and the rights gate now blocks it, which it could not do before.
-    expect(decideRights(updated!.dossier!.sources)[0]!.disposition).toBe('blocked');
+    expect(decideRights(sources)[0]?.disposition).toBe('blocked');
   });
 
   it('derives the citation hash, so a claim cannot cite a source that does not exist', async () => {
@@ -63,14 +74,15 @@ describe('research provenance (KTFULL-B7)', () => {
       ],
     });
 
-    const stored = updated!.dossier!.sources[0]!;
+    const dossier = dossierOf(updated);
+    const stored = must(dossier.sources[0], 'a stored source');
     expect(stored.hash).toBe(sourceHash('https://example.org/a', 'A'));
     expect(stored.hash).not.toBe('claimed-hash');
 
     // The real claim is re-pointed at the derived hash and stays supported…
-    expect(updated!.dossier!.claims.find((c) => c.claimId === 'c-real')!.sourceHashes).toEqual([stored.hash]);
+    expect(dossier.claims.find((c) => c.claimId === 'c-real')?.sourceHashes).toEqual([stored.hash]);
     // …while the invented citation is reported as unsupported.
-    expect(updated!.dossier!.unsupportedClaimIds).toEqual(['c-fake']);
+    expect(dossier.unsupportedClaimIds).toEqual(['c-fake']);
   });
 
   it('rejects a URL it cannot parse rather than defaulting the domain', async () => {
@@ -78,7 +90,10 @@ describe('research provenance (KTFULL-B7)', () => {
     // silently got domain "" would never match a blocked-domain entry.
     expect(() => sourceDomain('not a url')).toThrow(UnparsableSourceUrlError);
     expect(() => sourceDomain('javascript:alert(1)')).toThrow(UnparsableSourceUrlError);
-    expect(sourceDomain('https://WWW.Ted.COM/x')).toBe('www.ted.com'); // case-normalized
+    // Case-normalized. Honest ceiling: WHATWG `URL` already lowercases `hostname`,
+    // so the product's own `.toLowerCase()` is belt-and-braces and removing it
+    // leaves this line green (w41 probe rp-lowercase) — a contract pin, not a witness.
+    expect(sourceDomain('https://WWW.Ted.COM/x')).toBe('www.ted.com');
   });
 
   it('has exactly ONE citation-hash derivation (ARCH-4)', async () => {
@@ -86,14 +101,14 @@ describe('research provenance (KTFULL-B7)', () => {
     // pre-existing `sourceHash`, same input, different encoding. Two exported
     // functions that hash the same thing differently is the drift trap that
     // yields a bug the first time a stored key meets a computed one.
-    const mod = await import('../src/features/kicktodo-creator/creatorService.js');
-    const hashers = Object.keys(mod).filter((k) => /hash/i.test(k) && typeof (mod as Record<string, unknown>)[k] === 'function');
+    const hashers = Object.entries(creatorService).filter(([k, v]) => /hash/i.test(k) && typeof v === 'function').map(([k]) => k);
     expect(hashers).toEqual(['sourceHash']);
   });
 
   it('gives two callers citing the same source the same canonical key', async () => {
-    expect(sourceHash('https://a.test/x', 'Title'))
-      .toBe(sourceHash('https://a.test/x', 'Title'));
+    // A LITERAL digest (sha256 of `url|title`, first 32 hex) — never the function as
+    // its own oracle — so a changed derivation reds every stored key's reader here.
+    expect(sourceHash('https://a.test/x', 'Title')).toBe('sha256:3a0a7856d1506bb3effbd5982821dc0f');
     expect(sourceHash('https://a.test/x', 'Title'))
       .not.toBe(sourceHash('https://a.test/y', 'Title'));
   });
@@ -117,7 +132,7 @@ describe('dossier source suitability (ADR 0101 Phase 4)', () => {
       questions: ['q'],
       sources: [{ url: 'https://example.org/a', domain: 'example.org', title: 'A', hash: 'h', engine: 'native:google' }],
       claims: [],
-    })).rejects.toThrow(/stub\/demo|search adapter/i);
+    })).rejects.toThrow(StubSourceError);
   });
 
   it('still refuses the stub/demo markers (the original guard is intact)', async () => {
@@ -126,7 +141,7 @@ describe('dossier source suitability (ADR 0101 Phase 4)', () => {
       questions: ['q'],
       sources: [{ url: 'https://example.org/a', domain: 'example.org', title: 'A', hash: 'h', engine: 'demo' }],
       claims: [],
-    })).rejects.toThrow();
+    })).rejects.toThrow(StubSourceError);
   });
 
   it('accepts a host-configured vendor and a DURABLE native engine', async () => {
@@ -139,7 +154,9 @@ describe('dossier source suitability (ADR 0101 Phase 4)', () => {
       ],
       claims: [],
     });
-    expect(updated!.dossier!.sources).toHaveLength(2);
+    const dossier = dossierOf(updated);
+    expect(dossier.sources).toHaveLength(2);
+    expect(dossier.engines).toEqual(['brave', 'native:anthropic']);
   });
 });
 
@@ -155,16 +172,17 @@ describe('claims gate — entailment (ADR 0494 P2b)', () => {
 
   async function candidateWith(claim: ResearchClaim) {
     const id = await candidate();
-    return (await recordResearch(T, id, { questions: ['q'], sources: [src], claims: [claim] }))!;
+    return must(await recordResearch(T, id, { questions: ['q'], sources: [src], claims: [claim] }), 'a recorded candidate');
   }
+  const gate = (rows: ReturnType<typeof evaluateGates>, name: string) => must(rows.find((r) => r.gate === name), `a ${name} row`);
 
   it('a claim whose source is judged `unrelated` does NOT satisfy the gate', async () => {
     const c = await candidateWith({
       claimId: 'c-1', text: 'unsupported', sourceHashes: [sourceHash(src.url, src.title)],
       support: [{ sourceHash: sourceHash(src.url, src.title), verdict: 'unrelated' }],
     });
-    const rows = evaluateGates(c, decideRights(c.dossier!.sources));
-    expect(rows.find((r) => r.gate === 'claims')!.state).toBe('open');
+    const rows = evaluateGates(c, decideRights(dossierOf(c).sources));
+    expect(gate(rows, 'claims').state).toBe('open');
   });
 
   it('a claim judged `supports` (and agreed) DOES satisfy it', async () => {
@@ -173,8 +191,8 @@ describe('claims gate — entailment (ADR 0494 P2b)', () => {
       claimId: 'c-1', text: 'supported', sourceHashes: [h],
       support: [{ sourceHash: h, verdict: 'supports', span: 'the passage', secondOpinion: 'supports' }],
     });
-    const rows = evaluateGates(c, decideRights(c.dossier!.sources));
-    expect(rows.find((r) => r.gate === 'claims')!.state).toBe('pass');
+    const rows = evaluateGates(c, decideRights(dossierOf(c).sources));
+    expect(gate(rows, 'claims').state).toBe('pass');
   });
 
   it('a DISPUTED pair does not carry the claim, and surfaces informationally', async () => {
@@ -183,9 +201,9 @@ describe('claims gate — entailment (ADR 0494 P2b)', () => {
       claimId: 'c-1', text: 'disputed', sourceHashes: [h],
       support: [{ sourceHash: h, verdict: 'supports', span: 'p', secondOpinion: 'contradicts' }],
     });
-    const rows = evaluateGates(c, decideRights(c.dossier!.sources));
-    expect(rows.find((r) => r.gate === 'claims')!.state).toBe('open');
-    const disputed = rows.find((r) => r.gate === 'disputed')!;
+    const rows = evaluateGates(c, decideRights(dossierOf(c).sources));
+    expect(gate(rows, 'claims').state).toBe('open');
+    const disputed = gate(rows, 'disputed');
     expect(disputed.state).toBe('open');
     expect(disputed.informational, 'disagreement FLAGS for a human; it never hard-fails on its own').toBe(true);
     expect(disputed.detail).toContain('c-1');
@@ -194,8 +212,8 @@ describe('claims gate — entailment (ADR 0494 P2b)', () => {
   it('BACK-COMPAT — a dossier with NO verdicts keeps the structural meaning', async () => {
     // Candidates recorded before verification existed must not retroactively fail.
     const c = await candidateWith({ claimId: 'c-1', text: 'legacy', sourceHashes: [sourceHash(src.url, src.title)] });
-    const rows = evaluateGates(c, decideRights(c.dossier!.sources));
-    expect(rows.find((r) => r.gate === 'claims')!.state).toBe('pass');
+    const rows = evaluateGates(c, decideRights(dossierOf(c).sources));
+    expect(gate(rows, 'claims').state).toBe('pass');
   });
 
   it('a verdict citing an UNRECORDED source is dropped on record', async () => {
@@ -204,7 +222,7 @@ describe('claims gate — entailment (ADR 0494 P2b)', () => {
       claimId: 'c-1', text: 'x', sourceHashes: [sourceHash(src.url, src.title)],
       support: [{ sourceHash: 'sha256:not-recorded', verdict: 'supports', span: 'p' }],
     });
-    expect(c.dossier!.claims[0]!.support).toEqual([]);
+    expect(dossierOf(c).claims[0]?.support).toEqual([]);
   });
 });
 
@@ -223,11 +241,11 @@ describe('source retrieval marking (ADR 0494 P2c)', () => {
 
   it('marks each source read / not-read from the supplied set', async () => {
     const id = await candidate();
-    const c = (await recordResearch(T, id, {
+    const c = await recordResearch(T, id, {
       questions: ['q'], sources: [readable, blocked], claims: [],
       readSourceHashes: [sourceHash(readable.url, readable.title)],
-    }))!;
-    const byUrl = Object.fromEntries(c.dossier!.sources.map((s) => [s.url, s.retrieved]));
+    });
+    const byUrl = Object.fromEntries(dossierOf(c).sources.map((s) => [s.url, s.retrieved]));
     expect(byUrl['https://example.org/read']).toBe(true);
     expect(byUrl['https://example.org/blocked'], 'a 403 source is FOUND, not read').toBe(false);
   });
@@ -236,19 +254,20 @@ describe('source retrieval marking (ADR 0494 P2c)', () => {
     // "Unknown" and "not read" are different. Older dossiers must not be
     // retroactively relabelled as unread.
     const id = await candidate();
-    const c = (await recordResearch(T, id, { questions: ['q'], sources: [readable], claims: [] }))!;
-    expect(c.dossier!.sources[0]!.retrieved).toBeUndefined();
+    const c = await recordResearch(T, id, { questions: ['q'], sources: [readable], claims: [] });
+    const only = must(dossierOf(c).sources[0], 'a stored source');
+    expect('retrieved' in only).toBe(false);
   });
 
   it('the read set is re-pointed through the SAME hash map as citations', async () => {
     // A caller-supplied hash is re-derived on record; a mark keyed to the stale
     // hash would silently land on nothing.
     const id = await candidate();
-    const c = (await recordResearch(T, id, {
+    const c = await recordResearch(T, id, {
       questions: ['q'],
       sources: [{ ...readable, hash: 'caller-supplied-stale' }], claims: [],
       readSourceHashes: ['caller-supplied-stale'],
-    }))!;
-    expect(c.dossier!.sources[0]!.retrieved).toBe(true);
+    });
+    expect(dossierOf(c).sources[0]?.retrieved).toBe(true);
   });
 });

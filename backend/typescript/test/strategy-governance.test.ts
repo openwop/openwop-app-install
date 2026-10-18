@@ -7,11 +7,28 @@
  *   - mixed patch (title + status) applies the other fields, queues activation
  *   - protected-field edit on an ACTIVE strategy auto-reverts to draft (visible)
  *   - a decider without `host:members:manage` in the strategy's org gets 403
- *   - versions (§B4): revisions append with dedupe; content-only restore
+ *   - versions (§B4): revisions append with dedupe; content-only restore; the versions
+ *     read is gated by the strategy read rule, not only by tenant keying
+ *
+ * Sabotage witnesses (wave 19, `w19g3-gov-*`): forcing the gate on reds the gate-OFF case;
+ * keying the gate on `current === 'draft'` reds the every-origin case; dropping the
+ * terminal carve-out, the `paused`/`active` approved posture, the duplicate-card guard,
+ * the approve transition, the reject `decidedBy` stamp, the org-scope decide check, the
+ * list visibility filter, the GET `activationPending` projection, the kind/limit
+ * narrowing, validate-then-queue, both withdraw lanes, the revision dedupe and the
+ * versions read gate each red the case that names them.
+ *
+ * Honest ceiling: revisions are appended fire-and-forget (`void appendStrategyRevision`,
+ * strategyService.ts) with no hook to await. In-process they land inside the loopback
+ * HTTP turnaround; a lost race would red the exact counts below, never pass them.
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { bootPlanningApp, makeClient, enableToggle, uniqEmail, type Client } from './planningHarness.js';
+import type { PendingApproval } from '../src/host/approvalService.js';
+
+/** An approval as the list route serves it (the route strips `configurable`). */
+type ApprovalRow = Omit<PendingApproval, 'configurable'>;
 
 let BASE = '';
 let closeApp: () => Promise<void>;
@@ -45,10 +62,10 @@ async function ownerWithOrg(tenantId: string): Promise<{ owner: Client; userId: 
 }
 
 /** Find the pending strategy-activation approval for a strategy in the caller's inbox. */
-async function pendingActivation(c: Client, strategyId: string): Promise<any | undefined> {
+async function pendingActivation(c: Client, strategyId: string): Promise<ApprovalRow | undefined> {
   const inbox = await c.get(`${APPROVALS}?status=pending`);
   expect(inbox.status).toBe(200);
-  return (inbox.body.items as any[]).find((a) => a.kind === 'strategy-activation' && a.strategyId === strategyId);
+  return (inbox.body.items as ApprovalRow[]).find((a) => a.kind === 'strategy-activation' && a.strategyId === strategyId);
 }
 
 describe('strategy activation gate (ADR 0230 §B3)', () => {
@@ -83,13 +100,13 @@ describe('strategy activation gate (ADR 0230 §B3)', () => {
       // A second activation PATCH does not queue a duplicate.
       await owner.patch(`${S}/${s.id}`, { status: 'active' });
       const inbox = await owner.get(`${APPROVALS}?status=pending`);
-      const mine = (inbox.body.items as any[]).filter((a: any) => a.kind === 'strategy-activation' && a.strategyId === s.id);
+      const mine = (inbox.body.items as ApprovalRow[]).filter((a) => a.kind === 'strategy-activation' && a.strategyId === s.id);
       expect(mine).toHaveLength(1);
 
       // The org owner (host:members:manage) claims → the strategy activates.
       const appr = await pendingActivation(owner, s.id);
       expect(appr).toBeTruthy();
-      const claim = await owner.post(`${APPROVALS}/${appr.approvalId}/claim`);
+      const claim = await owner.post(`${APPROVALS}/${appr!.approvalId}/claim`);
       expect(claim.status, JSON.stringify(claim.body)).toBe(200);
       const after = await owner.get(`${S}/${s.id}`);
       expect(after.body.status).toBe('active');
@@ -107,7 +124,7 @@ describe('strategy activation gate (ADR 0230 §B3)', () => {
       await owner.patch(`${S}/${s.id}`, { status: 'active' });
       const appr = await pendingActivation(owner, s.id);
       expect(appr).toBeTruthy();
-      const rej = await owner.post(`${APPROVALS}/${appr.approvalId}/reject`);
+      const rej = await owner.post(`${APPROVALS}/${appr!.approvalId}/reject`);
       expect(rej.status, JSON.stringify(rej.body)).toBe(200);
       const after = await owner.get(`${S}/${s.id}`);
       expect(after.body.status).toBe('draft');
@@ -133,20 +150,20 @@ describe('strategy activation gate (ADR 0230 §B3)', () => {
       await owner.patch(`${S}/${s.id}`, { status: 'active' });
       const appr = await pendingActivation(owner, s.id);
       expect(appr).toBeTruthy();
-      const rej = await owner.post(`${APPROVALS}/${appr.approvalId}/reject`);
+      const rej = await owner.post(`${APPROVALS}/${appr!.approvalId}/reject`);
       expect(rej.status, JSON.stringify(rej.body)).toBe(200);
 
       // The decision must surface on the resolved-rejected list with WHO + WHEN.
       const rejected = await owner.get(`${APPROVALS}?status=rejected`);
       expect(rejected.status).toBe(200);
-      const row = (rejected.body.items as any[]).find(
-        (a: any) => a.kind === 'strategy-activation' && a.strategyId === s.id,
+      const row = (rejected.body.items as ApprovalRow[]).find(
+        (a) => a.kind === 'strategy-activation' && a.strategyId === s.id,
       );
-      expect(row, 'rejected strategy-activation must be listable').toBeTruthy();
+      if (!row) throw new Error('rejected strategy-activation must be listable');
       expect(row.status).toBe('rejected');
       expect(row.decidedBy, 'reject must record the deciding subject').toBe(userId);
       expect(typeof row.resolvedAt).toBe('string');
-      expect(Number.isNaN(Date.parse(row.resolvedAt))).toBe(false);
+      expect(Number.isNaN(Date.parse(row.resolvedAt ?? ''))).toBe(false);
     } finally {
       await setToggle('strategy-approval-gate', 'off');
     }
@@ -159,22 +176,30 @@ describe('strategy activation gate (ADR 0230 §B3)', () => {
     const { owner, orgId } = await ownerWithOrg(freshTenant());
     await setToggle('strategy-approval-gate', 'on');
     try {
-      const s = (await owner.post(S, { orgId, title: 'Narrowable' })).body;
-      await owner.patch(`${S}/${s.id}`, { status: 'active' });
-      const appr = await pendingActivation(owner, s.id);
-      await owner.post(`${APPROVALS}/${appr.approvalId}/reject`);
+      // TWO strategy-activation rows in this tenant, so `limit=1` has something to cap
+      // (with one row, ignoring `limit` returned the same single row — the case was vacuous).
+      const ids: string[] = [];
+      for (const title of ['Narrowable', 'Narrowable too']) {
+        const s = (await owner.post(S, { orgId, title })).body;
+        await owner.patch(`${S}/${s.id}`, { status: 'active' });
+        const appr = await pendingActivation(owner, s.id);
+        if (!appr) throw new Error(`nothing queued for ${title}`);
+        expect((await owner.post(`${APPROVALS}/${appr!.approvalId}/reject`)).status).toBe(200);
+        ids.push(s.id);
+      }
 
-      // kind filter: strategy-activation returns the row; a different kind excludes it.
+      // kind filter: strategy-activation returns both rows; a different kind excludes them.
       const sa = await owner.get(`${APPROVALS}?kind=strategy-activation`);
       expect(sa.status).toBe(200);
-      expect((sa.body.items as any[]).every((a) => a.kind === 'strategy-activation')).toBe(true);
-      expect((sa.body.items as any[]).some((a) => a.strategyId === s.id)).toBe(true);
+      const saItems = sa.body.items as ApprovalRow[];
+      expect(saItems.every((a) => a.kind === 'strategy-activation')).toBe(true);
+      expect(saItems.map((a) => a.strategyId).sort()).toEqual([...ids].sort());
       const cs = await owner.get(`${APPROVALS}?kind=commerce-spend`);
-      expect((cs.body.items as any[]).some((a) => a.strategyId === s.id)).toBe(false);
+      expect((cs.body.items as ApprovalRow[]).some((a) => a.strategyId !== undefined && ids.includes(a.strategyId))).toBe(false);
 
       // limit caps the returned count.
       const capped = await owner.get(`${APPROVALS}?kind=strategy-activation&limit=1`);
-      expect((capped.body.items as any[]).length).toBeLessThanOrEqual(1);
+      expect(capped.body.items as ApprovalRow[]).toHaveLength(1);
     } finally {
       await setToggle('strategy-approval-gate', 'off');
     }
@@ -195,7 +220,7 @@ describe('strategy activation gate (ADR 0230 §B3)', () => {
       // A NON-protected edit does not revert.
       await owner.patch(`${S}/${s.id}`, { status: 'active' });
       const appr = await pendingActivation(owner, s.id);
-      await owner.post(`${APPROVALS}/${appr.approvalId}/claim`);
+      await owner.post(`${APPROVALS}/${appr!.approvalId}/claim`);
       const r2 = await owner.patch(`${S}/${s.id}`, { summary: 'harmless note' });
       expect(r2.body.status).toBe('active');
     } finally {
@@ -247,7 +272,7 @@ describe('strategy activation gate (ADR 0230 §B3)', () => {
       expect(reactivate.body.activationPending).toBe(true);
       const appr = await pendingActivation(owner, s.id);
       expect(appr, 'no approval was ever queued for the re-activation').toBeTruthy();
-      const claim = await owner.post(`${APPROVALS}/${appr.approvalId}/claim`);
+      const claim = await owner.post(`${APPROVALS}/${appr!.approvalId}/claim`);
       expect(claim.status, JSON.stringify(claim.body)).toBe(200);
       expect((await owner.get(`${S}/${s.id}`)).body.status).toBe('active');
     } finally {
@@ -284,7 +309,7 @@ describe('strategy activation gate (ADR 0230 §B3)', () => {
         expect(r.body.activationPending, `${origin} → active queued nothing`).toBe(true);
         // "Approve what you see" still holds for a non-draft origin.
         const appr = await pendingActivation(owner, s.id);
-        expect((await owner.post(`${APPROVALS}/${appr.approvalId}/claim`)).status, `claim from ${origin}`).toBe(200);
+        expect((await owner.post(`${APPROVALS}/${appr!.approvalId}/claim`)).status, `claim from ${origin}`).toBe(200);
         expect((await owner.get(`${S}/${s.id}`)).body.status, `approving from ${origin} changed nothing`).toBe('active');
       } finally {
         await setToggle('strategy-approval-gate', 'off');
@@ -306,7 +331,7 @@ describe('strategy activation gate (ADR 0230 §B3)', () => {
       // List gating (review fix): a member without host:members:manage never
       // even sees the row (the content-publish MEDIUM-2 posture, reused).
       expect(await pendingActivation(editor, s.id)).toBeUndefined();
-      const denied = await editor.post(`${APPROVALS}/${appr.approvalId}/claim`);
+      const denied = await editor.post(`${APPROVALS}/${appr!.approvalId}/claim`);
       expect(denied.status, JSON.stringify(denied.body)).toBe(403);
       const after = await owner.get(`${S}/${s.id}`);
       expect(after.body.status).toBe('draft'); // untouched
@@ -318,7 +343,8 @@ describe('strategy activation gate (ADR 0230 §B3)', () => {
 
 describe('strategy versions (ADR 0230 §B4)', () => {
   it('appends deduped revisions and restores content only', async () => {
-    const { owner, orgId } = await ownerWithOrg(freshTenant());
+    const tenantId = freshTenant();
+    const { owner, orgId } = await ownerWithOrg(tenantId);
     const s = (await owner.post(S, { orgId, title: 'V1 title', summary: 'first' })).body;
 
     // Content change → new revision; a no-op patch → deduped (nothing appended).
@@ -326,7 +352,7 @@ describe('strategy versions (ADR 0230 §B4)', () => {
     await owner.patch(`${S}/${s.id}`, { title: 'V2 title' }); // identical content
     const versions = await owner.get(`${S}/${s.id}/versions`);
     expect(versions.status, JSON.stringify(versions.body)).toBe(200);
-    const list: any[] = versions.body.versions;
+    const list: Array<{ n: number; title: string }> = versions.body.versions;
     expect(list.length).toBe(2); // create + one distinct patch
     expect(list[0].n).toBe(1);
     expect(list[0].title).toBe('V1 title');
@@ -349,6 +375,15 @@ describe('strategy versions (ADR 0230 §B4)', () => {
     expect((await owner.get(`${S}/${s.id}/versions/99`)).status).toBe(404);
     const other = client(); await signup(other, freshTenant());
     expect((await other.get(`${S}/${s.id}/versions`)).status).toBe(404);
+
+    // Cross-TENANT alone cannot witness the read gate: the tenant-keyed lookup 404s it
+    // whatever `canReadStrategy` says (w19g3-gov-versions-readgate-bypass stayed green).
+    // A SAME-tenant peer and a user-private strategy reach the read rule itself.
+    const priv = (await owner.post(S, { orgId, title: 'Private plan', scope: 'user' })).body;
+    expect((await owner.get(`${S}/${priv.id}/versions`)).status, 'the owner reads their own history').toBe(200);
+    const peer = client(); await signup(peer, tenantId);
+    expect((await peer.get(`${S}/${priv.id}`)).status, 'matched: GET /:id refuses the peer').toBe(404);
+    expect((await peer.get(`${S}/${priv.id}/versions`)).status, 'a peer read a private strategy\'s history').toBe(404);
   });
 });
 
@@ -435,7 +470,7 @@ describe('ADR 0597 §Correction 4 — a protected edit under review cannot be ap
     expect(queued.status, JSON.stringify(queued.body)).toBe(200);
     const appr = await pendingActivation(owner, s.id);
     expect(appr, `nothing was queued from ${status}`).toBeTruthy();
-    return { owner, id: s.id, approvalId: appr.approvalId };
+    return { owner, id: s.id, approvalId: appr!.approvalId };
   }
 
   for (const origin of ['draft', 'archived', 'completed'] as const) {
@@ -508,7 +543,7 @@ describe('ADR 0597 §Correction 4 — a protected edit under review cannot be ap
       expect(await pendingActivation(owner, s.id),
         'a restore swapped the content under a live review and left it approvable').toBeUndefined();
       expect(restored.body.activationReviewClosed).toBe(true);
-      await owner.post(`${APPROVALS}/${appr.approvalId}/claim`);
+      await owner.post(`${APPROVALS}/${appr!.approvalId}/claim`);
       expect((await owner.get(`${S}/${s.id}`)).body.status,
         'restored-out-from-under content went live off a withdrawn review').not.toBe('active');
     } finally { await setToggle('strategy-approval-gate', 'off'); }

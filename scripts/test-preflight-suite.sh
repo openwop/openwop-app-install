@@ -35,6 +35,11 @@ FAKE_WT="$TMP/fake-worktree"
 declare -a PIDS=()
 LAST_PID=""   # macOS ships bash 3.2: no ${arr[-1]}
 fails=0
+# GATE-CLAIM-1: this harness runs INSIDE the gate, whose claim lives in the git
+# common dir every worktree here shares. No arm may reach it: the default is a
+# scratch dir, and an arm that needs a claim names its own.
+SAFE_CLAIM="$TMP/claim-default"
+export OPENWOP_PREFLIGHT_CLAIM_DIR="$SAFE_CLAIM"
 
 # Kill a process AND all its descendants (a waiter subshell → preflight --ci →
 # its own --wait child). `pkill -P` reaches one level only, and an orphaned
@@ -198,6 +203,39 @@ n_lines=$(printf '%s' "$out" | grep -c "$FAKE_WT" || true)
 for p in "${PIDS[@]:-}"; do [ -n "${p:-}" ] && kill "$p" 2>/dev/null; done
 for p in "${PIDS[@]:-}"; do [ -n "${p:-}" ] && wait "$p" 2>/dev/null; done
 PIDS=()
+
+# --- arm 1d (2026-10-15): a STOPPED suite is reported, never waited on --------
+# Slot 95r''' waited 68 min on a peer's SIGSTOPped probe while the probe waited
+# on the gate. Asserted by BLOCK, not by exit code: a real peer suite may be
+# running while this executes. Then SIGCONT, and the same process must compete
+# again, so the arm cannot pass by never seeing the fake at all.
+competing_block() { awk '/^  competing :/{on=1; next} /^  [a-z]/{on=0} on' <<<"$1"; }
+stopped_block()   { awk '/^  stopped   :/{on=1; next} /^  [a-z]/{on=0} on' <<<"$1"; }
+make_fake_vitest "$FAKE_WT" || { bad "fake vitest never became visible in ps"; exit 1; }
+STOPPED_PID="$LAST_PID"
+kill -STOP "$STOPPED_PID"
+for _ in $(seq 1 20); do ps -o stat= -p "$STOPPED_PID" | grep -q T && break; sleep 0.25; done
+out="$("$PF" 2>&1)"
+if grep -q "$FAKE_WT" <<<"$(competing_block "$out")"; then
+  bad "a STOPPED suite is still listed as competing (the 95r''' deadlock)"; printf '%s\n' "$out" | sed 's/^/      /'
+else
+  ok "a STOPPED suite in another worktree is not a competitor"
+fi
+if grep -q "$FAKE_WT" <<<"$(stopped_block "$out")"; then
+  ok "a STOPPED suite is still reported, on its own 'stopped' line"
+else
+  bad "a STOPPED suite vanished from the report"; printf '%s\n' "$out" | sed 's/^/      /'
+fi
+kill -CONT "$STOPPED_PID"
+for _ in $(seq 1 20); do ps -o stat= -p "$STOPPED_PID" | grep -q T || break; sleep 0.25; done
+out="$("$PF" 2>&1)"
+if grep -q "$FAKE_WT" <<<"$(competing_block "$out")"; then
+  ok "the same suite, CONTinued, competes again"
+else
+  bad "a CONTinued suite is not detected"; printf '%s\n' "$out" | sed 's/^/      /'
+fi
+kill "$STOPPED_PID" 2>/dev/null; wait "$STOPPED_PID" 2>/dev/null
+PIDS=()
 git -C "$ROOT" worktree remove --force "$FAKE_WT" 2>/dev/null
 
 # The same under /tmp (-> /private/tmp: lsof reports the realpath).
@@ -266,6 +304,23 @@ else
   bad "quiet branch did not corroborate with load"
   printf '%s\n' "$out" | sed 's/^/      /'
 fi
+
+# --- GATE-CLAIM-1: a claim is stale only on POSITIVE evidence -------------------
+# The arms above run with a `ps` that prints nothing. Before the fix, a live
+# claim whose start time could not be read was judged stale and DELETED, and
+# inside the gate that claim was the gate's own. A live claimant whose start
+# time `ps` cannot report must keep its claim; a live pid whose start time is
+# readable and DIFFERENT (a reused pid) must still be recovered.
+REG="$TMP/claim-reg"; sleep 300 & LIVE_R=$!; PIDS+=("$LIVE_R")
+mkdir -p "$REG"; printf '%s\t%s\t%s\n' "$LIVE_R" "$(/bin/ps -o lstart= -p "$LIVE_R" | sed 's/^ *//;s/ *$//')" "$(cd "$ROOT" && pwd -P)" > "$REG/info"
+PATH="$PSSTUB:$PATH" OPENWOP_PREFLIGHT_CLAIM_DIR="$REG" OPENWOP_PREFLIGHT_LOAD1=0.05 "$PF" >/dev/null 2>&1
+[ -f "$REG/info" ] && ok "a live claim whose start time ps cannot read is KEPT (not judged stale)" \
+                   || bad "a live claim was deleted because ps printed nothing for its claimant"
+printf '%s\t%s\t%s\n' "$LIVE_R" "Thu Jan  1 00:00:00 1970" "/elsewhere/peer-worktree" > "$REG/info"
+OPENWOP_PREFLIGHT_CLAIM_DIR="$REG" OPENWOP_PREFLIGHT_LOAD1=0.05 "$PF" --check >/dev/null 2>&1
+[ ! -d "$REG" ] && ok "...and a live pid with a DIFFERENT start time (reused pid) is still recovered" \
+                || bad "a reused pid's claim was not recovered"
+kill "$LIVE_R" 2>/dev/null; wait "$LIVE_R" 2>/dev/null; rm -rf "$REG"
 
 # The seam must not be able to hide a REAL competitor. Asserted STRUCTURALLY
 # rather than by timing: the detector must never read it. A runtime arm here
@@ -778,7 +833,7 @@ out="$(cd "$WT5" && "${DENV[@]}" bash "$WT5/scripts/preflight-suite.sh" 2>&1)"
 [ -z "$(foreign_block "$out")" ] && ok "...and an IDLE runner is below the default CPU floor: not counted" \
                                  || { bad "an idle Playwright runner was counted at the default floor"; printf '%s\n' "$out" | sed 's/^/      /' | tail -6; }
 kill "$LAST_PID" 2>/dev/null; wait "$LAST_PID" 2>/dev/null
-rm -rf "$CLAIM_TMP"; unset OPENWOP_PREFLIGHT_CLAIM_DIR
+rm -rf "$CLAIM_TMP"; export OPENWOP_PREFLIGHT_CLAIM_DIR="$SAFE_CLAIM"
 git -C "$ROOT" worktree remove --force "$WT4" 2>/dev/null; git -C "$ROOT" worktree remove --force "$WT5" 2>/dev/null
 
 # --- arm 3: the CLEAR path ------------------------------------------------------

@@ -33,14 +33,15 @@ describe('intelligence — budget optimizer (pure)', () => {
     expect(r.reallocations).toHaveLength(2);
     const meta = r.reallocations.find((x) => x.platform === 'meta')!;
     const google = r.reallocations.find((x) => x.platform === 'google')!;
-    expect(meta.changeAmount).toBeLessThan(0); // trimmed
-    expect(google.changeAmount).toBeGreaterThan(0); // scaled
-    expect(r.projectedRoasGain).toBeGreaterThan(0);
+    // shift = min(20% of 2000, 1000) = 400; gain = 400 x (4.0 - 1.5).
+    expect(meta.changeAmount).toBe(-400); // trimmed
+    expect(google.changeAmount).toBe(400); // scaled
+    expect(r.projectedRoasGain).toBe(1000);
     // R2 CI-SP-3 — the structured note the FE localizes (the prose mirror no
     // longer mints a '$').
     expect(r.noteCode).toBe('shift');
     expect(r.noteParams).toMatchObject({ from: 'meta', to: 'google' });
-    expect(r.noteParams!.shift).toBeGreaterThan(0);
+    expect(r.noteParams!.shift).toBe(400);
     expect(r.note).not.toContain('$');
   });
 
@@ -61,8 +62,8 @@ describe('intelligence — forecaster (pure)', () => {
     ];
     const [f] = forecastCampaigns(records);
     expect(f.creativeFatigue.detected).toBe(true);
-    expect(f.creativeFatigue.dropPercent).toBeGreaterThan(15);
-    expect(f.projection.projectedSpend).toBeGreaterThanOrEqual(0);
+    // impression-weighted halves: (.10+.09)/2 = .095 vs (.04+.03)/2 = .035.
+    expect(f.creativeFatigue.dropPercent).toBe(63.16);
   });
 
   it('R2 CI-SP-6: a multi-ad-set campaign projects per DAY, not per record', () => {
@@ -131,16 +132,18 @@ describe('campaign-intel — routes', () => {
     const call = async (method: string, path: string, body?: unknown) => {
       const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
       for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-      return { status: res.status, body: await res.json().catch(() => undefined) } as { status: number; body: any };
+      return { status: res.status, body: (await res.json().catch(() => undefined)) as unknown };
     };
     expect((await call('POST', '/host/openwop-app/test/login', { email: `ci-${Date.now()}-${n++}@acme.test` })).status).toBe(201);
     const org = await call('POST', '/host/openwop-app/orgs', { name: 'Acme' });
-    const orgId = org.body.orgId;
+    const orgId = (org.body as { orgId: string }).orgId;
     const csv = 'Platform,Campaign,Day,Cost,Impr.,Clicks,Conversions,Revenue\nMeta,A,2026-01-01,1000,10000,100,10,1500\nGoogle,B,2026-01-01,1000,10000,100,40,4000';
     expect((await call('POST', '/host/openwop-app/campaign-connectors/import', { orgId, csv })).status).toBe(201);
     const budget = await call('GET', `/host/openwop-app/campaign-intel/budget?orgId=${orgId}`);
     expect(budget.status).toBe(200);
-    expect(budget.body.reallocations.length).toBe(2);
-    expect(budget.body.projectedRoasGain).toBeGreaterThan(0);
+    const recommendation = budget.body as { reallocations: { platform: string; changeAmount: number }[]; projectedRoasGain: number };
+    // Meta 1000/1500 (ROAS 1.5), Google 1000/4000 (4.0): shift 400, gain 1000.
+    expect(recommendation.reallocations.map((x) => [x.platform, x.changeAmount])).toEqual([['meta', -400], ['google', 400]]);
+    expect(recommendation.projectedRoasGain).toBe(1000);
   });
 });

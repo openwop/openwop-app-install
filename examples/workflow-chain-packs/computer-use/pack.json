@@ -1,0 +1,100 @@
+{
+ "name": "core.openwop.workflows.computer-use",
+ "version": "1.0.1",
+ "kind": "workflow-chain",
+ "description": "Computer use (ADR 0418 / ADR 0894). `computer-use.run-task` starts a browser-agent session on the origins you allow, and every commit-class action it wants to take (a submit, a download, a new origin) stops the run and asks you. The approval is the only way a commit proceeds: the decide step raises it itself, so an edited chain cannot remove it.",
+ "author": "OpenWOP App",
+ "license": "Apache-2.0",
+ "keywords": [
+  "computer-use",
+  "browser-agent",
+  "hitl"
+ ],
+ "engines": {
+  "openwop": ">=1.0.0 <2.0.0"
+ },
+ "chains": [
+  {
+   "chainId": "computer-use.run-task",
+   "version": "1.0.1",
+   "label": "Computer use: run a browser task",
+   "description": "Runs a browser agent on a task, inside the origins you list. Reading and on-page input proceed on their own; each submit, download or move to a new origin pauses the run until you approve or reject that one action, and only you can answer. Rejecting, or cancelling the run, ends the session. Needs a browser provider set up by your operator; without one the run stops at the first step and says so. Sites that need you to sign in are not supported yet: the agent never enters credentials, and the run stops with a message when it reaches a sign-in step.",
+   "capabilities": [
+    "side-effectful"
+   ],
+   "parameters": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+     "orgId": {
+      "type": "string",
+      "default": "",
+      "description": "The id of the organization the session belongs to. You need permission to start runs there."
+     },
+     "task": {
+      "type": "string",
+      "default": "",
+      "description": "What the browser agent should do, in plain words."
+     },
+     "startUrl": {
+      "type": "string",
+      "default": "",
+      "description": "The https page to start on. It must be inside the allowed origins."
+     },
+     "allowedOrigins": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      },
+      "default": [],
+      "description": "The https origins the agent may reach. Anything else ends the session. Private and internal addresses are always refused."
+     }
+    }
+   },
+   "dag": {
+    "nodes": [
+     {
+      "id": "session",
+      "typeId": "feature.computer-use.nodes.task@1.0.0",
+      "name": "Start the browser session",
+      "position": {
+       "x": 0,
+       "y": 0
+      },
+      "config": {},
+      "inputs": {
+       "orgId": "{{params.orgId}}",
+       "task": "{{params.task}}",
+       "startUrl": "{{params.startUrl}}",
+       "allowedOrigins": "{{params.allowedOrigins}}"
+      }
+     },
+     {
+      "id": "decide",
+      "typeId": "feature.computer-use.nodes.decide@1.0.0",
+      "name": "Approve each commit",
+      "position": {
+       "x": 260,
+       "y": 0
+      },
+      "config": {},
+      "inputs": {}
+     }
+    ],
+    "edges": [
+     {
+      "from": "session.session",
+      "to": "decide.session",
+      "triggerRule": "all_success"
+     }
+    ]
+   },
+   "outputs": {
+    "session": {
+     "type": "object",
+     "description": "The session after the last decision: sessionId, status (completed / failed / denied / aborted), steps and any result or error."
+    }
+   }
+  }
+ ]
+}

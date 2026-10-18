@@ -51,6 +51,14 @@ describe('frontend-plugin-rpc-allowlist (RFC 0117 §3)', () => {
   it('rejects a method outside the closed host allowlist', async () => {
     const res = await dispatcherForTenant(TENANT)(req(1, 'host.deleteEverything'));
     expect(res).toMatchObject({ openwop: UI_PLUGIN_PROTOCOL, id: 1, ok: false, error: { code: 'method_not_allowed' } });
+    // `host.deleteEverything` has no handler either, so the line above also holds
+    // with the allowlist half removed. The allowlist on its own: a host method that
+    // HAS a handler, outside a plugin's narrowed allowlist (ADR 0840 per-plugin set),
+    // is refused — with a positive control that the same method runs when allowed.
+    const narrow = dispatcherForTenant(TENANT, {}, undefined, {}, new Set(['artifact.read']));
+    expect(await narrow(req(9, 'host.navigate', { to: '/' }))).toMatchObject({ id: 9, ok: false, error: { code: 'method_not_allowed' } });
+    const wide = dispatcherForTenant(TENANT, {}, undefined, {}, new Set(['host.navigate']));
+    expect(await wide(req(10, 'host.navigate', { to: '/' }))).toMatchObject({ id: 10, ok: true });
   });
   it('ignores a non-ui-plugin/1 message (null → host posts nothing)', async () => {
     expect(await dispatcherForTenant(TENANT)({ openwop: 'x', id: 1, type: 'request', method: 'artifact.read' })).toBeNull();
@@ -125,8 +133,10 @@ describe('frontend-plugin-artifact-concurrency (RFC 0117 §3)', () => {
     expect(res).toMatchObject({ ok: false, error: { code: 'artifact_not_found' } });
   });
 
-  it('does not leak a cross-tenant canvas (artifact_not_found, never artifact_conflict)', async () => {
+  it('does not leak a cross-tenant canvas (artifact_not_found, with an in-tenant positive control)', async () => {
     const id = await seedCanvas({ secret: 'x' }, 1);
+    // Positive control: the owning tenant reads it, so the refusal below is isolation, not absence.
+    expect(await dispatcherForTenant(TENANT)(req(11, 'artifact.read', { artifactId: id }))).toMatchObject({ ok: true, result: { payload: { secret: 'x' } } });
     const res = await dispatcherForTenant('other-tenant')(req(7, 'artifact.read', { artifactId: id }));
     expect(res).toMatchObject({ ok: false, error: { code: 'artifact_not_found' } });
   });

@@ -13,6 +13,11 @@
  *   - an escalation's record rides `node.suspended`, never interrupt data;
  *   - the carried payloads validate against the v2 corpus `$defs` after the v2
  *     projection, with `openwop-handoff` flat (not boxed under `vendor.openwop-app`).
+ *
+ * Sabotages that turn it red: any normalize cap/clamp/redaction removed;
+ * `namedTargetAgent` accepting any string; the hatch regex in
+ * `storage/vendorKeyCarry.ts` losing `openwop-`; the parallel stamp loop
+ * reordered; the record moved into interrupt `data` or off `node.suspended`.
  */
 import { describe, expect, it, beforeAll, afterEach } from 'vitest';
 import { join } from 'node:path';
@@ -41,7 +46,8 @@ import {
   type HandoffRecordV1,
 } from '../src/host/handoff/handoffRecord.js';
 import type { RunRecord } from '../src/types.js';
-import type { WorkflowDefinition } from '../src/executor/types.js';
+import type { NodeContext, WorkflowDefinition } from '../src/executor/types.js';
+import { createHostAdapterSuite, type HostAdapterSuite } from '../src/host/index.js';
 
 const storage: Storage = await openStorage('memory://');
 setEventLogBackend(storage);
@@ -56,9 +62,10 @@ const fakeExecuteRun = async (_s: Storage, childRun: RunRecord): Promise<unknown
   await storage.updateRun(childRun.runId, { status: 'completed', updatedAt: new Date().toISOString() });
   return undefined;
 };
-const fakeSuite = {
-  workflowCatalog: { getWorkflow: async (_id: string) => ({ definition: { variables: [], nodes: [], edges: [] } }) },
-} as never;
+const fakeSuite: HostAdapterSuite = {
+  ...createHostAdapterSuite({ storage }),
+  workflowCatalog: { getWorkflow: async (id: string) => ({ workflowId: id, definition: { workflowId: id, nodes: [] } }) },
+};
 
 function varsBag() {
   const m = new Map<string, unknown>();
@@ -73,8 +80,8 @@ async function insertParent(runId: string): Promise<void> {
   });
 }
 
-function dispatchCtx(runId: string, supervisor: Record<string, unknown>, config: Record<string, unknown> = {}): unknown {
-  return { runId, nodeId: 'dispatch-node', tenantId: TENANT, inputs: { input: supervisor }, config, configurable: {}, variables: varsBag() };
+function dispatchCtx(runId: string, supervisor: Record<string, unknown>, config: Record<string, unknown> = {}): NodeContext {
+  return { runId, nodeId: 'dispatch-node', tenantId: TENANT, inputs: { input: supervisor }, config, configurable: {}, variables: varsBag(), attempt: 1, secrets: {}, emit: async () => ({ eventId: 'e-test', sequence: 0 }) };
 }
 
 async function childRuns(parentRunId: string): Promise<RunRecord[]> {
@@ -171,7 +178,7 @@ describe('ADR 0829 D2 — core.dispatch (sequential)', () => {
 
   it('ON: stamps every child; emits agent.handoff only for the named agent, caused by its decided event', async () => {
     await insertParent('run-ho-on');
-    await getNodeRegistry().get('core.dispatch')!.execute(dispatchCtx('run-ho-on', supervisor) as never);
+    await getNodeRegistry().get('core.dispatch')!.execute(dispatchCtx('run-ho-on', supervisor));
     const events = await getEventLog().list('run-ho-on');
 
     const handoffs = events.filter((e) => e.type === 'agent.handoff');
@@ -198,7 +205,7 @@ describe('ADR 0829 D2 — core.dispatch (sequential)', () => {
   it('never infers a receiving agent: an invalid toAgentId emits no agent.handoff', async () => {
     await insertParent('run-ho-bad');
     const bad = { ...supervisor, handoffs: { 'wf-named': { toAgentId: 'x', intent: 'i' } } };
-    await getNodeRegistry().get('core.dispatch')!.execute(dispatchCtx('run-ho-bad', bad) as never);
+    await getNodeRegistry().get('core.dispatch')!.execute(dispatchCtx('run-ho-bad', bad));
     expect((await getEventLog().list('run-ho-bad')).filter((e) => e.type === 'agent.handoff')).toHaveLength(0);
   });
 });
@@ -214,7 +221,7 @@ describe('ADR 0829 D2 — core.dispatch (parallel wave)', () => {
         'wf-fast': { toAgentId: 'agent.fast', intent: 'fast one' },
       },
     };
-    await getNodeRegistry().get('core.dispatch')!.execute(dispatchCtx('run-ho-par', supervisor, { fanOutPolicy: 'parallel', joinPolicy: { mode: 'wait-all', onChildFailure: 'collect' } }) as never);
+    await getNodeRegistry().get('core.dispatch')!.execute(dispatchCtx('run-ho-par', supervisor, { fanOutPolicy: 'parallel', joinPolicy: { mode: 'wait-all', onChildFailure: 'collect' } }));
     const events = await getEventLog().list('run-ho-par');
     const order = events.filter((e) => e.type === 'agent.handoff').map((e) => (e.payload as { toAgentId: string }).toAgentId);
     expect(order).toEqual(['agent.slow', 'agent.fast']);
@@ -242,12 +249,15 @@ describe('ADR 0829 D2 — escalation rides node.suspended', () => {
   it('the node outcome carries the record beside, not inside, the interrupt data', async () => {
     enableFloor();
     await insertParent('run-ho-esc-node');
-    const res = await getNodeRegistry().get('core.dispatch')!.execute(dispatchCtx('run-ho-esc-node', lowConfidence) as never) as { status: string; interrupt?: { data: Record<string, unknown>; handoff?: HandoffRecordV1 } };
+    const res = await getNodeRegistry().get('core.dispatch')!.execute(dispatchCtx('run-ho-esc-node', lowConfidence));
     expect(res.status).toBe('suspended');
-    expect(res.interrupt!.data[HANDOFF_KEY]).toBeUndefined();
-    expect(res.interrupt!.handoff).toMatchObject({ intent: 'Draft the launch brief', openQuestions: ['Is the date fixed?'], producedBy: 'agent' });
-    expect(res.interrupt!.handoff!.confidence!.value).toBe(0.2);
-    expect(res.interrupt!.handoff!.confidence!.basis).toMatch(/below the escalation floor/);
+    if (res.status !== 'suspended') return;
+    const data = res.interrupt.data;
+    expect(data !== null && typeof data === 'object').toBe(true);
+    expect(Object.keys(data as object)).not.toContain(HANDOFF_KEY);
+    expect(res.interrupt.handoff).toMatchObject({ intent: 'Draft the launch brief', openQuestions: ['Is the date fixed?'], producedBy: 'agent' });
+    expect(res.interrupt.handoff?.confidence?.value).toBe(0.2);
+    expect(res.interrupt.handoff?.confidence?.basis).toMatch(/below the escalation floor/);
   });
 
   it('executeRun writes it onto node.suspended; interrupt.requested never carries it', async () => {
@@ -255,7 +265,7 @@ describe('ADR 0829 D2 — escalation rides node.suspended', () => {
       typeId: 'test.adr0829-escalate',
       version: '1.0.0',
       async execute(ctx) {
-        return getNodeRegistry().get('core.dispatch')!.execute({ ...ctx, inputs: { input: lowConfidence }, config: {}, variables: varsBag() } as never);
+        return getNodeRegistry().get('core.dispatch')!.execute({ ...ctx, inputs: { input: lowConfidence }, config: {}, variables: varsBag() });
       },
     });
     enableFloor();
@@ -275,6 +285,7 @@ describe('ADR 0829 D2 — escalation rides node.suspended', () => {
     expect(sp[HANDOFF_KEY]).toMatchObject({ v: 1, intent: 'Draft the launch brief' });
     expect(v2Violations('nodeSuspended', 'node.suspended', sp, 'run-ho-exec-on')).toEqual([]);
     const requested = on.find((e) => e.type === 'interrupt.requested');
+    expect(requested, 'no interrupt.requested — the negative below would be vacuous').toBeDefined();
     expect(JSON.stringify(requested?.payload ?? {})).not.toContain('Draft the launch brief');
   });
 });

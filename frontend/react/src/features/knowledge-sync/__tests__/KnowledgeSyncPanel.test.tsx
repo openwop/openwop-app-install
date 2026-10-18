@@ -8,6 +8,12 @@
  * failure alike, so the panel hid itself either way and a user whose Drive was
  * actively syncing was shown nothing. `null` now means 404 and only 404, so the
  * two are asserted separately below.
+ *
+ * Sabotage-witnessed (/grade-tests w23, 17 probes): the 404 self-hide, the failed-list
+ * and failed-connections arms, the no-connections hint, the collection filter, the
+ * create payload + SharePoint provider, the Sync-now sentence, the KSU-1/2/3/4/17 copy
+ * and controls, and the single announcing row (LOW 7). Fixtures are typed against the
+ * client's own `SyncSource` / `SyncRunResult` / `Connection` — no `as never`.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/react';
@@ -22,7 +28,9 @@ vi.mock('../../../ui/confirm.js', () => ({ confirm: vi.fn() }));
 
 import { KnowledgeSyncPanel } from '../KnowledgeSyncPanel.js';
 import { listSyncSources, createSyncSource, syncNow, setSyncIncludeMedia, setSyncPaused } from '../knowledgeSyncClient.js';
+import type { SyncSource, SyncRunResult } from '../knowledgeSyncClient.js';
 import { listConnections } from '../../connections/connectionsClient.js';
+import type { Connection } from '../../connections/connectionsClient.js';
 import { toast } from '../../../ui/toast.js';
 import { confirm } from '../../../ui/confirm.js';
 
@@ -35,7 +43,8 @@ const mPaused = vi.mocked(setSyncPaused);
 const mConfirm = vi.mocked(confirm);
 const mToast = vi.mocked(toast);
 
-const source = (over = {}) => ({ id: 's1', orgId: 'o1', connectionId: 'c1', provider: 'google', externalFolderId: 'FOLDER', collectionId: 'col1', cadence: 'daily', status: 'active', ...over } as never);
+const source = (over: Partial<SyncSource> = {}): SyncSource => ({ id: 's1', orgId: 'o1', connectionId: 'c1', provider: 'google', externalFolderId: 'FOLDER', collectionId: 'col1', cadence: 'daily', status: 'active', ...over });
+const conn = (over: Partial<Connection> = {}): Connection => ({ connectionId: 'c1', provider: 'google', kind: 'oauth2', displayName: 'My Drive', status: 'active', scopes: [], connectedAt: '2026-08-20T10:00:00.000Z', ...over });
 
 /**
  * A COMPLETE `SyncRunResult`, i.e. the shape the server actually returns.
@@ -53,24 +62,25 @@ const source = (over = {}) => ({ id: 's1', orgId: 'o1', connectionId: 'c1', prov
  * the sabotage pass found, and it is why the assertion below is on the whole
  * sentence instead.
  */
-const runResult = (over = {}) => ({ ingested: 2, pruned: 1, unchanged: 0, failed: 0, skippedMedia: 0, errors: [], ...over });
+const runResult = (over: Partial<SyncRunResult> = {}): SyncRunResult => ({ ingested: 2, pruned: 1, unchanged: 0, failed: 0, skippedMedia: 0, errors: [], ...over });
 
 beforeEach(() => {
   mList.mockReset(); mCreate.mockReset(); mSync.mockReset(); mConns.mockReset();
   mMedia.mockReset(); mPaused.mockReset(); mConfirm.mockReset();
   mToast.success.mockReset(); mToast.error.mockReset(); mToast.warning.mockReset();
-  mConns.mockResolvedValue([{ connectionId: 'c1', provider: 'google', displayName: 'My Drive' }] as never);
-  mMedia.mockResolvedValue(undefined as never);
-  mPaused.mockResolvedValue(undefined as never);
+  mConns.mockResolvedValue([conn()]);
+  mMedia.mockResolvedValue(source());
+  mPaused.mockResolvedValue(source());
 });
 afterEach(cleanup);
 
 describe('KnowledgeSyncPanel (ADR 0107)', () => {
   it('renders NOTHING when the feature is genuinely off (list resolves null = 404)', async () => {
-    mList.mockResolvedValue(null as never);
+    mList.mockResolvedValue(null);
     const { container } = render(<KnowledgeSyncPanel orgId="o1" collectionId="col1" />);
     await waitFor(() => expect(mList).toHaveBeenCalled());
-    await waitFor(() => expect(container.querySelector('.surface-card')).toBeNull());
+    // the panel renders NOTHING — not an empty card, not a skeleton
+    await waitFor(() => expect(container.innerHTML).toBe(''));
   });
 
   it('a FAILED list keeps the panel and says so — it does not hide', async () => {
@@ -78,14 +88,14 @@ describe('KnowledgeSyncPanel (ADR 0107)', () => {
     // actively syncing that no sync exists. Absence is a claim; a failed read
     // is not entitled to make it.
     mList.mockRejectedValue(new Error('upstream unavailable'));
-    const { container } = render(<KnowledgeSyncPanel orgId="o1" collectionId="col1" />);
+    render(<KnowledgeSyncPanel orgId="o1" collectionId="col1" />);
     await waitFor(() => expect(screen.getByText(/Could not load this collection/i)).toBeTruthy());
-    expect(container.querySelector('.surface-card')).not.toBeNull();
+    expect(screen.getByText('Drive sync')).toBeTruthy(); // the panel itself stays
     expect(screen.getByText(/upstream unavailable/)).toBeTruthy();
   });
 
   it('a FAILED connections read does not tell you to connect an account', async () => {
-    mList.mockResolvedValue([] as never);
+    mList.mockResolvedValue([]);
     mConns.mockRejectedValue(new Error('conn read failed'));
     render(<KnowledgeSyncPanel orgId="o1" collectionId="col1" />);
     // Settle on the panel heading, which renders in BOTH the fixed and the broken
@@ -100,24 +110,25 @@ describe('KnowledgeSyncPanel (ADR 0107)', () => {
 
   it('still shows the connect-an-account hint when the read SUCCEEDS with none', async () => {
     // The other arm — without this, the fix could degrade into "always error".
-    mList.mockResolvedValue([] as never);
-    mConns.mockResolvedValue([] as never);
+    mList.mockResolvedValue([]);
+    mConns.mockResolvedValue([]);
     render(<KnowledgeSyncPanel orgId="o1" collectionId="col1" />);
     await waitFor(() => expect(screen.getByText(/Connect a Google Drive or OneDrive account first/i)).toBeTruthy());
   });
 
   it('lists the collection’s sources and the add form', async () => {
-    mList.mockResolvedValue([source(), source({ id: 's2', collectionId: 'OTHER' })] as never);
+    mList.mockResolvedValue([source(), source({ id: 's2', collectionId: 'OTHER', externalFolderId: 'OTHER-FOLDER' })]);
     render(<KnowledgeSyncPanel orgId="o1" collectionId="col1" />);
-    await waitFor(() => expect(screen.getByText('Drive sync')).toBeTruthy());
     // only the col1 source shows (the OTHER-collection one is filtered out)
-    expect(screen.getByText('FOLDER')).toBeTruthy();
+    await waitFor(() => expect(screen.getByText('FOLDER')).toBeTruthy());
+    expect(screen.queryByText('OTHER-FOLDER')).toBeNull();
     await waitFor(() => expect(screen.getByText('My Drive')).toBeTruthy()); // connection option loaded
   });
 
   it('adds a sync source', async () => {
-    mList.mockResolvedValue([] as never);
-    mCreate.mockResolvedValue(source() as never);
+    // first load: empty; the reload after the create returns the new source
+    mList.mockResolvedValueOnce([]).mockResolvedValue([source({ externalFolderId: 'FOLDER42' })]);
+    mCreate.mockResolvedValue(source({ externalFolderId: 'FOLDER42' }));
     render(<KnowledgeSyncPanel orgId="o1" collectionId="col1" />);
     await waitFor(() => expect(screen.getByText('My Drive')).toBeTruthy());
     fireEvent.change(screen.getByLabelText('Drive account'), { target: { value: 'c1' } });
@@ -126,12 +137,15 @@ describe('KnowledgeSyncPanel (ADR 0107)', () => {
     await waitFor(() => expect(mCreate).toHaveBeenCalledWith(expect.objectContaining({
       orgId: 'o1', collectionId: 'col1', connectionId: 'c1', externalFolderId: 'FOLDER42', provider: 'google', cadence: 'daily',
     })));
+    // …and the user SEES it: the list reloads with the new source and the field clears
+    await waitFor(() => expect(screen.getByText('FOLDER42')).toBeTruthy());
+    expect((screen.getByLabelText('Folder ID') as HTMLInputElement).value).toBe('');
   });
 
   it('a Microsoft connection shows a Source selector; choosing SharePoint sends microsoft-sharepoint', async () => {
-    mConns.mockResolvedValue([{ connectionId: 'ms', provider: 'microsoft-graph', displayName: 'Work 365' }] as never);
-    mList.mockResolvedValue([] as never);
-    mCreate.mockResolvedValue(source() as never);
+    mConns.mockResolvedValue([conn({ connectionId: 'ms', provider: 'microsoft-graph', displayName: 'Work 365' })]);
+    mList.mockResolvedValue([]);
+    mCreate.mockResolvedValue(source());
     render(<KnowledgeSyncPanel orgId="o1" collectionId="col1" />);
     await waitFor(() => expect(screen.getByText('Work 365')).toBeTruthy());
     fireEvent.change(screen.getByLabelText('Drive account'), { target: { value: 'ms' } });
@@ -145,8 +159,8 @@ describe('KnowledgeSyncPanel (ADR 0107)', () => {
   });
 
   it('runs "Sync now"', async () => {
-    mList.mockResolvedValue([source()] as never);
-    mSync.mockResolvedValue({ result: runResult(), source: source() } as never);
+    mList.mockResolvedValue([source()]);
+    mSync.mockResolvedValue({ result: runResult(), source: source() });
     render(<KnowledgeSyncPanel orgId="o1" collectionId="col1" />);
     await waitFor(() => expect(screen.getByText('FOLDER')).toBeTruthy());
     fireEvent.click(screen.getByRole('button', { name: 'Sync now' }));
@@ -173,7 +187,7 @@ describe('ADR 0605 R1 — the Tier 6 deliverables, ratcheted', () => {
   it('KSU-1: a persisted lastRun renders what the last pass DID, including the deletions', async () => {
     mList.mockResolvedValue([source({
       lastRun: { at: '2026-08-20T10:00:00.000Z', ingested: 2, pruned: 3, unchanged: 5, failed: 1, skippedMedia: 4 },
-    })] as never);
+    })]);
     render(<KnowledgeSyncPanel orgId="o1" collectionId="col1" />);
     // "3 removed" is the number this whole ADR is about; a scheduled pass used to
     // report it nowhere in the product.
@@ -181,12 +195,12 @@ describe('ADR 0605 R1 — the Tier 6 deliverables, ratcheted', () => {
   });
 
   it('KSU-2: a source that has never run says so, and one that has shows when', async () => {
-    mList.mockResolvedValue([source()] as never);
+    mList.mockResolvedValue([source()]);
     const { unmount } = render(<KnowledgeSyncPanel orgId="o1" collectionId="col1" />);
     await waitFor(() => expect(screen.getByText(/Never synced yet/i)).toBeTruthy());
     unmount();
 
-    mList.mockResolvedValue([source({ lastSyncedAt: '2026-08-20T10:00:00.000Z' })] as never);
+    mList.mockResolvedValue([source({ lastSyncedAt: '2026-08-20T10:00:00.000Z' })]);
     render(<KnowledgeSyncPanel orgId="o1" collectionId="col1" />);
     await waitFor(() => expect(screen.getByText(/Last synced /i)).toBeTruthy());
     expect(screen.queryByText(/Never synced yet/i)).toBeNull();
@@ -195,7 +209,7 @@ describe('ADR 0605 R1 — the Tier 6 deliverables, ratcheted', () => {
   it('KSU-3: a REVOKED credential is not painted as a user pause', async () => {
     mList.mockResolvedValue([source({
       status: 'paused', pausedReason: 'connection-revoked', lastError: 'Connection revoked — reconnect to resume syncing.',
-    })] as never);
+    })]);
     render(<KnowledgeSyncPanel orgId="o1" collectionId="col1" />);
     await waitFor(() => expect(screen.getByText('Reconnect needed')).toBeTruthy());
     expect(screen.queryByText('Paused')).toBeNull();
@@ -214,7 +228,7 @@ describe('ADR 0605 R1 — the Tier 6 deliverables, ratcheted', () => {
   });
 
   it('KSU-3 (other arm): a pause the USER performed still reads as an ordinary pause', async () => {
-    mList.mockResolvedValue([source({ status: 'paused', pausedReason: 'user' })] as never);
+    mList.mockResolvedValue([source({ status: 'paused', pausedReason: 'user' })]);
     render(<KnowledgeSyncPanel orgId="o1" collectionId="col1" />);
     await waitFor(() => expect(screen.getByText('Paused')).toBeTruthy());
     expect(screen.queryByText('Reconnect needed')).toBeNull();
@@ -222,8 +236,8 @@ describe('ADR 0605 R1 — the Tier 6 deliverables, ratcheted', () => {
   });
 
   it('KSU-4: turning media OFF confirms first, and a REFUSED confirm changes nothing', async () => {
-    mList.mockResolvedValue([source()] as never); // includeMedia absent ⇒ on
-    mConfirm.mockResolvedValue(false as never);
+    mList.mockResolvedValue([source()]); // includeMedia absent ⇒ on
+    mConfirm.mockResolvedValue(false);
     render(<KnowledgeSyncPanel orgId="o1" collectionId="col1" />);
     await waitFor(() => expect(screen.getByText('FOLDER')).toBeTruthy());
     fireEvent.click(screen.getByRole('button', { name: /Media on/ }));
@@ -235,7 +249,7 @@ describe('ADR 0605 R1 — the Tier 6 deliverables, ratcheted', () => {
   });
 
   it('KSU-4 (other arm): turning media back ON is one click, correctly', async () => {
-    mList.mockResolvedValue([source({ includeMedia: false })] as never);
+    mList.mockResolvedValue([source({ includeMedia: false })]);
     render(<KnowledgeSyncPanel orgId="o1" collectionId="col1" />);
     await waitFor(() => expect(screen.getByText('FOLDER')).toBeTruthy());
     fireEvent.click(screen.getByRole('button', { name: /Media off/ }));
@@ -244,8 +258,8 @@ describe('ADR 0605 R1 — the Tier 6 deliverables, ratcheted', () => {
   });
 
   it('KSU-17: a pass that DROPPED documents is not announced as a clean one', async () => {
-    mList.mockResolvedValue([source()] as never);
-    mSync.mockResolvedValue({ result: runResult({ failed: 3, errors: ['ingest x: boom'] }), source: source() } as never);
+    mList.mockResolvedValue([source()]);
+    mSync.mockResolvedValue({ result: runResult({ failed: 3, errors: ['ingest x: boom'] }), source: source() });
     render(<KnowledgeSyncPanel orgId="o1" collectionId="col1" />);
     await waitFor(() => expect(screen.getByText('FOLDER')).toBeTruthy());
     fireEvent.click(screen.getByRole('button', { name: 'Sync now' }));
@@ -261,7 +275,7 @@ describe('ADR 0605 R1 — the Tier 6 deliverables, ratcheted', () => {
     mList.mockResolvedValue([
       source({ id: 'a', lastError: 'RAW-BLOB-A' }),
       source({ id: 'b', lastError: 'RAW-BLOB-B' }),
-    ] as never);
+    ]);
     const { container } = render(<KnowledgeSyncPanel orgId="o1" collectionId="col1" />);
     await waitFor(() => expect(screen.getByText('RAW-BLOB-A')).toBeTruthy());
     // `GlobalLiveRegion` lives at the app shell, not in this panel, so assert the

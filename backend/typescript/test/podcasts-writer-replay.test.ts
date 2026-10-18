@@ -7,6 +7,18 @@
  * replay/fork/retry leaked a duplicate outline AND transcript Document; and the pack asserted
  * the opposite in three places, one of which (`pack.json`'s description) named the synthesizer
  * specifically — the node with no recorded-result path at all.
+ *
+ * Sabotage witnesses (w21 g2): `mix` dropped from MANIFEST_FAST_PATH_SERVED (leg 1); a
+ * node's `capabilities` key removed (leg 2); a podcasts pattern added to the hand
+ * side-effect list (leg 4); `classifyNodeReach` never reports invocation-log (leg 5);
+ * `ctx.runId` folded into the Document mint (legs 6 + 8); `ownerSubject` dropped (leg 7);
+ * the old replay sentence restored in pack.json (leg 9). Leg 8 is a deliberate SOURCE
+ * tripwire (spelling-level); leg 6 carries the behaviour.
+ *
+ * The old leg 3 (pack + node version literals, and the feature.ts pin in lockstep) was cut
+ * in /grade-tests w21: the literals churned on every bump, and the lockstep claim is
+ * `required-packs-pin-parity.test.ts` › `podcasts: every requiredPacks pin matches disk`
+ * (probe w21g2-rep-leg3-pin-COVER red).
  */
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
@@ -18,7 +30,7 @@ import { isSideEffectingNode } from '../src/executor/sideEffects.js';
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 const P = 'feature.podcasts.nodes.';
 const PACK = JSON.parse(readFileSync(join(REPO, 'packs', 'feature.podcasts.nodes', 'pack.json'), 'utf8')) as {
-  version: string; description: string; nodes: { typeId: string; version: string; capabilities?: string[] }[];
+  description: string; nodes: { typeId: string; capabilities?: string[] }[];
 };
 
 describe('ADR 0679 D1 — the servable writers are served', () => {
@@ -33,16 +45,6 @@ describe('ADR 0679 D1 — the servable writers are served', () => {
   it('leg 2: every node declares a capabilities array — absence must be a decision', () => {
     expect(PACK.nodes.length).toBe(5);
     for (const n of PACK.nodes) expect(Array.isArray(n.capabilities), n.typeId).toBe(true);
-  });
-
-  it('leg 3: the pack and the two changed nodes moved version together', () => {
-    expect(PACK.version).toBe('1.1.1');
-    const by = new Map(PACK.nodes.map((n) => [n.typeId, n]));
-    expect(by.get(P + 'mix')?.version).toBe('1.3.0');
-    expect(by.get(P + 'synthesize')?.version).toBe('1.2.0');
-    const feature = readFileSync(join(REPO, 'backend', 'typescript', 'src', 'features', 'podcasts', 'feature.ts'), 'utf8');
-    expect(feature, 'the pin moves in lockstep or replay resolvability breaks (RFC 0076)')
-      .toContain(`{ name: 'feature.podcasts.nodes', version: '${PACK.version}' }`);
   });
 });
 

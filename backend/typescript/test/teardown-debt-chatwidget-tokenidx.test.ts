@@ -20,6 +20,9 @@
  *     proves the `${tenantId}:` trailing-colon guard.
  *  2. WIRING — assert `feature.ts` registers the hook (comment-stripped, so a
  *     commented-out registration still fails — the "ratchet counts comments" class).
+ *     BOTH comment forms are stripped: line-only stripping let a `/* … *\/`-commented
+ *     registration pass (wave 26 probe). CEILING: no exported reader of the hook
+ *     registry exists, so a source check is the honest limit short of a createApp boot.
  */
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -76,6 +79,7 @@ describe('teardown-debt chat-widget token index — reachable via the tenant pur
 
   it('feature.ts wires the purge hook (comment-stripped match)', () => {
     const featureSrc = readFileSync(join(__dirname, '..', 'src', 'features', 'chat-widget', 'feature.ts'), 'utf8')
+      .replace(/\/\*[\s\S]*?\*\//g, '')
       .split('\n')
       .map((line) => line.replace(/\/\/.*$/, ''))
       .join('\n');

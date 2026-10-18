@@ -12,17 +12,13 @@
  * 55 frontend tests still passed.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, cleanup, waitFor } from '@testing-library/react';
+import { render, screen, cleanup } from '@testing-library/react';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 
-const { getOrder, listOrderRefunds, CommerceApiError } = vi.hoisted(() => {
-  class CommerceApiError extends Error {
-    status: number;
-    constructor(status: number) { super(`http ${status}`); this.status = status; }
-  }
-  return { getOrder: vi.fn(), listOrderRefunds: vi.fn(), CommerceApiError };
-});
-vi.mock('../commerceClient.js', () => ({ getOrder, listOrderRefunds, CommerceApiError }));
+const { getOrder, listOrderRefunds } = vi.hoisted(() => ({ getOrder: vi.fn(), listOrderRefunds: vi.fn() }));
+// Spread the REAL module so the product's `instanceof CommerceApiError` is the shipped
+// class. The old fake took `(status)`; the real one is `(message, code, details?, status?)`.
+vi.mock('../commerceClient.js', async (orig) => ({ ...(await orig<Record<string, unknown>>()), getOrder, listOrderRefunds }));
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (k: string) => k }) }));
 vi.mock('../../../i18n/useFormat.js', () => ({ useFormat: () => ({ date: (d: string) => d, currency: (n: number) => String(n) }) }));
 vi.mock('../commerceShared.js', async (orig) => ({
@@ -34,9 +30,12 @@ const access = vi.hoisted(() => ({ value: { enabled: true, loading: false, varia
 vi.mock('../../../featureToggles/FeatureAccessContext.js', () => ({ useFeatureAccess: () => access.value }));
 
 import { OrderDetailPage } from '../OrderDetailPage.js';
+import { type Order, type OrderRefund } from '../commerceClient.js';
 
-const refunded = {
-  orderId: 'ord_1', status: 'refunded', fulfillmentStatus: 'unfulfilled', createdAt: '2026-08-10',
+// Typed: `fulfillmentStatus: 'unfulfilled'` (not in the union) and a missing
+// `createdBy` used to ride an untyped literal.
+const refunded: Order = {
+  orderId: 'ord_1', status: 'refunded', fulfillmentStatus: 'pending', createdAt: '2026-08-10', createdBy: 'user-1',
   currency: 'USD', items: [{ productId: 'p1', name: 'Widget', quantity: 1, unitPrice: 100 }],
   subtotal: 100, discount: 0, total: 100, refundedAmount: 100,
 };
@@ -64,32 +63,35 @@ describe('CM-P2-B3 — a refund that returned no money says so', () => {
   });
 
   it('does NOT label a real Stripe refund as state-only', async () => {
-    getOrder.mockResolvedValue({ ...refunded, refundProvider: 'stripe', refundId: 're_1' });
+    getOrder.mockResolvedValue({ ...refunded, refundProvider: 'stripe' });
     renderOrder();
-    await waitFor(() => expect(getOrder).toHaveBeenCalled());
+    // Positive control: the summary INCLUDING the refunded row has rendered. Waiting
+    // only for `getOrder` to be called asserted the absence in the loading state.
+    expect(await screen.findByText('refundedLabel')).toBeTruthy();
     expect(screen.queryByText('refundStateOnly')).toBeNull();
   });
 
   it('claims NOTHING for a pre-R2 row whose lane was never recorded', async () => {
     getOrder.mockResolvedValue(refunded); // no refundProvider at all
     renderOrder();
-    await waitFor(() => expect(getOrder).toHaveBeenCalled());
+    expect(await screen.findByText('refundedLabel')).toBeTruthy();
     // Absence is unknown, not "no money returned" — asserting either way would lie.
     expect(screen.queryByText('refundStateOnly')).toBeNull();
   });
 
   it('marks a state-only entry in the partial-refund ledger too', async () => {
     getOrder.mockResolvedValue({ ...refunded, status: 'partially_refunded', refundedAmount: 40 });
-    listOrderRefunds.mockResolvedValue([
-      { refundLedgerId: 'rl_1', orderId: 'ord_1', refundKey: 'k1', amount: 40, currency: 'USD', provider: 'none', createdAt: '2026-08-10' },
-    ]);
+    const row: OrderRefund = { refundLedgerId: 'rl_1', orderId: 'ord_1', refundKey: 'k1', amount: 40, currency: 'USD', provider: 'none', createdAt: '2026-08-10' };
+    listOrderRefunds.mockResolvedValue([row]);
     renderOrder();
     expect(await screen.findByText('refundStateOnly')).toBeTruthy();
+    // Exactly one: the LEDGER row's chip (the order itself has no refundProvider).
+    expect(screen.getAllByText('refundStateOnly')).toHaveLength(1);
   });
 });
 
 describe('ADR 0615 — a claim that never completed must not read as a completed refund', () => {
-  const row = {
+  const row: Omit<OrderRefund, 'provider'> = {
     refundLedgerId: 'rl_9', orderId: 'ord_1', refundKey: 'k9', amount: 100,
     currency: 'USD', createdAt: '2026-08-31',
   };

@@ -16,7 +16,11 @@ import { ALL_DASHBOARD_TILES, defaultLayoutFrom } from '../allTiles.js';
 
 /** ADR 0377 pin — tile tier mirrors the nav tier of the page each tile links to
  *  (verified against chrome/features.tsx + each feature's routes.tsx). A change
- *  here must follow a change to the PAGE's tier, never drift independently. */
+ *  here must follow a change to the PAGE's tier, never drift independently.
+ *  A deliberate CHANGE-DETECTOR: a tile def carries no link path, so the page's
+ *  tier cannot be read from a source of truth here. What it catches: a tile whose
+ *  tier drifts to 'workspace' while its page stays admin-tier — a member then sees
+ *  admin data and links that dead-end (probe w50g1-cat-tier). */
 const TIER_BY_TILE: Record<string, 'workspace' | 'admin'> = {
   // ADR 0844 — workspace-tier; the run-linking tiles drop their links for a
   // non-admin rather than point at the admin-tier `/runs` pages. Issue 4511: Run
@@ -44,8 +48,8 @@ const TIER_BY_TILE: Record<string, 'workspace' | 'admin'> = {
   'team-workload': 'admin',
   // ADR 0377 Wave 4 — admin-ops health
   'connection-health': 'admin', 'plugin-health': 'admin',
-  // ADR 0452 — KickTodo home tiles (participant pages are workspace-tier)
-  'kicktodo-today': 'workspace', 'kicktodo-progress': 'workspace',
+  // ADR 0452 — KickTodo home tiles (participant pages are workspace-tier);
+  // 'kicktodo-today' / 'kicktodo-progress' are pinned in the first row above.
   'personal-note': 'workspace',
   'mentions-inbox': 'workspace',
 };
@@ -100,11 +104,10 @@ describe('dashboard catalog invariants', () => {
     expect(todos!.owningFeatureToggle).toBeUndefined(); // /boards is core, not toggled
   });
 
-
-
   it('defaultLayoutFrom mirrors each tile default', () => {
+    // Every row, every field — not just the first. (defaultLayoutFrom has no
+    // product caller today; recorded as a grade-code row, the case stays.)
     const layout = defaultLayoutFrom(ALL_DASHBOARD_TILES);
-    expect(layout).toHaveLength(ALL_DASHBOARD_TILES.length);
-    expect(layout[0]).toMatchObject({ id: ALL_DASHBOARD_TILES[0]!.id, enabled: ALL_DASHBOARD_TILES[0]!.defaultEnabled });
+    expect(layout).toEqual(ALL_DASHBOARD_TILES.map((t) => ({ id: t.id, order: t.defaultOrder, size: t.defaultSize, enabled: t.defaultEnabled })));
   });
 });

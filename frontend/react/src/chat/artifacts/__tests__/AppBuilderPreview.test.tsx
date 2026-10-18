@@ -7,14 +7,19 @@
  * themeColors only reach the CSS variable when they are strict 6-hex.
  */
 import { describe, it, expect, afterEach } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { render, cleanup } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { AppBuilderContentView, AppScreenPreview, APP_BUILDER_ICON_NAMES } from '../AppBuilderPreview.js';
 
 afterEach(cleanup);
 
-/** The catalog's 43 types with minimal valid props — keep in step with
- *  backend componentCatalog.ts (its own parity test pins the other side). */
+/** The catalog's 45 types with minimal valid props. The TYPE SET is pinned to the
+ *  backend SSoT (componentCatalog.ts) by the "pinned to the backend catalog" case
+ *  below, so a catalog addition reds here until this list (and the renderer)
+ *  catch up. (Grade-tests w45: this list had drifted to 43 — statCard and table
+ *  were missing, so dropping their renderer arms stayed green.) */
 const ALL_TYPES: Record<string, unknown>[] = [
   { type: 'stack', props: { direction: 'vertical' }, children: [{ type: 'text', props: { text: 'in-stack' } }] },
   { type: 'grid', props: { columns: 2 }, children: [{ type: 'text', props: { text: 'in-grid' } }] },
@@ -59,18 +64,31 @@ const ALL_TYPES: Record<string, unknown>[] = [
   { type: 'breadcrumb', props: { items: 'Home,Shop,Item' } },
   { type: 'pagination', props: { pages: 3, active: 2 } },
   { type: 'list', children: [{ type: 'text', props: { text: 'row' } }] },
+  { type: 'statCard', props: { label: 'MRR', value: '$12k', delta: '+4%' } },
+  { type: 'table', props: { columns: 'Region,ARR', rows: 'EMEA,4.2M' } },
 ];
+
+const REPO = join(import.meta.dirname, '..', '..', '..', '..', '..', '..');
+const CATALOG_SRC = join(REPO, 'backend/typescript/src/features/app-builder/componentCatalog.ts');
 
 const doc = (extra: Record<string, unknown> = {}, components: unknown = ALL_TYPES) => JSON.stringify({
   name: 'Parity', screens: [{ id: 'home', name: 'Home', components }, { id: 'other', name: 'Other' }], ...extra,
 });
 
 describe('AppBuilderContentView catalog parity', () => {
-  it('renders all 43 catalog types with ZERO unknown placeholders', () => {
+  it('the parity list is pinned to the backend catalog SSoT (same 45 type names)', () => {
+    const backendTypes = [...readFileSync(CATALOG_SRC, 'utf8').matchAll(/\{ type: '([A-Za-z]+)'/g)].map((m) => m[1]).sort();
+    expect(backendTypes.length).toBe(45);
+    expect(ALL_TYPES.map((n) => n.type).sort()).toEqual(backendTypes);
+  });
+  it('renders all 45 catalog types with ZERO unknown placeholders', () => {
     const { container } = render(<MemoryRouter><AppBuilderContentView content={doc()} /></MemoryRouter>);
     expect(container.querySelectorAll('.canvas-ab__unknown').length).toBe(0);
     expect(container.querySelectorAll('.canvas-ab__stepper li').length).toBe(3);
-    expect(container.textContent).toContain('Ada Lovelace'.split(' ').map((w) => w[0]).join(''));
+    expect(container.textContent).toContain('AL'); // avatar initials of 'Ada Lovelace'
+    expect(container.querySelector('.canvas-ab__stat-value')?.textContent).toBe('$12k');
+    expect([...container.querySelectorAll('.canvas-ab__table th')].map((th) => th.textContent)).toEqual(['Region', 'ARR']);
+    expect([...container.querySelectorAll('.canvas-ab__table td')].map((td) => td.textContent)).toEqual(['EMEA', '4.2M']);
   });
   it('an unknown type renders the inert placeholder', () => {
     const { container } = render(<MemoryRouter><AppBuilderContentView content={doc({}, [{ type: 'holo-deck' }])} /></MemoryRouter>);

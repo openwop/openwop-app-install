@@ -1,11 +1,12 @@
 /**
  * CRM-UX-18 — the board's keyboard sensor snaps Left/Right to the neighbouring
  * COLUMN (what `dndInstructions` promises), not dnd-kit's 25 px default.
- * Pure-function coverage of the getter with a hand-built sensor context; the
+ * Pure-function coverage of the getter with a hand-built, fully typed sensor
+ * context (columns AND card droppables, as the board registers them); the
  * end-to-end press sequence lives in the CRM deals-board test.
  */
 import { describe, it, expect } from 'vitest';
-import type { ClientRect, UniqueIdentifier } from '@dnd-kit/core';
+import type { ClientRect, DroppableContainer, SensorContext, UniqueIdentifier } from '@dnd-kit/core';
 import { columnSnapCoordinateGetter } from '../columnKeyboardCoordinates.js';
 
 const rect = (left: number, top: number, width: number, height: number): ClientRect =>
@@ -17,25 +18,55 @@ const columns: Array<[UniqueIdentifier, ClientRect]> = [
   ['s2', rect(300, 0, 280, 600)],
   ['s3', rect(600, 0, 280, 300)], // a short column
 ];
+/** Production shape: every CARD is a droppable too (`kanban-card-target:<id>`,
+ *  `data.kind:'card'`), registered beside the columns. The getter must skip it —
+ *  this one sits inside s1, so counting it as a "column" would make it the
+ *  ArrowRight target from s1. */
+const CARD_DROPPABLE: [UniqueIdentifier, ClientRect] = ['kanban-card-target:c1', rect(10, 40, 260, 80)];
 
-function context(overId: UniqueIdentifier | null, collisionRect: ClientRect) {
-  const droppableRects = new Map(columns);
-  const droppableContainers = {
-    getEnabled: () => columns.map(([id]) => ({ id, disabled: false })),
-  };
-  return {
-    context: {
-      over: overId === null ? null : { id: overId },
-      collisionRect,
-      droppableRects,
-      droppableContainers,
-    },
-    currentCoordinates: { x: collisionRect.left, y: collisionRect.top },
-    active: 'card',
-  } as unknown as Parameters<typeof columnSnapCoordinateGetter>[1];
+const container = (id: UniqueIdentifier, kind: 'column' | 'card', r: ClientRect): DroppableContainer => ({
+  id, key: id, disabled: false,
+  data: { current: { kind } },
+  node: { current: null },
+  rect: { current: r },
+});
+
+/** A typed stand-in for dnd-kit's (unexported) `DroppableContainersMap`. */
+class Containers extends Map<UniqueIdentifier, DroppableContainer> {
+  override get(id: UniqueIdentifier | null | undefined): DroppableContainer | undefined {
+    return id === null || id === undefined ? undefined : super.get(id);
+  }
+  toArray(): DroppableContainer[] { return [...this.values()]; }
+  getEnabled(): DroppableContainer[] { return this.toArray().filter((c) => !c.disabled); }
+  getNodeFor(): HTMLElement | undefined { return undefined; }
 }
 
-const key = (code: string) => ({ code } as KeyboardEvent);
+function context(overId: UniqueIdentifier | null, collisionRect: ClientRect): Parameters<typeof columnSnapCoordinateGetter>[1] {
+  const all: Array<[UniqueIdentifier, ClientRect, 'column' | 'card']> = [
+    ...columns.map(([id, r]): [UniqueIdentifier, ClientRect, 'column'] => [id, r, 'column']),
+    [CARD_DROPPABLE[0], CARD_DROPPABLE[1], 'card'],
+  ];
+  const droppableContainers = new Containers(all.map(([id, r, kind]) => [id, container(id, kind, r)]));
+  const overRect = overId === null ? undefined : columns.find(([id]) => id === overId)?.[1];
+  const ctx: SensorContext = {
+    activatorEvent: null,
+    active: null,
+    activeNode: null,
+    collisionRect,
+    collisions: null,
+    draggableNodes: new Map(),
+    draggingNode: null,
+    draggingNodeRect: null,
+    droppableRects: new Map(all.map(([id, r]) => [id, r])),
+    droppableContainers,
+    over: overId === null || !overRect ? null : { id: overId, rect: overRect, disabled: false, data: { current: { kind: 'column' } } },
+    scrollableAncestors: [],
+    scrollAdjustedTranslate: null,
+  };
+  return { context: ctx, currentCoordinates: { x: collisionRect.left, y: collisionRect.top }, active: 'card' };
+}
+
+const key = (code: string): KeyboardEvent => new KeyboardEvent('keydown', { code });
 
 describe('columnSnapCoordinateGetter', () => {
   it('ArrowRight from column 1 lands INSIDE column 2 in one press (not +25 px)', () => {

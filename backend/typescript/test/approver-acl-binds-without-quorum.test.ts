@@ -18,6 +18,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import { __assertTokenQuorumVoteForTests as assertTokenQuorumVote } from '../src/routes/interrupts.js';
+import { signVoterBinding } from '../src/host/interruptVoterBinding.js';
 import type { InterruptRecord } from '../src/types.js';
 import { openStorage } from '../src/storage/index.js';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
@@ -36,9 +37,20 @@ describe('ADR 0677 D1 — a non-empty ACL binds on the token lane without a quor
       .rejects.toThrowError(/not an eligible approver/i);
   });
 
-  it('leg 2: a voter ON the list passes — the ACL admits, it does not merely refuse', async () => {
+  it('leg 2: a voter ON the list passes WITH its emailed binding — the ACL admits, it does not merely refuse', async () => {
     const it_ = gate({ approverRefs: ['urn:conformance:listed-approver'] });
-    await expect(assertTokenQuorumVote(it_, { voter: 'urn:conformance:listed-approver' }, true)).resolves.toBeUndefined();
+    const voterSig = signVoterBinding('tok-1', 'urn:conformance:listed-approver');
+    await expect(assertTokenQuorumVote(it_, { voter: 'urn:conformance:listed-approver', voterSig }, true)).resolves.toBeUndefined();
+  });
+
+  it('leg 2b (ADR 0899 D1, ISWF-23): a listed voter WITHOUT its binding is refused — a name is a claim, not a proof', async () => {
+    // This leg used to be leg 2's assertion: an unsigned listed voter passed on a
+    // single-approver gate, so any token holder could resolve it AS the approver.
+    const it_ = gate({ approverRefs: ['urn:conformance:listed-approver'] });
+    await expect(assertTokenQuorumVote(it_, { voter: 'urn:conformance:listed-approver' }, true))
+      .rejects.toThrowError(/signed per-approver link/i);
+    await expect(assertTokenQuorumVote(it_, { voter: 'urn:conformance:listed-approver', voterSig: signVoterBinding('tok-1', 'urn:someone:else') }, true))
+      .rejects.toThrowError(/signed per-approver link/i);
   });
 
   it('leg 3 (CONFORMANCE GUARD): an EMPTY list is still an open gate — any voter admissible', async () => {
@@ -68,11 +80,11 @@ describe('ADR 0677 D1 — a non-empty ACL binds on the token lane without a quor
       .rejects.toThrowError(/requires an authenticated approver or a valid interrupt token/i);
   });
 
-  it('leg 7: quorum gates are UNCHANGED — the HMAC binding still applies at threshold > 1', async () => {
-    // The per-recipient HMAC's rationale is that a SHARED emailed token let one recipient
-    // cast ALL listed approvers' votes — a multi-approver concern. ADR 0677 deliberately
-    // leaves it scoped to quorum gates; widening it would 403 legitimately-emailed
-    // single-approver links. Filed as `ISWF-23`.
+  it('leg 7: quorum gates — the HMAC binding applies at threshold > 1 too', async () => {
+    // ADR 0677 scoped the per-recipient HMAC to quorum gates on the premise that widening
+    // it would 403 legitimately-emailed single-approver links. That premise was false
+    // (every emailed link is signed for its recipient), and ADR 0899 D1 widened it to
+    // every declared ACL (leg 2b). `ISWF-23`, closed.
     const it_ = gate({ requiredApprovals: 2, approverRefs: ['urn:listed'] });
     await expect(assertTokenQuorumVote(it_, { voter: 'urn:listed', voterSig: 'bogus' }, true))
       .rejects.toThrowError(/signed per-approver link/i);

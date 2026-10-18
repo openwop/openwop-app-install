@@ -18,6 +18,12 @@
  *       re-queue finished work; a loop-owned claim whose row never appeared is
  *       restored only after the grace window; a legacy card is never touched.
  *
+ * Witnessed (w37 probes w37g1-hb-*): the lane table, the claim move into the
+ * working lane + its version CAS, the no-lane / KSCD-10 cause, the WorkItem skip,
+ * the release on a failed start, the terminal status stamp, the retention and
+ * grace guards, the failed-run restore, the fresh-read precondition, KSCD-1/2,
+ * and the approved-dispatch move + human-wins precondition.
+ *
  * @see docs/adr/0774-kanban-stack-claim-integrity.md
  */
 

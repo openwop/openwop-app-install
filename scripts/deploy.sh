@@ -406,6 +406,35 @@ if [ "$DO_BACKEND" -eq 1 ]; then
       node -e 'setTimeout(() => {}, Number(process.argv[1]) * 1000)' "$HOLD_S"
     fi
   fi
+  # ── the evidence-cut lock, read AGAIN right before the build ──────────────
+  # preflight-deploy.sh (Gate 8) reads it once, at the start. The certify run and
+  # the hour hold above can take 25 min between that read and this build, and a
+  # cut that starts in that gap was never seen. MEASURED 2026-10-14: a deploy
+  # passed preflight before 21:09Z, held to 21:15Z, and built while cut 82c
+  # (lock taken 21:09Z) was still running. The bundle came out sound only
+  # because the new revision was created 40 s after the bundle was written.
+  # A held lock is a short, task-owned hold (one ~10 min cut), so WAIT for it
+  # rather than fail. An unreadable lock still refuses, as Gate 8 does.
+  if command -v gcloud >/dev/null 2>&1 && [ -n "${OPENWOP_CERT_BUNDLE_ORIGIN:-}" ]; then
+    # shellcheck source=lib/cut-lock.sh
+    . "$ROOT/scripts/lib/cut-lock.sh"
+    CUT_LOCK_URL="${OPENWOP_CERT_BUNDLE_ORIGIN%/}/.cut-lock.json"
+    cut_waited=0
+    while :; do
+      lock_line=$(cut_lock_state "$CUT_LOCK_URL" --project "$OPENWOP_DEPLOY_PROJECT" --account "$OPENWOP_DEPLOY_ACCOUNT")
+      case "${lock_line%% *}" in
+        absent|expired) break ;;
+        held)
+          if [ "$cut_waited" -eq 0 ]; then
+            echo; echo "▶ hold: an evidence cut started after preflight — waiting for it to finish before the build (${lock_line#* })"
+          fi
+          cut_waited=$((cut_waited + 1))
+          sleep "${OPENWOP_DEPLOY_CUT_POLL_S:-30}" ;;
+        *) echo "deploy: the cut lock could not be read (${lock_line#* }) — refusing to guess; that is not the same as a cut in progress." >&2; exit 1 ;;
+      esac
+    done
+    if [ "$cut_waited" -gt 0 ]; then echo "  cut lock released — building now"; fi
+  fi
   # ── ADR 0802 — remember what serves NOW, to retire it after verify ──────────
   # Read before the deploy: afterwards the same field names the new revision.
   PREV_REVISION=""; PREV_IMAGE=""

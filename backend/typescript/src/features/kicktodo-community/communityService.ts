@@ -15,7 +15,7 @@ import { randomUUID } from 'node:crypto';
 import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { registerSubjectEraser } from '../../host/subjectErasure.js';
 import { createLogger } from '../../observability/logger.js';
-import { createCommunityApproval, getApproval } from '../../host/approvalService.js';
+import { createCommunityApproval, getApproval, resolveApproval, type PendingApproval } from '../../host/approvalService.js';
 import { getEntitlement } from '../kicktodo-commerce/entitlementService.js';
 import { listEnrollmentsFor } from '../kicktodo-core/enrollmentService.js';
 import { progressFor } from '../kicktodo-core/progressService.js';
@@ -85,6 +85,16 @@ const reviews = new DurableCollection<ChallengeReview>(
 
 const nowIso = (): string => new Date().toISOString();
 
+const reviewKey = (r: Pick<ChallengeReview, 'tenantId' | 'challengeId' | 'reviewerSubject'>): string =>
+  `${r.tenantId}::${r.challengeId}::${r.reviewerSubject}`;
+
+/** KTCOM-Y2 — every review write is a compare-and-swap against the row it was
+ *  derived from, retried from a fresh read this many times. A blind put from a
+ *  stale read could drop a `reviewEntityId` minted in between, and the kernel
+ *  entity published under that id was then orphaned (still public, unreachable
+ *  from the write-model, never pulled down by a flag or an erasure). */
+const REVIEW_CAS_ATTEMPTS = 8;
+
 export class HandleTakenError extends Error {
   constructor(handle: string) {
     super(`The handle \`${handle}\` is already taken.`);
@@ -99,6 +109,18 @@ export class ReviewProofError extends Error {
 export class NotFoundError extends Error {
   constructor() {
     super('Not found.');
+  }
+}
+/** KTCOM-Y2 — a review row kept changing under concurrent writers. */
+export class ReviewConflictError extends Error {
+  constructor() {
+    super('This review is being changed concurrently; retry.');
+  }
+}
+/** A-18 — the caller's profile kept changing under concurrent edits. */
+export class ProfileConflictError extends Error {
+  constructor() {
+    super('This profile is being changed concurrently; retry.');
   }
 }
 export class SeparationOfDutiesError extends Error {
@@ -166,39 +188,60 @@ export async function upsertProfile(
   const links = validateLinks(input.links);
   const localizations = validateProfileLocalizations(input.localizations);
 
-  const existing = await profiles.get(`${tenantId}::${creatorSubject}`);
-  if (!existing || existing.handle !== handle) {
-    // Claim the handle atomically; release the old one only after the claim.
-    const claimed = await handleIndex.compareAndSwap(null, { tenantId, handleLower: handle, creatorSubject });
-    if (!claimed) {
-      const holder = await handleIndex.get(`${tenantId}::${handle}`);
-      if (holder?.creatorSubject !== creatorSubject) throw new HandleTakenError(handle);
+  // A-18 (upsertProfile race) — the profile write is a CAS on the row this call
+  // read. Two concurrent edits to different handles each claimed their handle and
+  // blind-put the profile: the later write won, and the earlier call's handle stayed
+  // claimed for a profile that no longer used it — a handle nobody could take again.
+  // Now the loser releases the handle it claimed and retries on the fresh row.
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const existing = await profiles.get(`${tenantId}::${creatorSubject}`);
+    let freshlyClaimed = false;
+    if (!existing || existing.handle !== handle) {
+      // Claim the handle atomically; release the old one only after the claim.
+      freshlyClaimed = await handleIndex.compareAndSwap(null, { tenantId, handleLower: handle, creatorSubject });
+      if (!freshlyClaimed) {
+        const holder = await handleIndex.get(`${tenantId}::${handle}`);
+        if (holder?.creatorSubject !== creatorSubject) throw new HandleTakenError(handle);
+      }
     }
-  }
 
-  const profile: CreatorProfile = {
-    tenantId,
-    creatorSubject,
-    handle,
-    displayName,
-    bio: (input.bio ?? '').slice(0, 1000),
-    links,
-    ...(localizations ? { localizations } : {}),
-    state: 'draft',
-    createdAt: existing?.createdAt ?? nowIso(),
-    updatedAt: nowIso(),
-  };
-  await profiles.put(profile);
-  // Release the OLD handle only after the profile write commits (grade-pass
-  // KTD-2: a mid-way failure must fail CLOSED — old handle kept, never a
-  // profile pointing at a released index).
-  if (existing && existing.handle !== handle) await handleIndex.delete(`${tenantId}::${existing.handle}`);
+    const profile: CreatorProfile = {
+      tenantId,
+      creatorSubject,
+      handle,
+      displayName,
+      bio: (input.bio ?? '').slice(0, 1000),
+      links,
+      ...(localizations ? { localizations } : {}),
+      state: 'draft',
+      createdAt: existing?.createdAt ?? nowIso(),
+      updatedAt: nowIso(),
+    };
+    if (!(await profiles.compareAndSwap(existing ?? null, profile))) {
+      // Lost to a concurrent edit. Give back a handle this attempt claimed unless the
+      // row that won is using it, then re-read and try again.
+      if (freshlyClaimed) {
+        const now = await profiles.get(`${tenantId}::${creatorSubject}`);
+        if (now?.handle !== handle) await handleIndex.delete(`${tenantId}::${handle}`);
+      }
+      continue;
+    }
+    // Release the OLD handle only after the profile write commits (grade-pass
+    // KTD-2: a mid-way failure must fail CLOSED — old handle kept, never a
+    // profile pointing at a released index).
+    if (existing && existing.handle !== handle) await handleIndex.delete(`${tenantId}::${existing.handle}`);
+    return await afterProfileWrite(profile);
+  }
+  throw new ProfileConflictError();
+}
+
+async function afterProfileWrite(profile: CreatorProfile): Promise<CreatorProfile> {
   // ADR 0453 — an edit resets to `draft`, so a previously-approved profile is
   // pulled DOWN from the public kernel projection until it is re-approved.
   await syncCreatorProfileProjection(profile);
   // GC-2 — durable mutation. Log the PUBLIC handle + state; never the subject or
   // displayName (free text).
-  log.info('kicktodo_profile_upserted', { tenantId, handle, state: profile.state });
+  log.info('kicktodo_profile_upserted', { tenantId: profile.tenantId, handle: profile.handle, state: profile.state });
   return profile;
 }
 
@@ -211,6 +254,12 @@ export async function submitProfile(tenantId: string, creatorSubject: string): P
   const p = await profiles.get(`${tenantId}::${creatorSubject}`);
   if (!p) throw new NotFoundError();
   if (p.state === 'approved') return p;
+  // Code-grade KTY-4 — a re-submit while a decision is still open returns the
+  // pending profile instead of minting a second approval card for the same profile.
+  if (p.state === 'pending' && p.approvalId) {
+    const open = await getApproval(p.approvalId);
+    if (open && open.tenantId === tenantId && open.status === 'pending') return p;
+  }
   const approval = await createCommunityApproval({
     tenantId,
     kind: 'community-profile',
@@ -247,6 +296,10 @@ export async function applyProfileDecision(
   // profile while the approval was still pending).
   const expected = approve ? 'approved' : 'rejected';
   if (approval.status !== expected) throw new SeparationOfDutiesError();
+  return applyProfileOutcome(p, approve);
+}
+
+async function applyProfileOutcome(p: CreatorProfile, approve: boolean): Promise<CreatorProfile> {
   const next: CreatorProfile = { ...p, state: approve ? 'approved' : 'draft', updatedAt: nowIso() };
   await profiles.put(next);
   // ADR 0453 — publish the public kernel projection on approval; a rejection
@@ -254,6 +307,43 @@ export async function applyProfileDecision(
   await syncCreatorProfileProjection(next);
   log.info('kicktodo_profile_decided', { handle: p.handle, approved: approve });
   return next;
+}
+
+type SignoffResult = { approval: PendingApproval; changed: boolean } | null;
+
+/**
+ * Code-grade KTY-1 — the `community-profile` decision handler for the GENERIC lane
+ * (inbox card, approvals routes, decide-by-email). Separation of duties is checked
+ * BEFORE the approval resolves; the CAS resolve is the lock (only the winner applies);
+ * then the outcome lands on the profile it is about. An approval that no longer
+ * matches the profile's open decision (superseded) resolves without touching the
+ * profile. If applying fails after the resolve, `POST /profile/decide` re-applies it
+ * (it reads the resolved status) and the projection reconciler heals the read side.
+ */
+export async function decideCommunityProfileApproval(
+  tenantId: string,
+  approvalId: string,
+  outcome: 'approved' | 'rejected',
+  opts: { decidedByUserId?: string; note?: string },
+): Promise<SignoffResult> {
+  const approval = await getApproval(approvalId);
+  if (!approval || approval.tenantId !== tenantId || approval.kind !== 'community-profile' || !approval.community) return null;
+  if (approval.status !== 'pending') return { approval, changed: false };
+  const decidedBy = opts.decidedByUserId;
+  const creatorSubject = approval.community.refId;
+  if (!decidedBy || decidedBy === creatorSubject || decidedBy === approval.community.submittedBy) {
+    log.warn('kicktodo_profile_decision_denied', { tenantId, reason: 'separation-of-duties' });
+    throw new SeparationOfDutiesError();
+  }
+  const lock = await resolveApproval(approvalId, { status: outcome, decidedBy, ...(opts.note !== undefined ? { note: opts.note } : {}) });
+  if (!lock?.changed) return lock;
+  const p = await profiles.get(`${tenantId}::${creatorSubject}`);
+  if (p && p.state === 'pending' && p.approvalId === approvalId) {
+    await applyProfileOutcome(p, outcome === 'approved');
+  } else {
+    log.info('kicktodo_profile_decision_superseded', { tenantId, approvalId });
+  }
+  return lock;
 }
 
 /**
@@ -289,15 +379,15 @@ export async function reconcileCreatorProfileProjections(): Promise<number> {
  */
 export async function reconcileReviewProjections(tenantId?: string): Promise<number> {
   let reconciled = 0;
-  for (const r of await reviews.list()) {
+  // KTY-5 (KickTodo wave 4C) — rows are keyed `${tenantId}::…`, so a tenant-scoped
+  // reconcile reads that tenant's slice; it scanned every tenant's reviews before.
+  // The no-argument call is the boot-time all-tenant straggler sweep, unchanged.
+  const rows = tenantId ? await reviews.listByPrefix(`${tenantId}::`) : await reviews.list();
+  for (const r of rows) {
     if (tenantId && r.tenantId !== tenantId) continue;
     try {
-      let row = r;
-      if (!row.reviewEntityId) {
-        // Backfill the random id (never subject-derived) + persist it as the SoT.
-        row = { ...r, reviewEntityId: `rev:${randomUUID()}`, updatedAt: nowIso() };
-        await reviews.put(row);
-      }
+      const row = r.reviewEntityId ? r : await backfillReviewEntityId(r);
+      if (!row) continue; // erased between the list and the backfill — nothing to project
       await syncReviewProjection(row);
       reconciled += 1;
     } catch (err) {
@@ -306,6 +396,25 @@ export async function reconcileReviewProjections(tenantId?: string): Promise<num
   }
   log.info('kicktodo_review_projections_reconciled', { reconciled });
   return reconciled;
+}
+
+/** Backfill the random id (never subject-derived) + persist it as the SoT.
+ *
+ *  KTCOM-Y2 — insert-if-unset by CAS. Two concurrent reconcile runs (or a run racing
+ *  `putReview`) used to each mint their own `rev:<uuid>` and blind-`put` it; the
+ *  loser's id was overwritten after it had already published a kernel entity under
+ *  it, which nothing could then reach to pull down. Now a lost swap re-reads and
+ *  ADOPTS the id the winner minted. Null when the row is gone. */
+async function backfillReviewEntityId(start: ChallengeReview): Promise<ChallengeReview | null> {
+  let cur: ChallengeReview | null = start;
+  for (let attempt = 0; attempt < REVIEW_CAS_ATTEMPTS; attempt++) {
+    if (!cur) return null;
+    if (cur.reviewEntityId) return cur;
+    const next: ChallengeReview = { ...cur, reviewEntityId: `rev:${randomUUID()}`, updatedAt: nowIso() };
+    if (await reviews.compareAndSwap(cur, next)) return next;
+    cur = await reviews.get(reviewKey(cur));
+  }
+  throw new ReviewConflictError();
 }
 
 /** Public projection: approved profiles only; closed field set.
@@ -320,10 +429,16 @@ export async function publicProfileByHandle(
   handle: string,
   localePref?: { explicit?: string; acceptLanguage?: string },
 ): Promise<{ handle: string; displayName: string; bio: string; links: string[] } | null> {
-  const idx = await handleIndex.get(`${tenantId}::${handle.toLowerCase()}`);
+  const handleLower = handle.toLowerCase();
+  const idx = await handleIndex.get(`${tenantId}::${handleLower}`);
   if (!idx) return null;
   const p = await profiles.get(`${tenantId}::${idx.creatorSubject}`);
-  if (!p || p.state !== 'approved') return null;
+  // KTCOM-Y1 — the index row is a CLAIM, the profile is the truth. A handle change
+  // releases the old row only after the profile write (KTD-2: fail closed), so a
+  // failed release leaves the old handle pointing at a profile that has moved on.
+  // Without this check that released handle kept serving the profile (and would
+  // keep serving it to whoever later reads the stale row).
+  if (!p || p.state !== 'approved' || p.handle !== handleLower) return null;
   let displayName = p.displayName;
   let bio = p.bio;
   try {
@@ -372,23 +487,29 @@ export async function putReview(
   if (!challenge) throw new NotFoundError();
   const provenance = await reviewProof(tenantId, reviewerSubject, input.challengeId, input.challengeVersion);
   if (!provenance) throw new ReviewProofError();
-  const existing = await reviews.get(`${tenantId}::${input.challengeId}::${reviewerSubject}`);
-  const review: ChallengeReview = {
-    tenantId,
-    challengeId: input.challengeId,
-    challengeVersion: input.challengeVersion,
-    reviewerSubject,
-    rating: input.rating,
-    ...(input.body ? { body: input.body.slice(0, 2000) } : {}),
-    state: existing?.state === 'removed' ? 'removed' : 'visible', // removal sticks through edits
-    provenance,
-    // ADR 0465 P1 — mint a RANDOM, non-subject-derived kernel entity id on the
-    // FIRST write (preserve it on re-put). Never derived from `reviewerSubject`.
-    reviewEntityId: existing?.reviewEntityId ?? `rev:${randomUUID()}`,
-    createdAt: existing?.createdAt ?? nowIso(),
-    updatedAt: nowIso(),
-  };
-  await reviews.put(review);
+  // KTCOM-Y2 — swapped against the row the review was derived from, so a
+  // concurrent reconcile's id mint (or moderation) is re-read, never overwritten.
+  let review: ChallengeReview | null = null;
+  for (let attempt = 0; attempt < REVIEW_CAS_ATTEMPTS && !review; attempt++) {
+    const existing = await reviews.get(`${tenantId}::${input.challengeId}::${reviewerSubject}`);
+    const next: ChallengeReview = {
+      tenantId,
+      challengeId: input.challengeId,
+      challengeVersion: input.challengeVersion,
+      reviewerSubject,
+      rating: input.rating,
+      ...(input.body ? { body: input.body.slice(0, 2000) } : {}),
+      state: existing?.state === 'removed' ? 'removed' : 'visible', // removal sticks through edits
+      provenance,
+      // ADR 0465 P1 — mint a RANDOM, non-subject-derived kernel entity id on the
+      // FIRST write (preserve it on re-put). Never derived from `reviewerSubject`.
+      reviewEntityId: existing?.reviewEntityId ?? `rev:${randomUUID()}`,
+      createdAt: existing?.createdAt ?? nowIso(),
+      updatedAt: nowIso(),
+    };
+    if (await reviews.compareAndSwap(existing, next)) review = next;
+  }
+  if (!review) throw new ReviewConflictError();
   // ADR 0465 — publish the anonymous public kernel projection when visible; a
   // `removed` re-put takes the delete branch. Best-effort (never fails the write).
   await syncReviewProjection(review);
@@ -449,8 +570,17 @@ export async function flagReview(
     refId: `${challengeId}::${reviewerSubject}`,
     submittedBy: flaggerSubject,
   });
-  const flagged: ChallengeReview = { ...r, state: 'flagged', flagApprovalId: approval.approvalId, updatedAt: nowIso() };
-  await reviews.put(flagged);
+  // KTCOM-Y2 — CAS from the row read; a lost swap re-reads (keeping any id minted
+  // meanwhile) and re-checks the review is still visible.
+  let cur: ChallengeReview | null = r;
+  let flagged: ChallengeReview | null = null;
+  for (let attempt = 0; attempt < REVIEW_CAS_ATTEMPTS && !flagged; attempt++) {
+    if (!cur || cur.state !== 'visible') throw new NotFoundError();
+    const next: ChallengeReview = { ...cur, state: 'flagged', flagApprovalId: approval.approvalId, updatedAt: nowIso() };
+    if (await reviews.compareAndSwap(cur, next)) flagged = next;
+    else cur = await reviews.get(reviewKey(cur));
+  }
+  if (!flagged) throw new ReviewConflictError();
   // ADR 0465 — a flagged review is hidden → pull the public kernel projection down.
   await syncReviewProjection(flagged);
   log.info('kicktodo_review_flagged', { tenantId, challengeId, approvalId: approval.approvalId });
@@ -463,15 +593,76 @@ export async function resolveReviewFlag(
   challengeId: string,
   reviewerSubject: string,
   remove: boolean,
+  decidedBy: string,
 ): Promise<ChallengeReview> {
   const r = await reviews.get(`${tenantId}::${challengeId}::${reviewerSubject}`);
   if (!r || r.state !== 'flagged') throw new NotFoundError();
-  const next: ChallengeReview = { ...r, state: remove ? 'removed' : 'visible', updatedAt: nowIso() };
-  await reviews.put(next);
+  // Code-grade KTY-2 — the same rules as `applyProfileDecision` (COM-1): the review's
+  // own author cannot moderate it, and this route only APPLIES a decision the
+  // `community-review` approval already holds; it never mints one.
+  if (decidedBy === reviewerSubject) {
+    log.warn('kicktodo_review_flag_decision_denied', { tenantId, reason: 'separation-of-duties' });
+    throw new SeparationOfDutiesError();
+  }
+  if (r.flagApprovalId) {
+    const approval = await getApproval(r.flagApprovalId);
+    if (!approval || approval.tenantId !== tenantId) throw new NotFoundError();
+    if (approval.status !== (remove ? 'approved' : 'rejected')) throw new SeparationOfDutiesError();
+  }
+  return applyReviewFlagOutcome(r, remove);
+}
+
+async function applyReviewFlagOutcome(r: ChallengeReview, remove: boolean): Promise<ChallengeReview> {
+  const { tenantId, challengeId } = r;
+  // KTCOM-Y2 — CAS from the row read; a lost swap re-reads and applies only while
+  // the SAME flag is still open on it.
+  let cur: ChallengeReview | null = r;
+  let next: ChallengeReview | null = null;
+  for (let attempt = 0; attempt < REVIEW_CAS_ATTEMPTS && !next; attempt++) {
+    if (!cur || cur.state !== 'flagged' || cur.flagApprovalId !== r.flagApprovalId) throw new NotFoundError();
+    const candidate: ChallengeReview = { ...cur, state: remove ? 'removed' : 'visible', updatedAt: nowIso() };
+    if (await reviews.compareAndSwap(cur, candidate)) next = candidate;
+    else cur = await reviews.get(reviewKey(cur));
+  }
+  if (!next) throw new ReviewConflictError();
   // ADR 0465 — remove → delete the projection; restore → re-publish it.
   await syncReviewProjection(next);
   log.info('kicktodo_review_flag_resolved', { tenantId, challengeId, outcome: next.state });
   return next;
+}
+
+/**
+ * Code-grade KTY-1 — the `community-review` decision handler for the generic lane.
+ * Approving the flag REMOVES the review; rejecting it RESTORES the review. The
+ * flagger and the review's author are both refused (separation of duties), checked
+ * before the approval resolves.
+ */
+export async function decideCommunityReviewApproval(
+  tenantId: string,
+  approvalId: string,
+  outcome: 'approved' | 'rejected',
+  opts: { decidedByUserId?: string; note?: string },
+): Promise<SignoffResult> {
+  const approval = await getApproval(approvalId);
+  if (!approval || approval.tenantId !== tenantId || approval.kind !== 'community-review' || !approval.community) return null;
+  if (approval.status !== 'pending') return { approval, changed: false };
+  const decidedBy = opts.decidedByUserId;
+  const sep = approval.community.refId.lastIndexOf('::');
+  const challengeId = sep > 0 ? approval.community.refId.slice(0, sep) : '';
+  const reviewerSubject = sep > 0 ? approval.community.refId.slice(sep + 2) : '';
+  if (!decidedBy || decidedBy === approval.community.submittedBy || decidedBy === reviewerSubject) {
+    log.warn('kicktodo_review_flag_decision_denied', { tenantId, reason: 'separation-of-duties' });
+    throw new SeparationOfDutiesError();
+  }
+  const lock = await resolveApproval(approvalId, { status: outcome, decidedBy, ...(opts.note !== undefined ? { note: opts.note } : {}) });
+  if (!lock?.changed) return lock;
+  const r = challengeId ? await reviews.get(`${tenantId}::${challengeId}::${reviewerSubject}`) : undefined;
+  if (r && r.state === 'flagged' && r.flagApprovalId === approvalId) {
+    await applyReviewFlagOutcome(r, outcome === 'approved');
+  } else {
+    log.info('kicktodo_review_flag_decision_superseded', { tenantId, approvalId });
+  }
+  return lock;
 }
 
 /** Counts-only creator analytics (ADR 0426 P3): the caller's PRODUCT-LINKED
@@ -507,8 +698,8 @@ export async function creatorAnalytics(
 //   - the profile row, its handle-index claim (freeing the handle), and the public
 //     content-kernel projection (via a `draft`-state sync → the unpublish path, so the
 //     erased person can't linger publicly readable);
-//   - every review the subject authored (keyed by `reviewerSubject`; no subject prefix, so
-//     scan the tenant's reviews — the revokeConsent/comments scan precedent).
+//   - every review the subject authored (keyed `${tenantId}::${challengeId}::${reviewerSubject}`;
+//     no subject prefix, so read the tenant's slice by prefix — KTY-5).
 // (Flags carry no separate row — a flag lives on the review as `flagApprovalId` — so there
 // is nothing flag-shaped to erase here.) Tenant-scoped, idempotent, no notifications.
 export async function eraseCommunitySubject(tenantId: string, subjectKey: string): Promise<void> {
@@ -521,7 +712,8 @@ export async function eraseCommunitySubject(tenantId: string, subjectKey: string
     // takes the delete branch). Never leave an erased subject publicly readable.
     await syncCreatorProfileProjection({ ...profile, state: 'draft' });
   }
-  for (const r of await reviews.list()) {
+  // KTY-5 — the tenant's slice (keys are `${tenantId}::…`), not every tenant's reviews.
+  for (const r of await reviews.listByPrefix(`${tenantId}::`)) {
     if (r.tenantId === tenantId && r.reviewerSubject === subjectKey) {
       await reviews.delete(`${r.tenantId}::${r.challengeId}::${r.reviewerSubject}`);
       // ADR 0465 — the erasure must pull the public kernel projection down too, so

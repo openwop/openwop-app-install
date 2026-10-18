@@ -308,6 +308,16 @@ export interface FeatureBundleInfo {
   features: BundleFeatureInfo[];
 }
 
+/** ADR 0892 Phase B — where a bundle stands in the caller's workspace. `enabled`:
+ *  on here; `available`: the plan covers it, so Enable will succeed; `locked`: a
+ *  feature it needs is not covered by the plan (`missing`) or is switched off on
+ *  the host (`killed`). */
+export interface BundleActivation {
+  status: 'enabled' | 'available' | 'locked';
+  missing?: string[];
+  killed?: string[];
+}
+
 export interface FeatureBundleCatalog {
   available: boolean;
   /** ADR 0820 §7 UI — the ordered store goal-group ids. Optional: an older backend omits it. */
@@ -317,11 +327,56 @@ export interface FeatureBundleCatalog {
   standalone: BundleFeatureInfo[];
   /** The always-included substrate — read-only (P4). */
   core: BundleFeatureInfo[];
+  /** ADR 0892 Phase B — per-bundle state for THIS workspace. Absent from an older
+   *  backend, and when the server could not read it (`activationDegraded`). */
+  activation?: Record<string, BundleActivation>;
+  activationDegraded?: boolean;
+  /** ADR 0892 Phase B D1 — may the caller turn bundles on/off here (computed by the
+   *  same predicate the write routes enforce). */
+  viewer?: { canManageBundles: boolean };
 }
 
 export async function fetchFeatureBundles(): Promise<FeatureBundleCatalog> {
   const res = await fetch(`${base}/feature-bundles`, fetchOpts({ headers: authedHeaders() }));
   return asJson<FeatureBundleCatalog>(res, 'fetchFeatureBundles');
+}
+
+/** The typed refusal of a bundle enable/disable (ADR 0892 Phase B): `ids` are the
+ *  features it names (missing from the plan, killed, or still-dependent) and
+ *  `bundles` the bundles that would grant the missing ones. */
+export class BundleActivationError extends ApiError {
+  readonly code: 'bundle_not_entitled' | 'feature_killed' | 'disable_blocked' | 'other';
+  readonly ids: string[];
+  readonly bundles: string[];
+  constructor(message: string, status: number, code: BundleActivationError['code'], ids: string[], bundles: string[], serverMessage?: string) {
+    super(message, status, serverMessage, code === 'other' ? undefined : code);
+    this.name = 'BundleActivationError';
+    this.code = code;
+    this.ids = ids;
+    this.bundles = bundles;
+  }
+}
+
+const strings = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []);
+
+async function bundleWrite(bundleId: string, action: 'enable' | 'disable'): Promise<{ bundleId: string; status: 'enabled' | 'available' }> {
+  const res = await fetch(`${base}/feature-bundles/${encodeURIComponent(bundleId)}/${action}`, fetchOpts({ method: 'POST', headers: jsonHeaders() }));
+  if (res.ok) return (await res.json()) as { bundleId: string; status: 'enabled' | 'available' };
+  const body = (await res.json().catch(() => ({}))) as { error?: string; message?: string; details?: Record<string, unknown> };
+  const code = body.error === 'bundle_not_entitled' || body.error === 'feature_killed' || body.error === 'disable_blocked' ? body.error : 'other';
+  const d = body.details ?? {};
+  const ids = code === 'bundle_not_entitled' ? strings(d.missing) : code === 'feature_killed' ? strings(d.ids) : strings(d.dependents);
+  throw new BundleActivationError(body.message || `${action}FeatureBundle returned ${res.status}`, res.status, code, ids, strings(d.bundles), body.message);
+}
+
+/** Turn a bundle ON for the caller's active workspace (workspace admin). */
+export function enableFeatureBundle(bundleId: string): Promise<{ bundleId: string; status: 'enabled' | 'available' }> {
+  return bundleWrite(bundleId, 'enable');
+}
+
+/** Turn a bundle OFF for the caller's active workspace. No data is deleted. */
+export function disableFeatureBundle(bundleId: string): Promise<{ bundleId: string; status: 'enabled' | 'available' }> {
+  return bundleWrite(bundleId, 'disable');
 }
 
 // ── ADR 0419 P2: the tenant bundle STORE (billing-owned; composed over HTTP,

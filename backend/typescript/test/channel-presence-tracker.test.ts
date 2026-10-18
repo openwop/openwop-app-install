@@ -1,6 +1,10 @@
 /**
  * ADR 0126 Phase 4 / RFC 0110 — ephemeral channel-presence tracker (in-memory, never
  * persisted). present iff ≥1 live connection (multi-tab safe); typing; debounced broadcast.
+ *
+ * What breaks it: a closed tab marking a still-connected member absent, presence
+ * bleeding across channels, or a join/leave burst broadcasting once per event instead
+ * of one coalesced frame after the RFC 0110 "SHOULD debounce" window (200 ms).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { joinPresence, setTyping, snapshotOf, __resetPresence } from '../src/features/channels/channelPresenceTracker.js';
@@ -35,9 +39,14 @@ describe('channelPresenceTracker', () => {
     const a = vi.fn(); const b = vi.fn();
     joinPresence('c1', 'user:alice', a);
     joinPresence('c1', 'user:bob', b);
-    vi.advanceTimersByTime(250); // past DEBOUNCE_MS
-    expect(a).toHaveBeenCalledWith(expect.objectContaining({ present: ['user:alice', 'user:bob'] }));
-    expect(b).toHaveBeenCalled();
+    vi.advanceTimersByTime(199); // inside the 200 ms debounce window — nothing yet
+    expect(a).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(1);   // window closes — ONE coalesced frame for the two joins
+    const both = expect.objectContaining({ present: ['user:alice', 'user:bob'] });
+    expect(a).toHaveBeenCalledTimes(1);
+    expect(a).toHaveBeenCalledWith(both);
+    expect(b).toHaveBeenCalledTimes(1);
+    expect(b).toHaveBeenCalledWith(both);
   });
 
   it('two channels are isolated', () => {

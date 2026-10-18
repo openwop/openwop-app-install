@@ -15,7 +15,20 @@
  *   2. a FAILED eviction is reported (`removeStrategy` → false) rather than
  *      swallowed, because it is the one case with no self-heal;
  *   3. `backfillStrategyKb` on the OLD org genuinely cannot recover it — the
- *      relocated strategy carries the NEW orgId, so the sweep never visits it.
+ *      relocated strategy carries the NEW orgId, so the sweep never visits it;
+ *   4. the relocation call site OBSERVES a failed eviction — it writes the
+ *      `strategy_kb_relocation_eviction_failed` error line with both org ids.
+ *
+ * Sabotage witnesses (ADR 0597 §Correction 6 table + wave 19 `w19g3-rel-*`): swallowing
+ * the failure as `true`, rethrowing from either function, reporting a successful eviction
+ * as `false`, and dropping the sweep's `orgId` filter each red the case that names them.
+ *
+ * BLOCKED-ON-PRODUCT (ADR 0597 residual "§Correction 6 (orphan sweep)"): the stranded
+ * `contentTrust:'trusted'` copy in the old org is PERMANENT — nothing reconciles
+ * `mgd-strategy-<org>` against its backing strategies. The correct outcome is pinned as
+ * `it.fails` below instead of asserting the defect: when the sweep ships, that case reds
+ * and must be flipped to a plain `it`. (An `it.fails` body also "passes" on a setup
+ * throw; the plain case above it carries the same preconditions so that cannot hide.)
  */
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -85,8 +98,15 @@ describe('ADR 0597 §Correction 6 — the relocation eviction is OBSERVED, not a
     // Relocate with the eviction failing — the exact "worst case" §4 claimed
     // `reindex-kb` would repair.
     const spy = vi.spyOn(kbService, 'deleteDocument').mockRejectedValue(new Error('kb store down'));
+    // `log.error` writes to stderr (observability/logger.ts) — the OBSERVATION this file is named for.
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     await updateStrategy(T, s.id, { orgId: B }, 'u1');
     spy.mockRestore();
+    const observed = stderr.mock.calls.map((c) => String(c[0])).filter((l) => l.includes('strategy_kb_relocation_eviction_failed'));
+    stderr.mockRestore();
+    expect(observed, 'a failed relocation eviction was not observed at the call site').toHaveLength(1);
+    expect(observed[0]).toContain('"fromOrgId":"org-alpha"');
+    expect(observed[0]).toContain('"toOrgId":"org-bravo"');
 
     expect(await kbService.getDocument(T, B, col(B), s.id), 'the destination copy must exist').toBeTruthy();
     expect(await kbService.getDocument(T, A, col(A), s.id), 'the stale trusted copy the ADR said was recoverable').toBeTruthy();
@@ -95,7 +115,17 @@ describe('ADR 0597 §Correction 6 — the relocation eviction is OBSERVED, not a
     // strategies, because `listStrategies(tenantId, {orgId: A})` filters on the
     // strategy's CURRENT org, which is now B.
     expect(await backfillStrategyKb(T, A), 'the old-org sweep saw the relocated strategy after all').toBe(0);
+  });
+
+  it.fails('BLOCKED-ON-PRODUCT (ADR 0597 orphan-sweep residual): reindexing the old org evicts the stranded trusted copy', async () => {
+    const s = await createStrategy(T, A, 'u1', { title: 'Stranded', scope: 'org' });
+    const spy = vi.spyOn(kbService, 'deleteDocument').mockRejectedValue(new Error('kb store down'));
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    await updateStrategy(T, s.id, { orgId: B }, 'u1');
+    spy.mockRestore();
+    await backfillStrategyKb(T, A);
+    // The CORRECT outcome: an org the strategy has left holds no trusted copy of it.
     expect(await kbService.getDocument(T, A, col(A), s.id),
-      'the ADR claimed reindex-kb restores the invariant here; it cannot even see the row').toBeTruthy();
+      'a relocated strategy is still readable in the old org\'s shared KB').toBeFalsy();
   });
 });

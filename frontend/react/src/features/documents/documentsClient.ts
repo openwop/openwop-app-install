@@ -165,9 +165,11 @@ export async function listVersions(orgId: string, documentId: string): Promise<D
 }
 
 /** `baseVersionId` (ADR 0838 D5) makes the save CHECKED: it fails with
- *  `reason: 'stale_base'` if someone saved a newer version since that one. */
-export async function addVersion(orgId: string, documentId: string, content: string, baseVersionId?: string): Promise<DocumentVersion> {
-  const res = await fetch(`${base(orgId)}/documents/${encodeURIComponent(documentId)}/versions`, fetchOpts({ method: 'POST', headers: jsonHeaders(), body: JSON.stringify({ content, ...(baseVersionId ? { baseVersionId } : {}) }) }));
+ *  `reason: 'stale_base'` if someone saved a newer version since that one.
+ *  `null` checks a FIRST save: it fails if any version already exists
+ *  (ADR 0913 D5). */
+export async function addVersion(orgId: string, documentId: string, content: string, baseVersionId?: string | null): Promise<DocumentVersion> {
+  const res = await fetch(`${base(orgId)}/documents/${encodeURIComponent(documentId)}/versions`, fetchOpts({ method: 'POST', headers: jsonHeaders(), body: JSON.stringify({ content, ...(baseVersionId === null || baseVersionId ? { baseVersionId } : {}) }) }));
   return asJson(res, 'addVersion');
 }
 

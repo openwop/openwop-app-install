@@ -31,53 +31,69 @@ const CSS = readFileSync(join(process.cwd(), 'src/styles/global.css'), 'utf8').r
 
 const SYSTEM_COLOR = 'Highlight|HighlightText|CanvasText|Canvas|LinkText|ButtonText|GrayText|Mark|MarkText';
 
-/** Body of the first `@media (forced-colors: active)` block, brace-balanced
- *  (the flat rule matcher used elsewhere can't see nested at-rules). '' if absent. */
-function forcedColorsBlock(): string {
-  const m = CSS.match(/@media\s*\(\s*forced-colors\s*:\s*active\s*\)\s*\{/);
-  if (!m || m.index === undefined) return '';
-  const start = m.index + m[0].length;
-  let depth = 1;
-  let i = start;
-  for (; i < CSS.length && depth > 0; i++) {
-    if (CSS[i] === '{') depth++;
-    else if (CSS[i] === '}') depth--;
+/** Bodies of EVERY `@media (forced-colors: active)` block, brace-balanced (the
+ *  flat rule matcher used elsewhere can't see nested at-rules). global.css has
+ *  more than one (the CAD fill block, CADU-2), so "a block exists" says nothing
+ *  about the DRAWING chrome — callers pick the block that styles it. */
+function forcedColorsBlocks(): string[] {
+  const out: string[] = [];
+  const re = /@media\s*\(\s*forced-colors\s*:\s*active\s*\)\s*\{/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(CSS))) {
+    const start = m.index + m[0].length;
+    let depth = 1;
+    let i = start;
+    for (; i < CSS.length && depth > 0; i++) {
+      if (CSS[i] === '{') depth++;
+      else if (CSS[i] === '}') depth--;
+    }
+    out.push(CSS.slice(start, i - 1));
   }
-  return CSS.slice(start, i - 1);
+  return out;
 }
 
-/** The system colour a chrome selector sets on `stroke` inside the block, or null. */
+/** The system colour a chrome selector sets on `stroke` inside the block, or null.
+ *  The selector must END at the class name (`__handle` must not match `__handle-hit`). */
 function strokeColorFor(block: string, sel: string): string | null {
-  const re = new RegExp(`[^{}]*cv-draw-interactive__${sel}[^{}]*\\{([^{}]*)\\}`, 'g');
+  const re = new RegExp(`[^{}]*cv-draw-interactive__${sel}(?![\\w-])[^{}]*\\{([^{}]*)\\}`, 'g');
   let found: string | null = null;
   let match: RegExpExecArray | null;
   while ((match = re.exec(block))) {
-    const c = match[1]!.match(new RegExp(`stroke:\\s*(${SYSTEM_COLOR})`));
+    const c = match[1]!.match(new RegExp(`stroke:\\s*(${SYSTEM_COLOR})\\b`));
     if (c) found = c[1]!;
   }
   return found;
 }
 
+const CHROME = ['outline-top', 'handle', 'vertex', 'marquee'] as const;
+
 describe('DRU-1 — drawing selection chrome survives forced-colors (Windows High Contrast)', () => {
-  const block = forcedColorsBlock();
+  const drawingBlocks = forcedColorsBlocks().filter((b) => b.includes('cv-draw-interactive__'));
+  const block = drawingBlocks[0] ?? '';
 
   it('global.css has a forced-colors block (author colours collapse to the system palette in HCM)', () => {
     expect(
-      block,
-      'no `@media (forced-colors: active)` block in global.css — HCM users lose the drawing selection affordances',
-    ).not.toBe('');
+      drawingBlocks,
+      'no `@media (forced-colors: active)` block styles the drawing chrome — HCM users lose the selection affordances',
+    ).toHaveLength(1);
   });
 
   it('remaps the selection outline, handles and marquee to real system colours', () => {
-    for (const sel of ['__outline-top', '__handle', '__vertex', '__marquee']) {
-      expect(block, `the forced-colors block does not cover .cv-draw-interactive${sel}`).toContain(
-        `cv-draw-interactive${sel}`,
+    for (const sel of CHROME) {
+      expect(
+        strokeColorFor(block, sel),
+        `.cv-draw-interactive__${sel} has no system-colour stroke in the forced-colors block`,
+      ).toMatch(new RegExp(`^(${SYSTEM_COLOR})$`));
+    }
+  });
+
+  it('the remapped chrome classes are the ones the component actually renders (no dead CSS)', () => {
+    const src = readFileSync(join(process.cwd(), 'src/features/drawings/InteractiveDrawing.tsx'), 'utf8');
+    for (const sel of [...CHROME, 'snap-guide', 'space-span']) {
+      expect(src, `InteractiveDrawing no longer renders .cv-draw-interactive__${sel}`).toMatch(
+        new RegExp(`cv-draw-interactive__${sel}(?![\\w-])`),
       );
     }
-    expect(
-      block,
-      'the forced-colors block sets no system colour — an empty/opacity-only block does not restore HCM affordances',
-    ).toMatch(new RegExp(`\\b(${SYSTEM_COLOR})\\b`));
   });
 
   it('keeps the two-colour guide language distinguishable — align and space guides use DIFFERENT system colours', () => {

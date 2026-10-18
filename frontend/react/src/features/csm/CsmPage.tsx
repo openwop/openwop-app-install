@@ -26,6 +26,7 @@ import { announce } from '../../ui/announce.js';
 import { ActivityIcon, SparklesIcon } from '../../ui/icons/index.js';
 import { stageComposerDraft } from '../../chat/composerSeed.js';
 import { useFeatureAccess } from '../../featureToggles/FeatureAccessContext.js';
+import { useScopeWriteAccess } from '../../lib/writeAccess.js';
 import { formatCurrency, formatDate, formatNumber, formatRelativeTime } from '../../i18n/format.js';
 import {
   createAccount,
@@ -34,8 +35,10 @@ import {
   updateAccount,
   listOrgs,
   listCrmCompanies,
+  listAssignees,
   CsmRequestError,
   type Account,
+  type Assignee,
   type Org,
   type CrmCompany,
 } from './csmClient.js';
@@ -145,6 +148,13 @@ function groupedArr(rows: Array<{ arr?: number | undefined; arrCurrency?: string
 
 const HEALTH_INSIGHTS_AGENT = 'vendor.openwop-app.csm.agents.health-insights';
 
+/** The ADR 0882 D7 plays, deep-linked into the builder's template preflight
+ *  (`/builder?template=`, the app-builder precedent) — never instantiated here. */
+const PLAYS = [
+  { chainId: 'csm-ops.red-account-rescue', key: 'playRescue', trigger: 'event' },
+  { chainId: 'csm-ops.renewal-runway', key: 'playRunway', trigger: 'schedule' },
+] as const;
+
 /** The seven PATCHable fields, and the six that had no editor at all (CSM-UX-5). */
 interface AccountDraft {
   name: string;
@@ -152,7 +162,11 @@ interface AccountDraft {
   renewal: string;
   arr: string;
   arrCurrency: string;
-  owner: string;
+  /** ADR 0882 D3 — the member owner ('' = unassigned). */
+  ownerUserId: string;
+  /** The legacy free-text owner is only ever CLEARED, never edited — and only
+   *  when the operator asks, so an unrelated save cannot wipe it. */
+  clearLegacyOwner: boolean;
 }
 const draftOf = (a: Account): AccountDraft => ({
   name: a.name,
@@ -160,13 +174,17 @@ const draftOf = (a: Account): AccountDraft => ({
   renewal: a.renewalDate ?? '',
   arr: a.arr === undefined ? '' : String(a.arr),
   arrCurrency: a.arrCurrency ?? '',
-  owner: a.owner ?? '',
+  ownerUserId: a.ownerUserId ?? '',
+  clearLegacyOwner: false,
 });
 
 export function CsmPage(): JSX.Element {
   const { t } = useTranslation('csm');
   const navigate = useNavigate();
   const csm = useFeatureAccess('csm');
+  // CSM2UX-4 — every CSM write needs `workspace:write`; a Viewer used to be
+  // offered the whole form and every row action, each ending in a refusal toast.
+  const canWrite = useScopeWriteAccess('workspace:write');
   const [accounts, setAccounts] = useState<Account[] | null>(null);
   // ADR 0582 §6 (CSM-UX-2) — a failed read used to leave `accounts` null, which
   // is the SAME state as "still loading", so `DataTable` rendered skeleton rows
@@ -182,8 +200,14 @@ export function CsmPage(): JSX.Element {
   const [renewal, setRenewal] = useState('');
   const [arr, setArr] = useState('');
   const [arrCurrency, setArrCurrency] = useState('');
-  const [owner, setOwner] = useState('');
+  const [ownerUserId, setOwnerUserId] = useState('');
   const [busy, setBusy] = useState(false);
+  // ADR 0882 D3 — the people an account can belong to, and every spelling of
+  // "me" (the server's, so "Mine" matches whichever one an owner was stored as).
+  const [assignees, setAssignees] = useState<Assignee[] | null>(null);
+  const [me, setMe] = useState<readonly string[]>([]);
+  const [assigneesFailed, setAssigneesFailed] = useState(false);
+  const [ownerFilter, setOwnerFilter] = useState<'' | 'mine' | 'unassigned'>('');
   // Collection kit (§4.5 rule 13) + the grid⇄table view (rule 11).
   const [query, setQuery] = useState('');
   // ADR 0582 §14 — seed the facet from `?health=`. The dashboard's
@@ -205,10 +229,28 @@ export function CsmPage(): JSX.Element {
   const [editingAccountId, setEditingAccountId] = useState<string | null>(null);
   const [draft, setDraft] = useState<AccountDraft | null>(null);
   const [editBusy, setEditBusy] = useState(false);
+  /** ADR 0882 D3 — the owner as a person: their name, "You", the legacy text
+   *  (marked), or nothing. A member id that no longer resolves is said plainly. */
+  const ownerLabel = useCallback((a: Account): { text: string; legacy?: boolean; unknown?: boolean } | null => {
+    if (a.ownerUserId) {
+      if (me.includes(a.ownerUserId)) return { text: t('ownerYou') };
+      // CSM2UX-2 — "Former member" is a claim about the person; it is only true
+      // once the people list has actually loaded and does not contain them.
+      if (assignees === null) return { text: assigneesFailed ? t('ownerUnavailable') : t('ownerLoading'), unknown: true };
+      const hit = assignees.find((x) => x.subject === a.ownerUserId);
+      return hit ? { text: hit.displayName } : { text: t('ownerUnknown'), unknown: true };
+    }
+    // CSM2UX-10 — a DSAR leaves the marker `[erased]`; say what happened.
+    if (a.owner === '[erased]') return { text: t('ownerErased'), unknown: true };
+    if (a.owner) return { text: a.owner, legacy: true };
+    return null;
+  }, [assignees, assigneesFailed, me, t]);
   const visibleAccounts = useMemo(() => {
     const q = query.trim().toLowerCase();
     return (accounts ?? []).filter((a) => {
-      if (q && !(a.name.toLowerCase().includes(q) || (a.owner ?? '').toLowerCase().includes(q))) return false;
+      if (q && !(a.name.toLowerCase().includes(q) || (ownerLabel(a)?.text ?? '').toLowerCase().includes(q))) return false;
+      if (ownerFilter === 'mine' && !(a.ownerUserId && me.includes(a.ownerUserId))) return false;
+      if (ownerFilter === 'unassigned' && (a.ownerUserId || a.owner)) return false;
       if (healthFilter && healthTier(a) !== healthFilter) return false;
       if (renewalFilter) {
         const days = daysToRenewal(a.renewalDate);
@@ -217,7 +259,7 @@ export function CsmPage(): JSX.Element {
       }
       return true;
     });
-  }, [accounts, query, healthFilter, renewalFilter]);
+  }, [accounts, query, healthFilter, renewalFilter, ownerFilter, me, ownerLabel]);
 
   // ADR 0212 §4 — the linked-company affordance.
   // FIRST org-edge instance where `orgs` gates NO read: `listAccounts()` is
@@ -258,6 +300,7 @@ export function CsmPage(): JSX.Element {
       const title =
         err.status === 403 ? t('failureForbidden')
           : err.status === 404 ? t('failureNotFound')
+            : err.status === 422 && err.reason === 'invalid_owner' ? t('failureOwnerNotMember')
             : err.status === 400 || err.status === 422 ? t('failureRejected')
               : err.status === 429 ? t('failureRateLimited')
                 : err.status >= 500 ? t('failureServer')
@@ -285,6 +328,16 @@ export function CsmPage(): JSX.Element {
   useEffect(() => {
     if (csm.enabled) load();
   }, [csm.enabled, load]);
+
+  const loadAssignees = useCallback(() => {
+    setAssigneesFailed(false);
+    void listAssignees()
+      .then((r) => { setAssignees(r.assignees); setMe(r.me); })
+      .catch(() => setAssigneesFailed(true));
+  }, []);
+  useEffect(() => {
+    if (csm.enabled) loadAssignees();
+  }, [csm.enabled, loadAssignees]);
 
 
   // Batch company-name lookups: ONE listCrmCompanies(orgId) per distinct org
@@ -352,6 +405,26 @@ export function CsmPage(): JSX.Element {
   // user is left on a trigger whose panel is off-screen behind them, with
   // nothing announced. `tabIndex={-1}` makes the form programmatically
   // focusable without adding a tab stop.
+  /** CSM2UX-5 — ONE renderer for the linked company, both views: only link to a
+   *  company the CRM list actually returned (the grid used to skip the check). */
+  const renderCompany = useCallback((a: Account, opts?: { compact?: boolean }): JSX.Element | null => {
+    if (!a.crmRef) return opts?.compact ? null : <span className="muted">{t('notLinked')}</span>;
+    const { orgId, companyId } = a.crmRef;
+    if (companyResolved(orgId, companyId) === false) {
+      return (
+        <span className="u-flex u-gap-1 u-items-center u-wrap">
+          <span className="chip chip--warning">{t('companyGone')}</span>
+          {!opts?.compact ? <span className="u-label-sm">{t('companyGoneHint')}</span> : null}
+        </span>
+      );
+    }
+    return (
+      <Link to={`/crm/companies/${encodeURIComponent(companyId)}?org=${encodeURIComponent(orgId)}`} className={opts?.compact ? 'u-fs-13' : undefined}>
+        {companyName(orgId, companyId)}
+      </Link>
+    );
+  }, [t, companyName, companyResolved]);
+
   const linkFormRef = useRef<HTMLFormElement | null>(null);
   useEffect(() => {
     if (linkingAccountId !== null) linkFormRef.current?.focus();
@@ -413,9 +486,9 @@ export function CsmPage(): JSX.Element {
         ...(renewal.trim() ? { renewalDate: renewal.trim() } : {}),
         ...(arrNum !== undefined && Number.isFinite(arrNum) ? { arr: arrNum } : {}),
         ...(arrNum !== undefined && Number.isFinite(arrNum) && arrCurrency.trim() ? { arrCurrency: arrCurrency.trim().toUpperCase() } : {}),
-        ...(owner.trim() ? { owner: owner.trim() } : {}),
+        ...(ownerUserId ? { ownerUserId } : {}),
       });
-      setName(''); setScoreText(''); setRenewal(''); setArr(''); setArrCurrency(''); setOwner('');
+      setName(''); setScoreText(''); setRenewal(''); setArr(''); setArrCurrency(''); setOwnerUserId('');
       load();
       toast.success(t('accountAdded'));
     } catch (err) {
@@ -423,7 +496,7 @@ export function CsmPage(): JSX.Element {
     } finally {
       setBusy(false);
     }
-  }, [name, scoreText, renewal, arr, arrCurrency, owner, load, t, failureCopy]);
+  }, [name, scoreText, renewal, arr, arrCurrency, ownerUserId, load, t, failureCopy]);
 
   const remove = useCallback(async (id: string, name: string) => {
     if (!(await confirm({ title: t('deleteAccountConfirm', { name }), danger: true, confirmLabel: t('common:delete') }))) return;
@@ -448,6 +521,7 @@ export function CsmPage(): JSX.Element {
   // delete-and-recreate — which mints a new accountId and destroys the CRM link
   // and the whole health history with it. This reuses the shape already on the
   // page (the link editor: an inline `surface-form` keyed by an id).
+  const editingAccount = accounts?.find((a) => a.accountId === editingAccountId) ?? null;
   const openEditor = useCallback((a: Account) => {
     setLinkingAccountId(null);
     setEditingAccountId(a.accountId);
@@ -478,7 +552,10 @@ export function CsmPage(): JSX.Element {
         renewalDate: draft.renewal.trim() || null,
         arr: arrNum,
         arrCurrency: arrNum === null ? null : (draft.arrCurrency.trim().toUpperCase() || null),
-        owner: draft.owner.trim() || null,
+        // ADR 0882 D3 — sent only when it CHANGED, so an edit that never touched
+        // the owner cannot fail on (or rewrite) a row whose owner has left.
+        ...(draft.ownerUserId !== (editingAccount?.ownerUserId ?? '') ? { ownerUserId: draft.ownerUserId || null } : {}),
+        ...(draft.clearLegacyOwner ? { owner: null } : {}),
       });
       closeEditor();
       load();
@@ -489,7 +566,7 @@ export function CsmPage(): JSX.Element {
     } finally {
       setEditBusy(false);
     }
-  }, [editingAccountId, draft, closeEditor, load, t, failureCopy]);
+  }, [editingAccountId, editingAccount, draft, closeEditor, load, t, failureCopy]);
 
   // CFP D1 — the health-insights copilot had no surface entry point. Hand the
   // ONE chat a seeded prompt scoped to the health-insights agent (its tools read
@@ -537,7 +614,7 @@ export function CsmPage(): JSX.Element {
             </span>
           ) : null}
           {state.reason ? <span className="muted u-fs-12">{state.reason}</span> : null}
-          <Button variant="quiet" onClick={() => openLinkEditor(a)}>{t('healthFailedRelink')}</Button>
+          {canWrite ? <Button variant="quiet" onClick={() => openLinkEditor(a)}>{t('healthFailedRelink')}</Button> : null}
         </span>
       );
     }
@@ -547,7 +624,7 @@ export function CsmPage(): JSX.Element {
         <span className="muted u-fs-12">{t(`health_${healthTier(a)}`)}</span>
       </span>
     );
-  }, [t, openLinkEditor]);
+  }, [t, openLinkEditor, canWrite]);
 
   const accountColumns = useMemo<DataColumn<Account>[]>(() => [
     { key: 'name', header: t('colAccount'), render: (a) => a.name, sortValue: (a) => a.name },
@@ -557,7 +634,19 @@ export function CsmPage(): JSX.Element {
     { key: 'arr', header: t('colArr'), render: (a) => a.arr !== undefined ? formatArr(a.arr, a.arrCurrency) : <span className="muted">—</span>, sortValue: (a) => a.arr ?? null },
     // R2 CS-SP-3 — `owner` was captured, searchable (the aria copy even
     // promised it), PATCHable — and rendered NOWHERE.
-    { key: 'owner', header: t('colOwner'), render: (a) => a.owner ?? <span className="muted">—</span>, sortValue: (a) => a.owner ?? null },
+    // ADR 0882 D3 — a person, not a string: the member's name (or "You"); a
+    // legacy free-text owner is shown as what it is.
+    {
+      key: 'owner',
+      header: t('colOwner'),
+      render: (a) => {
+        const o = ownerLabel(a);
+        if (!o) return <span className="muted">{t('ownerUnassigned')}</span>;
+        if (o.legacy) return <span className="u-flex u-gap-1 u-items-center u-wrap"><span>{o.text}</span><span className="chip chip--neutral">{t('ownerLegacy')}</span></span>;
+        return o.unknown ? <span className="muted">{o.text}</span> : <span>{o.text}</span>;
+      },
+      sortValue: (a) => ownerLabel(a)?.text ?? null,
+    },
     {
       key: 'renewal',
       header: t('colRenewal'),
@@ -591,24 +680,8 @@ export function CsmPage(): JSX.Element {
     {
       key: 'crmRef',
       header: t('colLinkedCompany'),
-      render: (a) => {
-        if (!a.crmRef) return <span className="muted">{t('notLinked')}</span>;
-        const { orgId, companyId } = a.crmRef;
-        // CSMUX-3 — only link to a company the CRM list actually returned.
-        if (companyResolved(orgId, companyId) === false) {
-          return (
-            <span className="u-flex u-gap-1 u-items-center u-wrap">
-              <span className="chip chip--warning">{t('companyGone')}</span>
-              <span className="u-label-sm">{t('companyGoneHint')}</span>
-            </span>
-          );
-        }
-        return (
-          <Link to={`/crm/companies/${encodeURIComponent(companyId)}?org=${encodeURIComponent(orgId)}`}>
-            {companyName(orgId, companyId)}
-          </Link>
-        );
-      },
+      // CSMUX-3 — only link to a company the CRM list actually returned.
+      render: (a) => renderCompany(a),
     },
     {
       key: 'factors',
@@ -662,7 +735,7 @@ export function CsmPage(): JSX.Element {
     {
       key: 'actions',
       header: '',
-      render: (a) => (
+      render: (a) => !canWrite ? null : (
         <span className="action-bar">
           <Button variant="quiet" onClick={() => openEditor(a)} aria-label={t('editRowLabel', { name: a.name })}>
             {t('common:edit')}
@@ -678,12 +751,38 @@ export function CsmPage(): JSX.Element {
         </span>
       ),
     },
-  ], [remove, t, companyName, companyResolved, openLinkEditor, openEditor, renderHealth]);
+  ], [remove, t, openLinkEditor, openEditor, renderHealth, ownerLabel, renderCompany, canWrite]);
 
   const linkingAccount = accounts?.find((a) => a.accountId === linkingAccountId) ?? null;
-  const editingAccount = accounts?.find((a) => a.accountId === editingAccountId) ?? null;
   /** ADR 0582 §6 — the accounts whose health is NOT confidently known. */
   const unmeasured = useMemo(() => (accounts ?? []).filter((a) => confidentScore(a) === undefined), [accounts]);
+
+  /** ADR 0882 D3 — the owner picker: workspace members only (the server's own
+   *  list, so it can never offer someone the write would refuse). */
+  const ownerSelect = (value: string, onChange: (v: string) => void, current?: Account | null): JSX.Element => assigneesFailed ? (
+    // CSM2UX-6 — NOT inside a <label>: nested, the Retry button's accessible
+    // name absorbed the whole label (the DS-CSM-1 shape this page fixed once).
+    <span className="u-grid u-gap-1">
+      <span className="u-label-sm">{t('fieldOwner')}</span>
+      <span className="action-bar">
+        <span className="chip chip--danger">{t('ownersLoadFailed')}</span>
+        <Button variant="quiet" size="sm" type="button" onClick={loadAssignees} aria-label={t('retryOwnersLabel')}>{t('common:retry')}</Button>
+      </span>
+    </span>
+  ) : (
+    <label className="u-grid u-gap-1">
+      <span className="u-label-sm">{t('fieldOwner')}</span>
+      <select value={value} onChange={(e) => onChange(e.target.value)} disabled={assignees === null} aria-busy={assignees === null}>
+        <option value="">{t('ownerUnassigned')}</option>
+        {(assignees ?? []).map((x) => (
+          <option key={x.subject} value={x.subject}>{me.includes(x.subject) ? t('ownerYouNamed', { name: x.displayName }) : x.displayName}</option>
+        ))}
+        {current?.ownerUserId && !(assignees ?? []).some((x) => x.subject === current.ownerUserId) ? (
+          <option value={current.ownerUserId}>{t('ownerUnknown')}</option>
+        ) : null}
+      </select>
+    </label>
+  );
 
   if (csm.loading) return <Skeleton />;
   if (!csm.enabled) {
@@ -772,7 +871,10 @@ export function CsmPage(): JSX.Element {
         </div>
       ) : null}
 
-      <form className="surface-card u-p-4 surface-form" onSubmit={(e) => { e.preventDefault(); void add(); }}>
+      {!canWrite ? (
+        <p className="muted u-fs-13">{t('readOnlyNote')}</p>
+      ) : null}
+      {canWrite ? <form className="surface-card u-p-4 surface-form" onSubmit={(e) => { e.preventDefault(); void add(); }}>
         <label className="u-grid u-gap-1">
           <span className="u-label-sm">{t('fieldAccount')}</span>
           <input value={name} onChange={(e) => setName(e.target.value)} placeholder={t('accountNamePlaceholder')} />
@@ -791,7 +893,7 @@ export function CsmPage(): JSX.Element {
               button, nothing was announced, and a keyboard user was left with
               an open form behind them. `autoFocus` is the house idiom (13+
               features use it for exactly this). */}
-          <input autoFocus type="number" min={0} max={100} value={scoreText} onChange={(e) => setScoreText(e.target.value)} className="csm-score-input" placeholder={t('healthOptionalPlaceholder')} />
+          <input type="number" min={0} max={100} value={scoreText} onChange={(e) => setScoreText(e.target.value)} className="csm-score-input" placeholder={t('healthOptionalPlaceholder')} />
           <span className="muted u-fs-12">{t('fieldHealthHint')}</span>
         </label>
         <label className="u-grid u-gap-1 is-narrow">
@@ -806,14 +908,11 @@ export function CsmPage(): JSX.Element {
           <span className="u-label-sm">{t('fieldRenewal')}</span>
           <input type="date" value={renewal} onChange={(e) => setRenewal(e.target.value)} />
         </label>
-        <label className="u-grid u-gap-1">
-          <span className="u-label-sm">{t('fieldOwner')}</span>
-          <input value={owner} onChange={(e) => setOwner(e.target.value)} placeholder={t('ownerPlaceholder')} />
-        </label>
+        {ownerSelect(ownerUserId, setOwnerUserId)}
         <Button variant="primary" type="submit" disabled={busy || !name.trim()}>
           {t('addAccount')}
         </Button>
-      </form>
+      </form> : null}
 
       {/* CSM-UX-5 — the account editor. Same inline `surface-form` shape as the
           link editor below, keyed by `editingAccountId`. Before this, six of the
@@ -825,7 +924,9 @@ export function CsmPage(): JSX.Element {
           <span className="u-label-sm">{t('editPanelTitle', { name: editingAccount?.name ?? '' })}</span>
           <label className="u-grid u-gap-1">
             <span className="u-label-sm">{t('fieldAccount')}</span>
-            <input value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} />
+            {/* CSM2UX-1 — the focus target for an opened editor (the add form's
+                field used to take it on every page load instead). */}
+            <input autoFocus value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} />
           </label>
           <label className="u-grid u-gap-1 is-narrow">
             <span className="u-label-sm">{t('fieldHealth')}</span>
@@ -847,10 +948,20 @@ export function CsmPage(): JSX.Element {
             <span className="u-label-sm">{t('fieldRenewal')}</span>
             <input type="date" value={draft.renewal} onChange={(e) => setDraft({ ...draft, renewal: e.target.value })} />
           </label>
-          <label className="u-grid u-gap-1">
-            <span className="u-label-sm">{t('fieldOwner')}</span>
-            <input value={draft.owner} onChange={(e) => setDraft({ ...draft, owner: e.target.value })} placeholder={t('ownerPlaceholder')} />
-          </label>
+          {ownerSelect(draft.ownerUserId, (v) => setDraft({ ...draft, ownerUserId: v }), editingAccount)}
+          {editingAccount?.owner && editingAccount.owner !== '[erased]' ? (
+            <span className="u-grid u-gap-1">
+              <span className="u-label-sm">{t('legacyOwnerLabel')}</span>
+              <span className="u-flex u-gap-2 u-items-center u-wrap">
+                <span className={draft.clearLegacyOwner ? 'muted' : undefined}>{editingAccount.owner}</span>
+                <Button variant="quiet" size="sm" type="button"
+                  onClick={() => setDraft({ ...draft, clearLegacyOwner: !draft.clearLegacyOwner })}>
+                  {draft.clearLegacyOwner ? t('legacyOwnerKeep') : t('legacyOwnerClear')}
+                </Button>
+              </span>
+              <span className="muted u-fs-12">{t('legacyOwnerHint')}</span>
+            </span>
+          ) : null}
           <span className="action-bar">
             <Button variant="primary" type="submit" disabled={editBusy || !draft.name.trim()}>{t('common:save')}</Button>
             <Button variant="quiet" type="button" disabled={editBusy} onClick={closeEditor}>{t('common:cancel')}</Button>
@@ -925,7 +1036,7 @@ export function CsmPage(): JSX.Element {
               to clear it — on the page whose whole job is telling the truth
               about measurement. An ACTIVE filter now forces the controls to
               render regardless of size. */}
-          {accounts.length > 3 || healthFilter !== '' || renewalFilter !== '' || query !== '' ? (
+          {accounts.length > 3 || healthFilter !== '' || renewalFilter !== '' || ownerFilter !== '' || query !== '' ? (
             <>
               <input
                 type="search"
@@ -938,6 +1049,11 @@ export function CsmPage(): JSX.Element {
               <select className="ui-input filterbar-select" value={healthFilter} onChange={(e) => setHealthFilter(e.target.value as '' | HealthTier)} aria-label={t('filterHealthLabel')}>
                 <option value="">{t('allHealth')}</option>
                 {HEALTH_TIERS.map((tier) => <option key={tier} value={tier}>{t(`health_${tier}`)}</option>)}
+              </select>
+              <select className="ui-input filterbar-select" value={ownerFilter} onChange={(e) => setOwnerFilter(e.target.value as '' | 'mine' | 'unassigned')} aria-label={t('filterOwnerLabel')}>
+                <option value="">{t('allOwners')}</option>
+                <option value="mine" disabled={me.length === 0}>{t('ownerFacetMine')}</option>
+                <option value="unassigned">{t('ownerFacetUnassigned')}</option>
               </select>
               <select className="ui-input filterbar-select" value={renewalFilter} onChange={(e) => setRenewalFilter(e.target.value as '' | 'soon' | 'past')} aria-label={t('filterRenewalLabel')}>
                 <option value="">{t('allRenewals')}</option>
@@ -967,12 +1083,12 @@ export function CsmPage(): JSX.Element {
           )
           : accounts === null
             ? <SkeletonRows rows={3} columns={[200, 90, 140, 90, 100]} />
-            : (query.trim() || healthFilter || renewalFilter) && accounts.length > 0 ? (
+            : (query.trim() || healthFilter || renewalFilter || ownerFilter) && accounts.length > 0 ? (
             <StateCard
               icon={<ActivityIcon />}
               title={t('noMatchTitle')}
               body={t('noMatchBody')}
-              action={<Button variant="secondary" onClick={() => { setQuery(''); setHealthFilter(''); setRenewalFilter(''); }}>{t('clearFilters')}</Button>}
+              action={<Button variant="secondary" onClick={() => { setQuery(''); setHealthFilter(''); setRenewalFilter(''); setOwnerFilter(''); }}>{t('clearFilters')}</Button>}
             />
           ) : (
             <StateCard icon={<ActivityIcon />} title={t('noAccountsTitle')} body={t('noAccountsBody')} />
@@ -1010,18 +1126,19 @@ export function CsmPage(): JSX.Element {
                       </span>
                     );
                   })() : null}
-                  {a.crmRef ? (
-                    <Link to={`/crm/companies/${encodeURIComponent(a.crmRef.companyId)}?org=${encodeURIComponent(a.crmRef.orgId)}`} className="u-fs-13">
-                      {companyName(a.crmRef.orgId, a.crmRef.companyId)}
-                    </Link>
-                  ) : null}
-                  <span className="action-bar">
+                  {renderCompany(a, { compact: true })}
+                  {/* CSM2UX-7 — the grid card shows who owns the account too. */}
+                  {(() => {
+                    const o = ownerLabel(a);
+                    return o ? <span className="muted u-fs-12">{t('ownerInline', { owner: o.text })}</span> : null;
+                  })()}
+                  {canWrite ? <span className="action-bar">
                     <Button variant="quiet" onClick={() => openEditor(a)} aria-label={t('editRowLabel', { name: a.name })}>{t('common:edit')}</Button>
                     <Button variant="quiet" onClick={() => openLinkEditor(a)} aria-label={a.crmRef ? t('editLinkLabel', { name: a.name }) : t('linkLabel', { name: a.name })}>
                       {a.crmRef ? t('editLink') : t('linkCompany')}
                     </Button>
                     <Button variant="quiet" onClick={() => void remove(a.accountId, a.name)} aria-label={t('deleteRowLabel', { name: a.name })}>{t('common:delete')}</Button>
-                  </span>
+                  </span> : null}
                 </div>
               ))}
             </div>
@@ -1038,6 +1155,38 @@ export function CsmPage(): JSX.Element {
           />
         );
       })()}
+
+      {/* ADR 0882 D7 — the plays (6/6 comparators ship triggered playbooks). They
+          are chains: set up and edited in the builder, run by the one executor,
+          writing CRM tasks linked to the account's company. This card only
+          explains and deep-links; it never runs anything itself. */}
+      <section className="surface-card u-p-4 u-grid u-gap-2" aria-labelledby="csm-plays-title">
+        <h2 id="csm-plays-title" className="u-fs-15">{t('playsTitle')}</h2>
+        <p className="muted u-fs-13">{t('playsLede')}</p>
+        <ul className="u-grid u-gap-2">
+          {PLAYS.map((p) => (
+            <li key={p.chainId} className="u-flex u-gap-3 u-items-center u-wrap">
+              <span className="u-grid u-gap-1">
+                <strong>{t(`${p.key}Name`)}</strong>
+                <span className="muted u-fs-12">{t(`${p.key}When`)}</span>
+                {/* CSM2UX-3 — how each play actually STARTS. The rescue play
+                    runs only once its event is bound; saying "set it up once"
+                    produced a workflow that never ran, with nothing saying why. */}
+                <span className="muted u-fs-12">
+                  {t(`${p.key}HowRuns`)}
+                  {p.trigger === 'event' ? <> <Link to="/event-bindings">{t('playBindEvent')}</Link></> : null}
+                </span>
+              </span>
+              {canWrite ? (
+                <Link className="btn secondary btn-sm u-ml-auto" to={`/builder?template=${encodeURIComponent(p.chainId)}`}
+                  aria-label={t('playSetUpLabel', { play: t(`${p.key}Name`) })}>
+                  {t('playSetUp')}
+                </Link>
+              ) : null}
+            </li>
+          ))}
+        </ul>
+      </section>
     </section>
   );
 }

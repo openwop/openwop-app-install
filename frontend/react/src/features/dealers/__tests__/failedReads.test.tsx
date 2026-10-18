@@ -7,33 +7,44 @@
  * first" option, so a failed read actively instructed the operator to create
  * something that may already exist — and disabled the control that would have
  * shown it.
+ *
+ * Sabotage-witnessed (w52 /grade-tests, w52g2-fr-*): each catch reporting
+ * success (companies, outlets, registrations), the company select falling back
+ * to "create a company first", the outlets Retry wired to a no-op, and the
+ * outlet detail dropping the "name could not be loaded" label, the id fallback,
+ * or the dealer link each turn a case red.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, cleanup, waitFor, act } from '@testing-library/react';
+import { render, screen, cleanup, waitFor, act, fireEvent } from '@testing-library/react';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import type { Dealer, Outlet, Company } from '../dealersClient.js';
 
-const listDealers = vi.fn();
-const listCompanies = vi.fn();
-const listOutlets = vi.fn();
-const listRegistrations = vi.fn();
-const getOutlet = vi.fn();
-const getDealer = vi.fn();
+import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
 
+type DealersApi = typeof import('../dealersClient.js');
+const listDealers = vi.fn<DealersApi['listDealers']>();
+const listCompanies = vi.fn<DealersApi['listCompanies']>();
+const listOutlets = vi.fn<DealersApi['listOutlets']>();
+const listRegistrations = vi.fn<DealersApi['listRegistrations']>();
+const getOutlet = vi.fn<DealersApi['getOutlet']>();
+const getDealer = vi.fn<DealersApi['getDealer']>();
+
+// The real module, spread; only the reads are replaced. Arguments are passed
+// through so a case can check WHICH org/dealer a read was for.
 vi.mock('../dealersClient.js', async (orig) => ({
-  ...(await orig<Record<string, unknown>>()),
+  ...(await orig<DealersApi>()),
   listOrgs: vi.fn(async () => [{ orgId: 'org-1', name: 'Acme' }]),
-  listDealers: () => listDealers(),
-  listCompanies: () => listCompanies(),
-  listOutlets: () => listOutlets(),
-  listRegistrations: () => listRegistrations(),
-  getOutlet: () => getOutlet(),
-  getDealer: () => getDealer(),
-  createDealer: vi.fn(async () => ({})),
+  listDealers: (orgId: string) => listDealers(orgId),
+  listCompanies: (orgId: string) => listCompanies(orgId),
+  listOutlets: (orgId: string, dealerId: string) => listOutlets(orgId, dealerId),
+  listRegistrations: (orgId: string, dealerId?: string) => listRegistrations(orgId, dealerId),
+  getOutlet: (orgId: string, outletId: string) => getOutlet(orgId, outletId),
+  getDealer: (orgId: string, dealerId: string) => getDealer(orgId, dealerId),
 }));
 vi.mock('../../../ui/toast.js', () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
-vi.mock('../../../featureToggles/FeatureAccessContext.js', () => ({
-  useFeatureAccess: () => ({ enabled: true, locked: false, loading: false, status: 'on' as const, isBeta: false, variant: null, entitled: true, resolutionFailed: false }),
+vi.mock('../../../featureToggles/FeatureAccessContext.js', async (orig) => ({
+  ...(await orig<typeof import('../../../featureToggles/FeatureAccessContext.js')>()),
+  useFeatureAccess: () => makeFeatureAccess(),
 }));
 
 import { DealersPage } from '../DealersPage.js';
@@ -67,7 +78,8 @@ const outletView = async (): Promise<void> => {
 beforeEach(() => {
   for (const m of [listDealers, listCompanies, listOutlets, listRegistrations, getOutlet, getDealer]) m.mockReset();
   listDealers.mockResolvedValue([DEALER]);
-  listCompanies.mockResolvedValue([{ companyId: 'c1', name: 'Acme Corp' } as Company]);
+  const company: Company = { companyId: 'c1', name: 'Acme Corp', tags: [] };
+  listCompanies.mockResolvedValue([company]);
   listOutlets.mockResolvedValue([]);
   listRegistrations.mockResolvedValue([]);
   getOutlet.mockResolvedValue(OUTLET);
@@ -94,22 +106,25 @@ describe('DLR-G2: a failed companies read must not tell you to create one', () =
 
 describe('DLR-G1: failed outlet/registration reads are not "none yet"', () => {
   it('a failed outlets read says so, with a retry', async () => {
-    listOutlets.mockRejectedValue(new Error('outlets down'));
+    listOutlets.mockRejectedValueOnce(new Error('outlets down')).mockResolvedValue([OUTLET]);
     await dealersView();
     expect(await screen.findByText(/outlets could not be loaded/i)).toBeTruthy();
     expect(screen.queryByText(/no outlets yet/i)).toBeNull();
-    // The name promised "with a retry" and the body asserted none — a test name
-    // that over-promises is the same defect as a checklist row that does, just
-    // smaller. `DealersPage.tsx:250` renders it, so assert it rather than
-    // renaming the test down to what it happened to cover. (Presence only; that
-    // the click re-runs the read is still unasserted.)
-    expect(screen.getByRole('button', { name: /retry/i })).toBeTruthy();
+    expect(listOutlets).toHaveBeenCalledWith('org-1', 'd1');
+    // "With a retry" — and the retry WORKS: the click re-runs the read and the
+    // real list replaces the warning (w52: presence-only was probe-vacuous).
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(await screen.findByText('North Depot')).toBeTruthy();
+    expect(screen.queryByText(/outlets could not be loaded/i)).toBeNull();
+    expect(listOutlets).toHaveBeenCalledTimes(2);
   });
 
   it('a failed registrations read says so', async () => {
     listRegistrations.mockRejectedValue(new Error('regs down'));
     await dealersView();
     expect(await screen.findByText(/deal registrations could not be loaded/i)).toBeTruthy();
+    // ...and NOT also the empty-state sentence (failure presented as "none").
+    expect(screen.queryByText('No registrations from this dealer yet.')).toBeNull();
   });
 
   it('a genuinely empty dealer still reads as empty, not as an error', async () => {
@@ -123,7 +138,7 @@ describe('DLR-G3: the outlet detail says when the dealer name is missing', () =>
   it('a failed dealer lookup is labelled, not silently an id', async () => {
     getDealer.mockRejectedValue(new Error('dealer down'));
     await outletView();
-    expect(await screen.findByText(/could not be loaded/i)).toBeTruthy();
+    expect(await screen.findByText("(the dealer's name could not be loaded)")).toBeTruthy();
     // The id is still shown — it is the only handle the reader has.
     expect(screen.getByText('d1')).toBeTruthy();
   });

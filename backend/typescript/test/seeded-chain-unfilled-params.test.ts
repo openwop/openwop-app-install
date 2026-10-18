@@ -114,8 +114,16 @@ import type { WorkflowDefinition } from '../src/executor/types.js';
  *  inputs (the deferred variable bag), never a param-less copy; a param-less
  *  from-chain copy fails closed at its first node (`get-contact` → the surface's
  *  `requireStr` → a typed `validation_error` naming `contactId`). There is no
- *  honest default for "which contact". A declared +1, not a silent raise. */
-const CEILING = 123;
+ *  honest default for "which contact". A declared +1, not a silent raise.
+ *
+ *  123 → 124 (2026-10-14, KickTodo workflows grade): `openwop-app.kicktodo.convene-turn`
+ *  :: agentId, task — the last product pin site, drained to a chain pack, for EXACTLY
+ *  the ADR 0701/0703 reasons: the same single-agent-runner shape, params supplied
+ *  programmatically by the scheduler job's `configurable` (`kicktodo-core/agentTools.ts`
+ *  convene, `kickbotCoachTurnService.ts` coach turn), never from the gallery (the chain
+ *  is `internal: true`), and a param-less copy fails closed at the same typed
+ *  `agentRunnerNode.ts` agentId refusal. A declared +1, not a silent raise. */
+const CEILING = 124;
 
 /** ADR 0507 — the EMBEDDED family, invisible until the detector was widened. These
  *  freeze to `''` rather than `undefined`, so the node SUCCEEDS on truncated input

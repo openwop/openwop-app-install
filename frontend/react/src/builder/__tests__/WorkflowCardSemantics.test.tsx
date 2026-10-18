@@ -6,6 +6,17 @@
  * no ARIA name (prohibited on generics), (c) activating the kebab menu never
  * also opens the workflow (the old bubbling hazard), and (d) the embedded
  * runs-link stays independently clickable.
+ *
+ * CEILING, recorded (w47 grade-tests): (c) and (d) can no longer fail through a
+ * click. Since DSA-019 the card container has NO click handler — "open" lives
+ * only on the title button — and the menu/runs link are its SIBLINGS, so the
+ * bubbling hazard is gone structurally and the `stopPropagation` calls they
+ * keep have nothing to stop (the dashboard's outside-click close listens to
+ * document `mousedown` and uses `closest()`, not click propagation). No ancestor
+ * listener is added here: that would test a handler the product does not have.
+ * What those two cases CAN guard is the structure itself — the kebab and the
+ * runs link are not inside the open button — and that the open handler is the
+ * button's alone (the `onClick={onOpen}` probe reds case (a)).
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, fireEvent, cleanup } from '@testing-library/react';
@@ -67,19 +78,22 @@ describe('WorkflowCard semantics (DSA-019)', () => {
     expect(card!.getAttribute('role')).toBeNull();
   });
 
-  it('menu toggle does not open the workflow', () => {
+  it('menu toggle does not open the workflow (the kebab is not inside the open button)', () => {
     const { onOpen, onMenuToggle, container } = renderCard();
     const kebab = container.querySelector<HTMLButtonElement>('.workflow-card-menu button');
     expect(kebab).not.toBeNull();
+    expect(screen.getByRole('button', { name: /Lead enrichment/ }).contains(kebab)).toBe(false);
     fireEvent.click(kebab!);
     expect(onMenuToggle).toHaveBeenCalled();
     expect(onOpen).not.toHaveBeenCalled();
   });
 
-  it('the runs link stays independently clickable without opening the card', () => {
+  it('the runs link stays independently clickable without opening the card (not inside the open button)', () => {
     const { onOpen, container } = renderCard();
     const link = container.querySelector<HTMLAnchorElement>('.workflow-card-meta a');
     expect(link).not.toBeNull();
+    expect(link!.getAttribute('href')).toBe('/runs?q=wf-1');
+    expect(screen.getByRole('button', { name: /Lead enrichment/ }).contains(link)).toBe(false);
     fireEvent.click(link!);
     expect(onOpen).not.toHaveBeenCalled();
   });

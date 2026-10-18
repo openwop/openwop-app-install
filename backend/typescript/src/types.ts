@@ -668,6 +668,13 @@ export type OpenwopErrorCode =
   | 'session_authority_unavailable'
   | 'session_authority_unregistered'
   | 'self_lockout'
+  // ADR 0892 Phase B — a workspace admin turning a feature bundle on/off
+  // (host-ext store routes, never on the wire): the plan does not cover the
+  // bundle (402), a closure feature is under the kill switch (409), or a feature
+  // outside the bundle still needs it (409, the ADR 0194 disable-lock).
+  | 'bundle_not_entitled'
+  | 'feature_killed'
+  | 'disable_blocked'
   | 'validation_error'
   | 'unauthenticated'
   | 'forbidden'
@@ -765,6 +772,10 @@ export type OpenwopErrorCode =
   // RFC 0122 — self-hosted runner: no owning-subject runner is registered for a
   // dispatch (retriable; a runner may (re)connect). See host/selfHostedRunner.ts.
   | 'runner_unavailable'
+  // v2 errors.md — a transient upstream dependency failure (a Cloud KMS gRPC
+  // CANCELLED/UNAVAILABLE that survived one retry; byok/kmsEncryption.ts).
+  // Registered + retriable: 503 with `Retry-After` from `details.retryAfterSeconds`.
+  | 'service_unavailable'
   // ADR 0187 — application-layer egress firewall: the target host is denied by
   // the tenant's egress policy (or the always-on SSRF baseline). See host/egressPolicy.ts.
   | 'egress_blocked'

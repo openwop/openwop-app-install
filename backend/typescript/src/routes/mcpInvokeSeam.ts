@@ -94,6 +94,7 @@ export function registerMcpInvokeSeamRoutes(app: Express, deps: Deps): void {
           reason: requested < mcpMinimumRevision() ? 'below-floor' : 'unsupported',
           floor: mcpMinimumRevision(),
           peerUrl: serverUrl,
+          requested, // RFC 0242 §A.2 — the revision the host was asked to open with (narrowed: defined in this branch)
         });
         sendErrorWithMintedIds(
           res,

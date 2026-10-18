@@ -15,6 +15,12 @@ import { API } from './support/session.js';
  * The fixture is chosen from the live catalog and then MEASURED AS RENDERED: a
  * static catalog entry may override a node's ports, so the spec never trusts the
  * schema's `required` count alone.
+ *
+ * Sabotage-witnessed (wave 53), each red on its own: handles kept centred when
+ * only the OUTPUT side has several ports (`handlesInRows` reading inputs alone);
+ * the in-row handle's edge offset dropped from global.css (handles sit one
+ * ports-padding inside the edge); the lone output of a MIXED node losing its
+ * in-row handle.
  */
 type CatNode = {
   typeId: string; ports?: string; missingHostSurfaces?: string[];

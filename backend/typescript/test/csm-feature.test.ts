@@ -245,7 +245,7 @@ describe('CSM↔CRM linkage (ADR 0212)', () => {
     // Non-vacuity: while the company is live, a computed set IS accepted.
     const ok = await setAccountHealthForTenant('default', id, {
       healthScore: 42, factors: [{ factor: 'openDeals', weight: 8, value: 7 }],
-      method: 'penalty-sum', computedForCompanyId: company.companyId,
+      method: 'penalty-sum', computedForCompanyId: company.companyId, computedForOrgId: 'org-1',
     });
     expect(ok?.healthScore).toBe(42);
 
@@ -263,7 +263,7 @@ describe('CSM↔CRM linkage (ADR 0212)', () => {
     // leave the console showing a stale green score forever.
     await expect(setAccountHealthForTenant('default', id, {
       healthScore: 100, factors: [{ factor: 'openDeals', weight: 8, value: 0 }],
-      method: 'penalty-sum', computedForCompanyId: company.companyId,
+      method: 'penalty-sum', computedForCompanyId: company.companyId, computedForOrgId: 'org-1',
     })).rejects.toMatchObject({ code: 'validation_error' });
     const after = await getAccountForTenant('default', id);
     expect(after?.healthMeasureFailedReason, 'must record WHY it stopped measuring').toBeTruthy();
@@ -292,7 +292,7 @@ describe('CSM↔CRM linkage (ADR 0212)', () => {
 
     await expect(setAccountHealthForTenant('default', id, {
       healthScore: 100, factors: [{ factor: 'openDeals', weight: 8, value: 0 }],
-      method: 'penalty-sum', computedForCompanyId: company.companyId,
+      method: 'penalty-sum', computedForCompanyId: company.companyId, computedForOrgId: 'org-1',
     })).rejects.toMatchObject({ code: 'validation_error' });
     const after = await getAccountForTenant('default', id);
     expect(after?.healthMeasureFailedReason).toBeTruthy();
@@ -318,7 +318,7 @@ describe('CSM↔CRM linkage (ADR 0212)', () => {
     const surface = buildCsmSurface({ tenantId: 'default' });
     const ctx = {
       features: { csm: surface },
-      inputs: { accountId: created.body.accountId, deals: [], tasks: [], companyId: company.companyId },
+      inputs: { accountId: created.body.accountId, deals: [], tasks: [], companyId: company.companyId, orgId: 'org-1' },
       config: {},
     };
 
@@ -372,6 +372,7 @@ describe('CSM↔CRM linkage (ADR 0212)', () => {
       healthScore: 55,
       factors: [{ factor: 'openDeals', weight: 8, value: 2 }],
       companyId,
+      orgId: 'org-1',
       method: 'penalty-sum',
     })) as { account: { healthFactors?: unknown[]; healthComputedAt?: string; healthScore?: number; healthMethod?: string } };
     expect(out.account.healthScore).toBe(55);
@@ -390,7 +391,7 @@ describe('CSM↔CRM linkage (ADR 0212)', () => {
     // stamped the result as computed.
     await expect(surf.setHealth({
       accountId, healthScore: 90, factors: [{ factor: 'openDeals', weight: 8, value: 0 }],
-      companyId: 'cmp:some-other-company', method: 'penalty-sum',
+      companyId: 'cmp:some-other-company', orgId: 'org-1', method: 'penalty-sum',
     })).rejects.toMatchObject({ code: 'validation_error' });
     // ...and omitting the company entirely is refused too (no silent skip).
     await expect(surf.setHealth({
@@ -401,7 +402,7 @@ describe('CSM↔CRM linkage (ADR 0212)', () => {
   it('§2: a MANUAL PATCH healthScore (no factors — the only shape the HTTP route sends) clears prior computed factors', async () => {
     const { accountId, companyId } = await linkedAccount('WasComputed');
     const surf = buildCsmSurface({ tenantId: 'default' });
-    await surf.setHealth({ accountId, healthScore: 40, factors: [{ factor: 'openTasks', weight: 3, value: 5 }], companyId, method: 'penalty-sum' });
+    await surf.setHealth({ accountId, healthScore: 40, factors: [{ factor: 'openTasks', weight: 3, value: 5 }], companyId, orgId: 'org-1', method: 'penalty-sum' });
 
     const patched = await jf<{ healthFactors?: unknown; healthComputedAt?: unknown; healthScore?: number; healthMethod?: unknown }>(
       `/host/openwop-app/csm/accounts/${accountId}`,
@@ -431,14 +432,14 @@ describe('R2 csm honesty ratchets (UX_UPGRADE-csm XCS-2/3)', () => {
     const a = await createAccount({ tenantId: 't-r2', name: 'StampCo', healthScore: 60, crmRef: { orgId: 'org-r2', companyId: company.companyId } });
     await expect(setAccountHealthForTenant('t-r2', a.accountId, {
       factors: [{ factor: 'Usage', weight: 100, value: 10 }],
-      computedForCompanyId: company.companyId,
+      computedForCompanyId: company.companyId, computedForOrgId: 'org-r2',
       method: 'weighted-mean',
     })).rejects.toMatchObject({ code: 'validation_error' });
     // The accept polarity: score + factors + the company measured + the method.
     const ok = await setAccountHealthForTenant('t-r2', a.accountId, {
       healthScore: 10,
       factors: [{ factor: 'Usage', weight: 100, value: 10 }],
-      computedForCompanyId: company.companyId,
+      computedForCompanyId: company.companyId, computedForOrgId: 'org-r2',
       method: 'weighted-mean',
     });
     expect(ok?.healthFactors).toHaveLength(1);
@@ -452,7 +453,7 @@ describe('R2 csm honesty ratchets (UX_UPGRADE-csm XCS-2/3)', () => {
     await expect(setAccountHealthForTenant('t-r2', a.accountId, {
       healthScore: 70,
       factors: [{ factor: 'Usage', weight: 100, value: 70 }],
-      computedForCompanyId: company.companyId,
+      computedForCompanyId: company.companyId, computedForOrgId: 'org-r2',
     })).rejects.toMatchObject({ code: 'validation_error' });
   });
 

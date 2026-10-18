@@ -96,6 +96,8 @@ export const messages = {
   typeChannelActivity: 'Activité du canal',
   typeCommentAdded: 'Nouveau commentaire',
   typeCommentReply: 'Nouvelle réponse',
+  typeCommentMention: 'Mention',
+  typeCommentResolved: 'Commentaire résolu',
   typeReviewRequested: 'Relecture demandée',
   typeReviewDecided: 'Relecture tranchée',
 
@@ -272,6 +274,8 @@ export const messages = {
   approvalsAiDraftedTitle: 'Ces traductions ont été rédigées par un modèle et n’ont été relues par personne.',
   approvalsLiveData_one: '{{count}} section aux données en direct, non figée par l’approbation',
   approvalsLiveData_other: '{{count}} sections aux données en direct, non figées par l’approbation',
+  approvalsOutdatedTranslations_one: '{{count}} traduction est obsolète ({{locales}}), à vérifier dans l’éditeur',
+  approvalsOutdatedTranslations_other: '{{count}} traductions sont obsolètes ({{locales}}), à vérifier dans l’éditeur',
   rejectReasonLabel: 'Pourquoi la renvoyez-vous ?',
   rejectReasonPlaceholder: 'L’éditeur le verra sur la page. Facultatif, mais un refus sans motif est une impasse.',
   rejectSendLabel: 'Renvoyer en brouillon',
@@ -285,6 +289,7 @@ export const messages = {
   approvalForbidden: 'Vous n’avez pas le droit de trancher cela.',
   approvalGone: 'Cet élément n’est plus disponible.',
   approvalAlreadyDecided: 'Quelqu’un a déjà tranché.',
+  approvalAgentPaused: 'Cet agent est en pause. Réactivez-le, puis approuvez à nouveau — la proposition est toujours en attente.',
   approvalStrategyChanged: "Cette stratégie a changé après sa soumission, la revue a donc été close. Elle doit être soumise à nouveau.",
   approvalSelfApproval: "Vous l’avez soumise : une autre personne doit en décider.",
 } as const;

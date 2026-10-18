@@ -4,6 +4,12 @@
  * app-builder binding; these pin the PARAMETRIZATION — a second, non-app-builder
  * trait config (slides-shaped: `slides` + `items` + `body` keys, no route stamp)
  * must behave identically.
+ *
+ * (w46: the "refuses a move into the node's own subtree" case was cut. The group
+ * was the LAST root node, so a sabotaged move still returned null — its dest
+ * path stopped resolving after the delete (w46g2-fac-subtree vacuous). The
+ * guard is key-independent and witnessed by app-builder canvasTree.test
+ * "refuses moving into the node itself or its own descendant" (w46g2-fac-subtree-ct).)
  */
 import { describe, expect, it } from 'vitest';
 import { treeOps, type TreeNodeBase } from '../treeOps.js';
@@ -46,11 +52,6 @@ describe('treeOps with non-default keys', () => {
     expect(s.items?.[0]?.body?.[1]?.props?.text).toBe('z');
     tree.deleteAt(s, [0, 1]);
     expect(s.items?.[0]?.body?.length).toBe(3); // a, b, c remain after the duplicate is removed
-  });
-
-  it('refuses a move into the node\'s own subtree', () => {
-    const s = slide();
-    expect(tree.moveNode(s, [1], [1, 0], 0)).toBeNull();
   });
 });
 

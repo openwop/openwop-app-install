@@ -13,7 +13,3 @@ export function setRuntimeCapabilities(capabilities: readonly string[]): void {
 export function hasCapability(name: string): boolean {
   return provided.has(name);
 }
-
-export function listCapabilities(): readonly string[] {
-  return Array.from(provided).sort();
-}

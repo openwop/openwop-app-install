@@ -41,6 +41,7 @@ export const messages = {
   formBoundUnknown: "Formulário vinculado {{formId}}",
   formsLoading: "Carregando formulários…",
   noFormsAvailable: "Ainda não há formulários nesta organização — crie um primeiro.",
+  formsLoadFailed: "Não foi possível carregar os formulários desta organização, então nenhum pode ser escolhido agora.",
   bindFormLabel: "Formulário de inscrição",
   bindFormChoose: "Escolha um formulário…",
   fieldWebinarIdHelp: "O id do webinar no Zoom — o número que aparece no link do Zoom.",

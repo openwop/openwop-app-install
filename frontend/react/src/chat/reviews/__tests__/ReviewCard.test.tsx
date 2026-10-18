@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 vi.mock('../ReviewHandoff.js', () => ({ ReviewHandoff: () => null })); // own tests: reviewHandoff.test.tsx
 import { render, screen, fireEvent, cleanup, waitFor, act } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
@@ -16,6 +16,15 @@ vi.mock('../../../client/useEffectiveAccess.js', () => ({
 }));
 
 afterEach(cleanup);
+// Shuffle-safe: every case starts with a fresh `confirm` (no queued once-values or
+// calls from an earlier case) that accepts, and an empty kept-failure map.
+beforeEach(() => {
+  vi.mocked(confirm).mockReset();
+  vi.mocked(confirm).mockResolvedValue(true);
+  useReviewStatusStore.setState({ failureById: {} });
+});
+/** Let a resolved promise chain (confirm → decide) run to completion. */
+const drain = async (): Promise<void> => { for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r)); };
 
 /**
  * ReviewCard (ADR 0068) — proves the normalized card derives its actions from
@@ -80,10 +89,14 @@ describe('ReviewCard', () => {
     expect(meter?.getAttribute('aria-hidden')).toBe('true');
   });
 
-  it('renders read-only (no action buttons) once the source reports no actions', () => {
+  it('renders read-only (no action buttons, no note field, the status shown) once the source reports no actions', () => {
     render(<ReviewCard review={{ ...base, status: 'approved', actions: [] }} onDecide={vi.fn()} />);
     expect(screen.queryByRole('button', { name: /Approve/ })).toBeNull();
     expect(screen.queryByRole('button', { name: /Reject/ })).toBeNull();
+    // The decision UI is gone, not merely empty: no note field to type into…
+    expect(screen.queryByRole('textbox')).toBeNull();
+    // …and the resolved status is stated (StatusBadge renders the raw status).
+    expect(screen.getByText('approved')).toBeTruthy();
   });
 
   describe('ADR 0778 D10 correction — a typed answer is collected on the card', () => {
@@ -104,7 +117,7 @@ describe('ReviewCard', () => {
       expect(document.activeElement).not.toBe(field);
       fireEvent.change(field, { target: { value: 'the blue one' } });
       fireEvent.click(screen.getByRole('button', { name: /submit/i }));
-      await waitFor(() => expect(onDecide).toHaveBeenCalledWith('resolve', expect.objectContaining({ value: { answer: 'the blue one' } })));
+      await waitFor(() => expect(onDecide).toHaveBeenCalledWith('resolve', { value: { answer: 'the blue one' } }));
     });
 
     it('a refinement starts from the draft and posts the edit', async () => {
@@ -114,7 +127,7 @@ describe('ReviewCard', () => {
       expect(field.value).toBe('Draft one');
       fireEvent.change(field, { target: { value: 'Draft two' } });
       fireEvent.click(screen.getByRole('button', { name: /submit refinement/i }));
-      await waitFor(() => expect(onDecide).toHaveBeenCalledWith('resolve', expect.objectContaining({ value: { refinement: 'Draft two' } })));
+      await waitFor(() => expect(onDecide).toHaveBeenCalledWith('resolve', { value: { refinement: 'Draft two' } }));
     });
 
     it('a kind the card cannot answer: an admin gets the run link, a member is told who can answer — never a dead link', () => {
@@ -149,7 +162,9 @@ describe('ReviewCard', () => {
     const onDecide = vi.fn().mockResolvedValue(undefined);
     render(<ReviewCard review={base} onDecide={onDecide} />);
     fireEvent.click(screen.getByRole('button', { name: /Reject/ }));
-    await waitFor(() => expect(confirm).toHaveBeenCalled());
+    await waitFor(() => expect(confirm).toHaveBeenCalledTimes(1));
+    expect(confirm).toHaveBeenCalledWith(expect.objectContaining({ danger: true }));
+    await drain(); // the declined answer has settled — anything it would post, it has
     expect(onDecide).not.toHaveBeenCalled();
   });
 
@@ -231,6 +246,15 @@ describe('ReviewCard composed-workflow section (ADR 0473)', () => {
     await waitFor(() => expect(onDecide).toHaveBeenCalledWith('approve', { expectedDefinitionHash: 'live-2' }));
   });
 
+  it('no live view ⇒ no unpinned Approve; Reject stays (grade-ux U2)', async () => {
+    const { liveDefinitionHash: _absent, ...withoutLive } = composed.composedWorkflow!;
+    const degraded: ReviewRequest = { ...composed, composedWorkflow: withoutLive };
+    render(<MemoryRouter><ReviewCard review={degraded} onDecide={vi.fn()} /></MemoryRouter>);
+    expect(await screen.findByText('feature.crm.nodes.search')).toBeTruthy(); // section settled
+    expect(screen.queryByRole('button', { name: /Approve & run/ })).toBeNull();
+    expect(screen.getByRole('button', { name: /^Reject$/ })).toBeTruthy();
+  });
+
   it('reject does NOT carry the hash (only approve pins what was seen)', async () => {
     const onDecide = vi.fn().mockResolvedValue(undefined);
     render(<MemoryRouter><ReviewCard review={composed} onDecide={onDecide} /></MemoryRouter>);
@@ -274,6 +298,10 @@ describe('ADR 0862 — an assistant action review', () => {
   it('a reject carries no hash (refusing a changed action is still a refusal)', async () => {
     const onDecide = vi.fn().mockResolvedValue(undefined);
     render(<MemoryRouter><ReviewCard review={action} onDecide={onDecide} /></MemoryRouter>);
+    // AssistantActionFields is lazy and NOT in its own Suspense: until its chunk
+    // loads the whole card shows the loading fallback (no buttons). Wait for the
+    // real settle signal — under shuffle this case can run before the chunk is cached.
+    expect(await screen.findByText('Q3 numbers')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: /^Reject$/ }));
     await waitFor(() => expect(onDecide).toHaveBeenCalledWith('reject', {}));
   });

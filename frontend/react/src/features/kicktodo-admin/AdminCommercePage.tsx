@@ -14,6 +14,7 @@ import { Button } from '../../ui/Button.js';
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
+import { PageHeader } from '../../ui/PageHeader.js';
 import { Notice } from '../../ui/Notice.js';
 import { TextField } from '../../ui/Field.js';
 import { formatCurrencyMinor, formatPercent } from '../../i18n/format.js';
@@ -28,6 +29,7 @@ import {
   confirmPayoutRun,
   cancelPayoutRun,
   shareLedgerCsvUrl,
+  PayoutRequestError,
   type PayoutRun,
   type SharePolicy,
 } from '../../client/kicktodoSeatClient.js';
@@ -38,6 +40,19 @@ function runStateKey(s: PayoutRun['state']): string {
     case 'open': return 'payoutRunOpen';
     case 'confirmed': return 'payoutRunConfirmed';
     default: return 'payoutRunCanceled';
+  }
+}
+
+/** KTD-2 — the payout panel's failure kinds, each with its own localized copy. */
+type PayoutFailure = 'failed' | 'policy-conflict' | 'run-conflict';
+
+const isConflict = (e: unknown): boolean => e instanceof PayoutRequestError && e.status === 409;
+
+function payoutFailureKey(f: PayoutFailure): string {
+  switch (f) {
+    case 'policy-conflict': return 'payoutPolicyConflict';
+    case 'run-conflict': return 'payoutRunConflict';
+    default: return 'payoutError';
   }
 }
 
@@ -83,7 +98,10 @@ export function AdminCommercePage(): JSX.Element {
   const [policyInput, setPolicyInput] = useState('');
   const [runs, setRuns] = useState<PayoutRun[]>([]);
   const [payoutBusy, setPayoutBusy] = useState(false);
-  const [payoutError, setPayoutError] = useState(false);
+  // KTD-2 — WHICH failure, not just "failed": a 409 means a concurrent operator
+  // changed the share policy or the run first, and saying so (then re-reading)
+  // is the recovery. The server's own text never reaches the page.
+  const [payoutError, setPayoutError] = useState<PayoutFailure | null>(null);
   const [payoutInvalid, setPayoutInvalid] = useState(false); // grade-ux: range validation ≠ action failure
   const [payoutEmpty, setPayoutEmpty] = useState(false);
   const [reference, setReference] = useState<Record<string, string>>({});
@@ -113,28 +131,47 @@ export function AdminCommercePage(): JSX.Element {
     const bps = Number(policyInput.trim());
     setPayoutInvalid(false);
     if (!Number.isInteger(bps) || bps < 0 || bps > 10000) { setPayoutInvalid(true); return; }
-    setPayoutBusy(true); setPayoutError(false);
+    // KTD-1 — a revenue-share rate is a MONEY write that overwrites the current
+    // one, so it is confirmed first, naming the rate it replaces and the new one.
+    const pct = (b: number): string => formatPercent(b / 10000, { maximumFractionDigits: 2 });
+    const ok = await confirm({
+      title: t('payoutPolicyConfirmTitle'),
+      body: policy
+        ? t('payoutPolicyConfirmBodyChange', { from: pct(policy.shareBps), to: pct(bps) })
+        : t('payoutPolicyConfirmBodyFirst', { to: pct(bps) }),
+      confirmLabel: t('payoutPolicyConfirmCta'),
+    });
+    if (!ok) return;
+    setPayoutBusy(true); setPayoutError(null);
     try { await setSharePolicy(bps); setPolicyInput(''); await loadPayouts(); }
-    catch { setPayoutError(true); }
+    catch (e) {
+      // KTD-2 — a concurrent change won; show the rate that is now in force.
+      if (isConflict(e)) { setPayoutError('policy-conflict'); await loadPayouts(); }
+      else setPayoutError('failed');
+    }
     finally { setPayoutBusy(false); }
   };
 
   const onCreateRun = async () => {
-    setPayoutBusy(true); setPayoutError(false); setPayoutEmpty(false);
+    setPayoutBusy(true); setPayoutError(null); setPayoutEmpty(false);
     try {
       const run = await createPayoutRun();
       if (!run) setPayoutEmpty(true); // nothing accrued — an honest no-op
       await loadPayouts();
-    } catch { setPayoutError(true); }
+    } catch { setPayoutError('failed'); }
     finally { setPayoutBusy(false); }
   };
 
   const onConfirmRun = async (runId: string) => {
     const ref = (reference[runId] ?? '').trim();
     if (!ref) return;
-    setPayoutBusy(true); setPayoutError(false);
+    setPayoutBusy(true); setPayoutError(null);
     try { await confirmPayoutRun(runId, ref); await loadPayouts(); }
-    catch { setPayoutError(true); }
+    catch (e) {
+      // KTD-2 — 409: the run was confirmed/canceled/changed elsewhere first.
+      if (isConflict(e)) { setPayoutError('run-conflict'); await loadPayouts(); }
+      else setPayoutError('failed');
+    }
     finally { setPayoutBusy(false); }
   };
 
@@ -149,9 +186,12 @@ export function AdminCommercePage(): JSX.Element {
       danger: true,
     });
     if (!ok) return;
-    setPayoutBusy(true); setPayoutError(false);
+    setPayoutBusy(true); setPayoutError(null);
     try { await cancelPayoutRun(runId); await loadPayouts(); }
-    catch { setPayoutError(true); }
+    catch (e) {
+      if (isConflict(e)) { setPayoutError('run-conflict'); await loadPayouts(); }
+      else setPayoutError('failed');
+    }
     finally { setPayoutBusy(false); }
   };
 
@@ -161,10 +201,7 @@ export function AdminCommercePage(): JSX.Element {
         <Link className="btn-ghost btn-sm" to="/admin/kicktodo">{t('backToConsole')}</Link>
         <Link className="btn-ghost btn-sm" to="/admin/kicktodo/commerce/paid-challenges">{t('openPaidChallenges')}</Link>
       </div>
-      <header className="page-header">
-        <h1 className="page-header__title">{t('commerceTitle')}</h1>
-        <p className="page-header__lede">{t('commerceLede')}</p>
-      </header>
+      <PageHeader title={t('commerceTitle')} lede={t('commerceLede')} />
 
       <section className="surface-card" aria-label={t('reconcileHeading')}>
         <h2 className="kt-eyebrow">{t('reconcileHeading')}</h2>
@@ -174,7 +211,7 @@ export function AdminCommercePage(): JSX.Element {
             {busy ? t('reconciling') : t('reconcileCta')}
           </Button>
         </div>
-        {error && <Notice variant="error">{t('reconcileError')}</Notice>}
+        {error && <Notice variant="error" announce={t('reconcileError')}>{t('reconcileError')}</Notice>}
         {result && (
           <Notice variant={result.entitlementsRepaired > 0 ? 'success' : 'info'}>
             {result.entitlementsRepaired > 0
@@ -195,7 +232,7 @@ export function AdminCommercePage(): JSX.Element {
             {seatBusy ? t('reconciling') : t('seatReconcileCta')}
           </Button>
         </div>
-        {seatError && <Notice variant="error">{t('seatReconcileError')}</Notice>}
+        {seatError && <Notice variant="error" announce={t('seatReconcileError')}>{t('seatReconcileError')}</Notice>}
         {seatResult && (
           // Post-state, NOT a repair count: the route returns no delta, so
           // claiming "N repaired" would be a fabricated number.
@@ -238,8 +275,8 @@ export function AdminCommercePage(): JSX.Element {
           {/* ADR 0445 P4 — the operator statement (cookie-authed download). */}
           <a className="btn-ghost btn-sm" href={shareLedgerCsvUrl} download>{t('payoutLedgerCsvCta')}</a>
         </div>
-        {payoutInvalid && <Notice variant="error">{t('payoutPolicyInvalid')}</Notice>}
-        {payoutError && <Notice variant="error">{t('payoutError')}</Notice>}
+        {payoutInvalid && <Notice variant="error" announce={t('payoutPolicyInvalid')}>{t('payoutPolicyInvalid')}</Notice>}
+        {payoutError && <Notice variant="error" announce={t(payoutFailureKey(payoutError))}>{t(payoutFailureKey(payoutError))}</Notice>}
         {payoutEmpty && <Notice variant="info">{t('payoutNothingAccrued')}</Notice>}
         {policyFailed || runsFailed ? <Notice variant="warning" announce={t('payoutReadFailed')}>{t('payoutReadFailed')}</Notice> : null}
         {!payoutLoaded ? <p className="muted u-fs-13">{t('common:loading')}</p>

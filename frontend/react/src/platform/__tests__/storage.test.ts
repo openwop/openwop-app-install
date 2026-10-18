@@ -1,3 +1,15 @@
+/**
+ * Central client-storage helper (ADR 0434 / threat-model-secret-leakage). The key
+ * registry never classes a key `secret`; `diag` keys live in sessionStorage (tab
+ * lifetime) and never land in localStorage; JSON reads are guard-validated and fall
+ * back rather than surfacing a foreign shape; remove really removes.
+ *
+ * (Subject scoping — one user never reading another's `content` keys — is
+ * `src/auth/__tests__/localContentAdoption.test.ts`; the tri-state is storageSubject.test.)
+ *
+ * Sabotage that turns it red: route every area to localStorage; return the parsed value
+ * without the guard; class a key `secret`; make writeRaw or removeRaw a no-op.
+ */
 import { describe, it, expect, beforeEach } from 'vitest';
 import { STORAGE_KEYS, readJson, writeJson, readRaw, writeRaw, removeRaw } from '../storage.js';
 

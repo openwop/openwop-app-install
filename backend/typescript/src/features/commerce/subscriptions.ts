@@ -22,7 +22,7 @@ import { getProduct, getOrder, createOrder, markAsPaid, quantizeMoney, type Orde
 import { resolvePrice } from './pricing.js';
 import { setSubscriptionInvoiceHook } from '../billing/subscriptionInvoiceHook.js';
 import { onProductDeleted } from './productLifecycleSeam.js';
-import { createStripeSubscription, cancelStripeSubscription } from '../billing/stripeApi.js';
+import { createStripeSubscription, cancelStripeSubscription, type StorefrontCharge } from '../billing/stripeApi.js';
 import { getContact } from '../crm/contactsService.js';
 import { createLogger } from '../../observability/logger.js';
 import { recordCommerceAction } from './telemetry.js';
@@ -84,7 +84,7 @@ export async function getProductSubscriptionByStripeId(tenantId: string, stripeS
  *  subscription, and places the FIRST period order immediately. Demo-mode by default
  *  (no live Stripe charge; `paymentMode:'demo'`). */
 export async function subscribeToProduct(input: {
-  tenantId: string; orgId: string; createdBy: string; productId: string; interval: unknown; contactId?: string; stripeKey?: string | null; idempotencyKey?: string;
+  tenantId: string; orgId: string; createdBy: string; productId: string; interval: unknown; contactId?: string; /** ADR 0877 D2 — the settlement lane's charge (platform or the tenant's Connect account); absent/null ⇒ demo. Minted only by `resolveStorefrontSettlement`. */ charge?: StorefrontCharge | null; idempotencyKey?: string;
 }): Promise<{ subscription: ProductSubscription; firstOrder: Order; providerError?: string }> {
   const product = await getProduct(input.tenantId, input.orgId, input.productId);
   if (!product) throw new OpenwopError('validation_error', 'Product not found.', 400, { productId: input.productId });
@@ -96,7 +96,7 @@ export async function subscribeToProduct(input: {
   const base = (await resolvePrice(input.tenantId, input.orgId, product, { buyer: { ...(input.contactId ? { contactId: input.contactId } : {}) } })).price;
   const save = product.subscription.savePercent ?? 0;
   const unitPrice = quantizeMoney(base * (1 - save / 100), product.currency);
-  const paymentMode: 'demo' | 'live' = input.stripeKey ? 'live' : 'demo';
+  const paymentMode: 'demo' | 'live' = input.charge ? 'live' : 'demo';
   const now = nowIso();
   const subscriptionId = `psub:${randomUUID()}`;
   // Place the first period order at the discounted price (the internal override seam —
@@ -113,11 +113,11 @@ export async function subscribeToProduct(input: {
   let stripeSubscriptionId: string | undefined;
   let mode: 'demo' | 'live' = paymentMode;
   let providerError: string | undefined;
-  const stripeConfigured = !!input.stripeKey;
-  if (input.stripeKey) {
+  const stripeConfigured = !!input.charge;
+  if (input.charge) {
     try {
       const email = input.contactId ? (await getContact(input.contactId).catch(() => null))?.email : undefined;
-      const created = await createStripeSubscription(input.stripeKey, {
+      const created = await createStripeSubscription(input.charge, {
         ...(email ? { email } : {}), unitPrice, currency: product.currency, interval, productName: product.name,
         metadata: { productSubscriptionId: subscriptionId, tenantId: input.tenantId, orgId: input.orgId },
       });

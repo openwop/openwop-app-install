@@ -38,6 +38,9 @@ export interface ScheduledChat {
   /** ADR 0125 Phase 3c — the scheduler's next/last fire time (ISO). */
   nextRunAt?: string;
   lastRunAt?: string;
+  /** ADR 0879 D7 — the last fire failed; `conversation_write_refused` = its reply
+   *  could not be posted (the owner must see why, not a silent drop). */
+  lastError?: { code: string; message: string };
 }
 
 const BASE = (orgId: string): string => `/host/openwop-app/scheduled-chats/orgs/${encodeURIComponent(orgId)}/chats`;

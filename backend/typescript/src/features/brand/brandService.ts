@@ -377,14 +377,17 @@ export async function createBrand(
   if (!name) throw new OpenwopError('validation_error', 'A brand name is required.', 400, { field: 'name' });
   const now = new Date().toISOString();
   const identity = sanitizeIdentity(input.identity);
+  const id = randomUUID();
+  const parentBrandId = optionalCleanString(input.parentBrandId, NAME_MAX);
+  if (parentBrandId) await assertParentInOrg(tenantId, orgId, id, parentBrandId);
   const brand: Brand = {
-    id: randomUUID(),
+    id,
     tenantId,
     orgId,
     name,
     description: cleanString(input.description, TEXT_MAX),
     status: input.status === 'archived' ? 'archived' : 'active',
-    parentBrandId: optionalCleanString(input.parentBrandId, NAME_MAX),
+    parentBrandId,
     voiceProfile: sanitizeVoiceProfile(input.voiceProfile),
     positioning: sanitizePositioning(input.positioning),
     keyPhrases: sanitizeKeyPhrases(input.keyPhrases),
@@ -457,6 +460,10 @@ export async function updateBrand(
   if (input.expectedUpdatedAt !== undefined && input.expectedUpdatedAt !== existing.updatedAt) {
     throw new OpenwopError('conflict', 'This brand changed since you opened it — reload and reapply your edits.', 409, { brandId, expected: input.expectedUpdatedAt, actual: existing.updatedAt });
   }
+  if (input.parentBrandId !== undefined) {
+    const parent = optionalCleanString(input.parentBrandId, NAME_MAX);
+    if (parent && parent !== existing.parentBrandId) await assertParentInOrg(tenantId, existing.orgId, existing.id, parent);
+  }
   const next: Brand = {
     ...existing,
     name: input.name !== undefined ? cleanString(input.name, NAME_MAX) || existing.name : existing.name,
@@ -513,10 +520,33 @@ export async function __clearBrands(): Promise<void> {
 
 // ── ADR 0354 P3 — parent-brand cascade ───────────────────────────────────────
 
+const PARENT_DEPTH_MAX = 5;
+
+/**
+ * ADR 0891 D3 (BR2WF-3) — a parent brand must be a brand in the SAME org, not the
+ * brand itself, and must not close a cycle. The cascade hands a parent's bans to
+ * every reader of the child, so a parent in another org would publish that org's
+ * rules to people who cannot read them.
+ */
+async function assertParentInOrg(tenantId: string, orgId: string, brandId: string, parentBrandId: string): Promise<void> {
+  const refuse = (message: string): never => {
+    throw new OpenwopError('validation_error', message, 400, { field: 'parentBrandId' });
+  };
+  if (parentBrandId === brandId) refuse('A brand cannot be its own parent.');
+  const parent = await getBrand(tenantId, parentBrandId);
+  if (!parent || parent.orgId !== orgId) refuse('The parent brand must be a brand in the same organization.');
+  let cur: string | undefined = parent!.parentBrandId;
+  for (let depth = 0; cur && depth < PARENT_DEPTH_MAX; depth += 1) {
+    if (cur === brandId) refuse('That parent would make a cycle.');
+    cur = (await getBrand(tenantId, cur))?.parentBrandId;
+  }
+}
+
 /** Effective guardrail rules for a brand: banned phrases and avoid-lists are
  *  ADDITIVE down the parentBrandId chain (a child extends, never removes);
  *  voice/tone stay nearest-wins (the child brand object itself). Cycle-guarded,
- *  depth ≤ 5. Pure aggregation over stored rows. */
+ *  depth ≤ 5, and never past the brand's own org (ADR 0891 D3). Pure aggregation
+ *  over stored rows. */
 export async function resolveEffectiveBrandRules(tenantId: string, brandId: string): Promise<{ bannedPhrases: string[]; avoidPhrases: string[] } | null> {
   const seen = new Set<string>();
   const banned = new Set<string>();
@@ -524,10 +554,18 @@ export async function resolveEffectiveBrandRules(tenantId: string, brandId: stri
   let cur: string | undefined = brandId;
   let depth = 0;
   let found = false;
-  while (cur && depth < 5 && !seen.has(cur)) {
+  let orgId: string | undefined;
+  while (cur && depth < PARENT_DEPTH_MAX && !seen.has(cur)) {
     seen.add(cur);
     const b = await getBrand(tenantId, cur);
     if (!b) break;
+    // ADR 0891 D3 — the cascade stops at an org boundary (a row written before the
+    // write-time check). Logged so an operator can see whether any exist.
+    if (orgId !== undefined && b.orgId !== orgId) {
+      log.warn('brand_parent_cross_org_skipped', { tenantId, brandId, parentBrandId: b.id });
+      break;
+    }
+    orgId = b.orgId;
     found = true;
     for (const ph of b.keyPhrases.bannedPhrases) banned.add(ph);
     for (const rule of b.channelVoiceRules) for (const ph of rule.avoidPhrases ?? []) avoid.add(ph);
@@ -550,7 +588,9 @@ export interface BrandAuditRow {
 }
 const brandAudit = new DurableCollection<BrandAuditRow>('brand:audit', (r) => `${r.tenantId}:${r.brandId}:${r.auditId}`);
 const AUDIT_CAP = 500;
-const AUDIT_FIELDS = ['keyPhrases', 'channelVoiceRules', 'governance', 'positioning', 'voiceProfile'] as const;
+// ADR 0891 (grade BR2CD-2): `name` and `identity` too — the app brand's super-admin
+// edits are identity edits, and without them D9's attributed actor was never written.
+const AUDIT_FIELDS = ['name', 'keyPhrases', 'channelVoiceRules', 'governance', 'positioning', 'voiceProfile', 'identity'] as const;
 
 /** Record a guardrail-relevant diff (no-op when nothing relevant changed). */
 export async function recordBrandAudit(tenantId: string, brandId: string, actor: string, before: Partial<Brand> | null, after: Partial<Brand>): Promise<void> {
@@ -677,4 +717,45 @@ export function buildAdsComplianceChecker(
     if (!brand || !policy || policy.blockPublish === 'off') return { verdict: 'allow' };
     return scoreBrandCompliance(tenantId, brand, policy, args.content);
   };
+}
+
+// ── ADR 0891 D8 — subject erasure over the brand + audit stores ─────────────
+
+/** Remove every `forms` id from an `allowedEditors` list nested anywhere in an
+ *  audit diff value (the `governance` before/after images). */
+function scrubEditors(value: unknown, forms: ReadonlySet<string>): unknown {
+  if (!value || typeof value !== 'object') return value;
+  const g = value as { allowedEditors?: unknown };
+  if (!Array.isArray(g.allowedEditors)) return value;
+  return { ...g, allowedEditors: g.allowedEditors.filter((id) => !(typeof id === 'string' && forms.has(id))) };
+}
+
+/**
+ * Erase a person from one tenant's brands and their audit trail, keeping every
+ * brand (org config): `createdBy` and an audit `actor` become `tombstone`, and the
+ * person leaves `governance.allowedEditors` and every editor list inside an audit
+ * diff. Returns the rows touched. Called by `erasure.ts`, which owns the rules.
+ */
+export async function eraseBrandStoreSubject(tenantId: string, forms: ReadonlySet<string>, tombstone: string): Promise<number> {
+  let touched = 0;
+  for (const b of await brands.listByPrefix(`${tenantId}::`)) {
+    if (b.tenantId !== tenantId) continue;
+    const editors = b.governance.allowedEditors.filter((id) => !forms.has(id));
+    const creator = forms.has(b.createdBy);
+    if (!creator && editors.length === b.governance.allowedEditors.length) continue;
+    // `updatedAt` MOVES (grade BR2CD-1): it is the editor's CAS token, and a Brand
+    // page opened before the erasure would otherwise save the erased editor straight
+    // back. A stale save now gets the existing 409 and reloads.
+    await brands.put({ ...b, ...(creator ? { createdBy: tombstone } : {}), governance: { ...b.governance, allowedEditors: editors }, updatedAt: nextUpdatedAt(b.updatedAt) });
+    touched += 1;
+  }
+  for (const row of await brandAudit.listByPrefix(`${tenantId}:`)) {
+    if (row.tenantId !== tenantId) continue;
+    const changes = row.changes.map((c) => (c.field === 'governance' ? { ...c, from: scrubEditors(c.from, forms), to: scrubEditors(c.to, forms) } : c));
+    const actor = forms.has(row.actor) ? tombstone : row.actor;
+    if (actor === row.actor && JSON.stringify(changes) === JSON.stringify(row.changes)) continue;
+    await brandAudit.put({ ...row, actor, changes });
+    touched += 1;
+  }
+  return touched;
 }

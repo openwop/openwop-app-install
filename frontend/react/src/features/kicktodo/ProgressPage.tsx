@@ -3,8 +3,10 @@
  * not activity volume. It NEVER shows a bare percentage that implies false
  * precision: every figure states its basis ("6 of 10 required actions"), and
  * consistency is framed as recovery, never a broken streak or a failure. Backed
- * by the existing per-enrollment ProgressView; the richer achievement/verifier
- * trace (§5.6 detail) is honestly deferred until the backend exposes it.
+ * by the ONE batch ProgressView read (KTX-3), which carries the §5.6 evidence
+ * trace (what, when, done or not — recovery rows marked) and the store-backed
+ * recovery counts; both render below. (KTP-5: this header used to call the
+ * trace "deferred until the backend exposes it" after it already rendered.)
  */
 import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
@@ -27,6 +29,9 @@ export function ProgressPage() {
   const { t, i18n } = useTranslation('kicktodo');
   const [rows, setRows] = useState<Row[] | null>(null);
   const [error, setError] = useState(false);
+  // PT-2 — the catalog is a SIDE read (titles only). Its failure must not fail
+  // the page, but it is stated, never silently replaced by raw challenge ids.
+  const [namesUnknown, setNamesUnknown] = useState(false);
   const [reloadSequence, setReloadSequence] = useState(0);
 
   useEffect(() => {
@@ -39,10 +44,11 @@ export function ProgressPage() {
         // (the per-enrollment fan-out was a per-IP rate-limit hazard).
         const [{ enrollments, progress }, catalog] = await Promise.all([
           listEnrollmentsWithProgress(),
-          listChallengesForLocale(i18n.language).catch(() => []),
+          listChallengesForLocale(i18n.language).then((rows) => ({ ok: true as const, rows })).catch(() => ({ ok: false as const, rows: [] })),
         ]);
-        const titleOf = new Map(catalog.map((n) => [n.challenge.id, n.challenge.title]));
+        const titleOf = new Map(catalog.rows.map((n) => [n.challenge.id, n.challenge.title]));
         if (!current) return;
+        setNamesUnknown(!catalog.ok);
         setRows(enrollments.map((e): Row => ({
           enrollmentId: e.id,
           challengeId: e.challengeId,
@@ -75,6 +81,12 @@ export function ProgressPage() {
           body={t('progressLoadErrorBody')}
           action={<Button variant="accent-solid" onClick={() => setReloadSequence((n) => n + 1)}>{t('progressRetry')}</Button>}
         />
+      )}
+      {namesUnknown && rows && rows.length > 0 && !error && (
+        <Notice variant="warning" announce={t('progressNamesUnknown')}>
+          {t('progressNamesUnknown')}{' '}
+          <Button variant="quiet" size="sm" onClick={() => setReloadSequence((n) => n + 1)}>{t('common:retry')}</Button>
+        </Notice>
       )}
       {rows === null && !error && <StateCard loading title={t('progressTitle')} />}
       {isEmpty && !error && (

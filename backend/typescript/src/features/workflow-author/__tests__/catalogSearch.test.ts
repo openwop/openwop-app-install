@@ -1,5 +1,16 @@
 /**
  * ADR 0791 — the pure catalog search behind the Architect's `draft` tool.
+ *
+ * Guards what the model is shown when it asks the closed-world catalog a
+ * question (ADR 0773 G-10b: the whole catalog blew the managed tier's daily
+ * token cap in one read): ranking, stopwords + the 5-letter stem, the result
+ * cap, the `excluded` filtering (ADR 0773 B.2), the `noDedicatedMatch` stop with
+ * full-schema `generalBlocks` (B.5), and that every GENERAL_BLOCKS id is a
+ * vendored node. Each case is sabotage-witnessed (grade-tests w18, probes
+ * `w18g1-cs-*`): reversing the sort, dropping the typeId tiebreak, the stopword
+ * filter, the stem, the +20 exact-id bonus, the dedupe, the limit clamp, the
+ * category counts, any `selectExcluded` branch, the dedicated threshold, the
+ * workspace filter on blocks, or the `tokens.length > 0` hint gate turns a case red.
  */
 import { describe, expect, it } from 'vitest';
 import { searchAuthoringCatalog, selectExcluded, tokenize, CATALOG_SEARCH_MAX_LIMIT, GENERAL_BLOCKS, NO_DEDICATED_MATCH_HINT } from '../catalogSearch.js';
@@ -31,12 +42,17 @@ describe('searchAuthoringCatalog', () => {
     expect(searchAuthoringCatalog(CATALOG, { query: 'send an email to the lead' }).nodes[0]!.typeId).toBe('core.email.send');
   });
 
-  it('stems longer words ("deduplicate" finds "Deduplicates")', () => {
-    expect(searchAuthoringCatalog(CATALOG, { query: 'deduplicate' }).nodes.map((n) => n.typeId)).toContain('core.data.idempotency');
+  it('stems longer words ("deduplicating" finds "Deduplicates")', () => {
+    // NOT "deduplicate": that is a literal substring of the description, so it
+    // matched with the stem turned off (w18 probe cs-stem was vacuous).
+    expect(searchAuthoringCatalog(CATALOG, { query: 'deduplicating' }).nodes.map((n) => n.typeId)).toEqual(['core.data.idempotency']);
   });
 
   it('an exact typeId query returns that type first', () => {
-    expect(searchAuthoringCatalog(CATALOG, { query: 'core.noop' }).nodes[0]!.typeId).toBe('core.noop');
+    // A decoy that outranks core.noop on words alone (16 vs 6): only the exact-id
+    // bonus puts core.noop first (w18 probe cs-exactid was vacuous without it).
+    const decoyed = [...CATALOG, node('vendor.x.core-noop-batch', 'Core noop batch', 'flow', 'core noop')];
+    expect(searchAuthoringCatalog(decoyed, { query: 'core.noop' }).nodes[0]!.typeId).toBe('core.noop');
   });
 
   it('caps the limit, and never repeats a type fetched by id', () => {
@@ -44,14 +60,19 @@ describe('searchAuthoringCatalog', () => {
     const ids = r.nodes.map((n) => n.typeId);
     expect(new Set(ids).size).toBe(ids.length);
     expect(ids[0]).toBe('feature.crm.nodes.create-deal');
-    expect(searchAuthoringCatalog(CATALOG, { query: 'e', limit: 999 }).nodes.length).toBeLessThanOrEqual(CATALOG_SEARCH_MAX_LIMIT);
+    // A catalog LARGER than the cap, with a query every node matches — the old
+    // 7-node fixture and a one-letter query (tokenized to nothing) could never
+    // reach the cap (w18 probe cs-cap was vacuous).
+    const many = Array.from({ length: CATALOG_SEARCH_MAX_LIMIT + 5 }, (_, i) =>
+      node(`x.gen.n${String(i).padStart(2, '0')}`, `Generic ${i}`, 'flow', 'generic'));
+    expect(searchAuthoringCatalog(many, { query: 'generic', limit: 999 }).nodes).toHaveLength(CATALOG_SEARCH_MAX_LIMIT);
   });
 
   it('an empty read and a no-match search both say what exists', () => {
     const empty = searchAuthoringCatalog(CATALOG, {});
     expect(empty.nodes).toEqual([]);
     expect(empty.categories).toEqual({ flow: 3, integration: 3, data: 1 });
-    expect(searchAuthoringCatalog(CATALOG, { query: 'zzzqqq' }).categories).toBeDefined();
+    expect(searchAuthoringCatalog(CATALOG, { query: 'zzzqqq' }).categories).toEqual({ flow: 3, integration: 3, data: 1 });
   });
 
   it('is deterministic', () => {
@@ -139,6 +160,10 @@ describe('noDedicatedMatch — a stopping point for the search (ADR 0773 G-10b, 
 
   it('a typeIds-only fetch is not a search and carries no hint', () => {
     expect(searchAuthoringCatalog(WITH_BLOCKS, { typeIds: ['core.flow.if'] }).noDedicatedMatch).toBeUndefined();
+    // An unknown-only fetch returns nothing, so the `tokens.length > 0` gate is the
+    // only thing withholding the hint (a found typeId is "dedicated" by itself —
+    // w18 probe cs-typeids-nohint was vacuous on that alone).
+    expect(searchAuthoringCatalog(WITH_BLOCKS, { typeIds: ['not.a.node'] }).noDedicatedMatch).toBeUndefined();
   });
 
   it('every GENERAL_BLOCKS typeId is a node in a vendored pack (the list cannot drift from the catalog)', () => {

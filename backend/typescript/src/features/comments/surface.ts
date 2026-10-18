@@ -22,7 +22,8 @@ import type { BundleScope } from '../../host/inMemorySurfaces.js';
 import { OpenwopError } from '../../types.js';
 import { assertOrgScope } from '../../host/accessControlService.js';
 import { surfaceStr as str, surfaceOptStr as optStr, type FeatureSurface } from '../../host/featureSurfaces.js';
-import { listThread, createComment, updateComment, getComment, RESOURCE_TYPES, type ResourceType } from './commentsService.js';
+import { listThread, createComment, updateComment, getComment, RESOURCE_TYPES, type ResourceType, type CommentCaller } from './commentsService.js';
+import type { HostEventOrigin } from '../../host/hostEventDispatcher.js';
 import { emitCommentNotification } from './notifications.js';
 
 const INTERNAL = new Set(['tenantId']);
@@ -73,6 +74,15 @@ export function buildCommentsSurface(scope: BundleScope): FeatureSurface {
   // SYSTEM runs (schedule / inbound webhook), which is the correct fail-closed
   // signal and is a genuinely reachable lane, not a defensive branch.
   const viewer = scope.actingUserId;
+  // ADR 0881 D1/D2 — on this lane every spelling is the run owner's principal
+  // (`actingUserId` is stamped as `req.userId ?? principalId`, the conversation's own
+  // owner spelling), and entitlement asks with the same id `resolveFeatureAccess` uses.
+  const caller: CommentCaller = viewer ? { subject: viewer, principal: viewer, toggle: { userId: viewer } } : { subject: undefined };
+  // ADR 0617 D1a — a comment event emitted from inside a run carries its origin, so the
+  // dispatcher refuses to start a second run of the very workflow that is executing.
+  const origin: HostEventOrigin | undefined = scope.runId
+    ? { runId: scope.runId, ...(scope.workflowId ? { workflowId: scope.workflowId } : {}), ...(scope.chainId ? { chainId: scope.chainId } : {}) }
+    : undefined;
 
   /**
    * CMNT-4 / WF-CMNT-4 — the membership predicate this lane did not have.
@@ -130,7 +140,7 @@ export function buildCommentsSurface(scope: BundleScope): FeatureSurface {
     list: async (args) => {
       const rt = requireResourceType(args.resourceType);
       const orgId = await requireOrg(args.orgId, 'workspace:read');
-      const rows = await listThread(tenantId, orgId, rt, str(args.resourceId), { subject: viewer });
+      const rows = await listThread(tenantId, orgId, rt, str(args.resourceId), caller);
       if (rows === null) throw new OpenwopError('not_found', 'Resource not found in this organization.', 404, { resourceId: str(args.resourceId) });
       return { comments: rows.map(project) };
     },
@@ -143,8 +153,9 @@ export function buildCommentsSurface(scope: BundleScope): FeatureSurface {
         // ADR 0659 D1 — the run acts with its INITIATOR's visibility and is attributed to
         // the AGENT that wrote it. D10 — `onBehalfOf` keeps the row reachable by the
         // initiator's erasure (`agent:${runId}` matches no subject key).
-        body: str(args.body), authorId: author, caller: { subject: viewer },
+        body: str(args.body), authorId: author, caller,
         ...(viewer ? { onBehalfOf: viewer } : {}),
+        ...(origin ? { origin } : {}),
       });
       await emitCommentNotification(comment, notify);
       return { comment: project(comment) };
@@ -152,7 +163,7 @@ export function buildCommentsSurface(scope: BundleScope): FeatureSurface {
     resolve: async (args) => {
       const commentId = str(args.commentId);
       const orgId = await requireOrg(args.orgId, 'workspace:write');
-      const existing = await getComment(tenantId, orgId, commentId, { subject: viewer });
+      const existing = await getComment(tenantId, orgId, commentId, caller);
       if (!existing) return { comment: null };
       // CMNT-5 / WF-CMNT-5 — this passed `existing.authorId` as the `actorId`,
       // which is PRECISELY the value `updateComment` compares against for its
@@ -164,8 +175,12 @@ export function buildCommentsSurface(scope: BundleScope): FeatureSurface {
       // than as a landmine. The agent's own stable principal goes in instead (the
       // same value `post` already stamps); resolve is member-level, and the
       // member check is `requireOrg` above.
-      const c = await updateComment(tenantId, orgId, commentId, author, { status: 'resolved' }, { subject: viewer });
-      return { comment: c ? project(c) : null };
+      // ADR 0881 D6 — `resolvedBy` = the agent, `resolvedOnBehalfOf` = the human, so
+      // erasure reaches it. The node is classified side-effect (correction H1): on
+      // `:fork` this is served from the recorded outcome, never re-run.
+      const r = await updateComment(tenantId, orgId, commentId, { id: author, ...(viewer ? { onBehalfOf: viewer } : {}) }, { status: 'resolved' }, caller, origin);
+      if (r) await emitCommentNotification(r.comment, r.notify);
+      return { comment: r ? project(r.comment) : null };
     },
   };
 }

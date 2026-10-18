@@ -7,6 +7,12 @@
  *     whose role cannot respond (422), handing to yourself (422), a caller who
  *     cannot decide it (403), a note without an intent (400);
  *   - DSAR erases the handing person's note and identity.
+ *
+ * Sabotages that turn it red (probed w28): the GET returning null; dropping the
+ * self check, the caller's `canDecide` check, the target's `canDecide` check, the
+ * target's `approvals:respond` check (the ONLY guard for the in-list viewer —
+ * `canDecide` comes from the approver list alone), or the no-intent 400; DSAR
+ * keeping the note text.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -21,7 +27,6 @@ import { registerWorkflow as registerHostWorkflow } from '../src/host/workflowsR
 import { executeRun } from '../src/executor/executor.js';
 import { ERASED } from '../src/host/subjectErasureRedaction.js';
 import { eraseApprovalHandoffSubject, getApprovalHandoff } from '../src/features/structured-handoffs/approvalHandoffs.js';
-import type { WorkflowDefinition } from '../src/executor/types.js';
 import type { RunRecord } from '../src/types.js';
 
 let BASE: string;
@@ -44,40 +49,41 @@ afterAll(async () => { await new Promise<void>((res) => server.close(() => res()
 
 function client() {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown) => {
+  const call = async <T>(method: string, path: string, body?: unknown): Promise<{ status: number; body: T }> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]!; }
-    return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) as any };
+    return { status: res.status, body: (res.status === 204 ? undefined : await res.json().catch(() => undefined)) as T };
   };
-  return { get: (p: string) => call('GET', p), post: (p: string, b?: unknown) => call('POST', p, b) };
+  return { get: <T = unknown>(p: string) => call<T>('GET', p), post: <T = unknown>(p: string, b?: unknown) => call<T>('POST', p, b) };
 }
+type ErrorBody = { error?: string; details?: { field?: string } };
 const R = '/host/openwop-app/reviews';
 const NOTE = { intent: 'Legal sign-off on the EU copy', openQuestions: ['Is the GDPR line final?'] };
 
 async function setup() {
   const tenantId = `org:ah-${Date.now()}-${n++}`;
-  const people: Record<'a' | 'b' | 'c' | 'd', { c: ReturnType<typeof client>; id: string }> = {} as never;
-  for (const k of ['a', 'b', 'c', 'd'] as const) {
+  const person = async (k: string): Promise<{ c: ReturnType<typeof client>; id: string }> => {
     const c = client();
-    const id = (await c.post('/host/openwop-app/test/login', { email: `ah-${k}-${n++}@acme.test`, tenantId })).body.user.userId as string;
-    people[k] = { c, id };
-  }
-  const orgId = (await people.a.c.post('/host/openwop-app/orgs', { name: 'ApproveCo' })).body.orgId as string;
+    const id = (await c.post<{ user: { userId: string } }>('/host/openwop-app/test/login', { email: `ah-${k}-${n++}@acme.test`, tenantId })).body.user.userId;
+    return { c, id };
+  };
+  const people = { a: await person('a'), b: await person('b'), c: await person('c'), d: await person('d') };
+  const orgId = (await people.a.c.post<{ orgId: string }>('/host/openwop-app/orgs', { name: 'ApproveCo' })).body.orgId;
   for (const k of ['b', 'c'] as const) await createMember({ tenantId, orgId, subject: people[k].id, displayName: k, roles: ['editor'] });
   await createMember({ tenantId, orgId, subject: people.d.id, displayName: 'd', roles: ['viewer'] });
   const wf = `wf.ah.${n++}`;
   registerHostWorkflow({
-    workflowId: wf, name: wf, version: '1.0.0',
+    workflowId: wf,
     nodes: [{ nodeId: 'gate', typeId: 'core.approvalGate', config: { prompt: 'Ship the EU page?', approverRefs: [people.a.id, people.b.id, people.d.id] } }, { nodeId: 'after', typeId: 'core.noop', config: {} }],
     edges: [{ edgeId: 'e1', sourceNodeId: 'gate', targetNodeId: 'after' }],
-  } as unknown as WorkflowDefinition);
+  });
   const now = new Date().toISOString();
   const run: RunRecord = { runId: `run-ah-${n++}`, workflowId: wf, tenantId, status: 'pending', inputs: {}, metadata: { approverOrgId: orgId }, configurable: {}, createdAt: now, updatedAt: now };
   await insertRunWithStartContext(storage, run);
   const def = (await hostSuite.workflowCatalog.getWorkflow(wf))!.definition;
   expect((await executeRun(storage, (await storage.getRun(run.runId))!, def)).status.startsWith('waiting')).toBe(true);
   const [it] = await storage.listOpenInterrupts(run.runId);
-  return { tenantId, people, reviewId: `interrupt:${it!.interruptId}` };
+  return { tenantId, people, runId: run.runId, reviewId: `interrupt:${it!.interruptId}` };
 }
 
 describe('ADR 0854 D1 — approval handoffs', () => {
@@ -85,28 +91,36 @@ describe('ADR 0854 D1 — approval handoffs', () => {
     const s = await setup();
     const r = await s.people.a.c.post(`${R}/${s.reviewId}/handoff`, { to: s.people.b.id, handoff: NOTE });
     expect(r.status, JSON.stringify(r.body)).toBe(201);
-    const seen = await s.people.b.c.get(`${R}/${s.reviewId}/handoff`);
+    const seen = await s.people.b.c.get<{ handoff: unknown }>(`${R}/${s.reviewId}/handoff`);
     expect(seen.status).toBe(200);
     expect(seen.body.handoff).toMatchObject({ to: s.people.b.id, by: s.people.a.id, note: { intent: NOTE.intent, producedBy: 'human' } });
     // No authority moved: A still decides, through the unchanged decide route.
     const decided = await s.people.a.c.post(`${R}/${s.reviewId}/actions/approve`, {});
     expect(decided.status, JSON.stringify(decided.body)).toBeLessThan(300);
+    expect(await storage.listOpenInterrupts(s.runId)).toHaveLength(0); // the gate really resolved
   });
 
   it('refused: outside the list, in the list without respond, yourself, a caller who cannot decide, no intent', async () => {
     const s = await setup();
     const url = `${R}/${s.reviewId}/handoff`;
-    expect((await s.people.a.c.post(url, { to: s.people.c.id, handoff: NOTE })).status).toBe(422);
-    expect((await s.people.a.c.post(url, { to: s.people.d.id, handoff: NOTE })).status).toBe(422);
-    expect((await s.people.a.c.post(url, { to: s.people.a.id, handoff: NOTE })).status).toBe(422);
-    expect((await s.people.c.c.post(url, { to: s.people.b.id, handoff: NOTE })).status).toBe(403);
-    expect((await s.people.a.c.post(url, { to: s.people.b.id, handoff: { openQuestions: ['x'] } })).status).toBe(400);
+    const refusedTo = (who: typeof s.people.a, to: string, handoff: unknown) => who.c.post<ErrorBody>(url, { to, handoff });
+    for (const to of [s.people.c.id, s.people.d.id, s.people.a.id]) {
+      const r = await refusedTo(s.people.a, to, NOTE);
+      expect(r.status, to).toBe(422);
+      expect(r.body, to).toMatchObject({ error: 'validation_error', details: { field: 'to' } });
+    }
+    const caller = await refusedTo(s.people.c, s.people.b.id, NOTE);
+    expect(caller.status).toBe(403);
+    expect(caller.body.error).toBe('forbidden');
+    const noIntent = await refusedTo(s.people.a, s.people.b.id, { openQuestions: ['x'] });
+    expect(noIntent.status).toBe(400);
+    expect(noIntent.body).toMatchObject({ error: 'validation_error', details: { field: 'handoff.intent' } });
     expect(await getApprovalHandoff(s.tenantId, s.reviewId)).toBeNull();
   });
 
   it("DSAR erases the handing person's note and identity", async () => {
     const s = await setup();
-    await s.people.a.c.post(`${R}/${s.reviewId}/handoff`, { to: s.people.b.id, handoff: NOTE });
+    expect((await s.people.a.c.post(`${R}/${s.reviewId}/handoff`, { to: s.people.b.id, handoff: NOTE })).status).toBe(201);
     await eraseApprovalHandoffSubject(s.tenantId, `user:${s.people.a.id}`);
     expect(await getApprovalHandoff(s.tenantId, s.reviewId)).toMatchObject({ by: ERASED, to: s.people.b.id, note: { intent: ERASED, openQuestions: [] } });
   });

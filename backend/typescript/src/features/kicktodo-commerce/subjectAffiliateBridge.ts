@@ -87,20 +87,40 @@ export async function ensureAffiliateForSubject(
   // Find a code this subject can own: the deterministic base, else a bounded
   // suffix if some OTHER subject already claimed it (hash collision or a manual
   // KT- code). We never adopt a code the reverse index binds to another subject.
+  //
+  // KTCOM-5 — the reverse index is CLAIMED (insert-if-absent) before the affiliate
+  // is created, and that claim is what decides who owns a code. This used to check
+  // the index, create the affiliate, then blind-`put` the index at the end. A
+  // different subject claiming the same code in between (a hash collision, or a
+  // suffix candidate both reached) was then overwritten, so that subject's code
+  // resolved to THIS subject and the self-referral guard judged their orders against
+  // the wrong person. A claim carries `affiliateId: ''` until the affiliate exists;
+  // only `ownerSubject` is read from the index, so an unfilled claim is still correct.
   const base = baseCodeFor(tenantId, ownerSubject);
   let affiliate: Affiliate | null = null;
   let chosenCode = base;
+  let indexRow: CodeSubjectIndex | null = null; // the index row as stored, for the fill CAS
   for (let attempt = 0; attempt < 8 && !affiliate; attempt++) {
     const candidate = attempt === 0 ? base : `${base}-${attempt + 1}`;
-    const boundTo = await codeIndex.get(`${tenantId}::${candidate}`);
-    if (boundTo && boundTo.ownerSubject !== ownerSubject) continue; // owned by someone else → try next
-    if (boundTo && boundTo.ownerSubject === ownerSubject) {
+    let boundTo = await codeIndex.get(`${tenantId}::${candidate}`);
+    let freshlyClaimed = false;
+    if (!boundTo) {
+      const claim: CodeSubjectIndex = { tenantId, code: candidate, ownerSubject, affiliateId: '' };
+      freshlyClaimed = await codeIndex.compareAndSwap(null, claim);
+      if (freshlyClaimed) boundTo = claim;
+      else boundTo = await codeIndex.get(`${tenantId}::${candidate}`);
+      if (!boundTo) continue; // claimed and released under us — try the next candidate
+    }
+    if (boundTo.ownerSubject !== ownerSubject) continue; // owned by someone else → try next
+    if (!freshlyClaimed) {
       // Reverse index already binds this code to us but the forward link was
-      // missing (a partial prior run) — adopt the existing affiliate.
+      // missing (a partial prior run, or a concurrent mint for this subject) —
+      // adopt the existing affiliate.
       const adopted = await affiliateByCode(tenantId, orgId, candidate);
       if (adopted) {
         affiliate = adopted;
         chosenCode = candidate;
+        indexRow = boundTo;
         break;
       }
       // grade-fix: a STALE reverse-index entry (the affiliate row is gone —
@@ -114,14 +134,27 @@ export async function ensureAffiliateForSubject(
         commissionType: 'percentage', commissionRate: 0, // referral rate = the affiliate row's rate (OQ1); 0 until an operator sets it
       });
       chosenCode = candidate;
+      indexRow = boundTo;
     } catch (err) {
-      // 409 = the code exists in commerce but our reverse index didn't know it
-      // (e.g. an operator hand-created a KT- code). Don't hijack it — disambiguate.
-      if (err instanceof OpenwopError && err.httpStatus === 409) continue;
-      throw err;
+      if (!(err instanceof OpenwopError && err.httpStatus === 409)) throw err;
+      if (freshlyClaimed) {
+        // 409 = the code exists in commerce but our reverse index didn't know it
+        // (e.g. an operator hand-created a KT- code). Don't hijack it — release
+        // the claim we just made (nobody else can hold it while we do) and
+        // disambiguate.
+        await codeIndex.delete(`${tenantId}::${candidate}`);
+        continue;
+      }
+      // The code was already bound to US: a concurrent mint for this subject
+      // created the affiliate between our adopt check and our create. Adopt it.
+      const adopted = await affiliateByCode(tenantId, orgId, candidate);
+      if (!adopted) continue;
+      affiliate = adopted;
+      chosenCode = candidate;
+      indexRow = boundTo;
     }
   }
-  if (!affiliate) {
+  if (!affiliate || !indexRow) {
     log.error('kicktodo_affiliate_code_exhausted', { ownerSubject, base });
     throw new OpenwopError('conflict', 'Could not mint a unique referral code.', 409, {});
   }
@@ -132,18 +165,28 @@ export async function ensureAffiliateForSubject(
   // grade-fix: first-write-wins via a real CAS (insert-if-absent), not a
   // read-then-blind-put (which is a TOCTOU — `DurableCollection.put` is
   // last-writer-wins). A concurrent same-subject mint therefore yields exactly
-  // ONE forward link, and ONLY the winner writes the reverse index — so a
-  // subject can never end up with two codes/identities. The loser's already-
-  // created affiliate row is a benign orphan (rate 0, absent from the reverse
-  // index, so it can never cross-attribute); the residual duplicate-code
-  // possibility is the pre-existing non-CAS `createAffiliate` uniqueness check,
-  // out of this bridge's scope.
+  // ONE forward link. The loser's code claim is bound to this same subject, so it
+  // can never cross-attribute; a loser's separately created affiliate row is a
+  // benign orphan (rate 0). The residual duplicate-code possibility is the
+  // pre-existing non-CAS `createAffiliate` uniqueness check, out of this bridge's
+  // scope.
   const claimed = await links.compareAndSwap(null, link);
   if (!claimed) {
     const winner = await links.get(`${tenantId}::${ownerSubject}`);
     if (winner) return winner; // a concurrent mint won — keep the first binding
   }
-  await codeIndex.put({ tenantId, code: chosenCode, ownerSubject, affiliateId: affiliate.affiliateId });
+  // Record the affiliate id on our claim. Swapped against the row we observed, so
+  // it can never land on a binding that changed owner since.
+  if (indexRow.affiliateId !== affiliate.affiliateId) {
+    const filled: CodeSubjectIndex = { tenantId, code: chosenCode, ownerSubject, affiliateId: affiliate.affiliateId };
+    if (!(await codeIndex.compareAndSwap(indexRow, filled))) {
+      const now = await codeIndex.get(`${tenantId}::${chosenCode}`);
+      if (now?.ownerSubject !== ownerSubject) {
+        log.error('kicktodo_affiliate_code_claim_lost', { ownerSubject, code: chosenCode });
+        throw new OpenwopError('conflict', 'The referral code binding changed concurrently; retry.', 409, {});
+      }
+    }
+  }
   log.info('kicktodo_affiliate_linked', { ownerSubject, code: chosenCode });
   return link;
 }

@@ -1,4 +1,4 @@
-> **Published white-label install bundle.** Auto-synced from `openwop/openwop-app` (source `bff1945f0`). Clone or download the release zip, then follow **[WHITE-LABEL.md](./frontend/react/WHITE-LABEL.md)** to deploy your own. Generated — PRs here are not merged; development happens upstream.
+> **Published white-label install bundle.** Auto-synced from `openwop/openwop-app` (source `364c265f5`). Clone or download the release zip, then follow **[WHITE-LABEL.md](./frontend/react/WHITE-LABEL.md)** to deploy your own. Generated — PRs here are not merged; development happens upstream.
 
 # openwop-app — OpenWOP Application
 
@@ -593,6 +593,18 @@ runtime entitlements (no download). It rides the same one Stripe account + `bill
 toggle above. Activation is pure operator config — reversible, and **inert until the
 `billing` toggle is ON**.
 
+> **CORRECTED 2026-10-14 (ADR 0892 Phase B) — the first sentence above was half
+> true until now.** Buying a bundle granted the ENTITLEMENT and never turned a
+> toggle on, so on a host where a bundle's features default off (CRM, since ADR
+> 0892 Phase A) a buyer paid for features they could not see. Now a verified
+> purchase (the billing `grant-started` transition) also turns the bundle ON for
+> that workspace: its features plus their `dependsOn` closure, as per-tenant
+> overrides. It is best-effort and never fails the webhook; a refusal (a killed
+> feature, or a dependency the plan does not cover) is logged. A lapse leaves the
+> overrides, and the plan gate shows the features locked; no data is deleted.
+> A workspace owner/admin can also turn an entitled bundle on or off from the
+> store card (FEATURES.md § "The admin screen").
+
 1. **Mint one Stripe Price per bundle you sell** (recurring). A bundle is granted
    **per workspace, unlimited-seat** (one subscription unlocks it for the whole
    tenant), so price it **flat per workspace/month**, not per seat. (Competitive
@@ -640,6 +652,40 @@ toggle above. Activation is pure operator config — reversible, and **inert unt
      `BUNDLE_DISPLAY` entry — the store offers the yearly Buy only when the amount is
      published. Plans: `OPENWOP_BILLING_PLAN_PRICE_CADENCE` likewise
      (`POST …/billing/checkout {"plan":"pro","cadence":"year"}`).
+   - **Tax, promotion codes and no-card trials (ADR 0890):** three Checkout options,
+     each unset by default (the checkout is then exactly what it was before). Each takes
+     a bare value (every plan and bundle) or a JSON object keyed `"*"`, `"plan:<tier>"`
+     or `"bundle:<id>"`; a specific key beats `"*"`. They apply to plan and bundle
+     checkouts, not token packs, and to NEW checkouts only — existing subscriptions
+     keep the terms they were created with.
+     - `OPENWOP_BILLING_CHECKOUT_TAX` = `none` | `automatic` | `managed`.
+       `automatic` turns on **Stripe Tax**: Checkout requires a billing address and saves
+       it onto the workspace's Stripe customer. You still need tax registrations and
+       product tax codes in the Stripe Dashboard. `managed` turns on **Stripe Managed
+       Payments**, where Stripe is the merchant of record and files the tax itself.
+       Before you use it: accept the Managed Payments terms in the Dashboard, give each
+       product an eligible tax code, and **test one checkout in a sandbox**. This host
+       pins Stripe API `2025-12-15.clover`, and Stripe GA'd `managed_payments` in
+       `2026-04-22.dahlia`, so the host logs a warning at boot until you have checked
+       it (or set `OPENWOP_STRIPE_API_VERSION`). **Managed Payments does not support
+       Connect.** Don't use `managed` on a Stripe account that also runs the
+       commerce-connect storefront lane.
+     - `OPENWOP_BILLING_ALLOW_PROMOTION_CODES` = `true` | `false` — a promotion-code
+       field on the Checkout page. Create the coupons and promotion codes in Stripe.
+     - `OPENWOP_BILLING_TRIAL_CARD` = `required` (default) | `if_required` — a trial
+       starts without a card. If no card is added by the end of the trial, the
+       subscription cancels and the webhook revokes the grant. This only has an effect
+       where `OPENWOP_BILLING_TRIAL_DAYS` gives a trial, and a workspace still gets one
+       trial per plan or bundle.
+     - Example (Book AI selling its author suite under Managed Payments, with
+       promotion codes and a 14-day no-card trial):
+       ```
+       OPENWOP_BILLING_TRIAL_DAYS={"bundle:bookai-author-suite":14}
+       OPENWOP_BILLING_CHECKOUT_TAX={"bundle:bookai-author-suite":"managed"}
+       OPENWOP_BILLING_ALLOW_PROMOTION_CODES={"bundle:bookai-author-suite":true}
+       OPENWOP_BILLING_TRIAL_CARD={"bundle:bookai-author-suite":"if_required"}
+       ```
+       The key must name a bundle in that deployment's `distributions/bundles.json`.
    - **Preflight every change:** `node scripts/check-billing-config.mjs --cloud-run
      <service> --region <r> --project <p>` (or with the vars in your shell) — it
      expands `bundle:` entries, enforces standalone bundles, validates every knob

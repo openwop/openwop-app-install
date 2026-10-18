@@ -1,4 +1,11 @@
-/** Hub aliases must expose the same current-page state visually and to AT. */
+/**
+ * <AdminLayout> rail state. (1) ADR 0139 `activeFor` aliases: a direct URL a hub
+ * represents (`/model-router` under the Models hub) marks the visible hub link
+ * `aria-current="page"` — otherwise the rail shows no current destination.
+ * (2) DSA-026 (ADR 0510 Phase 7): ≤860px the rail is a labeled accordion whose
+ * sections start collapsed and open on demand, even when the desktop icon-strip
+ * preference was saved — inheriting it would render every item headerless.
+ */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
@@ -26,6 +33,9 @@ vi.mock('../../featureToggles/FeatureAccessContext.js', () => ({
 afterEach(() => {
   cleanup();
   localStorage.clear();
+  // The section toggle persists to this cookie (navCollapseCookie); clear it so
+  // no case inherits another's expanded set.
+  document.cookie = 'openwop.nav.expanded=; path=/; max-age=0';
   vi.unstubAllGlobals();
 });
 

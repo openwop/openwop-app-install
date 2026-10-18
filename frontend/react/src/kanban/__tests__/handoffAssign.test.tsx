@@ -6,21 +6,28 @@
  *     sends none, cancel sends nothing at all (the draft is never sent unconfirmed);
  *   - an empty intent cannot be sent with a note;
  *   - the card shows a stored note behind a disclosure; a malformed one renders nothing.
+ *
+ * Sabotages that turn it red (probed w28): the pick sending at once; the intent
+ * not prefilled; "without note" sending a note; Cancel assigning; an empty intent
+ * sendable; blank lines or empty lists sent; the confidence map or basis changed;
+ * the note shown without the disclosure; a person's confidence shown as a
+ * percentage; a malformed note rendered.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup, screen, fireEvent, waitFor } from '@testing-library/react';
-import { makeFeatureAccess } from '../../featureToggles/__testing__/makeFeatureAccess.js';
+import type { assignCard } from '../kanbanClient.js';
+import type { loadOrgMembers } from '../../orgs/orgMembers.js';
 
 const h = vi.hoisted(() => ({
-  assignCard: vi.fn(async () => ({ card: { id: 'c1' } })),
-  enabled: true,
+  assignCard: vi.fn<typeof assignCard>(async (cardId) => ({
+    card: { id: cardId, boardId: 'b1', columnId: 'todo', title: 'Launch brief', order: 0, createdAt: '2026-10-05T00:00:00Z', updatedAt: '2026-10-05T00:00:00Z' },
+  })),
 }));
 vi.mock('../kanbanClient.js', async (orig) => ({ ...(await orig<Record<string, unknown>>()), assignCard: h.assignCard }));
 vi.mock('../../orgs/orgMembers.js', () => ({
-  loadOrgMembers: vi.fn(async () => [{ memberId: 'm1', subject: 'user-bob', displayName: 'Bob' }]),
-}));
-vi.mock('../../featureToggles/FeatureAccessContext.js', () => ({
-  useFeatureAccess: () => makeFeatureAccess({ enabled: h.enabled }),
+  loadOrgMembers: vi.fn<typeof loadOrgMembers>(async () => [
+    { memberId: 'm1', orgId: 'o1', tenantId: 't1', subject: 'user-bob', displayName: 'Bob', roles: ['editor'], teamIds: [], createdAt: '2026-10-05T00:00:00Z', updatedAt: '2026-10-05T00:00:00Z' },
+  ]),
 }));
 
 import { AssigneeControl } from '../AssigneeControl.js';
@@ -40,7 +47,6 @@ async function pickBob(): Promise<void> {
 
 describe('AssigneeControl + HandoffDialog', () => {
   it('ON: picking a person opens the dialog prefilled from the card and sends nothing', async () => {
-    h.enabled = true;
     await pickBob();
     const intent = await screen.findByLabelText(/What this is for/);
     expect((intent as HTMLTextAreaElement).value).toBe('Launch brief');
@@ -48,7 +54,6 @@ describe('AssigneeControl + HandoffDialog', () => {
   });
 
   it('ON: "Assign with note" sends the draft', async () => {
-    h.enabled = true;
     await pickBob();
     fireEvent.change(await screen.findByLabelText(/Still open/), { target: { value: 'Is the date fixed?\n\n' } });
     fireEvent.click(screen.getByRole('button', { name: 'Assign with note' }));
@@ -57,7 +62,6 @@ describe('AssigneeControl + HandoffDialog', () => {
   });
 
   it('ON: a picked confidence and its reason ride the draft', async () => {
-    h.enabled = true;
     await pickBob();
     fireEvent.change(await screen.findByLabelText(/How sure are you/), { target: { value: 'low' } });
     fireEvent.change(await screen.findByLabelText(/^Why/), { target: { value: 'no data yet' } });
@@ -67,7 +71,6 @@ describe('AssigneeControl + HandoffDialog', () => {
   });
 
   it('ON: "Assign without note" sends no note; cancel sends nothing', async () => {
-    h.enabled = true;
     await pickBob();
     fireEvent.click(await screen.findByRole('button', { name: 'Assign without note' }));
     await waitFor(() => expect(h.assignCard).toHaveBeenCalledWith('c1', { assigneeId: 'user-bob', notifyAssignee: true }));
@@ -78,7 +81,6 @@ describe('AssigneeControl + HandoffDialog', () => {
   });
 
   it('ON: an empty intent disables "Assign with note"', async () => {
-    h.enabled = true;
     await pickBob();
     fireEvent.change(await screen.findByLabelText(/What this is for/), { target: { value: '   ' } });
     expect((screen.getByRole('button', { name: 'Assign with note' }) as HTMLButtonElement).disabled).toBe(true);

@@ -16,6 +16,7 @@ import { startTask } from '../src/features/computer-use/computerUseService.js';
 import { buildComputerUseSurface } from '../src/features/computer-use/feature.js';
 import { __resetHostExtPersistence, initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { openSqliteStorage } from '../src/storage/sqlite/index.js';
+import { createOrg } from '../src/host/accessControlService.js';
 
 const TENANT = 'user:t-gate';
 const ORIGIN = 'jobs.example.com';
@@ -64,6 +65,9 @@ describe('ADR 0541 P2 — the gate is NEVER weakened for anything else', () => {
   beforeEach(async () => {
     __resetHostExtPersistence();
     initHostExtPersistence(openSqliteStorage(':memory:'));
+    // ADR 0894 D4 — every advance rechecks the opener (`user-1`) holds
+    // `runs:create` in the session's org, so the org is real and theirs.
+    await createOrg({ tenantId: TENANT, createdBy: 'test', name: 'Gate', orgId: 'org-1', ownerSubject: 'user-1' });
   });
 
   it('with NO apply context, a commit halts for a human — exactly as before grants existed', async () => {
@@ -136,7 +140,10 @@ describe('ADR 0541 P2 — the gate is NEVER weakened for anything else', () => {
     const { adapter, approvals } = stubAdapter(cred);
     const view = await advance(adapter, s);
     expect(approvals).toEqual([]);
-    expect(view.status).toBe('awaiting_approval');
+    // ADR 0894 D6 — stronger than halting: a credential is never even offered
+    // to a human, because no broker exists to supply one.
+    expect(view.status).toBe('failed');
+    expect(view.error).toBe('credential_entry_unsupported');
   });
 
   it('an EXHAUSTED grant halts for a human rather than failing the session', async () => {

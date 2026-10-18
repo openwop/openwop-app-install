@@ -186,6 +186,9 @@ export async function seedDemoOpsPlanning(tenantId: string): Promise<{ created: 
           factors,
           method: 'weighted-mean',
           computedForCompanyId: COMPANY_ID(c.slug),
+          // ADR 0882 D2 — and the ORG; without it the service records "stopped
+          // measuring" on every seeded row, which this `.catch` would have hidden.
+          computedForOrgId: orgId,
         }).catch(() => undefined);
         created += 1;
       }

@@ -5,7 +5,7 @@
  * `deleteShow`)". It was a `SELECT count(*)` against production — so it could
  * only ever be run by someone with prod DB access, and it measured a quantity
  * rather than asserting the invariant that produces it. **Nothing in the repo
- * referenced `deleteShow`**: the ADR 0390 cascade at `podcastsService.ts:452`
+ * referenced `deleteShow`**: the ADR 0390 cascade (`deleteShow` in `podcastsService.ts`)
  * had zero executable coverage.
  *
  * The invariant is a public-surface leak guard. `deleteShow` orphans the show's
@@ -18,6 +18,10 @@
  * would pass against an episode that was never published in the first place —
  * the assertion would be true for a reason unrelated to the cascade. Each case
  * asserts the episode IS published and IS attached before the delete.
+ *
+ * Sabotage witnesses (w21 /grade-tests): keeping `published`, keeping `showId`,
+ * dropping the `showId === id` filter, and a tenant-blind show lookup each
+ * redden exactly the case that claims them.
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { mkdtempSync } from 'node:fs';

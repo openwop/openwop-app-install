@@ -82,7 +82,12 @@ export function billingExemptTenants(): string[] {
   return raw.split(',').map((s) => s.trim()).filter((s) => s.length > 0);
 }
 
-/** True iff the tenant is exempt from plan LIMITS and AI CREDITS (never the paywall). */
+/** True iff the tenant is exempt from plan LIMITS and AI CREDITS (never the paywall).
+ *
+ *  ADR 0877 Q3 (user decision 2026-10-12): this list is NOT read by commerce
+ *  platform settlement. Exempting a tenant from limits never lets its storefront
+ *  take live money on the operator's Stripe account — that is the explicit
+ *  `OPENWOP_COMMERCE_PLATFORM_TENANTS` list (`commerce-connect/storefrontSettlement.ts`). */
 export function isBillingExemptTenant(tenantId: string): boolean {
   return billingExemptTenants().includes(tenantId);
 }

@@ -209,27 +209,47 @@ const nowIso = (): string => new Date().toISOString();
 
 export class SharePolicyError extends Error {}
 
+/** KTCOM-5 / KTM-1 — the policy row kept changing under concurrent operators. */
+export class SharePolicyConflictError extends Error {
+  constructor() {
+    super('The share policy is being changed concurrently; retry.');
+  }
+}
+
+const SHARE_POLICY_CAS_ATTEMPTS = 8;
+
 export async function getSharePolicy(tenantId: string): Promise<AuthorSharePolicy | null> {
   return (await policies.get(tenantId)) ?? null;
 }
 
 /** Operator-set (route-gated). Versions monotonically; rows stamp the version
- *  they accrued under, so a change never rewrites existing rows. */
+ *  they accrued under, so a change never rewrites existing rows.
+ *
+ *  KTCOM-5 / KTM-1 — the bump is a compare-and-swap on the row it was derived
+ *  from. It used to read `prior.version`, add one and blind-`put`, so two
+ *  concurrent changes both wrote `version: N+1` with DIFFERENT rates. Accrual rows
+ *  stamp `policyVersion`, so one version number then named two rates and the
+ *  last writer silently erased the other. A lost swap re-reads and takes the
+ *  next version. */
 export async function setSharePolicy(tenantId: string, shareBps: number, actor: string): Promise<AuthorSharePolicy> {
   if (!Number.isInteger(shareBps) || shareBps < 0 || shareBps > 10000) {
     throw new SharePolicyError('`shareBps` must be an integer between 0 and 10000.');
   }
-  const prior = await policies.get(tenantId);
-  const next: AuthorSharePolicy = {
-    tenantId,
-    shareBps,
-    version: (prior?.version ?? 0) + 1,
-    updatedAt: nowIso(),
-    updatedBy: actor,
-  };
-  await policies.put(next);
-  log.info('kicktodo_share_policy_set', { tenantId, shareBps, version: next.version });
-  return next;
+  for (let attempt = 0; attempt < SHARE_POLICY_CAS_ATTEMPTS; attempt++) {
+    const prior = await policies.get(tenantId);
+    const next: AuthorSharePolicy = {
+      tenantId,
+      shareBps,
+      version: (prior?.version ?? 0) + 1,
+      updatedAt: nowIso(),
+      updatedBy: actor,
+    };
+    if (await policies.compareAndSwap(prior, next)) {
+      log.info('kicktodo_share_policy_set', { tenantId, shareBps, version: next.version });
+      return next;
+    }
+  }
+  throw new SharePolicyConflictError();
 }
 
 /** Per-line net in minor units: exact line gross (minor-first, so no float

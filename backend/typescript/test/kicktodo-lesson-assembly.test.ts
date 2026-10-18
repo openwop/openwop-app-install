@@ -14,11 +14,23 @@
  *      the run typed and `decompose` is skipped; an approved one proceeds; a
  *      zero-live-slot (outline-only) run reaches `decompose` with NO gate.
  *  (E) the factory workflow wires the P2 stages structurally.
+ *
+ * (D) runs a SLICE of the REAL factory definition (slot 0 + the barrier) with
+ * stand-ins only for the nodes that need a model or a sub-workflow, so a factory
+ * edge regression reds the behavioural cases, not just (E)'s structure check.
+ *
+ * Sabotage witnesses (w41 /grade-tests, 14 probes): batching ceil/outline-only/
+ * junk filter, the media pointer key + sort + day guard, unreadable⇒block, the
+ * block-finding override, empty-text drop, the missing-persona and block gates,
+ * the flag note, the barrier triggerRule, and the sims' zero tool surface.
+ * Honest ceiling: `kind: 'gif'` is a deliberately invalid runtime input and
+ * needs one `as never` to reach the guard.
  */
 import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { Ajv2020 } from 'ajv/dist/2020.js';
 import { openStorage } from '../src/storage/index.js';
 import { setEventLogBackend } from '../src/executor/eventLog.js';
 import { setSuspendBackend } from '../src/executor/suspendManager.js';
@@ -44,11 +56,12 @@ import { submitForPublication, getPublication } from '../src/features/kicktodo-c
 import { getApproval } from '../src/host/approvalService.js';
 import { createDraft } from '../src/features/kicktodo-core/challengeService.js';
 import { kicktodoCreatorBuiltinWorkflows, CHALLENGE_FACTORY_WORKFLOW_ID } from '../src/features/kicktodo-creator/builtinWorkflows.js';
-import type { WorkflowDefinition } from '../src/executor/types.js';
+import type { NodeContext, NodeOutcome, WorkflowDefinition } from '../src/executor/types.js';
 import type { RunRecord } from '../src/types.js';
 
 const chatUrl = new URL('../../../packs/vendor.myndhyve.chat/index.mjs', import.meta.url).href;
-type NodeFn = (ctx: Record<string, unknown>) => Promise<{ status: string; outputs?: Record<string, unknown>; error?: unknown }>;
+/** A pack node at the host boundary (untyped `.mjs` import) — the registry's executor signature. */
+type NodeFn = (ctx: NodeContext) => Promise<NodeOutcome>;
 
 const storage = await openStorage('memory://');
 setEventLogBackend(storage);
@@ -61,7 +74,8 @@ const hostSuite = createHostAdapterSuite({ storage });
 let approvalGateFn: NodeFn;
 beforeAll(async () => {
   ensureNodesRegistered();
-  approvalGateFn = ((await import(chatUrl)) as { approvalGate: NodeFn }).approvalGate;
+  const chat: { approvalGate: NodeFn } = await import(chatUrl);
+  approvalGateFn = chat.approvalGate;
 });
 
 /* ─────────────────────── (A) checkpoint batching ─────────────────────── */
@@ -133,8 +147,9 @@ describe('(B) setLessonMedia — replace-on-retry, one pointer per (candidate, d
   });
 
   it('rejects a bad kind / non-positive day (typed, never a silent write)', async () => {
-    await expect(setLessonMedia({ tenantId: 't', candidateId: 'c', day: 0, assetId: 'a', kind: 'image' })).rejects.toThrow();
-    await expect(setLessonMedia({ tenantId: 't', candidateId: 'c', day: 1, assetId: 'a', kind: 'gif' as never })).rejects.toThrow();
+    await expect(setLessonMedia({ tenantId: 't', candidateId: 'c', day: 0, assetId: 'a', kind: 'image' })).rejects.toThrow('day must be a positive integer.');
+    await expect(setLessonMedia({ tenantId: 't', candidateId: 'c', day: 1, assetId: 'a', kind: 'gif' as never })).rejects.toThrow('kind must be one of image, video.');
+    expect(await listLessonMedia('t', 'c')).toEqual([]); // never a silent write
   });
 });
 
@@ -174,7 +189,6 @@ describe('(C) simulation verdicts — closed-world normalization (persona-tagged
   it('parity with the sim-verdict pack schema — accepts a schema-valid verdict VERBATIM, derives block from a block finding', async () => {
     const schemaPath = new URL('../../../packs/vendor.openwop-app.kicktodo.agents/schemas/sim-verdict.schema.json', import.meta.url);
     const schema = JSON.parse(readFileSync(schemaPath, 'utf8'));
-    const { default: Ajv2020 } = (await import('ajv/dist/2020.js')) as { default: new (o?: unknown) => { compile: (s: unknown) => (v: unknown) => boolean } };
     const validate = new Ajv2020({ strict: false }).compile(schema);
 
     const passBody = { verdict: 'pass', findings: [{ severity: 'note', text: 'clear enough', day: 1 }], personaSummary: 'felt doable' };
@@ -255,35 +269,33 @@ describe('(D) the reject-safe barrier — one live slot, through the real schedu
   const BARRIER_ID = 'wf.kt-checkpoint-barrier';
   const EMIT = 'test.emit-outputs';
 
+  // Slot 0 of the REAL factory: its nodes + every edge among them. Stand-ins only
+  // where a node needs a model / sub-workflow; the gate and fail nodes are real.
+  const factory = kicktodoCreatorBuiltinWorkflows.find((w) => w.workflowId === CHALLENGE_FACTORY_WORKFLOW_ID);
+  const SLICE = new Set(['checkpoint-plan', 'build-0', 'gate-0', 'fail-0', 'decompose']);
+  const STAND_IN: Record<string, string> = { 'checkpoint-plan': EMIT, 'build-0': 'core.noop', decompose: 'core.noop' };
+  const sliceNodes = (factory?.nodes ?? [])
+    .filter((n) => SLICE.has(n.nodeId))
+    .map((n) => (STAND_IN[n.nodeId] ? { nodeId: n.nodeId, typeId: STAND_IN[n.nodeId]! } : n));
+  const sliceEdges = (factory?.edges ?? []).filter((e) => SLICE.has(e.sourceNodeId) && SLICE.has(e.targetNodeId));
+
   beforeAll(() => {
     // A node that emits fixed outputs from config — stands in for checkpoint-plan.
     getNodeRegistry().register({
       typeId: EMIT, version: '1.0.0',
-      execute: (ctx) => Promise.resolve({ status: 'success', outputs: ((ctx as { config?: { outputs?: Record<string, unknown> } }).config?.outputs) ?? {} }) as never,
+      execute: async (ctx: NodeContext): Promise<NodeOutcome> => {
+        const outputs = ctx.config?.outputs;
+        return { status: 'success', outputs: outputs ?? {} };
+      },
     });
-    getNodeRegistry().register({ typeId: 'core.chat.approvalGate', version: '1.0.0', execute: (ctx) => approvalGateFn(ctx as never) as never });
-
-    // The EXACT factory shape for one slot + the noLiveSlots bypass.
-    const def: WorkflowDefinition = {
-      workflowId: BARRIER_ID,
-      variables: [{ name: 'cadence' }],
-      nodes: [
-        { nodeId: 'checkpoint-plan', typeId: EMIT },
-        { nodeId: 'build-0', typeId: 'core.noop' },
-        { nodeId: 'gate-0', typeId: 'core.chat.approvalGate', config: { title: 'Approve checkpoint 1?' } },
-        { nodeId: 'fail-0', typeId: 'core.fail', config: { code: 'checkpoint_rejected', message: 'rejected' } },
-        { nodeId: 'decompose', typeId: 'core.noop' },
-      ],
-      edges: [
-        { edgeId: 'e_cp_build0', sourceNodeId: 'checkpoint-plan', targetNodeId: 'build-0', triggerRule: 'all_success', condition: { path: 'slot0Live', op: 'truthy' } },
-        { edgeId: 'e_build0_gate0', sourceNodeId: 'build-0', targetNodeId: 'gate-0', triggerRule: 'all_success' },
-        { edgeId: 'e_gate0_fail0', sourceNodeId: 'gate-0', targetNodeId: 'fail-0', condition: { path: 'approved', op: 'falsy' } },
-        // The reject-safe barrier — decompose ← fail-0 (none_failed): skipped fail
-        // (approved / dead slot) ⇒ decompose runs; a FAILED fail (reject) ⇒ skip.
-        { edgeId: 'e_fail0_decompose', sourceNodeId: 'fail-0', targetNodeId: 'decompose', triggerRule: 'none_failed' },
-      ],
-    };
+    getNodeRegistry().register({ typeId: 'core.chat.approvalGate', version: '1.0.0', execute: (ctx) => approvalGateFn(ctx) });
+    const def: WorkflowDefinition = { workflowId: BARRIER_ID, variables: [{ name: 'cadence' }], nodes: sliceNodes, edges: sliceEdges };
     registerHostWorkflow(def);
+  });
+
+  it('the slice IS the factory slot-0 wiring (build ← liveness, reject → fail, fail → decompose)', () => {
+    expect(sliceNodes.map((n) => n.nodeId).sort()).toEqual([...SLICE].sort());
+    expect(sliceEdges.map((e) => e.edgeId).sort()).toEqual(['e_build0_gate0', 'e_cp_build0', 'e_fail0_decompose', 'e_gate0_fail0']);
   });
 
   async function runWithCp(cpOutputs: Record<string, unknown>, resumeValue?: unknown): Promise<{ status: string; states: Record<string, string> }> {
@@ -358,7 +370,7 @@ describe('(E) the factory workflow wires the P2 stages', () => {
     for (const id of ['sim-newcomer', 'sim-time-poor', 'sim-skeptic']) {
       const node = wf.nodes.find((n) => n.nodeId === id)!;
       expect(node.typeId).toBe('local.openwop-app.agent-runner');
-      expect((node.config as { offerTools?: unknown }).offerTools).toEqual([]);
+      expect(node.config?.offerTools).toEqual([]);
       expect(edge(`e_${id}_collect`)?.targetNodeId).toBe('sim-collect');
     }
     expect(edge('e_collect_submit')?.targetNodeId).toBe('submit');

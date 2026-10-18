@@ -4,7 +4,12 @@
  *  - enroll() ⇒ kicktodo.participant.enrolled
  *  - submitCheckIn completing the last activity ⇒ kicktodo.participant.completed
  *  - reprocessOrder grant ⇒ kicktodo.challenge.purchased
- * …and that a subject WITHOUT a Contact emits nothing (Gate 0) through the same paths.
+ * …and that a subject WITHOUT a Contact emits nothing (Gate 0) through the enroll
+ * and purchase paths. Each emission is checked for WHO it is keyed to (the
+ * linked contactId) and WHICH challenge — not just that the event type exists.
+ *
+ * Sabotages that turn this red (w41 probes): removing the emit call in
+ * enroll(), in submitCheckIn's completion branch, or in reprocessOrder's grant.
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
@@ -24,6 +29,8 @@ const ORG = 'org-lw';
 const SUBJECT = 'user:participant-lw';
 
 const types = async (): Promise<string[]> => (await listCollectedEvents(T)).map((e) => e.eventType);
+const payloadsOf = async (eventType: string): Promise<Array<Record<string, unknown>>> =>
+  (await listCollectedEvents(T)).filter((e) => e.eventType === eventType).map((e) => e.payload);
 
 async function oneActivityChallenge(): Promise<string> {
   const draft = await createDraft({
@@ -42,12 +49,12 @@ beforeEach(async () => {
   registerGoalVerifier('kicktodo:progress-evidence', async () => ({ satisfied: false, confidence: 0, runId: 'r' }));
 });
 
-const orderOf = (productId: string): Order => ({
-  orderId: 'ord-lw', tenantId: T, orgId: ORG,
+const orderOf = (productId: string, createdBy = SUBJECT): Order => ({
+  orderId: `ord-lw-${createdBy}`, tenantId: T, orgId: ORG,
   items: [{ productId, name: 'C', unitPrice: 10, quantity: 1 }],
   subtotal: 10, discount: 0, total: 10, currency: 'usd',
   status: 'paid', fulfillmentStatus: 'pending',
-  createdBy: SUBJECT, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+  createdBy, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
 });
 
 describe('lifecycle emissions are wired (ADR 0456 P2)', () => {
@@ -62,14 +69,14 @@ describe('lifecycle emissions are wired (ADR 0456 P2)', () => {
     const contact = await createContact({ tenantId: T, name: 'Pat', email: 'pat@x.test' });
     await linkSubjectToContact(T, SUBJECT, contact.contactId, 'paid-checkout');
     await enroll({ tenantId: T, ownerSubject: SUBJECT, challengeId, challengeVersion: 1, timezone: 'UTC' });
-    expect(await types()).toContain('kicktodo.participant.enrolled');
+    expect(await payloadsOf('kicktodo.participant.enrolled')).toEqual([{ contactId: contact.contactId, challengeId, challengeVersion: 1 }]);
 
     // Completing the only activity emits 'completed'.
     const view = await todayFor(T, SUBJECT);
     const cardId = view.enrollments.flatMap((e) => e.actions).map((a) => a.card?.id).find(Boolean);
     expect(cardId).toBeTruthy();
     await submitCheckIn(T, SUBJECT, cardId!, {});
-    expect(await types()).toContain('kicktodo.participant.completed');
+    expect(await payloadsOf('kicktodo.participant.completed')).toEqual([{ contactId: contact.contactId, challengeId, challengeVersion: 1 }]);
   });
 
   it('a paid KickTodo order emits purchased for a consented buyer', async () => {
@@ -79,7 +86,11 @@ describe('lifecycle emissions are wired (ADR 0456 P2)', () => {
     const contact = await createContact({ tenantId: T, name: 'Buyer', email: 'buyer@x.test' });
     await linkSubjectToContact(T, SUBJECT, contact.contactId, 'paid-checkout');
 
+    // An unlinked buyer's paid order emits nothing (Gate 0 on the purchase path).
+    await reprocessOrder(orderOf(product.productId, 'user:anon-buyer-lw'), 'grant');
+    expect(await types()).not.toContain('kicktodo.challenge.purchased');
+
     await reprocessOrder(orderOf(product.productId), 'grant');
-    expect(await types()).toContain('kicktodo.challenge.purchased');
+    expect(await payloadsOf('kicktodo.challenge.purchased')).toEqual([{ contactId: contact.contactId, challengeId, challengeVersion: 1 }]);
   });
 });

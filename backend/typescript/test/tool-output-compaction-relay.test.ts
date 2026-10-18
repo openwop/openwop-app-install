@@ -13,6 +13,11 @@
  * not — the builder compacts and the dispatcher forwards. This guards that contract so the
  * misread can't recur silently, and so a future change that makes the dispatcher re-derive
  * or drop the builder's content fails loudly.
+ *
+ * Sabotage that turns it red (wave 22): any transform of `content: toolResult.content` in
+ * `dispatchAnthropicTools.ts`. A truncation/rewrite reds both cases; a dispatcher that
+ * RE-MINIFIES reds only the no-decision case, because already-minified content is a fixed
+ * point of minification — that case is the double-compaction witness, not a duplicate.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { dispatchAnthropicWithTools, type ToolsDispatchRequest } from '../src/providers/dispatchAnthropicTools.js';
@@ -26,7 +31,7 @@ function mockFetchSequence(bodies: unknown[]): { calls: Array<{ url: string; ini
     calls.push({ url, init });
     const body = bodies[Math.min(i, bodies.length - 1)];
     i += 1;
-    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body), text: () => Promise.resolve('') } as Response);
+    return Promise.resolve(new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } }));
   });
   return { calls };
 }
@@ -36,7 +41,7 @@ const TOOL: ToolsDispatchRequest['tools'][number] = {
 };
 
 // A verbose, pretty-printed payload with structurally-empty fields — lossless compaction
-// (minify + drop `""`/`null`/`[]`/`{}`) strictly shrinks it.
+// (minify ONLY since ADR 0604; the empties survive) strictly shrinks it.
 const RAW = JSON.stringify({ rows: [{ id: 1, label: 'a', note: '', tags: [] }], meta: {}, summary: null }, null, 2);
 
 beforeEach(() => {
@@ -80,6 +85,7 @@ describe('ADR 0099 — compaction reaches the model via the dispatcher relay', (
       .find((b) => b.type === 'tool_result');
 
     expect(toolResult?.content).toBe(returnedToModel);     // relayed VERBATIM (= the builder's compacted output)
+    expect(toolResult?.content).toBe('{"rows":[{"id":1,"label":"a","note":"","tags":[]}],"meta":{},"summary":null}');
     expect(returnedToModel.length).toBeLessThan(RAW.length); // compaction actually happened
     expect(toolResult?.content).not.toBe(RAW);             // raw verbose output did NOT reach the model
   });
@@ -97,6 +103,7 @@ describe('ADR 0099 — compaction reaches the model via the dispatcher relay', (
     await dispatchAnthropicWithTools(req);
     const round2 = JSON.parse(calls[1]!.init.body as string) as { messages: Array<{ content: string | Array<{ type: string; content?: string }> }> };
     const toolResult = round2.messages.flatMap((m) => (Array.isArray(m.content) ? m.content : [])).find((b) => b.type === 'tool_result');
-    expect(toolResult?.content).toBe(RAW); // identity preserved end-to-end
+    // identity preserved end-to-end — and the dispatcher did NOT re-minify the pretty payload
+    expect(toolResult?.content).toBe(RAW);
   });
 });

@@ -11,7 +11,10 @@ describe('CDP-D bigquery-write provider', () => {
     const p = getProvider('bigquery-write');
     expect(p).toBeTruthy();
     expect(p!.readOnly).not.toBe(true);
-    expect(p!.scopes.write?.some((g) => g.scopes.some((s) => s.includes('bigquery.insertdata')))).toBe(true);
+    const INSERT = 'https://www.googleapis.com/auth/bigquery.insertdata';
+    expect(p!.scopes.write?.flatMap((g) => g.scopes)).toEqual([INSERT]);
+    // the scope a consent actually requests is the write scope, not the read one
+    expect(p!.defaultScopes).toEqual([INSERT]);
     expect(p!.apiHosts).toContain('bigquery.googleapis.com');
     expect(() => assertReadOnlyConsistent(p!)).not.toThrow();
   });

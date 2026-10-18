@@ -3,12 +3,18 @@
  * injector + singleton hydrate. Values arrive already server-sanitized; these
  * tests assert the mapping (brandable color keys → :root tokens, title, favicon)
  * and that the build-time singleton merges a runtime override.
+ *
+ * Sabotage-witnessed (wave 51): mis-map any of the six colour keys or drop the
+ * theme-color meta → case 1 red; keep a font override a later identity lacks → case 4
+ * red; prefix/mangle the favicon href or keep its build-time `type` → case 3 red; rename
+ * the cache key that index.html's pre-paint script reads → the cache case red; drift
+ * either side of GENERATOR_OWNED_TOKENS → the MIRROR case red.
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { applyBrandIdentity, hydrateBrandSingleton, readCachedIdentity, cacheIdentity, BRAND_CACHE_KEY, GENERATOR_OWNED_TOKENS, splitGeneratorOwnedOverride } from './applyBrand.js';
+import { applyBrandIdentity, hydrateBrandSingleton, readCachedIdentity, cacheIdentity, GENERATOR_OWNED_TOKENS, splitGeneratorOwnedOverride } from './applyBrand.js';
 import { brand } from './brand.js';
 import { BRAND_DEFAULTS } from './defaults.js';
 
@@ -16,16 +22,24 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 afterEach(() => {
   document.documentElement.removeAttribute('style');
+  document.querySelector('meta[name="theme-color"]')?.remove();
   localStorage.clear();
 });
 
 describe('applyBrandIdentity', () => {
-  it('maps brandable colors to the :root design tokens', () => {
-    applyBrandIdentity({ colors: { accent: 'oklch(58% 0.13 250)', paper: '#101014', ink: '#f4f1ea' } });
+  it('maps every brandable color to its :root design token, and themeColor to the meta tag', () => {
+    applyBrandIdentity({ colors: {
+      accent: 'oklch(58% 0.13 250)', paper: '#101014', paper2: '#16161c', ink: '#f4f1ea', ink2: '#d0ccc2', rule: '#2a2a33',
+      themeColor: '#0b0b0f',
+    } });
     const s = document.documentElement.style;
     expect(s.getPropertyValue('--clay')).toBe('oklch(58% 0.13 250)'); // accent → --clay (recolors the ramp)
     expect(s.getPropertyValue('--paper')).toBe('#101014');
+    expect(s.getPropertyValue('--paper-2')).toBe('#16161c');
     expect(s.getPropertyValue('--ink')).toBe('#f4f1ea');
+    expect(s.getPropertyValue('--ink-2')).toBe('#d0ccc2');
+    expect(s.getPropertyValue('--rule')).toBe('#2a2a33');
+    expect(document.querySelector('meta[name="theme-color"]')?.getAttribute('content')).toBe('#0b0b0f');
   });
 
   it('applies typography tokens and the document title', () => {
@@ -35,14 +49,33 @@ describe('applyBrandIdentity', () => {
     expect(document.title).toBe('Acme Ops');
   });
 
-  it('swaps the favicon link', () => {
+  it('swaps the favicon link and drops the build-time type (an override may be PNG/ICO)', () => {
     const link = document.createElement('link');
     link.rel = 'icon';
     link.href = 'https://old/favicon.ico';
+    link.setAttribute('type', 'image/svg+xml');
     document.head.appendChild(link);
-    applyBrandIdentity({ logo: { faviconSrc: '/brand/acme.svg' } });
-    expect((document.querySelector('link[rel="icon"]') as HTMLLinkElement).getAttribute('href')).toContain('/brand/acme.svg');
-    link.remove();
+    try {
+      applyBrandIdentity({ logo: { faviconSrc: '/brand/acme.svg' } });
+      const icons = document.querySelectorAll('link[rel="icon"]');
+      expect(icons).toHaveLength(1); // swapped in place, not a second icon link
+      expect(icons[0]?.getAttribute('href')).toBe('/brand/acme.svg');
+      expect(icons[0]?.getAttribute('type')).toBeNull();
+    } finally {
+      link.remove();
+    }
+  });
+
+  it('clears a font override a later identity no longer carries (ADR 0883 correction)', () => {
+    applyBrandIdentity({ typography: { serif: '"Instrument Serif", serif', sans: 'Geist', mono: 'Geist Mono', fontsHref: 'https://fonts.googleapis.com/css2?family=Instrument+Serif' } });
+    expect(document.documentElement.style.getPropertyValue('--serif')).toBe('"Instrument Serif", serif');
+    expect(document.querySelector('link[data-brand-fonts]')).not.toBeNull();
+    applyBrandIdentity({ colors: { accent: 'oklch(58% 0.13 40)' } });
+    const s = document.documentElement.style;
+    expect(s.getPropertyValue('--serif')).toBe('');
+    expect(s.getPropertyValue('--sans')).toBe('');
+    expect(s.getPropertyValue('--mono')).toBe('');
+    expect(document.querySelector('link[data-brand-fonts]')).toBeNull();
   });
 
   it('no-ops on an empty identity (build-time fallback stays)', () => {
@@ -54,23 +87,29 @@ describe('applyBrandIdentity', () => {
 describe('hydrateBrandSingleton', () => {
   it('merges a runtime override onto the build-time brand singleton', () => {
     const origName = brand.productName;
-    hydrateBrandSingleton({ productName: 'Acme', logo: { markSrc: '/acme.svg' } });
-    expect(brand.productName).toBe('Acme');
-    expect(brand.markSrc).toBe('/acme.svg');
-    expect(brand.logoSrc).toBe('/acme.svg'); // logoSrc tracks markSrc
-    // restore to avoid leaking into other tests in this file
-    brand.productName = origName;
-    brand.markSrc = BRAND_DEFAULTS.markSrc;
-    brand.logoSrc = BRAND_DEFAULTS.markSrc;
+    try {
+      hydrateBrandSingleton({ productName: 'Acme', logo: { markSrc: '/acme.svg' } });
+      expect(brand.productName).toBe('Acme');
+      expect(brand.markSrc).toBe('/acme.svg');
+      expect(brand.logoSrc).toBe('/acme.svg'); // logoSrc tracks markSrc
+    } finally {
+      // restore even on a red, so nothing leaks into other cases under shuffle
+      brand.productName = origName;
+      brand.markSrc = BRAND_DEFAULTS.markSrc;
+      brand.logoSrc = BRAND_DEFAULTS.markSrc;
+    }
   });
 });
 
 describe('identity cache', () => {
-  it('round-trips through localStorage', () => {
+  it('round-trips through localStorage under the key the pre-paint script reads', () => {
     expect(readCachedIdentity()).toBeNull();
     cacheIdentity({ productName: 'Acme' });
     expect(readCachedIdentity()).toEqual({ productName: 'Acme' });
-    expect(localStorage.getItem(BRAND_CACHE_KEY)).toContain('Acme');
+    // LITERAL key: index.html's inline pre-paint script reads
+    // localStorage.getItem('openwop.brand') before any module loads, so the
+    // product constant must not be the expectation (it would move with a rename).
+    expect(localStorage.getItem('openwop.brand')).toBe('{"productName":"Acme"}');
   });
 });
 

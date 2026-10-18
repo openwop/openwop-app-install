@@ -62,8 +62,13 @@ export function WebinarsPage(): JSX.Element {
   const [bindingFor, setBindingFor] = useState('');
   const [bindFormId, setBindFormId] = useState('');
   // The org's forms, for the binding picker + for naming an already-bound form.
-  // A failed read degrades to "no forms" rather than blocking the dashboard.
+  // A failed read does not block the dashboard, but it is NOT "no forms"
+  // (EMPTY-ON-FAIL-7, ADR 0779 D7): since WEB-G1 made binding a picker, the old
+  // degrade-to-[] removed the only bind control AND said "create one first". The
+  // failure is its own state with a retry; the empty copy needs a successful read.
   const [forms, setForms] = useState<FormDef[] | null>(null);
+  const [formsFailed, setFormsFailed] = useState(false);
+  const [formsAttempt, setFormsAttempt] = useState(0);
 
   // R2 WB-SP-6 — latest-wins (the forms effect beside this one already had a
   // guard): a slow OLD-org response could overwrite the new org's list, and
@@ -82,9 +87,10 @@ export function WebinarsPage(): JSX.Element {
   useEffect(() => {
     if (!orgId) return;
     let live = true;
-    void listForms(orgId).then((f) => { if (live) setForms(f); }).catch(() => { if (live) setForms([]); });
+    setFormsFailed(false);
+    void listForms(orgId).then((f) => { if (live) setForms(f); }).catch(() => { if (live) setFormsFailed(true); });
     return () => { live = false; };
-  }, [orgId]);
+  }, [orgId, formsAttempt]);
   const formTitle = (formId: string): string | undefined => forms?.find((f) => f.formId === formId)?.title;
 
   const create = async (): Promise<void> => {
@@ -257,7 +263,12 @@ export function WebinarsPage(): JSX.Element {
                       dashboard then claimed a binding that could never deliver a
                       registrant. A picker makes an invalid id unreachable here,
                       and the route now refuses one anyway. */}
-                  {forms === null ? (
+                  {formsFailed ? (
+                    <>
+                      <span className="u-fs-13 u-text-warning">{t('formsLoadFailed')}</span>
+                      <Button variant="quiet" size="sm" onClick={() => setFormsAttempt((n) => n + 1)}>{t('common:retry')}</Button>
+                    </>
+                  ) : forms === null ? (
                     <span className="u-fs-13 u-text-muted">{t('formsLoading')}</span>
                   ) : forms.length === 0 ? (
                     <span className="u-fs-13 u-text-muted">{t('noFormsAvailable')}</span>

@@ -2,6 +2,15 @@
  * meshCodec (ADR 0388 P1) — round-trip fixtures (our exporter ↔ our importer),
  * typed-failure posture (malformed/oversized → MeshCodecError, never a
  * lookalike), determinism, and the FE↔BE twin byte-parity pin.
+ *
+ * Sabotage-witnessed (/grade-tests w34): the triangle cap (full-length body,
+ * literal oracle), the ASCII/binary non-finite guards, the length check, OBJ fan
+ * + negative-index resolution + material disclosure, glTF bounds / external-URI /
+ * sparse / material-disclosure / TRS, tessellation closedness (independent
+ * divergence volume), placement, and pose order. Parity passes vacuously only
+ * without the frontend tree (CAD-G4); the cap has a second guard in finishMesh
+ * with the same message (a recorded double guard). W34-CAD-3 (BLOCKED-ON-PRODUCT,
+ * `it.fails`): the sphere tessellation is inward-wound.
  */
 import { describe, expect, it } from 'vitest';
 import { existsSync, readFileSync } from 'node:fs';
@@ -16,12 +25,23 @@ import {
   poseMesh,
   tessellateSolid,
   MeshCodecError,
-  MAX_MESH_TRIANGLES,
 } from '../meshCodec.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 
 const TRI = new Float32Array([0, 0, 0, 10, 0, 0, 0, 10, 0, 0, 0, 5, 10, 0, 5, 0, 10, 5]);
+
+/** Signed volume by the divergence theorem (Σ a·(b×c) / 6) — an independent
+ *  oracle: exact for a closed, outward-wound triangle soup; an open or
+ *  inward-wound mesh reads wrong. Never computed by the code under test. */
+function signedVolume(t: Float32Array): number {
+  let v6 = 0;
+  for (let i = 0; i < t.length; i += 9) {
+    const [ax, ay, az, bx, by, bz, cx, cy, cz] = [t[i]!, t[i + 1]!, t[i + 2]!, t[i + 3]!, t[i + 4]!, t[i + 5]!, t[i + 6]!, t[i + 7]!, t[i + 8]!];
+    v6 += ax * (by * cz - bz * cy) - ay * (bx * cz - bz * cx) + az * (bx * cy - by * cx);
+  }
+  return v6 / 6;
+}
 
 describe('meshCodec — canonical STL', () => {
   it('binary round-trips byte-identically (emit → parse → emit)', () => {
@@ -51,17 +71,23 @@ endsolid a`;
   it('typed errors: truncated binary, length mismatch, non-numeric ASCII vertex', () => {
     expect(() => parseStl(new Uint8Array(10))).toThrowError(MeshCodecError);
     const bad = emitCanonicalStl(TRI).slice(0, 100); // truncated
-    expect(() => parseStl(bad)).toThrowError(/length mismatch|truncated/i);
-    const badAscii = 'solid x\nfacet\nvertex a b c\nendsolid';
-    expect(() => parseStl(new TextEncoder().encode(badAscii))).toThrowError(MeshCodecError);
+    expect(() => parseStl(bad)).toThrowError(/length mismatch/);
+    // `1e999` matches the vertex grammar but is not finite — the fixture must
+    // REACH the guard (a non-matching `vertex a b c` only ever hit empty_mesh).
+    const badAscii = 'solid x\nfacet normal 0 0 1\nouter loop\nvertex 1e999 0 0\nvertex 1 0 0\nvertex 0 1 0\nendloop\nendfacet\nendsolid x';
+    expect(() => parseStl(new TextEncoder().encode(badAscii))).toThrowError(/ASCII STL has a non-numeric vertex/);
   });
 
   it('triangle cap is enforced with a typed error', () => {
-    const header = new Uint8Array(84);
-    new DataView(header.buffer).setUint32(80, MAX_MESH_TRIANGLES + 1, true);
-    // Length check fires first unless we fabricate the full body — the cap
-    // check runs on the declared count before allocation:
-    expect(() => parseStl(header)).toThrowError(MeshCodecError);
+    // A FULL, length-consistent body of 50,001 triangles — a header-only file
+    // fails the length check first and never reaches the cap. The count is a
+    // literal (the documented 50k ceiling), never read from the module under
+    // test, so a raised cap cannot move the oracle with it.
+    const n = 50_001;
+    const body = new Uint8Array(84 + n * 50);
+    new DataView(body.buffer).setUint32(80, n, true);
+    expect(() => parseStl(body)).toThrowError(MeshCodecError);
+    expect(() => parseStl(body)).toThrowError(/Mesh has 50001 triangles — the cap is 50000/);
   });
 });
 
@@ -78,6 +104,12 @@ f -4 -3 -2
     const parsed = parseObj(obj);
     expect(parsed.triangleCount).toBe(3); // quad → 2 + 1
     expect(parsed.dropped).toEqual([]);
+    // fan (v1,v2,v3) + (v1,v3,v4), then -4 -3 -2 resolves to v1 v2 v3
+    expect([...parsed.positions]).toEqual([
+      0, 0, 0, 10, 0, 0, 10, 10, 0,
+      0, 0, 0, 10, 10, 0, 0, 10, 0,
+      0, 0, 0, 10, 0, 0, 10, 10, 0,
+    ]);
   });
 
   it('discloses dropped materials; rejects bad indices', () => {
@@ -89,7 +121,7 @@ usemtl steel
 f 1 2 3
 `;
     expect(parseObj(obj).dropped).toContain('materials');
-    expect(() => parseObj('v 0 0 0\nf 1 2 9')).toThrowError(MeshCodecError);
+    expect(() => parseObj('v 0 0 0\nf 1 2 9')).toThrowError(/out of range/);
     expect(() => parseObj('v 0 0 0\nv 1 0 0\nf 1 2')).toThrowError(/fewer than 3/);
   });
 });
@@ -136,6 +168,17 @@ describe('meshCodec — GLTF/GLB', () => {
     expect(() => parseGltf(new TextEncoder().encode(external))).toThrowError(/EXTERNAL buffer URI/);
     const reqExt = JSON.stringify({ asset: { version: '2.0' }, extensionsRequired: ['KHR_draco_mesh_compression'] });
     expect(() => parseGltf(new TextEncoder().encode(reqExt))).toThrowError(/extensions/);
+    const sparse = JSON.stringify({
+      asset: { version: '2.0' },
+      scene: 0,
+      scenes: [{ nodes: [0] }],
+      nodes: [{ mesh: 0 }],
+      meshes: [{ primitives: [{ attributes: { POSITION: 0 }, mode: 4 }] }],
+      accessors: [{ bufferView: 0, componentType: 5126, count: 3, type: 'VEC3', sparse: { count: 1 } }],
+      bufferViews: [{ buffer: 0, byteOffset: 0, byteLength: 36 }],
+      buffers: [{ uri: `data:application/octet-stream;base64,${Buffer.alloc(36).toString('base64')}`, byteLength: 36 }],
+    });
+    expect(() => parseGltf(new TextEncoder().encode(sparse))).toThrowError(/sparse accessors/);
   });
 
   it('bakes node TRS transforms', () => {
@@ -160,26 +203,38 @@ describe('meshCodec — GLTF/GLB', () => {
 
 describe('meshCodec — parametric tessellation', () => {
   it('every parametric kind emits closed triangle geometry; deterministic', () => {
+    // Closed + outward-wound ⇔ the divergence volume equals the solid's. Box:
+    // 10³. Cylinder/cone: the inscribed 24-gon prism/pyramid, (n/2)·r²·sin(2π/n)·L
+    // = 12·100·sin(π/12)·20 (÷3 for the cone). Sphere: inscribed, so strictly
+    // under (4/3)π·10³ and above 90 % of it. All hand-derived.
+    const expected: Record<string, (v: number) => void> = {
+      box: (v) => expect(v).toBeCloseTo(1000, 3),
+      cylinder: (v) => expect(v).toBeCloseTo(6211.657082, 2),
+      cone: (v) => expect(v).toBeCloseTo(2070.552361, 2),
+      // |V|: closedness only — the sphere's WINDING is pinned separately (W34-CAD-3).
+      sphere: (v) => { expect(Math.abs(v)).toBeGreaterThan(0.9 * 4188.790205); expect(Math.abs(v)).toBeLessThan(4188.790205); },
+    };
     for (const kind of ['box', 'cylinder', 'sphere', 'cone'] as const) {
       const tris = tessellateSolid({ kind, radius: 10, length: 20, width: 10, height: 10, depth: 10 });
       expect(tris.length % 9).toBe(0);
-      expect(tris.length).toBeGreaterThan(0);
+      expected[kind]!(signedVolume(tris));
       const again = tessellateSolid({ kind, radius: 10, length: 20, width: 10, height: 10, depth: 10 });
       expect([...again]).toEqual([...tris]);
     }
   });
 
+  // W34-CAD-3 (BLOCKED-ON-PRODUCT): the sphere is closed but INWARD-wound —
+  // its divergence volume is negative (measured −4070.55 for r=10), so every
+  // exported STL/GLB sphere carries inverted normals (box/cylinder/cone are
+  // outward, per the case above). Pinned until the ring winding is flipped.
+  it.fails('W34-CAD-3: the sphere tessellation is outward-wound like every other kind', () => {
+    const tris = tessellateSolid({ kind: 'sphere', radius: 10 });
+    expect(signedVolume(tris)).toBeGreaterThan(0.9 * 4188.790205);
+  });
+
   it('box tessellates to exactly 12 triangles with the declared dimensions', () => {
     const tris = tessellateSolid({ kind: 'box', width: 20, height: 10, depth: 30, x: 5, y: 5, z: 5 });
-    expect(tris.length / 9).toBe(12);
-    const parsed = { positions: tris };
-    let minX = Infinity; let maxX = -Infinity;
-    for (let i = 0; i < tris.length; i += 3) {
-      minX = Math.min(minX, tris[i] ?? 0);
-      maxX = Math.max(maxX, tris[i] ?? 0);
-    }
-    expect(maxX - minX).toBeCloseTo(20, 5);
-    void parsed;
+    expect(tris.length / 9).toBe(12); // dimensions: see the CAD-C1 placement golden below
   });
 
   it('GRADE CAD-C1: placement golden — exports match the viewer convention (min-corner, Y-up)', () => {

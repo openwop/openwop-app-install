@@ -31,8 +31,10 @@ import { resolveToggle } from '../../host/featureToggles/service.js';
 import type { ToggleSubject } from '../../host/featureToggles/types.js';
 import { checkEntitlement } from '../../host/entitlementSeam.js';
 import type { Scope } from '../../host/accessControlService.js';
-import { requireOrgScope, requireTenantScope } from '../featureRoute.js';
-import { createAccount, deleteAccount, getAccount, listAccounts, updateAccount, type CrmRef } from './accountsService.js';
+import { callerSubjectSpellings, requireOrgScope, requireTenantScope } from '../featureRoute.js';
+import { isOwnPersonalWorkspace } from '../../host/requestSubject.js';
+import { listWorkspaceRootMembers } from '../../host/accessControlService.js';
+import { assertAssignableOwner, reconfirmOwner, createAccount, deleteAccount, getAccount, listAccounts, updateAccount, type CrmRef } from './accountsService.js';
 
 const TOGGLE_ID = 'csm';
 
@@ -100,6 +102,40 @@ function tenantOf(req: Request): string {
   return req.tenantId ?? 'default';
 }
 
+/**
+ * ADR 0882 D3 — the caller's own spellings, offered as an assignable owner ONLY
+ * in their own personal workspace: its owner row is created lazily and an anon
+ * sandbox has none, so `isWorkspaceMember` would leave the owner unassignable
+ * there (the service-desk `selfMemberSubject` precedent, ADR 0878 D5). Anywhere
+ * else the caller must be a member like everyone else.
+ */
+async function selfOwnerSpellings(req: Request): Promise<string[]> {
+  return isOwnPersonalWorkspace(req) ? callerSubjectSpellings(req) : [];
+}
+
+/** ADR 0882 D3 — `ownerUserId` (a member id, or null to clear) / `ownerSelf: true`. */
+async function parseOwner(req: Request, body: { ownerUserId?: unknown; ownerSelf?: unknown }): Promise<string | null | undefined> {
+  const self = await selfOwnerSpellings(req);
+  if (body.ownerSelf === true) {
+    // Prefer the caller's canonical `user:` spelling; fall back to the member
+    // row's spelling when the caller is a member under it.
+    const mine = [...self, ...(await callerSubjectSpellings(req))];
+    for (const s of mine) {
+      try {
+        return await assertAssignableOwner(tenantOf(req), s, self);
+      } catch (err) {
+        // CSM2CD-11 — only "not assignable" moves on to the next spelling; a
+        // storage failure must surface as itself, not as a 422.
+        if (!(err instanceof OpenwopError && err.code === 'validation_error')) throw err;
+      }
+    }
+    throw new OpenwopError('validation_error', 'You cannot own accounts in this workspace: you are not a member of it.', 422, { field: 'ownerSelf', reason: 'invalid_owner' });
+  }
+  if (body.ownerUserId === undefined) return undefined;
+  if (body.ownerUserId === null) return null;
+  return assertAssignableOwner(tenantOf(req), body.ownerUserId, self);
+}
+
 function requireString(value: unknown, field: string): string {
   if (typeof value !== 'string' || value.trim().length === 0) {
     throw new OpenwopError('validation_error', `Field \`${field}\` is required and MUST be a non-empty string.`, 400, { field });
@@ -155,11 +191,39 @@ export function registerCsmRoutes(deps: RouteDeps): void {
     }
   });
 
+  // ADR 0882 D3 — who can own an account: workspace-root members under a
+  // canonical `user:` subject (a legacy `oidc:` row is not assignable — a later
+  // login rekeys it with no hook), de-duplicated by subject, plus the caller in
+  // their own personal workspace. `me` is every spelling of the caller, so "Mine"
+  // matches whichever one the owner was stored under (the service-desk shape).
+  app.get('/host/openwop-app/csm/assignees', async (req, res, next) => {
+    try {
+      await requireEnabled(req, 'workspace:read');
+      const seen = new Set<string>();
+      const assignees: Array<{ subject: string; displayName: string }> = [];
+      for (const m of await listWorkspaceRootMembers(tenantOf(req))) {
+        if (!m.subject || !m.subject.startsWith('user:') || seen.has(m.subject)) continue;
+        seen.add(m.subject);
+        assignees.push({ subject: m.subject, displayName: m.displayName || m.subject });
+      }
+      for (const s of await selfOwnerSpellings(req)) {
+        if (seen.has(s)) continue;
+        seen.add(s);
+        assignees.push({ subject: s, displayName: s }); // the SPA labels its own row "You" via `me`
+        break;
+      }
+      res.json({ assignees, me: await callerSubjectSpellings(req) });
+    } catch (err) {
+      next(err);
+    }
+  });
+
   app.post('/host/openwop-app/csm/accounts', async (req, res, next) => {
     try {
       await requireEnabled(req, 'workspace:write');
-      const body = (req.body ?? {}) as { name?: unknown; healthScore?: unknown; crmRef?: unknown; renewalDate?: unknown; arr?: unknown; arrCurrency?: unknown; owner?: unknown };
+      const body = (req.body ?? {}) as { name?: unknown; healthScore?: unknown; crmRef?: unknown; renewalDate?: unknown; arr?: unknown; arrCurrency?: unknown; owner?: unknown; ownerUserId?: unknown; ownerSelf?: unknown };
       const crmRef = parseCrmRef(body.crmRef);
+      const ownerUserId = await parseOwner(req, body);
       // CSM-2 — authorize the target org BEFORE `createAccount` resolves the
       // company (which is what would leak its existence).
       if (crmRef) await authorizeCrmRefOrg(req, crmRef.orgId);
@@ -175,7 +239,11 @@ export function registerCsmRoutes(deps: RouteDeps): void {
         ...(typeof body.arr === 'number' ? { arr: body.arr } : {}),
         ...(typeof body.arrCurrency === 'string' ? { arrCurrency: body.arrCurrency } : {}),
         ...(typeof body.owner === 'string' ? { owner: body.owner } : {}),
+        ...(typeof ownerUserId === 'string' ? { ownerUserId } : {}),
       });
+      if (typeof ownerUserId === 'string' && !(await reconfirmOwner(account.accountId))) {
+        throw new OpenwopError('validation_error', 'That person left the workspace while the account was being saved, so it was left unassigned.', 422, { field: 'ownerUserId', reason: 'invalid_owner', accountId: account.accountId });
+      }
       res.status(201).json(account);
     } catch (err) {
       next(err);
@@ -189,8 +257,9 @@ export function registerCsmRoutes(deps: RouteDeps): void {
       if (!existing || existing.tenantId !== tenantOf(req)) {
         throw new OpenwopError('not_found', 'Account not found.', 404, { accountId: req.params.id });
       }
-      const body = (req.body ?? {}) as { name?: unknown; healthScore?: unknown; crmRef?: unknown; renewalDate?: unknown; arr?: unknown; arrCurrency?: unknown; owner?: unknown };
+      const body = (req.body ?? {}) as { name?: unknown; healthScore?: unknown; crmRef?: unknown; renewalDate?: unknown; arr?: unknown; arrCurrency?: unknown; owner?: unknown; ownerUserId?: unknown; ownerSelf?: unknown };
       const crmRef = parseCrmRef(body.crmRef);
+      const ownerUserId = await parseOwner(req, body);
       // CSM-2 — same gate on the PATCH lane; a re-link is the same authority
       // decision as the original link. (`null` clears and touches no org.)
       if (crmRef) await authorizeCrmRefOrg(req, crmRef.orgId);
@@ -210,6 +279,7 @@ export function registerCsmRoutes(deps: RouteDeps): void {
         ...(nNum(body.arr) !== undefined ? { arr: nNum(body.arr) } : {}),
         ...('arrCurrency' in body ? { arrCurrency: body.arrCurrency === null ? null : typeof body.arrCurrency === 'string' ? body.arrCurrency : undefined } : {}),
         ...(nStr(body.owner) !== undefined ? { owner: nStr(body.owner) } : {}),
+        ...(ownerUserId !== undefined ? { ownerUserId } : {}),
       });
       // CSM-7 — `updateAccount` returns null when the row vanished between the
       // existence check above and the write (a concurrent DELETE). Shipping that
@@ -217,6 +287,9 @@ export function registerCsmRoutes(deps: RouteDeps): void {
       // success. It is a 404, the same answer the pre-read gives.
       if (!updated) {
         throw new OpenwopError('not_found', 'Account not found.', 404, { accountId: req.params.id });
+      }
+      if (typeof ownerUserId === 'string' && !(await reconfirmOwner(updated.accountId))) {
+        throw new OpenwopError('validation_error', 'That person left the workspace while the account was being saved, so it was left unassigned.', 422, { field: 'ownerUserId', reason: 'invalid_owner', accountId: updated.accountId });
       }
       res.json(updated);
     } catch (err) {

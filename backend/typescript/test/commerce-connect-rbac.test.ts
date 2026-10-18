@@ -24,7 +24,9 @@
  * authenticates with the `dev-token` bearer (`tenants: ['*']` — the wildcard
  * escape hatch every scope gate honours, so it cannot witness a gate) or logs in
  * with a plain `test/login`, which lands the caller in their OWN personal tenant
- * where `isOwnPersonalWorkspace` short-circuits `requireTenantScope` by design.
+ * where `assertTenantScope`'s implicit personal-owner branch
+ * (`host/accessControlService.ts`, called by `requireTenantScope`) admits them
+ * before any scope is resolved, by design.
  * Neither fixture can go red on a missing role check.
  *
  * REACHABILITY PER LANE — the point of this file. A branch assumed unreachable is
@@ -39,8 +41,11 @@
  *              it is the only lane whose refusal is attributable to the SCOPE
  *              gate on a READ — see its describe block for why OUTSIDER is not;
  *   ANON     → NOT refused here. An `anon:<sid>` caller acts inside their own
- *              personal workspace, so the implicit-owner short-circuit admits
- *              them by design. That is precisely why MPL-1's GEN-CC-1 fold guard
+ *              personal workspace, so `assertTenantScope`'s implicit-owner
+ *              branch admits them by design (NOT `isOwnPersonalWorkspace` —
+ *              that sibling predicate serves `requireOrgScope` and other
+ *              routes and is not on this path; measured: forcing it false
+ *              left the anon case green). That is precisely why MPL-1's GEN-CC-1 fold guard
  *              is a SEPARATE predicate and not a role check — pinned in
  *              `commerce-connect-anon-fold-guard.test.ts`. Asserted here so the
  *              branch is measured, not assumed away.
@@ -49,7 +54,8 @@
  *
  * The fixture is the ADR 0554 §P3 production path (personal sign-in → membership
  * under the HOME `userId` → `/workspaces/:id/switch`), because the derive-the-
- * subject shortcut leaves `isOwnPersonalWorkspace` true and every 403 below
+ * subject shortcut leaves the caller in its own personal tenant, where the
+ * implicit-owner branch admits it, and every 403 below
  * would be unfalsifiable.
  *
  * SABOTAGE PROBE, RE-RUN at the review fold-in (not asserted): replacing the body
@@ -76,23 +82,39 @@ import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createApp } from '../src/index.js';
 import { createWorkspace, createMember } from '../src/host/accessControlService.js';
-import { enableTenantOverride } from '../src/host/featureToggles/service.js';
-import { __resetCommerceConnect } from '../src/features/commerce-connect/stores.js';
+import { enableTenantOverride, saveConfig, getEffectiveConfig } from '../src/host/featureToggles/service.js';
+import { __resetCommerceConnect, type PaidListing, type SellerAccount } from '../src/features/commerce-connect/stores.js';
+
+/** The bound TCP port, narrowed without a cast (`address()` is `string | AddressInfo | null`). */
+function portOf(s: { address(): string | AddressInfo | null }): number {
+  const a = s.address();
+  if (a === null || typeof a === 'string') throw new Error('server is not listening on a TCP port');
+  return a.port;
+}
 
 let server: Server;
 let BASE = '';
 let WS = '';
 const B = '/host/openwop-app/commerce-connect';
 
-interface Res<T = any> { status: number; body: T }
+/** The ONE untyped boundary: `JSON.parse` returns the declared `T` (the call
+ *  site's statement of the shape it reads). An empty or non-JSON body is `null`. */
+function parseBody<T>(text: string): T {
+  try { return JSON.parse(text === '' ? 'null' : text); } catch { return JSON.parse('null'); }
+}
+/** The canonical error envelope a refused call carries. */
+interface ApiError { error: string; message?: string; details?: { requiredScope?: string } & Record<string, unknown> }
+/** A response whose body shape the CALL SITE names; unread bodies stay `unknown`.
+ *  Refusal-checking sites read `Partial<ApiError>` (an admitted body has none of its fields). */
+interface Res<T = unknown> { status: number; body: T }
 
-async function call<T = any>(auth: Record<string, string>, method: string, path: string, body?: unknown): Promise<Res<T>> {
+async function call<T = unknown>(auth: Record<string, string>, method: string, path: string, body?: unknown): Promise<Res<T>> {
   const res = await fetch(`${BASE}${path}`, {
     method,
     headers: { ...auth, ...(body !== undefined ? { 'content-type': 'application/json' } : {}) },
     ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
   });
-  return { status: res.status, body: (res.status === 204 ? undefined : await res.json().catch(() => undefined)) as T };
+  return { status: res.status, body: parseBody<T>(await res.text()) };
 }
 
 const cookie = (c: string): Record<string, string> => ({ cookie: c });
@@ -105,7 +127,7 @@ async function member(subject: string, roles: string[]): Promise<string> {
   });
   expect(res.status).toBeLessThan(300);
   const personal = (res.headers.get('set-cookie') ?? '').split(';')[0] ?? '';
-  const { user } = (await res.json()) as { user: { userId: string } };
+  const { user } = parseBody<{ user: { userId: string } }>(await res.text());
   await createMember({ orgId: WS, tenantId: WS, displayName: subject, subject: user.userId, roles });
   const sw = await fetch(`${BASE}/host/openwop-app/workspaces/${encodeURIComponent(WS)}/switch`, {
     method: 'POST', headers: { cookie: personal },
@@ -150,6 +172,20 @@ const READS: string[] = [
   `${B}/payouts`, `${B}/seller/stats`, `${B}/seller/listings`,
 ];
 
+/** The EXACT status an admitted caller gets on each read. "not 401/403" would
+ *  also pass a 500 or a blanket 404, so admission is asserted exactly: every
+ *  read answers 200, except the IDOR-guarded order read, which 404s an order
+ *  that does not exist (no existence leak) with the canonical `not_found`. */
+const ADMITTED_STATUS = (path: string): number => (path.endsWith('/orders/cco_nope') ? 404 : 200);
+
+async function expectAdmittedOnReads(label: string, auth: Record<string, string>): Promise<void> {
+  for (const path of READS) {
+    const res = await call<Partial<ApiError>>(auth, 'GET', path);
+    expect(res.status, `${label} ${path} got ${res.status} ${JSON.stringify(res.body)}`).toBe(ADMITTED_STATUS(path));
+    if (res.status === 404) expect(res.body?.error, `${label} ${path}`).toBe('not_found');
+  }
+}
+
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
@@ -160,7 +196,7 @@ beforeAll(async () => {
   delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   await new Promise<void>((res) => {
-    server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
+    server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${portOf(server)}`; res(); });
   });
   await __resetCommerceConnect();
 
@@ -188,12 +224,8 @@ afterAll(async () => { await new Promise<void>((res) => server.close(() => res()
 
 describe('MPL-2 — the VIEWER lane (the defect)', () => {
   it('a viewer may READ every tenant-facing route', async () => {
-    for (const path of READS) {
-      const res = await call(cookie(viewer), 'GET', path);
-      // 404 is legitimate on `/orders/:orderId` for an order that does not exist;
-      // what must NEVER appear is 401/403 — a viewer holds `workspace:read`.
-      expect([401, 403], `${path} must stay readable for a viewer`).not.toContain(res.status);
-    }
+    // A viewer holds `workspace:read`: every read answers exactly as for an owner.
+    await expectAdmittedOnReads('VIEWER', cookie(viewer));
   });
 
   it('a viewer is refused EXACTLY 403 on all five writes — including the payout-URL write and the name-releasing DELETE', async () => {
@@ -202,7 +234,7 @@ describe('MPL-2 — the VIEWER lane (the defect)', () => {
     // the "no row behind" case below vacuous under exactly the sabotage this file
     // is meant to detect (measured: the listing PUT never fired).
     const results = await Promise.all(WRITES.map(async ([method, path, body]) =>
-      [method, path, await call(cookie(viewer), method, path, body)] as const));
+      [method, path, await call<Partial<ApiError>>(cookie(viewer), method, path, body)] as const));
     for (const [method, path, res] of results) {
       expect(res.status, `${method} ${path} must be 403 for a viewer, got ${res.status} ${JSON.stringify(res.body)}`).toBe(403);
       // The 403 must come from the SCOPE gate, not from some downstream domain
@@ -216,16 +248,16 @@ describe('MPL-2 — the VIEWER lane (the defect)', () => {
   it('the refused listing write left NO row behind — the refusal is before the effect', async () => {
     // A 403 that still wrote the row would be worse than no gate: the operator
     // queue would carry a listing whose submitter was never authorized.
-    const own = await call(cookie(editor), 'GET', `${B}/seller/listings`);
+    const own = await call<{ listings: PaidListing[] }>(cookie(editor), 'GET', `${B}/seller/listings`);
     expect(own.status).toBe(200);
-    expect((own.body.listings as Array<{ packName: string }>).some((l) => l.packName === 'vendor.rbac.nodes')).toBe(false);
+    expect(own.body.listings.some((l) => l.packName === 'vendor.rbac.nodes')).toBe(false);
   });
 });
 
 describe('MPL-2 — the gate is not simply closed', () => {
   for (const [label, who] of [['OWNER', () => owner], ['ADMIN', () => admin], ['EDITOR', () => editor]] as const) {
     it(`an ${label} is admitted on the listing write (not 401/403)`, async () => {
-      const res = await call(cookie(who()), 'PUT', `${B}/listings/vendor.rbac-${label.toLowerCase()}.nodes`, {
+      const res = await call<Partial<ApiError>>(cookie(who()), 'PUT', `${B}/listings/vendor.rbac-${label.toLowerCase()}.nodes`, {
         lane: 'external-link', externalPaymentUrl: 'https://seller.example/pay',
       });
       expect([401, 403], `${label} must reach the handler; got ${res.status} ${JSON.stringify(res.body)}`).not.toContain(res.status);
@@ -233,16 +265,13 @@ describe('MPL-2 — the gate is not simply closed', () => {
     });
 
     it(`an ${label} is admitted on the reads`, async () => {
-      for (const path of READS) {
-        const res = await call(cookie(who()), 'GET', path);
-        expect([401, 403], `${label} ${path}`).not.toContain(res.status);
-      }
+      await expectAdmittedOnReads(label, cookie(who()));
     });
   }
 });
 
 describe('MPL-2 — the OUTSIDER lane fails closed', () => {
-  it('a signed-in non-member of the workspace is refused on reads AND writes', async () => {
+  it('a signed-in non-member of the workspace is refused on reads AND writes (by the TOGGLE 404, measured)', async () => {
     // MEASURED, not assumed: the ADR 0015 re-check in the auth middleware bounces
     // a non-member out of `WS` and back to their OWN personal tenant, where the
     // `commerce-connect` toggle is off — so the refusal arrives as the toggle
@@ -250,18 +279,30 @@ describe('MPL-2 — the OUTSIDER lane fails closed', () => {
     // asserting only 403 here would have been a false expectation. What must
     // never appear is a 2xx.
     for (const path of READS) {
-      const res = await call(cookie(outsider), 'GET', path);
+      const res = await call<Partial<ApiError>>(cookie(outsider), 'GET', path);
       expect([401, 403, 404], `${path} must refuse a non-member, got ${res.status}`).toContain(res.status);
     }
     for (const [method, path, body] of WRITES) {
-      const res = await call(cookie(outsider), method, path, body);
+      const res = await call<Partial<ApiError>>(cookie(outsider), method, path, body);
       expect([401, 403, 404], `${method} ${path} must refuse a non-member, got ${res.status}`).toContain(res.status);
     }
   });
 
   it('the outsider never reaches a 2xx on any of the twelve routes', async () => {
-    for (const path of READS) expect((await call(cookie(outsider), 'GET', path)).status).toBeGreaterThanOrEqual(400);
-    for (const [method, path, body] of WRITES) expect((await call(cookie(outsider), method, path, body)).status).toBeGreaterThanOrEqual(400);
+    // Overlaps the case above (both red when the toggle gate is removed —
+    // measured); kept because this file is protected. Strengthened: it asserts
+    // the measured refusal itself (the toggle 404 with its message), so a change
+    // in WHICH gate refuses the outsider is visible, not just "some 4xx".
+    for (const path of READS) {
+      const res = await call<Partial<ApiError>>(cookie(outsider), 'GET', path);
+      expect(res.status, path).toBe(404);
+      expect(res.body?.message, path).toMatch(/not enabled for this tenant/);
+    }
+    for (const [method, path, body] of WRITES) {
+      const res = await call<Partial<ApiError>>(cookie(outsider), method, path, body);
+      expect(res.status, `${method} ${path}`).toBe(404);
+      expect(res.body?.message, `${method} ${path}`).toMatch(/not enabled for this tenant/);
+    }
   });
 });
 
@@ -285,7 +326,7 @@ describe('MPL-2 — the OUTSIDER lane fails closed', () => {
 describe('MPL-2 — a MEMBER with no roles is refused by the SCOPE gate on reads AND writes', () => {
   it('every read refuses with forbidden_scope / workspace:read', async () => {
     for (const path of READS) {
-      const res = await call(cookie(nobody), 'GET', path);
+      const res = await call<Partial<ApiError>>(cookie(nobody), 'GET', path);
       expect(res.status, `${path} got ${res.status} ${JSON.stringify(res.body)}`).toBe(403);
       expect(res.body?.error, `${path} error code`).toBe('forbidden_scope');
       expect(res.body?.details?.requiredScope, `${path} requiredScope`).toBe('workspace:read');
@@ -296,7 +337,7 @@ describe('MPL-2 — a MEMBER with no roles is refused by the SCOPE gate on reads
     // Issue all of them before asserting — the `for`-loop-throws-first hazard the
     // viewer case documents applies identically here.
     const results = await Promise.all(WRITES.map(async ([method, path, body]) =>
-      [method, path, await call(cookie(nobody), method, path, body)] as const));
+      [method, path, await call<Partial<ApiError>>(cookie(nobody), method, path, body)] as const));
     for (const [method, path, res] of results) {
       expect(res.status, `${method} ${path} got ${res.status} ${JSON.stringify(res.body)}`).toBe(403);
       expect(res.body?.error, `${method} ${path} error code`).toBe('forbidden_scope');
@@ -309,20 +350,52 @@ describe('MPL-2 — the SYSTEM lane still works (the wildcard escape hatch)', ()
   it('the wildcard operator principal reaches the seller read', async () => {
     // `requireTenantScope` short-circuits `tenants: ['*']` on purpose: operator
     // tooling and the conformance harness would otherwise 403 on every route.
-    const res = await call({ authorization: 'Bearer dev-token' }, 'GET', `${B}/seller`);
-    expect([401, 403], `wildcard principal must not be fenced out; got ${res.status}`).not.toContain(res.status);
+    // The wildcard principal acts in the `default` tenant (auth.ts: a `*` key
+    // leaves tenantId unset). Its toggle must be ON, or the read 404s at the
+    // TOGGLE gate — which the old `not [401,403]` assertion accepted, so this case
+    // used to pass on a toggle refusal without ever reaching the scope gate.
+    await enableTenantOverride('commerce-connect', 'default', 'cc-rbac-test');
+    const res = await call<{ seller: SellerAccount | null }>({ authorization: 'Bearer dev-token' }, 'GET', `${B}/seller`);
+    expect(res.status, `wildcard principal must not be fenced out; got ${res.status} ${JSON.stringify(res.body)}`).toBe(200);
+    expect(res.body).toHaveProperty('seller');
   });
 });
 
 describe('MPL-2 — the ANON lane is NOT closed by RBAC (measured, not assumed)', () => {
-  it('an anon session passes the role gate via the implicit personal-owner branch', async () => {
+  it('an anon session passes the role gate via the implicit personal-owner branch; the FOLD guard refuses it', async () => {
     // This is the honest statement of what RBAC does and does not do here. An
     // `anon:<sid>` caller's ACTIVE tenant IS their personal workspace, so
-    // `isOwnPersonalWorkspace` short-circuits before any scope is resolved.
+    // `assertTenantScope`'s implicit personal-owner branch
+    // (`ctx.personalTenant === tenantId && isPersonalTenantId(tenantId)`,
+    // host/accessControlService.ts) returns before any scope is resolved. The
+    // look-alike `isOwnPersonalWorkspace` (host/requestSubject.ts) is NOT on this
+    // path — a sabotage of it left this case green (measured, w39 r2).
     // Closing the anon lane is MPL-1's fold guard, a different predicate at a
     // different layer — see `commerce-connect-anon-fold-guard.test.ts`.
-    const { isOwnPersonalWorkspace } = await import('../src/host/requestSubject.js');
-    const anonReq = { tenantId: 'anon:sid-1', personalTenant: 'anon:sid-1' } as unknown as Parameters<typeof isOwnPersonalWorkspace>[0];
-    expect(isOwnPersonalWorkspace(anonReq)).toBe(true);
+    //
+    // Measured over HTTP with a REAL anon session (a cookieless request is
+    // auto-minted one), not a hand-built request object. The toggle is turned
+    // on globally for the duration (an anon tenant id is not known in advance),
+    // spread from the CURRENT effective config so the WS tenant override the
+    // other lanes depend on survives, and that exact config is restored in
+    // `finally` (restoring the registry default instead wiped the override —
+    // measured: 9 cases red under shuffle).
+    const first = await fetch(`${BASE}${B}/seller`);
+    const anon = (first.headers.get('set-cookie') ?? '').split(';')[0] ?? '';
+    expect(anon).toMatch(/^__session=/);
+    const prior = await getEffectiveConfig('commerce-connect');
+    expect(prior).not.toBeNull();
+    if (!prior) return;
+    await saveConfig({ ...prior, status: 'on' }, 'cc-rbac-test');
+    try {
+      const read = await call<{ seller: SellerAccount | null }>(cookie(anon), 'GET', `${B}/seller`);
+      expect(read.status, JSON.stringify(read.body)).toBe(200); // admitted: no role gate refused it
+      expect(read.body).toEqual({ seller: null });
+      const onboard = await call<Partial<ApiError>>(cookie(anon), 'POST', `${B}/seller/onboard`, {});
+      expect(onboard.status).toBe(403);
+      expect(onboard.body.details).toMatchObject({ reason: 'anon_tenant' }); // the FOLD guard, not forbidden_scope
+    } finally {
+      await saveConfig(prior, 'cc-rbac-test');
+    }
   });
 });

@@ -21,7 +21,6 @@
  * is consistent across instances and survives a restart.
  *
  * @see src/host/seed-data/exampleAgents.json — the seed content (brand surface)
- * @see src/host/exampleWorkflows.ts — the runnable portfolio workflows
  * @see RFCS/0086-standing-agent-roster-and-workflow-portfolio.md
  */
 
@@ -36,7 +35,6 @@ import { getChart, putChart, type OrgDepartment, type OrgMember } from './orgCha
 import { deleteRosterMemberCascade } from './rosterCascade.js';
 import { deleteConversationMeta } from './conversationStore.js';
 import { seedWorkforceEntities, seedWorkforceHistory } from './workforceService.js';
-import { exampleWorkflowsForRole, type ExampleRoleKey } from './exampleWorkflows.js';
 import { createLogger } from '../observability/logger.js';
 import { ensureUserAgentRegistered } from '../routes/userAgents.js';
 import type { Storage } from '../storage/storage.js';
@@ -88,6 +86,37 @@ type SeedAgentProfile = Omit<AgentProfileInput, 'roleKey' | 'department'> & {
   department?: AgentProfileInput['department'];
 };
 
+/** A seed persona's role key (moved here from the deleted demo-workflow module,
+ *  ADR 0775 P2d). */
+export type ExampleRoleKey =
+  // ── Canonical work-twin roleKeys (ADR 0032). Their standing portfolios bind
+  //    the `tmpl.*` chain-backed templates (ADR 0032 Phase 2.0, ADR 0775 P2)
+  //    directly on the seed entry's `workflows[]`.
+  | 'sales-execution'
+  | 'finance-close'
+  | 'customer-success'
+  | 'it-service-desk'
+  | 'internal-comms'
+  | 'recruiting-coordinator'
+  | 'people-ops'
+  | 'contract-procurement'
+  // Executive Operations (ADR 0032) — a SECOND instance on the `assistant`
+  // surface (the assistant-side wiring is its own task); reserved here so the
+  // seed entry + role theming can reference it.
+  | 'executive-ops'
+  // ── Legacy demo roleKeys (RETIRED by ADR 0032 — removed from the seed set).
+  //    Kept in the union so the migration/heal path can name them in
+  //    `RETIRED_DEMO_ROLE_KEYS` to prune already-seeded legacy personas.
+  | 'sales-ops'
+  | 'support-triage'
+  | 'finance-ops'
+  | 'engineering-ops'
+  | 'marketing-ops'
+  // The Executive Assistant / Chief of Staff (ADR 0023) — a real seeded agent.
+  // Its standing portfolio is the perception loops (registered by the assistant
+  // feature, not here), so its seed entry authors no `workflows[]`.
+  | 'chief-of-staff';
+
 interface SeedAgent {
   persona: string;
   role: string;
@@ -102,8 +131,9 @@ interface SeedAgent {
   /** Explicit standing-workflow portfolio — the pinned `tmpl.*` ids from the
    *  shared template pack (ADR 0032 Phase 2.0) this persona owns. When present
    *  it IS the portfolio (and a schedule's `workflowIndex` indexes into it);
-   *  when omitted the portfolio falls back to `exampleWorkflowsForRole(roleKey)`
-   *  (the legacy EXAMPLE_WORKFLOWS), so pre-work-twin personas seed unchanged. */
+   *  when omitted the portfolio is empty (Chief of Staff: its standing work is
+   *  the assistant's perception loops). ADR 0775 P2d deleted the legacy
+   *  role-filter fallback, which already returned none for every seeded roleKey. */
   workflows?: string[];
   /** Model class for the persona's chat-callable inventory agent. Optional in
    *  the seed data; defaults to `chat`. One of the host's known classes
@@ -337,11 +367,11 @@ async function seedAgentProfile(tenantId: string, spec: SeedAgent, rosterId: str
 }
 
 /** The persona's standing-workflow portfolio: the explicit `tmpl.*` ids authored
- *  on the spec (work twins, ADR 0032), or the legacy `exampleWorkflowsForRole`
- *  filter when none are authored. One resolver, shared by the create + heal
- *  paths, so a schedule's `workflowIndex` indexes the same array everywhere. */
+ *  on the spec (work twins, ADR 0032), or none when none are authored. One
+ *  resolver, shared by the create + heal paths, so a schedule's `workflowIndex`
+ *  indexes the same array everywhere. */
 function workflowIdsForSpec(spec: SeedAgent): string[] {
-  return spec.workflows ?? exampleWorkflowsForRole(spec.roleKey).map((w) => w.workflowId);
+  return spec.workflows ?? [];
 }
 
 /** The ONE roster-member creation path: chat-agent record + roster entry

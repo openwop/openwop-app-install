@@ -10,6 +10,9 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { makeMockAdapter, tierOf, type CuAction } from '../src/features/computer-use/adapter.js';
 import { startTask, decide, sessionStatus, parseAllowedOrigins } from '../src/features/computer-use/computerUseService.js';
+import { createOrg } from '../src/host/accessControlService.js';
+import { saveConfig } from '../src/host/featureToggles/service.js';
+import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 
 let server: http.Server;
 const T = 'tenant-cu-1';
@@ -31,6 +34,12 @@ beforeAll(async () => {
   process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { void (server.address() as AddressInfo); res(); }); });
+  // ADR 0894 D4 — every advance rechecks the opener's `runs:create` in the
+  // session's org and the toggle, so the loop runs against a real org it owns.
+  const d = getToggleDefault('computer-use'); if (d) await saveConfig({ ...d, status: 'on' }, 'test');
+  for (const tenantId of [T, 'tenant-cu-budget']) {
+    await createOrg({ tenantId, createdBy: 'test', name: 'CU', orgId: tenantId === T ? 'org-1' : 'org-budget', ownerSubject: 'u1' });
+  }
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 beforeEach(() => { delete process.env.OPENWOP_COMPUTER_USE_DAILY_SESSIONS; });
@@ -88,7 +97,13 @@ describe('the control loop', () => {
     expect(halted.status).toBe('awaiting_approval');
     expect(halted.pendingAction?.actionId).toBe('b2');
     expect(halted.steps).toBe(1); // only the observe step recorded so far
-    const resumed = await decide(adapter, T, halted.sessionId, true);
+    // ADR 0894 D3 — an approve without a verified approval interrupt is refused.
+    await expect(decide(adapter, { tenantId: T, sessionId: halted.sessionId, approve: true, actor: 'u1' }))
+      .rejects.toMatchObject({ code: 'approval_required' });
+    // …and only the opener may decide at all (D2).
+    await expect(decide(adapter, { tenantId: T, sessionId: halted.sessionId, approve: false, actor: 'u2' }))
+      .rejects.toMatchObject({ code: 'forbidden' });
+    const resumed = await decide(adapter, { tenantId: T, sessionId: halted.sessionId, approve: true, actor: 'u1', approvalInterruptId: 'itr-b2' });
     expect(resumed.status).toBe('completed');
     expect(resumed.steps).toBe(3); // + the human-decided commit + trailing observe
     expect(resumed.resultSummary).toBe('purchased');
@@ -99,9 +114,21 @@ describe('the control loop', () => {
     const task = mockTask([act('c1', 'download', 'https://app.example.com/report.pdf')]);
     const halted = await startTask(adapter, { ...BASE_INPUT, task });
     expect(halted.status).toBe('awaiting_approval');
-    const denied = await decide(adapter, T, halted.sessionId, false);
+    const denied = await decide(adapter, { tenantId: T, sessionId: halted.sessionId, approve: false, actor: 'u1' });
     expect(denied.status).toBe('denied');
-    await expect(decide(adapter, T, halted.sessionId, true)).rejects.toMatchObject({ code: 'conflict' });
+    await expect(decide(adapter, { tenantId: T, sessionId: halted.sessionId, approve: true, actor: 'u1', approvalInterruptId: 'itr-c1' }))
+      .rejects.toMatchObject({ code: 'conflict' });
+  });
+
+  it('ADR 0894 D3 — an approval is spent once: the same interrupt cannot approve a second action', async () => {
+    const adapter = makeMockAdapter();
+    const task = mockTask([act('g1', 'submit', 'https://app.example.com/a'), act('g2', 'submit', 'https://app.example.com/b')]);
+    const halted = await startTask(adapter, { ...BASE_INPUT, task });
+    const next = await decide(adapter, { tenantId: T, sessionId: halted.sessionId, approve: true, actor: 'u1', approvalInterruptId: 'itr-g' });
+    expect(next.status).toBe('awaiting_approval');
+    expect(next.pendingAction?.actionId).toBe('g2');
+    await expect(decide(adapter, { tenantId: T, sessionId: halted.sessionId, approve: true, actor: 'u1', approvalInterruptId: 'itr-g' }))
+      .rejects.toMatchObject({ code: 'approval_required' });
   });
 
   it('an off-allowlist provider URL fails the session closed — even at observe/interact tier', async () => {
@@ -129,9 +156,9 @@ describe('the control loop', () => {
     process.env.OPENWOP_COMPUTER_USE_DAILY_SESSIONS = '1';
     const adapter = makeMockAdapter();
     const t2 = 'tenant-cu-budget';
-    const one = await startTask(adapter, { ...BASE_INPUT, tenantId: t2, task: mockTask([act('e1', 'screenshot')]) });
+    const one = await startTask(adapter, { ...BASE_INPUT, tenantId: t2, orgId: 'org-budget', task: mockTask([act('e1', 'screenshot')]) });
     expect(one.status).toBe('completed');
-    await expect(startTask(adapter, { ...BASE_INPUT, tenantId: t2, task: mockTask([act('e2', 'screenshot')]) }))
+    await expect(startTask(adapter, { ...BASE_INPUT, tenantId: t2, orgId: 'org-budget', task: mockTask([act('e2', 'screenshot')]) }))
       .rejects.toMatchObject({ code: 'rate_limited' });
   });
 
@@ -159,8 +186,8 @@ describe('node pack (honest-off)', () => {
     // @ts-expect-error — .mjs pack module has no type declarations (pure-JS node pack).
     const { nodes } = await import('../../../packs/feature.computer-use.nodes/index.mjs');
     const ctx = {
-      inputs: { orgId: 'org-1', task: mockTask([act('g1', 'screenshot')]), startUrl: BASE_INPUT.startUrl, allowedOrigins: BASE_INPUT.allowedOrigins },
-      features: { 'computer-use': buildComputerUseSurface({ tenantId: 'tenant-cu-node', runId: 'run-1' }) },
+      inputs: { orgId: 'org-1', task: mockTask([act('n1', 'screenshot')]), startUrl: BASE_INPUT.startUrl, allowedOrigins: BASE_INPUT.allowedOrigins },
+      features: { 'computer-use': buildComputerUseSurface({ tenantId: T, runId: 'run-1', actingUserId: 'u1' }) },
     };
     const out = await nodes['feature.computer-use.nodes.task'](ctx);
     expect(out.status).toBe('success');

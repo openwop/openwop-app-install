@@ -24,12 +24,16 @@ let server: http.Server;
 const B = '/host/openwop-app/commerce-connect';
 
 const SUPER_TENANT = 'org:cc-gate-super';
+/** The class-1 toggle-off shape (`requireFeatureEnabled`): a uniform 404, never the
+ *  403 a plan lock gives. */
+const TOGGLE_OFF = { status: 404, error: 'not_found' } as const;
 
 async function login(email: string, tenantId?: string): Promise<string> {
   const res = await fetch(`${BASE}/host/openwop-app/test/login`, {
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify(tenantId ? { email, tenantId } : { email }),
   });
+  expect(res.status, `login ${email}`).toBe(201); // a failed login would read as a refusal below
   return (getSetCookies(res.headers) as string[]).map((c) => c.split(';')[0]).join('; ');
 }
 
@@ -51,7 +55,8 @@ describe('ADR 0575 — gate classes hold with the toggle OFF', () => {
   it('(a) class 1: a tenant-facing route is GONE when the toggle is off', async () => {
     const cookie = await login('cc-gate-tenant@e2e.test');
     const res = await fetch(`${BASE}${B}/seller`, { headers: { cookie } });
-    expect([403, 404]).toContain(res.status);
+    expect(res.status).toBe(TOGGLE_OFF.status);
+    expect(((await res.json()) as { error?: string }).error).toBe(TOGGLE_OFF.error);
   });
 
   it('(b) class 3: operator remediation still ANSWERS a superadmin with the toggle off', async () => {
@@ -60,7 +65,8 @@ describe('ADR 0575 — gate classes hold with the toggle OFF', () => {
       const res = await fetch(`${BASE}${B}${path}`, { headers: { cookie } });
       // Answering means NOT the toggle-off shape: any 2xx, or a domain error —
       // never the feature-disabled 403/404 the tenant route shows above.
-      expect(res.status, `${path} must not be toggle-gated (ADR 0575: gating remediation on tenant visibility is a money trap)`).toBeLessThan(403);
+      // 200, not merely `< 403`: a 401 (a failed superadmin login) is also below 403.
+      expect(res.status, `${path} must not be toggle-gated (ADR 0575: gating remediation on tenant visibility is a money trap)`).toBe(200);
     }
   });
 
@@ -68,7 +74,9 @@ describe('ADR 0575 — gate classes hold with the toggle OFF', () => {
     const cookie = await login('cc-gate-user@e2e.test');
     for (const [method, path] of [['GET', '/admin/disputes'], ['GET', '/admin/orders'], ['PUT', '/fee-config'], ['POST', '/import'], ['DELETE', '/admin/listings/some.pack'], ['PUT', '/admin/listings/some.pack/state']] as const) {
       const res = await fetch(`${BASE}${B}${path}`, { method, headers: { cookie, 'content-type': 'application/json' }, body: method === 'GET' ? undefined : JSON.stringify({ reason: 'x', state: 'suspended' }) });
-      expect([401, 403]).toContain(res.status);
+      // Exactly 403 from the superadmin check — a 401 would be an auth failure, not the gate.
+      expect(res.status, `${method} ${path}`).toBe(403);
+      expect(((await res.json()) as { error?: string }).error, `${method} ${path}`).toBe('forbidden');
     }
   });
 });

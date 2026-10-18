@@ -19,17 +19,26 @@ import { storeMediaAsset } from '../src/host/inMemorySurfaces.js';
 import { assertFlatErrorEnvelope, errorCodeOf } from './helpers/errorEnvelope.js';
 
 let BASE: string;
-const H = { authorization: 'Bearer dev-token', 'content-type': 'application/json' };
+// ADR 0900 D1: with the test seam off the seam admits only a CONFIGURED wildcard
+// (`<key>:*`), never the public `dev-token:*` fallback, so this suite configures one.
+const WILDCARD_KEY = 'seam-stt-wildcard-operator-key';
+const H = { authorization: `Bearer ${WILDCARD_KEY}`, 'content-type': 'application/json' };
 let server: http.Server;
+let savedKeys: string | undefined;
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
+  savedKeys = process.env.OPENWOP_API_KEYS;
+  process.env.OPENWOP_API_KEYS = `${WILDCARD_KEY}:*`;
   delete process.env.OPENWOP_TEST_SEAM_ENABLED; // force the REAL url path, not the mock short-circuit
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
 });
-afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
+afterAll(async () => {
+  await new Promise<void>((res) => server.close(() => res()));
+  if (savedKeys === undefined) delete process.env.OPENWOP_API_KEYS; else process.env.OPENWOP_API_KEYS = savedKeys;
+});
 
 const SEAM = '/host/sample/ai/call-transcriber';
 const post = (body: unknown) => fetch(`${BASE}${SEAM}`, { method: 'POST', headers: H, body: JSON.stringify(body) });

@@ -14,8 +14,29 @@
  *     `wf.cadence.*`, `wf.copy.*`, `wf.fork.*`, `wf.seed.*`). `sub`/`cadence` ids
  *     are derived from a tenant id, so a free one is pre-squattable by any other
  *     tenant — the hole ADR 0794 closed on the REST lane and left open here.
+ *
+ * Sabotage-witnessed (grade-tests w18, probes `w18g1-a-*`): removing the gate
+ * from the Architect's persist tool, from `persistDraft`, or from compose-and-run;
+ * either of the draft route's two scope checks (`workspace:write` reds the Viewer
+ * case; `runs:create` reds the write-only-key case); the
+ * operator-key branch or its tenant binding; the personal-tenant stamp, its
+ * own-tenant comparison, or the executor's threading of it; the deterministic /
+ * server-minted id refusals on either door; the D4 diff (position-blind nodes,
+ * hash-decided `unchanged`, `inHistory`, create-carries-nothing); the D5
+ * approval eligibility; or gating `propose` — each turns a case red.
+ * CEILING: "a run with no acting user is refused" is double-guarded
+ * (`hasWorkflowScope`'s own check AND `assertTenantScope`'s `!subject` refusal),
+ * so no single sabotage of the posture can turn it red; it is kept as the
+ * posture's statement and asserts nothing was written. Likewise there is no
+ * "runs-only key" case: `keyVendorGate` refuses every vendor POST from a key
+ * that does not declare `workspace:write` BEFORE the route runs, so the route's
+ * own `workspace:write` check can never be the one that refuses such a key
+ * (w18 reprobe a-d2-write-gate left that case green).
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import type { BundleScope } from '../src/host/inMemorySurfaces.js';
+import type { NodeContext, NodeOutcome, WorkflowDefinition } from '../src/executor/types.js';
+import type { RunRecord } from '../src/types.js';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
@@ -36,6 +57,11 @@ const EDITOR_SUBJECT = 'user:editor-0822';
 const VIEWER_SUBJECT = 'user:viewer-0822';
 let EDITOR = '';
 let VIEWER = '';
+/** ADR 0822 D2 — an editor-issued key DECLARING `workspace:write` but not
+ *  `runs:create`: the only principal on which the route's `runs:create` check
+ *  decides alone (a Viewer is refused by `workspace:write` first, and in the
+ *  default posture `runs:create` narrows only `owk_` keys). */
+let WRITE_ONLY = '';
 const saved: Record<string, string | undefined> = {};
 let BASE = '';
 let server: http.Server;
@@ -45,20 +71,25 @@ async function call(method: string, path: string, opts: { key?: string; body?: u
   if (opts.body !== undefined) headers['content-type'] = 'application/json';
   const res = await fetch(`${BASE}${path}`, { method, headers, ...(opts.body !== undefined ? { body: JSON.stringify(opts.body) } : {}) });
   const text = await res.text();
-  let json: any; try { json = JSON.parse(text); } catch { json = text; }
+  let json: Record<string, unknown> = {};
+  try { json = JSON.parse(text) as Record<string, unknown>; } catch { json = { raw: text }; }
   return { status: res.status, json };
 }
 const host = (p: string) => `/host/openwop-app${p}`;
 
-const noop = (workflowId: string) => ({
+const noop = (workflowId: string): WorkflowDefinition => ({
   workflowId,
-  nodes: [{ nodeId: 'n1', typeId: 'core.noop', outputRole: 'primary' as const }],
+  nodes: [{ nodeId: 'n1', typeId: 'core.noop', outputRole: 'primary' }],
 });
+/** The run-scoped surface a meta-workflow node sees, built on a typed scope. */
+const surfaceFor = (scope: BundleScope) => buildWorkflowAuthorSurface(scope);
+/** Loose read of a JSON tool/route body — no `any`. */
+type Body = Record<string, unknown>;
 
 async function toolAs(name: string, scope: { tenantId?: string; actingUserId?: string; personalTenant?: string }, input: Record<string, unknown>) {
   const { executeTool } = createAgentToolProvider({ tenantId: scope.tenantId ?? TENANT, runId: 'r-0822', ...(scope.actingUserId ? { actingUserId: scope.actingUserId } : {}), ...(scope.personalTenant ? { personalTenant: scope.personalTenant } : {}) });
   const out = await executeTool({ name, input });
-  return { isError: out.isError === true, body: JSON.parse(out.content) as Record<string, any> };
+  return { isError: out.isError === true, body: JSON.parse(out.content) as Body };
 }
 const persistAs = (actingUserId: string, definition: unknown, extra: Record<string, unknown> = {}) =>
   toolAs(WORKFLOW_AUTHOR_PERSIST_TOOL_ID, { actingUserId }, { definition, ...extra });
@@ -77,6 +108,7 @@ beforeAll(async () => {
   await createMember({ tenantId: TENANT, orgId: TENANT, subject: VIEWER_SUBJECT, displayName: 'Viewer', roles: ['viewer'] });
   EDITOR = (await issueApiKey({ tenantId: TENANT, name: 'editor', createdBy: EDITOR_SUBJECT })).token;
   VIEWER = (await issueApiKey({ tenantId: TENANT, name: 'viewer', createdBy: VIEWER_SUBJECT })).token;
+  WRITE_ONLY = (await issueApiKey({ tenantId: TENANT, name: 'write-only', createdBy: EDITOR_SUBJECT, scopes: ['workspace:write'] })).token;
 });
 
 afterAll(async () => {
@@ -106,16 +138,16 @@ describe('ADR 0822 D1 — the Architect\'s persist tool needs workspace:write', 
 describe('ADR 0822 D1 — the meta-workflow persistDraft surface needs workspace:write', () => {
   it('refuses a run acting for a viewer', async () => {
     const id = 'wf.adr0822.viewer-surface';
-    const surface = buildWorkflowAuthorSurface({ tenantId: TENANT, actingUserId: VIEWER_SUBJECT } as never);
-    await expect((surface.persistDraft as (a: unknown) => Promise<unknown>)({ definition: noop(id) }))
+    const surface = surfaceFor({ tenantId: TENANT, actingUserId: VIEWER_SUBJECT });
+    await expect(surface.persistDraft({ definition: noop(id) }))
       .rejects.toMatchObject({ code: 'forbidden_scope' });
     expect(await getRegisteredWorkflowAsync(id)).toBeNull();
   });
 
   it('lets a run acting for an editor write', async () => {
     const id = 'wf.adr0822.editor-surface';
-    const surface = buildWorkflowAuthorSurface({ tenantId: TENANT, actingUserId: EDITOR_SUBJECT } as never);
-    await expect((surface.persistDraft as (a: unknown) => Promise<{ workflowId: string }>)({ definition: noop(id) }))
+    const surface = surfaceFor({ tenantId: TENANT, actingUserId: EDITOR_SUBJECT });
+    await expect(surface.persistDraft({ definition: noop(id) }))
       .resolves.toMatchObject({ workflowId: id });
   });
 });
@@ -125,7 +157,13 @@ describe('ADR 0822 D2 — POST workflow-author/draft needs runs:create + workspa
     const r = await call('POST', host('/workflow-author/draft'), { key: VIEWER, body: { intent: 'email me every morning' } });
     expect(r.status).toBe(403);
     expect(r.json.error).toBe('forbidden_scope');
-    expect(r.json?.runId).toBeUndefined();
+    expect(r.json.runId).toBeUndefined();
+  });
+
+  it('refuses a key that may write the workspace but not create runs', async () => {
+    const r = await call('POST', host('/workflow-author/draft'), { key: WRITE_ONLY, body: { intent: 'email me every morning' } });
+    expect(r.status, JSON.stringify(r.json)).toBe(403);
+    expect(r.json.runId).toBeUndefined();
   });
 
   it('admits an editor (201 + a runId)', async () => {
@@ -157,49 +195,51 @@ describe('ADR 0822 D3 — the author lane never creates a server-minted id', () 
 describe('ADR 0822 D1 — the predicate judges the actor by provenance (no legitimate lane locked out)', () => {
   it('an operator env key\'s run actor (`bearer:<8>`) persists through the surface', async () => {
     const id = 'wf.adr0822.env-key-surface';
-    const surface = buildWorkflowAuthorSurface({ tenantId: TENANT, actingUserId: `bearer:${TENANT_ENV_KEY.slice(0, 8)}` } as never);
-    await expect((surface.persistDraft as (a: unknown) => Promise<{ workflowId: string }>)({ definition: noop(id) }))
+    const surface = surfaceFor({ tenantId: TENANT, actingUserId: `bearer:${TENANT_ENV_KEY.slice(0, 8)}` });
+    await expect(surface.persistDraft({ definition: noop(id) }))
       .resolves.toMatchObject({ workflowId: id });
   });
 
   it('a configured key is nobody in a tenant it is NOT bound to (grade-code WFAC-17)', async () => {
-    const surface = buildWorkflowAuthorSurface({ tenantId: VICTIM, actingUserId: `bearer:${TENANT_ENV_KEY.slice(0, 8)}` } as never);
-    await expect((surface.persistDraft as (a: unknown) => Promise<unknown>)({ definition: noop('wf.adr0822.key-wrong-tenant') }))
+    const surface = surfaceFor({ tenantId: VICTIM, actingUserId: `bearer:${TENANT_ENV_KEY.slice(0, 8)}` });
+    await expect(surface.persistDraft({ definition: noop('wf.adr0822.key-wrong-tenant') }))
       .rejects.toMatchObject({ code: 'forbidden_scope' });
     expect(await getRegisteredWorkflowAsync('wf.adr0822.key-wrong-tenant')).toBeNull();
   });
 
   it('an unconfigured `bearer:` actor is nobody', async () => {
-    const surface = buildWorkflowAuthorSurface({ tenantId: TENANT, actingUserId: 'bearer:notakey0' } as never);
-    await expect((surface.persistDraft as (a: unknown) => Promise<unknown>)({ definition: noop('wf.adr0822.stale-key') }))
+    const surface = surfaceFor({ tenantId: TENANT, actingUserId: 'bearer:notakey0' });
+    await expect(surface.persistDraft({ definition: noop('wf.adr0822.stale-key') }))
       .rejects.toMatchObject({ code: 'forbidden_scope' });
   });
 
   it('a solo user persists in their OWN personal workspace (request-stamped personalTenant), in-run and in chat', async () => {
     const solo = 'user:solo0822hash';
-    const surface = buildWorkflowAuthorSurface({ tenantId: solo, actingUserId: 'user:solo-0822', personalTenant: solo } as never);
-    await expect((surface.persistDraft as (a: unknown) => Promise<{ workflowId: string }>)({ definition: noop('wf.adr0822.solo-surface') }))
+    const surface = surfaceFor({ tenantId: solo, actingUserId: 'user:solo-0822', personalTenant: solo });
+    await expect(surface.persistDraft({ definition: noop('wf.adr0822.solo-surface') }))
       .resolves.toMatchObject({ workflowId: 'wf.adr0822.solo-surface' });
     const chat = await toolAs(WORKFLOW_AUTHOR_PERSIST_TOOL_ID, { tenantId: solo, actingUserId: 'user:solo-0822', personalTenant: solo }, { definition: noop('wf.adr0822.solo-chat') });
     expect(chat.isError).toBe(false);
+    expect(await getOwned(solo, 'wf.adr0822.solo-chat')).not.toBeNull();
   });
 
   it('an anon session persists in its own anon: sandbox, and not in a workspace it merely names', async () => {
     const own = await toolAs(WORKFLOW_AUTHOR_PERSIST_TOOL_ID, { tenantId: 'anon:sid0822', actingUserId: 'session:sid0822', personalTenant: 'anon:sid0822' }, { definition: noop('wf.adr0822.anon') });
     expect(own.isError).toBe(false);
+    expect(await getOwned('anon:sid0822', 'wf.adr0822.anon')).not.toBeNull();
     const foreign = await toolAs(WORKFLOW_AUTHOR_PERSIST_TOOL_ID, { tenantId: TENANT, actingUserId: 'session:sid0822', personalTenant: 'anon:sid0822' }, { definition: noop('wf.adr0822.anon-foreign') });
     expect(foreign.body.error).toBe('forbidden_scope');
   });
 
   it('a personal-SHAPED tenant is not enough: the stamp must be the actor\'s own', async () => {
-    const surface = buildWorkflowAuthorSurface({ tenantId: 'user:someone-else', actingUserId: 'user:solo-0822', personalTenant: 'user:solo0822hash' } as never);
-    await expect((surface.persistDraft as (a: unknown) => Promise<unknown>)({ definition: noop('wf.adr0822.not-mine') }))
+    const surface = surfaceFor({ tenantId: 'user:someone-else', actingUserId: 'user:solo-0822', personalTenant: 'user:solo0822hash' });
+    await expect(surface.persistDraft({ definition: noop('wf.adr0822.not-mine') }))
       .rejects.toMatchObject({ code: 'forbidden_scope' });
   });
 
   it('a run with no acting user is refused (the ADR 0775 D7 posture)', async () => {
-    const surface = buildWorkflowAuthorSurface({ tenantId: TENANT } as never);
-    await expect((surface.persistDraft as (a: unknown) => Promise<unknown>)({ definition: noop('wf.adr0822.actorless') }))
+    const surface = surfaceFor({ tenantId: TENANT });
+    await expect(surface.persistDraft({ definition: noop('wf.adr0822.actorless') }))
       .rejects.toMatchObject({ code: 'forbidden_scope' });
     expect(await getRegisteredWorkflowAsync('wf.adr0822.actorless')).toBeNull();
   });
@@ -242,7 +282,7 @@ describe('ADR 0822 D3 — owned random origins stay editable; owned deterministi
     const { recordOwnership } = await import('../src/host/workflowOwnership.js');
     const { registerWorkflowDurable } = await import('../src/host/workflowsRegistry.js');
     const id = 'wf.copy.example.00000000000c0822';
-    await registerWorkflowDurable(noop(id) as never);
+    await registerWorkflowDurable(noop(id));
     await recordOwnership(TENANT, id, { nodeCount: 1 });
     const got = await toolAs(WORKFLOW_AUTHOR_GET_TOOL_ID, { actingUserId: EDITOR_SUBJECT }, { workflowId: id });
     const out = await persistAs(EDITOR_SUBJECT, { ...noop(id), metadata: { name: 'renamed' } }, { baseRevision: got.body.revision });
@@ -253,7 +293,7 @@ describe('ADR 0822 D3 — owned random origins stay editable; owned deterministi
     const { recordOwnership } = await import('../src/host/workflowOwnership.js');
     const { registerWorkflowDurable } = await import('../src/host/workflowsRegistry.js');
     const id = subWorkflowId(TENANT, 'example.owned', '1.0.0');
-    await registerWorkflowDurable(noop(id) as never);
+    await registerWorkflowDurable(noop(id));
     await recordOwnership(TENANT, id, { nodeCount: 1 });
     const out = await persistAs(EDITOR_SUBJECT, noop(id));
     expect(out.body.reason).toBe('deterministic_workflow_id');
@@ -314,7 +354,7 @@ describe('ADR 0822 D4 — persist says what an overwrite changed', () => {
     const renamed = await persistAs(EDITOR_SUBJECT, { ...base, metadata: { name: 'After' } }, { baseRevision: r1.body.revision });
     expect(renamed.isError, JSON.stringify(renamed.body)).toBe(false);
     expect(renamed.body.unchanged).toBe(false);
-    expect(renamed.body.changes.workflowFieldsChanged).toEqual(['metadata.name']);
+    expect(renamed.body.changes).toMatchObject({ workflowFieldsChanged: ['metadata.name'] });
     expect(String(renamed.body.note)).not.toMatch(/Nothing changed/);
     const r2 = await toolAs(WORKFLOW_AUTHOR_GET_TOOL_ID, { actingUserId: EDITOR_SUBJECT }, { workflowId: id });
     const same = await persistAs(EDITOR_SUBJECT, { ...base, metadata: { name: 'After' } }, { baseRevision: r2.body.revision });
@@ -324,6 +364,7 @@ describe('ADR 0822 D4 — persist says what an overwrite changed', () => {
 });
 
 describe('ADR 0822 D1 — the executor threads the REQUEST-stamped personalTenant into the in-run surface', () => {
+  let inRunSeq = 0;
   async function runPersistInRun(metadata: Record<string, unknown>, tenantId: string, id: string) {
     const { openStorage } = await import('../src/storage/index.js');
     const { executeRun } = await import('../src/executor/executor.js');
@@ -332,25 +373,28 @@ describe('ADR 0822 D1 — the executor threads the REQUEST-stamped personalTenan
     getNodeRegistry().register({
       typeId,
       version: '1.0.0',
-      async execute(ctx: any) {
+      async execute(ctx: NodeContext): Promise<NodeOutcome> {
+        const surface = ctx.features?.['workflow-author'];
+        if (!surface?.persistDraft) return { status: 'failure', error: { code: 'no_surface', message: 'workflow-author surface missing' } };
         try {
-          const out = await ctx.features['workflow-author'].persistDraft({ definition: ctx.inputs.definition });
+          const out = await surface.persistDraft({ definition: (ctx.inputs as { definition?: unknown }).definition });
           return { status: 'success', outputs: out };
-        } catch (e: any) {
-          return { status: 'failure', error: { code: e.code ?? 'x', message: String(e.message) } };
+        } catch (e: unknown) {
+          const code = typeof (e as { code?: unknown }).code === 'string' ? (e as { code: string }).code : 'x';
+          return { status: 'failure', error: { code, message: String((e as Error).message) } };
         }
       },
-    } as never);
+    });
     const storage = await openStorage('memory://');
     const now = new Date().toISOString();
-    const run = {
-      runId: `run-0822-${Math.random().toString(36).slice(2, 10)}`,
+    const run: RunRecord = {
+      runId: `run-0822-${++inRunSeq}`,
       workflowId: 'wf.test.adr0822.inrun', tenantId, status: 'pending',
       inputs: { definition: noop(id) }, metadata, configurable: {}, createdAt: now, updatedAt: now,
     };
-    await storage.insertRun(run as never);
-    return executeRun(storage, run as never, { workflowId: 'wf.test.adr0822.inrun', nodes: [{ nodeId: 'p', typeId }] } as never,
-      { policyResolver: { async resolveForRun() { return []; } } } as never);
+    await storage.insertRun(run);
+    return executeRun(storage, run, { workflowId: 'wf.test.adr0822.inrun', nodes: [{ nodeId: 'p', typeId }] },
+      { policyResolver: { async resolveForRun() { return []; } } });
   }
 
   it('a solo user\'s run in their own personal workspace persists (the stamp reached the surface)', async () => {

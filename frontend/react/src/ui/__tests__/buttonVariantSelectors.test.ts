@@ -10,6 +10,12 @@
  * variant at a class that does not exist, the button silently becomes primary,
  * and this fails instead.
  *
+ * The classes are read from the REAL component (each variant is rendered with
+ * `renderToStaticMarkup`), never from a hand-kept mirror: a mirror passes when
+ * `Button.tsx` is pointed at a dead class, which is the exact DYNBTN-6 shape.
+ * The variant list is an exhaustive `Record<ButtonVariant, true>`, so `tsc`
+ * forces a new variant to be listed here.
+ *
  * Scope, stated so a green run is not over-read: this asserts the class NAMES
  * resolve to selectors in the authored stylesheets. It says nothing about what
  * those rules look like, or about specificity — `a.btn` beating bare
@@ -19,6 +25,9 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { createElement } from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
+import { Button, type ButtonVariant, type ButtonSize } from '../Button.js';
 
 const CSS_FILES = [
   'src/styles/foundations/tokens.css',
@@ -27,17 +36,23 @@ const CSS_FILES = [
   'src/brand/brand.css',
 ];
 
-/** Mirrors VARIANT_CLASS + the size modifier in ui/Button.tsx. */
-const VARIANT_CLASSES: Record<string, string> = {
-  primary: '', // bare IS primary — there is deliberately no .primary class
-  secondary: 'secondary',
-  quiet: 'btn-ghost',
-  danger: 'secondary u-text-danger',
-  link: 'btn-link',
-  accent: 'btn-accent',
-  'accent-solid': 'btn-accent-solid',
+/** Exhaustive by type: adding a ButtonVariant without listing it fails tsc. */
+const ALL_VARIANTS: Record<ButtonVariant, true> = {
+  primary: true,
+  secondary: true,
+  quiet: true,
+  danger: true,
+  link: true,
+  accent: true,
+  'accent-solid': true,
 };
-const SIZE_SM = 'btn-sm';
+
+/** The class tokens the REAL Button renders for a variant/size. */
+function renderedClasses(variant: ButtonVariant, size: ButtonSize = 'md'): string[] {
+  const html = renderToStaticMarkup(createElement(Button, { variant, size }, 'x'));
+  const m = /class="([^"]*)"/.exec(html);
+  return m ? m[1]!.split(/\s+/).filter(Boolean) : [];
+}
 
 function definedClasses(): Set<string> {
   const out = new Set<string>();
@@ -51,17 +66,21 @@ function definedClasses(): Set<string> {
   return out;
 }
 
+const VARIANTS = Object.keys(ALL_VARIANTS) as ButtonVariant[];
+
 describe('ui/Button variant classes resolve to real selectors', () => {
   const defined = definedClasses();
 
-  it.each(Object.entries(VARIANT_CLASSES))('variant "%s" → %s', (_variant, classes) => {
-    for (const token of classes.split(/\s+/).filter(Boolean)) {
+  it.each(VARIANTS.map((v) => [v, renderedClasses(v).join(' ')] as const))('variant "%s" → %s', (variant) => {
+    for (const token of renderedClasses(variant)) {
       expect(defined.has(token), `.${token} is not defined in any authored stylesheet`).toBe(true);
     }
   });
 
-  it(`size="sm" → .${SIZE_SM}`, () => {
-    expect(defined.has(SIZE_SM)).toBe(true);
+  it('size="sm" → every rendered class is defined (incl. .btn-sm)', () => {
+    const tokens = renderedClasses('secondary', 'sm');
+    expect(tokens).toContain('btn-sm');
+    for (const token of tokens) expect(defined.has(token), `.${token} is not defined`).toBe(true);
   });
 
   it('SABOTAGE — a class that does not exist is detected', () => {
@@ -70,7 +89,8 @@ describe('ui/Button variant classes resolve to real selectors', () => {
   });
 
   it('primary is deliberately bare — .primary must NOT exist', () => {
-    expect(VARIANT_CLASSES.primary).toBe('');
+    // Behavioural: the real primary Button renders with no class at all.
+    expect(renderToStaticMarkup(createElement(Button, { variant: 'primary' }, 'x'))).not.toMatch(/class=/);
     expect(defined.has('primary')).toBe(false);
   });
 });

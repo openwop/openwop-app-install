@@ -44,6 +44,10 @@ describe('TOCWF-1 — `:fork` never re-resolves the compaction decision (real ro
   let BASE = '';
   let workflowId = '';
   const TOKEN = 'dev-token';
+  const prevEnv = {
+    dsn: process.env.OPENWOP_STORAGE_DSN,
+    cookies: process.env.OPENWOP_AUTH_DISABLE_COOKIES,
+  };
 
   beforeAll(async () => {
     process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -68,6 +72,10 @@ describe('TOCWF-1 — `:fork` never re-resolves the compaction decision (real ro
   afterAll(async () => {
     await __clearToggleStore();
     await new Promise<void>((res) => server.close(() => res()));
+    if (prevEnv.dsn === undefined) delete process.env.OPENWOP_STORAGE_DSN;
+    else process.env.OPENWOP_STORAGE_DSN = prevEnv.dsn;
+    if (prevEnv.cookies === undefined) delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
+    else process.env.OPENWOP_AUTH_DISABLE_COOKIES = prevEnv.cookies;
   });
 
   beforeEach(async () => {
@@ -178,7 +186,10 @@ describe('TOCWF-1 — `:fork` never re-resolves the compaction decision (real ro
    */
   async function redrive(sourceRunId: string): Promise<string> {
     // The route only redrives a terminal-failed run.
-    await storage.updateRun(sourceRunId, { status: 'failed' });
+    // Storage keys runs by the BARE id; the protocol id may be tenant-bound.
+    // Read the status back so this setup write cannot silently no-op.
+    await storage.updateRun(bareRunId(sourceRunId), { status: 'failed' });
+    expect((await storage.getRun(bareRunId(sourceRunId)))?.status).toBe('failed');
     const r = await api<{ results?: Array<{ redriveRunId?: string; error?: string }> }>(
       '/host/openwop-app/runs/redrive',
       { method: 'POST', body: JSON.stringify({ runIds: [bareRunId(sourceRunId)] }) },
@@ -226,7 +237,9 @@ describe('TOCWF-1 — `:fork` never re-resolves the compaction decision (real ro
     const meta = (await storage.getRun(bareRunId(rd)))?.metadata as Record<string, unknown> | undefined;
     expect(meta?.redriveOf).toBe(bareRunId(src)); // the host-side provenance stamp survives
     expect(meta?.definitionRevision).toBeTruthy();
-    expect(meta?.actingUserId).toBeTruthy(); // RE-stamped to the redriving caller
+    // RE-stamped to the redriving caller. Ceiling: with one dev-token caller a copied
+    // value and a re-stamp are indistinguishable; the provenance half above is the live one.
+    expect(meta?.actingUserId).toBeTruthy();
   });
 
   /**
@@ -280,6 +293,8 @@ describe('TOCWF-1 — `:fork` never re-resolves the compaction decision (real ro
     expect(meta?.definitionRevision).toEqual(
       ((await storage.getRun(bareRunId(src)))?.metadata as Record<string, unknown> | undefined)?.definitionRevision,
     );
+    // Ceiling: one caller, so the copied and the re-stamped actingUserId are equal;
+    // the definitionRevision half is the live witness (probe w22g1-fk-fork-defrev).
     expect(meta?.actingUserId).toBeTruthy();
   });
 });

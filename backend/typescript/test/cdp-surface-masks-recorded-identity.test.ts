@@ -8,6 +8,10 @@
  * `hasPiiGrant:false`. This drives the REAL pack node over the REAL surface, which is
  * the lane the leak travelled — a service-level test of `resolveIdentityWithAccess`
  * would pass with the surface still bypassing it.
+ *
+ * Sabotage-witnessed (/grade-tests w38): passing `hasPiiGrant:true` from the surface, dropping
+ * the `tenantId` projection, not masking string custom fields, a miss reporting `masked:true`,
+ * and a stale `requiredPacks` pin each turn a case red.
  */
 import { beforeAll, describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';

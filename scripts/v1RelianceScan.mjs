@@ -25,6 +25,27 @@ import { join } from 'node:path';
 export const STRIPE_CHOKE_FILE = 'features/billing/stripeApi.ts';
 export const V1_PATH = '/v1/[a-zA-Z0-9._{}$/-]*';
 
+/**
+ * ADR 0812 P4 slice 2b — a line carrying this marker is a DELIBERATE `/v1`
+ * spelling that is not a call on the v1 wire (a persisted idempotency-key
+ * namespace, a recogniser for links already sent in email). It is skipped by
+ * `scanMatches` and counted separately by `keptLines`, which the ratchet holds,
+ * so a new KEEP is a stated, reviewable change and never a silent one.
+ */
+export const KEEP_MARKER = 'ADR 0812 KEEP';
+
+/**
+ * The `/v1/…` spelling of one of THIS host's own paths: `host/…`, or a path
+ * whose first segment is a v2 protocol root (`segments`, derived by the caller
+ * from schemas/v2/path-manifest.json). A third-party API that happens to be
+ * versioned `/v1` (OpenAI, Gmail, GCS, the pack registry's `/v1/packs`) is not
+ * v1 reliance and does not match.
+ */
+export function ownV1Pattern(segments) {
+  const esc = segments.map((x) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  return `/v1/(host/|(${esc.join('|')})([/?:'"\`]|$))`;
+}
+
 /** Is this code line an exempt Stripe call? `file` is the path as grep printed it. */
 export function isThirdPartyApiCall(file, line) {
   return file.replace(/\\/g, '/').endsWith(STRIPE_CHOKE_FILE) && /\bstripeRequest\(/.test(line);
@@ -33,25 +54,65 @@ export function isThirdPartyApiCall(file, line) {
 /**
  * Every CODE-line match of `pattern` under `dir` (relative to `root`) — comments,
  * test files (via `excludes`) and exempt third-party calls excluded.
+ *
+ * #4484 — scans the git INDEX (`git grep`), not the filesystem. `grep -r` counted
+ * untracked files, so a concurrent vitest run's transient `.ts` under `test/` read
+ * as new reliance (+2, 936 → 938, gone on a clean tree, twice). `includes` are
+ * filename globs and `excludes` keep their grep spelling (`--exclude=<glob>`,
+ * `--exclude-dir=<name>`); both become pathspecs under `dir`.
  */
 export function scanMatches(root, dir, pattern, includes, excludes = []) {
-  const args = ['-rnE', pattern, dir];
-  for (const inc of includes) args.push(`--include=${inc}`);
-  for (const ex of excludes) args.push(ex);
-  let lines;
+  return scanSites(root, dir, pattern, includes, excludes).map((x) => x.match);
+}
+
+/**
+ * `git grep -n<flags>` under `dir` — the #4484 index scan shared by every reader
+ * here. `includes` are filename globs, `excludes` keep their grep spelling.
+ */
+function gitGrepLines(root, flags, pattern, dir, includes, excludes = []) {
+  const d = dir.replace(/\\/g, '/').replace(/\/+$/, '');
+  const specs = includes.map((inc) => `:(glob)${d}/**/${inc}`);
+  for (const ex of excludes) {
+    const file = /^--exclude=(.+)$/.exec(ex)?.[1];
+    const sub = /^--exclude-dir=(.+)$/.exec(ex)?.[1];
+    if (file) specs.push(`:(glob,exclude)${d}/**/${file}`);
+    else if (sub) specs.push(`:(glob,exclude)${d}/**/${sub}/**`);
+    else throw new Error(`scanMatches: unsupported exclude ${ex}`);
+  }
   try {
-    lines = execFileSync('grep', args, { cwd: root, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }).split('\n');
-  } catch { return []; }           // grep exits 1 on no match
+    return execFileSync('git', ['grep', '--no-color', `-n${flags}`, pattern, '--', ...specs], { cwd: root, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }).split('\n');
+  } catch (err) {
+    if (err?.status === 1) return [];   // git grep exits 1 on no match
+    throw err;                          // not a repo, bad pattern: fail, never read as zero
+  }
+}
+
+/** `scanMatches` with locations: `{ file, line, match }` per match, for error output. */
+export function scanSites(root, dir, pattern, includes, excludes = []) {
+  const lines = gitGrepLines(root, 'E', pattern, dir, includes, excludes);
   const re = new RegExp(pattern, 'g');
   const out = [];
-  for (const line of lines) {
-    if (!line) continue;
-    const file = /^([^:]+):\d+:/.exec(line)?.[1] ?? '';
-    const text = line.replace(/^[^:]+:\d+:/, '');          // strip `path:line:`
+  for (const raw of lines) {
+    if (!raw) continue;
+    const loc = /^([^:]+):(\d+):/.exec(raw);
+    const file = loc?.[1] ?? '';
+    const text = raw.replace(/^[^:]+:\d+:/, '');          // strip `path:line:`
     const t = text.trimStart();
     if (t.startsWith('//') || t.startsWith('*') || t.startsWith('/*')) continue;
+    if (text.includes(KEEP_MARKER)) continue;
     if (isThirdPartyApiCall(file, text)) continue;
-    for (const m of text.match(re) ?? []) out.push(m);
+    for (const m of text.match(re) ?? []) out.push({ file, line: Number(loc?.[2] ?? 0), match: m });
+  }
+  return out;
+}
+
+/** Lines under `dirs` carrying `KEEP_MARKER` that also spell `/v1/` — the ratcheted KEEP set. */
+export function keptLines(root, dirs, includes) {
+  const out = [];
+  for (const dir of dirs) {
+    if (!existsSync(join(root, dir))) continue;
+    const lines = gitGrepLines(root, 'F', KEEP_MARKER, dir, includes);
+    for (const line of lines) if (line && /\/v1\//.test(line.replace(/^[^:]+:\d+:/, ''))) out.push(line.replace(/:\d+:.*/, ''));
   }
   return out;
 }

@@ -12,9 +12,15 @@
  * Both polarities asserted: capability-absent (SDK null) still resolves `[]`
  * (a real answer), while an unexpected failure REJECTS; the hook keeps the
  * fulfilled runs' real annotations and exposes `degraded` for the rest.
+ *
+ * What turns it red: a catch-all `.catch(() => null)` in `listAnnotations`;
+ * `anyFailed` never set (or always set) in `useRunAnnotations`; a fulfilled
+ * run's list dropped. Each case uses a DISTINCT run id on purpose: the hook's
+ * `annCache` is module-level (60 s TTL), so a shared id would let one case
+ * answer another's read and make the file order-dependent.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, cleanup, screen } from '@testing-library/react';
+import { render, cleanup, screen, waitFor } from '@testing-library/react';
 
 const sdk = vi.hoisted(() => ({ listAnnotations: vi.fn() }));
 vi.mock('../../client/runsClient.js', async (importOriginal) => {
@@ -74,7 +80,9 @@ describe('useRunAnnotations — partial failure degrades honestly', () => {
       id === 'r-ok' ? Promise.resolve([flagAnn]) : Promise.reject(new Error('blip')));
     render(<Probe ids={['r-ok', 'r-fail']} />);
     // The success half must survive (a degraded pass is not an empty pass)…
-    expect((await screen.findByTestId('flagged-runs')).textContent).toBe('r-ok');
+    // `flagged-runs` exists on first paint with '' — wait for the SETTLED value.
+    await waitFor(() => expect(screen.getByTestId('flagged-runs').textContent).toBe('r-ok'));
+    expect(screen.getByTestId('feedback-on').textContent).toBe('true');
     // …and the failure half must be DECLARED, not absorbed into "0 flagged".
     expect(screen.getByTestId('degraded').textContent).toBe('true');
   });
@@ -82,7 +90,9 @@ describe('useRunAnnotations — partial failure degrades honestly', () => {
   it('a fully clean pass is NOT degraded (the polarity that keeps the warning meaningful)', async () => {
     sdk.listAnnotations.mockResolvedValue([flagAnn]);
     render(<Probe ids={['r-clean']} />);
-    expect((await screen.findByTestId('flagged-runs')).textContent).toBe('r-clean');
+    // `degraded` starts 'false' — only meaningful once the pass has settled.
+    await waitFor(() => expect(screen.getByTestId('flagged-runs').textContent).toBe('r-clean'));
+    expect(screen.getByTestId('feedback-on').textContent).toBe('true');
     expect(screen.getByTestId('degraded').textContent).toBe('false');
   });
 });

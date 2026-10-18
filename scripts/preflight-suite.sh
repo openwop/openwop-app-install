@@ -213,7 +213,13 @@ foreign_claim() {
 ' '?' '-' '(claim being written)'
     return 0
   fi
-  if ! kill -0 "$pid" 2>/dev/null || [ "$(proc_start "$pid")" != "$started" ]; then
+  # Stale needs POSITIVE evidence: the pid is dead, or `ps` reports a DIFFERENT
+  # start time (a reused pid). An empty answer means we could not read it, and
+  # that must keep the claim. GATE-CLAIM-1: the self-test's stubbed `ps` printed
+  # nothing for the live gate, so every gate deleted its own claim minutes into
+  # backend vitest, and the D8 wait-claim found nothing to wait on.
+  local now=""
+  if ! kill -0 "$pid" 2>/dev/null || { now="$(proc_start "$pid")"; [ -n "$now" ] && [ "$now" != "$started" ]; }; then
     rm -rf "$CLAIM_DIR"   # stale: the claimant is gone
     return 0
   fi
@@ -335,7 +341,19 @@ lane_of() {
     *) printf 'gate' ;;
   esac
 }
-find_competitors() {
+# A STOPPED process is not a competitor (2026-10-15). A peer SIGSTOPped its own
+# single-file probe to give a gate the machine, and this check went on listing
+# it — `ps` sees the process, so it "competes" — while the probe stayed stopped
+# until that very gate finished. MEASURED: slot 95r''' spent 68 min in this wait
+# at load1 2.2 on one stopped tree (STAT T), and would have run "contended" at the
+# cap. A stopped tree uses no CPU or bandwidth, so it is skipped. But it is still
+# REPORTED (`find_stopped`), because a stopped suite can be continued at any time
+# and the reader should see that, not a check that quietly called the machine
+# clear. Only `T` (stopped by signal or job control) counts; a sleeping `S` is a
+# running suite between syscalls and still competes.
+#   $1 = live    → worktrees with at least one matched process NOT stopped
+#   $1 = stopped → worktrees whose matched processes are ALL stopped
+scan_same_repo() {
   local pid cwd wt_root
   # shellcheck disable=SC2009  # pgrep -f would match this script's own argv
   # `-ww`: macOS ps truncates `command=` at 132 columns EVEN WHEN PIPED, so a
@@ -354,15 +372,20 @@ find_competitors() {
         wt_root=$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null) || continue
         [ "$(repo_id "$cwd")" = "$MY_REPO" ] || continue
         [ "$(cd "$wt_root" && pwd -P)" = "$MY_ROOT" ] && continue   # our own run
-        printf '%s\t%s\t%s\t%s\n' "$pid" "$(ps -o etime= -p "$pid" | tr -d ' ')" "$wt_root" "$(lane_of "$pid" "$cwd")"
+        printf '%s\t%s\t%s\t%s\t%s\n' "$pid" "$(ps -o etime= -p "$pid" | tr -d ' ')" "$wt_root" "$(lane_of "$pid" "$cwd")" \
+          "$(ps -o stat= -p "$pid" 2>/dev/null | tr -d ' ' | cut -c1)"
       done \
-    | awk -F'\t' '
+    | awk -F'\t' -v mode="$1" '
         # One line per competing WORKTREE (a gate is ci.sh + npm + vitest + …),
         # carrying every lane seen in it, so a waiter can read WHERE a peer is.
         { if (!($3 in first)) { first[$3] = $1 "\t" $2; order[++n] = $3 }
+          if ($5 != "T") live[$3] = 1
           if (index(" " lanes[$3] " ", " " $4 " ") == 0) lanes[$3] = (lanes[$3] ? lanes[$3] ", " : "") $4 }
-        END { for (i = 1; i <= n; i++) printf "%s\t%s\t%s\n", first[order[i]], order[i], lanes[order[i]] }'
+        END { for (i = 1; i <= n; i++) { w = order[i]
+                if ((mode == "live") == (w in live)) printf "%s\t%s\t%s\n", first[w], w, lanes[w] } }'
 }
+find_competitors() { scan_same_repo live; }
+find_stopped() { scan_same_repo stopped; }
 
 # Suites from OUTSIDE this repo: another project, or another clone of this one.
 # vitest and Playwright only, never a `scripts/ci.sh` (another project's gate
@@ -424,6 +447,15 @@ report_once() {
   local n; n=$(printf '%s' "$found" | grep -c . || true)
   local swapfree; swapfree="$(swap_free_mb)"
   printf '  machine   : load1 %s · free %s MB · swap free %s MB\n' "$(load1)" "$(free_mb)" "${swapfree:-?}"
+  local stopped; stopped="$(find_stopped)"
+  if [ -n "$stopped" ]; then
+    printf '  stopped   : %d suite(s) from another worktree are STOPPED (SIGSTOP) — not competing, not waited on\n' \
+      "$(printf '%s\n' "$stopped" | grep -c .)"
+    printf '%s\n' "$stopped" | while IFS=$'\t' read -r pid et wt lanes; do
+      [ -n "$pid" ] && printf '      pid %-7s up %-9s %s%s\n' "$pid" "$et" "$wt" "${lanes:+  [${lanes}]}"
+    done
+    printf '              A SIGCONT resumes it beside this run. Ask its owner to finish or end it first.\n'
+  fi
   FOREIGN_FOUND="$(find_foreign)"
   if [ -n "$FOREIGN_FOUND" ]; then
     printf '  elsewhere : %d suite(s) from OUTSIDE this repo%s\n' "$(printf '%s\n' "$FOREIGN_FOUND" | grep -c .)" \

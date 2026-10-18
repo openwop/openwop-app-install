@@ -39,6 +39,7 @@ import { KICKTODO_COMMUNITY_REVIEWS_TOOL_ID } from '../src/features/kicktodo-com
 import { KICKTODO_INTEGRATIONS_STATUS_TOOL_ID } from '../src/features/kicktodo-integrations/agentTools.js';
 import { KICKTODO_LOG_CHECKIN_TOOL_ID } from '../src/features/kicktodo-core/agentTools.js';
 import { SENSITIVE_APPROVAL_TOOLS } from '../src/features/capability-firewall/firewallHook.js';
+import { getAgentRegistry } from '../src/executor/agentRegistry.js';
 
 const T = 'tenant-kickbot-conn';
 
@@ -87,9 +88,8 @@ beforeEach(async () => {
   initHostExtPersistence(storage);
 });
 
-afterEach(async () => {
+afterEach(() => {
   __resetHostExtPersistence();
-  const { getAgentRegistry } = await import('../src/executor/agentRegistry.js');
   getAgentRegistry()._resetForTest();
 });
 
@@ -142,6 +142,9 @@ describe('KickBot fail-closed connection posture (ADR 0442 P4 tripwires)', () =>
     expect(agent?.toolAllowlist ?? []).toEqual(EXPECTED_ALLOWLIST);
   });
 
+  // Twin: kicktodo-kickbot.test.ts "provisions ONE instance…" asserts the same row
+  // values (both red under probe w41g2-kb-heartbeat / -cn-heartbeat). Kept here as
+  // the P4 posture tripwire; this one reads the ROW only, never the projection.
   it('never runs autonomously — heartbeat OFF + autonomy review', async () => {
     await ensureKickBot(T);
     const entry = await getRosterEntry(T, KICKBOT_ROSTER_ID);
@@ -149,28 +152,39 @@ describe('KickBot fail-closed connection posture (ADR 0442 P4 tripwires)', () =>
     expect(entry?.autonomyLevel).toBe('review'); // proposes; never auto-acts
   });
 
+  // Twin: connection-readiness.test.ts "is ungated when the profile declares no
+  // requiredConnections" (generic). This one pins it for KickBot's REAL profile.
   it('is trivially connection-READY because it requires none (uses no connection)', async () => {
     await ensureKickBot(T);
     const readiness = await resolveConnectionReadiness(T, KICKBOT_ROSTER_ID);
     expect(readiness.required).toEqual([]);
+    expect(readiness.entries).toEqual([]);
+    expect(gateAutonomyByReadiness('review', readiness)).toBe('review'); // its own level, unchanged
     expect(readiness.allConfigured).toBe(true); // ready with nothing required
     expect(readiness.missing).toEqual([]);
   });
 });
 
+// Twin: connection-readiness.test.ts "fails closed when a required connection is
+// missing" + "stays gated until EVERY required provider…" (the generic gate; both
+// red together under probes w41g2-cn-gate / -cn-gate-cover). Kept as KickBot's
+// positive proof, driven through KickBot's own provisioned profile.
 describe('the consent gate that WOULD protect KickBot if a connection were ever added', () => {
   it('an unmet required connection reports missing → gate forces review (no autonomous use)', async () => {
     await ensureKickBot(T);
     // Simulate a future build declaring a calendar requirement WITHOUT the user
     // having granted (consented to) that connection.
     const existing = await getAgentProfile(T, KICKBOT_ROSTER_ID);
+    if (!existing) throw new Error('KickBot must have a profile after provisioning');
+    expect(existing.requiredConnections ?? []).toEqual([]); // positive control: ready before the edit
     await upsertAgentProfile(T, KICKBOT_ROSTER_ID, {
       roleKey: KICKBOT_ROLE_KEY,
       requiredConnections: ['capability:calendar'],
-      autonomy: { specLevel: existing!.autonomy.specLevel },
+      autonomy: { specLevel: existing.autonomy.specLevel },
     });
     const readiness = await resolveConnectionReadiness(T, KICKBOT_ROSTER_ID);
-    expect(readiness.missing).toContain('capability:calendar'); // fail-closed: not consented
+    expect(readiness.missing).toEqual(['capability:calendar']); // fail-closed: not consented
+    expect(readiness.allConfigured).toBe(false);
     // Even at the most permissive autonomy, an unmet connection forces review —
     // the twin proposes; it never autonomously acts on an integration it cannot reach.
     expect(gateAutonomyByReadiness('auto', readiness)).toBe('review');

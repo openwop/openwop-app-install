@@ -22,23 +22,27 @@ import type { RouteDeps } from '../../routes/registerAllRoutes.js';
 import { resolveCallerUser } from '../users/usersGuards.js';
 import { callerSubject, personalTenantOf, isDurableCaller } from '../../host/requestSubject.js';
 import { projectAgentActivity } from '../../host/agentActivity.js';
-import { getUser, isEmailVouched, listUsers, type User } from '../users/usersService.js';
+import { getUser, isEmailVouched, type User } from '../users/usersService.js';
 import { indexProfile, teamPortfolioShareableKbProvider } from './profilesKnowledgeService.js';
+import { getLiveShare, listLiveShares, resolveRouteDirectory } from './directory.js';
+import { listHomeDirectory } from './homeDirectory.js';
+import { getWorkspace } from '../../host/accessControlService.js';
 import { registerShareableKb } from '../../host/shareableKb.js';
 import { getRosterEntry } from '../../host/rosterService.js';
 import { resolveMediaAsset } from '../../host/inMemorySurfaces.js';
+import { isInlineImageType } from '../../host/assetServeHeaders.js';
 import {
   addPortfolioToken,
   clearAvatar,
   getOrCreateProfile,
   getProfile,
-  listProfiles,
   removePortfolioToken,
   setAvatarToken,
   setEndorsement,
   setOwnSkills,
   setOwnWorkflows,
   setAgentPinned,
+  setWorkspaceShare,
   updateOwnProfile,
   viewOwnProfile,
   viewProfile,
@@ -226,24 +230,77 @@ export function registerProfilesRoutes(deps: RouteDeps): void {
     }
   });
 
-  // GET / — tenant directory. Tenant is the caller's resolved tenant (the single
-  // source of truth — same `user.tenantId` the write paths key on).
+  // GET / — the directory (ADR 0888 D1). In the reader's HOME tenant: every
+  // profile there (orphans skipped). In a shared workspace the reader is a root
+  // member of: only the people who shared their profile with it, each
+  // re-verified live. `scope` + `sharedByMe` let the SPA say which it is showing.
   app.get('/host/openwop-app/profiles', async (req, res, next) => {
     try {
-      const user = await resolveCallerUser(req);
-      const [profiles, users] = await Promise.all([listProfiles(user.tenantId), listUsers(user.tenantId)]);
-      const names = new Map(users.map((u) => [u.userId, u.displayName]));
+      const { viewer, scope } = await resolveRouteDirectory(req);
+      if (scope.kind === 'workspace') {
+        const { users, truncated } = await listLiveShares(scope.workspaceId);
+        const profiles = [];
+        for (const u of users) {
+          const p = await getProfile(u.tenantId, u.userId);
+          if (p) profiles.push(viewProfile(p, { viewerUserId: viewer.userId, scope: 'workspace', ...(u.displayName ? { displayName: u.displayName } : {}) }));
+        }
+        // `sharedByMe` from the reader's OWN profile (the source of truth), not the
+        // capped, re-verified list — past the cap the list would say "not shared"
+        // to someone who is (`PROF2UX-6`). The name lets the page say WHERE the
+        // share publishes (`PROF2UX-1`).
+        const [mine, ws] = await Promise.all([getProfile(viewer.tenantId, viewer.userId), getWorkspace(scope.workspaceId)]);
+        res.json({
+          scope: 'workspace',
+          workspaceId: scope.workspaceId,
+          ...(ws?.name ? { workspaceName: ws.name } : {}),
+          sharedByMe: (mine?.sharedWorkspaceIds ?? []).includes(scope.workspaceId),
+          truncated,
+          profiles,
+        });
+        return;
+      }
       res.json({
-        // Skip ORPHANS — a profile whose owning user was deleted. Listing it
-        // would render an opaque userId and leak that the account is gone.
-        profiles: profiles
-          .filter((p) => names.has(p.userId))
-          .map((p) => {
-            const dn = names.get(p.userId);
-            // Team view: `endorsedByMe` for the caller; NO `completenessMissing` (D4 self-only).
-            return viewProfile(p, { viewerUserId: user.userId, ...(dn ? { displayName: dn } : {}) });
-          }),
+        scope: 'home',
+        // Orphans skipped inside `listHomeDirectory` (the ONE home lister — the run
+        // lane uses it too). Team view: `endorsedByMe` for the caller; NO
+        // `completenessMissing` (D4 self-only).
+        profiles: (await listHomeDirectory(scope.tenantId)).map(({ profile, displayName }) =>
+          viewProfile(profile, { viewerUserId: viewer.userId, ...(displayName ? { displayName } : {}) })),
       });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // PUT /me/workspace-share — list MY profile in the ACTIVE workspace's directory
+  // (ADR 0888 D1, an explicit per-workspace opt-in). The caller must be in a
+  // shared workspace they are a root member of; the subject that proved it is
+  // stored so every later read re-checks membership with the same spelling.
+  app.put('/host/openwop-app/profiles/me/workspace-share', async (req, res, next) => {
+    try {
+      const { viewer, scope, memberSubject } = await resolveRouteDirectory(req);
+      if (scope.kind !== 'workspace' || !memberSubject) {
+        throw new OpenwopError('conflict', 'Switch into a shared workspace to share your profile with it.', 409, { reason: 'not_in_a_shared_workspace' });
+      }
+      // Membership must be proved by a USER id, never a principal: a principal is
+      // not issuer-qualified, so a share keyed on one could later match a
+      // DIFFERENT person's member row with the same string (ADR 0780). An unbound
+      // bearer caller finishes signing in first; its member row is then re-keyed.
+      if (!memberSubject.startsWith('user:')) {
+        throw new OpenwopError('conflict', 'Finish signing in to this workspace before sharing your profile with it.', 409, { reason: 'account_not_bound' });
+      }
+      res.json(viewOwnProfile(await setWorkspaceShare(viewer.tenantId, viewer.userId, scope.workspaceId, memberSubject, true)));
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // DELETE /me/workspace-share/:workspaceId — stop being listed there. Self-only
+  // and needs no membership: leaving a workspace's directory is always allowed.
+  app.delete('/host/openwop-app/profiles/me/workspace-share/:workspaceId', async (req, res, next) => {
+    try {
+      const viewer = await resolveCallerUser(req);
+      res.json(viewOwnProfile(await setWorkspaceShare(viewer.tenantId, viewer.userId, req.params.workspaceId ?? '', '', false)));
     } catch (err) {
       next(err);
     }
@@ -265,8 +322,11 @@ export function registerProfilesRoutes(deps: RouteDeps): void {
     if (!asset || asset.tenantId !== tenantId) {
       throw new OpenwopError('not_found', 'Media asset not found in this tenant.', 404, { token });
     }
-    if (!(asset.contentType ?? '').startsWith('image/')) {
-      throw new OpenwopError('validation_error', 'Avatar/portfolio asset MUST be an image.', 400, { contentType: asset.contentType ?? null });
+    // ADR 0888 D5 — an image the asset exit serves INLINE (PNG/JPEG/GIF/WebP/AVIF/
+    // ICO). `image/*` alone admitted TIFF/HEIC/BMP, which the exit sends as an
+    // attachment, so the avatar rendered broken everywhere it appeared.
+    if (!isInlineImageType(asset.contentType)) {
+      throw new OpenwopError('validation_error', 'Avatar/portfolio asset MUST be a PNG, JPEG, GIF, WebP or AVIF image.', 400, { contentType: asset.contentType ?? null });
     }
     return token;
   };
@@ -391,7 +451,13 @@ export function registerProfilesRoutes(deps: RouteDeps): void {
   // tenant; one endorsement per endorser (idempotent).
   const endorse = (add: boolean) => async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
-      const user = await resolveCallerUser(req);
+      const { viewer: user, scope } = await resolveRouteDirectory(req);
+      // ADR 0888 D1 — endorsements live in the target's HOME-tenant row, and an
+      // erasure in a workspace cannot reach that row. Until a workspace store
+      // exists (OQ-5), a workspace reader cannot endorse.
+      if (scope.kind === 'workspace') {
+        throw new OpenwopError('conflict', 'Endorsements can only be given in your home workspace.', 409, { reason: 'endorse_unavailable_here' });
+      }
       const targetUserId = req.params.userId;
       // PROF-9 (ADR 0624 D6): Express already decodes route params — a second
       // `decodeURIComponent` threw `URIError` (→ 500) on a legal skill name
@@ -403,7 +469,7 @@ export function registerProfilesRoutes(deps: RouteDeps): void {
       // Single read: setEndorsement loads + validates the target profile/skill in
       // the caller's tenant and returns null for a missing profile OR skill (no
       // existence leak — both map to 404).
-      const result = await setEndorsement(user.tenantId, targetUserId, skillName, user.userId, add);
+      const result = await setEndorsement(scope.tenantId, targetUserId, skillName, user.userId, add);
       if (!result) throw new OpenwopError('not_found', 'Profile or skill not found.', 404, { userId: targetUserId, skill: skillName });
       // PROF-12 (ADR 0624 D7) — the ONE cross-principal write on this surface is
       // audited, IDS ONLY (the `users/routes.ts` appendAudit shape): target,
@@ -429,16 +495,28 @@ export function registerProfilesRoutes(deps: RouteDeps): void {
   app.post('/host/openwop-app/profiles/:userId/skills/:skill/endorse', endorse(true));
   app.delete('/host/openwop-app/profiles/:userId/skills/:skill/endorse', endorse(false));
 
-  // GET /:userId — one user's profile (team-visible, tenant-scoped to the caller).
+  // GET /:userId — one person's profile, through the same D1 scope as the
+  // directory: the reader's home tenant, or — in a shared workspace — only a
+  // person who shared their profile with it (anything else is the same 404).
   app.get('/host/openwop-app/profiles/:userId', async (req, res, next) => {
     try {
-      const caller = await resolveCallerUser(req);
-      const profile = await getProfile(caller.tenantId, req.params.userId);
-      if (!profile) throw new OpenwopError('not_found', 'Profile not found.', 404, { userId: req.params.userId });
-      const owner = await getUser(profile.userId);
+      const { viewer, scope } = await resolveRouteDirectory(req);
+      const userId = req.params.userId ?? '';
+      let profile = null;
+      let owner: User | null = null;
+      if (scope.kind === 'workspace') {
+        owner = await getLiveShare(scope.workspaceId, userId);
+        profile = owner ? await getProfile(owner.tenantId, userId) : null;
+      } else {
+        profile = await getProfile(scope.tenantId, userId);
+        owner = profile ? await getUser(profile.userId) : null;
+        // An orphan (its user is gone) is the same 404 the list implies (`PROF2CD-4`).
+        if (!owner) profile = null;
+      }
+      if (!profile) throw new OpenwopError('not_found', 'Profile not found.', 404, { userId });
       const emailVerified = owner ? await resolveEmailVerified(owner) : undefined;
       // Team-visible view: `endorsedByMe` for the caller; NO `completenessMissing` (D4 self-only).
-      res.json(viewProfile(profile, { viewerUserId: caller.userId, emailVerified, ...(owner?.displayName ? { displayName: owner.displayName } : {}) }));
+      res.json(viewProfile(profile, { viewerUserId: viewer.userId, scope: scope.kind, emailVerified, ...(owner?.displayName ? { displayName: owner.displayName } : {}) }));
     } catch (err) {
       next(err);
     }

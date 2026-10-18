@@ -4,8 +4,15 @@
  * dropped, field-map, dedup, CDC) and the `prepareOnward` surface verb (flag-gate + the
  * OpenWOP envelopes a workflow egresses via `core.openwop.http.fetch`, ADR 0262 ruling #3 —
  * no bespoke egress). This is the non-vacuous tier-1 witness substrate for RFC 0128 G4.
+ *
+ * Sabotage that reds it (w38 probes): an unsorted label; ignoring narrowTo; taking
+ * narrowTo verbatim (widening); stamping `permittedPurposes: undefined` on an
+ * unlabelled record; not dropping `[]`; no dedupKey; no CDC watermark; field-map
+ * keyed by source name; a flag that defaults ON; the surface ignoring the flag; and
+ * the destinationKind check (the non-openwop-host sync carries a peerIngestUrl, so
+ * only the kind check can refuse it).
  */
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { buildOnwardEnvelopes, createDestinationSync, type DestinationSync } from '../src/features/destination-sync/destinationSyncService.js';
 import { buildDestinationSyncSurface } from '../src/features/destination-sync/surface.js';
@@ -89,7 +96,9 @@ describe('prepareOnward surface verb — flag-gated envelope prep for the http-n
     // Boot the app once to initialize host-ext persistence (DurableCollection storage).
     await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   });
-  afterAll(() => { delete process.env.OPENWOP_CDP_PURPOSE_PROPAGATION_ENABLED; });
+  // RFC 0128 flag: every case sets what it needs; nothing leaks past a case.
+  beforeEach(() => { delete process.env.OPENWOP_CDP_PURPOSE_PROPAGATION_ENABLED; });
+  afterEach(() => { delete process.env.OPENWOP_CDP_PURPOSE_PROPAGATION_ENABLED; });
 
   async function makeSync(): Promise<string> {
     const sync = await createDestinationSync({
@@ -131,11 +140,16 @@ describe('prepareOnward surface verb — flag-gated envelope prep for the http-n
 
   it('rejects a non-openwop-host sync', async () => {
     process.env.OPENWOP_CDP_PURPOSE_PROPAGATION_ENABLED = 'true';
+    // A peerIngestUrl is persisted for any kind, so the destinationKind check is the
+    // ONLY thing that can refuse this sync (without it, the URL check would mask it).
     const sync = await createDestinationSync({
       tenantId: TENANT, name: 'ESP', destinationKind: 'esp', sourceObject: 'contact', fieldMap: [{ from: 'email', to: 'e' }],
+      peerIngestUrl: 'https://peer.example/host/openwop-app/trigger-bridge/ingest',
     });
+    expect(sync.peerIngestUrl).toBe('https://peer.example/host/openwop-app/trigger-bridge/ingest');
     const surface = buildDestinationSyncSurface({ tenantId: TENANT });
-    const out = await surface.prepareOnward!({ syncId: sync.syncId, records: [] });
+    const out = await surface.prepareOnward!({ syncId: sync.syncId, records: [{ email: 'a@x.com', permittedPurposes: ['marketing'] }] });
     expect(out.error).toBe('not_openwop_host');
+    expect(out.envelopes).toEqual([]);
   });
 });

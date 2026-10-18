@@ -90,21 +90,27 @@ describe('collabDocBinding', () => {
     expect((B.current().shapes as Dict[]).map((s) => s.label)).toEqual(labels);
   });
 
-  it('a FULL-CLONE gesture (editDoc style) still keeps unchanged-element identity via deep-equal match', () => {
+  it('a FULL-CLONE gesture (editDoc style) still keeps unchanged-element identity via deep-equal match (not position)', () => {
     const { A, B, flush } = seeded();
     const aDoc = A.current() as DrawDoc;
-    // Full JSON clone (reference sharing broken), one element edited.
+    // Full JSON clone (reference sharing broken), one element edited AND a new
+    // element inserted at the head — so every unchanged element sits at a
+    // DIFFERENT index than before. Positional pairing would pair 'new'→s0 and
+    // overwrite the Y item B is concurrently editing; only the deep-equal match
+    // keeps s0's identity.
     const cloned = JSON.parse(JSON.stringify(aDoc)) as DrawDoc;
     (cloned.shapes as Dict[])[2] = { ...(cloned.shapes as Dict[])[2], label: 's2-edited' };
+    cloned.shapes = [shape('new'), ...(cloned.shapes as Dict[])];
     A.set(cloned);
-    // B concurrently edits s0 — must survive (s0 was deep-equal matched, not rebuilt).
+    // B concurrently edits s0 — must survive (s0 was deep-equal matched, not rebuilt or re-paired).
     const bDoc = B.current() as DrawDoc;
     const bShapes = (bDoc.shapes as Dict[]).slice(); bShapes[0] = { ...bShapes[0], y: 99 };
     B.set({ ...bDoc, shapes: bShapes });
     flush();
     const merged = A.current().shapes as Dict[];
-    expect(merged.map((s) => s.label)).toEqual(['s0', 's1', 's2-edited']);
-    expect(merged[0]!.y).toBe(99);
+    expect(merged.map((s) => s.label)).toEqual(['new', 's0', 's1', 's2-edited']);
+    expect(merged[1]!.y).toBe(99);
+    expect(merged[0]!.y).toBe(0);
     expect(B.current()).toEqual(A.current());
   });
 

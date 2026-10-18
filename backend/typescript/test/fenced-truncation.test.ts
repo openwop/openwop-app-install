@@ -193,6 +193,23 @@ describe('CALL-SITE RATCHET — every handler of fenced text is classified', () 
       kind: 'TRUNCATES',
       why: 'The TOCC-4 site. Speaks an ALREADY-FENCED tool result into a live realtime session under a 4000-char budget.',
     },
+    'features/voice/realtime/instructionBudget.ts': {
+      kind: 'TRUNCATES',
+      why:
+        'ADR 0893 D8 — holds the realtime system instructions under the provider ceiling. Sheds whole '
+        + 'blocks (transcript, then preamble); trims the RAW transcript before fencing it; and a last-resort '
+        + 'cut of the system prompt goes through `truncateFencedContent` and then drops any fence the cut '
+        + 'leaves open. Replaced `withoutTranscript.slice(0, 24_000)` in realtime/routes.ts.',
+    },
+    'features/brand/scoring.ts': {
+      kind: 'PRODUCES',
+      why:
+        'ADR 0891 D4 — `resolveVoice` fences the brand voice block via `wrapForLLMPrompt` after '
+        + '`defangBrandText` (fold + defang). It never shortens fenced or about-to-be-fenced text: '
+        + 'the only `slice` is `casual.slice(0, 3)`, which picks three casual MARKER words for the '
+        + 'unfenced deterministic-score issue text, and `maxLength` is measured and reported, never '
+        + 'applied. Pinned by `features/brand/__tests__/promptCatalogParity.test.ts`.',
+    },
     'host/toModelToolResult.ts': {
       kind: 'PRODUCES',
       why: 'The single builder of a model-facing tool result: it fences (and, since ADR 0604, compacts before fencing). It never shortens.',
@@ -220,6 +237,14 @@ describe('CALL-SITE RATCHET — every handler of fenced text is classified', () 
         + '`fenceUntrustedBlock`. Its `excerpt()` bounds RAW values (outputs, error text, the '
         + 'name) BEFORE they are fenced — redact, then cut, then fence — so no fenced string '
         + 'exists yet when anything is shortened, and nothing shortens the fenced result.',
+    },
+    'host/workflowEvalJudge.ts': {
+      kind: 'PRODUCES',
+      why:
+        'ADR 0889 grade remediation (AEV-1) — the eval judge fences the graded output with ONE '
+        + '`fenceUntrustedBlock`. `excerptOutput` cuts the RAW output to JUDGE_OUTPUT_EXCERPT_CHARS '
+        + 'BEFORE it is fenced — cut, then fence — and nothing shortens the fenced block afterwards '
+        + '(the reply excerpt in a `judge_error` detail is the judge\'s own reply, never fenced text).',
     },
     'features/team-intent-ledger/driftCheck.ts': {
       kind: 'PRODUCES',

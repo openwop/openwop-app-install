@@ -14,6 +14,11 @@
  * chip, so someone about to fire an expensive AI workflow got identical
  * silence either way. Fail-soft means the chip is optional, not that a failure
  * may masquerade as free.
+ *
+ * Sabotage that turns it red: un-anchoring `/_404$/`, widening it to any 40x,
+ * stringifying non-Error rejections, or rendering the unavailable estimate in
+ * the muted (price) register / not at all. UX-BLD-1's call site (BuilderShell's
+ * pin read) is not exercised here — this file's claim is the split itself.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, cleanup } from '@testing-library/react';
@@ -87,6 +92,7 @@ describe('UX-BLD-2 — an unavailable cost estimate never reads as a price', () 
 
   it('renders no chip when there is genuinely no estimate', () => {
     toolbar(null);
+    expect(screen.queryByText(/Cost estimate unavailable|\/run/)).toBeNull();
     expect(document.querySelector('.chip--muted')).toBeNull();
     expect(document.querySelector('.chip--warning')).toBeNull();
   });

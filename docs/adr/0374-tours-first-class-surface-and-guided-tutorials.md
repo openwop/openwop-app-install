@@ -63,6 +63,8 @@ click-through *tests* that assert outcomes (the Phase 5 `TOUR_E2E` replay
 posture), not authored tours. The `CSTOUR-01` "Campaign Studio (guided)" case
 is a TOUR, not a test — it moves to `/tours`.
 
+> **CORRECTED 2026-10-17 (/grade-tests wave 53):** `frontend/react/e2e/walkthrough-replay.spec.ts` (the opt-in `TOUR_E2E` replay) is DELETED. Nothing ever set `TOUR_E2E`, and it could not have passed: it enabled a `guided-tours` toggle renamed `walkthroughs` in #1898, doubled the `/host/openwop-app` prefix on two API paths, and logged in as a non-owner on the admin-tier `/test` page (measured red at its first assertion with `TOUR_E2E=1`). No test plays a seeded walkthrough end to end through the player, so the "true cross-half guard" ADR 0368 promised does not exist (tracked as `WALK-REPLAY-1`).
+
 ### 2. Guided tutorials — a tutorial step launches a tour
 
 `TutorialStep` (ADR 0301, authored data) gains one optional field:

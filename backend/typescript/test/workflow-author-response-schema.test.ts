@@ -16,67 +16,73 @@
  *     from it is REJECTED by the host at `workflowDefinitionValidation.ts:401`, which requires
  *     `workflowId`.
  * So the guard pins the thing that actually gates the write: a definition that satisfies the
- * prompt schema must PASS the validator.
+ * prompt schema must PASS the validator. (A former leg asserted the second bullet against the
+ * vendored wire schema; probe-proven unable to fail — the wire-shaped body throws for reasons
+ * unrelated to `workflowId` — and cut in wave 18. The rationale lives here instead.)
+ *
+ * The schema is read where the MODEL receives it — the `responseSchema` `draft` hands to
+ * `ctx.callAI` — not grepped from source. The legacy-alias behaviour at the validator is
+ * `workflow-edge-id-wire-spelling.test.ts`'s claim ("still accepts the host alias `edgeId`").
+ *
+ * SABOTAGE (wave 18, probe-witnessed): edge `required` → `edgeId` reds leg 1; dropping
+ * `targetNodeId` (edge) or `typeId` (node) from `required` reds leg 2; resolving the edge id
+ * from `edgeId` only reds leg 2.
  */
-import { readFileSync } from 'node:fs';
-import { join, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { validateWorkflowDefinition } from '../src/host/workflowDefinitionValidation.js';
+import * as pack from '../../../packs/feature.workflow-author.nodes/index.mjs';
 
-const REPO = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
-const PACK_SRC = readFileSync(join(REPO, 'packs', 'feature.workflow-author.nodes', 'index.mjs'), 'utf8');
+interface ObjSchema { required?: string[]; properties?: Record<string, ObjSchema>; items?: ObjSchema }
 
-/** The shape the prompt schema declares REQUIRED for an edge. */
-const requiredEdgeFields = (): string[] => {
-  const m = /required: \['(id|edgeId)', 'sourceNodeId', 'targetNodeId'\]/.exec(PACK_SRC);
-  expect(m, 'the edge `required` block must be findable — otherwise this test pins nothing').toBeTruthy();
-  return [m![1], 'sourceNodeId', 'targetNodeId'];
+/** The `responseSchema` the draft node actually hands the model. */
+async function promptSchema(): Promise<ObjSchema> {
+  let captured: ObjSchema | undefined;
+  await pack.draft({
+    inputs: { intent: 'capture the schema', maxAttempts: 1 },
+    features: {
+      'workflow-author': {
+        getCatalog: async () => ({ nodes: [] }),
+        validateDraft: async () => ({ ok: true, errors: [] }),
+      },
+    },
+    callAI: async (req: { responseSchema: ObjSchema }) => {
+      captured = req.responseSchema;
+      return { data: { workflowId: 'x', nodes: [{ nodeId: 'a', typeId: 'core.flow.noop' }] } };
+    },
+  });
+  expect(captured, 'draft must pass a responseSchema to ctx.callAI').toBeTruthy();
+  return captured!;
+}
+
+/** Placeholder values for exactly the keys a `required` list names. */
+const VALUES: Record<string, unknown> = {
+  workflowId: 'authored.roundtrip', nodeId: 'a', typeId: 'core.flow.noop',
+  id: 'e1', edgeId: 'e1', sourceNodeId: 'a', targetNodeId: 'b',
 };
+const pick = (required: string[] | undefined, overrides: Record<string, unknown> = {}): Record<string, unknown> =>
+  Object.fromEntries((required ?? []).map((k) => [k, k in overrides ? overrides[k] : VALUES[k]]));
 
 describe('ADR 0673 D3 — the model is taught the field the validator actually reads', () => {
-  it('leg 1: the prompt schema requires the CANONICAL edge id, not the legacy alias', () => {
-    expect(requiredEdgeFields()[0],
+  it('leg 1: the prompt schema requires the CANONICAL edge id, not the legacy alias', async () => {
+    const edge = (await promptSchema()).properties?.edges?.items;
+    expect(edge?.required,
       '`edgeId` is an alias kept for existing callers; teaching it to the model is teaching the wrong name',
-    ).toBe('id');
-    expect(PACK_SRC, 'and the alias must not linger as the declared property either').not.toMatch(/\n {10}edgeId: \{/);
+    ).toEqual(['id', 'sourceNodeId', 'targetNodeId']);
+    expect(Object.keys(edge?.properties ?? {}), 'and the alias must not linger as a declared property either').not.toContain('edgeId');
   });
 
-  it('leg 2 (the round-trip): a definition shaped by the prompt schema PASSES the validator', () => {
-    // Exactly the fields RESPONSE_SCHEMA declares required, nothing more.
+  it('leg 2 (the round-trip): a definition shaped by the prompt schema PASSES the validator', async () => {
+    // Built from EXACTLY the fields the schema declares required, nothing more — so a
+    // schema that stops requiring something the validator needs goes red here.
+    const schema = await promptSchema();
+    const nodeReq = schema.properties?.nodes?.items?.required;
+    const edgeReq = schema.properties?.edges?.items?.required;
     const authored = {
-      workflowId: 'authored.roundtrip',
-      nodes: [
-        { nodeId: 'a', typeId: 'core.flow.noop' },
-        { nodeId: 'b', typeId: 'core.flow.noop' },
-      ],
-      edges: [{ id: 'e1', sourceNodeId: 'a', targetNodeId: 'b' }],
+      ...pick(schema.required),
+      nodes: [pick(nodeReq, { nodeId: 'a' }), pick(nodeReq, { nodeId: 'b' })],
+      edges: [pick(edgeReq)],
     };
     expect(() => validateWorkflowDefinition(authored), 'the write gate must accept what the model is told to produce').not.toThrow();
-  });
-
-  it('leg 3: the WIRE schema is a DIFFERENT shape — generating from it would be rejected', () => {
-    // Recorded as a test so the next reader does not re-propose it (I proposed it twice).
-    const wire = JSON.parse(readFileSync(join(REPO, 'schemas', 'workflow-definition.schema.json'), 'utf8')) as {
-      required?: string[];
-    };
-    expect(wire.required, 'the wire shape keys on `id`').toContain('id');
-    expect(wire.required, 'while the host requires `workflowId`').not.toContain('workflowId');
-    // ...and a definition built to the wire's required set fails the host validator.
-    const wireShaped = {
-      id: 'authored.wire', name: 'n', version: '1', nodes: [{ nodeId: 'a', typeId: 'core.flow.noop' }],
-      edges: [], triggers: [], variables: {}, metadata: {}, settings: {},
-    };
-    expect(() => validateWorkflowDefinition(wireShaped as never)).toThrow();
-  });
-
-  it('leg 4: the legacy alias still WORKS at the validator — the fix narrows the prompt, not the contract', () => {
-    const legacy = {
-      workflowId: 'authored.legacy',
-      nodes: [{ nodeId: 'a', typeId: 'core.flow.noop' }, { nodeId: 'b', typeId: 'core.flow.noop' }],
-      edges: [{ edgeId: 'e1', sourceNodeId: 'a', targetNodeId: 'b' }],
-    };
-    expect(() => validateWorkflowDefinition(legacy as never), 'existing callers must keep working').not.toThrow();
   });
 });
 
@@ -93,7 +99,7 @@ describe('ADR 0673 D4 — the id patterns keep the promise their error text make
     const long = 'n'.repeat(129);
     expect(() => validateWorkflowDefinition({
       workflowId: 'authored.longid', nodes: [{ nodeId: long, typeId: 'core.flow.noop' }], edges: [],
-    } as never)).toThrow(/\{1,128\}/);
+    })).toThrow(/\{1,128\}/);
   });
 
   it('leg 2: an over-long EDGE id is refused too — the sibling defect', () => {
@@ -101,13 +107,13 @@ describe('ADR 0673 D4 — the id patterns keep the promise their error text make
       workflowId: 'authored.longedge',
       nodes: [{ nodeId: 'a', typeId: 'core.flow.noop' }, { nodeId: 'b', typeId: 'core.flow.noop' }],
       edges: [{ id: 'e'.repeat(129), sourceNodeId: 'a', targetNodeId: 'b' }],
-    } as never)).toThrow(/\{1,128\}/);
+    })).toThrow(/\{1,128\}/);
   });
 
   it('leg 3: a 128-char id is ACCEPTED — the bound is exact, not one off', () => {
     expect(() => validateWorkflowDefinition({
       workflowId: 'authored.exact', nodes: [{ nodeId: 'n'.repeat(128), typeId: 'core.flow.noop' }], edges: [],
-    } as never)).not.toThrow();
+    })).not.toThrow();
   });
 
   // REGRESSION WITNESS for the defect this bound actually had. The first cut of D4 used the
@@ -124,7 +130,7 @@ describe('ADR 0673 D4 — the id patterns keep the promise their error text make
     for (const id of [singlePrefixed, doublePrefixed]) {
       expect(() => validateWorkflowDefinition({
         workflowId: 'authored.realchain', nodes: [{ nodeId: id, typeId: 'core.flow.noop' }], edges: [],
-      } as never), id).not.toThrow();
+      }), id).not.toThrow();
     }
   });
 });

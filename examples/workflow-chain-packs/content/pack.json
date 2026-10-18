@@ -1,6 +1,6 @@
 {
   "name": "core.openwop.workflows.content",
-  "version": "1.0.5",
+  "version": "1.1.0",
   "kind": "workflow-chain",
   "description": "Real-work workflow pack (RFC 0013, ADR 0190 Phase 3) — the Content & Monitoring cluster: watch an RSS/Atom feed for new items and watch any web page for changes, each pairing a schedule trigger with durable seen-state in host KV storage (deterministic per-source key; the first run treats everything as new and seeds the state). NO host RSS poller exists — adding an 'rss' ingestion source to /v1/trigger-subscriptions is RFC 0099 wire territory (see ADR 0190) — so these chains ARE the poller: pair each with a Schedule and the scheduler does the polling. Authored over shipped node typeIds (core.trigger.schedule + core.openwop.http.fetch + core.storage.kv-get/kv-set + core.ai.chatCompletion + core.openwop.integration.notification-push). No external sends — digests are in-app notifications, so no approval gate is needed. All tenant values are run parameters (replay-deterministic).",
   "author": "openwop",
@@ -10,7 +10,7 @@
   "chains": [
     {
       "chainId": "content.feed-watch",
-      "version": "1.0.1",
+      "version": "1.1.0",
       "label": "Feed Watcher & Digest",
       "description": "Watch an RSS/Atom feed and get a digest of only the NEW items since the last run: fetch the feed, compare against the items already seen (kept in durable storage), summarize what's new, and remember it for next time. Pair with a Schedule to poll on a cadence; the first run seeds the seen-list, so expect everything to be new once.",
       "parameters": {
@@ -19,8 +19,8 @@
         "required": ["feedUrl", "scheduleCron"],
         "properties": {
           "feedUrl": { "type": "string", "description": "The RSS/Atom feed URL to watch." },
-          "provider": { "type": "string", "default": "anthropic", "description": "AI provider id for this chain's LLM nodes. Frozen into this chain's AI nodes when the workflow is created (ADR 0498 — a concrete provider is what keeps replay deterministic). Override at instantiation to use a different vendor or your own BYOK provider; whichever you pick, the workspace needs a key for it — the workflow will not fall back to another provider on its own." },
-          "model": { "type": "string", "default": "claude-sonnet-4-6", "description": "Model id for this chain's LLM nodes. Must be advertised by `provider` in the host catalog; override at instantiation." },
+          "provider": { "type": "string", "description": "AI provider id for this chain's model-calling nodes. Set it to fix a provider into those nodes when the workflow is created. Leave it unset and each run uses the run's chosen provider, else the workspace's AI setting, else the host's catalog default (ADR 0903); whichever is chosen is recorded on the run, so a replay or fork uses the same one. The workspace needs a key for the provider that runs." },
+          "model": { "type": "string", "description": "Model id for this chain's model-calling nodes. Must be offered by the provider in the host catalog. Leave it unset to use the provider's model from the same choice (ADR 0903)." },
           "scheduleCron": { "type": "string", "description": "Cron expression for when this workflow runs (e.g. `0 9 * * 1` = Mondays 09:00)." }
         }
       },
@@ -53,7 +53,7 @@
     },
     {
       "chainId": "content.page-watch",
-      "version": "1.0.1",
+      "version": "1.1.0",
       "label": "Page Change Watch",
       "description": "Watch any web page (competitor pricing, docs, a changelog) and get told WHAT changed, not just that it changed: fetch the page, compare against the last snapshot in durable storage, summarize the differences that matter, and save the new snapshot. Pair with a Schedule; the first run just takes the baseline snapshot.",
       "parameters": {
@@ -63,8 +63,8 @@
         "properties": {
           "pageUrl": { "type": "string", "description": "The page URL to watch." },
           "focus": { "type": "string", "default": "pricing, features, and announcements", "description": "What kinds of changes matter to you." },
-          "provider": { "type": "string", "default": "anthropic", "description": "AI provider id for this chain's LLM nodes. Frozen into this chain's AI nodes when the workflow is created (ADR 0498 — a concrete provider is what keeps replay deterministic). Override at instantiation to use a different vendor or your own BYOK provider; whichever you pick, the workspace needs a key for it — the workflow will not fall back to another provider on its own." },
-          "model": { "type": "string", "default": "claude-sonnet-4-6", "description": "Model id for this chain's LLM nodes. Must be advertised by `provider` in the host catalog; override at instantiation." },
+          "provider": { "type": "string", "description": "AI provider id for this chain's model-calling nodes. Set it to fix a provider into those nodes when the workflow is created. Leave it unset and each run uses the run's chosen provider, else the workspace's AI setting, else the host's catalog default (ADR 0903); whichever is chosen is recorded on the run, so a replay or fork uses the same one. The workspace needs a key for the provider that runs." },
+          "model": { "type": "string", "description": "Model id for this chain's model-calling nodes. Must be offered by the provider in the host catalog. Leave it unset to use the provider's model from the same choice (ADR 0903)." },
           "scheduleCron": { "type": "string", "description": "Cron expression for when this workflow runs (e.g. `0 9 * * 1` = Mondays 09:00)." }
         }
       },

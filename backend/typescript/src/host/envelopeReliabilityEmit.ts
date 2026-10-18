@@ -226,7 +226,64 @@ export function tryLenientParse(text: string): { data: unknown; path: RecoveryPa
       }
     }
   }
+  // ADR 0912 (Book AI P22) — jsonrepair: the one mistake models repeat on
+  // dialogue-heavy text is an unescaped `"` (or a raw newline) inside a string
+  // value. Repaired only when the result then parses; the caller still
+  // schema-validates it, so a repair can never turn a wrong shape into a pass.
+  const candidate = fenceMatch?.[1] ?? (firstBrace !== -1 ? text.slice(firstBrace, text.lastIndexOf('}') + 1) : '');
+  if (candidate) {
+    const repaired = repairJsonStrings(candidate);
+    if (repaired !== candidate) {
+      try {
+        return { data: JSON.parse(repaired), path: 'jsonrepair', byteOffset: text.indexOf(candidate) };
+      } catch {
+        /* fall through */
+      }
+    }
+  }
   return null;
+}
+
+/**
+ * Escape what a model leaves unescaped inside JSON strings: a `"` that does not
+ * end the string (the next non-space character is not `,` `}` `]` `:` or the
+ * end), and raw newlines / tabs. Everything outside strings is left as-is.
+ * Conservative by construction: a wrong guess makes `JSON.parse` fail, and the
+ * caller then reports the reply as unparsable, exactly as before.
+ */
+export function repairJsonStrings(text: string): string {
+  let out = '';
+  let inString = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i]!;
+    if (!inString) {
+      out += c;
+      if (c === '"') inString = true;
+      continue;
+    }
+    if (c === '\\') {
+      out += c + (text[i + 1] ?? '');
+      i++;
+      continue;
+    }
+    if (c === '"') {
+      let j = i + 1;
+      while (j < text.length && /\s/.test(text[j]!)) j++;
+      const next = text[j];
+      if (next === undefined || next === ',' || next === '}' || next === ']' || next === ':') {
+        out += c;
+        inString = false;
+      } else {
+        out += '\\"';
+      }
+      continue;
+    }
+    if (c === '\n') { out += '\\n'; continue; }
+    if (c === '\r') { out += '\\r'; continue; }
+    if (c === '\t') { out += '\\t'; continue; }
+    out += c;
+  }
+  return out;
 }
 
 /**

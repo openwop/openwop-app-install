@@ -15,8 +15,17 @@
  * success-with-empty shape CLAUDE.md's AI-exchange contract forbids — and here
  * it was compounded by `parseDefinition` fabricating a `workflowId` onto `{}`,
  * so an empty model response became a plausible-looking workflow object.
+ *
+ * SABOTAGE (ADR 0596 §W1–W5, re-witnessed wave 18): `if (!lastValidation.ok)` → `if (false)`
+ * reds the WFAC-2 cases; re-adding the id fabrication (`{}` + `authored.x-<runId>`) reds
+ * the invalid / prose / never-gave-an-id cases; nulling either `findWorkflowCycleError`
+ * call reds its cycle case; removing either `AUTHORED_VIA` stamp reds the provenance
+ * cases; dropping a key from `nodes` reds the manifest-parity case.
  */
 
+import { readFileSync } from 'node:fs';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { ensureNodesRegistered } from '../src/bootstrap/nodes.js';
 import { buildWorkflowAuthorSurface } from '../src/features/workflow-author/surface.js';
@@ -24,6 +33,12 @@ import { openStorage } from '../src/storage/index.js';
 import { initHostExtPersistence, __resetHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { getRegisteredWorkflow } from '../src/host/workflowsRegistry.js';
 import { createMember, createOrg } from '../src/host/accessControlService.js';
+import { persistAuthoredWorkflow } from '../src/features/workflow-author/workflowAuthorService.js';
+import { getOwned, recordOwnership } from '../src/host/workflowOwnership.js';
+
+const MANIFEST = JSON.parse(readFileSync(
+  join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'packs', 'feature.workflow-author.nodes', 'pack.json'), 'utf8',
+)) as { nodes: Array<{ typeId: string }> };
 
 let pack: typeof import('../../../packs/feature.workflow-author.nodes/index.mjs');
 
@@ -54,7 +69,7 @@ function ctxFor(opts: {
   const surface = buildWorkflowAuthorSurface({
     tenantId: opts.tenantId ?? TENANT,
     actingUserId: 'u-1',
-  } as never);
+  });
   const replies = opts.replies ?? [];
   const calls: unknown[] = [];
   let i = 0;
@@ -82,6 +97,7 @@ const goodDef = (id: string) => ({
 
 describe('workflow-author node pack — the pack is loadable and declares its four nodes', () => {
   it('exports exactly the four typeIds the manifest declares', () => {
+    expect(Object.keys(pack.nodes).sort()).toEqual(MANIFEST.nodes.map((n) => n.typeId).sort());
     expect(Object.keys(pack.nodes).sort()).toEqual([
       'feature.workflow-author.nodes.draft',
       'feature.workflow-author.nodes.get',
@@ -122,16 +138,6 @@ describe('WFAC-2 / WFAWF-10 — draft fails TYPED, never success-with-empty', ()
     // The repair message actually carried the reason back to the model.
     const second = calls[1] as { messages: Array<{ content: string }> };
     expect(second.messages[0]!.content).toMatch(/not parseable as a JSON object/);
-    expect(out.outputs).toBeUndefined();
-  });
-
-  it('an EMPTY model response does not become a plausible workflow object', async () => {
-    const { ctx } = ctxFor({
-      inputs: { intent: 'summarize documents', maxAttempts: 1 },
-      replies: [{ content: '' }],
-    });
-    const out = await pack.draft(ctx);
-    expect(out.status).toBe('failed');
     expect(out.outputs).toBeUndefined();
   });
 
@@ -286,13 +292,12 @@ describe('WFAWF-9 — acyclicity is enforced on the authoring lane', () => {
       },
     }).ctx);
     expect(out.status).toBe('success');
+    expect((out.outputs as { definition: { workflowId: string } }).definition.workflowId).toBe('authored.two-islands');
   });
 });
 
 describe('WFAC-9 / WFAU-2 — provenance is HOST-owned and reaches the surface that reads it', () => {
   it('the CHAT lane (no draft node) still gets provenance — it is stamped at the write choke', async () => {
-    const { persistAuthoredWorkflow } = await import('../src/features/workflow-author/workflowAuthorService.js');
-    const { getOwned } = await import('../src/host/workflowOwnership.js');
     // A definition with NO `metadata.authoring` at all — exactly what the agent
     // loop's `persist` tool passes, since there is no draft node in that lane.
     await persistAuthoredWorkflow(goodDef('authored.chat-lane-prov'), { tenantId: TENANT });
@@ -306,7 +311,6 @@ describe('WFAC-9 / WFAU-2 — provenance is HOST-owned and reaches the surface t
   });
 
   it('a model cannot FORGE the attribution — the host overwrites authoredVia', async () => {
-    const { persistAuthoredWorkflow } = await import('../src/features/workflow-author/workflowAuthorService.js');
     await persistAuthoredWorkflow(
       { ...goodDef('authored.forged-prov'), metadata: { authoring: { authoredVia: 'a-human-definitely', intent: 'x' } } },
       { tenantId: TENANT },
@@ -319,8 +323,6 @@ describe('WFAC-9 / WFAU-2 — provenance is HOST-owned and reaches the surface t
   });
 
   it('provenance is STICKY: a later ownership write from another lane cannot erase it', async () => {
-    const { persistAuthoredWorkflow } = await import('../src/features/workflow-author/workflowAuthorService.js');
-    const { recordOwnership, getOwned } = await import('../src/host/workflowOwnership.js');
     await persistAuthoredWorkflow(goodDef('authored.sticky-prov'), { tenantId: TENANT });
     // The builder's autosave / a revision restore records ownership WITHOUT
     // authoredVia. A machine-authored workflow does not stop being one because

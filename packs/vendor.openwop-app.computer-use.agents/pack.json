@@ -1,6 +1,6 @@
 {
   "name": "vendor.openwop-app.computer-use.agents",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "kind": "node",
   "description": "Browser Operator agent (ADR 0418) — narrates governed computer-use sessions through the EXISTING chat, reading their recorded trajectory via the openwop:computer-use.status tool. Starting a task and approving a commit-class action (submit/download/new-origin/credential) ride the governed executor + approvalGate run path (a HITL card), NOT a chat tool — so the agent observes and reports, and never drives an action or asks for credentials in chat. Pure-agent pack.",
   "author": "OpenWOP App",

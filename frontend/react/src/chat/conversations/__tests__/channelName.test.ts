@@ -20,6 +20,9 @@ describe('normalizeChannelName (mirrors backend cleanName)', () => {
   });
 });
 
+// The channel roster / member pickers render `ui/Avatar` (ADR 0192 D8), whose
+// monogram is `initials`; this is the only test of it. Breaks if a two-word name loses
+// its second letter or a single token renders two (w44 cn-initials).
 describe('ui/Avatar initials', () => {
   it('two-word names use first letters; a single token uses its first letter (AgentAvatar-preserved behavior)', () => {
     expect(initials('Dana Wong')).toBe('DW');

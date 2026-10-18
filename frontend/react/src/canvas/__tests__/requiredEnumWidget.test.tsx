@@ -11,18 +11,29 @@
  *
  * campaign-studio had already authored all 13 `opt_*` keys in all four locales.
  * None of them had ever reached a screen.
+ *
+ * w46 cuts (each covering case went red under the same sabotage): "an option with
+ * no key still shows its code" (case 1's exact toEqual includes `conversion`;
+ * w46g2-rew-fallback), "required and OPTIONAL enums now agree" (case 1 for the
+ * widget, w46g2-rew-opt; PropertyForm.labels case 1 for the built-in enum,
+ * w46g2-pfl-optkey), and "the field LABEL resolves through prop_<name>"
+ * (propLabelKey "falls back to the derived key", w46g2-plk-derived).
  */
 import { describe, it, expect, afterEach } from 'vitest';
 import { render, screen, cleanup, fireEvent } from '@testing-library/react';
 import { PropertyField } from '../PropertyForm.js';
 import { RequiredEnumWidget } from '../widgets.js';
 import type { CanvasPropDef } from '../types.js';
+import { campaignStudioDefinition } from '../../features/campaign-studio/definition.js';
+import { messages as csEn } from '../../features/campaign-studio/i18n/en.js';
+import { messages as csEs } from '../../features/campaign-studio/i18n/es.js';
+import { messages as csFr } from '../../features/campaign-studio/i18n/fr.js';
+import { messages as csPtBR } from '../../features/campaign-studio/i18n/pt-BR.js';
 
 const STAGE: CanvasPropDef = {
   name: 'stage', type: 'enum-required', label: 'Stage',
   options: ['awareness', 'consideration', 'conversion'], required: true,
 };
-const OPTIONAL: CanvasPropDef = { name: 'stage', type: 'enum', label: 'Stage', options: ['awareness', 'consideration'] };
 
 /** Stands in for a type namespace that HAS the keys (as campaign-studio does). */
 const tt = (key: string, opts: { defaultValue: string }): string =>
@@ -53,32 +64,9 @@ describe('required-enum options are localized like optional ones', () => {
     expect(optionTexts()).toEqual(['Notoriété', 'Considération', 'conversion']);
   });
 
-  it('an option with no key still shows its code — never a blank row', () => {
-    view(STAGE, true);
-    // `conversion` has no key in this fixture. The fallback is the code, which is
-    // what keeps a consumer that supplies NO keys (cad) unchanged.
-    expect(optionTexts()).toContain('conversion');
-  });
-
   it('with no translator at all, every option is its raw code', () => {
     view(STAGE, false);
     expect(optionTexts()).toEqual(['awareness', 'consideration', 'conversion']);
-  });
-
-  it('required and OPTIONAL enums now agree — the widget no longer decides', () => {
-    view(OPTIONAL, true);
-    const optional = optionTexts().filter((s) => s !== '—');
-    cleanup();
-    view(STAGE, true);
-    const required = optionTexts();
-    // The optional enum was always localized; the required one now matches it
-    // for the values they share.
-    expect(required.slice(0, optional.length)).toEqual(optional);
-  });
-
-  it('the field LABEL resolves through prop_<name> for both', () => {
-    view(STAGE, true);
-    expect(screen.getByText(/Étape/)).toBeTruthy();
   });
 
   it('reports the CODE, not the label — translation is presentation only', () => {
@@ -96,29 +84,25 @@ describe('required-enum options are localized like optional ones', () => {
 });
 
 describe('campaign-studio supplies the keys the panel reads', () => {
-  it('every prop def in the definition has a prop_<name> key in every locale', async () => {
-    const [{ campaignStudioDefinition }, en, es, fr, ptBR] = await Promise.all([
-      import('../../features/campaign-studio/definition.js'),
-      import('../../features/campaign-studio/i18n/en.js'),
-      import('../../features/campaign-studio/i18n/es.js'),
-      import('../../features/campaign-studio/i18n/fr.js'),
-      import('../../features/campaign-studio/i18n/pt-BR.js'),
-    ]);
-    const names = new Set<string>();
-    for (const coll of campaignStudioDefinition.elements ?? []) {
-      for (const p of coll.propDefs()) names.add(p.name);
+  it('every prop def has a prop_<name> key, and every enum option an opt_<name>_<value> key, in every locale', () => {
+    const catalogs: Record<string, Readonly<Record<string, string>>> = { en: csEn, es: csEs, fr: csFr, 'pt-BR': csPtBR };
+    const keys = new Set<string>();
+    const defs = [
+      ...(campaignStudioDefinition.elements ?? []).flatMap((coll) => coll.propDefs({})),
+      ...(campaignStudioDefinition.docPropDefs ?? []),
+    ];
+    for (const p of defs) {
+      keys.add(`prop_${p.name}`);
+      // The panel reads opt_<name>_<value> for both enum branches (built-in
+      // `enum` and the `enum-required` widget) — the 13 keys this file's header
+      // says were authored and never reached a screen.
+      if (p.type === 'enum' || p.type === 'enum-required') for (const o of p.options ?? []) keys.add(`opt_${p.name}_${o}`);
     }
-    for (const p of campaignStudioDefinition.docPropDefs ?? []) names.add(p.name);
-
-    const catalogs: Record<string, Record<string, string>> = {
-      en: en.messages as Record<string, string>,
-      es: es.messages as Record<string, string>,
-      fr: fr.messages as Record<string, string>,
-      'pt-BR': ptBR.messages as Record<string, string>,
-    };
+    // Non-vacuity floor: the definition really has enums with options to check.
+    expect([...keys].filter((k) => k.startsWith('opt_')).length).toBeGreaterThanOrEqual(13);
     const missing: string[] = [];
     for (const [locale, cat] of Object.entries(catalogs)) {
-      for (const n of names) if (!cat[`prop_${n}`]) missing.push(`${locale}:prop_${n}`);
+      for (const k of keys) if (!cat[k]) missing.push(`${locale}:${k}`);
     }
     // A half-translated panel reads as a bug rather than an untranslated
     // product — the mixed state is worse than either end.

@@ -11,6 +11,11 @@
  *    is not re-invoked; ADR 0412 replay invariant, observed end-to-end)
  *  - tampered evidence hash → typed failure, never a verdict
  *  - snooze halts materialization; resume restores it
+ *
+ * Sabotage witnesses (w41 /grade-tests): hashing `asOf` into the evidence body
+ * (breaks replay), disabling the tamper check, `>=`→`>` in the verdict, dropping
+ * the completed projection, letting a snoozed enrollment materialize, a null
+ * trace title, and dropping the owner filter in `listEnrollmentsFor` (KTX-3).
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -22,6 +27,12 @@ import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { getGoal, evaluateGoal, VerifierFailedError } from '../src/features/goals/goalsService.js';
 import { freezeProgressEvidence } from '../src/features/kicktodo-core/progressService.js';
 import { ensurePersonalWorkspace } from '../src/host/accessControlService.js';
+
+/** Typed JSON body without a cast: `JSON.parse` returns `any`, so the call
+ *  site names the narrow wire shape it reads (no `as`). */
+async function body<T>(res: Response): Promise<T> {
+  return JSON.parse(await res.text());
+}
 
 let BASE: string;
 let server: http.Server;
@@ -56,7 +67,7 @@ function client() {
       // implicit-owner hole. Seat each subject as an explicit owner MEMBER
       // (`ensurePersonalWorkspace` seeds the owner row idempotently — the same
       // call the seam makes for the first login), so authority is membership-derived.
-      const { user } = (await res.clone().json()) as { user: { userId: string } };
+      const { user } = await body<{ user: { userId: string } }>(res.clone());
       await ensurePersonalWorkspace({ tenantId, ownerSubject: user.userId, name: `Test workspace ${tenantId}` });
     },
   };
@@ -74,7 +85,9 @@ beforeAll(async () => {
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   await new Promise<void>((resolve) => {
     server = app.listen(0, '127.0.0.1', () => {
-      BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+      const addr: AddressInfo | string | null = server.address();
+      if (!addr || typeof addr === 'string') throw new Error('server has no TCP address');
+      BASE = `http://127.0.0.1:${addr.port}`;
       resolve();
     });
   });
@@ -102,12 +115,12 @@ const ONE_DAY = {
 };
 
 async function setupEnrollment(c: ReturnType<typeof client>) {
-  const draft = await (await c.post(`${B}/challenges`, ONE_DAY)).json() as { id: string };
+  const draft = await body<{ id: string }>(await c.post(`${B}/challenges`, ONE_DAY));
   await c.post(`${B}/challenges/${draft.id}/versions/1/publish`);
-  const e = await (await c.post(`${B}/enrollments`, { challengeId: draft.id, challengeVersion: 1, timezone: 'UTC' })).json() as { id: string; goalId: string };
-  const today = await (await c.get(`${B}/today`)).json() as {
+  const e = await body<{ id: string; goalId: string }>(await c.post(`${B}/enrollments`, { challengeId: draft.id, challengeVersion: 1, timezone: 'UTC' }));
+  const today = await body<{
     enrollments: Array<{ enrollmentId: string; actions: Array<{ occurrence: { cardId: string } }> }>;
-  };
+  }>(await c.get(`${B}/today`));
   const cards = today.enrollments.find((x) => x.enrollmentId === e.id)!.actions.map((a) => a.occurrence.cardId);
   return { e, cards };
 }
@@ -119,27 +132,27 @@ describe('progress + judged completion (ADR 0414 P3)', () => {
     const { e, cards } = await setupEnrollment(c);
 
     // Projection at zero.
-    const p0 = await (await c.get(`${B}/enrollments/${e.id}/progress`)).json() as { completedActivities: number; totalRequiredActivities: number };
+    const p0 = await body<{ completedActivities: number; totalRequiredActivities: number }>(await c.get(`${B}/enrollments/${e.id}/progress`));
     expect(p0.totalRequiredActivities).toBe(2);
     expect(p0.completedActivities).toBe(0);
 
     // Evaluate while incomplete → verdict recorded, everything stays active.
     await c.post(`${B}/check-ins`, { cardId: cards[0] });
-    const r1 = await (await c.post(`${B}/enrollments/${e.id}/evaluate`)).json() as { satisfied: boolean; replayed: boolean; enrollment: { state: string } };
+    const r1 = await body<{ satisfied: boolean; replayed: boolean; enrollment: { state: string } }>(await c.post(`${B}/enrollments/${e.id}/evaluate`));
     expect(r1.satisfied).toBe(false);
     expect(r1.enrollment.state).toBe('active');
     expect((await getGoal(TENANT, e.goalId))?.state).toBe('active');
 
     // Complete the second action → satisfied; enrollment projects completed.
     await c.post(`${B}/check-ins`, { cardId: cards[1] });
-    const r2 = await (await c.post(`${B}/enrollments/${e.id}/evaluate`)).json() as { satisfied: boolean; replayed: boolean; enrollment: { state: string } };
+    const r2 = await body<{ satisfied: boolean; replayed: boolean; enrollment: { state: string } }>(await c.post(`${B}/enrollments/${e.id}/evaluate`));
     expect(r2.satisfied).toBe(true);
     expect(r2.replayed).toBe(false);
     expect(r2.enrollment.state).toBe('completed');
     expect((await getGoal(TENANT, e.goalId))?.state).toBe('satisfied');
 
     // Unchanged state → same snapshot hash → the RECORDED verdict replays.
-    const r3 = await (await c.post(`${B}/enrollments/${e.id}/evaluate`)).json() as { satisfied: boolean; replayed: boolean };
+    const r3 = await body<{ satisfied: boolean; replayed: boolean }>(await c.post(`${B}/enrollments/${e.id}/evaluate`));
     expect(r3.satisfied).toBe(true);
     expect(r3.replayed).toBe(true);
   });
@@ -163,31 +176,40 @@ describe('progress + judged completion (ADR 0414 P3)', () => {
     await c.login('user:kp-finn', TENANT);
     const { e } = await setupEnrollment(c);
     await c.post(`${B}/enrollments/${e.id}/snooze`);
-    const snoozed = await (await c.post(`${B}/enrollments/${e.id}/materialize`)).json() as { occurrences: unknown[] };
+    const snoozed = await body<{ occurrences: unknown[] }>(await c.post(`${B}/enrollments/${e.id}/materialize`));
     expect(snoozed.occurrences).toHaveLength(0);
-    const resumed = await (await c.post(`${B}/enrollments/${e.id}/resume`)).json() as { state: string };
+    const resumed = await body<{ state: string }>(await c.post(`${B}/enrollments/${e.id}/resume`));
     expect(resumed.state).toBe('active');
-    const after = await (await c.post(`${B}/enrollments/${e.id}/materialize`)).json() as { occurrences: unknown[] };
+    const after = await body<{ occurrences: unknown[] }>(await c.post(`${B}/enrollments/${e.id}/materialize`));
     expect(after.occurrences.length).toBeGreaterThan(0);
   });
 
   it('KTX-3 batch read: ?include=progress returns the same projection as the per-id route, in ONE request', async () => {
+    // Positive control: ANOTHER participant in the same tenant has an enrollment
+    // (created here, so the case does not depend on run order).
+    const other = client();
+    await other.login('user:kp-gwen-neighbour', TENANT);
+    const { e: foreign } = await setupEnrollment(other);
     const c = client();
     await c.login('user:kp-gwen', TENANT);
     const { e } = await setupEnrollment(c);
     // Plain list carries no progress key (shape unchanged for existing callers).
-    const plain = await (await c.get(`${B}/enrollments`)).json() as { enrollments: unknown[]; progress?: unknown };
+    const plain = await body<{ enrollments: unknown[]; progress?: unknown }>(await c.get(`${B}/enrollments`));
     expect(plain.progress).toBeUndefined();
     // Batch read: one entry per enrollment, byte-equal to the per-id projection.
-    const batch = await (await c.get(`${B}/enrollments?include=progress`)).json() as {
+    const batch = await body<{
       enrollments: Array<{ id: string }>;
       progress: Record<string, unknown>;
-    };
+    }>(await c.get(`${B}/enrollments?include=progress`));
     expect(Object.keys(batch.progress)).toContain(e.id);
-    const single = await (await c.get(`${B}/enrollments/${e.id}/progress`)).json();
+    const single = await body<unknown>(await c.get(`${B}/enrollments/${e.id}/progress`));
     expect(batch.progress[e.id]).toEqual(single);
-    // The other user's enrollments never appear (authority = the caller's list).
-    for (const row of batch.enrollments) expect(Object.keys(batch.progress)).toContain(row.id);
+    // Authority = the caller's list: exactly the caller's one enrollment, in BOTH
+    // the list and the progress map — the neighbour's never appears.
+    expect(batch.enrollments.map((row) => row.id)).toEqual([e.id]);
+    expect(Object.keys(batch.progress)).toEqual([e.id]);
+    expect(foreign.id).not.toBe(e.id);
+    expect(Object.keys(batch.progress)).not.toContain(foreign.id);
   });
 
   it('§5.6 trace: per-activity rows joined to plan titles; recovery honest at zero', async () => {
@@ -195,10 +217,10 @@ describe('progress + judged completion (ADR 0414 P3)', () => {
     await c.login('user:kp-hana', TENANT);
     const { e, cards } = await setupEnrollment(c);
     await c.post(`${B}/check-ins`, { cardId: cards[0] });
-    const p = await (await c.get(`${B}/enrollments/${e.id}/progress`)).json() as {
+    const p = await body<{
       trace: Array<{ stableActivityId: string; day: number | null; title: string | null; recovery: boolean; completed: boolean; dateLocal: string }>;
       recovery: { offered: number; completed: number };
-    };
+    }>(await c.get(`${B}/enrollments/${e.id}/progress`));
     expect(p.trace).toHaveLength(2);
     const first = p.trace.find((r) => r.stableActivityId === 'a1');
     expect(first).toMatchObject({ day: 1, title: 'First', recovery: false, completed: true });

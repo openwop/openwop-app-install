@@ -35,7 +35,7 @@ import { ConversationLineup } from '../conversations/ConversationLineup.js';
 // Entry-weight (deck parity with ChatSidebar): the strip pulls the review-card
 // tree — lazy keeps it out of the entry chunk.
 const ConversationReviewsStrip = lazy(() => import('../reviews/ConversationReviewsStrip.js').then((m) => ({ default: m.ConversationReviewsStrip })));
-import { useChannelRoster } from '../conversations/useChannelRoster.js';
+import { useChannelRoster, CHANNEL_READ_ONLY_COPY } from '../conversations/useChannelRoster.js';
 import { useChannelMessageActions } from '../conversations/useChannelMessageActions.js';
 import { submitChannelPost } from '../conversations/channelSubmit.js';
 import { useScopeToAgent } from '../activeAgents/useScopeToAgent.js';
@@ -54,12 +54,15 @@ import { Menu, type MenuEntry } from '../../ui/Menu.js';
 import { MoreHorizontalIcon, SparklesIcon, UsersIcon } from '../../ui/icons/index.js';
 import type { BYOKActiveConfig } from '../../byok/lib/useBYOKConfig.js';
 import type { ConversationParticipant, ConversationType } from '../../client/chatSessionsClient.js';
-import type { ChatMessage } from '../types.js';
+import { messageText, type ChatMessage } from '../types.js';
 import { useRecordDecision } from '../decisions/useRecordDecision.js';
 
 // ADR 0117 Phase 3 — the read-only side-by-side compare view; lazy (zero entry-budget),
 // mirrors ChatSidebar.
 const CompareView = lazy(() => import('../CompareView.js').then((m) => ({ default: m.CompareView })));
+// ADR 0896 IL2UX-2 — the mission contract (deck parity with ChatHeader's Mission
+// button): without it a draft the assistant writes here has nowhere to be approved.
+const IntentLedgerModal = lazy(() => import('../../intentLedger/IntentLedgerModal.js'));
 // ADR 0154 — channel-only chrome, lazy (deck parity with ChatSidebar): keeps
 // channelsClient's SSE code out of the eager chat entry chunk.
 const ChannelPresenceBar = lazy(() => import('../conversations/ChannelPresenceBar.js').then((m) => ({ default: m.ChannelPresenceBar })));
@@ -153,7 +156,14 @@ function TabSessionImpl({
   // ADR 0195 D3b/D5 — deck parity: public reactions on multi-party tabs; the
   // private feedback thumbs stay the 1:1 affordance.
   const isMultiParty = conversationType === 'channel' || conversationType === 'group';
-  const channelMessageActions = useChannelMessageActions(sessionId, loadSessionFromBackend);
+  const baseChannelMessageActions = useChannelMessageActions(sessionId, loadSessionFromBackend);
+  // ADR 0879 — parity with ChatSidebar: no react/edit for a read-only role
+  // (CH2UX-2), delete-others for the owner/an admin (D3, CH2UX-4).
+  const channelMessageActions = useMemo(() => (conversationType === 'channel' ? {
+    ...baseChannelMessageActions,
+    canWrite: channelRoster.viewerCanWrite !== false,
+    canModerate: channelRoster.viewerCanManage,
+  } : baseChannelMessageActions), [baseChannelMessageActions, conversationType, channelRoster.viewerCanWrite, channelRoster.viewerCanManage]);
 
   // ?agent= deep-link (ADR 0140 G3): activate the agent in THIS tab's lineup once.
   useScopeToAgent(activeAgents, agentEntries, scopeAgentId ?? null);
@@ -256,6 +266,7 @@ function TabSessionImpl({
   const importInputRef = useRef<HTMLInputElement | null>(null);
   const hasTurns = session.messages.length > 0;
   const [showChannelDetails, setShowChannelDetails] = useState(false); // ADR 0154 FU-1 (deck parity)
+  const [missionOpen, setMissionOpen] = useState(false);
   // ADR 0140 follow-on — the right-docked members pane, per tab. Default closed
   // (progressive disclosure: the roster is contextual detail, not always-on).
   const [membersOpen, setMembersOpen] = useState(false);
@@ -275,6 +286,7 @@ function TabSessionImpl({
     ...(conversationType === 'channel' ? [{ id: 'channel-settings', label: t('channelSettingsAria'), onSelect: () => setShowChannelDetails(true) }] : []),
     ...(hasTurns ? [{ id: 'branch', label: t('branch'), title: t('branchConversationTitle'), onSelect: () => { void onBranch(); } }] : []),
     ...(hasTurns ? [{ id: 'compare', label: t('compare'), title: t('compareTitle'), onSelect: openCompare }] : []),
+    ...(hasTurns ? [{ id: 'mission', label: t('mission', { defaultValue: 'Mission' }), title: t('missionTitle', { defaultValue: 'Mission contract' }), onSelect: () => setMissionOpen(true) }] : []),
     ...(hasTurns && exportAccess.enabled ? [
       { id: 'export', label: t('export'), title: t('exportConversationTitle'), onSelect: () => { void onExport('md'); } },
       { id: 'export-json', label: t('exportAsJson'), onSelect: () => { void onExport('json'); } },
@@ -388,13 +400,23 @@ function TabSessionImpl({
           <CompareView currentSessionId={sessionId} onClose={closeCompare} />
         </Suspense>
       ) : null}
+      {missionOpen ? (
+        <Suspense fallback={null}>
+          <IntentLedgerModal sessionId={sessionId} onClose={() => setMissionOpen(false)} lastUserMessage={(() => { const m = [...session.messages].reverse().find((x) => x.role === 'user'); return m ? messageText(m) : ''; })()} />
+        </Suspense>
+      ) : null}
       {showChannelDetails && conversationType === 'channel' ? (
         <Suspense fallback={null}>
           <ChannelManageDialog
             channelId={sessionId}
             onClose={() => setShowChannelDetails(false)}
-            onChanged={() => refreshConversations()}
+            // CH2UX-6 — refresh the ROSTER too: a posting-policy or manager change
+            // must reach this tab's composer, not wait for the next open.
+            onChanged={async () => { await refreshConversations(); await channelRoster.refresh(); }}
             onArchived={() => { setShowChannelDetails(false); void refreshConversations(); onRequestClose?.(); }}
+            // CH2UX-6 — leaving from the dialog (now offered to an admin who manages
+            // a room it does not own) closes the tab, as archiving does.
+            onLeft={() => { setShowChannelDetails(false); void refreshConversations(); onRequestClose?.(); }}
           />
         </Suspense>
       ) : null}
@@ -412,7 +434,7 @@ function TabSessionImpl({
               <ChannelRosterPanel
                 variant="strip"
                 roster={channelRoster.roster}
-                viewerIsOwner={channelRoster.viewerIsOwner}
+                viewerCanManage={channelRoster.viewerCanManage}
                 viewerSubjectRef={channelRoster.viewerSubjectRef}
                 onManage={() => setShowChannelDetails(true)}
                 onLeave={() => setShowChannelDetails(true)}
@@ -493,13 +515,14 @@ function TabSessionImpl({
               <ChannelEmptyState
                 name={channelRoster.detail?.channel?.name ?? session.title}
                 description={channelRoster.detail?.channel?.description}
-                viewerIsOwner={channelRoster.viewerIsOwner}
+                viewerCanManage={channelRoster.viewerCanManage}
                 hasAgents={channelRoster.mentionEntries.length > 0}
                 onOpenDetails={() => setShowChannelDetails(true)}
               />
             </Suspense>
           ),
           composerPlaceholder: t('channelComposerPlaceholder', { name: channelRoster.detail?.channel?.name ?? session.title }),
+          ...(channelRoster.readOnlyReason ? { composerReadOnlyReason: t(CHANNEL_READ_ONLY_COPY[channelRoster.readOnlyReason]) } : {}),
           mentionEntries: channelRoster.mentionEntries,
           // Gated on a RESOLVED roster (review finding 3) — see ChatSidebar.
           ...(channelRoster.detail ? {
@@ -560,7 +583,7 @@ function TabSessionImpl({
             onRemoveAgent={(id) => { activeAgents.remove(id); onRemoveParticipant?.(sessionId, `agent:${id}`); }}
             {...(isChannel ? { channelRoster: {
               roster: channelRoster.roster,
-              viewerIsOwner: channelRoster.viewerIsOwner,
+              viewerCanManage: channelRoster.viewerCanManage,
               viewerSubjectRef: channelRoster.viewerSubjectRef,
               onManage: () => setShowChannelDetails(true),
               onLeave: () => setShowChannelDetails(true),

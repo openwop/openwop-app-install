@@ -13,6 +13,12 @@
  * They cover BOTH public consumers: the JSON the SPA reads, and the PRERENDER — the
  * document a bot, a reader-mode client, and any no-JS visitor actually receive, i.e.
  * exactly the consumers least able to play audio.
+ *
+ * Sabotage witnesses (w21 g2): the JSON route drops (or fabricates) `transcript`, or
+ * leaks `transcriptDocRef`; the bound is doubled; the show list carries a transcript;
+ * the prerender skips the projection, omits the absence notice, or stops escaping;
+ * `getPublicEpisodeTranscript` drops the `documents` toggle check (`M1`) or the
+ * document-KIND check (`L5`).
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -42,15 +48,24 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res { status: number; body: any }
-function client(): { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res> } {
+// ── Wire shapes this file reads (declared, never `any`) ──
+interface OrgBody { orgId: string }
+interface ShowBody { show: { id: string; slug: string } }
+interface EpisodePublishBody { episode: { slug: string } }
+interface PublicEpisodeBody { episode: { slug: string; audioUrl?: string; transcript?: string; transcriptTruncated?: boolean } }
+interface PublicShowBody { episodes: Array<{ slug: string; transcript?: string }> }
+
+interface Res<T> { status: number; body: T }
+interface Client { get: <T>(p: string) => Promise<Res<T>>; post: <T = unknown>(p: string, b?: unknown) => Promise<Res<T>> }
+function client(): Client {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
+  const call = async <T>(method: string, path: string, body?: unknown): Promise<Res<T>> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const c of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]; }
-    return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) };
+    // The one boundary where JSON becomes a declared shape; every reader names it.
+    return { status: res.status, body: (res.status === 204 ? undefined : await res.json().catch(() => undefined)) as T };
   };
-  return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b) };
+  return { get: <T>(p: string) => call<T>('GET', p), post: <T = unknown>(p: string, b?: unknown) => call<T>('POST', p, b) };
 }
 
 const rawGet = async (path: string): Promise<{ status: number; body: string }> => {
@@ -67,15 +82,15 @@ const TRANSCRIPT = '**Host:** Welcome to the show.\n\n**Guest:** Glad to be here
 async function publish(transcript: string | null): Promise<{ orgId: string; showSlug: string; episodeSlug: string; tenantId: string; episodeId: string }> {
   const c = client();
   await c.post('/host/openwop-app/test/login', { email: `pt-${Date.now()}-${n++}@acme.test` });
-  const org = await c.post('/host/openwop-app/orgs', { name: 'Acme Media' });
-  const orgId = org.body.orgId as string;
+  const org = await c.post<OrgBody>('/host/openwop-app/orgs', { name: 'Acme Media' });
+  const orgId = org.body.orgId;
   const tenantId = (await getOrg(orgId))!.tenantId;
-  const created = await c.post(`${P}/shows`, {
+  const created = await c.post<ShowBody>(`${P}/shows`, {
     orgId, title: 'The Acme Hour', author: 'Acme Studios', description: 'Weekly acme talk',
     category: 'Technology', explicit: false, ownerName: 'Acme', ownerEmail: 'pod@acme.test', languageCode: 'en',
   });
   expect(created.status, JSON.stringify(created.body)).toBe(201);
-  const showId = created.body.show.id as string;
+  const showId = created.body.show.id;
   expect((await c.post(`${P}/shows/${showId}/publish`)).status).toBe(200);
 
   const asset = await storeMediaAsset(tenantId, { contentBase64: Buffer.alloc(256, 7).toString('base64'), contentType: 'audio/mpeg' });
@@ -94,15 +109,15 @@ async function publish(transcript: string | null): Promise<{ orgId: string; show
     await addVersion(tenantId, orgId, doc.documentId, { content: transcript, producedBy: { kind: 'run', id: 'run-pt' } });
     await recordEpisodeResult(tenantId, ep.id, { transcriptDocRef: doc.documentId });
   }
-  const pub = await c.post(`${P}/episodes/${ep.id}/publish`, { showId, descriptionOverride: 'A fine first episode.' });
+  const pub = await c.post<EpisodePublishBody>(`${P}/episodes/${ep.id}/publish`, { showId, descriptionOverride: 'A fine first episode.' });
   expect(pub.status, JSON.stringify(pub.body)).toBe(200);
-  return { orgId, showSlug: created.body.show.slug as string, episodeSlug: pub.body.episode.slug as string, tenantId, episodeId: ep.id };
+  return { orgId, showSlug: created.body.show.slug, episodeSlug: pub.body.episode.slug, tenantId, episodeId: ep.id };
 }
 
 describe('PODU-1 — the public episode carries its transcript (WCAG 2.1 SC 1.2.1)', () => {
   it('the single-episode JSON serves the transcript CONTENT (never the internal ref)', async () => {
     const { orgId, showSlug, episodeSlug } = await publish(TRANSCRIPT);
-    const res = await client().get(`${PUB(orgId)}/${showSlug}/${episodeSlug}`);
+    const res = await client().get<PublicEpisodeBody>(`${PUB(orgId)}/${showSlug}/${episodeSlug}`);
     expect(res.status).toBe(200);
     expect(res.body.episode.transcript).toBe(TRANSCRIPT);
     expect(res.body.episode.transcriptTruncated).toBe(false);
@@ -114,7 +129,7 @@ describe('PODU-1 — the public episode carries its transcript (WCAG 2.1 SC 1.2.
     // An INGESTED episode (ADR 0562) legitimately has no generated transcript. The
     // route must not fabricate one, and the page states the absence in words.
     const { orgId, showSlug, episodeSlug } = await publish(null);
-    const res = await client().get(`${PUB(orgId)}/${showSlug}/${episodeSlug}`);
+    const res = await client().get<PublicEpisodeBody>(`${PUB(orgId)}/${showSlug}/${episodeSlug}`);
     expect(res.status).toBe(200);
     expect(res.body.episode.transcript).toBeUndefined();
     expect(res.body.episode.audioUrl).toBeTruthy(); // floor: the episode really did publish
@@ -123,14 +138,15 @@ describe('PODU-1 — the public episode carries its transcript (WCAG 2.1 SC 1.2.
   it('an oversized transcript is bounded and SAYS SO (never silently clipped)', async () => {
     const huge = 'x'.repeat(PUBLIC_TRANSCRIPT_MAX + 5_000);
     const { orgId, showSlug, episodeSlug } = await publish(huge);
-    const res = await client().get(`${PUB(orgId)}/${showSlug}/${episodeSlug}`);
+    const res = await client().get<PublicEpisodeBody>(`${PUB(orgId)}/${showSlug}/${episodeSlug}`);
+    expect(res.status).toBe(200);
     expect(res.body.episode.transcript).toHaveLength(PUBLIC_TRANSCRIPT_MAX);
     expect(res.body.episode.transcriptTruncated).toBe(true);
   });
 
   it('the transcript does NOT ride the show list (up to 20 episodes of model prose)', async () => {
     const { orgId, showSlug } = await publish(TRANSCRIPT);
-    const res = await client().get(`${PUB(orgId)}/${showSlug}`);
+    const res = await client().get<PublicShowBody>(`${PUB(orgId)}/${showSlug}`);
     expect(res.status).toBe(200);
     expect(res.body.episodes).toHaveLength(1); // floor: the list is not empty
     expect(res.body.episodes[0].transcript).toBeUndefined();
@@ -161,13 +177,13 @@ describe('PODU-1 — the public episode carries its transcript (WCAG 2.1 SC 1.2.
     // "degrades rather than breaks, IN BOTH DIRECTIONS"; only one direction was
     // honoured. Both are now.
     const { orgId, showSlug, episodeSlug } = await publish(TRANSCRIPT);
-    const before = await client().get(`${PUB(orgId)}/${showSlug}/${episodeSlug}`);
+    const before = await client().get<PublicEpisodeBody>(`${PUB(orgId)}/${showSlug}/${episodeSlug}`);
     expect(before.body.episode.transcript, 'floor: it really is served while documents is ON').toBe(TRANSCRIPT);
 
     const d = getToggleDefault('documents')!;
     try {
       await saveConfig({ ...d, status: 'off' }, 'test');
-      const res = await client().get(`${PUB(orgId)}/${showSlug}/${episodeSlug}`);
+      const res = await client().get<PublicEpisodeBody>(`${PUB(orgId)}/${showSlug}/${episodeSlug}`);
       expect(res.status, 'the episode itself still publishes — podcasts is still on').toBe(200);
       expect(res.body.episode.transcript).toBeUndefined();
       // The PRERENDER is the a11y-critical consumer and a separate call site, so it
@@ -194,7 +210,7 @@ describe('PODU-1 — the public episode carries its transcript (WCAG 2.1 SC 1.2.
     await addVersion(tenantId, orgId, secret.documentId, { content: 'CONFIDENTIAL board briefing.', producedBy: { kind: 'run', id: 'run-x' } });
     await recordEpisodeResult(tenantId, episodeId, { transcriptDocRef: secret.documentId });
 
-    const res = await client().get(`${PUB(orgId)}/${showSlug}/${episodeSlug}`);
+    const res = await client().get<PublicEpisodeBody>(`${PUB(orgId)}/${showSlug}/${episodeSlug}`);
     expect(res.status).toBe(200);
     expect(res.body.episode.transcript).toBeUndefined();
     expect(JSON.stringify(res.body)).not.toContain('CONFIDENTIAL');
@@ -205,6 +221,7 @@ describe('PODU-1 — the public episode carries its transcript (WCAG 2.1 SC 1.2.
   it('transcript text is HTML-ESCAPED in the prerender', async () => {
     const { orgId, showSlug, episodeSlug } = await publish('<script>alert(1)</script>\n\nsecond para');
     const res = await rawGet(`${PUB(orgId)}/${showSlug}/prerender/${episodeSlug}`);
+    expect(res.status).toBe(200);
     expect(res.body).not.toContain('<script>alert(1)</script>');
     expect(res.body).toContain('&lt;script&gt;');
     expect(res.body).toContain('second para'); // floor: the escaping did not eat the content

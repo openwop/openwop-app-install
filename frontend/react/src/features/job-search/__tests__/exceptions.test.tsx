@@ -4,6 +4,9 @@
  * This screen IS the interruption budget, so what it must never do is turn one
  * chore back into several. The assertions are about batching, about the empty
  * state being a success state, and about the answer reporting what it bought.
+ *
+ * w52: the typed answer is no longer '6' (it equalled `blockedCount: 6`, so a
+ * toast built from the ANSWER was indistinguishable), and what was sent is read.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
@@ -11,16 +14,17 @@ import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/re
 const toastSuccess = vi.fn();
 vi.mock('../../../ui/toast.js', () => ({ toast: { success: (...a: unknown[]) => toastSuccess(...a), error: vi.fn() } }));
 
-const list = vi.fn(async () => [] as unknown[]);
-const answer = vi.fn(async () => undefined);
-vi.mock('../jobSearchClient.js', () => ({
-  listExceptions: (...a: unknown[]) => list(...(a as [])),
-  answerException: (...a: unknown[]) => answer(...(a as [])),
+type Client = typeof import('../jobSearchClient.js');
+const { list, answer } = vi.hoisted(() => ({
+  list: vi.fn<Client['listExceptions']>(),
+  answer: vi.fn<Client['answerException']>(),
 }));
+vi.mock('../jobSearchClient.js', () => ({ listExceptions: list, answerException: answer }));
 
 import { ExceptionsPage } from '../ExceptionsPage.js';
+import type { CampaignException } from '../jobSearchClient.js';
 
-const SIX_BLOCKED = [{
+const SIX_BLOCKED: CampaignException[] = [{
   questionKey: 'k8s.years', questionText: 'How many years of Kubernetes do you have?',
   reason: 'unknown', blockedCount: 6, firstSeenAt: '2026-03-01',
 }];
@@ -39,7 +43,7 @@ describe('the exceptions card', () => {
     list.mockImplementation(async () => SIX_BLOCKED);
     render(<ExceptionsPage />);
     expect(await screen.findByText(/years of Kubernetes/i)).toBeTruthy();
-    expect(screen.getAllByText(/years of Kubernetes/i).length, 'one question, one chore').toBeLessThanOrEqual(2);
+    expect(screen.getAllByText(/years of Kubernetes/i), 'one question, one chore').toHaveLength(1);
     expect(screen.getByText(/6 applications waiting/i)).toBeTruthy();
   });
 
@@ -54,9 +58,11 @@ describe('the exceptions card', () => {
     // the number is what makes the trade visible.
     list.mockImplementation(async () => SIX_BLOCKED);
     render(<ExceptionsPage />);
-    fireEvent.change(await screen.findByRole('textbox'), { target: { value: '6' } });
+    fireEvent.change(await screen.findByRole('textbox'), { target: { value: '3 years' } });
     fireEvent.click(screen.getByRole('button', { name: /^answer$/i }));
     await waitFor(() => expect(answer).toHaveBeenCalledTimes(1));
+    // The answer is saved against the QUESTION TEXT the bank keys on.
+    expect(answer).toHaveBeenCalledWith('How many years of Kubernetes do you have?', '3 years');
     // The count is INTERPOLATED into the message, not passed alongside it —
     // asserting on a second argument checked a shape the call does not have.
     expect(String(toastSuccess.mock.calls[0]![0])).toMatch(/6 applications unblocked/i);

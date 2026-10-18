@@ -22,6 +22,7 @@ import { registerKicktodoAgentTools } from './agentTools.js';
 import { registerKicktodoArtifactTypes } from './artifactSchemas.js';
 import { registerChallengeCatalogSection } from './challengeCatalogSection.js';
 import { buildKicktodoCoreSurface } from './surface.js';
+import { KICKTODO_RUN_PRINCIPAL_BINDING_TOGGLE } from './surfaceBinding.js';
 import { registerKickbotLifecycleHooks } from './kickbotService.js';
 import { seedKicktodoConveneTurnWorkflow } from './conveneTurnWorkflow.js';
 import { registerKicktodoCoreCompliance } from './compliance.js';
@@ -102,6 +103,12 @@ export const kicktodoCoreFeature: BackendFeature = {
     bucketUnit: 'user',
     salt: 'kicktodo-core',
   },
+  // ADR 0901 D5 — the per-tenant run-principal binding for every
+  // `ctx.features['kicktodo-*']` surface (`surfaceBinding.ts`). OFF = shadow:
+  // today's tenant-trust posture, with each would-be refusal logged as
+  // `kicktodo_surface_unbound`; ON = enforced. Flipped per tenant once that
+  // tenant's shadow log is clean (ADR 0901 P3).
+  extraToggleDefaults: [KICKTODO_RUN_PRINCIPAL_BINDING_TOGGLE],
   // Goals is core substrate (always-on), but the dependency is real: the
   // enrollment saga creates one ADR 0412 goal per enrollment. Declaring it is
   // free (an always-on dep never locks) and records the relationship.
@@ -117,7 +124,7 @@ export const kicktodoCoreFeature: BackendFeature = {
     // ADR 0463 — nodes 1.21.0 (replan-clarify a2ui leg), agents 1.7.0 (the
     // plan-revision `clarification` arm). Pins move in lockstep.
     // ADR 0689 — nodes 1.28.0 (kickbot-coach-turn, the reminder-loop's second node).
-    { name: 'feature.kicktodo.nodes', version: '1.30.3' },
-    { name: 'vendor.openwop-app.kicktodo.agents', version: '1.9.1' },
+    { name: 'feature.kicktodo.nodes', version: '1.37.0' },
+    { name: 'vendor.openwop-app.kicktodo.agents', version: '1.9.4' },
   ],
 };

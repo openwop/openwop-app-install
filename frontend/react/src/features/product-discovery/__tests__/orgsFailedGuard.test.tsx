@@ -17,9 +17,16 @@
  * render would satisfy it:
  *   - read FAILS  → the retryable failure card; NEVER "No organizations"
  *   - read SUCCEEDS but is genuinely empty → the real "No organizations" survives
+ *
+ * PROTECTED (failure honesty + ORG-HON-2 org-less writes + the toggle gate).
+ * Sabotage-witnessed (round 1/2): `setOrgsFailed(true)` → `setOrgs([])` in
+ * `ui/useOrgSelection`, the empty branch of `ui/OrgSelectionState`, the
+ * retry wiring, the toggle's `enabled.enabled` read and its card, the loading
+ * branch, and the positive-control create.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup, screen, waitFor, act, fireEvent } from '@testing-library/react';
+import type { Collection, MerchRule, Org, SearchResponse } from '../discoveryClient.js';
 
 // The real hook returns an OBJECT (`{ enabled, loading, … }`) — mirrored in full
 // here, `loading` included, because the page branches on it too.
@@ -30,15 +37,17 @@ import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatu
 vi.mock('../../../featureToggles/FeatureAccessContext.js', () => ({ useFeatureAccess: access.useFeatureAccess }));
 
 const api = vi.hoisted(() => ({
-  listOrgs: vi.fn(),
-  listCollections: vi.fn(async () => []),
-  listRules: vi.fn(async () => []),
+  listOrgs: vi.fn<() => Promise<Org[]>>(),
+  listCollections: vi.fn(async (_orgId: string): Promise<Collection[]> => []),
+  listRules: vi.fn(async (_orgId: string): Promise<MerchRule[]> => []),
   // The four org-scoped WRITES this page can issue (ORG-HON-2), plus `search`,
   // which is a read but is dispatched from a form that also sits above the
   // org-state chain.
-  createCollection: vi.fn(), deleteCollection: vi.fn(),
-  createRule: vi.fn(), deleteRule: vi.fn(),
-  search: vi.fn(),
+  createCollection: vi.fn<(orgId: string, input: { name: string; type: 'manual' | 'dynamic' }) => Promise<Collection>>(),
+  deleteCollection: vi.fn<(orgId: string, collectionId: string) => Promise<void>>(),
+  createRule: vi.fn<(orgId: string, input: { name: string; scope: string; actions: unknown[] }) => Promise<MerchRule>>(),
+  deleteRule: vi.fn<(orgId: string, ruleId: string) => Promise<void>>(),
+  search: vi.fn<(orgId: string, q: string) => Promise<SearchResponse>>(),
 }));
 vi.mock('../discoveryClient.js', async (importOriginal) => {
   const orig = await importOriginal<Record<string, unknown>>();
@@ -49,6 +58,8 @@ import { DiscoveryPage } from '../DiscoveryPage.js';
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // `clearAllMocks` keeps queued `…Once` values — reset the one a case queues.
+  api.listOrgs.mockReset();
   // `clearAllMocks` does NOT drop a `mockReturnValue`, so the toggle is re-pinned
   // per test rather than left to whatever the previous one set.
   access.useFeatureAccess.mockReturnValue(makeFeatureAccess({ enabled: true, loading: false, status: 'on', isBeta: false, variant: null }));
@@ -79,7 +90,21 @@ describe('product discovery — failed store read is not an empty catalogue', ()
     expect(api.listCollections).not.toHaveBeenCalled();
   });
 
-  it('read SUCCEEDS and is genuinely empty: the real "No organizations" still shows', async () => {
+  it('read FAILS, then Try again: the read re-runs and the store-scoped page loads', async () => {
+    // The "retryable" half of the claim above: the button must re-issue the read,
+    // not just clear the card.
+    api.listOrgs.mockRejectedValueOnce(new Error('boom')).mockResolvedValue([{ orgId: 'o1', name: 'Acme Store' }]);
+    render(<DiscoveryPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Try again' }));
+    await waitFor(() => expect(api.listCollections).toHaveBeenCalledWith('o1'));
+    expect(api.listOrgs).toHaveBeenCalledTimes(2);
+    expect(screen.queryByText(FAIL_TITLE)).toBeNull();
+  });
+
+  // Twin: the HG-1 case below asserts everything this one does (same fixture)
+  // plus the never-a-skeleton half. Kept (protected file): this one is the
+  // failure card's NEGATIVE polarity, read on its own.
+  it('read SUCCEEDS and is genuinely empty: the real "No organizations" still shows, no failure card', async () => {
     api.listOrgs.mockResolvedValue([]);
     render(<DiscoveryPage />);
     await waitFor(() => expect(screen.getByText('No organizations')).toBeTruthy());
@@ -127,9 +152,14 @@ describe('product discovery — failed store read is not an empty catalogue', ()
  * defect: the collection form sat ABOVE the org-state branch, so it rendered in
  * the zero-organization state — org picker included, a labelled combobox with
  * zero options — while the rule form sat inside and did not. Both are inside
- * now. `addCollection`'s own `!orgId` early return is still asserted, because
- * "not rendered" is a fact about today's branch order and "the write never
- * fired" is the property.
+ * now.
+ *
+ * CEILING (round 2, probe `pdo-addguard` vacuous): `addCollection`'s own
+ * `!orgId` early return is a SECOND guard the UI cannot reach — in both org
+ * states the form is absent, so `attemptCreateCollection` returns before any
+ * submit. These cases assert the property the user can reach ("the forms are
+ * absent and nothing was written"); they do NOT witness the handler guard, and
+ * they no longer claim to.
  */
 describe('product discovery — no organization, no write (ORG-HON-2)', () => {
   const attemptCreateCollection = async (_container: HTMLElement): Promise<void> => {
@@ -160,8 +190,8 @@ describe('product discovery — no organization, no write (ORG-HON-2)', () => {
     // box, 0 items"). A control with no options is not a control.
     expect(screen.queryByLabelText('Organization')).toBeNull();
     expect(screen.queryByRole('button', { name: 'Add collection' })).toBeNull();
-    // Guard two, the property: `addCollection`'s `if (!orgId …) return` still
-    // holds even if the branch above it were removed.
+    // The property: nothing was written. (The handler's own `!orgId` return is
+    // unreachable from here — see the CEILING note above.)
     await attemptCreateCollection(container);
     expect(api.createCollection).not.toHaveBeenCalled();
 
@@ -206,7 +236,10 @@ describe('product discovery — no organization, no write (ORG-HON-2)', () => {
     // Without this, the assertions above would also pass if the form were broken
     // for everyone — a different bug wearing the same green.
     api.listOrgs.mockResolvedValue([{ orgId: 'o1', name: 'Acme Store' }]);
-    api.createCollection.mockResolvedValue({ collectionId: 'c1', name: 'Summer picks', type: 'dynamic' });
+    api.createCollection.mockResolvedValue({
+      collectionId: 'c1', orgId: 'o1', name: 'Summer picks', slug: 'summer-picks', type: 'dynamic',
+      rule: { categories: [] }, active: true, createdAt: '2026-10-01T10:00:00.000Z',
+    });
     const { container } = render(<DiscoveryPage />);
     await waitFor(() => expect(api.listCollections).toHaveBeenCalledWith('o1'));
     await attemptCreateCollection(container);

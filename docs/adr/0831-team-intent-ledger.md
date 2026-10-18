@@ -264,6 +264,16 @@ never-widen rule). Deferred to P4; no change to ADR 0136 enforcement before then
 | P3 (handoff source) | `feat/ledger-handoff-source` | `test/adr0831-team-ledger-handoff-source.test.ts` (6, real app; the card leg over real HTTP): a card note with a new question ⇒ exactly one proposed delta as the person, version unchanged; the same ref again ⇒ none, a different ref ⇒ one; held or no questions ⇒ none; toggle OFF ⇒ none; a non-project board ⇒ none; a viewer ⇒ none; a run's record ⇒ proposed as the agent only with a writing acting user. **Sabotage-witnessed:** no write check, no ref dedupe, the observer unregistered, and the assign route never announcing each go red |
 | B3 (chat context) | `feat/ledger-chat-context` | Chat turns never collected run context blocks, so an agent in the project's own room worked without the ledger. A core seam (`host/chatSubjectContextProviders.ts`) lets a feature add a block for a conversation's OWNER subject; the ledger registers one for project chats. Live per turn and per caller (the ADVB-1 shape), because a conversation is one long-lived run and a run-start stamp would go stale; the version shown is logged. `test/adr0831-team-ledger-chat-context.test.ts` (6, real composer): block at the current version; an accepted change shows on the next compose; nothing for toggle off, no ledger, a caller who cannot read a private project, or a conversation with no owner. **Sabotage-witnessed:** no caller access check, and the composer dropping the block, each go red |
 
+
+> **Correction 2026-10-12 (grade-tests wave 29):** the rows above describe the tests as they
+> landed, and several of their legs no longer exist. The ledger has had no toggle since `836a81994`
+> (the "Toggle" line at the top), so every "toggle OFF" leg in P1, P2, P3 and B3 is gone, not merely untested; no case
+> runs one. In P3 (partial), "both tools registered" is now "neither tool is on the default-on
+> baseline (`DEFAULT_ON_AGENT_TOOL_IDS`)", and "invalid patches are typed errors" moved to
+> `test/adr0831-team-ledger-grade.test.ts` (the XCH-TL-1 tripwire). B3 runs 5 cases, not 6.
+> Each test file's header now names its current guards and the sabotages that red them; read
+> those, not these rows, for what is witnessed today.
+
 P4 files: `features/projects/{ProjectLedgerTab.tsx,teamLedgerClient.ts}`, the
 project page's `ledger` tab (only with the toggle ON), four locales. The
 "last seen version" marker is per-viewer browser storage, a convenience only.

@@ -14,13 +14,26 @@
  *     truthful answer ("this has NOT happened yet") is easy to render as though
  *     it had.
  *
- * Assertions read the `en` catalog object rather than literal English, so a copy
- * change does not silently red the suite and a missing key fails loudly.
+ * Button names and state titles read the `en` catalog object, so a missing key
+ * fails loudly. Copy that IS the claim (the "NOT been waived yet" notice, the
+ * lost-race / approval-raised announcements, the chain-broken warning) is
+ * matched with LITERAL text, so a panel wired to the wrong key cannot pass.
+ * Absence is asserted only after the obligation timeline renders (data loaded);
+ * the panel heading is also on the LOADING card and is not a settle signal.
+ *
+ * What turns it red: a waive button under the retry scope; buttons with no
+ * scope; the scope-unknown warning shown always/never; a whitespace reason
+ * accepted; a hard-coded expectedState; a reason sent on retry; the approval
+ * notice without its copy; applied/not-applied inverted; the chain warning
+ * always/never; a failed read rendered as loading; a 403 as a generic failure;
+ * a conflict that does not re-read or says the wrong thing; an approval-gated
+ * waive treated as a failure.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
-import { GlobalLiveRegion } from '../../ui/announce.js';
+import { GlobalLiveRegion, announce, currentAnnouncements } from '../../ui/announce.js';
+import { dismiss, getToasts } from '../../ui/toast.js';
 
 const api = vi.hoisted(() => ({
   getRunCompensation: vi.fn(),
@@ -40,14 +53,18 @@ vi.mock('../../client/useEffectiveAccess.js', () => ({
 }));
 
 import { RunCompensationPanel } from '../RunCompensationPanel.js';
-import { OperationsRequestError } from '../../client/operationsClient.js';
+import {
+  OperationsRequestError,
+  type CompensationObligationRow,
+  type RunCompensation,
+} from '../../client/operationsClient.js';
 import { messages as en } from '../i18n/en.js';
 
-const OWED = {
+const OWED: CompensationObligationRow = {
   obligationId: 'cmp_abc',
   runId: 'run-1',
   nodeId: 'charge-card',
-  state: 'requested' as const,
+  state: 'requested',
   shape: 'forward-effect',
   effectKind: 'payment',
   attempts: 0,
@@ -61,7 +78,7 @@ const OWED = {
   history: [],
 };
 
-const PLAN = {
+const PLAN: RunCompensation = {
   runId: 'run-1',
   compensationStatus: 'pending',
   auditChain: { ok: true },
@@ -77,9 +94,16 @@ function renderPanel(): void {
   );
 }
 const page = () => within(screen.getByTestId('page'));
+/** Post-load settle signal: the timeline renders only once the plan is in hand. */
+const loaded = () => page().findByTestId('obligation-timeline');
+const isDisabled = (el: HTMLElement): boolean => el.hasAttribute('disabled');
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // Module-level announcer + toast store survive between cases; reset both.
+  announce('', { assertive: true });
+  announce('');
+  for (const t of getToasts()) dismiss(t.id);
   access.state = { access: { roles: ['owner'], scopes: ['host:compensation:waive', 'host:compensation:retry', 'host:compensation:start'], basis: 'member' }, resolved: true };
   api.getRunCompensation.mockResolvedValue(PLAN);
   api.postRunCompensationAction.mockResolvedValue({ state: 'failed', auditSeq: 1, compensationStatus: 'partial' });
@@ -111,7 +135,7 @@ describe('gated rendering', () => {
   it('shows NO recovery buttons to a principal with none of the scopes', async () => {
     access.state = { access: { roles: ['viewer'], scopes: ['runs:read'], basis: 'member' }, resolved: true };
     renderPanel();
-    await page().findByText(en.compHeading);
+    await loaded();
     expect(page().queryByRole('button', { name: en.compRetry })).toBeNull();
     expect(page().queryByRole('button', { name: en.compWaive })).toBeNull();
     expect(page().queryByRole('button', { name: en.compStart })).toBeNull();
@@ -129,7 +153,7 @@ describe('gated rendering', () => {
 
   it('does NOT show that warning when the scopes resolved normally', async () => {
     renderPanel();
-    await page().findByText(en.compHeading);
+    await loaded();
     expect(page().queryByText(en.compScopeUnknown)).toBeNull();
   });
 });
@@ -140,19 +164,22 @@ describe('reason validation on a waive', () => {
     fireEvent.click(await page().findByRole('button', { name: en.compWaive }));
 
     const confirm = page().getByRole('button', { name: en.compWaiveConfirm });
-    expect((confirm as HTMLButtonElement).disabled).toBe(true);
+    expect(isDisabled(confirm)).toBe(true);
 
     // Whitespace is not a reason — the same rule the route enforces.
     fireEvent.change(page().getByLabelText(en.compWaiveReasonLabel), { target: { value: '   ' } });
-    expect((confirm as HTMLButtonElement).disabled).toBe(true);
+    expect(isDisabled(confirm)).toBe(true);
 
     fireEvent.change(page().getByLabelText(en.compWaiveReasonLabel), {
       target: { value: 'the counterparty confirmed no charge was captured' },
     });
-    expect((confirm as HTMLButtonElement).disabled).toBe(false);
+    expect(isDisabled(confirm)).toBe(false);
   });
 
   it('sends the reason AND the state the operator saw, so a lost race is detectable', async () => {
+    // `paused`, not the fixture default: a panel that hard-coded 'requested'
+    // (or any constant) must not be able to pass.
+    api.getRunCompensation.mockResolvedValue({ ...PLAN, obligations: [{ ...OWED, state: 'paused' }] });
     renderPanel();
     fireEvent.click(await page().findByRole('button', { name: en.compWaive }));
     fireEvent.change(page().getByLabelText(en.compWaiveReasonLabel), { target: { value: 'accepted the loss' } });
@@ -164,7 +191,7 @@ describe('reason validation on a waive', () => {
       obligationId: 'cmp_abc',
       action: 'skip',
       reason: 'accepted the loss',
-      expectedState: 'requested',   // NOT re-read from the server
+      expectedState: 'paused',   // what the operator SAW, not re-read from the server
     });
   });
 
@@ -172,9 +199,9 @@ describe('reason validation on a waive', () => {
     renderPanel();
     fireEvent.click(await page().findByRole('button', { name: en.compRetry }));
     await waitFor(() => expect(api.postRunCompensationAction).toHaveBeenCalledTimes(1));
-    const sent = api.postRunCompensationAction.mock.calls[0]![0] as Record<string, unknown>;
-    expect(sent['action']).toBe('retry');
-    expect(sent['reason']).toBeUndefined();
+    // toStrictEqual: a `reason: undefined` key (or any reason) is a mismatch.
+    expect(api.postRunCompensationAction.mock.calls[0]![0])
+      .toStrictEqual({ runId: 'run-1', obligationId: 'cmp_abc', action: 'retry', expectedState: 'requested' });
   });
 });
 
@@ -185,10 +212,10 @@ describe('states the panel must not overstate', () => {
       obligations: [{ ...OWED, requiresApproval: true, waiveApprovalId: 'appr:xyz' }],
     });
     renderPanel();
-    expect(await page().findByText(/appr:xyz/)).toBeTruthy();
-    // The copy itself has to carry "has NOT been waived yet" — a bare
-    // "pending approval" chip would read as done-ish.
-    expect(en.compApprovalPending).toMatch(/NOT been waived yet/);
+    // The RENDERED notice has to carry "has NOT been waived yet" next to the
+    // approval id — a bare id or "pending approval" chip would read as done-ish.
+    const notice = await page().findByText(/appr:xyz/);
+    expect(notice.textContent).toMatch(/The effect has NOT been waived yet\./);
   });
 
   it('renders an unapplied audit entry as RECORDED, NOT APPLIED', async () => {
@@ -243,8 +270,10 @@ describe('states the panel must not overstate', () => {
 
   it('does NOT warn when the chain verified', async () => {
     renderPanel();
-    await page().findByText(en.compHeading);
-    expect(page().queryByText(en.compChainBroken.replace('{{seq}}', '7'))).toBeNull();
+    await loaded();
+    // Any chain-broken warning (whatever entry it names), not just seq 7 — the
+    // fixture has no `brokenAt`, so a seq-specific query could never match.
+    expect(page().queryByText(/The audit chain failed verification/)).toBeNull();
   });
 
   it('distinguishes "no compensation was owed" from a failed read', async () => {
@@ -256,6 +285,8 @@ describe('states the panel must not overstate', () => {
     api.getRunCompensation.mockRejectedValue(new Error('network down'));
     renderPanel();
     expect(await page().findByText(en.compUnavailableTitle)).toBeTruthy();
+    // A failed read is not EMPTY: the "owed nothing" copy must be absent now.
+    expect(page().queryByText(en.compEmptyTitle)).toBeNull();
     // The two must not share a message — an operator acts differently on each.
     expect(en.compEmptyTitle).not.toBe(en.compUnavailableTitle);
   });
@@ -278,6 +309,9 @@ describe('the lost-race response', () => {
 
     // Two reads: the initial load, then the forced re-read after the conflict.
     await waitFor(() => expect(api.getRunCompensation).toHaveBeenCalledTimes(2));
+    // …and it SAYS someone acted first (an error toast speaks assertively).
+    expect(currentAnnouncements().assertive).toContain(
+      'Someone else acted on this obligation first. The timeline has been reloaded — review it and try again.');
   });
 
   /**
@@ -297,5 +331,8 @@ describe('the lost-race response', () => {
     await waitFor(() => expect(api.getRunCompensation).toHaveBeenCalledTimes(2));
     // The form closed — the request was accepted for review, not rejected.
     await waitFor(() => expect(page().queryByLabelText(en.compWaiveReasonLabel)).toBeNull());
+    expect(currentAnnouncements().polite).toContain(
+      'This obligation is approval-gated. A waive request was raised for a second approver.');
+    expect(currentAnnouncements().assertive).not.toMatch(/acted on this obligation first/);
   });
 });

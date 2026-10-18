@@ -49,6 +49,13 @@ function collectUniverse(): Set<string> {
     const agentTools = join(featuresDir, feature, 'agentTools.ts');
     if (existsSync(agentTools)) toolSources.push(agentTools);
   }
+  // Host subsystems that register their own chat tools from `host/<sub>/agentTools.ts`
+  // (ADR 0889 D8: `host/evals/agentTools.ts`, allowlisted by the Agent Author pack).
+  const hostDir = join(SRC_DIR, 'host');
+  for (const sub of readdirSync(hostDir, { withFileTypes: true })) {
+    const agentTools = join(hostDir, sub.name, 'agentTools.ts');
+    if (sub.isDirectory() && existsSync(agentTools)) toolSources.push(agentTools);
+  }
   for (const source of toolSources) {
     const text = readFileSync(source, 'utf8');
     for (const m of text.matchAll(ID_RE)) universe.add(trim(m[0]));

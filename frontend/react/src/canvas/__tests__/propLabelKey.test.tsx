@@ -16,6 +16,8 @@ import { describe, it, expect, afterEach } from 'vitest';
 import { render, screen, cleanup } from '@testing-library/react';
 import { PropertyField } from '../PropertyForm.js';
 import type { CanvasPropDef } from '../types.js';
+import { slidesDefinition, SLIDE_LAYOUTS, type EditorSlide } from '../../features/slides/definition.js';
+import { messages as slidesEn } from '../../features/slides/i18n/en.js';
 
 const CATALOG: Record<string, string> = {
   prop_title: 'Titre',
@@ -74,19 +76,24 @@ describe('a prop label can be keyed explicitly', () => {
 });
 
 describe('every slides title call site is keyed', () => {
-  it('no layout leaves the title prop on the shared derived key', async () => {
-    const { slidesDefinition } = await import('../../features/slides/definition.js');
-    const layouts = ['title', 'title-bullets', 'section', 'quote', 'image', 'blank', 'blocks'];
+  it('no layout leaves the title prop on the shared derived key', () => {
+    // Layouts come from the product's own list (SLIDE_LAYOUTS), not a copy, so a
+    // new layout is checked the day it ships.
+    const catalog: Readonly<Record<string, string>> = slidesEn;
     const seen = new Set<string>();
-    for (const layout of layouts) {
-      for (const def of slidesDefinition.frames?.propDefs?.({ layout } as never) ?? []) {
+    for (const layout of SLIDE_LAYOUTS) {
+      const slide: EditorSlide = { id: `s-${layout}`, name: layout, layout };
+      for (const def of slidesDefinition.frames?.propDefs?.(slide) ?? []) {
         if (def.name !== 'title') continue;
         // A `title` def without a labelKey is the bug this closes.
         expect(def.labelKey, `layout ${layout} has an unkeyed title`).toBeTruthy();
+        // …and the key must resolve in the slides catalog, or the label silently
+        // falls back to English — the exact failure SL-G7 closed.
+        expect(typeof catalog[def.labelKey!], `layout ${layout}: ${def.labelKey} missing from slides en`).toBe('string');
         seen.add(def.labelKey!);
       }
     }
     // Three distinct labels really are in play — this is not a one-key rename.
-    expect(seen.size).toBeGreaterThanOrEqual(3);
+    expect([...seen].sort()).toEqual(['prop_quoteTitle', 'prop_sectionTitle', 'prop_title']);
   });
 });

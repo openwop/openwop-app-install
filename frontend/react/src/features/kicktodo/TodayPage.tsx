@@ -8,7 +8,7 @@
  * All copy i18n'd (4 locales); status → chips; ui/ cohesion + Daybreak tokens only.
  */
 import { Button } from '../../ui/Button.js';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { ArrowRightIcon, CalendarIcon, FlagIcon, SparklesIcon } from '../../ui/icons/index.js';
@@ -18,6 +18,7 @@ import { TheOneThing, ActionCompleter, washPosition, daypartOf } from './TheOneT
 import { ReminderDelivery } from './ReminderDelivery.js';
 import {
   checkIn,
+  CheckInRefusedError,
   acceptRecovery,
   getToday,
   listChallenges,
@@ -94,12 +95,27 @@ export function TodayPage() {
   const [enrollments, setEnrollments] = useState<Enrollment[]>([]);
   const [error, setError] = useState(false);
   // Screen-polish: a failed CHECK-IN is not a failed LOAD — separate signal.
-  const [actionError, setActionError] = useState(false);
+  // KTP-2 — and WHY it failed matters: a missing-evidence 422 and a
+  // superseded-action 409 ask the participant for different things, so they
+  // are not collapsed into one "didn't save". `true` = a generic failure.
+  const [actionError, setActionError] = useState<false | true | 'evidence-required' | 'superseded' | 'not-found'>(false);
   const [catalog, setCatalog] = useState<ChallengeSummary[]>([]);
+  // PT-2 — the two SIDE reads can fail without failing the page, but a failed
+  // read is "we could not check", never "there is nothing": the reminder
+  // controls (enrollment rows) and the challenge names (catalog) say so and
+  // offer a retry instead of silently vanishing (the KT-G1 `enrollmentUnknown`
+  // posture, ChallengeDetailPage).
+  const [enrollmentsUnknown, setEnrollmentsUnknown] = useState(false);
+  const [catalogUnknown, setCatalogUnknown] = useState(false);
   const [busyCard, setBusyCard] = useState<string | null>(null);
   const [busyEnrollment, setBusyEnrollment] = useState<string | null>(null);
   const [substituteFor, setSubstituteFor] = useState<string | null>(null);
   const [recoverySuccess, setRecoverySuccess] = useState<number | null>(null);
+
+  // KTP-3 — every state write after an await is guarded: an action's reload can
+  // resolve after the participant navigated away.
+  const mounted = useRef(true);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
 
   const reload = useCallback(async () => {
     try {
@@ -109,14 +125,17 @@ export function TodayPage() {
       // Discover's enrolled-badge fetch.
       const [t, es, cs] = await Promise.all([
         getToday(),
-        listEnrollments().catch(() => [] as Enrollment[]),
-        listChallenges().catch(() => [] as ChallengeSummary[]),
+        listEnrollments().then((rows) => ({ ok: true as const, rows })).catch(() => ({ ok: false as const, rows: [] as Enrollment[] })),
+        listChallenges().then((rows) => ({ ok: true as const, rows })).catch(() => ({ ok: false as const, rows: [] as ChallengeSummary[] })),
       ]);
+      if (!mounted.current) return;
       setToday(t);
-      setEnrollments(es);
-      setCatalog(cs);
+      setEnrollments(es.rows);
+      setEnrollmentsUnknown(!es.ok);
+      setCatalog(cs.rows);
+      setCatalogUnknown(!cs.ok);
     } catch {
-      setError(true);
+      if (mounted.current) setError(true);
     }
   }, []);
   useEffect(() => { void reload(); }, [reload]);
@@ -130,9 +149,17 @@ export function TodayPage() {
 
   const onComplete = async (cardId: string, evidence?: CheckInEvidence) => {
     setBusyCard(cardId);
+    setActionError(false);
     try { await checkIn(cardId, evidence); await reload(); }
-    catch { setActionError(true); }
-    finally { setBusyCard(null); }
+    catch (err) {
+      const refusal = err instanceof CheckInRefusedError ? err.refusal : 'failed';
+      if (!mounted.current) return;
+      setActionError(refusal === 'failed' ? true : refusal);
+      // The plan moved under the participant: show them the CURRENT Today
+      // rather than leave a stale card on screen to fail again.
+      if (refusal === 'superseded' || refusal === 'not-found') await reload();
+    }
+    finally { if (mounted.current) setBusyCard(null); }
   };
   const onSubstitute = async (cardId: string, altId: string) => {
     setBusyCard(cardId);
@@ -197,7 +224,12 @@ export function TodayPage() {
   const requestedWelcome = welcomeFromState(location.state);
   // Navigation state is only a presentation hint. A stale or fabricated state
   // cannot claim success unless the fresh enrollment read confirms the id.
-  const welcome = requestedWelcome && enrollments.some((enrollment) => enrollment.id === requestedWelcome.enrollmentId)
+  // PT-2 — confirm against EITHER fresh read: Today's own projection carries the
+  // enrollment id too, so a failed enrollment-list read no longer erases a
+  // welcome the Today read can still verify.
+  const welcome = requestedWelcome
+    && (enrollments.some((enrollment) => enrollment.id === requestedWelcome.enrollmentId)
+      || (today?.enrollments ?? []).some((enrollment) => enrollment.enrollmentId === requestedWelcome.enrollmentId))
     ? requestedWelcome
     : undefined;
   const heroChallengeTitle = hero ? challengeTitle(hero.e.challengeId) : null;
@@ -246,12 +278,24 @@ export function TodayPage() {
       ) : null}
 
       {error && (
-        <Notice variant="error">
+        <Notice variant="error" announce={navigator.onLine ? t('loadTodayError') : t('offlineNotice')}>
           {navigator.onLine ? t('loadTodayError') : t('offlineNotice')}{' '}
           <Button variant="quiet" size="sm" onClick={() => void reload()}>{t('common:retry')}</Button>
         </Notice>
       )}
-      {actionError && <Notice variant="error">{t('todayActionError')}</Notice>}
+      {catalogUnknown && !error && (
+        <Notice variant="warning" announce={t('todayNamesUnknown')}>
+          {t('todayNamesUnknown')}{' '}
+          <Button variant="quiet" size="sm" onClick={() => void reload()}>{t('common:retry')}</Button>
+        </Notice>
+      )}
+      {actionError && (() => {
+        const msg = actionError === 'evidence-required' ? t('todayCheckInEvidenceRequired')
+          : actionError === 'superseded' ? t('todayCheckInSuperseded')
+            : actionError === 'not-found' ? t('todayCheckInGone')
+              : t('todayActionError');
+        return <Notice variant="error" announce={msg}>{msg}</Notice>;
+      })()}
       {recoverySuccess !== null && (
         <Notice variant="success" announce={t('recoveryAddedNotice', { count: recoverySuccess })}>
           {t('recoveryAddedNotice', { count: recoverySuccess })}
@@ -382,7 +426,15 @@ export function TodayPage() {
       {/* ADR 0443 R1 — the opt-in reminder rhythm for the hero enrollment. A
           preference arms a KickBot reminder at that daypart (consent-gated
           server-side); "off" clears it. Status is the pressed chip, labeled. */}
-      {hero && (() => {
+      {hero && enrollmentsUnknown && (
+        <section className="surface-card" aria-label={t('reminderHeading')}>
+          <Notice variant="warning" announce={t('reminderUnknown')}>
+            {t('reminderUnknown')}{' '}
+            <Button variant="quiet" size="sm" onClick={() => void reload()}>{t('common:retry')}</Button>
+          </Notice>
+        </section>
+      )}
+      {hero && !enrollmentsUnknown && (() => {
         const en = enrollments.find((e) => e.id === hero.e.enrollmentId);
         if (!en) return null;
         const current = en.schedulePreference?.daypart ?? null;

@@ -26,6 +26,7 @@ import { registerConversationErasure } from './conversationStore.js';
 import { registerReadStateErasure } from './conversationReadState.js';
 import { registerMessageFeedbackErasure } from './messageFeedbackStore.js';
 import { registerReactionsErasure } from './messageReactionsStore.js';
+import { registerChatPostErasure } from './chatPostErasure.js';
 import { registerSubjectKnowledgeErasure } from './subjectKnowledge.js';
 import { registerSubjectMemoryErasure } from './subjectMemory.js';
 import { registerSelfHostedRunnerErasure } from './selfHostedRunner.js';
@@ -39,6 +40,8 @@ import { registerProposalPolicyErasure } from './workflowProposalPolicy.js';
 import { registerWorkflowRevisionErasure } from './workflowRevisions.js';
 import { registerDebugPinErasure } from './workflowDebugPins.js';
 import { registerEvalSetErasure } from './workflowEvalSets.js';
+import { registerEvalSuiteErasure } from './evals/suiteStore.js';
+import { registerToolBoundaryErasure } from './evals/toolBoundary.js';
 import { registerEmailPrefErasure } from './emailApprovalDelivery.js';
 import { registerWorkflowBudgetErasure } from './workflowBudgets.js';
 import { registerApplyGrantErasure } from './applyGrant.js';
@@ -69,6 +72,8 @@ export function registerHostSubjectErasers(): void {
   registerReadStateErasure();
   registerMessageFeedbackErasure();
   registerReactionsErasure();
+  // ADR 0879 D6 — the subject's chat POSTS (tombstoned + author redacted).
+  registerChatPostErasure();
   registerSubjectKnowledgeErasure();
   registerSubjectMemoryErasure();
   registerSelfHostedRunnerErasure();
@@ -77,6 +82,8 @@ export function registerHostSubjectErasers(): void {
   registerWorkflowRevisionErasure(); // ADR 0474 — revision-history attribution (`createdBy` redacted)
   registerDebugPinErasure(); // ADR 0475 — debug pins DELETED (pinned output may quote the subject)
   registerEvalSetErasure(); // ADR 0477 — eval set/result attribution redacted (tenant work-product)
+  registerEvalSuiteErasure(); // ADR 0889 — agent eval suite attribution redacted (tenant work-product)
+  registerToolBoundaryErasure(); // ADR 0889 D9 — captured tool calls mentioning the subject are deleted
   registerEmailPrefErasure(); // ADR 0478 — email prefs DELETED (the row IS the subject's address)
   registerWorkflowBudgetErasure(); // ADR 0482 — budget attribution (`updatedBy` redacted)
   registerApplyGrantErasure(); // WF-CONS-2 — was the ONE host eraser registering at module scope, outside this list

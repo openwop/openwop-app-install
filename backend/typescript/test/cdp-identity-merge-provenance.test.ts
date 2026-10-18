@@ -14,6 +14,15 @@
  * Route-level harness (mirrors cdp-identity-resolution.test.ts) for the normal
  * paths; the cycle is forged with a direct `tombstoneContact` call because the
  * CRM merge route correctly refuses to create one.
+ *
+ * Sabotage that reds it (w38 probes): claiming `mergedFrom` on every match; never
+ * recording the matched id; a non-canonical (no-follow) resolve; a depth bound of 8;
+ * dropping the merge's identifier re-point.
+ *
+ * DOUBLE GUARD (honest ceiling): the cycle case is held by TWO guards inside
+ * `resolveContactSurvivor` — the `seen` cycle check AND the 32-hop depth bound, which
+ * also returns null on a cycle. Removing `seen` alone stays green (w38 `mp-cycle`);
+ * reverting the CDP side to a non-canonical follow (w38 `mp-survivor`) reds it.
  */
 
 import http from 'node:http';
@@ -23,7 +32,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
-import { tombstoneContact } from '../src/features/crm/contactsService.js';
+import { getContact, tombstoneContact } from '../src/features/crm/contactsService.js';
 import { resolveIdentity } from '../src/features/cdp/identityService.js';
 
 let BASE: string;
@@ -45,8 +54,22 @@ afterAll(async () => {
   await new Promise<void>((res) => server.close(() => res()));
 });
 
-interface Res<T = any> { status: number; body: T }
+interface Res { status: number; body: unknown }
 interface Client { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res> }
+interface ContactBody { contactId: string }
+interface GoldenBody { contact: { contactId: string; name: string }; mergedFrom?: { contactId: string }; resolvedBy: { type: string; value: string } }
+/** Create a contact, asserting it landed (a silent failure would turn later cases into "unknown ⇒ null"). */
+async function mk(c: Client, body: Record<string, unknown>): Promise<ContactBody> {
+  const r = await c.post('/host/openwop-app/crm/contacts', body);
+  expect(r.status, JSON.stringify(r.body)).toBe(201);
+  return r.body as ContactBody;
+}
+/** Add an identifier, asserting it landed. */
+async function addId(c: Client, contactId: string, type: string, value: string): Promise<void> {
+  const r = await c.post(`/host/openwop-app/crm/contacts/${contactId}/identifiers`, { type, value });
+  expect(r.status, JSON.stringify(r.body)).toBe(201);
+}
+const golden = (r: Res): GoldenBody => r.body as GoldenBody;
 function client(): Client {
   let cookie = '';
   const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
@@ -89,41 +112,40 @@ describe('CDP golden record — merge provenance', () => {
     await setToggle('crm', 'on');
     await setToggle('cdp', 'on');
     const c = await owner();
-    const made = await c.post('/host/openwop-app/crm/contacts', { name: 'Direct', email: 'direct@acme.test' });
-    expect(made.status, JSON.stringify(made.body)).toBe(201);
+    const made = await mk(c, { name: 'Direct', email: 'direct@acme.test' });
     const r = await resolve(c, 'email', 'direct@acme.test');
     expect(r.status).toBe(200);
-    expect(r.body.contact.contactId).toBe(made.body.contactId);
-    expect(r.body.mergedFrom).toBeUndefined();
+    expect(golden(r).contact.contactId).toBe(made.contactId);
+    expect(golden(r).mergedFrom).toBeUndefined();
   });
 
   it('a CLEANLY merged email is re-pointed, so it is the survivor\'s own — no merge claimed', async () => {
     await setToggle('crm', 'on');
     await setToggle('cdp', 'on');
     const c = await owner();
-    const survivor = (await c.post('/host/openwop-app/crm/contacts', { name: 'Survivor', email: 'keep@acme.test' })).body;
-    const source = (await c.post('/host/openwop-app/crm/contacts', { name: 'Dupe', email: 'dupe@acme.test' })).body;
+    const survivor = await mk(c, { name: 'Survivor', email: 'keep@acme.test' });
+    const source = await mk(c, { name: 'Dupe', email: 'dupe@acme.test' });
     const merged = await c.post(`/host/openwop-app/crm/contacts/${survivor.contactId}/merge`, { sourceContactId: source.contactId });
     expect(merged.status, JSON.stringify(merged.body)).toBe(200);
 
     const r = await resolve(c, 'email', 'dupe@acme.test');
     expect(r.status).toBe(200);
-    expect(r.body.contact.contactId).toBe(survivor.contactId);
+    expect(golden(r).contact.contactId).toBe(survivor.contactId);
     // `mergeContacts` absorbs the source email as an identifier AND re-points
     // its index key at the survivor, so this identifier now genuinely belongs
     // to the survivor. No tombstone was followed ⇒ nothing to report. Claiming
     // a merge on every historically-merged identifier would be noise that
     // trains people to ignore the banner.
-    expect(r.body.mergedFrom).toBeUndefined();
+    expect(golden(r).mergedFrom).toBeUndefined();
   });
 
   it('a STALE index key pointing at a tombstone is reported, not silently substituted', async () => {
     await setToggle('crm', 'on');
     await setToggle('cdp', 'on');
     const c = await owner();
-    const survivor = (await c.post('/host/openwop-app/crm/contacts', { name: 'Survivor', email: 'live@acme.test' })).body;
-    const source = (await c.post('/host/openwop-app/crm/contacts', { name: 'Dupe', email: 'stale@acme.test' })).body;
-    await c.post(`/host/openwop-app/crm/contacts/${source.contactId}/identifiers`, { type: 'loyalty', value: 'LOY-STALE' });
+    const survivor = await mk(c, { name: 'Survivor', email: 'live@acme.test' });
+    const source = await mk(c, { name: 'Dupe', email: 'stale@acme.test' });
+    await addId(c, source.contactId, 'loyalty', 'LOY-STALE');
 
     // `mergeContacts` tombstones and THEN reindexes, in two non-transactional
     // steps. This is the state left behind when the second never runs: the key
@@ -135,60 +157,65 @@ describe('CDP golden record — merge provenance', () => {
     const r = await resolve(c, 'loyalty', 'LOY-STALE');
     expect(r.status).toBe(200);
     // The answer is the survivor …
-    expect(r.body.contact.contactId).toBe(survivor.contactId);
-    expect(r.body.contact.name).toBe('Survivor');
+    expect(golden(r).contact.contactId).toBe(survivor.contactId);
+    expect(golden(r).contact.name).toBe('Survivor');
     // … and the page is TOLD so, rather than having to infer it from a name
     // that doesn't match what was typed.
-    expect(r.body.mergedFrom).toEqual({ contactId: source.contactId });
+    expect(golden(r).mergedFrom).toEqual({ contactId: source.contactId });
     // resolvedBy still echoes the identifier searched — the two together are
     // what make the answer legible.
-    expect(r.body.resolvedBy).toEqual({ type: 'loyalty', value: 'LOY-STALE' });
+    expect(golden(r).resolvedBy).toEqual({ type: 'loyalty', value: 'LOY-STALE' });
   });
 
   it("the survivor's OWN email is a direct hit even after it absorbed a merge", async () => {
     await setToggle('crm', 'on');
     await setToggle('cdp', 'on');
     const c = await owner();
-    const survivor = (await c.post('/host/openwop-app/crm/contacts', { name: 'Keeper', email: 'keeper@acme.test' })).body;
-    const source = (await c.post('/host/openwop-app/crm/contacts', { name: 'Gone', email: 'gone@acme.test' })).body;
-    await c.post(`/host/openwop-app/crm/contacts/${survivor.contactId}/merge`, { sourceContactId: source.contactId });
+    const survivor = await mk(c, { name: 'Keeper', email: 'keeper@acme.test' });
+    const source = await mk(c, { name: 'Gone', email: 'gone@acme.test' });
+    expect((await c.post(`/host/openwop-app/crm/contacts/${survivor.contactId}/merge`, { sourceContactId: source.contactId })).status).toBe(200);
 
     const r = await resolve(c, 'email', 'keeper@acme.test');
     expect(r.status).toBe(200);
-    expect(r.body.contact.contactId).toBe(survivor.contactId);
+    expect(golden(r).contact.contactId).toBe(survivor.contactId);
     // Nothing was followed, so nothing is claimed.
-    expect(r.body.mergedFrom).toBeUndefined();
+    expect(golden(r).mergedFrom).toBeUndefined();
   });
 
   it('an absorbed non-email identifier now BELONGS to the survivor — no merge claimed', async () => {
     await setToggle('crm', 'on');
     await setToggle('cdp', 'on');
     const c = await owner();
-    const survivor = (await c.post('/host/openwop-app/crm/contacts', { name: 'S2', email: 's2@acme.test' })).body;
-    const source = (await c.post('/host/openwop-app/crm/contacts', { name: 'D2', email: 'd2@acme.test' })).body;
-    await c.post(`/host/openwop-app/crm/contacts/${source.contactId}/identifiers`, { type: 'loyalty', value: 'LOY-77' });
-    await c.post(`/host/openwop-app/crm/contacts/${survivor.contactId}/merge`, { sourceContactId: source.contactId });
+    const survivor = await mk(c, { name: 'S2', email: 's2@acme.test' });
+    const source = await mk(c, { name: 'D2', email: 'd2@acme.test' });
+    await addId(c, source.contactId, 'loyalty', 'LOY-77');
+    expect((await c.post(`/host/openwop-app/crm/contacts/${survivor.contactId}/merge`, { sourceContactId: source.contactId })).status).toBe(200);
 
     const r = await resolve(c, 'loyalty', 'LOY-77');
     expect(r.status).toBe(200);
-    expect(r.body.contact.contactId).toBe(survivor.contactId);
+    expect(golden(r).contact.contactId).toBe(survivor.contactId);
     // The merge RELINKED this identifier onto the survivor, so it is genuinely
     // the survivor's now. Reporting a merge here would be noise, not honesty.
-    expect(r.body.mergedFrom).toBeUndefined();
+    expect(golden(r).mergedFrom).toBeUndefined();
   });
 
   it('CDP-G1: a merge CYCLE fails closed instead of handing back a tombstone', async () => {
     await setToggle('crm', 'on');
     await setToggle('cdp', 'on');
     const c = await owner();
-    const a = (await c.post('/host/openwop-app/crm/contacts', { name: 'CycA', email: 'cyc-a@acme.test' })).body;
-    const b = (await c.post('/host/openwop-app/crm/contacts', { name: 'CycB', email: 'cyc-b@acme.test' })).body;
-    await c.post(`/host/openwop-app/crm/contacts/${a.contactId}/identifiers`, { type: 'device', value: 'cyc-dev-1' });
+    const a = await mk(c, { name: 'CycA', email: 'cyc-a@acme.test' });
+    const b = await mk(c, { name: 'CycB', email: 'cyc-b@acme.test' });
+    await addId(c, a.contactId, 'device', 'cyc-dev-1');
+    // positive control: before the forged cycle, the identifier resolves to A
+    expect((await resolveIdentity(TENANT, 'device', 'cyc-dev-1'))?.contact.contactId).toBe(a.contactId);
 
     // Forge A→B→A directly: the merge ROUTE refuses to build a cycle (it checks
     // the survivor's own tombstone), which is exactly why this has to bypass it.
     await tombstoneContact(a.contactId, TENANT, b.contactId);
     await tombstoneContact(b.contactId, TENANT, a.contactId);
+    // the forge landed (tombstoneContact no-ops silently on an already-merged row)
+    expect((await getContact(a.contactId))?.mergedInto).toBe(b.contactId);
+    expect((await getContact(b.contactId))?.mergedInto).toBe(a.contactId);
 
     // The old hand-rolled loop exited after 8 hops still holding a tombstone and
     // returned it as the live golden record. Fail CLOSED: no record at all.
@@ -202,9 +229,9 @@ describe('CDP golden record — merge provenance', () => {
     const c = await owner();
     const ids: string[] = [];
     for (let i = 0; i < 11; i++) {
-      ids.push((await c.post('/host/openwop-app/crm/contacts', { name: `Chain${i}`, email: `chain-${i}-${n}@acme.test` })).body.contactId);
+      ids.push((await mk(c, { name: `Chain${i}`, email: `chain-${i}-${n}@acme.test` })).contactId);
     }
-    await c.post(`/host/openwop-app/crm/contacts/${ids[0]}/identifiers`, { type: 'device', value: 'chain-dev-1' });
+    await addId(c, ids[0], 'device', 'chain-dev-1');
     // ids[0] → ids[1] → … → ids[10]: a 10-hop chain, past the old bound.
     for (let i = 0; i < ids.length - 1; i++) await tombstoneContact(ids[i], TENANT, ids[i + 1]);
 

@@ -1,30 +1,41 @@
 /**
  * ADR 0853 D2 — "Record as decision" from a message.
  *   - offered only when the conversation's project (a project chat's owner, or a
- *     channel's bound project) has a ledger and the toggle is on;
+ *     channel's bound project) has a ledger (the hook reads no toggle itself: a
+ *     toggled-off ledger route fails, and a failed lookup offers nothing);
  *   - the dialog is prefilled from the message (title from its first line) and
  *     sends nothing until Record; the link back names the conversation and message;
  *   - the ledger OWNER gets "Accept it now" (on by default); anyone else's record
  *     carries no `accept`; a failed record is said.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, cleanup, screen, fireEvent, waitFor } from '@testing-library/react';
-import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
+import { render, cleanup, screen, fireEvent, waitFor, act } from '@testing-library/react';
+import type { ChannelDetail } from '../../../client/channelsClient.js';
+import type { TeamLedger, RecordDecisionInput } from '../../../features/projects/teamLedgerClient.js';
 
 const h = vi.hoisted(() => ({
-  enabled: true, me: 'u-owner',
-  getChannel: vi.fn(), getTeamLedger: vi.fn(), recordDecision: vi.fn(),
+  me: 'u-owner',
+  getChannel: vi.fn<(channelId: string) => Promise<ChannelDetail>>(),
+  getTeamLedger: vi.fn<(projectId: string) => Promise<{ ledger: TeamLedger | null; state: null }>>(),
+  recordDecision: vi.fn<(projectId: string, input: RecordDecisionInput) => Promise<{ documentId: string; accepted: boolean }>>(),
 }));
 vi.mock('../../../client/channelsClient.js', async (orig) => ({ ...(await orig<Record<string, unknown>>()), getChannel: h.getChannel }));
 vi.mock('../../../features/projects/teamLedgerClient.js', async (orig) => ({ ...(await orig<Record<string, unknown>>()), getTeamLedger: h.getTeamLedger, recordDecision: h.recordDecision }));
-vi.mock('../../../featureToggles/FeatureAccessContext.js', () => ({ useFeatureAccess: () => makeFeatureAccess({ enabled: h.enabled }) }));
 vi.mock('../../../auth/backendSession.js', () => ({ useBackendSession: () => ({ user: { userId: h.me } }) }));
 vi.mock('../../../ui/toast.js', () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
 
 import { titleFrom, useRecordDecision } from '../useRecordDecision.js';
 import type { ChatMessage } from '../../types.js';
 
-const MSG = { id: 'm1', role: 'user', content: 'Ship EU first\nLegal is ready there, US waits a quarter.' } as unknown as ChatMessage;
+const MSG: ChatMessage = { id: 'm1', role: 'user', content: 'Ship EU first\nLegal is ready there, US waits a quarter.', createdAt: '2026-10-07T00:00:00.000Z' };
+const LEDGER: TeamLedger = { ledgerId: 'l1', ownerSubject: 'u-owner', version: 2, updatedAt: '2026-10-01T00:00:00.000Z' };
+
+/** Settle the hook's project/ledger lookup (await the client promise the effect
+ *  started, then let React commit) before asserting the action is ABSENT. */
+async function settled(p: Promise<unknown> | undefined): Promise<void> {
+  await act(async () => { await p?.catch(() => undefined); });
+  await act(async () => { for (let i = 0; i < 5; i++) await Promise.resolve(); });
+}
 
 function Harness(props: { sessionId: string; projectIdHint: string | null; isChannel: boolean }): JSX.Element {
   const { onRecord, dialog } = useRecordDecision(props);
@@ -32,9 +43,9 @@ function Harness(props: { sessionId: string; projectIdHint: string | null; isCha
 }
 
 beforeEach(() => {
-  h.enabled = true; h.me = 'u-owner';
+  h.me = 'u-owner';
   for (const f of [h.getChannel, h.getTeamLedger, h.recordDecision]) f.mockReset();
-  h.getTeamLedger.mockResolvedValue({ ledger: { ledgerId: 'l1', ownerSubject: 'u-owner', version: 2 }, state: {} });
+  h.getTeamLedger.mockResolvedValue({ ledger: LEDGER, state: null });
   h.recordDecision.mockResolvedValue({ documentId: 'd1', accepted: true });
 });
 afterEach(cleanup);
@@ -42,7 +53,8 @@ afterEach(cleanup);
 describe('Record as decision', () => {
   it('titleFrom takes the first non-empty line, bounded', () => {
     expect(titleFrom('\n  Ship EU first \nmore')).toBe('Ship EU first');
-    expect(titleFrom('x'.repeat(100)).length).toBe(80);
+    expect(titleFrom('x'.repeat(100))).toBe(`${'x'.repeat(79)}…`);
+    expect(titleFrom('x'.repeat(80))).toBe('x'.repeat(80)); // at the bound: untouched
   });
 
   it("the owner records from a project chat: prefilled, accepted, linked back", async () => {
@@ -61,7 +73,7 @@ describe('Record as decision', () => {
 
   it("a non-owner in a bound channel records a proposal (no accept)", async () => {
     h.me = 'u-mate';
-    h.getChannel.mockResolvedValue({ channel: { boundProjectId: 'p7' } });
+    h.getChannel.mockResolvedValue({ conversationId: 'ch1', channel: { name: 'launch', visibility: 'public', boundProjectId: 'p7' } });
     render(<Harness sessionId="ch1" projectIdHint={null} isChannel />);
     fireEvent.click(await screen.findByRole('button', { name: 'open' }));
     expect(screen.queryByLabelText('Accept it into the ledger now')).toBeNull();
@@ -73,15 +85,18 @@ describe('Record as decision', () => {
   });
 
   it('not offered: no project or no ledger', async () => {
-    h.getChannel.mockResolvedValue({ channel: {} });
+    h.getChannel.mockResolvedValue({ conversationId: 'ch1', channel: { name: 'launch', visibility: 'public' } });
     render(<Harness sessionId="ch1" projectIdHint={null} isChannel />);
-    await waitFor(() => expect(h.getChannel).toHaveBeenCalled());
+    await settled(h.getChannel.mock.results[0]?.value);
+    expect(h.getTeamLedger).not.toHaveBeenCalled(); // no project ⇒ no ledger lookup
     expect(screen.getByText('no-action')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'open' })).toBeNull();
     cleanup();
     h.getTeamLedger.mockResolvedValue({ ledger: null, state: null });
     render(<Harness sessionId="s1" projectIdHint="p1" isChannel={false} />);
-    await waitFor(() => expect(h.getTeamLedger).toHaveBeenCalled());
+    await settled(h.getTeamLedger.mock.results[0]?.value);
     expect(screen.getByText('no-action')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'open' })).toBeNull();
   });
 
   it('a failed record is said and the dialog stays open', async () => {

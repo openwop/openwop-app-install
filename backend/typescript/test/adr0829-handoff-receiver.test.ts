@@ -6,11 +6,18 @@
  *   - the run-start reader re-normalizes `openwop-handoff` as untrusted (root-run
  *     metadata is caller-writable);
  *   - the live dispatch composes the note into the opening message, before the
- *     task, and tags the turn untrusted-derived;
+ *     task, and tags the turn untrusted-derived (the memory write carries
+ *     `derived-from-untrusted`; without a note it does not);
  *   - D4: `:fork` over the REAL route copies the record byte-identically (read
  *     back from storage, not a model of the fork);
  *   - D4: re-entrant dispatch passes emit one `agent.handoff` per
  *     (`runOrchestrator.decided`, worker), never two for the same decided event.
+ *
+ * Sabotages that turn it red: `n = neutralizeUntrusted` → identity; the
+ * `handoffNote` push in `buildMessages` dropped or moved after `Task:`;
+ * `!!deps.handoffNote` dropped from `consumedUntrusted`; `readHandoffRecord`
+ * returning the raw key; the fork deleting `openwop-handoff`; `agent.handoff`
+ * caused by anything but its decided event.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -19,8 +26,12 @@ import { createApp } from '../src/index.js';
 import { bareRunId } from './support/bareRunId.js';
 import type { Storage } from '../src/storage/storage.js';
 import { getAgentRegistry } from '../src/executor/agentRegistry.js';
-import { runAgentDispatchLive } from '../src/host/agentDispatch.js';
-import type { AiCallRequest, AiCallResult } from '../src/executor/types.js';
+import { runAgentDispatchLive, type AgentMemoryPort } from '../src/host/agentDispatch.js';
+import agentRunnerNode from '../src/host/agentRunnerNode.js';
+import { createHostAdapterSuite } from '../src/host/index.js';
+import { MEMORY_UNTRUSTED_TAG } from '../src/host/memoryTrust.js';
+import type { AiCallRequest, AiCallResult, NodeContext } from '../src/executor/types.js';
+import type { ResolvedAgentManifest } from '../src/executor/agentRegistry.js';
 import { openStorage } from '../src/storage/index.js';
 import { setEventLogBackend, getEventLog } from '../src/executor/eventLog.js';
 import { getNodeRegistry } from '../src/executor/nodeRegistry.js';
@@ -79,28 +90,41 @@ describe('ADR 0829 P2 — readHandoffRecord (run-start, untrusted)', () => {
 
 describe('ADR 0829 D5 — live dispatch composes the note before the task', () => {
   const registry = getAgentRegistry();
+  const RECEIVER: ResolvedAgentManifest = { agentId: 'test.receiver', persona: 'R', modelClass: 'chat', systemPrompt: 'You are R.', packName: 'test', packVersion: '0', toolAllowlist: [], memoryShape: { longTerm: true } };
   beforeEach(() => {
     registry._resetForTest();
-    registry.register({ agentId: 'test.receiver', persona: 'R', modelClass: 'chat', systemPrompt: 'You are R.', packName: 'test', packVersion: '0', toolAllowlist: [] } as never);
+    registry.register(RECEIVER);
   });
 
   const userText = (req: AiCallRequest): string => JSON.stringify(req);
+  /** A memory port that remembers nothing and records each write's tags. */
+  const memoryPort = () => {
+    const write = vi.fn<AgentMemoryPort['write']>(async () => undefined);
+    const memory: AgentMemoryPort = { read: async () => [], write };
+    return { memory, write };
+  };
 
-  it('with a note: the fenced block precedes `Task:`', async () => {
+  it('with a note: the fenced block precedes `Task:`, and the turn is tagged untrusted-derived', async () => {
     const callAI = vi.fn<(req: AiCallRequest) => Promise<AiCallResult>>(async () => ({ content: 'done' }));
-    await runAgentDispatchLive({ agentId: 'test.receiver', task: 'Write the summary' }, { callAI, handoffNote: handoffPromptBlock(RECORD) });
+    const { memory, write } = memoryPort();
+    await runAgentDispatchLive({ agentId: 'test.receiver', task: 'Write the summary' }, { callAI, handoffNote: handoffPromptBlock(RECORD), memory, memoryScope: 'scope-note' });
     const text = userText(callAI.mock.calls[0]![0]);
     const fence = text.indexOf('BEGIN UNTRUSTED CONTENT');
     const task = text.indexOf('Task:');
     expect(fence).toBeGreaterThan(-1);
     expect(task).toBeGreaterThan(fence);
     expect(text).toContain('Find three comparable launches');
+    expect(write).toHaveBeenCalledTimes(1);
+    expect(write.mock.calls[0]![1].tags).toContain(MEMORY_UNTRUSTED_TAG);
   });
 
-  it('without a note: no fence (sabotage leg for the one above)', async () => {
+  it('without a note: no fence and no untrusted tag (sabotage leg for the one above)', async () => {
     const callAI = vi.fn<(req: AiCallRequest) => Promise<AiCallResult>>(async () => ({ content: 'done' }));
-    await runAgentDispatchLive({ agentId: 'test.receiver', task: 'Write the summary' }, { callAI });
+    const { memory, write } = memoryPort();
+    await runAgentDispatchLive({ agentId: 'test.receiver', task: 'Write the summary' }, { callAI, memory, memoryScope: 'scope-none' });
     expect(userText(callAI.mock.calls[0]![0])).not.toContain('Find three comparable launches');
+    expect(write).toHaveBeenCalledTimes(1);
+    expect(write.mock.calls[0]![1].tags).not.toContain(MEMORY_UNTRUSTED_TAG);
   });
 });
 
@@ -112,7 +136,7 @@ describe('ADR 0829 D4 — re-entrant dispatch passes', () => {
     ensureNodesRegistered();
     setSubWorkflowDispatcher({
       storage,
-      hostSuite: { workflowCatalog: { getWorkflow: async () => ({ definition: { variables: [], nodes: [], edges: [] } }) } } as never,
+      hostSuite: { ...createHostAdapterSuite({ storage }), workflowCatalog: { getWorkflow: async (id: string) => ({ workflowId: id, definition: { workflowId: id, nodes: [] } }) } },
       executeRun: async (_s: Storage, child: RunRecord) => { await storage.updateRun(child.runId, { status: 'completed', updatedAt: new Date().toISOString() }); return undefined; },
     });
     const now = new Date().toISOString();
@@ -120,10 +144,10 @@ describe('ADR 0829 D4 — re-entrant dispatch passes', () => {
     const m = new Map<string, unknown>();
     const vars = { get: (n: string): unknown => m.get(n), set: (n: string, v: unknown): void => { m.set(n, v); } };
     const supervisor = { agentId: 'orchestrator.reentry', decisions: [{ kind: 'next-worker', nextWorkerIds: ['wf-a'] }], handoffs: { 'wf-a': { toAgentId: 'agent.a', intent: 'do a' } } };
-    const ctx = { runId: 'run-reentry', nodeId: 'd', tenantId: 't-re', inputs: { input: supervisor }, config: {}, configurable: {}, variables: vars };
+    const ctx: NodeContext = { runId: 'run-reentry', nodeId: 'd', tenantId: 't-re', inputs: { input: supervisor }, config: {}, configurable: {}, variables: vars, attempt: 1, secrets: {}, emit: async () => ({ eventId: 'e-test', sequence: 0 }) };
     const node = getNodeRegistry().get('core.dispatch')!;
-    await node.execute(ctx as never);
-    await node.execute(ctx as never); // the second supervisor → dispatch pass
+    await node.execute(ctx);
+    await node.execute(ctx); // the second supervisor → dispatch pass
 
     const events = await getEventLog().list('run-reentry');
     const decided = events.filter((e) => e.type === 'runOrchestrator.decided');
@@ -179,17 +203,17 @@ describe('ADR 0829 D5 — the run lane (agentRunnerNode) hands the note to the m
 
   async function promptSeen(withNote: boolean): Promise<string> {
     registry._resetForTest();
-    registry.register({ agentId: 'test.runner-receiver', persona: 'R', modelClass: 'chat', systemPrompt: 'You are R.', packName: 'test', packVersion: '0', toolAllowlist: [] } as never);
-    const { default: agentRunnerNode } = await import('../src/host/agentRunnerNode.js');
+    registry.register({ agentId: 'test.runner-receiver', persona: 'R', modelClass: 'chat', systemPrompt: 'You are R.', packName: 'test', packVersion: '0', toolAllowlist: [] });
     const callAI = vi.fn<(req: AiCallRequest) => Promise<AiCallResult>>(async () => ({ content: 'ok' }));
-    const out = await agentRunnerNode.execute({
+    const ctx: NodeContext = {
       tenantId: 'tenant-runner', runId: `run-runner-${withNote ? 'note' : 'none'}`, nodeId: 'n',
       inputs: { agentId: 'test.runner-receiver', task: 'Write the summary', credentialRef: 'managed:openwop-free' },
-      config: { offerTools: [] }, configurable: {}, emit: async () => {},
+      config: { offerTools: [] }, configurable: {}, emit: async () => ({ eventId: 'e-test', sequence: 0 }), attempt: 1, secrets: {},
       ...(withNote ? { handoff: RECORD } : {}),
       callAI,
       callAIWithTools: vi.fn(async () => { throw new Error('no tool loop expected'); }),
-    } as never);
+    };
+    const out = await agentRunnerNode.execute(ctx);
     expect(out.status, JSON.stringify(out)).toBe('success');
     return JSON.stringify(callAI.mock.calls[0]![0]);
   }

@@ -31,7 +31,7 @@ import { createSubjectMemoryPort, addSubjectNote, listSubjectNotes, subjectMemor
 import { personSubject } from '../src/host/subject.js';
 import { getAgentProfile, upsertAgentProfile, setAgentKnowledge } from '../src/host/agentProfileService.js';
 import { deleteRosterMemberCascade } from '../src/host/rosterCascade.js';
-import { listAllTenantCollections } from '../src/features/kb/kbService.js';
+import { listAllTenantCollections, listDocuments } from '../src/features/kb/kbService.js';
 import { __resetRosterLifecycleHooks } from '../src/host/rosterLifecycle.js';
 import { ensureKickBot, KICKBOT_ROSTER_ID, registerKickbotLifecycleHooks } from '../src/features/kicktodo-core/kickbotService.js';
 import { kickbotKbCollectionId, flattenChallenge } from '../src/features/kicktodo-core/kicktodoKnowledgeService.js';
@@ -57,6 +57,10 @@ afterEach(async () => {
 
 const kbCollection = async (tenantId: string) =>
   (await listAllTenantCollections(tenantId)).find((c) => c.collectionId === kickbotKbCollectionId(tenantId));
+/** Titles of the docs in the managed KickBot collection. `'_kickbot'` is the
+ *  module-private KICKBOT_KB_ORG (a literal, so the oracle is independent). */
+const kbTitles = async (tenantId: string): Promise<string[]> =>
+  (await listDocuments(tenantId, '_kickbot', kickbotKbCollectionId(tenantId))).map((d) => d.title).sort();
 
 async function publishSample(tenantId: string, title: string): Promise<{ id: string; version: number }> {
   const draft = await createDraft({
@@ -180,12 +184,20 @@ describe('KickBot per-user memory isolation (ADR 0442 P3 — F1)', () => {
     await ensureKickBot(T);
     // Simulate a pre-P3 build's profile: coaching only, no memoryScope/knowledge,
     // plus a user's governance edit (a custom HITL gate) that must survive.
+    // `memoryScope: 'agent'` is the pre-P3 (shared) scope. An upsert that merely
+    // OMITS memoryScope keeps the stored 'per-user' (buildAgentProfile preserves
+    // provisioning-owned fields), so the heal would never run — w40 probe
+    // kb-memoryscope-heal-gone stayed green against that fixture.
     await upsertAgentProfile(T, KICKBOT_ROSTER_ID, {
       roleKey: 'kicktodo-guide',
       capabilities: ['coaching'],
+      memoryScope: 'agent',
       hitl: ['custom-operator-gate'],
       autonomy: { specLevel: 'recommend' },
     });
+    const stale = await getAgentProfile(T, KICKBOT_ROSTER_ID);
+    expect(stale?.memoryScope, 'the pre-P3 fixture write must land').toBe('agent');
+    expect(stale?.capabilities).not.toContain('knowledge');
     await ensureKickBot(T); // re-provision heals forward
 
     const healed = await getAgentProfile(T, KICKBOT_ROSTER_ID);
@@ -237,18 +249,16 @@ describe('KickBot KB grounding (ADR 0442 P3 — challenge content + guidance)', 
     await ensureKickBot(T);
     const afterProvision = await kbCollection(T);
     expect(afterProvision, 'the managed KickBot collection exists').toBeDefined();
-    // guidance doc + the pre-published challenge were backfilled.
-    expect(afterProvision!.documentCount).toBeGreaterThanOrEqual(2);
+    // guidance doc + the pre-published challenge were backfilled — by IDENTITY.
+    expect(await kbTitles(T)).toEqual(['How KickTodo works', 'Hydration']);
 
     // A challenge published AFTER provisioning rides the publish hook.
     await publishSample(T, 'Focus');
-    const afterPublish = await kbCollection(T);
-    expect(afterPublish!.documentCount).toBeGreaterThan(afterProvision!.documentCount);
+    expect(await kbTitles(T)).toEqual(['Focus', 'How KickTodo works', 'Hydration']);
 
-    // Retiring a challenge drops its doc (never cite a retired plan).
+    // Retiring a challenge drops ITS doc (never cite a retired plan); the others stay.
     await retireChallenge(T, pub.id, pub.version);
-    const afterRetire = await kbCollection(T);
-    expect(afterRetire!.documentCount).toBeLessThan(afterPublish!.documentCount);
+    expect(await kbTitles(T)).toEqual(['Focus', 'How KickTodo works']);
   });
 
   it('publishing in a tenant that never provisions KickBot creates NO orphan collection', async () => {

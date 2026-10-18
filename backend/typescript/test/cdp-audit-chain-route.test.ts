@@ -26,13 +26,14 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res { status: number; body: any }
+interface VerifyBody { ok?: boolean; brokenAt?: number; length?: number; error?: string; message?: string }
+interface Res { status: number; body: VerifyBody }
 function client() {
   let cookie = '';
   const call = async (m: string, p: string, b?: unknown, headers: Record<string, string> = {}): Promise<Res> => {
     const res = await fetch(`${BASE}${p}`, { method: m, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}), ...headers }, ...(b !== undefined ? { body: JSON.stringify(b) } : {}) });
     for (const c of getSetCookies(res.headers) as string[]) { const mm = /(__session=[^;]+)/.exec(c); if (mm) cookie = mm[1]; }
-    return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) };
+    return { status: res.status, body: (res.status === 204 ? {} : await res.json().catch(() => ({}))) as VerifyBody };
   };
   return {
     get: (p: string, headers?: Record<string, string>) => call('GET', p, undefined, headers),
@@ -40,21 +41,27 @@ function client() {
   };
 }
 let n = 0;
-async function ownerOn(tenantId: string) {
+async function ownerOn(tenantId: string, subject?: string) {
   const c = client();
-  const r = await c.post('/host/openwop-app/test/login', { email: `ac-${Date.now()}-${n++}@a.test`, tenantId });
+  const r = await c.post('/host/openwop-app/test/login', { email: `ac-${Date.now()}-${n++}@a.test`, tenantId, ...(subject ? { subject } : {}) });
   expect(r.status).toBe(201);
   return c;
 }
+const ADMIN_REFUSAL = 'Audit-chain verification requires an admin role.';
 const setToggle = async (id: string, s: 'on' | 'off') => { const d = getToggleDefault(id); if (d) await saveConfig({ ...d, status: s }, 'test'); };
 const VERIFY = '/host/openwop-app/cdp/audit-chain/verify';
 
 describe('CDP-F audit-chain verify route', () => {
   it('is toggle-gated (cdp OFF ⇒ 404)', async () => {
     await setToggle('cdp', 'off');
-    const c = await ownerOn(`org:ac-off-${Date.now()}`);
-    expect((await c.get(VERIFY)).status).toBe(404);
-    await setToggle('cdp', 'on');
+    try {
+      const c = await ownerOn(`org:ac-off-${Date.now()}`);
+      const r = await c.get(VERIFY);
+      expect(r.status).toBe(404);
+      expect(r.body.message).toMatch(/CDP/);
+    } finally {
+      await setToggle('cdp', 'on');
+    }
   });
 
   it('an owner sees ok:true after a consent change, and brokenAt after tampering', async () => {
@@ -67,7 +74,7 @@ describe('CDP-F audit-chain verify route', () => {
     const ok = await c.get(VERIFY);
     expect(ok.status, JSON.stringify(ok.body)).toBe(200);
     expect(ok.body.ok).toBe(true);
-    expect(ok.body.length).toBeGreaterThanOrEqual(1); // genesis (0) + at least the consent append (1)
+    expect(ok.body.length).toBe(1); // genesis (seq 0) + the one consent append (seq 1)
 
     // Tamper the consent entry (seq 1) in the store → verify now reports it broken.
     await __tamperEntryForTest(tenantId, 1, (e) => ({ ...e, payload: { subjectKey: 'HACKED' } }));
@@ -83,5 +90,19 @@ describe('CDP-F audit-chain verify route', () => {
     // An act-as header for a member that has no role resolves to zero roles ⇒ 403.
     const r = await c.get(VERIFY, { 'x-openwop-act-as': 'mem:nobody' });
     expect(r.status).toBe(403);
+    expect(r.body.message).toBe(ADMIN_REFUSAL);
+  });
+
+  // ADR 0797 (CE-8 / KEY-19) — roles resolve from the CALLER, not from `{}`
+  // (which answers OWNER): a same-tenant non-member with NO act-as header is refused.
+  it('a same-tenant NON-MEMBER (no act-as) ⇒ 403; the owner ⇒ 200', async () => {
+    await setToggle('cdp', 'on');
+    const tenantId = `org:ac-nm-${Date.now()}-${n++}`;
+    const owner = await ownerOn(tenantId, `oidc:ac-owner-${Date.now()}`);
+    const stranger = await ownerOn(tenantId, `oidc:ac-nonmember-${Date.now()}`);
+    const r = await stranger.get(VERIFY);
+    expect(r.status, JSON.stringify(r.body)).toBe(403);
+    expect(r.body.message).toBe(ADMIN_REFUSAL);
+    expect((await owner.get(VERIFY)).status).toBe(200); // positive control
   });
 });

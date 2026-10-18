@@ -24,12 +24,21 @@ const api = vi.hoisted(() => ({
   listAccounts: vi.fn<typeof C.listAccounts>(),
   listOrgs: vi.fn<typeof C.listOrgs>(),
   listCrmCompanies: vi.fn<typeof C.listCrmCompanies>(),
+  // ADR 0882 D3 — the owner picker's people list.
+  listAssignees: vi.fn<typeof C.listAssignees>(async () => ({ assignees: [], me: [] })),
 }));
 vi.mock('../csmClient.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../csmClient.js')>()),
   ...api,
   // `listCompanies` was overridden here once, but csmClient does not export it
   // (it lives in crm/crmOrgClient) — an inert key `check-inert-mocks` holds at zero.
+}));
+// ADR 0882 (CSM2UX-4) — write controls follow `workspace:write`; `writeAccess.value`
+// lets a case render as a Viewer.
+const writeAccess = vi.hoisted(() => ({ value: true }));
+vi.mock('../../../lib/writeAccess.js', async (orig) => ({
+  ...(await orig<typeof import('../../../lib/writeAccess.js')>()),
+  useScopeWriteAccess: () => writeAccess.value,
 }));
 vi.mock('../../../featureToggles/FeatureAccessContext.js', async (orig) => ({
   ...(await orig<typeof import('../../../featureToggles/FeatureAccessContext.js')>()),

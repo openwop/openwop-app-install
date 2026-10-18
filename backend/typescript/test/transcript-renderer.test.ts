@@ -1,5 +1,10 @@
 /**
- * ADR 0119 Phase 1 — pure transcript renderer.
+ * ADR 0119 Phase 1 — pure transcript renderer (`features/chat-export/transcriptRenderer.ts`).
+ *
+ * What turns each case red (wave-24 probes): reversing message order or mislabelling a
+ * role (title/header/sections); treating structured content as plain text (fenced JSON
+ * card); a random component in the header (deterministic); dropping `authorSubject`
+ * or mutating content in the JSON export (openwop-v1 shape).
  */
 import { describe, it, expect } from 'vitest';
 import { transcriptToMarkdown, transcriptToJson, EXPORT_FORMAT_VERSION } from '../src/features/chat-export/transcriptRenderer.js';
@@ -26,8 +31,8 @@ describe('transcriptToMarkdown', () => {
   it('renders a structured card as a fenced JSON block', () => {
     const md = transcriptToMarkdown(session, msgs);
     expect(md).toContain('```json');
-    expect(md).toContain('"kind":"approval"'.replace(/"/g, '"')); // the card content preserved verbatim
-    expect(md).toContain('"label":"Approve?"');
+    // the card content preserved verbatim, inside the fence
+    expect(md).toContain(`\`\`\`json\n${msgs[2]!.content}\n\`\`\`\n`);
   });
 
   it('is deterministic', () => {
@@ -39,10 +44,10 @@ describe('transcriptToJson', () => {
   it('produces the openwop-v1 round-trippable shape with authorship preserved', () => {
     const j = transcriptToJson(session, msgs);
     expect(j.version).toBe(EXPORT_FORMAT_VERSION);
-    expect(j.conversation.sessionId).toBe('c1');
+    expect(j.conversation).toEqual({ sessionId: 'c1', title: 'Planning', createdAt: '2026-01-01T00:00:00Z' });
     expect(j.messages).toHaveLength(3);
     expect(j.messages[0]!.authorSubject).toBe('user:alice');
     expect(j.messages[0]!.role).toBe('user');
-    expect(j.messages[2]!.content).toContain('approval'); // card content kept verbatim
+    expect(j.messages[2]!.content).toBe(msgs[2]!.content); // card content kept verbatim
   });
 });

@@ -11,18 +11,33 @@
  * route) is rendered inline for that row — and only that row. When every proposal
  * is the no-card case, the "decide on the card" pointer must be ABSENT (there is no
  * card to point at).
+ *
+ * Breaks it: buttons on a carded row, a pointer with no card, a fallback button
+ * that does not call the retained route, or a failed read rendered as the empty
+ * hint. The roster read is mocked (no live fetch); the coach therefore renders as
+ * the former-member label, which no assertion here depends on.
  */
 import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
-import { render, screen, cleanup, waitFor } from '@testing-library/react';
+import { render, screen, cleanup, waitFor, fireEvent } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
+import type { Circle } from '../../../client/kicktodoCirclesClient.js';
+import type { Enrollment } from '../../../client/kicktodoClient.js';
+
+const ENROLLMENTS: Enrollment[] = [
+  { id: 'enr:1', challengeId: 'ch:1', challengeVersion: 1, state: 'active', goalId: 'g:1', planRevision: 1, timezone: 'UTC', startDateLocal: '2026-01-01' },
+];
+
+const CIRCLES: Circle[] = [
+  { id: 'circle:1', type: 'coach', enrollmentId: 'enr:1', name: 'My circle', conversationId: 'conv:1' },
+];
+
+vi.mock('../../../orgs/orgMembers.js', () => ({ loadOrgMembers: vi.fn(() => Promise.resolve([])) }));
 
 vi.mock('../../../client/kicktodoClient.js', () => ({
-  listEnrollments: vi.fn(() => Promise.resolve([{ id: 'enr:1', challengeId: 'ch:1', state: 'active' }])),
+  listEnrollments: vi.fn(() => Promise.resolve(ENROLLMENTS)),
 }));
 vi.mock('../../../client/kicktodoCirclesClient.js', () => ({
-  listCircles: vi.fn(() => Promise.resolve([
-    { id: 'circle:1', type: 'coach', enrollmentId: 'enr:1', name: 'My circle', conversationId: 'conv:1' },
-  ])),
+  listCircles: vi.fn(() => Promise.resolve(CIRCLES)),
   createCircle: vi.fn(),
   listGrants: vi.fn(() => Promise.resolve([])),
   invite: vi.fn(),
@@ -72,8 +87,10 @@ describe('ADR 0459 — plan-proposal history vs degraded fallback', () => {
     expect(screen.getByRole('button', { name: en.proposalDismissCta })).toBeTruthy();
     // With no card anywhere, the "decide on the card" pointer must NOT render.
     expect(screen.queryByText(/Decide these on the card/i)).toBeNull();
-    // The buttons drive the retained route (the reachable fallback).
-    expect(resolveProposalAction).toBeDefined();
+    // The buttons drive the retained route (the reachable fallback), then reload.
+    fireEvent.click(screen.getByRole('button', { name: en.proposalApplyCta }));
+    await waitFor(() => expect(resolveProposalAction).toHaveBeenCalledWith('enr:1', 'prop:2', 'apply'));
+    await waitFor(() => expect(listProposals).toHaveBeenCalledTimes(2));
   });
 
   it('EMPTY history: the discoverability empty-state line, no buttons, no pointer', async () => {
@@ -90,6 +107,8 @@ describe('ADR 0459 — plan-proposal history vs degraded fallback', () => {
     render(<MemoryRouter><CirclesPage /></MemoryRouter>);
 
     // The proposals section renders its own load-error line (the grants-section convention).
-    await waitFor(() => expect(screen.getAllByText(/This section couldn.t load/i).length).toBeGreaterThan(0));
+    // Grants and sessions load as [] here, so this is the proposals section's line.
+    expect(await screen.findByText(en.sectionLoadError)).toBeTruthy();
+    expect(screen.queryByText(en.proposalsEmptyHint)).toBeNull();
   });
 });

@@ -3,7 +3,16 @@
  * Real app, real executor, the real run-terminal seam:
  *   - a completed, project-stamped run whose output has `decisions` ⇒ one
  *     suggestion each (strings or `{summary}`), linked to the run, capped;
- *   - an unstamped run, or a run without `decisions` ⇒ nothing.
+ *   - a run without `decisions` ⇒ nothing.
+ *
+ * Sabotage-witnessed (/grade-tests w29): the cap, the `{summary}` read, the
+ * blank drop, the `onAnyRunTerminal` subscription (`feature.ts`) and the
+ * `meeting` source kind each red their case. The negative case awaits the
+ * terminal fan-out (`fireAnyRunTerminal`) instead of sleeping, and carries a
+ * positive control so "nothing" is read after the subscriber has run. An
+ * "unstamped run ⇒ nothing" leg was cut: an unstamped run names no project to
+ * write to, so it could not fail (probe w29g3-rn-unstamped-VAC); the stamp
+ * itself is `adr0831-team-ledger-stamp.test.ts`'s claim.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -15,6 +24,7 @@ import type { HostAdapterSuite } from '../src/host/index.js';
 import { insertRunWithStartContext } from '../src/host/runInsert.js';
 import { registerWorkflow as registerHostWorkflow } from '../src/host/workflowsRegistry.js';
 import { executeRun } from '../src/executor/executor.js';
+import { fireAnyRunTerminal } from '../src/executor/runLifecycle.js';
 import { listSuggestions } from '../src/features/team-intent-ledger/suggestions.js';
 import { MAX_PER_RUN, reportedDecisions } from '../src/features/team-intent-ledger/runDecisionsSource.js';
 import type { WorkflowDefinition } from '../src/executor/types.js';
@@ -35,33 +45,38 @@ beforeAll(async () => {
   storage = app.locals.storage as Storage;
   hostSuite = app.locals.hostSuite as HostAdapterSuite;
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
-  registerHostWorkflow({ workflowId: 'wf.d6.echo', name: 'echo', version: '1.0.0', nodes: [{ nodeId: 'echo', typeId: 'core.identity', config: {} }], edges: [] } as unknown as WorkflowDefinition);
+  const echo: WorkflowDefinition = { workflowId: 'wf.d6.echo', nodes: [{ nodeId: 'echo', typeId: 'core.identity', config: {} }], edges: [] };
+  registerHostWorkflow(echo);
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
+/** The fields these legs read off a response. */
+interface ResBody { user?: { userId: string }; orgId?: string; id?: string; boardId?: string }
 function client() {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown) => {
+  const call = async (method: string, path: string, body?: unknown): Promise<{ status: number; body: ResBody }> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]!; }
-    return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) as any };
+    const parsed = res.status === 204 ? undefined : ((await res.json().catch(() => undefined)) as ResBody | undefined);
+    return { status: res.status, body: parsed ?? {} };
   };
   return { post: (p: string, b?: unknown) => call('POST', p, b) };
 }
 async function setup() {
   const tenantId = `org:d6-${Date.now()}-${n++}`;
   const owner = client();
-  const ownerId = (await owner.post('/host/openwop-app/test/login', { email: `d6-${n++}@acme.test`, tenantId })).body.user.userId as string;
-  const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'MeetCo' })).body.orgId as string;
-  const proj = (await owner.post('/host/openwop-app/projects', { orgId, name: 'Launch' })).body as { id: string; boardId: string };
+  const ownerId = (await owner.post('/host/openwop-app/test/login', { email: `d6-${n++}@acme.test`, tenantId })).body.user!.userId;
+  const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'MeetCo' })).body.orgId!;
+  const created = (await owner.post('/host/openwop-app/projects', { orgId, name: 'Launch' })).body;
+  const proj = { id: created.id!, boardId: created.boardId! };
   expect((await owner.post(`/host/openwop-app/team-ledger/projects/${proj.id}`)).status).toBe(201);
   return { tenantId, ownerId, projectId: proj.id, boardId: proj.boardId };
 }
-async function runEcho(s: { tenantId: string; ownerId: string; boardId: string }, inputs: unknown, onProject = true): Promise<string> {
+async function runEcho(s: { tenantId: string; ownerId: string; boardId: string }, inputs: Record<string, unknown>): Promise<string> {
   const now = new Date().toISOString();
   const run: RunRecord = {
     runId: `run-d6-${n++}`, workflowId: 'wf.d6.echo', tenantId: s.tenantId, status: 'pending', inputs,
-    metadata: onProject ? { kanban: { boardId: s.boardId, cardId: 'c1' }, actingUserId: s.ownerId } : {},
+    metadata: { kanban: { boardId: s.boardId, cardId: 'c1' }, actingUserId: s.ownerId },
     configurable: {}, createdAt: now, updatedAt: now,
   };
   await insertRunWithStartContext(storage, run);
@@ -84,14 +99,22 @@ describe('ADR 0853 D6 — runs that report decisions', () => {
     await vi.waitFor(async () => expect(await listSuggestions(s.tenantId, s.projectId)).toHaveLength(2), { timeout: 5000 });
     const list = await listSuggestions(s.tenantId, s.projectId);
     expect(list.map((x) => x.text).sort()).toEqual(['Price stays at $49', 'Ship EU first']);
-    expect(list[0]!.source).toMatchObject({ kind: 'meeting', link: `/runs/${runId}` });
+    for (const x of list) {
+      expect(x).toMatchObject({ status: 'open', source: { kind: 'meeting', link: `/runs/${runId}` }, suggestedBy: { kind: 'host', id: 'run:wf.d6.echo' } });
+    }
+    expect(list.map((x) => x.source.ref).sort()).toEqual([`${runId}:0`, `${runId}:1`]);
   });
 
-  it('an unstamped run, or one with no decisions ⇒ nothing', async () => {
+  it('a project run with no decisions ⇒ nothing', async () => {
     const s = await setup();
-    await runEcho(s, { decisions: ['Not a project run'] }, false);
-    await runEcho(s, { summary: 'no decisions field' });
-    await new Promise((r) => setTimeout(r, 300));
+    const quiet = await runEcho(s, { summary: 'no decisions field' });
+    // Await the terminal fan-out (every subscriber) instead of sleeping. Safe:
+    // a run with no decisions writes nothing, so the racing fire-and-forget copy
+    // cannot double-insert.
+    expect(await fireAnyRunTerminal(quiet, 'completed')).toBeGreaterThan(0);
     expect(await listSuggestions(s.tenantId, s.projectId)).toHaveLength(0);
+    // Positive control: the same project, the same seam, WITH a decision ⇒ exactly one.
+    await runEcho(s, { decisions: ['control'] });
+    await vi.waitFor(async () => expect((await listSuggestions(s.tenantId, s.projectId)).map((x) => x.text)).toEqual(['control']), { timeout: 5000 });
   });
 });

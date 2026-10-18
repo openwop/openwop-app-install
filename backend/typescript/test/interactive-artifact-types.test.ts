@@ -1,5 +1,9 @@
 /**
- * ADR 0128 Phase 1 — interactive artifact type registration + validation.
+ * ADR 0128 Phase 1 + IART-3 — the four interactive types register, and the raw-text
+ * kinds (html / mermaid / react) validate STRINGS only; chart validates an object.
+ * Red if a type stops registering (an unregistered type validates `valid:true`, so the
+ * negatives below would pass vacuously — the registration case guards that), or a schema
+ * reopens to objects / drops chart's required `data` (`w27g2-iat-*` probes).
  */
 import { describe, it, expect, beforeAll } from 'vitest';
 import { registerInteractiveArtifactTypes } from '../src/features/interactive-artifacts/artifactTypes.js';
@@ -27,6 +31,7 @@ describe('interactive artifact types', () => {
     expect(validateArtifact('interactive.mermaid', 'graph TD; A-->B').valid).toBe(true);
     expect(validateArtifact('interactive.mermaid', {}).valid).toBe(false); // object is not the raw-text contract
     expect(validateArtifact('interactive.react', 'const A = () => <div/>;').valid).toBe(true);
+    expect(validateArtifact('interactive.react', { jsx: 'x' }).valid).toBe(false); // IART-3: react is raw JSX text too
     expect(validateArtifact('interactive.chart', { chartType: 'bar', data: { labels: [], datasets: [] } }).valid).toBe(true);
     expect(validateArtifact('interactive.chart', { chartType: 'bar' }).valid).toBe(false); // missing data
   });

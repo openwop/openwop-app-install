@@ -24,6 +24,7 @@ import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { createAgentToolProvider } from '../src/host/agentToolProvider.js';
 import { APP_BUILDER_MCP_TOOLS, APP_BUILDER_MCP_TOOL_NAMES } from '../src/features/app-builder/mcpControlWorkflows.js';
 import { APP_BUILDER_GET_DESIGN_TOOL_ID, APP_BUILDER_RENDER_TOOL_ID } from '../src/features/app-builder/agentTools.js';
+import { APP_BUILDER_COMPONENTS } from '../src/features/app-builder/componentCatalog.js';
 
 let BASE: string;
 let server: http.Server;
@@ -65,6 +66,25 @@ async function owner(who: string): Promise<Client> {
   return c;
 }
 
+/** An owner signed into an EXPLICIT shared tenant, so a second login can join
+ *  the same tenant as a non-member (the same-tenant shape an authz case needs —
+ *  a cross-tenant stranger is refused by the tenant lookup first). */
+async function ownerIn(tenantId: string): Promise<{ c: Client; userId: string; orgId: string }> {
+  const c = client();
+  const r = await c.post('/host/openwop-app/test/login', { email: `own-${Date.now()}-${n++}@acme.test`, tenantId });
+  expect(r.status, JSON.stringify(r.body)).toBe(201);
+  const org = await c.post('/host/openwop-app/orgs', { name: 'Acme' });
+  expect(org.status, JSON.stringify(org.body)).toBe(201);
+  return { c, userId: r.body.user.userId as string, orgId: org.body.orgId as string };
+}
+
+async function joinAs(tenantId: string, who: string): Promise<{ c: Client; userId: string }> {
+  const c = client();
+  const r = await c.post('/host/openwop-app/test/login', { email: `${who}-${Date.now()}-${n++}@acme.test`, tenantId });
+  expect(r.status, JSON.stringify(r.body)).toBe(201);
+  return { c, userId: r.body.user.userId as string };
+}
+
 const MCP = '/host/openwop-app/mcp';
 let rpcId = 0;
 const rpc = (c: Client, method: string, params?: unknown) =>
@@ -73,6 +93,12 @@ const resultText = (r: Res): string => (r.body.result?.content?.[0]?.text ?? '')
 
 describe('app-builder MCP control tools — registration + roundtrip', () => {
   it('registers all 7 control tools', () => {
+    // The literal set — `APP_BUILDER_MCP_TOOL_NAMES` derives from the same array
+    // the registration maps, so it cannot be its own oracle.
+    expect([...APP_BUILDER_MCP_TOOL_NAMES].sort()).toEqual([
+      'app-builder-catalog', 'app-builder-create-project', 'app-builder-get-design', 'app-builder-get-preview-url',
+      'app-builder-open-project', 'app-builder-render-design', 'app-builder-resolve-paused-task',
+    ]);
     const names = listTools().map((t) => t.name);
     for (const expected of APP_BUILDER_MCP_TOOL_NAMES) expect(names, `missing ${expected}`).toContain(expected);
   });
@@ -113,8 +139,7 @@ describe('app-builder MCP control tools — registration + roundtrip', () => {
     const r = await rpc(c, 'tools/call', { name: 'app-builder-catalog', arguments: {} });
     expect(r.body.result?.isError).toBe(false);
     const parsed = JSON.parse(resultText(r)) as { components?: unknown[]; promptTypeList?: string };
-    expect(Array.isArray(parsed.components)).toBe(true);
-    expect((parsed.components ?? []).length).toBeGreaterThan(5);
+    expect(parsed.components).toHaveLength(APP_BUILDER_COMPONENTS.length);
   });
 
   it('a cross-tenant canvas is invisible (tenant comes from the principal)', async () => {
@@ -136,24 +161,69 @@ describe('app-builder MCP control tools — registration + roundtrip', () => {
 });
 
 describe('app-builder MCP control tools — ADR 0087 gating', () => {
+  // Honest ceiling (wave-36 probe mc-anon): the anonymous check is a DOUBLE
+  // guard — an anonymous principal also resolves to zero ADR 0601 scopes, so
+  // removing `isAnonymousPrincipal` alone leaves it denied. The positive
+  // control shows the denial is about the caller, not a global refusal.
   it('every control tool requires auth + the app-builder toggle; anonymous denied', async () => {
+    const tenantId = `org:mcp-gate-${Date.now()}-${n++}`;
+    const own = await ownerIn(tenantId);
     for (const name of APP_BUILDER_MCP_TOOL_NAMES) {
       const tool = listTools().find((t) => t.name === name)!;
       expect(tool.mcpRequiresAuth, `${name} must require auth`).toBe(true);
       expect(tool.mcpFeatureToggle, `${name} must gate on app-builder`).toBe('app-builder');
+      expect(await isToolAllowed(tool, { principalId: own.userId, tenants: [tenantId], token: 't' }), `${name} owner`).toBe(true);
       expect(await isToolAllowed(tool, { principalId: 'mcp-anonymous', tenants: ['*'], token: '' })).toBe(false);
     }
   });
 
   it('a tenant with app-builder OFF is denied', async () => {
+    // A REAL owner (holds every scope), so the toggle is the only thing that can
+    // refuse — a member-less principal was refused by the scope check anyway.
+    const tenantId = `org:mcp-toggle-${Date.now()}-${n++}`;
+    const own = await ownerIn(tenantId);
+    const principal = { principalId: own.userId, tenants: [tenantId], token: 't' };
     const tool = listTools().find((t) => t.name === 'app-builder-get-design')!;
+    expect(await isToolAllowed(tool, principal)).toBe(true);
     const d = getToggleDefault('app-builder');
     if (d) await saveConfig({ ...d, status: 'off' }, 'test');
     try {
-      expect(await isToolAllowed(tool, { principalId: 'p1', tenants: ['org:some-tenant'], token: 't' })).toBe(false);
+      expect(await isToolAllowed(tool, principal)).toBe(false);
     } finally {
       if (d) await saveConfig({ ...d, status: 'on' }, 'test');
     }
+  });
+
+  // ADR 0601 — the write tools take `workspace:write`. A same-tenant VIEWER may
+  // read but not write; a same-tenant NON-MEMBER (second login, zero scopes) may
+  // do neither. Both are inside the tenant, so only the scope gate refuses.
+  it('a same-tenant viewer reads but cannot write; a same-tenant non-member can do neither', async () => {
+    const tenantId = `org:mcp-scope-${Date.now()}-${n++}`;
+    const own = await ownerIn(tenantId);
+    const created = await rpc(own.c, 'tools/call', { name: 'app-builder-create-project', arguments: { name: 'Owned' } });
+    expect(created.body.result?.isError, JSON.stringify(created.body)).toBe(false);
+    const { canvasId } = JSON.parse(resultText(created)) as { canvasId: string };
+
+    const viewer = await joinAs(tenantId, 'viewer');
+    const add = await own.c.post(`/host/openwop-app/orgs/${encodeURIComponent(own.orgId)}/members`, { displayName: 'Vi', subject: viewer.userId, roles: ['viewer'] });
+    expect(add.status, JSON.stringify(add.body)).toBe(201);
+    const stranger = await joinAs(tenantId, 'stranger');
+
+    const viewerRead = await rpc(viewer.c, 'tools/call', { name: 'app-builder-get-design', arguments: { canvasId } });
+    expect(viewerRead.body.result?.isError, JSON.stringify(viewerRead.body)).toBe(false);
+    const viewerWrite = await rpc(viewer.c, 'tools/call', { name: 'app-builder-render-design', arguments: { app: { name: 'X', screens: [{ id: 'home', name: 'Home', isInitial: true, components: [] }] } } });
+    expect(viewerWrite.body.result, JSON.stringify(viewerWrite.body)).toBeUndefined();
+    expect(viewerWrite.body.error?.message).toContain('app-builder-render-design');
+
+    for (const [name, args] of [['app-builder-get-design', { canvasId }], ['app-builder-create-project', { name: 'Intruder' }]] as const) {
+      const r = await rpc(stranger.c, 'tools/call', { name, arguments: args });
+      expect(r.body.result, `${name}: ${JSON.stringify(r.body)}`).toBeUndefined();
+      expect(r.body.error?.message).toContain(name);
+    }
+    // Nothing was written by either refused caller.
+    const listed = await rpc(own.c, 'tools/call', { name: 'app-builder-open-project', arguments: {} });
+    const projects = (JSON.parse(resultText(listed)) as { projects: { canvasId: string }[] }).projects;
+    expect(projects.map((x) => x.canvasId)).toEqual([canvasId]);
   });
 });
 

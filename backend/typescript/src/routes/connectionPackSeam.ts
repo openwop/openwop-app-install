@@ -152,7 +152,7 @@ export function registerConnectionPackSeamRoutes(app: Express): void {
     return;
   }
   log.warn(
-    'connection-pack seams ENABLED — /v1/host/{openwop-app,sample}/connection-packs/* installs caller-supplied provider definitions. NEVER enable in production.',
+    'connection-pack seams ENABLED — /host/{openwop-app,sample}/connection-packs/* installs caller-supplied provider definitions. NEVER enable in production.',
   );
 
   for (const base of SEAM_BASES) {

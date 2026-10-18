@@ -1,6 +1,6 @@
 {
   "name": "core.openwop.workflows.channel-turn",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "kind": "workflow-chain",
   "description": "The channel agent-turn workflow (ADR 0154 Phase 4), migrated off the in-tree `registerWorkflow(DEF)` pin site (ADR 0703 / PIN_SITE_QUARANTINE drain — instance #3 of the SCWF-1 class, after assistant and scheduled-agent-chats). chainId keeps the original workflowId so every dispatch and run stamp keeps resolving.",
   "keywords": ["channels", "ADR 0154"],
@@ -8,7 +8,8 @@
   "chains": [
     {
       "chainId": "openwop-app.channel.turn",
-      "version": "1.0.1",
+      "version": "1.0.2",
+      "internal": true,
       "label": "Channel agent turn",
       "description": "Runs the addressed agent member against the channel post and appends the reply as an assistant turn in that channel. System-fired: the credential is the host-owned managed key, never BYOK, because a channel post has no acting user to hold one.",
       "parameters": {

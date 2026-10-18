@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/feature.agent-author.nodes/1.1.1/persist.output.schema.json",
+  "$id": "https://packs.openwop.dev/feature.agent-author.nodes/1.2.0/persist.output.schema.json",
   "title": "Agent Author Persist Output",
   "type": "object",
   "required": ["rosterId", "persona", "enabled"],

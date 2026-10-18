@@ -1,6 +1,6 @@
 {
   "name": "vendor.openwop-app.workflows.strategy",
-  "version": "1.0.5",
+  "version": "1.1.0",
   "kind": "workflow-chain",
   "description": "Strategy operating-rhythm workflows (RFC 0013, ADR 0231). The KR measurement cadence: a weekly check-in nudge that finds measured key results with no recent confirmed check-in and notifies their owners, a metric-sync pass that refreshes every sourced key result from its configured data owner (CRM deal totals, analytics conversions) through the one governed check-in path, and a board-pack pre-read that drafts an MBR/QBR memo into a board-update Document. All THREE are scheduled via the strategy cadence config (GET/PUT /v1/host/openwop-app/strategy/cadence) — no auto-boot jobs. All writes ride ctx.features.strategy.checkIn: agent writes are structurally proposals; sync writes are confirmed only by a human-configured measure.source (fail-closed).",
   "author": "openwop-app",
@@ -10,7 +10,7 @@
   "chains": [
     {
       "chainId": "strategy.weekly-checkin",
-      "version": "1.1.1",
+      "version": "1.2.0",
       "label": "Strategy: Weekly Check-in Nudge",
       "description": "Find measured key results with no confirmed check-in inside the staleness window (default 14 days) across active shared strategies, compose a per-owner digest, and deliver it as a notification deep-linking the Strategy page. Read-only over strategy data — no approval gate needed.",
       "parameters": {
@@ -19,8 +19,8 @@
         "required": [],
         "properties": {
           "staleDays": { "type": "number", "default": 14, "description": "The staleness window in days." },
-          "provider": { "type": "string", "default": "anthropic", "description": "AI provider id for this chain's LLM nodes. Frozen into this chain's AI nodes when the workflow is created (ADR 0498 — a concrete provider is what keeps replay deterministic). Override at instantiation to use a different vendor or your own BYOK provider; whichever you pick, the workspace needs a key for it — the workflow will not fall back to another provider on its own." },
-          "model": { "type": "string", "default": "claude-sonnet-4-6", "description": "Model id for this chain's LLM nodes. Must be advertised by `provider` in the host catalog; override at instantiation." }
+          "provider": { "type": "string", "description": "AI provider id for this chain's model-calling nodes. Set it to fix a provider into those nodes when the workflow is created. Leave it unset and each run uses the run's chosen provider, else the workspace's AI setting, else the host's catalog default (ADR 0903); whichever is chosen is recorded on the run, so a replay or fork uses the same one. The workspace needs a key for the provider that runs." },
+          "model": { "type": "string", "description": "Model id for this chain's model-calling nodes. Must be offered by the provider in the host catalog. Leave it unset to use the provider's model from the same choice (ADR 0903)." }
         }
       },
       "capabilities": ["side-effectful"],
@@ -44,7 +44,7 @@
     },
     {
       "chainId": "strategy.board-pack",
-      "version": "1.1.1",
+      "version": "1.2.0",
       "label": "Strategy: Board Pack Pre-read",
       "description": "Compose an MBR/QBR-shaped pre-read from the live portfolio: health verdicts with their signals (weighted progress, stale key results, pending agent proposals, execution links), synthesized into a board-update Document and delivered as a notification. Reporting as composition — no dashboard, no parallel store (ADR 0233/0082). Insights-suite variance stays chat-drivable rather than statically composed (a chain must not reference a maybe-off feature's nodes).",
       "parameters": {
@@ -54,8 +54,8 @@
         "properties": {
           "orgId": { "type": "string", "description": "The organization whose Documents the board-update memo files into." },
           "audience": { "type": "string", "default": "the executive team", "description": "Who the pre-read addresses." },
-          "provider": { "type": "string", "default": "anthropic", "description": "AI provider id for this chain's LLM nodes. Frozen into this chain's AI nodes when the workflow is created (ADR 0498 — a concrete provider is what keeps replay deterministic). Override at instantiation to use a different vendor or your own BYOK provider; whichever you pick, the workspace needs a key for it — the workflow will not fall back to another provider on its own." },
-          "model": { "type": "string", "default": "claude-sonnet-4-6", "description": "Model id for this chain's LLM nodes. Must be advertised by `provider` in the host catalog; override at instantiation." }
+          "provider": { "type": "string", "description": "AI provider id for this chain's model-calling nodes. Set it to fix a provider into those nodes when the workflow is created. Leave it unset and each run uses the run's chosen provider, else the workspace's AI setting, else the host's catalog default (ADR 0903); whichever is chosen is recorded on the run, so a replay or fork uses the same one. The workspace needs a key for the provider that runs." },
+          "model": { "type": "string", "description": "Model id for this chain's model-calling nodes. Must be offered by the provider in the host catalog. Leave it unset to use the provider's model from the same choice (ADR 0903)." }
         }
       },
       "capabilities": ["side-effectful"],
@@ -82,12 +82,12 @@
     },
     {
       "chainId": "strategy.metric-sync",
-      "version": "1.1.1",
+      "version": "1.2.0",
       "label": "Strategy: Sync Sourced Metrics",
       "description": "Refresh every sourced key result from its configured data owner through the governed check-in path (confirmed only by the human-configured measure.source; everything else fail-closed), then summarize the honest synced/skipped matrix as a notification. The run output is the sync-health record.",
       "parameters": { "type": "object", "additionalProperties": false, "required": [], "properties": {
-        "provider": { "type": "string", "default": "anthropic", "description": "AI provider id for this chain's LLM nodes. Frozen into this chain's AI nodes when the workflow is created (ADR 0498 — a concrete provider is what keeps replay deterministic). Override at instantiation to use a different vendor or your own BYOK provider; whichever you pick, the workspace needs a key for it — the workflow will not fall back to another provider on its own." },
-        "model": { "type": "string", "default": "claude-sonnet-4-6", "description": "Model id for this chain's LLM nodes. Must be advertised by `provider` in the host catalog; override at instantiation." }
+        "provider": { "type": "string", "description": "AI provider id for this chain's model-calling nodes. Set it to fix a provider into those nodes when the workflow is created. Leave it unset and each run uses the run's chosen provider, else the workspace's AI setting, else the host's catalog default (ADR 0903); whichever is chosen is recorded on the run, so a replay or fork uses the same one. The workspace needs a key for the provider that runs." },
+        "model": { "type": "string", "description": "Model id for this chain's model-calling nodes. Must be offered by the provider in the host catalog. Leave it unset to use the provider's model from the same choice (ADR 0903)." }
       } },
       "capabilities": ["side-effectful"],
       "dag": {

@@ -1,23 +1,32 @@
 /**
- * conversationTransport — turns→bubbles mapping + flag default + the gate-open
- * wait that guards the first turn against the background-dispatch race.
+ * conversationTransport (RFC 0005 / ADR 0067, the SOLE chat transport) —
+ * turns→bubbles mapping, the per-event replay-guarded mappers, run-state seeding,
+ * and the gate-open wait that guards the first turn against the
+ * background-dispatch race.
+ *
+ * What breaks it: each describe names its mapper; a replay guard loosened to
+ * `<` re-types a prior turn's delta, a lost spelling drops a live reply during a
+ * deploy-skew window, and a gate wait that accepts ANY open interrupt (or stops
+ * checking the run's terminal status) sends the first turn into a 404.
  */
 import { describe, it, expect, afterEach, vi } from 'vitest';
+import type { RunSnapshot } from '@openwop/openwop';
+import type { OpenInterrupt } from '../../client/interruptsClient.js';
 
-const openConversation = vi.fn();
-const listOpenInterrupts = vi.fn();
-const getRun = vi.fn();
+const openConversation = vi.fn<(input: { workflowId: string }) => Promise<{ runId: string }>>();
+const listOpenInterrupts = vi.fn<(runId: string) => Promise<readonly OpenInterrupt[]>>();
+const getRun = vi.fn<(runId: string) => Promise<RunSnapshot>>();
 
 vi.mock('../conversationClient.js', async (importActual) => ({
   ...(await importActual<typeof import('../conversationClient.js')>()),
-  openConversation: (...a: unknown[]) => openConversation(...a),
+  openConversation: (input: { workflowId: string }) => openConversation(input),
 }));
 vi.mock('../../client/interruptsClient.js', () => ({
-  listOpenInterrupts: (...a: unknown[]) => listOpenInterrupts(...a),
+  listOpenInterrupts: (runId: string) => listOpenInterrupts(runId),
 }));
 vi.mock('../../client/runsClient.js', async (importActual) => ({
   ...(await importActual<typeof import('../../client/runsClient.js')>()),
-  getRun: (...a: unknown[]) => getRun(...a),
+  getRun: (runId: string) => getRun(runId),
 }));
 
 import { seedRunState, turnsToBubbles, openConversationSession, streamDeltaFromEvent, exchangeSettleSignal, exchangeErrorPayload, toolActivityFromEvent, titledFromEvent, recallUsedFromEvent, contextDegradedFromEvent } from '../conversationTransport.js';
@@ -32,7 +41,8 @@ describe('turnsToBubbles', () => {
     const bubbles = turnsToBubbles([
       turn({ messageId: 'c:0:system', role: 'system', turnIndex: 0, from: 'system', content: 'opened' }),
       turn({ messageId: 'c:1:user', role: 'user', turnIndex: 1, from: 'user', content: 'hi @devon', to: 'a:devon' }),
-      turn({ messageId: 'c:2:agent', role: 'agent', turnIndex: 2, from: 'a:devon', content: 'Hey!', agent: { agentId: 'a:devon' } }),
+      // `from` differs from the wire agent on purpose: attribution prefers `agent.agentId`.
+      turn({ messageId: 'c:2:agent', role: 'agent', turnIndex: 2, from: 'host:router', content: 'Hey!', agent: { agentId: 'a:devon' } }),
       turn({ messageId: 'c:3:system', role: 'system', turnIndex: 3, from: 'system', content: 'closed' }),
     ]);
     expect(bubbles).toEqual([
@@ -215,27 +225,42 @@ describe('titledFromEvent — ADR 0151 auto-title', () => {
 });
 
 describe('openConversationSession — waits for the gate before the first turn', () => {
-  afterEach(() => { openConversation.mockReset(); listOpenInterrupts.mockReset(); getRun.mockReset(); });
+  const interrupt = (nodeId: string): OpenInterrupt => ({ interruptId: `i-${nodeId}`, nodeId, kind: 'conversation.start', data: null, createdAt: '2026-07-25T12:00:00.000Z' });
+  const snapshot = (status: RunSnapshot['status']): RunSnapshot => ({
+    runId: 'run-x', workflowId: 'openwop-app.conversation', status, eventLogSchemaVersion: 3,
+    owner: { tenant: 't', subject: { issuer: 'urn:test', subjectId: 'user:u1', tenant: 't', lane: 'session', kind: 'user' } },
+  });
+  afterEach(() => { vi.useRealTimers(); openConversation.mockReset(); listOpenInterrupts.mockReset(); getRun.mockReset(); });
 
   it('resolves only once the gate interrupt is open (guards the dispatch race)', async () => {
+    vi.useFakeTimers();
     openConversation.mockResolvedValue({ runId: 'run-1' });
-    // First poll: gate not open yet (background dispatch in flight); then it opens.
+    // Poll 1: nothing open (background dispatch in flight). Poll 2: ANOTHER node's
+    // interrupt is open — not the gate, so it must keep waiting. Poll 3: the gate.
     listOpenInterrupts
       .mockResolvedValueOnce([])
-      .mockResolvedValue([{ interruptId: 'i-gate', nodeId: 'gate', kind: 'conversation' }]);
-    getRun.mockResolvedValue({ status: 'running' });
+      .mockResolvedValueOnce([interrupt('other')])
+      .mockResolvedValue([interrupt('gate')]);
+    getRun.mockResolvedValue(snapshot('running'));
 
-    const { runId, nodeId } = await openConversationSession({});
+    const pending = openConversationSession({});
+    await vi.advanceTimersByTimeAsync(1_000);
+    const { runId, nodeId } = await pending;
     expect(runId).toBe('run-1');
     expect(nodeId).toBe('gate');
-    expect(listOpenInterrupts.mock.calls.length).toBeGreaterThanOrEqual(2); // it polled, didn't return early
+    expect(listOpenInterrupts).toHaveBeenCalledTimes(3); // it polled past the non-gate interrupt
+    expect(listOpenInterrupts).toHaveBeenCalledWith('run-1');
   });
 
   it('fails fast with a readable error if the run terminates before the gate opens', async () => {
+    vi.useFakeTimers();
     openConversation.mockResolvedValue({ runId: 'run-2' });
-    listOpenInterrupts.mockResolvedValue([]);       // gate never opens
-    getRun.mockResolvedValue({ status: 'failed' });  // run died first
-    await expect(openConversationSession({})).rejects.toThrow(/could not start \(run failed\)/);
+    listOpenInterrupts.mockResolvedValue([]);              // gate never opens
+    getRun.mockResolvedValue(snapshot('failed'));          // run died first
+    const outcome = expect(openConversationSession({})).rejects.toThrow('The conversation could not start (run failed).');
+    await vi.advanceTimersByTimeAsync(1_000);              // well inside the 10 s deadline
+    await outcome;
+    expect(getRun).toHaveBeenCalledWith('run-2');
   });
 });
 

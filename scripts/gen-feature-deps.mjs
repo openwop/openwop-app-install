@@ -150,7 +150,7 @@ function computeEdges() {
   // when the target is off. Reviewed per edge; the reason is the record.
   const HARD_DEP_NOT_REALLY = {
     'advisory-board->strategy': 'ADR 0820 §8.1 / G7 — strategyService now resolves its own toggle+plan, but ONLY inside the context seam (resolveStrategyContextRefs → strategyContextAllowed), which returns EMPTY when refused; the board degrades to no strategy context. getStrategy/canSubjectReadStrategy (board attach validation) do not gate. Degrade, not break ⇒ [2], not a lock',
-    'service-desk->whatsapp': 'imports the pure parser extractWaInbound; whatsappService self-gates only in its SEND path, which service-desk never calls — so it does NOT break when whatsapp is off ⇒ [2], not a lock',
+    'service-desk->whatsapp': 'imports the pure parser extractWaInbound + normalizeWaNumber, and (ADR 0878 D3) calls sendWhatsApp to deliver a ticket reply. sendWhatsApp self-gates on the whatsapp toggle and returns a typed feature_disabled, which the desk records on the message as a failed delivery — so it does NOT break when whatsapp is off ⇒ [2], not a lock',
   };
   // TARGET-level soft override (ADR 0446 F/D.2): the target's service resolves its own
   // toggle, but returns a valid ANSWER rather than breaking the consumer, so the edge is

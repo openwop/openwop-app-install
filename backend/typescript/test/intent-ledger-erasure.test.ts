@@ -13,34 +13,41 @@
  * This pins the fix in both directions, plus the two things it deliberately does
  * NOT do — because an eraser's un-erased residual is only honest while it is
  * asserted somewhere, not merely written in a comment.
+ *
+ * What turns it red (sabotage-probed, /grade-tests w29): dropping the per-row
+ * tenant filter or the subject-form match (NON-REACH), matching only the bare key
+ * (the `user:` form case), deleting instead of redacting (every REACH case).
+ * Registration into the DSAR fan-out is NOT asserted here: the boot layer of
+ * `subject-eraser-manifest.test.ts` ('nothing in the manifest is missing after
+ * createApp()') pins `eraseIntentLedgerSubject` as registered by a real boot.
  */
 
 import { beforeEach, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
-import { DurableCollection, initHostExtPersistence } from '../src/host/hostExtPersistence.js';
-import { eraseIntentLedgerSubject } from '../src/features/intent-ledger/ledgerStore.js';
+import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
+import { eraseIntentLedgerSubject, getLedger, saveLedger } from '../src/features/intent-ledger/ledgerStore.js';
 import { ERASED } from '../src/host/subjectErasureRedaction.js';
 import type { IntentLedger } from '../src/features/intent-ledger/types.js';
 
 const T = 'ws:il-erase';
-let store: DurableCollection<IntentLedger>;
+const CREATED = '2026-06-24T00:00:00.000Z';
 
 const put = async (over: Partial<IntentLedger> & { conversationId: string }): Promise<void> => {
-  await store.put({
+  const base: IntentLedger = {
     ledgerId: `l-${over.conversationId}`,
     tenantId: T,
+    conversationId: over.conversationId,
     goal: 'ship the thing',
     allowed: [], forbidden: [], requireApproval: [], successCriteria: [],
-    status: 'approved', proposedBy: 'user', createdAt: new Date().toISOString(),
-    ...over,
-  } as IntentLedger);
+    status: 'approved', proposedBy: 'user', createdAt: CREATED,
+  };
+  await saveLedger({ ...base, ...over });
 };
 const get = async (conversationId: string, tenantId = T): Promise<IntentLedger | null> =>
-  store.get(`${tenantId}:${conversationId}`);
+  getLedger(tenantId, conversationId);
 
 beforeEach(async () => {
   initHostExtPersistence(await openStorage('memory://'));
-  store = new DurableCollection<IntentLedger>('intent-ledger:ledgers', (l) => `${l.tenantId}:${l.conversationId}`);
 });
 
 describe('CONS-16 — a DSAR reaches the intent ledger\'s approver attribution', () => {
@@ -59,10 +66,10 @@ describe('CONS-16 — a DSAR reaches the intent ledger\'s approver attribution',
   it('NON-REACH: another approver, another tenant, and an unapproved ledger are untouched', async () => {
     await put({ conversationId: 'c2', approvedBy: 'bob' });
     await put({ conversationId: 'c3' }); // draft — no approvedBy at all
-    await store.put({
+    await saveLedger({
       ledgerId: 'l-other', tenantId: 'ws:other', conversationId: 'c4', goal: 'g',
       allowed: [], forbidden: [], requireApproval: [], successCriteria: [],
-      status: 'approved', proposedBy: 'user', approvedBy: 'alice', createdAt: new Date().toISOString(),
+      status: 'approved', proposedBy: 'user', approvedBy: 'alice', createdAt: CREATED,
     });
 
     await eraseIntentLedgerSubject(T, 'alice');
@@ -85,26 +92,37 @@ describe('CONS-16 — a DSAR reaches the intent ledger\'s approver attribution',
     expect(row!.status).toBe('approved');
   });
 
-  it('the STATED residual is real: `goal` free text is NOT reached', async () => {
-    // Asserted, not just written in a comment. `goal` is model-summarised text
-    // from a possibly multi-party conversation, so it is not unambiguously the
-    // erased subject's own data, and the cascade that would reach it cannot be
-    // done safely from inside an eraser (the sibling conversation eraser redacts
-    // the very fields that lookup would read, and eraser order is registration
-    // order). If that ever changes, this assertion is the thing that must be
-    // updated — which is the point of pinning a residual.
+  // PINNED DEFECT (IL-DSAR-1, proposed grade-code row; ruled a privacy defect in
+  // /grade-tests w29): a DSAR for alice leaves `goal` free text that names her in
+  // place. The product documents this as a stated gap (`ledgerStore.ts`
+  // `eraseIntentLedgerSubject` docblock: `goal` is multi-party model summary and
+  // the subject→conversation cascade cannot run safely inside an eraser — it needs
+  // an upfront closure in the `SubjectKeyResolver` phase). This `it.fails` asserts
+  // the CORRECT outcome; it goes red the moment the eraser reaches `goal`, which is
+  // the signal to flip it to a plain `it`.
+  it.fails('IL-DSAR-1: goal free text naming the erased subject no longer carries their name', async () => {
     await put({ conversationId: 'c6', approvedBy: 'alice', goal: 'alice wants a raise' });
     await eraseIntentLedgerSubject(T, 'alice');
-    expect((await get('c6'))!.goal).toBe('alice wants a raise');
+    const row = await get('c6');
+    expect(row, 'the row must still exist').toBeTruthy();
+    expect(row!.goal).not.toContain('alice');
   });
 
-  it('is idempotent and no-ops on a falsy tenant or subject (never a global redact)', async () => {
+  it('is idempotent: a repeated erase leaves the redaction in place', async () => {
     await put({ conversationId: 'c7', approvedBy: 'alice' });
-    await eraseIntentLedgerSubject('', 'alice');
-    await eraseIntentLedgerSubject(T, '');
-    expect((await get('c7'))!.approvedBy).toBe('alice');
     await eraseIntentLedgerSubject(T, 'alice');
     await eraseIntentLedgerSubject(T, 'alice');
     expect((await get('c7'))!.approvedBy).toBe(ERASED);
+  });
+
+  // CEILING (double guard): the `!tenantId || !subjectKey` early return cannot be
+  // made to fail with production-shaped rows — `erase('', …)` already no-ops via the
+  // per-row tenant filter, and `erase(T, '')` via the subject-form match (forms of ''
+  // are {'', 'user:'}, never a real approver). Kept as a no-op check, not a witness.
+  it('a falsy tenant or subject is a no-op (ceiling: double guard, see comment)', async () => {
+    await put({ conversationId: 'c8', approvedBy: 'alice' });
+    await eraseIntentLedgerSubject('', 'alice');
+    await eraseIntentLedgerSubject(T, '');
+    expect((await get('c8'))!.approvedBy).toBe('alice');
   });
 });

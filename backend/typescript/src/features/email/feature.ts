@@ -11,6 +11,8 @@
 import type { BackendFeature } from '../types.js';
 import { registerEmailRoutes } from './routes.js';
 import { registerEmailEgressGuard } from './egressGuard.js';
+import { registerChainEmailSenderLookup } from '../../host/chainEmailPolicy.js';
+import { listVerifiedSenders } from './emailService.js';
 import { registerEmailFormsConsentSink } from './formsConsentSink.js';
 import { registerEmailAgentTools } from './agentTools.js';
 import { buildEmailSurface } from './surface.js';
@@ -22,6 +24,9 @@ export const emailFeature: BackendFeature = {
     // ADR 0655 D1 — arm the recipient egress guard on the host seam. Toggle-
     // independent: a refusal floor for every lane, not a feature capability.
     registerEmailEgressGuard();
+    // ADR 0895 D1 — the chain lane's `from` binds to these senders. Toggle-independent
+    // for the same reason: a configured sender is an operator statement.
+    registerChainEmailSenderLookup(listVerifiedSenders);
     registerEmailFormsConsentSink(); // ADR 0338 §D2 — the `email-consent` forms sink (email → forms)
     // CFP-1 — the copywriter agent's REAL chat tools (get-campaign / save-draft),
     // gated like the routes; replaces the node-typeId allowlist the loop dropped.

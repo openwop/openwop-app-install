@@ -140,13 +140,14 @@ const SIDE_EFFECTING_TYPE_PATTERNS: readonly RegExp[] = [
   // `module.sideEffecting`, so the manifest declaration alone reaches the
   // DERIVED floor and this entry proves the typeId path independently.
   //
-  // `feature.comments.nodes.resolve` is deliberately NOT here. It is a durable
-  // write, but re-executing it converges on the SAME terminal state
-  // (`status:'resolved'`), mints no row and emits no notification, so a fork
-  // duplicates nothing observable — only `updatedAt` moves. Recorded as a
-  // judgement rather than left as an omission; revisit if `resolve` ever gains a
-  // notification or a `resolvedBy` audit row (`CMNT-10`).
-  /^feature\.comments\.nodes\.post$/,
+  // `feature.comments.nodes.resolve` joined it in ADR 0881 (correction H1). It
+  // used to be a deliberate omission ("re-executing converges on the same
+  // terminal state … revisit if `resolve` ever gains a notification or a
+  // `resolvedBy` audit row"). ADR 0881 D6 added BOTH, plus a host event, and a
+  // comment reopened between the source run and a `:fork` would make a real
+  // transition again. Same two-leg rule: the pack's `role:"side-effect"` is the
+  // other half.
+  /^feature\.comments\.nodes\.(post|resolve)$/,
   // WF-JS-1 — the campaign-pass trigger. One execution can SEND real job
   // applications (grant-bounded, but outward); a replay must be served the
   // recorded pass digest, never re-fire one. Pack `.mjs` nodes cannot

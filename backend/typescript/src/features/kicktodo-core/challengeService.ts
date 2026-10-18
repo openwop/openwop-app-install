@@ -15,6 +15,9 @@ import {
   type MissedWindowPolicy,
 } from './types.js';
 import { syncChallengeToKickbotKb, removeChallengeFromKickbotKb } from './kicktodoKnowledgeService.js';
+import { createLogger } from '../../observability/logger.js';
+
+const log = createLogger('kicktodo.challenges');
 
 /** Keyed `${tenant}::${challengeId}::v${version}` — point lookups + bounded
  *  tenant/challenge prefix scans only. */
@@ -235,6 +238,33 @@ export async function getLatest(tenantId: string, id: string): Promise<Challenge
   return rows.sort((a, b) => b.version - a.version)[0];
 }
 
+/** KTSEED-3 — every version row of one challenge id, oldest first (bounded per-id
+ *  prefix scan). */
+export async function listChallengeVersions(tenantId: string, id: string): Promise<ChallengeDefinition[]> {
+  const rows = await challenges.listByPrefix(`${tenantId}::${id}::`);
+  return rows.filter((c) => c.tenantId === tenantId && c.id === id).sort((a, b) => a.version - b.version);
+}
+
+/**
+ * KTSEED-3 — delete ONE version row, and only a RETIRED one (a published version
+ * is immutable and a draft is someone's work). The caller owns proving nothing
+ * still pins `(id, version)` — enrollments pin it (PRD §13), so the demo seeder
+ * deletes only versions no enrollment references. Returns true when it deleted.
+ */
+export async function deleteRetiredVersion(tenantId: string, id: string, version: number): Promise<boolean> {
+  const row = await getChallenge(tenantId, id, version);
+  if (!row || row.status !== 'retired') return false;
+  return challenges.delete(`${tenantId}::${id}::v${version}`);
+}
+
+/** KTCORE-2 — true when ANY version of this challenge id is currently published.
+ *  An invite names a challenge id (all versions), so "still invitable" means some
+ *  version is live in the catalog. Bounded per-id prefix scan. */
+export async function hasPublishedVersion(tenantId: string, id: string): Promise<boolean> {
+  const rows = await challenges.listByPrefix(`${tenantId}::${id}::`);
+  return rows.some((c) => c.tenantId === tenantId && c.id === id && c.status === 'published');
+}
+
 /** Published challenges for Discover — the PUBLIC immutable projection only
  *  (drafts and retired rows never leak; PRD §10.1). */
 export async function listPublished(tenantId: string): Promise<ChallengeDefinition[]> {
@@ -277,13 +307,17 @@ export async function listPublishedForLocale(tenantId: string, requestedLocale: 
  *  retires its translations (a safety signal must propagate), while retiring
  *  one translation leaves the source and its siblings untouched. */
 export async function retireLineage(tenantId: string, id: string, version: number): Promise<number> {
-  const root = await retireChallenge(tenantId, id, version);
+  const root = await retireOne(tenantId, id, version);
   if (!root || root.translationOf) return root ? 1 : 0;
-  let retired = 1;
+  return 1 + await retireTranslationsOf(tenantId, id, version);
+}
+
+/** The live translations of one source version, retired. Returns the count. */
+async function retireTranslationsOf(tenantId: string, id: string, version: number): Promise<number> {
+  let retired = 0;
   for (const c of await challenges.listByPrefix(`${tenantId}::`)) {
     if (c.translationOf?.challengeId === id && c.translationOf.version === version && c.status !== 'retired') {
-      await retireChallenge(tenantId, c.id, c.version);
-      retired += 1;
+      if (await retireOne(tenantId, c.id, c.version)) retired += 1;
     }
   }
   return retired;
@@ -316,8 +350,31 @@ export async function publishChallenge(tenantId: string, id: string, version: nu
 }
 
 /** Retire — blocks NEW enrollments; active/historical enrollments keep their
- *  pinned version (PRD §13). Idempotent. */
+ *  pinned version (PRD §13). Idempotent.
+ *
+ *  Grade-data KTCORE-D1 — retiring a SOURCE also retires its translations (the ADR
+ *  0430 P3 rule: "a safety signal must propagate"). That cascade lived only in
+ *  `retireLineage`, which nothing called: the authoring retire route and the Factory
+ *  kill switch both called this function, so a challenge withdrawn for safety stayed
+ *  enrollable in every other locale. Every retire now cascades DOWN; retiring a
+ *  translation still leaves its source and siblings alone. */
 export async function retireChallenge(tenantId: string, id: string, version: number): Promise<ChallengeDefinition | null> {
+  const root = await retireOne(tenantId, id, version);
+  if (root && !root.translationOf) await retireTranslationsOf(tenantId, id, version);
+  return root;
+}
+
+/** KTFAC-2 — retire a version ONLY while it is still a draft. The CAS is against
+ *  the draft row read, so a publish that lands first makes this a no-op (null)
+ *  rather than retiring live catalog content as a side effect. */
+export async function retireDraft(tenantId: string, id: string, version: number): Promise<ChallengeDefinition | null> {
+  const row = await getChallenge(tenantId, id, version);
+  if (!row || row.status !== 'draft') return null;
+  const retired: ChallengeDefinition = { ...row, status: 'retired' };
+  return (await challenges.compareAndSwap(row, retired)) ? retired : null;
+}
+
+async function retireOne(tenantId: string, id: string, version: number): Promise<ChallengeDefinition | null> {
   const row = await getChallenge(tenantId, id, version);
   if (!row) return null;
   if (row.status === 'retired') return row;
@@ -327,5 +384,45 @@ export async function retireChallenge(tenantId: string, id: string, version: num
   // ADR 0442 P3 — drop the retired plan from KickBot's KB so it is never cited
   // as live (best-effort; the KB service swallows its own failures).
   await removeChallengeFromKickbotKb(tenantId, id, version);
+  // KTCORE-2 — a retire that leaves NO published version of this id kills its
+  // "challenge a friend" links too. Best-effort: `resolveInvite` re-checks the
+  // challenge's status on every read, so a revoke that fails here never leaves a
+  // usable link — it only leaves a row the next retire/mint cleans up. Dynamic
+  // import: inviteService imports this module (the enrollmentService precedent).
+  try {
+    if (!(await hasPublishedVersion(tenantId, id))) {
+      const { revokeInvitesForChallenge } = await import('./inviteService.js');
+      await revokeInvitesForChallenge(tenantId, id);
+    }
+  } catch (err) {
+    log.warn('kicktodo_retire_invite_revoke_deferred', { challengeId: id, error: err instanceof Error ? err.message : String(err) });
+  }
   return retired;
+}
+
+// ── KTFAC-3 (KickTodo wave 4C) — a challenge outlives its author ──
+/** The sentinel an erased author's subject is replaced with (the creator package's
+ *  `ERASED_SUBJECT` value, restated here so core does not import a feature). */
+export const ERASED_CHALLENGE_AUTHOR = '[erased]';
+
+/**
+ * DSAR: a challenge is AUTHORED CONTENT and stays — published versions included —
+ * but it must not keep naming the person who wrote it. `authorSubject` is outside
+ * `challengeContentHash`, so replacing it never changes a version's content
+ * address, and nothing reads it for authorization. Every version of every lineage
+ * the subject authored is re-stamped by CAS (a lost CAS re-reads). Bounded tenant
+ * prefix; idempotent (a re-stamped row no longer matches). Returns the count.
+ */
+export async function anonymizeChallengeAuthor(tenantId: string, subjectKey: string): Promise<number> {
+  if (!tenantId || !subjectKey || subjectKey === ERASED_CHALLENGE_AUTHOR) return 0;
+  let n = 0;
+  for (const row of await challenges.listByPrefix(`${tenantId}::`)) {
+    if (row.tenantId !== tenantId || row.authorSubject !== subjectKey) continue;
+    const key = `${row.tenantId}::${row.id}::v${row.version}`;
+    for (let attempt = 0, cur: ChallengeDefinition | null = row; attempt < 4 && cur && cur.authorSubject === subjectKey; attempt += 1) {
+      if (await challenges.compareAndSwap(cur, { ...cur, authorSubject: ERASED_CHALLENGE_AUTHOR })) { n += 1; break; }
+      cur = await challenges.get(key);
+    }
+  }
+  return n;
 }

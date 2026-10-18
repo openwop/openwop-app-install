@@ -8,4 +8,7 @@ interface ImportMetaEnv {
   /** OTLP HTTP endpoint for browser-side OpenTelemetry (ADR 0118 Phase 6). When
    *  set at BUILD time, the SPA lazily bootstraps `sdk-trace-web`; unset ⇒ off. */
   readonly VITE_OTEL_EXPORTER_OTLP_ENDPOINT?: string;
+  /** ADR 0873 D12 — hours a last-known offline entitlement grant stays valid.
+   *  Unset, non-numeric or non-positive ⇒ 24. */
+  readonly VITE_OFFLINE_ENTITLEMENT_TTL_H?: string;
 }

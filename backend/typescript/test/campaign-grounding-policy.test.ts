@@ -5,6 +5,12 @@
  *  - kernel + channel nodes FAIL CLOSED under strict (no collection bound /
  *    rag error / coverage none → structured grounding_insufficient) and carry
  *    the grounding label on success; `off` skips retrieval entirely.
+ *
+ * Sabotage witnesses (wave 30): each coverage branch (none / thin / ok) and the
+ * minScore filter in ragQuery; the policy parse (junk → 400) and its store;
+ * in BOTH nodes the strict no-binding, coverage-none and rag-throws exits;
+ * the kernel's sourceDocIds, relevance floor + explicit override, the
+ * best-effort catch and the `off` skip each red the case that names them.
  */
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { mkdtempSync } from 'node:fs';
@@ -14,12 +20,17 @@ import { openSqliteStorage } from '../src/storage/sqlite/index.js';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { initInMemorySurfaces } from '../src/host/inMemorySurfaces.js';
 import { createCollection, ingestDocument, ragQuery } from '../src/features/kb/kbService.js';
-import { createBrief, __clearBriefs } from '../src/features/campaign-brief/briefService.js';
+import { createBrief, getBrief, __clearBriefs } from '../src/features/campaign-brief/briefService.js';
 import { nodes as briefNodes } from '../../../packs/feature.campaign-brief.nodes/index.mjs';
 import { nodes as channelNodes } from '../../../packs/feature.campaign-channels.nodes/index.mjs';
 
 const OK_AI = async () => ({ data: { headline: 'H', supportingStatement: 'S', proofPoints: ['P'], primaryCta: 'C', tone: 't' } });
 const CHANNEL_AI = async () => ({ data: { headline: 'H', heroSubhead: 'S', sections: [], seoTitle: 'T', seoDescription: 'D', primaryCta: 'C' } });
+
+// File-level so every describe has the surfaces under --sequence.shuffle.
+beforeAll(() => {
+  initInMemorySurfaces({ dataDir: mkdtempSync(join(tmpdir(), 'openwop-gp-')) });
+});
 
 function briefFeature(brief: Record<string, unknown>) {
   return {
@@ -30,12 +41,11 @@ function briefFeature(brief: Record<string, unknown>) {
 }
 
 describe('kb coverage classification (ADR 0351 P2)', () => {
-  beforeAll(async () => {
-    initInMemorySurfaces({ dataDir: mkdtempSync(join(tmpdir(), 'openwop-gp-')) });
+  beforeAll(() => {
     initHostExtPersistence(openSqliteStorage(':memory:'));
   });
 
-  it('none (0 hits) / ok (≥2 hits) / minScore filters before classification', async () => {
+  it('none (0 hits) / thin (1 hit) / ok (≥2 hits) / minScore filters before classification', async () => {
     const t = 'gp-tenant';
     const col = await createCollection(t, 'o1', 'u1', { name: 'C' });
     const empty = await ragQuery(t, 'o1', col.collectionId, 'zebra quantum', 5);
@@ -51,6 +61,13 @@ describe('kb coverage classification (ADR 0351 P2)', () => {
     const floored = await ragQuery(t, 'o1', col.collectionId, 'robotic picking grocery', 5, { minScore: 999 });
     expect(floored.coverage).toBe('none');
     expect(floored.contexts).toEqual([]);
+
+    // Exactly one retrievable chunk → thin (strict callers treat it as weak, not none).
+    const single = await createCollection(t, 'o1', 'u1', { name: 'One' });
+    await ingestDocument(t, 'o1', 'u1', single.collectionId, { title: 'Solo', text: 'FlashPick robotic picking.' });
+    const thin = await ragQuery(t, 'o1', single.collectionId, 'robotic picking', 5);
+    expect(thin.contexts).toHaveLength(1);
+    expect(thin.coverage).toBe('thin');
   });
 });
 
@@ -63,8 +80,9 @@ describe('brief groundingPolicy field', () => {
   it('stores valid values; rejects junk with 400', async () => {
     const b = await createBrief('gp-t', 'o1', 'u1', { name: 'B', productName: 'X', groundingPolicy: 'strict', messaging: { primaryValueProp: 'v' } });
     expect(b.groundingPolicy).toBe('strict');
+    expect((await getBrief('gp-t', b.id))?.groundingPolicy).toBe('strict'); // the STORED row, not the echo
     await expect(createBrief('gp-t', 'o1', 'u1', { name: 'B2', productName: 'X', groundingPolicy: 'very-strict', messaging: { primaryValueProp: 'v' } }))
-      .rejects.toMatchObject({ httpStatus: 400 });
+      .rejects.toMatchObject({ httpStatus: 400, code: 'validation_error' });
   });
 });
 
@@ -130,6 +148,9 @@ describe('strict fail-closed in the generation nodes', () => {
     };
     const out = await briefNodes['feature.campaign-brief.nodes.generate-kernel']({ features, callAI: OK_AI, inputs: { briefId: 'b1' } });
     expect(out.status).toBe('success');
+    // Ungrounded, and SAYS so — never labeled as grounded coverage.
+    expect(out.outputs?.grounding).toEqual({ policy: 'best-effort', coverage: 'none' });
+    expect((out.outputs?.kernel as Record<string, unknown>).headline).toBe('H');
   });
 
   it('kernel: off skips retrieval entirely', async () => {
@@ -156,5 +177,26 @@ describe('strict fail-closed in the generation nodes', () => {
     const ok = await channelNodes['feature.campaign-channels.nodes.generate']({ features: mk('ok'), callAI: CHANNEL_AI, inputs: { briefId: 'b1', channel: 'landing_page' } });
     expect(ok.status).toBe('success');
     expect(ok.outputs?.grounding).toMatchObject({ policy: 'strict', coverage: 'ok' });
+  });
+
+  it('channel generate: strict + no KB binding → grounding_insufficient', async () => {
+    const features = {
+      'campaign-brief': briefFeature({ id: 'b1', orgId: 'o1', productName: 'X', groundingPolicy: 'strict' }),
+      kb: { rag: async () => ({ augmentedPrompt: 'GROUNDED', citations: [], coverage: 'ok' }) },
+    };
+    const out = await channelNodes['feature.campaign-channels.nodes.generate']({ features, callAI: CHANNEL_AI, inputs: { briefId: 'b1', channel: 'landing_page' } });
+    expect(out.status).toBe('failed');
+    expect(out.error?.code).toBe('grounding_insufficient');
+  });
+
+  it('channel generate: strict + rag THROWS → grounding_insufficient (never silent)', async () => {
+    const features = {
+      'campaign-brief': briefFeature({ id: 'b1', orgId: 'o1', productName: 'X', kbCollectionId: 'kb1', groundingPolicy: 'strict' }),
+      kb: { rag: async () => { throw new Error('kb down'); } },
+    };
+    const out = await channelNodes['feature.campaign-channels.nodes.generate']({ features, callAI: CHANNEL_AI, inputs: { briefId: 'b1', channel: 'landing_page' } });
+    expect(out.status).toBe('failed');
+    expect(out.error?.code).toBe('grounding_insufficient');
+    expect(out.error?.message).toContain('kb down');
   });
 });

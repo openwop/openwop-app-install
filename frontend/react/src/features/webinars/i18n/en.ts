@@ -47,6 +47,7 @@ export const messages = {
   formBoundUnknown: "Bound form {{formId}}",
   formsLoading: "Loading forms…",
   noFormsAvailable: "No forms in this organization yet — create one first.",
+  formsLoadFailed: "Couldn’t load this organization’s forms, so none can be picked right now.",
   bindFormLabel: "Registration form",
   bindFormChoose: "Choose a form…",
   fieldWebinarIdHelp: "The webinar's id in Zoom — the numeric id in its Zoom link.",

@@ -1,8 +1,8 @@
 /**
  * ADR 0133 Phase 4 — the task-deck ENTRY (the chat-header button).
  *
- * `TaskDeckButton` self-gates on the `task-deck` feature (renders nothing when off)
- * and LAZY-loads the modal body so only this small button is in the entry chunk
+ * `TaskDeckButton` always renders (the feature is always-on, ADR 0134) and
+ * LAZY-loads the modal body so only this small button is in the entry chunk
  * (bundle-budget; the 0132-P5 lazy precedent).
  *
  * @see docs/adr/0133-run-task-deck.md
@@ -14,13 +14,14 @@ import { ColumnsIcon } from '../ui/icons/index.js';
 
 const TaskDeckModal = lazy(() => import('./TaskDeckModal.js'));
 
-// task-deck is always-on (toggle removed); the button always renders.
+// task-deck is always-on (toggle removed). TD2UX-2: the accessible name IS the
+// visible label (WCAG 2.5.3) — no aria-label that says something else.
 export function TaskDeckButton({ conversationRunId }: { conversationRunId?: string }): JSX.Element {
   const { t } = useTranslation('taskDeck');
   const [open, setOpen] = useState(false);
   return (
     <>
-      <Button variant="secondary" className="u-fs-11" onClick={() => setOpen(true)} aria-label={t('openTitle')} title={t('openTitle')}>
+      <Button variant="secondary" className="u-fs-11" onClick={() => setOpen(true)} title={t('openTitle')}>
         <ColumnsIcon size={14} /> {t('button')}
       </Button>
       {open && (

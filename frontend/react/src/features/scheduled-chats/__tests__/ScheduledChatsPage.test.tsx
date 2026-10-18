@@ -1,5 +1,24 @@
+/**
+ * ScheduledChatsPage (ADR 0125 Phase 3b) — the admin list of recurring agent chats.
+ *
+ * Guards: (1) each row's status is the REAL scheduler state — a paused chat reads
+ * Paused even with a turn-workflow wired; an enabled chat with a workflow reads
+ * Active; an enabled chat without one reads Inert — asserted PER ROW, because a
+ * page-wide "one Active, one Inert" also passes with the labels swapped between rows
+ * (grade-tests w53 probe `sch-active-inert-swap` was vacuous until the rows were
+ * told apart); (2) the Pause/Resume affordance follows `enabled`; (3) the empty
+ * state; (4) the feature-toggle UNRESOLVED state is a skeleton under the header, not
+ * the terminal "off" card, and nothing is read until it resolves (#2978 — the old
+ * four-field access mock hid that branch; `makeFeatureAccess` is typed as the hook's
+ * return); (5) RESOLVED off still renders the off card. No "disabled → no fetch"
+ * case: scheduled-chats graduated to always-on (ADR 0134).
+ *
+ * Breaks it: swapping the Active/Inert ternary, dropping `!r.enabled` precedence,
+ * hard-coding the Pause/Resume label, deleting the `access.loading` branch, or
+ * passing `true` instead of `access.enabled` to `useOrgSelection`.
+ */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, cleanup } from '@testing-library/react';
+import { render, screen, cleanup, within } from '@testing-library/react';
 import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
 vi.mock('../../../client/scheduledChatsClient.js', () => ({ listOrgs: vi.fn(), listScheduledChats: vi.fn(), deleteScheduledChat: vi.fn(), setScheduledChatEnabled: vi.fn() }));
 let enabled = true;
@@ -16,23 +35,34 @@ vi.mock('../../../featureToggles/FeatureAccessContext.js', async (orig) => ({
 import { listOrgs, listScheduledChats, type ScheduledChat } from '../../../client/scheduledChatsClient.js';
 import { ScheduledChatsPage } from '../ScheduledChatsPage.js';
 const mockOrgs = vi.mocked(listOrgs); const mockList = vi.mocked(listScheduledChats);
+/** The table row that shows `agentId` (each fixture row has its own agent). */
+const rowOf = (agentId: string): HTMLElement => {
+  const row = screen.getByText(agentId).closest('tr');
+  if (!row) throw new Error(`no table row for ${agentId}`);
+  return row;
+};
 const c = (chatId: string, over: Partial<ScheduledChat> = {}): ScheduledChat => ({ chatId, agentId: 'iris', prompt: 'p', conversationId: 'cv', cronExpr: '0 9 * * *', enabled: true, ...over });
 beforeEach(() => { enabled = true; loading = false; mockOrgs.mockReset(); mockList.mockReset(); mockOrgs.mockResolvedValue([{ orgId: 'o1', name: 'Acme' }]); });
 afterEach(cleanup);
 describe('ScheduledChatsPage (ADR 0125 Phase 3b)', () => {
   it('renders scheduled chats with active/inert status', async () => {
-    mockList.mockResolvedValue([c('a', { workflowId: 'wf' }), c('b')]);
+    mockList.mockResolvedValue([c('a', { agentId: 'iris', workflowId: 'wf' }), c('b', { agentId: 'atlas' })]);
     render(<ScheduledChatsPage />);
-    expect((await screen.findAllByText('iris')).length).toBe(2);
-    expect(screen.getByText('Active')).toBeTruthy();   // enabled + workflowId
-    expect(screen.getByText('Inert')).toBeTruthy();     // enabled, no workflowId
+    await screen.findByText('iris');
+    // Per row: enabled + workflowId → Active; enabled, no workflowId → Inert.
+    expect(within(rowOf('iris')).getByText('Active')).toBeTruthy();
+    expect(within(rowOf('iris')).queryByText('Inert')).toBeNull();
+    expect(within(rowOf('atlas')).getByText('Inert')).toBeTruthy();
+    expect(within(rowOf('atlas')).queryByText('Active')).toBeNull();
   });
 
   it('renders the REAL enabled state: a disabled chat reads Paused and offers Resume', async () => {
     mockList.mockResolvedValue([c('a', { workflowId: 'wf', enabled: false })]);
     render(<ScheduledChatsPage />);
     expect(await screen.findByText('Paused')).toBeTruthy();       // enabled:false wins over workflowId
+    expect(screen.queryByText('Active')).toBeNull();               // ...so the wired workflow does not read Active
     expect(screen.getByText('Resume')).toBeTruthy();               // paused → resume affordance
+    expect(screen.queryByText('Pause')).toBeNull();
   });
 
   it('offers a Pause control on an active chat', async () => {

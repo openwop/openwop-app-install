@@ -33,13 +33,13 @@ describe('LogicWorkspace', () => {
     fireEvent.change(value, { target: { value: '"ready"' } });
     fireEvent.blur(value);
 
-    const node = ((doc.screens as { components: { actions?: Record<string, unknown>[] }[] }[])[0]!.components[0]!);
+    const node = ((doc.screens as { components: { actions?: Record<string, unknown>[]; bindings?: Record<string, unknown> }[] }[])[0]!.components[0]!);
     expect(node.actions).toEqual([{ on: 'click', kind: 'set-state', state: 'query', value: 'ready' }]);
 
     fireEvent.click(screen.getByRole('button', { name: 'Add binding' }));
-    expect(node).toMatchObject({ bindings: { value: { path: 'state.query', mode: 'one-way' } } });
+    expect(node.bindings).toEqual({ value: { path: 'state.query', mode: 'one-way' } });
     fireEvent.change(screen.getByLabelText('Direction'), { target: { value: 'two-way' } });
-    expect(node).toMatchObject({ bindings: { value: { path: 'state.query', mode: 'two-way' } } });
+    expect(node.bindings).toEqual({ value: { path: 'state.query', mode: 'two-way' } });
     expect(announce).toHaveBeenCalledWith('Action added');
     expect(announce).toHaveBeenCalledWith('Binding added');
   });

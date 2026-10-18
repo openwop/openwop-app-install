@@ -48,7 +48,7 @@ describe('WF-CMNT-1 — the write node is classified, on both legs', () => {
     const src = readFileSync(join(REPO, 'backend/typescript/src/executor/sideEffects.ts'), 'utf8');
     const patterns = /const SIDE_EFFECTING_TYPE_PATTERNS: readonly RegExp\[\] = \[([\s\S]*?)\n\];/.exec(src);
     expect(patterns, 'SIDE_EFFECTING_TYPE_PATTERNS literal not found — this gate is inert').toBeTruthy();
-    expect(patterns![1]).toContain(String.raw`/^feature\.comments\.nodes\.post$/`);
+    expect(patterns![1]).toContain(String.raw`/^feature\.comments\.nodes\.(post|resolve)$/`); // ADR 0881 correction H1 — resolve joined post
   });
 
   it('the derived floor holds it AND the fast path SERVES it', () => {
@@ -66,10 +66,14 @@ describe('WF-CMNT-1 — the write node is classified, on both legs', () => {
     expect(isSideEffectingNode('feature.comments.nodes.list', null)).toBe(false);
   });
 
-  it('`resolve` is deliberately NOT classified — recorded as a judgement, not an omission', () => {
-    // It is a durable write, but re-execution converges on the SAME terminal
-    // state, mints no row and emits no notification: a fork duplicates nothing
-    // observable. Revisit if it ever notifies or records `resolvedBy` (CMNT-10).
-    expect(isSideEffectingNode('feature.comments.nodes.resolve', null)).toBe(false);
+  it('`resolve` IS classified since ADR 0881 (correction H1) — on both legs', () => {
+    // It used to be a recorded judgement ("re-execution converges on the same terminal
+    // state … revisit if it ever notifies or records `resolvedBy`"). ADR 0881 D6 added
+    // both plus a host event, and a comment reopened between the source run and a
+    // `:fork` would transition again. Floor + served set + the typeId predicate.
+    const RESOLVE = 'feature.comments.nodes.resolve';
+    expect(MANIFEST_SIDE_EFFECT_FLOOR.has(RESOLVE)).toBe(true);
+    expect(MANIFEST_FAST_PATH_SERVED.has(RESOLVE)).toBe(true);
+    expect(isSideEffectingNode(RESOLVE, null)).toBe(true);
   });
 });

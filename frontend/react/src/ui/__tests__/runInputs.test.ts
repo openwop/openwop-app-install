@@ -1,11 +1,17 @@
 /**
- * Phase 4 run-inputs helpers — the pure coercion/validation behind RunInputsDialog.
- * (The dialog wiring is UI; these are the testable invariants.)
+ * Run-inputs helpers (ADR 0184 line, reusable-workflow Phase 4) — the coercion /
+ * validation behind RunInputsDialog, the ADR 0507 deferred-name humanizer, and the
+ * SESS-4 (/grade-ux 2026-08-01) always-mounted missing-fields live region.
+ *
+ * Red under: sending whitespace or NaN as an input, treating `false` as unanswered or a
+ * blank string as answered, raw (unstringified) defaults, not stripping — or
+ * over-stripping — the 12-hex deferred prefix, and mounting the status region together
+ * with its text (probes w32g3-ri-*).
  */
-import { describe, expect, it } from 'vitest';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { humanizeVariableName } from '../RunInputsForm.js';
+import { afterEach, describe, expect, it } from 'vitest';
+import { createElement } from 'react';
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { humanizeVariableName, RunInputsDialog } from '../RunInputsForm.js';
 import { initialRunInputValues, toRunInputs, missingRequired } from '../RunInputsForm.js';
 import type { RunVariable } from '../../workflows/workflowsClient.js';
 
@@ -81,18 +87,24 @@ describe('ADR 0507 — deferred variable names are not shown raw', () => {
 });
 
 describe('SESS-4 — the missing-fields hint is an ANNOUNCEABLE live region', () => {
-  it('keeps the live region mounted when there is nothing missing', () => {
+  afterEach(cleanup);
+
+  it('keeps the live region mounted when there is nothing missing', async () => {
     // The trap: `{missing.length > 0 ? <p role="status">…</p> : null}` mounts the
     // region TOGETHER with its content, and a screen reader only announces
     // insertions into an ALREADY-PRESENT live region — so the hint was silent.
-    // Asserting the attribute alone passes against the broken form; this asserts
-    // the region exists even in the empty state, which is the actual fix.
-    const src = readFileSync(join(import.meta.dirname, '..', 'RunInputsForm.tsx'), 'utf8');
-    expect(src, 'the region must not be conditionally mounted').not.toMatch(
-      /\{missing\.length > 0 \? \(\s*<p[^>]*role="status"/,
-    );
-    expect(src, 'the region is rendered unconditionally with conditional TEXT').toMatch(
-      /<p[^>]*role="status"[\s\S]{0,120}missing\.length > 0 \?/,
-    );
+    // Behavioural check: the SAME status node exists while a field is missing AND
+    // after it is answered (identity, not just presence), with only its text changing.
+    render(createElement(RunInputsDialog, {
+      workflowName: 'W',
+      variables: [{ name: 'topic', type: 'string', required: true }],
+      onRun: () => undefined,
+      onCancel: () => undefined,
+    }));
+    const region = screen.getByRole('status');
+    expect(region.textContent, 'the hint is shown while the required field is empty').not.toBe('');
+    await act(async () => { fireEvent.change(screen.getByRole('textbox'), { target: { value: 'launch' } }); });
+    expect(screen.getByRole('status'), 'the region must survive with nothing missing').toBe(region);
+    expect(region.textContent).toBe('');
   });
 });

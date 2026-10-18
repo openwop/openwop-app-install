@@ -9,12 +9,16 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, cleanup, waitFor } from '@testing-library/react';
 
-const { fetchProposalPreview } = vi.hoisted(() => ({ fetchProposalPreview: vi.fn() }));
+import type { ProposalPreview } from '../reviewClient.js';
+
+const { fetchProposalPreview } = vi.hoisted(() => ({
+  fetchProposalPreview: vi.fn<(enrollmentId: string, proposalId: string) => Promise<ProposalPreview>>(),
+}));
 vi.mock('../reviewClient.js', () => ({ fetchProposalPreview }));
 
 import { PlanProposalPreview } from '../PlanProposalPreview.js';
 
-afterEach(() => { cleanup(); vi.clearAllMocks(); });
+afterEach(() => { cleanup(); vi.resetAllMocks(); });
 
 const mount = (): void => { render(<PlanProposalPreview enrollmentId="enr-1" proposalId="prop-1" />); };
 
@@ -26,6 +30,9 @@ describe('PlanProposalPreview — three distinct states', () => {
     });
     mount();
     await waitFor(() => expect(screen.getByText('Move your sessions to the morning')).toBeTruthy());
+    expect(screen.getByText('If you accept: 1 change to your plan')).toBeTruthy();
+    expect(screen.queryByText(/couldn’t work out/i)).toBeNull();
+    expect(screen.queryByText(/advice only/i)).toBeNull();
   });
 
   it('says ADVICE-ONLY rather than showing an empty diff', async () => {
@@ -51,5 +58,6 @@ describe('PlanProposalPreview — three distinct states', () => {
     await waitFor(() => expect(screen.getByText(/advice only/i)).toBeTruthy());
     rerender(<PlanProposalPreview enrollmentId="enr-1" proposalId="prop-1" />);
     expect(fetchProposalPreview).toHaveBeenCalledTimes(1);
+    expect(fetchProposalPreview).toHaveBeenCalledWith('enr-1', 'prop-1');
   });
 });

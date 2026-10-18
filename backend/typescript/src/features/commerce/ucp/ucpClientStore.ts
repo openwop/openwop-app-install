@@ -81,7 +81,11 @@ export async function listClients(tenantId: string, orgId: string): Promise<UcpC
 export async function deleteClient(tenantId: string, orgId: string, clientId: string): Promise<boolean> {
   const c = await clients.get(clientId);
   if (!c || c.tenantId !== tenantId || c.orgId !== orgId) return false;
-  return clients.delete(clientId);
+  const deleted = await clients.delete(clientId);
+  // ADR 0875 D4 — revoking a client revokes its bearers NOW, not when they expire
+  // (`verifyToken` also refuses an orphan, which covers a crash between the two).
+  for (const t of await tokens.listForTenantIndexed(tenantId)) if (t.clientId === clientId) await tokens.delete(t.tokenHash).catch(() => undefined);
+  return deleted;
 }
 
 /**
@@ -118,6 +122,11 @@ export async function verifyToken(tenantId: string, orgId: string, bearer: strin
   if (!raw) return null;
   const rec = await tokens.get(hashToken(raw));
   if (!rec || rec.tenantId !== tenantId || rec.orgId !== orgId || rec.expiresAt <= now) return null;
-  return { tenantId: rec.tenantId, orgId: rec.orgId, clientId: rec.clientId, subject: rec.subject, scopes: rec.scopes };
+  // ADR 0875 D4 — the client must still exist, and a token carries only the scopes its
+  // client holds TODAY (a narrowed client does not keep its old bearer's reach).
+  const c = await clients.get(rec.clientId);
+  if (!c || c.tenantId !== tenantId || c.orgId !== orgId) return null;
+  const scopes = rec.scopes.filter((sc) => c.scopes.includes(sc));
+  return { tenantId: rec.tenantId, orgId: rec.orgId, clientId: rec.clientId, subject: rec.subject, scopes };
 }
 

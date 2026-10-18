@@ -1,38 +1,53 @@
 /**
  * Suppression list + audience sync (ADR 0217 / campaign gap plan C3):
- *   - suppression CRUD + the honesty rule (system reasons aren't operator-removable);
- *   - the email send subtracts suppressed recipients (skipped:'suppressed');
- *   - buildAudienceUpload excludes no-email/suppressed members and hashes the rest
- *     (raw addresses never in the output);
- *   - adsAdapter.syncAudience DEFAULTS to require-approval (PII-adjacent);
- *     approve → the upload proceeds to the platform leg (no connection in tests
- *     ⇒ no_connection — i.e. PAST the gate); 'disabled' refuses.
+ *   - suppression CRUD + the honesty rule (system reasons aren't operator-removable)
+ *     and the SUPP-1 per-tenant cap counter;
+ *   - buildAudienceUpload excludes no-email / consent-refused / suppressed members and
+ *     emits exactly sha256(trim+lowercase email) for the rest (raw addresses and
+ *     contactIds never in the output);
+ *   - adsAdapter.syncAudience DEFAULTS to require-approval (PII-adjacent): one pending
+ *     approval per content while pending; approve → the upload proceeds to the platform
+ *     leg (no connection in tests ⇒ no_connection — i.e. PAST the gate); 'disabled'
+ *     refuses.
+ * The email-send suppression subtraction (skipped:'suppressed') is covered by
+ * `email-campaign-send.test.ts`, not here.
+ *
+ * Sabotage that turns it red: drop the lower-casing in `normalizeEmail`; lift the
+ * system-reason rule in `removeSuppression`; skip the `+1` counter bump or loosen the cap
+ * compare; treat 'suppressed' as clear / skip the consent check / hash a different input
+ * in `buildAudienceUpload`; start `syncAudience` approved, re-mint the approval while
+ * pending, or ignore the 'disabled' policy.
+ * Double guard (honest ceiling): the counter DECREMENT on remove is masked by the
+ * boundary scan-verify (`reconcileCount`) — a stale-high counter never refuses, by design.
  */
 
-import http from 'node:http';
-import type { AddressInfo } from 'node:net';
+import { createHash } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { createApp } from '../src/index.js';
-import { __hostExtStorage } from '../src/host/hostExtPersistence.js';
+import { openStorage } from '../src/storage/index.js';
+import type { Storage } from '../src/storage/storage.js';
+import { __hostExtStorage, __resetHostExtPersistence, initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { addSuppression, isSuppressed, removeSuppression, listSuppressions, __clearSuppressions } from '../src/features/crm/suppressionService.js';
 import { buildAudienceUpload } from '../src/features/campaign-connectors/audienceService.js';
 import { createSegment } from '../src/features/crm/segmentsService.js';
 import { createContact } from '../src/features/crm/contactsService.js';
+import { recordConsent } from '../src/features/consent/consentService.js';
+import { saveConfig } from '../src/host/featureToggles/service.js';
+import { getToggleDefault, registerToggleDefault } from '../src/host/featureToggles/registry.js';
+import { consentFeature } from '../src/features/consent/feature.js';
 import { setGovernancePolicy } from '../src/host/governanceService.js';
 import { listApprovals, resolveApproval } from '../src/host/approvalService.js';
 import { makeAdsAdapter } from '../src/host/adsAdapter.js';
 
-let server: http.Server;
-
+// Storage-only boot: every subject here is a host-ext DurableCollection.
+let storage: Storage;
 beforeAll(async () => {
-  process.env.OPENWOP_STORAGE_DSN = 'memory://';
-  process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
-  process.env.OPENWOP_TEST_AUTH_ENABLED = 'true';
-  delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
-  const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { void (server.address() as AddressInfo); res(); }); });
+  storage = await openStorage('memory://');
+  initHostExtPersistence(storage);
+  if (consentFeature.toggleDefault) registerToggleDefault(consentFeature.toggleDefault); // what createApp's feature boot would do
 });
-afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
+afterAll(async () => { await storage.close(); __resetHostExtPersistence(); });
+
+const sha256 = (s: string): string => createHash('sha256').update(s).digest('hex');
 
 function storageOrThrow() {
   const s = __hostExtStorage();
@@ -71,7 +86,8 @@ describe('ADR 0217 — suppression service', () => {
       // Re-suppressing an EXISTING address is not a new insert → allowed at cap.
       await addSuppression(C, 'a@x.com', 'complaint', 'test');
       expect((await listSuppressions(C)).length).toBe(2);
-      // Free a slot → the counter decremented → a new address fits again.
+      // Free a slot → a new address fits again (the decrement is a fast path; the
+      // boundary scan-verify reconciles a stale counter — a double guard, see header).
       expect(await removeSuppression(C, 'b@x.com')).toBe(true);
       await addSuppression(C, 'c@x.com', 'manual', 'test');
       expect(new Set((await listSuppressions(C)).map((s) => s.email))).toEqual(new Set(['a@x.com', 'c@x.com']));
@@ -86,18 +102,43 @@ describe('ADR 0217 — audience build (consent + suppression subtraction, hashes
   it('excludes no-email + suppressed members and never emits a raw address', async () => {
     const a = await createContact({ tenantId: T, name: 'Ada', email: 'ada@example.com', stage: 'customer' });
     const b = await createContact({ tenantId: T, name: 'Bob', email: 'bob@example.com', stage: 'customer' });
+    const c = await createContact({ tenantId: T, name: 'Cy', email: '  Cy.Two@Example.COM ', stage: 'customer' });
     await createContact({ tenantId: T, name: 'NoMail', stage: 'customer' });
     await addSuppression(T, 'bob@example.com', 'unsubscribed', 'test');
     const seg = await createSegment({ tenantId: T, name: 'Customers', filters: [{ field: 'stage', op: 'eq', value: 'customer' }], createdBy: 'test' });
 
     const upload = await buildAudienceUpload(T, seg.segmentId);
-    expect(upload.size).toBe(1);
-    expect(upload.excluded).toMatchObject({ noEmail: 1, suppressed: 1 });
-    expect(upload.memberHashes[0]).toMatch(/^[0-9a-f]{64}$/);
+    // Exactly sha256 of the NORMALIZED (trim + lowercase) address — never another input.
+    const expected = [sha256('ada@example.com'), sha256('cy.two@example.com')].sort();
+    expect([...upload.memberHashes].sort()).toEqual(expected);
+    expect(upload.size).toBe(2);
+    expect(upload.membersKey).toBe(sha256(JSON.stringify(expected)));
+    expect(upload.excluded).toMatchObject({ noEmail: 1, suppressed: 1, consent: 0 });
     const raw = JSON.stringify(upload);
     expect(raw).not.toContain('ada@example.com');
     expect(raw).not.toContain('bob@example.com');
-    expect([a.contactId, b.contactId].some((id) => raw.includes(id))).toBe(false);
+    expect(raw.toLowerCase()).not.toContain('cy.two@example.com');
+    expect([a.contactId, b.contactId, c.contactId].some((id) => raw.includes(id))).toBe(false);
+  });
+
+  it('with consent enforcement ON, a contact who refused marketing is excluded (never hashed)', async () => {
+    const TC = 'user:audience-consent-test';
+    const d = getToggleDefault('consent');
+    expect(d, 'the consent toggle must be declared for this case to mean anything').toBeTruthy();
+    await saveConfig({ ...d!, status: 'on' }, 'test');
+    try {
+      const yes = await createContact({ tenantId: TC, name: 'Yes', email: 'yes@example.com', stage: 'customer' });
+      const no = await createContact({ tenantId: TC, name: 'No', email: 'no@example.com', stage: 'customer' });
+      await recordConsent({ tenantId: TC, subjectKey: yes.contactId, categories: { marketing: true }, source: 'test', legalBasis: 'consent' });
+      await recordConsent({ tenantId: TC, subjectKey: no.contactId, categories: { marketing: false }, source: 'test', legalBasis: 'consent' });
+      const seg = await createSegment({ tenantId: TC, name: 'Customers', filters: [{ field: 'stage', op: 'eq', value: 'customer' }], createdBy: 'test' });
+
+      const upload = await buildAudienceUpload(TC, seg.segmentId);
+      expect(upload.memberHashes).toEqual([sha256('yes@example.com')]);
+      expect(upload.excluded).toMatchObject({ consent: 1, consentUnreadable: 0, suppressed: 0 });
+    } finally {
+      await saveConfig(d!, 'test');
+    }
   });
 });
 
@@ -111,15 +152,17 @@ describe('ADR 0217 — syncAudience gate (default require-approval)', () => {
     const adapter = makeAdsAdapter({ storage: storageOrThrow(), tenantId: T, runId: 'run-a', actingUserId: 'u1' });
 
     const r1 = await adapter.syncAudience(args);
-    expect(r1.outcome).toBe('requires_approval');
-    const approvalId = (r1 as { approvalId: string }).approvalId;
+    if (r1.outcome !== 'requires_approval') throw new Error(`expected requires_approval, got ${JSON.stringify(r1)}`);
+    const approvalId = r1.approvalId;
     const appr = (await listApprovals(T, 'pending')).find((a) => a.approvalId === approvalId);
     expect(appr?.kind).toBe('campaign-spend');
     expect(appr?.spendKind).toBe('audience');
 
     // Same content while pending → the same approval.
     const r2 = await adapter.syncAudience(args);
-    expect((r2 as { approvalId: string }).approvalId).toBe(approvalId);
+    expect(r2).toEqual({ outcome: 'requires_approval', approvalId });
+    // COUNT, not just compare ids: exactly one pending spend approval for the tenant.
+    expect((await listApprovals(T, 'pending')).filter((p) => p.kind === 'campaign-spend')).toHaveLength(1);
 
     await resolveApproval(approvalId, { status: 'approved' });
     const r3 = await adapter.syncAudience(args);

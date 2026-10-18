@@ -54,6 +54,9 @@ describe('kicktodo-commerce subject eraser', () => {
     await codeIdxCol().put({ tenantId: T, code: 'KT-AAA', ownerSubject: A, affiliateId: 'aff-A' });
     await affLinkCol().put({ tenantId: T, ownerSubject: B, orgId: 'org', affiliateId: 'aff-B', code: 'KT-BBB', createdAt: nowIso });
     await codeIdxCol().put({ tenantId: T, code: 'KT-BBB', ownerSubject: B, affiliateId: 'aff-B' });
+    // Co-TENANT controls for the affiliate linkage: the SAME subject A in T2.
+    await affLinkCol().put({ tenantId: T2, ownerSubject: A, orgId: 'org', affiliateId: 'aff-A2', code: 'KT-A2A', createdAt: nowIso });
+    await codeIdxCol().put({ tenantId: T2, code: 'KT-A2A', ownerSubject: A, affiliateId: 'aff-A2' });
 
     const res = await eraseSubject(T, A);
     expect(res.failed).toBe(0);
@@ -72,14 +75,16 @@ describe('kicktodo-commerce subject eraser', () => {
     expect(await affLinkCol().get(`${T}::${B}`)).not.toBeNull();
     expect(await codeIdxCol().get(`${T}::KT-BBB`)).not.toBeNull();
 
-    // A's OTHER-tenant entitlement untouched (tenant-scoped).
-    expect(await entCol().get(`${T2}::${A}::ch1::v1`)).not.toBeNull();
+    // A's OTHER-tenant rows untouched (tenant-scoped), in every store.
+    expect(await entCol().get(`${T2}::${A}::ch1::v1`)).toMatchObject({ buyerSubject: A, orderId: 'ord-A2' });
+    expect(await affLinkCol().get(`${T2}::${A}`)).toMatchObject({ affiliateId: 'aff-A2' });
+    expect(await codeIdxCol().get(`${T2}::KT-A2A`)).toMatchObject({ ownerSubject: A });
   });
 
   it('is idempotent — a re-erase finds A already anonymized and changes nothing more', async () => {
     await entCol().put({ tenantId: T, buyerSubject: A, challengeId: 'ch1', challengeVersion: 1, orderId: 'ord-A', state: 'active', grantedAt: nowIso });
-    await eraseSubject(T, A);
-    await eraseSubject(T, A);
+    expect((await eraseSubject(T, A)).failed).toBe(0);
+    expect((await eraseSubject(T, A)).failed).toBe(0);
     // Exactly ONE anonymized row (no duplicate / re-anonymize churn).
     const rows = (await entCol().list()).filter((e) => e.tenantId === T && e.challengeId === 'ch1');
     expect(rows).toHaveLength(1);

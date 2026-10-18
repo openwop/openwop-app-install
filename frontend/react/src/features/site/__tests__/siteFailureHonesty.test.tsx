@@ -13,6 +13,11 @@
  *   the wrapper is missing instead of silently swapping to the bare fallback;
  * - the default fallback page only advertises openwop.dev in DEMO mode
  *   (ADR 0196 Gate A — SITE-R2-5).
+ *
+ * Each claim was sabotage-probed red in /grade-tests w50 (probes w50g2-sfh-*):
+ * root error/404 fallbacks, slug notFound-vs-error + retry, the empty-page and
+ * renamed-slug paths, catalog search on slug only, the demo gate, the blog
+ * post's 404/failure/list-failure/canonical paths, and the pricing note/h1.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/react';
@@ -228,11 +233,10 @@ describe('BlogPostPage — 404 vs failure (R2-BLOG-1/2/4)', () => {
 describe('PricingPage — a failed wrapper read is not "no wrapper authored" (READ-2)', () => {
   /** PricingSection inside the fallback fetches the live tier grid — stub it. */
   function stubPricingReads(): void {
-    vi.stubGlobal('fetch', vi.fn(async (url: unknown) => {
-      const u = String(url);
-      if (u.includes('/public/pricing')) return { ok: true, status: 200, json: async () => ({ tiers: [{ tier: 'free', name: 'Free', features: [] }] }) } as Response;
-      return { ok: true, status: 200, json: async () => ({ bundles: [] }) } as Response;
-    }));
+    const json = (body: unknown): Response => new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
+    vi.stubGlobal('fetch', vi.fn(async (url: unknown) => (String(url).includes('/public/pricing')
+      ? json({ tiers: [{ tier: 'free', name: 'Free', features: [] }] })
+      : json({ bundles: [] }))));
   }
 
   it('keeps the live tier grid and adds a note + retry on a FAILED read', async () => {

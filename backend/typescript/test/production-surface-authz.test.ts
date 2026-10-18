@@ -19,13 +19,32 @@
  * These drive the SURFACE directly — the seam the run lane actually reaches.
  * The REST routes were already correct and their tests already passed, which is
  * exactly why this went unseen.
+ *
+ * w32 (grade-tests):
+ *  - The non-member READ refusals are DOUBLE-guarded: the ADR 0832 seam org floor
+ *    (`featureSurfaces.ts` `orgFloor`, `workspace:read`) refuses a non-member before
+ *    `requireScope` runs, so disabling `requireScope` alone leaves them red-proof.
+ *    `requireScope` is the ONLY guard on the WRITE scope — a read-only member passes
+ *    the floor — so a viewer-of-org-B savePlan case now witnesses it.
+ *  - The PROD2-R4 control stubbed `callAI` → `{ content }`, but the node reads
+ *    `ai.data`, so it returned `failed / generation_empty` and the control passed
+ *    with nothing generated. It now returns `{ data }` and reads the plan back.
+ *  - The PROD2-R1 case (never touched the route guard it named) is cut: covered by
+ *    `production-route.test.ts` "an editor’s PATCH carrying priceRanges leaves the
+ *    stored rates alone" + "an ADMIN can still change them" (probes
+ *    w32g1-sa-updatevendor-pr / w32g1-rt-updatevendor-pr both red). The PROD2-R2
+ *    currency case is cut: both legs live in `production-plan-reject-invalid.test.ts` T6.
+ *  - PIC-8 (BLOCKED-ON-PRODUCT, `it.fails`): the node builds the `production.plan`
+ *    ARTIFACT from the RAW model output, so the PIC-1 vendor drop and the PROD2-R2
+ *    currency normalisation reach the durable row but not the artifact the chat
+ *    renders. Flip to `it` when the payload is built from the saved plan.
  */
 import http from 'node:http';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { buildHostSurfaceBundle } from '../src/host/inMemorySurfaces.js';
 import { createOrg, createMember } from '../src/host/accessControlService.js';
-import { createVendor } from '../src/features/production/productionService.js';
+import { createVendor, getPlan } from '../src/features/production/productionService.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 
@@ -33,6 +52,7 @@ const TENANT = 'org:prod-authz';
 const MEMBER_A = 'u-a';   // member of org A only
 const MEMBER_B = 'u-b';   // member of org B, with write
 const ADMIN_B = 'u-b-admin'; // org B admin — holds host:members:manage, so entitled to see rates
+const VIEWER_B = 'u-b-viewer'; // org B read-only member: passes the read floor, lacks workspace:write
 
 let server: http.Server;
 let orgA: string;
@@ -50,6 +70,7 @@ beforeAll(async () => {
   await createMember({ tenantId: TENANT, orgId: orgA, subject: MEMBER_A, displayName: 'A', roles: ['editor'] });
   await createMember({ tenantId: TENANT, orgId: orgB, subject: MEMBER_B, displayName: 'B', roles: ['editor'] });
   await createMember({ tenantId: TENANT, orgId: orgB, subject: ADMIN_B, displayName: 'BA', roles: ['admin'] });
+  await createMember({ tenantId: TENANT, orgId: orgB, subject: VIEWER_B, displayName: 'BV', roles: ['viewer'] });
 
   // Org B holds a vendor whose NAME and rates are org-B business data.
   await createVendor({
@@ -57,7 +78,7 @@ beforeAll(async () => {
     contractStatus: 'preferred', createdBy: MEMBER_B,
     capabilities: [{ name: 'Landing page design', category: 'design', qualityRating: 5 }],
     priceRanges: [{ capability: 'Landing page design', min: 4000, max: 9000, unit: 'per-project' }],
-  } as never);
+  });
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
@@ -91,19 +112,31 @@ describe('PROD2-B1 — the run lane enforces the run owner’s org RBAC', () => 
     })).rejects.toMatchObject({ code: 'forbidden_scope' });
   });
 
+  it('refuses a READ-ONLY member of the target org the WRITE (savePlan needs workspace:write)', async () => {
+    // The seam's org floor asks only `workspace:read`, so a viewer passes it —
+    // `requireScope(…, 'workspace:write')` is the one guard on this leg.
+    const s = surfaceFor(VIEWER_B);
+    const vendors = await s.listVendors!({ orgId: orgB });
+    expect((vendors.vendors as Array<{ name: string }>).map((v) => v.name), 'the viewer may read').toContain('Beta Secret Studio');
+    await expect(s.savePlan!({ orgId: orgB, strategySummary: 'viewer plan', recommendations: [] }))
+      .rejects.toMatchObject({ code: 'forbidden_scope', message: expect.stringContaining('workspace:write') });
+  });
+
   it('refuses a SYSTEM run with no acting user (fail-closed)', async () => {
     const s = surfaceFor(undefined);
-    await expect(s.listVendors!({ orgId: orgB })).rejects.toMatchObject({ code: 'forbidden_scope' });
+    await expect(s.listVendors!({ orgId: orgB }))
+      .rejects.toMatchObject({ code: 'forbidden_scope', message: expect.stringMatching(/acting user/) });
   });
 
   it('ALLOWS a real member of that org (the negative control)', async () => {
     // Without this, "refuses everything" would pass while breaking the feature.
     const s = surfaceFor(MEMBER_B);
     const out = await s.listVendors!({ orgId: orgB });
-    expect(Array.isArray(out.vendors)).toBe(true);
-    expect((out.vendors as unknown[]).length).toBeGreaterThan(0);
+    expect((out.vendors as Array<{ name: string }>).map((v) => v.name)).toContain('Beta Secret Studio');
+    const saved = await s.savePlan!({ orgId: orgB, strategySummary: 'member plan', recommendations: [] });
+    const planId = (saved.plan as { planId: string }).planId;
     const plans = await s.listPlans!({ orgId: orgB });
-    expect(Array.isArray(plans.plans)).toBe(true);
+    expect((plans.plans as Array<{ planId: string }>).map((p) => p.planId), 'the member\'s write is readable back').toContain(planId);
   });
 });
 
@@ -139,62 +172,6 @@ describe('PROD2-B2 — the budget the model is asked to ground has rates to grou
   });
 });
 
-describe('PROD2-R1 — a caller who cannot SEE rates cannot WIPE them', () => {
-  it('the PATCH route ignores priceRanges from a non-entitled caller', async () => {
-    // The two scopes differ: EDITING a vendor needs `workspace:write`; SEEING
-    // rates needs `host:members:manage`. So an editor's GET has the key DELETED
-    // by `redactVendorPricing` — and the first cut of the new price repeater
-    // then sent `priceRanges: []` unconditionally. The route patches any key
-    // present in the body, so saving a NAME CHANGE destroyed the rates with a
-    // "Vendor updated" toast. Runtime-proven by the review.
-    //
-    // The client now omits the key, but this asserts the half that cannot
-    // regress: no client can blind-overwrite a field it may not read.
-    const { updateVendor, getVendor, createVendor } = await import('../src/features/production/productionService.js');
-    const created = await createVendor({
-      tenantId: TENANT, orgId: orgB, name: 'Rate Holder', type: 'agency', contractStatus: 'active', createdBy: ADMIN_B,
-      capabilities: [{ name: 'Copywriting', category: 'writing' }],
-      priceRanges: [{ capability: 'Copywriting', min: 100, max: 200, unit: 'per-hour' }],
-    } as never);
-
-    // Simulate the editor's save: the SERVICE is the last line of defence, so
-    // this asserts the route-level guard by driving what the route would build.
-    // A non-entitled caller's patch must not carry the key at all.
-    await updateVendor(TENANT, orgB, created.vendorId, { name: 'Rate Holder (renamed)' } as never);
-    const after = await getVendor(TENANT, orgB, created.vendorId);
-    expect(after!.name).toBe('Rate Holder (renamed)');
-    expect(after!.priceRanges, 'the rates survive an edit that did not mention them').toHaveLength(1);
-
-    // …and an ENTITLED caller can still change them (the control) — otherwise
-    // "rates survive" would be satisfied by making them immutable.
-    await updateVendor(TENANT, orgB, created.vendorId, {
-      priceRanges: [{ capability: 'Copywriting', min: 150, max: 250, unit: 'per-hour' }],
-    } as never);
-    expect((await getVendor(TENANT, orgB, created.vendorId))!.priceRanges[0]!.min).toBe(150);
-  });
-});
-
-describe('PROD2-R2 — a model-invented currency cannot reach the renderer', () => {
-  it('normalises anything that is not an ISO-4217 code', async () => {
-    // `cleanBudget` validated the currency only as a <=8-char string, so
-    // "dollars" / "$" / "EUROS" reached `formatCurrency` and threw a RangeError
-    // out of Intl — which, inside a render, takes the whole Production page
-    // down. The prompt hands the model bare magnitudes with no unit of account,
-    // so inventing a code is expected behaviour, not an edge case.
-    const { savePlan, getPlan } = await import('../src/features/production/productionService.js');
-    const saved = await savePlan({
-      tenantId: TENANT, orgId: orgB, updatedBy: ADMIN_B, strategySummary: 's',
-      recommendations: [
-        { assetType: 'landing page', executionRoute: 'agency', budget: { min: 1, max: 2, currency: 'dollars' } },
-        { assetType: 'video', executionRoute: 'internal', budget: { min: 1, max: 2, currency: 'eur' } },
-      ],
-    } as never);
-    const plan = await getPlan(TENANT, orgB, saved.planId);
-    expect(plan!.recommendations[0]!.budget.currency, 'garbage falls back to USD').toBe('USD');
-    expect(plan!.recommendations[1]!.budget.currency, 'a real code is kept, upper-cased').toBe('EUR');
-  });
-});
-
 describe('PROD2-R4 — a system run SKIPS honestly instead of failing the spine', () => {
   it('plan-generate returns skipped:true when the surface refuses for want of an acting user', async () => {
     // PROD2-B1 made the surface fail-closed for runs with no acting user, and
@@ -221,14 +198,45 @@ describe('PROD2-R4 — a system run SKIPS honestly instead of failing the spine'
   it('…and a run WITH an entitled acting user still generates (the control)', async () => {
     // Without this, "skips" is satisfied by a node that never does anything.
     const pack = await import('../../../packs/feature.production.nodes/index.mjs') as {
-      planGenerate: (c: unknown) => Promise<{ status: string; outputs?: Record<string, unknown> }>;
+      planGenerate: (c: unknown) => Promise<{ status: string; outputs?: Record<string, unknown>; error?: unknown }>;
     };
     const features = buildHostSurfaceBundle({ tenantId: TENANT, actingUserId: ADMIN_B, runId: 'run-ok' }).features;
     const out = await pack.planGenerate({
       inputs: { orgId: orgB, channels: ['landing_page'] },
       features,
-      callAI: async () => ({ content: JSON.stringify({ strategySummary: 's', recommendations: [] }) }),
+      // The node reads `ai.data` (the schema-constrained object), not `content`.
+      callAI: async () => ({ data: { strategySummary: 'entitled plan', recommendations: [] } }),
     });
+    expect(out.status, JSON.stringify(out.error ?? null)).toBe('success');
     expect(out.outputs?.skipped, 'an entitled run is not skipped').toBeUndefined();
+    const planId = (out.outputs?.plan as { planId?: string } | undefined)?.planId;
+    expect(planId, 'the node generated a plan').toBeTruthy();
+    expect((await getPlan(TENANT, orgB, planId!))?.strategySummary, 'and it was persisted').toBe('entitled plan');
+  });
+
+  it.fails('PIC-8: the production.plan ARTIFACT carries the CLEANED plan, not the raw model output', async () => {
+    const pack = await import('../../../packs/feature.production.nodes/index.mjs') as {
+      planGenerate: (c: unknown) => Promise<{ status: string; outputs?: Record<string, unknown> }>;
+    };
+    const features = buildHostSurfaceBundle({ tenantId: TENANT, actingUserId: ADMIN_B, runId: 'run-art' }).features;
+    const out = await pack.planGenerate({
+      inputs: { orgId: orgB, channels: ['landing_page'] },
+      features,
+      callAI: async () => ({
+        data: {
+          strategySummary: 'artifact plan',
+          recommendations: [{
+            assetType: 'video', executionRoute: 'agency', rationale: 'r',
+            budget: { min: 1, max: 2, currency: 'dollars' },
+            matchingVendors: [{ vendorId: 'vnd:ghost-artifact', name: 'Ghost Co', type: 'agency', matchReason: 'hallucinated' }],
+          }],
+        },
+      }),
+    });
+    expect(out.status).toBe('success');
+    const artifact = out.outputs?.artifact as { payload: { recommendations: Array<{ budget?: { currency?: string }; matchingVendors?: unknown[] }> } };
+    const rec = artifact.payload.recommendations[0]!;
+    expect(rec.budget?.currency, 'PROD2-R2 — the renderer gets an ISO code').toBe('USD');
+    expect(rec.matchingVendors ?? [], 'PIC-1 — the ghost vendor never reaches the artifact').toEqual([]);
   });
 });

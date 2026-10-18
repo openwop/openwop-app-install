@@ -6,6 +6,23 @@
  * gate that blocks everything cannot pass. The plan is simulated with the real
  * tenant entitlement seam (`registerTenantEntitlementCheck`), and `insights-suite`
  * is a real sellable bundle feature (agents bundle) with its real toggle default.
+ *
+ * Two gates guard a scheduled/triggered launch: the job's or subscription's OWN
+ * `featureId` check, and the launch funnel's check on the WORKFLOW's owning
+ * feature. w35 measured the own-gates vacuous: every stamped fixture used the
+ * paid workflow, so the funnel refused it anyway. Stamped fixtures now launch the
+ * UNOWNED workflow, so their own gate is the only guard; the unstamped
+ * (backfill-on-read) fixtures keep the paid one, so the funnel stays witnessed.
+ *
+ * The last describe pins the ADR 0821 P5 run-limit seam (`withRunLimit`): a no-op
+ * until a reserver is wired, a refusal stops the insert, and a failed insert
+ * releases its reservation (the HTTP wiring is `adr0821-p5-run-limit-wired`).
+ *
+ * Sabotage witnesses (w35): the funnel check removed, the chain-copy owner lookup,
+ * the relaunch gate, the planExempt bypass, the plan→'plan' mapping, the daemon's
+ * and the trigger's own gates and their plan-lapsed labels, the legacy drain, a
+ * person's disable clearing planPause, the lapse chip, the tool gate and its
+ * core-node exemption, and both run-limit seams each red a leg below.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { openSqliteStorage } from '../src/storage/sqlite/index.js';
@@ -24,7 +41,9 @@ import { startWorkflowRun, type StartRunDeps } from '../src/host/runStarter.js';
 import { getJob, registerJob, resetScheduling, setJobEnabled, type ScheduledJob } from '../src/host/schedulingService.js';
 import { DurableCollection } from '../src/host/hostExtPersistence.js';
 import { planLapsedFeature } from '../src/host/schedulePlanLapse.js';
-import { ingestExternalEvent } from '../src/host/triggerIngestionService.js';
+import { ingestExternalEvent, type IngestDeps } from '../src/host/triggerIngestionService.js';
+import { createHostAdapterSuite } from '../src/host/index.js';
+import { setEventLogBackend } from '../src/executor/eventLog.js';
 import { getSubscription, registerSubscription } from '../src/host/triggerBridgeService.js';
 import { processDueSchedules, resumePlanPausedJobs } from '../src/host/scheduleDaemon.js';
 import { builtinAgentTool } from '../src/host/agentToolProvider.js';
@@ -64,9 +83,17 @@ const hostSuite: StartRunDeps['hostSuite'] = {
 
 const storage = openSqliteStorage(':memory:');
 const deps: StartRunDeps = { storage, hostSuite };
+const ingestDeps: IngestDeps = { storage, hostSuite: { ...createHostAdapterSuite({ storage }), ...hostSuite } };
+
+/** A complete, typed run row (no cast): the relaunch gate reads tenant + workflow. */
+const runRow = (tenantId: string): RunRecord => ({
+  runId: `r-${tenantId}`, workflowId: PAID_WF, tenantId, status: 'completed', inputs: {}, metadata: {}, configurable: {},
+  createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
+});
 
 beforeAll(() => {
   initHostExtPersistence(storage);
+  setEventLogBackend(storage); // a delivered trigger appends its delivery event first
   registerToggleDefault({ id: FEATURE, status: 'on', bucketUnit: 'tenant', salt: FEATURE });
 });
 afterAll(async () => { __resetHostExtPersistence(); await storage.close(); });
@@ -84,6 +111,10 @@ beforeEach(async () => {
 
 async function runsFor(workflowId: string): Promise<RunRecord[]> {
   return (await storage.listRuns({ limit: 500 })).filter((r) => r.workflowId === workflowId);
+}
+/** Every run of one tenant, whichever workflow it launched. */
+async function tenantRuns(tenantId: string): Promise<RunRecord[]> {
+  return (await storage.listRuns({ limit: 500 })).filter((r) => r.tenantId === tenantId);
 }
 
 describe('G6 — the launch funnel refuses a feature-owned workflow the tenant may not use', () => {
@@ -122,10 +153,10 @@ describe('G6 — the launch funnel refuses a feature-owned workflow the tenant m
   });
 
   it('a RELAUNCH (:fork, redrive) is gated; a continuation (resume) is not', async () => {
-    const run = { runId: 'r1', tenantId: 'lapsed-1', workflowId: PAID_WF, metadata: {} } as unknown as RunRecord;
+    const run = runRow('lapsed-1');
     await expect(resolveRunDefinition(run, catalog, { relaunch: { operator: false } })).rejects.toBeInstanceOf(WorkflowFeatureRefusedError);
     expect((await resolveRunDefinition(run, catalog))?.definition.workflowId).toBe(PAID_WF);
-    const ok = { ...run, tenantId: 'acme' } as RunRecord;
+    const ok = runRow('acme');
     expect((await resolveRunDefinition(ok, catalog, { relaunch: { operator: false } }))?.definition.workflowId).toBe(PAID_WF);
   });
 });
@@ -154,13 +185,15 @@ describe('ADR 0820 §7 — schedule LAPSE auto-pause (a COMPUTED skip) and autom
   };
   async function hourlyJob(jobId: string, tenantId: string, opts: { featureId?: string; workflowId?: string } = {}): Promise<void> {
     const res = await registerJob({
-      jobId, tenantId, cronExpr: '0 * * * *', workflowId: opts.workflowId ?? PAID_WF, timezone: 'Europe/Paris',
+      // A STAMPED job launches the UNOWNED workflow, so its own featureId gate is
+      // the only guard; an unstamped job keeps the paid one (backfill-on-read).
+      jobId, tenantId, cronExpr: '0 * * * *', workflowId: opts.workflowId ?? (opts.featureId ? FREE_WF : PAID_WF), timezone: 'Europe/Paris',
       inputs: { enrollmentId: 'e-1' }, metadata: { note: 'keep me' },
       ...(opts.featureId ? { featureId: opts.featureId } : {}),
     });
     expect(res.ok).toBe(true);
   }
-  const runsOf = async (tenantId: string): Promise<RunRecord[]> => (await runsFor(PAID_WF)).filter((r) => r.tenantId === tenantId);
+  const runsOf = tenantRuns;
 
   it('POSITIVE: an entitled tenant\'s job fires and stays enabled', async () => {
     await hourlyJob('j-ok', 'acme-s', { featureId: FEATURE });
@@ -192,6 +225,7 @@ describe('ADR 0820 §7 — schedule LAPSE auto-pause (a COMPUTED skip) and autom
     expect(job?.enabled).toBe(true);
     expect(job?.lastSkipReason).toBe('feature-disabled');
     expect(job?.lastSkipFeatureId).toBeUndefined();
+    expect(await runsOf('acme-toggle-off')).toHaveLength(0);
   });
 
   it('backfill-on-read: a job with NO featureId is skipped through its workflow\'s owning feature', async () => {
@@ -259,24 +293,35 @@ describe('ADR 0820 §7 — schedule LAPSE auto-pause (a COMPUTED skip) and autom
     expect(await planLapsedFeature((await getJob('j-chip'))!)).toBe(FEATURE);
     registerTenantEntitlementCheck(async () => undefined);
     expect(await planLapsedFeature((await getJob('j-chip'))!)).toBeNull();
+    // A toggle-off skip is not a lapse: no chip.
+    await saveConfig(toggle({ tenantOverrides: { 'acme-chip-off': { status: 'off' } } }), 'test');
+    await hourlyJob('j-chip-off', 'acme-chip-off', { featureId: FEATURE });
+    await processDueSchedules(deps, dueAt(2));
+    const off = (await getJob('j-chip-off'))!;
+    expect(off.lastSkipReason).toBe('feature-disabled');
+    expect(await planLapsedFeature(off)).toBeNull();
   });
 });
 
 describe('ADR 0820 §7 — a TRIGGER on a plan-lapsed feature skips as plan-lapsed (the schedule daemon\'s twin)', () => {
   // Ingest is a computed skip already; only the LABEL was wrong: a plan lapse
   // read `feature-disabled`, the same as a kill switch. Every leg has a control.
+  // `preVerified` stands in for the signed-ingest route's verdict (ADR 0793), so a
+  // served event is DELIVERED rather than rejected for a missing signature.
   const ingest = (subscriptionId: string) => ingestExternalEvent(
-    deps as unknown as Parameters<typeof ingestExternalEvent>[0], subscriptionId,
-    { source: 'webhook', rawBody: JSON.stringify({ hello: 'world' }) } as Parameters<typeof ingestExternalEvent>[2],
+    ingestDeps, subscriptionId, { source: 'webhook', rawBody: JSON.stringify({ hello: 'world' }), preVerified: true },
   );
   async function sub(subscriptionId: string, tenantId: string, opts: { featureId?: string }): Promise<void> {
-    await registerSubscription({ subscriptionId, tenantId, source: 'webhook', workflowId: PAID_WF, ...(opts.featureId ? { featureId: opts.featureId } : {}) });
+    // A STAMPED subscription launches the UNOWNED workflow (its own gate is the
+    // only guard); an unstamped one keeps the paid workflow (the funnel's gate).
+    const workflowId = opts.featureId ? FREE_WF : PAID_WF;
+    await registerSubscription({ subscriptionId, tenantId, source: 'webhook', workflowId, ...(opts.featureId ? { featureId: opts.featureId } : {}) });
   }
 
   it('a subscription whose featureId the PLAN refuses skips with reason plan-lapsed and starts no run', async () => {
     await sub('s-lapsed', 'lapsed-t', { featureId: FEATURE });
     expect(await ingest('s-lapsed')).toEqual({ outcome: 'skipped', reason: 'plan-lapsed' });
-    expect((await runsFor(PAID_WF)).filter((r) => r.tenantId === 'lapsed-t')).toHaveLength(0);
+    expect(await tenantRuns('lapsed-t')).toHaveLength(0);
     expect((await getSubscription('s-lapsed'))?.state).toBe('active');
   });
 
@@ -296,7 +341,9 @@ describe('ADR 0820 §7 — a TRIGGER on a plan-lapsed feature skips as plan-laps
   it('POSITIVE: an entitled tenant\'s subscription is not skipped', async () => {
     await sub('s-ok', 'acme-trig', { featureId: FEATURE });
     const res = await ingest('s-ok');
-    expect(res.outcome).not.toBe('skipped');
+    expect(res.outcome, JSON.stringify(res)).toBe('delivered');
+    expect(res.runId).toBeTruthy();
+    expect((await tenantRuns('acme-trig')).map((r) => r.runId)).toEqual([res.runId]);
   });
 });
 
@@ -311,13 +358,14 @@ describe('G7 — projected compute-node chat tools resolve their owning feature'
 
   it('POSITIVE: an entitled tenant passes the gate (reaches the node resolution)', async () => {
     const out = await tool().run({}, { tenantId: 'acme-tool' });
-    expect(out.content).not.toContain('not_entitled');
-    expect(out.content).not.toContain('feature_disabled');
+    // No node pack is mounted in the vitest lane, so passing the gate lands on the
+    // registry lookup — the step AFTER the gate (`agentToolProvider.ts`).
+    expect(out).toEqual({ content: 'node not available: feature.insights-suite.nodes.variance-compute', isError: true });
   });
 
   it('a core.* compute node is never feature-gated', async () => {
     const out = await builtinAgentTool('openwop:core.flow.aggregate-text')!.run({}, { tenantId: 'lapsed-tool' });
-    expect(out.content).not.toContain('not_entitled');
+    expect(out).toEqual({ content: 'node not available: core.flow.aggregate-text', isError: true });
   });
 });
 

@@ -698,7 +698,12 @@ export function EntitiesPage(): JSX.Element {
               </Button>
             ) : null}
           </div>
-          {types === null ? (
+          {/* EMPTY-ON-FAIL-4 (ADR 0779 D7) — `error` is set only by the types read, so
+              a failed read is not "No types yet": the page Notice above says why, and
+              the rail offers the retry. Same guard the main pane's empty state has. */}
+          {error ? (
+            <Button variant="quiet" size="sm" onClick={() => void refreshTypes()}>{t('common:retry')}</Button>
+          ) : types === null ? (
             <SkeletonRows rows={3} columns={['70%']} />
           ) : types.length === 0 && !showTypeForm ? (
             <p className="u-text-sm muted">{t('noTypesHint')}</p>

@@ -42,6 +42,7 @@ interface Deps {
 }
 
 import { mayViewApproval } from '../host/approvalAudience.js';
+import { callerSubjectSpellings } from '../features/featureRoute.js';
 
 function tenantOf(req: Request): string {
   return (req as { tenantId?: string }).tenantId ?? 'default';
@@ -242,7 +243,7 @@ export function registerApprovalRoutes(app: Express, deps: Deps): void {
     try {
       const result = await claimApproval(
         deps,
-        { tenantId: tenantOf(req), decidedBy: req.userId ?? req.principal?.principalId, ...(noteOf(req) !== undefined ? { note: noteOf(req) } : {}), ...(actedForOf(req) !== undefined ? { actedFor: actedForOf(req) } : {}), ...(expectedHashOf(req) !== undefined ? { expectedDefinitionHash: expectedHashOf(req) } : {}), ...(expectedContentHashOf(req) !== undefined ? { expectedContentHash: expectedContentHashOf(req) } : {}), ...(isSuperadmin(req) ? { decidedBySuperadmin: true } : {}), ...(req.principal?.tenants?.includes('*') ? { decidedByWildcardOperator: true } : {}), ...(isOwnPersonalWorkspace(req) ? { decidedByPersonalOwner: true } : {}) },
+        { tenantId: tenantOf(req), decidedBy: req.userId ?? req.principal?.principalId, ...(noteOf(req) !== undefined ? { note: noteOf(req) } : {}), ...(actedForOf(req) !== undefined ? { actedFor: actedForOf(req) } : {}), ...(expectedHashOf(req) !== undefined ? { expectedDefinitionHash: expectedHashOf(req) } : {}), ...(expectedContentHashOf(req) !== undefined ? { expectedContentHash: expectedContentHashOf(req) } : {}), ...(isSuperadmin(req) ? { decidedBySuperadmin: true } : {}), ...(req.principal?.tenants?.includes('*') ? { decidedByWildcardOperator: true } : {}), ...(isOwnPersonalWorkspace(req) ? { decidedByPersonalOwner: true } : {}), decidedBySpellings: await callerSubjectSpellings(req) },
         req.params.approvalId,
       );
       res.status(200).json({
@@ -267,7 +268,7 @@ export function registerApprovalRoutes(app: Express, deps: Deps): void {
     try {
       const result = await rejectApproval(
         deps,
-        { tenantId: tenantOf(req), decidedBy: req.userId ?? req.principal?.principalId, ...(noteOf(req) !== undefined ? { note: noteOf(req) } : {}), ...(actedForOf(req) !== undefined ? { actedFor: actedForOf(req) } : {}), ...(expectedHashOf(req) !== undefined ? { expectedDefinitionHash: expectedHashOf(req) } : {}), ...(expectedContentHashOf(req) !== undefined ? { expectedContentHash: expectedContentHashOf(req) } : {}), ...(isSuperadmin(req) ? { decidedBySuperadmin: true } : {}), ...(req.principal?.tenants?.includes('*') ? { decidedByWildcardOperator: true } : {}), ...(isOwnPersonalWorkspace(req) ? { decidedByPersonalOwner: true } : {}) },
+        { tenantId: tenantOf(req), decidedBy: req.userId ?? req.principal?.principalId, ...(noteOf(req) !== undefined ? { note: noteOf(req) } : {}), ...(actedForOf(req) !== undefined ? { actedFor: actedForOf(req) } : {}), ...(expectedHashOf(req) !== undefined ? { expectedDefinitionHash: expectedHashOf(req) } : {}), ...(expectedContentHashOf(req) !== undefined ? { expectedContentHash: expectedContentHashOf(req) } : {}), ...(isSuperadmin(req) ? { decidedBySuperadmin: true } : {}), ...(req.principal?.tenants?.includes('*') ? { decidedByWildcardOperator: true } : {}), ...(isOwnPersonalWorkspace(req) ? { decidedByPersonalOwner: true } : {}), decidedBySpellings: await callerSubjectSpellings(req) },
         req.params.approvalId,
       );
       res.status(200).json({

@@ -93,7 +93,7 @@ export const messages = {
   videoVoice: 'Voix',
   videoVoiceBody: 'Adressez-vous à la personne par « vous », en phrases de 18 mots au plus. Chaleureuse et curieuse, jamais insolente. Pas de langage de spécification ni de sigles inexpliqués. Un seul narrateur pour tous les films. Ne commencez pas une phrase par un nom prononcé qui débute par « A ».',
   videoType: 'Cadre et typographie',
-  videoTypeBody: '1920×1080 à 30 images par seconde, marge gauche de 160px. Serif pour les cartes de titre, sans pour le corps, mono pour les étiquettes. Ligne d’ouverture 120px, titre de scène 76px, ligne de la carte de fin 160px, corps 23–36px, étiquettes 20–26px. Rien de ce qui doit être lu ne descend sous 20px.',
+  videoTypeBody: '1920×1080 à 30 images par seconde, marge gauche de 160px. Bricolage Grotesque pour les cartes de titre, Geist pour le corps, mono pour les étiquettes. Ligne d’ouverture 120px, titre de scène 76px, ligne de la carte de fin 160px, corps 23–36px, étiquettes 20–26px. Rien de ce qui doit être lu ne descend sous 20px.',
   videoMotion: 'Mouvement',
   videoMotionBody: 'Chaque temps comporte un mouvement qui explique quelque chose. Un seul mouvement principal à la fois, avec une entrée et une sortie douces, sans rebond. Les apparitions durent de 0,4 à 0,8 seconde et restent assez longtemps pour être lues deux fois.',
   videoSound: 'Son',

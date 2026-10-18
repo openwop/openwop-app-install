@@ -11,11 +11,16 @@ describe('snapDelta', () => {
   const cands = buildSnapCandidates([box(100, 100, 40, 40)]); // v: 100,120,140; h: 100,120,140
 
   it('snaps the nearest edge within the threshold, per axis independently', () => {
-    // moved left edge at 97 → snaps to 100 (dx +3); vertical middle at 200 → no h snap.
-    const r = snapDelta(box(97, 200, 20, 10), cands, 5);
+    // x: left edge 97 → 100 (dx +3). y: top 137 → 140 is +3 but the middle
+    // 142 → 140 is nearer (dy −2) — distinct per-axis deltas and guides.
+    const r = snapDelta(box(97, 137, 20, 10), cands, 5);
     expect(r.dx).toBe(3);
-    expect(r.dy).toBe(0);
-    expect(r.guides).toEqual([{ axis: 'v', pos: 100 }]);
+    expect(r.dy).toBe(-2);
+    expect(r.guides).toEqual([{ axis: 'v', pos: 100 }, { axis: 'h', pos: 140 }]);
+    // An axis with nothing in range stays unsnapped.
+    const xOnly = snapDelta(box(97, 200, 20, 10), cands, 5);
+    expect(xOnly.dy).toBe(0);
+    expect(xOnly.guides).toEqual([{ axis: 'v', pos: 100 }]);
   });
   it('snaps centers to centers', () => {
     // moved center x = 118 (x=108,w=20) → snaps to 120 (dx +2).
@@ -27,9 +32,11 @@ describe('snapDelta', () => {
     expect(r).toEqual({ dx: 0, dy: 0, guides: [] });
   });
   it('prefers the closest candidate', () => {
-    // right edge at 99 (x=79,w=20): dist to 100 is 1; left edge 79 to nothing.
-    const r = snapDelta(box(79, 100, 20, 40), cands, 5);
-    expect(r.dx).toBe(1);
+    // TWO hits in range, the FARTHER one tried first: left edge 103 → 100 is −3,
+    // centre 118 → 120 is +2. The nearer (+2) must win, not the first found.
+    const r = snapDelta(box(103, 300, 30, 10), cands, 5);
+    expect(r.dx).toBe(2);
+    expect(r.guides).toEqual([{ axis: 'v', pos: 120 }]);
   });
 });
 
@@ -59,9 +66,10 @@ describe('computeAlignPatches', () => {
     expect(patches).toContainEqual({ idx: 1, patch: { x: 40, y: 0 } });
   });
   it('distributes interior boxes with equal gaps (outermost fixed)', () => {
-    const patches = computeAlignPatches([item(0, 0, 0), item(1, 30, 0), item(2, 100, 0)], 'distributeH', move);
-    // span 0..120, total w 60, gaps (120-60)/2 = 30 → middle box lands at x=50.
-    expect(patches).toEqual([{ idx: 1, patch: { x: 50, y: 0 } }]);
+    // Passed OUT of x order (the selection order is arbitrary): sorted 0, 30, 100.
+    const patches = computeAlignPatches([item(0, 100, 0), item(1, 0, 0), item(2, 30, 0)], 'distributeH', move);
+    // span 0..120, total w 60, gaps (120-60)/2 = 30 → middle box (idx 2) lands at x=50.
+    expect(patches).toEqual([{ idx: 2, patch: { x: 50, y: 0 } }]);
   });
   it('skips locked/hidden and needs ≥2 usable', () => {
     expect(computeAlignPatches([item(0, 0, 0), item(1, 50, 0, { locked: true })], 'left', move)).toEqual([]);
@@ -89,8 +97,11 @@ describe('equal-spacing snapping (§7.4 / CV-6)', () => {
   it('snaps to the mirrored gap and reports labeled spans', () => {
     const r = combinedSnapDelta(box(217, 300, 20, 20), null, gaps, 5);
     expect(r.dx).toBe(3); // 217 → 220
-    expect(r.spans.length).toBeGreaterThanOrEqual(2);
-    for (const sp of r.spans) { expect(sp.dir).toBe('x'); expect(sp.gap).toBe(20); }
+    // The pair's own gap (140→160) plus the mirrored one after b (200→220).
+    expect(r.spans).toEqual([
+      { dir: 'x', at: 120, from: 140, to: 160, gap: 20 },
+      { dir: 'x', at: 120, from: 200, to: 220, gap: 20 },
+    ]);
   });
   it('alignment wins over spacing on the same axis', () => {
     const align = buildSnapCandidates(sibs);
@@ -98,6 +109,11 @@ describe('equal-spacing snapping (§7.4 / CV-6)', () => {
     const r = combinedSnapDelta(box(198, 300, 20, 20), align, gaps, 5);
     expect(r.guides.some((g) => g.kind === 'align')).toBe(true);
     expect(r.dx).toBe(2); // align 198→200 beats any gap candidate
+    // CONTENDED: both an align hit (216, dx −1) and a gap hit (220, dx +3) are in
+    // range for the same box — alignment must win and no spacing spans render.
+    const contended = combinedSnapDelta(box(217, 300, 20, 20), buildSnapCandidates([...sibs, box(216, 0, 40, 40)]), gaps, 5);
+    expect(contended.dx).toBe(-1);
+    expect(contended.spans).toEqual([]);
   });
   it('centered candidate splits the inner gap equally when the box fits', () => {
     // With a 10-wide box the centered pos is (140+160-10)/2 = 145 with 5 each side.

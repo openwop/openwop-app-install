@@ -36,7 +36,7 @@ import { resolveOne } from '../../host/featureToggles/service.js';
 import { listOrgs, resolveEffectiveAccess } from '../../host/accessControlService.js';
 import type { BundleScope } from '../../host/inMemorySurfaces.js';
 import { getNodeRegistry } from '../../executor/nodeRegistry.js';
-import { createCanvasForTenant, getCanvasForCaller, updateCanvasForTenant } from '../../host/canvasSurface.js';
+import { createCanvasForTenant, getCanvasForCaller, canvasWriteAllowed, updateCanvasForTenant } from '../../host/canvasSurface.js';
 import type { SubjectCaller } from '../../host/subjectAccess.js';
 import { OpenwopError } from '../../types.js';
 import { validateCampaignDoc } from './validateCampaignDoc.js';
@@ -183,6 +183,10 @@ async function renderCampaign(tenantId: string, args: RenderCampaignArgs): Promi
     const existing = await getCanvasForCaller(tenantId, args.canvasId, args.caller);
     if (!existing || existing.canvasTypeId !== CAMPAIGN_CANVAS_TYPE) {
       return { ok: false, error: 'not_found', message: `Campaign '${args.canvasId}' not found in this workspace.` };
+    }
+    // ADR 0886 D1 — WRITE on the owner, decided in the owner's org.
+    if (!(await canvasWriteAllowed(tenantId, existing, args.caller))) {
+      return { ok: false, error: 'forbidden_scope', message: 'The user can read this campaign but cannot edit it — tell them.' };
     }
     try {
       const applied = await updateCanvasForTenant(tenantId, args.canvasId, payload, {

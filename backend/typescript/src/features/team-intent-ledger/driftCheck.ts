@@ -30,7 +30,7 @@ import type { Storage } from '../../storage/storage.js';
 import { runUnderWorkerContract } from '../../storage/eventEraAdapter.js';
 import { createLogger } from '../../observability/logger.js';
 import { getDocument, listDocumentsForTenant, listVersions } from '../documents/documentsService.js';
-import { getProject } from '../projects/projectsService.js';
+import { getProject, type Project } from '../projects/projectsService.js';
 import { findLedgerById, stateAt } from './ledgerStore.js';
 import { readTeamLedgerStamp } from './runStamp.js';
 import { createSuggestion, markSuggestionSentBack, requireOpenSuggestion, type DecisionSuggestion } from './suggestions.js';
@@ -138,6 +138,16 @@ export function unexplainedFindings(findings: readonly Finding[], decisions: rea
   return findings.filter((f) => !(f.decisionTitle && known.has(norm(f.decisionTitle)) && departsFrom(f) !== norm(f.decisionTitle)));
 }
 
+/** The titles of the decision records on the ledger at a version (missing records skipped). */
+export async function decisionTitlesOf(project: Pick<Project, 'tenantId' | 'orgId'>, state: Pick<LedgerState, 'decisionDocumentIds'>): Promise<string[]> {
+  const out: string[] = [];
+  for (const id of state.decisionDocumentIds) {
+    const d = await getDocument(project.tenantId, project.orgId, id);
+    if (d) out.push(d.title.replace(/^Decision — /, ''));
+  }
+  return out;
+}
+
 export type DriftClassifier = (tenantId: string, ledger: string, produced: string) => Promise<Finding[] | null>;
 export const classifyDrift: DriftClassifier = async (tenantId, ledger, produced) => {
   // No `modelClass: 'quick'`: the workspace's own model. The real-model gate
@@ -153,7 +163,8 @@ export const classifyDrift: DriftClassifier = async (tenantId, ledger, produced)
   return parseFindings(raw);
 };
 
-async function takeBudget(tenantId: string): Promise<boolean> {
+/** One check from the per-workspace daily budget (shared by run and pull-request checks). */
+export async function takeDriftBudget(tenantId: string): Promise<boolean> {
   const key = `${tenantId}:${today()}`;
   const cur = await budget.get(key);
   if ((cur?.count ?? 0) >= driftDailyBudget()) return false;
@@ -166,7 +177,7 @@ export async function processDriftQueue(storage: Storage, classify: DriftClassif
   const batch = (await queue.list()).sort((a, b) => a.createdAt.localeCompare(b.createdAt)).slice(0, DRIFT_LIMITS.perTick);
   let n = 0;
   for (const p of batch) {
-    if (!(await takeBudget(p.tenantId))) { log.info('drift_check_budget_spent', { tenantId: p.tenantId }); continue; }
+    if (!(await takeDriftBudget(p.tenantId))) { log.info('drift_check_budget_spent', { tenantId: p.tenantId }); continue; }
     await queue.delete(p.key);
     try {
       const run = await storage.getRun(p.runId);
@@ -176,11 +187,7 @@ export async function processDriftQueue(storage: Storage, classify: DriftClassif
       const project = ledger ? await getProject(p.tenantId, ledger.scope.id) : null;
       const state = ledger ? await stateAt(p.tenantId, ledger.ledgerId, stamp.version) : null;
       if (!project || !state) continue;
-      const decisions: string[] = [];
-      for (const id of state.decisionDocumentIds) {
-        const d = await getDocument(project.tenantId, project.orgId, id);
-        if (d) decisions.push(d.title.replace(/^Decision — /, ''));
-      }
+      const decisions = await decisionTitlesOf(project, state);
       const produced = await producedText(storage, p.tenantId, p.runId);
       if (!produced.trim()) continue;
       n += 1;

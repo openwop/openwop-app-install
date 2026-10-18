@@ -118,10 +118,24 @@ describe("ADR 0610 collab-lane / SLC-1 — a private project's canvas collab roo
   });
 
   it('a project MEMBER regains the collab room — mint AND open the WS with the ticket (the prod cross-origin posture)', async () => {
-    const { projectId, canvasId, a, b } = await privateProjectCanvas();
+    const { tenantId, orgId, projectId, canvasId, a, b } = await privateProjectCanvas();
     expect((await a.post(`${P}/${projectId}/members`, { ref: `user:${b.userId}`, role: 'observer' })).status).toBe(201);
-    const minted = await mintTicket(b.cookie, canvasId);
-    expect(minted.status).toBe(200); // member (read) may mint
+    // ADR 0886 D2 — a room is read-WRITE, so joining is a write. The read-only
+    // member (org viewer + project observer) now gets the DISTINCT 403 the editor
+    // falls back on (single-writer, REST read) — not the uniform 404 of a
+    // non-member. This used to assert "member (read) may mint", which let a
+    // read-only person live-edit the canvas.
+    const ro = await fetch(`${BASE}/host/openwop-app/canvas-collab/${encodeURIComponent(canvasId)}/ticket`, { method: 'POST', headers: { cookie: b.cookie } });
+    expect(ro.status).toBe(403);
+    expect(((await ro.json()) as { details?: { reason?: string } }).details?.reason).toBe('collab_write_required');
+    expect(await connect(canvasId, { origin: ORIGIN, cookie: b.cookie })).toEqual({ open: false, status: 403 });
+    // A WRITER member regains the room (the original regression guard below is
+    // unchanged: mint over /api, join the direct origin with the ticket alone).
+    const w = await loginTo(tenantId, 'writer');
+    await createMember({ tenantId, orgId, subject: w.userId, displayName: 'W', roles: ['editor'] });
+    expect((await a.post(`${P}/${projectId}/members`, { ref: `user:${w.userId}`, role: 'observer' })).status).toBe(201);
+    const minted = await mintTicket(w.cookie, canvasId);
+    expect(minted.status).toBe(200); // a writer may mint
     // THE REGRESSION GUARD (adversarial-review #4): a member who minted MUST be able
     // to open the WS WITH that ticket — the prod posture (mint over /api, WS-join on
     // the direct origin, NO cookie). A caller-format mismatch between mint + WS would
@@ -134,5 +148,25 @@ describe("ADR 0610 collab-lane / SLC-1 — a private project's canvas collab roo
     const minted = await mintTicket(a.cookie, canvasId);
     expect(minted.status).toBe(200);
     expect(await connect(canvasId, { origin: ORIGIN }, `?ticket=${encodeURIComponent(minted.ticket!)}`)).toEqual({ open: true });
+  });
+});
+
+describe('ADR 0886 D2 / SL2CD-2 — the COOKIE WS lane decides write at the upgrade', () => {
+  it('a workspace Viewer cannot open a read-write room over a same-origin cookie; an Editor can', async () => {
+    const tenantId = `org:adr0886-ws-${Date.now()}-${n++}`;
+    const a = await loginTo(tenantId, 'owner');
+    const orgId = (await a.post('/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
+    const canvas = await createCanvasForTenant(tenantId, {
+      canvasTypeId: 'canvas.document', name: 'Org doc',
+      initialState: { title: 'Org doc', content: { type: 'doc', content: [] } },
+    });
+    const viewer = await loginTo(tenantId, 'viewer');
+    await createMember({ tenantId, orgId, subject: viewer.userId, displayName: 'V', roles: ['viewer'] });
+    const editor = await loginTo(tenantId, 'editor');
+    await createMember({ tenantId, orgId, subject: editor.userId, displayName: 'E', roles: ['editor'] });
+    // Positive control first (non-vacuity): the editor opens the room over its cookie.
+    expect(await connect(canvas.canvasId, { origin: ORIGIN, cookie: editor.cookie })).toEqual({ open: true });
+    // The viewer is refused at the upgrade (403 — they can read it; joining is a write).
+    expect(await connect(canvas.canvasId, { origin: ORIGIN, cookie: viewer.cookie })).toEqual({ open: false, status: 403 });
   });
 });

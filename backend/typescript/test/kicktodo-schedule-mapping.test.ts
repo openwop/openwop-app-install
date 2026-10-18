@@ -6,9 +6,41 @@
  *  - a non-allowed date yields null (nothing materializes ⇒ never "missed")
  *  - enroll freezes daysOfWeek; a non-allowed day materializes nothing while an
  *    allowed day maps the NEXT day index (weekday-stretching, not skipping)
+ *
+ * (The file also carries the ADR 0443 R3 planFor read, ADR 0444 I1/I2 invites +
+ * inviter notification and S1/S2 cohort sessions.)
+ *
+ * w41 grade-tests: every service-backed case now seeds its OWN enrollment with
+ * `Date` faked to Monday 2026-07-20 (the old cases shared one enrollment, so 7
+ * of them crashed under shuffle). The "non-allowed day" leg used a date BEFORE
+ * start — null for ANY daysOfWeek — and `occs.every(...)` on the [] that a
+ * re-materialize of today returns; both now use real weekdays after the start.
+ *
+ * Sabotages that turn this red (w41 probes): the non-allowed null in
+ * dayNumberFor, mapDayToDate's allowed-day walk, the override-beats-natural
+ * rule, daysOfWeek normalization, dropping daysOfWeek in materializeOccurrences,
+ * the daypart merge keeping daysOfWeek, planFor's 31-day cap, the invite tenant
+ * check and self-invite rule, and the inviter mute.
  */
-import { beforeAll, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { dayNumber, dayNumberFor, dueDaysOn, effectiveDateForDay, mapDayToDate } from '../src/features/kicktodo-core/types.js';
+import { openStorage } from '../src/storage/index.js';
+import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
+import { registerGoalVerifier } from '../src/features/goals/goalVerifiers.js';
+import { setNotificationBackend, getNotificationEmitter } from '../src/notifications/emitter.js';
+import { setNotificationMuteResolver } from '../src/host/notificationPolicy.js';
+import { createDraft, publishChallenge } from '../src/features/kicktodo-core/challengeService.js';
+import {
+  enroll, setSchedulePreference, materializeOccurrences, occurrencesOn,
+  InvalidDaysOfWeekError, __clearEnrollGuards,
+} from '../src/features/kicktodo-core/enrollmentService.js';
+import type { ChallengeEnrollment } from '../src/features/kicktodo-core/types.js';
+import { planFor } from '../src/features/kicktodo-core/todayService.js';
+import { mintInvite, revokeInvite, resolveInvite, InviteDeniedError } from '../src/features/kicktodo-core/inviteService.js';
+import { createCircle, inviteToCircle, acceptGrant } from '../src/features/kicktodo-accountability/circleService.js';
+import {
+  scheduleSession, cancelSession, listSessions, SessionDeniedError, SessionTimeError,
+} from '../src/features/kicktodo-accountability/sessionService.js';
 
 describe('mapDayToDate / dayNumberFor (pure)', () => {
   // 2026-07-20 is a Monday (getUTCDay() === 1).
@@ -91,61 +123,79 @@ describe('effectiveDateForDay / dueDaysOn — override-aware mapping (ADR 0496 D
   });
 });
 
-describe('enroll freezes daysOfWeek; materialization honors it', () => {
-  const T = 'tenant-sched';
-  const OWNER = 'user:sched-owner';
+// ── service-backed cases: each seeds its own tenant + enrollment ──────────
+const MONDAY = '2026-07-20'; // getUTCDay() === 1
+const OWNER = 'user:sched-owner';
+let caseNo = 0;
+let T = '';
 
-  beforeAll(async () => {
-    const { openStorage } = await import('../src/storage/index.js');
-    const { initHostExtPersistence } = await import('../src/host/hostExtPersistence.js');
-    const { registerGoalVerifier } = await import('../src/features/goals/goalVerifiers.js');
-    const { __clearEnrollGuards } = await import('../src/features/kicktodo-core/enrollmentService.js');
-    initHostExtPersistence(await openStorage('memory://'));
-    registerGoalVerifier('kicktodo:progress-evidence', async () => ({ satisfied: false, confidence: 0, runId: 'r' }));
-    __clearEnrollGuards();
+beforeEach(async () => {
+  vi.useFakeTimers({ toFake: ['Date'], now: new Date(`${MONDAY}T12:00:00.000Z`) });
+  const storage = await openStorage('memory://');
+  initHostExtPersistence(storage);
+  setNotificationBackend(storage);
+  setNotificationMuteResolver(async () => false);
+  registerGoalVerifier('kicktodo:progress-evidence', async () => ({ satisfied: false, confidence: 0, runId: 'r' }));
+  __clearEnrollGuards();
+  caseNo += 1;
+  T = `tenant-sched-${caseNo}`;
+});
+afterEach(() => {
+  setNotificationMuteResolver(async () => false);
+  vi.useRealTimers();
+});
+
+/** A published 3-day challenge (day 1 → a1, day 2 → a2). */
+async function publishedChallenge(): Promise<string> {
+  const draft = await createDraft({
+    tenantId: T, title: 'Sched Challenge', summary: 's', outcome: 'o', durationDays: 3,
+    activities: [
+      { stableActivityId: 'a1', day: 1, title: 'Day one', instructions: 'i', evidencePolicy: 'attestation' },
+      { stableActivityId: 'a2', day: 2, title: 'Day two', instructions: 'i', evidencePolicy: 'attestation' },
+    ],
   });
+  await publishChallenge(T, draft.id, 1);
+  return draft.id;
+}
 
+/** The owner enrolled Mon/Wed/Fri from Monday 2026-07-20. */
+async function ownerEnrollment(): Promise<ChallengeEnrollment> {
+  const challengeId = await publishedChallenge();
+  const { enrollment } = await enroll({ tenantId: T, ownerSubject: OWNER, challengeId, challengeVersion: 1, timezone: 'UTC', daysOfWeek: [1, 3, 5] });
+  return enrollment;
+}
+
+describe('enroll freezes daysOfWeek; materialization honors it', () => {
   it('invalid daysOfWeek is refused; valid is normalized + frozen on the row', async () => {
-    const { createDraft, publishChallenge } = await import('../src/features/kicktodo-core/challengeService.js');
-    const { enroll, InvalidDaysOfWeekError, materializeOccurrences } = await import('../src/features/kicktodo-core/enrollmentService.js');
-    const draft = await createDraft({
-      tenantId: T, title: 'Sched Challenge', summary: 's', outcome: 'o', durationDays: 3,
-      activities: [
-        { stableActivityId: 'a1', day: 1, title: 'Day one', instructions: 'i', evidencePolicy: 'attestation' },
-        { stableActivityId: 'a2', day: 2, title: 'Day two', instructions: 'i', evidencePolicy: 'attestation' },
-      ],
-    });
-    await publishChallenge(T, draft.id, 1);
-
-    await expect(enroll({ tenantId: T, ownerSubject: OWNER, challengeId: draft.id, challengeVersion: 1, timezone: 'UTC', daysOfWeek: [] }))
+    const challengeId = await publishedChallenge();
+    await expect(enroll({ tenantId: T, ownerSubject: OWNER, challengeId, challengeVersion: 1, timezone: 'UTC', daysOfWeek: [] }))
       .rejects.toBeInstanceOf(InvalidDaysOfWeekError);
-    await expect(enroll({ tenantId: T, ownerSubject: OWNER, challengeId: draft.id, challengeVersion: 1, timezone: 'UTC', daysOfWeek: [9] }))
+    await expect(enroll({ tenantId: T, ownerSubject: OWNER, challengeId, challengeVersion: 1, timezone: 'UTC', daysOfWeek: [9] }))
       .rejects.toBeInstanceOf(InvalidDaysOfWeekError);
 
     const { enrollment } = await enroll({
-      tenantId: T, ownerSubject: OWNER, challengeId: draft.id, challengeVersion: 1,
+      tenantId: T, ownerSubject: OWNER, challengeId, challengeVersion: 1,
       timezone: 'UTC', daysOfWeek: [5, 1, 3, 1], // deduped + sorted on the row
     });
     expect(enrollment.schedulePreference?.daysOfWeek).toEqual([1, 3, 5]);
+    expect(enrollment.startDateLocal).toBe(MONDAY);
 
-    // A non-allowed date materializes NOTHING; an allowed one maps its day index.
-    const start = enrollment.startDateLocal;
-    const day1Date = mapDayToDate(start, [1, 3, 5], 1);
-    const occs = await materializeOccurrences(T, enrollment.id, day1Date);
-    expect(occs.every((o) => o.occurrenceDateLocal === day1Date)).toBe(true);
-    const disallowed = dayNumberFor(start, [1, 3, 5], '2026-01-01') === null
-      ? '2026-01-01' // any date before start is fine as a null probe
-      : start;
-    expect(await materializeOccurrences(T, enrollment.id, disallowed)).toEqual([]);
+    // Monday (allowed) is day 1 — enroll already materialized it.
+    expect((await occurrencesOn(T, enrollment.id, MONDAY)).map((o) => o.stableActivityId)).toEqual(['a1']);
+    // Tuesday is AFTER the start but NOT allowed: nothing materializes (never "missed").
+    expect(await materializeOccurrences(T, enrollment.id, '2026-07-21')).toEqual([]);
+    expect(await occurrencesOn(T, enrollment.id, '2026-07-21')).toEqual([]);
+    // Wednesday (allowed) maps the NEXT day index — day 2, not day 3 (stretching, not skipping).
+    const wed = await materializeOccurrences(T, enrollment.id, '2026-07-22');
+    expect(wed.map((o) => [o.stableActivityId, o.occurrenceDateLocal])).toEqual([['a2', '2026-07-22']]);
   });
 
   it('setting a daypart PRESERVES the frozen daysOfWeek (the R1 merge fix)', async () => {
-    const { listEnrollmentsFor, setSchedulePreference } = await import('../src/features/kicktodo-core/enrollmentService.js');
-    const [e] = await listEnrollmentsFor(T, OWNER);
-    const withDaypart = await setSchedulePreference(T, e!.id, OWNER, 'evening');
+    const e = await ownerEnrollment();
+    const withDaypart = await setSchedulePreference(T, e.id, OWNER, 'evening');
     expect(withDaypart?.schedulePreference?.daypart).toBe('evening');
     expect(withDaypart?.schedulePreference?.daysOfWeek).toEqual([1, 3, 5]);
-    const cleared = await setSchedulePreference(T, e!.id, OWNER, null);
+    const cleared = await setSchedulePreference(T, e.id, OWNER, null);
     expect(cleared?.schedulePreference?.daypart).toBeUndefined();
     expect(cleared?.schedulePreference?.daysOfWeek).toEqual([1, 3, 5]); // never dropped
   });
@@ -153,114 +203,93 @@ describe('enroll freezes daysOfWeek; materialization honors it', () => {
 
 describe('planFor — the cross-challenge derived read (ADR 0443 R3)', () => {
   it('projects dated items via the ONE mapping, marks real check-ins, bounds the window, self-data only', async () => {
-    const { listEnrollmentsFor } = await import('../src/features/kicktodo-core/enrollmentService.js');
-    const { planFor } = await import('../src/features/kicktodo-core/todayService.js');
-    const [e] = await listEnrollmentsFor('tenant-sched', 'user:sched-owner');
-    const start = e!.startDateLocal;
-    const day1 = mapDayToDate(start, [1, 3, 5], 1);
-    const day2 = mapDayToDate(start, [1, 3, 5], 2);
-    const items = await planFor('tenant-sched', 'user:sched-owner', day1, day2);
-    expect(items.map((i) => i.dateLocal)).toEqual([day1, day2]);
-    expect(items.every((i) => i.enrollmentId === e!.id)).toBe(true);
+    const e = await ownerEnrollment();
+    const day1 = '2026-07-20'; // Mon
+    const day2 = '2026-07-22'; // Wed — day 2 under Mon/Wed/Fri
+    const items = await planFor(T, OWNER, day1, day2);
+    expect(items.map((i) => [i.dateLocal, i.stableActivityId])).toEqual([[day1, 'a1'], [day2, 'a2']]);
+    expect(items.every((i) => i.enrollmentId === e.id)).toBe(true);
     expect(items.every((i) => i.completed === false)).toBe(true); // nothing checked in
-    // over-wide window refused (silently empty), other subjects see nothing
-    expect(await planFor('tenant-sched', 'user:sched-owner', day1, '2099-01-01')).toEqual([]);
-    expect(await planFor('tenant-sched', 'user:nobody', day1, day2)).toEqual([]);
+    // a 32-day window is refused (silently empty); exactly 31 days is served
+    expect(await planFor(T, OWNER, day1, '2026-08-21')).toEqual([]);
+    expect((await planFor(T, OWNER, day1, '2026-08-20')).length).toBe(2);
+    // other subjects see nothing
+    expect(await planFor(T, 'user:nobody', day1, day2)).toEqual([]);
   });
 });
 
 describe('invite links (ADR 0444 I1) — attribution only, never authority', () => {
   it('mint requires published; re-mint revokes the prior; resolve is tenant-checked', async () => {
-    const { mintInvite, revokeInvite, resolveInvite, InviteDeniedError } = await import('../src/features/kicktodo-core/inviteService.js');
-    const { listEnrollmentsFor } = await import('../src/features/kicktodo-core/enrollmentService.js');
-    const [e] = await listEnrollmentsFor('tenant-sched', 'user:sched-owner');
-    const challengeId = e!.challengeId;
+    const challengeId = await publishedChallenge();
 
-    await expect(mintInvite('tenant-sched', 'chal:nope', 'user:sched-owner')).rejects.toBeInstanceOf(InviteDeniedError);
+    await expect(mintInvite(T, 'chal:nope', OWNER)).rejects.toBeInstanceOf(InviteDeniedError);
 
-    const t1 = await mintInvite('tenant-sched', challengeId, 'user:sched-owner');
+    const t1 = await mintInvite(T, challengeId, OWNER);
     expect(t1.startsWith('ktinv_')).toBe(true);
-    expect((await resolveInvite('tenant-sched', t1))?.inviterSubject).toBe('user:sched-owner');
+    expect((await resolveInvite(T, t1))?.inviterSubject).toBe(OWNER);
     expect(await resolveInvite('tenant-OTHER', t1)).toBeNull(); // never crosses tenants
 
-    const t2 = await mintInvite('tenant-sched', challengeId, 'user:sched-owner'); // re-mint
-    expect(await resolveInvite('tenant-sched', t1)).toBeNull(); // prior revoked
-    expect((await resolveInvite('tenant-sched', t2))?.challengeId).toBe(challengeId);
+    const t2 = await mintInvite(T, challengeId, OWNER); // re-mint
+    expect(await resolveInvite(T, t1)).toBeNull(); // prior revoked
+    expect((await resolveInvite(T, t2))?.challengeId).toBe(challengeId);
 
-    await revokeInvite('tenant-sched', challengeId, 'user:sched-owner');
-    expect(await resolveInvite('tenant-sched', t2)).toBeNull();
+    await revokeInvite(T, challengeId, OWNER);
+    expect(await resolveInvite(T, t2)).toBeNull();
   });
 
   it('enroll stamps invitedBy from a live token; self/invalid tokens stamp nothing', async () => {
-    const { mintInvite } = await import('../src/features/kicktodo-core/inviteService.js');
-    const { enroll, listEnrollmentsFor } = await import('../src/features/kicktodo-core/enrollmentService.js');
-    const [e] = await listEnrollmentsFor('tenant-sched', 'user:sched-owner');
-    const token = await mintInvite('tenant-sched', e!.challengeId, 'user:sched-owner');
+    const challengeId = await publishedChallenge();
+    const token = await mintInvite(T, challengeId, OWNER);
 
     const { enrollment: friend } = await enroll({
-      tenantId: 'tenant-sched', ownerSubject: 'user:sched-friend',
-      challengeId: e!.challengeId, challengeVersion: e!.challengeVersion,
-      timezone: 'UTC', inviteToken: token,
+      tenantId: T, ownerSubject: 'user:sched-friend', challengeId, challengeVersion: 1, timezone: 'UTC', inviteToken: token,
     });
-    expect(friend.invitedBy).toBe('user:sched-owner');
+    expect(friend.invitedBy).toBe(OWNER);
 
     const { enrollment: stranger } = await enroll({
-      tenantId: 'tenant-sched', ownerSubject: 'user:sched-stranger',
-      challengeId: e!.challengeId, challengeVersion: e!.challengeVersion,
-      timezone: 'UTC', inviteToken: 'ktinv_bogus',
+      tenantId: T, ownerSubject: 'user:sched-stranger', challengeId, challengeVersion: 1, timezone: 'UTC', inviteToken: 'ktinv_bogus',
     });
     expect(stranger.invitedBy).toBeUndefined(); // invalid → silently no attribution
+
+    // The inviter (not yet enrolled) uses their OWN live token: no self-referral.
+    const { enrollment: self } = await enroll({
+      tenantId: T, ownerSubject: OWNER, challengeId, challengeVersion: 1, timezone: 'UTC', inviteToken: token,
+    });
+    expect(self.invitedBy).toBeUndefined();
   });
 });
 
 describe('inviter notification (ADR 0444 I2)', () => {
-  it('an attributed enroll notifies the inviter — content-minimal, no joiner identity', async () => {
-    const { setNotificationBackend, getNotificationEmitter } = await import('../src/notifications/emitter.js');
-    const { openStorage } = await import('../src/storage/index.js');
-    setNotificationBackend(await openStorage('memory://'));
+  function captureInviteAccepted(): { captured: Array<{ recipientUserId: string; message: string }>; unsub: () => void } {
     const captured: Array<{ recipientUserId: string; message: string }> = [];
     const unsub = getNotificationEmitter().subscribe((n) => {
-      if ((n.metadata as Record<string, unknown> | undefined)?.category === 'kicktodo-invite-accepted') {
-        captured.push({ recipientUserId: n.recipientUserId ?? '', message: n.message ?? '' });
-      }
+      const meta: Record<string, unknown> | undefined = n.metadata;
+      if (meta?.category === 'kicktodo-invite-accepted') captured.push({ recipientUserId: n.recipientUserId ?? '', message: n.message ?? '' });
     });
+    return { captured, unsub };
+  }
+
+  it('an attributed enroll notifies the inviter — content-minimal, no joiner identity', async () => {
+    const challengeId = await publishedChallenge();
+    const token = await mintInvite(T, challengeId, OWNER);
+    const { captured, unsub } = captureInviteAccepted();
     try {
-      const { mintInvite } = await import('../src/features/kicktodo-core/inviteService.js');
-      const { enroll, listEnrollmentsFor } = await import('../src/features/kicktodo-core/enrollmentService.js');
-      const [e] = await listEnrollmentsFor('tenant-sched', 'user:sched-owner');
-      const token = await mintInvite('tenant-sched', e!.challengeId, 'user:sched-owner');
-      await enroll({
-        tenantId: 'tenant-sched', ownerSubject: 'user:sched-friend2',
-        challengeId: e!.challengeId, challengeVersion: e!.challengeVersion,
-        timezone: 'UTC', inviteToken: token,
-      });
-      expect(captured.length).toBe(1);
-      expect(captured[0]!.recipientUserId).toBe('user:sched-owner');
+      await enroll({ tenantId: T, ownerSubject: 'user:sched-friend2', challengeId, challengeVersion: 1, timezone: 'UTC', inviteToken: token });
+      expect(captured).toHaveLength(1);
+      expect(captured[0]!.recipientUserId).toBe(OWNER);
       expect(captured[0]!.message).not.toContain('sched-friend2'); // joiner identity never leaked
     } finally { unsub(); }
   });
 
   it('ADR 0457 — a muted inviter is NOT notified (quiet-hours / per-type mute respected)', async () => {
-    const { setNotificationBackend, getNotificationEmitter } = await import('../src/notifications/emitter.js');
-    const { openStorage } = await import('../src/storage/index.js');
-    const { setNotificationMuteResolver } = await import('../src/host/notificationPolicy.js');
-    setNotificationBackend(await openStorage('memory://'));
-    const captured: string[] = [];
-    const unsub = getNotificationEmitter().subscribe((n) => {
-      if ((n.metadata as Record<string, unknown> | undefined)?.category === 'kicktodo-invite-accepted') captured.push(n.recipientUserId ?? '');
-    });
+    const challengeId = await publishedChallenge();
+    const token = await mintInvite(T, challengeId, OWNER);
+    const { captured, unsub } = captureInviteAccepted();
     try {
-      const { mintInvite } = await import('../src/features/kicktodo-core/inviteService.js');
-      const { enroll, listEnrollmentsFor } = await import('../src/features/kicktodo-core/enrollmentService.js');
-      const [e] = await listEnrollmentsFor('tenant-sched', 'user:sched-owner');
-      const token = await mintInvite('tenant-sched', e!.challengeId, 'user:sched-owner');
-      setNotificationMuteResolver(async (_t, uid) => uid === 'user:sched-owner'); // inviter muted
-      await enroll({
-        tenantId: 'tenant-sched', ownerSubject: 'user:sched-friend3',
-        challengeId: e!.challengeId, challengeVersion: e!.challengeVersion,
-        timezone: 'UTC', inviteToken: token,
-      });
-      expect(captured.length).toBe(0); // courtesy notify suppressed; enroll still succeeded
+      setNotificationMuteResolver(async (_t, uid) => uid === OWNER); // inviter muted
+      const { enrollment } = await enroll({ tenantId: T, ownerSubject: 'user:sched-friend3', challengeId, challengeVersion: 1, timezone: 'UTC', inviteToken: token });
+      expect(enrollment.invitedBy).toBe(OWNER); // attribution still stamped…
+      expect(captured).toHaveLength(0); // …but the courtesy notify is suppressed
     } finally {
       setNotificationMuteResolver(async () => false); // restore deliver-all
       unsub();
@@ -270,43 +299,38 @@ describe('inviter notification (ADR 0444 I2)', () => {
 
 describe('cohort sessions (ADR 0444 S1/S2)', () => {
   it('coach schedules (idempotent, future-only); members read; outsiders uniformly denied; grantees notified', async () => {
-    const { createCircle, inviteToCircle, acceptGrant } = await import('../src/features/kicktodo-accountability/circleService.js');
-    const { scheduleSession, cancelSession, listSessions, SessionDeniedError, SessionTimeError } =
-      await import('../src/features/kicktodo-accountability/sessionService.js');
-    const { getNotificationEmitter } = await import('../src/notifications/emitter.js');
-    const { listEnrollmentsFor } = await import('../src/features/kicktodo-core/enrollmentService.js');
-
-    const [e] = await listEnrollmentsFor('tenant-sched', 'user:sched-owner');
-    const circle = await createCircle({ tenantId: 'tenant-sched', type: 'cohort', enrollmentId: e!.id, ownerSubject: 'user:sched-owner', name: 'Test cohort' });
-    await inviteToCircle('tenant-sched', circle.id, 'user:sched-owner', 'user:sched-member', ['progress-summary']);
+    const e = await ownerEnrollment();
+    const circle = await createCircle({ tenantId: T, type: 'cohort', enrollmentId: e.id, ownerSubject: OWNER, name: 'Test cohort' });
+    await inviteToCircle(T, circle.id, OWNER, 'user:sched-member', ['progress-summary']);
     await acceptGrant(circle.id, 'user:sched-member');
 
     const notified: string[] = [];
     const unsub = getNotificationEmitter().subscribe((n) => {
-      if ((n.metadata as Record<string, unknown> | undefined)?.category === 'kicktodo-session') notified.push(n.recipientUserId ?? '');
+      const meta: Record<string, unknown> | undefined = n.metadata;
+      if (meta?.category === 'kicktodo-session') notified.push(n.recipientUserId ?? '');
     });
     try {
       const at = new Date(Date.now() + 3_600_000).toISOString();
       // member cannot schedule; past time refused; coach schedules idempotently
-      await expect(scheduleSession('tenant-sched', circle.id, 'user:sched-member', at, 'x')).rejects.toBeInstanceOf(SessionDeniedError);
-      await expect(scheduleSession('tenant-sched', circle.id, 'user:sched-owner', '2000-01-01T00:00:00Z', 'x')).rejects.toBeInstanceOf(SessionTimeError);
-      const s1 = await scheduleSession('tenant-sched', circle.id, 'user:sched-owner', at, 'Kickoff');
-      const s2 = await scheduleSession('tenant-sched', circle.id, 'user:sched-owner', at, 'Kickoff');
+      await expect(scheduleSession(T, circle.id, 'user:sched-member', at, 'x')).rejects.toBeInstanceOf(SessionDeniedError);
+      await expect(scheduleSession(T, circle.id, OWNER, '2000-01-01T00:00:00Z', 'x')).rejects.toBeInstanceOf(SessionTimeError);
+      const s1 = await scheduleSession(T, circle.id, OWNER, at, 'Kickoff');
+      const s2 = await scheduleSession(T, circle.id, OWNER, at, 'Kickoff');
       expect(s2.createdAt).toBe(s1.createdAt); // idempotent — same row
       // grade-code #5 — MINUTE precision enforced: a sub-minute variant of the
       // same moment converges on the SAME row (no duplicate notify fan-out).
       const subMinute = new Date(Math.floor(Date.parse(at) / 60_000) * 60_000 + 500).toISOString();
-      const s3 = await scheduleSession('tenant-sched', circle.id, 'user:sched-owner', subMinute, 'Kickoff');
+      const s3 = await scheduleSession(T, circle.id, OWNER, subMinute, 'Kickoff');
       expect(s3.atIso).toBe(s1.atIso);
       expect(s3.createdAt).toBe(s1.createdAt);
       expect(s1.conversationId).toBe(circle.conversationId); // the ONE chat, no second surface
-      expect(notified).toContain('user:sched-member'); // S2 — grantee notified
+      expect(notified).toEqual(['user:sched-member']); // S2 — grantee notified ONCE
       // member reads; outsider uniformly denied
-      expect((await listSessions('tenant-sched', circle.id, 'user:sched-member')).length).toBe(1);
-      await expect(listSessions('tenant-sched', circle.id, 'user:nobody')).rejects.toBeInstanceOf(SessionDeniedError);
+      expect((await listSessions(T, circle.id, 'user:sched-member')).length).toBe(1);
+      await expect(listSessions(T, circle.id, 'user:nobody')).rejects.toBeInstanceOf(SessionDeniedError);
       // cancel hides it from upcoming
-      await cancelSession('tenant-sched', circle.id, 'user:sched-owner', s1.atIso);
-      expect((await listSessions('tenant-sched', circle.id, 'user:sched-owner')).length).toBe(0);
+      await cancelSession(T, circle.id, OWNER, s1.atIso);
+      expect((await listSessions(T, circle.id, OWNER)).length).toBe(0);
     } finally { unsub(); }
   });
 });

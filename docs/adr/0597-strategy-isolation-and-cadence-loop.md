@@ -376,6 +376,17 @@ Pinned as a test ("deferred expansion does NOT rescue an unsupplied required
 param"), not left as prose, because the tempting "simplification" later is
 exactly to replace the refusal with the deferral.
 
+> **CORRECTED 2026-10-10 (grade-tests wave 19).** That pin was removed from
+> `strategy-chain-execution.test.ts`. It asserted the LOADER's deferred-mode
+> internals (`orgId` freezes to `undefined`; `findUnfilledExpansionParams`
+> returns `[]`), so a later loader improvement would have turned it red, and it
+> never touched `cadence.ts`, so it could not see the hazard it named. Probe
+> `w19g2-ce-deferred-cover` (switch `applyCadenceConfig` to
+> `expandChain(…, { params, deferred: true })`) left it GREEN while turning
+> the route witnesses red: "refuses to schedule board-pack with no orgId…" and
+> §Correction 2's "leaves no config, no workflow, no ownership and no job…".
+> Those two cases are now the pin; the reasoning above stands.
+
 **Witnesses / sabotage:**
 
 | Sabotage | Red | Message |

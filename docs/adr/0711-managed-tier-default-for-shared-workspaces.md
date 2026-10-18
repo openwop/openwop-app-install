@@ -206,6 +206,18 @@ Built as the correction note above prescribes: a REPORTING change in
 | the SPA never caches a default as a choice | `byok/lib/useBYOKConfig.ts:216` | `byok/lib/__tests__/adr0711ManagedDefault.test.ts` legs 1-4 |
 | the operator-only refusal is legible | `byok/lib/byokClient.ts` `ByokForbiddenError` → `chat/ChatTab.tsx` | `chat:byokForbidden`, 4 locales |
 
+> **CORRECTED 2026-10-15 (grade-tests wave 48): the "SPA never caches a default" proof
+> above was inert.** Its legs 1-3 asserted a local COPY of the predicate, and leg 4 grepped
+> `useBYOKConfig.ts` for `envelope.stored !== false`, a string the neighbouring
+> `setStored(envelope.stored !== false)` line also contains. Turning the cache guard into
+> `if (true)` left all four legs green (probe `w48g2-adr-cache-leg4`, vacuous). The file now
+> drives the real `useBYOKConfig` hook and reads `localStorage` after the refresh lands:
+> `stored:false` is not cached, `stored:true` is, an omitted `stored` is cached, and a
+> `stored:false` default arriving on a LATER refresh leaves the cached choice untouched
+> (four legs, re-probed). `byokConfigResilience.test.ts` "restores the server-reported managed
+> default…" also goes red under the same sabotage. The row's line reference
+> (`useBYOKConfig.ts:216`) is historical; the guard is in `refresh`, step 1.
+
 **NO TENANT-SHAPE TEST, and that is the substantive design call.** This ADR framed B as
 applying to "multi-principal workspaces". Two predicates in this codebase disagree about
 the `default` tenant — `isSinglePrincipalTenant` counts it single-principal,

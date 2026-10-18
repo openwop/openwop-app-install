@@ -62,7 +62,7 @@ export function registerDocumentEditorRoutes(deps: RouteDeps): void {
       d.app.post(`${org}/canvases/:canvasId/export`, async (req, res, next) => {
         try {
           const { user } = await authz(req, 'workspace:read');
-          const canvas = await loadCanvas(user.tenantId, req.params.canvasId, user.userId);
+          const canvas = await loadCanvas(user.tenantId, req.params.canvasId, user.userId, 'read');
           const format = String((req.body ?? {}).format ?? 'markdown');
           if (!(DOC_EXPORT_FORMATS as readonly string[]).includes(format)) {
             throw new OpenwopError('validation_error', `Unsupported export format \`${format}\` — one of: ${DOC_EXPORT_FORMATS.join(', ')}.`, 400, { field: 'format' });

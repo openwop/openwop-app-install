@@ -6,10 +6,16 @@
 import type { BackendFeature } from '../types.js';
 import { registerKicktodoMetricsRoutes } from './routes.js';
 import { buildKicktodoMetricsSurface } from './surface.js';
+import { registerKicktodoMetricsAgentTools } from './agentTools.js';
 
 export const kicktodoMetricsFeature: BackendFeature = {
   id: 'kicktodo-metrics',
-  registerRoutes: registerKicktodoMetricsRoutes,
+  registerRoutes: (deps) => {
+    registerKicktodoMetricsRoutes(deps);
+    // XCH-HOLE-1 — the Challenge Author's performance read. Registration is
+    // process-wide; per-tenant toggle + manage authority are checked per call.
+    registerKicktodoMetricsAgentTools();
+  },
   toggleDefault: {
     id: 'kicktodo-metrics',
     label: 'KickTodo Metrics',
@@ -21,6 +27,6 @@ export const kicktodoMetricsFeature: BackendFeature = {
     salt: 'kicktodo-metrics',
   },
   dependsOn: ['kicktodo-core', 'kicktodo-creator', 'goals'],
-  requiredPacks: [{ name: 'feature.kicktodo.nodes', version: '1.30.3' }],
+  requiredPacks: [{ name: 'feature.kicktodo.nodes', version: '1.37.0' }],
   surface: { id: 'kicktodo-metrics', build: buildKicktodoMetricsSurface },
 };

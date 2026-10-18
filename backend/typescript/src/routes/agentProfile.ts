@@ -33,13 +33,17 @@ import { OpenwopError, type AgentCapabilityId } from '../types.js';
 import { getRosterEntry, autonomyOf, type RosterEntry } from '../host/rosterService.js';
 import {
   getAgentProfile,
-  upsertAgentProfile,
   specLevelForLevel,
   activateAgentCapability,
   deactivateAgentCapability,
   TENANT_ELECTABLE_CAPABILITIES,
+  EDITOR_PROFILE_FIELDS,
+  agentProfileEtag,
+  putAgentProfileMerged,
   type AgentProfileInput,
+  type EditorProfileField,
 } from '../host/agentProfileService.js';
+import { etagHeader, parseIfMatch } from '../host/entityVersion.js';
 import { resolveConnectionReadiness, gateAutonomyByReadiness } from '../host/connectionReadiness.js';
 import { requireTenantWrite } from '../features/featureRoute.js';
 
@@ -68,6 +72,26 @@ async function requireOwnedAgent(req: Request): Promise<RosterEntry> {
     throw new OpenwopError('not_found', 'Agent not found.', 404, { id });
   }
   return entry;
+}
+
+const LIST_EDITOR_FIELDS = new Set<EditorProfileField>(['hitl', 'adminControls', 'riskCompliance', 'requiredConnections', 'metrics']);
+
+/** ADR 0775 P4 — the profile PUT merges, so an omitted field is KEPT. To clear an
+ *  editor field the caller sends `null`, or an empty array for a list field (the
+ *  stored shape then matches a never-set field, as before). Returns the body with
+ *  those members removed, for the ordinary parser, and the set to clear. */
+function splitProfileClears(raw: unknown): { body: unknown; clear: Set<EditorProfileField> } {
+  const clear = new Set<EditorProfileField>();
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { body: raw, clear };
+  const body = { ...(raw as Record<string, unknown>) };
+  for (const field of EDITOR_PROFILE_FIELDS) {
+    const value = body[field];
+    if (value === null || (LIST_EDITOR_FIELDS.has(field) && Array.isArray(value) && value.length === 0)) {
+      clear.add(field);
+      delete body[field];
+    }
+  }
+  return { body, clear };
 }
 
 function optStringArray(value: unknown, field: string): string[] | undefined {
@@ -330,7 +354,8 @@ export function registerAgentProfileRoutes(app: Express): void {
       if (!profile) {
         throw new OpenwopError('not_found', 'Agent profile not found.', 404, { id: entry.rosterId });
       }
-      res.json(profile);
+      res.setHeader('ETag', etagHeader(agentProfileEtag(profile)));
+      res.json({ ...profile, etag: agentProfileEtag(profile) });
     } catch (err) {
       next(err);
     }
@@ -340,7 +365,8 @@ export function registerAgentProfileRoutes(app: Express): void {
     try {
       await requireTenantWrite(req); // ADR 0775 D1
       const entry = await requireOwnedAgent(req);
-      const input = parseProfileBody(req.body);
+      const { body, clear } = splitProfileClears(req.body);
+      const input = parseProfileBody(body);
       // ADR 0493 — `roster.autonomyLevel` is the single autonomy source of truth
       // (owned by the Edit-details modal). Derive the profile's enforced `level`
       // + provenance `specLevel` from it, never from the request body, so the two
@@ -356,8 +382,12 @@ export function registerAgentProfileRoutes(app: Express): void {
             : {}),
         },
       };
-      const profile = await upsertAgentProfile(tenantOf(req), entry.rosterId, derived);
-      res.json(profile);
+      const profile = await putAgentProfileMerged(tenantOf(req), entry.rosterId, derived, {
+        ifMatch: parseIfMatch(req.header('If-Match')),
+        clear,
+      });
+      res.setHeader('ETag', etagHeader(agentProfileEtag(profile)));
+      res.json({ ...profile, etag: agentProfileEtag(profile) });
     } catch (err) {
       next(err);
     }

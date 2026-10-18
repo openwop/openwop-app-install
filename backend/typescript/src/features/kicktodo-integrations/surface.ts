@@ -9,10 +9,21 @@ import { listConsents } from './integrationService.js';
 import { syncEnrollmentCalendar, routeReminder } from './calendarWriteService.js';
 import { getEnrollment } from '../kicktodo-core/enrollmentService.js';
 import { todayFor } from '../kicktodo-core/todayService.js';
+import { bindKicktodoSurface, type KicktodoSurfaceSpecs } from '../kicktodo-core/surfaceBinding.js';
+
+/** ADR 0901 (DEC-1) — the run-principal spec per method (`surfaceBinding.ts`).
+ *  `calendarSync` (calendar-sync job) and `remindToday` (reminder-loop) are
+ *  host-job ops and stay system-callable; both owner-check the enrollment in
+ *  the service against the bound subject. `consents` is the caller's own list. */
+export const KICKTODO_INTEGRATIONS_SURFACE_SPECS = {
+  consents: { subjectArg: 'ownerSubject', authority: 'none', personOnly: true },
+  calendarSync: { subjectArg: 'ownerSubject', authority: 'none' },
+  remindToday: { subjectArg: 'ownerSubject', authority: 'none' },
+} as const satisfies KicktodoSurfaceSpecs;
 
 export function buildKicktodoIntegrationsSurface(scope: BundleScope): FeatureSurface {
   const tenant = scope.tenantId;
-  return {
+  return bindKicktodoSurface('kicktodo-integrations', scope, {
     consents: async (args) => ({ consents: await listConsents(tenant, surfaceStr(args.ownerSubject)) }),
     calendarSync: async (args) => ({
       result: await syncEnrollmentCalendar(tenant, surfaceStr(args.ownerSubject), surfaceStr(args.enrollmentId)),
@@ -36,5 +47,5 @@ export function buildKicktodoIntegrationsSurface(scope: BundleScope): FeatureSur
       const reminded = await routeReminder(tenant, ownerSubject, title);
       return { reminded, reason: reminded ? undefined : 'no-consent' };
     },
-  };
+  }, KICKTODO_INTEGRATIONS_SURFACE_SPECS);
 }

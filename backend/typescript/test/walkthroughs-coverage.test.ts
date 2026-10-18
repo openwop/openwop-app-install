@@ -8,7 +8,8 @@
  * ANY edit to the tour (a new/renamed step) FAILS here in default CI — forcing
  * the author to consciously update the registration + the FE coverage too. The
  * true cross-half guard (does the FE registry actually resolve them at
- * runtime) remains the opt-in `TOUR_E2E` replay, which runs the real tour.
+ * runtime) has NO test: the opt-in `TOUR_E2E` replay never ran and was
+ * deleted 2026-10-17 (/grade-tests wave 53; WALK-REPLAY-1).
  *
  * Together: backend pins WHAT the tour references; FE pins the registry HAS
  * them; the e2e pins they RESOLVE live. No half is vacuous.

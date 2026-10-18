@@ -3,12 +3,19 @@
  * solved coordinates across runs — the fork/replay invariant), constraint
  * correctness per kind, under/over-constrained diagnostics, degenerate-input
  * typed failure, and the FE↔BE twin parity pin.
+ *
+ * Sabotage-witnessed (/grade-tests w34): every constraint kind exercised here
+ * (fixed, horizontal, vertical, distance, parallel, perpendicular, equal,
+ * symmetric, coincident, angle) has its residual zeroed by a probe that turns
+ * its case red; CAD-C9 asserts the VALIDATOR's own message (the downstream
+ * non-finite-residual throw would satisfy a bare /finite/). Expected geometry is
+ * hand-derived. Parity passes vacuously only without the frontend tree (CAD-G4).
  */
 import { describe, expect, it } from 'vitest';
 import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { solveSketch, SketchError, type Sketch } from '../cadSketch.js';
+import { solveSketch, SketchError, type Sketch, type SketchConstraint } from '../cadSketch.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -73,11 +80,20 @@ describe('solveSketch — the determinism golden gate', () => {
     const e1x = out2.points[1]!.x - out2.points[0]!.x; const e1y = out2.points[1]!.y - out2.points[0]!.y;
     const e2x = out2.points[3]!.x - out2.points[2]!.x; const e2y = out2.points[3]!.y - out2.points[2]!.y;
     expect(e1x * e2x + e1y * e2y).toBeCloseTo(0, 5); // perpendicular
+
+    // equal: segment 1 takes segment 0's length √(10² + 1²) = √101 (hand-derived).
+    // Start p3 at (9,7): |p3 − p2| = √85, so the constraint must move it.
+    const eq: Sketch = { ...sk, constraints: [...sk.constraints.slice(0, 3), { kind: 'equal', segments: [0, 1] }] };
+    const out3 = solveSketch(eq);
+    const len2 = Math.hypot(out3.points[3]!.x - out3.points[2]!.x, out3.points[3]!.y - out3.points[2]!.y);
+    expect(len2).toBeCloseTo(10.049876, 5);
   });
 
   it('symmetric + coincident behave', () => {
     const sk: Sketch = {
-      points: [{ x: -4, y: 2 }, { x: 6, y: 2.5 }, { x: 1, y: 0 }],
+      // Unsolved midpoint x is (−4 + 8)/2 = 2 and the ys differ, so BOTH
+      // symmetric residual rows must do work to land on the x = 1 midline.
+      points: [{ x: -4, y: 2 }, { x: 8, y: 2.5 }, { x: 1, y: 0 }],
       segments: [],
       constraints: [
         { kind: 'fixed', points: [2], x: 1, y: 0 },
@@ -87,6 +103,18 @@ describe('solveSketch — the determinism golden gate', () => {
     const out = solveSketch(sk);
     expect((out.points[0]!.x + out.points[1]!.x) / 2).toBeCloseTo(1, 6);
     expect(out.points[0]!.y).toBeCloseTo(out.points[1]!.y, 6);
+
+    // coincident: p1 joins the pinned p0 at (1, 2).
+    const co = solveSketch({
+      points: [{ x: 0, y: 0 }, { x: 3, y: 4 }],
+      segments: [],
+      constraints: [
+        { kind: 'fixed', points: [0], x: 1, y: 2 },
+        { kind: 'coincident', points: [0, 1] },
+      ],
+    });
+    expect(co.points[1]!.x).toBeCloseTo(1, 6);
+    expect(co.points[1]!.y).toBeCloseTo(2, 6);
   });
 
   it('diagnoses UNDER-constrained sketches with a free-DoF count', () => {
@@ -96,7 +124,8 @@ describe('solveSketch — the determinism golden gate', () => {
       constraints: [{ kind: 'horizontal', points: [0, 1] }],
     });
     expect(out.diagnostics.status).toBe('under-constrained');
-    expect(out.diagnostics.freeDof).toBeGreaterThan(0);
+    // 2 points = 4 unknowns; one horizontal row has rank 1 → 3 free DoF.
+    expect(out.diagnostics.freeDof).toBe(3);
   });
 
   it('diagnoses OVER-constrained sketches, names the conflict, and returns ORIGINAL coords (never a half-solved lie)', () => {
@@ -110,7 +139,9 @@ describe('solveSketch — the determinism golden gate', () => {
       ],
     });
     expect(out.diagnostics.status).toBe('over-constrained');
-    expect(out.diagnostics.conflicting?.length).toBeGreaterThan(0);
+    // All three constraints sit in the unsatisfiable set (measured [1, 0, 2] —
+    // residual-magnitude order); the distance (index 2) must be named.
+    expect([...(out.diagnostics.conflicting ?? [])].sort()).toEqual([0, 1, 2]);
     expect(out.points[0]).toEqual({ x: 0, y: 0 }); // untouched original
     expect(out.points[1]).toEqual({ x: 10, y: 0 });
   });
@@ -138,19 +169,23 @@ describe('solveSketch — the determinism golden gate', () => {
       points: [{ x: 0, y: 0 }, { x: 10, y: 0 }],
       segments: [],
       constraints: [{ kind: 'distance', points: [0, 1], value: Number.NaN }],
-    })).toThrowError(/finite/);
+    })).toThrowError(/Constraint 0: 'value' must be a finite number/);
     expect(() => solveSketch({
       points: [{ x: 0, y: 0 }],
       segments: [],
       constraints: [{ kind: 'fixed', points: [0], x: Infinity, y: 0 }],
-    })).toThrowError(/finite/);
+    })).toThrowError(/Constraint 0: 'x' must be a finite number/);
   });
 
   it('typed failures: bad refs, bad kinds, degenerate arcs', () => {
     expect(() => solveSketch({ points: [], segments: [], constraints: [] })).toThrowError(SketchError);
     expect(() => solveSketch({
-      points: [{ x: 0, y: 0 }], segments: [], constraints: [{ kind: 'coincident' as never, points: [0, 9] }],
+      points: [{ x: 0, y: 0 }], segments: [], constraints: [{ kind: 'coincident', points: [0, 9] }],
     })).toThrowError(/out of range/);
+    // A model-authored constraint arrives as untyped JSON — the parse IS the
+    // real path, so the one cast here stands for the wire, not a laundered fixture.
+    const bogus = JSON.parse('{"kind":"bogus","points":[0]}') as SketchConstraint;
+    expect(() => solveSketch({ points: [{ x: 0, y: 0 }], segments: [], constraints: [bogus] })).toThrowError(/unknown kind 'bogus'/);
     expect(() => solveSketch({
       points: [{ x: 0, y: 0 }, { x: 1, y: 0 }], segments: [{ kind: 'arc', a: 0, b: 1 }], constraints: [],
     })).toThrowError(/radius/);

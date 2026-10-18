@@ -25,13 +25,18 @@ vi.mock('../src/features/kicktodo-core/challengeService.js', () => ({
 
 const { publicChallengeCatalog } = await import('../src/features/kicktodo-core/publicCatalogService.js');
 
+// The fixture carries every authoring field the leak case names (author,
+// translation lineage, activity alternatives), so a spread of the stored row
+// would put each of them on the wire and the leak case would see it.
 const activity = (day: number) => ({
   stableActivityId: `a${day}`, day, title: `Day ${day}`, instructions: `Do the day-${day} thing`,
   estimatedMinutes: 10, evidencePolicy: 'note' as const,
+  alternatives: [{ stableActivityId: `a${day}-alt`, title: 'Lighter', instructions: 'Do less', evidencePolicy: 'note' as const }],
 });
 const published = (id: string) => ({
   challenge: {
     id, version: 2, status: 'published' as const, tenantId: 't1',
+    authorSubject: 'user:author', translationOf: { challengeId: 'c0', version: 1 },
     title: 'Sleep', summary: 'Sleep better', outcome: 'Rested', durationDays: 7,
     activities: [activity(1), activity(2)],
   },
@@ -90,11 +95,16 @@ describe('ADR 0641 p3 — anonymous catalog returns published rows for the named
   });
 
   it('never leaks authoring state onto the anonymous wire', async () => {
-    const c = (await publicChallengeCatalog("acme", "en")).challenges[0]! as unknown as Record<string, unknown>;
+    const c = (await publicChallengeCatalog('acme', 'en')).challenges[0]!;
     // Spelled-out projection, not a spread of the stored row: otherwise every
-    // future internal field becomes a public one by default.
-    for (const leaked of ['status', 'tenantId', 'authorSubject', 'translationOf', 'stableActivityId', 'activities.0.stableActivityId']) {
-      expect(leaked.split('.').reduce<unknown>((o, k) => (o as Record<string, unknown> | undefined)?.[k], c)).toBeUndefined();
+    // future internal field becomes a public one by default. An exact key set, so
+    // `status`, `tenantId`, `authorSubject`, `translationOf` or any field added to
+    // the row later cannot reach the wire unnoticed.
+    expect(Object.keys(c).sort()).toEqual([
+      'activities', 'challengeId', 'durationDays', 'exactLocale', 'outcome', 'servedLocale', 'summary', 'title', 'version',
+    ]);
+    for (const a of c.activities) {
+      expect(Object.keys(a).sort()).toEqual(['day', 'estimatedMinutes', 'evidencePolicy', 'instructions', 'title']);
     }
   });
 
@@ -106,14 +116,34 @@ describe('ADR 0641 p3 — anonymous catalog returns published rows for the named
     expect(c.exactLocale).toBe(false);
   });
 
+  it('reads Accept-Language by q-rank, never as the raw first segment (KT-I18N-ALANG-1)', async () => {
+    // A browser sends `fr;q=0.9,en`. The old split-on-comma read requested the
+    // literal `fr;q=0.9`, matched no row, and served every source silently,
+    // then echoed the unparsed tag back as `locale`.
+    const requestedFor = async (header: string | undefined): Promise<string> => {
+      listPublishedForLocale.mockClear();
+      const out = await publicChallengeCatalog('acme', header);
+      expect(listPublishedForLocale).toHaveBeenCalledWith('t1', out.locale);
+      return out.locale;
+    };
+    expect(await requestedFor('fr;q=0.9,en;q=0.8')).toBe('fr');
+    expect(await requestedFor('de;q=0.2, pt-BR')).toBe('pt-BR');
+    expect(await requestedFor('*')).toBe('en');
+    expect(await requestedFor('')).toBe('en');
+    expect(await requestedFor(undefined)).toBe('en');
+  });
+
   it('drafts never resolve — the read delegates to the published-only lister', async () => {
     // `listPublishedForLocale` is the choke (challengeService filters
     // status === 'published'). Asserting the DELEGATION rather than re-filtering
     // here: a second filter in this service would be a second owner of "what is
     // public", and the two would drift.
-    await publicChallengeCatalog('acme', 'en');
+    // What the lister returns is ALL that is served: one lister row in, one
+    // catalog row out, no second source merged in beside it.
+    const out = await publicChallengeCatalog('acme', 'en');
     expect(listPublishedForLocale).toHaveBeenCalledTimes(1);
-    expect(listPublishedForLocale).not.toHaveBeenCalledWith('t1', expect.objectContaining({ includeDrafts: true }));
+    expect(listPublishedForLocale).toHaveBeenCalledWith('t1', 'en');
+    expect(out.challenges.map((c) => c.challengeId)).toEqual(['c1']);
   });
 });
 

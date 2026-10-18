@@ -1,3 +1,11 @@
+/**
+ * ADR 0140 P2 — the pure working-set state machine of the multi-tab chat deck:
+ * open/dedupe/focus recency, LRU eviction at the soft cap (never the active,
+ * a pinned or a streaming tab), the hard ceiling (pinned-idle sacrificed, streaming
+ * never), neighbour activation on close, post-removal reorder, in-place rekey on
+ * `/clear`, and the G4 title cache. Breaks if any eviction exclusion, the LRU
+ * comparison, the neighbour preference, or an identity-preserving no-op is lost.
+ */
 import { describe, it, expect } from 'vitest';
 import {
   tabDeckReducer,
@@ -60,11 +68,21 @@ describe('tabDeckModel — LRU eviction at the soft cap', () => {
     expect(next.activeSessionId).toBe('d');
   });
 
-  it('never evicts the active tab', () => {
-    const s = deckOf(['a', 'b', 'c'], 3); // c active
+  it('never evicts the active tab, even when it is the least-recently-used', () => {
+    // A reducer-built deck always has the active tab as MRU, so the active exclusion
+    // only matters for a RESTORED descriptor (sanitize does not force active = MRU).
+    // Build that state literally: active 'a' is the LRU; 'b' is the next-LRU.
+    const s: TabDeckState = {
+      tabs: [
+        { sessionId: 'a', pinned: false, lastActiveSeq: 1 },
+        { sessionId: 'b', pinned: false, lastActiveSeq: 2 },
+        { sessionId: 'c', pinned: false, lastActiveSeq: 3 },
+      ],
+      activeSessionId: 'a',
+      seq: 3,
+    };
     const next = tabDeckReducer(s, { type: 'open', sessionId: 'd', maxTabs: 3 });
-    expect(ids(next)).toContain('c'); // active survives
-    expect(next.tabs.length).toBe(3);
+    expect(ids(next)).toEqual(['a', 'c', 'd']); // b evicted; the LRU-but-active a survives
   });
 
   it('never evicts a pinned tab at the soft cap (allows overflow instead)', () => {
@@ -99,6 +117,9 @@ describe('tabDeckModel — the hard ceiling', () => {
     const next = tabDeckReducer(s, { type: 'open', sessionId: 'overflow', maxTabs: 4 });
     expect(next.tabs.length).toBe(HARD_MAX_TABS); // held at the ceiling
     expect(ids(next)).toContain('overflow');
+    expect(ids(next)).not.toContain('t0'); // the LRU pinned-idle tab is the one sacrificed
+    expect(ids(next)).toContain(`t${HARD_MAX_TABS - 1}`); // the previously-active tab survives
+    expect(next.activeSessionId).toBe('overflow');
   });
 
   it('does NOT evict a streaming tab even at the hard ceiling (allows growth)', () => {
@@ -154,7 +175,7 @@ describe('tabDeckModel — reorder', () => {
     expect(ids(tabDeckReducer(s, { type: 'reorder', fromSessionId: 'c', toIndex: 0 }))).toEqual(['c', 'a', 'b']);
   });
 
-  it('moves a tab to the end (clamped)', () => {
+  it('a toIndex past the end appends the tab', () => {
     const s = deckOf(['a', 'b', 'c']);
     expect(ids(tabDeckReducer(s, { type: 'reorder', fromSessionId: 'a', toIndex: 99 }))).toEqual(['b', 'c', 'a']);
   });
@@ -182,7 +203,7 @@ describe('tabDeckModel — reorder', () => {
 });
 
 describe('tabDeckModel — pinned', () => {
-  it('setPinned toggles and protects from soft eviction; unknown id no-op', () => {
+  it('setPinned toggles; an unknown id or an unchanged value is an identity no-op', () => {
     let s = deckOf(['a', 'b']);
     s = tabDeckReducer(s, { type: 'setPinned', sessionId: 'a', pinned: true });
     expect(s.tabs.find((t) => t.sessionId === 'a')!.pinned).toBe(true);

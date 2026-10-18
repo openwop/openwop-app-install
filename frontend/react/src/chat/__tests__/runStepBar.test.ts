@@ -5,6 +5,10 @@
  * done, failed, the one step in hand, then the rest. These pin that a segment
  * is never invented (the bar is exactly `totalNodes` long) and that "waiting"
  * shows only while the run is actually waiting on the user.
+ *
+ * What breaks it: dropping either `Math.min` cap (extra segments), marking a
+ * finished run's step "in hand", ignoring `isSuspended`, or moving the
+ * 12-segment readability limit (12 is drawn, 13 is not).
  */
 import { describe, expect, it } from 'vitest';
 import { stepSegments } from '../WorkflowRunBubble.js';
@@ -14,9 +18,9 @@ function run(over: Partial<WorkflowRunState>): WorkflowRunState {
   return {
     slug: 'launch-plan', workflowName: 'Launch plan', workflowId: 'wf_1', runId: 'run-1',
     status: 'running', totalNodes: 5, completedNodeIds: [], nodeOutputs: {}, failedNodeIds: [],
-    startedAt: 0,
+    currentNodeName: null, nodeNames: {}, startedAt: '2026-09-29T00:00:00.000Z',
     ...over,
-  } as WorkflowRunState;
+  };
 }
 
 describe('stepSegments', () => {
@@ -45,5 +49,7 @@ describe('stepSegments', () => {
   it('draws nothing when the step count is unknown or too long to read', () => {
     expect(stepSegments(run({ totalNodes: 0 }), false)).toEqual([]);
     expect(stepSegments(run({ totalNodes: 13 }), false)).toEqual([]);
+    // Polarity at the limit: exactly 12 steps is still drawn, one segment each.
+    expect(stepSegments(run({ totalNodes: 12 }), false)).toEqual(['active', ...Array<string>(11).fill('todo')]);
   });
 });

@@ -49,7 +49,18 @@ describe('translation status in the sections editor', () => {
     renderEditor({ 'sec:1': { es: 'current' } }, vi.fn(async () => true));
     fireEvent.click(screen.getByRole('tab', { name: /español/i }));
     expect(screen.queryByText('Outdated')).toBeNull();
+    expect(screen.queryByText('Not confirmed')).toBeNull();
     expect(screen.queryByRole('button', { name: /up to date/i })).toBeNull();
+  });
+
+  it('an unknown overlay (a Copy from base, or legacy) says "Not confirmed" and offers Mark up to date', () => {
+    const confirm = vi.fn(async () => true);
+    renderEditor({ 'sec:1': { es: 'unknown' } }, confirm);
+    fireEvent.click(screen.getByRole('tab', { name: /español/i }));
+    expect(screen.getByText('Not confirmed')).toBeTruthy();
+    expect(screen.queryByText('Outdated')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: /mark the .* translation of this section up to date/i }));
+    expect(confirm).toHaveBeenCalledWith('sec:1', 'es');
   });
 
   it('no status (a read that failed, or no locales) renders nothing extra', () => {

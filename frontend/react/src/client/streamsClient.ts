@@ -53,6 +53,17 @@ export interface Subscription {
  *  failed-network scenarios from looping forever. */
 const MAX_RECONNECTS = 5;
 
+/** ADR 0897 / RFC 0247 — a stream that ends without one of these is not the
+ *  end of the run: the host bounded it (we opt in with `resumable=true`) or a
+ *  proxy/platform timeout cut it, and the reader resumes from `Last-Event-ID`. */
+const TERMINAL_TYPES = new Set(['run.completed', 'run.failed', 'run.cancelled']);
+/** A stream that lived at least this long ended for a reason other than a
+ *  broken endpoint, so its end resets the reconnect budget. The host's bound
+ *  is minutes (45–50 s on a front-door hop), far above this. */
+const HEALTHY_STREAM_MS = 10_000;
+/** The host's `retry:` hint (the SDK does not surface it); RFC 0247 SHOULD. */
+const RESUME_DELAY_MS = 1_000;
+
 export function subscribeToRun(runId: string, opts: SubscribeOptions): Subscription {
   // Dual-layer timeouts shared by both transports.
   const idleMs = opts.idleTimeoutMs ?? 30_000;
@@ -139,7 +150,8 @@ interface TimerHooks {
 
 /** Shared subscribe loop for both transports. `makeGenerator` builds a fresh
  *  RunEventDoc async-generator (re-entered each reconnect with the recorded
- *  Last-Event-ID). Reconnects on transient errors up to MAX_RECONNECTS, then
+ *  Last-Event-ID). Reconnects on transient errors up to MAX_RECONNECTS, and —
+ *  ADR 0897 — on a clean end that carried no terminal event, then
  *  surfaces a fatal error via `opts.onError`. Every yielded event is shape-
  *  validated before dispatch (GAP-ANALYSIS A-2): a value without a string
  *  `type` is logged and skipped, never silently forwarded as a RunEventDoc. */
@@ -161,10 +173,15 @@ function subscribeViaGenerator(
 
   void (async () => {
     while (!hooks.onTimedOut() && !hooks.onManuallyClosed() && attempt <= MAX_RECONNECTS) {
+      const openedAt = Date.now();
+      let terminal = false;
+      let yielded = false;
       try {
         const generator = makeGenerator(lastEventId, abort.signal);
         for await (const ev of generator) {
           if (hooks.onTimedOut() || hooks.onManuallyClosed()) return;
+          yielded = true;
+          if (ev && TERMINAL_TYPES.has(ev.type)) terminal = true;
           hooks.resetIdle(onAbort);
           // SDK doesn't surface the raw `id:` field on each yield, so fall
           // back to the event's `sequence` — every RunEventDoc carries it and
@@ -181,16 +198,27 @@ function subscribeViaGenerator(
           }
           opts.onEvent(ev);
         }
-        // Generator exhausted cleanly (server FIN after terminal event).
-        hooks.clearTimers();
-        if (!hooks.onManuallyClosed()) opts.onClose?.();
-        return;
+        if (terminal) {
+          // Generator exhausted cleanly (server FIN after terminal event).
+          hooks.clearTimers();
+          if (!hooks.onManuallyClosed()) opts.onClose?.();
+          return;
+        }
+        // ADR 0897 — a clean end WITHOUT the terminal event: resume. A healthy
+        // stream (one that delivered, or lived past HEALTHY_STREAM_MS) resets
+        // the budget; one that ended at once spends it, so a broken endpoint
+        // still gives up after MAX_RECONNECTS.
+        if (yielded || Date.now() - openedAt >= HEALTHY_STREAM_MS) attempt = 0;
+        else attempt += 1;
+        if (attempt > MAX_RECONNECTS) throw new Error('sse_stream_ended_without_terminal');
+        await new Promise((r) => setTimeout(r, RESUME_DELAY_MS * Math.max(1, attempt)));
+        continue;
       } catch (err) {
         if (hooks.onManuallyClosed() || hooks.onTimedOut()) {
           hooks.clearTimers();
           return;
         }
-        attempt += 1;
+        if ((err as Error | undefined)?.message !== 'sse_stream_ended_without_terminal') attempt += 1;
         if (attempt > MAX_RECONNECTS) {
           hooks.clearTimers();
           // CHAT-6: a stream that dies after exhausting reconnects is otherwise
@@ -277,6 +305,13 @@ function credentialedFetch(runId: string, signal: AbortSignal): typeof fetch {
     headers.delete('Authorization');
     for (const [k, v] of Object.entries(authedHeaders())) headers.set(k, v);
     let url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+    // ADR 0897 / RFC 0247 — this reader resumes on a clean close, so it lets
+    // the host bound the stream instead of holding it to the terminal event.
+    {
+      const u = new URL(url);
+      u.searchParams.set('resumable', 'true');
+      url = u.toString();
+    }
     if (!headers.has('authorization')) {
       const streamToken = await fetchRunStreamToken(runId, signal);
       if (streamToken) {

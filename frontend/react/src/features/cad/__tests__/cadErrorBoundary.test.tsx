@@ -6,7 +6,7 @@
  * degrades ONLY the 3D pane (a fallback in the pane) while the editor chrome (the
  * 2D/3D toggle, the rails) survives.
  */
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, cleanup, fireEvent, within } from '@testing-library/react';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import { InteractiveCad } from '../InteractiveCad.js';
@@ -16,10 +16,22 @@ vi.mock('../meshStore.js', async () => {
   const actual = await vi.importActual<typeof import('../meshStore.js')>('../meshStore.js');
   return { ...actual, cadOrgId: () => Promise.resolve(null) };
 });
-// The lazy 3D viewer throws on render — the CADU-1 boundary must catch it.
-vi.mock('../Cad3dView.js', () => ({ Cad3dView: () => { throw new Error('boom-3d-render'); } }));
+// The lazy 3D viewer throws on render while `h.fail` — the CADU-1 boundary must
+// catch it; clearing the flag lets Retry prove the reset actually re-mounts.
+const h = vi.hoisted(() => ({ fail: true }));
+vi.mock('../Cad3dView.js', () => ({
+  Cad3dView: () => {
+    if (h.fail) throw new Error('boom-3d-render');
+    return <div data-testid="cad3d-ok" />;
+  },
+}));
 
-afterEach(cleanup);
+beforeEach(() => {
+  h.fail = true;
+  // React logs the caught render error; it is the expected path here.
+  vi.spyOn(console, 'error').mockImplementation(() => {});
+});
+afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 const doc: CadDoc = {
   name: 'Bracket', units: 'mm',
@@ -55,8 +67,13 @@ describe('CADU-1 — a CAD-local ErrorBoundary around the 3D pane', () => {
     // The boundary catches the lazy viewer's render throw → the pane shows the fallback…
     expect(await screen.findByText(/could not be rendered/i)).toBeTruthy();
     // …the fallback offers a recovery action (not a dead end — check-failure-card-recovery)…
-    expect(screen.getByRole('button', { name: /retry/i })).toBeTruthy();
+    const retry = screen.getByRole('button', { name: 'Retry' });
     // …and the editor chrome (the 2D/3D toggle) SURVIVES — the whole editor did not unmount.
     expect(within(toggle()).getByRole('button', { name: '2D' })).toBeTruthy();
+    // Retry is a real recovery: once the cause is gone it re-mounts the viewer.
+    h.fail = false;
+    fireEvent.click(retry);
+    expect(await screen.findByTestId('cad3d-ok')).toBeTruthy();
+    expect(screen.queryByText(/could not be rendered/i)).toBeNull();
   });
 });

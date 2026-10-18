@@ -8,6 +8,8 @@
  */
 import { describe, it, expect } from 'vitest';
 import type { RunListItem } from '../../../client/runsClient.js';
+import type { PendingApproval } from '../../../agents/approvalsClient.js';
+import type { Connection } from '../../connections/connectionsClient.js';
 import { computeRunHealth, formatDuration, RUN_WINDOW } from '../runsWindow.js';
 import { needsYouItems } from '../tiles/NeedsYouTile.js';
 import { filterRuns } from '../tiles/RunActivityTile.js';
@@ -56,12 +58,12 @@ describe('computeRunHealth', () => {
   });
 
   it('counts waiting runs regardless of age, and buckets the sparkline oldest-first', () => {
-    const rows = [run('a', 'paused', 20 * D), run('b', 'suspended', 1 * H), run('c', 'completed', 6.5 * D, 1000)];
+    // ASYMMETRIC: two runs in the oldest bucket, one in the newest — a reversed
+    // bucket index would read [1,…,2], not [2,…,1] (w50g1-hh-bucketdir).
+    const rows = [run('a', 'paused', 20 * D), run('b', 'suspended', 1 * H), run('c', 'completed', 6.5 * D, 1000), run('c2', 'completed', 6.4 * D, 1000)];
     const h = computeRunHealth(rows, '7d', NOW, false);
     expect(h.waiting).toBe(2);
-    expect(h.series).toHaveLength(7);
-    expect(h.series[0]).toBe(1); // 6.5 days ago → first daily bucket
-    expect(h.series[6]).toBe(1); // 1 hour ago → last bucket
+    expect(h.series).toEqual([2, 0, 0, 0, 0, 0, 1]); // 6.5/6.4 days ago → first daily bucket; 1 hour ago → last
   });
 
   it('reports no rate and no median when nothing finished', () => {
@@ -81,8 +83,13 @@ describe('formatDuration', () => {
 
 describe('needsYouItems', () => {
   const t = (k: string): string => k;
-  const approval = { approvalId: 'p1', kind: 'agent', proposal: 'Pay invoice', createdAt: iso(NOW - 10 * 60_000), cardTitle: 'Invoice review' } as unknown as Parameters<typeof needsYouItems>[0][number];
-  const conn = (status: string) => ({ connectionId: `c-${status}`, provider: 'google', kind: 'oauth2', displayName: 'Drive', status, scopes: [], connectedAt: iso(NOW - D) });
+  // A real PendingApproval (the old fixture was laundered `as unknown as` with an
+  // invalid `kind: 'agent'` and no roster/persona/workflow fields).
+  const approval: PendingApproval = {
+    approvalId: 'p1', rosterId: 'r1', persona: 'Iris', workflowId: 'wf-pay', kind: 'assistant-action',
+    proposal: 'Pay invoice', status: 'pending', createdAt: iso(NOW - 10 * 60_000), cardTitle: 'Invoice review',
+  };
+  const conn = (status: Connection['status']): Connection => ({ connectionId: `c-${status}`, provider: 'google', kind: 'oauth2', displayName: 'Drive', status, scopes: [], connectedAt: iso(NOW - D) });
 
   it('ranks newest first across sources and only includes failures from the last day', () => {
     const items = needsYouItems(
@@ -97,6 +104,8 @@ describe('needsYouItems', () => {
   it('drops the run link for a caller who cannot open run pages', () => {
     const items = needsYouItems([], [run('f', 'failed', H, 1000)], [], NOW, t, false);
     expect(items[0]!.to).toBeUndefined();
+    // CONTROL: the same row for an admin carries the run link.
+    expect(needsYouItems([], [run('f', 'failed', H, 1000)], [], NOW, t, true)[0]!.to).toBe('/runs/f');
   });
 });
 

@@ -266,8 +266,17 @@ describe('vendored packs — repo-wide conventions', () => {
       const params = Object.keys(
         ((chain.parameters as { properties?: Record<string, unknown> }).properties) ?? {},
       );
+      // A param is also live when a sub-chain dispatch maps it by name: deferred
+      // expansion (how chains are seeded and chain-backed — ADR 0507) makes each
+      // param a same-name run variable, and `inputMapping` reads the parent bag
+      // (subWorkflowDispatcher). KickTodo's `generateMedia` reaches its lesson
+      // child only this way (KTF-LB-1).
+      const mappedFromBag = new Set(chain.dag.nodes.flatMap((n) => {
+        const m = (n.config as { inputMapping?: unknown } | undefined)?.inputMapping;
+        return m && typeof m === 'object' ? Object.values(m as Record<string, unknown>).filter((v): v is string => typeof v === 'string') : [];
+      }));
       for (const name of params) {
-        expect(configText.includes(`{{params.${name}}}`), `${chain.chainId} param ${name} is dead`).toBe(true);
+        expect(configText.includes(`{{params.${name}}}`) || mappedFromBag.has(name), `${chain.chainId} param ${name} is dead`).toBe(true);
       }
     }
   });

@@ -3,10 +3,21 @@
  * referenced ids from the ONE exported canonical list (no hand-maintained
  * mirror) and pins that the registration resolves each. The backend
  * `guided-tours-coverage.test` pins the tour DEFINITION references exactly the
- * same set; the opt-in `TOUR_E2E` replay pins they resolve live. No half is
- * vacuous, and a drift on either side fails in default CI.
+ * same set. No test pins that they resolve LIVE (the opt-in `TOUR_E2E` replay
+ * never ran and was deleted 2026-10-17, WALK-REPLAY-1); a drift on either
+ * side of the reference set fails in default CI.
+ *
+ * w51 r2 (/grade-tests): "either side" was not true. Every expectation here was the
+ * FE's own canonical export, and the backend test pins the DEF against its own
+ * literal — nothing compared the two, so dropping an id from BOTH the FE list and
+ * its registration stayed green everywhere (probe wc-backend-def was vacuous). The
+ * campaign and chat cases now READ the shipped definitions
+ * (`backend/typescript/src/host/demoWalkthroughsSeed.ts`) and pin the FE canonical
+ * lists to the ids those definitions reference.
  */
 import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import {
   registerCampaignStudioWalkthroughActions,
   CAMPAIGN_STUDIO_TOUR_ACTION_IDS,
@@ -19,11 +30,29 @@ import {
   CHAT_WALKTHROUGH_CHECKPOINT_IDS,
 } from '../../chat/walkthroughActions.js';
 
+const SEED = readFileSync(join(process.cwd(), '../../backend/typescript/src/host/demoWalkthroughsSeed.ts'), 'utf8');
+
+/** The step `actionId`s and checkpoint `expect`s one shipped definition references, in order. */
+function shippedIds(constName: string, nextConst: string | null): { actions: string[]; checkpoints: string[] } {
+  const from = SEED.indexOf(`const ${constName}: WorkflowDefinition`);
+  expect(from, `${constName} is gone from demoWalkthroughsSeed.ts — this test is reading nothing`).toBeGreaterThan(-1);
+  const to = nextConst ? SEED.indexOf(`const ${nextConst}: WorkflowDefinition`, from) : SEED.length;
+  const block = SEED.slice(from, to > from ? to : SEED.length);
+  return {
+    actions: [...block.matchAll(/actionId: '([^']+)'/g)].map((m) => m[1] ?? ''),
+    checkpoints: [...block.matchAll(/expect: '([^']+)'/g)].map((m) => m[1] ?? ''),
+  };
+}
+
 describe('campaign-studio tour coverage', () => {
   it('the registration resolves every canonical id (non-empty — no vacuous pass)', () => {
     __resetWalkthroughRegistryForTests();
     registerCampaignStudioWalkthroughActions();
     expect(CAMPAIGN_STUDIO_TOUR_ACTION_IDS.length + CAMPAIGN_STUDIO_TOUR_CHECKPOINT_IDS.length).toBeGreaterThan(0);
+    // The FE canonical list IS what the shipped definition references (cross-tree).
+    const shipped = shippedIds('CAMPAIGN_STUDIO_WALKTHROUGH', 'CHAT_WALKTHROUGH');
+    expect([...CAMPAIGN_STUDIO_TOUR_ACTION_IDS]).toEqual(shipped.actions);
+    expect([...CAMPAIGN_STUDIO_TOUR_CHECKPOINT_IDS]).toEqual(shipped.checkpoints);
     for (const id of CAMPAIGN_STUDIO_TOUR_ACTION_IDS) expect(getWalkthroughAction(id), id).toBeTruthy();
     for (const id of CAMPAIGN_STUDIO_TOUR_CHECKPOINT_IDS) expect(getWalkthroughCheckpoint(id), id).toBeTruthy();
   });
@@ -40,6 +69,9 @@ describe('chat walkthrough coverage (ADR 0378 P4)', () => {
     __resetWalkthroughRegistryForTests();
     registerChatWalkthroughActions();
     expect(CHAT_WALKTHROUGH_ACTION_IDS.length + CHAT_WALKTHROUGH_CHECKPOINT_IDS.length).toBeGreaterThan(0);
+    const shipped = shippedIds('CHAT_WALKTHROUGH', null);
+    expect([...CHAT_WALKTHROUGH_ACTION_IDS]).toEqual(shipped.actions);
+    expect([...CHAT_WALKTHROUGH_CHECKPOINT_IDS]).toEqual(shipped.checkpoints);
     for (const id of CHAT_WALKTHROUGH_ACTION_IDS) expect(getWalkthroughAction(id), id).toBeTruthy();
     for (const id of CHAT_WALKTHROUGH_CHECKPOINT_IDS) expect(getWalkthroughCheckpoint(id), id).toBeTruthy();
   });

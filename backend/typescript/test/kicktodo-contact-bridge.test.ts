@@ -12,13 +12,15 @@ import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import {
   linkSubjectToContact,
   resolveContactForSubject,
+  linkedContactIdsForSubject,
   __resetContactBridge,
 } from '../src/features/kicktodo-core/contactBridgeService.js';
 import { linkKicktodoBuyerContact } from '../src/features/kicktodo-commerce/contactLinkObserver.js';
 import { linkChallengeProduct } from '../src/features/kicktodo-commerce/entitlementService.js';
 import { createDraft, publishChallenge } from '../src/features/kicktodo-core/challengeService.js';
 import { createProduct, type Order } from '../src/features/commerce/commerceService.js';
-import { createContact } from '../src/features/crm/contactsService.js';
+import { createContact, deleteContact } from '../src/features/crm/contactsService.js';
+import { mergeContacts } from '../src/features/crm/crmMergeService.js';
 import { registerGoalVerifier } from '../src/features/goals/goalVerifiers.js';
 
 const T = 'tenant-bridge';
@@ -57,8 +59,6 @@ describe('link store (ADR 0449 P2)', () => {
 
 describe('resolveContactForSubject soft-ref safety (ADR 0449 grade-data)', () => {
   it('follows a CRM merge to the survivor and drops a deleted contact (never a dead id)', async () => {
-    const { createContact, deleteContact } = await import('../src/features/crm/contactsService.js');
-    const { mergeContacts } = await import('../src/features/crm/crmMergeService.js');
     // Merge case: subject linked to the LOSER, then loser merges into survivor.
     const loser = await createContact({ tenantId: T, name: 'Loser', email: 'l@x.test' });
     const survivor = await createContact({ tenantId: T, name: 'Survivor', email: 's@x.test' });
@@ -74,8 +74,6 @@ describe('resolveContactForSubject soft-ref safety (ADR 0449 grade-data)', () =>
   });
 
   it('KT-PORT-7b — follows a MULTI-HOP merge chain (A→B→C) to the live survivor', async () => {
-    const { createContact } = await import('../src/features/crm/contactsService.js');
-    const { mergeContacts } = await import('../src/features/crm/crmMergeService.js');
     const a = await createContact({ tenantId: T, name: 'A', email: 'a@chain.test' });
     const b = await createContact({ tenantId: T, name: 'B', email: 'b@chain.test' });
     const c = await createContact({ tenantId: T, name: 'C', email: 'c@chain.test' });
@@ -110,6 +108,9 @@ describe('paid-checkout observer (ADR 0449 P2)', () => {
   it('links NOTHING for a KickTodo order without a contactId (D3 floor)', async () => {
     const productId = await paidChallengeProduct();
     await linkKicktodoBuyerContact(orderOf({ items: [{ productId, name: 'Paid', unitPrice: 10, quantity: 1 }] })); // no contactId
+    // Read the RAW store: the merge-aware resolver maps a junk/undefined contactId to
+    // null too, so only the stored link can show that nothing was written.
+    expect(await linkedContactIdsForSubject(T, BUYER)).toEqual([]);
     expect(await resolveContactForSubject(T, BUYER)).toBeNull();
   });
 
@@ -117,6 +118,7 @@ describe('paid-checkout observer (ADR 0449 P2)', () => {
     // prod-x is not linked to any challenge/seat — even with a REAL contact, no link.
     const c2 = await createContact({ tenantId: T, name: 'B2', email: 'b2@x.test' });
     await linkKicktodoBuyerContact(orderOf({ contactId: c2.contactId }));
+    expect(await linkedContactIdsForSubject(T, BUYER)).toEqual([]);
     expect(await resolveContactForSubject(T, BUYER)).toBeNull();
   });
 });

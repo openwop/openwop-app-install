@@ -43,7 +43,7 @@ export function registerCommentsAgentTools(): void {
     def: {
       name: COMMENTS_LIST_TOOL_ID,
       description:
-        "Read a resource's existing comment thread (a CMS page or KB collection) so you can avoid repeating a note already made. "
+        `Read a resource's existing comment thread (resourceType one of: ${RESOURCE_TYPES.join(', ')}) so you can avoid repeating a note already made. `
         + 'Read-only. Read this BEFORE posting.',
       inputSchema: {
         type: 'object',
@@ -69,7 +69,8 @@ export function registerCommentsAgentTools(): void {
       // ADR 0659 D1 — an app-state tool SHARES its route's access predicate and fails
       // EMPTY without an acting user (CLAUDE.md). `null` = target absent OR invisible;
       // the note names no resource, so this is not an existence oracle for a model.
-      const rows = await listThread(scope.tenantId, r.orgId, rt as ResourceType, resourceId, { subject: scope.actingUserId });
+      const actor = scope.actingUserId;
+      const rows = await listThread(scope.tenantId, r.orgId, rt as ResourceType, resourceId, actor ? { subject: actor, principal: actor, toggle: { userId: actor } } : { subject: undefined });
       if (rows === null) return toolEmpty({ comments: [], note: 'That resource is not available in this organization.' });
       return toolOk({ comments: rows.map(project) });
     },
@@ -81,7 +82,7 @@ export function registerCommentsAgentTools(): void {
     def: {
       name: COMMENTS_POST_TOOL_ID,
       description:
-        'Post a review comment (or a reply via `parentId`) on a resource — this notifies the resource owner over the existing inbox. '
+        `Post a review comment (or a reply via \`parentId\`) on a resource (resourceType one of: ${RESOURCE_TYPES.join(', ')}) — this notifies the resource owner, or everyone in the thread for a reply, over the existing inbox. `
         + 'One focused issue per comment. Read the thread first (comments.list) to avoid duplicates. It does NOT edit the resource.',
       inputSchema: {
         type: 'object',
@@ -112,7 +113,7 @@ export function registerCommentsAgentTools(): void {
           // Author and caller are the same principal on this lane; passed separately
           // because the workflow lane's are NOT (ADR 0659 D1).
           authorId: resolved.actingUserId,
-          caller: { subject: resolved.actingUserId },
+          caller: { subject: resolved.actingUserId, principal: resolved.actingUserId, toggle: { userId: resolved.actingUserId } },
         });
         await emitCommentNotification(comment, notify);
         return { content: JSON.stringify({ comment: project(comment) }) };

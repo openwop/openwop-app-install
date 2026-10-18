@@ -14,12 +14,13 @@
  *     its strongest claims reads as an endorsement.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, cleanup, fireEvent, waitFor, within } from '@testing-library/react';
 import { matchVerifyToken } from '../verifyRoute.js';
-import { resolveAttestation } from '../attestationVerifyClient.js';
+import { resolveAttestation, type AttestationView } from '../attestationVerifyClient.js';
 import { AttestationVerifyPage } from '../AttestationVerifyPage.js';
+import { config } from '../../../client/config.js';
 
-const VIEW = {
+const VIEW: AttestationView = {
   // No campaignId: the projection drops it (a free-text correlator with no
   // reader). Day-precision issuedAt, matching the backend.
   issuedAt: '2026-03-01',
@@ -81,7 +82,9 @@ describe('the verification client', () => {
     await resolveAttestation('owatt_abc');
     expect(spy).toHaveBeenCalledTimes(1);
     const [url, init] = spy.mock.calls[0]!;
-    expect(url).toContain('/public-attestations/owatt_abc');
+    // EXACT: a substring passed the same path moved under an authed namespace
+    // (`/host/openwop-app/job-search/public-attestations/…`) — the sibling rule.
+    expect(url).toBe(`${config.baseUrl}/host/openwop-app/public-attestations/owatt_abc`);
     expect(init, 'a bare fetch, so no credentials can ride along').toBeUndefined();
   });
 
@@ -138,7 +141,7 @@ describe('the verification page', () => {
     vi.stubGlobal('fetch', spy);
     render(<AttestationVerifyPage token="owatt_abc" />);
     fireEvent.click(await screen.findByRole('button', { name: /try again/i }));
-    await waitFor(() => expect(spy.mock.calls.length).toBeGreaterThan(1));
+    await waitFor(() => expect(spy).toHaveBeenCalledTimes(2));
   });
 
   it('shows ONE state for a token that does not resolve, and does not guess why', async () => {
@@ -160,6 +163,7 @@ describe('the verification page', () => {
     render(<AttestationVerifyPage token="owatt_abc" />);
     await screen.findByText(/named person authorised/i);
     expect(screen.queryByText(/somethingNew|future-claim-kind/), 'an unlabelled fact still reads as a claim').toBeNull();
-    expect(screen.getAllByRole('listitem').filter((li) => li.className.includes('surface-card'))).toHaveLength(2);
+    // Count the CLAIM list's items (the first list on the page), not a CSS class.
+    expect(within(screen.getAllByRole('list')[0]!).getAllByRole('listitem')).toHaveLength(2);
   });
 });

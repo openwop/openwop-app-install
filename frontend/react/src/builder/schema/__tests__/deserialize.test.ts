@@ -12,6 +12,8 @@ import {
   CanonicalParseError,
 } from '../deserialize.js';
 
+// Twin: serialize.test.ts "recognizes a canonical backend definition…" asserts
+// the same predicate on a SERIALIZED definition (the shape the builder emits).
 describe('looksCanonical', () => {
   it('is true for nodes carrying typeId (backend shape)', () => {
     expect(looksCanonical({ nodes: [{ typeId: 'core.noop', id: 'n0' }], edges: [] })).toBe(true);
@@ -83,18 +85,19 @@ describe('fromCanonicalDefinition — happy path', () => {
   });
 
   it('inherits default ports when edges omit them', () => {
+    // uppercase → uppercase: the catalog ports are `text`/`text`, which differ
+    // from BOTH fallbacks (`out`/`in`) — a noop source would read `out` either
+    // way and could not tell "inherited" from "defaulted".
     const res = fromCanonicalDefinition({
       nodes: [
-        { id: 'a', typeId: 'core.noop' },
+        { id: 'a', typeId: 'local.openwop-app.uppercase' },
         { id: 'b', typeId: 'local.openwop-app.uppercase' },
       ],
       edges: [{ sourceNodeId: 'a', targetNodeId: 'b' }],
     });
     const e = res.edges[0]!;
-    expect(typeof e.sourcePort).toBe('string');
-    expect(typeof e.targetPort).toBe('string');
-    expect(e.sourcePort.length).toBeGreaterThan(0);
-    expect(e.targetPort.length).toBeGreaterThan(0);
+    expect(e.sourcePort).toBe('text');
+    expect(e.targetPort).toBe('text');
   });
 
   it('preserves a valid triggerRule and drops an invalid one', () => {
@@ -129,21 +132,26 @@ describe('fromCanonicalDefinition — ADR 0766 exact node pins', () => {
   it('imports a pinned typeId (`core.noop@1.0.0`, legal in a v2 definition) as its bare kind', () => {
     const res = fromCanonicalDefinition({ nodes: [{ id: 'a', typeId: 'core.noop@1.0.0' }], edges: [] });
     expect(res.nodes).toHaveLength(1);
-    expect(res.nodes[0]!.kind).toBe(fromCanonicalDefinition({ nodes: [{ id: 'a', typeId: 'core.noop' }], edges: [] }).nodes[0]!.kind);
+    expect(res.nodes[0]!.kind).toBe('noop');
   });
 });
 
 describe('fromCanonicalDefinition — failure modes', () => {
+  // Twin: serialize.test.ts "fromCanonicalDefinition throws on a definition with no nodes".
   it('throws on a definition with no nodes', () => {
     expect(() => fromCanonicalDefinition({ nodes: [], edges: [] })).toThrow(CanonicalParseError);
     expect(() => fromCanonicalDefinition({ nodes: [], edges: [] })).toThrow(/no nodes/i);
   });
 
   it('throws on a node missing id or typeId', () => {
+    // The exact message: an unknown typeId throws the SAME class, so the class
+    // alone cannot say which guard refused.
     expect(() => fromCanonicalDefinition({ nodes: [{ typeId: 'core.noop' }], edges: [] }))
       .toThrow(CanonicalParseError);
+    expect(() => fromCanonicalDefinition({ nodes: [{ typeId: 'core.noop' }], edges: [] }))
+      .toThrow('Node 0 is missing an id or typeId.');
     expect(() => fromCanonicalDefinition({ nodes: [{ id: 'a' }], edges: [] }))
-      .toThrow(CanonicalParseError);
+      .toThrow('Node 0 is missing an id or typeId.');
   });
 
   it('throws an aggregate error naming every unknown typeId (deduped)', () => {

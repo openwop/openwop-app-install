@@ -145,16 +145,29 @@ describe('#4511 — listOwnRuns (bounded scan)', () => {
     expect(whole.runs).toHaveLength(4);
   });
 
-  it('reads one page of exactly `limit` rows in the personal workspace, at most five of 200 in a shared one', async () => {
+  it('#4531 — one bounded store read: `limit` rows in the personal workspace, 1000 in a shared one, never listRuns', async () => {
     const storage = await openStorage('memory://');
     for (let i = 1; i <= 1100; i += 1) await storage.insertRun(run(i, stamp('user:bob')));
-    const pages: number[] = [];
-    const spy = { ...storage, listRuns: async (f: Parameters<typeof storage.listRuns>[0]) => { pages.push(f.limit ?? -1); return storage.listRuns(f); } } as typeof storage;
+    const calls: Array<{ scanCap: number; limit: number; owner?: unknown }> = [];
+    const spy = {
+      ...storage,
+      listRuns: async () => { throw new Error('my-runs must not read full rows'); },
+      listRunSummaries: async (f: Parameters<typeof storage.listRunSummaries>[0]) => { calls.push(f); return storage.listRunSummaries(f); },
+    } as typeof storage;
     await listOwnRuns(spy, { tenantId: T, subject: 'user:alice', wholeTenant: true, limit: 100 });
-    expect(pages).toEqual([100]);
-    pages.length = 0;
+    expect(calls).toEqual([{ tenantId: T, scanCap: 100, limit: 101 }]);
+    calls.length = 0;
     await listOwnRuns(spy, { tenantId: T, subject: 'user:alice', wholeTenant: false, limit: 100 });
-    expect(pages).toEqual([200, 200, 200, 200, 200]);
+    expect(calls).toEqual([{ tenantId: T, owner: { principal: opaquePrincipal('user:alice'), subject: 'user:alice' }, scanCap: 1000, limit: 101 }]);
+  });
+
+  it('#4531 — the store predicate is re-checked: a superset match that runOwner rejects is dropped', async () => {
+    const storage = await openStorage('memory://');
+    // A stamp naming bob, but an actingUserId of alice: the SQL superset matches it,
+    // runOwner (stamp first) says bob.
+    await storage.insertRun(run(1, { ...stamp('user:bob'), actingUserId: 'user:alice' }));
+    const out = await listOwnRuns(storage, { tenantId: T, subject: 'user:alice', wholeTenant: false, limit: 100 });
+    expect(out.runs).toEqual([]);
   });
 
   it('says truncated when the window fills or the scan budget runs out', async () => {

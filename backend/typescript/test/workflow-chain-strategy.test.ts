@@ -1,9 +1,23 @@
 /**
- * Strategy workflow-chain pack (ADR 0231 §C2/§C3) + the cadence reconcile route.
+ * Strategy workflow-chain pack (ADR 0231 §C2/§C3, ADR 0233 board-pack) + the
+ * cadence reconcile route.
  *
- * Asserts both chains load and expand to validated WorkflowDefinitions over
- * known shipped typeIds, and that PUT /strategy/cadence registers/removes the
- * deterministic scheduler jobs (the insights-suite reconcile pattern).
+ * Asserts the THREE chains load from this pack, that each EXPANDED definition
+ * binds the digest body into `deliver.message` with exactly one primary output
+ * (SPWF-1 / SPWF-7, ADR 0597 §1), that expansion is deterministic and param-keyed
+ * (replay), and that PUT /strategy/cadence registers / removes the deterministic
+ * scheduler job and refuses a bad cron (the insights-suite reconcile pattern).
+ *
+ * Sabotage (grade-tests w19, each witnessed red): a portless `digest → deliver`
+ * edge, marking every node primary, a random or param-blind `expansionId`, a
+ * disable that keeps the job, an unvalidated cron, a job registered under the
+ * wrong tenant or workflow id.
+ *
+ * Cut in w19 as covered by `strategy-chain-execution.test.ts` (both confirmed red
+ * under the same sabotage): the hand-kept KNOWN_TYPEIDS membership case (every
+ * node is resolved and RUN there), and "board-pack REPORTS its unfilled required
+ * param" (its consumer is witnessed by "refuses to schedule board-pack with no
+ * orgId…", red under the same sabotage).
  */
 
 import http from 'node:http';
@@ -24,14 +38,6 @@ import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 
 const PACK = 'vendor.openwop-app.workflows.strategy';
 const CHAINS = ['strategy.weekly-checkin', 'strategy.metric-sync', 'strategy.board-pack'];
-const KNOWN_TYPEIDS = new Set([
-  'feature.strategy.nodes.list-stale-krs',
-  'feature.strategy.nodes.sync-metrics',
-  'feature.strategy.nodes.get-health',
-  'feature.strategy.nodes.create-board-memo',
-  'core.ai.chatCompletion',
-  'feature.notifications.nodes.notify',
-]);
 
 let BASE: string;
 let server: http.Server;
@@ -50,28 +56,18 @@ beforeAll(async () => {
   // even if another test file reset it in this worker.
   _resetChainRegistryForTest();
   const { errors } = loadWorkflowChainPacks({ roots: defaultWorkflowChainPackRoots() });
-  expect(errors).toEqual([]);
+  // Scoped to THIS pack (dir name or manifest name): pack-wide load health is
+  // chain-pack-export-loads.test.ts's claim, not this file's.
+  expect(errors.filter((e) => e.pack === 'strategy' || e.pack === PACK)).toEqual([]);
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
 describe('strategy chain pack — discovery + expansion', () => {
-  it('loads both chains from the strategy pack', () => {
+  it('loads all three chains from the strategy pack', () => {
     for (const id of CHAINS) {
       const e = getChain(id);
       expect(e, id).not.toBeNull();
       expect(e!.packName).toBe(PACK);
-    }
-  });
-
-  it('every node uses a known shipped typeId and the chains expand validated', () => {
-    for (const id of CHAINS) {
-      const e = getChain(id)!;
-      for (const node of e.chain.dag.nodes) {
-        expect(KNOWN_TYPEIDS.has(node.typeId), `${id} → ${node.typeId}`).toBe(true);
-      }
-      const def = expandChain(e.chain, {});
-      expect(def.nodes.length).toBe(e.chain.dag.nodes.length);
-      expect(def.metadata?.chainId).toBe(id);
     }
   });
 
@@ -109,21 +105,18 @@ describe('strategy chain pack — discovery + expansion', () => {
     }
   });
 
-  it('board-pack REPORTS its unfilled required param when expanded with none', () => {
-    const def = expandChain(getChain('strategy.board-pack')!.chain, {});
-    const unfilled = (def.metadata as { unresolvedParams?: Array<{ param: string }> } | undefined)?.unresolvedParams ?? [];
-    expect(unfilled.map((u) => u.param), 'the cadence lane reads this to refuse at save time').toContain('orgId');
-  });
 });
 
 describe('strategy cadence reconcile (ADR 0231)', () => {
-  interface Res<T = any> { status: number; body: T }
+  interface CadenceEntry { enabled: boolean; cron: string }
+  interface CadenceBody { config: { weeklyCheckin: CadenceEntry }; error?: string; details?: { field?: string } }
+  interface Res { status: number; body: CadenceBody }
   function client() {
     let cookie = '';
     const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
       const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
       for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-      return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) };
+      return { status: res.status, body: (res.status === 204 ? undefined : await res.json().catch(() => undefined)) as CadenceBody };
     };
     return { get: (p: string) => call('GET', p), post: (p: string, b?: unknown) => call('POST', p, b), put: (p: string, b?: unknown) => call('PUT', p, b) };
   }
@@ -151,13 +144,17 @@ describe('strategy cadence reconcile (ADR 0231)', () => {
     expect(job).toBeTruthy();
     expect(job!.tenantId).toBe(tenantId);
     expect(job!.workflowId).toBe(`wf.cadence.strategy-weekly-checkin.${slugged}`);
+    expect(job!.cronExpr).toBe('0 9 * * 1');
 
-    // Disable ⇒ the job is removed. Re-save is idempotent.
+    // Disable ⇒ the job is removed.
     const off = await c.put('/host/openwop-app/strategy/cadence', { weeklyCheckin: { enabled: false, cron: '0 9 * * 1' } });
     expect(off.status).toBe(200);
     expect(await getJob(`strategy-cadence:weeklyCheckin:${slugged}`)).toBeFalsy();
 
     // Invalid cron fails closed.
-    expect((await c.put('/host/openwop-app/strategy/cadence', { metricSync: { enabled: true, cron: 'not a cron' } })).status).toBe(400);
+    const bad = await c.put('/host/openwop-app/strategy/cadence', { metricSync: { enabled: true, cron: 'not a cron' } });
+    expect(bad.status).toBe(400);
+    expect(bad.body.error).toBe('validation_error');
+    expect(bad.body.details?.field).toBe('metricSync');
   });
 });

@@ -62,7 +62,7 @@ export const workflowAuthorFeature: BackendFeature = {
   surface: { id: 'workflow-author', build: buildWorkflowAuthorSurface },
   // No toggleDefault → always-on (the surface gates open; the routes don't 404).
   requiredPacks: [
-    { name: 'feature.workflow-author.nodes', version: '1.0.6' },
-    { name: 'vendor.openwop-app.workflow-author.agents', version: '1.3.8' },
+    { name: 'feature.workflow-author.nodes', version: '1.1.0' },
+    { name: 'vendor.openwop-app.workflow-author.agents', version: '1.4.0' },
   ],
 };

@@ -2,22 +2,28 @@
  * ADR 0362 / CV-13 — the bar's quick-prop cluster: the quick filter (boolean
  * + options-bearing defs, 3-cap), toggle semantics (false stores as ABSENT —
  * the locked-checkbox precedent), and the enum menu write path.
+ *
+ * (w46: the ADR 0362 Phase 4 "tree-catalog quick props" case was cut — it
+ * re-implemented the chassis branch inside the test and re-exercised only this
+ * filter; w46g2-qp-options reds the quickDefs case above for the same break.)
  */
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
-import { QuickPropsCluster, quickDefs, QUICK_MAX } from '../QuickPropsCluster.js';
+import { QuickPropsCluster, quickDefs } from '../QuickPropsCluster.js';
 import type { CanvasPropDef } from '../types.js';
 
 const tt = (k: string, o?: { defaultValue: string }): string => o?.defaultValue ?? k;
 
 describe('quickDefs (ADR 0362)', () => {
   it('keeps quick booleans + options-bearing defs (custom enum widget types qualify); drops the rest', () => {
+    // The UNMARKED def comes FIRST: placed last it fell beyond the 3-cap, so
+    // dropping the `quick === true` filter could not show (w46g2-qp-quickflag).
     const defs: CanvasPropDef[] = [
-      { name: 'build', type: 'boolean', quick: true },
-      { name: 'variant', type: 'slide-enum', options: ['full', 'hero'], quick: true },
-      { name: 'notes', type: 'longtext', quick: true },   // no bar control → dropped
-      { name: 'width', type: 'number', quick: true },     // v2: renders as a compact number field
       { name: 'stage', type: 'enum-required', options: ['a'] }, // unmarked → dropped
+      { name: 'build', type: 'boolean', quick: true },
+      { name: 'notes', type: 'longtext', quick: true },   // no bar control → dropped
+      { name: 'variant', type: 'slide-enum', options: ['full', 'hero'], quick: true },
+      { name: 'width', type: 'number', quick: true },     // v2: renders as a compact number field
     ];
     expect(quickDefs(defs).map((d) => d.name)).toEqual(['build', 'variant', 'width']);
   });
@@ -25,9 +31,14 @@ describe('quickDefs (ADR 0362)', () => {
   it('caps at the bar budget with a dev warning', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     const many: CanvasPropDef[] = Array.from({ length: 5 }, (_, i) => ({ name: `b${i}`, type: 'boolean', quick: true }));
-    expect(quickDefs(many)).toHaveLength(QUICK_MAX);
-    expect(warn).toHaveBeenCalled();
-    warn.mockRestore();
+    try {
+      // Literal, not QUICK_MAX: an expectation imported from the product moves
+      // with a sabotage of it (w46g2-qp-capconst).
+      expect(quickDefs(many).map((d) => d.name)).toEqual(['b0', 'b1', 'b2']);
+      expect(warn).toHaveBeenCalledTimes(1);
+    } finally {
+      warn.mockRestore();
+    }
   });
 });
 
@@ -68,6 +79,7 @@ describe('QuickPropsCluster v2 (number + color)', () => {
     expect(onSet).not.toHaveBeenCalled(); // drafting — no per-keystroke history
     fireEvent.blur(input);
     expect(onSet).toHaveBeenCalledWith('strokeWidth', 100); // clamped to max
+    expect(onSet).toHaveBeenCalledTimes(1);
   });
 
   it('color renders a labeled native input writing the picked hex', () => {
@@ -78,19 +90,5 @@ describe('QuickPropsCluster v2 (number + color)', () => {
     expect(input.value).toBe('#112233');
     fireEvent.change(input, { target: { value: '#445566' } });
     expect(onSet).toHaveBeenCalledWith('fill', '#445566');
-  });
-});
-
-describe('tree-catalog quick props (ADR 0362 Phase 4)', () => {
-  it('served-catalog props filter through the definition map + renderable-type filter', () => {
-    // Simulates the chassis branch: catalog props ∩ quickPropsByType[type].
-    const served: CanvasPropDef[] = [
-      { name: 'label', type: 'string', required: true },
-      { name: 'variant', type: 'enum', options: ['primary', 'secondary', 'ghost'], default: 'primary' },
-      { name: 'navigateTo', type: 'screen' },
-    ];
-    const names = ['variant', 'navigateTo']; // navigateTo has no bar control → filtered
-    const defs = quickDefs(served.filter((p) => names.includes(p.name)).map((p) => ({ ...p, quick: true })));
-    expect(defs.map((d) => d.name)).toEqual(['variant']);
   });
 });

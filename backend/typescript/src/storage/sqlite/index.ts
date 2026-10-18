@@ -51,6 +51,7 @@ import { IdempotentCommitRejectedError, PAYLOAD_KEY_RE, RUN_FINAL_STATUSES, type
 import { applyMigrations } from './schema.js';
 import { isForwardExecutionEvent, RunLogClosedError, TERMINAL_RUN_EVENT_TYPES } from '../runLogClosure.js';
 import { nextChatMessageCreatedAt } from '../chatMessageOrder.js';
+import { toolBoundaryKeyPatterns } from '../runKvKeys.js';
 
 /** Every table with a `tenant_id` column, read from the live schema (memoized
  *  per Database). The single source of truth for tenant-scoped bulk ops
@@ -196,6 +197,31 @@ export function openSqliteStorage(dbPath: string): Storage {
            OR (created_at = @beforeCreatedAt AND run_id < @beforeRunId))
     ORDER BY created_at DESC, run_id DESC
     LIMIT @limit
+  `);
+
+  // #4531 — inner LIMIT on the tenant index FIRST, the owner predicate outside it.
+  const listRunSummariesStmt = db.prepare(`
+    SELECT run_id, workflow_id, status, created_at, completed_at, md FROM (
+      SELECT run_id, workflow_id, status, created_at, completed_at,
+             json_object(
+               'owner', json(json_extract(metadata, '$.owner')), 'anonPrincipal', json_extract(metadata, '$.anonPrincipal'),
+               'principalKind', json_extract(metadata, '$.principalKind'), 'actingUserId', json_extract(metadata, '$.actingUserId')) AS md,
+             json_extract(metadata, '$.owner.principal') AS owner_principal,
+             json_extract(metadata, '$.anonPrincipal') AS anon_principal,
+             json_extract(metadata, '$.actingUserId') AS acting_user_id
+        FROM runs WHERE tenant_id = @tenantId
+       ORDER BY created_at DESC, run_id DESC
+       LIMIT @scanCap
+    )
+    WHERE @principal IS NULL
+       OR owner_principal = @principal
+       OR anon_principal = @principal
+       OR acting_user_id = @subject
+    ORDER BY created_at DESC, run_id DESC
+    LIMIT @limit
+  `);
+  const runsBeyondStmt = db.prepare(`
+    SELECT 1 FROM runs WHERE tenant_id = ? ORDER BY created_at DESC, run_id DESC LIMIT 1 OFFSET ?
   `);
 
   const listRunsByParentStmt = db.prepare(`
@@ -1376,6 +1402,26 @@ export function openSqliteStorage(dbPath: string): Storage {
       return rows.map(rowToRun);
     },
 
+    async listRunSummaries({ tenantId, owner, scanCap, limit }) {
+      const rows = listRunSummariesStmt.all({
+        tenantId, scanCap, limit, principal: owner?.principal ?? null, subject: owner?.subject ?? null,
+      }) as Array<{ run_id: string; workflow_id: string; status: string; created_at: string; completed_at: string | null; md: string }>;
+      const md = (raw: string): Record<string, unknown> => {
+        const o = JSON.parse(raw) as Record<string, unknown>;
+        for (const k of Object.keys(o)) if (o[k] === null) delete o[k];
+        return o;
+      };
+      return {
+        runs: rows.map((r) => ({
+          runId: r.run_id, workflowId: r.workflow_id, status: r.status, tenantId,
+          createdAt: r.created_at,
+          ...(r.completed_at ? { completedAt: r.completed_at } : {}),
+          metadata: md(r.md),
+        })),
+        scanExhausted: runsBeyondStmt.get(tenantId, scanCap) !== undefined,
+      };
+    },
+
     async listTenantActivity(tenantPrefix, limit) {
       // ADR 0372 — mirrors postgres; sqlite stores metadata as JSON TEXT, so
       // json_extract(...,'$.schedule') IS NULL = human/API-initiated.
@@ -2035,6 +2081,9 @@ export function openSqliteStorage(dbPath: string): Storage {
         db.prepare(`DELETE FROM host_ext_kv WHERE k IN (?, ?, ?)`).run(`runvars:${rid}`, `runchans:${rid}`, `runagent:${rid}`);
         const ridEsc = rid.replace(/[\\%_]/g, (m) => `\\${m}`);
         db.prepare(`DELETE FROM host_ext_kv WHERE k LIKE ? ESCAPE '\\'`).run(`hostext:runartifact:${ridEsc}:%`);
+        // ADR 0889 EVD-2 — the run's tool-boundary capture (keyed by its tenant) retires with it.
+        const owner = db.prepare(`SELECT tenant_id FROM runs WHERE run_id = ?`).get(rid) as { tenant_id: string } | undefined;
+        if (owner?.tenant_id) for (const pattern of toolBoundaryKeyPatterns(owner.tenant_id, rid)) db.prepare(`DELETE FROM host_ext_kv WHERE k LIKE ? ESCAPE '\\'`).run(pattern);
         const rr = db.prepare(`DELETE FROM runs WHERE run_id = ?`).run(rid);
         return Number(rr.changes ?? 0) > 0;
       });
@@ -2084,6 +2133,11 @@ export function openSqliteStorage(dbPath: string): Storage {
           // metacharacters escaped defensively, same as the postgres arm.
           const ridEsc = run_id.replace(/[\\%_]/g, (m) => `\\${m}`);
           childRows += Number(db.prepare(`DELETE FROM host_ext_kv WHERE k LIKE ? ESCAPE '\\'`).run(`hostext:runartifact:${ridEsc}:%`).changes ?? 0);
+          // ADR 0889 EVD-2 — the run's tool-boundary capture retires too (as deleteRun).
+          const owner = db.prepare(`SELECT tenant_id FROM runs WHERE run_id = ?`).get(run_id) as { tenant_id: string } | undefined;
+          if (owner?.tenant_id) {
+            for (const pattern of toolBoundaryKeyPatterns(owner.tenant_id, run_id)) childRows += Number(db.prepare(`DELETE FROM host_ext_kv WHERE k LIKE ? ESCAPE '\\'`).run(pattern).changes ?? 0);
+          }
           runs += Number(db.prepare(`DELETE FROM runs WHERE run_id = ?`).run(run_id).changes ?? 0);
         }
         return { runs, childRows };
@@ -2502,6 +2556,28 @@ export function openSqliteStorage(dbPath: string): Storage {
       return info.changes > 0;
     },
 
+    async redactChatMessagesByAuthor(tenantId, authorRefs, replacementAuthor, at) {
+      if (authorRefs.length === 0) return 0;
+      const marks = authorRefs.map(() => '?').join(', ');
+      const meta = JSON.stringify({ deletedAt: at, erased: true });
+      return db.transaction(() => {
+        const sessions = (db.prepare(`
+          SELECT DISTINCT m.session_id AS session_id FROM chat_messages m
+            JOIN chat_sessions s ON s.session_id = m.session_id
+           WHERE s.tenant_id = ? AND m.author_subject IN (${marks})
+        `).all(tenantId, ...authorRefs) as Array<{ session_id: string }>).map((r) => r.session_id);
+        if (sessions.length === 0) return 0;
+        const info = db.prepare(`
+          UPDATE chat_messages SET content = '{"deleted":true}', meta = ?, author_subject = ?
+           WHERE author_subject IN (${marks})
+             AND session_id IN (SELECT session_id FROM chat_sessions WHERE tenant_id = ?)
+        `).run(meta, replacementAuthor, ...authorRefs, tenantId);
+        const bump = db.prepare('UPDATE chat_sessions SET updated_at = ? WHERE tenant_id = ? AND session_id = ?');
+        for (const sid of sessions) bump.run(at, tenantId, sid);
+        return info.changes;
+      })();
+    },
+
     async getChatMessage(sessionId, messageId) {
       const row = getChatMessageStmt.get(sessionId, messageId) as
         | { message_id: string; session_id: string; role: string; content: string; meta: string | null; author_subject: string | null; created_at: string }
@@ -2767,7 +2843,12 @@ export function openSqliteStorage(dbPath: string): Storage {
       return r.changes > 0;
     },
 
-    async updateUserAgent(expectedTenantId, record) {
+    async updateUserAgent(expectedTenantId, record, expected) {
+      const cas = expected
+        ? ` AND persona = ? AND label IS ? AND description IS ? AND model_class = ? AND system_prompt = ?
+            AND COALESCE(tool_allowlist, '[]') = ? AND memory_scratchpad = ? AND memory_conversation = ?
+            AND memory_long_term = ? AND confidence_threshold IS ?`
+        : '';
       const r = db.prepare(
         `UPDATE user_agents SET
           tenant_id = ?,
@@ -2775,7 +2856,7 @@ export function openSqliteStorage(dbPath: string): Storage {
           system_prompt = ?, tool_allowlist = ?,
           memory_scratchpad = ?, memory_conversation = ?, memory_long_term = ?,
           confidence_threshold = ?
-        WHERE agent_id = ? AND tenant_id = ?`,
+        WHERE agent_id = ? AND tenant_id = ?${cas}`,
       ).run(
         record.tenantId,
         record.persona,
@@ -2790,6 +2871,20 @@ export function openSqliteStorage(dbPath: string): Storage {
         record.confidenceThreshold ?? null,
         record.agentId,
         expectedTenantId,
+        ...(expected
+          ? [
+              expected.persona,
+              expected.label ?? null,
+              expected.description ?? null,
+              expected.modelClass,
+              expected.systemPrompt,
+              JSON.stringify(expected.toolAllowlist),
+              expected.memoryShape.scratchpad ? 1 : 0,
+              expected.memoryShape.conversation ? 1 : 0,
+              expected.memoryShape.longTerm ? 1 : 0,
+              expected.confidenceThreshold ?? null,
+            ]
+          : []),
       );
       return r.changes > 0;
     },

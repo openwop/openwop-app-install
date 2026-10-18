@@ -1,5 +1,8 @@
 /**
- * ADR 0127 Phase 2c — public-widget abuse caps.
+ * ADR 0127 Phase 2c — public-widget abuse caps (+ ADR 0707 secure defaults, PUB-3
+ * concurrency). Breaks if a visitor can exceed the per-session turn cap or the
+ * per-day new-session cap, if an UNSET cap is unbounded, or if concurrent first
+ * turns double-count a session.
  */
 import { describe, it, expect, beforeAll } from 'vitest';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
@@ -8,7 +11,7 @@ import { checkWidgetTurn } from '../src/features/chat-widget/capsTracker.js';
 import type { WidgetConfig } from '../src/features/chat-widget/widgetService.js';
 
 function widget(id: string, caps: WidgetConfig['caps']): WidgetConfig {
-  return { widgetId: id, tenantId: 't', orgId: 'o', agentId: 'a', allowedDomains: ['x.com'], caps, token: 'wgt_x', enabled: true, createdBy: 'u', createdAt: 'x', updatedAt: 'x' };
+  return { widgetId: id, tenantId: 't', orgId: 'o', agentId: 'a', allowedDomains: ['x.com'], caps, token: 'wgt_x', enabled: true, createdBy: 'u', createdAt: '2026-06-24T00:00:00.000Z', updatedAt: '2026-06-24T00:00:00.000Z' };
 }
 
 beforeAll(async () => { initHostExtPersistence(await openStorage('memory://')); });
@@ -67,21 +70,30 @@ describe('checkWidgetTurn', () => {
     // limit. With the old `?? Infinity` that was true only of a CONFIGURED widget; this
     // pins it for the DEFAULT one, which is the configuration most widgets run.
     const w = widget('w3-rotate', {});
+    let allowed = 0;
     let denied = 0;
     for (let i = 0; i < 205; i++) {
       const r = await checkWidgetTurn(w, `rotated-${i}`, '2026-06-26'); // a fresh session each time
-      if (!r.allowed) { denied += 1; expect(r.reason).toBe('session_cap'); }
+      if (r.allowed) allowed += 1; else { denied += 1; expect(r.reason).toBe('session_cap'); }
     }
-    expect(denied, 'rotation runs into the per-day session default').toBeGreaterThan(0);
+    // EXACTLY the default (200), not merely "some" denial.
+    expect(allowed, 'the per-day session default admits exactly 200').toBe(200);
+    expect(denied, 'rotation runs into the per-day session default').toBe(5);
   });
 
   it('PUB-3: concurrent first-turns of the SAME session count ONE session (no double-count)', async () => {
-    const w = widget('w4', { maxSessionsPerDay: 1, maxTurnsPerSession: 100 });
+    // Cap 2, not 1: with a cap of 1 a double-count (5) and a correct count (1) both
+    // deny the next session, so the case could not tell them apart.
+    const w = widget('w4', { maxSessionsPerDay: 2, maxTurnsPerSession: 100 });
     // 5 concurrent first-turns of the same sessionId must NOT each increment the day count.
     const results = await Promise.all(Array.from({ length: 5 }, () => checkWidgetTurn(w, 'sameSession', '2026-06-24')));
     expect(results.every((r) => r.allowed)).toBe(true); // all same-session turns allowed (cap 100)
-    // A DIFFERENT session is now over the per-day cap of 1 (the same session counted once).
-    expect((await checkWidgetTurn(w, 'otherSession', '2026-06-24')).reason).toBe('session_cap');
+    // Exactly ONE call opened the session (the ADR 0821 D3 meter unit).
+    expect(results.filter((r) => r.newSession).length).toBe(1);
+    // The day count is 1, so a second session still fits under the cap of 2…
+    expect((await checkWidgetTurn(w, 'otherSession', '2026-06-24')).allowed).toBe(true);
+    // …and a third is over it.
+    expect((await checkWidgetTurn(w, 'thirdSession', '2026-06-24')).reason).toBe('session_cap');
   });
 
   it('PUB-3: concurrent turns of one session do not overshoot the turn cap', async () => {

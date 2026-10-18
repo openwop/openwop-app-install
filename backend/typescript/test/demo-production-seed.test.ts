@@ -2,6 +2,9 @@
  * `demo-production` round-trip (ADR 0172 — Production Intelligence).
  * Creative vendors + asset-production plans; idempotent; clears clean; and the
  * global-keyed plan ids DON'T collide across tenants (the cross-tenant guard).
+ *
+ * w32 (grade-tests): pins each demo plan's status by slug (the old `.some(approved)`
+ * passed either plan being approved) and that the seeded plan CONTENT landed.
  */
 import { beforeAll, describe, expect, it } from 'vitest';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
@@ -12,7 +15,7 @@ import { seedDemoProduction, clearDemoProduction, countDemoProduction } from '..
 import { listVendors, listPlans } from '../src/features/production/productionService.js';
 import { listOrgs } from '../src/host/accessControlService.js';
 
-async function demoPlansOf(tenantId: string): Promise<{ planId: string; status: string }[]> {
+async function demoPlansOf(tenantId: string): Promise<{ planId: string; status: string; recommendations: unknown[] }[]> {
   const orgId = (await listOrgs(tenantId))[0]!.orgId;
   return (await listPlans(tenantId, orgId)).filter((p) => p.planId.startsWith('pln:demo-production:'));
 }
@@ -36,7 +39,9 @@ describe('demo-production seeder', () => {
     expect((await listVendors(tenantId, orgId)).filter((v) => v.createdBy === 'demo:production')).toHaveLength(5);
     const plans = await demoPlansOf(tenantId);
     expect(plans).toHaveLength(2);
-    expect(plans.some((p) => p.status === 'approved')).toBe(true);
+    expect(Object.fromEntries(plans.map((p) => [p.planId.split(':').pop(), p.status])))
+      .toEqual({ 'spring-launch': 'approved', 'holiday-gift': 'draft' });
+    expect(plans.find((p) => p.planId.endsWith(':spring-launch'))?.recommendations, 'the seeded plan content landed').toHaveLength(4);
 
     // Idempotent.
     expect((await seedDemoProduction(tenantId)).created).toBe(0);

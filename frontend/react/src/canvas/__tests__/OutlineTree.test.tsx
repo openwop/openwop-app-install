@@ -11,9 +11,12 @@ import type { TreeNodeBase } from '../treeOps.js';
 
 interface N extends TreeNodeBase { type: string; children?: N[] }
 
+// Root has THREE nodes and `a` has TWO children, so aria-setsize differs by
+// level (round 1's 2-and-2 fixture could not tell them apart — w46g2-ot-setsize).
 const nodes: N[] = [
   { type: 'a', children: [{ type: 'a1' }, { type: 'a2' }] },
   { type: 'b' },
+  { type: 'c' },
 ];
 
 function mount(selPath: number[] | null = null, onSelect = vi.fn()): { onSelect: ReturnType<typeof vi.fn> } {
@@ -42,14 +45,18 @@ describe('OutlineTree — ARIA tree', () => {
     const tree = screen.getByRole('tree', { name: 'Outline' });
     expect(tree).toBeTruthy();
     const items = screen.getAllByRole('treeitem');
-    expect(items).toHaveLength(4); // a, a1, a2, b
+    expect(items).toHaveLength(5); // a, a1, a2, b, c
     const a = items[0]!;
     expect(a.getAttribute('aria-level')).toBe('1');
     expect(a.getAttribute('aria-posinset')).toBe('1');
-    expect(a.getAttribute('aria-setsize')).toBe('2');
+    expect(a.getAttribute('aria-setsize')).toBe('3');
     expect(a.getAttribute('aria-expanded')).toBe('true'); // has children
     const a1 = items[1]!;
     expect(a1.getAttribute('aria-level')).toBe('2');
+    const a2 = items[2]!;
+    expect(a2.getAttribute('aria-posinset')).toBe('2');
+    expect(a2.getAttribute('aria-setsize')).toBe('2');
+    expect(items[3]!.getAttribute('aria-expanded')).toBeNull(); // leaf: no expanded state
     expect(screen.getByRole('group')).toBeTruthy(); // the nested child list
   });
 
@@ -67,6 +74,18 @@ describe('OutlineTree — ARIA tree', () => {
     expect(b.getAttribute('aria-selected')).toBe('true');
     expect(b.getAttribute('tabindex')).toBe('0');
     expect(items[0]!.getAttribute('tabindex')).toBe('-1');
+    // Every other row says NOT selected, and is not a tab stop.
+    for (const other of items.filter((el) => el !== b)) {
+      expect(other.getAttribute('aria-selected')).toBe('false');
+      expect(other.getAttribute('tabindex')).toBe('-1');
+    }
+  });
+
+  it('GC-CV — a stale selPath that matches no row still leaves exactly one tab stop (the first row)', () => {
+    mount([9]);
+    const items = screen.getAllByRole('treeitem');
+    expect(items.filter((el) => el.getAttribute('tabindex') === '0')).toEqual([items[0]]);
+    expect(items.every((el) => el.getAttribute('aria-selected') === 'false')).toBe(true);
   });
 
   it('ArrowDown moves focus to the next visible item; Enter selects', () => {
@@ -84,9 +103,25 @@ describe('OutlineTree — ARIA tree', () => {
     const items = screen.getAllByRole('treeitem');
     items[1]!.focus();
     fireEvent.keyDown(items[1]!, { key: 'End' });
-    expect(document.activeElement).toBe(items[3]!);
-    fireEvent.keyDown(items[3]!, { key: 'Home' });
+    expect(document.activeElement).toBe(items[4]!);
+    fireEvent.keyDown(items[4]!, { key: 'Home' });
     expect(document.activeElement).toBe(items[0]!);
+  });
+
+  it('ArrowUp moves focus to the previous visible item', () => {
+    mount(null);
+    const items = screen.getAllByRole('treeitem');
+    items[3]!.focus();
+    fireEvent.keyDown(items[3]!, { key: 'ArrowUp' });
+    expect(document.activeElement).toBe(items[2]!); // b → a2 (the visible item above)
+  });
+
+  it('Space selects the focused row', () => {
+    const { onSelect } = mount(null);
+    const items = screen.getAllByRole('treeitem');
+    fireEvent.keyDown(items[3]!, { key: ' ' });
+    expect(onSelect).toHaveBeenCalledWith([1]);
+    expect(onSelect).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -141,6 +176,23 @@ describe('OutlineTree — keyboard reorder (ADR 0458 a11y)', () => {
       />,
     );
     const items = screen.getAllByRole('treeitem');
-    expect(() => fireEvent.keyDown(items[3]!, { key: 'ArrowDown', altKey: true })).not.toThrow();
+    // Observable, not `not.toThrow()`: a TypeError thrown inside a React handler
+    // is reported by jsdom, not rethrown out of fireEvent, so round 1's
+    // not.toThrow could not fail (w46g2-ot-noreorder vacuous). Assert the gesture
+    // is swallowed (Alt+Arrow never falls through to navigation) and nothing
+    // reached the error channel.
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const onWinError = vi.fn((e: ErrorEvent) => e.preventDefault());
+    window.addEventListener('error', onWinError);
+    try {
+      items[3]!.focus();
+      fireEvent.keyDown(items[3]!, { key: 'ArrowDown', altKey: true });
+      expect(document.activeElement).toBe(items[3]!);
+      expect(onWinError).not.toHaveBeenCalled();
+      expect(errSpy).not.toHaveBeenCalled();
+    } finally {
+      window.removeEventListener('error', onWinError);
+      errSpy.mockRestore();
+    }
   });
 });

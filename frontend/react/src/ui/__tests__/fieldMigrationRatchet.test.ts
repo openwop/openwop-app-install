@@ -53,7 +53,11 @@ function tsxFiles(dir: string): string[] {
 describe('ui/Field migration stays done', () => {
   for (const feature of MIGRATED) {
     it(`${feature} renders no hand-rolled <label>`, () => {
-      const offenders = tsxFiles(join(FEATURES_DIR, feature))
+      const files = tsxFiles(join(FEATURES_DIR, feature));
+      // An emptied or .ts-only feature dir would make this case pass by scanning
+      // nothing (every MIGRATED dir has >= 2 non-test .tsx files, measured w49).
+      expect(files.length).toBeGreaterThan(0);
+      const offenders = files
         .filter((f) => /<label[\s>]/.test(readFileSync(f, 'utf8')))
         .map((f) => f.slice(FEATURES_DIR.length + 1));
       // A failure here is not "add an exemption" — it is "use TextField /

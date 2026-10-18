@@ -124,11 +124,16 @@ export class ApiError extends Error {
   readonly status: number;
   /** The backend's own `message`, when it sent one — already human prose. */
   readonly serverMessage?: string;
-  constructor(message: string, status: number, serverMessage?: string) {
+  /** The envelope's machine-readable `details.reason`, when it sent one (e.g.
+   *  `stale_write`, ADR 0775 P4) — for telling apart two refusals that share a
+   *  status. */
+  readonly reason?: string;
+  constructor(message: string, status: number, serverMessage?: string, reason?: string) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
     if (serverMessage !== undefined) this.serverMessage = serverMessage;
+    if (reason !== undefined) this.reason = reason;
   }
 }
 
@@ -143,5 +148,6 @@ export async function apiErrorFrom(res: Response, localizedFallback: string): Pr
   // ADR 0621 D5 — session-refusal 401s run the hard sign-out choke.
   noteSessionRefusal(res.status, body);
   const server = readErrorMessage(body);
-  return new ApiError(server ?? localizedFallback, res.status, server);
+  const reason = asRecord(asRecord(body)?.details)?.reason;
+  return new ApiError(server ?? localizedFallback, res.status, server, typeof reason === 'string' ? reason : undefined);
 }

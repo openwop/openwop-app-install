@@ -1,5 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
-import { API, enableToggle } from './support/session.js';
+import { API } from './support/session.js';
 import { serveFontsLocally } from './support/localFonts.js';
 import { serveFilmLocally } from './support/localFilm.js';
 
@@ -43,9 +43,37 @@ const ROUTES: Array<{ route: string; name: string; anonymous?: boolean; boundKey
   { route: '/access?tab=appearance', name: 'appearance' },
 ];
 
-async function login(page: Page): Promise<void> {
+async function login(page: Page): Promise<string> {
   const res = await page.request.post(`${API}/test/login`, { data: { email: 'route-snap@e2e.test' } });
   expect(res.status(), await res.text()).toBe(201);
+  const tenantId = ((await res.json()) as { user?: { tenantId?: string } }).user?.tenantId;
+  if (!tenantId) throw new Error('route-snap login returned no tenant');
+  return tenantId;
+}
+
+/**
+ * Pin a toggle for THIS spec's own tenant only (README trap 4; the
+ * pair-canvas.spec.ts pattern) — this used to write the GLOBAL
+ * `developer-tools` row and never restore it. Returns an undo for `finally`.
+ */
+type ToggleConfig = Record<string, unknown> & { tenantOverrides?: Record<string, unknown> };
+async function pinTenantToggle(page: Page, id: string, tenantId: string): Promise<() => Promise<void>> {
+  const url = `${API}/feature-toggles/admin/configs/${encodeURIComponent(id)}`;
+  const write = async (status: 'on' | null): Promise<void> => {
+    const get = await page.request.get(url);
+    expect(get.status(), `read toggle ${id}: ${await get.text()}`).toBe(200);
+    const config = (await get.json()) as ToggleConfig;
+    const overrides = { ...(config.tenantOverrides ?? {}) };
+    if (status) overrides[tenantId] = { status };
+    else delete overrides[tenantId];
+    const put = await page.request.put(url, { data: { ...config, id, tenantOverrides: overrides } });
+    expect(put.status(), `${status ? 'pin' : 'unpin'} ${id} for ${tenantId}: ${await put.text()}`).toBe(200);
+    const saved = (await put.json()) as ToggleConfig;
+    if (status) expect(saved.tenantOverrides?.[tenantId]).toMatchObject({ status });
+    else expect(saved.tenantOverrides?.[tenantId]).toBeUndefined();
+  };
+  await write('on');
+  return () => write(null);
 }
 
 /** A workspace with a bound key, so `/chat` renders the chat rather than the BYOK
@@ -129,8 +157,8 @@ test.describe('critical-route visual snapshots (ci:full)', () => {
       //
       //   - H86 was already fixed by #3365 — the `[data-chains-state="ready"]`
       //     wait below. (The sentence this replaces still described the pre-#3365
-      //     `waitForTimeout(1500)` as the pack-list wait; the remaining 1500ms is
-      //     a generic settle. A comment outliving the code it describes is how
+      //     `waitForTimeout(1500)` as the pack-list wait; the generic 1500ms
+      //     settle that remained was replaced by a loading-signal wait in wave 53. A comment outliving the code it describes is how
       //     that hypothesis stayed "open" for two weeks after it was closed.)
       //   - H87 was addressed by DSYS-4's dedicated pack dir in ci.sh.
       //   - The residual variance was neither: it was REPOSITORY CONTENT. Two
@@ -159,96 +187,120 @@ test.describe('critical-route visual snapshots (ci:full)', () => {
         await serveFontsLocally(page);
         // ADR 0762 — the public home's film poster, same rule as the fonts.
         await serveFilmLocally(page);
-        if (anonymous) await context.clearCookies();
-        else if (boundKey) await loginWithBoundKey(page, theme);
-        else await login(page);
-        // DSYS-4 stability evidence, runs 1-3 finding: the BYOK gate's
-        // operator fineprint renders on `useFeatureAccess('developer-tools')`
-        // — whose DEFAULT is `demoMode() ? 'on' : 'off'`, i.e. decided by the
-        // booted backend's environment, and whose client state applies only
-        // after TWO fetches join. Pixel determinism therefore needs the
-        // toggle PINNED (the feature-gated spec's own harness helper) and the
-        // DOM state awaited — a mask cannot fix a layout shift, and a settle
-        // timeout cannot fix a boot-environment fork.
-        if (name === 'chat') await enableToggle(page.request, 'developer-tools');
-        // The dashboard lede picks Morning/Afternoon/Evening from
-        // `new Date().getHours()`. MEASURED 2026-10-08: rendering "Good
-        // morning." against the evening baseline still PASSES — the swap is
-        // under the 0.001 ratio — so this never reddened the gate; it silently
-        // spent the diff budget by hour of day. Pin the hour to the baseline's
-        // slot (evening) so the capture does not depend on when the gate runs.
-        // Only getHours moves, not Date.now, so relative timestamps are
-        // unaffected.
-        if (route === '/dashboard') {
-          await page.addInitScript(() => { Date.prototype.getHours = function getHours() { return 20; }; });
+        let undoToggle: (() => Promise<void>) | null = null;
+        try {
+          if (anonymous) await context.clearCookies();
+          else if (boundKey) await loginWithBoundKey(page, theme);
+          else {
+            const tenantId = await login(page);
+            // DSYS-4 stability evidence, runs 1-3 finding: the BYOK gate's
+            // operator fineprint renders on `useFeatureAccess('developer-tools')`
+            // — whose DEFAULT is `demoMode() ? 'on' : 'off'`, i.e. decided by the
+            // booted backend's environment, and whose client state applies only
+            // after TWO fetches join. Pixel determinism therefore needs the
+            // toggle PINNED (per tenant — `pinTenantToggle`) and the
+            // DOM state awaited — a mask cannot fix a layout shift, and a settle
+            // timeout cannot fix a boot-environment fork.
+            if (name === 'chat') undoToggle = await pinTenantToggle(page, 'developer-tools', tenantId);
+          }
+          // The dashboard lede picks Morning/Afternoon/Evening from
+          // `new Date().getHours()`. MEASURED 2026-10-08: rendering "Good
+          // morning." against the evening baseline still PASSES — the swap is
+          // under the 0.001 ratio — so this never reddened the gate; it silently
+          // spent the diff budget by hour of day. Pin the hour to the baseline's
+          // slot (evening) so the capture does not depend on when the gate runs.
+          // Only getHours moves, not Date.now, so relative timestamps are
+          // unaffected.
+          if (route === '/dashboard') {
+            await page.addInitScript(() => { Date.prototype.getHours = function getHours() { return 20; }; });
+          }
+          await page.goto(route);
+          if (name === 'chat') {
+            await page.waitForSelector('.byok-section-fineprint--operator', { state: 'attached', timeout: 30_000 });
+          }
+          if (boundKey) await page.waitForSelector('.welcome-home', { timeout: 30_000 });
+          await page.waitForSelector('main#main-content, main#public-main');
+          // The public home passes through four skeleton stages inside
+          // `main#public-main` (auth, the front-page pointer, the lazy chunk, the
+          // CMS page fetch), so the shell selector above matches long before the
+          // page exists. Under parallel workers on a cold boot the capture landed
+          // on the placeholder (764px against the 5250px baseline). Wait for the
+          // rendered page with no skeleton left in it.
+          if (anonymous) {
+            await page.waitForSelector('main#public-main .cms-public-page', { timeout: 30_000 });
+            await page.waitForFunction(() => !document.querySelector('main#public-main .skeleton'), null, { timeout: 30_000 });
+          }
+          // ADR 0844 — dashboard tiles mount lazily (`LazyMount`, a 200px
+          // IntersectionObserver margin), and the taller home puts the last row
+          // just past that line at 1280×900. Whether it mounted then depended on
+          // whether the tiles above were still short skeletons when the observer
+          // ran — a race. Scroll every tile into view so all of them mount, then
+          // wait for every one to finish loading: the baseline is the whole page,
+          // loaded, regardless of timing.
+          if (route === '/dashboard') {
+            await page.waitForSelector('.dash-tile', { timeout: 30_000 });
+            for (const tile of await page.locator('.dash-tile').all()) await tile.scrollIntoViewIfNeeded();
+            await page.waitForFunction(() => !document.querySelector('.dash-tile .skeleton-rows, .dash-tile .skeleton'), null, { timeout: 30_000 });
+            await page.evaluate(() => window.scrollTo(0, 0));
+          }
+          // H86 — `/builder` populates its template gallery from an unchained
+          // `listChainTemplates()` promise, so the settle timeout below samples
+          // whatever had rendered rather than a determinate DOM. Wait for the
+          // gallery to REPORT itself loaded instead.
+          //
+          // WHAT THE EVIDENCE ACTUALLY IS, stated at the strength we have: ONE
+          // pair. `15873` and `16164` are the same tree rendered twice, differing
+          // in `csm-ops` pack text. Only `data-chains-state` is waited on because
+          // it is the only population shown to vary; `data-list-state` and
+          // `data-fleet-state` exist on the same element as instrumentation, and
+          // the fleet one CANNOT be waited on regardless — `fleetFigures` is empty
+          // both before the fetch lands and on a host with no runs, so a visual
+          // proxy cannot tell "not yet" from "never".
+          if (route === '/builder') {
+            await page.waitForSelector('[data-chains-state="ready"]', { timeout: 30_000 });
+          }
+          await page.evaluate(() => document.fonts.ready);
+          await page.addStyleTag({ content: '* { caret-color: transparent !important; }' });
+          // Settle on SIGNALS, not a sleep (this was `waitForTimeout(1500)`): no
+          // loading placeholder left in the captured region, then two animation
+          // frames. `toHaveScreenshot` itself then waits for two identical frames.
+          // Not networkidle — SSE/polling never idles.
+          await page.waitForFunction(() => !document.querySelector(
+            'main .skeleton, main .skeleton-rows, main [aria-busy="true"], main .inline-state--loading, .admin-content[role="status"]',
+          ), null, { timeout: 30_000 });
+          await page.evaluate(() => new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r()))));
+          await page.evaluate((t) => {
+            document.documentElement.classList.remove('theme-light', 'theme-dark');
+            document.documentElement.classList.add(`theme-${t}`);
+          }, theme);
+          // The appearance route lives inside the shared admin shell. Its rail is
+          // covered by admin-governance.spec.ts and legitimately changes when a
+          // parallel feature test toggles an admin destination (for example
+          // kicktodo-core adds the System operations group). Keep this route's
+          // pixel contract on the page it owns instead of shared mutable chrome.
+          const main = route === '/access?tab=appearance'
+            ? page.locator('.admin-content').first()
+            : page.locator('main#main-content, main#public-main').first();
+          // No masks yet — add per PROVEN flake (relative timestamps are the
+          // expected class), never preemptively broad.
+          //
+          // HONEST CEILING — the budget. `maxDiffPixelRatio: 0.001` is a ratio of
+          // the WHOLE capture: ≈1,319 px on the 1032×1278 dashboard, ≈7,060 px on
+          // the 1280×5516 public home. A COPY-level regression slips under it:
+          // wave 53 changed the dashboard lede ("…work stands." → "…work stood.")
+          // and both dashboard cases stayed green (probe w53g3-rs-dashboard-copy),
+          // as "Good morning" vs the evening baseline did on 2026-10-08. What this
+          // DOES catch is layout and token regressions (probe
+          // w53g3-rs-byok-fineprint-shift: a 36px shift of the BYOK operator
+          // fineprint reddened both chat cases). Copy belongs to unit tests; a
+          // measured tightening of this budget is a filed grade-code row.
+          await expect(main).toHaveScreenshot(`route-${name}-${theme}.png`, {
+            animations: 'disabled', timeout: 30_000,
+            maxDiffPixelRatio: 0.001,
+          });
+        } finally {
+          if (undoToggle) await undoToggle();
         }
-        await page.goto(route);
-        if (name === 'chat') {
-          await page.waitForSelector('.byok-section-fineprint--operator', { state: 'attached', timeout: 30_000 });
-        }
-        if (boundKey) await page.waitForSelector('.welcome-home', { timeout: 30_000 });
-        await page.waitForSelector('main#main-content, main#public-main');
-        // The public home passes through four skeleton stages inside
-        // `main#public-main` (auth, the front-page pointer, the lazy chunk, the
-        // CMS page fetch), so the shell selector above matches long before the
-        // page exists. Under parallel workers on a cold boot the capture landed
-        // on the placeholder (764px against the 5250px baseline). Wait for the
-        // rendered page with no skeleton left in it.
-        if (anonymous) {
-          await page.waitForSelector('main#public-main .cms-public-page', { timeout: 30_000 });
-          await page.waitForFunction(() => !document.querySelector('main#public-main .skeleton'), null, { timeout: 30_000 });
-        }
-        // ADR 0844 — dashboard tiles mount lazily (`LazyMount`, a 200px
-        // IntersectionObserver margin), and the taller home puts the last row
-        // just past that line at 1280×900. Whether it mounted then depended on
-        // whether the tiles above were still short skeletons when the observer
-        // ran — a race. Scroll every tile into view so all of them mount, then
-        // wait for every one to finish loading: the baseline is the whole page,
-        // loaded, regardless of timing.
-        if (route === '/dashboard') {
-          await page.waitForSelector('.dash-tile', { timeout: 30_000 });
-          for (const tile of await page.locator('.dash-tile').all()) await tile.scrollIntoViewIfNeeded();
-          await page.waitForFunction(() => !document.querySelector('.dash-tile .skeleton-rows, .dash-tile .skeleton'), null, { timeout: 30_000 });
-          await page.evaluate(() => window.scrollTo(0, 0));
-        }
-        // H86 — `/builder` populates its template gallery from an unchained
-        // `listChainTemplates()` promise, so the settle timeout below samples
-        // whatever had rendered rather than a determinate DOM. Wait for the
-        // gallery to REPORT itself loaded instead.
-        //
-        // WHAT THE EVIDENCE ACTUALLY IS, stated at the strength we have: ONE
-        // pair. `15873` and `16164` are the same tree rendered twice, differing
-        // in `csm-ops` pack text. Only `data-chains-state` is waited on because
-        // it is the only population shown to vary; `data-list-state` and
-        // `data-fleet-state` exist on the same element as instrumentation, and
-        // the fleet one CANNOT be waited on regardless — `fleetFigures` is empty
-        // both before the fetch lands and on a host with no runs, so a visual
-        // proxy cannot tell "not yet" from "never".
-        if (route === '/builder') {
-          await page.waitForSelector('[data-chains-state="ready"]', { timeout: 30_000 });
-        }
-        await page.evaluate(() => document.fonts.ready);
-        await page.addStyleTag({ content: '* { caret-color: transparent !important; }' });
-        // Settle data fetches; not networkidle (SSE/polling never idles).
-        await page.waitForTimeout(1500);
-        await page.evaluate((t) => {
-          document.documentElement.classList.remove('theme-light', 'theme-dark');
-          document.documentElement.classList.add(`theme-${t}`);
-        }, theme);
-        // The appearance route lives inside the shared admin shell. Its rail is
-        // covered by admin-governance.spec.ts and legitimately changes when a
-        // parallel feature test toggles an admin destination (for example
-        // kicktodo-core adds the System operations group). Keep this route's
-        // pixel contract on the page it owns instead of shared mutable chrome.
-        const main = route === '/access?tab=appearance'
-          ? page.locator('.admin-content').first()
-          : page.locator('main#main-content, main#public-main').first();
-        // No masks yet — add per PROVEN flake (relative timestamps are the
-        // expected class), never preemptively broad.
-        await expect(main).toHaveScreenshot(`route-${name}-${theme}.png`, {
-          animations: 'disabled', timeout: 30_000,
-          maxDiffPixelRatio: 0.001,
-        });
       });
     }
   }

@@ -4,14 +4,19 @@
  * stated. A `targetInput` edge into a single-port node routes at run time but has
  * no handle on the builder canvas, so it is invisible to whoever opens the
  * workflow next.
+ *
+ * Sabotage witnesses (grade-tests w18): `ports` dropped from the authoring
+ * catalog or from the draft prompt's menu; rule 8 weakened in the draft prompt;
+ * the single-port check removed from `validateAuthoredWorkflow` (validate door)
+ * or from `persistAuthoredWorkflow` (persist door); the persona's rule deleted.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { resolveDefaultPackDir } from '../src/packs/registryInstaller.js';
 import { buildNodeCatalog, findSinglePortEdgeViolations } from '../src/host/nodeCatalogBuilder.js';
-import { buildAuthoringCatalog, validateAuthoredWorkflow } from '../src/features/workflow-author/workflowAuthorService.js';
-import type { WorkflowDefinition } from '../src/executor/types.js';
+import { buildAuthoringCatalog, persistAuthoredWorkflow, validateAuthoredWorkflow } from '../src/features/workflow-author/workflowAuthorService.js';
+import { validateWorkflowDefinition } from '../src/host/workflowDefinitionValidation.js';
 
 const PACK = 'vendor.test.author-single-port';
 let dir = '';
@@ -31,10 +36,12 @@ beforeAll(() => {
 });
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
-const def = (targetInput?: string): WorkflowDefinition => ({
+/** The candidate as a model sends it: the WIRE shape (edge spelled `id`), so it
+ *  goes through the shared validator before any internal-typed helper sees it. */
+const def = (targetInput?: string): Record<string, unknown> => ({
   workflowId: 'wf.asp', nodes: [{ nodeId: 's', typeId: 'vendor.test.asp.src' }, { nodeId: 't', typeId: 'vendor.test.asp.single' }],
   edges: [{ id: 'e1', sourceNodeId: 's', targetNodeId: 't', ...(targetInput ? { targetInput } : {}) }],
-} as unknown as WorkflowDefinition);
+});
 
 describe('ADR 0782 — single-port nodes in the authoring lane', () => {
   it('the authoring catalog (chat + meta-workflow menu) carries ports:"single"', () => {
@@ -53,13 +60,20 @@ describe('ADR 0782 — single-port nodes in the authoring lane', () => {
   });
 
   it('validate REJECTS a targetInput edge into a single-port node; a plain edge passes', () => {
-    const bad = findSinglePortEdgeViolations(def('a'), buildNodeCatalog());
+    const bad = findSinglePortEdgeViolations(validateWorkflowDefinition(def('a')), buildNodeCatalog());
     expect(bad).toHaveLength(1);
     // The fixture types are real catalog entries, so the full validator runs.
     const v = validateAuthoredWorkflow(def('a'));
     expect(v.ok).toBe(false);
     expect(v.errors.join(' ')).toMatch(/single input port/);
-    expect(findSinglePortEdgeViolations(def(), buildNodeCatalog())).toEqual([]);
+    expect(findSinglePortEdgeViolations(validateWorkflowDefinition(def()), buildNodeCatalog())).toEqual([]);
+  });
+
+  it('persist REJECTS the same edge — the write door enforces the rule, not only validate', async () => {
+    // The check sits before any ownership/storage read, so a model that skips
+    // `validate` (or revises after it) is still refused at the write.
+    await expect(persistAuthoredWorkflow(def('a'), { tenantId: 't-asp' }))
+      .rejects.toMatchObject({ code: 'validation_error', details: { reason: 'single_port_target_input' } });
   });
 
   it('every model-facing prompt states the rule and none claims config supplies inputs', () => {

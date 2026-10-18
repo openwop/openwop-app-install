@@ -20,7 +20,7 @@ import { listStoredRefs } from '../byok/lib/byokClient.js';
 import { Notice } from '../ui/Notice.js';
 import { SelectField, TextField } from '../ui/Field.js';
 import { MicIcon } from '../ui/icons/index.js';
-import { writeErrorMessage } from './agentWriteAccess.js';
+import { writeErrorMessage, useAgentWriteAccess } from './agentWriteAccess.js';
 
 /** Providers whose key is BYOK (no managed host key) — they need a credentialRef. */
 const BYOK_PROVIDERS = new Set(['elevenlabs', 'openai', 'google']);
@@ -44,18 +44,11 @@ function buildInput(profile: AgentProfile | null, voice: VoiceConfig | undefined
   else delete configParameters.voice;
   return {
     roleKey: profile?.roleKey ?? 'custom',
-    ...(profile?.department ? { department: profile.department } : {}),
-    ...(Object.keys(configParameters).length ? { configParameters } : {}),
-    ...(profile?.permissions ? { permissions: profile.permissions } : {}),
-    ...(profile?.hitl?.length ? { hitl: profile.hitl } : {}),
-    ...(profile?.escalation ? { escalation: profile.escalation } : {}),
-    ...(profile?.requiredConnections?.length ? { requiredConnections: profile.requiredConnections } : {}),
-    ...(profile?.metrics?.length ? { metrics: profile.metrics } : {}),
-    // W4 (architect #4): the full-replace PUT preserves only capabilities/knowledge/twin
-    // server-side, so carry these through too — a VOICE edit must not wipe governance fields.
-    ...(profile?.channels ? { channels: profile.channels } : {}),
-    ...(profile?.adminControls?.length ? { adminControls: profile.adminControls } : {}),
-    ...(profile?.riskCompliance?.length ? { riskCompliance: profile.riskCompliance } : {}),
+    // ADR 0775 P4 — the PUT MERGES, so this panel sends only what it owns
+    // (`configParameters.voice`); the governance fields are kept server-side.
+    // An empty object is sent as `null` (clear): omitting it would now KEEP the
+    // old voice. `autonomy` is required and replaced whole, so it is carried.
+    configParameters: Object.keys(configParameters).length ? configParameters : null,
     autonomy: {
       specLevel: profile?.autonomy.specLevel ?? 'draft-only',
       ...(profile?.autonomy.withinPolicyActions?.length ? { withinPolicyActions: profile.autonomy.withinPolicyActions } : {}),
@@ -64,6 +57,8 @@ function buildInput(profile: AgentProfile | null, voice: VoiceConfig | undefined
 }
 
 export function AgentVoicePanel({ rosterId }: { rosterId: string }): JSX.Element {
+  // ADR 0775 P3 (`ARUX-18`) — a viewer sees the voice, not a form it cannot save.
+  const canWrite = useAgentWriteAccess();
   const { t } = useTranslation('agents');
   const [profile, setProfile] = useState<AgentProfile | null>(null);
   const [provider, setProvider] = useState('');
@@ -127,11 +122,11 @@ export function AgentVoicePanel({ rosterId }: { rosterId: string }): JSX.Element
         ...(voiceId.trim() ? { voiceId: voiceId.trim() } : {}),
         ...(needsCred && credentialRef ? { credentialRef } : {}),
       };
-      const saved = await putAgentProfile(rosterId, buildInput(profile, voice));
+      const saved = await putAgentProfile(rosterId, buildInput(profile, voice), { ifMatch: profile?.etag });
       setProfile(saved);
       setNotice(t('voiceSaved'));
     } catch (err) {
-      setError(writeErrorMessage(err, t('common:error_forbidden')));
+      setError(writeErrorMessage(err, t('common:error_forbidden'), t('agentChangedReload')));
     } finally {
       setBusy(false);
     }
@@ -147,8 +142,9 @@ export function AgentVoicePanel({ rosterId }: { rosterId: string }): JSX.Element
       <p className="muted u-fs-13 u-m-0">{t('voiceDesc')}</p>
       {error ? <Notice variant="error">{error}</Notice> : null}
       {notice ? <Notice variant="success" announce={notice}>{notice}</Notice> : null}
+      {!canWrite ? <p className="muted u-fs-13 u-m-0">{t('viewerPanelReadOnly')}</p> : null}
       <div className="u-flex u-gap-3 u-flex-wrap u-items-end">
-        <SelectField label={t('voiceProvider')} value={provider} onChange={(e) => setProvider(e.target.value)} className="u-flex-1">
+        <SelectField label={t('voiceProvider')} value={provider} onChange={(e) => setProvider(e.target.value)} disabled={!canWrite} className="u-flex-1">
           {VOICE_PROVIDERS.map((p) => <option key={p.id || 'default'} value={p.id}>{p.label ?? t('voiceProviderDefault')}</option>)}
         </SelectField>
         <TextField
@@ -156,13 +152,13 @@ export function AgentVoicePanel({ rosterId }: { rosterId: string }): JSX.Element
           value={voiceId}
           onChange={(e) => setVoiceId(e.target.value)}
           placeholder={provider === 'elevenlabs' ? 'e.g. 21m00Tcm4TlvDq8ikWAM' : t('voiceIdPlaceholder')}
-          disabled={!provider}
+          disabled={!provider || !canWrite}
           className="u-flex-2"
         />
       </div>
       {BYOK_PROVIDERS.has(provider) ? (
         <div className="u-flex u-flex-col u-gap-1">
-          <SelectField label={t('voiceKey')} value={credentialRef} onChange={(e) => setCredentialRef(e.target.value)}>
+          <SelectField label={t('voiceKey')} value={credentialRef} onChange={(e) => setCredentialRef(e.target.value)} disabled={!canWrite}>
             <option value="">{t('voiceKeySelect')}</option>
             {storedRefs.map((ref) => <option key={ref} value={ref}>{ref}</option>)}
           </SelectField>
@@ -183,11 +179,13 @@ export function AgentVoicePanel({ rosterId }: { rosterId: string }): JSX.Element
         </div>
       ) : null}
       {hintKey ? <p className="muted u-fs-12 u-m-0">{t(hintKey)}</p> : null}
-      <div className="action-bar">
-        <Button variant="primary" size="sm" disabled={busy} onClick={() => void save()}>
-          {busy ? t('voiceSaving') : t('voiceSave')}
-        </Button>
-      </div>
+      {canWrite ? (
+        <div className="action-bar">
+          <Button variant="primary" size="sm" disabled={busy} onClick={() => void save()}>
+            {busy ? t('voiceSaving') : t('voiceSave')}
+          </Button>
+        </div>
+      ) : null}
     </section>
   );
 }

@@ -17,7 +17,7 @@ export const taskDeckFeature: BackendFeature = {
   id: 'task-deck',
   registerRoutes: (deps) => {
     registerTaskDeckRoutes(deps);
-    registerTaskDeckAgentTools(deps.storage); // XCH-HOLE-4 (Wave 4) — openwop:tasks.deck (ADR 0308 seam)
+    registerTaskDeckAgentTools(deps.storage, deps.hostSuite.workflowCatalog); // XCH-HOLE-4 (Wave 4) — openwop:tasks.deck (ADR 0308 seam)
   },
   // No toggleDefault → always-on (ADR 0010/0024 graduation; toggle removed, gates open).
 };

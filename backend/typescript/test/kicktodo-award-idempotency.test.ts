@@ -11,7 +11,7 @@
  * single count cannot separate, so both are asserted here:
  *   1. the KEY is deterministic (`${tenant}::${subject}::${kind}::${enrollment}`),
  *      so a re-evaluation overwrites rather than appends; and
- *   2. the get-before-put guard (`engagementService.ts:187`) means a repeat
+ *   2. the insert-once guard (`awards.putIfAbsent`, KTENG-2) means a repeat
  *      evaluation reports NOTHING newly earned — the caller is told the truth,
  *      not handed a duplicate "you earned it!" event.
  *
@@ -62,6 +62,8 @@ describe('PROBE-KT3 (executable) — no duplicate awards per (subject, awardId)'
     expect(second, 're-evaluation re-announced an already-earned award (a census by GROUP BY cannot see this)').toEqual([]);
   });
 
+  // TWIN: the case above reds on every key/guard sabotage this one does (w40 probes
+  // aw-store-key); kept because it is the literal PROBE-KT3 census, executable.
   it('the (subject, awardId) pair is unique — a GROUP BY … HAVING count>1 would return 0', async () => {
     await evaluateAwards(await seedCheckIn(T, ALICE, 'e1', 'c1'));
     await evaluateAwards(await seedCheckIn(T, ALICE, 'e1', 'c1'));
@@ -94,5 +96,23 @@ describe('PROBE-KT3 (executable) — no duplicate awards per (subject, awardId)'
     expect(bob.length, 'bob\'s award collapsed onto alice\'s row — the key dropped the subject').toBeGreaterThan(0);
     expect(alice[0].awardId, 'precondition: the two subjects must share an awardId for this to test anything')
       .toBe(bob[0].awardId);
+  });
+
+  it('KTENG-2 / KTE-3 — two CONCURRENT observers for one check-in announce each award once', async () => {
+    // The sequential case above cannot see this: under get→put both observers
+    // read "absent" before either writes, both report the award as newly earned,
+    // and `celebrateAwards` notifies twice — while the row count stays 1 (same
+    // key). Breaks if `evaluateAwards` goes back to `awards.get` then `awards.put`
+    // (sabotage-witnessed: 'first-check-in' reported by both observers).
+    const ci = await seedCheckIn(T, ALICE, 'e1', 'c1');
+
+    const [a, b] = await Promise.all([evaluateAwards(ci), evaluateAwards(ci)]);
+    const reported = [...a, ...b].map((x) => x.kind);
+
+    expect(reported, 'precondition: something was earned').toContain('first-check-in');
+    expect(reported.filter((k) => k === 'first-check-in'), 'both racing observers announced the same award')
+      .toHaveLength(1);
+    expect(new Set(reported).size).toBe(reported.length);
+    expect(await listAwards(T, ALICE)).toHaveLength(reported.length);
   });
 });

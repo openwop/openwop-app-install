@@ -12,9 +12,14 @@
  * The evidence was on the wire the whole time: `executor.ts` binds
  * `artifactId`/`revisionId` onto the interrupt and `listOpenInterrupts` returns
  * them verbatim.
+ *
+ * w51 r2: "View full" now asserts the modal shows the SAME asset; the options case
+ * asserts the second option is acknowledged read-only (the old "no picker" line
+ * could not fail — this card never had one); the cancelled-confirm cases drain
+ * before asserting nothing was sent; a confirmed reject asserts the full payload.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, cleanup, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, cleanup, screen, fireEvent, waitFor, within, act } from '@testing-library/react';
 import type { CardRegistration } from '../../chat/registry/types.js';
 import { announce, currentAnnouncements } from '../../ui/announce.js';
 
@@ -72,9 +77,10 @@ describe('inbox / runs ApprovalCard — the approver sees what they are approvin
     });
     expect(await screen.findByText(/Happy 10th anniversary/)).toBeTruthy();
     expect(document.querySelector('.approval-preview-body')?.getAttribute('tabindex')).toBe('0');
-    // …and it does NOT offer a picker: this card resolves with {action, comment}
-    // and cannot carry a chosen resume value, so a Pick button would be a
-    // control that does not do what it looks like it does.
+    // …and the second option is acknowledged as read-only evidence ("+1 more"),
+    // not offered as a picker: this card resolves with {action, comment} and
+    // cannot carry a chosen resume value.
+    expect(screen.getByText('+1 more item under review.')).toBeTruthy();
     expect(screen.queryByRole('button', { name: /^pick$/i })).toBeNull();
   });
 
@@ -102,6 +108,8 @@ describe('inbox / runs ApprovalCard — the approver sees what they are approvin
   it('a SUCCESSFUL evidence read announces NOTHING (the polarity — no double-announce)', async () => {
     view({ prompt: GATE_PROMPT, artifactId: 'a-1', revisionId: 'rev-1' });
     expect(await screen.findByText(/labor variance -18\.4% vs plan/)).toBeTruthy();
+    // Flush passive effects first: a negative read right after findBy would pass before a late announcement lands.
+    await act(async () => {});
     expect(currentAnnouncements().assertive).toBe('');
   });
 
@@ -151,7 +159,8 @@ describe('inbox / runs ApprovalCard — the approver sees what they are approvin
   it('"View full" opens the modal over the same asset', async () => {
     view({ prompt: GATE_PROMPT, artifactId: 'a-1', revisionId: 'rev-1' });
     fireEvent.click(await screen.findByRole('button', { name: /view full/i }));
-    expect(await screen.findByRole('dialog')).toBeTruthy();
+    const dialog = await screen.findByRole('dialog');
+    expect(await within(dialog).findByText(/labor variance -18\.4% vs plan/)).toBeTruthy(); // the SAME asset
   });
 });
 
@@ -225,6 +234,7 @@ describe('chat ApprovalCard — the send envelope survives the unification', () 
     );
     fireEvent.click(await screen.findByRole('button', { name: /^reject$/i }));
     await waitFor(() => expect(api.confirm).toHaveBeenCalled());
+    await act(async () => {}); // let the declined confirm settle
     expect(onAction).not.toHaveBeenCalled();
   });
 
@@ -257,6 +267,7 @@ describe('inbox / runs ApprovalCard — reject confirms, approve does not', () =
     view({ prompt: GATE_PROMPT, artifactId: 'a-1', revisionId: 'rev-1' });
     fireEvent.click(await screen.findByRole('button', { name: /^reject$/i }));
     await waitFor(() => expect(api.confirm).toHaveBeenCalled());
+    await act(async () => {}); // let the declined confirm settle
     expect(api.resolveByRun).not.toHaveBeenCalled();
   });
 
@@ -264,7 +275,7 @@ describe('inbox / runs ApprovalCard — reject confirms, approve does not', () =
     view({ prompt: GATE_PROMPT, artifactId: 'a-1', revisionId: 'rev-1' });
     fireEvent.click(await screen.findByRole('button', { name: /^reject$/i }));
     await waitFor(() => expect(api.resolveByRun).toHaveBeenCalled());
-    expect(api.resolveByRun.mock.calls[0]![2]).toMatchObject({ action: 'reject' });
+    expect(api.resolveByRun).toHaveBeenCalledWith('r-1', 'redteam', { action: 'reject', comment: undefined });
   });
 
   it('APPROVE is deliberately NOT gated — friction on the common path teaches people to click through', async () => {

@@ -10,6 +10,14 @@ import { campaignJourneysFeature } from '../src/features/campaign-journeys/featu
  * 'Business Tools' / 'Marketing' / 'Workspace'), and the sub-features that
  * genuinely couple to the CDP core declare it as a dependency so the console
  * renders the relationship instead of leaving it invisible.
+ *
+ * Why it matters: `dependsOn` is the ADR 0194 disable-lock (and closes the ADR 0419
+ * white-label bundle selection — see feature-dependency-parity.test.ts), so dropping
+ * destination-sync → cdp lets an operator switch CDP off under a feature that imports
+ * its purpose-label engine. The category is the toggle console's grouping key.
+ *
+ * Sabotage that reds it (w38 probes): consent's category → 'Marketing'; destination-sync
+ * `dependsOn: []`; campaign-journeys dropping 'consent' from `recommends`.
  */
 describe('CDP feature grouping + dependency declaration', () => {
   const CDP_CATEGORY = 'Customer Data Platform';

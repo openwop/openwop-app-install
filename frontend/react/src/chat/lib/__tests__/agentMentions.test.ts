@@ -1,13 +1,18 @@
 /**
  * Agent @-mention dedup (fix: the picker showed @devon … @devon-6, one row per
- * duplicate roster/registry twin of the same persona).
+ * duplicate roster/registry twin of the same persona) and the attribution-label
+ * humanizer (prod 2026-10-09: a lineup miss rendered "Vendor.openwop App…").
+ *
+ * Breaks it: dropping a field from `agentSignature` (two different reviewers
+ * collapse), losing the `user.` preference (`@devon` dispatches to a roster twin),
+ * or reading a dotted agentId whole in `slugToName`.
  */
 import { describe, expect, it } from 'vitest';
 import { projectAgents, slugToName } from '../agentMentions.js';
 import type { AgentEntry } from '../../../client/agentsClient.js';
 
 function agent(partial: Partial<AgentEntry>): AgentEntry {
-  return {
+  const base: AgentEntry = {
     agentId: 'x',
     persona: 'X',
     label: 'X',
@@ -15,8 +20,10 @@ function agent(partial: Partial<AgentEntry>): AgentEntry {
     packName: 'p',
     packVersion: '1.0.0',
     modelClass: 'chat',
-    ...partial,
-  } as AgentEntry;
+    toolAllowlist: [],
+    hasHandoffSchemas: false,
+  };
+  return { ...base, ...partial };
 }
 
 describe('projectAgents — dedup identical agents', () => {

@@ -9,6 +9,12 @@ import { visibleHubRoutes, tabIdOf } from '../hubProjection.js';
  * nav collapses via `hiddenWhenFeature: 'campaigns'` while the routes stay
  * reachable, and the anchor id is `campaigns` (NOT `campaign-studio`, which is the
  * unrelated ADR 0153 in-chat canvas). Pure manifest derivations.
+ *
+ * Sabotage-witnessed (/grade-tests w30): reordering a tab, dropping a
+ * `hiddenWhenFeature`, sharing a tab's toggle, renaming the anchor toggle to
+ * `campaign-studio`, and dropping a route element each turn a case red.
+ * (A former "does not collide" case was cut: its anchor half is case 2, and its
+ * cross-console half could not fail — `inHub` puts a route in exactly one hub.)
  */
 const byPath = (p: string) => FEATURES.find((r) => r.path === p);
 const all = (): boolean => true;
@@ -43,15 +49,6 @@ describe('ADR 0200 — Campaign Studio console', () => {
   it('each tab gates on its own sub-feature toggle (single-source gating)', () => {
     const only = (keep: string) => (id?: string) => id === keep || id === 'campaigns';
     expect(visibleHubRoutes(FEATURES, only('campaign-brief'), true, 'campaigns').map(tabIdOf)).toEqual(['campaign-brief']);
-    expect(byPath('/campaign-intelligence')?.hubTab?.featureId).toBe('campaign-intel');
-  });
-
-  it('does not collide with the ADR 0153 campaign-studio canvas nor with other consoles', () => {
-    // The canvas is a chat artifact (no FE nav route); the hub anchor is `campaigns`.
-    expect(byPath('/campaign-studio')?.nav?.featureId).not.toBe('campaign-studio');
-    const campaigns = visibleHubRoutes(FEATURES, all, true, 'campaigns').map(tabIdOf);
-    const models = visibleHubRoutes(FEATURES, all, true, 'models').map(tabIdOf);
-    const access = visibleHubRoutes(FEATURES, all, true, 'access').map(tabIdOf);
-    expect(campaigns.filter((x) => models.includes(x) || access.includes(x))).toEqual([]);
+    expect(visibleHubRoutes(FEATURES, only('campaign-intel'), true, 'campaigns').map(tabIdOf)).toEqual(['campaign-intelligence']);
   });
 });

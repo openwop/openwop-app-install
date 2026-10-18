@@ -11,12 +11,27 @@
  *  - STR2-M2  a source currency matching nothing wrote a CONFIRMED revenue = 0, nightly
  *  - STR2-M3  archive/delete stranded an activation card that no action could clear
  *  - STR2-M4  approving activation on a non-draft reported "approved" and changed nothing
+ *  - STR2-M5  a save that deactivated the strategy never said so
  *  - STR2-M7  no subject eraser over six subject-keyed fields
+ *  - the review fold-in: B5 cap refusal, M3 deleted-strategy close, the UNCHANGED-status
+ *    gate bypass, M2's no-orders skip, M7's revision snapshots
+ *
+ * Sabotage witnesses (wave 19, `w19g3-hon-*`): counting over-cap rows as imported, summing
+ * across currencies, not normalising currency case, approving a non-draft, approving a
+ * deleted strategy, dropping the auto-revert marker, keying the gate on
+ * `body.status === undefined`, treating every edit as protected, removing the initiative
+ * cap, writing a confirmed 0 with no orders, keeping the id in a revision snapshot, and
+ * not erasing (or over-erasing) the owner each red the case that names them.
+ *
+ * Every global toggle flip is restored in `finally`, so a failing case cannot leak the
+ * gate (or `commerce`) into the next one. Honest ceiling: M7 reads revisions appended
+ * fire-and-forget (no hook to await); a lost race reds, it cannot pass.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { bootPlanningApp, makeClient, enableToggle, type Client } from './planningHarness.js';
 import { eraseSubject } from '../src/host/subjectErasure.js';
-import { listApprovals } from '../src/host/approvalService.js';
+import { getApproval, listApprovals } from '../src/host/approvalService.js';
+import { syncSourcedKrs } from '../src/features/strategy/metricSync.js';
 
 let BASE = '';
 let closeApp: () => Promise<void>;
@@ -115,8 +130,7 @@ describe('STR2-M3/M4 — an activation card must not outlive, or misreport, its 
     await enableToggle('strategy-approval-gate', 'on');
     const res = await c.patch(`${S}/${id}`, { status: 'active' });
     expect(res.status, JSON.stringify(res.body)).toBe(200);
-    const { listApprovals: list } = await import('../src/host/approvalService.js');
-    const card = (await list(tenantId, 'pending')).find((a) => a.kind === 'strategy-activation' && a.strategyId === id);
+    const card = (await listApprovals(tenantId, 'pending')).find((a) => a.kind === 'strategy-activation' && a.strategyId === id);
     expect(card, 'an activation card should be queued').toBeTruthy();
     return card!.approvalId;
   };
@@ -124,6 +138,7 @@ describe('STR2-M3/M4 — an activation card must not outlive, or misreport, its 
   it('approving a strategy that is no longer a draft is refused, not reported as approved', async () => {
     const { c, orgId, tenantId } = await login();
     const s = await mkStrategy(c, orgId);
+    try {
     const approvalId = await queueActivation(c, tenantId, s.id);
     // The author archives it while the card waits. The `if (s.status === 'draft')` had no
     // `else`: the CAS consumed the approval, the audit recorded `activation-approved`, the
@@ -135,16 +150,17 @@ describe('STR2-M3/M4 — an activation card must not outlive, or misreport, its 
     expect((await c.get(`${S}/${s.id}`)).body.status).toBe('archived');
     // …and the card is back to pending, so it can still be rejected deliberately.
     expect((await listApprovals(tenantId, 'pending')).some((a) => a.approvalId === approvalId)).toBe(true);
-    await enableToggle('strategy-approval-gate', 'off');
+    } finally { await enableToggle('strategy-approval-gate', 'off'); }
   });
 
   it('a draft still activates through the card (the negative control)', async () => {
     const { c, orgId, tenantId } = await login();
     const s = await mkStrategy(c, orgId);
-    const approvalId = await queueActivation(c, tenantId, s.id);
-    expect((await c.post(`/host/openwop-app/reviews/approval:${approvalId}/actions/approve`)).status).toBe(200);
-    expect((await c.get(`${S}/${s.id}`)).body.status).toBe('active');
-    await enableToggle('strategy-approval-gate', 'off');
+    try {
+      const approvalId = await queueActivation(c, tenantId, s.id);
+      expect((await c.post(`/host/openwop-app/reviews/approval:${approvalId}/actions/approve`)).status).toBe(200);
+      expect((await c.get(`${S}/${s.id}`)).body.status).toBe('active');
+    } finally { await enableToggle('strategy-approval-gate', 'off'); }
   });
 });
 
@@ -155,6 +171,7 @@ describe('STR2-M5 — a save that DEACTIVATES the strategy says so', () => {
     await enableToggle('strategy-approval-gate', 'off');
     expect((await c.patch(`${S}/${s.id}`, { status: 'active' })).status).toBe(200);
     await enableToggle('strategy-approval-gate', 'on');
+    try {
     // Editing a protected field on an ACTIVE strategy reverts it to draft. The marker rode
     // the event and the audit and never reached the client, so on screen the status chip
     // simply changed: the strategy was deactivated and nothing explained it.
@@ -163,14 +180,23 @@ describe('STR2-M5 — a save that DEACTIVATES the strategy says so', () => {
     expect(res.body.status).toBe('draft');
     expect(res.body.autoRevertedToDraft).toBe(true);
     expect(res.body.autoRevertedFields).toContain('objectives');
-    await enableToggle('strategy-approval-gate', 'off');
+    } finally { await enableToggle('strategy-approval-gate', 'off'); }
   });
 
+  // The control must sit in the SAME state as the case above (active, gate ON). On a
+  // draft no edit can revert, so "every edit is protected" passed it (w19g3-hon-touch-everything).
   it('an unprotected edit carries no marker (the negative control)', async () => {
     const { c, orgId } = await login();
     const s = await mkStrategy(c, orgId);
-    const res = await c.patch(`${S}/${s.id}`, { title: 'Renamed' });
-    expect(res.body.autoRevertedToDraft).toBeUndefined();
+    await enableToggle('strategy-approval-gate', 'off');
+    expect((await c.patch(`${S}/${s.id}`, { status: 'active' })).status).toBe(200);
+    await enableToggle('strategy-approval-gate', 'on');
+    try {
+      const res = await c.patch(`${S}/${s.id}`, { title: 'Renamed' });
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      expect(res.body.status).toBe('active');
+      expect(res.body.autoRevertedToDraft).toBeUndefined();
+    } finally { await enableToggle('strategy-approval-gate', 'off'); }
   });
 });
 
@@ -219,10 +245,11 @@ describe('review fold-in — the four findings that shipped untested, and two th
   it('M3: a card for a DELETED strategy closes as rejected — and does not record "approved"', async () => {
     const { c, orgId, tenantId } = await login();
     await enableToggle('strategy-approval-gate', 'on');
+    try {
     const s = await mkStrategy(c, orgId);
     expect((await c.patch(`${S}/${s.id}`, { status: 'active' })).status).toBe(200);
-    const { listApprovals: list } = await import('../src/host/approvalService.js');
-    const card = (await list(tenantId, 'pending')).find((a) => a.kind === 'strategy-activation' && a.strategyId === s.id)!;
+    const card = (await listApprovals(tenantId, 'pending')).find((a) => a.kind === 'strategy-activation' && a.strategyId === s.id);
+    if (!card) throw new Error('an activation card should be queued');
     expect([200, 204]).toContain((await c.del(`${S}/${s.id}?hard=true`)).status);
 
     // My first fix called `resolveApproval(..., 'rejected')` AFTER the CAS had already
@@ -231,12 +258,11 @@ describe('review fold-in — the four findings that shipped untested, and two th
     // APPROVED, with a governance audit entry saying so for a strategy that is gone.
     const decide = await c.post(`/host/openwop-app/reviews/approval:${card.approvalId}/actions/approve`);
     expect(decide.status).toBe(409);
-    const { getApproval } = await import('../src/host/approvalService.js');
     const closed = await getApproval(card.approvalId);
     expect(closed, 'the card should still exist').toBeTruthy();
     expect(closed!.status, 'closed as rejected, never recorded as approved').toBe('rejected');
     expect(closed!.note).toMatch(/no longer exists/i);
-    await enableToggle('strategy-approval-gate', 'off');
+    } finally { await enableToggle('strategy-approval-gate', 'off'); }
   });
 
   it('the gate fires when the editor posts an UNCHANGED status alongside a protected field', async () => {
@@ -245,6 +271,7 @@ describe('review fold-in — the four findings that shipped untested, and two th
     await enableToggle('strategy-approval-gate', 'off');
     expect((await c.patch(`${S}/${s.id}`, { status: 'active' })).status).toBe(200);
     await enableToggle('strategy-approval-gate', 'on');
+    try {
     // The app's OWN Overview editor posts the whole form, including the unchanged status.
     // `body.status === undefined` was therefore false and NEITHER gate branch fired: the
     // three protected fields it edits could be changed on a live, approved strategy with
@@ -255,7 +282,7 @@ describe('review fold-in — the four findings that shipped untested, and two th
     expect(res.body.status).toBe('draft');
     expect(res.body.autoRevertedToDraft).toBe(true);
     expect(res.body.autoRevertedFields).toContain('planningHorizon');
-    await enableToggle('strategy-approval-gate', 'off');
+    } finally { await enableToggle('strategy-approval-gate', 'off'); }
   });
 
   it('M2: a source currency with NO captured orders skips instead of writing a confirmed 0', async () => {
@@ -274,8 +301,8 @@ describe('review fold-in — the four findings that shipped untested, and two th
     // sync now skips it when `commerce` (default OFF) is off for the tenant. This
     // case is about the no-orders skip, so the source feature must be on.
     await enableToggle('commerce', 'on');
+    try {
     expect((await c.patch(`${S}/${s.id}`, { status: 'active' })).status).toBe(200);
-    const { syncSourcedKrs } = await import('../src/features/strategy/metricSync.js');
     // Zero is the one value indistinguishable from a correct measurement: it reads as 0%
     // progress and flips the verdict to at-risk, nightly, confirmed. My first fix guarded
     // `captured.length > 0`, so the org with NO orders — the commonest shape of this bug —
@@ -287,7 +314,7 @@ describe('review fold-in — the four findings that shipped untested, and two th
     // The no-orders case is the commonest shape of this bug (a KR wired up before the
     // first sale), and it is the one the earlier fix left writing a confirmed zero.
     expect(JSON.stringify(out.skipped)).toMatch(/no_captured_orders/);
-    expect(s.id).toBeTruthy();
+    } finally { await enableToggle('commerce', 'off'); }
   });
 
   it('M7: the erased id does not survive in a revision snapshot', async () => {

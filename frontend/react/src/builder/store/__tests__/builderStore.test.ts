@@ -3,17 +3,28 @@
  * undo/redo stack, edge dedup/self-loop rejection, and cascade-delete — all
  * safety-critical and previously untested.
  */
-import { describe, it, expect, beforeEach } from 'vitest';
-import { useBuilderStore } from '../builderStore.js';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { cancelPendingBackendSync, useBuilderStore } from '../builderStore.js';
+import { getSavedWorkflow } from '../../persistence/localStore.js';
 import type { SavedWorkflow } from '../../schema/workflow.js';
 
 const emptyWf: SavedWorkflow = {
-  id: 'wf-test', name: 'Test', version: '1.0.0', nodes: [], edges: [], createdAt: 'now', updatedAt: 'now',
+  id: 'wf-test', name: 'Test', version: '1.0.0', nodes: [], edges: [],
+  createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
 };
 const s = () => useBuilderStore.getState();
+const kinds = () => s().nodes.map((n) => n.kind);
 
 beforeEach(() => {
+  localStorage.clear();
   s().loadFromSaved(emptyWf);
+});
+
+// Every mutation persists, which arms a real 1.5 s debounced backend sync; never
+// let one outlive its case (it would POST from a later case or after the file).
+afterEach(() => {
+  cancelPendingBackendSync();
+  localStorage.clear();
 });
 
 describe('builderStore — nodes', () => {
@@ -73,9 +84,9 @@ describe('builderStore — undo/redo', () => {
     s().addNode('uppercase', { x: 100, y: 0 });
     expect(s().nodes).toHaveLength(2);
     s().undo();
-    expect(s().nodes).toHaveLength(1);
+    expect(kinds()).toEqual(['noop']); // the LAST mutation went, not the first
     s().redo();
-    expect(s().nodes).toHaveLength(2);
+    expect(kinds()).toEqual(['noop', 'uppercase']);
   });
 
   it('a new mutation after undo clears the redo (future) stack', () => {
@@ -83,9 +94,11 @@ describe('builderStore — undo/redo', () => {
     s().addNode('uppercase', { x: 100, y: 0 });
     s().undo(); // back to 1 node, future has the 2-node state
     s().addNode('delay', { x: 200, y: 0 }); // new branch
-    expect(s().nodes).toHaveLength(2);
+    expect(kinds()).toEqual(['noop', 'delay']);
     s().redo(); // nothing to redo — future was cleared
-    expect(s().nodes).toHaveLength(2);
+    // A count cannot tell: a stale redo would restore [noop, uppercase], also two.
+    expect(kinds()).toEqual(['noop', 'delay']);
+    expect(s().future).toEqual([]);
   });
 
   it('group remove + undo restores nodes and edges in one step', () => {
@@ -120,6 +133,10 @@ describe('builderStore — definition metadata carry (ADR 0440 P1)', () => {
     s().loadFromSaved({ ...emptyWf, metadata: { walkthrough: true } });
     s().addNode('noop', { x: 0, y: 0 });
     expect(s().metadata).toEqual({ walkthrough: true });
+    // …and what the autosave actually WROTE (persist → local cache, the same
+    // object the debounced backend sync sends) still carries it.
+    expect(getSavedWorkflow('wf-test')?.metadata).toEqual({ walkthrough: true });
+    expect(getSavedWorkflow('wf-test')?.nodes).toHaveLength(1); // the edit landed
   });
 });
 

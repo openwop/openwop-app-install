@@ -99,14 +99,14 @@ export const BRAND_DEFAULTS: BrandConfig = {
   faviconSrc:
     "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'>" +
     "<rect width='32' height='32' rx='6' fill='%23a35a30'/>" +
-    "<text x='16' y='22' font-family='Instrument Serif,Times New Roman,serif' " +
-    "font-style='italic' font-size='20' fill='%23f4f1ea' text-anchor='middle'>O</text></svg>",
+    "<text x='16' y='22' font-family='Bricolage Grotesque,Arial,sans-serif' " +
+    "font-weight='700' font-size='20' fill='%23f4f1ea' text-anchor='middle'>O</text></svg>",
   documentTitle: 'OpenWOP — agent platform',
   description:
     'The reference app for OpenWOP, the open-source protocol for multi-agent workflow ' +
     'orchestration. Watch a workflow run, pause it for approval, rewind it.',
   fontsHref:
-    'https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1' +
+    'https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400..700' +
     '&family=Geist:wght@300;400;500;600;700&family=Geist+Mono:wght@400;500&display=swap',
   primaryDomain: 'app.openwop.dev',
   instanceName: 'OpenWOP',
@@ -134,10 +134,10 @@ const GMONO = 'family=Geist+Mono:wght@400;500';
 export const FONT_PAIRINGS: FontPairing[] = [
   {
     id: 'editorial', name: 'Editorial (default)',
-    serif: '"Instrument Serif", "Times New Roman", serif',
+    serif: '"Bricolage Grotesque", ui-sans-serif, system-ui, sans-serif',
     sans: '"Geist", ui-sans-serif, system-ui, sans-serif',
     mono: '"Geist Mono", ui-monospace, "SF Mono", Menlo, monospace',
-    fontsHref: `https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@300;400;500;600;700&${GMONO}&display=swap`,
+    fontsHref: `https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400..700&family=Geist:wght@300;400;500;600;700&${GMONO}&display=swap`,
   },
   {
     id: 'grotesk', name: 'Modern grotesk',

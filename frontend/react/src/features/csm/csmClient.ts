@@ -51,7 +51,11 @@ export interface Account {
   arr?: number;
   /** R2 CS-SP-2 — ISO 4217 code for `arr` (absent = unitless legacy row). */
   arrCurrency?: string;
+  /** Legacy free-text owner (ADR 0582). New rows carry `ownerUserId`; the SPA
+   *  shows this read-only and only ever CLEARS it (ADR 0882 D3). */
   owner?: string;
+  /** ADR 0882 D3 — the CS owner as a workspace member (a `user:` subject). */
+  ownerUserId?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -84,23 +88,29 @@ export class CsmRequestError extends Error {
   readonly status: number;
   /** The server's own `message`, when it sent one. Never the primary copy. */
   readonly detail: string | undefined;
-  constructor(op: string, status: number, detail?: string) {
+  /** The server's machine `details.reason` (e.g. `invalid_owner`), for copy that names the cause. */
+  readonly reason: string | undefined;
+  constructor(op: string, status: number, detail?: string, reason?: string) {
     super(detail || `${op} returned ${status}`);
     this.name = 'CsmRequestError';
     this.status = status;
     this.detail = detail || undefined;
+    this.reason = reason || undefined;
   }
 }
 
 async function asJson<T>(res: Response, ctx: string): Promise<T> {
   if (!res.ok) {
     let detail = '';
+    let reason = '';
     try {
-      detail = ((await res.json()) as { message?: string })?.message ?? '';
+      const body = (await res.json()) as { message?: string; details?: { reason?: unknown } };
+      detail = body?.message ?? '';
+      reason = typeof body?.details?.reason === 'string' ? body.details.reason : '';
     } catch {
       /* non-JSON */
     }
-    throw new CsmRequestError(ctx, res.status, detail);
+    throw new CsmRequestError(ctx, res.status, detail, reason);
   }
   return (await res.json()) as T;
 }
@@ -110,14 +120,14 @@ export async function listAccounts(): Promise<Account[]> {
   return (await asJson<{ accounts: Account[] }>(res, 'listAccounts')).accounts;
 }
 
-export async function createAccount(input: { name: string; healthScore?: number; crmRef?: CrmRef; renewalDate?: string; arr?: number; owner?: string ; arrCurrency?: string }): Promise<Account> {
+export async function createAccount(input: { name: string; healthScore?: number; crmRef?: CrmRef; renewalDate?: string; arr?: number; ownerUserId?: string; arrCurrency?: string }): Promise<Account> {
   const res = await fetch(`${base}/accounts`, fetchOpts({ method: 'POST', headers: jsonHeaders(), body: JSON.stringify(input) }));
   return asJson<Account>(res, 'createAccount');
 }
 
 /** ADR 0582 §4 — `healthScore: null` CLEARS the score back to unscored; that is
  *  the affordance for an operator who no longer trusts the number. */
-export async function updateAccount(accountId: string, patch: { name?: string; healthScore?: number | null; crmRef?: CrmRef | null; renewalDate?: string | null; arr?: number | null; owner?: string | null ; arrCurrency?: string | null }): Promise<Account> {
+export async function updateAccount(accountId: string, patch: { name?: string; healthScore?: number | null; crmRef?: CrmRef | null; renewalDate?: string | null; arr?: number | null; owner?: null; ownerUserId?: string | null; arrCurrency?: string | null }): Promise<Account> {
   const res = await fetch(`${base}/accounts/${encodeURIComponent(accountId)}`, fetchOpts({ method: 'PATCH', headers: jsonHeaders(), body: JSON.stringify(patch) }));
   return asJson<Account>(res, 'updateAccount');
 }
@@ -140,4 +150,15 @@ export async function listOrgs(): Promise<Org[]> {
 export async function listCrmCompanies(orgId: string): Promise<CrmCompany[]> {
   const res = await fetch(`${config.baseUrl}/host/openwop-app/crm/orgs/${encodeURIComponent(orgId)}/companies`, fetchOpts({ headers: authedHeaders() }));
   return (await asJson<{ companies: CrmCompany[] }>(res, 'listCrmCompanies')).companies;
+}
+
+/** ADR 0882 D3 — who can own an account, and every spelling of "me" (so the
+ *  "Mine" filter matches whichever spelling an owner was stored under). */
+export interface Assignee {
+  subject: string;
+  displayName: string;
+}
+export async function listAssignees(): Promise<{ assignees: Assignee[]; me: string[] }> {
+  const res = await fetch(`${base}/assignees`, fetchOpts({ headers: authedHeaders() }));
+  return asJson<{ assignees: Assignee[]; me: string[] }>(res, 'listAssignees');
 }

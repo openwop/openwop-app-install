@@ -15,9 +15,12 @@ const mkBoard = (wipLimit?: number): KanbanBoard => ({
   id: 'b1', tenantId: 't1', name: 'Board',
   columns: [{ id: 'todo', name: 'To do', ...(wipLimit ? { wipLimit } : {}) }],
   createdAt: '2026-08-01T00:00:00Z', updatedAt: '2026-08-01T00:00:00Z',
-} as KanbanBoard);
+});
 const mkCards = (n: number): KanbanCard[] =>
-  Array.from({ length: n }, (_, i) => ({ id: `c${i}`, boardId: 'b1', columnId: 'todo', title: `T${i}`, priority: 'normal', order: i } as KanbanCard));
+  Array.from({ length: n }, (_, i): KanbanCard => ({
+    id: `c${i}`, boardId: 'b1', columnId: 'todo', title: `T${i}`, priority: 'normal', order: i,
+    createdAt: '2026-08-01T00:00:00Z', updatedAt: '2026-08-01T00:00:00Z',
+  }));
 
 afterEach(cleanup);
 
@@ -33,6 +36,12 @@ describe('KB-R2-5 — soft WIP limit UI', () => {
     const under = screen.getByText((_, el) => el?.classList.contains('kb-col-count') === true);
     expect(under.textContent).toContain('2/3');
     expect(under.classList.contains('kb-col-count--over')).toBe(false);
+
+    // AT the limit is not a breach: a soft limit flags only EXCEEDING it.
+    rerender(<MemoryRouter><KanbanBoardView board={mkBoard(3)} cards={mkCards(3)} onMoveCard={vi.fn()} /></MemoryRouter>);
+    const at = screen.getByText((_, el) => el?.classList.contains('kb-col-count') === true);
+    expect(at.textContent).toBe('3/3');
+    expect(at.classList.contains('kb-col-count--over')).toBe(false);
 
     rerender(<MemoryRouter><KanbanBoardView board={mkBoard(3)} cards={mkCards(4)} onMoveCard={vi.fn()} /></MemoryRouter>);
     const over = screen.getByText((_, el) => el?.classList.contains('kb-col-count--over') === true);

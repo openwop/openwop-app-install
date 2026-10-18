@@ -14,7 +14,7 @@
  * strand exactly rather than simulating it, then proves `reconcileEntitlements`
  * recovers it.
  */
-import { beforeAll, describe, expect, it } from 'vitest';
+import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { registerGoalVerifier } from '../src/features/goals/goalVerifiers.js';
@@ -28,11 +28,13 @@ import {
   enrollGuardVerdict, getEntitlement, linkChallengeProduct, reconcileEntitlements, reprocessOrder,
 } from '../src/features/kicktodo-commerce/entitlementService.js';
 
-const T = 'tenant-kt-reconcile';
 const ORG = 'org-kt-reconcile';
 const BUYER = 'user:stranded-buyer';
 
+/** Module-level switch read by the registered observers. Reset before EVERY case
+ *  (and restored in `finally` where a case flips it) so case order never matters. */
 let observerShouldFail = true;
+beforeEach(() => { observerShouldFail = true; });
 
 beforeAll(async () => {
   initHostExtPersistence(await openStorage('memory://'));
@@ -53,7 +55,7 @@ beforeAll(async () => {
   });
 });
 
-async function published(title: string): Promise<string> {
+async function published(T: string, title: string): Promise<string> {
   const draft = await createDraft({
     tenantId: T, title, summary: 's', outcome: 'o', durationDays: 3,
     activities: [{ stableActivityId: 'a1', day: 1, title: 'Act', instructions: '', evidencePolicy: 'attestation' }],
@@ -64,7 +66,8 @@ async function published(title: string): Promise<string> {
 
 describe('entitlement reconciliation (KTFULL-B13)', () => {
   it('recovers a paid order the fulfilment observer failed to fulfil', async () => {
-    const challengeId = await published('Stranded Course');
+    const T = 'tenant-kt-reconcile-paid'; // own tenant: the sweep counts are exact
+    const challengeId = await published(T, 'Stranded Course');
     const product = await createProduct({ tenantId: T, orgId: ORG, createdBy: 'user:publisher', type: 'digital', name: 'Stranded Course', price: 19 });
     await linkChallengeProduct(T, product.productId, challengeId, 1, 'user:publisher');
 
@@ -76,10 +79,12 @@ describe('entitlement reconciliation (KTFULL-B13)', () => {
     expect(await getEntitlement(T, BUYER, challengeId, 1)).toBeNull();
     await expect(enroll({ tenantId: T, ownerSubject: BUYER, challengeId, challengeVersion: 1 }))
       .rejects.toBeInstanceOf(EnrollDeniedError);
+    await expect(enroll({ tenantId: T, ownerSubject: BUYER, challengeId, challengeVersion: 1 }))
+      .rejects.toThrow('This challenge requires a purchase. Complete checkout to enroll.');
 
     // Reconciliation repairs it.
     const first = await reconcileEntitlements(T);
-    expect(first.entitlementsRepaired).toBe(1);
+    expect(first).toEqual({ ordersScanned: 1, entitlementsRepaired: 1 });
     expect((await getEntitlement(T, BUYER, challengeId, 1))?.state).toBe('active');
 
     // The buyer can now enroll with what they paid for.
@@ -89,27 +94,30 @@ describe('entitlement reconciliation (KTFULL-B13)', () => {
     // Idempotent — a healthy tenant repairs NOTHING, so the count is a real
     // signal rather than a restatement of order volume.
     const second = await reconcileEntitlements(T);
-    expect(second.ordersScanned).toBeGreaterThan(0);
-    expect(second.entitlementsRepaired).toBe(0);
+    expect(second).toEqual({ ordersScanned: 1, entitlementsRepaired: 0 });
   });
 
   it('also recovers a refund the observer failed to apply', async () => {
-    const challengeId = await published('Refunded Course');
+    const T = 'tenant-kt-reconcile-refund';
+    const challengeId = await published(T, 'Refunded Course');
     const product = await createProduct({ tenantId: T, orgId: ORG, createdBy: 'user:publisher', type: 'digital', name: 'Refunded Course', price: 19 });
     await linkChallengeProduct(T, product.productId, challengeId, 1, 'user:publisher');
 
     const order = await createOrder({ tenantId: T, orgId: ORG, createdBy: BUYER, lines: [{ productId: product.productId, quantity: 1 }] });
     // Let this one fulfil normally so there is an active entitlement to revoke.
     observerShouldFail = false;
-    await markAsPaid(T, ORG, order.orderId, 'demo:pi-refund');
+    try {
+      await markAsPaid(T, ORG, order.orderId, 'demo:pi-refund');
+    } finally {
+      observerShouldFail = true;
+    }
     expect((await getEntitlement(T, BUYER, challengeId, 1))?.state).toBe('active');
 
     // Now the refund observer fails — access stays granted after a refund.
-    observerShouldFail = true;
     await refundOrder(T, ORG, order.orderId, { actor: 'user:operator' });
     expect((await getEntitlement(T, BUYER, challengeId, 1))?.state).toBe('active'); // the strand
 
-    await reconcileEntitlements(T);
+    expect(await reconcileEntitlements(T)).toEqual({ ordersScanned: 1, entitlementsRepaired: 1 });
     expect((await getEntitlement(T, BUYER, challengeId, 1))?.state).toBe('revoked');
   });
 });

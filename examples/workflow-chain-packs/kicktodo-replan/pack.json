@@ -1,8 +1,8 @@
 {
   "name": "core.openwop.workflows.kicktodo-replan",
-  "version": "1.0.2",
+  "version": "1.0.4",
   "kind": "workflow-chain",
-  "description": "Participant-replan workflow (ADR 0459/0463), migrated from the deprecated builtin (ADR 0472 P4). chainId keeps the original id; the falsy reject-safe barrier rides RFC 0134.",
+  "description": "Participant-replan workflow (ADR 0459/0463), migrated from the deprecated builtin (ADR 0472 P4). chainId keeps the original id; the falsy reject-safe barrier rides RFC 0134. 1.0.3 declares `actions: [approve, reject]` on the approval gate (maxRequestChangesIterations 0), so an unmade decision is refused instead of recorded as a decline. 1.0.4 (WF-FAIL-2): a failed enrich stops the run (enrich-fail) instead of skipping the approval gate and applying the revision unapproved.",
   "keywords": [
     "KickTodo"
   ],
@@ -12,7 +12,7 @@
   "chains": [
     {
       "chainId": "openwop-app.kicktodo.replan",
-      "version": "1.0.2",
+      "version": "1.0.4",
       "label": "Replan a participant's plan",
       "description": "Compose a plan revision → clarify (one round) → humanize → approve in chat → apply the changes.",
       "parameters": {
@@ -64,7 +64,11 @@
             "config": {
               "title": "Apply these changes to your plan?",
               "artifactType": "kicktodo.plan-revision",
-              "maxRequestChangesIterations": 0
+              "maxRequestChangesIterations": 0,
+              "actions": [
+                "approve",
+                "reject"
+              ]
             }
           },
           {
@@ -73,6 +77,14 @@
             "config": {
               "code": "replan_rejected",
               "message": "The plan changes were declined — nothing was changed."
+            }
+          },
+          {
+            "id": "enrich-fail",
+            "typeId": "core.fail@1.0.0",
+            "config": {
+              "code": "revision_not_reviewable",
+              "message": "The proposed plan change could not be prepared for your approval, so nothing was changed."
             }
           },
           {
@@ -115,6 +127,16 @@
           },
           {
             "from": "reject",
+            "to": "apply",
+            "triggerRule": "none_failed"
+          },
+          {
+            "from": "enrich",
+            "to": "enrich-fail",
+            "triggerRule": "any_failed"
+          },
+          {
+            "from": "enrich-fail",
             "to": "apply",
             "triggerRule": "none_failed"
           }

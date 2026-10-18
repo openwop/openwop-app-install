@@ -32,7 +32,7 @@ import { resolveOne } from '../../host/featureToggles/service.js';
 import { createLogger } from '../../observability/logger.js';
 import { getPairing, unpair } from '../connections/messagingOutbound.js';
 import { getConnection } from '../connections/connectionsService.js';
-import { isPermittedForPurpose } from '../consent/consentService.js';
+import { getConsent, isErasureTombstoned, isPermittedForPurpose } from '../consent/consentService.js';
 
 const log = createLogger('features.whatsapp');
 
@@ -167,11 +167,17 @@ export interface WaSendArgs {
   templateVariables?: Record<string, string> | undefined;
   /** Meta Cloud template language (default `en`); ignored on Twilio. */
   languageCode?: string | undefined;
+  /** ADR 0878 D3 — a caller-owned idempotency key that REPLACES the content term
+   *  of the dispatch key. The service desk passes its message id: two identical
+   *  replies on one day are two sends, a retry of one reply is still one. Absent
+   *  (every other caller) ⇒ the content-keyed default, unchanged. Never reachable
+   *  from the generic `whatsapp.send` node (the surface does not forward it). */
+  idempotencyKey?: string | undefined;
 }
 
 export type WaSendResult =
   | { sent: true; providerSid: string | null; kind: 'session' | 'template'; deduped: boolean }
-  | { sent: false; error: 'feature_disabled' | 'validation_error' | 'no_binding' | 'consent_denied' | 'outside_window' | 'wa_not_connected' | 'wa_request_failed' | 'wa_rejected'; message: string; detail?: Record<string, unknown> };
+  | { sent: false; error: 'feature_disabled' | 'validation_error' | 'no_binding' | 'consent_denied' | 'opted_out' | 'subject_erased' | 'outside_window' | 'wa_not_connected' | 'wa_request_failed' | 'wa_rejected'; message: string; detail?: Record<string, unknown> };
 
 /** Fork-stable idempotency key — tenant+connection+recipient+content+UTC-DAY,
  *  NEVER runId (the adsAdapter rule: a fork must reuse the recorded send).
@@ -198,7 +204,39 @@ function metaGraphBase(): string {
   return (process.env.OPENWOP_META_GRAPH_BASE ?? 'https://graph.facebook.com/v20.0').replace(/\/+$/, '');
 }
 
+/** Every send but one: the strict explicit-opt-in lane (ADR 0394). */
 export async function sendWhatsApp(deps: BrokeredEgressDeps, args: WaSendArgs): Promise<WaSendResult> {
+  return sendOnLane(deps, args, 'strict');
+}
+
+/**
+ * ADR 0878 OQ-1 (decided by the user 2026-10-12, Option B) — the narrow SUPPORT-REPLY
+ * lane. Meta lets a business answer a customer who wrote to it, with a free-form
+ * session message, inside 24h of that customer's last message, without a marketing
+ * opt-in; the strict lane required one for every send, so nearly every reply to a
+ * support ticket failed `consent_denied`. This lane, and only this lane, differs:
+ *  - a SESSION message only: no `templateId` field exists on this signature, and a
+ *    template is refused at runtime too (never a business-initiated send);
+ *  - inside the 24h window of the customer's LAST inbound, read from the window
+ *    ledger the verified inbound observer writes (a server-recorded timestamp, never
+ *    a caller's) for THIS connection + number — the same gate as the strict lane;
+ *  - REFUSED on an explicit opt-out (`marketing.whatsapp: false` — a STOP — or a full
+ *    marketing opt-out) and on an erasure tombstone. Only an ABSENT opt-in is waived.
+ * Exactly ONE caller: the service desk's reply delivery, which passes the ticket's own
+ * captured sender on the ticket's own connection. `adr0878-wa-service-reply-ratchet`
+ * pins that set; the whatsapp surface, the node pack, chat tools and MCP never see it.
+ */
+export async function sendTicketReplyWhatsApp(
+  deps: BrokeredEgressDeps,
+  args: { connectionId: string; to: string; body: string; idempotencyKey: string },
+): Promise<WaSendResult> {
+  if ((args as { templateId?: unknown }).templateId !== undefined) {
+    return { sent: false, error: 'validation_error', message: 'A support reply is a session message; a template is not allowed on this lane.' };
+  }
+  return sendOnLane(deps, { connectionId: args.connectionId, to: args.to, body: args.body, idempotencyKey: args.idempotencyKey }, 'service-reply');
+}
+
+async function sendOnLane(deps: BrokeredEgressDeps, args: WaSendArgs, lane: 'strict' | 'service-reply'): Promise<WaSendResult> {
   // 1. Toggle honesty — per-tenant, dynamic, fail-closed.
   const assignment = await resolveOne('whatsapp', { tenantId: deps.tenantId }).catch(() => null);
   if (!assignment?.enabled) {
@@ -232,8 +270,23 @@ export async function sendWhatsApp(deps: BrokeredEgressDeps, args: WaSendArgs): 
   }
 
   // 3. Consent — STRICT explicit per-number opt-in (Meta's rule; no umbrella).
-  if (!(await isPermittedForPurpose(deps.tenantId, recipient, 'marketing-whatsapp'))) {
-    return { sent: false, error: 'consent_denied', message: 'The recipient has not explicitly opted in to WhatsApp messages (or has opted out).' };
+  //    The support-reply lane waives only an ABSENT opt-in; an explicit opt-out or an
+  //    erasure still refuses (ADR 0878 OQ-1).
+  if (lane === 'strict') {
+    if (!(await isPermittedForPurpose(deps.tenantId, recipient, 'marketing-whatsapp'))) {
+      return { sent: false, error: 'consent_denied', message: 'The recipient has not explicitly opted in to WhatsApp messages (or has opted out).' };
+    }
+  } else {
+    if (isTemplate) {
+      return { sent: false, error: 'validation_error', message: 'A support reply is a session message; a template is not allowed on this lane.' };
+    }
+    if (await isErasureTombstoned(deps.tenantId, recipient)) {
+      return { sent: false, error: 'subject_erased', message: 'This customer\'s data was erased; nothing can be sent to them.' };
+    }
+    const c = (await getConsent(deps.tenantId, recipient))?.categories;
+    if (c && (c['marketing.whatsapp'] === false || (c['marketing.whatsapp'] === undefined && c.marketing === false))) {
+      return { sent: false, error: 'opted_out', message: 'The customer opted out of WhatsApp messages (STOP).' };
+    }
   }
 
   // 4. The 24h window (hard Meta rule) — session messages only while open.
@@ -253,7 +306,7 @@ export async function sendWhatsApp(deps: BrokeredEgressDeps, args: WaSendArgs): 
   // 5. Fork-stable idempotency — the recorded send wins over a re-execution.
   const content = isTemplate ? `${args.templateId}:${JSON.stringify(args.templateVariables ?? {})}` : args.body!.trim();
   const kind: 'session' | 'template' = isTemplate ? 'template' : 'session';
-  const idemKey = idemKeyFor(deps.tenantId, { connectionId: args.connectionId, recipient, kind, content });
+  const idemKey = idemKeyFor(deps.tenantId, { connectionId: args.connectionId, recipient, kind, content: args.idempotencyKey ? `idem:${args.idempotencyKey}` : content });
   const prior = await dispatched.get(idemKey);
   if (prior) {
     return { sent: true, providerSid: prior.providerSid, kind: prior.kind, deduped: true };

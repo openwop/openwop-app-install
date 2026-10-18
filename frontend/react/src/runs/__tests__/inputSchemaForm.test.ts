@@ -3,6 +3,12 @@
  * keyword subset (type/title/description/default/required/enum/format),
  * the degrade paths (complex subschema → json field; non-object schema →
  * not renderable), and the validator's fail-closed required semantics.
+ *
+ * This is the CLIENT subset mirror; the server's closed-world check is
+ * `backend/typescript/test/run-input-validation.test.ts`. Validation assertions are
+ * EXACT lists, so a false positive on a valid field fails too. Red under: loosening the
+ * email/uri/integer checks, dropping errRequired, accepting non-object/empty schemas, or
+ * a non-json fallback for complex subschemas (probes w32g3-form-*).
  */
 import { describe, expect, it } from 'vitest';
 import {
@@ -65,25 +71,24 @@ describe('validateInputs', () => {
   const fields = deriveFields(SCHEMA);
 
   it('flags missing requireds and skips empty optionals', () => {
-    const errs = validateInputs(fields, {});
-    expect(errs).toEqual(expect.arrayContaining([
+    expect(validateInputs(fields, {})).toEqual([
       { name: 'name', key: 'errRequired' },
       { name: 'count', key: 'errRequired' },
-    ]));
-    expect(errs).toHaveLength(2);
+    ]);
   });
 
   it('type-checks numbers, integers, enums, email, and uri', () => {
     const errs = validateInputs(fields, {
       name: 'Ada', count: 1.5, ratio: Number.NaN, tier: 'gold', contact: 'nope', site: 'not a url',
     });
-    expect(errs).toEqual(expect.arrayContaining([
+    // Exact and ordered (fields iterate in property order): `name: 'Ada'` must add nothing.
+    expect(errs).toEqual([
       { name: 'count', key: 'errInteger' },
       { name: 'ratio', key: 'errNumber' },
       { name: 'tier', key: 'errEnum' },
       { name: 'contact', key: 'errEmail' },
       { name: 'site', key: 'errUri' },
-    ]));
+    ]);
   });
 
   it('passes a fully valid payload', () => {

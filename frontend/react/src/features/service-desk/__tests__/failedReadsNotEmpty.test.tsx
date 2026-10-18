@@ -14,16 +14,29 @@
  *     is the half that reads as the answer. Scanning the `.catch` alone does not
  *     surface this — the claim is not in the catch, it is in a render branch the
  *     catch happens to select.
+ *
+ * PROTECTED (failure honesty + ORG-HON-2/4 org-less writes). Line-cited by
+ * `docs/steward/DATA-ASSESSMENT.md` (the `listSupportTickets` not-called
+ * assertions and the two ORG-HON cases) — re-point those citations if lines move.
+ * Sabotage-witnessed (round 1/2): `setOrgsFailed(true)` → `setOrgs([])` in
+ * `ui/useOrgSelection`, the tickets `.catch` (`setRows([])` would restore the
+ * false claim), the empty-org branch, the `orgId &&` intake-PUT gate, the retry
+ * wiring, the `if (!orgId) return` read gate, the positive-control PUT.
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, cleanup, act, fireEvent } from '@testing-library/react';
+import type { Ticket, TicketDetail, IntakeStatus, IntakeConfig, QueueView } from '../serviceDeskClient.js';
+import type { Organization } from '../../../client/accessClient.js';
 
-const { listOrgs } = vi.hoisted(() => ({ listOrgs: vi.fn() }));
+const { listOrgs } = vi.hoisted(() => ({ listOrgs: vi.fn<() => Promise<Organization[]>>() }));
 const { listSupportTickets, getIntakeConfig, setIntakeOrg, postTicketMessage, setTicketStatus, getSupportTicket } = vi.hoisted(() => ({
-  listSupportTickets: vi.fn(), getIntakeConfig: vi.fn(),
+  listSupportTickets: vi.fn<(orgId: string, status?: string, view?: QueueView) => Promise<Ticket[]>>(),
+  getIntakeConfig: vi.fn<(orgId: string) => Promise<IntakeStatus>>(),
   // The three org-scoped WRITES this page can issue (ORG-HON-2).
-  setIntakeOrg: vi.fn(), postTicketMessage: vi.fn(), setTicketStatus: vi.fn(),
-  getSupportTicket: vi.fn(),
+  setIntakeOrg: vi.fn<(orgId: string) => Promise<IntakeConfig>>(),
+  postTicketMessage: vi.fn<(orgId: string, ticketId: string, body: string, direction: 'outbound' | 'internal', idempotencyKey?: string) => Promise<TicketDetail>>(),
+  setTicketStatus: vi.fn<(orgId: string, ticketId: string, status: string) => Promise<Ticket>>(),
+  getSupportTicket: vi.fn<(orgId: string, ticketId: string) => Promise<TicketDetail>>(),
 }));
 vi.mock('../../../client/accessClient.js', async (orig) => ({
   ...(await orig<typeof import('../../../client/accessClient.js')>()),
@@ -35,15 +48,21 @@ vi.mock('../../../client/accessClient.js', async (orig) => ({
 }));
 vi.mock('../serviceDeskClient.js', async (orig) => ({
   ...(await orig<typeof import('../serviceDeskClient.js')>()),
+  // ADR 0878 D7 — the assignee picker read (enrichment; never the network in tests).
+  listAssignees: async () => ({ assignees: [], me: [] }),
   listSupportTickets, getIntakeConfig, setIntakeOrg, postTicketMessage, setTicketStatus, getSupportTicket,
 }));
 
 import { SupportPage } from '../SupportPage.js';
 
-const ORG = { orgId: 'o1', name: 'Acme' };
-const TICKET = {
-  ticketId: 't1', subject: 'Printer on fire', status: 'open' as const,
-  priority: 'high' as const, createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z',
+const org = (orgId: string, name: string): Organization => ({
+  orgId, tenantId: 'tn1', name, slug: name.toLowerCase(), createdBy: 'u1',
+  createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z',
+});
+const ORG = org('o1', 'Acme');
+const TICKET: Ticket = {
+  ticketId: 't1', subject: 'Printer on fire', status: 'open', priority: 'high', channel: 'email', messages: [],
+  createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z',
 };
 
 const mount = async (): Promise<void> => {
@@ -56,8 +75,8 @@ beforeEach(() => {
   vi.clearAllMocks();
   listOrgs.mockResolvedValue([ORG]);
   listSupportTickets.mockResolvedValue([TICKET]);
-  getIntakeConfig.mockResolvedValue({ enabled: false });
-  getSupportTicket.mockResolvedValue({ ...TICKET, messages: [] });
+  getIntakeConfig.mockResolvedValue({ configured: true, here: true, config: { defaultOrgId: 'o1' } });
+  getSupportTicket.mockResolvedValue({ ...TICKET });
 });
 
 describe('a failed workspace read does not hang the ticket queue', () => {
@@ -106,6 +125,9 @@ describe('a failed workspace read does not hang the ticket queue', () => {
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Try again' })); });
     expect(listOrgs).toHaveBeenCalledTimes(2);
     expect(document.body.textContent).not.toContain('Could not load your organizations');
+    // …and the recovered workspace really loads its queue.
+    expect(await screen.findByText('Printer on fire')).toBeTruthy();
+    expect(listSupportTickets).toHaveBeenCalledWith('o1', undefined, 'all');
   });
 });
 
@@ -153,7 +175,7 @@ describe('a failed ticket read does not render an instruction beside the error',
 describe('service desk — no organization, no write (ORG-HON-2)', () => {
   it('zero organizations: none of the three org-scoped writes is reachable', async () => {
     listOrgs.mockResolvedValue([]);
-    getIntakeConfig.mockResolvedValue(null);
+    getIntakeConfig.mockResolvedValue({ configured: false, here: false, config: null });
     await mount();
 
     expect(document.body.textContent).toContain('No organizations');
@@ -163,7 +185,9 @@ describe('service desk — no organization, no write (ORG-HON-2)', () => {
     expect(getIntakeConfig).not.toHaveBeenCalled();
     expect(setIntakeOrg).not.toHaveBeenCalled();
     // No queue ⇒ no ticket ⇒ no detail panel ⇒ neither ticket write can be aimed.
-    expect(screen.queryByLabelText('Reply as')).toBeNull();
+    // (The composer's controls are "Message type" / "Message text".)
+    expect(screen.queryByLabelText('Message type')).toBeNull();
+    expect(screen.queryByLabelText('Message text')).toBeNull();
     expect(postTicketMessage).not.toHaveBeenCalled();
     expect(setTicketStatus).not.toHaveBeenCalled();
   });
@@ -172,9 +196,9 @@ describe('service desk — no organization, no write (ORG-HON-2)', () => {
     // The state the old code's safety rested on never happening. Two orgs, so the
     // picker renders; the queue loads (`rows` is now `[]`, NOT null) and intake
     // reads as unconfigured, so the "File intake into this org" button appears.
-    listOrgs.mockResolvedValue([ORG, { orgId: 'o2', name: 'Globex' }]);
+    listOrgs.mockResolvedValue([ORG, org('o2', 'Globex')]);
     listSupportTickets.mockResolvedValue([]);
-    getIntakeConfig.mockResolvedValue(null);
+    getIntakeConfig.mockResolvedValue({ configured: false, here: false, config: null });
     await mount();
     const enable = screen.getByRole('button', { name: 'File intake into this org' });
     expect(enable).toBeTruthy();
@@ -194,8 +218,8 @@ describe('service desk — no organization, no write (ORG-HON-2)', () => {
   it('positive control: with an organization selected, the intake PUT does fire — at that org', async () => {
     // Without this, the two assertions above could pass because the button never
     // renders for anyone, which is a different bug wearing the same green.
-    getIntakeConfig.mockResolvedValue(null);
-    setIntakeOrg.mockResolvedValue({ enabled: true });
+    getIntakeConfig.mockResolvedValue({ configured: false, here: false, config: null });
+    setIntakeOrg.mockResolvedValue({ defaultOrgId: 'o1' });
     await mount();
     await act(async () => {
       fireEvent.click(screen.getByRole('button', { name: 'File intake into this org' }));

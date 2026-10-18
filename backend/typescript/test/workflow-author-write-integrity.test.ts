@@ -22,6 +22,12 @@
  * These exercise the SERVICE + the agent-tool seam, not a spy: a test that
  * asserts "the helper was called" proves the mechanism and says nothing about
  * whether the lane reaches it (ADR 0502, paid for twice in this repo).
+ *
+ * Re-witnessed by sabotage in grade-tests w18 (probe ids `w18g3-wi-*` in the
+ * grade-tests tracker): every W-block goes red with its guard
+ * removed. Recorded exceptions: the W6 "not visible to another tenant" case is
+ * a deliberate double guard (each guard has its own witness), and the W1
+ * first-write case is a negative-control ceiling.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { revisionHashOf } from '../src/host/definitionHash.js';
@@ -49,6 +55,12 @@ import { createMember, createOrg } from '../src/host/accessControlService.js';
 
 const T = 'ws-wfa-integrity';
 let storage: Storage;
+/** ~30 cases author TRANSIENT drafts under the one tenant `T`, which brushes the
+ *  default 25-draft cap (ADR 0369 OQ4) — under `--sequence.shuffle` whichever case
+ *  ran last was refused (grade-tests w18, seed 1). The cap is not what those cases
+ *  test, so the file runs with headroom; W4b sets its own small caps explicitly
+ *  and restores THIS value afterwards. */
+const FILE_TRANSIENT_CAP = '1000';
 
 /** ADR 0822 D1 — every model write lane now carries the builder's
  *  `workspace:write` authority, so the acting user here is an Editor. */
@@ -58,6 +70,7 @@ async function grantEditor(tenantId: string, subject: string): Promise<void> {
 }
 
 beforeAll(async () => {
+  process.env.OPENWOP_AGENT_TRANSIENT_WORKFLOWS_MAX = FILE_TRANSIENT_CAP;
   ensureNodesRegistered();
   storage = await openStorage('memory://');
   initHostExtPersistence(storage);
@@ -65,6 +78,7 @@ beforeAll(async () => {
   await grantEditor(T, 'u-1');
 });
 afterAll(() => {
+  delete process.env.OPENWOP_AGENT_TRANSIENT_WORKFLOWS_MAX;
   setDurableStorage(null);
   __resetHostExtPersistence();
 });
@@ -102,10 +116,16 @@ const head = async (id: string): Promise<WorkflowDefinition> => {
 
 // ── W1 (WFAWF-1) — a revise must not strip what the model cannot express ─────
 describe('W1 — an AI revise round-trips the fields its response schema cannot express', () => {
-  const id = 'authored.w1-revise';
+  // Each case seeds its OWN rich head under its own id (grade-tests w18): the
+  // revise cases used to lean on case 1's head, so under shuffle the PARTIAL case
+  // ran as a first write — nothing to restore — and passed in the wrong state.
+  const seedRich = async (id: string): Promise<void> => {
+    await persistAuthoredWorkflow(richHead(id), { tenantId: T });
+  };
 
   it('seeds a rich head through the authoring lane', async () => {
-    await persistAuthoredWorkflow(richHead(id), { tenantId: T });
+    const id = 'authored.w1-seed';
+    await seedRich(id);
     const h = await head(id);
     expect(h.variables).toHaveLength(1);
     expect(h.settings).toEqual({ concurrency: 2 });
@@ -115,6 +135,8 @@ describe('W1 — an AI revise round-trips the fields its response schema cannot 
   });
 
   it('a revise that omits them wholesale does NOT destroy them', async () => {
+    const id = 'authored.w1-revise';
+    await seedRich(id);
     await persistAuthoredWorkflow(modelRevise(id), { tenantId: T });
     const h = await head(id);
     expect(h.variables, 'def-level `variables` survived the revise').toHaveLength(1);
@@ -131,11 +153,16 @@ describe('W1 — an AI revise round-trips the fields its response schema cannot 
   });
 
   it('a PARTIAL drop is honoured as a deletion, not resurrected (the discriminator is not unconditional)', async () => {
+    const id = 'authored.w1-partial';
+    await seedRich(id);
+    // Precondition: a real prior head carrying the variable-bound input, so the
+    // merge has something it COULD wrongly resurrect.
+    expect((await head(id)).nodes.find((n) => n.nodeId === 'a')?.inputs)
+      .toEqual({ greeting: { type: 'variable', variableName: 'who' } });
     const partial = {
       ...richHead(id),
-      // node `a` keeps its inputs; node `b` loses its compensation — a
-      // whole-set omission for `compensation`, so it WOULD restore. Give `b`
-      // an input instead so `inputs` is a PARTIAL, not whole-set, change.
+      // node `a` keeps an input (a different one) — so `inputs` is a PARTIAL
+      // change, not a whole-set omission, and the author's edit must win.
       nodes: [
         { ...noop('a'), inputs: { greeting: { type: 'static', value: 'hi' } } },
         noop('b'),
@@ -148,6 +175,9 @@ describe('W1 — an AI revise round-trips the fields its response schema cannot 
   });
 
   it('a FIRST write (no prior head) restores nothing — there is nothing to compare against', async () => {
+    // Negative control, recorded as a ceiling (grade-tests w18): no product
+    // sabotage short of a crash changes this outcome — the fixture carries none
+    // of the preservable fields, so there is nothing that could be restored.
     const fresh = 'authored.w1-fresh';
     await persistAuthoredWorkflow(modelRevise(fresh), { tenantId: T });
     const h = await head(fresh);
@@ -165,6 +195,15 @@ describe('W2 — the write never leaves a definition REGISTERED but UNOWNED', ()
     // The exposure this closes: an UNOWNED registered def is classified a host
     // BUILT-IN by `listAuthoredWorkflows` — visible to every tenant and
     // overwritable by none.
+    //
+    // PROMOTE it first (grade-tests w18). Born transient, the def is also hidden by
+    // the `catalogVisible` filter, so the stranger assertion below held even with
+    // the ownership classification deleted — a double guard. Promoted, only the
+    // ownership-based classification can keep it out of a stranger's list.
+    const { withLifecycle } = await import('../src/host/workflowLifecycle.js');
+    const { registerWorkflowDurable } = await import('../src/host/workflowsRegistry.js');
+    await registerWorkflowDurable(withLifecycle(await head(id), { transient: undefined }));
+    expect(lifecycleOf(await head(id)).transient, 'the fixture must be catalog-visible').toBeUndefined();
     const other = 'ws-w2-stranger';
     const seen = (await listAuthoredWorkflows({ tenantId: other })).map((w) => w.workflowId);
     expect(seen, 'a tenant-authored def must never read as a host built-in to a stranger').not.toContain(id);
@@ -193,7 +232,7 @@ describe('W2 — the write never leaves a definition REGISTERED but UNOWNED', ()
         }
         return Reflect.get(target, prop, recv);
       },
-    }) as Storage;
+    });
     // The ownership index rides `hostExtPersistence`'s OWN storage ref, not the
     // durable-store one — a real distinction, and getting it wrong is how a
     // fault-injection probe ends up injecting nothing and reporting green.
@@ -255,7 +294,7 @@ describe('W3 — a durable definition write that FAILS is not reported as succes
         }
         return Reflect.get(target, prop, recv);
       },
-    }) as Storage;
+    });
     setDurableStorage(failing);
     await expect(
       persistAuthoredWorkflow({ workflowId: id, nodes: [noop('a')] }, { tenantId: T }),
@@ -352,7 +391,7 @@ describe('W5b — `openwop:workflows.propose` also refuses a model-written lifec
 // ── W4b (WFAWF-3, resource half) — ONE budget across both write doors ───────
 describe('W4b — `persist` draws on the SAME transient budget as `propose`', () => {
   const t = 'ws-wfa-cap';
-  afterEach(() => { delete process.env.OPENWOP_AGENT_TRANSIENT_WORKFLOWS_MAX; });
+  afterEach(() => { process.env.OPENWOP_AGENT_TRANSIENT_WORKFLOWS_MAX = FILE_TRANSIENT_CAP; });
 
   it('refuses a NEW draft past the cap, and names the way out', async () => {
     process.env.OPENWOP_AGENT_TRANSIENT_WORKFLOWS_MAX = '2';
@@ -363,9 +402,17 @@ describe('W4b — `persist` draws on the SAME transient budget as `propose`', ()
   });
 
   it('still lets the tenant EDIT a draft it already owns — a cap with no exit is a defect', async () => {
+    // Own state (grade-tests w18): this case used to edit case 1's `cap-1`, so run
+    // alone it was a CREATE under the cap and passed in the wrong state.
     process.env.OPENWOP_AGENT_TRANSIENT_WORKFLOWS_MAX = '2';
-    await expect(persistAuthoredWorkflow({ workflowId: 'authored.cap-1', nodes: [noop('a'), noop('b')] }, { tenantId: t }))
-      .resolves.toMatchObject({ workflowId: 'authored.cap-1', nodeCount: 2 });
+    const te = 'ws-wfa-cap-edit';
+    await persistAuthoredWorkflow({ workflowId: 'authored.cap-edit-1', nodes: [noop('a')] }, { tenantId: te });
+    await persistAuthoredWorkflow({ workflowId: 'authored.cap-edit-2', nodes: [noop('a')] }, { tenantId: te });
+    // Precondition: the budget IS full — a new draft is refused.
+    await expect(persistAuthoredWorkflow({ workflowId: 'authored.cap-edit-3', nodes: [noop('a')] }, { tenantId: te }))
+      .rejects.toMatchObject({ code: 'conflict', details: { reason: 'transient_workflow_cap' } });
+    await expect(persistAuthoredWorkflow({ workflowId: 'authored.cap-edit-1', nodes: [noop('a'), noop('b')] }, { tenantId: te }))
+      .resolves.toMatchObject({ workflowId: 'authored.cap-edit-1', nodeCount: 2 });
   });
 
   it('the refusal names the population it actually counts, and the remedy that works (§Correction 7)', async () => {
@@ -395,15 +442,23 @@ describe('W4b — `persist` draws on the SAME transient budget as `propose`', ()
   });
 
   it('archiving frees budget (the refusal names an action that works)', async () => {
+    // Own state (grade-tests w18): this used to archive case 1's `cap-1` and threw
+    // when run alone.
     process.env.OPENWOP_AGENT_TRANSIENT_WORKFLOWS_MAX = '2';
+    const ta = 'ws-wfa-cap-archive';
+    await persistAuthoredWorkflow({ workflowId: 'authored.cap-arch-1', nodes: [noop('a')] }, { tenantId: ta });
+    await persistAuthoredWorkflow({ workflowId: 'authored.cap-arch-2', nodes: [noop('a')] }, { tenantId: ta });
+    // Precondition: full — so a pass below is BECAUSE of the archive.
+    await expect(persistAuthoredWorkflow({ workflowId: 'authored.cap-arch-3', nodes: [noop('a')] }, { tenantId: ta }))
+      .rejects.toMatchObject({ code: 'conflict', details: { reason: 'transient_workflow_cap' } });
     const { withLifecycle } = await import('../src/host/workflowLifecycle.js');
     const { registerWorkflowDurable } = await import('../src/host/workflowsRegistry.js');
-    const archived = withLifecycle(await head('authored.cap-1'), { archivedAt: new Date().toISOString() });
+    const archived = withLifecycle(await head('authored.cap-arch-1'), { archivedAt: new Date().toISOString() });
     await registerWorkflowDurable(archived);
     const { recordOwnership } = await import('../src/host/workflowOwnership.js');
-    await recordOwnership(t, 'authored.cap-1', { nodeCount: 2, transient: true, archivedAt: lifecycleOf(archived).archivedAt });
-    await expect(persistAuthoredWorkflow({ workflowId: 'authored.cap-3', nodes: [noop('a')] }, { tenantId: t }))
-      .resolves.toMatchObject({ workflowId: 'authored.cap-3' });
+    await recordOwnership(ta, 'authored.cap-arch-1', { nodeCount: 1, transient: true, archivedAt: lifecycleOf(archived).archivedAt });
+    await expect(persistAuthoredWorkflow({ workflowId: 'authored.cap-arch-3', nodes: [noop('a')] }, { tenantId: ta }))
+      .resolves.toMatchObject({ workflowId: 'authored.cap-arch-3' });
   });
 });
 
@@ -451,6 +506,11 @@ describe('W6 — ADR 0369 §5 lifecycle stamping', () => {
   });
 
   it('a transient draft is NOT visible to another tenant', async () => {
+    // Honest DOUBLE GUARD (grade-tests w18, probe `wi-w2-builtin-guard`): both the
+    // ownership classification and the `catalogVisible` filter hide a foreign
+    // transient draft, so deleting either one alone leaves this green. Each guard
+    // has its own witness — W2 case 1 (promoted, so only ownership can hide it) and
+    // the UNOWNED-transient case below (only `catalogVisible` can hide it).
     const id = 'authored.w6-scoped';
     await persistAuthoredWorkflow({ workflowId: id, nodes: [noop('a')] }, { tenantId: T });
     expect((await listAuthoredWorkflows({ tenantId: 'ws-w6-stranger' })).map((w) => w.workflowId)).not.toContain(id);
@@ -636,13 +696,13 @@ describe('W8 — an explicit clear is representable and honoured on the author l
     // service must not disagree about how a deletion is expressed — that
     // divergence is how this whole defect class started.
     const { buildWorkflowAuthorSurface } = await import('../src/features/workflow-author/surface.js');
-    const surface = buildWorkflowAuthorSurface({ tenantId: T, actingUserId: 'u-1' } as never);
+    const surface = buildWorkflowAuthorSurface({ tenantId: T, actingUserId: 'u-1' });
     const id = 'authored.w8-surface-clear';
     await surface.persistDraft?.({ definition: withComp(id) });
     expect((await head(id)).nodes.find((n) => n.nodeId === 'b')?.compensation).toBeDefined();
     // ADR 0773 G-10c — the surface overwrites only with the revision it read.
-    const out = await surface.persistDraft?.({ definition: withoutComp(id), clearFields: ['compensation'], baseRevision: revisionHashOf(await head(id)) } as never);
-    expect((out as { preservedFields?: unknown }).preservedFields).toBeUndefined();
+    const out = await surface.persistDraft?.({ definition: withoutComp(id), clearFields: ['compensation'], baseRevision: revisionHashOf(await head(id)) });
+    expect(out?.preservedFields).toBeUndefined();
     expect((await head(id)).nodes.find((n) => n.nodeId === 'b')?.compensation).toBeUndefined();
   });
 
@@ -690,19 +750,27 @@ describe('W9 — `preservedFields` crosses every seam from the merge to the read
 
   it('SEAM 2 — the node-facing surface relays it', async () => {
     const { buildWorkflowAuthorSurface } = await import('../src/features/workflow-author/surface.js');
-    const surface = buildWorkflowAuthorSurface({ tenantId: T, actingUserId: 'u-1' } as never);
+    const surface = buildWorkflowAuthorSurface({ tenantId: T, actingUserId: 'u-1' });
     const id = 'authored.w9-surface';
     await surface.persistDraft?.({ definition: withComp(id) });
     // ADR 0773 G-10c — an overwrite on this lane carries the revision it read.
-    const out = await surface.persistDraft?.({ definition: withoutComp(id), baseRevision: revisionHashOf(await head(id)) } as never);
-    expect((out as { preservedFields?: string[] }).preservedFields).toContain('compensation');
+    const out = await surface.persistDraft?.({ definition: withoutComp(id), baseRevision: revisionHashOf(await head(id)) });
+    expect(out?.preservedFields).toContain('compensation');
   });
 
-  it('SEAM 3 — the NODE puts it in its run outputs, and its output schema admits it', async () => {
-    // The seam the claims were false about. The node builds its own output
-    // object, and `persist.output.schema.json` is `additionalProperties:false`,
-    // so relaying the field WITHOUT declaring it would be a contract violation
-    // rather than a fix — both halves are asserted here.
+  it('SEAM 3 — the NODE\'s closed output schema admits the field, and the node lane is create-only (ADR 0773 G-10c)', async () => {
+    // The seam the claims were false about: `persist.output.schema.json` is
+    // `additionalProperties:false`, so relaying the field WITHOUT declaring it
+    // would be a contract violation rather than a fix.
+    //
+    // grade-tests w18 (probe `wi-w9-node`, vacuous): the node can no longer EMIT
+    // `preservedFields` at all. Since ADR 0773 G-10c the node lane has no read step
+    // and may only CREATE, and a create never preserves anything — so the relay at
+    // `packs/feature.workflow-author.nodes/index.mjs` (persist output) is
+    // unreachable. That is a product finding (grade-code row), not something this
+    // test can witness. What it CAN witness: the schema declares the field, and
+    // the node REFUSES an overwrite (typed, not thrown). The surface relay a
+    // revision-carrying caller uses is SEAM 2's claim and was cut from here.
     const { readFileSync } = await import('node:fs');
     const { resolve } = await import('node:path');
     const packDir = resolve(process.cwd(), '../../packs/feature.workflow-author.nodes');
@@ -715,20 +783,18 @@ describe('W9 — `preservedFields` crosses every seam from the merge to the read
 
     const mod = await import(resolve(packDir, 'index.mjs'));
     const { buildWorkflowAuthorSurface } = await import('../src/features/workflow-author/surface.js');
-    const surface = buildWorkflowAuthorSurface({ tenantId: T, actingUserId: 'u-1' } as never);
-    const runNode = async (definition: unknown): Promise<{ status: string; outputs?: Record<string, unknown> }> =>
+    const surface = buildWorkflowAuthorSurface({ tenantId: T, actingUserId: 'u-1' });
+    const runNode = async (definition: unknown): Promise<{ status: string; outputs?: Record<string, unknown>; error?: { code?: string; message?: string } }> =>
       mod.persist({ inputs: { definition }, features: { 'workflow-author': surface } });
 
     const id = 'authored.w9-node';
-    await runNode(withComp(id));
-    // ADR 0773 G-10c — the NODE lane is create-only: it has no read step, so an
-    // overwrite without the revision it read is refused (was last-writer-wins,
-    // ADR 0770 `WBWF-17`). The disclosure relay is then witnessed through the
-    // surface a revision-carrying caller uses.
-    const refused = await runNode(withoutComp(id)).catch(() => ({ status: 'threw' }));
-    expect(refused.status).not.toBe('success');
-    const relayed = await surface.persistDraft?.({ definition: withoutComp(id), baseRevision: revisionHashOf(await head(id)) } as never);
-    expect((relayed as { preservedFields?: string[] }).preservedFields, 'the surface relays the disclosure').toContain('compensation');
+    expect((await runNode(withComp(id))).status, 'the node CREATES').toBe('success');
+    const refused = await runNode(withoutComp(id));
+    expect(refused, 'an overwrite without the revision it read is a TYPED refusal').toMatchObject({
+      status: 'failed',
+      error: { code: 'conflict' },
+    });
+    expect(refused.error?.message).toMatch(/baseRevision/);
   });
 
   it('SEAM 4 — the agent tool relays it with an instruction the model can act on', async () => {

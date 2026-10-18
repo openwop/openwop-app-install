@@ -37,6 +37,8 @@ const api = vi.hoisted(() => ({
   createAccount: vi.fn<typeof C.createAccount>(),
   deleteAccount: vi.fn<typeof C.deleteAccount>(),
   updateAccount: vi.fn<typeof C.updateAccount>(),
+  // ADR 0882 D3 — the owner picker's people list.
+  listAssignees: vi.fn<typeof C.listAssignees>(async () => ({ assignees: [{ subject: 'user:me', displayName: 'Mia Me' }, { subject: 'user:dana', displayName: 'Dana Diaz' }], me: ['user:me'] })),
 }));
 const { listAccounts, listCrmCompanies, createAccount } = api;
 const toastError = vi.hoisted(() => vi.fn());
@@ -47,6 +49,13 @@ vi.mock('../../../ui/toast.js', () => ({ toast: { success: vi.fn(), error: toast
 vi.mock('../csmClient.js', async (orig) => ({
   ...(await orig<typeof import('../csmClient.js')>()),
   ...api,
+}));
+// ADR 0882 (CSM2UX-4) — write controls follow `workspace:write`; `writeAccess.value`
+// lets a case render as a Viewer.
+const writeAccess = vi.hoisted(() => ({ value: true }));
+vi.mock('../../../lib/writeAccess.js', async (orig) => ({
+  ...(await orig<typeof import('../../../lib/writeAccess.js')>()),
+  useScopeWriteAccess: () => writeAccess.value,
 }));
 
 import { CsmPage } from '../CsmPage.js';
@@ -105,10 +114,110 @@ describe('CS-SP-1 — company-read failure is visible and retryable', () => {
 });
 
 describe('CS-SP-3 — owner is rendered', () => {
-  it('the Owner column shows the value the form/search/PATCH always carried', async () => {
+  it('a legacy typed owner still shows, marked as a typed name', async () => {
     listAccounts.mockResolvedValue([acct('a1', 'Globex', { owner: 'dana@example.com' })]);
     renderPage();
     await screen.findByText('dana@example.com');
+    expect(screen.getAllByText('Typed name').length).toBeGreaterThan(0);
+  });
+});
+
+describe('ADR 0882 D3 — the owner is a member', () => {
+  it('shows the member\'s name, "You" for me, and "Mine" filters to my accounts', async () => {
+    listAccounts.mockResolvedValue([
+      acct('a1', 'MineCo', { ownerUserId: 'user:me' }),
+      acct('a2', 'DanaCo', { ownerUserId: 'user:dana' }),
+      acct('a3', 'NobodyCo', {}),
+      acct('a4', 'GoneCo', { ownerUserId: 'user:left' }),
+    ]);
+    renderPage();
+    await screen.findByText('MineCo');
+    // The name renders in the Owner cell (and as an option in the picker).
+    await waitFor(() => expect(screen.getAllByText('Dana Diaz').length).toBeGreaterThan(1));
+    expect(screen.getByText('You')).toBeTruthy();
+    expect(screen.getByText('Former member')).toBeTruthy();
+    fireEvent.change(screen.getByLabelText(/filter by owner/i), { target: { value: 'mine' } });
+    expect(screen.queryByText('DanaCo')).toBeNull();
+    expect(screen.getByText('MineCo')).toBeTruthy();
+    fireEvent.change(screen.getByLabelText(/filter by owner/i), { target: { value: 'unassigned' } });
+    expect(screen.getByText('NobodyCo')).toBeTruthy();
+    expect(screen.queryByText('MineCo')).toBeNull();
+  });
+
+  it('the create form sends a member id, never typed text', async () => {
+    listAccounts.mockResolvedValue([]);
+    createAccount.mockResolvedValue(acct('n1', 'New'));
+    renderPage();
+    const owner = await screen.findByLabelText(/^owner$/i);
+    await waitFor(() => expect((owner as HTMLSelectElement).disabled).toBe(false));
+    fireEvent.change(screen.getByLabelText(/^account$/i), { target: { value: 'New' } });
+    fireEvent.change(owner, { target: { value: 'user:dana' } });
+    fireEvent.click(screen.getByRole('button', { name: /add account/i }));
+    await waitFor(() => expect(createAccount).toHaveBeenCalled());
+    expect(createAccount.mock.calls[0]![0]).toMatchObject({ name: 'New', ownerUserId: 'user:dana' });
+    expect(createAccount.mock.calls[0]![0]).not.toHaveProperty('owner');
+  });
+});
+
+describe('ADR 0882 D7 — the plays card', () => {
+  it('deep-links each play into the builder preflight, never runs it here', async () => {
+    listAccounts.mockResolvedValue([]);
+    renderPage();
+    const links = await screen.findAllByRole('link', { name: /^set up .* in the builder$/i });
+    expect(links.map((l) => l.getAttribute('href'))).toEqual([
+      '/builder?template=csm-ops.red-account-rescue',
+      '/builder?template=csm-ops.renewal-runway',
+    ]);
+  });
+
+  it('CSM2UX-3: says how each play STARTS — the rescue play needs its event bound', async () => {
+    listAccounts.mockResolvedValue([]);
+    renderPage();
+    const bind = await screen.findByRole('link', { name: /bind the event/i });
+    expect(bind.getAttribute('href')).toBe('/event-bindings');
+    expect(screen.getByText(/from a schedule you add in the builder/i)).toBeTruthy();
+  });
+});
+
+describe('ADR 0882 — grade-ux fixes', () => {
+  afterEach(() => { writeAccess.value = true; });
+
+  it('CSM2UX-1: nothing grabs focus on load; opening the editor focuses its first field', async () => {
+    listAccounts.mockResolvedValue([acct('a1', 'FocusCo')]);
+    renderPage();
+    await screen.findByText('FocusCo');
+    expect(document.activeElement === document.body || document.activeElement === null).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: /edit focusco/i }));
+    const panel = (await screen.findByText(/edit "focusco"/i)).closest('form')!;
+    expect(document.activeElement).toBe(within(panel).getByLabelText(/^account$/i));
+  });
+
+  it('CSM2UX-2: while the people list is loading, an owner is not called a former member', async () => {
+    api.listAssignees.mockImplementationOnce(() => new Promise(() => {}));
+    listAccounts.mockResolvedValue([acct('a1', 'PendingCo', { ownerUserId: 'user:dana' })]);
+    renderPage();
+    await screen.findByText('PendingCo');
+    expect(screen.queryByText('Former member')).toBeNull();
+    expect(screen.getAllByText('Loading…').length).toBeGreaterThan(0);
+  });
+
+  it('CSM2UX-4: a Viewer is not offered the add form, row actions or play set-up', async () => {
+    writeAccess.value = false;
+    listAccounts.mockResolvedValue([acct('a1', 'ReadOnlyCo')]);
+    renderPage();
+    await screen.findByText('ReadOnlyCo');
+    expect(screen.queryByRole('button', { name: /add account/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: /edit readonlyco/i })).toBeNull();
+    expect(screen.queryByRole('link', { name: /^set up .* in the builder$/i })).toBeNull();
+    expect(screen.getByText(/needs edit access/i)).toBeTruthy();
+  });
+
+  it('CSM2UX-10: a DSAR-erased owner reads as "Erased", not the raw marker', async () => {
+    listAccounts.mockResolvedValue([acct('a1', 'ErasedCo', { owner: '[erased]' })]);
+    renderPage();
+    await screen.findByText('ErasedCo');
+    expect(screen.getByText('Erased')).toBeTruthy();
+    expect(screen.queryByText('[erased]')).toBeNull();
   });
 });
 

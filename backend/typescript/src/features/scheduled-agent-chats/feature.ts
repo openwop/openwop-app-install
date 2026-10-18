@@ -15,7 +15,7 @@ import type { BackendFeature } from '../types.js';
 import { registerScheduledChatRoutes } from './routes.js';
 import { seedScheduledChatTurnWorkflow } from './scheduledChatTurnWorkflow.js';
 import { subscribeChannelAgentRemoved } from '../../host/channelMembershipEvents.js';
-import { deleteScheduledChatsForAgent, pauseScheduledChatsForDeletedAgent } from './scheduledChatService.js';
+import { backfillScheduledChatSubjects, deleteScheduledChatsForAgent, pauseScheduledChatsForDeletedAgent } from './scheduledChatService.js';
 import { onRosterMemberDeleted } from '../../host/rosterLifecycle.js';
 import { registerScheduledFollowupTool, registerScheduledRecurringTool } from './agentTools.js';
 import { registerAgentTurnFallback } from '../../host/heartbeatService.js';
@@ -32,6 +32,11 @@ export const scheduledAgentChatsFeature: BackendFeature = {
   registerRoutes: (deps) => {
     registerScheduledChatRoutes(deps);
     seedScheduledChatTurnWorkflow();
+    // ADR 0879 D7 (CH2CD-2) — give pre-0879 schedules their creator as the run's
+    // person, so the run-lane write gate does not silently drop their replies.
+    void backfillScheduledChatSubjects()
+      .then((n) => { if (n > 0) log.info('scheduled_chat_subject_backfill', { stamped: n }); })
+      .catch((err) => log.warn('scheduled_chat_subject_backfill_failed', { error: String(err) }));
     // ADR 0313 D2 — hand the heartbeat its bare-card fallback workflow (the
     // fill-a-seam registration; core never imports this feature).
     registerAgentTurnFallback({ workflowId: SCHEDULED_CHAT_TURN_WORKFLOW_ID, credentialRef: SCHEDULED_CHAT_CREDENTIAL_REF });

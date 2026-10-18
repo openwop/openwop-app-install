@@ -96,6 +96,8 @@ export const messages = {
   typeChannelActivity: 'Atividade do canal',
   typeCommentAdded: 'Novo comentário',
   typeCommentReply: 'Nova resposta',
+  typeCommentMention: 'Menção',
+  typeCommentResolved: 'Comentário resolvido',
   typeReviewRequested: 'Revisão solicitada',
   typeReviewDecided: 'Revisão decidida',
 
@@ -272,6 +274,8 @@ export const messages = {
   approvalsAiDraftedTitle: 'Estas traduções foram redigidas por um modelo e ninguém as revisou.',
   approvalsLiveData_one: '{{count}} seção com dados ao vivo, a aprovação não a congela',
   approvalsLiveData_other: '{{count}} seções com dados ao vivo, a aprovação não as congela',
+  approvalsOutdatedTranslations_one: '{{count}} tradução está desatualizada ({{locales}}), revise no editor',
+  approvalsOutdatedTranslations_other: '{{count}} traduções estão desatualizadas ({{locales}}), revise no editor',
   rejectReasonLabel: 'Por que você está devolvendo?',
   rejectReasonPlaceholder: 'O editor verá isto na página. É opcional, mas uma rejeição sem motivo não leva a lugar nenhum.',
   rejectSendLabel: 'Devolver para rascunho',
@@ -285,6 +289,7 @@ export const messages = {
   approvalForbidden: 'Você não tem permissão para decidir isto.',
   approvalGone: 'Este item não está mais disponível.',
   approvalAlreadyDecided: 'Alguém já decidiu este.',
+  approvalAgentPaused: 'Este agente está pausado. Retome-o e aprove de novo — a proposta continua pendente.',
   approvalStrategyChanged: "Esta estratégia mudou depois de enviada, então a revisão foi encerrada. Ela precisa ser enviada de novo.",
   approvalSelfApproval: "Você a enviou, então outra pessoa aprovadora precisa decidir.",
 } as const;

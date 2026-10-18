@@ -31,14 +31,24 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T }
+/** The JSON fields these cases read. Declared, not `any`: a field the server does
+ *  not send fails the assertion that reads it, and a typo fails `tsc`. */
+interface ListingRow { packName: string; approvalState?: string; approvalNote?: string; pricing?: unknown }
+interface WireBody {
+  listing: { approvalState?: string }; listings: ListingRow[]; pending: Array<Record<string, unknown>>;
+  status?: string; error?: string; message?: string; details?: { field?: string };
+}
+interface Res<T = WireBody> { status: number; body: T }
 interface Client { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res>; put: (p: string, b?: unknown) => Promise<Res> }
 function client(): Client {
   let cookie = '';
   const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    return { status: res.status, body: await res.json().catch(() => undefined) };
+    // The fetch boundary is the one place JSON enters untyped; a non-JSON body reads as {}.
+    const text = await res.text();
+    let out: WireBody; try { out = JSON.parse(text); } catch { out = JSON.parse('{}'); }
+    return { status: res.status, body: out };
   };
   return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), put: (p, b) => call('PUT', p, b) };
 }
@@ -56,6 +66,7 @@ describe('listing editor routes', () => {
     await login(seller);
     const early = await seller.put(`${CC}/listings/vendor.x.nodes`, { lane: 'native-paid', priceMajorUnits: 25, currency: 'usd' });
     expect(early.status).toBe(409);
+    expect(early.body.message).toBe('Start seller onboarding before listing a native-paid pack.');
 
     await seller.post(`${CC}/seller/onboard`, {});
     const saved = await seller.put(`${CC}/listings/vendor.x.nodes`, { lane: 'native-paid', priceMajorUnits: 25, currency: 'usd' });
@@ -70,20 +81,26 @@ describe('listing editor routes', () => {
     await login(other);
     expect((await other.get(`${CC}/seller/listings`)).body.listings).toHaveLength(0);
     await other.post(`${CC}/seller/onboard`, {});
-    expect((await other.put(`${CC}/listings/vendor.x.nodes`, { lane: 'free' })).status).toBe(409);
+    const claim = await other.put(`${CC}/listings/vendor.x.nodes`, { lane: 'free' });
+    expect(claim.status).toBe(409);
+    expect(claim.body.message).toMatch(/^This pack is already listed by another seller\./);
   });
 
   it('approval routes are superadmin-only — a seller cannot approve their own listing', async () => {
     const seller = client();
     await login(seller);
-    expect((await seller.get(`${CC}/approvals`)).status).toBe(403);
-    expect((await seller.post(`${CC}/approvals/vendor.x.nodes`, { decision: 'approved' })).status).toBe(403);
+    for (const r of [await seller.get(`${CC}/approvals`), await seller.post(`${CC}/approvals/vendor.x.nodes`, { decision: 'approved' })]) {
+      expect(r.status, JSON.stringify(r.body)).toBe(403);
+      expect(r.body.error).toBe('forbidden'); // the superadmin gate, not a toggle/auth refusal
+    }
   });
 
   it('an invalid lane is rejected', async () => {
     const c = client();
     await login(c);
-    expect((await c.put(`${CC}/listings/vendor.y.nodes`, { lane: 'nonsense' })).status).toBe(400);
+    const r = await c.put(`${CC}/listings/vendor.y.nodes`, { lane: 'nonsense' });
+    expect(r.status).toBe(400);
+    expect(r.body.message).toBe('lane must be free | external-link | native-paid.');
   });
 });
 
@@ -109,7 +126,7 @@ describe('CC2-B1 — the approval queue shows what the operator is actually appr
       await login(op);
       const queue = await op.get(`${CC}/approvals`);
       expect(queue.status, JSON.stringify(queue.body)).toBe(200);
-      const row = (queue.body.pending as Array<Record<string, unknown>>)
+      const row = queue.body.pending
         .find((r) => r.packName === 'vendor.phish.nodes');
       expect(row, 'the pending listing should be queued').toBeTruthy();
 
@@ -139,7 +156,7 @@ describe('CC2-B1 — the approval queue shows what the operator is actually appr
       const op = client();
       await login(op);
       const queue = await op.get(`${CC}/approvals`);
-      const row = (queue.body.pending as Array<Record<string, unknown>>)
+      const row = queue.body.pending
         .find((r) => r.packName === 'vendor.native.nodes');
       expect(row, 'the native-paid listing should be queued').toBeTruthy();
       expect(row!.externalPaymentUrl).toBeUndefined();
@@ -164,7 +181,7 @@ describe('CC2-B1 — the approval queue shows what the operator is actually appr
       const op = client();
       await login(op);
       const queue = await op.get(`${CC}/approvals`);
-      const row = (queue.body.pending as Array<Record<string, unknown>>)
+      const row = queue.body.pending
         .find((r) => r.packName === 'vendor.ghost.nodes');
       expect(row, 'the listing should be queued').toBeTruthy();
       expect(row!.packMissing, 'no such pack on this host').toBe(true);
@@ -236,7 +253,7 @@ describe('listing approval rides the shared approvals owner (chat-first-port F3)
       expect(decide.status, JSON.stringify(decide.body)).toBe(200);
       expect(decide.body.status).toBe('approved');
       const mine = await seller.get(`${CC}/seller/listings`);
-      const listing = (mine.body.listings as { packName: string; approvalState?: string }[]).find((l) => l.packName === 'vendor.share.nodes');
+      const listing = mine.body.listings.find((l) => l.packName === 'vendor.share.nodes');
       expect(listing?.approvalState).toBe('approved');
       const rows3 = await listPendingCommerceListingApprovals();
       expect(rows3.some((a) => a.commerceListing?.packName === 'vendor.share.nodes')).toBe(false);
@@ -281,7 +298,7 @@ describe('listing approval rides the shared approvals owner (chat-first-port F3)
 
       // The seller reads it from THEIR route — they cannot read approval rows.
       const mine = await seller.get(`${CC}/seller/listings`);
-      const listing = (mine.body.listings as { packName: string; approvalState?: string; approvalNote?: string }[])
+      const listing = mine.body.listings
         .find((l) => l.packName === 'vendor.reason.nodes');
       expect(listing?.approvalState).toBe('rejected');
       expect(listing?.approvalNote, 'the seller must be able to READ the reason').toBe(reason);
@@ -316,6 +333,29 @@ describe('marketplace /listings pricing annotation', () => {
     await login(c);
     const r = await c.get('/host/openwop-app/marketplace/listings');
     expect(r.status).toBe(200);
-    for (const l of r.body.listings as { pricing?: unknown }[]) expect(l.pricing).toBeUndefined();
+    const listings = r.body.listings;
+    expect(listings.length, 'the lane has installed packs to annotate').toBeGreaterThan(0);
+    for (const l of listings) expect(l.pricing).toBeUndefined();
+
+    // Positive control — without it the loop above passes whether or not the
+    // provider runs at all. An APPROVED external-link listing for one real pack is
+    // annotated onto exactly that row.
+    const target = listings[0]!.packName;
+    const seller = client();
+    await login(seller);
+    const put = await seller.put(`${CC}/listings/${encodeURIComponent(target)}`, { lane: 'external-link', externalPaymentUrl: 'https://pay.example/annot' });
+    expect(put.status, JSON.stringify(put.body)).toBe(200);
+    const row = (await listPendingCommerceListingApprovals()).find((a) => a.commerceListing?.packName === target)!;
+    process.env.OPENWOP_FEATURE_TOGGLES_DEV_OPEN = 'true';
+    try {
+      const op = client();
+      await login(op);
+      expect((await op.post(`${CC}/approvals/${row.approvalId}`, { decision: 'approved' })).status).toBe(200);
+    } finally {
+      delete process.env.OPENWOP_FEATURE_TOGGLES_DEV_OPEN;
+    }
+    const after = (await c.get('/host/openwop-app/marketplace/listings')).body.listings;
+    expect(after.find((l) => l.packName === target)?.pricing).toEqual({ lane: 'external-link', externalPaymentUrl: 'https://pay.example/annot' });
+    expect(after.filter((l) => l.pricing !== undefined).map((l) => l.packName)).toEqual([target]);
   });
 });

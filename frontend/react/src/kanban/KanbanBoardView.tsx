@@ -843,7 +843,9 @@ export function KanbanBoardView({
       }
       lane.splice(index, 0, { ...moving, columnId: toColumnId });
       const ranked = new Map(lane.map((candidate, rank) => [candidate.id, rank + 1]));
-      return remaining.map((candidate) => ranked.has(candidate.id)
+      // KBV-MOVE-1 — map over `prev`, not `remaining`: `remaining` excludes the
+      // moved card, so mapping it dropped that card from local state.
+      return prev.map((candidate) => ranked.has(candidate.id)
         ? { ...candidate, columnId: toColumnId, order: ranked.get(candidate.id)! }
         : candidate);
     });

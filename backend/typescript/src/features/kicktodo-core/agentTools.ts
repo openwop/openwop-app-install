@@ -273,7 +273,7 @@ async function composeReplanTask(tenantId: string, actingUserId: string, enrollm
       );
     }
   } catch { /* fail-soft — the composer still has its own read tools + the intent */ }
-  lines.push('Propose a closed-world plan revision (schedule / substitution / recovery lanes only) that answers this intent, or an empty revision if it cannot be honestly expressed in those lanes.');
+  lines.push('Propose a closed-world plan revision (schedule / substitution / recovery / move lanes only) that answers this intent, or an empty revision if it cannot be honestly expressed in those lanes.');
   return lines.join('\n');
 }
 
@@ -537,7 +537,7 @@ export function registerKicktodoAgentTools(deps: StartRunDeps): void {
   });
 
   // ADR 0459 §3.1 / P1 — KickBot's ONE bounded ACTION tool: turn a participant's
-  // stated intent into a CLOSED-WORLD plan revision (the three ADR 0429 lanes),
+  // stated intent into a CLOSED-WORLD plan revision (the ADR 0429 / 0496 lanes),
   // proposed on an inline approval card in the participant's OWN conversation, and
   // applied through the governed surface ONLY on approval. It NEVER writes domain
   // state directly — it dispatches the `openwop-app.kicktodo.replan` workflow whose
@@ -551,7 +551,8 @@ export function registerKicktodoAgentTools(deps: StartRunDeps): void {
       name: KICKTODO_REPLAN_TOOL_ID,
       description:
         "Propose changes to the participant's OWN challenge plan from what they asked for — reschedule to a daypart, swap "
-        + 'today\'s action for a publisher-declared alternative, or collapse a missed window into recovery (those lanes only; '
+        + 'today\'s action for a publisher-declared alternative, collapse a missed window into recovery, or move a day to another '
+        + 'date inside the plan\'s window (those four lanes only; '
         + 'never new activities). This proposes a plan revision the participant approves on an inline card in this chat; NOTHING '
         + 'changes until they approve. Pass the `enrollmentId` and their `intent` in their own words. Returns the started `runId`.',
       inputSchema: {

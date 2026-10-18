@@ -4,6 +4,16 @@
  * (fail-closed), the never-clobber-a-rename guard, title-once idempotency, the no-op
  * paths (no session / empty title), and the TOCTOU re-check (a rename mid-generation is
  * never overwritten). Uses real sqlite storage so the `titleSource` round-trip is real.
+ *
+ * The no-op gates are witnessed by COUNTING generator calls (fail-closed = no LLM call, not
+ * just no write). The never-clobber logic is a triple guard (first `titleSource` gate →
+ * post-generation re-read → the store CAS); the forced-window case puts a rename BETWEEN the
+ * re-read and the CAS so the CAS + `if (won)` are witnessed through the binding.
+ * Sabotage: drop the toggle / `titleSource` gates → a generator call is counted; announce on a
+ * lost CAS (`if (won)` removed) or drop the CAS where-clause → the forced-window case reds.
+ * Honest double guards (grade-tests w28): dropping the re-read alone is masked by the CAS (an
+ * extra refused write is unobservable); dropping the `!chatSessionId` early return alone is
+ * masked by `getChatSession(undefined)` → null.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { openSqliteStorage } from '../src/storage/sqlite/index.js';
@@ -11,6 +21,7 @@ import { __resetHostExtPersistence, initHostExtPersistence } from '../src/host/h
 import { saveConfig, __clearToggleStore } from '../src/host/featureToggles/service.js';
 import { registerToggleDefault } from '../src/host/featureToggles/registry.js';
 import type { ChatSessionRecord } from '../src/types.js';
+import type { Storage } from '../src/storage/storage.js';
 import { autotitleOnFirstExchange } from '../src/features/chat-autotitle/binding.js';
 import { chatAutotitleFeature } from '../src/features/chat-autotitle/feature.js';
 
@@ -40,6 +51,12 @@ const collectTitled = (): { titles: string[]; onTitled: (t: string) => void } =>
   return { titles, onTitled: (t) => titles.push(t) };
 };
 
+/** A generator that records each call, so "no LLM call" is assertable. */
+const countingGen = (out: string | null): { calls: string[]; generate: (t: string, u: string, r: string) => Promise<string | null> } => {
+  const calls: string[] = [];
+  return { calls, generate: async (_t, u) => { calls.push(u); return out; } };
+};
+
 describe('ADR 0151 — autotitleOnFirstExchange', () => {
   beforeAll(() => { registerToggleDefault(chatAutotitleFeature.toggleDefault!); });
   beforeEach(async () => {
@@ -67,10 +84,12 @@ describe('ADR 0151 — autotitleOnFirstExchange', () => {
     await enableToggle('off');
     await seedSession();
     const { titles, onTitled } = collectTitled();
+    const gen = countingGen('Should Not Apply');
     await autotitleOnFirstExchange({
       tenantId: TENANT, userId: USER, chatSessionId: SID, userText: 'x', replyText: 'y',
-      storage, onTitled, generate: async () => 'Should Not Apply',
+      storage, onTitled, generate: gen.generate,
     });
+    expect(gen.calls).toEqual([]); // fail-closed: no LLM call
     expect(titles).toEqual([]);
     expect((await storage.getChatSession(TENANT, SID))?.titleSource).toBeUndefined();
   });
@@ -79,10 +98,12 @@ describe('ADR 0151 — autotitleOnFirstExchange', () => {
     await enableToggle('on');
     await seedSession({ title: 'My Renamed Chat', titleSource: 'user' });
     const { titles, onTitled } = collectTitled();
+    const gen = countingGen('Auto Override');
     await autotitleOnFirstExchange({
       tenantId: TENANT, userId: USER, chatSessionId: SID, userText: 'x', replyText: 'y',
-      storage, onTitled, generate: async () => 'Auto Override',
+      storage, onTitled, generate: gen.generate,
     });
+    expect(gen.calls).toEqual([]); // gated before the LLM call
     expect(titles).toEqual([]);
     expect((await storage.getChatSession(TENANT, SID))?.title).toBe('My Renamed Chat');
   });
@@ -91,10 +112,12 @@ describe('ADR 0151 — autotitleOnFirstExchange', () => {
     await enableToggle('on');
     await seedSession({ title: 'Existing Auto Title', titleSource: 'auto' });
     const { titles, onTitled } = collectTitled();
+    const gen = countingGen('Second Title');
     await autotitleOnFirstExchange({
       tenantId: TENANT, userId: USER, chatSessionId: SID, userText: 'x', replyText: 'y',
-      storage, onTitled, generate: async () => 'Second Title',
+      storage, onTitled, generate: gen.generate,
     });
+    expect(gen.calls).toEqual([]); // gated before the LLM call
     expect(titles).toEqual([]);
     expect((await storage.getChatSession(TENANT, SID))?.title).toBe('Existing Auto Title');
   });
@@ -102,10 +125,12 @@ describe('ADR 0151 — autotitleOnFirstExchange', () => {
   it('is a no-op without a chat session id (conformance / older clients)', async () => {
     await enableToggle('on');
     const { titles, onTitled } = collectTitled();
+    const gen = countingGen('Nope');
     await autotitleOnFirstExchange({
       tenantId: TENANT, userId: USER, chatSessionId: undefined, userText: 'x', replyText: 'y',
-      storage, onTitled, generate: async () => 'Nope',
+      storage, onTitled, generate: gen.generate,
     });
+    expect(gen.calls).toEqual([]); // gated before the LLM call
     expect(titles).toEqual([]);
   });
 
@@ -136,6 +161,34 @@ describe('ADR 0151 — autotitleOnFirstExchange', () => {
     });
     expect(titles).toEqual([]);
     expect((await storage.getChatSession(TENANT, SID))?.title).toBe('User Won The Race');
+  });
+
+  it('ATC-3/4 forced window — a rename landing BETWEEN the re-read and the write is never overwritten nor announced', async () => {
+    await enableToggle('on');
+    await seedSession();
+    const { titles, onTitled } = collectTitled();
+    // The binding reads the session twice (first gate, post-generation re-read). On the
+    // SECOND read, return the still-default record and THEN commit a manual rename — so the
+    // re-read passes and only the store CAS stands between the auto title and the rename.
+    let reads = 0;
+    const racing: Storage = {
+      ...storage,
+      getChatSession: async (tenantId, sessionId) => {
+        const rec = await storage.getChatSession(tenantId, sessionId);
+        reads += 1;
+        if (reads === 2) await storage.updateChatSession(tenantId, sessionId, { title: 'User Won The Window', titleSource: 'user' });
+        return rec;
+      },
+    };
+    await autotitleOnFirstExchange({
+      tenantId: TENANT, userId: USER, chatSessionId: SID, userText: 'x', replyText: 'y',
+      storage: racing, onTitled, generate: async () => 'Auto Lost The Window',
+    });
+    expect(reads).toBe(2); // the window was actually forced (re-read happened, then the rename)
+    expect(titles).toEqual([]); // a lost CAS is never announced
+    const s = await storage.getChatSession(TENANT, SID);
+    expect(s?.title).toBe('User Won The Window');
+    expect(s?.titleSource).toBe('user');
   });
 });
 

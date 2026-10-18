@@ -2,7 +2,10 @@
  *  + maxChildren are HARD in `validateComponentTree`; minChildren is a SOFT
  *  document warning (the mid-edit rule). The synthetic types exercise the
  *  mechanics; the production `form` component (ADR 0347 5b) is the first REAL
- *  catalog consumer and is pinned below. */
+ *  catalog consumer and is pinned below.
+ *  Sabotage witnesses (grade-tests w36): the allowedChildTypes and maxChildren
+ *  checks in validateComponentTree, the soft minChildren warning, and the
+ *  navBar cap of 8 → 9 each red their cases. */
 import { describe, it, expect, beforeAll } from 'vitest';
 import { registerCanvasComponents, validateComponentTree } from '../../../host/canvasComponentCatalog.js';
 import { registerAppBuilderComponents, APP_BUILDER_CANVAS_TYPE } from '../componentCatalog.js';
@@ -17,9 +20,9 @@ beforeAll(() => {
     { type: 'field', label: 'Field', category: 'input', props: [] },
     { type: 'stray', label: 'Stray', category: 'display', props: [] },
   ]);
-  // A test-only container in the app-builder catalog exercises the SOFT
-  // minChildren warning through validateAppDoc (no production component
-  // carries constraints yet — annotations land with their consumers).
+  // A test-only container in the app-builder catalog isolates the SOFT
+  // minChildren mechanics (min 2) from the production form/navBar constraints
+  // pinned in the describes below.
   registerCanvasComponents(APP_BUILDER_CANVAS_TYPE, [
     { type: 'testMinPair', label: 'Test pair', category: 'layout', acceptsChildren: true, minChildren: 2, props: [] },
   ]);

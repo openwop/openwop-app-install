@@ -9,6 +9,7 @@
  * always reports its denominator: an unstated denominator is a lie.
  */
 
+import { createHash } from 'node:crypto';
 import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { createLogger } from '../../observability/logger.js';
 import { createCommunityApproval, getApproval } from '../../host/approvalService.js';
@@ -38,6 +39,12 @@ const samples = new DurableCollection<VerifierSample>(
 );
 
 const nowIso = (): string => new Date().toISOString();
+
+/** KTENG-3 — the approval id for a sample, derived from its (tenant, sample)
+ *  identity. Approval ids are a GLOBAL key space, so the tenant is part of it. */
+function verifierSampleApprovalId(tenantId: string, sampleId: string): string {
+  return `appr:kt-vsample-${createHash('sha256').update(`${tenantId}\u0000${sampleId}`).digest('hex').slice(0, 32)}`;
+}
 
 /** Mint ONE sample for human grading. Idempotent by the deterministic id. */
 export class SampleSubjectError extends Error {
@@ -81,30 +88,61 @@ export async function sampleVerdict(
   // the exact ARCH-M2 double-count this change removed. Read the legacy ids
   // before minting so the one-sample-per-enrollment invariant survives the
   // shape change without a backfill.
-  const existing = (await samples.get(`${tenantId}::${sampleId}`))
-    ?? (await samples.get(`${tenantId}::${input.enrollmentId}::sat`))
-    ?? (await samples.get(`${tenantId}::${input.enrollmentId}::unsat`));
+  const existing = await existingVerifierSample(tenantId, input.enrollmentId);
   if (existing) return existing;
-  const approval = await createCommunityApproval({
-    tenantId,
-    kind: 'metrics-verifier-sample',
-    proposal:
-      `Grade the automated verifier: it judged enrollment ${input.enrollmentId} as `
-      + `${machineSatisfied ? 'COMPLETE' : 'not complete'}. Approve if you agree; reject if you disagree.`,
-    refId: sampleId,
-    submittedBy: input.submittedBy,
-  });
+  // KTENG-3 / KTX-5 — CLAIM THE SAMPLE ROW FIRST, then raise the approval only if
+  // this caller won the claim. The old order (check → create approval → put row)
+  // let two concurrent samplers both pass the check and both create an approval:
+  // the second `put` overwrote the row, so one approval sat in the human queue
+  // pointing at nothing the metric reads. The approval id is derived from the
+  // sample's identity so the claimed row can name it before it exists.
   const row: VerifierSample = {
     tenantId,
     sampleId,
     enrollmentId: input.enrollmentId,
     machineSatisfied,
-    approvalId: approval.approvalId,
+    approvalId: verifierSampleApprovalId(tenantId, sampleId),
     createdAt: nowIso(),
   };
-  await samples.put(row);
+  if (!(await samples.putIfAbsent(row))) {
+    // Lost the claim: the winner's row is the sample; never a second approval.
+    return (await existingVerifierSample(tenantId, input.enrollmentId)) ?? row;
+  }
+  // RESIDUAL (stated, not fixed): a crash between the claim above and this create
+  // leaves a sample whose approval never existed. It is counted in `sampled` and
+  // never in `resolved` (verifierQuality skips a missing approval), and a re-sample
+  // returns it rather than re-raising the card. It is NOT healed here because an
+  // absent approval is indistinguishable from one the approvals retention purger
+  // removed after it was graded, and re-raising THAT would un-grade a sample.
+  try {
+    await createCommunityApproval({
+      tenantId,
+      kind: 'metrics-verifier-sample',
+      proposal:
+        `Grade the automated verifier: it judged enrollment ${input.enrollmentId} as `
+        + `${machineSatisfied ? 'COMPLETE' : 'not complete'}. Approve if you agree; reject if you disagree.`,
+      refId: sampleId,
+      submittedBy: input.submittedBy,
+      approvalId: row.approvalId,
+    });
+  } catch (err) {
+    // A THROWN create (unlike a crash) can release the claim, so a retry is not
+    // wedged on a sample with no card — but only if the approval really is absent.
+    if (!(await getApproval(row.approvalId))) await samples.delete(`${tenantId}::${sampleId}`);
+    throw err;
+  }
   log.info('kicktodo_verifier_sampled', { enrollmentId: input.enrollmentId });
   return row;
+}
+
+/** The sample already minted for this enrollment (current or legacy id shape), if
+ *  any. The monthly daemon reads this so a re-visited enrollment never counts as a
+ *  NEW sample (code-grade KTX-1). */
+export async function existingVerifierSample(tenantId: string, enrollmentId: string): Promise<VerifierSample | null> {
+  return (await samples.get(`${tenantId}::${enrollmentId}`))
+    ?? (await samples.get(`${tenantId}::${enrollmentId}::sat`))
+    ?? (await samples.get(`${tenantId}::${enrollmentId}::unsat`))
+    ?? null;
 }
 
 export interface VerifierQuality {

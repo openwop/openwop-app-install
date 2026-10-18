@@ -17,6 +17,8 @@ export const messages = {
   rtSave: "Save",
   rtSaving: "Saving…",
   rtSaved: "Real-time voice settings saved.",
+  rtLoadFailed: "The current real-time voice settings could not be loaded, so they cannot be changed here right now.",
+  rtRetry: "Try again",
 
   // Default AI provider for media (ADR 0110)
   aiDefaultTitle: 'Default AI provider for media',
@@ -138,7 +140,6 @@ export const messages = {
   unscoped: 'Unscoped',
   noKeysTitle: 'No API keys yet',
   noKeysBody: 'Add a key to let chat and workflow nodes call a provider on your behalf. Keys are encrypted at rest; nodes reference them by label.',
-  addFirstKey: 'Add your first key',
   keyCount_one: '{{count}} key',
   keyCount_other: '{{count}} keys',
   addProviderKey: 'Add {{provider}} key',

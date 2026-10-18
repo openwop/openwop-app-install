@@ -2,6 +2,11 @@
  * CHAT-7 (docs/steward/CODEBASE-ASSESSMENT.md): the interrupt dispatcher routes each kind to
  * the right card and degrades gracefully on an unknown kind. Previously the
  * interrupts dir tested only a11y labels.
+ *
+ * Also owns (w51 r2, absorbed from the deleted interruptForms.test): each routed
+ * card's answer field is label-associated (`Comment (optional)`, `Draft`, `Your
+ * answer`), plus the two branches no case reached — the cancellation route and the
+ * ADR 0755 D3 token-less interrupt (readable, never answerable).
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, cleanup } from '@testing-library/react';
@@ -17,8 +22,8 @@ import type { OpenInterrupt } from '../../client/interruptsClient.js';
 afterEach(() => { resolveByRun.mockReset(); cleanup(); });
 
 /** Build a fully-typed OpenInterrupt fixture (no casts). */
-function mk(kind: OpenInterrupt['kind'], data: unknown): OpenInterrupt {
-  return { interruptId: 'int-1', nodeId: 'n1', token: 't', kind, data, createdAt: '2026-01-01T00:00:00Z' };
+function mk(kind: OpenInterrupt['kind'], data: unknown, token = 't'): OpenInterrupt {
+  return { interruptId: 'int-1', nodeId: 'n1', token, kind, data, createdAt: '2026-01-01T00:00:00Z' };
 }
 
 describe('RenderInterrupt dispatcher', () => {
@@ -29,18 +34,32 @@ describe('RenderInterrupt dispatcher', () => {
 
   it('routes the approval kind to the ApprovalCard', () => {
     render(<RenderInterrupt runId="r" active={mk('approval', { prompt: 'Approve?' })} onResolved={() => {}} />);
-    expect(screen.getByLabelText('Comment (optional)')).toBeTruthy();
+    expect(screen.getByLabelText('Comment (optional)').tagName).toBe('INPUT');
   });
 
   it('routes the refinement kind to the RefinementForm', () => {
     render(<RenderInterrupt runId="r" active={mk('refinement', { current: 'x' })} onResolved={() => {}} />);
-    expect(screen.getByLabelText('Draft')).toBeTruthy();
+    expect(screen.getByLabelText('Draft').tagName).toBe('TEXTAREA');
+  });
+
+  it('routes the cancellation kind to the CancellationBanner', () => {
+    render(<RenderInterrupt runId="r" active={mk('cancellation', { reason: 'Budget exceeded' })} onResolved={() => {}} />);
+    expect(screen.getByRole('heading', { name: 'Cancellation requested' })).toBeTruthy();
+    expect(screen.getByText('Budget exceeded')).toBeTruthy();
+  });
+
+  it('a token-less interrupt shows the read-only notice, never an answerable card (ADR 0755 D3)', () => {
+    render(<RenderInterrupt runId="r" active={mk('approval', { prompt: 'Approve?' }, '')} onResolved={() => {}} />);
+    expect(screen.getByRole('status').textContent).toBe("You can see this step, but you don't have permission to respond to it.");
+    expect(screen.queryByRole('button', { name: 'Approve' })).toBeNull();
+    expect(screen.queryByLabelText('Comment (optional)')).toBeNull();
   });
 
   it('routes a clarification WITHOUT the connection profile to the free-text dialog', () => {
     render(<RenderInterrupt runId="r" active={mk('clarification', { question: 'Which region?' })} onResolved={() => {}} />);
     expect(screen.getByText('Which region?')).toBeTruthy();
-    // The text-answer field is present; no Connect/Skip actions.
+    // The text-answer field is present and label-associated; no Connect/Skip actions.
+    expect(screen.getByLabelText('Your answer').tagName).toBe('TEXTAREA');
     expect(screen.queryByText(/Skip this step/i)).toBeNull();
   });
 

@@ -1,76 +1,84 @@
 /**
- * Schema-request responder. When the LLM emits a `schema.request`
- * envelope asking for one or more node-type schemas by name, this
- * module looks them up against the in-process NodeRegistry and
- * builds a matching `schema.response` envelope.
+ * Node-type schema responder: the `kind: "node"` half of `openwop:schema.lookup`
+ * (and of the Claude Code MCP `claude-code-schema-lookup`, which shares
+ * `host/schemaLookup.ts`). Given node names the model asks for, it answers with
+ * each node's config / input / output schemas so the model can compose a valid
+ * node BEFORE authoring (CLAUDE.md "AI↔app information exchange": schema text
+ * reaching a model is generated from its SSoT).
  *
- * Mirrors myndhyve's `SchemaLibraryService.getPack()` pattern — when
- * the registry has more node types than fit comfortably in a system
- * prompt, the LLM asks for what it needs; the host answers with
- * structured schemas; the next turn injects the response so the LLM
- * can continue with the schemas in context.
+ * NOTE: this is NOT the RFC 0021 `schema.request` responder — that wire kind asks
+ * for an ENVELOPE KIND's schema ({ envelopeType }, answered out-of-band by
+ * `agentDispatch.runChatToolLoop` from `loadEnvelopePayloadSchema`); node-type
+ * schemas are a tool-mediated ask-path.
  *
- * Pure function. LIVE CALLER (XCH-ENV-5, LLM-EXCHANGE-AUDIT Wave 5): the
- * `openwop:schema.lookup` agent tool (kind "node") serves this registry on
- * demand. NOTE: this is NOT the RFC 0021 `schema.request` responder — that
- * wire kind asks for an ENVELOPE KIND's schema ({ envelopeType }, answered
- * out-of-band by `agentDispatch.runChatToolLoop` from
- * `loadEnvelopePayloadSchema`); node-type schemas are a tool-mediated
- * ask-path. (The `chatResponderNode` this docstring once promised never
- * existed — the audit's N-ENV finding.)
+ * SOURCE: `buildNodeCatalog()` — the SAME inventory `GET …/node-catalog` serves
+ * (the in-process registry's modules plus every pack-declared node, with the
+ * schemas inlined from each pack manifest's `configSchemaRef` / `inputSchemaRef`
+ * / `outputSchemaRef`).
  *
- * Schema library source: the backend's NodeRegistry (`getNodeRegistry().listTypeIds()`)
- * — same source as `GET /v1/host/openwop-app/node-catalog`, which is the
- * canonical machine-readable inventory of node types this host knows.
+ * > **CORRECTED 2026-10-18 (SCHRESP-PORTS-1).** This module used to read
+ * > `getNodeRegistry()` and pull `inputs` / `outputs` / `configSchema` off the
+ * > registered `NodeModule`. A NodeModule carries none of those (MEASURED on
+ * > 991a62253: its keys are `typeId`, `version`, `execute`), so every answer was
+ * > `inputs: [], outputs: []` with no `configSchema` — `core.delay` and
+ * > `core.web.search` included, whose manifests declare all three — and the
+ * > registry listed 62 typeIds against the catalog's 813, so a pack node not yet
+ * > resolved came back `notFound`. The model was told a node had no config while
+ * > the closed-world validator enforced one. The old header's "same source as
+ * > node-catalog" was the false claim; this is now literally true.
  */
 
 import { createHash } from 'node:crypto';
-import { getNodeRegistry } from '../executor/nodeRegistry.js';
+import { buildNodeCatalog, type CatalogNode } from './nodeCatalogBuilder.js';
 
 export interface SchemaRequestPayload {
-  /** Node-type names the LLM is asking for. Canonicalized to array by
-   *  the envelopeNormalizers registry before this responder runs. */
+  /** Node-type names the model is asking for. */
   names: string[];
-  /** Optional context the LLM supplies so the host can rank fuzzy
-   *  matches when an exact match isn't found. Free-form. */
+  /** Optional free-form context. */
   context?: string;
 }
 
 export interface NodeTypeSchemaSummary {
   typeId: string;
-  /** Canonical kind name (the catalog-level identifier, e.g. "mock-ai",
-   *  "approval"). May equal the trailing segment of typeId. */
+  /** Canonical kind name — the typeId's trailing segment (e.g. "mock-ai"). */
   kind: string;
-  /** Input port descriptors. Shape: { name: string, type: string }. */
+  /** Input field descriptors, one per property of the node's input schema
+   *  (`{ name, type }`; `type` is the JSON-schema type, `any` when untyped).
+   *  Empty when the node declares no input schema or no properties. */
   inputs: Array<{ name: string; type: string }>;
-  /** Output port descriptors. */
+  /** Output field descriptors, from the node's output schema. */
   outputs: Array<{ name: string; type: string }>;
-  /** When the node has a configSchema declared in its NodeModule,
-   *  reproduced here so the LLM can compose a valid config. Omitted
-   *  when no config surface is declared. */
+  /** The node's config schema, verbatim from its manifest. Omitted when the
+   *  node declares none. */
   configSchema?: Record<string, unknown>;
+  /** The node's input / output JSON schemas, verbatim. Omitted when absent. */
+  inputSchema?: Record<string, unknown>;
+  outputSchema?: Record<string, unknown>;
+  /** ADR 0782 — `single`: the node has ONE input port; deliver fields as
+   *  output keys of one upstream node, never via an edge `targetInput`. */
+  ports?: 'single';
+  /** Host surfaces this node needs that THIS host does not advertise. Present
+   *  only when non-empty: such a node is not runnable here (the closed-world
+   *  validator, `runnableNodeTypeIds`, refuses it). */
+  missingHostSurfaces?: string[];
 }
 
 export interface SchemaResponsePayload {
   /** Schemas the host could resolve. */
   schemas: NodeTypeSchemaSummary[];
-  /** Names the host could NOT resolve. The LLM should treat these as
-   *  "not available on this host" and either pick from `schemas` or
-   *  emit a clarification.request. */
+  /** Names the host could NOT resolve ("not available on this host"). */
   notFound: string[];
-  /** Optional bundle version so the LLM can cache responses across
-   *  turns when the same names are requested. Sample uses the
-   *  registry's listed typeIds.length as a coarse fingerprint. */
+  /** Hash of the sorted catalog typeIds — distinct per node inventory, so a
+   *  caller can cache answers across turns. */
   bundleVersion: string;
 }
 
-/** Build a schema.response payload for the given request. Looks up
- *  each requested name in the in-process NodeRegistry; falls back to
- *  case-insensitive + trailing-segment matching to absorb common LLM
- *  drift (e.g., the model asks for "MockAi" instead of "mock-ai"). */
-export function buildSchemaResponse(req: SchemaRequestPayload): SchemaResponsePayload {
-  const registry = getNodeRegistry();
-  const allTypeIds = registry.listTypeIds();
+/** Build the answer for the given names. Exact typeId first, then
+ *  trailing-segment, then case/separator-insensitive segment match, to absorb
+ *  common model drift (e.g. "MockAi" for "mock-ai"). */
+export function buildSchemaResponse(req: SchemaRequestPayload, catalog: readonly CatalogNode[] = buildNodeCatalog()): SchemaResponsePayload {
+  const byTypeId = new Map(catalog.map((n) => [n.typeId, n] as const));
+  const allTypeIds = [...byTypeId.keys()];
   const allKinds = new Set<string>(allTypeIds.map(tailSegment));
 
   const schemas: NodeTypeSchemaSummary[] = [];
@@ -81,32 +89,27 @@ export function buildSchemaResponse(req: SchemaRequestPayload): SchemaResponsePa
       continue;
     }
     const resolved = resolveTypeId(requestedName, allTypeIds, allKinds);
-    if (!resolved) {
+    const node = resolved ? byTypeId.get(resolved) : undefined;
+    if (!resolved || !node) {
       notFound.push(requestedName);
       continue;
     }
-    const node = registry.get(resolved);
-    if (!node) {
-      // Registry listed the typeId but couldn't materialize the module
-      // (pack-resolver dependency missing) — surface as notFound so
-      // the LLM doesn't waste a turn pretending it has the schema.
-      notFound.push(requestedName);
-      continue;
-    }
+    const configSchema = asSchema(node.configSchema);
+    const inputSchema = asSchema(node.inputSchema);
+    const outputSchema = asSchema(node.outputSchema);
     schemas.push({
       typeId: resolved,
       kind: tailSegment(resolved),
-      inputs: extractPorts(node, 'inputs'),
-      outputs: extractPorts(node, 'outputs'),
-      ...(extractConfigSchema(node) ? { configSchema: extractConfigSchema(node) as Record<string, unknown> } : {}),
+      inputs: fieldsOf(inputSchema),
+      outputs: fieldsOf(outputSchema),
+      ...(configSchema ? { configSchema } : {}),
+      ...(inputSchema ? { inputSchema } : {}),
+      ...(outputSchema ? { outputSchema } : {}),
+      ...(node.ports === 'single' ? { ports: 'single' as const } : {}),
+      ...(node.missingHostSurfaces.length > 0 ? { missingHostSurfaces: [...node.missingHostSurfaces] } : {}),
     });
   }
 
-  // Bundle version: 8-char prefix of sha256(sorted typeIds joined by
-  // newline). Identifies the exact set of types this host knows, not
-  // just the count — two registries with the same length but different
-  // members yield distinct bundleVersions so caches can't accidentally
-  // serve stale schemas.
   return {
     schemas,
     notFound,
@@ -144,26 +147,19 @@ function tailSegment(typeId: string): string {
   return idx >= 0 ? typeId.slice(idx + 1) : typeId;
 }
 
-// The NodeModule type carries ports + configSchema in different
-// shapes depending on the pack manifest version. Both extractors are
-// defensive — they tolerate the canonical shape AND legacy shapes
-// without throwing.
-
-function extractPorts(node: unknown, key: 'inputs' | 'outputs'): Array<{ name: string; type: string }> {
-  const rec = node as Record<string, unknown>;
-  const raw = rec[key];
-  if (!Array.isArray(raw)) return [];
-  return raw
-    .filter((p): p is { name?: unknown; type?: unknown } => !!p && typeof p === 'object')
-    .map((p) => ({
-      name: typeof p.name === 'string' ? p.name : 'in',
-      type: typeof p.type === 'string' ? p.type : 'any',
-    }));
+/** A manifest schema object, or null. `readSchemaInline` returns a
+ *  `{ $ref, _note }` stub for an over-size schema — still an object, served as is
+ *  so the model sees where the schema lives rather than nothing. */
+function asSchema(raw: unknown): Record<string, unknown> | null {
+  return raw && typeof raw === 'object' && !Array.isArray(raw) ? raw as Record<string, unknown> : null;
 }
 
-function extractConfigSchema(node: unknown): Record<string, unknown> | null {
-  const rec = node as Record<string, unknown>;
-  const raw = rec.configSchema;
-  if (!raw || typeof raw !== 'object') return null;
-  return raw as Record<string, unknown>;
+/** One `{ name, type }` per property of an object schema. */
+function fieldsOf(schema: Record<string, unknown> | null): Array<{ name: string; type: string }> {
+  const props = schema?.properties;
+  if (!props || typeof props !== 'object' || Array.isArray(props)) return [];
+  return Object.entries(props as Record<string, unknown>).map(([name, p]) => {
+    const t = p && typeof p === 'object' ? (p as { type?: unknown }).type : undefined;
+    return { name, type: typeof t === 'string' ? t : Array.isArray(t) ? t.filter((x) => typeof x === 'string').join('|') || 'any' : 'any' };
+  });
 }

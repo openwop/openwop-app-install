@@ -161,7 +161,16 @@ export function CanvasEditorPage<
   // Resolve-once: the surface render below gates while a definitely-on session
   // provisions, so the mounted editor's binding/undo owner never swaps mid-session.
   const collabToggle = useFeatureAccess('realtime-collab');
-  const collabEnabled = !!def.collab && collabToggle.enabled === true && !!canvasId;
+  // ADR 0886 (SL2UX-1) — the server's answer to "may THIS caller write THIS
+  // canvas" (path-org write + write on the owner subject, in its own org). A
+  // reader gets a view-only editor: no Save/Delete/Share/restore, and no live
+  // room (joining one is a write). Absent ⇒ write (older backends).
+  const [writeAccess, setWriteAccess] = useState(true);
+  // ADR 0886 (SL2UX-3) — the last doc the SERVER holds (load / save / reload /
+  // restore), so a toolbar slot can tell a saved frame from one added since:
+  // a per-slide comment thread resolves against the saved deck only.
+  const [savedDoc, setSavedDoc] = useState<Doc | null>(null);
+  const collabEnabled = !!def.collab && collabToggle.enabled === true && !!canvasId && writeAccess;
   // UX-B2 — the explicit Retry re-provisions the session (a bumped attempt).
   const [collabAttempt, setCollabAttempt] = useState(0);
   const collab = useCollab({ canvasId: canvasId ?? undefined, enabled: collabEnabled, attempt: collabAttempt });
@@ -315,11 +324,18 @@ export function CanvasEditorPage<
           throw new Error(t('loadError'));
         }
         if (!live) return;
-        setOrgId(org); setCatalog(cat); setCanvasId(rec.canvasId);
+        setOrgId(org); setCatalog(cat); setCanvasId(rec.canvasId); setWriteAccess(rec.access !== 'read');
         const coerced = coerceDoc(rec.state);
         // ADR 0359 Phase 3 — the seeder election reads the loaded copy.
         seedDocRef.current = coerced;
-        reset(coerced); setVersion(rec.version); setDirty(false);
+        reset(coerced); setSavedDoc(coerced); setVersion(rec.version); setDirty(false);
+        // ADR 0886 (SL2UX-4) — a deep link may name a frame (`?frame=<id>`, the
+        // comments page's "Open the slide"); select it when it exists.
+        const wantFrame = search.get('frame');
+        if (wantFrame) {
+          const at = readFrames(coerced).findIndex((f) => f.id === wantFrame);
+          if (at >= 0) setFrameIdx(at);
+        }
       } catch (e) {
         // R2 (campaign-studio CS-SP-7, chassis-wide) — a 404 is a DESIGNED
         // outcome, not a raw error string: the canvas doesn't exist for this
@@ -342,7 +358,7 @@ export function CanvasEditorPage<
       }
     })();
     return () => { live = false; };
-  }, [routeCanvasId, fromArtifact, t, reset, client, coerceDoc, search]);
+  }, [routeCanvasId, fromArtifact, t, reset, client, coerceDoc, search, readFrames]);
 
   // Audit polish P2 — per-device favorites + recently-used (localStorage, the
   // useViewMode precedent), surfaced as pinned pseudo-groups above categories.
@@ -413,6 +429,8 @@ export function CanvasEditorPage<
     };
   }, [framesDef, def.summarizeVersions, readFrames, t]);
   const frame = frames[frameIdx] ?? null;
+  // A live room derives host.canvas continuously, so there every frame counts as saved.
+  const savedFrameIds = useMemo(() => new Set(savedDoc ? readFrames(savedDoc).map((f) => f.id) : []), [savedDoc, readFrames]);
   // ADR 0328 P3 — tree editing can be gated per-FRAME (`treeEnabledFor`):
   // slides enable the palette/outline only on blocks-based slides; legacy
   // slides keep the fixed-schema form panel. Absent predicate = all frames.
@@ -1714,6 +1732,7 @@ export function CanvasEditorPage<
       // unchanged element (clone-on-edit safe).
       const res = await client.saveCanvas(orgId, canvasId, clampDocForSave({ ...(doc as Record<string, unknown>) }, def), version);
       setVersion(res.newVersion);
+      setSavedDoc(doc);
       // Grade pass (code F9): edits that landed while the save was in flight
       // keep the dirty flag (and the unsaved-changes guard) alive.
       if (editGen.current === genAtSave) setDirty(false);
@@ -1723,6 +1742,9 @@ export function CanvasEditorPage<
     } catch (e) {
       const status = (e as { status?: number }).status;
       if (status === 409) setConflict(true);
+      // ADR 0886 — a refused write is named in the user's language, never as the
+      // server's scope string.
+      else if (status === 403) setError(t('noWriteAccess'));
       else setError(e instanceof Error ? e.message : t('saveError'));
     } finally {
       setSaving(false);
@@ -1738,7 +1760,8 @@ export function CanvasEditorPage<
       if (!orgId || !canvasId) return;
       try {
         const rec = await client.getCanvas(orgId, canvasId);
-        reset(coerceDoc(rec.state)); setVersion(rec.version); setDirty(false); setSelPath(null); setFrameIdx(0); setGraphSel({ node: null, edge: null });
+        const restored = coerceDoc(rec.state);
+        reset(restored); setSavedDoc(restored); setVersion(rec.version); setDirty(false); setSelPath(null); setFrameIdx(0); setGraphSel({ node: null, edge: null });
         toast.success(t('histRestored'));
       } catch (e) {
         setError(e instanceof Error ? e.message : t('loadError'));
@@ -1778,7 +1801,7 @@ export function CanvasEditorPage<
       if (res.ok) toast.success(t('shareCreated', { url }));
       else toast.warning(t('shareCreatedNotCopied', { url }));
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : t('shareFailed'));
+      toast.error((e as { status?: number }).status === 403 ? t('noWriteAccess') : e instanceof Error ? e.message : t('shareFailed'));
     } finally {
       setSharing(false);
     }
@@ -1987,7 +2010,7 @@ export function CanvasEditorPage<
                   navigate(`${def.editorPath}/${encodeURIComponent(canvasId)}/preview`);
                 },
               }] : []),
-              ...(share ? [{ id: 'share', label: sharing ? t('sharing') : t('share'), disabled: sharing || !canvasId, onSelect: () => void onShare() }] : []),
+              ...(share && writeAccess ? [{ id: 'share', label: sharing ? t('sharing') : t('share'), disabled: sharing || !canvasId, onSelect: () => void onShare() }] : []),
               ...(shareUrl ? [{ id: 'copy-share', label: t('copyShareLink'), onSelect: () => void recopyShare() }] : []),
               // ADR 0359 D2 — History (incl. restore) is locked while a room is
               // live: host.canvas is stale until the Phase 6 derive, and a
@@ -2017,7 +2040,7 @@ export function CanvasEditorPage<
                 {t('preview')}
               </Button>
             ) : null}
-            {share ? (
+            {share && writeAccess ? (
               <Button variant="secondary" size="sm" onClick={() => void onShare()} disabled={sharing || !canvasId}>
                 {sharing ? t('sharing') : t('share')}
               </Button>
@@ -2038,6 +2061,7 @@ export function CanvasEditorPage<
           </>
         )}
         <span className="cv-editor__bar-sep" aria-hidden="true" />
+        {writeAccess ? (
         <Button variant="primary" size="sm" className="cv-editor__save"
           // ADR 0359 D2 — no CAS save while a collab room is live (the CRDT
           // snapshot is the durable authority; onSave also guards).
@@ -2047,12 +2071,14 @@ export function CanvasEditorPage<
         >
           {saving ? t('saving') : t('save')}
         </Button>
+        ) : null}
         {ToolbarExtras && orgId && canvasId ? (
-          <ToolbarExtras orgId={orgId} canvasId={canvasId} docName={docName} dirty={dirty} />
+          <ToolbarExtras orgId={orgId} canvasId={canvasId} docName={docName} dirty={dirty} activeFrame={frame ? { id: frame.id, name: frame.name, saved: collab.enabled || savedFrameIds.has(frame.id) } : null} />
         ) : null}
         {/* Grade pass UX-CV-7: the destructive Delete lives at the FAR END,
             separated (`cv-editor__delete-sep` pushes it clear of the neutral
             controls) — a mid-toolbar destructive action was a misclick risk. */}
+        {writeAccess ? (
         <Button
           variant="secondary" size="sm" className="cv-editor__delete--danger cv-editor__delete-sep"
           disabled={!canvasId}
@@ -2068,14 +2094,21 @@ export function CanvasEditorPage<
                 // demo user out of the app onto the landing page).
                 navigate('/dashboard');
               } catch (e) {
-                toast.error(e instanceof Error ? e.message : tt('deleteDocFailed'));
+                toast.error((e as { status?: number }).status === 403 ? t('noWriteAccess') : e instanceof Error ? e.message : tt('deleteDocFailed'));
               }
             })();
           }}
         >
           {tt('deleteDoc')}
         </Button>
+        ) : null}
       </header>
+      {!writeAccess ? (
+        // Plain static text, NOT a <Notice>: a standing capability statement
+        // (the touch-level caveat's rule) — a live region would announce a
+        // phantom status on every mount.
+        <p className="muted">{t('viewOnly')}</p>
+      ) : null}
 
       {/* ADR 0739 — a distinct mode strip keeps persistent authoring modes out
           of the dense command bar. Types own mode behavior; the chassis owns
@@ -2110,7 +2143,8 @@ export function CanvasEditorPage<
                 if (!(await confirm({ title: t('reloadLatestTitle'), body: t('reloadLatestBody'), confirmLabel: t('reloadLatest'), danger: true }))) return;
                 try {
                   const rec = await client.getCanvas(orgId, canvasId);
-                  reset(coerceDoc(rec.state)); setVersion(rec.version); setDirty(false); setConflict(false); setSelPath(null); setFrameIdx(0); setGraphSel({ node: null, edge: null });
+                  const latest = coerceDoc(rec.state);
+                  reset(latest); setSavedDoc(latest); setVersion(rec.version); setDirty(false); setConflict(false); setSelPath(null); setFrameIdx(0); setGraphSel({ node: null, edge: null });
                 } catch (e) {
                   setError(e instanceof Error ? e.message : t('loadError'));
                 }
@@ -2188,7 +2222,7 @@ export function CanvasEditorPage<
         />
       ) : null}
       {historyOpen && orgId && canvasId ? (
-        <CanvasHistoryModal client={client} orgId={orgId} canvasId={canvasId} currentDoc={doc} coerceDoc={coerceDoc} summarize={defaultVersionSummarizer} typeNamespace={def.i18nNamespace} onClose={() => setHistoryOpen(false)} onRestored={onRestored} />
+        <CanvasHistoryModal client={client} orgId={orgId} canvasId={canvasId} currentDoc={doc} coerceDoc={coerceDoc} summarize={defaultVersionSummarizer} typeNamespace={def.i18nNamespace} onClose={() => setHistoryOpen(false)} onRestored={onRestored} canRestore={writeAccess} />
       ) : null}
       {shortcutsOpen ? (
         <ShortcutsOverlay shortcuts={committedShortcuts} typeT={(k) => tt(k)} onClose={() => setShortcutsOpen(false)} />

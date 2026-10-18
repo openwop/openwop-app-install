@@ -15,6 +15,7 @@ import type { AddressInfo } from 'node:net';
 import { getSetCookies } from './headerCookies.js';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
+import { createMember } from '../src/host/accessControlService.js';
 import { getAgentRegistry } from '../src/executor/agentRegistry.js';
 import { getJob } from '../src/host/schedulingService.js';
 import { createOrg } from '../src/host/accessControlService.js';
@@ -58,6 +59,11 @@ async function login(name: string): Promise<{ c: Client; userId: string }> {
   const c = client();
   const r = await c.post('/host/openwop-app/test/login', { email: `d3-${name}-${Date.now()}-${n++}@acme.test`, displayName: `${name} P`, tenantId: TENANT });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
+  // ADR 0879 D1 — a co-tenant login gets no member row from the seam (it founds the
+  // workspace for the FIRST login only), and channel writes now ask the ROLE. Make
+  // every person a real Editor of the workspace, the production shape (idempotent: a
+  // founder keeps their owner row).
+  await createMember({ orgId: TENANT, tenantId: TENANT, displayName: name, subject: r.body.user.userId as string, roles: ['editor'] });
   return { c, userId: r.body.user.userId as string };
 }
 
@@ -168,10 +174,21 @@ describe('ADR 0202 D6 — org create-path hardening', () => {
 
   it('binds a schedule when the agent resolves and the caller can see the conversation', async () => {
     const { c, orgId } = await orgOwner();
-    const conv = (await c.post(CH, { name: `d6ok-${n}`, visibility: 'public', agentIds: ['sch.a'] })).body.channel.conversationId as string;
+    const conv = (await c.post('/host/openwop-app/chat/sessions', { title: `d6ok-${n}` })).body.sessionId as string;
     const r = await c.post(schedOrg(orgId), { agentId: 'sch.a', prompt: 'digest', conversationId: conv, cronExpr: CRON });
     expect(r.status, JSON.stringify(r.body)).toBe(201);
     expect(r.body.chat.orgId).toBe(orgId);
+  });
+
+  // ADR 0879 D7 (architect C3) — the org lane checks only that the caller can SEE the
+  // conversation, and any member sees a public channel; channel posts go through the
+  // channel's own owner-gated schedule lane.
+  it('refuses an org schedule that targets a channel', async () => {
+    const { c, orgId } = await orgOwner();
+    const conv = (await c.post(CH, { name: `d6ch-${n}`, visibility: 'public', agentIds: ['sch.a'] })).body.channel.conversationId as string;
+    const r = await c.post(schedOrg(orgId), { agentId: 'sch.a', prompt: 'digest', conversationId: conv, cronExpr: CRON });
+    expect(r.status, JSON.stringify(r.body)).toBe(400);
+    expect(r.body.details?.code).toBe('channel_use_channel_schedule');
   });
 
   it('rejects an agent that does not resolve (404)', async () => {

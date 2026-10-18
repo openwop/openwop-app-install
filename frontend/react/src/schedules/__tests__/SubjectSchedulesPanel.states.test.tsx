@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { render, screen, cleanup, waitFor } from '@testing-library/react';
+import { render, screen, cleanup, waitFor, fireEvent } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
+import * as confirmModule from '../../ui/confirm.js';
 
 import { SubjectSchedulesPanel, type SubjectSchedulesClient, type SubjectScheduleRow } from '../SubjectSchedulesPanel.js';
 
@@ -21,9 +22,9 @@ import { SubjectSchedulesPanel, type SubjectSchedulesClient, type SubjectSchedul
 
 const EMPTY_SENTINEL = 'NOTHING-SCHEDULED-INSTRUCTION';
 
-function mkClient(list: () => Promise<never[]>): SubjectSchedulesClient {
+function mkClient(list: SubjectSchedulesClient['list']): SubjectSchedulesClient {
   return {
-    list: list as SubjectSchedulesClient['list'],
+    list,
     create: vi.fn(async () => undefined),
     update: vi.fn(async () => undefined),
     remove: vi.fn(async () => undefined),
@@ -45,7 +46,7 @@ afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 describe('SubjectSchedulesPanel — read states are distinguishable', () => {
   it('does NOT claim "nothing scheduled" while the read is still in flight', () => {
     // Never resolves: the panel is permanently in its loading state.
-    renderPanel(mkClient(() => new Promise<never[]>(() => {})));
+    renderPanel(mkClient(() => new Promise<SubjectScheduleRow[]>(() => {})));
     // Synchronous assertion on the FIRST paint — the exact moment the old `[]` init
     // rendered the instruction. A waitFor here would let the assertion pass for the
     // wrong reason.
@@ -164,6 +165,22 @@ describe('SubjectSchedulesPanel — ADR 0787 contract', () => {
     expect(screen.queryByText(/does not recognize it/i)).toBeNull();
   });
 
+  it('ADR 0775 P3 — agent-paused is a known reason that says how to resume, not "unrecognized"', async () => {
+    renderWith([{ ...base, lastSkippedAt: new Date().toISOString(), lastSkipReason: 'agent-paused' }], {});
+    await waitFor(() => expect(screen.getByText(/agent it runs as is paused/i)).toBeTruthy());
+    expect(screen.queryByText(/does not recognize it/i)).toBeNull();
+  });
+
+  it('ADR 0775 P3b — policy-denied and awaiting-approval are known reasons', async () => {
+    renderWith([
+      { ...base, jobId: 'j-deny', lastSkippedAt: new Date().toISOString(), lastSkipReason: 'policy-denied' },
+      { ...base, jobId: 'j-hold', lastSkippedAt: new Date().toISOString(), lastSkipReason: 'awaiting-approval' },
+    ], {});
+    await waitFor(() => expect(screen.getByText(/on its never list/i)).toBeTruthy());
+    expect(screen.getByText(/waiting for approval/i)).toBeTruthy();
+    expect(screen.queryByText(/does not recognize it/i)).toBeNull();
+  });
+
   it('ADR 0820 §7 — a plan-lapsed job reads "Paused — plan lapsed" with a store link and no next-run promise', async () => {
     renderWith([{ ...base, lastSkippedAt: new Date().toISOString(), lastSkipReason: 'plan-lapsed', planLapsed: { featureId: 'crm' } }], {});
     await waitFor(() => expect(screen.getByText(/paused — plan lapsed/i)).toBeTruthy());
@@ -183,10 +200,9 @@ describe('SubjectSchedulesPanel — ADR 0787 contract', () => {
   });
 
   it('an edit that changes only the workflow sends ONLY the workflow — a custom cadence and its zone survive (SCTUX-5)', async () => {
-    const update = vi.fn(async () => undefined);
+    const update = vi.fn<SubjectSchedulesClient['update']>(async () => undefined);
     renderWith([{ ...base, cronExpr: '0 8 * * *', timezone: 'Europe/Paris' }], { update });
     (await screen.findByRole('button', { name: /edit/i })).click();
-    const { fireEvent } = await import('@testing-library/react');
     await waitFor(() => expect(document.querySelector('.agentsched-edit-row')).not.toBeNull());
     const row = document.querySelector('.agentsched-edit-row')!;
     const [wfSelect, cadenceSelect] = Array.from(row.querySelectorAll('select'));
@@ -195,13 +211,13 @@ describe('SubjectSchedulesPanel — ADR 0787 contract', () => {
     fireEvent.change(wfSelect!, { target: { value: 'wf-2' } });
     fireEvent.click(await screen.findByRole('button', { name: /save changes/i }));
     await waitFor(() => expect(update).toHaveBeenCalledTimes(1));
-    const [, patch] = update.mock.calls[0] as unknown as [string, Record<string, unknown>];
+    const [, patch] = update.mock.calls[0]!;
     expect(patch).toEqual({ workflowId: 'wf-2' });
   });
 
   it('a double click fires Run now ONCE (SCTUX-8)', async () => {
     let release!: () => void;
-    const trigger = vi.fn(() => new Promise<{ runId?: string }>((r) => { release = () => r({ runId: 'run-1' }); }));
+    const trigger = vi.fn<NonNullable<SubjectSchedulesClient['trigger']>>(() => new Promise((r) => { release = () => r({ runId: 'run-1' }); }));
     renderWith([base], { trigger });
     const run = await screen.findByRole('button', { name: /run now/i });
     run.click();
@@ -215,13 +231,13 @@ describe('SubjectSchedulesPanel — ADR 0787 contract', () => {
 describe('ADR 0815 D4 (grade-ux ORGUX-4) — a job paused because its member left', () => {
   const row: SubjectScheduleRow = { jobId: 'j1', cronExpr: '0 9 * * *', workflowId: 'wf-1', enabled: false, pausedReason: 'acting_member_removed' };
   it('is labelled, cannot be run now, and resuming asks before it re-owns', async () => {
-    const confirmSpy = vi.spyOn(await import('../../ui/confirm.js'), 'confirm').mockResolvedValue(false);
+    const confirmSpy = vi.spyOn(confirmModule, 'confirm').mockResolvedValue(false);
     const client: SubjectSchedulesClient = {
-      list: vi.fn(async () => [row]) as SubjectSchedulesClient['list'],
+      list: vi.fn<SubjectSchedulesClient['list']>(async () => [row]),
       create: vi.fn(async () => undefined),
       update: vi.fn(async () => undefined),
       remove: vi.fn(async () => undefined),
-      trigger: vi.fn(async () => ({})) as NonNullable<SubjectSchedulesClient['trigger']>,
+      trigger: vi.fn<NonNullable<SubjectSchedulesClient['trigger']>>(async () => ({})),
     };
     render(
       <MemoryRouter>

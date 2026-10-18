@@ -13,9 +13,14 @@
  *    host can't run.
  *  - AUTHZ: manage-gated like every other creator route — an editor
  *    (workspace:write, no manage) gets 403 forbidden_scope, not a leaky 404.
+ *
+ * Honest ceiling (w41): "a second read converges on the same instance" cannot be
+ * broken by a provisioning sabotage — the roster id is deterministic
+ * (`host:challenge-author`) behind the roster's insert-if-absent CAS, so ONE row
+ * holds by construction. The single-flight and catch-converge guards behind it
+ * are witnessed in `kicktodo-challenge-author-provision.test.ts`.
  */
 import http from 'node:http';
-import type { AddressInfo } from 'node:net';
 import { randomBytes } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { getSetCookies } from './headerCookies.js';
@@ -25,6 +30,8 @@ import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { signSession, COOKIE_TTL_SECONDS } from '../src/middleware/cookieSession.js';
 import { createWorkspace, createMember } from '../src/host/accessControlService.js';
 import { upsertFromPrincipal } from '../src/features/users/usersService.js';
+import { listRoster } from '../src/host/rosterService.js';
+import { buildChainBackedDefinition } from '../src/host/chainBackedWorkflows.js';
 
 let BASE: string;
 let server: http.Server;
@@ -32,13 +39,19 @@ let server: http.Server;
 const CB = '/host/openwop-app/kicktodo/creator';
 const FACTORY_ID = 'openwop-app.kicktodo.challenge-factory';
 
-interface AuthorRead {
-  agentId: string;
-  rosterId: string;
-  label: string;
-  autonomyLevel?: string;
-  workflows: Array<{ workflowId: string; available: boolean; nodeCount: number }>;
+/** Untyped JSON → a plain record, without a cast (w41 typing rule: no `as`). */
+async function bodyOf(res: Response): Promise<Record<string, unknown>> {
+  const v: unknown = await res.json();
+  if (typeof v !== 'object' || v === null || Array.isArray(v)) throw new Error(`expected a JSON object (status ${res.status})`);
+  return { ...v };
 }
+/** The object rows of an untyped array field. */
+function rowsOf(v: unknown): Array<Record<string, unknown>> {
+  return Array.isArray(v) ? v.filter((x: unknown): x is Record<string, unknown> => typeof x === 'object' && x !== null && !Array.isArray(x)) : [];
+}
+
+const ENV_KEYS = ['OPENWOP_STORAGE_DSN', 'OPENWOP_SESSION_SECRET', 'OPENWOP_TEST_AUTH_ENABLED', 'OPENWOP_AUTH_DISABLE_COOKIES', 'OPENWOP_DEMO_MODE'] as const;
+const savedEnv = new Map<string, string | undefined>(ENV_KEYS.map((k) => [k, process.env[k]]));
 
 function client() {
   let cookie = '';
@@ -75,7 +88,8 @@ beforeAll(async () => {
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   await new Promise<void>((resolve) => {
     server = app.listen(0, '127.0.0.1', () => {
-      BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+      const addr = server.address();
+      BASE = `http://127.0.0.1:${addr && typeof addr === 'object' ? addr.port : 0}`;
       resolve();
     });
   });
@@ -87,6 +101,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await new Promise<void>((resolve) => server.close(() => resolve()));
+  for (const [k, v] of savedEnv) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
 });
 
 describe('ADR 0461 — the author read provisions eagerly and reports the roster truth', () => {
@@ -95,26 +110,32 @@ describe('ADR 0461 — the author read provisions eagerly and reports the roster
     await creator.login('user:author-read-fresh', 'tenant-kt-author-read');
     const res = await creator.get(`${CB}/author`);
     expect(res.status).toBe(200);
-    const body = await res.json() as AuthorRead;
+    const body = await bodyOf(res);
     expect(body.agentId).toBe('vendor.openwop-app.kicktodo.agents.challenge-author');
     expect(body.rosterId).toBe('host:challenge-author');
     expect(body.label).toBe('Challenge Author');
     // ADR 0461 OQ1 — the provisioning saga pins autonomy to 'review'.
     expect(body.autonomyLevel).toBe('review');
-    const factory = body.workflows.find((w) => w.workflowId === FACTORY_ID);
+    const factory = rowsOf(body.workflows).find((w) => w.workflowId === FACTORY_ID);
     expect(factory).toBeDefined();
-    // Catalog-verified honesty: the builtin resolves with its real node count.
-    expect(factory!.available).toBe(true);
-    expect(factory!.nodeCount).toBeGreaterThan(0);
+    // Catalog-verified honesty: the factory resolves with its REAL node count — the
+    // shipped chain's expansion, read independently of the route.
+    expect(factory?.available).toBe(true);
+    expect(factory?.nodeCount).toBe(buildChainBackedDefinition(FACTORY_ID).nodes.length);
   });
 
   it('is idempotent — a second read converges on the same roster instance', async () => {
+    // Its OWN tenant, so it does not ride on case 1's provisioning.
     const creator = client();
-    await creator.login('user:author-read-fresh', 'tenant-kt-author-read');
-    const a = await (await creator.get(`${CB}/author`)).json() as AuthorRead;
-    const b = await (await creator.get(`${CB}/author`)).json() as AuthorRead;
+    await creator.login('user:author-read-twice', 'tenant-kt-author-read-2');
+    const a = await bodyOf(await creator.get(`${CB}/author`));
+    const b = await bodyOf(await creator.get(`${CB}/author`));
+    expect(a.rosterId).toBe('host:challenge-author');
     expect(b.rosterId).toBe(a.rosterId);
     expect(b.workflows).toEqual(a.workflows);
+    // ONE roster row for the role after two reads (by construction — see header).
+    const authors = (await listRoster('tenant-kt-author-read-2')).filter((e) => e.roleKey === 'kicktodo-challenge-author');
+    expect(authors).toHaveLength(1);
   });
 });
 
@@ -143,12 +164,16 @@ describe('ADR 0461 — the author read is manage-gated', () => {
   it('an editor (workspace:write, NO manage) gets 403 forbidden_scope — not a leaky 404', async () => {
     const res = await fetch(`${BASE}${CB}/author`, { headers: { cookie: editorCookie } });
     expect(res.status).toBe(403);
-    const body = await res.json().catch(() => undefined) as { error?: string; code?: string } | undefined;
-    expect((body?.error ?? body?.code ?? '')).toContain('forbidden_scope');
+    const body = await bodyOf(res);
+    expect(body.error).toBe('forbidden_scope');
+    expect(body.message).toBe('Missing required scope: host:kicktodo:manage');
   });
 
   it('an admin (host:kicktodo:manage) gets 200', async () => {
     const res = await fetch(`${BASE}${CB}/author`, { headers: { cookie: adminCookie } });
     expect(res.status).toBe(200);
+    const body = await bodyOf(res);
+    expect(body.rosterId).toBe('host:challenge-author');
+    expect(body.agentId).toBe('vendor.openwop-app.kicktodo.agents.challenge-author');
   });
 });

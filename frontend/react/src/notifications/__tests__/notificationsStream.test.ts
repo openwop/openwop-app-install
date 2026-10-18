@@ -1,3 +1,17 @@
+/**
+ * The live notification feed's reconnect loop (`subscribeToNotifications`).
+ *
+ * The feed is fetch + ReadableStream, NOT native EventSource: EventSource is
+ * terminal on any non-2xx, so a Cloud Run `410 Gone` from a recycled instance
+ * silently killed the feed with no reconnect. These cases pin that the reader
+ * delivers validated frames, fires `onOpen` on EVERY (re)connect (the store's
+ * REST backfill hook; this stream has no Last-Event-ID replay), reconnects
+ * after a drop and after a non-2xx within the attempt-1 backoff ceiling
+ * (1000 ms), and stops for good on cleanup.
+ *
+ * Jitter is pinned (`Math.random` → 1, i.e. the full ceiling) so the backoff
+ * boundary is exact rather than "somewhere under 1100 ms".
+ */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { subscribeToNotifications } from '../notificationsClient.js';
 import type { Notification } from '../types.js';
@@ -36,12 +50,14 @@ describe('subscribeToNotifications (fetch-stream reconnect)', () => {
 
   beforeEach(() => {
     vi.useFakeTimers();
+    vi.spyOn(Math, 'random').mockReturnValue(1);
     fetchMock = vi.fn(async () => new Response(oneNotificationThenClose(), { status: 200 }));
     vi.stubGlobal('fetch', fetchMock);
   });
 
   afterEach(() => {
     vi.unstubAllGlobals();
+    vi.restoreAllMocks();
     vi.useRealTimers();
   });
 
@@ -61,8 +77,11 @@ describe('subscribeToNotifications (fetch-stream reconnect)', () => {
     // Clean close → transient error flip → entering backoff.
     expect(onError).toHaveBeenCalledTimes(1);
 
-    // Backoff for attempt 1 is ≤ 1000ms; advancing past it reconnects.
-    await vi.advanceTimersByTimeAsync(1100);
+    // Attempt-1 backoff at full jitter is exactly 1000 ms: not before…
+    await vi.advanceTimersByTimeAsync(999);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    // …and reconnected right after it.
+    await vi.advanceTimersByTimeAsync(2);
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(onOpen).toHaveBeenCalledTimes(2);
 
@@ -86,9 +105,14 @@ describe('subscribeToNotifications (fetch-stream reconnect)', () => {
     expect(onError).toHaveBeenCalledTimes(1);
 
     // Unlike native EventSource, a non-2xx is NOT terminal here — it retries.
-    await vi.advanceTimersByTimeAsync(1100);
+    await vi.advanceTimersByTimeAsync(999);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(2);
     expect(fetchMock).toHaveBeenCalledTimes(2);
 
+    // Cleanup stops the retry loop too.
     stop();
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });

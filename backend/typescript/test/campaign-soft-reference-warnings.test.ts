@@ -13,6 +13,10 @@
  *   4. a consistent doc warns zero times (non-vacuity).
  *
  * Born red on the pre-ADR validator: legs 1-3 fail (`warnings: []` unconditionally).
+ * Sabotage-witnessed (/grade-tests w30): disabling the dangling check, warning on an
+ * empty channel, dropping an invalid-typed channel's name, the tool's `warnings`
+ * field, the note's "SAVED" wording, and the chassis PATCH's warnings each turn the
+ * matching leg red. ONE app boot serves legs 2 and 3.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -69,21 +73,26 @@ describe('ADR 0727 D1 — the validator emits a soft reference warning', () => {
   });
 });
 
-describe('ADR 0727 D2 — the MODEL is told what the editor is told', () => {
-  let server: http.Server;
-  const TENANT = `org:test-cswtool-${Date.now()}`;
+// ONE boot for the two app-backed describes (legs 2 and 3) — they share nothing
+// else: leg 2 owns TENANT, leg 3 mints its own tenant per case.
+let server: http.Server;
+let BASE = '';
+const TENANT = `org:test-cswtool-${Date.now()}`;
 
-  beforeAll(async () => {
-    process.env.OPENWOP_STORAGE_DSN = 'memory://';
-    process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
-    const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-    await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => res()); });
-    const d = getToggleDefault('campaign-studio');
-    if (d) await saveConfig({ ...d, status: 'on' }, 'test');
-    // The tool refuses without an org to own the canvas ("org_required").
-    await createOrg({ tenantId: TENANT, createdBy: 'u-csw', name: 'Acme', ownerSubject: 'u-csw' });
-  }, 60_000);
-  afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
+beforeAll(async () => {
+  process.env.OPENWOP_STORAGE_DSN = 'memory://';
+  process.env.OPENWOP_TEST_AUTH_ENABLED = 'true'; // the seam that mints the session (authTestSeam.ts:33)
+  process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
+  const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
+  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
+  const d = getToggleDefault('campaign-studio');
+  if (d) await saveConfig({ ...d, status: 'on' }, 'test');
+  // The tool refuses without an org to own the canvas ("org_required").
+  await createOrg({ tenantId: TENANT, createdBy: 'u-csw', name: 'Acme', ownerSubject: 'u-csw' });
+}, 60_000);
+afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
+
+describe('ADR 0727 D2 — the MODEL is told what the editor is told', () => {
 
   const render = async (state: Record<string, unknown>): Promise<Record<string, unknown>> => {
     const out = await createAgentToolProvider({ tenantId: TENANT, actingUserId: 'u-csw' })
@@ -113,27 +122,18 @@ describe('ADR 0727 D2 — the MODEL is told what the editor is told', () => {
 });
 
 describe('ADR 0727 D3 — the chassis PATCH returns the warning (the hop the toast needs)', () => {
-  let server: http.Server;
-  let BASE = '';
   let n = 0;
 
-  beforeAll(async () => {
-    process.env.OPENWOP_STORAGE_DSN = 'memory://';
-    process.env.OPENWOP_TEST_AUTH_ENABLED = 'true'; // the seam that mints the session (authTestSeam.ts:33)
-    process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
-    const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-    await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
-    const d = getToggleDefault('campaign-studio');
-    if (d) await saveConfig({ ...d, status: 'on' }, 'test');
-  }, 60_000);
-  afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
-
-  const client = (): { post: (p: string, b?: unknown) => Promise<{ status: number; body: any }>; patch: (p: string, b?: unknown) => Promise<{ status: number; body: any }> } => {
+  /** The route bodies leg 3 reads (each field it touches is asserted). */
+  interface Body { orgId: string; canvasId: string; version: number; newVersion: number; warnings: Array<{ path: string; message: string }> }
+  interface Res { status: number; body: Body }
+  const client = (): { post: (p: string, b?: unknown) => Promise<Res>; patch: (p: string, b?: unknown) => Promise<Res> } => {
     let cookie = '';
-    const call = async (method: string, path: string, body?: unknown): Promise<{ status: number; body: any }> => {
+    const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
       const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
-      for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-      return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) };
+      for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]!; }
+      const parsed = (res.status === 204 ? undefined : await res.json().catch(() => undefined)) as Body; // JSON boundary
+      return { status: res.status, body: parsed };
     };
     return { post: (p, b) => call('POST', p, b), patch: (p, b) => call('PATCH', p, b) };
   };
@@ -155,7 +155,7 @@ describe('ADR 0727 D3 — the chassis PATCH returns the warning (the hop the toa
     const saved = await c.patch(`${B}/canvases/${canvasId}`, { state: DANGLING, expectedVersion: version });
     expect(saved.status, JSON.stringify(saved.body).slice(0, 300)).toBe(200);
     expect(saved.body.warnings, 'the save SUCCEEDED and reported').toHaveLength(1);
-    expect(saved.body.warnings[0].message).toContain("references missing channel 'LinkedIn ads'");
+    expect(saved.body.warnings[0]!.message).toContain("references missing channel 'LinkedIn ads'");
 
     // And a consistent save reports none — so the field is not simply always populated.
     const clean = await c.patch(`${B}/canvases/${canvasId}`, { state: CONSISTENT, expectedVersion: saved.body.newVersion });

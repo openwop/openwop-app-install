@@ -1,6 +1,6 @@
 {
   "name": "feature.podcasts.nodes",
-  "version": "1.1.1",
+  "version": "1.2.0",
   "description": "Multi-speaker podcast generation pipeline — workflow nodes that compose existing seams into the `podcasts.generate` built-in workflow. `select-content` grounds on a notebook's sources via ctx.features.notebooks; `outline` and `transcript` draft the script with ctx.callAI and persist versioned Documents (ctx.features.documents); `synthesize` voices each dialogue turn via ctx.callSpeechSynthesizer into per-turn audio clips; `mix` assembles the ordered clip list onto the episode (ctx.features.podcasts.recordEpisodeResult). The only run input is episodeId — each node resolves the episode/episodeProfile/speakerProfile config authoritatively from ctx.features.podcasts. Replay posture (ADR 0679, corrected): `mix` and `synthesize` declare `side-effectful` and ARE replay-served. `outline`/`transcript` reach ctx.callAI, so they are held out of the served set by design (their model call is discharged by the invocation log) and their Documents are minted at a content-derived deterministic id instead. `role:\"action\"` on…",
   "author": "OpenWOP App",
   "license": "Apache-2.0",

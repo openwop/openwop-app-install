@@ -3,6 +3,11 @@
  * never-widen invariants the steward's `purpose-propagation-onward` scenario gates:
  * intersection composition, unlabelled = top element, `[]` = contagious/no-onward-use,
  * and the widen prohibition.
+ *
+ * Sabotage-witnessed (/grade-tests w38): `normalizeLabel`'s `out.sort()` → `out`, `isNoOnwardUse`
+ * dropping the length check, `isNonWidening`'s `onw.every(...)` → `true`, `reEmitLabel`'s narrowTo
+ * intersection → `normalizeLabel(narrowTo)`, and `selectEligible`'s `dropNoOnwardUse` ternary forced
+ * off each turn a case below red.
  */
 import { describe, expect, it } from 'vitest';
 import {
@@ -40,6 +45,10 @@ describe('CDP-1d purpose-label algebra (RFC 0128)', () => {
   });
 
   it('intersect: a [] input is contagious through a join', () => {
+    // Asserts the RESULT, not the short-circuit: `intersectLabels`' `some(l => l.length === 0)`
+    // guard is behaviourally dead (an intersection with the empty set is already []), so no
+    // sabotage of that guard can redden this — w38 probe `lbl-contagious` was vacuous by
+    // construction. Recorded as a grade-code row (dead guard), not a test gap.
     expect(intersectLabels([[], ['analytics']])).toEqual([]);
     expect(intersectLabels([['analytics', 'marketing'], []])).toEqual([]);
   });

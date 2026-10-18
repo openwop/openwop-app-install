@@ -3,13 +3,20 @@
  * Pure unit tests (no network): the MP3/WAV concatenation contract, the WAV header
  * wrap, and the opaque-voiceId → provider-voice resolution for the three TTS
  * providers (MiniMax managed; OpenAI + Google BYOK). Anthropic has NO TTS API and is
- * deliberately absent from the speech path.
+ * deliberately absent from the speech path. MEDIA-3: every provider dispatch threads
+ * the host timeout's AbortSignal into `fetch`, so a hung TTS call is cancelled.
+ * (MiniMax voice resolution lives in `speech-synthesis.test.ts`.)
+ *
+ * Sabotage witnesses (w21 g2): mux accepts mixed codecs; WAV keeps every header;
+ * the ID3 strip is skipped; MP3 concat keeps one clip; the single-clip passthrough
+ * is removed; an OpenAI/Google voice resolver ignores the known set; `pcmToWav`
+ * writes the wrong sample rate; any provider drops `signal` (or invents one).
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { muxAudioClips } from '../src/features/podcasts/audioMux.js';
 import {
-  resolveOpenAIVoice, resolveGoogleVoice, resolveMiniMaxVoice, pcmToWav,
+  resolveOpenAIVoice, resolveGoogleVoice, pcmToWav,
   dispatchSpeechMiniMax, dispatchSpeechOpenAI, dispatchSpeechGoogle,
 } from '../src/providers/dispatchSpeech.js';
 
@@ -51,8 +58,11 @@ describe('podcasts — audio mux (ADR 0086 §mix)', () => {
   });
 
   it('passes a single clip through unchanged', () => {
-    const out = muxAudioClips([{ contentBase64: b64('solo'), contentType: 'audio/mpeg' }]);
-    expect(out).toEqual({ contentBase64: b64('solo'), contentType: 'audio/mpeg' });
+    // An UNKNOWN container: only the single-clip passthrough keeps it (a multi-clip
+    // list of this type returns null). With mp3 the passthrough was a no-op — the
+    // concat of one clip is the same bytes — so the case could not fail.
+    const out = muxAudioClips([{ contentBase64: b64('solo'), contentType: 'audio/ogg' }]);
+    expect(out).toEqual({ contentBase64: b64('solo'), contentType: 'audio/ogg' });
   });
 
   it('strips a leading ID3v2 tag from MP3 clips after the first (hardening)', () => {
@@ -77,10 +87,6 @@ describe('podcasts — speech provider voice resolution', () => {
     expect(resolveGoogleVoice('Puck')).toBe('Puck');
     expect(resolveGoogleVoice('opaque-id')).toBe('Kore');
   });
-  it('MiniMax: known voice passes, unknown → default', () => {
-    expect(resolveMiniMaxVoice('Wise_Woman')).toBe('Wise_Woman');
-    expect(resolveMiniMaxVoice('host:x')).toBe('male-qn-qingse');
-  });
   it('pcmToWav prepends a valid 44-byte RIFF/WAVE header', () => {
     const wav = Buffer.from(pcmToWav(b64('abcd'), 24000), 'base64');
     expect(wav.subarray(0, 4).toString()).toBe('RIFF');
@@ -91,47 +97,42 @@ describe('podcasts — speech provider voice resolution', () => {
 });
 
 describe('podcasts — speech dispatch threads the abort signal (MEDIA-3)', () => {
-  afterEach(() => vi.restoreAllMocks());
+  // `restoreAllMocks` does NOT undo `vi.stubGlobal` — unstub explicitly.
+  afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
-  // A minimal OK response shaped per provider, capturing the fetch init.
-  const stubFetch = (json: unknown, bytes?: Uint8Array) => {
+  // A real OK `Response` per call (a body is single-read), capturing the fetch init.
+  const stubFetch = (make: () => Response) => {
     const calls: RequestInit[] = [];
     vi.stubGlobal('fetch', async (_url: string, init: RequestInit) => {
       calls.push(init);
-      return {
-        ok: true,
-        status: 200,
-        json: async () => json,
-        text: async () => '',
-        arrayBuffer: async () => (bytes ?? new Uint8Array([1, 2, 3])).buffer,
-      } as unknown as Response;
+      return make();
     });
     return calls;
   };
 
   it('MiniMax forwards the signal to fetch', async () => {
-    const calls = stubFetch({ data: { audio: '0102' } });
+    const calls = stubFetch(() => Response.json({ data: { audio: '0102' } }));
     const signal = new AbortController().signal;
     await dispatchSpeechMiniMax({ apiKey: 'k', text: 'hi', voiceId: 'Wise_Woman', signal });
     expect(calls[0]?.signal).toBe(signal);
   });
 
   it('OpenAI forwards the signal to fetch', async () => {
-    const calls = stubFetch({}, new Uint8Array([9, 9, 9]));
+    const calls = stubFetch(() => new Response(new Uint8Array([9, 9, 9])));
     const signal = new AbortController().signal;
     await dispatchSpeechOpenAI({ apiKey: 'k', text: 'hi', voiceId: 'alloy', signal });
     expect(calls[0]?.signal).toBe(signal);
   });
 
   it('Google forwards the signal to fetch', async () => {
-    const calls = stubFetch({ candidates: [{ content: { parts: [{ inlineData: { mimeType: 'audio/L16;rate=24000', data: b64('ab') } }] } }] });
+    const calls = stubFetch(() => Response.json({ candidates: [{ content: { parts: [{ inlineData: { mimeType: 'audio/L16;rate=24000', data: b64('ab') } }] } }] }));
     const signal = new AbortController().signal;
     await dispatchSpeechGoogle({ apiKey: 'k', text: 'hi', voiceId: 'Kore', signal });
     expect(calls[0]?.signal).toBe(signal);
   });
 
   it('omits signal cleanly when none is supplied (no regression)', async () => {
-    const calls = stubFetch({ data: { audio: '0102' } });
+    const calls = stubFetch(() => Response.json({ data: { audio: '0102' } }));
     await dispatchSpeechMiniMax({ apiKey: 'k', text: 'hi', voiceId: 'Wise_Woman' });
     expect(calls[0]?.signal).toBeUndefined();
   });

@@ -13,6 +13,13 @@
  *    403s are the plan, not a broken route);
  *  - OFF: every bundle granted but each feature toggled OFF for it — 403
  *    `feature_disabled` (a kill switch is not a lapse).
+ *
+ * The isolation leg ("never another workspace's row") is meaningful only for the
+ * features with a seed; the unseeded ones run the gate legs only (an honest
+ * per-feature ceiling, not a skip).
+ * Sabotage witnesses (w35): the door refusing plan-lapsed, the door serving a
+ * toggled-off feature, the admin scope removed, and paging never setting
+ * nextOffset each red the legs that claim them.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -47,13 +54,13 @@ interface Case {
 }
 const CASES: Case[] = [
   { featureId: 'campaign-brief', write: '/host/openwop-app/campaign-brief/briefs',
-    seed: (t, o, m) => createCampaignBrief(t, o, 'test', { name: m, objective: 'o', productName: 'p', personaIds: ['x'], messaging: { primaryValueProp: 'v' }, channels: [{ type: 'ad_variants', enabled: true, config: {} }] } as never) },
+    seed: (t, o, m) => createCampaignBrief(t, o, 'test', { name: m, objective: 'o', productName: 'p', personaIds: ['x'], messaging: { primaryValueProp: 'v' }, channels: [{ type: 'ad_variants', enabled: true, config: {} }] }) },
   { featureId: 'creative-briefs', write: '/host/openwop-app/creative-briefs/orgs/:orgId/briefs',
     seed: (t, o, m) => createCreativeBrief(t, o, 'tester', { title: m, assetType: 'image', sceneDescription: 'Scene.' }) },
   { featureId: 'funnels', write: '/host/openwop-app/funnels/orgs/:orgId/funnels',
     seed: (t, o, m) => createFunnel({ tenantId: t, orgId: o, createdBy: 'u', name: m }) },
   { featureId: 'webinars', write: '/host/openwop-app/webinars/orgs/:orgId/events',
-    seed: (t, o, m) => upsertMarketingEvent({ tenantId: t, orgId: o, provider: 'zoom', providerEventId: m } as never) },
+    seed: (t, o, m) => upsertMarketingEvent({ tenantId: t, orgId: o, provider: 'zoom', providerEventId: m }) },
   { featureId: 'commerce', write: '/host/openwop-app/commerce/orgs/:orgId/products',
     seed: (t, o, m) => createProduct({ tenantId: t, orgId: o, createdBy: 'user:p', type: 'digital', name: m, price: 19 }) },
   { featureId: 'promotions', write: '/host/openwop-app/promotions/orgs/:orgId/promotions',
@@ -164,7 +171,9 @@ describe.each(CASES)('ADR 0820 §7 — $featureId export after a plan lapse', (c
   });
 
   it('an editor is refused (403)', async () => {
-    expect((await get(`${EXPORT}/${c.featureId}`, await login(who('l-editor'), LAPSED))).status).toBe(403);
+    const res = await get(`${EXPORT}/${c.featureId}`, await login(who('l-editor'), LAPSED));
+    expect(res.status).toBe(403);
+    expect(await res.text(), 'the admin-scope refusal, not another 403').toContain('host:billing:manage');
   });
 
   it('POSITIVE: the entitled workspace exports as entitled, with its own row', async () => {
@@ -174,8 +183,11 @@ describe.each(CASES)('ADR 0820 §7 — $featureId export after a plan lapse', (c
     expect(body.access).toBe('entitled');
     if (c.seed) expect(JSON.stringify(body.sections)).toContain(marker('other', c.featureId));
   });
+});
 
-  it.runIf(Boolean(c.write))('the feature\'s write route still refuses the lapsed admin BY THE PLAN; the entitled admin is not plan-refused', async () => {
+/** Only the features with a plain write route (w35: was an `it.runIf`, which reported two SKIPPED cases). */
+describe.each(CASES.filter((c) => c.write !== undefined))('ADR 0820 §7 — $featureId write route after a plan lapse', (c) => {
+  it('the feature\'s write route still refuses the lapsed admin BY THE PLAN; the entitled admin is not plan-refused', async () => {
     // The lapsed 403 must be the PLAN refusal (naming this feature), not a scope
     // refusal that would pass for the wrong reason. The control: the same route
     // for the entitled admin is never the plan refusal (it may still be a 400/

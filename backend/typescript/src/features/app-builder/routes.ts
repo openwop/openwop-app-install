@@ -132,7 +132,7 @@ export function registerAppBuilderRoutes(deps: RouteDeps): void {
           if (!isExportTarget(body.target)) {
             throw new OpenwopError('validation_error', `\`target\` must be one of: ${EXPORT_TARGETS.join(', ')}.`, 400, { field: 'target' });
           }
-          const canvas = await loadCanvas(tenantId, req.params.canvasId, user.userId);
+          const canvas = await loadCanvas(tenantId, req.params.canvasId, user.userId, 'write');
           const result = await exportCanvas(tenantId, canvas.state, body.target, { strict: body.strict === true });
           // ADR 0348 6c — durable export lineage (side collection; never bumps
           // the canvas version under a live editor session). Best-effort: the
@@ -161,7 +161,7 @@ export function registerAppBuilderRoutes(deps: RouteDeps): void {
       app.get(`${org}/canvases/:canvasId/exports`, async (req, res, next) => {
         try {
           const { user, tenantId } = await codeAuthz(req, EXPORT_FEATURE, 'workspace:read');
-          await loadCanvas(tenantId, req.params.canvasId, user.userId); // tenant + existence gate
+          await loadCanvas(tenantId, req.params.canvasId, user.userId, 'read'); // tenant + existence gate
           res.json({ exports: await listExportLineage(tenantId, req.params.canvasId!) });
         } catch (err) { next(err); }
       });
@@ -177,7 +177,7 @@ export function registerAppBuilderRoutes(deps: RouteDeps): void {
             throw new OpenwopError('validation_error', `\`target\` must be one of: ${EXPORT_TARGETS.join(', ')}.`, 400, { field: 'target' });
           }
           const repo = requireString(body.repo, 'repo');
-          const canvas = await loadCanvas(tenantId, req.params.canvasId, user.userId);
+          const canvas = await loadCanvas(tenantId, req.params.canvasId, user.userId, 'write');
           const result = await publishToGitHub(
             // A route-side publish has no run — the canvas id is the correlation id
             // (the teamsApprovalDelivery non-run precedent).
@@ -200,7 +200,7 @@ export function registerAppBuilderRoutes(deps: RouteDeps): void {
           if (!isExportTarget(body.target)) {
             throw new OpenwopError('validation_error', `\`target\` must be one of: ${EXPORT_TARGETS.join(', ')}.`, 400, { field: 'target' });
           }
-          await loadCanvas(tenantId, req.params.canvasId, user.userId); // tenant + existence gate
+          await loadCanvas(tenantId, req.params.canvasId, user.userId, 'write'); // tenant + existence gate
           const { view, webhookSecret } = await createSyncBinding(tenantId, req.params.canvasId!, {
             owner: requireString(body.owner, 'owner'),
             repo: requireString(body.repo, 'repo'),
@@ -216,7 +216,7 @@ export function registerAppBuilderRoutes(deps: RouteDeps): void {
       app.get(`${org}/canvases/:canvasId/sync-binding`, async (req, res, next) => {
         try {
           const { user, tenantId } = await codeAuthz(req, SYNC_FEATURE, 'workspace:read');
-          await loadCanvas(tenantId, req.params.canvasId, user.userId);
+          await loadCanvas(tenantId, req.params.canvasId, user.userId, 'read');
           res.json({ binding: await getSyncBindingView(tenantId, req.params.canvasId!) });
         } catch (err) { next(err); }
       });
@@ -224,7 +224,7 @@ export function registerAppBuilderRoutes(deps: RouteDeps): void {
       app.delete(`${org}/canvases/:canvasId/sync-binding`, async (req, res, next) => {
         try {
           const { user, tenantId } = await codeAuthz(req, SYNC_FEATURE, 'host:code-sync:manage');
-          await loadCanvas(tenantId, req.params.canvasId, user.userId);
+          await loadCanvas(tenantId, req.params.canvasId, user.userId, 'write');
           const removed = await deleteSyncBinding(tenantId, req.params.canvasId!);
           if (!removed) throw new OpenwopError('not_found', 'This canvas has no repo binding.', 404);
           res.status(204).end();
@@ -237,7 +237,7 @@ export function registerAppBuilderRoutes(deps: RouteDeps): void {
       app.post(`${org}/canvases/:canvasId/sync`, async (req, res, next) => {
         try {
           const { user, orgId, tenantId } = await codeAuthz(req, SYNC_FEATURE, 'workspace:write');
-          const canvas = await loadCanvas(tenantId, req.params.canvasId, user.userId);
+          const canvas = await loadCanvas(tenantId, req.params.canvasId, user.userId, 'write');
           const binding = await getSyncBinding(tenantId, req.params.canvasId!);
           if (!binding) {
             throw new OpenwopError('invalid_request', 'This canvas has no repo binding — an admin must bind a repository first.', 409, { canvasId: req.params.canvasId });

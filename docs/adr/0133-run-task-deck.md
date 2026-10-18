@@ -1,6 +1,14 @@
 # ADR 0133 — Run/task deck (a projection of pending, blocked, and delegated work)
 
 **Status:** implemented — all 4 phases (2026-06-24). P1 the `run.metadata.parentRunId`/`delegatedBy` linkage stamp in `subRunDispatcher` (+ the `bootstrap/nodes.ts` call site); P2 the pure `taskDeckProjection` read-model (`features/task-deck/taskDeckProjection.ts` — buckets + parent/child grouping + blocked join, no tasks table); P3 the `GET /v1/host/openwop-app/tasks` route + ownership-filter RBAC (own runs + their direct children, IDOR-safe, bounded + truncation-logged); P4 the FE deck (`frontend/react/src/taskDeck/`, status columns + nested cards, lazy-loaded). Each phase: `/architect` GO + `/code-review` CLEAR (+ `/ux-review` PASS for P4); 11 backend tests + the FE gate green. The deferred `ctx.tasks` workflow read (Phase 5) remains the only open item.
+> **CORRECTED 2026-10-17 (ADR 0902).** Three statements in this ADR are not what shipped, and one
+> shipped design was unsafe. (1) The toggle below graduated (ADR 0134): the deck is always-on and
+> gated by `runs:read` + ownership. (2) The blocked bucket reads `storage.listOpenInterrupts`, not the
+> unified review (ADR 0068), and cards had no deep links until ADR 0902 D7. (3) The P1 linkage stamp
+> rode caller `metadata`, so any member could plant a "delegated" card in another member's deck; ADR
+> 0902 D2 makes it host-only. Ownership is now the canonical run owner (ADR 0902 D4), forks are never
+> children (D3), and the P5 `ctx.tasks` surface stays unbuilt (no consumer).
+
 **Date:** 2026-06-24
 **Toggle:** `task-deck` · default **OFF** · `bucketUnit: tenant` (a shared
 operator-console surface a workspace opts into). When OFF, runs surface exactly as

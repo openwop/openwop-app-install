@@ -41,7 +41,7 @@ tenant-owned:
 - **Ids are unchanged.** `walkthrough.campaign-studio.first-brief` and
   `walkthrough.chat.first-message` keep their ids, so the existing referrers keep
   resolving once seeded: the `connect-your-ai` + `campaign-studio-first-brief`
-  tutorials, manual test CHAT-01, and the `walkthrough-replay` e2e.
+  tutorials, manual test CHAT-01, and the `walkthrough-replay` e2e (deleted 2026-10-17 by /grade-tests wave 53: it never ran and could not pass; see the ADR 0368 correction).
 
 ## Decision
 

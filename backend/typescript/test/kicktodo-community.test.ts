@@ -9,7 +9,7 @@
  */
 import { beforeAll, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
-import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
+import { initHostExtPersistence, DurableCollection } from '../src/host/hostExtPersistence.js';
 import { registerGoalVerifier } from '../src/features/goals/goalVerifiers.js';
 import { createDraft, publishChallenge } from '../src/features/kicktodo-core/challengeService.js';
 import { enroll, __clearEnrollGuards } from '../src/features/kicktodo-core/enrollmentService.js';
@@ -56,13 +56,46 @@ describe('creator profiles (P1)', () => {
     // COM-1: while the approval is still PENDING, nobody can apply an outcome —
     // the approval lane is the decision authority, this endpoint only applies it.
     await expect(applyProfileDecision(T, CREATOR, MOD, true)).rejects.toBeInstanceOf(SeparationOfDutiesError);
-    await resolveApproval(pending.approvalId!, { status: 'approved' });
+    if (!pending.approvalId) throw new Error('submitting raises a community-profile approval');
+    await resolveApproval(pending.approvalId, { status: 'approved' });
+    // KT-R1: now the approval IS approved, so COM-1 no longer refuses — only the
+    // owner check can stop the owner applying their own approval. (The PENDING
+    // attempt above is refused by COM-1 first, which masked this check — round-1
+    // probe w41g2-cm-sod-owner was vacuous.)
+    await expect(applyProfileDecision(T, CREATOR, CREATOR, true)).rejects.toBeInstanceOf(SeparationOfDutiesError);
+    expect(await publicProfileByHandle(T, 'ada-codes')).toBeNull(); // still not public
     await applyProfileDecision(T, CREATOR, MOD, true);
 
     const pub = await publicProfileByHandle(T, 'ADA-CODES');
     expect(pub?.displayName).toBe('Ada');
     // Closed public projection.
-    expect(Object.keys(pub!).sort()).toEqual(['bio', 'displayName', 'handle', 'links']);
+    expect(Object.keys(pub ?? {}).sort()).toEqual(['bio', 'displayName', 'handle', 'links']);
+  });
+
+  // KTCOM-Y1 — a handle change releases the old index row only AFTER the profile
+  // write (KTD-2 fails closed), so a failed release leaves `old → subject` behind.
+  // The seeded row below is exactly that residue. Sabotage (witnessed): drop the
+  // `p.handle !== handleLower` check and the released handle serves the profile.
+  it('a released handle whose index row survived does not serve the profile', async () => {
+    const GRACE = 'user:comm-grace';
+    const approve = async (): Promise<void> => {
+      const pending = await submitProfile(T, GRACE);
+      if (!pending.approvalId) throw new Error('submitting raises a community-profile approval');
+      await resolveApproval(pending.approvalId, { status: 'approved' });
+      await applyProfileDecision(T, GRACE, MOD, true);
+    };
+    await upsertProfile(T, GRACE, { handle: 'grace-old', displayName: 'Grace' });
+    await approve();
+    expect((await publicProfileByHandle(T, 'grace-old'))?.handle).toBe('grace-old'); // control
+
+    await upsertProfile(T, GRACE, { handle: 'grace-new', displayName: 'Grace' });
+    const handleIndex = new DurableCollection<{ tenantId: string; handleLower: string; creatorSubject: string }>(
+      'kicktodo-handle-index', (h) => `${h.tenantId}::${h.handleLower}`);
+    await handleIndex.put({ tenantId: T, handleLower: 'grace-old', creatorSubject: GRACE }); // the failed release
+    await approve();
+
+    expect((await publicProfileByHandle(T, 'grace-new'))?.handle).toBe('grace-new');
+    expect(await publicProfileByHandle(T, 'grace-old'), 'the released handle must not serve the moved profile').toBeNull();
   });
 });
 
@@ -73,7 +106,9 @@ describe('proof-gated reviews (P2)', () => {
     // Complete the (single-action) challenge → proof.
     await enroll({ tenantId: T, ownerSubject: BUYER, challengeId, challengeVersion: 1, timezone: 'UTC' });
     const today = await todayFor(T, BUYER);
-    await submitCheckIn(T, BUYER, today.enrollments[0].actions[0].occurrence.cardId, {});
+    const card = today.enrollments[0]?.actions[0]?.occurrence.cardId;
+    if (!card) throw new Error('the single action must be due today');
+    await submitCheckIn(T, BUYER, card, {});
 
     const first = await putReview(T, BUYER, { challengeId, challengeVersion: 1, rating: 5, body: 'Great' });
     expect(first.provenance).toBe('completed-enrollment');
@@ -82,8 +117,8 @@ describe('proof-gated reviews (P2)', () => {
     await putReview(T, BUYER, { challengeId, challengeVersion: 1, rating: 4, body: 'Still great' });
     const vis = await visibleReviews(T, challengeId);
     expect(vis).toHaveLength(1);
-    expect(vis[0].rating).toBe(4);
-    expect(vis[0].provenance).toBe('verified participant');
+    expect(vis[0]?.rating).toBe(4);
+    expect(vis[0]?.provenance).toBe('verified participant');
     // No reviewer PII in the projection.
     expect(JSON.stringify(vis)).not.toContain(BUYER);
 
@@ -91,9 +126,16 @@ describe('proof-gated reviews (P2)', () => {
     expect((await aggregateRating(T, challengeId)).average).toBeNull();
 
     // Flag → hidden immediately; restore → visible again.
-    await flagReview(T, MOD, challengeId, BUYER, 'test flag');
+    const flagged = await flagReview(T, MOD, challengeId, BUYER, 'test flag');
     expect(await visibleReviews(T, challengeId)).toHaveLength(0);
-    await resolveReviewFlag(T, challengeId, BUYER, false);
+    // Code-grade KTY-2 — the review's author cannot moderate it, and the route only
+    // APPLIES a decision the approval already holds (COM-1, as for profiles).
+    await expect(resolveReviewFlag(T, challengeId, BUYER, false, BUYER)).rejects.toBeInstanceOf(SeparationOfDutiesError);
+    await expect(resolveReviewFlag(T, challengeId, BUYER, false, CREATOR)).rejects.toBeInstanceOf(SeparationOfDutiesError);
+    if (!flagged.flagApprovalId) throw new Error('flagging raises a community-review approval');
+    await resolveApproval(flagged.flagApprovalId, { status: 'rejected' });
+    await expect(resolveReviewFlag(T, challengeId, BUYER, true, CREATOR)).rejects.toBeInstanceOf(SeparationOfDutiesError);
+    await resolveReviewFlag(T, challengeId, BUYER, false, CREATOR);
     expect(await visibleReviews(T, challengeId)).toHaveLength(1);
   });
 });

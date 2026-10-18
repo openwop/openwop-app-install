@@ -9,6 +9,11 @@
  *     the only ids a prompt may lean on are its allowlisted tools.
  *  3. Pack pins: feature.requiredPacks versions match the shipped pack.json
  *     versions (a pack bump without a pin bump breaks replay determinism).
+ *
+ * Sabotages that turn these red (w41 probes): tightening the snapshotHash
+ * pattern or adding a field to the frozen snapshot (parity), dropping the
+ * `display` property from the plan-revision schema, a node typeId in a skill
+ * prompt, flipping a memoryShape, a requiredPacks pin that lags pack.json.
  */
 import { describe, expect, it, beforeAll } from 'vitest';
 import { readFileSync } from 'node:fs';
@@ -17,7 +22,7 @@ import { openStorage } from '../src/storage/index.js';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { validateArtifact } from '../src/host/artifactTypes.js';
 import { registerKicktodoArtifactTypes, PROGRESS_EVIDENCE_TYPE, PLAN_REVISION_TYPE } from '../src/features/kicktodo-core/artifactSchemas.js';
-import { buildPlanRevisionDisplay } from '../src/features/kicktodo-core/replanService.js';
+import { buildPlanRevisionDisplay, REVISION_LANES } from '../src/features/kicktodo-core/replanService.js';
 import { createDraft, publishChallenge } from '../src/features/kicktodo-core/challengeService.js';
 import { enroll } from '../src/features/kicktodo-core/enrollmentService.js';
 import { freezeProgressEvidence } from '../src/features/kicktodo-core/progressService.js';
@@ -44,7 +49,7 @@ describe('artifact schema ↔ producer parity', () => {
     await publishChallenge(TENANT, draft.id, 1);
     const { enrollment } = await enroll({ tenantId: TENANT, ownerSubject: 'user:parity', challengeId: draft.id, challengeVersion: 1 });
     const snapshot = await freezeProgressEvidence(TENANT, enrollment.id);
-    const v = validateArtifact(PROGRESS_EVIDENCE_TYPE, snapshot as unknown as Record<string, unknown>);
+    const v = validateArtifact(PROGRESS_EVIDENCE_TYPE, snapshot);
     expect(v.registered).toBe(true);
     expect(v.valid, JSON.stringify(v.errors)).toBe(true);
   });
@@ -53,23 +58,45 @@ describe('artifact schema ↔ producer parity', () => {
   // (including the additive `display`) must validate against the registered schema, or
   // `detectTypedArtifact` falls back to raw JSON (the exact bug this fixes).
   it('a plan-revision payload validates WITH and WITHOUT the additive display', async () => {
-    const raw = { commands: [{ lane: 'recovery' }], rationale: 'Catch up.' } as Record<string, unknown>;
+    // Opaque card/alternative ids the humanizer must NEVER echo into the card.
+    const raw: Record<string, unknown> = {
+      commands: [{ lane: 'substitute', cardId: 'card:opaque-1', alternativeId: 'alt:opaque-2' }],
+      rationale: 'Swap it.',
+    };
     const withoutDisplay = validateArtifact(PLAN_REVISION_TYPE, raw);
     expect(withoutDisplay.registered).toBe(true);
     expect(withoutDisplay.valid, JSON.stringify(withoutDisplay.errors)).toBe(true);
-    // The enricher's real output (display resolved from an empty state → neutral lines).
+    // The enricher's real output (no enrollment ⇒ no titles ⇒ neutral phrases).
     const display = await buildPlanRevisionDisplay(TENANT, 'enr:none', raw);
     const enriched = validateArtifact(PLAN_REVISION_TYPE, { ...raw, display });
     expect(enriched.valid, JSON.stringify(enriched.errors)).toBe(true);
-    expect(display.lines).toHaveLength(1); // one command → one humanized line, never an id
-    expect(JSON.stringify(display)).not.toContain('enr:none');
+    // one command → one humanized line, never an id
+    expect(display).toEqual({
+      summary: '1 change to your plan',
+      lines: ['Swap “a scheduled activity” for “a publisher-approved alternative”.'],
+    });
+    expect(JSON.stringify(display)).not.toMatch(/card:opaque-1|alt:opaque-2|enr:none/);
+  });
+
+  // KTAP-MOVE-1 — the card schema listed three lanes; the service and the composer
+  // emit a fourth (`move`, ADR 0496). A move revision was stored untyped.
+  it('a move revision validates as a typed plan-revision', () => {
+    const v = validateArtifact(PLAN_REVISION_TYPE, { commands: [{ lane: 'move', day: 3, toDate: '2026-10-20' }], rationale: 'Move day 3.' });
+    expect(v.valid, JSON.stringify(v.errors)).toBe(true);
+  });
+
+  it("the service's lanes are exactly the composer schema's lanes", () => {
+    const schema: { properties: { commands: { items: { oneOf: Array<{ properties: { lane: { const: string } } }> } } } } =
+      JSON.parse(readFileSync(join(REPO, 'packs/vendor.openwop-app.kicktodo.agents/schemas/plan-revision.schema.json'), 'utf8'));
+    const composerLanes = schema.properties.commands.items.oneOf.map((b) => b.properties.lane.const);
+    expect([...REVISION_LANES].sort()).toEqual(composerLanes.sort());
   });
 });
 
 describe('prompt discipline (tool-first, no hand-copied schemas)', () => {
-  const pack = JSON.parse(readFileSync(join(REPO, 'packs/vendor.openwop-app.kicktodo.agents/pack.json'), 'utf8')) as {
+  const pack: {
     agents: Array<{ agentId: string; systemPromptRef: string; toolAllowlist: string[]; memoryShape?: { scratchpad: boolean; conversation: boolean; longTerm: boolean } }>;
-  };
+  } = JSON.parse(readFileSync(join(REPO, 'packs/vendor.openwop-app.kicktodo.agents/pack.json'), 'utf8'));
   it('no skill prompt names node typeIds or artifact type ids', () => {
     for (const a of pack.agents) {
       const prompt = readFileSync(join(REPO, 'packs/vendor.openwop-app.kicktodo.agents', a.systemPromptRef), 'utf8');
@@ -97,7 +124,7 @@ describe('prompt discipline (tool-first, no hand-copied schemas)', () => {
 describe('pack pins', () => {
   it('feature.requiredPacks versions match the shipped pack.json versions', () => {
     for (const pin of kicktodoCoreFeature.requiredPacks ?? []) {
-      const shipped = JSON.parse(readFileSync(join(REPO, 'packs', pin.name, 'pack.json'), 'utf8')) as { version: string };
+      const shipped: { version: string } = JSON.parse(readFileSync(join(REPO, 'packs', pin.name, 'pack.json'), 'utf8'));
       expect(shipped.version, pin.name).toBe(pin.version);
     }
     expect((kicktodoCoreFeature.requiredPacks ?? []).length).toBeGreaterThan(0);

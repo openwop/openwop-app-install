@@ -186,7 +186,8 @@ describe('ADR 0655 D10 — Suppressions panel (EM-UX-5 / EM-UX-23)', () => {
     await openSuppressions();
     expect(await screen.findByText(/couldn’t load the suppression list/i)).toBeTruthy();
     expect(screen.queryByText(/no suppressed addresses/i)).toBeNull();
-    expect(currentAnnouncements().polite).toMatch(/couldn’t load the suppression list/i);
+    // The announcement comes from a passive effect that can flush after findBy sees the DOM; wait for it.
+    await waitFor(() => expect(currentAnnouncements().polite).toMatch(/couldn’t load the suppression list/i));
     fireEvent.click(screen.getByRole('button', { name: /retry/i }));
     await waitFor(() => expect(supp.listSuppressions).toHaveBeenCalledTimes(2));
     expect(await screen.findByText(/no suppressed addresses/i)).toBeTruthy();
@@ -214,7 +215,7 @@ describe('EM-UX-27 — provider status: failed ≠ absent', () => {
     renderPage();
     expect(await screen.findByText(/provider status didn’t load/i)).toBeTruthy();
     const heading = screen.getByRole('heading', { name: 'Sending provider' });
-    expect(currentAnnouncements().polite).toMatch(/provider status didn’t load/i);
+    await waitFor(() => expect(currentAnnouncements().polite).toMatch(/provider status didn’t load/i));
     const before = api.getProviderStatus.mock.calls.length;
     // The Retry INSIDE the provider card (the page has several same-named Retries).
     fireEvent.click(within(heading.parentElement!).getByRole('button', { name: /retry/i }));
@@ -241,7 +242,7 @@ describe('EM-UX-6 / EM-UX-7 — failed page-level reads state the failure, never
     expect(screen.queryByText(/Create one above — a template is/i)).toBeNull();
     // EM-UX-7: the page-level Notice carries a Retry, and announces the headline.
     expect(screen.getByText('tpl_500')).toBeTruthy();
-    expect(currentAnnouncements().assertive).toMatch(/could not load/i);
+    await waitFor(() => expect(currentAnnouncements().assertive).toMatch(/could not load/i));
     const retries = screen.getAllByRole('button', { name: /retry/i });
     expect(retries.length).toBeGreaterThanOrEqual(2);
     api.listTemplates.mockResolvedValue([]);
@@ -309,7 +310,7 @@ describe('EM-UX-8 / EM-UX-9 — the sends failure has a Retry and announces poli
     fireEvent.click(screen.getByRole('button', { name: 'Log' }));
     expect(await screen.findByText(/could not load the send history/i)).toBeTruthy();
     expect(screen.queryByText(/No sends yet/i)).toBeNull();
-    expect(currentAnnouncements().polite).toMatch(/could not load the send history/i);
+    await waitFor(() => expect(currentAnnouncements().polite).toMatch(/could not load the send history/i));
     fireEvent.click(screen.getByRole('button', { name: /retry/i }));
     await waitFor(() => expect(api.listSends).toHaveBeenCalledTimes(2));
     expect(await screen.findByText(/No sends yet/i)).toBeTruthy();

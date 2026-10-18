@@ -5,9 +5,20 @@
  * user has connected it (`subscription:github.copilot` is a stored ref).
  * Picking it binds without a model or key step; removing the chat binding
  * unbinds it WITHOUT deleting the user's GitHub connection.
+ *
+ * Every "hides" case AWAITS the discovery promise before asserting absence: the tile
+ * starts hidden while discovery is in flight, so an absence read before it settles
+ * passes whatever the gate does (grade-tests w48).
+ *
+ * Sabotage that turns these red: dropping `storedRefs.includes(COPILOT_CREDENTIAL_REF)`
+ * (ProviderGrid), `setAdvertised(true)` on a failed or dark discovery
+ * (subscriptionProviders.ts), reading a mode other than `subscription`, confirming /
+ * deleting the key / printing the ref on a subscription binding (ConfiguredProviderCard).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, cleanup, fireEvent, waitFor, act } from '@testing-library/react';
+import type { HostCapabilities } from '../../client/capabilitiesV2Adapter.js';
+import type { BYOKActiveConfig } from '../lib/useBYOKConfig.js';
 
 vi.mock('../../client/runsClient.js', () => ({ getCapabilities: vi.fn() }));
 const deleteKey = vi.fn();
@@ -23,9 +34,22 @@ import { getCapabilities } from '../../client/runsClient.js';
 const { ProviderGrid } = await import('../ProviderGrid.js');
 const { ConfiguredProviderCard } = await import('../ConfiguredProviderCard.js');
 
-const LIT = { aiProviders: { byok: ['openai', 'github.copilot'], authModes: { openai: ['apiKey'], 'github.copilot': ['subscription'] } } };
-const DARK = { aiProviders: { byok: ['openai'], authModes: { openai: ['apiKey'] } } };
+const LIT: HostCapabilities = { aiProviders: { byok: ['openai', 'github.copilot'], authModes: { openai: ['apiKey'], 'github.copilot': ['subscription'] } } };
+/** The v2 shape (ADR 0730 C.3): the per-provider map lives in this host's extension record. */
+const LIT_V2: HostCapabilities = { extensions: { 'openwop-app.ai-providers': { subscriptionProviders: ['github.copilot'] } } };
+const DARK: HostCapabilities = { aiProviders: { byok: ['openai'], authModes: { openai: ['apiKey'] } } };
 const REF = 'subscription:github.copilot';
+
+/** Answer discovery with `caps` and return a settle function that waits for the
+ *  hook's `.then`/`.catch` to have run, so an absence check is made AFTER it. */
+const discovery = (caps: Promise<HostCapabilities>) => {
+  void caps.catch(() => undefined); // a rejected fixture is handled, not an unhandled rejection
+  vi.mocked(getCapabilities).mockReturnValue(caps);
+  return async () => {
+    await waitFor(() => expect(getCapabilities).toHaveBeenCalled());
+    await act(async () => { await caps.catch(() => undefined); });
+  };
+};
 
 beforeEach(() => {
   vi.mocked(getCapabilities).mockReset();
@@ -37,7 +61,7 @@ afterEach(cleanup);
 
 describe('ProviderGrid — GitHub Copilot tile', () => {
   it('offers Copilot when the host advertises it and the user has connected it; picking hands back the subscription provider', async () => {
-    vi.mocked(getCapabilities).mockResolvedValue(LIT as never);
+    vi.mocked(getCapabilities).mockResolvedValue(LIT);
     const onPick = vi.fn();
     render(<ProviderGrid isAuthed onPick={onPick} storedRefs={[REF]} />);
     const tile = await screen.findByRole('button', { name: /GitHub Copilot/ });
@@ -45,30 +69,36 @@ describe('ProviderGrid — GitHub Copilot tile', () => {
     expect(onPick).toHaveBeenCalledWith(expect.objectContaining({ id: 'github.copilot', subscription: true }));
   });
 
+  it('offers Copilot from the v2 extension record too (the shape a major-2 host serves)', async () => {
+    vi.mocked(getCapabilities).mockResolvedValue(LIT_V2);
+    render(<ProviderGrid isAuthed onPick={vi.fn()} storedRefs={[REF]} />);
+    expect(await screen.findByRole('button', { name: /GitHub Copilot/ })).toBeTruthy();
+  });
+
   it('hides the tile when the user has not connected Copilot', async () => {
-    vi.mocked(getCapabilities).mockResolvedValue(LIT as never);
+    const settled = discovery(Promise.resolve(LIT));
     render(<ProviderGrid isAuthed onPick={vi.fn()} storedRefs={['byok:openai']} />);
-    await waitFor(() => expect(getCapabilities).toHaveBeenCalled());
+    await settled();
     expect(screen.queryByRole('button', { name: /GitHub Copilot/ })).toBeNull();
   });
 
   it('hides the tile when the host does not serve Copilot, even if a token is stored', async () => {
-    vi.mocked(getCapabilities).mockResolvedValue(DARK as never);
+    const settled = discovery(Promise.resolve(DARK));
     render(<ProviderGrid isAuthed onPick={vi.fn()} storedRefs={[REF]} />);
-    await waitFor(() => expect(getCapabilities).toHaveBeenCalled());
+    await settled();
     expect(screen.queryByRole('button', { name: /GitHub Copilot/ })).toBeNull();
   });
 
   it('hides the tile when discovery fails', async () => {
-    vi.mocked(getCapabilities).mockRejectedValue(new Error('offline'));
+    const settled = discovery(Promise.reject(new Error('offline')));
     render(<ProviderGrid isAuthed onPick={vi.fn()} storedRefs={[REF]} />);
-    await waitFor(() => expect(getCapabilities).toHaveBeenCalled());
+    await settled();
     expect(screen.queryByRole('button', { name: /GitHub Copilot/ })).toBeNull();
   });
 });
 
 describe('ConfiguredProviderCard — a Copilot binding', () => {
-  const config = { provider: 'github.copilot', model: 'default', credentialRef: REF } as never;
+  const config: BYOKActiveConfig = { provider: 'github.copilot', model: 'default', credentialRef: REF };
 
   it('renders without the internal credentialRef, and "stop using" unbinds without deleting the connection', async () => {
     const onRemoved = vi.fn();

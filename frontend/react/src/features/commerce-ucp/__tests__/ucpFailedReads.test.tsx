@@ -46,13 +46,14 @@ vi.mock('../commerceUcpClient.js', async (importOriginal) => {
 });
 
 import { CommerceUcpPage } from '../CommerceUcpPage.js';
+import type { UcpClient } from '../commerceUcpClient.js';
 import { messages as en } from '../i18n/en.js';
 
 const ORG = { orgId: 'org_1', name: 'Merchant One' };
-const CLIENT = {
+const CLIENT: UcpClient = {
   clientId: 'ucp_client_1',
   name: 'Checkout Agent',
-  scopes: ['cart:write'] as const,
+  scopes: ['cart:write'],
   createdAt: '2026-07-01T00:00:00.000Z',
 };
 
@@ -64,7 +65,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   access.enabled = true;
   api.listOrgs.mockResolvedValue([ORG]);
-  api.listUcpClients.mockResolvedValue([]);
+  api.listUcpClients.mockResolvedValue({ clients: [], settlement: 'demo' });
 });
 afterEach(cleanup);
 
@@ -116,6 +117,9 @@ describe('HV-1 — a failed client read never offers to mint an OAuth credential
     await screen.findByText(en.clientsFailedTitle);
     const provisionButtons = screen.queryAllByRole('button', { name: en.newClient, hidden: true });
     expect(provisionButtons).toHaveLength(0);
+    // Removed from the DOM entirely — no node carries the label, so a visually-hidden
+    // or aria-hidden button would fail here too, not only a disabled one.
+    expect(screen.queryAllByText(en.newClient)).toHaveLength(0);
   });
 
   it('GENUINELY EMPTY: a real "no clients" answer still offers to provision one', async () => {
@@ -124,15 +128,31 @@ describe('HV-1 — a failed client read never offers to mint an OAuth credential
     expect(await screen.findByText(en.noClients)).toBeTruthy();
     expect(screen.queryByText(en.clientsFailedTitle)).toBeNull();
     // Both CTAs are back — the empty state is reachable and actionable.
-    expect(screen.queryAllByRole('button', { name: en.newClient }).length).toBeGreaterThan(0);
+    // EXACTLY two: the header action and the empty-state CTA.
+    expect(screen.queryAllByRole('button', { name: en.newClient })).toHaveLength(2);
   });
 
   it('HEALTHY: real clients render, and neither designed state appears', async () => {
-    api.listUcpClients.mockResolvedValue([CLIENT]);
+    api.listUcpClients.mockResolvedValue({ clients: [CLIENT], settlement: 'demo' });
     view();
 
     expect(await screen.findByText(CLIENT.name)).toBeTruthy();
     expect(screen.queryByText(en.clientsFailedTitle)).toBeNull();
     expect(screen.queryByText(en.noClients)).toBeNull();
+  });
+});
+
+describe('ADR 0875 D4 (COM2UX-1) — the page says what an agent will meet on a live-payments host', () => {
+  it('LIVE: warns that checkout and payment are refused', async () => {
+    api.listUcpClients.mockResolvedValue({ clients: [CLIENT], settlement: 'refused_live' });
+    view();
+    expect(await screen.findByText(en.liveRefusedNotice)).toBeTruthy();
+  });
+
+  it('DEMO: no warning', async () => {
+    api.listUcpClients.mockResolvedValue({ clients: [CLIENT], settlement: 'demo' });
+    view();
+    expect(await screen.findByText(CLIENT.name)).toBeTruthy();
+    expect(screen.queryByText(en.liveRefusedNotice)).toBeNull();
   });
 });

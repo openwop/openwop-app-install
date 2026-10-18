@@ -1,6 +1,16 @@
 /**
- * Sales Maps — projection unit tests (ADR 0282). The equirectangular projection +
+ * Sales Maps — projection unit tests (ADR 0282 §2). The equirectangular projection +
  * GeoJSON→SVG-path conversion are pure and must be exact (pins must land on regions).
+ *
+ * Every expected path below is HAND-COMPUTED, never derived from the functions under test:
+ *   x = (lng + 180) / 360 · 1000,  y = (90 − lat) / 180 · 500,  each rounded to 1 dp
+ *   lng 0→500, 1→502.8, 2→505.6, 5→513.9, 6→516.7, 10→527.8
+ *   lat 0→250, 1→247.2, 2→244.4, 5→236.1, 6→233.3, 10→222.2
+ *
+ * Sabotage-witnessed (wave 52): flipping the y axis, dropping the 1-dp rounding `r1` (the
+ * reason it exists: SVG geometry must not go through a locale formatter, and unrounded
+ * floats bloat 176 paths), dropping the closing ` Z`, dropping a Polygon's or a
+ * MultiPolygon member's hole rings, and dropping MultiPolygon members each turn a case red.
  */
 import { describe, expect, it } from 'vitest';
 import { project, ringToPath, geometryToPath, MAP_W, MAP_H, type GeoGeometry } from '../projection.js';
@@ -15,18 +25,30 @@ describe('sales-maps projection', () => {
   });
 
   it('builds a closed SVG path from a ring', () => {
-    const d = ringToPath([[0, 0], [10, 0], [10, 10]]);
-    expect(d.startsWith('M500,250')).toBe(true);
-    expect(d.includes(' L')).toBe(true);
-    expect(d.endsWith(' Z')).toBe(true);
+    expect(ringToPath([[0, 0], [10, 0], [10, 10]])).toBe('M500,250 L527.8,250 L527.8,222.2 Z');
     expect(ringToPath([])).toBe('');
   });
 
   it('handles Polygon and MultiPolygon geometries', () => {
-    const polygon: GeoGeometry = { type: 'Polygon', coordinates: [[[0, 0], [10, 0], [10, 10]]] };
-    expect(geometryToPath(polygon).endsWith('Z')).toBe(true);
-    const multi: GeoGeometry = { type: 'MultiPolygon', coordinates: [[[[0, 0], [1, 0], [1, 1]]], [[[5, 5], [6, 5], [6, 6]]]] };
-    // two rings → two Z's
-    expect((geometryToPath(multi).match(/Z/g) ?? []).length).toBe(2);
+    // A Polygon's later rings are holes — they must reach the path too.
+    const polygon: GeoGeometry = {
+      type: 'Polygon',
+      coordinates: [[[0, 0], [10, 0], [10, 10]], [[1, 1], [2, 1], [2, 2]]],
+    };
+    expect(geometryToPath(polygon)).toBe(
+      'M500,250 L527.8,250 L527.8,222.2 Z M502.8,247.2 L505.6,247.2 L505.6,244.4 Z',
+    );
+    // Two members, the first with a hole: every member and every ring is drawn.
+    const multi: GeoGeometry = {
+      type: 'MultiPolygon',
+      coordinates: [
+        [[[0, 0], [10, 0], [10, 10]], [[1, 1], [2, 1], [2, 2]]],
+        [[[5, 5], [6, 5], [6, 6]]],
+      ],
+    };
+    expect(geometryToPath(multi)).toBe(
+      'M500,250 L527.8,250 L527.8,222.2 Z M502.8,247.2 L505.6,247.2 L505.6,244.4 Z'
+        + ' M513.9,236.1 L516.7,236.1 L516.7,233.3 Z',
+    );
   });
 });

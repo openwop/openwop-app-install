@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { renderHook, act } from '@testing-library/react';
+import { renderHook, waitFor } from '@testing-library/react';
 
 /**
  * ADR 0140 P1 gate — the multi-tab persistence-isolation test.
@@ -108,8 +108,11 @@ describe('ADR 0140 — useChatSession: two concurrent backend-keyed tabs stay is
   it('each tab hydrates its OWN thread and neither writes the singleton cache', async () => {
     const a = renderHook(() => useChatSession({ sessionId: 'tab-A' }));
     const b = renderHook(() => useChatSession({ sessionId: 'tab-B' }));
-    // Flush the one-shot mount-load + its setState for both hooks.
-    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    // Settle on the real signal: each tab's one-shot mount-load has resolved.
+    await waitFor(() => {
+      expect(a.result.current.isHydrating).toBe(false);
+      expect(b.result.current.isHydrating).toBe(false);
+    });
 
     expect(a.result.current.session.id).toBe('tab-A');
     expect(b.result.current.session.id).toBe('tab-B');
@@ -128,8 +131,7 @@ describe('ADR 0140 — useChatSession: two concurrent backend-keyed tabs stay is
 
   it('the singleton main chat (no sessionId) DOES write the current-session cache', async () => {
     const main = renderHook(() => useChatSession());
-    await act(async () => { await Promise.resolve(); });
-    expect(localStorage.getItem(LS_CURRENT_SESSION_KEY)).not.toBeNull();
+    await waitFor(() => expect(localStorage.getItem(LS_CURRENT_SESSION_KEY)).not.toBeNull());
     main.unmount();
   });
 });
@@ -147,7 +149,7 @@ describe('ADR 0140 — backend-keyed not_found breaks the remount→404→re-key
     const onSessionIdChange = vi.fn();
 
     const tab = renderHook(() => useChatSession({ sessionId: 'dead-tab', onSessionIdChange }));
-    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    await waitFor(() => expect(tab.result.current.isHydrating).toBe(false));
 
     // Recovered to a fresh empty chat under a NEW id, no error surfaced.
     expect(tab.result.current.session.id).not.toBe('dead-tab');

@@ -512,6 +512,8 @@ export const messages = {
   localeOutdatedTag: 'outdated',
   translationOutdatedChip: 'Outdated',
   translationOutdatedHint: 'The base text this translation covers changed after it was written. Update the translation, or mark it up to date if it still reads correctly.',
+  translationUnknownChip: 'Not confirmed',
+  translationUnknownHint: 'Nothing confirms this translation matches the base text — it may be a copy of the base that still needs translating. Translate it, or mark it up to date if it already reads correctly.',
   confirmSourceAction: 'Mark up to date',
   translationOutdatedSummary: 'Outdated translations: {{list}}',
   translationOutdatedSummaryItem_one: '{{language}}: {{count}} section',

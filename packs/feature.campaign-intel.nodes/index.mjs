@@ -5,12 +5,11 @@
  * narrative on top of the deterministic recommendation. role:"action". Pure-JS.
  */
 
-/** DEBT-3 — pack-local mirror of the providers.json SSoT default (the
- *  anthropic `recommended: true` model; src/providers/catalog.ts
- *  getDefaultModel). ctx.callAI REQUIRES an explicit model and standalone
- *  .mjs packs cannot import the catalog, so the default lives in this ONE
- *  greppable constant — the /refresh-model-catalog sweep updates it. */
-const DEFAULT_MODEL = 'claude-sonnet-4-6';
+/** ADR 0903 — no hard-coded vendor. A call passes the provider/model the node
+ *  was given (a chain param frozen at instantiation, or a node input) and leaves
+ *  the rest to the host: `ctx.callAI` fills a missing provider/model from the
+ *  run's choice (`configurable.ai`), else the workspace's active AI binding, else
+ *  the catalog default — resolved once at run start (host/runAiDefault.ts). */
 
 function ensureIntel(ctx) {
   const ci = ctx.features && ctx.features['campaign-intel'];
@@ -34,8 +33,8 @@ export async function budgetOptimize(ctx) {
   if (i.narrate && typeof ctx.callAI === 'function') {
     try {
       const ai = await ctx.callAI({
-        provider: str(i.provider) || 'anthropic',
-        model: str(i.model) || DEFAULT_MODEL,
+        provider: str(i.provider) || undefined,
+        model: str(i.model) || undefined,
         systemPrompt: 'You are a marketing budget analyst. Given a deterministic budget reallocation recommendation, explain it in 2-3 sentences a CMO can act on. Be specific about the trade-off; do not invent numbers beyond the data.',
         messages: [{ role: 'user', content: JSON.stringify(recommendation) }],
       });
@@ -97,7 +96,7 @@ export async function planBudgetNode(ctx) {
   if (typeof ctx.callAI === 'function' && i.narrate !== false) {
     try {
       const ai = await ctx.callAI({
-        provider: str(i.provider) || 'anthropic', model: str(i.model) || DEFAULT_MODEL,
+        provider: str(i.provider) || undefined, model: str(i.model) || undefined,
         systemPrompt: 'You explain a computed media budget plan to a marketer in 3-5 sentences. Use ONLY the numbers provided — never invent or recompute figures.',
         messages: [{ role: 'user', content: JSON.stringify(out.plan) }],
       });

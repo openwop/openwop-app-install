@@ -13,13 +13,15 @@ import { MemoryRouter } from 'react-router-dom';
 import { KanbanBoardView } from '../KanbanBoardView.js';
 import type { KanbanBoard, KanbanCard } from '../kanbanClient.js';
 
-const board = {
+const board: KanbanBoard = {
   id: 'b1', tenantId: 't1', name: 'Board',
   columns: [{ id: 'todo', name: 'To Do' }, { id: 'doing', name: 'Doing' }, { id: 'done', name: 'Done' }],
   createdAt: '2026-09-28T00:00:00Z', updatedAt: '2026-09-28T00:00:00Z',
-} as KanbanBoard;
-const card = (over: Partial<KanbanCard>): KanbanCard =>
-  ({ id: 'c1', boardId: 'b1', columnId: 'doing', title: 'Work', order: 0, ...over } as KanbanCard);
+};
+const card = (over: Partial<KanbanCard>): KanbanCard => ({
+  id: 'c1', boardId: 'b1', columnId: 'doing', title: 'Work', order: 0,
+  createdAt: '2026-09-28T00:00:00Z', updatedAt: '2026-09-28T00:00:00Z', ...over,
+});
 
 const renderCard = (c: KanbanCard): void => {
   render(<MemoryRouter><KanbanBoardView board={board} cards={[c]} onMoveCard={vi.fn()} /></MemoryRouter>);

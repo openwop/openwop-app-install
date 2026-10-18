@@ -5,6 +5,11 @@
  *   - create / list / get / update / delete a persona (org-scoped)
  *   - buyer-stage clamp + list filtering by brandId
  *   - IDOR: a co-tenant member without read in the org gets 404
+ *
+ * Wave 30 (grade-tests): the IDOR stranger is a SAME-tenant user with no org
+ * membership (it used to be a personal-tenant stranger, refused by the tenant key
+ * before the org gate ran — sabotaging the gate stayed green), with the owner's
+ * read as the positive control. The toggle-off leg restores in `finally`.
  */
 
 import http from 'node:http';
@@ -14,6 +19,8 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
+import { createOrg } from '../src/host/accessControlService.js';
+import type { Persona } from '../src/features/campaign-brief/types.js';
 
 let BASE: string;
 let server: http.Server;
@@ -30,24 +37,26 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T }
+/** The response bodies this file reads (each route fills a subset). */
+interface Body { persona?: Persona; personas?: Persona[]; orgId?: string; user?: { userId: string } }
+interface Res<T = Body> { status: number; body: T }
 interface Client { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res>; patch: (p: string, b?: unknown) => Promise<Res>; del: (p: string) => Promise<Res> }
 function client(): Client {
   let cookie = '';
   const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    const out = (res.status === 204 ? {} : await res.json().catch(() => ({}))) as Body;
     return { status: res.status, body: out };
   };
   return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), patch: (p, b) => call('PATCH', p, b), del: (p) => call('DELETE', p) };
 }
 
 const uniqEmail = (who: string): string => `${who}-${Date.now()}-${n++}@acme.test`;
-async function signup(c: Client): Promise<{ userId: string }> {
-  const r = await c.post('/host/openwop-app/test/login', { email: uniqEmail('cb') });
+async function signup(c: Client, tenantId?: string): Promise<{ userId: string }> {
+  const r = await c.post('/host/openwop-app/test/login', { email: uniqEmail('cb'), ...(tenantId ? { tenantId } : {}) });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  return r.body.user;
+  return r.body.user!;
 }
 const enable = async (status: 'on' | 'off'): Promise<void> => { const d = getToggleDefault('campaign-brief'); if (d) await saveConfig({ ...d, status }, 'test'); };
 
@@ -56,7 +65,7 @@ async function ownerWithOrg(): Promise<{ owner: Client; orgId: string }> {
   await signup(owner);
   const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
-  return { owner, orgId: org.body.orgId };
+  return { owner, orgId: org.body.orgId! };
 }
 
 const P = '/host/openwop-app/campaign-brief/personas';
@@ -64,10 +73,11 @@ const P = '/host/openwop-app/campaign-brief/personas';
 describe('campaign-brief personas — toggle gating', () => {
   it('404s when the toggle is off', async () => {
     await enable('off');
-    const c = client();
-    await signup(c);
-    expect((await c.get(P)).status).toBe(404);
-    await enable('on');
+    try {
+      const c = client();
+      await signup(c);
+      expect((await c.get(P)).status).toBe(404);
+    } finally { await enable('on'); }
   });
 });
 
@@ -76,18 +86,18 @@ describe('campaign-brief personas — CRUD', () => {
     const { owner, orgId } = await ownerWithOrg();
     const r = await owner.post(P, { orgId, name: 'Ops Director', role: 'Operations Director', buyerStage: 'not_a_stage', painPoints: ['labor shortage'], objections: ['too expensive'] });
     expect(r.status, JSON.stringify(r.body)).toBe(201);
-    expect(r.body.persona.buyerStage).toBe('problem_aware'); // clamped
-    expect(r.body.persona.painPoints).toEqual(['labor shortage']);
-    const id = r.body.persona.id;
+    expect(r.body.persona!.buyerStage).toBe('problem_aware'); // clamped
+    expect(r.body.persona!.painPoints).toEqual(['labor shortage']);
+    const id = r.body.persona!.id;
 
     const list = await owner.get(`${P}?orgId=${orgId}`);
     expect(list.status).toBe(200);
-    expect(list.body.personas.map((p: any) => p.id)).toContain(id);
+    expect(list.body.personas!.map((p) => p.id)).toContain(id);
 
     const patched = await owner.patch(`${P}/${id}`, { buyerStage: 'product_aware', goals: ['cut cost'] });
     expect(patched.status).toBe(200);
-    expect(patched.body.persona.buyerStage).toBe('product_aware');
-    expect(patched.body.persona.goals).toEqual(['cut cost']);
+    expect(patched.body.persona!.buyerStage).toBe('product_aware');
+    expect(patched.body.persona!.goals).toEqual(['cut cost']);
 
     const del = await owner.del(`${P}/${id}`);
     expect(del.status).toBe(200);
@@ -99,7 +109,7 @@ describe('campaign-brief personas — CRUD', () => {
     const a = await owner.post(P, { orgId, name: 'A', brandId: 'brand-1' });
     await owner.post(P, { orgId, name: 'B', brandId: 'brand-2' });
     const list = await owner.get(`${P}?orgId=${orgId}&brandId=brand-1`);
-    expect(list.body.personas.map((p: any) => p.id)).toEqual([a.body.persona.id]);
+    expect(list.body.personas!.map((p) => p.id)).toEqual([a.body.persona!.id]);
   });
 
   it('requires a name', async () => {
@@ -110,12 +120,20 @@ describe('campaign-brief personas — CRUD', () => {
 
 describe('campaign-brief personas — isolation', () => {
   it('a member without read in the persona org gets a uniform 404', async () => {
-    const { owner, orgId } = await ownerWithOrg();
-    const created = await owner.post(P, { orgId, name: 'Secret' });
-    const id = created.body.persona.id;
+    // ONE explicit tenant for owner + stranger: the stranger is a co-tenant user
+    // with no membership in the org, so the ORG gate (not the tenant key) refuses.
+    const tenantId = `cb-persona-iso-${Date.now()}-${n++}`;
+    const owner = client();
+    const { userId: ownerId } = await signup(owner, tenantId);
+    const org = await createOrg({ tenantId, createdBy: ownerId, name: 'Acme', ownerSubject: ownerId });
+    const created = await owner.post(P, { orgId: org.orgId, name: 'Secret' });
+    expect(created.status, JSON.stringify(created.body)).toBe(201);
+    const id = created.body.persona!.id;
+    expect((await owner.get(`${P}/${id}`)).status).toBe(200); // positive control
     const stranger = client();
-    await signup(stranger);
+    await signup(stranger, tenantId);
     expect((await stranger.get(`${P}/${id}`)).status).toBe(404);
     expect((await stranger.patch(`${P}/${id}`, { name: 'x' })).status).toBe(404);
+    expect((await owner.get(`${P}/${id}`)).body.persona!.name).toBe('Secret'); // the refused patch did not land
   });
 });

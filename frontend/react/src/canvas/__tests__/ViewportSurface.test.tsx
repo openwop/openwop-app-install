@@ -30,7 +30,8 @@ describe('ViewportSurface', () => {
     const zoomOut = screen.getByRole('button', { name: 'Zoom out' });
     fireEvent.click(zoomIn);
     expect(screen.getByRole('button', { name: /120%/ })).toBeTruthy();
-    expect(stage(container).style.transform).toContain('scale(1.2');
+    // jsdom has no layout (clientWidth 0) → the zoom focal point is (0,0), so pan stays 0.
+    expect(stage(container).style.transform).toBe('translate(0px, 0px) scale(1.2)');
     fireEvent.click(zoomOut);
     expect(screen.getByRole('button', { name: /100%/ })).toBeTruthy();
   });
@@ -48,9 +49,11 @@ describe('ViewportSurface', () => {
 
   it('the preset menu jumps to an absolute percent (§7.3/CV-3)', () => {
     const { container } = render(<ViewportSurface><svg /></ViewportSurface>);
+    // Start OFF 100% so "absolute" is distinguishable from "relative ×2" (which would land at 240%).
+    fireEvent.click(screen.getByRole('button', { name: 'Zoom in' }));
     fireEvent.click(screen.getByRole('button', { name: /presets & fit/ }));
     fireEvent.click(screen.getByRole('menuitem', { name: '200%' }));
-    expect(stage(container).style.transform).toContain('scale(2');
+    expect(stage(container).style.transform).toBe('translate(0px, 0px) scale(2)');
     expect(screen.getByRole('button', { name: /Zoom 200%/ })).toBeTruthy();
   });
 
@@ -63,8 +66,11 @@ describe('ViewportSurface', () => {
     expect(screen.getByRole('button', { name: /120%/ })).toBeTruthy();
   });
 
-  it('labels the chrome group for AT', () => {
+  it('labels the chrome group and the focusable pan region for AT', () => {
     render(<ViewportSurface><svg /></ViewportSurface>);
     expect(screen.getByRole('group', { name: 'Zoom' })).toBeTruthy();
+    // The wrapper is the focusable, labeled region keyboard users pan with arrows.
+    const region = screen.getByRole('region', { name: 'Canvas viewport — arrow keys pan' });
+    expect(region.getAttribute('tabindex')).toBe('0');
   });
 });

@@ -4,6 +4,7 @@
  * doc↔nodes/edges mapping and the clone-mutating helpers the chassis commits.
  */
 import { describe, it, expect } from 'vitest';
+import type { ReactElement } from 'react';
 import { appBuilderGraph } from '../appBuilderGraph.js';
 import type { AppDoc } from '../screenOps.js';
 
@@ -52,26 +53,26 @@ describe('appBuilderGraph — mutations (clone-mutating; chassis commits)', () =
 
   it('connect rejects self / missing / duplicate, accepts a new edge', () => {
     const d = doc();
-    expect(appBuilderGraph.connect(d, 'home', 'home')).toBe(false); // self
-    expect(appBuilderGraph.connect(d, 'home', 'ghost')).toBe(false); // missing target
-    expect(appBuilderGraph.connect(d, 'home', 'next')).toBe(false); // duplicate
+    expect(appBuilderGraph.connect!(d, 'home', 'home')).toBe(false); // self
+    expect(appBuilderGraph.connect!(d, 'home', 'ghost')).toBe(false); // missing target
+    expect(appBuilderGraph.connect!(d, 'home', 'next')).toBe(false); // duplicate
     expect(d.connectors).toHaveLength(1);
-    expect(appBuilderGraph.connect(d, 'next', 'home')).toBe(true);
+    expect(appBuilderGraph.connect!(d, 'next', 'home')).toBe(true);
     expect(d.connectors).toHaveLength(2);
     expect(d.connectors![1]).toEqual({ from: 'next', to: 'home' });
   });
 
   it('connect bootstraps the connectors array when absent', () => {
     const d: AppDoc = { name: 'A', screens: [{ id: 'a', name: 'A' }, { id: 'b', name: 'B' }] };
-    expect(appBuilderGraph.connect(d, 'a', 'b')).toBe(true);
+    expect(appBuilderGraph.connect!(d, 'a', 'b')).toBe(true);
     expect(d.connectors).toEqual([{ from: 'a', to: 'b' }]);
   });
 
   it('deleteEdge splices by index; out-of-range is a no-op', () => {
     const d = doc();
-    appBuilderGraph.deleteEdge(d, '5');
+    appBuilderGraph.deleteEdge!(d, '5');
     expect(d.connectors).toHaveLength(1);
-    appBuilderGraph.deleteEdge(d, '0');
+    appBuilderGraph.deleteEdge!(d, '0');
     expect(d.connectors).toHaveLength(0);
   });
 });
@@ -99,18 +100,28 @@ describe('appBuilderGraph — addConnectedNode (audit gap #2)', () => {
   it('creates a screen beside the source + an auto-connector, returning the new id', () => {
     const d = doc();
     const id = appBuilderGraph.addConnectedNode!(d, 'home', 'Screen 3');
-    expect(id).toBeTruthy();
-    const created = d.screens.find((s) => s.id === id)!;
-    expect(created.name).toBe('Screen 3');
-    expect(created.x).toBe(10 + 190 + 120); // source.x + NODE_W + SPAWN_GAP
-    expect(created.y).toBe(20);
-    expect(d.connectors!.some((c) => c.from === 'home' && c.to === id)).toBe(true);
+    expect(id).toBe('screen-3');
+    // source.x 10 + NODE_W 190 + SPAWN_GAP 120 = 320; y follows the source.
+    expect(d.screens[2]).toEqual({ id: 'screen-3', name: 'Screen 3', route: '/screen-3', components: [], x: 320, y: 20 });
+    expect(d.connectors).toEqual([
+      { from: 'home', to: 'next', trigger: 'click', routingStyle: 'bezier', animated: true, label: 'Go' },
+      { from: 'home', to: 'screen-3' },
+    ]);
   });
   it('returns null for a missing source or at the screen cap', () => {
     expect(appBuilderGraph.addConnectedNode!(doc(), 'ghost', 'X')).toBeNull();
+    // Positive control one below the cap, so the null below is the CAP talking.
+    const nearly = doc();
+    while (nearly.screens.length < 59) nearly.screens.push({ id: `s${nearly.screens.length}`, name: 'S' });
+    expect(appBuilderGraph.addConnectedNode!(nearly, 'home', 'X')).toBe('x');
+    // Honest ceiling (w36 graph-cap): the trait's own `>= MAX_SCREENS` check is
+    // doubled by frameOps.addFrame's `max`, so this null cannot tell which guard
+    // fired — the outcome (no 61st screen, no dangling connector) is what is pinned.
     const full = doc();
     while (full.screens.length < 60) full.screens.push({ id: `s${full.screens.length}`, name: 'S' });
     expect(appBuilderGraph.addConnectedNode!(full, 'home', 'X')).toBeNull();
+    expect(full.screens).toHaveLength(60);
+    expect(full.connectors).toHaveLength(1);
   });
   it('§7.4/CV-10 link-drag-create: a drop position lands the screen there, grid-snapped', () => {
     const d = doc();
@@ -118,21 +129,21 @@ describe('appBuilderGraph — addConnectedNode (audit gap #2)', () => {
     const created = d.screens.find((sc) => sc.id === id);
     expect(created?.x).toBe(340); // 333 → snapped to the 20px grid
     expect(created?.y).toBe(280);
-    expect(d.connectors?.some((c) => c.from === 'home' && c.to === id)).toBe(true);
-  });
-  it('without a position the offset placement is unchanged (keyboard/button path)', () => {
-    const d = doc();
-    const from = d.screens.find((sc) => sc.id === 'home');
-    const id = appBuilderGraph.addConnectedNode!(d, 'home', 'Offset');
-    const created = d.screens.find((sc) => sc.id === id);
-    expect(created?.x).toBe(((from?.x as number) ?? 80) + 190 + 120);
+    expect(d.connectors?.[1]).toEqual({ from: 'home', to: 'dropped' });
   });
 });
 
 describe('appBuilderGraph — renderNode', () => {
   it('renders a screen body when the node carries a payload, null otherwise', () => {
     const nodes = appBuilderGraph.nodes(doc());
-    expect(appBuilderGraph.renderNode(nodes[0]!, { selected: false })).toBeTruthy();
+    const el = appBuilderGraph.renderNode(nodes[0]!, { selected: false }) as ReactElement;
+    // The board preview gets the SAME screen + theme + sample rows the full preview does.
+    expect(el.props).toEqual({
+      screen: { id: 'home', name: 'Home', isInitial: true, x: 10, y: 20, components: [{ type: 'button' }] },
+      theme: 'dark',
+      themeColors: { primary: '#7c5cff' },
+      dataSources: [{ id: 'rows', name: 'Rows', rows: [{ a: 1 }] }],
+    });
     expect(appBuilderGraph.renderNode({ id: 'x', label: 'X' }, { selected: false })).toBeNull();
   });
 });

@@ -15,6 +15,7 @@ import { Button } from '../../ui/Button.js';
 import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
+import { PageHeader } from '../../ui/PageHeader.js';
 import { StateCard } from '../../ui/StateCard.js';
 import { Notice } from '../../ui/Notice.js';
 import { KeyFigureBand } from '../../ui/KeyFigure.js';
@@ -36,14 +37,11 @@ export function AuditMetricsPage(): JSX.Element {
       <div className="action-bar">
         <Link className="btn-ghost btn-sm" to="/admin/kicktodo">{t('backToConsole')}</Link>
       </div>
-      <header className="page-header">
-        <h1 className="page-header__title">{t('auditMetricsTitle')}</h1>
-        <p className="page-header__lede">{t('auditMetricsLede')}</p>
-      </header>
+      <PageHeader title={t('auditMetricsTitle')} lede={t('auditMetricsLede')} />
 
       {error && (
         <>
-          <Notice variant="error">{t('auditMetricsError')}</Notice>
+          <Notice variant="error" announce={t('auditMetricsError')}>{t('auditMetricsError')}</Notice>
           <div className="action-bar">
             <Button variant="quiet" size="sm" onClick={() => void reload()}>{t('retry')}</Button>
           </div>

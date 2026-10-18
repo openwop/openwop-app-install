@@ -7,6 +7,10 @@ import { OpenwopError } from '../../types.js';
 import { paidListings, sellers, nowIso, type PaidListing, type ListingLane } from './stores.js';
 import { listingTombstones, listingState, platformRegion, assertFoldEligibleTenant, type ListingState } from './stores.js';
 import { hasPaidOrder } from './orders.js';
+import { toStripeMinorUnits, fromStripeMinorUnits } from '../billing/stripeApi.js';
+
+/** ADR 0877 D7 — the ceiling a single pack price may carry (major units). */
+const MAX_LISTING_PRICE_MAJOR = 1_000_000;
 import {
   createCommerceListingApproval,
   findPendingCommerceListingApproval,
@@ -120,6 +124,23 @@ export async function upsertPaidListing(
   }
   if (input.lane === 'native-paid' && (!(input.priceMajorUnits! > 0) || !input.currency)) {
     throw new OpenwopError('validation_error', 'A native-paid listing needs a positive price and a currency.', 400, {});
+  }
+  // ADR 0877 D7 — the ADR 0875 F13 class on this store: a price is quantized to the
+  // currency's minor unit on WRITE (a 10.005 price otherwise meant the operator
+  // approved one figure and Stripe charged another), bounded, and the currency is
+  // an ISO-4217 shape rather than any string Stripe will later reject.
+  if (input.currency !== undefined && !/^[a-zA-Z]{3}$/.test(input.currency)) {
+    throw new OpenwopError('validation_error', 'currency must be a 3-letter ISO 4217 code.', 400, { field: 'currency' });
+  }
+  if (input.priceMajorUnits !== undefined) {
+    if (!Number.isFinite(input.priceMajorUnits) || input.priceMajorUnits < 0 || input.priceMajorUnits > MAX_LISTING_PRICE_MAJOR) {
+      throw new OpenwopError('validation_error', `price must be a number no greater than ${MAX_LISTING_PRICE_MAJOR}.`, 400, { field: 'priceMajorUnits' });
+    }
+    const cur = (input.currency ?? 'usd').toLowerCase();
+    input = { ...input, priceMajorUnits: fromStripeMinorUnits(toStripeMinorUnits(input.priceMajorUnits, cur), cur) };
+    if (input.lane === 'native-paid' && !(input.priceMajorUnits! > 0)) {
+      throw new OpenwopError('validation_error', 'A native-paid listing needs a price of at least one minor unit.', 400, { field: 'priceMajorUnits' });
+    }
   }
   if (input.lane === 'external-link' && !/^https:\/\//.test(input.externalPaymentUrl ?? '')) {
     throw new OpenwopError('validation_error', 'An external-link listing needs an https payment URL.', 400, {});

@@ -9,7 +9,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { PageHeader } from '../../ui/PageHeader.js';
 import { TextField, SelectField } from '../../ui/Field.js';
-import { formatNumber } from '../../i18n/format.js';
+import { formatCurrency, formatNumber } from '../../i18n/format.js';
 import { Notice } from '../../ui/Notice.js';
 import { StateCard } from '../../ui/StateCard.js';
 import { useOrgSelection } from '../../ui/useOrgSelection.js';
@@ -113,14 +113,20 @@ export function PromotionsPage(): JSX.Element {
 
   // PRO-G2 — a percentage reward got its `%`; a FIXED-amount reward rendered as a
   // bare number with no unit at all, so "10" could be 10 currency units or
-  // anything else. A promotion carries no currency field, so (per the rule this
-  // programme applied three times over) no symbol is invented — the reward KIND
-  // is named instead, which is a fact we actually have.
+  // anything else. No symbol is ever invented — the reward KIND is named instead.
+  // PROMO-CUR-1 — but since R2 PRO2-P1 a promotion DOES record the currency its
+  // amounts are in (captured at intake), and the list still dropped it, so a
+  // EUR 10 reward read "10 off". Every money amount below now carries the
+  // recorded currency; a promotion without one (pre-PRO2-P1) stays a bare number.
+  const money = useCallback(
+    (value: number, p: Promotion) => (p.currency ? formatCurrency(value, p.currency) : formatNumber(value)),
+    [],
+  );
   const rewardLabel = useCallback(
     (p: Promotion) => p.reward.kind === 'percentage'
       ? t('rewardPercent', { value: formatNumber(p.reward.value) })
-      : t('rewardFixed', { value: formatNumber(p.reward.value) }),
-    [t],
+      : t('rewardFixed', { value: money(p.reward.value, p) }),
+    [t, money],
   );
 
   /**
@@ -131,12 +137,12 @@ export function PromotionsPage(): JSX.Element {
    */
   const conditionLabels = useCallback((p: Promotion): string[] => {
     const out: string[] = [];
-    if (p.minSpend !== undefined) out.push(t('condMinSpend', { value: formatNumber(p.minSpend) }));
-    if (p.budget?.maxDiscount !== undefined) out.push(t('condBudget', { value: formatNumber(p.budget.maxDiscount) }));
+    if (p.minSpend !== undefined) out.push(t('condMinSpend', { value: money(p.minSpend, p) }));
+    if (p.budget?.maxDiscount !== undefined) out.push(t('condBudget', { value: money(p.budget.maxDiscount, p) }));
     if (p.budget?.maxQuantity !== undefined) out.push(t('condMaxQty', { value: formatNumber(p.budget.maxQuantity) }));
     if (p.segmentId) out.push(t('condSegment', { segment: p.segmentId }));
     return out;
-  }, [t]);
+  }, [t, money]);
 
   const columns = useMemo<DataColumn<Promotion>[]>(() => [
     { key: 'name', header: t('colName'), render: (p) => p.name, sortValue: (p) => p.name },
@@ -159,7 +165,7 @@ export function PromotionsPage(): JSX.Element {
       return (
         <span className="u-flex u-items-center u-gap-1">
           <span className={p.active ? 'chip chip--success' : 'chip chip--muted'}>{p.active ? t('active') : t('paused')}</span>
-          {u && p.budget?.maxDiscount !== undefined ? <span className="u-fs-12 muted">{t('burn', { spent: formatNumber(u.amount), cap: formatNumber(p.budget.maxDiscount) })}</span> : null}
+          {u && p.budget?.maxDiscount !== undefined ? <span className="u-fs-12 muted">{t('burn', { spent: money(u.amount, p), cap: money(p.budget.maxDiscount, p) })}</span> : null}
         </span>
       );
     } },
@@ -169,7 +175,7 @@ export function PromotionsPage(): JSX.Element {
         <Button variant="quiet" onClick={() => void remove(p)} aria-label={t('deleteRowLabel', { name: p.name })}>{t('common:delete')}</Button>
       </span>
     ) },
-  ], [t, rewardLabel, conditionLabels, toggleActive, remove, usage]);
+  ], [t, rewardLabel, conditionLabels, toggleActive, remove, usage, money]);
 
   // The toggle has not resolved yet — a shape-matched skeleton UNDER the real
   // header, not a `StateCard`: the card's only text would be the page title, so

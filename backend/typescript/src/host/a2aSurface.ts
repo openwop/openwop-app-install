@@ -226,6 +226,8 @@ export async function negotiateA2aPeer(baseUrl: string, opts: A2aNegotiationOpti
       reason,
       floor,
       peerUrl: baseUrl,
+      // RFC 0242 §A.2 — the version this host asked the peer for.
+      requested,
       ...(version !== undefined ? { version } : {}),
     });
   const requested = opts.requestVersion ?? advertisedA2AProtocolVersion();

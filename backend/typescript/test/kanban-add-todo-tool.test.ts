@@ -3,11 +3,19 @@
  * real host.kanban card in the agent's own board's `todo` column (the roster
  * heartbeat's work-intake contract) — deliberately WITHOUT a workflow binding
  * (a bare todo is a visible backlog item, not auto-executed work).
+ *
+ * Runs on bare persistence (no app boot). Red if the ADR 0308 floor (acting user
+ * + agent) is dropped, the tz-explicit due-date rule loosens, a filed todo carries
+ * a workflow, the dedupe key gains entropy or loses its agent discriminator, the
+ * D7 receipt reports To Do for a moved card, or the conversation provenance is
+ * dropped on the card or the approval (probes w37g1-td-*). The cross-board
+ * `cardId` collision (GC-0311-1) case below is protected and also pinned by
+ * kanban-deterministic-card.test.ts.
  */
-import http from 'node:http';
-import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { createApp } from '../src/index.js';
+import { openStorage } from '../src/storage/index.js';
+import { initHostExtPersistence, __resetHostExtPersistence } from '../src/host/hostExtPersistence.js';
+import type { Storage } from '../src/storage/storage.js';
 import { createAgentToolProvider, builtinAgentToolIds, builtinToolNamespaces } from '../src/host/agentToolProvider.js';
 import { getBoard, subjectBoardId, listCards, moveCard } from '../src/host/kanbanService.js';
 import { createRosterEntry } from '../src/host/rosterService.js';
@@ -16,14 +24,15 @@ import { TOOL_GROUNDED_COMMITMENTS } from '../src/host/chatContext.js';
 const TENANT = 'default';
 const TOOL = 'openwop:kanban.add-todo';
 
-let server: http.Server;
+let storage: Storage;
 beforeAll(async () => {
-  process.env.OPENWOP_STORAGE_DSN = 'memory://';
-  process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
-  const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { void (server.address() as AddressInfo); res(); }); });
+  storage = await openStorage('memory://');
+  initHostExtPersistence(storage);
 });
-afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
+afterAll(async () => {
+  __resetHostExtPersistence();
+  await storage.close();
+});
 
 function runTool(input: Record<string, unknown>, scope: { actingUserId?: string; agentProfileId?: string; runId?: string }): Promise<{ content: string; isError?: boolean }> {
   const provider = createAgentToolProvider({ tenantId: TENANT, runId: 'run-adr0311', ...scope });
@@ -72,17 +81,6 @@ describe('ADR 0311 P1 — openwop:kanban.add-todo', () => {
     expect(card?.workflowId).toBeUndefined();
   });
 
-  it('an identical retried call returns the SAME card (deterministic id — no duplicate todos)', async () => {
-    const entry = await createRosterEntry({ tenantId: TENANT, persona: 'Retry Agent', agentRef: { agentId: 'user.default.retry-todo' } });
-    const scope = { actingUserId: 'u-filer', agentProfileId: entry.rosterId };
-    const input = { title: 'Same commitment', detail: 'Same detail.' };
-    const a = JSON.parse((await runTool(input, scope)).content) as { cardId: string };
-    const b = JSON.parse((await runTool(input, scope)).content) as { cardId: string };
-    expect(b.cardId).toBe(a.cardId);
-    const board = await getBoard(subjectBoardId(TENANT, { kind: 'agent', id: entry.rosterId }));
-    expect((await listCards(board!.id)).filter((c) => c.title === 'Same commitment')).toHaveLength(1);
-  });
-
   it('ADR 0774 D7 — a deduped call says so, and reports the column the card is ACTUALLY in', async () => {
     const entry = await createRosterEntry({ tenantId: TENANT, persona: 'Receipt Agent', agentRef: { agentId: 'user.default.receipt-todo' } });
     const scope = { actingUserId: 'u-filer', agentProfileId: entry.rosterId };
@@ -96,6 +94,9 @@ describe('ADR 0311 P1 — openwop:kanban.add-todo', () => {
     // Before ADR 0774 this reported `column: 'To Do'` for a card sitting in Done.
     expect(again).toMatchObject({ alreadyFiled: true, column: 'Done' });
     expect(again.note).toMatch(/already filed/);
+    // …and the retry filed NO duplicate (deterministic id).
+    const board = await getBoard(subjectBoardId(TENANT, { kind: 'agent', id: entry.rosterId }));
+    expect((await listCards(board!.id)).filter((c) => c.title === 'Already worked on')).toHaveLength(1);
   });
 
   it('the P0 scaffold names the three grounding paths (ADR 0311 D1)', () => {

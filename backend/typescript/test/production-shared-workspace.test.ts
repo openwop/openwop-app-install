@@ -16,6 +16,9 @@
  * wrote. A single-caller list would be vacuous (A writes and reads the same HOME
  * partition). No demo bypass, so HOME is genuinely distinct from ACTIVE. Born-red:
  * revert a site to `ctx.user.tenantId` → B stops seeing A's vendor.
+ *
+ * w32 (grade-tests): the case witnessed only the CREATE and LIST sites of the
+ * fourteen; it now also drives GET-one, PATCH and the plans list as member B.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -23,16 +26,27 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
+import { savePlan } from '../src/features/production/productionService.js';
 
 let BASE = '';
 let server: http.Server;
 let n = 0;
 
-interface Res<T = Record<string, any>> { status: number; body: T }
+/** The response fields this file reads — no `any`. */
+interface Body {
+  workspaceId?: string;
+  token?: string;
+  vendorId?: string;
+  name?: string;
+  notes?: string;
+  vendors?: Array<{ vendorId: string }>;
+  plans?: Array<{ planId: string }>;
+}
+interface Res { status: number; body: Body }
 
 function client() {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<Res<any>> => {
+  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
     const res = await fetch(`${BASE}${path}`, {
       method,
       headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) },
@@ -42,9 +56,9 @@ function client() {
     const single = res.headers.get('set-cookie');
     const setCookies: string[] = typeof h.getSetCookie === 'function' ? h.getSetCookie() : single ? [single] : [];
     for (const sc of setCookies) { const m = /(__session=[^;]+)/.exec(sc); if (m) cookie = m[1]!; }
-    return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) };
+    return { status: res.status, body: res.status === 204 ? {} : ((await res.json().catch(() => ({}))) as Body) };
   };
-  return { get: (p: string) => call('GET', p), post: (p: string, b?: unknown) => call('POST', p, b) };
+  return { get: (p: string) => call('GET', p), post: (p: string, b?: unknown) => call('POST', p, b), patch: (p: string, b?: unknown) => call('PATCH', p, b) };
 }
 type Client = ReturnType<typeof client>;
 
@@ -59,9 +73,9 @@ async function sharedWorkspace(c: Client): Promise<string> {
   const ws = await c.post('/host/openwop-app/workspaces', { name: `Prod WS ${n++}` });
   expect(ws.status, JSON.stringify(ws.body)).toBe(201);
   expect(ws.body.workspaceId, 'must be a real shared workspace').toMatch(/^ws:/);
-  const sw = await c.post(`/host/openwop-app/workspaces/${encodeURIComponent(ws.body.workspaceId)}/switch`);
+  const sw = await c.post(`/host/openwop-app/workspaces/${encodeURIComponent(ws.body.workspaceId!)}/switch`);
   expect(sw.status, JSON.stringify(sw.body)).toBe(200);
-  return ws.body.workspaceId as string;
+  return ws.body.workspaceId!;
 }
 
 /** Invite a second human into the workspace root org and have them accept — the real
@@ -116,8 +130,23 @@ describe('GC-5 — production routes act in the tenant the gate authorized', () 
     // Before the fix B read their OWN home-tenant partition, so this list was empty
     // no matter what A had written — every member held a private invisible copy.
     expect(
-      (list.body.vendors ?? []).map((v: { vendorId: string }) => v.vendorId),
+      (list.body.vendors ?? []).map((v) => v.vendorId),
       'member B must see the org vendor A created, not a private copy',
     ).toContain(created.body.vendorId);
+
+    // GET-one and PATCH act in the same (active) tenant: B reads and edits A's vendor,
+    // and A sees B's edit.
+    const one = await b.get(`${vendorsPath(ws)}/${encodeURIComponent(created.body.vendorId!)}`);
+    expect(one.status, JSON.stringify(one.body)).toBe(200);
+    expect(one.body.name).toBe('Acme Fabrication');
+    const patched = await b.patch(`${vendorsPath(ws)}/${encodeURIComponent(created.body.vendorId!)}`, { notes: 'b was here' });
+    expect(patched.status, JSON.stringify(patched.body)).toBe(200);
+    expect((await a.get(`${vendorsPath(ws)}/${encodeURIComponent(created.body.vendorId!)}`)).body.notes).toBe('b was here');
+
+    // Plans read in the workspace tenant too (a plan is generated into it by a run).
+    await savePlan({ tenantId: ws, orgId: ws, planId: 'pln:gc5-shared', strategySummary: 'Shared plan', recommendations: [] });
+    const plans = await b.get(`/host/openwop-app/production/orgs/${encodeURIComponent(ws)}/plans`);
+    expect(plans.status, JSON.stringify(plans.body)).toBe(200);
+    expect((plans.body.plans ?? []).map((pl) => pl.planId)).toEqual(['pln:gc5-shared']);
   });
 });

@@ -34,7 +34,7 @@ function mount(typeToConfirm?: string): { onConfirm: ReturnType<typeof vi.fn> } 
 }
 
 describe('SET-R2-1 — typeToConfirm arms the destructive button only on an exact match', () => {
-  it('stays disabled for empty and WRONG input; arms on the exact name; fires', () => {
+  it('stays disabled for empty, WRONG and wrong-CASE input; arms on the exact name; fires', () => {
     const { onConfirm } = mount('Acme');
     const btn = screen.getByRole('button', { name: 'Delete' });
     expect((btn as HTMLButtonElement).disabled).toBe(true);
@@ -42,6 +42,11 @@ describe('SET-R2-1 — typeToConfirm arms the destructive button only on an exac
     fireEvent.change(input, { target: { value: 'Acm' } });
     expect((btn as HTMLButtonElement).disabled).toBe(true);
     // A disabled button must also not fire if something clicks it anyway.
+    fireEvent.click(btn);
+    expect(onConfirm).not.toHaveBeenCalled();
+    // EXACT match: the right letters in the wrong case do not arm it.
+    fireEvent.change(input, { target: { value: 'acme' } });
+    expect((btn as HTMLButtonElement).disabled).toBe(true);
     fireEvent.click(btn);
     expect(onConfirm).not.toHaveBeenCalled();
     fireEvent.change(input, { target: { value: 'Acme' } });

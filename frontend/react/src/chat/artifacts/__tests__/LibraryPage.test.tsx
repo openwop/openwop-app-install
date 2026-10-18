@@ -10,7 +10,11 @@ import { MemoryRouter } from 'react-router-dom';
 // LibraryPage binds its tab filter to ?tab= (useUrlTab) — needs a Router.
 const render = (ui: React.ReactElement) => rtlRender(<MemoryRouter>{ui}</MemoryRouter>);
 
-vi.mock('../artifactClient.js', () => ({ listArtifacts: vi.fn() }));
+// Spread the real module: LibraryPage → ArtifactWorkbench imports more of it.
+vi.mock('../artifactClient.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../artifactClient.js')>()),
+  listArtifacts: vi.fn(),
+}));
 import { listArtifacts, type ArtifactProjection, type ArtifactPage } from '../artifactClient.js';
 import { LibraryPage } from '../LibraryPage.js';
 
@@ -30,7 +34,7 @@ beforeEach(() => mockList.mockReset());
 afterEach(cleanup);
 
 describe('LibraryPage (ART-2)', () => {
-  it('renders the loaded artifacts and filters to images when the Images tab is selected', async () => {
+  it('renders the loaded artifacts and filters to images / files by tab', async () => {
     mockList.mockResolvedValueOnce(page([
       art('run-event:r:a', 'Report A'),
       art('media:img', 'Diagram', { source: 'media', kind: 'image' }),
@@ -43,6 +47,10 @@ describe('LibraryPage (ART-2)', () => {
     fireEvent.click(screen.getByRole('tab', { name: 'Images' }));
     expect(screen.getByText('Diagram')).toBeTruthy();        // image kept
     expect(screen.queryByText('Report A')).toBeNull();        // non-image filtered out
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Files' }));
+    expect(screen.getByText('Report A')).toBeTruthy();       // non-image kept
+    expect(screen.queryByText('Diagram')).toBeNull();         // image filtered out
   });
 
   it('appends the next page via "Load more", then hides the button when the cursor is exhausted', async () => {

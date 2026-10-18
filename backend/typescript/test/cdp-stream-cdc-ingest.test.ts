@@ -8,18 +8,22 @@
  * (topic,partition,offset)/(table,changelogId); SR-1 (the message/row body lives ONLY in
  * `run.metadata.triggerData`, never an event payload); and the flag guardrail — with the
  * default-off flag, stream/change are neither ingested nor advertised.
+ *
+ * Sabotage-witnessed (/grade-tests w38): the `op` check, the (topic,partition,offset) dedup seed
+ * (replaced by a body hash), leaking the envelope into the delivery event, the flag gate in
+ * `ingestExternalEvent`, the stream `key` mapping, and the accept gate's flag term each turn a
+ * case red. (The ADVERT flip itself is asserted over HTTP in cdp-stream-cdc-consumer.test.ts,
+ * "honest-off advert flip".)
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { createApp } from '../src/index.js';
 import { openSqliteStorage } from '../src/storage/sqlite/index.js';
 import { createHostAdapterSuite } from '../src/host/index.js';
 import { getEventLog, setEventLogBackend } from '../src/executor/eventLog.js';
 import { __resetHostExtPersistence, initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { __resetTriggerBridgeStore, listDeliveries, registerSubscription } from '../src/host/triggerBridgeService.js';
 import {
-  EXTERNAL_INGESTION_SOURCES,
   ingestExternalEvent,
-  streamCdcIngestionEnabled,
+  isAcceptedIngestionSource,
   type TriggerEvent,
 } from '../src/host/triggerIngestionService.js';
 
@@ -88,8 +92,13 @@ describe('CDP-1c stream/CDC ingest (RFC 0127, flag-gated)', () => {
 
   it('a change event with an invalid op is rejected (op REQUIRED)', async () => {
     const sub = await reg('change');
-    const result = await ingestExternalEvent(deps, sub, { source: 'change', op: 'upsert' as any, table: 't', changelogId: '1' });
+    // @ts-expect-error — an `op` outside the union IS the case under test (tsc proves it invalid).
+    const result = await ingestExternalEvent(deps, sub, { source: 'change', op: 'upsert', table: 't', changelogId: '1' });
+    // The rejection REASON is deliberately not asserted: today it reads `signature-invalid`, a
+    // mislabel for an op failure (grade-code row) — pinning it would certify the bug.
     expect(result.outcome).toBe('rejected');
+    expect(result.runId).toBeUndefined();
+    expect(await listDeliveries(sub)).toEqual([]); // no delivery, so no run
   });
 
   it('dedup: the same (topic,partition,offset) redelivery returns the prior run (effectively-once)', async () => {
@@ -112,22 +121,31 @@ describe('CDP-1c stream/CDC ingest (RFC 0127, flag-gated)', () => {
     expect(serialized).not.toContain(secret); // body lives only in run.metadata.triggerData
   });
 
-  it('guardrail: stream/change stay OFF the advertised source set + flag is honest', () => {
-    // The advertised set never grows (advertise only what an Accepted RFC covers).
-    expect(EXTERNAL_INGESTION_SOURCES).not.toContain('stream');
-    expect(EXTERNAL_INGESTION_SOURCES).not.toContain('change');
-    // Flag reflects the env we set in this suite.
-    expect(streamCdcIngestionEnabled()).toBe(true);
+  it('guardrail: stream/change are accepted ONLY with the flag on', () => {
+    // The honest-off ACCEPT gate (`isAcceptedIngestionSource`). Replaces a pin on the
+    // EXTERNAL_INGESTION_SOURCES constant whose "never advertised" claim is false of the
+    // product: discovery DOES advertise stream/change when the flag is on (w38).
+    delete process.env.OPENWOP_TRIGGER_STREAM_CDC_ENABLED;
+    try {
+      expect(isAcceptedIngestionSource('stream')).toBe(false);
+      expect(isAcceptedIngestionSource('change')).toBe(false);
+      expect(isAcceptedIngestionSource('webhook')).toBe(true); // the advertised set is unaffected
+    } finally {
+      process.env.OPENWOP_TRIGGER_STREAM_CDC_ENABLED = 'true';
+    }
+    expect(isAcceptedIngestionSource('stream')).toBe(true);
+    expect(isAcceptedIngestionSource('change')).toBe(true);
   });
 
   it('guardrail: with the flag OFF, a stream event is skipped (not ingested)', async () => {
     const sub = await reg('stream');
     delete process.env.OPENWOP_TRIGGER_STREAM_CDC_ENABLED;
-    const result = await ingestExternalEvent(deps, sub, { source: 'stream', topic: 't', partition: 0, offset: '99', message: { a: 1 } });
-    process.env.OPENWOP_TRIGGER_STREAM_CDC_ENABLED = 'true'; // restore for the suite
+    let result: Awaited<ReturnType<typeof ingestExternalEvent>>;
+    try {
+      result = await ingestExternalEvent(deps, sub, { source: 'stream', topic: 't', partition: 0, offset: '99', message: { a: 1 } });
+    } finally {
+      process.env.OPENWOP_TRIGGER_STREAM_CDC_ENABLED = 'true'; // restore for the suite
+    }
     expect(result.outcome).toBe('skipped');
   });
 });
-
-// keep createApp imported reachable (boot wiring parity with sibling ingest tests)
-void createApp;

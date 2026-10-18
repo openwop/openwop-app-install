@@ -42,12 +42,15 @@ describe('readErrorCode', () => {
     expect(readErrorCode(FLAT)).toBe('runner_unavailable');
   });
 
+  // Twin (client wiring): chat/voice/__tests__/voiceClientErrors.test.ts › "still reads a
+  // nested error object from an older peer" — the same tolerance through voiceClient.ok().
   it('tolerates the legacy nested `error.code` during the deprecation window', () => {
     expect(readErrorCode(NESTED)).toBe('runner_unavailable');
   });
 
-  it('prefers FLAT when a body somehow carries both', () => {
-    // A shape no conforming host emits, but the precedence must be stated: the
+  it('reads the code only from `error` — never from `details.code`', () => {
+    // A body cannot carry `error` as both a string and an object, so the risk
+    // here is a reader that also looks at `details.code` and lets it win: the
     // schema's field is the one that wins, never whichever branch runs first.
     expect(readErrorCode({ error: 'flat_wins', details: { code: 'nested_loses' } })).toBe('flat_wins');
   });

@@ -13,13 +13,29 @@
  *   - a 'summary'-level source is in excludeDocumentIds AND contributes its summary
  *     to the binding's extraContext (chunks dropped, summary injected)
  *
+ * Double guard (recorded, wave 20): the `summary` level's "400 without a summary" is enforced
+ * by the ROUTE (`routes.ts` context-level handler) AND the SERVICE (`setSourceContextLevel`);
+ * breaking either alone stays green here (probe w20g5-sum-route-level-guard), by design.
+ *
+ * Sabotage witnesses (w20g5-*): extraContext trust forced trusted/untrusted ⇒ the composition
+ * cases; the summarize route's sid 404 / write-scope / run inputs ⇒ "enqueues a run"; listSources
+ * `hasSummary`, the projection's exclude / untrusted stamp / full-clears ⇒ the level case.
+ *
  * @see docs/adr/0084-research-notebooks.md (Transformations T1)
  */
 
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { getSetCookies } from './headerCookies.js';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+
+// Pass-through spy on the run starter: the REAL run is still enqueued; the spy lets the
+// "enqueues a run" claim assert WHICH workflow ran with WHICH inputs, not only that an id came back.
+vi.mock('../src/host/runStarter.js', async (orig) => {
+  const actual = await orig<typeof import('../src/host/runStarter.js')>();
+  return { ...actual, startWorkflowRun: vi.fn(actual.startWorkflowRun) };
+});
+import { startWorkflowRun } from '../src/host/runStarter.js';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
@@ -50,8 +66,12 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T }
+beforeEach(() => { vi.mocked(startWorkflowRun).mockClear(); });
+
+interface Res { status: number; body: unknown }
 interface Client { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res>; put: (p: string, b?: unknown) => Promise<Res>; del: (p: string) => Promise<Res> }
+/** Narrow a JSON body at the transport boundary (a JSON round-trip, no type assertion). */
+function body<T>(r: Res): T { return JSON.parse(JSON.stringify(r.body ?? null)); }
 function client(): Client {
   let cookie = '';
   const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
@@ -70,8 +90,21 @@ async function ownerWithOrg(who: string): Promise<{ c: Client; orgId: string; te
   const login = await c.post('/host/openwop-app/test/login', { email: uniqEmail(who), tenantId });
   expect(login.status, JSON.stringify(login.body)).toBe(201);
   const org = await c.post('/host/openwop-app/orgs', { name: 'Acme' });
-  return { c, orgId: org.body.orgId, tenantId };
+  return { c, orgId: body<{ orgId: string }>(org).orgId, tenantId };
 }
+/** A co-tenant added to `orgId` as a read-only `viewer` (workspace:read, no :write) — the NB-2 pattern. */
+async function viewerIn(owner: Client, tenantId: string, orgId: string): Promise<Client> {
+  const v = client();
+  const vu = await v.post('/host/openwop-app/test/login', { email: uniqEmail('nb-viewer'), tenantId });
+  const add = await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'V', subject: body<{ user: { userId: string } }>(vu).user.userId, roles: ['viewer'] });
+  expect(add.status, JSON.stringify(add.body)).toBe(201);
+  return v;
+}
+const notebookId = (r: Res): string => body<{ notebook: { id: string } }>(r).notebook.id;
+const documentId = (r: Res): string => body<{ documentId: string }>(r).documentId;
+interface SourceRow { documentId: string; hasSummary: boolean }
+/** The summarize enqueues this case made (other boot-time starters are ignored). */
+const summarizeStarts = () => vi.mocked(startWorkflowRun).mock.calls.map((c) => c[1]).filter((i) => i.workflowId === 'notebooks.summarize');
 
 const NB = '/host/openwop-app/notebooks';
 const FELINE = 'Feline companions: cats groom themselves with their tongue and purr when content.';
@@ -117,37 +150,57 @@ describe('agentKnowledgeComposition — generic extraContext is appended + fence
     );
     const chunks = await retrieve!('q');
     expect(chunks.some((ch) => ch.content === 'A trusted fact.' && ch.contentTrust === 'trusted')).toBe(true);
+    // …and composition CITES it rather than fencing it.
+    const block = await composeAgentKnowledgeContext(retrieve!, 'q');
+    expect(block).toContain('A trusted fact.');
+    expect(block.toUpperCase()).not.toContain('UNTRUSTED');
   });
 });
 
 describe('notebooks — summarize route + Summary context level (T1)', () => {
   it('enqueues a run (write-gated, sid-validated, cross-tenant 404)', async () => {
-    const { c, orgId } = await ownerWithOrg('nb-sum');
-    const id = (await c.post(NB, { orgId, name: 'Pets research' })).body.notebook.id as string;
-    const cat = (await c.post(`${NB}/${id}/sources`, { title: 'Cat facts', text: FELINE })).body.documentId as string;
+    const { c, orgId, tenantId } = await ownerWithOrg('nb-sum');
+    const id = notebookId(await c.post(NB, { orgId, name: 'Pets research' }));
+    const cat = documentId(await c.post(`${NB}/${id}/sources`, { title: 'Cat facts', text: FELINE }));
 
-    // The product path enqueues a REAL run and returns its id (202).
+    // The product path enqueues a REAL run of `notebooks.summarize` for THIS source (202).
     const enq = await c.post(`${NB}/${id}/sources/${cat}/summarize`);
     expect(enq.status, JSON.stringify(enq.body)).toBe(202);
-    expect(typeof enq.body.runId).toBe('string');
-    expect(enq.body.runId.length).toBeGreaterThan(0);
+    const { runId } = body<{ runId: string }>(enq);
+    expect(runId.length).toBeGreaterThan(0);
+    expect(summarizeStarts()).toEqual([
+      expect.objectContaining({ tenantId, workflowId: 'notebooks.summarize', inputs: { notebookId: id, sourceId: cat } }),
+    ]);
+    const run = await c.get(`/runs/${encodeURIComponent(`${tenantId}/${runId}`)}`); // major-2 run id is tenant-bound
+    expect(run.status, JSON.stringify(run.body)).toBe(200);
+    expect(body<{ workflowId: string }>(run).workflowId).toBe('notebooks.summarize');
 
     // unknown sid ⇒ 404.
     expect((await c.post(`${NB}/${id}/sources/ghost/summarize`)).status).toBe(404);
 
+    // write-gated: a co-tenant read-only viewer gets 403 (not 404 — they can read it).
+    const viewer = await viewerIn(c, tenantId, orgId);
+    expect((await viewer.get(`${NB}/${id}/sources`)).status).toBe(200);
+    expect((await viewer.post(`${NB}/${id}/sources/${cat}/summarize`)).status).toBe(403);
+
     // cross-tenant caller ⇒ 404 (uniform IDOR — never reaches enqueue).
     const stranger = await ownerWithOrg('nb-sum-stranger');
     expect((await stranger.c.post(`${NB}/${id}/sources/${cat}/summarize`)).status).toBe(404);
+    expect(summarizeStarts()).toHaveLength(1); // no refused call enqueued anything
   });
 
   it('Summary level is 400 without a summary, 200 after; binding excludes chunks + injects extraContext', async () => {
     const { c, orgId, tenantId } = await ownerWithOrg('nb-sum-level');
-    const id = (await c.post(NB, { orgId, name: 'Pets research' })).body.notebook.id as string;
-    const cat = (await c.post(`${NB}/${id}/sources`, { title: 'Cat facts', text: FELINE })).body.documentId as string;
+    const id = notebookId(await c.post(NB, { orgId, name: 'Pets research' }));
+    const cat = documentId(await c.post(`${NB}/${id}/sources`, { title: 'Cat facts', text: FELINE }));
+    const askHits = async (): Promise<string[]> =>
+      body<{ hits: Array<{ documentId: string }> }>(await c.post(`${NB}/${id}/search`, { query: 'cats groom purr' })).hits.map((h) => h.documentId);
 
     // listSources reports hasSummary:false initially.
-    const before = (await c.get(`${NB}/${id}/sources`)).body.sources as Array<{ documentId: string; hasSummary: boolean }>;
+    const before = body<{ sources: SourceRow[] }>(await c.get(`${NB}/${id}/sources`)).sources;
     expect(before.find((s) => s.documentId === cat)?.hasSummary).toBe(false);
+    // Positive control for the Ask assertion below: at level 'full' the source IS found.
+    expect(await askHits()).toContain(cat);
 
     // Summary level rejected until a summary exists.
     const tooEarly = await c.put(`${NB}/${id}/sources/${cat}/context-level`, { level: 'summary' });
@@ -159,14 +212,13 @@ describe('notebooks — summarize route + Summary context level (T1)', () => {
     await setSourceSummary(tenantId, id, cat, SUMMARY);
 
     // hasSummary now true.
-    const after = (await c.get(`${NB}/${id}/sources`)).body.sources as Array<{ documentId: string; hasSummary: boolean }>;
+    const after = body<{ sources: SourceRow[] }>(await c.get(`${NB}/${id}/sources`)).sources;
     expect(after.find((s) => s.documentId === cat)?.hasSummary).toBe(true);
 
     // Summary level now accepted.
     const ok = await c.put(`${NB}/${id}/sources/${cat}/context-level`, { level: 'summary' });
     expect(ok.status, JSON.stringify(ok.body)).toBe(200);
-    expect(ok.body.contextLevel).toBe('summary');
-    expect(ok.body.hasSummary).toBe(true);
+    expect(body<{ contextLevel: string; hasSummary: boolean }>(ok)).toMatchObject({ contextLevel: 'summary', hasSummary: true });
 
     // The DERIVED binding projection: chunks excluded AND the summary injected as a
     // fenced (untrusted) extraContext item.
@@ -181,8 +233,7 @@ describe('notebooks — summarize route + Summary context level (T1)', () => {
     expect((binding.collectionIds ?? []).length).toBeGreaterThanOrEqual(1);
 
     // The summary source's chunks are dropped from Ask (it's in excludeDocumentIds).
-    const ask = await c.post(`${NB}/${id}/search`, { query: 'cats groom purr' });
-    expect(ask.body.hits.some((h: { documentId: string }) => h.documentId === cat)).toBe(false);
+    expect(await askHits()).not.toContain(cat);
 
     // Switching back to 'full' clears the projection.
     const back = await c.put(`${NB}/${id}/sources/${cat}/context-level`, { level: 'full' });

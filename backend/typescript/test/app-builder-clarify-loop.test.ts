@@ -87,7 +87,8 @@ describe('AI-08 clarify loop — executor semantics', () => {
     const events = await storage.listEvents(run.runId);
     const interruptEvt = events.find((e) => e.type === 'node.suspended');
     expect(interruptEvt, 'an interrupt event must be recorded').toBeTruthy();
-    expect(JSON.stringify(interruptEvt!.payload)).toContain('clarification');
+    expect(interruptEvt!.nodeId).toBe('clarify');
+    expect((interruptEvt!.payload as { kind?: string }).kind).toBe('clarification');
 
     // Resume with the human's answer — the interrupts route's exact shape:
     // the suspended snapshot rides the run record.
@@ -103,7 +104,8 @@ describe('AI-08 clarify loop — executor semantics', () => {
     const done = await storage.listEvents(run.runId);
     const prdCompleted = done.find((e) => e.type === 'node.completed' && e.nodeId === 'prd');
     expect(prdCompleted).toBeTruthy();
-    expect(JSON.stringify(prdCompleted!.payload)).toContain('Small landscaping businesses.');
+    const prdGot = (prdCompleted!.payload as { outputs: { got: Record<string, unknown> } }).outputs.got;
+    expect(prdGot.clarifications).toBe('Small landscaping businesses.');
   });
 
   it('OK verdict: the gate never fires; the next stage runs via the conditional edge', async () => {
@@ -112,7 +114,9 @@ describe('AI-08 clarify loop — executor semantics', () => {
     const result = await executeRun(storage, run, def);
     expect(result.status).toBe('completed');
     const events = await storage.listEvents(run.runId);
-    expect(events.some((e) => e.type === 'node.completed' && e.nodeId === 'prd')).toBe(true);
+    const prd = events.find((e) => e.type === 'node.completed' && e.nodeId === 'prd');
+    // The conditional edge CARRIED the verdict, not merely let the node run.
+    expect((prd?.payload as { outputs: { got: Record<string, unknown> } } | undefined)?.outputs.got).toEqual({ intakeVerdict: 'VERDICT_OK' });
     // The gate never suspended anything.
     expect(events.some((e) => e.type === 'node.suspended')).toBe(false);
   });

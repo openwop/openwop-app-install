@@ -1,8 +1,8 @@
 {
   "name": "feature.profiles.nodes",
-  "version": "1.1.1",
+  "version": "1.2.0",
   "kind": "node",
-  "description": "Profiles feature node pack — reads over ctx.features.profiles (ADR 0172 / ADR 0624): list/get the tenant's profiles (read-only projections) so a workflow can branch or personalize on profile data. get takes { userId } and answers { profile, found } (an empty id is a typed validation_error failure; a real-id miss is found:false). Tenant-guarded; role:action (recorded).",
+  "description": "Profiles feature node pack — reads over ctx.features.profiles (ADR 0172 / ADR 0624 / ADR 0888): list/get the profiles the run's acting user may see (their home tenant, or the people who shared their profile with the run's workspace) as capability projections (no bio, contact or asset tokens). A run with no acting user, an API key, a disabled user or a non-member is a typed forbidden_scope failure. get takes { userId } and answers { profile, found } (an empty id is a typed validation_error failure; an id outside the reader's directory is found:false). role:action (recorded).",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
   "keywords": [
@@ -16,9 +16,9 @@
   "nodes": [
     {
       "typeId": "feature.profiles.nodes.list",
-      "version": "1.1.0",
+      "version": "1.2.0",
       "label": "Profiles: List",
-      "description": "Lists the tenant's profiles over ctx.features.profiles.listProfiles. Output: { profiles }.",
+      "description": "Lists the profiles the run's acting user may see over ctx.features.profiles.listProfiles (ADR 0888: home tenant, or the workspace's opted-in members). Output: { profiles, truncated? }. A run without a signed-in member is a typed forbidden_scope failure.",
       "category": "integration",
       "role": "action",
       "capabilities": [],
@@ -26,9 +26,9 @@
     },
     {
       "typeId": "feature.profiles.nodes.get",
-      "version": "1.1.0",
+      "version": "1.2.0",
       "label": "Profiles: Get",
-      "description": "Reads one member's profile over ctx.features.profiles.getProfile. Inputs: { userId } (the opaque user:<id> in the run's tenant). Output: { profile|null, found }. An empty/absent userId is a typed validation_error node FAILURE (never success-with-null); a real id not in the tenant is { profile: null, found: false } so a chain branches on { falsy found }.",
+      "description": "Reads one profile the run's acting user may see over ctx.features.profiles.getProfile. Inputs: { userId } (an opaque user:<id> in the reader's home tenant, or a person who shared their profile with the run's workspace — ADR 0888). Output: { profile|null, found } as a capability projection (no bio, contact or asset tokens). An empty/absent userId is a typed validation_error node FAILURE; a run without a signed-in member is a typed forbidden_scope failure; an id outside the reader's directory is { profile: null, found: false } so a chain branches on { falsy found }.",
       "category": "integration",
       "role": "action",
       "capabilities": [],

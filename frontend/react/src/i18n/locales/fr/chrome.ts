@@ -222,6 +222,9 @@ export const messages = {
   navLocked: 'Verrouillé — déverrouillez-le dans la boutique de fonctionnalités',
   lockedFeatureTitle: 'Cette fonctionnalité nécessite une mise à niveau',
   lockedFeatureNoStoreBody: "Elle ne fait pas partie de votre offre actuelle et n'est pas disponible à l'achat pour le moment. Demandez à un administrateur de votre espace de travail de l'activer.",
+  offlineEntitlementTitle: 'Vous êtes hors ligne',
+  offlineEntitlementBody: "Cette page a besoin d'une connexion pour vérifier que votre espace de travail peut l'utiliser. Elle s'ouvrira dès que vous serez de nouveau en ligne.",
+  offlineEntitlementRetry: 'Réessayer',
   navTelemetryDisclosure: 'Cet espace enregistre des comptages anonymes de navigation — quelles pages sont ouvertes, depuis quel menu, et quelles fonctionnalités verrouillées sont vues ou ouvertes — pour guider sa structure. Aucune activité individuelle n’est conservée.',
   navTelemetryDismiss: 'Fermer l’avis de télémétrie',
 } as const;

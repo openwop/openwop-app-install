@@ -54,6 +54,8 @@ function seeded() {
 const byId = (doc: Dict, id: string): Dict | undefined => (doc.nodes as Dict[]).find((n) => n.id === id);
 
 describe('workflow collab shape (ADR 0364)', () => {
+  // Twin: canvas/__tests__/collabDocBinding.test.ts "seeds and materializes the
+  // same doc on the peer" — same mechanic, canvas shape; kept for the workflow shape.
   it('seeds and materializes the graph + scalars on the peer', () => {
     const { B } = seeded();
     const doc = B.current();
@@ -100,19 +102,27 @@ describe('workflow collab shape (ADR 0364)', () => {
   });
 
   it('a deleted id is a genuine delete — never positionally revived by a leftover', () => {
-    const { A, B, flush, n1, e1 } = seeded();
-    // A deletes n_2 (and its edge); B concurrently renames n_2 via a clone.
-    A.set({ name: 'Wf', nodes: [clone(n1)], edges: [] } as WfDoc);
-    const docB0 = B.current();
-    B.set({ ...docB0, nodes: [clone(n1), { ...node('n_2'), name: 'late-edit' }], edges: [clone(e1)] } as WfDoc);
+    const { A, B, flush, n1, n2, e1 } = seeded();
+    // A deletes n_1 (the FIRST node) and edits n_2 with a fresh clone — the edited
+    // n_2 is a leftover that matches neither by reference nor by deep-equal, so a
+    // POSITIONAL pairing would hand it n_1's CRDT item (cross-wire + revival).
+    A.set({ name: 'Wf', nodes: [{ ...clone(n2), name: 'n2-edited' }], edges: [] } as WfDoc);
+    // B concurrently edits n_1's config via its own clone.
+    B.set({ name: 'Wf', nodes: [{ ...clone(n1), config: { foo: 1 } }, clone(n2)], edges: [clone(e1)] } as WfDoc);
     flush();
     const docA = A.current(); const docB = B.current();
     expect(docA).toEqual(docB);
-    // Convergent outcome must be consistent; the load-bearing assertion is
-    // that n_1 never absorbed n_2's fields (no cross-wire on delete).
-    expect(byId(docA, 'n_1')!.name).toBe('n_1');
+    // n_1 stays deleted: B's edit to a deleted item does not revive it.
+    expect(byId(docA, 'n_1')).toBeUndefined();
+    // n_2 kept its identity: A's rename landed, B's n_1 edit did NOT.
+    const m2 = byId(docA, 'n_2')!;
+    expect(m2.name).toBe('n2-edited');
+    expect((m2.config as Dict).foo).toBeUndefined();
   });
 
+  // Twin: canvas/__tests__/collabDocBinding.test.ts "per-user undo: A undoes only
+  // A's gesture, never B's" pins the same binding mechanic on a canvas shape; this
+  // case pins it on the WORKFLOW shape (protected — both kept).
   it('per-user undo scope holds for the graph (A undo never reverts B)', () => {
     const { A, B, flush } = seeded();
     const docA0 = A.current();
@@ -132,7 +142,11 @@ describe('workflow collab shape (ADR 0364)', () => {
     const slice = workflowCollabSlice({
       id: 'wf-1', version: '1.0.0', createdAt: 'x', updatedAt: 'y',
       name: 'Wf', nodes: [], edges: [], defaultInputs: '{}', inputSchema: '',
+      // ADR 0524 — the two fields the allowlist dropped once; they must ride the room.
+      variables: [{ name: 'v1' }], configurableSchema: { type: 'object' },
     });
-    expect(Object.keys(slice).sort()).toEqual(['defaultInputs', 'edges', 'inputSchema', 'name', 'nodes']);
+    expect(Object.keys(slice).sort()).toEqual([
+      'configurableSchema', 'defaultInputs', 'edges', 'inputSchema', 'name', 'nodes', 'variables',
+    ]);
   });
 });

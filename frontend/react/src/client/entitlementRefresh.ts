@@ -65,3 +65,14 @@ export function noteRequestStatus(status: number): void {
   lastReloadAt = now;
   reloadAccess?.();
 }
+
+/**
+ * ADR 0892 Phase B — re-resolve NOW, after a write the user just made that changes
+ * what they can see (turning a feature bundle on or off), so the nav updates
+ * without a page reload. No cooldown: it follows one explicit click, never a
+ * response status, so it cannot fan out. A no-op when no provider is mounted.
+ */
+export function reloadEntitlementsNow(): void {
+  lastReloadAt = Date.now();
+  reloadAccess?.();
+}

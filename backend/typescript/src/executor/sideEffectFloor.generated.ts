@@ -29,15 +29,15 @@
  * ADR 0572, not here: a build-only invariant forbids `src/` from referencing
  * it, and that guard matches the filename in ANY spelling, comments included.)
  *
- * Manifest census at generation time (747 distinct typeIds):
- *    319  action
- *    256  side-effect
- *    111  pure
+ * Manifest census at generation time (753 distinct typeIds):
+ *    305  action
+ *    275  side-effect
+ *    112  pure
  *     36  read
  *     16  streaming-output
  *      9  gate
  *
- * Floor 328 = served 255 + held 73:
+ * Floor 347 = served 274 + held 73:
  *     28  held: ai-invocation-log
  *     20  held: ai-opaque-not-logged
  *     24  held: deferred-role-semantics
@@ -298,6 +298,16 @@ export const MANIFEST_SIDE_EFFECT_FLOOR: ReadonlySet<string> = new Set([
   'feature.cms.nodes.update-section-draft',
   'feature.code-exec.nodes.run',
   'feature.comments.nodes.post',
+  'feature.comments.nodes.resolve',
+  'feature.commerce.buyer.nodes.build-cart',
+  'feature.commerce.buyer.nodes.checkout',
+  'feature.commerce.nodes.adjust-inventory',
+  'feature.commerce.nodes.create-coupon',
+  'feature.commerce.nodes.create-order',
+  'feature.commerce.nodes.create-quote',
+  'feature.commerce.nodes.fulfill-order',
+  'feature.commerce.nodes.refund-order',
+  'feature.commerce.nodes.send-quote',
   'feature.computer-use.nodes.decide',
   'feature.computer-use.nodes.task',
   'feature.consent.nodes.record',
@@ -316,12 +326,21 @@ export const MANIFEST_SIDE_EFFECT_FLOOR: ReadonlySet<string> = new Set([
   'feature.crm.nodes.sign-request',
   'feature.crm.nodes.update-contact-owner',
   'feature.crm.nodes.update-contact-stage',
+  'feature.csm.nodes.create-play-tasks',
   'feature.csm.nodes.health-set',
   'feature.dealers.nodes.approve-registration',
   'feature.documents.nodes.generate-from-template',
   'feature.documents.nodes.render',
+  'feature.evals.nodes.run-suite',
   'feature.job-search.nodes.run-campaign',
   'feature.kb.nodes.reindex-drain',
+  'feature.kicktodo.nodes.apply-revision-commands',
+  'feature.kicktodo.nodes.calendar-sync',
+  'feature.kicktodo.nodes.create-candidate',
+  'feature.kicktodo.nodes.kickbot-coach-turn',
+  'feature.kicktodo.nodes.propose-plan-change',
+  'feature.kicktodo.nodes.remind-today',
+  'feature.kicktodo.nodes.session-reminder',
   'feature.knowledge-sync.nodes.run',
   'feature.notebooks.nodes.ingest-source',
   'feature.notebooks.nodes.mcp-add-source',
@@ -579,6 +598,16 @@ export const MANIFEST_FAST_PATH_SERVED: ReadonlySet<string> = new Set([
   'feature.cms.nodes.update-section-draft',
   'feature.code-exec.nodes.run',
   'feature.comments.nodes.post',
+  'feature.comments.nodes.resolve',
+  'feature.commerce.buyer.nodes.build-cart',
+  'feature.commerce.buyer.nodes.checkout',
+  'feature.commerce.nodes.adjust-inventory',
+  'feature.commerce.nodes.create-coupon',
+  'feature.commerce.nodes.create-order',
+  'feature.commerce.nodes.create-quote',
+  'feature.commerce.nodes.fulfill-order',
+  'feature.commerce.nodes.refund-order',
+  'feature.commerce.nodes.send-quote',
   'feature.computer-use.nodes.decide',
   'feature.computer-use.nodes.task',
   'feature.consent.nodes.record',
@@ -597,11 +626,20 @@ export const MANIFEST_FAST_PATH_SERVED: ReadonlySet<string> = new Set([
   'feature.crm.nodes.sign-request',
   'feature.crm.nodes.update-contact-owner',
   'feature.crm.nodes.update-contact-stage',
+  'feature.csm.nodes.create-play-tasks',
   'feature.csm.nodes.health-set',
   'feature.dealers.nodes.approve-registration',
   'feature.documents.nodes.render',
+  'feature.evals.nodes.run-suite',
   'feature.job-search.nodes.run-campaign',
   'feature.kb.nodes.reindex-drain',
+  'feature.kicktodo.nodes.apply-revision-commands',
+  'feature.kicktodo.nodes.calendar-sync',
+  'feature.kicktodo.nodes.create-candidate',
+  'feature.kicktodo.nodes.kickbot-coach-turn',
+  'feature.kicktodo.nodes.propose-plan-change',
+  'feature.kicktodo.nodes.remind-today',
+  'feature.kicktodo.nodes.session-reminder',
   'feature.knowledge-sync.nodes.run',
   'feature.notebooks.nodes.ingest-source',
   'feature.notebooks.nodes.mcp-add-source',
@@ -1166,8 +1204,11 @@ export const MANIFEST_DECLARED_TYPE_IDS: ReadonlySet<string> = new Set([
   'feature.crm.nodes.update-contact-owner',
   'feature.crm.nodes.update-contact-stage',
   'feature.crm.nodes.validate-segment',
+  'feature.csm.nodes.at-risk-check',
+  'feature.csm.nodes.create-play-tasks',
   'feature.csm.nodes.health-read',
   'feature.csm.nodes.health-set',
+  'feature.csm.nodes.renewals-due',
   'feature.dealers.nodes.approve-registration',
   'feature.dealers.nodes.list-dealers',
   'feature.dealers.nodes.list-outlets',
@@ -1197,6 +1238,7 @@ export const MANIFEST_DECLARED_TYPE_IDS: ReadonlySet<string> = new Set([
   'feature.entities.nodes.query',
   'feature.entities.nodes.types-read',
   'feature.entities.nodes.update',
+  'feature.evals.nodes.run-suite',
   'feature.forms.nodes.get-submission',
   'feature.forms.nodes.list-forms',
   'feature.forms.nodes.list-submissions',
@@ -1244,6 +1286,7 @@ export const MANIFEST_DECLARED_TYPE_IDS: ReadonlySet<string> = new Set([
   'feature.kicktodo.nodes.get-enrollment',
   'feature.kicktodo.nodes.kickbot-coach-turn',
   'feature.kicktodo.nodes.lesson-batch-build',
+  'feature.kicktodo.nodes.lesson-batch-preview',
   'feature.kicktodo.nodes.lesson-media',
   'feature.kicktodo.nodes.lesson-media-persist',
   'feature.kicktodo.nodes.lifecycle-status',
@@ -1326,6 +1369,7 @@ export const MANIFEST_DECLARED_TYPE_IDS: ReadonlySet<string> = new Set([
   'feature.sales-commissions.nodes.list-statements',
   'feature.service-desk.nodes.get-ticket',
   'feature.service-desk.nodes.list-tickets',
+  'feature.service-desk.nodes.notify-team',
   'feature.slides.nodes.audit',
   'feature.slides.nodes.deepen',
   'feature.slides.nodes.draft',

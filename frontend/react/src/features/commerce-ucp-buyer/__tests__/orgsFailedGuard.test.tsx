@@ -28,7 +28,10 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 
-const api = vi.hoisted(() => ({ listOrgs: vi.fn(), listPurchases: vi.fn() }));
+type Client = typeof import('../ucpBuyerClient.js');
+// Typed against the real client, so every fixture below is checked against
+// `Org` / `UcpPurchase` (round 1: untyped hoisted mocks accepted any shape).
+const api = vi.hoisted(() => ({ listOrgs: vi.fn<Client['listOrgs']>(), listPurchases: vi.fn<Client['listPurchases']>() }));
 import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
 vi.mock('../ucpBuyerClient.js', async (importOriginal) => {
   const orig = await importOriginal<Record<string, unknown>>();
@@ -41,7 +44,9 @@ vi.mock('../../../featureToggles/FeatureAccessContext.js', () => ({
 import { PurchasesPage } from '../PurchasesPage.js';
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  // mockReset, not clearAllMocks: no case inherits another's org answer.
+  api.listOrgs.mockReset();
+  api.listPurchases.mockReset();
   api.listPurchases.mockResolvedValue([]);
 });
 afterEach(cleanup);

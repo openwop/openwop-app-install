@@ -3,15 +3,23 @@
  * pass flagged as untested (KTEXP-4): the time-of-day mapping and, most
  * importantly, the evidence-gating (KTFULL-B6) that must NEVER let a check-in
  * fire without the evidence the server enforces.
+ *
+ * Honest ceiling: `Number.isFinite` in `measureOk` is unreachable from jsdom —
+ * it sanitises a non-numeric `<input type="number">` to '' — so the reachable
+ * guard is `measure.trim() !== ''`, which the measurement case pins. `submit()`'s
+ * `!canSubmit || busy` early return is a double guard behind the button's
+ * `disabled` (React never fires onClick on a disabled button); the `disabled`
+ * copy is the one these cases witness.
  */
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { render, screen, cleanup, fireEvent } from '@testing-library/react';
 import { washPosition, daypartOf, ActionCompleter } from '../TheOneThing.js';
 import type { TodayAction } from '../../../client/kicktodoClient.js';
+import { messages as en } from '../i18n/en.js';
 
 afterEach(cleanup);
 
-const action = (policy: string, completed = false): TodayAction => ({
+const action = (policy: TodayAction['occurrence']['evidencePolicy'], completed = false): TodayAction => ({
   occurrence: { cardId: 'c1', stableActivityId: 'a1', occurrenceDateLocal: '2026-07-19', evidencePolicy: policy },
   card: { id: 'c1', title: 'Do the thing', columnId: 'todo', completed },
   checkIn: null,
@@ -26,6 +34,10 @@ describe('washPosition / daypartOf', () => {
     expect(daypartOf(18)).toBe('evening');
     expect(daypartOf(23)).toBe('evening');
     expect(washPosition(8)).toBe('18%');
+    expect(washPosition(11)).toBe('18%');
+    expect(washPosition(12)).toBe('50%');
+    expect(washPosition(17)).toBe('50%');
+    expect(washPosition(18)).toBe('82%');
     expect(washPosition(14)).toBe('50%');
     expect(washPosition(20)).toBe('82%');
   });
@@ -37,6 +49,8 @@ describe('ActionCompleter evidence-gating (KTFULL-B6)', () => {
   it('attestation completes in one tap — no input, no evidence', () => {
     const onComplete = vi.fn();
     render(<ActionCompleter action={action('attestation')} busy={false} onComplete={onComplete} />);
+    expect(screen.queryByRole('textbox')).toBeNull();
+    expect(screen.queryByRole('spinbutton')).toBeNull();
     expect(btn().hasAttribute('disabled')).toBe(false);
     fireEvent.click(btn());
     expect(onComplete).toHaveBeenCalledWith('c1');
@@ -45,6 +59,9 @@ describe('ActionCompleter evidence-gating (KTFULL-B6)', () => {
   it('note stays disabled until a note is typed, then submits it', () => {
     const onComplete = vi.fn();
     render(<ActionCompleter action={action('note')} busy={false} onComplete={onComplete} />);
+    expect(btn().hasAttribute('disabled')).toBe(true);
+    // Whitespace is not evidence (the server trims the note too).
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: '   ' } });
     expect(btn().hasAttribute('disabled')).toBe(true);
     fireEvent.change(screen.getByRole('textbox'), { target: { value: 'went well' } });
     expect(btn().hasAttribute('disabled')).toBe(false);
@@ -73,6 +90,7 @@ describe('ActionCompleter evidence-gating (KTFULL-B6)', () => {
 
   it('a completed action shows a done badge and no completion button', () => {
     render(<ActionCompleter action={action('attestation', true)} busy={false} onComplete={vi.fn()} />);
+    expect(screen.getByText(en.doneBadge)).toBeTruthy();
     expect(screen.queryByRole('button')).toBeNull();
   });
 });

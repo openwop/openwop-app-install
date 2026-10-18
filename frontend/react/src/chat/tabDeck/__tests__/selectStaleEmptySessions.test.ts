@@ -1,5 +1,8 @@
 /**
- * selectStaleEmptySessions — the mount-time stale-empty sweep's selection.
+ * selectStaleEmptySessions — the mount-time stale-empty sweep's selection
+ * (ADR 0140 deck, TabChatDeck's once-per-mount sweep). Breaks if the empty check,
+ * the plain-chat type filter, the open-tab / deck-minted exclusions or the age
+ * guard (inclusive at the boundary) is dropped or weakened.
  * Pins the guards that keep the hard-delete safe: only empty PLAIN chats, never
  * anything open as a tab or minted by this deck instance (the close-time reap
  * owns those), never a channel/group/workspace (an empty channel is deliberate),

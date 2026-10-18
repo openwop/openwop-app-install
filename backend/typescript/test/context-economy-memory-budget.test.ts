@@ -1,5 +1,16 @@
 /**
- * ADR 0148 Phase 4 (A4) — memory injection budget.
+ * ADR 0148 Phase 4 (A4) — memory injection budget (the SOFT policy; the RFC 0113
+ * hard policy is witnessed by rfc0113-memory-budget.test.ts).
+ *
+ * Guards: `budgetByChars` keeps a contiguous priority-order PREFIX within the char
+ * budget (it stops at the first overflow — it never skips an item to pack a
+ * smaller later one), always keeps the first item under the soft policy, and never
+ * mutates its input; `memoryBudgetConfig` reads OPENWOP_CONTEXT_ECONOMY_MEMORY_MAX_CHARS
+ * (default 8000, invalid ⇒ default).
+ *
+ * Sabotage (grade-tests w28): `break`→`continue`, dropping the keep-first
+ * exemption, widening the cap, mutating the items, or renaming the env knob each
+ * turn a case red.
  */
 import { describe, it, expect, afterEach } from 'vitest';
 import { budgetByChars, memoryBudgetConfig } from '../src/host/memoryBudget.js';
@@ -8,6 +19,7 @@ interface Item { id: number; content: string }
 const sizeOf = (i: Item) => i.content.length;
 const mk = (n: number, len = 100): Item[] =>
   Array.from({ length: n }, (_, i) => ({ id: i, content: 'x'.repeat(len) }));
+const mkSizes = (sizes: number[]): Item[] => sizes.map((len, id) => ({ id, content: 'x'.repeat(len) }));
 
 afterEach(() => {
   delete process.env.OPENWOP_CONTEXT_ECONOMY_MEMORY_MAX_CHARS;
@@ -20,9 +32,10 @@ describe('budgetByChars', () => {
   });
 
   it('drops overflow from the TAIL (lowest priority), keeping the front', () => {
-    const items = mk(10, 100); // 100 chars each
+    const items = mkSizes([100, 100, 200, 10]);
     const kept = budgetByChars(items, 250, sizeOf);
-    expect(kept.map((i) => i.id)).toEqual([0, 1]); // 100+100=200 ok; 300>250 stops
+    // 100+100=200 ok; item 2 (400>250) STOPS — item 3 (would total 210) is not packed in.
+    expect(kept.map((i) => i.id)).toEqual([0, 1]);
   });
 
   it('always keeps the first item even if it alone exceeds the budget', () => {

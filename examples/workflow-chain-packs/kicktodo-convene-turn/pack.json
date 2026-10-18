@@ -1,0 +1,45 @@
+{
+  "name": "core.openwop.workflows.kicktodo-convene-turn",
+  "version": "1.0.0",
+  "kind": "workflow-chain",
+  "description": "The KickTodo convene turn-workflow (ADR 0442 P5, ADR 0689), migrated off the in-tree `registerWorkflow(DEF)` pin site — the last PRODUCT entry in PIN_SITE_QUARANTINE, drained the way ADR 0701 and ADR 0703 drained the scheduled-chat and channel turns. chainId keeps the original workflowId so every scheduler job and run stamp keeps resolving.",
+  "keywords": ["kicktodo", "ADR 0442", "ADR 0689"],
+  "engines": { "openwop": ">=1.0.0 <3.0.0" },
+  "chains": [
+    {
+      "chainId": "openwop-app.kicktodo.convene-turn",
+      "version": "1.0.0",
+      "internal": true,
+      "label": "KickTodo convene turn",
+      "description": "Runs one convened KickTodo specialist (or KickBot's proactive guide turn) on the host-owned managed credential and posts its advisory reply into KickBot's conversation as a turn. Fired only by a scheduler job (`openwop:kicktodo.convene`, the KickBot coach turn), which supplies every parameter.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["agentId", "task"],
+        "properties": {
+          "agentId": { "type": "string", "description": "The convened specialist (or KickBot) to run." },
+          "task": { "type": "string", "description": "The advisory task the agent runs on." },
+          "credentialRef": { "type": "string", "description": "The host-owned managed credential (a chat-time tool is credential-less by design — no BYOK)." },
+          "conversationId": { "type": "string", "description": "The KickBot conversation the advice posts into (ADR 0125 Phase 2c)." }
+        }
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "run",
+            "typeId": "local.openwop-app.agent-runner@1.0.0",
+            "name": "Run the convened agent",
+            "position": { "x": 0, "y": 0 },
+            "inputs": {
+              "agentId": "{{params.agentId}}",
+              "task": "{{params.task}}",
+              "credentialRef": "{{params.credentialRef}}",
+              "conversationId": "{{params.conversationId}}"
+            }
+          }
+        ],
+        "edges": []
+      }
+    }
+  ]
+}

@@ -19,29 +19,41 @@
  * The falsifiable half of each case is the READ, not the copy. `getFunnel` must
  * never be called without an organization — that is the mechanism that made the
  * skeleton permanent, and it is what a copy-only test would miss.
+ *
+ * DOUBLE GUARD on the funnel read: the load effect returns on `!orgId`, AND
+ * `reload()` returns on its own `if (!orgId || !funnelId)`. Dropping the effect's
+ * check alone still leaves `getFunnel` uncalled, so the effect's guard is witnessed
+ * by `cms.listPages` — the one read in that effect with no second guard.
+ *
+ * Sabotage-witnessed (wave 52): dropping the effect's `!orgId` check, the failed-read
+ * clause, the zero-org branch, the retry wiring, the 404 → not-found mapping, and the
+ * guessed-workspace name (explicit `?org=` vs none) each turn a case red.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup, screen, waitFor, act, fireEvent } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
+import type * as FC from '../funnelsClient.js';
+import type { Funnel, FunnelStats } from '../funnelsClient.js';
+import type * as CC from '../../cms/cmsClient.js';
 
 const access = vi.hoisted(() => ({ useFeatureAccess: vi.fn(() => makeFeatureAccess({ enabled: true, loading: false })) }));
 import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
 vi.mock('../../../featureToggles/FeatureAccessContext.js', () => ({ useFeatureAccess: access.useFeatureAccess }));
 
 const api = vi.hoisted(() => ({
-  listOrgs: vi.fn(),
-  getFunnel: vi.fn(),
+  listOrgs: vi.fn<typeof FC.listOrgs>(),
+  getFunnel: vi.fn<typeof FC.getFunnel>(),
   // COMPLETE fixture — a partial one throws inside render (`stats.days.length`)
   // and every assertion then fails for a reason unrelated to the org states.
-  getFunnelStats: vi.fn(async () => ({ funnelId: 'f1', steps: [], days: [], eventWindow: 30, rebuiltAt: null })),
-  deleteFunnel: vi.fn(),
-  updateFunnel: vi.fn(),
+  getFunnelStats: vi.fn<typeof FC.getFunnelStats>(async (): Promise<FunnelStats> => ({ funnelId: 'f1', steps: [], days: [], eventWindow: 30, rebuiltAt: null })),
+  deleteFunnel: vi.fn<typeof FC.deleteFunnel>(),
+  updateFunnel: vi.fn<typeof FC.updateFunnel>(),
 }));
 vi.mock('../funnelsClient.js', async (importOriginal) => {
   const orig = await importOriginal<Record<string, unknown>>();
   return { ...orig, ...api };
 });
-const cms = vi.hoisted(() => ({ listPages: vi.fn(async () => []) }));
+const cms = vi.hoisted(() => ({ listPages: vi.fn<typeof CC.listPages>(async () => []) }));
 vi.mock('../../cms/cmsClient.js', async (importOriginal) => {
   const orig = await importOriginal<Record<string, unknown>>();
   return { ...orig, ...cms };
@@ -49,9 +61,10 @@ vi.mock('../../cms/cmsClient.js', async (importOriginal) => {
 
 import { FunnelDetailPage } from '../FunnelDetailPage.js';
 
-const FUNNEL = {
+const FUNNEL: Funnel = {
   funnelId: 'f1', orgId: 'o1', name: 'Summer launch', slug: 'summer-launch',
-  status: 'draft' as const, steps: [],
+  status: 'draft', steps: [],
+  createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
 };
 
 /** Mounted at its REAL route so `useParams`/`useSearchParams` behave as they do live. */
@@ -119,6 +132,9 @@ describe('funnel detail — the three organization states', () => {
     expect(document.querySelector('.skeleton')).toBeNull();
     expect(screen.queryByRole('status', { name: 'Loading…' })).toBeNull();
     expect(api.getFunnel).not.toHaveBeenCalled();
+    // `getFunnel` has a second guard inside `reload()` (see header); the pages read
+    // is the effect's own, so it is what shows the effect's `!orgId` guard holding.
+    expect(cms.listPages).not.toHaveBeenCalled();
   });
 
   it('a `?org=` deep link naming an organization that is not in the list lands on the same card', async () => {

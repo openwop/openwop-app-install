@@ -35,15 +35,21 @@
  * this host's commit, major and published keys before it is served or
  * advertised (`host/certificationEvidence.ts`). The "computes nothing" rule
  * survives: verification decides whether to SERVE, never what is claimed.
+ *
+ * > **CORRECTED 2026-10-16 (ADR 0812 P4 slice 3) — the IMAGE half is deleted.**
+ * > Nothing has written the `build-meta/` stamp since ADR 0869 (deploy.sh builds
+ * > no image bundle), and the in-process emitter that wrote it
+ * > (`conformance/certify.ts`, `run.ts --certify`) is gone with this slice. The
+ * > image reader, the major-1 bundle route and the `/claims` document served
+ * > only that stamp, so they went too. What remains is the origin reader: unset
+ * > `OPENWOP_CERT_BUNDLE_ORIGIN` now means "no evidence served" (the pointer is
+ * > absent, RFC 0089 §D), and set means the verified v3 cut, as before. The
+ * > paragraphs above describe the design as it was; "ABSENT IS THE HONEST
+ * > DEFAULT" still holds, now for every image build.
  */
-
-import { existsSync, readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 
 import { VENDOR_ROOT } from '../middleware/protocolVersion.js';
 import { createLogger } from '../observability/logger.js';
-import { locateRepoDir } from './_repoPath.js';
 import { buildCommit } from './buildInfo.js';
 import {
   CertificationEvidenceReader,
@@ -55,13 +61,6 @@ import {
 
 const log = createLogger('host.conformanceClaims');
 
-/** Stamp file names — the same constants `conformance/certify.ts` writes. */
-export const CLAIMS_STAMP = 'conformance-claims.json';
-export const BUNDLE_STAMP = 'certification-bundle.json';
-
-/** Public host-extension paths. Non-normative placement; the POINTER is the wire surface. */
-export const CERTIFICATION_BUNDLE_PATH = '/host/openwop-app/conformance/certification-bundle';
-export const CONFORMANCE_CLAIMS_PATH = '/host/openwop-app/conformance/claims';
 
 /**
  * WHD-18 — the MAJOR-2 bundle's address, served only in origin mode.
@@ -80,9 +79,10 @@ export const CERTIFICATION_BUNDLE_MAJOR2_VENDOR_PATH = `${VENDOR_ROOT}${MAJOR2_S
 
 // ── WHD-18 — where the SERVED evidence comes from ────────────────────────────
 //
-// `OPENWOP_CERT_BUNDLE_ORIGIN` UNSET ⇒ exactly the behaviour below this block,
-// unchanged: the image's `build-meta/` stamp, major 1 only. That is every
-// white-label adopter, every source boot, and every test that does not opt in.
+// `OPENWOP_CERT_BUNDLE_ORIGIN` UNSET ⇒ no evidence is served (ADR 0812 P4
+// slice 3; until then it meant the image's `build-meta/` stamp, major 1 only).
+// That is every white-label adopter, every source boot, and every test that
+// does not opt in.
 //
 // SET ⇒ the image's bundle is NOT served, at all, for either major. ADR 0735:
 // the in-image bundle is "cut before the thing it describes exists", so the
@@ -167,150 +167,8 @@ export function originCertificationBundle(major: ServedMajor): string | undefine
   return reader.snapshot({ origin: cfg.origin, commit, major });
 }
 
-/**
- * The claims document, typed only as far as this side needs it.
- *
- * Deliberately NOT a full mirror of `conformance/certify.ts`'s
- * `ConformanceClaims`. That type lives on the emitter side where the suite's
- * types are available (devDependency), and duplicating it here would create a
- * second definition of the artifact that could drift from the one that writes
- * it. The reader validates the two fields it actually reasons about and passes
- * the rest through untouched — the document a consumer receives is the document
- * the run produced, byte for byte.
- */
-export interface StampedClaims {
-  readonly claimsVersion: string;
-  readonly claimedProfiles: readonly string[];
-  readonly [k: string]: unknown;
-}
-
-function readStamp(dir: string, file: string): unknown | undefined {
-  const path = join(dir, file);
-  try {
-    if (!existsSync(path)) return undefined;
-    return JSON.parse(readFileSync(path, 'utf8')) as unknown;
-  } catch (err) {
-    // A stamp that will not parse is not evidence. Warn and omit rather than
-    // serve a partial document: a malformed claim read as a claim is the exact
-    // "success-with-empty" failure the exchange rules forbid.
-    log.warn('conformance stamp unreadable — omitting', { file, error: String(err) });
-    return undefined;
-  }
-}
-
-/**
- * Where the image's `build-meta/` lives, or null.
- *
- * NOT MEMOISED, for the same reason `buildInfo.ts` gives: `OPENWOP_BUILD_META_DIR`
- * is a test seam that tests vary per case, and freezing it at first call breaks
- * them silently. The walk terminates on the second `existsSync` inside the image.
- */
-function buildMetaDir(): string | null {
-  const override = process.env.OPENWOP_BUILD_META_DIR?.trim();
-  if (override) return override;
-  try {
-    // Same sentinel as `buildInfo.ts` — `build-meta/.gitkeep` is tracked, so the
-    // directory is findable in a source tree and in the image alike.
-    return locateRepoDir(dirname(fileURLToPath(import.meta.url)), 'build-meta', '.gitkeep');
-  } catch {
-    // `locateRepoDir` throws at the filesystem root. Absence is a normal state
-    // here (unlike its schema/pack callers, where it is fatal), so it is caught.
-    return null;
-  }
-}
-
-/**
- * The stamped claims document, or `undefined` when this build carries none —
- * **or carries one whose evidence it cannot serve** (WHD-6).
- *
- * The claims document is a SECOND pointer at the bundle, and until WHD-6 it was
- * the ungated one. `conformance/certify.ts` stamps `evidence.bundlePath` (the
- * very route `certificationBundleUrl` advertises) and `evidence.bundleSha256`
- * into it, so a reader of `/claims` is told "the proof is at that URL, and it
- * hashes to this". Discovery's pointer was gated on the bundle being servable;
- * this reader looked only at its own file. So an image holding a valid
- * `conformance-claims.json` beside a missing or unservable bundle answered
- * `/claims` 200 — naming a URL that 404s — while discovery correctly said
- * nothing. One door honest, the sibling door into the same claim not: the same
- * advertised-but-not-served defect, reachable by a different route.
- *
- * That posture is not hypothetical. It is exactly what ADR 0735's own remedy
- * produces if done by hand: drop the suite CLI's bundle (`bundleVersion: '3'`)
- * over `build-meta/certification-bundle.json` and redeploy, and the reader below
- * refuses it (it serves v2 only) while the in-process run's claims file is still
- * sitting next to it.
- *
- * So the rule is ONE predicate for every surface that names the bundle URL —
- * `servedBundle(1) !== undefined` (WHD-18 rename of `certificationBundle()`),
- * the same call the route itself makes —
- * and a claim with no servable evidence is withheld rather than published
- * unsubstantiated. ADR 0550 P4: a host may only publish a claim it can witness.
- */
-export function conformanceClaims(): StampedClaims | undefined {
-  // WHD-18 — WITHHELD in origin mode, and this is a decision rather than an
-  // unfinished branch (ADR 0735 § Implementation record 2026-09-21 says why at
-  // length). The only claims derivation this host has — ADR 0550 P4, "a
-  // profile is claimed when every floor requirement is executed-pass with ≥1
-  // assertion" — lives in `conformance/certify.ts` and runs on the suite's
-  // `deriveRequirementDispositions` + floor tables, a devDependency the release
-  // image does not contain (`npm ci --omit=dev`). Re-deriving it here would be a
-  // SECOND derivation of a public claim, which ADR 0735 forbids by name. And the
-  // image's stamped claims document binds `evidence.bundleSha256` to the
-  // in-image v2 bundle this mode refuses to serve — publishing it would point a
-  // third party at evidence we have just withdrawn. The v3 bundle carries its
-  // own per-profile `certified` verdicts, which the suite's `--verify`
-  // re-derives; that document IS the claim in this mode.
-  if (evidenceFromOrigin()) return undefined;
-  const dir = buildMetaDir();
-  if (dir === null) return undefined;
-  // The WHD-6 predicate, spelled as the route spells it. In image mode (the only
-  // mode that reaches this line) `servedBundle(1)` IS the image stamp.
-  if (servedBundle(1) === undefined) return undefined;
-  const parsed = readStamp(dir, CLAIMS_STAMP);
-  if (parsed === null || typeof parsed !== 'object') return undefined;
-  const doc = parsed as Record<string, unknown>;
-  // The two structural facts a reader must be able to rely on. A document
-  // missing either is not a claims document; serving it would let a malformed
-  // stamp masquerade as "this host claims nothing", which is a different
-  // statement from "this host published no claims".
-  if (typeof doc['claimsVersion'] !== 'string' || !Array.isArray(doc['claimedProfiles'])) {
-    log.warn('conformance claims stamp is missing claimsVersion/claimedProfiles — omitting', {});
-    return undefined;
-  }
-  return doc as unknown as StampedClaims;
-}
-
-/**
- * The stamped RFC 0148 §C bundle v2, or `undefined`.
- *
- * WHD-18: the IMAGE reader only, and no longer exported. It knows nothing about
- * the origin; `servedBundle()` below is the ONE mode-aware entry point, and the
- * only caller. An earlier draft also guarded this function on origin mode —
- * a second copy of the rule that no test could see (every path to it was already
- * guarded), i.e. a guard whose removal nothing would notice. One guard, in the
- * one place every surface goes through, is the WHD-6 shape.
- */
-function imageCertificationBundle(): Record<string, unknown> | undefined {
-  const dir = buildMetaDir();
-  if (dir === null) return undefined;
-  const parsed = readStamp(dir, BUNDLE_STAMP);
-  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined;
-  const doc = parsed as Record<string, unknown>;
-  // `bundleVersion: '2'` is the discriminator RFC 0148 §C requires a verifier to
-  // switch on. Refusing anything else keeps a v1 bundle — which cannot express
-  // dispositions and therefore cannot substantiate a claim — from being served
-  // through a pointer that promises v2 evidence.
-  if (doc['bundleVersion'] !== '2') {
-    log.warn('certification bundle stamp is not bundleVersion 2 — omitting', { found: String(doc['bundleVersion']) });
-    return undefined;
-  }
-  return doc;
-}
-
-// ADR 0812 P4: `certificationBundleUrl()` (the v1 root's pointer to the
-// image-mode bundle) is deleted with the v1 builder, its only caller. The
-// claims document's `evidence.bundlePath` is now the one surface naming that
-// bundle, and it hangs off the same `servedBundle(1)` predicate.
+// ADR 0812 P4 slice 3: the image-stamp readers (`conformanceClaims()`, the
+// `build-meta/` bundle reader) are deleted with the emitter that wrote the stamp.
 
 /**
  * WHD-18 — the value for the MAJOR-2 root's `conformance.certificationBundleUrl`
@@ -327,23 +185,16 @@ export function certificationBundleUrlV2(origin: string): string | undefined {
   return `${origin.replace(/\/+$/, '')}${CERTIFICATION_BUNDLE_MAJOR2_VENDOR_PATH}`;
 }
 
-/** What a bundle route serves: the parsed image stamp, or the origin's exact verified bytes. */
-export type ServedBundle =
-  | { readonly source: 'image'; readonly doc: Record<string, unknown> }
-  | { readonly source: 'origin'; readonly bytes: string };
+/** What the bundle route serves: the origin's exact verified bytes. */
+export type ServedBundle = { readonly source: 'origin'; readonly bytes: string };
 
 /**
- * THE one predicate (WHD-6): the route serves this, the pointer is advertised
- * iff this is defined, and `/claims` is gated on it. Mode-aware — image stamp
- * (major 1 only) when no origin is configured, the verified origin object
- * otherwise, and never a mix of the two.
+ * THE one predicate (WHD-6): the route serves this, and the pointer is
+ * advertised iff it is defined. Origin mode only since ADR 0812 P4 slice 3 —
+ * an image build serves no evidence, so with no origin configured this is
+ * always `undefined`.
  */
 export function servedBundle(major: ServedMajor): ServedBundle | undefined {
-  if (evidenceFromOrigin()) {
-    const bytes = originCertificationBundle(major);
-    return bytes === undefined ? undefined : { source: 'origin', bytes };
-  }
-  if (major !== 1) return undefined;
-  const doc = imageCertificationBundle();
-  return doc === undefined ? undefined : { source: 'image', doc };
+  const bytes = originCertificationBundle(major);
+  return bytes === undefined ? undefined : { source: 'origin', bytes };
 }

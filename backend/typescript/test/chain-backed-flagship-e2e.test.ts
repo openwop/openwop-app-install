@@ -9,10 +9,10 @@
  * all exercised as they run in production.
  *
  * The legacy e2e suites proved the workflow LOGIC against the RAW defs
- * (`kicktodo-challenge-factory.test.ts` drives the node adapters + a hand-built
- * gate-branch def); `chain-backed-flagships.test.ts` proved the expanded SHAPE
- * structurally. This suite closes the remaining gap: the expanded def actually
- * RUNS. Surface stand-ins mirror the §A precedents exactly (stub webResearch, a
+ * (`kicktodo-lesson-assembly.test.ts` §D drives the node adapters through a
+ * slice of the real factory def); `chain-backed-flagships.test.ts` proved the
+ * expanded SHAPE structurally. This suite closes the remaining gap: the
+ * expanded def actually RUNS. Surface stand-ins mirror those precedents exactly (stub webResearch, a
  * canned `ctx.callAI` plan/lesson/kernel, canned sim verdicts) — everything else
  * (scheduler, conditions, interrupts, sub-workflow dispatch, feature surfaces,
  * SoD submit) is the real path.
@@ -54,6 +54,9 @@ import { __resolveAndResumeForTests, __awaitRunResumeChainForTests } from '../sr
 import { createCandidate, getCandidate } from '../src/features/kicktodo-creator/creatorService.js';
 import { getPublication } from '../src/features/kicktodo-creator/publishService.js';
 import { getApproval } from '../src/host/approvalService.js';
+import { getRunArtifact } from '../src/host/runArtifactStore.js';
+import { validateArtifact } from '../src/host/artifactTypes.js';
+import { registerKicktodoCreatorArtifactTypes, CHALLENGE_LESSON_BATCH_TYPE } from '../src/features/kicktodo-creator/artifactSchemas.js';
 import { createBrief, getBrief } from '../src/features/campaign-brief/briefService.js';
 import { configureSecretResolver, setSecret } from '../src/byok/secretResolver.js';
 import type { NodeModule, WorkflowDefinition } from '../src/executor/types.js';
@@ -72,7 +75,7 @@ const briefPackUrl = new URL('../../../packs/feature.campaign-brief.nodes/index.
 
 type NodeFn = (ctx: Record<string, unknown>) => Promise<{ status: string; outputs?: Record<string, unknown>; error?: unknown }>;
 
-/** The same authoritative-validator-passing plan `kicktodo-challenge-factory.test.ts` §A uses. */
+/** An authoritative-validator-passing plan. */
 const VALID_PLAN = {
   title: 'Paint your first watercolor in three weeks',
   promise: 'Complete a simple watercolor from a reference photo.',
@@ -117,6 +120,9 @@ const recordAi = (typeId: string, ctx: Record<string, unknown>, req: Record<stri
   });
 };
 const hostSuite = createHostAdapterSuite({ storage });
+/** The day whose lesson the stand-in returns INVALID (null = none). Set only by
+ *  the build-failure case below, which resets it. */
+let lessonStandInBreaksDay: number | null = null;
 
 beforeAll(async () => {
   // Boot parity (src/index.ts): the build-N `core.subWorkflow` nodes dispatch their
@@ -135,6 +141,8 @@ beforeAll(async () => {
   // Boot parity: feature surfaces (ctx.features.*) — no toggle defaults are
   // registered in this harness, so the gate's always-on path applies.
   for (const f of BACKEND_FEATURES) if (f.surface) registerFeatureSurface(f.surface.id, f.surface.build);
+  // XCH-GATE-1 — the lesson checkpoint preview is a typed, registered artifact.
+  registerKicktodoCreatorArtifactTypes();
 
   const reg = getNodeRegistry();
   const kt = ((await import(kicktodoPackUrl)) as { nodes: Record<string, NodeFn> }).nodes;
@@ -158,7 +166,7 @@ beforeAll(async () => {
     } as NodeModule);
 
   // The REAL kicktodo pack nodes, surface-complete as-is.
-  for (const t of ['research-frame', 'source-normalize', 'evidence-graph', 'plan-validate', 'checkpoint-plan', 'sim-collect', 'submit-publication', 'decompose']) {
+  for (const t of ['research-frame', 'source-normalize', 'evidence-graph', 'plan-validate', 'checkpoint-plan', 'sim-collect', 'submit-publication', 'decompose', 'lesson-batch-preview']) {
     register(`feature.kicktodo.nodes.${t}`, kt[`feature.kicktodo.nodes.${t}`]!);
   }
   // plan-generate — REAL node fn, canned ctx.callAI returning the valid plan (§A stand-in).
@@ -178,6 +186,7 @@ beforeAll(async () => {
       if (!Number.isInteger(day)) throw new Error(`lesson stand-in could not read the day from the payload: ${payload.slice(0, 120)}`);
       // ADR 0458 §2.2 correction — the lesson cites the ONE claim the spine
       // recorded (c-1); the node validates the id against the evidence it received.
+      if (day === lessonStandInBreaksDay) return { data: { day, title: '', body: 'too short', steps: [], claimRefs: [] } };
       return { data: { day, title: `Lesson for day ${day}`, body: 'Today you paint one small watercolor study from the reference photo, focusing on brush control.', steps: ['Paint a small study from the reference.'], claimRefs: ['c-1'] } };
     },
   }));
@@ -247,8 +256,9 @@ beforeAll(async () => {
     execute: async (ctx) => {
       // ADR 0458 §2.2 correction — record what each persona was actually handed,
       // so the test can assert the skeptic sees the evidence (not just the brief).
-      const inputs = (ctx as unknown as { inputs?: { agentId?: string; task?: string } }).inputs ?? {};
+      const inputs = (ctx as unknown as { inputs?: { agentId?: string; task?: string; provider?: string; model?: string; credentialRef?: string } }).inputs ?? {};
       simTasks.set(String(inputs.agentId ?? ''), String(inputs.task ?? ''));
+      simBindings.set(String(inputs.agentId ?? ''), { provider: inputs.provider, model: inputs.model, credentialRef: inputs.credentialRef });
       return { status: 'success', outputs: { result: { verdict: 'pass', findings: [], personaSummary: 'clear' } } } as never;
     },
   } as NodeModule);
@@ -261,6 +271,8 @@ beforeAll(async () => {
 
 /** ADR 0458 §2.2 correction — the task text each sim persona received (agentId → task). */
 const simTasks = new Map<string, string>();
+/** XCH-SIM-4 — the AI binding each sim persona was dispatched with (agentId → binding). */
+const simBindings = new Map<string, { provider?: string; model?: string; credentialRef?: string }>();
 
 async function startRun(workflowId: string, tenantId: string, actingUserId: string, inputs: Record<string, unknown>, configurable: Record<string, unknown> = {}): Promise<{ run: RunRecord; def: WorkflowDefinition }> {
   const def = getChainBackedWorkflow(workflowId);
@@ -306,14 +318,49 @@ describe('(A) challenge-factory runs to COMPLETION chain-backed (RFC 0133 + 0134
     expect((await storage.getRun(run.runId))!.currentNodeId).toMatch(/_outline-approve$/);
 
     // Approve every gate the run raises (outline-approve, then each live gate-N).
+    // XCH-GATE-1 — what each lesson checkpoint shows its approver. It used to be
+    // the sub-workflow's `{childRunId, childStatus}`: the batch was approved blind.
+    // Sabotage: dropping gate-N's `artifact` input (or build-N's outputMapping)
+    // leaves an untyped preview and reds every assertion in the loop below.
+    const lessonGatePreviews: Array<{ artifactTypeId?: string; content: string }> = [];
+    let outlinePreviewed = false;
     let rounds = 0;
     while ((await storage.getRun(run.runId))!.status === 'waiting-approval' && rounds++ < 8) {
       for (const open of await storage.listOpenInterrupts(run.runId)) {
+        // XCH-GATE-1 (outline half) — the outline gate previews a typed plan.
+        if (/_outline-approve$/.test(open.nodeId)) {
+          const row = await getRunArtifact(`${run.runId}:${open.nodeId}`);
+          expect(row?.artifactTypeId, 'the outline gate must preview a typed challenge plan').toBe('kicktodo.challenge-plan');
+          expect(JSON.parse(row!.content)).toEqual(VALID_PLAN);
+          outlinePreviewed = true;
+        }
+        if (/_gate-\d$/.test(open.nodeId)) {
+          const row = await getRunArtifact(`${run.runId}:${open.nodeId}`);
+          expect(row, `${open.nodeId} persisted no gate preview`).toBeTruthy();
+          lessonGatePreviews.push({ ...(row!.artifactTypeId ? { artifactTypeId: row!.artifactTypeId } : {}), content: row!.content });
+        }
         await __resolveAndResumeForTests(storage, hostSuite, open.interruptId, { decision: 'approved', approved: true });
       }
       await __awaitRunResumeChainForTests(run.runId);
     }
     expect((await storage.getRun(run.runId))!.status).toBe('completed');
+    expect(outlinePreviewed).toBe(true);
+    expect(lessonGatePreviews.length).toBeGreaterThan(0);
+    const shownDays: number[] = [];
+    for (const p of lessonGatePreviews) {
+      expect(p.artifactTypeId).toBe(CHALLENGE_LESSON_BATCH_TYPE);
+      const payload = JSON.parse(p.content) as { lessons: Array<{ day: number; title: string; body: string; plan: { actionInstruction: string } }>; count: number };
+      expect(validateArtifact(CHALLENGE_LESSON_BATCH_TYPE, payload).valid).toBe(true);
+      expect(payload.count).toBe(payload.lessons.length);
+      for (const l of payload.lessons) {
+        // The lesson the approver reads, beside the plan row it was built from (XCH-LB-3).
+        expect(l.body.length).toBeGreaterThan(0);
+        expect(l.plan.actionInstruction.length).toBeGreaterThan(0);
+        shownDays.push(l.day);
+      }
+    }
+    // Every planned day was shown at some checkpoint, each exactly once.
+    expect([...shownDays].sort((a, b) => a - b)).toEqual([1, 2, 3]);
 
     // The RFC 0133 host-default bind ACTUALLY dispatched: a build-N node completed
     // with a child run of the SAME-ID lesson-batch workflow, and the child completed.
@@ -369,6 +416,12 @@ describe('(A) challenge-factory runs to COMPLETION chain-backed (RFC 0133 + 0134
     expect(String(bag.planEvidenceBrief)).toContain('[c-1] Short daily studies of 20 minutes help beginners improve.');
     expect(simTasks.get('vendor.openwop-app.kicktodo.agents.sim-skeptic')).toContain('[c-1]');
     expect(simTasks.get('vendor.openwop-app.kicktodo.agents.sim-newcomer')).not.toContain('EVIDENCE');
+    // XCH-SIM-4 — every sim persona runs on the run's frozen binding, never the
+    // managed tier: each declares a return schema, and the managed tier refuses
+    // any request carrying a `responseSchema`.
+    for (const persona of ['sim-newcomer', 'sim-time-poor', 'sim-skeptic']) {
+      expect(simBindings.get(`vendor.openwop-app.kicktodo.agents.${persona}`), persona).toEqual(AI);
+    }
 
     // SoD terminal: publication submitted, approval raised, NOTHING published in-run.
     const publication = await getPublication(T, candidate.id);
@@ -376,6 +429,45 @@ describe('(A) challenge-factory runs to COMPLETION chain-backed (RFC 0133 + 0134
     expect(publication!.completedAt).toBeUndefined();
     expect((await getApproval(publication!.approvalId))?.kind).toBe('challenge-publish');
     expect((await getCandidate(T, candidate.id))?.state).toBe('planned');
+  });
+});
+
+// XCH-GATE-1 (found building it) — a lesson batch that fails used to SKIP its
+// checkpoint gate and the run went on to submit the challenge for publication:
+// the executor treats a failed middle node as recoverable when every terminal
+// completes or is skipped. build-fail-N now stops the run. Sabotage: deleting
+// the build-fail-N edges turns this run 'completed' with a publication.
+describe('(A2) a lesson batch that cannot be built stops the factory run', () => {
+  it('build-N failing fails the run with checkpoint_build_failed and submits nothing', async () => {
+    const T = 'tenant-cb-e2e-buildfail';
+    const AUTHOR = 'user:cb-e2e-buildfail';
+    const candidate = await createCandidate({
+      tenantId: T, createdBy: AUTHOR, topic: 'Watercolor painting basics', audience: 'absolute beginners',
+      transformation: '', durationDaysTarget: 3, dailyMinutesTarget: 15,
+    });
+    await setSecret('google:one', 'test-gemini-key-one', { tenantId: T });
+    const AI = { provider: 'google', model: 'gemini-3.1-flash-lite', credentialRef: 'google:one' };
+    lessonStandInBreaksDay = 2;
+    try {
+      const { run, def } = await startRun(CHALLENGE_FACTORY_WORKFLOW_ID, T, AUTHOR, {
+        candidateId: candidate.id, topic: 'Watercolor painting basics', audience: 'absolute beginners', authorSubject: AUTHOR, ...AI,
+      }, { credentialRefs: ['google:one'] });
+      await executeRun(storage, run, def);
+      let rounds = 0;
+      while ((await storage.getRun(run.runId))!.status === 'waiting-approval' && rounds++ < 8) {
+        for (const open of await storage.listOpenInterrupts(run.runId)) {
+          await __resolveAndResumeForTests(storage, hostSuite, open.interruptId, { decision: 'approved', approved: true });
+        }
+        await __awaitRunResumeChainForTests(run.runId);
+      }
+      expect((await storage.getRun(run.runId))!.status).toBe('failed');
+      const failed = (await storage.listEvents(run.runId)).filter((e) => e.type === 'node.failed' && /_build-fail-\d$/.test(String(e.nodeId)));
+      expect(failed).toHaveLength(1);
+      expect(JSON.stringify(failed[0]!.payload)).toContain('checkpoint_build_failed');
+      expect(await getPublication(T, candidate.id)).toBeFalsy();
+    } finally {
+      lessonStandInBreaksDay = null;
+    }
   });
 });
 

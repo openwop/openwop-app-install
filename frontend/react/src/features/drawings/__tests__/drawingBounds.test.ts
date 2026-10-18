@@ -13,12 +13,23 @@ import type { CanvasPropDef } from '../../../canvas/types.js';
 
 describe('drawings bound tables mirror validateDrawingDoc', () => {
   it('NUM_BOUNDS matches the backend NUM_FIELDS min/max', () => {
-    expect(NUM_BOUNDS.fontSize).toMatchObject({ min: 1, max: 400 });
-    expect(NUM_BOUNDS.strokeWidth).toMatchObject({ min: 0, max: 100 });
-    expect(NUM_BOUNDS.opacity).toMatchObject({ min: 0, max: 1 });
-    expect(NUM_BOUNDS.size).toMatchObject({ min: 0.5, max: 100 });
-    expect(NUM_BOUNDS.taperStart).toMatchObject({ min: 0, max: 4000 });
-    expect(NUM_BOUNDS.taperEnd).toMatchObject({ min: 0, max: 4000 });
+    // The KEY SET is the backend NUM_FIELDS key set — an FE-only bound with no
+    // backend twin is exactly the drift this file exists to catch.
+    expect(Object.keys(NUM_BOUNDS).sort()).toEqual([
+      'cx', 'cy', 'fontSize', 'height', 'opacity', 'r', 'rotation', 'rx', 'ry', 'size',
+      'strokeWidth', 'taperEnd', 'taperStart', 'width', 'x', 'x1', 'x2', 'y', 'y1', 'y2',
+    ]);
+    // min/max exactly (`step` is FE presentation only — no backend counterpart).
+    const mm = (f: string): { min?: number; max?: number } => {
+      const { min, max } = NUM_BOUNDS[f] ?? {};
+      return { ...(min !== undefined ? { min } : {}), ...(max !== undefined ? { max } : {}) };
+    };
+    expect(mm('fontSize')).toEqual({ min: 1, max: 400 });
+    expect(mm('strokeWidth')).toEqual({ min: 0, max: 100 });
+    expect(mm('opacity')).toEqual({ min: 0, max: 1 });
+    expect(mm('size')).toEqual({ min: 0.5, max: 100 });
+    expect(mm('taperStart')).toEqual({ min: 0, max: 4000 });
+    expect(mm('taperEnd')).toEqual({ min: 0, max: 4000 });
     for (const f of ['width', 'height', 'rx', 'ry', 'r'] as const) expect(NUM_BOUNDS[f]).toEqual({ min: 0 });
     for (const f of ['x', 'y', 'cx', 'cy', 'x1', 'y1', 'x2', 'y2', 'rotation'] as const) expect(NUM_BOUNDS[f]).toEqual({});
   });

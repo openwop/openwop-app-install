@@ -44,6 +44,8 @@ describe('openwop.requirement.0209.render-needs-root', () => {
 
   it('a createSurface alone renders nothing of the surface', () => {
     renderCard(payload([create]));
+    // The positive signal: the fold is held as pending, not rendered as an (empty) surface.
+    expect(screen.getByRole('status').textContent).toMatch(/still building/);
     expect(screen.queryByRole('button')).toBeNull();
     expect(screen.queryByRole('heading')).toBeNull();
   });

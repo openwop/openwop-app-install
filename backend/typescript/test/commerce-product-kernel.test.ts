@@ -1,7 +1,5 @@
 /**
- * ADR 0410 Phase 1 — the product catalog lives in the content kernel. Pins:
- * commerce.product is a system type that is publicRead-ELIGIBLE but sets NEITHER
- * flag in v1 (façade-only — the storefront read stays the commerce route); the
+ * ADR 0410 Phase 1 — the product catalog lives in the content kernel. Pins: the
  * full Product round-trips via ext.product with queryable scalars + top-level
  * orgId; generic kernel writes are BLOCKED (money-truth: only the commerce
  * façade + ledger mutate inventory); and the migration is id-preserving.
@@ -10,8 +8,7 @@ import { beforeAll, describe, expect, it } from 'vitest';
 import { initHostExtPersistence, DurableCollection } from '../src/host/hostExtPersistence.js';
 import { openStorage } from '../src/storage/index.js';
 import { createProduct, getProduct, migrateProductsToKernel, type Product } from '../src/features/commerce/commerceService.js';
-import { getEntityType, getSystemEntity, createEntity, queryEntities } from '../src/features/entities/entitiesService.js';
-import { readPublicEntities } from '../src/features/entities/publicRead.js';
+import { getSystemEntity, createEntity, queryEntities } from '../src/features/entities/entitiesService.js';
 
 const T = 'tenant-product-kernel';
 const ORG = 'org-shop';
@@ -21,26 +18,24 @@ beforeAll(async () => {
 });
 
 describe('ADR 0410 Phase 1 — commerce.product on the kernel', () => {
-  it('system type, publicRead-eligible but NEITHER flag in v1 → façade-only; round-trips via ext.product', async () => {
+  // The type flags (system / neverPublic / publicRead unset) and the anonymous-read 404 are
+  // owned by commerce-product-public-leak-guard.test.ts, which asserts them with the
+  // `entities` toggle ON and a positive control (here the toggle was off, so the 404 was
+  // vacuous). Round-1 probe w39g3-leak-mint-publicread reds that file for the same edit
+  // that red this one (w39g3-ker-mint-publicread).
+  it('round-trips via ext.product with queryable scalars; cross-org get refused', async () => {
     const p = await createProduct({ tenantId: T, orgId: ORG, createdBy: 'u1', type: 'physical', name: 'Roaster', price: 199.99, currency: 'USD', inventory: 12, cost: 90 });
-    const type = await getEntityType(T, undefined, 'commerce.product');
-    expect(type?.system).toBe(true);
-    expect(type?.neverPublic).toBeUndefined();   // eligible for publicRead later
-    expect(type?.publicRead).toBeUndefined();     // but NOT set in v1
 
     const got = await getProduct(T, ORG, p.productId);
     expect(got).toMatchObject({ name: 'Roaster', price: 199.99, currency: 'USD', inventory: 12, cost: 90, orgId: ORG });
 
     const rec = await getSystemEntity(T, 'commerce.product', p.productId);
-    expect((rec?.ext?.product as Product).name).toBe('Roaster');
+    expect(rec?.ext?.product).toMatchObject({ name: 'Roaster', productId: p.productId });
     expect(rec?.values.name).toBe('Roaster');
     expect(rec?.values.price).toBe(199.99);
     expect(rec?.values.inventory).toBe(12); // queryable stock projection
     expect(rec?.orgId).toBe(ORG);            // RI-7 org guard sees it
 
-    // v1: NOT served by the anonymous public-entities read (publicRead unset).
-    await expect(readPublicEntities({ tenantId: T, typeName: 'commerce.product', limit: 10 }))
-      .rejects.toMatchObject({ httpStatus: 404 });
     // Generic query by org works internally; cross-org get refused (IDOR guard).
     const q = await queryEntities({ tenantId: T, typeName: 'commerce.product', filters: [{ key: 'org_id', op: 'eq', value: ORG }] });
     expect(q.entities.map((e) => e.values.name)).toContain('Roaster');
@@ -48,6 +43,9 @@ describe('ADR 0410 Phase 1 — commerce.product on the kernel', () => {
   });
 
   it('MONEY-TRUTH: a generic kernel write to commerce.product is BLOCKED (only the façade + ledger mutate)', async () => {
+    // Mint the type through the façade first: without it (case order shuffled) the write
+    // fails as "Entity type not found", which is not the guard under test.
+    await createProduct({ tenantId: T, orgId: ORG, createdBy: 'u1', type: 'digital', name: 'Seed', price: 1, currency: 'USD' });
     await expect(createEntity({ tenantId: T, typeName: 'commerce.product', values: { name: 'Rogue' }, createdBy: 'attacker' }))
       .rejects.toThrow(/system type/);
   });

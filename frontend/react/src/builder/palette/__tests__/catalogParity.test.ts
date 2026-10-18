@@ -33,6 +33,9 @@ const SERVER_ROWS = [
   { typeId: 'core.bigquery.query', version: '1.0.0', label: 'core.bigquery.query', description: '', category: 'data', source: 'local' as const },
   { typeId: 'core.workday.query', version: '1.0.0', label: 'core.workday.query', description: '', category: 'data', source: 'local' as const },
   { typeId: 'core.openwop.connectors.hris-action', version: '1.0.0', label: 'core.openwop.connectors.hris-action', description: '', category: 'flow', source: 'local' as const },
+  // Noise segments directly before an action word: only the noise list keeps
+  // "core"/"connectors" out of the label (the drift guard below needs this row).
+  { typeId: 'core.connectors.sync', version: '1.0.0', label: 'core.connectors.sync', description: '', category: 'flow', source: 'local' as const },
   { typeId: 'ui.walkthrough.step', version: '1.0.0', label: 'ui.walkthrough.step', description: '', category: 'flow', source: 'local' as const },
   // Non-authorable: must RESOLVE but stay OUT of the palette.
   { typeId: 'ui.tour.step', version: '1.0.0', label: 'ui.tour.step', description: '', category: 'flow', source: 'local' as const },
@@ -42,7 +45,9 @@ const SERVER_ROWS = [
   // ADR 0785 — an in-tree, AUTHORABLE node: visible, with the overlay's label + form.
   { typeId: 'claude-code.task', version: '1.0.0', label: 'claude-code.task', description: '', category: 'flow', source: 'local' as const },
   // A pack row with real authored metadata.
-  { typeId: 'core.openwop.http.fetch', version: '1.0.0', label: 'HTTP fetch', description: 'Fetch a URL', category: 'integration', source: 'pack' as const, packName: 'core.openwop.http' },
+  // Its authored label is one prettifyTypeId could NOT produce (it would say
+  // "HTTP fetch"), so "left untouched" is observable.
+  { typeId: 'core.openwop.http.fetch', version: '1.0.0', label: 'Fetch a web page', description: 'Fetch a URL', category: 'integration', source: 'pack' as const, packName: 'core.openwop.http' },
 ];
 
 async function loadFreshRegistry() {
@@ -74,11 +79,15 @@ describe('ADR 0440 P3 — every server-reported type RESOLVES', () => {
     }
   });
 
+  // Twin: the loop case above covers this id too (it walks every SERVER_ROW);
+  // kept as the named regression for the seeder's showcase workflows.
   it('resolves the type the workflow-author seeder actually uses', () => {
     // The concrete regression: both showcase workflows failed to open on this.
     expect(reg.catalogEntryByTypeId('local.sample.demo.mock-ai')).toBeDefined();
   });
 
+  // Twin: also covered by the loop case above; kept to name the resolution ≠
+  // visibility split for the excluded rows explicitly.
   it('resolves non-authorable types too — resolution is not visibility', () => {
     // A replay-only alias must still open a historical workflow.
     expect(reg.catalogEntryByTypeId('ui.tour.step')).toBeDefined();
@@ -157,7 +166,7 @@ describe('ADR 0440 P3 — the static catalog is a PRESENTATION overlay', () => {
   });
 
   it('leaves an authored pack label untouched', () => {
-    expect(reg.catalogEntryByTypeId('core.openwop.http.fetch')?.label).toBe('HTTP fetch');
+    expect(reg.catalogEntryByTypeId('core.openwop.http.fetch')?.label).toBe('Fetch a web page');
   });
 });
 
@@ -184,15 +193,17 @@ describe('ADR 0440 P3 — the merge is actually REACHABLE (grade-pass)', () => {
   });
 });
 
-describe('ADR 0440 P3 (grade-pass) — label maps cover the live host catalog, no drift', () => {
+describe('ADR 0440 P3 (grade-pass) — label maps hold over the host-shaped fixture rows, no drift', () => {
   let reg: Awaited<ReturnType<typeof loadFreshRegistry>>;
   beforeEach(async () => { reg = await loadFreshRegistry(); });
 
   it('every host-derived label is non-empty, has no bare lowercase acronym, and no leaked namespace noise', () => {
     // The hand-kept LABEL_ACRONYMS / LABEL_BRANDS / NOISE / GENERIC maps drift
     // silently otherwise — a new node with an unlisted acronym ships a mangled
-    // label green. This turns the maps into a checked contract over whatever the
-    // server actually reports (both grades flagged the missing drift guard).
+    // label green. This checks the maps over the host-shaped rows in SERVER_ROWS
+    // above (incl. a noise-before-action-word row) — NOT over the live server
+    // catalog, which a frontend unit test cannot load. A drift guard over the
+    // real registry belongs on the backend (grade-code row).
     const NOISE = ['core', 'local', 'openwop', 'openwop-app', 'connectors', 'sample', 'demo'];
     for (const entry of reg.mergedCatalog()) {
       const label = entry.label;

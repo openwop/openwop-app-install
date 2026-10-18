@@ -96,14 +96,77 @@ import { announce } from '../../ui/announce.js';
 import { StateCard } from '../../ui/StateCard.js';
 import { SkeletonRows } from '../../ui/Skeleton.js';
 import { toast } from '../../ui/toast.js';
-import { MessageSquareIcon, SendIcon, CheckIcon, RotateCwIcon, TrashIcon, AlertIcon } from '../../ui/icons/index.js';
-import { loadOrgMembers } from '../../orgs/orgMembers.js';
+import { MessageSquareIcon, SendIcon, CheckIcon, RotateCwIcon, TrashIcon, AlertIcon, PencilIcon, UserIcon, XIcon } from '../../ui/icons/index.js';
+import { loadOrgMembers, invalidateOrgMembers } from '../../orgs/orgMembers.js';
 import { useOrgEffectiveAccess } from '../../client/useEffectiveAccess.js';
 import { Notice } from '../../ui/Notice.js';
 import {
-  listThread, postComment, updateComment, deleteComment, CommentsHttpError,
-  type Comment, type ResourceType,
+  readThread, postComment, updateComment, deleteComment, CommentsHttpError,
+  type Comment, type CommentWrite, type ResourceType, type ThreadViewer,
 } from './commentsClient.js';
+
+/** An org member the composer can mention (ADR 0881 D5) — from the cached directory. */
+interface Mentionable { subject: string; displayName: string }
+
+/** ADR 0881 D5 — mirrors `MAX.mentions` in `commentsService.ts`. */
+const MENTIONS_MAX = 20;
+
+/**
+ * ADR 0881 D5 — pick people to @mention from the org directory. The server never
+ * parses names out of the body (display names are not unique), so the picker sends
+ * member ids and the body stays free text. A disclosure, not a popover: the list is
+ * in the page flow, so keyboard and screen-reader users get ordinary checkboxes and
+ * nothing to dismiss.
+ */
+function MentionPicker({ members, selected, onChange, disabled }: {
+  members: readonly Mentionable[]; selected: readonly string[]; onChange: (next: string[]) => void; disabled: boolean;
+}): JSX.Element | null {
+  const { t } = useTranslation('comments');
+  const [open, setOpen] = useState(false);
+  const [filter, setFilter] = useState('');
+  if (members.length === 0) return null;
+  const nameOf = (id: string): string => members.find((m) => m.subject === id)?.displayName ?? id;
+  const q = filter.trim().toLowerCase();
+  const matching = q ? members.filter((m) => m.displayName.toLowerCase().includes(q)) : members;
+  const shown = matching.slice(0, 8);
+  const full = selected.length >= MENTIONS_MAX;
+  const toggle = (id: string): void => {
+    if (selected.includes(id)) onChange(selected.filter((x) => x !== id));
+    else if (!full) onChange([...selected, id]);
+  };
+  return (
+    <div className="u-flex u-flex-col u-gap-1 u-w-full">
+      <div className="u-flex u-gap-1 u-items-center u-wrap">
+        <Button variant="quiet" size="sm" aria-expanded={open} {...inertProps(disabled)}
+          onClick={() => { if (disabled) return; setOpen(!open); }}>
+          <UserIcon /> {t('mentionButton')}
+        </Button>
+        {selected.map((id) => (
+          <span key={id} className="chip">
+            @{nameOf(id)}
+            <Button variant="quiet" size="sm" aria-label={t('mentionRemove', { name: nameOf(id) })} onClick={() => toggle(id)}><XIcon /></Button>
+          </span>
+        ))}
+      </div>
+      {open ? (
+        <fieldset className="surface-inset u-flex u-flex-col u-gap-1">
+          <legend className="u-label-sm">{t('mentionLegend')}</legend>
+          <input type="search" value={filter} onChange={(e) => setFilter(e.target.value)} aria-label={t('mentionFilter')} placeholder={t('mentionFilter')} />
+          {shown.length === 0 ? <span className="u-label-sm">{t('mentionNoMatch')}</span> : null}
+          {shown.map((m) => (
+            <label key={m.subject} className="u-flex u-gap-1 u-items-center">
+              <input type="checkbox" checked={selected.includes(m.subject)} disabled={full && !selected.includes(m.subject)} onChange={() => toggle(m.subject)} />
+              {m.displayName}
+            </label>
+          ))}
+          {/* CM2UX-4 — the cut is stated, not silent. */}
+          {matching.length > shown.length ? <span className="u-label-sm">{t('mentionShowingSome', { shown: shown.length, total: matching.length })}</span> : null}
+          {full ? <span className="u-label-sm">{t('mentionLimit', { max: MENTIONS_MAX })}</span> : null}
+        </fieldset>
+      ) : null}
+    </div>
+  );
+}
 
 /** CMNT-UX-8 — mirrors `MAX.body` in `commentsService.ts`. Over it, the server
  *  SILENTLY truncates (`cleanString(body, 4000)`) and returns 201, so the
@@ -133,12 +196,14 @@ const STATUS_KEY: Record<Comment['status'], string> = { open: 'statusOpen', reso
  * this subtree. `onSubmit` resolves `true` only on a real 201, which is also
  * what clears the box — a failed post keeps the author's text.
  */
-function Composer({ disabled, reason, posting, onSubmit }: {
+function Composer({ disabled, reason, posting, onSubmit, members }: {
   disabled: boolean; reason: string | null; posting: boolean;
-  onSubmit: (body: string) => Promise<boolean>;
+  onSubmit: (body: string, mentions: string[]) => Promise<boolean>;
+  members: readonly Mentionable[];
 }): JSX.Element {
   const { t } = useTranslation('comments');
   const [draft, setDraft] = useState('');
+  const [mentions, setMentions] = useState<string[]>([]);
   const inert = disabled || posting || draft.trim().length === 0;
   return (
     <div className="surface-card u-p-4 surface-form">
@@ -162,13 +227,15 @@ function Composer({ disabled, reason, posting, onSubmit }: {
       {draft.length > BODY_MAX * 0.8 ? (
         <span className="u-label-sm">{t('bodyCounter', { used: draft.length, max: BODY_MAX })}</span>
       ) : null}
+      {/* CM2UX-3 — who to notify is decided BEFORE the submit, so it comes first in tab order. */}
+      <MentionPicker members={members} selected={mentions} onChange={setMentions} disabled={disabled} />
       <Button
         variant="primary"
         {...inertProps(inert, posting)}
         onClick={() => {
           // CMNT-UX-16 — refuse the activation instead of removing the control.
           if (inert) return;
-          void onSubmit(draft).then((ok) => { if (ok) setDraft(''); });
+          void onSubmit(draft, mentions).then((ok) => { if (ok) { setDraft(''); setMentions([]); } });
         }}
       >
         <MessageSquareIcon /> {t('commentButton')}
@@ -179,11 +246,13 @@ function Composer({ disabled, reason, posting, onSubmit }: {
 }
 
 /** CMNT-UX-21 — same reasoning as `Composer`, for the per-row reply box. */
-function ReplyBox({ posting, onSubmit }: {
-  posting: boolean; onSubmit: (body: string) => Promise<boolean>;
+function ReplyBox({ posting, onSubmit, members }: {
+  posting: boolean; onSubmit: (body: string, mentions: string[]) => Promise<boolean>;
+  members: readonly Mentionable[];
 }): JSX.Element {
   const { t } = useTranslation('comments');
   const [draft, setDraft] = useState('');
+  const [mentions, setMentions] = useState<string[]>([]);
   const inert = posting || draft.trim().length === 0;
   return (
     <div className="u-flex u-gap-1 u-items-start u-wrap">
@@ -198,16 +267,39 @@ function ReplyBox({ posting, onSubmit }: {
         // was accepted and silently lost 1,000 characters on the refetch.
         maxLength={BODY_MAX}
       />
+      <MentionPicker members={members} selected={mentions} onChange={setMentions} disabled={false} />
       <Button
         variant="primary"
         {...inertProps(inert, posting)}
-        onClick={() => { if (inert) return; void onSubmit(draft).then((ok) => { if (ok) setDraft(''); }); }}
+        onClick={() => { if (inert) return; void onSubmit(draft, mentions).then((ok) => { if (ok) { setDraft(''); setMentions([]); } }); }}
       >
         {t('reply')}
       </Button>
       {draft.length > BODY_MAX * 0.8 ? (
         <span className="u-label-sm u-w-full">{t('bodyCounter', { used: draft.length, max: BODY_MAX })}</span>
       ) : null}
+    </div>
+  );
+}
+
+/** ADR 0881 — edit your own comment in place. Saving an unchanged body is refused
+ *  client-side (it would stamp nothing and announce a change that did not happen). */
+function EditBox({ initial, busy, onSave, onCancel }: {
+  initial: string; busy: boolean; onSave: (body: string) => Promise<boolean>; onCancel: () => void;
+}): JSX.Element {
+  const { t } = useTranslation('comments');
+  const [draft, setDraft] = useState(initial);
+  const inert = busy || draft.trim().length === 0 || draft.trim() === initial.trim();
+  return (
+    <div className="u-flex u-gap-1 u-items-start u-wrap">
+      {/* CM2UX-1 — the Edit button that opened this box is gone, so focus moves INTO
+          the box (never to <body>), and Escape cancels like every inline editor. */}
+      <textarea className="u-flex-1" rows={2} value={draft} maxLength={BODY_MAX} aria-label={t('editAria')}
+        autoFocus
+        onKeyDown={(e) => { if (e.key === 'Escape') { e.preventDefault(); onCancel(); } }}
+        onChange={(e) => setDraft(e.target.value)} />
+      <Button variant="primary" {...inertProps(inert, busy)} onClick={() => { if (inert) return; void onSave(draft); }}>{t('common:save')}</Button>
+      <Button variant="quiet" onClick={onCancel}>{t('common:cancel')}</Button>
     </div>
   );
 }
@@ -247,9 +339,26 @@ export function CommentsPanel({ orgId, resourceType, resourceId }: { orgId: stri
   // CMNT-UX-20 — the caller's write access IN THIS ORG. `null` = not answered;
   // see the docblock for why that is deliberately NOT treated as a refusal.
   const access = useOrgEffectiveAccess(orgId);
-  const readOnly = access !== null && !access.scopes.includes('workspace:write');
+  const accessReadOnly = access !== null && !access.scopes.includes('workspace:write');
 
   const [comments, setComments] = useState<Comment[] | null>(null);
+  // ADR 0881 D7 — the caller's capabilities on THIS thread, from the read itself.
+  // `null` (a host that predates it, or not read yet) claims nothing about ownership.
+  const [viewer, setViewer] = useState<ThreadViewer | null>(null);
+  // CM2UX-5 — the thread read's own `viewer.canWrite` is authoritative; the org
+  // access read is the fallback for a host that does not send it.
+  const readOnly = viewer ? !viewer.canWrite : accessReadOnly;
+  // CM2UX-2 — members mentioned in the last write who could not be notified. A
+  // persistent Notice, not a 5-second toast whose announcement the success message
+  // then overwrote in the single polite slot.
+  const [unnotified, setUnnotified] = useState<string[]>([]);
+  // CM2UX-1 — the row Edit buttons, so Save/Cancel can hand focus back.
+  const editButtons = useRef(new Map<string, HTMLButtonElement>());
+  const refocusEdit = (id: string): void => { requestAnimationFrame(() => editButtons.current.get(id)?.focus()); };
+  // ADR 0881 D5 — the mention picker reads the SAME cached directory.
+  // CM2UX-11 — never offer the viewer themselves (the server drops a self-mention).
+  const members = useMemo<Mentionable[]>(() => (names ? [...names].filter(([subject]) => subject !== viewer?.userId).map(([subject, displayName]) => ({ subject, displayName })) : []), [names, viewer]);
+  const [editing, setEditing] = useState('');
   // CMNT-UX-2 — the read FAILED. Distinct from `comments === null` (not answered
   // yet) and from `comments.length === 0` (a genuinely empty thread), because
   // the empty state makes a FACTUAL CLAIM the failed read cannot support.
@@ -273,8 +382,8 @@ export function CommentsPanel({ orgId, resourceType, resourceId }: { orgId: stri
   const load = useCallback((opts?: { keepList?: boolean }) => {
     if (opts?.keepList) setRefreshing(true);
     else { setComments(null); setFailed(false); setGone(false); }
-    return listThread(orgId, resourceType, resourceId)
-      .then((rows) => { setComments(rows); setFailed(false); setGone(false); })
+    return readThread(orgId, resourceType, resourceId)
+      .then((r) => { setComments(r.comments); setViewer(r.viewer); setFailed(false); setGone(false); })
       // NEVER `setComments([])` here: that is the false-empty. `null` + `failed`
       // keeps "we do not know what is here" distinguishable from "there is
       // nothing here", which is the whole point.
@@ -311,10 +420,13 @@ export function CommentsPanel({ orgId, resourceType, resourceId }: { orgId: stri
       // Uniform with the read: 404 says nothing about which of the two it was.
       if (e.status === 404) return t('writeGone');
       if (e.status === 403) return t(e.code === 'forbidden_scope' ? 'writeForbiddenScope' : 'writeForbidden');
+      // CM2UX-8 — a refused MENTION is a stale directory (someone left the org), not
+      // bad text; say so, and drop the cached directory so the picker refreshes.
+      if (e.status === 400 && e.field === 'mentions') { invalidateOrgMembers(orgId); return t('writeMentionInvalid'); }
       if (e.status === 400) return t('writeInvalid');
     }
     return t(fallbackKey);
-  }, [t]);
+  }, [t, orgId]);
 
   /** A write that came back 404 means the target stopped resolving under us —
    *  re-read so the panel shows the gone state rather than leaving a composer
@@ -323,17 +435,30 @@ export function CommentsPanel({ orgId, resourceType, resourceId }: { orgId: stri
     if (e instanceof CommentsHttpError && (e.status === 404 || e.status === 403)) void load({ keepList: true });
   }, [load]);
 
-  const add = useCallback(async (body: string, parentId?: string): Promise<boolean> => {
+  /** ADR 0881 D5 — mentioned members who cannot open this resource were not told.
+   *  Say who, rather than letting the author believe they were. */
+  const reportUnnotified = useCallback((w: CommentWrite): boolean => {
+    const ids = w.unnotifiedMentions ?? [];
+    setUnnotified(ids);
+    return ids.length > 0;
+  }, []);
+  const unnotifiedText = unnotified.length ? t('mentionsNotNotified', { names: unnotified.map((id) => names?.get(id) ?? id).join(', ') }) : '';
+  const warningText = unnotifiedText || (namesFailed && !failed ? t('directoryNamesFallback') : '');
+
+  const add = useCallback(async (body: string, mentions: string[] = [], parentId?: string): Promise<boolean> => {
     if (!body.trim()) return false;
     if (inFlight.current) return false; // CMNT-UX-16 — ignore a repeat activation
     inFlight.current = true;
     setPosting(true);
     try {
-      await postComment(orgId, { resourceType, resourceId, body: body.trim(), ...(parentId ? { parentId } : {}) });
+      const w = await postComment(orgId, { resourceType, resourceId, body: body.trim(), ...(parentId ? { parentId } : {}), ...(mentions.length ? { mentions } : {}) });
+      const partial = reportUnnotified(w);
       setReplyTo('');
       // CMNT-UX-3 — announce the outcome. Nothing in the success path said
       // anything at all before; the only signal was a full-panel flash.
-      announce(parentId ? t('replyPosted') : t('commentPosted'));
+      // CM2UX-2 — with unnotified mentions the Notice below announces instead, so the
+      // two never race for the one polite slot.
+      if (!partial) announce(parentId ? t('replyPosted') : t('commentPosted'));
       await load({ keepList: true });
       return true;
     } catch (e) {
@@ -341,7 +466,22 @@ export function CommentsPanel({ orgId, resourceType, resourceId }: { orgId: stri
       reresolveIfGone(e);
       return false;
     } finally { inFlight.current = false; setPosting(false); }
-  }, [orgId, resourceType, resourceId, load, t, refusalCopy, reresolveIfGone]);
+  }, [orgId, resourceType, resourceId, load, t, refusalCopy, reresolveIfGone, reportUnnotified]);
+
+  const saveEdit = useCallback(async (c: Comment, body: string): Promise<boolean> => {
+    if (inFlight.current) return false;
+    inFlight.current = true;
+    setBusyId(c.commentId);
+    try {
+      await updateComment(orgId, c.commentId, { body: body.trim() });
+      setEditing('');
+      refocusEdit(c.commentId);
+      announce(t('commentEdited'));
+      await load({ keepList: true });
+      return true;
+    } catch (e) { toast.error(refusalCopy(e, 'updateFailed')); reresolveIfGone(e); return false; }
+    finally { inFlight.current = false; setBusyId(null); }
+  }, [orgId, load, t, refusalCopy, reresolveIfGone]);
 
   const setStatus = useCallback(async (c: Comment, status: Comment['status']) => {
     if (inFlight.current) return;
@@ -422,14 +562,31 @@ export function CommentsPanel({ orgId, resourceType, resourceId }: { orgId: stri
 
   const row = (c: Comment, isReply: boolean): JSX.Element => {
     const rowBusy = busyId === c.commentId;
+    // ADR 0881 D7 — offer only what the server will do. `viewer === null` claims
+    // nothing: Edit (author-only) is withheld, Delete stays and the server decides.
+    const mine = viewer !== null && c.authorId === viewer.userId;
+    const foreignReplies = !isReply && (replyIndex.get(c.commentId) ?? []).some((r) => r.authorId !== c.authorId);
+    const canDelete = viewer === null || viewer.canModerate || (mine && !foreignReplies);
+    const resolver = c.resolvedOnBehalfOf ?? c.resolvedBy;
     return (
       <div key={c.commentId} className={`surface-inset u-gap-1 u-flex u-flex-col${isReply ? ' u-ml-2' : ''}`}>
         <div className="u-flex u-gap-2 u-items-center u-wrap">
           <code className="u-flex-1 u-min-w-0">{authorLabel(c.authorId)}</code>
           <span className={statusChip(c.status)}>{t(STATUS_KEY[c.status])}</span>
           <span className="u-label-sm">{when(c.createdAt)}</span>
+          {c.editedAt ? <span className="u-label-sm" title={when(c.editedAt)}>{t('edited')}</span> : null}
         </div>
-        <div>{c.body}</div>
+        {editing === c.commentId
+          ? <EditBox initial={c.body} busy={rowBusy} onSave={(b) => saveEdit(c, b)} onCancel={() => { setEditing(''); refocusEdit(c.commentId); }} />
+          : <div>{c.body}</div>}
+        {c.mentions?.length ? (
+          <div className="u-flex u-gap-1 u-wrap" role="group" aria-label={t('mentionedLabel')}>
+            {c.mentions.map((id) => <span key={id} className="chip chip--muted">@{authorLabel(id)}</span>)}
+          </div>
+        ) : null}
+        {c.status === 'resolved' && resolver ? (
+          <span className="u-label-sm">{c.resolvedAt ? t('resolvedByAt', { name: authorLabel(resolver), when: when(c.resolvedAt) }) : t('resolvedBy', { name: authorLabel(resolver) })}</span>
+        ) : null}
         {/* CMNT-UX-20 — every verb below is a `workspace:write` route. A member
             the server has told us holds only `workspace:read` is not offered
             them; the reason is stated ONCE, under the composer, rather than as a
@@ -442,14 +599,21 @@ export function CommentsPanel({ orgId, resourceType, resourceId }: { orgId: stri
                 <SendIcon /> {t('reply')}
               </Button>
             ) : null}
+            {mine && editing !== c.commentId ? (
+              <Button variant="quiet" {...inertProps(rowBusy, rowBusy)}
+                ref={(el) => { if (el) editButtons.current.set(c.commentId, el); else editButtons.current.delete(c.commentId); }}
+                onClick={() => { if (rowBusy) return; setEditing(c.commentId); }}><PencilIcon /> {t('common:edit')}</Button>
+            ) : null}
             {c.status === 'open'
               ? <Button variant="quiet" {...inertProps(rowBusy, rowBusy)} onClick={() => { if (rowBusy) return; void setStatus(c, 'resolved'); }}><CheckIcon /> {t('resolve')}</Button>
               : <Button variant="quiet" {...inertProps(rowBusy, rowBusy)} onClick={() => { if (rowBusy) return; void setStatus(c, 'open'); }}><RotateCwIcon /> {t('reopen')}</Button>}
-            <Button variant="quiet" {...inertProps(rowBusy, rowBusy)} title={t('deleteComment')} aria-label={t('deleteComment')} onClick={() => { if (rowBusy) return; void remove(c); }}><TrashIcon /></Button>
+            {canDelete ? (
+              <Button variant="quiet" {...inertProps(rowBusy, rowBusy)} title={t('deleteComment')} aria-label={t('deleteComment')} onClick={() => { if (rowBusy) return; void remove(c); }}><TrashIcon /></Button>
+            ) : null}
           </div>
         ) : null}
         {replyTo === c.commentId && !readOnly ? (
-          <ReplyBox posting={posting} onSubmit={(body) => add(body, c.commentId)} />
+          <ReplyBox posting={posting} members={members} onSubmit={(body, mentions) => add(body, mentions, c.commentId)} />
         ) : null}
       </div>
     );
@@ -461,7 +625,8 @@ export function CommentsPanel({ orgId, resourceType, resourceId }: { orgId: stri
         disabled={failed || readOnly}
         posting={posting}
         reason={failed ? t('composerBlockedByFailure') : readOnly ? t('composerBlockedByReadOnly') : null}
-        onSubmit={(body) => add(body)}
+        onSubmit={(body, mentions) => add(body, mentions)}
+        members={members}
       />
 
       {/* CMNT-UX-5 — the directory read failed, so the ids below are ids, not
@@ -471,7 +636,10 @@ export function CommentsPanel({ orgId, resourceType, resourceId }: { orgId: stri
           are no authors on screen to mislabel then, and `announce()` has ONE
           polite slot, so leaving both wired would silently drop whichever lost
           the race. The exclusion is in the PREDICATE, not in JSX order. */}
-      {namesFailed && !failed ? <Notice variant="warning" announce={t('directoryNamesFallback')}>{t('directoryNamesFallback')}</Notice> : null}
+      {/* ONE announcing Notice (CMNT-UX-22): the unnotified-mentions warning (CM2UX-2)
+          is the more recent, user-caused fact, so it takes the slot; the directory
+          caveat shows again once it is dismissed by the next write. */}
+      {warningText ? <Notice variant="warning" announce={warningText}>{warningText}</Notice> : null}
 
       {failed ? (
         // §4.6 — one honest signal, a Retry, and it ANNOUNCES. The old shape had

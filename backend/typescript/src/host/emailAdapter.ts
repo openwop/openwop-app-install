@@ -19,6 +19,7 @@ import { brokeredPost, type AuthScheme, type BrokeredEgressDeps } from './broker
 import { priorSend, recordSend, reserveSend, releaseSend } from './emailSentLedger.js';
 import { sendViaSmtp } from './smtpSend.js';
 import { consultRecipientEgressGuard, type EgressPurpose } from './recipientEgressGuard.js';
+import { bindChainSender, resolveChainPurpose, takeChainSendBudget } from './chainEmailPolicy.js';
 
 // ADR 0655 D8 — a ledger reservation older than this is a crashed send, not an
 // in-flight one; it is released on read so the retry can reach the provider.
@@ -61,7 +62,12 @@ const normalizeAddrs = (v: string | string[] | undefined): string[] =>
 const hashBody = (args: EmailSendArgs): string =>
   createHash('sha256').update(`${args.text ?? ''}\u0000${args.html ?? ''}`).digest('hex').slice(0, 16);
 
-export type EmailAdapterDeps = BrokeredEgressDeps;
+export type EmailAdapterDeps = BrokeredEgressDeps & {
+  /** ADR 0895 — `'chain'` for the executor's `ctx.email` (the workflow node lane):
+   *  binds `from` to the tenant's verified senders, admits `transactional` only for
+   *  a workspace admin, and meters recipients. Every other caller omits it. */
+  lane?: 'chain';
+};
 
 /** Args the integration pack passes to `ctx.email.send`. */
 export interface EmailSendArgs {
@@ -266,15 +272,35 @@ export function makeEmailAdapter(deps: EmailAdapterDeps): EmailAdapter {
         else return { sent: false, provider, error: 'email_send_in_flight' };
       }
 
+      // ADR 0895 D1/D2 — the chain lane's sender and purpose are the host's to
+      // decide, not the author's. After the ledger short-circuit (a recorded send is
+      // returned as-is) and before the egress guard (which reads the purpose).
+      let purpose: EgressPurpose = args.purpose ?? 'marketing';
+      if (deps.lane === 'chain') {
+        const sender = await bindChainSender(deps.tenantId, args.from);
+        if (!sender.ok) {
+          log.info('email_chain_sender_refused', { tenantId: deps.tenantId, code: sender.code });
+          return { sent: false, provider, error: sender.code };
+        }
+        args = { ...args, from: sender.from };
+        purpose = await resolveChainPurpose(deps.tenantId, deps.actingUserId, args.purpose);
+      }
+
       // ADR 0655 D1 — the egress floor, at the ONE owner every lane shares. After the
       // ledger short-circuit (a prior send is a recorded fact) and BEFORE the
       // reservation (a refusal must never hold one). All-or-nothing per message.
-      const purpose: EgressPurpose = args.purpose ?? 'marketing';
       const addresses = [...normalizeAddrs(args.to), ...normalizeAddrs(args.cc), ...normalizeAddrs(args.bcc)];
       const verdict = await consultRecipientEgressGuard({ channel: 'email', tenantId: deps.tenantId, addresses, purpose });
       if (!verdict.ok) {
         log.info('email_egress_refused', { tenantId: deps.tenantId, purpose, code: verdict.code, refused: verdict.refused, recipients: addresses.length });
         return { sent: false, provider, error: verdict.code };
+      }
+
+      // ADR 0895 D3 — the chain lane's recipient meter, spent only by a send that
+      // passed every refusal above.
+      if (deps.lane === 'chain' && !takeChainSendBudget(deps.tenantId, addresses.length)) {
+        log.info('email_chain_rate_limited', { tenantId: deps.tenantId, recipients: addresses.length });
+        return { sent: false, provider, error: 'email_chain_rate_limited' };
       }
 
       // DEF-3 — cross-instance guard: node execution is sequential per run, but a

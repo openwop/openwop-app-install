@@ -1,5 +1,15 @@
 /**
- * ADR 0099 — the pure compaction kernel. No I/O, no deps, deterministic.
+ * ADR 0099 / ADR 0604 — the pure compaction kernel. No I/O, no deps, deterministic.
+ *
+ * Guards: `lossless` deletes whitespace OUTSIDE string literals and nothing else
+ * (TOCC-3 / review H2); `lossy` drops empties and elides long arrays, each
+ * DISCLOSED (`_emptied` / `_elided`), and never regresses size.
+ *
+ * Sabotages that turn it red (wave 22 probes): skipping the string-literal scan,
+ * re-serialising in `lossless`, re-adding drop-empty to `lossless`, dropping the
+ * `_emptied` disclosure or eliding it, the lossy never-regress guard, the
+ * `minChars` skip, the elision boundary/count, the defaults, the non-JSON
+ * pass-through, and any non-determinism in the lossy serialiser.
  */
 import { describe, it, expect } from 'vitest';
 import { compactToolOutput } from '../src/features/tool-output-compaction/compact.js';
@@ -107,7 +117,9 @@ describe('compactToolOutput', () => {
   });
 
   it('LOSSY still normalises those bytes — documented, because lossy says so', () => {
-    // Not a defect: `lossy` rebuilds the value, so IEEE-754 and last-key-wins
+    // A CHARACTERISATION pin, not a requirement: a future lossy that preserved
+    // these bytes would be an improvement, and should update this pin rather than
+    // be treated as a regression. Not a defect: `lossy` rebuilds the value, so IEEE-754 and last-key-wins
     // apply. Recorded here so the class is known rather than rediscovered, and
     // so the difference between the two modes is a pinned fact.
     expect(compactToolOutput('{"a": 9007199254740993, "b": 0}', { mode: 'lossy' })).toBe('{"a":9007199254740992,"b":0}');
@@ -190,9 +202,17 @@ describe('compactToolOutput', () => {
   });
 
   it('lossy: short arrays are left intact (≤ head+tail+1)', () => {
-    const input = JSON.stringify({ items: [{ id: 1 }, { id: 2 }, { id: 3 }] });
+    // EXACTLY head+tail+1 = 5 — the boundary. Eliding here would replace one row
+    // with a marker (a lost row). Two fixture traps, both measured as vacuous
+    // probes: 3 items never reach the boundary, and 5 SMALL rows hide an
+    // off-by-one behind the never-regress guard (`{"_elided":1}` is longer than
+    // `{"id":4}`, so the elided form is discarded anyway). The row at the elision
+    // point is therefore LARGE, so a `>=` threshold would actually shrink and ship.
+    const rows = [1, 2, 3, 4, 5].map((id) => ({ id, body: 'x'.repeat(40) }));
+    const input = JSON.stringify({ items: rows });
     const out = compactToolOutput(input, { mode: 'lossy', head: 3, tail: 1 });
-    expect(JSON.parse(out).items).toHaveLength(3);
+    expect(JSON.parse(out).items).toEqual(rows);
+    expect(out).not.toContain('_elided');
   });
 
   it('non-JSON content passes through untouched', () => {
@@ -207,13 +227,13 @@ describe('compactToolOutput', () => {
     expect(compactToolOutput(broken, { mode: 'lossless' })).toBe(broken);
   });
 
-  it('never regresses: returns the original when compaction would not shrink it', () => {
-    const tiny = '[1,2,3]';
-    expect(compactToolOutput(tiny, { mode: 'lossless' }).length).toBeLessThanOrEqual(tiny.length);
-  });
-
   it('respects minChars (skips small payloads)', () => {
-    const small = JSON.stringify({ a: null, b: 'x' });
+    // INDENTED, so lossless WOULD shrink it — the control below proves the skip
+    // is the only reason it comes back unchanged (an already-minified fixture
+    // could not fail: probe w22g1-kn-minchars was vacuous).
+    const small = JSON.stringify({ a: null, b: 'x' }, null, 2);
+    expect(small.length).toBeLessThan(1000);
+    expect(compactToolOutput(small, { mode: 'lossless' })).toBe('{"a":null,"b":"x"}');
     expect(compactToolOutput(small, { mode: 'lossless', minChars: 1000 })).toBe(small);
   });
 

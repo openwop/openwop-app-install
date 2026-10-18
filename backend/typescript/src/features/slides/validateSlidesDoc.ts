@@ -26,7 +26,9 @@ export const SLIDE_TRANSITIONS = ['none', 'fade', 'magic'] as const;
 const TRANSITIONS = new Set<string>(SLIDE_TRANSITIONS);
 export const SLIDE_THEMES = ['default', 'light', 'dark', 'editorial', 'vibrant', 'brand'] as const;
 const THEMES = new Set<string>(SLIDE_THEMES);
-const ID_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
+/** The editor slide-id slug — exported so the render tool keeps ids by the SAME rule (SL2CD-9). */
+export const SLIDE_ID_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
+const ID_RE = SLIDE_ID_RE;
 export const MAX_SLIDES = 100;
 
 /** Slide fields beyond the editor identity pair. */

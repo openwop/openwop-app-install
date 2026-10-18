@@ -23,9 +23,27 @@ import { messages as fr } from '../i18n/fr.js';
 import { messages as ptBR } from '../i18n/pt-BR.js';
 
 const LOCALES = { en, es, fr, 'pt-BR': ptBR } as const;
+type Locale = keyof typeof LOCALES;
 
-/** Words that assert the coach's change was carried out. */
-const CLAIMS_EXECUTION = /\bapplied\b|\baplicada\b|\bappliquée\b|\baplicada\b/i;
+/** Words that assert the coach's change was carried out (with gender/plural
+ *  forms: es/pt-BR aplicado/aplicada(s), fr appliqué(e)(s)). */
+const CLAIMS_EXECUTION = /(?<!\p{L})(applied|aplicad[ao]s?|appliquée?s?)(?!\p{L})/iu;
+
+/** Each locale's "not applied for you" disclosure in the empty-state hint. */
+const NOT_APPLIED: Record<Locale, RegExp> = {
+  en: /not applied/i,
+  es: /no se aplican/i,
+  fr: /ne sont pas appliquées/i,
+  'pt-BR': /não são aplicadas/i,
+};
+
+/** Each locale's CTA names the REBUILD, which is what the action really does. */
+const NAMES_REBUILD: Record<Locale, RegExp> = {
+  en: /rebuild/i,
+  es: /reconstruir/i,
+  fr: /reconstruire/i,
+  'pt-BR': /reconstruir/i,
+};
 
 describe('KT-HONESTY-1 — the CTA never claims the coach change was executed', () => {
   it('the resolved-state chip does not say "Applied" in any locale', () => {
@@ -38,18 +56,15 @@ describe('KT-HONESTY-1 — the CTA never claims the coach change was executed', 
   it('the empty-state stops promising that changes "land here" for execution', () => {
     // The old copy promised "swaps, schedule moves, and recovery land here for
     // your decision" — which reads as: decide, and it happens.
-    for (const [loc, m] of Object.entries(LOCALES)) {
-      expect(`${loc}`).toBeTruthy();
-      expect(m.proposalsEmptyHint.length).toBeGreaterThan(0);
+    for (const loc of Object.keys(LOCALES) as Locale[]) {
+      expect(LOCALES[loc].proposalsEmptyHint, `${loc} proposalsEmptyHint`).toMatch(NOT_APPLIED[loc]);
     }
-    expect(en.proposalsEmptyHint).toMatch(/not applied/i);
   });
 
   it('every locale carries BOTH disclosures — the advice label and the consequence hint', () => {
     // A disclosure that exists only in English is not a disclosure for the
     // pt-BR speaker who owns this product's native-language review.
     for (const [loc, m] of Object.entries(LOCALES)) {
-      expect(`${loc} advice`, ).toBeTruthy();
       expect(m.proposalAdviceLabel, `${loc} proposalAdviceLabel`).toBeTruthy();
       expect(m.proposalApplyHint, `${loc} proposalApplyHint`).toBeTruthy();
       expect(m.proposalApplyHint.length, `${loc} hint is substantive`).toBeGreaterThan(40);
@@ -62,8 +77,11 @@ describe('KT-HONESTY-1 — the CTA never claims the coach change was executed', 
     expect(en.proposalApplyHint).toMatch(/does not make the coach/i);
   });
 
-  it('the CTA does not read as a bare "Apply"', () => {
-    expect(en.proposalApplyCta.trim().toLowerCase()).not.toBe('apply');
-    expect(en.proposalApplyCta).toMatch(/rebuild/i);
+  it('the CTA does not read as a bare "Apply" in any locale', () => {
+    for (const loc of Object.keys(LOCALES) as Locale[]) {
+      const cta = LOCALES[loc].proposalApplyCta;
+      expect(cta, `${loc} proposalApplyCta`).not.toMatch(/^\s*(apply|aplicar|appliquer)\s*$/i);
+      expect(cta, `${loc} proposalApplyCta`).toMatch(NAMES_REBUILD[loc]);
+    }
   });
 });

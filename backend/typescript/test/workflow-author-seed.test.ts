@@ -1,13 +1,28 @@
 /**
- * AI Workflow Author demo seed (ADR 0072) — unit tests for the showcase seeder
- * and the validator's metadata/variables passthrough that carries authoring
- * provenance through persist.
+ * AI Workflow Author demo seed (ADR 0072, WFAWF-6 / ADR 0596 R2, ADR 0789) —
+ * unit tests for the showcase seeder: per-tenant ownership, idempotency, stable
+ * replay-safe ids, the illustrative badge, closed-world node types, and a
+ * tenant-scoped clear that never deletes the shared definition. Plus the
+ * validator's refusal of a non-object `metadata`.
+ *
+ * Sabotage witnesses (grade-tests w18): ownership not recorded; `created`
+ * counted unconditionally; count ignoring archive/absence; a showcase id
+ * renamed; the showcase/illustrative badge flipped; a showcase built from a
+ * non-runnable typeId; clear deleting the shared def or miscounting; the
+ * non-object `metadata` guard removed.
+ *
+ * The validator's metadata/variables PASSTHROUGH cases lived here and were cut
+ * in w18 as redundant: `workflow-author-node-pack.test.ts` › "a model cannot
+ * FORGE the attribution" (authoring.intent survives) and
+ * `workflow-author-write-integrity.test.ts` › "seeds a rich head" (variables
+ * survive) both went red under the same sabotage.
  */
 
-import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { ensureNodesRegistered } from '../src/bootstrap/nodes.js';
 import { openStorage } from '../src/storage/index.js';
-import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
+import { initHostExtPersistence, __resetHostExtPersistence } from '../src/host/hostExtPersistence.js';
+import { findUnknownTypeIds } from '../src/host/nodeCatalogBuilder.js';
 import {
   seedWorkflowAuthorShowcase,
   clearWorkflowAuthorShowcase,
@@ -32,6 +47,7 @@ beforeAll(async () => {
   ensureNodesRegistered();
   initHostExtPersistence(await openStorage('memory://'));
 });
+afterAll(() => __resetHostExtPersistence());
 beforeEach(async () => {
   await clearWorkflowAuthorShowcase(tenantId);
   await clearWorkflowAuthorShowcase(otherTenant);
@@ -80,47 +96,33 @@ describe('workflow-author demo seed — tenant-owned (WFAWF-6)', () => {
 
   it('seeded workflows use only real, runnable catalog typeIds (closed-world)', () => {
     for (const s of WORKFLOW_AUTHOR_SHOWCASE) {
-      // validateWorkflowDefinition throws on any structural/gate violation; these
-      // are built from deterministic demo nodes so they must validate clean.
-      expect(() => validateWorkflowDefinition(s.definition)).not.toThrow();
+      // Structural validity (the shared validator) AND closed-world membership:
+      // `validateWorkflowDefinition` checks typeId GRAMMAR only, so the closed-world
+      // half is `findUnknownTypeIds` against the RUNNABLE set (grade-tests w18 —
+      // the case used to assert only the first half under this title).
+      const def = validateWorkflowDefinition(s.definition);
+      expect(findUnknownTypeIds(def), `${s.definition.workflowId} uses only runnable typeIds`).toEqual([]);
     }
   });
 
-  it('clear removes only THIS tenant\'s ownership; the shared def survives while another tenant owns it', async () => {
+  it('clear removes only THIS tenant\'s ownership; the shared def is never deleted (ADR 0789)', async () => {
     await seedWorkflowAuthorShowcase(tenantId);
     await seedWorkflowAuthorShowcase(otherTenant);
     const { cleared } = await clearWorkflowAuthorShowcase(tenantId);
     expect(cleared).toBe(WORKFLOW_AUTHOR_SHOWCASE.length);
     expect(await countWorkflowAuthorShowcase(tenantId)).toBe(0);
-    // otherTenant still owns it ⇒ its count is intact AND the shared def is NOT deleted
-    // (its historical runs must keep replaying).
+    // otherTenant still owns it ⇒ its count is intact. The shared def is NOT deleted —
+    // since ADR 0789 clear never deletes it at all (forked/retracted tenants still
+    // have runs stamped with the id), not merely "while another tenant owns it".
     expect(await countWorkflowAuthorShowcase(otherTenant)).toBe(WORKFLOW_AUTHOR_SHOWCASE.length);
     expect(getRegisteredWorkflow(LEAD_TRIAGE)).toBeDefined();
   });
 });
 
-describe('validator metadata/variables passthrough (provenance survives persist)', () => {
-  it('preserves metadata (authoring provenance) through validation', () => {
-    const def = validateWorkflowDefinition({
-      workflowId: 'authored.prov-1',
-      nodes: [{ nodeId: 'n1', typeId: 'core.noop' }],
-      metadata: { authoring: { authoredVia: 'workflow-author', intent: 'do a thing', model: 'claude-sonnet-4-6', attempts: 1 } },
-    });
-    expect((def.metadata?.authoring as Record<string, unknown>)?.intent).toBe('do a thing');
-  });
-
-  it('preserves variables when present', () => {
-    const def = validateWorkflowDefinition({
-      workflowId: 'authored.prov-2',
-      nodes: [{ nodeId: 'n1', typeId: 'core.noop' }],
-      variables: [{ name: 'intent', type: 'string', required: true }],
-    });
-    expect(def.variables?.[0]?.name).toBe('intent');
-  });
-
+describe('validator — a non-object metadata is refused', () => {
   it('rejects a non-object metadata', () => {
     expect(() =>
       validateWorkflowDefinition({ workflowId: 'authored.prov-3', nodes: [{ nodeId: 'n1', typeId: 'core.noop' }], metadata: 'nope' }),
-    ).toThrow();
+    ).toThrowError(/`metadata` MUST be an object/);
   });
 });

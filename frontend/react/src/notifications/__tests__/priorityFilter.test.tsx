@@ -8,14 +8,17 @@
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/react';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import type { Notification } from '../types.js';
+import type { useNotificationStore as RealStore } from '../notificationStore.js';
+
+type StoreState = ReturnType<typeof RealStore.getState>;
 
 // The real hook is SELECTOR-based (`useNotificationStore((s) => s.notifications)`),
 // so the mock must apply the selector rather than hand back the whole state.
-let storeState: Record<string, unknown> = {};
+let storeState: Partial<StoreState> = {};
 vi.mock('../notificationStore.js', () => ({
-  useNotificationStore: (sel?: (s: Record<string, unknown>) => unknown) => (sel ? sel(storeState) : storeState),
+  useNotificationStore: (sel?: (s: Partial<StoreState>) => unknown) => (sel ? sel(storeState) : storeState),
 }));
 vi.mock('../../client/interruptsClient.js', () => ({ listOpenInterrupts: async () => [] }));
 vi.mock('../NeedsYouInbox.js', () => ({ NeedsYouInbox: () => null }));
@@ -32,9 +35,9 @@ const note = (id: string, priority: Notification['priority'], title: string): No
   title,
   message: `${title} body`,
   createdAt: '2026-07-24T09:00:00.000Z',
-} as Notification);
+});
 
-function withNotifications(list: Notification[]) {
+function withNotifications(list: Notification[]): void {
   storeState = ({
     notifications: list,
     unreadCount: list.filter((n) => n.status === 'unread').length,
@@ -102,7 +105,7 @@ describe('inbox — priority filter (IB-G1)', () => {
   });
 
   it('does not count ARCHIVED items into the urgent tally of the open tabs', async () => {
-    const archived = { ...note('n9', 'urgent', 'Old fire'), status: 'archived' } as Notification;
+    const archived: Notification = { ...note('n9', 'urgent', 'Old fire'), status: 'archived' };
     withNotifications([note('n1', 'normal', 'A'), note('n2', 'low', 'B'), archived]);
     renderInbox();
     await screen.findByText('A');
@@ -137,6 +140,8 @@ describe('R2 IB-SP-9 — a failed FIRST read is not "all clear" under a 0/0/0 ba
     renderInbox();
     await screen.findByText('Still here');
     expect(screen.getByText(/didn.t go through/i)).toBeTruthy();
+    // The band stays: a mutation failure must not hide the key figures.
+    expect(screen.getByRole('button', { name: /action needed/i })).toBeTruthy();
   });
 });
 
@@ -175,9 +180,11 @@ describe('inbox — keyboard queue nav (IB-R2-1, first tests: review F13)', () =
     withNotifications([note('n1', 'normal', 'First'), note('n2', 'normal', 'Second')]);
     renderInbox();
     await screen.findByText('First');
+    // Cursor on the SECOND row, so "the cursor row" differs from "the first row".
+    kd('j');
     kd('j');
     kd('e');
-    expect(storeState['archive']).toHaveBeenCalledWith('n1');
+    expect(storeState.archive).toHaveBeenCalledWith('n2');
   });
 
   it('u marks the unread cursor row read', async () => {
@@ -186,7 +193,7 @@ describe('inbox — keyboard queue nav (IB-R2-1, first tests: review F13)', () =
     await screen.findByText('First');
     kd('j');
     kd('u');
-    expect(storeState['markAsRead']).toHaveBeenCalledWith('n1');
+    expect(storeState.markAsRead).toHaveBeenCalledWith('n1');
   });
 
   it('the grammar DISARMS under an open dialog (review F5 — no mutation behind a modal)', async () => {
@@ -199,7 +206,7 @@ describe('inbox — keyboard queue nav (IB-R2-1, first tests: review F13)', () =
     document.body.appendChild(dialog);
     try {
       kd('e');
-      expect(storeState['archive']).not.toHaveBeenCalled();
+      expect(storeState.archive).not.toHaveBeenCalled();
     } finally { dialog.remove(); }
   });
 
@@ -212,18 +219,26 @@ describe('inbox — keyboard queue nav (IB-R2-1, first tests: review F13)', () =
     document.body.appendChild(input);
     try {
       fireEvent.keyDown(input, { key: 'e' });
-      expect(storeState['archive']).not.toHaveBeenCalled();
+      expect(storeState.archive).not.toHaveBeenCalled();
     } finally { input.remove(); }
   });
 
   it('Enter navigates to the cursor row\'s action URL and marks it read', async () => {
-    const rows = [{ ...note('n1', 'normal', 'First'), actionUrl: '/runs/r1' } as Notification];
+    const rows: Notification[] = [{ ...note('n1', 'normal', 'First'), actionUrl: '/runs/r1' }];
     withNotifications(rows);
-    renderInbox();
+    render(
+      <MemoryRouter initialEntries={['/inbox']}>
+        <Routes>
+          <Route path="/inbox" element={<NotificationsPage />} />
+          <Route path="/runs/:runId" element={<p>run page</p>} />
+        </Routes>
+      </MemoryRouter>,
+    );
     await screen.findByText('First');
     kd('j');
     kd('Enter');
-    expect(storeState['markAsRead']).toHaveBeenCalledWith('n1');
+    expect(storeState.markAsRead).toHaveBeenCalledWith('n1');
+    await screen.findByText('run page');
   });
 
   it('Enter with no action URL does nothing (no false navigation)', async () => {
@@ -232,6 +247,6 @@ describe('inbox — keyboard queue nav (IB-R2-1, first tests: review F13)', () =
     await screen.findByText('First');
     kd('j');
     kd('Enter');
-    expect(storeState['markAsRead']).not.toHaveBeenCalled();
+    expect(storeState.markAsRead).not.toHaveBeenCalled();
   });
 });

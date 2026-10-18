@@ -11,6 +11,10 @@
  *    lookup (`documentsService.ts:481-485`) searched an EMPTY list and no key could match.
  *  - `record-decision` carried the byte-identical defect 80 lines away.
  *  - Both returned `status:'success'` carrying the error when the write FAILED (`SPC-20`).
+ *
+ * /grade-tests wave 19: every leg sabotage-witnessed (dropping a writer from the generated
+ * floor/served set, a read-verb prefix sweep, the manifest capability, a random or CONSTANT
+ * idemBase for either writer, either failure arm flipped to success, the degrade arm).
  */
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
@@ -21,7 +25,6 @@ import { isSideEffectingNode } from '../src/executor/sideEffects.js';
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 const PACK = JSON.parse(readFileSync(join(REPO, 'packs', 'feature.strategy.nodes', 'pack.json'), 'utf8')) as {
-  version: string;
   nodes: { typeId: string; role: string; capabilities?: string[] }[];
 };
 
@@ -48,13 +51,16 @@ const loadNodes = async (): Promise<Record<string, (ctx: unknown) => Promise<{ s
 };
 
 /** A documents surface that records every mint, so a duplicate is observable. */
-function docsSurface(opts?: { throwOnWrite?: boolean }) {
+function docsSurface(opts?: { throwOnWrite?: boolean; refuse?: boolean }) {
   const minted: string[] = [];
   return {
     minted,
     surface: {
       createDraftDocument: async (args: { orgId: string; title: string; kind: string; content: string; idemBase?: string }) => {
         if (opts?.throwOnWrite) throw new Error('documents unavailable');
+        // The real owner REFUSES some writes by returning a typed error, not throwing
+        // (`documents/surface.ts` createDraftDocument: empty_content / content_too_large).
+        if (opts?.refuse) return { error: { code: 'content_too_large', message: 'Document content exceeds the 1 MB cap.' } };
         // Mirrors the real owner: the documentId is DERIVED from idemBase, and an
         // existing id short-circuits (`documentsService.ts:326-329`).
         const documentId = `doc:${args.idemBase ?? 'run'}`;
@@ -90,10 +96,9 @@ describe('ADR 0676 D1 — strategy document writers are replay-safe', () => {
     }
   });
 
-  it('leg 4: the feature pin equals the manifest version', () => {
-    const feature = readFileSync(join(REPO, 'backend', 'typescript', 'src', 'features', 'strategy', 'feature.ts'), 'utf8');
-    expect(feature).toContain(`{ name: 'feature.strategy.nodes', version: '${PACK.version}' }`);
-  });
+  // Leg 4 ("the feature pin equals the manifest version") was REMOVED in /grade-tests wave 19:
+  // `pack-pin-parity.test.ts` ("every feature pin matches the pack version on disk") asserts it
+  // corpus-wide and went red under the same sabotage (probe w19g1-mr-pin-cover).
 
   it('leg 5: the SAME memo content re-resolves to the SAME documentId — the dedupe that the old key could not do', async () => {
     const nodes = await loadNodes();
@@ -129,6 +134,10 @@ describe('ADR 0676 D1 — strategy document writers are replay-safe', () => {
     const b = await nodes['feature.strategy.nodes.record-decision']!(ctx);
     expect(a.outputs?.documentId).toBe(b.outputs?.documentId);
     expect(minted.length, 'the twin must not mint twice either').toBe(1);
+    // Non-vacuity, as in leg 5: a constant id would pass the two assertions above.
+    const c = await nodes['feature.strategy.nodes.record-decision']!({ ...ctx, inputs: { ...ctx.inputs, markdown: 'We decided Y.' } });
+    expect(c.outputs?.documentId).not.toBe(a.outputs?.documentId);
+    expect(minted.length).toBe(2);
   });
 
   it('leg 7 (SPC-20): an ATTEMPTED write that FAILS is a typed failure, never success-with-a-note', async () => {
@@ -142,6 +151,13 @@ describe('ADR 0676 D1 — strategy document writers are replay-safe', () => {
       });
       expect(res.status, `${id}: a failed write must not report success`).toBe('error');
       expect(res.error?.code).toBe('document_write_failed');
+    }
+    // The owner's RETURNED refusal is a typed failure too, carrying the owner's code.
+    const refusing = docsSurface({ refuse: true }).surface;
+    for (const id of ['feature.strategy.nodes.create-board-memo', 'feature.strategy.nodes.record-decision']) {
+      const res = await nodes[id]!({ inputs: { orgId: 'o1', title: 'T', markdown: 'body' }, config: {}, features: { documents: refusing } });
+      expect(res.status, `${id}: a refused write must not report success`).toBe('error');
+      expect(res.error?.code).toBe('content_too_large');
     }
   });
 

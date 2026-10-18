@@ -9,6 +9,15 @@
  *    accidental erasure of good fields);
  *  - save calls `updateShow` with the newly added fields;
  *  - artwork rides the shared MediaPickerDialog and lands as `imageMediaRef`.
+ * Subject: `ShowsManager` (ADR 0390 shows & distribution; SP-9 canWrite gating).
+ *
+ * Sabotage-witnessed (grade-tests w21): blank pre-fill, dropping ownerEmail from
+ * the patch, storing the bare token instead of `serveUrl`, skipping the re-read,
+ * hiding the validity Notice, and closing the form / dropping the toast on a failed
+ * save each red the case that claims them; forcing `canWrite` either way reds the
+ * SP-9 pair; `canWrite === true` in the client reds the older-wire case.
+ * (w21 found the validity assertion here VACUOUS — `/required/` matched the create
+ * form's "Owner email (required by Apple)" label — and it now asserts the copy.)
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, cleanup, act, fireEvent, waitFor, within } from '@testing-library/react';
@@ -31,11 +40,12 @@ const { toastSuccess, toastError } = vi.hoisted(() => ({ toastSuccess: vi.fn(), 
 vi.mock('../../../ui/toast.js', () => ({ toast: { success: toastSuccess, error: toastError } }));
 
 import { ShowsManager } from '../ShowsManager.js';
+import type { PodcastShow } from '../podcastsClient.js';
 
-const SHOW = {
+const SHOW: PodcastShow = {
   id: 'sh1', orgId: 'o1', slug: 'acme-hour', title: 'The Acme Hour', author: 'Acme',
   description: 'Weekly talk', languageCode: 'en', explicit: false,
-  type: 'episodic' as const, published: false, createdAt: '2026-08-01T00:00:00Z', updatedAt: '2026-08-01T00:00:00Z',
+  type: 'episodic', published: false, createdAt: '2026-08-01T00:00:00Z', updatedAt: '2026-08-01T00:00:00Z',
 };
 
 afterEach(cleanup);
@@ -55,7 +65,9 @@ describe('R2 SP-2 — the show edit form makes the validity instruction performa
     await mount();
     await screen.findByText('The Acme Hour');
     // The warning names what's missing — the instruction this form serves.
-    expect(screen.getByText(/add before submitting|required/i)).toBeTruthy();
+    // SHOW has author + description but no owner email / artwork / category —
+    // exactly those three, named in the validity copy (not a field label).
+    expect(screen.getByText(/before submitting to a directory, add: owner email, channel artwork, category\./i)).toBeTruthy();
 
     fireEvent.click(screen.getByRole('button', { name: /edit/i }));
     // Scope to the EDIT form (the create form below shares field labels).
@@ -83,15 +95,20 @@ describe('R2 SP-2 — the show edit form makes the validity instruction performa
     await mount();
     await screen.findByText('The Acme Hour');
     fireEvent.click(screen.getByRole('button', { name: /edit/i }));
-    fireEvent.click(screen.getByRole('button', { name: /save show/i }));
-    await waitFor(() => expect(toastError).toHaveBeenCalled());
-    // The form is still on screen — the operator's edits are not discarded.
-    expect(screen.getByRole('button', { name: /save show/i })).toBeTruthy();
+    const editForm = screen.getByText(/edit “the acme hour”/i).closest('form')! as HTMLFormElement;
+    fireEvent.change(within(editForm).getByLabelText(/owner email/i), { target: { value: 'kept@acme.test' } });
+    fireEvent.click(within(editForm).getByRole('button', { name: /save show/i }));
+    // The failure is reported with the server's message, not swallowed.
+    await waitFor(() => expect(toastError).toHaveBeenCalledWith('http 500'));
+    expect(toastSuccess).not.toHaveBeenCalled();
+    // The form is still on screen AND still holds the operator's edit.
+    const stillOpen = screen.getByText(/edit “the acme hour”/i).closest('form')! as HTMLFormElement;
+    expect((within(stillOpen).getByLabelText(/owner email/i) as HTMLInputElement).value).toBe('kept@acme.test');
   });
 });
 
 describe('SP-9 (round 3) — write actions render only when the server reports canWrite', () => {
-  it('canWrite:false — Edit/Publish/Delete and the create form are GONE; the read-only disclosure shows', async () => {
+  it('canWrite:false — Edit/Publish/Delete and the create form are GONE', async () => {
     listShowsWithCapability.mockResolvedValue({ shows: [SHOW], canWrite: false });
     await mount();
     await screen.findByText('The Acme Hour');
@@ -105,10 +122,12 @@ describe('SP-9 (round 3) — write actions render only when the server reports c
     // consumer) — asserted in orgsFailedNotEmpty.test.tsx, not duplicated here.
   });
 
-  it('canWrite:true (the paired polarity) — the same queries FIND the actions and no disclosure renders', async () => {
+  it('canWrite:true (the paired polarity) — the same queries FIND the actions', async () => {
     await mount(); // beforeEach: canWrite true
     await screen.findByText('The Acme Hour');
     expect(screen.getByRole('button', { name: /edit/i })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /^publish$/i })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /delete/i })).toBeTruthy();
     expect(screen.getByRole('button', { name: /create show/i })).toBeTruthy();
   });
 });

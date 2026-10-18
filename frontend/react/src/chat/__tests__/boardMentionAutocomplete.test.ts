@@ -1,3 +1,10 @@
+/**
+ * ADR 0040 — the `@@<board>` picker trigger + filter in the composer. Breaks it:
+ * the `@` agent picker's trigger stealing `@@` (or the reverse), an email-ish
+ * `a@@b` token opening the picker, the picker staying open after the user typed a
+ * space, a query read past the caret, or a filter that misses names / is
+ * case-sensitive.
+ */
 import { describe, it, expect } from 'vitest';
 import {
   detectBoardMentionState,

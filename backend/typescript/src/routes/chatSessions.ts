@@ -56,7 +56,8 @@ import { readMarkersOf, readMarkersByConversation, type ReadMarkerView } from '.
 import { publishChatMessageAppended, publishConversationFrame } from '../host/chatMessageBus.js';
 import { addReaction, removeReaction, listReactionsForConversation, aggregateReactions, deleteReactionsForMessage, isReactionEmoji, REACTION_EMOJI } from '../host/messageReactionsStore.js';
 import { resolveSubjectAccess, levelSatisfies } from '../host/subjectAccess.js';
-import { isVisibleToAsync, isRailListed } from '../host/conversationVisibility.js';
+import { isVisibleTo, isVisibleToAsync, isRailListed } from '../host/conversationVisibility.js';
+import { channelAuthorityOf, requireChannelWrite, type ChannelAuthority } from '../host/channelAuthority.js';
 import { listRunningConversations } from '../host/runningByConversation.js';
 import { toolEffectsFor } from '../host/toolEffects.js';
 import { requireProtocolScope } from '../host/protocolAuthorization.js';
@@ -128,6 +129,34 @@ async function requireManageAsync(meta: ConversationMeta | null, req: Request, t
     }
   }
   requireOwner(meta, req);
+}
+
+/** ADR 0879 — the channel doors on this GENERIC route family. A channel is a room of
+ *  peers managed through `/channels/*`; these routes either refuse it outright
+ *  (rename, delete, branch, run binding, focus — archive is a channel's exit, and a
+ *  branch would copy other people's posts into a conversation the caller owns) or
+ *  apply the channel's own write rules (edit, delete, react). */
+function refuseChannel(meta: ConversationMeta | null, what: string): void {
+  if (meta?.type === 'channel') {
+    throw new OpenwopError('validation_error', `A channel cannot be ${what} here; use /host/openwop-app/channels/:id.`, 400, { code: 'channel_use_channel_routes' });
+  }
+}
+
+/** ADR 0879 D3 — the channel owner, or a workspace admin who can see the channel. */
+function isChannelManagerOf(meta: ConversationMeta, req: Request, authority: ChannelAuthority): boolean {
+  const caller = actingUserOf(req);
+  if (!caller) return false;
+  if (meta.ownerUserId !== undefined && meta.ownerUserId === caller) return true;
+  return authority.isAdmin && isVisibleTo(meta, caller);
+}
+
+/** ADR 0879 D2 (M1) — is the caller this row's author? Channel rows are stamped
+ *  `userRef(req.userId ?? principalId)`, while other rows carry `callerSubject` —
+ *  for a bearer caller those differ, so both spellings of the SAME caller count. */
+function isAuthorOf(row: { authorSubject: string | null }, req: Request): boolean {
+  if (row.authorSubject === null) return false;
+  const acting = actingUserOf(req);
+  return row.authorSubject === callerSubject(req) || (acting !== undefined && row.authorSubject === userRef(acting));
 }
 
 /** Project a chat-session header + its conversation meta into the unified
@@ -431,7 +460,11 @@ export function registerChatSessionRoutes(app: Express, deps: { storage: Storage
       if (!existing) {
         throw new OpenwopError('not_found', `chat_session "${req.params.sessionId}" not found.`, 404);
       }
-      await requireVisibleAsync(await getConversationMeta(tenantId, req.params.sessionId), req, tenantId, req.params.sessionId);
+      const patchMeta = await getConversationMeta(tenantId, req.params.sessionId);
+      await requireVisibleAsync(patchMeta, req, tenantId, req.params.sessionId);
+      // ADR 0879 (architect H3) — renaming a channel's rail title here skipped the
+      // owner gate entirely: any member of a public channel renamed it.
+      refuseChannel(patchMeta, 'renamed');
       const body = (req.body ?? {}) as PatchSessionRequest;
       if (typeof body !== 'object' || body === null) {
         throw new OpenwopError('validation_error', 'Request body MUST be a JSON object.', 400);
@@ -475,6 +508,8 @@ export function registerChatSessionRoutes(app: Express, deps: { storage: Storage
       // owner deletes a conversation (a participant leaves via the × instead).
       const meta = await getConversationMeta(tenantId, req.params.sessionId);
       await requireVisibleAsync(meta, req, tenantId, req.params.sessionId);
+      // ADR 0879 (H3) — a channel is everyone's history; its exit is archive.
+      refuseChannel(meta, 'deleted');
       await requireManageAsync(meta, req, tenantId);
       // The whole cascade — session (messages cascade in SQL), meta, the four
       // host-owned sidecars, then the feature seam. Extracted to ONE owner
@@ -566,7 +601,9 @@ export function registerChatSessionRoutes(app: Express, deps: { storage: Storage
       if (!(await storage.getChatSession(tenantId, req.params.sessionId))) {
         throw new OpenwopError('not_found', `chat_session "${req.params.sessionId}" not found.`, 404);
       }
-      await requireVisibleAsync(await getConversationMeta(tenantId, req.params.sessionId), req, tenantId, req.params.sessionId);
+      const runMeta = await getConversationMeta(tenantId, req.params.sessionId);
+      await requireVisibleAsync(runMeta, req, tenantId, req.params.sessionId);
+      refuseChannel(runMeta, 'bound to a conversation run'); // ADR 0879 (H3)
       const body = (req.body ?? {}) as { conversationRunId?: unknown };
       if (typeof body.conversationRunId !== 'string' || !ID_PATTERN.test(body.conversationRunId)) {
         throw new OpenwopError('validation_error', 'conversationRunId MUST match /^[A-Za-z0-9_-]{1,64}$/.', 400);
@@ -617,6 +654,7 @@ export function registerChatSessionRoutes(app: Express, deps: { storage: Storage
         }
         const existing = await getConversationMeta(tenantId, req.params.sessionId);
         if (existing) await requireVisibleAsync(existing, req, tenantId, req.params.sessionId);
+        refuseChannel(existing, 'focused'); // ADR 0879 (H3)
         const focus = { kind: body.kind, id: body.id } as const;
         if (!(await focusReadable(tenantId, focus, caller))) {
           throw new OpenwopError('not_found', `${focus.kind} "${focus.id}" not found.`, 404);
@@ -654,6 +692,7 @@ export function registerChatSessionRoutes(app: Express, deps: { storage: Storage
       const parentId = req.params.sessionId;
       const parentMeta = await getConversationMeta(tenantId, parentId);
       await requireVisibleAsync(parentMeta, req, tenantId, parentId); // 404 if not owner/participant
+      refuseChannel(parentMeta, 'branched'); // ADR 0879 (H3) — would copy other members' posts into a conversation the caller owns
       const parentSession = await storage.getChatSession(tenantId, parentId);
       if (!parentSession) throw new OpenwopError('not_found', `chat_session "${parentId}" not found.`, 404);
 
@@ -839,20 +878,17 @@ export function registerChatSessionRoutes(app: Express, deps: { storage: Storage
       if (!existingMsg) {
         throw new OpenwopError('not_found', `chat_message "${req.params.messageId}" not found.`, 404);
       }
-      const caller = callerSubject(req);
-      const isAuthor = existingMsg.authorSubject !== null && caller !== null && existingMsg.authorSubject === caller;
-      if (!isAuthor) {
-        // ADR 0195 D1 — for a CHANNEL the non-author fallback is the channel
-        // owner ONLY (never requireManageAsync, whose ownerless-permissive
-        // branch would let any tenant member edit others' messages in an
-        // ownerless legacy channel — the ADR 0192 finding-2 class).
-        if (meta?.type === 'channel') {
-          if (!meta.ownerUserId || meta.ownerUserId !== actingUserOf(req)) {
-            throw new OpenwopError('forbidden', 'Only the author or the channel owner may edit this message.', 403);
-          }
-        } else {
-          await requireManageAsync(meta, req, tenantId); // throws 403 unless owner/manager
+      if (meta?.type === 'channel') {
+        // ADR 0879 D2 — in a channel NOBODY edits another person's words: the
+        // owner and admins moderate by DELETE (the tombstone below), never by
+        // rewriting a post that keeps its author's name. ADR 0879 D1 — and the
+        // author needs `workspace:write` (a Viewer writes nothing).
+        if (!isAuthorOf(existingMsg, req)) {
+          throw new OpenwopError('forbidden', 'Only the author may edit this message.', 403);
         }
+        requireChannelWrite(await channelAuthorityOf(req));
+      } else if (!isAuthorOf(existingMsg, req)) {
+        await requireManageAsync(meta, req, tenantId); // throws 403 unless owner/manager
       }
       // ADR 0195 D1 — archived channels reject edits (mirrors the post guard).
       if (meta?.type === 'channel' && meta.channel?.archived) {
@@ -926,12 +962,15 @@ export function registerChatSessionRoutes(app: Express, deps: { storage: Storage
         throw new OpenwopError('not_found', `chat_message "${req.params.messageId}" not found.`, 404);
       }
       const caller = callerSubject(req);
-      const isAuthor = existingMsg.authorSubject !== null && caller !== null && existingMsg.authorSubject === caller;
-      if (!isAuthor) {
+      if (!isAuthorOf(existingMsg, req)) {
         if (meta?.type === 'channel') {
-          if (!meta.ownerUserId || meta.ownerUserId !== actingUserOf(req)) {
-            throw new OpenwopError('forbidden', 'Only the author or the channel owner may delete this message.', 403);
+          // ADR 0879 D3 — moderation: the owner, or a workspace admin who can see the
+          // channel (so a room whose owner left stays moderatable), with write.
+          const authority = await channelAuthorityOf(req);
+          if (!isChannelManagerOf(meta, req, authority)) {
+            throw new OpenwopError('forbidden', 'Only the author, the channel owner or a workspace admin may delete this message.', 403);
           }
+          requireChannelWrite(authority);
         } else {
           await requireManageAsync(meta, req, tenantId);
         }
@@ -989,6 +1028,8 @@ export function registerChatSessionRoutes(app: Express, deps: { storage: Storage
     if (meta?.type === 'channel' && meta.channel?.archived) {
       throw new OpenwopError('validation_error', 'Channel is archived.', 400);
     }
+    // ADR 0879 D1 — a reaction is a post-shaped social write; a Viewer reads only.
+    if (meta?.type === 'channel') requireChannelWrite(await channelAuthorityOf(req));
     const emoji = decodeURIComponent(req.params.emoji);
     if (!isReactionEmoji(emoji)) {
       throw new OpenwopError('validation_error', `emoji MUST be one of the supported set: ${REACTION_EMOJI.join(' ')}.`, 400);

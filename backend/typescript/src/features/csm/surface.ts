@@ -10,11 +10,41 @@
  */
 
 import type { BundleScope } from '../../host/inMemorySurfaces.js';
-import { surfaceStr as str, surfaceOptStr as optStr, type FeatureSurface } from '../../host/featureSurfaces.js';
+import { surfaceStr as str, surfaceOptStr as optStr, type FeatureSurface, type FeatureSurfaceOrgPolicy } from '../../host/featureSurfaces.js';
+import type { HostEventOrigin } from '../../host/hostEventDispatcher.js';
+import { isWorkspaceMember } from '../../host/accessControlService.js';
 import { OpenwopError } from '../../types.js';
-import { listAccounts, getAccountForTenant, setAccountHealthForTenant, type HealthMethod } from './accountsService.js';
+import {
+  listAccounts, getAccountForTenant, setAccountHealthForTenant, listRenewalsDue, validateCrmRef, MAX_PLAY_ACCOUNTS, MAX_RENEWAL_WINDOW_DAYS, type HealthMethod,
+} from './accountsService.js';
 
-const INTERNAL = new Set(['tenantId', 'createdAt', 'updatedAt']);
+/**
+ * ADR 0882 D1 (CSM2WF-1/-2) — the closed-world method partition. `csm` used to
+ * register its surface with NO policy, and no method takes an `orgId`, so the
+ * ADR 0832 org floor never fired: a Viewer's run rescored accounts its HTTP door
+ * refuses, and a run whose person had been REMOVED kept reading the whole book.
+ * Every method is now in exactly one set (`adr0882-csm-surface-floors.test.ts`
+ * fails on an unclassified one), and the seam asks the run's person (actor, else
+ * the causing member — an event binding's creator) for the tenant scope. Reads
+ * are floored too, unlike CRM's: CSM accounts are tenant-wide, so a read floor is
+ * the only thing that stops a removed member's scheduled run.
+ */
+export const CSM_SURFACE_READS = new Set(['listAccounts', 'getAccount', 'listRenewalsDue', 'playTargets']);
+export const CSM_SURFACE_WRITERS = new Set(['setHealth']);
+export const CSM_SURFACE_POLICY: FeatureSurfaceOrgPolicy = {
+  tenantMethodScopes: {
+    ...Object.fromEntries([...CSM_SURFACE_READS].map((m) => [m, 'workspace:read' as const])),
+    ...Object.fromEntries([...CSM_SURFACE_WRITERS].map((m) => [m, 'workspace:write' as const])),
+  },
+  // ADR 0882 D2 — a computed set names its org, and measuring an org is a WRITE
+  // there, as for CRM's org writers.
+  methodScopes: { setHealth: 'workspace:write' },
+};
+
+// ADR 0882 D3 — `ownerUserId` is a member subject id and `owner` is a typed
+// person's name (declared PII, CSM2CD-5); read outputs land in the durable
+// run-event log and in model context, so neither rides the run lane.
+const INTERNAL = new Set(['tenantId', 'createdAt', 'updatedAt', 'ownerUserId', 'owner']);
 function project(o: object): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(o)) if (!INTERNAL.has(k)) out[k] = v;
@@ -41,6 +71,11 @@ function parseScore(v: unknown): number | undefined {
 
 export function buildCsmSurface(scope: BundleScope): FeatureSurface {
   const tenantId = scope.tenantId;
+  const origin: HostEventOrigin = {
+    ...(scope.runId ? { runId: scope.runId } : {}),
+    ...(scope.workflowId ? { workflowId: scope.workflowId } : {}),
+    ...(scope.chainId ? { chainId: scope.chainId } : {}),
+  };
   return {
     // Read — at-risk accounts first (lowest health), the service's own sort.
     listAccounts: async () => {
@@ -63,6 +98,7 @@ export function buildCsmSurface(scope: BundleScope): FeatureSurface {
         healthScore?: number;
         factors?: unknown;
         computedForCompanyId?: string;
+        computedForOrgId?: string;
         method?: HealthMethod;
         measureFailed?: { reason: string };
       } = {};
@@ -76,10 +112,72 @@ export function buildCsmSurface(scope: BundleScope): FeatureSurface {
       // silently downgrade a computed write to a bare score).
       if (args.factors !== undefined) patch.factors = args.factors;
       if (optStr(args.companyId)) patch.computedForCompanyId = str(args.companyId);
+      // ADR 0882 D2 — the org a computed set was MEASURED in. Absent is not
+      // "every org" (the ADR 0832 S-A shape): the service then records why it
+      // stopped measuring and refuses. Named, it engages the seam's org floor.
+      if (typeof args.orgId === 'string' && args.orgId !== '') patch.computedForOrgId = args.orgId;
       if (optStr(args.method)) patch.method = str(args.method) as HealthMethod;
       if (optStr(args.measureFailedReason)) patch.measureFailed = { reason: str(args.measureFailedReason) };
-      const account = await setAccountHealthForTenant(tenantId, str(args.accountId), patch);
+      const account = await setAccountHealthForTenant(tenantId, str(args.accountId), patch, origin);
       return { account: projectOne(account) };
+    },
+    // ADR 0882 D6 — the renewal window. `days` is bounded; absent ⇒ 90.
+    listRenewalsDue: async (args) => {
+      const raw = args.days;
+      let days = 90;
+      if (raw !== undefined && raw !== null && raw !== '') {
+        if (typeof raw !== 'number' || !Number.isFinite(raw) || raw < 0 || raw > MAX_RENEWAL_WINDOW_DAYS) {
+          throw new OpenwopError('validation_error', `Field \`days\` MUST be a number in [0, ${MAX_RENEWAL_WINDOW_DAYS}].`, 400, { field: 'days' });
+        }
+        days = raw;
+      }
+      const out = await listRenewalsDue(tenantId, days);
+      return {
+        asOf: out.asOf,
+        days,
+        accounts: out.accounts.map((r) => ({ ...project(r.account), overdue: r.overdue, daysUntil: r.daysUntil })),
+      };
+    },
+    /**
+     * ADR 0882 D6 — what a play needs to write tasks for each account: its CRM
+     * link, renewal date, and the owner to assign (only while that person is still
+     * a workspace member). Consumed INSIDE `create-play-tasks` and never echoed in
+     * a node output, so the owner id stays out of the run-event log.
+     */
+    playTargets: async (args) => {
+      const ids = Array.isArray(args.accountIds) ? args.accountIds : [];
+      if (ids.length === 0 || ids.length > MAX_PLAY_ACCOUNTS || !ids.every((x) => typeof x === 'string' && x.length > 0)) {
+        throw new OpenwopError('validation_error', `Field \`accountIds\` MUST be 1–${MAX_PLAY_ACCOUNTS} account ids.`, 400, { field: 'accountIds' });
+      }
+      const targets: Array<Record<string, unknown>> = [];
+      for (const id of new Set(ids as string[])) {
+        const a = await getAccountForTenant(tenantId, id);
+        if (!a) {
+          targets.push({ accountId: id, missing: true });
+          continue;
+        }
+        const assignee = a.ownerUserId && (await isWorkspaceMember(a.ownerUserId, tenantId)) ? a.ownerUserId : undefined;
+        // CSM2CD-3 — a link to a merged (tombstoned) or deleted company is not a
+        // target: a play must not attach tasks to a company that no longer exists.
+        let linkGone = false;
+        if (a.crmRef) {
+          try {
+            await validateCrmRef(tenantId, a.crmRef);
+          } catch (err) {
+            if (err instanceof OpenwopError && err.code === 'not_found') linkGone = true;
+            else throw err;
+          }
+        }
+        targets.push({
+          ...(linkGone ? { linkGone: true } : {}),
+          accountId: a.accountId,
+          name: a.name,
+          ...(a.crmRef ? { orgId: a.crmRef.orgId, companyId: a.crmRef.companyId } : {}),
+          ...(a.renewalDate ? { renewalDate: a.renewalDate } : {}),
+          ...(assignee ? { assignee } : {}),
+        });
+      }
+      return { targets };
     },
   };
 }

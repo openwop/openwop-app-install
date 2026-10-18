@@ -28,6 +28,16 @@ const ACTIVE = /(html|\/xml$|\+xml$|svg|javascript|ecmascript|css|wasm)/;
 
 const CSP = "default-src 'none'; img-src 'self' data:; media-src 'self'; style-src 'unsafe-inline'; sandbox";
 
+/** ADR 0888 D5 — true iff this exit would serve `contentType` INLINE as an image (a
+ *  raster type in {@link INLINE_SAFE}), normalised exactly as {@link assetServeHeaders}
+ *  normalises. A reference that is going to be rendered as an `<img>` (a profile avatar
+ *  or portfolio item) uses this, so it cannot point at bytes the exit would send as an
+ *  attachment and every `<img>` would show broken. */
+export function isInlineImageType(contentType: string | undefined): boolean {
+  const type = (contentType ?? '').split(';')[0]!.trim().toLowerCase();
+  return type.startsWith('image/') && INLINE_SAFE.test(type) && !ACTIVE.test(type);
+}
+
 export function assetServeHeaders(contentType: string | undefined): Record<string, string> {
   const type = (contentType ?? '').split(';')[0]!.trim().toLowerCase();
   const active = ACTIVE.test(type) || (type.startsWith('text/') && !INLINE_SAFE.test(type));

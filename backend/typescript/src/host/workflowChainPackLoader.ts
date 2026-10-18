@@ -1541,7 +1541,12 @@ export function expandChain(authoredChain: WorkflowChain, opts: ExpandOptions = 
     if (typeof authored === 'string') {
       const m = /^\{\{\s*params\.([a-zA-Z0-9_]+)\s*\}\}$/.exec(authored);
       if (m) {
-        if (resolvedParams[m[1]!] === undefined) {
+        // ADR 0903 D7 — an unset AI `provider`/`model` is absent ON PURPOSE: the
+        // host fills it from the run's AI default at call time (D3), so it is not
+        // a gap a run would fail on. Recording it made every vendor-free chain
+        // look unfillable (the cadence PUT refused all of them).
+        const leaf = path.slice(path.lastIndexOf('.') + 1);
+        if (resolvedParams[m[1]!] === undefined && leaf !== 'provider' && leaf !== 'model') {
           unresolvedParams.push({ nodeId, key: path, param: m[1]! });
         }
         return;

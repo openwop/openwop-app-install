@@ -14,6 +14,11 @@
  *  - BigQuery per-row `insertErrors` are surfaced as a partial `{ loaded, failed, errors }`;
  *  - a row body NEVER appears in the load result envelope;
  *  - a `warehouse` sync requires connectionId + project + dataset + table.
+ *
+ * Sabotage-witnessed (/grade-tests w38): each create-time guard (asserted by its own message),
+ * the approval mint returning `allow`, ignoring an approved approval, a runId in the batch key,
+ * the `disabled` / `draft-only` gates, a random insertId, `loaded` ignoring insertErrors, and a
+ * row body in the error envelope each turn a case red.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import http from 'node:http';
@@ -60,16 +65,19 @@ describe('CDP-D §6 warehouse load (ADR 0292)', () => {
     process.env.OPENWOP_BIGQUERY_API_BASE = `http://127.0.0.1:${(bq.address() as AddressInfo).port}`;
 
     await createSecretConnection({ tenantId: TENANT, provider: 'bigquery-write', kind: 'bearer', secret: 'BQ_TOKEN', scope: 'user', userId: 'u1' });
-    await storage.insertRun({ runId: 'wrun-1', workflowId: 'w', tenantId: TENANT, status: 'pending', inputs: null, metadata: {}, configurable: {}, createdAt: 'x', updatedAt: 'x' });
-    await storage.insertRun({ runId: 'wrun-2', workflowId: 'w', tenantId: TENANT, status: 'pending', inputs: null, metadata: {}, configurable: {}, createdAt: 'x', updatedAt: 'x' });
+    await storage.insertRun({ runId: 'wrun-1', workflowId: 'w', tenantId: TENANT, status: 'pending', inputs: null, metadata: {}, configurable: {}, createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z' });
+    await storage.insertRun({ runId: 'wrun-2', workflowId: 'w', tenantId: TENANT, status: 'pending', inputs: null, metadata: {}, configurable: {}, createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z' });
   });
 
   afterAll(async () => {
     delete process.env.OPENWOP_BIGQUERY_API_BASE;
     await new Promise<void>((r) => bq.close(() => r()));
+    delete process.env.OPENWOP_WEBHOOK_ALLOW_PRIVATE;
   });
 
-  beforeEach(() => { hits = []; insertErrorsOnce = null; });
+  // Governance policy is per-case state: reset BEFORE every case so a failing case can never
+  // leak its policy into the next (shuffle-safe).
+  beforeEach(async () => { hits = []; insertErrorsOnce = null; await __resetGovernanceStore(); });
 
   const deps = (runId = 'wrun-1', actingUserId = 'u1'): BrokeredEgressDeps => ({
     storage, tenantId: TENANT, runId, ...(actingUserId ? { actingUserId } : {}), orgId: TENANT,
@@ -92,11 +100,12 @@ describe('CDP-D §6 warehouse load (ADR 0292)', () => {
   it('validation: a warehouse sync requires connectionId + project + dataset + table', async () => {
     await expect(createDestinationSync({
       tenantId: TENANT, name: 'bad', destinationKind: 'warehouse', sourceObject: 'contact', fieldMap: [{ from: 'email', to: 'EMAIL' }],
-    })).rejects.toMatchObject({ httpStatus: 400 });
+      project: 'proj-1', dataset: 'ds1', table: 'contacts', // a full target, NO connectionId
+    })).rejects.toMatchObject({ httpStatus: 400, message: expect.stringContaining('requires a `connectionId`') });
     await expect(createDestinationSync({
       tenantId: TENANT, name: 'bad2', destinationKind: 'warehouse', sourceObject: 'contact', fieldMap: [{ from: 'email', to: 'EMAIL' }],
       connectionId: 'conn:bq', dataset: 'ds1', table: 'contacts', // no project
-    })).rejects.toMatchObject({ httpStatus: 400 });
+    })).rejects.toMatchObject({ httpStatus: 400, message: expect.stringContaining('requires `project`, `dataset`, and `table`') });
   });
 
   it('unset policy (default approval-required) → mints a warehouse-load approval, inserts NOTHING', async () => {
@@ -154,7 +163,6 @@ describe('CDP-D §6 warehouse load (ADR 0292)', () => {
     const out = await warehouseLoad(deps(), { syncId, records });
     expect(out.status).toBe('disabled');
     expect(hits).toHaveLength(0);
-    await __resetGovernanceStore();
   });
 
   it("policy 'draft-only' → dry-runs (wouldLoad=N, loaded=0), no insert", async () => {
@@ -167,7 +175,6 @@ describe('CDP-D §6 warehouse load (ADR 0292)', () => {
     expect(out.loaded).toBe(0);
     expect(out.rows).toHaveLength(2);
     expect(hits).toHaveLength(0); // NO brokeredPost in a dry-run
-    await __resetGovernanceStore();
   });
 
   it('insertId is deterministic across two builds (dedup on replay/:fork)', () => {
@@ -195,6 +202,5 @@ describe('CDP-D §6 warehouse load (ADR 0292)', () => {
     expect(out.failed).toBe(1);
     expect(out.errors).toEqual([{ index: 1, reason: 'invalid' }]);
     expect(JSON.stringify(out)).not.toContain('b@x.test'); // no offending row body in the envelope
-    await __resetGovernanceStore();
   });
 });

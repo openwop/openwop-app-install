@@ -293,17 +293,36 @@ export async function executeApprovedAction(
     // binding (openwop-app.servicedesk.ticket-reply-approved → e.g. the whatsapp send
     // node) — the executor stays decoupled from channel adapters, and the send
     // itself runs on a recorded governed run.
+    // CORRECTED (ADR 0878 D3): no such binding could ever be written — the event
+    // carries `{ ticketId, actionId }` and the ticket stored no address — so every
+    // approved reply stopped at the thread. Delivery is now the service desk's own
+    // (`deliverOutbound`); the event stays for automation only.
     try {
-      const { appendMessage } = await import('../service-desk/tickets.js');
+      const { appendMessageResult, getTicket, userAuthorRef } = await import('../service-desk/tickets.js');
+      const { deliverOutbound, listDeliveries } = await import('../service-desk/delivery.js');
       const p = action.payload as { ticketId?: unknown };
       const ticketId = typeof p.ticketId === 'string' ? p.ticketId : '';
       if (!ticketId) throw new Error('servicedesk.reply payload missing ticketId');
-      await appendMessage(tenantId, ticketId, {
-        messageId: `reply:${action.actionId}`,
+      // ADR 0878 D6 — the decide gate verified the decider in the TICKET's org; a
+      // ticket that has since gone is not resurrected, and a stamped org that no
+      // longer matches the ticket is refused (the payload is immutable, so this is
+      // the backstop, not the gate).
+      const ticket = await getTicket(tenantId, ticketId);
+      if (!ticket) throw new Error('servicedesk.reply ticket not found');
+      if (action.orgId && action.orgId !== ticket.orgId) throw new Error('servicedesk.reply ticket is not in the action\'s org');
+      const messageId = `reply:${action.actionId}`;
+      const { appended } = await appendMessageResult(tenantId, ticketId, {
+        messageId,
         body: sanitizeFreeText(action.draft),
-        author: decidedByUserId ? `user:${decidedByUserId}` : 'agent:service-desk',
+        author: decidedByUserId ? userAuthorRef(decidedByUserId) : 'agent:service-desk',
         direction: 'outbound',
       });
+      // ADR 0878 D3 — the approved reply is DELIVERED (it used to stop at the
+      // thread). Only on the append that wrote it: a re-execution reads the
+      // recorded result instead of sending again.
+      const delivery = appended
+        ? await deliverOutbound({ tenantId, ticketId, messageId, ...(decidedByUserId ? { actor: decidedByUserId } : {}) })
+        : (await listDeliveries(tenantId, ticketId))[messageId];
       const { emitHostEvent } = await import('../../host/hostEventDispatcher.js');
       void emitHostEvent({ type: 'openwop-app.servicedesk.ticket-reply-approved', tenantId, payload: { ticketId, actionId: action.actionId } });
       // UX_UPGRADE-assistant R2 (AST2-B2) — `decidePendingAction`, NOT
@@ -318,6 +337,20 @@ export async function executeApprovedAction(
       // run that does not exist; and the happy path never reached `sent`
       // either. The `nudge` branch below has always done this correctly — this
       // one simply never matched it.
+      //
+      // ADR 0878 grade-code SD2CD-1 — and `sent` only when the customer can actually
+      // see it. The first cut stamped `sent` whatever delivery did, so a reply refused
+      // for consent (the usual WhatsApp result) read as sent on the action, in health,
+      // and to the model. The reply is on the thread either way; what failed is the
+      // send, and the approver is told so (the inbox toast promises exactly that).
+      const reached = !delivery || delivery.state === 'sent' || delivery.state === 'visible' || delivery.state === 'pending';
+      if (!reached) {
+        await decidePendingAction(tenantId, action.actionId, { status: 'failed' });
+        await notifyActionFailed(tenantId, action, decidedByUserId, {
+          reason: `the reply is on the ticket but was not sent to the customer${delivery?.message ? `: ${delivery.message}` : ''}`,
+        });
+        return null;
+      }
       await decidePendingAction(tenantId, action.actionId, { status: 'sent' });
       return null;
     } catch (err) {

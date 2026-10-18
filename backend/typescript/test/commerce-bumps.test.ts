@@ -34,13 +34,16 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T }
+/** The JSON fields these cases read. Declared, not `any`: a field the server does
+ *  not send fails the assertion that reads it, and a typo fails `tsc`. */
+interface WireBody { productId: string; orgId: string; orderId: string; total: number; user?: { tenantId: string } }
+interface Res<T = WireBody> { status: number; body: T }
 function client() {
   let cookie = '';
   const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const c of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    const out: WireBody = res.status === 204 ? JSON.parse('{}') : await res.json().catch(() => JSON.parse('{}'));
     return { status: res.status, body: out };
   };
   return { get: (p: string) => call('GET', p), post: (p: string, b?: unknown) => call('POST', p, b) };
@@ -49,12 +52,15 @@ function client() {
 async function shop() {
   const owner = client();
   const login = await owner.post('/host/openwop-app/test/login', { email: `bump-${Date.now()}-${n++}@acme.test` });
+  expect(login.status, JSON.stringify(login.body)).toBe(201);
   const tenantId: string = login.body.user?.tenantId ?? '';
   const org = await owner.post('/host/openwop-app/orgs', { name: 'Bump Shop' });
+  expect(org.status, JSON.stringify(org.body)).toBe(201);
   const orgId: string = org.body.orgId;
   const c = (suffix: string): string => `/host/openwop-app/commerce/orgs/${encodeURIComponent(orgId)}${suffix}`;
   const main = await owner.post(c('/products'), { type: 'digital', name: 'Course', price: 100, currency: 'USD' });
   const bump = await owner.post(c('/products'), { type: 'digital', name: 'Workbook', price: 20, currency: 'USD' });
+  expect([main.status, bump.status]).toEqual([201, 201]);
   return { owner, tenantId, orgId, mainId: main.body.productId as string, bumpId: bump.body.productId as string, c };
 }
 
@@ -78,6 +84,7 @@ describe('ADR 0296 P1 — order bumps in the public checkout', () => {
     expect(bumpLine?.origin).toBe('bump');
     expect(order?.items.find((i) => i.productId === mainId)?.origin).toBeUndefined();
     expect(order?.funnelRef).toEqual({ funnelId: 'fn-1', stepId: 'st-checkout' });
+    expect(order?.total).toBe(120); // the persisted ONE charge, not just the response
   });
 
   it('never trusts client-marked line origins and caps bumps at 5', async () => {
@@ -105,11 +112,14 @@ describe('ADR 0296 P1 — order bumps in the public checkout', () => {
     const guest = client();
     // without the bump: 100 < 110 ⇒ no discount
     const bare = await guest.post(checkout(orgId), { email: `g-${n++}@x.test`, lines: [{ productId: mainId, quantity: 1 }] });
+    expect(bare.status, JSON.stringify(bare.body)).toBe(201);
     expect(bare.body.total).toBe(100);
     // with the bump: 120 ≥ 110 ⇒ 10% off the whole order
     const bumped = await guest.post(checkout(orgId), { email: `g-${n++}@x.test`, lines: [{ productId: mainId, quantity: 1 }], bumps: [{ productId: bumpId }] });
+    expect(bumped.status, JSON.stringify(bumped.body)).toBe(201);
     expect(bumped.body.total).toBe(108);
     const order = await getOrder(tenantId, orgId, bumped.body.orderId);
+    expect(order?.total).toBe(108);
     expect(order?.appliedPromotions?.[0]?.type).toBe('cart_threshold');
   });
 });

@@ -31,6 +31,8 @@ import { slugify, uniqueSlug } from '../../host/slug.js';
 import { notifyHumanChatMessage } from '../../host/humanChatMessageObservers.js';
 import { getProject, resolveProjectAccess } from '../projects/projectsService.js';
 import { resolveSubjectDisplays, type SubjectDisplay } from '../../host/subjectDisplay.js';
+import { isWorkspaceMember } from '../../host/accessControlService.js';
+import { requireChannelWrite, type ChannelAuthority } from '../../host/channelAuthority.js';
 
 export interface ChannelInput {
   name?: unknown;
@@ -73,11 +75,26 @@ function readIdList(v: unknown, field: string): string[] {
   return [...new Set((v as string[]).map((x) => x.trim()))];
 }
 
-export async function createChannel(tenantId: string, ownerUserId: string | undefined, input: ChannelInput): Promise<ConversationMeta> {
+/** ADR 0879 D4 (S3) — only a member of THIS workspace can be added to a channel.
+ *  The id must key a workspace-root member row exactly: no principal lookup, so an
+ *  unbound OIDC member is refused rather than aliased (principals are not
+ *  issuer-qualified — lockout is the safe direction). A personal workspace's guests
+ *  are member rows too, and its owner is skipped by the callers. 404 either way: an id
+ *  that is not a member here is, as far as this workspace is concerned, nobody. */
+async function assertAddableMember(tenantId: string, userId: string): Promise<void> {
+  if (!(await isWorkspaceMember(userId, tenantId))) throw new OpenwopError('not_found', 'That person is not a member of this workspace.', 404, { userId });
+}
+
+export async function createChannel(tenantId: string, ownerUserId: string | undefined, input: ChannelInput, authority: ChannelAuthority): Promise<ConversationMeta> {
+  requireChannelWrite(authority);
   const name = cleanName(input.name);
   const visibility: 'public' | 'private' = input.visibility === 'private' ? 'private' : 'public';
   const memberUserIds = readIdList(input.memberUserIds, 'memberUserIds');
   const agentIds = readIdList(input.agentIds, 'agentIds');
+  for (const userId of memberUserIds) {
+    if (ownerUserId && userId === ownerUserId) continue;
+    await assertAddableMember(tenantId, userId);
+  }
   // Fail-closed BEFORE creating anything: every initial agent must resolve
   // (the addChannelAgent invariant, applied to the batch). ADR 0379 P1 —
   // tenant-gated: another tenant's user agent is absent (no cross-tenant bind).
@@ -125,8 +142,8 @@ async function stampAgentMember(tenantId: string, channelId: string, meta: Conve
 
 /** ADR 0202 D1 — set an agent member's reply policy (owner-gated). A real
  *  membership mutation (rewrites the participant record), so LWW-safe. */
-export async function setChannelAgentPolicy(tenantId: string, channelId: string, callerUserId: string | undefined, agentId: string, policy: 'all' | 'mention'): Promise<ConversationMeta> {
-  const m = await assertChannelManage(tenantId, channelId, callerUserId);
+export async function setChannelAgentPolicy(tenantId: string, channelId: string, callerUserId: string | undefined, authority: ChannelAuthority, agentId: string, policy: 'all' | 'mention'): Promise<ConversationMeta> {
+  const m = await assertChannelManage(tenantId, channelId, callerUserId, authority);
   const ref = agentRef(agentId);
   if (!(m.participants ?? []).some((p) => p.subjectRef === ref)) {
     throw new OpenwopError('not_found', `Agent "${agentId}" is not a member of this channel.`, 404, { agentId });
@@ -256,26 +273,38 @@ export async function getChannel(tenantId: string, channelId: string, callerUser
   return m;
 }
 
-/** Authorize a channel MANAGEMENT op (rename/archive/add-member/remove-member).
- *  Fail-closed owner-only policy (CHN-1): the owner passes (even though not a
- *  participant); a member who is not the owner is 403; a private-channel non-member
- *  and an ownerless legacy channel (no `ownerUserId`, e.g. created by an API-key
- *  principal before owners were stamped) are 404-masked. We never fall back to
- *  membership for the WRITE, which would reintroduce the IDOR. */
-export async function assertChannelManage(tenantId: string, channelId: string, callerUserId: string | undefined): Promise<ConversationMeta> {
-  const m = await mustGetChannel(tenantId, channelId);
-  if (isChannelOwner(m, callerUserId)) return m;
-  // Not the owner: distinguish "you may see it but can't manage it" (403) from
-  // "you may not even know it exists" (404). A public channel / a participant knows
-  // it exists → 403; everyone else (incl. undefined caller, ownerless channel) → 404.
-  if (callerUserId === undefined || !canAccessChannel(m, callerUserId)) {
-    throw new OpenwopError('not_found', 'Channel not found.', 404, { channelId });
-  }
-  throw new OpenwopError('forbidden', 'Only the channel owner can manage this channel.', 403, { channelId });
+/** May this caller MANAGE the channel (rename/archive/members/agents/policy, and
+ *  delete others' messages)? The owner, or a workspace admin (ADR 0879 D3 — the
+ *  manager of last resort), among callers who can see it. Pure: no write gate. */
+export function isChannelManager(m: ConversationMeta, callerUserId: string | undefined, authority: ChannelAuthority): boolean {
+  if (callerUserId === undefined) return false;
+  if (isChannelOwner(m, callerUserId)) return true;
+  return authority.isAdmin && canAccessChannel(m, callerUserId);
 }
 
-export async function renameChannel(tenantId: string, channelId: string, callerUserId: string | undefined, name: string): Promise<ConversationMeta> {
-  await assertChannelManage(tenantId, channelId, callerUserId);
+/** Authorize a channel MANAGEMENT op (rename/archive/add-member/remove-member).
+ *  Fail-closed (CHN-1): the owner or a workspace admin passes (ADR 0879 D3), and
+ *  must also hold `workspace:write` (D1 — a demoted owner keeps the room but cannot
+ *  change it). A member who is neither is 403; a private-channel non-member and an
+ *  undefined caller are 404-masked. We never fall back to membership for the WRITE,
+ *  which would reintroduce the IDOR. The authority is computed from the REQUEST by
+ *  the caller (`channelAuthorityOf`) — every caller passes it, including the
+ *  scheduled-agent-chats routes. */
+export async function assertChannelManage(tenantId: string, channelId: string, callerUserId: string | undefined, authority: ChannelAuthority): Promise<ConversationMeta> {
+  const m = await mustGetChannel(tenantId, channelId);
+  // "You may see it but can't manage it" (403) vs "you may not know it exists" (404).
+  if (callerUserId === undefined || (!isChannelOwner(m, callerUserId) && !canAccessChannel(m, callerUserId))) {
+    throw new OpenwopError('not_found', 'Channel not found.', 404, { channelId });
+  }
+  if (!isChannelManager(m, callerUserId, authority)) {
+    throw new OpenwopError('forbidden', 'Only the channel owner or a workspace admin can manage this channel.', 403, { channelId });
+  }
+  requireChannelWrite(authority);
+  return m;
+}
+
+export async function renameChannel(tenantId: string, channelId: string, callerUserId: string | undefined, authority: ChannelAuthority, name: string): Promise<ConversationMeta> {
+  await assertChannelManage(tenantId, channelId, callerUserId, authority);
   const normalized = cleanName(name);
   const next = await setConversationChannel(tenantId, channelId, { name: normalized });
   if (!next) throw new OpenwopError('not_found', 'Channel not found.', 404, { channelId });
@@ -287,9 +316,18 @@ export async function renameChannel(tenantId: string, channelId: string, callerU
 }
 
 /** ADR 0192 D4 — set/clear the channel description (owner-gated; ≤1000 chars). */
-export async function setChannelDescription(tenantId: string, channelId: string, callerUserId: string | undefined, description: string): Promise<ConversationMeta> {
-  await assertChannelManage(tenantId, channelId, callerUserId);
+export async function setChannelDescription(tenantId: string, channelId: string, callerUserId: string | undefined, authority: ChannelAuthority, description: string): Promise<ConversationMeta> {
+  await assertChannelManage(tenantId, channelId, callerUserId, authority);
   const next = await setConversationChannel(tenantId, channelId, { description: description.trim().slice(0, 1000) });
+  if (!next) throw new OpenwopError('not_found', 'Channel not found.', 404, { channelId });
+  return next;
+}
+
+/** ADR 0879 D8 — set who may post: `everyone` (default) or `managers` (an
+ *  announcement channel). Manage-gated. */
+export async function setChannelPostingPolicy(tenantId: string, channelId: string, callerUserId: string | undefined, authority: ChannelAuthority, postingPolicy: 'everyone' | 'managers'): Promise<ConversationMeta> {
+  await assertChannelManage(tenantId, channelId, callerUserId, authority);
+  const next = await setConversationChannel(tenantId, channelId, { postingPolicy });
   if (!next) throw new OpenwopError('not_found', 'Channel not found.', 404, { channelId });
   return next;
 }
@@ -301,8 +339,8 @@ export async function setChannelDescription(tenantId: string, channelId: string,
  * every member, so grounding it in a private project's ledger would show that
  * ledger to members who cannot open the project.
  */
-export async function setChannelProject(tenantId: string, channelId: string, callerUserId: string | undefined, projectId: string | null): Promise<ConversationMeta> {
-  await assertChannelManage(tenantId, channelId, callerUserId);
+export async function setChannelProject(tenantId: string, channelId: string, callerUserId: string | undefined, authority: ChannelAuthority, projectId: string | null): Promise<ConversationMeta> {
+  await assertChannelManage(tenantId, channelId, callerUserId, authority);
   if (projectId !== null) {
     const project = await getProject(tenantId, projectId);
     const access = project ? await resolveProjectAccess(tenantId, project.id, callerUserId) : 'none';
@@ -387,13 +425,15 @@ export async function leaveChannel(tenantId: string, channelId: string, callerUs
   await removeParticipant(tenantId, channelId, ref, m);
 }
 
-export async function archiveChannel(tenantId: string, channelId: string, callerUserId: string | undefined): Promise<void> {
-  await assertChannelManage(tenantId, channelId, callerUserId);
+export async function archiveChannel(tenantId: string, channelId: string, callerUserId: string | undefined, authority: ChannelAuthority): Promise<void> {
+  await assertChannelManage(tenantId, channelId, callerUserId, authority);
   await setConversationChannel(tenantId, channelId, { archived: true });
 }
 
-export async function addChannelMember(tenantId: string, channelId: string, callerUserId: string | undefined, userId: string): Promise<ConversationMeta> {
-  const m = await assertChannelManage(tenantId, channelId, callerUserId);
+export async function addChannelMember(tenantId: string, channelId: string, callerUserId: string | undefined, authority: ChannelAuthority, userId: string): Promise<ConversationMeta> {
+  const m = await assertChannelManage(tenantId, channelId, callerUserId, authority);
+  // The owner re-adding themselves is a no-op join, not a new person.
+  if (m.ownerUserId !== userId) await assertAddableMember(tenantId, userId);
   const next = await addParticipant(tenantId, channelId, userRef(userId), m);
   return next ?? m;
 }
@@ -402,8 +442,8 @@ export async function addChannelMember(tenantId: string, channelId: string, call
  *  member can be addressed in a post to dispatch a turn (channelAgentDispatch).
  *  The agent must resolve in the registry so an owner can't add a dead agentId
  *  whose every turn would silently fail. */
-export async function addChannelAgent(tenantId: string, channelId: string, callerUserId: string | undefined, agentId: string): Promise<ConversationMeta> {
-  const m = await assertChannelManage(tenantId, channelId, callerUserId);
+export async function addChannelAgent(tenantId: string, channelId: string, callerUserId: string | undefined, authority: ChannelAuthority, agentId: string): Promise<ConversationMeta> {
+  const m = await assertChannelManage(tenantId, channelId, callerUserId, authority);
   // ADR 0379 P1 — tenant-gated resolve (same 404 for absent and cross-tenant).
   const resolved = await resolveAgentForTenant(agentId, tenantId);
   if (!resolved) throw new OpenwopError('not_found', `Agent "${agentId}" not found.`, 404, { agentId });
@@ -419,8 +459,8 @@ export function isChannelAgentMember(m: ConversationMeta, agentId: string): bool
 }
 
 /** Remove an AGENT member (ADR 0154 Phase 4). Owner-gated. */
-export async function removeChannelAgent(tenantId: string, channelId: string, callerUserId: string | undefined, agentId: string): Promise<ConversationMeta> {
-  const m = await assertChannelManage(tenantId, channelId, callerUserId);
+export async function removeChannelAgent(tenantId: string, channelId: string, callerUserId: string | undefined, authority: ChannelAuthority, agentId: string): Promise<ConversationMeta> {
+  const m = await assertChannelManage(tenantId, channelId, callerUserId, authority);
   const wasMember = isChannelAgentMember(m, agentId);
   const next = await removeParticipant(tenantId, channelId, agentRef(agentId), m);
   // ADR 0202 OQ-3 — signal the removal so a listener (scheduled-agent-chats) can clean
@@ -431,8 +471,8 @@ export async function removeChannelAgent(tenantId: string, channelId: string, ca
   return next ?? m;
 }
 
-export async function removeChannelMember(tenantId: string, channelId: string, callerUserId: string | undefined, userId: string): Promise<ConversationMeta> {
-  const m = await assertChannelManage(tenantId, channelId, callerUserId);
+export async function removeChannelMember(tenantId: string, channelId: string, callerUserId: string | undefined, authority: ChannelAuthority, userId: string): Promise<ConversationMeta> {
+  const m = await assertChannelManage(tenantId, channelId, callerUserId, authority);
   // Invariant: the owner can't be removed (would orphan the channel into an
   // unmanageable state) — archive the channel instead.
   if (m.ownerUserId && m.ownerUserId === userId) {
@@ -447,7 +487,7 @@ export async function removeChannelMember(tenantId: string, channelId: string, c
 
 /** A public channel admits any tenant member; a private channel admits only its
  *  participants. DEFAULT-DENY: an undefined viewer on a private channel is denied. */
-function canAccessChannel(m: ConversationMeta, userId: string | undefined): boolean {
+export function canAccessChannel(m: ConversationMeta, userId: string | undefined): boolean {
   if (m.channel?.visibility === 'public') return true;
   if (userId === undefined) return false;
   const ref = userRef(userId);
@@ -466,13 +506,27 @@ export async function assertChannelAccess(tenantId: string, channelId: string, u
 
 const MAX_POST_BYTES = 256 * 1024; // envelope posts may carry inline attachments
 
-export async function postChannelMessage(tenantId: string, channelId: string, authorUserId: string | undefined, content: unknown): Promise<{ messageId: string; text: string }> {
+/** ADR 0879 D8 — may this caller POST here (access + posting policy)? The write
+ *  role is a separate question (`requireChannelWrite`). */
+export function channelPostRefusal(m: ConversationMeta, userId: string | undefined, authority: ChannelAuthority): string | null {
+  if (m.channel?.archived) return 'archived';
+  if (userId === undefined || !canAccessChannel(m, userId)) return 'not_member';
+  if (m.channel?.postingPolicy === 'managers' && !isChannelManager(m, userId, authority)) return 'managers_only';
+  return null;
+}
+
+export async function postChannelMessage(tenantId: string, channelId: string, authorUserId: string | undefined, content: unknown, authority: ChannelAuthority): Promise<{ messageId: string; text: string }> {
   const m = await mustGetChannel(tenantId, channelId);
   if (m.channel?.archived) throw new OpenwopError('validation_error', 'Channel is archived.', 400, { channelId });
   // CHN-3: no anonymous channel access — even a public channel requires a resolved
   // principal to post (mirrors assertChannelAccess's default-deny on an undefined caller).
   if (authorUserId === undefined) throw new OpenwopError('forbidden', 'Authentication required.', 403, { channelId });
   if (!canAccessChannel(m, authorUserId)) throw new OpenwopError('forbidden', 'Not a member of this channel.', 403, { channelId });
+  // ADR 0879 D1 — reading is not posting: a Viewer reads the room and writes nothing.
+  requireChannelWrite(authority);
+  if (channelPostRefusal(m, authorUserId, authority) === 'managers_only') {
+    throw new OpenwopError('forbidden', 'Only the channel owner or a workspace admin can post in this announcement channel.', 403, { channelId, code: 'channel_managers_only' });
+  }
   // ADR 0192 D5 — accept plain text (back-compat) OR the serialized ChatMessage
   // envelope (attachments; `useChatSession` already dual-parses both shapes).
   const raw = String(content ?? '').trim();
@@ -505,8 +559,12 @@ export async function resolveChannelCatchup(
   tenantId: string,
   channelId: string,
   callerUserId: string | undefined,
+  authority: ChannelAuthority,
 ): Promise<{ agentId: string; task: string; unreadCount: number }> {
   if (callerUserId === undefined) throw new OpenwopError('forbidden', 'Authentication required.', 403, { channelId });
+  // ADR 0879 D1 — catch-up STARTS A RUN on the host's managed key; a Viewer's role
+  // holds no `runs:create`, so it is a write, not a read.
+  requireChannelWrite(authority);
   // getChannel 404-masks a private channel from non-members (no existence leak)
   // and admits any member of a public channel — the correct catch-up gate.
   const m = await getChannel(tenantId, channelId, callerUserId);

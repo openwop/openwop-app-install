@@ -222,6 +222,9 @@ export const messages = {
   navLocked: 'Bloqueado: desbloquéalo en la tienda de funciones',
   lockedFeatureTitle: 'Esta función requiere una mejora de plan',
   lockedFeatureNoStoreBody: 'No forma parte de tu plan actual y por ahora no está disponible para comprar. Pide a una persona administradora del espacio de trabajo que la active.',
+  offlineEntitlementTitle: 'No tienes conexión',
+  offlineEntitlementBody: 'Esta página necesita conexión para comprobar que tu espacio de trabajo puede usarla. Se abrirá en cuanto vuelvas a estar en línea.',
+  offlineEntitlementRetry: 'Reintentar',
   navTelemetryDisclosure: 'Este espacio registra recuentos anónimos de navegación — qué páginas se abren, desde qué menú y qué funciones bloqueadas se ven o se abren — para guiar su estructura. No se guarda actividad individual.',
   navTelemetryDismiss: 'Cerrar el aviso de telemetría',
 } as const;

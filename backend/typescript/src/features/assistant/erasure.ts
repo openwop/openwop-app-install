@@ -308,6 +308,38 @@ function actionAddresses(a: PendingAction): string[] {
  * matched against the commitment ids BEFORE those commitments are redacted,
  * because redaction removes the evidence that linked them.
  */
+/**
+ * ADR 0878 D4 — the service-desk eraser's hop into the approval queue. A drafted
+ * support reply carries no subject ref (`payload` is `{ ticketId }`), so the leg-1
+ * predicates above can never match it — but its `draft` answers, and its `reason`
+ * names, the erased requester's thread. Redact + cancel every `servicedesk.reply`
+ * on the ticket, and its approval's proposal. Same CAS as leg 1; idempotent.
+ */
+export async function eraseServiceDeskReplyDrafts(tenantId: string, ticketId: string): Promise<number> {
+  if (!tenantId || !ticketId) return 0;
+  let touched = 0;
+  for (const listed of await pendingActions.listForTenantIndexed(tenantId)) {
+    if (listed.kind !== 'servicedesk.reply' || (listed.payload as { ticketId?: unknown }).ticketId !== ticketId) continue;
+    const out = await casUpdatePendingAction(tenantId, listed.actionId, (a) => {
+      const ts = new Date().toISOString();
+      return {
+        ...a,
+        draft: ERASED_VALUE,
+        ...(a.reason !== undefined ? { reason: ERASED_VALUE } : {}),
+        status: a.status === 'pending' ? 'rejected' : a.status,
+        erasedAt: a.erasedAt ?? ts,
+        updatedAt: ts,
+      };
+    });
+    if (out.ok) touched += 1;
+    if (listed.approvalId) {
+      const { redactApprovalProposal } = await import('../../host/approvalService.js');
+      if (await redactApprovalProposal(tenantId, listed.approvalId)) touched += 1;
+    }
+  }
+  return touched;
+}
+
 export async function eraseAssistantSubject(tenantId: string, subjectKey: string): Promise<void> {
   if (!tenantId || !subjectKey) return; // fail-closed — never a tenant-wide sweep
   let touched = 0;

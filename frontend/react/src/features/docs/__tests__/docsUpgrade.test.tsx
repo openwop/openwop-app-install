@@ -1,10 +1,19 @@
 /**
  * UX_UPGRADE-docs — the sidebar + article upgrades (D-G1/D-G2/D-G3/D-G5/D-G6).
  *
- * These pin BEHAVIOUR: the sidebar really groups (and by the SAME rule the index
- * uses), the filter really narrows it without ever stranding the reader on the
- * page they're on, `/` and ⌘K really focus it, and prev/next really point at the
- * `docsNav`-adjacent docs.
+ * ADR 0392 public docs tier. These pin BEHAVIOUR: the sidebar really groups by
+ * the `docsNav` prefix (humanised), the filter really narrows it without ever
+ * stranding the reader on the page they're on, `/` and ⌘K really focus it, the
+ * breadcrumb names the humanised group, and prev/next really link the
+ * `docsNav`-adjacent docs and drop the missing edge at BOTH ends.
+ *
+ * Sabotage-witnessed (/grade-tests w52): an un-humanised group label, a flat
+ * sidebar, a filter that drops the active doc or ignores the group name, a
+ * FILTER_MIN_DOCS of 3, the wrong focus keys, the raw order key as the crumb
+ * group, a wrong-neighbour or wrap-around pager, and a stamp not read from the
+ * nav each turn one case red. The group fixtures are HYPHENATED
+ * (`getting-started`) on purpose: `guides` alone could not show a missing
+ * humanisation.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, fireEvent, cleanup, waitFor, within } from '@testing-library/react';
@@ -55,7 +64,7 @@ async function sidebarWithDocs(): Promise<HTMLElement> {
 }
 
 describe('docs sidebar — grouping (D-G2) + filter (D-G1)', () => {
-  it('groups the SIDEBAR by the same docsNav prefix the index groups by', async () => {
+  it('groups the SIDEBAR by the docsNav prefix, humanised', async () => {
     getDocsNav.mockResolvedValue(nav());
     renderDocs('install');
     const sidebar = await sidebarWithDocs();
@@ -117,35 +126,44 @@ describe('docs sidebar — grouping (D-G2) + filter (D-G1)', () => {
 describe('docs article — breadcrumb (D-G5), pager (D-G3), freshness (D-G6)', () => {
   it('breadcrumbs Docs → group → title, and never shows the raw order key', async () => {
     getDocsNav.mockResolvedValue(nav());
-    renderDocs('workflows');
+    renderDocs('first-run');
     const crumbs = await screen.findByRole('navigation', { name: /breadcrumb/i });
-    expect(crumbs.textContent).toContain('guides');
-    expect(crumbs.textContent).toContain('Workflows');
-    expect(crumbs.textContent).not.toContain('guides/10');
-    expect(within(crumbs).getByRole('link', { name: /documentation/i })).toBeTruthy();
+    // Separators are aria-hidden "/" spans; the group is HUMANISED, never the key.
+    expect(crumbs.textContent).toBe('Documentation/getting started/First run');
+    expect(within(crumbs).getByRole('link', { name: 'Documentation' }).getAttribute('href')).toBe('/docs');
   });
 
   it('omits the group segment for an UNGROUPED doc', async () => {
     getDocsNav.mockResolvedValue(nav());
     renderDocs('changelog');
     const crumbs = await screen.findByRole('navigation', { name: /breadcrumb/i });
-    expect(crumbs.textContent).toContain('Changelog');
-    expect(crumbs.textContent).not.toContain('zz-changelog');
+    // Exactly Docs → title: no group segment at all (not even a humanised
+    // `zz changelog` made from the order key).
+    expect(crumbs.textContent).toBe('Documentation/Changelog');
   });
 
   it('pages to the docsNav-adjacent docs, and drops the edge at each end', async () => {
     getDocsNav.mockResolvedValue(nav());
     renderDocs('workflows');
     const pager = await screen.findByRole('navigation', { name: /nearby pages/i });
-    expect(pager.textContent).toContain('First run'); // previous
-    expect(pager.textContent).toContain('Agents');    // next
+    const hrefs = (el: HTMLElement): Array<string | null> =>
+      within(el).getAllByRole('link').map((a) => a.getAttribute('href'));
+    expect(hrefs(pager)).toEqual(['/docs/first-run', '/docs/agents']); // previous, next
+    expect(pager.textContent).toBe('PreviousFirst runNextAgents');
 
     cleanup();
     getDocsNav.mockResolvedValue(nav());
     renderDocs('install'); // the FIRST doc has no previous
     const first = await screen.findByRole('navigation', { name: /nearby pages/i });
-    expect(first.textContent).not.toContain('Previous');
-    expect(first.textContent).toContain('First run');
+    expect(hrefs(first)).toEqual(['/docs/first-run']);
+    expect(first.textContent).toBe('NextFirst run');
+
+    cleanup();
+    getDocsNav.mockResolvedValue(nav());
+    renderDocs('changelog'); // the LAST doc has no next — never wraps to the first
+    const last = await screen.findByRole('navigation', { name: /nearby pages/i });
+    expect(hrefs(last)).toEqual(['/docs/api']);
+    expect(last.textContent).toBe('PreviousAPI reference');
   });
 
   it('shows a machine-readable last-updated stamp', async () => {

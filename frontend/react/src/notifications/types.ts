@@ -96,6 +96,8 @@ export const TYPE_LABEL_KEYS: Record<string, string> = {
   // Comments feature (ADR 0021) — additive, fallback-protected; no core-union edit.
   'comment.added':            'notifications:typeCommentAdded',
   'comment.reply':            'notifications:typeCommentReply',
+  'comment.mention':          'notifications:typeCommentMention',
+  'comment.resolved':         'notifications:typeCommentResolved',
   'approval.content-review-requested': 'notifications:typeReviewRequested',
   'approval.content-review-decided':   'notifications:typeReviewDecided',
 };

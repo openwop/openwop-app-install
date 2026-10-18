@@ -10,10 +10,10 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
-import { EMPTY_MENU_CONFIG_BUNDLE } from '../../../chrome/navConfig/types.js';
+import { EMPTY_MENU_CONFIG_BUNDLE, type MenuConfigBundle } from '../../../chrome/navConfig/types.js';
 
 const nav = vi.hoisted(() => ({
-  bundle: null as unknown,
+  bundle: null as MenuConfigBundle | null,
   loading: false,
   failed: false,
 }));
@@ -46,7 +46,8 @@ describe('menu settings — failed-load guard (NAV-G1)', () => {
   it('a failed config read renders the failure card, never the editor (Save writes a full override set)', () => {
     nav.failed = true;
     view();
-    expect(document.body.textContent).toMatch(/couldn.t load|could not load/i);
+    expect(screen.getByText('Could not load the menu configuration')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Try again' })).toBeTruthy();
     expect(screen.queryByRole('button', { name: /save/i })).toBeNull();
   });
 
@@ -67,7 +68,10 @@ describe('menu settings — failed-load guard (NAV-G1)', () => {
   // fix here precisely because the render is fast — the measurement is what
   // distinguishes an honest timeout bump from papering over a freeze.
   it('a loaded config renders the editor with Save available', () => {
-    nav.bundle = { ...EMPTY_MENU_CONFIG_BUNDLE, loadedFromServer: true } as never;
+    // A config that WAS read (a distinct bundle, not the EMPTY seed) whose later
+    // reload failed: the guard keys on bundle identity, so the editor stays.
+    nav.failed = true;
+    nav.bundle = { tenant: { items: {}, headers: [] }, user: { items: {}, headers: [] } };
     view();
     expect(screen.getByRole('button', { name: /save/i })).toBeTruthy();
   }, 30_000);

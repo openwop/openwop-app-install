@@ -176,6 +176,10 @@ export interface FeatureRoute {
    * Absent on `CORE_FEATURES` routes — core substrate is never sellable.
    */
   ownerFeatureId?: string;
+  /** ADR 0873 D12 — the owning feature's `offline.entitlement`, stamped beside
+   *  `ownerFeatureId` by `featureRoutes()`. `'last-known'` lets `EntitlementGuard`
+   *  render offline on a recent positive answer; absent fails closed offline. */
+  ownerOfflineEntitlement?: 'fail-closed' | 'last-known';
   element: ReactElement;
   tier: FeatureTier;
   /** ADR 0641 decision 2 — auth posture, meaningful ONLY on the `site` tier and

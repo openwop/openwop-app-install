@@ -5,8 +5,15 @@
  * (the grade-pass finding): the dual-channel announcer routing (RFC 0130 —
  * assertive plugin announces vs the polite default), the dispatcher's
  * IDENTITY STABILITY across renders (the GC-CV-3 PluginFrame re-subscribe
- * fix), the registry commit→keydown-dispatch timing, and the ⌘K projection
- * (frozen id prefix, label-ns routing, enabled filter, unregister lifecycle).
+ * fix), the registry commit→keydown dispatch and its guards (text context,
+ * a modal owning Escape), and the ⌘K projection (frozen id prefix, label-ns
+ * routing, enabled filter, unregister lifecycle).
+ *
+ * Named ceiling — POST-COMMIT dispatch timing: the hook assigns the dispatch
+ * ref in an effect, not during render (a discarded concurrent render must
+ * never dispatch). jsdom + a synchronous render cannot produce a discarded
+ * render, so a render-time assignment is indistinguishable here; the cases
+ * below prove dispatch AFTER commit, not that it never happens before.
  */
 import { describe, it, expect, beforeEach } from 'vitest';
 import { useEffect, useRef } from 'react';
@@ -87,20 +94,35 @@ describe('useSurfaceChrome (ADR 0365)', () => {
     expect(new Set(seen).size).toBe(1);
   });
 
-  it('committed shortcuts dispatch through the window-keydown owner post-commit', () => {
+  it('committed shortcuts dispatch through the window-keydown owner, minus text contexts and modal Escape', () => {
     let ran = 0;
+    let escaped = 0;
     const defs: ShortcutDef[] = [
       { combo: 'mod+m', labelKey: 'verb', group: 'type', run: () => { ran += 1; } },
+      { combo: 'escape', labelKey: 'esc', group: 'general', run: () => { escaped += 1; } },
     ];
     render(<Harness shortcuts={defs} onChrome={() => undefined} />);
     fireEvent.keyDown(window, { key: 'm', metaKey: true });
     expect(ran).toBe(1);
-    // Text contexts never dispatch (inTextContext guard).
     const input = document.createElement('input');
-    document.body.appendChild(input);
-    fireEvent.keyDown(input, { key: 'm', metaKey: true });
-    expect(ran).toBe(1);
-    input.remove();
+    const modal = document.createElement('div');
+    modal.setAttribute('aria-modal', 'true');
+    try {
+      // Text contexts never dispatch (inTextContext guard).
+      document.body.appendChild(input);
+      fireEvent.keyDown(input, { key: 'm', metaKey: true });
+      expect(ran).toBe(1);
+      // An open modal owns Escape — the registry never also handles it.
+      document.body.appendChild(modal);
+      fireEvent.keyDown(window, { key: 'Escape' });
+      expect(escaped).toBe(0);
+      modal.remove();
+      fireEvent.keyDown(window, { key: 'Escape' }); // positive control: no modal → dispatched
+      expect(escaped).toBe(1);
+    } finally {
+      input.remove();
+      modal.remove();
+    }
   });
 
   it('projects the registry into ⌘K: frozen id prefix, per-group label ns, enabled filter', () => {

@@ -1,3 +1,15 @@
+/**
+ * ADR 0310 Phase-C — the hand-rolled 3D viewer math (`cad3d.ts`). What breaks it:
+ * a wrong yaw/pitch sign (the model orbits the wrong way), an INWARD face
+ * winding (the viewer's back-face cull then hides real faces), a wrong
+ * tessellation count, or a shading term that lights grazing faces brighter than
+ * aligned ones. Expected values are hand-derived literals, never re-computed
+ * through the module under test.
+ *
+ * Ceiling: `shadeBrightness`'s [0.15, 1.7] clamp is unreachable for any material
+ * in [0,1]² (min diffuse 0.26, max diffuse+spec 1.65), so no case can witness
+ * it — the range is pinned through exact values instead.
+ */
 import { describe, it, expect } from 'vitest';
 import { rotate, tessellate, shadeBrightness, centroid, type Drawable } from '../cad3d.js';
 
@@ -52,21 +64,29 @@ describe('cad3d pure math (ADR 0310 Phase-C 3D viewer)', () => {
 
   it('box faces have outward unit normals', () => {
     const box = tessellate({ kind: 'box', x: 0, y: 0, z: 0, width: 2, height: 2, depth: 2 });
+    expect(faces(box)).toHaveLength(6);
     for (const d of box) {
       if (d.kind !== 'face') continue;
       const n = d.face.normal;
       expect(Math.hypot(n.x, n.y, n.z)).toBeCloseTo(1, 6);
+      // Outward: the normal points from the box centre (1,1,1) towards the face.
+      const vs = d.face.verts, k = vs.length;
+      const c = { x: vs.reduce((a, v) => a + v.x, 0) / k, y: vs.reduce((a, v) => a + v.y, 0) / k, z: vs.reduce((a, v) => a + v.z, 0) / k };
+      expect(n.x * (c.x - 1) + n.y * (c.y - 1) + n.z * (c.z - 1)).toBeGreaterThan(0);
     }
   });
 
   it('shadeBrightness: stays in range; aligned > grazing; a glossier surface has a brighter highlight at the peak', () => {
     const matte = { metallic: 0, roughness: 1 };
-    // Range invariant across many orientations.
-    for (const n of [{ x: 1, y: 0, z: 0.1 }, { x: 0, y: 1, z: 0.2 }, { x: -1, y: -1, z: 0.3 }]) {
-      const b = shadeBrightness(n, matte);
-      expect(b).toBeGreaterThanOrEqual(0.15);
-      expect(b).toBeLessThanOrEqual(1.7);
-    }
+    // Exact diffuse range for a matte, non-metal surface (spec is 0 at roughness 1):
+    // a normal ALONG the light is lambert 1 → 0.4 + 0.6 = 1.0; a normal
+    // perpendicular to it (z > 0, so the two-sided flip does not apply) is
+    // lambert 0 → the 0.4 ambient floor. Hand-derived, not re-computed via cad3d.
+    const L = Math.hypot(0.35, 0.7, 0.62);
+    expect(shadeBrightness({ x: 0.35 / L, y: 0.7 / L, z: 0.62 / L }, matte)).toBeCloseTo(1, 6);
+    // (0.62, 0, -0.35) · (0.35, 0.7, 0.62) = 0 → flip to z>0 form: (-0.62, 0, 0.35).
+    const P = Math.hypot(0.62, 0.35);
+    expect(shadeBrightness({ x: -0.62 / P, y: 0, z: 0.35 / P }, matte)).toBeCloseTo(0.4, 6);
     // Diffuse ordering: a normal aligned with the light out-shines a grazing one (same material).
     const light = { x: 0.35, y: 0.7, z: 0.62 };
     expect(shadeBrightness(light, matte)).toBeGreaterThan(shadeBrightness({ x: 1, y: 0, z: 0.05 }, matte));

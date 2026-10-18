@@ -10,6 +10,8 @@ import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { OpenwopError } from '../../types.js';
 import { getAgentProfile } from '../../host/agentProfileService.js';
 import { resolveAgentIdentity } from '../../host/agentIdentity.js';
+import { registerSubjectEraser, type SubjectEraseReport } from '../../host/subjectErasure.js';
+import { subjectRefForms } from '../../host/conversationStore.js';
 
 export interface VoiceSession {
   sessionId: string;
@@ -18,6 +20,10 @@ export interface VoiceSession {
   conversationId?: string;
   /** The agent the session is scoped to (the ADR 0058 voice persona, optional in P1). */
   agentId?: string;
+  /** ADR 0893 (architect M5) — the opener's `callerSubject(req)`. Every walkie route
+   *  answers only this caller: the session holds the caller's live audio and its
+   *  transcripts, and spends the tenant's speech key. */
+  subject?: string;
   /** The current live-utterance handle (re-minted per turn). */
   streamRef: string;
   /** Host-internal transport floor (P1). WebSocket/WebRTC plug in behind the same model. */
@@ -29,9 +35,12 @@ export interface VoiceSession {
 }
 
 // Keyed by tenant+session → point-get, no cross-tenant scan (finding #2).
+// ADR 0893 — tenant-indexed so the subject eraser below reads one tenant's slice.
 const sessions = new DurableCollection<VoiceSession>(
   'voice:session',
   (s) => `${s.tenantId}:${s.sessionId}`,
+  undefined,
+  (s) => s.tenantId,
 );
 
 const keyOf = (tenantId: string, sessionId: string): string => `${tenantId}:${sessionId}`;
@@ -41,6 +50,7 @@ export interface CreateVoiceSessionInput {
   sessionId: string;
   conversationId?: string;
   agentId?: string;
+  subject?: string;
   streamRef: string;
 }
 
@@ -51,6 +61,7 @@ export async function createVoiceSession(tenantId: string, input: CreateVoiceSes
     tenantId,
     ...(input.conversationId ? { conversationId: input.conversationId } : {}),
     ...(input.agentId ? { agentId: input.agentId } : {}),
+    ...(input.subject ? { subject: input.subject } : {}),
     streamRef: input.streamRef,
     transport: 'http-chunked',
     status: 'open',
@@ -62,10 +73,11 @@ export async function createVoiceSession(tenantId: string, input: CreateVoiceSes
   return session;
 }
 
-/** Point-get a session, tenant-bound. Throws 404 (no existence oracle) when missing/closed. */
-export async function getOpenVoiceSession(tenantId: string, sessionId: string): Promise<VoiceSession> {
+/** Point-get a session, tenant- AND opener-bound (ADR 0893 M5). Throws 404 (no
+ *  existence oracle) when missing / closed / another tenant's / another caller's. */
+export async function getOpenVoiceSession(tenantId: string, sessionId: string, subject: string | undefined): Promise<VoiceSession> {
   const s = await sessions.get(keyOf(tenantId, sessionId));
-  if (!s || s.tenantId !== tenantId || s.status !== 'open') {
+  if (!s || s.tenantId !== tenantId || s.status !== 'open' || s.subject !== subject) {
     throw new OpenwopError('not_found', 'Voice session not found.', 404, { sessionId });
   }
   return s;
@@ -117,3 +129,27 @@ export async function resolveAgentVoice(tenantId: string, agentId: string | unde
     ...(typeof credentialRef === 'string' && credentialRef ? { credentialRef } : {}),
   };
 }
+
+/**
+ * ADR 0893 (M5) — a walkie session row now names its opener (`subject`). A session
+ * that is never ended (tab closed mid-call) keeps its row, so DSAR erasure deletes
+ * the subject's sessions outright: the row holds no conversation content (the
+ * committed turns live in the chat, which has its own eraser), only the binding.
+ */
+export async function eraseSubjectVoiceSessions(tenantId: string, subjectKey: string): Promise<SubjectEraseReport> {
+  const forms = subjectRefForms(subjectKey);
+  let rowsTouched = 0;
+  for (const s of await sessions.listForTenantIndexed(tenantId)) {
+    if (s.subject && forms.has(s.subject)) {
+      await sessions.delete(keyOf(s.tenantId, s.sessionId));
+      rowsTouched += 1;
+    }
+  }
+  return { rowsTouched };
+}
+
+/** Idempotent (the seam dedupes by reference). Called from `feature.ts`. */
+export function registerVoiceSessionErasure(): void {
+  registerSubjectEraser(eraseSubjectVoiceSessions);
+}
+

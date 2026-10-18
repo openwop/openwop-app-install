@@ -1,5 +1,13 @@
 /**
  * ADR 0136 Phase 3 — intersectScopes (ledger ∩ chipset, never-widen composition).
+ *
+ * Subject is the shared `conversation-tools/scopeResolver` (also used by
+ * builder-pair and every ADR 0856 scope contribution). It is tool authorization: a
+ * widened composition hands the agent a tool neither source allowed. What turns it
+ * red (sabotage-probed, /grade-tests w29): `&&`→`||` in the enabled intersection,
+ * exact-match instead of prefix-aware matching, treating `enabled: []` as "no
+ * constraint" (an out-of-mandate ledger must mean NO tools), dropping either side's
+ * disabled / requireApproval, or an agent-default side erasing the restricted one.
  */
 import { describe, it, expect } from 'vitest';
 import { intersectScopes, resolveCapabilityScope } from '../src/features/conversation-tools/scopeResolver.js';

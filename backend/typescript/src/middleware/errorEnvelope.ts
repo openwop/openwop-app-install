@@ -131,6 +131,15 @@ export function errorEnvelopeMiddleware(): ErrorRequestHandler {
         message: sanitizeForErrorMessage(env.message ?? ''),
         ...(env.details ? { details: sanitizeDetails(env.details) } : {}),
       };
+      // A retriable 503 carries its hint as a header too (v2 errors.md), so a
+      // webhook sender or SDK retries on the header without parsing the body. So
+      // does the retriable 409 `idempotency_in_flight` (its `details.retryAfter`,
+      // `idempotency.md` §"Concurrent duplicates"), so a thrown one needs no
+      // hand-set header (the canvas create, CANVAS-IDEM-ORPHAN-1).
+      const retryAfter = err.code === 'idempotency_in_flight' ? err.details?.retryAfter : err.details?.retryAfterSeconds;
+      if ((err.httpStatus === 503 || err.code === 'idempotency_in_flight') && typeof retryAfter === 'number' && Number.isFinite(retryAfter) && retryAfter > 0) {
+        res.setHeader('Retry-After', String(Math.ceil(retryAfter)));
+      }
       emitEnvelope(req, res, err.httpStatus, scrubbed);
       return;
     }

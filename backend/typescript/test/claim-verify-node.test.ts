@@ -81,15 +81,62 @@ describe('claim-verify — entailment', () => {
   it('a disputed pair is SURFACED when another citation carries the claim', async () => {
     const src2 = { hash: 'sha256:bbb', title: 'Second', url: 'https://b.example/x' };
     const page2 = { url: 'https://b.example/x', extractedText: 'A 20-minute walk improved mood.', status: 200 };
-    const { ctx } = ctxWith(
-      [{ verdict: 'supports', span: 'x' }, { verdict: 'unrelated' },   // pair 1 → disputed
-       { verdict: 'supports', span: 'y' }, { verdict: 'supports', span: 'y' }], // pair 2 → agreed
-      { claims: [{ ...CLAIM, sourceHashes: ['sha256:aaa', 'sha256:bbb'] }], sources: [SRC, src2], pages: [PAGE, page2] },
-    );
+    const { ctx } = ctxWith([], { claims: [{ ...CLAIM, sourceHashes: ['sha256:aaa', 'sha256:bbb'] }], sources: [SRC, src2], pages: [PAGE, page2] });
+    // Pairs are judged concurrently (KTF-RS-2), so answers key on the SOURCE and
+    // on whether this is the skeptical second opinion, as a real model's would.
+    ctx.callAI = vi.fn(async (req: { systemPrompt?: string; messages?: Array<{ content?: string }> }) => {
+      const skeptical = /SKEPTICAL/.test(String(req.systemPrompt));
+      const second = String(req.messages?.[0]?.content).includes('A 20-minute walk improved mood.');
+      if (!second) return { data: skeptical ? { verdict: 'unrelated' } : { verdict: 'supports', span: 'x' } }; // pair 1 → disputed
+      return { data: { verdict: 'supports', span: 'y' } };                                                    // pair 2 → agreed
+    });
     const out = await claimVerify(ctx);
     expect(out.status).toBe('success');
     const o = out.outputs as { disputedClaimIds: string[] };
     expect(o.disputedClaimIds, 'the disagreement must reach the human, not vanish').toEqual(['c-1']);
+  });
+
+  // KTF-RS-2 — pairs are judged with bounded concurrency, and each result lands in
+  // its PLANNED slot whatever order the calls return in. Sabotage: a serial loop
+  // never has >1 call in flight (reds the first expect); appending results in
+  // completion order reds the order assertion.
+  it('judges pairs concurrently (bounded) and keeps claim/source order regardless of completion order', async () => {
+    const hashes = ['sha256:a1', 'sha256:a2', 'sha256:a3', 'sha256:a4', 'sha256:a5', 'sha256:a6'];
+    const sources = hashes.map((h, n) => ({ hash: h, title: `S${n}`, url: `https://s${n}.example/` }));
+    const pages = hashes.map((_, n) => ({ url: `https://s${n}.example/`, extractedText: `source number ${n}`, status: 200 }));
+    const { ctx } = ctxWith([], { claims: [{ ...CLAIM, sourceHashes: hashes }], sources, pages });
+    let inFlight = 0, peak = 0;
+    ctx.callAI = vi.fn(async (req: { messages?: Array<{ content?: string }> }) => {
+      inFlight++; peak = Math.max(peak, inFlight);
+      const n = Number(/source number (\d)/.exec(String(req.messages?.[0]?.content))?.[1]);
+      // Later sources answer FIRST.
+      await new Promise((r) => setTimeout(r, (hashes.length - n) * 3));
+      inFlight--;
+      return { data: { verdict: 'unrelated' } };
+    });
+    const out = await claimVerify(ctx);
+    expect(peak).toBeGreaterThan(1);
+    expect(peak).toBeLessThanOrEqual(4);
+    // No pair is entailed, so the node fails closed — but every pair was judged once.
+    expect(out.status).toBe('failed');
+    expect(ctx.callAI).toHaveBeenCalledTimes(hashes.length);
+  });
+
+  it('the per-claim support list follows the claim\'s source order even when answers arrive out of order', async () => {
+    const hashes = ['sha256:a1', 'sha256:a2', 'sha256:a3'];
+    const sources = hashes.map((h, n) => ({ hash: h, title: `S${n}`, url: `https://s${n}.example/` }));
+    const pages = hashes.map((_, n) => ({ url: `https://s${n}.example/`, extractedText: `source number ${n}`, status: 200 }));
+    const { ctx } = ctxWith([], { claims: [{ ...CLAIM, sourceHashes: hashes }], sources, pages });
+    ctx.callAI = vi.fn(async (req: { messages?: Array<{ content?: string }> }) => {
+      const n = Number(/source number (\d)/.exec(String(req.messages?.[0]?.content))?.[1]);
+      await new Promise((r) => setTimeout(r, (hashes.length - n) * 3));
+      return { data: { verdict: 'supports', span: `span ${n}` } };
+    });
+    const out = await claimVerify(ctx);
+    expect(out.status).toBe('success');
+    const support = (out.outputs as { claims: Array<{ support: Array<{ sourceHash: string; span: string }> }> }).claims[0]!.support;
+    expect(support.map((x) => x.sourceHash)).toEqual(hashes);
+    expect(support.map((x) => x.span)).toEqual(['span 0', 'span 1', 'span 2']);
   });
 
   it('`supports` with NO quoted span is downgraded — an unauditable pass is not a pass', async () => {
@@ -102,6 +149,45 @@ describe('claim-verify — entailment', () => {
     const { ctx } = ctxWith([{ verdict: 'yes-definitely' }]);
     const out = await claimVerify(ctx);
     expect(out.status).toBe('failed');
+  });
+
+  // XCH-CV-1 — ONE bounded error-fed repair before the downgrade, so a
+  // formatting slip does not silently lose a pair the model could judge.
+  it('an off-schema judgement is repaired ONCE with the defect named, then counted', async () => {
+    const calls: Array<Array<{ role?: string; content?: string }>> = [];
+    const answers: Array<Record<string, unknown>> = [
+      { verdict: 'yes-definitely' },
+      { verdict: 'supports', span: 'walking 20 minutes daily reported better mood' },
+      { verdict: 'supports', span: 'walking 20 minutes daily reported better mood' },
+    ];
+    const { ctx: base } = ctxWith([]);
+    const ctx = {
+      ...base,
+      callAI: vi.fn(async (req: { messages?: Array<{ role?: string; content?: string }> }) => {
+        calls.push(req.messages ?? []);
+        return { data: answers[calls.length - 1] };
+      }),
+    };
+    const out = await claimVerify(ctx);
+    expect(out.status).toBe('success');
+    expect(calls.length, 'first + one repair + the second opinion').toBe(3);
+    expect(calls[1]!.length).toBe(3);
+    expect(String(calls[1]![2]!.content)).toContain('`verdict` must be one of');
+  });
+
+  it('a `supports` without a span is asked for the span once, then downgraded if still missing', async () => {
+    const { ctx, callAI } = ctxWith([{ verdict: 'supports' }]);
+    const out = await claimVerify(ctx);
+    expect(out.status).toBe('failed');
+    expect(callAI).toHaveBeenCalledTimes(2);
+  });
+
+  // XCH-CE-1 — a cut source is DISCLOSED to the verifier, never posed as whole.
+  it('a source longer than the read window is marked TRUNCATED in what the model reads', async () => {
+    const long = { ...PAGE, extractedText: `${PAGE.extractedText} ${'filler '.repeat(2000)}` };
+    const { ctx, calls } = ctxWith([{ verdict: 'unrelated' }], { pages: [long] });
+    await claimVerify(ctx);
+    expect(calls[0]!.user).toContain('[TRUNCATED — the first 6000 of');
   });
 
   it('a citation with no fetched content is SKIPPED, not guessed at', async () => {

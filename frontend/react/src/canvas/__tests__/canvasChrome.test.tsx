@@ -1,8 +1,19 @@
 /**
- * §7 chrome primitives — direct coverage (grade-pass 2026-07-12): the
- * SelectionPill verbs/ARIA, the NotesDrawer disclosure + draft-on-blur
- * commit + per-type persistence, and the ViewportHandleContext
- * last-mount-wins contract.
+ * §7 chrome primitives — direct coverage (grade-pass 2026-07-12).
+ *
+ * - SelectionPill (§7.4 / CV-7): a labeled toolbar whose verbs reach the
+ *   chassis actions; lock state reads through aria-pressed; group/ungroup and
+ *   duplicate render only when the chassis supplies them. Breaks: a verb wired
+ *   to the wrong action, a lock toggle that lies to assistive tech, or a
+ *   duplicate offered at the collection max.
+ * - ViewportHandleContext (§7.3 / CV-3): a center surface publishes its zoom
+ *   handle on mount; last mount wins; an earlier (stale) surface unmounting
+ *   must never clear the newer handle; the default slot is inert. Breaks: the
+ *   ⇧1/⇧2/⇧0 view shortcuts dispatching into a dead or null handle.
+ *
+ * (Corrected in /grade-tests w46: this header used to claim NotesDrawer
+ * coverage — disclosure, draft-on-blur commit, per-type persistence. No case
+ * here or anywhere renders NotesDrawer; that gap is recorded for grade-code.)
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, renderHook } from '@testing-library/react';

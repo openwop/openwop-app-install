@@ -255,3 +255,28 @@ export async function repointTasksToCompany(tenantId: string, orgId: string, tas
 export async function __clearTasks(): Promise<void> {
   await tasks.__clear();
 }
+
+/**
+ * ADR 0882 D4 — `Task.assignee` residue. CSM plays write member subjects into
+ * `assignee`, and nothing reached that field: no eraser covered `crm:task`, and a
+ * person removed from the workspace stayed assigned. A DSAR clears every task's
+ * assignee that matches a form of the subject key; a removal from the workspace
+ * ROOT unassigns that person's OPEN tasks (done tasks keep their history).
+ */
+export async function clearTaskAssignee(tenantId: string, matches: (assignee: string) => boolean, onlyOpen: boolean): Promise<number> {
+  let n = 0;
+  for (const first of await tasks.listForTenantIndexed(tenantId)) {
+    // CSM2CD-6 — a lost CAS is RE-READ and retried, never silently skipped: a
+    // concurrent edit must not leave an erased or removed person assigned.
+    let t: Task | null = first;
+    for (let attempt = 0; t && attempt < 4; attempt += 1) {
+      if (!t.assignee || !matches(t.assignee)) break;
+      if (onlyOpen && t.status === 'done') break;
+      const next: Task = { ...t, updatedAt: nowIso() };
+      delete next.assignee;
+      if (await tasks.compareAndSwap(t, next)) { n += 1; break; }
+      t = await tasks.get(t.taskId);
+    }
+  }
+  return n;
+}

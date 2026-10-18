@@ -22,6 +22,8 @@ export const messages = {
   toggleFailed: 'Could not update the scheduled chat. Please try again.',
   disabled: 'Scheduled chats are off for this workspace.',
   colNextRun: 'Next run',
+  lastRunNotPosted: 'Last run could not post its reply to the conversation. Check the agent and the conversation, then resume.',
+  lastRunFailed: 'Last run failed: {{reason}}',
 
   // §4.5 collection kit — search
   filterGroup: 'Filter scheduled chats',

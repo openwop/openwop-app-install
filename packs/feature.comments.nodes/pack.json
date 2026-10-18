@@ -1,6 +1,6 @@
 {
   "name": "feature.comments.nodes",
-  "version": "1.1.1",
+  "version": "1.2.1",
   "kind": "node",
   "description": "Comments feature node pack — read/post/resolve nodes over the ctx.features.comments surface. list reads a resource thread; post adds an (agent-authored) comment to a commentable resource; resolve marks a comment resolved. Tenant-guarded; the post emits a tenant-scoped notification through the existing seam.",
   "author": "OpenWOP App",
@@ -21,19 +21,19 @@
       "typeId": "feature.comments.nodes.post",
       "version": "1.1.0",
       "label": "Comments: Post",
-      "description": "Posts a comment (or reply, via parentId) on a commentable resource (cms_page | kb_collection | chat_message | priority_idea | canvas_document | creative_brief) over ctx.features.comments. The resource is validated in-org. Side-effecting: it mints a durable row and emits an addressed, user-visible notification, so a replay/fork is served the recorded outcome rather than posting a second time.",
+      "description": "Posts a comment (or reply, via parentId) on a commentable resource (cms_page | kb_collection | chat_message | priority_idea | canvas_document | canvas_slides | creative_brief) over ctx.features.comments. The resource is validated in-org. Side-effecting: it mints a durable row and emits an addressed, user-visible notification, so a replay/fork is served the recorded outcome rather than posting a second time.",
       "category": "integration",
       "role": "side-effect",
       "capabilities": ["side-effectful"]
     },
     {
       "typeId": "feature.comments.nodes.resolve",
-      "version": "1.1.0",
+      "version": "1.2.0",
       "label": "Comments: Resolve",
-      "description": "Marks a comment resolved over ctx.features.comments. Tenant-guarded.",
+      "description": "Marks a comment resolved over ctx.features.comments, stamping resolvedBy (the agent) and resolvedOnBehalfOf (the run's human). Side-effecting since ADR 0881: a real open-to-resolved transition notifies the comment's author and emits host.comments.comment.resolved, so a replay/fork is served the recorded outcome rather than resolving again.",
       "category": "integration",
-      "role": "action",
-      "capabilities": []
+      "role": "side-effect",
+      "capabilities": ["side-effectful"]
     }
   ],
   "runtime": { "language": "javascript", "format": "esm", "entry": "./index.mjs", "minRuntimeVersion": "node>=20" }

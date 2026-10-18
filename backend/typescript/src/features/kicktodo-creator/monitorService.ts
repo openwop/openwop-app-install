@@ -17,6 +17,7 @@ import { createLogger } from '../../observability/logger.js';
 import { retireChallenge } from '../kicktodo-core/challengeService.js';
 import { getCandidate, type FactoryCandidate } from './creatorService.js';
 import { getPublication } from './publishService.js';
+import { resolveApproval } from '../../host/approvalService.js';
 import { DurableCollection } from '../../host/hostExtPersistence.js';
 
 const log = createLogger('kicktodo.monitor');
@@ -102,6 +103,12 @@ export async function killSwitch(
   const candidate = await getCandidate(tenantId, candidateId);
   if (!candidate) throw new KillSwitchError('Candidate not found.');
   const publication = await getPublication(tenantId, candidateId);
+  // Code-grade (new) — a kill before the publication completed closes its pending
+  // `challenge-publish` approval, so nobody can approve a withdrawn candidate from
+  // the inbox (`completePublication` also refuses a withdrawn candidate).
+  if (publication && !publication.completedAt) {
+    await resolveApproval(publication.approvalId, { status: 'rejected', chainOutcome: 'superseded', note: 'withdrawn by the kill switch', decidedBy: actor });
+  }
   if (publication) {
     const retired = await retireChallenge(tenantId, publication.challengeId, publication.challengeVersion);
     if (!retired) throw new KillSwitchError('The published challenge could not be retired.');

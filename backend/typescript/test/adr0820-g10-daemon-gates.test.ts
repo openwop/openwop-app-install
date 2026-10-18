@@ -7,6 +7,17 @@
  *
  * The data owners each daemon calls are spied (not replaced wholesale): the
  * spy IS the observation of "did this tenant's work run".
+ *
+ * Sabotage witnesses (w35): each lane's own `mayUse`/`tenantMayUseFeature` check
+ * removed, the shared `tenantFeatureGate` answering true, the host-event gate
+ * skipped or applied to core events, and funnels gating on 'crm' instead of
+ * 'funnels' (red only since the plan became feature-specific) each red a leg.
+ *
+ * W35-CDP-CLAIM-1 (grade-code): `segmentEntryDaemon.ts` tested `if (!claim)` on the
+ * object `claimOnce` returns, so the fleet-wide fire-once claim never skipped — the
+ * only one of the ten `claimOnce` callers that did not read `.claimed`. FIXED
+ * (`if (!claim.claimed)`); the pin below is now a passing `it`, and the concurrent
+ * two-instance race is witnessed in `cdp-segment-entry-fleet-claim.test.ts`.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -70,10 +81,21 @@ import type { StartRunDeps } from '../src/host/runStarter.js';
 const FEATURES = ['cdp', 'crm', 'recommendations', 'funnels', 'webinars', 'whatsapp'];
 const storage = openSqliteStorage(':memory:');
 
-/** `lapsed*` tenants are refused by the plan for every feature; others entitled. */
+/**
+ * Each lapsed tenant's plan excludes ONLY the feature its lane must gate on, so a
+ * lane that checked the wrong (but registered) feature id would serve it and red.
+ * (w35: a plan refusing every feature made a swapped id invisible.) `lapsed-core`
+ * is refused everything: it is the "no feature owns this event" leg.
+ */
+const LAPSED_FEATURE: Record<string, string> = {
+  'lapsed-cdp': 'cdp', 'lapsed-crm': 'crm', 'lapsed-reco': 'recommendations', 'lapsed-fun': 'funnels',
+  'lapsed-web': 'webinars', 'lapsed-wa': 'whatsapp', 'lapsed-hev': 'crm',
+};
 function installPlan(): void {
   registerTenantEntitlementCheck(async (tenantId, featureId) => {
-    if (tenantId.startsWith('lapsed')) throw new OpenwopError('forbidden', `plan excludes ${featureId}`, 403, { feature: featureId });
+    if (tenantId === 'lapsed-core' || LAPSED_FEATURE[tenantId] === featureId) {
+      throw new OpenwopError('forbidden', `plan excludes ${featureId}`, 403, { feature: featureId });
+    }
   });
 }
 
@@ -101,6 +123,17 @@ describe('G10 — CDP segment-entry daemon', () => {
   it('a toggle switched off for a tenant is skipped the same way', async () => {
     await saveConfig({ id: 'cdp', status: 'on', bucketUnit: 'tenant', salt: 'cdp', tenantOverrides: { 'acme-cdp': { status: 'off' } } }, 'test');
     await sweepSegmentEntries(storage, Date.now() + 60_000 * 5);
+    expect(resolveSegmentMembers).not.toHaveBeenCalled();
+  });
+});
+
+describe('W35-CDP-CLAIM-1 — the segment-entry sweep honours the fleet-wide slot claim', () => {
+  it('a slot another instance already claimed is skipped: no membership resolve, nothing emitted', async () => {
+    const now = Date.UTC(2031, 0, 15, 10, 30, 0); // a slot no other leg uses
+    const slot = Math.floor(now / 60_000); // the daemon's one-minute slot
+    const first = await storage.claimOnce(`cdp:segment-entry:acme-cdp:seg-b:${slot}`, new Date(now).toISOString());
+    expect(first.claimed, 'the pre-claim must take the slot').toBe(true);
+    expect(await sweepSegmentEntries(storage, now)).toBe(0);
     expect(resolveSegmentMembers).not.toHaveBeenCalled();
   });
 });

@@ -83,6 +83,9 @@ export async function dispatchChannelAgentTurns(
   triggerMessageId: string,
   text: string,
   authorUserId: string | undefined,
+  /** ADR 0879 (CH2CD-1) — the poster's own personal tenant, so the run-lane post
+   *  gate admits the implicit owner of a personal workspace as the HTTP lane does. */
+  authorPersonalTenant?: string,
 ): Promise<void> {
   try {
     if (!authorUserId) return; // only a real (human) poster triggers a turn
@@ -116,6 +119,7 @@ export async function dispatchChannelAgentTurns(
           // ADR 0832 D3 — the poster bounds which orgs the turn may reach. NOT
           // the actor (see the twin-recall note above): it narrows, never grants.
           orgScopeSubject: authorUserId,
+          ...(authorPersonalTenant ? { personalTenant: authorPersonalTenant } : {}),
         });
       } catch { /* best-effort per agent */ }
     }

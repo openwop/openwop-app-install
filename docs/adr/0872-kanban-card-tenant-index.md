@@ -1,6 +1,6 @@
 # ADR 0872 — kanban card tenant index
 
-Status: Accepted
+Status: implemented
 
 Follows ADR 0866 (deploy-safe tenant-index adoption), open question 1.
 
@@ -125,7 +125,29 @@ or the CAS-repair guard reds its generic test.
 Not moved: `deleteBoard` and `purgeTenantKanban` still scan once per board.
 Teardown is rare and completeness wins (ADR 0284).
 
+### Production record
+
+| Step | When (UTC) | Evidence |
+|---|---|---|
+| Merged | 2026-10-10 | PR #4682, `472ff4697` (train tip `4001514ae`) |
+| Deployed | 2026-10-10 21:11Z | rev `00930-d8t`, both halves verified at `4001514ae` |
+| Verified | 2026-10-11 01:19:35Z | `tenant_index_verified collection=kanban:card repaired=0 skipped=0` on `00932-w92` |
+| Held | 2026-10-11 21:11Z → 2026-10-12 00:11Z | every hourly pass on `00933-ppj` (v0.4.0): `tenant_index_reconciled verified=true repaired=0 skipped=0` |
+
+`kanban_card_unstamped_orphans` and `tenant_index_unindexed_writer` never
+appeared in the three days after the deploy (log query over 3 days; the same
+query finds the `tenant_index_verified` lines above, so it can match).
+
+A side effect it predicted came true. Between the first pass and verification,
+the heartbeat's `listCards` full scan spilled a ~5.19 MB sort to disk on Cloud
+SQL about ten times every ten minutes, because D1's stamp made each row larger.
+The spills stopped at 01:21Z, two minutes after verification, when the read
+moved to the index. Measure such spills by size bucket, not exact size: the sort
+grew from 5,185,536 B to 5,193,728 B during the window.
+
 ## Open questions
 
-- [ ] Orphan cards in production: after deploy, read `kanban_card_unstamped_orphans`.
+- [x] Orphan cards in production: after deploy, read `kanban_card_unstamped_orphans`.
   If it is non-zero, kanban never verifies; decide deletion then.
+  **Closed 2026-10-12:** zero orphans logged and the index verified (see the
+  production record), so no deletion decision is needed.

@@ -5,6 +5,15 @@
  * guess from the last-success cache, "still waking" after 25 s, "resting" after
  * 40 s or on an error — and an outage is NEVER a key prompt (a user with a
  * working key must not be sent to re-enter it because the backend is asleep).
+ *
+ * Sabotage witnesses (w43): inverting `predictWarm`, moving either timeout
+ * constant, opening the detail at 25 s, dropping the URL or the error text, and
+ * dropping the effect's `setPhase('resting')` (the after-mount case below) each
+ * turn a case red. DOUBLE GUARD, recorded: at MOUNT an error is "resting" through
+ * both the `useState` initializer and the effect, so removing either alone keeps
+ * the mount case green; the after-mount case is what pins the effect's copy.
+ * The "never a key prompt" negatives have no product path that could produce a
+ * prompt today — they are a regression guard (honest ceiling), not a probe target.
  */
 import { render, screen, act, cleanup } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -47,5 +56,16 @@ describe('BackendStatusCard (ADR 0517 state machine)', () => {
     const text = document.body.textContent ?? '';
     expect(text).not.toMatch(/apiKey|byokWizard|enterKey|addKey/i);
     expect(screen.queryByRole('textbox')).toBeNull();
+  });
+
+  it('an error that arrives AFTER mount flips to "resting" at once (no timer needed)', () => {
+    // Production shape: ChatTab re-renders the SAME card once the BYOK read
+    // fails, so the transition rides the effect, not the initial state.
+    const { rerender } = render(<BackendStatusCard />);
+    act(() => { vi.advanceTimersByTime(1_000); });
+    expect(screen.getByRole('heading').textContent).toContain('backendWaking');
+    rerender(<BackendStatusCard error="ECONNREFUSED" />);
+    expect(screen.getByRole('heading').textContent).toContain('backendResting');
+    expect(screen.getByText('ECONNREFUSED')).toBeTruthy();
   });
 });

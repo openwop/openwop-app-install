@@ -57,17 +57,33 @@ export async function linkWearableProvider(
     throw new ConsentRequiredError('wearable-evidence');
   }
   const key = `${tenantId}::${provider}::${providerUserId}`;
-  const existing = await links.get(key);
-  if (existing) {
-    if (existing.ownerSubject !== ownerSubject) {
-      log.warn('kicktodo_wearable_link_conflict', { provider, existing: existing.ownerSubject, attempted: ownerSubject });
+  // KTINT-2 — first-write-wins is an ATOMIC insert, not get-then-put. Under the
+  // old read → put two subjects claiming one provider account concurrently both
+  // read "absent", both put, and the later put took the binding — re-pointing the
+  // provider account's data at whoever wrote second. Bounded: a loss whose winner
+  // vanished (unlinked in between) tries the insert again.
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const existing = await links.get(key);
+    if (existing) {
+      if (existing.ownerSubject !== ownerSubject) {
+        log.warn('kicktodo_wearable_link_conflict', { provider, existing: existing.ownerSubject, attempted: ownerSubject });
+      }
+      return existing;
     }
-    return existing;
+    const link: WearableLink = { tenantId, provider, providerUserId, ownerSubject, linkedAt: nowIso() };
+    if (await links.putIfAbsent(link)) {
+      log.info('kicktodo_wearable_linked', { provider });
+      return link;
+    }
   }
-  const link: WearableLink = { tenantId, provider, providerUserId, ownerSubject, linkedAt: nowIso() };
-  await links.put(link);
-  log.info('kicktodo_wearable_linked', { provider });
-  return link;
+  throw new WearableLinkConflictError();
+}
+
+/** KTINT-2 — the binding kept appearing and vanishing for every attempt. */
+export class WearableLinkConflictError extends Error {
+  constructor() {
+    super('This device link kept changing while it was being saved. Try again.');
+  }
 }
 
 /** The subject a provider account is bound to, or null. The Phase-2 webhook's

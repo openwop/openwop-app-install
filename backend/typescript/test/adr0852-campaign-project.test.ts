@@ -12,6 +12,13 @@
  *     archives the project, clears the facet, and lifts the lock;
  *   - a campaign agent run is stamped with the project's ledger version; a
  *     caller-supplied `campaignOrchestration` is stripped by `POST /runs`'s rule.
+ *
+ * Sabotage-witnessed (/grade-tests w30): an unconditional `putIfAbsent` win, the
+ * race loser NOT deleting its project (orphan), a thrown link failure, the stale
+ * link never removed, the private-visibility lock, the facet clear / archive on
+ * delete, the campaignChannel run binding, the campaign keys in
+ * `stripCallerAttribution` (only witness for those two keys), GET dropping
+ * `projectId`, and finalize not linking each turn a case red.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -47,12 +54,15 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
+/** The route bodies this suite reads (each field it touches is asserted). */
+interface Body { user: { userId: string }; orgId: string; campaign: { projectId?: string }; projectId: string }
 function client() {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown) => {
+  const call = async (method: string, path: string, body?: unknown): Promise<{ status: number; body: Body }> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]!; }
-    return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) as any };
+    const parsed = (res.status === 204 ? undefined : await res.json().catch(() => undefined)) as Body; // JSON boundary
+    return { status: res.status, body: parsed };
   };
   return { get: (p: string) => call('GET', p), post: (p: string, b?: unknown) => call('POST', p, b), patch: (p: string, b?: unknown) => call('PATCH', p, b), del: (p: string) => call('DELETE', p) };
 }
@@ -123,7 +133,10 @@ describe('ADR 0852 P1 — a campaign has one linked project', () => {
     const p = (await getProject(s.tenantId, projectId))!;
     expect(p.facet).toBeUndefined();
     expect(p.charter?.status).toBe('archived');
-    expect((await s.owner.patch(`/host/openwop-app/projects/${projectId}/visibility`, { visibility: 'private' })).status).toBeLessThan(300);
+    // The lock lifted: the same PATCH now lands, and the project IS private.
+    const lifted = await s.owner.patch(`/host/openwop-app/projects/${projectId}/visibility`, { visibility: 'private' });
+    expect(lifted.status).toBe(200);
+    expect((await getProject(s.tenantId, projectId))!.visibility).toBe('private');
   });
 });
 

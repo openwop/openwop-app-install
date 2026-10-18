@@ -118,7 +118,8 @@ describe('commerce markAsPaid — paymentIntent verification', () => {
     const orderId = await pendingOrder(49.99);
     respond = ({ path }) => {
       expect(path).toContain('/v1/payment_intents/pi_ok');
-      return { status: 200, body: { id: 'pi_ok', status: 'succeeded', amount: 4999, currency: 'usd' } };
+      // ADR 0875 D3 — a real intent this host created carries its order's metadata.
+      return { status: 200, body: { id: 'pi_ok', status: 'succeeded', amount: 4999, currency: 'usd', metadata: { orderId, tenantId: T, orgId: ORG } } };
     };
     const o = await markAsPaid(T, ORG, orderId, 'pi_ok', { stripeKey: 'sk_test_key' });
     expect(o?.status).toBe('paid');
@@ -126,20 +127,20 @@ describe('commerce markAsPaid — paymentIntent verification', () => {
 
   it('a non-succeeded intent 409s and the order stays pending', async () => {
     const orderId = await pendingOrder(10);
-    respond = () => ({ status: 200, body: { id: 'pi_x', status: 'requires_payment_method', amount: 1000, currency: 'usd' } });
-    await expect(markAsPaid(T, ORG, orderId, 'pi_x', { stripeKey: 'sk_test_key' })).rejects.toMatchObject({ code: 'validation_error' });
+    respond = () => ({ status: 200, body: { id: 'pi_x', status: 'requires_payment_method', amount: 1000, currency: 'usd', metadata: { orderId, tenantId: T, orgId: ORG } } });
+    await expect(markAsPaid(T, ORG, orderId, 'pi_x', { stripeKey: 'sk_test_key' })).rejects.toThrow(/requires_payment_method/);
   });
 
   it('an amount mismatch 409s (minor-units exact)', async () => {
     const orderId = await pendingOrder(10);
-    respond = () => ({ status: 200, body: { id: 'pi_y', status: 'succeeded', amount: 999, currency: 'usd' } });
-    await expect(markAsPaid(T, ORG, orderId, 'pi_y', { stripeKey: 'sk_test_key' })).rejects.toMatchObject({ code: 'validation_error' });
+    respond = () => ({ status: 200, body: { id: 'pi_y', status: 'succeeded', amount: 999, currency: 'usd', metadata: { orderId, tenantId: T, orgId: ORG } } });
+    await expect(markAsPaid(T, ORG, orderId, 'pi_y', { stripeKey: 'sk_test_key' })).rejects.toThrow(/amount/i);
   });
 
   it('a currency mismatch always hard-fails', async () => {
     const orderId = await pendingOrder(10, 'usd');
-    respond = () => ({ status: 200, body: { id: 'pi_z', status: 'succeeded', amount: 1000, currency: 'eur' } });
-    await expect(markAsPaid(T, ORG, orderId, 'pi_z', { stripeKey: 'sk_test_key' })).rejects.toMatchObject({ code: 'validation_error' });
+    respond = () => ({ status: 200, body: { id: 'pi_z', status: 'succeeded', amount: 1000, currency: 'eur', metadata: { orderId, tenantId: T, orgId: ORG } } });
+    await expect(markAsPaid(T, ORG, orderId, 'pi_z', { stripeKey: 'sk_test_key' })).rejects.toThrow(/currency/i);
   });
 
   it('keyless mode keeps the honest demo posture (recorded, unverified)', async () => {
@@ -157,7 +158,8 @@ describe('minor-units conversion', () => {
   });
 
   it('getStripePaymentIntent projects status/amount/currency', async () => {
-    respond = () => ({ status: 200, body: { id: 'pi_p', status: 'succeeded', amount: 123, currency: 'usd' } });
-    expect(await getStripePaymentIntent('sk_test_key', 'pi_p')).toEqual({ status: 'succeeded', amount: 123, currency: 'usd' });
+    respond = () => ({ status: 200, body: { id: 'pi_p', status: 'succeeded', amount: 123, currency: 'usd', metadata: { orderId: 'ord:1', n: 7 } } });
+    // ADR 0875 D3 — metadata rides through (string values only; it binds the intent to its order).
+    expect(await getStripePaymentIntent('sk_test_key', 'pi_p')).toEqual({ status: 'succeeded', amount: 123, currency: 'usd', metadata: { orderId: 'ord:1' } });
   });
 });

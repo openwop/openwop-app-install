@@ -8,6 +8,14 @@
  *     proposed delta removing it, the answer as the reason; nothing accepted;
  *   - a clarification about anything else ⇒ nothing; a run on no project ⇒ nothing;
  *   - announcing the same resolution again adds nothing (idempotent).
+ *
+ * Sabotage-witnessed (/grade-tests w29): the Approved/Rejected title, the
+ * suggestion (kind, ref) idempotency, the case-insensitive question match, the
+ * clarification dedupe, the "Answered:" reason and the held-question guard in
+ * `resolutionSource.ts` each red their case. Honest ceiling: the "run on no
+ * project" leg (same tenant, no board ⇒ no stamp) cannot fail — an unstamped run
+ * names no project to write to (probe w29g3-rs-loose-stamp-VAC); it stays as a
+ * cheap no-crash check, not as a witness.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -41,23 +49,26 @@ beforeAll(async () => {
   storage = app.locals.storage as Storage;
   hostSuite = app.locals.hostSuite as HostAdapterSuite;
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
-  const wf = (id: string, gate: Record<string, unknown>) => registerHostWorkflow({
-    workflowId: id, name: id, version: '1.0.0',
+  const wf = (id: string, gate: WorkflowDefinition['nodes'][number]) => registerHostWorkflow({
+    workflowId: id,
     nodes: [gate, { nodeId: 'after', typeId: 'core.noop', config: {} }],
     edges: [{ edgeId: 'e1', sourceNodeId: 'gate', targetNodeId: 'after' }],
-  } as unknown as WorkflowDefinition);
+  });
   wf('wf.d5.approval', { nodeId: 'gate', typeId: 'core.approvalGate', config: { prompt: 'Ship the EU page?', rejectionPolicy: 'single-veto' } });
   wf('wf.d5.clarify-held', { nodeId: 'gate', typeId: 'core.clarificationGate', config: { question: 'Which launch date?' } });
   wf('wf.d5.clarify-other', { nodeId: 'gate', typeId: 'core.clarificationGate', config: { question: 'What colour is the button?' } });
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
+/** The fields these legs read off a response. */
+interface ResBody { user?: { userId: string }; orgId?: string; id?: string; boardId?: string }
 function client() {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown) => {
+  const call = async (method: string, path: string, body?: unknown): Promise<{ status: number; body: ResBody }> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]!; }
-    return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) as any };
+    const parsed = res.status === 204 ? undefined : ((await res.json().catch(() => undefined)) as ResBody | undefined);
+    return { status: res.status, body: parsed ?? {} };
   };
   return { get: (p: string) => call('GET', p), post: (p: string, b?: unknown) => call('POST', p, b) };
 }
@@ -65,9 +76,10 @@ function client() {
 async function setup() {
   const tenantId = `org:d5-${Date.now()}-${n++}`;
   const owner = client();
-  const ownerId = (await owner.post('/host/openwop-app/test/login', { email: `d5-${n++}@acme.test`, tenantId })).body.user.userId as string;
-  const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'ResCo' })).body.orgId as string;
-  const proj = (await owner.post('/host/openwop-app/projects', { orgId, name: 'Launch' })).body as { id: string; boardId: string };
+  const ownerId = (await owner.post('/host/openwop-app/test/login', { email: `d5-${n++}@acme.test`, tenantId })).body.user!.userId;
+  const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'ResCo' })).body.orgId!;
+  const created = (await owner.post('/host/openwop-app/projects', { orgId, name: 'Launch' })).body;
+  const proj = { id: created.id!, boardId: created.boardId! };
   const L = `/host/openwop-app/team-ledger/projects/${proj.id}`;
   expect((await owner.post(L)).status).toBe(201);
   expect((await owner.post(`${L}/write`, { patch: { openQuestions: ['which launch DATE?', 'Who owns pricing?'] }, why: 'kickoff', baseVersion: 1 })).status).toBeLessThan(300);
@@ -75,11 +87,11 @@ async function setup() {
 }
 
 /** A run on the project's board (so it is stamped), suspended at its gate. */
-async function suspendedOnProject(s: { tenantId: string; ownerId: string; boardId: string } | null, workflowId: string) {
+async function suspendedOnProject(s: { tenantId: string; ownerId: string; boardId: string }, workflowId: string, onProject = true) {
   const now = new Date().toISOString();
   const run: RunRecord = {
-    runId: `run-d5-${n++}`, workflowId, tenantId: s?.tenantId ?? 'demo', status: 'pending', inputs: {},
-    metadata: s ? { kanban: { boardId: s.boardId, cardId: 'c1' }, actingUserId: s.ownerId } : {},
+    runId: `run-d5-${n++}`, workflowId, tenantId: s.tenantId, status: 'pending', inputs: {},
+    metadata: onProject ? { kanban: { boardId: s.boardId, cardId: 'c1' }, actingUserId: s.ownerId } : { actingUserId: s.ownerId },
     configurable: {}, createdAt: now, updatedAt: now,
   };
   await insertRunWithStartContext(storage, run);
@@ -105,6 +117,17 @@ describe('ADR 0853 D5 — resolutions as ledger sources', () => {
     expect(await listSuggestions(s.tenantId, s.projectId)).toHaveLength(1);
   });
 
+  it('a rejected approval ⇒ one "Rejected:" suggestion; the ledger does not move', async () => {
+    const s = await setup();
+    const { runId, interrupt } = await suspendedOnProject(s, 'wf.d5.approval');
+    await resolveAndResume(storage, hostSuite, interrupt.interruptId, { action: 'reject' }, { subjectRef: `user:${s.ownerId}` });
+    await __awaitRunResumeChainForTests(runId);
+    const sug = await listSuggestions(s.tenantId, s.projectId);
+    expect(sug).toHaveLength(1);
+    expect(sug[0]).toMatchObject({ title: 'Rejected: Ship the EU page?', source: { kind: 'approval', ref: interrupt.interruptId, link: `/runs/${runId}` }, suggestedBy: { kind: 'host', id: 'approval' }, status: 'open' });
+    expect((await getLedger(s.tenantId, s.projectId))!.version).toBe(2);
+  });
+
   it('an answered clarification that matches an open question ⇒ one proposal closing it', async () => {
     const s = await setup();
     const { runId, interrupt } = await suspendedOnProject(s, 'wf.d5.clarify-held');
@@ -124,8 +147,10 @@ describe('ADR 0853 D5 — resolutions as ledger sources', () => {
     const other = await suspendedOnProject(s, 'wf.d5.clarify-other');
     await resolveAndResume(storage, hostSuite, other.interrupt.interruptId, 'Blue', { subjectRef: `user:${s.ownerId}` });
     await __awaitRunResumeChainForTests(other.runId);
-    const loose = await suspendedOnProject(null, 'wf.d5.approval');
-    await resolveAndResume(storage, hostSuite, loose.interrupt.interruptId, { action: 'approve' }, { capabilityToken: true });
+    // Same tenant, no board: the run is not stamped (a ceiling — see the header).
+    const loose = await suspendedOnProject(s, 'wf.d5.approval', false);
+    expect((await storage.getRun(loose.runId))!.metadata?.teamLedger).toBeUndefined();
+    await resolveAndResume(storage, hostSuite, loose.interrupt.interruptId, { action: 'approve' }, { subjectRef: `user:${s.ownerId}` });
     await __awaitRunResumeChainForTests(loose.runId);
     const ledger = (await getLedger(s.tenantId, s.projectId))!;
     expect((await listDeltas(s.tenantId, ledger.ledgerId)).filter((d) => d.source?.kind === 'run')).toHaveLength(0);

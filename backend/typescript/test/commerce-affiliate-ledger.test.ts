@@ -39,9 +39,11 @@ describe('accrual (per-order rows)', () => {
   });
 
   it('fixed commissions convert minor-first (no float drift)', async () => {
-    await createAffiliate({ tenantId: T, orgId: ORG, code: 'FLAT', commissionType: 'fixed', commissionRate: 7.5, currency: 'USD' });
+    // 0.29 * 100 === 28.999999999999996 in IEEE-754: a truncating conversion books 28¢.
+    // (The old 7.5 fixture was exact under ANY conversion, so this claim could not fail.)
+    await createAffiliate({ tenantId: T, orgId: ORG, code: 'FLAT', commissionType: 'fixed', commissionRate: 0.29, currency: 'USD' });
     await accrueCommission({ tenantId: T, orgId: ORG, orderId: 'ord-f1', createdAt: at(), total: 10, currency: 'USD', affiliateCode: 'FLAT' });
-    expect((await listAffiliates(T, ORG))[0]?.balanceOwed).toBe(7.5);
+    expect((await listAffiliates(T, ORG))[0]?.balanceOwed).toBe(0.29);
   });
 });
 
@@ -72,8 +74,11 @@ describe('payout (payee-scoped ledger run)', () => {
     expect(payout.amount).toBe(30); // 40 − 10 clawback
     expect(payout.status).toBe('pending'); // advisory — disbursement is operator last-mile
     expect((await listAffiliates(T, ORG))[0]?.balanceOwed).toBe(0);
-    expect(await listPayouts(T, ORG)).toHaveLength(1);
-    await expect(recordPayout(T, ORG, aff.affiliateId)).rejects.toThrow(/No balance owed/);
+    const persisted = await listPayouts(T, ORG);
+    expect(persisted).toHaveLength(1);
+    expect(persisted[0]).toMatchObject({ amount: 30, currency: 'USD', status: 'pending' }); // the persisted row, not the response
+    await expect(recordPayout(T, ORG, aff.affiliateId)).rejects.toMatchObject({ httpStatus: 409, message: 'No balance owed.' });
+    expect(await listPayouts(T, ORG)).toHaveLength(1); // the refusal wrote no second row
   });
 });
 
@@ -108,6 +113,7 @@ describe('opening-balance backfill (ADR 0447 D3)', () => {
     // The opening balance pays out like any other accrual.
     const payout = await recordPayout(T, ORG, aff.affiliateId);
     expect(payout.amount).toBe(12.34);
+    expect((await listPayouts(T, ORG))[0]?.amount).toBe(12.34);
     expect((await listAffiliates(T, ORG))[0]?.balanceOwed).toBe(0);
     // A re-run after payout must NOT resurrect the frozen balance: the opening
     // row exists (paid), so first-write-wins refuses a duplicate.

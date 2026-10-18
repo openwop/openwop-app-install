@@ -6,6 +6,12 @@
  * in `MANIFEST_SIDE_EFFECT_FLOOR` or `MANIFEST_FAST_PATH_SERVED` and a replay re-executed every
  * writer. The pack's own docblocks asserted the opposite in six places — including pack-wide at
  * `index.mjs:10-12` — which is what a reader checks instead of the manifest.
+ *
+ * Sabotage witnesses (w20g5-*): a writer dropped from the generated floor / served set ⇒ leg 1; a
+ * notebooks-prefix classifier ⇒ leg 2; a writer's manifest capability removed ⇒ leg 3; a read's
+ * `capabilities` key removed ⇒ leg 4; `runId` folded into the mint key ⇒ leg 6; `ownerSubject`
+ * dropped from createDocument ⇒ leg 7. Leg 5 pins version strings and has no defect probe (kept:
+ * protected file, no covering case).
  */
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
@@ -45,7 +51,9 @@ describe('ADR 0678 D1 — notebooks writer classification', () => {
 
   it('leg 3: the manifest declares the capability on exactly the five', () => {
     const byId = new Map(PACK.nodes.map((n) => [n.typeId, n]));
-    expect(PACK.nodes.length).toBe(14);
+    // Every node in the pack is one of the three NAMED groups — a new node must be classified by
+    // decision here, and the failure names it rather than reporting a count.
+    expect([...byId.keys()].sort()).toEqual([...WRITERS, ...READS, ...HELD_BACK].sort());
     for (const id of WRITERS) expect(byId.get(id)?.capabilities ?? [], id).toContain('side-effectful');
     for (const id of [...READS, ...HELD_BACK]) expect(byId.get(id)?.capabilities ?? [], id).not.toContain('side-effectful');
   });
@@ -69,9 +77,12 @@ describe('ADR 0678 D1 — notebooks writer classification', () => {
     const mod = await import(join(REPO, 'packs', 'feature.notebooks.nodes', 'index.mjs'));
     const nodes = (mod.nodes ?? mod.default) as Record<string, (ctx: unknown) => Promise<{ status: string; outputs?: Record<string, unknown> }>>;
     const minted: string[] = [];
+    let fresh = 0;
     const docs = {
       createDocument: async (a: { documentId?: string; ownerSubject?: unknown }) => {
-        const id = a.documentId ?? `doc:${Math.random()}`;
+        // No caller id ⇒ a FRESH id per call (what the real store does), so a node that stopped
+        // passing a content-derived id would mint twice and turn this leg red.
+        const id = a.documentId ?? `doc:fresh-${fresh++}`;
         if (!minted.includes(id)) minted.push(id);
         return { document: { documentId: id, ownerSubject: a.ownerSubject } };
       },

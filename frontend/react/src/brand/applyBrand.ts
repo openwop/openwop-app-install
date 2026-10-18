@@ -137,19 +137,24 @@ export function applyBrandIdentity(identity: PublicBrandIdentity): void {
     }
     if (identity.colors.themeColor) setMeta('theme-color', identity.colors.themeColor);
   }
-  if (identity.typography) {
-    const t = identity.typography;
-    if (t.serif) root.style.setProperty('--serif', t.serif);
-    if (t.sans) root.style.setProperty('--sans', t.sans);
-    if (t.mono) root.style.setProperty('--mono', t.mono);
-    if (t.fontsHref) {
-      setLink('link[data-brand-fonts]', () => {
-        const l = document.createElement('link');
-        l.rel = 'stylesheet';
-        l.setAttribute('data-brand-fonts', '');
-        return l;
-      }, t.fontsHref);
-    }
+  // Every caller passes a WHOLE identity (cached, fetched or just saved), so an
+  // absent font value means "no override": clear what an earlier apply set, or a
+  // removed override keeps rendering from the inline style until a reload (ADR
+  // 0883 correction — the frozen Instrument Serif override).
+  const t = identity.typography ?? {};
+  for (const [key, prop] of [['serif', '--serif'], ['sans', '--sans'], ['mono', '--mono']] as const) {
+    if (t[key]) root.style.setProperty(prop, t[key]);
+    else root.style.removeProperty(prop);
+  }
+  if (t.fontsHref) {
+    setLink('link[data-brand-fonts]', () => {
+      const l = document.createElement('link');
+      l.rel = 'stylesheet';
+      l.setAttribute('data-brand-fonts', '');
+      return l;
+    }, t.fontsHref);
+  } else {
+    document.querySelector('link[data-brand-fonts]')?.remove();
   }
   const title = identity.documentTitle || identity.productName;
   if (title) document.title = title;

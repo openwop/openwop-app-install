@@ -244,7 +244,7 @@ describe('D7 / PROF-5 + PROF-12 — viewer-projected endorsements and the ids-on
   });
 });
 
-describe('PROF-11(d) — a switched `ws:` workspace still serves the HOME tenant\'s profile rows (ADR 0042, by design)', () => {
+describe('PROF-11(d) — a switched `ws:` workspace still serves the HOME tenant\'s profile row on the /me lane (ADR 0042, by design)', () => {
   it('/profiles/me and the directory from inside a ws: workspace read the home-tenant rows written before the switch', async () => {
     const c = client();
     const userId = await signup(c); // home = personal tenant
@@ -261,11 +261,18 @@ describe('PROF-11(d) — a switched `ws:` workspace still serves the HOME tenant
     expect(me.body.userId).toBe(userId);
     expect(me.body.jobTitle).toBe('HomeTitle'); // the HOME row, not a fresh ws:-keyed one
     expect(me.body.tenantId).not.toMatch(/^ws:/);
-    const dir = await c.get<DirectoryBody>(P);
+    // CORRECTED (ADR 0888 D1): this used to assert that the DIRECTORY inside a
+    // `ws:` workspace served the HOME tenant's rows — which pinned the defect
+    // (`PR2WF-2`: a workspace's directory never showed its own members). In a
+    // shared workspace the directory now lists the people who SHARED their
+    // profile with it; the caller's own home row reaches it only once they share.
+    const dir = await c.get<DirectoryBody & { scope: string }>(P);
     expect(dir.status).toBe(200);
-    const mine = dir.body.profiles.find((p) => p.userId === userId);
-    expect(mine?.jobTitle).toBe('HomeTitle');
-    expect(dir.body.profiles.every((p) => !p.tenantId.startsWith('ws:'))).toBe(true);
+    expect(dir.body.scope).toBe('workspace');
+    expect(dir.body.profiles.find((p) => p.userId === userId)).toBeUndefined();
+    expect((await c.put(`${P}/me/workspace-share`)).status).toBe(200);
+    const shared = await c.get<DirectoryBody>(P);
+    expect(shared.body.profiles.find((p) => p.userId === userId)?.jobTitle).toBe('HomeTitle');
     // A write from inside the workspace lands on the SAME home row.
     const patched = await c.patch<OwnProfileView>(`${P}/me`, { department: 'FromWs' });
     expect(patched.status).toBe(200);

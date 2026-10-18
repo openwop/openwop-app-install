@@ -24,6 +24,17 @@
  *     the lane the correction created. Fixing only (1) leaves this one open: the
  *     guard is at the CALLER here, not inside `deleteNotebook`.
  *
+ * The ordinary delete's conversation cascade (count 1, session + meta gone) is
+ * witnessed in `notebooks-delete-cascade-reachability.test.ts` CONTROL, and a
+ * PLAIN project's delete by the parity case's "nothing bound" lane below.
+ *
+ * Sabotage witnesses (grade-tests wave 20): restoring the `facet !== 'notebook'`
+ * guard in `deleteNotebook` reds the ensure-provisioned cases + parity; a
+ * `facet`-based discriminator at the projects door reds the /projects ensure case
+ * + parity; a `facet`-based `deletesCorpus` advertisement reds parity; a
+ * binding-position-0 eraser reds the SHARED control + parity; never deleting the
+ * corpus reds every corpus case; a plain delete that claims a corpus reds parity.
+ *
  * @see docs/adr/0601-notebooks-trust-boundary-and-mcp-authz.md
  */
 
@@ -34,6 +45,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
+import type { ProjectKnowledgeView } from '../src/features/projects/projectKnowledgeService.js';
 
 let BASE: string;
 let server: http.Server;
@@ -53,21 +65,37 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T }
-interface Client { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res>; del: (p: string) => Promise<Res> }
+interface Res<T> { status: number; body: T }
+interface OrgBody { orgId: string }
+interface IdBody { id: string }
+interface CreatedBody { notebook: { id: string }; collectionId: string }
+interface EnsureBody { collectionId: string }
+interface ChatBody { conversationId: string }
+interface CollectionBody { collectionId: string }
+interface DeleteBody { deleted: boolean; collectionDeleted?: boolean; notebookCorpusDeleted?: boolean; conversationsDeleted: number }
+interface ProjectView { deletesCorpus: boolean }
+interface Client {
+  get: <T = unknown>(p: string) => Promise<Res<T>>;
+  post: <T = unknown>(p: string, b?: unknown) => Promise<Res<T>>;
+  del: <T = unknown>(p: string) => Promise<Res<T>>;
+}
 function client(): Client {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
+  const call = async <T>(method: string, path: string, body?: unknown): Promise<Res<T>> => {
     const res = await fetch(`${BASE}${path}`, {
       method,
       headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) },
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     });
-    for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
-    return { status: res.status, body: out };
+    for (const ck of getSetCookies(res.headers)) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
+    const decoded: unknown = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    return { status: res.status, body: decoded as T };
   };
-  return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), del: (p) => call('DELETE', p) };
+  return {
+    get: <T = unknown>(p: string) => call<T>('GET', p),
+    post: <T = unknown>(p: string, b?: unknown) => call<T>('POST', p, b),
+    del: <T = unknown>(p: string) => call<T>('DELETE', p),
+  };
 }
 
 const NB = '/host/openwop-app/notebooks';
@@ -77,7 +105,7 @@ async function ownerWithOrg(who: string): Promise<{ c: Client; orgId: string }> 
   const c = client();
   const r = await c.post('/host/openwop-app/test/login', { email: `${who}-${Date.now()}-${n++}@acme.test` });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  const org = await c.post('/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await c.post<OrgBody>('/host/openwop-app/orgs', { name: 'Acme' });
   return { c, orgId: org.body.orgId };
 }
 
@@ -86,26 +114,26 @@ async function ownerWithOrg(who: string): Promise<{ c: Client; orgId: string }> 
  *  conversation, so a delete has something to destroy. */
 async function ensureProvisionedNotebook(who: string): Promise<{ c: Client; orgId: string; id: string; collectionId: string; conversationId: string }> {
   const { c, orgId } = await ownerWithOrg(who);
-  const plain = await c.post(PROJ, { orgId, name: 'Regular project' });
+  const plain = await c.post<IdBody>(PROJ, { orgId, name: 'Regular project' });
   expect(plain.status, JSON.stringify(plain.body)).toBe(201);
-  const id = plain.body.id as string;
-  const ens = await c.post(`${NB}/${id}/ensure`);
+  const id = plain.body.id;
+  const ens = await c.post<EnsureBody>(`${NB}/${id}/ensure`);
   expect(ens.status, JSON.stringify(ens.body)).toBe(200);
-  const collectionId = ens.body.collectionId as string;
+  const collectionId = ens.body.collectionId;
   const src = await c.post(`${NB}/${id}/sources`, { title: 'Paper', text: 'Mitochondria are the powerhouse of the cell.' });
   expect(src.status).toBe(201);
-  const chat = await c.post(`${NB}/${id}/chat`);
+  const chat = await c.post<ChatBody>(`${NB}/${id}/chat`);
   expect([200, 201], JSON.stringify(chat.body)).toContain(chat.status);
   // It reads as a notebook — which is precisely why the delete doors must agree.
   expect((await c.get(`${NB}/${id}`)).status).toBe(200);
-  return { c, orgId, id, collectionId, conversationId: chat.body.conversationId as string };
+  return { c, orgId, id, collectionId, conversationId: chat.body.conversationId };
 }
 
 describe('ADR 0601 / NBC-1 — DELETE /notebooks/:id validates BEFORE it destroys', () => {
   it('an /ensure-provisioned project deletes for real — no 200 that claims deleted:false', async () => {
     const { c, orgId, id, collectionId } = await ensureProvisionedNotebook('nb-del-ensure');
 
-    const del = await c.del(`${NB}/${id}`);
+    const del = await c.del<DeleteBody>(`${NB}/${id}`);
     expect(del.status, JSON.stringify(del.body)).toBe(200);
     // THE defect: this used to be `false` while the conversation was already gone.
     expect(del.body.deleted, JSON.stringify(del.body)).toBe(true);
@@ -117,37 +145,15 @@ describe('ADR 0601 / NBC-1 — DELETE /notebooks/:id validates BEFORE it destroy
     expect((await c.get(`/host/openwop-app/kb/orgs/${orgId}/collections/${collectionId}`)).status).toBe(404);
   });
 
-  it('THE ORDERING INVARIANT — a response that says deleted:false destroyed NOTHING', async () => {
-    const { c, id } = await ensureProvisionedNotebook('nb-del-order');
-    // First delete succeeds and takes the conversation with it.
-    const first = await c.del(`${NB}/${id}`);
-    expect(first.body.deleted).toBe(true);
-    expect(first.body.conversationsDeleted).toBe(1);
-
-    // A RETRY 404s at `requireNotebook`, so the ordinary door produces no second
-    // `deleted:false` body at all.
-    const retry = await c.del(`${NB}/${id}`);
-    expect(retry.status).toBe(404);
-    // CORRECTED (ADR 0601 § Corrections / MEDIUM-6): a dead `if (retry.status ===
-    // 200)` block used to sit here asserting `deleted:false ⇒
-    // conversationsDeleted:0`. It was unreachable (the line above pins 404), and
-    // the invariant it encoded is the WRONG one — enforcing it is exactly what
-    // made the cascade unreachable in the concurrent-delete race. The invariant
-    // that actually matters is "the body reports what happened", and it is
-    // witnessed against a REAL `deleted:false` in
-    // `notebooks-delete-cascade-reachability.test.ts`, not against a branch this
-    // file cannot reach.
-  });
-
   it('a notebook created through POST /notebooks (facet:notebook) still deletes — no regression', async () => {
     const { c, orgId } = await ownerWithOrg('nb-del-classic');
-    const created = await c.post(NB, { orgId, name: 'Classic notebook' });
+    const created = await c.post<CreatedBody>(NB, { orgId, name: 'Classic notebook' });
     expect(created.status).toBe(201);
-    const id = created.body.notebook.id as string;
-    const collectionId = created.body.collectionId as string;
+    const id = created.body.notebook.id;
+    const collectionId = created.body.collectionId;
     await c.post(`${NB}/${id}/sources`, { title: 'S', text: 'Some source text for the classic lane.' });
 
-    const del = await c.del(`${NB}/${id}`);
+    const del = await c.del<DeleteBody>(`${NB}/${id}`);
     expect(del.status).toBe(200);
     expect(del.body.deleted).toBe(true);
     expect(del.body.collectionDeleted).toBe(true);
@@ -159,7 +165,7 @@ describe('ADR 0601 / NBC-1 — the SIBLING door: DELETE /projects/:id', () => {
   it('deleting an /ensure-provisioned project through /projects also drops its corpus', async () => {
     const { c, orgId, id, collectionId } = await ensureProvisionedNotebook('nb-del-proj');
 
-    const del = await c.del(`${PROJ}/${id}`);
+    const del = await c.del<DeleteBody>(`${PROJ}/${id}`);
     expect(del.status, JSON.stringify(del.body)).toBe(200);
     expect(del.body.deleted).toBe(true);
     // The guard here was at the CALLER (`if (project?.facet === 'notebook')`), so
@@ -167,18 +173,6 @@ describe('ADR 0601 / NBC-1 — the SIBLING door: DELETE /projects/:id', () => {
     // fixing the discriminator too, the collection survives with no owner.
     expect(del.body.notebookCorpusDeleted, JSON.stringify(del.body)).toBe(true);
     expect((await c.get(`/host/openwop-app/kb/orgs/${orgId}/collections/${collectionId}`)).status).toBe(404);
-  });
-
-  it('CONTROL — a plain project with NO bound collection still deletes cleanly', async () => {
-    const { c, orgId } = await ownerWithOrg('nb-del-plain');
-    const plain = await c.post(PROJ, { orgId, name: 'No sources here' });
-    const id = plain.body.id as string;
-
-    const del = await c.del(`${PROJ}/${id}`);
-    expect(del.status, JSON.stringify(del.body)).toBe(200);
-    expect(del.body.deleted).toBe(true);
-    expect(del.body.notebookCorpusDeleted).toBe(false);
-    expect((await c.get(`${PROJ}/${id}`)).status).toBe(404);
   });
 
   it('CONTROL — a SHARED collection NAMED LIKE A PROVISIONED ONE is not destroyed, and the other project keeps it', async () => {
@@ -195,22 +189,22 @@ describe('ADR 0601 / NBC-1 — the SIBLING door: DELETE /projects/:id', () => {
     // that MINT a corpus — and this collection was minted by the KB surface, so
     // it is not stamped on anyone and cannot be erased by anyone's delete.
     const { c, orgId } = await ownerWithOrg('nb-del-shared');
-    const shared = await c.post(`/host/openwop-app/kb/orgs/${orgId}/collections`, { name: 'Sources: Q3 research', description: 'Shared corpus' });
+    const shared = await c.post<CollectionBody>(`/host/openwop-app/kb/orgs/${orgId}/collections`, { name: 'Sources: Q3 research', description: 'Shared corpus' });
     expect(shared.status, JSON.stringify(shared.body)).toBe(201);
-    const sharedId = (shared.body.collectionId ?? shared.body.id) as string;
+    const sharedId = shared.body.collectionId;
 
     // TWO projects bound to it — "shared" has to be real, or "it survived" is
     // just "nothing else wanted it".
-    const a = await c.post(PROJ, { orgId, name: 'Project A' });
-    const b = await c.post(PROJ, { orgId, name: 'Project B' });
-    const idA = a.body.id as string;
-    const idB = b.body.id as string;
+    const a = await c.post<IdBody>(PROJ, { orgId, name: 'Project A' });
+    const b = await c.post<IdBody>(PROJ, { orgId, name: 'Project B' });
+    const idA = a.body.id;
+    const idB = b.body.id;
     for (const id of [idA, idB]) {
       const bound = await c.post(`${PROJ}/${id}/knowledge/bindings`, { collectionId: sharedId });
       expect([200, 201], JSON.stringify(bound.body)).toContain(bound.status);
     }
 
-    const del = await c.del(`${PROJ}/${idA}`);
+    const del = await c.del<DeleteBody>(`${PROJ}/${idA}`);
     expect(del.status).toBe(200);
     expect(del.body.deleted).toBe(true);
     expect(del.body.notebookCorpusDeleted, 'A delete that erases nothing must not claim it did').toBe(false);
@@ -218,12 +212,9 @@ describe('ADR 0601 / NBC-1 — the SIBLING door: DELETE /projects/:id', () => {
     expect((await c.get(`/host/openwop-app/kb/orgs/${orgId}/collections/${sharedId}`)).status).toBe(200);
     // …and Project B must still SEE it. A 200 on the collection with an empty
     // binding list would be the same outage wearing a different status code.
-    const knowledgeB = await c.get(`${PROJ}/${idB}/knowledge`);
+    const knowledgeB = await c.get<ProjectKnowledgeView>(`${PROJ}/${idB}/knowledge`);
     expect(knowledgeB.status, JSON.stringify(knowledgeB.body)).toBe(200);
-    expect(
-      (knowledgeB.body.collections ?? []).map((x: { collectionId?: string; id?: string }) => x.collectionId ?? x.id),
-      JSON.stringify(knowledgeB.body),
-    ).toContain(sharedId);
+    expect(knowledgeB.body.collections.map((x) => x.collectionId), JSON.stringify(knowledgeB.body)).toContain(sharedId);
   });
 });
 
@@ -231,7 +222,7 @@ describe('ADR 0601 § Corrections (HIGH-2) — the consent gate and the eraser s
   /** Read the project's projection and return the `deletesCorpus` the confirm
    *  dialog keys off. */
   const advertised = async (c: Client, id: string): Promise<unknown> => {
-    const r = await c.get(`${PROJ}/${id}`);
+    const r = await c.get<ProjectView>(`${PROJ}/${id}`);
     expect(r.status, JSON.stringify(r.body)).toBe(200);
     return r.body.deletesCorpus;
   };
@@ -254,27 +245,27 @@ describe('ADR 0601 § Corrections (HIGH-2) — the consent gate and the eraser s
         name: 'classic POST /notebooks (facet:notebook)',
         make: async () => {
           const { c, orgId } = await ownerWithOrg('nb-consent-classic');
-          const created = await c.post(NB, { orgId, name: 'Classic notebook' });
+          const created = await c.post<CreatedBody>(NB, { orgId, name: 'Classic notebook' });
           expect(created.status).toBe(201);
-          return { c, id: created.body.notebook.id as string };
+          return { c, id: created.body.notebook.id };
         },
       },
       {
         name: 'plain project, nothing bound',
         make: async () => {
           const { c, orgId } = await ownerWithOrg('nb-consent-plain');
-          const plain = await c.post(PROJ, { orgId, name: 'Nothing bound' });
-          return { c, id: plain.body.id as string };
+          const plain = await c.post<IdBody>(PROJ, { orgId, name: 'Nothing bound' });
+          return { c, id: plain.body.id };
         },
       },
       {
         name: 'plain project bound to a SHARED corpus named like a provisioned one',
         make: async () => {
           const { c, orgId } = await ownerWithOrg('nb-consent-shared');
-          const shared = await c.post(`/host/openwop-app/kb/orgs/${orgId}/collections`, { name: 'Sources: shared', description: 'Shared' });
-          const sharedId = (shared.body.collectionId ?? shared.body.id) as string;
-          const plain = await c.post(PROJ, { orgId, name: 'Bound to shared' });
-          const id = plain.body.id as string;
+          const shared = await c.post<CollectionBody>(`/host/openwop-app/kb/orgs/${orgId}/collections`, { name: 'Sources: shared', description: 'Shared' });
+          const sharedId = shared.body.collectionId;
+          const plain = await c.post<IdBody>(PROJ, { orgId, name: 'Bound to shared' });
+          const id = plain.body.id;
           await c.post(`${PROJ}/${id}/knowledge/bindings`, { collectionId: sharedId });
           return { c, id };
         },
@@ -287,10 +278,13 @@ describe('ADR 0601 § Corrections (HIGH-2) — the consent gate and the eraser s
       const { c, id } = await lane.make();
       const claim = await advertised(c, id);
       expect(typeof claim, `${lane.name}: the projection must ANSWER, not omit`).toBe('boolean');
-      const del = await c.del(`${PROJ}/${id}`);
+      const del = await c.del<DeleteBody>(`${PROJ}/${id}`);
       expect(del.status, `${lane.name}: ${JSON.stringify(del.body)}`).toBe(200);
+      // Every lane — including a plain project with nothing bound — really deletes.
+      expect(del.body.deleted, `${lane.name}: ${JSON.stringify(del.body)}`).toBe(true);
+      expect((await c.get(`${PROJ}/${id}`)).status, `${lane.name}: the project is gone`).toBe(404);
       expect(del.body.notebookCorpusDeleted, `${lane.name}: warned ${String(claim)}, did ${String(del.body.notebookCorpusDeleted)}`).toBe(claim);
-      seen.add(claim as boolean);
+      seen.add(claim === true);
     }
     // BOTH answers must have occurred, or the parity above is satisfied by a
     // predicate that is constant — the classic vacuity.

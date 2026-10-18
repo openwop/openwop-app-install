@@ -1,6 +1,6 @@
 # ADR 0775 — Agents, roster & workforces: one write authority, tenant-owned cutover state, and a permission gate that can see a roster agent
 
-Status: Accepted — P1 implemented (feature-loop 2026-10 row 5); P2 in progress (P2a–P2c implemented: all 44 `tmpl.*` are chains; reachability decided: hidden; P2d blocked on a prod measurement); P3–P4 open
+Status: Accepted — P1 implemented (feature-loop 2026-10 row 5); P2 implemented (P2a–P2c: all 44 `tmpl.*` are chains, reachability decided: hidden; P2d: the 15 `openwop-app.agents.*` had zero prod runs and are deleted); P4 implemented (`ARWF-11` stale-write guards, `ARWF-8` eval from the workforce); P3 implemented (P3a–P3d + `ARUX-18`, 2026-10-15; P3e–P3f, 2026-10-16)
 
 Feature-loop 2026-10 row 5 (agents, roster & workforces, + agent author). Grade evidence:
 `docs/steward/WORKFLOWS-ASSESSMENT.md` § "Agents, roster & workforces" (`ARWF-1..14`,
@@ -298,9 +298,9 @@ endpoint contract changes.
 | Phase | Scope | Status |
 |---|---|---|
 | **P1** | D1–D8 (`ARWF-2..6`, `-9`, `-10`, `-12`, the `ARWF-1` ratchet), all architect findings | implemented |
-| P2 | `ARWF-1` conversion, **batched by category**. Each batch is one reviewable PR that does all four of: (i) ship the batch as workflow-chain pack(s) registered same-id via `registerChainBackedWorkflow`, with a `postProcess` that restores the bare node ids, so a pre-existing run `:fork`s def-identically (the replay note); (ii) make it reachable through the ownership index (`hostOwned`), after the open question below is decided; (iii) delete those entries from the in-tree module; (iv) LOWER the D6 ceiling by the batch size in the same commit. Composed flows move from `core.subWorkflow` `config.workflowId` to `subChainRef`. Batches: **P2a** meeting-ops, reporting, intake-triage, scheduling (16 `tmpl.*`). **P2b** approvals, knowledge, people, finance (16; carries the `approval-chase` → `single-approver` composition). **P2c** commercial, it, comms (12; carries `post-meeting-follow-up` → `action-extraction`). *(CORRECTED 2026-10-10: that composition is meeting-ops, so P2a carried it. P2c has no composition.)* **P2d** the 15 legacy `openwop-app.agents.*`: `seed-data/exampleAgents.json` binds none of them, so first measure prod run references. With none, delete them, and archive-not-dispose them otherwise (replay law). Then delete both modules and drop the two getters from source A. `frontend/react/src/agents/roleTemplates.ts` stops hand-copying the ids. *(CORRECTED 2026-10-10: step (ii) is answered NO. The user decided the `tmpl.*` chains stay `internal` replay archives, not reachable (Open questions).)* | **P2a–P2c implemented** (§ P2 implementation record); P2d blocked on a prod measurement |
-| P3 | `ARWF-7` / `-13`: one dispatch policy resolver. Roster `enabled:false` and the `agentPolicyResolver` autonomy/approval/required-connection rules apply on every AUTONOMOUS entry (schedules, follow-ups, heartbeat fallback). User-initiated chat stays a test pane, as in Relevance AI. The run path also gets the persona scaffold and agent knowledge. Cross-instance registry eviction (D5 H2). Viewer-aware write affordances in the SPA. | open |
-| P4 | `ARWF-11`: an `If-Match` / version CAS on roster PATCH, user-agent PATCH and profile PUT (profile PUT becomes a merge, not a full replace), and a CAS in `recordHeartbeat` against a concurrent pause. `ARWF-8`: the workforce eval reads its agent and suite from the workforce, not `host.priya`. | open |
+| P2 | `ARWF-1` conversion, **batched by category**. Each batch is one reviewable PR that does all four of: (i) ship the batch as workflow-chain pack(s) registered same-id via `registerChainBackedWorkflow`, with a `postProcess` that restores the bare node ids, so a pre-existing run `:fork`s def-identically (the replay note); (ii) make it reachable through the ownership index (`hostOwned`), after the open question below is decided; (iii) delete those entries from the in-tree module; (iv) LOWER the D6 ceiling by the batch size in the same commit. Composed flows move from `core.subWorkflow` `config.workflowId` to `subChainRef`. Batches: **P2a** meeting-ops, reporting, intake-triage, scheduling (16 `tmpl.*`). **P2b** approvals, knowledge, people, finance (16; carries the `approval-chase` → `single-approver` composition). **P2c** commercial, it, comms (12; carries `post-meeting-follow-up` → `action-extraction`). *(CORRECTED 2026-10-10: that composition is meeting-ops, so P2a carried it. P2c has no composition.)* **P2d** the 15 legacy `openwop-app.agents.*`: `seed-data/exampleAgents.json` binds none of them, so first measure prod run references. With none, delete them, and archive-not-dispose them otherwise (replay law). Then delete both modules and drop the two getters from source A. `frontend/react/src/agents/roleTemplates.ts` stops hand-copying the ids. *(CORRECTED 2026-10-10: step (ii) is answered NO. The user decided the `tmpl.*` chains stay `internal` replay archives, not reachable (Open questions).)* | **implemented** (§ P2 implementation record; P2d measured 2026-10-12 and deleted) |
+| P3 | `ARWF-7` / `-13`: one dispatch policy resolver. Roster `enabled:false` and the `agentPolicyResolver` autonomy/approval/required-connection rules apply on every AUTONOMOUS entry (schedules, follow-ups, heartbeat fallback). User-initiated chat stays a test pane, as in Relevance AI. The run path also gets the persona scaffold and agent knowledge. Cross-instance registry eviction (D5 H2). Viewer-aware write affordances in the SPA. | **implemented** (P3a roster `enabled:false` on every scheduler lane + approve-time; P3b the profile's explicit `never`/`hitl` rules on schedules — user decision: autonomy level, allowlist and readiness stay heartbeat-only; P3c agent knowledge on the run path — persona scaffold withdrawn as false on a run; P3d registry eviction + TTL backstop; `ARUX-18` viewer read-only panels; § P3 implementation record) |
+| P4 | `ARWF-11`: an `If-Match` / version CAS on roster PATCH, user-agent PATCH and profile PUT (profile PUT becomes a merge, not a full replace), and a CAS in `recordHeartbeat` against a concurrent pause. `ARWF-8`: the workforce eval reads its agent and suite from the workforce, not `host.priya`. | **implemented** (§ P4 implementation record) |
 
 ## Alternatives weighed
 
@@ -490,6 +490,38 @@ running (slot 10, a local train, was gating). What was checked:
    `GET /v1/runs?workflowId=…&limit=200` reads, then remove the key. This is an
    env change and a cross-tenant credential, so it needs the user's approval.
 
+> **MEASURED 2026-10-12 12:16Z — unblocked by access route 1, read-only.** The
+> user approved the read-only run count. It ran through `cloud-sql-proxy` on the
+> user's own gcloud login (DSN from Secret Manager `openwop-storage-dsn`), one
+> connection, `default_transaction_read_only = on`, a 20 s statement timeout,
+> after the hourly window and cleared with the release coordinator. Results:
+>
+> | Probe | Result |
+> |---|---|
+> | `runs` rows (floor: 25,913 runs over 130 workflow ids) | **0** for each of the 15 ids |
+> | Same `LIKE 'openwop-app.agents.%'` query, grouped by id (non-vacuity) | 5 OTHER ids have runs (`invoice-post` 229, `claim-adjudicate` 16, `order-apply` 16, `triage-respond` 16, `po-route` 14): the `workforces.json` synthetic history (`seedWorkforceHistory`), none of the 15 |
+> | `runs.inputs` / `runs.metadata` mentioning any id (sub-workflow parents) | 0 |
+> | `workflows` table | empty (0 rows), so it proves nothing either way |
+> | `user_agents`, `agent_run_activity` rows mentioning any id | 0, 0 |
+> | `host_ext_kv` (196,839 rows) values mentioning the prefix | 6: five `workforce:*` rows (the 15 other workforce ids above) and **one `triggerbridge:sub` bound to `openwop-app.agents.lead-routing`** |
+>
+> That one subscription is an inbound stream connection's trigger in one
+> `user:` tenant, `state: 'paused'` since 2026-07-06 and never fired (zero runs).
+> It is not a replay reference: replay needs a run, and there is none. If it is
+> ever resumed, its dispatch fails with workflow-not-found, which is the honest
+> outcome for a demo workflow that no longer exists. It is left in place, not
+> rewritten.
+>
+> So the replay law is satisfied by deletion. Implemented as below. Two items in
+> the paragraph that follows turned out to be no-ops: `roleTemplates.ts` stopped
+> copying these ids earlier (only its header comment still pointed at the
+> module), and the `RunsIndexPage` demo list names `openwop-app.uppercase` and
+> `openwop-app.approval-gate`, which are D6 ladder infrastructure ids, not any of
+> the 15, so it stays. `exampleWorkflowsForRole` already returned nothing for
+> every seeded roleKey (nine author `workflows[]`; Chief of Staff's role has no
+> example), so the seed fallback becomes `[]` with no behaviour change, and
+> `ExampleRoleKey` moves into `exampleDataSeed.ts`.
+
 With zero references: delete the 15 and `exampleWorkflows.ts`. Otherwise migrate
 them the P2a way (internal, byte-identical: archive, not dispose). Then delete
 `exampleWorkflows.ts` (its `exampleWorkflowsForRole` backs `exampleDataSeed.ts`'s
@@ -502,4 +534,355 @@ legacy fallback), the frontend `roleTemplates.ts` hand-copy of those ids, and th
 | P2b | `452795789` | same three; ceiling 28 → 12 |
 | P2c | `d29d18227` | same three + `test/agents-example-data.test.ts` (consumer run); catalog deleted, ceiling 0 |
 | (ii) | — | answered by the user 2026-10-10: hidden (no code) |
-| P2d | — | blocked: prod run-reference count needs access (above) |
+| P2d | `966a04a28` (#4722) | `test/catalog-source-a-literal-ratchet.test.ts` (module must not exist; resolver absent from source A) + `test/agents-example-data.test.ts` (seed still seeds) |
+
+## P4 implementation record (2026-10-12)
+
+### `ARWF-11` — no agent-area edit silently overwrites another
+
+**Mechanism.** Every write is a compare-and-swap against the row it read
+(`DurableCollection.compareAndSwap` for roster + profile; a conditional
+`UPDATE … WHERE <every editable column> IS NOT DISTINCT FROM <read value>` for the
+SQL `user_agents` table, so no migration). A write that loses the swap re-reads and
+re-applies its own change, so a concurrent write to another field is kept. On top of
+that, each route returns a content version (`host/entityVersion.ts`: a hash of the
+RFC 8785 canonical row) as `ETag` and as an `etag` body field (list rows have no
+header), and accepts an optional `If-Match`. A version that moved is
+`409 conflict`, `details.reason: 'stale_write'`, the app's existing convention for a
+lost optimistic write (navigation-settings CHN-6). Omitting `If-Match` keeps the
+old field-level behaviour, so no client breaks.
+
+Decisions made while implementing:
+
+- **Content hash, not `updatedAt`.** Two edits in one millisecond share an
+  `updatedAt`, the heartbeat stamp deliberately does not move it, and
+  `user_agents` has none. The roster version omits `lastHeartbeatAt`, so a
+  heartbeat does not invalidate an open editor.
+- **`recordHeartbeat`** re-reads and swaps, so a pause landing in its window is
+  kept (the defect the ADR named).
+- **Profile PUT merges.** An omitted editor field keeps its stored value; `null`
+  clears, and so does `[]` for a list field (normalised to absent, so the stored
+  shape matches a never-set field). Reading the SPA showed why this mattered now:
+  the Guardrails panel did not resend `channels`, `adminControls` or
+  `riskCompliance`, so **every Guardrails save wiped those three fields** under
+  full-replace. The two profile panels now send only the fields they own, with
+  explicit clears; the Voice panel sends `configParameters: null` when the voice
+  is removed, because omission would now keep it.
+- **The subsystem writers** (`setAgentMemoryScope`, `setAgentKnowledge`,
+  `setAgentTwin`) moved from get→put to the same compare-and-swap, so they cannot
+  overwrite a PUT that lands in their window either.
+- **SPA.** `If-Match` is sent where an edit is built from a read copy: the details
+  editor, the workflow portfolio, the assign-workflow modal and both profile
+  panels. One-field toggles (enabled, avatar, autonomy) do not need it: the
+  server-side swap already merges them. Appending a workflow re-reads and appends
+  to the current list on a stale refusal (`appendRosterWorkflow`), so a workflow
+  added elsewhere is not dropped. The instructions panel does not: its prompt
+  editor never reads the stored prompt, so there is no version to send.
+- **Not done:** workforce PATCH, listed under `ARWF-11` in the assessment but not
+  in this ADR's P4 scope, still writes last-writer-wins.
+
+  > **CORRECTED 2026-10-13 — workforce PATCH is now done (P4 follow-up).** Both
+  > workforce edit routes take the same guard. `PATCH /workforces/:id` (cut-over
+  > status) compare-and-swaps the tenant's status overlay, and its version is the
+  > workforce **as that tenant sees it**, so another tenant's cut-over never
+  > stales it. `PATCH /workforces/:id/migration` was a real lost update, not
+  > only last-writer-wins: two stage saves racing on different `stageStatus`
+  > keys each merged into the same read copy, and the second `put` dropped the
+  > first. It is now a CAS loop, and its version ignores `updatedAt` (an unsaved
+  > journey is minted fresh on every read). Both reads and writes return `ETag`
+  > + `etag`; the overview and migration wizard send `If-Match`, explain a stale
+  > refusal, and re-read. The production-graduation gate still runs first, so a
+  > stale move back to `production` answers `cutover_not_eligible`, not
+  > `stale_write`. Whether the
+  Firebase `/api` rewrite forwards `If-Match` on PATCH/PUT is unmeasured; it strips
+  `If-None-Match` on some conditional GETs (CDN hit-for-pass). The server-side
+  swap holds either way. Verify after deploy.
+
+  > **MEASURED 2026-10-13 03:35:55Z on `294a17d8a` (revision `00948-cpv`): the
+  > rewrite forwards `If-Match` on PATCH.** Through `https://app.openwop.dev/api`,
+  > in one throwaway anonymous session: create a user agent → `201`; PATCH with
+  > no `If-Match` → `200` + ETag E1; PATCH with `If-Match: E1` → `200` + E2;
+  > PATCH again with `If-Match: E1` → **`409 conflict`, `details.reason:
+  > 'stale_write'`, `currentEtag: E2`**; DELETE → `204`. Only user-agent PATCH
+  > was exercised. Roster PATCH and profile PUT go through the same rewrite, but
+  > PUT was not measured.
+
+### `ARWF-8` — the eval reads its agent and suite from the workforce
+
+`runWorkforceLiveShadowEval` now takes the workforce and resolves both from it: the
+suite is keyed by workforce id, and the agent dispatched is the workforce's
+`role: 'supervisor'` member. A workforce with no suite (four of the five seeded),
+or whose supervisor is not the agent the suite was written for, is refused with
+`409` (`no_eval_suite` / `supervisor_mismatch`). Before, all five workforces were
+scored by dispatching `host.priya` over the invoice suite. The eval run's fixed
+`workflowId` (the suite id) is unchanged: the ADR 0823 ownership ratchet records it
+as an eval record that executes no definition.
+
+| Item | Witness (sabotage-checked: each goes red with its fix reverted) |
+|---|---|
+| roster CAS, heartbeat vs pause, If-Match | `test/adr0775-p4-stale-write-guards.test.ts` |
+| profile merge + clears, subsystem-writer CAS | same file |
+| `user_agents` conditional update | same file (SQLite); `test/adr0775-p4-user-agent-cas-postgres-live.test.ts` (Postgres: `OPENWOP_PG_TEST_DSN`, else testcontainers, else skip; run here on a PGlite socket server, and sabotage-checked per column) |
+| HTTP: `ETag`, `If-Match` → 409, PUT merge/clear | `test/adr0775-p4-stale-write-http.test.ts` |
+| SPA: If-Match sent, stale classified by reason, append re-reads, voice clears | `frontend/react/src/agents/__tests__/staleWriteGuards.test.tsx` |
+| eval from the workforce | `test/workforce-eval.test.ts` |
+| workforce status + migration CAS, If-Match, ETag (2026-10-13 follow-up) | `test/adr0775-p4-workforce-stale-write.test.ts`; SPA: `frontend/react/src/client/__tests__/workforcesIfMatch.test.ts`, `frontend/react/src/workforces/__tests__/workforceStaleWrite.test.tsx` |
+| `If-Match` survives the Firebase `/api` rewrite (PATCH) | live probe, 2026-10-13, above (not a test; one prod run) |
+
+## P3 implementation record
+
+P3 is split, in order of risk: **P3a** the roster's off switch on every autonomous
+lane, **P3b** `agentPolicyResolver` parity on those lanes, **P3c** the persona
+scaffold and agent knowledge on the run path, **P3d** cross-instance registry
+eviction. Viewer-aware write affordances are tracked with P3d.
+
+### P3a — a paused agent does not run on its own (`ARWF-7`), 2026-10-15
+
+MEASURED on `d3495f816` before the change: heartbeat (`heartbeatService.ts:562`),
+"check now" (`routes/agentOps.ts:271`) and the kanban trigger
+(`kanbanTriggerDelivery.ts:91-98`) honoured `enabled:false`. Nothing else did. The
+schedule daemon's `fireJob` gated on the job's own `enabled`, the feature toggle,
+the acting person and the budget, never the agent; scheduled chats, follow-ups,
+recurring follow-ups, scheduler-route jobs and KickBot jobs all fire through it.
+Approving a paused agent's proposal checked only that the member still existed
+(`approvalDecision.ts:637`).
+
+- **One verdict.** `host/autonomousDispatchPolicy.ts` `autonomousDispatchVerdict(tenantId,
+  ref)` resolves a rosterId or a registry agentId (reverse lookup) and re-reads the
+  row with `getRosterEntry`, not the 30 s reverse cache, so a pause takes effect
+  on the next fire. A ref that is not a roster agent is allowed. P3b extends this
+  same verdict with the policy resolver.
+- **Schedules.** `fireJob` asks it for `jobAgentRef(job)` (rosterId, then agentId,
+  then `configurable.agentId`, which is where follow-ups and scheduled chats name
+  the agent) and skips the slot as the new `agent-paused` reason. Non-destructive,
+  like `actor-inactive`: the job stays enabled and resumes with the agent. Run now
+  is gated too, matching "check now". The SPA's schedule panels name the reason
+  in en/es/fr/pt-BR.
+- **Approvals.** Claiming a paused agent's run proposal is `409 conflict`,
+  `details.reason: 'agent_paused'`, checked before the claim lock, so the approval
+  stays pending and can be approved once the agent is resumed.
+- **Not changed.** User-initiated chat and @mention (the test pane), the heartbeat
+  and kanban gates (already correct), and trigger ingestion, which starts a
+  workflow rather than an agent; an agent pinned inside such a workflow is P3b's
+  agent-runner gate.
+
+| Item | Witness (sabotage-checked: red with the fix reverted) |
+|---|---|
+| `fireJob` skips a paused agent named by rosterId, agentId or `configurable.agentId`; resumed it reaches dispatch; a job with no roster agent is ungated | `backend/typescript/test/adr0775-p3-autonomous-dispatch-paused.test.ts` (gate off: 3 red) |
+| claim of a paused agent's proposal is 409 `agent_paused` and leaves it pending | same file (check off: 1 red) |
+| SPA names `agent-paused` instead of "unrecognized" | `frontend/react/src/schedules/__tests__/SubjectSchedulesPanel.states.test.tsx` (map entry off: red) |
+
+### P3b — explicit per-workflow rules on schedules (`ARWF-13`, policy half), 2026-10-15
+
+> **DECISION (user, 2026-10-15): "explicit rules only."** The P3 row above says the
+> `agentPolicyResolver` rules apply on every autonomous entry. Read literally, that
+> would make every schedule of an agent at `review`/`guided`, with an allowlist, or
+> missing a connection stop running and file an approval on every slot. Three
+> options were put to the user; they chose the middle one. The two rules a person
+> wrote down for a NAMED workflow apply on every schedule lane; the autonomy
+> level, the `withinPolicyActions` allowlist and the connection-readiness hold stay
+> heartbeat-only, because they govern what an agent picks up by itself and a person
+> who created a schedule already authorized it.
+
+- **One resolver.** `autonomousDispatchVerdict(tenantId, ref, actionClass)` calls
+  the heartbeat's own `resolveAgentPolicy` with the job's `workflowId` as the action
+  class and acts only on its `permissions.never` and `hitl` reasons, so the two lanes
+  cannot disagree about what those lists mean.
+- **`permissions.never`** — the slot is skipped as `policy-denied`. Nothing is
+  proposed, matching the heartbeat's fail-closed deny.
+- **`hitl`** — the slot files ONE pending run proposal carrying `scheduleJobId`
+  (later slots find it and add nothing) and is skipped as `awaiting-approval`.
+  Claiming it fires the job through `fireJob` itself (`approvedProposalId` satisfies
+  only the hold), so the run carries the job's inputs, acting person and attribution
+  exactly as an unheld fire would; an approved proposal never loses them by going
+  through the bare `startWorkflowRun` lane. A fire that skips for another reason
+  (the agent was paused since) re-opens the approval and answers `409` with the
+  skip, so it is never stranded approved with no run.
+- **SPA.** Both reasons are named in the schedule panels (en/es/fr/pt-BR).
+
+| Item | Witness (sabotage-checked) |
+|---|---|
+| never → `policy-denied`; hitl → one pending approval across slots; claim fires the job (its `lastRunId` is the run); paused since → 409, still pending; agent at `review` with no listed rule still runs | `backend/typescript/test/adr0775-p3b-explicit-policy-on-schedules.test.ts` (never off: 1 red; hitl off: 2; dedupe off: 1; claim-fires-job off: 1) |
+| SPA names both reasons | `frontend/react/src/schedules/__tests__/SubjectSchedulesPanel.states.test.tsx` |
+
+### P3c — the agent's own knowledge on the run path (`ARWF-13`, knowledge half), 2026-10-15
+
+MEASURED on `d3495f816` before the change: `agentRunnerNode` passed no
+`knowledgeRetrieve`, so an agent answering a schedule, a follow-up or a heartbeat
+fallback ran without the knowledge it cites in chat and on the ad-hoc dispatch lane.
+
+- **The runner composes it.** `agentRunnerNode` calls
+  `resolveAgentKnowledgeRetrieve(tenantId, profileId, createAgentMemoryPort(tenantId))`
+  with the RESOLVED profile id (for a roster agent, the rosterId) and hands the
+  result to the turn, the same resolver chat uses. It is fail-soft: a resolver
+  fault leaves the turn without a knowledge block, never a failed run.
+- **Deliberately NOT applied: the chat persona scaffold.** Its lines describe a chat
+  surface (a person on the other side, a conversation to continue), and they would
+  be false on a run. The ADR's P3 row named it; reading it showed it does not fit
+  this lane, so the row's "persona scaffold" clause is withdrawn, not deferred.
+- **Not enabled: memory writes from the run lane.** The port is read-only here;
+  cross-run memory writes remain a follow-up.
+
+| Item | Witness (sabotage-checked) |
+|---|---|
+| the runner asks with the resolved profile id and the returned knowledge reaches the model; a resolver fault still succeeds | `backend/typescript/test/adr0775-p3c-runner-agent-knowledge.test.ts` (wiring off: red) |
+
+### P3d — cross-instance registry eviction (D5 H2), 2026-10-15
+
+Before: deleting or editing a user agent dropped it only from the in-process
+registry of the instance that served the request; every other instance kept serving
+the old agent until it restarted.
+
+- **The message.** `host/agentRegistryEviction.ts` publishes
+  `{tenantId, agentId, origin: INSTANCE_ID}` on `agent-registry:evict` through the
+  existing host-ext pub/sub (LISTEN/NOTIFY on Postgres). It reuses the
+  `openwop_host_ext` LISTEN connection the boot subscription already holds, so it
+  opens 0 new connections and Gate 5's budget does not move. A listener started at
+  boot drops the named agent unless the message is its own; the next resolve
+  re-reads storage.
+- **Who sends it.** User-agent `DELETE` and `PATCH`, and the roster cascade when it
+  removes the member that owns a user agent.
+- **The backstop for a missed message.** A user-agent copy older than
+  `OPENWOP_USER_AGENT_REGISTRY_TTL_MS` (default 5 min) is re-read on its next
+  `resolve()`: edited → the stored record, deleted → gone. A storage FAULT during
+  that refresh keeps the old copy rather than unregistering a live agent.
+- **Not witnessed: two real instances.** The tests drive one process, and a message
+  with a foreign `origin` is exactly what a peer sends, but no automated test runs
+  LISTEN/NOTIFY across two processes.
+  > **CORRECTED 2026-10-16 (P3e):** now witnessed across two Postgres CONNECTIONS
+  > (two storages, one process) on real Postgres; see P3e item 3. Still not two
+  > processes: the registry is process-global, so one process cannot hold two of
+  > them, and the connection is the part the in-process test could not reach.
+
+| Item | Witness (sabotage-checked) |
+|---|---|
+| a peer's message evicts, this instance's own and malformed ones do not; the booted listener evicts and the next resolve reads storage; DELETE, PATCH and the roster cascade broadcast; the TTL re-read and the fault-keeps-copy rule | `backend/typescript/test/adr0775-p3d-agent-registry-eviction.test.ts` |
+
+### `ARUX-18` — the workspace's edit panels are read-only for a viewer, 2026-10-15
+
+The Instructions, Guardrails, Voice and workflow-portfolio panels each read
+`useAgentWriteAccess()` and render read-only for a viewer, with one
+`agents:viewerPanelReadOnly` line (en/es/fr/pt-BR), instead of offering an editor
+that learns of the backend's `403` only on save. The backend refusal was already
+there and is unchanged (`roster.ts`, `userAgents.ts`, `agentProfile.ts`; witnessed by
+`backend/typescript/test/agents-write-authority.test.ts`).
+
+| Item | Witness (sabotage-checked) |
+|---|---|
+| each panel as a viewer has no write control; the same panel as an editor has it (the control half, so a pass is never "the control was never there") | `frontend/react/src/agents/__tests__/viewerReadOnlyPanels.test.tsx` |
+
+| Phase | PR | Merge |
+|---|---|---|
+| P3a | #4836 | `e725a029e` |
+| P3c | #4842 | `5625c793e` |
+| P3d | #4846 | `a5eeffe89` |
+| `ARUX-18` | #4851 | `6dfe4a5e5` |
+| P3b | #4859 | `6a90b8da6` |
+
+All four rode slot 96: one gate, green on the train tree `382d00b72`, hand-merged
+after `main` moved by two disjoint PRs mid-gate (the tree on `main` after the merges
+differs from the gated tree by exactly those PRs' 8 files).
+
+### P3e — the agent acting on its own inside a workflow, and its memory there, 2026-10-16
+
+The three follow-ups P3a–P3d left open.
+
+**1. The agent-runner gate (`ARWF-7`/`-13`, the lanes that start a WORKFLOW).**
+MEASURED on `6a90b8da6`: eight lanes start a run with no person in the loop, and
+only the schedule daemon asked `autonomousDispatchVerdict`. Heartbeat and the kanban
+column trigger check `enabled` themselves; trigger-bridge ingestion, its route,
+host-event bindings, inbound connection webhooks and the kanban work-item daemon
+checked nothing. Gating each of them would be five copies, and none of them knows
+which agent the workflow will run. The agent-runner node does: it is where the agent
+acts. So the gate is there, once.
+
+- **When.** The run has no acting person (`ctx.actingUserId`) and the node no
+  conversation. That is the agent acting on its own. A run a person started, and a
+  reply to a person's channel post (which carries its conversation), stay ungated:
+  the test pane, as chat is.
+- **What.** The same verdict the schedule lane uses, with the run's workflow as the
+  action class. `ctx.workflowId` is new on the node context for this (declared
+  `run-context` in `EXECUTOR_CTX_POLICY`). A paused agent fails the node
+  `agent_paused`, a workflow on its `never` list `policy_denied`, both
+  `retryable: false`.
+- **Not applied: `hitl`.** On a schedule it holds the slot before the run exists;
+  here the run already exists, so honouring it means suspending the run for an
+  approval. That is a separate decision, not taken. A `hitl` workflow started by a
+  trigger runs as it did before.
+
+  > **Superseded by P3f (below), same day.** The decision was taken: the node pauses
+  > on the engine's approval interrupt. A `hitl` workflow started by a trigger no
+  > longer runs without one.
+
+**2. Cross-run memory on the run lane.** The dispatch now gets the agent's memory
+port and scope (`agentMemoryScope(profileId)`, the chat lane's), so an agent that
+opts in (`memoryShape.longTerm`, the chat lane's gate) reads prior memory and
+records its turn on a run as it does in chat. Three things differ, through a new
+`memoryWrite` option, because a run is not a chat turn:
+
+- **Always untrusted.** A chat summary is trusted unless the turn read untrusted
+  knowledge. A run's TASK may itself be a webhook or event payload nobody vetted,
+  and the summary quotes the task, so a trusted run summary would launder that
+  payload into the agent's trusted memory, recalled in the next chat. Recall fences
+  every run summary.
+- **One entry per run node.** The id is `run:<runId>:<nodeId>`, an upsert, so a
+  crash-resume re-execution rewrites its entry instead of adding a second. A node
+  that runs several times in one run (a loop) keeps its latest turn.
+- **Nothing on a replay.** The node is deliberately unclassified (borrowed recall
+  must re-resolve on `:fork`, see the comment above its dispatch), so a replay
+  re-executes it; the write checks `currentEffectContext().replaying` and skips.
+
+**3. The two-instance LISTEN/NOTIFY test P3d did not have.** A live test opens two
+Postgres storages (two pools, two LISTEN connections) against one database: a
+NOTIFY sent on B evicts on A, and A's own message, delivered over the wire, does
+not. It runs on `OPENWOP_PG_TEST_DSN` or a testcontainer and skips otherwise.
+MEASURED that PGlite cannot run it (it delivers a NOTIFY only to the sending
+connection); a real Postgres 17 from the `embedded-postgres` npm package did.
+
+| Item | Witness (sabotage-checked) |
+|---|---|
+| paused → `agent_paused`, resumed runs; a person's run is ungated; `never` → `policy_denied`, another workflow runs; `hitl` → see P3f | `backend/typescript/test/adr0775-p3e-runner-autonomy.test.ts` (gate off: 2 red) |
+| the run's `workflowId` reaches the node through the executor: a never-listed workflow fails the RUN | same file (`workflowId` off the executor ctx: 1 red) |
+| one untrusted summary per run node, upserted on re-execution, a new run adds one, none on replay, none without the opt-in | same file (untrusted off: 1; id off: 1; replay skip off: 1; port not passed: 1) |
+| a NOTIFY from another instance evicts, this instance's own does not | `backend/typescript/test/adr0775-p3d-eviction-postgres-live.test.ts` on embedded Postgres 17 (origin filter off: red; eviction off: red) |
+
+### P3f — `hitl` on a workflow a trigger started, 2026-10-16
+
+P3e left one rule unapplied on the run lane: an agent's `hitl` list (a workflow a
+person wrote down as "ask me first"). A trigger, webhook, event binding or kanban
+item that started that workflow ran it with no one asked, so the rule held on a
+schedule and was silently skipped on every other lane. The user delegated the
+decision ("make a decision based on deep research"). Decided: **apply it, by pausing
+the agent-runner node on the engine's approval interrupt.**
+
+**Options weighed.**
+
+| Option | Why not / why |
+|---|---|
+| Leave it (runs proceed) | A rule a person wrote down is ignored on four of five lanes, invisibly. The P3b decision ("explicit rules only") applies exactly these rules, so skipping one was a gap, not a policy. |
+| File a `run-proposal` and fail the node (the schedule lane's shape) | Approving starts a NEW run, re-executing every node before the agent's, side effects included, and the trigger payload (`triggerData`) is not carried by a proposal's `configurable`. Right for a schedule, where the run does not exist yet; wrong once it does. |
+| **Pause the node (`ctx.suspend`, kind `approval`)** — chosen | The run keeps its prefix and its trigger payload. The primitive already exists and is what `core.approvalGate` and `core.email.send` use: durable, re-entered with the resolution on the same key, resolved only through the ONE resolve path (`routes/interrupts.ts`, `approvals:respond` + run-tenant ownership), expired fail-closed by the gate timeout, and listed in the unified review inbox (ADR 0068) beside the schedule lane's proposals, so a person sees both lanes' requests in one place. |
+
+**Not the ADR 0189 precedent.** Headless runs never suspend for *connect-to-continue*
+or *send-as-you*, because only the acting person can answer those. An agent's
+`hitl` is a workspace decision anyone with `approvals:respond` may make, which is
+what `core.approvalGate` already asks of headless runs every day. So no
+`approverRefs` are set.
+
+**Behaviour.**
+
+- Same gate condition as P3e (no acting person, no conversation); same verdict.
+- `needs-approval` → `ctx.suspend({kind:'approval', key:'agent-hitl:<rosterId>', actions:['approve','reject'], prompt})`. The run goes `waiting-approval`.
+- Resolved `approve`/`accept` → the node re-enters and the agent acts. Anything
+  else (reject, or the timeout's fail-closed reject) → failure `approval_rejected`,
+  `retryable: false`.
+- No suspend surface on the context → failure `approval_required`, never a silent run.
+- One approval per node per run execution: a loop that revisits the node in the
+  same execution reuses it (the executor keeps the resolution for that node).
+- A `:fork` mints a new run, so it asks again (the `core.email.send` fork posture).
+
+| Item | Witness (sabotage-checked) |
+|---|---|
+| hitl pauses before the agent acts; approve/accept act; reject → `approval_rejected`; no surface → `approval_required`; another workflow, or a person's run, does not ask | `backend/typescript/test/adr0775-p3e-runner-autonomy.test.ts` (gate off: 4 red, controls green) |
+| through the executor: the run goes `waiting-approval`, the interrupt is listed, a reject through `POST /runs/:runId/interrupts/agent` fails the run `approval_rejected` | same file |
+

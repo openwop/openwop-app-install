@@ -41,6 +41,20 @@ export interface ShareLink {
    *  nothing else on the row distinguishes "an admin darkened this" from "this
    *  works". Set by the server, which is the only side that can know. */
   featureDisabled?: boolean;
+  /** ADR 0887 D2 — the person who shared this link lost access (left the
+   *  workspace, was demoted, deactivated, or can no longer see the resource), so
+   *  the server re-checks them on every read and refuses with the uniform 404.
+   *  A live check, not a revocation: restoring their access restores the link,
+   *  and a current writer can ADOPT it to keep the URL working (D5). */
+  publisherInactive?: boolean;
+  /** ADR 0887 D2 — the reader may not see this resource, so its title is withheld
+   *  (the link's existence, type, label and status are still listed). */
+  cardRedacted?: boolean;
+  /** ADR 0887 D5 — when a writer adopted this link (`createdBy` is then theirs). */
+  adoptedAt?: string;
+  /** ADR 0887 D2 — THIS reader could adopt this dark link (they write in the org
+   *  and may publish the resource). Absent ⇒ the page must not offer Adopt. */
+  canAdopt?: boolean;
 }
 
 /**
@@ -60,7 +74,7 @@ export interface ShareLink {
  * which are both claims that it does. Revoked and expired outrank it because
  * they are terminal — re-enabling the feature would not bring those back.
  */
-export type LinkStatus = 'revoked' | 'expired' | 'cap-reached' | 'feature-off' | 'orphaned' | 'expiring' | 'live';
+export type LinkStatus = 'revoked' | 'expired' | 'cap-reached' | 'feature-off' | 'publisher-inactive' | 'orphaned' | 'expiring' | 'live';
 
 /** Days within which an expiry is worth flagging on the row. */
 const EXPIRING_SOON_DAYS = 7;
@@ -88,6 +102,11 @@ export function linkStatus(l: ShareLink, now: number = Date.now()): LinkStatus {
   // function was written to remove.
   if (typeof l.maxViews === 'number' && (l.viewCount ?? 0) >= l.maxViews) return 'cap-reached';
   if (l.featureDisabled) return 'feature-off';
+  // ADR 0887 D2 — below `feature-off`: an admin's switch darkens every link of
+  // the type, so adopting one would not help. The server never sets this beside
+  // `resourceMissing` (a deleted resource leaves nothing for the publisher check
+  // to refuse), so its order against `orphaned` is moot.
+  if (l.publisherInactive) return 'publisher-inactive';
   if (l.resourceMissing) return 'orphaned';
   return expiringSoon ? 'expiring' : 'live';
 }
@@ -98,7 +117,10 @@ export const isLinkLive = (l: ShareLink, now: number = Date.now()): boolean => {
   // `feature-off` is NOT live — the resolver 404s it today. It is filed with the
   // dead links (where the owner can read WHY) rather than under "Active", which
   // is the heading that was asserting the opposite.
-  return s === 'live' || s === 'expiring' || s === 'orphaned';
+  // `publisher-inactive` is filed with the links the owner must SEE (beside
+  // `orphaned`): it is recoverable on the row itself (Adopt), and a collapsed
+  // dead-links section is where an action goes unnoticed.
+  return s === 'live' || s === 'expiring' || s === 'orphaned' || s === 'publisher-inactive';
 };
 
 /** The mint response — the ONE moment the raw token (and thus the URL) exists. */
@@ -180,6 +202,25 @@ export async function createLink(orgId: string, input: { resourceType: ResourceT
 }
 
 /** Management ops accept the tokenHash (list rows) or a raw token (mint-time). */
+/** ADR 0887 D5 — why an adopt was refused, as the server's machine-readable
+ *  `details.reason` (or `forbidden` for a 403), so the page can say it in the
+ *  reader's language rather than relaying the server's English message. */
+export type AdoptRefusal = 'publisher-active' | 'revoked' | 'expired' | 'system-link' | 'concurrent-change' | 'forbidden' | 'unknown';
+export class AdoptError extends Error {
+  constructor(readonly refusal: AdoptRefusal) { super(`adoptLink refused: ${refusal}`); }
+}
+const ADOPT_REFUSALS: readonly AdoptRefusal[] = ['publisher-active', 'revoked', 'expired', 'system-link', 'concurrent-change'];
+
+/** ADR 0887 D5 — adopt a link whose publisher lost access; the URL is unchanged. */
+export async function adoptLink(orgId: string, token: string): Promise<ShareLink> {
+  const res = await fetch(`${linksBase(orgId)}/${encodeURIComponent(token)}/adopt`, fetchOpts({ method: 'POST', headers: jsonHeaders(), body: '{}' }));
+  if (res.ok) return (await res.json()) as ShareLink;
+  if (res.status === 403) throw new AdoptError('forbidden');
+  let reason: unknown;
+  try { reason = ((await res.json()) as { details?: { reason?: unknown } })?.details?.reason; } catch { /* non-JSON */ }
+  throw new AdoptError(ADOPT_REFUSALS.find((r) => r === reason) ?? 'unknown');
+}
+
 export async function revokeLink(orgId: string, token: string): Promise<void> {
   const res = await fetch(`${linksBase(orgId)}/${encodeURIComponent(token)}`, fetchOpts({ method: 'DELETE', headers: authedHeaders() }));
   if (!res.ok) throw new Error(`revokeLink returned ${res.status}`);

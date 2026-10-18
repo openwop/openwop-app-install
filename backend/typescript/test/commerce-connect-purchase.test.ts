@@ -4,14 +4,25 @@
  * re-buy guards, fee clamp (read + write + corrupt-row fail-closed), the
  * deterministic order id, demo checkout, purchase-event fulfilment (CAS
  * exactly-once under concurrent duplicate delivery, amount-mismatch refusal,
- * async-payment ignore, money-truth toggle exception), and order IDOR routes.
+ * async-payment ignore, money-truth toggle exception).
+ *
+ * Every refusal asserts its MESSAGE, not only `httpStatus: 409`: approval,
+ * self-purchase, seller-not-ready, tombstone and already-purchased all 409, so a
+ * status-only assertion lets an earlier gate mask a deleted later one.
+ *
+ * The order-row CAS `pending→paid` (CLAUDE.md § Stripe money-truth) is witnessed
+ * by a FORCED race: a second delivery lands inside the first delivery's CAS
+ * window (a one-shot `kvCompareAndSwap` hook). Replacing the CAS with a blind put
+ * turns that case red. The order IDOR route (`GET …/orders/:orderId`) is a route
+ * claim and is not covered here.
  */
 import http from 'node:http';
-import type { AddressInfo } from 'node:net';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { tombstonePack, restorePack, __clearPackTombstones } from '../src/host/packTombstones.js';
+import { __hostExtStorage } from '../src/host/hostExtPersistence.js';
+import { feeConfigs } from '../src/features/commerce-connect/stores.js';
 import {
   __resetCommerceConnect, startOnboarding, syncSellerFromStripe, upsertPaidListing,
   setListingApproval, createCheckout, getOrder, orderIdFor, handleConnectEvent,
@@ -23,7 +34,7 @@ beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { void (server.address() as AddressInfo); res(); }); });
+  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { res(); }); });
   await saveConfig({ id: 'commerce-connect', label: 'Commerce Connect (seller marketplace)', description: 'test', category: 'Admin', status: 'on', bucketUnit: 'tenant', salt: 'commerce-connect' }, 'test');
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
@@ -41,8 +52,10 @@ async function sellerWithListing(sellerTenant: string, packName: string, price =
 describe('listings — lanes, validation, approval fail-close', () => {
   it('native-paid needs price+currency; external-link needs https URL', async () => {
     await __resetCommerceConnect();
-    await expect(upsertPaidListing('s1', { packName: 'p.a', lane: 'native-paid' })).rejects.toMatchObject({ httpStatus: 400 });
-    await expect(upsertPaidListing('s1', { packName: 'p.a', lane: 'external-link', externalPaymentUrl: 'http://insecure' })).rejects.toMatchObject({ httpStatus: 400 });
+    await expect(upsertPaidListing('s1', { packName: 'p.a', lane: 'native-paid' }))
+      .rejects.toMatchObject({ httpStatus: 400, message: expect.stringMatching(/positive price and a currency/) });
+    await expect(upsertPaidListing('s1', { packName: 'p.a', lane: 'external-link', externalPaymentUrl: 'http://insecure' }))
+      .rejects.toMatchObject({ httpStatus: 400, message: expect.stringMatching(/https payment URL/) });
     const ok = await upsertPaidListing('s1', { packName: 'p.a', lane: 'external-link', externalPaymentUrl: 'https://pay.example/p' });
     // Grade pass CC-2 (ADR 0385 correction): external-link is approval-gated too
     // (multi-tenant phishing/name-squat vector) — only the FREE lane is ungated.
@@ -54,7 +67,8 @@ describe('listings — lanes, validation, approval fail-close', () => {
   it('a seller cannot list a pack another seller already listed', async () => {
     await __resetCommerceConnect();
     await upsertPaidListing('s1', { packName: 'p.b', lane: 'free' });
-    await expect(upsertPaidListing('s2', { packName: 'p.b', lane: 'free' })).rejects.toMatchObject({ httpStatus: 409 });
+    await expect(upsertPaidListing('s2', { packName: 'p.b', lane: 'free' }))
+      .rejects.toMatchObject({ httpStatus: 409, message: expect.stringMatching(/already listed by another seller/) });
   });
 
   it('unapproved native-paid is not purchasable and hidden from other tenants', async () => {
@@ -62,7 +76,8 @@ describe('listings — lanes, validation, approval fail-close', () => {
     await startOnboarding('s1', { refreshUrl: 'http://x/r', returnUrl: 'http://x/t' });
     await syncSellerFromStripe('s1');
     await upsertPaidListing('s1', { packName: 'p.c', lane: 'native-paid', priceMajorUnits: 10, currency: 'usd' });
-    await expect(createCheckout('buyer1', 'p.c', URLS)).rejects.toMatchObject({ httpStatus: 409 });
+    await expect(createCheckout('buyer1', 'p.c', URLS))
+      .rejects.toMatchObject({ httpStatus: 409, message: expect.stringMatching(/not yet approved for native purchase/) });
     expect((await listPaidListings('buyer1')).map((l) => l.packName)).not.toContain('p.c');
     expect((await listPaidListings('s1')).map((l) => l.packName)).toContain('p.c'); // own row visible
   });
@@ -85,6 +100,17 @@ describe('fee config — clamp + fail-closed default', () => {
     expect(await getApplicationFeePct('t9')).toBe(10);
     await expect(setApplicationFeePct('__global__', NaN)).rejects.toMatchObject({ httpStatus: 400 });
   });
+
+  it('a CORRUPT stored fee row is clamped at READ (fail-closed), not trusted', async () => {
+    // The write path clamps, so only a row written around it (migration, manual
+    // edit, older code) can carry an out-of-band value — written directly here.
+    await __resetCommerceConnect();
+    const at = new Date().toISOString();
+    await feeConfigs.put({ key: 't-corrupt-hi', applicationFeePct: 99, updatedAt: at });
+    await feeConfigs.put({ key: 't-corrupt-lo', applicationFeePct: -5, updatedAt: at });
+    expect(await getApplicationFeePct('t-corrupt-hi')).toBe(15);
+    expect(await getApplicationFeePct('t-corrupt-lo')).toBe(10);
+  });
 });
 
 describe('checkout — deterministic order, guards, demo lane', () => {
@@ -93,12 +119,19 @@ describe('checkout — deterministic order, guards, demo lane', () => {
     await sellerWithListing('s1', 'p.e', 40);
     const started = await createCheckout('buyer1', 'p.e', URLS);
     expect(started.mode).toBe('demo');
-    expect(started.order.orderId).toBe(orderIdFor('buyer1', 'p.e'));
+    // The id is checked by SHAPE and by its determinism (same buyer+pack → same id,
+    // another buyer → another id), never against `orderIdFor` itself: an oracle
+    // computed by the function under test moves with any sabotage of it.
+    expect(started.order.orderId).toMatch(/^cco_[0-9a-f]{32}$/);
+    expect(orderIdFor('buyer1', 'p.e')).toBe(started.order.orderId); // the route derives the SAME id
+    expect((await getOrder(started.order.orderId))?.status).toBe('pending');
     expect(started.order.applicationFeeMajorUnits).toBeCloseTo(4.8); // 12% of 40
     expect(started.url).toBe(`demo:checkout:${started.order.orderId}`);
     // repeat click — same order, no duplicate
     const again = await createCheckout('buyer1', 'p.e', URLS);
     expect(again.order.orderId).toBe(started.order.orderId);
+    const other = await createCheckout('buyer2', 'p.e', URLS);
+    expect(other.order.orderId).not.toBe(started.order.orderId);
   });
 
   it('a REMOVED pack cannot be purchased — no charge for an entitlement to nothing (CC2-B2)', async () => {
@@ -130,25 +163,34 @@ describe('checkout — deterministic order, guards, demo lane', () => {
     await __resetCommerceConnect();
     await sellerWithListing('s1', 'p.removed', 25);
     await tombstonePack('p.removed', 'operator-1');
-    await expect(createCheckout('buyer-rm2', 'p.removed', URLS))
-      .rejects.toMatchObject({ httpStatus: 409, details: { reason: 'pack_removed' } });
+    try {
+      await expect(createCheckout('buyer-rm2', 'p.removed', URLS))
+        .rejects.toMatchObject({ httpStatus: 409, message: expect.stringMatching(/removed from this host/), details: { reason: 'pack_removed' } });
 
-    // …and RESTORING the pack makes it purchasable again — the refusal is keyed
-    // on the tombstone, not on some permanent side effect of having set one.
-    await restorePack('p.removed');
-    const after = await createCheckout('buyer-rm3', 'p.removed', URLS);
-    expect(after.order.orderId).toBeTruthy();
-    await __clearPackTombstones();
+      // …and RESTORING the pack makes it purchasable again — the refusal is keyed
+      // on the tombstone, not on some permanent side effect of having set one.
+      await restorePack('p.removed');
+      const after = await createCheckout('buyer-rm3', 'p.removed', URLS);
+      expect(after.order.orderId).toBeTruthy();
+    } finally {
+      await __clearPackTombstones();
+    }
   });
 
   it('self-purchase and disabled sellers are refused', async () => {
     await __resetCommerceConnect();
     await sellerWithListing('s1', 'p.f');
-    await expect(createCheckout('s1', 'p.f', URLS)).rejects.toMatchObject({ httpStatus: 409 });
-    // an un-onboarded seller's listing (no such flow normally, simulate by fresh listing owner)
+    await expect(createCheckout('s1', 'p.f', URLS))
+      .rejects.toMatchObject({ httpStatus: 409, message: expect.stringMatching(/cannot purchase your own listing/) });
+    // A seller who STARTED onboarding but is not enabled (no sync ⇒ `pending`,
+    // chargesEnabled false). The seller ROW exists, so this reaches the
+    // `onboardingState !== 'enabled'` branch — a seller with no row at all is
+    // refused by the `!seller` half and could not tell that branch was deleted.
+    await startOnboarding('s2', { refreshUrl: 'http://x/r', returnUrl: 'http://x/t' });
     await upsertPaidListing('s2', { packName: 'p.g', lane: 'native-paid', priceMajorUnits: 5, currency: 'usd' });
     await setListingApproval('p.g', 'approved');
-    await expect(createCheckout('buyer1', 'p.g', URLS)).rejects.toMatchObject({ httpStatus: 409 }); // seller not enabled
+    await expect(createCheckout('buyer1', 'p.g', URLS))
+      .rejects.toMatchObject({ httpStatus: 409, message: expect.stringMatching(/seller cannot take payments/) });
   });
 });
 
@@ -164,7 +206,7 @@ describe('purchase webhook — exactly-once fulfilment + money-truth guards', ()
     return started.order.orderId;
   }
 
-  it('fulfils exactly once under CONCURRENT duplicate delivery (different event ids)', async () => {
+  it('concurrent duplicate deliveries (different event ids) both resolve to one paid order', async () => {
     await __resetCommerceConnect();
     const orderId = await paidOrderSetup('buyer1', 'p.h');
     const [a, b] = await Promise.all([
@@ -180,6 +222,49 @@ describe('purchase webhook — exactly-once fulfilment + money-truth guards', ()
     expect(sides.sales.map((o) => o.orderId)).toContain(orderId);
   });
 
+  it('a re-delivery under a NEW event id after fulfilment does not re-apply (terminal guard)', async () => {
+    await __resetCommerceConnect();
+    const orderId = await paidOrderSetup('buyer1', 'p.h2');
+    await handleConnectEvent({ event: sessionEvent('evt_first', orderId) });
+    // Stripe re-delivers under a different event id (dedup on event.id cannot
+    // help); a different intent id makes a re-application observable.
+    const out = await handleConnectEvent({ event: sessionEvent('evt_second', orderId, { payment_intent: 'pi_2' }) });
+    expect(out.handled).toBe(true);
+    const order = (await getOrder(orderId))!;
+    expect(order.status).toBe('paid');
+    expect(order.stripePaymentIntentId).toBe('pi_1');
+  });
+
+  it('the pending→paid flip is a CAS: a delivery landing inside the window wins, the other is a no-op', async () => {
+    // Forced race (the money-truth file's pattern): when the FIRST delivery's
+    // pending→paid swap reaches storage, the SECOND delivery runs to completion
+    // inside that window. With the CAS, the first swap then fails (its expected
+    // row is gone) and the inner delivery's intent stands. A blind put would
+    // overwrite it — and would never reach this hook at all.
+    await __resetCommerceConnect();
+    const orderId = await paidOrderSetup('buyer1', 'p.h3');
+    const storage = __hostExtStorage()!;
+    const realCas = storage.kvCompareAndSwap.bind(storage);
+    let fired = false;
+    const spy = vi.spyOn(storage, 'kvCompareAndSwap').mockImplementation(async (key, expected, next) => {
+      if (!fired && key.includes(orderId) && Reflect.get(Object(JSON.parse(next)), 'status') === 'paid') {
+        fired = true;
+        await handleConnectEvent({ event: sessionEvent('evt_inner', orderId, { payment_intent: 'pi_inner' }) });
+      }
+      return realCas(key, expected, next);
+    });
+    try {
+      const out = await handleConnectEvent({ event: sessionEvent('evt_outer', orderId, { payment_intent: 'pi_outer' }) });
+      expect(out.handled).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(fired).toBe(true);
+    const order = (await getOrder(orderId))!;
+    expect(order.status).toBe('paid');
+    expect(order.stripePaymentIntentId).toBe('pi_inner');
+  });
+
   it('ignores a session completed with payment_status unpaid (async methods)', async () => {
     await __resetCommerceConnect();
     const orderId = await paidOrderSetup('buyer1', 'p.i');
@@ -191,7 +276,9 @@ describe('purchase webhook — exactly-once fulfilment + money-truth guards', ()
     await __resetCommerceConnect();
     const orderId = await paidOrderSetup('buyer1', 'p.j');
     await handleConnectEvent({ event: sessionEvent('evt_m', orderId, { amount_total: 999 }) });
-    expect((await getOrder(orderId))!.status).toBe('pending');
+    const o = (await getOrder(orderId))!;
+    expect(o.status).toBe('pending');
+    expect(o.anomaly?.kind).toBe('purchase-amount-mismatch');
   });
 
   it('MONEY-TRUTH: applies a purchase even when the toggle is now OFF', async () => {

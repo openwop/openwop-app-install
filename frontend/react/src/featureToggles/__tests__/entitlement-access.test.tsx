@@ -2,6 +2,15 @@
  * ADR 0419 P3 — the feature-access `entitled` / `locked` signal. `enabled` stays
  * toggle-only; `locked` = toggle on AND the plan/bundles don't entitle it (a paid
  * feature not yet bought). Billing off / unrestricted plan ('*') ⇒ nothing locked.
+ *
+ * The first-load failure case is the ADR 0419 decision (lines 266-267): an HTTP
+ * failure of the entitlement read degrades to '*' for PRESENTATION — the backend
+ * paywall stays the authority. (A REFRESH failure is the D12 follow-up's concern,
+ * pinned in offlineEntitlement.test.tsx.)
+ *
+ * Sabotage that turns it red: `locked: !entitled` (toggle-OFF case), dropping the
+ * `'*'` arm of `isEntitled` (unrestricted case), `allowed.length > 0` for
+ * `includes` (narrowed case), or degrading a failed read to `[]` (failure case).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, waitFor } from '@testing-library/react';
@@ -23,7 +32,7 @@ beforeEach(() => {
   fetchAssignments.mockReset();
   fetchEntitlements.mockReset();
   // crm toggle ON by default
-  fetchAssignments.mockResolvedValue([{ id: 'crm', status: 'on', enabled: true, variant: null }]);
+  fetchAssignments.mockResolvedValue({ assignments: [{ id: 'crm', status: 'on', enabled: true, variant: null }] });
 });
 afterEach(cleanup);
 
@@ -43,7 +52,7 @@ describe('feature-access entitlement signal (ADR 0419)', () => {
   });
 
   it('toggle OFF → never locked even when not entitled', async () => {
-    fetchAssignments.mockResolvedValue([{ id: 'crm', status: 'off', enabled: false, variant: null }]);
+    fetchAssignments.mockResolvedValue({ assignments: [{ id: 'crm', status: 'off', enabled: false, variant: null }] });
     fetchEntitlements.mockResolvedValue(['billing']);
     view('crm');
     await waitFor(() => expect(screen.getByText(/enabled=false/)).toBeTruthy());
@@ -51,7 +60,8 @@ describe('feature-access entitlement signal (ADR 0419)', () => {
   });
 
   it('entitlements failure degrades to unrestricted (never spuriously locks)', async () => {
-    fetchEntitlements.mockRejectedValue(new Error('billing down'));
+    // The client's real failure shape (`ToggleAdminError` carries `status`).
+    fetchEntitlements.mockRejectedValue(Object.assign(new Error('fetchEntitlements returned 503'), { status: 503 }));
     view('crm');
     await waitFor(() => expect(screen.getByText(/enabled=true/)).toBeTruthy());
     expect(screen.getByText('enabled=true entitled=true locked=false hook=false')).toBeTruthy();

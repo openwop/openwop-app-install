@@ -14,13 +14,14 @@
  *
  * What is true NOW, on both legs: `post` declares `"role": "side-effect"` + the
  * `side-effectful` capability in `pack.json`, and `executor/sideEffects.ts`
- * carries `/^feature\.comments\.nodes\.post$/`. It is in the derived floor AND
+ * carries `/^feature\.comments\.nodes\.(post|resolve)$/`. It is in the derived floor AND
  * the fast-path SERVED set, so a replay/fork is served the source run's recorded
  * outcome and never re-posts.
  *
- * `list` is a read and `resolve` converges on the same terminal state, so both
- * stay `role:"action"` and DO re-execute on a fork — stated, because "action"
- * meaning "not re-issued" is exactly the belief that shipped the defect.
+ * `resolve` joined it in ADR 0881 (it now notifies, stamps `resolvedBy` and emits
+ * a host event), so it is a side-effect on both legs too. `list` is a read and
+ * stays `role:"action"`, so it DOES re-execute on a fork — stated, because
+ * "action" meaning "not re-issued" is exactly the belief that shipped the defect.
  */
 
 function ensureComments(ctx) {

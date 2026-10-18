@@ -63,7 +63,9 @@ export function registerAppBrandRoutes(app: Express): void {
       if (body.name !== undefined) patch.name = body.name;
       if (body.description !== undefined) patch.description = body.description;
       if (body.identity !== undefined) patch.identity = body.identity;
-      const brand = await editAppBrand(patch, req.principal?.principalId ?? 'superadmin');
+      // ADR 0891 D9/D8 — the durable `user:` id where there is one: the brand eraser
+      // scrubs the app brand's audit by it (a principal id is not issuer-qualified).
+      const brand = await editAppBrand(patch, req.userId ?? req.principal?.principalId ?? 'superadmin');
       res.json({ brand });
     } catch (err) { next(err); }
   });

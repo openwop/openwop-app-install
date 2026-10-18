@@ -1,6 +1,6 @@
 {
   "name": "core.openwop.workflows.feedback-triage",
-  "version": "1.1.1",
+  "version": "1.2.0",
   "kind": "workflow-chain",
   "description": "Feedback-triage chains (RFC 0013): turn raw inbound feedback into classified, routed, actionable items. A form submission is classified and (on approval) filed as a follow-up task; a batch is themed into a weekly digest. Replay-deterministic.",
   "author": "openwop",
@@ -14,7 +14,7 @@
   "chains": [
     {
       "chainId": "feedback-triage.classify-and-route",
-      "version": "1.1.1",
+      "version": "1.2.0",
       "label": "Feedback → Classify → Task",
       "description": "Every feedback form submission is classified (theme, sentiment, severity) by AI; a human confirms, and a CRM follow-up task is filed with the classification.",
       "parameters": {
@@ -32,8 +32,8 @@
             "default": "review",
             "description": "Default theme label for the task title."
           },
-          "provider": { "type": "string", "default": "anthropic", "description": "AI provider id for this chain's LLM nodes. Frozen into this chain's AI nodes when the workflow is created (ADR 0498 — a concrete provider is what keeps replay deterministic). Override at instantiation to use a different vendor or your own BYOK provider; whichever you pick, the workspace needs a key for it — the workflow will not fall back to another provider on its own." },
-          "model": { "type": "string", "default": "claude-sonnet-4-6", "description": "Model id for this chain's LLM nodes. Must be advertised by `provider` in the host catalog; override at instantiation." }
+          "provider": { "type": "string", "description": "AI provider id for this chain's model-calling nodes. Set it to fix a provider into those nodes when the workflow is created. Leave it unset and each run uses the run's chosen provider, else the workspace's AI setting, else the host's catalog default (ADR 0903); whichever is chosen is recorded on the run, so a replay or fork uses the same one. The workspace needs a key for the provider that runs." },
+          "model": { "type": "string", "description": "Model id for this chain's model-calling nodes. Must be offered by the provider in the host catalog. Leave it unset to use the provider's model from the same choice (ADR 0903)." }
         }
       },
       "capabilities": [
@@ -137,7 +137,7 @@
     },
     {
       "chainId": "feedback-triage.weekly-themes",
-      "version": "1.0.1",
+      "version": "1.1.0",
       "label": "Weekly Feedback → Theme Digest",
       "description": "A scheduled roll-up that clusters the week's feedback into the top recurring themes with representative quotes, then posts the digest as an in-app notification.",
       "parameters": {
@@ -145,8 +145,8 @@
         "additionalProperties": false,
         "required": ["scheduleCron"],
         "properties": {
-          "provider": { "type": "string", "default": "anthropic", "description": "AI provider id for this chain's LLM nodes. Frozen into this chain's AI nodes when the workflow is created (ADR 0498 — a concrete provider is what keeps replay deterministic). Override at instantiation to use a different vendor or your own BYOK provider; whichever you pick, the workspace needs a key for it — the workflow will not fall back to another provider on its own." },
-          "model": { "type": "string", "default": "claude-sonnet-4-6", "description": "Model id for this chain's LLM nodes. Must be advertised by `provider` in the host catalog; override at instantiation." },
+          "provider": { "type": "string", "description": "AI provider id for this chain's model-calling nodes. Set it to fix a provider into those nodes when the workflow is created. Leave it unset and each run uses the run's chosen provider, else the workspace's AI setting, else the host's catalog default (ADR 0903); whichever is chosen is recorded on the run, so a replay or fork uses the same one. The workspace needs a key for the provider that runs." },
+          "model": { "type": "string", "description": "Model id for this chain's model-calling nodes. Must be offered by the provider in the host catalog. Leave it unset to use the provider's model from the same choice (ADR 0903)." },
           "scheduleCron": { "type": "string", "description": "Cron expression for when this workflow runs (e.g. `0 9 * * 1` = Mondays 09:00)." }
         }
       },

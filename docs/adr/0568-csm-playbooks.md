@@ -1,6 +1,6 @@
 # ADR 0568 — CSM playbooks: health-triggered plays as chains/stacks, never in-tree
 
-Status: Proposed
+Status: Superseded by 0882 (2026-10-13 — never started; its decision is absorbed there as D5–D7, reshaped)
 Date: 2026-08-14
 Feature: csm (extends the ADR-lineage csm feature — no new toggle)
 Origin: UX_UPGRADE-csm R2 deferral CSM-R2-2 ("playbooks — chains/stacks +

@@ -103,7 +103,7 @@ export function registerCadEditorRoutes(deps: RouteDeps): void {
           if (!isCadExportFormat(body.format)) {
             throw new OpenwopError('validation_error', `\`format\` must be one of: ${CAD_EXPORT_FORMATS.join(', ')}.`, 400, { field: 'format' });
           }
-          const canvas = await loadCanvas(tenantId, req.params.canvasId, user.userId);
+          const canvas = await loadCanvas(tenantId, req.params.canvasId, user.userId, 'read');
           const startedAt = Date.now();
           const result = await exportCad(tenantId, canvas.state as Record<string, unknown>, body.format);
           log.info('cad_exported', { tenantId, format: body.format, bytes: result.sizeBytes, triangles: result.triangleCount, ms: Date.now() - startedAt });
@@ -116,7 +116,7 @@ export function registerCadEditorRoutes(deps: RouteDeps): void {
       app.post(`${org}/canvases/:canvasId/bom`, async (req, res, next) => {
         try {
           const { user, tenantId } = await authorizeOrgScope(req, CAD_FEATURE, 'workspace:read');
-          const canvas = await loadCanvas(tenantId, req.params.canvasId, user.userId);
+          const canvas = await loadCanvas(tenantId, req.params.canvasId, user.userId, 'read');
           const bom = await generateBom(tenantId, canvas.state as Record<string, unknown>);
           const csv = bomCsv(bom);
           const stored = await storeMediaAsset(tenantId, {

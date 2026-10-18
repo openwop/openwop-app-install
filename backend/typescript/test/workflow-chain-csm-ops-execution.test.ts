@@ -237,6 +237,8 @@ describe('csm-ops.health-from-crm — end-to-end execution (real executor, direc
       { factor: 'dealsSeen', weight: 0, value: 2 },
       { factor: 'tasksAttributed', weight: 0, value: 2 },
       { factor: 'tasksSeen', weight: 0, value: 2 },
+      // ADR 0882 D4 — a play's own tasks, reported and never scored.
+      { factor: 'playTasksOpen', weight: 0, value: 0 },
     ]);
     expect(updated!.healthComputedAt, 'a computed write stamps healthComputedAt').toBeTruthy();
   });

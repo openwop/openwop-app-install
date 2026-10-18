@@ -2,9 +2,12 @@
  * ADR 0114 Phase 1 — code-exec node capability-honesty.
  * The `run` node throws `capability_not_provided` when no sandbox adapter is wired
  * (the default), and delegates to `ctx.runSandboxedCode` when one is present.
+ * Phase 3: on a host with an interrupt primitive it SUSPENDS for a human approval
+ * (kind `code-exec`) before executing; a decline never executes.
+ * Breaks if the node fakes execution with no adapter, forwards the wrong request,
+ * marks sandbox output trusted, or runs code the approver declined.
  */
 import { describe, it, expect } from 'vitest';
-// @ts-expect-error — .mjs pack module has no type declarations (pure-JS node pack).
 import { run } from '../../../packs/feature.code-exec.nodes/index.mjs';
 
 describe('feature.code-exec.nodes.run', () => {
@@ -27,7 +30,7 @@ describe('feature.code-exec.nodes.run', () => {
     const out = await run(ctx);
     expect(out.status).toBe('success');
     expect(out.outputs.stdout).toBe('4\n');
-    expect(calls).toHaveLength(1);
+    expect(calls).toEqual([{ language: 'python', code: 'print(2+2)', stdin: undefined, timeoutMs: undefined }]);
     // ADR 0114 Phase 4b — output carries the typed artifact (untrusted).
     expect(out.outputs.artifact.artifactTypeId).toBe('code.execution-result');
     expect(out.outputs.artifact.contentTrust).toBe('untrusted');
@@ -36,12 +39,14 @@ describe('feature.code-exec.nodes.run', () => {
 
   it('ADR 0114 Phase 3 — HITL approval gates execution: approved → runs', async () => {
     const calls: unknown[] = [];
+    const asked: unknown[] = [];
     const ctx = {
       inputs: { language: 'python', code: 'print(1)' },
-      suspend: async () => ({ decision: 'approved' }),
+      suspend: async (req: unknown) => { asked.push(req); return { decision: 'approved' }; },
       runSandboxedCode: async (req: unknown) => { calls.push(req); return { exitCode: 0, stdout: 'ok', stderr: '', files: [] }; },
     };
     const out = await run(ctx);
+    expect(asked).toEqual([expect.objectContaining({ reason: 'approval', kind: 'code-exec' })]); // asked FIRST
     expect(calls).toHaveLength(1); // executed after approval
     expect(out.outputs.stdout).toBe('ok');
   });
@@ -55,7 +60,9 @@ describe('feature.code-exec.nodes.run', () => {
     };
     const out = await run(ctx);
     expect(calls).toHaveLength(0); // NEVER executed
+    expect(out.status).toBe('success'); // a refused-but-successful outcome, not a node failure
     expect(out.outputs.declined).toBe(true);
     expect(out.outputs.exitCode).toBe(-1);
+    expect(out.outputs.stderr).toBe('execution declined by approver');
   });
 });

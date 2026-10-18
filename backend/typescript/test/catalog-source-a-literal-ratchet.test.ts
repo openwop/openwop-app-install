@@ -12,9 +12,8 @@
  * adding one fails here. A new workflow ships as a chain pack (CLAUDE.md
  * "Workflows — never hard-code").
  */
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { EXAMPLE_WORKFLOWS } from '../src/host/exampleWorkflows.js';
 
 const ALLOWED = [
   'openwop-app.uppercase',
@@ -51,6 +50,8 @@ describe('catalog source-A literal ladder (ADR 0764 D6)', () => {
    * comes from. A new definition source fails here. P2 converts both modules to
    * a chain pack and deletes them: P2c deleted `getWorkflowTemplate` and dropped
    * it from this set, after all 44 `tmpl.*` moved to the work-twin-templates pack.
+   * P2d deleted `getExampleWorkflow` (the 15 `openwop-app.agents.*` had zero prod
+   * runs, so they were deleted rather than archived) and dropped it too.
    */
   it('pins every definition source the resolver returns (ADR 0775 D6)', () => {
     const src = readFileSync('src/host/index.ts', 'utf8')
@@ -58,7 +59,7 @@ describe('catalog source-A literal ladder (ADR 0764 D6)', () => {
       .replace(/^\s*\/\/.*$/gm, '');
     const returned = [...src.matchAll(/return\s*\{\s*workflowId\s*,\s*definition:\s*([A-Za-z_$][\w$]*)\s*\}/g)].map((m) => m[1]!);
     // Non-vacuity: the probe must see the resolver it guards.
-    expect(returned.length).toBeGreaterThanOrEqual(5);
+    expect(returned.length).toBeGreaterThanOrEqual(4); // 5 → 4 when P2d removed getExampleWorkflow
     const sourceOf = (ident: string): string => {
       const init = new RegExp(`const\\s+${ident}\\s*=\\s*(?:await\\s+)?([\\w$.]+)\\(`).exec(src);
       return init ? `${init[1]}()` : `import:${ident}`;
@@ -67,7 +68,6 @@ describe('catalog source-A literal ladder (ADR 0764 D6)', () => {
       [
         'conformanceFixtures.get()',
         'getChainBackedWorkflow()',
-        'getExampleWorkflow()', // ARWF-1 quarantine — P2 deletes it
         'getRegisteredWorkflowAsync()',
         'import:agentMentionWorkflowDefinition',
       ].sort(),
@@ -76,10 +76,15 @@ describe('catalog source-A literal ladder (ADR 0764 D6)', () => {
 
   it('the quarantined in-tree catalogs only shrink (ADR 0775 D6)', () => {
     // ADR 0775 P2a/P2b/P2c took the tmpl.* ceiling 44 → 28 → 12 → 0 and P2c deleted
-    // the catalog. It must not come back as an export of that module.
+    // the catalog. It must not come back as an export of that module. P2d took the
+    // openwop-app.agents.* ceiling 15 → 0 and deleted that module outright.
     const templates = readFileSync('src/host/workflowTemplates.ts', 'utf8');
     expect(templates, 'a new tmpl.* ships as a workflow-chain pack').not.toMatch(/\bWORKFLOW_TEMPLATES\b|getWorkflowTemplate|WorkflowDefinition\s*=/);
-    expect(EXAMPLE_WORKFLOWS.length, 'a new demo workflow ships as a workflow-chain pack').toBeLessThanOrEqual(15);
+    expect(existsSync('src/host/exampleWorkflows.ts'), 'a new demo workflow ships as a workflow-chain pack').toBe(false);
+    const index = readFileSync('src/host/index.ts', 'utf8')
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/^\s*\/\/.*$/gm, '');
+    expect(index, 'the deleted demo-workflow resolver must not return to catalog source A').not.toMatch(/getExampleWorkflow|exampleWorkflows\.js/);
   });
 });
 

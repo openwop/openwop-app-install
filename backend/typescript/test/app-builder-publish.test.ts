@@ -80,7 +80,35 @@ describe('publish route (ADR 0306)', () => {
     const canvas = await createCanvasForTenant(tenantId, { canvasTypeId: 'canvas.app-builder', name: 'P', initialState: STATE });
     await setPublishToggle('off');
     const off = await c.post(`${AB(orgId)}/canvases/${canvas.canvasId}/publish`, { target: 'html-css', repo: 'my-app' });
-    expect([403, 404]).toContain(off.status);
+    // A toggle-off route does not exist for the tenant: exactly 404 not_found
+    // (a 403 here would be a different gate answering).
+    expect(off.status, JSON.stringify(off.body)).toBe(404);
+    expect(off.body.error).toBe('not_found');
+  });
+
+  // The header's workspace:write gate, witnessed by a SAME-tenant caller with no
+  // membership (a second login into the tenant ⇒ zero scopes). A cross-tenant
+  // stranger would be refused by the org lookup before the scope check runs.
+  it('a same-tenant non-member AND a viewer are refused 403 forbidden_scope before any GitHub call', async () => {
+    const { c, orgId, tenantId } = await orgOwner();
+    const canvas = await createCanvasForTenant(tenantId, { canvasTypeId: 'canvas.app-builder', name: 'P', initialState: STATE });
+    const stranger = client();
+    expect((await stranger.post('/host/openwop-app/test/login', { email: `abp-x-${Date.now()}-${n++}@acme.test`, tenantId })).status).toBe(201);
+    // A viewer holds workspace:read — enough to see the app, not to publish it.
+    const viewer = client();
+    const viewerUser = (await viewer.post('/host/openwop-app/test/login', { email: `abp-v-${Date.now()}-${n++}@acme.test`, tenantId })).body.user as { userId: string };
+    const add = await c.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'Vi', subject: viewerUser.userId, roles: ['viewer'] });
+    expect(add.status, JSON.stringify(add.body)).toBe(201);
+    await setPublishToggle('on');
+    try {
+      for (const who of [stranger, viewer]) {
+        const r = await who.post(`${AB(orgId)}/canvases/${canvas.canvasId}/publish`, { target: 'html-css', repo: 'my-app' });
+        expect(r.status, JSON.stringify(r.body)).toBe(403);
+        expect(r.body.error).toBe('forbidden_scope');
+      }
+    } finally {
+      await setPublishToggle('off');
+    }
   });
 
   it('validates target + repo name, then 424s without a GitHub connection', async () => {

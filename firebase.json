@@ -303,6 +303,15 @@
         ]
       },
       {
+        "source": "/@(sw|sw-push).js",
+        "headers": [
+          {
+            "key": "Cache-Control",
+            "value": "no-cache"
+          }
+        ]
+      },
+      {
         "source": "/api/host/openwop-app/ui-plugin/packs/**/entry",
         "headers": [
           {

@@ -10,6 +10,10 @@
  *   - DSAR: the note is erased when the subject wrote it — even on a card they
  *     neither created nor are assigned (the assigner's own free text) — or is
  *     named in its decisions; untouched otherwise.
+ *
+ * Sabotages that turn it red: the route normalizing as 'agent'; dropping the
+ * intent-less 400; `{handoff:null}` → `{}` on reassign; removing either
+ * `noteTouches` leg in `eraseSubjectKanban`.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -61,15 +65,22 @@ describe('ADR 0829 P4 — POST /kanban/cards/:cardId/assign carries a handoff no
     const r = await assign(id, { assigneeRole: 'editor', handoff: { ...NOTE, producedBy: 'agent' } });
     expect(r.status).toBe(200);
     expect(r.body.card.handoff).toMatchObject({ v: 1, intent: NOTE.intent, openQuestions: NOTE.openQuestions, producedBy: 'human' });
-    expect(typeof r.body.card.handoffBy).toBe('string');
+    expect(r.body.card.handoffBy).toBeTruthy();
+    expect(r.body.card.handoffBy).not.toBe('unknown'); // the caller, not the fallback
     expect(Number.isNaN(Date.parse(r.body.card.handoffAt ?? ''))).toBe(false);
   });
 
   it('ON: a note without an intent is a 400, and nothing changes', async () => {
     const id = await newCard();
-    const r = await assign(id, { assigneeRole: 'editor', handoff: { openQuestions: ['x'] } });
+    expect((await assign(id, { assigneeRole: 'editor', handoff: NOTE })).status).toBe(200);
+    const r = await assign(id, { assigneeRole: 'reviewer', handoff: { openQuestions: ['x'] } });
     expect(r.status).toBe(400);
     expect(r.body.error).toBe('validation_error');
+    // Nothing changed: the prior note and role survive the refused request (a route
+    // that cleared the note before validating would fail here).
+    const after = await kanban.getCard(id);
+    expect(after?.handoff?.intent).toBe(NOTE.intent);
+    expect(after?.assigneeRole).toBe('editor');
   });
 
   it('ON: reassignment without a note clears the old one; unassign clears it', async () => {

@@ -185,8 +185,10 @@ export const INSTALL_MARKER_FILE = '.openwop-installed.json';
  */
 export const INSTALLED_PACK_FILES: ReadonlySet<string> = new Set(['pack.json', 'index.mjs']);
 // `prompts` for RFC 0070 / RFC 0003 §C `systemPromptRef`; `keys` for the legacy
-// on-disk signature path (status only, never trust — `packSignature.verifySelfAttested`).
-export const INSTALLED_PACK_SUBDIRS: ReadonlySet<string> = new Set(['schemas', 'keys', 'prompts']);
+// on-disk signature path (status only, never trust — `packSignature.verifySelfAttested`);
+// `evals` for RFC 0081 §A `evalSuiteRef` (ADR 0889 D2 — JSON data, closed-world
+// validated at use; without it a registry install silently dropped the suite file).
+export const INSTALLED_PACK_SUBDIRS: ReadonlySet<string> = new Set(['schemas', 'keys', 'prompts', 'evals']);
 
 /** Never content, tolerated beside an installed pack (Finder litter on a dev box). */
 const TOLERATED_LITTER = new Set(['.DS_Store']);

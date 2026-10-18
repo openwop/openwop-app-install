@@ -12,7 +12,7 @@
  *  NTFUX-4 — a failed durable save of a signed-in caller's prefs is surfaced;
  *            an anonymous caller's 401 is not a failure.
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { sanitizeQuietHours } from '../preferences.js';
 import { defaultPreferences } from '../types.js';
 
@@ -38,6 +38,8 @@ vi.mock('../notificationsClient.js', () => ({
   listNotifications: vi.fn(async () => []),
   subscribeToNotifications: vi.fn(() => () => undefined),
   archiveNotification: vi.fn(async () => undefined),
+  archiveReadNotifications: vi.fn(async () => ({ updated: 0 })),
+  bulkReadNotifications: vi.fn(async () => ({ updated: 0 })),
   deleteNotification: vi.fn(async () => undefined),
   markAllNotificationsRead: vi.fn(async () => undefined),
   markNotificationRead: vi.fn(async () => undefined),
@@ -73,6 +75,10 @@ describe('ADR 0816 NTFUX-2/3 — push state is the server\'s truth', () => {
     Object.assign(window, { PushManager: function PushManager() { /* present */ } });
     Object.defineProperty(navigator, 'serviceWorker', { value: {}, configurable: true });
   });
+  afterEach(() => {
+    Reflect.deleteProperty(window, 'PushManager');
+    Reflect.deleteProperty(navigator, 'serviceWorker');
+  });
 
   it('a browser subscription bound to another account reads as elsewhere, not "on"', async () => {
     push.binding = 'elsewhere';
@@ -87,9 +93,12 @@ describe('ADR 0816 NTFUX-2/3 — push state is the server\'s truth', () => {
     push.enableError = new PushSubscribeError(400, 'push_endpoint_refused');
     expect(await useNotificationStore.getState().enablePush()).toBe(false);
     expect(useNotificationStore.getState().pushStatus).toBe('refused');
+    // A STATE, not a generic error as well.
+    expect(useNotificationStore.getState().error).toBeNull();
     push.enableError = new PushSubscribeError(409, 'push_endpoint_taken');
     expect(await useNotificationStore.getState().enablePush()).toBe(false);
     expect(useNotificationStore.getState().pushStatus).toBe('taken');
+    expect(useNotificationStore.getState().error).toBeNull();
   });
 
   it('a second click while an enable is in flight does not subscribe twice', async () => {
@@ -114,9 +123,36 @@ describe('ADR 0816 NTFUX-4 — a failed save is said, an anonymous 401 is not', 
 
   it('an anonymous caller\'s 401 is not reported as a failed save', async () => {
     useNotificationStore.setState({ preferencesSaveFailed: false });
+    useNotificationStore.setState({ error: null });
     putPreferences.mockRejectedValueOnce(new Error('/host/openwop-app/notifications/preferences → 401'));
     useNotificationStore.getState().updatePreferences({ ...defaultPreferences(), globalMute: true });
-    await new Promise((r) => setTimeout(r, 10));
+    // The settle signal: the failure is written in the SAME `set` as the flag.
+    await vi.waitFor(() => expect(useNotificationStore.getState().error).toMatch(/→ 401$/));
     expect(useNotificationStore.getState().preferencesSaveFailed).toBe(false);
+  });
+});
+
+describe('ADR 0816 NTFUX-3 — the REAL binding check: a subscription another account owns is `elsewhere`', () => {
+  // The cases above mock `currentPushBinding`; this one runs the module's own
+  // decision (the browser endpoint matched against the caller's OWN rows).
+  const ENDPOINT = 'https://push.example/e1';
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    Reflect.deleteProperty(window, 'PushManager');
+    Reflect.deleteProperty(navigator, 'serviceWorker');
+  });
+
+  it('reads `elsewhere` when the caller has no row for this browser endpoint, `here` when it does', async () => {
+    const actual = await vi.importActual<typeof import('../pushSubscription.js')>('../pushSubscription.js');
+    Object.assign(window, { PushManager: function PushManager() { /* present */ } });
+    Object.defineProperty(navigator, 'serviceWorker', {
+      configurable: true,
+      value: { getRegistration: async () => ({ pushManager: { getSubscription: async () => ({ endpoint: ENDPOINT }) } }) },
+    });
+    let rows: Array<{ subscriptionId: string; endpoint: string }> = [{ subscriptionId: 's2', endpoint: 'https://push.example/OTHER' }];
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ subscriptions: rows }), { status: 200, headers: { 'content-type': 'application/json' } })));
+    expect(await actual.currentPushBinding()).toBe('elsewhere');
+    rows = [{ subscriptionId: 's1', endpoint: ENDPOINT }];
+    expect(await actual.currentPushBinding()).toBe('here');
   });
 });

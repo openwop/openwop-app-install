@@ -107,6 +107,12 @@ export async function sendBackDriftSuggestion(projectId: string, suggestionId: s
   await asJson(await fetch(`${base(projectId)}/suggestions/${encodeURIComponent(suggestionId)}/send-back`, fetchOpts({ method: 'POST', headers: jsonHeaders(), body: JSON.stringify({ note }) })), 'sendBackDriftSuggestion');
 }
 
+/** ADR 0855 P5 — check a GitHub pull request against the ledger (on demand). */
+export interface PullRequestCheck { pullRequest: string; ledgerVersion: number; findings: number; unexplained: number; suggestionIds: string[] }
+export async function checkPullRequestDrift(projectId: string, url: string): Promise<PullRequestCheck> {
+  return asJson(await fetch(`${base(projectId)}/drift/pull-request`, fetchOpts({ method: 'POST', headers: jsonHeaders(), body: JSON.stringify({ url }) })), 'checkPullRequestDrift');
+}
+
 /** ADR 0852 D4/D5 — read-only summaries of several projects' ledgers (unreadable ones are omitted). */
 export interface LedgerSummary {
   projectId: string; name: string; hasLedger: boolean; version?: number; goal?: string;

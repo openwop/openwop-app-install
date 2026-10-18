@@ -183,6 +183,17 @@ ADR 0594 D2's tripwire ships as a test: no CMS route or surface can set `publicR
 exemption in the test (review L3). Entities registers its resolvers when the feature activates
 (`entities/publicRead.ts:225`), so the witness composes entities explicitly.
 
+> **ADDENDUM 2026-10-11 (ADR 0861 OQ-1, owner decision) — outdated translations are
+> disclosed on the card, as information.** The row gains `outdatedTranslationLocales`, derived
+> beside `aiDraftedLocales` / `liveReferenceSections` at queue and repin time (a repin REPLACES
+> it), from `pageTranslationStatus` — the same read as the editor's translation status, never
+> a second computation. The card shows "N translations are outdated (es, fr)" as a wrapping
+> link to the page editor; nothing in any decide lane reads the field, so approval is never
+> blocked by it (witnessed: `adr0861-approval-card-outdated-translations` approves with `fr`
+> still outdated). Like the other disclosures it describes the pinned version: a shared-section
+> edit after submit can change it without a repin, the same staleness `liveReferenceSections`
+> already has.
+
 ### D6 — the page's latest decision survives pruning (`CMSA2WF-4`)
 
 **Revised (review H1).** The first draft stamped `lastReview` onto the page. That would have

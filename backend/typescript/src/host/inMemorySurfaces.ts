@@ -137,6 +137,8 @@ export type KvSurface = {
   cas: SurfaceFn;
 };
 export type TableSurface = {
+  /** RFC 0228 G4 — declare `{ table, columns }`; a conflicting re-declaration is refused. */
+  createTable: SurfaceFn;
   insert: SurfaceFn;
   update: SurfaceFn;
   upsert: SurfaceFn;
@@ -426,14 +428,54 @@ function createKv(state: TenantMap<KvEntry>, scope: BundleScope): KvSurface {
 interface TableRow { id: string; [field: string]: unknown; }
 /** RFC 0016 §B point 2 — schema declared on first insert; subsequent
  *  rows MUST conform. Per-tenant + per-table column-type registry. */
-type TableColType = 'string' | 'number' | 'boolean' | 'object';
+export type TableColType = 'string' | 'number' | 'boolean' | 'object';
 const _tableSchemas = new Map<string /* tenantId::tableName */, Map<string, TableColType>>();
-function inferColType(v: unknown): TableColType {
+export function inferColType(v: unknown): TableColType {
   if (typeof v === 'string') return 'string';
   if (typeof v === 'number') return 'number';
   if (typeof v === 'boolean') return 'boolean';
   return 'object';
 }
+
+const COL_TYPES: ReadonlySet<string> = new Set(['string', 'number', 'boolean', 'object']);
+const schemaViolation = (message: string): Error =>
+  Object.assign(new Error(message), { code: 'table_schema_violation' });
+
+/**
+ * RFC 0228 G4 — `createTable(name, schema)` (storage.md §tableStorage). The
+ * declared columns, validated and in a stable key order, so a re-declaration
+ * compares by value. `id` is the row key, not a column.
+ */
+export function declaredTableSchema(columns: unknown): Record<string, TableColType> {
+  if (!columns || typeof columns !== 'object' || Array.isArray(columns)) {
+    throw schemaViolation('createTable needs a schema object of column → type');
+  }
+  const out: Record<string, TableColType> = {};
+  for (const col of Object.keys(columns as object).sort()) {
+    if (col === 'id') continue;
+    const t = (columns as Record<string, unknown>)[col];
+    if (typeof t !== 'string' || !COL_TYPES.has(t)) {
+      throw schemaViolation(`Column '${col}' has type ${JSON.stringify(t)}; expected one of string, number, boolean, object`);
+    }
+    out[col] = t as TableColType;
+  }
+  return out;
+}
+
+/** Refuse a row (or patch) whose declared columns carry another type. An
+ *  undeclared column is additive and allowed, as it always was on insert. */
+export function assertRowConforms(schema: Readonly<Record<string, TableColType>>, row: Record<string, unknown>): void {
+  for (const [col, val] of Object.entries(row)) {
+    if (col === 'id') continue;
+    const declared = schema[col];
+    if (declared === undefined) continue;
+    const got = inferColType(val);
+    if (got !== declared) throw schemaViolation(`Column '${col}' declared as '${declared}', got '${got}'`);
+  }
+}
+
+export const sameTableSchema = (a: Readonly<Record<string, TableColType>>, b: Readonly<Record<string, TableColType>>): boolean =>
+  JSON.stringify(declaredTableSchema(a)) === JSON.stringify(declaredTableSchema(b));
 /**
  * ADR 0868 — the most rows one `tableStorage.query` page returns. An absent or
  * larger `limit` is clamped to it and the caller pages on with `nextCursor`
@@ -456,32 +498,38 @@ function createTable(state: TenantMap<TableRow>, scope: BundleScope): TableSurfa
   const key = (table: unknown, id: unknown) => `${String(table)}::${String(id)}`;
   const bucket = () => state.bucket(scope.tenantId);
   const schemaKey = (table: unknown) => `${scope.tenantId}::${String(table)}`;
+  const declared = (table: unknown): Record<string, TableColType> | null => {
+    const m = _tableSchemas.get(schemaKey(table));
+    return m ? Object.fromEntries(m) : null;
+  };
   return {
+    async createTable({ table, columns }) {
+      const want = declaredTableSchema(columns);
+      const have = declared(table);
+      if (have) {
+        if (!sameTableSchema(have, want)) {
+          throw schemaViolation(`Table '${String(table)}' is already declared with another schema`);
+        }
+        return { ok: true, created: false };
+      }
+      _tableSchemas.set(schemaKey(table), new Map(Object.entries(want)));
+      return { ok: true, created: true };
+    },
     async insert({ table, row }) {
-      const r = row as TableRow;
-      const sKey = schemaKey(table);
-      let schema = _tableSchemas.get(sKey);
+      const r = { ...(row as Record<string, unknown>) } as TableRow;
+      // storage.md §tableStorage: insert → rowId. A row without one gets one.
+      if (r.id === undefined || r.id === null || r.id === '') r.id = randomUUID();
+      const schema = declared(table);
       if (!schema) {
-        // First insert — declare the schema from this row's columns.
-        schema = new Map();
+        // No createTable — declare the schema from this first row's columns.
+        const inferred = new Map<string, TableColType>();
         for (const [col, val] of Object.entries(r)) {
           if (col === 'id') continue;
-          schema.set(col, inferColType(val));
+          inferred.set(col, inferColType(val));
         }
-        _tableSchemas.set(sKey, schema);
+        _tableSchemas.set(schemaKey(table), inferred);
       } else {
-        // Subsequent insert — every column MUST conform.
-        for (const [col, val] of Object.entries(r)) {
-          if (col === 'id') continue;
-          const declared = schema.get(col);
-          if (declared === undefined) continue; // new column — additive, allowed
-          const got = inferColType(val);
-          if (got !== declared) {
-            throw Object.assign(new Error(`Column '${col}' declared as '${declared}', got '${got}'`), {
-              code: 'table_schema_violation',
-            });
-          }
-        }
+        assertRowConforms(schema, r);
       }
       bucket().set(key(table, r.id), { ...r });
       return { id: r.id };
@@ -491,11 +539,15 @@ function createTable(state: TenantMap<TableRow>, scope: BundleScope): TableSurfa
       const k = key(table, id);
       const cur = b.get(k);
       if (!cur) return { updated: 0 };
+      const schema = declared(table);
+      if (schema) assertRowConforms(schema, (patch ?? {}) as Record<string, unknown>);
       b.set(k, { ...cur, ...(patch as Record<string, unknown>) });
       return { updated: 1 };
     },
     async upsert({ table, row }) {
       const r = row as TableRow;
+      const schema = declared(table);
+      if (schema) assertRowConforms(schema, r);
       const b = bucket();
       const k = key(table, r.id);
       const existed = b.has(k);
@@ -1345,12 +1397,6 @@ const _memoryState = new TenantMap<MemoryRow[]>();
 let _fsRoot: string | null = null;
 let _initialized = false;
 
-/** RFC 0014 §A — exposed for /.well-known/openwop discovery so the
- *  spec-canonical `capabilities.fs.sandboxRoot` matches the in-memory
- *  surface's actual root. Returns null before initInMemorySurfaces() runs. */
-export function getFsSandboxRoot(): string | null {
-  return _fsRoot;
-}
 
 /** Initialize the surfaces module + advertise each surface. Idempotent. */
 export function initInMemorySurfaces(deps: { dataDir: string }): void {

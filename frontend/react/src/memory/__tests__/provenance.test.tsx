@@ -12,46 +12,56 @@
  * MEM-UX-1. The list is the curated-note store; the recall port reads the whole
  * scope, into which every completed turn writes a summary. The tab called itself
  * "{{persona}}'s long-term memory". `recallOnlyCount` discloses the gap.
+ *
+ * Sabotage that turns it red: invert/force either chip; render a date other than the
+ * row's `createdAt`; prefix the content; disclose for 0 or for an unknown count; show
+ * the wrong disclosed count.
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
-import { render, screen, cleanup, act } from '@testing-library/react';
+import { render, screen, cleanup, act, within } from '@testing-library/react';
 
-const { list, add, remove } = vi.hoisted(() => ({ list: vi.fn(), add: vi.fn(), remove: vi.fn() }));
+const { list, add, remove } = vi.hoisted(() => ({
+  list: vi.fn<MemoryBrowserProps['list']>(),
+  add: vi.fn<NonNullable<MemoryBrowserProps['add']>>(),
+  remove: vi.fn<MemoryBrowserProps['remove']>(),
+}));
 
-import { MemoryBrowser } from '../MemoryBrowser.js';
+import { MemoryBrowser, type MemoryBrowserProps, type SubjectMemoryNote } from '../MemoryBrowser.js';
 
-const AUTO = {
+const AUTO: SubjectMemoryNote = {
   id: 'n1',
   content: 'The user banks with Acme',
-  contentTrust: 'untrusted' as const,
-  source: 'auto-extract' as const,
+  contentTrust: 'untrusted',
+  source: 'auto-extract',
   createdAt: '2026-08-01T10:00:00.000Z',
 };
-const TYPED = {
+const TYPED: SubjectMemoryNote = {
   id: 'n2',
   content: 'I prefer concise briefings',
-  contentTrust: 'trusted' as const,
-  source: 'user' as const,
+  contentTrust: 'trusted',
+  source: 'user',
   createdAt: '2026-08-02T10:00:00.000Z',
 };
 
-const mount = async (props: Record<string, unknown> = {}): Promise<void> => {
+const mount = async (props: Partial<MemoryBrowserProps> = {}): Promise<void> => {
   render(<MemoryBrowser list={list} add={add} remove={remove} {...props} />);
   await act(async () => {});
 };
 
 afterEach(cleanup);
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
   list.mockResolvedValue([AUTO, TYPED]);
 });
 
 describe('MEM-UX-3 — a model-inferred belief is visibly distinguishable from a fact you typed', () => {
   it('renders the auto-learned chip AND the previously-dead untrusted chip', async () => {
     await mount();
-    expect(screen.getByText('Auto-learned')).toBeTruthy();
+    // On the AUTO row specifically — a chip that moved to the typed row must not pass.
+    const autoRow = screen.getByText('The user banks with Acme').closest('li')!;
+    expect(within(autoRow).getByText('Auto-learned')).toBeTruthy();
     // Dead code before ADR 0587 — nothing could produce an untrusted note.
-    expect(screen.getByText('External · unverified')).toBeTruthy();
+    expect(within(autoRow).getByText('External · unverified')).toBeTruthy();
   });
 
   it('ANTI-ROT: a user-typed note carries NEITHER chip — this is not "label everything"', async () => {
@@ -70,7 +80,9 @@ describe('MEM-UX-3 — a model-inferred belief is visibly distinguishable from a
 
   it('renders `createdAt`, which was fetched and dropped on the floor', async () => {
     await mount();
-    expect(screen.getAllByText(/^Learned /).length).toBe(2);
+    // en, dateStyle medium; 10:00Z is the same calendar day from UTC-10 to UTC+13.
+    expect(screen.getByText('Learned Aug 1, 2026')).toBeTruthy();
+    expect(screen.getByText('Learned Aug 2, 2026')).toBeTruthy();
   });
 });
 

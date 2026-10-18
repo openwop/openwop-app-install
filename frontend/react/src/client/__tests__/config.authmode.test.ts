@@ -2,11 +2,16 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { config, authedHeaders, fetchOpts, setCurrentIdToken, onAuthChange } from '../config.js';
 
 /**
- * Auth-mode switching (frontend enterprise-review Batch J): authedHeaders +
+ * Auth-mode switching (frontend enterprise-review Batch J, #55; token precedence
+ * ADR 0141 / ADR 0143): authedHeaders +
  * fetchOpts must produce the right Authorization / credentials behavior across
  * bearer / cookie / signed-in-token modes, and onAuthChange must fire only on
  * identity change. config.authMode is a mutable runtime field, so we flip it
  * per case and restore after.
+ *
+ * Breaks it: a cookie-mode request that carries the dev apiKey as a bearer, a
+ * signed-in request that rides the apiKey instead of the ID token, or a
+ * same-token rotation that drops every tenant-keyed cache.
  */
 const originalMode = config.authMode;
 

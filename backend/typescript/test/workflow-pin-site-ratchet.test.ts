@@ -591,7 +591,6 @@ const SANCTIONED_ORIGINS = new Map<string, string>([
  * would fail if either were still detected.
  */
 const PIN_SITE_QUARANTINE = new Map<string, string>([
-  ['features/kicktodo-core/conveneTurnWorkflow.ts', 'Boot path: a module `const DEF` (the convene-turn workflow), same shape as the channels one.'],
   ['routes/artifactTypeSeam.ts', 'FOUND BY THIS WIDENING. The RFC 0142 leg-B conformance witness registers an in-tree literal per artifact type on a request path. Test-seam surface rather than product surface, but it is a real unowned `wfreg:` row and is recorded rather than excused.'],
   // WFAWF-6 (ADR 0596 R2) — `host/workflowAuthorSeed.ts` DRAINED: the showcase
   // seeder now pairs `registerWorkflow` with `recordOwnership` per tenant (the
@@ -618,10 +617,16 @@ const PIN_SITE_QUARANTINE = new Map<string, string>([
  *  registered chain-backed under the same workflowId), zero added. The ONE remaining
  *  product entry is `kicktodo-core/conveneTurnWorkflow.ts`; `routes/artifactTypeSeam.ts`
  *  is a test seam.
+ *  KickTodo workflows grade (2026-10-14): 2 -> 1. The LAST product entry drained
+ *  (`features/kicktodo-core/conveneTurnWorkflow.ts` — instance #4 of the same
+ *  single-agent-runner class, now `core.openwop.workflows.kicktodo-convene-turn`
+ *  registered chain-backed under the same workflowId), zero added. The one remaining
+ *  entry, `routes/artifactTypeSeam.ts`, is the RFC 0142 conformance test seam; the
+ *  module-const anti-vacuity anchor became a fixture in the same commit.
  *  The ratchet is exact-match in BOTH directions, so leaving a fixed
  *  site listed is red too — which is why the ceiling and the map move in the same
  *  commit. */
-const PIN_SITE_CEILING = 2;
+const PIN_SITE_CEILING = 1;
 
 /**
  * RESIDUAL R1 — modules that accept an INJECTED registrar. The definitions they
@@ -656,7 +661,23 @@ describe('WF-KB-2 — registerWorkflow call sites are classified by definition O
     // `conveneTurnWorkflow.ts` goes, the class is empty and this line cannot be
     // re-pointed — replace it with a FIXTURE the walker must detect, so the
     // non-vacuity property survives the success of the migration it polices.
-    expect(sites.has('features/kicktodo-core/conveneTurnWorkflow.ts'), 'a module-const literal pin site').toBe(true);
+    //
+    // DONE (KickTodo workflows grade, 2026-10-14): `conveneTurnWorkflow.ts` was drained
+    // to `core.openwop.workflows.kicktodo-convene-turn`, so the PRODUCT class is empty.
+    // The anchor is now the FIXTURE the note above asked for, driven through the SAME
+    // `classifyRegistrationSource` the scan runs — the exact module-const shape the
+    // drained file had (a `const DEF: WorkflowDefinition = {…}` handed to the raw
+    // registrar behind a same-id guard). Neutralizing the const resolver turns it red.
+    const moduleConst = classifyRegistrationSource(stripComments(
+      "import { registerWorkflow, getRegisteredWorkflow } from '../../host/workflowsRegistry.js';\n"
+      + "const DEF: WorkflowDefinition = { workflowId: 'x.turn', nodes: [{ nodeId: 'run', typeId: 't' }], edges: [] };\n"
+      + "export function seed(): void { if (!getRegisteredWorkflow('x.turn')) registerWorkflow(DEF); }",
+    ));
+    expect(moduleConst.calls.length, 'the module-const registration is seen as a call site').toBe(1);
+    expect(moduleConst.inTreeLiteral, 'a module-const literal pin site').toBe(true);
+    expect(moduleConst.tier3, 'resolved by the const resolver, not the tier-3 fallback').toBe(false);
+    // …and the drained file must NOT come back. Asserted by name (the WF-COS-1 idiom).
+    expect(sites.has('features/kicktodo-core/conveneTurnWorkflow.ts'), 'convene-turn — drained, must not regress').toBe(false);
     // `host/workflowAuthorSeed.ts` is the owned-seed lane (WFAWF-6 / ADR 0596 R2):
     // it iterates a module array and pairs `registerWorkflow(s.definition)` with
     // `recordOwnership`, so it is a SANCTIONED site (recordsOwnership), NOT a pin

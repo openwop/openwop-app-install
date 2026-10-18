@@ -1,6 +1,12 @@
 /**
  * ADR 0360 — campaign funnel board trait: order-derived chain, positional
  * node ids, clamped/snapped moves, and the elements-selection bridge.
+ *
+ * Sabotage witnesses (wave 30): dropping the x/y spread or renaming node ids
+ * reds case 1; an off-by-one edge reds case 2; removing the clamp or the grid
+ * snap, or mapping an unparsable id onto stage 0, reds case 3; adding a
+ * `connect` reds case 4; mapping `chain-*` to an element reds case 5; any other
+ * `defaultView` reds case 6.
  */
 import { describe, it, expect } from 'vitest';
 import { campaignGraph } from '../campaignGraph.js';
@@ -14,7 +20,7 @@ const doc = (): CampaignDoc => ({
     { stage: 'consideration' },
     { stage: 'conversion', kpis: ['CVR'] },
   ],
-} as unknown as CampaignDoc);
+});
 
 describe('campaignGraph (ADR 0360)', () => {
   it('projects funnel stages as positional nodes; unpositioned stages omit x/y (auto-grid)', () => {
@@ -36,9 +42,11 @@ describe('campaignGraph (ADR 0360)', () => {
     const d = doc();
     campaignGraph.moveNode(d, 'funnel-1', 333, 4500);
     expect(d.funnel?.[1]).toMatchObject({ x: 340, y: 4000 });
-    // Unknown/garbage ids are a no-op, never a throw.
+    // Unknown/garbage ids are a no-op, never a throw — and never land on a stage.
+    const before: unknown = JSON.parse(JSON.stringify(d.funnel));
     campaignGraph.moveNode(d, 'chain-0', 1, 1);
     campaignGraph.moveNode(d, 'funnel-99', 1, 1);
+    expect(d.funnel).toEqual(before);
   });
 
   it('connect/deleteEdge are OMITTED — derived edges render no connect chrome (grade-pass ruling)', () => {

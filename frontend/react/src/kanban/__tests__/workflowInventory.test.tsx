@@ -1,8 +1,11 @@
 /**
- * Kanban workflow bindings are inventory-driven. The board must never fall
- * back to a role-template catalog: a user can bind the workflow they authored
- * in Workflow Builder, and the card keeps its editable name in every shared
- * board embedding.
+ * ADR 0738 (Phase 1 editable workflow bindings, Phase 2 the reusable WorkItem
+ * spine) — Kanban workflow bindings are inventory-driven. The board must never
+ * fall back to a role-template catalog: a user can bind the workflow they
+ * authored in Workflow Builder, and the card keeps its editable name in every
+ * shared board embedding. A core WorkItem renders and dispatches by its own id
+ * with no canvas-specific component, and the create-board picker never mistakes
+ * a pending or failed inventory read for an empty one (nor blocks a manual board).
  */
 import { describe, expect, it, vi, afterEach } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';

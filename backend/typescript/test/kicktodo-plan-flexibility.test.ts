@@ -15,6 +15,11 @@
  *    STRICTEST absorbed evidence policy, idempotent across re-fires, and
  *    stands down past the collapse cap
  *  - `ask` notifies ONCE per missed window, then `acceptRecovery` materializes
+ *
+ * Sabotage witnesses (w41 /grade-tests): the alternative policy/parent-id gates,
+ * the substitution owner check (`reason: 'not-owner'`), the strictest-policy
+ * comparator (the strictest day is LAST, so `policies[0]` cannot pass), the
+ * collapse cap, the ask-once marker and the deterministic recovery key.
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
@@ -35,7 +40,7 @@ import {
 } from '../src/features/kicktodo-core/todayService.js';
 import { setEnrollmentSnooze } from '../src/features/kicktodo-core/progressService.js';
 import { getCard } from '../src/host/kanbanService.js';
-import type { MissedWindowPolicy } from '../src/features/kicktodo-core/types.js';
+import type { ChallengeActivity, MissedWindowPolicy } from '../src/features/kicktodo-core/types.js';
 
 const T = 'tenant-flex';
 
@@ -53,18 +58,22 @@ beforeEach(async () => {
   __clearCheckInObservers();
 });
 
-async function publishWith(activities: unknown[], policy?: MissedWindowPolicy, days = 5) {
+async function publishWith(activities: ChallengeActivity[], policy?: MissedWindowPolicy, days = 5) {
   const draft = await createDraft({
     tenantId: T, title: 'Flex', summary: 's', outcome: 'o', durationDays: days,
-    activities: activities as never,
+    activities,
     ...(policy ? { missedWindowPolicy: policy } : {}),
   });
   await publishChallenge(T, draft.id, 1);
   return draft.id;
 }
 
-const BASE_ACTIVITY = {
-  stableActivityId: 'run', day: 1, title: 'Run 5k', instructions: 'Run', evidencePolicy: 'measurement' as const,
+/** The publish gate's typed refusal WITH its own message (two gates share the class). */
+const validationError = (message: RegExp) => (err: unknown): boolean =>
+  err instanceof ChallengeValidationError && message.test(err.message);
+
+const BASE_ACTIVITY: ChallengeActivity = {
+  stableActivityId: 'run', day: 1, title: 'Run 5k', instructions: 'Run', evidencePolicy: 'measurement',
 };
 
 describe('publisher-declared substitution (P1)', () => {
@@ -72,13 +81,13 @@ describe('publisher-declared substitution (P1)', () => {
     await expect(publishWith([{
       ...BASE_ACTIVITY,
       alternatives: [{ stableActivityId: 'walk', title: 'Walk', instructions: 'Walk', evidencePolicy: 'attestation' }],
-    }])).rejects.toBeInstanceOf(ChallengeValidationError);
+    }])).rejects.toSatisfy(validationError(/must carry the same evidencePolicy/));
 
     // …and refuses an alternative reusing its parent's id.
     await expect(publishWith([{
       ...BASE_ACTIVITY,
-      alternatives: [{ ...BASE_ACTIVITY, title: 'Same id' }],
-    }])).rejects.toBeInstanceOf(ChallengeValidationError);
+      alternatives: [{ stableActivityId: BASE_ACTIVITY.stableActivityId, title: 'Same id', instructions: 'Run', evidencePolicy: 'measurement' }],
+    }])).rejects.toSatisfy(validationError(/may not reuse its parent's id/));
   });
 
   it('substitution preserves the occurrence key + cardId, is idempotent, and denies unknown ids uniformly', async () => {
@@ -103,8 +112,13 @@ describe('publisher-declared substitution (P1)', () => {
     expect((await substituteOccurrence(T, owner, cardId, 'row')).substitutedActivityId).toBe('row');
 
     // Unknown alternative, and a foreign owner, are both uniform denials.
-    await expect(substituteOccurrence(T, owner, cardId, 'nope')).rejects.toBeInstanceOf(SubstitutionDeniedError);
-    await expect(substituteOccurrence(T, 'user:flex-intruder', cardId, 'row')).rejects.toBeInstanceOf(SubstitutionDeniedError);
+    // Same class + uniform message, distinguished only by `reason` (no existence leak).
+    await expect(substituteOccurrence(T, owner, cardId, 'nope')).rejects.toSatisfy(
+      (err: unknown) => err instanceof SubstitutionDeniedError && err.reason === 'unknown-alternative',
+    );
+    await expect(substituteOccurrence(T, 'user:flex-intruder', cardId, 'row')).rejects.toSatisfy(
+      (err: unknown) => err instanceof SubstitutionDeniedError && err.reason === 'not-owner',
+    );
 
     // A substituted action still checks in against the SAME row.
     const ci = await submitCheckIn(T, owner, cardId, { measuredValue: 5 });
@@ -131,15 +145,17 @@ describe('missed-window policy (P2)', () => {
   });
 
   it('collapse-recovery materializes ONE recovery with the strictest policy, idempotently', async () => {
+    // The STRICTEST policy is the LAST missed day, so a "first policy wins"
+    // regression cannot pass by accident.
     const challengeId = await publishWith([
-      { ...BASE_ACTIVITY, day: 1 },                                                            // measurement
-      { stableActivityId: 'read', day: 2, title: 'Read', instructions: 'Read', evidencePolicy: 'attestation' },
+      { stableActivityId: 'read', day: 1, title: 'Read', instructions: 'Read', evidencePolicy: 'attestation' },
+      { ...BASE_ACTIVITY, day: 2 },                                                            // measurement
     ], 'collapse-recovery');
     const id = await enrollStartedDaysAgo(challengeId, 'user:flex-collapse', 2);
     await materializeOccurrences(T, id, isoDaysAgo(1)); // day 2 also missed
 
     const first = await applyMissedWindowPolicy(T, id);
-    expect(first.missed).toBeGreaterThanOrEqual(1);
+    expect(first.missed).toBe(2);
     expect(first.recoveryCardId).toBeTruthy();
     const occ = await occurrenceByCard(T, first.recoveryCardId!);
     expect(occ!.stableActivityId.startsWith('recovery::')).toBe(true);
@@ -158,7 +174,7 @@ describe('missed-window policy (P2)', () => {
     const id = await enrollStartedDaysAgo(challengeId, 'user:flex-cap', 4);
     for (const back of [3, 2, 1]) await materializeOccurrences(T, id, isoDaysAgo(back));
     const r = await applyMissedWindowPolicy(T, id);
-    expect(r.missed).toBeGreaterThan(3);
+    expect(r.missed).toBe(4);
     expect(r.recoveryCardId).toBeUndefined(); // past COLLAPSE_CAP_DAYS
     const preview = (await todayFor(T, 'user:flex-cap')).enrollments.find((e) => e.enrollmentId === id)?.recovery;
     expect(preview).toEqual({ missed: 4, mode: 'review' });
@@ -178,14 +194,14 @@ describe('missed-window policy (P2)', () => {
     const id = await enrollStartedDaysAgo(challengeId, SUBJ, 4);
     for (const back of [3, 2, 1]) await materializeOccurrences(T, id, isoDaysAgo(back));
     const r = await applyMissedWindowPolicy(T, id);
-    expect(r.missed).toBeGreaterThan(3);
+    expect(r.missed).toBe(4);
     expect((await listCollectedEvents(T)).map((e) => e.eventType)).toContain('kicktodo.participant.stalled');
   });
 
   it('ask notifies ONCE per missed window; acceptRecovery then materializes', async () => {
     const captured: NotificationRecord[] = [];
     const unsub = getNotificationEmitter().subscribe((n) => {
-      if ((n.metadata as Record<string, unknown> | undefined)?.category === 'kicktodo-recovery') captured.push(n);
+      if (n.metadata?.category === 'kicktodo-recovery') captured.push(n);
     });
     try {
       const challengeId = await publishWith([BASE_ACTIVITY], 'ask');

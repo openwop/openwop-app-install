@@ -5,10 +5,19 @@
  * and the entry-serving guards (traversal-safe, uniform miss). The behavioral
  * isolation/egress legs are browser-runtime (witnessed via PluginFrame + a steward
  * browser observation), not assertable here.
+ *
+ * Honest ceiling (w33 probe `fpp-traversal-guard`, vacuous): `getPluginEntry`'s own
+ * traversal guard (resolved `entry` outside the pack dir) is unreachable from here —
+ * the manifest schema's pattern refuses `..` in `entry`, and the served-name lookup
+ * refuses any pack name not in the listing before a path is built. The traversal case
+ * below witnesses that lookup, not the guard. Likewise the hostApi ∩ host-set
+ * intersection is unobservable with an in-schema fixture (the schema's hostApi enum IS
+ * the host set); the projection itself is what the cases pin.
  */
 import { describe, it, expect } from 'vitest';
 import { listFrontendPluginPacks, getPluginEntry, hostIsolation } from '../frontendPluginPacks.js';
 import { uiPluginsCapability } from '../../../host/uiPluginRpc.js';
+import { VENDOR_ROOT } from '../../../middleware/protocolVersion.js';
 
 const REF_PACK = 'community.openwop.artifact-viewer';
 const REF_PLUGIN = 'artifact-viewer';
@@ -19,9 +28,9 @@ describe('frontendPluginPacks loader', () => {
     const ref = served.find((s) => s.packName === REF_PACK && s.pluginId === REF_PLUGIN);
     expect(ref).toBeDefined();
     expect(ref!.surface).toBe('artifact-viewer');
-    // hostApi is intersected to the host's advertised set = the plugin's closed allowlist.
+    // The plugin's closed allowlist is exactly what it declared (in-schema ⇒ ⊆ host set).
     expect(ref!.hostApi).toEqual(['artifact.read']);
-    expect(ref!.entryPath).toContain(`/ui-plugin/packs/${encodeURIComponent(REF_PACK)}/plugins/${REF_PLUGIN}/entry`);
+    expect(ref!.entryPath).toBe(`${VENDOR_ROOT}/ui-plugin/packs/${encodeURIComponent(REF_PACK)}/plugins/${REF_PLUGIN}/entry`);
   });
 
   it('projects the canvas-preview witness WITH its canvasTypes binding key (RFC 0130 — code-review C1)', () => {
@@ -56,7 +65,7 @@ describe('frontendPluginPacks loader', () => {
     expect(getPluginEntry('community.openwop.does-not-exist', REF_PLUGIN)).toBeNull();
   });
 
-  it('refuses a path-traversal pack name (defense-in-depth over the schema pattern)', () => {
+  it('a traversal-shaped pack name is a uniform miss (the served-name lookup refuses it before any path is built)', () => {
     expect(getPluginEntry('../../etc', REF_PLUGIN)).toBeNull();
     expect(getPluginEntry('community.openwop.artifact-viewer/../..', REF_PLUGIN)).toBeNull();
   });

@@ -9,6 +9,7 @@ import { surfaceStr, type FeatureSurface } from '../../host/featureSurfaces.js';
 import { OpenwopError } from '../../types.js';
 import {
   createCandidate,
+  candidateRunKey,
   getCandidate,
   getCandidatePlan,
   recordResearch,
@@ -20,7 +21,7 @@ import {
   type ResearchClaim,
   type ResearchSource,
   sourceDomain,
-  evidenceClaimsForPrompt,
+  evidenceBrief,
   supportedClaimIds,
 } from './creatorService.js';
 import { CHALLENGE_PLAN_JSON_SCHEMA, draftFromPlan, validatePlan, type PlanValidationOptions } from './planService.js';
@@ -40,6 +41,7 @@ import {
   type LessonMediaKind,
   LESSON_JSON_SCHEMA,
 } from './lessonAssembly.js';
+import { bindKicktodoSurface, type KicktodoSurfaceSpecs } from '../kicktodo-core/surfaceBinding.js';
 
 /** The closed world a candidate's plan may cite: its dossier's claim ids. No
  *  candidate (a bare validate) or no dossier ⇒ undefined ⇒ refs unchecked. */
@@ -67,11 +69,40 @@ export function frameResearchQuestions(topic: string, audience: string): string[
   ];
 }
 
+/** ADR 0901 (DEC-1) — the run-principal spec per method (`surfaceBinding.ts`).
+ *  Every creator route is `requireKicktodoManage`, so every method that reads or
+ *  writes a candidate asks the SAME manage predicate. No host job runs the
+ *  factory (it is started from the Challenge Author's chat tool or by a person),
+ *  so those are person-only; its lesson-batch sub-workflow runs on the CAUSE
+ *  lane with the parent's person. The model-free helpers (question framing,
+ *  source normalisation, the shape schemas, checkpoint batching, plan
+ *  validation) touch no candidate row and need no authority. */
+export const KICKTODO_CREATOR_SURFACE_SPECS = {
+  createCandidate: { subjectArg: 'createdBy', authority: 'manage', personOnly: true },
+  getCandidate: { authority: 'manage', personOnly: true },
+  frameResearch: { authority: 'none' },
+  normalizeSource: { authority: 'none' },
+  validatePlan: { authority: 'none' },
+  evidenceClaims: { authority: 'manage', personOnly: true },
+  lessonSchema: { authority: 'none' },
+  planSchema: { authority: 'none' },
+  claimSchema: { authority: 'none' },
+  verdictSchema: { authority: 'none' },
+  checkpointPlan: { authority: 'none' },
+  setLessonMedia: { authority: 'manage', personOnly: true },
+  lessonMedia: { authority: 'manage', personOnly: true },
+  recordSimulationVerdicts: { authority: 'manage', personOnly: true },
+  draftFromPlan: { subjectArg: 'authorSubject', authority: 'manage', personOnly: true },
+  getCandidatePlan: { authority: 'manage', personOnly: true },
+  recordResearch: { authority: 'manage', personOnly: true },
+  submitPublication: { authority: 'manage', personOnly: true },
+} as const satisfies KicktodoSurfaceSpecs;
+
 export function buildKicktodoCreatorSurface(scope: BundleScope): FeatureSurface {
   const tenant = scope.tenantId;
-  return {
-    createCandidate: async (args) => ({
-      candidate: await createCandidate({
+  return bindKicktodoSurface('kicktodo-creator', scope, {
+    createCandidate: async (args) => {
+      const input = {
         tenantId: tenant,
         createdBy: surfaceStr(args.createdBy) || 'workflow',
         topic: surfaceStr(args.topic),
@@ -79,8 +110,15 @@ export function buildKicktodoCreatorSurface(scope: BundleScope): FeatureSurface 
         transformation: surfaceStr(args.transformation),
         durationDaysTarget: typeof args.durationDaysTarget === 'number' ? args.durationDaysTarget : 14,
         dailyMinutesTarget: typeof args.dailyMinutesTarget === 'number' ? args.dailyMinutesTarget : 15,
-      }),
-    }),
+      };
+      // KTFAC-1 — a retried `create-candidate` node re-runs this op inside the SAME
+      // run with the SAME inputs, and used to mint a second `cand:<uuid>`. Key the
+      // create on the run (+ the node id when the caller passes one, + the inputs,
+      // so two distinct create nodes in one run stay distinct). Runless callers
+      // keep the fresh-id behaviour.
+      const idempotencyKey = scope.runId ? candidateRunKey(scope.runId, surfaceStr(args.nodeId), input) : undefined;
+      return { candidate: await createCandidate({ ...input, ...(idempotencyKey ? { idempotencyKey } : {}) }) };
+    },
     getCandidate: async (args) => ({ candidate: await getCandidate(tenant, surfaceStr(args.candidateId)) }),
     frameResearch: async (args) => ({
       questions: frameResearchQuestions(surfaceStr(args.topic), surfaceStr(args.audience)),
@@ -113,7 +151,9 @@ export function buildKicktodoCreatorSurface(scope: BundleScope): FeatureSurface 
     // dossier here (the SSoT) so no node re-derives it from raw rows.
     evidenceClaims: async (args) => {
       const candidate = await getCandidate(tenant, surfaceStr(args.candidateId));
-      return { claims: evidenceClaimsForPrompt(candidate?.dossier) };
+      // XCH-LB-5 — the brief AND what its caps left out, so no prompt presents
+      // a partial brief as whole.
+      return evidenceBrief(candidate?.dossier);
     },
     // ADR 0458 §2.2 (correction) — the lesson-shape SSoT for the lesson-batch-build
     // node (responseSchema + prompt grounding at call time; the planSchema pattern).
@@ -249,5 +289,5 @@ export function buildKicktodoCreatorSurface(scope: BundleScope): FeatureSurface 
         throw err;
       }
     },
-  };
+  }, KICKTODO_CREATOR_SURFACE_SPECS);
 }

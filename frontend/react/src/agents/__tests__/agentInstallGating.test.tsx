@@ -10,17 +10,19 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
+import type { AgentPackSummary } from '../../client/agentsClient.js';
 
-const listAvailableAgentPacks = vi.fn();
-const installAgentPack = vi.fn();
-vi.mock('../../client/agentsClient.js', () => ({
-  listAvailableAgentPacks: () => listAvailableAgentPacks(),
-  installAgentPack: (...a: unknown[]) => installAgentPack(...a),
+type AgentsClient = typeof import('../../client/agentsClient.js');
+const { listAvailableAgentPacks, installAgentPack } = vi.hoisted(() => ({
+  listAvailableAgentPacks: vi.fn<AgentsClient['listAvailableAgentPacks']>(),
+  installAgentPack: vi.fn<AgentsClient['installAgentPack']>(),
 }));
+vi.mock('../../client/agentsClient.js', () => ({ listAvailableAgentPacks, installAgentPack }));
 
 const { AgentInstallPage } = await import('../AgentInstallPage.js');
+const realClient = await vi.importActual<AgentsClient>('../../client/agentsClient.js');
 
-const PACKS = [
+const PACKS: AgentPackSummary[] = [
   { name: 'core.openwop.agents.sales', version: '1.2.0', description: 'Sales personas', personas: ['Ada'], installed: false },
   { name: 'core.openwop.agents.support', version: '0.9.0', description: 'Support personas', personas: ['Iris'], installed: true },
 ];
@@ -28,7 +30,7 @@ const PACKS = [
 const renderPage = () => render(<MemoryRouter><AgentInstallPage /></MemoryRouter>);
 const announced = () => document.querySelector('[aria-live="polite"]')?.textContent ?? '';
 
-afterEach(() => { cleanup(); vi.clearAllMocks(); });
+afterEach(() => { cleanup(); vi.resetAllMocks(); vi.unstubAllGlobals(); });
 
 describe('agent install — offering only what the caller can do (AG-G1)', () => {
   it('offers Install to a caller the SERVER says may install', async () => {
@@ -51,11 +53,20 @@ describe('agent install — offering only what the caller can do (AG-G1)', () =>
 
   it('fails CLOSED when the host does not report the capability', async () => {
     // An older host that predates `canInstall` reports nothing ⇒ the client
-    // resolves false. Offering nothing beats offering a guaranteed 403.
-    listAvailableAgentPacks.mockResolvedValue({ packs: PACKS, canInstall: false });
+    // resolves false. Offering nothing beats offering a guaranteed 403. Driven
+    // through the REAL client mapping (`agentsClient.ts`): the response below has
+    // no `canInstall` field at all, so a mock that already says `false` cannot
+    // stand in for the rule.
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({ packs: PACKS }), {
+      status: 200, headers: { 'content-type': 'application/json' },
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    listAvailableAgentPacks.mockImplementation(realClient.listAvailableAgentPacks);
     renderPage();
     await screen.findByText('core.openwop.agents.sales');
+    expect(String(fetchMock.mock.calls[0]?.[0])).toMatch(/\/host\/openwop-app\/registry\/agent-packs$/);
     expect(screen.queryByRole('button', { name: /^install$/i })).toBeNull();
+    expect(screen.getAllByText(/operator action/i)).toHaveLength(1);
   });
 });
 
@@ -81,6 +92,7 @@ describe('agent install — outcomes are stated (AG-G2/AG-G5)', () => {
     await screen.findByText('core.openwop.agents.sales');
     fireEvent.click(screen.getByRole('button', { name: /^install$/i }));
     await waitFor(() => expect(announced()).toMatch(/core\.openwop\.agents\.sales installed/i));
+    expect(installAgentPack).toHaveBeenCalledWith('core.openwop.agents.sales', '1.2.0');
   });
 
   it('translates a 403 into guidance instead of dumping the developer hint', async () => {

@@ -19,11 +19,14 @@
  * `assurance.evals` / `agents.evalSuite` advertisement stays honest (RFC 0031).
  */
 
+import { getEventLog } from '../executor/eventLog.js';
 import { createHash } from 'node:crypto';
 import type { Storage } from '../storage/storage.js';
 import { getAgentRegistry } from '../executor/agentRegistry.js';
 import { runAgentDispatch } from './agentDispatch.js';
 import { createLogger } from '../observability/logger.js';
+import { OpenwopError } from '../types.js';
+import type { AgentSpec } from './workforce.js';
 
 const log = createLogger('host.workforceEval');
 
@@ -32,7 +35,7 @@ export function evalSuiteEnabled(): boolean {
   return process.env.OPENWOP_AGENT_EVAL_SUITE_ENABLED === 'true';
 }
 
-const EVAL_AGENT_ID = 'host.priya';
+const INVOICE_SUPERVISOR_ID = 'host.priya';
 export const EVAL_SUITE_ID = 'openwop-app.evals.invoice-exception';
 const EVAL_SUITE_VERSION = '1.0.0';
 const EVAL_MODEL_CLASS = 'reasoning';
@@ -61,6 +64,28 @@ const SUITE: readonly EvalTask[] = [
   // lands at 0.8 (4/5), a credible "good but not perfect" pass rather than 1.0.
   { taskId: 'borderline-variance', scenario: 'Unit price 6% over PO — outside the auto-clear band.', simulateConfidence: 0.74, expect: 'escalated' },
 ];
+
+/** An embedded suite and the one workforce + supervisor it was authored for. */
+interface EvalSuite {
+  suiteId: string;
+  suiteVersion: string;
+  /** The supervisor the suite's baseline decisions were written against. */
+  subjectAgentId: string;
+  tasks: readonly EvalTask[];
+}
+
+/** ADR 0775 P4 (`ARWF-8`) — suites are keyed by workforce. Before this, every
+ *  workforce was scored by dispatching `host.priya` over the invoice suite, so a
+ *  support or claims workforce reported an invoice agent's score as its own. A
+ *  workforce with no entry here has no eval and the route says so. */
+const EVAL_SUITES: ReadonlyMap<string, EvalSuite> = new Map([
+  ['workforce.finance.invoice-exception', {
+    suiteId: EVAL_SUITE_ID,
+    suiteVersion: EVAL_SUITE_VERSION,
+    subjectAgentId: INVOICE_SUPERVISOR_ID,
+    tasks: SUITE,
+  }],
+]);
 
 export interface EvalTaskResult {
   taskId: string;
@@ -93,9 +118,9 @@ let agentsRegistered = false;
 export function registerWorkforceEvalAgents(): void {
   if (agentsRegistered) return;
   const reg = getAgentRegistry();
-  if (!reg.get(EVAL_AGENT_ID)) {
+  if (!reg.get(INVOICE_SUPERVISOR_ID)) {
     reg.register({
-      agentId: EVAL_AGENT_ID,
+      agentId: INVOICE_SUPERVISOR_ID,
       persona: 'invoice-exception-supervisor',
       modelClass: EVAL_MODEL_CLASS,
       systemPrompt:
@@ -117,55 +142,77 @@ function evalRunId(tenantId: string, workforceId: string, nowMs: number): string
 }
 
 /**
- * Run a real live-shadow eval of the workforce's supervisor over the embedded
- * suite. Persists a real eval run + `eval.*` events and returns the EvalSummary.
+ * Run a real live-shadow eval of the workforce's supervisor over the suite
+ * authored for that workforce. Persists a real eval run + `eval.*` events and
+ * returns the EvalSummary.
+ *
+ * ADR 0775 P4 (`ARWF-8`) — the agent and the suite both come from the workforce:
+ * the supervisor is the workforce's `role: 'supervisor'` member, and the suite is
+ * the one keyed by its id. A workforce with no suite, or whose supervisor is not
+ * the agent its suite was written for, is refused with `409` rather than scored
+ * on another workforce's suite.
  */
 export async function runWorkforceLiveShadowEval(
   storage: Storage,
   tenantId: string,
-  workforceId: string,
+  workforce: { workforceId: string; agents: readonly Pick<AgentSpec, 'agentRef' | 'role'>[] },
   nowMs: number,
 ): Promise<WorkforceEvalSummary> {
+  const { workforceId } = workforce;
+  const suite = EVAL_SUITES.get(workforceId);
+  if (!suite) {
+    throw new OpenwopError('conflict', `Workforce \`${workforceId}\` has no eval suite.`, 409, {
+      workforceId,
+      reason: 'no_eval_suite',
+    });
+  }
+  const supervisor = workforce.agents.find((a) => a.role === 'supervisor')?.agentRef;
+  if (supervisor !== suite.subjectAgentId) {
+    throw new OpenwopError(
+      'conflict',
+      `Workforce \`${workforceId}\`'s supervisor is not the agent its eval suite was written for.`,
+      409,
+      { workforceId, reason: 'supervisor_mismatch', suiteId: suite.suiteId },
+    );
+  }
+  const SUITE_TASKS = suite.tasks;
+  const evalAgentId = supervisor;
   registerWorkforceEvalAgents();
   const runId = evalRunId(tenantId, workforceId, nowMs);
   const at = (offsetMs: number): string => new Date(nowMs + offsetMs).toISOString();
 
   await storage.insertRun({
     runId,
-    workflowId: EVAL_SUITE_ID,
+    workflowId: suite.suiteId,
     tenantId,
     status: 'running',
-    inputs: { suiteId: EVAL_SUITE_ID, mode: 'live-shadow' },
-    metadata: { mode: 'eval', workforceId, suiteId: EVAL_SUITE_ID, evalAgentId: EVAL_AGENT_ID },
+    inputs: { suiteId: suite.suiteId, mode: 'live-shadow' },
+    metadata: { mode: 'eval', workforceId, suiteId: suite.suiteId, evalAgentId },
     configurable: {},
     createdAt: at(0),
     updatedAt: at(0),
   });
-  await storage.appendEvent({
-    eventId: `${runId}-eval-started`,
+  await getEventLog().append({
     runId,
     type: 'eval.started',
-    timestamp: at(0),
-    payload: { suiteId: EVAL_SUITE_ID, suiteVersion: EVAL_SUITE_VERSION, taskCount: SUITE.length, modes: ['live-shadow'] },
+    payload: { suiteId: suite.suiteId, suiteVersion: suite.suiteVersion, taskCount: SUITE_TASKS.length, modes: ['live-shadow'] },
   });
 
   const tasks: EvalTaskResult[] = [];
   let n = 0;
-  for (const t of SUITE) {
+  for (const t of SUITE_TASKS) {
     // A REAL dispatch through the agent registry (deterministic seam).
     const r = runAgentDispatch({
-      agentId: EVAL_AGENT_ID,
+      agentId: evalAgentId,
       task: { scenario: t.scenario },
       simulateConfidence: t.simulateConfidence,
     });
     const passed = r.status === t.expect;
     const score = passed ? 1 : 0;
     tasks.push({ taskId: t.taskId, score, passed });
-    await storage.appendEvent({
-      eventId: `${runId}-eval-scored-${t.taskId}`,
+    await getEventLog().append({
       runId,
       type: 'eval.scored',
-      timestamp: at(++n),
       // Content-free per `eval-summary-no-content-leak`: scores/ids only — no
       // scenario text, no agent output.
       payload: { taskId: t.taskId, score, passed },
@@ -178,19 +225,17 @@ export async function runWorkforceLiveShadowEval(
     : 0;
   const passed = aggregateScore >= PASS_SCORE;
 
-  await storage.appendEvent({
-    eventId: `${runId}-eval-completed`,
+  await getEventLog().append({
     runId,
     type: 'eval.completed',
-    timestamp: at(n + 1),
     payload: { aggregateScore, passed, taskCount: tasks.length, passedCount },
   });
 
   const summary: WorkforceEvalSummary = {
     runId,
     workforceId,
-    suiteId: EVAL_SUITE_ID,
-    suiteVersion: EVAL_SUITE_VERSION,
+    suiteId: suite.suiteId,
+    suiteVersion: suite.suiteVersion,
     mode: 'live-shadow',
     aggregateScore,
     passed,
@@ -203,7 +248,7 @@ export async function runWorkforceLiveShadowEval(
   await storage.updateRun(runId, {
     status: 'completed',
     completedAt: at(n + 2),
-    metadata: { mode: 'eval', workforceId, suiteId: EVAL_SUITE_ID, evalAgentId: EVAL_AGENT_ID, evalSummary: summary },
+    metadata: { mode: 'eval', workforceId, suiteId: suite.suiteId, evalAgentId, evalSummary: summary },
   });
   log.info('workforce_eval_completed', { tenantId, workforceId, runId, aggregateScore, passed });
   return summary;

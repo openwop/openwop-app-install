@@ -4,8 +4,16 @@
  * deletion via the generated manifest, the fast-forward-only ref-conflict
  * retry, marker parse round-trip, and `app.model.json` canonical round-trip
  * (the ADR's Phase 1 gate).
+ *
+ * Sabotage witnesses (grade-tests w36): the no-op compare disabled, force:true,
+ * the 422 retry removed, the manifest diff replaced by "delete everything
+ * previous", a parent on the first commit, key sorting removed, the marker
+ * dropped from the message, and the marker check removed from parseSyncMarker
+ * — each reds its case.
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { openStorage } from '../../../storage/index.js';
+import type { BrokeredEgressDeps } from '../../../host/brokeredEgress.js';
 
 interface Call { method: string; url: string; body?: Record<string, unknown> }
 const calls: Call[] = [];
@@ -26,7 +34,9 @@ const { validateAppDoc } = await import('../validateAppDoc.js');
 const { registerAppBuilderComponents } = await import('../componentCatalog.js');
 registerAppBuilderComponents(); // validateAppDoc reads the closed catalog
 
-const DEPS = { storage: {} as never, tenantId: 't1', runId: 'sync:test', actingUserId: 'u1' };
+// The broker is mocked, so storage is never read — but the fixture is the
+// real type, not a cast.
+const DEPS: BrokeredEgressDeps = { storage: await openStorage('memory://'), tenantId: 't1', runId: 'sync:test', actingUserId: 'u1' };
 const BINDING = {
   id: 't1:c1', tenantId: 't1', canvasId: 'c1', owner: 'octo', repo: 'my-app', branch: 'main',
   target: 'html-css' as const, webhookId: 'wh1', sealedWebhookSecret: 's', boundBy: 'u1', boundAt: 'now',
@@ -126,5 +136,7 @@ describe('parseSyncMarker', () => {
     expect(parseSyncMarker(`Sync\n\n${SYNC_ACTOR_MARKER} model-version=42`)).toBe(42);
     expect(parseSyncMarker('feat: a human commit')).toBeNull();
     expect(parseSyncMarker(`${SYNC_ACTOR_MARKER} but no version`)).toBeNull();
+    // A human commit that QUOTES the key is not ours — the marker decides.
+    expect(parseSyncMarker('chore: bump model-version=9')).toBeNull();
   });
 });

@@ -61,7 +61,7 @@ function build(modules: Record<string, unknown>): {
  *      a lazy feature catalog can only be needed by its own page.
  *   2. Exactly THREE feature namespaces are rendered by non-feature code, and
  *      they are listed in SHELL_FEATURE_NAMESPACES below with the reason.
- * If either fact stops holding, `i18nNamespaceSplit.test.ts` fails — the split
+ * If either fact stops holding, `src/i18n/__tests__/namespaceSplit.test.ts` fails — the split
  * is guarded, not assumed.
  */
 const SHELL_FEATURE_NAMESPACES: ReadonlySet<string> = new Set([

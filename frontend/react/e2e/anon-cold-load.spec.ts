@@ -11,6 +11,11 @@ import { test, expect } from '@playwright/test';
  * answers a first-call challenge by bootstrapping and retrying once, which is correct.
  *
  * The context starts with NO cookies (the config's storageState carries none).
+ *
+ * "Serves them" is the run-list ENVELOPE, not a bare 200: a 200 could also be the SPA's
+ * HTML shell (the backend serves a non-protocol `/runs` request the document) or an
+ * error body. Breaks it (w53 probe `anon-no-cookie`, witnessed): the anonymous mint
+ * that stops setting the session cookie.
  */
 test('cold anonymous load: the app boots, a session is minted, and the protocol surface serves it', async ({ page, context }) => {
   await page.goto('/dashboard');
@@ -31,9 +36,15 @@ test('cold anonymous load: the app boots, a session is minted, and the protocol 
   // client makes it. The base mirrors `client/config.ts`'s dev fallback (e2e README
   // trap 2: in dev the app calls the backend directly, not through `/api`).
   const base = process.env.VITE_OPENWOP_BASE_URL ?? 'http://localhost:8080';
-  const status = await page.evaluate(
-    async (b) => (await fetch(`${b}/runs`, { credentials: 'include', headers: { 'OpenWOP-Version': '2.0', accept: 'application/json' } })).status,
-    base,
-  );
-  expect(status, 'the anonymous visitor is served on the protocol surface, not challenged').toBe(200);
+  interface RunsRead { status: number; contentType: string; isRunList: boolean }
+  const read: RunsRead = await page.evaluate(async (b) => {
+    const res = await fetch(`${b}/runs`, { credentials: 'include', headers: { 'OpenWOP-Version': '2.0', accept: 'application/json' } });
+    const contentType = res.headers.get('content-type') ?? '';
+    const body: unknown = contentType.includes('json') ? await res.json() : null;
+    const runs = typeof body === 'object' && body !== null && 'runs' in body ? body.runs : undefined;
+    return { status: res.status, contentType, isRunList: Array.isArray(runs) };
+  }, base);
+  expect(read.status, 'the anonymous visitor is served on the protocol surface, not challenged').toBe(200);
+  expect(read.contentType, 'a JSON protocol answer, not the SPA document').toContain('application/json');
+  expect(read.isRunList, 'the body is the run-list envelope ({ runs: [...] })').toBe(true);
 });

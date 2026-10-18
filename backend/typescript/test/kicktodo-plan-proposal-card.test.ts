@@ -13,6 +13,12 @@
  *    no-op success in BOTH orders (resolveProposal is idempotent);
  *  - reviewProjection surfaces the card under the circle conversationId filter,
  *    and ONLY to the participant (the coach's note is PII).
+ *
+ * Sabotage witnesses (w41 /grade-tests): the resolveProposal owner check (coach
+ * claim then hits applyRevisionCommands' 403, not this 404), the advice-only
+ * refusal (message-asserted), reconcileProposalCard, the dismiss state, the
+ * ids-only projection, and approverRefs[0] = participant (visibility keys on
+ * approverRefs[0] alone — `approvalAudience.mayViewApproval`).
  */
 import { beforeAll, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
@@ -58,6 +64,15 @@ beforeAll(async () => {
   challengeId = draft.id;
 });
 
+/** The pending approval card raised for one proposal (narrowed, never cast). */
+async function raisedApproval(proposalId: string): Promise<PendingApproval> {
+  const approval = (await listApprovals(TENANT, 'pending')).find(
+    (a) => a.kind === 'kicktodo-plan-proposal' && a.planProposal?.proposalId === proposalId,
+  );
+  if (!approval) throw new Error(`no kicktodo-plan-proposal approval raised for ${proposalId}`);
+  return approval;
+}
+
 /** A fresh participant-owned circle with an accepted coach who holds the
  *  coach-plan-proposal scope, plus a proposal + its raised approval. */
 async function scenario() {
@@ -75,10 +90,8 @@ async function scenario() {
   const proposal = await proposePlanChange(circle.id, coach, 'Move your sessions to the morning.', [
     { lane: 'schedule', daypart: 'morning' },
   ]);
-  const approval = (await listApprovals(TENANT, 'pending')).find(
-    (a) => a.kind === 'kicktodo-plan-proposal' && a.planProposal?.proposalId === proposal.id,
-  );
-  return { participant, coach, enrollmentId: enrollment.id, circle, proposal, approval: approval as PendingApproval };
+  const approval = await raisedApproval(proposal.id);
+  return { participant, coach, enrollmentId: enrollment.id, circle, proposal, approval };
 }
 
 /** The pre-ADR-0501 shape: prose, no commands. Advice, and never applyable. */
@@ -91,10 +104,8 @@ async function advice() {
   await inviteToCircle(TENANT, circle.id, participant, coach, ['coach-plan-proposal']);
   await acceptGrant(circle.id, coach);
   const proposal = await proposePlanChange(circle.id, coach, 'Try to get more sleep.');
-  const approval = (await listApprovals(TENANT, 'pending')).find(
-    (a) => a.kind === 'kicktodo-plan-proposal' && a.planProposal?.proposalId === proposal.id,
-  );
-  return { participant, enrollmentId: enrollment.id, proposal, approval: approval as PendingApproval };
+  const approval = await raisedApproval(proposal.id);
+  return { participant, enrollmentId: enrollment.id, proposal, approval };
 }
 
 describe('ADR 0459 P2 — plan-proposal approval cards', () => {
@@ -145,7 +156,10 @@ describe('ADR 0459 P2 — plan-proposal approval cards', () => {
     // approved and the proposal 'applied' — the durable lie KT-HONESTY-1 was about.
     await expect(
       claimApproval(deps, { tenantId: TENANT, decidedBy: a.participant }, a.approval.approvalId),
-    ).rejects.toBeTruthy();
+    ).rejects.toThrow(/advice only/);
+    // ^ THIS guard's refusal. Without it `applyRevisionCommands` still refuses the
+    //   missing command list (`commands` must be an array) — a second guard whose
+    //   message differs, so the regex is what makes this case witness the first.
     expect((await getEnrollment(TENANT, a.enrollmentId))?.planRevision).toBe(before?.planRevision ?? 0);
     expect((await listProposalsFor(TENANT, a.enrollmentId))[0]?.state).toBe('proposed');
     expect((await getApproval(a.approval.approvalId))?.status).toBe('pending');

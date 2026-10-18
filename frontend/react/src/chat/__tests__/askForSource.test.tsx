@@ -19,8 +19,8 @@ import { MessageFeed } from '../MessageFeed.js';
 import type { ChatMessage } from '../types.js';
 import type { AgentMentionEntry } from '../lib/agentMentions.js';
 
-const msg = (id: string, role: ChatMessage['role'], content: string, over: Partial<ChatMessage> = {}): ChatMessage =>
-  ({ id, role, content, createdAt: '2026-09-30T00:00:00.000Z', ...over } as ChatMessage);
+const msg = (id: string, role: ChatMessage['role'], content: string, authorSubject: string): ChatMessage =>
+  ({ id, role, content, authorSubject, createdAt: '2026-09-30T00:00:00.000Z' });
 const actions = { onToggleReaction: () => {}, onEdit: () => {}, onDelete: () => {} };
 const directory = new Map([
   ['user:alice', { displayName: 'Alice', kind: 'user' as const }],
@@ -39,21 +39,24 @@ const feed = (messages: ChatMessage[], withEntries = true) => render(withEntries
 
 describe('Ask for a source (ADR 0768 D3)', () => {
   it('drafts an @-addressed question quoting the claim, and sends nothing', () => {
-    feed([msg('m1', 'assistant', 'Partner posts drove   40% of signups.', { authorSubject: 'agent:a.kai' })]);
+    feed([msg('m1', 'assistant', 'Partner posts drove   40% of signups.', 'agent:a.kai')]);
     fireEvent.click(screen.getByText('askForSource'));
     expect(seeded).toEqual(['askSourceDraft|kai|Partner posts drove 40% of signups.']);
   });
 
   it('no button on a human message, or an agent that is not a channel member', () => {
     feed([
-      msg('m1', 'user', 'I think so', { authorSubject: 'user:alice' }),
-      msg('m2', 'assistant', 'hi', { authorSubject: 'agent:a.ghost' }),
+      msg('m1', 'user', 'I think so', 'user:alice'),
+      msg('m2', 'assistant', 'hi', 'agent:a.ghost'),
+      // A human whose subject, sliced past an `agent:`-length prefix, IS a roster id
+      // ('user:xa.kai' → 'a.kai'): only the `agent:` prefix check keeps a button off it.
+      msg('m3', 'user', 'me too', 'user:xa.kai'),
     ]);
     expect(screen.queryByText('askForSource')).toBeNull();
   });
 
   it('no button without the roster (not a channel surface)', () => {
-    feed([msg('m1', 'assistant', 'x', { authorSubject: 'agent:a.kai' })], false);
+    feed([msg('m1', 'assistant', 'x', 'agent:a.kai')], false);
     expect(screen.queryByText('askForSource')).toBeNull();
   });
 });

@@ -7,6 +7,11 @@
  * `role="log"`/`aria-live="polite"` transcript, `aria-expanded` on the launcher, a
  * reduced-motion-safe typing indicator, Escape-to-close, ≥44px touch targets, and an
  * honest error message (never silence).
+ *
+ * CEILING (recorded, wave 26): the backend lane has no DOM (no jsdom/happy-dom
+ * dependency), so the a11y/UX markers below are pinned as the served source's
+ * spellings, not driven as behavior — a reformatted handler reds them and a broken
+ * handler that keeps the spelling would not. The syntax gate IS behavioral.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -16,20 +21,29 @@ import { createApp } from '../src/index.js';
 let BASE: string;
 let server: http.Server;
 let embed: string;
+let status = 0;
+let contentType = '';
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
+  // No assertions here: a failing beforeAll SKIPS every case instead of failing it.
   const r = await fetch(`${BASE}/host/openwop-app/public/widget/embed.js`);
-  expect(r.status).toBe(200);
-  expect(r.headers.get('content-type')).toContain('javascript');
+  status = r.status;
+  contentType = r.headers.get('content-type') ?? '';
   embed = await r.text();
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
 describe('ADR 0470 P2 — embed.js served widget', () => {
+  it('is served as JavaScript (200 + a JS content-type)', () => {
+    expect(status).toBe(200);
+    expect(contentType).toContain('javascript');
+  });
+
   it('is syntactically valid JavaScript (a parse error would break every widget)', () => {
+    expect(embed.length).toBeGreaterThan(1000); // the real widget, not an empty body that trivially parses
     // new Function COMPILES (parses) the body without EXECUTING it — a pure syntax gate.
     expect(() => new Function(embed)).not.toThrow();
   });

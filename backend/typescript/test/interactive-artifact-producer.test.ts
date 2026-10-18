@@ -7,11 +7,17 @@
  * as content, and the workbench projection surfaces that type — so the renderer
  * (which dispatches on `interactive.*`) can finally receive it. (The visual render
  * itself is a /browser check.)
+ *
+ * Red if the typed branch stops persisting `artifactTypeId` (`w27g2-iap-typed-branch-off`),
+ * a document-backed / unregistered / null-payload envelope mints a typed row
+ * (`iap-docbacked`, `iap-unregistered`, `iap-nullpayload-r2`), or the node maps a kind to
+ * the wrong type / drops its source check (`iap-node-*`).
  */
 import { describe, it, expect, beforeAll } from 'vitest';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { openStorage } from '../src/storage/index.js';
 import { registerInteractiveArtifactTypes } from '../src/features/interactive-artifacts/artifactTypes.js';
+import { registerArtifactType } from '../src/host/artifactTypes.js';
 import {
   detectTypedArtifact,
   persistRunArtifact,
@@ -63,6 +69,12 @@ describe('detectTypedArtifact', () => {
   it('ignores a null/undefined payload → null (no "null" artifact persisted)', () => {
     expect(detectTypedArtifact({ artifact: { artifactTypeId: 'interactive.mermaid', payload: null } }, 'n1')).toBeNull();
     expect(detectTypedArtifact({ artifact: { artifactTypeId: 'interactive.mermaid' } }, 'n1')).toBeNull();
+    // The mermaid STRING schema also rejects null, so the two lines above are double-guarded.
+    // A registered type whose schema accepts anything isolates the payload guard itself.
+    registerArtifactType({ artifactTypeId: 'test.ia-accepts-anything', title: 'any', schema: {}, export: [], registrationSource: 'host' });
+    expect(detectTypedArtifact({ artifact: { artifactTypeId: 'test.ia-accepts-anything', payload: 'x' } }, 'n1'), 'control: the open type mints').not.toBeNull();
+    expect(detectTypedArtifact({ artifact: { artifactTypeId: 'test.ia-accepts-anything', payload: null } }, 'n1')).toBeNull();
+    expect(detectTypedArtifact({ artifact: { artifactTypeId: 'test.ia-accepts-anything' } }, 'n1')).toBeNull();
   });
 });
 
@@ -102,6 +114,7 @@ describe('producer node — feature.interactive-artifacts.nodes.render', () => {
 
   it('accepts a chart object spec', async () => {
     const r = await render({ inputs: { kind: 'chart', chart: { chartType: 'line', data: { labels: ['a'], values: [1] } } } });
+    expect(r.status).toBe('success');
     const art = artifactOf(r.outputs);
     expect(art.artifactTypeId).toBe('interactive.chart');
     expect((art.payload as { chartType: string }).chartType).toBe('line');

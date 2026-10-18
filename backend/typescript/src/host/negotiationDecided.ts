@@ -24,6 +24,11 @@
  *     P4 reports that prose/schema disagreement to the steward.
  *   - `reason` is the schema's closed `below-floor | unauthenticated |
  *     unsupported | ok`.
+ *   - `requested` (RFC 0242 §A, suite 2.46.0) is the version the requesting
+ *     side NAMED — outbound, the one this host asked the peer for. It MUST be
+ *     present whenever one was named (§A.2), and a downgrade is an `accepted`
+ *     record whose `version` differs from it (§A.3). That is what the
+ *     `downgraded` outcome above could not say; `outcome` keeps its two values.
  *
  * Emitters supply a {@link NegotiationRecorder}; a caller with no run passes
  * none, and the decision then has no run log to land on (ADR 0858 P4 records
@@ -47,6 +52,7 @@ export interface NegotiationDecidedPayload {
   protocol: NegotiationProtocol;
   outcome: NegotiationOutcome;
   version?: string;
+  requested?: string;
   floor?: string;
   peerDigest?: string;
   reason: NegotiationReason;
@@ -74,6 +80,8 @@ export function negotiationDecidedPayload(input: {
   reason: NegotiationReason;
   /** Present only when a version was actually decided (never on a refusal). */
   version?: string;
+  /** RFC 0242 §A.2 — the version the requesting side named; set whenever one was. */
+  requested?: string;
   floor?: string;
   /** The peer URL; only its origin's DIGEST leaves this function. */
   peerUrl?: string;
@@ -84,6 +92,7 @@ export function negotiationDecidedPayload(input: {
     protocol: input.protocol,
     outcome: input.outcome,
     ...(input.outcome === 'accepted' && input.version !== undefined ? { version: input.version } : {}),
+    ...(input.requested !== undefined ? { requested: input.requested } : {}),
     ...(input.floor !== undefined ? { floor: input.floor } : {}),
     ...(digest !== undefined ? { peerDigest: digest } : {}),
     reason: input.reason,

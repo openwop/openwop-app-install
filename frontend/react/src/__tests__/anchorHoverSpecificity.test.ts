@@ -44,21 +44,39 @@ function rules(): Array<{ sel: string; body: string }> {
 }
 
 /**
- * An anchor-hover selector carrying NO specificity-raising qualifier outside
- * `:where()` — i.e. one that would outrank a component class. `a:where(:hover)`
- * is exempt (that IS the fix); `a.chip:hover` / `.docs-index-item:hover` are
- * exempt (a class owns them, which is the point).
+ * An anchor-hover selector that would outrank a component class on the anchor.
+ *
+ * Only the SUBJECT compound (after the last combinator) is the hovered element,
+ * so it must be an `a` (not `article`/`aside`) with `:hover` outside `:where()`.
+ * It is exempt only when a CLASS owns the rule: on the anchor itself
+ * (`a.chip:hover`) or on an ancestor (`.chat-md a:hover`, component-scoped).
+ * An attribute (`a[href]:hover`, (0,2,1)), an id, `:not()`/`:is()` arguments, or a
+ * type-only ancestor (`body a:hover`, (0,1,2)) raise specificity WITHOUT a
+ * component owning the rule — exactly the defect — so they do not exempt
+ * (/grade-tests w50 probes `ah-attr-dodge`, `ah-desc-dodge`).
  */
 function isUnclassedAnchorHover(selector: string): boolean {
-  const s = selector.trim();
-  if (!s.startsWith('a')) return false;
   // Strip every :where(...) group — by definition it adds no specificity.
-  const stripped = s.replace(/:where\([^)]*\)/g, '');
-  if (!/:hover\b/.test(stripped)) return false;
-  // Anything left beyond the tag + pseudo-classes (a class, id, or attribute)
-  // means a component owns this rule.
-  return !/[.#[]/.test(stripped);
+  const s = selector.trim().replace(/:where\([^)]*\)/g, '');
+  const compounds = s.split(/\s*[>+~]\s*|\s+/).filter(Boolean);
+  const subject = compounds[compounds.length - 1] ?? '';
+  if (!/^a(?![\w-])/.test(subject)) return false;
+  if (!/:hover\b/.test(subject)) return false;
+  // A class counts only outside :not()/:is() arguments.
+  const hasClass = (c: string): boolean => /\.[A-Za-z_-]/.test(c.replace(/:(not|is)\([^)]*\)/g, ''));
+  return !compounds.some(hasClass);
 }
+
+describe('the offender classifier itself', () => {
+  it('flags every specificity-raising unclassed anchor hover and exempts only class-owned or non-anchor ones', () => {
+    for (const sel of ['a:hover', 'a[href]:hover', 'body a:hover', ':root a:hover', 'main > a:hover', 'a:not(.btn):hover', 'a#x:hover']) {
+      expect(isUnclassedAnchorHover(sel), `${sel} must be an offender`).toBe(true);
+    }
+    for (const sel of ['a:where(:hover)', 'a.chip:hover', '.chat-md a:hover', 'article:hover', 'aside:hover', 'a.dash-activity__row:hover .dash-activity__name', 'a:focus']) {
+      expect(isUnclassedAnchorHover(sel), `${sel} must not be an offender`).toBe(false);
+    }
+  });
+});
 
 describe('global anchor hover is de-specified', () => {
   it('no unclassed a:hover rule declares color', () => {

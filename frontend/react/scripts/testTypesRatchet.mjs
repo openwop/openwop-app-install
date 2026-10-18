@@ -11,7 +11,7 @@
 
 /** The measured count at the commit that introduced this check. Lower it whenever
  *  you drive the real number down; NEVER raise it to make a red run green. */
-export const FILE_BASELINE = 163;
+export const FILE_BASELINE = 0; // 0 measured after /grade-tests w52 (was 23): tsc -p tsconfig.test.json exits 0
 
 /**
  * Resolve the effective baseline, honouring an env override that may only ever

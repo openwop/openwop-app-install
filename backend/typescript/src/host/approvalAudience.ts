@@ -48,6 +48,11 @@ export type Audience =
   | { policyApproverRef: true }
   /** The superadmin tenant only. */
   | { superadminTenant: true }
+  /** ADR 0878 D6 — holders of `scope` in the row's org WHEN the row has one; a row
+   *  without an `orgId` is tenant-scoped (the `null` answer). For a kind whose rows
+   *  are sometimes one org's business: an `assistant-action` drafting a support
+   *  reply carries its ticket's org, every other assistant action carries none. */
+  | { orgScopeWhenOrg: string }
   /** Genuinely tenant-scoped. Stated per kind, never a default — see the ratchet below. */
   | null;
 
@@ -86,7 +91,10 @@ export const APPROVAL_AUDIENCE: Record<ApprovalKind, Audience> = {
   // `features/assistant/actionApproval.ts` already emits a create-time tenant-wide
   // broadcast for it, deliberately.
   'run-proposal': null,
-  'assistant-action': null,
+  // ADR 0878 D6 — tenant-wide for every assistant action EXCEPT one stamped with an
+  // org (a `servicedesk.reply`, its ticket's org). It was plain `null`, so an editor
+  // of org A read and could decide org B's drafted reply to org B's customer.
+  'assistant-action': { orgScopeWhenOrg: 'workspace:write' },
   'campaign-spend': null,
   'commerce-spend': null,
   'contact-merge': null,
@@ -105,6 +113,32 @@ const audienceOf = (kind: string | undefined): Audience =>
   APPROVAL_AUDIENCE[(kind ?? 'run-proposal') as ApprovalKind] ?? null;
 
 /**
+ * ADR 0878 (grade-code SD2CD-3) — the org of a row that predates its kind's
+ * `orgScopeWhenOrg` stamp. A support-reply approval created before ADR 0878 carries
+ * no `orgId`, so it would read as tenant-wide forever while its proposal quotes a
+ * reply to one org's customer. The OWNING feature registers how to recover the org
+ * (the assistant: approval → action → ticket); host code never imports it. Only
+ * consulted for an unstamped row of a conditional kind.
+ */
+type ApprovalOrgResolver = (tenantId: string, a: { actionId?: string | undefined }) => Promise<string | undefined>;
+const orgResolvers = new Map<string, ApprovalOrgResolver>();
+export function registerApprovalOrgResolver(kind: ApprovalKind, fn: ApprovalOrgResolver): void {
+  orgResolvers.set(kind, fn);
+}
+
+type AudienceRow = Pick<PendingApproval, 'kind' | 'orgId' | 'policy'> & { actionId?: string | undefined };
+
+/** The audience for THIS row: the conditional variant resolved to its two plain
+ *  answers first, so neither function below can fall into the org-scoped branch's
+ *  `!a.orgId ⇒ fail closed` for a tenant-scoped row (pre-code review L6). */
+async function resolvedAudience(tenantId: string, a: AudienceRow): Promise<{ audience: Exclude<Audience, { orgScopeWhenOrg: string }>; orgId: string | undefined }> {
+  const declared = audienceOf(a.kind);
+  if (declared === null || !('orgScopeWhenOrg' in declared)) return { audience: declared, orgId: a.orgId };
+  const orgId = a.orgId ?? (await orgResolvers.get(a.kind ?? '')?.(tenantId, a));
+  return orgId ? { audience: { orgScope: declared.orgScopeWhenOrg }, orgId } : { audience: null, orgId: undefined };
+}
+
+/**
  * May `subjectRef` see this row? The PREDICATE half — for `/reviews` and the approvals list.
  *
  * Fails closed on a missing subject or a missing `orgId` for any org-scoped kind: both
@@ -113,21 +147,21 @@ const audienceOf = (kind: string | undefined): Audience =>
 export async function mayViewApproval(
   tenantId: string,
   subjectRef: string | undefined,
-  a: Pick<PendingApproval, 'kind' | 'orgId' | 'policy'>,
+  a: AudienceRow,
   /** ADR 0778 C14 — a per-request memo of `resolveEffectiveAccess` by
    *  (subject, org): the list path calls this once per row, and each call is
    *  three namespace scans. */
   accessMemo?: Map<string, Promise<EffectiveAccess>>,
 ): Promise<boolean> {
-  const audience = audienceOf(a.kind);
+  const { audience, orgId } = await resolvedAudience(tenantId, a);
   if (audience === null) return true;
   if ('superadminTenant' in audience) return isSuperadminTenant(tenantId);
   if ('policyApproverRef' in audience) return !!subjectRef && subjectRef === a.policy?.approverRefs?.[0];
-  if (!subjectRef || !a.orgId) return false;
-  const key = JSON.stringify([tenantId, subjectRef, a.orgId]);
+  if (!subjectRef || !orgId) return false;
+  const key = JSON.stringify([tenantId, subjectRef, orgId]);
   let pending = accessMemo?.get(key);
   if (!pending) {
-    pending = resolveEffectiveAccess(tenantId, { subject: subjectRef, orgId: a.orgId });
+    pending = resolveEffectiveAccess(tenantId, { subject: subjectRef, orgId });
     accessMemo?.set(key, pending);
   }
   const access = await pending;
@@ -147,9 +181,9 @@ export async function mayViewApproval(
  */
 export async function approvalRecipients(
   tenantId: string,
-  a: Pick<PendingApproval, 'kind' | 'orgId' | 'policy'>,
+  a: AudienceRow,
 ): Promise<{ addressed: boolean; refs: string[] }> {
-  const audience = audienceOf(a.kind);
+  const { audience, orgId: resolvedOrg } = await resolvedAudience(tenantId, a);
   if (audience === null) return { addressed: false, refs: [] };
   if ('policyApproverRef' in audience) {
     const ref = a.policy?.approverRefs?.[0];
@@ -158,8 +192,8 @@ export async function approvalRecipients(
   // A superadmin-tenant row has no per-user address; it is addressed in the sense that it
   // must NOT fan out to a normal tenant, and empty in the sense that we cannot name a user.
   if ('superadminTenant' in audience) return { addressed: true, refs: [] };
-  if (!a.orgId) return { addressed: true, refs: [] }; // fail closed, as both predicates do
-  const members = await listMembers(tenantId, a.orgId);
+  if (!resolvedOrg) return { addressed: true, refs: [] }; // fail closed, as both predicates do
+  const members = await listMembers(tenantId, resolvedOrg);
   const refs: string[] = [];
   for (const m of members) {
     // `subject` is OPTIONAL: a descriptive member has no principal binding yet
@@ -168,7 +202,7 @@ export async function approvalRecipients(
     // org of only descriptive members correctly resolves to zero, which the caller handles
     // as the redacted-broadcast case rather than as silence.
     if (!m.subject) continue;
-    const access = await resolveEffectiveAccess(tenantId, { subject: m.subject, orgId: a.orgId });
+    const access = await resolveEffectiveAccess(tenantId, { subject: m.subject, orgId: resolvedOrg });
     if ((access.scopes as readonly string[]).includes(audience.orgScope)) refs.push(m.subject);
   }
   return { addressed: true, refs };

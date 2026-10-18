@@ -31,6 +31,7 @@ import { buildCommentsSurface } from '../src/features/comments/surface.js';
 import { getNotificationEmitter } from '../src/notifications/emitter.js';
 import type { NotificationRecord } from '../src/types.js';
 import { PREAUTHORIZED_CALLER } from '../src/host/subjectAccess.js';
+import { createMember } from '../src/host/accessControlService.js';
 
 /** ADR 0659 D1 — `listThread` now answers `null` when the target is absent OR invisible.
  *  Every fixture here creates a real resource and is not testing that gate, so a null is
@@ -219,6 +220,8 @@ describe('Comments: notification emit (string types, tenant-scoped)', () => {
     const unsub = getNotificationEmitter().subscribe((r) => captured.push(r));
     try {
       const page = await createPage({ tenantId: 'tN', orgId: 'o1', title: 'Doc', createdBy: 'owner1' });
+      // ADR 0881 D3 — a recipient must be a member of the org (and able to see the page).
+      for (const subject of ['owner1', 'reviewer']) await createMember({ tenantId: 'tN', orgId: 'o1', displayName: subject, subject, roles: ['editor'] });
       // a reviewer (not the owner) comments → comment.added to owner1
       const a = await createComment({ tenantId: 'tN', orgId: 'o1', resourceType: 'cms_page', resourceId: page.pageId, body: 'looks off', authorId: 'reviewer' , caller: { subject: 'reviewer' }});
       await emitCommentNotification(a.comment, a.notify);

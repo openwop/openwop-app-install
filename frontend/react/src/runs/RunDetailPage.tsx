@@ -59,6 +59,15 @@ function fmtTime(iso?: string): string {
   return iso ? formatDateTime(iso) : '—';
 }
 
+/** ADR 0889 A9 — an agent eval run. Branches on `metadata.eval.kind` (the host's
+ *  stamp); the `eval:` workflowId prefix covers a snapshot whose metadata was not
+ *  projected. */
+function isAgentEvalRun(metadata: unknown, workflowId: string): boolean {
+  if (workflowId.startsWith('eval:')) return true;
+  const ev = metadata && typeof metadata === 'object' ? (metadata as { eval?: unknown }).eval : undefined;
+  return !!ev && typeof ev === 'object' && (ev as { kind?: unknown }).kind === 'agent-suite';
+}
+
 /**
  * ADR 0772 (`RRUX-1`) — keyed by `runId`. Every piece of state below belonged to
  * ONE run, and an in-app link to another run (the fork's source, a parent, a
@@ -550,7 +559,9 @@ function RunDetailView() {
           </Button>
           {/* Grade-ux #4 — cancelled runs debug too (a cancel mid-flight is
               as much a "why did this stop here" as a failure). */}
-          {snapshot && (snapshot.status === 'failed' || snapshot.status === 'cancelled') && snapshot.workflowId ? (
+          {/* ADR 0889 A9 — an agent eval run's workflowId is synthetic (`eval:<ref>`);
+              there is no workflow to open, so it never deep-links the builder. */}
+          {snapshot && (snapshot.status === 'failed' || snapshot.status === 'cancelled') && snapshot.workflowId && !isAgentEvalRun(snapshot.metadata, snapshot.workflowId) ? (
             <Button
               variant="secondary"
               onClick={() => nav(`/builder/${encodeURIComponent(snapshot.workflowId)}?debugRun=${encodeURIComponent(runId)}`)}

@@ -44,6 +44,7 @@ import {
   materializeOccurrences,
   ChallengeNotEnrollableError,
   EnrollDeniedError,
+  EnrollConflictError,
   substituteOccurrence,
   SubstitutionDeniedError,
 } from './enrollmentService.js';
@@ -305,6 +306,7 @@ export const KICKTODO_ROUTES: ReadonlyArray<{ method: 'get' | 'post'; path: stri
           throw new OpenwopError('conflict', err.message, 409);
         }
         if (err instanceof InvalidDaysOfWeekError) throw new OpenwopError('validation_error', err.message, 400);
+        if (err instanceof EnrollConflictError) throw new OpenwopError('conflict', err.message, 409);
         // ADR 0420 P1 — an enroll-guard denial (entitlement/capacity) is a 402:
         // the actionable "payment required" refusal, not a generic conflict.
         if (err instanceof EnrollDeniedError) throw new OpenwopError('forbidden', err.message, 402);
@@ -466,7 +468,9 @@ export const KICKTODO_ROUTES: ReadonlyArray<{ method: 'get' | 'post'; path: stri
   {
     // ADR 0430 P2 — Discover with CONTENT-locale negotiation. The requested
     // locale is an explicit query parameter, INDEPENDENT of the UI locale
-    // (the PRD's separation rule); absent ⇒ the caller's UI locale, then `en`.
+    // (the PRD's separation rule); absent ⇒ `en`. The SPA always sends it
+    // (`kicktodoClient` derives it from the reader's content-locale choice), so
+    // the server does not fall back to Accept-Language here.
     method: 'get',
     path: `${KICKTODO_PREFIX}/catalog`,
     handler: async (req, res) => {

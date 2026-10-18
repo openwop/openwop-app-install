@@ -1,7 +1,17 @@
+/**
+ * ADR 0140 P5 + MTCU-201 — per-tab background-activity badges and their SR
+ * announcement. Unread keys on the last FINALIZED inbound id (the streaming bubble is
+ * excluded), blocked (an open HITL interrupt) outranks unread, the active tab never
+ * badges, focus clears, closed tabs are pruned, and `onRaise` fires once on a genuine
+ * background rising edge — never for the on-load baseline, and the first live reply
+ * after a reload to an already-unread tab still announces. Breaks if any of those
+ * rules, or `reportActivity`'s referential stability (TabSession memo), is lost.
+ */
 import { describe, it, expect, vi } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 import { computeTabBadge, deriveActivity, useTabBadges, NO_BADGE } from '../useTabBadges.js';
 import type { ChatMessage } from '../../types.js';
+import type { OpenInterrupt } from '../../../client/interruptsClient.js';
 
 const msg = (id: string, role: ChatMessage['role'], extra: Partial<ChatMessage> = {}): ChatMessage =>
   ({ id, role, content: '', createdAt: '2026-01-01T00:00:00Z', ...extra });
@@ -21,7 +31,7 @@ describe('deriveActivity (pure) — the finalized-inbound projection', () => {
   });
 
   it('flags blocked when any message has an open interrupt', () => {
-    const open = [{ nodeId: 'n', kind: 'approval' }] as unknown as ChatMessage['activeInterrupts'];
+    const open: OpenInterrupt[] = [{ interruptId: 'i1', nodeId: 'n', kind: 'approval', data: null, createdAt: '2026-01-01T00:00:00Z' }];
     const msgs = [msg('w1', 'workflow_run', { activeInterrupts: open })];
     expect(deriveActivity(msgs, false).blocked).toBe(true);
     expect(deriveActivity([msg('a1', 'assistant')], false).blocked).toBe(false);
@@ -58,6 +68,9 @@ describe('useTabBadges (state machine)', () => {
     expect(result.current.statusFor('b')).toEqual(NO_BADGE);
   });
 
+  // DOUBLE GUARD: reportActivity marks the active tab's inbound id as SEEN before
+  // computing, so unread is false even without computeTabBadge's active short-circuit
+  // (w44 probe badge-active reds only the pure case above, which owns that piece).
   it('a self-reply in the ACTIVE tab never badges', () => {
     const { result } = renderHook(() => useTabBadges('a', ['a', 'b']));
     act(() => { result.current.reportActivity('a', 'a-msg1', false); });

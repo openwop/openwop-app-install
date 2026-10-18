@@ -1,9 +1,17 @@
 /**
- * ADR 0154 Phase 4 — channel agent-turn targeting + workflow registration.
+ * ADR 0154 Phase 4 / ADR 0192 D1 / ADR 0202 D1 — channel agent-turn targeting + the
+ * chain-backed turn-workflow registration (ADR 0703).
+ *
+ * What breaks it: a mention that silently targets nobody (the slug/agentId mismatch),
+ * a sole agent that stops auto-replying (or a multi-agent channel where every agent
+ * replies to every post), an empty attachment-only post firing a paid run, or the
+ * chain pack no longer binding the dispatch's `configurable` to the node's ports.
  */
 import { describe, it, expect } from 'vitest';
 import { selectChannelTurnTargets } from '../src/features/channels/channelAgentDispatch.js';
 import { CHANNEL_TURN_WORKFLOW_ID, seedChannelTurnWorkflow } from '../src/features/channels/channelTurnWorkflow.js';
+import { loadWorkflowChainPacks, defaultWorkflowChainPackRoots, _resetChainRegistryForTest } from '../src/host/workflowChainPackLoader.js';
+import { getChainBackedWorkflow } from '../src/host/chainBackedWorkflows.js';
 
 describe('selectChannelTurnTargets', () => {
   it('returns [] with no agent members', () => {
@@ -46,7 +54,8 @@ describe('selectChannelTurnTargets', () => {
     expect(selectChannelTurnTargets(agents, '@analyst look')).toEqual(['a']);
   });
   it('matches a @mention case-insensitively', () => {
-    expect(selectChannelTurnTargets(['Helper'], 'ping @helper')).toEqual(['Helper']);
+    // Two unstamped agents → no sole-agent fallback, so only the case-insensitive id match can pass.
+    expect(selectChannelTurnTargets(['Helper', 'Other'], 'ping @helper')).toEqual(['Helper']);
   });
   it('can target multiple mentioned agents', () => {
     expect(selectChannelTurnTargets(['a', 'b', 'c'], '@a and @c please').sort()).toEqual(['a', 'c']);
@@ -99,16 +108,16 @@ describe('channel turn workflow registration', () => {
     // the wiring assertions below are NEW: the old test proved only that SOMETHING was
     // registered, which would have stayed green if the migration had produced a
     // definition the dispatch could not drive.
-    const { loadWorkflowChainPacks, defaultWorkflowChainPackRoots, _resetChainRegistryForTest } =
-      await import('../src/host/workflowChainPackLoader.js');
-    const { getChainBackedWorkflow } = await import('../src/host/chainBackedWorkflows.js');
     _resetChainRegistryForTest();
     loadWorkflowChainPacks({ roots: defaultWorkflowChainPackRoots() });
 
     seedChannelTurnWorkflow();
-    seedChannelTurnWorkflow(); // idempotent
     const def = getChainBackedWorkflow(CHANNEL_TURN_WORKFLOW_ID);
     expect(def, 'registered under the original workflowId').toBeTruthy();
+    // Idempotent = a second seed does NOT rebuild/replace the registered definition
+    // (re-registration would mint a new object and re-record a revision every boot).
+    seedChannelTurnWorkflow();
+    expect(getChainBackedWorkflow(CHANNEL_TURN_WORKFLOW_ID)).toBe(def);
 
     // The dispatch (`channelAgentDispatch.ts`) supplies agentId/task/conversationId/
     // credentialRef through the run's `configurable`; the node MUST read them as run

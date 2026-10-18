@@ -8,6 +8,16 @@
  *  - the consistency blend degrades to deterministic-only without a provider;
  *  - growthInterests outrank generic interests in production ranking;
  *  - the workspace aggregate 404s uniformly for a cross-tenant campaign id.
+ *
+ * Sabotage-witnessed (/grade-tests w30): swapping production-plan after
+ * consistency, the plan node failing instead of skipping, the kb slot check, the
+ * no-coverage refusal, the 60/40 blend weights, growth interests ignored, and the
+ * aggregate dropping its brief each turn a case red.
+ * Ceiling: the cross-tenant 404 is DOUBLE-GUARDED — campaign rows are keyed
+ * `${tenantId}::${id}` (a foreign tenant cannot address the row) AND the route
+ * re-checks org scope — so no single edit makes the foreign read succeed (probe
+ * w30g3-wg-ws-orgscope vacuous by design). A same-tenant non-member would reach
+ * the org-scope branch; that is a different claim (not added here).
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -18,6 +28,7 @@ import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { setKernel } from '../src/features/campaign-brief/briefService.js';
 import type { Profile } from '../src/features/profiles/profilesService.js';
+import { buildProductionContext } from '../src/features/production/productionContext.js';
 import { campaignOrchestrationWorkflow, campaignOrchestrationParallel } from '../src/features/campaign-orchestration/orchestrationWorkflow.js';
 import { nodes as orchNodes } from '../../../packs/feature.campaign-orchestration.nodes/index.mjs';
 import { nodes as briefNodes } from '../../../packs/feature.campaign-brief.nodes/index.mjs';
@@ -116,7 +127,6 @@ describe('growth interests (P6)', () => {
   });
 
   it('growthInterests outrank generic interests in production ranking', async () => {
-    const { buildProductionContext } = await import('../src/features/production/productionContext.js');
     // Two profiles with IDENTICAL skills; only one declares a growth aspiration
     // matching the brief's channels — that member must rank first.
     const skills = [{ name: 'Graphic design', proficiency: 3, endorsements: [] }];
@@ -153,14 +163,17 @@ describe('workspace aggregate — uniform 404 for a cross-tenant campaign', () =
   });
   afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-  interface Res<T = any> { status: number; body: T }
+  /** The route bodies this block reads (each field it touches is asserted). */
+  interface Body { orgId: string; brief: { id: string } | null; campaign: { id: string } }
+  interface Res { status: number; body: Body }
   interface Client { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res>; patch: (p: string, b?: unknown) => Promise<Res> }
   function client(): Client {
     let cookie = '';
     const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
       const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
       for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-      return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) };
+      const parsed = (res.status === 204 ? undefined : await res.json().catch(() => undefined)) as Body; // JSON boundary
+      return { status: res.status, body: parsed };
     };
     return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), patch: (p, b) => call('PATCH', p, b) };
   }
@@ -178,8 +191,8 @@ describe('workspace aggregate — uniform 404 for a cross-tenant campaign', () =
     expect(org.status).toBe(201);
     const brief = await owner.post('/host/openwop-app/campaign-brief/briefs', { orgId: org.body.orgId, name: 'Q4', productName: 'FlashPick' });
     expect(brief.status, JSON.stringify(brief.body)).toBe(201);
-    await setKernel(tenantId, brief.body.brief.id, FINALIZE_KERNEL);
-    const fin = await owner.post(`${ORCH}/finalize`, { briefId: brief.body.brief.id });
+    await setKernel(tenantId, brief.body.brief!.id, FINALIZE_KERNEL);
+    const fin = await owner.post(`${ORCH}/finalize`, { briefId: brief.body.brief!.id });
     expect(fin.status, JSON.stringify(fin.body)).toBe(201);
     const campaignId = fin.body.campaign.id;
 
@@ -187,7 +200,7 @@ describe('workspace aggregate — uniform 404 for a cross-tenant campaign', () =
     const ws = await owner.get(`${ORCH}/campaigns/${campaignId}/workspace`);
     expect(ws.status, JSON.stringify(ws.body)).toBe(200);
     expect(ws.body.campaign.id).toBe(campaignId);
-    expect(ws.body.brief?.id).toBe(brief.body.brief.id);
+    expect(ws.body.brief?.id).toBe(brief.body.brief!.id);
 
     // A stranger in ANOTHER tenant: the real cross-tenant id must be
     // indistinguishable from a nonexistent one (uniform 404, same body shape).
@@ -196,7 +209,7 @@ describe('workspace aggregate — uniform 404 for a cross-tenant campaign', () =
     const missing = await stranger.get(`${ORCH}/campaigns/does-not-exist/workspace`);
     expect(foreign.status).toBe(404);
     expect(missing.status).toBe(404);
-    const shape = (b: any): unknown => JSON.parse(JSON.stringify(b, (k, v) => (k === 'campaignId' ? '<id>' : v)));
+    const shape = (b: unknown): unknown => JSON.parse(JSON.stringify(b, (k, v) => (k === 'campaignId' ? '<id>' : v)));
     expect(shape(foreign.body)).toEqual(shape(missing.body));
   });
 });

@@ -5,7 +5,14 @@
  * Capability model: a STATELESS HMAC token (the `runStreamToken` pattern —
  * domain-prefixed, signed with the ONE session secret, verifiable on any
  * instance, no store) minted only behind the canvas factory's
- * `authorizeOrgScope(workspace:read)` gate. The capability it grants is
+ * `authorizeOrgScope(workspace:write)` gate.
+ *
+ * ADR 0886 D3 — the token is NOT the whole authority. It names its minter and
+ * the org the mint was authorized in, and every public request re-runs the
+ * mint's own checks (`authorizePresentRemote`, routes/presentRemote.ts): before
+ * this, a token kept serving the LIVE deck's speaker notes for its full TTL
+ * after the minter left the org, lost access to the canvas, or the feature was
+ * turned off. The capability it grants is
  * deliberately small and documented: read ONE canvas's present OUTLINE (frame
  * names + speaker notes + skip flags) and publish/subscribe the ephemeral
  * navigation channel for that canvas. Notes exposure is the point — the
@@ -28,7 +35,9 @@ const log = createLogger('host.presentRemote');
 /** Long enough for a talk + hallway overrun; short enough to bound a leaked
  *  QR photo. The presenter can always mint a fresh one. */
 const TTL_SECONDS = 4 * 3600;
-const PREFIX = 'presentremote:v1:';
+// v2 (ADR 0886 D3): claims carry the minter `u` + the authorizing org `o`. A v1
+// token (no minter) is refused by VERSION, not by a missing field.
+const PREFIX = 'presentremote:v2:';
 
 /** Sign over the encoded claims blob — field-delimiter ambiguity is
  *  impossible by construction (grade pass 2026-07-10 N1: signing the raw
@@ -39,15 +48,30 @@ function sign(claimsB64: string, exp: number): string {
     .digest('base64url');
 }
 
-export interface PresentRemoteClaims { tenantId: string; canvasId: string; exp: number }
+export interface PresentRemoteClaims {
+  tenantId: string;
+  canvasId: string;
+  /** The minter's canonical `User.userId` (ADR 0886 D3). */
+  userId: string;
+  /** The PATH org the mint was authorized in — re-asked at use, so a token is
+   *  never valid at mint and dead on first use (or the reverse). */
+  orgId: string;
+  exp: number;
+}
 
 /** Mint a remote-control capability for one canvas. Caller MUST have passed
- *  the org/tenant gate for the canvas already (the factory mint route). */
-export function mintPresentRemoteToken(tenantId: string, canvasId: string, nowMs: number = Date.now()): { token: string; expiresAt: string } {
+ *  the org/tenant gate for the canvas already (the factory mint route), and
+ *  names who it is and which org authorized it (ADR 0886 D3). */
+export function mintPresentRemoteToken(
+  tenantId: string,
+  canvasId: string,
+  minter: { userId: string; orgId: string },
+  nowMs: number = Date.now(),
+): { token: string; expiresAt: string } {
   const exp = Math.floor(nowMs / 1000) + TTL_SECONDS;
   // JSON claims — tenant ids contain colons (`org:…`), so no delimiter parsing.
-  const claims = Buffer.from(JSON.stringify({ t: tenantId, c: canvasId })).toString('base64url');
-  const token = `v1.${claims}.${exp}.${sign(claims, exp)}`;
+  const claims = Buffer.from(JSON.stringify({ t: tenantId, c: canvasId, u: minter.userId, o: minter.orgId })).toString('base64url');
+  const token = `v2.${claims}.${exp}.${sign(claims, exp)}`;
   return { token, expiresAt: new Date(exp * 1000).toISOString() };
 }
 
@@ -55,13 +79,17 @@ export function mintPresentRemoteToken(tenantId: string, canvasId: string, nowMs
 export function verifyPresentRemoteToken(token: string, nowMs: number = Date.now()): PresentRemoteClaims | null {
   const reject = (reason: string): null => { log.debug('present_remote_token_rejected', { reason }); return null; };
   const parts = token.split('.');
-  if (parts.length !== 4 || parts[0] !== 'v1') return reject('malformed');
-  let tenantId = '', canvasId = '';
+  if (parts.length !== 4) return reject('malformed');
+  if (parts[0] !== 'v2') return reject(parts[0] === 'v1' ? 'retired_version' : 'malformed');
+  let tenantId = '', canvasId = '', userId = '', orgId = '';
   try {
-    const raw = JSON.parse(Buffer.from(parts[1]!, 'base64url').toString()) as { t?: unknown; c?: unknown };
-    if (typeof raw.t !== 'string' || !raw.t || typeof raw.c !== 'string' || !raw.c) return reject('malformed');
+    const raw = JSON.parse(Buffer.from(parts[1]!, 'base64url').toString()) as { t?: unknown; c?: unknown; u?: unknown; o?: unknown };
+    const ok = (v: unknown): v is string => typeof v === 'string' && v.length > 0;
+    if (!ok(raw.t) || !ok(raw.c) || !ok(raw.u) || !ok(raw.o)) return reject('malformed');
     tenantId = raw.t;
     canvasId = raw.c;
+    userId = raw.u;
+    orgId = raw.o;
   } catch { return reject('malformed'); }
   const exp = Number(parts[2]);
   if (!Number.isInteger(exp)) return reject('malformed');
@@ -69,7 +97,7 @@ export function verifyPresentRemoteToken(token: string, nowMs: number = Date.now
   const a = Buffer.from(parts[3]!);
   const b = Buffer.from(sign(parts[1]!, exp));
   if (a.length !== b.length || !timingSafeEqual(a, b)) return reject('bad_signature');
-  return { tenantId, canvasId, exp };
+  return { tenantId, canvasId, userId, orgId, exp };
 }
 
 // ── The per-type present OUTLINE projection. ────────────────────────────────

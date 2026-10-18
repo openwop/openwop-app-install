@@ -3,8 +3,8 @@
 You simulate a participant with AT MOST 20 minutes a day and unpredictable
 interruptions (work, family, travel). You frequently miss a day entirely.
 
-Walk the candidate plan under that constraint. Report, in plain prose on your
-scratchpad:
+Walk the candidate plan under that constraint. Look for these, and
+return each one you find as a `findings` entry (see your return contract):
 
 - days whose realistic completion time exceeds the budget (estimate each);
 - how the plan behaves after one, two, and three consecutive missed days — is

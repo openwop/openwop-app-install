@@ -17,9 +17,9 @@
  *    ledger and live grants. Pins that a revoked grant drops the subject from
  *    the count, and documents that the seat ROW survives (the known orphan).
  */
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
-import { initHostExtPersistence, hostExtStorage } from '../src/host/hostExtPersistence.js';
+import { initHostExtPersistence, hostExtStorage, DurableCollection } from '../src/host/hostExtPersistence.js';
 import { registerGoalVerifier } from '../src/features/goals/goalVerifiers.js';
 import { createDraft, publishChallenge } from '../src/features/kicktodo-core/challengeService.js';
 import { enroll, __clearEnrollGuards } from '../src/features/kicktodo-core/enrollmentService.js';
@@ -85,6 +85,22 @@ describe('KTD-12 — verifier-sample id shape change does not double-count', () 
     // The legacy row is REUSED, not superseded: one sample per enrollment.
     expect(row.sampleId).toBe(legacyId);
     expect(row.approvalId).toBe('appr:legacy');
+    expect((await verifierQuality(T)).sampled).toBe(1);
+  });
+
+  it('also reuses a LEGACY `::unsat` row (the other verdict the old id encoded)', async () => {
+    const enrollmentId = await judgedEnrollment();
+    const legacyId = `${enrollmentId}::unsat`;
+    await hostExtStorage().kvSet(
+      `hostext:kicktodo-verifier-samples:${T}::${legacyId}`,
+      JSON.stringify({
+        tenantId: T, sampleId: legacyId, enrollmentId,
+        machineSatisfied: false, approvalId: 'appr:legacy-unsat', createdAt: '2026-07-01T00:00:00.000Z',
+      }),
+    );
+    const row = await sampleVerdict(T, { enrollmentId, submittedBy: OWNER });
+    expect(row.sampleId).toBe(legacyId);
+    expect(row.approvalId).toBe('appr:legacy-unsat');
     expect((await verifierQuality(T)).sampled).toBe(1);
   });
 
@@ -180,15 +196,36 @@ describe('KTD-14 — reconcileSeats occupancy is the seat∩grant intersection',
   it('recordSeat strictly follows acceptGrant — a seat row is always grant-backed at write time', async () => {
     // The no-false-prune property depends on this ordering: if a future
     // refactor recorded the seat BEFORE granting access, `releaseRevokedSeat`
-    // (and any prune) could eat an in-progress seat. This pins the post-
-    // condition: after a confirm, the seat row's subject HAS a live grant.
+    // (and any prune) could eat an in-progress seat. Proved with a REAL crash:
+    // the grant write dies mid-confirm, and NO seat row may exist afterwards.
     const challengeId = await publishedChallenge('OrderInv');
     const { enrollment } = await enroll({ tenantId: T, ownerSubject: OWNER, challengeId, challengeVersion: 1, timezone: 'UTC' });
     const circle = await createCircle({ tenantId: T, type: 'cohort', enrollmentId: enrollment.id, ownerSubject: OWNER, name: 'C' });
     await createCohortDetail({ circle, actorSubject: OWNER, capacity: 5, startDateLocal: '2099-01-01' });
     const buyer = 'user:kt-order-buyer';
     await holdSeat(T, circle.id, buyer);
-    await confirmSeat(T, circle.id, buyer);
+
+    const storage = hostExtStorage();
+    const original = storage.kvSet.bind(storage);
+    let crashed = false;
+    const spy = vi.spyOn(storage, 'kvSet').mockImplementation(async (k: string, v: string) => {
+      if (!crashed && k === `hostext:kicktodo-grants:${T}::${circle.id}::${buyer}`) {
+        crashed = true;
+        throw new Error('injected: grant write crashed');
+      }
+      return original(k, v);
+    });
+    try {
+      await expect(confirmSeat(T, circle.id, buyer)).rejects.toThrow('injected: grant write crashed');
+    } finally {
+      spy.mockRestore();
+    }
+    expect(crashed).toBe(true);
+    const orphan = await hostExtStorage().kvList(`hostext:kicktodo-cohort-seats:${T}::${circle.id}::`);
+    expect(orphan.some((r) => r.key.includes(buyer)), 'a seat row was written before access was granted').toBe(false);
+
+    // The retry completes the confirm.
+    expect((await confirmSeat(T, circle.id, buyer)).granted).toBe(true);
     // The seat row exists AND the grant is live — reconcile counts them (2).
     const seatRows = await hostExtStorage().kvList(`hostext:kicktodo-cohort-seats:${T}::${circle.id}::`);
     expect(seatRows.some((r) => r.key.includes(buyer))).toBe(true);
@@ -214,6 +251,9 @@ describe('KTD-14 — reconcileSeats occupancy is the seat∩grant intersection',
  * The revoked-grant arm is already covered by the KTD-14 case above.
  */
 describe('PROBE-KT5 (executable) — ARCH-C2 seat occupancy', () => {
+  // TWIN: kicktodo-seat-saga-repair.test.ts "does not count a grant-holder who never
+  // claimed a seat" (same ARCH-C2 arm, accepted through the generic route). Kept:
+  // this one is the PROBE-KT5 executable migration and asserts the no-seat-row precondition.
   it('does NOT count a coach — a live grant with no seat row is not an occupant', async () => {
     const challengeId = await publishedChallenge('CoachInv');
     const { enrollment } = await enroll({ tenantId: T, ownerSubject: OWNER, challengeId, challengeVersion: 1, timezone: 'UTC' });
@@ -246,12 +286,13 @@ describe('PROBE-KT5 (executable) — ARCH-C2 seat occupancy', () => {
     await holdSeat(T, circle.id, buyer);
     expect((await reconcileSeats(T, circle.id))?.seatsTaken, 'an unexpired hold must reserve capacity').toBe(2);
 
-    // Expire the hold in place (the daemon's TTL, without waiting for it).
-    const key = (await hostExtStorage().kvList(`hostext:kicktodo-seat-holds:${T}::${circle.id}::`))
-      .find((r) => r.key.includes(buyer))!;
-    const row = JSON.parse(key.value) as { expiresAt?: string };
-    row.expiresAt = '2020-01-01T00:00:00.000Z';
-    await hostExtStorage().kvSet(key.key, JSON.stringify(row));
+    // Expire the hold in place (the daemon's TTL, without waiting for it),
+    // through a typed handle on the REAL hold namespace.
+    const holds = new DurableCollection<{ tenantId: string; circleId: string; buyerSubject: string; heldAt: string; expiresAt: string }>(
+      'kicktodo-seat-holds', (h) => `${h.tenantId}::${h.circleId}::${h.buyerSubject}`);
+    const hold = await holds.get(`${T}::${circle.id}::${buyer}`);
+    expect(hold, 'precondition: the hold row exists').not.toBeNull();
+    await holds.put({ ...hold!, expiresAt: '2020-01-01T00:00:00.000Z' });
 
     expect(
       (await reconcileSeats(T, circle.id))?.seatsTaken,

@@ -6,10 +6,16 @@
  * on the capture list; that announces every captured request, and one page load is 20+
  * calls — a firehose is worse than silence. So the list stays silent and a THROTTLED
  * polite status carries the count instead. The tests pin both halves: the row label
- * names its fields, and the list itself has no live region.
+ * names its fields (with their real values), the list itself — WITH a row rendered — has
+ * no live region, and the status stays silent until the throttle window elapses and
+ * then carries the count.
+ *
+ * Sabotage that turns it red: dropping the row `aria-label` fields (method/status/
+ * duration), `aria-live` on the list or a row, rendering the status text before the
+ * first tick, or shortening `CAPTURE_STATUS_MS`.
  */
-import { render, cleanup } from '@testing-library/react';
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import { render, cleanup, act } from '@testing-library/react';
+import { describe, it, expect, vi, afterEach, beforeAll } from 'vitest';
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
@@ -21,16 +27,19 @@ vi.mock('react-i18next', () => ({
 import { NetworkPanel } from '../NetworkPanel.js';
 import { clearNetworkEntries, installNetworkRecorder, listNetworkEntries } from '../networkRecorder.js';
 
-afterEach(() => { cleanup(); clearNetworkEntries(); });
-
-/** Seed ONE real captured entry by driving the recorder's own fetch wrapper — the
- *  production path, so the test cannot pass against a shape the app never produces. */
-async function captureOne(): Promise<void> {
-  const real = globalThis.fetch;
-  globalThis.fetch = (async () => new Response('{"ok":true}', { status: 200, headers: { 'content-type': 'application/json' } })) as typeof fetch;
+// Install the REAL recorder once over a stubbed fetch, so every captured entry is the
+// shape the production wrapper produces (the recorder's install is a module-level once).
+beforeAll(() => {
+  vi.stubGlobal('fetch', vi.fn(async () => new Response('{"ok":true}', { status: 200, headers: { 'content-type': 'application/json' } })));
   installNetworkRecorder();
-  await globalThis.fetch('/api/widgets', { method: 'POST', body: '{"name":"x"}' });
-  globalThis.fetch = real;
+});
+
+afterEach(() => { vi.useRealTimers(); cleanup(); clearNetworkEntries(); });
+
+/** Capture ONE request through the recorder's own fetch wrapper. */
+async function captureOne(): Promise<void> {
+  await window.fetch('/api/widgets', { method: 'POST', body: '{"name":"x"}' });
+  expect(listNetworkEntries().length, 'the recorder captured the call — otherwise this leg is vacuous').toBe(1);
 }
 
 describe('DTU-1 — column context for the captured-requests list', () => {
@@ -42,7 +51,6 @@ describe('DTU-1 — column context for the captured-requests list', () => {
 
   it('with a captured row: the strip renders, is hidden from SR, and the row LABEL names its fields', async () => {
     await captureOne();
-    expect(listNetworkEntries().length, 'the recorder captured the call — otherwise this leg is vacuous').toBeGreaterThan(0);
     render(<NetworkPanel open onClose={() => {}} />);
 
     const cols = document.querySelector('.netpanel-cols');
@@ -54,21 +62,23 @@ describe('DTU-1 — column context for the captured-requests list', () => {
     const row = document.querySelector('.netpanel-row-head');
     expect(row).not.toBeNull();
     const label = row!.getAttribute('aria-label') ?? '';
-    // The mocked `t` echoes `key:name=value,...`, so this proves the FIELDS are named —
-    // the thing the missing column headers actually cost a screen-reader user.
+    // The mocked `t` echoes `key:name=value,...`, so this proves the FIELDS are named
+    // WITH their values — the thing the missing column headers actually cost an SR user.
     expect(label).toContain('rowLabel:');
     expect(label).toContain('method=POST');
     expect(label).toContain('path=/api/widgets');
-    expect(label, 'status is named, not left as a bare ellipsis').toMatch(/status=/);
-    expect(label).toMatch(/duration=/);
+    expect(label, 'status is the real code, not the pending placeholder').toContain('status=200');
+    expect(label, 'duration is a measured number, not the pending placeholder').toMatch(/duration=\d/);
   });
 });
 
 describe('DTU-2 — the list does NOT announce every request', () => {
-  it('the capture list carries no live region', () => {
+  it('the capture list carries no live region', async () => {
+    await captureOne();
     render(<NetworkPanel open onClose={() => {}} />);
     const list = document.querySelector('.netpanel-list');
     expect(list).not.toBeNull();
+    expect(list!.querySelectorAll('.netpanel-row'), 'a row is rendered — otherwise the inner check is vacuous').toHaveLength(1);
     expect(list!.getAttribute('aria-live'), 'a live list would announce every captured call').toBeNull();
     expect(list!.querySelector('[aria-live]'), 'and nothing inside it may be live either').toBeNull();
   });
@@ -78,5 +88,17 @@ describe('DTU-2 — the list does NOT announce every request', () => {
     const status = document.querySelector('.netpanel-head-title [role="status"]');
     expect(status, 'the panel offers a polite status').not.toBeNull();
     expect(status!.textContent, 'silent until the throttle fires — an empty panel announces nothing').toBe('');
+  });
+
+  it('the status carries the count only once the throttle window (1500 ms) has elapsed', async () => {
+    await captureOne();
+    vi.useFakeTimers();
+    render(<NetworkPanel open onClose={() => {}} />);
+    const status = document.querySelector('.netpanel-head-title [role="status"]');
+    expect(status).not.toBeNull();
+    act(() => { vi.advanceTimersByTime(1499); });
+    expect(status!.textContent, 'still inside the throttle window').toBe('');
+    act(() => { vi.advanceTimersByTime(1); });
+    expect(status!.textContent).toBe('captureStatus:count=1');
   });
 });

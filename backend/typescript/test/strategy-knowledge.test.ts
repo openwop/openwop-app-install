@@ -4,55 +4,36 @@
  *   - a SHARED (org/workspace) strategy is indexed into the managed 'Strategy KB'
  *     (one doc, keyed by the strategy id) on create + re-indexed on update
  *   - a USER-scoped (private) strategy is NEVER indexed (the RBAC carve-out)
- *   - a scope change org→user, an archive, and a hard-delete all REMOVE the doc
+ *   - a scope change org→user and an archive REMOVE the doc
  *   - the managed collection rejects hand-edits via the KB routes (the guard)
- *   - indexing only happens when BOTH `kb` and `strategy` toggles are on
+ * Indexing is gated on the `strategy` toggle only — the KB is always-on (there is no
+ * `kb` toggle any more; strategyKnowledgeService.ts `gatesOpen`).
+ *
+ * Sabotage witnesses (wave 19, `w19g3-kno-*`): indexing user-scoped or archived
+ * strategies, creating the collection unmanaged, skipping the create- or update-path
+ * index, and disabling the KB route's managed guard each red the case that names them.
  */
 
-import http from 'node:http';
-import type { AddressInfo } from 'node:net';
-import { getSetCookies } from './headerCookies.js';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { createApp } from '../src/index.js';
-import { saveConfig } from '../src/host/featureToggles/service.js';
-import { getToggleDefault } from '../src/host/featureToggles/registry.js';
+import { bootPlanningApp, makeClient, enableToggle, uniqEmail, type Client } from './planningHarness.js';
 
-let BASE: string;
-let server: http.Server;
+let BASE = '';
+let closeApp: () => Promise<void>;
 let n = 0;
 
 beforeAll(async () => {
-  process.env.OPENWOP_STORAGE_DSN = 'memory://';
-  process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
-  process.env.OPENWOP_TEST_AUTH_ENABLED = 'true';
-  delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
-  const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
-  await enableToggle('strategy');
-  await enableToggle('kb');
+  const h = await bootPlanningApp(); BASE = h.base; closeApp = h.close;
+  await enableToggle('strategy', 'on');
 });
-afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
+afterAll(async () => { await closeApp(); });
 
-interface Res<T = any> { status: number; body: T }
-interface Client { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res>; patch: (p: string, b?: unknown) => Promise<Res>; del: (p: string) => Promise<Res> }
-function client(): Client {
-  let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
-    const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
-    for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
-    return { status: res.status, body: out };
-  };
-  return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), patch: (p, b) => call('PATCH', p, b), del: (p) => call('DELETE', p) };
-}
+const client = (): Client => makeClient(() => BASE);
 
-const uniqEmail = (who: string): string => `${who}-${Date.now()}-${n++}@acme.test`;
 async function signup(c: Client, tenantId: string): Promise<{ userId: string }> {
   const r = await c.post('/host/openwop-app/test/login', { email: uniqEmail('sk'), tenantId });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return r.body.user;
 }
-const enableToggle = async (id: string): Promise<void> => { const d = getToggleDefault(id); if (d) await saveConfig({ ...d, status: 'on' }, 'test'); };
 
 const S = '/host/openwop-app/strategy';
 const freshTenant = (): string => `org:sk-${Date.now()}-${n++}`;
@@ -64,11 +45,12 @@ async function ownerWithOrg(): Promise<{ owner: Client; orgId: string }> {
   return { owner, orgId: org.body.orgId };
 }
 
-/** The managed 'Strategy KB' doc ids for an org (empty if the collection absent). */
+/** The managed 'Strategy KB' doc ids for an org (the collection must exist). */
 async function kbDocIds(owner: Client, orgId: string): Promise<string[]> {
   const colId = `mgd-strategy-${orgId}`;
   const docs = await owner.get(`/host/openwop-app/kb/orgs/${encodeURIComponent(orgId)}/collections/${encodeURIComponent(colId)}/documents`);
-  if (docs.status !== 200) return [];
+  // No silent `[]`: a 404/403 here would make every `not.toContain` below pass vacuously.
+  expect(docs.status, JSON.stringify(docs.body)).toBe(200);
   return (docs.body.documents as Array<{ documentId: string }>).map((d) => d.documentId);
 }
 
@@ -80,16 +62,19 @@ describe('ADR 0100 P1 — strategy indexes into the managed Strategy KB', () => 
 
     expect(await kbDocIds(owner, orgId)).toEqual([created.body.id]);
     const cols = await owner.get(`/host/openwop-app/kb/orgs/${encodeURIComponent(orgId)}/collections`);
-    const managed = (cols.body.collections as Array<any>).find((c) => c.collectionId === `mgd-strategy-${orgId}`);
+    const managed = (cols.body.collections as Array<{ collectionId: string; managed?: string; name: string }>).find((c) => c.collectionId === `mgd-strategy-${orgId}`);
     expect(managed?.managed).toBe('strategy');
     expect(managed?.name).toBe('Strategy KB');
   });
 
   it('does NOT index a user-scoped (private) strategy — the RBAC carve-out', async () => {
     const { owner, orgId } = await ownerWithOrg();
+    // Positive control in the SAME org: the collection exists and the shared one IS in it.
+    const shared = await owner.post(S, { orgId, title: 'Our shared bet' });
+    expect(shared.status).toBe(201);
     const priv = await owner.post(S, { orgId, title: 'My private bet', scope: 'user' });
     expect(priv.status).toBe(201);
-    expect(await kbDocIds(owner, orgId)).not.toContain(priv.body.id);
+    expect(await kbDocIds(owner, orgId)).toEqual([shared.body.id]);
   });
 
   it('re-indexes on update (single doc, upserted by stable id)', async () => {
@@ -97,6 +82,12 @@ describe('ADR 0100 P1 — strategy indexes into the managed Strategy KB', () => 
     const s = await owner.post(S, { orgId, title: 'V1' });
     await owner.patch(`${S}/${s.body.id}`, { title: 'V2 renamed' });
     expect(await kbDocIds(owner, orgId)).toEqual([s.body.id]); // still one doc, not duplicated
+    // …and it carries the NEW content: one doc id alone was also the state with no re-index
+    // at all (w19g3-kno-update-not-reindexed stayed green on this case).
+    const colId = `mgd-strategy-${orgId}`;
+    const doc = await owner.get(`/host/openwop-app/kb/orgs/${encodeURIComponent(orgId)}/collections/${encodeURIComponent(colId)}/documents/${encodeURIComponent(s.body.id)}`);
+    expect(doc.status, JSON.stringify(doc.body)).toBe(200);
+    expect(doc.body.title).toBe('V2 renamed');
   });
 
   it('REMOVES the doc when scope changes org→user', async () => {
@@ -125,9 +116,12 @@ describe('ADR 0100 P1 — managed collection is read-only via the KB routes', ()
     const colId = `mgd-strategy-${orgId}`;
     const base = `/host/openwop-app/kb/orgs/${encodeURIComponent(orgId)}/collections/${encodeURIComponent(colId)}`;
 
+    // Assert WHICH 400: the managed guard names the managing feature.
     const ingest = await owner.post(`${base}/documents`, { title: 'manual', text: 'should be rejected' });
     expect(ingest.status).toBe(400);
+    expect(JSON.stringify(ingest.body)).toContain('"managed":"strategy"');
     const delCol = await owner.del(base);
     expect(delCol.status).toBe(400);
+    expect(JSON.stringify(delCol.body)).toContain('"managed":"strategy"');
   });
 });

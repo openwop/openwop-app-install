@@ -43,6 +43,9 @@ const designWorkflowDoc = {
   dataSources: [
     { id: 'workouts', name: 'Workouts', fields: ['title', 'duration'], rows: [{ title: 'Morning run', duration: '30m' }, { title: 'Yoga', duration: '20m' }] },
   ],
+  // ADR 0737 phase 3 — the public-share policy (w36: this facet was missing, so
+  // dropping it from OBJECT_FACETS stayed green despite the "every field" claim).
+  sharePolicy: { sampleData: 'include', perSource: { workouts: false } },
 } satisfies Record<string, unknown>;
 
 describe('coerceApp — round-trip parity (ADR 0342 Phase 0)', () => {
@@ -66,6 +69,6 @@ describe('coerceApp — round-trip parity (ADR 0342 Phase 0)', () => {
 
   it('keeps an array themeColors out (object narrowing)', () => {
     const coerced = coerceApp({ name: 'A', screens: [], themeColors: ['#ffffff'] });
-    expect(coerced.themeColors).toBeUndefined();
+    expect(coerced).toEqual({ name: 'A', screens: [] });
   });
 });

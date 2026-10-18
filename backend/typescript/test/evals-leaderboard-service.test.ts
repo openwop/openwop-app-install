@@ -1,5 +1,13 @@
 /**
- * ADR 0123 Phase 1c — tenant leaderboard service (feedback aggregation + join).
+ * ADR 0123 Phase 1c — tenant leaderboard service (`features/evals/leaderboardService.ts`):
+ * reads ONE tenant's MessageFeedback, resolves each rated message's model once (CONV-1
+ * dedupe), drops unattributable rows, and ranks win-rate + Elo.
+ *
+ * Witnessed (wave 25 probes): a tenant-blind feedback read reds the empty-tenant and CONV-1
+ * cases; no dedupe reds CONV-1; passing every rating as 'up' reds the aggregate.
+ * HONEST CEILING: "drops unattributable" is held by THREE guards (`if (!model)` here and
+ * `!r.model` in both `computeLeaderboard` and `computeEloRatings`), so no single sabotage
+ * can red it (probe `lbs-drop` vacuous by design); the case pins the end-to-end outcome.
  */
 import { describe, it, expect, beforeAll } from 'vitest';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
@@ -41,7 +49,7 @@ describe('buildTenantLeaderboard', () => {
     expect(new Set(lb.map((m) => m.model))).toEqual(new Set(['model-A', 'model-B']));
   });
 
-  it('empty tenant → empty leaderboard', async () => {
+  it('a tenant with no feedback sees none of another tenant\'s rows (empty leaderboard)', async () => {
     expect(await buildTenantLeaderboard('no-feedback', resolver)).toEqual([]);
   });
 
@@ -50,7 +58,9 @@ describe('buildTenantLeaderboard', () => {
     await setMessageFeedback({ tenantId: 'dedup-t', conversationId: 'c', messageId: 'm1', subjectRef: 'user:2', rating: 'down' });
     let calls = 0;
     const counting = (_c: string, _m: string): string | null => { calls++; return 'model-A'; };
-    await buildTenantLeaderboard('dedup-t', counting);
+    const lb = await buildTenantLeaderboard('dedup-t', counting);
     expect(calls).toBe(1); // the shared message is resolved once, not once per feedback row
+    // …and BOTH feedback rows still count toward the model.
+    expect(lb).toEqual([expect.objectContaining({ model: 'model-A', up: 1, down: 1 })]);
   });
 });

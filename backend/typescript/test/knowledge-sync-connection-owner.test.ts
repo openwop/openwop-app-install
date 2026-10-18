@@ -16,6 +16,11 @@
  *   - create/browse refuse a connection that is not the caller's;
  *   - the RUNNER, which has no caller, refuses a connection that no longer resolves
  *     to the user recorded as the source's creator.
+ *
+ * Sabotage-witnessed (/grade-tests w23): dropping `requireOwnConnection`'s owner check
+ * (create + browse red), widening it to refuse a user-less connection (tenant-level case
+ * red), dropping the `createdBy` stamp, and each of the three runner predicates (drift
+ * check off; matching creator refused; legacy row refused).
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -33,6 +38,7 @@ import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { upsertOAuthConnection } from '../src/features/connections/connectionsService.js';
 import { createCollection } from '../src/features/kb/kbService.js';
 import { createSyncSource } from '../src/features/knowledge-sync/knowledgeSyncService.js';
+import { hostExtStorage } from '../src/host/hostExtPersistence.js';
 import { runKnowledgeSyncOnce } from '../src/features/knowledge-sync/knowledgeSyncRunner.js';
 
 const KS = '/host/openwop-app/knowledge-sync';
@@ -53,16 +59,26 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
+/** The response bodies this file reads — typed, not `any`. */
+interface OwnerBody {
+  error?: string;
+  message?: string;
+  orgId?: string;
+  user?: { userId: string };
+  source?: { createdBy?: string };
+  sources?: unknown[];
+}
+
 function client() {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<{ status: number; body: any }> => {
+  const call = async (method: string, path: string, body?: unknown): Promise<{ status: number; body: OwnerBody | undefined }> => {
     const res = await fetch(`${BASE}${path}`, {
       method,
       headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) },
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) };
+    return { status: res.status, body: res.status === 204 ? undefined : ((await res.json().catch(() => undefined)) as OwnerBody | undefined) };
   };
   return {
     get: (p: string) => call('GET', p),
@@ -79,11 +95,11 @@ beforeEach(async () => {
 async function member(who: string, tenantId: string): Promise<{ c: ReturnType<typeof client>; orgId: string; userId: string }> {
   const c = client();
   const login = await c.post('/host/openwop-app/test/login', { email: `${who}-${Date.now()}-${n++}@acme.test`, tenantId });
-  const orgId = (await c.post('/host/openwop-app/orgs', { name: 'Acme' })).body.orgId as string;
+  const orgId = String((await c.post('/host/openwop-app/orgs', { name: 'Acme' })).body?.orgId);
   // `POST /test/login` responds `{ user }` and the session's acting subject is
   // `user.userId` — which is exactly what `actingUserOf(req)` resolves to, and so
   // exactly what the guard compares against.
-  const userId = login.body.user.userId as string;
+  const userId = String(login.body?.user?.userId ?? '');
   return { c, orgId, userId };
 }
 
@@ -105,7 +121,10 @@ describe('KSC-2 — a sync source may not bind a colleague\'s connection', () =>
       provider: 'google', externalFolderId: FOLDER, cadence: 'hourly',
     });
     expect(r.status, JSON.stringify(r.body)).toBe(403);
-    expect(r.body.error).toBe('forbidden');
+    expect(r.body?.error).toBe('forbidden');
+    expect(r.body?.message).toMatch(/must belong to you/i);
+    // …and the refusal persisted nothing.
+    expect((await attacker.c.get(`${KS}?orgId=${attacker.orgId}`)).body?.sources).toHaveLength(0);
   });
 
   it('BROWSE: refuses the same foreign connection (one shared predicate, not two copies)', async () => {
@@ -122,7 +141,7 @@ describe('KSC-2 — a sync source may not bind a colleague\'s connection', () =>
     // ALSO answers 403 ("Your connected account cannot access this source") because
     // the provider is unreachable here. Two different refusals wearing one status is
     // exactly the shape that makes a sabotage read as green.
-    expect(r.body.message).toMatch(/must belong to you/i);
+    expect(r.body?.message).toMatch(/must belong to you/i);
   });
 
   it('CREATE: accepts the caller\'s OWN connection and stamps createdBy', async () => {
@@ -138,7 +157,7 @@ describe('KSC-2 — a sync source may not bind a colleague\'s connection', () =>
       provider: 'google', externalFolderId: FOLDER, cadence: 'hourly',
     });
     expect(r.status, JSON.stringify(r.body)).toBe(201);
-    expect(r.body.source.createdBy).toBe(me.userId);
+    expect(r.body?.source?.createdBy).toBe(me.userId);
   });
 
   it('CREATE: a TENANT-LEVEL connection (no userId) is still allowed — nobody to impersonate', async () => {
@@ -175,7 +194,7 @@ describe('KSC-2 USE LANE — the runner refuses to act as a different user', () 
       collectionId: 'col', cadence: 'hourly', createdBy: 'user:original-owner',
     }, NOW);
 
-    await expect(runKnowledgeSyncOnce({ storage: {} as never }, source))
+    await expect(runKnowledgeSyncOnce({ storage: hostExtStorage() }, source))
       .rejects.toThrow(/different user/i);
   });
 
@@ -190,7 +209,7 @@ describe('KSC-2 USE LANE — the runner refuses to act as a different user', () 
       connectionId: conn.connectionId, provider: 'google', externalFolderId: FOLDER,
       collectionId: 'col', cadence: 'hourly', createdBy: 'user:same',
     }, NOW);
-    await expect(runKnowledgeSyncOnce({ storage: {} as never }, source)).resolves.toBeDefined();
+    await expect(runKnowledgeSyncOnce({ storage: hostExtStorage() }, source)).resolves.toMatchObject({ ingested: 0, pruned: 0, failed: 0, errors: [] });
   });
 
   it('a LEGACY source (no createdBy) keeps the previous behaviour rather than breaking', async () => {
@@ -207,6 +226,6 @@ describe('KSC-2 USE LANE — the runner refuses to act as a different user', () 
       collectionId: 'col', cadence: 'hourly',
     }, NOW);
     expect(source.createdBy).toBeUndefined();
-    await expect(runKnowledgeSyncOnce({ storage: {} as never }, source)).resolves.toBeDefined();
+    await expect(runKnowledgeSyncOnce({ storage: hostExtStorage() }, source)).resolves.toMatchObject({ ingested: 0, pruned: 0, failed: 0, errors: [] });
   });
 });

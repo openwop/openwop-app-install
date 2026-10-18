@@ -94,6 +94,8 @@ declare module '*feature.interactive-artifacts.nodes/index.mjs' {
 }
 declare module '*feature.brand.nodes/index.mjs' {
   export const nodes: Record<string, (ctx: unknown) => Promise<{ status: string; outputs?: Record<string, unknown>; error?: { code: string; message: string } }>>;
+  // ADR 0891 D5 — pinned to the host's wrapForLLMPrompt by the brand promptCatalogParity test.
+  export function fenceContent(text: string): string;
 }
 declare module '*feature.campaign-brief.nodes/index.mjs' {
   export const nodes: Record<string, (ctx: unknown) => Promise<{ status: string; outputs?: Record<string, unknown>; error?: { code: string; message: string } }>>;
@@ -127,6 +129,8 @@ declare module '*feature.campaign-journeys.nodes/index.mjs' {
   export function frequencyGate(ctx: Ctx): Promise<Out>;
   export function segmentMembers(ctx: Ctx): Promise<Out>;
   export function segmentWinbackPlan(ctx: Ctx): Promise<Out>;
+  // w38 — the CDP-E holdout split node (cdp-journey-split-node.test.ts imports it unsuppressed).
+  export function split(ctx: Ctx): Promise<Out>;
   export const nodes: Record<string, (ctx: Ctx) => Promise<Out>>;
 }
 declare module '*feature.campaign-intel.nodes/index.mjs' {
@@ -191,4 +195,16 @@ declare module '*feature.podcasts.nodes/index.mjs' {
   export function synthesize(ctx: unknown): Promise<PodResult<{ clips: Array<Record<string, unknown>> }>>;
   export function mix(ctx: unknown): Promise<PodResult<{ clipCount: number; audioMediaRef: string }>>;
   export const nodes: Record<string, (ctx: unknown) => Promise<PodResult<Record<string, unknown>>>>;
+}
+// ADR 0114 — the code-exec node's honest-off / HITL-gate tests import the real handler.
+declare module '*feature.code-exec.nodes/index.mjs' {
+  export function run(ctx: unknown): Promise<{ status: string; outputs: { exitCode: number; stdout: string; stderr: string; declined?: boolean; artifact: { artifactTypeId: string; contentTrust: string; payload: { stdout: string } } } }>;
+}
+// ADR 0269 / CDP-G — the zero-dep collection SDK (plain ESM) under test in cdp-collect-sdk.test.ts.
+declare module '*sdk/cdpCollectSdk.mjs' { type R = { status: number; ok: boolean; body: unknown }; export function createCdpClient(opts?: { baseUrl?: string; token?: string; fetchImpl?: (url: string, init: { method?: string; headers: Record<string, string>; body?: string }) => Promise<{ status: number; ok: boolean; json(): Promise<unknown> }> }): { collect(eventType: string, payload: Record<string, unknown>): Promise<R>; collectBatch(events: { eventType: string; payload: Record<string, unknown> }[]): Promise<R>; resolveIdentity(type: string, value: string): Promise<unknown>; registerSchema(eventType: string, schema: Record<string, unknown>): Promise<R> }; }
+// ADR 0889 WF-EV-11 — the agent-eval run-suite node, under test in adr0889-evals-run-suite-node.test.ts.
+declare module '*feature.evals.nodes/index.mjs' {
+  type Out = { status: string; outputs?: Record<string, unknown>; error?: { code: string; message: string } };
+  export function runSuite(ctx: unknown): Promise<Out>;
+  export const nodes: Record<string, (ctx: unknown) => Promise<Out>>;
 }

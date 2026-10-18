@@ -20,7 +20,7 @@ import { engineIsDurable } from '../../host/webSearchCapability.js';
 import { createLogger } from '../../observability/logger.js';
 import type { SimulationVerdict } from './lessonAssembly.js';
 import { fireCandidateDeath } from './candidateLifecycle.js';
-import { draftFromPlan, isChallengePlan, type ChallengePlan } from './planService.js';
+import { draftFromPlan, isChallengePlan, PLAN_DAILY_MINUTES, PLAN_DURATION_DAYS, type ChallengePlan } from './planService.js';
 import type { ChallengeDefinition } from '../kicktodo-core/types.js';
 
 const log = createLogger('kicktodo.creator');
@@ -110,28 +110,49 @@ export interface EvidenceClaimBrief {
    *  entailment verdicts exist) actually SUPPORTED by at least one cited source. */
   supported: boolean;
   sources: Array<{ title: string; url: string; domain: string }>;
+  /** XCH-LB-5 — characters of `text` the brief cut (absent = whole). */
+  textOmittedChars?: number;
+  /** XCH-LB-5 — cited sources beyond the brief's per-claim cap (absent = all listed). */
+  sourcesOmitted?: number;
 }
 
 export const EVIDENCE_BRIEF_LIMITS = { maxClaims: 60, maxTextChars: 400, maxSourcesPerClaim: 3 } as const;
 
-export function evidenceClaimsForPrompt(dossier: ResearchDossier | undefined): EvidenceClaimBrief[] {
-  if (!dossier) return [];
+/** The evidence brief every text-producing factory step is grounded on, plus
+ *  what the caps left out. KTF-EV-2 — SUPPORTED claims are listed first (stable
+ *  order within each group), so the claim cap can never push a citable claim
+ *  out in favour of one nobody may cite. XCH-LB-5 — every cut is disclosed:
+ *  `omittedClaims` for the cap, and per claim `textOmittedChars` /
+ *  `sourcesOmitted`, so a prompt never presents a partial brief as whole. */
+export function evidenceBrief(dossier: ResearchDossier | undefined): { claims: EvidenceClaimBrief[]; omittedClaims: number } {
+  if (!dossier) return { claims: [], omittedClaims: 0 };
   const unsupported = new Set(dossier.unsupportedClaimIds ?? []);
   const byHash = new Map(dossier.sources.map((sc) => [sc.hash, sc] as const));
-  return dossier.claims.slice(0, EVIDENCE_BRIEF_LIMITS.maxClaims).map((cl) => {
+  const all = dossier.claims.map((cl): EvidenceClaimBrief => {
     const cited = cl.sourceHashes.filter((h) => byHash.has(h));
     const supported = !unsupported.has(cl.claimId) && cited.length > 0
       && (cl.support === undefined || cited.some((h) => claimSupportedBy(cl, h)));
+    const textOmittedChars = Math.max(0, cl.text.length - EVIDENCE_BRIEF_LIMITS.maxTextChars);
+    const sourcesOmitted = Math.max(0, cited.length - EVIDENCE_BRIEF_LIMITS.maxSourcesPerClaim);
     return {
       claimId: cl.claimId,
-      text: cl.text.length > EVIDENCE_BRIEF_LIMITS.maxTextChars ? `${cl.text.slice(0, EVIDENCE_BRIEF_LIMITS.maxTextChars)}…` : cl.text,
+      text: textOmittedChars > 0 ? `${cl.text.slice(0, EVIDENCE_BRIEF_LIMITS.maxTextChars)}…` : cl.text,
       supported,
       sources: cited.slice(0, EVIDENCE_BRIEF_LIMITS.maxSourcesPerClaim).map((h) => {
         const sc = byHash.get(h)!;
         return { title: sc.title, url: sc.url, domain: sc.domain };
       }),
+      ...(textOmittedChars > 0 ? { textOmittedChars } : {}),
+      ...(sourcesOmitted > 0 ? { sourcesOmitted } : {}),
     };
   });
+  const ordered = [...all.filter((c) => c.supported), ...all.filter((c) => !c.supported)];
+  const claims = ordered.slice(0, EVIDENCE_BRIEF_LIMITS.maxClaims);
+  return { claims, omittedClaims: ordered.length - claims.length };
+}
+
+export function evidenceClaimsForPrompt(dossier: ResearchDossier | undefined): EvidenceClaimBrief[] {
+  return evidenceBrief(dossier).claims;
 }
 
 /** The closed world a plan's / lesson's `claimRefs` may cite: the dossier's
@@ -288,9 +309,19 @@ const PROHIBITED = ['suicide', 'self-harm', 'eating disorder', 'anorexia', 'cras
 const REGULATED = ['medical', 'diagnos', 'therapy', 'mental health', 'depression', 'anxiety treatment', 'invest', 'credit repair', 'tax', 'legal advice', 'lawsuit', 'weight loss'];
 const SENSITIVE = ['fitness', 'diet', 'nutrition', 'grief', 'relationship', 'addiction', 'sleep', 'stress', 'fasting'];
 
+// Code-grade KTF-IN-1 — a keyword matches at a WORD START and may carry one of a
+// closed set of inflections, never an arbitrary tail. Substring matching refused or
+// escalated real topics: 'tax' hit "taxonomy", 'invest' hit "investigate", 'diet'
+// hit "dietitian". The lists are unchanged (a policy decision, not this fix's), so
+// 'minor' still refuses "minor scales" — over-refusal stays the failure direction.
+const INFLECTION = '(?:s|es|ed|ing|ment|ments|or|ors|er|ers|al|ful|is|e|ic|ics|tic|tics|ation|ations|ary)?';
+const keywordPattern = (k: string): RegExp =>
+  new RegExp(`(?:^|[^a-z0-9])${k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/ /g, '[\\s-]+')}${INFLECTION}(?![a-z0-9])`);
+const PATTERNS = new Map<string, RegExp>([...PROHIBITED, ...REGULATED, ...SENSITIVE].map((k) => [k, keywordPattern(k)]));
+
 export function classifyRisk(text: string): { tier: RiskTier; signals: string[] } {
   const hay = text.toLowerCase();
-  const hits = (list: string[]) => list.filter((k) => hay.includes(k));
+  const hits = (list: string[]) => list.filter((k) => PATTERNS.get(k)?.test(hay) === true);
   const prohibited = hits(PROHIBITED);
   if (prohibited.length) return { tier: 'prohibited', signals: prohibited };
   const regulated = hits(REGULATED);
@@ -320,13 +351,34 @@ export interface CreateCandidateInput {
   transformation: string;
   durationDaysTarget: number;
   dailyMinutesTarget: number;
+  /** KTFAC-1 — a key that is STABLE across a retry of the same logical create
+   *  (the workflow node's run, the chat turn's run). Present ⇒ the candidate id is
+   *  derived from (tenant, key) and created by CAS, so a re-execution returns the
+   *  first candidate instead of minting `cand:<uuid>` again. Absent ⇒ a fresh
+   *  random id, unchanged. */
+  idempotencyKey?: string;
+}
+
+/** Code-grade KTF-IN-2 — an intake target outside the plan vocabulary (or not an
+ *  integer: NaN, 0, negatives) is refused at intake, not discovered later as a plan
+ *  defect. */
+export class IntakeTargetError extends Error {
+  constructor(readonly field: 'durationDaysTarget' | 'dailyMinutesTarget', readonly min: number, readonly max: number) {
+    super(`\`${field}\` must be an integer from ${min} to ${max}.`);
+  }
+}
+
+function assertIntakeTarget(value: number, field: 'durationDaysTarget' | 'dailyMinutesTarget', bounds: { min: number; max: number }): void {
+  if (!Number.isInteger(value) || value < bounds.min || value > bounds.max) throw new IntakeTargetError(field, bounds.min, bounds.max);
 }
 
 export async function createCandidate(input: CreateCandidateInput): Promise<FactoryCandidate> {
+  assertIntakeTarget(input.durationDaysTarget, 'durationDaysTarget', PLAN_DURATION_DAYS);
+  assertIntakeTarget(input.dailyMinutesTarget, 'dailyMinutesTarget', PLAN_DAILY_MINUTES);
   const { tier, signals } = classifyRisk(`${input.topic} ${input.audience} ${input.transformation}`);
   if (tier === 'prohibited') throw new ProhibitedTopicError(signals);
   const candidate: FactoryCandidate = {
-    id: `cand:${randomUUID()}`,
+    id: input.idempotencyKey ? idempotentCandidateId(input.tenantId, input.idempotencyKey) : `cand:${randomUUID()}`,
     tenantId: input.tenantId,
     topic: input.topic,
     audience: input.audience,
@@ -339,9 +391,39 @@ export async function createCandidate(input: CreateCandidateInput): Promise<Fact
     createdBy: input.createdBy,
     createdAt: nowIso(),
   };
-  await candidates.put(candidate);
+  if (input.idempotencyKey) {
+    if (!(await candidates.compareAndSwap(null, candidate))) {
+      // A retry (or a concurrent first execution) already created it: converge.
+      const existing = await getCandidate(input.tenantId, candidate.id);
+      if (existing) return existing;
+      throw new CandidateConflictError();
+    }
+  } else {
+    await candidates.put(candidate);
+  }
   log.info('kicktodo_candidate_created', { candidateId: candidate.id, riskTier: tier });
   return candidate;
+}
+
+/** KTFAC-1 — the idempotent create lost its CAS, yet no row exists to return
+ *  (removed between the CAS and the re-read). Retry. */
+export class CandidateConflictError extends Error {
+  constructor() { super('The candidate changed while it was being created — retry.'); }
+}
+
+/** KTFAC-1 — the retry-stable create key for one candidate inside one run. */
+export function candidateRunKey(
+  runId: string,
+  nodeId: string,
+  input: { topic: string; audience: string; transformation: string; durationDaysTarget: number; dailyMinutesTarget: number },
+): string {
+  return JSON.stringify(['run', runId, nodeId, input.topic, input.audience, input.transformation, input.durationDaysTarget, input.dailyMinutesTarget]);
+}
+
+/** `cand:<uuid-shaped digest>` — the same shape as a random id. */
+function idempotentCandidateId(tenantId: string, key: string): string {
+  const h = createHash('sha256').update(`kicktodo-candidate|${tenantId}|${key}`).digest('hex');
+  return `cand:${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20, 32)}`;
 }
 
 export async function getCandidate(tenantId: string, id: string): Promise<FactoryCandidate | null> {
@@ -578,11 +660,42 @@ export function sourceDomain(url: string): string {
   return parsed.hostname.toLowerCase();
 }
 
+/** Code-grade (new) — the dossier of a published or withdrawn candidate is the
+ *  evidence behind a live (or retired) challenge's gates and monitor reads; it is
+ *  never rewritten. Every sibling setter already refuses these states. */
+export class CandidateClosedError extends Error {
+  constructor(readonly state: CandidateState) {
+    super(`The candidate is ${state}; its research dossier can no longer change.`);
+  }
+}
+
+/** Code-grade KTF-RS-1 — a claim on the import lane must be well-formed before any
+ *  normalization dereferences it (a non-array `sourceHashes` used to be a 500). */
+export class MalformedClaimError extends Error {
+  constructor(readonly index: number) {
+    super(`Claim ${index} needs a string \`claimId\`, a string \`text\` and a \`sourceHashes\` array of strings.`);
+  }
+}
+
+function isWellFormedClaim(raw: unknown): boolean {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return false;
+  const claimId: unknown = Reflect.get(raw, 'claimId');
+  const text: unknown = Reflect.get(raw, 'text');
+  const hashes: unknown = Reflect.get(raw, 'sourceHashes');
+  const support: unknown = Reflect.get(raw, 'support');
+  return typeof claimId === 'string' && claimId !== '' && typeof text === 'string'
+    && Array.isArray(hashes) && hashes.every((h: unknown) => typeof h === 'string')
+    && (support === undefined || Array.isArray(support));
+}
+
 export async function recordResearch(
   tenantId: string,
   candidateId: string,
   dossier: Omit<ResearchDossier, 'recordedAt' | 'unsupportedClaimIds' | 'engines'>,
 ): Promise<FactoryCandidate | null> {
+  const rawClaims: readonly unknown[] = dossier.claims;
+  const bad = rawClaims.findIndex((cl) => !isWellFormedClaim(cl));
+  if (bad >= 0) throw new MalformedClaimError(bad);
   // KTFULL-B7 — normalize BEFORE any gate reads these fields. Caller-supplied
   // `domain` and `hash` are discarded, not merely validated: validation would
   // still leave the trusted value in place when it happened to look plausible.
@@ -638,6 +751,10 @@ export async function recordResearch(
   for (let attempt = 0; attempt < 4; attempt++) {
     const c = await getCandidate(tenantId, candidateId);
     if (!c) return null;
+    if (c.state === 'published' || c.state === 'withdrawn') {
+      log.warn('kicktodo_research_refused_closed', { candidateId, state: c.state });
+      throw new CandidateClosedError(c.state);
+    }
     const engines = [...new Set(normalized.sources.map((s) => s.engine))];
     // ADR 0101 Phase 4 — the refusal widened from "not a stub" to "may this be
     // STORED as evidence". A provider whose native-search links are licensed only
@@ -676,17 +793,53 @@ export async function recordResearch(
 // `[redacted]`/commerce-order precedent.
 export const ERASED_SUBJECT = '[erased]';
 
-/** Sever this subject's authorship on every candidate they created (in-place anonymize;
- *  the provenance row survives). Candidates are `${tenantId}::${id}`-keyed with no subject
- *  prefix → scan the tenant. Idempotent (skips rows already carrying the sentinel);
- *  tenant-scoped; returns the count re-stamped. */
+/**
+ * KTFAC-3 (decided by the product owner 2026-10-17) — the Factory BRIEF is personal
+ * data: the topic, audience and transformation the creator typed at intake, and the
+ * research questions framed from them (`frameResearchQuestions(topic, audience)`
+ * interpolates both). It is erased with its creator. The rest of the candidate is
+ * challenge PROVENANCE and stays: the dossier's sources/claims, the risk tier and
+ * the classifier's matched vocabulary (`riskSignals` — fixed keyword-list entries,
+ * not typed text), the validated plan, and the published-challenge binding. The
+ * question COUNT is kept so the dossier's shape is unchanged.
+ */
+function eraseBrief(c: FactoryCandidate): FactoryCandidate {
+  return {
+    ...c,
+    createdBy: ERASED_SUBJECT,
+    topic: ERASED_SUBJECT,
+    audience: ERASED_SUBJECT,
+    transformation: ERASED_SUBJECT,
+    ...(c.dossier ? { dossier: { ...c.dossier, questions: c.dossier.questions.map(() => ERASED_SUBJECT) } } : {}),
+    updatedAt: nowIso(),
+  };
+}
+
+/** KTFAC-3 — the ids of the candidates this subject created in this tenant (the
+ *  caller redacts the publication cards that quote their brief BEFORE the
+ *  candidates are anonymized, which is what makes them findable). */
+export async function candidateIdsCreatedBy(tenantId: string, subjectKey: string): Promise<string[]> {
+  if (!tenantId || !subjectKey || subjectKey === ERASED_SUBJECT) return [];
+  return (await candidates.listByPrefix(`${tenantId}::`))
+    .filter((c) => c.tenantId === tenantId && c.createdBy === subjectKey)
+    .map((c) => c.id);
+}
+
+/** Sever this subject's authorship on every candidate they created and erase the brief
+ *  they typed (KTFAC-3, `eraseBrief`); the provenance row survives. Candidates are
+ *  `${tenantId}::${id}`-keyed with no subject prefix → scan the tenant. CAS per row (a
+ *  concurrent stage write re-reads). Idempotent (skips rows already carrying the
+ *  sentinel); tenant-scoped; returns the count re-stamped. */
 export async function anonymizeCreatorAuthor(tenantId: string, subjectKey: string): Promise<number> {
   if (!tenantId || !subjectKey || subjectKey === ERASED_SUBJECT) return 0;
   let n = 0;
-  for (const c of await candidates.list()) {
-    if (c.tenantId === tenantId && c.createdBy === subjectKey) {
-      await candidates.put({ ...c, createdBy: ERASED_SUBJECT, updatedAt: nowIso() });
-      n += 1;
+  // Code-grade KTF-XC-1 — tenant-prefixed read (keys are `${tenantId}::${id}`), not a
+  // scan of every tenant's candidates.
+  for (const c of await candidates.listByPrefix(`${tenantId}::`)) {
+    if (c.tenantId !== tenantId || c.createdBy !== subjectKey) continue;
+    for (let attempt = 0, cur: FactoryCandidate | null = c; attempt < 4 && cur && cur.createdBy === subjectKey; attempt += 1) {
+      if (await candidates.compareAndSwap(cur, eraseBrief(cur))) { n += 1; break; }
+      cur = await candidates.get(`${tenantId}::${c.id}`);
     }
   }
   return n;

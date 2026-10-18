@@ -7,11 +7,17 @@ import { API } from './support/session.js';
  * the unit tests prove the parts and this proves the person's path through them:
  *
  *   - Ledger: every project has the Ledger tab; start the ledger, propose a
- *     scope change with a reason, see it lead the page (decision-first), accept
- *     it as the owner, and watch the version move 1 → 2 with the accepted scope.
+ *     scope change with a reason, see it waiting, accept it as the owner,
+ *     and watch the version move 1 → 2 with the accepted scope.
  *   - Handoff: picking a person opens the handoff dialog; "Assign with note"
  *     lands a note that the card shows, and it survives a reload (it was stored,
  *     not just rendered).
+ *
+ * WHAT ONLY THIS FILE PROVES is the round trip through the REAL backend (the
+ * unit tests mock teamLedgerClient / assignCard). Sabotage-witnessed (wave 53):
+ *   - accept POSTs to a wrong path            → "Version 2" never shows (ledger)
+ *   - the proposal's reason is not sent        → the queue shows another reason (ledger)
+ *   - `handoff` dropped from the assign body   → the card never carries a note (handoffs)
  *
  * MODEL-FREE. Nothing here needs a provider key. Each test logs into its OWN
  * personal workspace (no explicit tenantId, e2e/README.md trap 1 — the board is
@@ -91,15 +97,9 @@ test.describe('Structured handoffs + team intent ledger (ADR 0829 / 0831)', () =
     await expect(now.getByText('Version 1', { exact: true })).toBeVisible();
     await expect(now.getByText(scopeItem)).toHaveCount(0);
 
-    // Decision-first (DESIGN §4.5): the owner's queue renders ABOVE the record.
-    // One evaluate so both positions come from the same frame.
-    const order = await page.evaluate(() => {
-      const q = document.getElementById('ledger-pending');
-      const r = document.getElementById('ledger-now');
-      if (!q || !r) return 'missing';
-      return q.compareDocumentPosition(r) & Node.DOCUMENT_POSITION_FOLLOWING ? 'queue-first' : 'record-first';
-    });
-    expect(order, 'the waiting queue must lead the ledger page').toBe('queue-first');
+    // Decision-first ordering (DESIGN §4.5) is NOT re-asserted here: it is pure
+    // component logic, owned by projectLedgerTab.test.tsx › "decision-first: …"
+    // (w53 probe w53g3-cover-ledger-queue-first: red there under the same break).
 
     await pending.getByRole('button', { name: 'Accept', exact: true }).click();
     await expect(now.getByText('Version 2', { exact: true })).toBeVisible({ timeout: 15_000 });
@@ -123,15 +123,11 @@ test.describe('Structured handoffs + team intent ledger (ADR 0829 / 0831)', () =
     await pickAssignee(page, title, email);
     const dialog = page.getByRole('dialog', { name: `Hand off to ${email}` });
     await expect(dialog).toBeVisible({ timeout: 15_000 });
-    // The intent starts as the card title; it is required, so clearing it
-    // turns the send button off (positive control: filling turns it back on).
-    const intent = dialog.getByLabel('What this is for');
-    const send = dialog.getByRole('button', { name: 'Assign with note' });
-    await expect(intent).toHaveValue(title);
-    await intent.fill('');
-    await expect(send).toBeDisabled();
-    await intent.fill('Ship the pricing page copy');
-    await expect(send).toBeEnabled();
+    // The prefill-from-title and "empty intent disables send" rules are unit
+    // claims, owned by handoffAssign.test.tsx ("…opens the dialog prefilled from
+    // the card…", "ON: an empty intent disables…"; w53 probe
+    // w53g3-cover-handoff-intent-required). This case owns the STORED note.
+    await dialog.getByLabel('What this is for').fill('Ship the pricing page copy');
     await dialog.getByLabel('Decided so far').fill('Three tiers\nAnnual discount 20%');
     await dialog.getByLabel('Still open').fill('Enterprise tier name?');
     await dialog.getByLabel('How sure are you?').selectOption('medium');

@@ -126,8 +126,11 @@ describe('chain node config conformance', () => {
   it('the scan is NON-VACUOUS (a broken reader would report zero and pass)', () => {
     expect(chains.length, 'no chains read — the walker is broken, not the content').toBeGreaterThan(20);
     expect(requiredMap.size, 'no node type declared required config — schemas unreadable').toBeGreaterThan(10);
-    // The known-good control: this node type genuinely requires provider+model.
-    expect(requiredFor('core.ai.chatCompletion')).toEqual(expect.arrayContaining(['provider', 'model']));
+    // The known-good control: this node type genuinely requires `outputSchema`.
+    // (CORRECTED 2026-10-17, ADR 0903: it used to be chatCompletion's
+    // provider+model, which are no longer required — the host fills them.)
+    expect(requiredFor('core.ai.structuredOutput')).toEqual(expect.arrayContaining(['outputSchema']));
+    expect(requiredFor('core.ai.chatCompletion'), 'ADR 0903: provider/model are optional').not.toEqual(expect.arrayContaining(['provider']));
   });
 
   it('missing-required-config count only SHRINKS', () => {
@@ -232,10 +235,26 @@ describe('chain provider/model defaults track providers.json', () => {
     ).toEqual([]);
   });
 
-  it('the check is non-vacuous (some chain actually declares a default)', () => {
-    const withDefault = chains.filter((c) =>
-      typeof ((c.parameters as { properties?: Record<string, { default?: unknown }> } | undefined)?.properties?.provider?.default) === 'string');
-    expect(withDefault.length).toBeGreaterThan(50);
+  // CORRECTED 2026-10-17 (ADR 0903) — this used to require > 50 chains to pin a
+  // default, which made the pin itself mandatory. The user removed the pins: a
+  // chain's provider/model params now carry NO default, and an unset value
+  // follows the run's choice, then the workspace's AI setting, then the catalog
+  // default — resolved by the host once per run. So the drift check above has
+  // nothing to check, and the rule is now the opposite one.
+  it('no chain pins a default AI vendor or model (ADR 0903)', () => {
+    const pinned = chains
+      .filter((c) => {
+        const props = (c.parameters as { properties?: Record<string, { default?: unknown }> } | undefined)?.properties ?? {};
+        return props.provider?.default !== undefined || props.model?.default !== undefined;
+      })
+      .map((c) => c.chainId);
+    expect(pinned).toEqual([]);
+  });
+
+  it('the sweep is non-vacuous (chains still DECLARE provider/model params)', () => {
+    const declaring = chains.filter((c) =>
+      ((c.parameters as { properties?: Record<string, unknown> } | undefined)?.properties ?? {}).provider !== undefined);
+    expect(declaring.length).toBeGreaterThan(50);
   });
 });
 

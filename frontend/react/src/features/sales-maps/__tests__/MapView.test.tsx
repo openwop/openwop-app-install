@@ -2,6 +2,19 @@
  * MapView interactivity (ADR 0282 P5) — component smoke tests: pin click selects
  * its locations-table row (the P3 click→table tie extended to points), the
  * designed tooltip appears on hover, and the zoom buttons drive the viewBox.
+ * Plus the R2 SM2-F3/F9 money-honesty half: a cross-currency map is drawn as PRESENCE,
+ * never ranked by shading, and an all-zero ranking stays visible.
+ *
+ * Sabotage-witnessed (wave 52): ranking a non-comparable map, inverting the ramp, dropping
+ * the 0.12 floor, advertising the ramp in the legend on a presence map, dropping the pin
+ * selection, ignoring onPointClick, speaking the SHAPE count instead of the shaded count,
+ * making table names buttons, dropping the tooltip value / pin kind / pin address, the
+ * per-region tooltip clear, and the zoom in / zoom out / reset steps each turn a case red.
+ *
+ * The tooltip is cleared by TWO handlers: each region path's onMouseLeave (moving from a
+ * country onto the ocean) and the svg's onMouseLeave (leaving the map). A plain
+ * `fireEvent.mouseLeave(path)` fires both, so the hover case moves the pointer from the
+ * path ONTO the svg (relatedTarget) — only the path's own handler runs.
  */
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { render, screen, fireEvent, cleanup } from '@testing-library/react';
@@ -31,13 +44,21 @@ describe('R2 SM2-F9/F3 — the choropleth tells the truth about what it can comp
     Number(container.querySelectorAll('svg[role="img"] path')[i]!.getAttribute('fill-opacity'));
 
   it('a matched region with a ZERO value is still visible', () => {
+    // Twin: "R2 review M5" pins the same 0.12 floor as a state distinct from presence;
+    // this case pins it against the UNMATCHED neighbour it must not be confused with.
     // `maxValue <= 0` sent every matched region to opacity 0 while UNMATCHED regions
     // kept 0.6 — so on a brand-new territory model (before the first closed-won deal)
     // the countries WITH data vanished and the rest of the world looked like the data.
     // The 0.12 floor exists exactly so a coloured region is always faintly visible.
     const zeroed: MapRegion[] = [{ ...regions[0]!, value: 0 }, regions[1]!];
     const { container } = render(<MapView regions={zeroed} valueLabel="Won" caption="c" />);
-    expect(opacityOf(container, 0)).toBeGreaterThan(0);
+    const paths = container.querySelectorAll('svg[role="img"] path');
+    // matched + zero: on the ramp's floor, in the data colour
+    expect(opacityOf(container, 0)).toBeCloseTo(0.12, 5);
+    expect(paths[0]!.getAttribute('fill')).toBe('var(--clay-text)');
+    // unmatched (Brazil, no value): the neutral fill — visibly a different state
+    expect(paths[1]!.getAttribute('fill')).toBe('var(--paper)');
+    expect(opacityOf(container, 1)).toBeCloseTo(0.6, 5);
   });
 
   it('unlike units are rendered as PRESENCE, not ranked by shading', () => {
@@ -137,7 +158,10 @@ describe('MapView interactivity (P5)', () => {
     fireEvent.mouseMove(path!, { clientX: 10, clientY: 10 });
     expect(screen.getByText('United States of America')).toBeTruthy();
     expect(screen.getByText('Won revenue: $1200')).toBeTruthy();
-    fireEvent.mouseLeave(path!);
+    // Move from the country onto the svg background (the ocean): only the path's own
+    // leave handler runs — the svg-level clear does not (see header: two handlers).
+    const svg = container.querySelector('svg[role="img"]')!;
+    fireEvent.mouseOut(path!, { relatedTarget: svg });
     expect(screen.queryByText('Won revenue: $1200')).toBeNull();
   });
 
@@ -145,8 +169,11 @@ describe('MapView interactivity (P5)', () => {
     const { container } = renderMap();
     const pin = container.querySelectorAll('svg[role="img"] circle')[0]!;
     fireEvent.mouseMove(pin, { clientX: 10, clientY: 10 });
-    expect(screen.getByText('LA Outlet')).toBeTruthy();
-    expect(screen.getByText('1 Main St')).toBeTruthy();
+    // Scope to the tooltip: the legend also says "Outlet", so a page-wide query cannot
+    // see the KIND line go missing.
+    const tooltip = container.querySelector<HTMLElement>('[aria-hidden="true"][style*="position: absolute"]');
+    expect(tooltip).not.toBeNull();
+    expect([...tooltip!.children].map((c) => c.textContent)).toEqual(['LA Outlet', 'Outlet', '1 Main St']);
   });
 
   it('zoom buttons narrow the viewBox and reset restores the world', () => {
@@ -155,9 +182,14 @@ describe('MapView interactivity (P5)', () => {
     const home = `0 0 ${MAP_W} ${MAP_H}`;
     expect(svg.getAttribute('viewBox')).toBe(home);
     fireEvent.click(screen.getByRole('button', { name: 'Zoom in' }));
-    expect(svg.getAttribute('viewBox')).toBe(`${MAP_W / 4} ${MAP_H / 4} ${MAP_W / 2} ${MAP_H / 2}`);
-    const zoomOut = screen.getByRole('button', { name: 'Zoom out' }) as HTMLButtonElement;
-    expect(zoomOut.disabled).toBe(false);
+    expect(svg.getAttribute('viewBox')).toBe('250 125 500 250');
+    // Zoom out undoes one step (scale 2 → 1)…
+    fireEvent.click(screen.getByRole('button', { name: 'Zoom out' }));
+    expect(svg.getAttribute('viewBox')).toBe(home);
+    // …and Reset undoes several (scale 4 → 1).
+    fireEvent.click(screen.getByRole('button', { name: 'Zoom in' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Zoom in' }));
+    expect(svg.getAttribute('viewBox')).toBe('375 187.5 250 125');
     fireEvent.click(screen.getByRole('button', { name: 'Reset zoom' }));
     expect(svg.getAttribute('viewBox')).toBe(home);
   });

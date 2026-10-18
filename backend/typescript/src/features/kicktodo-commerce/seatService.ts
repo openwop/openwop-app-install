@@ -15,15 +15,17 @@
 import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { createLogger } from '../../observability/logger.js';
 import { getChallenge } from '../kicktodo-core/challengeService.js';
-import { getProductInTenant, type Order } from '../commerce/commerceService.js';
+import { getProductInTenant, listTenantOrdersByStatus, type Order } from '../commerce/commerceService.js';
 import {
   confirmSeat,
   getCohortDetail,
   holdSeat,
   liveHold,
   releaseSeat,
+  seatCircleForOrder,
   type SeatHold,
 } from '../kicktodo-accountability/cohortService.js';
+import { grantRowExists } from '../kicktodo-accountability/circleService.js';
 
 const log = createLogger('kicktodo.seats');
 
@@ -44,7 +46,25 @@ const nowIso = (): string => new Date().toISOString();
 
 export class SeatLinkError extends Error {}
 
-/** Link a Commerce product to a cohort so buying it buys a SEAT. */
+/** KTO-5 — the product already sells seats in a DIFFERENT cohort. */
+export class SeatLinkConflictError extends Error {
+  constructor(readonly existing: CohortSeatProduct) {
+    super(`Product already sells seats in cohort ${existing.circleId}; use a new product for another cohort.`);
+  }
+}
+
+/** Link a Commerce product to a cohort so buying it buys a SEAT.
+ *
+ *  KTO-5 — first-link-wins (insert-if-absent), never a silent overwrite. Re-linking
+ *  the SAME cohort is idempotent and returns the stored link; a DIFFERENT cohort is
+ *  refused with `SeatLinkConflictError`. Unlike a challenge link (where `replace` is
+ *  safe because revocation keys off the order, KTCOM-D1), every seat effect
+ *  resolves the product's CURRENT link: `reprocessSeatOrder` confirms a paid order
+ *  into it and RELEASES a refunded order's seat from it. A product re-pointed from
+ *  cohort A to B therefore refunds A-buyers out of B (freeing a seat they never
+ *  held, while their A seat stays taken) and confirms in-flight A-holds into B,
+ *  overselling capacity. That holds whether the overwrite was concurrent or not, so
+ *  there is no `replace` escape hatch: another cohort needs another product. */
 export async function linkCohortProduct(
   tenantId: string,
   createdBy: string,
@@ -59,8 +79,16 @@ export async function linkCohortProduct(
     createdBy,
     createdAt: nowIso(),
   };
-  await links.put(link);
-  return link;
+  // Seat links are never deleted, so a lost insert always finds the winner; the
+  // bounded loop only guards the theoretical vanish-between-reads case.
+  for (let attempt = 0; attempt < 4; attempt++) {
+    if (await links.compareAndSwap(null, link)) return link;
+    const existing = await links.get(`${tenantId}::${input.productId}`);
+    if (!existing) continue;
+    if (existing.circleId === input.circleId) return existing;
+    throw new SeatLinkConflictError(existing);
+  }
+  throw new SeatLinkError('Could not link the product; retry.');
 }
 
 export async function getSeatLink(tenantId: string, productId: string): Promise<CohortSeatProduct | null> {
@@ -134,11 +162,16 @@ export async function seatAvailability(
  */
 export async function reprocessSeatOrder(order: Order, mode: 'grant' | 'revoke'): Promise<number> {
   let affected = 0;
+  // KTCOM-4 — the seat this order bought, from the seat ledger. A refund releases
+  // THAT cohort's seat (not whatever the product links to today), and only when the
+  // seat records this order. A seat from before KTCOM-4 records none, so the
+  // product's link stays the fallback for it.
+  const boughtCircle = mode === 'revoke' ? await seatCircleForOrder(order.tenantId, order.createdBy, order.orderId) : null;
   for (const line of order.items ?? []) {
     const link = await getSeatLink(order.tenantId, line.productId);
     if (!link) continue;
     if (mode === 'grant') {
-      const result = await confirmSeat(order.tenantId, link.circleId, order.createdBy);
+      const result = await confirmSeat(order.tenantId, link.circleId, order.createdBy, undefined, { orderId: order.orderId });
       if (result.granted) {
         affected += 1;
       } else {
@@ -149,12 +182,50 @@ export async function reprocessSeatOrder(order: Order, mode: 'grant' | 'revoke')
         });
       }
     } else {
-      const detail = await getCohortDetail(order.tenantId, link.circleId);
+      const circleId = boughtCircle ?? link.circleId;
+      const detail = await getCohortDetail(order.tenantId, circleId);
       const today = new Date().toISOString().slice(0, 10);
-      const released = await releaseSeat(order.tenantId, link.circleId, order.createdBy, today);
+      const released = await releaseSeat(order.tenantId, circleId, order.createdBy, today, { orderId: order.orderId });
       if (released.released) affected += 1;
-      else log.info('kicktodo_seat_refund_after_start', { circleId: link.circleId, startedAt: detail?.startDateLocal });
+      else log.info('kicktodo_seat_refund_not_released', { circleId, startedAt: detail?.startDateLocal });
     }
   }
   return affected;
+}
+
+/**
+ * KTCOM-4 — the seat half of the operator `/reconcile` (it repaired entitlements and
+ * shares, never seats). The order observers are best-effort, so this re-derives seat
+ * effects from the tenant's terminal orders:
+ *  - a paid/fulfilled order whose buyer has NO grant row in the cohort at all (the
+ *    paid observer never reached them) is confirmed — only BEFORE the cohort starts,
+ *    and never over an existing row, so an owner's revocation is never undone;
+ *  - a refunded/canceled order releases the seat it bought (`releaseSeat` already
+ *    refuses after the start, and refuses a seat another order paid for).
+ * Idempotent: a healthy tenant repairs zero seats. Bounded by the tenant order index.
+ */
+export async function reconcileSeatOrders(tenantId: string, now: Date = new Date()): Promise<{ seatsRepaired: number }> {
+  let seatsRepaired = 0;
+  const today = now.toISOString().slice(0, 10);
+  for (const status of ['paid', 'fulfilled'] as const) {
+    for (const order of await listTenantOrdersByStatus(tenantId, status)) {
+      for (const line of order.items ?? []) {
+        const link = await getSeatLink(tenantId, line.productId);
+        if (!link) continue;
+        const detail = await getCohortDetail(tenantId, link.circleId);
+        if (!detail || !(today < detail.startDateLocal)) continue;
+        if (await grantRowExists(tenantId, link.circleId, order.createdBy)) continue;
+        const result = await confirmSeat(tenantId, link.circleId, order.createdBy, undefined, { orderId: order.orderId });
+        if (result.granted && result.reason === undefined) seatsRepaired += 1;
+        else if (!result.granted) log.error('kicktodo_seat_oversold_needs_refund', { orderId: order.orderId, circleId: link.circleId, reason: result.reason ?? 'unknown' });
+      }
+    }
+  }
+  for (const status of ['refunded', 'canceled'] as const) {
+    for (const order of await listTenantOrdersByStatus(tenantId, status)) {
+      seatsRepaired += await reprocessSeatOrder(order, 'revoke');
+    }
+  }
+  if (seatsRepaired > 0) log.info('kicktodo_seats_reconciled_from_orders', { tenantId, seatsRepaired });
+  return { seatsRepaired };
 }

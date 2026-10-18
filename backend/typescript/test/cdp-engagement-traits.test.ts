@@ -1,7 +1,11 @@
 /**
- * CDP-C — event-based behavioral segment traits (ADR 0265). `emailClicks`/`emailOpens`
- * read the email engagement store; a segment filtered on them selects only contacts
- * with the matching engagement. Attribute-only segments never pay the engagement read.
+ * CDP-C — event-based behavioral segment traits (ADR 0265). `emailClicks` reads the
+ * email engagement store; a segment filtered on it selects only contacts with a
+ * recorded click (a contact with none counts as 0 and is excluded).
+ *
+ * Not asserted here (no seam observes it): that attribute-only segments skip the
+ * engagement read — w38g1-en-attronly is an honest ceiling. `emailOpens` shares the
+ * same aggregation and is not separately exercised.
  */
 import { beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
@@ -23,18 +27,11 @@ describe('CDP-C engagement traits', () => {
 
     // seed a click event for the clicker
     const token = await mintToken({ tenantId, campaignId: 'camp1', contactId: clicker.contactId, kind: 'click', url: 'https://example.test', email: 'click@x.test' });
-    await recordClick(token);
+    expect(await recordClick(token)).toMatch(/^https:\/\/example\.test/); // the click was recorded
 
     const seg = await createSegment({ tenantId, name: 'clickers', filters: [{ field: 'emailClicks', op: 'gt', value: '0' }], createdBy: 'test' });
     const ids = (await resolveSegmentMembers(tenantId, seg.segmentId)).map((c) => c.contactId);
-    expect(ids).toContain(clicker.contactId);
-    expect(ids).not.toContain(quiet.contactId);
-  });
-
-  it('a contact with no clicks does not match emailClicks gt 0', async () => {
-    const tenantId = `org:eng2-${Date.now()}`;
-    await createContact({ tenantId, name: 'NoClicks', email: 'n@x.test' });
-    const seg = await createSegment({ tenantId, name: 'clickers', filters: [{ field: 'emailClicks', op: 'gt', value: '0' }], createdBy: 'test' });
-    expect((await resolveSegmentMembers(tenantId, seg.segmentId)).length).toBe(0);
+    expect(ids).not.toContain(quiet.contactId); // no click ⇒ count 0 ⇒ out
+    expect(ids).toEqual([clicker.contactId]);
   });
 });

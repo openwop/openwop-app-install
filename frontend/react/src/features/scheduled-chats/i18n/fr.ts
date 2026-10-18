@@ -22,6 +22,8 @@ export const messages = {
   toggleFailed: 'Impossible de mettre à jour le chat planifié. Veuillez réessayer.',
   disabled: 'Les chats planifiés sont désactivés pour cet espace.',
   colNextRun: 'Prochaine exécution',
+  lastRunNotPosted: 'La dernière exécution n’a pas pu publier sa réponse dans la conversation. Vérifiez l’agent et la conversation, puis reprenez.',
+  lastRunFailed: 'La dernière exécution a échoué : {{reason}}',
 
   // §4.5 collection kit — recherche
   filterGroup: 'Filtrer les chats planifiés',

@@ -25,15 +25,15 @@
  * required for reads AND writes, org RBAC via the same `resolveEffectiveAccess`
  * scopes (write = workspace:write, read = workspace:read).
  */
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { registerFeatureAgentTool } from '../../host/agentToolProvider.js';
 import { resolveFeatureToggle } from '../../host/agentToolKit.js';
 import { listOrgs, resolveEffectiveAccess } from '../../host/accessControlService.js';
 import type { BundleScope } from '../../host/inMemorySurfaces.js';
 import { getNodeRegistry } from '../../executor/nodeRegistry.js';
-import { createCanvasForTenant, updateCanvasForTenant, getCanvasForCaller } from '../../host/canvasSurface.js';
+import { createCanvasForTenant, updateCanvasForTenant, getCanvasForCaller, canvasWriteAllowed } from '../../host/canvasSurface.js';
 import { SLIDES_CANVAS_TYPE } from './blockCatalog.js';
-import { validateSlidesDoc } from './validateSlidesDoc.js';
+import { SLIDE_ID_RE, validateSlidesDoc } from './validateSlidesDoc.js';
 import { slidesCatalogProjection } from './surface.js';
 
 export const SLIDES_CATALOG_TOOL_ID = 'openwop:slides.catalog';
@@ -86,17 +86,45 @@ async function resolveOrgScope(
   return { orgId, actingUserId };
 }
 
+
 /** Add the editor identity fields (`id`/`name`) the `canvas.slides` working copy
  *  requires (`validateSlidesDoc`) onto the render node's ARTIFACT payload, which
  *  is positional (no id/name) — the one place the editor doc diverges from the
- *  artifact schema (validateSlidesDoc DATA-CV-2). Deterministic positional ids
- *  keep updates stable across re-renders. */
-function toEditorDeck(payload: Record<string, unknown>): Record<string, unknown> {
+ *  artifact schema (validateSlidesDoc DATA-CV-2).
+ *
+ *  ADR 0886 D5 — ids are KEPT from the model's input deck (`inputSlides[i].id`,
+ *  index-aligned: the render node maps 1:1 and only truncates) when each is a
+ *  valid, unused slug. Per-slide comment threads key on the id, so the old
+ *  positional `slide-${i+1}` on every update re-attached every thread after an
+ *  inserted slide to the wrong slide. A missing/invalid/duplicate id gets a
+ *  fresh never-reused id. (Create idempotency is unaffected: it hashes the
+ *  INPUT deck, before ids are minted.) */
+function toEditorDeck(payload: Record<string, unknown>, inputSlides: unknown[] = [], freshIds: 'positional' | 'unique' = 'positional'): Record<string, unknown> {
   const slidesIn = Array.isArray(payload.slides) ? payload.slides : [];
+  const wanted = slidesIn.map((_, i) => {
+    const raw = inputSlides[i];
+    const id = raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, unknown>).id : undefined;
+    return typeof id === 'string' && SLIDE_ID_RE.test(id) ? id : undefined;
+  });
+  const used = new Set<string>();
+  const keep = wanted.map((id) => (id && !used.has(id) ? (used.add(id), id) : undefined));
+  // On UPDATE a new slide gets a never-reused id (`slide-<hex>`, the editor's
+  // ADR 0886 rule): a positional `slide-${n}` would re-mint a deleted slide's id
+  // and re-attach its comment thread to whatever slide now takes it. On CREATE
+  // there is no thread to re-attach, so ids stay positional — deterministic, which
+  // the in-run create idempotency key (a hash of this deck) depends on.
+  let next = 1;
+  const fresh = (): string => {
+    if (freshIds === 'unique') {
+      for (;;) { const id = `slide-${randomUUID().slice(0, 8)}`; if (!used.has(id)) { used.add(id); return id; } }
+    }
+    while (used.has(`slide-${next}`)) next += 1;
+    const id = `slide-${next}`; used.add(id); return id;
+  };
   const slides = slidesIn.map((raw, i) => {
     const s = (raw && typeof raw === 'object' && !Array.isArray(raw)) ? (raw as Record<string, unknown>) : {};
     const name = str(s.title)?.slice(0, 200) ?? `Slide ${i + 1}`;
-    return { id: `slide-${i + 1}`, name, ...s };
+    return { id: keep[i] ?? fresh(), name, ...s };
   });
   return {
     ...(typeof payload.title === 'string' ? { title: payload.title } : {}),
@@ -111,6 +139,7 @@ function toEditorDeck(payload: Record<string, unknown>): Record<string, unknown>
 async function normalizeAndValidate(
   tenantId: string,
   deck: unknown,
+  freshIds: 'positional' | 'unique',
 ): Promise<{ ok: true; deck: Record<string, unknown>; slideCount: number } | ToolResult> {
   const node = await getNodeRegistry().resolve(RENDER_NODE_TYPE_ID);
   if (!node) return toolError('host_capability_missing', 'The slides render node pack is not loaded on this host.');
@@ -139,7 +168,10 @@ async function normalizeAndValidate(
     return toolError(err.code ?? 'validation_error', `${err.message ?? 'the deck failed normalization'} — fix the deck and call again.`);
   }
 
-  const editorDeck = toEditorDeck(payload);
+  const inputSlides = deck && typeof deck === 'object' && Array.isArray((deck as { slides?: unknown }).slides)
+    ? (deck as { slides: unknown[] }).slides
+    : [];
+  const editorDeck = toEditorDeck(payload, inputSlides, freshIds);
   const v = validateSlidesDoc(editorDeck);
   if (v.errors.length) {
     return toolError(
@@ -241,7 +273,8 @@ export function registerSlidesAgentTools(): void {
         + '{ canvasId, url, slideCount, version } — tell the user the deck title and give them the url. On a '
         + 'validation error, fix the reported issues and call again. To UPDATE an existing deck (including a '
         + 'restyle — re-emit with new theme/variant/background/transition), pass its `canvasId` + the `baseVersion` '
-        + 'you read via the get-design tool.',
+        + 'you read via the get-design tool, and keep each existing slide\'s `id` from that read (comments are '
+        + 'attached to slide ids; a slide you add needs no id).',
       inputSchema: {
         type: 'object',
         properties: {
@@ -263,7 +296,7 @@ export function registerSlidesAgentTools(): void {
         return toolError('validation_error', '`deck` must be the deck document object.');
       }
 
-      const normalized = await normalizeAndValidate(scope.tenantId, input.deck);
+      const normalized = await normalizeAndValidate(scope.tenantId, input.deck, str(input.canvasId) ? 'unique' : 'positional');
       if ('content' in normalized) return normalized;
       const { deck, slideCount } = normalized;
 
@@ -286,6 +319,11 @@ export function registerSlidesAgentTools(): void {
         const existing = await getCanvasForCaller(scope.tenantId, canvasId, { subject: scope.actingUserId });
         if (!existing || existing.canvasTypeId !== SLIDES_CANVAS_TYPE) {
           return toolError('not_found', `Slide deck '${canvasId}' not found in this workspace.`);
+        }
+        // ADR 0886 D1 — a write needs WRITE on the deck's owner, decided in that
+        // owner's org; the org this turn resolved is not the deck's org.
+        if (!(await canvasWriteAllowed(scope.tenantId, existing, { subject: scope.actingUserId }))) {
+          return toolError('forbidden_scope', 'The user can read this deck but cannot edit it — tell them, and offer to make a copy as a new deck instead.');
         }
         try {
           const applied = await updateCanvasForTenant(scope.tenantId, canvasId, deck, {

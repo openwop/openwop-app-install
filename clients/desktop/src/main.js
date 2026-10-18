@@ -67,6 +67,11 @@ function createWindow(targetOrigin) {
 
 // --- IPC: the window.openwopNative bridge lands here ----------------------
 
+/** How long native:notify waits for the OS to report show/failed. */
+const NOTIFY_OUTCOME_WINDOW_MS = 1500;
+/** The OS's reason for the most recent failed notification (the self-test reports it). */
+let lastNotifyFailure = null;
+
 ipcMain.handle('native:notify', (_evt, params) => {
   if (!Notification.isSupported()) return false;
   const n = new Notification({
@@ -84,13 +89,28 @@ ipcMain.handle('native:notify', (_evt, params) => {
       if (params?.navigatePath) win.webContents.send('native:notification-activated', String(params.navigatePath));
     }
   });
-  n.show();
-  return true;
+  // Electron 42+ shows macOS notifications through UNNotification, which needs a
+  // code-signed app: an unsigned build fails ASYNCHRONOUSLY, after show() has
+  // returned. So answer with the outcome, not the attempt. A platform that emits
+  // neither event within the window keeps the old answer (shown).
+  return new Promise((resolve) => {
+    let settled = false;
+    const settle = (ok) => { if (!settled) { settled = true; clearTimeout(timer); resolve(ok); } };
+    const timer = setTimeout(() => settle(true), NOTIFY_OUTCOME_WINDOW_MS);
+    n.once('show', () => settle(true));
+    n.once('failed', (_e, error) => {
+      lastNotifyFailure = String(error);
+      console.warn(`[notify] OS notification failed: ${error} (macOS needs a code-signed app since Electron 42)`);
+      settle(false);
+    });
+    n.show();
+  });
 });
 
 ipcMain.on('native:badge', (_evt, count) => {
   unreadBadge = Number.isFinite(count) ? Math.max(0, Math.floor(count)) : 0;
-  // macOS dock badge / Linux Unity count. Windows has no numeric badge API here;
+  // macOS dock badge. Linux has no badge since Electron 44 removed Unity support
+  // (setBadgeCount is a no-op there). Windows has no numeric badge API here;
   // the taskbar overlay would be the equivalent (left as a Phase-C refinement).
   if (typeof app.setBadgeCount === 'function') app.setBadgeCount(unreadBadge);
 });
@@ -209,7 +229,10 @@ function buildMenu() {
 // ADR's "Electron runtime is not verifiable headlessly" gate:
 //   1. the setup page renders and BOTH preload bridges are injected;
 //   2. saving a host via the real `setup:save-host` IPC persists + navigates;
-//   3. the REMOTE origin gets `window.openwopNative` (kind: 'electron').
+//   3. the REMOTE origin gets `window.openwopNative` (kind: 'electron');
+//   4. a notification sent through that bridge: the OS's show/failed outcome is
+//      RECORDED, not asserted — an unsigned macOS build is expected to fail
+//      (README § Electron 44 notes), and only a signed build can show one.
 // Screenshots land beside the JSON report in OPENWOP_SHELL_SELFTEST_DIR (or
 // the cwd) so a human can eyeball light/dark rendering.
 async function runSelfTest() {
@@ -218,7 +241,7 @@ async function runSelfTest() {
   const host = process.env.OPENWOP_SHELL_SELFTEST_HOST
     || BRANDING.lockedHost || BRANDING.demoHost || 'https://app.openwop.dev';
   const report = {
-    setupBridges: false, setupBranded: false, hostSaved: false, remoteBridge: null, host,
+    setupBridges: false, setupBranded: false, hostSaved: false, remoteBridge: null, notify: null, host,
     branding: { productName: BRANDING.productName, mode: BRANDING.mode, lockedHost: BRANDING.lockedHost },
   };
   let exitCode = 1;
@@ -270,6 +293,13 @@ async function runSelfTest() {
       "window.openwopNative ? String(window.openwopNative.kind) : null",
     );
     writeFileSync(path.join(outDir, 'selftest-app.png'), (await win.webContents.capturePage()).toPNG());
+    if (report.remoteBridge === 'electron') {
+      lastNotifyFailure = null;
+      const shown = await win.webContents.executeJavaScript(
+        "window.openwopNative.notify({ title: 'OpenWOP self-test', body: 'Notification check', tag: 'openwop-selftest' })",
+      );
+      report.notify = { platform: process.platform, shown: shown === true, ...(lastNotifyFailure ? { failure: lastNotifyFailure } : {}) };
+    }
     const setupOk = BRANDING.lockedHost
       ? true
       : report.setupBridges === true && report.setupBranded === true && report.hostSaved === true;

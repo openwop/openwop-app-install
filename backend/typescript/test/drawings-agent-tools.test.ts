@@ -82,10 +82,13 @@ describe('CFP-1 — drawings render tool: gates, repair-loop errors, persistence
 
   it('fails closed when the toggle is off (structured, not a throw)', async () => {
     await setDrawings('off');
-    const out = await provider({ actingUserId: 'u-1' }).executeTool({ name: DRAWINGS_RENDER_TOOL_ID, input: { drawing: VALID_DRAWING } });
-    expect(out.isError).toBe(true);
-    expect(JSON.parse(out.content)).toMatchObject({ error: 'feature_disabled' });
-    await setDrawings('on');
+    try {
+      const out = await provider({ actingUserId: 'u-1' }).executeTool({ name: DRAWINGS_RENDER_TOOL_ID, input: { drawing: VALID_DRAWING } });
+      expect(out.isError).toBe(true);
+      expect(JSON.parse(out.content)).toMatchObject({ error: 'feature_disabled' });
+    } finally {
+      await setDrawings('on');
+    }
   });
 
   it('returns a validation error the model can act on (the repair loop)', async () => {
@@ -97,6 +100,35 @@ describe('CFP-1 — drawings render tool: gates, repair-loop errors, persistence
     const parsed = JSON.parse(out.content) as { error: string };
     expect(parsed.error).toBe('validation_error');
     expect(JSON.stringify(parsed)).toContain('hologram');
+  });
+
+  it('a node-legal but closed-world-illegal drawing returns validateDrawingDoc errors[] (the post-node gate)', async () => {
+    // The render node keeps `fill` verbatim, so a url() paint reaches the
+    // authoring-time validateDrawingDoc gate (CODE-D4) — the hologram case above
+    // is refused by the NODE and never reaches it.
+    const out = await provider({ actingUserId: 'u-1' }).executeTool({
+      name: DRAWINGS_RENDER_TOOL_ID,
+      input: { drawing: { shapes: [{ kind: 'rect', x: 0, y: 0, width: 5, height: 5, fill: 'url(//evil.tld/p#f)' }] } },
+    });
+    expect(out.isError).toBe(true);
+    const parsed = JSON.parse(out.content) as { error: string; errors?: { path: string; message: string }[] };
+    expect(parsed.error).toBe('validation_error');
+    expect(parsed.errors).toEqual([{ path: 'shapes[0].fill', message: expect.stringContaining('safe color') }]);
+  });
+
+  // DRW-NODE-1 (BLOCKED-ON-PRODUCT, w33 grade-tests): the render node silently
+  // DROPS a non-numeric geometry field (`cx: '10'` vanishes) and the tool
+  // reports success with a different drawing than the model sent — a lossy
+  // success where the exchange contract requires a typed failure the repair
+  // loop can act on. Correct behaviour asserted; flips green when the node
+  // (packs/feature.drawings.nodes/index.mjs normalizeShape) fails typed.
+  it.fails('DRW-NODE-1: a non-numeric geometry field is a typed validation_error, not silently dropped', async () => {
+    const out = await provider({ actingUserId: 'u-1' }).executeTool({
+      name: DRAWINGS_RENDER_TOOL_ID,
+      input: { drawing: { shapes: [{ kind: 'circle', cx: '10', cy: 10, r: 5 }] } },
+    });
+    expect(out.isError).toBe(true);
+    expect(JSON.parse(out.content)).toMatchObject({ error: 'validation_error' });
   });
 
   it('creates a real canvas.drawing, normalized through the render node, with provenance', async () => {
@@ -111,6 +143,8 @@ describe('CFP-1 — drawings render tool: gates, repair-loop errors, persistence
     expect(canvas?.ownerSubject).toEqual({ kind: 'user', id: 'u-1' });
     const meta = canvas?.metadata as { producedBy?: { kind: string; id: string } } | undefined;
     expect(meta?.producedBy).toEqual({ kind: 'agent', id: 'vendor.openwop-app.drawings.agents.default' });
+    // The persisted state is the node-normalized scene — every field survives.
+    expect(canvas?.state).toEqual(VALID_DRAWING);
   });
 
   it('is idempotent within a run (retries do not mint duplicate canvases)', async () => {
@@ -142,10 +176,18 @@ describe('CFP-1 — drawings render tool: gates, repair-loop errors, persistence
 
   it('update without baseVersion is rejected with guidance toward get-design', async () => {
     const p = provider({ actingUserId: 'u-1' });
-    const created = JSON.parse((await p.executeTool({ name: DRAWINGS_RENDER_TOOL_ID, input: { drawing: VALID_DRAWING } })).content) as { canvasId: string };
-    const out = await p.executeTool({ name: DRAWINGS_RENDER_TOOL_ID, input: { drawing: VALID_DRAWING, canvasId: created.canvasId } });
+    const created = JSON.parse((await p.executeTool({ name: DRAWINGS_RENDER_TOOL_ID, input: { drawing: VALID_DRAWING } })).content) as { canvasId: string; version: number };
+    const out = await p.executeTool({ name: DRAWINGS_RENDER_TOOL_ID, input: { drawing: { ...VALID_DRAWING, title: 'Blind' }, canvasId: created.canvasId } });
     expect(out.isError).toBe(true);
-    expect(JSON.parse(out.content).message).toContain('get-design');
+    const parsed = JSON.parse(out.content) as { error: string; message: string };
+    // NOT the CAS conflict (whose message also says get-design): the missing
+    // baseVersion is refused before any write is attempted.
+    expect(parsed.error).toBe('validation_error');
+    expect(parsed.message).toContain('baseVersion');
+    expect(parsed.message).toContain('get-design');
+    const after = await getCanvasForTenant(TENANT, created.canvasId);
+    expect(after?.version).toBe(created.version);
+    expect((after?.state as { title?: string }).title).toBe('House');
   });
 });
 
@@ -162,6 +204,12 @@ describe('CFP-1 — drawings get-design: the canvas-state read path', () => {
     const missing = await p.executeTool({ name: DRAWINGS_GET_DESIGN_TOOL_ID, input: { canvasId: 'canvas-nope' } });
     expect(missing.isError).toBe(true);
     expect(JSON.parse(missing.content)).toMatchObject({ error: 'not_found' });
+
+    // Cross-type: a REAL canvas of another type in the SAME tenant is not a drawing.
+    const doc = await createCanvasForTenant(TENANT, { canvasTypeId: 'canvas.document', name: 'Doc', initialState: { title: 'Doc', content: { type: 'doc', content: [] } } });
+    const crossType = await p.executeTool({ name: DRAWINGS_GET_DESIGN_TOOL_ID, input: { canvasId: doc.canvasId } });
+    expect(crossType.isError).toBe(true);
+    expect(JSON.parse(crossType.content)).toMatchObject({ error: 'not_found' });
   });
 
   it('fails EMPTY without a human-initiated turn (tenant rows never leak to system runs; the loop is not derailed)', async () => {
@@ -174,7 +222,7 @@ describe('CFP-1 — drawings get-design: the canvas-state read path', () => {
     const foreign = await createCanvasForTenant('other-tenant', {
       canvasTypeId: 'canvas.drawing',
       name: 'Foreign',
-      initialState: { title: 'Foreign', shapes: [{ kind: 'rect', x: 0, y: 0, width: 10, height: 10 }] } as never,
+      initialState: { title: 'Foreign', shapes: [{ kind: 'rect', x: 0, y: 0, width: 10, height: 10 }] },
     });
     const out = await provider({ actingUserId: 'u-1' }).executeTool({ name: DRAWINGS_GET_DESIGN_TOOL_ID, input: { canvasId: foreign.canvasId } });
     expect(out.isError).toBe(true);
@@ -190,9 +238,9 @@ describe('DRC-3 — org RBAC forbidden_scope: the write door closes while the re
   // is granted the read tool and refused the write tool: the sharpest witness that
   // the two tools gate on DIFFERENT scopes, mirroring the HTTP editor path.
   //
-  // Deliberately uses a real member row (deterministic viewer scopes) rather than a
-  // non-member: the non-member path forks on the demo-mode owner bypass (LEAK-9,
-  // accessControlService.ts:1272-1287), which is env-dependent and would flake.
+  // The viewer cases use a real member row (deterministic viewer scopes). The
+  // NON-member case below pins OPENWOP_DEMO_MODE unset: the demo-mode owner bypass
+  // (LEAK-9) is the only env fork on that path, so pinned it is deterministic.
   let drawingId: string;
   beforeAll(async () => {
     await setDrawings('on');
@@ -218,6 +266,22 @@ describe('DRC-3 — org RBAC forbidden_scope: the write door closes while the re
     expect(out.isError).toBeFalsy();
     const res = JSON.parse(out.content) as { drawing: { title: string } | null };
     expect(res.drawing?.title).toBe('House');
+  });
+
+  it('a same-tenant NON-member (no org membership, demo mode off) is refused BOTH doors', async () => {
+    const prevDemo = process.env.OPENWOP_DEMO_MODE;
+    delete process.env.OPENWOP_DEMO_MODE;
+    try {
+      const stranger = provider({ actingUserId: 'u-stranger-w33' });
+      const read = await stranger.executeTool({ name: DRAWINGS_GET_DESIGN_TOOL_ID, input: { canvasId: drawingId } });
+      expect(read.isError).toBe(true);
+      expect(JSON.parse(read.content)).toMatchObject({ error: 'forbidden_scope' });
+      const write = await stranger.executeTool({ name: DRAWINGS_RENDER_TOOL_ID, input: { drawing: VALID_DRAWING } });
+      expect(write.isError).toBe(true);
+      expect(JSON.parse(write.content)).toMatchObject({ error: 'forbidden_scope' });
+    } finally {
+      if (prevDemo === undefined) delete process.env.OPENWOP_DEMO_MODE; else process.env.OPENWOP_DEMO_MODE = prevDemo;
+    }
   });
 });
 

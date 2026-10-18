@@ -38,10 +38,13 @@ export async function listCircles(): Promise<Circle[]> {
   return (await json<{ circles: Circle[] }>(res)).circles;
 }
 
-export async function createCircle(enrollmentId: string, type: string, name: string): Promise<Circle> {
+/** KTACC-5 — `idempotencyKey` makes a retried or double-submitted create return
+ *  the SAME circle: the server derives the circle id from it. Generate one per
+ *  create intent and reuse it across retries of that intent. */
+export async function createCircle(enrollmentId: string, type: string, name: string, idempotencyKey?: string): Promise<Circle> {
   const res = await fetch(B(), {
     ...fetchOpts({}), method: 'POST',
-    headers: authedHeaders({ 'content-type': 'application/json' }),
+    headers: authedHeaders({ 'content-type': 'application/json', ...(idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : {}) }),
     body: JSON.stringify({ enrollmentId, type, name }),
   });
   return json<Circle>(res);
@@ -183,20 +186,48 @@ export async function getCaseload(): Promise<CaseloadRow[]> {
   return (await json<{ caseload: CaseloadRow[] }>(res)).caseload;
 }
 
+/** CM-2 — a typed coach-console request failure. The console maps it to
+ *  localized copy by `status` + the error envelope's `code` (`{ error, message,
+ *  details }`); the server's English `message` is kept for logs only and is
+ *  never rendered. `failedIndex` is `details.failedIndex` from a per-command
+ *  `validation_error` (kicktodo-core `validateRevisionCommands`). `status` is
+ *  what `classifyHttpError` reads for the transport kinds (429/401/5xx). */
+export class CoachRequestError extends Error {
+  readonly status: number;
+  readonly code: string | null;
+  readonly failedIndex: number | null;
+  constructor(status: number, code: string | null, message: string, failedIndex: number | null) {
+    super(message || `coach request failed: ${status}`);
+    this.name = 'CoachRequestError';
+    this.status = status;
+    this.code = code;
+    this.failedIndex = failedIndex;
+  }
+}
+
 /** The coach's dry run: the server validates the commands under the coach grant and
  *  returns the humanized lines it would show the participant. Reads no plan, persists
- *  nothing. A 422 is an off-lane command — surfaced to the composer, never swallowed. */
+ *  nothing. Every non-2xx throws a `CoachRequestError` — the dry-run route answers a
+ *  malformed command with 400 `validation_error` (+ `details.failedIndex`), a missing
+ *  or revoked coach grant with 404 `not_found`, and 422 for a command outside the
+ *  coach lanes — surfaced to the composer, never swallowed. */
 export async function dryRunProposal(circleId: string, commands: RevisionCommand[]): Promise<{ lines: string[] }> {
   const res = await fetch(`${B()}/${encodeURIComponent(circleId)}/proposals/dry-run`, {
     ...fetchOpts({}), method: 'POST',
     headers: authedHeaders({ 'content-type': 'application/json' }),
     body: JSON.stringify({ commands }),
   });
-  if (res.status === 422) {
-    const body = (await res.json().catch(() => ({}))) as { message?: string };
-    throw new Error(body.message ?? 'One of the commands is outside the lanes a coach can propose.');
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { error?: unknown; message?: unknown; details?: { failedIndex?: unknown } };
+    const failedIndex = typeof body.details?.failedIndex === 'number' ? body.details.failedIndex : null;
+    throw new CoachRequestError(
+      res.status,
+      typeof body.error === 'string' ? body.error : null,
+      typeof body.message === 'string' ? body.message : '',
+      failedIndex,
+    );
   }
-  return json<{ lines: string[] }>(res);
+  return (await res.json()) as { lines: string[] };
 }
 
 /** A coach proposes. `commands` absent ⇒ advice-only (never applyable); present ⇒

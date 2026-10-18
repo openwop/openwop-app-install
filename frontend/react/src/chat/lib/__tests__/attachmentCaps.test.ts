@@ -26,10 +26,26 @@ describe('attachmentCaps (ADR 0768 D2)', () => {
     expect(attachmentCaps(visionProv.id, visionProv.models[0]!.id, { provider: blindProv.id, model: blindProv.models[0]!.id }).supportsImageInput).toBe(false);
   });
 
+  // Two honest ceilings, both caused by the shipped catalog (every provider is
+  // all-vision or no-vision, and `resolveActiveModel` falls back to a provider's
+  // recommended model for an unknown id):
+  //  - the override's MODEL id (`override?.model ?? defaultModel`) cannot change
+  //    the answer on its own: only the override's PROVIDER is witnessable here.
+  //  - the `supportsImageInput &&` half of the PDF rule: no anthropic/google model
+  //    lacks vision, so no fixture reaches it.
   it('PDFs need vision AND a provider whose dispatcher sends documents', () => {
     const anthropic = PROVIDERS.find((p) => p.id === 'anthropic');
+    const google = PROVIDERS.find((p) => p.id === 'google');
     const openai = PROVIDERS.find((p) => p.id === 'openai');
-    if (anthropic) expect(attachmentCaps('anthropic', anthropic.models[0]!.id, null).supportsPdfInput).toBe(true);
-    if (openai) expect(attachmentCaps('openai', openai.models[0]!.id, null).supportsPdfInput).toBe(false);
+    // Asserted, not `if`-guarded: a provider leaving the catalog must red this
+    // case, not silently drop its assertion.
+    expect(anthropic, 'catalog lost anthropic').toBeDefined();
+    expect(google, 'catalog lost google').toBeDefined();
+    expect(openai, 'catalog lost openai').toBeDefined();
+    expect(attachmentCaps('anthropic', anthropic!.models[0]!.id, null).supportsPdfInput).toBe(true);
+    expect(attachmentCaps('google', google!.models[0]!.id, null).supportsPdfInput).toBe(true);
+    // openai reads images but its dispatcher does not send documents.
+    expect(attachmentCaps('openai', openai!.models[0]!.id, null).supportsImageInput).toBe(true);
+    expect(attachmentCaps('openai', openai!.models[0]!.id, null).supportsPdfInput).toBe(false);
   });
 });

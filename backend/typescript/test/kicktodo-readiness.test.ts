@@ -12,6 +12,13 @@
  *  - the schedule daemon not having ticked is a blocker; a tick clears it;
  *  - web search and blob are reported and fold into `factory.ready`, never
  *    into `status`.
+ *
+ * Sabotage witnesses (w41 /grade-tests): the enterable predicate, the
+ * not-provisioned blocker, resolving toggles at the caller instead of the
+ * default tenant, the missing-pack blocker, the scheduler blocker, and routing
+ * web search into `blockers`. Note `enterable` has two conjuncts and the first
+ * (`isWorkspaceOrg`: orgId === tenantId) already refuses the pre-correction row,
+ * so only the whole predicate is probe-able for that case.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { fileURLToPath } from 'node:url';
@@ -33,10 +40,14 @@ let n = 0;
 // repo's vendored packs so a real pin reads present and a fake one reads missing.
 const REPO_PACKS = join(fileURLToPath(new URL('.', import.meta.url)), '..', '..', '..', 'packs');
 const PRIOR_PACK_DIR = process.env.OPENWOP_PACK_DIR;
+// The web-search status reads this env key; a developer/CI shell that sets it
+// would flip `webSearch.configured`. Cleared per case, restored after.
+const PRIOR_WEBSEARCH_KEY = process.env.OPENWOP_WEBSEARCH_API_KEY;
 let TARGET = { featureId: 'kicktodo-core', orgId: 'host-kicktodo', tenantId: 'host-kicktodo', name: 'KickTodo' };
 
 beforeEach(async () => {
   process.env.OPENWOP_PACK_DIR = REPO_PACKS;
+  delete process.env.OPENWOP_WEBSEARCH_API_KEY;
   initHostExtPersistence(await openStorage('memory://'));
   await __clearToggleStore();
   __resetScheduleDaemonLivenessForTest();
@@ -49,6 +60,7 @@ beforeEach(async () => {
 
 afterEach(() => {
   if (PRIOR_PACK_DIR === undefined) delete process.env.OPENWOP_PACK_DIR; else process.env.OPENWOP_PACK_DIR = PRIOR_PACK_DIR;
+  if (PRIOR_WEBSEARCH_KEY === undefined) delete process.env.OPENWOP_WEBSEARCH_API_KEY; else process.env.OPENWOP_WEBSEARCH_API_KEY = PRIOR_WEBSEARCH_KEY;
   setDefaultWorkspaceTargets([]);
   // ADR 0734: the pack-blocker case pins a FAKE `feature.kicktodo.never-shipped`
   // on the REAL kicktodo-core, and the next it() would read that poisoned blocker

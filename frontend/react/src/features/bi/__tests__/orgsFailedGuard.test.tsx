@@ -70,7 +70,8 @@ const fillMetricForm = (): void => {
 };
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  // mockReset, not clearAllMocks: no case's org/metric answer may leak into the next.
+  for (const m of [mockOrgs, mockTypes, mockMetrics, mockCreate, mockUpdate, mockDelete, mockRun]) m.mockReset();
   mockTypes.mockResolvedValue([]);
   mockMetrics.mockResolvedValue([]);
 });
@@ -105,11 +106,18 @@ describe('bi metrics — a failed workspace read is not a slow one', () => {
   });
 
   it('read SUCCEEDS but the tenant has no organizations: still not a failure claim', async () => {
+    // Twin of the next case (`read SUCCEEDS with []`), which owns the zero-org
+    // card's copy. This one owns the RECOVERY half of "not a failure claim": a
+    // retry control belongs to the failure branch only, so offering "Try again"
+    // over a truthful answer would accuse the read all the same.
     mockOrgs.mockResolvedValue([]);
     render(<MetricsPage />);
-    await waitFor(() => expect(mockOrgs).toHaveBeenCalled());
+    // Settle on the terminal state, never on "the read was called" (absence
+    // asserted while still loading proves nothing).
+    expect(await screen.findByText('No organizations')).toBeTruthy();
     // Never accuse the read of failing when it plainly did not…
     expect(screen.queryByText('Could not load your organizations')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull();
     // …and this assertion is INVERTED from what it used to claim. It asserted
     // that "New metric" was still offered — "the page has work to offer even
     // with no org selected" — which was the defect written down as a
@@ -171,6 +179,11 @@ describe('bi metrics — no organization, no write (ORG-HON-2)', () => {
     // Guard two, the one that survives a restyle: the handler says no as well.
     // Kept even though the form is now unreachable — `save()`'s `if (!orgId ||
     // !form) return` is the defence that does not depend on this render tree.
+    // HONEST CEILING (double guard, w52 probe `bi-save-guard` vacuous BY DESIGN):
+    // while guard one holds, deleting the handler clause cannot redden this case,
+    // because nothing can reach `save()`. The shared piece both rely on — the
+    // zero-org branch of `ui/OrgSelectionState` — is probed instead
+    // (`bi-zero-orgs-branch`: `orgs.length === 0` → `< 0` reds this case).
     expect(mockCreate).not.toHaveBeenCalled();
     expect(mockUpdate).not.toHaveBeenCalled();
     // The other two org-scoped writes hang off table rows, and there is no table:

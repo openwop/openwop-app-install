@@ -71,13 +71,17 @@ describe('app-builder verb denial paths (grade pass AB-CODE-9)', () => {
 
     // code-publish is off — a vendor WRITE is an independent opt-in even
     // while read-only export is on (ADR 0306).
-    expect((await user.post(AB(orgId, `/canvases/${canvasId}/publish`), { target: 'react-tailwind', repo: 'acme/app' })).status).toBe(404);
+    const pub = await user.post(AB(orgId, `/canvases/${canvasId}/publish`), { target: 'react-tailwind', repo: 'acme/app' });
+    expect(pub.status).toBe(404);
+    expect(pub.body.error).toBe('not_found');
 
     const d = getToggleDefault('code-export');
     expect(d).toBeTruthy();
     await saveConfig({ ...d!, status: 'off' }, 'test');
     try {
-      expect((await user.post(AB(orgId, `/canvases/${canvasId}/export`), { target: 'react-tailwind' })).status).toBe(404);
+      const off = await user.post(AB(orgId, `/canvases/${canvasId}/export`), { target: 'react-tailwind' });
+      expect(off.status).toBe(404);
+      expect(off.body.error).toBe('not_found');
       expect((await user.get(AB(orgId, `/canvases/${canvasId}/exports`))).status).toBe(404);
       // The EDITOR surface rides its own toggle and stays up.
       expect((await user.get(AB(orgId, `/canvases/${canvasId}`))).status).toBe(200);
@@ -92,11 +96,25 @@ describe('app-builder verb denial paths (grade pass AB-CODE-9)', () => {
     const login = await b.post('/host/openwop-app/test/login', { email: 'authz-intruder@acme.test', tenantId: 'org:authz-intruder' });
     expect(login.status).toBe(201);
 
-    expect((await b.post(AB(a.orgId, `/canvases/${a.canvasId}/export`), { target: 'react-tailwind' })).status).toBe(404);
+    const viaForeignOrg = await b.post(AB(a.orgId, `/canvases/${a.canvasId}/export`), { target: 'react-tailwind' });
+    expect(viaForeignOrg.status).toBe(404);
+    expect(viaForeignOrg.body.error).toBe('not_found');
     expect((await b.get(AB(a.orgId, `/canvases/${a.canvasId}/exports`))).status).toBe(404);
-    // The owner still sees exactly one lineage entry — the intruder wrote nothing.
+
+    // The org check above refuses B before any canvas is loaded. Through B's OWN
+    // org, the request reaches the canvas loader — the place an export would
+    // leak A's app if the load were not tenant-scoped.
+    const bOrg = await b.post('/host/openwop-app/orgs', { name: 'Intruder' });
+    expect(bOrg.status, JSON.stringify(bOrg.body)).toBe(201);
+    const viaOwnOrg = await b.post(AB(bOrg.body.orgId as string, `/canvases/${a.canvasId}/export`), { target: 'react-tailwind' });
+    expect(viaOwnOrg.status, JSON.stringify(viaOwnOrg.body)).toBe(404);
+    expect(viaOwnOrg.body.error).toBe('not_found');
+    expect(viaOwnOrg.body.assetToken).toBeUndefined();
+    expect((await b.get(AB(bOrg.body.orgId as string, `/canvases/${a.canvasId}/exports`))).status).toBe(404);
+
+    // The owner never exported, so the lineage is EMPTY — the intruder wrote nothing.
     const mine = await a.user.get(AB(a.orgId, `/canvases/${a.canvasId}/exports`));
     expect(mine.status).toBe(200);
-    expect(Array.isArray(mine.body.exports)).toBe(true);
+    expect(mine.body.exports).toEqual([]);
   });
 });

@@ -60,6 +60,7 @@ import { registerConformanceSideEffectNode } from './conformanceSideEffectNode.j
 import { registerConformanceHoldNode } from './conformanceHoldNode.js';
 import { registerConformanceHttpEffectNode } from './conformanceHttpEffectNode.js';
 import { registerConformanceStorageProbeNode } from './conformanceStorageProbe.js';
+import { registerConformanceTableSchemaProbeNode } from './conformanceTableSchemaProbe.js';
 import { registerConformanceA2aInvokeNode } from './conformanceA2aInvokeNode.js';
 import { registerConformanceMcpInvokeNode } from './conformanceMcpInvokeNode.js';
 import { enterprisePosture } from '../host/deployPosture.js';
@@ -73,11 +74,17 @@ import { assetTokenFromUrl } from '../host/assetServePath.js';
 /** ADR 0706 — the parent run's registered BYOK refs, handed to every child the
  *  parent spawns so `prepareRunSecrets` resolves the SAME secrets for the child.
  *  Read from the run-level `configurable` (names only), never widened. */
-function inheritedCredentialRefs(ctx: NodeContext): { parentCredentialRefs?: readonly string[] } {
+function inheritedCredentialRefs(ctx: NodeContext): { parentCredentialRefs?: readonly string[]; parentAi?: { provider: string; model?: string } } {
   // ADR 0712 — the same reader `prepareRunSecrets` uses, so a child inherits the
   // parent's wire `ai.credentialRef` too, not only the host-set list.
   const refs = declaredRunCredentialRefs(ctx.configurable as Record<string, unknown> | undefined);
-  return refs.length > 0 ? { parentCredentialRefs: refs } : {};
+  // ADR 0903 — and the parent's run-level provider/model choice, so a child's
+  // nodes that name no provider fall back to what the PARENT run chose.
+  const ai = (ctx.configurable as { ai?: { provider?: unknown; model?: unknown } } | undefined)?.ai;
+  const parentAi = ai && typeof ai.provider === 'string' && ai.provider.length > 0
+    ? { provider: ai.provider, ...(typeof ai.model === 'string' && ai.model.length > 0 ? { model: ai.model } : {}) }
+    : undefined;
+  return { ...(refs.length > 0 ? { parentCredentialRefs: refs } : {}), ...(parentAi ? { parentAi } : {}) };
 }
 
 const noopNode: NodeModule = {
@@ -3572,6 +3579,9 @@ export function ensureNodesRegistered(): void {
   // (`storageProbeEnabled()`, on by default), so production can project the
   // storage families it probes.
   registerConformanceStorageProbeNode();
+  // RFC 0228 G4: the tableStorage schema probe, same footing (its own switch,
+  // `tableSchemaProbeEnabled()`; it calls only the run tenant's own table).
+  registerConformanceTableSchemaProbeNode();
   registry.register(delayNode);
   registry.register(failNode);
   registry.register(approvalGateNode);

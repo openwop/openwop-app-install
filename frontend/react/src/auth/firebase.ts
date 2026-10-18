@@ -32,6 +32,8 @@ import type { FirebaseApp } from '@firebase/app';
 import type { AuthCredential, User, Auth, TotpSecret, MultiFactorResolver } from '@firebase/auth';
 import { setCurrentIdToken, registerIdTokenRefresher } from '../client/config.js';
 import i18n from '../i18n/index.js';
+import { purgeOfflineCaches } from '../sw/offlineCaches.js';
+import { clearLastKnownEntitlements } from '../featureToggles/lastKnownEntitlement.js';
 
 /** The lazily-imported `@firebase/auth` module namespace. */
 type AuthMod = typeof import('@firebase/auth');
@@ -612,6 +614,12 @@ export function hasPendingMfaChallenge(): boolean {
 }
 
 export async function signOut(): Promise<void> {
+  // ADR 0873 D8 — every sign-out path (SignInButton, invite switch, hardSignOut)
+  // runs through here, so this is the one place the offline caches are purged.
+  // Before the Firebase early return: a cookie-only session signs out too.
+  // ADR 0873 D12 — the last-known offline entitlement grants go on the same path.
+  clearLastKnownEntitlements();
+  await purgeOfflineCaches();
   const a = await ensureInitAsync();
   if (!a || !authMod) return;
   clearPendingLinkState();

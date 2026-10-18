@@ -21,7 +21,7 @@
  * failure Notice reds ORGINV-UX-7 (a)/(c′).
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
-import { render, screen, cleanup, act, fireEvent } from '@testing-library/react';
+import { render, screen, cleanup, act, fireEvent, waitFor } from '@testing-library/react';
 import type * as InvitesClient from '../invitesClient.js';
 
 const { listInvites, createInvite, revokeInvite } = vi.hoisted(() => ({
@@ -136,8 +136,11 @@ describe('ORGINV-UX-7 — inviter-side action feedback reaches assistive tech', 
     fireEvent.change(screen.getByLabelText(/email/i), { target: { value: 'new@acme.test' } });
     fireEvent.click(screen.getByRole('button', { name: /send invite/i }));
     await screen.findByText(/couldn.t be created/i);
-    expect(assertive()).not.toBe(before);
-    expect(assertive()).toContain('The invitation couldn’t be created. Try again.');
+    // The announcement comes from a passive effect that can flush after findBy sees the DOM; wait for it.
+    await waitFor(() => {
+      expect(assertive()).not.toBe(before);
+      expect(assertive()).toContain('The invitation couldn’t be created. Try again.');
+    });
   });
 
   it('(b) a REJECTED address marks the input invalid and points it at the message; the next edit clears it', async () => {
@@ -171,8 +174,10 @@ describe('ORGINV-UX-7 — inviter-side action feedback reaches assistive tech', 
     fireEvent.click(screen.getByRole('button', { name: /send invite/i }));
     await screen.findByText(/set one up on the email page/i);
     expect(input.getAttribute('aria-invalid')).toBeNull();
-    expect(assertive()).not.toBe(before);
-    expect(assertive()).toContain('couldn’t be delivered');
+    await waitFor(() => {
+      expect(assertive()).not.toBe(before);
+      expect(assertive()).toContain('couldn’t be delivered');
+    });
   });
 
   it('(c) a successful revoke gives a localized toast naming the address (toast.success announces)', async () => {
@@ -193,8 +198,10 @@ describe('ORGINV-UX-7 — inviter-side action feedback reaches assistive tech', 
     fireEvent.click(screen.getByRole('button', { name: /revoke/i }));
     await screen.findByText(/revoking the invitation failed/i);
     expect(toastSuccess).not.toHaveBeenCalled();
-    expect(assertive()).not.toBe(before);
-    expect(assertive()).toContain('Revoking the invitation failed.');
+    await waitFor(() => {
+      expect(assertive()).not.toBe(before);
+      expect(assertive()).toContain('Revoking the invitation failed.');
+    });
   });
 });
 
@@ -384,8 +391,10 @@ describe('ADR 0622 D5 — a failed re-invite says the EARLIER invitation is stil
     fireEvent.click(screen.getByRole('button', { name: /send invite/i }));
     await screen.findByText(/earlier invitation for this address may still be valid/i);
     expect(screen.queryByText(/nothing was kept/i)).toBeNull();
-    expect(assertive()).not.toBe(before);
-    expect(assertive()).toContain('may still be valid');
+    await waitFor(() => {
+      expect(assertive()).not.toBe(before);
+      expect(assertive()).toContain('may still be valid');
+    });
   });
 
   it('422 {reason: undeliverable, priorInviteStillValid: true} keeps the configuration guidance AND the prior-valid fact', async () => {

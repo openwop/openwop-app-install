@@ -1,8 +1,8 @@
 {
   "name": "core.openwop.workflows.kicktodo-challenge-factory",
-  "version": "1.5.2",
+  "version": "1.8.0",
   "kind": "workflow-chain",
-  "description": "The Challenge Factory (ADR 0458) + its lesson-batch child — migrated from the deprecated builtins (ADR 0472 P4, the terminal quarantine step). chainIds keep the original ids; build-0..3 reference lesson-batch via RFC 0133 config.subChainRef (host-default binds it to the shared same-id child); truthy/falsy reject-safe barriers ride RFC 0134; produced vars (plan/evidenceSummary/evidenceClaims/planBrief/planEvidenceBrief) declared per RFC 0133 §2.2; 1.4.0 (ADR 0458 §2.2 correction) grounds the plan, the lessons and the skeptic on the STRUCTURED evidence.",
+  "description": "The Challenge Factory (ADR 0458) + its lesson-batch child — migrated from the deprecated builtins (ADR 0472 P4, the terminal quarantine step). chainIds keep the original ids; build-0..3 reference lesson-batch via RFC 0133 config.subChainRef (host-default binds it to the shared same-id child); truthy/falsy reject-safe barriers ride RFC 0134; produced vars (plan/evidenceSummary/evidenceClaims/planBrief/planEvidenceBrief) declared per RFC 0133 §2.2; 1.4.0 (ADR 0458 §2.2 correction) grounds the plan, the lessons and the skeptic on the STRUCTURED evidence. 1.5.4 declares `actions: [approve, reject]` on all five approval gates (they set maxRequestChangesIterations 0, so those are the only real decisions — a defer/escalate/request-changes resume is now refused instead of being recorded as a decline that fails the run) and types the lesson-batch params honestly. 1.6.0: generateMedia param + image binding. 1.7.0: gate-N shows the lessons; a failed batch stops the run.",
   "keywords": [
     "KickTodo"
   ],
@@ -12,7 +12,7 @@
   "chains": [
     {
       "chainId": "openwop-app.kicktodo.challenge-factory",
-      "version": "1.5.2",
+      "version": "1.8.0",
       "label": "Challenge Factory",
       "description": "Research a topic → draft an outline → approve → build lesson batches (each checkpoint approved) → simulate with three personas → submit for publication.",
       "parameters": {
@@ -32,12 +32,10 @@
             "type": "string"
           },
           "provider": {
-            "type": "string",
-            "default": "anthropic"
+            "type": "string"
           },
           "model": {
-            "type": "string",
-            "default": "claude-sonnet-4-6"
+            "type": "string"
           },
           "checkpointEvery": {
             "type": "string"
@@ -45,6 +43,23 @@
           "credentialRef": {
             "type": "string",
             "description": "ADR 0706 — the Secrets Vault ref NAME (never a value) the four LLM nodes and the lesson-batch child pass to ctx.callAI. Set by the Challenge Author’s run tool from the workspace’s AI default; absent ⇒ the dispatcher’s exact/prefixed-ref ladder. Plain string, deliberately NOT x-openwop-sensitive: it carries a ref name, not a secret."
+          },
+          "generateMedia": {
+            "type": "boolean",
+            "default": false,
+            "description": "KTF-LB-1 / WF-3 — when true, each lesson also gets a generated image (ADR 0458 P2), reviewed at its checkpoint gate. Seeded by the Challenge Author’s run tool only when the creator asked for images; the build-N inputMapping reads it from the run bag."
+          },
+          "imageProvider": {
+            "type": "string",
+            "description": "XCH-LB-6 — the IMAGE provider for the media leg (openai/google/replicate), never the chat provider. Absent ⇒ the host’s image default."
+          },
+          "imageModel": {
+            "type": "string",
+            "description": "XCH-LB-6 — the image model id, with imageProvider. Absent ⇒ the provider’s default."
+          },
+          "imageCredentialRef": {
+            "type": "string",
+            "description": "XCH-LB-6 — the Secrets Vault ref NAME for the image provider (a name, never a value), pre-flighted by the run tool."
           }
         },
         "required": [
@@ -157,7 +172,11 @@
             "config": {
               "title": "Approve the challenge outline?",
               "artifactType": "challenge-outline",
-              "maxRequestChangesIterations": 0
+              "maxRequestChangesIterations": 0,
+              "actions": [
+                "approve",
+                "reject"
+              ]
             },
             "inputs": {
               "artifact": {
@@ -196,18 +215,34 @@
             "typeId": "core.subWorkflow@1.0.0",
             "config": {
               "waitForCompletion": true,
-              "onChildFailure": "absorb",
+              "onChildFailure": "fail-parent",
               "inputMapping": {
                 "candidateId": "candidateId",
                 "authorSubject": "authorSubject",
                 "days": "batch0",
                 "generateMedia": "generateMedia",
+                "imageProvider": "imageProvider",
+                "imageModel": "imageModel",
+                "imageCredentialRef": "imageCredentialRef",
                 "evidenceClaims": "evidenceClaims",
                 "provider": "provider",
                 "model": "model",
                 "credentialRef": "credentialRef"
               },
-              "subChainRef": "openwop-app.kicktodo.lesson-batch"
+              "subChainRef": "openwop-app.kicktodo.lesson-batch",
+              "outputMapping": {
+                "lessonBatch0": "lessonBatch"
+              }
+            }
+          },
+          {
+            "id": "preview-0",
+            "typeId": "feature.kicktodo.nodes.lesson-batch-preview@1.0.0",
+            "inputs": {
+              "lessonBatch": {
+                "type": "variable",
+                "variableName": "lessonBatch0"
+              }
             }
           },
           {
@@ -215,8 +250,12 @@
             "typeId": "core.chat.approvalGate@1.1.0",
             "config": {
               "title": "Approve the lessons for checkpoint 1?",
-              "artifactType": "challenge-lesson-batch",
-              "maxRequestChangesIterations": 0
+              "artifactType": "kicktodo.challenge-lesson-batch",
+              "maxRequestChangesIterations": 0,
+              "actions": [
+                "approve",
+                "reject"
+              ]
             }
           },
           {
@@ -228,22 +267,46 @@
             }
           },
           {
+            "id": "build-fail-0",
+            "typeId": "core.fail@1.0.0",
+            "config": {
+              "code": "checkpoint_build_failed",
+              "message": "Checkpoint 1's lessons could not be built or shown for approval — the factory run stops here rather than skip the checkpoint."
+            }
+          },
+          {
             "id": "build-1",
             "typeId": "core.subWorkflow@1.0.0",
             "config": {
               "waitForCompletion": true,
-              "onChildFailure": "absorb",
+              "onChildFailure": "fail-parent",
               "inputMapping": {
                 "candidateId": "candidateId",
                 "authorSubject": "authorSubject",
                 "days": "batch1",
                 "generateMedia": "generateMedia",
+                "imageProvider": "imageProvider",
+                "imageModel": "imageModel",
+                "imageCredentialRef": "imageCredentialRef",
                 "evidenceClaims": "evidenceClaims",
                 "provider": "provider",
                 "model": "model",
                 "credentialRef": "credentialRef"
               },
-              "subChainRef": "openwop-app.kicktodo.lesson-batch"
+              "subChainRef": "openwop-app.kicktodo.lesson-batch",
+              "outputMapping": {
+                "lessonBatch1": "lessonBatch"
+              }
+            }
+          },
+          {
+            "id": "preview-1",
+            "typeId": "feature.kicktodo.nodes.lesson-batch-preview@1.0.0",
+            "inputs": {
+              "lessonBatch": {
+                "type": "variable",
+                "variableName": "lessonBatch1"
+              }
             }
           },
           {
@@ -251,8 +314,12 @@
             "typeId": "core.chat.approvalGate@1.1.0",
             "config": {
               "title": "Approve the lessons for checkpoint 2?",
-              "artifactType": "challenge-lesson-batch",
-              "maxRequestChangesIterations": 0
+              "artifactType": "kicktodo.challenge-lesson-batch",
+              "maxRequestChangesIterations": 0,
+              "actions": [
+                "approve",
+                "reject"
+              ]
             }
           },
           {
@@ -264,22 +331,46 @@
             }
           },
           {
+            "id": "build-fail-1",
+            "typeId": "core.fail@1.0.0",
+            "config": {
+              "code": "checkpoint_build_failed",
+              "message": "Checkpoint 2's lessons could not be built or shown for approval — the factory run stops here rather than skip the checkpoint."
+            }
+          },
+          {
             "id": "build-2",
             "typeId": "core.subWorkflow@1.0.0",
             "config": {
               "waitForCompletion": true,
-              "onChildFailure": "absorb",
+              "onChildFailure": "fail-parent",
               "inputMapping": {
                 "candidateId": "candidateId",
                 "authorSubject": "authorSubject",
                 "days": "batch2",
                 "generateMedia": "generateMedia",
+                "imageProvider": "imageProvider",
+                "imageModel": "imageModel",
+                "imageCredentialRef": "imageCredentialRef",
                 "evidenceClaims": "evidenceClaims",
                 "provider": "provider",
                 "model": "model",
                 "credentialRef": "credentialRef"
               },
-              "subChainRef": "openwop-app.kicktodo.lesson-batch"
+              "subChainRef": "openwop-app.kicktodo.lesson-batch",
+              "outputMapping": {
+                "lessonBatch2": "lessonBatch"
+              }
+            }
+          },
+          {
+            "id": "preview-2",
+            "typeId": "feature.kicktodo.nodes.lesson-batch-preview@1.0.0",
+            "inputs": {
+              "lessonBatch": {
+                "type": "variable",
+                "variableName": "lessonBatch2"
+              }
             }
           },
           {
@@ -287,8 +378,12 @@
             "typeId": "core.chat.approvalGate@1.1.0",
             "config": {
               "title": "Approve the lessons for checkpoint 3?",
-              "artifactType": "challenge-lesson-batch",
-              "maxRequestChangesIterations": 0
+              "artifactType": "kicktodo.challenge-lesson-batch",
+              "maxRequestChangesIterations": 0,
+              "actions": [
+                "approve",
+                "reject"
+              ]
             }
           },
           {
@@ -300,22 +395,46 @@
             }
           },
           {
+            "id": "build-fail-2",
+            "typeId": "core.fail@1.0.0",
+            "config": {
+              "code": "checkpoint_build_failed",
+              "message": "Checkpoint 3's lessons could not be built or shown for approval — the factory run stops here rather than skip the checkpoint."
+            }
+          },
+          {
             "id": "build-3",
             "typeId": "core.subWorkflow@1.0.0",
             "config": {
               "waitForCompletion": true,
-              "onChildFailure": "absorb",
+              "onChildFailure": "fail-parent",
               "inputMapping": {
                 "candidateId": "candidateId",
                 "authorSubject": "authorSubject",
                 "days": "batch3",
                 "generateMedia": "generateMedia",
+                "imageProvider": "imageProvider",
+                "imageModel": "imageModel",
+                "imageCredentialRef": "imageCredentialRef",
                 "evidenceClaims": "evidenceClaims",
                 "provider": "provider",
                 "model": "model",
                 "credentialRef": "credentialRef"
               },
-              "subChainRef": "openwop-app.kicktodo.lesson-batch"
+              "subChainRef": "openwop-app.kicktodo.lesson-batch",
+              "outputMapping": {
+                "lessonBatch3": "lessonBatch"
+              }
+            }
+          },
+          {
+            "id": "preview-3",
+            "typeId": "feature.kicktodo.nodes.lesson-batch-preview@1.0.0",
+            "inputs": {
+              "lessonBatch": {
+                "type": "variable",
+                "variableName": "lessonBatch3"
+              }
             }
           },
           {
@@ -323,8 +442,12 @@
             "typeId": "core.chat.approvalGate@1.1.0",
             "config": {
               "title": "Approve the lessons for checkpoint 4?",
-              "artifactType": "challenge-lesson-batch",
-              "maxRequestChangesIterations": 0
+              "artifactType": "kicktodo.challenge-lesson-batch",
+              "maxRequestChangesIterations": 0,
+              "actions": [
+                "approve",
+                "reject"
+              ]
             }
           },
           {
@@ -333,6 +456,14 @@
             "config": {
               "code": "checkpoint_rejected",
               "message": "Checkpoint 4 was rejected — the factory run stops here."
+            }
+          },
+          {
+            "id": "build-fail-3",
+            "typeId": "core.fail@1.0.0",
+            "config": {
+              "code": "checkpoint_build_failed",
+              "message": "Checkpoint 4's lessons could not be built or shown for approval — the factory run stops here rather than skip the checkpoint."
             }
           },
           {
@@ -359,7 +490,9 @@
                 "type": "variable",
                 "variableName": "planBrief"
               },
-              "credentialRef": "managed:openwop-free"
+              "provider": "{{params.provider}}",
+              "model": "{{params.model}}",
+              "credentialRef": "{{params.credentialRef}}"
             }
           },
           {
@@ -374,7 +507,9 @@
                 "type": "variable",
                 "variableName": "planBrief"
               },
-              "credentialRef": "managed:openwop-free"
+              "provider": "{{params.provider}}",
+              "model": "{{params.model}}",
+              "credentialRef": "{{params.credentialRef}}"
             }
           },
           {
@@ -389,7 +524,9 @@
                 "type": "variable",
                 "variableName": "planEvidenceBrief"
               },
-              "credentialRef": "managed:openwop-free"
+              "provider": "{{params.provider}}",
+              "model": "{{params.model}}",
+              "credentialRef": "{{params.credentialRef}}"
             }
           },
           {
@@ -465,6 +602,11 @@
           },
           {
             "from": "build-0",
+            "to": "preview-0",
+            "triggerRule": "all_success"
+          },
+          {
+            "from": "preview-0",
             "to": "gate-0",
             "triggerRule": "all_success"
           },
@@ -482,6 +624,21 @@
             "triggerRule": "none_failed"
           },
           {
+            "from": "build-0",
+            "to": "build-fail-0",
+            "triggerRule": "any_failed"
+          },
+          {
+            "from": "preview-0",
+            "to": "build-fail-0",
+            "triggerRule": "any_failed"
+          },
+          {
+            "from": "build-fail-0",
+            "to": "decompose",
+            "triggerRule": "none_failed"
+          },
+          {
             "from": "checkpoint-plan",
             "to": "build-1",
             "triggerRule": "all_success",
@@ -492,6 +649,11 @@
           },
           {
             "from": "build-1",
+            "to": "preview-1",
+            "triggerRule": "all_success"
+          },
+          {
+            "from": "preview-1",
             "to": "gate-1",
             "triggerRule": "all_success"
           },
@@ -509,6 +671,21 @@
             "triggerRule": "none_failed"
           },
           {
+            "from": "build-1",
+            "to": "build-fail-1",
+            "triggerRule": "any_failed"
+          },
+          {
+            "from": "preview-1",
+            "to": "build-fail-1",
+            "triggerRule": "any_failed"
+          },
+          {
+            "from": "build-fail-1",
+            "to": "decompose",
+            "triggerRule": "none_failed"
+          },
+          {
             "from": "checkpoint-plan",
             "to": "build-2",
             "triggerRule": "all_success",
@@ -519,6 +696,11 @@
           },
           {
             "from": "build-2",
+            "to": "preview-2",
+            "triggerRule": "all_success"
+          },
+          {
+            "from": "preview-2",
             "to": "gate-2",
             "triggerRule": "all_success"
           },
@@ -536,6 +718,21 @@
             "triggerRule": "none_failed"
           },
           {
+            "from": "build-2",
+            "to": "build-fail-2",
+            "triggerRule": "any_failed"
+          },
+          {
+            "from": "preview-2",
+            "to": "build-fail-2",
+            "triggerRule": "any_failed"
+          },
+          {
+            "from": "build-fail-2",
+            "to": "decompose",
+            "triggerRule": "none_failed"
+          },
+          {
             "from": "checkpoint-plan",
             "to": "build-3",
             "triggerRule": "all_success",
@@ -546,6 +743,11 @@
           },
           {
             "from": "build-3",
+            "to": "preview-3",
+            "triggerRule": "all_success"
+          },
+          {
+            "from": "preview-3",
             "to": "gate-3",
             "triggerRule": "all_success"
           },
@@ -559,6 +761,21 @@
           },
           {
             "from": "fail-3",
+            "to": "decompose",
+            "triggerRule": "none_failed"
+          },
+          {
+            "from": "build-3",
+            "to": "build-fail-3",
+            "triggerRule": "any_failed"
+          },
+          {
+            "from": "preview-3",
+            "to": "build-fail-3",
+            "triggerRule": "any_failed"
+          },
+          {
+            "from": "build-fail-3",
             "to": "decompose",
             "triggerRule": "none_failed"
           },
@@ -684,12 +901,60 @@
           "name": "planEvidenceBrief",
           "producedBy": "checkpoint-plan",
           "type": "string"
+        },
+        {
+          "name": "batch0",
+          "producedBy": "checkpoint-plan",
+          "type": "array",
+          "description": "Checkpoint 1's plan-day payloads; build-0 maps it into the lesson-batch child's `days`."
+        },
+        {
+          "name": "batch1",
+          "producedBy": "checkpoint-plan",
+          "type": "array",
+          "description": "Checkpoint 2's plan-day payloads; build-1 maps it into the lesson-batch child's `days`."
+        },
+        {
+          "name": "batch2",
+          "producedBy": "checkpoint-plan",
+          "type": "array",
+          "description": "Checkpoint 3's plan-day payloads; build-2 maps it into the lesson-batch child's `days`."
+        },
+        {
+          "name": "batch3",
+          "producedBy": "checkpoint-plan",
+          "type": "array",
+          "description": "Checkpoint 4's plan-day payloads; build-3 maps it into the lesson-batch child's `days`."
+        },
+        {
+          "name": "lessonBatch0",
+          "producedBy": "build-0",
+          "type": "object",
+          "description": "Checkpoint 1's built lessons beside their plan rows, as a typed kicktodo.challenge-lesson-batch artifact; gate-0 shows it to the approver (XCH-GATE-1)."
+        },
+        {
+          "name": "lessonBatch1",
+          "producedBy": "build-1",
+          "type": "object",
+          "description": "Checkpoint 2's built lessons beside their plan rows, as a typed kicktodo.challenge-lesson-batch artifact; gate-1 shows it to the approver (XCH-GATE-1)."
+        },
+        {
+          "name": "lessonBatch2",
+          "producedBy": "build-2",
+          "type": "object",
+          "description": "Checkpoint 3's built lessons beside their plan rows, as a typed kicktodo.challenge-lesson-batch artifact; gate-2 shows it to the approver (XCH-GATE-1)."
+        },
+        {
+          "name": "lessonBatch3",
+          "producedBy": "build-3",
+          "type": "object",
+          "description": "Checkpoint 4's built lessons beside their plan rows, as a typed kicktodo.challenge-lesson-batch artifact; gate-3 shows it to the approver (XCH-GATE-1)."
         }
       ]
     },
     {
       "chainId": "openwop-app.kicktodo.lesson-batch",
-      "version": "1.2.1",
+      "version": "1.4.0",
       "label": "Lesson batch (Challenge Factory child)",
       "description": "Builds one checkpoint of a challenge’s lessons. Internal — dispatched by the Challenge Factory, not run on its own.",
       "internal": true,
@@ -704,14 +969,16 @@
             "type": "string"
           },
           "days": {
-            "type": "string"
+            "type": "array",
+            "description": "The plan days this checkpoint batch builds lessons for — the parent seeds it from its batchN bag variable (an array of day payloads; anything else builds an empty batch)."
           },
           "generateMedia": {
-            "type": "string"
+            "type": "boolean",
+            "description": "Optional. When true, each lesson also gets a generated image (ADR 0458 P2). The parent maps it from its generateMedia bag variable; absent means no media."
           },
           "evidenceClaims": {
             "type": "array",
-            "description": "The structured evidence (claim ids + sources) the batch’s lessons are grounded on and validated against; seeded by the parent from its evidenceClaims bag variable."
+            "description": "Optional. The structured evidence (claim ids + sources) the batch’s lessons are grounded on and validated against; seeded by the parent from its evidenceClaims bag variable. Absent means no evidence was gathered, so every lesson must cite no claim (the validator rejects an unknown claimRef)."
           },
           "provider": {
             "type": "string",
@@ -724,6 +991,18 @@
           "credentialRef": {
             "type": "string",
             "description": "ADR 0706 — the Secrets Vault ref NAME forwarded to ctx.callAI (not x-openwop-sensitive: a name, never a value)."
+          },
+          "imageProvider": {
+            "type": "string",
+            "description": "XCH-LB-6 — the image provider the media leg calls; seeded by the parent’s inputMapping. Never the chat provider."
+          },
+          "imageModel": {
+            "type": "string",
+            "description": "XCH-LB-6 — the image model id, with imageProvider."
+          },
+          "imageCredentialRef": {
+            "type": "string",
+            "description": "XCH-LB-6 — the Secrets Vault ref NAME forwarded to ctx.callImageGenerator (a name, never a value)."
           }
         },
         "required": [
@@ -742,6 +1021,9 @@
               "authorSubject": "{{params.authorSubject}}",
               "days": "{{params.days}}",
               "generateMedia": "{{params.generateMedia}}",
+              "imageProvider": "{{params.imageProvider}}",
+              "imageModel": "{{params.imageModel}}",
+              "imageCredentialRef": "{{params.imageCredentialRef}}",
               "evidenceClaims": "{{params.evidenceClaims}}",
               "provider": "{{params.provider}}",
               "model": "{{params.model}}",
@@ -750,7 +1032,15 @@
           }
         ],
         "edges": []
-      }
+      },
+      "producedVariables": [
+        {
+          "name": "lessonBatch",
+          "producedBy": "lesson-batch-build",
+          "type": "object",
+          "description": "The batch as a typed kicktodo.challenge-lesson-batch artifact envelope; the parent maps it to lessonBatchN for its checkpoint gate (XCH-GATE-1)."
+        }
+      ]
     }
   ]
 }

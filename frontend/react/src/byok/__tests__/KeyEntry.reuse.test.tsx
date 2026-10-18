@@ -8,24 +8,26 @@
  * workspace collected seven Google keys over five weeks. Two properties now hold:
  * an existing key is OFFERED rather than re-asked, and a deliberate replacement
  * OVERWRITES the ref the chat is bound to.
+ *
+ * Sabotage that turns these red (KeyEntry.tsx): adopting by storing again; offering
+ * a saved key when none exists; a timestamped ref; reporting a failed store as
+ * success.
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
+import type * as ByokClient from '../lib/byokClient.js';
+import { getProvider } from '../lib/providers.js';
+import { ApiError } from '../../client/requestJson.js';
 
-const storeKey = vi.fn();
-vi.mock('../lib/byokClient.js', () => ({ storeKey: (...a: unknown[]) => storeKey(...a) }));
+const storeKey = vi.fn<typeof ByokClient.storeKey>();
+vi.mock('../lib/byokClient.js', () => ({ storeKey: (...a: Parameters<typeof ByokClient.storeKey>) => storeKey(...a) }));
 
 const { KeyEntry } = await import('../KeyEntry.js');
 
-const provider = {
-  id: 'google', label: 'Google', managed: false,
-  apiKeyPrefix: 'AIza', apiKeyPlaceholder: 'AIza…',
-  apiKeyConsoleUrl: 'https://example.test', apiKeyHelpText: 'help',
-  models: [],
-} as never;
-const model = { id: 'gemini-3.1-flash-lite', label: 'Gemini 3.1 Flash-Lite' } as never;
+const provider = getProvider('google');
+const model = provider.models[0]!;
 
-beforeEach(() => { vi.clearAllMocks(); storeKey.mockResolvedValue({ credentialRef: 'byok:google', masked: '••' }); });
+beforeEach(() => { storeKey.mockReset().mockResolvedValue({ credentialRef: 'byok:google', masked: '••' }); });
 afterEach(cleanup);
 
 describe('KeyEntry — reuse before re-ask (fix A)', () => {
@@ -89,7 +91,8 @@ describe('KeyEntry — deterministic ref (fix B)', () => {
 
   it('surfaces a store failure instead of reporting success', async () => {
     const onStored = vi.fn();
-    storeKey.mockRejectedValue(new Error('provider rejected the key'));
+    // The shape `requestJson` actually throws: an ApiError carrying the server sentence.
+    storeKey.mockRejectedValue(new ApiError({ status: 400, statusText: 'Bad Request', url: '/host/openwop-app/byok/secrets', body: { error: 'validation_error', message: 'provider rejected the key' } }));
     render(
       <KeyEntry provider={provider} model={model} onBack={vi.fn()} onStored={onStored} targetRef="byok:google" />,
     );

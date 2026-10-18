@@ -6,11 +6,12 @@
  * without the sub-toggle, tenant isolation on records.
  */
 import http from 'node:http';
+import { createHash } from 'node:crypto';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { makeMockDeployAdapter } from '../src/features/app-builder/deploy/adapter.js';
-import { startDeploy, rollbackDeploy, getDeployment, parseEnvKeys, namespacedServiceName } from '../src/features/app-builder/deploy/deployService.js';
+import { startDeploy, rollbackDeploy, getDeployment, parseEnvKeys } from '../src/features/app-builder/deploy/deployService.js';
 
 let server: http.Server;
 const T = 'tenant-deploy-1';
@@ -40,8 +41,11 @@ describe('deploy records', () => {
     const first = await startDeploy(adapter, BASE);
     expect(first.status).toBe('deployed');
     // ADR 0835 D1 — the provider sees the namespaced name, never the caller's.
-    expect(first.cloudRunService).toBe(namespacedServiceName(T, 'org-1', 'my-app'));
-    expect(first.revision).toBe(`${first.cloudRunService}-rev-1`);
+    // The expected name is derived HERE, independently of `namespacedServiceName`
+    // (an oracle that calls the function under test moves with its sabotage).
+    const h = createHash('sha256').update('tenant-deploy-1\u0000org-1').digest('hex').slice(0, 12);
+    expect(first.cloudRunService).toBe(`owa-${h}-my-app`);
+    expect(first.revision).toBe(`owa-${h}-my-app-rev-1`);
     expect(adapter.calls.deploy).toBe(1);
     const again = await startDeploy(adapter, BASE);
     expect(again.deployKey).toBe(first.deployKey);
@@ -50,6 +54,18 @@ describe('deploy records', () => {
     const v2 = await startDeploy(adapter, { ...BASE, image: 'gcr.io/p/my-app:v2' });
     expect(v2.deployKey).not.toBe(first.deployKey);
     expect(adapter.calls.deploy).toBe(2);
+  });
+
+  // ADR 0835 D1 — orgs share a tenant (ADR 0832), so an admin of org A must not
+  // reach org B's same-named app: the org is part of the provider-side name.
+  it('the same service name in another ORG of the tenant is a different provider service and a new deploy', async () => {
+    const adapter = makeMockDeployAdapter();
+    const a = await startDeploy(adapter, { ...BASE, service: 'org-app' });
+    const b = await startDeploy(adapter, { ...BASE, orgId: 'org-2', service: 'org-app' });
+    expect(b.cloudRunService).not.toBe(a.cloudRunService);
+    expect(b.deployKey).not.toBe(a.deployKey);
+    expect(adapter.calls.deploy).toBe(2);
+    expect(b.revision).toBe(`${b.cloudRunService}-rev-1`); // org B's service starts its own history
   });
 
   it('rolls back to a prior revision and records it', async () => {
@@ -71,11 +87,16 @@ describe('deploy records', () => {
     await expect(startDeploy(adapter, { ...BASE, envKeys: ['X=y'] })).rejects.toMatchObject({ code: 'validation_error' });
   });
 
+  // Isolation is the storage key itself (`${tenantId}:${deployKey}`): the
+  // reader's `rec.tenantId === tenantId` re-check is a second guard no
+  // terminating sabotage can reach on its own (wave-36 probe dp-isolation,
+  // vacuous by construction — an honest ceiling, recorded).
   it('records are tenant-isolated', async () => {
     const adapter = makeMockDeployAdapter();
     const rec = await startDeploy(adapter, { ...BASE, service: 'iso-app' });
-    expect(await getDeployment(T, rec.deployKey)).toBeTruthy();
+    expect(await getDeployment(T, rec.deployKey)).toMatchObject({ deployKey: rec.deployKey, tenantId: T, service: 'iso-app' });
     expect(await getDeployment('tenant-other', rec.deployKey)).toBeNull();
+    expect(await getDeployment(T, 'no-such-key')).toBeNull(); // the reader's own negative control
   });
 });
 

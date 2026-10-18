@@ -1,10 +1,19 @@
 /**
  * Strategy health rollup (ADR 0080 Phase A). Pure-function unit coverage of the
  * verdict bands + signals, plus a route test that the `GET /strategy/health`
- * endpoint rolls up a linked project's charter health (RBAC-filtered, live).
+ * endpoint rolls up a linked project's charter health (live), honours a manual
+ * `healthOverride`, and is gated by the `strategy` toggle.
+ *
+ * Sabotage witnesses (wave 19, `w19g3-hea-*`): dropping the off-track-project, the
+ * objectives-with-no-execution, the at-risk-project or the <40% milestone band reds the
+ * case that names it; `<= 0.4` reds the band-edge case (2/5); counting only projects as
+ * execution reds the priority case; treating "no milestones tracked" as 0% reds the
+ * no-milestones case; dropping the charter health, the override, or the toggle check reds
+ * the route case that names it.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { computeStrategyHealth } from '../src/features/strategy/strategyHealth.js';
+import type { StrategyHealthRow } from '../src/features/strategy/types.js';
 import { bootPlanningApp, makeClient, enableToggle, type Client } from './planningHarness.js';
 
 describe('computeStrategyHealth (pure)', () => {
@@ -34,10 +43,11 @@ describe('computeStrategyHealth (pure)', () => {
     expect(r.signals.milestonesTotal).toBe(5);
   });
 
-  it('on-track with healthy linked execution and ≥40% milestones', () => {
+  // 2/5 is EXACTLY the 40% band edge — 3/5 left `< 0.4` → `<= 0.4` green.
+  it('on-track with healthy linked execution and ≥40% milestones (2/5 — the band edge)', () => {
     const r = computeStrategyHealth(entry({
       objectives: [{ title: 'O', keyResults: [] }],
-      linkedProjects: [{ id: 'p', name: 'P', health: 'on-track', milestonesDone: 3, milestonesTotal: 5 }],
+      linkedProjects: [{ id: 'p', name: 'P', health: 'on-track', milestonesDone: 2, milestonesTotal: 5 }],
       linkedPriorities: [{ listId: 'l', title: 'idea', rank: 1 }],
     }));
     expect(r.health).toBe('on-track');
@@ -78,7 +88,7 @@ const client = (): Client => makeClient(() => BASE);
 
 describe('GET /strategy/health (route)', () => {
   const S = '/host/openwop-app/strategy';
-  it('rolls up a linked off-track project into the strategy health (RBAC-filtered)', async () => {
+  it('rolls up a linked off-track project into the strategy health', async () => {
     const c = client();
     const u = await c.post('/host/openwop-app/test/login', { email: `h-${Date.now()}-${n++}@x.test`, tenantId: `org:h-${Date.now()}-${n++}` });
     expect(u.status).toBe(201);
@@ -90,11 +100,12 @@ describe('GET /strategy/health (route)', () => {
 
     const health = await c.get(`${S}/health`);
     expect(health.status, JSON.stringify(health.body)).toBe(200);
-    const row = health.body.strategies.find((x: any) => x.id === s.id);
+    const row = health.body.strategies.find((x: StrategyHealthRow) => x.id === s.id);
     expect(row).toBeTruthy();
     expect(row.health).toBe('off-track');
     expect(row.signals.projectsOffTrack).toBe(1);
     expect(row.signals.milestonesTotal).toBe(1);
+    expect(row.signals.linkedProjectCount).toBe(1);
   });
 
   it('a manual healthOverride wins over the computed verdict; clearing it (null) reverts to Auto', async () => {
@@ -103,26 +114,34 @@ describe('GET /strategy/health (route)', () => {
     const orgId = (await c.post('/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
     // Objectives declared but nothing executable linked ⇒ computes off-track.
     const s = (await c.post(S, { orgId, title: 'Override me', scope: 'org', objectives: [{ title: 'Grow', keyResults: [] }] })).body;
-    const computed = (await c.get(`${S}/health`)).body.strategies.find((x: any) => x.id === s.id);
+    const computed = (await c.get(`${S}/health`)).body.strategies.find((x: StrategyHealthRow) => x.id === s.id);
     expect(computed.health).toBe('off-track');
 
     // Manual override wins; the signals remain the computed truth.
     expect((await c.patch(`${S}/${s.id}`, { healthOverride: 'on-track' })).status).toBe(200);
-    const overridden = (await c.get(`${S}/health`)).body.strategies.find((x: any) => x.id === s.id);
+    const overridden = (await c.get(`${S}/health`)).body.strategies.find((x: StrategyHealthRow) => x.id === s.id);
     expect(overridden.health).toBe('on-track');
     expect(overridden.signals.hasExecution).toBe(false);
 
     // Clearing reverts to the derived verdict.
     expect((await c.patch(`${S}/${s.id}`, { healthOverride: null })).status).toBe(200);
-    const reverted = (await c.get(`${S}/health`)).body.strategies.find((x: any) => x.id === s.id);
+    const reverted = (await c.get(`${S}/health`)).body.strategies.find((x: StrategyHealthRow) => x.id === s.id);
     expect(reverted.health).toBe('off-track');
   });
 
   it('404s when the strategy toggle is off', async () => {
-    await enableToggle('strategy', 'off');
     const c = client();
     await c.post('/host/openwop-app/test/login', { email: `h2-${Date.now()}-${n++}@x.test` });
-    expect((await c.get(`${S}/health`)).status).toBe(404);
-    await enableToggle('strategy', 'on');
+    // Matched control: the same caller reads the route while the feature is on.
+    expect((await c.get(`${S}/health`)).status).toBe(200);
+    await enableToggle('strategy', 'off');
+    try {
+      const r = await c.get(`${S}/health`);
+      expect(r.status).toBe(404);
+      // The FEATURE gate refused it — not an unrelated miss.
+      expect(JSON.stringify(r.body)).toContain('"feature":"strategy"');
+    } finally {
+      await enableToggle('strategy', 'on');
+    }
   });
 });

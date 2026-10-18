@@ -43,8 +43,11 @@ vi.mock('react-router-dom', async (orig) => ({
 
 import { PackCanvasEditorPage } from '../PackCanvasEditorPage.js';
 
+// The REAL shape: canvasClient's `asJson` throws `${ctx} returned ${status}`
+// and attaches `.status` (canvasClient.ts:80-81). A message that does not carry
+// the status could never show "the status is never rendered" failing.
 const statusError = (status: number): Error => {
-  const e = new Error('request failed');
+  const e = new Error(`canvas catalog returned ${status}`);
   (e as { status?: number }).status = status;
   return e;
 };
@@ -56,7 +59,7 @@ const mount = async (): Promise<void> => {
 
 afterEach(cleanup);
 beforeEach(() => {
-  vi.clearAllMocks();
+  getCatalog.mockReset(); listOrgs.mockReset(); listPlugins.mockReset();
   listOrgs.mockResolvedValue([{ orgId: 'o1', name: 'Acme' }]);
   listPlugins.mockResolvedValue({ plugins: [] });
 });
@@ -76,6 +79,7 @@ describe('CP-G1 — an unavailable TYPE is not a failed request', () => {
     getCatalog.mockRejectedValue(statusError(503));
     await mount();
     expect(document.body.textContent).not.toContain('not available in this workspace');
+    expect(document.body.textContent).toContain('Could not load this canvas.');
     expect(screen.getByRole('button', { name: 'Try again' })).toBeTruthy();
     expect(document.body.textContent).not.toContain('503');
   });
@@ -84,6 +88,8 @@ describe('CP-G1 — an unavailable TYPE is not a failed request', () => {
     getCatalog.mockRejectedValue(new Error('network down'));
     await mount();
     expect(screen.getByRole('button', { name: 'Try again' })).toBeTruthy();
+    expect(document.body.textContent).toContain('Could not load this canvas.');
+    expect(document.body.textContent).not.toContain('network down');
   });
 });
 
@@ -95,6 +101,7 @@ describe('CP-G2 — the retry actually re-runs the load', () => {
     await mount();
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Try again' })); });
     expect(screen.getByTestId('chassis')).toBeTruthy();
+    expect(getCatalog).toHaveBeenCalledTimes(2);
     expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull();
   });
 });

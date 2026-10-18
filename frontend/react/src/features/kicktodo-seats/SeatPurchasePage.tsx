@@ -88,7 +88,14 @@ export function SeatPurchasePage() {
     <div className="page">
       <PageHeader title={t('title')} lede={t('lede')} />
 
-      {error && <Notice variant="error">{t('loadError')}</Notice>}
+      {/* CS-4 — a failed read offers its way back (DESIGN.md §4.6). The retry
+          drops `loaded` so the in-flight read shows loading, never "not found". */}
+      {error && (
+        <div className="action-bar">
+          <Notice variant="error" announce={t('loadError')}>{t('loadError')}</Notice>
+          <Button variant="quiet" size="sm" onClick={() => { setLoaded(false); void reload(); }}>{t('common:retry')}</Button>
+        </div>
+      )}
       {!loaded && !error && <StateCard loading title={t('title')} />}
 
       {loaded && !error && !availability && (

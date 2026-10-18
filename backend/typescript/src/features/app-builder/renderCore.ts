@@ -47,8 +47,11 @@ export async function renderDesign(tenantId: string, args: RenderDesignArgs): Pr
   }
 
   // ONE normalization gate: the same render node the design chain runs
-  // (slug ids, remap navigation, cap sizes, drop unknown fields) — the
-  // computeNodeTool minimal-ctx pattern (ADR 0081 P3; the node is pure).
+  // (slug invalid ids and follow their references) — the computeNodeTool
+  // minimal-ctx pattern (ADR 0081 P3; the node is pure). It CARRIES every
+  // field: it used to drop unknown ones, which erased the ADR 0343 facets on
+  // every update below (ABR-RENDER-1, ADR 0358 correction). validateAppDoc
+  // is what refuses a bad value or an unknown key.
   const node = await getNodeRegistry().resolve(RENDER_NODE_TYPE_ID);
   if (!node) return { ok: false, error: 'host_capability_missing', message: 'The render node pack is not loaded on this host.' };
   let payload: Record<string, unknown>;

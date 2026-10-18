@@ -1,3 +1,11 @@
+/**
+ * RT-9 / RT-9c — Gemini Live transcription fragments → whole voice turns.
+ *
+ * What breaks it: dropping the interim emit (no live transcript), not advancing
+ * or not clearing a side's turn after flush (bubble collisions / text bleeding
+ * into the next turn), emitting a blank turn, or draining the assistant before
+ * the user at teardown.
+ */
 import { describe, it, expect } from 'vitest';
 import { TranscriptAccumulator } from '../voice/realtimeClient.js';
 
@@ -47,6 +55,8 @@ describe('TranscriptAccumulator (RT-9c)', () => {
     acc.addUser('two'); acc.flushUser();
     acc.addAssistant('second'); acc.flushAssistant();
     expect(out.filter((e) => e.final).map((e) => e.turnId)).toEqual(['u0', 'a0', 'u1', 'a1']);
+    // …and each turn carries ONLY its own text (the buffer is cleared on flush).
+    expect(finals(out).map((e) => e.text)).toEqual(['one', 'first', 'two', 'second']);
   });
 
   it('never emits empty/whitespace turns', () => {

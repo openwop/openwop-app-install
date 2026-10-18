@@ -1,12 +1,20 @@
 {
   "name": "vendor.openwop-app.csm.agents",
-  "version": "1.2.1",
+  "version": "1.3.0",
   "kind": "node",
   "description": "CSM feature agent pack — a manifest agent whose tools are feature.csm.nodes over the ctx.features.csm surface. Reads at-risk accounts and recommends save-plays; tool-allowlisted to the CSM feature surface only, and READ-ONLY (it does not auto-mutate health). Mirrors vendor.openwop-app.kb.agents.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
-  "keywords": ["feature", "csm", "customer-success", "agent", "health"],
-  "engines": { "openwop": ">=1.1.0 <3.0.0" },
+  "keywords": [
+    "feature",
+    "csm",
+    "customer-success",
+    "agent",
+    "health"
+  ],
+  "engines": {
+    "openwop": ">=1.1.0 <3.0.0"
+  },
   "peerDependencies": {
     "aiProviders": "supported",
     "agents.manifestRuntime": "supported"
@@ -16,15 +24,25 @@
       "agentId": "vendor.openwop-app.csm.agents.health-insights",
       "persona": "RESEARCH",
       "label": "CSM Health Insights",
-      "description": "Surfaces at-risk customer-success accounts and recommends save-plays, grounded in the org's CSM accounts via feature.csm.nodes.health-read over ctx.features.csm. Read-only: it reports, it does not change health scores.",
+      "description": "Surfaces at-risk customer-success accounts and recommends save-plays, grounded in the org's CSM accounts via feature.csm.nodes.health-read and feature.csm.nodes.renewals-due over ctx.features.csm. Read-only: it reports, it does not change health scores.",
       "modelClass": "research",
       "systemPromptRef": "prompts/csm-health.md",
       "toolAllowlist": [
-        "openwop:feature.csm.nodes.health-read"
+        "openwop:feature.csm.nodes.health-read",
+        "openwop:feature.csm.nodes.renewals-due"
       ],
-      "memoryShape": { "scratchpad": true, "conversation": false, "longTerm": false },
-      "confidence": { "defaultThreshold": 0.6 }
+      "memoryShape": {
+        "scratchpad": true,
+        "conversation": false,
+        "longTerm": false
+      },
+      "confidence": {
+        "defaultThreshold": 0.6
+      }
     }
   ],
-  "runtime": { "language": "remote", "entry": "pack.json" }
+  "runtime": {
+    "language": "remote",
+    "entry": "pack.json"
+  }
 }

@@ -1,6 +1,12 @@
 # ADR 0229 — Planning surfaces on by default (strategy · priority-matrix · advisory-board)
 
 Status: Accepted (implemented)
+
+> **CORRECTED 2026-10-14 (ADR 0892): superseded.** `strategy`, `priority-matrix` and
+> `advisory-board` default **off** again, as opt-in features, so a white-label
+> install starts lean. App migration 24 keeps each one on for an install that already
+> has data for it. Enable them in Admin → Feature toggles (or, with ADR 0892 Phase B,
+> by enabling the `leadership` / `agents` bundle for a workspace).
 Date: 2026-07-03
 Relates to: ADR 0079/0080 (Strategic Planning), ADR 0058–0061 (Priority Matrix), ADR 0040 (Board of Advisors), ADR 0191 (the default-flip precedent), docs/research/strategy-gap-analysis.md (Phase A2)
 

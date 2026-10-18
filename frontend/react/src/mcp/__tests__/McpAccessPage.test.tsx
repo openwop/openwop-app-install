@@ -6,6 +6,12 @@
  * plain words (no env-var name), the per-tool switch is offered only to a caller
  * the server lets manage exposure (both directions), and a new key is shown
  * with a ready config exactly once.
+ *
+ * Sabotage that turns it red: title a failed read as "turned off"; a no-op retry; treat
+ * a 401 as a failed read; offer keys on a turned-off mount; send the tool's CURRENT
+ * state; offer the switch to a non-manager; mint every key read-only; keep the one-time
+ * key after Done; leave focus behind; accept an empty name; offer "Read & act" to a
+ * reader; recompute the switches locally instead of from the server's set (MCPCD-3).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, waitFor, cleanup, fireEvent } from '@testing-library/react';
@@ -14,33 +20,34 @@ import { ApiError } from '../../client/requestJson.js';
 
 const canWrite = vi.hoisted(() => ({ value: true }));
 vi.mock('../../lib/writeAccess.js', async (orig) => ({
-  ...(await orig<Record<string, unknown>>()),
+  ...(await orig<typeof import('../../lib/writeAccess.js')>()),
   useScopeWriteAccess: () => canWrite.value,
 }));
 vi.mock('../../chrome/hubContext.js', () => ({ useHub: () => ({ embedded: true }) }));
 vi.mock('../../auth/SignInButton.js', () => ({ SignInButton: () => <button type="button">Sign in</button> }));
 vi.mock('../../ui/toast.js', () => ({ toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn() } }));
+type McpClient = typeof import('../mcpAccessClient.js');
 vi.mock('../mcpAccessClient.js', async (orig) => ({
-  ...(await orig<Record<string, unknown>>()),
-  getMcpExposure: vi.fn(),
-  setMcpToolDisabled: vi.fn(async (key: string, disabled: boolean) => ({ disabled: disabled ? [key] : [], updatedAt: 'now' })),
-  listMcpKeys: vi.fn(async () => []),
-  createMcpKey: vi.fn(async (label: string) => ({ token: 'owk_secret_once', key: { keyId: 'dk:1', name: `MCP: ${label}`, scopes: ['workspace:read'], createdAt: '2026-09-30T00:00:00Z' } })),
-  revokeMcpKey: vi.fn(),
+  ...(await orig<McpClient>()),
+  getMcpExposure: vi.fn<McpClient['getMcpExposure']>(),
+  setMcpToolDisabled: vi.fn<McpClient['setMcpToolDisabled']>(async (key, disabled) => ({ disabled: disabled ? [key] : [], updatedAt: '2026-09-30T00:00:00Z' })),
+  listMcpKeys: vi.fn<McpClient['listMcpKeys']>(async () => []),
+  createMcpKey: vi.fn<McpClient['createMcpKey']>(async (label) => ({ token: 'owk_secret_once', key: { keyId: 'dk:1', name: `MCP: ${label}`, scopes: ['workspace:read'], createdAt: '2026-09-30T00:00:00Z' } })),
+  revokeMcpKey: vi.fn<McpClient['revokeMcpKey']>(),
 }));
 
 import { McpAccessPage } from '../McpAccessPage.js';
-import { getMcpExposure, setMcpToolDisabled, createMcpKey } from '../mcpAccessClient.js';
+import { getMcpExposure, setMcpToolDisabled, createMcpKey, type McpExposureView, type McpToolEntry } from '../mcpAccessClient.js';
 
 const mGet = vi.mocked(getMcpExposure);
-const view = (over: Partial<Awaited<ReturnType<typeof getMcpExposure>>> = {}) => ({
+const SEARCH: McpToolEntry = { key: 'host:notebooks.mcp.search:notebook-search', name: 'notebook-search', description: 'Search', source: 'host', safetyTier: 'read', approval: 'never', requiredScopes: ['workspace:read'], disabled: false };
+const OTHER: McpToolEntry = { key: 'host:x:other', name: 'other', description: 'Other', source: 'host', safetyTier: 'read', approval: 'never', requiredScopes: ['workspace:read'], disabled: false };
+const view = (over: Partial<McpExposureView> = {}): McpExposureView => ({
   enabled: true,
   endpoint: { url: 'https://svc.example/host/openwop-app/mcp', derived: false, viaProxy: false },
   protocolVersions: ['2026-07-28', '2025-06-18'],
   canManage: true,
-  tools: [
-    { key: 'host:notebooks.mcp.search:notebook-search', name: 'notebook-search', description: 'Search', source: 'host' as const, safetyTier: 'read', approval: 'never', requiredScopes: ['workspace:read'], disabled: false },
-  ],
+  tools: [SEARCH],
   ...over,
 });
 const renderPage = () => render(<MemoryRouter><McpAccessPage /></MemoryRouter>);
@@ -74,17 +81,21 @@ describe('McpAccessPage', () => {
     expect(await screen.findByText('Sign in to connect an AI client')).toBeTruthy();
   });
 
-  it('an admin gets the per-tool switch, and turning it off sends the tool key', async () => {
-    mGet.mockResolvedValueOnce(view());
+  it('an admin gets the per-tool switch, turning it off sends the tool key, and the switches show the SERVER set (MCPCD-3)', async () => {
+    mGet.mockResolvedValueOnce(view({ tools: [SEARCH, OTHER] }));
+    // The server answers with its resulting set, which ALSO has `other` off (another
+    // admin turned it off meanwhile). A local recomputation would leave it on.
+    vi.mocked(setMcpToolDisabled).mockResolvedValueOnce({ disabled: [SEARCH.key, OTHER.key], updatedAt: '2026-09-30T00:00:00Z' });
     renderPage();
     const sw = await screen.findByRole('switch', { name: 'Let AI clients use notebook-search' });
     fireEvent.click(sw);
     await waitFor(() => expect(vi.mocked(setMcpToolDisabled)).toHaveBeenCalledWith('host:notebooks.mcp.search:notebook-search', true));
-    await waitFor(() => expect((screen.getByRole('switch') as HTMLInputElement).checked).toBe(false));
+    await waitFor(() => expect((screen.getByRole('switch', { name: 'Let AI clients use notebook-search' }) as HTMLInputElement).checked).toBe(false));
+    expect((screen.getByRole('switch', { name: 'Let AI clients use other' }) as HTMLInputElement).checked).toBe(false);
   });
 
   it('a member who cannot manage exposure is NOT offered the switch', async () => {
-    mGet.mockResolvedValueOnce(view({ canManage: false, tools: [{ ...view().tools[0]!, disabled: true }] }));
+    mGet.mockResolvedValueOnce(view({ canManage: false, tools: [{ ...SEARCH, disabled: true }] }));
     renderPage();
     expect(await screen.findByText('Turned off')).toBeTruthy();
     expect(screen.queryByRole('switch')).toBeNull();

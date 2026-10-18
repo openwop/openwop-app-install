@@ -1,7 +1,18 @@
 /**
  * ADR 0148 Phase 1 (A2) — provider prompt caching helpers + config + replay safety.
+ *
+ * Guards: the `contextEconomy()` env vocabulary (true/1/yes on, off/0 off) and the
+ * master→lever defaulting; the Anthropic cache-marker helpers (plain string when
+ * off, a single ephemeral block when on, breakpoint on the LAST tool, never inside
+ * `input_schema`); and the replay invariant that the helpers never mutate the
+ * caller's tools, so the semantic request digest (the replay cache key) is the
+ * same with caching on or off (architect must-fix #1).
+ *
+ * Sabotage (grade-tests w28): dropping a vocabulary word, defaulting levers to
+ * false, unfreezing the config, marking the first tool, mutating the caller's
+ * array, or writing cache_control into a shared input_schema each turn a case red.
  */
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import {
   cacheableAnthropicSystem,
   withAnthropicToolCache,
@@ -19,9 +30,9 @@ const ENV_KEYS = [
   'OPENWOP_CONTEXT_ECONOMY_MEMORY',
   'OPENWOP_CONTEXT_ECONOMY_TRANSPORT',
 ];
-afterEach(() => {
-  for (const k of ENV_KEYS) delete process.env[k];
-});
+const saved: Record<string, string | undefined> = {};
+beforeEach(() => { for (const k of ENV_KEYS) { saved[k] = process.env[k]; delete process.env[k]; } });
+afterEach(() => { for (const k of ENV_KEYS) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; } });
 
 describe('contextEconomy() config resolution', () => {
   it('defaults every lever OFF when no env is set', () => {
@@ -64,9 +75,8 @@ describe('contextEconomy() config resolution', () => {
 });
 
 describe('cacheableAnthropicSystem', () => {
-  it('off → returns the plain string byte-identical (no behavior change)', () => {
-    expect(cacheableAnthropicSystem('you are a bot', false)).toBe('you are a bot');
-  });
+  // `off → plain string, byte-identical` lives in rfc0116-prompt-prefix-cache.test.ts
+  // ("backward-compat"), which goes red on the same break (grade-tests w28).
   it('on → returns a single cache-marked text block', () => {
     expect(cacheableAnthropicSystem('you are a bot', true)).toEqual([
       { type: 'text', text: 'you are a bot', cache_control: { type: 'ephemeral' } },
@@ -79,22 +89,25 @@ describe('cacheableAnthropicSystem', () => {
 });
 
 describe('withAnthropicToolCache', () => {
-  const tools: AnthropicToolDef[] = [
+  // Fresh per case: a mutation by one case must not pre-satisfy another's snapshot.
+  const mkTools = (): AnthropicToolDef[] => [
     { name: 'a', description: 'A', input_schema: { type: 'object' } },
     { name: 'b', description: 'B', input_schema: { type: 'object' } },
   ];
 
   it('off → returns input unchanged', () => {
+    const tools = mkTools();
     expect(withAnthropicToolCache(tools, false)).toBe(tools);
   });
 
   it('on → breakpoint on the LAST tool only', () => {
-    const out = withAnthropicToolCache(tools, true);
+    const out = withAnthropicToolCache(mkTools(), true);
     expect(out[0].cache_control).toBeUndefined();
     expect(out[1].cache_control).toEqual({ type: 'ephemeral' });
   });
 
   it('on → does NOT mutate the caller array or its objects (replay-safety invariant)', () => {
+    const tools = mkTools();
     const snapshot = JSON.stringify(tools);
     withAnthropicToolCache(tools, true);
     expect(JSON.stringify(tools)).toBe(snapshot);
@@ -102,8 +115,8 @@ describe('withAnthropicToolCache', () => {
   });
 
   it('on → never places cache_control inside a tool input_schema', () => {
-    const out = withAnthropicToolCache(tools, true);
-    expect((out[1].input_schema as Record<string, unknown>).cache_control).toBeUndefined();
+    const out = withAnthropicToolCache(mkTools(), true);
+    expect(out[1].input_schema?.cache_control).toBeUndefined();
   });
 
   it('empty tools → unchanged', () => {
@@ -114,8 +127,9 @@ describe('withAnthropicToolCache', () => {
 describe('replay cache-key is invisible to prompt caching (architect must-fix #1)', () => {
   it('the semantic request digest is byte-identical whether caching is on or off', () => {
     // The cache key is computed over the LOGICAL recipe (messages/tools), never
-    // the post-caching HTTP body. Inject cache_control on a COPY and confirm the
-    // logical inputs — hence the key — are unchanged.
+    // the post-caching HTTP body. The HTTP tools SHARE each logical tool's schema
+    // object (`input_schema: t.parameters`, as the dispatcher builds them), so a
+    // helper that wrote cache_control INTO input_schema would change the key here.
     const messages = [
       { role: 'system' as const, content: 'stable system prompt' },
       { role: 'user' as const, content: 'hi' },
@@ -129,7 +143,6 @@ describe('replay cache-key is invisible to prompt caching (architect must-fix #1
     // Simulate the dispatch path: build the cached body from the SAME inputs.
     const httpTools: AnthropicToolDef[] = tools.map((t) => ({ name: t.name, description: t.description, input_schema: t.parameters }));
     withAnthropicToolCache(httpTools, true);
-    cacheableAnthropicSystem('stable system prompt', true);
 
     const keyOn = semanticRequestDigestV2({ provider: 'anthropic', model: 'claude-x', messages, tools });
     expect(keyOn).toBe(keyOff);

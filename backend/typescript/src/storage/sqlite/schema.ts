@@ -1148,6 +1148,20 @@ export const MIGRATIONS: Record<number, (db: Database) => void> = {
     // projection schema allows, and no earlier row ever recorded one.
     addColumnIfTableExists(db, 'invocation_log', 'presented_key', 'TEXT');
   },
+  50: (db) => {
+    // ADR 0812 P3d — drop the subscriptions registered under the RETIRED major 1
+    // (mirrors postgres mig 48; see it). NULL `protocol_major` reads as 1 (mig 45).
+    // Pending deliveries go with the row, delivered/dead rows stay (WHD-16).
+    const has = (t: string) => db.prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?`).get(t);
+    if (!has('webhooks')) return;
+    db.transaction(() => {
+      if (has('webhook_deliveries')) {
+        db.exec(`DELETE FROM webhook_deliveries WHERE status = 'pending' AND subscription_id IN
+          (SELECT subscription_id FROM webhooks WHERE protocol_major IS NULL OR protocol_major = 1);`);
+      }
+      db.exec(`DELETE FROM webhooks WHERE protocol_major IS NULL OR protocol_major = 1;`);
+    })();
+  },
 };
 
 /** Highest defined migration — DERIVED from MIGRATIONS, never a hand-bumped cap

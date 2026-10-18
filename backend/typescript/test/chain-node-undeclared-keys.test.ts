@@ -161,6 +161,9 @@ describe('the retarget of #2871 stays repaired', () => {
     'notebooks.transform#write',
     // ADR 0785 P3 — the Claude Code add-todo tool genuinely takes a title (it IS the card title).
     'claude-code.mcp.add-todo#backing',
+    // ADR 0878 D8 — `feature.service-desk.nodes.notify-team` genuinely takes a title
+    // (it IS the addressed notification's title; the generic notify could only broadcast).
+    'service-desk.sla-escalation#notify',
   ]);
 
   it('no non-notify node carries either of the retarget\'s two keys', () => {

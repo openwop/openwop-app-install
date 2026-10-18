@@ -8,9 +8,17 @@
  *  - boardReview / taskAssign / timelinePlan / resourceMonitor / getReadyTasks /
  *    moveTask are genuinely computed against live cards (column counts, a
  *    dependency-aware critical path, per-assignee load, working-day schedule).
+ *
+ * RFC 0086 §D (host.kanban surface) + ADR 0738 (moveTask shares the durable
+ * trigger delivery). Every caller-supplied board/card id is resolved through the
+ * surface's tenant guard (loadScopedBoard/loadScopedCard) — red if any op skips it
+ * (probes w37g1-sf-tenant-*). Also red if: the node's column labels are dropped,
+ * automation is silently accepted, the at-risk horizon / open-only load / previous
+ * assignee / deterministic ids / dependency schedule / ready gating / by-name move
+ * / trigger dispatch break (probes w37g1-sf-*).
  */
 
-import { describe, expect, it, beforeAll, afterAll } from 'vitest';
+import { describe, expect, it, beforeAll, afterAll, vi } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
@@ -50,12 +58,11 @@ async function runNode(workflowId: string, typeId: string, config: Record<string
   expect(create.status).toBe(201);
   const { runId } = create.body;
   let status = 'pending';
-  for (let i = 0; i < 40; i++) {
-    await new Promise((r) => setTimeout(r, 25));
-    const snap = await jsonFetch<{ status: string }>(`/runs/${runId}`);
-    status = snap.body.status;
-    if (['completed', 'failed', 'cancelled'].includes(status)) break;
-  }
+  // Wait on the real condition (the run reaching a terminal status), not a fixed sleep budget.
+  await vi.waitFor(async () => {
+    status = (await jsonFetch<{ status: string }>(`/runs/${runId}`)).body.status;
+    expect(['completed', 'failed', 'cancelled']).toContain(status);
+  }, { timeout: 10_000, interval: 25 });
   const bundle = await jsonFetch<{ events?: BundleEvent[] }>(`/runs/${runId}/debug-bundle`);
   const ev = (bundle.body.events ?? []).find((e) => e.type === 'node.completed' && e.nodeId === 'op');
   return { __status: status, ...((ev?.payload?.outputs as Record<string, unknown>) ?? {}) };
@@ -174,11 +181,14 @@ describe('host.kanban: computed methods over live cards', () => {
     const plan = await k().timelinePlan({ boardId, startDate: '2026-06-01T00:00:00.000Z', workingHoursPerDay: 8, workingDaysPerWeek: 5, scheduler: 'critical-path', idempotencyKey: 'p1' }) as Record<string, unknown>;
     expect((plan.schedule as unknown[]).length).toBe(3);
     expect(plan.criticalPath).toEqual([a.id, b.id, c.id]);
-    // C can't start before A+B finish: its start is after B's.
+    // One working day each from Monday 2026-06-01 (no weekend crossed): each task
+    // starts exactly when its dependency ends.
     const sched = plan.schedule as Array<{ taskId: string; startAt: string; endAt: string }>;
-    const sa = sched.find((s) => s.taskId === a.id)!, sc = sched.find((s) => s.taskId === c.id)!;
-    expect(sc.startAt > sa.endAt || sc.startAt === sa.endAt).toBe(true);
-    expect(plan.projectEndDate).toBe(sc.endAt);
+    const at = (id: string) => sched.find((s) => s.taskId === id);
+    expect(at(a.id)).toMatchObject({ startAt: '2026-06-01T00:00:00.000Z', endAt: '2026-06-02T00:00:00.000Z' });
+    expect(at(b.id)).toMatchObject({ startAt: '2026-06-02T00:00:00.000Z', endAt: '2026-06-03T00:00:00.000Z' });
+    expect(at(c.id)).toMatchObject({ startAt: '2026-06-03T00:00:00.000Z', endAt: '2026-06-04T00:00:00.000Z' });
+    expect(plan.projectEndDate).toBe('2026-06-04T00:00:00.000Z');
   });
 
   it('getReadyTasks gates on dependencies; moveTask resolves a column by name', async () => {

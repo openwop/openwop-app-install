@@ -11,6 +11,11 @@
  *
  * WHAT THIS IS NOT. It is NOT (yet) a gate demanding zero.
  *
+ * CORRECTED 2026-10-15 (ADR 0812 P4 slice 2b): ONE metric now IS a gate at
+ * zero — `ownV1PathRefs`, this host's own paths spelled `/v1` in shipped code.
+ * The rest stay ratchets: the test corpus still holds the 410/308 front's own
+ * tests, which must keep calling `/v1` to prove it answers 410.
+ *
  * CORRECTED 2026-10-04 (ADR 0812): this used to say zero was FORBIDDEN until
  * the v1 EOS clock (2026-12-04). RFC 0234 (corpus 2.45.14) moved the floor to
  * 2026-10-04, app.openwop.dev retired v1 that day, and the product decision is to
@@ -27,7 +32,7 @@
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { scanMatches, stripeChokeViolations, V1_PATH } from './v1RelianceScan.mjs';
+import { scanMatches, scanSites, stripeChokeViolations, keptLines, ownV1Pattern, V1_PATH } from './v1RelianceScan.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const BASELINE = join(ROOT, 'scripts', 'v1-reliance-baseline.json');
@@ -43,13 +48,6 @@ const TS = ['*.ts', '*.tsx'];
 /** Doc citations (`spec/v1/foo.md`, schema filenames) are prose, not call sites. */
 const isDocCitation = (m) => /\.md\.?$|\.json$|\.schema\./.test(m);
 
-const spa = matches('frontend/react/src', V1_PATH, TS, NO_TESTS);
-const spaProtocol = spa.filter((m) => !m.startsWith('/v1/host/') && !isDocCitation(m));
-const spaHostExt = spa.filter((m) => m.startsWith('/v1/host/openwop-app/'));
-
-const be = matches('backend/typescript/src', V1_PATH, ['*.ts']);
-const beProtocol = be.filter((m) => !m.startsWith('/v1/host/') && !isDocCitation(m));
-const beHostExt = be.filter((m) => m.startsWith('/v1/host/openwop-app/'));
 
 /** The two constants that decide what a header-less client actually gets. */
 /**
@@ -101,11 +99,35 @@ const spaVersionHeader = matches('frontend/react/src', 'OpenWOP-Version|openwop-
  * day it lands. A third-party `/v1` API (ElevenLabs' `/v1/text-to-speech`) matches
  * neither.
  */
+/**
+ * ADR 0812 P4 slice 2b — the HARD gate. `/v1` spellings of this host's OWN
+ * paths in shipped code (backend src, its sdk/ and conformance/ runners, the
+ * SPA), tests excluded. v1 is deleted from this codebase, so the only
+ * legitimate count is ZERO; a deliberate spelling (a persisted key, a
+ * recogniser for links already sent) carries `ADR 0812 KEEP` and lands in the
+ * ratcheted `keptV1Lines` instead.
+ *
+ * This REPLACES five per-layer counts (spa protocol/host-ext, backend
+ * protocol/host-ext, and the older backend-only `/v1` total). Those counted
+ * every `/v1/` string, so 50 of the backend's 71 were OpenAI, Gmail, GCS and
+ * other third-party APIs, which no OpenWOP cut ever moves; zero was
+ * unreachable and the number meant nothing. MEASURED 2026-10-15 on d3495f816.
+ */
+const OWN_SCAN_DIRS = [
+  ['backend/typescript/src', ['*.ts'], NO_TESTS],
+  ['backend/typescript/sdk', ['*.ts', '*.mjs', '*.js'], NO_TESTS],
+  ['backend/typescript/conformance', ['*.ts', '*.mjs'], NO_TESTS],
+  ['frontend/react/src', TS, NO_TESTS],
+];
+const HARD_ZERO = new Set(['ownV1PathRefs', 'backendVersionedOwnUrls']);
+
 const ownSegments = [...new Set(JSON.parse(readFileSync(join(ROOT, 'schemas/v2/path-manifest.json'), 'utf8')).operations
   .map((o) => o.path.split('/')[1]?.split(':')[0])
   .filter((seg) => seg && !seg.startsWith('.')))];
 const VERSIONED_OWN_URL = `\\$\\{[^}]*\\}/v[0-9]+/(host/|(${ownSegments.map((x) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})([/?:]|$))`;
 const versionedOwnUrls = matches('backend/typescript/src', VERSIONED_OWN_URL, ['*.ts'], NO_TESTS);
+const ownV1 = OWN_SCAN_DIRS.flatMap(([dir, inc, ex]) => scanSites(ROOT, dir, ownV1Pattern(ownSegments), inc, ex));
+const kept = keptLines(ROOT, OWN_SCAN_DIRS.map(([d]) => d), ['*.ts', '*.tsx', '*.mjs', '*.js']);
 
 /**
  * ADR 0812 P2 — the TEST CORPUS's `/v1` addressing. Excluded from every count
@@ -123,11 +145,9 @@ const testCorpus = [
 
 const measured = {
   testCorpusV1Refs: testCorpus.length,
-  spaProtocolCallSites: spaProtocol.length,
-  spaHostExtensionCallSites: spaHostExt.length,
+  ownV1PathRefs: ownV1.length,
+  keptV1Lines: kept.length,
   spaOpenWopVersionHeaders: spaVersionHeader,
-  backendProtocolPathRefs: beProtocol.length,
-  backendHostExtensionPathRefs: beHostExt.length,
   backendVersionedOwnUrls: versionedOwnUrls.length,
 };
 
@@ -144,10 +164,14 @@ const measured = {
  */
 const HIGHER_IS_BETTER = new Set(['spaOpenWopVersionHeaders']);
 
+// CORRECTED 2026-10-15 (ADR 0812 P4 slice 2b): the last two facts here were
+// hard-coded strings that went false at P3b/P3c and kept printing — "v2 is a
+// rewrite onto the v1 handlers" had not been true for a week. They now state
+// the current shape; only `preferredVersion` is read from source.
 const facts = [
   ['preferredVersion (header-less default contract)', preferred],
-  ['storage currentContract() default', '1 — the v1 wire and every background worker'],
-  ['v2 routing', "req.url = `/v1${req.url}` — v2 is a rewrite onto the v1 handlers"],
+  ['routing', 'routes register unversioned; /v1 answers 410 (held reads 308) at the front (ADR 0812 P3b/P3c)'],
+  ['storage currentContract() fallback', '1 — the storage vocabulary for workers, not a wire major (ADR 0812 P0)'],
 ];
 
 // ADR 0786 — the Stripe exemption must not be able to hide an OpenWOP path.
@@ -178,28 +202,29 @@ let failed = 0, improved = 0;
 for (const [k, now] of Object.entries(measured)) {
   const was = base[k];
   const better = HIGHER_IS_BETTER.has(k);
-  const regressed = was !== undefined && (better ? now < was : now > was);
+  const regressed = HARD_ZERO.has(k) ? now > 0 : was !== undefined && (better ? now < was : now > was);
   const progressed = was !== undefined && (better ? now > was : now < was);
   if (regressed) failed++;
   if (progressed) improved++;
   const mark = was === undefined ? '?' : regressed ? '✗' : progressed ? '↓' : ' ';
-  const dir = better ? ' (higher is better)' : '';
+  const dir = better ? ' (higher is better)' : HARD_ZERO.has(k) ? ' (must be 0)' : '';
   console.log(`  ${mark} ${k.padEnd(34)} ${String(now).padStart(5)}${was === undefined ? '  (no baseline)' : now === was ? '' : `  (baseline ${was})`}${dir}`);
 }
 console.log();
 
+if (ownV1.length > 0) {
+  console.error('✗ check-v1-reliance: shipped code spells one of this host\'s own paths with /v1:');
+  for (const m of ownV1) console.error(`    ${m.file}:${m.line}  ${m.match}`);
+  console.error('  v1 is deleted (ADR 0812). Use the unversioned path. If the string is not a');
+  console.error('  call on the wire (a persisted key, a recogniser for an already-sent link),');
+  console.error(`  mark the line \`ADR 0812 KEEP: <why>\` — it then counts in keptV1Lines.`);
+}
 if (failed > 0) {
   console.error(`✗ check-v1-reliance: ${failed} metric(s) moved the WRONG WAY (v1 reliance up, or v2 adoption down).`);
-  console.error('  Every new /v1/ call site is one more migration on cutover day (ADR 0642).');
-  console.error('  Use the unversioned key + `OpenWOP-Version: 2` where the operation is in');
-  console.error('  schemas/v2/path-manifest.json. If it is a /v1/host/openwop-app/* extension');
-  console.error('  path, there is a v2 home since RFC 0181 — the version-agnostic');
-  console.error('  `/host/<org>/…` root (ADR 0652), which answers identically with or');
-  console.error('  without a version header and does NOT retire with /v1. MEASURED live:');
-  console.error('  /api/host/openwop-app/orgs and its /v1 twin both return 200. So a new');
-  console.error('  /v1/host/openwop-app/* call site is now avoidable, not unavoidable —');
-  console.error('  use the canonical root. Re-baseline with --update');
-  console.error('  only when that cost is intended and stated.');
+  console.error('  v1 is deleted from this codebase (ADR 0812) and /v1 answers 410 in production,');
+  console.error('  so a new /v1 reference is a call that cannot succeed. Use the unversioned path');
+  console.error('  (`/runs`, `/host/openwop-app/…`). Re-baseline with --update only when a count');
+  console.error('  that rose is intended and stated (a new KEEP, a new 410-front test).');
   process.exit(1);
 }
 console.log(`✓ check-v1-reliance: no new v1 reliance${improved ? ` (${improved} count(s) fell — re-baseline with --update)` : ''}.`);

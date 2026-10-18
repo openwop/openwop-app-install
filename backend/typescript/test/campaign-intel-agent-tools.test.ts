@@ -13,7 +13,7 @@
 import http from 'node:http';
 import { readFileSync } from 'node:fs';
 import type { AddressInfo } from 'node:net';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { createAgentToolProvider, builtinAgentToolIds } from '../src/host/agentToolProvider.js';
 import {
@@ -41,7 +41,8 @@ beforeAll(async () => {
   // The org RBAC gate mirrors the HTTP route path — the owner holds workspace:read.
   const org = await createOrg({ tenantId: TENANT, createdBy: OWNER, name: 'Acme', ownerSubject: OWNER });
   ORG_ID = org.orgId;
-  // Seed the performance store with two platforms of differing ROAS + a fatiguing run.
+  // Seed the performance store with two platforms of differing ROAS (2 days
+  // each — below the forecaster's 4-day creative-fatigue minimum).
   const csv = [
     'Platform,Campaign,Day,Cost,Impr.,Clicks,Conversions,Revenue',
     'Meta,A,2026-01-01,1000,10000,100,10,1500',   // ROAS 1.5
@@ -57,6 +58,9 @@ const setToggle = async (status: 'on' | 'off'): Promise<void> => {
   const d = getToggleDefault('campaign-intel');
   if (d) await saveConfig({ ...d, status }, 'test');
 };
+// The toggle defaults OFF and `readGate` checks it FIRST — every case sets it
+// itself so the file passes alone and shuffled (no inherited state).
+beforeEach(async () => { await setToggle('on'); });
 
 function provider(scope: { actingUserId?: string; runId?: string } = {}) {
   return createAgentToolProvider({ tenantId: TENANT, ...scope });
@@ -110,22 +114,28 @@ describe('CFP-1 — registration + pack parity', () => {
 
 describe('CFP-1 — budget-optimize: grounded read + gates', () => {
   it('recommends a reallocation over the ACTUAL performance store', async () => {
-    await setToggle('on');
     const out = await provider({ actingUserId: OWNER }).executeTool({ name: CAMPAIGN_INTEL_BUDGET_OPTIMIZE_TOOL_ID, input: { orgId: ORG_ID } });
     expect(out.isError).toBeFalsy();
     const parsed = JSON.parse(out.content) as { reallocations: { platform: string; changeAmount: number }[]; projectedRoasGain: number };
     expect(parsed.reallocations.length).toBe(2);
-    expect(parsed.projectedRoasGain).toBeGreaterThan(0);
+    // Seeded: meta 2000 spend / 2700 revenue (ROAS 1.35), google 2000 / 7800
+    // (3.9); shift = min(20% of 4000, 2000) = 800; gain = 800 x (3.9 - 1.35).
     const meta = parsed.reallocations.find((r) => r.platform === 'meta')!;
-    expect(meta.changeAmount).toBeLessThan(0); // trimmed from the low-ROAS platform
+    const google = parsed.reallocations.find((r) => r.platform === 'google')!;
+    expect(meta.changeAmount).toBe(-800); // trimmed from the low-ROAS platform
+    expect(google.changeAmount).toBe(800);
+    expect(parsed.projectedRoasGain).toBe(2040);
   });
 
   it('fails closed when the toggle is off (typed, not a throw)', async () => {
     await setToggle('off');
-    const out = await provider({ actingUserId: OWNER }).executeTool({ name: CAMPAIGN_INTEL_BUDGET_OPTIMIZE_TOOL_ID, input: { orgId: ORG_ID } });
-    expect(out.isError).toBe(true);
-    expect(JSON.parse(out.content)).toMatchObject({ error: 'feature_disabled' });
-    await setToggle('on');
+    try {
+      const out = await provider({ actingUserId: OWNER }).executeTool({ name: CAMPAIGN_INTEL_BUDGET_OPTIMIZE_TOOL_ID, input: { orgId: ORG_ID } });
+      expect(out.isError).toBe(true);
+      expect(JSON.parse(out.content)).toMatchObject({ error: 'feature_disabled' });
+    } finally {
+      await setToggle('on');
+    }
   });
 
   it('FAILS EMPTY without an acting user (no isError — a system turn reads nothing)', async () => {
@@ -148,12 +158,18 @@ describe('CFP-1 — budget-optimize: grounded read + gates', () => {
 });
 
 describe('CFP-1 — forecast: grounded read', () => {
-  it('returns per-campaign forecasts including creative-fatigue', async () => {
+  it('returns per-campaign forecasts from the store (fatigue needs >=4 days; 2 seeded)', async () => {
     const out = await provider({ actingUserId: OWNER }).executeTool({ name: CAMPAIGN_INTEL_FORECAST_TOOL_ID, input: { orgId: ORG_ID } });
     expect(out.isError).toBeFalsy();
-    const parsed = JSON.parse(out.content) as { forecasts: { campaignName: string; creativeFatigue: { detected: boolean } }[] };
-    expect(parsed.forecasts.length).toBeGreaterThan(0);
-    expect(parsed.forecasts.every((f) => typeof f.creativeFatigue.detected === 'boolean')).toBe(true);
+    const parsed = JSON.parse(out.content) as { forecasts: { campaignName: string; platform: string; creativeFatigue: { detected: boolean }; projection: { projectedSpend: number; projectedConversions: number } }[] };
+    const got = parsed.forecasts
+      .map((f) => ({ campaignName: f.campaignName, platform: f.platform, detected: f.creativeFatigue.detected, spend: f.projection.projectedSpend, conv: f.projection.projectedConversions }))
+      .sort((a, b) => a.campaignName.localeCompare(b.campaignName));
+    // 1000/day x 30; meta 18 conv / 2 days x 30 = 270; google 78 / 2 x 30 = 1170.
+    expect(got).toEqual([
+      { campaignName: 'A', platform: 'meta', detected: false, spend: 30000, conv: 270 },
+      { campaignName: 'B', platform: 'google', detected: false, spend: 30000, conv: 1170 },
+    ]);
   });
 
   it('fails empty without an acting user', async () => {
@@ -170,8 +186,14 @@ describe('CFP-1 — plan-budget: deterministic goal planning + input validation'
       input: { orgId: ORG_ID, totalBudgetMinor: 500000, targetConversions: 100 },
     });
     expect(out.isError).toBeFalsy();
-    const parsed = JSON.parse(out.content) as { plan: { verdict: string; platforms: unknown[] } };
-    expect(['feasible', 'stretch', 'infeasible']).toContain(parsed.plan.verdict);
+    const parsed = JSON.parse(out.content) as { plan: { verdict: string; platforms: { platform: string; allocationMinor: number }[] } };
+    // CPA: meta 2000/18 -> 11111 minor, google 2000/78 -> 2564; ~166 expected
+    // conversions vs a target of 100 (ratio ~1.66, far from either band edge).
+    expect(parsed.plan.verdict).toBe('feasible');
+    expect(parsed.plan.platforms.map((p) => p.platform).sort()).toEqual(['google', 'meta']);
+    expect(parsed.plan.platforms.reduce((s, p) => s + p.allocationMinor, 0)).toBe(500000);
+    const alloc = (name: string): number => parsed.plan.platforms.find((p) => p.platform === name)!.allocationMinor;
+    expect(alloc('google')).toBeGreaterThan(alloc('meta'));
   });
 
   it('rejects a non-positive goal as a TYPED validation error (money math never sees it)', async () => {
@@ -181,5 +203,35 @@ describe('CFP-1 — plan-budget: deterministic goal planning + input validation'
     });
     expect(out.isError).toBe(true);
     expect(JSON.parse(out.content)).toMatchObject({ error: 'validation_error', field: 'totalBudgetMinor' });
+  });
+});
+
+/** The header's "EACH tool" claim — authz + fail-empty for the three read
+ *  tools the budget-optimize cases above do not cover. 'stranger' is a
+ *  SAME-tenant non-member (the provider is pinned to TENANT), so the org
+ *  access predicate — not a tenant guard — is what refuses it. */
+const OTHER_TOOLS: Array<{ id: string; input: Record<string, unknown>; empty: Record<string, unknown> }> = [
+  { id: CAMPAIGN_INTEL_PACING_TOOL_ID, input: {}, empty: { rows: [], unplanned: 0, note: 'No acting user — nothing to read.' } },
+  { id: CAMPAIGN_INTEL_ATTRIBUTION_TOOL_ID, input: {}, empty: { rows: [], email: [], unattributedConversions: 0, note: 'No acting user — nothing to read.' } },
+  { id: CAMPAIGN_INTEL_PLAN_BUDGET_TOOL_ID, input: { totalBudgetMinor: 500000, targetConversions: 100 }, empty: { plan: null } },
+];
+
+describe('CFP-1 — every read tool shares the authority + fail-empty posture', () => {
+  it.each(OTHER_TOOLS)('$id: a same-tenant non-member is forbidden_scope', async ({ id, input }) => {
+    const out = await provider({ actingUserId: 'stranger' }).executeTool({ name: id, input: { orgId: ORG_ID, ...input } });
+    expect(out.isError).toBe(true);
+    expect(JSON.parse(out.content)).toMatchObject({ error: 'forbidden_scope', requiredScope: 'workspace:read' });
+  });
+
+  it.each(OTHER_TOOLS)('$id: no acting user fails EMPTY (no isError)', async ({ id, input, empty }) => {
+    const out = await provider().executeTool({ name: id, input: { orgId: ORG_ID, ...input } });
+    expect(out.isError).toBeFalsy();
+    expect(JSON.parse(out.content)).toMatchObject(empty);
+  });
+
+  it.each(OTHER_TOOLS)('$id: the org owner reads (positive control for the refusals above)', async ({ id, input }) => {
+    const out = await provider({ actingUserId: OWNER }).executeTool({ name: id, input: { orgId: ORG_ID, ...input } });
+    expect(out.isError).toBeFalsy();
+    expect(JSON.parse(out.content)).not.toHaveProperty('error');
   });
 });

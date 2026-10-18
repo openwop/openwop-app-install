@@ -9,6 +9,16 @@
  *    the clawback
  *  - discount is floor-allocated per line; tax/shipping never enter the share
  *  - author reads are self-scoped; summaries net reversals against accruals
+ *
+ * Money fixtures carry CENTS (29.99, 40.01) on purpose: whole-dollar amounts make
+ * every floor exact, so a floor→ceil/round regression could never show
+ * (grade-tests w40).
+ *
+ * DOUBLE GUARD (honest ceiling): a net≤0 author is kept out of a payout run TWICE
+ * in `host/obligationLedger.createRun` — the pre-claim `nets` snapshot gate AND the
+ * post-claim recompute that releases any group whose claimed total is ≤0. Removing
+ * either alone is invisible; the shared piece (`kept.length === 0` ⇒ typed
+ * `nothing-accrued` refusal) is what case #3 pins by code.
  */
 import { beforeAll, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
@@ -25,6 +35,8 @@ import {
   type Order,
 } from '../src/features/commerce/commerceService.js';
 import { linkChallengeProduct } from '../src/features/kicktodo-commerce/entitlementService.js';
+import { sharesCsv } from '../src/features/kicktodo-commerce/routes.js';
+import { DurableCollection } from '../src/host/hostExtPersistence.js';
 import { resolveApproval, getApproval } from '../src/host/approvalService.js';
 import {
   requestSellerOnboarding,
@@ -45,6 +57,7 @@ import {
   reconcileShares,
   summarizeShares,
   SharePolicyError,
+  normalizeShareLedgerRows,
 } from '../src/features/kicktodo-commerce/shareLedgerService.js';
 
 const ORG = 'org-kt-shares';
@@ -91,12 +104,23 @@ describe('accrual on paid (ADR 0445 P1)', () => {
     const order = await createOrder({ tenantId: T, orgId: ORG, createdBy: BUYER, lines: [{ productId, quantity: 1 }] });
     await markAsPaid(T, ORG, order.orderId, 'demo:pi-np');
     expect(await listSharesForTenant(T)).toEqual([]);
+    // Driven DIRECTLY too: the paid observer's throws are swallowed by commerce,
+    // so an empty ledger alone cannot tell "no promise" from a crash.
+    await expect(deriveShares({ ...order, status: 'paid' }, 'accrue')).resolves.toBe(0);
+
+    // A 0-bps policy is also "no promise": no rows, not zero-value rows.
+    const T0 = 'tenant-shares-zerobps';
+    await setSharePolicy(T0, 0, 'user:operator');
+    const zero = await publishedLinkedProduct(T0, 'Zero Share Course', 29.99);
+    const zeroOrder = await createOrder({ tenantId: T0, orgId: ORG, createdBy: BUYER, lines: [{ productId: zero.productId, quantity: 1 }] });
+    await expect(deriveShares({ ...zeroOrder, status: 'paid' }, 'accrue')).resolves.toBe(0);
+    expect(await listSharesForTenant(T0)).toEqual([]);
   });
 
   it('accrues minor-units-first with the policy version stamped; idempotent under replay', async () => {
     const T = 'tenant-shares-accrue';
     await setSharePolicy(T, 2000, 'user:operator'); // 20%
-    const { challengeId, productId } = await publishedLinkedProduct(T, 'Shared Course', 29);
+    const { challengeId, productId } = await publishedLinkedProduct(T, 'Shared Course', 29.99);
     const order = await createOrder({ tenantId: T, orgId: ORG, createdBy: BUYER, lines: [{ productId, quantity: 1 }] });
     await markAsPaid(T, ORG, order.orderId, 'demo:pi-acc');
 
@@ -107,9 +131,9 @@ describe('accrual on paid (ADR 0445 P1)', () => {
       kind: 'accrual',
       challengeId,
       authorSubject: AUTHOR,
-      grossMinor: 2900,
+      grossMinor: 2999,
       shareBps: 2000,
-      shareMinor: 580,
+      shareMinor: 599, // floor(2999 × 2000 / 10000) = floor(599.8)
       policyVersion: 1,
       state: 'accrued',
     });
@@ -124,23 +148,24 @@ describe('accrual on paid (ADR 0445 P1)', () => {
     await setSharePolicy(T, 2500, 'user:operator'); // 25%
     const { challengeId, productId } = await publishedLinkedProduct(T, 'Discounted Course', 60);
     // Hand-built order (derivation is pure over the row): a second, UNLINKED
-    // line + an order-level discount. subtotal 100, discount 10 ⇒ the linked
-    // 60-major line carries floor(1000×6000/10000)=600 minor of discount.
+    // line + an order-level discount. subtotal 100.01, discount 10 ⇒ the linked
+    // 60-major line carries floor(1000×6000/10001) = floor(599.94) = 599 minor of
+    // discount (a ceil would take 600).
     const order: Order = {
       orderId: 'ord-disc-1', tenantId: T, orgId: ORG,
       items: [
         { productId, name: 'Discounted Course', unitPrice: 60, quantity: 1 },
-        { productId: 'prod-unlinked', name: 'Merch', unitPrice: 40, quantity: 1 },
+        { productId: 'prod-unlinked', name: 'Merch', unitPrice: 40.01, quantity: 1 },
       ],
-      subtotal: 100, discount: 10, total: 90, currency: 'usd',
+      subtotal: 100.01, discount: 10, total: 90.01, currency: 'usd',
       status: 'paid', fulfillmentStatus: 'pending',
       createdBy: BUYER, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
     };
     expect(await deriveShares(order, 'accrue')).toBe(1); // only the linked line
     const [row] = await listSharesForTenant(T);
     expect(row.challengeId).toBe(challengeId);
-    expect(row.grossMinor).toBe(5400); // 6000 − 600
-    expect(row.shareMinor).toBe(1350); // floor(5400 × 2500 / 10000)
+    expect(row.grossMinor).toBe(5401); // 6000 − 599
+    expect(row.shareMinor).toBe(1350); // floor(5401 × 2500 / 10000) = floor(1350.25)
   });
 });
 
@@ -177,6 +202,8 @@ describe('grade-code fixes (2026-07-20 review)', () => {
     await refundOrder(T, ORG, order.orderId, { actor: 'user:operator' });
     // …which must never become a negative payout-run entry: net<=0 ⇒ refused.
     await expect(createPayoutRun(T, 'user:operator')).rejects.toBeInstanceOf(PayoutRunError);
+    await expect(createPayoutRun(T, 'user:operator')).rejects.toMatchObject({ code: 'nothing-accrued' });
+    expect(await listPayoutRuns(T)).toHaveLength(1); // only the first (confirmed) run exists
     const reversal = (await listSharesForTenant(T)).find((r) => r.kind === 'reversal');
     expect(reversal?.payoutId).toBeUndefined(); // still in the pool, offsets FUTURE earnings
   });
@@ -254,10 +281,13 @@ describe('reversal on refund (ADR 0445 P1)', () => {
 
   it('seller-onboarding request: anon refused, nothing-to-pay refused, idempotent approval, rejection allows re-request (ADR 0445 P2)', async () => {
     const T = 'tenant-shares-seller';
-    // anon: tenants can never become sellers (GEN-CC-1 mirror).
+    // anon: tenants can never become sellers (GEN-CC-1 mirror) — even WITH a
+    // linked product, so the later nothing-to-pay refusal cannot answer for it.
+    await publishedLinkedProduct('anon:sid-1', 'Anon Course', 15);
     await expect(requestSellerOnboarding('anon:sid-1', AUTHOR)).rejects.toBeInstanceOf(SellerRequestError);
+    await expect(requestSellerOnboarding('anon:sid-1', AUTHOR)).rejects.toMatchObject({ code: 'forbidden' });
     // No product links ⇒ nothing to be paid for.
-    await expect(requestSellerOnboarding(T, 'user:no-links')).rejects.toBeInstanceOf(SellerRequestError);
+    await expect(requestSellerOnboarding(T, 'user:no-links')).rejects.toMatchObject({ code: 'nothing-to-pay' });
 
     const { productId } = await publishedLinkedProduct(T, 'Seller Course', 15);
     void productId;
@@ -298,7 +328,7 @@ describe('reversal on refund (ADR 0445 P1)', () => {
 
     // Double-run safety: every accrued row is claimed, so a second run has
     // nothing to pay.
-    await expect(createPayoutRun(T, 'user:operator')).rejects.toBeInstanceOf(PayoutRunError);
+    await expect(createPayoutRun(T, 'user:operator')).rejects.toMatchObject({ code: 'nothing-accrued' });
 
     // Confirm with the external evidence → rows flip accrued→paid.
     const confirmed = await confirmPayoutRun(T, run.runId, 'user:operator', 'po_demo_123');
@@ -311,6 +341,7 @@ describe('reversal on refund (ADR 0445 P1)', () => {
     // Idempotent re-confirm; cancel of a confirmed run is refused (fail-closed).
     expect((await confirmPayoutRun(T, run.runId, 'user:operator', 'again')).reference).toBe('po_demo_123');
     await expect(cancelPayoutRun(T, run.runId)).rejects.toBeInstanceOf(PayoutRunError);
+    await expect(cancelPayoutRun(T, run.runId)).rejects.toMatchObject({ code: 'bad-state' });
     expect((await listPayoutRuns(T))[0]?.runId).toBe(run.runId);
   });
 
@@ -343,7 +374,6 @@ describe('reversal on refund (ADR 0445 P1)', () => {
   });
 
   it('sharesCsv serializes the statement (ADR 0445 P4): header shape, escaping, author column only on the operator export', async () => {
-    const { sharesCsv } = await import('../src/features/kicktodo-commerce/routes.js');
     const row = {
       tenantId: 'tenant-csv', orderId: 'ord-1', productId: 'prod-1', challengeId: 'chal "quoted"', kind: 'accrual' as const,
       authorSubject: AUTHOR, currency: 'USD', grossMinor: 5000, shareBps: 2000, shareMinor: 1000,
@@ -360,8 +390,6 @@ describe('reversal on refund (ADR 0445 P1)', () => {
 
   it('MEDIUM-2 (grade fix) — a LEGACY-shaped stored row is normalized at boot and can be CAS-claimed into a payout run', async () => {
     const T = 'tenant-shares-legacy';
-    const { DurableCollection } = await import('../src/host/hostExtPersistence.js');
-    const { normalizeShareLedgerRows } = await import('../src/features/kicktodo-commerce/shareLedgerService.js');
     // Seed a PRE-EXTRACTION row exactly as the old adapter stored it.
     const rawView = new DurableCollection<Record<string, unknown>>(
       'kicktodo-share-ledger',

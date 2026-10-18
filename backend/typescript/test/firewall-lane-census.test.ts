@@ -48,7 +48,8 @@ const LANE = /\bbuildLaneFirewall\(/g;
 const HANDOFF: Record<string, RegExp[]> = {
   'host/conversationToolLoop.ts': [/^\s*firewall,/m],
   'host/agentRunnerNode.ts': [/^\s*firewall,/m],
-  'routes/agents.ts': [/^\s*firewall,/m],
+  // ADR 0889 D3 — the ad-hoc dispatch lane (routes/agents.ts + the eval runner).
+  'host/liveDispatchLane.ts': [/^\s*firewall,/m],
   'features/voice/realtime/toolBridge.ts': [/\bfw\.evaluate\(/],
   'host/anonymousActor.ts': [/^\s*firewall,/m, /\bfirewall\.evaluate\(/],
 };
@@ -57,7 +58,7 @@ const HANDOFF: Record<string, RegExp[]> = {
 const CENSUS: Record<string, [number, number, string]> = {
   'host/conversationToolLoop.ts': [1, 1, 'chat lane — bypass only for the acting principal (D3)'],
   'host/agentRunnerNode.ts': [1, 1, 'run lane — always safe'],
-  'routes/agents.ts': [1, 1, 'ad-hoc live dispatch — always safe'],
+  'host/liveDispatchLane.ts': [1, 1, 'ad-hoc live dispatch (route + eval runner, ADR 0889 D3) — always safe'],
   'features/voice/realtime/toolBridge.ts': [2, 1, 'voice — one executor is decls-only (`resolveTool`, never executes); the other is guarded'],
   'host/anonymousActor.ts': [2, 2, 'anonymous widget turn + the deferred approve of a held write (re-checks deny)'],
   'host/agentToolProvider.ts': [1, 0, 'the scoped composer delegating to the base constructor — no execution of its own'],

@@ -12,6 +12,7 @@ import {
   setListingApproval, createCheckout, getOrder, handleConnectEvent, refundOrder,
   listDisputes, importSellers, getSeller,
 } from '../src/features/commerce-connect/connectService.js';
+import { accountIndex } from '../src/features/commerce-connect/stores.js';
 
 let server: http.Server;
 beforeAll(async () => {
@@ -38,6 +39,9 @@ async function paidOrder(buyer: string, pack: string): Promise<string> {
       data: { object: { id: `pi_${pack}`, amount: 4000, currency: 'usd', metadata: { ccOrderId: order.orderId } } },
     },
   });
+  // Every case below starts from a PAID order: refund/dispute refusals on a pending
+  // one would otherwise pass for the wrong reason.
+  expect((await getOrder(order.orderId))!.status).toBe('paid');
   return order.orderId;
 }
 
@@ -46,9 +50,13 @@ describe('refunds', () => {
     await __resetCommerceConnect();
     const orderId = await paidOrder('buyer1', 'p.r1');
     const out = await refundOrder(orderId);
-    expect(out.order.status === 'refunded' || out.refundId !== undefined).toBe(true);
-    expect((await getOrder(orderId))!.status).toBe('refunded');
-    await expect(refundOrder(orderId)).rejects.toMatchObject({ httpStatus: 409 });
+    expect(out).toMatchObject({ applied: true, state: 'applied' }); // the demo lane flips at once
+    expect((await getOrder(orderId))!).toMatchObject({ status: 'refunded', refundedMajorUnits: 40 });
+    await expect(refundOrder(orderId)).rejects.toMatchObject({ httpStatus: 409, message: 'Only a paid order can be refunded (status: refunded).' });
+    // …and a PENDING order (never paid) refuses too, and stays pending.
+    const pendingId = await paidOrderSetupFor('buyer2', 'p.r1b');
+    await expect(refundOrder(pendingId)).rejects.toMatchObject({ httpStatus: 409, message: 'Only a paid order can be refunded (status: pending).' });
+    expect((await getOrder(pendingId))!.status).toBe('pending');
   });
 
   it('charge.refunded webhook flips paid→refunded (live-lane confirmation path)', async () => {
@@ -90,9 +98,10 @@ describe('disputes — ledger + order status machine', () => {
 
   it('closed lost realizes the platform loss on the ledger', async () => {
     await __resetCommerceConnect();
-    await paidOrder('buyer1', 'p.d2');
+    const orderId = await paidOrder('buyer1', 'p.d2');
     await handleConnectEvent({ event: disputeEvent('evt_l1', 'charge.dispute.created', 'pi_p.d2', 'needs_response') });
     await handleConnectEvent({ event: disputeEvent('evt_l2', 'charge.dispute.closed', 'pi_p.d2', 'lost') });
+    expect((await getOrder(orderId))!.status, 'a LOST dispute leaves the order disputed (no entitlement)').toBe('disputed');
     const ledger = await listDisputes();
     expect(ledger.disputes[0]).toMatchObject({ status: 'lost', platformLossMajorUnits: 40 });
     expect(ledger.platformLossMajorUnitsByCurrency.usd).toBe(40);
@@ -159,11 +168,16 @@ describe('grade-pass hardening (CC-1/CC-2/CC-8/CC-10)', () => {
     const seller = (await getSeller('heal-t'))!;
     await __resetCommerceConnect();
     await importSellers([{ ...seller }]);
-    // importSellers writes the index too; simulate a legacy orphan by targeting
-    // the resume path anyway: resume must (re)write the index mapping. The
-    // imported row is mode:'live', so the keyless test env throws AFTER the
-    // heal (credential_unavailable on the account-link mint) — tolerated here;
-    // the assertion that matters is that the mapping resolves below.
+    // importSellers writes the index too, so DROP it: this is the legacy orphan (a
+    // seller row with no reverse-index row) the resume must heal. Without the delete
+    // the heal was never needed and this case could not fail.
+    await accountIndex.delete(acct);
+    const orphaned = await handleConnectEvent({
+      event: { id: 'evt_orphan', type: 'payout.paid', account: acct, data: { object: { id: 'po_orphan', amount: 100, currency: 'usd' } } },
+    });
+    expect(orphaned.handled, 'negative control: the orphan really drops events').toBe(false);
+    // The imported row is mode:'live', so the keyless test env throws AFTER the heal
+    // (credential_unavailable on the account-link mint) — tolerated here.
     await startOnboarding('heal-t', { refreshUrl: 'http://x/r', returnUrl: 'http://x/t' })
       .catch((e: unknown) => { expect((e as { code?: string }).code).toBe('credential_unavailable'); });
     const applied = await handleConnectEvent({

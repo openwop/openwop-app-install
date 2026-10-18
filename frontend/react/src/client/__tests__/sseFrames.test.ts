@@ -1,3 +1,10 @@
+/**
+ * The shared SSE frame reader behind the run-event stream and the notification
+ * feed (#108, credentialed fetch-stream SSE; WHATWG / RFC 8895 line grammar).
+ * Breaks it: frames lost across chunk boundaries, CRLF streams that never
+ * dispatch, multi-line data joined wrongly, a named event leaking onto the next
+ * frame, or a partial line at EOF dispatched as if complete.
+ */
 import { describe, it, expect } from 'vitest';
 import { readSseFrames, type SseFrame } from '../sseFrames.js';
 
@@ -31,10 +38,21 @@ describe('readSseFrames', () => {
   });
 
   it('defaults event to "message" when no event field is sent', async () => {
+    // Twin: 'joins multiple data lines with a newline' asserts the same default
+    // on its own fixture; this is the single-line, single-frame form.
     const frames = await collect(['data: hi\n\n']);
-    expect(frames[0]!.event).toBe('message');
+    expect(frames).toEqual([{ event: 'message', data: 'hi' }]);
   });
 
+  it('a named event does not leak onto the next frame — the default is restored after every dispatch', async () => {
+    const frames = await collect(['event: notification\ndata: 1\n\ndata: 2\n\n']);
+    expect(frames).toEqual([{ event: 'notification', data: '1' }, { event: 'message', data: '2' }]);
+  });
+
+  // Honest ceiling (double guard): a `:` line has an EMPTY field name, which the
+  // field dispatch ignores anyway, so deleting the explicit comment skip is
+  // behaviour-neutral (probe w48g3-sse-comment: vacuous by design). What this
+  // case can catch is a comment that dispatches or corrupts the next frame.
   it('skips `:` keep-alive comment lines (heartbeats)', async () => {
     const frames = await collect([': heartbeat\n\n', 'event: notification\ndata: {}\n\n']);
     expect(frames).toEqual([{ event: 'notification', data: '{}' }]);

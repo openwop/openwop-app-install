@@ -40,13 +40,12 @@ vi.mock('../../brand/BrandProvider.js', () => ({
   }),
 }));
 import { Sidebar } from '../Sidebar.js';
-import { view, __resetPaywallBeacon } from '../../featureToggles/paywallBeacon.js';
+import { view, notePaywall, __resetPaywallBeacon } from '../../featureToggles/paywallBeacon.js';
 
-const fetchMock = vi.fn(async () => new Response(null, { status: 202 }));
-const events = () => fetchMock.mock.calls
-  .map((c) => c as unknown as [string, RequestInit])
-  .filter(([url]) => url.endsWith('/analytics/paywall'))
-  .flatMap(([, init]) => (JSON.parse(String(init.body)) as { events: Array<{ metric: string; featureId: string; surface: string }> }).events);
+const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => new Response(null, { status: 202 }));
+const posts = (suffix: string) => fetchMock.mock.calls.filter(([url]) => url.endsWith(suffix));
+const events = () => posts('/analytics/paywall')
+  .flatMap(([, init]) => (JSON.parse(String(init?.body)) as { events: Array<{ metric: string; featureId: string; surface: string }> }).events);
 const mount = () => render(<MemoryRouter initialEntries={['/crm']}><Sidebar netOpen={false} onToggleNet={() => {}} /></MemoryRouter>);
 afterEach(() => { lockedId = 'crm'; __resetPaywallBeacon(); fetchMock.mockClear(); vi.unstubAllGlobals(); cleanup(); });
 
@@ -65,8 +64,13 @@ describe('Sidebar — paywall funnel contract (strategy §8)', () => {
     lockedId = null;
     mount();
     view('/crm', 'deep-link');
+    // Positive control: view() ran and the stubbed fetch is the one recording.
+    expect(posts('/analytics/nav')).toHaveLength(1);
     fireEvent.click(within(screen.getByLabelText('Primary')).getByRole('link', { name: /CRM/i }));
-    await new Promise((r) => setTimeout(r, 20));
-    expect(events()).toEqual([]);
+    // Sentinel instead of a sleep: one shared queue, flushed in order, so once the
+    // sentinel has been posted any click on the CRM link would have been too.
+    notePaywall('click', 'sentinel', 'palette');
+    await waitFor(() => expect(events()).toContainEqual({ metric: 'click', featureId: 'sentinel', surface: 'palette' }));
+    expect(events().filter((e) => e.featureId === 'crm')).toEqual([]);
   });
 });

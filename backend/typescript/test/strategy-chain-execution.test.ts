@@ -31,17 +31,13 @@
  * trust-gated pack lane, not a direct `import()`.
  */
 
-import http from 'node:http';
-import type { AddressInfo } from 'node:net';
+import { createHash } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { getSetCookies } from './headerCookies.js';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { createApp } from '../src/index.js';
-import { saveConfig } from '../src/host/featureToggles/service.js';
-import { getToggleDefault } from '../src/host/featureToggles/registry.js';
+import { bootPlanningApp, makeClient, enableToggle, type Client } from './planningHarness.js';
 import { buildFeatureSurfaces } from '../src/host/featureSurfaces.js';
-import { loadWorkflowChainPacks, getChain, expandChain, findUnfilledExpansionParams, _resetChainRegistryForTest } from '../src/host/workflowChainPackLoader.js';
+import { loadWorkflowChainPacks, getChain, expandChain, _resetChainRegistryForTest } from '../src/host/workflowChainPackLoader.js';
 import { getRegisteredWorkflowAsync } from '../src/host/workflowsRegistry.js';
 import { getNodeRegistry } from '../src/executor/nodeRegistry.js';
 import { resolveDeclaredInputs, buildNodeCtxInputs } from '../src/executor/nodeCtxInputs.js';
@@ -50,13 +46,16 @@ import { classifyPackDir } from '../src/host/packTrust.js';
 import { __hostExtStorage } from '../src/host/hostExtPersistence.js';
 import { listCheckIns } from '../src/features/strategy/checkIns.js';
 import { listDocuments } from '../src/features/documents/documentsService.js';
+import { getCadenceConfig } from '../src/features/strategy/cadence.js';
+import { listJobs, registerJob, getJob } from '../src/host/schedulingService.js';
+import { listOwned } from '../src/host/workflowOwnership.js';
 import type { NodeContext, WorkflowDefinition } from '../src/executor/types.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, '..', '..', '..');
 
-let BASE: string;
-let server: http.Server;
+let BASE = '';
+let closeApp: () => Promise<void>;
 type NodeResult = { status: string; outputs?: Record<string, unknown>; error?: unknown };
 
 /**
@@ -81,20 +80,15 @@ async function nodeImpl(typeId: string): Promise<(ctx: unknown) => Promise<NodeR
   if (typeId === 'core.ai.chatCompletion') return aiStub;
   const mod = await getNodeRegistry().resolve(typeId);
   expect(mod, `${typeId} did not resolve through the trust-gated pack lane`).toBeTruthy();
+  // Honest ceiling: the hand-walk harness builds a PARTIAL NodeContext
+  // ({inputs, config, features, runId}) — the fields every strategy/notify
+  // node reads. The cast is the one place that partiality is declared.
   return (ctx) => mod!.execute(ctx as NodeContext) as Promise<NodeResult>;
 }
 
 beforeAll(async () => {
-  process.env.OPENWOP_STORAGE_DSN = 'memory://';
-  process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
-  process.env.OPENWOP_TEST_AUTH_ENABLED = 'true';
-  delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
-  const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
-  for (const id of ['strategy', 'documents', 'notifications']) {
-    const d = getToggleDefault(id);
-    if (d) await saveConfig({ ...d, status: 'on' }, 'test');
-  }
+  const h = await bootPlanningApp(); BASE = h.base; closeApp = h.close;
+  for (const id of ['strategy', 'documents', 'notifications', 'crm' /* ADR 0892: CRM is opt-in */]) await enableToggle(id, 'on');
   _resetChainRegistryForTest();
   const { errors } = loadWorkflowChainPacks({ roots: [join(REPO_ROOT, 'examples', 'workflow-chain-packs')] });
   expect(errors).toEqual([]);
@@ -104,26 +98,14 @@ beforeAll(async () => {
   // precedent. Per-worker dir ⇒ no shared `~/.openwop-packs` contention.
   ensureLocalPacksMounted();
 });
-afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
+afterAll(async () => { await closeApp(); });
 
-interface Res<T = any> { status: number; body: T }
-function client() {
-  let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
-    const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
-    for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) };
-  };
-  return {
-    get: (p: string) => call('GET', p),
-    post: (p: string, b?: unknown) => call('POST', p, b),
-    patch: (p: string, b?: unknown) => call('PATCH', p, b),
-    put: (p: string, b?: unknown) => call('PUT', p, b),
-  };
-}
+const client = (): Client => makeClient(() => BASE);
+/** The tenant slug the cadence lane keys its job + workflow ids on. */
+const slugOf = (tenantId: string): string => createHash('sha256').update(tenantId).digest('hex').slice(0, 10);
 
 let n = 0;
-async function ownerOrg(): Promise<{ owner: ReturnType<typeof client>; orgId: string; tenantId: string }> {
+async function ownerOrg(): Promise<{ owner: Client; orgId: string; tenantId: string }> {
   const tenantId = `org:schx-${Date.now()}-${n++}`;
   const owner = client();
   expect((await owner.post('/host/openwop-app/test/login', { email: `schx-${Date.now()}-${n++}@acme.test`, tenantId })).status).toBe(201);
@@ -196,7 +178,7 @@ async function inbox(tenantId: string) {
 }
 
 /** A measured, active strategy with one sourced KR (crm-deal-total) and one unsourced. */
-async function activeMeasuredStrategy(owner: ReturnType<typeof client>, orgId: string): Promise<string> {
+async function activeMeasuredStrategy(owner: Client, orgId: string): Promise<string> {
   const s = (await owner.post('/host/openwop-app/strategy', {
     orgId, title: 'Chain plan',
     objectives: [{ title: 'Grow', keyResults: [
@@ -269,8 +251,8 @@ describe('strategy chains — end-to-end execution (STRAT-A1)', () => {
     const results = await runChain('strategy.weekly-checkin', { staleDays: 14 }, tenantId);
     expect(results.stale?.status).toBe('success');
     const stale = results.stale?.outputs.staleKrs as Array<{ krTitle: string }>;
-    expect(stale.length).toBeGreaterThanOrEqual(2); // both measured KRs are stale (no check-ins yet)
-    expect(stale.map((k) => k.krTitle)).toContain('Sourced ARR');
+    // Fresh tenant, exactly two measured KRs, no check-ins ⇒ exactly those two are stale.
+    expect(stale.map((k) => k.krTitle).sort()).toEqual(['Sourced ARR', 'Unsourced NPS']);
   });
 });
 
@@ -294,7 +276,7 @@ describe('every cadence chain DELIVERS its digest, not just a title', () => {
       expect(results[terminal]?.status, JSON.stringify(results)).toBe('success');
       expect(results[terminal]?.outputs.emitted).toBe(true);
       const rows = await inbox(tenantId);
-      expect(rows.length).toBeGreaterThan(0);
+      expect(rows, 'one run on a fresh tenant emits exactly one notification').toHaveLength(1);
       const row = rows[0]!;
       expect(row.title, 'the title was always bound — it is the BODY that was not').toBeTruthy();
       expect(row.message ?? '').toBe(AI_CONTENT);
@@ -308,6 +290,7 @@ describe('every cadence chain DELIVERS its digest, not just a title', () => {
     expect(results.persist?.outputs.persisted).toBe(true);
     expect(results.deliver?.outputs.emitted).toBe(true);
     const rows = await inbox(tenantId);
+    expect(rows).toHaveLength(1);
     expect(rows[0]?.message ?? '').toBe(AI_CONTENT);
   });
 });
@@ -337,7 +320,7 @@ describe('the cadence lane registers a RUNNABLE definition (wiring, not mechanis
     });
     expect(ok.status, JSON.stringify(ok.body)).toBe(200);
 
-    const slug = (await import('node:crypto')).createHash('sha256').update(tenantId).digest('hex').slice(0, 10);
+    const slug = slugOf(tenantId);
     const def = await getRegisteredWorkflowAsync(`wf.cadence.strategy-board-pack.${slug}`);
     expect(def, 'the cadence lane registered nothing to fire').toBeTruthy();
 
@@ -347,27 +330,13 @@ describe('the cadence lane registers a RUNNABLE definition (wiring, not mechanis
     expect(results.deliver?.outputs.emitted).toBe(true);
   });
 
-  /**
-   * The FALSIFICATION, pinned so nobody "simplifies" the save-time refusal back
-   * into it. The workflows grade prescribed `expandChain(chain, {deferred:true})`
-   * "matching the seeder" as the cure for SPWF-2. It is a NO-OP for this
-   * failure, twice over:
-   *   1. `deferredConfig` still calls `substituteTokensDeep` for a non-liftable
-   *      key, so a whole-value `{{params.orgId}}` in CONFIG freezes to
-   *      `undefined` and the key vanishes — deferral only defers `inputs`.
-   *   2. `collectUnresolved` is skipped entirely in deferred mode, so
-   *      `metadata.unresolvedParams` is EMPTY — adopting the prescription would
-   *      have silently made the save-time guard vacuous as well.
-   */
-  it('deferred expansion does NOT rescue an unsupplied required param (the prescribed cure was a no-op)', () => {
-    const chain = getChain('strategy.board-pack')!.chain;
-    const deferred = expandChain(chain, { deferred: true });
-    const persist = deferred.nodes.find((n) => n.typeId === 'feature.strategy.nodes.create-board-memo')!;
-    expect(((persist.config ?? {}) as Record<string, unknown>).orgId, 'deferral froze orgId to undefined exactly as expansion-time mode does').toBeUndefined();
-    expect(findUnfilledExpansionParams(deferred), 'deferred mode records nothing, so the save-time guard would go blind').toEqual([]);
-    // …while the mode the cadence lane actually uses DOES report it.
-    expect(findUnfilledExpansionParams(expandChain(chain, { params: {} })).map((u) => u.param)).toContain('orgId');
-  });
+  // ADR 0597 §5 "Prescription falsified": `expandChain(chain, {deferred:true})`
+  // is NOT a cure for SPWF-2 — deferral still freezes config `{{params.orgId}}`
+  // to undefined AND skips `collectUnresolved`, so the save-time guard would go
+  // blind. That hazard is witnessed HERE, at the route: switching cadence.ts to
+  // deferred turns the 400 above (and §Correction 2's refusal) red
+  // (grade-tests w19 probe `w19g2-ce-deferred-cover`). The loader-internals pin
+  // that used to sit here was removed — see ADR 0597 §5 correction note.
 
   it('weekly-checkin needs no params and its registered definition runs clean', async () => {
     const { owner, orgId, tenantId } = await ownerOrg();
@@ -376,7 +345,7 @@ describe('the cadence lane registers a RUNNABLE definition (wiring, not mechanis
       weeklyCheckin: { enabled: true, cron: '0 9 * * 1' },
     });
     expect(ok.status, JSON.stringify(ok.body)).toBe(200);
-    const slug = (await import('node:crypto')).createHash('sha256').update(tenantId).digest('hex').slice(0, 10);
+    const slug = slugOf(tenantId);
     const def = await getRegisteredWorkflowAsync(`wf.cadence.strategy-weekly-checkin.${slug}`);
     expect(def).toBeTruthy();
     const results = await runDefinition(def!, tenantId);
@@ -395,7 +364,7 @@ describe('the cadence lane registers a RUNNABLE definition (wiring, not mechanis
  */
 describe('ADR 0597 §Correction 9 — node inputs resolve through the executor\'s own rule', () => {
   const node = (inputs: Record<string, unknown>): WorkflowDefinition['nodes'][number] =>
-    ({ id: 'n', typeId: 'x', inputs } as unknown as WorkflowDefinition['nodes'][number]);
+    ({ nodeId: 'n', typeId: 'x', inputs });
 
   it('resolves a {type:static} PortValue descriptor instead of passing the descriptor through', () => {
     const out = buildCtxInputs(node({ message: { type: 'static', value: 'the body' } }), {}, {}) as Record<string, unknown>;
@@ -437,13 +406,12 @@ describe('ADR 0597 §Correction 9 — node inputs resolve through the executor\'
  * stranded. That ordering is the whole reproduction.
  */
 describe('ADR 0597 §Correction 2 — a refused cadence PUT persists NOTHING', () => {
-  const cadenceOf = async (tenantId: string) => (await import('../src/features/strategy/cadence.js')).getCadenceConfig(tenantId);
-  const jobsOf = async (tenantId: string) => (await import('../src/host/schedulingService.js')).listJobs(tenantId);
-  const slugOf = async (tenantId: string) => (await import('node:crypto')).createHash('sha256').update(tenantId).digest('hex').slice(0, 10);
+  const cadenceOf = (tenantId: string) => getCadenceConfig(tenantId);
+  const jobsOf = (tenantId: string) => listJobs(tenantId);
 
   it('leaves no config, no workflow, no ownership and no job when one entry is unschedulable', async () => {
     const { owner, tenantId } = await ownerOrg();
-    const slug = await slugOf(tenantId);
+    const slug = slugOf(tenantId);
 
     // weeklyCheckin is satisfiable and is processed FIRST; boardPack needs an
     // `orgId` nothing supplies and throws. One PUT, two entries, 400.
@@ -462,7 +430,6 @@ describe('ADR 0597 §Correction 2 — a refused cadence PUT persists NOTHING', (
     // 2. Nothing was half-reconciled for the entry that came BEFORE the failure.
     expect(await getRegisteredWorkflowAsync(`wf.cadence.strategy-weekly-checkin.${slug}`),
       'a 400 still registered a workflow for the entry processed first').toBeFalsy();
-    const { listOwned } = await import('../src/host/workflowOwnership.js');
     expect((await listOwned(tenantId)).map((o) => o.workflowId),
       'a 400 still published the workflow into the builder gallery').not.toContain(`wf.cadence.strategy-weekly-checkin.${slug}`);
     expect((await jobsOf(tenantId)).map((j) => j.jobId),
@@ -482,7 +449,7 @@ describe('ADR 0597 §Correction 2 — a refused cadence PUT persists NOTHING', (
    */
   it('a cadence job carries NO acting-user attribution — the premise §Correction 1 relies on', async () => {
     const { owner, tenantId } = await ownerOrg();
-    const slug = await slugOf(tenantId);
+    const slug = slugOf(tenantId);
     expect((await owner.put('/host/openwop-app/strategy/cadence', {
       weeklyCheckin: { enabled: true, cron: '0 9 * * 1' },
     })).status).toBe(200);
@@ -506,8 +473,7 @@ describe('ADR 0597 §Correction 2 — a refused cadence PUT persists NOTHING', (
    */
   it('refuses BEFORE writing when the deterministic job id belongs to another tenant', async () => {
     const { owner, tenantId } = await ownerOrg();
-    const slug = await slugOf(tenantId);
-    const { registerJob } = await import('../src/host/schedulingService.js');
+    const slug = slugOf(tenantId);
     const squatted = `strategy-cadence:weeklyCheckin:${slug}`;
     expect((await registerJob({ jobId: squatted, tenantId: 'org:someone-else', cronExpr: '0 3 * * *' })).ok).toBe(true);
 
@@ -517,13 +483,12 @@ describe('ADR 0597 §Correction 2 — a refused cadence PUT persists NOTHING', (
     expect(refused.status, JSON.stringify(refused.body)).toBe(409);
     expect(await cadenceOf(tenantId), 'a refused PUT persisted the config anyway').toBeNull();
     expect(await getRegisteredWorkflowAsync(`wf.cadence.strategy-weekly-checkin.${slug}`)).toBeFalsy();
-    const { getJob } = await import('../src/host/schedulingService.js');
     expect((await getJob(squatted))?.tenantId, "the other tenant's job was overwritten").toBe('org:someone-else');
   });
 
   it('MATCHED POSITIVE CONTROL — the same two entries, both satisfiable, DO all get built', async () => {
     const { owner, orgId, tenantId } = await ownerOrg();
-    const slug = await slugOf(tenantId);
+    const slug = slugOf(tenantId);
     const ok = await owner.put('/host/openwop-app/strategy/cadence', {
       weeklyCheckin: { enabled: true, cron: '0 9 * * 1' },
       boardPack: { enabled: true, cron: '0 8 * * 1', params: { orgId } },

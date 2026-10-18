@@ -80,7 +80,10 @@ export const priorityMatrixFeature: BackendFeature = {
     description:
       'Capture ideas and project requests into named priority lists, score them against a configurable weighted criteria set (1–10 slider weights; a Weighted-Scoring engine with WSJF / RICE / ICE / Value-Effort presets), and rank them. A planning session turns a selection into a meeting agenda. Statuses render as a Kanban board (it reuses host.kanban — an idea is a card; no parallel board). Workspace-scoped by default; a project id scopes a list to a project.',
     category: 'Leadership',
-    status: 'on',
+    // ADR 0892 — opt-in like CRM: OFF by default so a white-label install starts lean
+    // (supersedes ADR 0229's default-on). App migration 24 keeps it on for an
+    // install that already has data for it.
+    status: 'off',
     bucketUnit: 'tenant',
     salt: 'priority-matrix',
   },

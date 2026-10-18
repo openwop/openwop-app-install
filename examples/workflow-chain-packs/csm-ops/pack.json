@@ -1,42 +1,109 @@
 {
   "name": "core.openwop.workflows.csm-ops",
-  "version": "1.2.1",
+  "version": "1.3.0",
   "kind": "workflow-chain",
-  "description": "CSM↔CRM linkage workflows (ADR 0212, RFC 0013). Where vendor.openwop-app.csm.agents.health-insights is read-only, these two chains carry the CSM write surface: computing an Account's healthScore/healthFactors from its linked CRM company's deals/tasks (the scoring recipe as visible, editable workflow configuration rather than buried code — ADR 0212 §3), and a human-gated renewal-risk follow-up over the deal-hygiene shape (ADR 0212 §4 — renewals are deals, not a new entity). All tenant/org-specific values are run parameters (replay-deterministic). Resolves on hosts that ship the feature.crm + feature.csm features + node packs (the OpenWOP reference app).",
+  "description": "CSM↔CRM linkage workflows (ADR 0212, RFC 0013). Where vendor.openwop-app.csm.agents.health-insights is read-only, these two chains carry the CSM write surface: computing an Account's healthScore/healthFactors from its linked CRM company's deals/tasks (the scoring recipe as visible, editable workflow configuration rather than buried code — ADR 0212 §3), and a human-gated renewal-risk follow-up over the deal-hygiene shape (ADR 0212 §4 — renewals are deals, not a new entity). All tenant/org-specific values are run parameters (replay-deterministic). Resolves on hosts that ship the feature.crm + feature.csm features + node packs (the OpenWOP reference app). 1.3.0 (ADR 0882): health-from-crm 1.1.0 names the org it measured; two playbook chains — red-account-rescue (bind the health-changed host event) and renewal-runway (run on demand or on a schedule) — write CRM tasks linked to the account's company and assigned to its owner.",
   "author": "openwop",
   "license": "Apache-2.0",
-  "engines": { "openwop": ">=1.0.0 <3.0.0" },
-  "keywords": ["Customer Success"],
+  "engines": {
+    "openwop": ">=1.0.0 <3.0.0"
+  },
+  "keywords": [
+    "Customer Success"
+  ],
   "chains": [
     {
       "chainId": "csm-ops.health-from-crm",
-      "version": "1.0.1",
+      "version": "1.1.0",
       "label": "Compute Health From CRM",
-      "description": "ADR 0212 §3 — reads the linked CRM company's open deals (feature.crm.nodes.list-deals, company-scoped) and the org's open tasks (feature.crm.nodes.list-tasks — CRM has no company filter for tasks server-side, so the health-write node re-filters locally by companyId), then hands both lists to feature.csm.nodes.health-set, which applies its documented default formula (100, minus a configurable number of points per open deal and per open task, clamped to [0,100]) to produce healthScore + an inspectable healthFactors breakdown. Bind to a schedule or run on demand per account; tune the formula by editing the health-write node's `weights` config directly — no code change needed. Requires the target Account's crmRef to already point at orgId/companyId (set via the CSM UI or POST/PATCH /csm/accounts).",
+      "description": "ADR 0212 §3 — reads the linked CRM company's open deals (feature.crm.nodes.list-deals, company-scoped) and the org's open tasks (feature.crm.nodes.list-tasks — CRM has no company filter for tasks server-side, so the health-write node re-filters locally by companyId), then hands both lists to feature.csm.nodes.health-set, which applies its documented default formula (100, minus a configurable number of points per open deal and per open task, clamped to [0,100]) to produce healthScore + an inspectable healthFactors breakdown. Bind to a schedule or run on demand per account; tune the formula by editing the health-write node's `weights` config directly — no code change needed. Requires the target Account's crmRef to already point at orgId/companyId (set via the CSM UI or POST/PATCH /csm/accounts). 1.1.0 (ADR 0882 D2): the health-write node also receives orgId; the service refuses — and records why on the account — unless BOTH the org and the company match the account's crmRef, and the run's person must be a writer in that org. A workflow copy made from 1.0.x names no org and now records 're-create it from the gallery' instead of scoring. Tasks a play created are not counted against the account.",
       "parameters": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["orgId", "companyId", "accountId"],
+        "required": [
+          "orgId",
+          "companyId",
+          "accountId"
+        ],
         "properties": {
-          "orgId": { "type": "string", "description": "The org the linked CRM company belongs to." },
-          "companyId": { "type": "string", "description": "The linked CRM company (Account.crmRef.companyId) whose deals/tasks feed the score." },
-          "accountId": { "type": "string", "description": "The csm Account to update. Its crmRef MUST already reference orgId/companyId." }
+          "orgId": {
+            "type": "string",
+            "description": "The org the linked CRM company belongs to."
+          },
+          "companyId": {
+            "type": "string",
+            "description": "The linked CRM company (Account.crmRef.companyId) whose deals/tasks feed the score."
+          },
+          "accountId": {
+            "type": "string",
+            "description": "The csm Account to update. Its crmRef MUST already reference orgId/companyId."
+          }
         }
       },
-      "capabilities": ["side-effectful"],
+      "capabilities": [
+        "side-effectful"
+      ],
       "dag": {
         "nodes": [
-          { "id": "deals", "typeId": "feature.crm.nodes.list-deals@1.0.0", "name": "Company deals", "position": { "x": 0, "y": 0 }, "config": { "orgId": "{{params.orgId}}", "companyId": "{{params.companyId}}" }, "inputs": {} },
-          { "id": "tasks", "typeId": "feature.crm.nodes.list-tasks@1.0.0", "name": "Org open tasks", "position": { "x": 0, "y": 140 }, "config": { "orgId": "{{params.orgId}}" }, "inputs": {} },
-          { "id": "health-write", "typeId": "feature.csm.nodes.health-set@1.4.0", "name": "Compute + write health", "position": { "x": 320, "y": 70 }, "config": { "accountId": "{{params.accountId}}", "companyId": "{{params.companyId}}" }, "inputs": {} }
+          {
+            "id": "deals",
+            "typeId": "feature.crm.nodes.list-deals@1.0.0",
+            "name": "Company deals",
+            "position": {
+              "x": 0,
+              "y": 0
+            },
+            "config": {
+              "orgId": "{{params.orgId}}",
+              "companyId": "{{params.companyId}}"
+            },
+            "inputs": {}
+          },
+          {
+            "id": "tasks",
+            "typeId": "feature.crm.nodes.list-tasks@1.0.0",
+            "name": "Org open tasks (scored for the company only)",
+            "position": {
+              "x": 0,
+              "y": 140
+            },
+            "config": {
+              "orgId": "{{params.orgId}}"
+            },
+            "inputs": {}
+          },
+          {
+            "id": "health-write",
+            "typeId": "feature.csm.nodes.health-set@1.5.0",
+            "name": "Compute + write health",
+            "position": {
+              "x": 320,
+              "y": 70
+            },
+            "config": {
+              "accountId": "{{params.accountId}}",
+              "orgId": "{{params.orgId}}",
+              "companyId": "{{params.companyId}}"
+            },
+            "inputs": {}
+          }
         ],
         "edges": [
-          { "from": "deals.deals", "to": "health-write.deals" },
-          { "from": "tasks.tasks", "to": "health-write.tasks" }
+          {
+            "from": "deals.deals",
+            "to": "health-write.deals"
+          },
+          {
+            "from": "tasks.tasks",
+            "to": "health-write.tasks"
+          }
         ]
       },
       "outputs": {
-        "account": { "type": "object", "description": "The csm Account after the write — healthScore, healthFactors, and healthComputedAt." }
+        "account": {
+          "type": "object",
+          "description": "The csm Account after the write — healthScore, healthFactors, and healthComputedAt."
+        }
       }
     },
     {
@@ -47,27 +114,336 @@
       "parameters": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["orgId"],
+        "required": [
+          "orgId"
+        ],
         "properties": {
-          "orgId": { "type": "string", "description": "The org whose open deals (the renewal book) to review." }
+          "orgId": {
+            "type": "string",
+            "description": "The org whose open deals (the renewal book) to review."
+          }
         }
       },
-      "capabilities": ["side-effectful"],
+      "capabilities": [
+        "side-effectful"
+      ],
       "dag": {
         "nodes": [
-          { "id": "open-deals", "typeId": "feature.crm.nodes.list-deals@1.0.0", "name": "Open deals", "position": { "x": 0, "y": 0 }, "config": { "orgId": "{{params.orgId}}" }, "inputs": {} },
-          { "id": "review", "typeId": "core.chat.approvalGate@1.1.0", "name": "Review for renewal risk", "position": { "x": 320, "y": 0 }, "config": { "title": "Review open deals — flag any at renewal risk for follow-up", "artifactType": "crm.deals", "actions": ["approve", "reject"] }, "inputs": {} },
-          { "id": "gate-reject", "typeId": "core.flow.noop@1.0.0", "name": "Rejected — no follow-up task created", "position": { "x": 640, "y": 160 }, "config": {}, "inputs": {} },
-          { "id": "follow-up", "typeId": "feature.crm.nodes.create-task@1.0.0", "name": "Create renewal follow-up task", "position": { "x": 640, "y": 0 }, "config": { "orgId": "{{params.orgId}}", "title": "Follow up on at-risk renewal" }, "inputs": {} }
+          {
+            "id": "open-deals",
+            "typeId": "feature.crm.nodes.list-deals@1.0.0",
+            "name": "Open deals",
+            "position": {
+              "x": 0,
+              "y": 0
+            },
+            "config": {
+              "orgId": "{{params.orgId}}"
+            },
+            "inputs": {}
+          },
+          {
+            "id": "review",
+            "typeId": "core.chat.approvalGate@1.1.0",
+            "name": "Review for renewal risk",
+            "position": {
+              "x": 320,
+              "y": 0
+            },
+            "config": {
+              "title": "Review open deals — flag any at renewal risk for follow-up",
+              "artifactType": "crm.deals",
+              "actions": [
+                "approve",
+                "reject"
+              ]
+            },
+            "inputs": {}
+          },
+          {
+            "id": "gate-reject",
+            "typeId": "core.flow.noop@1.0.0",
+            "name": "Rejected — no follow-up task created",
+            "position": {
+              "x": 640,
+              "y": 160
+            },
+            "config": {},
+            "inputs": {}
+          },
+          {
+            "id": "follow-up",
+            "typeId": "feature.crm.nodes.create-task@1.0.0",
+            "name": "Create renewal follow-up task",
+            "position": {
+              "x": 640,
+              "y": 0
+            },
+            "config": {
+              "orgId": "{{params.orgId}}",
+              "title": "Follow up on at-risk renewal"
+            },
+            "inputs": {}
+          }
         ],
         "edges": [
-          { "from": "open-deals.deals", "to": "review.artifact" },
-          { "from": "review", "to": "follow-up", "condition": { "type": "truthy", "left": "approved" } },
-          { "from": "review", "to": "gate-reject", "condition": { "type": "falsy", "left": "approved" } }
+          {
+            "from": "open-deals.deals",
+            "to": "review.artifact"
+          },
+          {
+            "from": "review",
+            "to": "follow-up",
+            "condition": {
+              "type": "truthy",
+              "left": "approved"
+            }
+          },
+          {
+            "from": "review",
+            "to": "gate-reject",
+            "condition": {
+              "type": "falsy",
+              "left": "approved"
+            }
+          }
         ]
       },
       "outputs": {
-        "task": { "type": "object", "description": "The follow-up task created after the reviewer confirms a renewal is at risk." }
+        "task": {
+          "type": "object",
+          "description": "The follow-up task created after the reviewer confirms a renewal is at risk."
+        }
+      }
+    },
+    {
+      "chainId": "csm-ops.red-account-rescue",
+      "version": "1.0.0",
+      "label": "Red-Account Rescue Play",
+      "description": "ADR 0882 D7 — a playbook (ChurnZero Plays / Gainsight CTAs shape). Bind the `openwop-app.csm.account-health-changed` host event to a workflow made from this chain (Settings → Event Bindings). When an account's health CROSSES below the threshold (judged on the event: previous score at or above it, new score below it — and the account is still below it now), it creates three CRM tasks linked to the account's company and assigned to its CS owner (while that person is still a workspace member): review the health drivers, schedule a check-in, agree a recovery plan. A further drop while already red does not re-run the play; an unscored account never triggers it. The tasks are keyed on the health change, so a redelivered event re-ensures the same tasks instead of duplicating them, and they are never counted against the account's own health score. The run acts within the workspace authority of whoever created the binding. Edit the step titles and due offsets on the `plays` node.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "triggerEventName": {
+            "type": "string",
+            "default": "openwop-app.csm.account-health-changed",
+            "description": "The host event this chain ignites on. The event belongs to the INSTALLING HOST, not the pack — defaulted so an install keeps working."
+          },
+          "threshold": {
+            "type": "number",
+            "default": 70,
+            "description": "The at-risk line (the CSM page's own red tier is below 70)."
+          }
+        }
+      },
+      "capabilities": [
+        "side-effectful"
+      ],
+      "dag": {
+        "nodes": [
+          {
+            "id": "trigger",
+            "typeId": "core.trigger.event@1.0.0",
+            "name": "Health changed",
+            "position": {
+              "x": 0,
+              "y": 0
+            },
+            "config": {
+              "eventName": "{{params.triggerEventName}}"
+            },
+            "inputs": {}
+          },
+          {
+            "id": "check",
+            "typeId": "feature.csm.nodes.at-risk-check@1.0.0",
+            "name": "Crossed into red?",
+            "position": {
+              "x": 320,
+              "y": 0
+            },
+            "config": {
+              "threshold": "{{params.threshold}}"
+            },
+            "inputs": {}
+          },
+          {
+            "id": "not-at-risk",
+            "typeId": "core.flow.noop@1.0.0",
+            "name": "No crossing — no play",
+            "position": {
+              "x": 640,
+              "y": 160
+            },
+            "config": {},
+            "inputs": {}
+          },
+          {
+            "id": "plays",
+            "typeId": "feature.csm.nodes.create-play-tasks@1.0.0",
+            "name": "Create rescue tasks",
+            "position": {
+              "x": 640,
+              "y": 0
+            },
+            "config": {
+              "playId": "red-account-rescue",
+              "cycle": "transition",
+              "steps": [
+                {
+                  "title": "Review the health drivers",
+                  "dueInDays": 1
+                },
+                {
+                  "title": "Schedule a check-in call with the customer",
+                  "dueInDays": 3
+                },
+                {
+                  "title": "Agree a recovery plan",
+                  "dueInDays": 7
+                }
+              ]
+            },
+            "inputs": {}
+          }
+        ],
+        "edges": [
+          {
+            "from": "trigger",
+            "to": "check.event"
+          },
+          {
+            "from": "check.accountId",
+            "to": "plays.accountId",
+            "condition": {
+              "type": "truthy",
+              "left": "qualifies"
+            }
+          },
+          {
+            "from": "check.transitionKey",
+            "to": "plays.transitionKey",
+            "condition": {
+              "type": "truthy",
+              "left": "qualifies"
+            }
+          },
+          {
+            "from": "check",
+            "to": "not-at-risk",
+            "condition": {
+              "type": "falsy",
+              "left": "qualifies"
+            }
+          }
+        ]
+      },
+      "outputs": {
+        "tasks": {
+          "type": "object",
+          "description": "The rescue tasks ensured for the account (task and account ids)."
+        }
+      }
+    },
+    {
+      "chainId": "csm-ops.renewal-runway",
+      "version": "1.0.0",
+      "label": "Renewal Runway Play",
+      "description": "ADR 0882 D7 — a playbook (Totango SuccessPlays / Vitally renewal playbook shape) and the first chain to read Account.renewalDate. Lists accounts renewing within `days` (default 90; overdue renewals included), then creates a three-step ladder of CRM tasks per account, due 90, 60 and 30 days before its renewal date (never in the past), linked to the account's company and assigned to its CS owner. Run on demand or put it on a weekly schedule: the tasks are keyed on the account's renewal date, so a re-run re-ensures the same ladder instead of duplicating it, and a new renewal date starts a new one. Accounts with no CRM company link are listed as skipped. When nothing is due, the run completes down the `nothing-due` branch and creates nothing.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "days": {
+            "type": "number",
+            "default": 90,
+            "description": "How far ahead to look for renewals (0–366 days)."
+          }
+        }
+      },
+      "capabilities": [
+        "side-effectful"
+      ],
+      "dag": {
+        "nodes": [
+          {
+            "id": "due",
+            "typeId": "feature.csm.nodes.renewals-due@1.0.0",
+            "name": "Renewals due",
+            "position": {
+              "x": 0,
+              "y": 0
+            },
+            "config": {
+              "days": "{{params.days}}"
+            },
+            "inputs": {}
+          },
+          {
+            "id": "nothing-due",
+            "typeId": "core.flow.noop@1.0.0",
+            "name": "Nothing due — no play",
+            "position": {
+              "x": 320,
+              "y": 160
+            },
+            "config": {},
+            "inputs": {}
+          },
+          {
+            "id": "plays",
+            "typeId": "feature.csm.nodes.create-play-tasks@1.0.0",
+            "name": "Create renewal ladder",
+            "position": {
+              "x": 320,
+              "y": 0
+            },
+            "config": {
+              "playId": "renewal-runway",
+              "cycle": "renewal",
+              "steps": [
+                {
+                  "title": "Confirm the renewal decision-maker and timeline",
+                  "daysBeforeRenewal": 90
+                },
+                {
+                  "title": "Send the renewal proposal",
+                  "daysBeforeRenewal": 60
+                },
+                {
+                  "title": "Close the renewal",
+                  "daysBeforeRenewal": 30
+                }
+              ]
+            },
+            "inputs": {}
+          }
+        ],
+        "edges": [
+          {
+            "from": "due.accountIds",
+            "to": "plays.accountIds",
+            "condition": {
+              "type": "truthy",
+              "left": "any"
+            }
+          },
+          {
+            "from": "due",
+            "to": "nothing-due",
+            "condition": {
+              "type": "falsy",
+              "left": "any"
+            }
+          }
+        ]
+      },
+      "outputs": {
+        "tasks": {
+          "type": "object",
+          "description": "The renewal tasks ensured (task and account ids) and any skipped accounts."
+        }
       }
     }
   ]

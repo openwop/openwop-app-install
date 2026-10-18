@@ -1,6 +1,6 @@
 {
   "name": "core.openwop.workflows.marketing",
-  "version": "1.1.11",
+  "version": "1.2.0",
   "kind": "workflow-chain",
   "description": "Real-work workflow pack (RFC 0013, ADR 0149) — the Marketing & Advertising cluster: Full Campaign Launch, Ad Performance Optimization Loop, Content Brief Generator, and Content Repurposing. Reasons with core.ai.chatCompletion over real tenant data (feature.crm / feature.kb / feature.cms / feature.email); reads/optimizes the ad platforms provider-agnostically via the core.openwop.connectors.ad-* capability nodes (Meta or Google, whichever the tenant connected — ADR 0186). The optimization loop routes within-guardrail changes to auto-apply and out-of-guardrail changes to a core.chat.approvalGate via a core.flow.if conditional node (ADR 0149 open-question resolution: a flow conditional, not a new primitive). Every launch/publish/apply is approval- or guardrail-gated; all tenant values are run parameters (replay-deterministic). Published under core.openwop.workflows.* (openwop-team key).",
   "author": "openwop",
@@ -10,7 +10,7 @@
   "chains": [
     {
       "chainId": "marketing.campaign-launch",
-      "version": "1.0.2",
+      "version": "1.1.0",
       "label": "Full Campaign Launch",
       "description": "From a brief: select the audience (CRM), draft ad copy and creative, reference the landing page (CMS), consolidate for review, then launch on the ad platform after approval.",
       "parameters": {
@@ -20,8 +20,8 @@
         "properties": {
           "brief": { "type": "string", "description": "The campaign brief." },
           "orgId": { "type": "string", "description": "The CRM/CMS org id to read the audience + landing page from." },
-          "provider": { "type": "string", "default": "anthropic", "description": "AI provider id for this chain's LLM nodes. Frozen into this chain's AI nodes when the workflow is created (ADR 0498 — a concrete provider is what keeps replay deterministic). Override at instantiation to use a different vendor or your own BYOK provider; whichever you pick, the workspace needs a key for it — the workflow will not fall back to another provider on its own." },
-          "model": { "type": "string", "default": "claude-sonnet-4-6", "description": "Model id for this chain's LLM nodes. Must be advertised by `provider` in the host catalog; override at instantiation." }
+          "provider": { "type": "string", "description": "AI provider id for this chain's model-calling nodes. Set it to fix a provider into those nodes when the workflow is created. Leave it unset and each run uses the run's chosen provider, else the workspace's AI setting, else the host's catalog default (ADR 0903); whichever is chosen is recorded on the run, so a replay or fork uses the same one. The workspace needs a key for the provider that runs." },
+          "model": { "type": "string", "description": "Model id for this chain's model-calling nodes. Must be offered by the provider in the host catalog. Leave it unset to use the provider's model from the same choice (ADR 0903)." }
         }
       },
       "capabilities": ["side-effectful"],
@@ -55,7 +55,7 @@
     },
     {
       "chainId": "marketing.ad-optimization",
-      "version": "1.0.2",
+      "version": "1.1.0",
       "label": "Ad Performance Optimization Loop",
       "description": "Read ad metrics from whichever platform the tenant connected (provider-agnostic core.openwop.connectors.ad-metrics — Meta or Google, not hard-coded), diagnose anomalies and recommend a bid/budget shift, then a core.flow.if guardrail routes within-guardrail changes straight to a budget recommendation and out-of-guardrail changes through approval first — finally log the learnings. Budget changes are RECOMMENDED by default (the ad-budget-update node dry-runs unless you set config.dryRun:false); a deliberate opt-in applies the change live via ctx.ads.updateBudget behind the same guardrail + approval gate (ADR 0186 slice 4b). Pair with an hourly scheduled trigger.",
       "parameters": {
@@ -67,8 +67,8 @@
           "platform": { "type": "string", "default": "meta", "description": "Ad platform to read/optimize (meta | google | tiktok) — whichever the tenant connected." },
           "adAccountId": { "type": "string", "default": "", "description": "The ad account id on the platform." },
           "campaignId": { "type": "string", "default": "", "description": "The campaign to optimize." },
-          "provider": { "type": "string", "default": "anthropic", "description": "AI provider id for this chain's LLM nodes. Frozen into this chain's AI nodes when the workflow is created (ADR 0498 — a concrete provider is what keeps replay deterministic). Override at instantiation to use a different vendor or your own BYOK provider; whichever you pick, the workspace needs a key for it — the workflow will not fall back to another provider on its own." },
-          "model": { "type": "string", "default": "claude-sonnet-4-6", "description": "Model id for this chain's LLM nodes. Must be advertised by `provider` in the host catalog; override at instantiation." }
+          "provider": { "type": "string", "description": "AI provider id for this chain's model-calling nodes. Set it to fix a provider into those nodes when the workflow is created. Leave it unset and each run uses the run's chosen provider, else the workspace's AI setting, else the host's catalog default (ADR 0903); whichever is chosen is recorded on the run, so a replay or fork uses the same one. The workspace needs a key for the provider that runs." },
+          "model": { "type": "string", "description": "Model id for this chain's model-calling nodes. Must be offered by the provider in the host catalog. Leave it unset to use the provider's model from the same choice (ADR 0903)." }
         }
       },
       "capabilities": ["side-effectful"],
@@ -101,7 +101,7 @@
     },
     {
       "chainId": "marketing.content-brief",
-      "version": "1.0.3",
+      "version": "1.1.0",
       "label": "Content Brief Generator",
       "description": "Gather sources from the knowledge base and synthesize a structured SEO content brief for a topic/keyword.",
       "parameters": {
@@ -110,8 +110,8 @@
         "required": ["topic", "orgId", "collectionId"],
         "properties": {
           "topic": { "type": "string", "description": "Topic or keyword for the brief." },
-          "provider": { "type": "string", "default": "anthropic", "description": "AI provider id for this chain's LLM nodes. Frozen into this chain's AI nodes when the workflow is created (ADR 0498 — a concrete provider is what keeps replay deterministic). Override at instantiation to use a different vendor or your own BYOK provider; whichever you pick, the workspace needs a key for it — the workflow will not fall back to another provider on its own." },
-          "model": { "type": "string", "default": "claude-sonnet-4-6", "description": "Model id for this chain's LLM nodes. Must be advertised by `provider` in the host catalog; override at instantiation." },
+          "provider": { "type": "string", "description": "AI provider id for this chain's model-calling nodes. Set it to fix a provider into those nodes when the workflow is created. Leave it unset and each run uses the run's chosen provider, else the workspace's AI setting, else the host's catalog default (ADR 0903); whichever is chosen is recorded on the run, so a replay or fork uses the same one. The workspace needs a key for the provider that runs." },
+          "model": { "type": "string", "description": "Model id for this chain's model-calling nodes. Must be offered by the provider in the host catalog. Leave it unset to use the provider's model from the same choice (ADR 0903)." },
           "orgId": { "type": "string", "description": "The org whose knowledge base is searched. Must be the same org the collection belongs to, or nothing is found." },
           "collectionId": { "type": "string", "description": "The KB collection id to search (create via the Knowledge feature or knowledge-sync)." }
         }
@@ -139,7 +139,7 @@
     },
     {
       "chainId": "marketing.content-repurposing",
-      "version": "1.0.2",
+      "version": "1.1.0",
       "label": "Content Repurposing",
       "description": "From a published piece, outline then generate a channel-ready set (LinkedIn, X thread, newsletter), gate for approval, then schedule. Pair with a doc-published event trigger.",
       "parameters": {
@@ -150,8 +150,8 @@
           "sourceText": { "type": "string", "description": "The source content to repurpose." },
           "orgId": { "type": "string", "description": "The org whose email templates this newsletter is rendered from." },
           "templateId": { "type": "string", "description": "The email template to render the newsletter from (create one in the Email feature)." },
-          "provider": { "type": "string", "default": "anthropic", "description": "AI provider id for this chain's LLM nodes. Frozen into this chain's AI nodes when the workflow is created (ADR 0498 — a concrete provider is what keeps replay deterministic). Override at instantiation to use a different vendor or your own BYOK provider; whichever you pick, the workspace needs a key for it — the workflow will not fall back to another provider on its own." },
-          "model": { "type": "string", "default": "claude-sonnet-4-6", "description": "Model id for this chain's LLM nodes. Must be advertised by `provider` in the host catalog; override at instantiation." }
+          "provider": { "type": "string", "description": "AI provider id for this chain's model-calling nodes. Set it to fix a provider into those nodes when the workflow is created. Leave it unset and each run uses the run's chosen provider, else the workspace's AI setting, else the host's catalog default (ADR 0903); whichever is chosen is recorded on the run, so a replay or fork uses the same one. The workspace needs a key for the provider that runs." },
+          "model": { "type": "string", "description": "Model id for this chain's model-calling nodes. Must be offered by the provider in the host catalog. Leave it unset to use the provider's model from the same choice (ADR 0903)." }
         }
       },
       "capabilities": ["side-effectful"],

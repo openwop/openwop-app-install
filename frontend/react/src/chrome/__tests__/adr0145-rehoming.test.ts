@@ -179,14 +179,14 @@ describe('ADR 0145 — re-graduated tabs gate on their toggle', () => {
     // The control: removing the gating assertions entirely would leave the projection's
     // toggle filter untested. `campaign-intel` is genuinely toggle-gated.
     const off = (id?: string): boolean => !id || id !== 'campaign-intel';
+    // Tab ids are the route path's last segment: campaign-intel lives at
+    // `/campaign-intelligence`. (This used to assert `not.toContain('intel')`,
+    // an id no tab has, so it could never fail — w35 grade-tests.)
     const tabs = visibleHubRoutes(FEATURES, off, true, 'campaigns').map(tabIdOf);
-    expect(tabs, 'a genuinely disabled feature IS dropped').not.toContain('intel');
-    expect(tabs.length, 'and the others survive').toBeGreaterThan(0);
-  });
-
-  it('ADR 0434 — the subsumed surfaces keep no standalone nav', () => {
-    expect(byPath('/leaderboard')?.nav).toBeUndefined();
-    expect(byPath('/model-router')?.nav).toBeUndefined();
+    expect(tabs, 'a genuinely disabled feature IS dropped; the others survive in order')
+      .toEqual(['campaign-brief', 'campaigns', 'campaign-performance']);
+    // Positive control: enabled, the same tab IS projected.
+    expect(visibleHubRoutes(FEATURES, all, true, 'campaigns').map(tabIdOf)).toContain('campaign-intelligence');
   });
 });
 

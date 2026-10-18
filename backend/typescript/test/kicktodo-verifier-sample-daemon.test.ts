@@ -19,7 +19,7 @@ import { createDraft, publishChallenge } from '../src/features/kicktodo-core/cha
 import { enroll, __clearEnrollGuards } from '../src/features/kicktodo-core/enrollmentService.js';
 import { todayFor, submitCheckIn, __clearCheckInObservers } from '../src/features/kicktodo-core/todayService.js';
 import { evaluateEnrollment } from '../src/features/kicktodo-core/progressService.js';
-import { verifierQuality } from '../src/features/kicktodo-metrics/verifierSampleService.js';
+import { verifierQuality, __test as sampleStore } from '../src/features/kicktodo-metrics/verifierSampleService.js';
 import { kicktodoMetricsFeature } from '../src/features/kicktodo-metrics/feature.js';
 import { processDueVerifierSamples, yearMonth } from '../src/features/kicktodo-metrics/verifierSampleDaemon.js';
 
@@ -31,7 +31,7 @@ let storage: Storage;
 /** Seed `n` participants (each with a check-in), then have the judge rule on
  *  each so its enrollment carries a `lastVerdict` and is sampleable. Returns
  *  the enrollment ids in order. */
-async function seedJudged(n: number): Promise<string[]> {
+async function seedJudged(n: number, ownerPrefix = 'v'): Promise<string[]> {
   const draft = await createDraft({
     tenantId: T, title: 'Measured', summary: 's', outcome: 'o', durationDays: 3,
     activities: [{ stableActivityId: 'a1', day: 1, title: 'A', instructions: 'i', evidencePolicy: 'attestation' }],
@@ -39,7 +39,7 @@ async function seedJudged(n: number): Promise<string[]> {
   await publishChallenge(T, draft.id, 1);
   const ids: string[] = [];
   for (let i = 0; i < n; i += 1) {
-    const owner = `user:v-${i}`;
+    const owner = `user:${ownerPrefix}-${i}`;
     const { enrollment } = await enroll({ tenantId: T, ownerSubject: owner, challengeId: draft.id, challengeVersion: 1, timezone: 'UTC' });
     const today = await todayFor(T, owner);
     const card = today.enrollments[0]?.actions[0]?.occurrence.cardId;
@@ -70,9 +70,14 @@ beforeEach(async () => {
 describe('verifier-sample daemon (ADR 0432 P3 / G9)', () => {
   it('mints a sample per judged verdict for a metrics-enabled tenant', async () => {
     enableMetrics();
-    await seedJudged(3);
+    const ids = await seedJudged(3);
     const minted = await processDueVerifierSamples({ storage }, async () => [T], NOW);
     expect(minted).toBe(3);
+    // One sample per judged enrollment, carrying the verdict the JUDGE recorded
+    // (the registered judge rules NOT satisfied) — never a fabricated one.
+    const rows = await sampleStore.samples.listByPrefix(`${T}::`);
+    expect(rows.map((r) => r.enrollmentId).sort()).toEqual([...ids].sort());
+    expect(rows.map((r) => r.machineSatisfied)).toEqual([false, false, false]);
     const q = await verifierQuality(T);
     expect(q.sampled).toBe(3);
     expect(q.resolved).toBe(0); // minted-but-ungraded ⇒ no rate yet
@@ -84,10 +89,31 @@ describe('verifier-sample daemon (ADR 0432 P3 / G9)', () => {
     await seedJudged(2);
     const first = await processDueVerifierSamples({ storage }, async () => [T], NOW);
     expect(first).toBe(2);
-    // Same period ⇒ the slot is already claimed ⇒ zero new work, no double-sample.
+    // A verdict judged AFTER this month's pass. Only the slot claim stands between
+    // it and a second sample this month: `sampleVerdict`'s per-enrollment
+    // idempotency would let a fresh enrollment through. (Witness: w40g3-vd-claim —
+    // a lost claim that kept going minted it.)
+    await seedJudged(1, 'late');
+    // Same period ⇒ the slot is already claimed (by this instance or a peer — the
+    // claim is in shared storage) ⇒ zero new work, no double-sample.
     const again = await processDueVerifierSamples({ storage }, async () => [T], NOW);
     expect(again).toBe(0);
     expect((await verifierQuality(T)).sampled).toBe(2);
+  });
+
+  it('a later month samples NEW enrollments, never re-counts last month\'s (code-grade KTX-1)', async () => {
+    enableMetrics();
+    const first = await seedJudged(2);
+    expect(await processDueVerifierSamples({ storage }, async () => [T], NOW)).toBe(2);
+    const NEXT_MONTH = NOW + 32 * 24 * 60 * 60 * 1000;
+    expect(yearMonth(NEXT_MONTH)).not.toBe(yearMonth(NOW));
+    // Nothing new to sample: the already-sampled enrollments must not count as minted.
+    expect(await processDueVerifierSamples({ storage }, async () => [T], NEXT_MONTH)).toBe(0);
+    const later = await seedJudged(2);
+    const MONTH_AFTER = NEXT_MONTH + 32 * 24 * 60 * 60 * 1000;
+    expect(await processDueVerifierSamples({ storage }, async () => [T], MONTH_AFTER)).toBe(2);
+    const rows = await sampleStore.samples.listByPrefix(`${T}::`);
+    expect(rows.map((r) => r.enrollmentId).sort()).toEqual([...first, ...later].sort());
   });
 
   it('skips a tenant that has NOT enabled kicktodo-metrics (toggle honesty)', async () => {

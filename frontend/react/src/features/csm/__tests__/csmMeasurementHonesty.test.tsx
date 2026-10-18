@@ -44,8 +44,17 @@ vi.mock('../csmClient.js', async () => {
     listCrmCompanies: vi.fn(async () => [{ companyId: 'cmp:1', name: 'Acme Corp' }]),
     createAccount: vi.fn(async () => ({})),
     deleteAccount: vi.fn(async () => undefined),
+    // ADR 0882 D3 — the owner picker's people list.
+    listAssignees: vi.fn(async () => ({ assignees: [{ subject: 'user:cs-1', displayName: 'Casey One' }, { subject: 'user:cs-2', displayName: 'Casey Two' }], me: ['user:cs-1'] })),
   };
 });
+// ADR 0882 (CSM2UX-4) — write controls follow `workspace:write`; `writeAccess.value`
+// lets a case render as a Viewer.
+const writeAccess = vi.hoisted(() => ({ value: true }));
+vi.mock('../../../lib/writeAccess.js', async (orig) => ({
+  ...(await orig<typeof import('../../../lib/writeAccess.js')>()),
+  useScopeWriteAccess: () => writeAccess.value,
+}));
 
 // The REAL typed error, taken from the (partially) mocked module so it is the
 // SAME class identity the page's `instanceof` map keys on. Constructing a
@@ -195,7 +204,7 @@ describe('CSM-UX-3 — failure copy is LOCALIZED, and the server text is a detai
 describe('CSM-UX-5 — the account editor', () => {
   it('PATCHes the six fields that previously had no editor at all', async () => {
     listAccounts.mockResolvedValue([acct({
-      accountId: 'a1', name: 'Typo Co', healthScore: 55, arr: 1000, arrCurrency: 'USD', owner: 'cs-1', renewalDate: '2027-01-15',
+      accountId: 'a1', name: 'Typo Co', healthScore: 55, arr: 1000, arrCurrency: 'USD', ownerUserId: 'user:cs-1', owner: 'Legacy Name', renewalDate: '2027-01-15',
     })]);
     renderPage();
     await screen.findByText('Typo Co');
@@ -203,13 +212,38 @@ describe('CSM-UX-5 — the account editor', () => {
     const panel = (await screen.findByText(/edit "typo co"/i)).closest('form')!;
     fireEvent.change(within(panel).getByLabelText(/^account$/i), { target: { value: 'Fixed Co' } });
     fireEvent.change(within(panel).getByLabelText(/^arr$/i), { target: { value: '2500' } });
-    fireEvent.change(within(panel).getByLabelText(/^owner$/i), { target: { value: 'cs-2' } });
+    fireEvent.change(await within(panel).findByLabelText(/^owner$/i), { target: { value: 'user:cs-2' } });
     fireEvent.click(within(panel).getByRole('button', { name: /^save$/i }));
     await waitFor(() => expect(updateAccount).toHaveBeenCalled());
     expect(updateAccount.mock.calls[0]![0]).toBe('a1');
     expect(updateAccount.mock.calls[0]![1]).toMatchObject({
-      name: 'Fixed Co', arr: 2500, owner: 'cs-2', healthScore: 55, renewalDate: '2027-01-15', arrCurrency: 'USD',
+      name: 'Fixed Co', arr: 2500, ownerUserId: 'user:cs-2', healthScore: 55, renewalDate: '2027-01-15', arrCurrency: 'USD',
     });
+    // ADR 0882 D3 — the legacy typed owner is only ever cleared ON REQUEST; an
+    // edit that never touched it must not send it (it used to send `owner` on
+    // every save, so removing the text box would have wiped it silently).
+    expect(updateAccount.mock.calls[0]![1]).not.toHaveProperty('owner');
+  });
+
+  it('an edit that does not touch the owner does not send one, and the legacy name is cleared only on request', async () => {
+    listAccounts.mockResolvedValue([acct({ accountId: 'a1', name: 'Kept Co', ownerUserId: 'user:gone', owner: 'Old Typed Name' })]);
+    renderPage();
+    await screen.findByText('Kept Co');
+    fireEvent.click(screen.getByRole('button', { name: /edit kept co/i }));
+    const panel = (await screen.findByText(/edit "kept co"/i)).closest('form')!;
+    fireEvent.change(within(panel).getByLabelText(/^arr$/i), { target: { value: '10' } });
+    fireEvent.click(within(panel).getByRole('button', { name: /^save$/i }));
+    await waitFor(() => expect(updateAccount).toHaveBeenCalledTimes(1));
+    // The owner has left (not in the people list) — still not rewritten or refused.
+    expect(updateAccount.mock.calls[0]![1]).not.toHaveProperty('ownerUserId');
+    expect(updateAccount.mock.calls[0]![1]).not.toHaveProperty('owner');
+
+    fireEvent.click(screen.getByRole('button', { name: /edit kept co/i }));
+    const again = (await screen.findByText(/edit "kept co"/i)).closest('form')!;
+    fireEvent.click(within(again).getByRole('button', { name: /clear on save/i }));
+    fireEvent.click(within(again).getByRole('button', { name: /^save$/i }));
+    await waitFor(() => expect(updateAccount).toHaveBeenCalledTimes(2));
+    expect(updateAccount.mock.calls[1]![1]).toMatchObject({ owner: null });
   });
 
   it('clearing the score field UN-ASSERTS it (sends null) rather than inventing another number', async () => {

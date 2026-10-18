@@ -28,7 +28,9 @@ describe('ShapeEl image kind — safe-href belt', () => {
     expect(img).toBeTruthy();
     expect(img?.getAttribute('href')).toBe(HOST_SRC);
     expect(img?.getAttribute('x')).toBe('10');
+    expect(img?.getAttribute('y')).toBe('20');
     expect(img?.getAttribute('width')).toBe('100');
+    expect(img?.getAttribute('height')).toBe('80');
     expect(img?.getAttribute('preserveAspectRatio')).toBe('xMidYMid meet');
   });
 

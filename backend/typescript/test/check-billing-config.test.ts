@@ -11,6 +11,9 @@
  *   5. ADR 0821 D7 — `OPENWOP_BILLING_TOKEN_PACK_DISPLAY` keys must be configured pack
  *      prices (ERROR otherwise), each entry an object of string `price`/`label`; a pack
  *      with no display `price` WARNs (the store lists it with no buy button).
+ *   6. ADR 0890 — the checkout-option knobs: valid bare and keyed values are GREEN;
+ *      a value the host ignores or a key naming nothing real is an ERROR; `managed` on
+ *      a pre-dahlia API version and a no-trial `if_required` WARN.
  */
 import { describe, it, expect } from 'vitest';
 import { spawnSync } from 'node:child_process';
@@ -122,5 +125,38 @@ describe('check-billing-config — ADR 0820 §5/§7', () => {
     const none = run(env);
     expect(none.code).toBe(0);
     expect(none.out).not.toContain('ERROR');
+  });
+  it('ADR 0890 — valid checkout options are green; bad values and keys are ERRORs', () => {
+    const ok = withEnv({
+      OPENWOP_BILLING_CHECKOUT_TAX: JSON.stringify({ '*': 'automatic', 'bundle:crm': 'managed', 'plan:pro': 'none' }),
+      OPENWOP_BILLING_ALLOW_PROMOTION_CODES: 'true',
+      OPENWOP_BILLING_TRIAL_CARD: JSON.stringify({ 'bundle:crm': 'if_required' }),
+      OPENWOP_STRIPE_API_VERSION: '2026-04-22.dahlia',
+    });
+    expect(ok.code).toBe(0);
+    expect(ok.out).not.toContain('ERROR');
+    expect(ok.out).not.toContain('ADR 0890');
+    const bad = withEnv({
+      OPENWOP_BILLING_CHECKOUT_TAX: JSON.stringify({ 'bundle:crm': 'manged', 'bundle:nope': 'automatic', crm: 'none' }),
+      OPENWOP_BILLING_ALLOW_PROMOTION_CODES: JSON.stringify({ 'plan:free': true, '*': 'yes' }),
+      OPENWOP_BILLING_TRIAL_CARD: 'never',
+    });
+    expect(bad.code).toBe(1);
+    expect(bad.out).toContain("OPENWOP_BILLING_CHECKOUT_TAX['bundle:crm'] must be \"none\", \"automatic\" or \"managed\"");
+    expect(bad.out).toContain("OPENWOP_BILLING_CHECKOUT_TAX key 'bundle:nope' names no bundle");
+    expect(bad.out).toContain("OPENWOP_BILLING_CHECKOUT_TAX key 'crm' must be \"*\" or start with");
+    expect(bad.out).toContain("OPENWOP_BILLING_ALLOW_PROMOTION_CODES key 'plan:free' names no paid plan tier");
+    expect(bad.out).toContain("OPENWOP_BILLING_ALLOW_PROMOTION_CODES['*'] must be true or false");
+    expect(bad.out).toContain("OPENWOP_BILLING_TRIAL_CARD['*'] must be \"required\" or \"if_required\"");
+  });
+  it('ADR 0890 — managed on the pinned clover version and a no-trial if_required WARN', () => {
+    const r = withEnv({
+      OPENWOP_BILLING_CHECKOUT_TAX: JSON.stringify({ 'bundle:crm': 'managed' }),
+      OPENWOP_BILLING_TRIAL_CARD: JSON.stringify({ 'bundle:job-search': 'if_required' }),
+      OPENWOP_STRIPE_API_VERSION: '2025-12-15.clover',
+    });
+    expect(r.code).toBe(0);
+    expect(r.out).toMatch(/WARN\s+OPENWOP_BILLING_CHECKOUT_TAX is "managed" for bundle:crm but the Stripe API version is 2025-12-15\.clover/);
+    expect(r.out).toMatch(/WARN\s+OPENWOP_BILLING_TRIAL_CARD key 'bundle:job-search' is "if_required" but has no OPENWOP_BILLING_TRIAL_DAYS entry/);
   });
 });

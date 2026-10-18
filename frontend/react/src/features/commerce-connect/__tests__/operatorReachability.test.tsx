@@ -27,7 +27,7 @@
  * awaits past the window — so this one holds the promise open instead.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render as rtlRender, cleanup, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render as rtlRender, cleanup, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import type { ReactElement } from 'react';
 
@@ -53,14 +53,23 @@ vi.mock('../../../featureToggles/FeatureAccessContext.js', () => ({
   useFeatureAccess: () => makeFeatureAccess({ enabled: true, loading: false }),
 }));
 
-import { ApiError } from '../commerceConnectClient.js';
+import { ApiError, type PaidListing, type PendingListingApproval } from '../commerceConnectClient.js';
 import { CommerceConnectPage } from '../CommerceConnectPage.js';
 import { SellerListingsCard } from '../SellerListingsCard.js';
 
-const APPROVAL = {
-  approvalId: 'apr_1', packName: 'vendor.acme.nodes', lane: 'native-paid' as const,
+const APPROVAL: PendingListingApproval = {
+  approvalId: 'apr_1', packName: 'vendor.acme.nodes', lane: 'native-paid',
   proposal: 'Approve marketplace listing', createdAt: '2026-01-01T00:00:00Z',
   priceMajorUnits: 99, currency: 'usd', sellerTenantId: 'ws:acme', packMissing: false,
+};
+const listing = (over: Partial<PaidListing>): PaidListing => ({
+  packName: 'vendor.acme.nodes', sellerTenantId: 'ws:acme', lane: 'native-paid',
+  priceMajorUnits: 99, currency: 'usd', approvalState: 'approved',
+  createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z', ...over,
+});
+/** Let every settled read reach React before asserting an ABSENCE. */
+const drain = async (): Promise<void> => {
+  await act(async () => { for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0)); });
 };
 
 beforeEach(() => {
@@ -106,8 +115,14 @@ describe('MKT-UX-3 — the operator can reach the approval gate without being a 
     render(<CommerceConnectPage />);
     expect(await screen.findByText(/become a seller/i)).toBeTruthy();
     await waitFor(() => expect(api.listApprovals).toHaveBeenCalled());
-    expect(screen.queryByText(/approval queue/i)).toBeNull();
-    expect(screen.queryByText(/operator console/i)).toBeNull();
+    await waitFor(() => expect(api.listAdminDisputes).toHaveBeenCalled());
+    // Both cards start hidden, so an absence asserted before the 403s settle proves
+    // nothing. Drain, then assert the exact strings a mis-mapped 403 would render
+    // (the designed failure states carry the card titles AND a load-failed line).
+    await drain();
+    expect(screen.queryByText('Native-paid approval queue')).toBeNull();
+    expect(screen.queryByText('Operator console')).toBeNull();
+    expect(screen.queryByText('The operator console failed to load.')).toBeNull();
   });
 });
 
@@ -131,15 +146,13 @@ describe('MKT-UX-7 — a rejection carries a reason, and the seller gets an exit
     await waitFor(() => expect(api.decideApproval).toHaveBeenCalledWith(
       'apr_1', 'rejected', 'The payout URL is not on your verified domain.',
     ));
+    expect(api.decideApproval).toHaveBeenCalledTimes(1);
   });
 
   it('the SELLER reads the reason on their own row, and can revise and resubmit', async () => {
-    api.listOwnListings.mockResolvedValue([{
-      packName: 'vendor.acme.nodes', sellerTenantId: 'ws:acme', lane: 'native-paid',
-      priceMajorUnits: 99, currency: 'usd', approvalState: 'rejected',
-      approvalNote: 'The payout URL is not on your verified domain.',
-      createdAt: 'x', updatedAt: 'x',
-    }]);
+    api.listOwnListings.mockResolvedValue([listing({
+      approvalState: 'rejected', approvalNote: 'The payout URL is not on your verified domain.',
+    })]);
     render(<SellerListingsCard />);
 
     expect(await screen.findByText(/payout URL is not on your verified domain/i)).toBeTruthy();
@@ -153,10 +166,7 @@ describe('MKT-UX-7 — a rejection carries a reason, and the seller gets an exit
   it('a rejection with NO reason still says so, rather than showing a bare word', async () => {
     // Pre-fix rows carry no note. "Rejected" alone was the whole defect, so the
     // absent case must not silently degrade back to it.
-    api.listOwnListings.mockResolvedValue([{
-      packName: 'vendor.old.nodes', sellerTenantId: 'ws:acme', lane: 'native-paid',
-      priceMajorUnits: 10, currency: 'usd', approvalState: 'rejected', createdAt: 'x', updatedAt: 'x',
-    }]);
+    api.listOwnListings.mockResolvedValue([listing({ packName: 'vendor.old.nodes', priceMajorUnits: 10, approvalState: 'rejected' })]);
     render(<SellerListingsCard />);
     expect(await screen.findByText(/without recording a reason/i)).toBeTruthy();
   });
@@ -164,12 +174,10 @@ describe('MKT-UX-7 — a rejection carries a reason, and the seller gets an exit
 
 describe('MPL-11 — a SUSPENDED listing is visible to its own seller as suspended', () => {
   it('renders the hold chip and the operator reason', async () => {
-    api.listOwnListings.mockResolvedValue([{
-      packName: 'vendor.held.nodes', sellerTenantId: 'ws:acme', lane: 'native-paid',
-      priceMajorUnits: 20, currency: 'usd', approvalState: 'approved',
-      state: 'suspended', stateMeta: { by: 'op', at: 'x', reason: 'Dispute under review' },
-      createdAt: 'x', updatedAt: 'x',
-    }]);
+    api.listOwnListings.mockResolvedValue([listing({
+      packName: 'vendor.held.nodes', priceMajorUnits: 20,
+      state: 'suspended', stateMeta: { by: 'op', at: '2026-01-01T00:00:00Z', reason: 'Dispute under review' },
+    })]);
     render(<SellerListingsCard />);
     expect(await screen.findByText(/on hold/i)).toBeTruthy();
     expect(screen.getByText(/dispute under review/i)).toBeTruthy();
@@ -189,6 +197,8 @@ describe('MKT-UX-12 — the retry window never claims "no listings yet" over sta
     fireEvent.click(screen.getByRole('button', { name: /retry/i }));
 
     await waitFor(() => expect(screen.queryByText(/couldn.t be loaded/i)).toBeNull());
+    // Positive: the in-flight state is the loading state (no Retry, no empty claim).
+    expect(screen.queryByRole('button', { name: /retry/i })).toBeNull();
     expect(
       screen.queryByText(/no listings yet/i),
       'a seller mid-retry must never be told their inventory is empty',

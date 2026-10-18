@@ -54,6 +54,7 @@
 
 import { OpenwopError } from '../../types.js';
 import { getOrg } from '../../host/accessControlService.js';
+import { preferredLocale } from '../../host/i18n/index.js';
 import { resolveOne } from '../../host/featureToggles/service.js';
 import { listPublishedForLocale, type NegotiatedChallenge } from './challengeService.js';
 import type { ChallengeDefinition, EvidencePolicy } from './types.js';
@@ -162,7 +163,9 @@ export async function publicChallengeCatalog(
     .catch(() => false);
   if (!enabled) throw new OpenwopError('not_found', 'Site not found.', 404, { orgId });
 
-  const requested = (acceptLanguage ?? 'en').split(',')[0]?.trim() || 'en';
+  // The q-ranked first choice, never the raw first segment: `fr;q=0.9,en` used
+  // to request `fr;q=0.9`, match no row, and silently serve every source.
+  const requested = preferredLocale(acceptLanguage, 'en');
   const negotiated = await listPublishedForLocale(tenantId, requested);
   return {
     orgId,

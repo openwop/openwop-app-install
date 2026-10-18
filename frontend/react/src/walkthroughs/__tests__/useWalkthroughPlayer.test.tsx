@@ -4,6 +4,29 @@
  * performs the registry action then resolves; HITL steps wait for the user;
  * an unknown actionId lands needs-update (no silent hang); a failed
  * checkpoint cancels the run.
+ *
+ * w51 r2 (/grade-tests) — fixtures made able to fail, and two double guards named:
+ *  - position: the open step is s2 (index 1) — at s1 a constant index 0 passed;
+ *  - WALK-9 in-flight: a SECOND walkthrough's started row sits first, and a
+ *    terminal in-flight run must start fresh — one row could not show either;
+ *  - hitlAuto TRUE is asserted when hitlComplete attaches;
+ *  - confirmHitl's `status !== 'waiting-user'` guard is driven by confirming while
+ *    PAUSED (after Stop, teardown nulls activeRef first — the two guards overlap);
+ *  - DOUBLE GUARD: stop() during a retry is caught by resolveElement's own `live()`
+ *    check AND by the `live()` re-check after it returns; deleting either alone
+ *    stays green by design, so the probe targets the shared `live` predicate;
+ *  - the interrupt_gone (410) arm is owned by stepFailureIsVisible case 4;
+ *  - real-clock sleeps → fake timers / the settle signal.
+ *
+ * WALK-PAUSE-HITL-1 (PINNED with it.fails, grade-code row): the WT-1 §Correction
+ * at useWalkthroughPlayer.ts:258 calls `stash()` at the end of the HITL branch to
+ * let pause → resume come back to the step — but `stash()` writes only when
+ * `pausedRef.current` is ALREADY true, which it never is there. A real pause
+ * during `waiting-user` (Escape / the scrim → `player.pause`) leaves `pendingRef`
+ * null, `resume()` lands on 'starting', the "I did it" control (shown for
+ * `waiting-user` && !hitlAuto) disappears, and `confirmHitl` early-returns: the
+ * step is stranded. The it.fails case asserts the CORRECT behaviour; fix-probe
+ * `w51g2-walk-pause-hitl-fix-r2` (stash the open HITL step unconditionally) flips it.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, waitFor, act } from '@testing-library/react';
@@ -44,13 +67,19 @@ import { registerWalkthroughAction, registerWalkthroughCheckpoint, __resetWalkth
 
 const wrapper = ({ children }: { children: ReactNode }) => <MemoryRouter>{children}</MemoryRouter>;
 
+/** Route-aware: the launch's progress read gets NO in-flight row (it used to get
+ *  `{interrupts}`, so `progress.find` threw and the fresh start ran via the catch). */
 function stubInterrupts(rows: Array<Record<string, unknown>>): void {
-  vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ interrupts: rows }) }));
+  vi.stubGlobal('fetch', vi.fn((url: string) => Promise.resolve({
+    ok: true,
+    json: async () => (String(url).includes('/walkthroughs/progress') ? { progress: [] } : { interrupts: rows }),
+  })));
 }
 
 beforeEach(() => {
   __resetWalkthroughRegistryForTests();
   createRun.mockReset().mockResolvedValue({ runId: 'run-1' });
+  getRun.mockReset();
   resolveByRun.mockClear();
   getWorkflowDefinition.mockReset().mockResolvedValue(null);
   cancelRun.mockClear();
@@ -87,6 +116,7 @@ describe('useWalkthroughPlayer', () => {
     await act(async () => { await result.current.launch('tour-hitl'); });
     await waitFor(() => expect(result.current.status).toBe('waiting-user'));
     expect(resolveByRun).not.toHaveBeenCalled();
+    expect(result.current.hitlAuto).toBe(true); // attached ⇒ no "I did it" fallback
 
     await act(async () => { fire!({ mediaRef: 'media:x' }); });
     await waitFor(() => expect(resolveByRun).toHaveBeenCalledWith('run-1', 's2', { acked: true, hitlValue: { mediaRef: 'media:x' } }));
@@ -129,19 +159,22 @@ describe('useWalkthroughPlayer', () => {
   it('derives steps + position from the fetched def; def-fetch failure leaves them empty (ADR 0378 P2a)', async () => {
     const btn = document.createElement('button');
     registerWalkthroughAction('demo.pos.click', { route: '/', resolve: () => btn, verb: 'click' });
+    registerWalkthroughAction('demo.pos.fill', { route: '/', resolve: () => document.createElement('input'), verb: 'fill' });
     getWorkflowDefinition.mockResolvedValue({ nodes: [
       { nodeId: 's1', typeId: 'ui.walkthrough.step', config: { actionId: 'demo.pos.click', narration: 'One' } },
       { nodeId: 's2', typeId: 'ui.walkthrough.step', config: { actionId: 'demo.pos.fill', narration: 'Two', hitl: true } },
       { nodeId: 's3', typeId: 'ui.walkthrough.checkpoint', config: { expect: 'demo.pos.done' } },
     ] });
-    stubInterrupts([{ nodeId: 's1', kind: 'walkthrough-step', data: { actionId: 'demo.pos.click', hitl: false } }]);
+    // The OPEN step is s2 — the middle one — so a position stuck at 0 (or at the end) fails.
+    stubInterrupts([{ nodeId: 's2', kind: 'walkthrough-step', data: { actionId: 'demo.pos.fill', hitl: true } }]);
 
     const { result } = renderHook(() => useWalkthroughPlayer(), { wrapper });
     await act(async () => { await result.current.launch('walkthrough-pos'); });
     await waitFor(() => expect(result.current.steps).toHaveLength(3));
+    expect(result.current.steps[0]).toMatchObject({ nodeId: 's1', hitl: false, checkpoint: false, narration: 'One' });
     expect(result.current.steps[1]).toMatchObject({ nodeId: 's2', hitl: true, narration: 'Two' });
     expect(result.current.steps[2]).toMatchObject({ nodeId: 's3', checkpoint: true });
-    await waitFor(() => expect(result.current.position).toEqual({ index: 0, total: 3 }));
+    await waitFor(() => expect(result.current.position).toEqual({ index: 1, total: 3 }));
   });
 
   it('confirmHitl resolves a manual HITL step through the ONE tolerant path (ADR 0378 P1)', async () => {
@@ -158,12 +191,42 @@ describe('useWalkthroughPlayer', () => {
     await act(async () => { await result.current.confirmHitl(); });
     expect(resolveByRun).toHaveBeenCalledWith('run-1', 's9', { acked: true });
 
+    // Status guard: while PAUSED the step is still set and the run still active,
+    // so only `status !== 'waiting-user'` stops an "I did it" from resolving it.
+    resolveByRun.mockClear();
+    act(() => { result.current.pause(); });
+    await act(async () => { await result.current.confirmHitl(); });
+    expect(resolveByRun).not.toHaveBeenCalled();
+
     // Idle/no-step guard: a second confirm after completion is a no-op.
     resolveByRun.mockClear();
-  getWorkflowDefinition.mockReset().mockResolvedValue(null);
+    getWorkflowDefinition.mockReset().mockResolvedValue(null);
     await act(async () => { onEvent!({ type: 'run.completed' }); });
     await act(async () => { await result.current.confirmHitl(); });
     expect(resolveByRun).not.toHaveBeenCalled();
+  });
+
+  it.fails('WALK-PAUSE-HITL-1: a pause during an HITL step, then resume, still lets the user confirm the step', async () => {
+    // A manual HITL step (no hitlComplete): the chrome's "I did it" is the only way on.
+    const input = document.createElement('input');
+    registerWalkthroughAction('demo.pause.hitl', { route: '/', resolve: () => input, verb: 'focus' });
+    stubInterrupts([{ nodeId: 's4', kind: 'walkthrough-step', data: { actionId: 'demo.pause.hitl', hitl: true } }]);
+
+    const { result } = renderHook(() => useWalkthroughPlayer(), { wrapper });
+    await act(async () => { await result.current.launch('walkthrough-pause-hitl'); });
+    await waitFor(() => expect(result.current.status).toBe('waiting-user'));
+
+    act(() => { result.current.pause(); }); // Escape / the scrim click
+    expect(result.current.status).toBe('paused');
+    act(() => { result.current.resume(); });
+
+    // CORRECT behaviour: back on the same waiting step, "I did it" visible again…
+    await waitFor(() => expect(result.current.status).toBe('waiting-user'), { timeout: 1000 });
+    expect(result.current.step?.nodeId).toBe('s4');
+    expect(result.current.hitlAuto).toBe(false); // ⇒ the chrome shows "I did it"
+    // …and confirming it resolves the step.
+    await act(async () => { await result.current.confirmHitl(); });
+    expect(resolveByRun).toHaveBeenCalledWith('run-1', 's4', { acked: true });
   });
 
   it('stop() during an in-flight element retry NEVER performs the step afterward (grade-pass)', async () => {
@@ -174,15 +237,20 @@ describe('useWalkthroughPlayer', () => {
     registerWalkthroughAction('demo.late.click', { route: '/', resolve: () => (available ? btn : null), verb: 'click' });
     stubInterrupts([{ nodeId: 's1', kind: 'walkthrough-step', data: { actionId: 'demo.late.click', hitl: false } }]);
 
-    const { result } = renderHook(() => useWalkthroughPlayer(), { wrapper });
-    await act(async () => { await result.current.launch('walkthrough-late'); });
-    await act(async () => { await new Promise((r) => setTimeout(r, 300)); }); // mid-retry
-    await act(async () => { await result.current.stop(); });
-    available = true; // the element appears AFTER stop
-    await act(async () => { await new Promise((r) => setTimeout(r, 600)); });
-    expect(clicked).not.toHaveBeenCalled();        // the zombie perform is dead
-    expect(resolveByRun).not.toHaveBeenCalled();   // and nothing resolved a dead run
-    expect(result.current.status).toBe('idle');
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const { result } = renderHook(() => useWalkthroughPlayer(), { wrapper });
+      await act(async () => { await result.current.launch('walkthrough-late'); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(300); }); // mid-retry (250 ms interval)
+      await act(async () => { await result.current.stop(); });
+      available = true; // the element appears AFTER stop
+      await act(async () => { await vi.advanceTimersByTimeAsync(600); }); // past two more retry ticks
+      expect(clicked).not.toHaveBeenCalled();        // the zombie perform is dead
+      expect(resolveByRun).not.toHaveBeenCalled();   // and nothing resolved a dead run
+      expect(result.current.status).toBe('idle');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('pause() then resume() preserves the checkpoint data (grade-pass — the stash carries data)', async () => {
@@ -193,10 +261,10 @@ describe('useWalkthroughPlayer', () => {
     act(() => { result.current.pause(); });
     await act(async () => { await result.current.launch('walkthrough-pausedcp'); });
     expect(resolveByRun).not.toHaveBeenCalled(); // stashed, not evaluated
-    await act(async () => { result.current.resume(); await new Promise((r) => setTimeout(r, 20)); });
+    act(() => { result.current.resume(); });
     // With the data preserved, the CHECKPOINT branch runs (passed:true) — the
     // old view-only stash lost data.checkpoint and needs-update'd instead.
-    expect(resolveByRun).toHaveBeenCalledWith('run-1', 'cp1', { passed: true });
+    await waitFor(() => expect(resolveByRun).toHaveBeenCalledWith('run-1', 'cp1', { passed: true }));
     expect(result.current.status).not.toBe('needs-update');
   });
 
@@ -232,11 +300,16 @@ describe('useWalkthroughPlayer', () => {
     // rather than start fresh. Asserted through the client, not the transport:
     // the snapshot read is tenant-bound now, so a URL-matching stub would be
     // pinning the binding rather than the behaviour under test.
-    getRun.mockResolvedValue({ runId: 'run-55', status: 'waiting_interrupt' });
+    getRun.mockImplementation((id: string) => Promise.resolve({ runId: id, status: 'waiting_interrupt' }));
     // Route-aware stub: progress row (started) -> open interrupts.
     vi.stubGlobal('fetch', vi.fn().mockImplementation((url: string) => {
       const u = String(url);
-      if (u.includes('/walkthroughs/progress')) return Promise.resolve({ ok: true, json: async () => ({ progress: [{ walkthroughId: 'walkthrough-inflight', status: 'started', runId: 'run-55' }] }) });
+      // ANOTHER walkthrough's started row comes FIRST: matching on status alone
+      // would re-attach to run-99.
+      if (u.includes('/walkthroughs/progress')) return Promise.resolve({ ok: true, json: async () => ({ progress: [
+        { walkthroughId: 'other-walkthrough', status: 'started', runId: 'run-99' },
+        { walkthroughId: 'walkthrough-inflight', status: 'started', runId: 'run-55' },
+      ] }) });
       // The snapshot no longer rides `fetch` — see the `getRun` mock above.
       if (u.includes('/interrupts')) return Promise.resolve({ ok: true, json: async () => ({ interrupts: [{ nodeId: 's5', kind: 'walkthrough-step', data: { actionId: 'demo.resume.click', hitl: false } }] }) });
       return Promise.resolve({ ok: true, json: async () => ({}) });
@@ -246,6 +319,27 @@ describe('useWalkthroughPlayer', () => {
     await act(async () => { await result.current.launch('walkthrough-inflight'); });
     await waitFor(() => expect(resolveByRun).toHaveBeenCalledWith('run-55', 's5', { acked: true, actionId: 'demo.resume.click' }));
     expect(createRun).not.toHaveBeenCalled(); // re-attached to the in-flight run
+    expect(getRun).toHaveBeenCalledWith('run-55');
+    expect(getRun).not.toHaveBeenCalledWith('run-99');
+  });
+
+  it("launch's resume-in-flight branch starts FRESH when the started run is already terminal (WALK-9)", async () => {
+    const btn = document.createElement('button');
+    registerWalkthroughAction('demo.fresh.click', { route: '/', resolve: () => btn, verb: 'click' });
+    getRun.mockResolvedValue({ runId: 'run-55', status: 'completed' });
+    vi.stubGlobal('fetch', vi.fn().mockImplementation((url: string) => {
+      const u = String(url);
+      if (u.includes('/walkthroughs/progress')) return Promise.resolve({ ok: true, json: async () => ({ progress: [{ walkthroughId: 'walkthrough-done', status: 'started', runId: 'run-55' }] }) });
+      if (u.includes('/interrupts')) return Promise.resolve({ ok: true, json: async () => ({ interrupts: [{ nodeId: 's1', kind: 'walkthrough-step', data: { actionId: 'demo.fresh.click', hitl: false } }] }) });
+      return Promise.resolve({ ok: true, json: async () => ({}) });
+    }));
+
+    const { result } = renderHook(() => useWalkthroughPlayer(), { wrapper });
+    await act(async () => { await result.current.launch('walkthrough-done'); });
+    expect(getRun).toHaveBeenCalledWith('run-55');
+    expect(createRun).toHaveBeenCalledWith(expect.objectContaining({ workflowId: 'walkthrough-done' }));
+    await waitFor(() => expect(resolveByRun).toHaveBeenCalledWith('run-1', 's1', { acked: true, actionId: 'demo.fresh.click' }));
+    expect(resolveByRun).not.toHaveBeenCalledWith('run-55', expect.anything(), expect.anything());
   });
 
   it('a failed checkpoint CANCELS the run', async () => {

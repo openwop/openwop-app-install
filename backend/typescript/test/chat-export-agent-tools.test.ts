@@ -8,6 +8,14 @@
  * conversation the caller can't read folds to not_found), writes the transcript
  * through the ONE documents owner, and dedupes an exact re-export in a run.
  * Boots the REAL app — the feature-init registration seam is what's under test.
+ *
+ * What turns each case red (wave-24 probes, sabotage in `features/chat-export/agentTools.ts`
+ * unless noted): dropping `registerChatExportAgentTools()` from `feature.ts` (registers);
+ * skipping the `documents` toggle check (fails closed); skipping the acting-user check
+ * (human-initiated turn); skipping the no-conversation check (validation_error);
+ * ignoring `scope.conversationId` (CURRENT conversation + re-export); dropping the
+ * `isVisibleToAsync` READ check (the same-tenant stranger then reaches RBAC and answers
+ * `forbidden_scope`, not `not_found`); dropping the run-scoped idempotency key (re-export).
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -23,13 +31,18 @@ import { ensureConversationMeta } from '../src/host/conversationStore.js';
 import { getDocument, listVersions, listDocumentsForTenant } from '../src/features/documents/documentsService.js';
 
 let server: http.Server;
+const ENV_KEYS = ['OPENWOP_STORAGE_DSN', 'OPENWOP_AUTH_DISABLE_COOKIES'] as const;
+const savedEnv = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { void (server.address() as AddressInfo); res(); }); });
 });
-afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
+afterAll(async () => {
+  await new Promise<void>((res) => server.close(() => res()));
+  for (const k of ENV_KEYS) { if (savedEnv[k] === undefined) delete process.env[k]; else process.env[k] = savedEnv[k]; }
+});
 
 const setDocuments = async (status: 'on' | 'off'): Promise<void> => {
   const d = getToggleDefault('documents');
@@ -56,10 +69,15 @@ describe('A6 — openwop:conversations.export-document', () => {
 
   it('fails closed when the documents (write-target) toggle is OFF', async () => {
     await setDocuments('off');
-    const out = await run('a6-toggle', {}, { actingUserId: 'u-1', conversationId: 'conv-anything' });
-    expect(out.isError).toBe(true);
-    expect(JSON.parse(out.content)).toMatchObject({ error: 'feature_disabled' });
-    await setDocuments('on');
+    try {
+      const out = await run('a6-toggle', {}, { actingUserId: 'u-1', conversationId: 'conv-anything' });
+      expect(out.isError).toBe(true);
+      expect(JSON.parse(out.content)).toMatchObject({ error: 'feature_disabled' });
+    } finally {
+      // Restore even when an assertion throws — a leaked OFF would make every later
+      // case answer feature_disabled and pass/fail for the wrong reason.
+      await setDocuments('on');
+    }
   });
 
   it('requires a human-initiated turn (no acting user ⇒ refusal)', async () => {

@@ -1,3 +1,26 @@
+/**
+ * Admin shell governance (ADR 0510 Phase 4 — the admin governance/visual contract;
+ * Phase 7 DSA-026 — the ≤860px rail is a compact DISCLOSURE, not a link cloud).
+ *
+ * What only a browser can show, one case each:
+ *  1. Ten admin aliases / detail routes, loaded by URL and walked through browser
+ *     history, keep ONE <main> and exactly one current destination (`aria-current`,
+ *     ADR 0139 `activeFor` aliases) — or, for a child whose parent is hidden from a
+ *     non-superadmin, zero current plus an explicit parent link (wayfinding).
+ *  2. WCAG 1.4.10 reflow at 320px: no horizontal page overflow, one main, every nav
+ *     uniquely labelled (the admin rail among them), one current destination.
+ *  3. WCAG 2.1.1 keyboard: the mobile disclosure opens with Enter and closes on
+ *     navigation.
+ *  4. WCAG 2.5.8 / DESIGN `--hit-target`: coarse-pointer admin targets ≥ 44 CSS px.
+ * `AdminLayout.activeAlias.test.tsx` (jsdom) pins one alias and the accordion
+ * state; it cannot load lazy routes, walk history, lay out or size targets.
+ *
+ * Incidents already paid for (see the inline notes): the one-shot count that raced
+ * the rail (72d56d6eb), the 44px float compare (d05a421b8), the per-route budget
+ * (ADR 0863). Breaks it (w53 probes, all witnessed): dropping the rail's
+ * `aria-current`, a fixed-width admin grid at ≤860px, not closing the disclosure on
+ * navigation, a sub-44px toggle, or dropping the parent route context.
+ */
 import { devices, expect, test, type APIRequestContext } from '@playwright/test';
 import { API, enableToggle } from './support/session.js';
 
@@ -7,6 +30,12 @@ async function loginPersonal(request: APIRequestContext, email: string): Promise
 }
 
 test.describe('admin shell governance matrix', () => {
+  // Cases 2–4 wait up to 60 s for the first admin paint (a cold lazy-chunk compile),
+  // which the DEFAULT 30 s test budget made unreachable — case 4 timed out at 30 s
+  // under a loaded machine (w53 baseline, 2026-10-17), the same defect case 1 fixed for
+  // itself (ADR 0863). Budget every case for the waits it declares; case 1 still sets
+  // its own larger per-route budget.
+  test.describe.configure({ timeout: 90_000 });
   test('direct admin aliases and detail routes preserve shell wayfinding through browser history', async ({ page }) => {
     await page.setViewportSize({ width: 1280, height: 900 });
     await loginPersonal(page.request, 'admin-history@e2e.test');
@@ -59,6 +88,9 @@ test.describe('admin shell governance matrix', () => {
     await loginPersonal(page.request, 'admin-governance@e2e.test');
     await page.goto('/admin');
     await expect(page.locator('.admin-rail-mobile-toggle')).toBeVisible({ timeout: 60_000 });
+    // Web-first, like case 1: the shell paints before the rail resolves its current
+    // destination, so the one-shot evaluate below must not read it mid-settle.
+    await expect(page.locator('[aria-current="page"]')).toHaveCount(1);
     const measurement = await page.evaluate(() => ({
       overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
       mains: document.querySelectorAll('main').length,
@@ -67,6 +99,8 @@ test.describe('admin shell governance matrix', () => {
     }));
     expect(measurement.overflow).toBeLessThanOrEqual(0);
     expect(measurement.mains).toBe(1);
+    // Non-vacuous: `every` is true of an EMPTY list, so the admin rail's own nav must be present.
+    expect(measurement.navNames).toContain('Admin sections');
     expect(measurement.navNames.every((name) => typeof name === 'string' && name.trim().length > 0)).toBe(true);
     expect(new Set(measurement.navNames).size).toBe(measurement.navNames.length);
     expect(measurement.current).toBe(1);

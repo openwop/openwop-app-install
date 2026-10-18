@@ -64,6 +64,20 @@ export const EVIDENCE_RANK: Readonly<Record<EvidencePolicy, number>> = {
   measurement: 3,
 };
 
+/**
+ * KickTodo wave 4C (KTACC-6 / KTCORE-4 / KTINT-4) — how long a REVOKED row is
+ * kept before the kvAgeOut lane reclaims it: grants, challenge invites, ICS feed
+ * tokens and wearable webhook tokens. KickTodo had no retention constant to
+ * reuse, so this is the conservative default the task set, matching the host's
+ * other revocation-record windows (`OPENWOP_API_KEY_RETENTION_DAYS` defaults to
+ * 90; `settings:byok-usage` ages at 90). A revoked row only answers "why did
+ * this link/grant stop working", and every reader already treats revoked and
+ * absent identically (uniform not-found), so the window bounds growth without
+ * changing any answer. Keyed on `revokedAt`: a live row has none and is never
+ * touched (kvAgeOut skips a row without the field — never deletes on a guess).
+ */
+export const KICKTODO_REVOKED_ROW_RETENTION_DAYS = 90;
+
 /** The synthetic activity id a collapsed recovery occurrence carries. It rides
  *  the SAME occurrence key + card-id scheme as any other activity, so
  *  supersession, freeze, and the card seam need no special-casing. */

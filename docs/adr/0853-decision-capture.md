@@ -1,6 +1,6 @@
 # ADR 0853 — Decision capture: decisions made in chat, meetings and approvals reach the team ledger, confirmed by a person
 
-Status: Accepted (maintainer go, 2026-10-07: "proceed" on the collaborative-orchestration plan) — P1, P2, P4, P5, P6 implemented; P3 built, and its eval merge gate MET on 2026-10-09
+Status: Accepted (maintainer go, 2026-10-07: "proceed" on the collaborative-orchestration plan) — P1–P7 implemented; P3's eval merge gate MET on 2026-10-09
 
 - **Program:** ROADMAP § "Collaborative orchestration program", item 3, plus the
   two write-back sources ADR 0831 D5 deferred (resolved approvals and
@@ -120,6 +120,23 @@ run), each extracted decision becomes a suggestion (D1) with `source.kind:
 > run-terminal seam: any project-stamped run whose final output carries
 > `decisions` feeds them in as suggestions, so a user-built extraction plugs in.
 
+### D7 — `Decision:` lines in a project's documents (added 2026-10-11)
+
+D6 leaves meeting notes unhandled unless someone builds an extraction workflow,
+and the meeting-ops templates are frozen replay archives (ADR 0775 P2,
+maintainer decision 2026-10-10). The app has no meeting feature; notes live in
+documents. So the D4 convention extends to them: in a document whose owner is a
+PROJECT with a ledger, a line that starts with `Decision:` (after an optional
+list marker, number or bold) and was not in the previous version becomes a
+suggestion (D1) with `source.kind:'meeting'`, linked to the document and
+suggested by whoever saved it. Deterministic and model-free: no eval gate, no
+cost. A decision-record document never feeds itself. At most 20 new lines per
+save; the ref is the document plus the line's hash, so re-adding a line is
+idempotent. Delivered through a core seam (`host/documentVersionObservers.ts`,
+fired by `addVersion` once per inserted version, fail-soft) so the documents
+feature does not import the ledger. The keyword is English in every locale (the
+Ledger tab says so in each language).
+
 ## 3. Consequences
 
 - One path into the ledger's decisions, always through a person; automatic
@@ -138,14 +155,19 @@ run), each extracted decision becomes a suggestion (D1) with `source.kind:
 | P4 | D5 seam + `resolvedBy` + the two rules | Each rule creates exactly one suggestion / proposal; nothing auto-accepts; replay does not duplicate |
 | P5 | D4 inbound `decision:` | Only the prefix, only a project-linked connection |
 | P6 | D6 meeting extraction | Template output validates; each decision → one suggestion |
+| P7 | D7 `Decision:` lines in project documents | One suggestion per new line; org-level docs, no-ledger projects and decision records file nothing; the cap counts new lines only |
 
 ## 5. Implementation record
 
 | Phase | Branch | Evidence |
 |---|---|---|
+| P7 | `feat/meeting-decisions` | `host/documentVersionObservers.ts` (fired in `addVersion` after the pointer moves) + `features/team-intent-ledger/notesSource.ts`; a hint on the Ledger tab (4 locales). `adr0853-notes-decisions.test.ts` (4, real documents routes): a new line ⇒ one suggestion linked to the document, by its writer; only new lines; re-adding is idempotent; past-the-cap filing; org-level / no-ledger / decision-record ⇒ nothing; the parser. **Sabotage-witnessed:** decision records not excluded, no ledger check, the seam not called, no previous-version diff (the cap test). An org-level-document probe could not fail (no project resolves), so the `kind === 'project'` check is defense in depth, not witnessed |
 | P1 | `feat/record-as-decision` | `POST …/decisions` + `provenance.source` + the message action. Backend `adr0853-record-decision.test.ts` (3), frontend `recordDecision.test.tsx` (5) + `recordDecisionButton.test.tsx` (2). **Sabotage-witnessed:** a non-owner's accept accepting (the route's owner check is the only guard: `acceptDelta` does not check), any link accepted, own messages losing the action. No browser leg (chat needs a configured provider; ADR 0852 P3) |
 | P2 | `feat/decision-suggestions` | `team-ledger:suggestions`, the list / dismiss routes, record-from-suggestion, erasure + cascade, "Possible decisions" on the Ledger tab. Backend `adr0853-suggestions.test.ts` (4), frontend `decisionSuggestions.test.tsx` (3). **Sabotage-witnessed:** no 50 cap, no open-check before writing, Record not sending the suggestion id |
 | P4 | `feat/resolution-sources` | The seam + the ledger subscriber. `adr0853-resolution-sources.test.ts` (3, real executor + `resolveAndResume`). **Sabotage-witnessed:** the accept path not announcing, no clarification dedupe |
 | P5 | `feat/inbound-decisions` | `connection.projectId` (write on the project), the inbound seam inside the delivery dedup, `decision:` ⇒ suggestion. `adr0853-inbound-decisions.test.ts` (3, real `handleInboundEvent` with Slack signature + redelivery dedup). **Sabotage-witnessed:** any text accepted. My own test caught that Slack's handler passes the `event` object, not the raw callback. Not tested: the route's `projectId` check (the PUT needs a published workflow) |
 | P6 | `feat/run-decisions` | The `decisions` output contract via `onAnyRunTerminal`. `adr0853-run-decisions.test.ts` (3, real executor + terminal fan-out). **Sabotage-witnessed:** not subscribed |
-| P3 | `feat/decision-suggester` (draft) | Enqueue in-request via `host/humanChatMessageObservers.ts` (channel posts, group-chat turns); classify on a bounded worker tick (never in-request — ADR 0699 D1) with one quick-class headless call, fenced, strict parse, daily budget; a yes files a suggestion. Toggle `decision-capture` (default ON). `adr0853-decision-suggester.test.ts` (5, model injected). **Sabotage-witnessed:** unfenced input, no budget. **Gate MET 2026-10-09:** `scripts/eval-decision-suggester.mts` (30 labelled) on `claude-haiku-4-5-20251001`: precision 0.94, recall 1.00 (tp 15, fp 1, fn 0, tn 14) against ≥ 0.8 / ≥ 0.5, on two runs with the same score. The one false positive is a one-off reminder ("standup moved to 10am tomorrow only") |
+| P3 | `feat/decision-suggester` (#4558, merged 2026-10-10) | Enqueue in-request via `host/humanChatMessageObservers.ts` (channel posts, group-chat turns); classify on a bounded worker tick (never in-request — ADR 0699 D1) with one quick-class headless call, fenced, strict parse, daily budget; a yes files a suggestion. Toggle `decision-capture` (default ON) — **removed before merge** (always on, #4590's decision). `adr0853-decision-suggester.test.ts` (5, model injected). **Sabotage-witnessed:** unfenced input, no budget. **Gate MET 2026-10-09:** `scripts/eval-decision-suggester.mts` (30 labelled) on `claude-haiku-4-5-20251001`: precision 0.94, recall 1.00 (tp 15, fp 1, fn 0, tn 14) against ≥ 0.8 / ≥ 0.5, on two runs with the same score. The one false positive is a one-off reminder ("standup moved to 10am tomorrow only") |
+
+> **Correction 2026-10-12 (grade-tests wave 29):** `adr0853-resolution-sources.test.ts` now runs 4
+> cases, not 3: a Rejected-approval case was added for the path the test header promised but never ran.

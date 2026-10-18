@@ -17,6 +17,8 @@ export const messages = {
   actionReject: 'Rejeter',
   rejectConfirmTitle: 'Rejeter et faire échouer l’exécution ?',
   rejectConfirmBody: 'Rejeter met fin à l’exécution ici. Ce qu’elle a déjà consommé — une requête, un appel au modèle, votre relecture — n’est pas récupéré, et le rejet est irréversible.',
+  cuRejectConfirmTitle: 'Rejeter cette action et mettre fin à la session de navigation ?',
+  cuRejectConfirmBody: 'L’agent de navigation n’effectuera pas cette action et la session s’arrête ici. Ce qu’il a déjà fait sur le site reste fait.',
   actionRequestChanges: 'Demander des modifications',
   actionDefer: 'Reporter',
   actionEscalate: 'Escalader',

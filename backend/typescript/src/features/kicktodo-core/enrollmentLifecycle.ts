@@ -19,6 +19,12 @@ export interface EnrollmentDeletedEvent {
   tenantId: string;
   /** The deleted enrollment's id (`enr:<hex>`). Enrollment-keyed rows key on it. */
   enrollmentId: string;
+  /** KTINT-1 / KTA-11 (KickTodo wave 4C) — the deleted row's owner. The row is gone
+   *  when this fires, so a consumer that must act FOR the participant (remove the
+   *  events written to their calendar) or tell their rows from a later owner's (a
+   *  handed-over circle) cannot read it back. Optional: an emitter that does not
+   *  know it omits it, and a consumer that needs it then does nothing. */
+  ownerSubject?: string;
 }
 
 type EnrollmentDeletedHandler = (e: EnrollmentDeletedEvent) => Promise<void>;
@@ -42,7 +48,43 @@ export async function fireEnrollmentDeleted(e: EnrollmentDeletedEvent): Promise<
   return ran;
 }
 
+// ── KTENR-4 / KTINT-1 (KickTodo wave 4C) — the ABANDON signal ──
+/**
+ * Fired by `abandonEnrollment` AFTER the enrollment row has moved to `abandoned`
+ * (the row still exists, unlike the delete signal). Same house contract as
+ * `onEnrollmentDeleted`: keyed registration, best-effort fan-out, never throws.
+ * It exists so a package core never imports can stop acting for a closed
+ * enrollment — integrations disarms its calendar-sync job and removes the events
+ * it wrote to the participant's calendar.
+ */
+export interface EnrollmentAbandonedEvent {
+  tenantId: string;
+  enrollmentId: string;
+  ownerSubject: string;
+}
+
+type EnrollmentAbandonedHandler = (e: EnrollmentAbandonedEvent) => Promise<void>;
+
+const abandonedHandlers = new Map<string, EnrollmentAbandonedHandler>();
+
+/** A consumer package registers (idempotently, keyed) its abandon cleanup. */
+export function onEnrollmentAbandoned(key: string, fn: EnrollmentAbandonedHandler): void {
+  abandonedHandlers.set(key, fn);
+}
+
+/** Fired by `abandonEnrollment` after its CAS lands. Never throws; returns how many
+ *  handlers ran. */
+export async function fireEnrollmentAbandoned(e: EnrollmentAbandonedEvent): Promise<number> {
+  if (!e.tenantId || !e.enrollmentId) return 0;
+  let ran = 0;
+  for (const h of abandonedHandlers.values()) {
+    try { await h(e); ran += 1; } catch { /* a consumer's cleanup failure must not fail the abandon */ }
+  }
+  return ran;
+}
+
 /** Test-only: drop all registrations so suites don't leak handlers across files. */
 export function __resetEnrollmentLifecycleHooks(): void {
   handlers.clear();
+  abandonedHandlers.clear();
 }

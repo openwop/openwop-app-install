@@ -3,6 +3,11 @@
  * artifact type whose schema gates `artifact.created` (ADR 0055). A valid parametric
  * model validates; malformed ones (no solids, unknown kind, unknown keys, non-numeric
  * geometry) are rejected — the closed schema keeps the inline-SVG projection safe.
+ * Each reject asserts the AJV error that fired (instancePath + message), so a
+ * fixture failing for an unrelated reason cannot stand in for the rule. Sabotage-
+ * witnessed (/grade-tests w34): dropping the solid `additionalProperties:false`,
+ * the units/kind enums, `minItems:1`, or the width/rotation `type:number` each
+ * turn exactly their case red.
  */
 import { describe, it, expect, beforeAll } from 'vitest';
 import { registerCadArtifactType } from '../artifactTypes.js';
@@ -27,25 +32,37 @@ describe('canvas.cad artifact type', () => {
     expect(validateArtifact('canvas.cad', valid)).toMatchObject({ registered: true, valid: true });
   });
   it('rejects a model with no solids', () => {
-    expect(validateArtifact('canvas.cad', { solids: [] }).valid).toBe(false);
+    const r = validateArtifact('canvas.cad', { solids: [] });
+    expect(r.valid).toBe(false);
+    expect(r.errors).toContain('/solids must NOT have fewer than 1 items');
   });
   it('rejects an unknown solid kind', () => {
-    expect(validateArtifact('canvas.cad', { solids: [{ kind: 'torus', radius: 4 }] }).valid).toBe(false);
+    const r = validateArtifact('canvas.cad', { solids: [{ kind: 'torus', radius: 4 }] });
+    expect(r.valid).toBe(false);
+    expect(r.errors).toContain('/solids/0/kind must be equal to one of the allowed values');
   });
   it('rejects unknown solid keys (closed schema)', () => {
-    expect(validateArtifact('canvas.cad', { solids: [{ kind: 'box', onload: 'x' }] }).valid).toBe(false);
+    const r = validateArtifact('canvas.cad', { solids: [{ kind: 'box', onload: 'x' }] });
+    expect(r.valid).toBe(false);
+    expect(r.errors).toContain('/solids/0 must NOT have additional properties');
   });
   it('rejects non-numeric geometry', () => {
-    expect(validateArtifact('canvas.cad', { solids: [{ kind: 'box', width: '80' }] }).valid).toBe(false);
+    const r = validateArtifact('canvas.cad', { solids: [{ kind: 'box', width: '80' }] });
+    expect(r.valid).toBe(false);
+    expect(r.errors).toContain('/solids/0/width must be number');
   });
   it('rejects an unknown units value', () => {
-    expect(validateArtifact('canvas.cad', { units: 'furlongs', solids: [{ kind: 'sphere', radius: 1 }] }).valid).toBe(false);
+    const r = validateArtifact('canvas.cad', { units: 'furlongs', solids: [{ kind: 'sphere', radius: 1 }] });
+    expect(r.valid).toBe(false);
+    expect(r.errors).toContain('/units must be equal to one of the allowed values');
   });
   // ADR 0317 follow-up — the additive in-plane rotation field.
   it('accepts an optional numeric rotation on a solid', () => {
     expect(validateArtifact('canvas.cad', { solids: [{ kind: 'box', width: 40, height: 30, depth: 20, rotation: 45 }] }).valid).toBe(true);
   });
   it('rejects a non-numeric rotation', () => {
-    expect(validateArtifact('canvas.cad', { solids: [{ kind: 'box', rotation: '45' }] }).valid).toBe(false);
+    const r = validateArtifact('canvas.cad', { solids: [{ kind: 'box', rotation: '45' }] });
+    expect(r.valid).toBe(false);
+    expect(r.errors).toContain('/solids/0/rotation must be number');
   });
 });

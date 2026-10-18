@@ -248,6 +248,9 @@ async function callerRolesIn(workspaceId: string, subject: string | undefined): 
   return members.find((m) => m.subject === subject)?.roles ?? [];
 }
 
+/** Server-side lifetime of one board change stream (see the route). */
+export const KANBAN_STREAM_MAX_AGE_MS = 120_000;
+
 export function registerKanbanRoutes(app: Express, deps: Deps): void {
   // Live board refresh (SSE): clients subscribe to a board's change stream
   // and refetch on `board.changed`. Tenant-scoped at subscribe time. A plain
@@ -263,7 +266,13 @@ export function registerKanbanRoutes(app: Express, deps: Deps): void {
       // X-Accel-Buffering: no, which this feed previously lacked (frames could
       // be held by the Cloud Run / Firebase proxy) — heartbeat, per-tenant
       // connection cap, and teardown.
-      const channel = openSseChannel(req, res);
+      // maxAgeMs: the server ends the stream after 2 min and the client
+      // reconnects while the board is still open. An in-page abort (switching
+      // boards) never reached the container in prod, so each stream held a cap
+      // slot for the full 3600 s request timeout (MEASURED 2026-10-10: five
+      // boards opened in 35 s, five 3601 s streams). The 5 s poll covers the
+      // reconnect gap.
+      const channel = openSseChannel(req, res, { maxAgeMs: KANBAN_STREAM_MAX_AGE_MS });
       let unsubscribe: (() => Promise<void>) | null = null;
       channel.onClose(() => { if (unsubscribe) void unsubscribe(); });
       // subscribe is async (it may open a LISTEN connection); if the client

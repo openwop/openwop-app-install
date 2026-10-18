@@ -12,7 +12,7 @@
 
 import type { BackendFeature } from '../types.js';
 import { registerCsmRoutes } from './routes.js';
-import { buildCsmSurface } from './surface.js';
+import { buildCsmSurface, CSM_SURFACE_POLICY } from './surface.js';
 import { registerCsmAgentTools } from './agentTools.js';
 import { onCrmRecordDeleted } from '../../host/crmRecordLifecycle.js';
 import { scrubCrmRefsForDeletedCompany } from './accountsService.js';
@@ -33,7 +33,8 @@ export const csmFeature: BackendFeature = {
   },
   // Face 2 (ADR 0014): `ctx.features.csm` — a thin, tenant-guarded read/health
   // adapter over accountsService that backs the feature.csm.nodes pack.
-  surface: { id: 'csm', build: buildCsmSurface },
+  // ADR 0882 D1 — the closed-world partition + run floors (CSM2WF-1/-2).
+  surface: { id: 'csm', build: buildCsmSurface, orgPolicy: CSM_SURFACE_POLICY },
   toggleDefault: {
     id: 'csm',
     label: 'CSM',
@@ -52,7 +53,9 @@ export const csmFeature: BackendFeature = {
     // unscopeable fan-in), agents 1.1.0 (the prompt states unscored ≠ low, that a
     // recorded measurement failure supersedes the number beside it, and that a
     // factor breakdown is only interpretable with its `healthMethod`).
-    { name: 'feature.csm.nodes', version: '1.4.1' },
-    { name: 'vendor.openwop-app.csm.agents', version: '1.2.1' },
+    // ADR 0882 — nodes 1.5.0 (health-set names its org; the three play nodes),
+    // agents 1.3.0 (the renewals-due read tool).
+    { name: 'feature.csm.nodes', version: '1.5.0' },
+    { name: 'vendor.openwop-app.csm.agents', version: '1.3.0' },
   ],
 };

@@ -13,7 +13,11 @@
  *  - an "AI credits" strip of the configured one-time credit packs (ADR 0821 D7,
  *    `CreditPacksStrip`), only when at least one pack is configured;
  *  - "always free" (the catalog's core) and a short FAQ that says only what the
- *    data supports.
+ *    data supports;
+ *  - ADR 0892 Phase B: each card's state in THIS workspace (on / ready to turn on /
+ *    locked) from the catalog's `activation`, with Enable / Turn off for a workspace
+ *    admin (`viewer.canManageBundles`, the server's own predicate). A refusal names
+ *    its reason; a 402 opens the bundle that would grant the missing features.
  *
  * The white-label composer that used to live here is `/marketplace/distribution`
  * (`DistributionComposerPage`), reached through the Marketplace hub's tabs
@@ -39,9 +43,10 @@ import { useAuth } from '../../auth/useAuth.js';
 import { useBackendSession } from '../../auth/backendSession.js';
 import { openHeaderSignIn, rememberReturn, takeReturn } from '../../auth/signInReturn.js';
 import {
-  fetchFeatureBundles, fetchBundleCommerce, fetchPublicPricing,
-  type BundleCommerce, type FeatureBundleCatalog, type FeatureBundleInfo, type PublicPlanTier,
+  fetchFeatureBundles, fetchBundleCommerce, fetchPublicPricing, enableFeatureBundle, disableFeatureBundle, BundleActivationError,
+  type BundleActivation, type BundleCommerce, type FeatureBundleCatalog, type FeatureBundleInfo, type PublicPlanTier,
 } from './marketplaceClient.js';
+import { reloadEntitlementsNow } from '../../client/entitlementRefresh.js';
 // ADR 0786 D5 — purchases are billing writes gated on `host:billing:manage`;
 // billing's client carries the typed error, so a refusal reads as one.
 import {
@@ -63,6 +68,9 @@ type Filter = 'all' | BundleStatus;
 const TOP_FEATURES = 3;
 const STATUS_CHIP: Record<BundleStatus, string> = {
   owned: 'chip chip--success', included: 'chip chip--success', free: 'chip chip--accent', available: 'chip chip--muted',
+};
+const ACTIVATION_CHIP: Record<BundleActivation['status'], string> = {
+  enabled: 'chip chip--success', available: 'chip chip--accent', locked: 'chip chip--muted',
 };
 
 /** The secondary price line: "or $290/yr · save $58" (monthly view) or
@@ -113,6 +121,8 @@ export function BundleShopPage(): JSX.Element {
   /** MKT-UX-8 — one checkout in flight at a time (a click during the round trip
    *  must not open a second session). Holds the bundle id or `plan:<tier>`. */
   const [buying, setBuying] = useState<string | null>(null);
+  /** ADR 0892 Phase B — the bundle whose enable/disable is in flight (one at a time). */
+  const [activating, setActivating] = useState<string | null>(null);
   const [cadence, setCadenceState] = useState<Cadence>(readCadence);
   const [filter, setFilter] = useState<Filter>('all');
   const [params, setParams] = useSearchParams();
@@ -202,6 +212,12 @@ export function BundleShopPage(): JSX.Element {
   }, [featureParam, catalog, params, setParams]);
 
   const bundles = useMemo(() => catalog?.bundles ?? [], [catalog]);
+  /** Feature id → its label, for naming the features a refusal lists. */
+  const featureLabels = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const f of [...bundles.flatMap((b) => b.features), ...(catalog?.standalone ?? []), ...(catalog?.core ?? [])]) m.set(f.id, f.label ?? f.id);
+    return m;
+  }, [bundles, catalog]);
   const commerceById = useMemo(() => new Map((commerce ?? []).map((c) => [c.bundleId, c])), [commerce]);
 
   const checkout = async (key: string, run: () => Promise<{ url: string; mode: 'live' | 'demo' }>): Promise<void> => {
@@ -224,6 +240,42 @@ export function BundleShopPage(): JSX.Element {
     }
   };
   const buy = (bundleId: string, c: Cadence): void => { void checkout(bundleId, () => buyBundle(bundleId, c)); };
+
+  // ADR 0892 Phase B — turn a bundle on/off for this workspace. The server decides;
+  // its typed refusal is named here, never folded into a generic error.
+  const activationFailure = (e: unknown): string => {
+    if (e instanceof BundleActivationError) {
+      const features = e.ids.map((id) => featureLabels.get(id) ?? id).join(', ');
+      if (e.code === 'bundle_not_entitled') return t('storeActivationNotEntitled', { features });
+      if (e.code === 'feature_killed') return t('storeActivationKilled', { features });
+      if (e.code === 'disable_blocked') return t('storeActivationBlocked', { features });
+      if (e.status === 403) return t('storeActivationForbidden');
+    }
+    return t('storeActivationFailed');
+  };
+  const setBundleActivation = async (b: FeatureBundleInfo, action: 'enable' | 'disable'): Promise<void> => {
+    if (activating) return;
+    setActivating(b.id);
+    try {
+      const r = await (action === 'enable' ? enableFeatureBundle(b.id) : disableFeatureBundle(b.id));
+      setCatalog((prev) => (prev ? { ...prev, activation: { ...prev.activation, [b.id]: { status: r.status } } } : prev));
+      toast.success(t(action === 'enable' ? 'storeActivationEnabled' : 'storeActivationDisabled', { bundle: b.label }));
+      // The nav reads the access map: re-resolve it so the bundle's items appear
+      // (or go) without a reload. Then re-read the store quietly — the write already
+      // succeeded and its answer is shown, so a failed re-read keeps that answer.
+      reloadEntitlementsNow();
+      void fetchFeatureBundles().then(setCatalog).catch(() => undefined);
+    } catch (e) {
+      toast.error(activationFailure(e));
+      // 402 — offer the checkout of the bundle that grants what is missing.
+      if (e instanceof BundleActivationError && e.code === 'bundle_not_entitled') {
+        const seller = e.bundles.find((id) => id !== b.id && bundles.some((x) => x.id === id)) ?? (e.bundles.includes(b.id) ? b.id : undefined);
+        if (seller) setParam('bundle', seller);
+      }
+    } finally {
+      setActivating(null);
+    }
+  };
   const subscribe = (tier: 'pro' | 'team', c: Cadence): void => { void checkout(`plan:${tier}`, () => buyPlan(tier, c)); };
   const buyPack = (packKey: string): void => { void checkout(`pack:${packKey}`, () => buyCreditPack(packKey)); };
 
@@ -296,6 +348,12 @@ export function BundleShopPage(): JSX.Element {
     const buyable = priced && canPurchase(c) && (status === 'available' || status === 'free');
     const complimentary = priced && status === 'free' && !canPurchase(c);
     const titleId = `store-bundle-${b.id}`;
+    const act = catalog?.activation?.[b.id];
+    const canManage = catalog?.viewer?.canManageBundles === true;
+    const actLabel = !act ? null
+      : act.status === 'enabled' ? t('storeActivationOn')
+        : act.status === 'available' ? t('storeActivationReady')
+          : act.killed?.length ? t('storeActivationUnavailable') : t('storeActivationNeedsPlan');
     return (
       <article key={b.id} className="surface-card fstore-card" aria-labelledby={titleId}>
         <div className="u-flex u-items-start u-justify-between u-gap-2">
@@ -316,6 +374,36 @@ export function BundleShopPage(): JSX.Element {
           {more > 0 ? t('storeMoreFeatures', { count: more }) : t('storeDetails')}
         </Button>
         {requires.length ? <span className="u-text-sm muted">{t('storeRequires', { bundles: requires.map((r) => r.label).join(', ') })}</span> : null}
+        {act && actLabel ? (
+          <div className="u-flex u-flex-wrap u-items-center u-justify-between u-gap-2" data-testid={`bundle-activation-${b.id}`}>
+            <span className={ACTIVATION_CHIP[act.status]}>
+              {act.status === 'enabled' ? <CheckIcon aria-hidden size={12} /> : null}{actLabel}
+            </span>
+            {act.status === 'enabled' && canManage ? (
+              <Button
+                variant="secondary"
+                size="sm"
+                disabled={activating !== null}
+                onClick={() => { void setBundleActivation(b, 'disable'); }}
+                aria-label={t('storeActivationTurnOffAria', { bundle: b.label })}
+              >
+                {activating === b.id ? t('storeActivationWorking') : t('storeActivationTurnOff')}
+              </Button>
+            ) : act.status === 'available' && canManage ? (
+              <Button
+                variant={buyable ? 'secondary' : 'primary'}
+                size="sm"
+                disabled={activating !== null}
+                onClick={() => { void setBundleActivation(b, 'enable'); }}
+                aria-label={t('storeActivationEnableAria', { bundle: b.label })}
+              >
+                {activating === b.id ? t('storeActivationWorking') : t('storeActivationEnable')}
+              </Button>
+            ) : act.status === 'available' ? (
+              <span className="u-text-sm muted">{t('storeActivationAskAdmin')}</span>
+            ) : null}
+          </div>
+        ) : null}
         {priced ? (
           <div className="fstore-card__foot">
             <div className="u-grid u-gap-0-5">
@@ -454,6 +542,7 @@ export function BundleShopPage(): JSX.Element {
       ) : (
         <>
           {!billing.enabled ? <Notice variant="info">{t('storeBillingOff')}</Notice> : null}
+          {catalog.activationDegraded ? <Notice variant="warning" announce={t('storeActivationDegraded')}>{t('storeActivationDegraded')}</Notice> : null}
 
           {/* ── Status strip ── */}
           {billing.enabled ? (

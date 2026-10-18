@@ -250,7 +250,13 @@ export async function submitCheckIn(
     ...(evidence.measuredValue !== undefined ? { measuredValue: evidence.measuredValue } : {}),
     createdAt: nowIso(),
   };
-  await checkIns.put(ci);
+  // Code-grade KTC-4 — create-if-absent, not get-then-put: of two concurrent
+  // submits exactly one writes the evidence and fires the completion side effects;
+  // the loser returns the recorded check-in ("recorded evidence wins").
+  if (!(await checkIns.compareAndSwap(null, ci))) {
+    const winner = await checkIns.get(`${tenantId}::${occ.enrollmentId}::${cardId}`);
+    if (winner) return winner;
+  }
 
   // Completion signal: the deterministic card enters the terminal column.
   const card = await getCard(cardId);
@@ -298,6 +304,26 @@ export async function eraseSubjectCheckIns(tenantId: string, subjectKey: string)
     }
   }
   return removed;
+}
+
+/** KTENR-2 / KTX-D2 — rewrite `ownerSubject` from→to on ONE enrollment's check-ins
+ *  (the key carries no subject, so the row is rewritten in place, by CAS). Only rows
+ *  whose owner is exactly `fromSubject` change; returns how many did. Used only by
+ *  the explicit fold backfill (`foldSubjectBackfill.ts`). */
+export async function rewriteCheckInOwner(
+  tenantId: string,
+  enrollmentId: string,
+  fromSubject: string,
+  toSubject: string,
+  opts: { dryRun?: boolean } = {},
+): Promise<number> {
+  if (!tenantId || !enrollmentId || !fromSubject || !toSubject || fromSubject === toSubject) return 0;
+  let n = 0;
+  for (const c of await checkIns.listByPrefix(`${tenantId}::${enrollmentId}::`)) {
+    if (c.tenantId !== tenantId || c.enrollmentId !== enrollmentId || c.ownerSubject !== fromSubject) continue;
+    if (opts.dryRun || (await checkIns.compareAndSwap(c, { ...c, ownerSubject: toSubject }))) n += 1;
+  }
+  return n;
 }
 
 /** Time-based retention (ADR 0077 seam): delete this tenant's check-ins whose

@@ -12,6 +12,7 @@
  * GEN-CC-1 mirror: an `anon:` tenant can never request — refused at the door.
  */
 
+import { createHash } from 'node:crypto';
 import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { createLogger } from '../../observability/logger.js';
 import {
@@ -42,7 +43,7 @@ const requests = new DurableCollection<SellerRequest>(
 const nowIso = (): string => new Date().toISOString();
 
 export class SellerRequestError extends Error {
-  constructor(message: string, readonly code: 'forbidden' | 'nothing-to-pay') {
+  constructor(message: string, readonly code: 'forbidden' | 'nothing-to-pay' | 'conflict') {
     super(message);
   }
 }
@@ -55,9 +56,30 @@ export interface SellerRequestStatus {
   seller: { onboardingState: string; payoutsEnabled: boolean } | null;
 }
 
+const SELLER_REQUEST_CAS_ATTEMPTS = 8;
+
+/** KTM-3 — the approval id a request mints, DERIVED from what it supersedes: the
+ *  (tenant, author) pair plus the approval id of the request row it replaces (none
+ *  for a first request, the rejected one for a re-request). Every concurrent caller
+ *  that read the same row derives the same id, so they create ONE approval between
+ *  them; a later re-request reads a different row and gets a fresh id. */
+function sellerApprovalIdFor(tenantId: string, author: string, supersedes: string | undefined): string {
+  const h = createHash('sha256').update(`${tenantId}::${author}::${supersedes ?? ''}`).digest('hex').slice(0, 32);
+  return `appr:kt-seller:${h}`;
+}
+
 /** Request payout onboarding. Idempotent: an existing pending/approved request
  *  is returned as-is; a REJECTED one may be re-requested (a fresh approval —
- *  operators can change their mind). */
+ *  operators can change their mind).
+ *
+ *  KTCOM-5 / KTM-3 — concurrent requests mint ONE approval. This used to read the
+ *  row, create an approval with a random id, then blind-`put` the row, so two
+ *  concurrent requests both saw "none" and put two cards in the operator's inbox
+ *  (approving the orphan one did nothing). The approval id is now derived from
+ *  the row the caller read (`sellerApprovalIdFor`) and created insert-if-absent,
+ *  and the row is swapped against that read. A loser re-reads and returns the
+ *  winner's row. A crash between the two writes is repaired by the next request,
+ *  which derives the same id and adopts the approval it already made. */
 export async function requestSellerOnboarding(tenantId: string, author: string): Promise<SellerRequest> {
   if (tenantId.startsWith('anon:')) {
     throw new SellerRequestError('Sign in to request payouts — anonymous sessions cannot become sellers.', 'forbidden');
@@ -68,22 +90,27 @@ export async function requestSellerOnboarding(tenantId: string, author: string):
     throw new SellerRequestError('Link a challenge to a product first — payouts need something that sells.', 'nothing-to-pay');
   }
 
-  const existing = await requests.get(`${tenantId}::${author}`);
-  if (existing) {
-    const approval = await getApproval(existing.approvalId);
-    const status = approval && approval.tenantId === tenantId ? approval.status : existing.lastStatus;
-    if (status && status !== 'rejected') return existing; // pruned-but-approved stays settled
-  }
+  for (let attempt = 0; attempt < SELLER_REQUEST_CAS_ATTEMPTS; attempt++) {
+    const existing = await requests.get(`${tenantId}::${author}`);
+    if (existing) {
+      const approval = await getApproval(existing.approvalId);
+      const status = approval && approval.tenantId === tenantId ? approval.status : existing.lastStatus;
+      if (status && status !== 'rejected') return existing; // pruned-but-approved stays settled
+    }
 
-  const approval = await createConnectSellerApproval({
-    tenantId,
-    submittedBy: author,
-    proposal: `KickTodo author requests payout onboarding (${links.length} linked product${links.length === 1 ? '' : 's'}).`,
-  });
-  const row: SellerRequest = { tenantId, authorSubject: author, approvalId: approval.approvalId, createdAt: nowIso() };
-  await requests.put(row);
-  log.info('kicktodo_seller_requested', { tenantId, approvalId: approval.approvalId });
-  return row;
+    const approval = await createConnectSellerApproval({
+      tenantId,
+      submittedBy: author,
+      proposal: `KickTodo author requests payout onboarding (${links.length} linked product${links.length === 1 ? '' : 's'}).`,
+      approvalId: sellerApprovalIdFor(tenantId, author, existing?.approvalId),
+    });
+    const row: SellerRequest = { tenantId, authorSubject: author, approvalId: approval.approvalId, createdAt: nowIso() };
+    if (await requests.compareAndSwap(existing, row)) {
+      log.info('kicktodo_seller_requested', { tenantId, approvalId: approval.approvalId });
+      return row;
+    }
+  }
+  throw new SellerRequestError('Your payout request is being updated concurrently — retry.', 'conflict');
 }
 
 /** The author's OWN request + the tenant's seller state (self-scoped read). */
@@ -95,7 +122,10 @@ export async function sellerRequestStatus(tenantId: string, author: string): Pro
     if (approval && approval.tenantId === tenantId) {
       request = approval.status;
       // Stamp the observed status so the read survives approval pruning.
-      if (row.lastStatus !== approval.status) await requests.put({ ...row, lastStatus: approval.status });
+      // KTM-3 — swap, never put: a blind put of this (possibly stale) row could
+      // overwrite a concurrent re-request's new approval id. A lost swap just
+      // skips the stamp; the next read stamps again.
+      if (row.lastStatus !== approval.status) await requests.compareAndSwap(row, { ...row, lastStatus: approval.status });
     } else {
       request = row.lastStatus ?? 'pending'; // pruned ⇒ the last observed truth
     }

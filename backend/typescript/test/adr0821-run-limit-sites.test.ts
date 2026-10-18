@@ -24,6 +24,7 @@ const WRAPPED: Record<string, number> = {
   'host/mcpSemantics.ts': 1,
   'features/workflow-author/routes.ts': 1,
   'features/creative-briefs/routes.ts': 1,
+  'host/evals/createEvalRun.ts': 1, // ADR 0889 — POST /runs {mode:"eval"}: a real run, under the same limit
 };
 
 const EXCLUDED: Record<string, string> = {

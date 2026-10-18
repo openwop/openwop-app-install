@@ -1,6 +1,6 @@
 {
   "name": "vendor.openwop-app.comments.agents",
-  "version": "1.0.2",
+  "version": "1.0.4",
   "kind": "node",
   "description": "Comments feature agent pack — a reviewer agent that reads a CMS page / KB collection and posts review comments via the openwop:comments.list / openwop:comments.post chat tools. Tool-allowlisted to those two only; it posts comments (which notify a human over the existing inbox), it does not edit the resource.",
   "author": "OpenWOP App",

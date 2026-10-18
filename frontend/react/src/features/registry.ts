@@ -12,6 +12,7 @@ import type { ReactNode } from 'react';
  * (Phase 4). Empty until the first product feature (CRM) ships.
  */
 import type { FeatureRoute } from '../chrome/featureTypes.js';
+import type { FeatureOffline } from '../sw/offlineTypes.js';
 import { crmFeature } from './crm/routes.js';
 import { cdpFeature } from './cdp/routes.js';
 import { csmFeature } from './csm/routes.js';
@@ -116,6 +117,26 @@ export interface FrontendFeature {
    * `match` is a pure pathname test; `render` returns the (lazy) element.
    */
   publicRoutes?: { match: (pathname: string) => boolean; render: () => ReactNode }[];
+  /**
+   * ADR 0873 D1 — offline declaration. Set it to the `offline` export of the
+   * feature's data-only `offline.ts` sibling (the build reads that file);
+   * `src/sw/__tests__/offlineDeclarations.test.ts` pins the two together.
+   */
+  offline?: FeatureOffline;
+  /**
+   * ADR 0889 D8 — tabs a feature adds to the agent workspace (`agents/AgentWorkspacePage`).
+   * Declared here for the same reason as `publicRoutes`: the page never imports a
+   * feature module, so a distribution that excludes the feature drops its tab too.
+   */
+  agentWorkspaceTabs?: AgentWorkspaceTab[];
+}
+
+/** A feature-contributed agent-workspace tab. `labelKey` is in the `agents` i18n namespace. */
+export interface AgentWorkspaceTab {
+  key: string;
+  labelKey: string;
+  /** `onDirtyChange` — the tab reports unsaved edits; the host then asks before switching tabs (ADR 0889 EVUX-5). */
+  render: (p: { agentId: string; persona: string; canWrite: boolean; onDirtyChange?: (dirty: boolean) => void }) => ReactNode;
 }
 
 /** Every frontend feature the app composes. Append a new feature here. */
@@ -135,5 +156,21 @@ export function featureRoutes(): FeatureRoute[] {
   // exists solely on index routes — leaving every detail/deep-link route
   // unguarded by `EntitlementGuard`. Doing it here means it cannot be forgotten
   // by a new feature or a new route within an existing one.
-  return FRONTEND_FEATURES.flatMap((f) => f.routes.map((r) => ({ ...r, ownerFeatureId: f.id })));
+  // ADR 0873 D12 — the offline entitlement mode rides along for the same reason.
+  return FRONTEND_FEATURES.flatMap((f) => f.routes.map((r) => ({
+    ...r,
+    ownerFeatureId: f.id,
+    ...(f.offline?.entitlement ? { ownerOfflineEntitlement: f.offline.entitlement } : {}),
+  })));
+}
+
+/** ADR 0889 — the agent-workspace tabs contributed by the composed features, with their owner. */
+export function featureAgentWorkspaceTabs(): Array<AgentWorkspaceTab & { featureId: string }> {
+  return FRONTEND_FEATURES.flatMap((f) => (f.agentWorkspaceTabs ?? []).map((t) => ({ ...t, featureId: f.id })));
+}
+
+/** ADR 0873 D12 — the features whose online answers `FeatureAccessProvider`
+ *  records as last-known offline grants. */
+export function lastKnownEntitlementFeatureIds(): string[] {
+  return FRONTEND_FEATURES.filter((f) => f.offline?.entitlement === 'last-known').map((f) => f.id);
 }

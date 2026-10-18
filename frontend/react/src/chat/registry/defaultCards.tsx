@@ -14,7 +14,7 @@ import { registerCard } from './CardRegistry.js';
 import type { CardProps } from './types.js';
 import { ConnectionRequiredCard } from '../cards/ConnectionRequiredCard.js';
 import { TextField, TextareaField } from '../../ui/Field.js';
-import { GateEvidence, hasGateEvidence } from '../reviews/GateEvidence.js';
+import { GateEvidence, hasGateEvidence, isBrowserActionGate } from '../reviews/GateEvidence.js';
 import { Notice } from '../../ui/index.js';
 import { useReviewStatusByRunNode } from '../reviews/reviewStatusStore.js';
 import { confirm } from '../../ui/confirm.js';
@@ -144,9 +144,12 @@ function ApprovalCard({ payload, onAction, isLoading, context, autoFocus }: Card
   // path is what teaches people to click through the one that matters — and the
   // ≥2-option "Pick this" button is an approve, so it is ungated too.
   async function resolveWithRejectConfirm(action: string): Promise<void> {
+    // ADR 0894 — a browser-action gate's reject ends the browser session (the run
+    // completes), so it gets its own copy rather than "fail the run".
+    const browserGate = isBrowserActionGate(data);
     if (action === 'reject' && !(await confirm({
-      title: t('interrupts:rejectConfirmTitle'),
-      body: t('interrupts:rejectConfirmBody'),
+      title: t(browserGate ? 'interrupts:cuRejectConfirmTitle' : 'interrupts:rejectConfirmTitle'),
+      body: t(browserGate ? 'interrupts:cuRejectConfirmBody' : 'interrupts:rejectConfirmBody'),
       danger: true,
       confirmLabel: t('interrupts:actionReject'),
     }))) return;

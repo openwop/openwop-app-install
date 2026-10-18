@@ -76,6 +76,12 @@ describe('ADR 0574 — dissolution, cooldown, suspension, and the ONE purchasabl
     await setListingApproval('p.region', 'approved');
     const pricing = (await listingPricingFor(['p.region'], 'buyer-t'))['p.region'];
     expect(pricing?.purchasable).toBe(false); // the projection agrees with checkout's region 409
+    // Control: an identical importer-minted seller IN the platform region is purchasable,
+    // so the `false` above is the region conjunct and nothing else.
+    await importSellers([{ tenantId: 'sl-home', stripeAccountId: 'acct_home_1', region: platformRegion() }]);
+    await upsertPaidListing('sl-home', { packName: 'p.region-ok', lane: 'native-paid', priceMajorUnits: 10, currency: 'usd' });
+    await setListingApproval('p.region-ok', 'approved');
+    expect((await listingPricingFor(['p.region-ok'], 'buyer-t'))['p.region-ok']?.purchasable).toBe(true);
   });
 });
 
@@ -103,7 +109,7 @@ describe('ADR 0576 — the binding invariant', () => {
     await importSellers([{ tenantId: 'ok-t', stripeAccountId: 'acct_ok' }]);
     await bindSellerAccount('ghost-t', 'acct_ghost'); // index row, NO seller row
     const out = await reconcileSellerBindings();
-    expect(out.checked).toBeGreaterThanOrEqual(2);
+    expect(out.checked).toBe(2); // the store is reset: exactly acct_ok + acct_ghost
     expect(out.divergent).toBe(1);
   });
 });

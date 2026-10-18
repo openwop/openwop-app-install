@@ -31,17 +31,24 @@ describe('a2ui-surface-no-code-exec', () => {
     // …and produced NO injected elements and ran NO code.
     expect(document.querySelector('img')).toBeNull();
     expect(document.querySelector('script')).toBeNull();
+    // Defence in depth only: jsdom neither runs injected <script> nor loads <img>,
+    // so this line cannot fail here (honest ceiling) — the element checks above carry the claim.
     expect((globalThis as Record<string, unknown>).__pwned).toBeUndefined();
   });
 
   it('fails closed on an out-of-catalog component — no interactive render', () => {
     render(<A2uiSurfaceCard
-      payload={{ catalogVersion: A2UI_CATALOG_VERSION, surface: { components: [{ component: 'iframe', src: 'https://evil.example' }] } }}
+      // A valid button rides along, so admitting `iframe` would render it — the
+      // "no button" check can fail.
+      payload={{ catalogVersion: A2UI_CATALOG_VERSION, surface: { components: [
+        { component: 'iframe', src: 'https://evil.example' },
+        { component: 'action.button', id: 'go', label: 'Go', action: { target: 'resume' } },
+      ] } }}
       cardType="ui.a2ui-surface" context={ctx} onAction={vi.fn()}
     />);
     expect(screen.queryByRole('button')).toBeNull();
     expect(document.querySelector('iframe')).toBeNull();
-    expect(screen.getByText(/could not be rendered safely/)).toBeTruthy();
+    expect(screen.getByText(/could not be rendered safely: component "iframe" is not in the host A2UI catalog/)).toBeTruthy();
   });
 });
 
@@ -49,10 +56,8 @@ describe('a2ui-surface-no-network-egress', () => {
   it('opens no network connection when rendering or acting — egress is only via onAction', () => {
     const fetchSpy = vi.fn();
     const xhrOpen = vi.fn();
-    const origFetch = globalThis.fetch;
-    const origXHR = globalThis.XMLHttpRequest;
-    (globalThis as { fetch?: unknown }).fetch = fetchSpy;
-    (globalThis as { XMLHttpRequest?: unknown }).XMLHttpRequest = class { open = xhrOpen; send = vi.fn(); setRequestHeader = vi.fn(); } as unknown;
+    vi.stubGlobal('fetch', fetchSpy);
+    vi.stubGlobal('XMLHttpRequest', class { open = xhrOpen; send = vi.fn(); setRequestHeader = vi.fn(); });
     try {
       const onAction = vi.fn().mockResolvedValue(undefined);
       render(<A2uiSurfaceCard
@@ -70,8 +75,7 @@ describe('a2ui-surface-no-network-egress', () => {
       expect(fetchSpy).not.toHaveBeenCalled();
       expect(xhrOpen).not.toHaveBeenCalled();
     } finally {
-      (globalThis as { fetch?: unknown }).fetch = origFetch;
-      (globalThis as { XMLHttpRequest?: unknown }).XMLHttpRequest = origXHR;
+      vi.unstubAllGlobals();
     }
   });
 });

@@ -4,6 +4,11 @@
  * `armsBackgroundPan` gate (plain-left-drag pans for no-marquee consumers). The
  * pointer/zoom GEOMETRY is proven in the pure `viewport.ts` suite (jsdom drops
  * pointer `button`/`pointerType`), so the pan gate is tested as a pure predicate.
+ *
+ * Named jsdom ceilings: (1) synthetic pointer events carry no `button` /
+ * `pointerType`, so arming is proven on `armsBackgroundPan`, not via fireEvent;
+ * (2) jsdom does not implement `isContentEditable`, so that branch of
+ * `isInteractiveTarget` is not reachable here.
  */
 import { describe, it, expect } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
@@ -27,11 +32,19 @@ describe('useCanvasViewport — fitBounds (ADR 0337 Phase 2c)', () => {
     act(() => { result.current.wrapperProps.ref(el); });
     // A tiny box would magnify to fill the surface, but the ≤1 fit clamp caps it
     // at 1:1 — exactly the graph's fit-all-nodes-never-past-100% behavior.
-    act(() => { result.current.fitBounds({ minX: 0, minY: 0, maxX: 100, maxY: 100 }, { min: 0.25, max: 1 }); });
+    // An off-origin, non-square box (100×50 at 10,20) so pan x/y and the
+    // binding axis are all distinguishable. Expectations are hand-derived:
+    // pan = (vw - cw·z)/2 - minX·z per axis, margin 40.
+    const b = { minX: 10, minY: 20, maxX: 110, maxY: 70 };
+    act(() => { result.current.fitBounds(b, { min: 0.25, max: 1 }); });
     expect(result.current.zoom).toBe(1);
-    // Without the per-fit override, the interaction clamp lets it magnify past 1.
-    act(() => { result.current.fitBounds({ minX: 0, minY: 0, maxX: 100, maxY: 100 }); });
-    expect(result.current.zoom).toBeGreaterThan(1);
+    expect(result.current.pan.x).toBeCloseTo(440, 10); // (1000-100)/2 - 10
+    expect(result.current.pan.y).toBeCloseTo(355, 10); // (800-50)/2 - 20
+    // Without the per-fit override, the interaction clamp (2.5) bounds it instead.
+    act(() => { result.current.fitBounds(b); });
+    expect(result.current.zoom).toBe(2.5);
+    expect(result.current.pan.x).toBeCloseTo(350, 10);   // (1000-250)/2 - 25
+    expect(result.current.pan.y).toBeCloseTo(287.5, 10); // (800-125)/2 - 50
   });
 
   it('no-ops on an unmeasured surface and on zero-area bounds', () => {
@@ -39,6 +52,11 @@ describe('useCanvasViewport — fitBounds (ADR 0337 Phase 2c)', () => {
     // Never bound a ref → unmeasured → no change.
     act(() => { result.current.fitBounds({ minX: 0, minY: 0, maxX: 100, maxY: 100 }); });
     expect(result.current.zoom).toBe(1);
+    // Bound but UNMEASURED (0×0 — jsdom's default, or a first paint) → no change.
+    act(() => { result.current.wrapperProps.ref(measuredDiv(0, 0)); });
+    act(() => { result.current.fitBounds({ minX: 0, minY: 0, maxX: 100, maxY: 100 }); });
+    expect(result.current.zoom).toBe(1);
+    expect(result.current.pan).toEqual({ x: 0, y: 0 });
     const el = measuredDiv(1000, 800);
     act(() => { result.current.wrapperProps.ref(el); });
     act(() => { result.current.fitBounds({ minX: 50, minY: 50, maxX: 50, maxY: 50 }); }); // degenerate

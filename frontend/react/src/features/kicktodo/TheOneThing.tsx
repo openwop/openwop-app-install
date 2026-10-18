@@ -10,6 +10,7 @@ import { Button } from '../../ui/Button.js';
 import { useState, type CSSProperties, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { CheckIcon } from '../../ui/icons/index.js';
+import { TextField } from '../../ui/Field.js';
 import type { CheckInEvidence, TodayAction } from '../../client/kicktodoClient.js';
 
 /** Wash anchor for the local time of day: morning left, afternoon centre, evening right. */
@@ -91,20 +92,17 @@ export function ActionCompleter({ action, busy, onComplete }: {
 
   return (
     <div className="kt-onething__evidence">
+      {/* PT-6 — the shared `ui/Field` primitive owns the label↔control wiring. */}
       {policy === 'measurement' && (
-        <label className="u-flex u-items-center u-gap-2 u-fs-13">
-          <span>{t('evidenceMeasurementLabel')}</span>
-          <input type="number" inputMode="decimal" value={measure} disabled={busy}
-            onChange={(e) => setMeasure(e.target.value)} />
-        </label>
+        <TextField label={t('evidenceMeasurementLabel')} className="u-fs-13"
+          type="number" inputMode="decimal" value={measure} disabled={busy}
+          onChange={(e) => setMeasure(e.target.value)} />
       )}
       {(policy === 'note' || policy === 'photo') && (
-        <label className="u-flex u-items-center u-gap-2 u-fs-13">
-          <span>{noteLabel}</span>
-          <input type="text" value={note} disabled={busy} maxLength={280}
-            onChange={(e) => setNote(e.target.value)}
-            placeholder={policy === 'photo' ? t('evidencePhotoPlaceholder') : t('evidenceNotePlaceholder')} />
-        </label>
+        <TextField label={noteLabel} className="u-fs-13"
+          type="text" value={note} disabled={busy} maxLength={280}
+          onChange={(e) => setNote(e.target.value)}
+          placeholder={policy === 'photo' ? t('evidencePhotoPlaceholder') : t('evidenceNotePlaceholder')} />
       )}
       <div>
         {/* The CTA names the evidence it collects (ADR 0436 §4.3 — the control IS

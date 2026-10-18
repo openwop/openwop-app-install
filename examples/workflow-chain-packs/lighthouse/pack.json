@@ -1,6 +1,6 @@
 {
   "name": "core.openwop.workflows.lighthouse",
-  "version": "1.1.11",
+  "version": "1.2.0",
   "kind": "workflow-chain",
   "description": "Real-work workflow pack (RFC 0013, ADR 0149 / ADR 0155 follow-on). The five zero-config 'lighthouse' workflows from the ADR 0149 catalog — Lead Triage, Account Brief, Renewal & Churn-Risk Digest, RFP Response, and Post-Meeting Follow-up — authored entirely over node typeIds shipped with this host (feature.crm/kb/analytics + core.ai.chatCompletion + core.chat.approvalGate + core.openwop.integration.*). Each rides real tenant data through the feature node packs, reasons with the LLM node, gates every external send behind a human approval, and delivers a usable artifact. Tenant-specific values are RUN PARAMETERS (never hardcoded) so the expansion stays replay-deterministic. Picking one in the builder instantiates a fully-editable, runnable, assignable workflow.",
   "author": "openwop",
@@ -10,7 +10,7 @@
   "chains": [
     {
       "chainId": "lighthouse.lead-triage",
-      "version": "1.1.1",
+      "version": "1.2.0",
       "label": "Inbound Lead Triage & Routing",
       "description": "Enrich and score an inbound lead, draft a first-touch reply, gate it for review, then send and log it. Real CRM data via feature.crm; every send behind a human approval. ADR 0582 §11 — the send hangs off a `truthy approved` conditioned edge AND the drafted text is routed THROUGH the gate (`draft.content → approve.artifact → send.text`), so a REJECTED review sends nothing. Both halves are load-bearing: `core.chat.approvalGate` returns status:'success' on reject too, and a conditioned edge ALONE is not enough — an unconditional sibling data edge into the send node satisfies `all_success` by itself and would mail the draft anyway.",
       "parameters": {
@@ -19,8 +19,8 @@
         "required": ["recipientEmail", "senderEmail"],
         "properties": {
           "firstTouchTone": { "type": "string", "default": "friendly, concise, and helpful", "description": "Tone for the drafted first-touch reply." },
-          "provider": { "type": "string", "default": "anthropic", "description": "AI provider id for this chain's LLM nodes. Frozen into this chain's AI nodes when the workflow is created (ADR 0498 — a concrete provider is what keeps replay deterministic). Override at instantiation to use a different vendor or your own BYOK provider; whichever you pick, the workspace needs a key for it — the workflow will not fall back to another provider on its own." },
-          "model": { "type": "string", "default": "claude-sonnet-4-6", "description": "Model id for this chain's LLM nodes. Must be advertised by `provider` in the host catalog; override at instantiation." },
+          "provider": { "type": "string", "description": "AI provider id for this chain's model-calling nodes. Set it to fix a provider into those nodes when the workflow is created. Leave it unset and each run uses the run's chosen provider, else the workspace's AI setting, else the host's catalog default (ADR 0903); whichever is chosen is recorded on the run, so a replay or fork uses the same one. The workspace needs a key for the provider that runs." },
+          "model": { "type": "string", "description": "Model id for this chain's model-calling nodes. Must be offered by the provider in the host catalog. Leave it unset to use the provider's model from the same choice (ADR 0903)." },
           "senderEmail": { "type": "string", "description": "Verified sender address these emails are sent from." },
           "recipientEmail": { "type": "string", "description": "The address this email is sent to." },
           "emailSubject": { "type": "string", "default": "Following up on your enquiry", "description": "Subject line for the sent email." }
@@ -56,7 +56,7 @@
     },
     {
       "chainId": "lighthouse.account-brief",
-      "version": "1.0.1",
+      "version": "1.1.0",
       "label": "Account Brief & Next-Step Draft",
       "description": "Pull a company profile and its deals, synthesize an account brief with recommended next steps and a draft outreach, gate it, then notify the owner. Real CRM data; advisory send behind approval. ADR 0582 §11 — the notification hangs off a `truthy approved` conditioned edge and the brief is routed THROUGH the gate (`brief.content → approve.artifact → notify.message`), so a REJECTED review notifies no one.",
       "parameters": {
@@ -66,8 +66,8 @@
         "properties": {
           "orgId": { "type": "string", "description": "The org the CRM company/deals belong to." },
           "companyId": { "type": "string", "description": "The CRM company id to brief." },
-          "provider": { "type": "string", "default": "anthropic", "description": "AI provider id for this chain's LLM nodes. Frozen into this chain's AI nodes when the workflow is created (ADR 0498 — a concrete provider is what keeps replay deterministic). Override at instantiation to use a different vendor or your own BYOK provider; whichever you pick, the workspace needs a key for it — the workflow will not fall back to another provider on its own." },
-          "model": { "type": "string", "default": "claude-sonnet-4-6", "description": "Model id for this chain's LLM nodes. Must be advertised by `provider` in the host catalog; override at instantiation." }
+          "provider": { "type": "string", "description": "AI provider id for this chain's model-calling nodes. Set it to fix a provider into those nodes when the workflow is created. Leave it unset and each run uses the run's chosen provider, else the workspace's AI setting, else the host's catalog default (ADR 0903); whichever is chosen is recorded on the run, so a replay or fork uses the same one. The workspace needs a key for the provider that runs." },
+          "model": { "type": "string", "description": "Model id for this chain's model-calling nodes. Must be offered by the provider in the host catalog. Leave it unset to use the provider's model from the same choice (ADR 0903)." }
         }
       },
       "capabilities": ["side-effectful"],
@@ -95,7 +95,7 @@
     },
     {
       "chainId": "lighthouse.renewal-risk",
-      "version": "1.1.1",
+      "version": "1.2.0",
       "label": "Renewal & Churn-Risk Digest",
       "description": "Combine open deals with usage analytics to score renewal/churn risk, then push an at-risk list with save plays to the CSM. Real CRM + analytics data; advisory, no external send.",
       "parameters": {
@@ -105,8 +105,8 @@
         "properties": {
           "orgId": { "type": "string", "description": "The org whose open deals + usage analytics to assess." },
           "segment": { "type": "string", "default": "all active accounts", "description": "Account segment to assess." },
-          "provider": { "type": "string", "default": "anthropic", "description": "AI provider id for this chain's LLM nodes. Frozen into this chain's AI nodes when the workflow is created (ADR 0498 — a concrete provider is what keeps replay deterministic). Override at instantiation to use a different vendor or your own BYOK provider; whichever you pick, the workspace needs a key for it — the workflow will not fall back to another provider on its own." },
-          "model": { "type": "string", "default": "claude-sonnet-4-6", "description": "Model id for this chain's LLM nodes. Must be advertised by `provider` in the host catalog; override at instantiation." }
+          "provider": { "type": "string", "description": "AI provider id for this chain's model-calling nodes. Set it to fix a provider into those nodes when the workflow is created. Leave it unset and each run uses the run's chosen provider, else the workspace's AI setting, else the host's catalog default (ADR 0903); whichever is chosen is recorded on the run, so a replay or fork uses the same one. The workspace needs a key for the provider that runs." },
+          "model": { "type": "string", "description": "Model id for this chain's model-calling nodes. Must be offered by the provider in the host catalog. Leave it unset to use the provider's model from the same choice (ADR 0903)." }
         }
       },
       "capabilities": ["side-effectful"],
@@ -132,7 +132,7 @@
     },
     {
       "chainId": "lighthouse.rfp-response",
-      "version": "1.0.3",
+      "version": "1.1.0",
       "label": "RFP / Proposal Response Assembly",
       "description": "Retrieve answers and past proposals from the knowledge base, draft an RFP response grounded in them, and gate it for SME review. Real KB data via feature.kb RAG.",
       "parameters": {
@@ -141,8 +141,8 @@
         "required": ["rfpText", "orgId", "collectionId"],
         "properties": {
           "rfpText": { "type": "string", "description": "The RFP requirements text to respond to." },
-          "provider": { "type": "string", "default": "anthropic", "description": "AI provider id for this chain's LLM nodes. Frozen into this chain's AI nodes when the workflow is created (ADR 0498 — a concrete provider is what keeps replay deterministic). Override at instantiation to use a different vendor or your own BYOK provider; whichever you pick, the workspace needs a key for it — the workflow will not fall back to another provider on its own." },
-          "model": { "type": "string", "default": "claude-sonnet-4-6", "description": "Model id for this chain's LLM nodes. Must be advertised by `provider` in the host catalog; override at instantiation." },
+          "provider": { "type": "string", "description": "AI provider id for this chain's model-calling nodes. Set it to fix a provider into those nodes when the workflow is created. Leave it unset and each run uses the run's chosen provider, else the workspace's AI setting, else the host's catalog default (ADR 0903); whichever is chosen is recorded on the run, so a replay or fork uses the same one. The workspace needs a key for the provider that runs." },
+          "model": { "type": "string", "description": "Model id for this chain's model-calling nodes. Must be offered by the provider in the host catalog. Leave it unset to use the provider's model from the same choice (ADR 0903)." },
           "orgId": { "type": "string", "description": "The org whose knowledge base is searched. Must be the same org the collection belongs to, or nothing is found." },
           "collectionId": { "type": "string", "description": "The KB collection id to search (create via the Knowledge feature or knowledge-sync)." }
         }
@@ -172,7 +172,7 @@
     },
     {
       "chainId": "lighthouse.post-meeting",
-      "version": "1.1.1",
+      "version": "1.2.0",
       "label": "Post-Meeting Follow-up",
       "description": "Extract decisions, action items, and owners from a meeting transcript, draft a follow-up email, gate it, then send. Transcript supplied as a run parameter; every send behind a human approval. ADR 0582 §11 — the send hangs off a `truthy approved` conditioned edge and the drafted text is routed THROUGH the gate (`extract.content → approve.artifact → send.text`), so a REJECTED review sends nothing.",
       "parameters": {
@@ -181,8 +181,8 @@
         "required": ["recipientEmail", "senderEmail", "transcript"],
         "properties": {
           "transcript": { "type": "string", "description": "The meeting transcript to summarize." },
-          "provider": { "type": "string", "default": "anthropic", "description": "AI provider id for this chain's LLM nodes. Frozen into this chain's AI nodes when the workflow is created (ADR 0498 — a concrete provider is what keeps replay deterministic). Override at instantiation to use a different vendor or your own BYOK provider; whichever you pick, the workspace needs a key for it — the workflow will not fall back to another provider on its own." },
-          "model": { "type": "string", "default": "claude-sonnet-4-6", "description": "Model id for this chain's LLM nodes. Must be advertised by `provider` in the host catalog; override at instantiation." },
+          "provider": { "type": "string", "description": "AI provider id for this chain's model-calling nodes. Set it to fix a provider into those nodes when the workflow is created. Leave it unset and each run uses the run's chosen provider, else the workspace's AI setting, else the host's catalog default (ADR 0903); whichever is chosen is recorded on the run, so a replay or fork uses the same one. The workspace needs a key for the provider that runs." },
+          "model": { "type": "string", "description": "Model id for this chain's model-calling nodes. Must be offered by the provider in the host catalog. Leave it unset to use the provider's model from the same choice (ADR 0903)." },
           "senderEmail": { "type": "string", "description": "Verified sender address these emails are sent from." },
           "recipientEmail": { "type": "string", "description": "The address this email is sent to." },
           "emailSubject": { "type": "string", "default": "Recap and next steps", "description": "Subject line for the sent email." }

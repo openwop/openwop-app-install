@@ -8,32 +8,36 @@
  * is REAL links whose hrefs carry the current URL; ⌘K focuses search but
  * YIELDS when the user is typing elsewhere (the negative control is the
  * guard's whole point); the progress bar is decorative and tracks scroll.
+ *
+ * Sabotages that red it (/grade-tests w50): a ToC href built from the heading
+ * text, an always-rendered ToC, a share URL that is not `window.location.href`
+ * (X, LinkedIn or the mailto body), a dropped `rel`, a progress formula off the
+ * viewport bottom, a dropped `aria-hidden`, a bar not under the header, Ctrl-K
+ * that does not focus+select, and a typing guard that does not yield.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import type { BlogPost } from '../blogClient.js';
+import type { PublicPage, PublicPageResult } from '../siteClient.js';
 
 const fetchBlog = vi.fn<() => Promise<BlogPost[] | null>>();
-const fetchPublicPage = vi.fn<() => Promise<unknown>>();
+const pageResult = vi.fn<() => Promise<PublicPageResult>>();
 
 vi.mock('../blogClient.js', async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
   fetchBlog: () => fetchBlog(),
   blogFeedUrl: () => 'https://example.test/feed.xml',
 }));
-vi.mock('../siteClient.js', () => ({
-  fetchPublicPage: () => fetchPublicPage(),
-  fetchPublicPageResult: async () => {
-    const p = await fetchPublicPage();
-    return p ? { status: 'ok', page: p } : { status: 'notFound' };
-  },
+vi.mock('../siteClient.js', async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  fetchPublicPageResult: () => pageResult(),
 }));
 
 const { BlogPage } = await import('../BlogPage.js');
 const { BlogPostPage } = await import('../BlogPostPage.js');
 
-afterEach(() => { cleanup(); vi.clearAllMocks(); });
+afterEach(() => { cleanup(); vi.resetAllMocks(); vi.restoreAllMocks(); });
 
 const post = (slug: string): BlogPost => ({
   pageId: `page:${slug}`, slug, title: `T ${slug}`, excerpt: 'x',
@@ -41,16 +45,17 @@ const post = (slug: string): BlogPost => ({
 });
 
 /** A page whose sections render THREE headings (deriveToc's own gate is ≥2). */
-const richPage = {
-  slug: 'post-a', title: 'Post A',
+const SEO: PublicPage['seo'] = { title: 'Post A', description: '', canonicalUrl: '', ogTitle: 'Post A', ogDescription: '', noindex: false };
+const richPage: PublicPage = {
+  slug: 'post-a', title: 'Post A', updatedAt: '2026-07-20T00:00:00.000Z',
   sections: [
     { sectionId: 's1', type: 'richText', data: { heading: 'Alpha', text: 'one' } },
     { sectionId: 's2', type: 'richText', data: { heading: 'Beta', text: 'two' } },
     { sectionId: 's3', type: 'richText', data: { heading: 'Gamma', text: 'three' } },
   ],
-  seo: {},
+  seo: SEO,
 };
-const flatPage = { ...richPage, sections: [{ sectionId: 's1', type: 'richText', data: { text: 'no headings here' } }] };
+const flatPage: PublicPage = { ...richPage, sections: [{ sectionId: 's1', type: 'richText', data: { text: 'no headings here' } }] };
 
 const renderPost = () =>
   render(<MemoryRouter initialEntries={['/blog/post-a']}><BlogPostPage orgId="org-1" slug="post-a" /></MemoryRouter>);
@@ -58,7 +63,7 @@ const renderPost = () =>
 describe('R3-G2 — table of contents from the rendered body', () => {
   it('lists each heading as a fragment link when the body has enough of them', async () => {
     fetchBlog.mockResolvedValue([post('post-a')]);
-    fetchPublicPage.mockResolvedValue(richPage);
+    pageResult.mockResolvedValue({ status: 'ok', page: richPage });
     renderPost();
     await screen.findByRole('heading', { name: 'Alpha' });
 
@@ -74,7 +79,7 @@ describe('R3-G2 — table of contents from the rendered body', () => {
 
   it('grows NO ToC on a post without headings (the noise gate)', async () => {
     fetchBlog.mockResolvedValue([post('post-a')]);
-    fetchPublicPage.mockResolvedValue(flatPage);
+    pageResult.mockResolvedValue({ status: 'ok', page: flatPage });
     renderPost();
     await screen.findByText('no headings here');
     expect(screen.queryByText(/on this page/i), 'a short post never grows chrome').toBeNull();
@@ -84,7 +89,7 @@ describe('R3-G2 — table of contents from the rendered body', () => {
 describe('R3-G4 — the share row is REAL links carrying the current URL', () => {
   it('renders X / LinkedIn / email as anchors with the platform intent URLs', async () => {
     fetchBlog.mockResolvedValue([post('post-a')]);
-    fetchPublicPage.mockResolvedValue(richPage);
+    pageResult.mockResolvedValue({ status: 'ok', page: richPage });
     renderPost();
     await screen.findByRole('heading', { name: 'Alpha' });
 
@@ -94,20 +99,27 @@ describe('R3-G4 — the share row is REAL links carrying the current URL', () =>
 
     // Real links — middle-click and copy-address must work, so NO js-only
     // pseudo-anchors: a genuine external href with a safe rel.
-    expect(x.getAttribute('href')).toContain('x.com/intent/post');
+    const href = (a: HTMLElement): URL => new URL(a.getAttribute('href') ?? '');
+    expect(href(x).origin + href(x).pathname).toBe('https://x.com/intent/post');
     expect(x.getAttribute('rel')).toContain('noopener');
     expect(x.getAttribute('target')).toBe('_blank');
-    expect(li.getAttribute('href')).toContain('linkedin.com/sharing/share-offsite');
-    expect(mail.getAttribute('href')).toMatch(/^mailto:\?/);
-    // The URL being shared is the page's own.
-    expect(decodeURIComponent(x.getAttribute('href') ?? '')).toContain(window.location.origin);
+    expect(href(li).origin + href(li).pathname).toBe('https://www.linkedin.com/sharing/share-offsite/');
+    expect(li.getAttribute('rel')).toContain('noopener');
+    expect(li.getAttribute('target')).toBe('_blank');
+    const mailHref = mail.getAttribute('href') ?? '';
+    expect(mailHref.startsWith('mailto:?')).toBe(true);
+    // The URL being shared is the page's own — the WHOLE href, on every channel.
+    expect(href(x).searchParams.get('url')).toBe(window.location.href);
+    expect(href(x).searchParams.get('text')).toBe('Post A');
+    expect(href(li).searchParams.get('url')).toBe(window.location.href);
+    expect(new URLSearchParams(mailHref.slice('mailto:?'.length)).get('body')).toBe(window.location.href);
   });
 });
 
 describe('R3-G1 — the reading-progress bar', () => {
   it('is decorative (aria-hidden) and tracks scroll into the article', async () => {
     fetchBlog.mockResolvedValue([post('post-a')]);
-    fetchPublicPage.mockResolvedValue(richPage);
+    pageResult.mockResolvedValue({ status: 'ok', page: richPage });
     renderPost();
     await screen.findByRole('heading', { name: 'Alpha' });
 
@@ -119,10 +131,9 @@ describe('R3-G1 — the reading-progress bar', () => {
     const bar = wrap.firstElementChild as HTMLElement;
     // The measured element is the body wrapper the page hands to the bar (the
     // unclassed div wrapping RenderSections).
-    const bodyEl = (document.querySelector('.fp-post > div:not(.fp-shell):not(.fp-post__progress)') ?? document.body) as HTMLElement;
-    vi.spyOn(bodyEl, 'getBoundingClientRect').mockReturnValue({
-      top: window.innerHeight - 250, height: 1000, bottom: 0, left: 0, right: 0, width: 0, x: 0, y: 0, toJSON: () => ({}),
-    } as DOMRect);
+    const bodyEl = document.querySelector<HTMLElement>('.fp-post > div:not(.fp-shell):not(.fp-post__progress)');
+    if (!bodyEl) throw new Error('the article body wrapper is missing — the selector drifted');
+    vi.spyOn(bodyEl, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, window.innerHeight - 250, 0, 1000));
     fireEvent.scroll(window);
     await waitFor(() => expect(bar.style.transform).toBe('scaleX(0.25)'));
   });
@@ -132,13 +143,11 @@ describe('R3-G1 — the reading-progress bar', () => {
     // fixed bar painted OVER its top edge. The bar must track the header's
     // bottom (and fall back to 0 on a header-less white-label shell).
     fetchBlog.mockResolvedValue([post('post-a')]);
-    fetchPublicPage.mockResolvedValue(richPage);
+    pageResult.mockResolvedValue({ status: 'ok', page: richPage });
     const header = document.createElement('header');
     header.className = 'public-shell-header';
     document.body.prepend(header);
-    vi.spyOn(header, 'getBoundingClientRect').mockReturnValue({
-      top: 0, height: 56, bottom: 56, left: 0, right: 0, width: 0, x: 0, y: 0, toJSON: () => ({}),
-    } as DOMRect);
+    vi.spyOn(header, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, 0, 56));
     try {
       renderPost();
       await screen.findByRole('heading', { name: 'Alpha' });
@@ -154,11 +163,17 @@ describe('R3-G3 — Cmd/Ctrl-K focuses blog search, and YIELDS while typing else
   it('focuses and selects the search input on Ctrl-K', async () => {
     fetchBlog.mockResolvedValue(Array.from({ length: 6 }, (_, i) => post(`p-${i}`))); // the search band gates on FILTER_MIN_POSTS
     render(<MemoryRouter><BlogPage orgId="org-1" route={{ kind: 'index' }} /></MemoryRouter>);
-    const input = await screen.findByRole('textbox', { name: /filter posts/i });
+    const input = await screen.findByRole<HTMLInputElement>('textbox', { name: /filter posts/i });
+    // A prior query, then focus elsewhere: Ctrl-K must land in search AND
+    // select what is there, so typing replaces it.
+    fireEvent.change(input, { target: { value: 'abc' } });
+    input.setSelectionRange(3, 3);
+    input.blur();
     expect(document.activeElement).not.toBe(input);
 
     fireEvent.keyDown(window, { key: 'k', ctrlKey: true });
     expect(document.activeElement, 'Ctrl-K lands in search (the Ghost ⌘K row)').toBe(input);
+    expect([input.selectionStart, input.selectionEnd], 'and selects the existing query').toEqual([0, 3]);
     expect(input.getAttribute('aria-keyshortcuts')).toBe('Meta+K Control+K');
   });
 

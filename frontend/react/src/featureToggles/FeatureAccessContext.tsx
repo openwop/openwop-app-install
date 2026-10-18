@@ -11,6 +11,7 @@ import { fetchAssignments, fetchEntitlements, type ResolvedAssignment } from '..
 import { onAuthChange } from '../client/config.js';
 import { registerEntitlementReloader } from '../client/entitlementRefresh.js';
 import { telemetry } from '../platform/telemetry.js';
+import { isNetworkFailure, recordEntitlementAnswer, revokeLastKnownEntitlements } from './lastKnownEntitlement.js';
 
 export interface FeatureAccess {
   status: 'on' | 'off' | 'beta';
@@ -38,23 +39,43 @@ interface FeatureAccessState {
    *  every `enabled:false` below is "unknown", not "off". Consent-grade surfaces
    *  branch on this instead of rendering a failed read as a resolved OFF. */
   resolutionFailed: boolean;
+  /** ADR 0873 D12 — the last resolution failed to REACH the server (a network
+   *  error, not an HTTP answer). `EntitlementGuard` fails closed on it, unless the
+   *  feature opted into `offline.entitlement: 'last-known'` and holds a grant. */
+  offline: boolean;
   reload: () => void;
 }
 
 const FALLBACK: Omit<FeatureAccess, 'entitled' | 'locked'> = { status: 'off', enabled: false, isBeta: false, variant: null };
 
-const Ctx = createContext<FeatureAccessState>({ byId: {}, allowedFeatures: '*', loading: true, resolutionFailed: false, reload: () => {} });
+const Ctx = createContext<FeatureAccessState>({ byId: {}, allowedFeatures: '*', loading: true, resolutionFailed: false, offline: false, reload: () => {} });
+
+/** ADR 0873 D12 — the bounded backoff for re-resolving an offline answer while the
+ *  browser still reports itself online. Three tries, then the notice's button. */
+const AUTO_RETRY_MS = [2_000, 5_000, 15_000] as const;
+
+/** A 401 or 403 — an authoritative refusal, which deletes last-known grants (D12). */
+const isAuthRefusal = (err: unknown): boolean => {
+  const status = (err as { status?: unknown } | null)?.status;
+  return status === 401 || status === 403;
+};
 
 /** Whether `allowedFeatures` entitles a given feature id. */
 function isEntitled(allowed: '*' | string[], id: string): boolean {
   return allowed === '*' || allowed.includes(id);
 }
 
-export function FeatureAccessProvider({ children }: { children: ReactNode }): JSX.Element {
+/**
+ * `lastKnownFeatureIds` — the features declaring `offline.entitlement:
+ * 'last-known'` (ADR 0873 D12). Each online resolution refreshes or deletes their
+ * grants; no other feature is ever written to storage.
+ */
+export function FeatureAccessProvider({ children, lastKnownFeatureIds = [] }: { children: ReactNode; lastKnownFeatureIds?: readonly string[] }): JSX.Element {
   const [byId, setById] = useState<Record<string, ResolvedAssignment>>({});
   const [allowedFeatures, setAllowed] = useState<'*' | string[]>('*');
   const [loading, setLoading] = useState(true);
   const [resolutionFailed, setResolutionFailed] = useState(false);
+  const [offline, setOffline] = useState(false);
   const [nonce, setNonce] = useState(0);
   const reload = useCallback(() => setNonce((n) => n + 1), []);
   /** True once the FIRST resolution has completed. A REFRESH must not flip
@@ -66,6 +87,11 @@ export function FeatureAccessProvider({ children }: { children: ReactNode }): JS
    *  /ux-review 2026-07-28 — UI-ENT-1b's 403 hook made every 403 in the app,
    *  including unrelated superadmin refusals, trigger exactly that unmount.) */
   const settledOnce = useRef(false);
+  /** ADR 0873 D12 — the opted-in feature ids, read inside the resolution. */
+  const lastKnownIds = useRef(lastKnownFeatureIds);
+  lastKnownIds.current = lastKnownFeatureIds;
+  /** ADR 0873 D12 — automatic re-resolves spent since the last success. */
+  const autoRetries = useRef(0);
 
   // UI-ENT-1b — let a mid-session 403 re-resolve entitlements through the ONE
   // existing path. Registered rather than imported by the client layer so the
@@ -77,18 +103,45 @@ export function FeatureAccessProvider({ children }: { children: ReactNode }): JS
 
   useEffect(() => {
     let cancelled = false;
+    /** The entitlement read failed with an HTTP error: its '*' fallback is not an answer. */
+    let notAnAnswer = false;
     if (!settledOnce.current) setLoading(true);
     // Resolve the toggle assignments AND the plan/bundle entitlements together
     // (ADR 0419). Entitlements degrade to '*' (unrestricted) on any failure /
     // billing-off, so a resolution error never spuriously LOCKS a feature.
-    void Promise.all([fetchAssignments(), fetchEntitlements().catch(() => '*' as const)])
-      .then(([list, allowed]) => {
+    //
+    // ADR 0873 D12 — except a NETWORK failure, which propagates so the guard can
+    // fail closed offline. An HTTP failure still degrades to '*', but is never
+    // recorded as a last-known grant, and a 401/403 deletes the grants held.
+    void Promise.all([
+      fetchAssignments(),
+      fetchEntitlements().catch((err: unknown) => {
+        if (isNetworkFailure(err)) throw err;
+        notAnAnswer = true;
+        if (isAuthRefusal(err)) revokeLastKnownEntitlements();
+        return '*' as const;
+      }),
+    ])
+      .then(([{ assignments: list, caller }, allowed]) => {
+        // ADR 0873 D12 — record grants under the subject THIS answer was resolved
+        // for (the server's echo: the ACTIVE workspace). Only a real answer, only
+        // for opted-in features, and never without the echo (an older backend).
+        const ids = lastKnownIds.current;
+        if (!notAnAnswer && caller?.principalId && ids.length > 0) {
+          recordEntitlementAnswer(
+            { userId: caller.principalId, tenantId: caller.tenantId },
+            ids.filter((id) => isEntitled(allowed, id)),
+            ids.filter((id) => !isEntitled(allowed, id)),
+          );
+        }
         if (cancelled) return;
         const map: Record<string, ResolvedAssignment> = {};
         for (const a of list) map[a.id] = a;
         setById(map);
         setAllowed(allowed);
         setResolutionFailed(false);
+        setOffline(false);
+        autoRetries.current = 0;
       })
       .catch((err) => {
         // Resolution is best-effort presentation; on failure every feature
@@ -98,7 +151,22 @@ export function FeatureAccessProvider({ children }: { children: ReactNode }): JS
         // TWIN-UX-1: expose it as `resolutionFailed`, so a consent surface can
         // render "we couldn't check" instead of a silent OFF.
         telemetry.reportError(err, { region: 'feature-access-resolution' });
-        if (!cancelled) { setById({}); setAllowed('*'); setResolutionFailed(true); }
+        const unreachable = isNetworkFailure(err);
+        const refused = !unreachable && isAuthRefusal(err);
+        if (refused) revokeLastKnownEntitlements();
+        // ADR 0873 D12 follow-up — a failed REFRESH keeps the previous answer
+        // (stale-while-revalidate, as `loading` does). Resetting here read every
+        // feature as its fallback: `locked` false showed a paywalled feature
+        // unlocked, and every toggle-gated feature vanished, on any 5xx or blip.
+        // A 401/403 is the exception: the answer it would keep is no longer ours.
+        if (settledOnce.current && !refused) return;
+        if (!cancelled) {
+          setById({}); setAllowed('*'); setResolutionFailed(true);
+          // ADR 0873 D12 — only the FIRST resolution decides "offline". A refused
+          // REFRESH leaves it as it was, so it never swaps a mounted page for the
+          // notice (the same reason `loading` never flips back: UI-ENT-1b).
+          if (!settledOnce.current) setOffline(unreachable);
+        }
       })
       .finally(() => {
         if (!cancelled) { settledOnce.current = true; setLoading(false); }
@@ -112,7 +180,25 @@ export function FeatureAccessProvider({ children }: { children: ReactNode }): JS
   // differently and may have different overrides).
   useEffect(() => onAuthChange(reload), [reload]);
 
-  const value = useMemo<FeatureAccessState>(() => ({ byId, allowedFeatures, loading, resolutionFailed, reload }), [byId, allowedFeatures, loading, resolutionFailed, reload]);
+  // ADR 0873 D12 — offline is a state the browser announces the end of; re-resolve
+  // then, so the offline notice clears without a manual retry.
+  useEffect(() => {
+    if (!offline || typeof window === 'undefined') return;
+    window.addEventListener('online', reload);
+    return () => window.removeEventListener('online', reload);
+  }, [offline, reload]);
+
+  // ADR 0873 D12 — a blip the browser never called offline (`navigator.onLine`
+  // stayed true: a reset connection, a captive portal) fires no `online` event, so
+  // re-resolve on a short bounded backoff instead of waiting for a click.
+  useEffect(() => {
+    if (!offline || autoRetries.current >= AUTO_RETRY_MS.length) return;
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) return; // the `online` event covers it
+    const t = setTimeout(() => { autoRetries.current += 1; reload(); }, AUTO_RETRY_MS[autoRetries.current]);
+    return () => clearTimeout(t);
+  }, [offline, nonce, reload]);
+
+  const value = useMemo<FeatureAccessState>(() => ({ byId, allowedFeatures, loading, resolutionFailed, offline, reload }), [byId, allowedFeatures, loading, resolutionFailed, offline, reload]);
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }
 
@@ -134,6 +220,14 @@ export function useFeatureAccess(id: string): FeatureAccess & { loading: boolean
     loading,
     resolutionFailed,
   };
+}
+
+/** ADR 0873 D12 — whether the last resolution failed to reach the server, and the
+ *  re-resolve to offer as "retry". Kept out of `useFeatureAccess`'s return so its
+ *  eight-field shape (and every typed mock of it) is unchanged. */
+export function useAccessOffline(): { offline: boolean; retry: () => void } {
+  const { offline, reload } = useContext(Ctx);
+  return { offline, retry: reload };
 }
 
 /** Imperative read of every resolved assignment (e.g. for the admin preview). */

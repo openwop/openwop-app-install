@@ -61,8 +61,8 @@ function run(): WorkflowRunState {
     completedNodeIds: ['pull', 'score', 'notify'],
     nodeNames: { pull: 'pull', score: 'score', notify: 'notify' },
     nodeOutputs: { pull: { rows: [] }, score: { box: 5 }, notify: { emitted: true } },
-    failedNodeIds: [], startedAt: Date.now(),
-  } as unknown as WorkflowRunState;
+    failedNodeIds: [], currentNodeName: null, startedAt: '2026-08-01T00:00:00.000Z',
+  };
 }
 
 function view(): void {

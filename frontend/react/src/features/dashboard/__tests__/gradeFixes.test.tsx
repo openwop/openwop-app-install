@@ -1,8 +1,14 @@
 /**
  * Grade-pass fixes (2026-07-16) — regression tests for the dashboard audit:
- *  S3 sharedRead (duplicate-fetch dedup), S7b mergeForPersist (toggled-off
+ *  S3 sharedRead (key scoping), S7b mergeForPersist (toggled-off
  *  preference preservation), and a representative tile component contract
- *  (ApprovalsInboxTile: loading → rows → empty → error, never throws).
+ *  (ApprovalsInboxTile: rows → empty → error, never throws; ADR 0593 CMSAU-15).
+ *
+ * /grade-tests w50: sharedRead's "joins concurrent readers" and "a rejection
+ * clears the slot" cases were cut — `src/client/__tests__/requestCache.test.ts`
+ * ("collapses concurrent identical calls…", "does not cache a rejected load…")
+ * and `runTilesScope.test.tsx` ("…shares within one paint") go red under the
+ * same sabotages (probes w50g1-gf-coalesce-cover/-cover2, w50g1-gf-reject-cover).
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, waitFor } from '@testing-library/react';
@@ -10,33 +16,21 @@ import { MemoryRouter } from 'react-router-dom';
 import { sharedRead, __resetSharedReads } from '../sharedRead.js';
 import { mergeForPersist } from '../resolveTiles.js';
 
-const listApprovals = vi.fn();
-vi.mock('../../../agents/approvalsClient.js', () => ({ listApprovals: (s?: string) => listApprovals(s) }));
+type ApprovalsClient = typeof import('../../../agents/approvalsClient.js');
+const listApprovals = vi.fn<ApprovalsClient['listApprovals']>();
+vi.mock('../../../agents/approvalsClient.js', () => ({ listApprovals: (...a: Parameters<ApprovalsClient['listApprovals']>) => listApprovals(...a) }));
 
 import ApprovalsInboxTile from '../tiles/ApprovalsInboxTile.js';
 
 beforeEach(() => { __resetSharedReads(); listApprovals.mockReset(); });
 
-describe('sharedRead (S3 — duplicate-fetch dedup)', () => {
-  it('joins concurrent readers of the same key onto ONE request', async () => {
-    const fetcher = vi.fn().mockResolvedValue(42);
-    const [a, b] = await Promise.all([sharedRead('k', fetcher), sharedRead('k', fetcher)]);
-    expect(a).toBe(42);
-    expect(b).toBe(42);
-    expect(fetcher).toHaveBeenCalledTimes(1);
-  });
-
+describe('sharedRead (S3 — key scoping)', () => {
   it('different keys fetch independently', async () => {
-    const fetcher = vi.fn().mockResolvedValue(1);
-    await Promise.all([sharedRead('x', fetcher), sharedRead('y', fetcher)]);
-    expect(fetcher).toHaveBeenCalledTimes(2);
-  });
-
-  it('a rejection clears the slot so the next read retries', async () => {
-    const fetcher = vi.fn().mockRejectedValueOnce(new Error('boom')).mockResolvedValue(7);
-    await expect(sharedRead('k', fetcher)).rejects.toThrow('boom');
-    await expect(sharedRead('k', fetcher)).resolves.toBe(7);
-    expect(fetcher).toHaveBeenCalledTimes(2);
+    const x = vi.fn().mockResolvedValue('x-value');
+    const y = vi.fn().mockResolvedValue('y-value');
+    expect(await Promise.all([sharedRead('x', x), sharedRead('y', y)])).toEqual(['x-value', 'y-value']);
+    expect(x).toHaveBeenCalledTimes(1);
+    expect(y).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -50,8 +44,12 @@ describe('mergeForPersist (S7b — toggled-off preferences survive a save)', () 
     ] as const;
     const working = [{ id: 'a', order: 5, size: 'half' as const, enabled: false }];
     const out = mergeForPersist([...saved], working, registryIds);
-    expect(out).toContainEqual({ id: 'a', order: 5, size: 'half', enabled: false }); // edited wins
-    expect(out).toContainEqual({ id: 'b', order: 10, size: 'full', enabled: true }); // preserved
+    // EXACT: the edited 'a' wins and the stale saved 'a' is gone (a toContainEqual
+    // passed with both present — w50g1-gf-merge-edited); 'b' is preserved.
+    expect(out).toEqual([
+      { id: 'a', order: 5, size: 'half', enabled: false },
+      { id: 'b', order: 10, size: 'full', enabled: true },
+    ]);
   });
 
   it('drops saved rows for tiles no longer in the registry (self-healing)', () => {
@@ -93,13 +91,15 @@ describe('ApprovalsInboxTile (representative tile contract)', () => {
 
   it('renders the designed empty state on zero approvals', async () => {
     listApprovals.mockResolvedValue([]);
-    const { getByText } = renderTile();
-    await waitFor(() => expect(getByText(/approval/i)).toBeTruthy());
+    const { findByText } = renderTile();
+    expect(await findByText('Nothing waiting for approval.')).toBeTruthy();
   });
 
   it('renders the designed error state (never throws to the grid)', async () => {
     listApprovals.mockRejectedValue(new Error('500'));
-    const { container } = renderTile();
-    await waitFor(() => expect(container.querySelector('.dash-tile__state')).toBeTruthy());
+    const { findByText, queryByText } = renderTile();
+    // The error COPY, not just the state class (the empty state carries it too).
+    expect(await findByText(/could not load/i)).toBeTruthy();
+    expect(queryByText(/nothing waiting for approval/i)).toBeNull();
   });
 });

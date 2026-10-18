@@ -27,10 +27,11 @@ import {
 } from './assistantService.js';
 import { listLoopStatuses, enableLoop, disableLoop } from './loops.js';
 import { composeBriefing } from './briefing.js';
-import { contentHashOf, decideActionViaApproval, projectActionCard } from './actionApproval.js';
+import { contentHashOf, decideActionViaApproval, mayActOnAction, projectActionCard, type ActionActor } from './actionApproval.js';
 import { buildAssistantHealth } from './health.js';
 import { requireSuperadmin } from '../../host/superadmin.js';
-import { requireTenantScope } from '../featureRoute.js';
+import { callerSubjectSpellings, requireTenantScope } from '../featureRoute.js';
+import { isOwnPersonalWorkspace } from '../../host/requestSubject.js';
 import { findAssistantAgent } from './capability.js';
 import { randomUUID } from 'node:crypto';
 import { ensureConversationMeta, findByDmKey, dmKeyOf, userRef, type ConversationMeta } from '../../host/conversationStore.js';
@@ -198,9 +199,23 @@ export function registerAssistantRoutes(deps: RouteDeps): void {
   // bodies + recipient addresses, so it gates on the SAME `workspace:write`
   // authority the decide path requires (a viewer must not read a draft they
   // cannot send).
+  /** ADR 0878 D6 — the request's person, for an org-scoped action's check. */
+  const actorOf = async (req: Request): Promise<ActionActor> => ({
+    spellings: await callerSubjectSpellings(req),
+    ...(req.principal?.tenants?.includes('*') ? { isOperator: true } : {}),
+    ...(isOwnPersonalWorkspace(req) ? { isPersonalOwner: true } : {}),
+  });
   app.get('/host/openwop-app/assistant/pending-actions', wrapWrite(async (req, res) => {
     const status = typeof req.query.status === 'string' ? (req.query.status as 'pending') : undefined;
-    res.json({ pendingActions: await listPendingActions(tenantOf(req), status) });
+    const tenantId = tenantOf(req);
+    const actor = await actorOf(req);
+    // ADR 0878 D6 — an org's action (a support reply) is listed only to that org's
+    // writers; tenant-scoped actions are unchanged.
+    const visible = [];
+    for (const a of await listPendingActions(tenantId, status)) {
+      if (await mayActOnAction(tenantId, a, actor)) visible.push(a);
+    }
+    res.json({ pendingActions: visible });
   }));
   // Every action decision flows THROUGH its approval act — the single loop
   // (ADR 0025 §4): the CAS-guarded resolveApproval is the lock, shared with
@@ -225,6 +240,7 @@ export function registerAssistantRoutes(deps: RouteDeps): void {
       // empty string is ABSENT (400), not a mismatch (409).
       const expectedContentHash = typeof rawHash === 'string' && rawHash.trim().length > 0 ? rawHash.trim() : undefined;
       const decided = await decideActionViaApproval(tenantId, existing.approvalId, outcome, {
+        decider: await actorOf(req),
         ...(decidedByUserId !== undefined ? { decidedByUserId } : {}),
         ...(expectedContentHash !== undefined ? { expectedContentHash } : {}),
       });
@@ -271,6 +287,17 @@ export function registerAssistantRoutes(deps: RouteDeps): void {
     // ADR 0862 D2 — you edit the version you read: the editor's displayed hash is required
     // and compared INSIDE the CAS, on the row being swapped.
     const expectedContentHash = typeof body.expectedContentHash === 'string' && body.expectedContentHash.trim().length > 0 ? body.expectedContentHash.trim() : undefined;
+    // ADR 0878 D6 — another org's action is not yours to edit (uniform 404: no oracle).
+    const target = await getPendingAction(tenantOf(req), req.params.id);
+    if (target && !(await mayActOnAction(tenantOf(req), target, await actorOf(req)))) {
+      throw new OpenwopError('not_found', 'Pending action not found.', 404, { actionId: req.params.id });
+    }
+    // A support reply's target ticket is fixed at draft time (ADR 0878 D6); the
+    // service drops a payload change, and the route SAYS so rather than answering
+    // 200 for an edit that did not happen (grade-code SD2CD-12).
+    if (target?.kind === 'servicedesk.reply' && body.payload !== undefined) {
+      throw new OpenwopError('validation_error', 'A support reply\'s ticket cannot be changed — edit the reply text, or draft a new reply on the other ticket.', 422, { field: 'payload' });
+    }
     if (expectedContentHash === undefined) {
       throw new OpenwopError('validation_error', 'This draft is out of date. Reload it before editing.', 400, { field: 'expectedContentHash', reason: 'content_hash_required' });
     }

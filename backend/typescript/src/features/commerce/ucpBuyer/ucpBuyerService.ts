@@ -32,6 +32,10 @@ import { subjectKeyForms } from '../../../host/subjectErasureRedaction.js';
 const log = createLogger('commerce.ucp-buyer');
 import { buildCartMandate, buildPaymentMandate, signPaymentMandate, type Ap2CartLine, type Ap2CartMandate, type Ap2IntentMandate, type Ap2PaymentMandate } from './ap2Mandates.js';
 import { assertEffectAllowed } from '../../../host/runEffectContext.js';
+import { fetch as undiciFetch } from 'undici';
+import { webhookEgressDispatcher } from '../../../host/webhookEgressGuard.js';
+
+type MerchantResponse = Awaited<ReturnType<typeof undiciFetch>>;
 
 const nowIso = (): string => new Date().toISOString();
 /** Read at call time (not module load) so a test can shorten it via env. */
@@ -165,7 +169,7 @@ const MERCHANT_MAX_BYTES = 512 * 1024;
  *  are re-checked against the egress policy per hop (grade-code B10 — a merchant
  *  302 to 169.254.169.254/loopback would otherwise bypass the SSRF baseline); the
  *  body is size-bounded (grade-code I9). */
-async function merchantFetch(tenantId: string, url: string, init?: RequestInit): Promise<Record<string, unknown>> {
+async function merchantFetch(tenantId: string, url: string, init?: { method?: string; headers?: Record<string, string>; body?: string }): Promise<Record<string, unknown>> {
   // ADR 0533 — a merchant call is a PURCHASE path (`checkoutPurchase`). Of every
   // seam in this codebase this is the one where re-firing on a replay costs the
   // operator real money, so it fails closed before the first hop.
@@ -175,9 +179,13 @@ async function merchantFetch(tenantId: string, url: string, init?: RequestInit):
     await assertEgressAllowed(tenantId, current); // re-gate EVERY hop, including redirects
     const ctl = new AbortController();
     const timer = setTimeout(() => ctl.abort(), fetchTimeoutMs());
-    let res: Response;
+    let res: MerchantResponse;
     try {
-      res = await fetch(current, { ...init, signal: ctl.signal, redirect: 'manual' });
+      // ADR 0875 D6 — `assertEgressAllowed` judges the hostname STRING; a DNS name
+      // that resolves to 10/8 or 169.254/16 passed it and was dialed. The ONE
+      // pinned-resolution dispatcher re-checks the resolved address at connect
+      // time (the same posture every webhook/MCP egress rides).
+      res = await undiciFetch(current, { ...init, signal: ctl.signal, redirect: 'manual', dispatcher: webhookEgressDispatcher() });
     } catch (err) {
       clearTimeout(timer);
       if (err instanceof OpenwopError) throw err;
@@ -202,7 +210,7 @@ async function merchantFetch(tenantId: string, url: string, init?: RequestInit):
 }
 
 /** Read at most `max` bytes of a response body, aborting if the merchant exceeds it. */
-async function readBounded(res: Response, max: number): Promise<string> {
+async function readBounded(res: MerchantResponse, max: number): Promise<string> {
   const reader = res.body?.getReader();
   if (!reader) return (await res.text()).slice(0, max);
   const chunks: Uint8Array[] = [];

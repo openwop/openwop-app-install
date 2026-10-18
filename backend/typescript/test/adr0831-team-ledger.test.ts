@@ -1,17 +1,28 @@
 /**
  * ADR 0831 P1 — the team intent ledger, over real HTTP with real sign-ins.
+ * Always on since 2026-10-07 (no toggle); the first case pins that.
  *
- *   - toggle OFF ⇒ 404 on every route (sabotage leg for the rest);
  *   - one ledger per project; the creator is the owner; version 1 = creation;
  *   - the charter stays the home of goal/objectives: an accepted goal change
  *     shows up in `charter.goal`, and a DIRECT charter edit bumps the version;
  *   - propose ≠ accept: a teammate with write proposes, only the owner accepts;
- *     a viewer cannot propose; a stranger gets 404 (no existence leak);
+ *     a viewer cannot propose; a cross-tenant stranger AND a same-tenant
+ *     non-member get the same 404 (no existence leak); ownership moves only to a
+ *     writer, by the owner;
  *   - a stale base is refused until the owner says `rebased`;
  *   - every version's state is retrievable exactly (the P2 stamp relies on it);
- *   - decision references must be decision records in the project's org;
- *   - concurrent accepts serialize: versions are unique and contiguous;
+ *   - an unknown patch field is refused even beside a real one; decision
+ *     references must be decision records in the project's org;
+ *   - concurrent accepts serialize (compare-and-swap): versions are unique and contiguous;
+ *   - last-seen is per person, bounded, monotonic; erasure and the project delete take it;
  *   - DSAR redacts what the subject authored and leaves the shared record.
+ *
+ * Sabotage-witnessed (w29): owner check, propose-needs-write, transfer-owner-only,
+ * new-owner-must-write, the access predicate's `'none' ⇒ null`, stale base, CAS
+ * replaced by a blind put, charter write-back, charter listener ignoring `origin`,
+ * `stateAt` returning the latest, unknown-key guard, decision-kind check, empty
+ * text, seen monotonic/bounded, erasure + cascade of seen rows, DSAR why/patch,
+ * a re-added toggle default — each turns its case red.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -25,6 +36,7 @@ import { createDocument } from '../src/features/documents/documentsService.js';
 import { acceptDelta, countLedgerRowsForProject, deleteLedgerForProject, eraseTeamLedgerSubject, getLedger, getSeenVersion, listDeltas } from '../src/features/team-intent-ledger/ledgerStore.js';
 import { getProject } from '../src/features/projects/projectsService.js';
 import { ERASED } from '../src/host/subjectErasureRedaction.js';
+import type { LedgerState, TeamLedger, TeamLedgerDelta } from '../src/features/team-intent-ledger/types.js';
 
 let BASE: string;
 let server: http.Server;
@@ -41,13 +53,19 @@ beforeAll(async () => {
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
 
-interface Res<T = any> { status: number; body: T }
+/** The response fields this file reads, typed against the real records (an absent field fails the case). */
+interface Body {
+  ledger: TeamLedger; state: LedgerState; seenVersion: number | null;
+  delta: TeamLedgerDelta; deltas: TeamLedgerDelta[]; details: Record<string, unknown>;
+  user: { userId: string }; orgId: string; id: string; charter: { goal?: string };
+}
+interface Res { status: number; body: Body }
 function client() {
   let cookie = '';
   const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]!; }
-    return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) };
+    return { status: res.status, body: (res.status === 204 ? undefined : await res.json().catch(() => undefined)) as Body };
   };
   return { get: (p: string) => call('GET', p), post: (p: string, b?: unknown) => call('POST', p, b), patch: (p: string, b?: unknown) => call('PATCH', p, b) };
 }
@@ -57,14 +75,14 @@ const email = (who: string): string => `${who}-${Date.now()}-${n++}@acme.test`;
 async function setup(): Promise<{ tenantId: string; orgId: string; projectId: string; owner: Client; ownerId: string; mate: Client; mateId: string; L: string }> {
   const tenantId = `org:tl-${Date.now()}-${n++}`;
   const owner = client();
-  const ownerId = (await owner.post('/host/openwop-app/test/login', { email: email('tl-owner'), tenantId })).body.user.userId as string;
-  const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'LedgerCo' })).body.orgId as string;
+  const ownerId = (await owner.post('/host/openwop-app/test/login', { email: email('tl-owner'), tenantId })).body.user.userId;
+  const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'LedgerCo' })).body.orgId;
   const p = await owner.post('/host/openwop-app/projects', { orgId, name: 'Launch' });
   expect(p.status, JSON.stringify(p.body)).toBe(201);
   // Before any ledger exists, so this edit is not recorded anywhere.
   expect((await owner.patch(`/host/openwop-app/projects/${p.body.id}`, { charter: { goal: 'Ship the launch', objectives: ['EU live'] } })).status).toBe(200);
   const mate = client();
-  const mateId = (await mate.post('/host/openwop-app/test/login', { email: email('tl-mate'), tenantId })).body.user.userId as string;
+  const mateId = (await mate.post('/host/openwop-app/test/login', { email: email('tl-mate'), tenantId })).body.user.userId;
   await createMember({ tenantId, orgId, subject: mateId, displayName: 'Mate', roles: ['editor'] });
   return { tenantId, orgId, projectId: p.body.id, owner, ownerId, mate, mateId, L: `/host/openwop-app/team-ledger/projects/${p.body.id}` };
 }
@@ -76,7 +94,7 @@ describe('ADR 0831 P1 — team intent ledger', () => {
     expect(getToggleDefault('team-intent-ledger')).toBeNull();
     expect(getToggleDefault('structured-handoffs')).toBeNull();
     for (const id of ['team-intent-ledger', 'structured-handoffs']) {
-      await saveConfig({ id, label: id, status: 'off', bucketUnit: 'tenant', salt: id } as never, 'test');
+      await saveConfig({ id, status: 'off', bucketUnit: 'tenant', salt: id }, 'test');
     }
     const s = await setup();
     expect((await s.owner.post(s.L)).status).toBe(201);
@@ -152,29 +170,43 @@ describe('ADR 0831 P1 — team intent ledger', () => {
     const s = await setup();
     await s.owner.post(s.L);
     const viewer = client();
-    const viewerId = (await viewer.post('/host/openwop-app/test/login', { email: email('tl-viewer'), tenantId: s.tenantId })).body.user.userId as string;
+    const viewerId = (await viewer.post('/host/openwop-app/test/login', { email: email('tl-viewer'), tenantId: s.tenantId })).body.user.userId;
     await createMember({ tenantId: s.tenantId, orgId: s.orgId, subject: viewerId, displayName: 'V', roles: ['viewer'] });
     expect((await viewer.get(s.L)).status).toBe(200);
     expect((await viewer.post(`${s.L}/deltas`, { patch: { inScope: ['x'] }, why: 'y', baseVersion: 1 })).status).toBe(403);
 
+    // Cross-tenant: refused by the tenant guard.
     const stranger = client();
     await stranger.post('/host/openwop-app/test/login', { email: email('tl-stranger') });
-    expect((await stranger.get(s.L)).status).toBe(404);
+    const st = await stranger.get(s.L);
+    expect(st.status).toBe(404);
+    // SAME tenant, no org membership: reaches the access predicate (`'none'` ⇒ 404),
+    // and the answer is indistinguishable from the stranger's.
+    const insider = client();
+    await insider.post('/host/openwop-app/test/login', { email: email('tl-insider'), tenantId: s.tenantId });
+    const ins = await insider.get(s.L);
+    expect(ins.status, JSON.stringify(ins.body)).toBe(404);
+    expect(ins.body).toEqual(st.body);
 
     expect((await s.owner.post(`${s.L}/owner`, { ownerSubject: viewerId })).status).toBe(400);
     const moved = await s.owner.post(`${s.L}/owner`, { ownerSubject: s.mateId });
     expect(moved.status, JSON.stringify(moved.body)).toBe(200);
+    expect(moved.body.ledger.ownerSubject).toBe(s.mateId);
+    expect((await s.owner.get(s.L)).body.ledger.ownerSubject).toBe(s.mateId);
     expect((await s.owner.post(`${s.L}/owner`, { ownerSubject: s.ownerId })).status).toBe(403); // no longer owner
   });
 
   it('validation: unknown fields, empty why, and a decision id that is not a decision record are refused', async () => {
     const s = await setup();
     await s.owner.post(s.L);
-    expect((await s.mate.post(`${s.L}/deltas`, { patch: { intent: 'x' }, why: 'w', baseVersion: 1 })).status).toBe(400);
+    // The unknown key sits beside a REAL change, so only the unknown-key guard can refuse it.
+    const unknown = await s.mate.post(`${s.L}/deltas`, { patch: { intent: 'x', inScope: ['ok'] }, why: 'w', baseVersion: 1 });
+    expect(unknown.status).toBe(400);
+    expect(unknown.body.details).toMatchObject({ field: 'patch.intent' });
     expect((await s.mate.post(`${s.L}/deltas`, { patch: { inScope: ['x'] }, why: '  ', baseVersion: 1 })).status).toBe(400);
-    const memo = await createDocument({ tenantId: s.tenantId, orgId: s.orgId, title: 'Memo', kind: 'memo', format: 'markdown', createdBy: s.ownerId } as never);
+    const memo = await createDocument({ tenantId: s.tenantId, orgId: s.orgId, title: 'Memo', kind: 'memo', format: 'markdown', provenance: { producedBy: { kind: 'user', id: s.ownerId } }, createdBy: s.ownerId });
     expect((await s.mate.post(`${s.L}/deltas`, { patch: { decisionDocumentIds: [memo.documentId] }, why: 'w', baseVersion: 1 })).status).toBe(400);
-    const dec = await createDocument({ tenantId: s.tenantId, orgId: s.orgId, title: 'Decision — EU first', kind: 'decision-record', format: 'markdown', createdBy: s.ownerId } as never);
+    const dec = await createDocument({ tenantId: s.tenantId, orgId: s.orgId, title: 'Decision — EU first', kind: 'decision-record', format: 'markdown', provenance: { producedBy: { kind: 'user', id: s.ownerId } }, createdBy: s.ownerId });
     const ok = await s.mate.post(`${s.L}/deltas`, { patch: { decisionDocumentIds: [dec.documentId] }, why: 'Recorded Monday', baseVersion: 1 });
     expect(ok.status, JSON.stringify(ok.body)).toBe(201);
   });

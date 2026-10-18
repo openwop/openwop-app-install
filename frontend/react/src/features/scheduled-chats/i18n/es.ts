@@ -22,6 +22,8 @@ export const messages = {
   toggleFailed: 'No se pudo actualizar el chat programado. Inténtelo de nuevo.',
   disabled: 'Los chats programados están desactivados en este espacio.',
   colNextRun: 'Próxima ejecución',
+  lastRunNotPosted: 'La última ejecución no pudo publicar su respuesta en la conversación. Revisa el agente y la conversación y reanúdala.',
+  lastRunFailed: 'La última ejecución falló: {{reason}}',
 
   // §4.5 collection kit — búsqueda
   filterGroup: 'Filtrar chats programados',

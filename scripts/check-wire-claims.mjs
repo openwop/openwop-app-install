@@ -149,53 +149,13 @@ function expectedSuiteVersion() {
 const SUITE = expectedSuiteVersion();
 
 /**
- * ADR 0550 P4 — the shipped conformance CLAIMS, if this checkout produced any.
- *
- * The other arms of this script compare a wire value against SOURCE. This one
- * cannot: a profile claim is not decidable from source, only from the RFC 0148
- * ledger of a run. So the SSoT here is the stamped artifact
- * (`build-meta/conformance-claims.json`), which is the same file
- * `COPY build-meta ./build-meta` puts in the image — i.e. the exact bytes the
- * running host reads.
- *
- * WHY IT NEEDS AN ARM AT ALL. A stale claims document is invisible on the wire
- * in both directions. A host that stopped certifying still serves yesterday's
- * profile list (the `sideEffectSuppression` failure this file was born from,
- * applied to evidence), and a host whose claims never reached the image is
- * indistinguishable — per RFC 0089 §D — from one that legitimately publishes
- * none. From the deployer's vantage the two are distinguishable, because the
- * deployer knows what it certified. Same argument as the `contractProvenance`
- * arm below, one layer up: there the wire cannot diagnose ABSENCE, here it
- * cannot diagnose STALENESS.
- */
-function shippedClaims() {
-  try {
-    // `OPENWOP_BUILD_META_DIR` is the SAME seam `src/host/buildInfo.ts` and
-    // `src/host/conformanceClaims.ts` read. One name across the writer, the
-    // server and this checker means a test can stage all three consistently;
-    // inventing a second variable here would be a second place to get it wrong.
-    const dir = process.env.OPENWOP_BUILD_META_DIR?.trim() || join(ROOT, 'build-meta');
-    const raw = readFileSync(join(dir, 'conformance-claims.json'), 'utf8');
-    const doc = JSON.parse(raw);
-    if (typeof doc?.claimsVersion !== 'string' || !Array.isArray(doc?.claimedProfiles)) {
-      throw new Error('build-meta/conformance-claims.json is not a claims document (no claimsVersion / claimedProfiles)');
-    }
-    return doc;
-  } catch (err) {
-    if (err instanceof Error && err.message.startsWith('build-meta/')) throw err;
-    return null; // not certified in this checkout — the SKIP arm below says so out loud
-  }
-}
-const CLAIMS = shippedClaims();
-
-/**
  * WHD-18 / ADR 0735 — ORIGIN MODE. When the deployed service serves its
  * certification evidence from an out-of-image origin (`OPENWOP_CERT_BUNDLE_ORIGIN`,
  * the SAME variable the service reads — `deploy.sh` exports every
  * `scripts/deploy.env` key, so a deploy-driven verify sees it; a hand-run
- * verify must export it), the build-meta arm below is the WRONG oracle: the
- * image's pre-deploy claims are deliberately not served, so comparing the wire
- * against them would red every healthy origin-mode deploy.
+ * verify must export it). This used to sit beside a build-meta (image-mode)
+ * arm; that arm was deleted with the image half (ADR 0812 P4 slice 5), so
+ * origin mode is the only evidence check.
  *
  * The oracle instead is the bundle's OWN binding: it must be v3, attribute to
  * the commit we expected (`EXPECTED_COMMIT`, passed by `verify-deploy.sh`), be
@@ -211,28 +171,6 @@ const CLAIMS = shippedClaims();
 const ORIGIN_MODE = Boolean(process.env.OPENWOP_CERT_BUNDLE_ORIGIN?.trim());
 const EXPECTED_COMMIT = process.env.EXPECTED_COMMIT?.trim() ?? '';
 
-/**
- * Canonical JSON — sorted keys, no incidental whitespace.
- *
- * A SECOND implementation of `conformance/certify.ts`'s `canonicalJson`, and
- * the duplication is deliberate rather than sloppy: this file is plain ESM run
- * by a deploy script, and the original lives in a module that imports a
- * devDependency the runtime stage strips. Importing it here would make the
- * deploy verifier depend on the dev graph.
- *
- * The duplication is SAFE because it fails closed. The two are compared through
- * `evidence.bundleSha256` on every run: if they ever disagree about byte order,
- * the digest check below goes RED rather than quietly passing. A drifting copy
- * announces itself here instead of hiding.
- */
-function canonicalJson(value) {
-  if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'null';
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
-  const entries = Object.entries(value)
-    .filter(([, v]) => v !== undefined)
-    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
-  return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${canonicalJson(v)}`).join(',')}}`;
-}
 const sha256 = (t) => createHash('sha256').update(t, 'utf8').digest('hex');
 
 // `--emit-expected` prints the minimal document this check would ACCEPT. The
@@ -251,14 +189,6 @@ if (process.argv.includes('--emit-expected')) {
     // The schema is the only authority for placement, so this mirrors the schema.
     ...(SUITE ? { contractProvenance: { suiteVersion: SUITE.version } } : {}),
     capabilities: {
-      // ADR 0550 P4. Present only when this checkout stamped a bundle, mirroring
-      // the runtime gate: `host/conformanceClaims.ts` omits the pointer when the
-      // image carries none, so a fixture that always emitted it would assert a
-      // shape the honest posture does not produce. The value is a placeholder —
-      // the check asserts the pointer EXISTS (the URL's origin is the deployed
-      // host's, which a fixture cannot know) and compares the CLAIMS document
-      // for equality.
-      ...(CLAIMS && !ORIGIN_MODE ? { conformance: { certificationBundleUrl: 'https://example.invalid/v1/host/openwop-app/conformance/certification-bundle' } } : {}),
       ...(SUPPRESSION ? { replay: { sideEffectSuppression: SUPPRESSION } } : {}),
       a2a: { protocolVersions: A2A, preferredVersion: A2A[0] },
       mcp: { supported: true, protocolVersions: MCP },
@@ -351,13 +281,11 @@ if (V2_ONLY) {
   }
 }
 
-// ── ADR 0550 P4 — the deployed CLAIMS must equal the shipped artifact ───────
+// ── certification evidence (WHD-18 / ADR 0735; image mode removed, ADR 0812 P4) ──
 //
-// Two assertions, and the order matters: the pointer must be advertised, and the
-// document it points past must be the one we built. Checking only the pointer
-// would pass against a host serving a different host's evidence; checking only
-// the document would pass against a host that publishes evidence nobody can
-// discover.
+// Only origin mode serves evidence now. Its oracle is the signed bundle's own
+// binding (see ORIGIN_MODE above), and the in-image claims document must stay
+// withheld (404).
 if (ORIGIN_MODE) {
   const { verifyServedBundle } = await import('./lib/bundle-v3-verify.mjs');
   const liveKeys = Array.isArray(doc.signingKeys) ? doc.signingKeys : [];
@@ -426,133 +354,16 @@ if (ORIGIN_MODE) {
       failed++;
     }
   }
-} else if (CLAIMS) {
-  const liveUrl = caps.conformance?.certificationBundleUrl;
-  if (typeof liveUrl !== 'string' || liveUrl === '') {
-    console.log(`  ${'conformance.certificationBundleUrl'.padEnd(30)} MISSING  this build stamped claims but the wire advertises no pointer`);
-    console.error('\n  `build-meta/conformance-claims.json` exists in this checkout, so the image');
-    console.error('  carries a bundle and RFC 0089 §D\'s pointer MUST be advertised. Absence here is');
-    console.error('  the same shape as the contractProvenance failure: legitimate for a host that');
-    console.error('  never certified, and a silent regression for one that did.');
-    failed++;
-  } else {
-    console.log(`  ${'conformance.certificationBundleUrl'.padEnd(30)} OK       ${liveUrl}`);
-  }
-
-  const claimsRes = await fetch(`${base}/host/openwop-app/conformance/claims?cb=${Date.now()}`, { redirect: 'follow' });
-  const claimsType = claimsRes.headers.get('content-type') ?? '';
-  if (!claimsType.includes('json')) {
-    console.log(`  ${'conformance claims document'.padEnd(30)} STALE    ${claimsRes.status} ${claimsType} — not a claims document`);
-    failed++;
-  } else {
-    const live = await claimsRes.json();
-    // Compare the CLAIM, not the whole document: `generatedAt` and the digests
-    // are the evidence's identity, and the profile list is the assertion a peer
-    // relies on. A mismatch in either direction is a deployed claim that the
-    // artifact we built does not substantiate.
-    const liveProfiles = JSON.stringify(live?.claimedProfiles ?? null);
-    const wantProfiles = JSON.stringify(CLAIMS.claimedProfiles);
-    const liveBundle = live?.evidence?.bundleSha256 ?? null;
-    const wantBundle = CLAIMS.evidence?.bundleSha256 ?? null;
-    if (liveProfiles === wantProfiles && liveBundle === wantBundle) {
-      console.log(`  ${'conformance claims document'.padEnd(30)} OK       ${CLAIMS.claimedProfiles.length} profile(s), evidence ${String(wantBundle).slice(0, 12)}`);
-    } else {
-      console.log(`  ${'conformance claims document'.padEnd(30)} STALE    live=${liveProfiles} @${String(liveBundle).slice(0, 12)}`);
-      console.log(`  ${''.padEnd(30)}          built=${wantProfiles} @${String(wantBundle).slice(0, 12)}`);
-      failed++;
-    }
-
-    // ── The pointer must RESOLVE, and what it resolves to must be the evidence
-    //    the claims document names.
-    //
-    // Everything above compares documents. This follows the link a third party
-    // would follow. A pointer that 404s, or that resolves to a bundle whose
-    // digest is not the one the claims bind, is a claim nobody can check — which
-    // is the same as no claim, except that it looks like one. RFC 0089 §B says a
-    // consumer MUST re-evaluate rather than trust `claimedProfiles` verbatim, so
-    // the deployer had better make sure there is something to re-evaluate.
-    if (typeof liveUrl === 'string' && liveUrl !== '') {
-      // Follow the PATH the host advertised, against the origin we are checking:
-      // the advertised HOST may legitimately differ (a custom domain in front of
-      // the same service), and dialling it instead would test DNS rather than
-      // this deploy.
-      //
-      // ADR 0614 — this comment used to say "(custom domain, rewrite prefix)",
-      // treating those as one benign category. They are not, and the difference
-      // is a live defect this check could not see:
-      //
-      //   - a different HOST is a deployment detail the origin-relative dial
-      //     correctly ignores;
-      //   - a different PATH PREFIX means the advertised URL is unfollowable by
-      //     the only party it exists for.
-      //
-      // MEASURED 2026-09-01 on app.openwop.dev: the advertised bundle URL
-      // returned `200 text/html` (the SPA catch-all) while `${base}${path}` —
-      // with `/api` in `base` — returned JSON. This check passed on every deploy
-      // while the published pointer resolved to a web page. That is exactly the
-      // state the docblock above warns about: "a host that publishes evidence
-      // nobody can discover".
-      //
-      // So: keep the origin-relative dial as the primary assertion, and ALSO
-      // dial the absolute URL when its host matches the origin under test. Same
-      // host + wrong path is a defect; different host is skipped with a reason,
-      // never silently.
-      const path = liveUrl.replace(/^https?:\/\/[^/]+/, '');
-      const advertisedHost = (liveUrl.match(/^https?:\/\/([^/]+)/) ?? [])[1] ?? '';
-      const baseHost = (base.match(/^https?:\/\/([^/]+)/) ?? [])[1] ?? '';
-      if (advertisedHost && advertisedHost === baseHost) {
-        const aRes = await fetch(`${liveUrl}?cb=${Date.now()}`, { redirect: 'follow' }).catch(() => null);
-        const aType = aRes?.headers.get('content-type') ?? '';
-        if (!aRes || !aType.includes('json')) {
-          console.log(`  ${'advertised url is followable'.padEnd(30)} BROKEN   ${aRes ? `${aRes.status} ${aType}` : 'fetch failed'} — a consumer following the ADVERTISED url does not get the bundle`);
-          console.error('\n  The pointer resolves origin-relatively but not as published. That is a');
-          console.error('  mount-prefix divergence: the host advertises root-relative wire URLs while');
-          console.error('  being served under a prefix. Fix the ROUTING (serve the wire at the origin');
-          console.error('  root) rather than the advert — see ADR 0614.');
-          failed++;
-        } else {
-          console.log(`  ${'advertised url is followable'.padEnd(30)} OK       ${liveUrl}`);
-        }
-      } else {
-        console.log(`  ${'advertised url is followable'.padEnd(30)} SKIPPED  advertised host ${advertisedHost || '(none)'} != ${baseHost} — dialling it would test DNS, not this deploy`);
-      }
-      const bRes = await fetch(`${base}${path}?cb=${Date.now()}`, { redirect: 'follow' });
-      const bType = bRes.headers.get('content-type') ?? '';
-      if (!bType.includes('json')) {
-        console.log(`  ${'certification bundle resolves'.padEnd(30)} BROKEN   ${bRes.status} ${bType} — the advertised pointer does not serve a bundle`);
-        failed++;
-      } else {
-        const bundle = await bRes.json();
-        const problems = [];
-        // RFC 0148 §C's discriminator. A v1 bundle cannot express dispositions,
-        // so serving one through a pointer that promises v2 evidence overstates
-        // what a consumer can verify.
-        if (bundle?.bundleVersion !== '2') problems.push(`bundleVersion=${JSON.stringify(bundle?.bundleVersion)}, expected "2"`);
-        // The binding: the claims document's digest must be OF this bundle.
-        const digest = sha256(canonicalJson(bundle));
-        if (digest !== CLAIMS.evidence?.bundleSha256) {
-          problems.push(`bundle digest ${digest.slice(0, 12)} != claims evidence.bundleSha256 ${String(CLAIMS.evidence?.bundleSha256).slice(0, 12)}`);
-        }
-        // And the two documents must name the same profiles. The digest already
-        // implies this, but reporting it separately turns "some byte differs"
-        // into the diagnosis a reader can act on.
-        const bundleProfiles = JSON.stringify(bundle?.claimedProfiles ?? null);
-        if (bundleProfiles !== wantProfiles) problems.push(`bundle claims ${bundleProfiles}, claims document claims ${wantProfiles}`);
-        if (problems.length === 0) {
-          console.log(`  ${'certification bundle resolves'.padEnd(30)} OK       v2, ${(bundle.results?.requirements ?? []).length} requirement row(s), digest matches`);
-        } else {
-          console.log(`  ${'certification bundle resolves'.padEnd(30)} BROKEN`);
-          for (const p of problems) console.log(`  ${''.padEnd(30)}          ${p}`);
-          failed++;
-        }
-      }
-    }
-  }
 } else {
-  // Loud, never silent — a skip is the check not running.
-  console.log(`  ${'conformance claims document'.padEnd(30)} SKIP     (this checkout has no build-meta/conformance-claims.json)`);
+  // ADR 0812 P4 slice 5: the IMAGE-mode arm is gone. It compared the wire with
+  // a `build-meta/conformance-claims.json` stamp, and since #4875 deleted the
+  // image half (certify.ts, the in-image claims and bundle routes) nothing
+  // writes that stamp; `write-build-commit.mjs` deletes a stale one. Origin mode
+  // is the only evidence check, and it needs the origin in this run's env.
+  // Loud, never silent: a skip is the check not running.
+  console.log(`  ${'certification evidence'.padEnd(30)} N/A      (no OPENWOP_CERT_BUNDLE_ORIGIN in this run, so no origin-mode check; verify-deploy.sh reads it from the live service)`);
   if (caps.conformance?.certificationBundleUrl !== undefined) {
-    console.log(`  ${''.padEnd(30)}          live advertises ${caps.conformance.certificationBundleUrl} — cannot verify from this checkout`);
+    console.log(`  ${''.padEnd(30)}          live advertises ${caps.conformance.certificationBundleUrl} — only origin mode can verify it`);
   }
 }
 

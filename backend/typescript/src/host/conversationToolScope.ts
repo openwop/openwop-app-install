@@ -10,7 +10,8 @@
  * intersected with an APPROVED intent ledger (never widens), resolved against the
  * lane's ceiling (the tools it would offer), with the ledger's approve/deny decisions
  * folded in. Read LIVE every turn — a revocation holds on `:fork` because nothing here
- * is read back from a stamp (the stamps are provenance only).
+ * is read back from a stamp; the one exception is the intent ledger's TTL anchor, read
+ * from the run's per-approval stamp so a fork re-reads the recorded clock (ADR 0896 D4).
  *
  * @see docs/adr/0132-per-conversation-capability-scope.md
  * @see docs/adr/0136-intent-ledger.md
@@ -20,8 +21,8 @@ import { collectConversationScopes } from './conversationScopeContributors.js';
 import { resolveCapabilityScope, isNarrowing, applyApprovalDecisions, intersectScopes } from '../features/conversation-tools/scopeResolver.js';
 import { computeCapabilityScopeStamp } from '../features/conversation-tools/capabilityScopeStamp.js';
 import type { ToolApprovalRecord } from '../features/conversation-tools/approvalLedger.js';
-import { ledgerToScope, computeIntentLedgerStamp, readIntentLedgerStamp } from '../features/intent-ledger/ledgerProjection.js';
-import { getLedger, saveLedger } from '../features/intent-ledger/ledgerStore.js';
+import { ledgerToScope, readApprovalStamp, withApprovalStamp, INTENT_LEDGER_APPROVALS_KEY } from '../features/intent-ledger/ledgerProjection.js';
+import { getLedger, writeLedger } from '../features/intent-ledger/ledgerStore.js';
 import type { RunRecord } from '../types.js';
 import type { Storage } from '../storage/storage.js';
 import { createLogger } from '../observability/logger.js';
@@ -41,9 +42,10 @@ export interface ConversationToolGateInput {
    *  act as the owner). */
   foldApprovalsOnlyFor?: string;
   /** The run this turn rides (chat). Present ⇒ the intent ledger's TTL is anchored at the
-   *  run's ledger stamp and the provenance stamps are written. Absent (voice — no run) ⇒
-   *  the TTL is anchored at the ledger's `createdAt`, which precedes its approval, so a
-   *  runless lane can only see a mandate expire SOONER, never later. */
+   *  run's stamp for THIS approval (ADR 0896 D4; minted on first sight, never rewritten)
+   *  and the provenance stamps are written. Absent (voice — no run) ⇒ the TTL is anchored
+   *  at the approval itself (`approvedAt`, legacy `createdAt`), which precedes every run
+   *  under it, so a runless lane can only see a mandate expire SOONER, never later. */
   run?: RunRecord;
   storage?: Storage;
 }
@@ -70,19 +72,64 @@ export async function resolveConversationToolGate(input: ConversationToolGateInp
   if (ledger?.status === 'expired') {
     scopeConfig = intersectScopes(scopeConfig, { mode: 'restricted', enabled: [] });
   } else if (ledger?.status === 'approved') {
-    if (run && storage) {
-      const md = computeIntentLedgerStamp(run.metadata ?? {}, ledger, new Date().toISOString());
-      if (md) { try { await storage.updateRun(run.runId, { metadata: md }); run.metadata = md; } catch { /* best-effort */ } }
+    let anchor: string | undefined;
+    let mintedHere = false;
+    if (run) {
+      // ADR 0896 D4 — the anchor is THIS approval's stamp on this run. A chat run spans
+      // its conversation, so a stamp from an earlier mission must never anchor this one.
+      let stamp = readApprovalStamp(run.metadata, ledger);
+      if (!stamp) {
+        // IL2CD-2 — mint from the STORED metadata (another turn may have minted it) and
+        // write only this key, atomically: a whole-metadata write from the in-memory copy
+        // raced every other metadata writer, and losing the map re-minted a LATER anchor.
+        let base: Record<string, unknown> = run.metadata ?? {};
+        if (storage) {
+          try { const fresh = await storage.getRun(run.runId); if (fresh?.metadata) base = fresh.metadata as Record<string, unknown>; }
+          catch (err) { log.warn('intent_ledger_stamp_read_failed', { runId: run.runId, error: err instanceof Error ? err.message : String(err) }); }
+        }
+        stamp = readApprovalStamp(base, ledger);
+        const md = stamp ? null : withApprovalStamp(base, ledger, new Date().toISOString(), run.runId);
+        if (md) {
+          if (storage) {
+            try { await storage.mergeRunMetadata(run.runId, { [INTENT_LEDGER_APPROVALS_KEY]: md[INTENT_LEDGER_APPROVALS_KEY] }); }
+            catch (err) { log.warn('intent_ledger_stamp_write_failed', { runId: run.runId, error: err instanceof Error ? err.message : String(err) }); }
+          }
+          stamp = readApprovalStamp(md, ledger);
+          base = md;
+        }
+        run.metadata = { ...(run.metadata ?? {}), [INTENT_LEDGER_APPROVALS_KEY]: base[INTENT_LEDGER_APPROVALS_KEY] };
+      }
+      anchor = stamp?.resolvedAt;
+      mintedHere = stamp?.runId === run.runId;
+    } else {
+      anchor = ledger.approvedAt ?? ledger.createdAt;
     }
-    const anchor = run ? readIntentLedgerStamp(run.metadata)?.resolvedAt : ledger.createdAt;
     const expired = ledger.expiresAtRelMs !== undefined && anchor !== undefined
       && (Date.now() - Date.parse(anchor)) > ledger.expiresAtRelMs;
     if (expired) {
       log.info('intent_ledger_out_of_mandate', { conversationId: conversationKey, ledgerId: ledger.ledgerId, lane: run ? 'run' : 'runless' });
-      // Only the run lane PERSISTS expiry: its anchor is the run's own stamp. A runless
-      // lane anchors at `createdAt` (earlier than the approval), which is right for
-      // refusing early but must not end the mission for every other lane.
-      if (run) { try { await saveLedger({ ...ledger, status: 'expired' }); } catch { /* best-effort */ } }
+      // Only the run lane PERSISTS expiry, and only from the run that MINTED this
+      // approval's stamp (ADR 0896 D5): a `:fork` copies the entry, so it re-reads the
+      // same anchor and is out of mandate itself, deterministically — but it is not the
+      // run the stamp belongs to and never writes back to the live ledger. The owner's
+      // run (or whichever run minted the anchor) persists it on its next turn. By CAS
+      // against the row read above, so a revoke or redraft in between is never
+      // overwritten. Every anchor is at or after `approvedAt` (it is minted at a turn
+      // after the approval), so no run ends a mission before `approvedAt + TTL`.
+      // Delta-review M1 — or once the APPROVAL's own clock has run out (`approvedAt +
+      // TTL`, server-stamped, the earliest bound any lane uses): then the mission is over
+      // for every lane, so any run may record it. Without this a conversation whose
+      // minting run stopped taking turns (the user moved to a branch-fork) kept a stored
+      // `approved` forever while every turn was out of mandate.
+      const approvalClockOut = ledger.approvedAt !== undefined && ledger.expiresAtRelMs !== undefined
+        && (Date.now() - Date.parse(ledger.approvedAt)) > ledger.expiresAtRelMs;
+      if (run && (mintedHere || approvalClockOut)) {
+        try {
+          if (!(await writeLedger(ledger, { ...ledger, status: 'expired' }))) {
+            log.info('intent_ledger_expiry_superseded', { conversationId: conversationKey, ledgerId: ledger.ledgerId });
+          }
+        } catch (err) { log.warn('intent_ledger_expiry_write_failed', { conversationId: conversationKey, error: err instanceof Error ? err.message : String(err) }); }
+      }
     }
     const ledgerScope: ConversationCapabilityScope = expired ? { mode: 'restricted', enabled: [] } : ledgerToScope(ledger);
     scopeConfig = intersectScopes(scopeConfig, ledgerScope);

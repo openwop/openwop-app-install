@@ -1,3 +1,9 @@
+/**
+ * Conversation-rail grouping + unread signal (ADR 0043 Phase 2/3/6; ADR 0192 D6).
+ * Breaks if a conversation type lands in the wrong section, the title filter keeps
+ * a non-match or turns case-sensitive, or unread is read off the wrong participant
+ * row / goes negative / ignores the exact count (w44 cg-* probes).
+ */
 import { describe, it, expect } from 'vitest';
 import { groupConversations, isUnread, mentionCountOf, sectionOf, selfParticipant, unreadCountOf, SECTION_ORDER } from '../conversationGroups.js';
 import type { ChatSessionHeader, ConversationParticipant } from '../../../client/chatSessionsClient.js';
@@ -55,9 +61,14 @@ describe('groupConversations', () => {
       conv({ sessionId: 'a1', type: 'agent', title: 'Ada Lovelace' }),
       conv({ sessionId: 'g1', type: 'group', title: 'Advisory Council' }),
       conv({ sessionId: 'w1', type: 'workspace', title: 'Adaptive Workspace' }),
+      conv({ sessionId: 'a2', type: 'agent', title: 'Felix' }),
+      conv({ sessionId: 'ch1', type: 'channel', title: 'product' }),
     ];
     const grouped = groupConversations(list, 'ad');
+    // Non-matches are excluded (positive control: they are in the unfiltered list).
+    expect(groupConversations(list).Agents.map((c) => c.sessionId)).toEqual(['a1', 'a2']);
     expect(grouped.Agents.map((c) => c.sessionId)).toEqual(['a1']);
+    expect(grouped.Channels).toEqual([]);
     expect(grouped.Groups.map((c) => c.sessionId)).toEqual(['g1']);
     expect(grouped.Workspace.map((c) => c.sessionId)).toEqual(['w1']);
   });

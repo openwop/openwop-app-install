@@ -109,7 +109,11 @@ function CommissionsForOrg({ orgId }: { orgId: string }): JSX.Element {
     setStatementsFailed(false);
     listStatements(orgId)
       .then((x) => { setStatements(x); setStatementsFailed(false); })
-      .catch(() => { setStatements([]); setStatementsFailed(true); });
+      // COM-EMPTY-ON-FAIL-1 — the line above said so, and the catch still wrote
+      // `[]`: the warning rendered AND, below it, the "No statements yet" card.
+      // A failed read now leaves the list unset, and the panel shows only the
+      // warning + Retry (StatementsPanel renders no list while it is failed).
+      .catch(() => { setStatements(null); setStatementsFailed(true); });
   }, [orgId, t]);
   useEffect(load, [load]);
 
@@ -361,7 +365,7 @@ function StatementsPanel({ orgId, plans, plansFailed, statements, statementsFail
         <Notice variant="warning" announce={t('statementsLoadFailed')}>{t('statementsLoadFailed')} <Button variant="link" onClick={onChange}>{t('retryButton')}</Button></Notice>
       ) : null}
 
-      {statements && statements.length > 3 ? (
+      {!statementsFailed && statements && statements.length > 3 ? (
         <div className="filterbar" role="group" aria-label={t('filterGroup')}>
           <input
             type="search"
@@ -379,7 +383,7 @@ function StatementsPanel({ orgId, plans, plansFailed, statements, statementsFail
           </select>
         </div>
       ) : null}
-      {statements === null ? <Skeleton /> : statements.length === 0 ? (
+      {statementsFailed ? null : statements === null ? <Skeleton /> : statements.length === 0 ? (
         <StateCard icon={<ScaleIcon />} title={t('noStatementsTitle')} body={t('noStatementsBody')} />
       ) : visibleStatements.length === 0 ? (
         <StateCard icon={<ScaleIcon />} title={t('noMatchTitle')} body={t('noMatchBody')} action={<Button variant="secondary" onClick={clearFilters}>{t('clearFilters')}</Button>} />

@@ -17,7 +17,7 @@ import { loadOrgMembers } from '../orgs/orgMembers.js';
 import type { CanvasClient, CanvasVersionRow } from './canvasClient.js';
 import { summaryEntries, summaryLines, type VersionSummary } from './versionSummary.js';
 
-export function CanvasHistoryModal<Doc extends object>({ client, orgId, canvasId, currentDoc, coerceDoc, summarize, typeNamespace, onClose, onRestored }: {
+export function CanvasHistoryModal<Doc extends object>({ client, orgId, canvasId, currentDoc, coerceDoc, summarize, typeNamespace, onClose, onRestored, canRestore = true }: {
   client: CanvasClient;
   orgId: string;
   canvasId: string;
@@ -27,6 +27,8 @@ export function CanvasHistoryModal<Doc extends object>({ client, orgId, canvasId
   typeNamespace: string;
   onClose: () => void;
   onRestored: () => void;
+  /** ADR 0886 — false for a view-only caller: history reads, restore is a write. */
+  canRestore?: boolean;
 }): JSX.Element {
   const { t, i18n } = useTranslation('canvas');
   const { t: tt } = useTranslation(typeNamespace);
@@ -83,7 +85,7 @@ export function CanvasHistoryModal<Doc extends object>({ client, orgId, canvasId
       await client.restoreVersion(orgId, canvasId, row.versionId);
       onRestored();
     } catch (e) {
-      setError(e instanceof Error ? e.message : t('histRestoreFailed'));
+      setError((e as { status?: number }).status === 403 ? t('noWriteAccess') : e instanceof Error ? e.message : t('histRestoreFailed'));
     } finally {
       setBusy(null);
     }
@@ -125,7 +127,7 @@ export function CanvasHistoryModal<Doc extends object>({ client, orgId, canvasId
                     {busy === row.versionId ? t('loading') : t('histCompare')}
                   </Button>
                 ) : null}
-                <Button variant="secondary" size="sm" disabled={busy === row.versionId} onClick={() => void onRestore(row)}>{t('histRestore')}</Button>
+                {canRestore ? <Button variant="secondary" size="sm" disabled={busy === row.versionId} onClick={() => void onRestore(row)}>{t('histRestore')}</Button> : null}
               </span>
             </li>
           ))}

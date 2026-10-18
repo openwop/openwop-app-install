@@ -134,7 +134,7 @@ export function bundleObjectUrl(origin: BundleOrigin, commit: string, major: Ser
 //
 // Mirrors `@openwop/openwop-conformance` `src/lib/certification-bundle-v3.ts`
 // (suite 2.34.0, the version the reference fixture was cut with). It is a
-// MIRROR, not an import, for the reason `conformance/certify.ts` gives: the
+// MIRROR, not an import, for the reason the (retired) `conformance/certify.ts` gave: the
 // suite is a devDependency and the release stage runs `npm ci --omit=dev`, so
 // nothing here may import it. The mirror fails CLOSED — a drift in
 // canonicalisation or row reduction changes the recomputed digest, and the real

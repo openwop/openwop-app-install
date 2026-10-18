@@ -18,6 +18,7 @@
 import { createHash } from 'node:crypto';
 import { insertRunWithStartContext } from './runInsert.js';
 import { DurableCollection } from './hostExtPersistence.js';
+import { CAS_RETRIES, entityEtag, staleWriteError } from './entityVersion.js';
 import { createLogger } from '../observability/logger.js';
 import type { Storage } from '../storage/storage.js';
 import { generateWorkforceHistory } from './workforceHistory.js';
@@ -103,17 +104,35 @@ export async function putWorkforce(workforce: Workforce): Promise<void> {
  *  workforce as that tenant now sees it, or null if it doesn't exist. Writes
  *  ONLY the tenant overlay — never the shared seed (ADR 0775 D2). The
  *  PRODUCTION gate (only promote once the agent has graduated to
- *  bounded-autonomous) is enforced at the route, which has the run history. */
+ *  bounded-autonomous) is enforced at the route, which has the run history.
+ *
+ *  ADR 0775 P4 follow-up (`ARWF-11`, workforce PATCH) — the overlay write is a
+ *  compare-and-swap against the overlay that was read, and `ifMatch` names the
+ *  version of the workforce the caller decided from: a cut-over chosen against
+ *  `shadow` is refused once another editor has moved it to `production`. */
 export async function setWorkforceStatus(
   tenantId: string,
   workforceId: string,
   status: WorkforceStatus,
+  opts: { ifMatch?: string } = {},
 ): Promise<Workforce | null> {
-  const wf = await workforces.get(workforceId);
-  if (!wf) return null;
-  const overlay: WorkforceStatusOverlay = { tenantId, workforceId, status, updatedAt: new Date().toISOString() };
-  await statusOverlays.put(overlay);
-  return withTenantStatus(wf, overlay);
+  for (let attempt = 0; attempt < CAS_RETRIES; attempt += 1) {
+    const wf = await workforces.get(workforceId);
+    if (!wf) return null;
+    const current = await statusOverlays.get(`${tenantId}:${workforceId}`);
+    if (opts.ifMatch !== undefined) {
+      const seen = workforceEtag(withTenantStatus(wf, current));
+      if (seen !== opts.ifMatch) throw staleWriteError('workforce', seen);
+    }
+    const overlay: WorkforceStatusOverlay = { tenantId, workforceId, status, updatedAt: new Date().toISOString() };
+    if (await statusOverlays.compareAndSwap(current ?? null, overlay)) return withTenantStatus(wf, overlay);
+  }
+  throw staleWriteError('workforce', undefined);
+}
+
+/** A workforce's content version as one tenant sees it (ADR 0775 P4). */
+export function workforceEtag(wf: Workforce): string {
+  return entityEtag(wf);
 }
 
 /** ADR 0775 D2 (architect M4) — drop every cutover decision `tenantId` made, so

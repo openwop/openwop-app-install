@@ -49,7 +49,6 @@ const RECORDED_OUTCOME_CLAIM = /recorded\s*(→|->|;|,)?\s*replay|replay\/fork r
  */
 const QUARANTINE: ReadonlySet<string> = new Set([
   'feature.assistant.nodes.log-decision', // WF-COS-3 family
-  'feature.commerce.nodes.create-order', // same claim, `role:action (recorded → replay-safe)`
 ]);
 
 interface ManifestNode {

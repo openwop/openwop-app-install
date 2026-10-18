@@ -10,6 +10,13 @@
  * SL-G6: Present and Presenter view load the SAVED canvas from the server, the
  * same as Export does. Export hinted when the doc was dirty; these two didn't,
  * so an unsaved edit was silently missing from what the audience saw.
+ *
+ * /grade-tests w52 — witnessed by sabotage of `definition.tsx`
+ * (SlidesToolbarExtras): the report gate, the clean-import path, dismiss-opens,
+ * both Present hints, the coded lane and its all-or-nothing rule, and the open
+ * navigation. The dismiss case now asserts the report is OPEN before it is
+ * dismissed — without that, a build that never showed the report navigated
+ * straight through and passed it.
  */
 import { describe, it, expect, afterEach, vi, beforeEach } from 'vitest';
 import { render, cleanup, fireEvent, act, screen } from '@testing-library/react';
@@ -55,7 +62,8 @@ const importReturns = (skipped: string[]): void => {
 };
 
 const doImport = async (container: HTMLElement): Promise<void> => {
-  const input = container.querySelector('input[type="file"]') as HTMLInputElement;
+  const input = container.querySelector('input[type="file"]');
+  if (!(input instanceof HTMLInputElement)) throw new Error('no file input');
   await act(async () => { fireEvent.change(input, { target: { files: [pptx()] } }); });
 };
 
@@ -92,8 +100,13 @@ describe('SL-G5 — the import reports WHAT it skipped', () => {
     importReturns(['slide 1: images/charts/tables are not imported (text only)']);
     const { container } = view(false);
     await doImport(container);
+    // The report is open and nothing has navigated yet…
+    expect(screen.getByRole('dialog').textContent).toContain('slide 1: images/charts/tables');
+    expect(navigate).not.toHaveBeenCalled();
     await act(async () => { fireEvent.keyDown(window, { key: 'Escape' }); });
+    // …and dismissing it is what opens the deck.
     expect(navigate).toHaveBeenCalledWith('/slides/cv-new');
+    expect(screen.queryByRole('dialog')).toBeNull();
   });
 
   it('a clean import needs no report — it navigates straight through', async () => {
@@ -101,7 +114,7 @@ describe('SL-G5 — the import reports WHAT it skipped', () => {
     const { container } = view(false);
     await doImport(container);
     expect(screen.queryByRole('dialog')).toBeNull();
-    expect(toastSuccess).toHaveBeenCalled();
+    expect(toastSuccess).toHaveBeenCalledWith('Deck imported (text only \u2014 images and charts are not carried over).');
     expect(navigate).toHaveBeenCalledWith('/slides/cv-new');
   });
 });

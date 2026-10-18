@@ -259,6 +259,30 @@ CONFIGURED locale.
     `localizations`.
   - Approval proposal: no change in this ADR.
 
+> **ADDENDUM 2026-10-11 (owner decision, row-35 follow-up) — a copy of the base is not a
+> translation.** D6 stamped every new or changed overlay from the base, so the editor's
+> *Copy from base* (which writes `{ ...data }` into the overlay) recorded `current`: the
+> editor's chips, the page summary and the agent read all said the page was translated
+> while it still read in the base language. **MEASURED red on `f7a216b78`** (6 of 7 legs in
+> `test/cms-copy-from-base-status.test.ts`). Decision, in the ONE stamp helper so every lane
+> inherits it (editor PATCH, page create, the node/agent `updatePage` lane, the submit-time
+> auto-translate merge, both shared-section writers):
+> - an overlay whose **every overridden key equals the base value** (`copiesBase`, canonical
+>   JSON per key) is **not stamped** — status `unknown`, the existing "no evidence, no claim"
+>   state. No new status: `unknown` already means exactly this, and a fifth state would have
+>   had to ride the agent read, the status route, the editor and the card for no added truth;
+> - it becomes `current` when the text changes (one differing key is a translation: partial
+>   translation is the editor's claim to make), when an editor clicks *Mark up to date*
+>   (confirm-source stamps even an exact copy — the explicit claim, e.g. a brand name), or
+>   when a translation writes text that differs from the base. A model translation that
+>   echoes its input verbatim reads `unknown`, because nothing distinguishes it from a copy;
+> - a previously `current` overlay overwritten by a copy LOSES its stamp.
+>
+> The editor now shows a **Not confirmed** chip for `unknown` overlays and offers *Mark up to
+> date* on them (it was offered only on `outdated`, so a legitimately identical copy could
+> never be cleared). Pre-existing, unchanged and out of scope: the ADR 0408 kernel field
+> validator keeps a cleaned client `sourceDigest` on system-row writes that bypass the façade.
+
 ### D7 — witnesses carried from it.23
 
 - `CMSLWF-11`: one SUCCESSFUL chat-lane translate (the agent tool with a mocked
@@ -317,6 +341,13 @@ metadata that never reaches the wire. No new RFC, and none is ridden.
 - **OQ-1 (owner):** should a page with outdated translations be *flagged* on its approval card?
   Recommendation: yes, in a follow-up. Today's card already discloses AI-drafted locales.
   Deferred here to keep the review lifecycle (ADR 0859) unchanged.
+  **RESOLVED 2026-10-11 (owner): yes, as information, never a block.** The approval row
+  carries `outdatedTranslationLocales`, derived at queue AND repin time by
+  `outdatedTranslationLocalesOf` from `pageTranslationStatus` — the function behind
+  `GET …/translation-status`, so the card cannot disagree with the editor. The inbox card
+  (`ContentReviewContext`, both inboxes) renders "N translations are outdated (es, fr)"
+  linking to the page editor (where the status lives: toolbar summary + section chips; there
+  is no separate translation tab). The decide bar is unchanged. Recorded in ADR 0859 D5.
 - **OQ-2:** confirm-source on a `published` page under the gate is refused, the same as any
   live edit. That is consistent, but a translator cannot clear "outdated" on a live page
   without unpublishing. Recommendation: keep it consistent for now, because the flag is
@@ -361,6 +392,7 @@ tell "none withheld" from "not known".
 | P4 D6 | feat(cms): translation status — server-owned source digests, confirm-source, agent read; feat(cms): translation status in the editor | `cms-translation-status`, FE `translationStatus.test.tsx` |
 | P5 D7 | test(cms): real-executor chain + chat translate success witnesses | `cms-chain-real-executor`, `cms-agent-translate-success` |
 | review | fix(cms): confirm-source pins the editor's version (grade-ux CMSL2UX-1..7); one live-edit refusal (CMSL2CD-2) | the 409 leg in `cms-translation-status` |
+| addendum | fix(cms): Copy from base records unknown, not current; approval card notes outdated translations (ADR 0861 D6 addendum, OQ-1) | `cms-copy-from-base-status` (red first), `adr0861-approval-card-outdated-translations`, FE `contentReviewCard` + `translationStatus` |
 
 **Corrections found after the pre-code review (recorded, not silently fixed).** `/grade-ux` found a
 Blocker in D6's own client half: "Mark up to date" pinned the CAS to the route's fresh read, and the

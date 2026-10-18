@@ -29,6 +29,33 @@ function stripeApiBase(): string {
 const STRIPE_TIMEOUT_MS = 15_000;
 
 /**
+ * ADR 0877 D2 (architect H4) — the ONLY thing a storefront money-opening call
+ * accepts in place of a key. It is minted solely by
+ * `commerce-connect/storefrontSettlement.ts` (`resolveStorefrontSettlement`),
+ * which decides whether this tenant may take live money on the PLATFORM account
+ * or only through its own Connect account. The brand is type-level (no runtime
+ * symbol exists), so a caller holding a bare key cannot build one without an
+ * `as StorefrontCharge` cast — and `adr0877-charge-gate-ratchet` pins that
+ * cast to the resolver module. A bare-key storefront charge is what let every
+ * signed-in tenant charge cards onto the operator's account.
+ */
+declare const STOREFRONT_CHARGE: unique symbol;
+export interface StorefrontCharge {
+  readonly [STOREFRONT_CHARGE]: true;
+  readonly key: string;
+  /** Present ⇒ a destination charge to the tenant's own connected account. */
+  readonly connect?: { readonly destinationAccountId: string; readonly applicationFeePct: number };
+}
+
+/** ADR 0877 M8 — the platform fee on a Connect charge: a percentage of the GOODS
+ *  (tax and shipping excluded), minor units first, never above the charge. */
+export function storefrontApplicationFeeMinor(charge: StorefrontCharge, goodsMinor: number, chargeMinor: number): number {
+  if (!charge.connect) return 0;
+  const fee = Math.round(Math.max(0, goodsMinor) * (charge.connect.applicationFeePct / 100));
+  return Math.min(fee, Math.max(0, chargeMinor));
+}
+
+/**
  * Pin the Stripe API version (R-1 cutover, ADR 0176 open question). MyndHyve's
  * account runs `2025-12-15.clover`; pinning it here keeps BOTH our outgoing calls
  * AND — when the operator creates the cutover webhook endpoint at this version —
@@ -139,6 +166,17 @@ export async function createStripeCheckoutSession(
     subscriptionMetadata?: Record<string, string>;
     /** ADR 0820 §7 — a free trial on the created subscription (subscription mode only). */
     trialPeriodDays?: number;
+    /** ADR 0890 — who computes tax. Absent = none (the pre-0890 session).
+     *  `automatic` = Stripe Tax on this account. `managed` = Stripe Managed
+     *  Payments (merchant of record), which REJECTS `automatic_tax`,
+     *  `tax_id_collection`, `customer_update`, `payment_method_types` and the
+     *  Connect/invoice params, so that branch sends none of them. */
+    tax?: 'automatic' | 'managed';
+    /** ADR 0890 — let the buyer enter a Stripe promotion code. */
+    allowPromotionCodes?: boolean;
+    /** ADR 0890 — start the trial without collecting a card; the subscription
+     *  cancels if none is added by the trial's end. Only with `trialPeriodDays`. */
+    trialWithoutCard?: boolean;
   },
 ): Promise<{ id: string; url: string }> {
   const params: Record<string, string> = {
@@ -153,7 +191,21 @@ export async function createStripeCheckoutSession(
   if (input.mode === 'subscription') {
     for (const [k, v] of Object.entries(input.subscriptionMetadata ?? {})) params[`subscription_data[metadata][${k}]`] = v;
     if (input.trialPeriodDays) params['subscription_data[trial_period_days]'] = String(input.trialPeriodDays);
+    if (input.trialPeriodDays && input.trialWithoutCard) {
+      params.payment_method_collection = 'if_required';
+      params['subscription_data[trial_settings][end_behavior][missing_payment_method]'] = 'cancel';
+    }
   }
+  if (input.tax === 'managed') {
+    params['managed_payments[enabled]'] = 'true';
+  } else if (input.tax === 'automatic') {
+    // Stripe Tax needs a location. An existing customer may have no address, so
+    // collect a billing address and save it onto that customer.
+    params['automatic_tax[enabled]'] = 'true';
+    params.billing_address_collection = 'required';
+    if (input.customer) params['customer_update[address]'] = 'auto';
+  }
+  if (input.allowPromotionCodes) params.allow_promotion_codes = 'true';
   const body = await stripeRequest(key, 'POST', '/v1/checkout/sessions', params);
   const id = typeof body.id === 'string' ? body.id : '';
   const url = typeof body.url === 'string' ? body.url : '';
@@ -223,12 +275,20 @@ export async function createStripePortalSession(key: string, customerId: string,
 }
 
 /** Fetch a PaymentIntent for verification (status/amount/currency). */
-export async function getStripePaymentIntent(key: string, paymentIntentId: string): Promise<{ status: string; amount: number; currency: string }> {
+export async function getStripePaymentIntent(key: string, paymentIntentId: string): Promise<{ status: string; amount: number; currency: string; metadata: Record<string, string>; transferDestination?: string }> {
   const body = await stripeRequest(key, 'GET', `/v1/payment_intents/${encodeURIComponent(paymentIntentId)}`);
+  // ADR 0875 D3 — `metadata` is what binds an intent to the order it was created for.
+  const metadata: Record<string, string> = {};
+  for (const [k, v] of Object.entries((body.metadata as Record<string, unknown> | undefined) ?? {})) if (typeof v === 'string') metadata[k] = v;
   return {
     status: typeof body.status === 'string' ? body.status : 'unknown',
     amount: typeof body.amount === 'number' ? body.amount : NaN,
     currency: typeof body.currency === 'string' ? body.currency : '',
+    metadata,
+    // ADR 0877 D3 — a destination charge's refund must reverse the transfer; the
+    // intent (not a stamp on our order) is the authority on where the money went.
+    ...(typeof (body.transfer_data as { destination?: unknown } | undefined)?.destination === 'string'
+      ? { transferDestination: (body.transfer_data as { destination: string }).destination } : {}),
   };
 }
 
@@ -251,15 +311,19 @@ export function fromStripeMinorUnits(amountMinor: number, currency: string): num
  *  + the order correlation metadata the commerce webhook flips `paid` on. Amounts
  *  are MINOR units (zero-decimal aware via toStripeMinorUnits at the caller). */
 export async function createStripeOrderCheckoutSession(
-  key: string,
+  charge: StorefrontCharge,
   input: {
     lines: { name: string; amountMinor: number; currency: string; quantity: number }[];
     metadata: { orderId: string; tenantId: string; orgId: string };
     successUrl: string; cancelUrl: string;
     customerId?: string;
     setupFutureUsage?: 'off_session';
+    /** ADR 0877 M8 — the goods total (after discount, before tax/shipping) the
+     *  Connect fee is a percentage of. Ignored on the platform lane. */
+    feeBaseMinor: number;
   },
 ): Promise<{ id: string; url: string }> {
+  const chargeMinor = input.lines.reduce((sum, l) => sum + l.amountMinor * l.quantity, 0);
   const params: Record<string, string> = {
     mode: 'payment',
     success_url: input.successUrl,
@@ -274,6 +338,15 @@ export async function createStripeOrderCheckoutSession(
     'metadata[orderId]': input.metadata.orderId,
     'metadata[tenantId]': input.metadata.tenantId,
     'metadata[orgId]': input.metadata.orgId,
+    // ADR 0877 D2 — a Connect tenant's sale is a DESTINATION charge: the connected
+    // account is the settlement merchant (`on_behalf_of`), the remainder transfers
+    // to it, and the platform keeps only its fee. NO `ccOrderId` (M12): this is a
+    // storefront order, routed by `metadata.orderId`, never the pack marketplace.
+    ...(charge.connect ? {
+      'payment_intent_data[transfer_data][destination]': charge.connect.destinationAccountId,
+      'payment_intent_data[on_behalf_of]': charge.connect.destinationAccountId,
+      'payment_intent_data[application_fee_amount]': String(storefrontApplicationFeeMinor(charge, input.feeBaseMinor, chargeMinor)),
+    } : {}),
   };
   input.lines.forEach((l, i) => {
     params[`line_items[${i}][quantity]`] = String(l.quantity);
@@ -281,7 +354,9 @@ export async function createStripeOrderCheckoutSession(
     params[`line_items[${i}][price_data][unit_amount]`] = String(l.amountMinor);
     params[`line_items[${i}][price_data][product_data][name]`] = l.name;
   });
-  const body = await stripeRequest(key, 'POST', '/v1/checkout/sessions', params);
+  // ADR 0877 M13 — the Connect variant is keyed by order (a retried create returns
+  // the same session); the platform lane keeps its pre-0877 key-less shape.
+  const body = await stripeRequest(charge.key, 'POST', '/v1/checkout/sessions', params, charge.connect ? `storefront:${input.metadata.orderId}` : undefined);
   const id = typeof body.id === 'string' ? body.id : '';
   const url = typeof body.url === 'string' ? body.url : '';
   if (!id || !url) throw new OpenwopError('internal_error', 'Stripe returned a checkout session without id/url.', 502, { provider: 'stripe' });
@@ -298,9 +373,10 @@ const STRIPE_RECURRING: Record<string, { interval: string; count: number }> = {
   quarterly: { interval: 'month', count: 3 }, yearly: { interval: 'year', count: 1 },
 };
 export async function createStripeSubscription(
-  key: string,
+  charge: StorefrontCharge,
   input: { email?: string; unitPrice: number; currency: string; interval: string; productName: string; metadata: Record<string, string> },
 ): Promise<{ subscriptionId: string; customerId: string }> {
+  const key = charge.key;
   const cust = await stripeRequest(key, 'POST', '/v1/customers', input.email ? { email: input.email } : {});
   const customerId = typeof cust.id === 'string' ? cust.id : '';
   if (!customerId) throw new OpenwopError('internal_error', 'Stripe returned a customer without id.', 502, { provider: 'stripe' });
@@ -312,9 +388,18 @@ export async function createStripeSubscription(
     'items[0][price_data][recurring][interval]': rec.interval,
     'items[0][price_data][recurring][interval_count]': String(rec.count),
     'items[0][price_data][product_data][name]': input.productName,
+    // ADR 0877 D2 — every invoice of a Connect tenant's subscription is a
+    // destination charge to its own account; the fee is a percentage (Stripe
+    // applies it per invoice).
+    ...(charge.connect ? {
+      'transfer_data[destination]': charge.connect.destinationAccountId,
+      on_behalf_of: charge.connect.destinationAccountId,
+      application_fee_percent: String(charge.connect.applicationFeePct),
+    } : {}),
   };
   for (const [k, v] of Object.entries(input.metadata)) params[`metadata[${k}]`] = v;
-  const body = await stripeRequest(key, 'POST', '/v1/subscriptions', params);
+  const subKey = charge.connect && input.metadata.productSubscriptionId ? `storefront-sub:${input.metadata.productSubscriptionId}` : undefined;
+  const body = await stripeRequest(key, 'POST', '/v1/subscriptions', params, subKey);
   const subscriptionId = typeof body.id === 'string' ? body.id : '';
   if (!subscriptionId) throw new OpenwopError('internal_error', 'Stripe returned a subscription without id.', 502, { provider: 'stripe' });
   return { subscriptionId, customerId };
@@ -329,13 +414,16 @@ export async function createStripeSubscription(
 export async function createStripeRefund(
   key: string,
   paymentIntentId: string,
-  opts: { amountMinor?: number; idempotencyKey?: string; reverseTransfer?: boolean } = {},
+  opts: { amountMinor?: number; idempotencyKey?: string; reverseTransfer?: boolean; refundApplicationFee?: boolean } = {},
 ): Promise<{ id: string; status: string }> {
   const params: Record<string, string> = { payment_intent: paymentIntentId };
   // ADR 0385 P5 — destination-charge refund: pull the seller's share back from
   // the connected account (best-effort creator recovery; the platform still
   // fronts the buyer's refund either way).
   if (opts.reverseTransfer) params.reverse_transfer = 'true';
+  // ADR 0877 Q5 — a Connect STOREFRONT refund returns the platform's fee
+  // (prorated by Stripe on a partial). The pack marketplace never sets this.
+  if (opts.refundApplicationFee) params.refund_application_fee = 'true';
   if (opts.amountMinor !== undefined) {
     if (!Number.isInteger(opts.amountMinor) || opts.amountMinor <= 0) {
       throw new OpenwopError('validation_error', 'A partial refund amount must be a positive integer in minor units.', 400, { provider: 'stripe' });
@@ -369,6 +457,11 @@ export async function createStripeConnectAccount(
 ): Promise<{ accountId: string; country: string }> {
   const params: Record<string, string> = {
     type: 'express',
+    // ADR 0877 D8 — `on_behalf_of` needs `card_payments` on the connected account
+    // and a destination needs `transfers`. Nothing was requested before, so a
+    // live seller could never become chargeable through either lane.
+    'capabilities[card_payments][requested]': 'true',
+    'capabilities[transfers][requested]': 'true',
     ...(input.country ? { country: input.country.toUpperCase() } : {}),
     ...(input.email ? { email: input.email } : {}),
   };
@@ -472,12 +565,14 @@ export async function createStripeCustomer(key: string, input: { email?: string 
  *  outcomes: an SCA challenge (`requiresAction` + clientSecret for the
  *  on-session fallback) and a decline — the funnel must route on both. */
 export async function createStripeOffSessionPaymentIntent(
-  key: string,
+  charge: StorefrontCharge,
   input: {
     customerId: string; paymentMethodId: string;
     amountMinor: number; currency: string;
     metadata: { orderId: string; tenantId: string; orgId: string };
     idempotencyKey: string;
+    /** ADR 0877 M8 — goods total the Connect fee is a percentage of. */
+    feeBaseMinor: number;
   },
 ): Promise<
   | { outcome: 'succeeded'; paymentIntentId: string }
@@ -494,7 +589,15 @@ export async function createStripeOffSessionPaymentIntent(
     'metadata[orderId]': input.metadata.orderId,
     'metadata[tenantId]': input.metadata.tenantId,
     'metadata[orgId]': input.metadata.orgId,
+    // ADR 0877 D2 — same destination shape as the parent's checkout; the caller
+    // (H3) has already refused a child whose lane differs from the parent's.
+    ...(charge.connect ? {
+      'transfer_data[destination]': charge.connect.destinationAccountId,
+      on_behalf_of: charge.connect.destinationAccountId,
+      application_fee_amount: String(storefrontApplicationFeeMinor(charge, input.feeBaseMinor, input.amountMinor)),
+    } : {}),
   };
+  const key = charge.key;
   // ADR 0533 — an off-session charge is the sharpest edge of all: a replay
   // would charge a saved card a second time.
   assertEffectAllowed('payment', 'stripe off-session payment intent');

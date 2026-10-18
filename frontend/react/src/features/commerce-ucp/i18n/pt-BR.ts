@@ -22,6 +22,7 @@ export const messages = {
   copied: 'Copiado para a área de transferência',
   clientsTitle: 'Clientes de agente',
   clientsHint: 'Credenciais de cliente que os agentes externos usam para autenticar.',
+  liveRefusedNotice: 'Este espaço de trabalho recebe pagamentos reais: os agentes podem navegar pelo catálogo e montar carrinhos, mas o checkout e o pagamento são recusados até que os mandatos AP2 possam ser verificados.',
   newClient: 'Novo cliente',
   noClients: 'Nenhum cliente de agente ainda.',
   noClientsBody: 'Provisione um cliente para que um agente de IA externo possa se autenticar e comprar no seu catálogo.',

@@ -1,3 +1,15 @@
+/**
+ * ADR 0738 (reusable WorkItems) — the core `core.openwop.kanban-work-items`
+ * materializer forwards a producer's proposal to the tenant-scoped
+ * `ctx.kanban.materializeWorkItems` boundary with a DETERMINISTIC delivery key
+ * (per run/node/board/source), and never a tenantId (the host fills tenant from
+ * the run scope). Red if the key gains entropy or the command carries a tenant
+ * (probes w37g1-pack-key-deterministic, w37g1-pack-no-tenant).
+ *
+ * The review-policy gate (`requireApproval`) is owned by
+ * `adr0835-approvals-and-repo.test.ts` (S6: approve/accept pass; reject, missing
+ * and override refuse) — not duplicated here.
+ */
 import { describe, expect, it } from 'vitest';
 
 type CorePack = typeof import('../../../packs/core.openwop.kanban-work-items/index.mjs');
@@ -27,28 +39,12 @@ describe('core.openwop.kanban-work-items', () => {
       },
     };
     const first = await materializeWorkItems(ctx);
-    const second = await materializeWorkItems(ctx);
-    expect(first.outputs).toMatchObject({ dryRun: false, workItems: [{ workItemId: 'work-1' }] });
-    expect(second.outputs).toEqual(first.outputs);
+    await materializeWorkItems(ctx);
+    expect(first).toMatchObject({ status: 'success', outputs: { dryRun: false, workItems: [{ workItemId: 'work-1' }] } });
     expect(received).toHaveLength(2);
     expect(received[0]).toMatchObject({ boardId: 'board-1', ...proposal });
+    expect(received[0]?.idempotencyKey).toMatch(/^kanban-work-[0-9a-f]{32}$/);
     expect(received[0]?.idempotencyKey).toEqual(received[1]?.idempotencyKey);
     expect(received[0]).not.toHaveProperty('tenantId');
-  });
-
-  it('makes review policy composable rather than hard-coding it into every producer', async () => {
-    const { materializeWorkItems } = await pack();
-    const ctx = {
-      runId: 'run-1', nodeId: 'node-1',
-      inputs: { boardId: 'board-1', proposal, approval: false },
-      config: { requireApproval: true },
-      kanban: { materializeWorkItems: async () => ({ dryRun: false, workItems: [], cards: [] }) },
-    };
-    await expect(materializeWorkItems(ctx)).rejects.toMatchObject({ code: 'kanban_approval_required' });
-
-    await expect(materializeWorkItems({
-      ...ctx,
-      inputs: { boardId: 'board-1', proposal, approval: { action: 'approve' } },
-    })).resolves.toMatchObject({ status: 'success' });
   });
 });

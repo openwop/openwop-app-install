@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/feature.profiles.nodes/1.1.1/list.output.json",
+  "$id": "https://packs.openwop.dev/feature.profiles.nodes/1.2.0/list.output.json",
   "title": "ProfilesListOutput",
-  "description": "The tenant's team roster \u2014 every profile in the run's tenant as a descriptive projection (tenant bookkeeping columns stripped; endorsements as `{ count, endorserUserIds }`). Descriptive only: a profile confers no authority and carries no ranking (ADR 0005).",
+  "description": "The profiles the run's acting user may see (ADR 0888): every profile in their home tenant, or in a workspace the people who shared their profile with it. Capability projections only — no bio, contact or asset tokens; endorsements as `{ count, endorserUserIds }` (ids empty in a workspace). Descriptive only: a profile confers no authority and carries no ranking (ADR 0005).",
   "type": "object",
   "required": [
     "profiles"
@@ -19,7 +19,7 @@
           "userId": {
             "type": "string",
             "minLength": 1,
-            "description": "The member's opaque `User.userId` \u2014 the key `get` was called with."
+            "description": "The member's opaque `User.userId` — the key `get` was called with."
           },
           "skills": {
             "type": "array",
@@ -66,8 +66,12 @@
           }
         },
         "additionalProperties": true,
-        "description": "One roster row \u2014 the same projection `get` returns as `profile`."
+        "description": "One roster row — the same projection `get` returns as `profile`."
       }
+    },
+    "truncated": {
+      "type": "boolean",
+      "description": "Present and true when a workspace directory hit its 500-person cap."
     }
   },
   "additionalProperties": false

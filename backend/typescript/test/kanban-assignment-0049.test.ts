@@ -2,7 +2,7 @@
  * ADR 0049 (kanban card assignment) + ADR 0050 (per-recipient notification
  * targeting).
  *
- * Covers, against the sqlite memory backend booted by createApp:
+ * Covers, against a bare sqlite memory backend:
  *  - ADR 0050: an ADDRESSED notification (recipientUserId set) is visible only
  *    to its recipient + tenant broadcasts; broadcasts reach everyone;
  *    markAllNotificationsRead is recipient-scoped.
@@ -10,12 +10,27 @@
  *    cards across boards; completion stamping on a terminal column; the
  *    `taskAssign` surface op now emits an addressed notification (the formerly
  *    dead `notifyAssignee`) and withdraws the prior assignee's on reassign.
+ *
+ * Runs on bare persistence (sqlite memory + the notification backend) — no app
+ * boot. The list-filter half of the ADR 0050 case is also covered by
+ * notifications.test.ts "recipientRole: a role row is visible ONLY to
+ * role-holders"; the mark-all half (another user's ADDRESSED row stays unread)
+ * is unique here.
+ *
+ * Red if the recipient filter or the mark-all scope widens (probes
+ * w37g1-a49-list-addressed, -a49-markall-addressed), the role mirror ignores the
+ * held roles (-a49-role-mirror), completedAt is not stamped/cleared
+ * (-a49-completed-*), or taskAssign ignores notifyAssignee, skips the emit or the
+ * prior-assignee withdraw, or the durable receipt replay (-a49-notify-flag,
+ * -a49-emit, -a49-withdraw-prior, -a49-receipt-replay — the last reds through the
+ * contested-receipt throw; without the receipt, assignee equality would also stop
+ * a second notice).
  */
 
 import { describe, expect, it, beforeAll, afterAll } from 'vitest';
-import http from 'node:http';
-import { createApp } from '../src/index.js';
-import { __hostExtStorage } from '../src/host/hostExtPersistence.js';
+import { openStorage } from '../src/storage/index.js';
+import { initHostExtPersistence, __resetHostExtPersistence } from '../src/host/hostExtPersistence.js';
+import { ensureNotificationEmitterInstalled } from '../src/bootstrap/notifications.js';
 import {
   createBoard,
   createCard,
@@ -24,29 +39,22 @@ import {
   listCardsAssignedToUser,
 } from '../src/host/kanbanService.js';
 import { createKanbanSurface } from '../src/host/kanbanSurface.js';
-import type { BundleScope } from '../src/host/inMemorySurfaces.js';
 import type { Storage } from '../src/storage/storage.js';
 
-let server: http.Server;
+let store: Storage;
 
 beforeAll(async () => {
-  process.env.OPENWOP_STORAGE_DSN = 'memory://';
-  process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
-  const app = await createApp({
-    port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false,
-  });
-  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', res); });
+  store = await openStorage('memory://');
+  initHostExtPersistence(store);
+  ensureNotificationEmitterInstalled(store);
 });
 
 afterAll(async () => {
-  await new Promise<void>((res) => server.close(() => res()));
+  __resetHostExtPersistence();
+  await store.close();
 });
 
-const storage = (): Storage => {
-  const s = __hostExtStorage();
-  if (!s) throw new Error('storage not initialized');
-  return s;
-};
+const storage = (): Storage => store;
 
 describe('ADR 0050 — per-recipient notification targeting', () => {
   it('addressed notifications are private to their recipient; broadcasts reach all', async () => {
@@ -121,7 +129,7 @@ describe('ADR 0049 — taskAssign honors notifyAssignee', () => {
     const tenantId = 'ws:assign-test';
     const b = await createBoard({ tenantId, name: 'Board' });
     const card = await createCard({ boardId: b.id, columnId: 'todo', title: 'do the thing' });
-    const surface = createKanbanSurface({ tenantId } as BundleScope);
+    const surface = createKanbanSurface({ tenantId });
 
     await surface.taskAssign({ taskId: card.id, assigneeId: 'userA', notifyAssignee: true, idempotencyKey: 'k1' });
     const aInbox = await storage().listNotifications({ tenantId, recipientUserId: 'userA' });
@@ -132,7 +140,7 @@ describe('ADR 0049 — taskAssign honors notifyAssignee', () => {
 
     // A fresh host surface (the restart/multi-instance shape) gets the durable
     // receipt's original result and cannot create another addressed notice.
-    const retry = createKanbanSurface({ tenantId } as BundleScope);
+    const retry = createKanbanSurface({ tenantId });
     await retry.taskAssign({ taskId: card.id, assigneeId: 'userA', notifyAssignee: true, idempotencyKey: 'k1' });
     expect((await storage().listNotifications({ tenantId, recipientUserId: 'userA' }))
       .filter((n) => n.type === 'task.assigned')).toHaveLength(1);
@@ -149,7 +157,7 @@ describe('ADR 0049 — taskAssign honors notifyAssignee', () => {
     const tenantId = 'ws:assign-silent';
     const b = await createBoard({ tenantId, name: 'Board' });
     const card = await createCard({ boardId: b.id, columnId: 'todo', title: 'silent' });
-    const surface = createKanbanSurface({ tenantId } as BundleScope);
+    const surface = createKanbanSurface({ tenantId });
     await surface.taskAssign({ taskId: card.id, assigneeId: 'userA', notifyAssignee: false, idempotencyKey: 'k3' });
     const aInbox = await storage().listNotifications({ tenantId, recipientUserId: 'userA' });
     expect(aInbox.filter((n) => n.type === 'task.assigned')).toHaveLength(0);

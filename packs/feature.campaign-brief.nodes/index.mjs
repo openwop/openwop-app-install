@@ -17,12 +17,11 @@
 
 import { createHash } from 'node:crypto';
 
-/** DEBT-3 — pack-local mirror of the providers.json SSoT default (the
- *  anthropic `recommended: true` model; src/providers/catalog.ts
- *  getDefaultModel). ctx.callAI REQUIRES an explicit model and standalone
- *  .mjs packs cannot import the catalog, so the default lives in this ONE
- *  greppable constant — the /refresh-model-catalog sweep updates it. */
-const DEFAULT_MODEL = 'claude-sonnet-4-6';
+/** ADR 0903 — no hard-coded vendor. A call passes the provider/model the node
+ *  was given (a chain param frozen at instantiation, or a node input) and leaves
+ *  the rest to the host: `ctx.callAI` fills a missing provider/model from the
+ *  run's choice (`configurable.ai`), else the workspace's active AI binding, else
+ *  the catalog default — resolved once at run start (host/runAiDefault.ts). */
 
 // XCH-CB-3 — one kernel schema literal, used by the first call AND the repair.
 const KERNEL_RESPONSE_SCHEMA = {
@@ -94,7 +93,8 @@ export async function generateKernel(ctx) {
   const brand = ctx.features && ctx.features.brand;
   if (brief.brandId && brand && typeof brand.resolveVoice === 'function') {
     try {
-      const v = await brand.resolveVoice({ brandId: str(brief.brandId) });
+      // ADR 0891 D7 — name the brief's org: a brand bound from another org gives no voice.
+      const v = await brand.resolveVoice({ brandId: str(brief.brandId), orgId });
       if (v && typeof v.voice === 'string') voiceBlock = v.voice;
     } catch { /* brand optional — proceed without */ }
   }
@@ -149,8 +149,8 @@ export async function generateKernel(ctx) {
   let data;
   try {
     const ai = await ctx.callAI({
-      provider: str(i.provider) || 'anthropic',
-      model: str(i.model) || DEFAULT_MODEL,
+      provider: str(i.provider) || undefined,
+      model: str(i.model) || undefined,
       systemPrompt,
       messages: [{ role: 'user', content: userParts.join('\n\n') }],
       responseSchema: KERNEL_RESPONSE_SCHEMA,
@@ -160,8 +160,8 @@ export async function generateKernel(ctx) {
     // before failing — name the missing contract instead of re-rolling blind.
     if (!data || typeof data !== 'object' || typeof data.headline !== 'string') {
       const retry = await ctx.callAI({
-        provider: str(i.provider) || 'anthropic',
-        model: str(i.model) || DEFAULT_MODEL,
+        provider: str(i.provider) || undefined,
+        model: str(i.model) || undefined,
         systemPrompt,
         messages: [
           { role: 'user', content: userParts.join('\n\n') },
@@ -248,8 +248,8 @@ export async function extractBriefSeeds(ctx) {
   let data;
   try {
     const ai = await ctx.callAI({
-      provider: str(i.provider) || 'anthropic',
-      model: str(i.model) || DEFAULT_MODEL,
+      provider: str(i.provider) || undefined,
+      model: str(i.model) || undefined,
       systemPrompt: 'You extract campaign-brief seeds from company knowledge. From the CONTEXT ONLY, propose personas (name, role, buyer stage, pain points, objections), the product summary, and competitor names. Cite the [n] context indexes you drew each item from. Never invent — omit what the context does not support. Reply with strict JSON only.',
       messages: [{ role: 'user', content: r.augmentedPrompt }],
       responseSchema: {
@@ -377,8 +377,8 @@ export async function extractVoc(ctx) {
   const docAttr = (id) => str(id).replace(/[^A-Za-z0-9:._\-]/g, '_');
   const sourceBlock = chunks.map((c, n) => `[${n}] <SOURCE doc="${docAttr(c.documentId)}">\n${defangSource(c.text)}\n</SOURCE>`).join('\n\n');
   const userContent = `Extract voice-of-customer evidence for the product "${str(brief.productName)}" (${str(brief.industryVertical)}).\n\nSOURCES:\n\n${sourceBlock}`;
-  const provider = str(i.provider) || 'anthropic';
-  const model = str(i.model) || DEFAULT_MODEL;
+  const provider = str(i.provider) || undefined;
+  const model = str(i.model) || undefined;
 
   let data;
   try {
@@ -527,8 +527,8 @@ export async function generateAngles(ctx) {
     ...(personaBlock ? [personaBlock] : []),
     `EVIDENCE (verbatim customer quotes — cite by [n]):\n${evidenceBlock}`,
   ];
-  const provider = str(i.provider) || 'anthropic';
-  const model = str(i.model) || DEFAULT_MODEL;
+  const provider = str(i.provider) || undefined;
+  const model = str(i.model) || undefined;
 
   let data;
   try {
@@ -626,8 +626,8 @@ export async function buildTargeting(ctx) {
   const systemPrompt = `You are a paid-media strategist building a ${platform} targeting pack. From the CAMPAIGN CONTEXT and the numbered EVIDENCE quotes (real customer language), recommend audiences, interest segments, and keywords appropriate to ${platform}'s targeting model. Cite the [n] evidence indexes your recommendations derive from and explain the derivation in the rationale. Recommend nothing the evidence does not support. Reply with strict JSON only.`;
   const evidenceBlock = evidence.map((e, n) => `[${n}] (${str(e.sentiment)} · ${str(e.theme)}) "${str(e.quote)}"`).join('\n');
   const userContent = [`CAMPAIGN CONTEXT:\n${str(asm.contextText)}`, `EVIDENCE (cite by [n]):\n${evidenceBlock}`].join('\n\n');
-  const provider = str(i.provider) || 'anthropic';
-  const model = str(i.model) || DEFAULT_MODEL;
+  const provider = str(i.provider) || undefined;
+  const model = str(i.model) || undefined;
 
   const mapCandidate = (d) => {
     if (!d || typeof d !== 'object') return null;

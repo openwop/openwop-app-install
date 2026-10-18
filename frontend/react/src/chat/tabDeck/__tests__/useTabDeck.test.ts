@@ -1,9 +1,16 @@
+/**
+ * ADR 0140 P2/P6 — useTabDeck, the React wrapper over tabDeckReducer: actions
+ * dispatch through, the hook's `maxTabs` and per-call `protectedIds` reach the
+ * reducer, the per-user working set restores on init (kind tabs excluded from
+ * `restoredSessionIds` — ADR 0785: the prune once closed and stopped Claude Code),
+ * and changes persist on the debounce. Breaks if any of that wiring is dropped.
+ */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 import { useTabDeck } from '../useTabDeck.js';
 import { saveTabDeck, loadTabDeck } from '../tabDeckPersistence.js';
 
-/** Thin wiring tests — the state-machine logic itself is pinned by tabDeckModel.test.ts. */
+/** The state-machine logic itself is pinned by tabDeckModel.test.ts. */
 describe('useTabDeck — hook wiring', () => {
   it('openTab adds + activates; focusTab/closeTab dispatch through', () => {
     const { result } = renderHook(() => useTabDeck({ maxTabs: 3 }));
@@ -66,6 +73,10 @@ describe('useTabDeck — persistence (ADR 0140 P6)', () => {
     expect(loadTabDeck('u1')?.tabs.map((t) => t.sessionId)).toEqual(['a']);
   });
 
+  // DOUBLE GUARD: the hook skips its save effects without a subject AND saveTabDeck
+  // no-ops on a null subject, so removing either alone stays green (w44 probe
+  // hook-loggedout). saveTabDeck's copy is witnessed in tabDeckPersistence.test.ts
+  // ("save is a no-op when logged out").
   it('does NOT persist when there is no subject (logged out)', () => {
     const { result } = renderHook(() => useTabDeck({ persistSubject: null }));
     act(() => { result.current.openTab('a'); });

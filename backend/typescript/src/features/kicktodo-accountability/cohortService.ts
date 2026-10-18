@@ -12,7 +12,7 @@
  *    plan directly (PRD §13).
  */
 
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { declarePiiFields } from '../../host/dataClassification.js';
 import { purgeRowsByAge, type PurgeOutcome } from '../../host/retentionPurger.js';
@@ -34,6 +34,7 @@ import { progressFor } from '../kicktodo-core/progressService.js';
 import { applyRevisionCommands, previewRevisionCommands, validateRevisionCommands, type RevisionCommand, describeRevisionCommands } from '../kicktodo-core/replanService.js';
 import {
   acceptGrant,
+  grantAcceptable,
   liveGrant,
   resolveCircleByOpaqueId,
   CircleDeniedError,
@@ -96,6 +97,11 @@ export interface PlanChangeProposal {
    *  and the retained per-enrollment route reconciles it on resolve. ABSENT ⇒ the
    *  card-raise degraded (best-effort), so the FE renders honest apply/dismiss here. */
   approvalId?: string;
+  /** KTA-4 — the apply CLAIM: set (by CAS) while one resolve is executing the
+   *  commands, so a concurrent apply/dismiss cannot run them twice or overwrite
+   *  the outcome. `state` stays 'proposed' until the apply commits. Absent on
+   *  every row not mid-apply (and on every row written before KTA-4). */
+  applyingAt?: string;
 }
 
 const proposals = new DurableCollection<PlanChangeProposal>(
@@ -164,13 +170,28 @@ export async function joinCohort(circleId: string, granteeSubject: string): Prom
   // `seatsTaken` and silently shrank the cohort.
   if (await liveGrant(circle.tenantId, circleId, granteeSubject)) return detail0;
 
-  // KTFULL-B11 — accept the invitation BEFORE claiming the seat. The old order
-  // incremented first, so a missing or revoked invitation threw from
-  // `acceptGrant` and STRANDED the seat with nobody in it. Accepting first
-  // means a refusal costs nothing; the seat is only taken once a real member
-  // exists to occupy it.
-  await acceptGrant(circleId, granteeSubject); // throws CircleDeniedError when not invited
+  // KTFULL-B11 — a missing or revoked invitation is refused BEFORE any seat is
+  // claimed, so it never strands one.
+  //
+  // KT-COHORT-FULL-GRANT-1 — and the seat is claimed BEFORE the invitation is
+  // accepted. B11 first fixed the stranded seat by accepting first, but then a
+  // FULL cohort threw `CohortFullError` after the grant had already gone
+  // active: the invitee was told "full" yet held cohort access with no seat,
+  // and the `liveGrant` early return above made that permanent. Those grants
+  // also counted as members in `cohortOutcomeAggregate`, which feeds the
+  // org-programs k-anonymity floor. Now: check the invitation without
+  // accepting it, claim the seat, then accept. If the accept fails (a revoke
+  // landed in between), the seat is given back. A crash between the claim and
+  // the accept leaves the counter one high, which `reconcileSeats` restates
+  // from the seat and grant rows. It never leaves access without a seat.
+  if (!(await grantAcceptable(circleId, granteeSubject))) throw new CircleDeniedError();
   if (!(await claimSeat(circle.tenantId, circleId))) throw new CohortFullError();
+  try {
+    await acceptGrant(circleId, granteeSubject);
+  } catch (err) {
+    await unclaimSeat(circle.tenantId, circleId);
+    throw err;
+  }
   await recordSeat(circle.tenantId, circleId, granteeSubject); // ARCH-C2 ledger
 
   await granteeIndex.put({ granteeSubject, circleId, tenantId: circle.tenantId });
@@ -236,14 +257,32 @@ interface CohortSeat {
   circleId: string;
   subject: string;
   claimedAt: string;
+  /** KTCOM-4 (KickTodo wave 4C) — the paid order this seat was bought with. A refund
+   *  releases the seat only when it is THAT order's: before, a refund of a second,
+   *  redundant order released the seat a first order had paid for. Absent on a free
+   *  `joinCohort` seat and on every seat written before KTCOM-4 (those keep the old
+   *  release-on-any-refund behaviour — forward-only, no row is rewritten). */
+  orderId?: string;
 }
 const seats = new DurableCollection<CohortSeat>(
   'kicktodo-cohort-seats',
   (x) => `${x.tenantId}::${x.circleId}::${x.subject}`,
 );
 
-async function recordSeat(tenantId: string, circleId: string, subject: string): Promise<void> {
-  await seats.put({ tenantId, circleId, subject, claimedAt: new Date().toISOString() });
+async function recordSeat(tenantId: string, circleId: string, subject: string, orderId?: string): Promise<void> {
+  await seats.put({ tenantId, circleId, subject, claimedAt: new Date().toISOString(), ...(orderId ? { orderId } : {}) });
+}
+
+/** KTCOM-4 — the circle whose seat THIS order bought for the buyer, from the seat
+ *  ledger (so a refund never depends on the product's current link). Null when no
+ *  seat records the order — a seat bought before KTCOM-4, or never confirmed.
+ *  Bounded tenant-prefix scan; refunds are rare. */
+export async function seatCircleForOrder(tenantId: string, subject: string, orderId: string): Promise<string | null> {
+  if (!tenantId || !subject || !orderId) return null;
+  for (const x of await seats.listByPrefix(`${tenantId}::`)) {
+    if (x.tenantId === tenantId && x.subject === subject && x.orderId === orderId) return x.circleId;
+  }
+  return null;
 }
 async function dropSeat(tenantId: string, circleId: string, subject: string): Promise<void> {
   await seats.delete(`${tenantId}::${circleId}::${subject}`);
@@ -353,13 +392,37 @@ async function reapExpiredHolds(tenantId: string, circleId: string, nowMs: numbe
  *
  *  Returns false when the cohort is genuinely full (not a transient CAS loss). */
 async function claimSeat(tenantId: string, circleId: string): Promise<boolean> {
+  let reaped = false;
   for (let attempt = 0; attempt < 4; attempt += 1) {
     const detail = await cohorts.get(`${tenantId}::${circleId}`);
     if (!detail) return false;
-    if (detail.seatsTaken >= detail.capacity) return false; // re-checked EVERY attempt
+    if (detail.seatsTaken >= detail.capacity) { // re-checked EVERY attempt
+      // KTACC-3 — expiry is lazy, so a seat an EXPIRED hold still occupies reads
+      // as taken. Only `holdSeat`/`confirmSeat` reaped before claiming; a
+      // `joinCohort` on a cohort whose last seat was an abandoned checkout was
+      // refused as full. Reap once, at the moment "full" would be the answer,
+      // then re-check against the restated count.
+      if (reaped) return false;
+      reaped = true;
+      await reapExpiredHolds(tenantId, circleId, Date.now());
+      attempt -= 1; // the reap is not a CAS loss
+      continue;
+    }
     if (await cohorts.compareAndSwap(detail, { ...detail, seatsTaken: detail.seatsTaken + 1 })) return true;
   }
   throw new CohortError('Concurrent seat claims — retry.');
+}
+
+/** KT-COHORT-FULL-GRANT-1 — give back a seat `claimSeat` took for a join whose
+ *  accept then failed. Best effort: if it cannot land, the counter stays one
+ *  high (capacity lost, never access granted) until `reconcileSeats` runs. */
+async function unclaimSeat(tenantId: string, circleId: string): Promise<void> {
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const detail = await cohorts.get(`${tenantId}::${circleId}`);
+    if (!detail || detail.seatsTaken <= 0) return;
+    if (await cohorts.compareAndSwap(detail, { ...detail, seatsTaken: detail.seatsTaken - 1 })) return;
+  }
+  log.warn('kicktodo_seat_unclaim_failed', { circleId });
 }
 
 /** ADR 0431 — take (or refresh) ONE hold for this buyer on this cohort.
@@ -374,26 +437,43 @@ export async function holdSeat(
   const now = Date.now();
   await reapExpiredHolds(tenantId, circleId, now);
   const key = `${tenantId}::${circleId}::${buyerSubject}`;
-  const existing = await holds.get(key);
-  if (existing && !isExpired(existing, now)) {
-    const refreshed: SeatHold = { ...existing, expiresAt: new Date(now + ttlMs).toISOString() };
-    await holds.put(refreshed);
-    return refreshed; // already occupying a seat — do not double-count
+  // KTACC-3 — the hold row is written by CAS against what was read. The old
+  // read-then-put let two concurrent holds by ONE buyer both read "no hold",
+  // both claim a seat, and both put the same key: one row, TWO seats counted,
+  // the second stranded until some later reconcile. Now the loser of the row
+  // CAS gives its seat back and converges onto the winner's hold.
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const existing = await holds.get(key);
+    if (existing && !isExpired(existing, now)) {
+      const refreshed: SeatHold = { ...existing, expiresAt: new Date(now + ttlMs).toISOString() };
+      // Refresh is CAS too: a blind put could resurrect a hold `confirmSeat`
+      // just consumed.
+      if (await holds.compareAndSwap(existing, refreshed)) return refreshed; // already occupying a seat — do not double-count
+      continue;
+    }
+    const detail = await cohorts.get(`${tenantId}::${circleId}`);
+    if (!detail) throw new CircleDeniedError();
+    // KTFULL-B10 — the capacity check lives INSIDE the CAS; a pre-check here
+    // would reopen the oversell window this fix exists to close.
+    if (!(await claimSeat(tenantId, circleId))) {
+      // "Full" may be OUR OWN concurrent hold taking the last seat: converge onto
+      // it (the next pass refreshes it) instead of refusing the buyer who holds it.
+      const raced = await holds.get(key);
+      if (raced && !isExpired(raced, now)) continue;
+      throw new CohortFullForHoldError();
+    }
+    const hold: SeatHold = {
+      tenantId,
+      circleId,
+      buyerSubject,
+      heldAt: new Date(now).toISOString(),
+      expiresAt: new Date(now + ttlMs).toISOString(),
+    };
+    // `existing` here is null or an EXPIRED row the reap above did not remove.
+    if (await holds.compareAndSwap(existing, hold)) return hold;
+    await unclaimSeat(tenantId, circleId); // a concurrent hold for this buyer won the row
   }
-  const detail = await cohorts.get(`${tenantId}::${circleId}`);
-  if (!detail) throw new CircleDeniedError();
-  // KTFULL-B10 — the capacity check lives INSIDE the CAS; a pre-check here
-  // would reopen the oversell window this fix exists to close.
-  if (!(await claimSeat(tenantId, circleId))) throw new CohortFullForHoldError();
-  const hold: SeatHold = {
-    tenantId,
-    circleId,
-    buyerSubject,
-    heldAt: new Date(now).toISOString(),
-    expiresAt: new Date(now + ttlMs).toISOString(),
-  };
-  await holds.put(hold);
-  return hold;
+  throw new CohortError('Concurrent seat holds — retry.');
 }
 
 export async function liveHold(tenantId: string, circleId: string, buyerSubject: string): Promise<SeatHold | null> {
@@ -414,6 +494,8 @@ export async function confirmSeat(
   circleId: string,
   buyerSubject: string,
   scopes: GrantScope[] = ['progress-summary'],
+  /** KTCOM-4 — the paid order buying this seat, recorded on the seat row. */
+  opts: { orderId?: string } = {},
 ): Promise<{ granted: boolean; reason?: 'already-member' | 'cohort-full' }> {
   const detail = await cohorts.get(`${tenantId}::${circleId}`);
   if (!detail) return { granted: false, reason: 'cohort-full' };
@@ -451,7 +533,7 @@ export async function confirmSeat(
   // ARCH-C2 — record the seat BEFORE releasing the hold, so occupancy is never
   // momentarily unbacked: hold and seat overlap (reconcile counts the subject
   // once) rather than leaving a gap a concurrent reconcile could read.
-  await recordSeat(tenantId, circleId, buyerSubject);
+  await recordSeat(tenantId, circleId, buyerSubject, opts.orderId);
   if (holdIsLive) await holds.delete(`${tenantId}::${circleId}::${buyerSubject}`);
   log.info('kicktodo_seat_confirmed', { circleId });
   return { granted: true };
@@ -465,9 +547,19 @@ export async function releaseSeat(
   circleId: string,
   buyerSubject: string,
   todayLocal: string,
+  /** KTCOM-4 — the refunded order. When the seat records a DIFFERENT order, this
+   *  refund did not buy it and nothing is released. */
+  opts: { orderId?: string } = {},
 ): Promise<{ released: boolean }> {
   const detail = await cohorts.get(`${tenantId}::${circleId}`);
   if (!detail) return { released: false };
+  if (opts.orderId) {
+    const seat = await seats.get(`${tenantId}::${circleId}::${buyerSubject}`);
+    if (seat?.orderId && seat.orderId !== opts.orderId) {
+      log.info('kicktodo_seat_refund_other_order', { circleId });
+      return { released: false };
+    }
+  }
   const had = await liveGrant(tenantId, circleId, buyerSubject);
   const beforeStart = todayLocal < detail.startDateLocal;
   // ARCH-H4 — the revoke used to run UNCONDITIONALLY, before `beforeStart` was
@@ -484,6 +576,7 @@ export async function releaseSeat(
   // decrement. The revoke already happened durably; reconcile derives the
   // count from it, so a retry converges instead of double-decrementing.
   await dropSeat(tenantId, circleId, buyerSubject); // ARCH-C2 ledger
+  await unindexRevokedGrantee(buyerSubject, circleId, tenantId).catch(() => undefined); // KTACC-4
   await holds.delete(`${tenantId}::${circleId}::${buyerSubject}`).catch(() => undefined);
   await reconcileSeats(tenantId, circleId);
   return { released: true };
@@ -527,6 +620,21 @@ export async function indexGrantee(granteeSubject: string, circleId: string, ten
   await granteeIndex.put({ granteeSubject, circleId, tenantId });
 }
 
+/** KTACC-4 — drop the caseload pointer for a grant that was just REVOKED.
+ *  Reads re-check the live grant, so a stale pointer was never a disclosure —
+ *  but it was an unbounded leftover that every caseload read paid for. Delete,
+ *  THEN re-check: if a re-invite raced in (the grant is acceptable again) the
+ *  pointer is restored, so the cleanup can never strand a live grantee's row
+ *  out of the coach console. Best-effort by contract — callers have already
+ *  committed the revoke. */
+export async function unindexRevokedGrantee(granteeSubject: string, circleId: string, tenantId: string): Promise<void> {
+  const key = `${granteeSubject}::${circleId}`;
+  const ptr = await granteeIndex.get(key);
+  if (!ptr || ptr.tenantId !== tenantId) return;
+  await granteeIndex.delete(key);
+  if (await grantAcceptable(circleId, granteeSubject)) await granteeIndex.put(ptr);
+}
+
 /** ADR 0501 (console) — the coach's OWN proposal, as the console shows it: state and
  *  note, never the participant's decision reasoning. `hasCommands` distinguishes an
  *  executable proposal from advice-only (the seam's absent-vs-present rule). */
@@ -552,10 +660,13 @@ export interface CaseloadRow {
 
 /** The coach console: every circle where the caller holds a LIVE grant with
  *  the `coach-plan-proposal` scope (cross-workspace via the pointer index). */
-export async function coachCaseload(coachSubject: string): Promise<CaseloadRow[]> {
+export async function coachCaseload(coachSubject: string, opts: { tenantId?: string } = {}): Promise<CaseloadRow[]> {
   const pointers = await granteeIndex.listByPrefix(`${coachSubject}::`);
   const rows: CaseloadRow[] = [];
   for (const ptr of pointers) {
+    // Code-grade KTA-1 — a workflow surface caller is bound to its run's tenant;
+    // only the coach's own console route reads across workspaces.
+    if (opts.tenantId !== undefined && ptr.tenantId !== opts.tenantId) continue;
     const grant = await liveGrant(ptr.tenantId, ptr.circleId, coachSubject);
     if (!grant || !grant.scopes.includes('coach-plan-proposal')) continue;
     const circle = await resolveCircleByOpaqueId(ptr.circleId).catch(() => null);
@@ -614,6 +725,7 @@ export async function proposePlanChange(
   coachSubject: string,
   note: string,
   commands?: readonly unknown[],
+  opts: { idempotencyKey?: string } = {},
 ): Promise<PlanChangeProposal> {
   const circle = await resolveCircleByOpaqueId(circleId);
   const grant = await liveGrant(circle.tenantId, circleId, coachSubject);
@@ -627,8 +739,13 @@ export async function proposePlanChange(
   // Deliberately NOT stored as `[]` when the coach sends nothing — see the
   // `commands?` doc on PlanChangeProposal; absent means advice-only.
   const validated = commands === undefined ? undefined : validateRevisionCommands(commands);
+  // KTA-4 — a replayed propose (a retried workflow node, a double submit) must
+  // not mint a second proposal + a second approval card. With a stable key the
+  // id is DERIVED and the row is created by CAS; the loser returns the winner.
   const proposal: PlanChangeProposal = {
-    id: `prop:${randomUUID()}`,
+    id: opts.idempotencyKey
+      ? idempotentProposalId(circle.tenantId, circleId, coachSubject, opts.idempotencyKey)
+      : `prop:${randomUUID()}`,
     tenantId: circle.tenantId,
     circleId,
     enrollmentId: circle.enrollmentId,
@@ -638,7 +755,15 @@ export async function proposePlanChange(
     state: 'proposed',
     createdAt: nowIso(),
   };
-  await proposals.put(proposal);
+  if (opts.idempotencyKey) {
+    if (!(await proposals.compareAndSwap(null, proposal))) {
+      const existing = await proposals.get(PROPOSAL_KEY(proposal));
+      if (existing) return existing; // the replay converges on the first proposal
+      throw new CohortError('The proposal changed while it was being created — retry.');
+    }
+  } else {
+    await proposals.put(proposal);
+  }
 
   // ADR 0459 P2 — raise the participant-facing approval card. BEST-EFFORT
   // coupling by design: the proposal row above is the durable truth (the
@@ -665,7 +790,10 @@ export async function proposePlanChange(
       // must never strand a pending card). Left absent when the raise above throws
       // — the degraded case the FE renders an honest apply/dismiss fallback for.
       proposal.approvalId = card.approvalId;
-      await proposals.put(proposal);
+      // KTA-4 — stamp by CAS, never a blind put: the participant may already have
+      // resolved the proposal (the row is live the moment it is written), and a
+      // put of this stale 'proposed' copy would silently un-resolve it.
+      await stampProposalCard(PROPOSAL_KEY(proposal), card.approvalId);
     }
   } catch (err) {
     log.warn('kicktodo_plan_proposal_card_deferred', {
@@ -676,6 +804,29 @@ export async function proposePlanChange(
   }
   return proposal;
 }
+
+function idempotentProposalId(tenantId: string, circleId: string, coachSubject: string, key: string): string {
+  const h = createHash('sha256').update(`kicktodo-proposal|${tenantId}|${circleId}|${coachSubject}|${key}`).digest('hex');
+  return `prop:${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20, 32)}`;
+}
+
+async function stampProposalCard(key: string, approvalId: string): Promise<void> {
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const cur = await proposals.get(key);
+    if (!cur || cur.approvalId) return;
+    if (await proposals.compareAndSwap(cur, { ...cur, approvalId })) return;
+  }
+  log.warn('kicktodo_plan_proposal_card_stamp_contended', { key });
+}
+
+/** KTA-4 — another resolve of this proposal holds the apply claim. */
+export class ProposalBusyError extends Error {
+  constructor() { super('This proposal is already being applied — refresh in a moment.'); }
+}
+
+/** An apply claim older than this is presumed dead (its holder crashed between
+ *  claiming and finishing) and may be taken over. */
+const APPLY_CLAIM_TTL_MS = 5 * 60 * 1000;
 
 /** ADR 0459 grade-fix — best-effort flip a proposal's linked approval CARD to match a
  *  decision taken through the retained per-enrollment route, so that route never
@@ -762,10 +913,25 @@ export async function resolveProposal(
 ): Promise<PlanChangeProposal> {
   const enrollment = await getEnrollment(tenantId, enrollmentId);
   if (!enrollment || enrollment.ownerSubject !== participantSubject) throw new CircleDeniedError();
-  const p = await proposals.get(`${tenantId}::${enrollmentId}::${proposalId}`);
-  if (!p) throw new CircleDeniedError();
-  if (p.state !== 'proposed') return p; // idempotent
-  if (action === 'apply') {
+  const key = `${tenantId}::${enrollmentId}::${proposalId}`;
+  // KTA-4 — every transition is a CAS against the row read. The old shape read
+  // `proposed`, ran the commands, then blind-put the outcome: two concurrent
+  // applies EXECUTED the commands twice, and an apply racing a dismiss could
+  // persist 'dismissed' over a plan that had in fact been changed. Apply now
+  // takes a CLAIM (`applyingAt`, still state 'proposed') by CAS before running
+  // anything, so exactly one resolve executes; the claim is released on failure.
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const p = await proposals.get(key);
+    if (!p) throw new CircleDeniedError();
+    if (p.state !== 'proposed') return p; // idempotent
+    const claimHeld = p.applyingAt !== undefined && Date.now() - Date.parse(p.applyingAt) < APPLY_CLAIM_TTL_MS;
+    const { applyingAt: _staleClaim, ...unclaimed } = p;
+    if (action === 'dismiss') {
+      if (claimHeld) throw new ProposalBusyError();
+      const next: PlanChangeProposal = { ...unclaimed, state: 'dismissed', resolvedAt: nowIso() };
+      if (await proposals.compareAndSwap(p, next)) return next;
+      continue;
+    }
     // ADR 0501 step 3 — route through the ONE execution seam, with the PARTICIPANT as
     // the acting subject. This is the whole point of the trust model: a coach advises,
     // the participant executes on their own enrollment. `applyRevisionCommands`
@@ -789,11 +955,23 @@ export async function resolveProposal(
         'This proposal is advice only — it carries no plan changes to apply. Ask your coach to re-send it as a change, or dismiss it.',
       );
     }
-    await applyRevisionCommands(tenantId, { enrollmentId, subject: participantSubject, commands: p.commands });
+    if (claimHeld) throw new ProposalBusyError();
+    const claimed: PlanChangeProposal = { ...unclaimed, applyingAt: nowIso() };
+    if (!(await proposals.compareAndSwap(p, claimed))) continue;
+    try {
+      await applyRevisionCommands(tenantId, { enrollmentId, subject: participantSubject, commands: p.commands });
+    } catch (err) {
+      // Release the claim so the participant can retry or dismiss (best-effort:
+      // an unreleased claim lapses after APPLY_CLAIM_TTL_MS).
+      await proposals.compareAndSwap(claimed, unclaimed).catch(() => undefined);
+      throw err;
+    }
+    const next: PlanChangeProposal = { ...unclaimed, state: 'applied', resolvedAt: nowIso() };
+    if (await proposals.compareAndSwap(claimed, next)) return next;
+    // Our claim lapsed and was taken over mid-apply; report what is stored.
+    return (await proposals.get(key)) ?? next;
   }
-  const next: PlanChangeProposal = { ...p, state: action === 'apply' ? 'applied' : 'dismissed', resolvedAt: nowIso() };
-  await proposals.put(next);
-  return next;
+  throw new CohortError('Concurrent proposal updates — retry.');
 }
 
 // ── ADR 0458 Phase 0 — compliance (subject erasure + retention) ──
@@ -860,4 +1038,52 @@ export async function purgeProposalsByAge(tenantId: string, cutoffIso: string): 
   return purgeRowsByAge('kicktodo-accountability', await proposals.listByPrefix(`${tenantId}::`), tenantId, cutoffIso,
     (p) => ({ tenantId: p.tenantId, updatedAt: p.createdAt, id: PROPOSAL_KEY(p) }),
     (id) => proposals.delete(id));
+}
+
+// ── KTACC-2 / KTA-11 (KickTodo wave 4C) — circle + enrollment end-of-life ──
+/**
+ * KTACC-2 — a circle DISSOLVED by `handOverCircle` (its owner was erased and no
+ * live member remained) takes its cohort-owned children with it: the cohort
+ * detail, every seat and hold, the coach-caseload pointers of its former
+ * members, and any coach proposal raised in it. Bounded by the circle's own key
+ * prefixes (the pointers by subject × circle). Idempotent; fail-closed on a falsy
+ * tenant/circle.
+ */
+export async function dropDissolvedCircleCohortRows(
+  tenantId: string,
+  circleId: string,
+  memberSubjects: readonly string[],
+): Promise<void> {
+  if (!tenantId || !circleId) return;
+  await cohorts.delete(`${tenantId}::${circleId}`);
+  for (const s of await seats.listByPrefix(`${tenantId}::${circleId}::`)) {
+    if (s.tenantId === tenantId && s.circleId === circleId) await seats.delete(`${s.tenantId}::${s.circleId}::${s.subject}`);
+  }
+  for (const h of await holds.listByPrefix(`${tenantId}::${circleId}::`)) {
+    if (h.tenantId === tenantId && h.circleId === circleId) await holds.delete(`${h.tenantId}::${h.circleId}::${h.buyerSubject}`);
+  }
+  for (const subject of memberSubjects) {
+    const ptr = await granteeIndex.get(`${subject}::${circleId}`);
+    if (ptr && ptr.tenantId === tenantId) await granteeIndex.delete(`${subject}::${circleId}`);
+  }
+  for (const p of await proposals.listByPrefix(`${tenantId}::`)) {
+    if (p.tenantId === tenantId && p.circleId === circleId) await proposals.delete(PROPOSAL_KEY(p));
+  }
+}
+
+/**
+ * KTA-11 — the `onEnrollmentDeleted` half of proposal cleanup. Proposals are keyed
+ * by the enrollment they are ABOUT, and the subject eraser above reaches them only
+ * through `listEnrollmentsFor` — which returns nothing once kicktodo-core's eraser
+ * has already deleted the enrollment (the seam guarantees no eraser order). This
+ * subscription deletes exactly that enrollment's proposals when the row goes,
+ * whichever eraser ran first. Bounded `${tenant}::${enrollment}::` prefix.
+ */
+export async function eraseProposalsForEnrollment(tenantId: string, enrollmentId: string): Promise<number> {
+  if (!tenantId || !enrollmentId) return 0;
+  let removed = 0;
+  for (const p of await proposals.listByPrefix(`${tenantId}::${enrollmentId}::`)) {
+    if (p.tenantId === tenantId && p.enrollmentId === enrollmentId && (await proposals.delete(PROPOSAL_KEY(p)))) removed += 1;
+  }
+  return removed;
 }

@@ -284,6 +284,17 @@ describe('ADR 0439 — feature dependency graph integrity', () => {
     // disable-LOCK, and access-hub is always on. With voice OFF the reader's own
     // `requireFeatureEnabled` refuses and the summary OMITS the section (never
     // reports it), pinned by `access-hub-summary-route.test.ts`'s omission legs.
-    ).toBeLessThanOrEqual(98);
+    // 98 → 99 (ADR 0877 D1, 2026-10-12): `commerce → commerce-connect`. The
+    // storefront's charge gate (`commerce-connect/storefrontSettlement.ts`) reads
+    // the tenant's seller row and the storefront fee: who may take live money is
+    // ONE resolver, and it lives with the Connect account it routes to — the edge
+    // is the point of the decision. DECLARED as `recommends` (advisory, ADR 0194
+    // P5), deliberately NOT `dependsOn`: that is a disable-LOCK, and with
+    // commerce-connect OFF the resolver answers `demo` (no charge) — the store
+    // works, it just cannot take live money, which is the user's decision for an
+    // unconnected tenant. A lock would wrongly make commerce-connect
+    // undisableable for every store. The off-leg is pinned by
+    // `adr0877-live-checkout-eligibility.test.ts` ("toggle is OFF falls back to demo").
+    ).toBeLessThanOrEqual(99);
   });
 });

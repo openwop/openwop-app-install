@@ -177,7 +177,7 @@ export function GuidePage() {
                 <TextField label={t('guideRenameLabel')} value={renameDraft}
                   onChange={(e) => setRenameDraft(e.target.value)} required maxLength={60} />
                 <p className="muted u-fs-13">{t('guideRenameContinuity')}</p>
-                {renameError && <Notice variant="error">{t('guideRenameError')}</Notice>}
+                {renameError && <Notice variant="error" announce={t('guideRenameError')}>{t('guideRenameError')}</Notice>}
                 <div className="action-bar">
                   <Button type="submit" variant="accent-solid" size="sm" disabled={renameBusy || !renameDraft.trim()} aria-busy={renameBusy}>
                     {t('guideRenameSave')}
@@ -324,7 +324,7 @@ export function GuidePage() {
       {notes !== null && (
         <section className="surface-card" aria-label={t('guideMemoriesHeading')}>
           <h2 className="kt-eyebrow">{t('guideMemoriesHeading')}</h2>
-          {noteError && <Notice variant="error">{t('guideMemoryDeleteError')}</Notice>}
+          {noteError && <Notice variant="error" announce={t('guideMemoryDeleteError')}>{t('guideMemoryDeleteError')}</Notice>}
           {notes.length === 0
             ? <p className="muted u-m-0">{t('guideMemoriesEmpty')}</p>
             : (

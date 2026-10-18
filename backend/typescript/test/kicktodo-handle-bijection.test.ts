@@ -23,7 +23,7 @@ import { join } from 'node:path';
 import { openStorage } from '../src/storage/index.js';
 import { initInMemorySurfaces } from '../src/host/inMemorySurfaces.js';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
-import { upsertProfile, __test } from '../src/features/kicktodo-community/communityService.js';
+import { upsertProfile, __test, HandleTakenError } from '../src/features/kicktodo-community/communityService.js';
 
 const T = 'tenant-A';
 const ALICE = 'user:alice';
@@ -83,7 +83,7 @@ describe('PROBE-KT2 (executable) — creator-handle index is a bijection', () =>
 
   it('refuses to STEAL a live handle — the other failure direction', async () => {
     await mk(ALICE, 'alice-one');
-    await expect(mk(BOB, 'alice-one'), 'a second subject claimed a LIVE handle').rejects.toThrow();
+    await expect(mk(BOB, 'alice-one'), 'a second subject claimed a LIVE handle').rejects.toBeInstanceOf(HandleTakenError);
     expect(await bijectionErrors(T)).toEqual([]);
   });
 });

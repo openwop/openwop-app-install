@@ -7,9 +7,19 @@
  * request; the host rejected each (`OIDC verify failed … code:"expired"`) and fell
  * through to the cookie path WITHOUT `oidcAuthTime`, silently breaking reveal-gated
  * surfaces for a signed-in user. Prod showed a continuous ~25s cadence of these.
+ *
+ * ADR 0141 / ADR 0143 (#2639). Breaks it: an expired or about-to-expire JWT
+ * attached as a bearer, a refresh storm from a failing refresher, or a token
+ * whose `exp` cannot be read being refused (fail-closed).
+ *
+ * Module state: `lastRefreshAt` (the refresh cooldown) is zeroed by every
+ * `setCurrentIdToken(<token>)`, which is why each case can expect its own first
+ * refresh without a test seam; `config.authMode` is restored in afterEach.
  */
-import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { authedHeaders, setCurrentIdToken, registerIdTokenRefresher } from '../config.js';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { authedHeaders, config, setCurrentIdToken, registerIdTokenRefresher } from '../config.js';
+
+const originalMode = config.authMode;
 
 /** A syntactically real JWT whose payload carries `exp` (seconds). */
 function jwtExpiringAt(expMs: number, marker = 'x'): string {
@@ -23,6 +33,7 @@ describe('authedHeaders — ID-token staleness', () => {
     registerIdTokenRefresher(null);
     setCurrentIdToken(null);
   });
+  afterEach(() => { config.authMode = originalMode; });
 
   it('attaches a token that is comfortably in-date', () => {
     const token = jwtExpiringAt(Date.now() + 30 * 60_000, 'fresh');
@@ -71,13 +82,18 @@ describe('authedHeaders — ID-token staleness', () => {
     expect(authedHeaders()['authorization']).toBe('Bearer not-a-jwt');
   });
 
-  it('leaves the non-OIDC auth modes alone when signed out', () => {
-    // No ID token → the pre-existing precedence resumes (bearer mode's configured
-    // API key here; nothing at all in cookie mode). The staleness branch must not
-    // intercept a request that was never carrying an ID token.
+  it('leaves the non-OIDC auth modes alone when signed out — bearer sends the apiKey, cookie sends nothing, and no refresh is asked', () => {
+    // Twin: config.authmode.test.ts › 'bearer mode sends Authorization: Bearer
+    // <apiKey>' / 'cookie mode sends no Authorization header' pin the same
+    // precedence; this leg pins it FROM the staleness side — with no ID token
+    // the staleness branch must neither intercept nor kick a refresh.
+    const refresh = vi.fn();
+    registerIdTokenRefresher(refresh);
     setCurrentIdToken(null);
-    const auth = authedHeaders()['authorization'];
-    expect(auth === undefined || auth.startsWith('Bearer ')).toBe(true);
-    expect(auth).not.toContain('.');
+    config.authMode = 'bearer';
+    expect(authedHeaders()['authorization']).toBe(`Bearer ${config.apiKey}`);
+    config.authMode = 'cookie';
+    expect(authedHeaders()['authorization']).toBeUndefined();
+    expect(refresh).not.toHaveBeenCalled();
   });
 });

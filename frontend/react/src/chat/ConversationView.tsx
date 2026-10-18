@@ -34,6 +34,7 @@ const BoardDisclaimerNotice = lazy(() => import('./conversations/BoardDisclaimer
 import { WelcomeCard } from './WelcomeCard.js';
 import { ChatInput } from './ChatInput.js';
 import { SignInRequiredNotice } from './SignInRequiredNotice.js';
+import { Notice } from '../ui/Notice.js';
 import { NeedsYouTray } from './NeedsYouTray.js';
 import { useFeatureAccess } from '../featureToggles/FeatureAccessContext.js';
 
@@ -140,6 +141,9 @@ export interface ConversationViewProps {
    *  1:1/embed surfaces (behavior unchanged). */
   /** Composer placeholder override (`Message #name` in a channel). */
   composerPlaceholder?: string;
+  /** ADR 0879 D8 — the viewer may read but not post here (an announcement channel,
+   *  or a read-only role): the composer is disabled with this explanation. */
+  composerReadOnlyReason?: string;
   /** Channel-scoped `@` entries (the channel's agent members, server slugs) —
    *  replaces the tenant-wide agent list in the composer autocomplete. */
   mentionEntries?: readonly AgentMentionEntry[];
@@ -152,6 +156,12 @@ export interface ConversationViewProps {
     onToggleReaction: (messageId: string, emoji: string, currentlyMine: boolean) => void;
     onEdit: (messageId: string, newText: string) => void;
     onDelete: (messageId: string) => void;
+    /** CH2UX-2/3 (ADR 0879) — `false` hides react + edit (the viewer's role is
+     *  read-only; a Viewer may still delete their OWN old posts). Absent = true. */
+    canWrite?: boolean;
+    /** ADR 0879 D3 — the channel owner or a workspace admin: may DELETE (never
+     *  edit) other people's messages. Absent = false. */
+    canModerate?: boolean;
   };
   /** ADV-UX-1 — the board this conversation is bound to, when it is a boardroom.
    *  Drives the simulated-persona disclaimer ADR 0040:345 requires "in chat".
@@ -186,7 +196,7 @@ export function ConversationView(props: ConversationViewProps): JSX.Element {
     onResolveInterrupt, onRegenerate, onFeedback, onReconfigureBYOK, onBranchFrom,
     hasOlderMessages, isLoadingEarlier, onLoadEarlier, isHydrating = false, progress, footerSlot,
     renderEmptyState, composerModifiers, voiceAgentId, voiceConversationId, voiceBoardActive, onVoiceSpeakingAgent, draftKey, commentsContext, onLiveTranscript, onReloadConversation,
-    composerPlaceholder, mentionEntries, authorDirectory, viewerSubjectRef, messageActions,
+    composerPlaceholder, composerReadOnlyReason, mentionEntries, authorDirectory, viewerSubjectRef, messageActions,
     unreadFromIndex, onSummarize, summarizeBusy, boardId, onOpenArtifact, composerCompact = false,
   } = props;
   const [composerSeed, setComposerSeed] = useState<{ text: string; nonce: number } | undefined>(undefined);
@@ -301,6 +311,16 @@ export function ConversationView(props: ConversationViewProps): JSX.Element {
       <div className="u-p-3 u-border-t">
         <div className="cv-spine">
         <SignInRequiredNotice onUseOwnKey={onReconfigureBYOK} />
+        {/* CH2UX-1 (ADR 0879 D1/D8) — a viewer who may read but not post gets the
+            REASON in place of the composer, not a disabled one: ChatInput keeps its
+            textarea typeable (the in-flight design) and turns Send into a Stop
+            button whenever `disabled` + `onCancel`, so a read-only composer let
+            people type a post it would never send and offered "Stop generating"
+            for a turn that did not exist — and the reason lived only in a
+            placeholder that vanishes on the first keystroke. */}
+        {composerReadOnlyReason !== undefined ? (
+          <Notice variant="info">{composerReadOnlyReason}</Notice>
+        ) : (
         <ChatInput
           onSend={onSend}
           onCancel={onCancel}
@@ -322,6 +342,7 @@ export function ConversationView(props: ConversationViewProps): JSX.Element {
           {...(leadingControls ? { leadingControls } : {})}
           {...(voiceAccess.enabled && liveVoice ? { liveVoice } : {})}
         />
+        )}
         </div>
       </div>
     </>

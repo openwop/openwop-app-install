@@ -1,5 +1,7 @@
 /**
- * UX_UPGRADE-docs ROUND 2 (R2-D1/D2/D4/D5/D6/D9) — behaviour pins:
+ * Docs embed + collection guard (UX_UPGRADE-docs ROUND 2: R2-D1/D2/D4/D5/D6/D9;
+ * ADR 0392 public docs tier) — behaviour pins over the REAL FrontPage embed
+ * (only the wire is mocked):
  * - the FrontPage embed canonicalizes a renamed slug INSIDE docs and its
  *   404/empty fallback points at /docs (never the marketing home) — the two
  *   defects #3041 introduced;
@@ -8,6 +10,15 @@
  * - a failed nav read announces (role=alert inserts on failure) and its Retry
  *   actually refetches;
  * - the index rows render the freshness stamp the payload carries.
+ *
+ * Sabotage-witnessed (/grade-tests w52): embed basePath '/p/', fallbackTo '/',
+ * an isKnownSlug that ignores the nav, a fail-CLOSED guard on a nav error, an
+ * inert Retry, role=status on the nav error, and an index <time> not read from
+ * the payload each turn one case red.
+ *
+ * Honest ceiling: "canonicalization runs before the guard" is structural — the
+ * redirect in FrontPage returns before either guard site runs, so the absence
+ * of "Page not found" after the redirect is asserted, not the ordering itself.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, fireEvent, cleanup, waitFor, within } from '@testing-library/react';
@@ -37,7 +48,7 @@ vi.mock('../../../client/useDemoMode.js', () => ({ useDemoMode: () => false }));
 
 const { DocsPublicPage } = await import('../DocsPublicPage.js');
 
-afterEach(() => { cleanup(); vi.clearAllMocks(); });
+afterEach(() => { cleanup(); getDocsNav.mockReset(); pageResult.mockReset(); });
 
 const mk = (slug: string, title: string, order: string): DocsNavItem =>
   ({ slug, title, order, updatedAt: '2026-07-20T10:00:00.000Z' });
@@ -65,13 +76,8 @@ const renderDocs = (slug: string | null, initialPath = `/docs/${slug ?? ''}`) =>
   );
 
 describe('R2-D1/D2 — the docs embed stays inside docs', () => {
-  it('canonicalizes a renamed doc slug to /docs/<new>, never /p/', async () => {
-    getDocsNav.mockResolvedValue(NAV);
-    pageResult.mockResolvedValue({ status: 'ok', page: page('agents') });
-    renderDocs('old-agents');
-    await waitFor(() => expect(screen.getByTestId('loc').textContent).toBe('/docs/agents'));
-  });
-
+  // The renamed-slug canonicalization (R2-D1) is asserted by the R2-D4 case
+  // "the guard NEVER 404s a renamed doc" below — one case, not two.
   it('the 404 state inside docs offers "Back to docs", not the marketing home', async () => {
     getDocsNav.mockResolvedValue([]); // empty nav ⇒ the collection guard steps aside
     pageResult.mockResolvedValue({ status: 'notFound' });
@@ -145,6 +151,7 @@ describe('R2-D9 — index rows carry the freshness stamp', () => {
     expect(row).toBeTruthy();
     const time = row.querySelector('time');
     expect(time?.getAttribute('dateTime')).toBe('2026-07-20T10:00:00.000Z');
-    expect(time?.textContent?.length).toBeGreaterThan(0);
+    // The visible stamp is the payload's date, formatted — not an empty node.
+    expect(time?.textContent).toBe('Jul 20, 2026');
   });
 });

@@ -1,3 +1,17 @@
+/**
+ * <DataTable> — the one tabular-data primitive. What this file guards, and what
+ * breaks if it fails:
+ *   - key/value semantics: an opt-in `rowHeader` column renders `th scope=row`
+ *     and the caption names the table (screen readers announce "host, row header");
+ *   - JSUX-LIST-1 (filter half): a case-insensitive filter over EVERY column's
+ *     sortValue projection (or a caller `textOf`); a filter with no hits is a
+ *     DISTINCT "no rows match" state, never the `empty` slot that claims "no data
+ *     yet" (the failure-as-empty family); results are announced once, debounced,
+ *     through the shell live region (WCAG 4.1.3);
+ *   - stacked headers glue a spaced connector to the word before it, so it cannot
+ *     orphan onto its own line, and leave headers verbatim when off;
+ *   - CSM R3: a null sortValue sinks LAST in both directions.
+ */
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { render, cleanup, screen, fireEvent } from '@testing-library/react';
 import { DataTable, type DataColumn } from '../DataTable.js';
@@ -46,11 +60,19 @@ describe('filterable (JSUX-LIST-1 filter half)', () => {
   it('narrows rows case-insensitively over sortValue projections; clearing restores', () => {
     render(<DataTable rows={rows} columns={columns} rowKey={(r) => r.id} filterable={{ placeholder: 'Filter…' }} />);
     const input = screen.getByRole('searchbox', { name: 'Filter…' });
-    fireEvent.change(input, { target: { value: 'beta' } });
+    // Upper-case query against mixed-case data: both sides are case-folded.
+    fireEvent.change(input, { target: { value: 'BETA' } });
     expect(screen.queryByText('Alpha Corp')).toBeNull();
     expect(screen.getByText('Beta LLC')).toBeTruthy();
+    // A value only the SECOND column's projection carries (stage) — every
+    // column is searched, not just the first.
+    fireEvent.change(input, { target: { value: 'screening' } });
+    expect(screen.getByText('Beta LLC')).toBeTruthy();
+    expect(screen.queryByText('Alpha Corp')).toBeNull();
+    expect(screen.queryByText('Gamma Inc')).toBeNull();
     fireEvent.change(input, { target: { value: '' } });
     expect(screen.getByText('Alpha Corp')).toBeTruthy();
+    expect(screen.getByText('Gamma Inc')).toBeTruthy();
   });
 
   it('zero matches renders the DISTINCT no-match state — never the empty slot', () => {
@@ -64,8 +86,9 @@ describe('filterable (JSUX-LIST-1 filter half)', () => {
   });
 
   it('an EMPTY rows array renders the empty slot and no filter input (nothing to filter)', () => {
+    const noRows: typeof rows = [];
     render(
-      <DataTable rows={[] as typeof rows} columns={columns} rowKey={(r) => r.id}
+      <DataTable rows={noRows} columns={columns} rowKey={(r) => r.id}
         filterable={{ placeholder: 'Filter…' }} empty={<p>no data yet</p>} />,
     );
     expect(screen.getByText('no data yet')).toBeTruthy();
@@ -80,13 +103,19 @@ describe('filterable (JSUX-LIST-1 filter half)', () => {
     try {
       render(<DataTable rows={rows} columns={columns} rowKey={(r) => r.id} filterable={{ placeholder: 'Filter…' }} />);
       const input = screen.getByRole('searchbox', { name: 'Filter…' });
-      fireEvent.change(input, { target: { value: 'beta' } });
+      fireEvent.change(input, { target: { value: 'b' } });
+      vi.advanceTimersByTime(200);
       expect(announce).not.toHaveBeenCalled(); // debounce: nothing mid-typing
-      vi.advanceTimersByTime(400);
-      expect(announce).toHaveBeenCalledWith(expect.stringMatching(/1/)); // "1 row matches."
+      // A keystroke inside the window RESTARTS it: the 'b' announcement is dropped.
+      fireEvent.change(input, { target: { value: 'beta' } });
+      vi.advanceTimersByTime(200);
+      expect(announce).not.toHaveBeenCalled(); // 400 ms since 'b', 200 since 'beta'
+      vi.advanceTimersByTime(200);
+      expect(announce).toHaveBeenCalledTimes(1); // one settled announcement
+      expect(announce).toHaveBeenCalledWith('1 row matches.');
       fireEvent.change(input, { target: { value: 'zzz' } });
       vi.advanceTimersByTime(400);
-      expect(announce).toHaveBeenLastCalledWith(expect.stringMatching(/no rows match/i));
+      expect(announce).toHaveBeenLastCalledWith('No rows match “zzz”.');
       expect(screen.getByText(/no rows match/i).getAttribute('role')).toBeNull();
     } finally {
       vi.useRealTimers();

@@ -25,12 +25,20 @@ import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 
-const { listApprovals, claimApproval, rejectApproval } = vi.hoisted(() => ({
-  listApprovals: vi.fn(), claimApproval: vi.fn(), rejectApproval: vi.fn(),
+const { listApprovals, listApprovalsByKind, claimApproval, rejectApproval } = vi.hoisted(() => ({
+  listApprovals: vi.fn(), listApprovalsByKind: vi.fn(), claimApproval: vi.fn(), rejectApproval: vi.fn(),
 }));
+// Every call either inbox makes on load is mocked: `listApprovalsByKind` is
+// ApprovalsInbox's decided-history read, `loadAgentViews` NeedsYouInbox's
+// board read. Unmocked, both fetched live from jsdom.
 vi.mock('../../agents/approvalsClient.js', async (orig) => ({
   ...(await orig<typeof import('../../agents/approvalsClient.js')>()),
-  listApprovals, claimApproval, rejectApproval,
+  listApprovals, listApprovalsByKind, claimApproval, rejectApproval,
+}));
+const { loadAgentViews } = vi.hoisted(() => ({ loadAgentViews: vi.fn() }));
+vi.mock('../../agents/agentViewModel.js', async (orig) => ({
+  ...(await orig<typeof import('../../agents/agentViewModel.js')>()),
+  loadAgentViews,
 }));
 const { toastSuccess, toastError, toastInfo } = vi.hoisted(() => ({
   toastSuccess: vi.fn(), toastError: vi.fn(), toastInfo: vi.fn(),
@@ -52,7 +60,12 @@ const ROW = {
 };
 
 afterEach(cleanup);
-beforeEach(() => { vi.clearAllMocks(); });
+beforeEach(() => {
+  // reset, not clear: a case's queued values must never answer another case.
+  vi.resetAllMocks();
+  listApprovalsByKind.mockResolvedValue([]);
+  loadAgentViews.mockResolvedValue([]);
+});
 
 describe('CMSAU-1 — the reviewer can open the page they are deciding', () => {
   for (const [name, Surface] of [['ApprovalsInbox', ApprovalsInbox], ['NeedsYouInbox', NeedsYouInbox]] as const) {
@@ -93,6 +106,29 @@ describe('CMSAU-4 — machine-drafted overlays are disclosed on the card', () =>
     const { container } = render(<MemoryRouter><ApprovalsInbox /></MemoryRouter>);
     await screen.findByText(/Publish CMS page/);
     expect(container.querySelector('.chip--ai')).toBeNull();
+  });
+});
+
+describe('ADR 0861 D6 addendum — outdated translations are information on the card, never a block', () => {
+  for (const [name, Surface] of [['ApprovalsInbox', ApprovalsInbox], ['NeedsYouInbox', NeedsYouInbox]] as const) {
+    it(`${name} names the outdated locales, links to the page editor, and still approves`, async () => {
+      listApprovals.mockResolvedValue([{ ...ROW, outdatedTranslationLocales: ['es', 'fr'] }]);
+      claimApproval.mockResolvedValue({ ...ROW, status: 'approved' });
+      render(<MemoryRouter><Surface /></MemoryRouter>);
+      const note = await screen.findByRole('link', { name: /2 translations are outdated \(es, fr\)/ });
+      expect(note.getAttribute('href')).toBe('/cms/p/org-7/page-42');
+      const approve = screen.getByRole('button', { name: /^Approve$/ });
+      expect(approve.hasAttribute('disabled'), 'the note must not disable the decision').toBe(false);
+      fireEvent.click(approve);
+      await waitFor(() => expect(claimApproval).toHaveBeenCalled());
+    });
+  }
+
+  it('renders no note when nothing is outdated', async () => {
+    listApprovals.mockResolvedValue([ROW]);
+    render(<MemoryRouter><ApprovalsInbox /></MemoryRouter>);
+    await screen.findByText(/Publish CMS page/);
+    expect(screen.queryByText(/outdated/)).toBeNull();
   });
 });
 
@@ -181,7 +217,7 @@ describe('F7 — the disclosure and the reason step are usable without a mouse',
     // keyboard users, touch users and most screen readers.
     listApprovals.mockResolvedValue([{ ...ROW, aiDraftedLocales: ['es'] }]);
     const { container } = render(<MemoryRouter><ApprovalsInbox /></MemoryRouter>);
-    await screen.findByText(/es/);
+    await waitFor(() => expect(container.querySelector('.chip--ai')).not.toBeNull());
     const sr = container.querySelector('.chip--ai .sr-only');
     expect(sr, 'the explanation must be real text, not a title attribute').toBeTruthy();
     expect(sr?.textContent).toMatch(/not been reviewed by a person/i);

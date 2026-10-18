@@ -369,7 +369,9 @@ export function registerInterruptRoutes(app: Express, deps: Deps): void {
       }
       // The URL token was cryptographically matched to THIS interrupt — the RFC
       // 0093 capability-token path (the token is the authorization; body `voter`
-      // declares the approver, approverRefs-constrained in `assertTokenQuorumVote`).
+      // declares the approver — on an ACL'd gate it must be eligible AND carry its
+      // emailed signature, `assertTokenQuorumVote`, ADR 0899 D1). A public path:
+      // no session reaches this route, so a cookie never stands in for the proof.
       await resolveAndResume(storage, hostSuite, interrupt.interruptId, body?.resumeValue, { capabilityToken: true });
       const run = await storage.getRun(interrupt.runId);
       res.json({ runId: interrupt.runId, nodeId: interrupt.nodeId, status: run?.status });
@@ -451,7 +453,7 @@ ${bodyHtml}
       const comment = typeof b.comment === 'string' && b.comment.trim().length > 0 ? b.comment.trim().slice(0, 500) : undefined;
       // Grade-code H1 — reject a voter claim without its emailed (token, voter)
       // binding BEFORE any resolution work (assertTokenQuorumVote re-verifies
-      // on the quorum path; this check also covers non-quorum gates so a
+      // on every ACL'd gate, ADR 0899 D1; this check also covers OPEN gates so a
       // forged voter never reaches the decision ledger).
       if (voter && !verifyVoterBinding(token, voter, sig)) {
         throw new OpenwopError('not_found', 'Interrupt not found.', 404, {});
@@ -1024,11 +1026,14 @@ async function assertEligibleApprover(
  *     MUST be one of them — otherwise a single token could satisfy a restricted
  *     N-approver gate with fabricated voter ids. An OPEN gate (empty list) admits
  *     any `voter`, matching the `openwop-interrupt-quorum` conformance contract.
+ *     ADR 0899 D1 — on ANY gate that declares an ACL (quorum or single-approver),
+ *     the `voter` must also carry its emailed `(token, voter)` binding: a listed
+ *     name alone is a claim, not a proof.
  *   - otherwise (anon cookie session / no principal): a quorum vote fails closed
  *     — the node route has no per-run owner check, so eligibility is the only
  *     authorization on this path, and an anonymous caller is not an approver.
- * No-op for a non-quorum interrupt (the clarification / single-approver / token
- * resume paths are unchanged).
+ * No-op for an interrupt that is neither a quorum gate nor ACL'd (the
+ * clarification / open single-approver / token resume paths are unchanged).
  */
 async function assertTokenQuorumVote(
   interrupt: InterruptRecord,
@@ -1083,20 +1088,21 @@ async function assertTokenQuorumVote(
   if (!eligible) {
     throw new OpenwopError('forbidden', 'The `voter` is not an eligible approver for this gate.', 403, { interruptId: interrupt.interruptId });
   }
-  // ADR 0677 D1 — the HMAC stays scoped to QUORUM gates, deliberately: a SHARED
-  // emailed token let one recipient cast ALL approvers' votes, a multi-approver
-  // concern. Whether a single-approver shared token should also carry the binding
-  // is filed as `ISWF-23`.
-  if (requiredApprovals === 0) return undefined;
   // Grade-code H1 (ADR 0478 correction), widened by ADR 0778 D4(c) from explicit
-  // lists to EVERY declared ACL: the token is shared across every emailed
-  // approver, so membership alone let one recipient cast every listed — or every
-  // group member's — vote. Every emailed link carries its recipient's signature
-  // (`emailApprovalDelivery.ts`), so a real recipient is unaffected.
+  // lists to EVERY declared ACL, and by ADR 0899 D1 to every gate SIZE: the token
+  // is handed to every `approvals:respond` holder (the listing) and shared across
+  // every emailed approver, so an unproven `voter` let any of them resolve the
+  // gate AS a named approver. ADR 0677 scoped this to quorum gates on the premise
+  // that single-approver emailed links carry no binding; they do — every emailed
+  // link is signed for its recipient (`emailApprovalDelivery.ts`), so a real
+  // recipient is unaffected. (`ISWF-23`, closed.)
   const voterSig = typeof rv.voterSig === 'string' ? rv.voterSig : '';
   if (!verifyVoterBinding(interrupt.token, voter, voterSig)) {
     throw new OpenwopError('forbidden', 'This vote requires the signed per-approver link from your notification email.', 403, { interruptId: interrupt.interruptId });
   }
+  // ADR 0677 D1 — a NON-quorum ACL gate needs the 403-or-pass decision only (see
+  // `assertEligibleApprover`); the vote-identity machinery below is quorum-only.
+  if (requiredApprovals === 0) return undefined;
   // ADR 0778 C6 — the ADR 0198 consumed identity, as on the session lane: a
   // delegate voting by email counts as the principal they cover, so the pair can
   // never count twice.
@@ -1587,10 +1593,11 @@ export async function resolveAndResume(
   //   (b) an RFC 0093 CAPABILITY TOKEN (a signed interrupt token, or a bearer /
   //       API-key principal with no bound user): the token authorizes access and
   //       the body `voter` declares the approver — but it MUST name a listed
-  //       approver when the gate declares an explicit list (`assertTokenQuorumVote`);
-  //   (c) anon / no identity: a quorum vote fails closed.
-  // (Non-quorum interrupts — clarification, single-approver, conversation — are
-  // untouched: both helpers no-op when `requiredApprovals <= 1`.)
+  //       approver when the gate declares an ACL, proven by its signed emailed
+  //       binding (`assertTokenQuorumVote`, ADR 0899 D1);
+  //   (c) anon / no identity: a quorum or ACL'd vote fails closed.
+  // (Interrupts that are neither quorum gates nor ACL'd — clarification, open
+  // single-approver, conversation — are untouched: both helpers no-op.)
   const reviewerRef = reviewer?.subjectRef;
   // ADR 0198 — eligibility returns the CONSUMED vote identity: the reviewer
   // themselves normally; the covered principal when they vote as a delegate

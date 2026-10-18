@@ -1,14 +1,19 @@
 /**
- * ADR 0112 Phase 2 — conversation-search route tests.
- * Toggle gating (404 when off), the search round-trip over the real chat routes,
- * facets, and that the visible-set scoping (ADR 0043) governs results.
+ * ADR 0112 Phase 2 — conversation-search route tests: the GET + POST wiring of
+ * `/host/openwop-app/chat/search` over the REAL chat routes, the message/title hit
+ * round-trip, and the role facet reaching the engine.
+ *
+ * The feature is ALWAYS-ON (no toggle — ADR 0820 §8.6; this header used to claim
+ * "404 when off"). ADR 0043 visibility scoping is pinned once, in
+ * `conversation-search-engine.test.ts`, on `searchVisibleConversations` — the ONE
+ * helper this route and the agent tool share (XCH-HOLE-5) — not re-booted here.
+ * Breaks if: the route stops being registered, drops the `role` param, or stops
+ * reading `q` from a POST body (probes w24g1-route-*).
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
-import { saveConfig } from '../src/host/featureToggles/service.js';
-import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 
 let server: http.Server;
 let BASE: string;
@@ -20,11 +25,6 @@ async function jsonFetch<T = unknown>(path: string, init: RequestInit = {}): Pro
     headers: { 'content-type': 'application/json', authorization: `Bearer ${TOKEN}`, ...(init.headers ?? {}) },
   });
   return { status: res.status, body: (await res.json()) as T };
-}
-
-async function enable(id: string, status: 'on' | 'off'): Promise<void> {
-  const d = getToggleDefault(id);
-  if (d) await saveConfig({ ...d, status }, 'test');
 }
 
 async function newSession(title: string): Promise<string> {
@@ -57,12 +57,12 @@ afterAll(async () => { await new Promise<void>((res) => server.close(() => res()
 
 describe('conversation-search route', () => {
   it('serves without a toggle (always-on)', async () => {
-    const r = await jsonFetch('/host/openwop-app/chat/search?q=anything');
+    const r = await jsonFetch<SearchResp>('/host/openwop-app/chat/search?q=anything');
     expect(r.status).toBe(200);
+    expect(Array.isArray(r.body.hits), 'the search body, not a 200 from some other handler').toBe(true);
   });
 
-  it('searches the caller conversations + messages when enabled', async () => {
-    await enable('conversation-search', 'on');
+  it('searches the caller conversations + messages', async () => {
     const s1 = await newSession('Quarterly planning');
     await appendMsg(s1, 'user', 'what is the revenue forecast for Q3');
     await appendMsg(s1, 'assistant', 'the forecast looks strong');
@@ -78,9 +78,10 @@ describe('conversation-search route', () => {
   });
 
   it('returns a title hit and supports the role facet', async () => {
-    await enable('conversation-search', 'on');
     const s = await newSession('Budget review session');
-    await appendMsg(s, 'user', 'narwhal question');
+    // The USER message scores higher on `narwhal`, so without the role facet the best
+    // hit for this conversation would be the user one — the facet is load-bearing.
+    await appendMsg(s, 'user', 'narwhal narwhal narwhal question');
     await appendMsg(s, 'assistant', 'narwhal answer');
 
     const title = await jsonFetch<SearchResp>('/host/openwop-app/chat/search?q=budget');
@@ -89,20 +90,19 @@ describe('conversation-search route', () => {
     const assistant = await jsonFetch<SearchResp>('/host/openwop-app/chat/search?q=narwhal&role=assistant');
     const hit = assistant.body.hits.find((h) => h.conversationId === s);
     expect(hit?.role).toBe('assistant');
-  });
-
-  it('returns no hits for a term in no conversation', async () => {
-    await enable('conversation-search', 'on');
-    const r = await jsonFetch<SearchResp>('/host/openwop-app/chat/search?q=zzzznonexistentterm');
-    expect(r.body.hits).toHaveLength(0);
+    expect(hit?.messageId).toBeTruthy();
   });
 
   it('accepts POST as well as GET', async () => {
-    await enable('conversation-search', 'on');
+    // Seeds its OWN term — it used to search 'forecast' and pass only when the GET
+    // case had run first (red alone / under shuffle).
+    const s = await newSession('Post body search');
+    await appendMsg(s, 'user', 'the axolotlpost memo');
     const r = await jsonFetch<SearchResp>('/host/openwop-app/chat/search', {
-      method: 'POST', body: JSON.stringify({ q: 'forecast' }),
+      method: 'POST', body: JSON.stringify({ q: 'axolotlpost' }),
     });
     expect(r.status).toBe(200);
-    expect(r.body.hits.length).toBeGreaterThanOrEqual(1);
+    expect(r.body.hits).toHaveLength(1);
+    expect(r.body.hits[0]!.conversationId).toBe(s);
   });
 });

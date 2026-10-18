@@ -2,6 +2,12 @@
  * ADR 0482 §6 — the per-node cost table: the stamp is authoritative when
  * present; pre-stamp runs fall back to aggregating the already-loaded
  * provider.usage events by nodeId (no extra fetch, no invented numbers).
+ *
+ * What turns it red: __other not sorted last; unattributed events not folded
+ * into __other; per-node costs not summed; the stamp ignored when present; the
+ * source note swapped; __other rendered raw. The panel stamp case uses a stamp
+ * value (0.37) that DIFFERS from the events' (0.01), so a panel that read the
+ * events instead of the stamp cannot render it.
  */
 
 import { describe, it, expect } from 'vitest';
@@ -20,7 +26,8 @@ function usage(nodeId: string | undefined, costEstimateUsd: number, extra: Recor
     payload: { provider: 'anthropic', model: 'claude-sonnet-5', costEstimateUsd, inputTokens: 10, outputTokens: 5, ...extra },
     timestamp: new Date(Date.UTC(2026, 6, 24, 12, 0, seq)).toISOString(),
     sequence: seq,
-  } as RunEventDoc;
+    schemaVersion: 1,
+  };
 }
 
 describe('aggregateNodeCosts', () => {
@@ -58,8 +65,10 @@ describe('RunCostPanel per-node table', () => {
   });
 
   it('renders the stamp rows (with the localized __other label) when provided', () => {
-    render(<RunCostPanel events={[usage('x', 0.01)]} costByNode={{ x: 0.01, __other: 0.002 }} />);
+    render(<RunCostPanel events={[usage('x', 0.01)]} costByNode={{ x: 0.37, __other: 0.002 }} />);
     expect(screen.getByText('Other / unattributed')).toBeTruthy();
+    // The stamp's number, not the events' — formatUsd renders 4 decimals under $1.
+    expect(screen.getByText(/0\.3700/)).toBeTruthy();
     expect(screen.getByText(/Recorded at run completion/)).toBeTruthy();
   });
 });

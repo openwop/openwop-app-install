@@ -11,7 +11,10 @@ const routes: FeatureRoute[] = [
     element: <AnalyticsPage />,
     tier: 'workspace', archetype: 'standard-index',
     nav: {
-      group: 'CRM',
+      // ADR 0892 — Analytics measures the public site (CMS pages, the paywall
+      // funnel), not CRM, and stays on when CRM is off; it lives in the
+      // always-present Marketing group so an opt-in CRM leaves no orphan group.
+      group: 'Marketing',
       label: 'Analytics', labelKey: 'analyticsLabel',
       icon: ActivityIcon,
       hint: 'Traffic + conversions on the public surface', hintKey: 'analyticsHint',

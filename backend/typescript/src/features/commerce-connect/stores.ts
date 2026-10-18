@@ -299,7 +299,12 @@ export const orderSellerIndex = new DurableCollection<{ orderId: string; sellerT
 // Grade-data DATA-CC-1: tenant-indexed so a PER-TENANT fee override is purged by
 // tenant teardown (ADR 0284 registry). The '__global__' row registers under a
 // pseudo-tenant slice that no teardown ever targets — harmless by construction.
-export const feeConfigs = new DurableCollection<FeeConfig>('commerce-connect:fee-config', (f) => f.key, undefined, (f) => f.key);
+// ADR 0877 Q1 — the STOREFRONT fee rows share this namespace under a
+// `storefront:` key prefix (one operator fee-config store, two lanes). The tenant
+// index strips the prefix so tenant teardown still reclaims a per-tenant override.
+export const STOREFRONT_FEE_PREFIX = 'storefront:';
+export const feeConfigs = new DurableCollection<FeeConfig>('commerce-connect:fee-config', (f) => f.key, undefined,
+  (f) => (f.key.startsWith(STOREFRONT_FEE_PREFIX) ? f.key.slice(STOREFRONT_FEE_PREFIX.length) : f.key));
 
 
 /** ADR 0385 bounds; default = the midpoint (final % is ADR open question 2). */
@@ -310,6 +315,15 @@ const FEE_MAX_PCT = 15;
 export const DEFAULT_FEE_PCT = 12;
 
 export const clampFee = (pct: number): number => Math.min(FEE_MAX_PCT, Math.max(FEE_MIN_PCT, pct));
+
+/** ADR 0877 Q1 (user decision 2026-10-12) — the STOREFRONT application fee is its
+ *  own config: a storefront sale is not a marketplace pack sale, and the pack
+ *  lane's 10% floor is not a storefront price. 0–15%, default 2%. The marketplace
+ *  bounds above are unchanged. */
+const STOREFRONT_FEE_MIN_PCT = 0;
+const STOREFRONT_FEE_MAX_PCT = 15;
+export const DEFAULT_STOREFRONT_FEE_PCT = 2;
+export const clampStorefrontFee = (pct: number): number => Math.min(STOREFRONT_FEE_MAX_PCT, Math.max(STOREFRONT_FEE_MIN_PCT, pct));
 
 
 /** The platform Stripe account's region — the v1 same-region payout restriction

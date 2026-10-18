@@ -1,12 +1,17 @@
 /** §4.5 filtering on /feature-toggles — the pure client filter behind the
- *  key-figure tiles (status/attention) + the filterbar (search/category/sort). */
+ *  key-figure tiles (status/attention) + the filterbar (search/category/sort).
+ *  A wrong filter hides a toggle an operator is looking for (it is the only list).
+ *  Sabotage that turns it red: inverting the status test, ignoring the attention
+ *  set, dropping the General fallback, the description/trim/case-folding of the
+ *  search, the copy in `sortToggles`, or sorting 'updated' by name (the fixture
+ *  gives 'name' and 'updated' DIFFERENT orders). */
 import { describe, it, expect } from 'vitest';
 import { filterToggles, sortToggles } from '../FeatureTogglePanel.js';
 import type { ToggleConfig } from '../../client/featureTogglesClient.js';
 
 const GENERAL = 'General';
 const cfg = (over: Partial<ToggleConfig> & { id: string }): ToggleConfig =>
-  ({ status: 'on', bucketUnit: 'user', ...over }) as ToggleConfig;
+  ({ status: 'on', bucketUnit: 'user', salt: 's', ...over });
 
 const CONFIGS: ToggleConfig[] = [
   cfg({ id: 'crm', label: 'CRM', status: 'on', category: 'Sales' }),
@@ -38,6 +43,9 @@ describe('filterToggles', () => {
     expect(filterToggles(CONFIGS, { ...none, query: 'BUILDER' }, new Set(), GENERAL).map((c) => c.id)).toEqual(['app-builder']);
     expect(filterToggles(CONFIGS, { ...none, query: 'export apps' }, new Set(), GENERAL).map((c) => c.id)).toEqual(['app-builder']);
     expect(filterToggles(CONFIGS, { ...none, query: '  crm ' }, new Set(), GENERAL).map((c) => c.id)).toEqual(['crm']);
+    // Matches ONLY the mixed-case label "Code Export" (the id is hyphenated), so
+    // the haystack's case-folding is what makes it match.
+    expect(filterToggles(CONFIGS, { ...none, query: 'code export' }, new Set(), GENERAL).map((c) => c.id)).toEqual(['code-export']);
   });
 
   it('category select narrows, with the General fallback bucket', () => {
@@ -55,13 +63,14 @@ describe('filterToggles', () => {
 
 describe('sortToggles', () => {
   const items: ToggleConfig[] = [
-    cfg({ id: 'b', label: 'Bravo', updatedAt: '2026-07-01T00:00:00Z' }),
-    cfg({ id: 'a', label: 'alpha', updatedAt: '2026-07-10T00:00:00Z' }),
+    cfg({ id: 'b', label: 'Bravo', updatedAt: '2026-07-10T00:00:00Z' }),
+    cfg({ id: 'a', label: 'alpha', updatedAt: '2026-07-01T00:00:00Z' }),
     cfg({ id: 'c', label: 'Charlie' }), // undated
   ];
 
   it("'default' keeps the load order (and returns the same array)", () => {
     expect(sortToggles(items, 'default').map((c) => c.id)).toEqual(['b', 'a', 'c']);
+    expect(sortToggles(items, 'default')).toBe(items);
   });
 
   it("'name' sorts locale-aware A–Z by label, without mutating the input", () => {
@@ -70,6 +79,7 @@ describe('sortToggles', () => {
   });
 
   it("'updated' is most-recent first; undated rows sink", () => {
-    expect(sortToggles(items, 'updated').map((c) => c.id)).toEqual(['a', 'b', 'c']);
+    // Newest (Bravo, 07-10) first — NOT the name order a,b,c.
+    expect(sortToggles(items, 'updated').map((c) => c.id)).toEqual(['b', 'a', 'c']);
   });
 });

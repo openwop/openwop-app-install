@@ -120,7 +120,8 @@ describe('scaleShapePatch — group resize (uniform scale about an origin)', () 
     expect(scaleShapePatch({ kind: 'polygon', points: [{ x: 0, y: 0 }, { x: 10, y: 0 }] }, 2, origin)).toEqual({ points: [{ x: 0, y: 0 }, { x: 20, y: 0 }] });
   });
   it('clamps dimensions ≥ 1 and never inverts (factor ≤ 0 → identity factor)', () => {
-    expect(scaleShapePatch({ kind: 'rect', x: 0, y: 0, width: 40, height: 30 }, 0, origin)).toMatchObject({ width: 40, height: 30 });
+    expect(scaleShapePatch({ kind: 'rect', x: 0, y: 0, width: 40, height: 30 }, 0, origin)).toEqual({ x: 0, y: 0, width: 40, height: 30 });
+    expect(scaleShapePatch({ kind: 'rect', x: 10, y: 10, width: 40, height: 30 }, -2, origin)).toEqual({ x: 10, y: 10, width: 40, height: 30 });
   });
 });
 
@@ -159,6 +160,9 @@ describe('snap-to-grid', () => {
   it('snapPatch snaps coordinate fields + points but nothing else', () => {
     expect(snapPatch({ x: 13, y: 27, r: 8 }, 10)).toEqual({ x: 10, y: 30, r: 10 });
     expect(snapPatch({ points: [{ x: 3, y: 8 }, { x: 24, y: 11 }] }, 10)).toEqual({ points: [{ x: 0, y: 10 }, { x: 20, y: 10 }] });
+    // "nothing else": numeric NON-coordinate fields pass through unsnapped.
+    expect(snapPatch({ x: 13, strokeWidth: 3, rotation: 17, opacity: 0.4, fontSize: 14, fill: '#123' }, 10))
+      .toEqual({ x: 10, strokeWidth: 3, rotation: 17, opacity: 0.4, fontSize: 14, fill: '#123' });
     // grid 0 returns the patch untouched.
     expect(snapPatch({ x: 13 }, 0)).toEqual({ x: 13 });
   });
@@ -197,11 +201,8 @@ describe('stroke geometry (ADR 0333 Phase 3)', () => {
 
   it('rdpIndices keeps endpoints + salient corners, drops collinear points', () => {
     const pts = [{ x: 0, y: 0 }, { x: 5, y: 0.01 }, { x: 10, y: 0 }, { x: 10, y: 10 }];
-    const keep = rdpIndices(pts, 0.5);
-    expect(keep[0]).toBe(0);
-    expect(keep[keep.length - 1]).toBe(3);
-    expect(keep).toContain(2); // the corner survives
-    expect(keep).not.toContain(1); // the collinear jitter is dropped
+    // endpoints (0, 3) + the corner (2); the collinear jitter (1) is dropped.
+    expect(rdpIndices(pts, 0.5)).toEqual([0, 2, 3]);
   });
 });
 
@@ -225,9 +226,12 @@ describe('symmetryVariants (ADR 0333 Phase 7)', () => {
     expect(v).toEqual([{ x: 10, y: 80 }, { x: 30, y: 60 }]);
   });
   it('quadrant yields 3 variants (V, H, both)', () => {
-    const vs = symmetryVariants(spine, 'quadrant', cx, cy, false);
-    expect(vs).toHaveLength(3);
-    expect(vs[2]![0]).toEqual({ x: 90, y: 80 });
+    // V, H and both — each variant whole and in order (a duplicated V is not "H").
+    expect(symmetryVariants(spine, 'quadrant', cx, cy, false)).toEqual([
+      [{ x: 90, y: 20 }, { x: 70, y: 40 }],
+      [{ x: 10, y: 80 }, { x: 30, y: 60 }],
+      [{ x: 90, y: 80 }, { x: 70, y: 60 }],
+    ]);
   });
   it('radial rotational yields 7 pure rotations (8-fold total)', () => {
     const vs = symmetryVariants(spine, 'radial', cx, cy, true);
@@ -238,9 +242,18 @@ describe('symmetryVariants (ADR 0333 Phase 7)', () => {
     expect(r180[0]!.y).toBeCloseTo(80, 6);
   });
   it('radial kaleidoscope yields 7 variants incl. mirrored copies', () => {
-    const vs = symmetryVariants(spine, 'radial', cx, cy, false);
-    expect(vs).toHaveLength(7);
-    // The plain mirror is present.
-    expect(vs.some((v) => v[0]!.x === 90 && v[0]!.y === 20)).toBe(true);
+    // rot 90/180/270 of the spine, then its VERTICAL mirror and that mirror's
+    // rotations — every variant asserted (rotation floats rounded to 6dp; the old
+    // exact-=== `.some` only held by float luck and accepted an H mirror's rot180).
+    const r6 = (v: number): number => Math.round(v * 1e6) / 1e6 + 0;
+    expect(symmetryVariants(spine, 'radial', cx, cy, false).map((v) => v.map((p) => [r6(p.x), r6(p.y)]))).toEqual([
+      [[80, 10], [60, 30]],
+      [[90, 80], [70, 60]],
+      [[20, 90], [40, 70]],
+      [[90, 20], [70, 40]],
+      [[80, 90], [60, 70]],
+      [[10, 80], [30, 60]],
+      [[20, 10], [40, 30]],
+    ]);
   });
 });

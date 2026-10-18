@@ -21,7 +21,8 @@ export type CuTier = 'observe' | 'interact' | 'commit';
 /** The closed risk-tier classification (ADR 0418 §Decision 2):
  *  observe = read-only (auto-approved); interact = on-page input (session-
  *  approved by starting the task); commit = side effects, new origins,
- *  downloads, credential entry — EACH gated through the approval primitives. */
+ *  downloads — EACH gated by the opener's approval (ADR 0894 D3); credential
+ *  entry is commit-tier here but refused outright by the loop (D6). */
 export function tierOf(action: CuAction): CuTier {
   switch (action.kind) {
     case 'screenshot':
@@ -61,6 +62,9 @@ export interface ComputerUseAdapter {
 interface MockScript {
   actions: CuAction[];
   resultSummary?: string;
+  /** Polls that report "still working" (no action yet) before the first
+   *  action — what a real provider does while its model thinks. */
+  thinkPolls?: number;
 }
 
 /** Deterministic scripted adapter. The script rides the TASK string as JSON
@@ -68,7 +72,7 @@ interface MockScript {
  *  single screenshot then completion. Approved actions advance the cursor; a
  *  denied action ends the session failed (mirroring a real abort). */
 export function makeMockAdapter(): ComputerUseAdapter & { calls: { start: number; poll: number; decide: number } } {
-  const sessions = new Map<string, { script: MockScript; cursor: number; failed?: string }>();
+  const sessions = new Map<string, { script: MockScript; cursor: number; failed?: string; thought: number }>();
   let seq = 0;
   const calls = { start: 0, poll: 0, decide: 0 };
   return {
@@ -79,7 +83,7 @@ export function makeMockAdapter(): ComputerUseAdapter & { calls: { start: number
         ? (JSON.parse(task.slice(5)) as MockScript)
         : { actions: [{ actionId: 'a1', kind: 'screenshot', description: 'initial screenshot' }], resultSummary: 'done' };
       const id = `mock-session-${++seq}`;
-      sessions.set(id, { script, cursor: 0 });
+      sessions.set(id, { script, cursor: 0, thought: 0 });
       return { ok: true, value: { providerSessionId: id } };
     },
     async pollSession(id) {
@@ -87,6 +91,7 @@ export function makeMockAdapter(): ComputerUseAdapter & { calls: { start: number
       const s = sessions.get(id);
       if (!s) return { ok: false, error: 'unknown_session' };
       if (s.failed) return { ok: true, value: { status: 'failed', error: s.failed } };
+      if (s.thought < (s.script.thinkPolls ?? 0)) { s.thought += 1; return { ok: true, value: { status: 'running' } }; }
       const next = s.script.actions[s.cursor];
       if (!next) return { ok: true, value: { status: 'completed', resultSummary: s.script.resultSummary ?? 'completed' } };
       return { ok: true, value: { status: 'running', pendingAction: next } };

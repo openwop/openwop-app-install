@@ -51,7 +51,12 @@ export function ApplyGrantPage(): JSX.Element {
   const { orgs, orgsFailed, retry: retryOrgs, orgId } = useOrgSelection(listOrgs);
 
   const [grants, setGrants] = useState<ApplyGrantView[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  // EMPTY-ON-FAIL-5 (ADR 0779 D7) — a failed grants read is NOT "no grants". The
+  // catch used to set `grants` to [], so the table's empty state said "No
+  // auto-apply authority issued — Nothing is being submitted on your behalf"
+  // from a read that never came back: a false SAFETY assurance. The read keeps its
+  // own flag, and the empty copy renders only after a successful read.
+  const [grantsFailed, setGrantsFailed] = useState(false);
   const [busy, setBusy] = useState(false);
   const [confirming, setConfirming] = useState<ApplyGrantView | null>(null);
 
@@ -65,13 +70,13 @@ export function ApplyGrantPage(): JSX.Element {
   const refresh = useCallback(async () => {
     if (!orgId) return;
     try {
-      setError(null);
-      setGrants(await listGrants(orgId));
+      const rows = await listGrants(orgId);
+      setGrants(rows);
+      setGrantsFailed(false);
     } catch {
-      setError(t('loadFailed'));
-      setGrants([]);
+      setGrantsFailed(true);
     }
-  }, [orgId, t]);
+  }, [orgId]);
 
   useEffect(() => { void refresh(); }, [refresh]);
 
@@ -208,8 +213,6 @@ export function ApplyGrantPage(): JSX.Element {
         orgs={orgs} orgsFailed={orgsFailed} retry={retryOrgs}
         emptyBody={t('orgsEmptyClause')} failedBody={t('orgsFailedClause')} icon={<ShieldIcon />}
       >
-        {error ? <Notice variant="error">{error}</Notice> : null}
-
         {/* JSUX-Q-1 — the queued card's DESTINATION survives the toast. */}
         {queuedBoardId ? (
           <Notice variant="info">
@@ -221,7 +224,17 @@ export function ApplyGrantPage(): JSX.Element {
         ) : null}
 
         <Panel title={t('activeTitle')}>
-          {grants === null ? (
+          {/* failed → loading → empty/rows. On a failed read we say we could not
+              CHECK; we never say nothing is being submitted. */}
+          {grantsFailed ? (
+            <StateCard
+              announce
+              icon={<ShieldIcon />}
+              title={t('grantsUnknownTitle')}
+              body={t('grantsUnknownBody')}
+              action={<Button variant="secondary" size="sm" onClick={() => void refresh()}>{t('common:retry')}</Button>}
+            />
+          ) : grants === null ? (
             <Skeleton />
           ) : (
             <DataTable

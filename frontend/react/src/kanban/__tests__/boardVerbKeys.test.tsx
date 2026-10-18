@@ -4,36 +4,43 @@
  *   - `e` opens the edit form of the card that OWNS FOCUS (not the first card)
  *   - `n` opens the composer in the column that owns focus
  *   - typing guard: keys inside a form field never trigger a verb (polarity)
- *   - a board without the affordance no-ops by construction (delegation to
- *     the real button means no button → no action, no crash)
+ *   (A board WITHOUT the affordance no-ops by construction — delegation to the
+ *   real button means no button → no action. That is covered by
+ *   cardEditCompose "no onEditCard prop ⇒ no edit affordance"; the `n` half is
+ *   double-guarded (the composer renders only with onCreateCard), so the case
+ *   that pinned it here was cut in /grade-tests wave 37.)
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
+import type { ComponentProps } from 'react';
 import { render, cleanup, screen, fireEvent, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { KanbanBoardView } from '../KanbanBoardView.js';
 import type { KanbanBoard, KanbanCard } from '../kanbanClient.js';
 
+type BoardProps = ComponentProps<typeof KanbanBoardView>;
+
 const board: KanbanBoard = {
   id: 'b1', tenantId: 't1', name: 'Board',
   columns: [{ id: 'todo', name: 'To do' }, { id: 'done', name: 'Done', terminal: true }],
   createdAt: '2026-08-01T00:00:00Z', updatedAt: '2026-08-01T00:00:00Z',
-} as KanbanBoard;
-const cards: KanbanCard[] = [
-  { id: 'c1', boardId: 'b1', columnId: 'todo', title: 'First card', priority: 'normal', order: 0 } as KanbanCard,
-  { id: 'c2', boardId: 'b1', columnId: 'done', title: 'Second card', priority: 'normal', order: 0 } as KanbanCard,
-];
+};
+const mkCard = (id: string, columnId: string, title: string): KanbanCard => ({
+  id, boardId: 'b1', columnId, title, priority: 'normal', order: 0,
+  createdAt: '2026-08-01T00:00:00Z', updatedAt: '2026-08-01T00:00:00Z',
+});
+const cards: KanbanCard[] = [mkCard('c1', 'todo', 'First card'), mkCard('c2', 'done', 'Second card')];
 
 afterEach(cleanup);
 
-function view(overrides: { onEditCard?: ReturnType<typeof vi.fn> | undefined; onCreateCard?: ReturnType<typeof vi.fn> | undefined } = { onEditCard: vi.fn(), onCreateCard: vi.fn() }): void {
+function view(): void {
   render(
     <MemoryRouter>
       <KanbanBoardView
         board={board}
         cards={cards}
-        onMoveCard={vi.fn()}
-        onCreateCard={overrides.onCreateCard}
-        onEditCard={overrides.onEditCard}
+        onMoveCard={vi.fn<BoardProps['onMoveCard']>()}
+        onCreateCard={vi.fn<NonNullable<BoardProps['onCreateCard']>>()}
+        onEditCard={vi.fn<NonNullable<BoardProps['onEditCard']>>()}
       />
     </MemoryRouter>,
   );
@@ -57,20 +64,17 @@ describe('KB-R2-3 — board verb keys', () => {
     expect(within(doneCol).getByPlaceholderText('Task title…')).toBeTruthy();
   });
 
-  it('typing `e` inside a form field is TYPING, not a verb (polarity guard)', () => {
+  it('typing a verb key inside a form field is TYPING, not a verb (polarity guard)', () => {
     view();
     fireEvent.keyDown(screen.getByLabelText('Drag First card to another lane'), { key: 'n' });
     const title = screen.getByPlaceholderText('Task title…');
+    // `n` typed in the open To-do composer: without the typing guard it falls
+    // through to the OTHER column's add button and opens a second composer.
+    // (`e` here could never fail — the composer is outside every card, so no
+    // edit button is found either way.)
+    fireEvent.keyDown(title, { key: 'n' });
     fireEvent.keyDown(title, { key: 'e' });
+    expect(screen.getAllByPlaceholderText('Task title…')).toHaveLength(1);
     expect(screen.queryByLabelText('Card title')).toBeNull(); // no edit form opened
-  });
-
-  it('a board without edit/create affordances no-ops on both keys', () => {
-    view({ onEditCard: undefined, onCreateCard: undefined });
-    const grip = screen.getByLabelText('Drag First card to another lane');
-    fireEvent.keyDown(grip, { key: 'e' });
-    fireEvent.keyDown(grip, { key: 'n' });
-    expect(screen.queryByLabelText('Card title')).toBeNull();
-    expect(screen.queryByPlaceholderText('Task title…')).toBeNull();
   });
 });

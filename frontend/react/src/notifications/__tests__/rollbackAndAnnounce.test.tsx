@@ -19,7 +19,7 @@ import type { Notification } from '../types.js';
 const row = (id: string, status: Notification['status'], createdAt: string): Notification => ({
   notificationId: id, type: 'system', title: `t-${id}`, message: 'm',
   status, priority: 'normal', createdAt,
-} as Notification);
+});
 
 /** A fetch stub whose resolution the test controls — the in-flight window is real. */
 function deferredFailingFetch(): { release: () => void } {
@@ -33,7 +33,10 @@ function deferredFailingFetch(): { release: () => void } {
 }
 
 beforeEach(() => {
-  useNotificationStore.setState({ notifications: [], unreadCount: 0, error: null, preferences: useNotificationStore.getState().preferences });
+  useNotificationStore.setState({ notifications: [], unreadCount: 0, error: null });
+  // The global announcer is module-level: reset it so no case can pass on text
+  // a previous case announced (shuffle).
+  announce('');
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.clearAllMocks(); });
 
@@ -55,16 +58,21 @@ describe('R2 IB-SP-11 — surgical rollback preserves concurrent arrivals', () =
   });
 
   it('a failed delete re-inserts the row without erasing a mid-flight arrival', async () => {
-    useNotificationStore.setState({ notifications: [row('n1', 'read', '2026-08-09T00:00:00Z')], unreadCount: 0 });
+    // An OLDER row (n0) sits below n1, so re-inserting n1 at the end differs
+    // from re-inserting it in createdAt order.
+    useNotificationStore.setState({ notifications: [
+      row('n1', 'read', '2026-08-09T00:00:00Z'),
+      row('n0', 'read', '2026-08-08T00:00:00Z'),
+    ], unreadCount: 0 });
     const { release } = deferredFailingFetch();
     const pending = useNotificationStore.getState().delete('n1');
-    expect(useNotificationStore.getState().notifications).toHaveLength(0); // optimistic removal
+    expect(useNotificationStore.getState().notifications.map((n) => n.notificationId)).toEqual(['n0']); // optimistic removal
     act(() => { useNotificationStore.getState()._ingest(row('n2', 'unread', '2026-08-09T00:01:00Z')); });
     release();
     await pending;
     const ids = useNotificationStore.getState().notifications.map((n) => n.notificationId);
-    expect(ids).toContain('n1');
-    expect(ids).toContain('n2');
+    // n1 is back in its createdAt slot; the arrival n2 survives at the top.
+    expect(ids).toEqual(['n2', 'n1', 'n0']);
   });
 
   it('a failed markAllRead restores only the rows it flipped; the arrival stays unread', async () => {
@@ -118,12 +126,17 @@ describe('R2 IB-SP-10 — a genuine ARRIVAL is announced (global announcer)', ()
     expect(second).not.toBe(first); // identity changed → AT re-reads it
   });
 
-  it("the user's own mark-read announces nothing (falls are silent)", () => {
+  it("the user's own mark-read announces nothing (falls are silent)", async () => {
     useNotificationStore.setState({ notifications: [row('c1', 'unread', '2026-08-09T01:00:00Z')], unreadCount: 1 });
     act(() => { announce(''); });
     const before = baseline();
-    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({}), { status: 200, headers: { 'content-type': 'application/json' } })));
-    act(() => { void useNotificationStore.getState().markAsRead('c1'); });
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(row('c1', 'read', '2026-08-09T01:00:00Z')), { status: 200, headers: { 'content-type': 'application/json' } })));
+    await act(async () => { await useNotificationStore.getState().markAsRead('c1'); });
+    // The read landed (the count fell)…
+    expect(useNotificationStore.getState().unreadCount).toBe(0);
+    // …and nothing was announced. (The original count-rise defect lived in the
+    // bell, which is not rendered here; this pins that the STORE's mark paths
+    // stay silent — only `_ingest` of a genuine arrival speaks.)
     expect(baseline()).toBe(before);
   });
 });
@@ -145,7 +158,7 @@ describe('R3 IB-R2-2 — scoped bulk verbs: optimistic flip, surgical rollback, 
     expect(st.notifications.find((n) => n.notificationId === 'r1')?.status).toBe('archived');
     expect(st.notifications.find((n) => n.notificationId === 'u1')?.status).toBe('unread'); // untouched
     expect(calls.length).toBe(1); // ONE request — the whole point vs the N-loop
-    expect(calls[0]).toContain(':archive-read');
+    expect(new URL(calls[0]!, 'http://x').pathname).toMatch(/\/host\/openwop-app\/notifications:archive-read$/);
   });
 
   it('a failed archiveRead rolls back ONLY the flipped rows; a mid-flight arrival survives', async () => {

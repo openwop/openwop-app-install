@@ -214,4 +214,21 @@ export const messages = {
   fieldAvatar: 'Avatar',
   fieldEquipment: 'Equipment',
   fieldInterests: 'Interests',
+
+  // ADR 0888 D1 — the workspace directory is opt-in per person
+  wsShareTitle: 'Who appears here',
+  wsShareBodyNotShared: 'This workspace lists only the people who chose to share their profile with it. Yours is not shared here.',
+  wsShareBodyShared: 'This workspace lists only the people who chose to share their profile with it. Yours is shared here.',
+  wsShareAction: 'Share my profile here',
+  wsUnshareAction: 'Stop sharing here',
+  wsShareFailed: 'Could not update sharing. Try again.',
+  wsNoSharedTitle: 'Nobody has shared a profile here yet',
+  wsNoSharedBody: 'People in this workspace appear once they share their profile with it.',
+  wsTruncated: 'Showing the first {{count}} people.',
+  wsEndorseHomeOnly: 'Endorsing isn’t available in shared workspaces yet.',
+  wsShareDisclosure: 'Members of {{workspace}} will see your name, photo, title, bio, location, links, skills and availability. You can stop sharing at any time.',
+  wsShareDisclosureUnnamed: 'Members of this workspace will see your name, photo, title, bio, location, links, skills and availability. You can stop sharing at any time.',
+  wsSharedToast: 'Your profile is now shared with this workspace.',
+  wsUnsharedToast: 'Your profile is no longer shared with this workspace.',
+  wsNoSharedBodyMine: 'Your profile is shared here. Others appear once they share theirs.',
 } as const;

@@ -2,33 +2,60 @@
  * ADR 0080 follow-on (perf): `resolveStrategyContext` memoizes the priority-list
  * reads PER RESOLVE, so a portfolio with multiple priority-idea links into the
  * same list ranks it ONCE — not once per link. Proven by counting the calls into
- * the (mocked) priority-matrix service.
+ * the (mocked) priority-matrix service. The call COUNT is the claim (an N+1 perf
+ * guarantee), so counting is behavior here, not shape.
+ *
+ * The mocks are typed against the REAL service signatures (`satisfies typeof
+ * real.fn`) with full fixtures of the real return types, so a renamed field the
+ * resolver reads breaks `tsc` instead of being served stale by the mock.
+ *
+ * Sabotage witnesses (grade-tests w19, `w19g2-cm-*`): drop the list memo, the
+ * ranking memo or the project-data memo, or rethrow a per-link fetch error —
+ * each turns a case red.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openSqliteStorage } from '../src/storage/sqlite/index.js';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 
+import type * as PmService from '../src/features/priority-matrix/priorityMatrixService.js';
+import type * as ProjectsService from '../src/features/projects/projectsService.js';
+import type { AccessLevel } from '../src/host/subjectAccess.js';
+
 const counters = vi.hoisted(() => ({ getList: 0, rank: 0, getProject: 0 }));
+// Hoisted with the mocks: the factories run while the static imports below load.
+const { T } = vi.hoisted(() => ({ T: '2030-01-01T00:00:00.000Z' }));
 
-vi.mock('../src/features/priority-matrix/priorityMatrixService.js', () => ({
-  getList: async (_tenantId: string, id: string) => { counters.getList++; return { id, tenantId: 't', orgId: 'org-1', name: 'Bets' }; },
-  listRankedIdeas: async (_tenantId: string, _listId: string) => {
+vi.mock('../src/features/priority-matrix/priorityMatrixService.js', () => {
+  const getList = (async (_tenantId: string, id: string) => {
+    counters.getList++;
+    return {
+      id, tenantId: 't', orgId: 'org-1', name: 'Bets', boardId: 'board-1',
+      criteriaSet: { aggregation: 'weighted-sum', criteria: [] },
+      votingMode: 'single', voteAggregation: 'mean', createdBy: 'u', createdAt: T, updatedAt: T,
+    };
+  }) satisfies typeof PmService.getList;
+  const idea = (id: string, title: string, rank: number, computedPriority: number): PmService.RankedIdea => ({
+    card: { id, boardId: 'board-1', columnId: 'col-1', title, order: rank, createdAt: T, updatedAt: T },
+    status: { columnId: 'col-1', columnName: 'Ideas', terminal: false },
+    scores: {}, computedPriority, rank,
+    completeness: { declared: 0, scored: 0, missing: [], complete: true },
+  });
+  const listRankedIdeas = (async (_tenantId: string, _listId: string) => {
     counters.rank++;
-    return [
-      { card: { id: 'card-1', title: 'Idea one' }, computedPriority: 5, rank: 1 },
-      { card: { id: 'card-2', title: 'Idea two' }, computedPriority: 4, rank: 2 },
-    ];
-  },
-}));
+    return [idea('card-1', 'Idea one', 1, 5), idea('card-2', 'Idea two', 2, 4)];
+  }) satisfies typeof PmService.listRankedIdeas;
+  return { getList, listRankedIdeas };
+});
 
-vi.mock('../src/features/projects/projectsService.js', () => ({
-  resolveProjectAccess: async () => 'workspace', // readable (anything but 'none')
-  getProject: async (_tenantId: string, id: string) => {
+vi.mock('../src/features/projects/projectsService.js', () => {
+  const resolveProjectAccess = (async (): Promise<AccessLevel> => 'read') satisfies typeof ProjectsService.resolveProjectAccess; // readable (anything but 'none'; the old 'workspace' was not an AccessLevel)
+  const getProject = (async (_tenantId: string, id: string) => {
     counters.getProject++;
     if (id === 'proj-boom') throw new Error('projects store transient error'); // STRAT-4 fixture
-    return { id, tenantId: 't', name: `Project ${id}`, charter: { status: 'active', health: 'green', milestones: [] } };
-  },
-}));
+    return { id, tenantId: 't', orgId: 'org-1', name: `Project ${id}`, workflows: [], charter: { status: 'active', health: 'on-track', milestones: [] }, createdAt: T, updatedAt: T };
+  }) satisfies typeof ProjectsService.getProject;
+  return { resolveProjectAccess, getProject };
+});
 
 import { createStrategy, replaceLinks, resolveStrategyContext, __clearStrategies } from '../src/features/strategy/strategyService.js';
 
@@ -85,6 +112,7 @@ describe('resolveStrategyContext memo (ADR 0080 follow-on)', () => {
 
     expect(entries).toHaveLength(1);                                  // did NOT throw
     expect(entries[0].linkedProjects.map((p) => p.id)).toEqual(['proj-ok']); // healthy link kept, boom dropped
-    expect(entries[0].health).toBeDefined();                         // health rollup still computed
+    // The rollup ran over the SURVIVING link only (the boom link would make it 2).
+    expect(entries[0].health?.signals.linkedProjectCount).toBe(1);
   });
 });

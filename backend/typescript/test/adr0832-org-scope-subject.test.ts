@@ -150,7 +150,29 @@ describe('never a grant', () => {
       'features/documents/surface.ts', // ADR 0838 D3: NARROWS only — the person must pass canReadDocument; absent ⇒ unchanged
       'features/crm/surface.ts', // ADR 0838 D3: NARROWS only — e-sign document target read-gated for the person; absent ⇒ unchanged
       'features/cms/surface.ts', // ADR 0859 D3/D4: NARROWS only — a causing member is recorded as a submitterCause, which only REFUSES a self-approval; never notified
+      'features/brand/surface.ts', // ADR 0891 D1: NARROWS only — the org-less listBrands keeps only the orgs the person may read (runOrgScopeFilter, cause lane by membership); absent ⇒ tenant-trusted, unchanged
+      'features/service-desk/surface.ts', // ADR 0878 D1: NARROWS only — getTicket/notifyTicketTeam floor the ticket's own org via assertRunScopeOrg
+      'features/assistant/surface.ts', // ADR 0878 D6: NARROWS only — an org's pending action is listed only to a person who may decide it; the personal-owner exit is the ACTOR's only
+      'features/computer-use/feature.ts', // ADR 0894 D2: NARROWS only — decide/status floor the SESSION's own org via assertRunScopeOrg (404 when refused); decide additionally requires actingUserId === the opener, so a cause never decides
+      // ADR 0901 D1/D2: NARROWS only — the cause lane binds the run's surfaces to the member who
+      // caused it (tenant trust before); every authority predicate still runs for THAT person,
+      // the personal-owner exit is the ACTOR's only, and OFF (shadow) leaves the call unchanged
+      'features/kicktodo-core/surfaceBinding.ts',
       'features/entities/namespaceAccess.ts', // ADR 0847 D1: NARROWS only — the run's person must hold the tenant tier + the project namespace; absent ⇒ root tenant-trusted, project refused
+      // ADR 0879 D7 — the run-lane conversation WRITE gate. Reviewed claim: it NARROWS. A
+      // channel append with no person is REFUSED; with the stamped person it is allowed only
+      // if THAT person may post there now (role + access + posting policy) — the person's
+      // own authority is the ceiling, and nothing else (credentials, tools, recall) reads it.
+      'host/runConversationWrite.ts', // the gate's subject (actingUserId ?? orgScopeSubject); refuses, never widens
+      'host/agentRunnerNode.ts', // forwarded from ctx into the gate
+      'host/chatSurface.ts', // forwarded from the BundleScope into the gate
+      'executor/types.ts', // NodeContext field doc (the executor threads the reserved key)
+      'host/hostCapabilityGates.ts', // EXECUTOR_CTX_POLICY declares it run-context (G14)
+      'host/approvalDecision.ts', // stamped: approver (the ADR 0832 D3 role runStarter documents)
+      'features/scheduled-agent-chats/scheduledChatService.ts', // stamped: the schedule's creator (host-written job metadata) + its backfill
+      'host/scheduleDaemon.ts', // forwarded from host-written job metadata onto the run
+      'routes/scheduler.ts', // RESERVED job-metadata key — stripped from client metadata
+      'host/schedulingService.ts', // DSAR: an erased creator's stamp is scrubbed
     ]);
     const src = join(import.meta.dirname, '../src');
     const found: string[] = [];

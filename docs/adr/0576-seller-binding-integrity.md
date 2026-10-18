@@ -2,6 +2,13 @@
 
 Status: implemented (2026-08-15) — create-only CAS on every accountIndex write (import + all three onboarding sites), typed import refusals with rejected[], reconcileSellerBindings divergence flag.
 
+> **CORRECTED 2026-10-12 (ADR 0877 D7 / WF-MKT-14):** `reconcileSellerBindings` has
+> NO production caller. Its docblock said "Invoked from the daily sweep", and no
+> sweep exists. It is an operator/test check; the create-only CAS is the guard that
+> actually runs. ADR 0877 D4 adds the one sanctioned binding removal outside
+> dissolution: a tenant's own `acct_demo_*` placeholder, when that tenant
+> re-onboards live.
+
 ## Problem
 
 `importSellers` (`commerce-connect/adminOps.ts:64`) skips-if-exists on the

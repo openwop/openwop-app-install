@@ -21,12 +21,11 @@
  * the run when invalid) → persist (register through the shared validator).
  */
 
-/** DEBT-3 — pack-local mirror of the providers.json SSoT default (the
- *  anthropic `recommended: true` model; src/providers/catalog.ts
- *  getDefaultModel). ctx.callAI REQUIRES an explicit model and standalone
- *  .mjs packs cannot import the catalog, so the default lives in this ONE
- *  greppable constant — the /refresh-model-catalog sweep updates it. */
-const DEFAULT_MODEL = 'claude-sonnet-4-6';
+/** ADR 0903 — no hard-coded vendor. A call passes the provider/model the node
+ *  was given (a chain param frozen at instantiation, or a node input) and leaves
+ *  the rest to the host: `ctx.callAI` fills a missing provider/model from the
+ *  run's choice (`configurable.ai`), else the workspace's active AI binding, else
+ *  the catalog default — resolved once at run start (host/runAiDefault.ts). */
 
 /** Resolve the workflow-author feature surface, or fail with the canonical
  *  capability error (the surface is gated by the `workflow-author` toggle). */
@@ -219,8 +218,10 @@ export async function draft(ctx) {
   if (!intent) {
     return { status: 'failed', error: { code: 'intent_required', message: 'A non-empty `intent` input is required.' } };
   }
-  const provider = str(i.provider) || 'anthropic';
-  const model = str(i.model) || DEFAULT_MODEL;
+  const provider = str(i.provider) || undefined;
+  const model = str(i.model) || undefined;
+  // ADR 0903 — the host may fill the model; record the one that actually ran.
+  let usedModel = model;
   const maxAttempts = typeof i.maxAttempts === 'number' && i.maxAttempts > 0 ? Math.min(Math.floor(i.maxAttempts), 5) : 3;
 
   const catalog = await wa.getCatalog();
@@ -240,6 +241,7 @@ export async function draft(ctx) {
       messages: [{ role: 'user', content: userMessage }],
       responseSchema: RESPONSE_SCHEMA,
     });
+    if (ai && typeof ai.model === 'string' && ai.model) usedModel = ai.model;
     const candidate = parseDefinition(ai);
     lastDef = candidate;
     if (!candidate) {
@@ -280,7 +282,7 @@ export async function draft(ctx) {
   // many attempts it took (no separate store — ADR 0072 §provenance).
   lastDef.metadata = {
     ...(lastDef.metadata && typeof lastDef.metadata === 'object' ? lastDef.metadata : {}),
-    authoring: { authoredVia: 'workflow-author', intent, model, attempts },
+    authoring: { authoredVia: 'workflow-author', intent, model: usedModel, attempts },
   };
 
   return { status: 'success', outputs: { definition: lastDef, validation: lastValidation, attempts } };

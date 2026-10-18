@@ -3,20 +3,26 @@
  * accepted the focus binding (it checked the caller may read the canvas). Until
  * then, and on a refusal, the honest workspace-wide label stays: a label the
  * server never confirmed would tell the user the agent sees something it may not.
+ *
+ * Sabotage witnesses (w43): showing the focus label before acceptance, treating
+ * a refusal as acceptance, binding another session, and requesting a binding
+ * without a focus each turn a case red.
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, cleanup, act } from '@testing-library/react';
 import type { ReactNode } from 'react';
+import type { BYOKActiveConfig } from '../../byok/lib/useBYOKConfig.js';
+import type { ChatMessage } from '../types.js';
 
 const setConversationFocus = vi.fn(async (_s: string, _f: unknown) => true);
 vi.mock('../../client/chatSessionsClient.js', async (orig) => ({
   ...(await orig<typeof import('../../client/chatSessionsClient.js')>()),
   setConversationFocus: (s: string, f: unknown) => setConversationFocus(s, f),
 }));
-const runCoreSubmit = vi.fn(async () => undefined);
-vi.mock('../lib/chatSubmit.js', () => ({ runCoreSubmit: (...a: unknown[]) => runCoreSubmit(...(a as [])) }));
+const runCoreSubmit = vi.fn(async (..._a: unknown[]) => undefined);
+vi.mock('../lib/chatSubmit.js', () => ({ runCoreSubmit: (...a: unknown[]) => runCoreSubmit(...a) }));
 
-let messages: unknown[] = [];
+let messages: Array<Pick<ChatMessage, 'id' | 'agentEvents'>> = [];
 vi.mock('../hooks/useChatSession.js', () => ({
   useChatSession: () => ({
     session: { id: 'sess-1', messages },
@@ -40,7 +46,7 @@ vi.mock('../ConversationView.js', () => ({
 
 import { EmbeddedConversation } from '../EmbeddedConversation.js';
 
-const config = { provider: 'anthropic', model: 'claude-opus-5-5' } as never;
+const config: BYOKActiveConfig = { provider: 'anthropic', model: 'claude-opus-5-5', credentialRef: 'byok:anthropic' };
 const base = { agentId: 'a', config, onReconfigureBYOK: vi.fn(), contextLabel: 'any model you can open' };
 const focus = { kind: 'canvas' as const, id: 'cv-1', label: 'this model' };
 const strip = () => document.querySelector('.embed-context-strip')?.textContent ?? '';
@@ -63,6 +69,9 @@ describe('ADR 0777 — focus label follows the server', () => {
     setConversationFocus.mockResolvedValue(false);
     render(<EmbeddedConversation {...base} focus={focus} />);
     await act(async () => { await Promise.resolve(); });
+    // Positive control: the binding WAS asked for (and answered "no") — without
+    // it, a focus effect that never fired would also leave the workspace label.
+    expect(setConversationFocus).toHaveBeenCalledWith('sess-1', { kind: 'canvas', id: 'cv-1' });
     expect(strip()).toContain('any model you can open');
     expect(screen.queryByText('this model')).toBeNull();
   });

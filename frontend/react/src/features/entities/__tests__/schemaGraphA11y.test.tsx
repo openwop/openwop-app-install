@@ -11,14 +11,24 @@
  * solid edges). The canvas is left as the visual view (not made SR-navigable,
  * per the task — that's fragile). This witness asserts the equivalent exists and
  * conveys the same information; it is born-red (no such list/table before).
+ *
+ * w52 (three probes were vacuous in round 1): the xyflow stub now RECORDS the
+ * props the page passes, so `nodesFocusable/edgesFocusable/elementsSelectable =
+ * false` is asserted; the live-region check covers the region element ITSELF
+ * (`querySelector` only searches descendants); and the relationships row is read
+ * in column order, so From/To swapped is visible. Fixtures are typed.
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, cleanup, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
 
-const { listEntityTypes, listRelationships } = vi.hoisted(() => ({
-  listEntityTypes: vi.fn(), listRelationships: vi.fn(),
+type Client = typeof import('../entitiesClient.js');
+const { listEntityTypes, listRelationships, flowProps } = vi.hoisted(() => ({
+  listEntityTypes: vi.fn<Client['listEntityTypes']>(), listRelationships: vi.fn<Client['listRelationships']>(),
+  // The xyflow stub records the props the page passes, so the "decorative,
+  // never focusable" contract is asserted on what the page actually sends.
+  flowProps: { current: null as Record<string, unknown> | null },
 }));
 vi.mock('../entitiesClient.js', async (orig) => ({
   ...(await orig<typeof import('../entitiesClient.js')>()),
@@ -29,7 +39,7 @@ vi.mock('../../../featureToggles/FeatureAccessContext.js', () => ({
 }));
 // Stub xyflow — the accessible equivalent is the surface under test, not the canvas.
 vi.mock('@xyflow/react', () => ({
-  ReactFlow: () => null,
+  ReactFlow: (p: Record<string, unknown>) => { flowProps.current = p; return null; },
   ReactFlowProvider: ({ children }: { children?: React.ReactNode }) => <>{children}</>,
   Background: () => null,
   Controls: () => null,
@@ -37,8 +47,9 @@ vi.mock('@xyflow/react', () => ({
 }));
 
 import { SchemaGraphPage } from '../SchemaGraphPage.js';
+import type { EntityType, Relationship } from '../entitiesClient.js';
 
-const TYPES = [
+const TYPES: EntityType[] = [
   {
     typeId: 't-article', tenantId: 'x', projectId: 'p', name: 'article', displayName: 'Article',
     status: 'published', createdAt: '', updatedAt: '',
@@ -53,13 +64,14 @@ const TYPES = [
     fields: [{ key: 'name', label: 'Name', type: 'string', required: true }],
   },
 ];
-const RELS = [
+const RELS: Relationship[] = [
   { relId: 'r1', fromTypeId: 't-article', toTypeId: 't-author', cardinality: 'many-many', onDelete: 'restrict' },
 ];
 
 afterEach(cleanup);
 beforeEach(() => {
   vi.clearAllMocks();
+  flowProps.current = null;
   listEntityTypes.mockResolvedValue(TYPES);
   listRelationships.mockResolvedValue(RELS);
 });
@@ -85,6 +97,9 @@ describe('ENTU-1 — SchemaGraphPage accessible types+relationships equivalent',
     expect(within(table).getAllByText('Author').length).toBeGreaterThan(0);
     expect(within(table).getByText(/Many to many/i)).toBeTruthy();
     expect(within(table).getByText(/Restrict/i)).toBeTruthy();
+    // Direction is information: the row reads From → To in column order.
+    const body = within(table).getAllByRole('row')[1]!;
+    expect(within(body).getAllByRole('cell').map((c) => c.textContent)).toEqual(['Article', 'Author', 'Many to many', 'Restrict']);
   });
 
   it('marks the visual canvas decorative (aria-hidden) so it is not a redundant AT surface', async () => {
@@ -99,11 +114,19 @@ describe('ENTU-1 — SchemaGraphPage accessible types+relationships equivalent',
     expect(canvas!.getAttribute('aria-hidden')).toBe('true');
     // A decorative subtree must not advertise itself as a labeled region.
     expect(canvas!.getAttribute('role')).toBeNull();
+    // …and nothing inside it can take focus or be selected.
+    expect(flowProps.current).not.toBeNull();
+    expect(flowProps.current!.nodesFocusable).toBe(false);
+    expect(flowProps.current!.edgesFocusable).toBe(false);
+    expect(flowProps.current!.elementsSelectable).toBe(false);
   });
 
   it('does NOT use a conditionally-mounted role=status live region for the list (MTCU-201 family)', async () => {
     render(<MemoryRouter><SchemaGraphPage /></MemoryRouter>);
     const region = await screen.findByTestId('schema-accessible-list');
+    // The region ITSELF too: querySelector only searches descendants.
+    expect(region.getAttribute('role')).toBeNull();
+    expect(region.getAttribute('aria-live')).toBeNull();
     expect(region.querySelector('[role="status"]')).toBeNull();
     expect(region.querySelector('[aria-live]')).toBeNull();
   });

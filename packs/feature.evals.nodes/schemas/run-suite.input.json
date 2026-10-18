@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://packs.openwop.dev/feature.evals.nodes/1.1.0/run-suite.input.json",
+  "title": "EvalsRunSuiteInput",
+  "description": "Read from the merged `{ ...ctx.config, ...ctx.inputs }` bag (inputs win). The surface refuses a missing suite or agent with a typed failure.",
+  "type": "object",
+  "properties": {
+    "suiteRef": { "type": "string", "description": "The suite ref, <suiteId>@<version> (a tenant suite or a pack-shipped one)." },
+    "agentId": { "type": "string", "description": "The agent to evaluate." },
+    "baselineRunId": { "type": "string", "description": "Optional earlier eval run of the same suite; adds the regression verdict." },
+    "timeoutMs": { "type": "number", "minimum": 1000, "maximum": 540000, "description": "How long to wait for the eval run. Default and maximum 540000 (inside the 600000 ms run-duration ceiling). On timeout the eval run is cancelled and the node fails." },
+    "pollIntervalMs": { "type": "number", "minimum": 20, "maximum": 10000, "description": "How often to read the run's status. Default 2000." }
+  },
+  "additionalProperties": true
+}

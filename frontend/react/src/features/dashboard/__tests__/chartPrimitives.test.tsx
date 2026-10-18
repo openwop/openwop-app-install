@@ -1,6 +1,9 @@
 /**
  * Chart primitives (ADR 0377 Wave 2) — TileBars scaling/a11y + Sparkline
- * normalization + the TileStats delta variant's glyph pairing.
+ * normalization + the TileStats delta variant's glyph pairing. What breaks it:
+ * a bar or trend conveyed by geometry/colour alone, a mis-scaled fill, or a
+ * sparkline whose points are not normalized to the series (a flat line or an
+ * off-canvas polyline on every chart tile).
  */
 import { describe, it, expect } from 'vitest';
 import { render } from '@testing-library/react';
@@ -29,6 +32,10 @@ describe('TileBars', () => {
     expect(fills[1]!.style.width).toBe('100%');
   });
 
+  // DOUBLE GUARD: `top` is the max of the explicit max AND every value, so
+  // value/top <= 1 already; the Math.min(100, …) clamp is a second guard that is
+  // unreachable for non-negative values. One sabotage of either piece stays green
+  // (w50g1-cp-caponly was vacuous by design); w50g1-cp-cap breaks both and reds.
   it('caps overflow at 100% when an explicit max is exceeded (pacing "over")', () => {
     const { container } = render(<TileBars bars={[{ key: 'a', label: 'A', value: 130 }]} max={100} />);
     const fill = container.querySelector<HTMLElement>('.dash-tile__bar-fill');
@@ -37,12 +44,14 @@ describe('TileBars', () => {
 });
 
 describe('Sparkline', () => {
-  it('renders role="img" with the tile-supplied label', () => {
+  it('renders role="img" with the tile-supplied label, min-max normalized into the viewBox', () => {
     const { container } = render(<Sparkline points={[1, 5, 3]} label="3-week trend, latest 3" />);
     const svg = container.querySelector('svg');
     expect(svg?.getAttribute('role')).toBe('img');
     expect(svg?.getAttribute('aria-label')).toBe('3-week trend, latest 3');
-    expect(container.querySelector('polyline')?.getAttribute('points')).toBeTruthy();
+    // Normalized into the 120x28 viewBox with 2px padding: x = 2 + i*58,
+    // y = 26 - ((p - min) / span) * 24. Literal, not derived from the component.
+    expect(container.querySelector('polyline')?.getAttribute('points')).toBe('2,26 60,2 118,14');
   });
 
   it('is aria-hidden decoration without a label, and null for <2 points', () => {
@@ -54,7 +63,7 @@ describe('Sparkline', () => {
 
   it('a flat series (zero span) still renders without NaN coordinates', () => {
     const { container } = render(<Sparkline points={[5, 5, 5]} />);
-    expect(container.querySelector('polyline')?.getAttribute('points')).not.toContain('NaN');
+    expect(container.querySelector('polyline')?.getAttribute('points')).toBe('2,26 60,26 118,26');
   });
 });
 

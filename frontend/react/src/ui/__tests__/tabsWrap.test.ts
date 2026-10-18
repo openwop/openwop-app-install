@@ -54,6 +54,15 @@ describe('.tabs reflows on a narrow viewport — CRM-UX-5', () => {
 
   it('does NOT become a scroll container (that would clip .tab margin-bottom: -1px)', () => {
     expect(tabsRuleBody()).not.toMatch(/overflow/);
+    // EVERY base `.tabs { … }` rule, not just the first: a later
+    // `.tabs { overflow-x: auto }` is the same regression and the first-match read
+    // could not see it (w49 probe `wrap-second-rule`).
+    // The `}` is a LOOKBEHIND, not consumed: a consuming `(^|\})` eats the first rule's
+    // closing brace, so a second `.tabs { … }` written straight after it was never
+    // matched (w49 probe `wrap-second-rule-r2` stayed green).
+    const bodies = [...css.matchAll(/(?<=^|\})\s*\.tabs\s*\{([^}]*)\}/g)].map((m) => m[1] ?? '');
+    expect(bodies.length).toBeGreaterThan(0);
+    for (const b of bodies) expect(b).not.toMatch(/overflow/);
   });
 
   it('keeps the row rule and the flex layout it always had', () => {

@@ -30,6 +30,7 @@
  * @see spec/v1/replay.md §"AI determinism"
  */
 
+import { withRunAiDefault, type RunAiDefault } from '../host/runAiDefault.js';
 import { createHash } from 'node:crypto';
 import { trace, SpanStatusCode } from '@opentelemetry/api';
 import type {
@@ -57,7 +58,7 @@ import { enterprisePosture } from '../host/deployPosture.js';
 import { subscriptionLoginDetected, subscriptionRequireDetectedLogin } from './subscriptionCliDetect.js';
 import type { AiProviderPolicy, ProviderPolicyResolver } from '../host/index.js';
 import { dispatchChat, type ChatMessage, type ProviderId } from '../providers/dispatch.js';
-import { hasPendingMockProgram } from '../providers/dispatchMock.js';
+import { dispatchMockToolsRound, hasPendingMockProgram } from '../providers/dispatchMock.js';
 import { explicitRefNamesOtherProvider, pickCredentialRef } from './credentialRefLadder.js';
 import { dispatchAnthropicToolsRound, type ToolsRoundRequest, type ToolsRoundResult } from '../providers/dispatchAnthropicTools.js';
 import { dispatchOpenAIToolsRound, dispatchGoogleToolsRound, dispatchMiniMaxToolsRound } from '../providers/dispatchProviderTools.js';
@@ -135,6 +136,8 @@ import { createLogger } from '../observability/logger.js';
 import { buildReasoningDirective } from '@openwop/openwop';
 import { resolveEnvelopeReasoning } from '../host/envelopeReasoningConfig.js';
 import { getEnvelopeReliabilityConfig } from '../host/envelopeReliabilityConfig.js';
+import { classifyProviderRefusal, describeProviderRefusal, providerRetryBackoffMs, sleepMs, PROVIDER_ERROR_RETRY_REASON } from './providerRefusalRetry.js';
+import { sanitizeFreeText } from '../byok/textRedaction.js';
 import {
   buildRetryAttemptedPayload,
   buildRetryExhaustedPayload,
@@ -240,6 +243,10 @@ export interface AdapterScope {
   /** ADR 0712 — the run's `configurable.ai.credentialRef` (a NAME), the ladder's
    *  run rung for a node that passes no ref of its own. */
   runCredentialRef?: string;
+  /** ADR 0903 — the provider + model a call that names neither falls back to
+   *  (`host/runAiDefault.ts`: the run's `configurable.ai`, else the default frozen
+   *  at run creation). Absent ⇒ a call without a provider is refused, as before. */
+  runAiDefault?: RunAiDefault | null;
   policyResolver: ProviderPolicyResolver;
   /** Optional per-call timeout override. Defaults to 120s. */
   timeoutMs?: number;
@@ -614,6 +621,8 @@ export function assertModalitiesAdvertised(req: AiCallRequest | AiToolCallReques
 // constant per pack). Only introduce a host default via a model-independent
 // cache-key sentinel that records the resolved model in the cached value.
 async function callAI(scope: AdapterScope, req: AiCallRequest): Promise<AiCallResult> {
+  // ADR 0903 — a node that names no provider/model gets the run's default, never a pack's hard-coded vendor.
+  req = withRunAiDefault(req, scope.runAiDefault);
   assertModalitiesAdvertised(req);
   if (req.embeddingMode) {
     // A5 — real, self-contained deterministic embedding (feature hashing). No
@@ -879,6 +888,7 @@ async function callAI(scope: AdapterScope, req: AiCallRequest): Promise<AiCallRe
  * not this single round.
  */
 async function callAIWithTools(scope: AdapterScope, req: AiToolCallRequest): Promise<AiToolCallResult> {
+  req = withRunAiDefault(req, scope.runAiDefault); // ADR 0903
   // Managed-provider short-circuit, the tools-round twin of callAI's. Without it a
   // workflow run on a `managed:*` credential that offers tools reached
   // assertProviderSupported with the managed tile id (`openwop-free`) and failed
@@ -889,6 +899,23 @@ async function callAIWithTools(scope: AdapterScope, req: AiToolCallRequest): Pro
   // failed this way and pushed "Workflow failed" to the participant.
   if (isManagedCredentialRef(req.credentialRef)) {
     return callAIWithToolsManaged(scope, req);
+  }
+  // ADR 0889 D6 — scripted tool rounds from the mock program (test seams only;
+  // the gate is the same one every other mock path uses).
+  if (req.provider === 'mock' && mockProviderEnabled()) {
+    const round = await dispatchMockToolsRound({
+      nodeId: scope.nodeId,
+      messages: toChatMessages(req),
+      ...(req.maxTokens != null ? { maxTokens: req.maxTokens } : {}),
+    });
+    await emitProviderUsage(scope, 'mock', req.model, round.inputTokens, round.outputTokens, false, undefined, undefined);
+    return {
+      content: round.text,
+      toolCalls: round.toolUses,
+      usage: { inputTokens: round.inputTokens, outputTokens: round.outputTokens },
+      finishReason: normalizeFinishReason(round.finishReason),
+      credentialRefHashed: sha256Hex('mock'),
+    };
   }
   assertProviderSupported(req.provider);
   if (!TOOL_CALLING_PROVIDERS.includes(req.provider)) {
@@ -1126,12 +1153,6 @@ const videoDispatchSlots = createSemaphore(VIDEO_MAX_CONCURRENT);
  *  test seam (no network/credential). Base64 of a tiny valid mp4. */
 const MOCK_MP4_B64 = 'AAAAHGZ0eXBpc29tAAACAGlzb21pc28ybXA0MQAAAAhmcmVlAAAAKW1kYXQAAAAAAAAAIQ==';
 
-/** ADR 0411 §honesty — advertise `videoGeneration:{supported:true}` ONLY when
- *  the operator opted in (a provider is wired). Default false = production-honest
- *  (the mock is test-seam-only). Mirrors imageGenerationAdvertised. */
-export function videoGenerationAdvertised(): boolean {
-  return process.env.OPENWOP_VIDEO_PROVIDER_ENABLED === 'true';
-}
 
 /** RFC 0121 §B.9 / §C — whether the operator has explicitly accepted the
  *  AT-OWN-RISK subscription un-park (ADR 0180). The steward issued an
@@ -1987,6 +2008,8 @@ async function dispatchPlain(
         apiKey,
         messages: toChatMessages(req),
         ...(req.maxTokens != null ? { maxTokens: req.maxTokens } : {}),
+        // ADR 0912 (Book AI P22) — ask the vendor for JSON natively where it can.
+        ...(req.responseSchema !== undefined ? { jsonSchema: req.responseSchema } : {}),
         signal,
         ...(onDelta ? { onDelta } : {}),
         // CEC-2 / RFC 0116 §43 — per-tenant prompt-cache namespacing (same as the
@@ -1997,6 +2020,7 @@ async function dispatchPlain(
         // providers ignore this extension field. See `dispatchMock.ts`.
         ...(req.provider === 'mock' ? { nodeId: scope.nodeId } : {}),
       } as Parameters<typeof dispatchChat>[0]);
+      if (raw.structuredMode) log.debug('structured_output_mode', { provider: req.provider, model: req.model, mode: raw.structuredMode });
       return {
         content: raw.completion,
         usage: {
@@ -2084,6 +2108,10 @@ async function dispatchStructured(
   // extra dispatch with a strong coercion fragment. Tracks the last
   // raw text so the post-loop fallback decision has context.
   let lastResponseText = '';
+  // ADR 0912 (Book AI P22, RFC 0033 §C) — the corrective fragment for the next
+  // attempt: what was wrong with the last reply. Resending the identical
+  // request makes a model that slipped once slip the same way again.
+  let correction: string | null = null;
 
   for (let attempt = 1; attempt <= reliabilityCfg.maxRetryAttempts; attempt++) {
     // Emit envelope.retry.attempted BEFORE the second-and-subsequent calls
@@ -2103,7 +2131,7 @@ async function dispatchStructured(
     // the budget was insufficient).
     const systemForAttempt = suppressSchemaHint
       ? [req.systemPrompt, reasoningDirective].filter((s): s is string => Boolean(s)).join('\n\n')
-      : augmentedSystem;
+      : [augmentedSystem, correction].filter((s): s is string => Boolean(s)).join('\n\n');
     const enrichedReq: AiCallRequest = {
       ...req,
       systemPrompt: systemForAttempt,
@@ -2114,12 +2142,24 @@ async function dispatchStructured(
     try {
       raw = await dispatchPlain(scope, enrichedReq, apiKey);
     } catch (err) {
+      // ADR 0911 (Book AI P19) — a provider refusal is not a parse error. A
+      // credential/model/request rejection cannot succeed on retry, so it is
+      // thrown as itself now; a rate limit, 5xx or timeout is retried after a
+      // backoff under its own reason, carrying the vendor's (scrubbed) text.
+      const refusal = classifyProviderRefusal(err);
+      if (refusal === 'fatal') throw err;
       lastError = err;
-      lastFailureReason = 'parse-error';
-      lastFailureMessage = err instanceof Error ? err.message : String(err);
       // Reset the truncation-suppression state for the next attempt —
       // a dispatch-layer error isn't truncation.
       suppressSchemaHint = false;
+      if (refusal === 'transient') {
+        lastFailureReason = PROVIDER_ERROR_RETRY_REASON;
+        lastFailureMessage = describeProviderRefusal(err, (t) => stripSecretsFromPersisted(sanitizeFreeText(t)));
+        if (attempt < reliabilityCfg.maxRetryAttempts) await sleepMs(providerRetryBackoffMs(attempt));
+        continue;
+      }
+      lastFailureReason = 'parse-error';
+      lastFailureMessage = err instanceof Error ? err.message : String(err);
       continue;
     }
 
@@ -2232,14 +2272,22 @@ async function dispatchStructured(
           data: lenientParse.data,
         };
       }
+      const missing = missingRequiredKeys(lenientParse.data, req.responseSchema);
       lastError = new Error('structured output did not match required-key check');
       lastFailureReason = 'schema-violation';
-      lastFailureMessage = 'required-key check failed';
+      lastFailureMessage = missing.length > 0 ? `required-key check failed: missing ${missing.join(', ')}` : 'required-key check failed: the reply is not a JSON object';
+      correction = missing.length > 0
+        ? `Your previous reply was missing the required key(s) ${missing.map((k) => JSON.stringify(k)).join(', ')}. Return the complete JSON object with every required key.`
+        : 'Your previous reply was not a JSON object. Return one JSON object that matches the schema.';
       suppressSchemaHint = false;
     } else {
+      const parseError = jsonParseErrorMessage(text);
       lastError = new Error('structured output did not parse as JSON (even with lenient fallbacks)');
       lastFailureReason = 'parse-error';
-      lastFailureMessage = 'JSON.parse failed + lenient recovery paths exhausted';
+      // A bounded, scrubbed excerpt of what the model wrote, so a failure can
+      // be diagnosed from the run record (it is otherwise kept nowhere).
+      lastFailureMessage = `JSON.parse failed (${parseError}) + lenient recovery paths exhausted; reply (${text.length} chars) began: ${JSON.stringify(replyExcerpt(text))}`;
+      correction = `Your previous reply was not valid JSON (${parseError}). Inside a JSON string, write a double quote as \\" and a line break as \\n. Return only the JSON object.`;
       suppressSchemaHint = false;
     }
   }
@@ -2262,6 +2310,10 @@ async function dispatchStructured(
     lastFailureReason !== null
     && lastFailureReason !== 'truncation'
     && lastFailureReason !== 'refusal'
+    // ADR 0911 — the last attempt never reached the model; the text on hand
+    // belongs to an earlier attempt, and a reformat call would hit the same
+    // refusing provider.
+    && lastFailureReason !== PROVIDER_ERROR_RETRY_REASON
     && isNlResponse(lastResponseText)
   ) {
     const originalEnvelopeType = inferEnvelopeType(req.responseSchema) ?? 'structured-output';
@@ -2300,6 +2352,14 @@ async function dispatchStructured(
     log.warn('envelope.retry.exhausted emit failed', { err: err instanceof Error ? err.message : String(err) });
   });
 
+  // ADR 0911 — the budget ran out on a provider refusal: report THAT
+  // (provider_rate_limited / provider_unavailable / provider_timed_out), so
+  // the run fails with the provider's code and the classifier's "try again"
+  // copy, not "did not emit valid JSON". A run whose LAST attempt was a parse
+  // or schema failure still ends envelope_invalid: that is what happened last.
+  if (finalReason === PROVIDER_ERROR_RETRY_REASON && lastError instanceof AiProviderError) {
+    throw lastError;
+  }
   const errorCode =
     finalReason === 'truncation'
       ? 'envelope_truncation_unrecoverable'
@@ -2335,7 +2395,11 @@ async function dispatchStructuredLegacy(
     try {
       raw = await dispatchPlain(scope, enrichedReq, apiKey);
     } catch (err) {
+      // ADR 0911 — same refusal rules as the end-to-end loop.
+      const refusal = classifyProviderRefusal(err);
+      if (refusal === 'fatal') throw err;
       lastError = err;
+      if (refusal === 'transient' && attempt < STRUCTURED_OUTPUT_RETRIES) await sleepMs(providerRetryBackoffMs(attempt + 1));
       continue;
     }
     const text = raw.content ?? '';
@@ -2349,11 +2413,34 @@ async function dispatchStructuredLegacy(
       lastError = parseErr;
     }
   }
+  if (classifyProviderRefusal(lastError) === 'transient' && lastError instanceof AiProviderError) throw lastError;
   throw new AiProviderError(
     'envelope_invalid',
     `Provider did not emit valid JSON matching the response schema after ${STRUCTURED_OUTPUT_RETRIES + 1} attempts.`,
     { lastError: lastError instanceof Error ? lastError.message : String(lastError) },
   );
+}
+
+/** ADR 0912 — the top-level `required` keys a reply is missing. */
+function missingRequiredKeys(data: unknown, schema: unknown): string[] {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return [];
+  const required = schema && typeof schema === 'object' && Array.isArray((schema as { required?: unknown }).required)
+    ? ((schema as { required: unknown[] }).required.filter((k): k is string => typeof k === 'string'))
+    : [];
+  return required.filter((k) => !(k in (data as Record<string, unknown>)));
+}
+
+/** ADR 0912 — the engine's own parse error ("Unexpected token … at position N"), capped. */
+function jsonParseErrorMessage(text: string): string {
+  if (text.trim().length === 0) return 'the reply was empty';
+  try { JSON.parse(text); return 'unknown'; } catch (err) { return (err instanceof Error ? err.message : String(err)).slice(0, 160); }
+}
+
+/** ADR 0912 — the first 200 characters of an unparsable reply, with secrets
+ *  and credential shapes scrubbed before they reach the event log. */
+const REPLY_EXCERPT_MAX = 200;
+function replyExcerpt(text: string): string {
+  return stripSecretsFromPersisted(sanitizeFreeText(text.slice(0, REPLY_EXCERPT_MAX)));
 }
 
 /** Shallow JSON Schema check: every key in `required[]` is present on

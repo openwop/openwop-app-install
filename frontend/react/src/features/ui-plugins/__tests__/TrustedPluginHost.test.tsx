@@ -5,11 +5,19 @@
  *  - trustedEntryUrl builds only from a host-supplied trusted label + path.
  * (The happy dynamic-import path is exercised live — jsdom can't import()
  * a network module; the fail-closed side is what must be pinned here.)
+ *
+ * "No import attempted" is witnessed by TIMING: the error state is set synchronously
+ * inside the mount effect only when there is no URL to import; an attempted import
+ * (which fails in jsdom) would reach the error state only after a microtask, so the
+ * synchronous `getByText` right after `render` would throw.
  */
 import { describe, it, expect } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import { TrustedPluginHost } from '../TrustedPluginHost.js';
 import { trustedEntryUrl, type ServedPlugin } from '../pluginClient.js';
+import { config } from '../../../client/config.js';
+
+const TRUSTED_PATH = '/host/openwop-app/ui-plugin/trusted/vendor.acme.demo/plugins/viewer/entry.mjs';
 
 const base: ServedPlugin = {
   packName: 'vendor.acme.demo',
@@ -24,7 +32,9 @@ const base: ServedPlugin = {
 
 describe('TrustedPluginHost (ADR 0367 P2)', () => {
   it('a community-tier plugin renders the error state, never a mount', () => {
-    render(<TrustedPluginHost plugin={{ ...base, tier: 'community' }} loadingLabel="loading" errorLabel="cannot load" />);
+    // Even WITH a trusted path present, the host's 'community' label must refuse:
+    // the label is the gate, not the presence of a path.
+    render(<TrustedPluginHost plugin={{ ...base, tier: 'community', trustedEntryPath: TRUSTED_PATH }} loadingLabel="loading" errorLabel="cannot load" />);
     expect(screen.getByText('cannot load')).toBeTruthy();
   });
 
@@ -37,7 +47,6 @@ describe('TrustedPluginHost (ADR 0367 P2)', () => {
     expect(trustedEntryUrl(base)).toBeNull();
     expect(trustedEntryUrl({ ...base, tier: 'trusted' })).toBeNull();
     expect(trustedEntryUrl({ ...base, trustedEntryPath: '/x' })).toBeNull();
-    expect(trustedEntryUrl({ ...base, tier: 'trusted', trustedEntryPath: '/host/openwop-app/ui-plugin/trusted/vendor.acme.demo/plugins/viewer/entry.mjs' }))
-      .toContain('/trusted/vendor.acme.demo/plugins/viewer/entry.mjs');
+    expect(trustedEntryUrl({ ...base, tier: 'trusted', trustedEntryPath: TRUSTED_PATH })).toBe(`${config.baseUrl}${TRUSTED_PATH}`);
   });
 });

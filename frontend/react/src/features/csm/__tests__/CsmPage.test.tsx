@@ -30,12 +30,21 @@ const api = vi.hoisted(() => ({
   createAccount: vi.fn<typeof C.createAccount>(),
   deleteAccount: vi.fn<typeof C.deleteAccount>(),
   updateAccount: vi.fn<typeof C.updateAccount>(),
+  // ADR 0882 D3 — the owner picker's people list.
+  listAssignees: vi.fn<typeof C.listAssignees>(async () => ({ assignees: [{ subject: 'user:me', displayName: 'Mia Me' }, { subject: 'user:dana', displayName: 'Dana Diaz' }], me: ['user:me'] })),
 }));
 // Partial mock: every fetching export is replaced, and the REAL
 // `CsmRequestError` survives for the page's `instanceof` map (CSMWF-11).
 vi.mock('../csmClient.js', async (orig) => ({
   ...(await orig<typeof import('../csmClient.js')>()),
   ...api,
+}));
+// ADR 0882 (CSM2UX-4) — write controls follow `workspace:write`; `writeAccess.value`
+// lets a case render as a Viewer.
+const writeAccess = vi.hoisted(() => ({ value: true }));
+vi.mock('../../../lib/writeAccess.js', async (orig) => ({
+  ...(await orig<typeof import('../../../lib/writeAccess.js')>()),
+  useScopeWriteAccess: () => writeAccess.value,
 }));
 
 import { CsmPage } from '../CsmPage.js';

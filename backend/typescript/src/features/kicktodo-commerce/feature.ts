@@ -83,6 +83,6 @@ export const kicktodoCommerceFeature: BackendFeature = {
   dependsOn: ['kicktodo-core', 'commerce'],
   // The pack's entitlement-check / referral-code / seat-availability nodes consume
   // this surface — pin it here, not only transitively via kicktodo-core (NP-KT-3).
-  requiredPacks: [{ name: 'feature.kicktodo.nodes', version: '1.30.3' }],
+  requiredPacks: [{ name: 'feature.kicktodo.nodes', version: '1.37.0' }],
   surface: { id: 'kicktodo-commerce', build: buildKicktodoCommerceSurface }, // ADR 0420 P5
 };

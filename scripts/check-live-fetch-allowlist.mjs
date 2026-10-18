@@ -44,8 +44,39 @@ const LIST = join(FE, 'test-live-fetch-allowlist.txt');
  * 40 after wave 14: documents documentsFailedReads and documentsP2P3 mock
  *   listPackCanvasTypes (no live read left).
  * 37 after wave 17: cms CmsPage, honestyBatch and orgsFailedNotSubset mock
- *   listMembers and the org-access / per-org reads (no live read left). */
-const CEILING = 37;
+ *   listMembers and the org-access / per-org reads (no live read left).
+ * 36 after wave 19: strategy alignmentReads mocks loadOrgMembers (no live
+ *   read left).
+ * 35 after wave 30: campaign-brief BriefValidation mocks findCampaignForBrief
+ *   (no live read left).
+ * 33 after wave 35: chrome Sidebar.lock and publicShellLiveRegion mock their
+ *   fetching children / stub fetch (no live read left).
+ * 32 after wave 37: kanban boardMutationRefresh mocks listWorkflowSummaries
+ *   and BoardReviewsSection (no live read left).
+ * 30 after wave 42: KickTodo CirclesProposals mocks loadOrgMembers, and
+ *   unknownNotEmpty mocks the modules GuidePage really imports.
+ * 27 after wave 43: chat ChatInputVoiceControl and selectionRewrite mock
+ *   ChatInput's mount-time readers; MessageComments mocks loadOrgMembers.
+ * 22 after wave 44: the five chat tabDeck TabChatDeck* files mock
+ *   useRunningConversations and the reviews store's reviewClient.
+ * 21 after wave 46: canvas useCollab stubs fetch in every case (no live
+ *   read left).
+ * 19 after wave 47: builder Inspector and presetInputsEditable mock
+ *   getCapabilities (no live read left).
+ * 18 after wave 48: agents agentAuthorEntry mocks agentAuthorDraftClient (no
+ *   live read left).
+ * 13 after wave 49: runs branchForkLiveEffectsConfirm, eventReadHonesty and
+ *   runRefreshHonesty stub fetch; notifications contentReviewCard and
+ *   liveTruthAndKinds make no live read (audit: 0 lines each).
+ * 12 after wave 50: failedReadDecisions stubs the dashboard tile bodies
+ *   (LazyMount; 3/3 runs green with its line removed).
+ * 11 after wave 51: workforces unreadableSignals mocks useDemoMode (audit: 0
+ *   lines; 3/3 runs green with its line removed).
+ * 7 after wave 52: creative-briefs BriefLifecycle, operations
+ *   opsHealthHonesty, podcasts orgsFailedNotEmpty and tutorials
+ *   TutorialsPage.progress mock every read (audit: 0 lines each; 3/3 runs
+ *   green with their lines removed). */
+const CEILING = 7;
 
 const fail = (msg) => {
   console.error(`✗ check-live-fetch-allowlist: ${msg}`);

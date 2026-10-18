@@ -4,7 +4,7 @@
  * typeIds `feature.computer-use.nodes.task` / `decide` / `status`, none of which
  * project into a conversational tool (CFP-1). Of those three, only a STATUS READ
  * is safe as a chat tool: starting a task and deciding a commit-tier action MUST
- * ride the governed executor + `core.approvalGate` HITL path (a workflow run) —
+ * ride the governed executor + the decide node's own approval (a workflow run) —
  * projecting them as naive chat tools would fork execution AND bypass the human
  * approval halts (ADR 0418). So `task`/`decide` are PRUNED from the allowlist
  * (they stay on the governed run path) and only `openwop:computer-use.status` is
@@ -29,12 +29,21 @@ const str = (v: unknown): string | undefined => (typeof v === 'string' && v.trim
 /** Read-safe projection of a governed session (mirrors the sessions-list route):
  *  the recorded trajectory + status, mock task masked, no internal ids. */
 function project(s: CuSession): Record<string, unknown> {
+  const origin = (url: string | undefined): string | undefined => {
+    if (!url) return undefined;
+    try { return new URL(url).origin; } catch { return undefined; }
+  };
   return {
     sessionId: s.sessionId,
     status: s.status,
     task: s.task.startsWith('mock:') ? '(mock script)' : s.task,
     startUrl: s.startUrl,
-    steps: s.steps.length,
+    // The trajectory the persona narrates (grade-ux CU2UX-8): what kind of step,
+    // where, and under whose authority — never the provider's free text, which
+    // is page-derived (the pending action's description rides fenced below).
+    steps: s.steps.map((st) => ({ kind: st.action.kind, tier: st.tier, decidedBy: st.decidedBy, ...(origin(st.action.url) ? { origin: origin(st.action.url) } : {}), at: st.at })),
+    // The run holding the approval card, so the persona can point to it (CU2UX-3).
+    ...(s.runId ? { runId: s.runId } : {}),
     createdAt: s.createdAt,
     updatedAt: s.updatedAt,
     ...(s.pendingAction ? { pendingAction: s.pendingAction } : {}),
@@ -69,8 +78,8 @@ export function registerComputerUseAgentTools(): void {
     def: {
       name: COMPUTER_USE_STATUS_TOOL_ID,
       description:
-        'Read the status of governed browser sessions — steps taken, current status (running / awaiting_approval / '
-        + 'completed / failed / denied), any pending commit-tier action, and result/error. Pass `sessionId` for one '
+        'Read the status of governed browser sessions — the steps taken (kind, site, who decided), current status (running / awaiting_approval / '
+        + 'completed / failed / denied / aborted), any pending commit-tier action, the run that holds its approval card (`runId`), and result/error. Pass `sessionId` for one '
         + 'session, or omit it to list the org\'s sessions. Read-only: it never starts a task or approves an action.',
       inputSchema: {
         type: 'object',

@@ -31,8 +31,10 @@ describe('ADR 0686 D1 — a fork must not re-run sandboxed code', () => {
   it('leg 2: the manifest declares the capability, and the pack + node versions moved together', () => {
     const n = PACK.nodes.find((x) => x.typeId === TYPE_ID);
     expect(n?.capabilities ?? [], 'role:"action" confers nothing — the capability is what binds').toContain('side-effectful');
-    expect(PACK.version).toBe('1.1.1');
-    expect(n?.version).toBe('1.1.0');
+    // The version literals that used to sit here (pack 1.1.1 / node 1.1.0) pinned the ONE bump
+    // that shipped with the fix and would red on every later legitimate bump. The lockstep
+    // invariant is leg 3 + `required-packs-pin-parity.test.ts` (w24 g2).
+    expect(n?.version, 'the node is declared with a version').toMatch(/^\d+\.\d+\.\d+$/);
   });
 
   it('leg 3: the feature pin moves in lockstep (RFC 0076 replay resolvability)', () => {

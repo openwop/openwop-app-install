@@ -27,6 +27,13 @@ export interface FrameOpsConfig<Doc extends object, F extends FrameBase> {
   /** Re-stamp per-type derived fields on a duplicated/instantiated frame
    *  after its id/name were remapped (e.g. app-builder's `route`). */
   restamp?: (frame: F, id: string) => void;
+  /** ADR 0886 (SL2CD-1) — mint ids that are never REUSED: `<slug>-<6 random
+   *  base36>`. The default deterministic slug re-mints a deleted frame's id for
+   *  the next frame of the same name ("Slide 4" → `slide-4`), which re-attaches
+   *  anything keyed on the old id (slides' per-slide comment threads) to a
+   *  different frame. Opt-in, so frame types whose ids are routes/anchors keep
+   *  their readable deterministic ids. Ids stay unique within the list. */
+  uniqueIds?: boolean;
   /** Per-type cleanup when a frame is deleted (e.g. app-builder drops
    *  connectors referencing the screen id). Mutates the cloned doc. */
   cascade?: (doc: Doc, removedFrameId: string) => void;
@@ -77,8 +84,20 @@ export function frameOps<Doc extends object, F extends FrameBase = FrameBase>(
   const isHome = (f: F): boolean => (homeFlag ? dict(f)[homeFlag] === true : false);
 
   /** A deterministic unique frame id derived from the name — no clock/random
-   *  (derivable from existing state; replays and re-renders agree). */
+   *  (derivable from existing state; replays and re-renders agree) — unless the
+   *  type opts into `uniqueIds` (never-reused ids; see the config field). Ids
+   *  are minted inside the editor's mutation, once per user action, and then
+   *  live in the document, so a random suffix changes nothing that replays. */
   function nextFrameId(list: F[], name: string): string {
+    if (config.uniqueIds) {
+      // Capped so `<base>-xxxx` stays inside the 64-char id slug the backend
+      // validators accept (slides `ID_RE`).
+      const base = slugify(name, slugFallback).slice(0, 48).replace(/-+$/, '') || slugFallback;
+      for (;;) {
+        const id = `${base}-${Math.random().toString(36).slice(2, 8).padEnd(6, '0')}`;
+        if (!list.some((s) => s.id === id)) return id;
+      }
+    }
     const base = slugify(name, slugFallback);
     if (!list.some((s) => s.id === base)) return base;
     let n = 2;

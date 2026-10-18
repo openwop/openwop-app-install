@@ -426,6 +426,7 @@ export const messages = {
   pickProvider: 'Choisissez un fournisseur…',
   loadingCredentials: 'Chargement des identifiants…',
   noKeysStored: 'Aucune clé {{provider}}enregistrée pour le moment.',
+  credentialsLoadFailed: 'Impossible de charger vos clés enregistrées : nous ne pouvons donc pas savoir s’il y en a.',
   manageKeys: 'Gérer les clés',
   manageKeysToAdd: 'pour en ajouter une.',
   pickKey: 'Choisissez une clé…',

@@ -2,10 +2,41 @@
  * ADR 0328 Phase 7 — the public shared-deck pager: notes NEVER render (the
  * S7 audience posture), skipped slides are passed over, and each reached
  * frame reports one analytics view.
+ *
+ * /grade-tests w52 — PROTECTED (public share surface). Witnessed by sabotage of
+ * `SharedDeckViewer.tsx`: rendering `slide.notes`, the once-per-frame guard, the
+ * reported index, both key-scoping rules, the audience-empty analytics guard and
+ * its raw-entries clause, the stage click, the swipe dominance rule (the
+ * vertical leg now starts on frame 1 with |dx| past the 40px threshold — it used
+ * to run on the LAST frame with dx=−5, so neither rule was reachable), the
+ * fullscreen presence + label, the autoplay loop, manual-stop, autostart and the
+ * single-slide Play. Autoplay legs advance ONE tick (7 s): four ticks on a
+ * two-frame loop land back on "1 / 2", which made the no-motion and paused
+ * counters unable to fail.
+ *
+ * DOUBLE GUARD (named, not probed per-clause): `audienceEmpty`'s
+ * `visible.length === 0` clause sits behind the raw-entries clause — every raw
+ * deck with no non-skipped object entry is already caught there, and coercion
+ * never marks a raw non-skipped object skipped, so no fixture reaches the
+ * second clause alone. The shared piece (the analytics/empty guard both feed)
+ * is probed instead. Counter + real-index analytics are twinned in
+ * `sharedDeckUpgrade.test.tsx` (both protected; kept).
  */
-import { describe, it, expect, afterEach, vi, beforeEach } from 'vitest';
+import { describe, it, expect, afterEach, vi, beforeEach, type Mock } from 'vitest';
 import { render, cleanup, fireEvent, act } from '@testing-library/react';
+import { config } from '../../../client/config.js';
 import { SharedDeckViewer } from '../SharedDeckViewer.js';
+
+const FRAME_VIEW_URL = `${config.baseUrl}/host/openwop-app/shared/tok/frame-view`;
+
+/** A typed fetch stub — read back without casting `globalThis.fetch`. */
+function stubFetch(): Mock<typeof fetch> {
+  const spy = vi.fn<typeof fetch>(async () => new Response(null, { status: 204 }));
+  vi.stubGlobal('fetch', spy);
+  return spy;
+}
+const frameViewCalls = (spy: Mock<typeof fetch>): unknown[][] =>
+  spy.mock.calls.filter((c) => String(c[0]).includes('frame-view'));
 
 afterEach(cleanup);
 
@@ -44,18 +75,16 @@ describe('SharedDeckViewer', () => {
   });
 
   it('reports each reached frame ONCE to the share analytics', async () => {
-    const calls: string[] = [];
-    vi.stubGlobal('fetch', vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
-      calls.push(`${String(url)}|${String(init?.body ?? '')}`);
-      return new Response(null, { status: 204 });
-    }));
+    const spy = stubFetch();
     const { getByLabelText } = render(<SharedDeckViewer token="tok" deck={deck} />);
     await act(async () => { fireEvent.click(getByLabelText('Next')); });
     await act(async () => { fireEvent.click(getByLabelText('Previous')); });
-    const frameViews = calls.filter((c) => c.includes('/shared/tok/frame-view'));
-    expect(frameViews.length).toBe(2); // frames 0 and 2, each once (revisit not re-reported)
-    expect(frameViews[0]).toContain('"frame":0');
-    expect(frameViews[1]).toContain('"frame":2');
+    // Frames 0 and 2, each once (the revisit of 0 is not re-reported), each a
+    // POST to the share link's own frame-view endpoint.
+    expect(spy.mock.calls.map(([url, init]) => [String(url), init?.method, init?.body])).toEqual([
+      [FRAME_VIEW_URL, 'POST', '{"frame":0}'],
+      [FRAME_VIEW_URL, 'POST', '{"frame":2}'],
+    ]);
   });
 });
 
@@ -84,9 +113,8 @@ describe('R2 SR-9 / review F2 — window key capture scoping', () => {
 });
 
 describe('R2 SL-SP-2/SL-SP-5 — audience-empty honesty (no fabrication, no hidden slides, no analytics)', () => {
-  beforeEach(() => {
-    vi.stubGlobal('fetch', vi.fn(async () => new Response(null, { status: 204 })));
-  });
+  let spy: Mock<typeof fetch>;
+  beforeEach(() => { spy = stubFetch(); });
   afterEach(() => vi.unstubAllGlobals());
 
   it('an ALL-SKIPPED deck renders the designed empty state — never the retracted slide or "1 / 0"', async () => {
@@ -97,20 +125,20 @@ describe('R2 SL-SP-2/SL-SP-5 — audience-empty honesty (no fabrication, no hidd
     expect(container.textContent).not.toContain('RETRACTED');
     expect(container.textContent).not.toContain('1 / 0');
     // No analytics for a frame no audience was meant to see.
-    expect((globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.filter((c) => String(c[0]).includes('frame-view'))).toHaveLength(0);
+    expect(frameViewCalls(spy)).toHaveLength(0);
   });
 
   it('a missing/corrupt deck payload renders the empty state — never a fabricated "Slide 1"', async () => {
     const { container } = render(<SharedDeckViewer token="tok" deck={{}} />);
     expect(container.textContent).toContain('Nothing to show yet');
     expect(container.textContent).not.toContain('Slide 1');
-    expect((globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.filter((c) => String(c[0]).includes('frame-view'))).toHaveLength(0);
+    expect(frameViewCalls(spy)).toHaveLength(0);
   });
 
   it('a deck of all-INVALID entries (nulls) also hits the empty state — coerceSlide never drops entries (review F3)', async () => {
     const { container } = render(<SharedDeckViewer token="tok" deck={{ slides: [null, null] }} />);
     expect(container.textContent).toContain('Nothing to show yet');
-    expect((globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.filter((c) => String(c[0]).includes('frame-view'))).toHaveLength(0);
+    expect(frameViewCalls(spy)).toHaveLength(0);
   });
 });
 
@@ -130,16 +158,20 @@ describe('R2 SL-SP-3/SL-SP-4 — pointer + touch paging', () => {
   it('a horizontal swipe pages; a vertical drag does not (scrolling stays untouched)', async () => {
     const { container } = render(<SharedDeckViewer token="tok" deck={deck} />);
     const root = container.querySelector('.cv-shared-deck')!;
+    // Vertical-dominant drag FIRST, on frame 1 (so a wrongful page has somewhere
+    // to go), with |dx| = 60 — past the 40px threshold, so only the dominance
+    // rule can refuse it.
+    await act(async () => {
+      fireEvent.touchStart(root, { touches: [{ clientX: 300, clientY: 100 }] });
+      fireEvent.touchEnd(root, { changedTouches: [{ clientX: 240, clientY: 400 }] });
+    });
+    expect(container.textContent).toContain('1 / 2');
+    expect(container.textContent).toContain('Public headline');
     await act(async () => {
       fireEvent.touchStart(root, { touches: [{ clientX: 300, clientY: 100 }] });
       fireEvent.touchEnd(root, { changedTouches: [{ clientX: 100, clientY: 110 }] });
     });
     expect(container.textContent).toContain('Second stop');
-    await act(async () => {
-      fireEvent.touchStart(root, { touches: [{ clientX: 200, clientY: 100 }] });
-      fireEvent.touchEnd(root, { changedTouches: [{ clientX: 195, clientY: 300 }] });
-    });
-    expect(container.textContent).toContain('Second stop'); // unchanged
   });
 });
 
@@ -183,8 +215,9 @@ describe('SL-R2-5 (round 3) — audience-initiated autoplay', () => {
 
   it('never plays on its own; Play advances on the cadence and LOOPS past the end, skipping hidden slides', async () => {
     const { container, getByLabelText } = render(<SharedDeckViewer token="tok" deck={deck} />);
-    // No spontaneous motion: time alone moves nothing.
-    await act(async () => { vi.advanceTimersByTime(30000); });
+    // No spontaneous motion: time alone moves nothing. ONE cadence tick — four
+    // ticks on this two-frame loop would land back on "1 / 2" and hide motion.
+    await act(async () => { vi.advanceTimersByTime(7000); });
     expect(container.textContent).toContain('1 / 2');
 
     fireEvent.click(getByLabelText('Play the deck (advances every few seconds)'));
@@ -202,7 +235,7 @@ describe('SL-R2-5 (round 3) — audience-initiated autoplay', () => {
     fireEvent.click(getByLabelText('Play the deck (advances every few seconds)'));
     await act(async () => { vi.advanceTimersByTime(7000); }); // → 2 / 2, so Previous is enabled
     await act(async () => { fireEvent.click(getByLabelText('Previous')); });
-    await act(async () => { vi.advanceTimersByTime(30000); });
+    await act(async () => { vi.advanceTimersByTime(7000); }); // one tick: a live timer would show 2 / 2
     expect(container.textContent).toContain('1 / 2'); // paused: no advance since
     // The control reads Play again (paired polarity of the pressed state).
     expect(getByLabelText('Play the deck (advances every few seconds)')).toBeTruthy();

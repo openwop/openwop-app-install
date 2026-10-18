@@ -259,35 +259,61 @@ export async function patchCard(
  * the board's cards/columns change (from this or another client), so the page
  * can refetch. Uses a fetch-based reader (not native EventSource) so the
  * bearer Authorization header is sent; cookie mode works via credentials.
- * Returns an unsubscribe fn (aborts the stream).
+ * Returns an unsubscribe fn (aborts the stream and stops reconnecting).
+ *
+ * The server ends each stream after a bounded lifetime (routes/kanban.ts
+ * `KANBAN_STREAM_MAX_AGE_MS`), because an in-page abort never reached the
+ * container in prod and every stream held a cap slot for the full hour. So a
+ * stream that ENDS while still subscribed reconnects: after 1 s on a clean
+ * end, with backoff (5 s → 60 s) on a refusal or network error. The caller's
+ * 5 s poll covers the gap.
  */
 export function subscribeBoardEvents(boardId: string, onChange: () => void): () => void {
   const controller = new AbortController();
+  const { signal } = controller;
+  const wait = (ms: number) => new Promise<void>((resolve) => {
+    const t = setTimeout(resolve, ms);
+    signal.addEventListener('abort', () => { clearTimeout(t); resolve(); }, { once: true });
+  });
   void (async () => {
-    try {
-      const res = await fetch(
-        `${streamBase}/boards/${encodeURIComponent(boardId)}/events`,
-        fetchOpts({ headers: authedHeaders({ accept: 'text/event-stream' }), signal: controller.signal }),
-      );
-      if (!res.ok || !res.body) return;
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buf = '';
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buf += decoder.decode(value, { stream: true });
-        // A `board.changed` event line is enough to trigger a refetch; we
-        // don't parse the data payload (the client re-reads the board).
-        if (buf.includes('event: board.changed')) {
-          buf = '';
-          onChange();
-        } else if (buf.length > 8192) {
-          buf = buf.slice(-1024); // bound the buffer between events/heartbeats
+    let backoffMs = 5_000;
+    while (!signal.aborted) {
+      let clean = false;
+      try {
+        const res = await fetch(
+          `${streamBase}/boards/${encodeURIComponent(boardId)}/events`,
+          fetchOpts({ headers: authedHeaders({ accept: 'text/event-stream' }), signal }),
+        );
+        if (res.ok && res.body) {
+          backoffMs = 5_000;
+          const reader = res.body.getReader();
+          const decoder = new TextDecoder();
+          let buf = '';
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buf += decoder.decode(value, { stream: true });
+            // A `board.changed` event line is enough to trigger a refetch; we
+            // don't parse the data payload (the client re-reads the board).
+            if (buf.includes('event: board.changed')) {
+              buf = '';
+              onChange();
+            } else if (buf.length > 8192) {
+              buf = buf.slice(-1024); // bound the buffer between events/heartbeats
+            }
+          }
+          clean = true;
         }
+      } catch {
+        /* aborted (the loop exits) or network drop (back off and retry) */
       }
-    } catch {
-      /* aborted or network drop — caller may resubscribe */
+      if (signal.aborted) return;
+      if (clean) {
+        await wait(1_000);
+      } else {
+        await wait(backoffMs);
+        backoffMs = Math.min(backoffMs * 2, 60_000);
+      }
     }
   })();
   return () => controller.abort();

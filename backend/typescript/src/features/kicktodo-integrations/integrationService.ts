@@ -17,12 +17,14 @@ import { hashToken, mintToken } from '../../host/capabilityToken.js';
 import { buildIcsCalendar, type IcsEvent } from '../../host/ics.js';
 import { resolveOne } from '../../host/featureToggles/service.js';
 import { DurableCollection } from '../../host/hostExtPersistence.js';
+import { registerKvAgeOut } from '../../host/kvAgeOut.js';
+import { registerTenantIndexAdoption } from '../../host/tenantIndexAdoption.js';
 import { registerSubjectEraser } from '../../host/subjectErasure.js';
 import { createLogger } from '../../observability/logger.js';
 import { listEnrollmentsFor, occurrencesOn } from '../kicktodo-core/enrollmentService.js';
 import { onEnrollmentDeleted } from '../kicktodo-core/enrollmentLifecycle.js';
 import { getChallenge } from '../kicktodo-core/challengeService.js';
-import { localDateIn } from '../kicktodo-core/types.js';
+import { KICKTODO_REVOKED_ROW_RETENTION_DAYS, localDateIn } from '../kicktodo-core/types.js';
 import { submitCheckIn } from '../kicktodo-core/todayService.js';
 import { recordWearableReading } from './wearableLivenessService.js';
 
@@ -54,8 +56,32 @@ interface FeedRow {
   revokedAt?: string;
 }
 
-/** Keyed by token HASH (global — the public route has no tenant). */
-const feeds = new DurableCollection<FeedRow>('kicktodo-feed-tokens', (f) => f.tokenHash);
+/** Keyed by token HASH (global — the public route has no tenant). KTI-5 / KTX-D1
+ *  (KickTodo wave 4C) — the key is unchanged (existing rows are never re-keyed);
+ *  the 4th arg adds a TENANT SECONDARY INDEX maintained on every write, so revoke
+ *  and erase read one tenant's slice instead of every tenant's tokens. */
+const feeds = new DurableCollection<FeedRow>('kicktodo-feed-tokens', (f) => f.tokenHash, undefined, (f) => f.tenantId);
+// ADR 0866 — the hourly reconcile is the idempotent backfill for pre-index rows
+// (forward-only marker writes; a second pass changes nothing). Reads use the index
+// only once it is VERIFIED; until then `tenantFeeds` keeps the full scan.
+registerTenantIndexAdoption('kicktodo-feed-tokens', feeds);
+// KTINT-4 — revoked feed tokens were never purged. A revoked token already
+// renders the same uniform 404 as an unknown one, so past the window it is
+// reclaimed (through the collection, so its index marker goes too).
+registerKvAgeOut({
+  id: 'kicktodo-feed-tokens:revoked',
+  prefix: 'hostext:kicktodo-feed-tokens:',
+  ttlDays: KICKTODO_REVOKED_ROW_RETENTION_DAYS,
+  timestampField: 'revokedAt',
+  acceptIndexed: true,
+});
+
+/** KTI-5 — one tenant's feed tokens: the verified tenant index, else the legacy
+ *  full scan + tenant filter (only until the backfill is verified). */
+async function tenantFeeds(tenantId: string): Promise<FeedRow[]> {
+  if (await feeds.tenantIndexVerified()) return feeds.listForTenantIndexed(tenantId);
+  return (await feeds.list()).filter((f) => f.tenantId === tenantId);
+}
 
 export interface WearableEvidenceRule {
   tenantId: string;
@@ -108,15 +134,32 @@ export async function grantConsent(
   return consent;
 }
 
+/** KTINT-1 (KickTodo wave 4C) — a revoke subscriber: the lane that acted under a
+ *  consent cleans up what it did (the calendar-write lane removes the events it
+ *  wrote). Keyed (a repeat boot overwrites), best-effort, never fails the revoke. */
+export type ConsentRevokedHandler = (e: { tenantId: string; ownerSubject: string; kind: ConsentKind }) => Promise<void>;
+const consentRevokedHandlers = new Map<string, ConsentRevokedHandler>();
+export function onConsentRevoked(key: string, fn: ConsentRevokedHandler): void {
+  consentRevokedHandlers.set(key, fn);
+}
+
 export async function revokeConsent(tenantId: string, ownerSubject: string, kind: ConsentKind): Promise<void> {
   const c = await consents.get(`${tenantId}::${ownerSubject}::${kind}`);
-  if (c && !c.revokedAt) await consents.put({ ...c, revokedAt: nowIso() });
+  if (c && !c.revokedAt) {
+    await consents.put({ ...c, revokedAt: nowIso() });
+    // Fired only on a real live→revoked transition (a repeat revoke is a no-op).
+    for (const h of consentRevokedHandlers.values()) {
+      try { await h({ tenantId, ownerSubject, kind }); } catch (err) {
+        log.warn('kicktodo_consent_revoke_cleanup_failed', { kind, error: err instanceof Error ? err.message : String(err) });
+      }
+    }
+  }
   // Revoking the feed lane also revokes every live feed token (immediate).
-  // NOTE: feeds is keyed by token HASH, so this is a full-collection scan —
-  // acceptable ONLY because revocation is rare and renderFeed independently
-  // re-checks liveConsent per request; never call this on a hot path.
+  // KTI-5 — a bounded tenant-slice read through the tenant index (it was a
+  // full-collection scan of every tenant's tokens); renderFeed still re-checks
+  // liveConsent per request, so a token this misses can never render.
   if (kind === 'calendar-project') {
-    for (const f of await feeds.list()) {
+    for (const f of await tenantFeeds(tenantId)) {
       if (f.tenantId === tenantId && f.ownerSubject === ownerSubject && !f.revokedAt) {
         await feeds.put({ ...f, revokedAt: nowIso() });
       }
@@ -239,8 +282,8 @@ export async function ingestWearableMetric(
 // ADR 0458 P0 — GDPR data-subject erasure (subjectErasure seam). Every integration lane is
 // the SUBJECT's own consent/connection surface, so on a DSAR delete it all:
 //   - consents (subject-keyed prefix) — the revocable per-lane grants;
-//   - feed tokens (keyed by token HASH, but carry `ownerSubject`; scan — the same
-//     full-collection scan revokeConsent already accepts, rare + off the hot path);
+//   - feed tokens (keyed by token HASH, but carry `ownerSubject`; read by tenant
+//     through the tenant index — KTI-5, it scanned every tenant before);
 //   - wearable evidence rules — keyed by ENROLLMENT (no subject field), so resolve the
 //     subject's enrollments and delete their rules. This reads enrollments at erase time;
 //     integrations owns their removal on the subject seam because kicktodo-core has no
@@ -252,7 +295,7 @@ export async function eraseIntegrationsSubject(tenantId: string, subjectKey: str
   for (const c of await consents.listByPrefix(`${tenantId}::${subjectKey}::`)) {
     await consents.delete(`${c.tenantId}::${c.ownerSubject}::${c.kind}`);
   }
-  for (const f of await feeds.list()) {
+  for (const f of await tenantFeeds(tenantId)) {
     if (f.tenantId === tenantId && f.ownerSubject === subjectKey) await feeds.delete(f.tokenHash);
   }
   for (const e of await listEnrollmentsFor(tenantId, subjectKey)) {

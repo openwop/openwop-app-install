@@ -28,6 +28,8 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
+import { maxStreamAgeSec } from '../src/host/streamAgeCapability.js';
+import { defaultMaxAgeMs } from '../src/host/sseChannel.js';
 
 import { createApp } from '../src/index.js';
 import { adaptV2Capabilities } from '../../../frontend/react/src/client/capabilitiesV2Adapter.js';
@@ -190,6 +192,11 @@ describe.each(CONFIGS)('adapt(v2 discovery) gives every consumer read the value 
     expect(at(adapted, DELIBERATE.limits)).toEqual({
       clarificationRounds: 5, schemaRounds: 3, envelopesPerTurn: 32,
       maxNodeExecutions: 1000, maxRunDurationMs: 600000, maxRequestBodyBytes: 1048576,
+      // ADR 0897 P4 / RFC 0247 — from the advert's one source (300 with the
+      // default; absent when the host does not bound). The consumer
+      // (builderShellHelpers) reads named fields, so this member claims nothing
+      // a v1 reader relied on.
+      ...(maxStreamAgeSec(defaultMaxAgeMs()) !== undefined ? { maxStreamAgeSec: maxStreamAgeSec(defaultMaxAgeMs()) } : {}),
     });
   });
 

@@ -15,13 +15,18 @@ vi.mock('../lib/workflowMentions.js', async (orig) => ({
 }));
 
 import { SlashAutocomplete } from '../SlashAutocomplete.js';
+import { messages as en } from '../i18n/en.js';
 
 afterEach(cleanup);
 
 describe('slash picker keys (ADR 0768 D4)', () => {
-  it('shows the key tip', () => {
+  it('shows the key tip, and its words name the keys the picker handles', () => {
     render(<SlashAutocomplete text="/sum" onPick={vi.fn()} onDismiss={vi.fn()} />);
     expect(screen.getByText('slashPickerKeys')).toBeTruthy();
+    // The `t` mock echoes keys, so the WORDS are checked on the shipped catalog.
+    expect(en.slashPickerKeys).toMatch(/Tab/);
+    expect(en.slashPickerKeys).toMatch(/Esc/);
+    expect(en.slashPickerKeys).not.toMatch(/fill/i);
   });
 
   it('Tab picks, as the tip says', () => {

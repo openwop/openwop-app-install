@@ -330,6 +330,8 @@ install.
 | KB-UX-1/2/4/10/14/16 | `features/kb/KnowledgeBasePage.tsx` | `features/kb/__tests__/readHonesty.test.tsx` (14) |
 | Registry-shadow visibility | `scripts/check-registry-parity.sh` | self — its first run found 10 stale packs (LIVE lane) |
 
+> **CORRECTED 2026-10-11 (grade-tests w23):** the two WF-KB-4 rows above cite `knowledge-sync-daemon.test.ts`. WF-KB-3 deleted `knowledgeSyncDaemon.ts`; the spend gate moved to `knowledgeSyncGate.ts` (`syncEnabledFor`) and is enforced by the `knowledge-sync` surface. The daemon test's WF-KB-4 cases went with the daemon. The toggle, fail-closed-resolver and kill-switch witnesses now live in `backend/typescript/test/knowledge-sync-workflow.test.ts` (the fail-closed and full kill-switch-spelling cases were re-added there in w23 after being found unwitnessed). The entitlement half has no direct witness there: it is a no-op unless an operator narrows `OPENWOP_BILLING_PLAN_FEATURES`.
+
 **Non-vacuity.** Every new assertion was run against the pre-fix code and
 observed RED, then restored: the pack edges reverted (5/5 execution tests), the
 node order reverted (2 primary assertions), the delivery

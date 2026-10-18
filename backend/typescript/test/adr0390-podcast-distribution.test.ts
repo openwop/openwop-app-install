@@ -18,6 +18,25 @@
  * so the public surface can be exercised without running the pipeline. The
  * publish flips themselves go through the AUTHED HTTP routes (to exercise RBAC).
  *
+ * Sabotage witnesses (w21 /grade-tests) — each reddens the case that claims it:
+ * dropping the create `workspace:write` check, the show-publish `workspace:read`
+ * check (now driven by a SAME-tenant outsider — a foreign-tenant caller is
+ * stopped earlier by the tenant-keyed lookup), the publish `showId` validation,
+ * or the same-org show check (now a second org in the SAME tenant); ignoring the
+ * show / episode `published` flag on the page, feed or audio read (the episode
+ * case publishes, proves live, then UNPUBLISHES — so the flag is the only gate);
+ * enclosure length, item guid, Range slicing, the 416 bound, the ADR 0818 serve
+ * headers, the GET-path size a HEAD reports (the HEAD metadata branch is unreachable — PODCAST-1a), the slug re-uniquify, the show delete, the
+ * explicit inheritance + override, the directory-URL scheme filter, the publish
+ * duration measure + its `itunes:duration` format, `canWrite`, and the guid
+ * mint-once + namespace.
+ *
+ * Honest ceiling: `404s for a foreign-tenant episode id` is guarded FOUR times —
+ * the tenant-keyed `episodes.get`, the `episode.orgId` check, the tenant-keyed
+ * show re-read in `getPublishedEpisodeById`, and the asset-tenant check in
+ * `decodeAudioByToken` — so no single sabotage can redden it. It is kept as the
+ * end-to-end tenant-isolation assertion, not as a witness of any one guard.
+ *
  * @see docs/adr/0390-podcast-public-distribution.md
  */
 
@@ -30,7 +49,11 @@ import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { getOrg } from '../src/host/accessControlService.js';
 import { storeMediaAsset } from '../src/host/inMemorySurfaces.js';
-import { createEpisode, recordEpisodeResult, type PodcastEpisode } from '../src/features/podcasts/podcastsService.js';
+import { __podcastAudioCacheStats } from '../src/features/podcasts/audioCache.js';
+import {
+  createEpisode, createShow, ensureShowGuid, getEpisode, getShow, recordEpisodeResult,
+  type PodcastEpisode, type PodcastShow,
+} from '../src/features/podcasts/podcastsService.js';
 
 let BASE: string; let PORT = 0; let server: http.Server; let n = 0;
 
@@ -48,17 +71,33 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T }
-interface Client { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res>; put: (p: string, b?: unknown) => Promise<Res>; delete: (p: string) => Promise<Res> }
+interface Res<T> { status: number; body: T }
+interface Client {
+  get: <T>(p: string) => Promise<Res<T>>;
+  post: <T>(p: string, b?: unknown) => Promise<Res<T>>;
+  put: <T>(p: string, b?: unknown) => Promise<Res<T>>;
+  delete: <T>(p: string) => Promise<Res<T>>;
+}
+/** Response shapes the cases read (the real service types where one exists). */
+type ShowBody = { show: PodcastShow };
+type EpisodeBody = { episode: PodcastEpisode };
+type PublicEpisodeBody = { show: { slug: string; title: string; author: string }; episode: { slug: string; title: string } };
+type ListBody = { canWrite: boolean; shows?: PodcastShow[] };
 function client(): Client {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
+  const call = async <T>(method: string, path: string, body?: unknown): Promise<Res<T>> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const c of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    // The ONE typed boundary: the wire body is `unknown` until a case names its shape.
+    const out = (res.status === 204 ? undefined : await res.json().catch(() => undefined)) as T;
     return { status: res.status, body: out };
   };
-  return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), put: (p, b) => call('PUT', p, b), delete: (p) => call('DELETE', p) };
+  return {
+    get: <T>(p: string) => call<T>('GET', p),
+    post: <T>(p: string, b?: unknown) => call<T>('POST', p, b),
+    put: <T>(p: string, b?: unknown) => call<T>('PUT', p, b),
+    delete: <T>(p: string) => call<T>('DELETE', p),
+  };
 }
 
 /** A raw GET with arbitrary headers, returning text + headers (for feed XML +
@@ -83,8 +122,8 @@ async function ownerWithOrg(who: string): Promise<{ c: Client; orgId: string; te
   const c = client();
   const r = await c.post('/host/openwop-app/test/login', { email: uniqEmail(who) });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  const org = await c.post('/host/openwop-app/orgs', { name: 'Acme Media' });
-  const orgId = org.body.orgId as string;
+  const org = await c.post<{ orgId: string }>('/host/openwop-app/orgs', { name: 'Acme Media' });
+  const orgId = org.body.orgId;
   const tenantId = (await getOrg(orgId))!.tenantId;
   return { c, orgId, tenantId };
 }
@@ -104,18 +143,18 @@ async function publishedShowWithEpisode(who: string, audioType?: string): Promis
   c: Client; orgId: string; tenantId: string; showSlug: string; showId: string; episodeId: string; episodeSlug: string;
 }> {
   const { c, orgId, tenantId } = await ownerWithOrg(who);
-  const created = await c.post(`${P}/shows`, {
+  const created = await c.post<ShowBody>(`${P}/shows`, {
     orgId, title: 'The Acme Hour', author: 'Acme', description: 'Weekly acme talk',
     category: 'Technology', explicit: false, ownerName: 'Acme', ownerEmail: 'pod@acme.test', languageCode: 'en',
   });
   expect(created.status, JSON.stringify(created.body)).toBe(201);
-  const showId = created.body.show.id as string;
-  const showSlug = created.body.show.slug as string;
+  const showId = created.body.show.id;
+  const showSlug = created.body.show.slug;
   expect((await c.post(`${P}/shows/${showId}/publish`)).status).toBe(200);
   const ep = await seedEpisodeWithAudio(tenantId, orgId, 'Episode One', 512, audioType);
-  const pub = await c.post(`${P}/episodes/${ep.id}/publish`, { showId });
+  const pub = await c.post<EpisodeBody>(`${P}/episodes/${ep.id}/publish`, { showId });
   expect(pub.status, JSON.stringify(pub.body)).toBe(200);
-  const episodeSlug = pub.body.episode.slug as string;
+  const episodeSlug = pub.body.episode.slug!;
   return { c, orgId, tenantId, showSlug, showId, episodeId: ep.id, episodeSlug };
 }
 
@@ -125,9 +164,26 @@ describe('ADR 0390 — publish RBAC (workspace:write)', () => {
     const anon = client();
     // Create (no entity yet) → the write gate fires directly: 403.
     expect((await anon.post(`${P}/shows`, { orgId, title: 'X', author: 'Y' })).status).toBe(403);
-    // Flip an EXISTING show without even read access → uniform 404 (the routes.ts
-    // no-existence-leak IDOR convention: a caller who can't read can't learn it exists).
+    // A FOREIGN-tenant caller flipping an existing show → 404 (the tenant-keyed
+    // lookup misses before any scope check runs).
     expect((await anon.post(`${P}/shows/${showId}/publish`)).status).toBe(404);
+
+    // A SAME-tenant caller with no read in the show's org: the lookup FINDS the
+    // show, so only the `workspace:read` check stands between them — and it must
+    // answer 404 (the routes.ts no-existence-leak IDOR convention), not 403.
+    const tenantId = `org:rbac-${Date.now()}-${n++}`;
+    const owner = client();
+    await owner.post('/host/openwop-app/test/login', { email: uniqEmail('rbac-owner'), tenantId });
+    const sameOrg = await owner.post<{ orgId: string }>('/host/openwop-app/orgs', { name: 'Closed Org' });
+    expect(sameOrg.status, JSON.stringify(sameOrg.body)).toBe(201);
+    const hidden = await owner.post<ShowBody>(`${P}/shows`, { orgId: sameOrg.body.orgId, title: 'Closed Show', author: 'A' });
+    expect(hidden.status, JSON.stringify(hidden.body)).toBe(201);
+    const outsider = client();
+    await outsider.post('/host/openwop-app/test/login', { email: uniqEmail('rbac-outsider'), tenantId });
+    // PRECONDITION — same tenant, and genuinely no read in that org.
+    expect((await outsider.get(`${P}/shows?orgId=${encodeURIComponent(sameOrg.body.orgId)}`)).status).toBe(404);
+    expect((await outsider.post(`${P}/shows/${hidden.body.show.id}/publish`)).status).toBe(404);
+    expect((await getShow(tenantId, hidden.body.show.id))?.published, 'the outsider flipped the show').toBe(false);
   });
 
   it('publishing an episode requires access + a valid same-org show', async () => {
@@ -136,28 +192,54 @@ describe('ADR 0390 — publish RBAC (workspace:write)', () => {
     // unauthed publish of an existing episode → uniform 404 (no-existence-leak)
     expect((await client().post(`${P}/episodes/${ep.id}/publish`, { showId })).status).toBe(404);
     // publish without a showId → validation error
-    expect((await c.post(`${P}/episodes/${ep.id}/publish`, {})).status).toBe(400);
-    // cross-org show → uniform 404
+    const noShow = await c.post<{ error?: { code?: string } | string }>(`${P}/episodes/${ep.id}/publish`, {});
+    expect(noShow.status).toBe(400);
+    expect(JSON.stringify(noShow.body)).toContain('validation_error');
+    // foreign-TENANT show → 404 (the tenant-keyed getShow misses)
     const other = await ownerWithOrg('rbac2-other');
-    const otherShow = await other.c.post(`${P}/shows`, { orgId: other.orgId, title: 'O', author: 'O' });
+    const otherShow = await other.c.post<ShowBody>(`${P}/shows`, { orgId: other.orgId, title: 'O', author: 'O' });
     expect((await c.post(`${P}/episodes/${ep.id}/publish`, { showId: otherShow.body.show.id })).status).toBe(404);
+    // cross-ORG show in the SAME tenant → 404: getShow FINDS it, so only the
+    // same-org check refuses the binding.
+    const secondOrg = await c.post<{ orgId: string }>('/host/openwop-app/orgs', { name: 'Sister Org' });
+    expect(secondOrg.status, JSON.stringify(secondOrg.body)).toBe(201);
+    const sisterShow = await c.post<ShowBody>(`${P}/shows`, { orgId: secondOrg.body.orgId, title: 'Sister', author: 'S' });
+    expect(sisterShow.status, JSON.stringify(sisterShow.body)).toBe(201);
+    expect((await getShow(tenantId, sisterShow.body.show.id))?.orgId).not.toBe(orgId);
+    expect((await c.post(`${P}/episodes/${ep.id}/publish`, { showId: sisterShow.body.show.id })).status).toBe(404);
+    const after = await getEpisode(tenantId, ep.id);
+    expect(after, 'episode row missing').toBeTruthy();
+    expect(after?.published ?? false, 'the episode was published onto another org\'s show').toBe(false);
+    expect(after?.showId).toBeUndefined();
   });
 });
 
 describe('ADR 0390 — public reads gated on published + uniform 404', () => {
   it('an unpublished show / episode is a uniform 404 on every public surface', async () => {
     const { c, orgId, tenantId } = await ownerWithOrg('unpub');
-    const created = await c.post(`${P}/shows`, { orgId, title: 'Hidden Show', author: 'A' });
-    const showSlug = created.body.show.slug as string;
-    const showId = created.body.show.id as string;
+    const created = await c.post<ShowBody>(`${P}/shows`, { orgId, title: 'Hidden Show', author: 'A' });
+    const showSlug = created.body.show.slug;
+    const showId = created.body.show.id;
     // show exists but is NOT published → 404 everywhere
     expect((await rawGet(`${PUB(orgId)}/${showSlug}`)).status).toBe(404);
     expect((await rawGet(`${PUB(orgId)}/${showSlug}/feed.xml`)).status).toBe(404);
-    // publish the show, add an UNPUBLISHED episode → episode page still 404
+    // publish the show + the episode, prove both episode surfaces LIVE, then
+    // UNPUBLISH the episode: it keeps its showId + slug, so the `published` flag
+    // is the ONLY thing that can 404 it (a never-published episode has neither,
+    // and would 404 on the slug / showId miss whatever the flag said).
     expect((await c.post(`${P}/shows/${showId}/publish`)).status).toBe(200);
     const ep = await seedEpisodeWithAudio(tenantId, orgId, 'Secret Ep', 128);
-    // The episode is not published — its audio + page are 404.
-    expect((await rawGet(`${PUB(orgId)}/${showSlug}/secret-ep`)).status).toBe(404);
+    const pub = await c.post<EpisodeBody>(`${P}/episodes/${ep.id}/publish`, { showId });
+    expect(pub.status, JSON.stringify(pub.body)).toBe(200);
+    const epSlug = pub.body.episode.slug!;
+    expect((await rawGet(`${PUB(orgId)}/${showSlug}/${epSlug}`)).status, 'episode page was not live').toBe(200);
+    expect((await rawGet(`${PUB(orgId)}/episodes/${ep.id}/audio`)).status, 'audio was not live').toBe(200);
+    expect((await c.post(`${P}/episodes/${ep.id}/unpublish`)).status).toBe(200);
+    const row = await getEpisode(tenantId, ep.id);
+    expect(row?.published).toBe(false);
+    expect(row?.showId).toBe(showId);
+    expect(row?.slug).toBe(epSlug);
+    expect((await rawGet(`${PUB(orgId)}/${showSlug}/${epSlug}`)).status).toBe(404);
     expect((await rawGet(`${PUB(orgId)}/episodes/${ep.id}/audio`)).status).toBe(404);
   });
 
@@ -242,7 +324,24 @@ describe('ADR 0390 — Range-capable audio route', () => {
     const res = await rawGet(`${PUB(orgId)}/episodes/${episodeId}/audio`, {}, 'HEAD');
     expect(res.status).toBe(200);
     expect(String(res.headers['accept-ranges'])).toBe('bytes');
-    expect(res.body.length).toBe(0);
+    // HEAD reports the enclosure's real size + type.
+    expect(Number(res.headers['content-length'])).toBe(512);
+    expect(String(res.headers['content-type'])).toBe('audio/mpeg');
+    expect(res.body.length).toBe(0); // Node never sends a HEAD body; kept as a sanity line
+  });
+
+  // PODCAST-1a (w21 /grade-tests pinned it as it.fails). Express lets a GET
+  // route answer HEAD, and publicRoutes.ts registered `app.get(…/audio)` before
+  // `app.head(…/audio)`, so the metadata-only branch was unreachable and a HEAD
+  // decoded the WHOLE asset into the LRU (up to 256 MB) like a GET. Fixed: the
+  // one route passes `req.method === 'HEAD'`. Sabotage witness: passing `false`
+  // there turns this red on the cache-entries line.
+  it('PODCAST-1a — HEAD answers from metadata and never decodes the audio', async () => {
+    const { orgId, episodeId } = await publishedShowWithEpisode('audio-head-nodecode');
+    const before = __podcastAudioCacheStats().entries;
+    const res = await rawGet(`${PUB(orgId)}/episodes/${episodeId}/audio`, {}, 'HEAD');
+    expect(res.status).toBe(200);
+    expect(__podcastAudioCacheStats().entries, 'HEAD decoded the episode audio into the cache').toBe(before);
   });
 
   it('404s for a foreign-tenant episode id (bytes never cross tenants)', async () => {
@@ -258,11 +357,11 @@ describe('ADR 0390 (P0PUB-3) — episode slug re-uniquifies on a show move', () 
     const { c, orgId, tenantId } = await ownerWithOrg('slug-move');
     // Two shows in the SAME org.
     const mk = async (title: string): Promise<{ id: string; slug: string }> => {
-      const r = await c.post(`${P}/shows`, { orgId, title, author: 'A', description: 'd', category: 'Technology', explicit: false, languageCode: 'en' });
+      const r = await c.post<ShowBody>(`${P}/shows`, { orgId, title, author: 'A', description: 'd', category: 'Technology', explicit: false, languageCode: 'en' });
       expect(r.status, JSON.stringify(r.body)).toBe(201);
-      const id = r.body.show.id as string;
+      const id = r.body.show.id;
       expect((await c.post(`${P}/shows/${id}/publish`)).status).toBe(200);
-      return { id, slug: r.body.show.slug as string };
+      return { id, slug: r.body.show.slug };
     };
     const showA = (await mk('Show A')).id;
     const showBRec = await mk('Show B');
@@ -270,26 +369,26 @@ describe('ADR 0390 (P0PUB-3) — episode slug re-uniquifies on a show move', () 
 
     // Same episode TITLE in both shows → the incumbent on B claims `collision-ep`.
     const incumbent = await seedEpisodeWithAudio(tenantId, orgId, 'Collision Ep', 256);
-    const pubB = await c.post(`${P}/episodes/${incumbent.id}/publish`, { showId: showB });
+    const pubB = await c.post<EpisodeBody>(`${P}/episodes/${incumbent.id}/publish`, { showId: showB });
     expect(pubB.status, JSON.stringify(pubB.body)).toBe(200);
-    const incumbentSlug = pubB.body.episode.slug as string;
+    const incumbentSlug = pubB.body.episode.slug!;
 
     // The mover first publishes on A (no collision — different show catalog).
     const mover = await seedEpisodeWithAudio(tenantId, orgId, 'Collision Ep', 256);
-    const pubA = await c.post(`${P}/episodes/${mover.id}/publish`, { showId: showA });
+    const pubA = await c.post<EpisodeBody>(`${P}/episodes/${mover.id}/publish`, { showId: showA });
     expect(pubA.status).toBe(200);
     expect(pubA.body.episode.slug).toBe(incumbentSlug); // same slug OK — different show
 
     // Now MOVE the mover onto show B, whose catalog already holds that slug.
-    const moved = await c.post(`${P}/episodes/${mover.id}/publish`, { showId: showB });
+    const moved = await c.post<EpisodeBody>(`${P}/episodes/${mover.id}/publish`, { showId: showB });
     expect(moved.status, JSON.stringify(moved.body)).toBe(200);
-    const movedSlug = moved.body.episode.slug as string;
+    const movedSlug = moved.body.episode.slug!;
     expect(movedSlug).not.toBe(incumbentSlug); // re-uniquified against B's catalog
 
     // Both episodes now resolve distinctly on the public show-B surface.
     const showBSlug = showBRec.slug;
-    const a = await client().get(`${PUB(orgId)}/${showBSlug}/${incumbentSlug}`);
-    const b = await client().get(`${PUB(orgId)}/${showBSlug}/${movedSlug}`);
+    const a = await client().get<PublicEpisodeBody>(`${PUB(orgId)}/${showBSlug}/${incumbentSlug}`);
+    const b = await client().get<PublicEpisodeBody>(`${PUB(orgId)}/${showBSlug}/${movedSlug}`);
     expect(a.status).toBe(200);
     expect(b.status).toBe(200);
     expect(a.body.episode.title).toBe('Collision Ep');
@@ -367,7 +466,7 @@ describe('R2 SP-1 — publish metadata reaches the PUBLIC surface (explicit inhe
 describe('R2 PR2-4 — directory URLs: operator-entered, sanitized, projected', () => {
   it('stores http(s) directory URLs, DROPS a javascript: URL, and projects them publicly', async () => {
     const { c, orgId, showId, showSlug } = await publishedShowWithEpisode('pr24');
-    const upd = await c.put(`${P}/shows/${showId}`, {
+    const upd = await c.put<ShowBody>(`${P}/shows/${showId}`, {
       appleUrl: 'https://podcasts.apple.com/us/podcast/id123',
       spotifyUrl: 'javascript:alert(1)', // must be DROPPED, never stored
     });
@@ -394,14 +493,14 @@ describe('R2 PR2-1 — duration measured at publish reaches the feed and the pub
     const asset = await storeMediaAsset(tenantId, { contentBase64: wav.toString('base64'), contentType: 'audio/wav' });
     const ep = await createEpisode(tenantId, orgId, { notebookId: 'nb-1', episodeProfileId: 'ep-profile-1', title: 'Timed One' });
     await recordEpisodeResult(tenantId, ep.id, { audioMediaRef: asset.url });
-    const pub = await c.post(`${P}/episodes/${ep.id}/publish`, { showId });
+    const pub = await c.post<EpisodeBody>(`${P}/episodes/${ep.id}/publish`, { showId });
     expect(pub.status, JSON.stringify(pub.body)).toBe(200);
     expect(pub.body.episode.durationSeconds).toBe(60);
 
     // The feed finally carries itunes:duration for the measured episode…
     const feed = await rawGet(`${PUB(orgId)}/${showSlug}/feed.xml`);
     expect(feed.status).toBe(200);
-    expect(feed.body).toContain('<itunes:duration>');
+    expect(feed.body).toContain('<itunes:duration>1:00</itunes:duration>'); // 60 s in Apple's mm:ss form
     // …and the public JSON carries the seconds for the pages' row furniture.
     const pubJson = await (await fetch(`${BASE}${PUB(orgId)}/${showSlug}`)).json() as { episodes: Array<{ title: string; durationSeconds?: number }> };
     expect(pubJson.episodes.find((e) => e.title === 'Timed One')!.durationSeconds).toBe(60);
@@ -417,14 +516,14 @@ describe('SP-9 (round 3) — shows/episodes lists carry the caller\'s canWrite f
     const tenantId = `org:pcw-${Date.now()}-${n++}`;
     const owner = client();
     await owner.post('/host/openwop-app/test/login', { email: uniqEmail('pcw-owner'), tenantId });
-    const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'CapCo' })).body.orgId as string;
+    const orgId = (await owner.post<{ orgId: string }>('/host/openwop-app/orgs', { name: 'CapCo' })).body.orgId;
     expect((await owner.post(`${P}/shows`, { orgId, title: 'Cap Show', author: 'A' })).status).toBe(201);
 
     // The creator holds workspace:write → both list reads REPORT it.
-    const oShows = await owner.get(`${P}/shows?orgId=${encodeURIComponent(orgId)}`);
+    const oShows = await owner.get<ListBody>(`${P}/shows?orgId=${encodeURIComponent(orgId)}`);
     expect(oShows.status).toBe(200);
     expect(oShows.body.canWrite).toBe(true);
-    const oEps = await owner.get(`${P}/episodes?orgId=${encodeURIComponent(orgId)}`);
+    const oEps = await owner.get<ListBody>(`${P}/episodes?orgId=${encodeURIComponent(orgId)}`);
     expect(oEps.status).toBe(200);
     expect(oEps.body.canWrite).toBe(true);
 
@@ -432,14 +531,14 @@ describe('SP-9 (round 3) — shows/episodes lists carry the caller\'s canWrite f
     // but canWrite is FALSE — and the projection matches the authority (the
     // viewer's actual write on this surface 403s on the same predicate).
     const viewer = client();
-    const vlogin = await viewer.post('/host/openwop-app/test/login', { email: uniqEmail('pcw-viewer'), tenantId });
+    const vlogin = await viewer.post<{ user: { userId: string } }>('/host/openwop-app/test/login', { email: uniqEmail('pcw-viewer'), tenantId });
     const add = await owner.post(`/host/openwop-app/orgs/${orgId}/members`, { displayName: 'V', subject: vlogin.body.user.userId, roles: ['viewer'] });
     expect(add.status, JSON.stringify(add.body)).toBe(201);
-    const vShows = await viewer.get(`${P}/shows?orgId=${encodeURIComponent(orgId)}`);
+    const vShows = await viewer.get<ListBody>(`${P}/shows?orgId=${encodeURIComponent(orgId)}`);
     expect(vShows.status).toBe(200);
     expect(vShows.body.canWrite).toBe(false);
-    expect(vShows.body.shows.length).toBe(1); // the read itself is not narrowed
-    const vEps = await viewer.get(`${P}/episodes?orgId=${encodeURIComponent(orgId)}`);
+    expect(vShows.body.shows?.length).toBe(1); // the read itself is not narrowed
+    const vEps = await viewer.get<ListBody>(`${P}/episodes?orgId=${encodeURIComponent(orgId)}`);
     expect(vEps.status).toBe(200);
     expect(vEps.body.canWrite).toBe(false);
     expect((await viewer.post(`${P}/shows`, { orgId, title: 'Sneaky', author: 'V' })).status).toBe(403);
@@ -459,7 +558,7 @@ describe('R3 XP-R2-4 — <podcast:guid>: minted once, persisted, spec-conformant
     // Rename the slug → the feed URL CHANGES. A re-derivation over the new URL
     // would yield a different UUID; the persisted mint must survive the move —
     // stability across feed-URL changes is the tag's entire purpose.
-    const renamed = await c.put(`${P}/shows/${showId}`, { slug: `moved-${Date.now()}` });
+    const renamed = await c.put<ShowBody>(`${P}/shows/${showId}`, { slug: `moved-${Date.now()}` });
     expect(renamed.status).toBe(200);
     const feed2 = await rawGet(`${PUB(orgId)}/${renamed.body.show.slug}/feed.xml`);
     expect(feed2.status).toBe(200);
@@ -472,9 +571,8 @@ describe('R3 XP-R2-4 — <podcast:guid>: minted once, persisted, spec-conformant
     // the podcastindex namespace. Verified against the spec's own vector
     // (independently reproduced with python uuid.uuid5).
     const { tenantId, orgId } = await ownerWithOrg('guid-vector');
-    const svc = await import('../src/features/podcasts/podcastsService.js');
-    const show = await svc.createShow(tenantId, orgId, 'tester', { title: 'Vector', author: 'A' });
-    const guid = await svc.ensureShowGuid(tenantId, show.id, 'https://podnews.net/rss/');
+    const show = await createShow(tenantId, orgId, 'tester', { title: 'Vector', author: 'A' });
+    const guid = await ensureShowGuid(tenantId, show.id, 'https://podnews.net/rss/');
     expect(guid).toBe('9b024349-ccf0-5f69-a609-6b82873eab3c');
   });
 });

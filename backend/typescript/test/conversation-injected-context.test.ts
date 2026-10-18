@@ -24,6 +24,8 @@ import { describe, expect, it, beforeAll, afterAll, beforeEach } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
+import { saveConfig } from '../src/host/featureToggles/service.js';
+import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { getAgentRegistry } from '../src/executor/agentRegistry.js';
 import { markAsBoardGroup } from '../src/host/conversationStore.js';
 import { registerBoardContextResolver } from '../src/host/boardContextResolver.js';
@@ -40,6 +42,8 @@ beforeAll(async () => {
   process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
   process.env.OPENWOP_TEST_SEAM_ENABLED = 'true';
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
+  // ADR 0892: these planning surfaces are opt-in; the fixtures below need them on.
+  for (const id of ['strategy', 'priority-matrix', 'advisory-board']) { const d = getToggleDefault(id); if (d) await saveConfig({ ...d, status: 'on' }, 'test'); }
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
 });
 afterAll(async () => {

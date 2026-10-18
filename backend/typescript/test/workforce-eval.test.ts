@@ -6,18 +6,32 @@
  * the content-free guarantee (no scenario prose in the events), and that the
  * deterministic suite lands at the designed 0.8.
  */
+import { readFileSync } from 'node:fs';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { openSqliteStorage } from '../src/storage/sqlite/index.js';
+import { setEventLogBackend } from '../src/executor/eventLog.js';
 import { EVAL_SUITE_ID, runWorkforceLiveShadowEval } from '../src/host/workforceEval.js';
 import type { Storage } from '../src/storage/storage.js';
+import type { AgentSpec } from '../src/host/workforce.js';
 
-const HERO = 'workforce.finance.invoice-exception';
+// The real seeded workforces, so the eval resolves its agent from the entity it
+// is asked about (ADR 0775 P4 / ARWF-8), not from a constant.
+type SeedWorkforce = { workforceId: string; agents: AgentSpec[] };
+const WORKFORCES = JSON.parse(readFileSync('src/host/seed-data/workforces.json', 'utf8')) as SeedWorkforce[];
+const byId = (id: string): SeedWorkforce => {
+  const wf = WORKFORCES.find((w) => w.workforceId === id);
+  if (!wf) throw new Error(`seed workforce ${id} missing`);
+  return wf;
+};
+const HERO = byId('workforce.finance.invoice-exception');
 const NOW = 1_750_000_000_000;
 
 describe('workforce live-shadow eval (RFC 0081 §C, host-ext)', () => {
   let storage: Storage;
   beforeEach(() => {
     storage = openSqliteStorage(':memory:');
+    // ADR 0889 — eval events go through the event log (sequence, bus, closure), as in production.
+    setEventLogBackend(storage);
   });
 
   it('dispatches the supervisor over the suite, scores it, and returns a spec-shaped EvalSummary', async () => {
@@ -63,5 +77,34 @@ describe('workforce live-shadow eval (RFC 0081 §C, host-ext)', () => {
     expect(b.aggregateScore).toBe(a.aggregateScore);
     expect(b.tasks).toEqual(a.tasks);
     expect(b.runId).toBe(a.runId); // id derived from (tenant, workforce, nowMs)
+  });
+
+  // ADR 0775 P4 (ARWF-8) — before this, every workforce dispatched `host.priya`
+  // over the invoice suite and reported that score under its own id.
+  it('refuses a workforce that has no eval suite instead of scoring it on the invoice suite', async () => {
+    const support = byId('workforce.support.escalation-triage');
+    await expect(runWorkforceLiveShadowEval(storage, 'demo', support, NOW)).rejects.toMatchObject({
+      httpStatus: 409,
+      details: { reason: 'no_eval_suite', workforceId: support.workforceId },
+    });
+    expect(await storage.listRuns({ tenantId: 'demo', limit: 100 })).toEqual([]);
+  });
+
+  it('refuses when the workforce supervisor is not the agent the suite was written for', async () => {
+    const swapped: SeedWorkforce = {
+      ...HERO,
+      agents: HERO.agents.map((a) => (a.role === 'supervisor' ? { ...a, agentRef: 'host.someone-else' } : a)),
+    };
+    await expect(runWorkforceLiveShadowEval(storage, 'demo', swapped, NOW)).rejects.toMatchObject({
+      httpStatus: 409,
+      details: { reason: 'supervisor_mismatch' },
+    });
+  });
+
+  it('records the supervisor it resolved from the workforce on the eval run', async () => {
+    const s = await runWorkforceLiveShadowEval(storage, 'demo', HERO, NOW);
+    const run = await storage.getRun(s.runId);
+    const supervisor = HERO.agents.find((a) => a.role === 'supervisor')!.agentRef;
+    expect(run?.metadata).toMatchObject({ evalAgentId: supervisor, workforceId: HERO.workforceId });
   });
 });

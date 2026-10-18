@@ -4,12 +4,12 @@
  * them (unlike a third-party crm record): the profile row, its handle-index claim, and the
  * subject's reviews. Other subjects and other tenants are untouched.
  */
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { eraseSubject } from '../src/host/subjectErasure.js';
 import {
-  eraseCommunitySubject, __test,
+  eraseCommunitySubject, reconcileReviewProjections, __test,
 } from '../src/features/kicktodo-community/communityService.js';
 
 const T = 'tenant-A';
@@ -54,6 +54,7 @@ describe('ADR 0458 P0 — community subject erasure', () => {
     expect(await __test.reviews.get(`${T}::c1::${B}`)).not.toBeNull();
     // Same subject id in another tenant untouched.
     expect(await __test.profiles.get(`${T2}::${A}`)).not.toBeNull();
+    expect(await __test.handleIndex.get(`${T2}::alice2`)).not.toBeNull();
     expect(await __test.reviews.get(`${T2}::c9::${A}`)).not.toBeNull();
   });
 
@@ -61,7 +62,15 @@ describe('ADR 0458 P0 — community subject erasure', () => {
     await eraseCommunitySubject(T, A);
     await eraseCommunitySubject(T, A);
     expect(await __test.profiles.get(`${T}::${A}`)).toBeNull();
+    // The falsy guard is only observable against a row whose subject IS empty
+    // (malformed/legacy): an unguarded '' would match exactly that row. Without
+    // it, '' matches no key and the guard could be deleted unnoticed (w40 probe
+    // ec-falsy-guard-gone stayed green).
+    await seedProfile(T, '', 'blank');
+    await seedReview(T, '', 'c1');
     await eraseCommunitySubject(T, '');
+    expect(await __test.profiles.get(`${T}::`)).not.toBeNull();
+    expect(await __test.reviews.get(`${T}::c1::`)).not.toBeNull();
     expect(await __test.profiles.get(`${T}::${B}`)).not.toBeNull();
   });
 
@@ -69,5 +78,31 @@ describe('ADR 0458 P0 — community subject erasure', () => {
     await eraseSubject(T, A);
     expect(await __test.profiles.get(`${T}::${A}`)).toBeNull();
     expect(await __test.profiles.get(`${T}::${B}`)).not.toBeNull();
+  });
+});
+
+/**
+ * KTY-5 / KTCOM-Y3 (KickTodo wave 4C) — the review erasure and the tenant-scoped
+ * review reconcile read ONE tenant's slice (rows are keyed `${tenantId}::…`); both
+ * scanned every tenant's reviews before. Breaks if either goes back to `list()`
+ * (the spy sees the call) — sabotage-witnessed.
+ */
+describe('KTY-5 — community erasure + tenant reconcile never scan other tenants', () => {
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  it('erases from the tenant prefix only', async () => {
+    const scan = vi.spyOn(__test.reviews, 'list');
+    await eraseCommunitySubject(T, A);
+    expect(scan).not.toHaveBeenCalled();
+    expect(await __test.reviews.get(`${T}::c1::${A}`)).toBeNull();
+    expect(await __test.reviews.get(`${T}::c1::${B}`)).not.toBeNull();
+  });
+
+  it('a tenant-scoped reconcile reads that tenant only; the boot sweep still covers all', async () => {
+    const scan = vi.spyOn(__test.reviews, 'list');
+    await reconcileReviewProjections(T);
+    expect(scan).not.toHaveBeenCalled();
+    await reconcileReviewProjections();
+    expect(scan).toHaveBeenCalledTimes(1);
   });
 });

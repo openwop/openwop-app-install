@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { render, screen, fireEvent, cleanup } from '@testing-library/react';
+import { render, screen, fireEvent, cleanup, within } from '@testing-library/react';
 import { MembersPane } from '../MembersPane.js';
 import type { ActiveAgentRow } from '../../activeAgents/types.js';
 
@@ -7,6 +7,10 @@ import type { ActiveAgentRow } from '../../activeAgents/types.js';
  * ADR 0140 follow-on — the shared right-docked members pane (deck + ChatSidebar).
  * Renders the active conversation's roster (agent case here) with the shared
  * ConversationLineup.
+ *
+ * Breaks if the aside loses its accessible name (a landmark named "In this
+ * conversation"), the lineup renders outside it, or the labelled close control
+ * stops calling onClose (w44 mp-label / mp-lineup / mp-close).
  */
 
 const LINEUP: ActiveAgentRow[] = [
@@ -34,8 +38,8 @@ afterEach(() => cleanup());
 describe('MembersPane', () => {
   it('renders the roster heading and the agent lineup', () => {
     renderPane();
-    expect(screen.getByRole('complementary', { name: 'In this conversation' })).toBeTruthy();
-    expect(screen.getByText('Chief of Staff')).toBeTruthy();
+    const pane = screen.getByRole('complementary', { name: 'In this conversation' });
+    expect(within(pane).getByText('Chief of Staff')).toBeTruthy();
   });
 
   it('calls onClose from the close control', () => {

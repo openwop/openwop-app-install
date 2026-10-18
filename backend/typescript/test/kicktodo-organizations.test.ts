@@ -62,7 +62,7 @@ describe('org challenge library (P1)', () => {
   it('allowlist overlay when curated; full catalog when absent; unknown challenge 404s', async () => {
     const before = await libraryCatalog(T, ORG);
     expect(before.curated).toBe(false);
-    expect(before.challenges.length).toBeGreaterThanOrEqual(2);
+    expect(before.challenges.map((c) => c.id).sort()).toEqual([challengeA, challengeB].sort());
 
     await setLibraryEntry(T, ORG, 'user:orgp-admin', { challengeId: challengeA, version: 1, present: true });
     const curated = await libraryCatalog(T, ORG);
@@ -87,7 +87,7 @@ describe('org cohorts + k-anonymous report (P2/P3)', () => {
 
     const big = cells.find((c) => c.circleId === bigCircleId)!;
     expect(big.outcome).not.toBeNull();
-    expect(big.outcome!.activeMembers).toBeGreaterThanOrEqual(REPORT_K_FLOOR);
+    expect(big.outcome!.activeMembers).toBe(REPORT_K_FLOOR + 1); // K joiners + the owner's grant (the exact floor is pinned in -depth)
     expect(Object.keys(big.outcome!).sort()).toEqual(['activeMembers', 'completedMembers', 'completionRate', 'members']);
 
     const small = cells.find((c) => c.circleId === smallCircleId)!;

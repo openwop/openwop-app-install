@@ -31,7 +31,8 @@ describe('deck tab kinds', () => {
     const bad = sanitizeTabDeck(env([{ sessionId: 'b', pinned: false, lastActiveSeq: 1, kind: '<script>' }]), 'u1');
     expect(bad?.tabs).toEqual([]);
     const old = sanitizeTabDeck(env([{ sessionId: 'c', pinned: false, lastActiveSeq: 1 }]), 'u1');
-    expect(old?.tabs[0]).toEqual({ sessionId: 'c', pinned: false, lastActiveSeq: 1 });
+    // toStrictEqual: an old deck must not gain even a `kind: undefined` key.
+    expect(old?.tabs[0]).toStrictEqual({ sessionId: 'c', pinned: false, lastActiveSeq: 1 });
   });
 
   it('the registry refuses a malformed kind id', () => {

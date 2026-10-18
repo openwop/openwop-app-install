@@ -9,7 +9,11 @@ import { describe, expect, it } from 'vitest';
 import { clampNumber, clampValue, clampDocForSave } from '../propBounds.js';
 import type { CanvasPropDef } from '../types.js';
 
-const numDef = (name: string, min?: number, max?: number): CanvasPropDef => ({ name, type: 'number', label: name, min, max });
+const numDef = (name: string, min?: number, max?: number): CanvasPropDef => ({
+  name, type: 'number', label: name,
+  ...(min !== undefined ? { min } : {}),
+  ...(max !== undefined ? { max } : {}),
+});
 const strDef = (name: string, maxLength: number): CanvasPropDef => ({ name, type: 'string', label: name, maxLength });
 
 describe('clampNumber', () => {
@@ -27,9 +31,12 @@ describe('clampValue', () => {
     expect(clampValue(150, numDef('w', 0, 100))).toBe(100);
     expect(clampValue(undefined, numDef('w', 0, 100))).toBeUndefined();
     expect(clampValue(NaN, numDef('w', 0, 100))).toBeNaN();
+    // Only FINITE numbers are clamped — Infinity passes through (NaN alone could
+    // not show the isFinite guard: clampNumber leaves NaN as NaN either way).
+    expect(clampValue(Infinity, numDef('w', 0, 100))).toBe(Infinity);
     expect(clampValue('nope', numDef('w', 0, 100))).toBe('nope');
   });
-  it('truncates over-length strings, leaves shorter ones by reference', () => {
+  it('truncates over-length strings, leaves shorter ones unchanged', () => {
     expect(clampValue('abcdef', strDef('t', 3))).toBe('abc');
     const short = 'ab';
     expect(clampValue(short, strDef('t', 3))).toBe(short);

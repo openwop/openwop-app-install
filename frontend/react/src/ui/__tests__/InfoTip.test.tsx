@@ -31,8 +31,11 @@ describe('InfoTip', () => {
     // NOT use aria-expanded (that's a disclosure/button-controls-region attr).
     expect(trigger.getAttribute('aria-expanded')).toBeNull();
 
+    // Opened by focus AND hover: Escape must clear both, or the hover keeps it up.
+    fireEvent.mouseEnter(trigger);
     fireEvent.keyDown(trigger, { key: 'Escape' });
     expect(screen.queryByRole('tooltip')).toBeNull();
+    expect(trigger.getAttribute('aria-describedby')).toBeNull();
   });
 
   it('shows on hover and hides on mouse-leave', () => {

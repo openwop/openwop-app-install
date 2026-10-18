@@ -15,9 +15,10 @@ import { render, cleanup, fireEvent, act, screen } from '@testing-library/react'
 import { InteractiveDrawing } from '../InteractiveDrawing.js';
 import type { DrawingDoc } from '../definition.js';
 
-const { toastWarning, toastError, toastInfo, copyPngToClipboard, svgStringToPngBlob, inlineSvgImageHrefs } = vi.hoisted(() => ({
+const { toastWarning, toastError, toastInfo, copyPngToClipboard, svgStringToPngBlob, inlineSvgImageHrefs, downloadBlob } = vi.hoisted(() => ({
   toastWarning: vi.fn(), toastError: vi.fn(), toastInfo: vi.fn(),
   copyPngToClipboard: vi.fn(), svgStringToPngBlob: vi.fn(), inlineSvgImageHrefs: vi.fn(),
+  downloadBlob: vi.fn(),
 }));
 
 vi.mock('../../../ui/toast.js', async (orig) => {
@@ -26,11 +27,10 @@ vi.mock('../../../ui/toast.js', async (orig) => {
 });
 vi.mock('../../../canvas/exportUtils.js', async (orig) => ({
   ...(await orig<typeof import('../../../canvas/exportUtils.js')>()),
-  inlineSvgImageHrefs, svgStringToPngBlob, copyPngToClipboard,
-  downloadBlob: vi.fn(),
+  inlineSvgImageHrefs, svgStringToPngBlob, copyPngToClipboard, downloadBlob,
 }));
 
-const DOC = { shapes: [{ kind: 'rect', x: 40, y: 40, width: 120, height: 80 }], width: 360, height: 360 } as unknown as DrawingDoc;
+const DOC: DrawingDoc = { title: 'Plan', shapes: [{ kind: 'rect', x: 40, y: 40, width: 120, height: 80 }], width: 360, height: 360 };
 
 const mount = (): void => {
   render(
@@ -48,10 +48,11 @@ const mount = (): void => {
   );
 };
 
-const clickExport = async (name: RegExp): Promise<void> => {
-  const btn = screen.getAllByRole('button').find((b) => name.test(b.textContent ?? '') || name.test(b.getAttribute('aria-label') ?? ''));
-  expect(btn, `no export control matching ${name}`).toBeTruthy();
-  await act(async () => { fireEvent.click(btn!); });
+/** Exact accessible names ("Export PNG" vs "Copy PNG" — a /PNG/ match only
+ *  worked by DOM order). */
+const clickExport = async (name: 'Export SVG' | 'Export PNG' | 'Copy PNG'): Promise<void> => {
+  const btn = screen.getByRole('button', { name });
+  await act(async () => { fireEvent.click(btn); });
 };
 
 afterEach(() => { cleanup(); vi.clearAllMocks(); });
@@ -65,23 +66,28 @@ describe('DRAW-G3 — the export says what it could not embed', () => {
   it('warns when an image could not be inlined, and still exports', async () => {
     inlineSvgImageHrefs.mockResolvedValue({ text: '<svg/>', unresolved: 2 });
     mount();
-    await clickExport(/SVG/i);
-    expect(toastWarning).toHaveBeenCalled();
+    await clickExport('Export SVG');
+    expect(toastWarning).toHaveBeenCalledWith('2 image(s) could not be embedded and are missing from the exported file.');
     // Degrading beats failing: the file is still produced.
+    expect(downloadBlob).toHaveBeenCalledTimes(1);
+    expect(downloadBlob).toHaveBeenCalledWith(expect.any(Blob), 'Plan.svg');
     expect(toastError).not.toHaveBeenCalled();
   });
 
   it('warns on the PNG path too — that is where the hole is invisible', async () => {
     inlineSvgImageHrefs.mockResolvedValue({ text: '<svg/>', unresolved: 1 });
     mount();
-    await clickExport(/PNG/i);
-    expect(toastWarning).toHaveBeenCalled();
+    await clickExport('Export PNG');
+    expect(toastWarning).toHaveBeenCalledWith('1 image(s) could not be embedded and are missing from the exported file.');
+    expect(downloadBlob).toHaveBeenCalledWith(expect.any(Blob), 'Plan.png');
   });
 
   it('stays quiet when everything embedded', async () => {
     mount();
-    await clickExport(/SVG/i);
+    await clickExport('Export SVG');
     expect(toastWarning).not.toHaveBeenCalled();
+    // Positive control: the export really ran (a click that never reached it is also silent).
+    expect(downloadBlob).toHaveBeenCalledWith(expect.any(Blob), 'Plan.svg');
   });
 });
 
@@ -89,20 +95,20 @@ describe('DRAW-G2 — a refused clipboard is not a failed export', () => {
   it('reports the COPY as the thing that failed', async () => {
     copyPngToClipboard.mockResolvedValue(false);
     mount();
-    const copy = screen.getAllByRole('button').find((b) => /copy/i.test(`${b.textContent} ${b.getAttribute('aria-label')}`));
-    expect(copy, 'no copy control').toBeTruthy();
-    await act(async () => { fireEvent.click(copy!); });
+    await clickExport('Copy PNG');
     expect(toastError).toHaveBeenCalledTimes(1);
-    const msg = String(toastError.mock.calls[0]![0]);
-    expect(msg).toMatch(/copy/i);
-    // The old message sent the user back to re-export a PNG that was fine.
-    expect(msg).not.toBe('Export failed');
+    // The old message ("Export failed") sent the user back to re-export a PNG that was fine.
+    expect(toastError).toHaveBeenCalledWith('Could not copy — the clipboard refused. The image exported fine; try Export PNG.');
+    expect(toastInfo).not.toHaveBeenCalled();
   });
 
   it('a genuine rasterization failure is still an export failure', async () => {
     svgStringToPngBlob.mockResolvedValue(null);
     mount();
-    await clickExport(/PNG/i);
-    expect(String(toastError.mock.calls[0]![0])).toBe('Export failed');
+    await clickExport('Export PNG');
+    expect(toastError).toHaveBeenCalledTimes(1);
+    expect(toastError).toHaveBeenCalledWith('Export failed');
+    expect(downloadBlob).not.toHaveBeenCalled();
+    expect(copyPngToClipboard).not.toHaveBeenCalled();
   });
 });

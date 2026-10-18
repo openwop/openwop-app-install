@@ -6,9 +6,19 @@
  * `runs:read` starts a run and is then refused reading it), the bare key is
  * shown once with the two lines the CLI needs, and a key that declares nothing
  * is called unrestricted instead of looking like a small one.
+ *
+ * Also covers ADR 0795 D4 (lifetimes), ADR 0798 (hint, rotation, workspace
+ * rules — offered only to a workspace manager) and ADR 0799 (CLI sign-in
+ * approval: only APPROVE refreshes the key list). PROTECTED (secrets): the bare
+ * key lives on the page exactly once and Done / revoke removes every trace of it.
+ *
+ * Sabotage-witnessed (wave 52): dropping `runs:read` from the run preset, the
+ * MCP chip's scope check, `dismissIssued`'s clear, the Deny/Approve branch in
+ * CliLoginCard, the KeyPolicyCard error, or the base-URL trailing-slash trim
+ * each turn a case below red.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, waitFor, cleanup, fireEvent } from '@testing-library/react';
+import { render, screen, waitFor, cleanup, fireEvent, act } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { ApiError } from '../../../client/requestJson.js';
 
@@ -36,6 +46,7 @@ vi.mock('../apiKeysClient.js', async (orig) => ({
 
 import { ApiKeysPage } from '../ApiKeysPage.js';
 import { decideCliLogin, getCliLoginRequest } from '../apiKeysClient.js';
+import { config } from '../../../client/config.js';
 import { API_KEY_PRESETS, cliSetupSnippet, createDeveloperKey, daysUntilExpiry, lifetimeChoices, listDeveloperKeysWithPolicy, presetOfKey, revokeDeveloperKey, rotateDeveloperKey, setWorkspaceKeyPolicy } from '../apiKeysClient.js';
 
 const mListRaw = vi.mocked(listDeveloperKeysWithPolicy);
@@ -52,7 +63,7 @@ const mRotate = vi.mocked(rotateDeveloperKey);
 const mSetPolicy = vi.mocked(setWorkspaceKeyPolicy);
 const mGetLogin = vi.mocked(getCliLoginRequest);
 const mDecideLogin = vi.mocked(decideCliLogin);
-const key = (over: Partial<Keys[number]> = {}) => ({
+const key = (over: Partial<Keys[number]> = {}): Keys[number] => ({
   keyId: 'dk:1', name: 'Laptop', scopes: [...API_KEY_PRESETS.run], createdAt: '2026-10-01T00:00:00Z', mine: true, ...over,
 });
 const renderPage = () => render(<MemoryRouter><ApiKeysPage /></MemoryRouter>);
@@ -92,8 +103,9 @@ describe('ApiKeysPage', () => {
     const [name, scopes, lifetimeDays] = mCreate.mock.calls[0]!;
     expect(name).toBe('Laptop');
     expect(lifetimeDays, 'the deployment default, sent explicitly').toBe(90);
-    // Exactly the preset — `runs:read` is the scope the MCP key lacked.
-    expect(scopes).toEqual(API_KEY_PRESETS.run);
+    // Exactly the preset — `runs:read` is the scope the MCP key lacked. Pinned as a
+    // literal: an expectation read from API_KEY_PRESETS would move with a sabotage.
+    expect(scopes).toEqual(['runs:create', 'runs:read', 'runs:cancel', 'artifacts:read', 'approvals:respond']);
     expect(scopes).toContain('runs:read');
   });
 
@@ -103,7 +115,7 @@ describe('ApiKeysPage', () => {
     fireEvent.click(screen.getByRole('radio', { name: /Read only/ }));
     fireEvent.click(screen.getByRole('button', { name: 'Create key' }));
     await waitFor(() => expect(mCreate).toHaveBeenCalledTimes(1));
-    expect(mCreate.mock.calls[0]![1]).toEqual(API_KEY_PRESETS.read);
+    expect(mCreate.mock.calls[0]![1]).toEqual(['runs:read', 'artifacts:read']);
   });
 
   it('shows the bare key once, with the two lines the CLI needs, and Done removes both', async () => {
@@ -116,12 +128,14 @@ describe('ApiKeysPage', () => {
     expect(region.textContent).toContain('export OPENWOP_API_KEY=owk_secret_once');
     fireEvent.click(screen.getByRole('button', { name: 'Done' }));
     expect(screen.queryByText(/owk_secret_once/)).toBeNull();
+    // Not in ANY node — an attribute or a hidden copy would still hold the secret.
+    expect(document.body.innerHTML).not.toContain('owk_secret_once');
   });
 
   it('a blank name is refused in place; nothing is minted', async () => {
     renderPage();
     fireEvent.click(await screen.findByRole('button', { name: 'Create key' }));
-    expect(await screen.findByRole('alert')).toBeTruthy();
+    expect((await screen.findByRole('alert')).textContent).toContain('Give the key a name so you can tell your keys apart.');
     expect(mCreate).not.toHaveBeenCalled();
   });
 
@@ -177,6 +191,7 @@ describe('ApiKeysPage', () => {
     await waitFor(() => expect(mRevoke).toHaveBeenCalledWith('dk:new'));
     await waitFor(() => expect(screen.queryByRole('region', { name: 'Your new key' })).toBeNull());
     expect(screen.queryByText(/owk_secret_once/)).toBeNull();
+    expect(document.body.innerHTML).not.toContain('owk_secret_once');
   });
 
   it('a list refresh that fails after a create keeps the once-only key on the page', async () => {
@@ -191,11 +206,15 @@ describe('ApiKeysPage', () => {
   });
 
   it('a key NAMED like an AI-client key but holding API scopes is not relabelled', async () => {
-    mList.mockImplementation(async () => [key({ keyId: 'dk:9', name: 'MCP: sneaky', scopes: [...API_KEY_PRESETS.cli] })]);
+    // A CUSTOM declaration (not a preset), so the chip reaches the MCP branch and
+    // only its scope check keeps it from reading "AI client": `runs:read` is an
+    // API scope an MCP key never holds. (The old fixture held the `cli` preset
+    // and returned before the MCP branch — removing the scope check stayed green.)
+    mList.mockImplementation(async () => [key({ keyId: 'dk:9', name: 'MCP: sneaky', scopes: ['runs:create', 'runs:read'] })]);
     renderPage();
     const row = (await screen.findByText('MCP: sneaky')).closest('li')!;
     expect(row.textContent).not.toContain('AI client');
-    expect(row.textContent).toContain('CLI — act as me');
+    expect(row.textContent).toContain('Custom scopes');
   });
 });
 
@@ -312,13 +331,15 @@ describe('ApiKeysPage — hint, rotation, workspace rules (ADR 0798)', () => {
     await waitFor(() => expect(mSetPolicy).toHaveBeenCalledWith({ disabled: true, maxLifetimeDays: 30 }));
   });
 
-  it('a refused save shows the server’s reason', async () => {
+  it('a refused (403) save is shown as a permission refusal, not swallowed', async () => {
+    // A 403 maps to the shared localized permission copy (writeErrorMessage), by
+    // design — never the raw transport text, and never silence.
     canManage.value = true;
     mSetPolicy.mockImplementation(async () => { throw new ApiError({ status: 403, statusText: 'Forbidden', url: 'developer key policy', body: { message: 'Only a workspace admin or owner can change the API key policy.' }, message: 'no' }); });
     renderPage();
     fireEvent.click(await screen.findByRole('button', { name: 'Save rules' }));
     await waitFor(() => expect(mSetPolicy).toHaveBeenCalledTimes(1));
-    await waitFor(() => expect(document.querySelector('.alert.error')).not.toBeNull());
+    expect(await screen.findByText("You don't have permission to do that here. Ask an admin of this workspace for access.")).toBeTruthy();
   });
 });
 
@@ -357,9 +378,15 @@ describe('ApiKeysPage — approve a CLI sign-in (ADR 0799)', () => {
     renderPage();
     fireEvent.change(await screen.findByLabelText('Code from your terminal'), { target: { value: 'BCDF-GHJK' } });
     fireEvent.click(screen.getByRole('button', { name: 'Find sign-in' }));
-    fireEvent.click(await screen.findByRole('button', { name: 'Deny' }));
+    const deny = await screen.findByRole('button', { name: 'Deny' });
+    const listsBefore = mListRaw.mock.calls.length;
+    fireEvent.click(deny);
     await waitFor(() => expect(mDecideLogin).toHaveBeenCalledWith('BCDF-GHJK', 'deny'));
     expect(await screen.findByText(/Sign-in for “laptop” was denied/)).toBeTruthy();
+    // The decision has settled (its message is up); a refresh would have been
+    // issued in the same continuation.
+    await act(async () => { for (let i = 0; i < 5; i += 1) await new Promise((r) => setImmediate(r)); });
+    expect(mListRaw.mock.calls.length).toBe(listsBefore);
   });
 
   it('a wrong, expired or used code reads the same, with what to do next', async () => {
@@ -403,9 +430,17 @@ describe('apiKeysClient', () => {
 
   it('publicApiBaseUrl makes a same-origin base absolute and leaves an absolute one alone', async () => {
     const real = await vi.importActual<typeof import('../apiKeysClient.js')>('../apiKeysClient.js');
-    const url = real.publicApiBaseUrl('https://app.example');
-    expect(url).toMatch(/^https?:\/\//);
-    expect(url.endsWith('/')).toBe(false);
+    const was = config.baseUrl;
+    try {
+      // Absolute base: left alone (and never given a trailing slash).
+      config.baseUrl = 'https://api.example/v-base/';
+      expect(real.publicApiBaseUrl('https://app.example')).toBe('https://api.example/v-base');
+      // Same-origin base: resolved against the page origin.
+      config.baseUrl = '/api';
+      expect(real.publicApiBaseUrl('https://app.example')).toBe('https://app.example/api');
+    } finally {
+      config.baseUrl = was;
+    }
   });
 
   it('the CLI snippet names the two variables the CLI reads', () => {

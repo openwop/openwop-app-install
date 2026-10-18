@@ -2,10 +2,22 @@
  * ADR 0107 Phase 2 — the knowledge-sync feature-package (config layer). Two parts:
  *  (a) the service CRUD + diff-state store (createSyncSource validation, org-filtered
  *      list, cross-tenant null, status, delete-cascades-file-state);
- *  (b) the routes' gating — toggle 404, missing-org 400, non-existent-connection 404,
- *      cross-tenant IDOR 404. The 201 happy-path seeds a Google OAuth connection
- *      (built-in `google` provider) + a KB collection, incl. the folder-URL→id
- *      normalization (ADR 0107 follow-on).
+ *  (b) the routes' gating — toggle 404 (ADR 0681 D1: every route, by message), missing-org
+ *      400, non-existent-connection 404, cross-tenant IDOR 404 (and the victim row
+ *      survives). The 201 happy-path seeds a Google OAuth connection (built-in `google`
+ *      provider) + a KB collection, incl. the folder-URL→id normalization (ADR 0107
+ *      follow-on) and the ADR 0108 OQ-3 `includeMedia` opt-out.
+ *
+ * Sabotage-witnessed (/grade-tests w23): inverting the diff's revision compare, the prune
+ * filter or the malformed-entry skip; dropping the org filter, the provider/cadence
+ * validation, the delete cascade, the status write; removing `requireFeatureEnabled`
+ * from a route; an unlisted new route; a tenant-blind source lookup; the route's own
+ * folder-URL refusal (asserted by its MESSAGE — the service's `req()` also answers 400).
+ *
+ * Honest double guard: `getSyncSource`'s `s.tenantId === tenantId` belt cannot be
+ * witnessed — the store key is `<tenantId>:<id>`, so a cross-tenant read misses before
+ * the belt runs (probe `w23g2-ks-svc-crosstenant-belt`, vacuous). The tenant-blind lookup
+ * probe is the witness instead.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -17,7 +29,7 @@ import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import {
   createSyncSource, listSyncSources, getSyncSource, setSyncStatus, deleteSyncSource,
   listFileStates, upsertFileState, diffFolder, syncDocumentId,
-  type RemoteFile, type SyncFileState,
+  type RemoteFile, type SyncFileState, type SyncSource,
 } from '../src/features/knowledge-sync/knowledgeSyncService.js';
 import { upsertOAuthConnection } from '../src/features/connections/connectionsService.js';
 import { createCollection } from '../src/features/kb/kbService.js';
@@ -31,7 +43,7 @@ describe('diffFolder (ADR 0107 Phase 3 — the correctness-critical diff)', () =
     ({ sourceId, externalFileId: fileId, documentId: syncDocumentId(sourceId, fileId), revision });
 
   it('classifies NEW / CHANGED / UNCHANGED / DELETED', () => {
-    const remote = [rf('a', 'r1'), rf('b', 'r2-NEW'), rf('c', 'r3')]; // a unchanged, b changed, c unchanged-then-... wait
+    const remote = [rf('a', 'r1'), rf('b', 'r2-NEW'), rf('c', 'r3')]; // a unchanged, b changed, c new
     const states = [st('S', 'a', 'r1'), st('S', 'b', 'r2-OLD'), st('S', 'd', 'r4')]; // a same, b differs, d gone
     const d = diffFolder('S', remote, states);
     // a: revision matches → unchanged; c: no prior state → new; b: revision differs → changed
@@ -86,8 +98,14 @@ describe('knowledgeSyncService (ADR 0107 Phase 2 — CRUD + diff state)', () => 
     await upsertFileState({ sourceId: s.id, externalFileId: 'fileA', documentId: `sync:${s.id}:fileA`, revision: 'r1' });
     expect((await listFileStates(s.id)).length).toBe(1);
 
-    const paused = await setSyncStatus('tA', s.id, 'paused', NOW);
-    expect(paused?.status).toBe('paused');
+    await setSyncStatus('tA', s.id, 'paused', NOW, { pausedReason: 'user' });
+    // read back — the PERSISTED row, not the writer's return value
+    expect((await getSyncSource('tA', s.id))?.status).toBe('paused');
+    expect((await getSyncSource('tA', s.id))?.pausedReason).toBe('user');
+    await setSyncStatus('tA', s.id, 'active', NOW, { pausedReason: null });
+    const resumed = await getSyncSource('tA', s.id);
+    expect(resumed?.status).toBe('active');
+    expect(resumed?.pausedReason).toBeUndefined(); // a resumed row cannot keep a pause reason
 
     expect(await deleteSyncSource('tA', s.id)).toBe(true);
     expect(await getSyncSource('tA', s.id)).toBeNull();
@@ -112,13 +130,22 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T }
+/** The response bodies this file reads — typed, not `any`, so a misspelled field is a tsc error. */
+interface KsBody {
+  error?: string;
+  message?: string;
+  orgId?: string;
+  source?: SyncSource;
+  sources?: SyncSource[];
+  deleted?: boolean;
+}
+interface Res { status: number; body: KsBody | undefined }
 function client() {
   let cookie = '';
   const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    const out = res.status === 204 ? undefined : ((await res.json().catch(() => undefined)) as KsBody | undefined);
     return { status: res.status, body: out };
   };
   return { get: (p: string) => call('GET', p), post: (p: string, b?: unknown) => call('POST', p, b), patch: (p: string, b?: unknown) => call('PATCH', p, b), del: (p: string) => call('DELETE', p) };
@@ -128,7 +155,7 @@ async function ownerWithOrg(who: string) {
   const c = client();
   await c.post('/host/openwop-app/test/login', { email: uniqEmail(who) });
   const org = await c.post('/host/openwop-app/orgs', { name: 'Acme' });
-  return { c, orgId: org.body.orgId as string };
+  return { c, orgId: String(org.body?.orgId) };
 }
 const KS = '/host/openwop-app/knowledge-sync';
 
@@ -171,21 +198,23 @@ describe('knowledge-sync routes — gating (ADR 0107 Phase 2)', () => {
 
   it('404s EVERY route while the toggle is OFF — all of them, not the two the name used to cover', async () => {
     await enableToggle(false);
-    const { c, orgId } = await ownerWithOrg('ks-off');
-    for (const { label, call } of TOGGLE_GATED_ROUTES) {
-      const res = await call(c, orgId);
-      expect(res.status, `${label} must 404 while the toggle is OFF`).toBe(404);
-      // NON-VACUITY (this leg was vacuous when first written, and a sabotage caught it):
-      // asserting 404 alone cannot tell "404 because the toggle is off" from "404 because
-      // `ks-1` does not exist" — removing `requireFeatureEnabled` from POST /:id/sync left the
-      // whole file GREEN. Both paths throw `not_found`, so the status and the code are both
-      // useless here; what separates them is the toggle-off message, which names the feature
-      // (`featureRoute.ts:41` — "<label> is not enabled for this tenant.").
-      expect(
-        String(res.body?.message ?? ''),
-        `${label} must 404 because the TOGGLE is off, not because the resource is missing`,
-      ).toMatch(/is not enabled for this tenant/i);
-    }
+    try {
+      const { c, orgId } = await ownerWithOrg('ks-off');
+      for (const { label, call } of TOGGLE_GATED_ROUTES) {
+        const res = await call(c, orgId);
+        expect(res.status, `${label} must 404 while the toggle is OFF`).toBe(404);
+        // NON-VACUITY (this leg was vacuous when first written, and a sabotage caught it):
+        // asserting 404 alone cannot tell "404 because the toggle is off" from "404 because
+        // `ks-1` does not exist" — removing `requireFeatureEnabled` from POST /:id/sync left the
+        // whole file GREEN. Both paths throw `not_found`, so the status and the code are both
+        // useless here; what separates them is the toggle-off message, which names the feature
+        // (`featureRoute.ts:41` — "<label> is not enabled for this tenant.").
+        expect(
+          String(res.body?.message ?? ''),
+          `${label} must 404 because the TOGGLE is off, not because the resource is missing`,
+        ).toMatch(/is not enabled for this tenant/i);
+      }
+    } finally { await enableToggle(true); } // restore — never leak a global toggle into a later case
   });
 
   it('the table above covers every route the feature registers — a new route cannot shrink the claim silently', async () => {
@@ -203,28 +232,42 @@ describe('knowledge-sync routes — gating (ADR 0107 Phase 2)', () => {
 
   it('rejects a create with no orgId (400) and a non-existent connection (404)', async () => {
     const { c, orgId } = await ownerWithOrg('ks-val');
-    expect((await c.post(KS, {})).status).toBe(400); // no orgId
+    const noOrg = await c.post(KS, {});
+    expect(noOrg.status).toBe(400); // no orgId
+    expect(noOrg.body?.error).toBe('validation_error');
+    expect(noOrg.body?.message).toMatch(/orgId/);
     const r = await c.post(KS, { orgId, connectionId: 'conn:does-not-exist', collectionId: 'col', provider: 'google', externalFolderId: 'F', cadence: 'hourly' });
     expect(r.status, JSON.stringify(r.body)).toBe(404); // connection not found
-    expect(r.body.error).toBe('not_found');
+    expect(r.body?.error).toBe('not_found');
+    // the CONNECTION guard answered, not the (also missing) collection lookup behind it
+    expect(r.body?.message).toMatch(/Connection not found/);
   });
 
-  it('GET /browse — toggle-gated, requires orgId, 404 on an unknown connection', async () => {
-    await enableToggle(false);
-    const off = await ownerWithOrg('ks-browse-off');
-    expect((await off.c.get(`${KS}/browse?orgId=${off.orgId}&connectionId=c`)).status).toBe(404); // toggle off
-    await enableToggle(true);
+  // The toggle-off leg that used to open this case was a status-only duplicate of the
+  // `GET /browse` row of the table above (which also checks the toggle-off MESSAGE). Probe
+  // `w23g2-ks-rt-toggle-browse` (gate removed from /browse) left this leg GREEN — the 404
+  // came from the unknown connection — and turned only the table case red. Cut, not lost.
+  it('GET /browse — requires orgId, 404 on an unknown connection', async () => {
     const { c, orgId } = await ownerWithOrg('ks-browse');
-    expect((await c.get(`${KS}/browse?connectionId=c`)).status).toBe(400); // no orgId
-    expect((await c.get(`${KS}/browse?orgId=${orgId}&connectionId=conn:nope`)).status).toBe(404); // unknown connection
+    const noOrg = await c.get(`${KS}/browse?connectionId=c`);
+    expect(noOrg.status).toBe(400); // no orgId
+    expect(noOrg.body?.message).toMatch(/orgId/);
+    const unknown = await c.get(`${KS}/browse?orgId=${orgId}&connectionId=conn:nope`);
+    expect(unknown.status).toBe(404); // unknown connection
+    expect(unknown.body?.message).toMatch(/Connection not found/);
   });
 
   it('cross-tenant IDOR: a stranger gets a uniform 404 for another tenant\'s source', async () => {
     const { c: stranger } = await ownerWithOrg('ks-stranger');
     // seed a source for an unrelated tenant directly via the service
     const seeded = await createSyncSource('tenant-victim', 'org-v', { connectionId: 'c', provider: 'google', externalFolderId: 'F', collectionId: 'col', cadence: 'hourly' }, NOW);
-    expect((await stranger.get(`${KS}/${seeded.id}`)).status).toBe(404);
-    expect((await stranger.del(`${KS}/${seeded.id}`)).status).toBe(404);
+    const read = await stranger.get(`${KS}/${seeded.id}`);
+    expect(read.status).toBe(404);
+    expect(read.body?.message).toMatch(/Sync source not found/); // the uniform not-found, not a 403 that leaks existence
+    const del = await stranger.del(`${KS}/${seeded.id}`);
+    expect(del.status).toBe(404);
+    expect(del.body?.message).toMatch(/Sync source not found/);
+    expect(await getSyncSource('tenant-victim', seeded.id), 'the victim\'s source must survive the stranger\'s DELETE').not.toBeNull();
   });
 });
 
@@ -236,7 +279,7 @@ describe('create normalizes a Google Drive folder URL (ADR 0107 follow-on)', () 
     const tenantId = `org:${who}-${Date.now()}-${n++}`;
     const c = client();
     await c.post('/host/openwop-app/test/login', { email: uniqEmail(who), tenantId });
-    const orgId = (await c.post('/host/openwop-app/orgs', { name: 'Acme' })).body.orgId as string;
+    const orgId = String((await c.post('/host/openwop-app/orgs', { name: 'Acme' })).body?.orgId);
     // seed a Google OAuth connection + a KB collection in this tenant/org (Phase 4
     // is satisfied by the built-in `google` provider, so this resolves).
     const conn = await upsertOAuthConnection({ tenantId, provider: 'google', orgId, tokens: { accessToken: 'x', tokenType: 'Bearer', scopes: ['https://www.googleapis.com/auth/drive.readonly'] } });
@@ -248,7 +291,7 @@ describe('create normalizes a Google Drive folder URL (ADR 0107 follow-on)', () 
     const { c, orgId, connectionId, collectionId } = await seededOrg('ks-url-ok');
     const r = await c.post(KS, { orgId, connectionId, collectionId, provider: 'google', externalFolderId: `https://drive.google.com/drive/folders/${FOLDER_ID}?usp=sharing`, cadence: 'hourly' });
     expect(r.status, JSON.stringify(r.body)).toBe(201);
-    expect(r.body.source.externalFolderId).toBe(FOLDER_ID); // URL normalized server-side
+    expect(r.body?.source?.externalFolderId).toBe(FOLDER_ID); // URL normalized server-side
   });
 
   it('persists the per-source includeMedia opt-out through the route (ADR 0108 OQ-3)', async () => {
@@ -256,24 +299,27 @@ describe('create normalizes a Google Drive folder URL (ADR 0107 follow-on)', () 
     // explicit opt-out → stored false on the source
     const off = await c.post(KS, { orgId, connectionId, collectionId, provider: 'google', externalFolderId: FOLDER_ID, cadence: 'hourly', includeMedia: false });
     expect(off.status, JSON.stringify(off.body)).toBe(201);
-    expect(off.body.source.includeMedia).toBe(false);
+    expect(off.body?.source?.includeMedia).toBe(false);
     // omitted ⇒ media included (the field is simply absent; the runner treats absent as true)
     const on = await c.post(KS, { orgId, connectionId, collectionId, provider: 'google', externalFolderId: FOLDER_ID, cadence: 'daily' });
-    expect(on.body.source.includeMedia).toBeUndefined();
+    expect(on.status, JSON.stringify(on.body)).toBe(201);
+    expect(on.body?.source?.includeMedia).toBeUndefined();
   });
 
   it('PATCH /:id toggles includeMedia on an existing source without recreate (ADR 0108 OQ-3 follow-on)', async () => {
     const { c, orgId, connectionId, collectionId } = await seededOrg('ks-patch');
     const created = await c.post(KS, { orgId, connectionId, collectionId, provider: 'google', externalFolderId: FOLDER_ID, cadence: 'daily' });
-    const id = created.body.source.id as string;
-    expect(created.body.source.includeMedia).toBeUndefined(); // media on by default
+    expect(created.status, JSON.stringify(created.body)).toBe(201);
+    const id = String(created.body?.source?.id);
+    expect(created.body?.source?.includeMedia).toBeUndefined(); // media on by default
     // turn media OFF
     const off = await c.patch(`${KS}/${id}`, { includeMedia: false });
     expect(off.status, JSON.stringify(off.body)).toBe(200);
-    expect(off.body.source.includeMedia).toBe(false);
+    expect(off.body?.source?.includeMedia).toBe(false);
     // turn it back ON (field cleared ⇒ default)
     const back = await c.patch(`${KS}/${id}`, { includeMedia: true });
-    expect(back.body.source.includeMedia).toBeUndefined();
+    expect(back.status).toBe(200);
+    expect(back.body?.source?.includeMedia).toBeUndefined();
     // a non-boolean is rejected
     expect((await c.patch(`${KS}/${id}`, { includeMedia: 'yes' })).status).toBe(400);
     // PATCH on an unknown id → 404
@@ -284,7 +330,12 @@ describe('create normalizes a Google Drive folder URL (ADR 0107 follow-on)', () 
     const { c, orgId, connectionId, collectionId } = await seededOrg('ks-url-bad');
     const r = await c.post(KS, { orgId, connectionId, collectionId, provider: 'google', externalFolderId: 'not a real folder link', cadence: 'hourly' });
     expect(r.status).toBe(400);
-    expect(r.body.error).toBe('validation_error');
-    expect((await c.get(`${KS}?orgId=${orgId}`)).body.sources).toHaveLength(0); // nothing persisted
+    expect(r.body?.error).toBe('validation_error');
+    // The ROUTE's refusal, by its message: with it removed, the service's `req()` ALSO
+    // answers 400 validation_error ("`externalFolderId` is required") and persists
+    // nothing, so status + code + empty list were all green under that sabotage
+    // (probe `w23g2-ks-rt-url-reject`, vacuous before this line).
+    expect(r.body?.message).toMatch(/Google Drive folder link/i);
+    expect((await c.get(`${KS}?orgId=${orgId}`)).body?.sources).toHaveLength(0); // nothing persisted
   });
 });

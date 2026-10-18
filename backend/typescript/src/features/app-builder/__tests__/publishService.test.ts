@@ -1,11 +1,17 @@
 /**
- * Grade pass 2026-07-07 (code F8 test gap) — the publish push loop, unit-tested
+ * ADR 0306 (GitHub publish lane) — grade pass 2026-07-07 (code F8 test gap) — the publish push loop, unit-tested
  * over a mocked `brokeredFetch`: repo create/reuse (incl. the raced 409),
  * per-file 422 → warning, auth/rate-limit ABORT (no 200-warning cascade), and
  * `filesPushed`/`partial` accounting. The route-level authz/toggle/424 trio
  * lives in test/app-builder-publish.test.ts.
+ *
+ * Sabotage witnesses (grade-tests w36): 409 no longer tolerated, 403 not in the
+ * abort class, the repo-name check disabled, the 422 warning text changed,
+ * and the reported filesPushed clamped — each reds its case.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { openStorage } from '../../../storage/index.js';
+import type { BrokeredEgressDeps } from '../../../host/brokeredEgress.js';
 
 const calls: { method: string; url: string }[] = [];
 let responder: (method: string, url: string) => { status: number; json: Record<string, unknown> };
@@ -21,7 +27,9 @@ vi.mock('../../../host/brokeredEgress.js', () => ({
 
 const { publishToGitHub } = await import('../publishService.js');
 
-const DEPS = { storage: {} as never, tenantId: 't1', runId: 'publish:test', actingUserId: 'u1' };
+// The broker is mocked, so storage is never read — but the fixture is the
+// real type, not a cast.
+const DEPS: BrokeredEgressDeps = { storage: await openStorage('memory://'), tenantId: 't1', runId: 'publish:test', actingUserId: 'u1' };
 const APP = { name: 'Pub', screens: [{ id: 'home', name: 'Home', isInitial: true, components: [{ type: 'text', props: { text: 'x' } }] }] };
 
 beforeEach(() => { calls.length = 0; });
@@ -36,6 +44,8 @@ describe('publishToGitHub loop semantics', () => {
     const res = await publishToGitHub(DEPS, { state: APP, target: 'html-css', repo: 'my-app', isPrivate: true });
     expect(res.repo).toBe('created');
     expect(res.partial).toBe(false);
+    // Exact: every PUT the broker saw landed (an independent count).
+    expect(res.filesPushed).toBe(calls.filter((c) => c.method === 'PUT').length);
     expect(res.filesPushed).toBeGreaterThan(0);
     expect(res.repoUrl).toBe('https://github.com/octo/my-app');
   });
@@ -62,7 +72,9 @@ describe('publishToGitHub loop semantics', () => {
     expect(res.repo).toBe('reused');
     expect(res.partial).toBe(true);
     expect(res.warnings.some((w) => w.includes('left untouched'))).toBe(true);
-    expect(res.filesPushed).toBeGreaterThan(0); // later files still pushed
+    // Later files still pushed: every PUT but the one 422.
+    expect(res.filesPushed).toBe(calls.filter((c) => c.method === 'PUT').length - 1);
+    expect(res.filesPushed).toBeGreaterThan(0);
   });
 
   it('ABORTS the loop on an auth/rate-limit class status (grade pass F8)', async () => {

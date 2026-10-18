@@ -1,6 +1,6 @@
 {
   "name": "feature.brand.nodes",
-  "version": "1.2.1",
+  "version": "1.4.0",
   "kind": "node",
   "description": "Brand & Guardrails feature node pack \u2014 read + enforce nodes over the ctx.features.brand surface shipped by the Brand feature package. Lets a workflow (or a chat agent via the agent pack) read the app's white-label identity, resolve a brand's voice into a prompt block, and score generated content for compliance (deterministic banned-phrase / formality / per-channel length blended with an LLM tone judgement).",
   "author": "OpenWOP App",
@@ -19,18 +19,18 @@
   "nodes": [
     {
       "typeId": "feature.brand.nodes.list-brands",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "label": "Brand: List Brands",
-      "description": "Lists the workspace's brands (optionally one org) over ctx.features.brand. Tenant-guarded. Inputs: { orgId? }. Output: { brands }.",
+      "description": "Lists the brands the run may read (optionally one org) over ctx.features.brand \u2014 with no orgId, only the orgs the run's person can read (ADR 0891). Inputs: { orgId? }. Output: { brands }.",
       "category": "integration",
       "role": "action",
       "capabilities": []
     },
     {
       "typeId": "feature.brand.nodes.get-brand",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "label": "Brand: Get Brand",
-      "description": "Fetches one brand by id over ctx.features.brand (tenant-scoped; foreign tenant reads as null). Inputs: { brandId }. Output: { brand }.",
+      "description": "Fetches one brand by id over ctx.features.brand \u2014 null when absent, in another tenant, outside `orgId`, or in an org the run's person cannot read; the recorded brand carries no person ids (ADR 0891). Inputs: { brandId, orgId? }. Output: { brand }.",
       "category": "integration",
       "role": "action",
       "capabilities": []
@@ -46,18 +46,18 @@
     },
     {
       "typeId": "feature.brand.nodes.resolve-voice",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "label": "Brand: Resolve Voice",
-      "description": "Renders a brand's voice (formality, channel rules, approved + banned phrases) into a prompt-injectable text block downstream generators prepend. Inputs: { brandId, channel?, register? }. Output: { voice }.",
+      "description": "Renders a brand's voice (formality, channel rules, approved + banned phrases) into a prompt-injectable text block downstream generators prepend \u2014 one BEGIN/END BRAND VOICE block, style authority only (ADR 0891). Inputs: { brandId, orgId?, channel?, register?, personaId? }. Output: { voice }.",
       "category": "integration",
       "role": "action",
       "capabilities": []
     },
     {
       "typeId": "feature.brand.nodes.compliance-check",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "label": "Brand: Compliance Check",
-      "description": "Scores content against a brand's guardrails \u2014 the pure deterministic leg (banned-phrase caps \u226430, formality register, per-channel length) blended 60/40 with an LLM tone judgement when ctx.callAI is available. Inputs: { brandId, content, channel?, provider?, model? }. Output: { report }.",
+      "description": "Scores content against a brand's guardrails \u2014 the pure deterministic leg (banned-phrase caps \u226430, formality register, per-channel length) blended 60/40 with an LLM tone judgement when ctx.callAI is available; the content is fenced as untrusted data and report.llm names the LLM leg (scored | skipped | failed). Inputs: { brandId, content, orgId?, channel?, provider?, model? }. Output: { report }.",
       "category": "integration",
       "role": "action",
       "capabilities": []

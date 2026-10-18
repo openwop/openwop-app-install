@@ -29,15 +29,43 @@
  *   - hook lane   : a legacy cursor (no `tenantId`) with a live parent. The content
  *                   walk cannot resolve it at all; only the hook reaches it.
  * Each is sabotage-proved against its OWN mechanism.
+ *
+ * Sabotage-witnessed (/grade-tests w23): unregistering the purge hook (HOOK LANE red);
+ * the generic walk ignoring a collection with no `tenantOf` (FIELD LANE red); the hook
+ * scanning every tenant's sources (tenant-scoped case red); a hook that throws on an
+ * empty second pass (idempotent red);
+ * and the RUNNER no longer stamping `tenantId` on the cursors it writes (the last case —
+ * which used to call `upsertFileState` itself and could not see that sabotage).
+ * Honest ceiling: the hook's empty-tenant guard is a double guard (see that case).
  */
 import type http from 'node:http';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+
+// The last describe drives the REAL runner: the drive listing/fetch and the KB write are
+// the composed seams it calls out to, so those (and only those) are stubbed.
+vi.mock('../src/host/knowledgeSourceFetch.js', async (orig) => ({
+  ...(await orig<Record<string, unknown>>()),
+  listFolder: vi.fn(async () => ({
+    files: [{ fileId: 'f1', name: 'f1', mimeType: 'application/vnd.google-apps.document', revision: 'r1' }],
+    complete: true,
+  })),
+  fetchKnowledgeSource: vi.fn(async () => ({ title: 'f1', text: 'hello' })),
+}));
+vi.mock('../src/features/kb/kbService.js', async (orig) => ({
+  ...(await orig<Record<string, unknown>>()),
+  ingestDocument: vi.fn(async () => ({})),
+  deleteDocument: vi.fn(async () => undefined),
+}));
+
 import { createApp } from '../src/index.js';
-import { purgeTenantHostExt } from '../src/host/hostExtPersistence.js';
+import { hostExtStorage, purgeTenantHostExt } from '../src/host/hostExtPersistence.js';
+import { upsertOAuthConnection } from '../src/features/connections/connectionsService.js';
+import { createCollection } from '../src/features/kb/kbService.js';
 import {
   createSyncSource, getSyncSource, listFileStates, upsertFileState,
-  purgeTenantSyncCursors, type SyncFileState,
+  purgeTenantSyncCursors,
 } from '../src/features/knowledge-sync/knowledgeSyncService.js';
+import { runKnowledgeSyncOnce } from '../src/features/knowledge-sync/knowledgeSyncRunner.js';
 
 const NOW = '2026-06-22T00:00:00.000Z';
 const mk = (tenantId: string) => createSyncSource(
@@ -89,7 +117,7 @@ describe('KSWF-6 — tenant teardown removes the diff cursors', () => {
     const s = await mk(tenantId);
     // Exactly the shape written before ADR 0605: no `tenantId` anywhere on the row
     // and none in the key. The generic walk cannot resolve this row at all.
-    const legacy = { sourceId: s.id, externalFileId: 'old', documentId: `sync:${s.id}:old`, revision: 'r0' } as SyncFileState;
+    const legacy = { sourceId: s.id, externalFileId: 'old', documentId: `sync:${s.id}:old`, revision: 'r0' };
     await upsertFileState(legacy);
     expect((await listFileStates(s.id))[0]).not.toHaveProperty('tenantId');
 
@@ -118,6 +146,13 @@ describe('KSWF-6 — tenant teardown removes the diff cursors', () => {
     const tenantId = nextTenant();
     const s = await mk(tenantId);
     await upsertFileState({ sourceId: s.id, externalFileId: 'f', documentId: `sync:${s.id}:f`, revision: 'r', tenantId });
+    // HONEST CEILING (double guard): the hook's `if (!tenantId) return 0` cannot be
+    // witnessed. A falsy tenant scans prefix `:`, which no tenant-prefixed source key
+    // matches, so removing the guard leaves this case green (probe
+    // `w23g2-tp-hook-failclosed`, vacuous). Seeding an empty-tenant source to make the
+    // guard the only thing standing is impossible: `createSyncSource('')` is refused by
+    // the workflow-ownership index ("tenantOf produced a non-string/empty tenantId").
+    // The case still pins the OUTCOME the guard promises.
     expect(await purgeTenantSyncCursors('')).toBe(0);
     expect(await listFileStates(s.id)).toHaveLength(1); // nothing was swept
   });
@@ -127,16 +162,34 @@ describe('KSWF-6 — tenant teardown removes the diff cursors', () => {
     const s = await mk(tenantId);
     await upsertFileState({ sourceId: s.id, externalFileId: 'f', documentId: `sync:${s.id}:f`, revision: 'r', tenantId });
     await purgeTenantHostExt(tenantId);
-    await expect(purgeTenantHostExt(tenantId)).resolves.toBeDefined();
     expect(await listFileStates(s.id)).toEqual([]);
+    // the second teardown neither throws nor finds anything left to delete
+    await expect(purgeTenantHostExt(tenantId)).resolves.toEqual({ deleted: 0, ghostRows: 0, collections: 0 });
   });
 });
 
 describe('the runner stamps the tenant, so cursors self-heal as files change', () => {
-  it('upsertFileState round-trips tenantId', async () => {
-    const tenantId = nextTenant();
-    const s = await mk(tenantId);
-    await upsertFileState({ sourceId: s.id, externalFileId: 'f', documentId: `sync:${s.id}:f`, revision: 'r', tenantId });
-    expect((await listFileStates(s.id))[0]!.tenantId).toBe(tenantId);
+  // This used to write the cursor with `upsertFileState(..., tenantId)` ITSELF and read it
+  // back — a store round-trip that never ran the runner, so removing the runner's stamp
+  // left it green (probe `w23g2-tp-runner-stamp`, vacuous). FIELD LANE above also supplies
+  // the field by hand, so before this case nothing witnessed that the RUNNER writes it.
+  it('the RUNNER stamps tenantId on every cursor it writes', async () => {
+    const tenantId = `org:ks-purge-runner-${Date.now()}-${(seq += 1)}`;
+    const conn = await upsertOAuthConnection({
+      tenantId, provider: 'google', orgId: 'org1', userId: 'user:o',
+      tokens: { accessToken: 't', tokenType: 'Bearer', scopes: [] },
+    });
+    await createCollection(tenantId, 'org1', 'test', { name: 'col' }, { collectionId: 'col' });
+    const s = await createSyncSource(tenantId, 'org1', {
+      connectionId: conn.connectionId, provider: 'google', externalFolderId: 'F',
+      collectionId: 'col', cadence: 'hourly', createdBy: 'user:o',
+    }, NOW);
+
+    const result = await runKnowledgeSyncOnce({ storage: hostExtStorage() }, s);
+
+    expect(result).toMatchObject({ ingested: 1, failed: 0, errors: [] });
+    const cursors = await listFileStates(s.id);
+    expect(cursors.map((c) => c.externalFileId)).toEqual(['f1']);
+    expect(cursors[0]?.tenantId, 'a cursor without its tenant is invisible to teardown once its source is gone').toBe(tenantId);
   });
 });

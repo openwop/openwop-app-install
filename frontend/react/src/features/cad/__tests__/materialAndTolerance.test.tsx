@@ -18,6 +18,7 @@
 import { describe, it, expect } from 'vitest';
 import { cadDefinition } from '../definition.js';
 import { CAD_MATERIALS } from '../cadMaterials.js';
+import { CadMaterialWidget } from '../CadMaterialWidget.js';
 import { messages as en } from '../i18n/en.js';
 import { messages as es } from '../i18n/es.js';
 import { messages as fr } from '../i18n/fr.js';
@@ -26,12 +27,12 @@ import { messages as ptBR } from '../i18n/pt-BR.js';
 const solids = cadDefinition.elements!.find((c) => c.key === 'solids')!;
 const dims = cadDefinition.elements!.find((c) => c.key === 'dimensions')!;
 const propNames = (defs: { name: string }[]): string[] => defs.map((d) => d.name);
+const LOCALES: ReadonlyArray<readonly [string, Readonly<Record<string, string>>]> = [['en', en], ['es', es], ['fr', fr], ['pt-BR', ptBR]];
 
 describe('CAD-G1 — closed vocabularies have labels, in every locale', () => {
-  const locales: [string, Record<string, string>][] = ([['en', en], ['es', es], ['fr', fr], ['pt-BR', ptBR]] as [string, unknown][]).map(([n, m]) => [n, m as Record<string, string>]);
 
   it('every catalog material id has a label in all four locales', () => {
-    for (const [name, table] of locales) {
+    for (const [name, table] of LOCALES) {
       for (const m of CAD_MATERIALS) {
         const key = `opt_materialId_${m.id}`;
         expect(table[key], `${name} is missing ${key}`).toBeTruthy();
@@ -44,7 +45,9 @@ describe('CAD-G1 — closed vocabularies have labels, in every locale', () => {
 
   it('every tolerance type has a label in all four locales', () => {
     const tolDef = dims.propDefs({ kind: 'linear', axis: 'x' }).find((d) => d.name === 'tolType')!;
-    for (const [name, table] of locales) {
+    // Pin the vocabulary first, so an emptied option list cannot make the loop vacuous.
+    expect(tolDef.options).toEqual(['symmetric', 'asymmetric', 'limit']);
+    for (const [name, table] of LOCALES) {
       for (const o of tolDef.options ?? []) {
         expect(table[`opt_tolType_${o}`], `${name} is missing opt_tolType_${o}`).toBeTruthy();
       }
@@ -54,7 +57,7 @@ describe('CAD-G1 — closed vocabularies have labels, in every locale', () => {
   it('the material prop uses the cad widget, and the widget is registered', () => {
     const def = solids.propDefs({ kind: 'box' }).find((d) => d.name === 'materialId')!;
     expect(def.type).toBe('cad-material');
-    expect(cadDefinition.propertyWidgets?.[def.type]).toBeTruthy();
+    expect(cadDefinition.propertyWidgets?.[def.type]).toBe(CadMaterialWidget);
   });
 });
 
@@ -79,7 +82,6 @@ describe('CAD-G2 — a required axis is not clearable', () => {
 });
 
 describe('CAD-G4 — the tolerance fields follow the tolerance type', () => {
-  const locales: [string, Record<string, string>][] = ([['en', en], ['es', es], ['fr', fr], ['pt-BR', ptBR]] as [string, unknown][]).map(([n, m]) => [n, m as Record<string, string>]);
 
   it('shows neither tol field until a type is chosen', () => {
     const names = propNames(dims.propDefs({ kind: 'linear', axis: 'x' }));
@@ -115,7 +117,7 @@ describe('CAD-G4 — the tolerance fields follow the tolerance type', () => {
     expect(en.prop_tolUpper).toBe('Upper limit');
     expect(en.prop_tolLower).toBe('Lower limit');
     // Every locale carries them, or a pt-BR user sees the ± wording on limits.
-    for (const [name, table] of locales) {
+    for (const [name, table] of LOCALES) {
       expect(table.prop_tolUpper, `${name} prop_tolUpper`).toBeTruthy();
       expect(table.prop_tolLower, `${name} prop_tolLower`).toBeTruthy();
     }
@@ -138,8 +140,9 @@ describe('CAD-G4 — hiding a field also drops its stored value', () => {
   });
 
   it('switching to asymmetric keeps both', () => {
-    const out = transform({ kind: 'linear', axis: 'x', tolType: 'symmetric', tolA: 0.2 }, 'tolType', 'asymmetric');
-    expect(out).toMatchObject({ tolType: 'asymmetric', tolA: 0.2 });
+    // From `limit` (both stored) — so "keeps both" has a tolB to keep.
+    const out = transform({ kind: 'linear', axis: 'x', tolType: 'limit', tolA: 0.2, tolB: 0.1 }, 'tolType', 'asymmetric');
+    expect(out).toEqual({ kind: 'linear', axis: 'x', tolType: 'asymmetric', tolA: 0.2, tolB: 0.1 });
   });
 
   it('leaves every OTHER prop change to the default single-field set', () => {

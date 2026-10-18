@@ -3,11 +3,23 @@
  *  - lazy mint: a referrer subject resolves to a stable affiliate (idempotent);
  *  - the code is deterministic (same subject ⇒ same code across calls);
  *  - the reverse index resolves code→subject (backs the self-referral guard);
- *  - distinct subjects get distinct codes/affiliates (no cross-attribution).
+ *  - distinct subjects get distinct codes/affiliates (no cross-attribution) — even
+ *    when a subject's deterministic code is already bound to someone else (the
+ *    disambiguation loop, forced below with a seeded reverse-index row).
+ *
+ * TRIPLE GUARD (honest ceiling, grade-tests w40): "re-calls are idempotent" holds
+ * through THREE independent paths in `ensureAffiliateForSubject` — the early
+ * forward-link return, the reverse-index ADOPT path (the code is bound to this
+ * subject ⇒ reuse its affiliate), and the forward-link CAS loser returning the
+ * winner. Removing any ONE is invisible; the reverse-index write they all rely on
+ * is witnessed by the reverse-index case.
  */
+import { createHash } from 'node:crypto';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
-import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
+import { initHostExtPersistence, DurableCollection } from '../src/host/hostExtPersistence.js';
+import { createContact } from '../src/features/crm/contactsService.js';
+import { linkSubjectToContact } from '../src/features/kicktodo-core/contactBridgeService.js';
 import {
   ensureAffiliateForSubject,
   resolveSubjectForAffiliateCode,
@@ -26,6 +38,17 @@ import {
 
 const T = 'tenant-aff';
 const ORG = 'org-aff';
+
+/** The REAL namespaces of the bridge's two sidecars, for seeding exact states. */
+const codeIndex = () => new DurableCollection<{ tenantId: string; code: string; ownerSubject: string; affiliateId: string }>(
+  'kicktodo-affiliate-code-subject', (c) => `${c.tenantId}::${c.code}`, undefined, (c) => c.tenantId);
+const forwardLinks = () => new DurableCollection<{ tenantId: string; ownerSubject: string; orgId: string; affiliateId: string; code: string; createdAt: string }>(
+  'kicktodo-subject-affiliate', (l) => `${l.tenantId}::${l.ownerSubject}`, undefined, (l) => l.tenantId);
+
+/** An independent derivation of the documented base code (`KT-` + 12 upper-hex
+ *  of sha256(`tenant::subject`)) — never computed by the module under test. */
+const documentedBaseCode = (tenantId: string, subject: string): string =>
+  `KT-${createHash('sha256').update(`${tenantId}::${subject}`).digest('hex').slice(0, 12).toUpperCase()}`;
 
 beforeEach(async () => {
   initHostExtPersistence(await openStorage('memory://'));
@@ -58,6 +81,16 @@ describe('ensureAffiliateForSubject (ADR 0451 P1)', () => {
     const bob = await ensureAffiliateForSubject(T, ORG, 'user:bob');
     expect(bob.code).not.toBe(a1.code); // distinct subject ⇒ distinct code
     expect(bob.affiliateId).not.toBe(a1.affiliateId);
+    expect(a2.code).toBe(documentedBaseCode(T, 'user:alice'));
+
+    // COLLISION: carol's deterministic code is already bound to mallory. Carol
+    // must get a DISAMBIGUATED code, and mallory's binding must survive.
+    const carolBase = documentedBaseCode(T, 'user:carol');
+    await codeIndex().put({ tenantId: T, code: carolBase, ownerSubject: 'user:mallory', affiliateId: 'aff:mallory' });
+    const carol = await ensureAffiliateForSubject(T, ORG, 'user:carol');
+    expect(carol.code).toBe(`${carolBase}-2`);
+    expect(await resolveSubjectForAffiliateCode(T, carolBase)).toBe('user:mallory');
+    expect(await resolveSubjectForAffiliateCode(T, carol.code)).toBe('user:carol');
   });
 
   it('reverse index resolves code→subject; unknown code ⇒ null (fail-closed)', async () => {
@@ -82,8 +115,6 @@ describe('self-referral guard (ADR 0451 P2)', () => {
   });
 
   it('catches a GUEST-checkout self-referral by contactId (ADR 0451 P2b, LEV-3 closure)', async () => {
-    const { createContact } = await import('../src/features/crm/contactsService.js');
-    const { linkSubjectToContact } = await import('../src/features/kicktodo-core/contactBridgeService.js');
     // The referrer has a linked Contact (the consent that made them a Contact).
     const contact = await createContact({ tenantId: T, name: 'Ivy', email: 'ivy@x.test' });
     await linkSubjectToContact(T, 'user:ivy', contact.contactId, 'paid-checkout');
@@ -109,13 +140,15 @@ describe('self-referral guard (ADR 0451 P2)', () => {
 
   it('the composed KickTodo guard blocks a self-referral but allows a real referral (via the seam)', async () => {
     registerAffiliateAccrualGuard(async (o) => !(await isSelfReferralAccrual(o)));
-    const link = await ensureAffiliateForSubject(T, ORG, 'user:frank'); // frank's bridged code
-    // A DIFFERENT buyer through frank's code is allowed by the guard (not a self-referral);
-    // it accrues 0 only because ensureAffiliate's rate is 0 — so assert the GUARD verdict, not the amount.
-    expect(await isSelfReferralAccrual({ tenantId: T, createdBy: 'user:frank', affiliateCode: link.code })).toBe(true); // blocked
-    expect(await isSelfReferralAccrual({ tenantId: T, createdBy: 'user:heidi', affiliateCode: link.code })).toBe(false); // allowed
-    // And the seam does not throw for the bridged code (guard resolves cleanly).
-    await expect(accrueCommission({ tenantId: T, orgId: ORG, orderId: 'o-frank', createdAt: new Date(0).toISOString(), total: 100, currency: 'USD', affiliateCode: link.code, createdBy: 'user:frank' })).resolves.toBe(0);
+    // A bridged KickTodo code with a NON-ZERO rate (an operator raised it), so the
+    // accrual AMOUNT tells a veto apart from a 0% commission.
+    await createAffiliate({ tenantId: T, orgId: ORG, code: 'KT-FRANK-01', name: 'Frank', commissionType: 'percentage', commissionRate: 20, currency: 'USD' });
+    await codeIndex().put({ tenantId: T, code: 'KT-FRANK-01', ownerSubject: 'user:frank', affiliateId: 'aff:frank' });
+    const order = { tenantId: T, orgId: ORG, createdAt: new Date(0).toISOString(), total: 99.5, currency: 'USD', affiliateCode: 'KT-FRANK-01' };
+    // Frank buying through his OWN code ⇒ vetoed, nothing accrues.
+    expect(await accrueCommission({ ...order, orderId: 'o-frank', createdBy: 'user:frank' })).toBe(0);
+    // Heidi through frank's code ⇒ a real referral, 20% of 99.50 accrues.
+    expect(await accrueCommission({ ...order, orderId: 'o-heidi', createdBy: 'user:heidi' })).toBeCloseTo(19.9, 2);
   });
 });
 
@@ -129,6 +162,14 @@ describe('referral earnings surface (ADR 0451 P3)', () => {
     const earn = await referralEarningsForSubject(T, 'user:kim');
     expect(earn.code).toBe(link.code);
     expect(earn.balanceOwed).toBe(0); // rate 0 ⇒ nothing accrued yet; never fabricated
-    expect(typeof earn.currency).toBe('string');
+    expect(earn.currency).toBe('USD');
+
+    // Once a referral really accrues, the surface reports the LIVE balance.
+    await createAffiliate({ tenantId: T, orgId: ORG, code: 'KT-LIV-01', name: 'Liv', commissionType: 'percentage', commissionRate: 20, currency: 'USD' });
+    await forwardLinks().put({ tenantId: T, ownerSubject: 'user:liv', orgId: ORG, affiliateId: 'aff:liv', code: 'KT-LIV-01', createdAt: '2026-01-01T00:00:00.000Z' });
+    expect(await accrueCommission({ tenantId: T, orgId: ORG, orderId: 'o-liv', createdAt: new Date(0).toISOString(), total: 99.5, currency: 'USD', affiliateCode: 'KT-LIV-01', createdBy: 'user:buyer' })).toBeCloseTo(19.9, 2);
+    const liv = await referralEarningsForSubject(T, 'user:liv');
+    expect(liv.code).toBe('KT-LIV-01');
+    expect(liv.balanceOwed).toBeCloseTo(19.9, 2);
   });
 });

@@ -230,14 +230,14 @@ describe('BLOCKER 2 — the doors that turn a user-supplied collectionId into a 
     // --- too open: the intruder sees nothing, through every by-id lane too.
     expect(await listThread(tenantId, orgId, 'kb_collection', collectionId, { subject: intruder })).toBeNull();
     expect(await getComment(tenantId, orgId, comment.commentId, { subject: intruder })).toBeNull();
-    expect(await updateComment(tenantId, orgId, comment.commentId, intruder, { status: 'resolved' }, { subject: intruder })).toBeNull();
+    expect(await updateComment(tenantId, orgId, comment.commentId, { id: intruder }, { status: 'resolved' }, { subject: intruder })).toBeNull();
     expect(await deleteComment(tenantId, orgId, comment.commentId, { userId: intruder, isAdmin: false }, { subject: intruder })).toBe(false);
 
     // No oracle: a comment the intruder cannot see and a comment that does not exist
     // answer IDENTICALLY. Before D1's ordering rule, `updateComment` threw 403 here
     // ("exists, not yours") and a ghost id returned null — a usable existence probe.
     expect(await getComment(tenantId, orgId, 'cmt:does-not-exist', { subject: intruder })).toBeNull();
-    expect(await updateComment(tenantId, orgId, 'cmt:does-not-exist', intruder, { status: 'resolved' }, { subject: intruder })).toBeNull();
+    expect(await updateComment(tenantId, orgId, 'cmt:does-not-exist', { id: intruder }, { status: 'resolved' }, { subject: intruder })).toBeNull();
 
     // --- too closed (the CMWF-2 direction): the bound MEMBER still works.
     expect((await listThread(tenantId, orgId, 'kb_collection', collectionId, { subject: member }))?.length).toBe(1);
@@ -394,9 +394,14 @@ describe('ADR 0664 D6 — the agent-dispatch lane re-resolves the reader', () =>
     // The leg above proves the MECHANISM honours a caller. It cannot notice if
     // `routes/agents.ts` stops passing one — which is exactly the defect D6 fixed. This
     // pins the call site, the way the repo pins other cross-file obligations.
-    const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'routes', 'agents.ts'), 'utf8');
-    const call = /resolveAgentKnowledgeRetrieve\(([\s\S]*?)\);/.exec(src);
-    expect(call, 'the dispatch route must still call resolveAgentKnowledgeRetrieve').toBeTruthy();
-    expect(call![1], 'ADR 0664 D6 — the reader is re-resolved on this lane').toContain('req.userId');
+    // ADR 0889 D3 — the call moved to the shared lane; pin both the lane's reader and
+    // the route handing the lane its user.
+    const srcDir = join(dirname(fileURLToPath(import.meta.url)), '..', 'src');
+    const lane = readFileSync(join(srcDir, 'host', 'liveDispatchLane.ts'), 'utf8');
+    const call = /resolveAgentKnowledgeRetrieve\(([\s\S]*?)\);/.exec(lane);
+    expect(call, 'the dispatch lane must still call resolveAgentKnowledgeRetrieve').toBeTruthy();
+    expect(call![1], 'ADR 0664 D6 — the reader is re-resolved on this lane').toContain('input.userId');
+    const route = readFileSync(join(srcDir, 'routes', 'agents.ts'), 'utf8');
+    expect(route, 'the dispatch route hands the lane its user').toMatch(/buildLiveDispatchLane\(\{[\s\S]{0,400}userId: req\.userId/);
   });
 });

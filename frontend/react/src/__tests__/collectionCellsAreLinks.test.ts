@@ -28,6 +28,13 @@
  * those classes for a non-navigational reason (a filter chip, a mode switch)
  * would be a false positive; none exists today, and one should be added to
  * ALLOWED with a note rather than silently reshaping the check.
+ *
+ * Matched in either order and either quote style (`? 'btn-ghost' : 'btn-accent'`
+ * is the same selection ternary), and on the `ui/Button` component as well as a
+ * bare `<button>` — `Button` renders a `<button>` (ui/Button.tsx). Both were
+ * dodges before (/grade-tests w50 probes `cc-swap-dodge`, `cc-Button-dodge`).
+ * A positive control counts every ternary site, so a regex that drifts to match
+ * nothing reds instead of passing.
  */
 import { describe, it, expect } from 'vitest';
 import { readdirSync, readFileSync } from 'node:fs';
@@ -57,13 +64,17 @@ function owningTag(src: string, at: number): string {
 describe('collection + rail cells are links', () => {
   it('no <button> carries the btn-accent/btn-ghost selection ternary', () => {
     const offenders: string[] = [];
+    let sites = 0;
     for (const file of tsxFiles(SRC)) {
       const rel = relative(SRC, file);
       if (ALLOWED.has(rel)) continue;
       const src = readFileSync(file, 'utf8');
-      for (const m of src.matchAll(/\?\s*'btn-accent'\s*:\s*'btn-ghost'/g)) {
+      const TERNARY = /\?\s*(['"])btn-(accent|ghost)\1\s*:\s*(['"])btn-(accent|ghost)\3/g;
+      for (const m of src.matchAll(TERNARY)) {
+        if (m[2] === m[4]) continue; // `? 'btn-accent' : 'btn-accent'` is not a selection toggle
+        sites += 1;
         const tag = owningTag(src, m.index);
-        if (tag === 'button') {
+        if (tag === 'button' || tag === 'Button') {
           offenders.push(`${rel}:${src.slice(0, m.index).split('\n').length}`);
         }
       }
@@ -76,5 +87,7 @@ describe('collection + rail cells are links', () => {
         '`?param=<id>`; a full-page collection gets a path route). See DESIGN.md §4.5 ' +
         'rule 12 and docs/steward/COLLECTION-CANON-SWEEP.md.',
     ).toEqual([]);
+    // MEASURED 2026-10-16: 4 selection-ternary sites, all <Link> (kb, media ×2, publishing).
+    expect(sites, 'the scan found no selection ternaries at all — the pattern drifted').toBeGreaterThanOrEqual(4);
   });
 });

@@ -94,6 +94,15 @@ artifact nothing serves.
   > in image mode `servedBundle(1)` and the claims document return `undefined`.
   > They are dead code, but deleting them is a separate slice; the v1 deletion
   > did not cover it.
+  >
+  > **DONE 2026-10-16 (ADR 0812 P4 slice 3).** All three are deleted:
+  > `conformance/certify.ts`, `run.ts --certify` (now refused with exit 2 and a
+  > pointer to `publish-evidence.sh`), the image reader behind `servedBundle(1)`,
+  > `conformanceClaims()`, and the two routes they fed. MEASURED in production
+  > before the deletion (origin mode, 2026-10-16 ~04:05Z): both routes already
+  > answered 404. The major-2 origin route is unchanged. One dead arm remains in
+  > deploy tooling: `check-wire-claims.mjs`'s image-mode claims arm (it SKIPs
+  > when no stamp exists, and nothing writes one now).
 
 ## Implementation
 

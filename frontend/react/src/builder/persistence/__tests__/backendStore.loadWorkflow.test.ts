@@ -20,9 +20,24 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { loadWorkflow, loadWorkflowWithHead, LoadOfflineError, LoadRefusedError } from '../backendStore.js';
-import { upsertSavedWorkflow } from '../localStore.js';
-import { CanonicalParseError } from '../../schema/deserialize.js';
+import type * as BackendStore from '../backendStore.js';
+import type * as LocalStore from '../localStore.js';
+import type * as Deserialize from '../../schema/deserialize.js';
+import type * as CatalogRegistry from '../../palette/catalogRegistry.js';
+
+// `loadDynamicCatalog()` is memoized at MODULE level with no reset seam, so a
+// case that ran after any other would find the catalog already loaded and could
+// not observe the ordering it claims (grade-tests w47: the slow-catalog case was
+// witnessed only when it happened to run first). Every case therefore gets a
+// fresh module graph — and the error classes are taken from that same graph, so
+// `instanceof` compares against the class the code under test actually threw.
+let loadWorkflow: typeof BackendStore.loadWorkflow;
+let loadWorkflowWithHead: typeof BackendStore.loadWorkflowWithHead;
+let LoadOfflineError: typeof BackendStore.LoadOfflineError;
+let LoadRefusedError: typeof BackendStore.LoadRefusedError;
+let upsertSavedWorkflow: typeof LocalStore.upsertSavedWorkflow;
+let CanonicalParseError: typeof Deserialize.CanonicalParseError;
+let isDynamicCatalogLoaded: typeof CatalogRegistry.isDynamicCatalogLoaded;
 
 const PACK_TYPE_ID = 'vendor.test.pack-node';
 
@@ -57,23 +72,38 @@ function defBody(typeId: string) {
 }
 
 describe('loadWorkflow (backend-first, catalog-ordered)', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     localStorage.clear();
+    vi.resetModules();
+    ({ loadWorkflow, loadWorkflowWithHead, LoadOfflineError, LoadRefusedError } = await import('../backendStore.js'));
+    ({ upsertSavedWorkflow } = await import('../localStore.js'));
+    ({ CanonicalParseError } = await import('../../schema/deserialize.js'));
+    ({ isDynamicCatalogLoaded } = await import('../../palette/catalogRegistry.js'));
   });
 
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
   });
 
   it('waits for a SLOW dynamic catalog before deserializing a pack-typeId definition', async () => {
+    // Precondition: this case starts with NO catalog loaded (fresh module graph),
+    // or it could pass without ever observing the ordering.
+    expect(isDynamicCatalogLoaded()).toBe(false);
+    const order: string[] = [];
     vi.stubGlobal(
       'fetch',
       vi.fn(async (input: RequestInfo | URL) => {
         const url = String(input);
-        if (url.endsWith('/head')) return jsonResponse({}, 404); // not owned: the by-id read (ADR 0770)
+        if (url.endsWith('/head')) {
+          order.push('def-read');
+          return jsonResponse({}, 404); // not owned: the by-id read (ADR 0770)
+        }
         if (url.includes('/node-catalog')) {
-          // The race: the catalog resolves AFTER the definition would have.
-          await new Promise((r) => setTimeout(r, 40));
+          // The race, without a wall clock: the catalog settles several
+          // macrotasks later — after a definition read that did not wait for it.
+          for (let i = 0; i < 5; i += 1) await new Promise((r) => setImmediate(r));
+          order.push('catalog-resolved');
           return jsonResponse(CATALOG_BODY);
         }
         if (url.includes('/workflows/')) return jsonResponse(defBody(PACK_TYPE_ID));
@@ -82,6 +112,7 @@ describe('loadWorkflow (backend-first, catalog-ordered)', () => {
     );
 
     const wf = await loadWorkflow('wf.test.1');
+    expect(order).toEqual(['catalog-resolved', 'def-read']);
     expect(wf).not.toBeNull();
     expect(wf?.nodes).toHaveLength(1);
     expect(wf?.nodes[0]?.kind).toBe(PACK_TYPE_ID);
@@ -111,7 +142,7 @@ describe('loadWorkflow (backend-first, catalog-ordered)', () => {
         if (url.endsWith('/head')) return jsonResponse({}, 404); // not owned: the by-id read (ADR 0770)
         if (url.includes('/node-catalog')) return jsonResponse(CATALOG_BODY);
         if (url.includes('/host/openwop-app/workflows')) {
-          return jsonResponse({ workflows: [{ workflowId: 'wf.test.4', name: 'Webhook → Slack', nodeCount: 1, createdAt: 'x', updatedAt: 'y' }] });
+          return jsonResponse({ workflows: [{ workflowId: 'wf.test.4', name: 'Webhook → Slack', nodeCount: 1, createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z' }] });
         }
         if (url.includes('/workflows/')) {
           // Builder-authored: the display name lives in the ownership record,
@@ -178,7 +209,7 @@ describe('loadWorkflow (backend-first, catalog-ordered)', () => {
 
   it('a REFUSED read (5xx, or a non-transport error) rejects with LoadRefusedError, even with a local copy', async () => {
     upsertSavedWorkflow({ id: 'wf.test.6', name: 'Stale local', version: '1.0.0', nodes: [], edges: [], defaultInputs: '{}', createdAt: '', updatedAt: '' });
-    vi.stubGlobal('fetch', vi.fn(async (url: string) => (String(url).includes('/node-catalog') ? jsonResponse(CATALOG_BODY) : jsonResponse({ error: 'internal_error' }, 503))));
+    vi.stubGlobal('fetch', vi.fn(async (url: RequestInfo | URL) => (String(url).includes('/node-catalog') ? jsonResponse(CATALOG_BODY) : jsonResponse({ error: 'internal_error' }, 503))));
     await expect(loadWorkflow('wf.test.6')).rejects.toBeInstanceOf(LoadRefusedError);
     vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('network down'); }));
     await expect(loadWorkflow('wf.test.6')).rejects.toBeInstanceOf(LoadRefusedError);

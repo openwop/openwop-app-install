@@ -1,6 +1,6 @@
 {
   "name": "feature.agent-author.nodes",
-  "version": "1.1.1",
+  "version": "1.2.0",
   "kind": "node",
   "description": "Agent Author node pack (ADR 0514) — describe-to-create for the digital workforce over the ctx.features['agent-author'] surface. get (closed-world catalog: visible agents, tenant workflows, roster, autonomy levels), draft (LLM authors a roster-entry draft with bounded error-fed repair), validate (closed-world re-check), persist (create through the SHARED wizard path; the agent lands DISABLED for human review — or mode:'draft' stashes the validated draft for the manual wizard's prefill, ADR 0514 OQ1).",
   "author": "OpenWOP App",

@@ -124,6 +124,12 @@ false — the host already runs **seven**: `artifactTypes.ts:21`, `mcpServerRout
 `workflowChainPackLoader.ts:153` (memoized, not per-call — a suspected perf issue that
 turned out not to exist), and `agentDispatch.ts:65`.
 
+> *CORRECTED 2026-10-15 (ADR 0889 §Grade remediation, EVAL-8):* `agentEvalGrader.ts` no
+> longer exists. #4847 retired the legacy `POST /host/openwop-app/agents/eval-run` grader
+> along with its module and its two tests; ADR 0889 had planned to fold it into a thin
+> alias, and none was built. So that Ajv instance is gone, and the census above is
+> one lower than written. Re-count before citing it.
+
 The right principle is **not** "one Ajv for the app". It is:
 
 > **One validator per schema CLASS, shared by every caller of that class.**

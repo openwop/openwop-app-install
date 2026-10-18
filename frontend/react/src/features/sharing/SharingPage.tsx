@@ -31,6 +31,9 @@ import {
   listOrgs,
   listResources,
   revokeLink,
+  adoptLink,
+  AdoptError,
+  type AdoptRefusal,
   listFrameViews,
   sharedPageUrl,
   linkStatus,
@@ -53,6 +56,18 @@ const STATUS_CHIP: Record<LinkStatus, { className: string; key: string }> = {
   orphaned: { className: 'chip chip--warning', key: 'statusOrphaned' },
   'cap-reached': { className: 'chip chip--muted', key: 'statusCapReached' },
   'feature-off': { className: 'chip chip--warning', key: 'statusFeatureOff' },
+  'publisher-inactive': { className: 'chip chip--warning', key: 'statusPublisherInactive' },
+};
+
+/** ADR 0887 D5 — a refused adopt, in the reader's language (SH2UX-4). */
+const ADOPT_REFUSAL_KEY: Record<AdoptRefusal, string> = {
+  'publisher-active': 'adoptRefusedActive',
+  revoked: 'adoptRefusedRevoked',
+  expired: 'adoptRefusedExpired',
+  'system-link': 'adoptRefusedSystem',
+  'concurrent-change': 'adoptRefusedConflict',
+  forbidden: 'adoptRefusedForbidden',
+  unknown: 'adoptFailed',
 };
 
 const TYPE_LABEL_KEY: Record<ResourceType, string> = { cms_page: 'typeCmsPage', kb_collection: 'typeKbCollection', document: 'typeDocument', conversation: 'typeConversation', prompt: 'typePrompt', commerce_quote: 'typeCommerceQuote', commerce_order: 'typeCommerceOrder', app_builder_canvas: 'typeAppBuilderCanvas', slides_canvas: 'typeSlidesCanvas', creative_brief: 'typeCreativeBrief', booking_manage: 'typeBookingManage', sign_request: 'typeSignRequest' };
@@ -235,6 +250,20 @@ export function SharingPage(): JSX.Element {
     catch { toast.error(t('revokeFailed')); }
   }, [orgId, loadLinks, t]);
 
+  // ADR 0887 D5 — adopt keeps the URL working after its publisher lost access.
+  // Not a destructive act (nothing stops working), so no confirm; the outcome is
+  // announced either way. SH2UX-1 — one request per row at a time: a second
+  // click while the first is in flight would be refused as "the owner still has
+  // access" (it is now YOU) and contradict the success toast.
+  const [adopting, setAdopting] = useState<string | null>(null);
+  const adopt = useCallback(async (token: string) => {
+    if (adopting) return;
+    setAdopting(token);
+    try { await adoptLink(orgId, token); loadLinks(orgId); toast.success(t('adoptDone')); }
+    catch (e) { toast.error(t(e instanceof AdoptError ? ADOPT_REFUSAL_KEY[e.refusal] : 'adoptFailed')); }
+    finally { setAdopting(null); }
+  }, [adopting, orgId, loadLinks, t]);
+
   if (access.loading) return <Skeleton />;
   if (!access.enabled) {
     return <StateCard icon={<LockIcon />} title={t('notEnabledTitle')} body={t('notEnabledBody')} />;
@@ -257,7 +286,14 @@ export function SharingPage(): JSX.Element {
         <span className="chip">{t(TYPE_LABEL_KEY[l.resourceType])}</span>
         {/* SHARE-UX-2 — every row states whether it still works. */}
         <span className={chip.className}>{t(chip.key)}</span>
-        <strong className="sharing-link-title">{l.label ?? l.cardTitle ?? l.resourceId}</strong>
+        {/* ADR 0887 D2 — a title the reader may not see is withheld, never
+            replaced by the raw id (which would read as "this was deleted"). */}
+        {l.label ?? l.cardTitle
+          ? <strong className="sharing-link-title">{l.label ?? l.cardTitle}</strong>
+          : l.cardRedacted
+            // SH2UX-7 — the placeholder must not read as the item's name.
+            ? <span className="sharing-link-title u-text-muted u-italic" title={t('titleRedactedHint')}>{t('titleRedacted')}</span>
+            : <strong className="sharing-link-title">{l.resourceId}</strong>}
         <span className="u-flex-1" />
         {/* The date is now a DETAIL under a status, not the only signal — and it
             says "expired" in the past tense rather than promising an expiry that
@@ -286,6 +322,19 @@ export function SharingPage(): JSX.Element {
       {/* SHUX-5 — a spent view budget is terminal and IRREVERSIBLE (the count only
           climbs), so say so plainly rather than leaving the owner to compare
           "Seen 3 times" against "view cap 3" themselves. */}
+      {/* ADR 0887 D2/D5 — dark because the person who shared it lost access. The
+          one dark state the row itself can repair, so the action sits here. */}
+      {status === 'publisher-inactive' ? (
+        <div className="u-flex u-gap-2 u-items-center u-wrap">
+          <span className="u-label-sm u-flex-1">
+            {t('publisherInactiveBody')} {t(l.canAdopt ? 'publisherInactiveAdoptHint' : 'publisherInactiveAskEditor')}
+          </span>
+          {/* SH2UX-2 — offered only to a reader the server would let adopt it. */}
+          {l.canAdopt ? (
+            <Button variant="secondary" size="sm" loading={adopting === l.tokenHash} disabled={adopting !== null} onClick={() => void adopt(l.tokenHash)}>{t('adoptLinkLabel')}</Button>
+          ) : null}
+        </div>
+      ) : null}
       {status === 'cap-reached' ? (
         <span className="u-label-sm">{t('capReachedBody', { n: l.maxViews ?? 0 })}</span>
       ) : null}

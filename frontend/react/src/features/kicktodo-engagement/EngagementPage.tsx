@@ -7,6 +7,7 @@
 import { Button } from '../../ui/Button.js';
 import { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { PageHeader } from '../../ui/PageHeader.js';
 import { StarIcon } from '../../ui/icons/index.js';
 import { StateCard } from '../../ui/StateCard.js';
 import { Notice } from '../../ui/Notice.js';
@@ -114,10 +115,7 @@ export function EngagementPage() {
 
   return (
     <div className="page" data-walkthrough="kicktodo-leaderboard.page">
-      <header className="page-header">
-        <h1 className="page-header__title">{t('title')}</h1>
-        <p className="page-header__lede">{t('lede')}</p>
-      </header>
+      <PageHeader title={t('title')} lede={t('lede')} />
 
       {anonymous ? (
         <StateCard
@@ -133,7 +131,7 @@ export function EngagementPage() {
         />
       ) : null}
 
-      {!anonymous && error && <Notice variant="error">{t('loadError')}</Notice>}
+      {!anonymous && error && <Notice variant="error" announce={t('loadError')}>{t('loadError')}</Notice>}
       {!anonymous && !loaded && !error && <StateCard loading title={t('title')} />}
 
       {/* Not a gate any more (ADR 0641 d13): the board renders above whether or

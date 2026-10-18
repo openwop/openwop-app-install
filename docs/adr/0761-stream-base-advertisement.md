@@ -19,6 +19,14 @@ the public base URL.
 The protocol cannot fix this: `spec/v2/core/runs.md` requires `eventsUrl` /
 `statusUrl` to resolve on the origin the request was made to.
 
+> **CORRECTED 2026-10-12 (ADR 0876) — "buffers" understates it.** MEASURED on
+> `00940-4nb`: one stream through `/api` became **12 upstream streams in 3 min**
+> (Hosting retries the upstream; each retry held a per-tenant SSE cap slot for
+> 120 s) and the client got `503 text/html` at 188 s. Read direct, the same
+> stream was one request. Advertising `streamBase` stays correct; ADR 0876 adds
+> the server-side half and refuses host-extension streams that still arrive
+> through the front door.
+
 ## Decision
 
 1. **Env** `OPENWOP_STREAM_BASE_URL` (optional). Validated by

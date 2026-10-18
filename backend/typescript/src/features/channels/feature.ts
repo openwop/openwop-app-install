@@ -16,12 +16,24 @@ import { registerChannelRoutes } from './routes.js';
 import { registerChannelsAgentTools } from './agentTools.js';
 import { setAgentLabelResolver } from '../../host/subjectDisplay.js';
 import { getAgentRegistry } from '../../executor/agentRegistry.js';
+import { onMemberAuthorityLost, isWorkspaceRootPair } from '../../host/accessControlService.js';
+import { relinquishChannelSubject } from '../../host/conversationStore.js';
 
 export const channelsFeature: BackendFeature = {
   id: 'channels',
   registerRoutes: (deps) => {
     registerChannelRoutes(deps);
     registerChannelsAgentTools(); // XCH-HOLE-7 (round 3) — openwop:channels.list (ADR 0308 seam)
+    // ADR 0879 D4 (S4) — leaving the WORKSPACE leaves its channels: every roster row
+    // that is theirs goes, and ownership is relinquished (a re-invite restores
+    // neither a private room nor manage rights; workspace admins manage the room
+    // afterwards). Only a ROOT removal counts — leaving a sub-org is not leaving the
+    // workspace. Hygiene, like the push precedent: the per-request membership check
+    // and the stream re-check (D5) are the guard if this hook fails.
+    onMemberAuthorityLost('channels.membership', async (lost) => {
+      if (lost.reason !== 'removed' || !isWorkspaceRootPair(lost.orgId, lost.tenantId)) return 0;
+      return relinquishChannelSubject(lost.tenantId, lost.subject);
+    });
     // ADR 0192 D2 — legacy agent members (no add-time `displayLabel`) resolve
     // their display through the registry; current members carry the label on
     // the participant record and never reach this resolver.

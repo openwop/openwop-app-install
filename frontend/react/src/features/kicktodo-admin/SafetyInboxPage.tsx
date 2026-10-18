@@ -15,6 +15,7 @@
 import { Button } from '../../ui/Button.js';
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { PageHeader } from '../../ui/PageHeader.js';
 import { StateCard } from '../../ui/StateCard.js';
 import { Notice } from '../../ui/Notice.js';
 import { InboxIcon, AlertIcon } from '../../ui/icons/index.js';
@@ -53,10 +54,7 @@ export function SafetyInboxPage(): JSX.Element {
 
   return (
     <div className="page" data-walkthrough="admin-kicktodo-safety.page">
-      <header className="page-header">
-        <h1 className="page-header__title">{t('safetyTitle')}</h1>
-        <p className="page-header__lede">{t('safetyLede')}</p>
-      </header>
+      <PageHeader title={t('safetyTitle')} lede={t('safetyLede')} />
 
       {/* Honest scope note: authority is enforced server-side; this surface only
           presents the queue + delegates the decision (§3.4 / B15). */}

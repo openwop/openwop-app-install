@@ -9,15 +9,28 @@
  *
  * These pin the two things that make the fix real: a pasted key reaches the RIGHT
  * vendor, and each vendor's response is normalized to the same result shape.
+ *
+ * @see docs/adr/0494-multi-vendor-search-and-claim-entailment.md
+ *
+ * w32 (grade-tests): both env knobs are cleared before EVERY case (the inference
+ * cases used to depend on the runner not exporting OPENWOP_WEBSEARCH_BASE_URL); the
+ * "BSA → Brave" case is cut — that branch returns the default, so it could only
+ * fail where "an UNKNOWN key shape stays on Brave" already does; the Brave URL is
+ * asserted exactly; and the 500-char snippet cap gets a fixture larger than the cap
+ * (the captured Exa highlights are 180 chars).
  */
-import { describe, expect, it, afterEach } from 'vitest';
+import { describe, expect, it, afterEach, beforeEach } from 'vitest';
 import { resolveSearchVendor, getSearchVendor, listSearchVendors } from '../src/host/searchVendors.js';
 import { engineIsDurable } from '../src/host/webSearchCapability.js';
 
-const savedEngine = process.env.OPENWOP_WEBSEARCH_ENGINE;
+const ENV_KEYS = ['OPENWOP_WEBSEARCH_ENGINE', 'OPENWOP_WEBSEARCH_BASE_URL'] as const;
+const saved = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
+beforeEach(() => { for (const k of ENV_KEYS) delete process.env[k]; });
 afterEach(() => {
-  if (savedEngine === undefined) delete process.env.OPENWOP_WEBSEARCH_ENGINE;
-  else process.env.OPENWOP_WEBSEARCH_ENGINE = savedEngine;
+  for (const k of ENV_KEYS) {
+    if (saved[k] === undefined) delete process.env[k];
+    else process.env[k] = saved[k];
+  }
 });
 
 describe('vendor resolution — a pasted key reaches the right vendor', () => {
@@ -27,10 +40,6 @@ describe('vendor resolution — a pasted key reaches the right vendor', () => {
 
   it('infers Exa from its UUID-shaped key', () => {
     expect(resolveSearchVendor('a1b2c3d4-e5f6-7890-abcd-ef1234567890').id).toBe('exa');
-  });
-
-  it('infers Brave from its `BSA` key prefix', () => {
-    expect(resolveSearchVendor('BSAabcdef123').id).toBe('brave');
   });
 
   it('an UNKNOWN key shape stays on Brave — the historical default', () => {
@@ -60,7 +69,7 @@ describe('request shaping — each vendor gets its own dialect', () => {
     const r = v.request({ ...args, baseUrl: v.baseUrl });
     expect(r.method).toBe('GET');
     expect(r.headers['x-subscription-token']).toBe('K');
-    expect(r.url).toContain('q=gratitude%20study');
+    expect(r.url).toBe(`${v.baseUrl}?q=gratitude%20study&count=5`);
     expect(r.body).toBeUndefined();
   });
 
@@ -140,6 +149,12 @@ describe('response normalization — every vendor yields ONE result shape', () =
     }
   });
 
+  it('caps an Exa snippet at the shared 500-char budget', () => {
+    const long = 'evidence passage '.repeat(40); // 680 chars, spaced
+    const rows = getSearchVendor('exa')!.parse({ results: [{ url: 'https://c.example', highlights: [long] }] }, 5);
+    expect(rows[0]!.snippet).toBe(long.slice(0, 500));
+  });
+
   it('honours maxResults', () => {
     const many = Array.from({ length: 20 }, (_u, i) => ({ url: `https://x${i}.example` }));
     expect(getSearchVendor('tavily')!.parse({ results: many }, 3)).toHaveLength(3);
@@ -170,12 +185,6 @@ describe('suitability — the descriptor is the SSoT for shipped vendors', () =>
  * SHAPE sent to an operator's own endpoint.
  */
 describe('operator endpoints keep their historical shape', () => {
-  const savedBase = process.env.OPENWOP_WEBSEARCH_BASE_URL;
-  afterEach(() => {
-    if (savedBase === undefined) delete process.env.OPENWOP_WEBSEARCH_BASE_URL;
-    else process.env.OPENWOP_WEBSEARCH_BASE_URL = savedBase;
-  });
-
   it('a configured BASE URL with no named engine stays Brave-shaped', () => {
     // Before this change, ANY key + a custom base URL meant Brave's shape. A
     // UUID-shaped key must NOT start POSTing Exa's body at the operator's proxy.

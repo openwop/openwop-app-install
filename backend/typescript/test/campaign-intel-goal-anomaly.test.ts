@@ -3,7 +3,11 @@
  *  - planBudget: no-history infeasible; efficiency-weighted allocation favors
  *    the cheaper-CPA platform; verdict banding; pacing sums to the budget;
  *    scenarioShift recomputes deterministically;
- *  - detectAnomalies: min-N guard + |z|≥3 spike detection;
+ *  - detectAnomalies: |z|≥3 spike detection; zero-conversion days are
+ *    excluded from the CPA series. HONEST CEILING (INTEL-ANOM-MINN): the
+ *    MIN_POINTS=7 guard is unobservable — under population σ the largest
+ *    |z| in n points is √(n−1) (Samuelson), so n ≤ 9 can never reach 3;
+ *    no test can witness it, so none claims to;
  *  - funnel + top/bottom (min-spend guard);
  *  - CSV preset pins exact platform headers over autodetect;
  *  - the circuit breaker opens after 5 failures, half-opens after cooldown,
@@ -14,13 +18,13 @@ import { describe, expect, it, vi, afterEach } from 'vitest';
 import { planBudget, scenarioShift, detectAnomalies, funnelByPlatform, topBottomPerformers } from '../src/features/campaign-intel/budgetPlanner.js';
 import { mappingWithPreset, parseCsv } from '../src/features/campaign-connectors/csvImport.js';
 import { reportConnectionFailure, reportConnectionSuccess, circuitStatus, __resetCircuitBreakers } from '../src/features/connections/connectionsService.js';
-import type { CampaignPerformanceRecord } from '../src/features/campaign-connectors/types.js';
+import type { AdPlatform, CampaignPerformanceRecord } from '../src/features/campaign-connectors/types.js';
 
 afterEach(() => { __resetCircuitBreakers(); vi.useRealTimers(); });
 
-function rec(platform: string, date: string, over: Partial<CampaignPerformanceRecord> = {}): CampaignPerformanceRecord {
+function rec(platform: AdPlatform, date: string, over: Partial<CampaignPerformanceRecord> = {}): CampaignPerformanceRecord {
   return {
-    id: `${platform}:${date}:${Math.random()}`, tenantId: 't', orgId: 'o', platform: platform as never,
+    id: `${platform}:${date}`, tenantId: 't', orgId: 'o', platform,
     campaignName: 'Camp', adSet: 'A', date, spend: 100, impressions: 10_000, clicks: 200, conversions: 10, revenue: 500,
     ctr: 0.02, cpc: 0.5, cvr: 0.05, cpa: 10, roas: 5, source: 'csv',
     ...over,
@@ -41,20 +45,27 @@ describe('planBudget (P1)', () => {
     const records = [
       // google: $100 → 10 conv (CPA $10); meta: $100 → 2 conv (CPA $50)
       ...Array.from({ length: 10 }, (_, i) => rec('google', `2026-06-${String(i + 1).padStart(2, '0')}`, { spend: 10, conversions: 1 })),
-      ...Array.from({ length: 10 }, (_, i) => rec('meta', `2026-06-${String(i + 1).padStart(2, '0')}`, { spend: 10, conversions: 0.2 as never })),
+      ...Array.from({ length: 10 }, (_, i) => rec('meta', `2026-06-${String(i + 1).padStart(2, '0')}`, { spend: 10, conversions: 0.2 })),
     ];
     const p = planBudget(records, { totalBudgetMinor: 100_000, targetConversions: 50, horizonDays: 28 });
     const google = p.platforms.find((x) => x.platform === 'google')!;
     const meta = p.platforms.find((x) => x.platform === 'meta')!;
-    expect(google.allocationMinor).toBeGreaterThan(meta.allocationMinor); // cheaper CPA gets more
+    // CPA google 1000 minor, meta 5000 → weights 5:1 → 83333.3 / 16666.7,
+    // largest remainder gives meta the residual unit.
+    expect(google.allocationMinor).toBe(83_333); // cheaper CPA gets more
+    expect(meta.allocationMinor).toBe(16_667);
+    expect(p.expectedConversions).toBe(86); // floor(83333/1000) + floor(16667/5000)
     expect(p.pacing.reduce((s, w) => s + w.budgetMinor, 0)).toBe(100_000); // pacing sums exactly
     expect(p.pacing.reduce((s, w) => s + w.expectedConversions, 0)).toBe(p.expectedConversions); // weekly conv. shares sum exactly
     expect(p.noteCode).toBeUndefined(); // a plannable goal carries no note
-    expect(['feasible', 'stretch', 'infeasible']).toContain(p.verdict);
+    // Verdict bands on expected/target: 86/50 ≥ 1 feasible; 86/100 = .86 stretch; 86/200 = .43 infeasible.
+    expect(p.verdict).toBe('feasible');
+    expect(planBudget(records, { totalBudgetMinor: 100_000, targetConversions: 100, horizonDays: 28 }).verdict).toBe('stretch');
+    expect(planBudget(records, { totalBudgetMinor: 100_000, targetConversions: 200, horizonDays: 28 }).verdict).toBe('infeasible');
 
+    // Move 50% of meta (8334) to google: floor(91667/1000) + floor(8333/5000) = 92.
     const sc = scenarioShift(p, 'meta', 'google', 0.5);
-    expect(sc).not.toBeNull();
-    expect(sc!.delta).toBeGreaterThanOrEqual(0); // shifting toward the cheaper CPA never loses conversions
+    expect(sc).toEqual({ expectedConversions: 92, delta: 6 });
   });
 
   it('allocations sum EXACTLY to the budget — incl. 101 across two equal CPAs (largest remainder)', () => {
@@ -79,10 +90,7 @@ describe('planBudget (P1)', () => {
 });
 
 describe('detectAnomalies (P2)', () => {
-  it('min-N guarded; flags a 10x spend spike', () => {
-    const short = detectAnomalies(Array.from({ length: 5 }, (_, i) => rec('google', `2026-06-0${i + 1}`)));
-    expect(short).toEqual([]); // < 7 points
-
+  it('flags a 10x spend spike (min-N itself is unobservable — see header)', () => {
     const rows = Array.from({ length: 13 }, (_, i) => rec('google', `2026-06-${String(i + 1).padStart(2, '0')}`));
     rows.push(rec('google', '2026-06-14', { spend: 5000 })); // the spike
     const found = detectAnomalies(rows);
@@ -90,10 +98,17 @@ describe('detectAnomalies (P2)', () => {
   });
 
   it('zero-conversion days do not poison the CPA baseline', () => {
-    // 13 steady converting days (CPA 10) interleaved with 13 zero-conversion
-    // days, plus ONE real CPA spike. The cpa series must be built from
-    // converting days only: the spike is flagged, and NO cpa anomaly is ever
-    // dated on a zero-conversion day (those used to read as drops/skew).
+    // 20 steady converting days (CPA 10) + ONE zero-conversion day. Folded in
+    // as CPA 0, that day scores z ≈ −4.47 against the steady 10s and reads as
+    // a "drop"; built from converting days only, the series is flat → nothing.
+    const steady: CampaignPerformanceRecord[] = [
+      ...Array.from({ length: 20 }, (_, i) => rec('google', `2026-06-${String(i + 1).padStart(2, '0')}`, { spend: 100, conversions: 10 })),
+      rec('google', '2026-06-21', { spend: 100, conversions: 0 }),
+    ];
+    expect(detectAnomalies(steady).filter((a) => a.metric === 'cpa')).toEqual([]);
+
+    // A real CPA spike is still flagged beside zero-conversion days, and no
+    // cpa anomaly is ever dated on a zero-conversion day.
     const rows: CampaignPerformanceRecord[] = [];
     for (let i = 1; i <= 13; i++) {
       rows.push(rec('google', `2026-06-${String(i * 2 - 1).padStart(2, '0')}`, { spend: 100, conversions: 10 })); // CPA 10
@@ -106,10 +121,11 @@ describe('detectAnomalies (P2)', () => {
     expect(found.some((a) => zeroDays.has(a.date))).toBe(false);
   });
 
-  it('the min-N rule applies AFTER filtering zero-conversion days', () => {
-    // 6 converting days + 10 zero-conversion days: 16 raw points, but only 6
-    // usable CPA points — below MIN_POINTS, so no cpa verdict at all (the old
-    // mostly-0 series would have flagged the outlier as a spike).
+  it('zero-conversion days are excluded BEFORE the CPA statistics (16 raw → 6 usable)', () => {
+    // 6 converting days + 10 zero-conversion days. Unfiltered, the mostly-0
+    // series flags the 1000-CPA day as a spike (z ≈ 3.87). Filtered, 6 points
+    // can never reach |z| ≥ 3 (√5 ≈ 2.24) — so this witnesses the FILTER; the
+    // post-filter MIN_POINTS recheck itself is unobservable (INTEL-ANOM-MINN).
     const rows: CampaignPerformanceRecord[] = [
       ...Array.from({ length: 10 }, (_, i) => rec('google', `2026-06-${String(i + 1).padStart(2, '0')}`, { spend: 100, conversions: 0 })),
       ...Array.from({ length: 5 }, (_, i) => rec('google', `2026-06-${String(i + 11).padStart(2, '0')}`, { spend: 100, conversions: 10 })),
@@ -125,7 +141,15 @@ describe('funnel + performers (P4)', () => {
       rec('google', '2026-06-01', { campaignName: 'Big', spend: 1000, revenue: 8000 }),
       rec('google', '2026-06-02', { campaignName: 'Tiny', spend: 1, revenue: 100 }), // below min-spend
     ];
-    expect(funnelByPlatform(records)[0]).toMatchObject({ platform: 'google' });
+    // Funnel: per-platform SUMS, ordered by impressions.
+    const funnel = funnelByPlatform([
+      ...records,
+      rec('meta', '2026-06-01', { impressions: 5_000, clicks: 50, conversions: 3 }),
+    ]);
+    expect(funnel).toEqual([
+      { platform: 'google', impressions: 20_000, clicks: 400, conversions: 20 },
+      { platform: 'meta', impressions: 5_000, clicks: 50, conversions: 3 },
+    ]);
     const perf = topBottomPerformers(records, { minSpend: 100 });
     expect(perf.top.map((p) => p.campaignName)).toEqual(['Big']); // Tiny filtered
   });
@@ -149,12 +173,16 @@ describe('funnel + performers (P4)', () => {
 
 describe('CSV presets (P5)', () => {
   it('a preset pins the platform headers; unknown preset falls back to autodetect', () => {
-    const { headers } = parseCsv('Campaign,Ad group,Day,Cost,Impr.,Clicks,Conversions,Total conv. value\nA,B,2026-06-01,10,100,5,1,50');
+    // Both 'Spend' and 'Cost' are spend aliases; autodetect takes the FIRST
+    // alias ('spend'), so only the google preset can choose 'Cost'.
+    const { headers } = parseCsv('Campaign,Ad group,Day,Spend,Cost,Impr.,Clicks,Conversions,Total conv. value\nA,B,2026-06-01,10,10,100,5,1,50');
+    expect(mappingWithPreset(headers).spend).toBe('Spend'); // autodetect alone
     const google = mappingWithPreset(headers, 'google');
-    expect(google.spend).toBe('Cost'); // pinned by the preset
+    expect(google.spend).toBe('Cost'); // pinned by the preset, over autodetect
     expect(google.impressions).toBe('Impr.');
     const unknown = mappingWithPreset(headers, 'no-such-platform');
-    expect(unknown.campaignName).toBe('Campaign'); // plain autodetect still works
+    expect(unknown.spend).toBe('Spend'); // unknown preset = plain autodetect
+    expect(unknown.campaignName).toBe('Campaign');
   });
 });
 

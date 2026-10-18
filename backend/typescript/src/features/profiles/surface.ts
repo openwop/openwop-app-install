@@ -23,10 +23,20 @@
 import { surfaceStr as str, type FeatureSurface } from '../../host/featureSurfaces.js';
 import type { BundleScope } from '../../host/inMemorySurfaces.js';
 import { OpenwopError } from '../../types.js';
-import { listProfiles, getProfile, type Profile, type ProfileSkill } from './profilesService.js';
+import { getProfile, viewProfile, type Profile, type ProfileSkill } from './profilesService.js';
+import { listHomeDirectory } from './homeDirectory.js';
+import { getUser } from '../users/usersService.js';
+import { getLiveShare, listLiveShares, resolveRunDirectory, type DirectoryScope } from './directory.js';
 
-/** Tenant-owned bookkeeping columns stripped from surface output. */
-const INTERNAL = new Set(['tenantId', 'updatedBy']);
+/**
+ * ADR 0888 D2 — what a RUN may record about a person: the team allowlist minus
+ * the declared-PII and bearer fields. A node output is written into the run log
+ * and replayed on `:fork`, and a person's later erasure does not rewrite another
+ * run's history — so `bio`, `contact` and the avatar/portfolio asset tokens (bearer
+ * URLs on the unauthenticated `/assets/:token` route) never enter it. What stays is
+ * what this surface exists for: capability (ADR 0005 / ADR 0172).
+ */
+const RUN_OMITTED = new Set(['bio', 'contact', 'avatarAssetToken', 'portfolioAssetTokens', 'emailVerified']);
 
 /** The surface's skill shape: endorsements as a count + the opaque endorser ids. */
 export interface SurfaceProfileSkill {
@@ -35,31 +45,57 @@ export interface SurfaceProfileSkill {
   endorsements: { count: number; endorserUserIds: string[] };
 }
 
-function projectSkill(s: ProfileSkill): SurfaceProfileSkill {
+function projectSkill(s: ProfileSkill, scope: DirectoryScope): SurfaceProfileSkill {
   const ids = s.endorsements ?? [];
-  return { name: s.name, proficiency: s.proficiency, endorsements: { count: ids.length, endorserUserIds: [...ids] } };
+  // In a workspace the endorser ids are home-tenant people (ADR 0888 D1): count only.
+  return { name: s.name, proficiency: s.proficiency, endorsements: { count: ids.length, endorserUserIds: scope.kind === 'workspace' ? [] : [...ids] } };
 }
 
-function projectProfileForSurface(p: Profile): Record<string, unknown> {
+function projectProfileForSurface(p: Profile, scope: DirectoryScope, displayName?: string): Record<string, unknown> {
+  // The ONE team projector (D2) first, so a field it withholds from peers can
+  // never reach a run; then the run-only omissions.
+  const team = viewProfile(p, { scope: scope.kind, ...(displayName ? { displayName } : {}) }) as unknown as Record<string, unknown>;
   const out: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(p)) if (!INTERNAL.has(k)) out[k] = v;
-  out.skills = (p.skills ?? []).map(projectSkill);
+  for (const [k, v] of Object.entries(team)) if (!RUN_OMITTED.has(k)) out[k] = v;
+  out.skills = (p.skills ?? []).map((s) => projectSkill(s, scope));
   return out;
 }
 
 export function buildProfilesSurface(scope: BundleScope): FeatureSurface {
-  const tenantId = scope.tenantId;
   return {
-    // The tenant's team roster (descriptive capability profiles).
-    listProfiles: async () => ({ profiles: (await listProfiles(tenantId)).map(projectProfileForSurface) }),
+    // The team the run's acting user may see (ADR 0888 D1/D3) — the SAME
+    // resolver the `/profiles` route uses. A run with no acting user, an API key,
+    // an anonymous session, a disabled user or a non-member is REFUSED
+    // (`forbidden_scope`, named `reason`), never served the directory.
+    listProfiles: async () => {
+      const { scope: dir } = await resolveRunDirectory(scope);
+      if (dir.kind === 'home') return { profiles: (await listHomeDirectory(dir.tenantId)).map(({ profile }) => projectProfileForSurface(profile, dir)) };
+      const { users, truncated } = await listLiveShares(dir.workspaceId);
+      const profiles: Record<string, unknown>[] = [];
+      for (const u of users) {
+        const p = await getProfile(u.tenantId, u.userId);
+        if (p) profiles.push(projectProfileForSurface(p, dir, u.displayName));
+      }
+      return { profiles, ...(truncated ? { truncated } : {}) };
+    },
     // One member's profile. An EMPTY id is a typed refusal (never a null read);
-    // a real id that is not in the tenant is `{ profile: null, found: false }`
-    // (tenant-scoped; a foreign user is not found).
+    // an id outside the reader's directory is `{ profile: null, found: false }`.
     getProfile: async (args) => {
       const userId = str(args.userId).trim();
       if (!userId) throw new OpenwopError('validation_error', '`userId` is required', 400, { field: 'userId' });
-      const p = await getProfile(tenantId, userId);
-      return { profile: p ? projectProfileForSurface(p) : null, found: p !== null };
+      const { scope: dir } = await resolveRunDirectory(scope);
+      let p: Profile | null = null;
+      let displayName: string | undefined;
+      if (dir.kind === 'home') {
+        p = await getProfile(dir.tenantId, userId);
+        // The route's rule: an orphan (its user is gone) is not found.
+        if (p && !(await getUser(p.userId))) p = null;
+      } else {
+        const u = await getLiveShare(dir.workspaceId, userId);
+        p = u ? await getProfile(u.tenantId, userId) : null;
+        displayName = u?.displayName;
+      }
+      return { profile: p ? projectProfileForSurface(p, dir, displayName) : null, found: p !== null };
     },
   };
 }

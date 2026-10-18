@@ -9,28 +9,41 @@
  *    prompt is driven by the SHARED `ChatInput` — a re-hand-rolled arena bubble
  *    (inline MSG/USER_MSG styling) or a raw `<input type="text">` composer would
  *    fail the two regression tests at the bottom.
+ *
+ * Witnessed (wave 25 probes): pinning the wrong model at session-open, voting the
+ * wrong winner, swapping modelA/modelB in the capture, dropping a returned rating,
+ * swallowing a pane error, dropping the pane-error gate on the vote bar (the
+ * LATER-turn case — on a first-turn failure the empty pane hides the bar anyway),
+ * a hand-rolled bubble, and a raw-input composer each red a case.
+ * Mocks are typed against the real transport/client signatures; the turn fixture is
+ * a real `ConversationTurn` (role 'agent', not the non-union 'assistant').
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, waitFor, fireEvent } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 
-const openSession = vi.fn();
-const sendTurn = vi.fn();
-const closeSession = vi.fn().mockResolvedValue(undefined);
+import type { SendResult } from '../../../chat/conversationTransport.js';
+import type { ConversationTurn } from '../../../chat/conversationClient.js';
+
+type Transport = typeof import('../../../chat/conversationTransport.js');
+type EvalsClient = typeof import('../../../client/evalsClient.js');
+const openSession = vi.fn<Transport['openConversationSession']>();
+const sendTurn = vi.fn<Transport['sendConversationTurn']>();
+const closeSession = vi.fn<Transport['closeConversationSession']>().mockResolvedValue(undefined);
 import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
 vi.mock('../../../chat/conversationTransport.js', async (importOriginal) => {
-  const real = await importOriginal<typeof import('../../../chat/conversationTransport.js')>();
+  const real = await importOriginal<Transport>();
   return {
     ...real,
-    openConversationSession: (cfg: unknown) => openSession(cfg),
-    sendConversationTurn: (...a: unknown[]) => sendTurn(...a),
-    closeConversationSession: (...a: unknown[]) => closeSession(...a),
+    openConversationSession: (...a: Parameters<Transport['openConversationSession']>) => openSession(...a),
+    sendConversationTurn: (...a: Parameters<Transport['sendConversationTurn']>) => sendTurn(...a),
+    closeConversationSession: (...a: Parameters<Transport['closeConversationSession']>) => closeSession(...a),
   };
 });
 
-const captureArenaMatch = vi.fn();
+const captureArenaMatch = vi.fn<EvalsClient['captureArenaMatch']>();
 vi.mock('../../../client/evalsClient.js', () => ({
-  captureArenaMatch: (orgId: string, input: unknown) => captureArenaMatch(orgId, input),
+  captureArenaMatch: (...a: Parameters<EvalsClient['captureArenaMatch']>) => captureArenaMatch(...a),
   fetchArenaRating: vi.fn().mockResolvedValue(1500),
   listOrgs: vi.fn().mockResolvedValue([{ orgId: 'org-1', name: 'Acme' }]),
 }));
@@ -53,13 +66,13 @@ vi.mock('../../../chat/ModelSwitcher.js', () => ({
 
 import { ArenaPage } from '../ArenaPage.js';
 
-const turnFor = (text: string) => ({
-  turns: [
-    { messageId: `u-${text}`, role: 'user', content: text, seq: 1 },
-    { messageId: `a-${text}`, role: 'assistant', content: `reply to ${text}`, seq: 2 },
-  ],
-  lastSeq: 2,
-});
+const turnFor = (text: string): SendResult => {
+  const turns: ConversationTurn[] = [
+    { messageId: `u-${text}`, from: 'user', role: 'user', content: text, ts: 1, turnIndex: 1 },
+    { messageId: `a-${text}`, from: 'assistant', role: 'agent', content: `reply to ${text}`, ts: 2, turnIndex: 2 },
+  ];
+  return { turns, lastSeq: 2 };
+};
 
 beforeEach(() => {
   openSession.mockReset();
@@ -67,7 +80,7 @@ beforeEach(() => {
   captureArenaMatch.mockReset();
   let n = 0;
   openSession.mockImplementation(() => Promise.resolve({ runId: `run-${++n}`, nodeId: 'gate' }));
-  sendTurn.mockImplementation((_r: string, _n2: string, input: { content: string }) => Promise.resolve(turnFor(input.content)));
+  sendTurn.mockImplementation((_r, _n2, input) => Promise.resolve(turnFor(typeof input.content === 'string' ? input.content : '')));
 });
 
 async function driveMatch() {
@@ -115,13 +128,28 @@ describe('ArenaPage', () => {
     expect(queryByText(/b is better/i)).toBeNull(); // vote bar requires both panes settled
   });
 
+  it('a LATER failed turn hides the vote bar even though the pane already has replies', async () => {
+    // On a first-turn failure the empty pane alone hides the bar; here pane A HAS bubbles,
+    // so only the pane-error gate can keep a verdict off a half-failed comparison.
+    const { getByText, queryByText, findByText, getByPlaceholderText } = await driveMatch();
+    expect(getByText(/b is better/i), 'precondition: the bar shows after a clean round').toBeTruthy();
+    sendTurn.mockImplementationOnce(() => Promise.reject(new Error('provider_auth 401')));
+    const composer = getByPlaceholderText(/ask both models/i);
+    fireEvent.change(composer, { target: { value: 'and now?' } });
+    fireEvent.keyDown(composer, { key: 'Enter' });
+    await findByText(/could not reply/i);
+    await findByText(/reply to and now\?/); // pane B settled too
+    expect(queryByText(/b is better/i)).toBeNull();
+  });
+
   // a9 port pins — the arena's feed + composer ride the ONE chat's presentation
   // layer, not a third hand-rolled copy of chat-bubble/composer styling.
   it('renders replies through the SHARED chat bubble (no hand-rolled arena bubbles)', async () => {
     const { container } = await driveMatch();
     // The shared MessageBubble emits `.msgbubble-row`; the demolished arena
     // bubbles used inline MSG/USER_MSG styles carrying none of these classes.
-    expect(container.querySelectorAll('.msgbubble-row').length).toBeGreaterThanOrEqual(2);
+    // user + reply in each of the two panes
+    expect(container.querySelectorAll('.msgbubble-row')).toHaveLength(4);
   });
 
   it('drives the prompt with the SHARED composer (ChatInput), not a raw <input type="text">', () => {

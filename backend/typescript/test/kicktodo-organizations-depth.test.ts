@@ -21,11 +21,17 @@ import { createCircle, inviteToCircle } from '../src/features/kicktodo-accountab
 import { createCohortDetail, joinCohort } from '../src/features/kicktodo-accountability/cohortService.js';
 import {
   setLibraryEntry, libraryCatalog, getLibrary, linkCohort, unlinkCohort, listCohortLinks, orgReport,
-  setBrandRef, getBrandRef, OrgProgramError, OrgProgramNotFoundError, REPORT_K_FLOOR,
+  setBrandRef, getBrandRef, OrgProgramError, OrgProgramNotFoundError, REPORT_K_FLOOR, __test as orgStores,
 } from '../src/features/kicktodo-organizations/orgProgramService.js';
 
 const T = 'tenant-orgprog-depth';
-const ORG = 'org:depth-1';
+// One org per describe: each case owns its links/library/brand, so the file passes
+// in any order (`--sequence.shuffle`).
+const ORG_SYM = 'org:depth-sym';
+const ORG_K = 'org:depth-k';
+const ORG_LIB = 'org:depth-lib';
+const ORG_LIB_EMPTYING = 'org:depth-lib-emptying';
+const ORG_BRAND = 'org:depth-brand';
 const COACH = 'user:orgd-coach';
 const OTHER_COACH = 'user:orgd-other';
 let challengeId = '';
@@ -64,24 +70,26 @@ beforeAll(async () => {
 
 describe('cohort links are symmetric (ARCH-M6)', () => {
   it('owner links and unlinks; a different coach is refused with the uniform not-found; an absent link is a no-op', async () => {
-    await linkCohort(T, ORG, COACH, atFloorCircle);
-    await linkCohort(T, ORG, OTHER_COACH, otherCoachCircle);
-    expect((await listCohortLinks(T, ORG)).map((l) => l.circleId).sort()).toEqual([atFloorCircle, otherCoachCircle].sort());
+    await linkCohort(T, ORG_SYM, COACH, atFloorCircle);
+    await linkCohort(T, ORG_SYM, OTHER_COACH, otherCoachCircle);
+    expect((await listCohortLinks(T, ORG_SYM)).map((l) => l.circleId).sort()).toEqual([atFloorCircle, otherCoachCircle].sort());
     // The other coach cannot undo COACH's decision, and vice versa.
-    await expect(unlinkCohort(T, ORG, atFloorCircle, OTHER_COACH)).rejects.toBeInstanceOf(OrgProgramNotFoundError);
-    await expect(unlinkCohort(T, ORG, otherCoachCircle, COACH)).rejects.toBeInstanceOf(OrgProgramNotFoundError);
-    await unlinkCohort(T, ORG, otherCoachCircle, OTHER_COACH);
-    expect((await listCohortLinks(T, ORG)).map((l) => l.circleId)).toEqual([atFloorCircle]);
-    await expect(unlinkCohort(T, ORG, otherCoachCircle, OTHER_COACH)).resolves.toBeUndefined(); // already gone — no-op
+    await expect(unlinkCohort(T, ORG_SYM, atFloorCircle, OTHER_COACH)).rejects.toBeInstanceOf(OrgProgramNotFoundError);
+    await expect(unlinkCohort(T, ORG_SYM, otherCoachCircle, COACH)).rejects.toBeInstanceOf(OrgProgramNotFoundError);
+    await unlinkCohort(T, ORG_SYM, otherCoachCircle, OTHER_COACH);
+    expect((await listCohortLinks(T, ORG_SYM)).map((l) => l.circleId)).toEqual([atFloorCircle]);
+    await expect(unlinkCohort(T, ORG_SYM, otherCoachCircle, OTHER_COACH)).resolves.toBeUndefined(); // already gone — no-op
     // The report only covers what is linked.
-    expect((await orgReport(T, ORG)).map((c) => c.circleId)).toEqual([atFloorCircle]);
+    expect((await orgReport(T, ORG_SYM)).map((c) => c.circleId)).toEqual([atFloorCircle]);
   });
 });
 
 describe('the k-floor is exact', () => {
   it(`k-1 active members withholds; exactly k shows buckets; no member is ever named`, async () => {
-    await linkCohort(T, ORG, COACH, belowFloorCircle);
-    const cells = await orgReport(T, ORG);
+    await linkCohort(T, ORG_K, COACH, atFloorCircle);
+    await linkCohort(T, ORG_K, COACH, belowFloorCircle);
+    const cells = await orgReport(T, ORG_K);
+    expect(cells.map((c) => c.circleId).sort()).toEqual([atFloorCircle, belowFloorCircle].sort());
     const shown = cells.find((c) => c.circleId === atFloorCircle)!;
     const withheld = cells.find((c) => c.circleId === belowFloorCircle)!;
     expect(shown.outcome?.activeMembers).toBe(REPORT_K_FLOOR);
@@ -93,30 +101,45 @@ describe('the k-floor is exact', () => {
 
 describe('library overlay edges', () => {
   it('removing the only entry restores the full catalog; re-adding is idempotent; the raw library records who added', async () => {
-    const lib = await setLibraryEntry(T, ORG, 'user:orgd-admin', { challengeId, version: 1, present: true });
+    const lib = await setLibraryEntry(T, ORG_LIB, 'user:orgd-admin', { challengeId, version: 1, present: true });
     expect(lib.entries).toHaveLength(1);
     expect(lib.entries[0]?.addedBy).toBe('user:orgd-admin');
-    expect((await libraryCatalog(T, ORG)).curated).toBe(true);
+    expect((await libraryCatalog(T, ORG_LIB)).curated).toBe(true);
     // Idempotent: the same entry again is still one entry.
-    expect((await setLibraryEntry(T, ORG, 'user:orgd-admin', { challengeId, version: 1, present: true })).entries).toHaveLength(1);
+    expect((await setLibraryEntry(T, ORG_LIB, 'user:orgd-admin', { challengeId, version: 1, present: true })).entries).toHaveLength(1);
     // Remove it: an EMPTY library is "no library" — the full catalog, not "nothing".
-    expect((await setLibraryEntry(T, ORG, 'user:orgd-admin', { challengeId, version: 1, present: false })).entries).toHaveLength(0);
-    const after = await libraryCatalog(T, ORG);
+    expect((await setLibraryEntry(T, ORG_LIB, 'user:orgd-admin', { challengeId, version: 1, present: false })).entries).toHaveLength(0);
+    const after = await libraryCatalog(T, ORG_LIB);
     expect(after.curated).toBe(false);
     expect(after.challenges.map((c) => c.id)).toContain(challengeId);
-    expect((await getLibrary(T, ORG))?.entries).toEqual([]);
+    // Grade-data KTORG-D1 — an emptied library leaves NO row (a kept empty row blocked
+    // deleting the org forever through deleteOrg's refuse-while-populated guard).
+    expect(await getLibrary(T, ORG_LIB)).toBeNull();
     // Removing an entry that was never present is a no-op, not an error.
-    await expect(setLibraryEntry(T, ORG, 'user:orgd-admin', { challengeId, version: 1, present: false })).resolves.toBeTruthy();
+    await expect(setLibraryEntry(T, ORG_LIB, 'user:orgd-admin', { challengeId, version: 1, present: false })).resolves.toBeTruthy();
+  });
+
+  // The removal of the last entry is two writes: CAS the row to `entries: []` (the
+  // EMPTYING claim), then delete it. A Discover read landing between them — or after
+  // an emptier crashed before its delete — finds an EMPTY row. That row must still
+  // read as "no library" (the full catalog), never as an allowlist of nothing.
+  // Witness: w40g3-od-empty-library (`!lib || lib.entries.length === 0` → `!lib`).
+  it('an EMPTY library row (an emptier mid-delete, or a crashed one) still reads as the full catalog', async () => {
+    await orgStores.libraries.put({ tenantId: T, orgId: ORG_LIB_EMPTYING, entries: [], updatedAt: new Date().toISOString() });
+    expect((await getLibrary(T, ORG_LIB_EMPTYING))?.entries).toEqual([]); // the claim row really is there
+    const view = await libraryCatalog(T, ORG_LIB_EMPTYING);
+    expect(view.curated).toBe(false);
+    expect(view.challenges.map((c) => c.id)).toContain(challengeId);
   });
 });
 
 describe('brand ref', () => {
   it('round-trips a trimmed id and refuses empty or oversized ids', async () => {
-    expect(await getBrandRef(T, ORG)).toBeNull();
-    await setBrandRef(T, ORG, '  brand:kicktodo  ');
-    expect(await getBrandRef(T, ORG)).toBe('brand:kicktodo');
-    await expect(setBrandRef(T, ORG, '   ')).rejects.toBeInstanceOf(OrgProgramError);
-    await expect(setBrandRef(T, ORG, 'x'.repeat(201))).rejects.toBeInstanceOf(OrgProgramError);
-    expect(await getBrandRef(T, ORG)).toBe('brand:kicktodo'); // a refused write changes nothing
+    expect(await getBrandRef(T, ORG_BRAND)).toBeNull();
+    await setBrandRef(T, ORG_BRAND, '  brand:kicktodo  ');
+    expect(await getBrandRef(T, ORG_BRAND)).toBe('brand:kicktodo');
+    await expect(setBrandRef(T, ORG_BRAND, '   ')).rejects.toBeInstanceOf(OrgProgramError);
+    await expect(setBrandRef(T, ORG_BRAND, 'x'.repeat(201))).rejects.toBeInstanceOf(OrgProgramError);
+    expect(await getBrandRef(T, ORG_BRAND)).toBe('brand:kicktodo'); // a refused write changes nothing
   });
 });

@@ -1,23 +1,30 @@
 /**
- * Strategy §8 — the operator's paywall funnel panel on the billing page.
+ * ADR 0820 §7 / monetization strategy §8 — the operator's paywall funnel panel on
+ * the billing page (cross-workspace data: superadmin only).
  *  - shown (and fetched) ONLY for a superadmin; an owner/admin never requests it;
  *  - a rate with no denominator renders "—", never 0%;
  *  - demo-mode checkouts are named as excluded;
  *  - switching the window re-reads with days=30;
- *  - a failed read says so.
+ *  - a failed read says so, and shows no bundle rows.
+ *
+ * Witnessed (wave 52): "—" → 0%, the wrong rate column, hiding the demo count,
+ * a window button that always reads 7, "new" → "no change", a swallowed weekly
+ * failure, offering the panel to a non-superadmin, and hiding the read failure
+ * each turn a case red. The panel is `React.lazy`: the owner case awaits the
+ * chunk (`settleLazy`) before asserting it never mounted.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, cleanup, fireEvent, within } from '@testing-library/react';
+import { render, screen, cleanup, fireEvent, within, act } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
-import type { PaywallFunnel } from '../billingClient.js';
+import type { PaywallFunnel, Subscription, TokenBalance, AiCreditMeter } from '../billingClient.js';
 
 const access = vi.hoisted(() => ({ current: { access: { basis: 'member', scopes: [] as string[], superadmin: false as boolean }, resolved: true } }));
 vi.mock('../billingClient.js', async (orig) => ({
   ...(await orig<Record<string, unknown>>()),
-  getSubscription: vi.fn(async () => ({ tenantId: 't', planTier: 'pro', status: 'active' })),
-  getBalance: vi.fn(async () => ({ tenantId: 't', purchasedTokensTotal: 0, totalAvailable: 0 })),
-  getAiCredits: vi.fn(async () => ({ freeDaily: null, monthly: null, balanceCredits: 0, windowDays: 30, topFeatures: [], otherCredits: 0 })),
+  getSubscription: vi.fn(async (): Promise<Subscription> => ({ tenantId: 't', planTier: 'pro', status: 'active' })),
+  getBalance: vi.fn(async (): Promise<TokenBalance> => ({ tenantId: 't', purchasedTokensTotal: 0, totalAvailable: 0 })),
+  getAiCredits: vi.fn(async (): Promise<AiCreditMeter> => ({ freeDaily: null, monthly: null, balanceCredits: 0, windowDays: 30, topFeatures: [], otherCredits: 0 })),
   getPaywallFunnel: vi.fn(),
   getPaywallFunnelWeekly: vi.fn(),
 }));
@@ -59,7 +66,22 @@ const FUNNEL: PaywallFunnel = {
 };
 const at = () => render(<MemoryRouter initialEntries={['/billing']}><BillingPage /></MemoryRouter>);
 
-beforeEach(() => { vi.clearAllMocks(); access.current = OPERATOR; mWeekly.mockResolvedValue(WEEKLY); });
+/** Resolve the lazy panel chunk and let any mount effect run, so "never sent to"
+ *  is checked after the panel WOULD have mounted — not while Suspense is pending. */
+const settleLazy = async (): Promise<void> => {
+  await act(async () => {
+    await import('../PaywallFunnelPanel.js');
+    for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+  });
+};
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  mFunnel.mockReset();
+  mWeekly.mockReset();
+  access.current = OPERATOR;
+  mWeekly.mockResolvedValue(WEEKLY);
+});
 afterEach(cleanup);
 
 describe('BillingPage — paywall funnel (superadmin)', () => {
@@ -123,6 +145,7 @@ describe('BillingPage — paywall funnel (superadmin)', () => {
     access.current = OWNER;
     at();
     expect(await screen.findByRole('heading', { name: 'AI credits' })).toBeTruthy();
+    await settleLazy();
     expect(screen.queryByRole('heading', { name: 'Paywall funnel' })).toBeNull();
     expect(mFunnel).not.toHaveBeenCalled();
     expect(mWeekly).not.toHaveBeenCalled();
@@ -132,5 +155,6 @@ describe('BillingPage — paywall funnel (superadmin)', () => {
     mFunnel.mockRejectedValue(new Error('network down'));
     at();
     expect(await screen.findByText(/Could not load the paywall funnel\./)).toBeTruthy();
+    expect(screen.queryByRole('rowheader', { name: 'crm' })).toBeNull();
   });
 });

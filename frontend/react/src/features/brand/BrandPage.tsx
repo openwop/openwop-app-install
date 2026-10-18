@@ -8,7 +8,7 @@
  * @see docs/adr/0155-campaign-studio-brand-guardrails.md
  */
 import { Button } from '../../ui/Button.js';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { PageHeader } from '../../ui/PageHeader.js';
 import { Notice } from '../../ui/Notice.js';
@@ -16,7 +16,9 @@ import { StateCard } from '../../ui/StateCard.js';
 import { Modal } from '../../ui/Modal.js';
 import { formatDateTime } from '../../i18n/format.js';
 import { ConfirmDialog } from '../../ui/ConfirmDialog.js';
-import { TextField, TextareaField, SelectField } from '../../ui/Field.js';
+import { TextField, TextareaField, SelectField, CheckboxField } from '../../ui/Field.js';
+import { loadOrgMembers } from '../../orgs/orgMembers.js';
+import type { OrgMember } from '../../client/accessClient.js';
 import { MegaphoneIcon, PlusIcon, TrashIcon } from '../../ui/icons/index.js';
 import {
   listBrands, createBrand, updateBrand, deleteBrand, listOrgs, getBrandAudit, type BrandAuditRow,
@@ -232,13 +234,14 @@ interface EditorState {
   elevatorPitch: string;
   channelRules: ChannelVoiceRule[];
   lockLevel: BrandLockLevel;
+  allowedEditors: string[];
 }
 
 function initialState(brand: Brand | null, orgs: OrgRef[]): EditorState {
   if (!brand) {
     return {
       orgId: orgs[0]?.orgId ?? '', name: '', description: '', voice: '', formalityLevel: 3, guidelines: '',
-      approved: '', banned: '', tagline: '', elevatorPitch: '', channelRules: [], lockLevel: 'none',
+      approved: '', banned: '', tagline: '', elevatorPitch: '', channelRules: [], lockLevel: 'none', allowedEditors: [],
     };
   }
   return {
@@ -254,6 +257,7 @@ function initialState(brand: Brand | null, orgs: OrgRef[]): EditorState {
     elevatorPitch: brand.positioning.elevatorPitch,
     channelRules: brand.channelVoiceRules,
     lockLevel: brand.governance.lockLevel,
+    allowedEditors: brand.governance.allowedEditors,
   };
 }
 
@@ -286,6 +290,33 @@ function BrandEditor({ brand, orgs, t, onClose, onSaved, onError }: {
     });
   };
   const set = <K extends keyof EditorState>(k: K, v: EditorState[K]): void => setS((p) => ({ ...p, [k]: v }));
+
+  // BR2UX-1 — `allowedEditors` was API-only: a partial lock named editors nobody
+  // could see or change. The org's members are the candidates; listing them needs
+  // member-read access, which a governance change (org admin) has anyway. A failed
+  // load is said, never shown as "no members".
+  const [members, setMembers] = useState<OrgMember[] | null>(null);
+  const [membersFailed, setMembersFailed] = useState(false);
+  useEffect(() => {
+    if (s.lockLevel !== 'partial' || !s.orgId) return;
+    let live = true;
+    setMembersFailed(false);
+    loadOrgMembers(s.orgId).then((m) => { if (live) setMembers(m); }).catch(() => { if (live) setMembersFailed(true); });
+    return () => { live = false; };
+  }, [s.lockLevel, s.orgId]);
+  const toggleEditor = (subject: string, on: boolean): void =>
+    set('allowedEditors', on ? [...new Set([...s.allowedEditors, subject])] : s.allowedEditors.filter((x) => x !== subject));
+  const pickable = (members ?? []).filter((m): m is OrgMember & { subject: string } => typeof m.subject === 'string' && m.subject.length > 0);
+  const unlisted = s.allowedEditors.filter((id) => !pickable.some((m) => m.subject === id)).length;
+
+  // BR2UX-2 — a failed save is shown at the top of a long dialog while Save sits at
+  // the bottom: bring the error into view (it is also spoken, `errorAnnounce`).
+  const formRef = useRef<HTMLFormElement>(null);
+  useEffect(() => {
+    if (!editorError) return;
+    const dialog = formRef.current?.closest('[role="dialog"]');
+    if (dialog) dialog.scrollTop = 0;
+  }, [editorError]);
 
   const addRule = (): void => {
     const used = new Set(s.channelRules.map((r) => r.channel));
@@ -324,7 +355,7 @@ function BrandEditor({ brand, orgs, t, onClose, onSaved, onError }: {
       keyPhrases: { ...brand?.keyPhrases, approvedTaglines: splitLines(s.approved), bannedPhrases: splitLines(s.banned) },
       positioning: { ...brand?.positioning, tagline: s.tagline, elevatorPitch: s.elevatorPitch },
       channelVoiceRules: s.channelRules,
-      governance: { ...brand?.governance, lockLevel: s.lockLevel },
+      governance: { ...brand?.governance, lockLevel: s.lockLevel, allowedEditors: s.allowedEditors },
       // R2 BR-SP-5 — a stale editor gets a 409, never a silent clobber.
       ...(brand ? { expectedUpdatedAt: brand.updatedAt } : {}),
     };
@@ -353,6 +384,7 @@ function BrandEditor({ brand, orgs, t, onClose, onSaved, onError }: {
       onClose={onClose}
       showClose
       error={editorError}
+      errorAnnounce={editorError ?? undefined}
     >
       <h2 className="u-mt-0">{brand ? t('editorEditTitle') : t('editorCreateTitle')}</h2>
       {/* BR-G2 — the list already knows this brand is locked (it renders a chip
@@ -368,7 +400,7 @@ function BrandEditor({ brand, orgs, t, onClose, onSaved, onError }: {
           </Notice>
         </div>
       ) : null}
-      <form onSubmit={(e) => { e.preventDefault(); if (canSave && !saving) void save(); }}>
+      <form ref={formRef} onSubmit={(e) => { e.preventDefault(); if (canSave && !saving) void save(); }}>
         <fieldset className="u-mb-4 u-border-none u-p-0">
           <legend className="u-fw-600 u-mb-2">{t('secIdentity')}</legend>
           {!brand ? (
@@ -430,6 +462,40 @@ function BrandEditor({ brand, orgs, t, onClose, onSaved, onError }: {
           <SelectField label={t('fieldLockLevel')} value={s.lockLevel} onChange={(e) => set('lockLevel', e.target.value as BrandLockLevel)}>
             {LOCK_LEVELS.map((l) => <option key={l} value={l}>{t(`lock_${l}`)}</option>)}
           </SelectField>
+          {s.lockLevel === 'partial' ? (
+            <div role="group" aria-labelledby="brand-editors-label" className="u-mb-3">
+              <span id="brand-editors-label" className="u-fw-600 u-fs-13">{t('fieldAllowedEditors')}</span>
+              <p className="muted u-fs-13 u-mt-0">{t('fieldAllowedEditorsHelp')}</p>
+              {membersFailed ? (
+                <p className="muted u-fs-13 u-m-0">{t('allowedEditorsUnavailable', { count: s.allowedEditors.length })}</p>
+              ) : members === null ? (
+                <p className="muted u-fs-13 u-m-0">{t('common:loading')}</p>
+              ) : pickable.length === 0 ? (
+                <p className="muted u-fs-13 u-m-0">{t('allowedEditorsNone')}</p>
+              ) : (
+                pickable.map((m) => (
+                  <CheckboxField
+                    key={m.memberId}
+                    label={m.displayName || m.email || m.subject}
+                    checked={s.allowedEditors.includes(m.subject)}
+                    onChange={(e) => toggleEditor(m.subject, e.target.checked)}
+                  />
+                ))
+              )}
+              {!membersFailed && members !== null && unlisted > 0 ? (
+                <p className="muted u-fs-13 u-m-0">{t('allowedEditorsUnlisted', { count: unlisted })}</p>
+              ) : null}
+            </div>
+          ) : null}
+          {/* BR2UX-1 — the two server-side governance facts this editor does not
+              edit are at least stated, so a save is never a surprise. */}
+          {brand ? (
+            <p className="muted u-fs-13 u-m-0">
+              {t(brand.governance.requireApproval ? 'governanceApprovalOn' : 'governanceApprovalOff')}
+              {' · '}
+              {t(`governancePublish_${brand.governance.compliance?.blockPublish ?? 'off'}`, { threshold: brand.governance.compliance?.blockThreshold ?? 60 })}
+            </p>
+          ) : null}
         </fieldset>
 
         {/* ADR 0399 OQ-1 — ad-render fonts. Edit-mode only (needs a brandId);

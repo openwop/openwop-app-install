@@ -11,10 +11,21 @@
  *
  * BI-G2: a failed entity-type read left the picker holding only the kernel types
  * and the field datalist empty — the form silently offered less than it should.
+ * The warning's "Try again" must actually re-read (a retry that only clears the
+ * flag would bring back the silent shrink).
+ *
+ * Sabotage-witnessed (w52): dropping `readErrorMessage` / `details.field` in
+ * `biErrorFrom`; showing the notice for located errors; dropping `setErrorField`;
+ * `setTypesFailed(false)` in the catch; un-wiring the retry's `onClick={loadTypes}`.
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, cleanup, act, fireEvent } from '@testing-library/react';
 import { biErrorFrom } from '../biClient.js';
+import type * as BiClient from '../biClient.js';
+import type * as EntitiesClient from '../../entities/entitiesClient.js';
+import type * as AccessClient from '../../../client/accessClient.js';
+import type { EntityType } from '../../entities/entitiesClient.js';
+import type { Organization } from '../../../client/accessClient.js';
 
 const envelope = (status: number, body: unknown): Response =>
   new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
@@ -50,7 +61,10 @@ describe('BI-G1 — the client parses the real ErrorEnvelope', () => {
 /* ── the page ── */
 
 const { listBiMetrics, createBiMetric, listEntityTypes, listOrgs } = vi.hoisted(() => ({
-  listBiMetrics: vi.fn(), createBiMetric: vi.fn(), listEntityTypes: vi.fn(), listOrgs: vi.fn(),
+  listBiMetrics: vi.fn<typeof BiClient.listBiMetrics>(),
+  createBiMetric: vi.fn<typeof BiClient.createBiMetric>(),
+  listEntityTypes: vi.fn<typeof EntitiesClient.listEntityTypes>(),
+  listOrgs: vi.fn<typeof AccessClient.listOrgs>(),
 }));
 vi.mock('../biClient.js', async (orig) => ({
   ...(await orig<typeof import('../biClient.js')>()),
@@ -78,12 +92,23 @@ const located = (message: string, field: string): Error => {
   return e;
 };
 
+const ORG: Organization = {
+  orgId: 'o1', tenantId: 't1', name: 'Acme', slug: 'acme',
+  createdBy: 'u1', createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z',
+};
+const DEAL: EntityType = {
+  typeId: 'type-deal', tenantId: 't1', projectId: 'p1', name: 'deal', displayName: 'Deal',
+  fields: [{ key: 'amount', label: 'Amount', type: 'number', required: false }],
+  status: 'published', createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z',
+};
+
 afterEach(cleanup);
 beforeEach(() => {
-  vi.clearAllMocks();
-  listOrgs.mockResolvedValue([{ orgId: 'o1', name: 'Acme' }]);
+  // mockReset, not clearAllMocks: a case's mockRejectedValue must not answer the next case.
+  for (const m of [listOrgs, listBiMetrics, createBiMetric, listEntityTypes]) m.mockReset();
+  listOrgs.mockResolvedValue([ORG]);
   listBiMetrics.mockResolvedValue([]);
-  listEntityTypes.mockResolvedValue([{ name: 'deal', fields: [{ key: 'amount' }] }]);
+  listEntityTypes.mockResolvedValue([DEAL]);
 });
 
 describe('BI-G1 — a located error lands ON the control', () => {
@@ -124,7 +149,11 @@ describe('BI-G2 — a failed entity-type read is visible', () => {
     listEntityTypes.mockRejectedValue(new Error('503'));
     await mount();
     expect(document.body.textContent).toContain('only the built-in ones');
-    expect(screen.getByRole('button', { name: 'Try again' })).toBeTruthy();
+    // The retry RE-READS: the next read succeeds, and the warning goes with it.
+    listEntityTypes.mockResolvedValueOnce([DEAL]);
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Try again' })); });
+    expect(listEntityTypes).toHaveBeenCalledTimes(2);
+    expect(document.body.textContent).not.toContain('only the built-in ones');
   });
 
   it('says nothing when the types load', async () => {

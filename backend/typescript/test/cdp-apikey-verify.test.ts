@@ -3,9 +3,13 @@
  * stick: a prior/concurrent verify's best-effort lastUsedAt stamp must never
  * re-persist the pre-revoke record and un-revoke the key (fixed via compareAndSwap).
  */
-import { beforeAll, describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/index.js';
 import { issueApiKey, verifyApiKey, revokeApiKey } from '../src/features/developer-keys/apiKeyService.js';
+import { DurableCollection } from '../src/host/hostExtPersistence.js';
+
+interface KeyRow { keyId: string; tenantId: string; tokenHash: string; lastUsedAt?: string; revokedAt?: string }
+const drain = async (): Promise<void> => { for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r)); };
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -16,12 +20,43 @@ beforeAll(async () => {
 describe('CDP-H verifyApiKey durability', () => {
   it('a revoke sticks even after repeated verifies (no lastUsedAt clobber)', async () => {
     const { token, key } = await issueApiKey({ tenantId: 'org:kv', name: 'k', createdBy: 'u1', scopes: ['manifest:read'] });
-    // several verifies (each does the best-effort lastUsedAt CAS)
-    expect(await verifyApiKey(token)).toBeTruthy();
-    expect(await verifyApiKey(token)).toBeTruthy();
-    // revoke, then interleave more verifies — must stay revoked
-    expect(await revokeApiKey('org:kv', key.keyId, { callerSubject: 'u1', isAdmin: false })).toBe(true);
-    for (let i = 0; i < 5; i++) expect(await verifyApiKey(token)).toBeNull();
+    const records = new DurableCollection<KeyRow>('devkey:record', (k) => k.keyId);
+
+    // Force the race the fix closes: hold verify's best-effort lastUsedAt write
+    // (whether it is a CAS or a plain put) until AFTER the revoke has landed.
+    // Only the stamp write is held — it carries lastUsedAt and no revokedAt.
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let held = 0;
+    const isStamp = (self: unknown, row: unknown): boolean => {
+      const r = row as Partial<KeyRow> | null;
+      return Reflect.get(self as object, 'name') === 'devkey:record' && r?.keyId === key.keyId && r.lastUsedAt !== undefined && r.revokedAt === undefined;
+    };
+    const origCas = DurableCollection.prototype.compareAndSwap;
+    const origPut = DurableCollection.prototype.put;
+    const cas = vi.spyOn(DurableCollection.prototype, 'compareAndSwap').mockImplementation(async function (this: DurableCollection<unknown>, expected, next) {
+      if (isStamp(this, next)) { held++; await gate; }
+      return origCas.call(this, expected, next);
+    });
+    const put = vi.spyOn(DurableCollection.prototype, 'put').mockImplementation(async function (this: DurableCollection<unknown>, item) {
+      if (isStamp(this, item)) { held++; await gate; }
+      return origPut.call(this, item);
+    });
+    try {
+      // A use well past the 5-minute stamp resolution ⇒ verify writes lastUsedAt.
+      expect(await verifyApiKey(token, Date.now() + 10 * 60_000)).toBeTruthy();
+      expect(held).toBe(1); // the stamp write is in flight, pre-revoke
+      expect(await revokeApiKey('org:kv', key.keyId, { callerSubject: 'u1', isAdmin: false })).toBe(true);
+      release();
+      await drain();
+    } finally {
+      release();
+      cas.mockRestore();
+      put.mockRestore();
+    }
+    // The late stamp must not have re-persisted the pre-revoke row.
+    expect((await records.get(key.keyId))?.revokedAt).toBeTruthy();
+    for (let i = 0; i < 3; i++) expect(await verifyApiKey(token, Date.now() + 20 * 60_000)).toBeNull();
   });
 
   it('an expired key never authenticates', async () => {
@@ -29,7 +64,6 @@ describe('CDP-H verifyApiKey durability', () => {
     expect(await verifyApiKey(token)).toBeNull();
   });
   it('TOK-D-2 (ADR 0448) — a legacy hashidx pointer without tenantId is lazily healed on the next verify', async () => {
-    const { DurableCollection } = await import('../src/host/hostExtPersistence.js');
     const { token, key } = await issueApiKey({ tenantId: 'org:heal', name: 'legacy', createdBy: 'u1', scopes: ['manifest:read'] });
 
     // Simulate a PRE-fix pointer: overwrite the index row with the old shape
@@ -43,12 +77,7 @@ describe('CDP-H verifyApiKey durability', () => {
 
     // A verify still succeeds AND heals the pointer in place (fire-and-forget).
     expect(await verifyApiKey(token)).toBeTruthy();
-    // The heal is a void promise; poll briefly for it to land.
-    let healed: string | undefined;
-    for (let i = 0; i < 20 && healed === undefined; i++) {
-      healed = (await hashIndex.get(th))!.tenantId;
-      if (healed === undefined) await new Promise((r) => setTimeout(r, 5));
-    }
-    expect(healed).toBe('org:heal'); // now tenant-purge-reachable
+    // The heal is a void promise; wait on the real condition, not a sleep.
+    await vi.waitFor(async () => expect((await hashIndex.get(th))!.tenantId).toBe('org:heal')); // now tenant-purge-reachable
   });
 });

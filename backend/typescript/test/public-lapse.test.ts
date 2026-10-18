@@ -174,6 +174,7 @@ const LAPSE_LANES = [
   'features/docs/docsService.ts',           // docs site + llms.txt
   'features/funnels/routes.ts',             // funnel runtime
   'features/podcasts/publicRoutes.ts',      // show/episode pages, feed.xml, audio
+  'features/service-desk/intake.ts',        // ADR 0878 D9 — WhatsApp intake (the sender is a visitor)
   'features/service-desk/widgetRoutes.ts',  // service-desk widget
   'features/webinars/formsSubmissionSink.ts', // webinar registration sink
   'middleware/customDomain.ts',             // custom-domain serving

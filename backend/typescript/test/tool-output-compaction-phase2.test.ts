@@ -1,6 +1,18 @@
 /**
  * ADR 0099 Phase 2 — per-agent LOSSY opt-in via agentProfile, frozen at run
  * creation (replay-safe), gated by the tenant toggle.
+ *
+ * Unique here: the agent is DERIVED from the run's attribution block at insert
+ * (`runInsert.ts` `attribution?.rosterId`), `lossy:false` is not an opt-in, a
+ * missing profile still stamps `lossless`, and the toggle beats an opted-in
+ * profile. Sabotage that turns it red (wave 22): dropping the attribution
+ * fallback reds the insert cases; `if (cfg.lossy !== undefined)` reds the
+ * no-opt-in case; `if (!profile) return {}` reds the missing-profile case.
+ *
+ * Cut in wave 22 (redundant, cover confirmed red by the same sabotage):
+ * "an opted-in agent freezes mode lossy with its head/tail" → residuals
+ * "lossy agent carries minChars + exemptTools together"; "a run with no agent
+ * stays lossless" → residuals "default carries NO minChars floor".
  */
 import { describe, it, expect, beforeEach, beforeAll, afterAll } from 'vitest';
 import { openSqliteStorage } from '../src/storage/sqlite/index.js';
@@ -75,20 +87,9 @@ describe('extractRunAttribution (shared convention reader)', () => {
 });
 
 describe('per-agent lossy resolution', () => {
-  it('an opted-in agent freezes mode "lossy" with its head/tail', async () => {
-    await setAgentLossy({ lossy: true, head: 2, tail: 1 });
-    const patch = await resolveCompactionDecision({ tenantId: TENANT, agentId: ROSTER });
-    expect(readCompactionDecision(patch)).toEqual({ mode: 'lossy', head: 2, tail: 1 });
-  });
-
   it('an agent without the opt-in stays lossless', async () => {
     await setAgentLossy({ lossy: false });
     const patch = await resolveCompactionDecision({ tenantId: TENANT, agentId: ROSTER });
-    expect(readCompactionDecision(patch)).toEqual({ mode: 'lossless' });
-  });
-
-  it('a run with no agent stays lossless', async () => {
-    const patch = await resolveCompactionDecision({ tenantId: TENANT });
     expect(readCompactionDecision(patch)).toEqual({ mode: 'lossless' });
   });
 
@@ -121,6 +122,14 @@ describe('insertRunWithStartContext derives the agent from attribution', () => {
 
     // Agent later turns lossy OFF — the already-created run must be unaffected.
     await setAgentLossy({ lossy: false });
+    // Non-vacuity: the edit LANDED — a run created now sees it and freezes lossless.
+    await insertRunWithStartContext(storage, attributedRun('run-p2-3'));
+    expect(readCompactionDecision((await storage.getRun('run-p2-3'))?.metadata)).toEqual({ mode: 'lossless' });
+    // …while the earlier run keeps the decision it was born with. Honest ceiling:
+    // nothing between insert and read re-resolves the profile, so this half is a
+    // property of the stored row; the live replay invariant (a re-insert of a
+    // COPIED blob) is witnessed on the real `:fork` route in
+    // tool-output-compaction-fork-real-path.test.ts.
     const stored = await storage.getRun('run-p2-2');
     expect(readCompactionDecision(stored?.metadata)).toEqual({ mode: 'lossy', head: 3, tail: 2 });
   });

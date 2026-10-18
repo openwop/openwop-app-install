@@ -20,6 +20,7 @@
  * (feature.documents.nodes). Bytes are durable in `documents:version.content`.
  */
 
+import { notifyDocumentVersionAdded } from '../../host/documentVersionObservers.js';
 import { resolveCanvasTypeAccess } from '../../host/canvasTypeOwnership.js';
 import type { ToggleSubject } from '../../host/featureToggles/types.js';
 import { randomUUID } from 'node:crypto';
@@ -579,7 +580,7 @@ export async function getVersion(tenantId: string, orgId: string, documentId: st
  */
 export async function addVersion(
   tenantId: string, orgId: string, documentId: string,
-  input: { content: unknown; renderedMediaToken?: string; producedBy: Provenance['producedBy']; idempotencyKey?: string; baseVersionId?: string },
+  input: { content: unknown; renderedMediaToken?: string; producedBy: Provenance['producedBy']; idempotencyKey?: string; baseVersionId?: string | null },
 ): Promise<DocumentVersion> {
   const doc = await getDocument(tenantId, orgId, documentId);
   if (!doc) throw new OpenwopError('not_found', 'Document not found.', 404, { documentId });
@@ -598,7 +599,13 @@ export async function addVersion(
   // retry, so a concurrent save makes this one fail instead of landing on top of
   // text the caller never saw (the slot is insert-only-if-absent).
   let checkedNum: number | undefined;
-  if (input.baseVersionId !== undefined) {
+  // ADR 0913 D5 (Book AI P11) — `baseVersionId: null` is the checked FIRST save:
+  // "I saw no version". It is the version-1 case of the same check, so two first
+  // saves from two tabs cannot both land (the slot write below is insert-only).
+  if (input.baseVersionId === null) {
+    if (existing.length > 0) throw staleBase(documentId, existing[0]?.versionId ?? doc.currentVersionId);
+    checkedNum = 1;
+  } else if (input.baseVersionId !== undefined) {
     const base = boundString(input.baseVersionId, 'baseVersionId', MAX.title);
     // The base must be the NEWEST version that exists, not merely the pointer:
     // a version row is inserted before the pointer moves, so a crash (or a lost
@@ -637,6 +644,13 @@ export async function addVersion(
     // a lower version can never pull the pointer back, and a concurrent PATCH's
     // fields survive.
     await advancePointer(tenantId, orgId, documentId, version);
+    // ADR 0853 D7 — announce the new text (fail-soft; never fails the save).
+    const previous = existing.find((v) => v.version < version.version);
+    await notifyDocumentVersionAdded({
+      tenantId, orgId, documentId, title: doc.title, kind: doc.kind,
+      ...(doc.ownerSubject ? { ownerSubject: doc.ownerSubject } : {}),
+      version: version.version, content, previousContent: previous?.content ?? '', producedBy: input.producedBy,
+    });
     return version;
   }
   throw new OpenwopError('conflict', 'Could not allocate a version id (too many concurrent writes).', 409, { documentId });

@@ -7,29 +7,33 @@
  * outright. The tempting shortcut, `?force=true`, bypasses EVERY consumer
  * including a realtime-voice binding on the same key: that is precisely the
  * orphaning ADR 0499 was written to stop. So the order is load-bearing.
+ *
+ * Sabotage that turns these red (ConfiguredProviderCard.tsx `onDelete`): deleting
+ * before unbinding; passing `{ force: true }` to `deleteKey`.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
+import type * as ByokClient from '../lib/byokClient.js';
+import type { BYOKActiveConfig } from '../lib/useBYOKConfig.js';
 
-const deleteKey = vi.fn();
-const clearActiveConfig = vi.fn();
+const deleteKey = vi.fn<typeof ByokClient.deleteKey>();
+const clearActiveConfig = vi.fn<typeof ByokClient.clearActiveConfig>();
 const order: string[] = [];
 
 vi.mock('../lib/byokClient.js', () => ({
-  deleteKey: (...a: unknown[]) => { order.push('deleteKey'); return deleteKey(...a); },
-  clearActiveConfig: (...a: unknown[]) => { order.push('clearActiveConfig'); return clearActiveConfig(...a); },
+  deleteKey: (...a: Parameters<typeof ByokClient.deleteKey>) => { order.push('deleteKey'); return deleteKey(...a); },
+  clearActiveConfig: (...a: Parameters<typeof ByokClient.clearActiveConfig>) => { order.push('clearActiveConfig'); return clearActiveConfig(...a); },
 }));
 vi.mock('../../ui/confirm.js', () => ({ confirm: () => Promise.resolve(true) }));
 
 const { ConfiguredProviderCard } = await import('../ConfiguredProviderCard.js');
 
-const config = { provider: 'google', model: 'gemini-3.1-flash-lite', credentialRef: 'byok:google' } as never;
+const config: BYOKActiveConfig = { provider: 'google', model: 'gemini-3.1-flash-lite', credentialRef: 'byok:google' };
 
 beforeEach(() => {
   order.length = 0;
-  vi.clearAllMocks();
-  deleteKey.mockResolvedValue(undefined);
-  clearActiveConfig.mockResolvedValue(undefined);
+  deleteKey.mockReset().mockResolvedValue(undefined);
+  clearActiveConfig.mockReset().mockResolvedValue(undefined);
 });
 afterEach(cleanup);
 
@@ -49,7 +53,7 @@ describe('ConfiguredProviderCard — remove key', () => {
     fireEvent.click(screen.getByRole('button', { name: /remove|delete/i }));
 
     await waitFor(() => expect(deleteKey).toHaveBeenCalled());
-    expect(deleteKey).toHaveBeenCalledWith('byok:google');
-    expect(JSON.stringify(deleteKey.mock.calls)).not.toMatch(/force/);
+    // Exactly the ref and NO options argument: `{ force: true }` (or any opts) is absent.
+    expect(deleteKey.mock.calls).toEqual([['byok:google']]);
   });
 });

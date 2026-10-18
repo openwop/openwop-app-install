@@ -15,6 +15,8 @@ import type { AddressInfo } from 'node:net';
 import { getSetCookies } from './headerCookies.js';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
+import { getToggleDefault } from '../src/host/featureToggles/registry.js';
+import { saveConfig } from '../src/host/featureToggles/service.js';
 import { ensureAssistantAgent } from '../src/features/assistant/capability.js';
 import { bareRunId } from './support/bareRunId.js';
 
@@ -28,6 +30,8 @@ beforeAll(async () => {
   process.env.OPENWOP_TEST_AUTH_ENABLED = 'true';
   delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
+  // ADR 0892: advisory-board is opt-in; the board-attach case creates a real board.
+  { const d = getToggleDefault('advisory-board'); if (d) await saveConfig({ ...d, status: 'on' }, 'test'); }
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });

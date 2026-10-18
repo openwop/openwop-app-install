@@ -16,8 +16,9 @@
  *
  * The load-bearing case is the last one: it asserts over EVERY own enumerable
  * field of the source rather than a named list, so it guards fields that do not
- * exist yet (`compensation` / `irreversibleEffect` per RFC 0157/0151, and
- * whatever comes after) without anybody remembering to come back here.
+ * exist yet without anybody remembering to come back here. (`compensation` /
+ * `irreversibleEffect`, RFC 0157/0151, were that future once; they are real
+ * `BuilderNode` fields now and the fixture carries them explicitly.)
  */
 import { describe, it, expect, beforeEach } from 'vitest';
 import { useBuilderStore } from '../builderStore.js';
@@ -26,7 +27,7 @@ import { serializeWorkflow } from '../../schema/serialize.js';
 import type { BuilderNode, SavedWorkflow } from '../../schema/workflow.js';
 
 const emptyWf: SavedWorkflow = {
-  id: 'wf-h37', name: 'H37', version: '1.0.0', nodes: [], edges: [], createdAt: 'now', updatedAt: 'now',
+  id: 'wf-h37', name: 'H37', version: '1.0.0', nodes: [], edges: [], createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
 };
 const s = () => useBuilderStore.getState();
 
@@ -114,12 +115,13 @@ describe('H37 — copy→paste carries every node field', () => {
     // Pre-H37 entries carried only kind/name/config[/inputs] + dx/dy. Feed
     // exactly that shape to `pasteNodes` — a widened entry type must not make
     // the narrow one unpastable.
+    // dx ≠ dy so the anchored position can tell x from y.
     s().pasteNodes(
-      [{ kind: 'noop', name: 'Legacy', config: { a: 1 }, dx: 0, dy: 0 }],
+      [{ kind: 'noop', name: 'Legacy', config: { a: 1 }, dx: 3, dy: 7 }],
       { x: 5, y: 6 },
     );
     expect(s().nodes).toHaveLength(1);
-    expect(s().nodes[0]).toMatchObject({ kind: 'noop', name: 'Legacy', config: { a: 1 }, position: { x: 5, y: 6 } });
+    expect(s().nodes[0]).toMatchObject({ kind: 'noop', name: 'Legacy', config: { a: 1 }, position: { x: 8, y: 13 } });
     expect('outputRole' in s().nodes[0]!).toBe(false);
   });
 });
@@ -129,7 +131,8 @@ describe('H37 — the generic guard: no field is dropped, named or not', () => {
    *  does not — standing in for the next one somebody adds (RFC 0157
    *  `compensation`, RFC 0151 `irreversibleEffect`, …). Both lanes must carry
    *  it without this test ever learning its name. */
-  const rich = {
+  // An intersection, not a cast: a real BuilderNode PLUS a field it does not declare.
+  const rich: BuilderNode & { futureFieldNobodyHasWrittenYet: Record<string, unknown> } = {
     id: 'n_source',
     kind: 'noop',
     name: 'Rich node',
@@ -137,16 +140,18 @@ describe('H37 — the generic guard: no field is dropped, named or not', () => {
     config: { retries: 3, nested: { deep: true } },
     inputs: { to: '{{params.recipient}}' },
     outputRole: 'primary',
-    futureFieldNobodyHasWrittenYet: { compensation: 'core.undo', irreversibleEffect: true },
-  } as unknown as BuilderNode;
+    compensation: { nodeTypeId: 'core.undo', requiresApproval: false },
+    // `false` on purpose — the value a truthiness-based copy would drop.
+    irreversibleEffect: false,
+    futureFieldNobodyHasWrittenYet: { marker: 'carried by construction' },
+  };
 
   function assertCarried(copy: BuilderNode): void {
-    const source = rich as unknown as Record<string, unknown>;
-    const carried = copy as unknown as Record<string, unknown>;
-    const expectedKeys = Object.keys(source).filter((k) => !MINTED_FIELDS.has(k)).sort();
+    const source = new Map(Object.entries(rich).filter(([k]) => !MINTED_FIELDS.has(k)));
+    const carried = new Map(Object.entries(copy).filter(([k]) => !MINTED_FIELDS.has(k)));
     // Every surviving key, and NO extra invented ones.
-    expect(Object.keys(carried).filter((k) => !MINTED_FIELDS.has(k)).sort()).toEqual(expectedKeys);
-    for (const k of expectedKeys) expect(carried[k]).toEqual(source[k]);
+    expect([...carried.keys()].sort()).toEqual([...source.keys()].sort());
+    for (const [k, v] of source) expect(carried.get(k)).toEqual(v);
     expect(copy.id).not.toBe(rich.id);
   }
 
@@ -168,8 +173,8 @@ describe('H37 — the generic guard: no field is dropped, named or not', () => {
     seedNode(rich);
     s().cloneNodes([rich.id]);
     const copy = otherThan([rich.id]);
-    (copy.config as Record<string, unknown>).retries = 99;
-    (copy.inputs as Record<string, unknown>).to = 'clobbered';
+    copy.config.retries = 99;
+    copy.inputs!.to = 'clobbered';
     const source = s().nodes.find((n) => n.id === rich.id)!;
     expect(source.config).toEqual({ retries: 3, nested: { deep: true } });
     expect(source.inputs).toEqual({ to: '{{params.recipient}}' });

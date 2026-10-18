@@ -9,36 +9,44 @@
  *   and Save binds; "No project" unbinds; a non-owner reads the bound project.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, cleanup, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, cleanup, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
-import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
+import type { ChannelDetail, ChannelDescriptor, ChannelSummary } from '../../../client/channelsClient.js';
+import type { LedgerSummary } from '../../../features/projects/teamLedgerClient.js';
+import type { Project } from '../../../features/projects/projectsClient.js';
 
 const h = vi.hoisted(() => ({
-  enabled: true,
-  getChannel: vi.fn(),
-  setChannelProject: vi.fn(async () => ({ conversationId: 'ch1' })),
-  getLedgerSummaries: vi.fn(),
-  listProjects: vi.fn(),
+  getChannel: vi.fn<(channelId: string) => Promise<ChannelDetail>>(),
+  setChannelProject: vi.fn<(channelId: string, projectId: string | null) => Promise<ChannelSummary>>(async () => ({ conversationId: 'ch1' })),
+  getLedgerSummaries: vi.fn<(projectIds: readonly string[]) => Promise<LedgerSummary[]>>(),
+  listProjects: vi.fn<() => Promise<Project[]>>(),
 }));
 vi.mock('../../../client/channelsClient.js', async (orig) => ({ ...(await orig<Record<string, unknown>>()), getChannel: h.getChannel, setChannelProject: h.setChannelProject }));
 vi.mock('../../../features/projects/teamLedgerClient.js', async (orig) => ({ ...(await orig<Record<string, unknown>>()), getLedgerSummaries: h.getLedgerSummaries }));
 vi.mock('../../../features/projects/projectsClient.js', async (orig) => ({ ...(await orig<Record<string, unknown>>()), listProjects: h.listProjects }));
-vi.mock('../../../featureToggles/FeatureAccessContext.js', () => ({ useFeatureAccess: () => makeFeatureAccess({ enabled: h.enabled }) }));
 vi.mock('../ChannelSchedulePanel.js', () => ({ ChannelSchedulePanel: () => null }));
 vi.mock('../MemberPickers.js', () => ({ MemberPicker: () => null, AgentPicker: () => null }));
 
 import { ChannelLedgerPanel } from '../ChannelLedgerPanel.js';
 import { ChannelManageDialog } from '../ChannelManageDialog.js';
 
-const detail = (over: Record<string, unknown> = {}) => ({ conversationId: 'ch1', channel: { name: 'launch', visibility: 'public', ...over }, roster: [], viewerIsOwner: true });
+const detail = (over: Partial<ChannelDescriptor> = {}): ChannelDetail => ({ conversationId: 'ch1', channel: { name: 'launch', visibility: 'public', ...over }, roster: [], viewerIsOwner: true });
+const project = (id: string, name: string, canWrite: boolean, visibility: NonNullable<Project['visibility']>): Project =>
+  ({ id, tenantId: 't1', orgId: 'o1', name, workflows: [], boardId: `b-${id}`, canWrite, visibility });
+
+/** Settle the panel's load: await the client promise the effect started, then let
+ *  React commit — "renders nothing" is only asserted AFTER this (never while loading). */
+async function settled(p: Promise<unknown> | undefined): Promise<void> {
+  await act(async () => { await p?.catch(() => undefined); });
+  await act(async () => { for (let i = 0; i < 5; i++) await Promise.resolve(); });
+}
 
 beforeEach(() => {
-  h.enabled = true;
   for (const f of [h.getChannel, h.setChannelProject, h.getLedgerSummaries, h.listProjects]) f.mockClear();
   h.listProjects.mockResolvedValue([
-    { id: 'p1', name: 'Launch', canWrite: true, visibility: 'org' },
-    { id: 'p2', name: 'Secret', canWrite: true, visibility: 'private' },
-    { id: 'p3', name: 'Read only', canWrite: false, visibility: 'org' },
+    project('p1', 'Launch', true, 'org'),
+    project('p2', 'Secret', true, 'private'),
+    project('p3', 'Read only', false, 'org'),
   ]);
 });
 afterEach(cleanup);
@@ -58,7 +66,7 @@ describe('ChannelLedgerPanel', () => {
   it('unbound or an unreadable project ⇒ nothing', async () => {
     h.getChannel.mockResolvedValue(detail());
     const a = render(<MemoryRouter><ChannelLedgerPanel channelId="ch1" /></MemoryRouter>);
-    await waitFor(() => expect(h.getChannel).toHaveBeenCalled());
+    await settled(h.getChannel.mock.results[0]?.value);
     expect(a.container.textContent).toBe('');
     expect(h.getLedgerSummaries).not.toHaveBeenCalled();
     cleanup();
@@ -66,6 +74,7 @@ describe('ChannelLedgerPanel', () => {
     h.getLedgerSummaries.mockResolvedValue([]); // the route omits what the caller cannot read
     const b = render(<MemoryRouter><ChannelLedgerPanel channelId="ch1" /></MemoryRouter>);
     await waitFor(() => expect(h.getLedgerSummaries).toHaveBeenCalledWith(['p2']));
+    await settled(h.getLedgerSummaries.mock.results[0]?.value);
     expect(b.container.textContent).toBe('');
   });
 

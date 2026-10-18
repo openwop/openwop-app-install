@@ -4,6 +4,14 @@
  * `egress:host-mediated` wire form), the empty state offers a one-click
  * recommended rule, and adding it persists the canonical read→send guard.
  * Client is mocked → pure component test.
+ *
+ * Writes are asserted on the REQUEST (`setFirewallRules` args), never a toast.
+ * Sabotage that turns it red (wave 52): rendering a raw class as text instead of
+ * a tooltip (case 1); dropping `host-owned` from recommendedRule (case 2) or
+ * `threshold` from addCountRule (case 3); saving the enforce posture without its
+ * deny verdict or without the confirm (case 11).
+ * (FW-DECISIONS-FAIL-1, filed by the coordinator: the decisions-read FAILURE state
+ * has no behavioural test — outside this file's stated claim.)
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, fireEvent, waitFor, within } from '@testing-library/react';
@@ -39,11 +47,11 @@ describe('FirewallRulesPage (ADR 0135 clarity redesign)', () => {
   it('explains what the firewall does and speaks plain language (no raw wire classes)', async () => {
     render(<FirewallRulesPage />);
     expect(await screen.findByText('What this does')).toBeTruthy();
-    // Plain-language class label is present…
-    expect(screen.getAllByText('send data via a connected app').length).toBeGreaterThan(0);
-    // …and the raw RFC 0078 wire form is NOT shown to the user.
-    expect(screen.queryByText(/egress:host-mediated/)).toBeNull();
-    expect(screen.queryByText('safetyTier')).toBeNull();
+    // Plain-language class label is present, the raw class rides as its tooltip…
+    const chip = within(screen.getByRole('region', { name: 'Build a rule' })).getAllByRole('button', { name: 'send data via a connected app' })[0]!;
+    expect(chip.getAttribute('title')).toBe('egress:host-mediated');
+    // …and no raw RFC 0078 wire form is rendered as TEXT anywhere.
+    expect(screen.queryByText(/safetyTier:|egress:host-/)).toBeNull();
   });
 
   it('offers a one-click recommended rule from the empty state and persists the read→send guard', async () => {
@@ -51,12 +59,12 @@ describe('FirewallRulesPage (ADR 0135 clarity redesign)', () => {
     const add = await screen.findByRole('button', { name: 'Add recommended rule' });
     fireEvent.click(add);
     await waitFor(() => expect(mockSet).toHaveBeenCalledTimes(1));
-    const savedRules = mockSet.mock.calls[0][1];
+    const savedRules = mockSet.mock.calls[0]![1];
     expect(savedRules).toHaveLength(1);
     // The canonical guard: run did read → next tool sends off-host.
-    expect(savedRules[0].when.anyOf).toEqual([{ safetyTier: 'read' }]);
-    expect(savedRules[0].when.with).toEqual([{ egress: 'host-mediated' }, { egress: 'host-owned' }]);
-    expect(savedRules[0].verdict).toBe('require-approval');
+    expect(savedRules[0]!.when.anyOf).toEqual([{ safetyTier: 'read' }]);
+    expect(savedRules[0]!.when.with).toEqual([{ egress: 'host-mediated' }, { egress: 'host-owned' }]);
+    expect(savedRules[0]!.verdict).toBe('require-approval');
   });
 
   // ADR 0135 Phase 5 — the composition-VOLUME (countAtLeast) builder.
@@ -70,9 +78,9 @@ describe('FirewallRulesPage (ADR 0135 clarity redesign)', () => {
     fireEvent.click(within(builder).getByRole('button', { name: 'send data via a connected app' }));
     fireEvent.click(within(builder).getByRole('button', { name: 'Add rule' }));
     await waitFor(() => expect(mockSet).toHaveBeenCalledTimes(1));
-    const saved = mockSet.mock.calls[0][1];
-    expect(saved[0].when.countAtLeast).toEqual({ class: { egress: 'host-mediated' }, threshold: 5, window: 'turn' });
-    expect(saved[0].when.anyOf).toBeUndefined();
+    const saved = mockSet.mock.calls[0]![1];
+    expect(saved[0]!.when.countAtLeast).toEqual({ class: { egress: 'host-mediated' }, threshold: 5, window: 'turn' });
+    expect(saved[0]!.when.anyOf).toBeUndefined();
   });
 
   // ADR 0135 Phase 6 — the bounded-expression builder.
@@ -82,8 +90,8 @@ describe('FirewallRulesPage (ADR 0135 clarity redesign)', () => {
     fireEvent.change(screen.getByLabelText('Expression'), { target: { value: 'count.egress:host-mediated >= 3' } });
     fireEvent.click(screen.getByRole('button', { name: 'Add rule' }));
     await waitFor(() => expect(mockSet).toHaveBeenCalledTimes(1));
-    const saved = mockSet.mock.calls[0][1];
-    expect(saved[0].when.expression).toBe('count.egress:host-mediated >= 3');
+    const saved = mockSet.mock.calls[0]![1];
+    expect(saved[0]!.when.expression).toBe('count.egress:host-mediated >= 3');
   });
 
   it('surfaces a server 400 on a bad expression inline (fail-closed)', async () => {
@@ -149,23 +157,28 @@ describe('FirewallRulesPage (ADR 0135 clarity redesign)', () => {
     fireEvent.click(within(sim).getByRole('button', { name: 'Simulate' }));
     await waitFor(() => expect(mockSimulate).toHaveBeenCalledTimes(1));
     expect(await within(sim).findByText('matched rule: read-then-egress')).toBeTruthy();
-    expect(mockSimulate.mock.calls[0][1].next).toEqual({ egress: 'host-mediated' });
+    expect(mockSimulate.mock.calls[0]![1].next).toEqual({ egress: 'host-mediated' });
   });
 
   // ADR 0397 Phase 3 — the enforcement-posture (mode) selector.
   it('switches to enforce mode and persists the posture — only after a confirm (FW2-UX-6)', async () => {
     const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValueOnce(false).mockReturnValueOnce(true);
-    render(<FirewallRulesPage />);
-    const posture = await screen.findByRole('region', { name: 'Enforcement posture' });
-    // Declined: nothing is saved (arrow-keying past enforce no longer turns it on).
-    fireEvent.click(within(posture).getByRole('radio', { name: /Enforce/ }));
-    await waitFor(() => expect(confirmSpy).toHaveBeenCalledTimes(1));
-    expect(mockSet).not.toHaveBeenCalled();
-    fireEvent.click(within(posture).getByRole('radio', { name: /Enforce/ }));
-    await waitFor(() => expect(mockSet).toHaveBeenCalledTimes(1));
-    confirmSpy.mockRestore();
-    expect(mockSet.mock.calls[0][3]).toMatchObject({ mode: 'enforce' });
+    try {
+      render(<FirewallRulesPage />);
+      const posture = await screen.findByRole('region', { name: 'Enforcement posture' });
+      // Declined: nothing is saved (arrow-keying past enforce no longer turns it on).
+      fireEvent.click(within(posture).getByRole('radio', { name: /Enforce/ }));
+      await waitFor(() => expect(confirmSpy).toHaveBeenCalledTimes(1));
+      expect(mockSet).not.toHaveBeenCalled();
+      fireEvent.click(within(posture).getByRole('radio', { name: /Enforce/ }));
+      await waitFor(() => expect(mockSet).toHaveBeenCalledTimes(1));
+    } finally {
+      confirmSpy.mockRestore();
+    }
+    // The whole posture rides the write: mode AND the deny verdict.
+    expect(mockSet.mock.calls[0]![3]).toEqual({ mode: 'enforce', defaultDenyVerdict: 'deny' });
     // The deny-verdict control appears once enforce is active.
+    const posture = screen.getByRole('region', { name: 'Enforcement posture' });
     expect(await within(posture).findByLabelText('An unmatched action should')).toBeTruthy();
   });
 });

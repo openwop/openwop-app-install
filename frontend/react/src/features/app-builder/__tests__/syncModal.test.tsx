@@ -13,7 +13,7 @@
  * The sibling PublishModal already keeps the two apart.
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
-import { render, screen, cleanup, act, fireEvent } from '@testing-library/react';
+import { render, screen, cleanup, act, fireEvent, within } from '@testing-library/react';
 import { SyncModal } from '../SyncModal.js';
 
 const { getSyncBinding, syncCanvasNow } = vi.hoisted(() => ({
@@ -48,8 +48,8 @@ describe('AB-G1 — a failed binding read is not "not bound"', () => {
     expect(screen.queryByLabelText('Repository owner')).toBeNull();
     expect(screen.queryByRole('button', { name: 'Bind repository' })).toBeNull();
     expect(screen.getByRole('button', { name: 'Retry' })).toBeTruthy();
-    // And the reason is still shown, not swallowed.
-    expect(document.body.textContent).toContain('502 upstream');
+    // And the reason is still shown — as an ERROR (role=alert), not swallowed.
+    expect(within(screen.getByRole('dialog')).getByRole('alert').textContent).toContain('502 upstream');
   });
 
   it('the retry re-reads, and a binding that WAS there appears', async () => {
@@ -57,9 +57,13 @@ describe('AB-G1 — a failed binding read is not "not bound"', () => {
     getSyncBinding.mockResolvedValueOnce(BINDING);
     await open();
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Retry' })); });
-    expect(document.body.textContent).toContain('acme/storefront');
+    const dialog = screen.getByRole('dialog');
+    expect(within(dialog).getByText('acme/storefront')).toBeTruthy();
+    expect(within(dialog).getByRole('button', { name: 'Sync now' })).toBeTruthy();
+    expect(within(dialog).queryByRole('button', { name: 'Retry' })).toBeNull();
     // The stale error must not outlive the successful re-read.
-    expect(document.body.textContent).not.toContain('502 upstream');
+    expect(within(dialog).queryByRole('alert')).toBeNull();
+    expect(dialog.textContent).not.toContain('502 upstream');
   });
 
   it('a genuine null STILL shows the bind form', async () => {
@@ -82,9 +86,11 @@ describe('AB-G4 — warnings on a successful push are warnings', () => {
     });
     await open();
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Sync now' })); });
-    const notice = document.querySelector('.alert.warning');
-    expect(notice?.textContent).toContain('no react-tailwind equivalent');
-    expect(document.querySelector('.alert.error')).toBeNull();
+    // Notice maps warning → role=status, error → role=alert: assert the ROLE a
+    // screen reader gets, not the class.
+    const dialog = screen.getByRole('dialog');
+    expect(within(dialog).getByRole('status').textContent).toContain('screens[1].components[0]: no react-tailwind equivalent');
+    expect(within(dialog).queryByRole('alert')).toBeNull();
   });
 
   it('a real failure is still an error', async () => {
@@ -92,6 +98,8 @@ describe('AB-G4 — warnings on a successful push are warnings', () => {
     syncCanvasNow.mockRejectedValue(new Error('403 forbidden'));
     await open();
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Sync now' })); });
-    expect(document.querySelector('.alert.error')?.textContent).toContain('403 forbidden');
+    const dialog = screen.getByRole('dialog');
+    expect(within(dialog).getByRole('alert').textContent).toContain('403 forbidden');
+    expect(within(dialog).queryByRole('status')).toBeNull();
   });
 });

@@ -1,5 +1,8 @@
 /**
- * host.canvas crossCanvasInvoke — real child-run dispatch (Residual #3).
+ * host.canvas crossCanvasInvoke — real child-run dispatch (Residual #3 of the
+ * host.canvas gap list; PR #548 replaced the stub). Breaks if the child run is not
+ * persisted, its terminal status is dropped, awaitTerminal:false blocks, or the
+ * per-target circuit breaker stops counting failures.
  *
  * Proves ctx.canvas.invoke now starts a REAL child run (not the stub): the
  * `core.coordination.crossCanvasInvoke` node spawns a child workflow that
@@ -8,7 +11,7 @@
  * breaker opens after repeated child-run failures.
  */
 
-import { describe, expect, it, beforeAll, afterAll } from 'vitest';
+import { describe, expect, it, beforeAll, afterAll, vi } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
@@ -43,13 +46,12 @@ async function runNode(workflowId: string, typeId: string, config: Record<string
   const create = await jsonFetch<{ runId: string }>('/runs', { method: 'POST', body: JSON.stringify({ workflowId, inputs, tenantId: 'default' }) });
   expect(create.status).toBe(201);
   const { runId } = create.body;
+  // Settle on the run's own terminal status (no hook to await from outside the run).
   let status = 'pending';
-  for (let i = 0; i < 60; i++) {
-    await new Promise((r) => setTimeout(r, 25));
-    const snap = await jsonFetch<{ status: string }>(`/runs/${runId}`);
-    status = snap.body.status;
-    if (['completed', 'failed', 'cancelled'].includes(status)) break;
-  }
+  await vi.waitFor(async () => {
+    status = (await jsonFetch<{ status: string }>(`/runs/${runId}`)).body.status;
+    expect(['completed', 'failed', 'cancelled']).toContain(status);
+  }, { timeout: 5_000, interval: 25 });
   const bundle = await jsonFetch<{ events?: BundleEvent[] }>(`/runs/${runId}/debug-bundle`);
   const ev = (bundle.body.events ?? []).find((e) => e.type === 'node.completed' && e.nodeId === 'op');
   return { __status: status, ...((ev?.payload?.outputs as Record<string, unknown>) ?? {}) };

@@ -15,6 +15,20 @@ export interface ChannelRosterState {
   detail: ChannelDetail | null;
   roster: readonly ChannelRosterEntry[];
   viewerIsOwner: boolean;
+  /** ADR 0879 — server-computed manage / post authority (see `ChannelDetail`). */
+  viewerCanManage: boolean;
+  viewerCanPost: boolean;
+  /** CH2UX-1 — WHY the viewer cannot post (null when they can, or before the
+   *  detail resolves). Each reason has its own copy: an announcement channel and
+   *  a read-only workspace role are different problems with different fixes. */
+  readOnlyReason: ChannelReadOnlyReason | null;
+  /** CH2UX-2 — `workspace:write`, inferred from the server's flags: `true` when
+   *  the viewer may post or manage, `false` when an open, non-announcement
+   *  channel still refuses their post (the only cause left is the role), and
+   *  `null` when the flags cannot tell (a non-manager in an announcement
+   *  channel). `null` claims nothing — the affordances stay and the server
+   *  remains the authority. */
+  viewerCanWrite: boolean | null;
   viewerSubjectRef: string | null;
   /** The fetch failed (non-member / transient) — the surface renders in the
    *  pre-0192 mode and may offer a retry. */
@@ -27,6 +41,28 @@ export interface ChannelRosterState {
 }
 
 const EMPTY: readonly ChannelRosterEntry[] = [];
+
+export type ChannelReadOnlyReason = 'archived' | 'managers' | 'role';
+
+/** The composer copy per reason (chat namespace keys). */
+export const CHANNEL_READ_ONLY_COPY = {
+  archived: 'channelArchivedComposer',
+  managers: 'channelReadOnlyComposer',
+  role: 'channelReadOnlyRole',
+} as const satisfies Record<ChannelReadOnlyReason, string>;
+
+/** Derive the read-only reason + write authority from the server's flags. Pure. */
+export function channelWriteState(detail: ChannelDetail | null): { readOnlyReason: ChannelReadOnlyReason | null; viewerCanWrite: boolean | null } {
+  if (detail === null) return { readOnlyReason: null, viewerCanWrite: null };
+  // `viewerCanWrite` is the server's ROLE answer when it sends one (CH2UX-9); the
+  // inference below is only for an older server that does not.
+  const role = typeof detail.viewerCanWrite === 'boolean' ? detail.viewerCanWrite : null;
+  if (detail.viewerCanPost !== false) return { readOnlyReason: null, viewerCanWrite: true };
+  if (role === false) return { readOnlyReason: 'role', viewerCanWrite: false };
+  if (detail.channel?.archived) return { readOnlyReason: 'archived', viewerCanWrite: role ?? (detail.viewerCanManage === true ? true : null) };
+  if (detail.channel?.postingPolicy === 'managers') return { readOnlyReason: 'managers', viewerCanWrite: role ?? (detail.viewerCanManage === true ? true : null) };
+  return { readOnlyReason: 'role', viewerCanWrite: false };
+}
 
 export function useChannelRoster(channelId: string | null, enabled: boolean): ChannelRosterState {
   const { t } = useTranslation('chat');
@@ -95,6 +131,11 @@ export function useChannelRoster(channelId: string | null, enabled: boolean): Ch
     detail,
     roster,
     viewerIsOwner: detail?.viewerIsOwner === true,
+    viewerCanManage: detail?.viewerCanManage === true,
+    // Unknown until the detail resolves: the composer stays usable rather than
+    // flashing read-only; the server refuses a post it would not accept anyway.
+    viewerCanPost: detail === null ? true : detail.viewerCanPost !== false,
+    ...channelWriteState(detail),
     viewerSubjectRef: detail?.viewerSubjectRef ?? null,
     failed,
     mentionEntries,

@@ -9,9 +9,15 @@
  *  - append → persist → (simulated cross-instance) hydrate → snapshot round-trip
  *  - messageId idempotency survives hydration
  *  - clear removes the durable row (tenant-hard-delete cascade parity)
- *  - the GET /v1/runs/:runId snapshot hydrates channels+variables before
+ *  - a live in-memory state is never clobbered by an older durable copy
+ *  - the GET /runs/:runId snapshot hydrates channels+variables before
  *    projecting (route-level, in-memory cache wiped between write and read)
  *  - the persist ceiling skips (not corrupts) an oversized state
+ *
+ * Sabotage-witnessed (wave 26): dropping the kvSet write-through, the hydrate
+ * load, the messageId dedupe, the kvDelete in clear, the size ceiling, the
+ * `runChannels.has` live-wins guard, or the route's `hydrateRunChannels` each
+ * turn the matching case red.
  */
 import { describe, expect, it, beforeAll, afterAll } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -38,8 +44,14 @@ afterAll(async () => { await new Promise<void>((res) => server.close(() => res()
 const msg = (id: string, content = `content-${id}`): ConversationMessage =>
   ({ messageId: id, role: 'user', content, timestamp: '2026-07-09T00:00:00.000Z' });
 
-// The fire-and-forget persist needs a microtask beat before the kv row exists.
-const settle = () => new Promise((r) => setTimeout(r, 25));
+// The persist/delete are fire-and-forget (no hook to await); on memory:// they
+// complete within a few immediates, so drain instead of sleeping.
+const settle = async (): Promise<void> => { for (let i = 0; i < 5; i++) await new Promise<void>((r) => setImmediate(r)); };
+
+const snapIds = (runId: string): string[] | undefined =>
+  (snapshotRunChannels(runId)?.messages as ConversationMessage[] | undefined)?.map((m) => m.messageId);
+const snapMessages = (runId: string): ConversationMessage[] | undefined =>
+  snapshotRunChannels(runId)?.messages as ConversationMessage[] | undefined;
 
 describe('CS-WF-1 — channel state survives a simulated cross-instance hand-off', () => {
   it('append → wipe in-memory → hydrate → snapshot round-trips', async () => {
@@ -49,8 +61,7 @@ describe('CS-WF-1 — channel state survives a simulated cross-instance hand-off
     __resetAllRunChannelsForTests(); // "the other instance"
     expect(snapshotRunChannels('run-dur-1')).toBeNull();
     await hydrateRunChannels('run-dur-1');
-    const snap = snapshotRunChannels('run-dur-1') as Record<string, ConversationMessage[]>;
-    expect(snap.messages?.map((m) => m.messageId)).toEqual(['m1', 'm2']);
+    expect(snapIds('run-dur-1')).toEqual(['m1', 'm2']);
   });
 
   it('messageId idempotency holds across hydration (no duplicate fold)', async () => {
@@ -59,18 +70,22 @@ describe('CS-WF-1 — channel state survives a simulated cross-instance hand-off
     __resetAllRunChannelsForTests();
     await hydrateRunChannels('run-dur-2');
     appendChannelMessage('run-dur-2', 'messages', msg('a', 'duplicate emission'));
-    const snap = snapshotRunChannels('run-dur-2') as Record<string, ConversationMessage[]>;
-    expect(snap.messages).toHaveLength(1);
-    expect(snap.messages?.[0]?.content).toBe('content-a'); // first write wins
+    const messages = snapMessages('run-dur-2');
+    expect(messages).toHaveLength(1);
+    expect(messages?.[0]?.content).toBe('content-a'); // first write wins
   });
 
   it('a live in-memory state wins over hydration (no clobber of the executing instance)', async () => {
     appendChannelMessage('run-dur-3', 'messages', msg('x1'));
+    await settle(); // durable copy = [x1]
+    // An oversized append stays in-memory-only (persist ceiling), so the live
+    // state [x1, x2] now DIFFERS from the durable [x1]. (A normal append would
+    // write through synchronously on memory://, making live === durable and the
+    // guard unobservable — wave 26 probe dur-live-wins proved that vacuous.)
+    appendChannelMessage('run-dur-3', 'messages', msg('x2', 'x'.repeat(300 * 1024)));
     await settle();
-    appendChannelMessage('run-dur-3', 'messages', msg('x2'));
     await hydrateRunChannels('run-dur-3'); // cache present → no-op
-    const snap = snapshotRunChannels('run-dur-3') as Record<string, ConversationMessage[]>;
-    expect(snap.messages).toHaveLength(2);
+    expect(snapIds('run-dur-3')).toEqual(['x1', 'x2']);
   });
 
   it('clearRunChannels removes the durable row too (cascade parity)', async () => {
@@ -90,22 +105,22 @@ describe('CS-WF-1 — channel state survives a simulated cross-instance hand-off
     await settle();
     __resetAllRunChannelsForTests();
     await hydrateRunChannels('run-dur-5');
-    const snap = snapshotRunChannels('run-dur-5') as Record<string, ConversationMessage[]>;
     // The oversized append stayed in-memory-only; the durable copy is the last
     // under-cap state.
-    expect(snap.messages?.map((m) => m.messageId)).toEqual(['small']);
+    expect(snapIds('run-dur-5')).toEqual(['small']);
   });
 });
 
 describe('CS-WF-2 — the run snapshot route hydrates before projecting', () => {
-  it('GET /v1/runs/:runId returns channels after the in-memory cache is wiped', async () => {
+  it('GET /runs/:runId returns channels after the in-memory cache is wiped', async () => {
     // A real run so the route resolves it (conversation gate suspends).
     const workflowId = 'openwop-app.channels.durability-test';
-    await fetch(`${BASE}/host/openwop-app/workflows`, {
+    const registered = await fetch(`${BASE}/host/openwop-app/workflows`, {
       method: 'POST', headers: H, body: JSON.stringify({
         workflowId, nodes: [{ nodeId: 'gate', typeId: 'core.chat.approvalGate', config: { title: 'hold' } }], edges: [],
       }),
     });
+    expect(registered.ok, String(registered.status)).toBe(true);
     const create = await fetch(`${BASE}/runs`, {
       method: 'POST', headers: H, body: JSON.stringify({ workflowId, inputs: {}, tenantId: '_anon' }),
     });

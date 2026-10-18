@@ -17,7 +17,22 @@ import { test, expect, type Locator, type Page } from '@playwright/test';
 import { login, enableToggle, API } from './support/session';
 
 /**
- * QUARANTINED TO THE SERIAL PASS, not skipped (ADR 0509 Phase 2).
+ * QUARANTINED TO THE SERIAL PASS, not skipped (ADR 0509 Phase 2) — and that pass is
+ * ADVISORY: `scripts/ci.sh` runs it and ledgers the result but IGNORES its exit, so
+ * a red here never blocks a merge. Measured (grade-tests wave 53): green in the
+ * round-1 baseline run alone, then red in all 3 runs alone after this wave's edit
+ * AND in a run of the unedited spec — always at "B's work survives A's undo" (the
+ * `beta replied` check AFTER A's Ctrl+Z), never at the B→A sync before it, which
+ * passes. So B's text reaches A and then leaves A's document on A's undo. Open as
+ * E2E-ORDER-1 (owner: the openwop-app-8f session). Ceiling: a browser claim (two live WebSocket clients against the
+ * real backend room) in an advisory lane — making it blocking is an ADR 0509
+ * decision, not a test edit.
+ *
+ * What only this spec covers (sabotage-witnessed, wave 53): the Mod-z keymap in
+ * `collabExtension.ts` (`'Mod-z': () => false` → red; `collabExtension.test.ts` has
+ * no keyboard case), the shared WebSocket room (a per-client room name in
+ * `useCollab.ts` → red), and awareness reaching the other client (hiding
+ * `.cv-presence__peer` → red; the render alone is also `CollabPresence.test.tsx`'s).
  *
  * This spec passes ALONE in ~3.3s and fails under `--workers=2`: it drives two
  * live browser clients through a real WebSocket, and under concurrent machine
@@ -27,12 +42,13 @@ import { login, enableToggle, API } from './support/session';
  *
  * `@serial` moves it out of `npm run test:e2e` (which is `--grep-invert @serial`)
  * and into `npm run test:e2e:serial` (`--workers=1`). It therefore STILL RUNS on
- * every full lane pass.
+ * every full lane pass — as an advisory result (above).
  *
- * Deliberately NOT a fifth `test.skip`: 4 of 13 specs already skip behind opt-in
- * env vars, and this lane's coverage is measurably overstated by its file count
- * (`docs/steward/CODEBASE-ASSESSMENT.md`, `E2E-2`). Quarantine that stops a test
- * executing is indistinguishable from deletion after a few months.
+ * Deliberately NOT another `test.skip`: several specs already skip behind opt-in
+ * env vars (see `e2e/README.md` § "What's quarantined"), and this lane's coverage is
+ * measurably overstated by its file count (`docs/steward/CODEBASE-ASSESSMENT.md`,
+ * `E2E-2`). Quarantine that stops a test executing is indistinguishable from
+ * deletion after a few months.
  *
  * The tag is declared via Playwright's TAG OPTION, not by embedding "@serial" in
  * the describe title. `--grep` matches both, but a title-embedded tag disappears
@@ -153,11 +169,18 @@ test.describe('realtime canvas collaboration (ADR 0359)', { tag: '@serial' }, ()
     await expectDocText(edA, 'beta replied', true);
 
     // ── Per-user undo: A's undo removes only A's text ───────────────────────
+    // Each Ctrl+Z is followed by a wait on its EFFECT (the document text changed),
+    // not a fixed sleep: y-prosemirror groups typing into undo steps, so the number
+    // of presses is bounded (6) but not known, and a press is only "done" once the
+    // doc moved. A dead keymap (the Phase 7 finding) fails that wait on the first press.
     await edA.click();
     for (let i = 0; i < 6; i++) {
-      if (!(await docText(edA)).includes('alpha wrote this')) break;
+      const before = await docText(edA);
+      if (!before.includes('alpha wrote this')) break;
       await pageA.keyboard.press('ControlOrMeta+z');
-      await pageA.waitForTimeout(200);
+      await expect
+        .poll(() => docText(edA), { message: `Ctrl+Z #${i + 1} did not change A's document`, timeout: 5_000 })
+        .not.toBe(before);
     }
     await expectDocText(edA, 'alpha wrote this', false);
     await expectDocText(edA, 'beta replied', true); // B's work survives A's undo

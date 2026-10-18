@@ -6,16 +6,21 @@
  *    and a click on one is a `sidebar` click (delegated, no Sidebar code);
  *  - impressions dedupe once per feature + surface per page view; a new
  *    pathname counts again; clicks are never deduped; one batched POST per tick.
+ *
+ * Privacy-adjacent: telemetry OFF ⇒ nothing leaves the browser. The non-lock
+ * controls DO carry a `?feature=` (wave 50: a plain `/chat` link was dropped for
+ * lacking one, so a selector that read every link stayed green).
+ * Sabotage that turns it red: flushing before activation; posting nav for an
+ * unmatched route; skipping the dedupe / page-view reset / surface in the key;
+ * one POST per event; reading any `a` instead of the Sidebar's lock selector.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { notePaywall, view, __resetPaywallBeacon } from '../paywallBeacon.js';
 
 type Ev = { metric: string; featureId: string; surface: string };
-const fetchMock = vi.fn(async () => new Response(null, { status: 202 }));
-const calls = () => fetchMock.mock.calls.map((c) => {
-  const [url, init] = c as unknown as [string, RequestInit];
-  return { url, body: JSON.parse(String(init.body)) as { events?: Ev[]; route?: string; source?: string } };
-});
+const fetchMock = vi.fn(async (_url: string, _init?: RequestInit): Promise<Response> => new Response(null, { status: 202 }));
+const calls = () => fetchMock.mock.calls.map(([url, init]) =>
+  ({ url, body: JSON.parse(String(init?.body)) as { events?: Ev[]; route?: string; source?: string } }));
 const sent = (): Ev[] => calls().filter((c) => c.url.endsWith('/analytics/paywall')).flatMap((c) => c.body.events ?? []);
 const tick = () => new Promise((r) => setTimeout(r, 5));
 
@@ -64,7 +69,8 @@ describe('paywall beacon', () => {
       <a class="app-nav-link" href="/marketplace/bundles?feature=crm">CRM</a>
       <a class="app-mobile-nav__item" href="/marketplace/bundles?feature=crm">CRM</a>
       <a class="app-nav-link" href="/marketplace/bundles?feature=twin-recall">Twin</a>
-      <a class="app-nav-link" href="/chat">Chat</a>`;
+      <a class="app-nav-link" href="/chat">Chat</a>
+      <a class="app-other-link" href="/marketplace/bundles?feature=okrs">OKRs elsewhere</a>`;
     view('/crm', 'deep-link');
     await tick();
     expect(sent()).toEqual([
@@ -72,10 +78,14 @@ describe('paywall beacon', () => {
       { metric: 'impression', featureId: 'twin-recall', surface: 'sidebar' },
     ]);
     document.querySelector<HTMLAnchorElement>('a[href="/chat"]')!.addEventListener('click', (e) => e.preventDefault());
-    document.querySelector('a[href="/chat"]')!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    document.querySelector('a[href="/chat"]')!.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
     const lock = document.querySelector<HTMLAnchorElement>('a[href$="twin-recall"]')!;
     lock.addEventListener('click', (e) => e.preventDefault());
-    lock.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    lock.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+    // A feature link OUTSIDE the Sidebar's lock selector is not a sidebar click.
+    const other = document.querySelector<HTMLAnchorElement>('a.app-other-link')!;
+    other.addEventListener('click', (e) => e.preventDefault());
+    other.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
     await tick();
     expect(sent().filter((e) => e.metric === 'click')).toEqual([{ metric: 'click', featureId: 'twin-recall', surface: 'sidebar' }]);
   });

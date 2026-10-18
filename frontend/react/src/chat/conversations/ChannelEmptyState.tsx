@@ -18,14 +18,14 @@ import { HashIcon, BotIcon, UsersIcon } from '../../ui/icons/index.js';
 export function ChannelEmptyState({
   name,
   description,
-  viewerIsOwner,
+  viewerCanManage,
   hasAgents,
   onOpenDetails,
 }: {
   /** The normalized channel name (no `#` — the component renders the glyph). */
   name: string;
   description?: string | undefined;
-  viewerIsOwner: boolean;
+  viewerCanManage: boolean;
   /** Whether any agent members exist — drives the member hint copy. */
   hasAgents: boolean;
   /** All actions land in the channel-details dialog (one roster surface). */
@@ -50,10 +50,10 @@ export function ChannelEmptyState({
         </h2>
         {description ? (
           <p className="chanempty-body">{description}</p>
-        ) : viewerIsOwner ? (
+        ) : viewerCanManage ? (
           <p className="chanempty-body muted">{t('channelEmptyNoDescription')}</p>
         ) : null}
-        {viewerIsOwner ? (
+        {viewerCanManage ? (
           <div className="action-bar u-wrap u-mt-3">
             <Button variant="secondary" size="sm" className="u-iflex u-items-center u-gap-1" onClick={onOpenDetails}>
               <UsersIcon size={13} /> {t('channelEmptyAddPeople')}

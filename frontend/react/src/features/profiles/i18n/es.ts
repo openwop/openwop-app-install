@@ -213,4 +213,21 @@ export const messages = {
   fieldAvatar: 'Avatar',
   fieldEquipment: 'Equipo',
   fieldInterests: 'Intereses',
+
+  // ADR 0888 D1 — the workspace directory is opt-in per person
+  wsShareTitle: 'Quién aparece aquí',
+  wsShareBodyNotShared: 'Este espacio de trabajo solo muestra a las personas que eligieron compartir su perfil con él. El tuyo no está compartido aquí.',
+  wsShareBodyShared: 'Este espacio de trabajo solo muestra a las personas que eligieron compartir su perfil con él. El tuyo está compartido aquí.',
+  wsShareAction: 'Compartir mi perfil aquí',
+  wsUnshareAction: 'Dejar de compartir aquí',
+  wsShareFailed: 'No se pudo actualizar el uso compartido. Inténtalo de nuevo.',
+  wsNoSharedTitle: 'Nadie ha compartido su perfil aquí todavía',
+  wsNoSharedBody: 'Las personas de este espacio de trabajo aparecen cuando comparten su perfil con él.',
+  wsTruncated: 'Se muestran las primeras {{count}} personas.',
+  wsEndorseHomeOnly: 'Las recomendaciones aún no están disponibles en los espacios de trabajo compartidos.',
+  wsShareDisclosure: 'Los miembros de {{workspace}} verán tu nombre, foto, cargo, biografía, ubicación, enlaces, habilidades y disponibilidad. Puedes dejar de compartir en cualquier momento.',
+  wsShareDisclosureUnnamed: 'Los miembros de este espacio de trabajo verán tu nombre, foto, cargo, biografía, ubicación, enlaces, habilidades y disponibilidad. Puedes dejar de compartir en cualquier momento.',
+  wsSharedToast: 'Tu perfil ahora está compartido con este espacio de trabajo.',
+  wsUnsharedToast: 'Tu perfil ya no está compartido con este espacio de trabajo.',
+  wsNoSharedBodyMine: 'Tu perfil está compartido aquí. Los demás aparecen cuando comparten el suyo.',
 } as const;

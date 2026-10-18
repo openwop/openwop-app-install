@@ -257,7 +257,7 @@ describe('present remote (ADR 0328 P4)', () => {
     expect(patched.status).toBe(200);
     const minted = await c.post(`${SL(orgId)}/canvases/${created.body.canvasId}/present-remote`);
     expect(minted.status).toBe(201);
-    expect(minted.body.token).toMatch(/^v1\./);
+    expect(minted.body.token).toMatch(/^v2\./); // ADR 0886 D3 — minter-bearing claims
     expect(new Date(minted.body.expiresAt).getTime()).toBeGreaterThan(Date.now());
 
     // The outline is public — the token IS the credential (no cookie sent).

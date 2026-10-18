@@ -16,6 +16,13 @@
  * these product surfaces `on` so the bundled templates resolve out of the box;
  * the A/B split is preserved (`on` + variants ⇒ enabled, split traffic). An
  * operator can still turn it off per-tenant in the Feature toggles screen.
+ *
+ * CORRECTED 2026-10-14 (ADR 0892): the default is `off` again. CRM is an opt-in
+ * bundle, so a white-label install does not show the CRM group until an operator
+ * enables it (Admin → Feature toggles; workspace self-enable is ADR 0892 Phase B).
+ * The lighthouse templates no longer crash with CRM off: ADR 0191 Phase 2's
+ * preflight names the missing feature before a run. App migration 23 keeps CRM
+ * on for any install that already has CRM contacts or an enabled CRM dependent.
  */
 
 import type { BackendFeature } from '../types.js';
@@ -88,7 +95,11 @@ export const crmFeature: BackendFeature = {
     label: 'CRM',
     description: 'Contacts + contact triage — sample product feature.',
     category: 'CRM',
-    status: 'on', // ADR 0191 — default-on so the bundled lighthouse templates resolve OOTB
+    // ADR 0892 — CRM is an opt-in bundle: OFF by default, so a white-label install
+    // starts without the CRM group. Supersedes ADR 0191 Phase 1 (default-on); the
+    // ADR 0191 Phase 2 preflight now tells a lighthouse template user CRM is needed.
+    // Installs that already use CRM are kept on by app migration 23.
+    status: 'off',
     bucketUnit: 'tenant',
     salt: 'crm',
     variants: [

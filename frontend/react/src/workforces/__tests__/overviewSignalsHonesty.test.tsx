@@ -6,13 +6,20 @@
  * nothing needs your attention right now." from numbers never read. The
  * all-clear now requires BOTH reads; a partial (or total) signal failure says
  * "could not be fully checked" instead.
+ *
+ * Sabotage that turns it red: `partial = !metrics` (or `!governance`); drop `!partial`
+ * from `clear`; drop the warning Notice; hide the needs-you chips on a partial read.
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, cleanup, act } from '@testing-library/react';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
+import type * as WfClient from '../../client/workforcesClient.js';
+import type { Workforce, WorkforceGovernance, WorkforceMetrics } from '../../client/workforcesClient.js';
 
 const { getWorkforce, getWorkforceMetrics, getWorkforceGovernance } = vi.hoisted(() => ({
-  getWorkforce: vi.fn(), getWorkforceMetrics: vi.fn(), getWorkforceGovernance: vi.fn(),
+  getWorkforce: vi.fn<typeof WfClient.getWorkforce>(),
+  getWorkforceMetrics: vi.fn<typeof WfClient.getWorkforceMetrics>(),
+  getWorkforceGovernance: vi.fn<typeof WfClient.getWorkforceGovernance>(),
 }));
 vi.mock('../../client/workforcesClient.js', async (orig) => ({
   ...(await orig<typeof import('../../client/workforcesClient.js')>()),
@@ -21,14 +28,22 @@ vi.mock('../../client/workforcesClient.js', async (orig) => ({
 
 import { WorkforceOverviewPage } from '../WorkforceOverviewPage.js';
 
-const WF = {
-  workforceId: 'w1', name: 'Support pod', businessFunction: 'support', status: 'active' as const,
+const WF: Workforce = {
+  workforceId: 'w1', name: 'Support pod', businessFunction: 'support', status: 'piloting',
   purpose: { statement: 'Answer tickets', policyTags: [], refusalBoundaries: [] },
-  autonomyLevel: 'assisted' as const, dataManifestId: 'dm1',
-  successMetrics: [], workflowCatalog: [], agents: [],
+  autonomyLevel: 'guided', dataManifestId: 'dm1',
+  successMetrics: [], workflowCatalog: [], agents: [], decisionBoundaries: { auto: [], review: [] },
 };
-const CLEAN_METRICS = { openApprovals: 0, policyViolations: 0, totalRuns: 10, escalationRate: 0, overrideRate: 0, weekly: [], source: 'live' };
-const CLEAN_GOV = { autonomy: { eligibleForNext: false, milestones: [] }, posture: { policyViolations: 0 }, source: 'live' };
+const CLEAN_METRICS: WorkforceMetrics = {
+  workforceId: 'w1', source: 'tenant', totalRuns: 10, terminalRuns: 10, openApprovals: 0, cycleTimeP50Ms: null,
+  costPerClearedUsd: null, escalationRate: 0, overrideRate: 0, falsePositiveRate: 0, recoveryRate: 0,
+  policyViolations: 0, weekly: [],
+};
+const CLEAN_GOV: WorkforceGovernance = {
+  source: 'tenant',
+  autonomy: { workforceId: 'w1', currentTier: 'guided', milestones: [], nextTier: 'auto', nextThreshold: null, recentOverrideIncidence: 0, eligibleForNext: false },
+  posture: { workforceId: 'w1', totalRuns: 10, overrides: 0, escalations: 0, falsePositives: 0, recoveries: 0, policyViolations: 0, recentEvents: [] },
+};
 
 const mount = async (): Promise<void> => {
   render(
@@ -41,7 +56,7 @@ const mount = async (): Promise<void> => {
 
 afterEach(cleanup);
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
   getWorkforce.mockResolvedValue(WF);
   getWorkforceMetrics.mockResolvedValue(CLEAN_METRICS);
   getWorkforceGovernance.mockResolvedValue(CLEAN_GOV);
@@ -80,6 +95,8 @@ describe('WF-G2 — the overview all-clear requires both reads', () => {
     getWorkforceGovernance.mockRejectedValue(new Error('503'));
     await mount();
     expect(document.body.textContent).toContain('could not be fully checked');
-    expect(screen.getAllByText(/awaiting approval/i).length).toBeGreaterThan(0);
+    // The CHIP, exactly: the telemetry label "Runs · 3 awaiting approval" also renders
+    // whenever metrics has runs, so a loose /awaiting approval/ was satisfied without it.
+    expect(screen.getByText('3 awaiting approval')).toBeTruthy();
   });
 });

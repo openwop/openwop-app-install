@@ -18,21 +18,40 @@
  * organizations" in the card, five lines apart in one catalog. The strings below
  * are asserted in full, not as a regex spanning both forms — a test that accepted
  * either noun would be indifferent to the drift it exists to stop.
+ *
+ * TWO DOUBLE GUARDS, named so a green single-guard probe is not read as a gap:
+ *  - The funnel READ: the effect's `if (orgId)` AND `load()`'s `if (!org) return`.
+ *    Removing either alone leaves `listFunnels` uncalled; the wave-52 re-probe drops
+ *    both in one edit.
+ *  - The create WRITE (ORG-HON-2): `OrgSelectionState` replaces the form in both org
+ *    states, so `add()`'s own `if (!orgId …)` is a second copy that no UI gesture can
+ *    reach today (there is no form to submit). The cases assert the form is GONE —
+ *    that is the guard that holds — and keep the `createFunnel` not-called check for
+ *    the day the wrapper stops covering it. Honest ceiling: `add()`'s copy is not
+ *    witnessable through the page.
+ *
+ * Sabotage-witnessed (wave 52): the failed-read clause, the zero-org branch, the
+ * wrapper rendering the form for zero organizations, both read guards together, the
+ * retry wiring, the toggle card, the toggle-gated org read, the loading branch, and
+ * creating under the wrong org each turn a case red.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup, screen, waitFor, act, fireEvent } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
+import type * as FC from '../funnelsClient.js';
+import type { Funnel } from '../funnelsClient.js';
 
 const access = vi.hoisted(() => ({ useFeatureAccess: vi.fn(() => makeFeatureAccess({ enabled: true, loading: false })) }));
 import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
 vi.mock('../../../featureToggles/FeatureAccessContext.js', () => ({ useFeatureAccess: access.useFeatureAccess }));
 
 const api = vi.hoisted(() => ({
-  listOrgs: vi.fn(), listFunnels: vi.fn(async () => []),
+  listOrgs: vi.fn<typeof FC.listOrgs>(), listFunnels: vi.fn<typeof FC.listFunnels>(async () => []),
   // The org-scoped WRITES this page can issue (ORG-HON-2). `createFunnel` is the
   // one with a control in the zero-organization state; the three lifecycle
   // writes hang off table rows that only exist once the read has answered.
-  createFunnel: vi.fn(), publishFunnel: vi.fn(), unpublishFunnel: vi.fn(), archiveFunnel: vi.fn(),
+  createFunnel: vi.fn<typeof FC.createFunnel>(), publishFunnel: vi.fn<typeof FC.publishFunnel>(),
+  unpublishFunnel: vi.fn<typeof FC.unpublishFunnel>(), archiveFunnel: vi.fn<typeof FC.archiveFunnel>(),
 }));
 vi.mock('../funnelsClient.js', async (importOriginal) => {
   const orig = await importOriginal<Record<string, unknown>>();
@@ -43,6 +62,8 @@ import { FunnelsPage } from '../FunnelsPage.js';
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // `clearAllMocks` keeps queued `…Once` values — reset the read whose cases queue them.
+  api.listOrgs.mockReset();
   // `clearAllMocks` does NOT drop a `mockReturnValue`, so the toggle is re-pinned
   // per test rather than left to whatever the previous one set.
   access.useFeatureAccess.mockReturnValue(makeFeatureAccess({ enabled: true, loading: false }));
@@ -57,9 +78,9 @@ const view = (): HTMLElement => {
 /**
  * Fill in a funnel name and submit the create form — the whole gesture, minus
  * the organization. Submitting the FORM rather than clicking the button is
- * deliberate: `disabled` is one guard and `add()`'s `if (!orgId …) return` is
- * the other, and only the second one is still standing after a refactor that
- * restyles the button. Both are asserted.
+ * deliberate: it bypasses `disabled` and reaches `add()`'s `if (!orgId …) return`
+ * whenever a form exists. In both org states there is NO form (see header), so the
+ * gesture is a no-op there and the cases assert the form's absence first.
  */
 const attemptCreateFunnel = async (container: HTMLElement): Promise<void> => {
   // `query`, not `get`: in the org-state branches the form is not merely
@@ -79,14 +100,22 @@ describe('funnels — failed workspace read is not an empty account', () => {
     expect(screen.getByText(
       'Funnels were never requested. This is a failed read, not an empty organization list.',
     )).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Try again' })).toBeTruthy();
     // The false claim must be absent everywhere on the page, select included —
     // and the select is where the OTHER noun used to live.
     expect(screen.queryByText('No organizations')).toBeNull();
     expect(screen.queryByText('No workspaces')).toBeNull();
+    // "Retryable" means the button re-reads and a success then loads the page.
+    api.listOrgs.mockResolvedValue([{ orgId: 'o1', name: 'Acme' }]);
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Try again' })); });
+    await waitFor(() => expect(api.listFunnels).toHaveBeenCalledWith('o1'));
+    expect(api.listOrgs).toHaveBeenCalledTimes(2);
+    expect(screen.queryByText('Could not load your organizations')).toBeNull();
   });
 
-  it('read SUCCEEDS and is genuinely empty: the real "No organizations" still shows', async () => {
+  it('read SUCCEEDS and is genuinely empty: "No organizations" shows and no failure is claimed', async () => {
+    // TWIN: the HG-1 case below runs the same fixture and asserts a superset (the
+    // body copy, no skeleton, no funnel read). Kept, not cut — this file is
+    // protected — as the plain polarity statement the header promises.
     api.listOrgs.mockResolvedValue([]);
     view();
     await waitFor(() => expect(screen.getByText('No organizations')).toBeTruthy());
@@ -138,7 +167,10 @@ describe('funnels — no organization, no write (ORG-HON-2)', () => {
     // is replaced by the card that says why — there is nothing to disable.
     expect(screen.queryByRole('button', { name: 'Create funnel' })).toBeNull();
     expect(screen.queryByLabelText('Organization')).toBeNull();
-    // Guard two, the one that matters: the handler says no as well.
+    expect(container.querySelector('form')).toBeNull();
+    // `add()`'s own guard is a second copy no gesture can reach while the form is
+    // gone (header: honest ceiling); the gesture and the no-write check stay for the
+    // day the wrapper stops covering it.
     await attemptCreateFunnel(container);
     expect(api.createFunnel).not.toHaveBeenCalled();
     // The lifecycle writes are row-scoped and there is no table — same
@@ -155,6 +187,7 @@ describe('funnels — no organization, no write (ORG-HON-2)', () => {
     // Same shape: the failure card replaces the form, so the empty combobox a
     // failed read used to leave behind is gone too.
     expect(screen.queryByLabelText('Organization')).toBeNull();
+    expect(container.querySelector('form')).toBeNull();
     await attemptCreateFunnel(container);
     expect(api.createFunnel).not.toHaveBeenCalled();
   });
@@ -163,9 +196,15 @@ describe('funnels — no organization, no write (ORG-HON-2)', () => {
     // Without this, the assertions above would also pass if the form were broken
     // for everyone — a different bug wearing the same green.
     api.listOrgs.mockResolvedValue([{ orgId: 'o1', name: 'Acme' }]);
-    api.createFunnel.mockResolvedValue({ funnelId: 'f1', name: 'Summer launch', slug: 'summer-launch', status: 'draft', steps: [] });
+    const created: Funnel = {
+      funnelId: 'f1', orgId: 'o1', name: 'Summer launch', slug: 'summer-launch', status: 'draft', steps: [],
+      createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
+    };
+    api.createFunnel.mockResolvedValue(created);
     const container = view();
     await waitFor(() => expect(api.listFunnels).toHaveBeenCalledWith('o1'));
+    // The form exists here — the absence asserted in the org-state cases is real.
+    expect(container.querySelector('form')).not.toBeNull();
     await attemptCreateFunnel(container);
     expect(api.createFunnel).toHaveBeenCalledTimes(1);
     expect(api.createFunnel.mock.calls[0]?.[0]).toBe('o1');

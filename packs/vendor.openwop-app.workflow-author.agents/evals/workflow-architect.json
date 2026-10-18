@@ -1,0 +1,385 @@
+{
+  "suiteId": "vendor.openwop-app.workflow-author.evals.workflow-architect",
+  "version": "1.0.0",
+  "targetAgentId": "vendor.openwop-app.workflow-author.agents.workflow-architect",
+  "modes": [
+    "golden"
+  ],
+  "thresholds": {
+    "passScore": 1
+  },
+  "tasks": [
+    {
+      "taskId": "author-new-workflow",
+      "input": {
+        "request": "Build me a workflow I can start by hand that emails sales@example.com the subject 'New lead'."
+      },
+      "expected": {
+        "kind": "trajectory",
+        "trajectory": {
+          "match": "in-order",
+          "calls": [
+            {
+              "tool": "openwop:feature.workflow-author.nodes.draft"
+            },
+            {
+              "tool": "openwop:feature.workflow-author.nodes.validate"
+            },
+            {
+              "tool": "openwop:feature.workflow-author.nodes.persist"
+            }
+          ],
+          "forbidden": [
+            "openwop:workflows.compose-and-run"
+          ]
+        }
+      },
+      "fixtures": {
+        "onMiss": "fail",
+        "toolResponses": [
+          {
+            "tool": "openwop:feature.builder-pair.nodes.read-canvas",
+            "response": {
+              "error": "no_pairing_context"
+            }
+          },
+          {
+            "tool": "openwop:feature.workflow-author.nodes.draft",
+            "response": {
+              "query": "send email",
+              "matches": [
+                {
+                  "typeId": "core.trigger.manual",
+                  "label": "Manual trigger",
+                  "category": "trigger"
+                },
+                {
+                  "typeId": "core.email.send",
+                  "label": "Send email",
+                  "category": "integration",
+                  "configSchema": {
+                    "type": "object",
+                    "properties": {
+                      "to": {
+                        "type": "string"
+                      },
+                      "subject": {
+                        "type": "string"
+                      },
+                      "body": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "to",
+                      "subject"
+                    ]
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:feature.workflow-author.nodes.draft",
+            "response": {
+              "query": "send email",
+              "matches": [
+                {
+                  "typeId": "core.trigger.manual",
+                  "label": "Manual trigger",
+                  "category": "trigger"
+                },
+                {
+                  "typeId": "core.email.send",
+                  "label": "Send email",
+                  "category": "integration",
+                  "configSchema": {
+                    "type": "object",
+                    "properties": {
+                      "to": {
+                        "type": "string"
+                      },
+                      "subject": {
+                        "type": "string"
+                      },
+                      "body": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "to",
+                      "subject"
+                    ]
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:feature.workflow-author.nodes.draft",
+            "response": {
+              "query": "send email",
+              "matches": [
+                {
+                  "typeId": "core.trigger.manual",
+                  "label": "Manual trigger",
+                  "category": "trigger"
+                },
+                {
+                  "typeId": "core.email.send",
+                  "label": "Send email",
+                  "category": "integration",
+                  "configSchema": {
+                    "type": "object",
+                    "properties": {
+                      "to": {
+                        "type": "string"
+                      },
+                      "subject": {
+                        "type": "string"
+                      },
+                      "body": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "to",
+                      "subject"
+                    ]
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:feature.workflow-author.nodes.draft",
+            "response": {
+              "query": "send email",
+              "matches": [
+                {
+                  "typeId": "core.trigger.manual",
+                  "label": "Manual trigger",
+                  "category": "trigger"
+                },
+                {
+                  "typeId": "core.email.send",
+                  "label": "Send email",
+                  "category": "integration",
+                  "configSchema": {
+                    "type": "object",
+                    "properties": {
+                      "to": {
+                        "type": "string"
+                      },
+                      "subject": {
+                        "type": "string"
+                      },
+                      "body": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "to",
+                      "subject"
+                    ]
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:feature.workflow-author.nodes.validate",
+            "response": {
+              "ok": true,
+              "errors": []
+            }
+          },
+          {
+            "tool": "openwop:feature.workflow-author.nodes.persist",
+            "response": {
+              "workflowId": "email-sales-new-lead",
+              "url": "/builder/email-sales-new-lead"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "taskId": "change-reads-before-writing",
+      "input": {
+        "request": "In my 'lead-intake' workflow, change the email subject to 'Hot lead'."
+      },
+      "expected": {
+        "kind": "trajectory",
+        "trajectory": {
+          "match": "in-order",
+          "calls": [
+            {
+              "tool": "openwop:feature.workflow-author.nodes.get",
+              "args": {
+                "workflowId": "lead-intake"
+              },
+              "argsMatch": "subset"
+            },
+            {
+              "tool": "openwop:feature.workflow-author.nodes.persist",
+              "args": {
+                "baseRevision": "r7"
+              },
+              "argsMatch": "subset"
+            }
+          ]
+        }
+      },
+      "fixtures": {
+        "onMiss": "fail",
+        "toolResponses": [
+          {
+            "tool": "openwop:feature.builder-pair.nodes.read-canvas",
+            "response": {
+              "error": "no_pairing_context"
+            }
+          },
+          {
+            "tool": "openwop:feature.workflow-author.nodes.get",
+            "args": {
+              "workflowId": "lead-intake"
+            },
+            "argsMatch": "subset",
+            "response": {
+              "workflowId": "lead-intake",
+              "name": "Lead intake",
+              "revision": "r7",
+              "definition": {
+                "workflowId": "lead-intake",
+                "nodes": [
+                  {
+                    "id": "start",
+                    "typeId": "core.trigger.manual"
+                  },
+                  {
+                    "id": "notify",
+                    "typeId": "core.email.send",
+                    "config": {
+                      "to": "sales@example.com",
+                      "subject": "New lead"
+                    }
+                  }
+                ],
+                "edges": [
+                  {
+                    "from": "start",
+                    "to": "notify"
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:feature.workflow-author.nodes.draft",
+            "response": {
+              "query": "send email",
+              "matches": [
+                {
+                  "typeId": "core.trigger.manual",
+                  "label": "Manual trigger",
+                  "category": "trigger"
+                },
+                {
+                  "typeId": "core.email.send",
+                  "label": "Send email",
+                  "category": "integration",
+                  "configSchema": {
+                    "type": "object",
+                    "properties": {
+                      "to": {
+                        "type": "string"
+                      },
+                      "subject": {
+                        "type": "string"
+                      },
+                      "body": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "to",
+                      "subject"
+                    ]
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:feature.workflow-author.nodes.draft",
+            "response": {
+              "query": "send email",
+              "matches": [
+                {
+                  "typeId": "core.trigger.manual",
+                  "label": "Manual trigger",
+                  "category": "trigger"
+                },
+                {
+                  "typeId": "core.email.send",
+                  "label": "Send email",
+                  "category": "integration",
+                  "configSchema": {
+                    "type": "object",
+                    "properties": {
+                      "to": {
+                        "type": "string"
+                      },
+                      "subject": {
+                        "type": "string"
+                      },
+                      "body": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "to",
+                      "subject"
+                    ]
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:feature.workflow-author.nodes.validate",
+            "response": {
+              "ok": true,
+              "errors": []
+            }
+          },
+          {
+            "tool": "openwop:feature.workflow-author.nodes.validate",
+            "response": {
+              "ok": true,
+              "errors": []
+            }
+          },
+          {
+            "tool": "openwop:feature.workflow-author.nodes.persist",
+            "args": {
+              "baseRevision": "r7"
+            },
+            "argsMatch": "subset",
+            "response": {
+              "workflowId": "lead-intake",
+              "url": "/builder/lead-intake",
+              "changes": {
+                "edited": [
+                  "notify"
+                ]
+              },
+              "inHistory": true
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

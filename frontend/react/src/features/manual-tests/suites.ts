@@ -1096,10 +1096,19 @@ export const SUITES: TestSuite[] = [
       { id: 'CFW-06', title: 'Malformed rules rejected', priority: 'P3', preconditions: ['Admin'],
         steps: [ { action: 'Submit an invalid rule set', expect: 'validateRules rejects it with a clear error — no partial/ambiguous state persists' } ] },
     ] },
-  { key: 'intent-ledger', feature: 'Intent Ledger', route: '/', description: 'Durable record of agent intents (host-ext, no page).',
-    toggle: ON, updatedAt: '2026-07-01', sourceCommit: 'e1a37bb2', sourceFiles: ['backend/typescript/src/features/intent-ledger'],
-    cases: [ { id: 'ILDG-01', title: 'Intents are recorded', priority: 'P2', preconditions: ['Run an agent action that declares intent'],
-      steps: [ { action: 'Drive an agent action, then inspect the intent ledger (governance surface / API)', expect: 'The intent is recorded with actor + timestamp' } ] } ] },
+  { key: 'intent-ledger', feature: 'Intent Ledger', route: '/', description: 'Per-conversation mission contract: draft, review, approve; narrows the agent\u2019s tools until revoked (ADR 0136, ADR 0896).',
+    toggle: ON, updatedAt: '2026-10-15', sourceCommit: '7f36f9f9', sourceFiles: ['backend/typescript/src/features/intent-ledger', 'frontend/react/src/intentLedger'],
+    cases: [
+      { id: 'ILDG-01', title: 'Draft and approve a mission', priority: 'P2', preconditions: ['Signed in with write access; a conversation you own'],
+        steps: [
+          { action: 'In the chat header open Mission, enter a goal and Create draft', expect: 'The draft shows its goal and a note that no allowed tools means the agent can talk but not act' },
+          { action: 'Click Approve', expect: '"Mission approved"; the Revoke mission button appears' } ] },
+      { id: 'ILDG-02', title: 'A redraft forces a re-review', priority: 'P1', preconditions: ['A draft mission open in the Mission panel'],
+        steps: [
+          { action: 'In the chat, ask the assistant to redraft the mission (it calls intent-ledger.draft-contract), then click Approve in the still-open panel', expect: 'Nothing is approved; the panel reloads with "This mission changed since you opened it" and shows the new version' } ] },
+      { id: 'ILDG-03', title: 'Only the owner decides', priority: 'P2', preconditions: ['A participant (not the owner) in a shared conversation with a draft mission'],
+        steps: [
+          { action: 'As the participant open Mission', expect: 'No Approve/Reject buttons; a note says only the owner (or a workspace admin, if there is no owner) can decide' } ] } ] },
   { key: 'ambient-work-graph', feature: 'Ambient Work Graph', route: '/', description: 'Suggested next work from activity (host-ext).',
     toggle: ON, updatedAt: '2026-07-01', sourceCommit: 'e1a37bb2', sourceFiles: ['frontend/react/src/features/ambient-work-graph'],
     cases: [ { id: 'AWG-01', title: 'Suggestions surface', priority: 'P3', preconditions: ['Some activity exists'],

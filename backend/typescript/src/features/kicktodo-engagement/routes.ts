@@ -7,7 +7,7 @@ import type { Request, Response, NextFunction, Express } from 'express';
 import { OpenwopError } from '../../types.js';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
 import { callerSubject, tenantOf } from '../../host/requestSubject.js';
-import { requireFeatureEnabled, requireString } from '../featureRoute.js';
+import { requireFeatureEnabled, requireKicktodoManage, requireString } from '../featureRoute.js';
 import { resolveOne } from '../../host/featureToggles/service.js';
 import {
   optIn,
@@ -100,6 +100,9 @@ export const KICKTODO_ENGAGEMENT_ROUTES: ReadonlyArray<{ method: 'get' | 'post';
     path: `${KICKTODO_ENGAGEMENT_PREFIX}/effectiveness`,
     handler: async (req, res) => {
       await gate(req);
+      // Code-grade KTE-1 — a per-variant completion total is an OPERATOR read (a
+      // one-member variant discloses that member's total); it needs manage authority.
+      await requireKicktodoManage(req, 'kicktodo-engagement', 'KickTodo Engagement');
       const tenant = tenantOf(req);
       res.json({
         byVariant: await effectivenessByVariant(tenant, async (subject) => {

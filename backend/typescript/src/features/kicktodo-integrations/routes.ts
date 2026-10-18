@@ -30,6 +30,7 @@ import {
   linkWearableProvider,
   unlinkWearableProvider,
   listWearableLinksForSubject,
+  WearableLinkConflictError,
 } from './wearableLinkService.js';
 import {
   registerWearableWebhook,
@@ -160,6 +161,7 @@ export const KICKTODO_INTEGRATIONS_ROUTES: ReadonlyArray<{ method: 'get' | 'post
         res.json(await linkWearableProvider(tenantOf(req), subjectOf(req), b.provider, b.providerUserId));
       } catch (err) {
         if (err instanceof ConsentRequiredError) throw new OpenwopError('conflict', err.message, 409, { kind: err.kind });
+        if (err instanceof WearableLinkConflictError) throw new OpenwopError('conflict', err.message, 409);
         throw err;
       }
     },

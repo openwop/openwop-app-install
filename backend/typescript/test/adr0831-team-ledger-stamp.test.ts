@@ -2,13 +2,23 @@
  * ADR 0831 P2 — the run stamp and read-before-act, on real runs.
  *
  *   - a run on the project's BOARD (host-written `kanban.boardId`) is stamped with
- *     the ledger's current version; toggle OFF ⇒ no stamp (sabotage leg);
+ *     the ledger's CURRENT version (asserted after the ledger has moved past 1);
  *   - the binding is checked against the run's acting user: a user who cannot read
  *     the project gets no stamp even if their run names the board;
  *   - a caller cannot pre-set `teamLedger` through `POST /runs` (reserved key);
- *   - `:fork` over the real route keeps the source's version after the ledger moves;
- *   - the context provider returns the state AT the stamped version, not the latest;
+ *   - `:fork` over the real route keeps the source's version after the ledger
+ *     moves, and never GAINS a stamp its source lacked (ADR 0604);
+ *   - the context provider returns the state AT the stamped version, fenced as
+ *     untrusted, and nothing for another tenant;
  *   - the live dispatch puts the fenced block before `Task:`.
+ *
+ * Sabotage-witnessed (w29): a stamp pinned to version 1, the acting-user access
+ * check dropped, `teamLedger` un-reserved, `derivedFromRun` ignored, `stateAt`
+ * returning the latest, the fence dropped, the blocks dropped from dispatch.
+ * Honest double guards (no single sabotage reds them): the fork keeping v1 is held
+ * by BOTH `derivedFromRun` and run-start's "fork-copied values win" merge; the
+ * other-tenant read is held by BOTH the provider's tenant check and the
+ * tenant-scoped `stateAt`.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -26,6 +36,8 @@ import { getAgentRegistry } from '../src/executor/agentRegistry.js';
 import { runAgentDispatchLive } from '../src/host/agentDispatch.js';
 import type { AiCallRequest, AiCallResult } from '../src/executor/types.js';
 import type { RunRecord } from '../src/types.js';
+import { getLedger } from '../src/features/team-intent-ledger/ledgerStore.js';
+import type { TeamLedger } from '../src/features/team-intent-ledger/types.js';
 
 let BASE: string;
 let server: http.Server;
@@ -43,13 +55,15 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T }
+/** The response fields this file reads, typed against the real records (an absent field fails the case). */
+interface Body { ledger: TeamLedger; user: { userId: string }; orgId: string; id: string; boardId: string; runId: string; fixtures?: string[] }
+interface Res { status: number; body: Body }
 function client() {
   let cookie = '';
   const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]!; }
-    return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) };
+    return { status: res.status, body: (res.status === 204 ? undefined : await res.json().catch(() => undefined)) as Body };
   };
   return { get: (p: string) => call('GET', p), post: (p: string, b?: unknown) => call('POST', p, b), patch: (p: string, b?: unknown) => call('PATCH', p, b) };
 }
@@ -64,8 +78,8 @@ const email = (who: string): string => `${who}-${Date.now()}-${n++}@acme.test`;
 async function setup() {
   const tenantId = `org:tls-${Date.now()}-${n++}`;
   const owner = client();
-  const ownerId = (await owner.post('/host/openwop-app/test/login', { email: email('tls-owner'), tenantId })).body.user.userId as string;
-  const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'StampCo' })).body.orgId as string;
+  const ownerId = (await owner.post('/host/openwop-app/test/login', { email: email('tls-owner'), tenantId })).body.user.userId;
+  const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'StampCo' })).body.orgId;
   const proj = (await owner.post('/host/openwop-app/projects', { orgId, name: 'Launch' })).body as { id: string; boardId: string };
   await owner.patch(`/host/openwop-app/projects/${proj.id}`, { charter: { goal: 'Ship the launch', objectives: ['EU live'] } });
   const L = `/host/openwop-app/team-ledger/projects/${proj.id}`;
@@ -88,8 +102,10 @@ async function boardRun(tenantId: string, boardId: string, actingUserId: string 
 describe('ADR 0831 P2 — run stamp', () => {
   it('a run on the project board is stamped with the current version', async () => {
     const s = await setup();
+    // Move the ledger past its creation version, so "current" is distinguishable from 1.
+    expect((await s.owner.post(`${s.L}/write`, { patch: { inScope: ['EU'] }, why: 'v2' })).body.ledger.version).toBe(2);
     const run = await boardRun(s.tenantId, s.boardId, s.ownerId);
-    expect(readTeamLedgerStamp(run.metadata)).toMatchObject({ version: 1 });
+    expect(readTeamLedgerStamp(run.metadata)).toEqual({ ledgerId: (await getLedger(s.tenantId, s.projectId))!.ledgerId, version: 2 });
   });
 
   it('a user who cannot read the project gets no stamp, even naming its board', async () => {
@@ -97,7 +113,7 @@ describe('ADR 0831 P2 — run stamp', () => {
     // Make the project private, then use a co-tenant viewer who is not a member.
     expect((await s.owner.patch(`/host/openwop-app/projects/${s.projectId}/visibility`, { visibility: 'private' })).status).toBe(200);
     const viewer = client();
-    const viewerId = (await viewer.post('/host/openwop-app/test/login', { email: email('tls-viewer'), tenantId: s.tenantId })).body.user.userId as string;
+    const viewerId = (await viewer.post('/host/openwop-app/test/login', { email: email('tls-viewer'), tenantId: s.tenantId })).body.user.userId;
     await createMember({ tenantId: s.tenantId, orgId: s.orgId, subject: viewerId, displayName: 'V', roles: ['viewer'] });
     expect(readTeamLedgerStamp((await boardRun(s.tenantId, s.boardId, viewerId)).metadata)).toBeUndefined();
     expect(readTeamLedgerStamp((await boardRun(s.tenantId, s.boardId, s.ownerId)).metadata)).toBeDefined();
@@ -106,17 +122,19 @@ describe('ADR 0831 P2 — run stamp', () => {
   it('a caller cannot pre-set teamLedger through POST /runs', async () => {
     const s = await setup();
     const disco = await s.owner.get('/.well-known/openwop');
-    const workflowId = (disco.body?.fixtures?.[0] as string | undefined) ?? 'openwop-app.uppercase';
+    const workflowId = disco.body?.fixtures?.[0] ?? 'openwop-app.uppercase';
     const r = await s.owner.post('/runs', { workflowId, inputs: {}, metadata: { teamLedger: { ledgerId: 'tl_forged', version: 99 } } });
     expect(r.status, JSON.stringify(r.body)).toBe(201);
     const run = await storage.getRun(localRunId(r.body.runId, s.tenantId));
-    expect(readTeamLedgerStamp(run!.metadata)?.ledgerId).not.toBe('tl_forged');
+    // Not board-bound, so the honest outcome is NO stamp — the forged one is stripped, not kept.
+    expect(readTeamLedgerStamp(run!.metadata)).toBeUndefined();
+    expect((run!.metadata as Record<string, unknown>).teamLedger).toBeUndefined();
   });
 
   it(':fork over the real route keeps the source version after the ledger moves', async () => {
     const s = await setup();
     const disco = await s.owner.get('/.well-known/openwop');
-    const workflowId = (disco.body?.fixtures?.[0] as string | undefined) ?? 'openwop-app.uppercase';
+    const workflowId = disco.body?.fixtures?.[0] ?? 'openwop-app.uppercase';
     // A board-bound run on a REAL workflow, so the fork route can resolve it.
     const src = await boardRun(s.tenantId, s.boardId, s.ownerId, {}, workflowId);
     expect(readTeamLedgerStamp(src.metadata)?.version).toBe(1);
@@ -134,7 +152,7 @@ describe('ADR 0831 P2 — a fork never GAINS a stamp its source was born without
   it('a source born without a stamp (e.g. while the ledger was still toggled) stays unstamped on a fork', async () => {
     const s = await setup();
     const disco = await s.owner.get('/.well-known/openwop');
-    const workflowId = (disco.body?.fixtures?.[0] as string | undefined) ?? 'openwop-app.uppercase';
+    const workflowId = disco.body?.fixtures?.[0] ?? 'openwop-app.uppercase';
     const born = await boardRun(s.tenantId, s.boardId, s.ownerId, {}, workflowId);
     const { teamLedger: _dropped, ...unstamped } = born.metadata as Record<string, unknown>;
     await storage.updateRun(born.runId, { metadata: unstamped });
@@ -172,7 +190,7 @@ describe('ADR 0831 P2 — read before act', () => {
   it('the live dispatch places the blocks before Task:', async () => {
     const registry = getAgentRegistry();
     registry._resetForTest();
-    registry.register({ agentId: 'test.ledger-reader', persona: 'R', modelClass: 'chat', systemPrompt: 'You are R.', packName: 'test', packVersion: '0', toolAllowlist: [] } as never);
+    registry.register({ agentId: 'test.ledger-reader', persona: 'R', modelClass: 'chat', systemPrompt: 'You are R.', packName: 'test', packVersion: '0', toolAllowlist: [] });
     const callAI = vi.fn<(req: AiCallRequest) => Promise<AiCallResult>>(async () => ({ content: 'ok' }));
     await runAgentDispatchLive({ agentId: 'test.ledger-reader', task: 'Draft the brief' }, { callAI, contextBlocks: ['BEGIN UNTRUSTED CONTENT\n- Goal: X\nEND UNTRUSTED CONTENT'] });
     const text = JSON.stringify(callAI.mock.calls[0]![0]);

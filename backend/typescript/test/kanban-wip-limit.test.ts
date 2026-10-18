@@ -1,9 +1,15 @@
 /**
  * KB-R2-5 — soft WIP limits, route level. Invariants:
  *   - the dedicated limit route sets/clears; validation 400s outside 1–999
- *   - the board PATCH still rejects column edits (the 2026-06-05 memo holds)
  *   - THE SOFT PIN: an over-limit column still accepts creates and moves —
  *     the limit is a signal, never a gate (the GitHub/Jira consensus)
+ * (The board PATCH rejecting column edits — the 2026-06-05 memo — is owned by
+ * kanban-board-rename.test.ts "rejects other fields".)
+ *
+ * Red if the 1–999 / integer validation loosens (probes w37g1-wip-range,
+ * -wip-integer), a clear keeps the limit or the write is not persisted
+ * (-wip-clear, -wip-persisted), or any create/move path starts gating on the
+ * limit (-wip-soft-gate).
  */
 
 import http from 'node:http';
@@ -25,9 +31,14 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-function client(): { get: (p: string) => Promise<{ status: number; body: any }>; post: (p: string, b?: unknown) => Promise<{ status: number; body: any }>; patch: (p: string, b?: unknown) => Promise<{ status: number; body: any }> } {
+interface Res { status: number; body: unknown }
+interface BoardBody { id: string; columns: Array<{ id: string; name: string; wipLimit?: number }> }
+const board = (r: Res): BoardBody => r.body as BoardBody;
+const errorOf = (r: Res): string | undefined => (r.body as { error?: string } | undefined)?.error;
+
+function client(): { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res>; patch: (p: string, b?: unknown) => Promise<Res> } {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<{ status: number; body: any }> => {
+  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
     const res = await fetch(`${BASE}${path}`, {
       method,
       headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) },
@@ -46,33 +57,40 @@ async function boardOwner(): Promise<{ c: ReturnType<typeof client>; boardId: st
   expect((await c.post('/host/openwop-app/test/login', { email: `wip-${Date.now()}-${Math.floor(Math.random() * 1e6)}@acme.test` })).status).toBe(201);
   const b = await c.post(`${KB}/boards`, { name: 'WIP board' });
   expect(b.status, JSON.stringify(b.body)).toBe(201);
-  const todo = (b.body.columns as Array<{ id: string; name: string }>).find((col) => /to ?do/i.test(col.name) || col.id === 'todo');
-  expect(todo, JSON.stringify(b.body.columns)).toBeTruthy();
-  return { c, boardId: b.body.id, todoId: todo!.id };
+  const todo = board(b).columns.find((col) => /to ?do/i.test(col.name) || col.id === 'todo');
+  expect(todo, JSON.stringify(board(b).columns)).toBeTruthy();
+  return { c, boardId: board(b).id, todoId: todo!.id };
+}
+
+/** The limit as PERSISTED — a fresh GET, never the write response. */
+async function storedLimit(c: ReturnType<typeof client>, boardId: string, columnId: string): Promise<number | undefined> {
+  const r = await c.get(`${KB}/boards/${boardId}`);
+  expect(r.status).toBe(200);
+  return (r.body as { board: BoardBody }).board.columns.find((col) => col.id === columnId)?.wipLimit;
 }
 
 describe('KB-R2-5 — the limit route', () => {
   it('sets, reflects, and clears; validates the range', async () => {
     const { c, boardId, todoId } = await boardOwner();
-    expect((await c.patch(`${KB}/boards/${boardId}/columns/${todoId}/limit`, { wipLimit: 0 })).status).toBe(400);
+    const zero = await c.patch(`${KB}/boards/${boardId}/columns/${todoId}/limit`, { wipLimit: 0 });
+    expect(zero.status).toBe(400);
+    expect(errorOf(zero)).toBe('validation_error');
     expect((await c.patch(`${KB}/boards/${boardId}/columns/${todoId}/limit`, { wipLimit: 2.5 })).status).toBe(400);
     expect((await c.patch(`${KB}/boards/${boardId}/columns/${todoId}/limit`, { wipLimit: 1000 })).status).toBe(400);
+    expect(await storedLimit(c, boardId, todoId)).toBeUndefined();
 
     const set = await c.patch(`${KB}/boards/${boardId}/columns/${todoId}/limit`, { wipLimit: 2 });
     expect(set.status, JSON.stringify(set.body)).toBe(200);
-    expect((set.body.columns as Array<{ id: string; wipLimit?: number }>).find((col) => col.id === todoId)?.wipLimit).toBe(2);
+    expect(board(set).columns.find((col) => col.id === todoId)?.wipLimit).toBe(2);
+    expect(await storedLimit(c, boardId, todoId)).toBe(2);
 
     const cleared = await c.patch(`${KB}/boards/${boardId}/columns/${todoId}/limit`, { wipLimit: null });
     expect(cleared.status).toBe(200);
-    expect((cleared.body.columns as Array<{ id: string; wipLimit?: number }>).find((col) => col.id === todoId)?.wipLimit).toBeUndefined();
+    expect(await storedLimit(c, boardId, todoId)).toBeUndefined();
 
-    expect((await c.patch(`${KB}/boards/${boardId}/columns/missing-col/limit`, { wipLimit: 2 })).status).toBe(404);
-  });
-
-  it('the board PATCH still rejects column edits (the memo invariant holds)', async () => {
-    const { c, boardId } = await boardOwner();
-    const res = await c.patch(`${KB}/boards/${boardId}`, { columns: [] });
-    expect(res.status).toBe(400);
+    const missing = await c.patch(`${KB}/boards/${boardId}/columns/missing-col/limit`, { wipLimit: 2 });
+    expect(missing.status).toBe(404);
+    expect(errorOf(missing)).toBe('not_found');
   });
 
   it('SOFT: an over-limit column still accepts creates and moves', async () => {
@@ -82,5 +100,11 @@ describe('KB-R2-5 — the limit route', () => {
     expect((await c.post(`${KB}/boards/${boardId}/cards`, { title: 'one', columnId: todoId })).status).toBe(201);
     const second = await c.post(`${KB}/boards/${boardId}/cards`, { title: 'two', columnId: todoId });
     expect(second.status, JSON.stringify(second.body)).toBe(201);
+    // …and a MOVE into the (now over-limit) column also succeeds.
+    const elsewhere = await c.post(`${KB}/boards/${boardId}/cards`, { title: 'three', columnId: 'doing' });
+    expect(elsewhere.status).toBe(201);
+    const moved = await c.patch(`${KB}/cards/${(elsewhere.body as { id: string }).id}`, { columnId: todoId });
+    expect(moved.status, JSON.stringify(moved.body)).toBe(200);
+    expect((moved.body as { card: { columnId: string } }).card.columnId).toBe(todoId);
   });
 });

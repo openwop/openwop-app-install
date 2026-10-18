@@ -1,13 +1,24 @@
-import { defineConfig, loadEnv } from 'vite';
+import { defineConfig, loadEnv, runnerImport, type ViteDevServer } from 'vite';
 import react from '@vitejs/plugin-react';
 import { resolve } from 'node:path';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 // The repo-root generator. `tsconfig.json` includes only `src/**` and `e2e/**`,
 // so this config file is transformed by esbuild and never type-checked — no
 // suppression is needed or wanted here.
 import { generate } from '../../scripts/gen-distribution.mjs';
+import {
+  DEFAULT_PRECACHE_MAX_KB,
+  buildOfflineTable,
+  computePrecache,
+  generateServiceWorker,
+  prepareOfflineBuild,
+  resolveHostingConfigPath,
+  type NeverCacheRule,
+  type OfflineFeature,
+} from './scripts/gen-service-worker.mjs';
 import { BRAND_DEFAULTS, resolveBrandFromEnv } from './src/brand/defaults';
 import { DEV_FALLBACK_BASE_URL } from './src/client/baseUrlDefault';
+import { chunkFileName } from './scripts/chunkNames.mjs';
 
 // Vite inlines `import.meta.env.VITE_*` at build time, NOT at runtime.
 // A production build with `VITE_OPENWOP_BASE_URL` unset bakes the dev
@@ -27,9 +38,14 @@ import { DEV_FALLBACK_BASE_URL } from './src/client/baseUrlDefault';
 // `registry.distribution.ts` so excluded features tree-shake out of the
 // bundle. Default: no alias — byte-identical build.
 const distributionName = process.env.OPENWOP_DISTRIBUTION ?? 'default';
+const canonicalRegistry = resolve(__dirname, 'src/features/registry.ts');
+// ADR 0873 — the registry text this build compiles (the distribution's when one
+// is set), which is what the service-worker generator reads the offline
+// declarations from. Set by distributionPlugin below.
+let composedRegistrySource: string | null = null;
 const distributionPlugin = (() => {
   if (distributionName === 'default') return [];
-  const canonical = resolve(__dirname, 'src/features/registry.ts');
+  const canonical = canonicalRegistry;
   // GENERATE HERE rather than reading `registry.distribution.ts` off disk.
   //
   // That file is gitignored and written by the `prebuild` npm hook, so a bare
@@ -48,6 +64,7 @@ const distributionPlugin = (() => {
   // the same hole on the frontend side.
   const { generated, frontendSource } = generate(distributionName, { write: false });
   if (!generated || !frontendSource) return [];
+  composedRegistrySource = frontendSource;
   // A load()-hook substitution keyed on the RESOLVED path — resolve.alias
   // matches import SPECIFIERS (relative strings), so an absolute-path alias
   // never engages (the backend build.mjs hit the same class via onResolve).
@@ -73,6 +90,8 @@ export default defineConfig(({ mode }) => {
       );
     }
   }
+
+  const pwaStartUrl = loadEnv(mode, __dirname, '').VITE_PWA_START_URL || '/';
 
   return {
     server: {
@@ -127,6 +146,63 @@ export default defineConfig(({ mode }) => {
     // empty module — the frontend never executes the HMAC code path.
     plugins: [...distributionPlugin, 
       react(),
+      (() => {
+        // ADR 0873 — the ONE generated service worker. Emitted as `dist/sw.js`
+        // and served at `/sw.js` under `vite dev` (always the empty-table
+        // worker there), so `public/sw-push.js` (the permanent shim,
+        // `importScripts('/sw.js')`) works in both. `config` loads the composed
+        // features' `offline.ts` declarations, derives the D4 never-cache set and
+        // refuses a bad table before anything builds; `generateBundle` (post, so
+        // `index.html` is in the bundle) derives the D6 precache and budget.
+        let offlineFeatures: OfflineFeature[] = [];
+        let neverCache: NeverCacheRule[] = [];
+        return {
+          name: 'openwop-service-worker',
+          enforce: 'post' as const,
+          async config() {
+            const env = loadEnv(mode, __dirname, '');
+            ({ features: offlineFeatures, neverCache } = await prepareOfflineBuild({
+              registrySource: composedRegistrySource ?? readFileSync(canonicalRegistry, 'utf8'),
+              registryPath: canonicalRegistry,
+              importModule: async (file: string) => (await runnerImport<{ offline?: unknown }>(file, { configFile: false })).module,
+              hostingConfigPath: resolveHostingConfigPath(resolve(__dirname, '..', '..'), env.VITE_SW_HOSTING_CONFIG),
+              hostingTarget: env.VITE_SW_HOSTING_TARGET || 'app',
+              startUrl: pwaStartUrl,
+            }));
+            return { define: { __OPENWOP_SW_OFFLINE__: JSON.stringify(offlineFeatures.length > 0) } };
+          },
+          configureServer(server: ViteDevServer) {
+            server.middlewares.use((req, res, next) => {
+              if (req.url?.split('?')[0] !== '/sw.js') { next(); return; }
+              res.setHeader('Content-Type', 'text/javascript; charset=utf-8');
+              res.setHeader('Cache-Control', 'no-cache');
+              res.end(generateServiceWorker());
+            });
+          },
+          generateBundle(_options: unknown, bundle: Record<string, unknown>) {
+            if (offlineFeatures.length === 0) {
+              this.emitFile({ type: 'asset', fileName: 'sw.js', source: generateServiceWorker() });
+              return;
+            }
+            const budgetKb = Number(process.env.OPENWOP_SW_PRECACHE_MAX_KB ?? DEFAULT_PRECACHE_MAX_KB);
+            const result = computePrecache({
+              bundle: bundle as Parameters<typeof computePrecache>[0]['bundle'],
+              features: offlineFeatures,
+              budgetKb,
+              readPublicFile: (p: string) => {
+                const file = resolve(__dirname, 'public', p.slice(1));
+                return existsSync(file) ? readFileSync(file) : null;
+              },
+            });
+            for (const s of result.sizes) {
+              console.log(`[sw] ${s.id}: precache ${s.gzipKb} kB gzip over ${s.chunks} files (budget ${budgetKb} kB)`);
+            }
+            if (result.errors.length > 0) this.error(`[sw] ADR 0873 precache refused:\n  - ${result.errors.join('\n  - ')}`);
+            const table = buildOfflineTable({ features: offlineFeatures, neverCache, precache: result.precache, version: result.version });
+            this.emitFile({ type: 'asset', fileName: 'sw.js', source: generateServiceWorker(table) });
+          },
+        };
+      })(),
       {
         // White-label: stamp the brand document title, favicon, and font
         // stylesheet into index.html at build time from `VITE_BRAND_*`
@@ -174,7 +250,10 @@ export default defineConfig(({ mode }) => {
             name: brand.productName,
             short_name: brand.productName,
             description: brand.tagline,
-            start_url: '/',
+            // ADR 0873 D9 — `/` is a Cloud Run document, so an installed app that
+            // must launch offline sets VITE_PWA_START_URL to a declared navigation
+            // (the plugin above refuses a start_url that cannot launch offline).
+            start_url: pwaStartUrl,
             display: 'standalone',
             background_color: brand.themeColor,
             theme_color: brand.themeColor,
@@ -242,6 +321,10 @@ export default defineConfig(({ mode }) => {
       assetsInlineLimit: (filePath) => (filePath.endsWith('pcmCaptureWorklet.js') ? false : undefined),
       rollupOptions: {
         output: {
+          // ADR 0874 D2 — async chunks are `c-[hash].js` unless something keys on
+          // their name (scripts/chunkNames.mjs says which, and why). The entry is
+          // unaffected: it stays `index-[hash].js` (entryFileNames).
+          chunkFileNames: chunkFileName,
           // Code-split the markdown stack into its own chunk. The chat
           // surface is the only consumer of react-markdown + remark-gfm
           // + their transitive unified/mdast/micromark deps (~250KB
@@ -282,7 +365,7 @@ export default defineConfig(({ mode }) => {
               // namespaces stay in the locale chunk for the same reason they stay
               // eager in `en` (they render in the chat feed, which is shell).
               // Keep in sync with SHELL_FEATURE_NAMESPACES in src/i18n/resources.ts
-              // — i18nNamespaceSplit.test.ts pins the lists together.
+              // — namespaceSplit.test.ts pins the lists together.
               const lazyFeature = n.match(/\/src\/features\/([^/]+)\/i18n\/(?:pt-BR|fr|es)\.ts$/);
               if (lazyFeature && !['comments', 'cad', 'campaign-studio'].includes(lazyFeature[1]!)) return undefined;
               const lazy = n.match(/\/i18n\/(?:locales\/)?(pt-BR|fr|es)(?:\/|\.ts$)/);
@@ -296,7 +379,7 @@ export default defineConfig(({ mode }) => {
             {
               const enFeature = n.match(/\/src\/features\/([^/]+)\/i18n\/en\.ts$/);
               // Keep in sync with SHELL_FEATURE_NAMESPACES in src/i18n/resources.ts
-              // (i18nNamespaceSplit.test.ts pins the two lists together).
+              // (namespaceSplit.test.ts pins the two lists together).
               if (enFeature && !['comments', 'cad', 'campaign-studio'].includes(enFeature[1]!)) return undefined;
             }
             // ADR 0819 — the LAZY AREA catalogs: `featureToggles` renders only in the

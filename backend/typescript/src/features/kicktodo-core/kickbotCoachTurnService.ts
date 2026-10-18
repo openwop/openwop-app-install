@@ -44,6 +44,7 @@ import { ensureConversationMeta, findByDmKey, dmKeyOf, userRef, agentRef } from 
 import { registerJob, ONE_SHOT_CRON } from '../../host/schedulingService.js';
 import { isNotificationMuted } from '../../host/notificationPolicy.js';
 import { createLogger } from '../../observability/logger.js';
+import { OpenwopError } from '../../types.js';
 import { ensureKickBot } from './kickbotService.js';
 import { getEnrollment } from './enrollmentService.js';
 import { todayFor } from './todayService.js';
@@ -59,6 +60,13 @@ export interface CoachTurnRequest {
   occasion: CoachTurnOccasion;
   /** The award kind, for an `award` occasion (also the idempotence key). */
   awardKind?: string;
+  /** ADR 0901 D3 — the run's person when the caller is a person-lane workflow
+   *  (always, independent of the run-principal binding toggle). When set, the
+   *  job this call mints MUST act as exactly that person: a turn that would
+   *  stamp any other `actingUserId` is refused before the scheduler is touched.
+   *  Absent for the host-authored reminder-loop (system lane) and in-process
+   *  callers. */
+  boundActor?: string;
 }
 
 export type CoachTurnSkipReason = 'not-found' | 'not-active' | 'nothing-pending' | 'muted' | 'schedule-unavailable';
@@ -127,6 +135,16 @@ function taskFor(occasion: CoachTurnOccasion, persona: string, headline: string 
 
 /** Enqueue one proactive KickBot turn for a participant (gated, idempotent, best-effort). */
 export async function enqueueKickbotCoachTurn(tenantId: string, req: CoachTurnRequest): Promise<CoachTurnOutcome> {
+  // ADR 0901 D3 — the minted job runs AS `actingUserId`. On the person lane it
+  // may only be the person the run already acts for. Checked first, so a
+  // mismatch never reaches the enrollment read or the scheduler.
+  const actingUserId = req.ownerSubject;
+  // An empty `ownerSubject` mints nothing (no enrollment has an empty owner), so
+  // it falls through to today's honest `not-found` skip rather than a refusal.
+  if (req.boundActor !== undefined && actingUserId && actingUserId !== req.boundActor) {
+    log.info('kickbot_coach_turn_actor_refused', { tenantId, occasion: req.occasion });
+    throw new OpenwopError('forbidden', 'A coach turn may only be queued for the person running this workflow.', 403, { reason: 'actor_mismatch' });
+  }
   const e = await getEnrollment(tenantId, req.enrollmentId);
   if (!e || e.ownerSubject !== req.ownerSubject) return { queued: false, reason: 'not-found' };
   if (e.state !== 'active') return { queued: false, reason: 'not-active' };
@@ -165,7 +183,7 @@ export async function enqueueKickbotCoachTurn(tenantId: string, req: CoachTurnRe
       agentId: bot.rosterId,
       // `actingUserId` lets the guide's actingUserId-gated read tools (today,
       // progress, journal) authorize on the scheduled run (ADR 0324 scope law).
-      metadata: { purpose: 'kickbot-coach-turn', occasion: req.occasion, enrollmentId: req.enrollmentId, actingUserId: req.ownerSubject },
+      metadata: { purpose: 'kickbot-coach-turn', occasion: req.occasion, enrollmentId: req.enrollmentId, actingUserId },
       configurable: { agentId: bot.rosterId, task, conversationId, credentialRef: KICKTODO_CONVENE_CREDENTIAL_REF },
     });
     if (!res.ok) {

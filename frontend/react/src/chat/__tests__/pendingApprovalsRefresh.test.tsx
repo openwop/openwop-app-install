@@ -7,6 +7,9 @@
  * so a held call stayed invisible until the next message. This drives the hook through
  * exactly that sequence (count 0 → sending at 2 → settled at 2) and asserts the control is
  * asked to re-read after `isSending` goes false.
+ *
+ * Sabotage witness (w43): keying `refreshKey` on `messageCount` alone (the
+ * born-red shape) turns it red.
  */
 import { render } from '@testing-library/react';
 import { describe, it, expect, vi } from 'vitest';
@@ -32,8 +35,7 @@ describe('pending approvals re-read on turn settle (FW2-UX-1)', () => {
     rerender(<Harness messageCount={2} isSending />);            // send: user row + placeholder
     await vi.waitFor(() => expect(keys.at(-1)).toBe(-1));
     rerender(<Harness messageCount={2} isSending={false} />);    // completion: 1:1 swap, same count
+    // Settled: the key moved off the in-flight -1 to the count — a re-read.
     await vi.waitFor(() => expect(keys.at(-1)).toBe(2));
-    // the settled key differs from every key seen while the turn was in flight
-    expect(keys.at(-1)).not.toBe(-1);
   });
 });

@@ -41,17 +41,23 @@ beforeAll(async () => {
 }, 60_000);
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Client { cookie: string; userId: string; get: (p: string) => Promise<any>; post: (p: string, b?: unknown) => Promise<any>; patch: (p: string, b?: unknown) => Promise<any> }
+/** The response fields this file reads — every one optional, so a missing field
+ *  reads as `undefined` and fails the assertion that names it (no `any`). */
+interface Body { canvasId?: string; orgId?: string; id?: string; visibility?: string; user?: { userId: string } }
+interface Res { status: number; body: Body | undefined }
+interface Client { cookie: string; userId: string; get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res>; patch: (p: string, b?: unknown) => Promise<Res> }
 async function loginTo(tenantId: string, who: string): Promise<Client> {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<any> => {
+  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) };
+    return { status: res.status, body: res.status === 204 ? undefined : ((await res.json().catch(() => undefined)) as Body | undefined) };
   };
   const r = await call('POST', '/host/openwop-app/test/login', { email: `${who}-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  return { cookie, userId: r.body.user.userId, get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), patch: (p, b) => call('PATCH', p, b) };
+  const userId = r.body?.user?.userId;
+  if (!userId) throw new Error(`test/login returned no userId: ${JSON.stringify(r.body)}`);
+  return { cookie, userId, get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), patch: (p, b) => call('PATCH', p, b) };
 }
 
 const P = '/host/openwop-app/projects';
@@ -61,9 +67,11 @@ const P = '/host/openwop-app/projects';
 async function privateProjectDrawing() {
   const tenantId = `org:drw-sa-${Date.now()}-${n++}`;
   const a = await loginTo(tenantId, 'owner');
-  const orgId = (await a.post('/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
-  const projectId = (await a.post(P, { orgId, name: 'Secret' })).body.id;
-  expect((await a.patch(`${P}/${projectId}/visibility`, { visibility: 'private' })).body.visibility).toBe('private');
+  const orgId = (await a.post('/host/openwop-app/orgs', { name: 'Acme' })).body?.orgId;
+  if (!orgId) throw new Error('org create returned no orgId');
+  const projectId = (await a.post(P, { orgId, name: 'Secret' })).body?.id;
+  if (!projectId) throw new Error('project create returned no id');
+  expect((await a.patch(`${P}/${projectId}/visibility`, { visibility: 'private' })).body?.visibility).toBe('private');
   const canvas = await createCanvasForTenant(tenantId, {
     canvasTypeId: 'canvas.drawing', name: 'Secret sketch',
     ownerSubject: { kind: 'project', id: projectId },
@@ -71,7 +79,7 @@ async function privateProjectDrawing() {
   });
   const b = await loginTo(tenantId, 'nonmember');
   await createMember({ tenantId, orgId, subject: b.userId, displayName: 'B', roles: ['viewer'] });
-  return { orgId, canvasId: canvas.canvasId, a, b };
+  return { tenantId, orgId, canvasId: canvas.canvasId, a, b };
 }
 
 const DRW = (orgId: string): string => `/host/openwop-app/drawings/orgs/${encodeURIComponent(orgId)}`;
@@ -81,15 +89,25 @@ describe('DRC-1 — a private project\'s drawing is member-gated on the REST rea
     const { orgId, canvasId, a } = await privateProjectDrawing();
     const r = await a.get(`${DRW(orgId)}/canvases/${canvasId}`);
     expect(r.status, JSON.stringify(r.body).slice(0, 200)).toBe(200);
-    expect(r.body.canvasId).toBe(canvasId);
+    expect(r.body?.canvasId).toBe(canvasId);
   }, 60_000);
 
   it('a same-tenant ORG member who is NOT a project member gets a uniform 404', async () => {
-    const { orgId, canvasId, b } = await privateProjectDrawing();
+    const { tenantId, orgId, canvasId, b } = await privateProjectDrawing();
     const r = await b.get(`${DRW(orgId)}/canvases/${canvasId}`);
     expect(r.status, 'org scope alone must not admit a private project canvas').toBe(404);
     // 404, not 403 — a refusal must not confirm the drawing exists.
     expect(JSON.stringify(r.body ?? {}), 'no existence leak in the error body').not.toContain('Secret sketch');
+    // Positive control: B passes the ORG gate on this very route — an ORG-owned
+    // drawing (no ownerSubject) in the same org reads 200 — so the 404 above is
+    // the subject gate's, not an org-scope miss that would read identically.
+    const orgOwned = await createCanvasForTenant(tenantId, {
+      canvasTypeId: 'canvas.drawing', name: 'Org sketch',
+      initialState: { title: 'Org sketch', shapes: [{ kind: 'rect', x: 0, y: 0, width: 1, height: 1 }] },
+    });
+    const ok = await b.get(`${DRW(orgId)}/canvases/${orgOwned.canvasId}`);
+    expect(ok.status, JSON.stringify(ok.body).slice(0, 200)).toBe(200);
+    expect(ok.body?.canvasId).toBe(orgOwned.canvasId);
   }, 60_000);
 
   it('STRUCTURAL: drawings registers through the shared chassis, so it cannot drift off the choke', () => {

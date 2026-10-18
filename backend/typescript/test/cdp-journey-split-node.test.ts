@@ -1,47 +1,62 @@
 /**
  * CDP-E — the journey experiment/holdout `split` node (ADR 0267). Asserts the node
- * CONTRACT directly (like the data-ops pack test): it buckets deterministically via
- * ctx.features bucketHoldout and outputs the arm for EdgeCondition routing; it fails
- * closed without a contactId or when the host capability is missing.
+ * CONTRACT directly (like the data-ops pack test): it forwards contactId /
+ * experimentId / holdoutPct (default 10) to ctx.features bucketHoldout and outputs the
+ * capability's arm verbatim (+ contactId) for EdgeCondition routing; it fails closed
+ * without a contactId or when the host capability is missing.
+ *
+ * The bucketing itself (determinism, population split) is cdp-journey-holdout.test.ts;
+ * here the capability is a RECORDING fake returning a fixed literal, so the test
+ * asserts what the node does with its inputs and outputs, not the fake's arithmetic.
+ *
+ * Sabotage that reds it (w38 probes): dropping the contactId guard; dropping the
+ * capability check (a TypeError instead of host_capability_missing); not echoing
+ * contactId; a hard-coded holdoutPct; dropping experimentId.
  */
 import { describe, it, expect } from 'vitest';
-// eslint-disable-next-line @typescript-eslint/ban-ts-comment
-// @ts-ignore — importing the pack's .mjs node directly to assert its contract.
 import { split } from '../../../packs/feature.campaign-journeys.nodes/index.mjs';
-import { holdoutArm } from '../src/features/campaign-journeys/surface.js';
+
+type NodeResult = { status: string; outputs?: Record<string, unknown>; error?: { code: string; message: string } };
+type BucketArgs = { contactId: string; experimentId: string; holdoutPct: number };
+const ARM = { arm: 'control', bucket: 7, control: true, treatment: false } as const;
 
 const noop = async () => ({});
 function ctxWith(inputs: Record<string, unknown>, opts: { withBucket?: boolean } = {}) {
+  const calls: BucketArgs[] = [];
   const cj: Record<string, unknown> = { enroll: noop, checkEligibility: noop };
   if (opts.withBucket !== false) {
-    cj.bucketHoldout = async (a: { contactId: string; experimentId: string; holdoutPct: number }) => {
-      const r = holdoutArm(a.contactId, a.experimentId, a.holdoutPct);
-      return { arm: r.arm, bucket: r.bucket, control: r.arm === 'control', treatment: r.arm === 'treatment' };
-    };
+    cj.bucketHoldout = async (a: BucketArgs) => { calls.push(a); return { ...ARM }; };
   }
-  return { inputs, triggerData: {}, nodeId: 'n1', features: { 'campaign-journeys': cj } };
+  return { calls, ctx: { inputs, triggerData: {}, nodeId: 'n1', features: { 'campaign-journeys': cj } } };
 }
 
 describe('CDP-E journey split node', () => {
   it('outputs a deterministic arm + boolean edges', async () => {
-    const out: any = await split(ctxWith({ contactId: 'crm:abc', experimentId: 'exp', holdoutPct: 50 }));
+    const { calls, ctx } = ctxWith({ contactId: 'crm:abc', experimentId: 'exp', holdoutPct: 50 });
+    const out = (await split(ctx)) as NodeResult;
     expect(out.status).toBe('success');
-    expect(['control', 'treatment']).toContain(out.outputs.arm);
-    expect(out.outputs.control).toBe(!out.outputs.treatment);
-    expect(out.outputs.contactId).toBe('crm:abc');
-    const out2: any = await split(ctxWith({ contactId: 'crm:abc', experimentId: 'exp', holdoutPct: 50 }));
-    expect(out2.outputs.arm).toBe(out.outputs.arm); // deterministic
+    expect(calls).toEqual([{ contactId: 'crm:abc', experimentId: 'exp', holdoutPct: 50 }]);
+    expect(out.outputs).toEqual({ ...ARM, contactId: 'crm:abc' });
+  });
+
+  it('defaults holdoutPct to 10 when the input omits it', async () => {
+    const { calls, ctx } = ctxWith({ contactId: 'crm:abc', experimentId: 'exp' });
+    expect(((await split(ctx)) as NodeResult).status).toBe('success');
+    expect(calls).toEqual([{ contactId: 'crm:abc', experimentId: 'exp', holdoutPct: 10 }]);
   });
 
   it('fails closed without a contactId', async () => {
-    const out: any = await split(ctxWith({}));
+    const { calls, ctx } = ctxWith({});
+    const out = (await split(ctx)) as NodeResult;
     expect(out.status).toBe('failed');
-    expect(out.error.code).toBe('validation_error');
+    expect(out.error).toEqual({ code: 'validation_error', message: 'contactId is required.' });
+    expect(calls).toHaveLength(0);
   });
 
   it('fails closed when bucketHoldout is unavailable', async () => {
-    const out: any = await split(ctxWith({ contactId: 'crm:x' }, { withBucket: false }));
+    const { ctx } = ctxWith({ contactId: 'crm:x' }, { withBucket: false });
+    const out = (await split(ctx)) as NodeResult;
     expect(out.status).toBe('failed');
-    expect(out.error.code).toBe('host_capability_missing');
+    expect(out.error?.code).toBe('host_capability_missing');
   });
 });

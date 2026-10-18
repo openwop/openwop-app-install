@@ -11,6 +11,11 @@
  *
  * Both arms are asserted: without the success arm, the fix could regress into
  * "always show the error" and stay green.
+ *
+ * ADR 0786 / BILLUX-9. Witnessed (wave 52): restoring the old swallow-and-default
+ * catch, printing the raw transport text, rendering a 0 balance on success, or
+ * turning every read into an error each turn a case red. Fixtures are typed
+ * `Subscription` / `TokenBalance` (no casts).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render as rtlRender, screen, waitFor, cleanup } from '@testing-library/react';
@@ -33,7 +38,7 @@ vi.mock('../../../featureToggles/FeatureAccessContext.js', () => ({
 vi.mock('../../../ui/toast.js', () => ({ toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn() } }));
 
 import { BillingPage } from '../BillingPage.js';
-import { getSubscription, getBalance } from '../billingClient.js';
+import { getSubscription, getBalance, type Subscription, type TokenBalance } from '../billingClient.js';
 // ADR 0820 §7 — the "Your data" panel's read (its own tests: dataExport.test.tsx).
 vi.mock('../dataExportClient.js', () => ({ listExportableFeatures: vi.fn(async () => []), downloadFeatureExport: vi.fn() }));
 
@@ -69,8 +74,10 @@ describe('BillingPage — a failed read makes no money claim', () => {
   });
 
   it('renders the real plan and balance when the read SUCCEEDS', async () => {
-    mSub.mockResolvedValue({ planTier: 'pro', status: 'active' } as never);
-    mBal.mockResolvedValue({ totalAvailable: 12345 } as never);
+    const pro: Subscription = { tenantId: 't', planTier: 'pro', status: 'active' };
+    const bal: TokenBalance = { tenantId: 't', purchasedTokensTotal: 12345, totalAvailable: 12345 };
+    mSub.mockResolvedValue(pro);
+    mBal.mockResolvedValue(bal);
     render(<BillingPage />);
 
     await waitFor(() => expect(screen.getByText('12,345')).toBeTruthy());
@@ -78,8 +85,10 @@ describe('BillingPage — a failed read makes no money claim', () => {
   });
 
   it('a genuinely free account still reads Free — the fix is not "always error"', async () => {
-    mSub.mockResolvedValue({ planTier: 'free', status: 'none' } as never);
-    mBal.mockResolvedValue({ totalAvailable: 0 } as never);
+    const free: Subscription = { tenantId: 't', planTier: 'free', status: 'none' };
+    const empty: TokenBalance = { tenantId: 't', purchasedTokensTotal: 0, totalAvailable: 0 };
+    mSub.mockResolvedValue(free);
+    mBal.mockResolvedValue(empty);
     render(<BillingPage />);
 
     await waitFor(() => expect(screen.getByText(/^Free$/)).toBeTruthy());

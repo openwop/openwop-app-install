@@ -43,6 +43,11 @@ describe('elementOps', () => {
     expect(moveElement(d, 'shapes', 2, -5)).toBe(0);
     expect(d.shapes.map((s) => s.kind)).toEqual(['rect', 'circle', 'text']);
     expect(moveElement(d, 'shapes', 9, 0)).toBe(9); // invalid index → no-op
+    // High clamp, asymmetric: a target far past the end lands LAST (a target equal
+    // to the end could not tell the clamp from no clamp — w46g2-eo-clamphigh).
+    const far = doc();
+    expect(moveElement(far, 'shapes', 0, 99)).toBe(2);
+    expect(far.shapes.map((s) => s.kind)).toEqual(['circle', 'text', 'rect']);
   });
 
   it('duplicates deep and respects the cap', () => {

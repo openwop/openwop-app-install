@@ -10,7 +10,8 @@ import type { DashboardTileDef } from '../tileTypes.js';
 
 const stub = lazy(async () => ({ default: () => null }));
 const def = (over: Partial<DashboardTileDef> & Pick<DashboardTileDef, 'id'>): DashboardTileDef => ({
-  id: over.id, label: over.id, labelKey: over.id, descriptionKey: `${over.id}-d`,
+  // `id` comes from `over` (required by the Pick).
+  label: over.id, labelKey: over.id, descriptionKey: `${over.id}-d`,
   icon: () => null, category: 'Work', requiredTier: 'workspace',
   defaultEnabled: true, defaultOrder: 0, defaultSize: 'half', resizable: true, component: stub,
   ...over,
@@ -38,6 +39,13 @@ describe('resolveTiles', () => {
     expect(crmOn.map((r) => r.def.id)).toContain('crm');
   });
 
+  // Moved from edb-grade-probe EDBP-4 (/grade-tests w50): the only case that runs
+  // an UNGATED tile against a toggle predicate that says no to everything.
+  it('never gates an UNGATED tile on the toggle predicate', () => {
+    const r = resolveTiles({ registry: [def({ id: 'runs' }), def({ id: 'crm', owningFeatureToggle: 'crm' })], saved: null, toggleEnabled: () => false, isAdmin: false });
+    expect(r.map((x) => x.def.id)).toEqual(['runs']);
+  });
+
   it('derives defaults when the caller has no saved layout', () => {
     const r = resolveTiles({ registry: [def({ id: 'runs', defaultEnabled: false, defaultOrder: 5, defaultSize: 'full' })], saved: null, toggleEnabled: allOn, isAdmin: true });
     expect(r[0]).toMatchObject({ order: 5, size: 'full', enabled: false });
@@ -52,6 +60,9 @@ describe('resolveTiles', () => {
     expect(r[0]).toMatchObject({ order: 99, size: 'full', enabled: false });
   });
 
+  // STRUCTURAL guard: resolveTiles iterates the REGISTRY, so a saved-only id
+  // cannot appear today; this pins that shape against a refactor that iterates
+  // `saved` instead. Not a sabotage-witnessed claim.
   it('drops a saved id no longer in the registry (no migration, no crash)', () => {
     const r = resolveTiles({ registry, saved: [{ id: 'ghost', order: 0, size: 'half', enabled: true }, { id: 'runs', order: 1, size: 'half', enabled: true }], toggleEnabled: allOn, isAdmin: true });
     expect(r.map((x) => x.def.id)).not.toContain('ghost');

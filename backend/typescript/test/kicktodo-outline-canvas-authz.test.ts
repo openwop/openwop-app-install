@@ -37,7 +37,7 @@ import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { signSession, COOKIE_TTL_SECONDS } from '../src/middleware/cookieSession.js';
 import { createWorkspace, createMember } from '../src/host/accessControlService.js';
 import { upsertFromPrincipal } from '../src/features/users/usersService.js';
-import { createCanvasForTenant } from '../src/host/canvasSurface.js';
+import { createCanvasForTenant, getCanvasForTenant } from '../src/host/canvasSurface.js';
 import { CHALLENGE_OUTLINE_CANVAS_TYPE } from '../src/features/kicktodo-creator/outlineDoc.js';
 
 let BASE: string;
@@ -65,15 +65,36 @@ async function seatMember(principalId: string, roles: string[], personalTenant: 
   return craftCookie(user.userId, TENANT, personalTenant);
 }
 
-interface Res<T = any> { status: number; body: T }
+/** The response fields this suite reads — narrowed from `unknown`, no casts. */
+interface Body { error?: string; code?: string; message?: string; canvasId?: string; ticket?: string }
+interface Res { status: number; body: Body | undefined; raw: string }
+function asBody(v: unknown): Body | undefined {
+  if (!v || typeof v !== 'object') return undefined;
+  return {
+    ...('error' in v && typeof v.error === 'string' ? { error: v.error } : {}),
+    ...('code' in v && typeof v.code === 'string' ? { code: v.code } : {}),
+    ...('message' in v && typeof v.message === 'string' ? { message: v.message } : {}),
+    ...('canvasId' in v && typeof v.canvasId === 'string' ? { canvasId: v.canvasId } : {}),
+    ...('ticket' in v && typeof v.ticket === 'string' ? { ticket: v.ticket } : {}),
+  };
+}
 async function call(cookie: string, method: string, path: string, body?: unknown): Promise<Res> {
   const res = await fetch(`${BASE}${path}`, {
     method,
     headers: { cookie, ...(body !== undefined ? { 'content-type': 'application/json' } : {}) },
     ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
   });
-  const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
-  return { status: res.status, body: out };
+  const raw = res.status === 204 ? '' : await res.text();
+  let parsed: unknown;
+  try { parsed = raw ? JSON.parse(raw) : undefined; } catch { parsed = undefined; }
+  return { status: res.status, body: asBody(parsed), raw };
+}
+
+/** The refusal must be the MANAGE hook's — the chassis stacks `requireOrgScope`,
+ *  whose 403 names a different scope (same discriminator as kicktodo-authz-http). */
+function expectManageRefusal(r: Res): void {
+  expect(r.status, r.raw).toBe(403);
+  expect(r.raw, 'a 403 from a different gate is not this proof').toContain('host:kicktodo:manage');
 }
 
 const OUT = (rest: string): string => `/host/openwop-app/challenge-outline/orgs/${encodeURIComponent(TENANT)}${rest}`;
@@ -107,25 +128,35 @@ afterAll(async () => { await new Promise<void>((res) => server.close(() => res()
 describe('B1 — an editor (workspace:write, NO manage) is denied on the outline canvas', () => {
   it('GET is 403 forbidden_scope (not a leaky 404)', async () => {
     const r = await call(editorCookie, 'GET', OUT(`/canvases/${outlineCanvasId}`));
-    expect(r.status).toBe(403);
+    expectManageRefusal(r);
     expect(r.body?.error ?? r.body?.code).toContain('forbidden_scope');
   });
 
   it('PATCH is 403 and mutates nothing', async () => {
-    const r = await call(editorCookie, 'PATCH', OUT(`/canvases/${outlineCanvasId}`), { state: skeleton() });
-    expect(r.status).toBe(403);
+    const before = await getCanvasForTenant(TENANT, outlineCanvasId);
+    expect(before, 'the outline canvas must exist for "mutates nothing" to mean anything').not.toBeNull();
+    const tampered = { ...skeleton(), meta: { title: 'EDITOR-WROTE', promise: 'P', audience: 'A', durationDays: 7, dailyMinutesBudget: 15 } };
+    const r = await call(editorCookie, 'PATCH', OUT(`/canvases/${outlineCanvasId}`), { state: tampered });
+    expectManageRefusal(r);
+    // Read the STORED canvas back: neither the state nor the version moved.
+    const after = await getCanvasForTenant(TENANT, outlineCanvasId);
+    expect(after?.state).toEqual(before!.state);
+    expect(after?.version).toBe(before!.version);
   });
 
   it('the versions list is 403', async () => {
-    expect((await call(editorCookie, 'GET', OUT(`/canvases/${outlineCanvasId}/versions`))).status).toBe(403);
+    expectManageRefusal(await call(editorCookie, 'GET', OUT(`/canvases/${outlineCanvasId}/versions`)));
   });
 
   it('the collab ticket mint is refused (403)', async () => {
-    expect((await call(editorCookie, 'POST', TICKET(outlineCanvasId))).status).toBe(403);
+    const r = await call(editorCookie, 'POST', TICKET(outlineCanvasId));
+    expectManageRefusal(r);
+    expect(r.body?.ticket).toBeUndefined();
   });
 
   it('DELETE is 403 — the canvas survives (proven by the admin reading it afterwards)', async () => {
-    expect((await call(editorCookie, 'DELETE', OUT(`/canvases/${outlineCanvasId}`))).status).toBe(403);
+    expectManageRefusal(await call(editorCookie, 'DELETE', OUT(`/canvases/${outlineCanvasId}`)));
+    expect(await getCanvasForTenant(TENANT, outlineCanvasId)).not.toBeNull();
     expect((await call(adminCookie, 'GET', OUT(`/canvases/${outlineCanvasId}`))).status).toBe(200);
   });
 
@@ -146,8 +177,10 @@ describe('B1 — an admin (host:kicktodo:manage) succeeds on the outline canvas'
     expect(typeof ticket.body?.ticket).toBe('string');
   });
 
-  it('DELETE succeeds for the admin (run last — removes the canvas)', async () => {
-    expect((await call(adminCookie, 'DELETE', OUT(`/canvases/${outlineCanvasId}`))).status).toBe(204);
-    expect((await call(adminCookie, 'GET', OUT(`/canvases/${outlineCanvasId}`))).status).toBe(404);
+  it('DELETE succeeds for the admin (on its own canvas, so case order does not matter)', async () => {
+    const own = (await createCanvasForTenant(TENANT, { canvasTypeId: CHALLENGE_OUTLINE_CANVAS_TYPE, name: 'Outline (admin delete)', initialState: skeleton() })).canvasId;
+    expect((await call(adminCookie, 'DELETE', OUT(`/canvases/${own}`))).status).toBe(204);
+    expect(await getCanvasForTenant(TENANT, own)).toBeNull();
+    expect((await call(adminCookie, 'GET', OUT(`/canvases/${own}`))).status).toBe(404);
   });
 });

@@ -15,29 +15,42 @@
  * in the URL the funnel read followed. A card drawn over a page that still
  * fetches is the same defect wearing a different coat, which is why the READS
  * are asserted here and not only the copy.
+ *
+ * The destructive-control check queries the Delete button by its REAL accessible
+ * name ("Delete", `common:delete`); the positive control finds that same button on
+ * an enabled page, so the absence assertion is proven able to see it. (Before wave
+ * 52 it queried "Delete funnel", a name that exists nowhere in src/, so it could
+ * never fail.)
+ *
+ * Sabotage-witnessed (wave 52): rendering past the not-enabled card, reading orgs
+ * with the toggle off, dropping the effect's toggle check, and dropping the loading
+ * branch each turn a case red.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
+import type * as FC from '../funnelsClient.js';
+import type { Funnel, FunnelStats } from '../funnelsClient.js';
+import type * as CC from '../../cms/cmsClient.js';
 
 const access = vi.hoisted(() => ({ useFeatureAccess: vi.fn(() => makeFeatureAccess({ enabled: true, loading: false })) }));
 import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
 vi.mock('../../../featureToggles/FeatureAccessContext.js', () => ({ useFeatureAccess: access.useFeatureAccess }));
 
 const api = vi.hoisted(() => ({
-  listOrgs: vi.fn(),
-  getFunnel: vi.fn(),
+  listOrgs: vi.fn<typeof FC.listOrgs>(),
+  getFunnel: vi.fn<typeof FC.getFunnel>(),
   // COMPLETE fixture. A partial one throws inside render (`stats.days.length`)
   // and every assertion then fails for a reason unrelated to the toggle.
-  getFunnelStats: vi.fn(async () => ({ funnelId: 'f1', steps: [], days: [], eventWindow: 30, rebuiltAt: null })),
-  deleteFunnel: vi.fn(),
-  updateFunnel: vi.fn(),
+  getFunnelStats: vi.fn<typeof FC.getFunnelStats>(async (): Promise<FunnelStats> => ({ funnelId: 'f1', steps: [], days: [], eventWindow: 30, rebuiltAt: null })),
+  deleteFunnel: vi.fn<typeof FC.deleteFunnel>(),
+  updateFunnel: vi.fn<typeof FC.updateFunnel>(),
 }));
 vi.mock('../funnelsClient.js', async (importOriginal) => {
   const orig = await importOriginal<Record<string, unknown>>();
   return { ...orig, ...api };
 });
-const cms = vi.hoisted(() => ({ listPages: vi.fn(async () => []) }));
+const cms = vi.hoisted(() => ({ listPages: vi.fn<typeof CC.listPages>(async () => []) }));
 vi.mock('../../cms/cmsClient.js', async (importOriginal) => {
   const orig = await importOriginal<Record<string, unknown>>();
   return { ...orig, ...cms };
@@ -45,9 +58,10 @@ vi.mock('../../cms/cmsClient.js', async (importOriginal) => {
 
 import { FunnelDetailPage } from '../FunnelDetailPage.js';
 
-const FUNNEL = {
+const FUNNEL: Funnel = {
   funnelId: 'f1', orgId: 'o1', name: 'Summer launch', slug: 'summer-launch',
-  status: 'draft' as const, steps: [],
+  status: 'draft', steps: [],
+  createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
 };
 
 /** Mounted at its REAL route so `useParams`/`useSearchParams` behave as they do live. */
@@ -78,7 +92,8 @@ describe('funnel detail — the feature toggle gates the page', () => {
     expect(api.listOrgs).not.toHaveBeenCalled();
     expect(api.getFunnel).not.toHaveBeenCalled();
     // The editor's destructive control must not be on a disabled feature's page.
-    expect(screen.queryByRole('button', { name: 'Delete funnel' })).toBeNull();
+    // Its real name is "Delete" — the positive control below finds it.
+    expect(screen.queryByRole('button', { name: 'Delete' })).toBeNull();
   });
 
   it('toggle OFF with `?org=` in the URL still reads nothing — the effect guard, not just the render', async () => {
@@ -109,6 +124,8 @@ describe('funnel detail — the feature toggle gates the page', () => {
     // for everyone — a different bug wearing the same green.
     view();
     await waitFor(() => expect(api.getFunnel).toHaveBeenCalledWith('o1', 'f1'));
+    // The same query the toggle-OFF case asserts absent finds the editor's Delete here.
+    expect(await screen.findByRole('button', { name: 'Delete' })).toBeTruthy();
     expect(screen.queryByText('Funnels are not enabled')).toBeNull();
   });
 });

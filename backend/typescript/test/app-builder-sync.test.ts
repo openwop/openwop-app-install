@@ -71,10 +71,18 @@ async function ownerEditorCanvas(): Promise<{ owner: Client; editor: Client; org
 describe('code-sync toggle gate', () => {
   it('404s the binding surface until code-sync is enabled (OFF by default)', async () => {
     await setSyncToggle('off');
-    const { owner, orgId, canvasId } = await ownerEditorCanvas();
-    expect((await owner.put(`${AB(orgId)}/canvases/${canvasId}/sync-binding`, BIND)).status).toBe(404);
-    await setSyncToggle('on');
-    expect((await owner.get(`${AB(orgId)}/canvases/${canvasId}/sync-binding`)).status).toBe(200);
+    try {
+      const { owner, orgId, canvasId } = await ownerEditorCanvas();
+      const off = await owner.put(`${AB(orgId)}/canvases/${canvasId}/sync-binding`, BIND);
+      expect(off.status).toBe(404);
+      expect(off.body.error).toBe('not_found');
+      await setSyncToggle('on');
+      const on = await owner.get(`${AB(orgId)}/canvases/${canvasId}/sync-binding`);
+      expect(on.status).toBe(200);
+      expect(on.body).toEqual({ binding: null });
+    } finally {
+      await setSyncToggle('on');
+    }
   });
 });
 
@@ -84,7 +92,9 @@ describe('binding RBAC (host:code-sync:manage) + contract', () => {
     const { owner, editor, orgId, canvasId } = await ownerEditorCanvas();
 
     // editor holds workspace:write — NOT enough to wire an external write channel
-    expect((await editor.put(`${AB(orgId)}/canvases/${canvasId}/sync-binding`, BIND)).status).toBe(403);
+    const editorBind = await editor.put(`${AB(orgId)}/canvases/${canvasId}/sync-binding`, BIND);
+    expect(editorBind.status).toBe(403);
+    expect(editorBind.body.error).toBe('forbidden_scope');
 
     const bound = await owner.put(`${AB(orgId)}/canvases/${canvasId}/sync-binding`, BIND);
     expect(bound.status, JSON.stringify(bound.body)).toBe(201);
@@ -102,7 +112,9 @@ describe('binding RBAC (host:code-sync:manage) + contract', () => {
     expect((await owner.put(`${AB(orgId)}/canvases/${canvasId}/sync-binding`, BIND)).status).toBe(409);
 
     // unbind: editor 403, owner 204, second unbind 404
-    expect((await editor.del(`${AB(orgId)}/canvases/${canvasId}/sync-binding`)).status).toBe(403);
+    const editorUnbind = await editor.del(`${AB(orgId)}/canvases/${canvasId}/sync-binding`);
+    expect(editorUnbind.status).toBe(403);
+    expect(editorUnbind.body.error).toBe('forbidden_scope');
     expect((await owner.del(`${AB(orgId)}/canvases/${canvasId}/sync-binding`)).status).toBe(204);
     expect((await owner.del(`${AB(orgId)}/canvases/${canvasId}/sync-binding`)).status).toBe(404);
   });

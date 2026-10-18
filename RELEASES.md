@@ -30,6 +30,20 @@ A release SHOULD be marked a required stop only when at least one holds:
 
 ## Version log
 
+### v0.5.0 — 2026-10-18
+- **Required stop:** no.
+- **Schema:** sqlite 50 / postgres 48 · **App migrations:** 24.
+- Eight days since v0.4.0 (255 merged PRs; ADRs up to 0915). Rolling-safe, no
+  breaking config. Migrations: Postgres 48 / SQLite 50 drop webhook subscriptions
+  of the retired OpenWOP major 1 (they already received nothing); app migrations
+  23–24 keep CRM, Strategy, Priority matrix and Advisory board ON for installs
+  that use them, now that those default off. New: no hard-coded AI vendor (a run
+  AI default), honest provider-failure codes and native structured output, agent
+  evaluations, approval/session authority, checkout tax and promotions, and the
+  white-label seams (subject erasure, content language, feature public paths).
+  New optional env: `OPENWOP_PROVIDER_RETRY_BACKOFF_MS`.
+- [CHANGELOG §0.5.0](./CHANGELOG.md#050--2026-10-18)
+
 ### v0.4.0 — 2026-10-10
 - **Required stop:** no.
 - **Schema:** sqlite 49 / postgres 47 · **App migrations:** 22.

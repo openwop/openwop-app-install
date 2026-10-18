@@ -91,8 +91,8 @@ describe('a lost conversation reads in plain words', () => {
 });
 
 describe('the error banner does not repeat the feed', () => {
-  const user: ChatMessage = { id: 'u', role: 'user', content: 'hi', createdAt: '' } as ChatMessage;
-  const failed: ChatMessage = { id: 'a', role: 'assistant', content: '', createdAt: '', meta: { error: { code: 'x', message: 'boom' } } } as ChatMessage;
+  const user: ChatMessage = { id: 'u', role: 'user', content: 'hi', createdAt: '2026-10-07T00:00:00.000Z' };
+  const failed: ChatMessage = { id: 'a', role: 'assistant', content: '', createdAt: '2026-10-07T00:00:01.000Z', meta: { error: { code: 'x', message: 'boom' } } };
 
   it('is suppressed when the newest failed turn carries the same text', () => {
     expect(errorShownInFeed([user, failed], 'boom')).toBe(true);
@@ -128,10 +128,10 @@ describe('the composer while a reply streams', () => {
 });
 
 describe('Needs you leads the conversations rail', () => {
-  const CONVERSATIONS = [
-    { sessionId: 'ag-1', title: 'Quarterly review', type: 'agent', messageCount: 2 },
-    { sessionId: 'ag-2', title: 'Launch FAQ', type: 'agent', messageCount: 3 },
-  ] as ChatSessionHeader[];
+  const CONVERSATIONS: ChatSessionHeader[] = [
+    { sessionId: 'ag-1', tenantId: 't', title: 'Quarterly review', type: 'agent', messageCount: 2, createdAt: '2026-10-07T00:00:00.000Z', updatedAt: '2026-10-07T00:00:00.000Z' },
+    { sessionId: 'ag-2', tenantId: 't', title: 'Launch FAQ', type: 'agent', messageCount: 3, createdAt: '2026-10-07T00:00:00.000Z', updatedAt: '2026-10-07T00:00:00.000Z' },
+  ];
 
   it('moves a blocked conversation into Needs you, and only there', () => {
     render(

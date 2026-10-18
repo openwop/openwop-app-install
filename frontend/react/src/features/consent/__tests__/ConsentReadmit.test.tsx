@@ -177,7 +177,8 @@ describe('the three answers', () => {
     const done = await screen.findByText(/re-admitted .*erased-1/i);
     expect(done.textContent).toMatch(/no consent was granted/i);
     // Spoken, not just shown — the outcome of an action the operator took.
-    expect(currentAnnouncements().polite).toMatch(/re-admitted/i);
+    // The announcement comes from a passive effect that can flush after findBy sees the DOM; wait for it.
+    await waitFor(() => expect(currentAnnouncements().polite).toMatch(/re-admitted/i));
     expect(currentAnnouncements().polite).toMatch(/no consent was granted/i);
     // No toast doubles it (same live region — DS-8).
     expect(toastSuccess).not.toHaveBeenCalled();
@@ -190,7 +191,7 @@ describe('the three answers', () => {
     await screen.findByText(/re-admitted .*erased-1/i);
     await waitFor(() => expect(screen.queryByText(/^erased on /i)).toBeNull());
     expect(screen.queryByRole('button', { name: /re-admit subject/i }), 'no door back to a door already used').toBeNull();
-    expect(currentAnnouncements().polite, 'the re-read is silent; the Notice is the voice').toMatch(/re-admitted/i);
+    await waitFor(() => expect(currentAnnouncements().polite, 'the re-read is silent; the Notice is the voice').toMatch(/re-admitted/i));
     // N1 — the button the dialog returned focus to is gone; the outcome takes focus.
     await waitFor(() => {
       expect(document.activeElement, 'focus never falls to <body>').not.toBe(document.body);

@@ -127,6 +127,18 @@ export async function getSharePolicy(): Promise<SharePolicy | null> {
   return ((await res.json()) as { policy: SharePolicy | null }).policy;
 }
 
+/** KTD-2 — a non-2xx payout/share-policy WRITE. Carries the status so the
+ *  console can say something specific about a 409 (the share policy or the run
+ *  changed under a concurrent operator) instead of one generic failure. The
+ *  server's message text is deliberately NOT carried: the UI shows localized
+ *  copy, never raw server text. */
+export class PayoutRequestError extends Error {
+  constructor(readonly action: string, readonly status: number) {
+    super(`${action} failed: ${status}`);
+    this.name = 'PayoutRequestError';
+  }
+}
+
 export async function setSharePolicy(shareBps: number): Promise<SharePolicy> {
   const res = await fetch(`${ENTITLEMENTS_BASE}/share-policy`, {
     ...fetchOpts({}),
@@ -134,7 +146,7 @@ export async function setSharePolicy(shareBps: number): Promise<SharePolicy> {
     headers: authedHeaders({ 'content-type': 'application/json' }),
     body: JSON.stringify({ shareBps }),
   });
-  if (!res.ok) throw new Error(`share policy set failed: ${res.status}`);
+  if (!res.ok) throw new PayoutRequestError('share policy set', res.status);
   return ((await res.json()) as { policy: SharePolicy }).policy;
 }
 
@@ -151,7 +163,7 @@ export async function createPayoutRun(): Promise<PayoutRun | null> {
     ...fetchOpts({}), method: 'POST', headers: authedHeaders({ 'content-type': 'application/json' }),
   });
   if (res.status === 400) return null; // nothing accrued — an honest no-op
-  if (!res.ok) throw new Error(`payout run failed: ${res.status}`);
+  if (!res.ok) throw new PayoutRequestError('payout run', res.status);
   return ((await res.json()) as { run: PayoutRun }).run;
 }
 
@@ -162,7 +174,7 @@ export async function confirmPayoutRun(runId: string, reference: string): Promis
     ...fetchOpts({}), method: 'POST', headers: authedHeaders({ 'content-type': 'application/json' }),
     body: JSON.stringify({ runId, reference }),
   });
-  if (!res.ok) throw new Error(`payout confirm failed: ${res.status}`);
+  if (!res.ok) throw new PayoutRequestError('payout confirm', res.status);
   return ((await res.json()) as { run: PayoutRun }).run;
 }
 
@@ -171,7 +183,7 @@ export async function cancelPayoutRun(runId: string): Promise<PayoutRun> {
     ...fetchOpts({}), method: 'POST', headers: authedHeaders({ 'content-type': 'application/json' }),
     body: JSON.stringify({ runId }),
   });
-  if (!res.ok) throw new Error(`payout cancel failed: ${res.status}`);
+  if (!res.ok) throw new PayoutRequestError('payout cancel', res.status);
   return ((await res.json()) as { run: PayoutRun }).run;
 }
 

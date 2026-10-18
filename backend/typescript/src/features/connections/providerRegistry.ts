@@ -513,6 +513,33 @@ const BUILTIN: ProviderManifest[] = [
     docsUrl: 'https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens',
   },
   {
+    // ADR 0855 D4 / P5 — GitHub READ, for checking a pull request against a
+    // project's team ledger (title, description, diff). The read twin of
+    // `github-publish`, and deliberately separate: a person can let the app READ
+    // their pull requests without ever granting it a write. Same posture:
+    // `adapterOnly` (the generic http node can never carry this token), NO
+    // consumer nodes (no run-initiated path), host-pinned to api.github.com; the
+    // only reach is the team ledger's on-demand route, behind workspace:write on
+    // the project and the user's consented read scope. Bearer = a fine-grained
+    // PAT with Pull requests: read and Contents: read.
+    id: 'github-read',
+    label: 'GitHub (read pull requests)',
+    kind: 'bearer',
+    authFlow: 'manual',
+    reach: 'openapi',
+    scopes: {
+      read: [{ key: 'pulls.read', label: 'Read pull requests and their diffs', scopes: ['pull_requests:read', 'contents:read'] }],
+      write: [],
+    },
+    refreshable: false,
+    defaultScopes: [],
+    consumerNodes: [],
+    apiHosts: ['api.github.com'],
+    adapterOnly: true,
+    openapiRef: 'https://docs.github.com/en/rest/pulls/pulls',
+    docsUrl: 'https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens',
+  },
+  {
     // ADR 0076 P2 — Microsoft Graph, for the `core.email.draft` node (creates a
     // DRAFT in Outlook, NEVER sends). A dedicated builtin (not the broad
     // `microsoft365` pack, which carries no `apiHosts` → fails closed at
@@ -724,7 +751,7 @@ const BUILTIN_VENDOR: Readonly<Record<string, string>> = {
   postmark: 'Postmark',
   // ADR 0306 GitHub-publish connector — groups under GitHub (added when the ADR
   // 0185 "nothing ungrouped" guard caught it missing after the app-builder program).
-  'github-publish': 'GitHub',
+  'github-publish': 'GitHub', 'github-read': 'GitHub',
   // Vendor-neutral protocol transport (ADR 0201 smtp) — groups under its own
   // label; added when the ADR 0185 "nothing ungrouped" guard caught it missing.
   smtp: 'SMTP',

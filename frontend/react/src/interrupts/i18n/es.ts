@@ -17,6 +17,8 @@ export const messages = {
   actionReject: 'Rechazar',
   rejectConfirmTitle: '¿Rechazar esto y hacer fallar la ejecución?',
   rejectConfirmBody: 'Rechazar termina la ejecución aquí. Lo que ya se gastó —una consulta, una llamada al modelo, tu revisión— no se recupera, y no se puede deshacer el rechazo.',
+  cuRejectConfirmTitle: '¿Rechazar esta acción y terminar la sesión de navegador?',
+  cuRejectConfirmBody: 'El agente de navegador no realizará esta acción y la sesión termina aquí. Lo que ya hizo en el sitio no se deshace.',
   actionRequestChanges: 'Solicitar cambios',
   actionDefer: 'Aplazar',
   actionEscalate: 'Escalar',

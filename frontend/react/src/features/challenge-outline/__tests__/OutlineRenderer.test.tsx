@@ -2,6 +2,10 @@
  * OutlineRenderer tests (ADR 0458 §2.3) — the ONE read surface must show the
  * challenge header, its days, and each day's evidence/effort/alternatives, and
  * must never throw on malformed content (it coerces defensively).
+ *
+ * Sabotage-witnessed (w52): the achievement chip falling back to the raw id;
+ * hiding the recovery chip; rethrowing in the parse catch; rendering the raw
+ * evidence policy instead of its localized label.
  */
 import { describe, it, expect, afterEach } from 'vitest';
 import { render, screen, cleanup } from '@testing-library/react';
@@ -28,14 +32,17 @@ describe('OutlineRenderer', () => {
     expect(screen.getByText('Wind down')).toBeTruthy();
     expect(screen.getByText('Melatonin rises in the dark')).toBeTruthy();
     expect(screen.getByText('Dim the lights')).toBeTruthy();
-    // The recovery flag + evidence chip render as their localized labels.
+    // The recovery flag + evidence chip render as their localized labels —
+    // 'note' reaches the reader as "Note", on the day AND on its alternative.
     expect(screen.getByText('Recovery')).toBeTruthy();
+    expect(screen.getAllByText('Note')).toHaveLength(2);
+    expect(screen.queryByText('note')).toBeNull();
     expect(screen.getByText('Read instead')).toBeTruthy();
     // Outcomes + achievements context.
     expect(screen.getByText('Wake refreshed')).toBeTruthy();
     // The evidence text appears in the achievements checklist AND resolved on
     // the day's achievement chip (screen-polish: ids never face the creator).
-    expect(screen.getAllByText('Logged 7h sleep').length).toBeGreaterThanOrEqual(2);
+    expect(screen.getAllByText('Logged 7h sleep')).toHaveLength(2);
   });
 
   it('never throws on malformed content — falls back to an empty outline', () => {

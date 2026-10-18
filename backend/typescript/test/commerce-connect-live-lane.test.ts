@@ -95,14 +95,15 @@ const sign = (secret: string, body: string): string => {
   const t = Math.floor(Date.now() / 1000);
   return `t=${t},v1=${createHmac('sha256', secret).update(`${t}.${body}`).digest('hex')}`;
 };
-async function deliverWebhook(secret: string, event: Record<string, unknown>): Promise<{ status: number; body: any }> {
+interface WebhookAck { received?: boolean; applied?: boolean; error?: string }
+async function deliverWebhook(secret: string, event: Record<string, unknown>): Promise<{ status: number; body: WebhookAck | undefined }> {
   const body = JSON.stringify(event);
   const res = await fetch(`${BASE}/host/openwop-app/billing/webhook`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'stripe-signature': sign(secret, body) },
     body,
   });
-  return { status: res.status, body: await res.json().catch(() => undefined) };
+  return { status: res.status, body: (await res.json().catch(() => undefined)) as WebhookAck | undefined };
 }
 
 describe('CC-4a — live onboarding + destination-charge checkout (mock Stripe)', () => {
@@ -140,7 +141,7 @@ describe('CC-4a — live onboarding + destination-charge checkout (mock Stripe)'
     await liveSeller('lv-de', 'DE'); // platform region defaults to US
     await upsertPaidListing('lv-de', { packName: 'p.de', lane: 'native-paid', priceMajorUnits: 10, currency: 'eur' });
     await setListingApproval('p.de', 'approved');
-    await expect(createCheckout('lv-buyer', 'p.de', URLS)).rejects.toMatchObject({ httpStatus: 409 });
+    await expect(createCheckout('lv-buyer', 'p.de', URLS)).rejects.toMatchObject({ httpStatus: 409, message: "Native purchase is limited to US-region sellers in v1 — use the seller's external payment link." });
   });
 });
 
@@ -152,7 +153,7 @@ describe('CC-4b — dual-secret webhook HTTP path (end-to-end)', () => {
     const evt = { id: 'evt_ws_1', type: 'account.updated', account: acct, data: { object: { id: acct, charges_enabled: false, payouts_enabled: true, country: 'US', capabilities: {}, requirements: { disabled_reason: 'requirements.past_due' } } } };
     const ok = await deliverWebhook(CONNECT_SECRET, evt);
     expect(ok.status).toBe(202);
-    expect(ok.body.applied).toBe(true);
+    expect(ok.body?.applied).toBe(true);
     expect((await getSeller('wh-seller'))!.onboardingState).toBe('restricted'); // the event actually applied
 
     const bad = await deliverWebhook('whsec_wrong', { ...evt, id: 'evt_ws_2' });
@@ -174,7 +175,7 @@ describe('CC-4b — dual-secret webhook HTTP path (end-to-end)', () => {
       data: { object: { id: 'cs_wh', payment_status: 'paid', amount_total: 4000, currency: 'usd', payment_intent: 'pi_wh', metadata: { ccOrderId: order.orderId } } },
     });
     expect(done.status).toBe(202);
-    expect(done.body.applied).toBe(true);
+    expect(done.body?.applied).toBe(true);
     expect((await getOrder(order.orderId))!.status).toBe('paid');
   });
 });
@@ -285,9 +286,14 @@ describe('MPL-4 — the LIVE refund lane: the request is stamped, and the respon
       data: { object: { id: 'cs_rf2', payment_status: 'paid', amount_total: 4000, currency: 'usd', payment_intent: 'pi_rf2', metadata: { ccOrderId: order.orderId } } },
     });
 
+    // Precondition: the order IS paid, so the refusal below comes from Stripe — a
+    // pending order 409s before Stripe and would carry no stamp either way.
+    expect((await getOrder(order.orderId))!.status).toBe('paid');
     respond = () => ({ status: 402, body: { error: { message: 'charge already refunded' } } });
+    stripeCalls = [];
     const { refundOrder } = await import('../src/features/commerce-connect/connectService.js');
-    await expect(refundOrder(order.orderId)).rejects.toBeTruthy();
+    await expect(refundOrder(order.orderId)).rejects.toThrow(/charge already refunded/);
+    expect(stripeCalls.some((c) => c.path === '/v1/refunds'), 'the refund reached Stripe').toBe(true);
     const stored = (await getOrder(order.orderId))!;
     expect(stored.refundRequestedAt).toBeUndefined();
     expect(stored.refundId).toBeUndefined();

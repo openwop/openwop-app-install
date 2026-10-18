@@ -1,6 +1,6 @@
 {
   "name": "core.openwop.workflows.customer-onboarding",
-  "version": "1.1.1",
+  "version": "1.2.0",
   "kind": "workflow-chain",
   "description": "Customer-onboarding chains (RFC 0013): the post-sale first-mile — a warm welcome, a personalized kickoff checklist, and a scheduled 30-day health check. All external sends sit behind a human approval gate; tenant values are run parameters (replay-deterministic).",
   "author": "openwop",
@@ -14,7 +14,7 @@
   "chains": [
     {
       "chainId": "onboarding.welcome-sequence",
-      "version": "1.0.1",
+      "version": "1.1.0",
       "label": "New Customer → Welcome Email",
       "description": "A new customer signs up (webhook) and gets a warm, personalized welcome email drafted from their signup details — reviewed by a human before it sends.",
       "parameters": {
@@ -32,8 +32,8 @@
             "default": "friendly",
             "description": "Voice for the welcome email."
           },
-          "provider": { "type": "string", "default": "anthropic", "description": "AI provider id for this chain's LLM nodes. Frozen into this chain's AI nodes when the workflow is created (ADR 0498 — a concrete provider is what keeps replay deterministic). Override at instantiation to use a different vendor or your own BYOK provider; whichever you pick, the workspace needs a key for it — the workflow will not fall back to another provider on its own." },
-          "model": { "type": "string", "default": "claude-sonnet-4-6", "description": "Model id for this chain's LLM nodes. Must be advertised by `provider` in the host catalog; override at instantiation." },
+          "provider": { "type": "string", "description": "AI provider id for this chain's model-calling nodes. Set it to fix a provider into those nodes when the workflow is created. Leave it unset and each run uses the run's chosen provider, else the workspace's AI setting, else the host's catalog default (ADR 0903); whichever is chosen is recorded on the run, so a replay or fork uses the same one. The workspace needs a key for the provider that runs." },
+          "model": { "type": "string", "description": "Model id for this chain's model-calling nodes. Must be offered by the provider in the host catalog. Leave it unset to use the provider's model from the same choice (ADR 0903)." },
           "webhookPath": { "type": "string", "default": "/welcome-sequence", "description": "URL path segment this workflow listens on (e.g. `ci-failure`)." },
           "senderEmail": { "type": "string", "description": "Verified sender address these emails are sent from." },
           "recipientEmail": { "type": "string", "description": "The address this email is sent to." },
@@ -146,7 +146,7 @@
     },
     {
       "chainId": "onboarding.kickoff-checklist",
-      "version": "1.0.1",
+      "version": "1.1.0",
       "label": "Kickoff → Personalized Checklist",
       "description": "Turns a new account's context into a tailored onboarding checklist and posts it to the team as an in-app notification so the CSM can act on it.",
       "parameters": {
@@ -159,8 +159,8 @@
             "default": "our product",
             "description": "Product name."
           },
-          "provider": { "type": "string", "default": "anthropic", "description": "AI provider id for this chain's LLM nodes. Frozen into this chain's AI nodes when the workflow is created (ADR 0498 — a concrete provider is what keeps replay deterministic). Override at instantiation to use a different vendor or your own BYOK provider; whichever you pick, the workspace needs a key for it — the workflow will not fall back to another provider on its own." },
-          "model": { "type": "string", "default": "claude-sonnet-4-6", "description": "Model id for this chain's LLM nodes. Must be advertised by `provider` in the host catalog; override at instantiation." },
+          "provider": { "type": "string", "description": "AI provider id for this chain's model-calling nodes. Set it to fix a provider into those nodes when the workflow is created. Leave it unset and each run uses the run's chosen provider, else the workspace's AI setting, else the host's catalog default (ADR 0903); whichever is chosen is recorded on the run, so a replay or fork uses the same one. The workspace needs a key for the provider that runs." },
+          "model": { "type": "string", "description": "Model id for this chain's model-calling nodes. Must be offered by the provider in the host catalog. Leave it unset to use the provider's model from the same choice (ADR 0903)." },
           "triggerEventName": { "type": "string", "description": "Host event name that starts this workflow (e.g. `crm.deal.won`)." }
         }
       },
@@ -227,7 +227,7 @@
     },
     {
       "chainId": "onboarding.health-check-30d",
-      "version": "1.0.1",
+      "version": "1.1.0",
       "label": "30-Day Check-In (Scheduled)",
       "description": "A scheduled check-in that drafts a personalized 30-day health-check email — reviewed by a human — asking how the rollout is going and offering help.",
       "parameters": {
@@ -240,8 +240,8 @@
             "default": "our product",
             "description": "Product name."
           },
-          "provider": { "type": "string", "default": "anthropic", "description": "AI provider id for this chain's LLM nodes. Frozen into this chain's AI nodes when the workflow is created (ADR 0498 — a concrete provider is what keeps replay deterministic). Override at instantiation to use a different vendor or your own BYOK provider; whichever you pick, the workspace needs a key for it — the workflow will not fall back to another provider on its own." },
-          "model": { "type": "string", "default": "claude-sonnet-4-6", "description": "Model id for this chain's LLM nodes. Must be advertised by `provider` in the host catalog; override at instantiation." },
+          "provider": { "type": "string", "description": "AI provider id for this chain's model-calling nodes. Set it to fix a provider into those nodes when the workflow is created. Leave it unset and each run uses the run's chosen provider, else the workspace's AI setting, else the host's catalog default (ADR 0903); whichever is chosen is recorded on the run, so a replay or fork uses the same one. The workspace needs a key for the provider that runs." },
+          "model": { "type": "string", "description": "Model id for this chain's model-calling nodes. Must be offered by the provider in the host catalog. Leave it unset to use the provider's model from the same choice (ADR 0903)." },
           "scheduleCron": { "type": "string", "description": "Cron expression for when this workflow runs (e.g. `0 9 * * 1` = Mondays 09:00)." },
           "senderEmail": { "type": "string", "description": "Verified sender address these emails are sent from." },
           "recipientEmail": { "type": "string", "description": "The address this email is sent to." },

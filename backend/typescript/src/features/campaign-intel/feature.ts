@@ -28,7 +28,7 @@ export const campaignIntelFeature: BackendFeature = {
   },
   surface: { id: 'campaign-intel', build: buildCampaignIntelSurface },
   requiredPacks: [
-    { name: 'feature.campaign-intel.nodes', version: '1.1.2' },
+    { name: 'feature.campaign-intel.nodes', version: '1.2.0' },
     { name: 'vendor.openwop-app.campaign-intel.agents', version: '1.2.2' },
   ],
   toggleDefault: {

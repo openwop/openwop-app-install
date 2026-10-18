@@ -3,8 +3,9 @@
  * SHWF-1 / ADR 0644 D1 mint-entitlement witness.
  *
  * Guards: the resolver serves the prompt's NAME and its `resolvePromptRef` BODY
- * (and the card title); `validate` refuses to mint another member's PRIVATE
- * prompt via `promptReadableBy`, with the MINTER threaded in as `caller.subject`;
+ * (and the card title); the resolver's `entitlement` (ADR 0887 D1 — it was
+ * `validate` until then) refuses to mint another member's PRIVATE prompt via
+ * `promptReadableBy`, with the MINTER threaded in as the subject;
  * a missing prompt is a 404 at mint.
  *
  * Sabotage-witnessed (w7 /grade-tests): body forced to '' · card title replaced
@@ -18,7 +19,7 @@ import { join } from 'node:path';
 import { initInMemorySurfaces } from '../src/host/inMemorySurfaces.js';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { openStorage } from '../src/storage/index.js';
-import { createOrg } from '../src/host/accessControlService.js';
+import { createOrg, createMember } from '../src/host/accessControlService.js';
 import { createLink, resolveShared, resolveSharedCard } from '../src/features/sharing/sharingService.js';
 import { createEntry } from '../src/features/prompts/promptLibraryService.js';
 import { createUserTemplate } from '../src/host/promptStore.js';
@@ -31,7 +32,10 @@ beforeAll(async () => {
   initHostExtPersistence(await openStorage('memory://'));
   // No toggle setup: `sharing` is always-on (ADR 0434) and `prompts` declares no
   // toggle, so the prompt resolver's `toggleId` is null (SHARE-1).
-  await createOrg({ tenantId: T, createdBy: 'u1', name: 'Org', orgId: ORG });
+  // ADR 0887 D1 — a link is re-checked against its publisher on every read, so the
+  // actors that mint here hold REAL memberships (a bare actor's link is dark).
+  await createOrg({ tenantId: T, createdBy: 'u1', name: 'Org', orgId: ORG, ownerSubject: 'u1' });
+  for (const subject of ['owner-a', 'intruder-b']) await createMember({ tenantId: T, orgId: ORG, subject, displayName: subject, roles: ['editor'] });
   createUserTemplate({ templateId: 'tpl-shared', version: '1.0.0', kind: 'user', text: 'Summarize {{topic}} crisply', name: 'tpl-shared' });
 });
 

@@ -39,14 +39,20 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res { status: number; body: any }
-function client(): { post: (p: string, b?: unknown) => Promise<Res> } {
+interface Res<T> { status: number; body: T }
+interface ErrBody { error: string; message: string }
+interface LoginBody { user: { userId: string } }
+interface OrgBody { orgId: string }
+interface CanvasBody { canvasId: string; canvasTypeId: string; state: Record<string, unknown>; version: number }
+function client(): { post: <T>(p: string, b?: unknown) => Promise<Res<T>> } {
   let cookie = '';
   return {
-    post: async (path, body) => {
+    post: async <T>(path: string, body?: unknown): Promise<Res<T>> => {
       const res = await fetch(`${BASE}${path}`, { method: 'POST', headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
       for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]!; }
-      return { status: res.status, body: await res.json().catch(() => undefined) };
+      const text = await res.text();
+      const parsed: T = JSON.parse(text || 'null'); // every route here answers JSON
+      return { status: res.status, body: parsed };
     },
   };
 }
@@ -60,10 +66,10 @@ const app = (fontSize = 'md') => ({ name: 'Todo', screens: [{ id: 'home', name: 
 async function fixture() {
   const tenantId = `org:writers835-${Date.now()}-${n++}`;
   const owner = client();
-  const ownerId: string = (await owner.post(`${H}/test/login`, { email: `w835-o-${n++}@acme.test`, tenantId })).body.user.userId;
+  const ownerId = (await owner.post<LoginBody>(`${H}/test/login`, { email: `w835-o-${n++}@acme.test`, tenantId })).body.user.userId;
   const viewer = client();
-  const viewerId: string = (await viewer.post(`${H}/test/login`, { email: `w835-v-${n++}@acme.test`, tenantId })).body.user.userId;
-  const orgId: string = (await owner.post(`${H}/orgs`, { name: 'Acme' })).body.orgId;
+  const viewerId = (await viewer.post<LoginBody>(`${H}/test/login`, { email: `w835-v-${n++}@acme.test`, tenantId })).body.user.userId;
+  const orgId = (await owner.post<OrgBody>(`${H}/orgs`, { name: 'Acme' })).body.orgId;
   const add = await owner.post(`${H}/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'V', subject: viewerId, roles: ['viewer'] });
   expect(add.status, JSON.stringify(add.body)).toBe(201);
   return { tenantId, owner, ownerId, viewerId, orgId };
@@ -78,17 +84,27 @@ async function emit(tenantId: string, payload: unknown, artifactTypeId = 'canvas
 describe('ADR 0835 D3 — from-artifact is type-pinned and closed-world (S3)', () => {
   it('refuses an artifact whose design the editor would refuse (422 + errors), and seeds a valid one', async () => {
     const f = await fixture();
-    const bad = await f.owner.post(`${AB(f.orgId)}/canvases/from-artifact`, { artifactKey: await emit(f.tenantId, app(HOSTILE)) });
+    const bad = await f.owner.post<ErrBody>(`${AB(f.orgId)}/canvases/from-artifact`, { artifactKey: await emit(f.tenantId, app(HOSTILE)) });
     expect(bad.status, JSON.stringify(bad.body)).toBe(422);
-    const good = await f.owner.post(`${AB(f.orgId)}/canvases/from-artifact`, { artifactKey: await emit(f.tenantId, app()) });
+    expect(bad.body.error).toBe('validation_error');
+    expect(bad.body.message).toMatch(/^this artifact is not a valid canvas\.app-builder document: /);
+    const good = await f.owner.post<CanvasBody>(`${AB(f.orgId)}/canvases/from-artifact`, { artifactKey: await emit(f.tenantId, app()) });
     expect(good.status, JSON.stringify(good.body)).toBe(201);
     expect(good.body.canvasTypeId).toBe('canvas.app-builder');
+    expect(good.body.state).toEqual(app());
   });
 
   it('an app-builder artifact is absent to the slides door (uniform 404)', async () => {
     const f = await fixture();
-    const res = await f.owner.post(`${SL(f.orgId)}/canvases/from-artifact`, { artifactKey: await emit(f.tenantId, app()) });
+    const key = await emit(f.tenantId, app());
+    const res = await f.owner.post<ErrBody>(`${SL(f.orgId)}/canvases/from-artifact`, { artifactKey: key });
     expect(res.status, JSON.stringify(res.body)).toBe(404);
+    expect(res.body).toMatchObject({ error: 'not_found', message: `canvas '${key}' not found` });
+    // Control: the SAME artifact is real and seeds through its own (app-builder) door,
+    // so the 404 above is the type pin, not a missing artifact or a closed slides door.
+    const own = await f.owner.post<CanvasBody>(`${AB(f.orgId)}/canvases/from-artifact`, { artifactKey: key });
+    expect(own.status, JSON.stringify(own.body)).toBe(201);
+    expect(own.body.canvasTypeId).toBe('canvas.app-builder');
   });
 });
 
@@ -97,21 +113,25 @@ const rpc = (id: number, method: string, params: unknown) => ({ openwop: UI_PLUG
 describe('ADR 0835 D7 — the ui-plugin write is the editor write (S9)', () => {
   it('a Viewer who can read a canvas cannot overwrite it', async () => {
     const f = await fixture();
-    const c = await createCanvasForTenant(f.tenantId, { canvasTypeId: 'canvas.app-builder', name: 'Org app', initialState: app() as never });
+    const c = await createCanvasForTenant(f.tenantId, { canvasTypeId: 'canvas.app-builder', name: 'Org app', initialState: app() });
     const read = await dispatcherForTenant(f.tenantId, { subject: f.viewerId })(rpc(1, 'artifact.read', { artifactId: c.canvasId }));
     expect(read?.ok, 'control: the viewer CAN read it').toBe(true);
     const write = await dispatcherForTenant(f.tenantId, { subject: f.viewerId })(rpc(2, 'artifact.write', { artifactId: c.canvasId, version: '1', payload: app() }));
-    expect(write).toMatchObject({ ok: false, error: { code: 'unauthorized' } });
+    expect(write).toMatchObject({ ok: false, error: { code: 'unauthorized', message: 'writing an artifact requires workspace:write' } });
     expect((await getCanvasForTenant(f.tenantId, c.canvasId))!.version).toBe(1);
   });
 
   it('an out-of-catalog payload is refused, a valid one from an editor-class member lands', async () => {
     const f = await fixture();
-    const c = await createCanvasForTenant(f.tenantId, { canvasTypeId: 'canvas.app-builder', name: 'Org app', initialState: app() as never });
+    const c = await createCanvasForTenant(f.tenantId, { canvasTypeId: 'canvas.app-builder', name: 'Org app', initialState: app() });
     const bad = await dispatcherForTenant(f.tenantId, { subject: f.ownerId })(rpc(1, 'artifact.write', { artifactId: c.canvasId, version: '1', payload: app(HOSTILE) }));
-    expect(bad?.ok).toBe(false);
+    // `validation_error` is not an RPC wire code, so it rides `handler_error` with its message.
+    expect(bad).toMatchObject({ ok: false, error: { code: 'handler_error', message: expect.stringContaining('payload violates the app-builder component catalog') } });
     expect((await getCanvasForTenant(f.tenantId, c.canvasId))!.version).toBe(1);
     const good = await dispatcherForTenant(f.tenantId, { subject: f.ownerId })(rpc(2, 'artifact.write', { artifactId: c.canvasId, version: '1', payload: app('lg') }));
-    expect(good?.ok, JSON.stringify(good)).toBe(true);
+    expect(good, JSON.stringify(good)).toMatchObject({ ok: true, result: { version: '2' } });
+    const back = (await getCanvasForTenant(f.tenantId, c.canvasId))!;
+    expect(back.version).toBe(2);
+    expect(back.state).toEqual(app('lg'));
   });
 });

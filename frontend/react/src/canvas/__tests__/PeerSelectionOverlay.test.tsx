@@ -1,4 +1,14 @@
-/** PeerSelectionOverlays (ADR 0359 residuals — the scene half of D5). */
+/**
+ * PeerSelectionOverlays (ADR 0359 residuals — the scene half of D5): a dashed
+ * outline in the peer's hue + a name flag per peer, pointer-inert and hidden
+ * from assistive tech. Breaks: a flag eating clicks or being announced, an
+ * outline off its padded bbox, truncation keeping the full name, co-selection
+ * flags occluding each other, top-edge flags clipped off-canvas, flag geometry
+ * not following flagScale (or the outline wrongly scaling with it).
+ *
+ * Expected geometry is computed by hand from the module constants PAD=3,
+ * FLAG_H=13, FLAG_GAP=2 — never by calling the renderer's math.
+ */
 import { describe, it, expect } from 'vitest';
 import { render } from '@testing-library/react';
 
@@ -21,10 +31,15 @@ describe('PeerSelectionOverlays', () => {
     );
     const g = container.querySelector('.cv-peer-outlines');
     expect(g?.getAttribute('aria-hidden')).toBe('true');
+    expect(g?.getAttribute('pointer-events')).toBe('none');
     const rects = container.querySelectorAll('rect[stroke-dasharray]');
     expect(rects.length).toBe(2);
     expect(rects[0]?.getAttribute('stroke')).toBe('#3366aa');
-    expect(rects[0]?.getAttribute('x')).toBe('7'); // bbox padded by 3
+    // bbox padded by 3 on every side: (10,20,100,50) → (7,17,106,56).
+    expect(rects[0]?.getAttribute('x')).toBe('7');
+    expect(rects[0]?.getAttribute('y')).toBe('17');
+    expect(rects[0]?.getAttribute('width')).toBe('106');
+    expect(rects[0]?.getAttribute('height')).toBe('56');
     const names = [...container.querySelectorAll('text')].map((t) => t.textContent);
     expect(names).toEqual(['Ana', 'Bo']);
   });
@@ -33,7 +48,8 @@ describe('PeerSelectionOverlays', () => {
     const { container } = renderSvg(
       <PeerSelectionOverlays outlines={[{ x: 0, y: 0, w: 10, h: 10, name: 'A very long collaborator name', color: '#123123' }]} />,
     );
-    expect(container.querySelector('text')?.textContent?.endsWith('…')).toBe(true);
+    // MAX_NAME 18 → the first 17 characters plus the ellipsis.
+    expect(container.querySelector('text')?.textContent).toBe('A very long colla…');
   });
 
   it('collision-stacks co-selection flags so BOTH names stay visible (UX finding 2)', () => {
@@ -47,7 +63,9 @@ describe('PeerSelectionOverlays', () => {
       .filter((g) => g.querySelector('text'));
     expect(flags.length).toBe(2);
     const ys = flags.map((g) => Number(/translate\([^,]+,\s*([-\d.]+)\)/.exec(g.getAttribute('transform') ?? '')?.[1]));
-    expect(ys[0]).not.toBe(ys[1]); // stacked, not occluding
+    // First flag above the box: 60 − 3 − 13 − 2 = 42; the second shifts one
+    // flag + gap down (42 + 15 = 57) — stacked, not occluding.
+    expect(ys).toEqual([42, 57]);
   });
 
   it('flips the flag BELOW the box when the element sits at the top edge (UX finding 3)', () => {
@@ -56,7 +74,8 @@ describe('PeerSelectionOverlays', () => {
     );
     const flag = [...container.querySelectorAll('g[transform^="translate"]')].find((g) => g.querySelector('text'));
     const y = Number(/translate\([^,]+,\s*([-\d.]+)\)/.exec(flag?.getAttribute('transform') ?? '')?.[1]);
-    expect(y).toBeGreaterThan(4 + 20); // below the box, never negative/clipped
+    // Above would be 4 − 3 − 13 − 2 = −14 (clipped) → flipped below: 4 + 20 + 3 + 2.
+    expect(y).toBe(29);
   });
 
   it('scales flag geometry by flagScale while the outline stays scene-space (UX finding 4)', () => {
@@ -64,6 +83,11 @@ describe('PeerSelectionOverlays', () => {
       <PeerSelectionOverlays flagScale={2} outlines={[{ x: 100, y: 100, w: 30, h: 20, name: 'Ana', color: '#333366' }]} />,
     );
     const flag = [...container.querySelectorAll('g[transform^="translate"]')].find((g) => g.querySelector('text'));
-    expect(flag?.getAttribute('transform')).toContain('scale(2)');
+    // Flag geometry scales: fh = 26, gap = 4 → y = 100 − 3 − 26 − 4 = 67.
+    expect(flag?.getAttribute('transform')).toBe('translate(97, 67) scale(2)');
+    // The outline stays in scene units (30×20 padded by 3, NOT scaled by 2).
+    const outline = container.querySelector('rect[stroke-dasharray]');
+    expect(outline?.getAttribute('width')).toBe('36');
+    expect(outline?.getAttribute('height')).toBe('26');
   });
 });

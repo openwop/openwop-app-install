@@ -9,7 +9,7 @@
  * that the glyph is aria-hidden so it is not double-announced.
  */
 import { afterEach, describe, expect, it } from 'vitest';
-import { render, screen, cleanup } from '@testing-library/react';
+import { render, screen, cleanup, within } from '@testing-library/react';
 import { buildPackDefinition, parsePackEditorHints } from '../packDefinition.js';
 
 const HINTS = parsePackEditorHints({
@@ -32,14 +32,28 @@ describe('CPKU-2 — pack boolean fields have an accessible Yes/No name', () => 
     const Renderer = def.Renderer!;
     render(<Renderer content={JSON.stringify({ items: [{ text: 'Milk', done: true }, { text: 'Bread', done: false }] })} />);
 
-    // Load-bearing: BOTH boolean states carry an accessible textual name.
-    expect(screen.getByText('Yes')).toBeTruthy();
-    expect(screen.getByText('No')).toBeTruthy();
+    // Load-bearing, PER ROW: the true row reads Yes and the false row reads No.
+    // Asserting "Yes and No both exist somewhere" could not see the mapping
+    // swapped — one true + one false row is a symmetric fixture
+    // (w46g2-pba-swap was vacuous in round 1).
+    const rows = screen.getAllByRole('listitem');
+    expect(rows).toHaveLength(2);
+    const [milk, bread] = rows as [HTMLElement, HTMLElement];
+    expect(milk.textContent).toContain('Milk');
+    expect(bread.textContent).toContain('Bread');
+    const yes = within(milk).getByText('Yes');
+    expect(within(milk).queryByText('No')).toBeNull();
+    const no = within(bread).getByText('No');
+    expect(within(bread).queryByText('Yes')).toBeNull();
+    // The accessible text itself is NOT hidden from assistive tech.
+    expect(yes.closest('[aria-hidden="true"]')).toBeNull();
+    expect(no.closest('[aria-hidden="true"]')).toBeNull();
 
     // The decorative glyph is aria-hidden so a screen reader doesn't ALSO read
-    // "check mark"/"dash" alongside the Yes/No.
-    const hidden = Array.from(document.querySelectorAll('[aria-hidden="true"]')).map((g) => g.textContent);
-    expect(hidden).toContain('✓');
-    expect(hidden).toContain('—');
+    // "check mark"/"dash" alongside the Yes/No — and each row carries ITS glyph.
+    const glyphs = (row: HTMLElement): (string | null)[] =>
+      Array.from(row.querySelectorAll('[aria-hidden="true"]')).map((g) => g.textContent);
+    expect(glyphs(milk)).toEqual(['✓']);
+    expect(glyphs(bread)).toEqual(['—']);
   });
 });

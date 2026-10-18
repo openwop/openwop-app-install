@@ -49,9 +49,15 @@ describe('exceptionProjection seam', () => {
     const boom = res.sources.find((s) => s.key === 'boom')!;
     expect(boom.ok).toBe(false);
     expect(boom.error).toBe('feed down');
+    expect(res.sources.find((s) => s.key === 'good')).toMatchObject({ ok: true, count: 1 });
     const degradedRow = res.rows.find((r) => r.source === 'boom');
-    expect(degradedRow?.severity).toBe('degraded');
-    expect(degradedRow?.audit.detectedAt).toBeTruthy(); // a real timestamp, not empty
+    expect(degradedRow).toMatchObject({
+      id: 'degraded:boom',
+      severity: 'degraded',
+      owner: { kind: 'system', ref: 'system' },
+      audit: { tenantId: 'T' },
+    });
+    expect(degradedRow?.audit.detectedAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/); // a real timestamp, not empty
   });
 
   it('repeat registration with the same key OVERWRITES (double-boot safe)', async () => {
@@ -74,5 +80,12 @@ describe('exceptionProjection seam', () => {
     const big = res.sources.find((s) => s.key === 'big')!;
     expect(big.truncated).toBe(true);
     expect(big.count).toBe(SOURCE_ROW_CAP);
+  });
+
+  it('a source of EXACTLY SOURCE_ROW_CAP rows is complete — not flagged truncated (the cap boundary)', async () => {
+    registerExceptionSource('exact', async () => Array.from({ length: SOURCE_ROW_CAP }, (_, i) => row(`exact:${i}`)));
+    const res = await listExceptions('T');
+    expect(res.rows).toHaveLength(SOURCE_ROW_CAP);
+    expect(res.sources.find((s) => s.key === 'exact')).toMatchObject({ ok: true, truncated: false, count: SOURCE_ROW_CAP });
   });
 });

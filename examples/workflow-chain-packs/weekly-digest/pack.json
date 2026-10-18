@@ -1,6 +1,6 @@
 {
   "name": "core.openwop.workflows.weekly-digest",
-  "version": "1.2.1",
+  "version": "1.3.0",
   "kind": "workflow-chain",
   "description": "Weekly-digest chains (RFC 0013): scheduled roundups that keep a team informed without a meeting — a research digest on a watched topic, and a team status roll-up. In-app + gated-send sinks; replay-deterministic.",
   "author": "openwop",
@@ -14,7 +14,7 @@
   "chains": [
     {
       "chainId": "digest.topic-watch",
-      "version": "1.1.1",
+      "version": "1.2.0",
       "label": "Weekly Topic Watch → Digest",
       "description": "A scheduled research digest: searches a watched topic, summarizes what's new with sources, and posts an in-app notification.",
       "parameters": {
@@ -27,8 +27,8 @@
             "default": "",
             "description": "The topic to watch."
           },
-          "provider": { "type": "string", "default": "anthropic", "description": "AI provider id for this chain's LLM nodes. Frozen into this chain's AI nodes when the workflow is created (ADR 0498 — a concrete provider is what keeps replay deterministic). Override at instantiation to use a different vendor or your own BYOK provider; whichever you pick, the workspace needs a key for it — the workflow will not fall back to another provider on its own." },
-          "model": { "type": "string", "default": "claude-sonnet-4-6", "description": "Model id for this chain's LLM nodes. Must be advertised by `provider` in the host catalog; override at instantiation." },
+          "provider": { "type": "string", "description": "AI provider id for this chain's model-calling nodes. Set it to fix a provider into those nodes when the workflow is created. Leave it unset and each run uses the run's chosen provider, else the workspace's AI setting, else the host's catalog default (ADR 0903); whichever is chosen is recorded on the run, so a replay or fork uses the same one. The workspace needs a key for the provider that runs." },
+          "model": { "type": "string", "description": "Model id for this chain's model-calling nodes. Must be offered by the provider in the host catalog. Leave it unset to use the provider's model from the same choice (ADR 0903)." },
           "scheduleCron": { "type": "string", "description": "Cron expression for when this workflow runs (e.g. `0 9 * * 1` = Mondays 09:00)." }
         }
       },
@@ -110,7 +110,7 @@
     },
     {
       "chainId": "digest.team-status",
-      "version": "1.0.2",
+      "version": "1.1.0",
       "label": "Weekly Team Status → Roll-Up",
       "description": "Rolls a week of status updates into a concise leadership summary (wins, risks, asks) and sends it to the channel after a human review.",
       "parameters": {
@@ -118,8 +118,8 @@
         "additionalProperties": false,
         "required": ["scheduleCron", "slackChannel"],
         "properties": {
-          "provider": { "type": "string", "default": "anthropic", "description": "AI provider id for this chain's LLM nodes. Frozen into this chain's AI nodes when the workflow is created (ADR 0498 — a concrete provider is what keeps replay deterministic). Override at instantiation to use a different vendor or your own BYOK provider; whichever you pick, the workspace needs a key for it — the workflow will not fall back to another provider on its own." },
-          "model": { "type": "string", "default": "claude-sonnet-4-6", "description": "Model id for this chain's LLM nodes. Must be advertised by `provider` in the host catalog; override at instantiation." },
+          "provider": { "type": "string", "description": "AI provider id for this chain's model-calling nodes. Set it to fix a provider into those nodes when the workflow is created. Leave it unset and each run uses the run's chosen provider, else the workspace's AI setting, else the host's catalog default (ADR 0903); whichever is chosen is recorded on the run, so a replay or fork uses the same one. The workspace needs a key for the provider that runs." },
+          "model": { "type": "string", "description": "Model id for this chain's model-calling nodes. Must be offered by the provider in the host catalog. Leave it unset to use the provider's model from the same choice (ADR 0903)." },
           "scheduleCron": { "type": "string", "description": "Cron expression for when this workflow runs (e.g. `0 9 * * 1` = Mondays 09:00)." },
           "slackChannel": { "type": "string", "description": "Slack channel these messages post to (e.g. `#ops`)." }
         }

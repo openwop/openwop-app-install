@@ -10,12 +10,18 @@
  * `ui/__tests__/orgSelectionEdgeRatchet` scan that protects every other adopter.
  * The strings below are now the SHARED ones, so a page that quietly re-grew its
  * own copy would go red here.
+ *
+ * Sabotage-witnessed (wave 52): the failed org read mapped back to `setOrgs([])`
+ * in `ui/useOrgSelection`, the failed branch moved below the children in
+ * `ui/OrgSelectionState`, the Retry dropped, and the toggle gate removed from
+ * `useOrgSelection(listOrgs, access.enabled)` each turn a case below red.
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, cleanup, act, fireEvent } from '@testing-library/react';
 
 const { listOrgs, listDomains, useFeatureAccess } = vi.hoisted(() => ({
-  listOrgs: vi.fn(), listDomains: vi.fn(),
+  listOrgs: vi.fn<typeof import('../domainsClient.js').listOrgs>(),
+  listDomains: vi.fn<typeof import('../domainsClient.js').listDomains>(),
   useFeatureAccess: vi.fn(() => makeFeatureAccess({ enabled: true, loading: false })),
 }));
 import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
@@ -33,9 +39,15 @@ vi.mock('../../../featureToggles/FeatureAccessContext.js', async (orig) => ({
 }));
 
 import { DomainsPage } from '../DomainsPage.js';
+import type { CustomDomain, Org } from '../domainsClient.js';
 
-const ORG = { orgId: 'o1', name: 'Acme' };
-const DOMAIN = { hostname: 'app.example.com', status: 'verified' as const, target: 'x.run.app', verifiedAt: null };
+const ORG: Org = { orgId: 'o1', name: 'Acme' };
+// A production-shaped row (the old fixture used `status: 'verified'`, which is not
+// a CustomDomain status, and fields the type does not have).
+const DOMAIN: CustomDomain = {
+  hostname: 'app.example.com', orgId: 'o1', status: 'live',
+  verificationToken: 'tok-1', createdAt: '2026-08-01T00:00:00.000Z',
+};
 
 const mount = async (): Promise<void> => {
   render(<DomainsPage />);
@@ -45,6 +57,12 @@ const mount = async (): Promise<void> => {
 afterEach(cleanup);
 beforeEach(() => {
   vi.clearAllMocks();
+  listOrgs.mockReset();
+  listDomains.mockReset();
+  // Set in EVERY case: a toggle case that fails mid-way can no longer leak
+  // "disabled" into the next one.
+  useFeatureAccess.mockReset();
+  useFeatureAccess.mockReturnValue(makeFeatureAccess({ enabled: true, loading: false }));
   listOrgs.mockResolvedValue([ORG]);
   listDomains.mockResolvedValue([DOMAIN]);
 });
@@ -113,7 +131,6 @@ describe('custom domains — the feature toggle gates the page', () => {
     render(<DomainsPage />);
     expect(await screen.findByText(/not enabled/i)).toBeTruthy();
     expect(listOrgs).not.toHaveBeenCalled();
-    useFeatureAccess.mockReturnValue(makeFeatureAccess({ enabled: true, loading: false }));
   });
 
   it('toggle UNRESOLVED is a skeleton under the real header — not a terminal card', async () => {
@@ -130,6 +147,5 @@ describe('custom domains — the feature toggle gates the page', () => {
     expect(screen.getByRole('heading', { name: 'Custom domains' })).toBeTruthy();
     expect(screen.queryByText(/not enabled/i)).toBeNull();
     expect(listOrgs).not.toHaveBeenCalled();
-    useFeatureAccess.mockReturnValue(makeFeatureAccess({ enabled: true, loading: false }));
   });
 });

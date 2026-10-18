@@ -1,6 +1,6 @@
 {
   "name": "core.openwop.workflows.starters",
-  "version": "1.1.2",
+  "version": "1.2.0",
   "kind": "workflow-chain",
   "description": "Starter workflow pack (RFC 0013, ADR 0190) — the simple-pipe on-ramp tier: short single-trigger→action recipes (webhook→notify, form→table, schedule→digest, fetch→store) that run in under a minute with zero connections, before you graduate to the AI-agent packs. Trigger-shaped starters begin with a core.trigger.* pass-through entry node: bind them to a live source with a trigger subscription (POST /v1/trigger-subscriptions — webhook, email, or form; RFC 0099) or a Schedule; on a manual run the trigger payload is empty, so bind a source to see them shine. External sends stay behind a human approval gate; in-app notifications are direct. All tenant values are run parameters (replay-deterministic).",
   "author": "openwop",
@@ -68,7 +68,7 @@
     },
     {
       "chainId": "starters.scheduled-digest",
-      "version": "1.0.1",
+      "version": "1.1.0",
       "label": "Scheduled One-Line Digest",
       "description": "A tiny recurring brief: on each scheduled run, write a one-paragraph digest on your topic and notify you. Pair it with a Schedule to make it recurring — the simplest taste of an AI step inside a pipe.",
       "parameters": {
@@ -77,8 +77,8 @@
         "required": [],
         "properties": {
           "topic": { "type": "string", "default": "a short daily focus note for the team", "description": "The digest topic." },
-          "provider": { "type": "string", "default": "anthropic", "description": "AI provider id for this chain's LLM nodes. Frozen into this chain's AI nodes when the workflow is created (ADR 0498 — a concrete provider is what keeps replay deterministic). Override at instantiation to use a different vendor or your own BYOK provider; whichever you pick, the workspace needs a key for it — the workflow will not fall back to another provider on its own." },
-          "model": { "type": "string", "default": "claude-sonnet-4-6", "description": "Model id for this chain's LLM nodes. Must be advertised by `provider` in the host catalog; override at instantiation." },
+          "provider": { "type": "string", "description": "AI provider id for this chain's model-calling nodes. Set it to fix a provider into those nodes when the workflow is created. Leave it unset and each run uses the run's chosen provider, else the workspace's AI setting, else the host's catalog default (ADR 0903); whichever is chosen is recorded on the run, so a replay or fork uses the same one. The workspace needs a key for the provider that runs." },
+          "model": { "type": "string", "description": "Model id for this chain's model-calling nodes. Must be offered by the provider in the host catalog. Leave it unset to use the provider's model from the same choice (ADR 0903)." },
           "scheduleCron": { "type": "string", "default": "0 9 * * *", "description": "Cron expression for when this workflow runs (e.g. `0 9 * * 1` = Mondays 09:00)." }
         }
       },
@@ -171,7 +171,7 @@
     },
     {
       "chainId": "starters.webhook-to-slack",
-      "version": "1.0.2",
+      "version": "1.1.0",
       "label": "Webhook → Summarize → Slack",
       "description": "Turn any webhook event into a one-line summary and post it to Slack — behind a human approval, because it leaves the building. Approve a few, then decide if you want it always-on.",
       "parameters": {
@@ -180,8 +180,8 @@
         "required": [],
         "properties": {
           "channel": { "type": "string", "default": "#activity", "description": "Slack channel to post to." },
-          "provider": { "type": "string", "default": "anthropic", "description": "AI provider id for this chain's LLM nodes. Frozen into this chain's AI nodes when the workflow is created (ADR 0498 — a concrete provider is what keeps replay deterministic). Override at instantiation to use a different vendor or your own BYOK provider; whichever you pick, the workspace needs a key for it — the workflow will not fall back to another provider on its own." },
-          "model": { "type": "string", "default": "claude-sonnet-4-6", "description": "Model id for this chain's LLM nodes. Must be advertised by `provider` in the host catalog; override at instantiation." },
+          "provider": { "type": "string", "description": "AI provider id for this chain's model-calling nodes. Set it to fix a provider into those nodes when the workflow is created. Leave it unset and each run uses the run's chosen provider, else the workspace's AI setting, else the host's catalog default (ADR 0903); whichever is chosen is recorded on the run, so a replay or fork uses the same one. The workspace needs a key for the provider that runs." },
+          "model": { "type": "string", "description": "Model id for this chain's model-calling nodes. Must be offered by the provider in the host catalog. Leave it unset to use the provider's model from the same choice (ADR 0903)." },
           "webhookPath": { "type": "string", "default": "/webhook-to-slack", "description": "URL path segment this workflow listens on (e.g. `ci-failure`)." }
         }
       },

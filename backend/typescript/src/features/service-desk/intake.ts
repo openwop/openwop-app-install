@@ -21,10 +21,12 @@ import { createLogger } from '../../observability/logger.js';
 import { resolveToggle } from '../../host/featureToggles/service.js';
 import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { registerInboundObserver } from '../connections/inboundWebhooks.js';
-import { extractWaInbound } from '../whatsapp/whatsappService.js';
+import { extractWaInbound, normalizeWaNumber } from '../whatsapp/whatsappService.js';
+import { ownerPublicRuntimeLapsed } from '../../host/publicLapse.js';
 import { registerSubmissionSink } from '../forms/submissionSinks.js';
 import { resolveIdentity } from '../cdp/identityService.js';
 import { createTicket } from './tickets.js';
+import { OpenwopError } from '../../types.js';
 
 const log = createLogger('service-desk.intake');
 
@@ -50,10 +52,35 @@ export async function getIntakeConfig(tenantId: string): Promise<IntakeConfig | 
   return c && c.tenantId === tenantId ? c : null;
 }
 
+/** Write the tenant's intake config. ADR 0878 D2: an absent `slaHoursByPriority`
+ *  KEEPS the stored table — the old PUT silently dropped it, so no SLA override
+ *  ever survived a save. */
 export async function setIntakeConfig(tenantId: string, defaultOrgId: string, updatedBy: string, slaHoursByPriority?: Partial<Record<'low' | 'normal' | 'high' | 'urgent', number>>): Promise<IntakeConfig> {
-  const cfg: IntakeConfig = { tenantId, defaultOrgId, ...(slaHoursByPriority ? { slaHoursByPriority } : {}), updatedBy, updatedAt: new Date().toISOString() };
+  const prior = await getIntakeConfig(tenantId);
+  const sla = slaHoursByPriority ?? prior?.slaHoursByPriority;
+  const cfg: IntakeConfig = { tenantId, defaultOrgId, ...(sla ? { slaHoursByPriority: sla } : {}), updatedBy, updatedAt: new Date().toISOString() };
   await intakeConfigs.put(cfg);
   return cfg;
+}
+
+/** ADR 0878 D2 — validate an operator's SLA table: integer hours 0–720 per known
+ *  priority (0 disables that priority's clock). Anything else is a typed 422. */
+export function parseSlaHours(raw: unknown): Partial<Record<'low' | 'normal' | 'high' | 'urgent', number>> | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new OpenwopError('validation_error', '`slaHoursByPriority` must be an object of priority → hours.', 422, { field: 'slaHoursByPriority' });
+  }
+  const out: Partial<Record<'low' | 'normal' | 'high' | 'urgent', number>> = {};
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (k !== 'low' && k !== 'normal' && k !== 'high' && k !== 'urgent') {
+      throw new OpenwopError('validation_error', `Unknown priority \`${k}\` in slaHoursByPriority.`, 422, { field: 'slaHoursByPriority' });
+    }
+    if (typeof v !== 'number' || !Number.isInteger(v) || v < 0 || v > 720) {
+      throw new OpenwopError('validation_error', `SLA hours for \`${k}\` must be a whole number from 0 to 720.`, 422, { field: 'slaHoursByPriority' });
+    }
+    out[k] = v;
+  }
+  return out;
 }
 
 /** Best-effort contact resolution via the owning identity module.
@@ -72,13 +99,24 @@ async function contactIdFor(tenantId: string, type: 'phone' | 'email', value: st
 
 /** The WhatsApp verified-inbound observer (both BSP transports). */
 export async function onWhatsAppInboundForTickets(event: { tenantId: string; connectionId: string; body: Record<string, unknown> }): Promise<void> {
+  // ADR 0878 D9 (SD2-S7) — this lane read NO toggle: with Service desk off it kept
+  // filing tickets and arming SLA clocks. The sender is not a member (a PUBLIC
+  // lane, tenant from the verified connection), so it reads the toggle only — the
+  // ADR 0819 visitor opt-out — plus the owner-lapse policy, exactly as the widget.
+  const desk = await resolveToggle('service-desk', { tenantId: event.tenantId }).catch(() => null);
+  if (desk?.enabled !== true || (await ownerPublicRuntimeLapsed('service-desk', event.tenantId))) {
+    log.debug('service-desk off — whatsapp message not ticketed', { tenantId: event.tenantId });
+    return;
+  }
   const cfg = await getIntakeConfig(event.tenantId);
   if (!cfg) {
     log.debug('service-desk intake unconfigured — whatsapp message not ticketed', { tenantId: event.tenantId });
     return;
   }
   for (const [i, msg] of extractWaInbound(event.body).entries()) {
-    const contactId = await contactIdFor(event.tenantId, 'phone', msg.from);
+    // Twilio's sender is `whatsapp:+E164`; store and match the bare E.164 (ADR 0878 D4).
+    const phone = normalizeWaNumber(msg.from);
+    const contactId = await contactIdFor(event.tenantId, 'phone', phone ?? msg.from);
     // Provider payloads carry a stable message id on Cloud API; Twilio's form
     // POST carries MessageSid. Fall back to a content-deterministic id so a
     // provider RETRY of the same body stays idempotent.
@@ -91,11 +129,15 @@ export async function onWhatsAppInboundForTickets(event: { tenantId: string; con
       channel: 'whatsapp',
       ...(cfg.slaHoursByPriority ? { slaHoursByPriority: cfg.slaHoursByPriority } : {}),
       ...(contactId ? { contactId } : {}),
+      // The key keeps the RAW sender so a thread opened before ADR 0878 continues.
       externalKey: `wa:${event.connectionId}:${msg.from}`,
+      // ADR 0878 D3 — where a reply goes. Backfilled onto an existing thread.
+      replyChannel: { kind: 'whatsapp', connectionId: event.connectionId },
+      ...(phone ? { requester: { phone } } : {}),
       firstMessage: {
         messageId: providerMsgId ?? `wa:${msg.from}:${hashText(msg.text)}:${i}`,
         body: msg.text,
-        author: contactId ? `contact:${contactId}` : `wa:${msg.from}`,
+        author: contactId ? `contact:${contactId}` : `wa:${phone ?? msg.from}`,
         direction: 'inbound',
       },
       createdBy: 'system:service-desk',
@@ -146,6 +188,10 @@ export function registerServiceDeskIntake(): void {
         channel: 'form',
         ...(cfg?.slaHoursByPriority ? { slaHoursByPriority: cfg.slaHoursByPriority } : {}),
         ...(contactId ? { contactId } : {}),
+        // ADR 0878 D4 — the requester's address, so a DSAR keyed on it reaches this
+        // thread even when no CRM contact resolved. No reply channel: a form ticket
+        // has no outbound lane yet (email delivery is SD2-F1).
+        ...(email ? { requester: { email } } : {}),
         externalKey: `form:${submission.submissionId}`,
         firstMessage: {
           messageId: `form:${submission.submissionId}`,

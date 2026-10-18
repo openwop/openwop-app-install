@@ -22,6 +22,8 @@ import type { Storage } from '../storage/storage.js';
 import { getRosterEntry } from './rosterService.js';
 import { applyBoardCommand, getBoard, moveCard, setCardLastRun, notifyBoardChanged, todoColumnOf, workingColumnOf } from './kanbanService.js';
 import { startWorkflowRun } from './runStarter.js';
+import { fireJob } from './scheduleDaemon.js';
+import { getJob } from './schedulingService.js';
 import { resolveTenantWorkflow } from './resolveLaunchDefinition.js';
 import { resolveEffectiveAccess } from './accessControlService.js';
 import { isEligibleApprover, consumeVoteIdentity } from './approverResolution.js';
@@ -35,6 +37,7 @@ import {
   getAssistantActionApprovalHandler,
   getContentApprovalHandler,
   getChallengePublishApprovalHandler,
+  getKicktodoSignoffApprovalHandler,
   getAnonSurfaceWriteApprovalHandler,
   getStrategyActivationApprovalHandler,
   getStrategyCheckInApprovalHandler,
@@ -70,6 +73,10 @@ export interface ApprovalDecisionCtx {
    *  from `(tenantId, decidedBy)` alone (commerce-listing-publish). Ignored by
    *  every tenant-scoped kind. */
   decidedBySuperadmin?: boolean;
+  /** ADR 0878 D6 — every spelling of the decider (`callerSubjectSpellings`), so an
+   *  org-scoped decision matches the member row however it is keyed. Absent ⇒
+   *  `[decidedBy]`. */
+  decidedBySpellings?: string[];
   /** UX_UPGRADE-assistant R2 — the two REQUEST-level facts a kind's eligibility
    *  check cannot derive from `(tenantId, decidedBy)`, threaded from the HTTP
    *  boundary the same way `decidedBySuperadmin` is:
@@ -219,6 +226,15 @@ async function loadPending(tenantId: string, approvalId: string): Promise<Pendin
     throw new OpenwopError('conflict', `Approval already ${approval.status}.`, 409, { status: approval.status });
   }
   return approval;
+}
+
+/** ADR 0878 D6 — the decider as an org-scoped action check needs them. */
+function deciderOf(ctx: ApprovalDecisionCtx): { spellings: string[]; isOperator?: boolean; isPersonalOwner?: boolean } {
+  return {
+    spellings: ctx.decidedBySpellings ?? (ctx.decidedBy ? [ctx.decidedBy] : []),
+    ...(ctx.decidedByWildcardOperator ? { isOperator: true } : {}),
+    ...(ctx.decidedByPersonalOwner ? { isPersonalOwner: true } : {}),
+  };
 }
 
 function auditDecision(deps: ApprovalDecisionDeps, ctx: ApprovalDecisionCtx, action: string, resource: string, payload: Record<string, unknown>): void {
@@ -430,10 +446,33 @@ const KIND_DISPATCH = {
     audit: (a, o) => ({ action: o === 'approved' ? 'kicktodo.challenge.published' : 'kicktodo.challenge.publish-rejected', resource: `kicktodo-candidate:${a.challengePublish?.candidateId ?? a.approvalId}`, payload: { ...baseAuditPayload(a), challengeId: a.challengePublish?.challengeId, challengeVersion: a.challengePublish?.challengeVersion } }),
     result: (a) => ({ ...(a.challengePublish ? { candidateId: a.challengePublish.candidateId, challengeId: a.challengePublish.challengeId, challengeVersion: a.challengePublish.challengeVersion } : {}) }),
   },
-  'community-profile': 'run-proposal',
-  'community-review': 'run-proposal',
-  'metrics-verifier-sample': 'run-proposal',
-  'connect-seller': 'run-proposal',
+  // KickTodo sign-offs (code-grade KTY-1, 2026-10-14) — these four used to fall
+  // through the run-proposal finalizer, whose roster lookup 404'd on their host
+  // personas (`host:kicktodo-community` / `host:kicktodo-commerce` are not roster
+  // rows): approve from the inbox never worked, and reject resolved the row without
+  // changing the profile or review it was about. Same trap as challenge-publish and
+  // commerce-spend; same cure: a registered handler from the owning feature, which
+  // CAS-resolves the approval and then applies the outcome to its own state.
+  'community-profile': {
+    getHandler: () => getKicktodoSignoffApprovalHandler('community-profile'),
+    notComposedLabel: 'KickTodo Community',
+    audit: (a, o) => ({ action: o === 'approved' ? 'kicktodo.community.profile-approved' : 'kicktodo.community.profile-rejected', resource: `kicktodo-profile:${a.approvalId}`, payload: baseAuditPayload(a) }),
+  },
+  'community-review': {
+    getHandler: () => getKicktodoSignoffApprovalHandler('community-review'),
+    notComposedLabel: 'KickTodo Community',
+    audit: (a, o) => ({ action: o === 'approved' ? 'kicktodo.community.review-removed' : 'kicktodo.community.review-restored', resource: `kicktodo-review-flag:${a.approvalId}`, payload: baseAuditPayload(a) }),
+  },
+  'metrics-verifier-sample': {
+    getHandler: () => getKicktodoSignoffApprovalHandler('metrics-verifier-sample'),
+    notComposedLabel: 'KickTodo Metrics',
+    audit: (a, o) => ({ action: o === 'approved' ? 'kicktodo.metrics.verifier-sample-agreed' : 'kicktodo.metrics.verifier-sample-disagreed', resource: `kicktodo-verifier-sample:${a.approvalId}`, payload: baseAuditPayload(a) }),
+  },
+  'connect-seller': {
+    getHandler: () => getKicktodoSignoffApprovalHandler('connect-seller'),
+    notComposedLabel: 'KickTodo Commerce',
+    audit: (a, o) => ({ action: o === 'approved' ? 'kicktodo.commerce.seller-onboarding-approved' : 'kicktodo.commerce.seller-onboarding-rejected', resource: `kicktodo-seller-request:${a.approvalId}`, payload: baseAuditPayload(a) }),
+  },
   // ADR 0554 P2 / RFC 0151 §E — compensation-action: the decision IS the whole
   // act here. There is no handler to dispatch, because the unwind that raised
   // this card has already stopped at the paused obligation; resuming it is P3
@@ -517,6 +556,7 @@ export async function claimApproval(
   await assertApprovalEligibility(tenantId, decidedBy, approval, {
     isOperator: ctx.decidedByWildcardOperator === true,
     isPersonalOwner: ctx.decidedByPersonalOwner === true,
+    ...(ctx.decidedBySpellings ? { spellings: ctx.decidedBySpellings } : {}),
   });
 
   // ADR 0070 — multi-approver gate: a claim is a VOTE. Until quorum is met the
@@ -587,6 +627,7 @@ export async function claimApproval(
       ...(decidedBy ? { decidedByUserId: decidedBy } : {}),
       ...(note !== undefined ? { note } : {}),
       ...(ctx.expectedContentHash !== undefined ? { expectedContentHash: ctx.expectedContentHash } : {}),
+      decider: deciderOf(ctx),
     });
     if (!decided) throw new OpenwopError('not_found', 'Approval not found.', 404, { approvalId: approval.approvalId });
     if (!decided.changed) throw new OpenwopError('conflict', `Approval already ${decided.approval.status}.`, 409, { status: decided.approval.status });
@@ -598,6 +639,16 @@ export async function claimApproval(
   const entry = await getRosterEntry(tenantId, approval.rosterId);
   if (!entry) {
     throw new OpenwopError('not_found', 'Proposing agent no longer exists.', 404, { rosterId: approval.rosterId });
+  }
+  // ADR 0775 P3 (`ARWF-7`) — a proposal made before its agent was paused does not
+  // run once it is paused: turning an agent off stops what it does next, including
+  // work it queued for approval. Checked before the lock, so the approval stays
+  // pending and runs if the agent is resumed and it is approved again.
+  if (!entry.enabled) {
+    throw new OpenwopError('conflict', 'This agent is paused. Resume it to run what it proposed.', 409, {
+      rosterId: approval.rosterId,
+      reason: 'agent_paused',
+    });
   }
   // Pre-resolve the proposed workflow BEFORE locking, so a vanished workflow
   // fails cleanly (422) instead of leaving an approved-but-unrun approval.
@@ -612,6 +663,35 @@ export async function claimApproval(
   if (!lock) throw new OpenwopError('not_found', 'Approval not found.', 404, { approvalId: approval.approvalId });
   if (!lock.changed) throw new OpenwopError('conflict', `Approval already ${lock.approval.status}.`, 409, { status: lock.approval.status });
 
+  // ADR 0775 P3b — a proposal a SCHEDULE slot filed (its workflow is on the agent's
+  // `hitl` list) runs by firing that job through the daemon's own recipe, so the run
+  // carries the job's inputs, acting person and attribution exactly as an unheld fire
+  // would. Every other gate in `fireJob` still applies; a skip puts the approval back
+  // to pending and says why, rather than stranding it approved with no run.
+  if (approval.scheduleJobId) {
+    const job = await getJob(approval.scheduleJobId);
+    if (!job || job.tenantId !== tenantId) {
+      await reopenApproval(approval.approvalId).catch(() => null);
+      throw new OpenwopError('not_found', 'The schedule that proposed this no longer exists.', 404, { jobId: approval.scheduleJobId });
+    }
+    const outcome = await fireJob(deps, job, {
+      trigger: 'manual',
+      ...(decidedBy ? { triggeredBy: decidedBy } : {}),
+      applyBudget: false,
+      approvedProposalId: approval.approvalId,
+    });
+    if ('skipped' in outcome) {
+      await reopenApproval(approval.approvalId).catch(() => null);
+      throw new OpenwopError('conflict', `The scheduled run did not start (${outcome.skipped}).`, 409, {
+        jobId: job.jobId,
+        reason: outcome.skipped === 'agent-paused' ? 'agent_paused' : 'schedule_skipped',
+        skipped: outcome.skipped,
+      });
+    }
+    await attachRunId(approval.approvalId, outcome.runId);
+    return announceReview(tenantId, { approvalId: approval.approvalId, status: 'approved', runId: outcome.runId });
+  }
+
   let runId: string | null;
   try {
     runId = await startWorkflowRun(deps, {
@@ -620,6 +700,11 @@ export async function claimApproval(
     // ADR 0313 P2 — the proposal's frozen run inputs (the bare-card fallback's
     // agent-turn task). Absent ⇒ exactly the prior dispatch.
     ...(approval.configurable ? { configurable: approval.configurable } : {}),
+    // ADR 0879 D7 (grade-code CH2CD-2) — the approver CAUSED this run (the ADR 0832
+    // D3 role: it narrows, never grants). Without a person a bare-card reply into
+    // the filer's conversation has nobody to check, and the run-lane write gate
+    // refuses it.
+    ...(decidedBy ? { orgScopeSubject: decidedBy } : {}),
     metadata: {
       approval: {
         rosterId: entry.rosterId,
@@ -705,6 +790,7 @@ export async function rejectApproval(
   await assertApprovalEligibility(tenantId, ctx.decidedBy, approval, {
     isOperator: ctx.decidedByWildcardOperator === true,
     isPersonalOwner: ctx.decidedByPersonalOwner === true,
+    ...(ctx.decidedBySpellings ? { spellings: ctx.decidedBySpellings } : {}),
   });
 
   // ADR 0070 — multi-approver gate: a reject is a VOTE; the gate only fails once
@@ -761,6 +847,7 @@ export async function rejectApproval(
     const decided = await handler(tenantId, approval.approvalId, 'rejected', {
       ...(decidedBy ? { decidedByUserId: decidedBy } : {}),
       ...(note !== undefined ? { note } : {}),
+      decider: deciderOf(ctx),
     });
     if (!decided) throw new OpenwopError('not_found', 'Approval not found.', 404, { approvalId: approval.approvalId });
     if (!decided.changed) throw new OpenwopError('conflict', `Approval already ${decided.approval.status}.`, 409, { status: decided.approval.status });

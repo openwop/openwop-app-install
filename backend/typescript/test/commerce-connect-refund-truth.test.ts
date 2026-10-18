@@ -29,7 +29,6 @@
  * cannot fix one and leave the other.
  */
 import http from 'node:http';
-import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
@@ -78,7 +77,7 @@ beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { void (server.address() as AddressInfo); res(); }); });
+  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { res(); }); });
   await saveConfig({ id: 'commerce-connect', label: 'Commerce Connect', description: 'test', category: 'Admin', status: 'on', bucketUnit: 'tenant', salt: 'commerce-connect' }, 'test');
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
@@ -219,6 +218,10 @@ describe('MPL-4 — an issued-but-unconfirmed refund is VISIBLE, and the respons
     expect(out.applied).toBe(true);
     expect(out.state).toBe('applied');
     expect(out.order.status).toBe('refunded');
+    // Persisted, not only reported.
+    const stored = (await getOrder(orderId))!;
+    expect(stored.status).toBe('refunded');
+    expect(stored.refundedMajorUnits).toBe(40);
   });
 
   it('a refund stamped long ago with the order still `paid` becomes an operator exception', async () => {
@@ -387,11 +390,21 @@ describe('the ENTITLED set, not the `paid` literal — every site', () => {
   it('a dispute WON on an order with NO partial refund still restores plain `paid`', async () => {
     // The other side of the derivation — proves the new branch discriminates on
     // `refundedMajorUnits` rather than always returning `partially-refunded`.
+    // (Also asserted by commerce-connect-disputes › "created flips paid→disputed;
+    // closed won restores paid" — both red under the same sabotage, measured. Kept:
+    // protected file, and this one pins the entitlement + stats half too.)
     const pack = 'vendor.dispute-won-clean.nodes';
     const orderId = await paidOrder(pack);
     await handleConnectEvent({ event: disputeEvent('evt_dp4', 'charge.dispute.created', `pi_${pack}`, 'needs_response') });
+    expect((await getOrder(orderId))!.status).toBe('disputed'); // precondition: the dispute landed
     await handleConnectEvent({ event: disputeEvent('evt_dp5', 'charge.dispute.closed', `pi_${pack}`, 'won') });
-    expect((await getOrder(orderId))!.status).toBe('paid');
+    const o = (await getOrder(orderId))!;
+    expect(o.status).toBe('paid');
+    expect(o.refundedMajorUnits).toBeUndefined();
+    expect(await hasPaidOrder(BUYER, pack)).toBe(true);
+    const { sales } = await sellerStats(SELLER);
+    expect(sales.paid).toBe(1);
+    expect(sales.netMajorUnitsByCurrency.usd).toBe(40);
   });
 
   it('refundOrder: a PARTIALLY-REFUNDED order is still refundable for the remainder', async () => {
@@ -399,6 +412,10 @@ describe('the ENTITLED set, not the `paid` literal — every site', () => {
     // today, but it is the same drift seam — pinned so the shared set stays shared.
     const orderId = await partiallyRefunded('vendor.refund-again.nodes');
     const out = await refundOrder(orderId);
-    expect(out.order.status === 'refunded' || out.refundId !== undefined).toBe(true);
+    // Demo lane: the remainder is refunded in place, and the ledger records the
+    // WHOLE charge as returned (the $1 partial plus the remaining $39).
+    expect(out.order.status).toBe('refunded');
+    expect(out.order.refundedMajorUnits).toBe(40);
+    expect((await getOrder(orderId))!.status).toBe('refunded');
   });
 });

@@ -18,6 +18,11 @@
  *      comparison is on the CLEANED candidate, so an honest idempotent retry of a
  *      node re-sending the same raw model output is NOT refused.
  *
+ * w32 (grade-tests) — case 2 alone changed only `strategySummary`, so dropping
+ * `recommendations` from the comparison (the field that routes work and budget to
+ * vendors) stayed green, and only `approved` was tried although the guard covers
+ * every non-draft status. Cases 2c/2d close both; case 4 pins the documented escape.
+ *
  * Born red on the pre-ADR service: case 2 writes and returns happily.
  */
 import { beforeEach, describe, expect, it } from 'vitest';
@@ -52,6 +57,7 @@ describe('ADR 0728 — an approval attests to content', () => {
     const revised = await savePlan({ ...base, strategySummary: 'Revised while still a draft.' });
     expect(revised.status).toBe('draft');
     expect(revised.strategySummary).toBe('Revised while still a draft.');
+    expect((await getPlan(TENANT, ORG, PLAN))?.strategySummary, 'the revision is stored').toBe('Revised while still a draft.');
   });
 
   it('case 2 (BORN RED): an APPROVED plan with changed content is refused, and NOTHING is written', async () => {
@@ -73,15 +79,34 @@ describe('ADR 0728 — an approval attests to content', () => {
   it('case 2b: the refusal carries a machine-readable reason and a 409', async () => {
     await savePlan(base);
     await transitionPlan(TENANT, ORG, PLAN, 'approved', 'u-alice');
-    try {
-      await savePlan({ ...base, strategySummary: 'Different.' });
-      throw new Error('savePlan must refuse');
-    } catch (e) {
-      expect(e).toBeInstanceOf(OpenwopError);
-      const err = e as OpenwopError;
-      expect(err.httpStatus).toBe(409);
-      expect((err.details as { reason?: string } | undefined)?.reason).toBe('plan_not_draft');
-    }
+    const attempt = savePlan({ ...base, strategySummary: 'Different.' });
+    await expect(attempt).rejects.toBeInstanceOf(OpenwopError);
+    await expect(attempt).rejects.toMatchObject({
+      code: 'conflict',
+      httpStatus: 409,
+      details: { reason: 'plan_not_draft', planId: PLAN, status: 'approved' },
+    });
+  });
+
+  const rec0 = base.recommendations[0]!;
+  it.each([
+    ['recommendations (the execution route)', { recommendations: [{ ...rec0, executionRoute: 'agency' }] }, (p: Awaited<ReturnType<typeof getPlan>>) => p?.recommendations[0]?.executionRoute, 'contractor'],
+    ['the total budget', { totalBudget: { min: 1000, max: 9000, currency: 'USD' } }, (p: Awaited<ReturnType<typeof getPlan>>) => p?.totalBudget.max, 5000],
+    ['the capability assessment', { capabilityAssessment: { overallRecommendation: 'Outsource everything.' } }, (p: Awaited<ReturnType<typeof getPlan>>) => p?.capabilityAssessment.overallRecommendation, ''],
+  ] as const)('case 2c: changing %s on an APPROVED plan is refused and nothing is written', async (_label, change, read, approvedValue) => {
+    await savePlan(base);
+    await transitionPlan(TENANT, ORG, PLAN, 'approved', 'u-alice');
+    await expect(savePlan({ ...base, ...change })).rejects.toMatchObject({ code: 'conflict' });
+    expect(read(await getPlan(TENANT, ORG, PLAN)), 'the approved value is intact').toBe(approvedValue);
+  });
+
+  it.each(['in_production', 'completed'] as const)('case 2d: a plan in %s is guarded too (every non-draft status)', async (status) => {
+    await savePlan(base);
+    await transitionPlan(TENANT, ORG, PLAN, status, 'u-alice');
+    await expect(savePlan({ ...base, strategySummary: 'Something nobody approved.' })).rejects.toMatchObject({ code: 'conflict' });
+    const stored = await getPlan(TENANT, ORG, PLAN);
+    expect(stored?.strategySummary).toBe(base.strategySummary);
+    expect(stored?.status).toBe(status);
   });
 
   it('case 3 (the leg the comparison layer decides): an IDENTICAL re-write of an approved plan still succeeds', async () => {
@@ -110,5 +135,16 @@ describe('ADR 0728 — an approval attests to content', () => {
     const again = await savePlan(withGhost);
     expect(again.status).toBe('approved');
     expect(again.recommendations[0]?.matchingVendors ?? [], 'the ghost vendor was dropped, so the content is unchanged').toEqual([]);
+  });
+
+  it('case 4: the documented escape — moved back to draft, a re-write is accepted', async () => {
+    // The refusal message tells the caller to "move this one back to draft first";
+    // the guard must not outlive that move.
+    await savePlan(base);
+    await transitionPlan(TENANT, ORG, PLAN, 'approved', 'u-alice');
+    await transitionPlan(TENANT, ORG, PLAN, 'draft', 'u-alice');
+    const again = await savePlan({ ...base, strategySummary: 'Re-planned after un-approving.' });
+    expect(again.status).toBe('draft');
+    expect((await getPlan(TENANT, ORG, PLAN))?.strategySummary).toBe('Re-planned after un-approving.');
   });
 });

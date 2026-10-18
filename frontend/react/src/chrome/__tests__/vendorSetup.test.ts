@@ -3,6 +3,10 @@
  *  - only OAuth-CONFIGURED providers count toward a vendor group (a host with
  *    dark Connect buttons never shows the wizard);
  *  - vendor seeding follows the SSO identity, Microsoft preferred when both.
+ *
+ * Sabotage that turns it red: count unconfigured or non-oauth2 providers (the
+ * api_key fixture carries a RECOGNIZED vendor, so only the kind check excludes it);
+ * require EVERY vendor to be configured; prefer Google over Microsoft.
  */
 import { describe, expect, it } from 'vitest';
 
@@ -19,7 +23,7 @@ describe('pickVendorGroups', () => {
       p('google', 'Google', true),
       p('gmail', 'Google', false), // unconfigured — excluded
       p('microsoft-graph', 'Microsoft 365', true),
-      p('servicenow', undefined, true, 'api_key'), // not oauth2 — excluded
+      p('google-apikey', 'Google', true, 'api_key'), // not oauth2 — excluded even under a recognized vendor
       p('slack', 'Slack', true), // unrecognized vendor for the wizard — excluded
     ]);
     expect(eligible).toBe(true);
@@ -30,6 +34,10 @@ describe('pickVendorGroups', () => {
   it('ineligible when nothing is configured (never a dead wizard)', () => {
     const { eligible } = pickVendorGroups([p('google', 'Google', false), p('microsoft-graph', 'Microsoft 365', false)]);
     expect(eligible).toBe(false);
+  });
+
+  it('eligible when any ONE recognized vendor is configured', () => {
+    expect(pickVendorGroups([p('google', 'Google', true), p('microsoft-graph', 'Microsoft 365', false)]).eligible).toBe(true);
   });
 });
 

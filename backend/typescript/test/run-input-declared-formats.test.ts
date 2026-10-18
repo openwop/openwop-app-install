@@ -8,6 +8,10 @@
  * The third leg is the one that made D2 safe to ship: an UNKNOWN format must be IGNORED,
  * not thrown. A throw would hit `validateRunInputs`' fail-open catch and drop validation
  * ENTIRELY for that schema — D2 weakening the guard instead of tightening it.
+ *
+ * Red under: `validateFormats: false` (BORN RED), `strict: true` (the unknown format throws
+ * → fail-open → the rest of the schema stops biting), or a validator that refuses valid
+ * input / accepts everything (probes w32g3-fmt-*).
  */
 import { describe, expect, it } from 'vitest';
 import { validateRunInputs } from '../src/host/runInputValidation.js';
@@ -17,9 +21,10 @@ const emailSchema = { type: 'object', properties: { to: { type: 'string', format
 describe('ADR 0729 D2 — declared formats are enforced', () => {
   it('BORN RED: a bad email against `format: email` is now an error (it validated before)', () => {
     const errs = validateRunInputs(emailSchema, { to: 'not-an-email' });
-    expect(errs, 'a declared format is a contract the author asked for').not.toBeNull();
-    expect(errs!.length).toBeGreaterThan(0);
-    expect(errs![0]!.path).toBe('/to');
+    // Exact: a FORMAT rejection at `/to`, not merely some error there.
+    expect(errs, 'a declared format is a contract the author asked for').toEqual([
+      { path: '/to', message: 'must match format "email"' },
+    ]);
   });
 
   it('a well-formed value still passes', () => {
@@ -37,8 +42,8 @@ describe('ADR 0729 D2 — declared formats are enforced', () => {
     // …and the REST of the schema is still enforced, which is what proves the guard
     // survived rather than being silently dropped.
     const errs = validateRunInputs(schema, { sku: 'anything', n: 'not-a-number' });
-    expect(errs, 'the rest of the schema must still bite').not.toBeNull();
-    expect(errs!.some((e) => e.path === '/n')).toBe(true);
+    // Exactly one error, at `/n` — the unknown-format field itself produced none.
+    expect(errs, 'the rest of the schema must still bite').toEqual([{ path: '/n', message: 'must be number' }]);
   });
 
   it('a schema declaring NO format behaves exactly as before (the shipped population)', () => {

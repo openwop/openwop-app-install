@@ -73,6 +73,7 @@ export const messages = {
   proveFirstOverride: '— una persona aún interviene en',
   proveFirstOverrideTail: 'de las ejecuciones',
   viewerReadOnly: 'Puede ver esta fuerza laboral. Cambiar su migración o su transición requiere acceso de edición a este espacio de trabajo; pídalo a un administrador.',
+  workforceChangedReload: 'Alguien cambió esta fuerza laboral después de que la abrió. Ahora se muestra su cambio: revíselo y vuelva a hacer el suyo.',
   showcaseReadOnly:
     'Datos de muestra: aquí los controles de autonomía son de solo lectura. Ejecute su propia plantilla digital para gestionarla.',
   advanceTo: 'Avanzar a {{label}} →',

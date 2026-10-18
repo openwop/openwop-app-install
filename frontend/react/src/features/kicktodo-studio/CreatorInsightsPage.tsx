@@ -20,6 +20,7 @@ import { Button } from '../../ui/Button.js';
 import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
+import { PageHeader } from '../../ui/PageHeader.js';
 import { StateCard } from '../../ui/StateCard.js';
 import { Notice } from '../../ui/Notice.js';
 import { WandIcon } from '../../ui/icons/index.js';
@@ -106,12 +107,15 @@ export function CreatorInsightsPage(): JSX.Element {
       <div className="action-bar">
         <Link className="btn-ghost btn-sm" to="/kicktodo/studio">{t('backToStudio')}</Link>
       </div>
-      <header className="page-header">
-        <h1 className="page-header__title">{t('insightsTitle')}</h1>
-        <p className="page-header__lede">{t('insightsLede')}</p>
-      </header>
+      <PageHeader title={t('insightsTitle')} lede={t('insightsLede')} />
 
-      {error && <Notice variant="error">{t('insightsError')}</Notice>}
+      {/* CS-4 — a failed read offers its way back (DESIGN.md §4.6), not a reload. */}
+      {error && (
+        <div className="action-bar">
+          <Notice variant="error" announce={t('insightsError')}>{t('insightsError')}</Notice>
+          <Button variant="quiet" size="sm" onClick={() => void load().catch(() => setError(true))}>{t('common:retry')}</Button>
+        </div>
+      )}
       {!rows && !error && <StateCard loading title={t('insightsTitle')} />}
 
       {rows && rows.length === 0 && !error && (

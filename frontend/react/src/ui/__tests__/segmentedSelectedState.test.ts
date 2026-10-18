@@ -38,6 +38,13 @@ describe('.segmented selection is visible in both ARIA idioms', () => {
     expect(rule, 'the pressed/selected rule should exist').toBeTruthy();
     expect(rule![1]).toMatch(/background/);
     expect(rule![1]).toMatch(/color/);
+    // The SELECTED arm read on its own. The pressed-only read passed when the
+    // aria-selected selector was split into its own EMPTY rule — DS-SEG-1 itself
+    // (w49 probe `seg-split`). When both share one rule this reads the same body.
+    const sel = /\.segmented\s*>\s*button\[aria-selected="true"\][^{]*\{([^}]*)\}/.exec(css);
+    expect(sel, 'the aria-selected rule should exist').toBeTruthy();
+    expect(sel![1]).toMatch(/background/);
+    expect(sel![1]).toMatch(/color/);
   });
 
   it('SABOTAGE — the segmented base still resets variants, so the rule is load-bearing', () => {

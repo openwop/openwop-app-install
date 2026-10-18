@@ -10,6 +10,8 @@ import { pairCommand } from '../ClaudeCodeDevicesPage.js';
 describe('pairCommand', () => {
   it('same-origin path API (Firebase /api) ⇒ --api-base /api', () => {
     expect(pairCommand('https://app.openwop.dev', '/api')).toBe('npx @openwop/agent-host pair --host https://app.openwop.dev --api-base /api');
+    // A relative base with a trailing slash is trimmed the same way.
+    expect(pairCommand('https://app.openwop.dev', '/api/')).toBe('npx @openwop/agent-host pair --host https://app.openwop.dev --api-base /api');
   });
   it('API at the app origin root ⇒ no --api-base', () => {
     expect(pairCommand('https://app.example.com', 'https://app.example.com')).toBe('npx @openwop/agent-host pair --host https://app.example.com');
@@ -26,5 +28,8 @@ describe('shortDeviceId', () => {
     expect(shortDeviceId('ccd_XRqyAV_D6S1M')).toBe('ccd_XRqy…');
     expect(shortDeviceId('ccd_1HuOiN_nbFM1')).not.toBe(shortDeviceId('ccd_XRqyAV_D6S1M'));
     expect(shortDeviceId('ccd_abc')).toBe('ccd_abc');
+    // The boundary: 9 characters stay whole, 10 are shortened.
+    expect(shortDeviceId('ccd_abcde')).toBe('ccd_abcde');
+    expect(shortDeviceId('ccd_abcdef')).toBe('ccd_abcd…');
   });
 });

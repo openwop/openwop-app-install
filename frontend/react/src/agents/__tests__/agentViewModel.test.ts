@@ -65,9 +65,11 @@ function board(columns: { id: string; name: string }[], over: Partial<KanbanBoar
     columns: columns.map((c) => ({ ...c })), createdAt: 'now', updatedAt: 'now', ...over,
   };
 }
+let cardSeq = 0;
 function card(columnId: string): KanbanCard {
+  cardSeq += 1;
   return {
-    id: `c-${Math.random()}`, boardId: 'b1', columnId, title: 'T',
+    id: `c-${cardSeq}`, boardId: 'b1', columnId, title: 'T',
     order: 0, createdAt: 'now', updatedAt: 'now',
   };
 }
@@ -90,10 +92,12 @@ beforeEach(() => {
 describe('loadAgentViews — lane counts (laneOf / buildView)', () => {
   it('classifies cards into todo/working/waiting/done by column id', async () => {
     m.roster = [entry()];
-    m.boards = [{
-      ...board(STD_COLUMNS),
-      cards: [card('todo'), card('todo'), card('working'), card('waiting'), card('done')],
-    }];
+    m.boards = [
+      // Another agent's board, listed FIRST: the view must pick the board by
+      // rosterId, not the first board it is handed.
+      { ...board(STD_COLUMNS, { id: 'b-other', rosterId: 'other' }), cards: [card('done'), card('done'), card('done')] },
+      { ...board(STD_COLUMNS), cards: [card('todo'), card('todo'), card('working'), card('waiting'), card('done')] },
+    ];
     const [view] = await loadAgentViews();
     expect(view!.laneCounts).toEqual({ todo: 2, working: 1, waiting: 1, done: 0 + 1 });
   });
@@ -119,10 +123,15 @@ describe('loadAgentViews — status derivation (deriveStatus)', () => {
     cards?: KanbanCard[];
     noBoard?: boolean;
     failed?: boolean;
+    /** A recent failure belonging to ANOTHER agent — must not badge this one. */
+    otherFailed?: boolean;
   }): Promise<string> {
     m.roster = [entry(over.entry)];
     m.boards = over.noBoard ? [] : [{ ...board(STD_COLUMNS), cards: over.cards ?? [] }];
-    m.failures = over.failed ? { items: [{ rosterId: 'r1' }], truncated: false } : { items: [], truncated: false };
+    m.failures = {
+      items: [...(over.failed ? [{ rosterId: 'r1' }] : []), ...(over.otherFailed ? [{ rosterId: 'other' }] : [])],
+      truncated: false,
+    };
     const [view] = await loadAgentViews();
     return view!.status;
   }
@@ -139,8 +148,8 @@ describe('loadAgentViews — status derivation (deriveStatus)', () => {
   it('error (overrides working/waiting) when a recent run failed', async () => {
     expect(await statusFor({ cards: [card('working')], failed: true })).toBe('error');
   });
-  it('working when a card sits in the Working lane', async () => {
-    expect(await statusFor({ cards: [card('working')] })).toBe('working');
+  it('working when a card sits in the Working lane (another agent\'s failure does not badge it)', async () => {
+    expect(await statusFor({ cards: [card('working')], otherFailed: true })).toBe('working');
   });
   it('waiting when a card sits in the Waiting lane (and none working)', async () => {
     expect(await statusFor({ cards: [card('waiting')] })).toBe('waiting');
@@ -183,10 +192,14 @@ describe('loadAgentView — single agent', () => {
 });
 
 describe('exported pure helpers', () => {
-  it('statusMeta returns a label/chip/help for every status', () => {
+  it('statusMeta returns the user-visible label, a chip modifier and help for every status', () => {
+    const labels = {
+      active: 'Ready', working: 'Working', waiting: 'Waiting on you',
+      paused: 'Paused', 'needs-setup': 'Needs setup', error: 'Run failed',
+    } as const;
     for (const st of ['active', 'working', 'waiting', 'paused', 'needs-setup', 'error'] as const) {
       const meta = statusMeta(st);
-      expect(meta.label).toBeTruthy();
+      expect(meta.label).toBe(labels[st]);
       expect(meta.chip).toMatch(/^chip--/);
       expect(meta.help).toBeTruthy();
     }
@@ -194,21 +207,33 @@ describe('exported pure helpers', () => {
 
   it('statusRingColor maps statuses to CSS token vars', () => {
     expect(statusRingColor('waiting')).toBe('var(--color-warning)');
+    expect(statusRingColor('working')).toBe('var(--clay)');
+    expect(statusRingColor('needs-setup')).toBe('var(--color-danger)');
     expect(statusRingColor('active')).toBe('var(--color-success)');
     expect(statusRingColor('error')).toBe('var(--color-danger)');
     expect(statusRingColor('paused')).toBe('var(--rule)'); // default branch
   });
 
   it('relativeTime renders compact buckets and falls back gracefully', () => {
-    expect(relativeTime(undefined)).toBeNull();
-    expect(relativeTime('not-a-date')).toBeNull();
-    expect(relativeTime(new Date().toISOString())).toBe('just now');
-    expect(relativeTime(new Date(Date.now() - 5 * 60_000).toISOString())).toBe('5m ago');
-    expect(relativeTime(new Date(Date.now() - 3 * 3_600_000).toISOString())).toBe('3h ago');
-    expect(relativeTime(new Date(Date.now() - 2 * 86_400_000).toISOString())).toBe('2d ago');
-    // Past a week → ISO date prefix.
-    const old = new Date(Date.now() - 30 * 86_400_000).toISOString();
-    expect(relativeTime(old)).toBe(old.slice(0, 10));
+    // A FIXED clock (only Date is faked) and literal inputs, so the buckets and
+    // their boundaries are exact under any wall clock, incl. the clock-shift lane.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(new Date('2026-03-20T12:00:00.000Z'));
+      expect(relativeTime(undefined)).toBeNull();
+      expect(relativeTime('not-a-date')).toBeNull();
+      expect(relativeTime('2026-03-20T12:00:00.000Z')).toBe('just now');
+      expect(relativeTime('2026-03-20T11:59:16.000Z')).toBe('just now'); // 44 s
+      expect(relativeTime('2026-03-20T11:55:00.000Z')).toBe('5m ago');
+      expect(relativeTime('2026-03-20T09:00:00.000Z')).toBe('3h ago');
+      expect(relativeTime('2026-03-18T12:00:00.000Z')).toBe('2d ago');
+      expect(relativeTime('2026-03-13T12:00:00.000Z')).toBe('7d ago'); // the last relative bucket
+      // Past a week → ISO date prefix.
+      expect(relativeTime('2026-03-12T12:00:00.000Z')).toBe('2026-03-12'); // 8 days
+      expect(relativeTime('2026-02-18T12:00:00.000Z')).toBe('2026-02-18');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

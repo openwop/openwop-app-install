@@ -17,14 +17,14 @@ import type { ChannelRosterEntry } from '../../client/channelsClient.js';
 
 export function ChannelRosterPanel({
   roster,
-  viewerIsOwner,
+  viewerCanManage,
   viewerSubjectRef,
   onManage,
   onLeave,
   variant = 'rail',
 }: {
   roster: readonly ChannelRosterEntry[];
-  viewerIsOwner: boolean;
+  viewerCanManage: boolean;
   viewerSubjectRef: string | null;
   onManage: () => void;
   onLeave: () => void;
@@ -77,7 +77,7 @@ export function ChannelRosterPanel({
         })}
       </ul>
       <div className="u-pad-2-4 u-flex u-gap-2">
-        {viewerIsOwner ? (
+        {viewerCanManage ? (
           <Button variant="quiet" size="sm" className="u-iflex u-items-center u-gap-1" onClick={onManage}>
             <SettingsIcon size={13} /> {t('manageMembersCta')}
           </Button>

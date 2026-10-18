@@ -163,3 +163,16 @@ export async function purgeBrandFonts(tenantId: string, brandId: string): Promis
   }
 }
 
+
+/** ADR 0891 D8 — a font's attestation outlives the person who made it: the row
+ *  stays (it is still a record that the license was attested), `attestedBy`
+ *  becomes `tombstone`. Returns the rows touched. */
+export async function eraseBrandFontSubject(tenantId: string, forms: ReadonlySet<string>, tombstone: string): Promise<number> {
+  let touched = 0;
+  for (const row of await fonts.listByPrefix(`${tenantId}:`)) {
+    if (row.tenantId !== tenantId || !forms.has(row.attestedBy)) continue;
+    await fonts.put({ ...row, attestedBy: tombstone });
+    touched += 1;
+  }
+  return touched;
+}

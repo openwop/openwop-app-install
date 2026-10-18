@@ -3,6 +3,7 @@ import type { FeatureRoute } from '../../chrome/featureTypes.js';
 import type { FrontendFeature } from '../registry.js';
 
 const LeaderboardPage = lazy(() => import('./LeaderboardPage.js').then((m) => ({ default: m.LeaderboardPage })));
+const AgentEvalsPanel = lazy(() => import('./agent/AgentEvalsPanel.js').then((m) => ({ default: m.AgentEvalsPanel })));
 const ArenaPage = lazy(() => import('./ArenaPage.js').then((m) => ({ default: m.ArenaPage })));
 
 const routes: FeatureRoute[] = [
@@ -24,4 +25,9 @@ const routes: FeatureRoute[] = [
   { path: '/leaderboard/arena', element: <ArenaPage />, tier: 'admin' , archetype: 'admin',},
 ];
 
-export const evalsFeature: FrontendFeature = { id: 'evals', routes };
+export const evalsFeature: FrontendFeature = {
+  id: 'evals',
+  routes,
+  // ADR 0889 D8 — the agent workspace's Evals tab (suites, runs, scorecards, capture).
+  agentWorkspaceTabs: [{ key: 'evals', labelKey: 'wsTabEvals', render: (p) => <AgentEvalsPanel {...p} /> }],
+};

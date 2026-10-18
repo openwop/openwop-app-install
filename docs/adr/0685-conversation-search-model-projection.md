@@ -25,7 +25,7 @@ commit agrees, and three of the checks that found defects elsewhere in this loop
 - **`CSWF-1` is STALE.** It says the agent lane serves models content the human deleted. The
   `CSC-1` watermark landed (`searchEngine.ts:80`, labelled `(CSC-1)`) with a `TOMBSTONE_CONTENT`
   sentinel (`:83`) and a dedicated **born-red** test —
-  `test/conversation-search-freshness.test.ts:86`, *"a tombstone DELETE removes the deleted
+  `test/conversation-search-freshness.test.ts:90`, *"a tombstone DELETE removes the deleted
   content from the index (privacy)"*. Fourth carried row this session found already fixed.
 
 ## D1 (`CSWF-2`, upgraded from the instance to its generator) — the tool has no projection
@@ -80,3 +80,10 @@ This record read `Status: Proposed` while its decision was already merged in **#
 **Evidence.** `features/conversation-search/agentTools.ts:60-71` projects an explicit allowlist; `matchedAt` absent; rationale at `:49-58`.
 
 **Witness caveat:** 3 of the 4 legs in the cited test are source-text assertions over `agentTools.ts`, so they pin the current spelling; leg 1 is the behavioural one.
+
+> **CORRECTED 2026-10-11 (/grade-tests wave 24):** all FOUR legs were source-text assertions — leg 1
+> sliced `agentTools.ts` and checked each key literal was present, it never ran the tool. A `...h`
+> spread inside the projection (re-leaking every engine field, `matchedAt` included) left all four
+> green (probe `w24g1-proj-spread-engine-hit`: vacuous). The legs are replaced by one behavioural case
+> that runs the registered tool and asserts its output hit's keys EQUAL the allowlist and carry no
+> `matchedAt` — the witness the D1 text above asked for.

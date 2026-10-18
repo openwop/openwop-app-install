@@ -103,6 +103,10 @@ describe('kernel discipline', () => {
 describe('ADR 0422 P2 — intake', () => {
   it('whatsapp inbound files onto ONE continuous ticket; provider retries dedupe; unconfigured no-ops', async () => {
     const { onWhatsAppInboundForTickets, setIntakeConfig } = await import('../src/features/service-desk/intake.js');
+    // ADR 0878 D9 — intake files only while Service desk is ON.
+    const { saveConfig } = await import('../src/host/featureToggles/service.js');
+    const { getToggleDefault } = await import('../src/host/featureToggles/registry.js');
+    await saveConfig({ ...getToggleDefault('service-desk')!, status: 'on' }, 'test');
     const t2 = 'tenant-sd-intake';
     // Unconfigured: no ticket minted.
     await onWhatsAppInboundForTickets({ tenantId: t2, connectionId: 'conn-1', body: { From: '+15550001', Body: 'help', MessageSid: 'SMa' } });
@@ -218,7 +222,11 @@ describe('ADR 0422 P3 — the governed agent lane', () => {
     // all. It now asserts the STATUS, which is what the product claims.
     const outcome = await executeApprovedAction(runDeps, T, action!, 'approver-1');
     expect(outcome, 'no run is dispatched for a servicedesk reply').toBeNull();
-    expect((await getPendingAction(T, parsed.queued!.actionId))!.status).toBe('sent');
+    // ADR 0878 (grade-code SD2CD-1) — this asserted `sent`, and it was the same
+    // defect class as the AST2-B2 note above: the ticket is a FORM ticket, which
+    // has no reply channel, so nothing reached the customer. The reply is on the
+    // thread (asserted below); the SEND failed, and the action now says so.
+    expect((await getPendingAction(T, parsed.queued!.actionId))!.status).toBe('failed');
     const after = await getTicket(T, ticket.ticketId);
     expect(after!.messages).toHaveLength(2);
     expect(after!.messages[1]!.direction).toBe('outbound');
@@ -351,10 +359,12 @@ describe('ADR 0422 P5 — the public widget lane', () => {
     expect(await tenantForIntakeKey(key)).toBeNull();
     expect(await tenantForIntakeKey(key2)).toBe(t5);
     // Visitor token: verify round-trip; tampering fails.
-    const { visitorId, token } = mintVisitorToken();
-    expect(verifyVisitorToken(token)).toBe(visitorId);
-    expect(verifyVisitorToken(token.slice(0, -1) + (token.endsWith('0') ? '1' : '0'))).toBeNull();
-    expect(verifyVisitorToken('sdv1.aaaaaaaaaaaaaaaaaaaa.' + 'b'.repeat(32))).toBeNull();
+    const { visitorId, token } = mintVisitorToken(t5);
+    expect(verifyVisitorToken(token, t5)).toBe(visitorId);
+    expect(verifyVisitorToken(token.slice(0, -1) + (token.endsWith('0') ? '1' : '0'), t5)).toBeNull();
+    expect(verifyVisitorToken('sdv2.aaaaaaaaaaaaaaaaaaaa.' + 'b'.repeat(32), t5)).toBeNull();
+    // ADR 0878 D3a — bound to the tenant: another tenant's widget refuses it.
+    expect(verifyVisitorToken(token, 'tenant-other')).toBeNull();
   });
 
   it('the visitor thread is find-or-create per visitor and the public view never contains internal notes', async () => {

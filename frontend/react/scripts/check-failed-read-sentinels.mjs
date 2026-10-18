@@ -176,8 +176,14 @@ const SRC = join(__dirname, '..', 'src');
 // failed-read swallows (schedule tri-state, peers list) into stated failures.
 // CLNP-2(d) — 44 → 43: the kanban assignee picker's `.catch(() => setMembers([]))`
 // now keeps the previous list and renders a stated 'couldn't load members' option.
+// CS-1 (KickTodo grade-ux, 2026-10-15) — 43 → 38: the Creator Studio client's side
+// reads return null only on 404 and rethrow anything else; the candidate workspace
+// shows a scoped 'couldn't load this section' state with Retry instead of an empty one.
 // Shrink-only: never raise this without the disclosure the header demands.
-const BASELINE = readGateBaseline('check-failed-read-sentinels', 'OPENWOP_FAILED_READ_BASELINE', 43);
+// ADR 0779 D7 near-miss (EMPTY-ON-FAIL sweep, 2026-10-15) — 38 → 37: the agent
+// portfolio's `.catch(() => setMine([]))` now also records `mineFailed`, so a card
+// whose workflow could not be checked says so instead of claiming "Local-only".
+const BASELINE = readGateBaseline('check-failed-read-sentinels', 'OPENWOP_FAILED_READ_BASELINE', 37);
 
 /**
  * TWO shapes are counted, both of which hand a render an empty value it cannot

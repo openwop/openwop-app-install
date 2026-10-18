@@ -1,6 +1,7 @@
 /**
- * Slash-picker trigger detection (fix: `/` showed no command/workflow menu once
- * an `@agent` was already in the composer).
+ * Slash-picker trigger detection, ADR 0764 D4 (CHATWF-2) (fix: `/` showed no
+ * command/workflow menu once an `@agent` was already in the composer). Breaks it:
+ * the picker staying shut after `@agent `, or staying open in args mode.
  */
 import { describe, expect, it } from 'vitest';
 import { detectSlashTrigger } from '../workflowMentions.js';

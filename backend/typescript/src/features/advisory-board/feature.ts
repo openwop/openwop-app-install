@@ -64,7 +64,10 @@ export const advisoryBoardFeature: BackendFeature = {
     description:
       'Assemble councils of named advisor agents (digital-clone personas) and convene them together in one shared chat via `@@`. Each advisor draws from its own bound knowledge and the council sees each other\'s turns; a moderator synthesizes. Advisors are roster agents; the board is a grouping under /advisors/*, not a Kanban board. Boards are private or workspace-shared. Simulated personas of real people carry a disclaimer; living individuals require an explicit acknowledgement.',
     category: 'Agents',
-    status: 'on',
+    // ADR 0892 — opt-in like CRM: OFF by default so a white-label install starts lean
+    // (supersedes ADR 0229's default-on). App migration 24 keeps it on for an
+    // install that already has data for it.
+    status: 'off',
     bucketUnit: 'tenant',
     salt: 'advisory-board',
   },

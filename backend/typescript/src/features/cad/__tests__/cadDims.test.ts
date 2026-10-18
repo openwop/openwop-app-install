@@ -2,6 +2,12 @@
  * Dimension system (ADR 0388 P3) — derived values, the flat tolerance grammar
  * (validator closed-world), deterministic suggestions, and the FE↔BE twin
  * byte-parity pin.
+ *
+ * Sabotage-witnessed (/grade-tests w34): diameter/box-depth/mesh-scale/arc
+ * derivation, the asymmetric and limit tolerance text, suggestion coverage +
+ * per-kind order, and each validator rule (asserted by the exact error PATH, so
+ * an unrelated error cannot satisfy it). The parity case passes vacuously only
+ * in a checkout without the frontend tree (GRADE-PASS CAD-G4 — recorded ceiling).
  */
 import { describe, expect, it } from 'vitest';
 import { existsSync, readFileSync } from 'node:fs';
@@ -29,12 +35,16 @@ describe('deriveDimensionValue (values never stored — derived at read)', () =>
     // mesh extent comes from the injected bbox reader (× scale)
     expect(deriveDimensionValue({ kind: 'mesh', scale: 2 }, { kind: 'linear', solid: 0, axis: 'x' }, () => 15)).toBe(30);
     expect(deriveDimensionValue({ kind: 'mesh' }, { kind: 'linear', solid: 0, axis: 'x' }, () => null)).toBeNull();
+    // arc = full circumference 2π·5 (hand-derived), r6-rounded
+    expect(deriveDimensionValue(CYL, { kind: 'arc', solid: 0 })).toBeCloseTo(31.415927, 6);
   });
 
   it('formats values with the tolerance grammar', () => {
     expect(formatDimension(20, { kind: 'linear', solid: 0, tolType: 'symmetric', tolA: 0.5 }, 'mm')).toBe('20 mm ±0.5');
     expect(formatDimension(20, { kind: 'linear', solid: 0, tolType: 'asymmetric', tolA: 0.2, tolB: 0.1 }, 'mm')).toBe('20 mm +0.2/−0.1');
     expect(formatDimension(90, { kind: 'angular', solid: 0 }, 'mm')).toBe('90°');
+    // limit = ABSOLUTE (lower…upper); band 0.4 keeps mm at 2dp
+    expect(formatDimension(10, { kind: 'diameter', solid: 0, tolType: 'limit', tolA: 10.2, tolB: 9.8 }, 'mm')).toBe('10 mm (9.8…10.2)');
   });
 });
 
@@ -55,24 +65,24 @@ describe('suggestDimensions (deterministic)', () => {
 
 describe('validateCadDoc — dimensions mirror (closed world)', () => {
   const base = { name: 'D', units: 'mm', solids: [BOX, CYL] };
-  const ok = (dims: unknown): number => validateCadDoc({ ...base, dimensions: dims } as never).errors.length;
+  const paths = (dims: unknown): string[] => validateCadDoc({ ...base, dimensions: dims }).errors.map((e) => e.path);
 
   it('accepts a valid dimension set', () => {
-    expect(ok([
+    expect(paths([
       { kind: 'linear', solid: 0, axis: 'x', unit: 'mm', tolType: 'symmetric', tolA: 0.1 },
       { kind: 'diameter', solid: 1, tolType: 'limit', tolA: 5.1, tolB: 4.9 },
-    ])).toBe(0);
+    ])).toEqual([]);
   });
 
   it('rejects: out-of-range solid, missing axis, wrong unit, bad tolerance grammar, unknown field', () => {
-    expect(ok([{ kind: 'linear', solid: 9, axis: 'x' }])).toBeGreaterThan(0);
-    expect(ok([{ kind: 'linear', solid: 0 }])).toBeGreaterThan(0); // linear needs axis
-    expect(ok([{ kind: 'radial', solid: 1, axis: 'x' }])).toBeGreaterThan(0); // axis only on linear/ordinate
-    expect(ok([{ kind: 'linear', solid: 0, axis: 'x', unit: 'in' }])).toBeGreaterThan(0); // unit ≠ doc
-    expect(ok([{ kind: 'linear', solid: 0, axis: 'x', tolA: 0.1 }])).toBeGreaterThan(0); // tolA without tolType
-    expect(ok([{ kind: 'linear', solid: 0, axis: 'x', tolType: 'asymmetric', tolA: 0.1 }])).toBeGreaterThan(0); // missing tolB
-    expect(ok([{ kind: 'linear', solid: 0, axis: 'x', tolType: 'limit', tolA: 1, tolB: 2 }])).toBeGreaterThan(0); // upper < lower
-    expect(ok([{ kind: 'linear', solid: 0, axis: 'x', bogus: 1 }])).toBeGreaterThan(0);
+    expect(paths([{ kind: 'linear', solid: 9, axis: 'x' }])).toEqual(['dimensions[0].solid']);
+    expect(paths([{ kind: 'linear', solid: 0 }])).toEqual(['dimensions[0].axis']); // linear needs axis
+    expect(paths([{ kind: 'radial', solid: 1, axis: 'x' }])).toEqual(['dimensions[0].axis']); // axis only on linear/ordinate
+    expect(paths([{ kind: 'linear', solid: 0, axis: 'x', unit: 'in' }])).toEqual(['dimensions[0].unit']); // unit ≠ doc
+    expect(paths([{ kind: 'linear', solid: 0, axis: 'x', tolA: 0.1 }])).toEqual(['dimensions[0].tolType']); // tolA without tolType
+    expect(paths([{ kind: 'linear', solid: 0, axis: 'x', tolType: 'asymmetric', tolA: 0.1 }])).toEqual(['dimensions[0].tolB']); // missing tolB
+    expect(paths([{ kind: 'linear', solid: 0, axis: 'x', tolType: 'limit', tolA: 1, tolB: 2 }])).toEqual(['dimensions[0].tolA']); // upper < lower
+    expect(paths([{ kind: 'linear', solid: 0, axis: 'x', bogus: 1 }])).toEqual(['dimensions[0].bogus']);
   });
 });
 

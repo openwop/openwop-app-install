@@ -5,7 +5,12 @@
  *   - strategy KR metric sync reads crm / analytics / commerce → each source;
  *     a refused source contributes NOTHING (a skip, never a confirmed 0);
  *   - Production's vendor→company link reads crm → `crm`.
- * Each refusal has a positive control (an entitled tenant is served).
+ * Each refusal has a positive control (an entitled tenant is served), and each
+ * lane is refused by the TOGGLE as well as by the plan (w35: the header claimed
+ * both and only the plan half was asserted).
+ * Sabotage witnesses (w35): each lane's own refusal skipped, the CMS plan reason
+ * mislabelled, the CMS not-found check moved behind the gate, and a cleared
+ * Production link sent through the crm gate each red a leg below.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -30,11 +35,13 @@ vi.mock('../src/features/crm/crmEntitiesService.js', async (orig) => ({
   getCompany: (t: string, o: string, id: string) => getCompany(t, o, id),
 }));
 
-const strategyFor = (tenantId: string): unknown => ({
-  id: `s-${tenantId}`, tenantId, scope: 'org', status: 'active',
-  objectives: [{ id: 'o1', keyResults: [
-    { id: 'kr-crm', measure: { source: { kind: 'crm-deal-total', orgId: 'org1' } } },
-    { id: 'kr-anl', measure: { source: { kind: 'analytics-conversions', orgId: 'org1' } } },
+const strategyFor = (tenantId: string): Strategy => ({
+  id: `s-${tenantId}`, tenantId, orgId: 'org1', scope: 'org', status: 'active', title: 'Grow',
+  planningHorizon: 'quarter', period: { label: 'Q1' }, initiatives: [], links: [],
+  createdBy: 'u', createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
+  objectives: [{ id: 'o1', title: 'Revenue', keyResults: [
+    { id: 'kr-crm', title: 'Deals', measure: { kind: 'currency', source: { kind: 'crm-deal-total', orgId: 'org1' } } },
+    { id: 'kr-anl', title: 'Conversions', measure: { kind: 'numeric', source: { kind: 'analytics-conversions', orgId: 'org1' } } },
   ] }],
 });
 vi.mock('../src/features/strategy/strategyService.js', async (orig) => ({
@@ -56,6 +63,7 @@ import { OpenwopError } from '../src/types.js';
 import { createExperiment, experimentResults } from '../src/features/cms/pageExperimentsService.js';
 import { syncSourcedKrs } from '../src/features/strategy/metricSync.js';
 import { resolveCompanyRef, type Ctx } from '../src/features/production/routes.js';
+import type { Strategy } from '../src/features/strategy/types.js';
 
 const FEATURES = ['analytics', 'crm', 'commerce'];
 const storage = openSqliteStorage(':memory:');
@@ -77,6 +85,11 @@ beforeEach(async () => {
   });
   vi.clearAllMocks();
 });
+
+/** Switch `featureId` OFF for one tenant (the plan still entitles it). */
+async function toggleOff(featureId: string, tenantId: string): Promise<void> {
+  await saveConfig({ id: featureId, status: 'on', bucketUnit: 'tenant', salt: featureId, tenantOverrides: { [tenantId]: { status: 'off' } } }, 'test');
+}
 
 async function experimentFor(tenantId: string): Promise<string> {
   const exp = await createExperiment({
@@ -103,6 +116,16 @@ describe('G11 — CMS page-experiment results gate on analytics', () => {
     expect(listEventsForExperiment).toHaveBeenCalledTimes(1);
   });
 
+  it('a tenant that switched analytics OFF gets the typed 403 feature_disabled, and the store is never read', async () => {
+    await toggleOff('analytics', 'off-cms');
+    const id = await experimentFor('off-cms');
+    const err = await experimentResults('off-cms', 'org1', 'p1', id).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(OpenwopError);
+    expect((err as OpenwopError).httpStatus).toBe(403);
+    expect((err as OpenwopError).details).toMatchObject({ feature: 'analytics', reason: 'feature_disabled' });
+    expect(listEventsForExperiment).not.toHaveBeenCalled();
+  });
+
   it('an unknown experiment is still a plain not-found (null) before any feature answer', async () => {
     expect(await experimentResults('lapsed-cms', 'org1', 'p1', 'pexp:missing')).toBeNull();
   });
@@ -118,6 +141,15 @@ describe('G11 — strategy KR metric sync gates each source feature', () => {
     expect(appendCheckIn).toHaveBeenCalledTimes(1);
   });
 
+  it('a source switched OFF by toggle is skipped the same way (no read, no check-in)', async () => {
+    await toggleOff('analytics', 'off-strat');
+    const out = await syncSourcedKrs('off-strat', 'u');
+    expect(out.synced.map((s) => s.krId)).toEqual(['kr-crm']);
+    expect(out.skipped.map((s) => s.krId)).toEqual(['kr-anl']);
+    expect(out.skipped[0]!.reason).toMatch(/^source_feature_unavailable/);
+    expect(summarize).not.toHaveBeenCalled();
+  });
+
   it('POSITIVE: an entitled tenant syncs both sources', async () => {
     const out = await syncSourcedKrs('acme-strat', 'u');
     expect(out.synced.map((s) => s.krId).sort()).toEqual(['kr-anl', 'kr-crm']);
@@ -126,12 +158,23 @@ describe('G11 — strategy KR metric sync gates each source feature', () => {
 });
 
 describe('G11 — Production vendor→company link gates on crm', () => {
-  const ctx = (tenantId: string): Ctx => ({ tenantId, orgId: 'org1', user: { userId: 'u1' } } as unknown as Ctx);
+  const ctx = (tenantId: string): Ctx => ({
+    tenantId, orgId: 'org1',
+    user: { userId: 'u1', tenantId, principalId: 'oidc:u1', groups: [], source: 'oidc', status: 'active', createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z' },
+  });
 
   it('a tenant whose plan excludes crm cannot link a company (typed 403, no crm read)', async () => {
     const err = await resolveCompanyRef(ctx('nocrm-prod'), 'co-1').catch((e: unknown) => e);
     expect((err as OpenwopError).httpStatus).toBe(403);
     expect((err as OpenwopError).details).toMatchObject({ feature: 'crm', field: 'companyId' });
+    expect(getCompany).not.toHaveBeenCalled();
+  });
+
+  it('a tenant that switched crm OFF cannot link either (typed 403 feature_disabled, no crm read)', async () => {
+    await toggleOff('crm', 'off-prod');
+    const err = await resolveCompanyRef(ctx('off-prod'), 'co-1').catch((e: unknown) => e);
+    expect((err as OpenwopError).httpStatus).toBe(403);
+    expect((err as OpenwopError).details).toMatchObject({ feature: 'crm', field: 'companyId', reason: 'feature_disabled' });
     expect(getCompany).not.toHaveBeenCalled();
   });
 

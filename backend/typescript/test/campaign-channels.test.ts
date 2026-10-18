@@ -1,13 +1,27 @@
 /**
  * Campaign Channels (ADR 0157) — the generate + content-quality nodes over a
- * stubbed 3-surface ctx, the five channel child workflows (DAG validity), the
- * artifact-type registration, and the agent pack.
+ * stubbed 3-surface ctx, the five channel child workflows (a generate → HITL
+ * approval-gate DAG — nothing reaches publish without a human), the agent pack
+ * loading (CFP-1), and the creative_briefs prompt↔schema parity (CRB-SP-6).
+ * The agent's exact tool allowlist is pinned in `campaign-agent-tools.test.ts`
+ * › "the generator allowlist is exactly [channels, generate]" (not duplicated here).
+ *
+ * Sabotage that turns it red: accept an unknown channel; generate without a kernel;
+ * drop the brand-voice or KB-grounding prompt leg; pass every quality check; drop the
+ * generate → approve edge or the per-item `itemsFrom`; remove `directions` from the
+ * creative_briefs schema.
  */
 import { describe, it, expect } from 'vitest';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadAgentsFromManifest } from '../src/packs/agentLoader.js';
-import { nodes as nodePack } from '../../../packs/feature.campaign-channels.nodes/index.mjs';
+import { nodes as nodePack, CHANNEL_SPEC } from '../../../packs/feature.campaign-channels.nodes/index.mjs';
+
+/** Walk a JSON-schema-ish object by keys; throws on a missing / non-object hop (no casts). */
+const at = (root: unknown, ...keys: string[]): unknown => keys.reduce<unknown>((cur, k) => {
+  if (typeof cur !== 'object' || cur === null || !(k in cur)) throw new Error(`missing schema path segment: ${k}`);
+  return (cur as Record<string, unknown>)[k];
+}, root);
 import { CHANNEL_WORKFLOWS, CHANNEL_WORKFLOW_IDS } from '../src/features/campaign-channels/channelWorkflows.js';
 
 const REPO_ROOT = join(fileURLToPath(new URL('.', import.meta.url)), '..', '..', '..');
@@ -58,7 +72,7 @@ describe('feature.campaign-channels.nodes — generate', () => {
       'campaign-brief': goodBriefSurface,
       brand: {
         resolveVoice: async () => ({ voice: 'VOICE' }),
-        checkComplianceDeterministic: async (a: unknown) => { calls.compliance = a; return { report: { deterministicScore: 90, hasBannedPhrase: false } }; },
+        checkComplianceDeterministic: async (a: Record<string, unknown>) => { calls.compliance = a; return { report: { deterministicScore: 90, hasBannedPhrase: false } }; },
       },
       kb: { rag: async () => ({ augmentedPrompt: 'GROUNDED', citations: [{ docId: 'doc-1' }] }) },
     };
@@ -68,11 +82,11 @@ describe('feature.campaign-channels.nodes — generate', () => {
     };
     const out = await nodePack['feature.campaign-channels.nodes.generate']({ features, callAI, inputs: { briefId: 'b1', channel: 'landing_page' } });
     expect(out.status).toBe('success');
-    const o = out.outputs as Record<string, any>;
-    expect(o.draft.channel).toBe('landing_page');
-    expect(o.draft.title).toBe('Pick faster');
-    expect(o.qualityReport.overallScore).toBeGreaterThan(0);
-    expect(o.complianceReport.deterministicScore).toBe(90);
+    expect(out.outputs).toMatchObject({ draft: { channel: 'landing_page', title: 'Pick faster' }, complianceReport: { deterministicScore: 90 } });
+    expect(Number(at(out.outputs, 'qualityReport', 'overallScore'))).toBeGreaterThan(0);
+    // The compliance check ran over THIS draft, for this brand + channel.
+    expect(calls.compliance).toMatchObject({ brandId: 'brand-1', channel: 'landing_page' });
+    expect(String(at(calls.compliance, 'content'))).toContain('Pick faster');
     expect(String(calls.prompt)).toContain('VOICE');
     expect(String(calls.prompt)).toContain('GROUNDED');
     expect(String(calls.prompt)).toContain('Pick faster'); // kernel echoed
@@ -81,9 +95,8 @@ describe('feature.campaign-channels.nodes — generate', () => {
   it('content-quality-check flags a draft with no content', async () => {
     const out = await nodePack['feature.campaign-channels.nodes.content-quality-check']({ inputs: { draft: { channel: 'social_posts' }, channel: 'social_posts' } });
     expect(out.status).toBe('success');
-    const r = out.outputs?.report as Record<string, unknown>;
-    expect(r.overallScore).toBeLessThan(70);
-    expect(r.passesThreshold).toBe(false);
+    expect(Number(at(out.outputs, 'report', 'overallScore'))).toBeLessThan(70);
+    expect(at(out.outputs, 'report', 'passesThreshold')).toBe(false);
   });
 });
 
@@ -113,41 +126,35 @@ describe('campaign-channels — channel workflows', () => {
   it('array channels carry itemsFrom (per-item refine); landing page does not', () => {
     const lp = CHANNEL_WORKFLOWS.find((w) => w.workflowId.endsWith('landing-page'));
     const email = CHANNEL_WORKFLOWS.find((w) => w.workflowId.endsWith('email-sequence'));
-    expect((lp?.nodes[1].config as Record<string, unknown>).itemsFrom).toBeUndefined();
-    expect((email?.nodes[1].config as Record<string, unknown>).itemsFrom).toBe('emails');
+    expect(lp?.nodes[1]?.config).toBeDefined();
+    expect(lp?.nodes[1]?.config).not.toHaveProperty('itemsFrom');
+    expect(email?.nodes[1]?.config).toMatchObject({ itemsFrom: 'emails' });
   });
 });
 
 describe('campaign-channels — agent pack', () => {
-  it('loads the Channel Generator with its registered tool-allowlist', () => {
-    // CFP-1: the generator drives channel generation through two REAL registered
-    // tools (catalog/readiness read + channel-workflow igniter), not phantom node
-    // typeIds — the resolution tripwire is test/agent-allowlist-resolution.test.ts.
+  it('loads the Channel Generator agent through the real manifest loader', () => {
+    // CFP-1: the exact allowlist is pinned in campaign-agent-tools.test.ts and the
+    // resolution tripwire is test/agent-allowlist-resolution.test.ts; this case pins
+    // that the pack LOADS (the loader validates the manifest) as exactly one agent.
     const loaded = loadAgentsFromManifest(join(REPO_ROOT, 'packs', 'vendor.openwop-app.campaign-channels.agents'));
-    expect(loaded.length).toBe(1);
-    expect(loaded[0].agentId).toBe('vendor.openwop-app.campaign-channels.agents.channel-generator');
-    expect([...(loaded[0].toolAllowlist ?? [])].sort()).toEqual([
-      'openwop:campaign-channels.channels',
-      'openwop:campaign-channels.generate',
-    ]);
+    expect(loaded.map((a) => a.agentId)).toEqual(['vendor.openwop-app.campaign-channels.agents.channel-generator']);
   });
 });
 
 describe('R2 CRB-SP-6 — creative_briefs prompt↔schema parity (the promptCatalogParity discipline)', () => {
-  it('every field the system prompt promises is expressible in the response schema', async () => {
+  it('every field the system prompt promises is expressible in the response schema', () => {
     // The prompt demanded "2-3 direction variants per format" while the schema
     // (additionalProperties:false) had no `directions` property — the model
     // could never return them, the landing code's `vb.directions` was dead, and
     // every generated managed brief arrived direction-less, immediately
     // triggering the app's own "No creative directions" warning.
-    const { CHANNEL_SPEC } = await import('../../../packs/feature.campaign-channels.nodes/index.mjs');
-    const spec = (CHANNEL_SPEC as Record<string, { system: string; schema: { properties: Record<string, { items?: { properties?: Record<string, unknown>; required?: string[] } }> }; itemsKey: string }>).creative_briefs;
-    expect(spec.system).toMatch(/direction variants/);
-    const itemProps = spec.schema.properties[spec.itemsKey]!.items!.properties!;
-    expect(itemProps).toHaveProperty('directions');
-    const dirItems = (itemProps.directions as { items: { properties: Record<string, unknown>; required: string[] } }).items;
-    expect(dirItems.properties).toHaveProperty('label');
-    expect(dirItems.required).toContain('label');
+    const spec = CHANNEL_SPEC.creative_briefs;
+    expect(spec?.system).toMatch(/direction variants/);
+    expect(spec?.itemsKey).toBe('briefs');
+    const dirItems = at(spec?.schema, 'properties', 'briefs', 'items', 'properties', 'directions', 'items');
+    expect(at(dirItems, 'properties')).toHaveProperty('label');
+    expect(at(dirItems, 'required')).toContain('label');
     // Both halves of the entity's own SSoT claim ("2-3 creative-direction
     // variants") are now structurally reachable: prompt promises, schema admits.
   });

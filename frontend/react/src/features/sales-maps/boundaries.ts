@@ -69,12 +69,3 @@ export function regionValues(values: ReadonlyArray<{ name: string; regionId?: st
   }
   return out;
 }
-
-/** A rough centroid (vertex mean) for placing a region label / matching by proximity. */
-export function regionCentroid(region: BoundaryRegion): [number, number] {
-  const rings = region.geometry.type === 'Polygon' ? region.geometry.coordinates : region.geometry.coordinates.flat();
-  const pts = rings.flat();
-  const lng = pts.reduce((s, p) => s + p[0], 0) / pts.length;
-  const lat = pts.reduce((s, p) => s + p[1], 0) / pts.length;
-  return [lng, lat];
-}

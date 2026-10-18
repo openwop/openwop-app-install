@@ -14,6 +14,14 @@
  * files, ~230 KB, OFL-licensed). A woff2 the vendored set does not contain
  * fulfills as 404 — loud in the font-load assertions, never a silent
  * fall-through back to the network.
+ *
+ * CORRECTED 2026-10-18 (E2E-ORDER-1): "removes the dependency" was true only for
+ * the specs that call this — two of ~27. Every other spec still fetched the CDN
+ * on every page load, through a RENDER-BLOCKING stylesheet, so a hung request
+ * presented as "the page never renders" on whichever spec was loading at the
+ * time. `playwright.config.ts` now fails both hosts at the resolver for every
+ * context; this helper is how a spec that needs the real faces (visual and
+ * width contracts) still gets them, since `page.route` runs first.
  */
 import { promises as fs } from 'node:fs';
 import path from 'node:path';

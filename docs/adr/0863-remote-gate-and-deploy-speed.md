@@ -172,6 +172,28 @@ the app, whose self-HTTP bridge receives that same assigned port. Functional
 assertions and timeouts are unchanged. This integration changes only CI
 scheduling, test setup/waits, and this ADR; application runtime files are intact.
 
+> **CORRECTED 2026-10-14 — the conformance ∥ frontend-vitest overlap reds the
+> frontend lane under load.** "Conformance was joined with zero wait: it finished
+> inside the 511 s frontend lane" describes the overlap D6 chose. Slot 77 went red
+> three times on three DIFFERENT async UI tests: `ConnectionRequiredCard`,
+> `ExceptionLedgerRow` and `systemSiteScope`. Each passed 3/3 alone on the train
+> tree. In every one, frontend vitest (all 1,008 files) started 8 s after
+> conformance-m2 went to the background at +405–466 s, at load 12–20. The same
+> tree went GREEN with `OPENWOP_CI_SERIAL_LANES=1` at similar load and with the
+> Tracegate recorder still on, which isolates the overlap. That is one green: evidence, not
+> proof. The overlap itself is old. ADR 0880's backend Tracegate made backend
+> vitest short (≈ 5 min, was ≈ 20), so the overlap now lands on the frontend run
+> at a busier time than before.
+>
+> **Fix: narrow the frontend run instead of serialising it.** While any background
+> lane is live, frontend vitest runs with `VITEST_MAX_WORKERS=4`
+> (`OPENWOP_CI_FE_WORKERS_BESIDE_BG`), against the default 7 on an 8-core machine.
+> Vitest 4 reads that env var. The gate log prints the cap and the lanes it
+> yielded to, plus the frontend run's seconds, so the cost can be read off
+> gates rather than assumed. If reds continue under the cap, the next step is to
+> join conformance-m2 before frontend vitest (≈ +5–7 min a gate). The date-bomb
+> sweep was already outside the overlap.
+
 ## D7 — Frontend lint, build and types use the preamble's idle cores
 
 MEASURED from the D6 gate's vitest summary: backend vitest keeps **~6.7 of its 7
@@ -276,6 +298,27 @@ A full backend run outside a gate now waits for the gate's CLAIM first
   starts anyway with the DEBT-3 note and never fails a run.
 - It covers `node node_modules/vitest/vitest.mjs run`, the form CLAUDE.md
   recommends, which a wrapper on `npm test` would not.
+
+> **CORRECTION 2026-10-16 (GATE-CLAIM-1) — the claim D8 waits on was deleted a few
+> minutes into every gate.** Found by 67: train 108 printed "claimed for pid 72352",
+> yet `preflight-suite.claim` was absent while 72352 was alive, and a peer's full
+> run at 14:52Z went straight into the gate (load ~65). Cause: the gate runs
+> `test-preflight-suite.sh` beside backend vitest. Two of its arms ran the real
+> preflight from the gate's own worktree with a stub `ps` that prints nothing,
+> and without the claim-dir test seam. `foreign_claim` judged a claim stale
+> whenever `proc_start` differed from the recorded start time, and an EMPTY
+> reading differs, so it deleted the gate's live claim. Fixed both ways:
+> - a claim is stale only on positive evidence: the pid is dead, or `ps` reports a
+>   different non-empty start time;
+> - the harness defaults `OPENWOP_PREFLIGHT_CLAIM_DIR` to a scratch dir for the
+>   whole file.
+>
+> New arms: a live claim with an unreadable start time is kept, and a reused pid
+> is still recovered. Witnessed: on main's script the first deletes the claim. The
+> ps start time is also time-zone dependent (`TZ=UTC` prints a different string).
+> Every preflight on this machine runs with the same TZ (checked, no process sets
+> one), so that was not the cause here; it remains a reason never to compare those
+> strings across environments.
 - `filenamePattern` is internal to vitest 4. If an upgrade drops it, a targeted
   run reads as full, but it still waits only while a gate is running.
 

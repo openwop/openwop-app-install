@@ -8,6 +8,11 @@
  *    back to their raw ids.
  *  - STR-G2: an empty `allStrategies` makes the parent picker offer nothing,
  *    reading as "there are no eligible parents".
+ *
+ * Sabotage-witnessed (grade-tests w19, probes w19g5-ar-*): forcing either
+ * catch to `false`, dropping the `projectsUnavailable` option / the
+ * `projectsLoadFailed` notice / the name lookup, or the `strategiesFailed` help
+ * switch each turns the matching case red.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 vi.mock('../StrategyLedgerRollup.js', () => ({ StrategyLedgerRollup: () => null })); // own tests: strategyLedgerRollup.test.tsx
@@ -28,6 +33,13 @@ vi.mock('../strategyClient.js', async (orig) => ({
   replaceLinks: vi.fn(async () => ({})),
 }));
 vi.mock('../../../ui/toast.js', () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
+// ADR 0661 — the STR-G2 arms open the Overview tab, whose owner `UserPicker`
+// calls `loadOrgMembers`. Unmocked, that was a REAL fetch out of jsdom (this file
+// was on the live-fetch allowlist for it). Nothing here asserts on members.
+vi.mock('../../../orgs/orgMembers.js', async (orig) => ({
+  ...(await orig<Record<string, unknown>>()),
+  loadOrgMembers: vi.fn(async () => []),
+}));
 
 import { StrategyDetailPage } from '../StrategyDetailPage.js';
 

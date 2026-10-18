@@ -1,3 +1,10 @@
+/**
+ * chatSessionReducer — the transcript's pure transitions (frontend
+ * enterprise-review Batch I). Breaks it: mutating the previous session (React
+ * misses the change), a no-op that is not identity-stable (re-render storm), a
+ * cleared feedback that leaves a `feedback` key behind, or edit/regenerate
+ * (`truncateFrom`) keeping the turn being replaced.
+ */
 import { describe, it, expect } from 'vitest';
 import { chatSessionReducer } from '../chatSessionReducer.js';
 import type { ChatSession, ChatMessage } from '../../types.js';

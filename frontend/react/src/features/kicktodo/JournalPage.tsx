@@ -19,13 +19,19 @@ export function JournalPage(): JSX.Element {
   const [entries, setEntries] = useState<JournalEntry[] | null>(null);
   const [challenges, setChallenges] = useState<ChallengeSummary[]>([]);
   const [error, setError] = useState(false);
+  // PT-2 — challenge names are a SIDE read; a failure is stated (with a retry),
+  // never rendered as entries that simply have no challenge.
+  const [namesUnknown, setNamesUnknown] = useState(false);
 
   const reload = () => {
     setError(false);
     void (async () => {
       try {
-        const [es, cs] = await Promise.all([getJournal(), listChallenges().catch(() => [])]);
-        setEntries(es); setChallenges(cs);
+        const [es, cs] = await Promise.all([
+          getJournal(),
+          listChallenges().then((rows) => ({ ok: true as const, rows })).catch(() => ({ ok: false as const, rows: [] as ChallengeSummary[] })),
+        ]);
+        setEntries(es); setChallenges(cs.rows); setNamesUnknown(!cs.ok);
       } catch { setError(true); }
     })();
   };
@@ -62,8 +68,14 @@ export function JournalPage(): JSX.Element {
       </header>
 
       {error && (
-        <Notice variant="error">
+        <Notice variant="error" announce={t('journalError')}>
           {t('journalError')}{' '}
+          <Button variant="quiet" size="sm" onClick={reload}>{t('common:retry')}</Button>
+        </Notice>
+      )}
+      {namesUnknown && entries && entries.length > 0 && !error && (
+        <Notice variant="warning" announce={t('journalNamesUnknown')}>
+          {t('journalNamesUnknown')}{' '}
           <Button variant="quiet" size="sm" onClick={reload}>{t('common:retry')}</Button>
         </Notice>
       )}

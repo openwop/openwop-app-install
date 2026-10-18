@@ -25,8 +25,20 @@ export default defineConfig({
     // ADR 0863 D8 — a full suite outside a gate waits for a running gate's
     // claim first. Targeted runs never wait. See test/setup/queueBehindGate.ts.
     globalSetup: ['test/setup/queueBehindGate.ts'],
-    setupFiles: process.env.OPENWOP_CI_CLOCKSHIFT === '1'
-      ? ['test/setup/isolatePackDir.ts', 'test/setup/testServerKeepAlive.ts', 'test/setup/clockShift.ts']
-      : ['test/setup/isolatePackDir.ts', 'test/setup/testServerKeepAlive.ts'],
+    // ADR 0880 — the Tracegate recorder rides along ONLY when a run asks for it
+    // (OPENWOP_TRACEGATE_RECORD=<dir>). Unset, nothing is loaded and nothing changes.
+    setupFiles: [
+      // ADR 0880 — FIRST, so modules the other setup files load are mapped too.
+      ...(process.env.OPENWOP_TRACEGATE_RECORD ? ['test/setup/tracegateRecorder.ts'] : []),
+      'test/setup/isolatePackDir.ts',
+      'test/setup/testServerKeepAlive.ts',
+      ...(process.env.OPENWOP_CI_CLOCKSHIFT === '1' ? ['test/setup/clockShift.ts'] : []),
+    ],
+    // ADR 0880 — the recorder needs each file's verdict, which a setup file cannot
+    // see. The JSON reporter rides beside the default one; unset, reporters are
+    // exactly vitest's default.
+    ...(process.env.OPENWOP_TRACEGATE_RECORD
+      ? { reporters: ['default', ['json', { outputFile: `${process.env.OPENWOP_TRACEGATE_RECORD}/results.json` }]] }
+      : {}),
   },
 });

@@ -76,7 +76,17 @@ describe('the visitor key (D5)', () => {
     localStorage.setItem(`owp:vk:${ORG}`, 'vk-stale');
     await loadPosture(ORG);
     expect(decisionFor(ORG)).toBe('unknown');
+    // Sends nothing: the stored key is not handed out, no token, no POST.
     expect(getVisitorKey(ORG)).toBeNull();
+    expect(consentTokenFor(ORG)).toBeUndefined();
+    expect(calls.filter((c) => c.init?.method === 'POST')).toHaveLength(0);
+    // Writes nothing: the stale key is neither replaced nor re-minted …
+    expect(localStorage.getItem(`owp:vk:${ORG}`)).toBe('vk-stale');
+    // … and an org with NO key gets none (this reaches the mint path).
+    await loadPosture('org-c');
+    expect(decisionFor('org-c')).toBe('unknown');
+    expect(getVisitorKey('org-c')).toBeNull();
+    expect(localStorage.getItem('owp:vk:org-c')).toBeNull();
   });
 
   it('a failed refusal still fails closed; a failed grant is not remembered', async () => {
@@ -114,6 +124,25 @@ describe('token repair (grade-code M4)', () => {
     const other = new Response(JSON.stringify({ error: 'validation_error', details: { field: 'consentToken' } }), { status: 400 });
     await repairConsentTokenFrom(ORG, other);
     expect(consentTokenFor(ORG), 'once per tab').toBe('tok-2');
+
+    // The repair drops the token BEFORE re-recording, so it never reaches
+    // recordChoice's own discard branch. That branch is the second half of the
+    // same M4 fix: a direct choice carrying a token the server now refuses is
+    // retried without it and stores the fresh one (probe w50g2-vc-repair-discard).
+    n = 2;
+    const before = calls.length;
+    // The stub refuses tok-1 only; make it refuse the stored tok-2 as well.
+    stubFetch((_url, init) => {
+      if (init?.method === 'POST') {
+        const sent = JSON.parse(String(init.body)) as { subjectToken?: string };
+        return sent.subjectToken ? { status: 400, body: { error: 'validation_error', details: { field: 'subjectToken' } } } : { status: 201, body: { subjectToken: `tok-${++n}` } };
+      }
+      return { status: 404 };
+    });
+    await recordChoice(ORG, true);
+    expect(consentTokenFor(ORG)).toBe('tok-3');
+    const sent = calls.slice(before).map((c) => JSON.parse(String(c.init?.body)) as { subjectToken?: string });
+    expect(sent.map((b) => b.subjectToken ?? null)).toEqual(['tok-2', null]);
   });
 });
 

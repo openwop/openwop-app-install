@@ -74,6 +74,7 @@ import { createLogger } from '../../observability/logger.js';
 import { isForwardExecutionEvent, RunLogClosedError, TERMINAL_RUN_EVENT_TYPES } from '../runLogClosure.js';
 import { nextChatMessageCreatedAt } from '../chatMessageOrder.js';
 import { startPoolPressureProbe } from '../../observability/saturationProbe.js';
+import { toolBoundaryKeyPatterns } from '../runKvKeys.js';
 
 const log = createLogger('storage.postgres');
 
@@ -621,6 +622,48 @@ export async function openPostgresStorage(options: PostgresStorageOptions | stri
         [tenantId ?? null, status ?? null, limit, workflowId ?? null, before?.createdAt ?? null, before?.runId ?? null],
       );
       return rows.map(rowToRun);
+    },
+
+    async listRunSummaries({ tenantId, owner, scanCap, limit }) {
+      // #4531 — inner LIMIT on the tenant index FIRST, the owner predicate outside it.
+      const { rows } = await pool.query<{
+        run_id: string; workflow_id: string; status: string; created_at: Date; completed_at: Date | null;
+        md_owner: unknown; md_anon: string | null; md_kind: string | null; md_acting: string | null;
+      }>(
+        `SELECT run_id, workflow_id, status, created_at, completed_at, md_owner, md_anon, md_kind, md_acting FROM (
+           SELECT run_id, workflow_id, status, created_at, completed_at,
+                  metadata->'owner' AS md_owner, metadata->>'anonPrincipal' AS md_anon,
+                  metadata->>'principalKind' AS md_kind, metadata->>'actingUserId' AS md_acting
+             FROM runs WHERE tenant_id = $1
+            ORDER BY created_at DESC, run_id DESC
+            LIMIT $2
+         ) scan
+         WHERE $3::text IS NULL
+            OR md_owner->>'principal' = $3
+            OR md_anon = $3
+            OR md_acting = $4
+         ORDER BY created_at DESC, run_id DESC
+         LIMIT $5`,
+        [tenantId, scanCap, owner?.principal ?? null, owner?.subject ?? null, limit],
+      );
+      const { rows: more } = await pool.query(
+        `SELECT 1 FROM runs WHERE tenant_id = $1 ORDER BY created_at DESC, run_id DESC LIMIT 1 OFFSET $2`,
+        [tenantId, scanCap],
+      );
+      return {
+        runs: rows.map((r) => ({
+          runId: r.run_id, workflowId: r.workflow_id, status: r.status, tenantId,
+          createdAt: (r.created_at instanceof Date ? r.created_at : new Date(r.created_at)).toISOString(),
+          ...(r.completed_at ? { completedAt: (r.completed_at instanceof Date ? r.completed_at : new Date(r.completed_at)).toISOString() } : {}),
+          metadata: {
+            ...(r.md_owner != null ? { owner: r.md_owner } : {}),
+            ...(r.md_anon != null ? { anonPrincipal: r.md_anon } : {}),
+            ...(r.md_kind != null ? { principalKind: r.md_kind } : {}),
+            ...(r.md_acting != null ? { actingUserId: r.md_acting } : {}),
+          },
+        })),
+        scanExhausted: more.length > 0,
+      };
     },
 
     async listRunsByParent(parentRunId) {
@@ -1754,6 +1797,9 @@ export async function openPostgresStorage(options: PostgresStorageOptions | stri
       const client = await pool.connect();
       try {
         await client.query('BEGIN');
+        // ADR 0889 EVD-2 — the tool-boundary capture is keyed by the run's TENANT,
+        // so read it before the run row goes.
+        const owner = await client.query<{ tenant_id: string }>(`SELECT tenant_id FROM runs WHERE run_id = $1`, [runId]);
         await client.query(`DELETE FROM events WHERE run_id = $1`, [runId]);
         await client.query(`DELETE FROM interrupts WHERE run_id = $1`, [runId]);
         await client.query(`DELETE FROM invocation_log WHERE run_id = $1`, [runId]);
@@ -1773,6 +1819,10 @@ export async function openPostgresStorage(options: PostgresStorageOptions | stri
         await client.query(`DELETE FROM host_ext_kv WHERE k = ANY($1::text[])`, [[`runvars:${runId}`, `runchans:${runId}`, `runagent:${runId}`]]);
         const ridEsc = runId.replace(/[\\%_]/g, (m) => `\\${m}`);
         await client.query(`DELETE FROM host_ext_kv WHERE k LIKE $1`, [`hostext:runartifact:${ridEsc}:%`]);
+        // ADR 0889 EVD-2 — captured tool calls (PII-bearing inputs/results) and the
+        // capture index row retire with the run; they outlived it by up to 30 days.
+        const tid = owner.rows[0]?.tenant_id;
+        if (tid) for (const pattern of toolBoundaryKeyPatterns(tid, runId)) await client.query(`DELETE FROM host_ext_kv WHERE k LIKE $1`, [pattern]);
         const rr = await client.query(`DELETE FROM runs WHERE run_id = $1`, [runId]);
         await client.query('COMMIT');
         return (rr.rowCount ?? 0) > 0;
@@ -1998,8 +2048,8 @@ export async function openPostgresStorage(options: PostgresStorageOptions | stri
       const client = await pool.connect();
       try {
         await client.query('BEGIN');
-        const picked = await client.query<{ run_id: string }>(
-          `SELECT run_id FROM runs WHERE status = ANY($1::text[]) AND updated_at < $2 ORDER BY updated_at ASC LIMIT $3`,
+        const picked = await client.query<{ run_id: string; tenant_id: string }>(
+          `SELECT run_id, tenant_id FROM runs WHERE status = ANY($1::text[]) AND updated_at < $2 ORDER BY updated_at ASC LIMIT $3`,
           [TERMINAL, cutoffIso, limit],
         );
         const runIds = picked.rows.map((r) => r.run_id);
@@ -2033,6 +2083,13 @@ export async function openPostgresStorage(options: PostgresStorageOptions | stri
           const ridEsc = rid.replace(/[\\%_]/g, (m) => `\\${m}`);
           const ar = await client.query(`DELETE FROM host_ext_kv WHERE k LIKE $1`, [`hostext:runartifact:${ridEsc}:%`]);
           childRows += ar.rowCount ?? 0;
+        }
+        // ADR 0889 EVD-2 — the runs' tool-boundary capture retires with them (as deleteRun).
+        for (const { run_id: rid, tenant_id: tid } of picked.rows) {
+          for (const pattern of toolBoundaryKeyPatterns(tid, rid)) {
+            const br = await client.query(`DELETE FROM host_ext_kv WHERE k LIKE $1`, [pattern]);
+            childRows += br.rowCount ?? 0;
+          }
         }
         const rr = await client.query(`DELETE FROM runs WHERE run_id = ANY($1::text[])`, [runIds]);
         await client.query('COMMIT');
@@ -2607,6 +2664,27 @@ export async function openPostgresStorage(options: PostgresStorageOptions | stri
       return (res.rowCount ?? 0) > 0;
     },
 
+    async redactChatMessagesByAuthor(tenantId, authorRefs, replacementAuthor, at) {
+      if (authorRefs.length === 0) return 0;
+      const meta = JSON.stringify({ deletedAt: at, erased: true });
+      const res = await pool.query<{ session_id: string }>(
+        `WITH hit AS (
+           UPDATE chat_messages m
+              SET content = '{"deleted":true}', meta = $3, author_subject = $4
+             FROM chat_sessions s
+            WHERE s.session_id = m.session_id AND s.tenant_id = $1 AND m.author_subject = ANY($2::text[])
+           RETURNING m.session_id
+         ), bumped AS (
+           UPDATE chat_sessions SET updated_at = $5
+            WHERE tenant_id = $1 AND session_id IN (SELECT DISTINCT session_id FROM hit)
+           RETURNING session_id
+         )
+         SELECT session_id FROM hit`,
+        [tenantId, [...authorRefs], meta, replacementAuthor, at],
+      );
+      return res.rowCount ?? res.rows.length;
+    },
+
     async getChatMessageAuthor(sessionId, messageId) {
       const res = await pool.query<{ author_subject: string | null }>(
         `SELECT author_subject FROM chat_messages WHERE session_id = $1 AND message_id = $2`,
@@ -2906,7 +2984,13 @@ export async function openPostgresStorage(options: PostgresStorageOptions | stri
       return (r.rowCount ?? 0) > 0;
     },
 
-    async updateUserAgent(expectedTenantId, record) {
+    async updateUserAgent(expectedTenantId, record, expected) {
+      const cas = expected
+        ? ` AND persona = $14 AND label IS NOT DISTINCT FROM $15 AND description IS NOT DISTINCT FROM $16
+            AND model_class = $17 AND system_prompt = $18 AND tool_allowlist = $19::jsonb
+            AND memory_scratchpad = $20 AND memory_conversation = $21 AND memory_long_term = $22
+            AND confidence_threshold IS NOT DISTINCT FROM $23`
+        : '';
       const r = await pool.query(
         `UPDATE user_agents SET
           tenant_id = $12,
@@ -2914,7 +2998,7 @@ export async function openPostgresStorage(options: PostgresStorageOptions | stri
           system_prompt = $6, tool_allowlist = $7::jsonb,
           memory_scratchpad = $8, memory_conversation = $9, memory_long_term = $10,
           confidence_threshold = $11
-        WHERE agent_id = $1 AND tenant_id = $13`,
+        WHERE agent_id = $1 AND tenant_id = $13${cas}`,
         [
           record.agentId,
           record.persona,
@@ -2929,6 +3013,20 @@ export async function openPostgresStorage(options: PostgresStorageOptions | stri
           record.confidenceThreshold ?? null,
           record.tenantId,
           expectedTenantId,
+          ...(expected
+            ? [
+                expected.persona,
+                expected.label ?? null,
+                expected.description ?? null,
+                expected.modelClass,
+                expected.systemPrompt,
+                JSON.stringify(expected.toolAllowlist),
+                expected.memoryShape.scratchpad,
+                expected.memoryShape.conversation,
+                expected.memoryShape.longTerm,
+                expected.confidenceThreshold ?? null,
+              ]
+            : []),
         ],
       );
       return (r.rowCount ?? 0) > 0;

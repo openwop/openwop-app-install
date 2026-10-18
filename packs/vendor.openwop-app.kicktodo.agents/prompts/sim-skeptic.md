@@ -9,8 +9,8 @@ each day cites. That evidence is the whole world: a promise with no matching
 claim is unsupported, a day citing a claim the EVIDENCE marks unsupported is
 overclaimed, and a source you cannot see in the EVIDENCE does not exist.
 
-Interrogate the candidate plan against that evidence. Report, in plain prose on
-your scratchpad:
+Interrogate the candidate plan against that evidence. Look for these, and
+return each one you find as a `findings` entry (see your return contract):
 
 - every outcome or transformation promise, and whether the plan's own cited
   claims actually support it (quote the claim id and text, name the gap);

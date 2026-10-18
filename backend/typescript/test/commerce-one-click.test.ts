@@ -18,20 +18,29 @@
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { getSetCookies } from './headerCookies.js';
+import type { Product } from '../src/features/commerce/commerceService.js';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { setSecret } from '../src/byok/secretResolver.js';
 import {
-  getOrder, markAsPaid, captureSavedPmFromPaidIntent, getSavedPaymentMethod,
-  deleteSavedPaymentMethodsForContact,
+  getOrder, markAsPaid, captureSavedPmFromPaidIntent, getSavedPaymentMethodForOrder,
+  deleteSavedPaymentMethodsForContact, listChildOrders,
 } from '../src/features/commerce/commerceService.js';
+import { mintOneClickToken } from '../src/features/commerce/oneClickToken.js';
+
+/** The bound TCP port, narrowed without a cast (`address()` is `string | AddressInfo | null`). */
+function portOf(s: { address(): string | AddressInfo | null }): number {
+  const a = s.address();
+  if (a === null || typeof a === 'string') throw new Error('server is not listening on a TCP port');
+  return a.port;
+}
 
 let BASE: string; let server: http.Server; let n = 0;
 let stripe: http.Server;
 let stripeCalls: Array<{ path: string; body: string; idem?: string }> = [];
-const intentAmounts = new Map<string, { amount: number; currency: string }>();
+const intentAmounts = new Map<string, { amount: number; currency: string; metadata: Record<string, string> }>();
 let intentOutcome: 'succeeded' | 'authentication_required' | 'card_declined' = 'succeeded';
 
 beforeAll(async () => {
@@ -45,7 +54,8 @@ beforeAll(async () => {
     let raw = '';
     req.on('data', (c) => (raw += c));
     req.on('end', () => {
-      stripeCalls.push({ path: req.url ?? '', body: raw, idem: req.headers['idempotency-key'] as string | undefined });
+      const idem = req.headers['idempotency-key'];
+      stripeCalls.push({ path: req.url ?? '', body: raw, idem: typeof idem === 'string' ? idem : undefined });
       const reply = (status: number, body: Record<string, unknown>): void => {
         res.writeHead(status, { 'content-type': 'application/json' });
         res.end(JSON.stringify(body));
@@ -54,7 +64,10 @@ beforeAll(async () => {
         if (intentOutcome === 'succeeded') {
           const id = `pi_${stripeCalls.length}`;
           const form = new URLSearchParams(raw);
-          intentAmounts.set(id, { amount: Number(form.get('amount') ?? 0), currency: String(form.get('currency') ?? 'usd') });
+          // ADR 0875 D3 — echo the intent's own metadata, which binds it to its order.
+          const metadata: Record<string, string> = {};
+          for (const k of ['orderId', 'tenantId', 'orgId']) { const v = form.get(`metadata[${k}]`); if (v) metadata[k] = v; }
+          intentAmounts.set(id, { amount: Number(form.get('amount') ?? 0), currency: String(form.get('currency') ?? 'usd'), metadata });
           reply(200, { id, status: 'succeeded' });
           return;
         }
@@ -68,7 +81,7 @@ beforeAll(async () => {
       if (req.url?.startsWith('/v1/payment_intents/')) {
         // markAsPaid verification read — echo THIS intent's own amount/currency
         const id = req.url.split('/').pop() ?? '';
-        const known = intentAmounts.get(id) ?? { amount: 0, currency: 'usd' };
+        const known = intentAmounts.get(id) ?? { amount: 0, currency: 'usd', metadata: {} };
         reply(200, { id, status: 'succeeded', ...known });
         return;
       }
@@ -78,10 +91,10 @@ beforeAll(async () => {
     });
   });
   await new Promise<void>((r) => stripe.listen(0, '127.0.0.1', r));
-  process.env.OPENWOP_STRIPE_API_BASE = `http://127.0.0.1:${(stripe.address() as AddressInfo).port}`;
+  process.env.OPENWOP_STRIPE_API_BASE = `http://127.0.0.1:${portOf(stripe)}`;
 
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
+  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${portOf(server)}`; res(); }); });
   for (const id of ['users', 'commerce', 'crm']) {
     const d = getToggleDefault(id);
     if (d) await saveConfig({ ...d, status: 'on' }, 'test');
@@ -89,40 +102,61 @@ beforeAll(async () => {
   await setSecret('billing:stripe-key', 'sk_test_mock');
 });
 afterAll(async () => {
+  delete process.env.OPENWOP_COMMERCE_PLATFORM_TENANTS; // ADR 0877 — set per shop above
   delete process.env.OPENWOP_COMMERCE_OFFSESSION_ENABLED;
   await new Promise<void>((res) => server.close(() => res()));
   await new Promise<void>((res) => stripe.close(() => res()));
 });
 
-interface Res<T = any> { status: number; body: T }
+/** The ONE untyped boundary: `JSON.parse` returns the declared `T` (the call
+ *  site's statement of the shape it reads). An empty or non-JSON body is `null`. */
+function parseBody<T>(text: string): T {
+  try { return JSON.parse(text === '' ? 'null' : text); } catch { return JSON.parse('null'); }
+}
+/** The canonical error envelope a refused call carries. */
+interface ApiError { error: string; message?: string; details?: Record<string, unknown> }
+/** A response whose body shape the CALL SITE names (`owner.post<Product>(…)`);
+ *  unread bodies stay `unknown`, so a field read without a named shape fails tsc. */
+interface Res<T = unknown> { status: number; body: T }
 function client() {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
+  const call = async <T>(method: string, path: string, body?: unknown): Promise<Res<T>> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
-    for (const c of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
-    return { status: res.status, body: out };
+    for (const ck of getSetCookies(res.headers)) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
+    return { status: res.status, body: parseBody<T>(await res.text()) };
   };
-  return { get: (p: string) => call('GET', p), post: (p: string, b?: unknown) => call('POST', p, b) };
+  return { get: <T = unknown>(p: string) => call<T>('GET', p), post: <T = unknown>(p: string, b?: unknown) => call<T>('POST', p, b) };
 }
+/** The public checkout's success body (the fields this suite reads). */
+interface CheckoutBody { orderId: string; mode?: string; total?: number }
+/** The one-click route answers one of four shapes (201 paid / 200 duplicate /
+ *  202 SCA / 402 declined) or the error envelope — every field optional. */
+interface OneClickBody extends Partial<ApiError> {
+  orderId?: string; status?: string; paid?: boolean; duplicate?: boolean;
+  requiresAction?: boolean; clientSecret?: string; declined?: boolean; reason?: string;
+}
+interface LoginBody { user?: { userId: string; tenantId?: string }; tenantId?: string }
 
 async function paidParentWithSavedPm() {
   const owner = client();
-  const login = await owner.post('/host/openwop-app/test/login', { email: `oc-${Date.now()}-${n++}@acme.test` });
+  const login = await owner.post<LoginBody>('/host/openwop-app/test/login', { email: `oc-${Date.now()}-${n++}@acme.test` });
   const tenantId: string = login.body.user?.tenantId ?? '';
-  const org = await owner.post('/host/openwop-app/orgs', { name: 'OneClick Shop' });
+  // ADR 0877 — this suite drives the PLATFORM-lane one-click, which only an
+  // operator tenant may use; list this shop on the explicit platform list.
+  process.env.OPENWOP_COMMERCE_PLATFORM_TENANTS = [process.env.OPENWOP_COMMERCE_PLATFORM_TENANTS, tenantId].filter(Boolean).join(',');
+  const org = await owner.post<{ orgId: string }>('/host/openwop-app/orgs', { name: 'OneClick Shop' });
   const orgId: string = org.body.orgId;
   const c = (sfx: string): string => `/host/openwop-app/commerce/orgs/${encodeURIComponent(orgId)}${sfx}`;
-  const main = await owner.post(c('/products'), { type: 'digital', name: 'Course', price: 100, currency: 'USD' });
-  const upsell = await owner.post(c('/products'), { type: 'digital', name: 'Coaching', price: 50, currency: 'USD' });
-  const upsell2 = await owner.post(c('/products'), { type: 'digital', name: 'Extra A', price: 10, currency: 'USD' });
-  const upsell3 = await owner.post(c('/products'), { type: 'digital', name: 'Extra B', price: 10, currency: 'USD' });
-  const upsell4 = await owner.post(c('/products'), { type: 'digital', name: 'Extra C', price: 10, currency: 'USD' });
+  const main = await owner.post<Product>(c('/products'), { type: 'digital', name: 'Course', price: 100, currency: 'USD' });
+  const upsell = await owner.post<Product>(c('/products'), { type: 'digital', name: 'Coaching', price: 50, currency: 'USD' });
+  const upsell2 = await owner.post<Product>(c('/products'), { type: 'digital', name: 'Extra A', price: 10, currency: 'USD' });
+  const upsell3 = await owner.post<Product>(c('/products'), { type: 'digital', name: 'Extra B', price: 10, currency: 'USD' });
+  const upsell4 = await owner.post<Product>(c('/products'), { type: 'digital', name: 'Extra C', price: 10, currency: 'USD' });
 
   // guest checkout WITH consent — live mode creates the session (mock stripe)
   const guest = client();
   const email = `buyer-${n++}@x.test`;
-  const co = await guest.post(`/host/openwop-app/public-store/${encodeURIComponent(orgId)}/checkout`, {
+  const co = await guest.post<CheckoutBody>(`/host/openwop-app/public-store/${encodeURIComponent(orgId)}/checkout`, {
     email, lines: [{ productId: main.body.productId, quantity: 1 }], savePaymentMethod: true,
     funnel: { funnelId: 'fn-oc', stepId: 'st-co' },
   });
@@ -134,7 +168,9 @@ async function paidParentWithSavedPm() {
   expect(order?.pmSaveRequested).toBe(true);
   const captured = await captureSavedPmFromPaidIntent(order!, { customer: 'cus_1', payment_method: 'pm_1' });
   expect(captured).toBe(true);
-  return { guest, tenantId, orgId, orderId, contactId: order!.contactId!, upsellId: upsell.body.productId as string, extras: [upsell2.body.productId, upsell3.body.productId, upsell4.body.productId] as string[] };
+  // ADR 0875 D2 — the capability the success URL carries for THIS order.
+  const oc = mintOneClickToken(tenantId, orgId, orderId);
+  return { guest, oc, tenantId, orgId, orderId, contactId: order!.contactId!, mainId: main.body.productId, upsellId: upsell.body.productId, extras: [upsell2.body.productId, upsell3.body.productId, upsell4.body.productId] };
 }
 
 const oneClick = (orgId: string, orderId: string): string =>
@@ -144,29 +180,39 @@ describe('ADR 0296 P2/P3 — saved PM + one-click chains', () => {
   it('is 503 not_configured until the operator opts in', async () => {
     delete process.env.OPENWOP_COMMERCE_OFFSESSION_ENABLED;
     const v = client();
-    const res = await v.post(oneClick('any-org', 'any-order'), { productId: 'p' });
+    const res = await v.post<OneClickBody>(oneClick('any-org', 'any-order'), { productId: 'p' });
     expect(res.status).toBe(503);
     expect(res.body.error).toBe('not_configured');
   });
 
   it('capture only persists for orders that REQUESTED the save', async () => {
     process.env.OPENWOP_COMMERCE_OFFSESSION_ENABLED = 'true';
-    const { tenantId, orgId, contactId } = await paidParentWithSavedPm();
-    expect(await getSavedPaymentMethod(tenantId, orgId, contactId)).toMatchObject({ stripeCustomerId: 'cus_1', paymentMethodId: 'pm_1' });
-    // an order WITHOUT the marker never captures
-    const bare = { tenantId, orgId, contactId, pmSaveRequested: undefined } as never;
-    expect(await captureSavedPmFromPaidIntent(bare, { customer: 'cus_x', payment_method: 'pm_x' })).toBe(false);
+    const { guest, tenantId, orgId, orderId, mainId } = await paidParentWithSavedPm();
+    expect(await getSavedPaymentMethodForOrder(tenantId, orgId, orderId)).toMatchObject({ stripeCustomerId: 'cus_1', paymentMethodId: 'pm_1' });
+    // A REAL paid order whose checkout did NOT tick "save" (same shop, a linked
+    // contact, so only the consent marker can refuse it) never captures.
+    const co = await guest.post<CheckoutBody>(`/host/openwop-app/public-store/${encodeURIComponent(orgId)}/checkout`, {
+      email: `nosave-${n++}@x.test`, lines: [{ productId: mainId, quantity: 1 }],
+    });
+    expect(co.status).toBe(201);
+    await markAsPaid(tenantId, orgId, co.body.orderId, 'pi_nosave', { actor: 'test' });
+    const unconsented = (await getOrder(tenantId, orgId, co.body.orderId))!;
+    expect(unconsented.contactId).toBeTruthy();
+    expect(unconsented.pmSaveRequested).toBeFalsy();
+    expect(await captureSavedPmFromPaidIntent(unconsented, { customer: 'cus_x', payment_method: 'pm_x' })).toBe(false);
+    expect(await getSavedPaymentMethodForOrder(tenantId, orgId, co.body.orderId)).toBeNull();
   });
 
   it('one-click success: server-priced child, upsell origin, parent link, inherited funnelRef, idempotency key', async () => {
     process.env.OPENWOP_COMMERCE_OFFSESSION_ENABLED = 'true';
     intentOutcome = 'succeeded';
-    const { guest, tenantId, orgId, orderId, upsellId } = await paidParentWithSavedPm();
+    const { guest, oc, tenantId, orgId, orderId, upsellId } = await paidParentWithSavedPm();
     stripeCalls = [];
-    const res = await guest.post(oneClick(orgId, orderId), { productId: upsellId, price: 1 /* hostile client price — ignored */ });
+    const res = await guest.post<OneClickBody>(oneClick(orgId, orderId), { oc, productId: upsellId, price: 1 /* hostile client price — ignored */ });
     expect(res.status).toBe(201);
     expect(res.body.paid).toBe(true);
-    const child = await getOrder(tenantId, orgId, res.body.orderId);
+    expect(res.body.orderId).toEqual(expect.any(String));
+    const child = await getOrder(tenantId, orgId, res.body.orderId ?? '');
     expect(child?.parentOrderId).toBe(orderId);
     expect(child?.status).toBe('paid');
     expect(child?.items[0]?.origin).toBe('upsell');
@@ -180,7 +226,7 @@ describe('ADR 0296 P2/P3 — saved PM + one-click chains', () => {
     expect(form.get('confirm')).toBe('true');
 
     // duplicate accept returns the SAME child — no second charge
-    const again = await guest.post(oneClick(orgId, orderId), { productId: upsellId });
+    const again = await guest.post<OneClickBody>(oneClick(orgId, orderId), { oc, productId: upsellId });
     expect(again.status).toBe(200);
     expect(again.body.duplicate).toBe(true);
     expect(again.body.orderId).toBe(res.body.orderId);
@@ -188,38 +234,70 @@ describe('ADR 0296 P2/P3 — saved PM + one-click chains', () => {
 
   it('SCA challenge → 202 + clientSecret (child pending); decline → child canceled + 402', async () => {
     process.env.OPENWOP_COMMERCE_OFFSESSION_ENABLED = 'true';
-    const { guest, tenantId, orgId, orderId, upsellId, extras } = await paidParentWithSavedPm();
-    intentOutcome = 'authentication_required';
-    const sca = await guest.post(oneClick(orgId, orderId), { productId: upsellId });
-    expect(sca.status).toBe(202);
-    expect(sca.body.requiresAction).toBe(true);
-    expect(sca.body.clientSecret).toBe('cs_sca');
-    expect((await getOrder(tenantId, orgId, sca.body.orderId))?.status).toBe('pending');
+    const { guest, oc, tenantId, orgId, orderId, upsellId, extras } = await paidParentWithSavedPm();
+    try {
+      intentOutcome = 'authentication_required';
+      const sca = await guest.post<OneClickBody>(oneClick(orgId, orderId), { oc, productId: upsellId });
+      expect(sca.status).toBe(202);
+      expect(sca.body.requiresAction).toBe(true);
+      expect(sca.body.clientSecret).toBe('cs_sca');
+      expect(sca.body.orderId).toEqual(expect.any(String));
+      expect((await getOrder(tenantId, orgId, sca.body.orderId ?? ''))?.status).toBe('pending');
 
-    intentOutcome = 'card_declined';
-    const declined = await guest.post(oneClick(orgId, orderId), { productId: extras[0] });
-    expect(declined.status).toBe(402);
-    expect(declined.body.declined).toBe(true);
-    intentOutcome = 'succeeded';
+      intentOutcome = 'card_declined';
+      const declined = await guest.post<OneClickBody>(oneClick(orgId, orderId), { oc, productId: extras[0] });
+      expect(declined.status).toBe(402);
+      expect(declined.body.declined).toBe(true);
+      // The declined CHILD is released (canceled) so the funnel can downsell and it
+      // stops counting toward the chain limit — the 402 alone cannot show that.
+      const kids = await listChildOrders(tenantId, orgId, orderId);
+      const declinedChild = kids.find((k) => k.items[0]?.productId === extras[0]);
+      expect(declinedChild?.status).toBe('canceled');
+    } finally {
+      intentOutcome = 'succeeded';
+    }
   });
 
   it('caps the chain at 3 non-canceled children and 404s foreign/unpaid orders', async () => {
     process.env.OPENWOP_COMMERCE_OFFSESSION_ENABLED = 'true';
     intentOutcome = 'succeeded';
-    const { guest, orgId, orderId, upsellId, extras } = await paidParentWithSavedPm();
+    const { guest, oc, orgId, orderId, upsellId, extras } = await paidParentWithSavedPm();
     for (const pid of [upsellId, ...extras.slice(0, 2)]) {
-      expect((await guest.post(oneClick(orgId, orderId), { productId: pid })).status).toBe(201);
+      expect((await guest.post<OneClickBody>(oneClick(orgId, orderId), { oc, productId: pid })).status).toBe(201);
     }
-    const fourth = await guest.post(oneClick(orgId, orderId), { productId: extras[2] });
+    const fourth = await guest.post<OneClickBody>(oneClick(orgId, orderId), { oc, productId: extras[2] });
     expect(fourth.status).toBe(400);
-    expect((await guest.post(oneClick(orgId, 'order-nope'), { productId: upsellId })).status).toBe(404);
+    expect(fourth.body.details?.code).toBe('chain_limit');
+    expect((await guest.post<OneClickBody>(oneClick(orgId, 'order-nope'), { productId: upsellId })).status).toBe(404);
+  });
+
+  it('a REAL paid parent without its capability token, and an UNPAID parent with one, both 404', async () => {
+    // A nonexistent order is refused by the `!parent` half and cannot witness the
+    // token or the paid-status branch, so each refusal gets a real order.
+    process.env.OPENWOP_COMMERCE_OFFSESSION_ENABLED = 'true';
+    intentOutcome = 'succeeded';
+    const { guest, oc, tenantId, orgId, orderId, upsellId, mainId } = await paidParentWithSavedPm();
+    const noToken = await guest.post<OneClickBody>(oneClick(orgId, orderId), { productId: upsellId });
+    expect(noToken.status).toBe(404);
+    expect(noToken.body.error).toBe('not_found');
+    const wrongToken = await guest.post<OneClickBody>(oneClick(orgId, orderId), { oc: mintOneClickToken(tenantId, orgId, 'some-other-order'), productId: upsellId });
+    expect(wrongToken.status).toBe(404);
+    // unpaid: a pending order with a VALID token for itself
+    const co = await guest.post<CheckoutBody>(`/host/openwop-app/public-store/${encodeURIComponent(orgId)}/checkout`, {
+      email: `unpaid-${n++}@x.test`, lines: [{ productId: mainId, quantity: 1 }], savePaymentMethod: true,
+    });
+    expect(co.status).toBe(201);
+    const unpaid = await guest.post<OneClickBody>(oneClick(orgId, co.body.orderId), { oc: mintOneClickToken(tenantId, orgId, co.body.orderId), productId: upsellId });
+    expect(unpaid.status).toBe(404);
+    // positive control: the SAME parent + product WITH its token is accepted
+    expect((await guest.post<OneClickBody>(oneClick(orgId, orderId), { oc, productId: upsellId })).status).toBe(201);
   });
 
   it('a contact deletion prunes the saved payment reference (seam consumer)', async () => {
     process.env.OPENWOP_COMMERCE_OFFSESSION_ENABLED = 'true';
-    const { tenantId, orgId, contactId } = await paidParentWithSavedPm();
-    expect(await getSavedPaymentMethod(tenantId, orgId, contactId)).not.toBeNull();
+    const { tenantId, orgId, orderId, contactId } = await paidParentWithSavedPm();
+    expect(await getSavedPaymentMethodForOrder(tenantId, orgId, orderId)).not.toBeNull();
     await deleteSavedPaymentMethodsForContact(tenantId, contactId);
-    expect(await getSavedPaymentMethod(tenantId, orgId, contactId)).toBeNull();
+    expect(await getSavedPaymentMethodForOrder(tenantId, orgId, orderId)).toBeNull();
   });
 });

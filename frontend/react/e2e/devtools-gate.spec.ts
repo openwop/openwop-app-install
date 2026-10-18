@@ -29,6 +29,10 @@ import { API } from './support/session.js';
  * wrong selector fails ON. A dead route fails ON. A broken session fails ON. Only
  * a genuinely-gated surface passes both.
  *
+ * Sabotage (grade-tests wave 53): rendering `.app-sidebar-net` unconditionally, or
+ * whenever access is NOT loading, reds OFF; ignoring the page gate reds OFF;
+ * forcing the "off" card reds ON (via the runner's search box).
+ *
  * That is also the sabotage proof for an absence family, and it is cheaper than
  * hand-reintroducing each leak: it re-proves the selectors on every run instead of
  * once at authoring time.
@@ -131,7 +135,27 @@ test.describe('developer-tools gate (ADR 0196 Gate B)', () => {
       await loginPersonal(page.request, `devtools-${status}@e2e.test`);
       await setToggle(page.request, 'developer-tools', status);
 
+      // Wait for the app's OWN feature-access read to answer before judging the
+      // network button: while access is loading, `enabled` is false, so an absence
+      // read before resolution passes even if the resolved state would leak it.
+      //
+      // BOTH reads: `FeatureAccessProvider` resolves assignments AND billing
+      // entitlements in one `Promise.all` and clears `loading` only after both
+      // (`FeatureAccessContext.tsx`). Waiting on assignments alone let the
+      // absence below run while `loading` was still true — a button shown once
+      // access RESOLVED stayed green (wave 53 probe dt-net-late-leak-r2, vacuous).
+      // After this wait the late-paint probe (dt-net-late-leak-r3) is STILL vacuous:
+      // the late paint did not reproduce, so that variant is unwitnessed. The OFF
+      // claim itself is witnessed by dt-net-leak.
+      const resolved = page.waitForResponse((r) => r.url().includes('/feature-toggles/assignments') && r.request().method() === 'GET');
+      const entitled = page.waitForResponse((r) => r.url().includes('/billing/entitlements') && r.request().method() === 'GET');
       await page.goto('/dashboard');
+      expect((await resolved).status(), 'feature-access read failed — the gate state below would be unresolved').toBe(200);
+      // Entitlements may answer 404 (billing off ⇒ unrestricted); any answer settles it.
+      await entitled;
+      // …and let React commit the resolved state (two frames: the Promise.all's
+      // `.finally` setState renders on the next scheduler task, painted the frame after).
+      await page.evaluate(() => new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r()))));
 
       // Positive control for the PAGE: the sidebar footer exists in both states,
       // so a blank page or a dead session fails here rather than sliding past the
@@ -163,6 +187,13 @@ test.describe('developer-tools gate (ADR 0196 Gate B)', () => {
       await page.goto(MANUAL_TESTS_ROUTE);
       const denied = page.getByText('Developer tools are off', { exact: false });
       if (status === 'on') {
+        // POSITIVE CONTROL for the ON leg: the runner's own suite filter. Without it,
+        // the absence below passed while the page was still a loading skeleton
+        // (wave 53: a page stuck on "Developer tools are off" stayed green).
+        await expect(
+          page.getByRole('searchbox'),
+          'manual-test runner never rendered while developer-tools is ON',
+        ).toBeVisible({ timeout: 30_000 });
         await expect(
           denied,
           'manual-test runner refused to load while developer-tools is ON — the gate is stuck closed',

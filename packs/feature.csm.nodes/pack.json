@@ -1,12 +1,19 @@
 {
   "name": "feature.csm.nodes",
-  "version": "1.4.1",
+  "version": "1.5.0",
   "kind": "node",
-  "description": "CSM feature node pack (extends health-set) — read/health nodes over the ctx.features.csm surface shipped by the CSM feature package. health-read lists at-risk accounts; health-set updates an existing account's score (idempotent, replay-safe) and now also accepts a `deals`/`tasks` CRM fan-in (the csm-ops.health-from-crm chain) to compute a documented default healthScore + healthFactors breakdown, or an explicit `factors` array (which MUST be accompanied by the healthScore it computed — the service fails closed on factors alone) ADR 0582: the computed path refuses to score an absent, partial or unscopeable CRM fan-in rather than treating it as measured zeros.",
+  "description": "CSM feature node pack (extends health-set) — read/health nodes over the ctx.features.csm surface shipped by the CSM feature package. health-read lists at-risk accounts; health-set updates an existing account's score (idempotent, replay-safe) and now also accepts a `deals`/`tasks` CRM fan-in (the csm-ops.health-from-crm chain) to compute a documented default healthScore + healthFactors breakdown, or an explicit `factors` array (which MUST be accompanied by the healthScore it computed — the service fails closed on factors alone) ADR 0582: the computed path refuses to score an absent, partial or unscopeable CRM fan-in rather than treating it as measured zeros. ADR 0882: health-set names the CRM org it measured (the service checks both halves of crmRef and records a refusal), play tasks are excluded from the score, and three playbook nodes (at-risk-check, renewals-due, create-play-tasks) back the csm-ops red-account-rescue and renewal-runway chains.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
-  "keywords": ["feature", "csm", "customer-success", "health"],
-  "engines": { "openwop": ">=1.0.0 <3.0.0" },
+  "keywords": [
+    "feature",
+    "csm",
+    "customer-success",
+    "health"
+  ],
+  "engines": {
+    "openwop": ">=1.0.0 <3.0.0"
+  },
   "nodes": [
     {
       "typeId": "feature.csm.nodes.health-read",
@@ -19,13 +26,49 @@
     },
     {
       "typeId": "feature.csm.nodes.health-set",
-      "version": "1.4.0",
+      "version": "1.5.0",
       "label": "CSM Health Set",
-      "description": "Sets healthScore/name on an EXISTING account by id, over ctx.features.csm. Tenant-guarded + idempotent (update-only — replay/fork safe). ADR 0212 §2/§3: accepts an optional `factors` array WITH its computed healthScore (marks the set as COMPUTED, stamping healthComputedAt; factors without healthScore are rejected fail-closed), or `deals`/`tasks` fan-in from feature.crm.nodes read nodes — from which it derives a documented default healthScore + factors (tunable via a `weights` config). A bare healthScore with neither clears any prior computed factors/stamp. ADR 0582 §4/§5: the COMPUTED path REFUSES rather than defaults — BOTH fan-ins and a non-empty `companyId` are required (a partial fan-in used to score the unmeasured side as zero open rows and stamp it as computed), the company is checked against the account's crmRef by the service, unattributed CRM rows are no longer counted against every account, the stored breakdown carries the arithmetic that produced it, and a refusal is recorded on the account as healthMeasureFailedAt/Reason instead of being scored as 100. ADR 0582 §15: an explicit `factors` breakdown MUST also name its `method` — the node no longer defaults it to `penalty-sum`, which mislabelled an upstream weighted-mean breakdown as arithmetic it had not run; only the deals/tasks fan-in path hardcodes `penalty-sum`, because that path actually performs it. ADR 0582 §16: the fan-in scores ONLY rows whose `companyId` matches the account's linked company. `Task.companyId` is optional and the sibling `create-task` node never sets it, so `openTasks` reads 0 for most tenants today — correct (the alternative charged every account for every unattributed row) but indistinguishable from a measured zero, so the breakdown also carries unweighted `dealsAttributed`/`dealsSeen`/`tasksAttributed`/`tasksSeen` counts. They have `weight: 0` and can never move the score; they exist so a reader can tell \"nothing is open\" from \"nothing is attributable\". A non-numeric healthScore is a typed validation_error, never a silent no-op write that returns success.",
+      "description": "Sets healthScore/name on an EXISTING account by id, over ctx.features.csm. Tenant-guarded + idempotent (update-only — replay/fork safe). ADR 0212 §2/§3: accepts an optional `factors` array WITH its computed healthScore (marks the set as COMPUTED, stamping healthComputedAt; factors without healthScore are rejected fail-closed), or `deals`/`tasks` fan-in from feature.crm.nodes read nodes — from which it derives a documented default healthScore + factors (tunable via a `weights` config). A bare healthScore with neither clears any prior computed factors/stamp. ADR 0582 §4/§5: the COMPUTED path REFUSES rather than defaults — BOTH fan-ins and a non-empty `companyId` are required (a partial fan-in used to score the unmeasured side as zero open rows and stamp it as computed), the company is checked against the account's crmRef by the service, unattributed CRM rows are no longer counted against every account, the stored breakdown carries the arithmetic that produced it, and a refusal is recorded on the account as healthMeasureFailedAt/Reason instead of being scored as 100. ADR 0582 §15: an explicit `factors` breakdown MUST also name its `method` — the node no longer defaults it to `penalty-sum`, which mislabelled an upstream weighted-mean breakdown as arithmetic it had not run; only the deals/tasks fan-in path hardcodes `penalty-sum`, because that path actually performs it. ADR 0582 §16: the fan-in scores ONLY rows whose `companyId` matches the account's linked company. `Task.companyId` is optional and the sibling `create-task` node never sets it, so `openTasks` reads 0 for most tenants today — correct (the alternative charged every account for every unattributed row) but indistinguishable from a measured zero, so the breakdown also carries unweighted `dealsAttributed`/`dealsSeen`/`tasksAttributed`/`tasksSeen` counts. They have `weight: 0` and can never move the score; they exist so a reader can tell \"nothing is open\" from \"nothing is attributable\". A non-numeric healthScore is a typed validation_error, never a silent no-op write that returns success. ADR 0882 D2: also takes `orgId` — the org the deals/tasks were read from. A computed set MUST name it and it MUST equal the account's crmRef.orgId (the run's person must be a writer there); a frozen pre-0882 copy that names no org records `healthMeasureFailed` and fails typed. D4: tasks a play created (`task:play:` ids) are excluded from openTasks and reported as a weight-0 `playTasksOpen` factor, so a play can never move the score it reacts to.",
       "category": "integration",
       "role": "side-effect",
-      "capabilities": ["side-effectful"]
+      "capabilities": [
+        "side-effectful"
+      ]
+    },
+    {
+      "typeId": "feature.csm.nodes.at-risk-check",
+      "version": "1.0.0",
+      "label": "CSM At-Risk Check",
+      "description": "ADR 0882 D6 — does a health change START a rescue play? Reads the `host.csm.account.health-changed` event (`event`, the core.trigger.event output) or a bare `accountId`, plus `threshold` (default 70). The crossing is judged on the EVENT (previousScore absent or ≥ threshold, healthScore < threshold); the account is re-read now and must still be below the threshold (a guard that can only turn a crossing off). Outputs { accountId, qualifies, reason, threshold, transitionKey } — never the owner. An unscored account never qualifies.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.csm.nodes.renewals-due",
+      "version": "1.0.0",
+      "label": "CSM Renewals Due",
+      "description": "ADR 0882 D6 — accounts whose renewalDate falls within `days` (default 90, max 366), soonest first; overdue renewals included and flagged. Outputs { asOf, days, accounts, accountIds, count, any }. Date-dependent: `asOf` states which day was measured.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.csm.nodes.create-play-tasks",
+      "version": "1.0.0",
+      "label": "CSM Create Play Tasks",
+      "description": "ADR 0882 D6 — a playbook's effect: one CRM task per step per account, written through ctx.features.crm.createTask (CRM's floors, link validation and visibility apply), linked to the account's CRM company and assigned to its owner while that person is still a member. Inputs: `accountId`/`accountIds`, `playId`, `steps` [{title, dueInDays? | daysBeforeRenewal?}], `cycle` ('transition' | 'renewal' | 'run'), `transitionKey`. Deterministic ids `task:play:<playId>:<digest(account,org,company)>:<cycle>:<i>` — a re-run re-ensures the same ladder. Accounts without a CRM link are skipped; a floor refusal fails the node; nothing ensured fails typed (`no_play_targets`). Outputs task and account ids only.",
+      "category": "integration",
+      "role": "side-effect",
+      "capabilities": [
+        "side-effectful"
+      ]
     }
   ],
-  "runtime": { "language": "javascript", "format": "esm", "entry": "./index.mjs", "minRuntimeVersion": "node>=20" }
+  "runtime": {
+    "language": "javascript",
+    "format": "esm",
+    "entry": "./index.mjs",
+    "minRuntimeVersion": "node>=20"
+  }
 }

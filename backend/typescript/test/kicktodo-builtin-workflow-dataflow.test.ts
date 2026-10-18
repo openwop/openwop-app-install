@@ -10,6 +10,12 @@
  *
  * These assert the CONTRACT between definitions, the seeding runtime and the
  * nodes, rather than re-testing the services underneath.
+ *
+ * Sabotages that turn these red (w41 probes): removing a variable declaration
+ * a node reads, the enroll node's `variables.set('enrollmentId', …)`, or the
+ * enrollment chain's `challengeVersion` default; the daily-loop case reds if its
+ * reads drift from the `{ enrollmentId, ownerSubject }` the enrollment arms
+ * (`enrollmentService.ts` armContinuation inputs).
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
@@ -31,9 +37,9 @@ function referencedVariables(wf: (typeof ALL)[number]): string[] {
   const names = new Set<string>();
   for (const node of wf.nodes) {
     for (const value of Object.values(node.inputs ?? {})) {
-      if (value && typeof value === 'object' && (value as { type?: string }).type === 'variable') {
-        const n = (value as { variableName?: string }).variableName;
-        if (n) names.add(n);
+      if (value && typeof value === 'object' && 'type' in value && value.type === 'variable'
+        && 'variableName' in value && typeof value.variableName === 'string' && value.variableName) {
+        names.add(value.variableName);
       }
     }
   }
@@ -64,7 +70,15 @@ describe('the seeding runtime actually populates those inputs (KTFULL-B4)', () =
     });
     const seeded = snapshotRunVariables(runId)!;
     expect(seeded.ownerSubject).toBe('user:p1');
-    expect(seeded.challengeVersion).toBe(1); // declared default applied
+    expect(seeded.challengeId).toBe('chal:x');
+    expect(seeded.timezone).toBe('UTC');
+    // Declared default applied. DOUBLE GUARD: the default lives in the chain
+    // pack's parameters (`examples/workflow-chain-packs/kicktodo-loops/pack.json`,
+    // `challengeVersion.default: 1`) AND in `KICKTODO_LOOP_DEFAULTS`
+    // (builtinWorkflows.ts), which only fills it when expansion dropped it — so
+    // this case witnesses the pack default; the host fallback is not reached here
+    // (w41g4-dfw-default was vacuous for exactly that reason).
+    expect(seeded.challengeVersion).toBe(1);
 
     // `enrollmentId` is declared with no default precisely so the enroll node
     // can write it; before the fix it was undeclared and unwritable.
@@ -82,7 +96,7 @@ describe('the nodes publish what the next step reads (KTFULL-B4)', () => {
   const packUrl = new URL('../../../packs/feature.kicktodo.nodes/index.mjs', import.meta.url).href;
 
   it('enroll writes enrollmentId into the run bag', async () => {
-    const m = (await import(packUrl)) as { nodes: Record<string, (c: Record<string, unknown>) => Promise<unknown>> };
+    const m: { nodes: Record<string, (c: Record<string, unknown>) => Promise<unknown>> } = await import(packUrl);
     const written: Record<string, unknown> = {};
     await m.nodes['feature.kicktodo.nodes.enroll']!({
       inputs: { ownerSubject: 'user:p', challengeId: 'chal:x' },
@@ -94,10 +108,16 @@ describe('the nodes publish what the next step reads (KTFULL-B4)', () => {
 });
 
 describe('the daily continuation is armed at enrollment (KTFULL-B5)', () => {
-  it('the daily-loop workflow the goal arms actually exists and is dataflow-complete', () => {
+  it('the daily-loop the enrollment arms exists, is dataflow-complete, and reads exactly the inputs the arm seeds', () => {
     const daily = buildKicktodoLoopWorkflow('openwop-app.kicktodo.daily-loop');
     expect(daily, 'armContinuation targets this id — it must exist').toBeTruthy();
-    const declared = new Set((daily!.variables ?? []).map((v) => v.name));
-    for (const name of referencedVariables(daily!)) expect(declared.has(name)).toBe(true);
+    const declared = new Set((daily.variables ?? []).map((v) => v.name));
+    const referenced = referencedVariables(daily);
+    // `armContinuation` (enrollmentService.ts) seeds exactly these two inputs; a
+    // read outside them runs every scheduled fire against `undefined`. Asserted
+    // as a set so an expansion that stopped producing variable refs (zero reads)
+    // is red, not a vacuous empty loop.
+    expect([...referenced].sort()).toEqual(['enrollmentId', 'ownerSubject']);
+    for (const name of referenced) expect(declared.has(name)).toBe(true);
   });
 });

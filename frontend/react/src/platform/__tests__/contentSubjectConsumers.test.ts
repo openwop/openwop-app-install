@@ -25,6 +25,11 @@ import { STORAGE_KEYS } from '../storage.js';
 
 const SRC = join(process.cwd(), 'src');
 const read = (rel: string): string => readFileSync(join(SRC, rel), 'utf8');
+/** The module's CODE: comments and import lines stripped, so a comment or an unused
+ *  import that merely NAMES the hook cannot satisfy the ratchet (wave 51: removing the
+ *  `useStorageSubject()` call from PromptLibraryPage stayed green on the import + a comment). */
+const code = (src: string): string =>
+  src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '').replace(/^import [\s\S]*?;$/gm, '');
 
 /** content key → the React module that must re-read when the subject settles. */
 const CONSUMERS: Record<string, string> = {
@@ -36,7 +41,7 @@ const CONSUMERS: Record<string, string> = {
 
 describe('content-class storage consumers observe the boot-window tri-state (IDN-11)', () => {
   const contentKeys = Object.entries(STORAGE_KEYS)
-    .filter(([, spec]) => (spec as { cls?: string }).cls === 'content')
+    .filter(([, spec]) => spec.cls === 'content')
     .map(([name]) => name);
 
   it('finds the content-class corpus (non-vacuous)', () => {
@@ -53,12 +58,13 @@ describe('content-class storage consumers observe the boot-window tri-state (IDN
   });
 
   it.each(Object.entries(CONSUMERS))('%s → %s subscribes and depends on the primitive key', (_key, module) => {
-    const src = read(module);
-    expect(src, `${module} must import useStorageSubject`).toContain('useStorageSubject');
+    const src = code(read(module));
+    // It must CALL the hook (every consumer binds it as `subjectState = useStorageSubject()`).
+    expect(src, `${module} must call useStorageSubject()`).toMatch(/\bsubjectState\s*=\s*useStorageSubject\(\)/);
     // The object-vs-primitive distinction is the actual bug risk, so pin it:
     // the module must derive a primitive `subjectKey`, not put the returned
     // object straight into a dependency array.
-    expect(src, `${module} must derive a primitive subjectKey`).toMatch(/subjectKey\s*=/);
+    expect(src, `${module} must derive a primitive subjectKey from the hook's state`).toMatch(/\bsubjectKey\s*=\s*subjectState\b/);
     // …and must actually USE it as an effect dependency. Asserting only that the
     // declaration exists was theater: deleting `subjectKey` from the dep array
     // is precisely the regression that breaks the re-read, and the declaration

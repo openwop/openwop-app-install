@@ -10,6 +10,16 @@
  * The owner pages are `lazy()` in the FEATURES manifest, so the console subtree
  * suspends → the harness wraps a <Suspense> boundary and awaits with findBy*.
  * The owner pages' data clients are mocked so mounting them is inert.
+ *
+ * SETTLE BEFORE ABSENCE (wave 52 / grade-tests). Each "no duplicate header"
+ * assertion waits for a signal the EMBEDDED owner page renders once it has
+ * settled — the routing page's Organization picker, the leaderboard's zero-org
+ * clause — so the absence is never read off a loading skeleton. The routing
+ * fixture lists one org so the page reaches its main render, which is where a
+ * non-embedded page shows its own header.
+ * Sabotage: dropping `<HubProvider>` around the active owner page in
+ * ModelsHubPage (the pages render non-embedded) reds the EMBEDDED and the
+ * tab-switch cases (probe w52g1-mh-hubprovider).
  */
 import { Suspense } from 'react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -38,7 +48,9 @@ vi.mock('../../../client/evalsClient.js', () => ({
   fetchLeaderboard: vi.fn().mockResolvedValue([]),
 }));
 vi.mock('../../model-router/modelRouterClient.js', () => ({
-  listOrgs: vi.fn().mockResolvedValue([]),
+  // One org, so the routing page settles on its MAIN render (header + picker),
+  // not the zero-org StateCard that has no header in either mode.
+  listOrgs: vi.fn().mockResolvedValue([{ orgId: 'o1', name: 'Acme' }]),
   getRouterConfig: vi.fn().mockResolvedValue(null),
   setRouterConfig: vi.fn(),
   setRouterEnabled: vi.fn(),
@@ -71,6 +83,8 @@ describe('ModelsHubPage (ADR 0145 console shell)', () => {
     // model-router is the first tab; embedded, its own "Model routing" PageHeader
     // is suppressed (the console owns the chrome). Only the console title shows.
     expect(await screen.findByRole('heading', { name: 'Models' })).toBeTruthy();
+    // Settled: the routing page's own picker is up (its main render).
+    expect(await screen.findByLabelText('Organization')).toBeTruthy();
     expect(screen.queryByRole('heading', { name: 'Model routing' })).toBeNull();
   });
 
@@ -83,6 +97,8 @@ describe('ModelsHubPage (ADR 0145 console shell)', () => {
       expect(screen.getByRole('tab', { name: 'Leaderboard' }).getAttribute('aria-selected')).toBe('true'),
     );
     // Leaderboard mounts embedded too — no "Model leaderboard" duplicate header.
+    // Settled first: the leaderboard's zero-org clause (evals listOrgs → []).
+    expect(await screen.findByText(/The model leaderboard belongs to an organization/)).toBeTruthy();
     expect(screen.queryByRole('heading', { name: 'Model leaderboard' })).toBeNull();
   });
 });

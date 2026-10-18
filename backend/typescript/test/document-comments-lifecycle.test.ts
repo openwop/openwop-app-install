@@ -14,6 +14,8 @@ import { createApp } from '../src/index.js';
 import { createCanvasForTenant } from '../src/host/canvasSurface.js';
 import { fireCanvasDeleted } from '../src/host/canvasLifecycle.js';
 import { createComment, listThread, __resetCommentsStore } from '../src/features/comments/commentsService.js';
+import { saveConfig } from '../src/host/featureToggles/service.js';
+import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { PREAUTHORIZED_CALLER } from '../src/host/subjectAccess.js';
 
 /** ADR 0659 D1 — `listThread` now answers `null` when the target is absent OR invisible.
@@ -34,6 +36,10 @@ beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
   await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
+  // ADR 0881 D2 — a canvas.document thread is gated on its OWNING feature
+  // (`document-editor`, default off), so the fixture turns it on.
+  const d = getToggleDefault('document-editor');
+  if (d) await saveConfig({ ...d, status: 'on' }, 'test');
 });
 afterAll(() => { delete process.env.OPENWOP_STORAGE_DSN; });
 beforeEach(() => __resetCommentsStore());

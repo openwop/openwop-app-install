@@ -9,6 +9,15 @@
  *  - CRB-G2: the validator grades each issue `error` | `warning` and names its
  *    field. Both were erased into one joined WARNING strip, so a blocker read
  *    exactly like a suggestion.
+ *
+ * /grade-tests w52 — witnessed by sabotage of `CreativeBriefsPage.tsx`:
+ * dropping `if (dirty) await saveFields()` (CRB-G1 order), sending the wrong
+ * target status (the transition args are asserted exactly), demoting the error
+ * Notice to `warning` (case 1 now reads the NOTICE, not any alert — the title
+ * Field renders its own `role="alert"`, which used to satisfy it), and
+ * filtering errors on `=== 'error'` (unknown severity). The file is fetch-free:
+ * `RendersSection` reads templates + renders on mount, so both are mocked
+ * (ADR 0661; it was on the live-fetch allowlist only because they were not).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, waitFor, fireEvent, act, within } from '@testing-library/react';
@@ -32,6 +41,9 @@ vi.mock('../creativeBriefsClient.js', async (orig) => {
     transitionBrief: (...a: unknown[]) => { calls.push('transition'); return transitionBrief(...a); },
     listVersions: vi.fn(async () => []),
     deleteBrief: vi.fn(async () => {}),
+    // RendersSection's mount reads — unmocked, they were live fetches.
+    listRenderTemplates: vi.fn(async () => []),
+    listRenders: vi.fn(async () => []),
   };
 });
 vi.mock('../../media/mediaClient.js', async (orig) => ({
@@ -47,12 +59,21 @@ vi.mock('../../../featureToggles/FeatureAccessContext.js', () => ({
 import { CreativeBriefsPage } from '../CreativeBriefsPage.js';
 
 function brief(over: Partial<CreativeBrief> = {}): CreativeBrief {
-  return {
+  const base: CreativeBrief = {
     briefId: 'cb-1', orgId: 'org-1', title: 'Spring hero', assetType: 'still',
     sceneDescription: 'A field at dawn', directions: [], moodBoard: [],
-    status: 'review', version: 3, createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
-    ...over,
-  } as CreativeBrief;
+    status: 'review', version: 3, updatedAt: '2026-01-01T00:00:00.000Z',
+  };
+  return { ...base, ...over };
+}
+
+/** The issue panel's own Notice (by its title), not any `role` region — the
+ *  Fields render their own `role="alert"` errors, which a bare role query
+ *  would accept in the Notice's place. */
+function noticeTitled(role: 'alert' | 'status', title: RegExp): HTMLElement {
+  const hit = screen.getAllByRole(role).find((n) => title.test(n.textContent ?? ''));
+  if (!hit) throw new Error(`no ${role} notice titled ${String(title)}`);
+  return hit;
 }
 
 async function openDetail(b: CreativeBrief): Promise<void> {
@@ -85,6 +106,7 @@ describe('lifecycle acts on the brief on screen', () => {
     await openDetail(brief());
     fireEvent.click(screen.getByRole('button', { name: /^approve$/i }));
     await waitFor(() => expect(transitionBrief).toHaveBeenCalled());
+    expect(transitionBrief).toHaveBeenCalledWith('org-1', 'cb-1', 'approved');
     expect(updateBrief).not.toHaveBeenCalled();
   });
 
@@ -97,17 +119,20 @@ describe('lifecycle acts on the brief on screen', () => {
     fireEvent.click(approve);
 
     await waitFor(() => expect(transitionBrief).toHaveBeenCalled());
+    expect(transitionBrief).toHaveBeenCalledWith('org-1', 'cb-1', 'approved');
     // Order matters: approving first would approve the stored version, and the
     // later save would then DEMOTE the brief back to draft and purge its links.
     expect(calls).toEqual(['update', 'transition']);
-    const [, , payload] = updateBrief.mock.calls[0] as [string, string, { sceneDescription: string }];
-    expect(payload.sceneDescription).toBe('A field at dusk');
+    expect(updateBrief).toHaveBeenCalledWith('org-1', 'cb-1', expect.objectContaining({ sceneDescription: 'A field at dusk' }));
   });
 
-  it('CRB-G1: send-to-review discloses the save too', async () => {
+  it('CRB-G1: send-to-review discloses the save too — and saves before it transitions', async () => {
     await openDetail(brief({ status: 'draft' }));
     fireEvent.change(screen.getByDisplayValue('A field at dawn'), { target: { value: 'Changed' } });
-    expect(await screen.findByRole('button', { name: /save & send to review/i })).toBeTruthy();
+    fireEvent.click(await screen.findByRole('button', { name: /save & send to review/i }));
+    await waitFor(() => expect(transitionBrief).toHaveBeenCalled());
+    expect(calls).toEqual(['update', 'transition']);
+    expect(transitionBrief).toHaveBeenCalledWith('org-1', 'cb-1', 'review');
   });
 });
 
@@ -119,28 +144,36 @@ describe('issue severity survives to the screen', () => {
         { field: 'messagingIntent', severity: 'warning', message: 'Messaging intent helps the designer land the point' },
       ],
     }));
-    const alerts = screen.getAllByRole('alert');
-    // An `error` Notice announces assertively; the warning stays a polite status.
-    expect(alerts.some((n) => (n.textContent ?? '').includes('A title is required'))).toBe(true);
-    const statuses = screen.getAllByRole('status');
-    expect(statuses.some((n) => (n.textContent ?? '').includes('Messaging intent helps'))).toBe(true);
+    // An `error` Notice announces assertively; the warning stays a polite status
+    // — and neither absorbs the other's issue.
+    const errors = noticeTitled('alert', /1 issue\(s\) must be fixed/);
+    expect(errors.textContent).toContain('A title is required');
+    expect(errors.textContent).not.toContain('Messaging intent helps');
+    const warnings = noticeTitled('status', /1 suggestion\(s\)/);
+    expect(warnings.textContent).toContain('Messaging intent helps');
+    expect(warnings.textContent).not.toContain('A title is required');
   });
 
   it('CRB-G2: each issue names its field', async () => {
     await openDetail(brief({
       issues: [{ field: 'sceneDescription', severity: 'error', message: 'A scene description is required' }],
     }));
-    const alert = screen.getAllByRole('alert').find((n) => (n.textContent ?? '').includes('scene description'))!;
+    const alert = noticeTitled('alert', /must be fixed/);
+    expect(alert.textContent).toContain('A scene description is required');
     expect(within(alert).getByText('Scene')).toBeTruthy();
   });
 
   it('CRB-G2: an issue with an UNKNOWN severity is treated as an error, not downgraded', async () => {
-    await openDetail(brief({
-      issues: [{ field: 'title', severity: 'critical' as 'error', message: 'A future rule fired' }],
+    // A severity outside the client's union is a WIRE value (a newer server):
+    // it arrives through JSON, so it is built through JSON, not a cast.
+    // `composition` has no field-error control, so the Notice is its only carrier.
+    const wire: CreativeBrief = JSON.parse(JSON.stringify({
+      ...brief(), issues: [{ field: 'composition', severity: 'critical', message: 'A future rule fired' }],
     }));
+    await openDetail(wire);
     // A rule we don't recognise must not be quietly demoted to a suggestion.
-    const alerts = screen.getAllByRole('alert');
-    expect(alerts.some((n) => (n.textContent ?? '').includes('A future rule fired'))).toBe(true);
+    expect(noticeTitled('alert', /must be fixed/).textContent).toContain('A future rule fired');
+    expect(screen.queryByText(/suggestion\(s\)/)).toBeNull();
   });
 
   it('CRB-G2: no issues renders neither notice', async () => {

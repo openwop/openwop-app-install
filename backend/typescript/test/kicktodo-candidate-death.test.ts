@@ -14,6 +14,11 @@
  *  - `setLessonMedia` overwrite with a CHANGED assetId deletes the superseded asset,
  *    while an identical re-put deletes nothing;
  *  - a THROWING subscriber never breaks the kill or the other subscribers.
+ *
+ * w41: the throwing subscriber is registered FIRST (the fan-out runs in insertion
+ * order), so a fan-out that stops at the first failure leaves the real cleanups
+ * unrun — the old order registered it last, where that sabotage stayed green. The
+ * re-kill case counts deliveries with a named counting subscriber.
  */
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
@@ -105,25 +110,36 @@ describe('candidate death purges the outline canvas + lesson media (I2)', () => 
     const candidateId = await newCandidate();
     const canvasId = await seedOutlineCanvas(candidateId);
 
+    let deaths = 0;
+    onCandidateDeath('test.count', async function countDeaths() { deaths += 1; });
+
     const first = await __setCandidateWithdrawn(TENANT, candidateId, 'reason', ACTOR);
     expect(first?.state).toBe('withdrawn');
     expect(await getCanvasForTenant(TENANT, canvasId)).toBeNull();
+    expect(deaths).toBe(1);
 
-    // A re-withdraw of an already-terminal candidate must not throw (nothing to re-fire).
+    // A re-withdraw of an already-terminal candidate must not throw, and must NOT re-fire.
     const again = await __setCandidateWithdrawn(TENANT, candidateId, 'reason again', ACTOR);
     expect(again?.state).toBe('withdrawn');
+    expect(again?.riskSignals.filter((r) => r.startsWith('withdrawn:'))).toHaveLength(1); // no second audit line
+    expect(deaths).toBe(1);
   });
 
   it('a THROWING subscriber never breaks the kill or the other subscribers', async () => {
-    // A hostile/broken subscriber registered ahead of the real ones.
-    onCandidateDeath('test.explode', async () => { throw new Error('boom'); });
+    // A hostile/broken subscriber registered AHEAD of the real ones (re-registering the
+    // real keys afterwards keeps the thrower's earlier position in the fan-out order).
+    let exploded = 0;
+    __resetCandidateLifecycleHooks();
+    onCandidateDeath('test.explode', async function explode() { exploded += 1; throw new Error('boom'); });
+    registerCandidateDeathSubscribers();
     const candidateId = await newCandidate();
     const canvasId = await seedOutlineCanvas(candidateId);
     const assetA = await seedLessonAsset(candidateId, 1);
 
     const withdrawn = await killSwitch(TENANT, candidateId, 'reason', ACTOR);
+    expect(exploded).toBe(1); // the thrower really ran (and ran first)
     expect(withdrawn.state).toBe('withdrawn'); // the kill still committed
-    // …and the real subscribers still ran.
+    // …and the real subscribers AFTER it still ran.
     expect(await getCanvasForTenant(TENANT, canvasId)).toBeNull();
     expect(await getAssetByIdForTenant(TENANT, assetA)).toBeNull();
   });
@@ -143,7 +159,7 @@ describe('setLessonMedia frees a superseded asset on retry (I4)', () => {
     expect(await getAssetByIdForTenant(TENANT, newAsset.assetId)).not.toBeNull();
     const pointers = await listLessonMedia(TENANT, candidateId);
     expect(pointers).toHaveLength(1);
-    expect(pointers[0]!.assetId).toBe(newAsset.assetId);
+    expect(pointers[0]?.assetId).toBe(newAsset.assetId);
   });
 
   it('an identical re-put (same assetId) deletes nothing', async () => {

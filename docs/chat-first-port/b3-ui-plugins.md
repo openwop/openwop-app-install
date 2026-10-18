@@ -54,6 +54,11 @@ The FE bridge builds its allow-set from the *calling plugin's* declared `hostApi
 
 Regression pins already in place that a port must not break: `frontendPluginPacks.test.ts` (host filter + traversal/size caps), `PluginFrame.test.tsx` + `TrustedPluginHost.test.tsx` (allowlist reject, opaque-origin mount, error states), and `routes/__tests__/uiPlugins.test.ts` + the conformance `frontend-plugin-packs` scenario (closed allowlist + version-token concurrency). If F1(b) is ever taken, add a route-level test asserting a method outside the *calling plugin's* declared `hostApi` is rejected server-side.
 
+> **Correction 2026-10-12 (grade-tests wave 33):** `frontendPluginPacks.test.ts` does not exercise a host
+> filter, a traversal guard or size caps. It pins the served-catalog projection, the entry bytes, isolation
+> non-drift and the uniform 404 miss; the traversal guard is unreachable behind the served-name lookup and
+> the schema pattern (probe `w33g1-fpp-traversal-guard`, vacuous — a recorded ceiling).
+
 ---
 
 ## New-code inventory

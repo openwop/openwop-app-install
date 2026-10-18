@@ -20,10 +20,11 @@ import { createLogger } from '../../observability/logger.js';
 import { getNotificationEmitter } from '../../notifications/emitter.js';
 import { isNotificationMuted } from '../../host/notificationPolicy.js';
 import { registerPlanRevisedListener } from '../../host/planRevisedHook.js';
-import { getEnrollment, occurrencesOn, __test as coreStore } from '../kicktodo-core/enrollmentService.js';
+import { getEnrollment, listEnrollmentsFor, occurrencesOn, __test as coreStore } from '../kicktodo-core/enrollmentService.js';
 import { getChallenge } from '../kicktodo-core/challengeService.js';
 import { localDateIn } from '../kicktodo-core/types.js';
-import { liveConsent, ConsentRequiredError } from './integrationService.js';
+import { liveConsent, ConsentRequiredError, onConsentRevoked } from './integrationService.js';
+import { onEnrollmentAbandoned, onEnrollmentDeleted } from '../kicktodo-core/enrollmentLifecycle.js';
 
 const log = createLogger('kicktodo.calendar');
 
@@ -70,6 +71,51 @@ const written = new DurableCollection<{ tenantId: string; enrollmentId: string; 
 // subject key). It is therefore neither on the subject-erasure seam nor the retention sweep;
 // the personal integration data (consents/feeds/wearable rules) is erased in
 // integrationService's `eraseIntegrationsSubject`.
+//
+// KTINT-1 (KickTodo wave 4C) — but the EVENTS it names sit on the participant's own
+// calendar, and abandon, a calendar-write consent revoke and a DSAR all left them there
+// (and the ledger rows here). `removeWrittenCalendarEvents` below is the cleanup, wired to
+// all three at the bottom of this module.
+
+/**
+ * KTINT-1 — remove every event this lane wrote for one enrollment through the
+ * transport's `remove`, and drop its ledger row. `keepLedgerOnFailure`: when the
+ * enrollment still exists (abandon, consent revoke) a failed remove KEEPS its row,
+ * so a later call can retry; when the enrollment is gone (DSAR) nothing could ever
+ * retry, so the row is dropped regardless and the failure is only logged. No
+ * transport configured ⇒ treated as a failed remove (nothing can be reached).
+ */
+export async function removeWrittenCalendarEvents(
+  tenantId: string,
+  ownerSubject: string | undefined,
+  enrollmentId: string,
+  opts: { keepLedgerOnFailure: boolean },
+): Promise<{ removed: number; failed: number }> {
+  let removed = 0;
+  let failed = 0;
+  if (!tenantId || !enrollmentId) return { removed, failed };
+  for (const row of await written.listByPrefix(`${tenantId}::${enrollmentId}::`)) {
+    if (row.tenantId !== tenantId || row.enrollmentId !== enrollmentId) continue;
+    let ok = false;
+    if (transport && ownerSubject) {
+      try {
+        await transport.remove(row.externalId, { tenantId, ownerSubject });
+        ok = true;
+      } catch (err) {
+        log.warn('kicktodo_calendar_remove_failed', { enrollmentId, error: err instanceof Error ? err.message : String(err) });
+      }
+    }
+    if (!ok) {
+      failed += 1;
+      if (opts.keepLedgerOnFailure) continue;
+    } else {
+      removed += 1;
+    }
+    await written.delete(`${row.tenantId}::${row.enrollmentId}::${row.externalId}`);
+  }
+  if (removed || failed) log.info('kicktodo_calendar_events_removed', { enrollmentId, removed, failed });
+  return { removed, failed };
+}
 
 export function calendarEventId(enrollmentId: string, dateLocal: string, stableActivityId: string): string {
   return `${enrollmentId}|${dateLocal}|${stableActivityId}`;
@@ -181,4 +227,20 @@ registerPlanRevisedListener(async (ev) => {
   if (!ev.lanes.includes('move')) return;
   const out = await syncEnrollmentCalendar(ev.tenantId, ev.ownerSubject, ev.enrollmentId);
   log.info('kicktodo_move_calendar_synced', { enrollmentId: ev.enrollmentId, ...out });
+});
+
+// ── KTINT-1 (KickTodo wave 4C) — the three ends of the calendar-write lane ──
+// Keyed registrations at module load (the house pattern above). Each is
+// idempotent: a ledger row is the record of an event still to remove.
+onEnrollmentAbandoned('kicktodo-integrations.calendar-events', async ({ tenantId, enrollmentId, ownerSubject }) => {
+  await removeWrittenCalendarEvents(tenantId, ownerSubject, enrollmentId, { keepLedgerOnFailure: true });
+});
+onEnrollmentDeleted('kicktodo-integrations.calendar-events', async ({ tenantId, enrollmentId, ownerSubject }) => {
+  await removeWrittenCalendarEvents(tenantId, ownerSubject, enrollmentId, { keepLedgerOnFailure: false });
+});
+onConsentRevoked('kicktodo-integrations.calendar-events', async ({ tenantId, ownerSubject, kind }) => {
+  if (kind !== 'calendar-write') return;
+  for (const e of await listEnrollmentsFor(tenantId, ownerSubject)) {
+    await removeWrittenCalendarEvents(tenantId, ownerSubject, e.id, { keepLedgerOnFailure: true });
+  }
 });

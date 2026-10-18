@@ -2,6 +2,12 @@
 
 Status: Accepted (Phase 1 + Phase 2 implemented)
 
+> **CORRECTED 2026-10-14 (ADR 0892): Phase 1 is superseded for `crm`.** `crm` defaults
+> **off** again, as an opt-in bundle, so white-label installs start without the CRM
+> group. Phase 2's preflight is what now keeps a lighthouse template from failing
+> mid-run: it names the disabled feature before the run. `analytics` stays on. App
+> migration 23 keeps CRM on for installs that already use it.
+
 ## Context
 
 The reference app installs `core.openwop.workflows.lighthouse` (ADR 0149) by

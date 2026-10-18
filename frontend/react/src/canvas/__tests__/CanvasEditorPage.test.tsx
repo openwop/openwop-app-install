@@ -7,38 +7,38 @@
  * tree definition and the RFC 0130 PreviewPanel path, over a mocked client.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react';
+import { render, cleanup, fireEvent, screen, waitFor, within, act } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
+import type { CanvasClient, CanvasRecord, CatalogResponse } from '../canvasClient.js';
 
 // ── the mocked wire (module-level so definitions import the same instance) ──
-const state = vi.hoisted(() => ({
-  catalog: { canvasTypeId: 'canvas.test', components: [] as unknown[], promptSchema: '' } as Record<string, unknown>,
-  record: { canvasId: 'c1', canvasTypeId: 'canvas.test', state: {} as Record<string, unknown>, version: 1 } as {
-    canvasId: string;
-    canvasTypeId: string;
-    state: Record<string, unknown>;
-    version: number;
-    name?: string;
-  },
-  saveCanvas: vi.fn(),
-  loadError: null as unknown,
-}));
+const state = vi.hoisted(() => {
+  const catalog: CatalogResponse = { canvasTypeId: 'canvas.test', components: [], promptSchema: '' };
+  const record: CanvasRecord = { canvasId: 'c1', canvasTypeId: 'canvas.test', state: {}, version: 1 };
+  return {
+    catalog,
+    record,
+    saveCanvas: vi.fn<CanvasClient['saveCanvas']>(),
+    loadError: null as unknown,
+  };
+});
 
 vi.mock('../canvasClient.js', async (importOriginal) => {
   const orig = await importOriginal<typeof import('../canvasClient.js')>();
   return {
     ...orig,
     listOrgs: vi.fn().mockResolvedValue([{ orgId: 'org1', name: 'Acme' }]),
-    createCanvasClient: () => ({
+    createCanvasClient: (): CanvasClient => ({
       root: '/test',
-      getCatalog: vi.fn().mockImplementation(() => Promise.resolve(state.catalog)),
-      getCanvas: vi.fn().mockImplementation(() => (state.loadError ? Promise.reject(state.loadError) : Promise.resolve(state.record))),
-      seedFromArtifact: vi.fn(),
-      deleteCanvas: vi.fn(),
-      listVersions: vi.fn().mockResolvedValue([]),
-      getVersion: vi.fn(),
-      restoreVersion: vi.fn(),
-      saveCanvas: state.saveCanvas,
+      getCatalog: vi.fn(async () => state.catalog),
+      getCanvas: vi.fn(async () => { if (state.loadError) throw state.loadError; return state.record; }),
+      createCanvas: vi.fn<CanvasClient['createCanvas']>(),
+      seedFromArtifact: vi.fn<CanvasClient['seedFromArtifact']>(),
+      deleteCanvas: vi.fn<CanvasClient['deleteCanvas']>(),
+      listVersions: vi.fn(async () => []),
+      getVersion: vi.fn<CanvasClient['getVersion']>(),
+      restoreVersion: vi.fn<CanvasClient['restoreVersion']>(),
+      saveCanvas: (...args) => state.saveCanvas(...args),
     }),
   };
 });
@@ -53,7 +53,10 @@ import { cadDefinition } from '../../features/cad/definition.js';
 
 afterEach(cleanup);
 beforeEach(() => {
-  state.saveCanvas = vi.fn().mockResolvedValue({ canvasId: 'c1', newVersion: 2, warnings: [] });
+  // Per-device palette prefs + the frames clipboard live in localStorage: every
+  // case starts clean, so a red case cannot leak into the next one.
+  localStorage.clear();
+  state.saveCanvas = vi.fn<CanvasClient['saveCanvas']>().mockResolvedValue({ canvasId: 'c1', newVersion: 2, warnings: [] });
   state.catalog = { canvasTypeId: 'canvas.test', components: [], promptSchema: '' };
   state.loadError = null;
 });
@@ -72,8 +75,9 @@ function mount<Doc extends object, F extends FrameBase, N extends TreeNodeBase>(
 
 describe('frames mode (the real slides definition)', () => {
   beforeEach(() => {
+    // Version 7 (not 1): a save that sends a hard-coded 1 must not pass.
     state.record = {
-      canvasId: 'c1', canvasTypeId: 'canvas.slides', version: 1,
+      canvasId: 'c1', canvasTypeId: 'canvas.slides', version: 7,
       state: { title: 'Pitch', slides: [{ layout: 'title', title: 'Hello' }, { layout: 'blank' }] },
     };
   });
@@ -84,7 +88,7 @@ describe('frames mode (the real slides definition)', () => {
     const tabs = await screen.findAllByRole('tab');
     expect(tabs).toHaveLength(2);
     expect(container.querySelector('[data-canvas-layout="workbench"]')).toBeTruthy();
-    expect(screen.getByLabelText('Canvas status').textContent).toContain('v1');
+    expect(screen.getByLabelText('Canvas status').textContent).toContain('v7');
     expect(screen.getByDisplayValue('Pitch')).toBeTruthy(); // docNameKey='title'
     // Frames-only mode: the property panel is bound to the ACTIVE frame.
     expect(screen.getByLabelText(/Layout/)).toBeTruthy();
@@ -95,7 +99,7 @@ describe('frames mode (the real slides definition)', () => {
     fireEvent.click(save);
     await waitFor(() => expect(state.saveCanvas).toHaveBeenCalledTimes(1));
     const [, , savedState, expectedVersion] = state.saveCanvas.mock.calls[0]!;
-    expect(expectedVersion).toBe(1);
+    expect(expectedVersion).toBe(7);
     expect((savedState as { slides: { layout: string }[] }).slides[0]!.layout).toBe('quote');
   });
 
@@ -109,7 +113,7 @@ describe('frames mode (the real slides definition)', () => {
   });
 
   it('a stale save (409) surfaces the conflict notice with Reload latest', async () => {
-    state.saveCanvas = vi.fn().mockRejectedValue(Object.assign(new Error('conflict'), { status: 409 }));
+    state.saveCanvas = vi.fn<CanvasClient['saveCanvas']>().mockRejectedValue(Object.assign(new Error('conflict'), { status: 409 }));
     mount(slidesDefinition);
     await screen.findAllByRole('tab');
     fireEvent.change(screen.getByLabelText(/Layout/), { target: { value: 'quote' } });
@@ -117,10 +121,56 @@ describe('frames mode (the real slides definition)', () => {
     await screen.findByRole('button', { name: 'Reload latest' });
   });
 
+  it('a view-only caller (access:read) gets no Save/Delete/Share and a plain view-only line (ADR 0886 SL2UX-1)', async () => {
+    state.record = { ...state.record, access: 'read' };
+    mount(slidesDefinition);
+    await screen.findAllByRole('tab');
+    expect(screen.queryByRole('button', { name: 'Save' })).toBeNull();
+    expect(screen.queryByRole('button', { name: /^Delete/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Share' })).toBeNull();
+    expect(screen.getByText(/You can view this, but not edit it/)).toBeTruthy();
+  });
+
+  it('a ?frame=<id> deep link selects that slide on load (ADR 0886 SL2UX-4)', async () => {
+    state.record = { ...state.record, state: { title: 'Pitch', slides: [{ id: 'cover', name: 'Cover', layout: 'title', title: 'Hello' }, { id: 'ask', name: 'The ask', layout: 'blank' }] } };
+    render(
+      <MemoryRouter initialEntries={['/edit/c1?frame=ask']}>
+        <Routes>
+          <Route path="/edit/:canvasId" element={<CanvasEditorPage definition={slidesDefinition} />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    const tabs = await screen.findAllByRole('tab');
+    await waitFor(() => expect(tabs[1]!.getAttribute('aria-selected')).toBe('true'));
+    expect(tabs[0]!.getAttribute('aria-selected')).toBe('false');
+  });
+
+  it('a refused save (403) is named in the user language, not the server scope string', async () => {
+    state.saveCanvas = vi.fn<CanvasClient['saveCanvas']>().mockRejectedValue(Object.assign(new Error('Missing required scope: workspace:write on the canvas owner'), { status: 403 }));
+    mount(slidesDefinition);
+    await screen.findAllByRole('tab');
+    fireEvent.change(screen.getByLabelText(/Layout/), { target: { value: 'quote' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await screen.findByText("You don't have permission to change this.");
+    expect(screen.queryByText(/Missing required scope/)).toBeNull();
+  });
+
   it('typing in the doc-name input keeps the doc dirty (the GC-CV-2 editGen path)', async () => {
     mount(slidesDefinition);
     await screen.findAllByRole('tab');
     fireEvent.change(screen.getByDisplayValue('Pitch'), { target: { value: 'Pitch v2' } });
+    expect(screen.getByText('Unsaved')).toBeTruthy();
+    expect((screen.getByRole('button', { name: 'Save' }) as HTMLButtonElement).disabled).toBe(false);
+
+    // GC-CV-2: a keystroke landing WHILE a save is in flight must keep the doc
+    // dirty when that save resolves (the save captured the doc before it).
+    let release: (v: { canvasId: string; newVersion: number; warnings: [] }) => void = () => {};
+    state.saveCanvas = vi.fn<CanvasClient['saveCanvas']>(() => new Promise((r) => { release = r; }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(state.saveCanvas).toHaveBeenCalledTimes(1));
+    fireEvent.change(screen.getByDisplayValue('Pitch v2'), { target: { value: 'Pitch v3' } });
+    await act(async () => { release({ canvasId: 'c1', newVersion: 8, warnings: [] }); });
+    await waitFor(() => expect(screen.getByLabelText('Canvas status').textContent).toContain('v8'));
     expect(screen.getByText('Unsaved')).toBeTruthy();
     expect((screen.getByRole('button', { name: 'Save' }) as HTMLButtonElement).disabled).toBe(false);
   });
@@ -254,7 +304,6 @@ describe('tree mode (synthetic definition + host catalog)', () => {
   });
 
   it('palette favorites pin a group; adding feeds Recent; both persist across remount (audit polish P2)', async () => {
-    localStorage.removeItem('cv-palette:canvas.test');
     const { container, unmount } = mount(syntheticTreeDefinition());
     // Star the item → a pinned Favorites group appears.
     fireEvent.click(await screen.findByRole('button', { name: 'Add TextBlock to favorites' }));
@@ -267,7 +316,6 @@ describe('tree mode (synthetic definition + host catalog)', () => {
     unmount();
     mount(syntheticTreeDefinition());
     expect(await screen.findByRole('heading', { name: 'Favorites' })).toBeTruthy();
-    localStorage.removeItem('cv-palette:canvas.test');
   });
 
   it('the template gallery previews via the shared Renderer and Use adds the frame (audit gap #5)', async () => {
@@ -387,13 +435,14 @@ describe('InteractivePreview seam (ADR 0310 Phase C follow-up)', () => {
         { kind: 'rect', x: 90, y: 0, width: 10, height: 10 },
       ] },
     };
+    const removedCounts: number[] = [];
     const def = { ...drawingsDefinition, InteractivePreview: ({ patchElements, deleteElements }: {
       patchElements: (col: string, patches: { idx: number; patch: Record<string, unknown> }[], phase: 'start' | 'move' | 'end') => void;
       deleteElements: (col: string, idxs: number[]) => number;
     }) => (
       <div>
         <button type="button" onClick={() => { patchElements('shapes', [{ idx: 0, patch: { x: 5 } }, { idx: 1, patch: { x: 55 } }], 'start'); patchElements('shapes', [], 'end'); }}>tp-group-move</button>
-        <button type="button" onClick={() => deleteElements('shapes', [0, 1])}>tp-group-del</button>
+        <button type="button" onClick={() => { removedCounts.push(deleteElements('shapes', [0, 1])); }}>tp-group-del</button>
       </div>
     ) };
     mount(def);
@@ -414,13 +463,19 @@ describe('InteractivePreview seam (ADR 0310 Phase C follow-up)', () => {
     await waitFor(() => expect(state.saveCanvas).toHaveBeenCalledTimes(2));
     const afterDel = state.saveCanvas.mock.calls[1]![2] as { shapes: unknown[] };
     expect(afterDel.shapes).toHaveLength(1);
+    expect(removedCounts).toEqual([2]);
+
+    // Respecting min: deleting [0, 1] from the ONE remaining shape removes
+    // nothing (drawings min = 1) — the list never drops below the schema floor.
+    fireEvent.click(screen.getByRole('button', { name: 'tp-group-del' }));
+    expect(removedCounts).toEqual([2, 0]);
+    expect((screen.getByRole('button', { name: 'Save' }) as HTMLButtonElement).disabled).toBe(true); // nothing changed
   });
 });
 
 // ── Grade pass 2026-07-10 — the P7 FRAMES clipboard (copy → paste across decks). ──
 describe('frames clipboard (ADR 0328 P7)', () => {
   it('copies the active slide to localStorage and pastes it as a NEW frame with re-minted identity', async () => {
-    localStorage.removeItem('owp-frames-clip:canvas.slides');
     state.record = {
       canvasId: 'c1', canvasTypeId: 'canvas.slides', name: 'Deck', version: 1,
       state: { title: 'Deck', slides: [
@@ -443,6 +498,15 @@ describe('frames clipboard (ADR 0328 P7)', () => {
     fireEvent.click(await screen.findByText('Paste from clipboard'));
     const tabs = r.container.querySelectorAll('[role="tab"]');
     expect(tabs.length).toBe(2);
+    // The pasted frame carries the content but a FRESH identity.
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(state.saveCanvas).toHaveBeenCalledTimes(1));
+    const saved = state.saveCanvas.mock.calls[0]![2] as { slides: { id?: string; name?: string; bullets?: string[] }[] };
+    expect(saved.slides).toHaveLength(2);
+    expect(saved.slides[0]!.id).toBe('orig');
+    expect(typeof saved.slides[1]!.id).toBe('string');
+    expect(saved.slides[1]!.id).not.toBe('orig');
+    expect(saved.slides[1]!.bullets).toEqual(['a', 'b']);
   });
 });
 
@@ -512,6 +576,18 @@ describe('narrow editor toolbar', () => {
     expect(bar!.querySelector('.cv-editor__spacer')).not.toBeNull();
     // Cluster hairline dividers group the action set.
     expect(bar!.querySelectorAll('.cv-editor__bar-sep').length).toBeGreaterThan(0);
+
+    // Behaviour, not just layout: the identity in the bar is the LIVE doc state.
+    // The name input edits the doc name, Save lives in the same bar, and the
+    // version chip follows the version the server answered with.
+    const name = within(bar as HTMLElement).getByDisplayValue('My Doc');
+    expect(bar!.querySelector('.cv-editor__version')?.textContent).toBe('v3');
+    state.saveCanvas = vi.fn<CanvasClient['saveCanvas']>().mockResolvedValue({ canvasId: 'c1', newVersion: 4, warnings: [] });
+    fireEvent.change(name, { target: { value: 'Renamed' } });
+    fireEvent.click(within(bar as HTMLElement).getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(bar!.querySelector('.cv-editor__version')?.textContent).toBe('v4'));
+    expect((state.saveCanvas.mock.calls[0]![2] as { name?: string }).name).toBe('Renamed');
+    expect(state.saveCanvas.mock.calls[0]![3]).toBe(3);
   });
 });
 

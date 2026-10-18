@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { WopError } from '@openwop/openwop';
 import { config, setCurrentIdToken } from '../config.js';
 
 /**
@@ -20,7 +21,6 @@ import { config, setCurrentIdToken } from '../config.js';
 
 type Call = { url: string; init: RequestInit | undefined };
 const calls: Call[] = [];
-const origFetch = globalThis.fetch;
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
@@ -34,12 +34,12 @@ function headerOf(init: RequestInit | undefined, name: string): string | null {
 /** Every stub answers the tenant lookup (`me/workspaces` → active tenant
  *  `default`) so a bind can resolve; the route under test handles the rest. */
 function stub(route: (url: string, init: RequestInit | undefined) => Response | Promise<Response>): void {
-  globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = urlOf(input);
     calls.push({ url, init });
     if (url.includes('/me/workspaces')) return json({ workspaces: [], active: 'default', personal: 'default' });
     return route(url, init);
-  }) as unknown as typeof fetch;
+  });
 }
 const last = (): Call => calls[calls.length - 1]!;
 /** Poll a predicate instead of resolving from inside a stream callback —
@@ -56,7 +56,7 @@ const BOUND = `default/${BARE}`;
 const ENC = BOUND.replace('/', '~2F');
 
 beforeEach(() => { calls.length = 0; config.authMode = 'bearer'; setCurrentIdToken(null); });
-afterEach(() => { globalThis.fetch = origFetch; vi.restoreAllMocks(); });
+afterEach(() => { vi.restoreAllMocks(); });
 
 describe('runs — major 2 on the wire, bare ids in the app', () => {
   it('createRun: unversioned /runs, OpenWOP-Version: 2.0, and the tenant-bound id comes back bare', async () => {
@@ -193,7 +193,7 @@ describe('ADR 0730 C.4 — the last SPA reads that spoke v1 protocol', () => {
     await expect(getWorkflowDefinitionRaw('gone')).resolves.toBeNull();
   });
 
-  it('a 500 THROWS — this is the leg that keeps the helper honest', async () => {
+  it('a 500 THROWS the SDK WopError with status 500 — this is the leg that keeps the helper honest', async () => {
     // A swallow-everything helper would return null here, and
     // `getWorkflowRunInputs` would report "this workflow declares no inputs"
     // for a workflow that declares several. The run would then launch with an
@@ -201,7 +201,9 @@ describe('ADR 0730 C.4 — the last SPA reads that spoke v1 protocol', () => {
     // than a visible failure. Null must mean absent, never unreadable.
     stub(() => new Response('boom', { status: 500 }));
     const { getWorkflowDefinitionRaw } = await import('../workflowsClient.js');
-    await expect(getWorkflowDefinitionRaw('wf-1')).rejects.toBeTruthy();
+    const err = await getWorkflowDefinitionRaw('wf-1').then(() => null, (e: unknown) => e);
+    expect(err).toBeInstanceOf(WopError);
+    expect((err as WopError).status).toBe(500);
   });
 
   it('getWorkflowRunInputs reads variables off that same major-2 read', async () => {
@@ -292,9 +294,11 @@ describe('SSE — one transport, major 2, this app\'s auth', () => {
     return new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } });
   }
   const FRAME = `event: node.completed\ndata: ${JSON.stringify({ eventId: 'e1', runId: BOUND, type: 'node.completed', payload: {}, timestamp: 't', sequence: 1, schemaVersion: 3 })}\n\n`;
+  // ADR 0897 — a stream ends the subscription only on the terminal event.
+  const TERMINAL = `id: 9\nevent: run.completed\ndata: ${JSON.stringify({ eventId: 'e9', runId: BOUND, type: 'run.completed', payload: {}, timestamp: 't', sequence: 9, schemaVersion: 3 })}\n\n`;
 
   it('bearer mode: GET /runs/{id}/events with OpenWOP-Version: 2.0 and text/event-stream; the event id is unbound', async () => {
-    stub(() => sse(FRAME));
+    stub(() => sse(FRAME + TERMINAL));
     const { subscribeToRun } = await import('../streamsClient.js');
     const got: string[] = [];
     let closed = false;
@@ -310,24 +314,26 @@ describe('SSE — one transport, major 2, this app\'s auth', () => {
     expect(headerOf(call.init, 'Accept')).toBe('text/event-stream');
     expect(headerOf(call.init, 'authorization')).toMatch(/^Bearer /);
     expect(u.searchParams.get('streamToken')).toBeNull();
-    expect(got).toEqual([BARE]);
+    expect(got).toEqual([BARE, BARE]);
+    expect(u.searchParams.get('resumable'), 'ADR 0897 / RFC 0247 — this reader opts in to a bounded close').toBe('true');
   });
 
   it('a RENAMED wire type on the stream reaches onEvent in the SPA\'s v1 dialect', async () => {
     const renamed = `event: agent.tool-called\ndata: ${JSON.stringify({ eventId: 'e2', runId: BOUND, type: 'agent.tool-called', payload: {}, timestamp: 't', sequence: 2, schemaVersion: 3 })}\n\n`;
-    stub(() => sse(FRAME + renamed));
+    stub(() => sse(FRAME + renamed + TERMINAL));
     const { subscribeToRun } = await import('../streamsClient.js');
     const types: string[] = [];
     let closed = false;
     const sub = subscribeToRun(BARE, { onEvent: (ev) => { types.push(ev.type); }, onClose: () => { closed = true; } });
     await waitFor(() => closed);
     sub.close();
-    expect(types).toEqual(['node.completed', 'agent.toolCalled']);
+    expect(closed, 'the stream settled (not a waitFor timeout)').toBe(true);
+    expect(types).toEqual(['node.completed', 'agent.toolCalled', 'run.completed']);
   });
 
   it('cookie mode: no bearer, so a run-scoped streamToken minted from the VENDOR token route (ADR 0654) rides the stream URL', async () => {
     config.authMode = 'cookie';
-    stub((url) => url.includes('/events/token') ? json({ streamToken: 'tok-1' }) : sse(FRAME));
+    stub((url) => url.includes('/events/token') ? json({ streamToken: 'tok-1' }) : sse(FRAME + TERMINAL));
     const { subscribeToRun } = await import('../streamsClient.js');
     let closed = false;
     const sub = subscribeToRun(BARE, { onEvent: () => {}, onClose: () => { closed = true; } });
@@ -342,6 +348,44 @@ describe('SSE — one transport, major 2, this app\'s auth', () => {
     expect(u.searchParams.get('streamToken')).toBe('tok-1');
     expect(headerOf(stream.init, 'authorization')).toBeNull();
     expect(stream.init?.credentials).toBe('include');
+  });
+
+  // ADR 0897 / RFC 0247 — the host may end an opted-in stream before the run
+  // ends. The reader resumes from the last sequence it saw, and only the
+  // terminal event ends the subscription.
+  it('a clean close without the terminal event resumes with Last-Event-ID, and the terminal event ends it', async () => {
+    let opened = 0;
+    stub(() => { opened += 1; return sse(opened === 1 ? FRAME : TERMINAL); });
+    const { subscribeToRun } = await import('../streamsClient.js');
+    const seqs: number[] = [];
+    let closed = false;
+    const sub = subscribeToRun(BARE, { onEvent: (ev) => { seqs.push(ev.sequence); }, onClose: () => { closed = true; } });
+    await waitFor(() => closed, 5000);
+    sub.close();
+    expect(closed, 'the stream settled (not a waitFor timeout)').toBe(true);
+    expect(seqs).toEqual([1, 9]);
+    const streams = calls.filter((c) => c.url.includes('/events') && !c.url.includes('/token'));
+    expect(streams).toHaveLength(2);
+    expect(headerOf(streams[0]!.init, 'Last-Event-ID')).toBeNull();
+    expect(headerOf(streams[1]!.init, 'Last-Event-ID')).toBe('1');
+    expect(new URL(streams[1]!.url).searchParams.get('resumable')).toBe('true');
+  });
+
+  it('an endpoint that keeps closing at once with nothing gives up via onError instead of looping', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      stub(() => sse(''));
+      const { subscribeToRun } = await import('../streamsClient.js');
+      let errored = false;
+      let closed = false;
+      const sub = subscribeToRun(BARE, { onEvent: () => {}, onError: () => { errored = true; }, onClose: () => { closed = true; }, idleTimeoutMs: 600_000, absoluteTimeoutMs: 600_000 });
+      for (let i = 0; i < 60 && !errored; i++) await vi.advanceTimersByTimeAsync(1_000);
+      expect(errored).toBe(true);
+      expect(closed).toBe(false);
+      sub.close();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

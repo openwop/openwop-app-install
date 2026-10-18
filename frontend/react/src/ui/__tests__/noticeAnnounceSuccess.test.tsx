@@ -17,7 +17,15 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { Notice } from '../Notice.js';
-import { GlobalLiveRegion, currentAnnouncements } from '../announce.js';
+import { GlobalLiveRegion, announce } from '../announce.js';
+
+/** What the SHELL live regions actually hold (their test hook, announce.tsx). */
+const shell = (): { polite: string; assertive: string } => ({
+  polite: document.querySelector('[data-owp-live="polite"]')?.textContent ?? '',
+  assertive: document.querySelector('[data-owp-live="assertive"]')?.textContent ?? '',
+});
+/** The announcer's slots are module state: clear them so each case starts silent. */
+const resetSlots = (): void => { announce(''); announce('', { assertive: true }); };
 
 const SRC = join(__dirname, '..', '..');
 const read = (p: string): string => readFileSync(join(SRC, p), 'utf8');
@@ -74,39 +82,39 @@ const WIRED = [
 const NOT_ANNOUNCED: ReadonlyArray<readonly [string, string]> = [
   ['a11y/A11yIssuesPanel.tsx', 'empty-issues state display, not the act of checking'],
   ['agents/AgentConnectionStatusPanel.tsx', '`allConfigured` is standing status'],
-  ['features/kicktodo/ProgressPage.tsx', '`completed` celebration re-renders on every visit'],
   ['settings/HeartbeatSettingsPage.tsx', 'banner describing current settings'],
   ['workforces/WorkforcesGalleryPage.tsx', '`allClear` is standing status'],
 ];
 
 describe('success Notice reaches the live region', () => {
   beforeEach(() => {
+    resetSlots();
     render(<GlobalLiveRegion />);
   });
 
   it('speaks the message when a success notice mounts', () => {
     render(<Notice variant="success" announce="Saved alpha">Saved alpha</Notice>);
-    expect(currentAnnouncements().polite).toBe('Saved alpha');
+    expect(shell().polite).toBe('Saved alpha');
   });
 
   // The reversibility check. Without `announce` the notice still RENDERS
   // correctly and still carries role="status" — and says nothing. This is the
   // assertion that fails if someone drops the prop as redundant.
   //
-  // Asserted against THIS test's own string rather than `toBe('')`, because
-  // `politeMsg` is a module global with no reset seam: it still holds the
-  // previous test's message here. `toBe('')` would have failed for a reason
-  // that has nothing to do with the behaviour under test — and scoping the
-  // text query to this render avoids matching the live region's copy of it.
+  // The slots are cleared in beforeEach (`announce('')`), so the shell region
+  // must be EMPTY — not merely "not this string". Scoping the text query to this
+  // render's container avoids matching the live region's copy of it.
   it('says NOTHING without announce, though it renders identically', () => {
     const { container } = render(<Notice variant="success">Quiet beta</Notice>);
     expect(container.textContent).toContain('Quiet beta');
-    expect(currentAnnouncements().polite).not.toBe('Quiet beta');
+    expect(shell().polite).toBe('');
+    expect(shell().assertive).toBe('');
   });
 
   it('stays polite — a success must not preempt like an error', () => {
     render(<Notice variant="success" announce="Polite gamma">Polite gamma</Notice>);
-    expect(currentAnnouncements().assertive).not.toBe('Polite gamma');
+    expect(shell().assertive).toBe('');
+    expect(shell().polite).toBe('Polite gamma');
   });
 
   // Delegating AND carrying a role would be two regions for one message (DS-8).
@@ -132,6 +140,7 @@ describe('success Notice reaches the live region', () => {
  */
 describe('the single polite slot', () => {
   beforeEach(() => {
+    resetSlots();
     render(<GlobalLiveRegion />);
   });
 
@@ -142,15 +151,15 @@ describe('the single polite slot', () => {
         <Notice variant="success" announce="Voice saved">Voice saved</Notice>
       </>,
     );
-    expect(currentAnnouncements().polite).toBe('Voice saved');
+    expect(shell().polite).toBe('Voice saved');
   });
 
   it('announces each in turn when they are sequential', () => {
     const first = render(<Notice variant="success" announce="Instructions saved">Instructions saved</Notice>);
-    expect(currentAnnouncements().polite).toBe('Instructions saved');
+    expect(shell().polite).toBe('Instructions saved');
     first.unmount();
     render(<Notice variant="success" announce="Voice saved">Voice saved</Notice>);
-    expect(currentAnnouncements().polite).toBe('Voice saved');
+    expect(shell().polite).toBe('Voice saved');
   });
 });
 
@@ -183,6 +192,30 @@ describe('tranche 2 wiring stays wired', () => {
   it('StorefrontPage announces the placed order but not the paid-landing banner', () => {
     const s = read('features/commerce/StorefrontPage.tsx');
     expect(s).toContain("announce={t('demoPlacedTitle')}");
-    expect(s).not.toMatch(/paidBanner[^\n]*announce/);
+    // The banner's own line must carry no `announce` on EITHER side of
+    // `paidBanner`. The old `/paidBanner[^\n]*announce/` only looked AFTER it,
+    // but the attribute sits BEFORE the children (`<Notice … announce=…>{t('paidBanner'…`),
+    // so it could never match the violation it names (w49 probe nas-paid-banner).
+    const bannerLines = s.split('\n').filter((l) => l.includes("t('paidBanner'"));
+    expect(bannerLines).toHaveLength(1); // the banner exists — the check is not vacuous
+    expect(bannerLines[0]).not.toMatch(/\bannounce\s*[:=]/);
+  });
+
+  /**
+   * `ProgressPage` is split the same way, so it left `NOT_ANNOUNCED` (whose
+   * `announced()` counts every variant). The `completed` celebration stays
+   * SILENT: it renders from a standing state and would re-announce on every
+   * visit. The PT-2 catalog-failure warning DOES announce: a failed read is new
+   * information the user has no other way to learn (the InvitesSection
+   * precedent above), and it only renders when this visit's read failed.
+   */
+  it('ProgressPage announces the failed catalog read but never the completed celebration', () => {
+    const s = read('features/kicktodo/ProgressPage.tsx');
+    const celebration = s.split('\n').filter((l) => l.includes("t('progressCompletionCelebration')"));
+    expect(celebration).toHaveLength(1); // the celebration exists — the check is not vacuous
+    expect(celebration[0]).not.toMatch(/\bannounce\s*[:=]/);
+    expect(announcedSuccess('features/kicktodo/ProgressPage.tsx')).toBe(0);
+    expect(announced('features/kicktodo/ProgressPage.tsx')).toBe(1);
+    expect(s).toContain("announce={t('progressNamesUnknown')}");
   });
 });

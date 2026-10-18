@@ -14,14 +14,21 @@
  *
  * All three polarities are pinned below, and the 404 case now asserts the DISTINCTION
  * rather than the shared shape.
+ *
+ * Sabotage-witnessed (grade-tests w21, `podcastsClient.ts`): 404 → `featureUnavailable:
+ * false` reds the 404 case; the 200 branch flagged `true` reds both 200 cases; a non-ok
+ * that returns instead of throwing reds the 500 case; dropping `body.notebooks` reds the
+ * list case.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { listNotebooksForPodcasts } from '../podcastsClient.js';
 
 afterEach(() => vi.unstubAllGlobals());
 
+// A REAL Response (no laundering cast): `ok`, `status` and `json()` all come from
+// the platform type the client actually reads.
 const stub = (status: number, body: unknown = {}): void => {
-  vi.stubGlobal('fetch', vi.fn(async () => ({ ok: status >= 200 && status < 300, status, json: async () => body } as unknown as Response)));
+  vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })));
 };
 
 describe('listNotebooksForPodcasts — three outcomes, three shapes', () => {

@@ -155,18 +155,6 @@ export function registerSelfHostedRunnerErasure(): void {
   registerSubjectEraser(eraseSubjectRunnerDispatches);
 }
 
-/**
- * RFC 0122 capability advertisement. HONEST-OFF: `supported:false` until RFC 0122
- * is `Accepted` (Phase 3) AND an operator opts in — no host may advertise
- * `supported:true` before then. `dispatchKinds:["model"]` reflects the Phase-5
- * model-first arm (tool dispatch deferred behind the same gate).
- */
-export function selfHostedRunnerAdvertised(): { supported: boolean; dispatchKinds: string[] } {
-  const supported =
-    process.env.OPENWOP_SELF_HOSTED_RUNNER === 'true' &&
-    process.env.OPENWOP_SELF_HOSTED_RUNNER_ACCEPTED === 'true';
-  return { supported, dispatchKinds: ['model'] };
-}
 
 /** Test-only reset of the in-memory registry (durable results persist). */
 export function _resetRunnerRegistryForTest(): void {

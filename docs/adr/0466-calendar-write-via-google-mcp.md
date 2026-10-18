@@ -119,6 +119,17 @@ is effectively serial per enrollment; the lane ships gated-off. **Hardening foll
 (only if the lane goes live):** a CAS "creating" placeholder row to serialize
 first-create across instances, and/or a `list_events` reconcile to adopt orphans.
 
+> **CORRECTION 2026-10-17 (KTINT-3).** The CAS placeholder shipped as ENG-15(b) and
+> closes (a). KTINT-3 found that a crash between the claim and the map write wedged
+> the externalId on `calendar_mcp_create_in_progress` forever, so the claim now
+> carries its time (`pending:<ms>:<uuid>`) and expires after 5 minutes; the map row
+> lands only by CAS over the writer's own claim, and a writer whose claim is gone
+> deletes the event it just created. **Still open, and not closable here:** a crash
+> after a SUCCESSFUL `create_event` but before the map CAS orphans that event, and
+> the retake creates a second one. (b) still holds — the event carries no marker of
+> ours — and a `list_events` match on (title, date) could adopt a user's own event,
+> so OQ1's reconcile was deliberately not built.
+
 ## Alternatives weighed
 
 - **Keep REST only (do nothing).** Rejected: MCP is the sanctioned path (governance +

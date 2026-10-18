@@ -11,48 +11,68 @@
  *     honestly (the ADR 0542 P5 finding: "revoke any time" overstates it);
  *  4. a refusal never opens a confirm box — a "Create the link" button above an
  *     explanation of why no link can exist is a button that must not be pressed.
+ *
+ * w52: TWO applications, and the share is started on the SECOND, so the link
+ * issued is asserted to be for the deal whose numbers were shown (round 1 had one
+ * application and never read `issue`'s arguments — sc-binding was vacuous). The
+ * revoke leg now also confirms and asserts what was revoked.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, cleanup, fireEvent, waitFor, within } from '@testing-library/react';
+import type { AttestationPreview, AttestationRow, JobApplication } from '../jobSearchClient.js';
+import type { VerifierClaim } from '../attestationVerifyClient.js';
 
 vi.mock('../../../ui/toast.js', () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
 
-const apps = [
-  { deal: { dealId: 'deal:1', title: 'Staff Backend Engineer', stageName: 'Applied', customFields: { appliedAt: '2026-03-02' } }, digest: { title: 'Staff Backend Engineer', companyName: 'Northwind' } },
+const APPS: JobApplication[] = [
+  { dealId: 'deal:1', title: 'Staff Backend Engineer', companyName: 'Northwind', stage: 'Applied', appliedAt: '2026-03-02' },
+  { dealId: 'deal:2', title: 'Platform Engineer', companyName: 'Contoso', stage: 'Applied', appliedAt: '2026-03-05' },
 ];
 
-const PREVIEW = [
+const PREVIEW: VerifierClaim[] = [
   { type: 'authorised-by-person', facts: { authorisedByNamedPerson: true, maxSubmits: 40 }, sourceDigest: 'a'.repeat(32) },
   { type: 'applications-in-window', facts: { count: 12, windowStart: '2026-02-01', windowEnd: '2026-02-28' }, sourceDigest: 'b'.repeat(32) },
 ];
 
-const preview = vi.fn(async () => ({ kind: 'ok' as const, claims: PREVIEW }));
-const issue = vi.fn(async () => ({ token: 'owatt_tok', attestationId: 'att:1' }));
-const revoke = vi.fn(async () => undefined);
-const listIssued = vi.fn(async () => [] as unknown[]);
+type Client = typeof import('../jobSearchClient.js');
+const { preview, issue, revoke, listIssued } = vi.hoisted(() => ({
+  preview: vi.fn<Client['previewAttestation']>(),
+  issue: vi.fn<Client['issueAttestation']>(),
+  revoke: vi.fn<Client['revokeAttestation']>(),
+  listIssued: vi.fn<Client['listIssuedAttestations']>(),
+}));
+const OK: AttestationPreview = { kind: 'ok', claims: PREVIEW };
 
 vi.mock('../jobSearchClient.js', () => ({
   listOrgs: vi.fn(async () => [{ orgId: 'org-1', name: 'Acme' }]),
-  listApplications: vi.fn(async () => apps.map(({ deal, digest }) => ({
-    dealId: String(deal.dealId), title: String(digest.title), companyName: digest.companyName,
-    stage: deal.stageName, appliedAt: deal.customFields.appliedAt,
-  }))),
-  listIssuedAttestations: (...a: unknown[]) => listIssued(...(a as [])),
-  previewAttestation: (...a: unknown[]) => preview(...(a as [])),
-  issueAttestation: (...a: unknown[]) => issue(...(a as [])),
-  revokeAttestation: (...a: unknown[]) => revoke(...(a as [])),
+  listApplications: vi.fn(async (): Promise<JobApplication[]> => APPS),
+  listIssuedAttestations: listIssued,
+  previewAttestation: preview,
+  issueAttestation: issue,
+  revokeAttestation: revoke,
 }));
 
 import { JobApplicationsPage } from '../JobApplicationsPage.js';
 
+/** The table row of one application. */
+const rowOf = async (title: string): Promise<HTMLElement> => (await screen.findByText(title)).closest('tr')!;
+
+/** Share on the SECOND application (deal:2), so the deal the link is for is checkable. */
 const openShare = async () => {
-  fireEvent.click(await screen.findByRole('button', { name: /share a verification link/i }));
+  fireEvent.click(within(await rowOf('Platform Engineer')).getByRole('button', { name: /share a verification link/i }));
 };
+
+function resetMocks(issued: AttestationRow[] = []): void {
+  preview.mockReset(); issue.mockReset(); revoke.mockReset(); listIssued.mockReset();
+  preview.mockResolvedValue(OK);
+  issue.mockResolvedValue({ token: 'owatt_tok', attestationId: 'att:2' });
+  revoke.mockResolvedValue(undefined);
+  listIssued.mockResolvedValue(issued);
+}
 
 describe('the share-a-link consent', () => {
   beforeEach(() => {
-    preview.mockClear(); issue.mockClear(); revoke.mockClear();
-    listIssued.mockImplementation(async () => []);
+    resetMocks();
     render(<JobApplicationsPage />);
   });
   afterEach(cleanup);
@@ -73,6 +93,9 @@ describe('the share-a-link consent', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /create the link/i }));
     await waitFor(() => expect(issue).toHaveBeenCalledTimes(1));
+    // The link is for the application whose numbers were previewed — deal:2.
+    expect(preview).toHaveBeenCalledWith('org-1', 'deal:2');
+    expect(issue).toHaveBeenCalledWith('org-1', 'deal:2');
   });
 
   it('cancelling issues nothing', async () => {
@@ -101,11 +124,11 @@ describe('the share-a-link consent', () => {
 });
 
 describe('when there is nothing to attest', () => {
-  beforeEach(() => { preview.mockClear(); issue.mockClear(); listIssued.mockImplementation(async () => []); });
+  beforeEach(() => { resetMocks(); });
   afterEach(cleanup);
 
   it('explains, and never offers a confirm button', async () => {
-    preview.mockImplementation(async () => ({ kind: 'not-attestable' }) as never);
+    preview.mockResolvedValue({ kind: 'not-attestable' });
     render(<JobApplicationsPage />);
     await openShare();
     expect(await screen.findByText(/no record of sending this application/i)).toBeTruthy();
@@ -115,7 +138,7 @@ describe('when there is nothing to attest', () => {
 
   it('a failed READ is not reported as "nothing to verify"', async () => {
     // The two are different facts and only one is about the applicant.
-    preview.mockImplementation(async () => ({ kind: 'failed' }) as never);
+    preview.mockResolvedValue({ kind: 'failed' });
     render(<JobApplicationsPage />);
     await openShare();
     expect(await screen.findByText(/nothing has been shared/i)).toBeTruthy();
@@ -125,20 +148,25 @@ describe('when there is nothing to attest', () => {
 
 describe('revoking', () => {
   beforeEach(() => {
-    revoke.mockClear();
-    listIssued.mockImplementation(async () => [{ attestationId: 'att:1', dealId: 'deal:1', issuedAt: '2026-03-02' }]);
+    resetMocks([{ attestationId: 'att:1', dealId: 'deal:1', issuedAt: '2026-03-02' }]);
     render(<JobApplicationsPage />);
   });
   afterEach(cleanup);
 
   it('confirms first, and states what revoking cannot undo', async () => {
-    fireEvent.click(await screen.findByRole('button', { name: /revoke/i }));
+    fireEvent.click(within(await rowOf('Staff Backend Engineer')).getByRole('button', { name: /revoke/i }));
     expect(await screen.findByText(/cannot un-read what has already been read/i)).toBeTruthy();
     expect(revoke, 'the consequential direction confirms').not.toHaveBeenCalled();
+    // Confirming revokes exactly the live attestation.
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: /^revoke$/i }));
+    await waitFor(() => expect(revoke).toHaveBeenCalledWith('org-1', 'att:1'));
   });
 
   it('offers no second share while one is live', async () => {
-    await screen.findByRole('button', { name: /revoke/i });
-    expect(screen.queryByRole('button', { name: /share a verification link/i })).toBeNull();
+    const live = await rowOf('Staff Backend Engineer');
+    await within(live).findByRole('button', { name: /revoke/i });
+    expect(within(live).queryByRole('button', { name: /share a verification link/i })).toBeNull();
+    // Positive control: the OTHER application, with nothing live, can still share.
+    expect(within(await rowOf('Platform Engineer')).getByRole('button', { name: /share a verification link/i })).toBeTruthy();
   });
 });

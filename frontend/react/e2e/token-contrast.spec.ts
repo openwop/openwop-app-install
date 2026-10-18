@@ -20,6 +20,11 @@ import { test, expect, type Page } from '@playwright/test';
  * passes here can still fail in situ if something adds opacity, a gradient, or a
  * different ancestor background. So this retires "is this token pair legible",
  * not "is every screen legible". Said plainly so a green run is not over-read.
+ *
+ * Sabotage-witnessed (wave 53): raising each `.alert.*` tint from 10% to 90%
+ * turned exactly that pairing red in both themes; darkening the
+ * `:root.theme-dark` `--clay-text` turned exactly the three `@dark` cases red —
+ * so the class swap below really reaches the dark tokens.
  */
 
 /** WCAG 2.1 AA for normal-size text. */

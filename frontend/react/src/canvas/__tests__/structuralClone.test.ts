@@ -33,7 +33,7 @@ describe('structuralClone', () => {
     const snapshot = JSON.stringify(src);
     const next = structuralClone(src, 'shapes', [0]);
     (next.shapes[0] as { x: number }).x = 999;
-    (readElements(next, 'shapes')[0] as { points: { x: number }[] }).points[0].x = 888; // nested array too
+    (readElements(next, 'shapes')[0] as { points: { x: number }[] }).points[0]!.x = 888; // nested array too
     expect(JSON.stringify(src)).toBe(snapshot); // source byte-identical — no aliasing
   });
 

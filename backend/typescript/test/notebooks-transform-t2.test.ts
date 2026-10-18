@@ -12,13 +12,25 @@
  *   - GET .../transformations lists the owned transformation Documents.
  *   - GET .../transformations/templates returns the 5 catalog entries.
  *
+ * Sabotage witnesses (w20g5-*): templates catalog sliced ⇒ case 1; templateId check / sid 404 /
+ * write scope / run inputs ⇒ "transform enqueues a run"; the kind filter in listTransformations ⇒
+ * the list case.
+ *
  * @see docs/adr/0084-research-notebooks.md (Transformations T2)
  */
 
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { getSetCookies } from './headerCookies.js';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+
+// Pass-through spy: the REAL run is enqueued; the spy lets "enqueues a run" assert WHICH workflow
+// and WHICH inputs, not only that an id came back.
+vi.mock('../src/host/runStarter.js', async (orig) => {
+  const actual = await orig<typeof import('../src/host/runStarter.js')>();
+  return { ...actual, startWorkflowRun: vi.fn(actual.startWorkflowRun) };
+});
+import { startWorkflowRun } from '../src/host/runStarter.js';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
@@ -43,8 +55,12 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T }
+beforeEach(() => { vi.mocked(startWorkflowRun).mockClear(); });
+
+interface Res { status: number; body: unknown }
 interface Client { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res> }
+/** Narrow a JSON body at the transport boundary (a JSON round-trip, no type assertion). */
+function body<T>(r: Res): T { return JSON.parse(JSON.stringify(r.body ?? null)); }
 function client(): Client {
   let cookie = '';
   const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
@@ -63,8 +79,19 @@ async function ownerWithOrg(who: string): Promise<{ c: Client; orgId: string; te
   const login = await c.post('/host/openwop-app/test/login', { email: uniqEmail(who), tenantId });
   expect(login.status, JSON.stringify(login.body)).toBe(201);
   const org = await c.post('/host/openwop-app/orgs', { name: 'Acme' });
-  return { c, orgId: org.body.orgId, tenantId };
+  return { c, orgId: body<{ orgId: string }>(org).orgId, tenantId };
 }
+/** A co-tenant added to `orgId` as a read-only `viewer` (workspace:read, no :write) — the NB-2 pattern. */
+async function viewerIn(owner: Client, tenantId: string, orgId: string): Promise<Client> {
+  const v = client();
+  const vu = await v.post('/host/openwop-app/test/login', { email: uniqEmail('nb-tx-viewer'), tenantId });
+  const add = await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'V', subject: body<{ user: { userId: string } }>(vu).user.userId, roles: ['viewer'] });
+  expect(add.status, JSON.stringify(add.body)).toBe(201);
+  return v;
+}
+const notebookId = (r: Res): string => body<{ notebook: { id: string } }>(r).notebook.id;
+const transformStarts = () => vi.mocked(startWorkflowRun).mock.calls.map((c) => c[1]).filter((i) => i.workflowId === 'notebooks.transform');
+interface TxRow { documentId: string; title: string; kind: string; status: string; createdAt: string }
 
 const NB = '/host/openwop-app/notebooks';
 const FELINE = 'Feline companions: cats groom themselves with their tongue and purr when content.';
@@ -72,24 +99,33 @@ const FELINE = 'Feline companions: cats groom themselves with their tongue and p
 describe('notebooks — apply-transformation route + catalog (T2)', () => {
   it('templates endpoint returns the 5 catalog entries', async () => {
     const { c, orgId } = await ownerWithOrg('nb-tpl');
-    const id = (await c.post(NB, { orgId, name: 'Pets research' })).body.notebook.id as string;
+    const id = notebookId(await c.post(NB, { orgId, name: 'Pets research' }));
     const r = await c.get(`${NB}/${id}/transformations/templates`);
     expect(r.status, JSON.stringify(r.body)).toBe(200);
-    const ids = (r.body.templates as Array<{ id: string; label: string }>).map((t) => t.id).sort();
-    expect(ids).toEqual(['key-concepts', 'methodology', 'questions', 'summary', 'takeaways']);
-    expect((r.body.templates as Array<{ label: string }>).every((t) => typeof t.label === 'string' && t.label.length > 0)).toBe(true);
+    const templates = body<{ templates: Array<{ id: string; label: string }> }>(r).templates;
+    expect(templates.map((t) => t.id).sort()).toEqual(['key-concepts', 'methodology', 'questions', 'summary', 'takeaways']);
+    expect(templates.find((t) => t.id === 'key-concepts')?.label).toBe('Key Concepts');
   });
 
   it('transform enqueues a run (write-gated, templateId-validated, sid-validated, cross-tenant 404)', async () => {
-    const { c, orgId } = await ownerWithOrg('nb-tx');
-    const id = (await c.post(NB, { orgId, name: 'Pets research' })).body.notebook.id as string;
-    const cat = (await c.post(`${NB}/${id}/sources`, { title: 'Cat facts', text: FELINE })).body.documentId as string;
+    const { c, orgId, tenantId } = await ownerWithOrg('nb-tx');
+    const id = notebookId(await c.post(NB, { orgId, name: 'Pets research' }));
+    const cat = body<{ documentId: string }>(await c.post(`${NB}/${id}/sources`, { title: 'Cat facts', text: FELINE })).documentId;
 
-    // The product path enqueues a REAL run and returns its id (202).
+    // The product path enqueues a REAL `notebooks.transform` run for THIS source + template (202).
     const enq = await c.post(`${NB}/${id}/sources/${cat}/transform`, { templateId: 'key-concepts' });
     expect(enq.status, JSON.stringify(enq.body)).toBe(202);
-    expect(typeof enq.body.runId).toBe('string');
-    expect(enq.body.runId.length).toBeGreaterThan(0);
+    expect(body<{ runId: string }>(enq).runId.length).toBeGreaterThan(0);
+    expect(transformStarts()).toEqual([
+      expect.objectContaining({
+        tenantId,
+        workflowId: 'notebooks.transform',
+        inputs: expect.objectContaining({
+          notebookId: id, sourceId: cat, orgId, kind: 'notebook-key-concepts', title: 'Key Concepts: Cat facts',
+          ownerSubject: { kind: 'project', id },
+        }),
+      }),
+    ]);
 
     // bad templateId ⇒ 400.
     expect((await c.post(`${NB}/${id}/sources/${cat}/transform`, { templateId: 'nope' })).status).toBe(400);
@@ -99,19 +135,25 @@ describe('notebooks — apply-transformation route + catalog (T2)', () => {
     // unknown sid ⇒ 404.
     expect((await c.post(`${NB}/${id}/sources/ghost/transform`, { templateId: 'summary' })).status).toBe(404);
 
+    // write-gated: a co-tenant read-only viewer gets 403 (it can read the notebook, so not 404).
+    const viewer = await viewerIn(c, tenantId, orgId);
+    expect((await viewer.get(`${NB}/${id}/transformations`)).status).toBe(200);
+    expect((await viewer.post(`${NB}/${id}/sources/${cat}/transform`, { templateId: 'summary' })).status).toBe(403);
+
     // cross-tenant caller ⇒ 404 (uniform IDOR — never reaches enqueue).
     const stranger = await ownerWithOrg('nb-tx-stranger');
     expect((await stranger.c.post(`${NB}/${id}/sources/${cat}/transform`, { templateId: 'summary' })).status).toBe(404);
+    expect(transformStarts()).toHaveLength(1); // no refused call enqueued anything
   });
 
   it('listTransformations returns the owned transformation Documents', async () => {
     const { c, orgId, tenantId } = await ownerWithOrg('nb-tx-list');
-    const id = (await c.post(NB, { orgId, name: 'Pets research' })).body.notebook.id as string;
+    const id = notebookId(await c.post(NB, { orgId, name: 'Pets research' }));
 
     // Empty before any transformation.
     const before = await c.get(`${NB}/${id}/transformations`);
     expect(before.status, JSON.stringify(before.body)).toBe(200);
-    expect((before.body.transformations as unknown[]).length).toBe(0);
+    expect(body<{ transformations: TxRow[] }>(before).transformations).toHaveLength(0);
 
     // Simulate the run's effect: a Document owned by project:<id>, kind notebook-*.
     const doc = await createDocument({
@@ -131,7 +173,7 @@ describe('notebooks — apply-transformation route + catalog (T2)', () => {
 
     const after = await c.get(`${NB}/${id}/transformations`);
     expect(after.status, JSON.stringify(after.body)).toBe(200);
-    const list = after.body.transformations as Array<{ documentId: string; title: string; kind: string; status: string; createdAt: string }>;
+    const list = body<{ transformations: TxRow[] }>(after).transformations;
     expect(list.length).toBe(1);
     expect(list[0].documentId).toBe(doc.documentId);
     expect(list[0].kind).toBe('notebook-key-concepts');

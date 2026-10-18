@@ -405,7 +405,6 @@ const EXPECTED_COVERED = new Set([
 const RECORDED_DEBT = new Map<string, string>([
   ['notifications:prefs', 'Per-user notification preferences. Safe to delete on erasure; simply has no eraser yet.'],
   ['settings:user-prefs', 'Per-user settings. Safe to delete on erasure; simply has no eraser yet.'],
-  ['computer-use:session', 'FOUND BY the R3 subjectId widening (the territories-deferral M2 class): durable session rows carry applyContext.subjectId (the job-search subject whose campaign drove the session) + createdBy, with no TTL, no purger and no eraser. Erasure needs a decision: sessions are also audit evidence for automated submissions (ADR 0541), so redact-the-subject vs delete needs the computer-use owner. Until then reclaimed only by tenant teardown.'],
   // ── FOUND BY the CRM-2 contactId/email widening. Each was read individually; none
   //    is a coverage claim. They are recorded rather than covered because each needs
   //    a decision from its owning feature that this CRM change is not the place to make.
@@ -500,7 +499,6 @@ const ACTOR_ATTRIBUTED_DEBT = new Map<string, string>([
   //    owning feature has to choose.
   ['advisory:board', 'FOUND BY the CONS-7 cross-file widening. `AdvisoryBoard.createdBy` (advisory-board/types.ts). The board is a tenant\'s simulation configuration — personas, turn policy, a `livingPersonaAck` right-of-publicity acknowledgement. Deleting it on erasure would destroy the org\'s configured board; the acknowledgement in particular is a COMPLIANCE record about a decision, which argues for re-attribute rather than delete. Needs the advisory-board owner. Reclaimed today only by tenant teardown.'],
   ['bi:metric', 'FOUND BY the CONS-7 cross-file widening. `MetricDef.createdBy` (bi/metricTypes.ts). A metric DEFINITION is org analytics config that dashboards and scheduled reports resolve by id; deleting it on erasure would break every consumer. Re-attribute, which needs the bi owner to choose a target.'],
-  ['brand:brand', 'FOUND BY the CONS-7 cross-file widening. `Brand.createdBy` (brand/types.ts). A brand record is the tenant\'s identity config, referenced by campaigns, briefs and publishing. Delete is plainly wrong; re-attribution needs the brand owner.'],
   ['campaign-brief:brief', 'FOUND BY the CONS-7 cross-file widening. `CampaignBrief.createdBy` (campaign-brief/types.ts). Org marketing collateral — the same shape as the `campaign-brief:*` artifacts already on this list, which is itself the tell that the family was only PARTLY visible before.'],
   ['campaign-brief:persona', 'FOUND BY the CONS-7 cross-file widening. `Persona.createdBy` (campaign-brief/types.ts). An audience persona is org marketing config, not a person\'s own data (the persona DESCRIBES a market segment). Re-attribute.'],
   ['campaign-orchestration:campaign', 'FOUND BY the CONS-7 cross-file widening. `MarketingCampaign.createdBy` (campaign-orchestration/types.ts). A live campaign is org marketing state with sends, versions and journey enrollments hanging off it. Delete would be destructive well beyond the erased person; re-attribution needs the campaign-orchestration owner.'],
@@ -600,8 +598,16 @@ const ACTOR_ATTRIBUTED_DEBT = new Map<string, string>([
  *  EXPECTED_COVERED — `eraseScheduledChatsSubject` now disables the schedule and
  *  tombstones `createdBy`. The ledger SHRINKS 22 -> 21, so the ceiling ratchets
  *  down with it (no slack left behind — a covered store must not leave room for a
- *  silent re-add). Ledger 21, ceiling 21. */
-const ACTOR_DEBT_CEILING = 21;
+ *  silent re-add). Ledger 21, ceiling 21.
+ *
+ *  ADR 0891 D8 (2026-10-14, feature loop row 46): `brand:brand` leaves this ledger
+ *  because `features/brand/erasure.ts` registers `eraseBrandSubject`, which
+ *  tombstones `createdBy` in place (the ledger's own "re-attribute, never delete"
+ *  note, with the tombstone as the target) and also scrubs `allowedEditors`, the
+ *  audit actor and a font's `attestedBy`, which this matcher cannot see. Module-level
+ *  coverage cannot witness those fields, so `test/adr0891-brand-probes.test.ts`
+ *  BR2-S5 asserts each one. Ledger 20, ceiling 20. */
+const ACTOR_DEBT_CEILING = 20;
 
 /** NO-GROWTH: debt may only shrink. Raising this is a deliberate, reviewable act.
  *  RAISED 4→5 (2026-08-15, the R3 subjectId widening): the WIDENED matcher found
@@ -668,7 +674,15 @@ const ACTOR_DEBT_CEILING = 21;
  *  the gate stopped seeing it. Reachability by a userId key comes from the users
  *  feature's new `SubjectKeyResolver` (userId -> email). MEASURED: 8 entries.
  */
-const DEBT_CEILING = 8;
+/*  ADR 0894 D9 (2026-10-15, feature loop row 48) — 8 -> 7: `computer-use:session`
+ *  leaves the ledger because the WORK LANDED (`features/computer-use/erasure.ts`
+ *  registers `eraseComputerUseSubject`). Its note asked the computer-use owner to
+ *  choose redact-the-subject vs delete; the decision (KEEP the row as the audit of
+ *  what an agent did and under whose authority, tombstone `createdBy` and
+ *  `applyContext.subjectId`, drop every free-text field) is argued in that
+ *  module's header and asserted by `adr0894-computer-use-session-authority`.
+ */
+const DEBT_CEILING = 7;
 
 /**
  * ADR 0584 §Correction (FORM-ERASE-1) — PARTIAL COVERAGE: a store that DOES

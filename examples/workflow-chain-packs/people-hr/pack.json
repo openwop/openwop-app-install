@@ -1,6 +1,6 @@
 {
   "name": "core.openwop.workflows.people-hr",
-  "version": "1.5.2",
+  "version": "1.6.0",
   "kind": "workflow-chain",
   "description": "Real-work workflow pack (RFC 0013, ADR 0149) — the People / HR cluster: Employee Onboarding Orchestrator, Offboarding & Access Revocation, and Leave/PTO Request Routing. Reasons with core.ai.chatCompletion; binds Microsoft 365 via core.openwop.http.openapi-call connectionRef, recommends HRIS actions provider-agnostically via core.openwop.connectors.hris-action (Workday today), and provider-agnostic ticketing (Jira/ServiceNow) via the core.openwop.connectors.ticket-* capability nodes (ADR 0186); every account/HRIS mutation and every team-facing send is gated by core.chat.approvalGate. All tenant-specific values are run parameters (replay-deterministic). Resolves on hosts shipping the http + ai + chat + integration packs; connections are configured under Access & data → Connections. Published under core.openwop.workflows.* (openwop-team key).",
   "author": "openwop",
@@ -10,7 +10,7 @@
   "chains": [
     {
       "chainId": "people-hr.onboarding",
-      "version": "1.1.1",
+      "version": "1.2.0",
       "label": "Employee Onboarding Orchestrator",
       "description": "On offer-accepted, plan the onboarding checklist and provision the new hire across IT (Microsoft 365), HRIS/payroll (Workday), and provider-agnostic task tracking (Jira/ServiceNow) in parallel — and, behind the same approval, invite the new hire into THIS workspace (feature.orgs.nodes.invite, ADR 0622 D3) — then summarize completion. Exceptions are surfaced for review.",
       "parameters": {
@@ -24,8 +24,8 @@
           "role": { "type": "string", "default": "the assigned role", "description": "Role/title to tailor provisioning + training." },
           "ticketingBaseUrl": { "type": "string", "default": "", "description": "The tenant's ticketing instance REST base (Jira/ServiceNow). Empty ⇒ no ticket is created." },
           "ticketProject": { "type": "string", "default": "HR", "description": "Project/queue key for the onboarding tasks." },
-          "provider": { "type": "string", "default": "anthropic", "description": "AI provider id for this chain's LLM nodes. Frozen into this chain's AI nodes when the workflow is created (ADR 0498 — a concrete provider is what keeps replay deterministic). Override at instantiation to use a different vendor or your own BYOK provider; whichever you pick, the workspace needs a key for it — the workflow will not fall back to another provider on its own." },
-          "model": { "type": "string", "default": "claude-sonnet-4-6", "description": "Model id for this chain's LLM nodes. Must be advertised by `provider` in the host catalog; override at instantiation." }
+          "provider": { "type": "string", "description": "AI provider id for this chain's model-calling nodes. Set it to fix a provider into those nodes when the workflow is created. Leave it unset and each run uses the run's chosen provider, else the workspace's AI setting, else the host's catalog default (ADR 0903); whichever is chosen is recorded on the run, so a replay or fork uses the same one. The workspace needs a key for the provider that runs." },
+          "model": { "type": "string", "description": "Model id for this chain's model-calling nodes. Must be offered by the provider in the host catalog. Leave it unset to use the provider's model from the same choice (ADR 0903)." }
         }
       },
       "capabilities": ["side-effectful"],
@@ -65,7 +65,7 @@
     },
     {
       "chainId": "people-hr.offboarding",
-      "version": "1.2.2",
+      "version": "1.3.0",
       "label": "Offboarding & Access Revocation",
       "description": "On termination, deprovision accounts (Microsoft 365), close access tickets (provider-agnostic Jira/ServiceNow), run final-pay in the HRIS (Workday), capture a knowledge handoff, then require a compliance attestation before completing. 1.1.0 (ADR 0617 D3): the chain has TWO lanes. The SCIM-leaver lane starts from the `host.users.user.deactivated` host event (bind it on the Event Bindings page to this workflow — see the pack README); the `trigger` entry node forwards the ids-only payload. The human-started lane runs from the gallery with `userId` as a parameter. A new gated step `deprovision-host` (feature.users.nodes.deactivate) disables THIS workspace's own account BEHIND the compliance attestation — never before it — via one `{truthy approved}` edge; it reads `userId` from the event payload, else the chain parameter. It requires the run's acting user to hold host:members:manage, so on an event-started (system) run it fails closed — by design: on that lane the host account was already disabled at the identity write (ADR 0621). `notify` reports the attestation OUTCOME on both legs (decision-aware, unconditional — the NOTIFY_OF_OUTCOME allow-list).",
       "parameters": {
@@ -79,8 +79,8 @@
           "accessTicketKey": { "type": "string", "default": "", "description": "The access-request ticket key / sys_id to close." },
           "closeTransitionId": { "type": "string", "default": "", "description": "The provider transition id (Jira) or target state (ServiceNow) that marks the ticket closed." },
           "userId": { "type": "string", "default": "", "description": "The departing employee's HOST account id (`user:<id>`, from Access & data → Users) for the human-started lane. Ignored when the run was started by the `host.users.user.deactivated` event, whose payload carries the id. Empty ⇒ the host-deprovision step fails typed (nothing to act on)." },
-          "provider": { "type": "string", "default": "anthropic", "description": "AI provider id for this chain's LLM nodes. Frozen into this chain's AI nodes when the workflow is created (ADR 0498 — a concrete provider is what keeps replay deterministic). Override at instantiation to use a different vendor or your own BYOK provider; whichever you pick, the workspace needs a key for it — the workflow will not fall back to another provider on its own." },
-          "model": { "type": "string", "default": "claude-sonnet-4-6", "description": "Model id for this chain's LLM nodes. Must be advertised by `provider` in the host catalog; override at instantiation." }
+          "provider": { "type": "string", "description": "AI provider id for this chain's model-calling nodes. Set it to fix a provider into those nodes when the workflow is created. Leave it unset and each run uses the run's chosen provider, else the workspace's AI setting, else the host's catalog default (ADR 0903); whichever is chosen is recorded on the run, so a replay or fork uses the same one. The workspace needs a key for the provider that runs." },
+          "model": { "type": "string", "description": "Model id for this chain's model-calling nodes. Must be offered by the provider in the host catalog. Leave it unset to use the provider's model from the same choice (ADR 0903)." }
         }
       },
       "capabilities": ["side-effectful"],
@@ -114,7 +114,7 @@
     },
     {
       "chainId": "people-hr.pto-routing",
-      "version": "1.0.3",
+      "version": "1.1.0",
       "label": "Leave / PTO Request Routing",
       "description": "On a PTO request, check policy, analyze coverage against the team calendar (Microsoft 365), route to the manager for approval, then update the HRIS (Workday) and notify the team.",
       "parameters": {
@@ -127,8 +127,8 @@
           "hrisBaseUrl": { "type": "string", "default": "", "description": "The Workday Absence Management REST base (…/ccx/api/absenceManagement/v1/{tenant}). Empty ⇒ recommend only." },
           "workerId": { "type": "string", "default": "", "description": "The Workday worker id for a live time-off submit." },
           "timeOffType": { "type": "string", "default": "", "description": "The Workday time-off type id." },
-          "provider": { "type": "string", "default": "anthropic", "description": "AI provider id for this chain's LLM nodes. Frozen into this chain's AI nodes when the workflow is created (ADR 0498 — a concrete provider is what keeps replay deterministic). Override at instantiation to use a different vendor or your own BYOK provider; whichever you pick, the workspace needs a key for it — the workflow will not fall back to another provider on its own." },
-          "model": { "type": "string", "default": "claude-sonnet-4-6", "description": "Model id for this chain's LLM nodes. Must be advertised by `provider` in the host catalog; override at instantiation." },
+          "provider": { "type": "string", "description": "AI provider id for this chain's model-calling nodes. Set it to fix a provider into those nodes when the workflow is created. Leave it unset and each run uses the run's chosen provider, else the workspace's AI setting, else the host's catalog default (ADR 0903); whichever is chosen is recorded on the run, so a replay or fork uses the same one. The workspace needs a key for the provider that runs." },
+          "model": { "type": "string", "description": "Model id for this chain's model-calling nodes. Must be offered by the provider in the host catalog. Leave it unset to use the provider's model from the same choice (ADR 0903)." },
           "slackChannel": { "type": "string", "description": "Slack channel these messages post to (e.g. `#ops`)." }
         }
       },

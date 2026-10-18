@@ -57,7 +57,8 @@ import { buildBoardInterceptor, buildProjectConveneInterceptor, runProjectConven
 import { useBoardroomCadence } from './conversations/useBoardroomCadence.js';
 import { participantsToLineup } from './conversations/participantLineup.js';
 import { useChannelMessageStream } from './conversations/useChannelMessageStream.js';
-import { useChannelRoster } from './conversations/useChannelRoster.js';
+import { useChannelRoster, CHANNEL_READ_ONLY_COPY } from './conversations/useChannelRoster.js';
+import { channelErrorCopy } from './conversations/channelErrors.js';
 import { useChannelMessageActions } from './conversations/useChannelMessageActions.js';
 import { submitChannelPost } from './conversations/channelSubmit.js';
 import { useNotificationStore } from '../notifications/notificationStore.js';
@@ -511,6 +512,18 @@ export function ChatSidebar({ config, byokStored, onOpenSettings, onRemoveKey, t
   // ADR 0154 FU-6 — live channel message delivery (debounced reload on each frame).
   useChannelMessageStream(session.id, isChannelActive, refreshNewestMessages); // ADR 0327 P2 slice — incremental merge, not a full session reset per frame
   const [showCreateChannel, setShowCreateChannel] = useState(false);
+  // ADR 0879 D1 (CH2UX-8) — the server's role answer, read once (lazy import keeps
+  // channelsClient out of the eager chunk). Optimistic until known: the create
+  // dialog maps a 403 to the role copy anyway.
+  const [canCreateChannel, setCanCreateChannel] = useState(true);
+  useEffect(() => {
+    let live = true;
+    void import('../client/channelsClient.js')
+      .then(({ canCreateChannels }) => canCreateChannels())
+      .then((ok) => { if (live) setCanCreateChannel(ok); })
+      .catch(() => { /* unknown — keep the affordance; the server decides */ });
+    return () => { live = false; };
+  }, []);
   const [showBrowseChannels, setShowBrowseChannels] = useState(false);
   const [showChannelDetails, setShowChannelDetails] = useState(false);
   const onChannelCreated = useCallback((channelId: string) => {
@@ -535,7 +548,14 @@ export function ChatSidebar({ config, byokStored, onOpenSettings, onRemoveKey, t
   }, [sessionsCollection, reset]);
   // ADR 0195 D5 — multi-party message affordances via the ONE shared owner
   // (ADR 0327 P3: previously copy-pasted verbatim here and in TabSession).
-  const channelMessageActions = useChannelMessageActions(session.id, loadSessionFromBackend);
+  const baseChannelMessageActions = useChannelMessageActions(session.id, loadSessionFromBackend);
+  // ADR 0879 — offer only the writes the server will accept: no react/edit for a
+  // read-only role (CH2UX-2), delete-others for the owner/an admin (D3, CH2UX-4).
+  const channelMessageActions = useMemo(() => (isChannelActive ? {
+    ...baseChannelMessageActions,
+    canWrite: channelRoster.viewerCanWrite !== false,
+    canModerate: channelRoster.viewerCanManage,
+  } : baseChannelMessageActions), [baseChannelMessageActions, isChannelActive, channelRoster.viewerCanWrite, channelRoster.viewerCanManage]);
 
   // ADR 0202 D5 — the caller's first-unread index (from their own participant
   // row's readMessageCount, ADR 0192 D6) drives the "New messages" divider.
@@ -569,14 +589,14 @@ export function ChatSidebar({ config, byokStored, onOpenSettings, onRemoveKey, t
           const done = events.find((e) => e.type === 'run.completed' || e.type === 'run.failed');
           if (done) {
             const text = (done.payload as { outputs?: { text?: unknown } } | undefined)?.outputs?.text;
-            emitSystem(typeof text === 'string' && text.trim() ? t('recapPrefix', { summary: text }) : t('recapFailed'));
+            emitSystem(typeof text === 'string' && text.trim() ? t('recapPrefix', { summary: text }) : t('chat:recapFailed'));
             return;
           }
           await new Promise((r) => setTimeout(r, 1000));
         }
         toast.error(t('recapTimedOut'));
-      } catch {
-        toast.error(t('recapFailed'));
+      } catch (e) {
+        toast.error(channelErrorCopy(e, (k) => t(k), 'chat:recapFailed'));
       } finally {
         setSummarizing(false);
       }
@@ -711,7 +731,8 @@ export function ChatSidebar({ config, byokStored, onOpenSettings, onRemoveKey, t
               else emitSystem(t('noWorkspaceAssistant'));
             })();
           },
-          onCreateChannel: () => setShowCreateChannel(true),
+          // ADR 0879 D1 (CH2UX-8) — no "New channel" for a Viewer (it would 403).
+          ...(canCreateChannel ? { onCreateChannel: () => setShowCreateChannel(true) } : {}),
           onBrowseChannels: () => setShowBrowseChannels(true),
           // ADR 0192 D7 — mute (notifications prefs owner).
           mutedIds,
@@ -823,13 +844,14 @@ export function ChatSidebar({ config, byokStored, onOpenSettings, onRemoveKey, t
                 <ChannelEmptyState
                   name={channelRoster.detail?.channel?.name ?? activeConversation.title}
                   description={channelRoster.detail?.channel?.description}
-                  viewerIsOwner={channelRoster.viewerIsOwner}
+                  viewerCanManage={channelRoster.viewerCanManage}
                   hasAgents={channelRoster.mentionEntries.length > 0}
                   onOpenDetails={() => setShowChannelDetails(true)}
                 />
               </Suspense>
             ),
             composerPlaceholder: t('channelComposerPlaceholder', { name: channelRoster.detail?.channel?.name ?? activeConversation.title }),
+            ...(channelRoster.readOnlyReason ? { composerReadOnlyReason: t(CHANNEL_READ_ONLY_COPY[channelRoster.readOnlyReason]) } : {}),
             mentionEntries: channelRoster.mentionEntries,
             // Alignment/attribution only once the roster RESOLVED (review
             // finding 3): with an empty directory + no viewerSubjectRef the
@@ -842,7 +864,8 @@ export function ChatSidebar({ config, byokStored, onOpenSettings, onRemoveKey, t
             } : {}),
             // ADR 0202 D5 — New-messages divider + Summarize (only with an agent).
             ...(unreadFromIndex !== undefined ? { unreadFromIndex } : {}),
-            ...(hasChannelAgent ? { onSummarize: requestCatchup, summarizeBusy: summarizing } : {}),
+            // CH2UX-2 — the catch-up starts a run (`workspace:write`): not offered to a read-only role.
+            ...(hasChannelAgent && channelRoster.viewerCanWrite !== false ? { onSummarize: requestCatchup, summarizeBusy: summarizing } : {}),
           } : {})}
           error={error}
           isSending={isSending}
@@ -915,7 +938,7 @@ export function ChatSidebar({ config, byokStored, onOpenSettings, onRemoveKey, t
             onRemoveAgent={(agentId) => { activeAgents.remove(agentId); void sessionsCollection.removeParticipant(session.id, `agent:${agentId}`); }}
             {...(isChannelActive && channelRoster.detail ? { channelRoster: {
               roster: channelRoster.roster,
-              viewerIsOwner: channelRoster.viewerIsOwner,
+              viewerCanManage: channelRoster.viewerCanManage,
               viewerSubjectRef: channelRoster.viewerSubjectRef,
               onManage: () => setShowChannelDetails(true),
               onLeave: requestLeaveChannel,

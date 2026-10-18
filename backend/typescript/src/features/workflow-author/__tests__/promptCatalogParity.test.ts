@@ -14,6 +14,17 @@
  *      acyclicity claim is the one that was false for the life of the feature
  *      (`WFAWF-9`): the prompt said the graph MUST be acyclic and nothing
  *      checked it. These assertions fail if either half moves without the other.
+ *
+ * Sabotage-witnessed (grade-tests w18, probes `w18g1-pc-*`): dropping the draft
+ * id from SCHEMA_READ_EXEMPT_TOOLS, renaming a prompt tool bullet or a pack
+ * handler key, removing the cycle check or the closed-world check, rejecting a
+ * disconnected graph, writing "connected" into any of the three sources,
+ * re-wording the persist description as an auto-open, blanking the catalog's
+ * description hop or the menu's description field, feeding the menu something
+ * other than the live catalog, or hand-copying the clearFields enum — each turns
+ * a case red. CEILING: the `index.mjs` / `agentTools.ts` wiring pins at the
+ * bottom are source pins (the pack cannot import TypeScript), so they police a
+ * SPELLING; the behavioral cases above them carry the claims a pin cannot.
  */
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
@@ -28,6 +39,12 @@ import {
 import { validateAuthoredWorkflow } from '../workflowAuthorService.js';
 import { ensureNodesRegistered } from '../../../bootstrap/nodes.js';
 import { buildNodeCatalog } from '../../../host/nodeCatalogBuilder.js';
+import type { ToolResultTransformContext } from '../../../host/toolResultTransform.js';
+
+/** The pack module, typed for the two exports these parity cases execute. */
+type NodesPack = { nodes: Record<string, unknown>; buildSystemPrompt: (c: { nodes: unknown[] }) => string };
+const loadPack = async (): Promise<NodesPack> =>
+  (await import(join(REPO_ROOT, 'packs/feature.workflow-author.nodes/index.mjs'))) as NodesPack;
 
 const here = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(here, '../../../../../..');
@@ -104,10 +121,10 @@ describe('WFAC-3 — the catalog tool is exempt from tool-result compaction', ()
     registerToolResultTransform(() => 'COMPACTED');
     try {
       const content = JSON.stringify({ nodes: [{ typeId: 'core.noop', configSchema: { enum: ['a', 'b'] } }] });
-      const ctx = { toolName: WORKFLOW_AUTHOR_DRAFT_TOOL_ID, decision: { mode: 'lossy' as const } };
-      expect(applyToolResultTransform(content, ctx as never)).toBe(content);
+      const ctx: ToolResultTransformContext = { toolName: WORKFLOW_AUTHOR_DRAFT_TOOL_ID, decision: { mode: 'lossy' } };
+      expect(applyToolResultTransform(content, ctx)).toBe(content);
       // control: a non-exempt tool IS transformed, so the exemption is what did it
-      expect(applyToolResultTransform(content, { ...ctx, toolName: 'openwop:some.other.tool' } as never))
+      expect(applyToolResultTransform(content, { ...ctx, toolName: 'openwop:some.other.tool' }))
         .toBe('COMPACTED');
     } finally {
       __resetToolResultTransform();
@@ -131,15 +148,16 @@ describe('WFAC-3 — the four tool ids the model is told about are the four that
     }
   });
 
-  it('the pack exports exactly those four node handlers', () => {
-    for (const id of [
-      WORKFLOW_AUTHOR_DRAFT_TOOL_ID,
-      WORKFLOW_AUTHOR_GET_TOOL_ID,
-      WORKFLOW_AUTHOR_VALIDATE_TOOL_ID,
-      WORKFLOW_AUTHOR_PERSIST_TOOL_ID,
-    ]) {
-      expect(packSrc, id).toContain(`'${id.replace('openwop:', '')}'`);
-    }
+  it('the pack exports exactly those four node handlers', async () => {
+    // Executed, not grepped: the pack's handler keys ARE the chat tool constants
+    // minus the `openwop:` prefix (the node-pack test pins literals; this pins
+    // the constants the chat lane registers under).
+    const pack = await loadPack();
+    expect(Object.keys(pack.nodes).sort()).toEqual(
+      [WORKFLOW_AUTHOR_DRAFT_TOOL_ID, WORKFLOW_AUTHOR_GET_TOOL_ID, WORKFLOW_AUTHOR_VALIDATE_TOOL_ID, WORKFLOW_AUTHOR_PERSIST_TOOL_ID]
+        .map((id) => id.replace('openwop:', ''))
+        .sort(),
+    );
   });
 });
 
@@ -256,15 +274,37 @@ describe('WFAU-1 — the retired "it opens in the builder" promise is gone from 
     }
   });
 
-  it('the pack menu really carries `description` — the last hop into the system prompt', () => {
-    expect(packSrc).toMatch(/description:\s*n\.description/);
+  it('the pack menu really carries `description` — the last hop into the system prompt', async () => {
+    // Executed: the menu is the prompt's last line, as JSON.
+    const { buildSystemPrompt } = await loadPack();
+    const prompt = buildSystemPrompt({ nodes: [{ typeId: 'x.t', label: 'L', description: 'DESC-MARKER-0596', category: 'flow' }] });
+    const menu = JSON.parse(prompt.trim().split('\n').pop() as string) as Array<{ typeId: string; description?: string }>;
+    expect(menu.find((n) => n.typeId === 'x.t')?.description).toBe('DESC-MARKER-0596');
   });
 });
 
 describe('WFAC-3 — the catalog the model sees is the LIVE one, never a hand-copy', () => {
-  it('the pack builds its menu from the host surface, not an in-file node list', () => {
-    expect(packSrc).toContain('await wa.getCatalog()');
-    expect(packSrc).toContain('buildSystemPrompt(catalog)');
+  it('the pack builds its menu from the host surface, not an in-file node list', async () => {
+    // Executed through the draft handler: the system prompt sent to the model
+    // carries the node the SURFACE returned. The old `toContain('buildSystemPrompt(catalog)')`
+    // also matched the function's own signature, so it could not fail (w18
+    // probe pc-livecat was vacuous).
+    const pack = await loadPack();
+    const draft = pack.nodes['feature.workflow-author.nodes.draft'] as (ctx: unknown) => Promise<unknown>;
+    const prompts: string[] = [];
+    await draft({
+      runId: 'parity-live-catalog',
+      inputs: { intent: 'anything', maxAttempts: 1 },
+      features: {
+        'workflow-author': {
+          getCatalog: async () => ({ nodes: [{ typeId: 'live.surface.marker', label: 'Live', description: 'from the surface', category: 'flow' }], excluded: [] }),
+          validateDraft: async () => ({ ok: false, errors: ['probe'] }),
+        },
+      },
+      callAI: async (req: { systemPrompt?: string }) => { prompts.push(String(req.systemPrompt)); return { content: '' }; },
+    });
+    expect(prompts.length).toBeGreaterThan(0);
+    expect(prompts[0]).toContain('live.surface.marker');
   });
 
   it('the chat tool builds its catalog from the shared service with tenant curation', () => {

@@ -17,6 +17,7 @@ import {
   listCanvasVersions,
   restoreCanvasVersion,
   updateCanvasForTenant,
+  type CanvasSurface,
 } from '../src/host/canvasSurface.js';
 import { isPrivilegedCanvasType, registerCanvasTypeOwner } from '../src/host/canvasTypeOwnership.js';
 import { onCanvasStateWrite, __resetCanvasLifecycleHooks } from '../src/host/canvasLifecycle.js';
@@ -28,18 +29,12 @@ import { createProject, setProjectVisibility } from '../src/features/projects/pr
 
 const HERE = fileURLToPath(new URL('.', import.meta.url));
 
-type CanvasApi = {
-  read(id: string): Promise<{ state: Record<string, unknown>; version: number }>;
-  write(id: string, m: Record<string, unknown>, o?: Record<string, unknown>): Promise<{ newVersion: number }>;
-  create(a: Record<string, unknown>): Promise<{ canvasId: string }>;
-};
-
 let WS: string;
 const MEMBER = 'oidc:adr0865-member';
 const VIEWER = 'oidc:adr0865-viewer';
 const OTHER = 'oidc:adr0865-other';
 
-const canvasOf = (scope: BundleScope): CanvasApi => (buildHostSurfaceBundle(scope) as unknown as { canvas: CanvasApi }).canvas;
+const canvasOf = (scope: BundleScope): CanvasSurface => buildHostSurfaceBundle(scope).canvas;
 const bindingOf = (scope: BundleScope) => makeDataIntegrationAdapter({ runId: scope.runId ?? 'r', tenantId: scope.tenantId, canvasScope: scope });
 const codeOf = async (p: Promise<unknown>): Promise<string | undefined> => {
   try { await p; return undefined; } catch (err) { return (err as { code?: string }).code; }
@@ -196,6 +191,11 @@ describe('ADR 0865 B9–B15 — applyBinding', () => {
     expect(calls).toBe(1);
   });
 
+  // DOUBLE GUARD (honest ceiling): the failed-capture leg below is refused twice —
+  // dataBinding's catch around `snapshotCanvas`, and the post-capture
+  // `getCanvasVersionAt` verify. Swallowing the first alone is invisible here
+  // (probe w47g1-865-undo-catch); case 23's silent-no-persist leg witnesses the
+  // verify on its own (probe w47g1-865-undo-verify).
   it('14: preserveUndo captures the PRIOR state, and restoring it is the undo; a failed capture leaves the canvas unwritten', async () => {
     const c = await createCanvasForTenant(WS, { canvasTypeId: 'doc', initialState: { a: 'before' } });
     await bind(member(), { canvasId: c.canvasId, targetPath: '/a', value: 'after' });

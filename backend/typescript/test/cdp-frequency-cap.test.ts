@@ -2,14 +2,20 @@
  * CDP-E — email frequency governor config (ADR 0267). The cap is env-driven and
  * OFF by default (max=0 ⇒ the send loop skips the ledger scan, behavior unchanged);
  * a positive cap enables the per-recipient rolling-window governor.
+ *
+ * Sabotage that reds it (w38 probes): the 30-day default window; the `max > 0` floor;
+ * ignoring OPENWOP_EMAIL_FREQ_CAP_MAX. The env is cleared BEFORE each case too, so an
+ * operator/CI env carrying the cap cannot fake (or break) "OFF by default".
  */
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { emailFrequencyCap } from '../src/features/email/emailService.js';
 
-afterEach(() => {
+function clearCapEnv(): void {
   delete process.env.OPENWOP_EMAIL_FREQ_CAP_MAX;
   delete process.env.OPENWOP_EMAIL_FREQ_CAP_WINDOW_DAYS;
-});
+}
+beforeEach(clearCapEnv);
+afterEach(clearCapEnv);
 
 describe('CDP-E emailFrequencyCap', () => {
   it('is OFF by default (max 0, 30-day window)', () => {

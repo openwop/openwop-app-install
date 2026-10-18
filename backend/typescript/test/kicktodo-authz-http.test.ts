@@ -45,7 +45,7 @@
  *   admin      → NOT 401/403 (200/201/204/400/404/409… all fine: the GATE admitted;
  *                the handler's own validation of an empty body is not the claim);
  *   editor     → EXACTLY 403 (the gate refused a real, in-workspace member);
- *   non-member → ≥ 400 (fail-closed; measured 404 — a non-member is bounced to the
+ *   non-member → EXACTLY 404 (fail-closed — a non-member is bounced to the
  *                personal tenant by `middleware/auth.ts` where the feature is off,
  *                so the refusal is the auth layer's, not the scope gate's — see
  *                the note at `authTestSeam.ts` "under sharedWorkspace a NON-member
@@ -275,9 +275,9 @@ describe('KTH-4 ratchet — the GATED/OPEN tables match the routes source', () =
     expect(GATED.filter((r) => r.family === 'chassis'), 'chassis rows ≠ chassis verbs').toHaveLength(chassisVerbs - (declaresBlank ? 0 : 1));
     // The top-line pin — every `requireKicktodoManage(` CALL in the seven files
     // (comments and imports don't match the paren): accountability 1 inline,
-    // community 2 inline, commerce 1 helper (`payoutGate`) + 8 inline, core 1
+    // community 2 inline, commerce 1 helper (`payoutGate`) + 10 inline, core 1
     // helper (`authoringGate`), creator 1 helper (`gate`) + 1 inline (`/author`)
-    // + 1 `authorize:`, metrics 1 helper, organizations 1 inline = 18. Bump it
+    // + 1 `authorize:`, metrics 1 helper, organizations 1 inline = 20. Bump it
     // WITH the table, never alone.
     expect(totalCallSites, 'requireKicktodoManage( call-site count moved — did the GATED table move with it?').toBe(20);
   });
@@ -427,7 +427,11 @@ describe('GC-1 — the kicktodo manage gate over HTTP', () => {
     // No member row: auth falls back to this caller's personal tenant, where it
     // holds no kicktodo authority. Refusal either way, which is the point.
     const res = await call(cookies[OUTSIDER]!, { method: 'GET', path: CANDIDATES }, WS);
-    expect(res.status).toBeGreaterThanOrEqual(400);
+    // Exactly 404, as measured: the auth layer bounces a non-member to their
+    // personal tenant, where the feature is off. This is the AUTH layer's refusal
+    // (an honest ceiling for the scope gate — the editor leg is the scope proof);
+    // `>= 400` used to accept a 500 as "refused".
+    expect(res.status, await res.text()).toBe(404);
   });
 
   describe.each(GATED.map((r) => [key(r.method, r.path), r] as const))('%s', (_label, row) => {
@@ -450,9 +454,9 @@ describe('GC-1 — the kicktodo manage gate over HTTP', () => {
       // (the chassis stacks `requireOrgScope`, whose 403 names ITS scope).
       expect(body, 'a 403 from a different gate is not this proof').toContain('host:kicktodo:manage');
     });
-    it('NON-MEMBER is refused (≥ 400, fail-closed)', async () => {
+    it('NON-MEMBER is refused (404 — auth-layer bounce, fail-closed)', async () => {
       const res = await call(cookies[OUTSIDER]!, row, WS);
-      expect(res.status).toBeGreaterThanOrEqual(400);
+      expect(res.status, await res.text()).toBe(404); // auth-layer bounce (see the case above)
     });
     it('feature toggle OFF ⇒ 404 even for an admin (toggle gate runs first)', async () => {
       const res = await call(cookies[ADMIN_OFF]!, row, WS_OFF);

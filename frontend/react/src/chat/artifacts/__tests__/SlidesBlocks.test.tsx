@@ -62,6 +62,8 @@ describe('blocks slides — BlockView', () => {
       blocks: [
         { type: 'hologram', props: { text: 'nope' } },
         { type: 'image', props: { src: 'javascript:alert(1)', caption: 'evil' } },
+        { type: 'image', props: { src: 'data:text/html,<script>alert(1)</script>', caption: 'html' } },
+        { type: 'image', props: { src: '//evil.example/x.png', caption: 'proto' } },
         { type: 'image', props: { src: 'https://ok.example/a.png', caption: 'fine' } },
       ],
     }]);
@@ -74,9 +76,12 @@ describe('blocks slides — BlockView', () => {
     // placeholder) instead of silently rendering nothing; its caption (plain
     // escaped text) stays. The old pin asserted silence, which read as a
     // missing slide to the audience.
-    expect(c.querySelector('.canvas-slides__img-fallback')?.textContent).toBe('Image unavailable');
+    // Each refused scheme — javascript:, a non-image data: URI, a protocol-relative
+    // //host — leaves its own witness.
+    expect([...c.querySelectorAll('.canvas-slides__img-fallback')].map((f) => f.textContent))
+      .toEqual(['Image unavailable', 'Image unavailable', 'Image unavailable']);
     const captions = [...c.querySelectorAll('figcaption')].map((f) => f.textContent);
-    expect(captions).toEqual(['evil', 'fine']);
+    expect(captions).toEqual(['evil', 'html', 'proto', 'fine']);
   });
 
   it('renders a chart block through the shared ChartRenderer', () => {

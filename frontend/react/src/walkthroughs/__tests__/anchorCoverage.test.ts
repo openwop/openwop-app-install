@@ -42,6 +42,12 @@
  * detectable half: the screen carries AT LEAST ONE anchor. That is exactly the
  * bottleneck (an uninstrumented screen cannot be driven at all). ADR 0489 OQ3
  * already scoped widening to the drawdown; see the ADR's correction note.
+ *
+ * w51 r2 (/grade-tests): the floors are the MEASURED truth (108 screens, 25 spotlight
+ * anchors — both were far lower), an anchor is the ATTRIBUTE in code (a comment no
+ * longer counts), and the spotlight check reads product sources only. Sabotage-
+ * witnessed: renaming the /cli anchor (or hiding it behind a comment), dropping a nav
+ * entry and renaming a core spotlight anchor each red their case.
  */
 import { describe, it, expect } from 'vitest';
 import { readFileSync, existsSync, readdirSync } from 'node:fs';
@@ -62,11 +68,14 @@ function routeModules(): string[] {
  *  idiom the route tables use and plain named imports. */
 function importMap(src: string): Map<string, string> {
   const m = new Map<string, string>();
-  for (const mm of src.matchAll(/const\s+(\w+)\s*=\s*lazy\(\s*\(\)\s*=>\s*import\(\s*'([^']+)'/g)) m.set(mm[1], mm[2]);
-  for (const mm of src.matchAll(/import\s*\{([^}]+)\}\s*from\s*'([^']+)'/g)) {
-    for (const n of mm[1].split(',')) {
+  for (const [, name, spec] of src.matchAll(/const\s+(\w+)\s*=\s*lazy\(\s*\(\)\s*=>\s*import\(\s*'([^']+)'/g)) {
+    if (name && spec) m.set(name, spec);
+  }
+  for (const [, names, spec] of src.matchAll(/import\s*\{([^}]+)\}\s*from\s*'([^']+)'/g)) {
+    if (!names || !spec) continue;
+    for (const n of names.split(',')) {
       const t = n.trim().split(/\s+as\s+/).pop()?.trim();
-      if (t) m.set(t, mm[2]);
+      if (t) m.set(t, spec);
     }
   }
   return m;
@@ -79,11 +88,11 @@ function resolveSpec(fromFile: string, spec: string): string | null {
   return null;
 }
 
-export interface NavScreen { path: string; component: string; file: string | null }
+interface NavScreen { path: string; component: string; file: string | null }
 
 /** Every nav-entry screen, with the source file that renders it. Redirect-only
  *  routes (`<Navigate/>`, `*Redirect`) are NOT screens and are excluded. */
-export function navScreens(): NavScreen[] {
+function navScreens(): NavScreen[] {
   const found: NavScreen[] = [];
   for (const f of routeModules()) {
     const src = readFileSync(f, 'utf8');
@@ -94,12 +103,13 @@ export function navScreens(): NavScreen[] {
     // 600-char window (surfaced when ADR 0510 P3's `archetype:` field shifted
     // distances and three unrelated routes started failing).
     for (const mm of src.matchAll(/\{[^{}]*?path:\s*'([^']+)'(?:(?!path:)[\s\S]){0,600}?nav:\s*\{/g)) {
+      const path = mm[1];
+      if (!path) continue;
       const seg = src.slice(mm.index, mm.index + 800);
-      const el = seg.match(/element:\s*<(\w+)/);
-      if (!el) continue;
-      const component = el[1];
+      const component = seg.match(/element:\s*<(\w+)/)?.[1];
+      if (!component) continue;
       if (component === 'Navigate' || /Redirect$/.test(component)) continue;
-      found.push({ path: mm[1], component, file: resolveSpec(f, imap.get(component) ?? '') });
+      found.push({ path, component, file: resolveSpec(f, imap.get(component) ?? '') });
     }
   }
   return found;
@@ -121,13 +131,23 @@ export function navScreens(): NavScreen[] {
  * anchor is far from the route and the screen genuinely deserves its own
  * page-root anchor.
  */
-export function hasAnchor(screen: NavScreen): boolean {
+/** An ANCHOR is the attribute (`data-walkthrough="…"` / `data-walkthrough={…}`) in
+ *  code — not the bare word. A comment, prose, or `data-walkthrough-recorder` never
+ *  counts (w51 r2: a block comment naming data-walkthrough beside a renamed attribute
+ *  kept the screen "covered" — probe an-cli-comment). Measured: the strict form leaves
+ *  exactly the same three offenders as the old substring test, so nothing moved. */
+function carriesAnchor(src: string): boolean {
+  const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:'"`])\/\/.*$/gm, '$1');
+  return /data-walkthrough=["{]/.test(code);
+}
+
+function hasAnchor(screen: NavScreen): boolean {
   if (!screen.file) return false;
   const src = readFileSync(screen.file, 'utf8');
-  if (src.includes('data-walkthrough')) return true;
+  if (carriesAnchor(src)) return true;
   for (const mm of src.matchAll(/from\s*'(\.[^']+)'|import\(\s*'(\.[^']+)'/g)) {
     const child = resolveSpec(screen.file, mm[1] ?? mm[2] ?? '');
-    if (child && readFileSync(child, 'utf8').includes('data-walkthrough')) return true;
+    if (child && carriesAnchor(readFileSync(child, 'utf8'))) return true;
   }
   return false;
 }
@@ -167,7 +187,11 @@ describe('ADR 0489 D3 — walkthrough anchor coverage ratchet', () => {
     const screens = navScreens();
     // If the route-table shape ever changes so the scanner stops matching, this
     // guard fires instead of the ratchet silently passing on an empty set.
-    expect(screens.length).toBeGreaterThan(60);
+    // FLOOR = MEASURED TRUTH (108 nav-entry screens on e3c2492be, 2026-10-16). It was
+    // `> 60`, so a scanner that silently dropped 47 screens passed (w51 probe
+    // an-nav-drop). Lower it ONLY when a nav entry is genuinely deleted.
+    expect(screens.length).toBeGreaterThanOrEqual(108);
+    expect(new Set(screens.map((s) => s.path)).size, 'one screen per nav path').toBe(screens.length);
     expect(screens.filter((s) => s.file === null)).toEqual([]);
   });
 
@@ -217,12 +241,14 @@ describe('ADR 0489 D3 — walkthrough anchor coverage ratchet', () => {
    * `data-walkthrough="..."` literal in the source.
    */
   it('every page-spotlight ACTION names an anchor that actually exists in the source', () => {
+    // PRODUCT sources only: an anchor or registration that exists only in a test
+    // fixture must never satisfy this (measured: none does today).
     const src: string[] = [];
     const walk = (dir: string): void => {
       for (const entry of readdirSync(dir, { withFileTypes: true })) {
         const full = join(dir, entry.name);
-        if (entry.isDirectory()) walk(full);
-        else if (/\.(tsx?|ts)$/.test(entry.name)) src.push(readFileSync(full, 'utf8'));
+        if (entry.isDirectory()) { if (entry.name !== '__tests__') walk(full); }
+        else if (/\.(tsx?|ts)$/.test(entry.name) && !/\.test\.tsx?$/.test(entry.name)) src.push(readFileSync(full, 'utf8'));
       }
     };
     walk('src');
@@ -230,10 +256,11 @@ describe('ADR 0489 D3 — walkthrough anchor coverage ratchet', () => {
 
     // Both registration shapes: the direct call, and the CORE_PAGE_SPOTLIGHTS triples.
     const anchors = new Set<string>();
-    for (const m of all.matchAll(/registerPageSpotlight\(\s*'[^']+'\s*,\s*'[^']+'\s*,\s*'([^']+)'/g)) anchors.add(m[1]!);
-    for (const m of all.matchAll(/\[\s*'[\w.-]+\.page\.view'\s*,\s*'[^']+'\s*,\s*'([^']+)'\s*\]/g)) anchors.add(m[1]!);
+    for (const [, a] of all.matchAll(/registerPageSpotlight\(\s*'[^']+'\s*,\s*'[^']+'\s*,\s*'([^']+)'/g)) if (a) anchors.add(a);
+    for (const [, a] of all.matchAll(/\[\s*'[\w.-]+\.page\.view'\s*,\s*'[^']+'\s*,\s*'([^']+)'\s*\]/g)) if (a) anchors.add(a);
 
-    expect(anchors.size, 'non-vacuous — no spotlight registrations found').toBeGreaterThan(5);
+    // FLOOR = MEASURED TRUTH (25 spotlight anchors on e3c2492be, 2026-10-16; was `> 5`).
+    expect(anchors.size, 'non-vacuous — spotlight registrations went missing from the scan').toBeGreaterThanOrEqual(25);
     const missing = [...anchors].filter((a) => !all.includes(`data-walkthrough="${a}"`));
     expect(
       missing,

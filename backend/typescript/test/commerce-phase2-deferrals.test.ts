@@ -7,14 +7,18 @@
  *  - DEF-3 product search: multi-token AND + relevance ranking.
  */
 import http from 'node:http';
-import type { AddressInfo } from 'node:net';
 import { getSetCookies } from './headerCookies.js';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
-import { sweepExpiredReservations } from '../src/features/commerce/commerceService.js';
+import { sweepExpiredReservations, type CommerceSummary, type Order, type Product } from '../src/features/commerce/commerceService.js';
 
+function portOf(s: http.Server): number {
+  const a = s.address();
+  if (a === null || typeof a === 'string') throw new Error('server is not listening on a TCP port');
+  return a.port;
+}
 let BASE: string; let server: http.Server; let n = 0;
 
 beforeAll(async () => {
@@ -23,41 +27,55 @@ beforeAll(async () => {
   process.env.OPENWOP_TEST_AUTH_ENABLED = 'true';
   delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
+  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${portOf(server)}`; res(); }); });
   for (const id of ['users', 'commerce']) { const d = getToggleDefault(id); if (d) await saveConfig({ ...d, status: 'on' }, 'test'); }
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T }
-function client() {
+/** The host error envelope (`middleware/errorEnvelope.ts`). */
+interface ErrBody { error?: string; message?: string; details?: Record<string, unknown> }
+interface Res<T> { status: number; body: T }
+interface Client {
+  get: <T = ErrBody>(p: string) => Promise<Res<T>>;
+  post: <T = ErrBody>(p: string, b?: unknown) => Promise<Res<T>>;
+}
+function client(): Client {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
+  // The ONE deserialization boundary: `res.json()` is untyped, so each call site names the
+  // body it expects (the product's exported row type where one exists, else a narrow local
+  // interface). A 204 / non-JSON body reads as `null`.
+  const call = async <T,>(method: string, path: string, body?: unknown): Promise<Res<T>> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
-    for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    for (const sc of getSetCookies(res.headers)) { const m = /(__session=[^;]+)/.exec(sc); if (m) cookie = m[1]; }
+    const text = await res.text();
+    let out: T;
+    try { out = JSON.parse(text || 'null'); } catch { out = JSON.parse('null'); }
     return { status: res.status, body: out };
   };
-  return { get: (p: string) => call('GET', p), post: (p: string, b?: unknown) => call('POST', p, b) };
+  return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b) };
 }
-async function shopOwner(): Promise<{ owner: ReturnType<typeof client>; orgId: string; tenantId: string }> {
+/** Login + org bodies (the test-auth and orgs routes). */
+interface LoginBody extends ErrBody { user: { userId: string; tenantId: string } }
+interface OrgBody extends ErrBody { orgId: string }
+async function shopOwner(): Promise<{ owner: Client; orgId: string; tenantId: string }> {
   const owner = client();
-  const r = await owner.post('/host/openwop-app/test/login', { email: `p2-${Date.now()}-${n++}@acme.test` });
-  const org = await owner.post('/host/openwop-app/orgs', { name: 'Shop' });
-  return { owner, orgId: org.body.orgId, tenantId: r.body.user?.tenantId ?? '' };
+  const r = await owner.post<LoginBody>('/host/openwop-app/test/login', { email: `p2-${Date.now()}-${n++}@acme.test` });
+  const org = await owner.post<OrgBody>('/host/openwop-app/orgs', { name: 'Shop' });
+  return { owner, orgId: org.body.orgId, tenantId: r.body.user.tenantId };
 }
 const c = (orgId: string, s = ''): string => `/host/openwop-app/commerce/orgs/${encodeURIComponent(orgId)}${s}`;
 
 describe('DEF-6 — per-currency summary', () => {
   it('buckets money per currency; the headline mirrors the highest-GMV currency', async () => {
     const { owner, orgId } = await shopOwner();
-    const usd = await owner.post(c(orgId, '/products'), { type: 'digital', name: 'USD Guide', price: 100, currency: 'USD' });
-    const eur = await owner.post(c(orgId, '/products'), { type: 'digital', name: 'EUR Guide', price: 30, currency: 'EUR' });
+    const usd = await owner.post<Product & ErrBody>(c(orgId, '/products'), { type: 'digital', name: 'USD Guide', price: 100, currency: 'USD' });
+    const eur = await owner.post<Product & ErrBody>(c(orgId, '/products'), { type: 'digital', name: 'EUR Guide', price: 30, currency: 'EUR' });
     for (const p of [usd, usd, eur]) { // 2 USD orders (200), 1 EUR order (30)
-      const o = await owner.post(c(orgId, '/orders'), { lines: [{ productId: p.body.productId, quantity: 1 }] });
-      await owner.post(c(orgId, `/orders/${encodeURIComponent(o.body.orderId)}/pay`), { paymentIntentId: 'demo:pi' });
+      const o = await owner.post<Order & ErrBody>(c(orgId, '/orders'), { lines: [{ productId: p.body.productId, quantity: 1 }] });
+      await owner.post<Order & ErrBody>(c(orgId, `/orders/${encodeURIComponent(o.body.orderId)}/pay`), { paymentIntentId: 'demo:pi' });
     }
-    const sum = (await owner.get(c(orgId, '/reports/summary'))).body;
-    const byCcy = Object.fromEntries((sum.byCurrency as any[]).map((b) => [b.currency, b]));
+    const sum = (await owner.get<CommerceSummary>(c(orgId, '/reports/summary'))).body;
+    const byCcy = Object.fromEntries(sum.byCurrency.map((b) => [b.currency, b]));
     expect(byCcy.USD.gmv).toBe(200);
     expect(byCcy.EUR.gmv).toBe(30);
     expect(sum.currency).toBe('USD'); // primary = highest GMV
@@ -68,28 +86,33 @@ describe('DEF-6 — per-currency summary', () => {
 describe('DEF-5 — reservation due-index sweep', () => {
   it('releases an expired pending reservation and restores its stock', async () => {
     const { owner, orgId } = await shopOwner();
-    const p = await owner.post(c(orgId, '/products'), { type: 'physical', name: 'Boxed', price: 10, currency: 'USD', inventory: 5 });
-    const o = await owner.post(c(orgId, '/orders'), { lines: [{ productId: p.body.productId, quantity: 2 }] });
+    const p = await owner.post<Product & ErrBody>(c(orgId, '/products'), { type: 'physical', name: 'Boxed', price: 10, currency: 'USD', inventory: 5 });
+    const o = await owner.post<Order & ErrBody>(c(orgId, '/orders'), { lines: [{ productId: p.body.productId, quantity: 2 }] });
     expect(o.body.status).toBe('pending');
     // Stock reserved at create: 5 → 3.
-    let prod = (await owner.get(c(orgId, `/products?q=Boxed`))).body.products[0];
+    let prod = (await owner.get<{ products: Product[] }>(c(orgId, `/products?q=Boxed`))).body.products[0];
     expect(prod.inventory).toBe(3);
     // Sweep far in the future ⇒ the reservation is due.
     const released = await sweepExpiredReservations(Date.now() + 1000 * 60 * 60 * 24);
     expect(released).toBeGreaterThanOrEqual(1);
-    const fresh = (await owner.get(c(orgId, `/orders/${encodeURIComponent(o.body.orderId)}`))).body;
+    const fresh = (await owner.get<Order>(c(orgId, `/orders/${encodeURIComponent(o.body.orderId)}`))).body;
     expect(fresh.status).toBe('canceled');
-    prod = (await owner.get(c(orgId, `/products?q=Boxed`))).body.products[0];
+    prod = (await owner.get<{ products: Product[] }>(c(orgId, `/products?q=Boxed`))).body.products[0];
     expect(prod.inventory).toBe(5); // restored
   });
 
+  // Ceiling (defense in depth): three layers keep a paid order out of the sweep —
+  // markAsPaid clears its due-row, the sweep prunes any non-pending row before acting,
+  // and cancelOrder refuses a non-pending order (its 409 is swallowed by the sweep).
+  // No single edit can fail this case (round-1 probe on the prune was vacuous); it stays
+  // as the outcome tripwire.
   it('does not touch a PAID order (off the due-index)', async () => {
     const { owner, orgId } = await shopOwner();
-    const p = await owner.post(c(orgId, '/products'), { type: 'digital', name: 'Paid Guide', price: 10, currency: 'USD' });
-    const o = await owner.post(c(orgId, '/orders'), { lines: [{ productId: p.body.productId, quantity: 1 }] });
-    await owner.post(c(orgId, `/orders/${encodeURIComponent(o.body.orderId)}/pay`), { paymentIntentId: 'demo:pi' });
+    const p = await owner.post<Product & ErrBody>(c(orgId, '/products'), { type: 'digital', name: 'Paid Guide', price: 10, currency: 'USD' });
+    const o = await owner.post<Order & ErrBody>(c(orgId, '/orders'), { lines: [{ productId: p.body.productId, quantity: 1 }] });
+    await owner.post<Order & ErrBody>(c(orgId, `/orders/${encodeURIComponent(o.body.orderId)}/pay`), { paymentIntentId: 'demo:pi' });
     await sweepExpiredReservations(Date.now() + 1000 * 60 * 60 * 24);
-    const fresh = (await owner.get(c(orgId, `/orders/${encodeURIComponent(o.body.orderId)}`))).body;
+    const fresh = (await owner.get<Order>(c(orgId, `/orders/${encodeURIComponent(o.body.orderId)}`))).body;
     expect(fresh.status).toBe('paid'); // untouched
   });
 });
@@ -97,14 +120,16 @@ describe('DEF-5 — reservation due-index sweep', () => {
 describe('DEF-3 — product search relevance', () => {
   it('multi-token AND matches across fields and ranks name hits highest', async () => {
     const { owner, orgId } = await shopOwner();
-    await owner.post(c(orgId, '/products'), { type: 'physical', name: 'Red Shirt', price: 20, currency: 'USD', tags: ['cotton'] });
-    await owner.post(c(orgId, '/products'), { type: 'physical', name: 'Shirt', price: 15, currency: 'USD', tags: ['red', 'linen'] });
-    await owner.post(c(orgId, '/products'), { type: 'physical', name: 'Blue Hat', price: 12, currency: 'USD', tags: ['wool'] });
-    const hits = (await owner.get(c(orgId, `/products?q=${encodeURIComponent('red shirt')}`))).body.products as any[];
+    await owner.post<Product & ErrBody>(c(orgId, '/products'), { type: 'physical', name: 'Red Shirt', price: 20, currency: 'USD', tags: ['cotton'] });
+    await owner.post<Product & ErrBody>(c(orgId, '/products'), { type: 'physical', name: 'Shirt', price: 15, currency: 'USD', tags: ['red', 'linen'] });
+    await owner.post<Product & ErrBody>(c(orgId, '/products'), { type: 'physical', name: 'Blue Hat', price: 12, currency: 'USD', tags: ['wool'] });
+    await owner.post<Product & ErrBody>(c(orgId, '/products'), { type: 'physical', name: 'Red Sock', price: 5, currency: 'USD', tags: ['wool'] });
+    const hits = (await owner.get<{ products: Product[] }>(c(orgId, `/products?q=${encodeURIComponent('red shirt')}`))).body.products;
     const names = hits.map((h) => h.name);
     expect(names).toContain('Red Shirt');  // both tokens in name
     expect(names).toContain('Shirt');       // "shirt" in name, "red" in tags — AND satisfied
     expect(names).not.toContain('Blue Hat'); // neither token
+    expect(names).not.toContain('Red Sock'); // ONE token only — AND drops it (OR would keep it)
     expect(names[0]).toBe('Red Shirt');      // name-weighted rank wins
   });
 });

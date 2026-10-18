@@ -59,38 +59,39 @@ describe('GraphSurface — read-only presentation', () => {
     fireEvent.keyDown(screen.getByRole('group', {name:labels.surface}), {key:'Delete'});
     expect(props.onMoveNode).not.toHaveBeenCalled(); expect(props.onConnect).not.toHaveBeenCalled(); expect(props.onDeleteEdge).not.toHaveBeenCalled();
     expect(screen.queryByRole('button', {name:/Connect from/})).toBeNull();
+    // The selected node would offer Add-connected when editable — read-only refuses it.
+    expect(screen.queryByRole('button', { name: /Add connected/ })).toBeNull();
     expect(container.querySelector('.cv-graph__handle')).toBeNull();
   });
 });
 
 describe('GraphSurface — derived-edge mode (ADR 0360 grade pass)', () => {
   it('without onConnect: no Connect buttons, no pointer handles; Delete on an edge is inert', () => {
-    const props = {} as Partial<GraphSurfaceProps>;
-    const { container } = (() => {
-      const p: GraphSurfaceProps = {
-        nodes: [
-          { id: 'a', label: 'Awareness', x: 0, y: 0 },
-          { id: 'b', label: 'Conversion', x: 300, y: 0 },
-        ],
-        edges: [{ id: 'chain-0', from: 'a', to: 'b' }],
-        nodeSize: { w: 200, h: 120 },
-        renderNode: (n) => <div>{n.label}</div>,
-        selectedNodeId: null,
-        selectedEdgeId: 'chain-0',
-        onSelectNode: vi.fn(),
-        onSelectEdge: vi.fn(),
-        onMoveNode: vi.fn(),
-        onActivateNode: vi.fn(),
-        onAnnounce: vi.fn(),
-        labels,
-        ...props,
-      };
-      return render(<GraphSurface {...p} />);
-    })();
+    const onAnnounce = vi.fn();
+    // No onConnect and no onDeleteEdge: the derived-edge consumer's contract.
+    const p: GraphSurfaceProps = {
+      nodes: [
+        { id: 'a', label: 'Awareness', x: 0, y: 0 },
+        { id: 'b', label: 'Conversion', x: 300, y: 0 },
+      ],
+      edges: [{ id: 'chain-0', from: 'a', to: 'b' }],
+      nodeSize: { w: 200, h: 120 },
+      renderNode: (n) => <div>{n.label}</div>,
+      selectedNodeId: null,
+      selectedEdgeId: 'chain-0',
+      onSelectNode: vi.fn(),
+      onSelectEdge: vi.fn(),
+      onMoveNode: vi.fn(),
+      onActivateNode: vi.fn(),
+      onAnnounce,
+      labels,
+    };
+    const { container } = render(<GraphSurface {...p} />);
     expect(screen.queryByRole('button', { name: /Connect from/ })).toBeNull();
     expect(container.querySelectorAll('.cv-graph__handle').length).toBe(0);
-    // Delete on the selected edge: inert + silent (no dishonest announcement).
+    // Delete on the selected edge: inert + silent (no dishonest "Connection deleted").
     fireEvent.keyDown(screen.getByRole('group', { name: 'Screen-flow graph' }), { key: 'Delete' });
+    expect(onAnnounce).not.toHaveBeenCalled();
   });
 });
 
@@ -160,6 +161,10 @@ describe('GraphSurface', () => {
     expect(props.onAnnounce).toHaveBeenCalledWith('Connection deleted', 'polite');
   });
 
+  // Triple guard (recorded): a same-node second press re-arms in onConnectButton
+  // (connectFrom === id → beginConnect), so completeConnect's and doConnect's own
+  // `from === to` refusals are unreachable from this path. The case pins the
+  // observable outcome; the reachable guard is onConnectButton's.
   it('does not connect a node to itself', () => {
     const { props } = setup();
     fireEvent.click(screen.getByRole('button', { name: 'Connect from Home' }));
@@ -203,13 +208,26 @@ describe('grade-pass regressions', () => {
   it('a plain click on a node selects but NEVER moves it (no bogus undo entry)', () => {
     const { props } = setup();
     const node = screen.getByRole('button', { name: 'Home' });
-    fireEvent.pointerDown(node, { button: 0 });
-    fireEvent.pointerUp(node);
-    fireEvent.click(node);
+    // jsdom ceiling: there is no PointerEvent, and fireEvent.pointerDown's init
+    // (`button`) is DROPPED on the generic Event — the node handler would return at
+    // `e.button !== 0` and the drag path would never arm. MouseEvent-constructed
+    // events with the pointer type names carry `button` + coordinates.
+    const ptr = (type: string): void => {
+      fireEvent(node, new MouseEvent(type, { bubbles: true, button: 0, clientX: 10, clientY: 10 }));
+    };
+    ptr('pointerdown');
+    // Positive control: the pointer-down path ran (it selects on down, before any click).
     expect(props.onSelectNode).toHaveBeenCalledWith('home');
+    ptr('pointermove'); // zero travel — still a click
+    ptr('pointerup');
+    fireEvent.click(node);
     expect(props.onMoveNode).not.toHaveBeenCalled();
   });
 
+  // Double guard (recorded): the Connect button is a SIBLING of the keyboard-owner
+  // title button, not a child, so its keydown never reaches onNodeKey at all and the
+  // `e.target !== e.currentTarget` check there is unreachable from this case. The case
+  // pins the observable outcome (structure + guard together).
   it('Enter on the Connect button is NOT hijacked into node activation', () => {
     const { props } = setup();
     fireEvent.keyDown(screen.getByRole('button', { name: 'Connect from Home' }), { key: 'Enter' });

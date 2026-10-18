@@ -38,7 +38,7 @@ import { Notice } from '../ui/Notice.js';
 import { StateCard } from '../ui/StateCard.js';
 import { Field } from '../ui/Field.js';
 import { ShieldIcon, ZapIcon, LifeBuoyIcon, PlugIcon, ActivityIcon } from '../ui/icons/index.js';
-import { writeErrorMessage } from './agentWriteAccess.js';
+import { writeErrorMessage, useAgentWriteAccess } from './agentWriteAccess.js';
 
 /** roster level → spec level (ADR 0101 — the backend re-derives this from
  *  `roster.autonomyLevel` on save; we send a consistent value for the type). */
@@ -123,12 +123,14 @@ export function AgentGuardrailsPanel({
   startEditing?: boolean;
 }): JSX.Element {
   const { t } = useTranslation('agents');
+  // ADR 0775 P3 (`ARUX-18`) — a viewer reads the guardrails; Add/Edit are offered only to writers.
+  const canWrite = useAgentWriteAccess();
   const [profile, setProfile] = useState<AgentProfile | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
-  const [editing, setEditing] = useState(startEditing);
+  const [editing, setEditing] = useState(startEditing && canWrite);
   const [form, setForm] = useState<FormState>(() => toForm(null));
 
   useEffect(() => {
@@ -166,17 +168,16 @@ export function AgentGuardrailsPanel({
         // to a non-empty default for an agent that has none — an empty string would
         // 400 the PUT.
         roleKey: profile?.roleKey ?? roleKey ?? 'custom',
-        // PUT is a full replace — carry through fields this editor no longer owns
-        // so a guardrails save doesn't wipe them. `capabilities`/`knowledge`/`twin`
-        // are preserved server-side (agentProfileService); `configParameters` (its
-        // functional `.compaction` key) and `department` we carry from the FE.
-        ...(profile?.department !== undefined ? { department: profile.department } : {}),
-        ...(profile?.configParameters !== undefined ? { configParameters: profile.configParameters } : {}),
-        ...(hasPermissions ? { permissions: { read: permRead, write: permWrite, never: permNever } } : {}),
-        ...(parseList(form.hitl).length ? { hitl: parseList(form.hitl) } : {}),
-        ...(hasEscalation ? { escalation: { contacts: escContacts, triggers: escTriggers } } : {}),
-        ...(parseList(form.requiredConnections).length ? { requiredConnections: parseList(form.requiredConnections) } : {}),
-        ...(parseList(form.metrics).length ? { metrics: parseList(form.metrics) } : {}),
+        // ADR 0775 P4 — the PUT MERGES: fields this editor does not own (department,
+        // configParameters, channels, adminControls, riskCompliance, …) are kept
+        // server-side, so they are not sent. Before P4 it was a full replace and this
+        // editor wiped channels/adminControls/riskCompliance on every save. The
+        // fields it DOES own are always sent, emptied ones as `null` / `[]` (clear).
+        permissions: hasPermissions ? { read: permRead, write: permWrite, never: permNever } : null,
+        hitl: parseList(form.hitl),
+        escalation: hasEscalation ? { contacts: escContacts, triggers: escTriggers } : null,
+        requiredConnections: parseList(form.requiredConnections),
+        metrics: parseList(form.metrics),
         // Autonomy is owned by `roster.autonomyLevel`; the backend re-derives
         // `specLevel`/`level` from it. We only carry the auto allowlist (and only
         // when the agent is actually at `auto`).
@@ -185,13 +186,13 @@ export function AgentGuardrailsPanel({
           ...(isAuto && withinPolicyActions.length ? { withinPolicyActions } : {}),
         },
       };
-      const saved = await putAgentProfile(rosterId, input);
+      const saved = await putAgentProfile(rosterId, input, { ifMatch: profile?.etag });
       setProfile(saved);
       setForm(toForm(saved));
       setEditing(false);
       setNotice(t('profileSaved'));
     } catch (err) {
-      setError(writeErrorMessage(err, t('common:error_forbidden')));
+      setError(writeErrorMessage(err, t('common:error_forbidden'), t('agentChangedReload')));
     } finally {
       setSaving(false);
     }
@@ -213,11 +214,11 @@ export function AgentGuardrailsPanel({
           icon={<ShieldIcon size={20} />}
           title={t('guardrailsNoneTitle')}
           body={t('guardrailsNoneBody', { persona })}
-          action={
+          action={canWrite ? (
             <Button variant="primary" onClick={() => { setForm(toForm(null)); setEditing(true); }}>
               {t('guardrailsAdd')}
             </Button>
-          }
+          ) : undefined}
         />
       </div>
     );
@@ -243,8 +244,10 @@ export function AgentGuardrailsPanel({
               {saving ? t('profileSaving') : t('profileSaveProfile')}
             </Button>
           </div>
-        ) : (
+        ) : canWrite ? (
           <Button variant="secondary" onClick={() => setEditing(true)}>{t('profileEditProfile')}</Button>
+        ) : (
+          <span className="muted u-fs-13">{t('viewerPanelReadOnly')}</span>
         )}
       </div>
 

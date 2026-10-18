@@ -1,10 +1,16 @@
 /**
  * UX_UPGRADE-workflows-builder P3 — directionalTarget, the pure picker behind
  * Alt+Arrow node navigation. Left/right walk edges (tie-break: vertical
- * distance); up/down are spatial; no current node = enter at top-left.
+ * distance); up/down are spatial; no current node = enter at top-left
+ * (LEFTMOST first, then topmost). Accessibility: this is the keyboard path to
+ * every node.
+ *
+ * Sabotage that turns it red: ordering entry by y before x, tie-breaking on x,
+ * walking left downstream, swapping above/below, dropping the empty-graph
+ * guard, the range de-dup, the flood direction, or the flood's `seen` de-dup.
  */
 import { describe, it, expect } from 'vitest';
-import { directionalTarget, floodSelection } from '../builderShellHelpers.js';
+import { directionalTarget, floodSelection, nextRangeSelection } from '../builderShellHelpers.js';
 
 const N = (id: string, x: number, y: number) => ({ id, position: { x, y } });
 
@@ -26,6 +32,8 @@ describe('directionalTarget', () => {
   it('enters the graph at the top-left-most node when nothing is selected', () => {
     expect(directionalTarget(nodes, edges, null, 'down')).toBe('a');
     expect(directionalTarget(nodes, edges, 'missing-id', 'up')).toBe('a');
+    // Leftmost beats topmost: `t` is higher, `l` is further left.
+    expect(directionalTarget([N('t', 300, 0), N('l', 0, 200)], [], null, 'down')).toBe('l');
   });
 
   it('right = downstream neighbor, tie broken by vertical closeness', () => {
@@ -48,12 +56,10 @@ describe('directionalTarget', () => {
 });
 
 describe('nextRangeSelection (BLDKB-1, round 2)', () => {
-  it('appends an unselected target', async () => {
-    const { nextRangeSelection } = await import('../builderShellHelpers.js');
+  it('appends an unselected target', () => {
     expect(nextRangeSelection(['a', 'b'], 'c')).toEqual(['a', 'b', 'c']);
   });
-  it('never duplicates an already-selected target and starts from empty', async () => {
-    const { nextRangeSelection } = await import('../builderShellHelpers.js');
+  it('never duplicates an already-selected target and starts from empty', () => {
     expect(nextRangeSelection(['a', 'b'], 'b')).toEqual(['a', 'b']);
     expect(nextRangeSelection([], 'a')).toEqual(['a']);
   });
@@ -85,5 +91,7 @@ describe('R3 flood-select — everything reachable in ONE direction, and only th
     const cyclic = [...edges, { source: 'c', target: 'a' }];
     const out = floodSelection(['a'], cyclic, ['a'], 'downstream');
     expect([...out].sort()).toEqual(['a', 'b', 'c', 'd']); // no infinite loop, no dupes
+    // A reached node that is ALREADY in the selection is not added twice.
+    expect(floodSelection(['a', 'c'], edges, ['a'], 'downstream')).toEqual(['a', 'c', 'b', 'd']);
   });
 });

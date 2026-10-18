@@ -18,7 +18,7 @@ import { MemoryRouter } from 'react-router-dom';
 const api = vi.hoisted(() => ({
   listOrgs: vi.fn(), listProducts: vi.fn(), listOrders: vi.fn(),
   listQuotes: vi.fn(), listProductFields: vi.fn(), listPriceLists: vi.fn(),
-  listCoupons: vi.fn(),
+  listCoupons: vi.fn(), getPaymentsReadiness: vi.fn(),
 }));
 import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
 vi.mock('../commerceClient.js', async (orig) => {
@@ -32,6 +32,10 @@ vi.mock('../../../featureToggles/FeatureAccessContext.js', async (orig) => {
 });
 
 import { CommercePage } from '../CommercePage.js';
+import type { Product } from '../commerceClient.js';
+
+/** The loading placeholder `ui/Skeleton` renders (aria-hidden, so it has no role). */
+const skeletons = (): number => document.querySelectorAll('.skeleton').length;
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -43,6 +47,7 @@ beforeEach(() => {
   api.listProductFields.mockResolvedValue([]);
   api.listPriceLists.mockResolvedValue([]);
   api.listCoupons.mockResolvedValue([]);
+  api.getPaymentsReadiness.mockResolvedValue({ settlement: 'platform', connectAvailable: false }); // ADR 0877 D6
 });
 afterEach(cleanup);
 
@@ -55,9 +60,41 @@ describe('CM-R2-2 — products retry keeps the error card while the read still f
     fireEvent.click(retry);
     expect(await screen.findByRole('button', { name: /retry/i })).toBeTruthy();
     // Recovery polarity: a succeeding retry shows real rows.
-    api.listProducts.mockResolvedValue([{ productId: 'p1', name: 'Widget', priceMinor: 100, currency: 'USD', status: 'active' }]);
+    const widget: Product = { productId: 'p1', type: 'physical', name: 'Widget', price: 1, currency: 'USD', variants: [], active: true, updatedAt: '2026-07-01T00:00:00.000Z' };
+    api.listProducts.mockResolvedValue([widget]);
     fireEvent.click(screen.getByRole('button', { name: /retry/i }));
     expect(await screen.findByText('Widget')).toBeTruthy();
+  });
+});
+
+describe('CM-R2-2-WINDOW — a retry in flight is not an empty catalog', () => {
+  it('products: while the retry is pending, "No products" is not shown over the failed read', async () => {
+    render(<MemoryRouter><CommercePage /></MemoryRouter>);
+    const retry = await screen.findByRole('button', { name: /retry/i });
+    api.listProducts.mockReturnValue(new Promise(() => {}));
+    const before = skeletons();
+    fireEvent.click(retry);
+    // Positive: the in-flight retry IS the loading state…
+    expect(skeletons()).toBeGreaterThan(before);
+    // …and never the empty catalog over a read that failed.
+    expect(screen.queryByText('No products yet')).toBeNull();
+    expect(screen.queryByText(/no products/i)).toBeNull();
+    expect(screen.queryByRole('button', { name: /retry/i })).toBeNull();
+  });
+
+  it('orders: while the retry is pending, "No orders" is not shown over the failed read', async () => {
+    api.listProducts.mockResolvedValue([]);
+    api.listOrders.mockRejectedValue(new Error('orders_500'));
+    render(<MemoryRouter><CommercePage /></MemoryRouter>);
+    fireEvent.click(await screen.findByRole('tab', { name: /orders/i }));
+    const retry = await screen.findByRole('button', { name: /retry/i });
+    api.listOrders.mockReturnValue(new Promise(() => {}));
+    const before = skeletons();
+    fireEvent.click(retry);
+    expect(skeletons()).toBeGreaterThan(before);
+    expect(screen.queryByText('No orders yet')).toBeNull();
+    expect(screen.queryByText(/no orders/i)).toBeNull();
+    expect(screen.queryByRole('button', { name: /retry/i })).toBeNull();
   });
 });
 
@@ -68,7 +105,7 @@ describe('CM-R2-1 — a failed orgs read never claims "no orgs"', () => {
     // `ui/OrgSelectionState` owns this card now: the shared failure title plus
     // THIS feature's consequence clause. The empty-state title must stay absent.
     const cards = await screen.findAllByText('Could not load your organizations');
-    expect(cards.length).toBeGreaterThan(0);
+    expect(cards).toHaveLength(1);
     expect(screen.getByText(/product catalog was never requested/i)).toBeTruthy();
     expect(screen.queryByText('No organizations')).toBeNull();
   });

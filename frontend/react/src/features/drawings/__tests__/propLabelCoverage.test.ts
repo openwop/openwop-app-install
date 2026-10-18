@@ -19,8 +19,11 @@ import { messages as es } from '../i18n/es.js';
 import { messages as fr } from '../i18n/fr.js';
 import { messages as ptBR } from '../i18n/pt-BR.js';
 
-const LOCALES: [string, Record<string, string>][] = ([['en', en], ['es', es], ['fr', fr], ['pt-BR', ptBR]] as [string, unknown][])
-  .map(([n, m]) => [n, m as Record<string, string>]);
+// String-keyed views of the catalogs (a plain widening, no cast): the keys
+// looked up here are computed (`prop_<name>`), so the literal-keyed type can't index them.
+const EN: Record<string, string> = en;
+const PTBR: Record<string, string> = ptBR;
+const LOCALES: [string, Record<string, string>][] = [['en', EN], ['es', es], ['fr', fr], ['pt-BR', PTBR]];
 
 const KINDS = ['rect', 'circle', 'ellipse', 'line', 'arrow', 'polyline', 'polygon', 'text', 'image', 'stroke'];
 const col = drawingsDefinition.elements![0]!;
@@ -58,8 +61,8 @@ describe('DRAW-G1 — property-label coverage', () => {
     // from English in a non-English locale.
     const wordy = ['prop_cornerRadius', 'prop_fontSize', 'prop_strokeWidth', 'prop_canvasWidth', 'prop_fill'];
     for (const key of wordy) {
-      expect(ptBR[key], `pt-BR ${key}`).toBeTruthy();
-      expect(ptBR[key], `pt-BR ${key} is still the English string`).not.toBe(en[key]);
+      expect(PTBR[key], `pt-BR ${key}`).toBeTruthy();
+      expect(PTBR[key], `pt-BR ${key} is still the English string`).not.toBe(EN[key]);
     }
   });
 });
@@ -82,6 +85,7 @@ describe('DRAW-G1 — the two names that carry two meanings', () => {
     const ellipse = col.propDefs({ kind: 'ellipse' }).find((d) => d.name === 'rx')!;
     expect(rect.labelKey).toBe('prop_cornerRadius');
     expect(ellipse.labelKey).toBeUndefined();
-    expect(en[keyOf(rect)]).not.toBe(en[keyOf(ellipse)]);
+    expect(EN[keyOf(rect)]).toBe('Corner radius');
+    expect(EN[keyOf(ellipse)]).toBe('Radius X');
   });
 });

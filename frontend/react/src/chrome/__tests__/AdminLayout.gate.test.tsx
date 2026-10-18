@@ -21,7 +21,7 @@ vi.mock('../../client/useEffectiveAccess.js', async (importOriginal) => {
   return { ...real, useEffectiveAccessState: () => state };
 });
 vi.mock('../navConfig/NavConfigProvider.js', () => ({
-  useResolvedNav: () => ({ admin: [], workspace: [] }),
+  useResolvedNav: () => ({ admin: [], workspace: [], site: [], degraded: false }),
 }));
 vi.mock('../../featureToggles/FeatureAccessContext.js', () => ({
   useFeatureBadge: () => () => null,
@@ -57,6 +57,7 @@ describe('AdminLayout gate (ADR 0203 / ADM-8)', () => {
     state.access = { roles: ['admin'], scopes: [], basis: 'member' };
     mount();
     expect(screen.getByText('ORG PAGE BODY')).toBeTruthy();
+    expect(screen.getByRole('navigation', { name: 'Admin sections' })).toBeTruthy();
     expect(screen.queryByText('Administrator access required')).toBeNull();
   });
 
@@ -69,6 +70,8 @@ describe('AdminLayout gate (ADR 0203 / ADM-8)', () => {
   it('unresolved → quiet loading, neither deny nor page (no deny flash)', () => {
     state.resolved = false;
     mount();
+    // The quiet loading state is itself rendered (a status region), not a blank.
+    expect(screen.getByRole('status', { name: 'Loading…' })).toBeTruthy();
     expect(screen.queryByText('Administrator access required')).toBeNull();
     expect(screen.queryByText('ORG PAGE BODY')).toBeNull();
   });

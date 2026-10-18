@@ -10,6 +10,9 @@ import { registerDrawingArtifactType } from '../artifactTypes.js';
 import { validateArtifact, isRegisteredArtifactType } from '../../../host/artifactTypes.js';
 import { validateDrawingDoc } from '../validateDrawingDoc.js';
 
+/** The validator's error PATHS — an exact claim, not "some error happened". */
+const paths = (doc: Record<string, unknown>): string[] => validateDrawingDoc(doc).errors.map((e) => e.path);
+
 const valid = {
   title: 'House',
   width: 400, height: 300,
@@ -37,6 +40,8 @@ describe('canvas.drawing artifact type', () => {
   });
   it('rejects unknown shape keys (closed schema)', () => {
     expect(validateArtifact('canvas.drawing', { shapes: [{ kind: 'rect', onload: 'x' }] }).valid).toBe(false);
+    // The editor-doc mirror refuses the same unknown key (the closed world on both doors).
+    expect(paths({ shapes: [{ kind: 'rect', onload: 'x' }] })).toEqual(['shapes[0].onload']);
   });
   it('rejects non-numeric geometry', () => {
     expect(validateArtifact('canvas.drawing', { shapes: [{ kind: 'circle', cx: '10', cy: 10, r: 5 }] }).valid).toBe(false);
@@ -75,13 +80,13 @@ describe('canvas.drawing — ADR 0333 Phase 3 (stroke kind + chrome), dual-mirro
   it('rejects out-of-range pressures through both mirrors', () => {
     const doc = { shapes: [{ ...inkStroke, pressures: [1.5] }] };
     expect(validateArtifact('canvas.drawing', doc).valid).toBe(false);
-    expect(validateDrawingDoc(doc).errors.length).toBeGreaterThan(0);
+    expect(paths(doc)).toEqual(['shapes[0].pressures']);
   });
   it('rejects a 601-point spine through both mirrors (the split budget)', () => {
     const pts = Array.from({ length: 601 }, (_, i) => ({ x: i, y: i }));
     const doc = { shapes: [{ kind: 'stroke', points: pts, size: 4 }] };
     expect(validateArtifact('canvas.drawing', doc).valid).toBe(false);
-    expect(validateDrawingDoc(doc).errors.length).toBeGreaterThan(0);
+    expect(paths(doc)).toEqual(['shapes[0].points']);
   });
   it('accepts a 600-point polyline (the shared cap raise) through both mirrors', () => {
     const pts = Array.from({ length: 600 }, (_, i) => ({ x: i, y: i }));
@@ -93,15 +98,16 @@ describe('canvas.drawing — ADR 0333 Phase 3 (stroke kind + chrome), dual-mirro
     for (const bad of [{ locked: 'yes' }, { hidden: 1 }, { name: 'x'.repeat(81) }, { groupId: 'g'.repeat(41) }]) {
       const doc = { shapes: [{ kind: 'rect', x: 0, y: 0, width: 5, height: 5, ...bad }] };
       expect(validateArtifact('canvas.drawing', doc).valid).toBe(false);
-      expect(validateDrawingDoc(doc).errors.length).toBeGreaterThan(0);
+      expect(paths(doc)).toEqual([`shapes[0].${Object.keys(bad)[0]}`]);
     }
   });
   it('caps shapes at 2000 through both mirrors', () => {
     const shapes = Array.from({ length: 2001 }, () => ({ kind: 'rect', x: 0, y: 0, width: 1, height: 1 }));
     expect(validateArtifact('canvas.drawing', { shapes }).valid).toBe(false);
-    expect(validateDrawingDoc({ shapes }).errors.length).toBeGreaterThan(0);
+    expect(paths({ shapes })).toEqual(['shapes']);
     const ok = Array.from({ length: 2000 }, () => ({ kind: 'rect', x: 0, y: 0, width: 1, height: 1 }));
     expect(validateArtifact('canvas.drawing', { shapes: ok }).valid).toBe(true);
+    expect(validateDrawingDoc({ shapes: ok }).errors).toEqual([]);
   });
 });
 
@@ -117,7 +123,7 @@ describe('canvas.drawing — ADR 0333 Phase 4 (arrow kind)', () => {
   it('rejects an unknown head value through both mirrors', () => {
     const doc = { shapes: [{ kind: 'arrow', x1: 0, y1: 0, x2: 10, y2: 10, endHead: 'barb' }] };
     expect(validateArtifact('canvas.drawing', doc).valid).toBe(false);
-    expect(validateDrawingDoc(doc).errors.length).toBeGreaterThan(0);
+    expect(paths(doc)).toEqual(['shapes[0].endHead']);
   });
 });
 
@@ -135,7 +141,7 @@ describe('canvas.drawing — ADR 0333 Phase 7 (grid + symmetry doc fields)', () 
     for (const bad of [{ gridSize: 0 }, { gridSize: 501 }, { symmetry: 'diagonal' }, { gridShow: 1 }]) {
       const doc = { ...base, ...bad };
       expect(validateArtifact('canvas.drawing', doc).valid).toBe(false);
-      expect(validateDrawingDoc(doc).errors.length).toBeGreaterThan(0);
+      expect(paths(doc)).toEqual([Object.keys(bad)[0]]);
     }
   });
 });
@@ -147,7 +153,7 @@ describe('canvas.drawing — ADR 0333 grade-pass hardening (dual-mirror)', () =>
     for (const bad of [{ fill: 'url(//evil.tld/p#f)' }, { stroke: 'var(--x)' }, { fill: 'url(x)' }]) {
       const doc = { shapes: [{ kind: 'rect', x: 0, y: 0, width: 5, height: 5, ...bad }] };
       expect(validateArtifact('canvas.drawing', doc).valid).toBe(false);
-      expect(validateDrawingDoc(doc).errors.length).toBeGreaterThan(0);
+      expect(paths(doc)).toEqual([`shapes[0].${Object.keys(bad)[0]}`]);
     }
     for (const good of ['#e8d6b3', '#fff', 'rgb(10,20,30)', 'oklch(58% 0.13 40)', 'currentColor', 'none', 'red']) {
       const doc = { shapes: [{ kind: 'rect', x: 0, y: 0, width: 5, height: 5, fill: good }] };
@@ -160,12 +166,12 @@ describe('canvas.drawing — ADR 0333 grade-pass hardening (dual-mirror)', () =>
     for (const pts of [[{ x: 1, y: 2, blob: 'x' }], [{ x: 1, y: 2, z: 0 }]]) {
       const doc = { shapes: [{ kind: 'polyline', points: pts }] };
       expect(validateArtifact('canvas.drawing', doc).valid).toBe(false);
-      expect(validateDrawingDoc(doc).errors.length).toBeGreaterThan(0);
+      expect(paths(doc)).toEqual(['shapes[0].points']);
     }
     // Non-finite coordinate: the editor-doc validator rejects (the JSON schema's
     // type:number admits Infinity, so this is the validator's added guard).
     const inf = { shapes: [{ kind: 'polyline', points: [{ x: 1e400, y: 0 }] }] };
-    expect(validateDrawingDoc(inf).errors.length).toBeGreaterThan(0);
+    expect(paths(inf)).toEqual(['shapes[0].points']);
   });
 });
 
@@ -183,14 +189,15 @@ describe('canvas.drawing — ADR 0401 follow-through (image kind), dual-mirror',
     for (const src of ['https://evil.example/x.png', 'http://replicate.delivery/a.png', 'data:image/png;base64,AAAA', '//evil.example/x.png', 'javascript:alert(1)']) {
       const doc = { shapes: [{ kind: 'image', x: 0, y: 0, width: 10, height: 10, src }] };
       expect(validateArtifact('canvas.drawing', doc).valid, src).toBe(false);
-      expect(validateDrawingDoc(doc).errors.length, src).toBeGreaterThan(0);
+      expect(paths(doc), src).toEqual(['shapes[0].src']);
     }
   });
 
   it('rejects a src on no shape... anywhere src is malformed (traversal, empty token)', () => {
     for (const src of ['/v1/host/openwop-app/assets/', '/v1/host/openwop-app/assets/../../etc', '/v1/host/openwop-app/assets/tok?x=1']) {
       const doc = { shapes: [{ kind: 'image', x: 0, y: 0, width: 10, height: 10, src }] };
-      expect(validateDrawingDoc(doc).errors.length, src).toBeGreaterThan(0);
+      expect(validateArtifact('canvas.drawing', doc).valid, src).toBe(false);
+      expect(paths(doc), src).toEqual(['shapes[0].src']);
     }
   });
 });

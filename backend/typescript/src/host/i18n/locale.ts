@@ -70,6 +70,17 @@ function parseAcceptLanguage(header: string | undefined | null): RankedTag[] {
 }
 
 /**
+ * The client's single most-preferred concrete tag: highest q, request order on
+ * ties, `*` skipped. `fallback` when the header is absent, empty or all-`*`.
+ * For callers that cannot hand `negotiateLocale` one supported set because the
+ * set differs per row (a challenge lineage negotiates each row separately).
+ * Never return the raw header: `fr;q=0.9,en` must read as `fr`, not `fr;q=0.9`.
+ */
+export function preferredLocale(acceptLanguage: string | undefined | null, fallback: string): string {
+  return parseAcceptLanguage(acceptLanguage).find((r) => r.tag !== '*')?.tag ?? fallback;
+}
+
+/**
  * Pick the locale to serve. Walks the client's q-ranked preferences: for each,
  * try an exact (case-insensitive) match in `supported`, then a script-family
  * match (RFC 0206), then a language-family match. Falls back to `defaultLocale` when nothing matches. Returns the

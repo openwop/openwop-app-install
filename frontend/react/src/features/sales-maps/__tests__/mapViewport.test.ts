@@ -1,6 +1,18 @@
 /**
  * Sales Maps — viewport (zoom/pan) math unit tests (ADR 0282 P5). The wheel/drag
  * handlers are thin; the anchor + clamping invariants live here and must be exact.
+ *
+ * Expected viewports are hand-computed literals (halfW = 1000/scale/2, halfH = 500/scale/2);
+ * `pointAt` is an independent re-derivation of viewBox semantics, never the product code.
+ *
+ * Sabotage-witnessed (wave 52): dropping the MAX scale clamp, dropping the low cx clamp,
+ * dropping zoomAtPoint's final clamp, swapping the anchor's fx for fy, inverting the pan
+ * sign, ignoring scale in the pan conversion, and returning the centre instead of the
+ * top-left corner from viewBoxOf each turn a case red.
+ *
+ * Wave 52 found the old edge case vacuous: a ZOOM-IN anchored at the top-left corner lands
+ * exactly on the boundary (cx = 125 = halfW), so the clamp was a no-op. A zoom OUT from a
+ * corner is the case where the unclamped answer leaves the world.
  */
 import { describe, expect, it } from 'vitest';
 import { MAP_W, MAP_H } from '../projection.js';
@@ -28,19 +40,22 @@ describe('sales-maps map viewport', () => {
 
   it('zoomAtPoint keeps the anchored world point under the cursor', () => {
     const v1 = zoomAtPoint(HOME_VIEWPORT, 0.25, 0.75, 2);
-    expect(v1.scale).toBe(2);
+    // hand-computed: anchor world point (250, 375); cx = 250 + 500·0.25, cy = 375 − 250·0.25
+    expect(v1).toEqual({ scale: 2, cx: 375, cy: 312.5 });
+    expect(viewBoxOf(v1)).toBe('125 187.5 500 250');
     expect(pointAt(v1, 0.25, 0.75)).toEqual(pointAt(HOME_VIEWPORT, 0.25, 0.75));
     // and again from a zoomed state, unless clamping intervenes
     const v2 = zoomAtPoint(v1, 0.5, 0.5, 4);
     expect(pointAt(v2, 0.5, 0.5)).toEqual(pointAt(v1, 0.5, 0.5));
   });
 
-  it('zoomAtPoint clamps at the world edge instead of leaving it', () => {
-    const v = zoomAtPoint(HOME_VIEWPORT, 0, 0, 4); // anchor the top-left corner
-    const [x0, y0] = pointAt(v, 0, 0);
-    expect(x0).toBeGreaterThanOrEqual(0);
-    expect(y0).toBeGreaterThanOrEqual(0);
-    expect(v.scale).toBe(4);
+  it('zoomAtPoint clamps at the world edge instead of leaving it (zooming OUT from a corner)', () => {
+    // Top-left quarter at scale 4 (halfW 125, halfH 62.5), zoom out to 2 around the centre.
+    // Unclamped the centre would stay at (125, 62.5) and the viewBox would start at
+    // (−125, −62.5); at scale 2 the centre must be at least (halfW 250, halfH 125).
+    const v = zoomAtPoint({ scale: 4, cx: 125, cy: 62.5 }, 0.5, 0.5, 2);
+    expect(v).toEqual({ scale: 2, cx: 250, cy: 125 });
+    expect(viewBoxOf(v)).toBe('0 0 500 250');
   });
 
   it('panByPixels converts screen px to world units at the current scale', () => {

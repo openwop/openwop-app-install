@@ -15,7 +15,7 @@
  * still gets the real create-your-first-board invitation.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, cleanup, screen } from '@testing-library/react';
+import { render, cleanup, screen, fireEvent } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 
 const api = vi.hoisted(() => ({
@@ -63,7 +63,13 @@ describe('UX-BRD-1 — a failed boards read never says "No boards yet"', () => {
     expect(await screen.findByText(/Couldn't load your boards/i)).toBeTruthy();
     // The claim that would make a user create a duplicate of a board they own.
     expect(screen.queryByText(/No boards yet/i)).toBeNull();
-    expect(screen.getByRole('button', { name: /retry/i })).toBeTruthy();
+    // The retry is a real re-read, not a decoration: it fetches again, and a
+    // read that now succeeds (empty) clears the failure state.
+    api.listBoardsWithCards.mockResolvedValue([]);
+    fireEvent.click(screen.getByRole('button', { name: /retry/i }));
+    expect(await screen.findByText(/No boards yet/i)).toBeTruthy();
+    expect(api.listBoardsWithCards).toHaveBeenCalledTimes(2);
+    expect(screen.queryByText(/Couldn't load your boards/i)).toBeNull();
   });
 
   it('EMPTY: a genuinely empty account still gets the create invitation', async () => {

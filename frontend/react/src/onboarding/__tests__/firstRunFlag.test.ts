@@ -3,8 +3,11 @@
  *  - no uid → treated as dismissed (never nag an anonymous/loading session);
  *  - the flag is per-uid AND per-feature (no cross-leak between users or surfaces);
  *  - dismiss is idempotent and the key shape is the stable ADR 0188 string.
+ *  - a storage failure (private mode) fails CLOSED — treated as dismissed, never a
+ *    nag — and dismissing never throws (the module's stated contract; w51 r2 added
+ *    the case after probe fr-storage-fail stayed green).
  */
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { firstRunKey, isFirstRunDismissed, dismissFirstRun } from '../firstRunFlag.js';
 
 afterEach(() => localStorage.clear());
@@ -25,6 +28,11 @@ describe('firstRunFlag', () => {
     expect(isFirstRunDismissed('getStarted', 'u1')).toBe(false);
     dismissFirstRun('getStarted', 'u1');
     expect(isFirstRunDismissed('getStarted', 'u1')).toBe(true);
+    // Idempotent (header claim): a second dismiss leaves exactly the one stable key.
+    dismissFirstRun('getStarted', 'u1');
+    expect(isFirstRunDismissed('getStarted', 'u1')).toBe(true);
+    expect(localStorage.length).toBe(1);
+    expect(localStorage.key(0)).toBe('openwop-app.onboarding.getStarted.u1');
   });
 
   it('is per-uid — one user dismissing does not dismiss another', () => {
@@ -37,6 +45,18 @@ describe('firstRunFlag', () => {
     dismissFirstRun('vendorSetup', 'u1');
     expect(isFirstRunDismissed('vendorSetup', 'u1')).toBe(true);
     expect(isFirstRunDismissed('getStarted', 'u1')).toBe(false);
+  });
+
+  it('a storage failure fails closed (dismissed) and dismiss never throws', () => {
+    const get = vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => { throw new Error('SecurityError'); });
+    const set = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('QuotaExceededError'); });
+    try {
+      expect(isFirstRunDismissed('getStarted', 'u1')).toBe(true);
+      expect(() => dismissFirstRun('getStarted', 'u1')).not.toThrow();
+    } finally {
+      get.mockRestore();
+      set.mockRestore();
+    }
   });
 
   it('dismiss is a no-op without a uid', () => {

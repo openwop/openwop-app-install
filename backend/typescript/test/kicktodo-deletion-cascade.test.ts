@@ -77,8 +77,13 @@ beforeAll(async () => {
 describe('KT-D1 — account deletion purges the whole KickTodo graph', () => {
   it('purges tenant A completely while tenant B stays fully intact', async () => {
     // Pre-flight: everything exists for BOTH tenants.
+    expect(await getChallenge(A, a.challengeId, 1)).not.toBeNull();
+    expect(await getEnrollment(A, a.enrollmentId)).not.toBeNull();
     expect(await getGoal(A, a.goalId)).not.toBeNull();
+    expect(await getBoard(a.boardId)).not.toBeNull();
     expect(await getCard(a.cardId)).not.toBeNull();
+    expect(await getEvidence(A, a.enrollmentId, a.evidenceId)).not.toBeNull();
+    expect(await getCandidate(A, a.candidateId)).not.toBeNull();
     expect(await getJob(continuationJobId(A, a.goalId))).not.toBeNull();
 
     // The account-deletion order: kanban FIRST (cards need their boards to be
@@ -86,6 +91,13 @@ describe('KT-D1 — account deletion purges the whole KickTodo graph', () => {
     const kanban = await purgeTenantKanban(A);
     expect(kanban.boards).toBeGreaterThanOrEqual(1);
     expect(kanban.cards).toBeGreaterThanOrEqual(1);
+    // The board→card cascade's OWN claim, read before the generic walk: cards
+    // are now tenant-stamped (ADR 0872), so after `purgeTenantHostExt` the
+    // generic walk would delete them anyway and hide a broken cascade (w40 probe
+    // dc-board-card-cascade-gone stayed green against the post-walk read).
+    expect(await getBoard(a.boardId)).toBeNull();
+    expect(await getCard(a.cardId)).toBeNull();
+    expect(await getCard(b.cardId)).not.toBeNull();
     await purgeTenantHostExt(A);
 
     // Tenant A: every node of the graph is GONE.
@@ -111,10 +123,17 @@ describe('KT-D1 — account deletion purges the whole KickTodo graph', () => {
     expect((await todayFor(B, 'user:bob')).enrollments).toHaveLength(1);
   });
 
-  it('registerJob rows for other purposes in tenant A are also gone (tenantId probe)', async () => {
-    // A plain scheduler job registered under A pre-purge would be covered by
-    // the generic walk; register one under B and prove isolation held.
-    await registerJob({ jobId: 'job:b-extra', tenantId: B, cronExpr: '0 * * * *', workflowId: 'wf:x' });
-    expect(await getJob('job:b-extra')).not.toBeNull();
+  // This case used to register a job in tenant B AFTER the purge and check it
+  // existed — it asserted nothing about the purge (w40). It now uses its own
+  // tenant pair so it is independent of case order.
+  it('a plain scheduler job is purged with its tenant; a sibling tenant\'s job survives', async () => {
+    const C = 'tenant-del-c';
+    const D = 'tenant-del-d';
+    await registerJob({ jobId: 'job:c-extra', tenantId: C, cronExpr: '0 * * * *', workflowId: 'wf:x' });
+    await registerJob({ jobId: 'job:d-extra', tenantId: D, cronExpr: '0 * * * *', workflowId: 'wf:x' });
+    expect(await getJob('job:c-extra')).not.toBeNull();
+    await purgeTenantHostExt(C);
+    expect(await getJob('job:c-extra')).toBeNull();
+    expect(await getJob('job:d-extra')).not.toBeNull();
   });
 });

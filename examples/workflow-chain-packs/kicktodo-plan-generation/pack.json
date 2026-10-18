@@ -1,14 +1,14 @@
 {
   "name": "core.openwop.workflows.kicktodo-plan-generation",
-  "version": "1.0.2",
+  "version": "1.1.0",
   "kind": "workflow-chain",
-  "description": "KickTodo plan generation as an RFC 0013 / RFC 0133 chain pack (migrated from the deprecated ADR 0072 builtin `openwop-app.kicktodo.plan-generation`). Generate a validated challenge plan with the run-scoped provider (closed-world validatePlan + one bounded repair inside the node; fails closed on stub providers), then decompose it into a draft. Demonstrates RFC 0133 produced variables: `generate` writes the validated `plan` to the run bag and `decompose` reads it by name — no typed output port, so an explicit edge is not the right shape.",
+  "description": "KickTodo plan generation as an RFC 0013 / RFC 0133 chain pack (migrated from the deprecated ADR 0072 builtin `openwop-app.kicktodo.plan-generation`). Generate a validated challenge plan with the run-scoped provider (closed-world validatePlan + one bounded repair inside the node; fails closed on stub providers), then decompose it into a draft. Demonstrates RFC 0133 produced variables: `generate` writes the validated `plan` to the run bag and `decompose` reads it by name — no typed output port, so an explicit edge is not the right shape. 1.1.0 (XCH-PGC-1) forwards provider/model/credentialRef to generate; the node reads the candidate's dossier claims itself when none are passed, so the prompt and validatePlan see the same evidence.",
   "keywords": ["KickTodo", "Challenges"],
   "engines": { "openwop": ">=1.0.0 <3.0.0" },
   "chains": [
     {
       "chainId": "kicktodo.plan-generation",
-      "version": "1.0.1",
+      "version": "1.1.0",
       "label": "Generate a challenge plan",
       "description": "Generate a validated plan from research, then decompose it into a challenge draft.",
       "parameters": {
@@ -20,7 +20,10 @@
           "topic": { "type": "string", "description": "The challenge topic." },
           "audience": { "type": "string", "description": "The target audience." },
           "evidenceSummary": { "type": "string", "description": "Optional research evidence summary to ground the plan." },
-          "authorSubject": { "type": "string", "description": "The authoring subject the draft binds to." }
+          "authorSubject": { "type": "string", "description": "The authoring subject the draft binds to." },
+          "provider": { "type": "string", "description": "XCH-PGC-1 — the AI provider for the generate node (ADR 0706). Absent ⇒ the node's pinned default." },
+          "model": { "type": "string", "description": "XCH-PGC-1 — the model id, with provider." },
+          "credentialRef": { "type": "string", "description": "XCH-PGC-1 — the Secrets Vault ref NAME forwarded to ctx.callAI (a name, never a value). Absent ⇒ the dispatcher's provider ladder." }
         }
       },
       "capabilities": [],
@@ -43,7 +46,10 @@
               "candidateId": "{{params.candidateId}}",
               "topic": "{{params.topic}}",
               "audience": "{{params.audience}}",
-              "evidenceSummary": "{{params.evidenceSummary}}"
+              "evidenceSummary": "{{params.evidenceSummary}}",
+              "provider": "{{params.provider}}",
+              "model": "{{params.model}}",
+              "credentialRef": "{{params.credentialRef}}"
             }
           },
           {

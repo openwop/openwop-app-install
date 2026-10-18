@@ -18,6 +18,24 @@ npm start            # launches the shell; enter a host URL (e.g. http://localho
 The setup page offers the self-hosted default (`http://localhost:8000`), a
 one-click **hosted demo** (`app.openwop.dev`), and your **recent hosts**.
 
+### Electron 44 notes
+
+- **macOS notifications need a code-signed app** (Electron 42 moved them to
+  `UNNotification`). An unsigned build, including `npm start` and the unsigned
+  packages below, gets no OS notification; `native:notify` answers `false` and
+  logs the reason. In-app notifications are unaffected.
+  MEASURED 2026-10-16 with `npm run selftest` (its notification leg, below) on
+  macOS 15 (Darwin 24.6), unsigned Electron 44.6: `notify.shown: false`, failure
+  `UNErrorDomain error 1` (Apple's `notificationsNotAllowed`). A signed build is
+  the only way to show one; it has not been measured, so it may also need the
+  user to allow notifications in System Settings.
+- **macOS 13 or newer** is required. Windows 32-bit and Linux armv7l builds are
+  no longer published, and the Linux dock badge is gone with Unity support.
+- **The Electron binary downloads on first run**, not at `npm install`. The first
+  `npm start` or `npm run selftest` needs network access
+  (`ELECTRON_SKIP_BINARY_DOWNLOAD` no longer applies; `npx install-electron`
+  pre-fetches it).
+
 ## Self-test (the display-gate closer)
 
 ```bash
@@ -27,7 +45,10 @@ npm run selftest     # exits 0/1; screenshots + selftest-report.json in ./selfte
 Launches the REAL shell against an isolated userData dir and verifies, end to
 end: the setup page renders with both preload bridges injected → the real
 `setup:save-host` IPC persists + navigates → the **remote host origin** receives
-`window.openwopNative` (`kind: 'electron'`). Override the probed host with
+`window.openwopNative` (`kind: 'electron'`) → a notification sent through that
+bridge, whose OS outcome is RECORDED in `notify` (`shown`, plus the OS's
+`failure` reason) but does not decide the exit code, because an unsigned macOS
+build is expected to fail it. Override the probed host with
 `OPENWOP_SHELL_SELFTEST_HOST` (default `https://app.openwop.dev`). First
 verified run: 2026-07-06, against the live demo host — pass.
 

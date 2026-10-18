@@ -76,6 +76,12 @@ export async function startWorkflowRun(
      *  Stamped onto the reserved `run.metadata.orgScopeSubject` after the strip;
      *  it narrows which orgs the run's surfaces may reach and grants nothing. */
     orgScopeSubject?: string;
+    /** ADR 0879 D7 (grade-code CH2CD-1) — the causing person's OWN personal tenant
+     *  (`req.personalTenant`), stamped onto the reserved `run.metadata.personalTenant`
+     *  after the strip. Read by req-less tenant gates for the implicit personal-owner
+     *  short-circuit (the HTTP lane's `isOwnPersonalWorkspace`); grants nothing in a
+     *  workspace that is not that personal tenant. */
+    personalTenant?: string;
   },
 ): Promise<string | null> {
   const { storage, hostSuite } = deps;
@@ -148,6 +154,7 @@ export async function startWorkflowRun(
       ...stripReservedRunMetadata(input.metadata),
       launchResolved: wf.launchResolved,
       ...(input.orgScopeSubject ? { orgScopeSubject: input.orgScopeSubject } : {}),
+      ...(input.personalTenant ? { personalTenant: input.personalTenant } : {}),
     },
     configurable: input.configurable ?? {},
     createdAt: now,

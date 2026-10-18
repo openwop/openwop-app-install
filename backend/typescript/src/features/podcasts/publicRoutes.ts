@@ -234,7 +234,9 @@ export function registerPublicPodcastRoutes(deps: RouteDeps): void {
     res.vary('Accept-Language, Accept-Encoding');
     res.setHeader('Cache-Control', `public, max-age=${prerenderTtlSeconds()}`);
     res.type('html');
-    if (isHead) { res.end(); return; }
+    // A HEAD reports the length a GET would send (it reached this branch only
+    // once PODCAST-1a fixed the routing; before, it took the GET path).
+    if (isHead) { res.setHeader('Content-Length', String(Buffer.byteLength(html))); res.end(); return; }
     res.send(html);
   };
 
@@ -253,17 +255,14 @@ export function registerPublicPodcastRoutes(deps: RouteDeps): void {
     sendPrerender(res, isHead, out?.html ?? null, out?.languageCode ?? 'en');
   };
 
+  // PODCAST-1a: Express routes a HEAD to the GET route registered for the same
+  // path, so a separate `app.head` after `app.get` is never reached. One route
+  // per path, and the handler reads the method.
   app.get(`${PUB}/:showSlug/prerender`, async (req, res, next) => {
-    try { await showPrerenderHandler(req, res, false); } catch (err) { next(err); }
-  });
-  app.head(`${PUB}/:showSlug/prerender`, async (req, res, next) => {
-    try { await showPrerenderHandler(req, res, true); } catch (err) { next(err); }
+    try { await showPrerenderHandler(req, res, req.method === 'HEAD'); } catch (err) { next(err); }
   });
   app.get(`${PUB}/:showSlug/prerender/:episodeSlug`, async (req, res, next) => {
-    try { await episodePrerenderHandler(req, res, false); } catch (err) { next(err); }
-  });
-  app.head(`${PUB}/:showSlug/prerender/:episodeSlug`, async (req, res, next) => {
-    try { await episodePrerenderHandler(req, res, true); } catch (err) { next(err); }
+    try { await episodePrerenderHandler(req, res, req.method === 'HEAD'); } catch (err) { next(err); }
   });
 
   // ── One episode (JSON) ──
@@ -363,11 +362,11 @@ export function registerPublicPodcastRoutes(deps: RouteDeps): void {
     res.end(buffer.subarray(range.start, range.end + 1));
   };
 
+  // PODCAST-1a: this route also answers HEAD (Express), so the method decides.
+  // It used to pass `false` here with a separate `app.head` below it that was
+  // never reached, so every HEAD decoded the whole asset into the LRU.
   app.get(`${PUB}/episodes/:episodeId/audio`, async (req, res, next) => {
-    try { await audioHandler(req, res, false); } catch (err) { next(err); }
-  });
-  app.head(`${PUB}/episodes/:episodeId/audio`, async (req, res, next) => {
-    try { await audioHandler(req, res, true); } catch (err) { next(err); }
+    try { await audioHandler(req, res, req.method === 'HEAD'); } catch (err) { next(err); }
   });
 
   log.info('public podcast routes registered (/host/openwop-app/public/:orgId/podcasts/*)');

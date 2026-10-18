@@ -25,6 +25,12 @@ import { OpenwopError } from '../../types.js';
 import { cleanString } from '../../host/boundedStrings.js';
 import { recordCommerceAction } from './telemetry.js';
 import { CURRENCIES, type Product } from './commerceService.js';
+import { toStripeMinorUnits, fromStripeMinorUnits } from '../billing/stripeApi.js';
+
+/** ADR 0875 D7 — every resolved price is a whole number of minor units. A stored 0.125
+ *  billed 13¢ per Stripe line while the order expected 50¢ for four, so the webhook
+ *  refused a real payment. Quantizing the ANSWER covers legacy rows and price lists. */
+const q = (price: number, currency: string): number => fromStripeMinorUnits(toStripeMinorUnits(price, currency), currency);
 
 const nowIso = (): string => new Date().toISOString();
 const MAX = { name: 200, entries: 500, assignments: 500, perOrg: 200 } as const;
@@ -193,15 +199,15 @@ export async function resolvePrice(
         (opts.variantId ? list.entries.find((e) => e.productId === product.productId && e.variantId === opts.variantId) : undefined) ??
         list.entries.find((e) => e.productId === product.productId && !e.variantId);
       if (entry) {
-        return { price: entry.price, currency: product.currency, source: `price-list:${list.priceListId}`, priceListName: list.name, priority: list.priority };
+        return { price: q(entry.price, product.currency), currency: product.currency, source: `price-list:${list.priceListId}`, priceListName: list.name, priority: list.priority };
       }
     }
   }
   if (opts.variantId) {
     const v = product.variants.find((x) => x.variantId === opts.variantId);
-    if (v?.price !== undefined) return { price: v.price, currency: product.currency, source: 'variant' };
+    if (v?.price !== undefined) return { price: q(v.price, product.currency), currency: product.currency, source: 'variant' };
   }
-  return { price: product.price, currency: product.currency, source: 'default' };
+  return { price: q(product.price, product.currency), currency: product.currency, source: 'default' };
 }
 
 /** D3 — ONE sellability answer beside the price answer: when a buyer matches any

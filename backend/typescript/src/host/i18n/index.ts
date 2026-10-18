@@ -7,6 +7,7 @@
 export { resolveSection, resolveLocalizedValues, type LocalizableSection } from './resolveSection.js';
 export {
   negotiateLocale,
+  preferredLocale,
   LOCALE_RE,
   hostDefaultLocale,
   hostSupportedLocales,

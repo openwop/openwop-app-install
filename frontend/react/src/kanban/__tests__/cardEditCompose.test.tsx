@@ -13,6 +13,7 @@
  * submit, taxing rapid entry with a reopen per card.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
+import type { ComponentProps } from 'react';
 import { render, cleanup, screen, fireEvent } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { KanbanBoardView } from '../KanbanBoardView.js';
@@ -26,11 +27,14 @@ const board: KanbanBoard = {
 const card: KanbanCard = {
   id: 'c1', boardId: 'b1', columnId: 'todo', title: 'Old title',
   description: 'Same desc', priority: 'normal', order: 0,
-} as KanbanCard;
+  createdAt: '2026-08-01T00:00:00Z', updatedAt: '2026-08-01T00:00:00Z',
+};
 
 afterEach(cleanup);
 
-function view(overrides: { onEditCard?: ReturnType<typeof vi.fn>; onCreateCard?: ReturnType<typeof vi.fn> } = {}): void {
+type BoardProps = ComponentProps<typeof KanbanBoardView>;
+
+function view(overrides: { onEditCard?: BoardProps['onEditCard']; onCreateCard?: BoardProps['onCreateCard'] } = {}): void {
   render(
     <MemoryRouter>
       <KanbanBoardView

@@ -92,6 +92,8 @@ export function useRealtimeVoice({ agentId, conversationId, onTranscript }: { ag
       const cb: RealtimeCallbacks = {
         onStatus: (s) => setPhase(s === 'live' ? 'live' : s === 'connecting' ? 'connecting' : s === 'error' ? 'error' : 'idle'),
         onError: (m) => setError(m),
+        // VOX2UX-1 — the host ended the call (e.g. the caller lost access mid-call).
+        onRemoteEnded: () => { stop(); toast.info(i18n.t('chat:voiceCallEndedRemote')); },
         onAudioGraph: (g) => setAudioGraph(g),
         onDegraded: (blocks) => setDegraded(blocks),
         // RT-9: whole spoken turns (accumulated client-side) surface into the chat thread.
@@ -123,7 +125,7 @@ export function useRealtimeVoice({ agentId, conversationId, onTranscript }: { ag
       setError(err instanceof Error ? err.message : 'Could not start real-time voice.');
       setPhase('error');
     }
-  }, [agentId, conversationId]);
+  }, [agentId, conversationId, stop]);
 
   const toggle = useCallback(() => {
     if (phase === 'idle' || phase === 'error') void start();

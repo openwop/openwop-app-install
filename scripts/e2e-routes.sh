@@ -2,7 +2,10 @@
 #
 # Live feature-route Playwright run (ADR 0183). Boots a local backend on :8080 with the
 # test seams, a cookie-mode Vite dev server proxying /api → :8080, then runs the
-# render-smoke (e2e/feature-routes.spec.ts) + step-driven (e2e/feature-gated.spec.ts).
+# render-smoke (e2e/feature-routes.spec.ts) + announcement-delivery. (The step-driven
+# e2e/feature-gated.spec.ts was deleted 2026-10-17, /grade-tests wave 53: its render
+# claims are carried by BillingPage.writeAccess + ucpFailedReads, its route loads by
+# feature-routes.)
 # This makes the "56 passed live" result reproducible instead of a one-off manual run.
 #
 # Gated (needs Chromium + a free :8080/:5173). Run directly, or via `npm run ci:full`
@@ -184,5 +187,5 @@ echo "== e2e-routes: run render-smoke + step-driven =="
   # default path is byte-identical to what it was before the seam existed.
   OPENWOP_E2E_PORT="$WEB_PORT" \
   OPENWOP_E2E_REUSE_SERVER=1 \
-  OPENWOP_E2E_ROUTES=1 node "${OPENWOP_E2E_PLAYWRIGHT_BIN:-node_modules/@playwright/test/cli.js}" test feature-routes feature-gated announcement-delivery --reporter=line )
+  OPENWOP_E2E_ROUTES=1 node "${OPENWOP_E2E_PLAYWRIGHT_BIN:-node_modules/@playwright/test/cli.js}" test feature-routes announcement-delivery --reporter=line )
 echo "== e2e-routes: PASS =="

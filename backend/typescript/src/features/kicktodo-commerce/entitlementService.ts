@@ -49,6 +49,11 @@ export interface ChallengeEntitlement {
   state: 'active' | 'revoked';
   grantedAt: string;
   revokedAt?: string;
+  /** Grade-data KTCOM-D2 — set when a DSAR anonymized this row (its buyer key is
+   *  then `erased:<hash>`). A paid order created at or before this instant belongs
+   *  to the erased subject's history, so reconciliation must not re-grant it under
+   *  the original subject. */
+  erasedAt?: string;
 }
 
 /** Keyed by product — the paid-observer's lookup direction. */
@@ -75,21 +80,44 @@ const nowIso = (): string => new Date().toISOString();
 
 export class LinkError extends Error {}
 
+/** A link call refused because the product already sells a DIFFERENT challenge
+ *  version and the caller did not ask to replace it (see {@link relinkConflict}). */
+export class LinkConflictError extends LinkError {
+  constructor(message: string, readonly existing: ChallengeProductLink) {
+    super(message);
+  }
+}
+
 /** Link a PUBLISHED challenge version to a Commerce product (publisher-gated
- *  at the route). One product ⇒ one challenge version; relinking overwrites. */
+ *  at the route). One product ⇒ one challenge version.
+ *
+ *  A-18 (`/links` race) — the relink check and the write are ONE compare-and-swap.
+ *  The route used to read the link, judge {@link relinkConflict}, then blind-`put`:
+ *  two operators linking the same product to different versions both read "no
+ *  link", both passed, and the later write silently replaced the earlier sale.
+ *  Now the write only lands on the row the check judged; a lost swap re-reads and
+ *  re-judges, so the loser gets the same 409 a sequential second call gets.
+ *  `replace` defaults to true for in-process callers (seeding, tests), which have
+ *  always overwritten; the route passes the operator's explicit choice. */
 export async function linkChallengeProduct(
   tenantId: string,
   productId: string,
   challengeId: string,
   challengeVersion: number,
   createdBy: string,
+  opts: { replace?: boolean } = { replace: true },
 ): Promise<ChallengeProductLink> {
   const challenge = await getChallenge(tenantId, challengeId, challengeVersion);
   if (!challenge) throw new LinkError('Challenge version not found.');
   if (challenge.status !== 'published') throw new LinkError('Only a PUBLISHED challenge version can be sold.');
-  const link: ChallengeProductLink = { tenantId, productId, challengeId, challengeVersion, createdBy, createdAt: nowIso() };
-  await links.put(link);
-  return link;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const existing = (await links.get(`${tenantId}::${productId}`)) ?? null;
+    const conflict = relinkConflict(existing, { challengeId, challengeVersion, replace: opts.replace === true });
+    if (conflict) throw new LinkConflictError(conflict, existing!);
+    const link: ChallengeProductLink = { tenantId, productId, challengeId, challengeVersion, createdBy, createdAt: nowIso() };
+    if (await links.compareAndSwap(existing, link)) return link;
+  }
+  throw new LinkError('The product link kept changing; try again.');
 }
 
 export async function getLinkByProduct(tenantId: string, productId: string): Promise<ChallengeProductLink | null> {
@@ -122,10 +150,28 @@ export async function unlinkChallengeProduct(tenantId: string, productId: string
   return await links.delete(`${tenantId}::${productId}`);
 }
 
-/** Whether ANY product sells this challenge version (⇒ enrollment is gated). */
+/** Whether ANY product sells this challenge version (⇒ enrollment is gated).
+ *
+ *  KTCOM-3 — "sells" means the linked product still EXISTS. A deleted product
+ *  left its link behind, so this returned true (paywalled) while
+ *  `productForChallenge` — which resolves the product — returned null: the Detail
+ *  page had no price to show and the enroll guard still demanded a checkout that
+ *  could not happen. The two now agree on one rule: a link whose product is gone
+ *  sells nothing (an INACTIVE product still does — that is "temporarily
+ *  unavailable", not "not for sale").
+ *
+ *  Deliberately NOT done by unlinking from commerce's `onProductDeleted` seam: the
+ *  link is also the lookup for MONEY effects. An order created before the delete and
+ *  paid after it (a slow Stripe webhook) still needs its entitlement grant, its author
+ *  share accrual and the reconcile sweep's repair, and every one of those resolves
+ *  `line.productId → link`. Deleting the link would silently drop all three. */
 export async function isChallengePaid(tenantId: string, challengeId: string, challengeVersion: number): Promise<boolean> {
   const rows = await links.listByPrefix(`${tenantId}::`);
-  return rows.some((l) => l.challengeId === challengeId && l.challengeVersion === challengeVersion);
+  for (const l of rows) {
+    if (l.challengeId !== challengeId || l.challengeVersion !== challengeVersion) continue;
+    if (await getProductInTenant(tenantId, l.productId)) return true;
+  }
+  return false;
 }
 
 /** ADR 0455 P1 — the price/CTA info the KickTodo Detail page needs to surface a
@@ -167,55 +213,142 @@ export async function listEntitlementsFor(tenantId: string, buyerSubject: string
   return rows.sort((a, b) => a.grantedAt.localeCompare(b.grantedAt));
 }
 
+/** KTCOM-5 / KTM-2 — an entitlement write lost its compare-and-swap this many times
+ *  in a row. Every loss means another writer changed the row in between, so this is
+ *  sustained contention, not a stale read; the caller (an order observer, which
+ *  commerce runs best-effort, or the reconcile sweep) retries the whole order. */
+const ENTITLEMENT_CAS_ATTEMPTS = 8;
+
+export class EntitlementConflictError extends Error {
+  constructor(key: string) {
+    super(`Entitlement ${key} kept changing under concurrent writers; retry.`);
+  }
+}
+
 /** Derive + apply entitlement effects for one order (idempotent; the repair
- *  entry). `mode: 'grant'` on paid; `'revoke'` on full refund. */
+ *  entry). `mode: 'grant'` on paid; `'revoke'` on full refund.
+ *
+ *  KTCOM-5 / KTM-2 — every write is a compare-and-swap against the row this call
+ *  decided on, re-read and re-decided on a lost swap. It used to read, decide, then
+ *  blind-`put`. Two paid orders for the same buyer and challenge (the paid observer
+ *  racing the reconcile sweep, or two webhooks) could then both read "no row" or the
+ *  same old row, and whichever wrote LAST won. If that was the OLDER order, the
+ *  ARCH-H1 rule broke: a refund of the older order revoked access the newer one paid
+ *  for. A refund racing a grant could likewise write `revoked` over the newer
+ *  order's fresh grant. */
 export async function reprocessOrder(order: Order, mode: 'grant' | 'revoke'): Promise<number> {
+  if (mode === 'revoke') return await revokeOrderEntitlements(order);
   let affected = 0;
   for (const line of order.items ?? []) {
     const link = await getLinkByProduct(order.tenantId, line.productId);
     if (!link) continue;
-    const key = `${order.tenantId}::${order.createdBy}::${link.challengeId}::v${link.challengeVersion}`;
-    const existing = await entitlements.get(key);
-    if (mode === 'grant') {
-      // Idempotent per order; a re-purchase RE-POINTS the entitlement to the
-      // newest paying order so an older order's refund cannot claw back what
-      // a newer order paid for.
-      if (existing?.state === 'active' && existing.orderId === order.orderId) continue;
-      // ARCH-H1 — only a STRICTLY NEWER order may take the pointer. The claim
-      // above was previously unenforced, so a reconciliation sweep that
-      // happened to process an older paid order last would re-point the
-      // entitlement backwards; refunding that older order then revoked access
-      // a newer order had paid for. It also meant the sweep never converged —
-      // two paid orders flipped the pointer on every run, so
-      // `entitlementsRepaired` could not reach zero.
-      if (existing?.state === 'active' && (existing.orderCreatedAt ?? '') >= order.createdAt) continue;
-      const next: ChallengeEntitlement = {
-        tenantId: order.tenantId,
-        buyerSubject: order.createdBy,
-        challengeId: link.challengeId,
-        challengeVersion: link.challengeVersion,
-        orderId: order.orderId,
-        orderCreatedAt: order.createdAt,
-        state: 'active',
-        grantedAt: existing?.grantedAt ?? nowIso(),
-      };
-      await entitlements.put(next);
+    if (await grantLine(order, link)) {
       affected += 1;
       log.info('kicktodo_entitlement_granted', { orderId: order.orderId, challengeId: link.challengeId, buyer: order.createdBy });
       // ADR 0456 P2 — consent-gated purchased signal for CDP marketing. No-ops
       // unless the BUYER has a linked Contact (Gate 0) — so a `public:` guest
       // checkout emits nothing; best-effort + deduped once per (subject,order).
       await emitKicktodoLifecycle(order.tenantId, order.createdBy, 'purchased', { challengeId: link.challengeId, challengeVersion: link.challengeVersion });
-    } else {
-      // Revoke ONLY the entitlement this order granted (a later re-purchase
-      // through a different order must not be clawed back by an old refund).
-      if (!existing || existing.state === 'revoked' || existing.orderId !== order.orderId) continue;
-      await entitlements.put({ ...existing, state: 'revoked', revokedAt: nowIso() });
-      affected += 1;
-      log.info('kicktodo_entitlement_revoked', { orderId: order.orderId, challengeId: link.challengeId, buyer: order.createdBy });
     }
   }
   return affected;
+}
+
+/** One order line's grant decision, applied by CAS. True when this call changed the row. */
+async function grantLine(order: Order, link: ChallengeProductLink): Promise<boolean> {
+  const key = `${order.tenantId}::${order.createdBy}::${link.challengeId}::v${link.challengeVersion}`;
+  for (let attempt = 0; attempt < ENTITLEMENT_CAS_ATTEMPTS; attempt++) {
+    const existing = await entitlements.get(key);
+    // Grade-data KTCOM-D2 — a DSAR moved this buyer's entitlement to an anonymized
+    // key. `order.createdBy` still names the original subject (Commerce keeps the
+    // order), so without this check the next reconcile sweep re-created the row
+    // under the erased subject: the erasure was silently undone. Only orders the
+    // erased history already covers are skipped; a NEWER purchase still grants.
+    if (!existing && await coveredByErasure(order, link.challengeId, link.challengeVersion)) return false;
+    // A-18 — an erasure has CLAIMED this row and is moving it to its anonymized key.
+    // Re-pointing it now would be deleted with it; the erasure's tombstone covers
+    // every order up to its `erasedAt`, exactly as for a finished erasure.
+    if (existing?.erasedAt) return false;
+    // Idempotent per order; a re-purchase RE-POINTS the entitlement to the
+    // newest paying order so an older order's refund cannot claw back what
+    // a newer order paid for.
+    if (existing?.state === 'active' && existing.orderId === order.orderId) return false;
+    // ARCH-H1 — only a STRICTLY NEWER order may take the pointer. The claim
+    // above was previously unenforced, so a reconciliation sweep that
+    // happened to process an older paid order last would re-point the
+    // entitlement backwards; refunding that older order then revoked access
+    // a newer order had paid for. It also meant the sweep never converged —
+    // two paid orders flipped the pointer on every run, so
+    // `entitlementsRepaired` could not reach zero.
+    if (existing?.state === 'active' && (existing.orderCreatedAt ?? '') >= order.createdAt) return false;
+    const next: ChallengeEntitlement = {
+      tenantId: order.tenantId,
+      buyerSubject: order.createdBy,
+      challengeId: link.challengeId,
+      challengeVersion: link.challengeVersion,
+      orderId: order.orderId,
+      orderCreatedAt: order.createdAt,
+      state: 'active',
+      grantedAt: existing?.grantedAt ?? nowIso(),
+    };
+    if (await entitlements.compareAndSwap(existing, next)) return true;
+  }
+  throw new EntitlementConflictError(key);
+}
+
+/** Grade-data KTCOM-D1 — revoke every entitlement THIS order granted, found by the
+ *  `orderId` the entitlement records, never through the product's CURRENT link.
+ *  The old revoke resolved `line.productId → link → challenge`, so a refund after
+ *  the product was unlinked (`continue` on no link) or relinked with `replace`
+ *  (a different challenge) never reached the entitlement the order had paid for,
+ *  and the refunded buyer kept access permanently; reconcile used the same lookup
+ *  and could not repair it. Matching on `orderId` alone also reaches an
+ *  anonymized (DSAR) row, whose money-truth state must still follow its order.
+ *  A later re-purchase re-pointed the row to a newer `orderId`, so an old refund
+ *  still cannot claw it back.
+ *
+ *  KTCOM-5 — the listed row is only a candidate: the revoke re-reads it and swaps
+ *  against that read, so a newer order's grant landing in between (which re-points
+ *  `orderId`) makes this refund a no-op instead of being overwritten by it. */
+async function revokeOrderEntitlements(order: Order): Promise<number> {
+  let affected = 0;
+  for (const candidate of await entitlements.listByPrefix(`${order.tenantId}::`)) {
+    if (candidate.tenantId !== order.tenantId || candidate.orderId !== order.orderId || candidate.state === 'revoked') continue;
+    const key = `${candidate.tenantId}::${candidate.buyerSubject}::${candidate.challengeId}::v${candidate.challengeVersion}`;
+    let revoked: ChallengeEntitlement | null = null;
+    for (let attempt = 0; attempt < ENTITLEMENT_CAS_ATTEMPTS && !revoked; attempt++) {
+      const e = await entitlements.get(key);
+      if (!e && !candidate.buyerSubject.startsWith('erased:')) {
+        // A-18 — an erasure moved the row after this refund listed it. The refund
+        // still belongs to the order, so it follows the row to its anonymized copy.
+        if (await revokeAnonymizedCopy({ ...candidate, revokedAt: nowIso() })) affected += 1;
+        break;
+      }
+      if (!e || e.orderId !== order.orderId || e.state === 'revoked') break; // re-pointed or revoked meanwhile
+      const next: ChallengeEntitlement = { ...e, state: 'revoked', revokedAt: nowIso() };
+      if (await entitlements.compareAndSwap(e, next)) revoked = next;
+      else if (attempt === ENTITLEMENT_CAS_ATTEMPTS - 1) throw new EntitlementConflictError(key);
+    }
+    if (!revoked) continue;
+    // A-18 — the row was claimed by an in-flight erasure, which may already have
+    // copied it to the anonymized key and be about to delete this one. Apply the
+    // refund to that copy too, so it survives whichever side finishes last.
+    if (revoked.erasedAt && !revoked.buyerSubject.startsWith('erased:')) await revokeAnonymizedCopy(revoked);
+    affected += 1;
+    log.info('kicktodo_entitlement_revoked', { orderId: order.orderId, challengeId: revoked.challengeId, buyer: revoked.buyerSubject });
+  }
+  return affected;
+}
+
+/** Grade-data KTCOM-D2 — whether a DSAR already erased the entitlement this order
+ *  would grant. The tombstone is the anonymized row `eraseSubjectEntitlements`
+ *  wrote; an order created at or before its erasure is part of that history.
+ *  Legacy tombstones (no `erasedAt`) fall back to their grant time. */
+async function coveredByErasure(order: Order, challengeId: string, challengeVersion: number): Promise<boolean> {
+  const anon = anonymizedSubject(order.tenantId, order.createdBy);
+  const tomb = await entitlements.get(`${order.tenantId}::${anon}::${challengeId}::v${challengeVersion}`);
+  if (!tomb) return false;
+  return tomb.orderId === order.orderId || order.createdAt <= (tomb.erasedAt ?? tomb.grantedAt);
 }
 
 /** Creator revenue projection (ADR 0420 P3): the caller's OWN links with
@@ -314,16 +447,64 @@ function anonymizedSubject(tenantId: string, subjectKey: string): string {
 /** DSAR erasure (anonymize, not delete): rewrite every entitlement this tenant holds
  *  for the buyer under an anonymized key, preserving the money-truth fields (orderId,
  *  challenge, state, timestamps). Idempotent; fail-closed on a falsy tenant/subject.
- *  Returns the count anonymized. */
+ *  Returns the count anonymized.
+ *
+ *  A-18 (erasure race) — this used to copy each LISTED row and then delete the live
+ *  one. A grant landing in between (a newer order re-pointing the row) was deleted
+ *  with it and the tombstone kept the older order, and a row granted after the list
+ *  was never erased at all. Now each row is first CLAIMED with a CAS that stamps
+ *  `erasedAt` (grants back off a claimed row; a refund on it also reaches the
+ *  copy), the copy is made from the claimed row and re-checked before the delete,
+ *  and the tenant is re-listed until a pass finds nothing left. */
 export async function eraseSubjectEntitlements(tenantId: string, subjectKey: string): Promise<number> {
   if (!tenantId || !subjectKey) return 0;
   const anon = anonymizedSubject(tenantId, subjectKey);
   let anonymized = 0;
-  for (const e of await entitlements.listByPrefix(`${tenantId}::`)) {
-    if (e.tenantId !== tenantId || e.buyerSubject !== subjectKey) continue;
-    await entitlements.put({ ...e, buyerSubject: anon });
-    await entitlements.delete(`${tenantId}::${subjectKey}::${e.challengeId}::v${e.challengeVersion}`);
-    anonymized += 1;
+  for (let pass = 0; pass < ENTITLEMENT_CAS_ATTEMPTS; pass++) {
+    let found = 0;
+    for (const listed of await entitlements.listByPrefix(`${tenantId}::`)) {
+      if (listed.tenantId !== tenantId || listed.buyerSubject !== subjectKey) continue;
+      found += 1;
+      if (await eraseOne(`${tenantId}::${subjectKey}::${listed.challengeId}::v${listed.challengeVersion}`, anon)) anonymized += 1;
+    }
+    if (found === 0) return anonymized;
   }
-  return anonymized;
+  throw new EntitlementConflictError(`${tenantId}::${subjectKey}`);
+}
+
+/** Move one live entitlement to its anonymized key (see {@link eraseSubjectEntitlements}). */
+async function eraseOne(key: string, anon: string): Promise<boolean> {
+  for (let attempt = 0; attempt < ENTITLEMENT_CAS_ATTEMPTS; attempt++) {
+    const live = await entitlements.get(key);
+    if (!live) return false; // another erasure finished it
+    const claimed: ChallengeEntitlement = live.erasedAt ? live : { ...live, erasedAt: nowIso() };
+    if (claimed !== live && !(await entitlements.compareAndSwap(live, claimed))) continue;
+    // Copy, then confirm nothing changed the claimed row (a refund may have) before
+    // deleting it; a change is copied again.
+    let current = claimed;
+    for (let check = 0; check < ENTITLEMENT_CAS_ATTEMPTS; check++) {
+      await entitlements.put({ ...current, buyerSubject: anon });
+      const again = await entitlements.get(key);
+      if (!again) return true;
+      if (JSON.stringify(again) === JSON.stringify(current)) {
+        await entitlements.delete(key);
+        return true;
+      }
+      current = again;
+    }
+    throw new EntitlementConflictError(key);
+  }
+  throw new EntitlementConflictError(key);
+}
+
+/** A refund for a row an erasure claimed or already moved: apply it to the
+ *  anonymized copy. True iff this call revoked the copy. */
+async function revokeAnonymizedCopy(revoked: ChallengeEntitlement): Promise<boolean> {
+  const key = `${revoked.tenantId}::${anonymizedSubject(revoked.tenantId, revoked.buyerSubject)}::${revoked.challengeId}::v${revoked.challengeVersion}`;
+  for (let attempt = 0; attempt < ENTITLEMENT_CAS_ATTEMPTS; attempt++) {
+    const copy = await entitlements.get(key);
+    if (!copy || copy.orderId !== revoked.orderId || copy.state === 'revoked') return false;
+    if (await entitlements.compareAndSwap(copy, { ...copy, state: 'revoked', revokedAt: revoked.revokedAt ?? nowIso() })) return true;
+  }
+  throw new EntitlementConflictError(key);
 }

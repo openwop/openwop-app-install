@@ -32,7 +32,8 @@ beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   initHostExtPersistence(await openStorage('memory://'));
   registerCrmAgentTools(); // registers openwop:crm.lead.capture into BUILTINS
-  if (crmFeature.toggleDefault) registerToggleDefault(crmFeature.toggleDefault); // crm is default-on (ADR 0191)
+  // ADR 0892: crm defaults off, so the test enables it (as an operator would).
+  if (crmFeature.toggleDefault) registerToggleDefault({ ...crmFeature.toggleDefault, status: 'on' });
 });
 
 describe('ADR 0470 P1 — the anon write tier lands a REAL write (§N3 closed)', () => {

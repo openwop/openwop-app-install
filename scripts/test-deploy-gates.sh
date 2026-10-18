@@ -612,75 +612,23 @@ set_live "$OLD"
 printf '{"commit":"%s","stamped":true,"dirty":false}' "$NEW" > "$STUB_DIR/build-info.json"
 check "--frontend-only ignores an un-deployed backend" 0 "$(VH "$NEW" --frontend-only)"
 
-echo "== check-wire-claims: the published claims arm (ADR 0550 P4) =="
-# The one arm whose SSoT is not source but the stamped artifact. Staged in both
-# postures, because a check exercised in one direction only has not been shown to
-# work — the mistake that shipped a `contractProvenance` arm which could never go
-# green (see check-wire-claims.mjs).
-W() { ( cd "$REPO" && OPENWOP_BUILD_META_DIR="$1" node "$ROOT/scripts/check-wire-claims.mjs" "$STUB/api" >/dev/null 2>&1; echo $? ); }
-CERT_META="$TMP/certmeta"; mkdir -p "$CERT_META"
-# A minimal but REAL pair: the claims document's digest is computed over the
-# bundle with the same canonical-JSON rule the checker uses, so the resolve leg
-# below exercises the actual binding rather than a hand-picked constant that
-# would only ever prove the two strings were typed the same.
-BUNDLE_JSON='{"bundleVersion":"2","claimedProfiles":["openwop-core-standard","openwop-discovery-core"],"results":{"requirements":[{"disposition":"executed-pass","requirementId":"openwop.floor.discovery","scenarioId":"discovery.test.ts"}]}}'
-printf '%s' "$BUNDLE_JSON" > "$TMP/bundle.json"
-BUNDLE_SHA="$(node -e '
-const {createHash}=require("node:crypto");
-const cj=(v)=>v===null||typeof v!=="object"?(JSON.stringify(v)??"null"):Array.isArray(v)?`[${v.map(cj).join(",")}]`:`{${Object.entries(v).filter(([,x])=>x!==undefined).sort(([a],[b])=>a<b?-1:a>b?1:0).map(([k,x])=>`${JSON.stringify(k)}:${cj(x)}`).join(",")}}`;
-process.stdout.write(createHash("sha256").update(cj(JSON.parse(require("node:fs").readFileSync(process.argv[1],"utf8"))),"utf8").digest("hex"));
-' "$TMP/bundle.json")"
-CLAIMS_JSON='{"claimsVersion":"1","claimedProfiles":["openwop-core-standard","openwop-discovery-core"],"evidence":{"bundleSha256":"'"$BUNDLE_SHA"'"}}'
-printf '%s' "$CLAIMS_JSON" > "$CERT_META/conformance-claims.json"
-# UNDER `api/`: the checker is handed `$STUB/api` (the Firebase rewrite prefix a
-# real deploy uses), so every path it fetches is relative to THAT. Staging the
-# file at the stub root made the fetch 404 — and the negative cases below still
-# went red, for the wrong reason. A negative that passes on a 404 proves nothing.
-CLAIMS_STUB="$STUB_DIR/api/v1/host/openwop-app/conformance"; mkdir -p "$CLAIMS_STUB"
-# check-wire-claims reads the claims document at the UNVERSIONED vendor path,
-# which the host serves on both sides of the ADR 0669 cut. Only `claims` moves;
-# the in-image bundle stays where the advertised pointer below names it.
+echo "== check-wire-claims: no origin → no evidence check (image mode removed, ADR 0812 P4) =="
+# The IMAGE-mode claims arm (ADR 0550 P4) compared the wire with a
+# build-meta/conformance-claims.json stamp. Nothing writes that stamp since the
+# image half was deleted (#4875), and write-build-commit deletes a stale one (its
+# case is below), so the arm and its seven cases are gone. What must still hold:
+# without an origin the check says N/A out loud and never fails the deploy.
+W() { ( cd "$REPO" && OPENWOP_BUILD_META_DIR="$1" node "$ROOT/scripts/check-wire-claims.mjs" "$STUB/api" >"$TMP/w.out" 2>&1; echo $? ); }
+check "no origin → the evidence arm says N/A (never a false red)" 0 "$(W "$CLAIMS_META")"
+if grep -qE 'certification evidence +N/A' "$TMP/w.out" && ! grep -q 'conformance claims document' "$TMP/w.out"; then
+  ok "  ...printed N/A, and no image-mode claims row ran"
+else
+  bad "  ...expected the N/A row and no claims-document row; got: $(grep -E 'evidence|claims' "$TMP/w.out" | tr '\n' ' ')"
+fi
+# Origin mode below asserts the claims document is withheld (404); it stages a
+# served one to prove that check can fail.
+CLAIMS_JSON='{"claimsVersion":"1","claimedProfiles":["openwop-core-standard","openwop-discovery-core"]}'
 CLAIMS_FILE="$STUB_DIR/api/host/openwop-app/conformance/claims"; mkdir -p "$(dirname "$CLAIMS_FILE")"
-printf '%s' "$CLAIMS_JSON" > "$CLAIMS_FILE"
-cp "$TMP/bundle.json" "$CLAIMS_STUB/certification-bundle"
-
-# Unstamped checkout: the arm SKIPS loudly and must not fail the deploy.
-check "no local stamp → the claims arm skips (never a false red)" 0 "$(W "$CLAIMS_META")"
-
-# Stamped, and the wire agrees — but the advert is missing from the stub, which
-# is the regression this arm exists for: a host that certified and then shipped
-# an image whose pointer never reached discovery.
-check "stamped + NO pointer advertised → FAILS" 1 "$(W "$CERT_META")"
-
-# Add the pointer: now both halves agree and the arm passes.
-python3 - "$STUB_DIR/api/.well-known/openwop" <<'PY'
-import json, sys
-p = sys.argv[1]
-d = json.load(open(p))
-d.setdefault('capabilities', {}).setdefault('conformance', {})['certificationBundleUrl'] = 'https://example.invalid/v1/host/openwop-app/conformance/certification-bundle'
-json.dump(d, open(p, 'w'))
-PY
-check "stamped + pointer + matching claims → PASSES" 0 "$(W "$CERT_META")"
-
-# The staleness this arm is named for: the deployed claim names a profile the
-# artifact we built does not. A commit stamp cannot see this — the commit was
-# never the claim.
-printf '%s' '{"claimsVersion":"1","claimedProfiles":["openwop-core-standard","openwop-discovery-core","openwop-replay-fork"],"evidence":{"bundleSha256":"'"$(printf '%064d' 1)"'"}}' \
-  > "$CLAIMS_FILE"
-check "deployed claims name an EXTRA profile → FAILS (stale claim)" 1 "$(W "$CERT_META")"
-
-# The POINTER must resolve to the evidence the claims name. A pointer nobody can
-# follow is the same as no claim, except that it looks like one.
-printf '%s' '{"bundleVersion":"1"}' > "$CLAIMS_STUB/certification-bundle"
-check "advertised bundle is v1, not v2 → FAILS" 1 "$(W "$CERT_META")"
-printf '%s' '{"bundleVersion":"2","claimedProfiles":["openwop-core-standard","openwop-discovery-core"],"results":{"requirements":[]}}' > "$CLAIMS_STUB/certification-bundle"
-check "advertised bundle digest != claims evidence → FAILS" 1 "$(W "$CERT_META")"
-rm -f "$CLAIMS_STUB/certification-bundle"
-check "advertised pointer 404s → FAILS" 1 "$(W "$CERT_META")"
-cp "$TMP/bundle.json" "$CLAIMS_STUB/certification-bundle"
-
-# Restore for anything downstream that reads the stub.
-printf '%s' "$CLAIMS_JSON" > "$CLAIMS_FILE"
 
 echo "== check-wire-claims: ORIGIN mode — the signed post-deploy bundle (WHD-18, ADR 0735) =="
 # The served evidence is the suite CLI's v3 cut, read by the host from an
@@ -770,7 +718,6 @@ grep -qE 'certification bundle \(major 2\) +OK +v3' "$TMP/vo.out" && ok "  ...an
 cp "$TMP/doc.origin.bak" "$DOC"; rm -f "$DOC.v2" "$MAJ2_STUB/major-2"
 cp "$TMP/build-info.origin.bak" "$STUB_DIR/build-info.json"
 if [ -f "$TMP/readiness.origin.bak" ]; then cp "$TMP/readiness.origin.bak" "$STUB_DIR/api/readiness"; else rm -f "$STUB_DIR/api/readiness"; fi
-printf '%s' "$CLAIMS_JSON" > "$CLAIMS_FILE"
 
 # ── the a2a posture arm: a SKIP that used to be a RED ──────────────────────
 # Found 2026-09-09 on a live KickTodo deploy. The agent-card arm gated on
@@ -1287,6 +1234,8 @@ case "$SR_BAD" in *"old-rev fired 2 job(s):  gcloud run revisions delete old-rev
 SR_AD="$(SR "$(printf 'old-rev\nlive-rev')" --after-deploy)"
 case "$SR_AD" in *"stale revs  ACTION"*) ok "stale revs: right after a deploy the old revision is an ACTION, not a failure" ;; *) bad "stale revs: --after-deploy did not report an ACTION" ;; esac
 case "$SR_AD" in *"stale revs  FAILED"*) bad "  ...but it still FAILED every deploy" ;; *) ok "  ...and does not fail every deploy for an old instance that is still draining" ;; esac
+case "$SR_AD" in *"revisions delete"*) bad "  ...but it still told the deployer to delete the rollback target" ;; *) ok "  ...and does not print a delete command for the draining previous revision (ADR 0802)" ;; esac
+case "$SR_AD" in *"keep it as the rollback target"*) ok "  ...and says to keep it as the rollback target" ;; *) bad "  ...but did not say to keep the previous revision" ;; esac
 SR_EMPTY="$(SR "")"
 case "$SR_EMPTY" in *"stale revs  NOT CORROBORATED"*) ok "stale revs: no fires in the window → NOT CORROBORATED, never OK" ;; *) bad "stale revs: an empty window was not reported as NOT CORROBORATED" ;; esac
 SR_ERR="$(SR "" "" 1)"
@@ -1564,9 +1513,9 @@ EV() { ( cd "$REPO" && out=$(PATH="$GCBIN:$PATH" BASE="$STUB" SHELL_CONVERGE_S=0
         arm=""; grep -q 'certification bundle (major 2)' <<<"$out" && arm=" [origin-arm]"
         printf '%s %s%s' "$rc" "$(grep -m1 'evidence mode' <<<"$out")" "$arm" ); }
 ORIGIN_A="gs://bucket-a/openwop-app-backend"; ORIGIN_B="gs://bucket-b/openwop-app-backend"
-# The stub is an IMAGE-mode host (a v2 bundle and the in-image claims document,
-# from the arms above), so once origin mode is adopted the origin checks rightly
-# red it. What these two cases pin is the SELECTION: that the origin arm ran.
+# The stub publishes no origin-mode evidence, so once origin mode is adopted the
+# origin checks may red it. What these two cases pin is the SELECTION: that the
+# origin arm ran.
 r=$(EV "" "$ORIGIN_A")
 if grep -q "read from the live service" <<<"$r" && grep -q "\[origin-arm\]" <<<"$r"; then
   ok "local UNSET, service in origin mode: adopts the service's origin and runs the origin-mode evidence checks"
@@ -1609,6 +1558,36 @@ d_line=$(grep -nE 'die "major \$m: the suite wrote no bundle' "$PE" | head -1 | 
 if [ -n "$k_line" ] && [ -n "$d_line" ] && [ "$k_line" -lt "$d_line" ]; then
   ok "publish-evidence keeps a REFUSED bundle before dying (the cleanup trap would delete it)"
 else bad "publish-evidence: the refused bundle is not copied out before the fatal exit (keep=$k_line die=$d_line)"; fi
+# A bundle written but NOT uploaded (the 74c expired-token upload, 2026-10-14)
+# must survive the cleanup trap too: armed once the bundle exists, disarmed only
+# after the upload, and copied out by cleanup() BEFORE its rm -rf.
+a_line=$(grep -nE '^[[:space:]]+UNPUBLISHED="\$OUT"' "$PE" | head -1 | cut -d: -f1)
+u_line=$(grep -nE 'gcloud storage cp "\$OUT" "\$DEST"' "$PE" | head -1 | cut -d: -f1)
+c_line=$(grep -nE '^[[:space:]]+UNPUBLISHED=""' "$PE" | head -1 | cut -d: -f1)
+if [ -n "$a_line" ] && [ -n "$d_line" ] && [ -n "$u_line" ] && [ -n "$c_line" ] \
+   && [ "$a_line" -gt "$d_line" ] && [ "$a_line" -lt "$u_line" ] && [ "$c_line" -gt "$u_line" ] \
+   && awk '/^cleanup\(\) \{/ {f=1} f && /cp "\$UNPUBLISHED"/ {k=NR} f && /rm -rf "\$WORK"/ {r=NR; exit} END {exit !(k && r && k<r)}' "$PE"; then
+  ok "publish-evidence keeps a written-but-UNPUBLISHED bundle on any exit (armed after write, disarmed after upload, copied before rm)"
+else bad "publish-evidence: an unpublished bundle is lost to the cleanup trap (arm=$a_line upload=$u_line disarm=$c_line)"; fi
+# Trigger subscriptions are swept BEFORE the suite as well as after it, so a cut
+# that died mid-flight (74c, 2026-10-14: 10 leaked) cannot hand them to the next.
+s1=$(grep -nE '^sweep_trigger_subs "' "$PE" | head -1 | cut -d: -f1)
+s2=$(grep -nE '^sweep_trigger_subs "' "$PE" | sed -n 2p | cut -d: -f1)
+st=$(grep -nE 'cutting against \$BASE' "$PE" | head -1 | cut -d: -f1)
+if [ -n "$s1" ] && [ -n "$s2" ] && [ -n "$st" ] && [ "$s1" -lt "$st" ] && [ "$s2" -gt "$st" ]; then
+  ok "publish-evidence sweeps trigger subscriptions before the suite AND after it (a crashed cut's leftovers never ride along)"
+else bad "publish-evidence: trigger subscriptions are not swept on both sides of the suite (pre=$s1 suite=$st post=$s2)"; fi
+
+# The cut lock is read AGAIN after the hour hold, right before the backend build:
+# preflight reads it once, and a cut that starts during the hold was never seen
+# (2026-10-14: a deploy held to 21:15Z and built while cut 82c, locked 21:09Z, ran).
+h_line=$(grep -nE 'hold: this build would boot inside the top-of-hour window' "$DS" | head -1 | cut -d: -f1)
+r_line=$(grep -nE 'cut_lock_state "\$CUT_LOCK_URL"' "$DS" | head -1 | cut -d: -f1)
+b_line=$(grep -nE 'echo "▶ backend → Cloud Run' "$DS" | head -1 | cut -d: -f1)
+if [ -n "$h_line" ] && [ -n "$r_line" ] && [ -n "$b_line" ] && [ "$r_line" -gt "$h_line" ] && [ "$r_line" -lt "$b_line" ] \
+   && awk -v r="$r_line" -v b="$b_line" 'NR>r && NR<b && /held\)/ {h=1} NR>r && NR<b && h && /sleep/ {w=1} NR>r && NR<b && /exit 1/ {f=1} END {exit !(w&&f)}' "$DS"; then
+  ok "deploy.sh re-reads the cut lock after the hour hold, before the build (waits on held, refuses unreadable)"
+else bad "deploy.sh: no cut-lock re-check between the hour hold and the backend build (hold=$h_line recheck=$r_line build=$b_line)"; fi
 
 # ── the evidence-cut lock: one cut at a time (2026-09-28) ──────────────────
 # BEHAVIOURAL, against a fake gcloud that keeps objects as files with a
@@ -1966,7 +1945,7 @@ fg_reset; printf '[{"id":7,"enforcement":"active","name":"release-freeze | holde
 check "release-freeze: an expired freeze still reports frozen" 3 "$(RF status)"
 grep -q 'EXPIRED' "$FG/out" && ok "  ...flagged EXPIRED (the holder may be gone)" || bad "  ...but not flagged as expired"
 # merge-train refuses BEFORE its 45-minute gate when someone else holds the freeze.
-MT() { ( PATH="$FGBIN:$PATH" FG_DIR="$FG" RELEASE_FREEZE_REPO=o/r OPENWOP_FREEZE_HOLDER="${1:-}" OPENWOP_TRAIN_DIR="$TMP/no-train" \
+MT() { ( PATH="$FGBIN:$PATH" FG_DIR="$FG" RELEASE_FREEZE_REPO=o/r OPENWOP_FREEZE_HOLDER="${1:-}" OPENWOP_TRAIN_DIR="$TMP/no-train" OPENWOP_TRAIN_LOCK="$TMP/no-train.lock" \
         bash "$ROOT/scripts/merge-train.sh" --dry-run 4242 >"$FG/mt" 2>&1; echo $? ); }
 check "merge-train: someone else's freeze → refuses" 1 "$(MT me)"
 grep -q 'Not gating a train that cannot merge' "$FG/mt" && ok "  ...before the gate, naming the freeze" || bad "  ...but not for the freeze: $(tail -2 "$FG/mt")"

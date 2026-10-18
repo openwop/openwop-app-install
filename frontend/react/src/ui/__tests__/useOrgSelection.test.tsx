@@ -8,6 +8,7 @@ import { useOrgSelection } from '../useOrgSelection.js';
 
 const A = { orgId: 'o1', name: 'Acme' };
 const B = { orgId: 'o2', name: 'Beta' };
+const C = { orgId: 'o3', name: 'Gamma' };
 
 describe('useOrgSelection', () => {
   it('a failed read is NOT an empty list', async () => {
@@ -55,10 +56,18 @@ describe('useOrgSelection', () => {
     const { result } = renderHook(() => useOrgSelection(listOrgs));
     await waitFor(() => expect(result.current.orgId).toBe('o1'));
     act(() => result.current.setOrgId('o2'));
-    listOrgs.mockResolvedValue([A, B]);
+    // HOLD the re-read and release it explicitly. Waiting on `toHaveBeenCalledTimes(2)`
+    // passed the moment the read was ISSUED, before it resolved, so 'o2' was the
+    // hand-set value and a hook that always took the first org stayed green (w49
+    // probe `uos-keep`). The re-read must LAND before 'kept' means anything.
+    let release!: (v: Array<typeof A>) => void;
+    listOrgs.mockImplementationOnce(() => new Promise<Array<typeof A>>((r) => { release = r; }));
     act(() => result.current.retry());
     await waitFor(() => expect(listOrgs).toHaveBeenCalledTimes(2));
-    expect(result.current.orgId).toBe('o2'); // still present — kept
+    // A DIFFERENT list ([A, B, C]) so `orgs` can only equal it once the re-read lands.
+    await act(async () => { release([A, B, C]); await Promise.resolve(); });
+    await waitFor(() => expect(result.current.orgs).toEqual([A, B, C]));
+    expect(result.current.orgId).toBe('o2'); // still present after the re-read landed — kept
     listOrgs.mockResolvedValue([A]);         // o2 is gone now
     act(() => result.current.retry());
     await waitFor(() => expect(result.current.orgId).toBe('o1'));

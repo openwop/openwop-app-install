@@ -11,9 +11,23 @@
  *
  * This version wires the node to the REAL `validatePlan` through a surface
  * that mirrors the host's, so a prompt/schema divergence fails here.
+ *
+ * Sabotage witnesses (w41 /grade-tests): dropping the callAI guard, the ONE
+ * repair, the typed `plan_invalid` failure, the live responseSchema, the schema
+ * text in the prompt, or the fed-back defect list each turn a case red; the
+ * bound cases assert the defect CODE, so a plan rejected for an unrelated
+ * reason cannot satisfy them.
  */
 import { describe, expect, it } from 'vitest';
-import { validatePlan, type ChallengePlan } from '../src/features/kicktodo-creator/planService.js';
+import { Ajv2020 } from 'ajv/dist/2020.js';
+import {
+  validatePlan,
+  CHALLENGE_PLAN_JSON_SCHEMA,
+  PLAN_DURATION_DAYS,
+  PLAN_DAILY_MINUTES,
+  PLAN_EVIDENCE_POLICIES,
+  type ChallengePlan,
+} from '../src/features/kicktodo-creator/planService.js';
 
 const packUrl = new URL('../../../packs/feature.kicktodo.nodes/index.mjs', import.meta.url).href;
 
@@ -21,14 +35,15 @@ type NodeResult = { status: string; outputs?: Record<string, unknown>; error?: {
 type Ctx = Record<string, unknown>;
 
 async function node(): Promise<(ctx: Ctx) => Promise<NodeResult>> {
-  const m = (await import(packUrl)) as { nodes: Record<string, (ctx: Ctx) => Promise<NodeResult>> };
+  const m: { nodes: Record<string, (ctx: Ctx) => Promise<NodeResult>> } = await import(packUrl);
   return m.nodes['feature.kicktodo.nodes.plan-generate'];
 }
 
 /** The REAL creator surface shape the host exposes — no canned defects. */
 const realCreatorSurface = {
   frameResearch: async () => ({}),
-  validatePlan: async (args: { plan: unknown }) => ({ defects: validatePlan(args.plan as ChallengePlan) }),
+  validatePlan: async (args: { plan: unknown }) => ({ defects: validatePlan(args.plan) }),
+  planSchema: async () => ({ schema: CHALLENGE_PLAN_JSON_SCHEMA }),
 };
 
 /** A plan that genuinely satisfies the authoritative validator. */
@@ -62,7 +77,7 @@ describe('the authoritative validator is what the node is judged by (KTFULL-B3)'
       title: 't', summary: 's', outcome: 'o', durationDays: 3,
       activities: [{ stableActivityId: 'a', day: 1, title: 't', instructions: 'i', evidencePolicy: 'note' }],
     };
-    expect(validatePlan(legacyShape as unknown as ChallengePlan).length).toBeGreaterThan(0);
+    expect(validatePlan(legacyShape).length).toBeGreaterThan(0);
   });
 });
 
@@ -90,21 +105,28 @@ describe('plan-generate against the real validator', () => {
   it('an INVALID first answer is repaired ONCE with the real defects fed back, then succeeds', async () => {
     const run = await node();
     const calls: Array<Array<{ role: string; content: string }>> = [];
+    // First answer uses the legacy shape the old prompt asked for.
+    const firstAnswer = { title: 't', summary: 's', outcome: 'o', durationDays: 3, activities: [] };
     const out = await run({
       inputs: { topic: 'sleep' },
       features: { 'kicktodo-creator': realCreatorSurface },
       callAI: async (req: { messages: Array<{ role: string; content: string }> }) => {
         calls.push(req.messages);
-        // First answer uses the legacy shape the old prompt asked for.
-        return { data: calls.length === 1 ? { title: 't', summary: 's', outcome: 'o', durationDays: 3, activities: [] } : VALID_PLAN };
+        return { data: calls.length === 1 ? firstAnswer : VALID_PLAN };
       },
     });
     expect(out.status).toBe('success');
     expect(calls).toHaveLength(2);
-    // The repair names defects produced by the REAL validator, not canned text.
-    const repair = calls[1]!.map((m) => m.content).join('\n');
-    expect(repair).toContain('FAILED validation');
-    expect(repair.length).toBeGreaterThan(50);
+    // The repair turn (the LAST message) lists EVERY defect the real validator
+    // found in the first answer — not canned text, not a subset. The validator is
+    // a dependency here; the subject is the node's repair loop.
+    const firstDefects = validatePlan(firstAnswer);
+    expect(firstDefects.length).toBeGreaterThan(1);
+    const repairTurn = calls[1]!.at(-1)!;
+    expect(repairTurn.role).toBe('user');
+    expect(repairTurn.content).toContain('FAILED validation');
+    for (const d of firstDefects) expect(repairTurn.content).toContain(d.message);
+    expect(repairTurn.content.split('\n- ').length - 1).toBe(firstDefects.length);
   });
 
   it('still-invalid after ONE repair ⇒ typed plan_invalid with the real defects; exactly two calls', async () => {
@@ -129,34 +151,31 @@ describe('plan-generate against the real validator', () => {
 // These pins make schema↔validator divergence and a silent fallback regression
 // fail here instead of lying to the model.
 describe('plan schema SSoT parity (XCH-KT-1)', () => {
-  it('the VALID_PLAN fixture passes the JSON schema AND the validator — one shape, two enforcers', async () => {
-    const { CHALLENGE_PLAN_JSON_SCHEMA } = await import('../src/features/kicktodo-creator/planService.js');
-    const { default: Ajv2020 } = (await import('ajv/dist/2020.js')) as unknown as { default: new (o?: unknown) => { compile: (s: unknown) => ((v: unknown) => boolean) & { errors?: unknown } } };
+  it('the VALID_PLAN fixture passes the JSON schema AND the validator — one shape, two enforcers', () => {
     const check = new Ajv2020({ strict: false }).compile(CHALLENGE_PLAN_JSON_SCHEMA);
     expect(check(VALID_PLAN), JSON.stringify(check.errors)).toBe(true);
     expect(validatePlan(VALID_PLAN)).toEqual([]);
   });
 
-  it('bound violations fail BOTH the schema and the validator (shared constants)', async () => {
-    const { CHALLENGE_PLAN_JSON_SCHEMA, PLAN_DURATION_DAYS, PLAN_DAILY_MINUTES } = await import('../src/features/kicktodo-creator/planService.js');
-    const { default: Ajv2020 } = (await import('ajv/dist/2020.js')) as unknown as { default: new (o?: unknown) => { compile: (s: unknown) => (v: unknown) => boolean } };
+  it('bound violations fail BOTH the schema and the validator (shared constants)', () => {
     const check = new Ajv2020({ strict: false }).compile(CHALLENGE_PLAN_JSON_SCHEMA);
     const overDuration = { ...VALID_PLAN, durationDays: PLAN_DURATION_DAYS.max + 1 };
     const underBudget = { ...VALID_PLAN, dailyMinutesBudget: PLAN_DAILY_MINUTES.min - 1 };
-    for (const bad of [overDuration, underBudget]) {
+    // Each fixture must be refused for ITS bound — a 61-day plan with 3 days is
+    // also refused for coverage, which used to satisfy a bare `length > 0`.
+    for (const [bad, code] of [[overDuration, 'duration-implausible'], [underBudget, 'budget-implausible']] as const) {
       expect(check(bad)).toBe(false);
-      expect(validatePlan(bad as unknown as ChallengePlan).length).toBeGreaterThan(0);
+      expect(validatePlan(bad).map((d) => d.code)).toContain(code);
     }
   });
 
-  it('the schema evidence-policy enum IS the validator vocabulary const', async () => {
-    const { CHALLENGE_PLAN_JSON_SCHEMA, PLAN_EVIDENCE_POLICIES } = await import('../src/features/kicktodo-creator/planService.js');
-    const dayProps = (CHALLENGE_PLAN_JSON_SCHEMA as unknown as { properties: { days: { items: { properties: Record<string, { enum?: string[] }> } } } }).properties.days.items.properties;
+  it('the schema evidence-policy enum IS the validator vocabulary const', () => {
+    const dayProps = CHALLENGE_PLAN_JSON_SCHEMA.properties.days.items.properties;
     expect(dayProps.evidencePolicy.enum).toEqual([...PLAN_EVIDENCE_POLICIES]);
+    expect(dayProps.alternatives.items.properties.evidencePolicy.enum).toEqual([...PLAN_EVIDENCE_POLICIES]);
   });
 
   it('the node hands the LIVE surface schema to the model as responseSchema + prompt grounding', async () => {
-    const { CHALLENGE_PLAN_JSON_SCHEMA } = await import('../src/features/kicktodo-creator/planService.js');
     const run = await node();
     const seen: { responseSchema?: unknown; systemPrompt?: string } = {};
     const out = await run({
@@ -164,7 +183,7 @@ describe('plan schema SSoT parity (XCH-KT-1)', () => {
       features: {
         'kicktodo-creator': {
           ...realCreatorSurface,
-          planSchema: async () => ({ schema: CHALLENGE_PLAN_JSON_SCHEMA as unknown as Record<string, unknown> }),
+          planSchema: async () => ({ schema: CHALLENGE_PLAN_JSON_SCHEMA }),
         },
       },
       callAI: async (args: { responseSchema?: unknown; systemPrompt?: string }) => {
@@ -180,21 +199,89 @@ describe('plan schema SSoT parity (XCH-KT-1)', () => {
     expect(seen.systemPrompt).toContain('"evidencePolicy"');
   });
 
-  it('falls back to the pinned prose shape on an older host without planSchema', async () => {
+  // XCH-PG-1 — no hand-kept fallback shape: a host whose creator surface does
+  // not serve `planSchema` fails closed instead of prompting from a copy.
+  it('fails closed (capability_missing) on a host without planSchema — never prompts a copied shape', async () => {
     const run = await node();
-    const seen: { responseSchema?: { type?: string; properties?: unknown }; systemPrompt?: string } = {};
+    let called = false;
+    const olderHost = { frameResearch: realCreatorSurface.frameResearch, validatePlan: realCreatorSurface.validatePlan };
     const out = await run({
       inputs: { topic: 'sleep' },
-      features: { 'kicktodo-creator': realCreatorSurface },
-      callAI: async (args: { responseSchema?: { type?: string; properties?: unknown }; systemPrompt?: string }) => {
-        seen.responseSchema = args.responseSchema;
-        seen.systemPrompt = args.systemPrompt;
-        return { data: VALID_PLAN };
+      features: { 'kicktodo-creator': olderHost },
+      callAI: async () => { called = true; return { data: VALID_PLAN }; },
+    });
+    expect(out.status).toBe('failed');
+    expect(out.error?.code).toBe('capability_missing');
+    expect(called).toBe(false);
+  });
+
+  // XCH-PG-2 — the plan is authored against the intake the creator agreed,
+  // read from the candidate at call time (not guessed from the topic).
+  it('reads the candidate\'s agreed targets into the prompt', async () => {
+    const run = await node();
+    let user = '';
+    const out = await run({
+      inputs: { topic: 'sleep', candidateId: 'cand:1' },
+      features: {
+        'kicktodo-creator': {
+          ...realCreatorSurface,
+          getCandidate: async (args: { candidateId: string }) => ({
+            candidate: args.candidateId === 'cand:1'
+              ? { transformation: 'Fall asleep within 20 minutes', durationDaysTarget: 3, dailyMinutesTarget: 20 }
+              : null,
+          }),
+        },
       },
+      callAI: async (args: { messages?: Array<{ content?: string }> }) => { user = String(args.messages?.[0]?.content ?? ''); return { data: VALID_PLAN }; },
     });
     expect(out.status).toBe('success');
-    expect(seen.systemPrompt).toContain('EXACTLY these fields');
-    expect(seen.responseSchema?.type).toBe('object');
-    expect(seen.responseSchema?.properties).toBeUndefined(); // the stub, not a half-schema
+    expect(user).toContain('TARGETS the creator agreed');
+    expect(user).toContain('Fall asleep within 20 minutes');
+    expect(user).toContain('durationDays: 3');
+    expect(user).toContain('dailyMinutesBudget: 20');
+  });
+});
+
+// XCH-PGC-1 — a caller that passes no `evidenceClaims` (the standalone
+// plan-generation chain) gets the candidate's dossier claims read from the
+// creator surface, the same world `validatePlan` judges `claimRefs` against.
+// Sabotage: dropping the surface read leaves the prompt saying no evidence was
+// recorded while the claim below exists, and reds the first case.
+describe('plan-generate reads the dossier evidence when none is passed (XCH-PGC-1)', () => {
+  const DOSSIER_CLAIMS = [
+    { claimId: 'claim-light', text: 'Dim evening light advances melatonin onset.', supported: true, sources: [{ title: 'Light study', url: 'https://example.org/light', domain: 'example.org' }] },
+  ];
+
+  it('with a candidateId and no evidenceClaims the prompt carries the dossier claims from the surface', async () => {
+    const run = await node();
+    const asked: string[] = [];
+    const prompts: string[] = [];
+    const out = await run({
+      inputs: { topic: 'sleep', candidateId: 'cand-1' },
+      features: {
+        'kicktodo-creator': {
+          ...realCreatorSurface,
+          evidenceClaims: async (a: { candidateId: string }) => { asked.push(a.candidateId); return { claims: DOSSIER_CLAIMS }; },
+        },
+      },
+      callAI: async (req: { messages: Array<{ content: string }> }) => { prompts.push(req.messages[0]!.content); return { data: VALID_PLAN }; },
+    });
+    expect(out.status).toBe('success');
+    expect(asked).toEqual(['cand-1']);
+    expect(prompts[0]).toContain('[claim-light]');
+  });
+
+  it('evidenceClaims passed by the caller win; the surface is not read', async () => {
+    const run = await node();
+    let read = false;
+    const prompts: string[] = [];
+    await run({
+      inputs: { topic: 'sleep', candidateId: 'cand-1', evidenceClaims: [{ ...DOSSIER_CLAIMS[0], claimId: 'claim-passed' }] },
+      features: { 'kicktodo-creator': { ...realCreatorSurface, evidenceClaims: async () => { read = true; return { claims: DOSSIER_CLAIMS }; } } },
+      callAI: async (req: { messages: Array<{ content: string }> }) => { prompts.push(req.messages[0]!.content); return { data: VALID_PLAN }; },
+    });
+    expect(read).toBe(false);
+    expect(prompts[0]).toContain('[claim-passed]');
+    expect(prompts[0]).not.toContain('[claim-light]');
   });
 });

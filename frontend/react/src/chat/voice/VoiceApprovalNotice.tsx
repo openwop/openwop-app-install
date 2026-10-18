@@ -22,7 +22,14 @@ export function VoiceApprovalNotice({ toolName, callId, fcId }: { toolName: stri
   const resolve = async (approve: boolean): Promise<void> => {
     setState('busy');
     try {
-      setState(await resolveHeldVoiceApproval(callId, fcId, approve));
+      const outcome = await resolveHeldVoiceApproval(callId, fcId, approve);
+      if (outcome === 'forbidden') {
+        // VOX2UX-6 — still pending for the person who may answer it; keep the card.
+        setState('pending');
+        toast.error(t('voiceHeldApprovalForbidden'));
+        return;
+      }
+      setState(outcome);
     } catch (err) {
       setState('pending');
       toast.error(err instanceof Error ? err.message : String(err));

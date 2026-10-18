@@ -79,6 +79,10 @@ describe('KickBot rename continuity (ADR 0442 P6 / D4)', () => {
     const bot = await ensureKickBot(T);
     const challengeId = await publishedChallenge();
     const { enrollment } = await enroll({ tenantId: T, ownerSubject: PARTICIPANT, challengeId, challengeVersion: 1, timezone: 'UTC' });
+    // NOTE: no rename hook exists today, so the profile/agent/KB/job/conversation
+    // checks below are a TRIPWIRE against a future one (header D4); the roster
+    // identity checks are what the rename itself can break (probe
+    // w41g2-lc-rename-rolekey).
 
     const before = {
       roster: await getRosterEntry(T, KICKBOT_ROSTER_ID),
@@ -116,10 +120,11 @@ describe('KickBot rename continuity (ADR 0442 P6 / D4)', () => {
     // P5 convene tool still in the allowlist.
     expect(after.agent?.toolAllowlist).toEqual(before.agent?.toolAllowlist);
     expect(after.agent?.toolAllowlist).toContain('openwop:kicktodo.convene');
-    // Board + conversation + KB collection ids are deterministic (rename-safe).
-    expect(bot.boardId).toBe(kickbotBoardId(T));
+    // Board + conversation + KB collection survive the rename (read AFTER it).
+    expect(await getBoard(kickbotBoardId(T))).not.toBeNull();
     expect(after.kb?.collectionId).toBe(before.kb?.collectionId);
     expect(after.conv).not.toBeNull();
+    expect(after.conv).toEqual(before.conv);
     // P2 daily-loop attribution survives the rename.
     expect(after.job).not.toBeNull();
     expect(after.job?.rosterId).toBe(KICKBOT_ROSTER_ID);

@@ -43,8 +43,12 @@ describe('parent-brand cascade (P3)', () => {
     const eff = await resolveEffectiveBrandRules(T, child.id);
     expect(eff?.bannedPhrases.sort()).toEqual(['cheap', 'discount']);
 
-    // Cycle: parent pointing back at child must not loop.
-    await updateBrand(T, parent.id, { parentBrandId: child.id } as never);
+    // ADR 0891 D3 — a cycle is refused at write time…
+    await expect(updateBrand(T, parent.id, { parentBrandId: child.id } as never)).rejects.toMatchObject({ code: 'validation_error' });
+    // …and a legacy cyclic row (written before the check) still must not loop.
+    const { DurableCollection } = await import('../src/host/hostExtPersistence.js');
+    const store = new DurableCollection<Brand>('brand:brand', (b) => `${b.tenantId}::${b.id}`);
+    await store.put({ ...parent, parentBrandId: child.id });
     const cyc = await resolveEffectiveBrandRules(T, child.id);
     expect(cyc?.bannedPhrases.sort()).toEqual(['cheap', 'discount']);
   });

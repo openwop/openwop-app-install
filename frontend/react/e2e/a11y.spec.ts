@@ -1,13 +1,23 @@
 import { test, expect } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
 import { expiredExceptions, isExcepted } from './support/axeExceptions.js';
+import { serveFontsLocally } from './support/localFonts.js';
 
 /**
  * Live accessibility audit (GAP-ANALYSIS — live-app pass). Runs axe-core
  * against the app shell + key routes in BOTH themes. Routes that need a
  * backend render their error/empty states (still fully auditable for the
- * shell, nav, headers, notices, and any rendered controls). Serious/critical
- * violations fail the suite; we fix the app until each route is clean.
+ * shell, nav, headers, notices, and any rendered controls). EVERY in-scope
+ * violation fails the suite (ADR 0510 Phase 2, DSA-021); the only ship path is an
+ * owned, EXPIRING row in support/axeExceptions.ts, and an expired row fails every
+ * case. Scope is axe's `wcag2a` + `wcag2aa` tags — WCAG 2.0 A/AA; the 2.1/2.2-only
+ * rules (e.g. target-size) are NOT audited here (admin-governance.spec.ts carries
+ * the 44px floor for the admin rail).
+ *
+ * Breaks it (w53 probes, all witnessed): a dark-only muted-text token below AA
+ * (`--ink-3` in `:root.theme-dark`) reds every `(dark)` case; `aria-hidden` on the
+ * app shell's <main> (focusable content hidden from AT) reds every app-shell route;
+ * an expired exception row reds every case.
  */
 
 const ROUTES = [
@@ -33,6 +43,9 @@ for (const theme of ['light', 'dark'] as const) {
       // reports false contrast failures. The app honors prefers-reduced-motion,
       // so reduced-motion disables the animation and axe sees true colors.
       await page.emulateMedia({ reducedMotion: 'reduce' });
+      // Audit the faces users get, not the fallback stack: the config fails the
+      // Google Fonts hosts fast (E2E-ORDER-1), so serve the vendored copies.
+      await serveFontsLocally(page);
       await page.goto(route);
       // EITHER main, because the app has two shells. `/` is the PUBLIC root
       // (ADR 0487 split public root from `/dashboard`), so it renders
@@ -48,7 +61,15 @@ for (const theme of ['light', 'dark'] as const) {
       // capturing mid-fetch/mid-seed measures a transient render and reports
       // false contrast failures (e.g. a board column briefly on default colors).
       // NOTE: not networkidle — the live backend's SSE/polling never goes idle.
-      await page.waitForTimeout(1200);
+      // Web-first settle signals instead of a fixed 1.2 s sleep (w53): the app's
+      // loading regions mark themselves `aria-busy` (StateCard loading, AdminLayout,
+      // ~150 sites), so none may remain; and fonts must be loaded before axe
+      // measures text colour against layout. (A loading region WITHOUT aria-busy
+      // is not waited for — that is the residual this signal cannot see.)
+      // `/design-system` renders loading STATES as specimens inside its
+      // `[data-gallery]` sections — permanently busy by design, so excluded.
+      await expect(page.locator('[aria-busy="true"]:not([data-gallery] *)')).toHaveCount(0, { timeout: 15_000 });
+      await page.evaluate(async () => { await document.fonts.ready; });
       const results = await new AxeBuilder({ page })
         .withTags(['wcag2a', 'wcag2aa'])
         .analyze();

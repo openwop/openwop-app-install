@@ -19,7 +19,7 @@ import { useTranslation } from 'react-i18next';
 import { Modal } from '../../ui/Modal.js';
 import {
   getChannel, renameChannel, archiveChannel, addChannelMember, addChannelAgent, removeChannelMember, removeChannelAgent,
-  updateChannelDescription, leaveChannel, setChannelAgentPolicy, setChannelProject,
+  updateChannelDescription, leaveChannel, setChannelAgentPolicy, setChannelProject, setChannelPostingPolicy,
   type ChannelDetail,
 } from '../../client/channelsClient.js';
 import { Avatar } from '../../ui/Avatar.js';
@@ -27,6 +27,7 @@ import { MemberPicker, AgentPicker } from './MemberPickers.js';
 import { ChannelSchedulePanel } from './ChannelSchedulePanel.js';
 import { normalizeChannelName } from './channelName.js';
 import { listProjects, type Project } from '../../features/projects/projectsClient.js';
+import { channelErrorCopy } from './channelErrors.js';
 
 interface Props {
   channelId: string;
@@ -55,6 +56,9 @@ export function ChannelManageDialog({ channelId, onClose, onChanged, onArchived,
   // ADR 0852 D5 — the project this channel works on (owner picks from the
   // org-visible projects they can edit; the server is authoritative).
   const [projects, setProjects] = useState<Project[] | null>(null);
+  // A failed projects read is not "the bound project is one you cannot see"
+  // (ADR 0779 D7, the EMPTY-ON-FAIL near-miss): we never learned which projects exist.
+  const [projectsFailed, setProjectsFailed] = useState(false);
   const [projectId, setProjectId] = useState('');
 
   const reload = useCallback(async (): Promise<void> => {
@@ -73,10 +77,13 @@ export function ChannelManageDialog({ channelId, onClose, onChanged, onArchived,
   useEffect(() => { void reload(); }, [reload]);
   useEffect(() => {
     let live = true;
-    listProjects().then((ps) => { if (live) setProjects(ps); }).catch(() => { if (live) setProjects([]); });
+    listProjects().then((ps) => { if (live) setProjects(ps); }).catch(() => { if (live) { setProjects([]); setProjectsFailed(true); } });
     return () => { live = false; };
   }, []);
 
+  // ADR 0879 — the SERVER decides who manages: the owner, or a workspace admin who
+  // can see the channel, holding `workspace:write` (a demoted owner reads only).
+  const canManage = detail?.viewerCanManage ?? detail?.viewerIsOwner === true;
   const isOwner = detail?.viewerIsOwner === true;
   const roster = detail?.roster ?? [];
   const viewerRef = detail?.viewerSubjectRef ?? null;
@@ -88,8 +95,8 @@ export function ChannelManageDialog({ channelId, onClose, onChanged, onArchived,
       await op();
       await reload();
       await onChanged();
-    } catch {
-      setError(t('manageError'));
+    } catch (e) {
+      setError(channelErrorCopy(e, (k) => t(k), 'chat:manageError'));
     } finally {
       setBusy(false);
     }
@@ -128,8 +135,8 @@ export function ChannelManageDialog({ channelId, onClose, onChanged, onArchived,
         await onChanged();
         onArchived();
         onClose();
-      } catch {
-        setError(t('manageError'));
+      } catch (e) {
+        setError(channelErrorCopy(e, (k) => t(k), 'chat:manageError'));
         setBusy(false);
         setConfirmingArchive(false);
       }
@@ -175,7 +182,7 @@ export function ChannelManageDialog({ channelId, onClose, onChanged, onArchived,
       <h2 className="u-mt-0 u-fs-16">{t('channelDetailsTitle')}</h2>
 
       {/* Name + description — the owner edits; everyone else reads. */}
-      {isOwner ? (
+      {canManage ? (
         <>
           <label className="field">
             <span className="field-label">{t('renameChannelLabel')}</span>
@@ -208,16 +215,17 @@ export function ChannelManageDialog({ channelId, onClose, onChanged, onArchived,
       )}
 
       {/* ADR 0852 D5 — the bound project (owner edits; everyone else reads). */}
-      {isOwner ? (
+      {canManage ? (
         <>
           <label className="field">
             <span className="field-label">{t('channelProjectLabel')}</span>
-            <select value={projectId} onChange={(e) => setProjectId(e.target.value)} disabled={busy || projects === null}>
+            <select value={projectId} onChange={(e) => setProjectId(e.target.value)} disabled={busy || projects === null || projectsFailed}>
               <option value="">{t('channelProjectNone')}</option>
               {(projects ?? []).filter((p) => p.canWrite === true && (p.visibility ?? 'org') === 'org').map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-              {projectId && projects && !projects.some((p) => p.id === projectId) ? <option value={projectId}>{t('channelProjectUnavailable')}</option> : null}
+              {projectId && projects && !projects.some((p) => p.id === projectId) ? <option value={projectId}>{t(projectsFailed ? 'channelProjectUnknown' : 'channelProjectUnavailable')}</option> : null}
             </select>
           </label>
+          {projectsFailed ? <p className="u-fs-11 u-text-warning u-mt-0 u-mb-1">{t('channelProjectsLoadFailed')}</p> : null}
           <p className="muted u-fs-11 u-mt-0 u-mb-1">{t('channelProjectHint')}</p>
           <div className="u-flex u-justify-end u-mb-2">
             <Button variant="secondary" size="sm" disabled={busy || projectId === (detail?.channel?.boundProjectId ?? '')} onClick={() => void run(() => setChannelProject(channelId, projectId || null))}>{tc('save')}</Button>
@@ -226,7 +234,30 @@ export function ChannelManageDialog({ channelId, onClose, onChanged, onArchived,
       ) : detail?.channel?.boundProjectId ? (
         <p className="u-fs-12 u-mb-2">
           <span className="field-label">{t('channelProjectLabel')}: </span>
-          <span>{projects?.find((p) => p.id === detail.channel?.boundProjectId)?.name ?? t('channelProjectUnavailable')}</span>
+          <span>{projects?.find((p) => p.id === detail.channel?.boundProjectId)?.name ?? t(projectsFailed ? 'channelProjectUnknown' : 'channelProjectUnavailable')}</span>
+        </p>
+      ) : null}
+
+      {/* ADR 0879 D8 — who may post: everyone, or only managers (an announcement
+          channel). Managers edit; everyone else reads. */}
+      {canManage ? (
+        <label className="field">
+          <span className="field-label">{t('postingPolicyLabel')}</span>
+          <select
+            aria-describedby={`${channelId}-posting-hint`}
+            value={detail?.channel?.postingPolicy ?? 'everyone'}
+            disabled={busy || detail === null}
+            onChange={(e) => void run(() => setChannelPostingPolicy(channelId, e.target.value === 'managers' ? 'managers' : 'everyone'))}
+          >
+            <option value="everyone">{t('postingPolicyEveryone')}</option>
+            <option value="managers">{t('postingPolicyManagers')}</option>
+          </select>
+          <span id={`${channelId}-posting-hint`} className="muted u-fs-11">{t('postingPolicyHint')}</span>
+        </label>
+      ) : detail?.channel?.postingPolicy === 'managers' ? (
+        <p className="u-fs-12 u-mb-2">
+          <span className="field-label">{t('postingPolicyLabel')}: </span>
+          <span className="muted">{t('postingPolicyManagers')}</span>
         </p>
       ) : null}
 
@@ -255,7 +286,7 @@ export function ChannelManageDialog({ channelId, onClose, onChanged, onArchived,
               {/* ADR 0202 D1/D4 — the agent's reply policy, visible + owner-editable
                   (the invisible sole-agent auto-reply, now a real control). */}
               {isAgent && (
-                isOwner ? (
+                canManage ? (
                   <label className="u-flex u-items-center u-gap-1 u-fs-11 muted">
                     {t('responsePolicyLabel')}
                     <select
@@ -274,7 +305,7 @@ export function ChannelManageDialog({ channelId, onClose, onChanged, onArchived,
                 )
               )}
               {/* The owner can remove any non-owner member — a user or an agent. */}
-              {isOwner && m.role !== 'owner' ? (
+              {canManage && m.role !== 'owner' ? (
                 <Button
                   variant="secondary" size="sm"
                   disabled={busy}
@@ -289,7 +320,15 @@ export function ChannelManageDialog({ channelId, onClose, onChanged, onArchived,
         })}
       </ul>
 
-      {isOwner ? (
+      {confirmingLeave ? (
+        <div className="u-mt-3">
+          <p className="u-fs-12 u-mb-1">{t('leaveChannelConfirmBody')}</p>
+          <div className="u-flex u-gap-2 u-justify-end">
+            <Button variant="secondary" disabled={busy} onClick={() => setConfirmingLeave(false)}>{tc('cancel')}</Button>
+            <Button variant="primary" size="sm" disabled={busy} onClick={doLeave}>{t('leaveChannelCta')}</Button>
+          </div>
+        </div>
+      ) : canManage ? (
         <>
           {/* Add people + agents — the same pickers as the create flow (no raw IDs). */}
           <MemberPicker selectedIds={addUserIds} onChange={setAddUserIds} excludeUserIds={memberIdsInChannel} />
@@ -316,18 +355,14 @@ export function ChannelManageDialog({ channelId, onClose, onChanged, onArchived,
           ) : (
             <div className="u-flex u-justify-between u-items-center u-mt-3">
               <Button variant="secondary" size="sm" disabled={busy} onClick={() => setConfirmingArchive(true)}>{t('archiveChannelCta')}</Button>
+              {/* An admin managing a room it does not own can still leave it. */}
+              {!isOwner && viewerRef !== null && roster.some((r) => r.subjectRef === viewerRef) && (
+                <Button variant="secondary" size="sm" disabled={busy} onClick={() => setConfirmingLeave(true)}>{t('leaveChannelCta')}</Button>
+              )}
               <Button variant="secondary" onClick={onClose}>{tc('close')}</Button>
             </div>
           )}
         </>
-      ) : confirmingLeave ? (
-        <div className="u-mt-3">
-          <p className="u-fs-12 u-mb-1">{t('leaveChannelConfirmBody')}</p>
-          <div className="u-flex u-gap-2 u-justify-end">
-            <Button variant="secondary" disabled={busy} onClick={() => setConfirmingLeave(false)}>{tc('cancel')}</Button>
-            <Button variant="primary" size="sm" disabled={busy} onClick={doLeave}>{t('leaveChannelCta')}</Button>
-          </div>
-        </div>
       ) : (
         <div className="u-flex u-justify-between u-items-center u-mt-3">
           <Button variant="secondary" size="sm" disabled={busy} onClick={() => setConfirmingLeave(true)}>{t('leaveChannelCta')}</Button>

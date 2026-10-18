@@ -5,12 +5,11 @@
  * outputs recorded, replay-safe. Pure-JS, Node-20 stdlib only.
  */
 
-/** DEBT-3 — pack-local mirror of the providers.json SSoT default (the
- *  anthropic `recommended: true` model; src/providers/catalog.ts
- *  getDefaultModel). ctx.callAI REQUIRES an explicit model and standalone
- *  .mjs packs cannot import the catalog, so the default lives in this ONE
- *  greppable constant — the /refresh-model-catalog sweep updates it. */
-const DEFAULT_MODEL = 'claude-sonnet-4-6';
+/** ADR 0903 — no hard-coded vendor. A call passes the provider/model the node
+ *  was given (a chain param frozen at instantiation, or a node input) and leaves
+ *  the rest to the host: `ctx.callAI` fills a missing provider/model from the
+ *  run's choice (`configurable.ai`), else the workspace's active AI binding, else
+ *  the catalog default — resolved once at run start (host/runAiDefault.ts). */
 
 function ensureStudio(ctx) {
   const cs = ctx.features && ctx.features['campaign-orchestration'];
@@ -29,11 +28,20 @@ function str(v) { return typeof v === 'string' ? v : ''; }
  * Deterministic cross-asset consistency: each draft should echo the kernel's
  * headline keywords + primary CTA. Score = fraction of drafts that do. When no
  * drafts are supplied (the workflow path before a gather step), returns a neutral
- * report so the pipeline never blocks.
+ * report — unless the channel fan-out ran and every channel failed (see below).
  */
 export async function consistencyCheck(ctx) {
   const i = ctx.inputs ?? {};
   const briefId = str(i.briefId);
+  // ADR 0903 D8 — when the channel fan-out ran (its `dispatched` list reaches
+  // this node by edge) and not one channel completed, there is nothing to score
+  // and no campaign worth finalizing. Fail with the children's outcomes instead
+  // of the neutral "no drafts to compare" report, which let the run complete.
+  const dispatched = Array.isArray(i.dispatched) ? i.dispatched : null;
+  if (dispatched && dispatched.length > 0 && !dispatched.some((d) => d && d.childStatus === 'completed')) {
+    const outcomes = dispatched.map((d) => `${str(d && d.childWorkflowId) || 'unknown'}: ${str(d && d.childStatus) || 'unknown'}`).join(', ');
+    return { status: 'failed', error: { code: 'channels_all_failed', message: `Every channel run failed, so there is nothing to check or finalize (${outcomes}).` } };
+  }
   const cb = ctx.features && ctx.features['campaign-brief'];
 
   let kernel = null;
@@ -64,8 +72,8 @@ export async function consistencyCheck(ctx) {
   if (typeof ctx.callAI === 'function') {
     try {
       const ai = await ctx.callAI({
-        provider: str(i.provider) || 'anthropic',
-        model: str(i.model) || DEFAULT_MODEL,
+        provider: str(i.provider) || undefined,
+        model: str(i.model) || undefined,
         systemPrompt: 'You judge cross-channel campaign consistency. Given the messaging kernel and the channel drafts, score 0-100 how consistently the drafts carry the SAME core message, promise, and call to action (not word-for-word — semantically). Reply with strict JSON only.',
         messages: [{ role: 'user', content: `KERNEL:\n${JSON.stringify(kernel)}\n\nDRAFTS:\n${JSON.stringify(drafts).slice(0, 20000)}` }],
         responseSchema: { type: 'object', additionalProperties: false, required: ['score'], properties: { score: { type: 'number' }, rationale: { type: 'string' } } },

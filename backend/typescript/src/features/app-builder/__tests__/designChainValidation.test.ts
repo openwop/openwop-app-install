@@ -5,6 +5,12 @@
  * save. The gate now lives where the workflow-author precedent puts it: a
  * `validate` op on the feature surface, called by the pack's render/deepen
  * nodes when the surface is present.
+ *
+ * Since #4756 (ABR-RENDER-1) render CARRIES the document and the gate judges
+ * every value; the per-facet matrix lives in renderPreservesFacets.test.ts.
+ * Sabotage witnesses (grade-tests w36): surface.validate always ok, the
+ * render gate disabled, the `unvalidated` marker replaced, and deepen's
+ * revert loop removed — each reds its case.
  */
 import { describe, expect, it } from 'vitest';
 import { buildAppBuilderSurface } from '../surface.js';
@@ -14,7 +20,7 @@ import { render, deepen } from '../../../../../../packs/feature.app-builder.node
 
 registerAppBuilderComponents();
 
-const surface = buildAppBuilderSurface({ tenantId: 't1' } as never);
+const surface = buildAppBuilderSurface({ tenantId: 't1' });
 
 const validApp = {
   name: 'Parity',
@@ -31,7 +37,7 @@ describe('app-builder surface.validate (XCH-APPB-3)', () => {
     const bad = { ...validApp, screens: [{ ...validApp.screens[0], components: [{ type: 'holo-deck', props: {} }] }] };
     const v = await (surface.validate as (a: Record<string, unknown>) => Promise<{ ok: boolean; errors: unknown[] }>)({ app: bad });
     expect(v.ok).toBe(false);
-    expect(v.errors.length).toBeGreaterThan(0);
+    expect(v.errors[0]).toMatchObject({ code: 'unknown_component_type', path: 'screens[0].components[0]' });
   });
 });
 
@@ -40,13 +46,18 @@ describe('render node gates through the surface (XCH-APPB-3)', () => {
 
   it('fails typed on an out-of-catalog type instead of emitting the artifact', async () => {
     const app = { name: 'Bad', screens: [{ id: 's1', name: 'S1', components: [{ type: 'holo-deck', props: {} }] }] };
-    await expect(render({ inputs: { app }, features })).rejects.toMatchObject({ code: 'app_doc_invalid' });
+    await expect(render({ inputs: { app }, features })).rejects.toMatchObject({
+      code: 'app_doc_invalid',
+      details: { errors: [expect.objectContaining({ code: 'unknown_component_type' })] },
+    });
   });
 
   it('passes a conformant doc and reports the validation verdict', async () => {
     const r = await render({ inputs: { app: validApp }, features });
     expect(r.status).toBe('success');
     expect(r.outputs.validation).toMatchObject({ ok: true });
+    // ABR-RENDER-1 (#4756): a valid document passes through the gate unchanged.
+    expect(r.outputs.artifact.payload).toEqual(validApp);
   });
 
   it('stays normalize-only (honestly unvalidated) on hosts without the surface', async () => {

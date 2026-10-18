@@ -1,0 +1,30 @@
+{
+  "name": "feature.evals.nodes",
+  "version": "1.1.0",
+  "kind": "node",
+  "description": "Agent eval node pack (ADR 0889 WF-EV-11) over the `ctx.features.evals` surface. `run-suite` starts an RFC 0081 eval run of a suite against an agent, waits for it to finish, and outputs the scorecard plus one gate boolean (`ok` = passed and not regressed), so a chain can branch on a regression inside the app instead of only in the CLI. role:\"side-effect\": the run spends model calls, so a replay fork is served the recorded outcome and never starts a second eval run. It cancels its eval run when the workflow run is cancelled or its wait times out. v1.1.0: it passes its nodeId, and the surface starts the eval run once per (workflow run, node), so a re-dispatched node gets the same eval run back. Needs a signed-in person behind the run and the `evals` feature.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["feature", "evals", "agents", "regression"],
+  "engines": { "openwop": ">=1.0.0 <3.0.0" },
+  "runtime": {
+    "language": "javascript",
+    "format": "esm",
+    "entry": "./index.mjs",
+    "minRuntimeVersion": "node>=20"
+  },
+  "nodes": [
+    {
+      "typeId": "feature.evals.nodes.run-suite",
+      "version": "1.0.0",
+      "label": "Agent Evals: Run Suite",
+      "description": "Runs an agent eval suite (RFC 0081 / RFC 0244) via ctx.features.evals and waits for the scorecard. Inputs: { suiteRef, agentId, baselineRunId?, timeoutMs? }. Output: { evalRunId, status, passed, regressed, ok, aggregateScore, passedCount, taskCount, verdict }. A refused start, an eval run that ends failed or cancelled, and a wait that times out are typed failures, never a pass.",
+      "category": "integration",
+      "x-paletteCategory": "ai",
+      "role": "side-effect",
+      "capabilities": ["side-effectful"],
+      "inputSchemaRef": "schemas/run-suite.input.json",
+      "outputSchemaRef": "schemas/run-suite.output.json"
+    }
+  ]
+}

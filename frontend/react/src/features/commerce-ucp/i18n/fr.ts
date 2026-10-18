@@ -22,6 +22,7 @@ export const messages = {
   copied: 'Copié dans le presse-papiers',
   clientsTitle: 'Clients agents',
   clientsHint: 'Identifiants client que les agents externes utilisent pour s’authentifier.',
+  liveRefusedNotice: 'Cet espace de travail accepte des paiements réels : les agents peuvent parcourir votre catalogue et préparer des paniers, mais la commande et le paiement sont refusés tant que les mandats AP2 ne peuvent pas être vérifiés.',
   newClient: 'Nouveau client',
   noClients: 'Aucun client agent pour l’instant.',
   noClientsBody: 'Provisionnez un client pour qu’un agent IA externe puisse s’authentifier et acheter dans votre catalogue.',

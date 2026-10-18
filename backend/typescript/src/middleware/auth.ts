@@ -606,8 +606,59 @@ export function carriesRunStreamToken(req: ExpressRequest): boolean {
 // ever handed an unversioned path (ADR 0812 P3c).
 export function isPublicPath(path: string): boolean {
   // The `p !== '/'` guard keeps a `/` prefix from matching every path via `'//'`.
-  return PUBLIC_PATH_PREFIXES.some((p) => path === p || (p !== '/' && path.startsWith(p + '/')));
+  if (PUBLIC_PATH_PREFIXES.some((p) => path === p || (p !== '/' && path.startsWith(p + '/')))) return true;
+  // ADR 0915 — a feature path is public only on a CANONICAL path: no dot
+  // segment and no percent-escape anywhere. `startsWith` on an un-normalized
+  // path would let `<prefix>/..%2F..%2Fother` count as public, and the /api
+  // rewrite decodes `%2F` (measured), so a proxy that normalizes after this
+  // check could route it to a session-only handler.
+  if (FEATURE_PUBLIC_PATHS.size > 0 && !/(?:^|\/)\.{1,2}(?:\/|$)|%/.test(path)) {
+    for (const p of FEATURE_PUBLIC_PATHS) if (path === p || path.startsWith(p + '/')) return true;
+  }
+  return false;
 }
+
+/**
+ * ADR 0915 (Book AI P4) — public paths a FEATURE declares
+ * (`BackendFeature.publicPaths`), merged into `isPublicPath` at boot.
+ *
+ * The closed list above belongs to this file, so a feature with its own
+ * capability-token surface (Book AI's beta-reader links) could only borrow
+ * ANOTHER feature's public prefix — and that feature's security boundary. A
+ * declared path is confined to the declaring feature's own namespace:
+ *
+ *   - it must sit strictly BELOW `/host/openwop-app/<featureId>/` (one or more
+ *     lowercase segments), so a feature can never open its whole namespace,
+ *     another feature's namespace, or anything outside the vendor tree;
+ *   - no wildcards, no trailing slash, no `..`.
+ *
+ * A violation throws at boot, never at request time. Being public only skips
+ * session resolution: the owning route MUST authenticate its own capability
+ * (the token IS the credential, hashed at rest), answer a uniform 404 for an
+ * unknown or revoked one (no existence leak), and it still rides the global
+ * per-IP limiter — the ADR 0013 share-link precedent. The same predicate feeds
+ * the CSRF exemption, which is correct for a cookie-less route.
+ */
+const FEATURE_PUBLIC_PATHS = new Set<string>();
+const FEATURE_ID = /^[a-z][a-z0-9-]{0,63}$/;
+const SEGMENTS = /^(?:\/[a-z0-9][a-z0-9-]{0,63}){1,6}$/;
+
+export function registerFeaturePublicPaths(featureId: string, paths: readonly string[]): void {
+  if (!FEATURE_ID.test(featureId)) throw new Error(`feature public paths: invalid feature id ${JSON.stringify(featureId)}`);
+  const root = `/host/openwop-app/${featureId}`;
+  for (const p of paths) {
+    if (typeof p !== 'string' || !p.startsWith(root + '/') || !SEGMENTS.test(p.slice(root.length))) {
+      throw new Error(`feature ${featureId}: public path ${JSON.stringify(p)} must be strictly below ${root}/ (lowercase segments, no wildcard, no trailing slash)`);
+    }
+    FEATURE_PUBLIC_PATHS.add(p);
+  }
+}
+
+/** The feature-declared public paths, for the boot log and the ratchet. */
+export function featurePublicPaths(): readonly string[] { return [...FEATURE_PUBLIC_PATHS].sort(); }
+
+/** Test seam. */
+export function resetFeaturePublicPathsForTests(): void { FEATURE_PUBLIC_PATHS.clear(); }
 
 /**
  * ADR 0748 — `GET|HEAD /v1/content/pages/<slug>`, and nothing else: exact method,
@@ -988,6 +1039,43 @@ async function assertPersonalSubjectLive(
   }
   if (opts.session) refuseRevokedFamily(opts.session, state.revokedFamilies);
   return { epoch: state.sessionEpoch };
+}
+
+/**
+ * ADR 0893 VOX2-F3 — the OIDC bearer lane's liveness, re-asked by a caller that
+ * holds no request (the voice sideband between tool calls). The bearer lane
+ * authenticates every request from the IdP token, checks the durable row and
+ * remembers the epoch it validated (`req.sessionEpoch`); a long-lived call
+ * re-asks the same row instead. Bound (`userId`): the keyed row. Unbound: the
+ * read-only personal-tenant row. Throws the same typed refusals as the request
+ * lane; an epoch that moved since connect is `session_revoked` ("sign out
+ * everywhere" covers a live call too).
+ */
+export async function assertBearerSubjectLive(b: { personalTenant: string; subject: string; userId?: string; epoch?: number }): Promise<void> {
+  if (b.userId) {
+    let state: Awaited<ReturnType<typeof resolveSessionSubject>>;
+    try {
+      state = await resolveSessionSubject(b.userId);
+    } catch (err: unknown) {
+      throw mapAuthorityFault(err);
+    }
+    if (!state) throw new OpenwopError('account_erased', 'This account no longer exists. Sign in again.', 401, {});
+    if (state.status !== 'active') throw new OpenwopError('account_disabled', 'This account is disabled.', 401, {});
+    if (b.epoch !== undefined && b.epoch !== state.sessionEpoch) {
+      throw new OpenwopError('session_revoked', 'This session was signed out. Sign in again.', 401, {});
+    }
+    return;
+  }
+  if (!b.personalTenant.startsWith('user:')) return;
+  const live = await assertPersonalSubjectLive(b.personalTenant, b.subject);
+  if (live && b.epoch !== undefined && live.epoch !== b.epoch) {
+    throw new OpenwopError('session_revoked', 'This session was signed out. Sign in again.', 401, {});
+  }
+}
+
+/** True for the three DEFINITIVE liveness refusals (not a transient 503). */
+export function isSessionRefusal(err: unknown): boolean {
+  return err instanceof OpenwopError && SESSION_REFUSAL_CODES.has(err.code);
 }
 
 /** D6 — a thrown authority read fails THIS request as a typed 503 (never a grant,

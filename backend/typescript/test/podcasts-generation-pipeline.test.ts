@@ -15,8 +15,15 @@
  *
  * These drive the REAL pack module against the REAL surface (the `adr0411-reel-node`
  * precedent), so they redden on either the service-side or the node-side guard.
+ *
+ * Sabotage witnesses (w21 g2): `recordEpisodeResult`'s keep-table / merge-line clips
+ * guards, its no-op early return and its `dropped` report; `mix`'s early return, its
+ * partial-acceptance check and its trust in the store's report; the outline repair; an
+ * empty assistant echo in either repair (H2); `failEpisode`'s write; speaker
+ * normalization (and a fuzzy fallback); synthesize's voiceless / zero-turn rule; the
+ * M1 catch (scoped vs blanket); the missing-episode return; `clearEpisodeError`.
  */
-import { beforeAll, describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { selectContent, outline, transcript, synthesize, mix } from '../../../packs/feature.podcasts.nodes/index.mjs';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { openStorage } from '../src/storage/index.js';
@@ -24,6 +31,7 @@ import {
   createEpisode, getEpisode, recordEpisodeResult, clearEpisodeError, type EpisodeClip,
 } from '../src/features/podcasts/podcastsService.js';
 import { buildPodcastsSurface } from '../src/features/podcasts/surface.js';
+import type { BundleScope } from '../src/host/inMemorySurfaces.js';
 
 const TENANT = 'tenant-podc1';
 const ORG = 'org-podc1';
@@ -37,8 +45,8 @@ const CLIPS: EpisodeClip[] = [
   { speaker: 'Guest', voiceId: 'v-guest', url: '/media/clip-two', mimeType: 'audio/mpeg' },
 ];
 
-const surface = (): ReturnType<typeof buildPodcastsSurface> =>
-  buildPodcastsSurface({ tenantId: TENANT } as Parameters<typeof buildPodcastsSurface>[0]);
+const SCOPE: BundleScope = { tenantId: TENANT };
+const surface = (): ReturnType<typeof buildPodcastsSurface> => buildPodcastsSurface(SCOPE);
 
 const runMix = (episodeId: string, clips: unknown[]): ReturnType<typeof mix> =>
   mix({ inputs: { episodeId, clips }, features: { podcasts: surface() } });
@@ -72,6 +80,20 @@ describe('PODC-1 — recordEpisodeResult merges, and an EMPTY clips list never c
     expect(after!.clips.map((c) => c.url)).toEqual(['/media/clip-one', '/media/clip-two']);
   });
 
+  it('an empty `clips` BESIDE a kept field still never clears (the merge-line guard)', async () => {
+    // The empty-ONLY patch above returns before the merge (nothing is applied), so it
+    // cannot witness the merge's own length check. Here another field IS applied, the
+    // row IS written, and only the merge guard keeps `[]` from replacing the clips.
+    const episodeId = await seedEpisodeWithClips('empty beside kept');
+    const res = await recordEpisodeResult(TENANT, episodeId, { clips: [], transcriptDocRef: 'doc-x' });
+    expect(res.recorded).toBe(true);
+    expect(res.applied).toEqual(['transcriptDocRef']);
+    expect(res.dropped).toEqual(['clips']);
+    const after = await getEpisode(TENANT, episodeId);
+    expect(after!.transcriptDocRef, 'floor: the write really landed').toBe('doc-x');
+    expect(after!.clips.map((c) => c.url)).toEqual(['/media/clip-one', '/media/clip-two']);
+  });
+
   it('a NON-empty `clips` patch still replaces the list (the guard is not a freeze)', async () => {
     const episodeId = await seedEpisodeWithClips('non-empty patch');
     const replacement: EpisodeClip[] = [{ speaker: 'Host', voiceId: 'v-host', url: '/media/clip-three', mimeType: 'audio/mpeg' }];
@@ -89,9 +111,15 @@ describe('PODC-1 — recordEpisodeResult merges, and an EMPTY clips list never c
   it('`M2` — a fully-dropped patch does not even bump `updatedAt`', async () => {
     const episodeId = await seedEpisodeWithClips('no-op timestamp');
     const before = (await getEpisode(TENANT, episodeId))!.updatedAt;
-    await new Promise((r) => setTimeout(r, 2));
-    await recordEpisodeResult(TENANT, episodeId, { clips: [], error: '' });
-    expect((await getEpisode(TENANT, episodeId))!.updatedAt, 'the episode did not change').toBe(before);
+    // A fixed clock a minute later, so any bump is visible (no real sleep).
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(Date.parse(before) + 60_000);
+      await recordEpisodeResult(TENANT, episodeId, { clips: [], error: '' });
+      expect((await getEpisode(TENANT, episodeId))!.updatedAt, 'the episode did not change').toBe(before);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -99,7 +127,11 @@ describe('PODC-1 — the `mix` NODE, driven through the real ctx.features.podcas
   it('a run that synthesized NO clips leaves the recorded clips AND the audio intact', async () => {
     const episodeId = await seedEpisodeWithClips('retry that produced nothing');
     // PODC-2: a mix with nothing to mix is a TYPED FAILURE (it used to return
-    // `status:'success'` with `clipCount: 0`, so the run reported `done`).
+    // `status:'success'` with `clipCount: 0`, so the run reported `done`). The CODE is
+    // the node-side early return's witness: without it the write is attempted, the
+    // service drops it, and the node fails `podcast_mix_clips_rejected` instead. (A
+    // separate "NODE-side early return" case asserting only `status` + `outputs` was
+    // cut in /grade-tests w21 — since `M2` it stayed green with the return removed.)
     const out = await runMix(episodeId, []);
     expect(out.status).toBe('failed');
     expect(out.error?.code).toBe('podcast_mix_no_clips');
@@ -110,17 +142,6 @@ describe('PODC-1 — the `mix` NODE, driven through the real ctx.features.podcas
     expect(after!.clips).toHaveLength(2);
     expect(after!.clips.map((c) => c.url)).toEqual(['/media/clip-one', '/media/clip-two']);
     expect(after!.audioMediaRef).toBe('/media/episode-v1');
-  });
-
-  it('the NODE-side early return is independently load-bearing', async () => {
-    // Node-only reachable: with `clips: []` the node returns BEFORE the write, so the
-    // erasing call is never attempted. Reverting only the node's early return still
-    // reddens here (the returned status flips) while the service guard silently
-    // absorbs the write — which is exactly the hiding this assertion exists to stop.
-    const episodeId = await seedEpisodeWithClips('early return');
-    const out = await runMix(episodeId, []);
-    expect(out.status).toBe('failed');
-    expect(out.outputs).toBeUndefined();
   });
 
   it('malformed clips (dropped by the surface\'s per-clip validation) never clear — and never report success', async () => {

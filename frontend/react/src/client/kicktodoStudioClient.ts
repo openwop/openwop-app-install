@@ -82,8 +82,29 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
     ...fetchOpts(init),
     headers: { 'content-type': 'application/json', ...authedHeaders(), ...(init?.headers ?? {}) },
   });
-  if (!res.ok) throw new Error(`studio request failed: ${res.status}`);
+  if (!res.ok) throw new StudioRequestError(res.status);
   return (await res.json()) as T;
+}
+
+/** A non-2xx Studio response. Carries the status so a read can tell "the server
+ *  has nothing here" (404 → `null`, an honest empty state) from "the read failed"
+ *  (anything else → thrown, so the page can say the section is unavailable rather
+ *  than claim it is empty — DESIGN.md §4.6). */
+export class StudioRequestError extends Error {
+  constructor(readonly status: number) {
+    super(`studio request failed: ${status}`);
+    this.name = 'StudioRequestError';
+  }
+}
+
+/** 404 → `null`; every other failure rethrows. */
+async function nullOn404<T>(read: Promise<T>): Promise<T | null> {
+  try {
+    return await read;
+  } catch (e) {
+    if (e instanceof StudioRequestError && e.status === 404) return null;
+    throw e;
+  }
 }
 
 export async function listCandidates(): Promise<FactoryCandidate[]> {
@@ -135,11 +156,7 @@ export async function getChallengeAuthor(): Promise<ChallengeAuthorProfile | nul
 /** The candidate DETAIL read (ADR 0437 UX-2.2) — the full record incl. its research
  *  dossier. Backs the candidate workspace + provenance spine. */
 export async function getCandidate(candidateId: string): Promise<FactoryCandidate | null> {
-  try {
-    return await req<FactoryCandidate>(`/candidates/${encodeURIComponent(candidateId)}`);
-  } catch {
-    return null;
-  }
+  return nullOn404(req<FactoryCandidate>(`/candidates/${encodeURIComponent(candidateId)}`));
 }
 
 /** ADR 0458 §2.3 — the challenge-outline canvas binding. */
@@ -215,11 +232,7 @@ export async function applyOutline(candidateId: string): Promise<OutlineApplyRes
 }
 
 export async function getPublication(candidateId: string): Promise<PublicationState | null> {
-  try {
-    return await req<PublicationState>(`/candidates/${encodeURIComponent(candidateId)}/publication`);
-  } catch {
-    return null;
-  }
+  return nullOn404(req<PublicationState>(`/candidates/${encodeURIComponent(candidateId)}/publication`));
 }
 
 // ── ADR 0460 Phase 1 — the honesty reads (display-only; re-derived server-side) ──
@@ -266,31 +279,21 @@ export interface LessonDayStatus {
  *  path enforces. 404 (candidate absent) → null → the workspace shows the honest
  *  "not run" state, never a painted all-green. */
 export async function getGateStatus(candidateId: string): Promise<GateRow[] | null> {
-  try {
-    return (await req<{ gates: GateRow[] }>(`/candidates/${encodeURIComponent(candidateId)}/gates`)).gates;
-  } catch {
-    return null;
-  }
+  const body = await nullOn404(req<{ gates: GateRow[] }>(`/candidates/${encodeURIComponent(candidateId)}/gates`));
+  return body ? body.gates : null;
 }
 
 /** The durable three-persona simulation record, verbatim. 404 (not simulated) →
  *  null → the workspace shows "not simulated", never a fabricated verdict. */
 export async function getSimulationVerdicts(candidateId: string): Promise<SimulationVerdicts | null> {
-  try {
-    return await req<SimulationVerdicts>(`/candidates/${encodeURIComponent(candidateId)}/simulation`);
-  } catch {
-    return null;
-  }
+  return nullOn404(req<SimulationVerdicts>(`/candidates/${encodeURIComponent(candidateId)}/simulation`));
 }
 
 /** Per-day build status. 404 (candidate absent) → null; an empty array = a
  *  candidate with no plan revision yet (honestly distinct from "no candidate"). */
 export async function getLessonStatus(candidateId: string): Promise<LessonDayStatus[] | null> {
-  try {
-    return (await req<{ lessons: LessonDayStatus[] }>(`/candidates/${encodeURIComponent(candidateId)}/lessons`)).lessons;
-  } catch {
-    return null;
-  }
+  const body = await nullOn404(req<{ lessons: LessonDayStatus[] }>(`/candidates/${encodeURIComponent(candidateId)}/lessons`));
+  return body ? body.lessons : null;
 }
 
 /** The operator kill switch (ADR 0415 P4 / 0437 UX-2.6): retire the published
@@ -306,11 +309,7 @@ export async function killCandidate(candidateId: string, reason: string): Promis
 /** Latest post-publication source-health report, if any has been run (ADR 0415 P4).
  *  404 (no report yet) resolves to null — the workspace shows the honest "not run". */
 export async function getMonitorReport(candidateId: string): Promise<MonitorReport | null> {
-  try {
-    return await req<MonitorReport>(`/candidates/${encodeURIComponent(candidateId)}/monitor`);
-  } catch {
-    return null;
-  }
+  return nullOn404(req<MonitorReport>(`/candidates/${encodeURIComponent(candidateId)}/monitor`));
 }
 
 // ADR 0458 P4 — createCandidate/submitPublication/completePublication client fns

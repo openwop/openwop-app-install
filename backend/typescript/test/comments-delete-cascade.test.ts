@@ -38,6 +38,8 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
+import { saveConfig } from '../src/host/featureToggles/service.js';
+import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { createPage, deletePage, __resetCms } from '../src/features/cms/cmsService.js';
 import { createCollection, deleteCollection } from '../src/features/kb/kbService.js';
 import { createList, submitIdea, deleteIdea, deleteList } from '../src/features/priority-matrix/priorityMatrixService.js';
@@ -59,6 +61,8 @@ beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
+  // ADR 0892: these planning surfaces are opt-in; the fixtures below need them on.
+  for (const id of ['priority-matrix', 'strategy']) { const d = getToggleDefault(id); if (d) await saveConfig({ ...d, status: 'on' }, 'test'); }
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => res()); });
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });

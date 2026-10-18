@@ -10,6 +10,11 @@
  *    fieldsets of work.
  *  - BR-G3: the channel select cannot author a duplicate rule, because scoring
  *    resolves channels first-match-wins and the duplicate would be inert.
+ *
+ * Sabotage-witnessed (w52): `error={editorError}` → `null` (BR-G1 cases red);
+ * closing the dialog in the save catch (stays-open red); swapping the full /
+ * partial lock copy and showing it for `none` (BR-G2); offering used channels or
+ * dropping the row's own channel (BR-G3, both selects checked).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, waitFor, fireEvent, act, within } from '@testing-library/react';
@@ -31,19 +36,22 @@ vi.mock('../brandClient.js', async (orig) => {
   };
 });
 
+// ADR 0891 BR2UX-1 — a partial lock now lists the org's members to pick editors from.
+vi.mock('../../../orgs/orgMembers.js', () => ({ loadOrgMembers: vi.fn(async () => []) }));
+
 import { BrandPage } from '../BrandPage.js';
 
 function brand(over: Partial<Brand> = {}): Brand {
   return {
-    id: 'brand-1', orgId: 'org-1', name: 'Acme Brand', description: 'The house voice', status: 'active',
-    voiceProfile: { voice: 'warm', formalityLevel: 3, guidelines: '' },
+    id: 'brand-1', tenantId: 't1', orgId: 'org-1', name: 'Acme Brand', description: 'The house voice', status: 'active',
+    voiceProfile: { voice: 'warm', formalityLevel: 3, guidelines: '', samplePhrases: [], avoidPhrases: [], toneRegisters: [] },
     keyPhrases: { approvedTaglines: [], bannedPhrases: [], valuePropositions: [], productDescriptors: [] },
-    positioning: { tagline: '', elevatorPitch: '' },
+    positioning: { tagline: '', elevatorPitch: '', differentiators: [], competitiveFrame: '' },
     channelVoiceRules: [],
     governance: { lockLevel: 'none', allowedEditors: [], requireApproval: false },
     createdBy: 'user:someone-else', createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
     ...over,
-  } as Brand;
+  };
 }
 
 /** Open the editor for the first (only) brand in the list. */
@@ -79,13 +87,16 @@ describe('brand editor — governance + failure visibility', () => {
   it('BR-G1: the dialog stays open after a rejected save, so the work is not lost', async () => {
     updateBrand.mockRejectedValue(new Error('nope'));
     await openEditor();
+    // Make some work to lose: an edit that exists only in the dialog's state.
+    fireEvent.change(screen.getByLabelText(/^Brand name/), { target: { value: 'Acme Brand v2' } });
     fireEvent.click(screen.getByRole('button', { name: /^save$/i }));
     const dialog = await screen.findByRole('dialog');
     await waitFor(() => expect(within(dialog).getByText('nope')).toBeTruthy());
     // Still open, with the form state intact — a rejected save must not discard
     // the work. (The parent page also holds the message so it survives a
     // dismissal, which is why this scopes the query to the dialog.)
-    expect(screen.getByRole('dialog')).toBeTruthy();
+    expect(screen.getByRole('dialog')).toBe(dialog);
+    expect(within(dialog).getByDisplayValue('Acme Brand v2')).toBeTruthy();
   });
 
   it('BR-G2: a fully-locked brand states who can save BEFORE the form', async () => {
@@ -115,13 +126,17 @@ describe('brand editor — governance + failure visibility', () => {
       ],
     })]);
     await openEditor();
-    const selects = screen.getAllByLabelText(/channel/i) as HTMLSelectElement[];
-    const first = selects[0]!;
-    const offered = Array.from(first.options).map((o) => o.value);
+    const selects = screen.getAllByRole('combobox', { name: 'Channel' });
+    expect(selects).toHaveLength(2);
+    const offered = (i: number): string[] =>
+      within(selects[i]!).getAllByRole('option').map((o) => o.getAttribute('value') ?? '');
     // Its own channel stays selectable …
-    expect(offered).toContain('email_sequence');
+    expect(offered(0)).toContain('email_sequence');
     // … but the one the OTHER rule holds is gone. Scoring is first-match-wins,
     // so a duplicate would be authored-but-inert.
-    expect(offered).not.toContain('social_posts');
+    expect(offered(0)).not.toContain('social_posts');
+    // Both directions: the second rule is held to the same rule.
+    expect(offered(1)).toContain('social_posts');
+    expect(offered(1)).not.toContain('email_sequence');
   });
 });

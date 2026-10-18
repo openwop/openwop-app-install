@@ -16,6 +16,13 @@
  * Both arms asserted throughout: an unknown deployment discloses the caveat, and
  * a genuinely-clean install still renders the plain enterprise text with no
  * spurious warning.
+ *
+ * Every absence is asserted AFTER the read settles. The `<h1>` also renders in
+ * the `unresolved` (loading) branch, so waiting for it proves nothing: until
+ * /grade-tests w50 the CLEAN and heading cases asserted on the loading skeleton
+ * and stayed green with clean → 'unknown' (probe `pv-clean`) and with an
+ * `unknown` arm that renders nothing (`pv-heading`). The settle signal is the
+ * enterprise lede, which only the resolved non-demo arm renders.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup, screen } from '@testing-library/react';
@@ -26,7 +33,10 @@ vi.mock('../client/runsClient.js', async (importOriginal) => {
   return { ...orig, getCapabilities: caps.getCapabilities };
 });
 
-import { PrivacyPage } from '../PrivacyPage.js';
+/** Rendered only by the RESOLVED non-demo arm (literal en copy: an expectation
+ *  imported from the catalog would move with it). */
+const ENTERPRISE_LEDE = /How this workspace handles your data\./;
+const CAVEAT = /couldn't confirm which deployment/i;
 
 /** demoMode caches module-level, so each case needs a fresh module graph. */
 async function freshRender(): Promise<void> {
@@ -45,7 +55,7 @@ describe('UX-PRIV-1 — an unread deployment flag never silently picks a disclos
   it('UNKNOWN: a failed capabilities read discloses that the deployment is unconfirmed', async () => {
     caps.getCapabilities.mockRejectedValue(new Error('caps_500'));
     await freshRender();
-    expect(await screen.findByText(/couldn't confirm which deployment/i)).toBeTruthy();
+    expect(await screen.findByText(CAVEAT)).toBeTruthy();
   });
 
   it('CLEAN: a real non-demo answer renders the plain text with NO caveat', async () => {
@@ -53,8 +63,10 @@ describe('UX-PRIV-1 — an unread deployment flag never silently picks a disclos
     // putting a permanent scary notice on every white-label install.
     caps.getCapabilities.mockResolvedValue({ demoMode: false });
     await freshRender();
-    await screen.findByRole('heading', { level: 1 });
-    expect(screen.queryByText(/couldn't confirm which deployment/i)).toBeNull();
+    // Settled: the resolved arm is on screen and the loading status is gone.
+    expect(await screen.findByText(ENTERPRISE_LEDE)).toBeTruthy();
+    expect(screen.queryByRole('status')).toBeNull();
+    expect(screen.queryByText(CAVEAT)).toBeNull();
   });
 
   it('DEMO: a real demo answer renders the anon-cookie disclosure', async () => {
@@ -62,17 +74,17 @@ describe('UX-PRIV-1 — an unread deployment flag never silently picks a disclos
     await freshRender();
     // The 24h session cookie block is the demo-only disclosure.
     expect(await screen.findByText(/openwop\.session/i)).toBeTruthy();
-    expect(screen.queryByText(/couldn't confirm which deployment/i)).toBeNull();
+    expect(screen.queryByText(CAVEAT)).toBeNull();
   });
 
   it('the page always renders its heading, whatever the flag did', async () => {
     // A disclosure that renders nothing is worse than one that renders a caveat.
     caps.getCapabilities.mockRejectedValue(new Error('caps_500'));
     await freshRender();
-    expect(await screen.findByRole('heading', { level: 1 })).toBeTruthy();
+    // Wait for the read to SETTLE (the caveat), then the page must still carry
+    // its heading and its body — not a bare caveat, not nothing.
+    expect(await screen.findByText(CAVEAT)).toBeTruthy();
+    expect(screen.getByRole('heading', { level: 1 }).textContent).toBe('Privacy & cookies');
+    expect(screen.getByText(ENTERPRISE_LEDE)).toBeTruthy();
   });
 });
-
-// Keep the static import referenced so lint doesn't flag it while the dynamic
-// import above is what each case actually renders.
-void PrivacyPage;

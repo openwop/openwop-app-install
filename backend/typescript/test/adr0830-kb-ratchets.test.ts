@@ -41,8 +41,11 @@ const code = (p: string): string => readFileSync(p, 'utf8')
  *  named; it cannot check one that is missing. No-growth: a new surface with
  *  this shape must require its org (or filter by the run's orgs) instead. */
 const ABSENT_ORG_IS_TENANT_WIDE_PINNED = new Set([
-  'brand', 'campaign-brief', 'campaign-connectors', 'campaign-intel', 'campaign-orchestration', 'priority-matrix',
+  'campaign-brief', 'campaign-connectors', 'campaign-intel', 'campaign-orchestration', 'priority-matrix',
 ]);
+
+/** Surfaces whose org-less read is narrowed by `runOrgScopeFilter` (the cure). */
+const FILTERED_BY_RUN_ORGS = new Set(['brand']);
 
 describe('D1 / ADR 0832 — the org floor lives at the seam, for every surface', () => {
   const featuresDir = join(SRC, 'features');
@@ -67,7 +70,16 @@ describe('D1 / ADR 0832 — the org floor lives at the seam, for every surface',
     expect(seam).not.toMatch(/if \(alwaysOn\) return surface/);
   });
 
-  const absentIsAll = (f: string): boolean => /(optStr|surfaceOptStr)\((args|input)\??\.orgId\)|(args|input)\??\.orgId \?\?/.test(code(join(featuresDir, f, 'surface.ts')));
+  // The cure the pin list names — "filter by the run's orgs" — is accepted BY NAME,
+  // and only while the surface still calls `runOrgScopeFilter` (grade BR2CD-3: a
+  // source-text exemption alone would pass any surface that merely mentions it).
+  // ADR 0891 D1: `brand`'s org-less `listBrands` keeps only the person's orgs,
+  // witnessed by `adr0891-brand-probes.test.ts` BR2-S1.
+  const absentIsAll = (f: string): boolean => {
+    const src = code(join(featuresDir, f, 'surface.ts'));
+    const shape = /(optStr|surfaceOptStr)\((args|input)\??\.orgId\)|(args|input)\??\.orgId \?\?/.test(src);
+    return shape && !(FILTERED_BY_RUN_ORGS.has(f) && /runOrgScopeFilter\(/.test(src));
+  };
 
   it('no NEW surface where an absent org reads the whole tenant (the pinned list may only shrink)', () => {
     expect(surfaces.filter((f) => absentIsAll(f) && !ABSENT_ORG_IS_TENANT_WIDE_PINNED.has(f)), 'require the org instead').toEqual([]);
@@ -79,10 +91,16 @@ describe('D1 / ADR 0832 — the org floor lives at the seam, for every surface',
 });
 
 describe('D1 — the ad-hoc agent dispatch carries the human into its tools', () => {
-  it('routes/agents.ts builds the executor through createScopedAgentToolProvider with actingUserId', () => {
-    const src = code(join(SRC, 'routes/agents.ts'));
-    expect(src).not.toMatch(/createAgentToolProvider\s*\(/);
-    expect(src).toMatch(/createScopedAgentToolProvider\(\{[\s\S]{0,300}actingUserId: callerSubject\(req\)/);
+  // ADR 0889 D3 — the composition moved to host/liveDispatchLane.ts (shared with the
+  // eval runner). Both halves stay pinned: the lane builds through the scoped composer
+  // WITH the acting user, and the route hands it `callerSubject(req)`.
+  it('the live-dispatch lane builds the executor through createScopedAgentToolProvider with actingUserId', () => {
+    const lane = code(join(SRC, 'host/liveDispatchLane.ts'));
+    expect(lane).not.toMatch(/createAgentToolProvider\s*\(/);
+    expect(lane).toMatch(/createScopedAgentToolProvider\(\{[\s\S]{0,300}actingUserId/);
+    const route = code(join(SRC, 'routes/agents.ts'));
+    expect(route).not.toMatch(/createAgentToolProvider\s*\(/);
+    expect(route).toMatch(/buildLiveDispatchLane\(\{[\s\S]{0,300}actingUserId: callerSubject\(req\)/);
   });
 });
 

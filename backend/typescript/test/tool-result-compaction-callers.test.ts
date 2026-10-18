@@ -89,10 +89,14 @@ const CLASSIFIED: Record<string, { kind: Kind; why: string; decisionSource?: Reg
       'is dispatched from a live session, not a run record. It DOES fence (RFC 0137 §F1). Until it has a ' +
       'run-scoped decision it cannot compact, and guessing one live would break the run-start freeze.',
   },
-  'routes/agents.ts': {
+  'host/liveDispatchLane.ts': {
     kind: 'MUST_SUPPLY',
-    why: 'The runless live-dispatch lane. Resolves via stampRunStartContext({}, {...}) — the blessed reuse.',
+    why: 'The runless live-dispatch lane (ADR 0889 D3: moved from routes/agents.ts, shared with the eval runner). Resolves via stampRunStartContext({}, {...}) — the blessed reuse.',
     decisionSource: /const\s+compaction\s*=\s*readCompactionDecision\s*\(\s*compactionMeta\s*\)/,
+  },
+  'host/evals/toolBoundary.ts': {
+    kind: 'EXEMPT',
+    why: 'ADR 0889 D9 — wraps a lane executor to record the tool boundary and returns the inner result unchanged; the calling loop (run / chat lane, both classified) applies the compaction.',
   },
   'features/destination-sync/agentTools.ts': {
     kind: 'EXEMPT',

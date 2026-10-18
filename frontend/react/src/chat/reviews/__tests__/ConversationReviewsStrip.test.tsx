@@ -1,35 +1,50 @@
 /**
- * ADR 0473 grade-code C6 — the conversation strip's decide wiring: the card
- * reloads on decide FAILURE too (the F2 contract — a stale approve must
- * re-render the fresh live view), and on success.
+ * ADR 0473 grade-code C6 — the conversation strip's decide wiring: the strip
+ * re-reads ITS conversation-scoped list on decide FAILURE too (the F2 contract —
+ * a stale approve must re-render the fresh live view), and on success.
+ *
+ * The strip's read is told apart from the shared store's own unscoped
+ * reconcile (`reviewStatusStore.decide` calls `refresh()` → `listReviews('pending')`
+ * on a failed decide), which alone would satisfy a bare call count.
+ *
+ * Double guard (honest ceiling): the stale error line reaches the card twice —
+ * the card's own catch of the rethrown error AND the store's kept failure
+ * (`failureById`, consumed by the card; witnessed in reviewStatusStore.test.ts
+ * "a failed decision is kept per review"). A strip that swallowed the error is
+ * therefore NOT detectable here.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 vi.mock('../ReviewHandoff.js', () => ({ ReviewHandoff: () => null })); // own tests: reviewHandoff.test.tsx
 import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
+import type * as ReviewClient from '../reviewClient.js';
 import type { ReviewRequest } from '../reviewClient.js';
 
-const listReviews = vi.fn<() => Promise<ReviewRequest[]>>();
-const decideReview = vi.fn<() => Promise<{ reviewId: string; status: string }>>();
+const listReviews = vi.fn<typeof ReviewClient.listReviews>();
+const decideReview = vi.fn<typeof ReviewClient.decideReview>();
 
-class MockReviewRequestError extends Error {
-  constructor(message: string, readonly errorCode: string, readonly httpStatus: number, readonly reason?: string) {
-    super(message);
-    this.name = 'ReviewRequestError';
-  }
-}
-
-vi.mock('../reviewClient.js', () => ({
-  listReviews: (...a: unknown[]) => listReviews(...(a as [])),
-  decideReview: (...a: unknown[]) => decideReview(...(a as [])),
+// The REAL ReviewRequestError (the store and the card branch on it).
+vi.mock('../reviewClient.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof ReviewClient>()),
+  listReviews: (...a: Parameters<typeof ReviewClient.listReviews>) => listReviews(...a),
+  decideReview: (...a: Parameters<typeof ReviewClient.decideReview>) => decideReview(...a),
   getReview: vi.fn(),
-  ReviewRequestError: MockReviewRequestError,
 }));
 
+const { ReviewRequestError } = await import('../reviewClient.js');
 const { ConversationReviewsStrip } = await import('../ConversationReviewsStrip.js');
+const { useReviewStatusStore } = await import('../reviewStatusStore.js');
+
+/** The strip's own reads: pending, scoped to this conversation. */
+const scopedReads = (): number =>
+  listReviews.mock.calls.filter(([status, opts]) => status === 'pending' && opts?.conversationId === 'conv-strip').length;
 
 afterEach(cleanup);
-beforeEach(() => { listReviews.mockReset(); decideReview.mockReset(); });
+beforeEach(() => {
+  listReviews.mockReset();
+  decideReview.mockReset();
+  useReviewStatusStore.setState({ reviews: [], statusById: {}, failureById: {}, loading: false, error: null, errorCause: null, initialized: false, _busCleanup: null, _refcount: 0 });
+});
 
 const proposal: ReviewRequest = {
   reviewId: 'approval:appr-strip',
@@ -49,13 +64,14 @@ const proposal: ReviewRequest = {
 describe('ConversationReviewsStrip (ADR 0473)', () => {
   it('reloads the list after a FAILED decide (the stale-card refresh contract)', async () => {
     listReviews.mockResolvedValue([proposal]);
-    decideReview.mockRejectedValue(new MockReviewRequestError('conflict: changed', 'conflict', 409, 'proposal_stale'));
+    decideReview.mockRejectedValue(new ReviewRequestError('conflict: changed', 'conflict', 409, 'proposal_stale'));
     render(<MemoryRouter><ConversationReviewsStrip conversationId="conv-strip" isSending={false} /></MemoryRouter>);
     fireEvent.click(await screen.findByRole('button', { name: /Approve & run/ }));
-    // load() ran once on mount and AGAIN in the finally after the failure
-    // (the shared store also re-reads its own list on a failed decide).
-    await waitFor(() => expect(listReviews.mock.calls.length).toBeGreaterThanOrEqual(2));
-    // The card surfaced the localized stale error rather than swallowing it.
+    // The strip's scoped load() ran once on mount and AGAIN in the finally.
+    await waitFor(() => expect(scopedReads()).toBe(2));
+    // Positive control: the store's UNSCOPED reconcile also ran — and is excluded above.
+    expect(listReviews.mock.calls.some(([status, opts]) => status === 'pending' && opts?.conversationId === undefined)).toBe(true);
+    // The card surfaced the localized stale error (double-guarded — see header).
     expect(await screen.findByText(/draft changed since you reviewed/i)).toBeTruthy();
   });
 
@@ -64,7 +80,8 @@ describe('ConversationReviewsStrip (ADR 0473)', () => {
     decideReview.mockResolvedValue({ reviewId: proposal.reviewId, status: 'approved' });
     render(<MemoryRouter><ConversationReviewsStrip conversationId="conv-strip" isSending={false} /></MemoryRouter>);
     fireEvent.click(await screen.findByRole('button', { name: /Approve & run/ }));
-    await waitFor(() => expect(listReviews).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(scopedReads()).toBe(2));
+    expect(listReviews).toHaveBeenCalledTimes(2); // no unscoped read on success
     await waitFor(() => expect(screen.queryByRole('button', { name: /Approve & run/ })).toBeNull());
   });
 });

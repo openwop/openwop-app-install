@@ -1,6 +1,6 @@
 {
   "name": "core.openwop.workflows.funnels",
-  "version": "1.0.3",
+  "version": "1.1.0",
   "kind": "workflow-chain",
   "description": "Funnel optimization chains (ADR 0294 / Funnel A, Phase 6) — read-only analysis over the funnels feature nodes: per-step stats in, a grounded optimization proposal out. Proposals only: publishing, step edits, and experiment starts remain human actions in the Funnels page.",
   "author": "OpenWOP App",
@@ -10,7 +10,7 @@
   "chains": [
     {
       "chainId": "funnels.optimize-step",
-      "version": "1.0.1",
+      "version": "1.1.0",
       "label": "Funnel Step Optimization Proposal",
       "description": "Reads a funnel's definition and per-step stats, identifies the weakest step (honest about small samples), and produces a grounded optimization proposal: what to change on that step's page, and the 50/50 challenger experiment a human should start in the Funnels page. Read-only — no drafts are written, nothing is published.",
       "parameters": {
@@ -21,8 +21,8 @@
           "orgId": { "type": "string", "description": "The workspace org id." },
           "funnelId": { "type": "string", "description": "The funnel to analyze." },
           "goal": { "type": "string", "default": "maximize completed checkouts", "description": "What the funnel should optimize for." },
-          "provider": { "type": "string", "default": "anthropic", "description": "AI provider id for this chain's LLM nodes. Frozen into this chain's AI nodes when the workflow is created (ADR 0498 — a concrete provider is what keeps replay deterministic). Override at instantiation to use a different vendor or your own BYOK provider; whichever you pick, the workspace needs a key for it — the workflow will not fall back to another provider on its own." },
-          "model": { "type": "string", "default": "claude-sonnet-4-6", "description": "Model id for this chain's LLM nodes. Must be advertised by `provider` in the host catalog; override at instantiation." }
+          "provider": { "type": "string", "description": "AI provider id for this chain's model-calling nodes. Set it to fix a provider into those nodes when the workflow is created. Leave it unset and each run uses the run's chosen provider, else the workspace's AI setting, else the host's catalog default (ADR 0903); whichever is chosen is recorded on the run, so a replay or fork uses the same one. The workspace needs a key for the provider that runs." },
+          "model": { "type": "string", "description": "Model id for this chain's model-calling nodes. Must be offered by the provider in the host catalog. Leave it unset to use the provider's model from the same choice (ADR 0903)." }
         }
       },
       "capabilities": [],

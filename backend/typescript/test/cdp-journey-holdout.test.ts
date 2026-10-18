@@ -2,6 +2,11 @@
  * CDP-E — journey experiment/holdout split (ADR 0267). The bucketing is
  * deterministic + replay-stable (same contact → same arm), keyed on contactId,
  * and honors the holdout percentage at the population level.
+ *
+ * Sabotage that reds it (w38 probes): a random bucket (replay instability); a
+ * mis-scaled percentage boundary; an inverted arm; ignoring the experimentId salt.
+ * The 0%/100% legs walk the SAME 4000-contact population as the split
+ * case, so a boundary drift cannot hide behind a handful of ids.
  */
 import { describe, expect, it } from 'vitest';
 import { holdoutArm } from '../src/features/campaign-journeys/surface.js';
@@ -13,7 +18,8 @@ describe('CDP-E holdoutArm', () => {
     expect(a).toEqual(b);
   });
   it('0% holdout → everyone treatment; 100% → everyone control', () => {
-    for (const id of ['crm:1', 'crm:2', 'crm:3', 'crm:4', 'crm:5']) {
+    for (let i = 0; i < 4000; i++) {
+      const id = `crm:${i}`;
       expect(holdoutArm(id, 'e', 0).arm).toBe('treatment');
       expect(holdoutArm(id, 'e', 100).arm).toBe('control');
     }
@@ -23,8 +29,9 @@ describe('CDP-E holdoutArm', () => {
     const N = 4000;
     for (let i = 0; i < N; i++) if (holdoutArm(`crm:${i}`, 'exp', 25).arm === 'control') control++;
     const pct = (control / N) * 100;
-    expect(pct).toBeGreaterThan(20);
-    expect(pct).toBeLessThan(30); // ~25% ± tolerance
+    // The hash is deterministic, so this band cannot flake; ±1.5pp is ~2 SD at N=4000.
+    expect(pct).toBeGreaterThan(23.5);
+    expect(pct).toBeLessThan(26.5);
   });
   it('different experiments bucket independently', () => {
     // the same contact can be control in one experiment and treatment in another

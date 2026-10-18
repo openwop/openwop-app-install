@@ -1,0 +1,133 @@
+{
+  "name": "core.openwop.workflows.service-desk",
+  "version": "1.1.0",
+  "kind": "workflow-chain",
+  "description": "Service-desk workflow pack (RFC 0013, ADR 0878 D8): SLA escalation for the host's own support tickets. Bind it to the host's SLA-breach event (ADR 0683 — the event name belongs to the installing host and is a parameter here) or run it for one ticket by id. The ticket is read over feature.service-desk.nodes (the run person's org floor applies), an AI summary is grounded in the thread, and the people who work the ticket — its assignee, else its org's writers — are notified. Never a tenant broadcast; nothing is sent to the customer.",
+  "author": "openwop",
+  "license": "Apache-2.0",
+  "engines": {
+    "openwop": ">=1.0.0 <3.0.0"
+  },
+  "keywords": [
+    "Support"
+  ],
+  "chains": [
+    {
+      "chainId": "service-desk.sla-escalation",
+      "version": "1.1.0",
+      "label": "SLA Breach Escalation",
+      "description": "On an SLA breach (bind to the host's ticket-sla-breached event): the trigger payload's ticketId reaches the ticket read (a manual run passes `ticketId` instead), AI writes a two-line escalation summary grounded in the thread, and the ticket's assignee — else its organization's writers — are notified with it. A ticket the run cannot read fails the run typed (`ticket_unavailable`); the AI never summarizes nothing.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [],
+        "properties": {
+          "ticketId": {
+            "type": "string",
+            "default": "",
+            "description": "The ticket for a MANUAL run. An event-bound run reads it from the trigger payload instead."
+          },
+          "provider": {
+            "type": "string",
+            "description": "AI provider id for this chain's model-calling nodes. Set it to fix a provider into those nodes when the workflow is created. Leave it unset and each run uses the run's chosen provider, else the workspace's AI setting, else the host's catalog default (ADR 0903); whichever is chosen is recorded on the run, so a replay or fork uses the same one. The workspace needs a key for the provider that runs."
+          },
+          "model": {
+            "type": "string",
+            "description": "Model id for this chain's model-calling nodes. Must be offered by the provider in the host catalog. Leave it unset to use the provider's model from the same choice (ADR 0903)."
+          },
+          "triggerEventName": {
+            "type": "string",
+            "default": "openwop-app.servicedesk.ticket-sla-breached",
+            "description": "The host event this chain ignites on. The event belongs to the INSTALLING HOST, not the pack (ADR 0683) — defaulted to this host's name for it; bind the workflow to that event to enroll."
+          }
+        }
+      },
+      "capabilities": [
+        "side-effectful"
+      ],
+      "dag": {
+        "nodes": [
+          {
+            "id": "trigger",
+            "typeId": "core.trigger.event@1.0.0",
+            "name": "SLA breached",
+            "position": {
+              "x": -320,
+              "y": 0
+            },
+            "config": {
+              "eventName": "{{params.triggerEventName}}"
+            },
+            "inputs": {}
+          },
+          {
+            "id": "ticket",
+            "typeId": "feature.service-desk.nodes.get-ticket@1.0.0",
+            "name": "Read the ticket",
+            "position": {
+              "x": 0,
+              "y": 0
+            },
+            "config": {},
+            "inputs": {
+              "ticketId": "{{params.ticketId}}"
+            }
+          },
+          {
+            "id": "summarize",
+            "typeId": "core.ai.chatCompletion@1.0.0",
+            "name": "Summarize for escalation",
+            "position": {
+              "x": 320,
+              "y": 0
+            },
+            "config": {
+              "systemPrompt": "A support ticket just missed its response deadline. In at most two short lines, say what the customer needs and what is blocking a reply. Ground every statement in the ticket thread; never invent order numbers, amounts or promises. Do not address the customer.",
+              "provider": "{{params.provider}}",
+              "model": "{{params.model}}"
+            },
+            "inputs": {}
+          },
+          {
+            "id": "notify",
+            "typeId": "feature.service-desk.nodes.notify-team@1.0.0",
+            "name": "Notify the ticket team",
+            "position": {
+              "x": 640,
+              "y": 0
+            },
+            "config": {},
+            "inputs": {
+              "ticketId": "{{params.ticketId}}",
+              "title": "Support SLA breached — needs attention"
+            }
+          }
+        ],
+        "edges": [
+          {
+            "from": "trigger.payload",
+            "to": "ticket.event"
+          },
+          {
+            "from": "trigger.payload",
+            "to": "notify.event"
+          },
+          {
+            "from": "ticket",
+            "to": "summarize"
+          },
+          {
+            "from": "summarize.content",
+            "to": "notify.message"
+          }
+        ]
+      },
+      "outputs": {
+        "notified": {
+          "type": "number",
+          "description": "How many people were notified."
+        }
+      }
+    }
+  ]
+}

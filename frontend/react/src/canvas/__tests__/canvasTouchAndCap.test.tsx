@@ -8,11 +8,13 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup, fireEvent, screen, waitFor } from '@testing-library/react';
+import type { CanvasClient } from '../canvasClient.js';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 
+type SaveCanvas = CanvasClient['saveCanvas'];
 const state = vi.hoisted(() => ({
   record: { canvasId: 'c1', canvasTypeId: 'canvas.tiny', state: {} as Record<string, unknown>, version: 1 },
-  saveCanvas: vi.fn(),
+  saveCanvas: vi.fn<SaveCanvas>(),
 }));
 vi.mock('../canvasClient.js', async (importOriginal) => {
   const orig = await importOriginal<typeof import('../canvasClient.js')>();
@@ -33,7 +35,7 @@ import type { InteractivePreviewProps, CanvasNode } from '../types.js';
 import type { FrameBase } from '../frameOps.js';
 
 afterEach(cleanup);
-beforeEach(() => { state.saveCanvas = vi.fn().mockResolvedValue({ canvasId: 'c1', newVersion: 2, warnings: [] }); });
+beforeEach(() => { state.saveCanvas = vi.fn<SaveCanvas>().mockResolvedValue({ canvasId: 'c1', newVersion: 2, warnings: [] }); });
 
 interface TinyDoc { shapes: Record<string, unknown>[] }
 // A minimal elements preview that surfaces the add seam as buttons so the test
@@ -51,15 +53,20 @@ function TinyPreview({ addElements, patchElement, cancelSignal }: InteractivePre
   );
 }
 
-const tinyDef = {
+const tinyDef: CanvasEditorDefinition<TinyDoc, FrameBase, CanvasNode> = {
   canvasTypeId: 'canvas.tiny', toggleId: 'drawings', clientBasePath: '/x', editorPath: '/x', i18nNamespace: 'drawings',
   Renderer: () => <div>renderer</div>,
   InteractivePreview: TinyPreview,
   coerceDoc: (s: Record<string, unknown>): TinyDoc => ({ shapes: Array.isArray(s.shapes) ? s.shapes as Record<string, unknown>[] : [{ kind: 'dot', x: 0 }] }),
   elements: [{ key: 'shapes', max: 3, min: 1, adders: [{ id: 'dot', make: () => ({ kind: 'dot' }) }], labelFor: () => 'dot', propDefs: () => [] }],
-} as unknown as CanvasEditorDefinition<TinyDoc, FrameBase, CanvasNode>;
+};
 
 const esc = (): void => { fireEvent.keyDown(window, { key: 'Escape' }); };
+/** The live-region text, minus the invisible repeat marker (`withRepeatMark`). */
+const status = (): string => (screen.getByRole('status').textContent ?? '').replace(/\u200B/g, '');
+const saveBtn = (): HTMLButtonElement => screen.getByText('Save') as HTMLButtonElement;
+/** The `state` argument of the n-th saveCanvas call — what would be persisted. */
+const savedState = (n = 0): Record<string, unknown> | undefined => state.saveCanvas.mock.calls[n]?.[2];
 
 function mount(): ReturnType<typeof render> {
   return render(
@@ -77,10 +84,16 @@ describe('chassis addElements cap atomicity (DRAW-D5/R2)', () => {
     await screen.findByText('add-three');
     // 1 existing + 3 = 4 > max 3 → atomic reject.
     fireEvent.click(screen.getByText('add-three'));
-    await waitFor(() => expect(screen.getByRole('status').textContent).toMatch(/limit/i));
-    // Save uses the working doc — a reject leaves it at 1 shape (unchanged, so not dirty→ no new version)
+    await waitFor(() => expect(status()).toBe('At the 3-item limit'));
+    // Nothing committed: the doc is unchanged, so it is not dirty (Save stays off).
+    expect(saveBtn().disabled).toBe(true);
     fireEvent.click(screen.getByText('add-one')); // 1+1=2 ≤ 3 → lands
-    await waitFor(() => expect(screen.getByRole('status').textContent).toMatch(/added|1/i));
+    await waitFor(() => expect(status()).toBe('1 added'));
+    // The persisted doc holds the original + the ONE that fit — none of the rejected three.
+    await waitFor(() => expect(saveBtn().disabled).toBe(false));
+    fireEvent.click(saveBtn());
+    await waitFor(() => expect(state.saveCanvas).toHaveBeenCalledTimes(1));
+    expect(savedState()).toEqual({ shapes: [{ kind: 'dot' }, { kind: 'dot', n: 1 }] });
   });
 });
 
@@ -95,7 +108,12 @@ describe('chassis Esc cancels a live gesture (DRAW-R3)', () => {
     const before = Number(screen.getByTestId('cancel').textContent);
     esc();
     await waitFor(() => expect(Number(screen.getByTestId('cancel').textContent)).toBe(before + 1)); // type told to drop overlay
-    expect(screen.getByRole('status').textContent).toMatch(/cancel/i); // gesture reverted
+    expect(status()).toBe('Cancelled');
+    // The pushed history entry was REVERTED: the doc the chassis would persist is
+    // the pre-drag one (x 0), not the dragged one (x 10).
+    fireEvent.click(saveBtn());
+    await waitFor(() => expect(state.saveCanvas).toHaveBeenCalledTimes(1));
+    expect(savedState()).toEqual({ shapes: [{ kind: 'dot', x: 0 }] });
   });
 
   it('Esc with no gesture falls through to clear/tool-select (bumps signal harmlessly)', async () => {
@@ -105,6 +123,6 @@ describe('chassis Esc cancels a live gesture (DRAW-R3)', () => {
     esc();
     // No gesture pushed → no "cancelled" announcement; the signal still bumps.
     await waitFor(() => expect(Number(screen.getByTestId('cancel').textContent)).toBe(before + 1));
-    expect(screen.getByRole('status').textContent ?? '').not.toMatch(/cancel/i);
+    expect(status()).not.toMatch(/cancel/i);
   });
 });

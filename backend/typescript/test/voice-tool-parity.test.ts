@@ -32,6 +32,9 @@ import { handleSidebandEvent, type SidebandSession } from '../src/features/voice
 import { getAgentRegistry } from '../src/executor/agentRegistry.js';
 import { __clearAgentIdentityCache } from '../src/host/agentIdentity.js';
 import { hostExtStorage } from '../src/host/hostExtPersistence.js';
+import type { VoiceAuthoritySnapshot } from '../src/features/voice/voiceAuthority.js';
+/** ADR 0893 D4 — a live call holds its opener's authority snapshot; this one passes every check while `voice` is ON. */
+const ALLOW_AUTHORITY: VoiceAuthoritySnapshot = { tenantId: 'default', toggleSubject: { tenantId: 'default' }, lane: 'wildcard', scopeEscape: true };
 
 let BASE: string;
 let server: http.Server;
@@ -130,7 +133,7 @@ describe('ADR 0324 §2 — the realtime bridge threads the acting user + convers
   });
 
   it('the OpenAI sideband threads the session OPENER as the acting user — also while a tool call runs delegated', async () => {
-    const s: SidebandSession = { callId: 'rtc_parity', tenantId: 'default', agentId: PARITY_AGENT, conversationId: 'conv-sb-1', userId: 'user-sideband-1' };
+    const s: SidebandSession = { callId: 'rtc_parity', tenantId: 'default', authority: ALLOW_AUTHORITY, agentId: PARITY_AGENT, conversationId: 'conv-sb-1', userId: 'user-sideband-1' };
     const out = await handleSidebandEvent(s, { type: 'response.function_call_arguments.done', name: CAPTURE_TOOL, call_id: 'fc_p1', arguments: '{}' });
     expect(JSON.stringify(out[0])).toContain('captured-ok');
     expect(captured.at(-1)).toMatchObject({ actingUserId: 'user-sideband-1', conversationId: 'conv-sb-1' });

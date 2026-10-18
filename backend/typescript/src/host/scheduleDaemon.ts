@@ -41,12 +41,15 @@ import { startWorkflowRun } from './runStarter.js';
 import { createHash } from 'node:crypto';
 import { listJobsForDaemon, claimDueSlot, recordJobRun, recordJobSkipped, currentTick, scheduleSubject, isStalled, reviveStalledJob, jobActorIsInactive, resumeJobFromPlanPause, type ScheduledJob, type ScheduleSkipReason } from './schedulingService.js';
 import { WorkflowFeatureRefusedError } from './workflowFeatureGate.js';
+import { autonomousDispatchVerdict, jobAgentRef } from './autonomousDispatchPolicy.js';
+import { createApproval, hasPendingApprovalForJob } from './approvalService.js';
 import { subjectScope } from './subject.js';
 import { checkAutonomousRunBudget, pruneRunBudget } from './runBudgetService.js';
 import { resolveOne } from './featureToggles/service.js';
 import { getInstanceId } from './instanceId.js';
 import { DurableCollection } from './hostExtPersistence.js';
 import { createLogger } from '../observability/logger.js';
+import { CALLER_LINKAGE_KEYS } from './runLinkage.js';
 
 const log = createLogger('scheduleDaemon');
 
@@ -91,7 +94,16 @@ export type FireOutcome = { runId: string } | { skipped: ScheduleSkipReason };
 export async function fireJob(
   deps: StartRunDeps,
   job: ScheduledJob,
-  opts: { runId?: string; trigger: 'schedule' | 'manual'; triggeredBy?: string; applyBudget: boolean; now?: number },
+  opts: {
+    runId?: string;
+    trigger: 'schedule' | 'manual';
+    triggeredBy?: string;
+    applyBudget: boolean;
+    now?: number;
+    /** ADR 0775 P3b — this fire is the APPROVED proposal a `hitl` hold filed; the
+     *  hold is satisfied, every other gate still applies. */
+    approvedProposalId?: string;
+  },
 ): Promise<FireOutcome> {
   const now = opts.now ?? Date.now();
   // ADR 0599 §6 — OWNING-FEATURE gate, resolved PER TENANT at fire time.
@@ -129,6 +141,43 @@ export async function fireJob(
     log.info('schedule fire dropped — the person it acts as is deactivated', { jobId: job.jobId, tenantId: job.tenantId });
     return skip(job.jobId, 'actor-inactive', now);
   }
+  // ADR 0775 P3 (`ARWF-7`) — never run a paused roster agent. A schedule, a
+  // scheduled chat and a follow-up all fire through here; before this only the
+  // heartbeat honoured the roster's switch. Non-destructive like the gates above:
+  // the slot is skipped and resuming the agent resumes the job. Applies to Run now
+  // too, matching "check now" on a paused agent (`routes/agentOps.ts`).
+  //
+  // ADR 0775 P3b — and honour the agent's EXPLICIT rules for this workflow: on
+  // `permissions.never` the slot is skipped; on `hitl` it files one pending
+  // approval (or finds the one already filed) instead of running, and approving
+  // it fires the job through this recipe with `approvedProposalId`.
+  const agentRef = jobAgentRef(job);
+  if (agentRef !== undefined) {
+    const verdict = await autonomousDispatchVerdict(job.tenantId, agentRef, job.workflowId);
+    if (!verdict.allowed && verdict.reason === 'agent-paused') {
+      log.info('schedule fire dropped — the agent it runs as is paused', { jobId: job.jobId, tenantId: job.tenantId, rosterId: verdict.rosterId });
+      return skip(job.jobId, 'agent-paused', now);
+    }
+    if (!verdict.allowed && verdict.reason === 'policy-denied') {
+      log.info("schedule fire dropped — the workflow is on the agent's never list", { jobId: job.jobId, tenantId: job.tenantId, rosterId: verdict.rosterId, workflowId: job.workflowId });
+      return skip(job.jobId, 'policy-denied', now);
+    }
+    if (!verdict.allowed && verdict.reason === 'needs-approval' && opts.approvedProposalId === undefined) {
+      if (!(await hasPendingApprovalForJob(job.tenantId, job.jobId))) {
+        await createApproval({
+          tenantId: job.tenantId,
+          rosterId: verdict.entry.rosterId,
+          persona: verdict.entry.persona,
+          workflowId: job.workflowId!,
+          ...(job.configurable !== undefined ? { configurable: job.configurable } : {}),
+          scheduleJobId: job.jobId,
+          proposal: `Run ${job.workflowId} (scheduled)`,
+        });
+      }
+      log.info("schedule fire held for approval — the workflow is on the agent's hitl list", { jobId: job.jobId, tenantId: job.tenantId, rosterId: verdict.entry.rosterId });
+      return skip(job.jobId, 'awaiting-approval', now);
+    }
+  }
   // Autonomous-run budget: drop (don't queue) a fire that would exceed the
   // tenant's window ceiling. The slot already advanced, so the schedule just
   // skips this slot and resumes next window — it cannot run away on cost.
@@ -153,6 +202,12 @@ export async function fireJob(
       // `enrollmentId`/`ownerSubject` — runs with them UNDEFINED unless the job
       // carries them.
       ...(job.inputs !== undefined ? { inputs: job.inputs } : {}),
+      // ADR 0879 D7 — a feature-created job that acts for nobody can still name the
+      // human who CAUSED it (a scheduled chat's creator). It only narrows (ADR 0832
+      // D3); the run-conversation write gate reads it as the poster. Host-written:
+      // the scheduler route strips the key from client metadata.
+      ...(typeof job.metadata?.orgScopeSubject === 'string' ? { orgScopeSubject: job.metadata.orgScopeSubject } : {}),
+      ...(typeof job.metadata?.personalTenant === 'string' ? { personalTenant: job.metadata.personalTenant } : {}),
       // `ScheduledJob.metadata` is free-form attribution carried onto the run.
       // The assistant loops (ADR 0023 §12 T2) rely on it to carry
       // `actingUserId`, which the Connections resolver keys per-user credentials
@@ -164,7 +219,9 @@ export async function fireJob(
       // The schedule block spreads LAST.
       metadata: {
         ...Object.fromEntries(
-          Object.entries(job.metadata ?? {}).filter(([k]) => k !== 'heartbeat' && k !== 'kanban' && k !== 'approval' && k !== 'schedule'),
+          // ADR 0902 D2 — never the task-deck linkage either (a job written before
+          // the scheduler route stripped it must not plant cards on each fire).
+          Object.entries(job.metadata ?? {}).filter(([k]) => k !== 'heartbeat' && k !== 'kanban' && k !== 'approval' && k !== 'schedule' && !(CALLER_LINKAGE_KEYS as readonly string[]).includes(k)),
         ),
         schedule: {
           jobId: job.jobId,

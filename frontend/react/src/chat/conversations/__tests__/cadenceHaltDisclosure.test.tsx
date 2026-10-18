@@ -15,7 +15,7 @@ import { useBoardroomCadence } from '../useBoardroomCadence.js';
 import type { BoardroomTurn } from '../boardroomCadence.js';
 import type { BYOKActiveConfig } from '../../../byok/lib/useBYOKConfig.js';
 
-const CONFIG = { provider: 'mock', model: 'mock-1', credentialRef: 'managed:test' } as unknown as BYOKActiveConfig;
+const CONFIG: BYOKActiveConfig = { provider: 'mock', model: 'mock-1', credentialRef: 'managed:test' };
 const personaOf = (agentId: string): string => `Persona ${agentId}`;
 const turn = (agentId: string): BoardroomTurn => ({ agentId, kind: 'advisor', round: 0 });
 
@@ -42,6 +42,7 @@ describe('L3 — the halt message matches the surface that halted', () => {
     const said = emitSystem.mock.calls[0]?.[0] as string;
     expect(said).toContain('boardroom');
     expect(said).toContain('@@titans');
+    expect(said).toContain('2 advisor(s) did not speak');
   });
 
   it('a PROJECT convene names the project team and a bare @@ — never "boardroom"', () => {

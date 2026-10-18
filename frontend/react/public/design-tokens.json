@@ -38,8 +38,8 @@
       "narrator": {
         "provider": "ElevenLabs",
         "model": "eleven_v4",
-        "voiceName": "Peter - British Narrator & Explainer",
-        "voiceId": "6Qg2hzCqEpqk0bR3ckiw"
+        "voiceName": "Christopher - Gentle and Trustworthy",
+        "voiceId": "G17SuINrv2H9FC6nvetn"
       }
     },
     "motion": {
@@ -80,7 +80,7 @@
       "accent-on-card": "oklch(46% 0.15 40)"
     },
     "fontFamily": {
-      "headline": "\"Instrument Serif\", \"Instrument Serif Fallback\", \"Times New Roman\", serif",
+      "headline": "\"Bricolage Grotesque\", \"Bricolage Grotesque Fallback\", ui-sans-serif, system-ui, sans-serif",
       "body": "\"Geist\", \"Geist Fallback\", ui-sans-serif, system-ui, sans-serif",
       "label": "\"Geist Mono\", ui-monospace, \"SF Mono\", Menlo, monospace"
     }

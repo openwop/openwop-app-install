@@ -34,6 +34,8 @@ const api = vi.hoisted(() => ({
   createAccount: vi.fn<typeof C.createAccount>(),
   updateAccount: vi.fn<typeof C.updateAccount>(),
   deleteAccount: vi.fn<typeof C.deleteAccount>(),
+  // ADR 0882 D3 — the owner picker's people list.
+  listAssignees: vi.fn<typeof C.listAssignees>(async () => ({ assignees: [{ subject: 'user:me', displayName: 'Mia Me' }, { subject: 'user:dana', displayName: 'Dana Diaz' }], me: ['user:me'] })),
 }));
 const { listOrgs, listAccounts } = api;
 // BOTH come from `csmClient` — `listOrgs` is re-exported there (ADR 0212), NOT
@@ -44,6 +46,13 @@ import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatu
 vi.mock('../csmClient.js', async (orig) => ({
   ...(await orig<typeof import('../csmClient.js')>()),
   ...api,
+}));
+// ADR 0882 (CSM2UX-4) — write controls follow `workspace:write`; `writeAccess.value`
+// lets a case render as a Viewer.
+const writeAccess = vi.hoisted(() => ({ value: true }));
+vi.mock('../../../lib/writeAccess.js', async (orig) => ({
+  ...(await orig<typeof import('../../../lib/writeAccess.js')>()),
+  useScopeWriteAccess: () => writeAccess.value,
 }));
 vi.mock('../../../featureToggles/FeatureAccessContext.js', async (orig) => ({
   ...(await orig<typeof import('../../../featureToggles/FeatureAccessContext.js')>()),

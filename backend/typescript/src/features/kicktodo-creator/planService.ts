@@ -25,7 +25,7 @@ import type { ChallengeDefinition } from '../kicktodo-core/types.js';
 /** KT-EXP-8 / ADR 0441 §4 — the deterministic draft id for a candidate: one draft
  *  per (tenant, candidate), so a re-decompose overwrites instead of orphaning. The
  *  `ktc-` prefix keeps it distinct from the manual route's random `chal:<uuid>`. */
-function candidateDraftId(tenantId: string, candidateId: string): string {
+export function candidateDraftId(tenantId: string, candidateId: string): string {
   return `chal:ktc-${createHash('sha256').update(`${tenantId}|${candidateId}`).digest('hex').slice(0, 32)}`;
 }
 

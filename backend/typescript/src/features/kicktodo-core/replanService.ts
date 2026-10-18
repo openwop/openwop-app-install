@@ -24,7 +24,7 @@ import { OpenwopError, type OpenwopErrorCode } from '../../types.js';
 import { hasKicktodoEnrollmentAuthority } from '../featureRoute.js';
 import {
   setSchedulePreference, substituteOccurrence, applyPlanRevision, getEnrollment,
-  setDayOverride, assertDayMoveAllowed, DayMoveDeniedError,
+  setDayOverride, assertDayMoveAllowed, DayMoveDeniedError, assertSubstitutionAllowed,
 } from './enrollmentService.js';
 import { acceptRecovery, todayFor } from './todayService.js';
 import { createLogger } from '../../observability/logger.js';
@@ -43,6 +43,13 @@ export type RevisionCommand =
   | { lane: 'recovery' }
   /** ADR 0496 D1 — re-date ONE challenge day (1-based) to an explicit local date. */
   | { lane: 'move'; day: number; toDate: string };
+
+/** KTAP-MOVE-1 — the lanes, as a value: the card schema's `lane` enum is built
+ *  from this, and a test pins it to the pack schema's `oneOf`. Exhaustive both
+ *  ways against {@link RevisionCommand}, so a fifth lane cannot be left out. */
+export const REVISION_LANES = ['schedule', 'substitute', 'recovery', 'move'] as const satisfies readonly RevisionCommand['lane'][];
+const revisionLanesExhaustive: [Exclude<RevisionCommand['lane'], (typeof REVISION_LANES)[number]>] extends [never] ? true : never = true;
+void revisionLanesExhaustive;
 
 export interface RevisionResult {
   applied: boolean;
@@ -240,6 +247,37 @@ export function validateRevisionCommands(commands: unknown): RevisionCommand[] {
   return commands.map((c, i) => validateCommand(c, i));
 }
 
+/** KT-REPLAN-HALFAPPLY-1 — the read-only guard pass behind `applyRevisionCommands`
+ *  step 3. Throws the SAME `RevisionCommandError` (409 + failing index, lane
+ *  reason verbatim) the write loop would have, but before anything is written. */
+async function preflightRevisionCommands(
+  tenantId: string,
+  enrollmentId: string,
+  subject: string,
+  validated: RevisionCommand[],
+): Promise<void> {
+  if (validated.length === 0) return;
+  const enrollment = await getEnrollment(tenantId, enrollmentId);
+  for (let idx = 0; idx < validated.length; idx++) {
+    const c = validated[idx]!;
+    try {
+      if (c.lane === 'substitute') {
+        await assertSubstitutionAllowed(tenantId, subject, c.cardId, c.alternativeId);
+      } else if (c.lane === 'move') {
+        // `setDayOverride` returns null (→ 'not-owner') for a missing, foreign or
+        // non-active enrollment; mirror that before its shared guards.
+        if (!enrollment || enrollment.ownerSubject !== subject || enrollment.state !== 'active') throw new Error('not-owner');
+        await assertDayMoveAllowed(tenantId, enrollment, c.day, c.toDate);
+      }
+      // schedule + recovery: their only refusal is ownership, which step 1's
+      // authority predicate already proved for this subject.
+    } catch (err) {
+      const message = err instanceof Error && err.message ? err.message : 'A revision command could not be applied.';
+      throw new RevisionCommandError('validation_error', `Command ${idx} (${c.lane}) failed: ${message}`, 409, idx);
+    }
+  }
+}
+
 export async function applyRevisionCommands(
   tenantId: string,
   args: { enrollmentId: string; subject: string; commands: unknown[] },
@@ -257,7 +295,19 @@ export async function applyRevisionCommands(
   //    never half-applies a prefix of the list before failing.
   const validated = validateRevisionCommands(commands);
 
-  // 3) Execute in order; a lane refusal surfaces the failing command index.
+  // 3) KT-REPLAN-HALFAPPLY-1 — PRE-FLIGHT every command's lane guards before ANY
+  //    write. Shape validation alone let `[schedule, substitute(bad alt)]` persist
+  //    the daypart + arm the reminder job and THEN refuse at index 1, with no
+  //    revision bump and no plan-revised event. Each check is the SAME read-only
+  //    guard the lane runs at write time (`assertSubstitutionAllowed`,
+  //    `assertDayMoveAllowed`), so this cannot pass what apply would refuse. The
+  //    lanes do not read each other's writes (a daypart/override write never
+  //    changes an occurrence until the trailing re-materialize), so checking
+  //    against the pre-write state is exact. What remains un-atomic is a WRITE-time
+  //    failure (a lost CAS race, a store error) — no lane guard can refuse there.
+  await preflightRevisionCommands(tenantId, enrollmentId, subject, validated);
+
+  // 4) Execute in order; a lane refusal surfaces the failing command index.
   const results: RevisionResult['results'] = [];
   for (let idx = 0; idx < validated.length; idx++) {
     const c = validated[idx]!;
@@ -281,7 +331,7 @@ export async function applyRevisionCommands(
     }
   }
 
-  // 4) ONE re-materialize (only when something changed — an empty list never
+  // 5) ONE re-materialize (only when something changed — an empty list never
   //    bumps the revision pointlessly).
   const applied = validated.length > 0;
   if (applied) await applyPlanRevision(tenantId, enrollmentId);
@@ -316,8 +366,9 @@ export interface PlanChange {
 
 /**
  * ADR 0496 D2 — the PURE dry-run behind the §5.5 compare: same authority
- * predicate, same closed-world validator, and — for the move lane — the SAME
- * `assertDayMoveAllowed` guards the apply path runs (architect M5: one guard
+ * predicate, same closed-world validator, and — for the move and substitute
+ * lanes — the SAME `assertDayMoveAllowed` / `assertSubstitutionAllowed` guards
+ * the apply path runs (architect M5: one guard
  * path, so preview can never pass what apply refuses). ZERO writes. Refusals
  * are the same typed `RevisionCommandError`s apply would raise, carrying the
  * failing command index.
@@ -346,6 +397,16 @@ export async function previewRevisionCommands(
         const reason = err instanceof DayMoveDeniedError ? err.reason : (err instanceof Error ? err.message : 'refused');
         throw new RevisionCommandError('validation_error', `Command ${idx} (move) failed: ${reason}`, 409, idx);
       }
+    } else if (c.lane === 'substitute') {
+      // KT-PREVIEW-SUBGUARD — the SAME read-only guard apply's pre-flight runs, so
+      // the compare view can never offer a swap that apply would refuse.
+      try {
+        await assertSubstitutionAllowed(tenantId, subject, c.cardId, c.alternativeId);
+      } catch (err) {
+        const message = err instanceof Error && err.message ? err.message : 'refused';
+        throw new RevisionCommandError('validation_error', `Command ${idx} (substitute) failed: ${message}`, 409, idx);
+      }
+      changes.push({ lane: 'substitute', line });
     } else {
       changes.push({ lane: c.lane, line });
     }

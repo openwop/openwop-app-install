@@ -6,6 +6,13 @@
  * (bigquery.query, email.draft) are deliberately NOT projected (they need the executor
  * broker ctx — meta-workflow path only). Verifies resolution, real execution, fail-closed,
  * and the connector-node exclusion.
+ *
+ * Sabotage-witnessed (/grade-tests w20): dropping variance-compute from
+ * `PROJECTABLE_COMPUTE_NODE_TYPE_IDS` reds cases 1+3; projecting `core.email.draft` reds
+ * case 2; mapping a node `failure` to `isError:false` reds case 4. PROBE-IS-11 below: an
+ * extra node output key, an extra backticked key in the prompt, a new provenance line, the
+ * honest sentence weakened, the pack description's SQL phrase restored, or a prose survivor
+ * restored each red the case named for it.
  */
 
 import { beforeAll, describe, expect, it } from 'vitest';
@@ -32,7 +39,7 @@ beforeAll(() => {
 
 describe('ADR 0081 §3 — node-as-tool projection', () => {
   it('projects the pure compute nodes as live agent tools (with a def)', () => {
-    expect(builtinAgentToolIds()).toEqual(expect.arrayContaining([VARIANCE, TALENT, 'openwop:knowledge.search']));
+    expect(builtinAgentToolIds()).toEqual(expect.arrayContaining([VARIANCE, TALENT]));
     const p = createAgentToolProvider({ tenantId: 'tenant-a' });
     expect(p.resolveTool(VARIANCE)?.inputSchema).toMatchObject({ type: 'object' });
     expect(p.resolveTool(TALENT)?.name).toBe(TALENT); // resolveTool returns the AgentToolDef directly
@@ -87,11 +94,17 @@ describe('PROBE-IS-11 — the Financial prompt does not promise provenance the n
 
   it('the node emits exactly the output keys the prompt enumerates — no more, no fewer', async () => {
     const mod = await getNodeRegistry().resolve('feature.insights-suite.nodes.variance-compute');
-    expect(mod, 'variance-compute did not resolve through the trust-gated pack lane').toBeTruthy();
-    const out = await mod!.execute({
-      config: {}, inputs: { businessUnit: 'TX', actuals: { sales: 95 }, plan: { sales: 100 } },
-    } as unknown as NodeContext) as { status: string; outputs: Record<string, unknown> };
-    expect(out.status).toBe('success');
+    expect(mod, 'variance-compute is not in the node registry (this file\'s beforeAll registers it)').toBeTruthy();
+    const ctx: NodeContext = {
+      runId: 'probe-is-11', nodeId: VARIANCE, tenantId: 'tenant-a',
+      inputs: { businessUnit: 'TX', actuals: { sales: 95 }, plan: { sales: 100 } },
+      config: {}, configurable: {}, attempt: 1, secrets: {},
+      emit: async () => ({ eventId: '', sequence: 0 }),
+    };
+    const outcome = await mod!.execute(ctx);
+    expect(outcome.status).toBe('success');
+    if (outcome.status !== 'success') throw new Error('unreachable');
+    const out = { outputs: outcome.outputs as Record<string, unknown> };
 
     const prompt = readFileSync(promptPath, 'utf8');
     const enumerated = [...prompt.matchAll(/`([a-zA-Z]+)`/g)].map((m) => m[1]!);

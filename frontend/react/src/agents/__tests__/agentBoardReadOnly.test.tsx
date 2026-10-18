@@ -6,15 +6,16 @@
  * error. `readOnly` drops the handlers the board view gates its controls on, and a drag is
  * never sent.
  */
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, cleanup, waitFor } from '@testing-library/react';
 
-const patchCard = vi.fn(async () => ({}));
+type KanbanClient = typeof import('../../kanban/kanbanClient.js');
+const { patchCard } = vi.hoisted(() => ({ patchCard: vi.fn<KanbanClient['patchCard']>() }));
 vi.mock('../../kanban/kanbanClient.js', async (orig) => ({
-  ...(await orig<Record<string, unknown>>()),
-  getBoard: vi.fn(async () => ({ board: { id: 'b1', name: 'B', columns: [{ id: 'todo', name: 'To Do' }] }, cards: [] })),
+  ...(await orig<KanbanClient>()),
+  getBoard: vi.fn(async () => ({ board: { id: 'b1', tenantId: 't1', name: 'B', columns: [{ id: 'todo', name: 'To Do' }], createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' }, cards: [] })),
   subscribeBoardEvents: vi.fn(() => () => undefined),
-  patchCard: (...a: unknown[]) => patchCard(...(a as [])),
+  patchCard,
 }));
 vi.mock('../AgentUpNextPanel.js', () => ({ AgentUpNextPanel: () => null }));
 const seen: Array<Record<string, unknown>> = [];
@@ -24,7 +25,11 @@ vi.mock('../../kanban/KanbanBoardView.js', () => ({
 
 const { AgentBoardPanel } = await import('../AgentBoardPanel.js');
 
-afterEach(() => { cleanup(); seen.length = 0; patchCard.mockClear(); });
+afterEach(() => { cleanup(); seen.length = 0; patchCard.mockReset(); });
+beforeEach(() => { patchCard.mockResolvedValue({
+  card: { id: 'c1', boardId: 'b1', columnId: 'todo', title: 'T', order: 0, createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' },
+  triggeredRunId: null,
+}); });
 
 describe('AgentBoardPanel readOnly', () => {
   it('a viewer gets no create / edit / delete, a drag is not sent, and the reason is shown', async () => {
@@ -44,7 +49,11 @@ describe('AgentBoardPanel readOnly', () => {
     await screen.findByText('board-view');
     const props = seen.at(-1)!;
     expect(typeof props.onCreateCard).toBe('function');
+    expect(typeof props.onEditCard).toBe('function');
+    expect(typeof props.onDeleteCard).toBe('function');
+    expect(screen.queryByText(/needs edit access/)).toBeNull();
     (props.onMoveCard as (id: string, col: string) => void)('c1', 'todo');
     await waitFor(() => expect(patchCard).toHaveBeenCalledTimes(1));
+    expect(patchCard).toHaveBeenCalledWith('c1', { columnId: 'todo' });
   });
 });

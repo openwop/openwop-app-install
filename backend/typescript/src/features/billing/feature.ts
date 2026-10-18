@@ -16,7 +16,7 @@ import { registerPlanLimitsResolver } from '../../host/planLimitsSeam.js';
 import { registerRunLimitReserver } from '../../host/runLimitSeam.js';
 import { reservePlanRun } from '../../host/planRunLimit.js';
 import { resolveOne } from '../../host/featureToggles/service.js';
-import { getBalance, drawFromBalance, resolveEntitlements } from './billingService.js';
+import { getBalance, drawFromBalance, resolveEntitlements, warnCheckoutConfigAtBoot } from './billingService.js';
 
 /** ADR 0821 D2/D6 — the plan-limits resolver billing registers into
  *  `host/planLimitsSeam.ts`. Exported so tests exercise the production path. */
@@ -52,6 +52,9 @@ export const billingFeature: BackendFeature = {
     // tenants and tenants with no `workflowRuns` limit are a no-op (no write), and
     // each site reserves only after its own refusals, releasing on a failed insert.
     registerRunLimitReserver(reservePlanRun);
+    // ADR 0890 — a `managed` checkout on a pinned API version that predates
+    // Managed Payments' GA is worth one line in the boot log.
+    warnCheckoutConfigAtBoot();
   },
   toggleDefault: {
     id: 'billing',

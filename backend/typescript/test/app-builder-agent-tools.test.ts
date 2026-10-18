@@ -10,7 +10,7 @@
 import http from 'node:http';
 import { readFileSync } from 'node:fs';
 import type { AddressInfo } from 'node:net';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { createAgentToolProvider, builtinAgentToolIds } from '../src/host/agentToolProvider.js';
 import {
@@ -21,7 +21,7 @@ import {
 import { APP_BUILDER_COMPONENTS, catalogTypeListForPrompt } from '../src/features/app-builder/componentCatalog.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
-import { createCanvasForTenant, getCanvasForTenant } from '../src/host/canvasSurface.js';
+import { createCanvasForTenant, getCanvasForTenant, listCanvasesForTenant } from '../src/host/canvasSurface.js';
 import { createOrg } from '../src/host/accessControlService.js';
 
 const TENANT = 'default';
@@ -42,6 +42,10 @@ const setAppBuilder = async (status: 'on' | 'off'): Promise<void> => {
   const d = getToggleDefault('app-builder');
   if (d) await saveConfig({ ...d, status }, 'test');
 };
+
+// Every case starts with the feature ON — the toggle is global config, so a
+// case that flips it must not leak into whichever case shuffle runs next.
+beforeEach(async () => { await setAppBuilder('on'); });
 
 function provider(scope: { actingUserId?: string; runId?: string } = {}) {
   return createAgentToolProvider({ tenantId: TENANT, ...scope });
@@ -103,10 +107,13 @@ describe('ADR 0358 — registration + the schema-request path', () => {
 
   it('catalog tool fails closed when the toggle is off', async () => {
     await setAppBuilder('off');
-    const out = await provider().executeTool({ name: APP_BUILDER_CATALOG_TOOL_ID, input: {} });
-    expect(out.isError).toBe(true);
-    expect(JSON.parse(out.content)).toMatchObject({ error: 'feature_disabled' });
-    await setAppBuilder('on');
+    try {
+      const out = await provider().executeTool({ name: APP_BUILDER_CATALOG_TOOL_ID, input: {} });
+      expect(out.isError).toBe(true);
+      expect(JSON.parse(out.content)).toMatchObject({ error: 'feature_disabled' });
+    } finally {
+      await setAppBuilder('on');
+    }
   });
 
   it('the prompt type list derives from the SSoT with constrained-container hints', () => {
@@ -125,10 +132,50 @@ describe('ADR 0358 — render tool: gates, repair-loop errors, persistence', () 
 
   it('fails closed when the toggle is off (structured, not a throw)', async () => {
     await setAppBuilder('off');
-    const out = await provider({ actingUserId: 'u-1' }).executeTool({ name: APP_BUILDER_RENDER_TOOL_ID, input: { app: VALID_APP } });
-    expect(out.isError).toBe(true);
-    expect(JSON.parse(out.content)).toMatchObject({ error: 'feature_disabled' });
-    await setAppBuilder('on');
+    try {
+      const out = await provider({ actingUserId: 'u-1' }).executeTool({ name: APP_BUILDER_RENDER_TOOL_ID, input: { app: VALID_APP } });
+      expect(out.isError).toBe(true);
+      expect(JSON.parse(out.content)).toMatchObject({ error: 'feature_disabled' });
+    } finally {
+      await setAppBuilder('on');
+    }
+  });
+
+  // AB-AT-1 (wave-36 grading) — the org-RBAC half of "gated exactly like the
+  // HTTP editor path". `u-2` is a SAME-tenant caller with no member row (demo
+  // mode off ⇒ zero scopes): the tenant lookup passes, so only the scope check
+  // in the tool's org gate can refuse it. A cross-tenant stranger would be
+  // refused earlier and prove nothing about this gate. The tool's predicate is
+  // still its own `resolveOrgScope`, not the route's `assertOrgScope` (grade-code
+  // row AB-AT-1); this case is the witness that must stay red-on-break when it
+  // moves onto the shared helper.
+  it('a same-tenant NON-MEMBER is refused forbidden_scope on read AND write — nothing read, nothing written', async () => {
+    const mine = JSON.parse((await provider({ actingUserId: 'u-1' }).executeTool({ name: APP_BUILDER_RENDER_TOOL_ID, input: { app: { ...VALID_APP, name: 'Members Only' } } })).content) as { canvasId: string };
+    const before = (await listCanvasesForTenant(TENANT)).length;
+
+    const write = await provider({ actingUserId: 'u-2' }).executeTool({ name: APP_BUILDER_RENDER_TOOL_ID, input: { app: VALID_APP } });
+    expect(write.isError).toBe(true);
+    expect(JSON.parse(write.content)).toEqual({ error: 'forbidden_scope', message: 'The user does not have write access to that organization.' });
+    expect((await listCanvasesForTenant(TENANT)).length).toBe(before);
+
+    const read = await provider({ actingUserId: 'u-2' }).executeTool({ name: APP_BUILDER_GET_DESIGN_TOOL_ID, input: { canvasId: mine.canvasId } });
+    expect(read.isError).toBe(true);
+    expect(JSON.parse(read.content)).toEqual({ error: 'forbidden_scope', message: 'The user does not have read access to that organization.' });
+    expect(read.content).not.toContain('Members Only');
+  });
+
+  it('with several orgs the caller must name one (org_required); an unknown org is not_found', async () => {
+    const tenantId = `org:at-two-orgs-${Date.now()}`;
+    await createOrg({ tenantId, createdBy: 'u-1', name: 'One', ownerSubject: 'u-1' });
+    await createOrg({ tenantId, createdBy: 'u-1', name: 'Two', ownerSubject: 'u-1' });
+    const p = createAgentToolProvider({ tenantId, actingUserId: 'u-1' });
+    const unnamed = await p.executeTool({ name: APP_BUILDER_RENDER_TOOL_ID, input: { app: VALID_APP } });
+    expect(unnamed.isError).toBe(true);
+    expect(JSON.parse(unnamed.content)).toMatchObject({ error: 'org_required' });
+    const unknown = await p.executeTool({ name: APP_BUILDER_RENDER_TOOL_ID, input: { app: VALID_APP, orgId: 'org-nope' } });
+    expect(unknown.isError).toBe(true);
+    expect(JSON.parse(unknown.content)).toEqual({ error: 'not_found', message: 'Organization not found in this workspace.' });
+    expect(await listCanvasesForTenant(tenantId)).toEqual([]);
   });
 
   it('returns closed-world validation errors the model can act on (the repair loop)', async () => {
@@ -161,8 +208,11 @@ describe('ADR 0358 — render tool: gates, repair-loop errors, persistence', () 
   it('is idempotent within a run (retries do not mint duplicate canvases)', async () => {
     const p = provider({ actingUserId: 'u-1', runId: 'run-adr0358' });
     const a = JSON.parse((await p.executeTool({ name: APP_BUILDER_RENDER_TOOL_ID, input: { app: VALID_APP } })).content) as { canvasId: string };
+    const afterFirst = (await listCanvasesForTenant(TENANT)).length;
     const b = JSON.parse((await p.executeTool({ name: APP_BUILDER_RENDER_TOOL_ID, input: { app: VALID_APP } })).content) as { canvasId: string };
     expect(b.canvasId).toBe(a.canvasId);
+    // Count the rows, not just the id: the retry minted nothing.
+    expect((await listCanvasesForTenant(TENANT)).length).toBe(afterFirst);
   });
 
   it('updates via CAS: stale baseVersion is a structured conflict, fresh one lands a new version', async () => {
@@ -207,6 +257,58 @@ describe('ADR 0358 — render tool: gates, repair-loop errors, persistence', () 
   });
 });
 
+// ABR-RENDER-1 (wave-36 grading) — the headline data loss, end to end through
+// the real tool, render node and canvas store. The render node rebuilt every
+// document from a fixed field list and renderCore CAS-wrote the result, so the
+// exact loop the agent prompt prescribes (get-design → render with baseVersion)
+// erased the user's data model, operations and per-node actions under a green
+// success. MEASURED red on origin/main d812ae704.
+describe('ABR-RENDER-1 — get-design → render(baseVersion) keeps the whole document', () => {
+  const RICH_APP = {
+    name: 'Tasks',
+    stateVariables: [{ id: 'filter', type: 'string', initial: 'all' }],
+    models: [{ id: 'task', name: 'Task', fields: [{ name: 'title', type: 'string', required: true }] }],
+    operations: [{ id: 'listTasks', name: 'List tasks', kind: 'list', modelId: 'task', output: { type: 'modelList' } }],
+    authProfile: { kind: 'email-password', roles: ['admin'] },
+    sharePolicy: { sampleData: 'include' },
+    screens: [{
+      id: 'home', name: 'Home', isInitial: true, components: [{
+        type: 'button', props: { label: 'Load', variant: 'primary' }, locked: true,
+        actions: [{ on: 'click', kind: 'invoke-operation', operation: 'listTasks' }],
+        bindings: { label: { path: 'state.filter' } },
+      }],
+    }],
+  };
+
+  it('an update that only renames the app leaves every facet the update did not touch', async () => {
+    await setAppBuilder('on');
+    const p = provider({ actingUserId: 'u-1' });
+    const created = JSON.parse((await p.executeTool({ name: APP_BUILDER_RENDER_TOOL_ID, input: { app: RICH_APP } })).content) as { canvasId: string; version: number };
+    expect((await getCanvasForTenant(TENANT, created.canvasId))?.state).toEqual(RICH_APP);
+
+    const read = JSON.parse((await p.executeTool({ name: APP_BUILDER_GET_DESIGN_TOOL_ID, input: { canvasId: created.canvasId } })).content) as { app: Record<string, unknown>; version: number };
+    const updated = await p.executeTool({
+      name: APP_BUILDER_RENDER_TOOL_ID,
+      input: { app: { ...read.app, name: 'Tasks v2' }, canvasId: created.canvasId, baseVersion: read.version },
+    });
+    expect(updated.isError).toBeFalsy();
+    expect((await getCanvasForTenant(TENANT, created.canvasId))?.state).toEqual({ ...RICH_APP, name: 'Tasks v2' });
+  });
+
+  it('an invalid value is refused with the field named, and the stored design is untouched', async () => {
+    await setAppBuilder('on');
+    const p = provider({ actingUserId: 'u-1' });
+    const created = JSON.parse((await p.executeTool({ name: APP_BUILDER_RENDER_TOOL_ID, input: { app: RICH_APP } })).content) as { canvasId: string; version: number };
+    const out = await p.executeTool({
+      name: APP_BUILDER_RENDER_TOOL_ID,
+      input: { app: { ...RICH_APP, themeColors: { primary: 'blue' } }, canvasId: created.canvasId, baseVersion: created.version },
+    });
+    expect(out.isError).toBe(true);
+    expect(out.content).toContain('themeColors.primary');
+    expect((await getCanvasForTenant(TENANT, created.canvasId))?.state).toEqual(RICH_APP);
+  });
+});
+
 describe('ADR 0358 — get-design: the app-state read path', () => {
   it('reads the current design + CAS version; cross-type and missing ids are not found', async () => {
     const p = provider({ actingUserId: 'u-1' });
@@ -220,6 +322,13 @@ describe('ADR 0358 — get-design: the app-state read path', () => {
     const missing = await p.executeTool({ name: APP_BUILDER_GET_DESIGN_TOOL_ID, input: { canvasId: 'canvas-nope' } });
     expect(missing.isError).toBe(true);
     expect(JSON.parse(missing.content)).toMatchObject({ error: 'not_found' });
+
+    // Cross-TYPE: a real canvas in the SAME tenant that is not an app design.
+    const slides = await createCanvasForTenant(TENANT, { canvasTypeId: 'canvas.slides', name: 'Deck', initialState: { slides: [] } });
+    const crossType = await p.executeTool({ name: APP_BUILDER_GET_DESIGN_TOOL_ID, input: { canvasId: slides.canvasId } });
+    expect(crossType.isError).toBe(true);
+    expect(JSON.parse(crossType.content)).toMatchObject({ error: 'not_found' });
+    expect(crossType.content).not.toContain('Deck');
   });
 
   it('requires a human-initiated turn (tenant rows never leak to system runs)', async () => {
@@ -235,7 +344,7 @@ describe('ADR 0358 — get-design: the app-state read path', () => {
     const foreign = await createCanvasForTenant('other-tenant', {
       canvasTypeId: 'canvas.app-builder',
       name: 'Foreign',
-      initialState: { name: 'Foreign', screens: [{ id: 'home', name: 'H', isInitial: true, components: [] }] } as never,
+      initialState: { name: 'Foreign', screens: [{ id: 'home', name: 'H', isInitial: true, components: [] }] },
     });
     const out = await provider({ actingUserId: 'u-1' }).executeTool({ name: APP_BUILDER_GET_DESIGN_TOOL_ID, input: { canvasId: foreign.canvasId } });
     expect(out.isError).toBe(true);

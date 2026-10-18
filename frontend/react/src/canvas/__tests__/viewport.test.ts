@@ -49,13 +49,16 @@ describe('zoomAtPoint', () => {
 
 describe('fitToBounds', () => {
   it('centres content and respects the margin', () => {
-    const f = fitToBounds({ minX: 0, minY: 0, maxX: 100, maxY: 100 }, 500, 300, 40, LIMITS);
-    expect(f.zoom).toBeCloseTo((300 - 80) / 100, 10);
-    // Content centre maps to the viewport centre.
-    const cx = 50 * f.zoom + f.pan.x;
-    const cy = 50 * f.zoom + f.pan.y;
-    expect(cx).toBeCloseTo(250, 10);
-    expect(cy).toBeCloseTo(150, 10);
+    // A WIDE box in a wide viewport: width binds (420/200 = 2.1) while height
+    // would allow 220/50 = 4.4 — a square fixture could not tell the axes apart.
+    const f = fitToBounds({ minX: 10, minY: 20, maxX: 210, maxY: 70 }, 500, 300, 40, LIMITS);
+    expect(f.zoom).toBeCloseTo(2.1, 10);
+    // Hand-derived: pan = (vw - cw·z)/2 - minX·z, per axis.
+    expect(f.pan.x).toBeCloseTo((500 - 420) / 2 - 21, 10); // 19
+    expect(f.pan.y).toBeCloseTo((300 - 105) / 2 - 42, 10); // 55.5
+    // Content centre (110, 45) maps to the viewport centre.
+    expect(110 * f.zoom + f.pan.x).toBeCloseTo(250, 10);
+    expect(45 * f.zoom + f.pan.y).toBeCloseTo(150, 10);
   });
   it('magnifies past 1:1 when the limits allow it', () => {
     const f = fitToBounds({ minX: 0, minY: 0, maxX: 10, maxY: 10 }, 500, 500, 0, LIMITS);
@@ -107,8 +110,7 @@ describe('clientToCanvas delegation', () => {
 
 describe('DEFAULT_ZOOM_LIMITS', () => {
   it('is a magnifying range for artboard canvases', () => {
-    expect(DEFAULT_ZOOM_LIMITS.min).toBeLessThan(1);
-    expect(DEFAULT_ZOOM_LIMITS.max).toBeGreaterThan(1);
+    expect(DEFAULT_ZOOM_LIMITS).toEqual({ min: 0.25, max: 8 });
   });
 });
 
@@ -140,8 +142,15 @@ describe('edgeScrollVector (ADR 0333 Phase 2)', () => {
     expect(atLeft.x).toBeCloseTo(14, 10); // pan grows → content slides right
     expect(atLeft.y).toBe(0);
     const nearRight = edgeScrollVector({ x: 800 - 6, y: 300 }, 800, 600, 24, 14);
-    expect(nearRight.x).toBeLessThan(0);
-    expect(Math.abs(nearRight.x)).toBeLessThan(14); // eased, not full speed
+    // 18px into the 24px zone → f = 0.75, eased (squared) = 0.5625 → 7.875 (linear would be 10.5).
+    expect(nearRight.x).toBeCloseTo(-7.875, 10);
+    expect(nearRight.y).toBe(0);
+    // The Y axis ramps independently, against the 600px height (not the 800px width).
+    const atTop = edgeScrollVector({ x: 400, y: 0 }, 800, 600, 24, 14);
+    expect(atTop).toEqual({ x: 0, y: 14 });
+    const nearBottom = edgeScrollVector({ x: 400, y: 600 - 6 }, 800, 600, 24, 14);
+    expect(nearBottom.x).toBe(0);
+    expect(nearBottom.y).toBeCloseTo(-7.875, 10);
   });
   it('never scrolls a degenerate wrapper', () => {
     expect(edgeScrollVector({ x: 1, y: 1 }, 40, 40, 24, 14)).toEqual({ x: 0, y: 0 });

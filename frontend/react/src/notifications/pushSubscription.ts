@@ -17,8 +17,7 @@
  */
 
 import { authedHeaders, config, fetchOpts } from '../client/config.js';
-
-const SW_PATH = '/sw-push.js';
+import { SW_SCOPE, SW_URL } from '../sw/swUrl.js';
 
 export interface PushConfig {
   enabled: boolean;
@@ -37,7 +36,7 @@ export async function getPushConfig(): Promise<PushConfig> {
 export async function getCurrentSubscription(): Promise<PushSubscription | null> {
   if (!('serviceWorker' in navigator) || !('PushManager' in window)) return null;
   try {
-    const reg = await navigator.serviceWorker.getRegistration(SW_PATH);
+    const reg = await navigator.serviceWorker.getRegistration(SW_SCOPE);
     if (!reg) return null;
     return reg.pushManager.getSubscription();
   } catch {
@@ -62,7 +61,7 @@ export async function enablePush(vapidPublicKey: string): Promise<{ subscription
   if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
     throw new Error('Push not supported in this browser');
   }
-  const reg = await navigator.serviceWorker.register(SW_PATH, { scope: '/' });
+  const reg = await navigator.serviceWorker.register(SW_URL, { scope: SW_SCOPE });
   // Wait for it to become active so `pushManager.subscribe()` doesn't
   // race against the install/activate cycle.
   if (reg.installing || reg.waiting) {

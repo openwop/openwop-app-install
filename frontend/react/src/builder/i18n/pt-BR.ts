@@ -426,6 +426,7 @@ export const messages = {
   pickProvider: 'Escolha um provedor…',
   loadingCredentials: 'Carregando credenciais…',
   noKeysStored: 'Nenhuma chave de {{provider}}armazenada ainda.',
+  credentialsLoadFailed: 'Não foi possível carregar suas chaves armazenadas, então não sabemos se há alguma.',
   manageKeys: 'Gerenciar chaves',
   manageKeysToAdd: 'para adicionar uma.',
   pickKey: 'Escolha uma chave…',

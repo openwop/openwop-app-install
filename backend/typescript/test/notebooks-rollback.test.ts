@@ -3,6 +3,10 @@
  * or its binding throwing) must ROLL BACK the project, not leave an orphaned `facet:'notebook'`
  * project that is invisible (toNotebook ⇒ null, 404 on get, filtered from the list) yet still
  * counts against the workspace cap. Found by the post-grade `/code-review` deep read.
+ *
+ * Sabotage witness (w20g5-rb-no-delete): drop the `deleteProject` in createNotebook's catch ⇒ red.
+ * (`listNotebooks` is NOT the reader here: it filters an unprovisioned project out whether or not
+ * it was rolled back, so only the raw project list can see the orphan.)
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
@@ -14,7 +18,7 @@ vi.mock('../src/features/kb/kbService.js', async (orig) => {
   return { ...actual, createCollection: vi.fn(async () => { throw new Error('kb collection unavailable'); }) };
 });
 
-import { createNotebook, listNotebooks } from '../src/features/notebooks/notebooksService.js';
+import { createNotebook } from '../src/features/notebooks/notebooksService.js';
 import { listProjects } from '../src/features/projects/projectsService.js';
 
 beforeEach(async () => { initHostExtPersistence(await openStorage('memory://')); });
@@ -26,6 +30,5 @@ describe('NB-5 — createNotebook rolls back a partial provision', () => {
 
     // The rollback deleted the just-minted project — no phantom consuming the workspace cap.
     expect((await listProjects('t')).filter((p) => p.facet === 'notebook')).toHaveLength(0);
-    expect(await listNotebooks('t')).toHaveLength(0);
   });
 });

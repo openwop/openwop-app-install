@@ -19,6 +19,7 @@ import { eraseSubjectEnrollments } from './enrollmentService.js';
 import { eraseSubjectCheckIns, purgeCheckInsByAge } from './todayService.js';
 import { eraseEvidenceForEnrollments, purgeEvidenceByAge } from './progressService.js';
 import { eraseSubjectInvites } from './inviteService.js';
+import { anonymizeChallengeAuthor } from './challengeService.js';
 import {
   eraseContactLinkForSubject,
   linkedContactIdsForSubject,
@@ -29,7 +30,8 @@ import {
  * The package's single subject-eraser. Deletes every subject-keyed row this package
  * owns for (tenant, subjectKey): the subject's enrollments + occurrences (and, via
  * the returned enrollment ids, their evidence snapshots), their check-ins, the
- * invites they minted, and their subject→contact link. Enrollment-keyed evidence
+ * invites they minted, and their subject→contact link; and re-stamps the author
+ * of every challenge they wrote (KTFAC-3 — the challenge itself is kept). Enrollment-keyed evidence
  * MUST be captured before the enrollment rows are deleted, so `eraseSubjectEnrollments`
  * returns the ids and evidence is dropped from them. No-op on a falsy tenant; each
  * helper is idempotent and none fires a notification (per the seam contract).
@@ -41,6 +43,9 @@ const kicktodoCoreEraser = async (tenantId: string, subjectKey: string): Promise
   await eraseSubjectCheckIns(tenantId, subjectKey);
   await eraseSubjectInvites(tenantId, subjectKey);
   await eraseContactLinkForSubject(tenantId, subjectKey);
+  // KTFAC-3 — challenges the subject authored stay (authored content) but stop
+  // naming them.
+  await anonymizeChallengeAuthor(tenantId, subjectKey);
 };
 
 /**
@@ -49,7 +54,10 @@ const kicktodoCoreEraser = async (tenantId: string, subjectKey: string): Promise
  * frozen evidence snapshots — exactly like the crm/comments purgers: guard on the
  * classification + a falsy tenant, sum the two `PurgeOutcome`s. Enrollments /
  * occurrences / invites / the contact link are `internal` operational rows (erased on
- * DSAR, never aged out), so they are deliberately not swept here.
+ * DSAR, never aged out), so they are deliberately not swept here. KTENR-3: the
+ * occurrence growth ceiling that makes "never aged out" safe is recorded on the
+ * `occurrences` collection in enrollmentService.ts; REVOKED invites do age out, on
+ * the kvAgeOut lane (KTCORE-4, inviteService.ts).
  */
 const kicktodoCorePurger: RetentionPurger = {
   feature: 'kicktodo-core',

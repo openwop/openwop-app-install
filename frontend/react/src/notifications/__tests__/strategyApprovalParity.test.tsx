@@ -8,31 +8,80 @@
  * bare buttons and a kind-blind "Proposal dismissed." toast for an outcome that is
  * actually "back in draft, resubmittable".
  *
- * These legs pin the PARITY, not the implementation: if a future kind is added with
- * bare buttons, the first leg is the one that notices.
+ * These legs pin the PARITY by BEHAVIOUR on both deciding surfaces: a strategy row
+ * offers the reason step, the typed reason reaches `rejectApproval`, and the toast
+ * says "back in draft … can be resubmitted".
+ *
+ * grade-tests w19 — the previous SGU-2 leg sliced `ApprovalsInbox.tsx` from the
+ * strategy block to END OF FILE, so the Claude Code group's identical
+ * `<ApprovalDecideBar … onReject={(note) => reject(a, note)}` satisfied it: bare
+ * buttons in the strategy group stayed green (probe w19g5-pa-decidebar-strategy,
+ * vacuous). Its export-name leg asserted what `tsc` already enforces (two inboxes
+ * import the bar). The four-locale leg is `scripts/check-i18n.mjs`'s job (checks 1
+ * and 4, in `npm run build`). Sabotage-witnessed: probes w19g5-pa-*.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
+import { MemoryRouter } from 'react-router-dom';
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import type { PendingApproval } from '../../agents/approvalsClient.js';
+
+const { listApprovals, listApprovalsByKind, rejectApproval } = vi.hoisted(() => ({
+  listApprovals: vi.fn<() => Promise<PendingApproval[]>>(),
+  listApprovalsByKind: vi.fn<() => Promise<PendingApproval[]>>(),
+  rejectApproval: vi.fn<(id: string, note?: string) => Promise<void>>(),
+}));
+vi.mock('../../agents/approvalsClient.js', async (orig) => ({
+  ...(await orig<typeof import('../../agents/approvalsClient.js')>()),
+  listApprovals, listApprovalsByKind, rejectApproval,
+}));
+vi.mock('../../agents/agentViewModel.js', async (orig) => ({
+  ...(await orig<typeof import('../../agents/agentViewModel.js')>()),
+  loadAgentViews: vi.fn(async () => []),
+}));
+vi.mock('../../orgs/orgMembers.js', () => ({ loadOrgMembers: vi.fn(async () => []), invalidateOrgMembers: vi.fn() }));
+const { toastInfo } = vi.hoisted(() => ({ toastInfo: vi.fn<(m: string) => void>() }));
+vi.mock('../../ui/toast.js', () => ({ toast: { success: vi.fn(), error: vi.fn(), info: toastInfo } }));
+
+import { ApprovalsInbox } from '../ApprovalsInbox.js';
+import { NeedsYouInbox } from '../NeedsYouInbox.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const read = (p: string): string => readFileSync(join(here, '..', p), 'utf8');
 
-describe('SGU-2 — both approval kinds get the same decide affordance', () => {
-  it('the decide bar is named for what it IS, not for its first consumer', () => {
-    const bar = read('ContentReviewContext.tsx');
-    expect(bar).toContain('export function ApprovalDecideBar');
-    expect(bar, 'the old name is why strategy shipped bare buttons').not.toContain('export function ContentReviewDecideBar');
-  });
+const ROW: PendingApproval = {
+  approvalId: 'sa1', rosterId: '', persona: '', workflowId: '',
+  kind: 'strategy-activation', strategyId: 's1', strategyTitle: 'North Star', orgId: 'o1',
+  proposal: 'Activate "North Star"?', status: 'pending', createdAt: '2026-08-20T00:00:00Z',
+};
 
-  it('the full inbox renders it for the strategy group, not just content-publish', () => {
-    const inbox = read('ApprovalsInbox.tsx');
-    const strategyBlock = inbox.slice(inbox.indexOf('strategyActivation.length > 0'));
-    expect(strategyBlock).toContain('<ApprovalDecideBar');
-    expect(strategyBlock, 'reject must carry the reviewer note').toContain('onReject={(note) => reject(a, note)}');
-  });
+beforeEach(() => {
+  listApprovals.mockReset(); listApprovalsByKind.mockReset(); rejectApproval.mockReset(); toastInfo.mockReset();
+  listApprovals.mockResolvedValue([ROW]);
+  listApprovalsByKind.mockResolvedValue([]);
+  rejectApproval.mockResolvedValue(undefined);
+});
+afterEach(cleanup);
 
+describe('SGU-2 / SGU-3 — a strategy activation is rejected WITH a reason, and the toast says back-in-draft', () => {
+  for (const [name, Surface] of [['ApprovalsInbox', ApprovalsInbox], ['NeedsYouInbox', NeedsYouInbox]] as const) {
+    it(`${name}: Reject opens the reason step, the note reaches the wire, and the toast says resubmittable`, async () => {
+      render(<MemoryRouter><Surface /></MemoryRouter>);
+      await screen.findByText('Activate "North Star"?');
+      fireEvent.click(screen.getByRole('button', { name: /^reject$/i }));
+      // The reasoned bar: a bare reject button has no reason step at all.
+      const reason = await screen.findByLabelText(/why are you sending this back/i);
+      fireEvent.change(reason, { target: { value: 'needs owners' } });
+      fireEvent.click(screen.getByRole('button', { name: /send back to draft/i }));
+      await waitFor(() => expect(rejectApproval).toHaveBeenCalledWith('sa1', 'needs owners'));
+      await waitFor(() => expect(toastInfo).toHaveBeenCalledWith('Rejected — the strategy is back in draft and can be resubmitted.'));
+    });
+  }
+});
+
+describe('SGU-2 — the remaining bare-reject sites', () => {
   /**
    * RATCHET, shrink-only. Writing this test as "no group may use a bare reject" was the
    * first instinct and it FAILED — correctly. This inbox has five card groups
@@ -48,24 +97,5 @@ describe('SGU-2 — both approval kinds get the same decide affordance', () => {
     const inbox = read('ApprovalsInbox.tsx');
     const bare = inbox.split('onClick={() => void reject(a)}').length - 1;
     expect(bare, 'a NEW approval group must not ship a reject that drops the reviewer note').toBeLessThanOrEqual(4);
-  });
-});
-
-describe('SGU-3 — the reject toast says what actually happened', () => {
-  it('a rejected strategy activation is reported as back-in-draft, in both inboxes', () => {
-    for (const f of ['ApprovalsInbox.tsx', 'NeedsYouInbox.tsx']) {
-      expect(read(f), `${f} must not report a reversible reject as a dismissal`)
-        .toContain('toastStrategyRejectedToDraft');
-    }
-  });
-
-  it('the copy exists in all four locales (no fallback leak)', () => {
-    for (const loc of ['en', 'es', 'fr', 'pt-BR']) {
-      expect(read(`i18n/${loc}.ts`)).toContain('toastStrategyRejectedToDraft');
-    }
-  });
-
-  it('and it says the strategy can be resubmitted — the fact the old copy hid', () => {
-    expect(read('i18n/en.ts')).toMatch(/toastStrategyRejectedToDraft:.*resubmitted/);
   });
 });

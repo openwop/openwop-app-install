@@ -1,21 +1,24 @@
 /**
- * Marketplace hub wayfinding — Billing is where a workspace owner goes to change
+ * ADR 0820 §7 (the Marketplace hub, 1977a1156) wayfinding — Billing is where a workspace owner goes to change
  * what they pay for, so it links to the feature store (the Marketplace hub's
  * primary tab). The link follows the store's own gate: shown only while the
  * `marketplace` toggle is on (the route would render "not enabled" otherwise).
  * Both directions are pinned so "hidden" cannot pass against a deleted link.
+ * Witnessed (wave 52): `storeOn ?` → `true ?` reds the OFF case; a wrong `to`
+ * reds the ON case.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
+import type { Subscription, TokenBalance, AiCreditMeter } from '../billingClient.js';
 
 const marketplace = vi.hoisted(() => ({ on: true }));
 vi.mock('../billingClient.js', async (orig) => ({
   ...(await orig<Record<string, unknown>>()),
-  getSubscription: vi.fn(async () => ({ tenantId: 't', planTier: 'free', status: 'none' })),
-  getBalance: vi.fn(async () => ({ tenantId: 't', purchasedTokensTotal: 0, totalAvailable: 0 })),
-  getAiCredits: vi.fn(async () => ({ freeDaily: null, monthly: null, balanceCredits: 0, windowDays: 30, topFeatures: [], otherCredits: 0 })),
+  getSubscription: vi.fn(async (): Promise<Subscription> => ({ tenantId: 't', planTier: 'free', status: 'none' })),
+  getBalance: vi.fn(async (): Promise<TokenBalance> => ({ tenantId: 't', purchasedTokensTotal: 0, totalAvailable: 0 })),
+  getAiCredits: vi.fn(async (): Promise<AiCreditMeter> => ({ freeDaily: null, monthly: null, balanceCredits: 0, windowDays: 30, topFeatures: [], otherCredits: 0 })),
 }));
 vi.mock('../../../featureToggles/FeatureAccessContext.js', () => ({
   useFeatureAccess: (id: string) => makeFeatureAccess({ enabled: id === 'marketplace' ? marketplace.on : true, loading: false }),

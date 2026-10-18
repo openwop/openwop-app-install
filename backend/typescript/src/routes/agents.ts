@@ -36,8 +36,6 @@ import { A2A_10_ERROR, errorData10 } from '../host/a2aCodec10.js';
 import { sanitizeForErrorMessage } from '../middleware/sanitize.js';
 import { getAgentRegistry, type ResolvedAgentManifest } from '../executor/agentRegistry.js';
 import { runAgentDispatch, runAgentDispatchLive, AgentNotFoundError, type AgentDispatchRequest, type CallAi } from '../host/agentDispatch.js';
-import { stampRunStartContext } from '../host/runStartContext.js';
-import { readCompactionDecision } from '../executor/compaction.js';
 import { createAiProvidersAdapter, assertModalitiesAdvertised, INPUT_MODALITIES, AiProviderError } from '../aiProviders/aiProvidersHost.js';
 import type { AiCallRequest } from '../executor/types.js';
 import { dispatchChat, type ChatMessage } from '../providers/dispatch.js';
@@ -48,16 +46,14 @@ import { COPILOT_PROVIDER_ID } from '../aiProviders/copilotSubscription.js';
 import { storeSubscriptionCredential, subscriptionCredentialRef } from '../byok/subscriptionCredential.js';
 import { removeSecret } from '../byok/secretResolver.js';
 import { callerSubject, personalTenantOf } from '../host/requestSubject.js';
-import { createScopedAgentToolProvider, builtinAgentToolIds } from '../host/agentToolProvider.js';
-import { buildLaneFirewall } from '../host/laneFirewall.js';
+import { requireProtocolScope } from '../host/protocolAuthorization.js';
+import { requireNonAnonymousPrincipal } from '../middleware/auth.js';
+import { apiKeysConfigured } from '../middleware/apiKeyTenants.js';
+import type { LogReasonCode } from '../observability/logReasonCodes.js';
+import { builtinAgentToolIds } from '../host/agentToolProvider.js';
+import { buildLiveDispatchLane } from '../host/liveDispatchLane.js';
 import { advertisedCapabilitySet, mergeDegraded } from '../host/agentCapabilities.js';
 import { projectMemoryDegradation, type MemoryDimension } from '../host/memoryDimensions.js';
-import { gradeSuite, type EvalTask } from '../host/agentEvalGrader.js';
-import { evalSuiteEnabled } from '../host/workforceEval.js';
-import { createAgentMemoryPort, agentMemoryScope } from '../host/agentMemoryAdapter.js';
-import { resolveAgentIdentity } from '../host/agentIdentity.js';
-import { resolveAgentKnowledgeRetrieve } from '../host/agentKnowledgeComposition.js';
-import { getBorrowedRecallResolver } from '../host/twinRecallSurface.js';
 import { handleA2aRequest, type A2aJsonRpcRequest } from '../host/a2aServer.js';
 import { createA2aSurface, getPublishedAgentCard, A2aVersionRefusedError, type A2aCallRecord } from '../host/a2aSurface.js';
 import { traceContextFromHeaders } from '../host/traceContext.js';
@@ -73,7 +69,7 @@ import { startWorkflowRun } from '../host/runStarter.js';
 import { requestOrigin } from '../host/requestOrigin.js';
 import type { HostAdapterSuite } from '../host/index.js';
 import type { Storage } from '../storage/storage.js';
-import type { UserAgentRecord } from '../types.js';
+import { OpenwopError, type UserAgentRecord } from '../types.js';
 import { agentVisibleToTenant, resolveAgentForTenant } from '../host/agentVisibility.js';
 import { sendError, sendErrorWithMintedIds } from '../middleware/errorEnvelope.js';
 import { assetServeUrl } from '../host/assetServePath.js';
@@ -318,151 +314,31 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
       if (body.live === true && deps.hostSuite) {
         const tenantId = (req as AgentReqLike).tenantId ?? 'default';
         // Ad-hoc dispatch (not a persisted run): a synthetic scope, empty BYOK
-        // secrets, no event-log emit. The managed tier needs none of these; a
-        // pinned BYOK provider would fail byok_required (returned as a failed
-        // turn), which is the honest outcome without a per-run vault.
-        // RCL-3(b) — mint the dispatch id ONCE and share it between the provider
-        // adapter and the borrowed-recall ctx below, so the twin.recall audit row
-        // can correlate this (runless) dispatch instead of carrying no ref at all.
+        // secrets, no event-log emit. RCL-3(b) — the dispatch id is minted ONCE
+        // and shared by the adapter, the borrowed-recall audit row and the
+        // firewall. ADR 0889 D3 — the lane composition (identity, scoped tools,
+        // memory, knowledge, borrowed recall, compaction, firewall) lives in
+        // `host/liveDispatchLane.ts`, shared with the eval runner.
         const dispatchRunId = `agent-dispatch:${randomUUID()}`;
-        const adapter = createAiProvidersAdapter({
-          runId: dispatchRunId,
-          nodeId: 'agent.dispatch',
+        const lane = await buildLiveDispatchLane({
           tenantId,
-          attempt: 1,
-          secrets: {},
+          agentId: reqShape.agentId,
+          dispatchRunId,
+          actingUserId: callerSubject(req),
+          ...(personalTenantOf(req) ? { personalTenant: personalTenantOf(req) } : {}),
+          ...(req.userId ? { userId: req.userId } : {}),
           policyResolver: deps.hostSuite.providerPolicyResolver,
         });
-        // A2 — wire the host's built-in tool catalog + executor so a tool-using
-        // turn runs end-to-end. The host offers its built-in tool ids this turn
-        // (intersected with the agent's toolAllowlist inside dispatch, §A14);
-        // the caller MAY still pin a narrower `availableTools`.
-        // ADR 0277 P2 — normalize once: the profile id scopes the knowledge
-        // tools; the memory scope + knowledge composition key off it too.
-        const dispatchIdentity = await resolveAgentIdentity(tenantId, reqShape.agentId, { allowReverseScan: true });
-        // ADR 0830 D1 — through the ONE scope composer (ADR 0324), WITH the caller. This
-        // hand-rolled literal carried no `actingUserId`, so every tool on this lane ran
-        // as a system run (tenant-trusted) for any signed-in caller —
-        // `openwop:knowledge.search` included, which then read every org's KB. The
-        // subject is `callerSubject` (an `apikey:`/bearer caller has no `req.userId`,
-        // and resolves through its issuer like every other lane).
-        const toolProvider = createScopedAgentToolProvider({
-          tenantId, runId: reqShape.agentId, agentProfileId: dispatchIdentity.profileId,
-          actingUserId: callerSubject(req), personalTenant: personalTenantOf(req),
-        });
-        const memory = createAgentMemoryPort(tenantId);
-        const memoryScope = agentMemoryScope(dispatchIdentity.profileId);
-        // ADR 0038 Phase 3 — compose the agent's BOUND knowledge (cited KB docs +
-        // private memory) into the turn, from host-owned primitives. `undefined`
-        // (no `knowledge` capability / no binding) ⇒ dispatch is unchanged.
-        // ADR 0442 P3 — this ad-hoc/runless dispatch has no acting participant, so
-        // a default-scope agent recalls `agent:<profileId>` (unchanged) and a
-        // `per-user` agent fails closed (chat is its surface, not this path).
-        // ADR 0664 D6 — re-resolve the READER. ADR 0643 R3 left `PREAUTHORIZED_CALLER` on
-        // lanes where no principal exists, and re-resolves "wherever a principal exists";
-        // this lane HAS one (`req.userId`, used for the borrowed-recall gate 17 lines
-        // below), so it belongs in the second group and was simply missed — it lives on a
-        // different router than the four `agent-knowledge/routes.ts` reads that do it.
-        // `actor` stays undefined: the per-user memory-scope posture above is unchanged.
-        const knowledgeRetrieve = await resolveAgentKnowledgeRetrieve(
-          tenantId, dispatchIdentity.profileId, memory, undefined,
-          req.userId ? { subject: req.userId } : undefined,
-        );
-        // ADR 0044 Phase 2 — when this agent is a granted twin, compose its OWNER's
-        // corpus (live grant gate via the host seam the `twin` feature fills). The
-        // result is fenced STRUCTURALLY by dispatch (`borrowedRetrieve` → untrusted
-        // block). Absent / not-granted / toggle-off ⇒ undefined ⇒ no cross read.
-        const borrowedResolver = getBorrowedRecallResolver();
-        // WF-TWIN-5 — the RESOLVED profile id, not the raw URL id. The resolver
-        // keys on the ROSTER id (`getTwinLink` → `getRosterEntry`), and
-        // `resolveAgentIdentity` returns `profileId = entry.rosterId ≠ id` on its
-        // reverse-lookup branch — so a registry-id dispatch of a granted twin
-        // silently recalled nothing. Every adjacent consumer on THIS lane already
-        // uses `dispatchIdentity.profileId` (`:313`, `:315`, `:322`), and the other
-        // two lanes pass the resolved id and say why in a comment
-        // (`agentRunnerNode.ts:161-162`, `chatContext.ts:243-244`). This was the
-        // odd one out. Fail-closed (capability loss, not leakage).
-        // ADR 0589 §D2 — the acting human on this lane is the session's own user.
-        // ADR 0666 D5 — its OWN catch, degrading rather than 500-ing.
-        //
-        // This await used to sit bare inside the route-wide `try`, whose catch returns a 500 —
-        // so a transient consent-store read failure killed the whole request on this lane
-        // while the other two degraded and told the model (`host/agentRunnerNode.ts` resolves a
-        // fault sentinel; `host/chatContext.ts` pushes a degradation label). Three lanes, three
-        // behaviours, for one fault.
-        //
-        // Deliberately a dedicated catch: moving the await elsewhere inside the route `try` is a
-        // no-op, because that catch also fails the request — the same reasoning
-        // `agentRunnerNode.ts` records where it made the identical fix for the run lane.
-        let borrowedSource: Awaited<ReturnType<NonNullable<typeof borrowedResolver>>>;
-        try {
-          borrowedSource = borrowedResolver
-            ? await borrowedResolver(tenantId, dispatchIdentity.profileId, {
-                ...(req.userId ? { callerUserId: req.userId } : {}),
-                // RCL-3(b) — the minted ad-hoc dispatch id (shared with the
-                // adapter above) so the audit row carries a correlatable ref.
-                // No `dispatchId` (F1): this runId is minted per dispatch, so it
-                // already IS the dispatch identity — one dispatch, one row.
-                runId: dispatchRunId,
-              })
-            : undefined;
-        } catch (err) {
-          log.warn('twin_recall_resolve_failed_degrading', {
-            tenantId, agentId: dispatchIdentity.profileId, runId: dispatchRunId,
-            error: err instanceof Error ? err.message : String(err),
-          });
-          // The fault SENTINEL, not `undefined`: a faulted authorization read must not present
-          // as "not granted". The model is told the owner corpus could not be READ, and the
-          // answer still happens. Fail-closed on content — no chunks.
-          borrowedSource = { retrieve: async (_q, onSourceError) => { onSourceError?.('kb'); return []; }, ownerUserId: '' };
-        }
-        const borrowedRetrieve = borrowedSource?.retrieve;
-        // ADR 0099 §residuals — this dispatch is RUNLESS (no run.metadata to read),
-        // so resolve the compaction decision here via the SAME core run-start seam
-        // (no feature import, no new seam) and pass it in. Toggle off ⇒ undefined ⇒
-        // identity. Per-agent lossy only matches when the manifest agentId is also a
-        // profile (roster) id; otherwise the tenant lossless default applies.
-        // Cost: one toggle resolution per LIVE dispatch — negligible beside the
-        // model round-trip this path is about to make.
-        const compactionMeta = await stampRunStartContext({}, { tenantId, agentId: reqShape.agentId });
-        const compaction = readCompactionDecision(compactionMeta);
-        // CFP Phase-2 review HIGH-1 — this ad-hoc live-dispatch lane runs the SAME
-        // real tool executor as chat/runs, so it takes the SAME ADR 0150 gate:
-        // without it, an agent pack that allowlists a sensitive tool (code-exec,
-        // files.write, http.fetch) executes it with no approval. Mirrors
-        // agentRunnerNode's hook; an escalated result surfaces in the response.
-        // ADR 0834 D1 — the ONE lane factory (always safe here: no interactive user).
-        const { hook: firewall } = await buildLaneFirewall({ tenantId, lane: 'dispatch', resource: dispatchRunId, dedupeKey: dispatchRunId });
         const result = await runAgentDispatchLive(
           {
             ...reqShape,
+            // A2 — the host offers its built-in tool ids (intersected with the
+            // agent's toolAllowlist inside dispatch, §A14); the caller MAY pin
+            // a narrower `availableTools`.
             availableTools: reqShape.availableTools ?? [...builtinAgentToolIds()],
-            ...(compaction ? { compaction } : {}),
+            ...(lane.compaction ? { compaction: lane.compaction } : {}),
           },
-          {
-            callAI: adapter.callAI,
-            callAIWithTools: adapter.callAIWithTools,
-            resolveTool: toolProvider.resolveTool,
-            executeTool: toolProvider.executeTool,
-            // ADR 0102 — lets the tool loop resolve this standing agent's tool
-            // permissions for the per-tool gate (shadow-logged until enabled).
-            tenantId,
-            // ADR 0775 D3 — the addressed id (the registry id here: this route
-            // resolves only registry/user agents), so every roster member that
-            // shares it binds.
-            agentAddressedId: req.params.agentId,
-            // A4 — cross-run agent memory (RFC 0004). Injected unconditionally;
-            // dispatch's `memoryEnabled` gate only reads/writes when the agent's
-            // manifest declares `memoryShape.longTerm`, so agents without it are
-            // unaffected. tenant-bound for CTI-1; per-agent namespace.
-            memory,
-            memoryScope,
-            ...(knowledgeRetrieve ? { knowledgeRetrieve } : {}),
-            ...(borrowedRetrieve ? { borrowedRetrieve } : {}),
-            // RCL-6 — the owner's name labels the fenced borrowed block.
-            ...(borrowedSource?.ownerName ? { borrowedOwnerName: borrowedSource.ownerName } : {}),
-            firewall,
-          },
+          lane.deps,
         );
         res.status(200).json(result);
         return;
@@ -483,42 +359,12 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
     }
   });
 
-  // A8 — agent-eval grader seam (RFC 0081). Scores a batch of agent results
-  // against typed criteria (golden/rubric/schema) via the deterministic
-  // `gradeSuite` grader and returns the content-free `EvalSummary` (scalars +
-  // per-task scores, NO result text — the `eval-summary-no-content-leak`
-  // posture). Gated on `evalSuiteEnabled()`: a host that does not advertise
-  // `agents.evalSuite` MUST NOT serve it, so we 404 when disabled (mirrors the
-  // sandbox-MVP seam's gating in testSeam.ts). The request supplies parallel
-  // `tasks[]` / `results[]` arrays — the runner produces the results, the host
-  // grades them; the grader never makes a model call (replay-safe).
-  app.post('/host/openwop-app/agents/eval-run', (req, res) => {
-    if (!evalSuiteEnabled()) {
-      res.status(404).json({ error: 'not_found', message: 'agent eval suite disabled (set OPENWOP_AGENT_EVAL_SUITE_ENABLED=true)' });
-      return;
-    }
-    const body = (req.body ?? {}) as { tasks?: unknown; results?: unknown };
-    if (!Array.isArray(body.tasks) || !Array.isArray(body.results)) {
-      res.status(400).json({ error: 'validation_error', message: 'tasks[] and results[] arrays are required' });
-      return;
-    }
-    if (body.tasks.length !== body.results.length) {
-      res.status(400).json({ error: 'validation_error', message: `tasks/results length mismatch (${body.tasks.length} vs ${body.results.length})` });
-      return;
-    }
-    // Structural check of each task: a string taskId and a criterion with a
-    // known `kind`. The grader is defensive about criterion internals (an
-    // unknown kind scores 0), but a malformed envelope is a client error.
-    for (const [i, t] of body.tasks.entries()) {
-      const task = t as Partial<EvalTask>;
-      if (typeof task?.taskId !== 'string' || !task.criterion || typeof (task.criterion as { kind?: unknown }).kind !== 'string') {
-        res.status(400).json({ error: 'validation_error', message: `tasks[${i}] must have a string taskId and a criterion with a kind` });
-        return;
-      }
-    }
-    const summary = gradeSuite(body.tasks as EvalTask[], body.results);
-    res.status(200).json(summary);
-  });
+  // ADR 0889 EVAL-8 — the legacy `POST /host/openwop-app/agents/eval-run` grader
+  // (`host/agentEvalGrader.ts`) was RETIRED here: a second, divergent grader with no
+  // tenant check, no run and a non-RFC summary shape, env-gated and called by
+  // nothing but its own tests. Agent evals run through the ONE lane,
+  // `POST /runs {mode:"eval"}` (RFC 0081 §B, `host/evals/`). The conformance
+  // eval-run seam is a different path (`/v1/host/sample/agents/eval-run`).
 
   // RFC 0091 §A/§B — multimodal perception input on `callAI`. This seam exposes
   // the host's modality gate (`assertModalitiesAdvertised`, the SAME guard the
@@ -799,8 +645,50 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
       sendError(res, 500, 'internal_error', err instanceof Error ? err.message : String(err));
     }
   };
-  app.post('/host/openwop-app/ai/call-speech-synthesizer', callSpeechSynthesizerSeam);
-  app.post('/host/sample/ai/call-speech-synthesizer', callSpeechSynthesizerSeam);
+  // ADR 0893 VOX2-F1 — the speech seams spend a provider (the managed MiniMax tier
+  // on the platform key when the test seam is off), so they take the gate every
+  // other voice route takes: `runs:create`, the scope that opens a conversation.
+  // The conformance harness's wildcard bearer passes it, so no certified row moves.
+  // VOX2-F1b: the scope gate alone let a cookieless caller through (MEASURED on prod
+  // 5edc98fe6: a fresh anon: session got 200), because enforcement is off there and
+  // every fresh anon tenant gets its own TTS budget. An anonymous principal is
+  // refused first, as on every other test seam (host-sample-test-seams.md).
+  // ADR 0900 D1: those two gates still let ANY signed-in member spend the managed tier,
+  // and no product surface calls these routes (the FE and the podcasts pack reach TTS
+  // through `ctx.callSpeechSynthesizer` inside a run). They are admitted only in the
+  // test-seam mode or for a CONFIGURED wildcard principal (`<key>:*`, the corpus's
+  // credential), never the public `dev-token:*` fallback (the ADR 0771 rule). Everyone
+  // else gets the 404 every flag-gated seam answers when its flag is off
+  // (`hostEventEmitSeam.ts`), anonymous visitors included, so a closed seam reads as an
+  // absent one. Both flags are read per request.
+  const speechSeamAnon = requireNonAnonymousPrincipal('the RFC 0105/0106 speech seams');
+  const speechSeamRefused = (route: string, reasonCode: LogReasonCode): void => {
+    log.info('speech_seam_refused', { reasonCode, route });
+  };
+  const speechSeamGate = (route: string) => (req: Request, res: Response, next: NextFunction): void => {
+    const admitted = process.env.OPENWOP_TEST_SEAM_ENABLED === 'true'
+      || ((req.principal?.tenants ?? []).includes('*') && apiKeysConfigured());
+    if (!admitted) {
+      speechSeamRefused(route, 'speech_seam_not_admitted');
+      sendError(res, 404, 'not_found', 'The conformance seam surface is not enabled on this host.');
+      return;
+    }
+    // `requireNonAnonymousPrincipal` is synchronous: not calling back IS its refusal.
+    let passedAnon = false;
+    speechSeamAnon(req, res, () => {
+      passedAnon = true;
+      requireProtocolScope(req, 'runs:create').then(() => next(), (err: unknown) => {
+        // Only a scope DENY is counted as one; a membership-store fault is not a refusal.
+        if (err instanceof OpenwopError && err.httpStatus === 403) speechSeamRefused(route, 'speech_seam_insufficient_scope');
+        next(err);
+      });
+    });
+    if (!passedAnon) speechSeamRefused(route, 'speech_seam_anonymous');
+  };
+  const SYNTH_APP = '/host/openwop-app/ai/call-speech-synthesizer';
+  const SYNTH_SAMPLE = '/host/sample/ai/call-speech-synthesizer';
+  app.post(SYNTH_APP, speechSeamGate(SYNTH_APP), callSpeechSynthesizerSeam);
+  app.post(SYNTH_SAMPLE, speechSeamGate(SYNTH_SAMPLE), callSpeechSynthesizerSeam);
 
   // RFC 0106 §B (ADR 0109 P1) — the `ctx.callTranscriber` test seam. Exercises
   // the same per-node adapter `ctx.callTranscriber` uses, with a COLLECTING
@@ -858,8 +746,10 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
       sendError(res, 500, 'internal_error', err instanceof Error ? err.message : String(err));
     }
   };
-  app.post('/host/openwop-app/ai/call-transcriber', callTranscriberSeam);
-  app.post('/host/sample/ai/call-transcriber', callTranscriberSeam);
+  const STT_APP = '/host/openwop-app/ai/call-transcriber';
+  const STT_SAMPLE = '/host/sample/ai/call-transcriber';
+  app.post(STT_APP, speechSeamGate(STT_APP), callTranscriberSeam);
+  app.post(STT_SAMPLE, speechSeamGate(STT_SAMPLE), callTranscriberSeam);
 
   // RFC 0106 §D/§F (ADR 0109 P4) — the barge-in / cancellation seam. A live mic
   // SESSION is host-internal per RFC 0106 §E, but the WIRE CONTRACT the

@@ -29,6 +29,11 @@ const ALLOWED: Record<string, number> = {
   'features/billing/entitlementGuard.ts': 1,
   // The FE single-assignment read (the bulk map resolves configs directly).
   'routes/featureToggles.ts': 1,
+  // ADR 0892 Phase B — the store card's "is this bundle already on here" read.
+  // Visibility only; the plan half is asked explicitly through
+  // `checkTenantEntitlement` before the state can say anything but `locked`, and
+  // before any enable writes.
+  'host/featureBundleActivation.ts': 1,
   // ADR 0820 §7 — the owner-lapse helper for PUBLIC lanes (`checkOwnerPublicAccess`,
   // first caller: the storefront). It reads the toggle alone because it applies the
   // plan half ITSELF, with the grace window and fault-serves rule that `resolveOne`
@@ -64,7 +69,14 @@ const ALLOWED: Record<string, number> = {
   'features/webinars/formsSubmissionSink.ts': 1,
   // ADR 0850 D1 — the service-desk form sink now reads its toggle (FRMWF-13); a
   // public visitor lane, tenant from the resource, the same opt-out as its siblings.
-  'features/service-desk/intake.ts': 1,
+  // +1 ADR 0878 D9 — the WhatsApp intake observer read NO toggle (SD2-S7); the sender
+  // is not a member, so it is the same visitor opt-out, plus the owner-lapse policy.
+  'features/service-desk/intake.ts': 2,
+  // ADR 0878 D3 — a reply's widget delivery reads the `service-desk.widget` sub-toggle
+  // to answer "can the VISITOR see this thread" — the question the visitor lane
+  // (widgetRoutes, below) answers with the same toggle-only read. The member's own
+  // access is the route's `resolveOne`; this grants nothing.
+  'features/service-desk/delivery.ts': 1,
   // ADR 0820 §8.2 — public VISITOR lanes of features moved into the Support bundle.
   // The tenant comes from the resource (widget token / intake key); paywalling the
   // visitor would 404 every visitor of a lapsed owner, and every tenant's visitors

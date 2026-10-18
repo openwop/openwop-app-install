@@ -62,6 +62,12 @@ describe('resolveInternalToken', () => {
     expect(resolveInternalToken()).toBe('k1');
   });
 
+  it('ADR 0902 (TD2CD-1): presents the KEY of a `<key>:<tenant>` entry, never the whole entry', () => {
+    delete process.env.OPENWOP_INTERNAL_TOKEN;
+    process.env.OPENWOP_API_KEYS = 'svc-key:*,k2:acme';
+    expect(resolveInternalToken()).toBe('svc-key');
+  });
+
   it('uses the dev literal only when auth is not enforced and no creds exist', () => {
     delete process.env.OPENWOP_INTERNAL_TOKEN;
     delete process.env.OPENWOP_API_KEYS;

@@ -24,12 +24,16 @@ const board: KanbanBoard = {
   id: 'b1', tenantId: 't1', name: 'Board',
   columns: [{ id: 'todo', name: 'To do' }, { id: 'done', name: 'Done', terminal: true }],
   createdAt: '2026-08-01T00:00:00Z', updatedAt: '2026-08-01T00:00:00Z',
-} as KanbanBoard;
+};
+const mkCard = (id: string, columnId: string, title: string, order: number): KanbanCard => ({
+  id, boardId: 'b1', columnId, title, priority: 'normal', order,
+  createdAt: '2026-08-01T00:00:00Z', updatedAt: '2026-08-01T00:00:00Z',
+});
 const cards: KanbanCard[] = [
-  { id: 'c1', boardId: 'b1', columnId: 'todo', title: 'Alpha', priority: 'normal', order: 0 } as KanbanCard,
-  { id: 'c2', boardId: 'b1', columnId: 'todo', title: 'Beta', priority: 'normal', order: 1 } as KanbanCard,
-  { id: 'c3', boardId: 'b1', columnId: 'todo', title: 'Gamma', priority: 'normal', order: 2 } as KanbanCard,
-  { id: 'c4', boardId: 'b1', columnId: 'done', title: 'Delta', priority: 'normal', order: 0 } as KanbanCard,
+  mkCard('c1', 'todo', 'Alpha', 0),
+  mkCard('c2', 'todo', 'Beta', 1),
+  mkCard('c3', 'todo', 'Gamma', 2),
+  mkCard('c4', 'done', 'Delta', 0),
 ];
 
 afterEach(cleanup);
@@ -88,9 +92,12 @@ describe('KB-BULK — selection', () => {
   });
 
   it('`x` inside a form field is typing, not selection (polarity)', () => {
-    view({ onCreateCard: vi.fn() });
-    fireEvent.click(screen.getAllByRole('button', { name: '+ Add card' })[0]!);
-    fireEvent.keyDown(screen.getByPlaceholderText('Task title…'), { key: 'x' });
+    // The field must sit INSIDE a card (`[data-card-id]`) — the card's own edit
+    // form. A field outside every card (the add-card composer) finds no card to
+    // select with or without the typing guard, so it could never fail.
+    view({ onEditCard: vi.fn() });
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Alpha' }));
+    fireEvent.keyDown(screen.getByLabelText('Card title'), { key: 'x' });
     expect(screen.queryByRole('toolbar', { name: 'Bulk actions for selected cards' })).toBeNull();
   });
 
@@ -111,7 +118,23 @@ describe('KB-BULK — bulk actions fan out over the existing callbacks', () => {
     expect(onMoveCard).toHaveBeenCalledTimes(2);
     expect(onMoveCard.mock.calls.map((c) => c[0]).sort()).toEqual(['c1', 'c2']);
     expect(onMoveCard.mock.calls.every((c) => c[1] === 'done')).toBe(true);
+    // Load-bearing only since KBV-MOVE-1 was fixed (#4758): before, the moved
+    // cards vanished from the view and the prune effect emptied the selection
+    // whether or not the handler cleared it (probe w37g2-bb-move-clear was vacuous).
     expect(screen.queryByRole('toolbar', { name: 'Bulk actions for selected cards' })).toBeNull();
+  });
+
+  // KBV-MOVE-1 (found by grade-tests wave 37, FIXED by #4758): `moveCard`'s
+  // optimistic update returned `remaining.map(…)`, and `remaining` EXCLUDES the
+  // moved card — so on any surface whose parent does not re-supply `cards` (this
+  // bulk bar; an in-lane reorder on /boards until its refetch lands) the moved
+  // card vanished instead of landing in its target lane.
+  it('KBV-MOVE-1 — a bulk-moved card stays on the board, in its target lane', () => {
+    view();
+    fireEvent.keyDown(grip('Alpha'), { key: 'x' });
+    fireEvent.change(within(bar()).getByLabelText('Move to'), { target: { value: 'done' } });
+    const doneCol = document.querySelector<HTMLElement>('[data-column-id="done"]')!;
+    expect(within(doneCol).getByLabelText('Drag Alpha to another lane')).toBeTruthy();
   });
 
   it('priority + delete render ONLY with their callbacks; delete is ONE batched call', () => {
@@ -121,15 +144,17 @@ describe('KB-BULK — bulk actions fan out over the existing callbacks', () => {
     fireEvent.keyDown(grip('Alpha'), { key: 'x' });
     fireEvent.keyDown(grip('Gamma'), { key: 'x' });
     fireEvent.change(within(bar()).getByLabelText('Priority'), { target: { value: 'high' } });
-    expect(onEditCard).toHaveBeenCalledTimes(2);
-    expect(onEditCard).toHaveBeenCalledWith('c1', { priority: 'high' });
+    // Exactly the two selected cards, once each — not one of them twice.
+    expect(onEditCard.mock.calls).toEqual([['c1', { priority: 'high' }], ['c3', { priority: 'high' }]]);
 
+    // TWO cards: with one, a per-id fan-out and a batch both make one call.
     fireEvent.keyDown(grip('Beta'), { key: 'x' });
-    fireEvent.click(within(bar()).getByRole('button', { name: 'Delete 1' }));
+    fireEvent.keyDown(grip('Gamma'), { key: 'x' });
+    fireEvent.click(within(bar()).getByRole('button', { name: 'Delete 2' }));
     // ONE call with the id list — the consumer confirms ONCE for the batch
     // (a fan-out over onDeleteCard would pop N confirm dialogs).
     expect(onDeleteCards).toHaveBeenCalledTimes(1);
-    expect(onDeleteCards).toHaveBeenCalledWith(['c2']);
+    expect(onDeleteCards).toHaveBeenCalledWith(['c2', 'c3']);
   });
 
   it('without onEditCard/onDeleteCards the bar offers NO priority/delete (structural no-op)', () => {

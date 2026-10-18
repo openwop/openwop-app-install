@@ -10,8 +10,8 @@ import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { __resetExceptionSources, listExceptions } from '../src/host/exceptionProjection.js';
 import { registerGoalVerifier } from '../src/features/goals/goalVerifiers.js';
 import { createDraft, publishChallenge } from '../src/features/kicktodo-core/challengeService.js';
-import { enroll } from '../src/features/kicktodo-core/enrollmentService.js';
-import { grantConsent } from '../src/features/kicktodo-integrations/integrationService.js';
+import { enroll, __test as enrollmentStore } from '../src/features/kicktodo-core/enrollmentService.js';
+import { grantConsent, revokeConsent } from '../src/features/kicktodo-integrations/integrationService.js';
 import { __putWearableLivenessForTest, recordWearableReading, listStaleWearableStreams, __resetWearableLiveness } from '../src/features/kicktodo-integrations/wearableLivenessService.js';
 import { registerKicktodoWearableStaleExceptionSource } from '../src/features/kicktodo-integrations/exceptionSources.js';
 
@@ -19,13 +19,14 @@ const T = 'tenant-stale';
 const OLD = new Date(Date.now() - 400 * 86_400_000).toISOString(); // 400d ago
 const staleRows = async () => (await listExceptions(T)).rows.filter((r) => r.source === 'kicktodo:wearable-stale');
 
-async function enrollActive(subject: string): Promise<void> {
+async function enrollActive(subject: string): Promise<string> {
   const draft = await createDraft({
     tenantId: T, title: 'C', summary: 's', outcome: 'o', durationDays: 3,
     activities: [{ stableActivityId: 'a1', day: 1, title: 'A', instructions: '', evidencePolicy: 'attestation' }],
   });
   await publishChallenge(T, draft.id, 1);
-  await enroll({ tenantId: T, ownerSubject: subject, challengeId: draft.id, challengeVersion: 1 });
+  const { enrollment } = await enroll({ tenantId: T, ownerSubject: subject, challengeId: draft.id, challengeVersion: 1 });
+  return enrollment.id;
 }
 
 beforeEach(async () => {
@@ -58,7 +59,13 @@ describe('the stale-wearable exception source — honest join (ADR 0462 P3)', ()
   });
 
   it('SKIPS when consent was revoked (expected-quiet, not an exception)', async () => {
-    await __putWearableLivenessForTest(T, 'user:no-consent', OLD); // stale, but no consent
+    // Stale AND actively enrolled — so ONLY the consent check can skip it.
+    const s = 'user:revoked';
+    await grantConsent(T, s, 'wearable-evidence');
+    await enrollActive(s);
+    await __putWearableLivenessForTest(T, s, OLD);
+    expect((await staleRows()).map((r) => r.owner.ref)).toEqual([s]); // positive control: it fires while consented
+    await revokeConsent(T, s, 'wearable-evidence');
     expect(await staleRows()).toEqual([]);
   });
 
@@ -66,6 +73,18 @@ describe('the stale-wearable exception source — honest join (ADR 0462 P3)', ()
     const s = 'user:no-enroll';
     await grantConsent(T, s, 'wearable-evidence');
     await __putWearableLivenessForTest(T, s, OLD); // stale + consent, but no enrollment
+    expect(await staleRows()).toEqual([]);
+  });
+
+  it('SKIPS when the only enrollment is COMPLETED (an enrollment exists, but none is active)', async () => {
+    const s = 'user:completed';
+    await grantConsent(T, s, 'wearable-evidence');
+    const enrollmentId = await enrollActive(s);
+    await __putWearableLivenessForTest(T, s, OLD);
+    expect(await staleRows()).toHaveLength(1); // positive control: fires while active
+    const row = await enrollmentStore.enrollments.get(`${T}::${enrollmentId}`);
+    if (!row) throw new Error('precondition: the enrollment row exists');
+    await enrollmentStore.enrollments.put({ ...row, state: 'completed' });
     expect(await staleRows()).toEqual([]);
   });
 

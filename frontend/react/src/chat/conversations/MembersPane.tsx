@@ -40,7 +40,7 @@ interface Props {
   /** Channel roster (channel conversations). */
   channelRoster?: {
     roster: readonly ChannelRosterEntry[];
-    viewerIsOwner: boolean;
+    viewerCanManage: boolean;
     viewerSubjectRef: string | null;
     onManage: () => void;
     onLeave: () => void;
@@ -85,7 +85,7 @@ export function MembersPane({
             <ChannelLedgerPanel channelId={channelId} />
             <ChannelRosterPanel
               roster={channelRoster.roster}
-              viewerIsOwner={channelRoster.viewerIsOwner}
+              viewerCanManage={channelRoster.viewerCanManage}
               viewerSubjectRef={channelRoster.viewerSubjectRef}
               onManage={channelRoster.onManage}
               onLeave={channelRoster.onLeave}

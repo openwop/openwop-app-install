@@ -4,8 +4,15 @@
  * Verifies (a) the 2 compute nodes (variance-compute / talent-score) math AND their
  * ADR 0599 fail-closed guards, (b) the talent-snapshot PII classification — of the RUN
  * OUTPUT; ADR 0082 deleted the read model this header used to name, (c) the 3 agents
- * load + list in GET /v1/agents under the vendor.openwop-app.insights-suite.agents.* ids, and
- * (d) the config route fails closed when the toggle is OFF.
+ * load + list in GET /agents under the vendor.openwop-app.insights-suite.agents.* ids with
+ * their tool allowlists, and (d) the config route fails closed when the toggle is OFF — the
+ * TOGGLE gate's own refusal, not the RBAC 404 behind it.
+ *
+ * Sabotage-witnessed (/grade-tests w20): `>=`→`>` on the flag threshold, `measure()`
+ * back to `Number()` for non-strings or blanks, either aggregate guard → `if (false)`
+ * (each distinguishable by its message), the 9-box map, the clamp, the absent /
+ * ambiguous / unknown-scale refusals, the `subject_required` code, a renamed agent or
+ * allowlist entry, and dropping `requireFeatureEnabled` from `requireRead` each red a case.
  */
 
 import { describe, expect, it, beforeAll, afterAll } from 'vitest';
@@ -33,11 +40,12 @@ describe('ADR 0078 §1 — compute nodes', () => {
     const o = outs(res);
     expect(o.businessUnit).toBe('Enterprise Sales');
     expect((o.variances as Record<string, unknown>).sales).toEqual({ actual: 95, plan: 100, delta: -5, pct: -0.05 });
-    expect(o.verdict).toBe('off_plan'); // sales -5% (>=5%), labor +10%
+    expect(o.verdict).toBe('off_plan');
+    // sales −5% (exactly the threshold — `>=` is the contract), margin +5.26%, labor +10%.
+    // `churn` is not a metric; `shrink` was never supplied, so it is MISSING, not flagged.
     const flaggedMetrics = (o.flagged as Array<{ metric: string }>).map((f) => f.metric);
-    expect(flaggedMetrics).toContain('sales');
-    expect(flaggedMetrics).toContain('labor');
-    expect(flaggedMetrics).not.toContain('shrink'); // 0% delta
+    expect(flaggedMetrics).toEqual(['sales', 'margin', 'labor']);
+    expect(o.metricsMissing).toEqual(['shrink']);
   });
 
   it('variance-compute: on_plan when nothing exceeds the threshold', async () => {
@@ -70,6 +78,10 @@ describe('ADR 0078 §1 — compute nodes', () => {
     expect(res.status).toBe('failure');
     expect(res.error?.code).toBe('insufficient_data');
     expect(outs(res).verdict).toBeUndefined();
+    // DOUBLE GUARD (/grade-tests w20): with zero metrics the ZERO-PLAN guard also fires
+    // (0 === 0) with the same code, so only the message tells WHICH guard refused.
+    // Without this line, deleting the zero-metrics guard stayed green.
+    expect(res.error?.message).toMatch(/evaluated ZERO metrics/);
   });
 
   // ── ADR 0599 §Correction 1 — the guards above did not see the real absence ──
@@ -227,6 +239,7 @@ describe('ADR 0078 §1 — compute nodes', () => {
   it('talent-score: fails closed without a subjectId', async () => {
     const res = await talent({ inputs: { performance: 2, potential: 2 } });
     expect(res.status).toBe('failure');
+    expect(res.error?.code).toBe('subject_required');
   });
 });
 
@@ -243,29 +256,54 @@ describe('ADR 0077 — talent-snapshot PII classification (run output, not a sto
 
 let BASE: string;
 const H = { authorization: 'Bearer dev-token', 'content-type': 'application/json' };
-const REPO_ROOT = join(fileURLToPath(new URL('.', import.meta.url)), '..', '..', '..', '..', '..');
+// `.../backend/typescript/test/` + three `..` = the repo root. (/grade-tests w20: this
+// used FIVE, which resolved above the checkout, so `loadAgentsFromManifest` read a path
+// that does not exist, silently returned [], and the listing depended on whatever an
+// earlier file had mounted into this worker's pack dir.)
+const REPO_ROOT = join(fileURLToPath(new URL('.', import.meta.url)), '..', '..', '..');
+const AGENT_IDS = [
+  'vendor.openwop-app.insights-suite.agents.communication',
+  'vendor.openwop-app.insights-suite.agents.financial',
+  'vendor.openwop-app.insights-suite.agents.talent',
+];
+const VARIANCE_TOOL = 'openwop:feature.insights-suite.nodes.variance-compute';
+const TALENT_TOOL = 'openwop:feature.insights-suite.nodes.talent-score';
 let server: http.Server;
+let loadedAgentIds: string[] = [];
 
 describe('ADR 0078 §1 — agents + route gating', () => {
   beforeAll(async () => {
     process.env.OPENWOP_STORAGE_DSN = 'memory://';
     process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
     const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-    loadAgentsFromManifest(join(REPO_ROOT, 'packs', 'vendor.openwop-app.insights-suite.agents'));
+    loadedAgentIds = loadAgentsFromManifest(join(REPO_ROOT, 'packs', 'vendor.openwop-app.insights-suite.agents')).map((a) => a.agentId).sort();
     await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
   });
   afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
   it('lists the 3 suite agents in GET /v1/agents with their tool allowlists', async () => {
-    const list = await (await fetch(`${BASE}/agents`, { headers: H })).json() as { agents?: Array<{ agentId?: string; label?: string }> };
-    const ids = (list.agents ?? []).map((a) => a.agentId);
-    expect(ids).toContain('vendor.openwop-app.insights-suite.agents.financial');
-    expect(ids).toContain('vendor.openwop-app.insights-suite.agents.communication');
-    expect(ids).toContain('vendor.openwop-app.insights-suite.agents.talent');
+    const list = await (await fetch(`${BASE}/agents`, { headers: H })).json() as { agents?: Array<{ agentId?: string; toolAllowlist?: string[] }> };
+    // The load itself must be real — [] here means the listing reads ambient state.
+    // Asserted HERE, not in `beforeAll`: a hook failure skips the case instead of
+    // redding it (/grade-tests w20 r2: a renamed agent id read as "vacuous").
+    expect(loadedAgentIds).toEqual(AGENT_IDS);
+    const byId = new Map((list.agents ?? []).map((a) => [a.agentId, a]));
+    for (const id of AGENT_IDS) expect(byId.has(id), `${id} is not listed`).toBe(true);
+    // Each agent carries the compute tool its persona needs — and the drafter neither.
+    expect(byId.get('vendor.openwop-app.insights-suite.agents.financial')?.toolAllowlist).toContain(VARIANCE_TOOL);
+    expect(byId.get('vendor.openwop-app.insights-suite.agents.talent')?.toolAllowlist).toContain(TALENT_TOOL);
+    const drafter = byId.get('vendor.openwop-app.insights-suite.agents.communication')?.toolAllowlist ?? [];
+    expect(drafter).not.toContain(VARIANCE_TOOL);
+    expect(drafter).not.toContain(TALENT_TOOL);
+    expect(drafter).toContain('openwop:knowledge.search');
   });
 
   it('read routes fail closed when the toggle is OFF (default)', async () => {
     const res = await fetch(`${BASE}/host/openwop-app/insights-suite/config`, { headers: H });
     expect(res.status).toBe(404); // requireFeatureEnabled — toggle off ⇒ not found
+    // A 404 alone also answers a missing route AND the RBAC `Not found` behind the toggle
+    // gate — removing `requireFeatureEnabled` stayed green (/grade-tests w20). The toggle
+    // gate's own refusal names the feature.
+    expect(JSON.stringify(await res.json())).toContain('Insights & Drafting Agent Suite is not enabled for this tenant.');
   });
 });

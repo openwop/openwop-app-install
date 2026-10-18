@@ -9,6 +9,12 @@
  * a method outside the `ui-plugin/1` enum with 400, and runs the declared one.
  * Plus what the suite cannot see: the browser lane (a headerless `text/html`
  * load, ADR 0840 architect #1) and that an undeclared method never executes.
+ *
+ * Every 404 asserts the route's own `not_found` envelope ('Unknown plugin.'), so a
+ * request that fell through to no route at all cannot pass. Honest double guard:
+ * an undeclared `artifact.write` would ALSO be stopped by write authz and the
+ * app-builder validator, so the persisted-state half of the "never executes" case is
+ * a second guard; the `method_not_allowed` code is what carries that claim.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import http from 'node:http';
@@ -43,7 +49,7 @@ function parseCsp(header: string | null): Map<string, string[]> {
 let server: http.Server; let base = '';
 let packDir = '';
 const saved: Record<string, string | undefined> = {};
-const ENV = ['OPENWOP_API_KEYS', 'OPENWOP_AUTH_ENFORCE_BEARER', 'OPENWOP_DEPLOY_POSTURE', 'OPENWOP_FRONTEND_PLUGIN_PACK_DIR', 'OPENWOP_PRESENTATION_UIPLUGINS'];
+const ENV = ['OPENWOP_API_KEYS', 'OPENWOP_AUTH_ENFORCE_BEARER', 'OPENWOP_DEPLOY_POSTURE', 'OPENWOP_FRONTEND_PLUGIN_PACK_DIR', 'OPENWOP_PRESENTATION_UIPLUGINS', 'OPENWOP_STORAGE_DSN', 'OPENWOP_SESSION_SECRET'];
 let getCanvasForTenant: (t: string, id: string) => Promise<{ state: unknown; version: number } | null>;
 
 beforeAll(async () => {
@@ -82,6 +88,11 @@ afterAll(async () => {
 
 const asProtocol = { authorization: `Bearer ${KEY}`, 'openwop-version': '2' };
 const getFrame = (headers: Record<string, string> = asProtocol, path = framePath) => fetch(`${base}${path}`, { headers });
+/** The routes' own refusal — not a fall-through to no route. */
+async function expectUnknownPlugin(r: Response): Promise<void> {
+  expect(r.status).toBe(404);
+  expect(await r.json()).toMatchObject({ error: 'not_found', message: 'Unknown plugin.' });
+}
 const rpc = (message: unknown, path = rpcPath) => fetch(`${base}${path}`, {
   method: 'POST', headers: { ...asProtocol, 'content-type': 'application/json' }, body: JSON.stringify(message === undefined ? {} : { message }),
 });
@@ -101,7 +112,7 @@ describe('ADR 0840 §B — the frame document', () => {
   });
 
   it('an unknown plugin is 404', async () => {
-    expect((await getFrame(asProtocol, `/host/ui-plugins/${encodeURIComponent(PACK)}/nope/frame`)).status).toBe(404);
+    await expectUnknownPlugin(await getFrame(asProtocol, `/host/ui-plugins/${encodeURIComponent(PACK)}/nope/frame`));
   });
 
   it('a browser load (Accept: text/html, no OpenWOP-Version) gets the plugin, never the SPA shell', async () => {
@@ -148,11 +159,13 @@ describe('ADR 0840 §C — the per-plugin dispatch', () => {
   it('a body without a message is 400 validation_error', async () => {
     const r = await rpc(undefined);
     expect(r.status).toBe(400);
-    expect(((await r.json()) as { error?: string }).error).toBe('validation_error');
+    // The schema validator would also 400 an absent message (a double guard); the
+    // explicit check is what names the problem, so the message text is the claim.
+    expect(await r.json()).toMatchObject({ error: 'validation_error', message: "body must carry a 'message' (ui-plugin/1 request)" });
   });
 
   it('an unknown plugin is 404, whatever the body', async () => {
-    expect((await rpc(request(5, 'host.exec'), `/host/ui-plugins/${encodeURIComponent(PACK)}/nope/rpc`)).status).toBe(404);
+    await expectUnknownPlugin(await rpc(request(5, 'host.exec'), `/host/ui-plugins/${encodeURIComponent(PACK)}/nope/rpc`));
   });
 });
 
@@ -169,8 +182,8 @@ describe('ADR 0840 — the facet gates both operations', () => {
   it('with uiPlugins not presented, the frame and the dispatch are 404', async () => {
     process.env.OPENWOP_PRESENTATION_UIPLUGINS = 'off';
     try {
-      expect((await getFrame()).status).toBe(404);
-      expect((await rpc(request(6, 'artifact.read', { artifactId: ARTIFACT }))).status).toBe(404);
+      await expectUnknownPlugin(await getFrame());
+      await expectUnknownPlugin(await rpc(request(6, 'artifact.read', { artifactId: ARTIFACT })));
     } finally {
       delete process.env.OPENWOP_PRESENTATION_UIPLUGINS;
     }

@@ -19,7 +19,7 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
 import { initInMemorySurfaces } from '../src/host/inMemorySurfaces.js';
 import { initHostExtPersistence, __resetHostExtPersistence } from '../src/host/hostExtPersistence.js';
@@ -30,6 +30,7 @@ import { resolveAgentToolAllowlistOverride, effectiveToolAllowlist, DEFAULT_ON_A
 import { loadAgentsFromManifest } from '../src/packs/agentLoader.js';
 import { conveneSpecialist, convenableSpecialists } from '../src/features/kicktodo-core/agentTools.js';
 import { KICKTODO_CONVENE_TURN_WORKFLOW_ID, KICKTODO_CONVENE_CREDENTIAL_REF, seedKicktodoConveneTurnWorkflow } from '../src/features/kicktodo-core/conveneTurnWorkflow.js';
+import { loadWorkflowChainPacks, defaultWorkflowChainPackRoots, _resetChainRegistryForTest } from '../src/host/workflowChainPackLoader.js';
 
 const T = 'tenant-convene';
 const PLAN_BUILDER = 'vendor.openwop-app.kicktodo.agents.plan-builder';
@@ -50,12 +51,18 @@ function registerSpecialist(agentId: string, toolAllowlist: string[] = ['openwop
     // The typed handoff contract: a task MUST carry a non-empty `goal`.
     handoff: {
       validateTask: (v: unknown) => {
-        const goal = (v as { goal?: unknown } | null)?.goal;
+        const goal = typeof v === 'object' && v !== null && 'goal' in v ? v.goal : undefined;
         return typeof goal === 'string' && goal.length > 0 ? { ok: true } : { ok: false, errors: 'goal is required' };
       },
     },
   });
 }
+
+// The convene turn-workflow is chain-backed: load its pack once so the seed registers it.
+beforeAll(() => {
+  _resetChainRegistryForTest();
+  loadWorkflowChainPacks({ roots: defaultWorkflowChainPackRoots() });
+});
 
 beforeEach(async () => {
   initInMemorySurfaces({ dataDir: mkdtempSync(join(tmpdir(), 'openwop-convene-')) });
@@ -68,7 +75,21 @@ afterEach(() => {
   getAgentRegistry()._resetForTest();
 });
 
-const parse = (r: { content: string }) => JSON.parse(r.content) as Record<string, any>;
+/** The convene tool's JSON content (the fields these cases read). */
+interface ConveneOut {
+  status?: string;
+  specialist?: string;
+  note?: string;
+  error?: string | { code: string; message?: string };
+  provenance?: { parentAgentId?: string; specialistVersion?: string };
+  recommendations?: unknown;
+}
+const parse = (r: { content: string }): ConveneOut => {
+  const v: ConveneOut = JSON.parse(r.content);
+  return v;
+};
+/** The typed failure's code — only present on a contract failure (an object `error`). */
+const errorCode = (rec: ConveneOut): string | undefined => (typeof rec.error === 'object' ? rec.error.code : undefined);
 
 describe('KickBot convenes a specialist (ADR 0442 P5)', () => {
   it('validates the contract, fires a LIVE run of the specialist, and posts back into the conversation', async () => {
@@ -78,21 +99,23 @@ describe('KickBot convenes a specialist (ADR 0442 P5)', () => {
     const rec = parse(r);
     expect(rec.status).toBe('convened');
     expect(rec.specialist).toBe('plan-builder');
-    expect(rec.provenance.parentAgentId).toBe('host:kickbot'); // attributed to the convener (David's-law: from scope)
-    expect(rec.provenance.specialistVersion).toBe('1.3.0');
+    expect(rec.provenance?.parentAgentId).toBe('host:kickbot'); // attributed to the convener (David's-law: from scope)
+    expect(rec.provenance?.specialistVersion).toBe('1.3.0');
     expect(rec).not.toHaveProperty('recommendations'); // honest — no fabricated advice in the tool return
     expect(rec.note).toMatch(/reviewing now|post into this conversation/i);
 
     // The LIVE run is a fire-now job firing the convene turn-workflow, as the
     // SPECIALIST, on the managed tier, posting back into THIS conversation.
     const jobs = await listJobsForSubject(T, { kind: 'user', id: 'user:u1' });
-    const convened = jobs.find((j) => j.metadata?.['tool'] === 'openwop:kicktodo.convene');
-    expect(convened).toBeDefined();
-    expect(convened!.workflowId).toBe(KICKTODO_CONVENE_TURN_WORKFLOW_ID);
-    expect(convened!.agentId).toBe(PLAN_BUILDER);
-    expect(convened!.configurable?.['agentId']).toBe(PLAN_BUILDER);
-    expect(convened!.configurable?.['conversationId']).toBe('conv-1');
-    expect(convened!.configurable?.['credentialRef']).toBe(KICKTODO_CONVENE_CREDENTIAL_REF); // managed — no BYOK
+    const all = jobs.filter((j) => j.metadata?.['tool'] === 'openwop:kicktodo.convene');
+    expect(all).toHaveLength(1); // ONE live run per convene, never a duplicate
+    const convened = all[0];
+    if (!convened) throw new Error('a convened job is required');
+    expect(convened.workflowId).toBe(KICKTODO_CONVENE_TURN_WORKFLOW_ID);
+    expect(convened.agentId).toBe(PLAN_BUILDER);
+    expect(convened.configurable?.['agentId']).toBe(PLAN_BUILDER);
+    expect(convened.configurable?.['conversationId']).toBe('conv-1');
+    expect(convened.configurable?.['credentialRef']).toBe(KICKTODO_CONVENE_CREDENTIAL_REF); // managed — no BYOK
   });
 
   it('a task that violates the handoff contract is a TYPED failure — NOTHING is run', async () => {
@@ -101,7 +124,7 @@ describe('KickBot convenes a specialist (ADR 0442 P5)', () => {
     expect(r.isError).toBe(true);
     const rec = parse(r);
     expect(rec.status).toBe('failed');
-    expect(rec.error.code).toBe('task_schema_violation'); // the real, validated contract — not a vacuous {ok:true}
+    expect(errorCode(rec)).toBe('task_schema_violation'); // the real, validated contract — not a vacuous {ok:true}
     // No live run was scheduled on a failed contract.
     const jobs = await listJobsForSubject(T, { kind: 'user', id: 'user:u1' });
     expect(jobs.some((j) => j.metadata?.['tool'] === 'openwop:kicktodo.convene')).toBe(false);
@@ -116,7 +139,11 @@ describe('KickBot convenes a specialist (ADR 0442 P5)', () => {
     expect(jobs.some((j) => j.metadata?.['tool'] === 'openwop:kicktodo.convene')).toBe(false);
   });
 
-  it('SYNC check: a write/egress tool is filtered out by the read-only allowlist', () => {
+  // Twin: agents.test.ts "§A14 filters the tool surface to the allowlist" (the
+  // generic dispatcher; both red under w41g2-cv-sync-filter / -cover). Kept: this
+  // one drives a KickTodo specialist manifest and also checks convene's OWN
+  // offered surface reaches the dispatch (toolSurface on the convene record).
+  it('SYNC check: a write/egress tool is filtered out by the read-only allowlist', async () => {
     registerSpecialist(PLAN_BUILDER, ['openwop:kicktodo.today']); // read-only
     const r = runAgentDispatch({
       agentId: PLAN_BUILDER,
@@ -125,6 +152,10 @@ describe('KickBot convenes a specialist (ADR 0442 P5)', () => {
       validateHandoff: true,
     });
     expect(r.toolSurface).toEqual(['openwop:kicktodo.today']); // write/egress filtered OUT
+    // And convene's own validated record carries the filtered surface (no conversation ⇒ validated).
+    const viaConvene = await conveneSpecialist({ specialist: 'plan-builder', goal: 'x' }, { tenantId: T, actingUserId: 'user:u1', agentProfileId: 'host:kickbot' });
+    const toolSurface: unknown = JSON.parse(viaConvene.content).toolSurface;
+    expect(toolSurface).toEqual(['openwop:kicktodo.today']);
   });
 
   it('LIVE run is CONFINED — convene sets a full-replace override that EXCLUDES the ADR 0315 write/egress/recursion baseline', async () => {
@@ -205,10 +236,10 @@ describe('the convenable specialists LOAD through the real pack loader', () => {
   it('all 4 convenable specialists load with COMPILED handoff validators', () => {
     for (const short of convenableSpecialists()) {
       const agent = getAgentRegistry().get(`vendor.openwop-app.kicktodo.agents.${short}`);
-      expect(agent, `${short} loaded from the pack`).toBeTruthy();
-      expect(typeof agent!.handoff?.validateTask, `${short} has a compiled task validator`).toBe('function');
-      expect(typeof agent!.handoff?.validateReturn, `${short} has a compiled return validator`).toBe('function');
-      for (const tool of agent!.toolAllowlist ?? []) expect(tool.startsWith('openwop:kicktodo.')).toBe(true);
+      if (!agent) throw new Error(`${short} must load from the pack`);
+      expect(typeof agent.handoff?.validateTask, `${short} has a compiled task validator`).toBe('function');
+      expect(typeof agent.handoff?.validateReturn, `${short} has a compiled return validator`).toBe('function');
+      for (const tool of agent.toolAllowlist ?? []) expect(tool.startsWith('openwop:kicktodo.')).toBe(true);
     }
   });
 
@@ -219,6 +250,6 @@ describe('the convenable specialists LOAD through the real pack loader', () => {
 
     const bad = await conveneSpecialist({ specialist: 'plan-builder', goal: '' }, ACTOR);
     expect(bad.isError).toBe(true);
-    expect(parse(bad).error.code).toBe('task_schema_violation'); // the REAL pack schema validates
+    expect(errorCode(parse(bad))).toBe('task_schema_violation'); // the REAL pack schema validates
   });
 });

@@ -41,11 +41,9 @@ function go(initial: string): HTMLElement {
 }
 
 describe('/my-work redirect (ADR 0049 compatibility shim)', () => {
-  it('is still registered as a route', () => {
-    expect(entry).toBeDefined();
-    expect(entry?.element).toBeDefined();
-  });
-
+  // (A separate "is still registered" case was cut in w35: an unregistered
+  // route renders nothing here, so every case below goes red — probe
+  // w35g2-mywork-unregistered reddened all four.)
   it('sends a bare /my-work to the boards page', () => {
     expect(go('/my-work').textContent).toBe('/boards');
   });

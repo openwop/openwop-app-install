@@ -7,18 +7,25 @@
  *    threshold were indistinguishable in the list.
  *  - PRO-G2: a percentage reward got its `%`; a FIXED-amount reward rendered as
  *    a bare number with no unit at all.
+ *  - PROMO-CUR-1 (fixed in #4882): every amount carries the promotion's recorded
+ *    currency.
+ *
+ * Sabotages that turn it red: dropping the `condMinSpend` push (w52g1-pc-minspend),
+ * the `condBudget` push (w52g1-pc-budget), `>=` → `>` on the exhausted boundary
+ * (w52g1-pc-exhausted-boundary), a burn fabricated for absent usage
+ * (w52g1-pc-burn-fabricated).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, waitFor, act, within } from '@testing-library/react';
 import type { Promotion } from '../promotionsClient.js';
 
-const listPromotions = vi.fn();
+const listPromotions = vi.fn<typeof import('../promotionsClient.js')['listPromotions']>();
 
 import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
 vi.mock('../promotionsClient.js', async (orig) => ({
   ...(await orig<Record<string, unknown>>()),
   listOrgs: vi.fn(async () => [{ orgId: 'org-1', name: 'Acme' }]),
-  listPromotions: () => listPromotions(),
+  listPromotions: (orgId: string) => listPromotions(orgId),
   createPromotion: vi.fn(async () => ({})),
   updatePromotion: vi.fn(async () => ({})),
   deletePromotion: vi.fn(async () => {}),
@@ -37,7 +44,7 @@ const promo = (over: Partial<Promotion> = {}): Promotion => ({
   reward: { kind: 'percentage', value: 20 }, priority: 10, stackable: false, active: true,
   createdAt: '2026-07-01T00:00:00.000Z', updatedAt: '2026-07-01T00:00:00.000Z',
   ...over,
-} as Promotion);
+});
 
 const view = async (): Promise<void> => {
   render(<PromotionsPage />);
@@ -96,8 +103,8 @@ describe('PRO-G2: a reward always carries a unit', () => {
   it('a FIXED reward is not a bare number', async () => {
     listPromotions.mockResolvedValue({ promotions: [promo({ reward: { kind: 'fixed', value: 10 } })], usage: {} });
     await view();
-    // No currency rides a promotion, so no symbol is invented — but the reward
-    // can no longer render as a naked "10".
+    // This promotion records no currency (pre-PRO2-P1), so no symbol is
+    // invented — but the reward can no longer render as a naked "10".
     const cell = await screen.findByText(/10 off/i);
     expect(cell).toBeTruthy();
     expect(within(cell).queryByText(/^10$/)).toBeNull();
@@ -121,5 +128,22 @@ describe('R3 P-5 — an exhausted budget must not read Active', () => {
     await view();
     expect(await screen.findAllByText('Active')).toBeTruthy();
     expect(screen.queryByText(/of 100 spent/)).toBeNull();
+  });
+
+  // PROMO-CUR-1 — since R2 PRO2-P1 a promotion RECORDS its currency, and the
+  // list still dropped it: a EUR reward read "10 off". Every money amount in the
+  // row (reward, threshold, loss budget, burn) now carries it. Expected strings
+  // written by hand for the `en` test locale. Sabotage: make `money()` ignore
+  // `p.currency` → red.
+  it('a promotion with a recorded currency shows it on every amount (PROMO-CUR-1)', async () => {
+    listPromotions.mockResolvedValue({
+      promotions: [promo({ type: 'loss_leader', currency: 'EUR', reward: { kind: 'fixed', value: 10 }, minSpend: 50, budget: { maxDiscount: 200 } })],
+      usage: { 'pr-1': { amount: 75, quantity: 3 } },
+    });
+    await view();
+    expect(await screen.findByText('€10.00 off')).toBeTruthy();
+    expect(screen.getByText('Min spend €50.00')).toBeTruthy();
+    expect(screen.getByText('Loss budget €200.00')).toBeTruthy();
+    expect(screen.getByText('€75.00 of €200.00 spent')).toBeTruthy();
   });
 });

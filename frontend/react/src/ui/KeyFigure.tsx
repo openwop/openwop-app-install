@@ -9,7 +9,7 @@
  * container of joined tiles, each centred on the numeral with its label beneath.
  *
  * The numeral is SANS at weight 700. DESIGN.md §1 had listed the figure numeral as
- * one of four surviving Instrument-Serif accents; that is overturned for this
+ * one of four surviving serif accents (the display face is Bricolage Grotesque since ADR 0883); that is overturned for this
  * component only (correction note recorded there). The wordmark, gate product name
  * and ledger persona names keep the serif.
  *

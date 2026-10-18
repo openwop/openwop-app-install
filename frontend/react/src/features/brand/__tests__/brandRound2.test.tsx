@@ -1,41 +1,53 @@
 /**
- * UX_UPGRADE-brand ROUND 2 — XBR-0/1/3 (frontend).
+ * Brand editor — merge-preserving save, 409 copy, delete failure, audit reader
+ * (UX_UPGRADE-brand round 2/3: XBR-0/1/3, BR-SP-1/2/5/7). The filename is the
+ * grading-pass name; it stays because ADR 0661 cites it.
  *
  *  - BR-SP-1 (Blocker): the save payload spreads the LOADED brand's facets —
  *    a rename must carry governance.allowedEditors/compliance and voice
- *    samplePhrases through, not wipe them.
+ *    samplePhrases through, not wipe them (a wiped allowedEditors silently
+ *    revokes a partial lock's editors).
  *  - BR-SP-2: a failed delete shows its error IN the dialog (which stays
- *    open); the confirm is busy-guarded.
+ *    open); the confirm is busy-guarded while the delete is in flight.
  *  - BR-SP-5: the update carries expectedUpdatedAt; a conflict shows the
- *    localized conflict copy.
+ *    localized conflict copy, never the raw server sentence.
+ *  - BR-SP-7: the audit trail is read lazily, and failed ≠ empty.
+ *
+ * Sabotage-witnessed (w52): dropping the governance / voiceProfile spreads or the
+ * expectedUpdatedAt token; `status === 409` → `410`; the delete error routed to
+ * the page Notice, or the dialog closed in `finally`; `busy={false}`; the audit
+ * arrow reversed; an audit failure becoming `[]`; an eager audit load.
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
-import { render, screen, fireEvent, cleanup, waitFor, act } from '@testing-library/react';
+import { render, screen, fireEvent, cleanup, waitFor, act, within } from '@testing-library/react';
 import type { Brand } from '../brandClient.js';
+import type * as C from '../brandClient.js';
 
-const listBrands = vi.fn(async (..._a: unknown[]): Promise<Brand[]> => []);
-const listOrgs = vi.fn(async (..._a: unknown[]) => [{ orgId: 'org:1', name: 'Acme' }]);
-const updateBrand = vi.fn();
-const createBrand = vi.fn();
-const deleteBrand = vi.fn();
-const getBrandAudit = vi.fn();
-const listBrandFonts = vi.fn(async (..._a: unknown[]) => []);
+const listBrands = vi.fn<typeof C.listBrands>();
+const listOrgs = vi.fn<typeof C.listOrgs>();
+const updateBrand = vi.fn<typeof C.updateBrand>();
+const createBrand = vi.fn<typeof C.createBrand>();
+const deleteBrand = vi.fn<typeof C.deleteBrand>();
+const getBrandAudit = vi.fn<typeof C.getBrandAudit>();
+const listBrandFonts = vi.fn<typeof C.listBrandFonts>();
 
 import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
+// ADR 0891 BR2UX-1 — a partial lock now lists the org's members to pick editors from.
+vi.mock('../../../orgs/orgMembers.js', () => ({ loadOrgMembers: vi.fn(async () => []) }));
 vi.mock('../brandClient.js', async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
-  listBrands: (...a: unknown[]) => listBrands(...a),
-  listOrgs: (...a: unknown[]) => listOrgs(...a),
-  updateBrand: (...a: unknown[]) => updateBrand(...a),
-  createBrand: (...a: unknown[]) => createBrand(...a),
-  deleteBrand: (...a: unknown[]) => deleteBrand(...a),
-  getBrandAudit: (...a: unknown[]) => getBrandAudit(...a),
+  listBrands: () => listBrands(),
+  listOrgs: () => listOrgs(),
+  updateBrand: (...a: Parameters<typeof C.updateBrand>) => updateBrand(...a),
+  createBrand: (...a: Parameters<typeof C.createBrand>) => createBrand(...a),
+  deleteBrand: (...a: Parameters<typeof C.deleteBrand>) => deleteBrand(...a),
+  getBrandAudit: (...a: Parameters<typeof C.getBrandAudit>) => getBrandAudit(...a),
   // ADR 0661 — this factory spreads `importOriginal()`, so any export it does not
   // name keeps its REAL implementation. `listBrandFonts` was unnamed, so the fonts
   // panel issued a live `fetch` out of jsdom and rendered its failed state in a
   // test that never asked for one. Nothing here asserts on fonts; an empty list is
   // the honest stand-in.
-  listBrandFonts: (...a: unknown[]) => listBrandFonts(...a),
+  listBrandFonts: (...a: Parameters<typeof C.listBrandFonts>) => listBrandFonts(...a),
 }));
 vi.mock('../../../featureToggles/FeatureAccessContext.js', () => ({
   useFeatureAccess: () => makeFeatureAccess({ enabled: true, loading: false }),
@@ -44,19 +56,26 @@ vi.mock('../../../featureToggles/FeatureAccessContext.js', () => ({
 const { BrandPage } = await import('../BrandPage.js');
 
 const brand = (over: Partial<Brand> = {}): Brand => ({
-  id: 'b1', orgId: 'org:1', name: 'Solstice', description: '', status: 'active',
-  voiceProfile: { voice: 'warm', formalityLevel: 'casual', guidelines: '', samplePhrases: ['hello there'], avoidPhrases: [], toneRegisters: [] },
-  positioning: { tagline: 'Shine', elevatorPitch: '', differentiators: ['fast'] },
-  keyPhrases: { approvedTaglines: [], bannedPhrases: [], valuePropositions: ['value!'] },
+  id: 'b1', tenantId: 't1', orgId: 'org:1', name: 'Solstice', description: '', status: 'active',
+  voiceProfile: { voice: 'warm', formalityLevel: 2, guidelines: '', samplePhrases: ['hello there'], avoidPhrases: [], toneRegisters: [] },
+  positioning: { tagline: 'Shine', elevatorPitch: '', differentiators: ['fast'], competitiveFrame: '' },
+  keyPhrases: { approvedTaglines: [], bannedPhrases: [], valuePropositions: ['value!'], productDescriptors: [] },
   channelVoiceRules: [],
   governance: { lockLevel: 'partial', allowedEditors: ['user:listed'], requireApproval: true, compliance: { blockPublish: 'critical' } },
   createdBy: 'u1', createdAt: '2026-08-01T00:00:00Z', updatedAt: '2026-08-08T00:00:00Z',
   ...over,
-} as unknown as Brand);
+});
 
 const renderPage = () => render(<BrandPage />);
 
-beforeEach(() => { vi.clearAllMocks(); listBrands.mockResolvedValue([brand()]); });
+beforeEach(() => {
+  // mockReset, not clearAllMocks: a case's rejected update/delete or queued audit
+  // answer must never reach the next case (shuffle-safe).
+  for (const m of [listBrands, listOrgs, updateBrand, createBrand, deleteBrand, getBrandAudit, listBrandFonts]) m.mockReset();
+  listBrands.mockResolvedValue([brand()]);
+  listOrgs.mockResolvedValue([{ orgId: 'org:1', name: 'Acme' }]);
+  listBrandFonts.mockResolvedValue([]);
+});
 afterEach(cleanup);
 
 describe('BR-SP-1 — the merge-preserving save', () => {
@@ -87,7 +106,11 @@ describe('BR-SP-1 — the merge-preserving save', () => {
     fireEvent.click(await screen.findByRole('button', { name: /Solstice/ }));
     await screen.findByDisplayValue('Solstice');
     fireEvent.click(screen.getByRole('button', { name: /^save$/i }));
-    await screen.findAllByText(/close the editor, reload/i); // dialog + parent Notice
+    const dialog = screen.getByRole('dialog');
+    // The localized copy, IN the dialog (the parent Notice holds a second copy)…
+    expect(await within(dialog).findByText(/close the editor, reload, and reapply your edits/i)).toBeTruthy();
+    // …and it REPLACES the raw server sentence rather than riding beside it.
+    expect(screen.queryByText('This brand changed since you opened it — reload and reapply your edits.')).toBeNull();
   });
 });
 
@@ -99,12 +122,24 @@ describe('BR-SP-2 — delete failure lives in the dialog', () => {
     // button shares the same accessible name, so scope the second click.
     fireEvent.click(await screen.findByRole('button', { name: /^delete$/i }));
     const dialog = await screen.findByRole('dialog');
-    const { within } = await import('@testing-library/react');
     fireEvent.click(within(dialog).getByRole('button', { name: /^delete$/i }));
     await waitFor(() => expect(deleteBrand).toHaveBeenCalled());
     expect(screen.getByRole('dialog')).toBeTruthy(); // still open
     expect(await screen.findByText(/governance says no/)).toBeTruthy();
     expect(dialog.contains(screen.getByText(/governance says no/))).toBe(true); // IN the dialog
+  });
+
+  it('the confirm is busy while the delete is in flight — a second click cannot fire it again', async () => {
+    deleteBrand.mockReturnValue(new Promise<void>(() => { /* held in flight for the whole case */ }));
+    renderPage();
+    fireEvent.click(await screen.findByRole('button', { name: /^delete$/i }));
+    const dialog = await screen.findByRole('dialog');
+    const confirmBtn = within(dialog).getByRole('button', { name: /^delete$/i });
+    fireEvent.click(confirmBtn);
+    await waitFor(() => expect(deleteBrand).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect((confirmBtn as HTMLButtonElement).disabled).toBe(true));
+    fireEvent.click(confirmBtn);
+    expect(deleteBrand).toHaveBeenCalledTimes(1);
   });
 });
 

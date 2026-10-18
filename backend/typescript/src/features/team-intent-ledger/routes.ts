@@ -29,6 +29,7 @@ import { vendorPath } from '../../middleware/protocolVersion.js';
 import { parseDecisionInput, recordDecision } from './decisions.js';
 import { dismissSuggestion, listSuggestions } from './suggestions.js';
 import { sendBackDrift } from './driftCheck.js';
+import { checkPullRequest } from './prDrift.js';
 import {
   acceptDelta, cleanWhy, createLedger, currentState, getDelta, getLedger, listDeltas, proposeDelta,
   rejectDelta, requireBaseVersion, setOwner, stateAt, validatePatch,
@@ -214,6 +215,15 @@ export function registerTeamLedgerRoutes(deps: RouteDeps): void {
       if (!me) throw new OpenwopError('unauthenticated', 'Sign in to dismiss a suggestion.', 401, {});
       const reason = typeof (req.body as { reason?: unknown } | undefined)?.reason === 'string' ? (req.body as { reason: string }).reason : undefined;
       res.json({ suggestion: await dismissSuggestion(project.tenantId, project.id, req.params.sid ?? '', me, reason) });
+    } catch (err) { next(err); }
+  });
+  // ADR 0855 D4 / P5 — check a GitHub pull request against the ledger (on demand).
+  app.post(route('/drift/pull-request'), async (req, res, next) => {
+    try {
+      const project = await requireProjectAccess(req, 'write');
+      const me = actingUserOf(req);
+      if (!me) throw new OpenwopError('unauthenticated', 'Sign in to check a pull request.', 401, {});
+      res.json(await checkPullRequest(project, me, (req.body as { url?: unknown } | undefined)?.url));
     } catch (err) { next(err); }
   });
   // ADR 0855 D2 — send a drift finding back to the person who started the run.

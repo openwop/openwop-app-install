@@ -921,6 +921,8 @@ export function makeMcpClient(deps: McpClientDeps): {
         reason,
         floor,
         peerUrl: target.url,
+        // RFC 0242 §A.2 — the revision this client opened with, i.e. asked for.
+        requested: opening,
         ...(version !== undefined ? { version } : {}),
       });
     };

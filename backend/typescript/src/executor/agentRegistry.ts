@@ -25,6 +25,10 @@ export interface ResolvedAgentManifest {
   systemPrompt: string;
   /** Provenance: the tarball-relative ref when the prompt was external. */
   systemPromptRef?: string;
+  /** RFC 0081 §A — the pack's eval suite ref and its PARSED JSON (validated lazily
+   *  by `host/evals/packSuites.ts`, ADR 0889 D2). Absent ⇒ the agent ships no suite. */
+  evalSuiteRef?: string;
+  evalSuite?: unknown;
   toolAllowlist?: string[];
   /** RFC 0092 — host-capability keys this agent needs to run fully. A host that
    *  doesn't advertise a listed key surfaces the agent as degraded on the
@@ -132,6 +136,18 @@ let resolver: AgentPackResolver | null = null;
 
 const userKey = (tenant: string, agentId: string): string => `u\u0000${tenant}\u0000${agentId}`;
 
+/** ADR 0775 P3d — when each user-agent entry was registered on THIS instance. A
+ *  peer's delete or edit reaches here as an eviction message
+ *  (`host/agentRegistryEviction.ts`); this is the backstop for a message that was
+ *  missed (an instance restarting mid-publish, a dropped LISTEN connection). An
+ *  entry older than the TTL is re-read from storage on its next `resolve()`, so a
+ *  missed message costs at most one TTL of staleness, never "until restart". */
+const registeredAt = new Map<string, number>();
+const USER_AGENT_TTL_MS = (() => {
+  const n = Number(process.env.OPENWOP_USER_AGENT_REGISTRY_TTL_MS);
+  return Number.isFinite(n) && n > 0 ? n : 5 * 60_000;
+})();
+
 /** ADR 0826 D5 — a PACK agent whose pack version is revoked is not dispatchable,
  *  from the moment the revocation reaches this instance (no restart): every
  *  lookup — `has`/`get`/`resolve` — and the dispatchable list treat it as absent.
@@ -167,6 +183,7 @@ export function getAgentRegistry() {
      *  agents key under their `ownerTenant`; pack agents under the bare id. */
     register(agent: ResolvedAgentManifest): void {
       inProcess.set(agent.ownerTenant ? userKey(agent.ownerTenant, agent.agentId) : agent.agentId, agent);
+      if (agent.ownerTenant) registeredAt.set(userKey(agent.ownerTenant, agent.agentId), Date.now());
     },
     /** Drop one agent from the in-process registry. Returns true when
      *  a row was removed. The pack-loader path is append-only (RFC
@@ -174,6 +191,7 @@ export function getAgentRegistry() {
      *  (`DELETE /v1/host/openwop-app/agents/:agentId`, phase E1 2026-05-28) —
      *  which is why `tenant` is REQUIRED here, unlike the lookups. */
     remove(agentId: string, tenant: string): boolean {
+      registeredAt.delete(userKey(tenant, agentId));
       return inProcess.delete(userKey(tenant, agentId));
     },
     has(agentId: string, tenant?: string): boolean {
@@ -188,6 +206,25 @@ export function getAgentRegistry() {
      *  the matching pack, so we re-read after it runs. */
     async resolve(agentId: string, tenant?: string): Promise<ResolvedAgentManifest | null> {
       const direct = lookup(agentId, tenant);
+      // ADR 0775 P3d — a user-agent copy past its TTL is re-read through the
+      // resolver (storage): gone ⇒ null, edited ⇒ the new record. A read FAULT keeps
+      // the copy (and restarts its clock): an outage must not unregister agents.
+      // Synchronous `get()` does not refresh; it sees the next refreshed copy.
+      if (direct?.ownerTenant !== undefined && resolver) {
+        const key = userKey(direct.ownerTenant, direct.agentId);
+        if (Date.now() - (registeredAt.get(key) ?? 0) > USER_AGENT_TTL_MS) {
+          inProcess.delete(key);
+          registeredAt.delete(key);
+          try {
+            await resolver(direct.agentId, direct.ownerTenant);
+          } catch {
+            inProcess.set(key, direct);
+            registeredAt.set(key, Date.now());
+            return direct;
+          }
+          return lookup(agentId, tenant);
+        }
+      }
       if (direct) return direct;
       if (resolver) {
         // ADR 0763 — hand the pack scan the canonical spelling first (it
@@ -223,6 +260,7 @@ export function getAgentRegistry() {
     /** Test seam — clears the in-process maps. */
     _resetForTest(): void {
       inProcess.clear();
+      registeredAt.clear();
       refused.clear();
     },
   };

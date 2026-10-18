@@ -13,6 +13,10 @@
  * assertively. Completion and cancellation deliberately do NOT — the ancestor
  * log announces the card's insertion politely, and a second announcement there
  * is the double-announce `ui/announce.tsx`'s boundary exists to prevent.
+ *
+ * Sabotage witnesses (w43): announcing every tone, announcing politely, the
+ * shell role or label, rendering a running card, or the failed title each turn
+ * a case red.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { render, cleanup, screen } from '@testing-library/react';
@@ -22,13 +26,16 @@ import { announce, currentAnnouncements } from '../../ui/announce.js';
 import type { WorkflowRunState } from '../types.js';
 
 function runState(over: Partial<WorkflowRunState>): WorkflowRunState {
-  return {
+  // A production-shaped run: `startedAt` is an ISO string (the type's contract —
+  // a number here used to hide behind an `as` cast). Nothing asserts elapsed text.
+  const base: WorkflowRunState = {
     slug: 'wf', workflowName: 'Weekly variance', workflowId: 'wf-1',
     runId: 'r-1', status: 'completed', totalNodes: 3,
     completedNodeIds: ['a'], nodeOutputs: {}, failedNodeIds: [],
-    startedAt: Date.now(),
-    ...over,
-  } as WorkflowRunState;
+    currentNodeName: null, nodeNames: {},
+    startedAt: '2026-01-01T00:00:00.000Z',
+  };
+  return { ...base, ...over };
 }
 
 function view(run: WorkflowRunState): void {

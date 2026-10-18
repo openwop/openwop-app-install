@@ -22,6 +22,8 @@ export function notificationTypeIcon(type: string, size = 14): JSX.Element {
     case 'chat.channel_post':
     case 'comment.added':
     case 'comment.reply':
+    case 'comment.mention':
+    case 'comment.resolved':
       return <MessageSquareIcon size={size} />;
     default:
       return <InfoIcon size={size} />;

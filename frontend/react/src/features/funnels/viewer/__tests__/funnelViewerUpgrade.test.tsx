@@ -5,9 +5,25 @@
  * visitor into the unavailable state. Losing a part-completed funnel to one
  * flaky request is the worst thing this screen can do, and the old code did
  * exactly that (`show(null)` → unavailable).
+ *
+ * Claims, one case each: FN-G1 progressbar value + FN-G3 stage label (and no
+ * name when the step has none); FN-G2 Back past step 1 only, never hitting
+ * `/next`; FN-G4 a failed advance keeps the step + offers retry, and a retry
+ * clears it; VP-R2-0 no redundant step refetch after an advance; FN-R2-1 a
+ * page-read blip keeps the session; FN-R2-4 an entry read failure is
+ * load-failed with a working Retry, a 404 is "unavailable"; VP-R2-3/FN-R2-6
+ * the authored completion CTA renders (none invented when absent, none for an
+ * unsafe URL); R2R F1 a Back during an in-flight advance page read wins;
+ * FN-R2-5 a dead `?step` deep link falls back to the entry.
+ * (The exact public URLs and the 410 posture are `FunnelViewerPage.test.tsx`'s.)
+ *
+ * Sabotage-witnessed (round 1/2): aria-valuenow/stage label, the Back guard,
+ * the session-preserving `hasSession` branches, the skipParamLoad swallow,
+ * the not-found vs error split, the dead-link fallback, `safeCtaUrl`, the CTA
+ * action, and the second-await `isStale()` check.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { FunnelViewerPage } from '../FunnelViewerPage.js';
 
@@ -211,6 +227,19 @@ describe('funnel viewer — ROUND 2 (VP-R2-0/2/3)', () => {
     fireEvent.click(screen.getByRole('button', { name: /continue/i }));
     const cta = await screen.findByRole('link', { name: 'Get the guide' });
     expect(cta.getAttribute('href')).toBe('https://example.com/guide');
+
+    // …and when the operator authored none, completion offers NO link.
+    cleanup();
+    mockRoutes({
+      '/next': { funnel: FUNNEL, stepCount: 1, complete: true },
+      '/pages/p0': page('One body'),
+      '/funnels/launch': { funnel: FUNNEL, stepCount: 1, step: step(0, 's0', 'p0') },
+    });
+    renderViewer();
+    await screen.findByText('One body');
+    fireEvent.click(screen.getByRole('button', { name: /continue/i }));
+    await screen.findByText('Launch — all done');
+    expect(screen.queryByRole('link')).toBeNull();
   });
 
   it('an unsafe completion CTA URL renders NO link (javascript: never reaches the DOM)', async () => {
@@ -222,7 +251,7 @@ describe('funnel viewer — ROUND 2 (VP-R2-0/2/3)', () => {
     renderViewer();
     await screen.findByText('One body');
     fireEvent.click(screen.getByRole('button', { name: /continue/i }));
-    await screen.findByText(/thanks|complete/i);
+    await screen.findByText('Launch — all done');
     expect(screen.queryByRole('link', { name: 'Evil' })).toBeNull();
   });
 });
@@ -230,13 +259,17 @@ describe('funnel viewer — ROUND 2 (VP-R2-0/2/3)', () => {
 describe('funnel viewer — the race machinery (R2R F1/F2, FN-R2-5)', () => {
   it('Back clicked while an advance page-read is IN FLIGHT wins — no forward yank (the second-await guard)', async () => {
     let releasePage: (() => void) | null = null;
+    // The stale read's body — its `json()` is the product's LAST await before the
+    // `isStale()` re-check, so awaiting the same promise is the settle signal.
+    const stalePage = json(page('Three body'));
+    const staleJson = vi.spyOn(stalePage, 'json');
     vi.stubGlobal('fetch', vi.fn(async (url: RequestInfo | URL) => {
       const u = String(url);
       if (u.includes('/next')) return json({ funnel: FUNNEL, stepCount: 3, step: step(2, 's2', 'p2', 'Three') });
       if (u.includes('/pages/p2')) {
         // the SLOW half of the advance — held until the test releases it
         await new Promise<void>((r) => { releasePage = r; });
-        return json(page('Three body'));
+        return stalePage;
       }
       if (u.includes('/pages/p1')) return json(page('Two body'));
       if (u.includes('/pages/p0')) return json(page('One body'));
@@ -251,8 +284,11 @@ describe('funnel viewer — the race machinery (R2R F1/F2, FN-R2-5)', () => {
     fireEvent.click(screen.getByRole('button', { name: /back/i })); // Back mid-flight — must win
     await screen.findByText('One body');
     releasePage!(); // the stale page read resolves AFTER Back
+    // Wait for the product to have CONSUMED the stale read (no real-clock sleep):
+    // once its json() settles, the stale advance has made its commit decision.
+    await waitFor(() => expect(staleJson).toHaveBeenCalledTimes(1));
+    await act(async () => { await staleJson.mock.results[0]!.value; });
     // The stale advance must not yank forward: step 0 stays.
-    await new Promise((r) => setTimeout(r, 20));
     expect(screen.queryByText('Three body')).toBeNull();
     expect(screen.getByText('One body')).toBeTruthy();
   });

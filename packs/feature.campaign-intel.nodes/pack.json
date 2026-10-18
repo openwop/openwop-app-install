@@ -1,6 +1,6 @@
 {
   "name": "feature.campaign-intel.nodes",
-  "version": "1.1.2",
+  "version": "1.2.0",
   "kind": "node",
   "description": "Campaign Intelligence node pack \u2014 `budget-optimize` (heuristic marginal-ROAS reallocation over the performance store, plus an optional ctx.callAI scenario narrative) and `forecast` (creative-fatigue detection + outcome projection). Over ctx.features['campaign-intel']. The natural-language analysis the Campaign Intelligence Analyst calls.",
   "author": "OpenWOP App",

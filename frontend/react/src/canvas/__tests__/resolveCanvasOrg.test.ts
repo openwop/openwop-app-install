@@ -1,3 +1,12 @@
+/**
+ * GC-AB-1 — `resolveCanvasOrg` decides which org a canvas link opens. The API is
+ * `/orgs/:orgId/canvases/:canvasId` but the app route carries only the canvas id,
+ * so the org rides the link (`?org=`). What breaks it: substituting `orgs[0]`
+ * (a member of several orgs opens the wrong workspace and gets a generic load
+ * error), silently falling back when the link names an org the caller is not in
+ * (answers a question nobody asked), or guessing when the link is ambiguous.
+ * The editor-side wiring is CanvasEditorPage.org.test.tsx.
+ */
 import { describe, it, expect } from 'vitest';
 
 import { resolveCanvasOrg } from '../resolveCanvasOrg.js';
@@ -10,6 +19,8 @@ describe('resolveCanvasOrg', () => {
   // org-b — comes back as a generic load error the user cannot act on.
   it('uses the org named on the link, not the first one', () => {
     expect(resolveCanvasOrg([A, B], 'org-b')).toEqual({ kind: 'ok', orgId: 'org-b' });
+    // The TRIMMED value is what comes back, not the raw padded link value.
+    expect(resolveCanvasOrg([A, B], ' org-b ')).toEqual({ kind: 'ok', orgId: 'org-b' });
   });
 
   it('refuses an org the caller does not belong to instead of falling back', () => {

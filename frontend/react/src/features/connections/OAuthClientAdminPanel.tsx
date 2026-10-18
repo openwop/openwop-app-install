@@ -96,7 +96,12 @@ export function OAuthClientAdminPanel(): JSX.Element | null {
   // Non-superadmin (or still resolving the gate): render nothing.
   if (hidden) return null;
   if (loading) return null;
-  if (oauthProviders.length === 0) return null;
+  // OAUTHADMIN-ERR-1 — a failed read leaves `providers` empty, and this line used
+  // to return null for it too, so the error Notice below was dead code: a
+  // superadmin whose read failed saw exactly what a non-superadmin sees (the
+  // GOV-3/UX-3 family, already fixed in GovernancePanel and VaultAdminPanel).
+  // Only a 403 hides the panel; any other failure is shown, with Retry.
+  if (oauthProviders.length === 0 && !error) return null;
 
   return (
     <div className="surface-card u-p-4 u-grid u-gap-3">
@@ -105,7 +110,12 @@ export function OAuthClientAdminPanel(): JSX.Element | null {
         <p className="muted">{t('oauthClientBlurb')}</p>
       </div>
 
-      {error ? <Notice variant="error">{error}</Notice> : null}
+      {error ? (
+        <Notice variant="error">
+          {error}{' '}
+          <Button variant="link" onClick={load}>{t('common:retry')}</Button>
+        </Notice>
+      ) : null}
 
       <div className="u-grid u-gap-3">
         {oauthProviders.map((p) => {

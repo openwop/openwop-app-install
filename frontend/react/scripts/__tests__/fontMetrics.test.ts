@@ -12,6 +12,9 @@
  * values from the size-adjust actually written in tokens.css — so it goes red
  * if the fonts are re-subsetted, if size-adjust changes without re-deriving
  * the overrides, or if the pinned numbers drift by hand.
+ *
+ * Sabotage (wave 51 probes): editing any override % or the size-adjust of a face in
+ * tokens.css reds that face's case.
  */
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
@@ -19,7 +22,12 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 // fontkit is CJS; vitest's ESM default-interop hands back undefined here.
-const fontkit = createRequire(import.meta.url)('fontkit') as { openSync: (p: string) => unknown };
+/** The fields of a fontkit `Font` this test reads (fontkit ships no types). */
+interface FontkitFont {
+  unitsPerEm: number;
+  'OS/2': { typoAscender: number; typoDescender: number; typoLineGap: number; fsSelection: { useTypoMetrics?: boolean } };
+}
+const fontkit = createRequire(import.meta.url)('fontkit') as { openSync: (p: string) => FontkitFont };
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const TOKENS = readFileSync(join(ROOT, 'src/styles/foundations/tokens.css'), 'utf8');
@@ -27,7 +35,7 @@ const TOKENS = readFileSync(join(ROOT, 'src/styles/foundations/tokens.css'), 'ut
 interface Face { family: string; woff2: string }
 const FACES: Face[] = [
   { family: 'Geist Fallback', woff2: 'e2e/assets/fonts/gyByhwUxId8gMEwcGFWNOITd.woff2' },
-  { family: 'Instrument Serif Fallback', woff2: 'e2e/assets/fonts/jizBRFtNs2ka5fXjeivQ4LroWlx-6zUTjnTLgNs.woff2' },
+  { family: 'Bricolage Grotesque Fallback', woff2: 'e2e/assets/fonts/3y9K6as8bTXq_nANBjzKo3IeZx8z6up5BeSl9D4dj_x9PpZBMlGIInHWVyNJ.woff2' },
 ];
 
 /** The @font-face block for one family, parsed for its descriptor values. */
@@ -44,10 +52,7 @@ const pct = (v: string): number => Number(v.replace('%', ''));
 describe('DSYS-3 — metric-fallback overrides match the measured webfonts', () => {
   for (const face of FACES) {
     it(`${face.family}: ascent/descent/line-gap match the woff2, USE_TYPO_METRICS honored`, () => {
-      const font = fontkit.openSync(join(ROOT, face.woff2)) as unknown as {
-        unitsPerEm: number; ascent: number; descent: number; lineGap: number;
-        'OS/2': { typoAscender: number; typoDescender: number; typoLineGap: number; fsSelection: { useTypoMetrics?: boolean } };
-      };
+      const font = fontkit.openSync(join(ROOT, face.woff2));
       const os2 = font['OS/2'];
       // Both vendored faces set the bit; if a re-subset ever clears it the
       // formula's inputs change — fail loudly rather than silently mis-pin.

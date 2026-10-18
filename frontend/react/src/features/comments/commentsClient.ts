@@ -25,9 +25,9 @@ export interface Org { orgId: string; name: string }
  */
 export type ResourceType =
   | 'cms_page' | 'kb_collection' | 'chat_message'
-  | 'canvas_document' | 'priority_idea' | 'creative_brief';
+  | 'canvas_document' | 'priority_idea' | 'creative_brief' | 'canvas_slides';
 export const ALL_RESOURCE_TYPES: readonly ResourceType[] = [
-  'cms_page', 'kb_collection', 'chat_message', 'canvas_document', 'priority_idea', 'creative_brief',
+  'cms_page', 'kb_collection', 'chat_message', 'canvas_document', 'priority_idea', 'creative_brief', 'canvas_slides',
 ];
 export function isResourceType(v: unknown): v is ResourceType {
   return typeof v === 'string' && (ALL_RESOURCE_TYPES as readonly string[]).includes(v);
@@ -47,10 +47,28 @@ export interface Comment {
   parentId?: string;
   body: string;
   authorId: string;
+  /** ADR 0659 D10 — the human an agent-authored comment was made for. */
+  onBehalfOf?: string;
   status: CommentStatus;
+  /** ADR 0881 D5 — the org members mentioned AND notified. */
+  mentions?: string[];
+  /** ADR 0881 D6 — who resolved it (an `agent:` id on the workflow lane, with the
+   *  human in `resolvedOnBehalfOf`) and when; absent while open. */
+  resolvedBy?: string;
+  resolvedOnBehalfOf?: string;
+  resolvedAt?: string;
+  /** ADR 0881 D6 — set when the author changed the body. */
+  editedAt?: string;
   createdAt: string;
   updatedAt: string;
 }
+
+/** ADR 0881 D7 — what the caller may do on this thread (server-authoritative). */
+export interface ThreadViewer { userId: string; canWrite: boolean; canModerate: boolean }
+
+/** A write's answer: the row, plus mentioned members who could not open the resource
+ *  and so were not notified (ADR 0881 D5) — never stored on the row. */
+export type CommentWrite = Comment & { unnotifiedMentions?: string[] };
 
 const root = `${config.baseUrl}/host/openwop-app`;
 const jsonHeaders = (): Record<string, string> => authedHeaders({ 'content-type': 'application/json' });
@@ -81,7 +99,9 @@ const jsonHeaders = (): Record<string, string> => authedHeaders({ 'content-type'
  * mapping must therefore never REQUIRE it.
  */
 export class CommentsHttpError extends Error {
-  constructor(message: string, readonly status: number, readonly code: string | undefined = undefined) {
+  /** `field` — the envelope's `details.field`, so a lane can name WHICH input was
+   *  refused (CM2UX-8: a stale mention reads differently from bad text). */
+  constructor(message: string, readonly status: number, readonly code: string | undefined = undefined, readonly field: string | undefined = undefined) {
     super(message);
     this.name = 'CommentsHttpError';
   }
@@ -91,12 +111,14 @@ export class CommentsHttpError extends Error {
 async function refusal(res: Response, ctx: string): Promise<CommentsHttpError> {
   let detail = '';
   let code: string | undefined;
+  let field: string | undefined;
   try {
-    const body = (await res.json()) as { message?: string; error?: string };
+    const body = (await res.json()) as { message?: string; error?: string; details?: { field?: unknown } };
     detail = body?.message ?? '';
     if (typeof body?.error === 'string') code = body.error;
+    if (typeof body?.details?.field === 'string') field = body.details.field;
   } catch { /* non-JSON */ }
-  return new CommentsHttpError(detail || `${ctx} returned ${res.status}`, res.status, code);
+  return new CommentsHttpError(detail || `${ctx} returned ${res.status}`, res.status, code, field);
 }
 
 async function asJson<T>(res: Response, ctx: string): Promise<T> {
@@ -122,20 +144,27 @@ const base = (orgId: string): string => `${root}/comments/orgs/${encodeURICompon
  * NOT try to tell them apart either, and the panel renders ONE state for both.
  * 403 is treated identically by the panel in case the final contract differs.
  */
-export async function listThread(orgId: string, resourceType: ResourceType, resourceId: string): Promise<Comment[]> {
+/** The thread plus the caller's capabilities on it (ADR 0881 D7). `viewer` is `null`
+ *  against a host that predates it — the panel then claims nothing about ownership. */
+export async function readThread(orgId: string, resourceType: ResourceType, resourceId: string): Promise<{ comments: Comment[]; viewer: ThreadViewer | null }> {
   const q = new URLSearchParams({ resourceType, resourceId });
   const res = await fetch(`${base(orgId)}?${q.toString()}`, fetchOpts({ headers: authedHeaders() }));
-  return (await asJson<{ comments: Comment[] }>(res, 'listThread')).comments;
+  const out = await asJson<{ comments: Comment[]; viewer?: ThreadViewer }>(res, 'listThread');
+  return { comments: out.comments, viewer: out.viewer ?? null };
 }
 
-export async function postComment(orgId: string, input: { resourceType: ResourceType; resourceId: string; body: string; parentId?: string }): Promise<Comment> {
+export async function listThread(orgId: string, resourceType: ResourceType, resourceId: string): Promise<Comment[]> {
+  return (await readThread(orgId, resourceType, resourceId)).comments;
+}
+
+export async function postComment(orgId: string, input: { resourceType: ResourceType; resourceId: string; body: string; parentId?: string; mentions?: string[] }): Promise<CommentWrite> {
   const res = await fetch(base(orgId), fetchOpts({ method: 'POST', headers: jsonHeaders(), body: JSON.stringify(input) }));
-  return asJson<Comment>(res, 'postComment');
+  return asJson<CommentWrite>(res, 'postComment');
 }
 
-export async function updateComment(orgId: string, commentId: string, patch: { body?: string; status?: CommentStatus }): Promise<Comment> {
+export async function updateComment(orgId: string, commentId: string, patch: { body?: string; status?: CommentStatus; mentions?: string[] }): Promise<CommentWrite> {
   const res = await fetch(`${base(orgId)}/${encodeURIComponent(commentId)}`, fetchOpts({ method: 'PATCH', headers: jsonHeaders(), body: JSON.stringify(patch) }));
-  return asJson<Comment>(res, 'updateComment');
+  return asJson<CommentWrite>(res, 'updateComment');
 }
 
 export async function deleteComment(orgId: string, commentId: string): Promise<void> {

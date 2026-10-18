@@ -9,14 +9,23 @@
  *
  * The behaviours worth pinning are the failure modes, not the happy path: a
  * failed read must floor to the shipped library, never to an empty catalog.
+ *
+ * DOUBLE GUARD (w52, probe tsc-failed came back vacuous by design): a FAILED
+ * catalog read is floored twice — `!res.ok` returns before `server` is set (so
+ * the in-tree TUTORIALS render), and even an EMPTY server map would show every
+ * tutorial through the floor loop (`for (const t of TUTORIALS) if
+ * (!server.has(t.id)) merged.push(t)`). Removing either alone changes nothing on
+ * a failed read; the floor loop is witnessed on its own by 'a tutorial the server
+ * does not know about…' (probe tsc-floor). Case 1 pins the user-visible outcome.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, act } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 
+type Client = typeof import('../tutorialsClient.js');
 const client = vi.hoisted(() => ({
-  fetchTutorials: vi.fn(), fetchTutorial: vi.fn(),
-  fetchTutorialProgress: vi.fn(), saveTutorialProgress: vi.fn(),
+  fetchTutorialProgress: vi.fn<Client['fetchTutorialProgress']>(), saveTutorialProgress: vi.fn<Client['saveTutorialProgress']>(),
+  fetchTutorials: vi.fn<Client['fetchTutorials']>(), fetchTutorial: vi.fn<Client['fetchTutorial']>(),
 }));
 import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
 vi.mock('../tutorialsClient.js', () => client);
@@ -40,7 +49,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   localStorage.clear();
   client.fetchTutorialProgress.mockResolvedValue({ ok: true, persisted: false, rows: [] });
-  client.saveTutorialProgress.mockResolvedValue(true);
+  client.saveTutorialProgress.mockResolvedValue({ ok: true });
   client.fetchTutorials.mockResolvedValue({ ok: true, degraded: false, tutorials: [] });
   client.fetchTutorial.mockResolvedValue({ ok: true, tutorial: null });
 });
@@ -50,6 +59,8 @@ describe('ADR 0488 — server-first content with the in-tree floor', () => {
     client.fetchTutorials.mockResolvedValue({ ok: false, degraded: false, tutorials: [] });
     renderList();
     await waitFor(() => expect(client.fetchTutorials).toHaveBeenCalled());
+    // Let the FAILED answer land before looking (the floor is also the pre-read state).
+    await act(async () => { for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r)); });
     // Every shipped tutorial is still reachable.
     for (const t of TUTORIALS) expect(screen.getByText(t.title)).toBeTruthy();
   });
@@ -93,6 +104,8 @@ describe('ADR 0488 — server-first content with the in-tree floor', () => {
   it('an unknown slug is still not-found (the floor does not invent a tutorial)', async () => {
     renderDetail('no-such-tutorial');
     await waitFor(() => expect(client.fetchTutorial).toHaveBeenCalled());
+    // The not-found state itself — a blank page would also have no hero.
+    expect(await screen.findByText('Tutorial not found')).toBeTruthy();
     expect(screen.queryByText(FIRST.hero.title)).toBeNull();
   });
 });

@@ -15,7 +15,7 @@ import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { createLogger } from '../../observability/logger.js';
 import { getChallenge, listPublished } from '../kicktodo-core/challengeService.js';
 import { getCohortDetail, cohortOutcomeAggregate } from '../kicktodo-accountability/cohortService.js';
-import { resolveCircleByOpaqueId } from '../kicktodo-accountability/circleService.js';
+import { CircleDeniedError, resolveCircleByOpaqueId } from '../kicktodo-accountability/circleService.js';
 
 const log = createLogger('kicktodo.orgPrograms');
 
@@ -65,24 +65,84 @@ export class OrgProgramNotFoundError extends Error {
   }
 }
 
-/** Add/remove a published challenge in the org's library (idempotent). */
+/** KTORG-2 — the library kept changing for every attempt (a bounded CAS loop
+ *  lost each round). Never a silent last-writer-wins. */
+export class OrgLibraryConflictError extends Error {
+  constructor() {
+    super('The library kept changing while it was being saved. Try again.');
+  }
+}
+
+/** How long an EMPTYING row (below) may stand before another writer may retire
+ *  it — the window in which its claimant is presumed crashed, not slow. */
+const EMPTYING_STALE_MS = 30_000;
+const LIBRARY_CAS_ATTEMPTS = 8;
+
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Add/remove a published challenge in the org's library (idempotent).
+ *
+ * KTORG-2 (KTO-2) — this was get → filter → put with no CAS, so two concurrent
+ * edits both read the same library and the later `put` dropped the other's entry.
+ * Every write is now a CAS on the exact row read, re-derived on each attempt.
+ *
+ * THE EMPTY CASE is the hard half. KTORG-D1 requires an empty library to be NO
+ * row, and `Storage` has no compare-and-delete, so a bare `delete` after a CAS
+ * could erase an entry a concurrent adder had just written. The removal is two
+ * steps instead: CAS the row to an EMPTYING row (`entries: []`), then delete it.
+ * An empty row is never a base for anyone else's write — a writer that reads one
+ * backs off and re-reads until it is gone — so between the claim and the delete
+ * no other write can land on that key, and the delete cannot erase one. An
+ * emptying row older than `EMPTYING_STALE_MS` belongs to a crashed claimant; a
+ * writer retires it the same way (CAS to a fresh emptying row it owns, then
+ * delete), so a crash never wedges the library or `deleteOrg`. Residual: a
+ * claimant paused for longer than that window between its CAS and its delete
+ * could erase a later write — the lease bound every TTL lock here shares.
+ */
 export async function setLibraryEntry(
   tenantId: string,
   orgId: string,
   actorSubject: string,
   input: { challengeId: string; version: number; present: boolean },
 ): Promise<OrgChallengeLibrary> {
-  const challenge = await getChallenge(tenantId, input.challengeId, input.version);
-  if (!challenge) throw new OrgProgramNotFoundError();
-  const existing = await libraries.get(`${tenantId}::${orgId}`) ?? { tenantId, orgId, entries: [], updatedAt: nowIso() };
-  const without = existing.entries.filter((e) => !(e.challengeId === input.challengeId && e.version === input.version));
-  const entries = input.present
-    ? [...without, { challengeId: input.challengeId, version: input.version, addedBy: actorSubject, addedAt: nowIso() }]
-    : without;
-  const next: OrgChallengeLibrary = { tenantId, orgId, entries, updatedAt: nowIso() };
-  await libraries.put(next);
-  log.info('kicktodo_org_library_updated', { orgId, entries: entries.length });
-  return next;
+  // Grade-data KTORG-D1 — only an ADD needs the challenge to exist; removing an
+  // entry must work even for a version that is gone, or a dangling entry could
+  // never be cleared.
+  if (input.present && !(await getChallenge(tenantId, input.challengeId, input.version))) throw new OrgProgramNotFoundError();
+  const key = `${tenantId}::${orgId}`;
+  for (let attempt = 0; attempt < LIBRARY_CAS_ATTEMPTS; attempt++) {
+    const stored = await libraries.get(key);
+    if (stored && stored.entries.length === 0) {
+      // Another writer's EMPTYING claim (or a crashed one's). Never build on it.
+      if (Date.now() - Date.parse(stored.updatedAt) > EMPTYING_STALE_MS) {
+        const retake: OrgChallengeLibrary = { tenantId, orgId, entries: [], updatedAt: nowIso() };
+        if (await libraries.compareAndSwap(stored, retake)) await libraries.delete(key);
+      } else {
+        await sleep(5 * (attempt + 1));
+      }
+      continue;
+    }
+    const existing = stored ?? { tenantId, orgId, entries: [], updatedAt: nowIso() };
+    const without = existing.entries.filter((e) => !(e.challengeId === input.challengeId && e.version === input.version));
+    const entries = input.present
+      ? [...without, { challengeId: input.challengeId, version: input.version, addedBy: actorSubject, addedAt: nowIso() }]
+      : without;
+    const next: OrgChallengeLibrary = { tenantId, orgId, entries, updatedAt: nowIso() };
+    // Grade-data KTORG-D1 — an EMPTY library is no row at all. `deleteOrg` refuses
+    // while any org-scoped business row exists (`countOrgHostExtRows`), so a kept
+    // empty row blocked deleting the org forever once anyone had curated a library.
+    if (entries.length === 0) {
+      if (!stored) return next; // nothing stored, nothing to remove
+      if (!(await libraries.compareAndSwap(stored, next))) continue; // claim EMPTYING
+      await libraries.delete(key);
+    } else if (!(await libraries.compareAndSwap(stored, next))) {
+      continue;
+    }
+    log.info('kicktodo_org_library_updated', { orgId, entries: entries.length });
+    return next;
+  }
+  throw new OrgLibraryConflictError();
 }
 
 export async function getLibrary(tenantId: string, orgId: string): Promise<OrgChallengeLibrary | null> {
@@ -151,7 +211,13 @@ export async function unlinkCohort(
 ): Promise<void> {
   const link = await cohortLinks.get(`${tenantId}::${orgId}::${circleId}`);
   if (!link) return;
-  const circle = await resolveCircleByOpaqueId(circleId).catch(() => null);
+  // Code-grade KTO-1 — only a GONE circle (`CircleDeniedError`) makes the link
+  // ownerless. Any other failure (a storage outage) used to be swallowed into the
+  // same null, so a transient error let any org admin remove another member's link.
+  const circle = await resolveCircleByOpaqueId(circleId).catch((err: unknown) => {
+    if (err instanceof CircleDeniedError) return null;
+    throw err;
+  });
   if (circle && circle.ownerSubject !== actorSubject) throw new OrgProgramNotFoundError();
   await cohortLinks.delete(`${tenantId}::${orgId}::${circleId}`);
   log.info('kicktodo_org_cohort_unlinked', { tenantId, orgId, circleId });
@@ -165,6 +231,15 @@ export async function setBrandRef(tenantId: string, orgId: string, brandProfileI
   if (!brandProfileId.trim() || brandProfileId.length > 200) throw new OrgProgramError('A brand profile id is required.');
   await brandRefs.put({ tenantId, orgId, brandProfileId: brandProfileId.trim(), updatedAt: nowIso() });
   log.info('kicktodo_org_brand_ref_set', { tenantId, orgId, brandProfileId: brandProfileId.trim() });
+}
+
+/** Grade-data KTORG-D1 — remove the org's brand reference. Without it a brand ref,
+ *  once set, could never be removed, and `deleteOrg`'s refuse-while-populated guard
+ *  blocked deleting the org forever. Idempotent. */
+export async function clearBrandRef(tenantId: string, orgId: string): Promise<boolean> {
+  const removed = await brandRefs.delete(`${tenantId}::${orgId}`);
+  if (removed) log.info('kicktodo_org_brand_ref_cleared', { tenantId, orgId });
+  return removed;
 }
 
 export async function getBrandRef(tenantId: string, orgId: string): Promise<string | null> {

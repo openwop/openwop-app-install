@@ -31,4 +31,9 @@ export const messages = {
   healthLoopFailedNote: 'Abre Tareas recurrentes abajo para ver por qué y cómo solucionarlo.',
   actionWithheld: 'Solo los miembros que pueden enviar esta acción pueden leerla o decidirla.',
   loopAutoPaused: 'Pausada automáticamente {{when}}: {{reason}} Vuelve a conectar Google y luego actívala de nuevo.',
+  // ADR 0878 (SD2UX-2) — where an approved support reply goes.
+  replyVia: "La respuesta va a",
+  replyViaWhatsapp: "El cliente, por WhatsApp",
+  replyViaWidget: "El visitante, en el chat del sitio web",
+  replyViaNone: "Nadie: este ticket no tiene canal de respuesta, así que la respuesta se guarda pero no se envía",
 } as const;

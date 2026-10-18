@@ -1,5 +1,13 @@
-import { describe, it, expect, afterEach, beforeEach } from 'vitest';
-import { render, screen, cleanup } from '@testing-library/react';
+import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
+import { render, screen, cleanup, fireEvent } from '@testing-library/react';
+
+// The node inspector's model-capability hint reads host discovery; answer it
+// locally (no advertisement) so the file never issues a live fetch (ADR 0661).
+vi.mock('../../../client/runsClient.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../client/runsClient.js')>()),
+  getCapabilities: vi.fn(async () => ({})),
+}));
+
 import { Inspector } from '../Inspector.js';
 import { useBuilderStore } from '../../store/builderStore.js';
 
@@ -12,25 +20,31 @@ beforeEach(() => {
 });
 
 /**
- * Verifies the Field-primitive migration of the node Inspector: with a node
+ * Field-primitive migration (#66 / #69) of the node Inspector: with a node
  * selected, the always-present Name + Artifact controls resolve by accessible
- * label and reflect the builder-store node. Uses the `noop` node (no config
- * fields) so only the migrated fields are under test.
+ * label, reflect the builder-store node, and Name writes back through the
+ * store. Breaks if either control loses its label or its binding. Uses the
+ * `noop` node (catalog label "Pass-through", no config fields) so only the
+ * migrated fields are under test.
  */
 describe('Inspector node forms (Field migration)', () => {
   it('exposes Name + Artifact as label-associated controls for the selected node', () => {
     const id = useBuilderStore.getState().addNode('noop', { x: 0, y: 0 });
+    // Non-default output role, so "reflects the node" cannot pass on the '' default.
+    useBuilderStore.getState().updateNode(id, { outputRole: 'secondary' });
     useBuilderStore.getState().selectNode(id);
     render(<Inspector />);
 
     const nameInput = screen.getByLabelText('Name') as HTMLInputElement;
-    expect(nameInput).toBeTruthy();
+    // Literal, not read back from the store (the noop catalog label).
+    expect(nameInput.value).toBe('Pass-through');
     const artifact = screen.getByLabelText('Artifact') as HTMLSelectElement;
     expect(artifact.tagName).toBe('SELECT');
+    expect(artifact.value).toBe('secondary');
 
-    // Name reflects the node + writes back through the store.
-    const node = useBuilderStore.getState().nodes.find((n) => n.id === id);
-    expect(nameInput.value).toBe(node?.name ?? '');
+    // Name writes back through the store.
+    fireEvent.change(nameInput, { target: { value: 'Renamed node' } });
+    expect(useBuilderStore.getState().nodes.find((n) => n.id === id)?.name).toBe('Renamed node');
   });
 });
 
@@ -46,9 +60,18 @@ describe('Inspector node forms (Field migration)', () => {
  */
 describe('Inspector — preset inputs (ADR 0523)', () => {
   it('renders nothing when the node has no preset inputs', () => {
+    // Both empty shapes: `inputs` absent, and `inputs: {}` — the state a CLEAR of
+    // the last preset input leaves (presetInputsEditable.test.tsx).
     const id = useBuilderStore.getState().addNode('noop', { x: 0, y: 0 });
     useBuilderStore.getState().selectNode(id);
+    const { unmount } = render(<Inspector />);
+    expect(screen.getByLabelText('Name')).toBeTruthy(); // the inspector itself rendered
+    expect(screen.queryByText('Preset inputs')).toBeNull();
+    unmount();
+
+    useBuilderStore.getState().updateNode(id, { inputs: {} });
     render(<Inspector />);
+    expect(screen.getByLabelText('Name')).toBeTruthy();
     expect(screen.queryByText('Preset inputs')).toBeNull();
   });
 
@@ -79,10 +102,20 @@ describe('Inspector — preset inputs (ADR 0523)', () => {
   });
 
   it('does NOT claim an override when no edge feeds the preset port', () => {
+    // Asymmetric fixture: an edge DOES feed a `to` port — but on ANOTHER node —
+    // and an edge feeds THIS node on a different port. Only an edge into this
+    // node's `to` would make the preset an override.
     const id = useBuilderStore.getState().addNode('noop', { x: 0, y: 0 });
+    const other = useBuilderStore.getState().addNode('noop', { x: 200, y: 0 });
+    const src = useBuilderStore.getState().addNode('noop', { x: 400, y: 0 });
     useBuilderStore.getState().updateNode(id, { inputs: { to: 'someone@example.com' } });
+    useBuilderStore.getState().updateNode(other, { inputs: { to: 'x@example.com' } });
+    useBuilderStore.getState().addEdge({ source: id, sourcePort: 'out', target: other, targetPort: 'to' });
+    useBuilderStore.getState().addEdge({ source: src, sourcePort: 'out', target: id, targetPort: 'in' });
+    expect(useBuilderStore.getState().edges).toHaveLength(2); // both fixture edges landed
     useBuilderStore.getState().selectNode(id);
     render(<Inspector />);
+    expect(screen.getByDisplayValue('someone@example.com')).toBeTruthy(); // the section rendered
     expect(screen.queryByText(/overrides the incoming edge/)).toBeNull();
   });
 

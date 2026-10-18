@@ -9,6 +9,10 @@
  * empty row is ≤ 100. So the cap is only half the property; the other half is
  * that the retained entries are the MOST RECENT ones. Both are asserted, plus
  * the tenant scoping the row's `tenantOf` index depends on.
+ *
+ * Sabotage witnesses (grade-tests w36): no slice (uncapped), slice keeping the
+ * OLDEST window, and a key that ignores the tenant — each reds its case. Each
+ * case seeds its own rows, so the file passes in any order (shuffle-verified).
  */
 import { beforeAll, describe, expect, it } from 'vitest';
 import { initHostExtPersistence } from '../../../host/hostExtPersistence.js';
@@ -37,11 +41,14 @@ describe('PROBE-AB-2 (executable) — export lineage is capped at MAX_ENTRIES', 
   });
 
   it('is scoped per canvas and per tenant', async () => {
-    await appendExportLineage(T, 'canvas-2', entry(1));
-    await appendExportLineage('other-tenant', CANVAS, entry(1));
+    // Own tenant + canvases: nothing here depends on the cap case's rows.
+    const T2 = 'tenant-lineage-scope';
+    for (let i = 1; i <= 3; i++) await appendExportLineage(T2, 'canvas-a', entry(i));
+    await appendExportLineage(T2, 'canvas-b', entry(1));
+    await appendExportLineage('other-tenant-scope', 'canvas-a', entry(1));
 
-    expect((await listExportLineage(T, 'canvas-2')).length, 'a sibling canvas shared the cap').toBe(1);
-    expect((await listExportLineage('other-tenant', CANVAS)).length, 'another tenant shared this canvas row').toBe(1);
-    expect((await listExportLineage(T, CANVAS)).length, 'the original row was disturbed').toBe(100);
+    expect((await listExportLineage(T2, 'canvas-b')).length, 'a sibling canvas shared the row').toBe(1);
+    expect((await listExportLineage('other-tenant-scope', 'canvas-a')).length, 'another tenant shared this canvas row').toBe(1);
+    expect((await listExportLineage(T2, 'canvas-a')).map((e) => e.canvasVersion), 'the original row was disturbed').toEqual([1, 2, 3]);
   });
 });

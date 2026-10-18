@@ -19,6 +19,9 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { createElement } from 'react';
+import { render, screen, cleanup } from '@testing-library/react';
+import { SelectField } from '../Field.js';
 
 const SRC = join(__dirname, '..', '..');
 const read = (p: string): string => readFileSync(join(SRC, p), 'utf8');
@@ -36,9 +39,49 @@ const WIRED: ReadonlyArray<readonly [string, string]> = [
   ['features/environments/EnvironmentsPage.tsx', 'envError'],
 ];
 
+/**
+ * The disclosure gated on THIS flag announces — not "some Notice in the file".
+ * A file-wide count cannot fail when the named disclosure is unwired while
+ * another Notice in the file still announces (StrategyDetailPage has 9 announcing
+ * notices; w49 probes nafr-strategy / nafr-chat-roster stayed green under the
+ * old `>= 1`). Anchored on the flag the same way the DocumentsPage case is.
+ */
+const flagNoticeAnnounces = (src: string, flag: string): boolean =>
+  new RegExp(`\\b${flag}\\b[^\\n]*\\?\\s*\\(?\\s*<Notice[^>]*\\bannounce\\s*[:=]`).test(src);
+
+/**
+ * `ProjectMembersTab`'s `directoryFailed` disclosure is no longer a Notice: since
+ * d7a4bab8e (projects R2) it is the add-member `SelectField`'s `error`, which
+ * `ui/Field` renders as `role="alert"` and wires into the control's
+ * `aria-describedby` + `aria-invalid`. The row keeps `directoryFailed` as its
+ * subject and asserts the disclosure where it lives now.
+ */
+const FIELD_ERROR_DISCLOSURES: ReadonlySet<string> = new Set(['directoryFailed']);
+const fieldErrorCarries = (src: string, flag: string): boolean =>
+  new RegExp(`<SelectField[\\s\\S]{0,400}?\\{\\.\\.\\.\\(${flag} \\? \\{ error: t\\(`).test(src);
+
 describe('failed-read notices announce', () => {
-  it.each(WIRED)('%s announces its %s disclosure', (file) => {
+  it.each(WIRED)('%s announces its %s disclosure', (file, flag) => {
+    const s = read(file);
     expect(announced(file)).toBeGreaterThanOrEqual(1);
+    if (FIELD_ERROR_DISCLOSURES.has(flag)) {
+      expect(fieldErrorCarries(s, flag)).toBe(true);
+      expect(flagNoticeAnnounces(s, flag)).toBe(false); // it moved; don't double-disclose
+      // …and a Field error is announced + associated (the contract the row now relies on).
+      try {
+        render(createElement(SelectField, { label: 'Person', error: 'Directory unavailable', value: '', onChange: () => {} },
+          createElement('option', { value: '' }, '—')));
+        const select = screen.getByLabelText('Person');
+        expect(screen.getByRole('alert').textContent).toBe('Directory unavailable');
+        expect(select.getAttribute('aria-invalid')).toBe('true');
+        const describedBy = select.getAttribute('aria-describedby') ?? '';
+        expect(describedBy.split(' ').map((id) => document.getElementById(id)?.textContent)).toContain('Directory unavailable');
+      } finally {
+        cleanup();
+      }
+    } else {
+      expect(flagNoticeAnnounces(s, flag)).toBe(true);
+    }
   });
 
   /**

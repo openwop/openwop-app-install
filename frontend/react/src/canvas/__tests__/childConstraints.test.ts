@@ -1,4 +1,10 @@
-/** ADR 0344 2c — the shared adoption rule every FE gate consults. */
+/**
+ * ADR 0344 2c — the shared adoption rule every FE gate (palette add, preview
+ * drop, outline drop, paste) consults. Mirrors the backend's HARD catalog
+ * enforcement, so a drift here lets the editor build a tree the server refuses.
+ * Sabotage: `>=`→`>` on maxChildren, or dropping the null-root / acceptsChildren /
+ * allowedChildTypes arm, each turn exactly one case red.
+ */
 import { describe, it, expect } from 'vitest';
 import { canAdopt } from '../childConstraints.js';
 

@@ -5,6 +5,9 @@
  * that back to the right row AND pick a tab that actually shows it.
  */
 import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   parseInboxDeepLink,
   matchesInboxDeepLink,
@@ -47,6 +50,10 @@ describe('matchesInboxDeepLink', () => {
     expect(matchesInboxDeepLink(n, { notificationId: '', approvalId: 'apr_8' })).toBe(false);
   });
   it('never matches on an empty param (no bare /inbox false-positive)', () => {
+    // The row carries EMPTY ids, so the `link.x &&` guards are the only thing
+    // keeping '' === '' from matching (a row with real ids could never match '').
+    const blank = notif({ notificationId: '', metadata: { approvalId: '' } });
+    expect(matchesInboxDeepLink(blank, { notificationId: '', approvalId: '' })).toBe(false);
     expect(matchesInboxDeepLink(notif({}), { notificationId: '', approvalId: '' })).toBe(false);
   });
   it('is safe when metadata is absent or approvalId is not a string', () => {
@@ -89,9 +96,23 @@ describe('inboxTabShows', () => {
 });
 
 describe('FE↔BE round-trip (DL-C-3)', () => {
-  // Mirror of the emit sites: escalationNotify.ts / actionApproval.ts build
-  // `/inbox?approval=${encodeURIComponent(approvalId)}`.
+  // The other side is READ, not copied: every backend emit site must build the
+  // deep link with this exact template, so `beActionUrl` below is what they emit.
+  const BACKEND = join(dirname(fileURLToPath(import.meta.url)), '../../../../../backend/typescript/src');
+  const EMIT_SITES = [
+    'host/escalationNotify.ts',
+    'host/approvalSla.ts',
+    'features/assistant/actionApproval.ts',
+    'features/claude-code/mcpTools.ts',
+  ];
   const beActionUrl = (approvalId: string): string => `/inbox?approval=${encodeURIComponent(approvalId)}`;
+
+  it('every backend emit site builds `/inbox?approval=<encodeURIComponent(id)>`', () => {
+    for (const site of EMIT_SITES) {
+      const src = readFileSync(join(BACKEND, site), 'utf8');
+      expect(src, site).toMatch(/actionUrl: `\/inbox\?approval=\$\{encodeURIComponent\([\w.]+\)\}`/);
+    }
+  });
 
   it('resolves a BE-emitted approval actionUrl back to the emitting notification', () => {
     const approvalId = 'apr_abc-123';

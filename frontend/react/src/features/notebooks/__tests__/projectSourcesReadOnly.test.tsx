@@ -5,6 +5,10 @@
  * For a read-only member that 403'd and rendered the raw "Missing required scope" text as
  * a load failure. `readOnly` reads instead, and "no notebook yet" is a designed empty
  * state — while a genuine read failure still says it failed.
+ *
+ * Sabotage witnesses (w20g5-ro-*): readOnly calling `ensureNotebook` ⇒ case 1; any status (not just
+ * 404) mapped to "none" ⇒ case 2; a 404 not mapped to "none" ⇒ case 1. Case 1 asserts the READ-ONLY
+ * body copy, because the title "No sources yet" is shared with the ordinary empty workspace.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, cleanup } from '@testing-library/react';
@@ -27,6 +31,8 @@ describe('ProjectSourcesPanel readOnly', () => {
     getNotebook.mockRejectedValue(Object.assign(new Error('Notebook not found.'), { status: 404 }));
     render(<MemoryRouter><ProjectSourcesPanel projectId="p1" readOnly /></MemoryRouter>);
     await screen.findByText('No sources yet');
+    expect(screen.getByText('Someone with edit access to this project can add sources here.')).toBeTruthy();
+    expect(getNotebook).toHaveBeenCalledWith('p1');
     expect(ensureNotebook).not.toHaveBeenCalled();
   });
 
@@ -34,6 +40,7 @@ describe('ProjectSourcesPanel readOnly', () => {
     getNotebook.mockRejectedValue(Object.assign(new Error('upstream 503'), { status: 503 }));
     render(<MemoryRouter><ProjectSourcesPanel projectId="p1" readOnly /></MemoryRouter>);
     await screen.findByText('Failed to load.');
+    expect(screen.getByText('upstream 503')).toBeTruthy();
     expect(screen.queryByText('No sources yet')).toBeNull();
   });
 });

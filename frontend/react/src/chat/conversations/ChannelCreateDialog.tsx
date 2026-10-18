@@ -14,6 +14,7 @@ import { Modal } from '../../ui/Modal.js';
 import { createChannel } from '../../client/channelsClient.js';
 import { MemberPicker, AgentPicker } from './MemberPickers.js';
 import { normalizeChannelName } from './channelName.js';
+import { channelErrorCopy } from './channelErrors.js';
 
 interface Props {
   onClose: () => void;
@@ -51,8 +52,8 @@ export function ChannelCreateDialog({ onClose, onCreated }: Props): JSX.Element 
       });
       onCreated(ch.conversationId);
       onClose();
-    } catch {
-      setError(t('createChannelError'));
+    } catch (e) {
+      setError(channelErrorCopy(e, (k) => t(k), 'chat:createChannelError'));
       setBusy(false);
     }
   };

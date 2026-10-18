@@ -113,8 +113,9 @@ describe('CONS-UX-30 — the receipt announces', () => {
   it('a clean receipt is spoken politely, and says the subject is now blocked until re-admitted', async () => {
     await erase('subj-42');
     await screen.findByText(/reported success/i);
+    // The announcement comes from a passive effect that can flush after findBy sees the DOM; wait for it.
+    await waitFor(() => expect(currentAnnouncements().polite).toMatch(/erasure completed for "subj-42"/i));
     const { polite, assertive } = currentAnnouncements();
-    expect(polite).toMatch(/erasure completed for "subj-42"/i);
     expect(polite).toMatch(/blocked until an administrator re-admits them/i);
     expect(assertive).not.toMatch(/subj-42/);
   });
@@ -123,7 +124,7 @@ describe('CONS-UX-30 — the receipt announces', () => {
     eraseResult = { ok: true, consentRecord: false, erasure: { total: 4, failed: 0, keysResolved: 1, foundNothing: true, rowsTouched: 0 } };
     await erase('subj-42');
     await screen.findByText(/found NOTHING to erase/i);
-    expect(currentAnnouncements().polite).toMatch(/home workspace/i);
+    await waitFor(() => expect(currentAnnouncements().polite).toMatch(/home workspace/i));
     expect(currentAnnouncements().polite).toMatch(/run the erasure there too/i);
   });
 
@@ -161,6 +162,8 @@ describe('CONS-UX-29 / CONS-UX-5 — busy states, and the receipt outlives its o
     deleteSubject.mockImplementation(() => new Promise<SubjectErasureResult>((r) => { resolve = r; }));
     retry.focus();
     expect(document.activeElement).toBe(retry);
+    // Capture the FIRST receipt's announcement, not a pre-flush '' (which would make the not.toBe below vacuous).
+    await waitFor(() => expect(currentAnnouncements().polite).toMatch(/partial erasure of "subj-42"/i));
     const spokenBefore = currentAnnouncements().polite;
     fireEvent.click(retry);
     await waitFor(() => expect(retry.getAttribute('aria-busy')).toBe('true'));
@@ -177,9 +180,11 @@ describe('CONS-UX-29 / CONS-UX-5 — busy states, and the receipt outlives its o
     await waitFor(() => expect(document.activeElement).toBe(retryAfter));
     // …and the replacement receipt was spoken even though its text is identical: the
     // live-region value must CHANGE (the repeat marker), not merely still match.
-    const spokenAfter = currentAnnouncements().polite;
-    expect(spokenAfter).toMatch(/partial erasure of "subj-42"/i);
-    expect(spokenAfter, 'an identical outcome must still be RE-announced').not.toBe(spokenBefore);
+    await waitFor(() => {
+      const spokenAfter = currentAnnouncements().polite;
+      expect(spokenAfter).toMatch(/partial erasure of "subj-42"/i);
+      expect(spokenAfter, 'an identical outcome must still be RE-announced').not.toBe(spokenBefore);
+    });
   });
 });
 

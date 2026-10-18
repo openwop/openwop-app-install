@@ -99,6 +99,7 @@ describe('check-notice-announce — rule 2, failed-read disclosures', () => {
       'compound.tsx': `export const A = () => <>{policyFailed || runsFailed ? <Notice variant="warning">{t('f')}</Notice> : null}</>;\n`,
     });
     expect(r.code).toBe(1);
+    expect(r.out).toContain('compound.tsx:1');
   });
 
   // Static furniture must stay silent — announcing it fires on every mount.
@@ -323,6 +324,8 @@ describe('check-failure-card-announce', () => {
       'features/card.tsx': `export const A = () => <StateCard title={t('loadFailed')} body={t('couldNotLoadBody')} />;\n`,
     }));
     expect(r.code).toBe(1);
+    // The ratchet's own refusal, not the 0-elements or over-eager guard that also exit 1.
+    expect(r.out).toMatch(/1 failure StateCards do not announce/);
   });
 
   it('passes the same card once it announces', () => {
@@ -339,8 +342,15 @@ describe('check-failure-card-announce', () => {
    * these gates exist to catch, one level up.
    */
   it('FAILS LOUDLY when its scan root is missing, rather than passing on nothing', () => {
-    const r = runGate('check-failure-card-announce.mjs', { 'no-features-dir.tsx': 'export const A = 1;\n' });
+    // App.tsx present so the ONLY thing missing is `features/` — without it the
+    // App.tsx ENOENT also exited non-zero and a walk that tolerated the missing
+    // root still passed this case (wave 51 probe w51g1-fc-root-missing).
+    const r = runGate('check-failure-card-announce.mjs', {
+      'no-features-dir.tsx': 'export const A = 1;\n',
+      'App.tsx': 'export const App = () => <><GlobalLiveRegion /></>;\n',
+    });
     expect(r.code).not.toBe(0);
+    expect(r.out).toMatch(/ENOENT[^\n]*features/);
   });
 
   /** The same property from the other side: a degenerate walk is not a clean bill. */
@@ -539,10 +549,20 @@ describe('check-i18n — the ADR 0602 parser-backed comment stripper', () => {
     });
     expect(r.code).toBe(0);
     expect(r.out).not.toContain('alsoNotARealKey');
-    // Non-vacuity: the fixture must actually exercise the miner. If the live
-    // `t('realKey')` calls were ALSO lost, this file would pass by seeing
-    // nothing — which is the failure mode the whole gate is about. A mined
-    // reference is what stops `realKey` being reported as an orphan.
-    expect(r.out).not.toContain('common:realKey');
+    // Non-vacuity: the miner must still be LIVE after the char class. (The old
+    // control here — `not.toContain('common:realKey')` — could not fail: the
+    // orphan pass reads the UNSTRIPPED source, whose `'realKey'` literal always
+    // counts as a use; wave 51 probe w51g1-i18n-orphan-vacuity.) A live typo'd
+    // key AFTER the class must be reported, so a desynced or dead miner reds.
+    const live = runGate('check-i18n.mjs', {
+      'i18n/locales/en/common.ts': EN_CATALOG,
+      'Comp.tsx': "const QUOTES = /['\"]/g;\n"
+        + "export const C = () => <span>{QUOTES.test('x') ? t('realKey') : t('realKey')}</span>;\n"
+        + "export const E = () => <b>{t('liveTypoAfterClass')}</b>;\n\n"
+        + "/**\n * Example: t('alsoNotARealKey')\n */\n",
+    });
+    expect(live.code).toBe(1);
+    expect(live.out).toContain('liveTypoAfterClass');
+    expect(live.out).not.toContain('alsoNotARealKey');
   });
 });

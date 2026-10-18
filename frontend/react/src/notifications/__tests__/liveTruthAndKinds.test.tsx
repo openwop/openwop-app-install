@@ -22,8 +22,18 @@ vi.mock('../../agents/approvalsClient.js', async (orig) => ({
 }));
 const { toastSuccess } = vi.hoisted(() => ({ toastSuccess: vi.fn() }));
 vi.mock('../../ui/toast.js', () => ({ toast: { success: toastSuccess, error: vi.fn(), info: vi.fn() } }));
+// NeedsYouInbox's board read — unmocked, it fetched live from jsdom.
+const { loadAgentViews } = vi.hoisted(() => ({ loadAgentViews: vi.fn() }));
 vi.mock('../../agents/agentViewModel.js', async (orig) => ({
   ...(await orig<typeof import('../../agents/agentViewModel.js')>()),
+  loadAgentViews,
+}));
+// IB-SP-3 drives the real connect(); its SSE subscription is mocked so no
+// reconnecting stream (whose onOpen can also call refresh) runs in the case.
+const { subscribeToNotifications } = vi.hoisted(() => ({ subscribeToNotifications: vi.fn() }));
+vi.mock('../notificationsClient.js', async (orig) => ({
+  ...(await orig<typeof import('../notificationsClient.js')>()),
+  subscribeToNotifications,
 }));
 
 import { NeedsYouInbox } from '../NeedsYouInbox.js';
@@ -33,7 +43,11 @@ import { useNotificationStore } from '../notificationStore.js';
 const BASE = { rosterId: 'r1', persona: 'Ana', workflowId: 'wf.x', proposal: 'Publish "Summer launch" to the public site?', status: 'pending', createdAt: '2026-08-09T00:00:00Z' };
 
 afterEach(cleanup);
-beforeEach(() => { vi.clearAllMocks(); });
+beforeEach(() => {
+  vi.resetAllMocks();
+  loadAgentViews.mockResolvedValue([]);
+  subscribeToNotifications.mockReturnValue(() => undefined);
+});
 
 describe('R2 IB-SP-4 — approval-kind honesty (NeedsYouInbox first tests)', () => {
   it('a content-publish approval renders the server proposal + plain Approve — never "Approve & run"', async () => {
@@ -67,11 +81,16 @@ describe('R2 IB-SP-4 — approval-kind honesty (NeedsYouInbox first tests)', () 
 });
 
 describe('R2 IB-SP-2 — the SSE drop is visible', () => {
+  beforeEach(() => { useNotificationStore.setState({ connectionStatus: 'connected', unreadCount: 0 }); });
+
   it('the bell shows the stale badge + label when connectionStatus is error', () => {
     useNotificationStore.setState({ connectionStatus: 'error', unreadCount: 3 });
     render(<NotificationBell />);
-    expect(screen.getByRole('button', { name: /reconnecting/i })).toBeTruthy();
-    useNotificationStore.setState({ connectionStatus: 'connected' });
+    // Review F12 — a blip must not erase the count: the stale label COMPOSES
+    // with the unread label rather than replacing it.
+    expect(screen.getByRole('button', {
+      name: 'Notifications (3 unread) — Notifications — live updates interrupted, reconnecting',
+    })).toBeTruthy();
   });
 
   it('a healthy connection shows the normal unread label (the positive case)', () => {
@@ -84,15 +103,34 @@ describe('R2 IB-SP-2 — the SSE drop is visible', () => {
 describe('R2 IB-SP-3 — tab-focus backfill', () => {
   it('becoming visible triggers a refresh while connected', async () => {
     const refreshSpy = vi.fn(async () => undefined);
+    const realRefresh = useNotificationStore.getState().refresh;
+    const visibility = Object.getOwnPropertyDescriptor(document, 'visibilityState');
+    let state: DocumentVisibilityState = 'visible';
+    Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => state });
     // Drive the real connect() far enough to attach the listener, with the
-    // client fully stubbed at the network boundary.
+    // REST client stubbed at the network boundary.
     vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ notifications: [] }), { status: 200, headers: { 'content-type': 'application/json' } })));
-    useNotificationStore.setState({ connectionStatus: 'disconnected', _sseCleanup: null, loading: false, error: null });
-    await useNotificationStore.getState().connect();
-    useNotificationStore.setState({ refresh: refreshSpy });
-    await act(async () => { document.dispatchEvent(new Event('visibilitychange')); });
-    expect(refreshSpy).toHaveBeenCalled();
-    useNotificationStore.getState().disconnect();
-    vi.unstubAllGlobals();
+    try {
+      useNotificationStore.setState({ connectionStatus: 'disconnected', _sseCleanup: null, loading: false, error: null });
+      await useNotificationStore.getState().connect();
+      useNotificationStore.setState({ refresh: refreshSpy });
+      await act(async () => { document.dispatchEvent(new Event('visibilitychange')); });
+      expect(refreshSpy).toHaveBeenCalledTimes(1);
+      // Hidden → no refresh (the guard's other branch).
+      state = 'hidden';
+      await act(async () => { document.dispatchEvent(new Event('visibilitychange')); });
+      expect(refreshSpy).toHaveBeenCalledTimes(1);
+      // "while connected": after disconnect the listener is gone.
+      state = 'visible';
+      useNotificationStore.getState().disconnect();
+      await act(async () => { document.dispatchEvent(new Event('visibilitychange')); });
+      expect(refreshSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      useNotificationStore.getState().disconnect();
+      useNotificationStore.setState({ refresh: realRefresh });
+      if (visibility) Object.defineProperty(document, 'visibilityState', visibility);
+      else Reflect.deleteProperty(document, 'visibilityState');
+      vi.unstubAllGlobals();
+    }
   });
 });

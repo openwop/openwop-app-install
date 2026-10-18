@@ -6,29 +6,39 @@
  * stays disabled until the acknowledgement is ticked, that the approval sends
  * back the hash of the text SHOWN, and that a text change mid-page reloads it
  * rather than approving the old one.
+ *
+ * Sabotage-witnessed (w52): Approve enabled without the tick, the hash taken from
+ * the consent version, the tick not cleared on reload, no reload on 409, the
+ * feature marker ignored either way, Deny gated on the tick, the workspace not
+ * shown. 'IGNORES a code in the URL' guards an ABSENCE (no code reads the query)
+ * and has no sabotage short of adding a reader — an honest ceiling.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 
-const getReq = vi.fn();
-const approve = vi.fn();
-const deny = vi.fn();
+type Client = typeof import('../claudeCodeClient.js');
+const getReq = vi.fn<Client['getPairRequest']>();
+const approve = vi.fn<Client['approvePairRequest']>();
+const deny = vi.fn<Client['denyPairRequest']>();
 vi.mock('../claudeCodeClient.js', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('../claudeCodeClient.js')>()),
-  getPairRequest: (...a: unknown[]) => getReq(...a),
-  approvePairRequest: (...a: unknown[]) => approve(...a),
-  denyPairRequest: (...a: unknown[]) => deny(...a),
+  ...(await importOriginal<Client>()),
+  getPairRequest: (...a: Parameters<Client['getPairRequest']>) => getReq(...a),
+  approvePairRequest: (...a: Parameters<Client['approvePairRequest']>) => approve(...a),
+  denyPairRequest: (...a: Parameters<Client['denyPairRequest']>) => deny(...a),
 }));
 
 import { ClaudeCodePairPage } from '../ClaudeCodePairPage.js';
-import { ClaudeCodeApiError as FakeApiError } from '../claudeCodeClient.js';
+import { ClaudeCodeApiError as FakeApiError, type PairRequestView } from '../claudeCodeClient.js';
 
 const QUOTE = 'Anthropic does not permit third-party developers to offer Claude.ai login into their own applications, or to route requests through Free, Pro, or Max plan credentials on behalf of their users.';
-const view = (hash: string) => ({
+// A DIFFERENT sentence for the "terms changed" case, so the reload is seen to
+// show the NEW text (the round-1 fixture reloaded the same quote).
+const QUOTE2 = 'Updated terms: pairing a device lets workflows reach it only after you allow workflow tasks on it.';
+const view = (hash: string, quote: string = QUOTE): PairRequestView => ({
   request: { userCode: 'BCDF-GH23', label: 'work mac', platform: 'darwin-arm64', requestedFrom: '203.0.113.7', createdAt: '2026-09-29T12:00:00.000Z', expiresAt: '2030-01-01T00:00:00.000Z' },
   workspaceId: 'org:acme',
-  consent: { version: 'v1', quote: QUOTE, source: 'https://code.claude.com/docs/en/legal-and-compliance', fetchedAt: '2026-09-26', acknowledgements: ['I run it on my own machine.'] },
+  consent: { version: 'v1', quote, source: 'https://code.claude.com/docs/en/legal-and-compliance', fetchedAt: '2026-09-26', acknowledgements: ['I run it on my own machine.'] },
   consentHash: hash,
 });
 
@@ -73,22 +83,30 @@ describe('the Claude Code device approval page', () => {
   });
 
   it('a consent change mid-page reloads the text and requires a fresh tick — it never approves the old text', async () => {
-    getReq.mockResolvedValueOnce(view('h1')).mockResolvedValueOnce(view('h2'));
+    getReq.mockResolvedValueOnce(view('h1')).mockResolvedValueOnce(view('h2', QUOTE2));
     approve.mockRejectedValueOnce(new FakeApiError('changed', 409, 'consent_outdated'));
     openWithTypedCode();
     fireEvent.click(await screen.findByRole('checkbox'));
     fireEvent.click(screen.getByRole('button', { name: /approve device/i }));
     expect(await screen.findByText(/terms on this page changed/i)).toBeTruthy();
     await waitFor(() => expect(getReq).toHaveBeenCalledTimes(2));
+    // The NEW text is what is now on screen, and the old one is gone.
+    expect(await screen.findByText(QUOTE2)).toBeTruthy();
+    expect(screen.queryByText(QUOTE)).toBeNull();
     const approveBtn = await screen.findByRole('button', { name: /approve device/i }) as HTMLButtonElement;
     expect(approveBtn.disabled, 'the old acknowledgement does not carry over').toBe(true);
     expect(approve).toHaveBeenCalledTimes(1);
   });
 
+  // Twin of 'an unknown-code 404 (no feature marker)…' below (same featureless 404);
+  // kept (protected consent surface) and sharpened to the state's OTHER half:
+  // nothing approvable is shown for a code that does not resolve.
   it('an expired or unknown code is its own state, not a generic error', async () => {
     getReq.mockRejectedValue(new FakeApiError('nope', 404));
     openWithTypedCode('ZZZZ-ZZZZ');
     expect(await screen.findByText(/code is not valid/i)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /approve device/i })).toBeNull();
+    expect(getReq).toHaveBeenCalledWith('ZZZZ-ZZZZ');
   });
 
   it('IGNORES a code in the URL — a pre-filled link is a phishing lure; the user must type it', async () => {
@@ -107,9 +125,9 @@ describe('the Claude Code device approval page', () => {
     expect(screen.getByText(/did not start this on your own machine/i)).toBeTruthy();
   });
 
-  it('with no code in the URL, asks for one', async () => {
+  it('sends the code the user typed, trimmed', async () => {
     renderAt('/claude-code/pair');
-    fireEvent.change(screen.getByLabelText(/pairing code/i), { target: { value: 'bcdf gh23' } });
+    fireEvent.change(screen.getByLabelText(/pairing code/i), { target: { value: '  bcdf gh23  ' } });
     getReq.mockResolvedValue(view('h1'));
     fireEvent.click(screen.getByRole('button', { name: /continue/i }));
     await waitFor(() => expect(getReq).toHaveBeenCalledWith('bcdf gh23'));

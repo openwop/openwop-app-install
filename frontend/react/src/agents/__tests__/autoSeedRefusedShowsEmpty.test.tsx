@@ -12,7 +12,10 @@ import { render, screen, cleanup, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 
 const { seedExampleAgents, loadAgentViews, getCapabilities, listApprovals, access } = vi.hoisted(() => ({
-  seedExampleAgents: vi.fn(), loadAgentViews: vi.fn(), getCapabilities: vi.fn(), listApprovals: vi.fn(),
+  seedExampleAgents: vi.fn<typeof import('../rosterClient.js')['seedExampleAgents']>(),
+  loadAgentViews: vi.fn<typeof import('../agentViewModel.js')['loadAgentViews']>(),
+  getCapabilities: vi.fn<typeof import('../../client/runsClient.js')['getCapabilities']>(),
+  listApprovals: vi.fn<typeof import('../approvalsClient.js')['listApprovals']>(),
   access: { current: { access: { roles: ['viewer'], scopes: ['workspace:read'], basis: 'member' }, resolved: true } as { access: { roles: string[]; scopes: string[]; basis: string }; resolved: boolean } },
 }));
 vi.mock('../../client/useEffectiveAccess.js', async (orig) => ({
@@ -26,8 +29,20 @@ vi.mock('../../client/runsClient.js', async (orig) => ({ ...(await orig<typeof i
 vi.mock('../approvalsClient.js', async (orig) => ({ ...(await orig<typeof import('../approvalsClient.js')>()), listApprovals }));
 
 import { AgentDashboardPage } from '../AgentDashboardPage.js';
+import type { AgentView } from '../agentViewModel.js';
 
-afterEach(() => { cleanup(); vi.clearAllMocks(); });
+const SEEDED_VIEW: AgentView = {
+  entry: {
+    rosterId: 'r-sawyer', persona: 'Sawyer', label: 'Sales', roleKey: 'sales',
+    autonomyLevel: 'review', agentRef: { agentId: 'a-sawyer' },
+    workflows: [], tenantId: 't1', enabled: true,
+    createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z',
+  },
+  board: null, cards: [], laneCounts: { todo: 0, working: 0, waiting: 0, done: 0 },
+  status: 'needs-setup', jobs: [], nextSchedule: null, failureCheckUnavailable: false,
+};
+
+afterEach(() => { cleanup(); vi.resetAllMocks(); });
 
 const VIEWER = { access: { roles: ['viewer'], scopes: ['workspace:read'], basis: 'member' }, resolved: true };
 const EDITOR = { access: { roles: ['editor'], scopes: ['workspace:read', 'workspace:write'], basis: 'member' }, resolved: true };
@@ -66,15 +81,21 @@ describe('ADR 0775 D1 — a viewer’s refused auto-seed', () => {
     listApprovals.mockResolvedValue([]);
     render(<MemoryRouter><AgentDashboardPage /></MemoryRouter>);
     expect(await screen.findByRole('button', { name: /Hire an agent/i })).toBeTruthy();
+    // Not the demo deployment ⇒ no auto-seed was attempted.
+    await vi.waitFor(() => expect(getCapabilities).toHaveBeenCalled());
+    expect(seedExampleAgents).not.toHaveBeenCalled();
   });
 
   it('a successful auto-seed still re-reads the roster', async () => {
     access.current = EDITOR;
-    loadAgentViews.mockResolvedValue([]);
+    // The re-read is what puts the seeded roster on screen: first read empty,
+    // second read (after the seed) returns the agent.
+    loadAgentViews.mockResolvedValueOnce([]).mockResolvedValueOnce([SEEDED_VIEW]);
     getCapabilities.mockResolvedValue({ demoMode: true });
     seedExampleAgents.mockResolvedValue({ seeded: true, agents: 10 });
     listApprovals.mockResolvedValue([]);
     render(<MemoryRouter><AgentDashboardPage /></MemoryRouter>);
-    await waitFor(() => expect(loadAgentViews).toHaveBeenCalledTimes(2));
+    expect(await screen.findAllByText('Sawyer')).not.toHaveLength(0);
+    expect(loadAgentViews).toHaveBeenCalledTimes(2);
   });
 });

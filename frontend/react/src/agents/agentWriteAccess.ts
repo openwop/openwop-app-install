@@ -10,6 +10,7 @@
  */
 import { useEffectiveAccessState } from '../client/useEffectiveAccess.js';
 import { classifyHttpError } from '../client/classifyHttpError.js';
+import { ApiError } from '../client/errorEnvelope.js';
 
 /**
  * May the caller WRITE agent-area state here? FAIL-OPEN: only a resolved
@@ -38,8 +39,16 @@ export function isWriteRefusal(err: unknown): boolean {
 }
 
 /** The message a surface shows for a failed write: `forbidden` (the caller's
- *  localized `common:error_forbidden`) for a refusal, the error text otherwise. */
-export function writeErrorMessage(err: unknown, forbidden: string): string {
+ *  localized `common:error_forbidden`) for a refusal, `stale` (when given) for a
+ *  stale-version refusal, the error text otherwise. */
+export function writeErrorMessage(err: unknown, forbidden: string, stale?: string): string {
   if (isWriteRefusal(err)) return forbidden;
+  if (stale !== undefined && isStaleWrite(err)) return stale;
   return err instanceof Error ? err.message : String(err);
+}
+
+/** ADR 0775 P4 — the server refused an edit because the agent changed after the
+ *  caller loaded it (`409`, `details.reason: 'stale_write'`). */
+export function isStaleWrite(err: unknown): boolean {
+  return err instanceof ApiError && err.status === 409 && err.reason === 'stale_write';
 }

@@ -46,9 +46,23 @@ interface LedgerBody {
   // decision-log entries; the local response type must carry them.
   entries?: Array<{ at: string; payload: Record<string, unknown> }>;
 }
+/** Narrow the untyped JSON to the local response shape — a type guard, not a cast:
+ *  each field is copied only when it has the expected runtime type. */
+function toLedgerBody(raw: unknown): LedgerBody {
+  const o: Record<string, unknown> = typeof raw === 'object' && raw !== null ? { ...raw } : {};
+  const body: LedgerBody = {
+    rows: Array.isArray(o.rows) ? o.rows : [],
+    sources: Array.isArray(o.sources) ? o.sources : [],
+  };
+  if (typeof o.error === 'string') body.error = o.error;
+  if (typeof o.code === 'string') body.code = o.code;
+  if (Array.isArray(o.entries)) body.entries = o.entries;
+  return body;
+}
 const call = async (cookie: string, path: string): Promise<{ status: number; body: LedgerBody }> => {
   const res = await fetch(`${BASE}${path}`, { headers: { cookie } });
-  return { status: res.status, body: (await res.json().catch(() => ({}))) as LedgerBody };
+  const raw: unknown = await res.json().catch(() => null);
+  return { status: res.status, body: toLedgerBody(raw) };
 };
 
 beforeAll(async () => {
@@ -73,20 +87,27 @@ describe('ADR 0460 P2 — Exception Ledger read', () => {
   it('an editor (no manage) gets 403 forbidden_scope — not a leaky 404', async () => {
     const r = await call(editorCookie, EXC());
     expect(r.status).toBe(403);
-    expect(String(r.body?.error ?? r.body?.code ?? '')).toContain('forbidden_scope');
+    expect(String(r.body.error ?? r.body.code ?? '')).toContain('forbidden_scope');
+    // Positive control: the SAME route answers the admin in the same tenant.
+    expect((await call(adminCookie, EXC())).status).toBe(200);
   });
 
   it('an admin gets 200; the sources are wired and healthy on a fresh tenant', async () => {
-    const r = await call(adminCookie, EXC());
+    // Its OWN workspace: the approval cases below write pending rows into wsTenant,
+    // so "honest empty" must not depend on running before them (shuffle-safe).
+    const fresh = await createWorkspace({ name: 'KT Exceptions (fresh)', ownerSubject: 'oidc:exc-fresh-owner' });
+    const freshAdmin = await upsertFromPrincipal({ tenantId: fresh.tenantId, principalId: 'oidc:exc-fresh-admin', source: 'oidc' });
+    await createMember({ tenantId: fresh.tenantId, orgId: fresh.tenantId, subject: freshAdmin.userId, displayName: 'fresh admin', roles: ['admin'] });
+    const r = await call(craftCookie(freshAdmin.userId, fresh.tenantId, 'ws:home-exc-fresh-admin'), EXC());
     expect(r.status).toBe(200);
-    const keys = (r.body.sources as Array<{ key: string; ok: boolean }>).map((s) => s.key).sort();
+    const keys = r.body.sources.map((s) => s.key).sort();
     // chat-first-port F3 added the commerce-connect:disputes source alongside the
     // five kicktodo sources (any feature may register one — ADR 0460); MPL-5 then
     // added commerce-connect:order-anomalies, the captured-but-unfulfilled detector
     // that replaced a polling sweep. This list is exhaustive on purpose: a feature
     // that registers a source without landing here is an unannounced surface.
     expect(keys).toEqual(['commerce-connect:disputes', 'commerce-connect:order-anomalies', 'kicktodo:approvals', 'kicktodo:monitor', 'kicktodo:payouts', 'kicktodo:review-flags', 'kicktodo:wearable-stale']);
-    expect((r.body.sources as Array<{ ok: boolean }>).every((s) => s.ok)).toBe(true);
+    expect(r.body.sources.every((s) => s.ok)).toBe(true);
     // honest empty — a fresh tenant has no exceptions, NOT a painted status
     expect(r.body.rows).toEqual([]);
   });
@@ -102,7 +123,7 @@ describe('ADR 0460 P2 — Exception Ledger read', () => {
     });
     const r = await call(adminCookie, EXC());
     expect(r.status).toBe(200);
-    const rows = r.body.rows as Array<{ id: string; source: string; severity: string; owner: { ref: string } }>;
+    const rows = r.body.rows;
     const approvalRow = rows.find((x) => x.source === 'kicktodo:approvals');
     expect(approvalRow).toBeDefined();
     expect(approvalRow!.id).toMatch(/^approval:appr:/);
@@ -126,7 +147,7 @@ describe('SCREEN_POLISH — the ADR 0301 chain slice behind an approval row', ()
 
     const r = await call(adminCookie, `${EXC()}/audit?approvalId=${encodeURIComponent(appr.approvalId)}`);
     expect(r.status).toBe(200);
-    const entries = r.body.entries as Array<{ at: string; payload: Record<string, unknown> }>;
+    const entries = r.body.entries ?? [];
     expect(entries).toHaveLength(1);
     expect(entries[0]!.payload).toMatchObject({
       approvalId: appr.approvalId,

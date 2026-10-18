@@ -33,12 +33,20 @@ export function RealtimeVoiceSettings({ storedRefs, refsUnreadable = false }: {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
+  // VOX2UX-9 — the read used to be swallowed: the card then showed "Off" with Save
+  // enabled, so one click on a failed load turned the workspace's voice OFF. Save
+  // is now only offered over a config that was actually read.
+  const [load, setLoad] = useState<'loading' | 'ready' | 'failed'>('loading');
+  const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
     let live = true;
-    void getRealtimeConfig().then((c) => { if (!live) return; setProvider(c.provider); setCredentialRef(c.credentialRef ?? ''); }).catch(() => {});
+    setLoad('loading');
+    void getRealtimeConfig()
+      .then((c) => { if (!live) return; setProvider(c.provider); setCredentialRef(c.credentialRef ?? ''); setLoad('ready'); })
+      .catch(() => { if (live) setLoad('failed'); });
     return () => { live = false; };
-  }, []);
+  }, [attempt]);
 
   const save = async (): Promise<void> => {
     setBusy(true); setError(null); setSaved(false);
@@ -65,6 +73,12 @@ export function RealtimeVoiceSettings({ storedRefs, refsUnreadable = false }: {
       <h2 id="rt-voice-h" className="u-fs-16 u-fw-600 u-m-0">{t('rtTitle')}</h2>
       <p className="muted u-fs-13 u-m-0">{t('rtDesc')}</p>
       {error ? <Notice variant="error">{error}</Notice> : null}
+      {load === 'failed' ? (
+        <Notice variant="error">
+          {t('rtLoadFailed')}{' '}
+          <Button variant="quiet" size="sm" onClick={() => setAttempt((n) => n + 1)}>{t('rtRetry')}</Button>
+        </Notice>
+      ) : null}
       {saved ? <Notice variant="success" announce={t('rtSaved')}>{t('rtSaved')}</Notice> : null}
       <div className="u-flex u-gap-3 u-flex-wrap u-items-end">
         <SelectField label={t('rtProvider')} value={provider} onChange={(e) => setProvider(e.target.value as RealtimeProviderId | 'off')} className="u-flex-1">
@@ -88,7 +102,7 @@ export function RealtimeVoiceSettings({ storedRefs, refsUnreadable = false }: {
       {needsKey && !refsUnreadable && storedRefs.length === 0 ? <p className="muted u-fs-12 u-m-0">{t('rtNoKeys')}</p> : null}
       {provider === 'gemini-live' ? <Notice variant="warning">{t('rtGeminiAssurance')}</Notice> : null}
       <div className="action-bar">
-        <Button variant="primary" size="sm" disabled={busy || (needsKey && !credentialRef)} onClick={() => void save()}>
+        <Button variant="primary" size="sm" disabled={busy || load !== 'ready' || (needsKey && !credentialRef)} onClick={() => void save()}>
           {busy ? t('rtSaving') : t('rtSave')}
         </Button>
       </div>

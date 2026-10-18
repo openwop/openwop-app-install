@@ -93,11 +93,11 @@ const FIXED = [
   // harm: a conforming peer's identity object rejected by a host reading a stale
   // reference. Guarding the copy is what makes that findable.
   'workload-identity.schema.json',
-  // ADR 0550 P4 / RFC 0148 §C. `conformance/certify.ts` COMPILES this copy with
-  // ajv and refuses to write a bundle that fails it, so the vendored file is the
-  // gate on every public claim this host makes. A stale copy here would let the
-  // emitter accept a bundle no consumer's verifier would — the drift class this
-  // file's header describes, applied to evidence rather than to live data.
+  // ADR 0550 P4 / RFC 0148 §C. `conformance/certify.ts` COMPILED this copy with
+  // ajv and refused to write a bundle that failed it (that emitter is retired,
+  // ADR 0812 P4 slice 3; the copy stays guarded while it stays vendored). A
+  // stale copy let that emitter accept a bundle no consumer's verifier would —
+  // the drift class this file's header describes, applied to evidence.
   //
   // Guarded even though it is not compiled by a RUNTIME loader (the route serves
   // the already-validated stamp): the harm is the same shape, and it lands on

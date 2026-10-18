@@ -1,39 +1,43 @@
 /**
- * UX_UPGRADE-site — the blog index + post upgrades (G1/G3/G4/G6).
+ * ADR 0391 (a) / UX_UPGRADE-site — the blog index + post upgrades (G1/G3/G4/G6).
  *
  * These pin BEHAVIOUR, not markup: the filter actually narrows the rendered
  * list, "show more" actually reveals the next batch, the pager points at the
  * chronologically adjacent posts, and the related rail is honest — it only
  * calls posts "related" when they truly share a facet, and never lists the
  * post you're already reading.
+ *
+ * Sabotages that red it (/grade-tests w50): an unfiltered list, no slice to
+ * the first batch, a "show more" that never goes away, a lower filter-band
+ * threshold, no reading estimate, older/newer swapped (labels OR indexes), the
+ * current post in its own rail, a related cap below the real matches, a
+ * zero-score post called "related", a pager on a one-post blog, a copy of the
+ * wrong URL, a copy button with no clipboard.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, cleanup, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import type { BlogPost } from '../blogClient.js';
+import type { PublicPage, PublicPageResult } from '../siteClient.js';
 
 const fetchBlog = vi.fn<() => Promise<BlogPost[] | null>>();
-const fetchPublicPage = vi.fn<() => Promise<unknown>>();
+const pageResult = vi.fn<() => Promise<PublicPageResult>>();
 
 vi.mock('../blogClient.js', async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
   fetchBlog: () => fetchBlog(),
   blogFeedUrl: () => 'https://example.test/feed.xml',
 }));
-vi.mock('../siteClient.js', () => ({
-  fetchPublicPage: () => fetchPublicPage(),
-  // The page consumers now read the discriminated result (R2-G2); derive it from
-  // the same stub so both shapes stay in lockstep.
-  fetchPublicPageResult: async () => {
-    const p = await fetchPublicPage();
-    return p ? { status: 'ok', page: p } : { status: 'notFound' };
-  },
+vi.mock('../siteClient.js', async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  // The page consumers read the discriminated result (R2-G2).
+  fetchPublicPageResult: () => pageResult(),
 }));
 
 const { BlogPage } = await import('../BlogPage.js');
 const { BlogPostPage } = await import('../BlogPostPage.js');
 
-afterEach(() => { cleanup(); vi.clearAllMocks(); });
+afterEach(() => { cleanup(); vi.resetAllMocks(); });
 
 /** N posts, newest-first, alternating category so relatedness is testable. */
 function posts(n: number): BlogPost[] {
@@ -103,25 +107,29 @@ describe('blog index — filter (G1) + show more (G3)', () => {
 });
 
 describe('blog post — pager + related rail (G4)', () => {
-  const page = { slug: 'post-2', title: 'Post 2', sections: [], updatedAt: '2026-07-18T00:00:00.000Z', seo: { title: 'Post 2', description: '', canonicalUrl: '', ogTitle: 'Post 2', ogDescription: '', noindex: false } };
+  const page: PublicPage = { slug: 'post-2', title: 'Post 2', sections: [], updatedAt: '2026-07-18T00:00:00.000Z', seo: { title: 'Post 2', description: '', canonicalUrl: '', ogTitle: 'Post 2', ogDescription: '', noindex: false } };
 
   it('links the chronologically adjacent posts and never the current one', async () => {
-    fetchPublicPage.mockResolvedValue(page);
+    pageResult.mockResolvedValue({ status: 'ok', page });
     fetchBlog.mockResolvedValue(posts(6));
     render(<MemoryRouter><BlogPostPage orgId="org-1" slug="post-2" /></MemoryRouter>);
     await screen.findByRole('heading', { level: 1, name: 'Post 2' });
 
     const pager = screen.getByRole('navigation', { name: /nearby posts/i });
-    // The list is newest-first: index 1 is NEWER than 2, index 3 is OLDER.
-    expect(pager.textContent).toContain('Post 1');
-    expect(pager.textContent).toContain('Post 3');
+    // The list is newest-first: index 1 is NEWER than 2, index 3 is OLDER —
+    // each under its own direction label (a swap must not pass).
+    expect(within(pager).getByRole('link', { name: /older post\s*post 3/i }).getAttribute('href')).toBe('/blog/post-3');
+    expect(within(pager).getByRole('link', { name: /newer post\s*post 1/i }).getAttribute('href')).toBe('/blog/post-1');
 
-    const related = screen.getByRole('heading', { name: /related reading/i }).closest('section')!;
-    expect(related.textContent).not.toContain('Post 2');
+    // The rail lists exactly the OTHER posts sharing post-2's category
+    // (engineering: posts 0 and 4) — never post-2 itself, never a product post.
+    const related = screen.getByRole('heading', { name: /related reading/i }).closest('section');
+    if (!related) throw new Error('the related rail is not a section');
+    expect(within(related).getAllByRole('link').map((a) => a.getAttribute('href'))).toEqual(['/blog/post-0', '/blog/post-4']);
   });
 
   it('falls back to a NEUTRAL heading when nothing shares a facet', async () => {
-    fetchPublicPage.mockResolvedValue(page);
+    pageResult.mockResolvedValue({ status: 'ok', page });
     // Every post in its own category, no tags ⇒ zero relatedness.
     fetchBlog.mockResolvedValue(posts(4).map((p, i) => ({ ...p, category: `cat-${i}` })));
     render(<MemoryRouter><BlogPostPage orgId="org-1" slug="post-2" /></MemoryRouter>);
@@ -131,7 +139,7 @@ describe('blog post — pager + related rail (G4)', () => {
   });
 
   it('a single-post blog shows neither pager nor rail', async () => {
-    fetchPublicPage.mockResolvedValue({ ...page, slug: 'post-0', title: 'Post 0' });
+    pageResult.mockResolvedValue({ status: 'ok', page: { ...page, slug: 'post-0', title: 'Post 0' } });
     fetchBlog.mockResolvedValue(posts(1));
     render(<MemoryRouter><BlogPostPage orgId="org-1" slug="post-0" /></MemoryRouter>);
     await screen.findByRole('heading', { level: 1, name: 'Post 0' });
@@ -142,23 +150,27 @@ describe('blog post — pager + related rail (G4)', () => {
 
 describe('blog post — copy link (G6)', () => {
   it('copies the URL and confirms, and is ABSENT when the browser has no clipboard', async () => {
-    fetchPublicPage.mockResolvedValue({ slug: 'post-0', title: 'Post 0', sections: [], updatedAt: '', seo: { title: '', description: '', canonicalUrl: '', ogTitle: '', ogDescription: '', noindex: false } });
+    pageResult.mockResolvedValue({ status: 'ok', page: { slug: 'post-0', title: 'Post 0', sections: [], updatedAt: '', seo: { title: '', description: '', canonicalUrl: '', ogTitle: '', ogDescription: '', noindex: false } } });
     fetchBlog.mockResolvedValue(posts(2));
 
     const writeText = vi.fn<(s: string) => Promise<void>>().mockResolvedValue();
     const original = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
-    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
-    render(<MemoryRouter><BlogPostPage orgId="org-1" slug="post-0" /></MemoryRouter>);
-    const btn = await screen.findByRole('button', { name: /copy link/i });
-    fireEvent.click(btn);
-    await waitFor(() => expect(screen.getByText('Copied')).toBeTruthy());
-    expect(writeText).toHaveBeenCalledWith(window.location.href);
+    try {
+      Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+      render(<MemoryRouter><BlogPostPage orgId="org-1" slug="post-0" /></MemoryRouter>);
+      const btn = await screen.findByRole('button', { name: /copy link/i });
+      fireEvent.click(btn);
+      await waitFor(() => expect(screen.getByText('Copied')).toBeTruthy());
+      expect(writeText).toHaveBeenCalledWith(window.location.href);
 
-    cleanup();
-    Object.defineProperty(navigator, 'clipboard', { value: undefined, configurable: true });
-    render(<MemoryRouter><BlogPostPage orgId="org-1" slug="post-0" /></MemoryRouter>);
-    await screen.findByRole('heading', { level: 1, name: 'Post 0' });
-    expect(screen.queryByRole('button', { name: /copy link/i })).toBeNull();
-    if (original) Object.defineProperty(navigator, 'clipboard', original);
+      cleanup();
+      Object.defineProperty(navigator, 'clipboard', { value: undefined, configurable: true });
+      render(<MemoryRouter><BlogPostPage orgId="org-1" slug="post-0" /></MemoryRouter>);
+      await screen.findByRole('heading', { level: 1, name: 'Post 0' });
+      expect(screen.queryByRole('button', { name: /copy link/i })).toBeNull();
+    } finally {
+      if (original) Object.defineProperty(navigator, 'clipboard', original);
+      else Reflect.deleteProperty(navigator, 'clipboard');
+    }
   });
 });

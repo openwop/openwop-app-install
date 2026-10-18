@@ -5,8 +5,13 @@
  * flattens `envelopes[0]` onto `onwardBody` for the downstream `core.openwop.http.fetch`,
  * and stays honest-off when purpose propagation is disabled. The workflow registers the
  * `prepare-onward → http.fetch (POST)` spine (egress rides the http node, ADR 0262 #3).
+ *
+ * Sabotage that reds it (w38 probes): onwardBody = the whole array / undefined for
+ * none; swallowing the surface error; no syncId guard; dropping connectionId or the
+ * dropped count; no capability check; the surface ignoring the RFC 0128 flag; the
+ * chain edge carrying `envelopes` instead of `onwardBody`.
  */
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { prepareOnward } from '../../../packs/feature.destination-sync.nodes/index.mjs';
 import { buildDestinationSyncSurface } from '../src/features/destination-sync/surface.js';
@@ -19,6 +24,13 @@ type NodeResult = {
   outputs?: Record<string, unknown>;
   error?: { code: string; message: string };
 };
+
+// ONE app boot for the file (host-ext persistence + the chain-backed registry);
+// the pure node-contract block does not need it but shares it harmlessly.
+beforeAll(async () => {
+  process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
+  await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
+});
 
 const nodeCtx = (inputs: Record<string, unknown>, surface: unknown) => ({
   inputs,
@@ -59,14 +71,14 @@ describe('CDP W1.1 prepare-onward node contract', () => {
     const surface = { prepareOnward: async () => ({ error: 'purpose_propagation_disabled', envelopes: [], count: 0 }) };
     const out: NodeResult = await prepareOnward(nodeCtx({ syncId: 'dsync:1', records: [] }, surface));
     expect(out.status).toBe('failed');
-    expect(out.error!.code).toBe('purpose_propagation_disabled');
+    expect(out.error).toEqual({ code: 'purpose_propagation_disabled', message: 'Purpose propagation is disabled — the RFC 0128 flag is off (honest-off until witnessed).' });
   });
 
   it('fails closed without a syncId', async () => {
     const surface = { prepareOnward: async () => ({ envelopes: [], count: 0 }) };
     const out: NodeResult = await prepareOnward(nodeCtx({ records: [] }, surface));
     expect(out.status).toBe('failed');
-    expect(out.error!.code).toBe('validation_error');
+    expect(out.error).toEqual({ code: 'validation_error', message: 'syncId is required.' });
   });
 
   it('throws when the host capability is missing (no prepareOnward)', async () => {
@@ -76,11 +88,9 @@ describe('CDP W1.1 prepare-onward node contract', () => {
 
 describe('CDP W1.1 prepare-onward over the REAL surface (flag gate)', () => {
   const TENANT = 'tenant-owp-w11';
-  beforeAll(async () => {
-    process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
-    await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  });
-  afterAll(() => { delete process.env.OPENWOP_CDP_PURPOSE_PROPAGATION_ENABLED; });
+  // RFC 0128 flag: every case sets what it needs; nothing leaks past a case.
+  beforeEach(() => { delete process.env.OPENWOP_CDP_PURPOSE_PROPAGATION_ENABLED; });
+  afterEach(() => { delete process.env.OPENWOP_CDP_PURPOSE_PROPAGATION_ENABLED; });
 
   async function makeSync(): Promise<string> {
     const sync = await createDestinationSync({
@@ -123,10 +133,6 @@ describe('CDP W1.1 prepare-onward over the REAL surface (flag gate)', () => {
 });
 
 describe('CDP W1.1 built-in workflow registration', () => {
-  beforeAll(async () => {
-    process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
-    await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  });
 
   it('registers openwop-app.cdp.sync-to-openwop-host with the prepare-onward → http.fetch spine', () => {
     // ADR 0472 P4: migrated out of the builtin quarantine to a same-id chain pack;

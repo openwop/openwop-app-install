@@ -20,8 +20,23 @@
  *   - an ERRORED recheck is never rendered as "still working";
  *   - the recheck outcome is ANNOUNCED (`StateCard`'s announce effect is keyed on the
  *     title, and a recheck changes only the body — so it would be sighted-only).
+ *
+ * Sabotage-witnessed (grade-tests w21): an unsuppressed empty state, a retry that does
+ * not re-read, an error not cleared on retry, a skeleton left spinning after a failure,
+ * a removed give-up guard, an off-by-one bound, `episodes` back in the poll's deps, a
+ * hidden run link, a silent or uncounted recheck, a recheck error counted as an
+ * observation, a "something finished" clear predicate, and the notebooks-off card
+ * conditioned away — each reds the case that claims it.
+ *
+ * DOUBLE GUARD (honest ceiling, w21): the gave-up card is cleared by TWO independent
+ * sites that evaluate the same id predicate — `recheckPoll` and the `M3a` effect
+ * (which re-runs whenever `episodes` changes, and `recheckPoll` sets them). Sabotaging
+ * either alone leaves the card cleared, so the "clears" assertions witness the pair, not
+ * one site. The FALSE-clear direction is single-site and is probed (`M2` second case).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import type { PodcastEpisode, PodcastShow } from '../podcastsClient.js';
+import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
 import { render, screen, cleanup, fireEvent, act } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 
@@ -41,17 +56,18 @@ vi.mock('../podcastsClient.js', async (orig) => ({
 const { announceSpy } = vi.hoisted(() => ({ announceSpy: vi.fn() }));
 vi.mock('../../../ui/announce.js', () => ({ announce: announceSpy }));
 vi.mock('../../../ui/toast.js', () => ({ toast: { success: vi.fn(), error: vi.fn(), info: vi.fn() } }));
-vi.mock('../../../featureToggles/FeatureAccessContext.js', () => ({
-  useFeatureAccess: () => ({ enabled: true, locked: false, loading: false, status: 'on' as const, isBeta: false, variant: null, entitled: true, resolutionFailed: false }),
+vi.mock('../../../featureToggles/FeatureAccessContext.js', async (orig) => ({
+  ...(await orig<typeof import('../../../featureToggles/FeatureAccessContext.js')>()),
+  useFeatureAccess: () => makeFeatureAccess(),
 }));
 
 import { ShowsManager } from '../ShowsManager.js';
 import { PodcastStudioPage, POLL_MAX_ATTEMPTS } from '../PodcastStudioPage.js';
 
-const SHOW = {
+const SHOW: PodcastShow = {
   id: 'sh1', orgId: 'o1', slug: 'acme-hour', title: 'The Acme Hour', author: 'Acme',
   description: 'Weekly talk', languageCode: 'en', explicit: false,
-  type: 'episodic' as const, published: false, createdAt: '2026-08-01T00:00:00Z', updatedAt: '2026-08-01T00:00:00Z',
+  type: 'episodic', published: false, createdAt: '2026-08-01T00:00:00Z', updatedAt: '2026-08-01T00:00:00Z',
 };
 
 afterEach(() => { cleanup(); vi.useRealTimers(); });
@@ -69,6 +85,9 @@ describe('PODU-2 — a failed show read is recoverable, and never claims the lis
     listShowsWithCapability.mockRejectedValue(new Error('network down'));
     await mount();
     expect(screen.getByText('network down')).toBeTruthy();
+    // The original PODU-2 defect: the card sat ABOVE a skeleton that spun forever.
+    // The skeleton must stop once the read has failed.
+    expect(document.querySelector('.skeleton')).toBeNull();
     // The regression: stopping the forever-skeleton by setting `shows = []` would
     // otherwise render "No shows yet" — a claim about the server from a read that
     // never landed. A hang traded for a lie is not a fix.
@@ -110,8 +129,8 @@ describe('PODU-2 — a failed show read is recoverable, and never claims the lis
 
 // ──────────────────────── PODU-3 / PODU-4 ─────────────────────────
 
-const EPISODE = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
-  id: 'ep1', tenantId: 't1', orgId: 'o1', notebookId: 'nb1', episodeProfileId: 'epp1',
+const EPISODE = (over: Partial<PodcastEpisode> = {}): PodcastEpisode => ({
+  id: 'ep1', orgId: 'o1', notebookId: 'nb1', episodeProfileId: 'epp1',
   title: 'Episode One', status: 'running', runId: 'run-1', clips: [],
   createdAt: '2026-08-01T00:00:00Z', updatedAt: '2026-08-01T00:00:00Z', ...over,
 });
@@ -130,10 +149,18 @@ async function mountStudioAndExhaustPoll(): Promise<void> {
 describe('PODU-3/-4 — the generation poll gives up HONESTLY and offers a way on', () => {
   beforeEach(() => {
     listOrgs.mockResolvedValue([{ orgId: 'o1', name: 'Acme' }]);
+    // The studio mounts ShowsManager, which reads this. Armed HERE: without it the
+    // block inherited whatever an earlier describe left (clearAllMocks keeps
+    // implementations), and run first it returned `undefined` (w21 shuffle finding).
+    listShowsWithCapability.mockResolvedValue({ shows: [SHOW], canWrite: true });
     listNotebooksForPodcasts.mockResolvedValue({ notebooks: [{ id: 'nb1', name: 'Research' }], featureUnavailable: false });
     listSpeakerProfiles.mockResolvedValue([]);
     listEpisodeProfiles.mockResolvedValue([]);
     listShows.mockResolvedValue([SHOW]);
+    // `C1` — a FRESH object per call, as `fetch(...).json()` allocates. A
+    // `mockResolvedValue([EPISODE()])` hands back the SAME array every call, React's
+    // `Object.is` bailout suppresses the re-render, the poll effect is never torn
+    // down, and the regression (`episodes` in the effect deps) becomes invisible.
     listEpisodesWithCapability.mockImplementation(async () => ({ episodes: [EPISODE()], canWrite: true }));
     listEpisodes.mockImplementation(async () => [EPISODE()]);
   });
@@ -151,19 +178,6 @@ describe('PODU-3/-4 — the generation poll gives up HONESTLY and offers a way o
     await act(async () => { vi.advanceTimersByTime(30000); await Promise.resolve(); });
     expect(listEpisodes.mock.calls.length).toBe(callsAtGiveUp);
     expect(callsAtGiveUp).toBeGreaterThanOrEqual(55); // floor: it really polled
-  });
-
-  it('`C1` — the WITNESS models real response identity (a stable-reference mock hides the whole class)', async () => {
-    // `mockResolvedValue([EPISODE()])` hands back the SAME array instance on every
-    // call. React's `Object.is` bailout then suppresses the re-render, the polling
-    // effect is never torn down, and its attempt counter accumulates — which is
-    // precisely the condition production NEVER has, because `fetch(...).json()`
-    // allocates a fresh object per response. Every assertion in this describe
-    // block rests on that, so it is asserted rather than assumed.
-    const a = await listEpisodes('o1');
-    const b = await listEpisodes('o1');
-    expect(a).not.toBe(b);
-    expect(a).toEqual(b);
   });
 
   it('`C1` — a SUCCEEDING poll still reaches the bound: a fresh response does not reset the counter', async () => {
@@ -236,8 +250,24 @@ describe('PODU-3/-4 — the generation poll gives up HONESTLY and offers a way o
     fireEvent.click(screen.getByRole('button', { name: /check again/i }));
     await act(async () => { await Promise.resolve(); await Promise.resolve(); });
     // ep1 (the one we were waiting on) IS done, so the card clears — correctly, and
-    // for the right reason: the id it tracked is no longer pending.
+    // for the right reason: the id it tracked is no longer pending. (Double-guarded:
+    // the `M3a` effect clears on the same predicate — see the header.)
     expect(screen.queryByText(/we stopped checking after about/i)).toBeNull();
+  });
+
+  it('`M2` — an UNRELATED finished episode does NOT clear the card (the false-clear direction)', async () => {
+    await mountStudioAndExhaustPoll();
+    expect(screen.getByText(/we stopped checking after about/i)).toBeTruthy();
+    // The danger M2 names: ep1 is STILL running, a different episode finished. A
+    // "something finished" / count predicate would clear the card and announce
+    // "Finished" about an episode that is still generating.
+    listEpisodes.mockResolvedValue([EPISODE(), EPISODE({ id: 'ep2', status: 'done', runId: 'run-2' })]);
+    fireEvent.click(screen.getByRole('button', { name: /check again/i }));
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    expect(screen.getByText(/we stopped checking after about/i)).toBeTruthy();
+    expect(screen.getByText(/checked 1 more time/i)).toBeTruthy();
+    expect(announceSpy).not.toHaveBeenCalledWith(expect.stringMatching(/finished/i));
+    expect(announceSpy).toHaveBeenCalledWith(expect.stringMatching(/still working/i));
   });
 });
 

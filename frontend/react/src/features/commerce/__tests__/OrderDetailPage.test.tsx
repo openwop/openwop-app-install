@@ -10,14 +10,10 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, cleanup, waitFor } from '@testing-library/react';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 
-const { getOrder, listOrderRefunds, CommerceApiError } = vi.hoisted(() => {
-  class CommerceApiError extends Error {
-    status: number;
-    constructor(status: number) { super(`http ${status}`); this.status = status; }
-  }
-  return { getOrder: vi.fn(), listOrderRefunds: vi.fn(), CommerceApiError };
-});
-vi.mock('../commerceClient.js', () => ({ getOrder, listOrderRefunds, CommerceApiError }));
+const { getOrder, listOrderRefunds } = vi.hoisted(() => ({ getOrder: vi.fn(), listOrderRefunds: vi.fn() }));
+// Spread the REAL module so the product's `instanceof CommerceApiError` is the shipped
+// class. The old fake took `(status)`; the real one is `(message, code, details?, status?)`.
+vi.mock('../commerceClient.js', async (orig) => ({ ...(await orig<Record<string, unknown>>()), getOrder, listOrderRefunds }));
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (k: string) => k }) }));
 vi.mock('../../../i18n/useFormat.js', () => ({ useFormat: () => ({ date: (d: string) => d, currency: (n: number) => String(n) }) }));
 // Spread the REAL module and override only the two components. Enumerating the
@@ -33,9 +29,12 @@ const access = vi.hoisted(() => ({ value: { enabled: true, loading: false, varia
 vi.mock('../../../featureToggles/FeatureAccessContext.js', () => ({ useFeatureAccess: () => access.value }));
 
 import { OrderDetailPage } from '../OrderDetailPage.js';
+import { CommerceApiError, type Order } from '../commerceClient.js';
 
-const anOrder = {
-  orderId: 'ord_1', status: 'paid', fulfillmentStatus: 'unfulfilled', createdAt: '2026-07-10',
+// Typed: `fulfillmentStatus: 'unfulfilled'` (not in the union) and a missing
+// `createdBy` used to ride an untyped literal.
+const anOrder: Order = {
+  orderId: 'ord_1', status: 'paid', fulfillmentStatus: 'pending', createdAt: '2026-07-10', createdBy: 'user-1',
   currency: 'USD', items: [{ productId: 'p1', name: 'Widget', quantity: 2, unitPrice: 500 }],
   subtotal: 1000, discount: 0, total: 1000,
 };
@@ -70,9 +69,11 @@ describe('OrderDetailPage deep-link derivation (DL-T-1b)', () => {
   });
 
   it('renders not-found on a 404 (tenant-scoped miss, no existence leak)', async () => {
-    getOrder.mockRejectedValue(new CommerceApiError(404));
+    getOrder.mockRejectedValue(new CommerceApiError('Order not found', 'not_found', undefined, 404));
     renderAt('/commerce/orders/ghost?org=store_9');
     expect(await screen.findByText('orderNotFoundTitle')).toBeTruthy();
+    expect(getOrder).toHaveBeenCalledWith('store_9', 'ghost');
+    expect(screen.queryByText('loadErrorTitle')).toBeNull();
   });
 
   it('shows the not-enabled gate when the feature is off', async () => {

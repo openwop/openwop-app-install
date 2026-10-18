@@ -2,6 +2,14 @@
  * ADR 0368 P1 — the tour action registry (the chassis seam): semantic ids in,
  * live targets out; HITL contract shape; the coverage listing the conventions
  * test (P4) will pin shipped tours against.
+ *
+ * PROTECTED (ADR 0489 D1): `narrowCheckpointVerdict` is the FAIL-CLOSED gate — a
+ * malformed checkpoint return must never read as "already satisfied". Each malformed
+ * row asserts its exact failure detail (w51 r2; was "any truthy string").
+ * Sabotage-witnessed (/grade-tests w51): dropping the undefined arm, the blank-reason
+ * trim, the empty-string detail, or the unrecognized fallback reds its row; a lookup
+ * returning undefined reds cases 1/3; a registration that drops or refuses to
+ * replace an action reds case 2.
  */
 import { describe, it, expect, beforeEach } from 'vitest';
 import {
@@ -12,6 +20,8 @@ import {
   narrowCheckpointVerdict,
   listWalkthroughActionIds,
   __resetWalkthroughRegistryForTests,
+  type WalkthroughAction,
+  type WalkthroughCheckpoint,
 } from '../actionRegistry.js';
 
 beforeEach(__resetWalkthroughRegistryForTests);
@@ -25,27 +35,43 @@ describe('tour action registry', () => {
     expect(listWalkthroughActionIds()).toEqual(['demo.first.click']);
   });
 
-  it('HITL actions expose the completion subscription (resolve-by-user, never scripted)', () => {
-    let fire: ((v: unknown) => void) | null = null;
-    registerWalkthroughAction('demo.upload.file', {
+  // Twin: useWalkthroughPlayer 'an HITL step waits for the user; the completion
+  // subscription resolves with the value' drives hitlComplete END-TO-END. This case
+  // owns what the player never exercises: the registry hands back the SAME action
+  // object (every field — hitlComplete, perform, verb — survives storage), and a
+  // re-registration of the id (a remounted feature) REPLACES the old action rather
+  // than leaving a stale target behind.
+  it('HITL actions expose the completion subscription — stored by identity, replaced on re-registration', () => {
+    const hook: { fire: ((v: unknown) => void) | null } = { fire: null };
+    const first: WalkthroughAction = {
       route: '/demo',
       resolve: () => document.createElement('input'),
       verb: 'click',
-      hitlComplete: (_el, done) => { fire = done; return () => { fire = null; }; },
-    });
-    const action = getWalkthroughAction('demo.upload.file')!;
+      hitlComplete: (_el, done) => { hook.fire = done; return () => { hook.fire = null; }; },
+    };
+    registerWalkthroughAction('demo.upload.file', first);
+    expect(getWalkthroughAction('demo.upload.file')).toBe(first);
     const seen: unknown[] = [];
-    const off = action.hitlComplete!(document.createElement('input'), (v) => seen.push(v));
-    fire!({ mediaRef: 'media:abc' });
+    const off = getWalkthroughAction('demo.upload.file')!.hitlComplete!(document.createElement('input'), (v) => seen.push(v));
+    hook.fire?.({ mediaRef: 'media:abc' });
     expect(seen).toEqual([{ mediaRef: 'media:abc' }]);
-    off();
-    expect(fire).toBeNull();
+    off?.();
+    expect(hook.fire).toBeNull();
+
+    const replacement: WalkthroughAction = { route: '/demo/v2', resolve: () => null, verb: 'focus' };
+    registerWalkthroughAction('demo.upload.file', replacement);
+    expect(getWalkthroughAction('demo.upload.file')).toBe(replacement);
+    expect(listWalkthroughActionIds()).toEqual(['demo.upload.file']);
   });
 
-  it('checkpoints evaluate to null (pass) or a failure detail', async () => {
-    registerWalkthroughCheckpoint('demo.brief-exists', { evaluate: () => null });
-    registerWalkthroughCheckpoint('demo.always-fails', { evaluate: () => 'no brief found' });
-    expect(await getWalkthroughCheckpoint('demo.brief-exists')!.evaluate()).toBeNull();
+  it('checkpoints are stored and looked up by id; unknown ids are undefined', async () => {
+    const pass: WalkthroughCheckpoint = { evaluate: () => null };
+    const fail: WalkthroughCheckpoint = { evaluate: () => 'no brief found' };
+    registerWalkthroughCheckpoint('demo.brief-exists', pass);
+    registerWalkthroughCheckpoint('demo.always-fails', fail);
+    expect(getWalkthroughCheckpoint('demo.brief-exists')).toBe(pass);
+    expect(getWalkthroughCheckpoint('demo.always-fails')).toBe(fail);
+    expect(getWalkthroughCheckpoint('demo.missing')).toBeUndefined();
     expect(await getWalkthroughCheckpoint('demo.always-fails')!.evaluate()).toBe('no brief found');
   });
 
@@ -62,20 +88,21 @@ describe('tour action registry', () => {
         .toEqual({ satisfied: true, because: 'Already connected.' });
     });
 
+    const NO_REASON = 'checkpoint reported already-satisfied without a reason';
+    const UNRECOGNIZED = 'checkpoint returned an unrecognized verdict';
     it.each([
-      ['satisfied without a reason', { satisfied: true }],
-      ['satisfied with a blank reason', { satisfied: true, because: '   ' }],
-      ['satisfied with a non-string reason', { satisfied: true, because: 42 }],
-      ['a bare truthy object', { ok: true }],
-      ['satisfied:false', { satisfied: false, because: 'nope' }],
-      ['an array', ['satisfied']],
-      ['a number', 7],
-      ['a boolean', true],
-      ['an empty failure string', ''],
-    ])('FAILS CLOSED on %s — never silently skips', (_label, input) => {
-      const verdict = narrowCheckpointVerdict(input);
-      expect(typeof verdict).toBe('string');   // i.e. a FAILURE, not a skip
-      expect(verdict).toBeTruthy();            // and it carries a detail
+      ['satisfied without a reason', { satisfied: true }, NO_REASON],
+      ['satisfied with a blank reason', { satisfied: true, because: '   ' }, NO_REASON],
+      ['satisfied with a non-string reason', { satisfied: true, because: 42 }, NO_REASON],
+      ['a bare truthy object', { ok: true }, UNRECOGNIZED],
+      ['satisfied:false', { satisfied: false, because: 'nope' }, UNRECOGNIZED],
+      ['an array', ['satisfied'], UNRECOGNIZED],
+      ['a number', 7, UNRECOGNIZED],
+      ['a boolean', true, UNRECOGNIZED],
+      ['an empty failure string', '', 'checkpoint returned an empty failure detail'],
+    ])('FAILS CLOSED on %s — never silently skips', (_label, input, detail) => {
+      // A FAILURE (a string detail), never a skip — and the detail names why.
+      expect(narrowCheckpointVerdict(input)).toBe(detail);
     });
   });
 });

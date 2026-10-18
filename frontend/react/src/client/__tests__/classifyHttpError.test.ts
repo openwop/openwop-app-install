@@ -1,3 +1,10 @@
+/**
+ * GAP-ANALYSIS E5 (#613) / ADR 0482 / ADR 0621 D5 — a transport error becomes
+ * ONE kind the list pages render. Breaks it: a 429 read as a failure rather
+ * than "busy, retry", a 403 read as "your session may have expired" (it is
+ * "not allowed here"), a budget pause read as transient, or a session refusal
+ * read as a plain 401.
+ */
 import { describe, it, expect } from 'vitest';
 import { classifyHttpError, errorReasonOf } from '../classifyHttpError.js';
 
@@ -52,9 +59,15 @@ describe('classifyHttpError', () => {
     expect(c.retryable).toBe(true);
   });
 
-  it('maps 401/403 to a non-retryable auth error', () => {
-    expect(classifyHttpError(Object.assign(new Error('x'), { status: 401 })).kind).toBe('auth');
-    expect(classifyHttpError(Object.assign(new Error('x'), { statusCode: 403 })).retryable).toBe(false);
+  it('maps 401 to auth and 403 to forbidden — both non-retryable', () => {
+    const a = classifyHttpError(Object.assign(new Error('x'), { status: 401 }));
+    expect(a.kind).toBe('auth');
+    expect(a.retryable).toBe(false);
+    // `statusCode` (the SDK carrier) is read too; a 403 is "not allowed here",
+    // never "sign in again" (UX_UPGRADE-projects R2).
+    const f = classifyHttpError(Object.assign(new Error('x'), { statusCode: 403 }));
+    expect(f.kind).toBe('forbidden');
+    expect(f.retryable).toBe(false);
   });
 
   it('maps 404 to not-found and 5xx to a retryable server error', () => {

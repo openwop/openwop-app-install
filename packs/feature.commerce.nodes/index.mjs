@@ -10,6 +10,15 @@ function ensureCommerce(ctx) {
   return c;
 }
 function str(v) { return typeof v === 'string' ? v : ''; }
+/** ADR 0875 D11 — an event-bound chain routes `trigger.payload` to the `event` port.
+ *  A DECLARED input (the manual-run param) wins when it is non-empty; an empty one
+ *  falls back to the payload's field, so one node serves both launch paths. */
+function fromEvent(i, key) {
+  const declared = str(i[key]);
+  if (declared) return declared;
+  const ev = i.event && typeof i.event === 'object' ? i.event : {};
+  return str(ev[key]);
+}
 export async function createOrder(ctx) {
   const c = ensureCommerce(ctx); const i = ctx.inputs ?? {};
   const out = await c.createOrder({ orgId: str(i.orgId), lines: Array.isArray(i.lines) ? i.lines : [], ...(str(i.contactId) ? { contactId: str(i.contactId) } : {}), ...(str(i.couponCode) ? { couponCode: str(i.couponCode) } : {}) });
@@ -29,7 +38,7 @@ export const nodes = {
 // the service applies audit + host events + the B3 approval thresholds. ──
 export async function getOrder(ctx) {
   const c = ensureCommerce(ctx); const i = ctx.inputs ?? {};
-  return { status: 'success', outputs: await c.getOrder({ orgId: str(i.orgId), orderId: str(i.orderId) }) };
+  return { status: 'success', outputs: await c.getOrder({ orgId: str(i.orgId), orderId: fromEvent(i, 'orderId') }) };
 }
 export async function listOrders(ctx) {
   const c = ensureCommerce(ctx); const i = ctx.inputs ?? {};
@@ -53,7 +62,7 @@ export async function listCoupons(ctx) {
 }
 export async function createCoupon(ctx) {
   const c = ensureCommerce(ctx); const i = ctx.inputs ?? {};
-  return { status: 'success', outputs: await c.createCoupon({ orgId: str(i.orgId), code: str(i.code), type: str(i.type), value: typeof i.value === 'number' ? i.value : Number(i.value) }) };
+  return { status: 'success', outputs: await c.createCoupon({ orgId: str(i.orgId), code: str(i.code), type: str(i.type), value: typeof i.value === 'number' ? i.value : Number(i.value), currency: str(i.currency) || undefined }) };
 }
 nodes['feature.commerce.nodes.get-order'] = getOrder;
 nodes['feature.commerce.nodes.list-orders'] = listOrders;
@@ -93,6 +102,6 @@ nodes['feature.commerce.nodes.resolve-price'] = resolvePriceNode;
 // ── Catalog single-read (node-pack audit 2026-07-18) — parity with list-products. ──
 export async function getProduct(ctx) {
   const c = ensureCommerce(ctx); const i = ctx.inputs ?? {};
-  return { status: 'success', outputs: await c.getProduct({ orgId: str(i.orgId), productId: str(i.productId) }) };
+  return { status: 'success', outputs: await c.getProduct({ orgId: str(i.orgId), productId: fromEvent(i, 'productId') }) };
 }
 nodes['feature.commerce.nodes.get-product'] = getProduct;

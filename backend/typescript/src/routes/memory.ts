@@ -91,5 +91,5 @@ export function registerMemoryRoutes(app: Express): void {
     } catch (err) { next(err); }
   });
 
-  log.info('memory read routes registered (GET /v1/host/openwop-app/memory)');
+  log.info('memory read routes registered (GET /host/openwop-app/memory)');
 }

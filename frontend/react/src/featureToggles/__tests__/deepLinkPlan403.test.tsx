@@ -7,28 +7,34 @@
  * `requestJson` read 403s → `noteRequestStatus` re-resolves the access context
  * (UI-ENT-1b) → the entitlements now exclude the feature → `EntitlementGuard`
  * swaps the page for the lazy `LockedState` → which names the bundle and price.
+ *
+ * Sabotage that turns it red: drop `noteRequestStatus(res.status)` from
+ * `requestJson`, narrow it to 401, unregister the provider's reloader, or let the
+ * guard render children while locked — each leaves the page's error card up.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, cleanup } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { useEffect, useState } from 'react';
+import type { ResolvedAssignment } from '../../client/featureTogglesClient.js';
+import type { BundleCommerce, FeatureBundleCatalog, PublicPlanTier } from '../../features/marketplace/marketplaceClient.js';
 
 const entitlements = vi.hoisted(() => ({ current: '*' as '*' | string[] }));
 vi.mock('../../client/featureTogglesClient.js', () => ({
-  fetchAssignments: async () => [{ id: 'crm', status: 'on', enabled: true, variant: null }],
-  fetchEntitlements: async () => entitlements.current,
+  fetchAssignments: async (): Promise<{ assignments: ResolvedAssignment[] }> => ({ assignments: [{ id: 'crm', status: 'on', enabled: true, variant: null }] }),
+  fetchEntitlements: async (): Promise<'*' | string[]> => entitlements.current,
 }));
 vi.mock('../../features/marketplace/marketplaceClient.js', () => ({
-  fetchFeatureBundles: async () => ({
+  fetchFeatureBundles: async (): Promise<FeatureBundleCatalog> => ({
     available: true,
     bundles: [{ id: 'crm', label: 'CRM Suite', features: [{ id: 'crm', registered: true, dependsOn: [] }] }],
     standalone: [], core: [],
   }),
-  fetchBundleCommerce: async () => [{
+  fetchBundleCommerce: async (): Promise<BundleCommerce[]> => [{
     bundleId: 'crm', forSale: true, owned: false, purchasable: true, cadences: ['month'],
     priceDisplay: { price: '$29', cadence: '/mo' },
   }],
-  fetchPublicPricing: async () => [],
+  fetchPublicPricing: async (): Promise<PublicPlanTier[]> => [],
 }));
 vi.mock('../../lib/writeAccess.js', async (orig) => ({
   ...(await orig<Record<string, unknown>>()),
@@ -37,12 +43,13 @@ vi.mock('../../lib/writeAccess.js', async (orig) => ({
 
 // The page's own read: the backend refuses it with the central plan 403 — and,
 // from this moment, so does the entitlements read.
-vi.stubGlobal('fetch', vi.fn(async () => {
+const fetchStub = vi.fn(async (_url: string, _init?: RequestInit): Promise<Response> => {
   entitlements.current = ['chat'];
   return new Response(JSON.stringify({ error: 'forbidden', message: 'Your plan (free) does not include this feature.', details: { feature: 'crm', plan: 'free' } }), {
     status: 403, headers: { 'content-type': 'application/json' },
   });
-}));
+});
+vi.stubGlobal('fetch', fetchStub);
 
 import { FeatureAccessProvider } from '../FeatureAccessContext.js';
 import { EntitlementGuard } from '../EntitlementGuard.js';
@@ -72,5 +79,7 @@ describe('deep-linked page + plan 403 → the upgrade prompt (ADR 0419)', () => 
     expect(cta.getAttribute('href')).toBe('/marketplace/bundles?bundle=crm');
     expect(screen.queryByText(/Couldn't load contacts/)).toBeNull();
     expect(screen.queryByText('CRM PAGE')).toBeNull();
+    // The trigger was the PAGE's own read (not some other request).
+    expect(fetchStub.mock.calls.some(([url]) => String(url).endsWith('/v1/host/openwop-app/crm/contacts'))).toBe(true);
   });
 });

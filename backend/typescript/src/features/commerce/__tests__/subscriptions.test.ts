@@ -3,10 +3,11 @@
  *  - subscribing places the FIRST period order at the save-and-save discounted price
  *    and records an active subscription (demo-mode without a Stripe key);
  *  - a non-subscribable product / unsupported interval is rejected;
- *  - runSubscriptionCycle places the next period order and advances nextOrderAt;
+ *  - runSubscriptionCycle places the next period order and advances nextOrderAt
+ *    (asserted against a faked Date, literal oracle);
  *  - a canceled subscription runs no further cycles.
  */
-import { describe, it, expect, beforeAll, beforeEach } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, vi } from 'vitest';
 import { initHostExtPersistence } from '../../../host/hostExtPersistence.js';
 import { openStorage } from '../../../storage/index.js';
 import { createProduct, getOrder, __resetCommerce, type Product } from '../commerceService.js';
@@ -30,20 +31,43 @@ describe('MERCH-E product subscriptions', () => {
     expect(subscription.unitPrice).toBe(90); // 100 − 10%
     expect(firstOrder.total).toBe(90);
     expect(firstOrder.items[0]?.unitPrice).toBe(90);
+    // ADR 0450 — the DEMO subscribe IS the confirmation: the first order is persisted PAID.
+    expect(await getOrder(T, ORG, firstOrder.orderId)).toMatchObject({ total: 90, status: 'paid' });
     expect((await listProductSubscriptions(T, ORG))).toHaveLength(1);
   });
 
   it('rejects a non-subscribable product and an unsupported interval', async () => {
     const plain = await createProduct({ tenantId: T, orgId: ORG, createdBy: 'u', type: 'digital', name: 'One-off', price: 20, currency: 'USD' });
-    await expect(subscribeToProduct({ tenantId: T, orgId: ORG, createdBy: 'u', productId: plain.productId, interval: 'monthly' })).rejects.toThrow();
+    // The exact refusal: dropping the `enabled` guard still throws (a TypeError at
+    // `product.subscription.intervals`), so `.toThrow()` alone could not tell the two apart.
+    await expect(subscribeToProduct({ tenantId: T, orgId: ORG, createdBy: 'u', productId: plain.productId, interval: 'monthly' })).rejects.toMatchObject({ message: 'This product is not available as a subscription.' });
     const p = await subProduct();
-    await expect(subscribeToProduct({ tenantId: T, orgId: ORG, createdBy: 'u', productId: p.productId, interval: 'weekly' })).rejects.toThrow();
+    await expect(subscribeToProduct({ tenantId: T, orgId: ORG, createdBy: 'u', productId: p.productId, interval: 'weekly' })).rejects.toThrow(/^Unsupported interval\. Product offers: monthly$/);
   });
 
   it('runs a recurring cycle placing the next period order, and stops when canceled', async () => {
-    const p = await subProduct(0);
-    const { subscription } = await subscribeToProduct({ tenantId: T, orgId: ORG, createdBy: 'u', productId: p.productId, interval: 'monthly' });
-    const cycleOrder = await runSubscriptionCycle(T, ORG, subscription.subscriptionId);
+    // Fake only `Date`, so the cycle runs a day after the subscribe and nextOrderAt
+    // provably moves (both writes in one millisecond would tie). Literal oracle.
+    const T0 = Date.UTC(2031, 0, 1);
+    const DAY = 86_400_000;
+    vi.useFakeTimers({ toFake: ['Date'] });
+    let subscriptionId = '';
+    let cycleOrder: Awaited<ReturnType<typeof runSubscriptionCycle>> = null;
+    try {
+      vi.setSystemTime(T0);
+      const p = await subProduct(0);
+      const { subscription } = await subscribeToProduct({ tenantId: T, orgId: ORG, createdBy: 'u', productId: p.productId, interval: 'monthly' });
+      subscriptionId = subscription.subscriptionId;
+      expect(subscription.nextOrderAt).toBe(new Date(T0 + 30 * DAY).toISOString());
+      vi.setSystemTime(T0 + DAY);
+      cycleOrder = await runSubscriptionCycle(T, ORG, subscriptionId);
+      const advanced = (await listProductSubscriptions(T, ORG)).find((s) => s.subscriptionId === subscriptionId);
+      expect(advanced?.nextOrderAt).toBe(new Date(T0 + DAY + 30 * DAY).toISOString());
+      expect(advanced?.lastOrderId).toBe(cycleOrder?.orderId);
+    } finally {
+      vi.useRealTimers();
+    }
+    const subscription = { subscriptionId };
     expect(cycleOrder).not.toBeNull();
     expect(cycleOrder!.total).toBe(100);
     // #2316 (ADR 0450 unblock): a renewal-cycle order FULFILS — it is marked paid

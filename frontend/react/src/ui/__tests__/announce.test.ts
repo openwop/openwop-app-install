@@ -1,5 +1,21 @@
-import { describe, it, expect } from 'vitest';
+/**
+ * ADR 0363 P4 — the global screen-reader announcer. What breaks if this fails:
+ *   - a repeat of the SAME message stops changing string identity, so the live
+ *     region never mutates and the screen reader stays silent on the second
+ *     press (the MAJOR bug the alternating marker fixes — toggle, not append);
+ *   - an assertive message also lands in (or replaces) the polite slot, which
+ *     double-announces it or drops the polite message.
+ * The slots are module-level state, so every case starts from a reset.
+ */
+import { describe, it, expect, beforeEach } from 'vitest';
 import { announce, currentAnnouncements } from '../announce.js';
+
+const MARK = '​';
+
+beforeEach(() => {
+  announce('');
+  announce('', { assertive: true });
+});
 
 describe('announce (ADR 0363 P4)', () => {
   it('changes identity on EVERY repeat of the same message (the marker toggles, not one-shot)', () => {
@@ -16,12 +32,18 @@ describe('announce (ADR 0363 P4)', () => {
     expect(b).not.toBe(a);
     expect(c).not.toBe(b);
     expect(d).not.toBe(c);
-    // The visible text (marker stripped) is stable.
-    for (const v of [a, b, c, d]) expect(v.replace(/​$/, '')).toBe('Assistant replied');
+    // The exact alternation: the marker toggles on and off.
+    expect(a).toBe('Assistant replied');
+    expect(b).toBe(`Assistant replied${MARK}`);
+    expect(c).toBe('Assistant replied');
+    expect(d).toBe(`Assistant replied${MARK}`);
   });
 
   it('routes assertive separately from polite', () => {
+    announce('Calm');
     announce('Boom', { assertive: true });
-    expect(currentAnnouncements().assertive.replace(/​$/, '')).toBe('Boom');
+    expect(currentAnnouncements().assertive).toBe('Boom');
+    // The polite slot is untouched by an assertive message (no double announce).
+    expect(currentAnnouncements().polite).toBe('Calm');
   });
 });

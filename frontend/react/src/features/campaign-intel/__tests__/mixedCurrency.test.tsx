@@ -11,7 +11,7 @@
  *    sub-report blanked ALL FOUR sections behind a single error line.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, cleanup, waitFor, act } from '@testing-library/react';
+import { render, screen, cleanup, waitFor, act, fireEvent } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import type { AttributionReport, BudgetRecommendation, CampaignForecast, PacingReport } from '../campaignIntelClient.js';
 
@@ -36,6 +36,7 @@ vi.mock('../campaignIntelClient.js', async (orig) => {
 });
 
 import { CampaignIntelPage } from '../CampaignIntelPage.js';
+import { listOrgs } from '../campaignIntelClient.js';
 
 // R2 CI-SP-11 — full literals, no `as`-casts: a cast fixture missing SSoT
 // fields (totalSpend, changePercent, computedAt) meant SSoT drift never failed
@@ -48,9 +49,9 @@ const BUDGET: BudgetRecommendation = {
 };
 
 const attribution = (currency: string, currencyMixed: boolean): AttributionReport => ({
-  rows: [], email: [], unattributedConversions: 0, sharedJoinKeys: [],
+  rows: [], email: [], unattributedConversions: 0,
   currency, currencyMixed, computedAt: '2026-07-01T00:00:00.000Z',
-} as AttributionReport);
+} satisfies AttributionReport);
 
 const view = async (): Promise<void> => {
   render(<MemoryRouter><CampaignIntelPage /></MemoryRouter>);
@@ -59,6 +60,8 @@ const view = async (): Promise<void> => {
 };
 
 beforeEach(() => {
+  // The org-switch case widens this to two orgs; reset so no case inherits it.
+  vi.mocked(listOrgs).mockResolvedValue([{ orgId: 'org-1', name: 'Acme' }]);
   getBudget.mockReset(); getForecast.mockReset(); getAttribution.mockReset(); getPacing.mockReset(); getAnomalies.mockReset().mockResolvedValue([]);
   getBudget.mockResolvedValue(BUDGET);
   getForecast.mockResolvedValue([] as CampaignForecast[]);
@@ -104,7 +107,8 @@ describe('CI-G1: org-wide figures never claim a currency the org does not use', 
     delete legacy.currencyMixed;
     getAttribution.mockResolvedValue(legacy as AttributionReport);
     await view();
-    expect(screen.getByText(/12,345/)).toBeTruthy();
+    // Labelled in the report's own currency — not merely "a number is shown".
+    expect(screen.getByText(/€12,345/)).toBeTruthy();
     expect(screen.queryByText(/more than one currency/i)).toBeNull();
   });
 });
@@ -116,8 +120,8 @@ describe('CI-G2: one failing report does not blank the others', () => {
     await act(async () => {});
     // The budget section still renders — under `Promise.all` this was blank.
     await waitFor(() => expect(screen.getByText(/Shift spend toward/)).toBeTruthy());
-    // And the failure is reported specifically, not as a bare page error.
-    expect(screen.getByText(/Could not load/i)).toBeTruthy();
+    // And the failure is reported specifically — ONLY the failed section.
+    expect(screen.getByText('Could not load: Attribution (last-click). The other sections are current.')).toBeTruthy();
   });
 
   it('no failures ⇒ no error line', async () => {
@@ -192,8 +196,7 @@ describe('R2 CI-SP-3 — the localized noteCode path (not just the prose fallbac
 
 describe('R2 CI-SP-2 — the org-switch race', () => {
   it('the OLD org\'s slower batch never lands under the NEW org', async () => {
-    const listOrgsMock = (await import('../campaignIntelClient.js')).listOrgs as ReturnType<typeof vi.fn>;
-    listOrgsMock.mockResolvedValue([{ orgId: 'org-1', name: 'Acme' }, { orgId: 'org-2', name: 'Beta' }]);
+    vi.mocked(listOrgs).mockResolvedValue([{ orgId: 'org-1', name: 'Acme' }, { orgId: 'org-2', name: 'Beta' }]);
     // org-1's budget hangs until WE release it — after org-2 has landed.
     let releaseOrg1: (v: BudgetRecommendation) => void = () => {};
     getBudget
@@ -202,7 +205,6 @@ describe('R2 CI-SP-2 — the org-switch race', () => {
     render(<MemoryRouter><CampaignIntelPage /></MemoryRouter>);
     await act(async () => {});
     // Switch to org-2 while org-1's batch is still in flight.
-    const { fireEvent } = await import('@testing-library/react');
     fireEvent.change(screen.getByLabelText(/Organization/i), { target: { value: 'org-2' } });
     await act(async () => {});
     expect(await screen.findByText(/ORG TWO NOTE/)).toBeTruthy();
@@ -237,7 +239,7 @@ describe('R3 CI-SP-8 remainder — the anomaly detector gets its reader', () => 
     cleanup();
     getAnomalies.mockRejectedValue(new Error('boom'));
     await mountWithOrg();
-    expect(await screen.findByText(/Anomalies/)).toBeTruthy(); // named in the failed-sections line
+    expect(await screen.findByText('Could not load: Anomalies. The other sections are current.')).toBeTruthy();
     expect(screen.queryByText(/spend spike/)).toBeNull();
   });
 });

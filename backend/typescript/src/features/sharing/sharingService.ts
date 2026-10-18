@@ -13,10 +13,11 @@ import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { createLogger } from '../../observability/logger.js';
 import { hashToken, isTokenHash, mintToken } from '../../host/capabilityToken.js';
 import { OpenwopError } from '../../types.js';
-import { PREAUTHORIZED_CALLER, type SubjectCaller } from '../../host/subjectAccess.js'; // KBC-1 — `PREAUTHORIZED_CALLER` only on the PUBLIC read lane of an already-minted link (see `kb_collection`)
+import { PREAUTHORIZED_CALLER } from '../../host/subjectAccess.js'; // KBC-1 — `PREAUTHORIZED_CALLER` only to read a collection UNFILTERED: the public lane of an already-minted link, and the existence half of `validate`/`entitlement` (see `kb_collection`)
 import { cleanOpaqueToken, optionalCleanString } from '../../host/boundedStrings.js';
-import { getOrg } from '../../host/accessControlService.js';
-import { getCanvasForTenant, getCanvasForCaller } from '../../host/canvasSurface.js';
+import { getOrg, assertOrgScope, isSharedWorkspaceTenant, isWorkspaceMember } from '../../host/accessControlService.js';
+import { isSessionAuthorityRegistered, resolveSessionSubject } from '../../host/sessionAuthority.js';
+import { getCanvasForTenant, getCanvasForCaller, canvasWriteAllowed } from '../../host/canvasSurface.js';
 import { getBrief as getCreativeBrief } from '../creative-briefs/creativeBriefsService.js';
 import { briefToSharedMarkdown as creativeBriefToSharedMarkdown } from '../creative-briefs/routes.js';
 import { resolveOne, resolveToggle } from '../../host/featureToggles/service.js';
@@ -76,6 +77,10 @@ export interface ShareLink {
    *  viewers by design and deliberately not approximated. */
   lastViewedAt?: string;
   revoked: boolean;
+  /** ADR 0887 D5 — when a writer adopted this link after its publisher lost
+   *  access (`createdBy` is then the adopter). The previous publisher is NOT
+   *  stored: one person-identifier column (`createdBy`) is what DSAR erases. */
+  adoptedAt?: string;
   /** Grade fix #5 — when the link was revoked (the retention sweep's 30-day
    *  grace anchors HERE, not createdAt, so a long-lived link's audit trail
    *  isn't purged the moment it's revoked). Absent on pre-fix rows. */
@@ -112,17 +117,64 @@ interface ShareResolver {
    * always-on, CI goes red — instead of the public lane silently going dark.
    */
   toggleId: string | null;
-  /** Mint-time: assert the resource exists in (tenant, org); throw 404 otherwise.
-   *  `caller` (ADR 0643 R3 Blocker 2) is the MINTING principal — a resolver whose
-   *  resource can be subject-bound (a KB collection) MUST resolve it, so a non-member
-   *  cannot publish a private corpus through a public link. */
-  validate(tenantId: string, orgId: string, resourceId: string, caller?: SubjectCaller): Promise<void>;
+  /** Mint-time: assert the resource exists in (tenant, org) and is in a mintable
+   *  STATUS; throw 404 (or the status 409) otherwise. ADR 0887 D1 — WHO may mint
+   *  (the ADR 0643 R3 subject binding, ADR 0644 D1's prompt visibility, the canvas
+   *  read/write floor) moved to `entitlement`, which the public lane re-runs. */
+  validate(tenantId: string, orgId: string, resourceId: string): Promise<void>;
   /** Public read-only projection (or null if the resource is gone). `opts.snapshotAt`
    *  (ADR 0122 Phase 3) is the link's mint time — a resolver that snapshots
    *  time-ordered content (a conversation) MUST NOT expose anything created after it. */
   load(tenantId: string, orgId: string, resourceId: string, opts?: { snapshotAt?: string }): Promise<Record<string, unknown> | null>;
   /** Social-card metadata (or null if gone). */
   card(tenantId: string, orgId: string, resourceId: string, opts?: { snapshotAt?: string }): Promise<Card | null>;
+  /**
+   * ADR 0887 D1 — may `subject` PUBLISH (`mode:'publish'`) or READ (`mode:'read'`,
+   * the D2 owner-list redaction) this resource? `null` = yes; an OpenwopError =
+   * no, and is exactly what the MINT throws. The ONE subject predicate: the mint,
+   * every public read (re-run for the link's publisher) and the owner list all
+   * call it, so they cannot disagree.
+   *
+   * ABSENCE is not this hook's question: a resource that no longer exists answers
+   * `null` and `load` reports it gone (the SHARE-UX-1 `resource-gone` reason).
+   * Existence MUST be decided by an UNFILTERED read — never by a subject-filtered
+   * read that returns null for a refused caller (architect H2: that would read a
+   * refusal as absence and grant).
+   *
+   * `validate` keeps existence + mint-only STATUS rules (an approved brief, a
+   * `sent` quote); this hook is never asked about status, which is why the read
+   * lane re-runs it and not `validate` (an accepted quote is still served).
+   */
+  entitlement(tenantId: string, orgId: string, resourceId: string, subject: string, mode: 'publish' | 'read'): Promise<OpenwopError | null>;
+}
+
+/** ADR 0887 D1 — org-scoped resources: the publisher's org write (checked by the
+ *  presence gate) is the whole entitlement; no per-subject visibility exists. */
+const ORG_SCOPED_ENTITLEMENT = async (): Promise<OpenwopError | null> => null;
+
+/** ADR 0887 D1 — the canvas entitlement, shared by both canvas types. Order keeps
+ *  the mint's codes (architect L2): read refusal 404 → write 403 `forbidden_scope`
+ *  → user-owner 403 `forbidden`. */
+async function canvasEntitlement(typeId: string, tenantId: string, resourceId: string, subject: string, mode: 'publish' | 'read'): Promise<OpenwopError | null> {
+  const exists = await getCanvasForTenant(tenantId, resourceId); // UNFILTERED existence (H2)
+  if (!exists || exists.canvasTypeId !== typeId) return null;
+  const c = await getCanvasForCaller(tenantId, resourceId, { subject });
+  if (!c) return notFound(resourceId);
+  if (mode === 'read') return null;
+  // ADR 0886 D1 — publishing a live public link is a WRITE on the owner,
+  // decided in the owner's org (a reader of a project's canvas, or a writer
+  // in some other org, must not publish it).
+  if (!(await canvasWriteAllowed(tenantId, c, { subject }))) {
+    return new OpenwopError('forbidden_scope', 'Missing required scope: workspace:write on the canvas owner', 403, { requiredScope: 'workspace:write' });
+  }
+  // Grade pass 2026-07-07 (DATA finding 6): a USER-owned canvas (ADR 0153 §R6
+  // ownerSubject anchor) is publishable only by its owner. (Moved here from
+  // `createLink` by ADR 0887, unchanged. Whether the write check above already
+  // refuses every such caller is unmeasured, so the rule stays explicit.)
+  if (c.ownerSubject?.kind === 'user' && c.ownerSubject.id !== subject) {
+    return new OpenwopError('forbidden', 'Only the owner of this canvas may share it.', 403, { resourceId });
+  }
+  return null;
 }
 
 const RESOLVERS: Record<ResourceType, ShareResolver> = {
@@ -151,6 +203,7 @@ const RESOLVERS: Record<ResourceType, ShareResolver> = {
       if (!b || b.status !== 'approved') return null;
       return { title: b.title, description: `Creative brief — ${b.assetType}. ${b.directions.length} direction(s).` };
     },
+    entitlement: ORG_SCOPED_ENTITLEMENT,
   },
   // ADR 0305 Phase D — a shared app design (the `canvas.app-builder` working copy),
   // rendered interactively by the public viewer. LIVING document: `load` serves the
@@ -165,13 +218,14 @@ const RESOLVERS: Record<ResourceType, ShareResolver> = {
     // guarded this surface before). SHARE-1 moved the check to the one gate.
     toggleId: 'app-builder',
     // Canvas-access fix (ADR 0768 Phase 0): the MINTER must be able to read the
-    // canvas (THE shared predicate). The mint already passes `caller`; this
-    // resolver ignored it, so a non-member of a project could publish that
-    // project's canvas as a public link. Refusal = the same uniform 404.
-    async validate(tenantId, _orgId, resourceId, caller) {
-      const c = await getCanvasForCaller(tenantId, resourceId, caller ?? {});
+    // canvas (THE shared predicate); refusal = the same uniform 404.
+    // ADR 0887 D1 — existence only; the MINTER's read + write (ADR 0768 Phase 0,
+    // ADR 0886 D1) moved to `entitlement`, which the read lane re-runs.
+    async validate(tenantId, _orgId, resourceId) {
+      const c = await getCanvasForTenant(tenantId, resourceId);
       if (!c || c.canvasTypeId !== 'canvas.app-builder') throw notFound(resourceId);
     },
+    entitlement: (tenantId, _orgId, resourceId, subject, mode) => canvasEntitlement('canvas.app-builder', tenantId, resourceId, subject, mode),
     async load(tenantId, _orgId, resourceId) {
       const c = await getCanvasForTenant(tenantId, resourceId);
       if (!c || c.canvasTypeId !== 'canvas.app-builder') return null;
@@ -223,6 +277,7 @@ const RESOLVERS: Record<ResourceType, ShareResolver> = {
       if (!o) return null;
       return { title: `Order ${o.orderId}`, description: `${o.status} · ${o.total.toFixed(2)} ${o.currency}` };
     },
+    entitlement: ORG_SCOPED_ENTITLEMENT,
   },
   // C3 (ecommerce gap plan) — a SENT quote as a shareable offer: the buyer opens
   // a read-only, PII-free projection; acceptance happens on the commerce public
@@ -252,6 +307,7 @@ const RESOLVERS: Record<ResourceType, ShareResolver> = {
       if (!q || !SHAREABLE_QUOTE_STATUSES.includes(q.status)) return null;
       return { title: `Quote — ${q.total} ${q.currency}`, description: `${q.lines.length} item${q.lines.length === 1 ? '' : 's'}${q.expiresAt ? ` · valid until ${q.expiresAt.slice(0, 10)}` : ''}` };
     },
+    entitlement: ORG_SCOPED_ENTITLEMENT,
   },
 
   cms_page: {
@@ -286,18 +342,23 @@ const RESOLVERS: Record<ResourceType, ShareResolver> = {
       if (hero) c.imageToken = hero;
       return c;
     },
+    entitlement: ORG_SCOPED_ENTITLEMENT,
   },
   kb_collection: {
     // SHARE-1 — null: `kb` graduated off its toggle (ADR 0010/0024). Same
     // reasoning as `cms_page` above.
     toggleId: null,
-    async validate(tenantId, orgId, resourceId, caller) {
-      // ADR 0643 R3 (Blocker 2) — the MINT gate resolves the minter against the
-      // collection's subject (an omitted caller is `{ subject: undefined }`: fail-closed
-      // on a bound collection). `load`/`card` below stay PREAUTHORIZED: they serve the
-      // PUBLIC lane of a link this gate already admitted, to viewers who are anonymous
-      // by design.
-      if (!(await getCollection(tenantId, orgId, resourceId, caller ?? { subject: undefined }))) throw notFound(resourceId); // KBC-1
+    async validate(tenantId, orgId, resourceId) {
+      if (!(await getCollection(tenantId, orgId, resourceId, PREAUTHORIZED_CALLER))) throw notFound(resourceId); // KBC-1 — existence only
+    },
+    // ADR 0643 R3 (Blocker 2) — the minter must resolve the collection's subject.
+    // ADR 0887 D1 — and the PUBLISHER must still resolve it on every read, so a
+    // collection that becomes subject-bound after mint stops serving (SHWF-11).
+    // `load`/`card` below stay PREAUTHORIZED: they serve viewers who are anonymous
+    // by design, behind a link this hook has just re-admitted.
+    async entitlement(tenantId, orgId, resourceId, subject) {
+      if (!(await getCollection(tenantId, orgId, resourceId, PREAUTHORIZED_CALLER))) return null; // KBC-1 — UNFILTERED existence (H2)
+      return (await getCollection(tenantId, orgId, resourceId, { subject })) ? null : notFound(resourceId); // KBC-1
     },
     async load(tenantId, orgId, resourceId) {
       const col = await getCollection(tenantId, orgId, resourceId, PREAUTHORIZED_CALLER); // KBC-1 — public lane after mint
@@ -338,12 +399,16 @@ const RESOLVERS: Record<ResourceType, ShareResolver> = {
     // SHARE-1 — was UNGATED: an approved SOW/RFP kept resolving on the public
     // internet after the tenant disabled `documents`.
     toggleId: 'documents',
-    async validate(tenantId, orgId, resourceId, caller) {
+    async validate(tenantId, orgId, resourceId) {
       if (!(await publicDocumentView(tenantId, orgId, resourceId))) throw notFound(resourceId);
-      // ADR 0838 A3 — publishing is a read of the text: the MINTER must pass the
-      // same document read gate as every other exit (uniform 404).
-      const doc = await getDocument(tenantId, orgId, resourceId);
-      if (!doc || !(await canReadDocument(tenantId, doc, caller?.subject))) throw notFound(resourceId);
+    },
+    // ADR 0838 A3 — publishing is a read of the text: the publisher must pass the
+    // same document read gate as every other exit (uniform 404) — at mint, and
+    // (ADR 0887 D1) on every public read.
+    async entitlement(tenantId, orgId, resourceId, subject) {
+      const doc = await getDocument(tenantId, orgId, resourceId); // UNFILTERED existence (H2)
+      if (!doc) return null;
+      return (await canReadDocument(tenantId, doc, subject)) ? null : notFound(resourceId);
     },
     async load(tenantId, orgId, resourceId) {
       return publicDocumentView(tenantId, orgId, resourceId);
@@ -368,6 +433,19 @@ const RESOLVERS: Record<ResourceType, ShareResolver> = {
     toggleId: null,
     async validate(tenantId, _orgId, resourceId) {
       if (!(await hostExtStorage().getChatSession(tenantId, resourceId))) throw notFound(resourceId);
+    },
+    // ADR 0122 Phase 2 — a conversation is OWNER-scoped (not org-scoped): only the
+    // conversation owner may publish it, not any tenant member with
+    // workspace:write; and (ADR 0887 D2) only the owner reads its title on the
+    // owner list. An unowned (legacy) conversation stays publishable (consistent
+    // with the ADR 0043 visibility model; SHWF-14 / ADR 0887 OQ-3). Moved here
+    // from `createLink` by ADR 0887 D1.
+    async entitlement(tenantId, _orgId, resourceId, subject) {
+      const meta = await getConversationMeta(tenantId, resourceId);
+      if (meta?.ownerUserId && meta.ownerUserId !== subject) {
+        return new OpenwopError('forbidden', 'Only the conversation owner may share it.', 403, { resourceId });
+      }
+      return null;
     },
     async load(tenantId, _orgId, resourceId, opts) {
       const session = await hostExtStorage().getChatSession(tenantId, resourceId);
@@ -400,20 +478,25 @@ const RESOLVERS: Record<ResourceType, ShareResolver> = {
     // SHARE-1 — null: `prompts` graduated off its toggle (ADR 0134). Same
     // reasoning as `cms_page`.
     toggleId: null,
-    // SHWF-1 / ADR 0644 D1 — `validate` is the ENTITLEMENT hook: it answers "may
-    // THIS actor grant public access?", so it must apply the resource's own
-    // visibility predicate. `load`/`card` below deliberately keep the unfiltered
+    // SHWF-1 / ADR 0644 D1 — the ENTITLEMENT answers "may THIS actor grant public
+    // access?", so it must apply the resource's own visibility predicate (it was
+    // `validate` until ADR 0887 D1 split it out as `entitlement`). `load`/`card` below deliberately keep the unfiltered
     // read — they answer "what does an already-granted link show?", they have no
     // caller to compare against, and filtering them would break an owner sharing
     // their OWN private prompt. `promptLibraryService`'s "a minted public link IS
     // the grant" rationale is sound for the read hooks and CIRCULAR here, where
     // whether the minter was entitled to mint is the open question.
-    async validate(tenantId, orgId, resourceId, caller) {
-      const entry = await getEntryUnfiltered(tenantId, orgId, resourceId);
-      if (!entry) throw notFound(resourceId);
-      if (!promptReadableBy(entry, caller?.subject)) {
-        throw new OpenwopError('forbidden', 'Only the owner may share a private prompt.', 403, { resourceId });
-      }
+    async validate(tenantId, orgId, resourceId) {
+      if (!(await getEntryUnfiltered(tenantId, orgId, resourceId))) throw notFound(resourceId);
+    },
+    // ADR 0887 D1 — and re-asked for the PUBLISHER on every read: a prompt its
+    // owner makes private after another member published it stops serving.
+    async entitlement(tenantId, orgId, resourceId, subject) {
+      const entry = await getEntryUnfiltered(tenantId, orgId, resourceId); // UNFILTERED existence (H2)
+      if (!entry) return null;
+      return promptReadableBy(entry, subject)
+        ? null
+        : new OpenwopError('forbidden', 'Only the owner may share a private prompt.', 403, { resourceId });
     },
     async load(tenantId, orgId, resourceId) {
       const entry = await getEntryUnfiltered(tenantId, orgId, resourceId);
@@ -435,13 +518,13 @@ const RESOLVERS: Record<ResourceType, ShareResolver> = {
   slides_canvas: {
     toggleId: 'slides',
     // Canvas-access fix (ADR 0768 Phase 0): the MINTER must be able to read the
-    // canvas (THE shared predicate). The mint already passes `caller`; this
-    // resolver ignored it, so a non-member of a project could publish that
-    // project's canvas as a public link. Refusal = the same uniform 404.
-    async validate(tenantId, _orgId, resourceId, caller) {
-      const c = await getCanvasForCaller(tenantId, resourceId, caller ?? {});
+    // canvas (THE shared predicate); refusal = the same uniform 404.
+    // ADR 0887 D1 — existence only; read + write moved to `entitlement`.
+    async validate(tenantId, _orgId, resourceId) {
+      const c = await getCanvasForTenant(tenantId, resourceId);
       if (!c || c.canvasTypeId !== 'canvas.slides') throw notFound(resourceId);
     },
+    entitlement: (tenantId, _orgId, resourceId, subject, mode) => canvasEntitlement('canvas.slides', tenantId, resourceId, subject, mode),
     async load(tenantId, _orgId, resourceId) {
       const c = await getCanvasForTenant(tenantId, resourceId);
       if (!c || c.canvasTypeId !== 'canvas.slides') return null;
@@ -490,6 +573,7 @@ const RESOLVERS: Record<ResourceType, ShareResolver> = {
     async card() {
       return null; // private management link — no social card
     },
+    entitlement: ORG_SCOPED_ENTITLEMENT, // system-minted (visitor lane) — never re-checked (ADR 0887 D1 step 1)
   },
   // ADR 0402 §b — the per-signer e-signature capability token. A CAPABILITY link
   // (an action, not shareable content): `load` serves the signing projection +
@@ -505,6 +589,7 @@ const RESOLVERS: Record<ResourceType, ShareResolver> = {
     async card() {
       return null; // private signing link — no social card
     },
+    entitlement: ORG_SCOPED_ENTITLEMENT, // system-minted (visitor lane) — never re-checked (ADR 0887 D1 step 1)
   },
 };
 
@@ -739,6 +824,116 @@ export async function listFrameViews(tenantId: string, orgId: string, token: str
     .sort((a, b) => a.frame - b.frame);
 }
 
+// ─── ADR 0887 D1 — the publisher is re-checked on every read ─────────────────
+//
+// A link is a GRANT its publisher made. The mint checked that they could make it;
+// these functions re-check it, for every public lane, against the live facts:
+// still present (user not disabled, still in a shared workspace, still holding
+// `workspace:write` in the link's org) and still entitled to the resource (the
+// resolver's `entitlement`). A live re-check, not a revocation: restoring the
+// publisher's access restores the link. ADR 0886 D3 is the precedent.
+
+/** Visitor-lane mints (ADR 0820): the host minted these FOR a visitor (a booking
+ *  manage link, an e-sign link, an order receipt). There is no publisher to
+ *  re-check, and a buyer's receipt must not die when a staff member leaves.
+ *  Every such call site mints as `system:<feature>` (pinned by the ADR 0887
+ *  call-site test). `erased` links are already revoked (ADR 0464). */
+function isPublisherMint(l: Pick<ShareLink, 'createdBy'>): boolean {
+  return !l.createdBy.startsWith('system:') && l.createdBy !== ERASED_ACTOR;
+}
+
+/** Architect M1 — only a REFUSAL darkens. A storage blip or a 503 from the session
+ *  authority is not "the publisher lost access" (which D5 would let anyone adopt). */
+function isRefusal(err: unknown): err is OpenwopError {
+  return err instanceof OpenwopError && (err.httpStatus === 403 || err.httpStatus === 404);
+}
+
+/** Step 2 — is `subject` still PRESENT in (tenant, org) with the mint's authority?
+ *  The three checks a mint request passes (architect H1), not only the last.
+ *  Returns the refusal reason, or null. Non-refusal errors propagate. */
+async function publisherAbsence(tenantId: string, orgId: string, subject: string): Promise<string | null> {
+  if (isSessionAuthorityRegistered()) {
+    // "No row" is a seed/test actor this host never registered (the
+    // `delegationIssuerIsLive` reading); only a row that says so counts.
+    const state = await resolveSessionSubject(subject);
+    if (state !== null && state.status !== 'active') return 'publisher-disabled';
+  }
+  // ADR 0015 — membership IS presence in a shared `ws:` workspace; removal from
+  // its root can leave a same-subject row in a sub-org (architect H1).
+  if (isSharedWorkspaceTenant(tenantId) && !(await isWorkspaceMember(subject, tenantId))) return 'publisher-left-workspace';
+  try {
+    // The exact call `requireOrgScope` made at mint.
+    await assertOrgScope(tenantId, subject, orgId, 'workspace:write');
+  } catch (err) {
+    if (isRefusal(err)) return 'publisher-lost-org-write';
+    throw err;
+  }
+  return null;
+}
+
+/** Architect H3 — `assertOrgScope` scans roles + groups on every call; the
+ *  anonymous lane (and the per-slide frame-view POST) must not pay that per
+ *  request. So the verdict is memoized for a STATED bound: a removal or demotion
+ *  darkens a link within 30 s on every instance. Process-local, size-bounded. */
+const PUBLISHER_VERDICT_TTL_MS = 30_000;
+const PUBLISHER_VERDICT_MAX = 5_000;
+const publisherVerdicts = new Map<string, { reason: string | null; at: number }>();
+
+/** Steps 2–3 for one link: the reason it is dark because of its publisher, or
+ *  null, and whether that answer came from the memo (`cached`, so a report-mode
+ *  WARN fires once per bound, not per request).
+ *  `fresh` bypasses the memo (D5 adopt must decide on the current truth).
+ *  `absence` (D2) shares the presence answer across the rows of ONE list call:
+ *  presence depends on the publisher, not the resource, so 200 links by one
+ *  person cost one presence check, not 200. */
+async function publisherVerdict(
+  l: ShareLink,
+  opts: { fresh?: boolean; absence?: Map<string, Promise<string | null>> } = {},
+): Promise<{ reason: string | null; cached: boolean }> {
+  const key = [l.tenantId, l.orgId, l.createdBy, l.resourceType, l.resourceId].join('\u0000');
+  const now = Date.now();
+  const hit = opts.fresh ? undefined : publisherVerdicts.get(key);
+  if (hit && now - hit.at < PUBLISHER_VERDICT_TTL_MS) return { reason: hit.reason, cached: true };
+  let absent: Promise<string | null>;
+  if (opts.absence) {
+    const pk = `${l.tenantId}\u0000${l.orgId}\u0000${l.createdBy}`;
+    absent = opts.absence.get(pk) ?? publisherAbsence(l.tenantId, l.orgId, l.createdBy);
+    opts.absence.set(pk, absent);
+  } else {
+    absent = publisherAbsence(l.tenantId, l.orgId, l.createdBy);
+  }
+  let reason = await absent;
+  if (!reason) {
+    try {
+      const refusal = await RESOLVERS[l.resourceType].entitlement(l.tenantId, l.orgId, l.resourceId, l.createdBy, 'publish');
+      if (refusal) reason = 'publisher-lost-resource-access';
+    } catch (err) {
+      if (!isRefusal(err)) throw err;
+      reason = 'publisher-lost-resource-access';
+    }
+  }
+  // Bounded: re-inserting moves a key to the back, and a full map sheds an EXPIRED
+  // entry before it sheds the oldest live one (SH2CD-10).
+  publisherVerdicts.delete(key);
+  if (publisherVerdicts.size >= PUBLISHER_VERDICT_MAX) {
+    let victim: string | undefined;
+    for (const [k, v] of publisherVerdicts) { if (now - v.at >= PUBLISHER_VERDICT_TTL_MS) { victim = k; break; } }
+    publisherVerdicts.delete(victim ?? (publisherVerdicts.keys().next().value as string));
+  }
+  publisherVerdicts.set(key, { reason, at: now });
+  return { reason, cached: false };
+}
+
+/** Test affordance — drop the memo (never routed). Tests that want to witness
+ *  the 30 s bound advance the clock instead. */
+export function __resetPublisherVerdictsForTests(): void { publisherVerdicts.clear(); }
+
+/** ADR 0887 (architect H4) — the operator escape hatch: `report` logs the would-be
+ *  refusal and serves. Default `enforce`. */
+function publisherRecheckEnforced(): boolean {
+  return process.env.OPENWOP_SHARE_PUBLISHER_RECHECK !== 'report';
+}
+
 // ─── authed management (authorizeOrgScope-gated in routes) ───────────────────
 
 export async function createLink(
@@ -780,31 +975,12 @@ export async function createLink(
   // shape as a missing resource. ADR 0820 G4: a member mint also needs the plan.
   await assertMintAccess(resourceType as ResourceType, tenantId, actor, resourceId, access);
 
-  // The resource MUST exist in THIS (tenant, org) — cross-org/tenant id 404s — AND be
-  // readable by the MINTER (ADR 0643 R3 Blocker 2; only subject-bindable resolvers use it).
-  await RESOLVERS[resourceType as ResourceType].validate(tenantId, orgId, resourceId, { subject: actor });
-
-  // ADR 0122 Phase 2 — a conversation is OWNER-scoped (not org-scoped): only the
-  // conversation owner may mint a public link, not any tenant member with
-  // workspace:write. An unowned (legacy) conversation stays mintable (consistent
-  // with the ADR 0043 visibility model).
-  // Grade pass 2026-07-07 (DATA finding 6): a USER-owned canvas (ADR 0153 §R6
-  // ownerSubject anchor) is mintable only by its owner — the same posture as
-  // conversations. Tenant/org-scoped canvases (no user owner) stay
-  // workspace:write-mintable (parity with the editor's own PATCH authz).
-  if (resourceType === 'app_builder_canvas' || resourceType === 'slides_canvas') {
-    const c = await getCanvasForTenant(tenantId, resourceId);
-    if (c?.ownerSubject?.kind === 'user' && c.ownerSubject.id !== actor) {
-      throw new OpenwopError('forbidden', 'Only the owner of this canvas may share it.', 403, { resourceId });
-    }
-  }
-
-  if (resourceType === 'conversation') {
-    const meta = await getConversationMeta(tenantId, resourceId);
-    if (meta?.ownerUserId && meta.ownerUserId !== actor) {
-      throw new OpenwopError('forbidden', 'Only the conversation owner may share it.', 403, { resourceId });
-    }
-  }
+  // The resource MUST exist in THIS (tenant, org) — cross-org/tenant id 404s — in a
+  // mintable status, AND the MINTER must be entitled to publish it (ADR 0887 D1:
+  // the one subject predicate the public lane re-runs for the publisher).
+  await RESOLVERS[resourceType as ResourceType].validate(tenantId, orgId, resourceId);
+  const refusal = await RESOLVERS[resourceType as ResourceType].entitlement(tenantId, orgId, resourceId, actor, 'publish');
+  if (refusal) throw refusal;
 
   // ADR 0448 P2 — the raw token exists exactly HERE and in the return value.
   const minted = mintToken('shr');
@@ -961,7 +1137,13 @@ export async function hasActiveLinkForResource(tenantId: string, resourceType: R
   return false;
 }
 
-export async function listLinks(tenantId: string, orgId: string): Promise<Array<ShareLink & { cardTitle?: string; resourceMissing?: boolean; featureDisabled?: boolean }>> {
+export type ListedShareLink = ShareLink & { cardTitle?: string; resourceMissing?: boolean; featureDisabled?: boolean; publisherInactive?: boolean; cardRedacted?: boolean; canAdopt?: boolean };
+
+/** `caller` (ADR 0887 D2) is the reader of the list: a row whose resource the
+ *  caller may not READ (and did not publish) is listed without its title, and a
+ *  dark-by-publisher row says whether THIS caller could adopt it (`canAdopt`), so
+ *  the page never offers an action the server will refuse. */
+export async function listLinks(tenantId: string, orgId: string, caller: string): Promise<ListedShareLink[]> {
   // SHARE-5 — the tenant's own slice via the secondary index this collection
   // already maintains (`tenantOf`), not a full cross-tenant `list()` scan.
   // This is the ONE read left on the index (R2 SHARE-5 correction): a miss here
@@ -975,7 +1157,13 @@ export async function listLinks(tenantId: string, orgId: string): Promise<Array<
   // Annotate with the resource's current card title (best-effort — a deleted
   // resource just has no title). N+1 by design: this is an AUTHED, low-volume
   // management list (unlike the public sitemap/feed path, which must not fan out).
-  const out: Array<ShareLink & { cardTitle?: string; resourceMissing?: boolean; featureDisabled?: boolean }> = [];
+  const out: ListedShareLink[] = [];
+  // ADR 0887 D2 — one presence answer per publisher per call (SH2CD-1), and the
+  // caller's own write in this org asked at most once.
+  const absence = new Map<string, Promise<string | null>>();
+  let callerWrites: Promise<boolean> | undefined;
+  const callerCanWrite = (): Promise<boolean> => (callerWrites ??= assertOrgScope(tenantId, caller, orgId, 'workspace:write').then(() => true, () => false));
+  const now = Date.now();
   for (const l of rows) {
     // SHARE-1 parity: the management list must not show a card title for a type
     // whose owning feature is OFF (that was the per-resolver behaviour the one
@@ -985,9 +1173,21 @@ export async function listLinks(tenantId: string, orgId: string): Promise<Array<
     // card lookup failed" into "the resource is gone", which is exactly the
     // false claim this annotation now feeds — so the two are kept apart and a
     // failed lookup asserts nothing.
+    // ADR 0887 D2 — the title is the resource's, so it follows the resource's read
+    // rule, not the list route's `workspace:read`: another member's private prompt
+    // or conversation is listed (governance) but not named. A failed read check
+    // redacts (fail-closed), it does not claim the resource is gone.
+    let redacted = false;
+    if (l.createdBy !== caller) {
+      try { redacted = (await RESOLVERS[l.resourceType].entitlement(l.tenantId, l.orgId, l.resourceId, caller, 'read')) !== null; }
+      catch (err) {
+        redacted = true;
+        log.warn('share_list_annotation_failed', { annotation: 'redaction', tokenPrefix: l.tokenHash.slice(0, 12), error: err instanceof Error ? err.message : String(err) });
+      }
+    }
     let card: Card | null = null;
     let cardFailed = false;
-    if (gated) {
+    if (gated && !redacted) {
       try { card = await RESOLVERS[l.resourceType].card(l.tenantId, l.orgId, l.resourceId); }
       catch { cardFailed = true; }
     }
@@ -1000,6 +1200,28 @@ export async function listLinks(tenantId: string, orgId: string): Promise<Array<
     // `sign_request` return null BY DESIGN — private links have no social card),
     // so those two are never falsely marked missing.
     const cardCapable = l.resourceType !== 'booking_manage' && l.resourceType !== 'sign_request';
+    const resourceMissing = gated && cardCapable && !cardFailed && !redacted && !card;
+    // ADR 0887 D2 — the owner's side of D1: a link dark because its publisher lost
+    // access says so (and, for a caller who could, offers D5's adopt) instead of
+    // reading "Live". Not asked for a TERMINAL row (revoked, expired), for a row
+    // whose resource is gone (adopting cannot bring that back, and the status is
+    // `orphaned`), or in report mode (the link is still serving — SH2CD-6). A
+    // failed check asserts nothing (the SHARE-UX-1 rule: a throw is not an absence).
+    let publisherInactive = false;
+    const terminal = l.revoked || (l.expiresAt !== undefined && !(Date.parse(l.expiresAt) > now));
+    if (!terminal && !resourceMissing && isPublisherMint(l) && publisherRecheckEnforced()) {
+      try { publisherInactive = (await publisherVerdict(l, { absence })).reason !== null; }
+      catch (err) {
+        log.warn('share_list_annotation_failed', { annotation: 'publisher', tokenPrefix: l.tokenHash.slice(0, 12), error: err instanceof Error ? err.message : String(err) });
+      }
+    }
+    // D5 — the same refusals `adoptLink` would raise, minus the mint plan gate
+    // (a plan refusal there is a 403 the toast names; it is rare and honest).
+    let canAdopt = false;
+    if (publisherInactive && !redacted && (await callerCanWrite())) {
+      try { canAdopt = (await RESOLVERS[l.resourceType].entitlement(l.tenantId, l.orgId, l.resourceId, caller, 'publish')) === null; }
+      catch { canAdopt = false; }
+    }
     // SHARE-1 HONESTY (R2) — `gated` used to be computed here and then DISCARDED:
     // it suppressed the card lookup and the `resourceMissing` flag, and nothing
     // about the gate reached the wire. So the moment SHARE-1 made `document`,
@@ -1011,8 +1233,11 @@ export async function listLinks(tenantId: string, orgId: string): Promise<Array<
     out.push({
       ...l,
       ...(card ? { cardTitle: card.title } : {}),
-      ...(gated && cardCapable && !cardFailed && !card ? { resourceMissing: true } : {}),
+      ...(resourceMissing ? { resourceMissing: true } : {}),
       ...(gated ? {} : { featureDisabled: true }),
+      ...(publisherInactive ? { publisherInactive: true } : {}),
+      ...(canAdopt ? { canAdopt: true } : {}),
+      ...(redacted ? { cardRedacted: true } : {}),
     });
   }
   return out;
@@ -1027,11 +1252,57 @@ export async function revokeLink(tenantId: string, orgId: string, token: string)
   await links.put({ ...link, revoked: true, revokedAt, deadAt: revokedAt });
 }
 
+/**
+ * ADR 0887 D5 — adopt a link whose publisher lost access, so its URL survives a
+ * departure (the Dropbox Business / Box "transfer" parity). A RECOVERY action,
+ * not a reassignment: refused while the publisher is still present and entitled,
+ * and refused for revoked, expired and visitor-lane links. The adopter passes the
+ * FULL member mint gate — adopting is publishing. Token, URL, counts and expiry
+ * are unchanged; `createdBy` becomes the adopter (the one column DSAR erases).
+ */
+export async function adoptLink(tenantId: string, orgId: string, token: string, actor: string, access: ShareMintAccess = { lane: 'member' }): Promise<ShareLink> {
+  const link = await links.get(keyOf(token));
+  if (!link || link.tenantId !== tenantId || link.orgId !== orgId) {
+    throw new OpenwopError('not_found', 'Share link not found.', 404, {});
+  }
+  const refuse = (why: string, message: string): never => {
+    throw new OpenwopError('validation_error', message, 409, { reason: why });
+  };
+  if (link.revoked) refuse('revoked', 'A revoked link can’t be adopted. Create a new link instead.');
+  if (link.expiresAt && !(Date.parse(link.expiresAt) > Date.now())) refuse('expired', 'An expired link can’t be adopted. Create a new link instead.');
+  if (!isPublisherMint(link)) refuse('system-link', 'This link was created by the app, not by a person, so it can’t be adopted.');
+  // Architect M1 — decided on a REFUSAL, never on an error, and on the current
+  // truth (the memo could be up to 30 s stale in either direction).
+  if ((await publisherVerdict(link, { fresh: true })).reason === null) {
+    refuse('publisher-active', 'The person who shared this link still has access. Only a link whose publisher lost access can be adopted.');
+  }
+  await assertMintAccess(link.resourceType, tenantId, actor, link.resourceId, access);
+  await RESOLVERS[link.resourceType].validate(tenantId, orgId, link.resourceId);
+  const refusal = await RESOLVERS[link.resourceType].entitlement(tenantId, orgId, link.resourceId, actor, 'publish');
+  if (refusal) throw refusal;
+  const next: ShareLink = { ...link, createdBy: actor, adoptedAt: nowIsoSharing() };
+  if (!(await links.compareAndSwap(link, next))) {
+    throw new OpenwopError('conflict', 'This link changed while you were adopting it. Refresh and try again.', 409, { reason: 'concurrent-change' });
+  }
+  publisherVerdicts.clear();
+  log.info('shared_link_adopted', { resourceType: link.resourceType, tenantId, orgId, tokenPrefix: link.tokenHash.slice(0, 12), from: link.createdBy, to: actor });
+  return next;
+}
+
 // ─── public resolve (unauthed — tenant from the link) ───────────────────────
 
-/** Load a share link by token, enforcing every public gate (charset, existence,
- *  revocation, expiry, org↔tenant). Throws a uniform 404 on ANY failure so the
- *  surface leaks nothing about which condition failed.
+/** Load a share link by token, enforcing every public gate, in this order:
+ *  charset, existence, revocation, org↔tenant, the owning toggle (SHARE-1), the
+ *  view cap (ADR 0644 D8), the publisher (ADR 0887 D1), and LAST the expiry. Every
+ *  refusal is the same reason-less 404 so the surface leaks nothing about which
+ *  condition failed — except expiry, which is an honest 410 (R2 SR-10) and, since
+ *  ADR 0887 D3, only for a link every other gate would have served.
+ *
+ *  CORRECTED (ADR 0887): this docblock listed five gates ("charset, existence,
+ *  revocation, expiry, org↔tenant") long after the toggle and cap gates joined,
+ *  and said "uniform 404 on ANY failure" beside a 410. The paragraph below is
+ *  kept as written; its "each resolver still applies its OWN feature's toggle"
+ *  was corrected by SHARE-1 (the ONE gate is `owningFeatureEnabled`, here).
  *
  *  § ADR 0434 — the `sharing` toggle graduated to always-on, so the former
  *  toggle gate (and its `enforceSharingToggle: false` carve-out for ADR 0402
@@ -1065,17 +1336,8 @@ async function resolveActiveLink(token: string, opts: { enforceViewCap?: boolean
   if (!link) link = await migrateLegacyLinkOnRead(token);
   if (!link) gone('unknown-token');
   if (link!.revoked) gone('revoked', link!);
-  if (link!.expiresAt) {
-    const exp = Date.parse(link!.expiresAt);
-    if (Number.isNaN(exp)) gone('unparseable-expiry', link!); // fail-closed
-    // R2 SR-10 — an EXPIRED link gets honest visitor copy (410, the Dropbox
-    // convention). Revoked and never-existed stay a UNIFORM 404: revocation is
-    // the owner deliberately killing the link, and distinguishing it from
-    // "never existed" would make the resolve a token-validity oracle. Expiry
-    // is a benign time lapse; admitting a dead token once existed there is the
-    // whole point of the message ("ask the owner for a fresh link").
-    if (exp <= Date.now()) throw new OpenwopError('not_found', 'This shared link has expired.', 410, { reason: 'expired' });
-  }
+  const exp = link!.expiresAt ? Date.parse(link!.expiresAt) : undefined;
+  if (exp !== undefined && Number.isNaN(exp)) gone('unparseable-expiry', link!); // fail-closed
   const org = await getOrg(link!.orgId);
   if (!org || org.tenantId !== link!.tenantId) gone('org-tenant-mismatch', link!);
   // SHARE-1 — the owning-feature gate, on the LINK's tenant, for EVERY public
@@ -1104,6 +1366,28 @@ async function resolveActiveLink(token: string, opts: { enforceViewCap?: boolean
     log.info('shared_link_view_cap_reached', { resourceType: link!.resourceType, tenantId: link!.tenantId, orgId: link!.orgId, tokenPrefix: link!.tokenHash.slice(0, 12) });
     gone('view-cap-reached', link!);
   }
+  // ADR 0887 D1 — the publisher half of the grant, re-checked (after the cheap cap
+  // pre-check, architect M4). A refusal is the uniform reason-less 404, the same
+  // envelope as a revoked token.
+  if (isPublisherMint(link!)) {
+    const { reason: why, cached } = await publisherVerdict(link!);
+    if (why) {
+      if (publisherRecheckEnforced()) gone(why, link!);
+      // Report mode serves; it says so once per memo bound, not on every view.
+      if (!cached) log.warn('shared_link_publisher_would_darken', { reason: why, resourceType: link!.resourceType, tenantId: link!.tenantId, orgId: link!.orgId, tokenPrefix: link!.tokenHash.slice(0, 12) });
+    }
+  }
+  // R2 SR-10 — an EXPIRED link gets honest visitor copy (410, the Dropbox
+  // convention). Revoked and never-existed stay a UNIFORM 404: revocation is
+  // the owner deliberately killing the link, and distinguishing it from
+  // "never existed" would make the resolve a token-validity oracle. Expiry
+  // is a benign time lapse; admitting a dead token once existed there is the
+  // whole point of the message ("ask the owner for a fresh link").
+  // ADR 0887 D3 — decided LAST, so a 410 is only ever given for a link that
+  // would be live but for the date: one that is ALSO dead for a reason the
+  // uniform 404 hides (a deleted org, a disabled feature, a spent cap, a
+  // removed publisher) stays that 404.
+  if (exp !== undefined && exp <= Date.now()) throw new OpenwopError('not_found', 'This shared link has expired.', 410, { reason: 'expired' });
   return link!;
 }
 

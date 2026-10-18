@@ -168,6 +168,7 @@ import { notebooksBuiltinWorkflows } from './notebooks/summarizeWorkflow.js';
 import { notebookMcpToolWorkflows } from './notebooks/mcpToolsWorkflows.js';
 import { appBuilderMcpControlWorkflows } from './app-builder/mcpControlWorkflows.js';
 import { kicktodoAccountabilityBuiltinWorkflows } from './kicktodo-accountability/builtinWorkflows.js';
+import { registerFeaturePublicPaths } from '../middleware/auth.js';
 
 const log = createLogger('features');
 
@@ -358,6 +359,8 @@ export function registerBackendFeatures(deps: RouteDeps): void {
     registerFeaturePacks(feature.id, feature.requiredPacks ?? []);
     // ADR 0194 Phase 5 — soft deps → console suggestions (advisory, never a lock).
     registerFeatureRecommends(feature.id, feature.recommends ?? []);
+    // ADR 0915 — before the routes, so a bad declaration fails the boot.
+    if (feature.publicPaths?.length) registerFeaturePublicPaths(feature.id, feature.publicPaths);
     feature.registerRoutes(deps);
     // Face 2 (ADR 0014 Phase 1): the feature's ctx.features.<id> workflow surface.
     if (feature.surface) registerFeatureSurface(feature.surface.id, feature.surface.build, feature.surface.orgPolicy);

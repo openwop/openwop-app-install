@@ -21,13 +21,44 @@ function writeCache(suiteKey: string, r: Results): void {
   try { localStorage.setItem(PREFIX + suiteKey, JSON.stringify(r)); } catch { /* storage disabled — server is the source of truth */ }
 }
 
+/**
+ * MT-LOSS-1 — a suite whose last save the server did NOT accept. While this is
+ * set, the local cache holds results the server never received, so a healthy
+ * read must MERGE into it, not overwrite it (see `loadResults`). Cleared by the
+ * next accepted save, which sends the whole merged set.
+ */
+const UNSYNCED = '.unsynced';
+function markUnsynced(suiteKey: string, on: boolean): void {
+  try {
+    if (on) localStorage.setItem(PREFIX + suiteKey + UNSYNCED, '1');
+    else localStorage.removeItem(PREFIX + suiteKey + UNSYNCED);
+  } catch { /* storage disabled — nothing local to protect */ }
+}
+function isUnsynced(suiteKey: string): boolean {
+  try { return localStorage.getItem(PREFIX + suiteKey + UNSYNCED) === '1'; } catch { return false; }
+}
+
+/** Per case, the newer of the two (ISO `ts`); a case only one side has is kept. */
+function mergeNewer(server: Results, local: Results): Results {
+  const out: Results = { ...server };
+  for (const [id, mine] of Object.entries(local)) {
+    const theirs = out[id];
+    if (!theirs || mine.ts >= theirs.ts) out[id] = mine;
+  }
+  return out;
+}
+
 /** Load one suite's results — server first, localStorage cache on failure. */
 export async function loadResults(suiteKey: string): Promise<Results> {
   try {
     const res = await fetch(`${ROOT}/runs/${encodeURIComponent(suiteKey)}`, fetchOpts({ headers: authedHeaders() }));
     if (res.ok) {
       const body = (await res.json()) as { run?: { results?: Results } | null };
-      const results = body.run?.results ?? {};
+      const server = body.run?.results ?? {};
+      // MT-LOSS-1 — refreshing the cache from the server erased results whose
+      // save the server had rejected: the tester saw their result, then saw it
+      // gone. While the suite is unsynced, the server copy is merged in instead.
+      const results = isUnsynced(suiteKey) ? mergeNewer(server, readCache(suiteKey)) : server;
       writeCache(suiteKey, results); // refresh the offline cache
       return results;
     }
@@ -44,8 +75,10 @@ export async function loadResults(suiteKey: string): Promise<Results> {
  *
  * That was not merely silent, it was DESTRUCTIVE. The old comment said "next
  * load reconciles", but reconciliation runs the other way: `loadResults`
- * refreshes the cache from the server on every successful read, so results the
- * server never received were overwritten by the stale server copy and lost.
+ * refreshed the cache from the server on every successful read, so results the
+ * server never received were overwritten by the stale server copy and lost
+ * (MT-LOSS-1, now closed: a failed save marks the suite unsynced and the next
+ * healthy read merges instead of overwriting).
  * In a tool whose only job is recording test results, the user had no way to
  * know — they saw their result, then later saw it gone.
  */
@@ -62,9 +95,11 @@ export async function saveResults(suiteKey: string, results: Results): Promise<S
     const res = await fetch(`${ROOT}/runs/${encodeURIComponent(suiteKey)}`, fetchOpts({
       method: 'PUT', headers: authedHeaders({ 'content-type': 'application/json' }), body: JSON.stringify({ results }),
     }));
-    if (!res.ok) return { ok: false, reason: 'rejected', status: res.status };
+    if (!res.ok) { markUnsynced(suiteKey, true); return { ok: false, reason: 'rejected', status: res.status }; }
+    markUnsynced(suiteKey, false);
     return { ok: true };
   } catch {
+    markUnsynced(suiteKey, true);
     return { ok: false, reason: 'unreachable' };
   }
 }

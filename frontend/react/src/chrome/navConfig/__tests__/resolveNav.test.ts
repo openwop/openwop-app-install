@@ -1,3 +1,13 @@
+/**
+ * ADR 0139 — the pure nav resolver: (tenant ← user) MenuConfig overlaid on the
+ * declared FEATURES nav. Guards the feature-toggle HARD gate (no override can
+ * reveal a disabled feature), the ADR 0144 `hiddenWhenFeature` inverse gate,
+ * hide-overrides never touching always-on items, the ADR 0203 authority
+ * projection (admin tier / superadminOnly / requiredScope; a legacy saved
+ * `tier` cannot move an item across the boundary), group/order/header
+ * overrides with per-field user-over-tenant precedence, and the empty == today
+ * invariant against the static rails.
+ */
 import { createElement } from 'react';
 import { describe, it, expect } from 'vitest';
 import { FEATURES, WORKSPACE_NAV, ADMIN_NAV_GROUPS } from '../../features.js';
@@ -18,8 +28,11 @@ function feat(
     path,
     element: createElement('div'),
     tier,
+    archetype: tier === 'admin' ? 'admin' : 'standard-index',
     nav: {
-      group, label: opts.label ?? path, icon, hint: '', order: opts.order, featureId: opts.featureId,
+      group, label: opts.label ?? path, icon, hint: '',
+      ...(opts.order !== undefined ? { order: opts.order } : {}),
+      ...(opts.featureId !== undefined ? { featureId: opts.featureId } : {}),
       ...(opts.superadminOnly !== undefined ? { superadminOnly: opts.superadminOnly } : {}),
       ...(opts.requiredScope ? { requiredScope: opts.requiredScope } : {}),
     },
@@ -78,12 +91,14 @@ describe('resolveNav — hiddenWhenFeature inverse gate (ADR 0144)', () => {
       path: '/keys',
       element: createElement('div'),
       tier: 'admin',
+      archetype: 'admin',
       nav: { group: 'Access & data', label: 'Keys', icon, hint: '', hiddenWhenFeature: 'access-hub' },
     },
     {
       path: '/access',
       element: createElement('div'),
       tier: 'admin',
+      archetype: 'admin',
       nav: { group: 'Access & data', label: 'Access', icon, hint: '', featureId: 'access-hub' },
     },
   ];

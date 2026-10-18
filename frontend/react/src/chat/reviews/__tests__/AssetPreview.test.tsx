@@ -1,3 +1,10 @@
+/**
+ * AssetPreview (ADR 0458 §2.4, ADR 0459) — what a HITL approver sees of the
+ * asset under review. Breaks if: the model-influenced serve URL reaches a raw
+ * <img>/<video> without the shared `mediaSrc` allowlist (DOM-XSS); media is
+ * guessed from a missing or unknown MIME; a typed artifact dumps raw JSON as its
+ * body. Sabotage-witnessed in /grade-tests wave 44 (w44g3-ap-*).
+ */
 import { describe, it, expect, afterEach } from 'vitest';
 import { render, screen, cleanup } from '@testing-library/react';
 import { AssetPreview } from '../AssetPreview.js';
@@ -48,6 +55,14 @@ describe('AssetPreview media rendering', () => {
     expect(screen.getByText('a drafted lesson')).toBeTruthy();
   });
 
+  it('falls back to the text path when a URL has no MIME (never guessed)', () => {
+    const asset: ReviewAsset = { url: 'https://cdn.example/img.png', content: 'a drafted lesson' };
+    const { container } = render(<AssetPreview asset={asset} />);
+    expect(container.querySelector('img')).toBeNull();
+    expect(container.querySelector('video')).toBeNull();
+    expect(screen.getByText('a drafted lesson')).toBeTruthy();
+  });
+
   it('falls back to the artifact-ref text path when a media MIME has no URL', () => {
     // A bound artifact whose media URL never resolved: keep the "open in workbench" ref, never guess.
     const asset: ReviewAsset = { mimeType: 'image/png', artifactId: 'media:asset-1' };
@@ -76,7 +91,12 @@ describe('AssetPreview typed-artifact dispatch', () => {
     expect(screen.getByText('Swap “Run 5k” for “Brisk 20-min walk”.')).toBeTruthy();
     expect(screen.getByText('Swap in something lower-impact this week.')).toBeTruthy();
     // The raw commands are available only behind the collapsed disclosure (not the body).
-    expect(screen.getByText(/Show the raw commands/i).closest('details')).toBeTruthy();
+    const raw = screen.getByText(/Show the raw commands/i).closest('details');
+    expect(raw).not.toBeNull();
+    expect(raw!.open).toBe(false);
+    expect(raw!.textContent).toContain('occ:abc');
+    // …and the JSON document itself is not the body (the markdown path would print it).
+    expect(screen.queryByText(/"rationale"/)).toBeNull();
   });
 
   it('falls through to markdown for an UNREGISTERED artifactTypeId (untyped path unchanged)', () => {

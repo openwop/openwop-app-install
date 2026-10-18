@@ -18,17 +18,21 @@
  * It follows the UX-OPS-1 precedent in `opsHealthHonesty.test.tsx` exactly:
  * per-panel outcome state, `allSettled` so one read cannot poison another, and
  * failure detected structurally by HTTP status rather than by message text.
+ *
+ * w52: every fixture is typed against the client's own interfaces (HEALTH, DLQ
+ * and OUTBOX were untyped), and the mocks are typed.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { GlobalLiveRegion } from '../../../ui/announce.js';
 
+type Client = typeof import('../../../client/operationsClient.js');
 const api = vi.hoisted(() => ({
-  getHealthSummary: vi.fn(),
-  getDlqSummary: vi.fn(),
-  getOutboxSummary: vi.fn(),
-  getSloSummary: vi.fn(),
+  getHealthSummary: vi.fn<Client['getHealthSummary']>(),
+  getDlqSummary: vi.fn<Client['getDlqSummary']>(),
+  getOutboxSummary: vi.fn<Client['getOutboxSummary']>(),
+  getSloSummary: vi.fn<Client['getSloSummary']>(),
 }));
 vi.mock('../../../client/operationsClient.js', async (importOriginal) => {
   const orig = await importOriginal<Record<string, unknown>>();
@@ -36,18 +40,18 @@ vi.mock('../../../client/operationsClient.js', async (importOriginal) => {
 });
 
 import { OperationsHubPage } from '../OperationsHubPage.js';
-import { OperationsRequestError, type SloRow, type SloSummary } from '../../../client/operationsClient.js';
+import { OperationsRequestError, type DlqSummary, type HealthSummary, type OutboxSummary, type SloRow, type SloSummary } from '../../../client/operationsClient.js';
 import { messages as en } from '../i18n/en.js';
 
-const HEALTH = {
-  status: 'ready' as const, version: '1.0.0',
+const HEALTH: HealthSummary = {
+  status: 'ready', version: '1.0.0',
   checks: { config: { ok: true }, storage: { ok: true } },
   sse: { totalStreams: 0, keys: 0, max: 10, top: [] },
   rateLimits: { ipReqsPerMin: 60, sessionRunsPerMin: 1, sessionRunsPerDay: 1, sessionConcurrent: 1, ipRunsPerDay: 1, mcpPrincipalReqsPerMin: 1 },
   daemon: {}, perInstance: false, fetchedAt: '2026-08-17T00:00:00Z',
 };
-const DLQ = { subjects: [], backend: 'durable' as const, perInstance: false, pointInTime: true, fetchedAt: '2026-08-17T00:00:00Z' };
-const OUTBOX = {
+const DLQ: DlqSummary = { subjects: [], backend: 'durable', perInstance: false, pointInTime: true, fetchedAt: '2026-08-17T00:00:00Z' };
+const OUTBOX: OutboxSummary = {
   counts: { pending: 0, dead: 0 }, oldestPendingCreatedAt: null, oldestPendingAgeS: null,
   dead: [], deadSample: { limit: 20, truncated: false }, perInstance: false, fetchedAt: '2026-08-17T00:00:00Z',
 };

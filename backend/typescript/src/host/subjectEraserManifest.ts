@@ -158,6 +158,42 @@
  *      rows go with a deleted conversation (a conversation id is not a subject key —
  *      the intent ledger's stated residual applies to a still-pending row).
  */
+/*
+ *  +1 (2026-10-12, ADR 0879 D6 / S6):
+ *    + `eraseSubjectChatPosts` — `chat_messages.author_subject` + `content`. The
+ *      conversation eraser anonymized metas only, so an erased member's channel and
+ *      DM posts (their words AND their id) survived. The rows are kept (other
+ *      people's thread order and counts) as ADR 0195 tombstones with the author
+ *      redacted, in one tenant-scoped storage write.
+ */
+/*
+ *  +1 (2026-10-13, ADR 0882 D4):
+ *    + `eraseCrmTaskAssignees` — `crm:task.assignee`. CSM plays now write member
+ *      subjects there, and no eraser reached the field (the contact-centric CRM
+ *      eraser never looked at tasks). The task is kept; the assignee is cleared.
+ */
+/*
+ *  +1 (2026-10-14, ADR 0891 D8):
+ *    + `eraseBrandSubject` — `brand:brand` sat on the ADR 0464 actor-attribution
+ *      ledger ("re-attribution needs the brand owner"). Brands are org config and
+ *      are kept; `createdBy` and the audit `actor` are tombstoned, the person leaves
+ *      `allowedEditors` (row and audit diffs), and a font's `attestedBy` is
+ *      tombstoned. A `user:` key also reaches the `host:site` app-brand audit.
+ */
+/*
+ *  +1 (2026-10-15, ADR 0893 M5, feature loop row 47):
+ *    + `eraseSubjectVoiceSessions` — `voice:session` walkie rows now name their
+ *      opener (`subject`) so every walkie route answers only that caller. A session
+ *      that is never ended keeps its row, so the eraser deletes the subject's rows
+ *      outright (they hold no conversation content, only the binding).
+ */
+/*
+ *  +1 (2026-10-15, ADR 0894 D9, feature loop row 48):
+ *    + `eraseComputerUseSubject` — `computer-use:session` was recorded debt in
+ *      `subject-erasure-feature-stores`. Rows are kept as the audit of what a
+ *      browser agent did; the opener and the apply subject are tombstoned and
+ *      every free-text field (task, summaries, descriptions, errors) is dropped.
+ */
 export const EXPECTED_SUBJECT_ERASERS: ReadonlySet<string> = new Set([
   'commentsEraser',
   'consentSubjectEraser',
@@ -168,6 +204,7 @@ export const EXPECTED_SUBJECT_ERASERS: ReadonlySet<string> = new Set([
   'eraseApprovals',
   'eraseAssistantSubject',
   'eraseBuilderPairSubject',
+  'eraseBrandSubject',
   'eraseCalendarMcpForSubject',
   'eraseCdpCollectedEvents',
   'eraseClaudeCodeSubjectKey',
@@ -177,9 +214,11 @@ export const EXPECTED_SUBJECT_ERASERS: ReadonlySet<string> = new Set([
   'eraseCommerceConnectSubject',
   'eraseCommunitySubject',
   'eraseCompensation',
+  'eraseComputerUseSubject',
   'eraseConversationToolApprovalsSubject',
   'eraseCreatorSubject',
   'eraseCrmSubject',
+  'eraseCrmTaskAssignees',
   'eraseCsmSubject',
   'eraseDashboard',
   'eraseDocumentSubject',
@@ -212,12 +251,15 @@ export const EXPECTED_SUBJECT_ERASERS: ReadonlySet<string> = new Set([
   'eraseSubjectConnections',
   'eraseSubjectCampaignDays',
   'eraseSubjectCanvas',
+  'eraseSubjectChatPosts',
   'eraseSubjectConversations',
   'eraseSubjectDealers',
   'eraseSubjectDebugPins',
   'eraseSubjectDrafts',
   'eraseSubjectEmailPrefs',
   'eraseSubjectEvalRows',
+  'eraseSubjectEvalSuites',      // ADR 0889 — agent eval suites (createdBy)
+  'eraseSubjectToolBoundary',    // ADR 0889 D9 — captured tool-boundary rows
   'eraseSubjectFeedback',
   'eraseSubjectFollowUps',
   'eraseSubjectKanban',
@@ -259,10 +301,13 @@ export const EXPECTED_SUBJECT_ERASERS: ReadonlySet<string> = new Set([
   'eraseWearableLinksForSubject',
   'eraseWearableLivenessForSubject',
   'eraseWhatsAppSubject',
+  // ADR 0888 D1 — a person's opt-in to one workspace's profile directory.
+  'eraseWorkspaceShare',
   'identityLinkEraser',
   'kicktodoAccountabilityEraser',
   'kicktodoCommerceEraser',
   'kicktodoCoreEraser',
   'profileEraser',
   'userEraser',
+  'eraseSubjectVoiceSessions',
 ]);

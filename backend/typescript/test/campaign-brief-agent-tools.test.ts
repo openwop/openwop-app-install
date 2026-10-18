@@ -7,6 +7,13 @@
  * (get-brief, validate) fail EMPTY without an acting user and fail closed on the
  * toggle; the actions (research.run, generate-kernel) fail TYPED and ignite the
  * feature's builtin workflows via the shared run-starter.
+ *
+ * Wave 30 (grade-tests): the write-scope gate is driven by a real VIEWER member
+ * (read but not write) — before, the only "reader" was a stranger refused at the
+ * read gate, so the `forbidden` branch was never run. The validate verdict and the
+ * ignited workflow id are asserted, not just the presence of a key / a runId.
+ * Sabotage-witnessed: dropping the write check, the toggle check, the read gate,
+ * the platform pick or the claim release each reds a case here.
  */
 import http from 'node:http';
 import { readFileSync } from 'node:fs';
@@ -20,13 +27,15 @@ import {
   CAMPAIGN_BRIEF_RESEARCH_RUN_TOOL_ID,
   CAMPAIGN_BRIEF_GENERATE_KERNEL_TOOL_ID,
   runResearchRunTool,
+  runGenerateKernelTool,
 } from '../src/features/campaign-brief/agentTools.js';
+import { MARKET_INTEL_WORKFLOW_ID, KERNEL_WORKFLOW_ID } from '../src/features/campaign-brief/intelWorkflows.js';
 import type { StartRunDeps } from '../src/host/runStarter.js';
 import { openStorage } from '../src/storage/index.js';
 import { claimIgnition, ignitionKey } from '../src/host/ignitionGuard.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
-import { createOrg } from '../src/host/accessControlService.js';
+import { createOrg, createMember } from '../src/host/accessControlService.js';
 import { createBrief } from '../src/features/campaign-brief/briefService.js';
 
 const TENANT = 'default';
@@ -53,8 +62,10 @@ beforeAll(async () => {
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { void (server.address() as AddressInfo); res(); }); });
   const org = await createOrg({ tenantId: TENANT, createdBy: 'u-1', name: 'Acme', ownerSubject: 'u-1' });
   orgId = org.orgId;
-  const brief = await createBrief(TENANT, orgId, 'u-1', { name: 'Launch Brief', productName: 'Acme' } as never);
+  const brief = await createBrief(TENANT, orgId, 'u-1', { name: 'Launch Brief', productName: 'Acme' });
   briefId = brief.id;
+  // A VIEWER in the brief's org: workspace:read, no workspace:write.
+  await createMember({ orgId, tenantId: TENANT, displayName: 'Reader', subject: 'u-reader', roles: ['viewer'] });
   await setToggle('on');
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
@@ -96,16 +107,19 @@ describe('CFP-1 — reads: toggle honesty + empty-without-acting-user', () => {
 
   it('get-brief fails closed (typed) when the toggle is OFF', async () => {
     await setToggle('off');
-    const out = await provider({ actingUserId: 'u-1' }).executeTool({ name: CAMPAIGN_BRIEF_GET_TOOL_ID, input: { briefId } });
-    expect(out.isError).toBe(true);
-    expect(JSON.parse(out.content)).toMatchObject({ error: 'feature_disabled' });
-    await setToggle('on');
+    try {
+      const out = await provider({ actingUserId: 'u-1' }).executeTool({ name: CAMPAIGN_BRIEF_GET_TOOL_ID, input: { briefId } });
+      expect(out.isError).toBe(true);
+      expect(JSON.parse(out.content)).toMatchObject({ error: 'feature_disabled' });
+    } finally { await setToggle('on'); }
   });
 
   it('get-brief fails EMPTY (not error) without an acting user', async () => {
     const out = await provider().executeTool({ name: CAMPAIGN_BRIEF_GET_TOOL_ID, input: { briefId } });
     expect(out.isError).toBeFalsy();
     expect(JSON.parse(out.content)).toMatchObject({ brief: null });
+    // The no-actor branch answered (the not-found fallback would ALSO be brief:null).
+    expect(JSON.parse(out.content).note).toMatch(/No acting user/);
   });
 
   it('get-brief never reads a brief the caller cannot access (uniform not-found)', async () => {
@@ -117,7 +131,11 @@ describe('CFP-1 — reads: toggle honesty + empty-without-acting-user', () => {
   it('validate returns the completeness verdict', async () => {
     const out = await provider({ actingUserId: 'u-1' }).executeTool({ name: CAMPAIGN_BRIEF_VALIDATE_TOOL_ID, input: { briefId } });
     expect(out.isError).toBeFalsy();
-    expect(JSON.parse(out.content)).toHaveProperty('enabledChannels');
+    // The seeded brief has no persona, no value prop and no enabled channel — the
+    // REAL verdict names them (the not-found / no-actor branches return issues: []).
+    const verdict = JSON.parse(out.content) as { valid: boolean; issues: Array<{ field: string }>; enabledChannels: string[] };
+    expect(verdict).toMatchObject({ valid: false, enabledChannels: [] });
+    expect(verdict.issues.map((i) => i.field)).toEqual(expect.arrayContaining(['personaIds', 'messaging.primaryValueProp', 'channels']));
   });
 });
 
@@ -130,13 +148,18 @@ describe('CFP-1 — actions: typed gating + real ignition', () => {
 
   it('research.run fails closed when the toggle is OFF', async () => {
     await setToggle('off');
-    const out = await provider({ actingUserId: 'u-1' }).executeTool({ name: CAMPAIGN_BRIEF_RESEARCH_RUN_TOOL_ID, input: { briefId } });
-    expect(out.isError).toBe(true);
-    expect(JSON.parse(out.content)).toMatchObject({ error: 'feature_disabled' });
-    await setToggle('on');
+    try {
+      const out = await provider({ actingUserId: 'u-1' }).executeTool({ name: CAMPAIGN_BRIEF_RESEARCH_RUN_TOOL_ID, input: { briefId } });
+      expect(out.isError).toBe(true);
+      expect(JSON.parse(out.content)).toMatchObject({ error: 'feature_disabled' });
+    } finally { await setToggle('on'); }
   });
 
   it('research.run forbids a reader without write scope', async () => {
+    // A viewer can READ the brief but lacks workspace:write → typed forbidden.
+    const reader = await provider({ actingUserId: 'u-reader' }).executeTool({ name: CAMPAIGN_BRIEF_RESEARCH_RUN_TOOL_ID, input: { briefId } });
+    expect(reader.isError).toBe(true);
+    expect(JSON.parse(reader.content)).toMatchObject({ error: 'forbidden' });
     // A stranger has no read either → uniform not_found (no existence leak).
     const out = await provider({ actingUserId: 'stranger' }).executeTool({ name: CAMPAIGN_BRIEF_RESEARCH_RUN_TOOL_ID, input: { briefId } });
     expect(out.isError).toBe(true);
@@ -177,11 +200,12 @@ describe('CFP-1 — actions: typed gating + real ignition', () => {
     await setToggle('on');
     // A FRESH brief so its ignition key is un-claimed (the "ignites" test above
     // already latched the shared briefId's key inside the window).
-    const fresh = await createBrief(TENANT, orgId, 'u-1', { name: 'Retry Brief', productName: 'Acme' } as never);
+    const fresh = await createBrief(TENANT, orgId, 'u-1', { name: 'Retry Brief', productName: 'Acme' });
+    const requested: string[] = [];
     const failingDeps: StartRunDeps = {
       storage: await openStorage('memory://'),
       hostSuite: {
-        workflowCatalog: { getWorkflow: async () => null },
+        workflowCatalog: { getWorkflow: async (id: string) => { requested.push(id); return null; } },
         providerPolicyResolver: { resolveForRun: async () => [] },
       },
     };
@@ -192,13 +216,33 @@ describe('CFP-1 — actions: typed gating + real ignition', () => {
     // refused if the failed dispatch had left the latch behind).
     const key = ignitionKey('campaign-brief.research.run', fresh.id);
     expect((await claimIgnition(TENANT, key)).claimed).toBe(true);
+    // research.run asked the run-starter for the MARKET-INTEL workflow, not another.
+    expect(requested).toContain(MARKET_INTEL_WORKFLOW_ID);
+    expect(requested).not.toContain(KERNEL_WORKFLOW_ID);
+  });
+
+  it('generate-kernel asks the run-starter for the messaging-kernel workflow (and releases on failure)', async () => {
+    await setToggle('on');
+    const fresh = await createBrief(TENANT, orgId, 'u-1', { name: 'Kernel Brief', productName: 'Acme' });
+    const requested: string[] = [];
+    const deps: StartRunDeps = {
+      storage: await openStorage('memory://'),
+      hostSuite: {
+        workflowCatalog: { getWorkflow: async (id: string) => { requested.push(id); return null; } },
+        providerPolicyResolver: { resolveForRun: async () => [] },
+      },
+    };
+    const out = await runGenerateKernelTool(deps, { briefId: fresh.id }, { tenantId: TENANT, actingUserId: 'u-1' });
+    expect(JSON.parse(out.content)).toMatchObject({ error: 'dispatch_failed' });
+    expect(requested).toContain(KERNEL_WORKFLOW_ID);
+    expect(requested).not.toContain(MARKET_INTEL_WORKFLOW_ID);
   });
 
   // DATA-4 — the release must also happen when startWorkflowRun THROWS, not only
   // when it returns null. A throwing catalog stands in for a dispatch that blows up.
   it('research.run releases the ignition claim when dispatch THROWS', async () => {
     await setToggle('on');
-    const fresh = await createBrief(TENANT, orgId, 'u-1', { name: 'Throw Brief', productName: 'Acme' } as never);
+    const fresh = await createBrief(TENANT, orgId, 'u-1', { name: 'Throw Brief', productName: 'Acme' });
     const throwingDeps: StartRunDeps = {
       storage: await openStorage('memory://'),
       hostSuite: {

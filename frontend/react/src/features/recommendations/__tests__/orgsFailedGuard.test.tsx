@@ -16,9 +16,16 @@
  * render would satisfy it:
  *   - read FAILS  → the retryable failure card; NEVER "No organizations"
  *   - read SUCCEEDS but is genuinely empty → the real "No organizations" survives
+ *
+ * PROTECTED (failure honesty + ORG-HON-2 org-less writes + the toggle gate).
+ * Sabotage-witnessed (round 1/2): `setOrgsFailed(true)` → `setOrgs([])` in
+ * `ui/useOrgSelection`, the empty branch of `ui/OrgSelectionState`, the
+ * retry wiring, the toggle's `enabled.enabled` read and its card, the loading
+ * branch, and the positive-control create.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup, screen, waitFor, act, fireEvent } from '@testing-library/react';
+import type { Org, Placement, RecoSlot, RecoSource, ResolvePreview } from '../recommendationsClient.js';
 
 // The real hook returns an OBJECT (`{ enabled, loading, … }`) — mirrored in full
 // here, `loading` included, because the page branches on it too.
@@ -29,14 +36,16 @@ import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatu
 vi.mock('../../../featureToggles/FeatureAccessContext.js', () => ({ useFeatureAccess: access.useFeatureAccess }));
 
 const api = vi.hoisted(() => ({
-  listOrgs: vi.fn(),
-  listPlacements: vi.fn(async () => []),
+  listOrgs: vi.fn<() => Promise<Org[]>>(),
+  listPlacements: vi.fn(async (_orgId: string): Promise<Placement[]> => []),
   // The four org-scoped WRITES this page can issue (ORG-HON-2), plus
   // `resolvePreview`, which is a read dispatched from a form that also sits
   // above the org-state chain.
-  createPlacement: vi.fn(), updatePlacement: vi.fn(), deletePlacement: vi.fn(),
-  rebuildAffinity: vi.fn(),
-  resolvePreview: vi.fn(),
+  createPlacement: vi.fn<(orgId: string, input: { slot: RecoSlot; source: RecoSource }) => Promise<Placement>>(),
+  updatePlacement: vi.fn<(orgId: string, placementId: string, patch: { active?: boolean }) => Promise<Placement>>(),
+  deletePlacement: vi.fn<(orgId: string, placementId: string) => Promise<void>>(),
+  rebuildAffinity: vi.fn<(orgId: string) => Promise<{ rows: number; removed: number }>>(),
+  resolvePreview: vi.fn<(orgId: string, params: { slot: RecoSlot }) => Promise<ResolvePreview>>(),
 }));
 vi.mock('../recommendationsClient.js', async (importOriginal) => {
   const orig = await importOriginal<Record<string, unknown>>();
@@ -47,6 +56,8 @@ import { RecommendationsPage } from '../RecommendationsPage.js';
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // `clearAllMocks` keeps queued `…Once` values — reset the one a case queues.
+  api.listOrgs.mockReset();
   // `clearAllMocks` does NOT drop a `mockReturnValue`, so the toggle is re-pinned
   // per test rather than left to whatever the previous one set.
   access.useFeatureAccess.mockReturnValue(makeFeatureAccess({ enabled: true, loading: false, status: 'on', isBeta: false, variant: null }));
@@ -77,7 +88,21 @@ describe('recommendations — failed store read is not an empty account', () => 
     expect(api.listPlacements).not.toHaveBeenCalled();
   });
 
-  it('read SUCCEEDS and is genuinely empty: the real "No organizations" still shows', async () => {
+  it('read FAILS, then Try again: the read re-runs and the placements load', async () => {
+    // The "retryable" half of the claim above: the button must re-issue the read,
+    // not just clear the card.
+    api.listOrgs.mockRejectedValueOnce(new Error('boom')).mockResolvedValue([{ orgId: 'o1', name: 'Acme Store' }]);
+    render(<RecommendationsPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Try again' }));
+    await waitFor(() => expect(api.listPlacements).toHaveBeenCalledWith('o1'));
+    expect(api.listOrgs).toHaveBeenCalledTimes(2);
+    expect(screen.queryByText(FAIL_TITLE)).toBeNull();
+  });
+
+  // Twin: the HG-1 case below asserts everything this one does (same fixture)
+  // plus the never-a-skeleton half. Kept (protected file): this one is the
+  // failure card's NEGATIVE polarity, read on its own.
+  it('read SUCCEEDS and is genuinely empty: the real "No organizations" still shows, no failure card', async () => {
     api.listOrgs.mockResolvedValue([]);
     render(<RecommendationsPage />);
     await waitFor(() => expect(screen.getByText('No organizations')).toBeTruthy());
@@ -124,9 +149,13 @@ describe('recommendations — failed store read is not an empty account', () => 
  * The create form USED to sit ABOVE the org-state branch, so both of those
  * controls rendered in the zero-organization state — including the org picker
  * itself, a labelled combobox with zero options. It is INSIDE the branch now, so
- * neither control exists there at all. `add()`'s own `if (!orgId) return` is
- * still pinned below: the branch order is a fact about today's render tree and
- * the handler guard is the property.
+ * neither control exists there at all.
+ *
+ * CEILING (round 2, probe `rpo-addguard` vacuous): `add()`'s own
+ * `if (!orgId) return` is a SECOND guard the UI cannot reach — in both org
+ * states there is no submit button, so `attemptCreatePlacement` submits
+ * nothing. These cases assert the reachable property ("the form is absent and
+ * nothing was written"); they do NOT witness the handler guard.
  */
 describe('recommendations — no organization, no write (ORG-HON-2)', () => {
   const attemptCreatePlacement = async (_container: HTMLElement): Promise<void> => {
@@ -153,8 +182,8 @@ describe('recommendations — no organization, no write (ORG-HON-2)', () => {
     expect(screen.queryByLabelText('Organization')).toBeNull();
     expect(screen.queryByRole('button', { name: 'Add placement' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Rebuild affinity' })).toBeNull();
-    // Guard two, the property: `add()`'s `if (!orgId) return` still holds even if
-    // the branch above it were removed.
+    // The property: nothing was written. (The handler's own `!orgId` return is
+    // unreachable from here — see the CEILING note above.)
     await attemptCreatePlacement(container);
     expect(api.createPlacement).not.toHaveBeenCalled();
     expect(api.rebuildAffinity).not.toHaveBeenCalled();
@@ -192,7 +221,10 @@ describe('recommendations — no organization, no write (ORG-HON-2)', () => {
     // Without this, the assertions above would also pass if the form were broken
     // for everyone — a different bug wearing the same green.
     api.listOrgs.mockResolvedValue([{ orgId: 'o1', name: 'Acme Store' }]);
-    api.createPlacement.mockResolvedValue({ placementId: 'pl1', slot: 'pdp', source: 'bought_together', active: true });
+    api.createPlacement.mockResolvedValue({
+      placementId: 'pl1', orgId: 'o1', slot: 'pdp', source: 'bought_together', active: true,
+      createdAt: '2026-10-01T10:00:00.000Z', updatedAt: '2026-10-01T10:00:00.000Z',
+    });
     const { container } = render(<RecommendationsPage />);
     await waitFor(() => expect(api.listPlacements).toHaveBeenCalledWith('o1'));
     await attemptCreatePlacement(container);

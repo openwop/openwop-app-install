@@ -22,11 +22,22 @@
  *
  * BORN RED on the `role:"action"` manifest: the fork re-executes `persist` with definition B
  * and a second owned workflow appears.
+ *
+ * The divergence is a PRECONDITION, so it is asserted: if the fork's `draft` ever stops
+ * returning B (the pending-mock skip at `aiProvidersHost.ts` no longer applies), the end
+ * state is `['authored.A']` even with `persist` re-executing, and the witness would pass
+ * over the exact defect it guards. MEASURED wave 18: with `mockProgramPending` forced
+ * false, the pre-upgrade version of this file stayed GREEN.
+ *
+ * SABOTAGE (wave 18, probe-witnessed): making `isSideEffectingNode` return false for
+ * `feature.workflow-author.*` (both legs — the generated served set AND the typeId
+ * pattern) turns this red.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { getSetCookies } from './headerCookies.js';
+import { bareRunId } from './support/bareRunId.js';
 import { createApp } from '../src/index.js';
 import { registerWorkflow } from '../src/host/workflowsRegistry.js';
 import { listOwned } from '../src/host/workflowOwnership.js';
@@ -38,23 +49,32 @@ let server: http.Server;
 let BASE = '';
 let cookie = '';
 
-const call = async (method: string, path: string, body?: unknown): Promise<{ status: number; body: any }> => {
+interface Body {
+  runId?: string;
+  orgId?: string;
+  status?: string;
+  error?: unknown;
+  events?: Array<{ type: string; nodeId?: string; payload?: { outputs?: Record<string, unknown> } }>;
+}
+
+const call = async (method: string, path: string, body?: unknown): Promise<{ status: number; body: Body }> => {
   const res = await fetch(`${BASE}${path}`, {
     method,
     headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) },
     ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
   });
   for (const c of getSetCookies(res.headers)) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]; }
-  return { status: res.status, body: await res.json().catch(() => undefined) };
+  return { status: res.status, body: (await res.json().catch(() => undefined)) as Body }; // json() is untyped: the one boundary narrowing
 };
 
 const settleRun = async (runId: string): Promise<string> => {
-  let snap: { status?: string; error?: unknown } = {};
-  for (let i = 0; i < 200; i++) {
+  // A run-settle wait has no hook to await (the executor runs detached): poll the
+  // snapshot until terminal — the honest ceiling, not a fixed sleep.
+  let snap: Body = {};
+  await vi.waitFor(async () => {
     snap = (await call('GET', `/runs/${runId}`)).body ?? snap;
-    if (['completed', 'failed', 'cancelled'].includes(snap.status ?? '')) break;
-    await new Promise((r) => setTimeout(r, 25));
-  }
+    expect(['completed', 'failed', 'cancelled']).toContain(snap.status ?? '');
+  }, { timeout: 5000, interval: 25 });
   return snap.status === 'completed' ? 'completed' : `${snap.status}:${JSON.stringify(snap.error)}`;
 };
 
@@ -95,8 +115,8 @@ describe('ADR 0673 D1 — a replay :fork must not author a second workflow', () 
         { nodeId: DRAFT_NODE, typeId: 'feature.workflow-author.nodes.draft', inputs: { intent: 'a witness workflow', provider: 'mock', model: DRAFT_NODE, orgId } },
         { nodeId: 'p1', typeId: 'feature.workflow-author.nodes.persist', inputs: { orgId } },
       ],
-      edges: [{ id: 'e1', sourceNodeId: DRAFT_NODE, targetNodeId: 'p1' }],
-    } as never);
+      edges: [{ edgeId: 'e1', sourceNodeId: DRAFT_NODE, targetNodeId: 'p1' }],
+    });
 
     // ── the live run authors definition A ────────────────────────────────────
     program(defWith('authored.A'));
@@ -121,5 +141,15 @@ describe('ADR 0673 D1 — a replay :fork must not author a second workflow', () 
     expect(afterFork.map((r) => r.workflowId).sort(),
       'the fork must not durably author a SECOND workflow — persist is replay-served',
     ).toEqual(['authored.A']);
+
+    const bundle = await call('GET', `/host/openwop-app/runs/${bareRunId(forkRunId)}/debug-bundle`);
+    expect(bundle.status, JSON.stringify(bundle.body)).toBe(200);
+    const completed = (nodeId: string): Record<string, unknown> | undefined =>
+      (bundle.body.events ?? []).find((e) => e.type === 'node.completed' && e.nodeId === nodeId)?.payload?.outputs;
+    // PRECONDITION — the fork really diverged: its `draft` authored B, not A.
+    expect((completed(DRAFT_NODE)?.definition as { workflowId?: string } | undefined)?.workflowId,
+      'the fork did not diverge — this witness cannot see a re-executed persist').toBe('authored.B');
+    // The claim in the title: the fork's persist was SERVED the source run's outcome.
+    expect(completed('p1')?.workflowId, 'persist must report the SOURCE run\'s id').toBe('authored.A');
   });
 });

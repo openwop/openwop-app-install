@@ -1,5 +1,11 @@
 /** ADR 0738 P4 — the reusable WorkItem executor owns eligibility and leases,
- * while every actual workflow launch still uses the shared run-starter/outbox. */
+ * while every actual workflow launch still uses the shared run-starter/outbox.
+ *
+ * Red if delivery drops the item input or the card's lastRunId, the started
+ * metric, or the terminal move to Done (probes w37g1-dmn-inputs, -dmn-card-lastrun,
+ * -dmn-metric, -dmn-settle-move); if a manual claim can race an `auto` item
+ * (-dmn-mode-policy); or if retries stop at maxAttempts / end `blocked`
+ * (-dmn-max-attempts, -dmn-blocked). */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
 import type { Storage } from '../src/storage/storage.js';
@@ -54,7 +60,7 @@ describe('core Kanban WorkItem daemon', () => {
       tenantId: 'tenant-a',
       name: 'Reusable delivery',
       columns: [
-        { id: 'todo', name: 'To Do', wipLimit: 1 },
+        { id: 'todo', name: 'To Do' },
         { id: 'done', name: 'Done', terminal: true },
       ],
     });
@@ -76,6 +82,8 @@ describe('core Kanban WorkItem daemon', () => {
 
     // Fleet racing is safe: one persisted outbox lease wins and produces one
     // normal RunRecord; the loser observes no due entry.
+    // Honest double guard: removing only the outbox CAS stays green — the
+    // execution CAS + live lease (→ defer) in claimEligibleWorkItemExecution is the outer guard.
     const [first, second] = await Promise.all([
       sweepKanbanWorkItemOutbox(deps, 'worker-a', now),
       sweepKanbanWorkItemOutbox(deps, 'worker-b', now),

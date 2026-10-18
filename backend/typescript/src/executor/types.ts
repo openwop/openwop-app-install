@@ -448,6 +448,9 @@ export interface NodeContext {
    *  for every node (replay-safe). `undefined` for runs not started by a
    *  trigger that carries a payload. */
   triggerData?: unknown;
+  /** ADR 0775 P3e — the run's workflow id, so a node that acts for an agent can
+   *  check the agent's per-workflow rules (`permissions.never`). Host-internal. */
+  workflowId?: string;
   /** Per-attempt counter; first attempt = 1. */
   attempt: number;
   /** Trust boundary of inputs entering this node (RFC 0020 §D).
@@ -654,6 +657,12 @@ export interface NodeContext {
    *  which is the correct fail-closed signal. Stamped on `run.metadata.actingUserId`
    *  at run creation and re-stamped to the FORKING caller on `:fork`. */
   actingUserId?: string;
+  /** ADR 0832 D3 / ADR 0879 D7 — `run.metadata.orgScopeSubject`: the member who
+   *  CAUSED a run that acts for nobody. Narrows only; never an actor. */
+  orgScopeSubject?: string;
+  /** ADR 0627 D3 — `run.metadata.personalTenant`, the run owner's own personal
+   *  tenant (the implicit-owner short-circuit of a req-less tenant gate). */
+  personalTenant?: string;
   /** RFC 0207 §A/§B — the W3C trace context the RUN was created under
    *  (`run.metadata.traceContext`, a reserved key stamped host-side from the
    *  creating request's `traceparent` header). A node that calls out over MCP

@@ -7,7 +7,15 @@
  * Pure node-fn unit test: the node functions are driven directly against a MOCK
  * ctx whose `ctx.features.notebooks` returns canned data — fencing + context-level
  * filtering are the HOST surface's job (covered by notebooks-surface.test.ts), so
- * this test asserts only the pack's own contract (merge/dedupe/shape/backstop).
+ * this test asserts only the pack's own contract (merge/dedupe/shape/backstop), plus
+ * the write-transformation ownerSubject hardening (ADR 0084 review) and the MCP
+ * write node's decision gate (ADR 0087 OQ-1).
+ *
+ * What reds it (sabotage-witnessed, /grade-tests wave 20): citation dedupe; the
+ * multi-query fan-out; context concatenation; the search hits passthrough; the
+ * `ctx.features.notebooks` backstop; the read-source systemPrompt branch (both
+ * arms); the `kind === 'project'` owner check (both arms); the `decision !==
+ * 'accept'` guard in `mcpCreateNote`.
  */
 
 import { describe, expect, it } from 'vitest';
@@ -78,7 +86,7 @@ describe('feature.notebooks.nodes', () => {
     expect(out.status).toBe('success');
     expect(out.outputs.hits).toHaveLength(1);
     expect(out.outputs.hits[0].documentId).toBe('d1');
-    expect(mock.calls.some((c) => c.method === 'searchNotebook')).toBe(true);
+    expect(mock.calls).toEqual([{ method: 'searchNotebook', query: 'whales' }]);
   });
 
   it('ask throws host_capability_missing when ctx.features.notebooks is absent', async () => {
@@ -117,30 +125,40 @@ describe('feature.notebooks.nodes — review fixes', () => {
     expect(out.outputs.messages).toEqual([{ role: 'user', content: 'the source body' }]);
   });
 
-  it('write-transformation honors a project ownerSubject', async () => {
-    const created: Array<Record<string, unknown>> = [];
-    const docs = {
-      createDocument: async (args: Record<string, unknown>) => { created.push(args); return { document: { documentId: 'doc-1' } }; },
-      addVersion: async () => ({}),
-    };
-    const out = await pack.writeTransformation(
-      { runId: 'r1', nodeId: 'write', inputs: { orgId: 'o1', title: 'Summary: X', kind: 'notebook-summary', content: 'body', ownerSubject: { kind: 'project', id: 'nb-1' } }, features: { documents: docs } },
-    );
-    expect(out.outputs.written).toBe(true);
-    expect(created[0]?.ownerSubject).toEqual({ kind: 'project', id: 'nb-1' });
-  });
-
   it('write-transformation DROPS a non-project ownerSubject (a chat agent cannot own a Document to a user/agent subject)', async () => {
     const created: Array<Record<string, unknown>> = [];
     const docs = {
       createDocument: async (args: Record<string, unknown>) => { created.push(args); return { document: { documentId: 'doc-1' } }; },
       addVersion: async () => ({}),
     };
-    const out = await pack.writeTransformation(
-      { runId: 'r1', nodeId: 'write', inputs: { orgId: 'o1', title: 'X', kind: 'notebook-summary', content: 'body', ownerSubject: { kind: 'user', id: 'someone-else' } }, features: { documents: docs } },
+    const write = (ownerSubject: { kind: string; id: string }) => pack.writeTransformation(
+      { runId: 'r1', nodeId: 'write', inputs: { orgId: 'o1', title: 'X', kind: 'notebook-summary', content: 'body', ownerSubject }, features: { documents: docs } },
     );
+    // Control: a project owner IS forwarded — without this, an implementation that
+    // dropped every owner would pass the assertion below. (The standalone "honors"
+    // case was cut: `notebooks-writer-replay.test.ts` › leg 7 carries it too.)
+    expect((await write({ kind: 'project', id: 'nb-1' })).outputs.written).toBe(true);
+    expect(created[0]?.ownerSubject).toEqual({ kind: 'project', id: 'nb-1' });
     // still written (the artifact is created), but UN-owned — never mis-attributed to the user subject.
+    const out = await write({ kind: 'user', id: 'someone-else' });
     expect(out.outputs.written).toBe(true);
-    expect(created[0]?.ownerSubject).toBeUndefined();
+    expect(created).toHaveLength(2);
+    expect(created[1]?.ownerSubject).toBeUndefined();
+  });
+});
+
+// ADR 0087 OQ-1 — the HITL-gated MCP write node performs its write ONLY on an
+// explicit `accept`. (Moved here from notebooks-mcp.test.ts: a pure node-fn claim
+// does not need the app booted.)
+describe('feature.notebooks.nodes — MCP write nodes (ADR 0087 OQ-1)', () => {
+  it('the write node is a no-op unless the decision is accept', async () => {
+    const seen: Array<{ notebookId: string; content: string }> = [];
+    const ctxBase = { features: { notebooks: { addNote: async (a: { notebookId: string; content: string }) => { seen.push(a); return { created: true }; } } } };
+    const declined = await pack.mcpCreateNote({ ...ctxBase, inputs: { notebookId: 'n', content: 'x', decision: 'reject' } });
+    expect(declined.outputs).toEqual({ created: false, declined: true });
+    expect(seen).toEqual([]);
+    const accepted = await pack.mcpCreateNote({ ...ctxBase, inputs: { notebookId: 'n', content: 'x', decision: 'accept' } });
+    expect(accepted.outputs.created).toBe(true);
+    expect(seen).toEqual([{ notebookId: 'n', content: 'x' }]);
   });
 });

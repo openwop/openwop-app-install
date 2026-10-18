@@ -1,27 +1,36 @@
 /**
  * ADR 0768 P4 — promote an ephemeral embedded conversation to the full chat,
  * on click only, strictly (no partial handoff), idempotently (a retry finishes).
+ * Breaks if the row is not bound to the EXISTING run, a streaming bubble or a
+ * mis-encoded message is copied, a 409 is treated as failure (or a 500 as done),
+ * or a failed handoff navigates / stays silent. Store encodings are pinned as
+ * literals — never recomputed with encodeMessageForStore (the subject).
  */
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (k: string) => k }) }));
+type Client = typeof import('../../client/chatSessionsClient.js');
 const client = vi.hoisted(() => ({
-  createChatSession: vi.fn(),
-  setConversationRun: vi.fn(),
-  appendChatMessage: vi.fn(),
-  updateChatMessage: vi.fn(),
+  createChatSession: vi.fn<Client['createChatSession']>(),
+  setConversationRun: vi.fn<Client['setConversationRun']>(),
+  appendChatMessage: vi.fn<Client['appendChatMessage']>(),
+  updateChatMessage: vi.fn<Client['updateChatMessage']>(),
 }));
 vi.mock('../../client/chatSessionsClient.js', () => client);
 const announced = vi.hoisted(() => ({ calls: [] as string[] }));
 vi.mock('../../ui/announce.js', () => ({ announce: (m: string) => { announced.calls.push(m); } }));
 
 import type { ChatMessage } from '../types.js';
-import { encodeMessageForStore, promoteConversation } from '../lib/promoteConversation.js';
+import { promoteConversation } from '../lib/promoteConversation.js';
 import { ContinueInFullChat } from '../ContinueInFullChat.js';
 
-const m = (id: string, over: Partial<ChatMessage> = {}): ChatMessage => ({ id, role: 'assistant', content: id, ...over } as ChatMessage);
+const AT = '2026-09-28T10:00:00.000Z';
+const m = (id: string, over: Partial<ChatMessage> = {}): ChatMessage => ({ id, role: 'assistant', content: id, createdAt: AT, ...over });
+// The store encoding of u1 / a1, written out by hand (id + meta lifted out of `content`).
+const U1_CONTENT = `{"role":"user","content":"u1","createdAt":"${AT}"}`;
+const A1_STORED = { messageId: 'a1', role: 'assistant', content: `{"role":"assistant","content":"a1","createdAt":"${AT}"}`, meta: '{"model":"x"}' };
 const session = {
   id: 's1',
   title: 'Lead intake',
@@ -30,7 +39,12 @@ const session = {
 };
 
 beforeEach(() => {
-  for (const f of Object.values(client)) f.mockReset().mockResolvedValue(undefined);
+  client.createChatSession.mockReset().mockResolvedValue({ sessionId: 's1', tenantId: 't', title: 'Lead intake', createdAt: AT, updatedAt: AT, messageCount: 0 });
+  client.setConversationRun.mockReset().mockResolvedValue(undefined);
+  client.appendChatMessage.mockReset().mockImplementation(async (sessionId, msg) => ({
+    messageId: msg.messageId, sessionId, role: 'assistant', content: msg.content, meta: msg.meta ?? null, createdAt: AT,
+  }));
+  client.updateChatMessage.mockReset().mockResolvedValue(undefined);
   announced.calls = [];
 });
 
@@ -40,14 +54,18 @@ describe('promoteConversation', () => {
     expect(client.createChatSession).toHaveBeenCalledWith({ sessionId: 's1', title: 'Lead intake', participants: ['agent:workflow-architect'] });
     expect(client.setConversationRun).toHaveBeenCalledWith('s1', 'run-1');
     expect(client.appendChatMessage.mock.calls.map((c) => c[1].messageId)).toEqual(['u1', 'a1']);
-    expect(client.appendChatMessage.mock.calls[1]?.[1]).toEqual(encodeMessageForStore(session.messages[1]!));
+    expect(client.appendChatMessage.mock.calls[0]?.[1]).toEqual({ messageId: 'u1', role: 'user', content: U1_CONTENT });
+    expect(client.appendChatMessage.mock.calls[1]?.[1]).toEqual(A1_STORED);
   });
 
   it('treats 409s as already-done, so a retry finishes a half-done promotion', async () => {
     client.createChatSession.mockRejectedValueOnce(new Error('idempotency_key_conflict'));
     client.appendChatMessage.mockRejectedValueOnce(new Error('HTTP 409'));
     await expect(promoteConversation(session)).resolves.toBe('s1');
-    expect(client.updateChatMessage).toHaveBeenCalledWith('s1', 'u1', expect.objectContaining({ content: expect.any(String) }));
+    expect(client.updateChatMessage).toHaveBeenCalledWith('s1', 'u1', { content: U1_CONTENT });
+    // …and the copy carried on past the conflict to the next settled message.
+    expect(client.appendChatMessage.mock.calls.map((c) => c[1].messageId)).toEqual(['u1', 'a1']);
+    expect(client.setConversationRun).toHaveBeenCalledWith('s1', 'run-1');
   });
 
   it('throws on a real failure instead of handing off a partial transcript', async () => {

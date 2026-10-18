@@ -7,25 +7,46 @@
  * routes (toggle, acting user, org RBAC). Boots the REAL app (the ADR 0308 D2
  * registration seam is what's under test — the pre-remediation pack allowlisted
  * two node typeIds nothing resolved, so the agent had zero tools).
+ *
+ * w32 (grade-tests): the org-RBAC half of "gated exactly like the routes" had no
+ * refusal case — a same-tenant non-member and a read-only viewer now exercise the
+ * `forbidden_scope` check on both tools. `production` defaults OFF, so the toggle is
+ * set per case (the cases used to inherit it from whichever case ran first). The
+ * ignition case reads the run-start call back (a pass-through wrapper on
+ * `startWorkflowRun`) instead of accepting any non-empty runId.
  */
 import http from 'node:http';
 import { readFileSync } from 'node:fs';
 import type { AddressInfo } from 'node:net';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { createApp } from '../src/index.js';
-import { createAgentToolProvider, builtinAgentToolIds } from '../src/host/agentToolProvider.js';
-import {
-  PRODUCTION_GET_VENDORS_TOOL_ID,
-  PRODUCTION_PLAN_TOOL_ID,
-} from '../src/features/production/agentTools.js';
-import { saveConfig } from '../src/host/featureToggles/service.js';
-import { getToggleDefault } from '../src/host/featureToggles/registry.js';
-import { createOrg, createMember } from '../src/host/accessControlService.js';
-import { createVendor } from '../src/features/production/productionService.js';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+
+/** Every `startWorkflowRun` input the plan tool sends (the real function still runs). */
+const runStarts = vi.hoisted(() => [] as Array<{ workflowId: string; inputs?: Record<string, unknown> | null; tenantId: string }>);
+vi.mock('../src/host/runStarter.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/host/runStarter.js')>();
+  return {
+    ...actual,
+    startWorkflowRun: async (...args: Parameters<typeof actual.startWorkflowRun>) => {
+      runStarts.push({ workflowId: args[1].workflowId, inputs: args[1].inputs, tenantId: args[1].tenantId });
+      return actual.startWorkflowRun(...args);
+    },
+  };
+});
+
+const { createApp } = await import('../src/index.js');
+const { createAgentToolProvider, builtinAgentToolIds } = await import('../src/host/agentToolProvider.js');
+const { PRODUCTION_GET_VENDORS_TOOL_ID, PRODUCTION_PLAN_TOOL_ID } = await import('../src/features/production/agentTools.js');
+const { PRODUCTION_PLAN_WORKFLOW_ID } = await import('../src/features/production/builtinWorkflows.js');
+const { saveConfig } = await import('../src/host/featureToggles/service.js');
+const { getToggleDefault } = await import('../src/host/featureToggles/registry.js');
+const { createOrg, createMember } = await import('../src/host/accessControlService.js');
+const { createVendor } = await import('../src/features/production/productionService.js');
 
 const TENANT = 'default';
 const OWNER = 'u-1';
 const EDITOR = 'u-editor';
+const VIEWER = 'u-viewer';     // read-only member: may read vendors, may NOT drive a plan
+const STRANGER = 'u-stranger'; // same tenant, no membership in the org at all
 
 let orgId: string;
 
@@ -42,6 +63,7 @@ beforeAll(async () => {
   const org = await createOrg({ tenantId: TENANT, createdBy: OWNER, name: 'Acme', ownerSubject: OWNER });
   orgId = org.orgId;
   await createMember({ tenantId: TENANT, orgId, displayName: 'Ed', subject: EDITOR, roles: ['editor'] });
+  await createMember({ tenantId: TENANT, orgId, displayName: 'Vi', subject: VIEWER, roles: ['viewer'] });
   await createVendor({
     tenantId: TENANT,
     orgId,
@@ -58,6 +80,8 @@ const setProduction = async (status: 'on' | 'off'): Promise<void> => {
   const d = getToggleDefault('production');
   if (d) await saveConfig({ ...d, status }, 'test');
 };
+
+beforeEach(async () => { await setProduction('on'); });
 
 function provider(scope: { actingUserId?: string; runId?: string } = {}) {
   return createAgentToolProvider({ tenantId: TENANT, ...scope });
@@ -91,7 +115,6 @@ describe('CFP-1 — the pack rides the real host-registered tools', () => {
 
 describe('CFP-1 — get-vendors: the read tool (redaction parity, fail-empty)', () => {
   it('returns vendors with priceRanges for a members-manage caller (owner)', async () => {
-    await setProduction('on');
     const out = await provider({ actingUserId: OWNER }).executeTool({ name: PRODUCTION_GET_VENDORS_TOOL_ID, input: {} });
     expect(out.isError).toBeFalsy();
     const res = JSON.parse(out.content) as { orgId: string; vendors: Array<Record<string, unknown>> };
@@ -121,16 +144,30 @@ describe('CFP-1 — get-vendors: the read tool (redaction parity, fail-empty)', 
 
   it('fails EMPTY when the toggle is off', async () => {
     await setProduction('off');
-    const out = await provider({ actingUserId: OWNER }).executeTool({ name: PRODUCTION_GET_VENDORS_TOOL_ID, input: {} });
+    try {
+      const out = await provider({ actingUserId: OWNER }).executeTool({ name: PRODUCTION_GET_VENDORS_TOOL_ID, input: {} });
+      expect(out.isError).toBeFalsy();
+      expect(JSON.parse(out.content)).toEqual({ vendors: [] });
+    } finally {
+      await setProduction('on');
+    }
+  });
+
+  it('fails EMPTY for a same-tenant NON-MEMBER of the org (org RBAC, not just the tenant)', async () => {
+    const out = await provider({ actingUserId: STRANGER }).executeTool({ name: PRODUCTION_GET_VENDORS_TOOL_ID, input: { orgId } });
     expect(out.isError).toBeFalsy();
     expect(JSON.parse(out.content)).toEqual({ vendors: [] });
-    await setProduction('on');
+  });
+
+  it('serves a read-only VIEWER (read needs only workspace:read)', async () => {
+    const out = await provider({ actingUserId: VIEWER }).executeTool({ name: PRODUCTION_GET_VENDORS_TOOL_ID, input: {} });
+    const res = JSON.parse(out.content) as { vendors: Array<Record<string, unknown>> };
+    expect(res.vendors.map((v) => v.name)).toEqual(['Pixel Forge']);
   });
 });
 
 describe('CFP-1 — plan: the action tool (typed failures, real run ignition)', () => {
   it('requires a human-initiated turn (typed error)', async () => {
-    await setProduction('on');
     const out = await provider().executeTool({ name: PRODUCTION_PLAN_TOOL_ID, input: { channels: ['landing_page'] } });
     expect(out.isError).toBe(true);
     expect(JSON.parse(out.content)).toMatchObject({ error: 'acting_user_required' });
@@ -138,13 +175,28 @@ describe('CFP-1 — plan: the action tool (typed failures, real run ignition)', 
 
   it('fails closed when the toggle is off (typed, not a throw)', async () => {
     await setProduction('off');
-    const out = await provider({ actingUserId: OWNER }).executeTool({ name: PRODUCTION_PLAN_TOOL_ID, input: { channels: ['landing_page'] } });
+    try {
+      const out = await provider({ actingUserId: OWNER }).executeTool({ name: PRODUCTION_PLAN_TOOL_ID, input: { channels: ['landing_page'] } });
+      expect(out.isError).toBe(true);
+      expect(JSON.parse(out.content)).toMatchObject({ error: 'feature_disabled' });
+    } finally {
+      await setProduction('on');
+    }
+  });
+
+  it.each([
+    ['a same-tenant NON-MEMBER', STRANGER],
+    ['a read-only VIEWER (driving a plan needs workspace:write)', VIEWER],
+  ])('refuses %s with a typed forbidden_scope, and starts no run', async (_who, subject) => {
+    const before = runStarts.length;
+    const out = await provider({ actingUserId: subject }).executeTool({ name: PRODUCTION_PLAN_TOOL_ID, input: { orgId, channels: ['social_posts'] } });
     expect(out.isError).toBe(true);
-    expect(JSON.parse(out.content)).toMatchObject({ error: 'feature_disabled' });
-    await setProduction('on');
+    expect(JSON.parse(out.content)).toMatchObject({ error: 'forbidden_scope' });
+    expect(runStarts.length, 'no run was started').toBe(before);
   });
 
   it('ignites a real production-plan run and returns the runId', async () => {
+    const before = runStarts.length;
     const out = await provider({ actingUserId: OWNER }).executeTool({
       name: PRODUCTION_PLAN_TOOL_ID,
       input: { channels: ['landing_page', 'ad_variants'], assets: ['hero image'] },
@@ -154,5 +206,11 @@ describe('CFP-1 — plan: the action tool (typed failures, real run ignition)', 
     expect(typeof res.runId).toBe('string');
     expect(res.runId.length).toBeGreaterThan(0);
     expect(res.orgId).toBe(orgId);
+    // The run that started is the production-plan workflow, for THIS org and these inputs.
+    expect(runStarts.slice(before)).toEqual([{
+      tenantId: TENANT,
+      workflowId: PRODUCTION_PLAN_WORKFLOW_ID,
+      inputs: { orgId, channels: ['landing_page', 'ad_variants'], assets: ['hero image'] },
+    }]);
   });
 });

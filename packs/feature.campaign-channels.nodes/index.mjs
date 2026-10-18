@@ -11,12 +11,11 @@
  * ctx.callAI with the channel-specific system prompt + responseSchema.
  */
 
-/** DEBT-3 — pack-local mirror of the providers.json SSoT default (the
- *  anthropic `recommended: true` model; src/providers/catalog.ts
- *  getDefaultModel). ctx.callAI REQUIRES an explicit model and standalone
- *  .mjs packs cannot import the catalog, so the default lives in this ONE
- *  greppable constant — the /refresh-model-catalog sweep updates it. */
-const DEFAULT_MODEL = 'claude-sonnet-4-6';
+/** ADR 0903 — no hard-coded vendor. A call passes the provider/model the node
+ *  was given (a chain param frozen at instantiation, or a node input) and leaves
+ *  the rest to the host: `ctx.callAI` fills a missing provider/model from the
+ *  run's choice (`configurable.ai`), else the workspace's active AI binding, else
+ *  the catalog default — resolved once at run start (host/runAiDefault.ts). */
 
 function ensureBrief(ctx) {
   const cb = ctx.features && ctx.features['campaign-brief'];
@@ -123,7 +122,8 @@ export async function generate(ctx) {
   let voiceBlock = '';
   const brand = ctx.features && ctx.features.brand;
   if (brief.brandId && brand && typeof brand.resolveVoice === 'function') {
-    try { const v = await brand.resolveVoice({ brandId: str(brief.brandId), channel, ...(Array.isArray(brief.personaIds) && brief.personaIds[0] ? { personaId: str(brief.personaIds[0]) } : {}) }); if (v && typeof v.voice === 'string') voiceBlock = v.voice; } catch { /* optional */ }
+    // ADR 0891 D7 — name the brief's org: a brand bound from another org gives no voice.
+    try { const v = await brand.resolveVoice({ brandId: str(brief.brandId), orgId: str(brief.orgId), channel, ...(Array.isArray(brief.personaIds) && brief.personaIds[0] ? { personaId: str(brief.personaIds[0]) } : {}) }); if (v && typeof v.voice === 'string') voiceBlock = v.voice; } catch { /* optional */ }
   }
   // ADR 0351 P2 — policy-aware grounding (mirrors the kernel node; the brief's
   // groundingPolicy is the single knob for BOTH stages).
@@ -200,8 +200,8 @@ export async function generate(ctx) {
   let data;
   try {
     const ai = await ctx.callAI({
-      provider: str(i.provider) || 'anthropic',
-      model: str(i.model) || DEFAULT_MODEL,
+      provider: str(i.provider) || undefined,
+      model: str(i.model) || undefined,
       systemPrompt: spec.system,
       messages: [{ role: 'user', content: userParts.join('\n\n') }],
       responseSchema: spec.schema,
@@ -226,8 +226,8 @@ export async function generate(ctx) {
     if (findings.length > 0) {
       try {
         const fixAi = await ctx.callAI({
-          provider: str(i.provider) || 'anthropic',
-          model: str(i.model) || DEFAULT_MODEL,
+          provider: str(i.provider) || undefined,
+          model: str(i.model) || undefined,
           systemPrompt: spec.system,
           messages: [{ role: 'user', content: `${userParts.join('\n\n')}\n\nYOUR PREVIOUS DRAFT EXCEEDED HARD LIMITS: ${JSON.stringify(findings)}. Regenerate the SAME JSON with every field within its limit. Reply with strict JSON only.` }],
           responseSchema: spec.schema,
@@ -275,7 +275,7 @@ export async function generate(ctx) {
   let complianceReport = null;
   if (brief.brandId && brand && typeof brand.checkComplianceDeterministic === 'function') {
     try {
-      const c = await brand.checkComplianceDeterministic({ brandId: str(brief.brandId), content: JSON.stringify(draft), channel });
+      const c = await brand.checkComplianceDeterministic({ brandId: str(brief.brandId), orgId: str(brief.orgId), content: JSON.stringify(draft), channel });
       complianceReport = c && typeof c.report === 'object' ? c.report : null;
     } catch { /* compliance optional */ }
   }

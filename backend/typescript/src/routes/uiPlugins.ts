@@ -25,7 +25,7 @@ import {
   type UiPluginHandler,
   type UiPluginResponse,
 } from '../host/uiPluginRpc.js';
-import { canvasReadAllowed, getCanvasForTenant, updateCanvasForTenant, type CanvasRecordView } from '../host/canvasSurface.js';
+import { canvasReadAllowed, canvasWriteAllowed, getCanvasForTenant, updateCanvasForTenant, type CanvasRecordView } from '../host/canvasSurface.js';
 import type { SubjectCaller } from '../host/subjectAccess.js';
 import { callerSubject } from '../host/requestSubject.js';
 import { resolveCanvasTypeAccess } from '../host/canvasTypeOwnership.js';
@@ -120,6 +120,11 @@ function handlersForTenant(tenantId: string, caller: SubjectCaller, access: Togg
       } catch {
         // `unauthorized` is the RPC's closed wire code for this (UI_PLUGIN_ERROR_CODES).
         throw Object.assign(new Error('writing an artifact requires workspace:write'), { code: 'unauthorized' });
+      }
+      // ADR 0886 D1 — and WRITE on the canvas owner, in the owner's own org: the
+      // tenant-wide union above does not say which org granted the write.
+      if (!(await canvasWriteAllowed(tenantId, c, caller))) {
+        throw Object.assign(new Error('writing this artifact requires workspace:write in its owner'), { code: 'unauthorized' });
       }
       // Opaque-token compare: the host mints String(version). Anything else (stale, unknown,
       // or absent) conflicts — the host MUST NOT persist and returns its current token.

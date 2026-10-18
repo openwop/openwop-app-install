@@ -44,9 +44,14 @@ describe('ADR 0672 D1 — the audience table is complete and correct', () => {
   });
 
   it('leg 3: `null` is stated deliberately, and ONLY for kinds that are genuinely tenant-scoped', () => {
-    // `assistant-action` is the precedent that null is a real value: actionApproval.ts already
-    // emits a create-time tenant-wide broadcast for it, on purpose.
-    expect(APPROVAL_AUDIENCE['assistant-action']).toBeNull();
+    // `run-proposal` is the precedent that null is a real value.
+    // CORRECTED (ADR 0878 D6): this used to say the same of `assistant-action`. It is
+    // tenant-wide only while a row carries no org: a drafted SUPPORT REPLY carries its
+    // ticket's org, and as plain `null` it was readable and decidable by every editor in
+    // the tenant (SD2-S6, proved red). It is now the conditional variant; its two
+    // resolved answers are pinned in `adr0878-service-desk-security.test.ts` SD2-S6
+    // (org-scoped) and by every pre-existing assistant-action test (tenant-wide).
+    expect(APPROVAL_AUDIENCE['assistant-action']).toEqual({ orgScopeWhenOrg: 'workspace:write' });
     expect(APPROVAL_AUDIENCE['run-proposal']).toBeNull();
     // Every scoped branch must NOT be null — the failure mode this table exists to prevent is a
     // scoped kind silently reading as tenant-wide.

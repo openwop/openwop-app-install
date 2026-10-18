@@ -2,28 +2,32 @@
  * ADR 0473 Phase 3 — the builder proposal banner. Pins the save-then-approve
  * order (approve-what-you-see: the canvas persists FIRST, the hash of exactly
  * what was saved is what the decide carries) and the reject-with-note path.
+ *
+ * The review client is mocked with importOriginal, so a decide failure is the
+ * product's REAL `ReviewRequestError` (a hand-written stand-in could drift from
+ * the `reason` field the banner branches on). Absence is asserted only after
+ * the pending list has resolved.
+ *
+ * Sabotage that turns it red: skipping persistDraft, deciding with the stale
+ * hash, dropping the note, mis-mapping proposal_stale, not announcing (or
+ * announcing a failure politely), matching a proposal for another workflow, or
+ * a wrong run link.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, cleanup, waitFor, act } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import type { ReviewRequest } from '../../chat/reviews/reviewClient.js';
 
-const listReviews = vi.fn<() => Promise<ReviewRequest[]>>();
-const getReview = vi.fn<() => Promise<ReviewRequest>>();
-const decideReview = vi.fn<() => Promise<{ reviewId: string; status: string; runId?: string }>>();
+type ReviewClient = typeof import('../../chat/reviews/reviewClient.js');
+const listReviews = vi.fn<ReviewClient['listReviews']>();
+const getReview = vi.fn<ReviewClient['getReview']>();
+const decideReview = vi.fn<ReviewClient['decideReview']>();
 
-class MockReviewRequestError extends Error {
-  constructor(message: string, readonly errorCode: string, readonly httpStatus: number, readonly reason?: string) {
-    super(message);
-    this.name = 'ReviewRequestError';
-  }
-}
-
-vi.mock('../../chat/reviews/reviewClient.js', () => ({
-  listReviews: (...a: unknown[]) => listReviews(...(a as [])),
-  getReview: (...a: unknown[]) => getReview(...(a as [])),
-  decideReview: (...a: unknown[]) => decideReview(...(a as [])),
-  ReviewRequestError: MockReviewRequestError,
+vi.mock('../../chat/reviews/reviewClient.js', async (orig) => ({
+  ...(await orig<ReviewClient>()),
+  listReviews: (...a: Parameters<ReviewClient['listReviews']>) => listReviews(...a),
+  getReview: (...a: Parameters<ReviewClient['getReview']>) => getReview(...a),
+  decideReview: (...a: Parameters<ReviewClient['decideReview']>) => decideReview(...a),
 }));
 vi.mock('../../notifications/signalBus.js', () => ({
   subscribeReviewSignal: () => () => {},
@@ -39,6 +43,7 @@ vi.mock('../../ui/announce.js', () => ({
 
 const { ProposalBanner } = await import('../ProposalBanner.js');
 const { useBuilderStore } = await import('../store/builderStore.js');
+const { ReviewRequestError } = await import('../../chat/reviews/reviewClient.js');
 
 afterEach(cleanup);
 
@@ -71,6 +76,8 @@ describe('ProposalBanner (ADR 0473 Phase 3)', () => {
     listReviews.mockResolvedValue([{ ...proposal, workflowId: 'someone-else' }]);
     const { container } = render(<MemoryRouter><ProposalBanner workflowId="agent-wf-p3" persistDraft={vi.fn()} /></MemoryRouter>);
     await waitFor(() => expect(listReviews).toHaveBeenCalled());
+    // Settle: the pending list has RESOLVED and been applied before absence is read.
+    await act(async () => { await listReviews.mock.results[0]!.value; });
     expect(container.querySelector('.builder-proposal-banner')).toBeNull();
   });
 
@@ -111,7 +118,7 @@ describe('ProposalBanner (ADR 0473 Phase 3)', () => {
   it('a proposal_stale 409 surfaces the localized error and keeps the banner decidable', async () => {
     listReviews.mockResolvedValue([proposal]);
     getReview.mockResolvedValue(proposal);
-    decideReview.mockRejectedValue(new MockReviewRequestError('conflict: changed', 'conflict', 409, 'proposal_stale'));
+    decideReview.mockRejectedValue(new ReviewRequestError('conflict: changed', 'conflict', 409, 'proposal_stale'));
     render(<MemoryRouter><ProposalBanner workflowId="agent-wf-p3" persistDraft={vi.fn()} /></MemoryRouter>);
     fireEvent.click(await screen.findByRole('button', { name: /Approve & run/ }));
     expect(await screen.findByText(/changed while deciding/)).toBeTruthy();
@@ -147,7 +154,7 @@ describe('PROPU-3 — apply/reject outcome is ANNOUNCED via the live region (ord
   it('speaks a decide FAILURE assertively, and the error is not a mounted role=alert', async () => {
     listReviews.mockResolvedValue([proposal]);
     getReview.mockResolvedValue(proposal);
-    decideReview.mockRejectedValue(new MockReviewRequestError('conflict: changed', 'conflict', 409, 'proposal_stale'));
+    decideReview.mockRejectedValue(new ReviewRequestError('conflict: changed', 'conflict', 409, 'proposal_stale'));
     const { container } = render(<MemoryRouter><ProposalBanner workflowId="agent-wf-p3" persistDraft={vi.fn()} /></MemoryRouter>);
     fireEvent.click(await screen.findByRole('button', { name: /Approve & run/ }));
     await screen.findByText(/changed while deciding/);

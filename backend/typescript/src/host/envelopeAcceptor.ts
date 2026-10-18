@@ -634,9 +634,3 @@ function redactCanaries(
   return { value, count: total };
 }
 
-/** Returns the universal-kind list. Discovery route MUST include
- *  these in its `supportedEnvelopes` advertisement when the host
- *  advertises `aiProviders.supported: true`. */
-export function universalEnvelopeKinds(): readonly UniversalKind[] {
-  return UNIVERSAL_KINDS;
-}

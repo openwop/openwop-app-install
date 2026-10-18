@@ -81,7 +81,9 @@ beforeAll(async () => {
   for (const f of [documentsFeature, commerceFeature]) {
     if (f.toggleDefault) registerToggleDefault(f.toggleDefault);
   }
-  const org = await createOrg({ tenantId: T, createdBy: 'u1', name: 'Org' });
+  // ADR 0887 D1 — a link is re-checked against its publisher on every read, so the
+  // actors that mint here hold REAL memberships (a bare actor's link is dark).
+  const org = await createOrg({ tenantId: T, createdBy: 'u1', name: 'Org', ownerSubject: 'u1' });
   ORG = org.orgId;
 });
 
@@ -270,12 +272,12 @@ describe('SHARE-1 — a public link darkens when its OWNING feature is toggled o
     await updateDocument(T, ORG, doc.documentId, 'u1', { status: 'approved' });
     const link = await createLink(T, ORG, 'u1', { resourceType: 'document', resourceId: doc.documentId });
 
-    const on = (await listLinks(T, ORG)).find((l) => l.tokenHash === link.tokenHash)!;
+    const on = (await listLinks(T, ORG, 'u1')).find((l) => l.tokenHash === link.tokenHash)!;
     expect(on.featureDisabled, 'the feature is ON — nothing to flag').toBeUndefined();
     expect(on.cardTitle).toBe('Gated list doc');
 
     await setToggle('documents', 'off');
-    const off = (await listLinks(T, ORG)).find((l) => l.tokenHash === link.tokenHash)!;
+    const off = (await listLinks(T, ORG, 'u1')).find((l) => l.tokenHash === link.tokenHash)!;
     expect(off.featureDisabled, 'the resolver refuses this link — the owner must be told why').toBe(true);
     expect(off.cardTitle, 'a darkened feature must not keep leaking its card title').toBeUndefined();
     expect(off.resourceMissing, 'the gate skipped the lookup, so “gone” is not something the server knows').toBeUndefined();

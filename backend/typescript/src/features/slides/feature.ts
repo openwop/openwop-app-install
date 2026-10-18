@@ -48,6 +48,10 @@ export const slidesFeature: BackendFeature = {
   // PRODUCER — the node emits a typed `canvas.slides` artifact (carried to the
   // workbench by the ADR 0083 run-output producer); the Slide Designer agent drives
   // it through the existing chat (ADR 0058) — no new chat surface.
+  // ADR 0886 D5 — per-slide comment threads ride the `comments` feature. A SOFT
+  // dependency: decks work fully without it, and the toolbar control is absent
+  // while it is off.
+  recommends: ['comments'],
   requiredPacks: [
     { name: 'feature.slides.nodes', version: '1.1.3' },
     { name: 'vendor.openwop-app.slides.agents', version: '1.1.2' },

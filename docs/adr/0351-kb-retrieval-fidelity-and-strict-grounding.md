@@ -123,3 +123,7 @@ RBAC unchanged (org-scoped, fail-closed). No public surface.
 | 2 | `RagCoverage` (count-based) + `minScore` · brief `groundingPolicy` (validated) · kernel+channel nodes FAIL CLOSED under strict (`grounding_insufficient`) + `grounding` label on outputs · pack bumps (brief.nodes 1.1.0 / channels.nodes 1.3.0) · FE policy select | `test/campaign-grounding-policy.test.ts` (8) |
 | 3 | `revision` + compact `kb:docrev` · `host/knowledgeLifecycle.ts` seam + `host.kb.document.updated` event · campaign-brief `markKernelsStaleForDoc` + deep-linked notification | `test/kb-revisions-staleness.test.ts` (2) |
 | 4 | URL ingest (SSRF-guarded readable extraction, UNTRUSTED-fenced, derived title) · `heading-path` enrichment (embed-side only, in the vector signature) · FE URL input + enrichment select | `test/kb-url-enrichment.test.ts` (3) |
+
+> **Correction 2026-10-12 (grade-tests wave 30):** `test/campaign-grounding-policy.test.ts` now runs 11
+> cases, not 8: `thin` coverage, the stored `groundingPolicy` read-back, and the channel node's strict no-binding and
+> strict rag-throws paths were added (each was claimed but unasserted).

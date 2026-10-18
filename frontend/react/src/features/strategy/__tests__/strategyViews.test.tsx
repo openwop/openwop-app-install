@@ -6,6 +6,10 @@
  *
  * These are the assertions that make the claim checkable instead of decorative.
  * `StrategyViews` was one of six surfaces the whole feature had NO spec for.
+ *
+ * Sabotage-witnessed (grade-tests w19, probes w19g5-vw-*): the Card re-inlining
+ * `s.summary ?? null`, `strategySubLine` ignoring the summary, the Card dropping
+ * its health chip, or the Card dropping the parent chip each turn a case red.
  */
 import { describe, it, expect, afterEach } from 'vitest';
 import { render, cleanup, within } from '@testing-library/react';

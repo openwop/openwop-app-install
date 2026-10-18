@@ -7,6 +7,12 @@
  *    move the apply path would bounce;
  *  - a valid move applies end-to-end through the route (override stored,
  *    revision bumped).
+ *
+ * Sabotage witnesses (w41 /grade-tests): removing either route's owner guard
+ * (the service then answers 403), making the preview route apply, or dropping
+ * the past-date window guard each turn a case red. Service-level twins of the
+ * window/parity claims live in kicktodo-replan.test.ts; THIS file owns the HTTP
+ * mapping (404 vs 403, 409 + details.failedIndex).
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -16,6 +22,12 @@ import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { ensurePersonalWorkspace } from '../src/host/accessControlService.js';
+
+/** Typed JSON body without a cast: `JSON.parse` returns `any`, so the call
+ *  site names the narrow wire shape it reads (no `as`). */
+async function body<T>(res: Response): Promise<T> {
+  return JSON.parse(await res.text());
+}
 
 let BASE: string;
 let server: http.Server;
@@ -50,7 +62,7 @@ function client() {
       // implicit-owner hole. Seat each subject as an explicit owner MEMBER
       // (`ensurePersonalWorkspace` seeds the owner row idempotently — the same
       // call the seam makes for the first login), so authority is membership-derived.
-      const { user } = (await res.clone().json()) as { user: { userId: string } };
+      const { user } = await body<{ user: { userId: string } }>(res.clone());
       await ensurePersonalWorkspace({ tenantId, ownerSubject: user.userId, name: `Test workspace ${tenantId}` });
     },
   };
@@ -68,7 +80,9 @@ beforeAll(async () => {
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   await new Promise<void>((resolve) => {
     server = app.listen(0, '127.0.0.1', () => {
-      BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+      const addr: AddressInfo | string | null = server.address();
+      if (!addr || typeof addr === 'string') throw new Error('server has no TCP address');
+      BASE = `http://127.0.0.1:${addr.port}`;
       resolve();
     });
   });
@@ -86,15 +100,15 @@ const isoShift = (days: number): string => new Date(Date.now() + days * 86_400_0
 
 /** 5-day challenge with a day-3 activity, enrolled for the caller. */
 async function setupEnrollment(c: ReturnType<typeof client>): Promise<string> {
-  const draft = await (await c.post(`${B}/challenges`, {
+  const draft = await body<{ id: string }>(await c.post(`${B}/challenges`, {
     title: 'Move routes', summary: 's', outcome: 'o', durationDays: 5,
     activities: [
       { stableActivityId: 'a1', day: 1, title: 'First', instructions: '', evidencePolicy: 'attestation' },
       { stableActivityId: 'a3', day: 3, title: 'Third', instructions: '', evidencePolicy: 'attestation' },
     ],
-  })).json() as { id: string };
+  }));
   await c.post(`${B}/challenges/${draft.id}/versions/1/publish`);
-  const e = await (await c.post(`${B}/enrollments`, { challengeId: draft.id, challengeVersion: 1, timezone: 'UTC' })).json() as { id: string };
+  const e = await body<{ id: string }>(await c.post(`${B}/enrollments`, { challengeId: draft.id, challengeVersion: 1, timezone: 'UTC' }));
   return e.id;
 }
 
@@ -109,7 +123,9 @@ describe('revision-commands / revision-preview routes (ADR 0496 D2)', () => {
     await intruder.login('user:mv-intruder', TENANT);
     for (const path of ['revision-commands', 'revision-preview']) {
       const r = await intruder.post(`${B}/enrollments/${enrollmentId}/${path}`, { commands: [] });
+      // The ROUTE's uniform 404 — without it the service would answer 403 'Not your enrollment.'.
       expect(r.status).toBe(404);
+      expect((await body<{ message?: string }>(r)).message).toBe('Enrollment not found.');
     }
 
     // Preview: pure read with before/after dates.
@@ -117,11 +133,11 @@ describe('revision-commands / revision-preview routes (ADR 0496 D2)', () => {
       commands: [{ lane: 'move', day: 3, toDate }],
     });
     expect(pv.status).toBe(200);
-    const { changes } = await pv.json() as { changes: Array<{ lane: string; day: number; fromDate: string; toDate: string }> };
+    const { changes } = await body<{ changes: Array<{ lane: string; day: number; fromDate: string; toDate: string }> }>(pv);
     expect(changes[0]).toMatchObject({ lane: 'move', day: 3, toDate });
     expect(changes[0]!.fromDate).not.toBe(toDate);
     // Nothing mutated by the preview.
-    const before = await (await owner.get(`${B}/enrollments/${enrollmentId}`)).json() as { planRevision: number; schedulePreference?: { dayOverrides?: unknown } };
+    const before = await body<{ planRevision: number; schedulePreference?: { dayOverrides?: unknown } }>(await owner.get(`${B}/enrollments/${enrollmentId}`));
     expect(before.schedulePreference?.dayOverrides).toBeUndefined();
 
     // Apply through the route.
@@ -129,7 +145,7 @@ describe('revision-commands / revision-preview routes (ADR 0496 D2)', () => {
       commands: [{ lane: 'move', day: 3, toDate }],
     });
     expect(ap.status).toBe(200);
-    const after = await (await owner.get(`${B}/enrollments/${enrollmentId}`)).json() as { planRevision: number; schedulePreference?: { dayOverrides?: Record<string, string> } };
+    const after = await body<{ planRevision: number; schedulePreference?: { dayOverrides?: Record<string, string> } }>(await owner.get(`${B}/enrollments/${enrollmentId}`));
     expect(after.schedulePreference?.dayOverrides).toEqual({ '3': toDate });
     expect(after.planRevision).toBe(before.planRevision + 1);
   });
@@ -143,9 +159,19 @@ describe('revision-commands / revision-preview routes (ADR 0496 D2)', () => {
     const ap = await owner.post(`${B}/enrollments/${enrollmentId}/revision-commands`, bad);
     expect(pv.status).toBe(409);
     expect(ap.status).toBe(409);
-    const pvBody = await pv.json() as { error?: string; code?: string; details?: { failedIndex?: number } };
-    const apBody = await ap.json() as { error?: string; code?: string; details?: { failedIndex?: number } };
+    type Refusal = { error?: string; message?: string; details?: { failedIndex?: number } };
+    const pvBody = await body<Refusal>(pv);
+    const apBody = await body<Refusal>(ap);
     expect(pvBody.details?.failedIndex).toBe(0);
     expect(apBody.details?.failedIndex).toBe(0);
+    // Same code, and both name the window guard (the shared assertDayMoveAllowed).
+    expect(pvBody.error).toBeTruthy();
+    expect(pvBody.error).toBe(apBody.error);
+    expect(pvBody.message).toContain('window');
+    expect(apBody.message).toContain('window');
+    // The refused apply changed nothing.
+    const after = await body<{ planRevision: number; schedulePreference?: { dayOverrides?: unknown } }>(await owner.get(`${B}/enrollments/${enrollmentId}`));
+    expect(after.planRevision).toBe(1);
+    expect(after.schedulePreference?.dayOverrides).toBeUndefined();
   });
 });

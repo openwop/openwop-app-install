@@ -12,7 +12,10 @@
  *  3. recovery counted GAPS, so one person lapsing four times contributed four
  *     recoveries to a rate that is meant to describe a population.
  *
- * Each expectation below fails against those old definitions.
+ * Each expectation below fails against those old definitions. (w41 probes:
+ * keying the participant set or the meaningful set by enrollment, dropping the
+ * retention window's upper bound, shifting the D7 window, counting recoveries
+ * per gap, and `Math.max(...stamps)` each turn a case red.)
  *
  * Seeding writes through SECOND HANDLES on the owning collections (same name,
  * same key function) rather than through the services, because these metrics
@@ -79,6 +82,18 @@ describe('PRD §15 metric definitions', () => {
     const m = await engagementMetrics(T, NOW);
     // The old code reported 3 contributors for one human being.
     expect(m.weeklyMeaningfulProgress.contributors).toBe(1);
+  });
+
+  it('the north-star VALUE counts each participant once, at the k-floor', async () => {
+    // Below the floor the value is withheld, so the case above cannot see the
+    // numerator. FIVE people (K_FLOOR): one holds three enrollments.
+    await seed('s1', 'user:solo', NOW - 3 * DAY, [NOW - DAY]);
+    await seed('s2', 'user:solo', NOW - 3 * DAY, [NOW - DAY]);
+    await seed('s3', 'user:solo', NOW - 3 * DAY, [NOW - DAY]);
+    for (let i = 0; i < 4; i += 1) await seed(`p${i}`, `user:peer-${i}`, NOW - 3 * DAY, [NOW - DAY]);
+    const m = await engagementMetrics(T, NOW);
+    expect(m.weeklyMeaningfulProgress.contributors).toBe(5);
+    expect(m.weeklyMeaningfulProgress.value).toBe(5); // enrollment-keyed would be 7
   });
 
   it('does NOT score a much-later check-in as D7 or D30 retention', async () => {

@@ -39,5 +39,7 @@ describe('matchStoreOrgId', () => {
     expect(matchStoreOrgId('/commerce')).toBeNull();
     expect(matchStoreOrgId('/shared/tok')).toBeNull();
     expect(matchStoreOrgId('/')).toBeNull();
+    // The start anchor: a route that merely CONTAINS `/store/` is not a store link.
+    expect(matchStoreOrgId('/shop/store/org1')).toBeNull();
   });
 });

@@ -15,7 +15,7 @@ import { render, waitFor } from '@testing-library/react';
 import { MemoryRouter, Routes, Route, useLocation } from 'react-router-dom';
 import { RootRedirect } from '../routes.js';
 
-const listAssignedToMe = vi.fn();
+const listAssignedToMe = vi.fn<typeof import('../../../kanban/kanbanClient.js')['listAssignedToMe']>();
 vi.mock('../../../kanban/kanbanClient.js', () => ({ listAssignedToMe: () => listAssignedToMe() }));
 
 import TodosTile from '../tiles/TodosTile.js';
@@ -53,16 +53,20 @@ describe('root route contract (ADR 0487)', () => {
 
 describe('todos auth-gated state', () => {
   it('a 401 renders the sign-in hint, not the error state', async () => {
+    // The client's real message shape (kanbanClient.listAssignedToMe).
     listAssignedToMe.mockRejectedValue(new Error('listAssignedToMe returned 401'));
-    const { container } = render(<MemoryRouter><TodosTile compact /></MemoryRouter>);
-    await waitFor(() => expect(container.querySelector('.dash-tile__state')).toBeTruthy());
-    expect(container.textContent).toMatch(/sign in/i);
+    const { findByText, queryByText } = render(<MemoryRouter><TodosTile compact /></MemoryRouter>);
+    expect(await findByText(/sign in to see tasks/i)).toBeTruthy();
+    expect(queryByText(/could not load/i)).toBeNull();
   });
 
   it('a non-auth failure still renders the error state', async () => {
     listAssignedToMe.mockRejectedValue(new Error('listAssignedToMe returned 500'));
-    const { container } = render(<MemoryRouter><TodosTile compact /></MemoryRouter>);
-    await waitFor(() => expect(container.querySelector('.dash-tile__state')).toBeTruthy());
-    expect(container.textContent).not.toMatch(/sign in/i);
+    const { findByText, queryByText } = render(<MemoryRouter><TodosTile compact /></MemoryRouter>);
+    // The ERROR copy after the read settles — a failed read shown as the empty
+    // state ("No tasks assigned to you.") also has no "sign in" (w50g1-hc-500).
+    expect(await findByText(/could not load/i)).toBeTruthy();
+    expect(queryByText(/no tasks assigned/i)).toBeNull();
+    expect(queryByText(/sign in/i)).toBeNull();
   });
 });

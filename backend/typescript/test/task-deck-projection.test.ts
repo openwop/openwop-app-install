@@ -63,3 +63,33 @@ describe('taskDeckProjection (ADR 0133 P2)', () => {
     expect(deck.buckets.running[0].title).toBe('My Task');
   });
 });
+
+describe('taskDeckProjection (ADR 0902 hardening)', () => {
+  it('TD2CD-4: a linkage cycle is shown top-level, never nested, and stays serialisable', () => {
+    const deck = taskDeckProjection([
+      run('x', 'running', { metadata: { parentRunId: 'yy' } }),
+      run('yy', 'running', { metadata: { parentRunId: 'x' } }),
+      run('zzz', 'running', { metadata: { parentRunId: 'zzz' } }),
+    ], NO_BLOCKS);
+    expect(() => JSON.stringify(deck)).not.toThrow();
+    const ids = Object.values(deck.buckets).flat().map((c) => c.runId).sort();
+    expect(ids).toEqual(['x', 'yy', 'zzz']);
+  });
+
+  it('CONTROL: a real chain still nests', () => {
+    const deck = taskDeckProjection([
+      run('p', 'running'),
+      run('cc', 'running', { parentRunId: 'p' }),
+      run('ggg', 'running', { parentRunId: 'cc' }),
+    ], NO_BLOCKS);
+    expect(deck.buckets.running.map((c) => c.runId)).toEqual(['p']);
+    expect(deck.buckets.running[0]!.children[0]!.children.map((c) => c.runId)).toEqual(['ggg']);
+  });
+
+  it('TD2UX-3: a run with no title takes the workflow\'s display name, else its id', () => {
+    const deck = taskDeckProjection([run('a', 'running'), run('bb', 'running')], NO_BLOCKS, new Map([['wf-a', 'Weekly report']]));
+    const byId = new Map(deck.buckets.running.map((c) => [c.runId, c.title]));
+    expect(byId.get('a')).toBe('Weekly report');
+    expect(byId.get('bb')).toBe('wf-bb');
+  });
+});

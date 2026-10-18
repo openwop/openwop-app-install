@@ -1,57 +1,29 @@
 /**
- * Unit tests for `configFieldsFromSchema` — the pack-manifest JSON Schema
- * → ConfigField[] converter that the builder Inspector relies on. Pure
- * function (no React, no fetch), so the tests are vitest-style assertions
- * with zero stubs.
+ * `configFieldsFromSchema` — the pack-manifest JSON Schema → ConfigField[]
+ * converter behind the builder Inspector's per-node config form (scalar
+ * inference is the shared form engine's, ADR 0331 §D4-B). Pure function: no
+ * React, no fetch, no stubs. Breaks if a pack schema keyword is silently
+ * dropped (a default, a bound, `required`) or maps to the wrong control.
  *
- * **Runtime note (2026-05-25).** The frontend package (`
- * frontend/react/`) does not currently ship a test runner — the backend
- * sibling has vitest wired, but the frontend was UI-only for the lifetime
- * of the v1.x release cadence. This file is therefore **executable
- * documentation**: vitest-compatible syntax so the file becomes a live
- * regression suite the moment `vitest` is added as a frontend devDep, and
- * readable as-is in code review.
- *
- * To opt the file in today, add:
- *
- *   ```jsonc
- *   // frontend/react/package.json
- *   "scripts":      { "test": "vitest run", ... },
- *   "devDependencies": { "vitest": "^2.1.0", ... }
- *   ```
- *
- * then `npm install && npm test`. No code changes needed in this file.
+ * The production fixture is READ from the shipped pack schema, never copied: a
+ * copy kept here had drifted to the 1.1.2 shape (6 properties) while the pack
+ * shipped 1.4.1 with a seventh (`modelClass`, ADR 0525 GRD-8), and the
+ * "exactly the 6 properties" case kept passing against a schema nobody ships.
  */
 
 import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { configFieldsFromSchema } from '../configFieldsFromSchema.js';
 import type { ConfigField } from '../nodeCatalog.js';
 
-/** Schema for the real `core.ai.chatCompletion` configSchema shipped in
- *  `packs/core.openwop.ai/schemas/chat-completion.config.json`. Used as
- *  the load-bearing regression fixture: every change to the converter
- *  is validated against the production-grade schema first. */
-const CHAT_COMPLETION_CONFIG_SCHEMA = {
-  $schema: 'https://json-schema.org/draft/2020-12/schema',
-  $id: 'https://packs.openwop.dev/core.openwop.ai/1.1.2/chat-completion.config.json',
-  title: 'ChatCompletionConfig',
-  type: 'object',
-  required: ['provider', 'model'],
-  properties: {
-    provider: { type: 'string', description: 'AI provider id.' },
-    model: { type: 'string', minLength: 1, description: 'Provider-specific model id.' },
-    systemPrompt: { type: 'string', description: 'Optional system prompt.' },
-    temperature: { type: 'number', minimum: 0, maximum: 2, description: 'Sampling temperature.' },
-    maxTokens: { type: 'integer', minimum: 1, maximum: 100000, description: 'Max tokens to generate.' },
-    stopSequences: {
-      type: 'array',
-      items: { type: 'string', minLength: 1 },
-      maxItems: 8,
-      description: 'Optional stop sequences.',
-    },
-  },
-  additionalProperties: false,
-} as const;
+/** The real `core.ai.chatCompletion` configSchema, resolved from this file
+ *  (repo-root `packs/` ships in the white-label bundle). */
+const HERE = dirname(fileURLToPath(import.meta.url));
+const CHAT_COMPLETION_CONFIG_SCHEMA = JSON.parse(
+  readFileSync(resolve(HERE, '../../../../../../packs/core.openwop.ai/schemas/chat-completion.config.json'), 'utf8'),
+) as { required?: string[]; properties: Record<string, unknown> };
 
 function byKey(fields: readonly ConfigField[], key: string): ConfigField | undefined {
   return fields.find((f) => f.key === key);
@@ -212,6 +184,7 @@ describe('configFieldsFromSchema', () => {
           stops: { type: 'array', items: { type: 'string' }, default: ['END', 'STOP'] },
         },
       });
+      expect(byKey(fields, 'stops')?.kind).toBe('string-list');
       expect(byKey(fields, 'stops')?.defaultValue).toEqual(['END', 'STOP']);
     });
 
@@ -302,46 +275,39 @@ describe('configFieldsFromSchema', () => {
     });
   });
 
-  describe('production-grade fixture — core.ai.chatCompletion configSchema', () => {
+  describe('production-grade fixture — the shipped core.ai.chatCompletion configSchema', () => {
     const fields = configFieldsFromSchema(CHAT_COMPLETION_CONFIG_SCHEMA);
 
-    it('produces exactly the 6 properties from the schema', () => {
-      expect(fields.map((f) => f.key)).toEqual([
-        'provider', 'model', 'systemPrompt', 'temperature', 'maxTokens', 'stopSequences',
-      ]);
+    it('produces one field per schema property, in the schema\'s order', () => {
+      // The FILE is the oracle here, not the converter.
+      expect(fields.map((f) => f.key)).toEqual(Object.keys(CHAT_COMPLETION_CONFIG_SCHEMA.properties));
     });
 
-    it('marks provider + model as required', () => {
-      expect(byKey(fields, 'provider')?.required).toBe(true);
-      expect(byKey(fields, 'model')?.required).toBe(true);
-      expect(byKey(fields, 'systemPrompt')?.required).toBe(false);
+    it('marks exactly the schema\'s required properties as required', () => {
+      // Since 1.5.0 the schema requires nothing: an unset provider/model takes
+      // the run's AI default (openwop-app ADR 0903 D7), so the form must not
+      // demand them. The positive control for `required` is the literal-schema
+      // case under "top-level shape".
+      const required = CHAT_COMPLETION_CONFIG_SCHEMA.required ?? [];
+      expect(required).not.toContain('provider');
+      expect(required).not.toContain('model');
+      for (const f of fields) {
+        expect(f.required, f.key).toBe(required.includes(f.key));
+      }
     });
 
-    it('renders temperature as a bounded number input', () => {
-      const f = byKey(fields, 'temperature')!;
-      expect(f.kind).toBe('number');
-      expect(f.min).toBe(0);
-      expect(f.max).toBe(2);
+    it('maps every shipped property to the expected control (a new property must be decided here)', () => {
+      expect(Object.fromEntries(fields.map((f) => [f.key, f.kind]))).toEqual({
+        provider: 'text',
+        model: 'text',
+        systemPrompt: 'text',
+        temperature: 'number',
+        maxTokens: 'number',
+        stopSequences: 'string-list',
+        modelClass: 'text',
+      });
     });
-
-    it('renders maxTokens as an integer input with step 1', () => {
-      const f = byKey(fields, 'maxTokens')!;
-      expect(f.kind).toBe('number');
-      expect(f.min).toBe(1);
-      expect(f.max).toBe(100000);
-      expect(f.step).toBe(1);
-    });
-
-    it('renders stopSequences as a string-list with maxItems=8', () => {
-      const f = byKey(fields, 'stopSequences')!;
-      expect(f.kind).toBe('string-list');
-      expect(f.maxItems).toBe(8);
-    });
-
-    it('renders model as a text input with minLength=1', () => {
-      const f = byKey(fields, 'model')!;
-      expect(f.kind).toBe('text');
-      expect(f.minLength).toBe(1);
-    });
+    // Per-keyword forwarding (min/max, integer step, maxItems, minLength) is
+    // pinned by the unit cases above on literal schemas.
   });
 });

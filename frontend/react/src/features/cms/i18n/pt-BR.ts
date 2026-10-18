@@ -503,6 +503,8 @@ export const messages = {
   localeOutdatedTag: 'desatualizada',
   translationOutdatedChip: 'Desatualizada',
   translationOutdatedHint: 'O texto base coberto por esta tradução mudou depois que ela foi escrita. Atualize a tradução ou marque-a como em dia se ainda estiver correta.',
+  translationUnknownChip: 'Não confirmada',
+  translationUnknownHint: 'Nada confirma que esta tradução corresponde ao texto base; pode ser uma cópia da base que ainda precisa ser traduzida. Traduza-a ou marque-a como atualizada se já estiver correta.',
   confirmSourceAction: 'Marcar como em dia',
   translationOutdatedSummary: 'Traduções desatualizadas: {{list}}',
   translationOutdatedSummaryItem_one: '{{language}}: {{count}} seção',

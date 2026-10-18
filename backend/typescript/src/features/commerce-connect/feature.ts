@@ -15,7 +15,7 @@ import { registerCommerceConnectErasure } from './erasure.js';
 import { setConnectEventHook } from '../billing/connectEventHook.js';
 import { setListingPricingProvider } from '../marketplace/listingPricingHook.js';
 import { resolveOne } from '../../host/featureToggles/service.js';
-import { handleConnectEvent, getSeller, listPaidListings, getOrder, createCheckout, sellerStats, listingPricingFor } from './connectService.js';
+import { handleConnectEvent, getSeller, listPaidListings, getOrder, createCheckout, sellerStats, listingPricingFor, orderIdFor } from './connectService.js';
 
 export const commerceConnectFeature: BackendFeature = {
   id: 'commerce-connect',
@@ -55,6 +55,13 @@ export const commerceConnectFeature: BackendFeature = {
   // featureSurfaces seam per the run's tenant.
   surface: {
     id: 'commerce-connect',
+    // ADR 0877 D5 — the one money-opening verb asks what its HTTP door asks
+    // (`requireTenantScope(req, 'workspace:write')` in `authorizeTenant`): a run
+    // acting for a Viewer used to start a purchase the route refuses a Viewer. A
+    // run with no person is not checked (the seam's rule); acceptable here because
+    // `createCheckout` only mints a hosted session — nothing is charged until a
+    // person enters a card (architect L16).
+    orgPolicy: { tenantMethodScopes: { createCheckout: 'workspace:write' } },
     build: (scope) => ({
       sellerAccount: async () => {
         const seller = await getSeller(scope.tenantId);
@@ -86,9 +93,13 @@ export const commerceConnectFeature: BackendFeature = {
       createCheckout: async (input: Record<string, unknown>) => {
         const packName = typeof input.packName === 'string' ? input.packName : '';
         const base = process.env.OPENWOP_PUBLIC_BASE_URL ?? 'http://localhost:8080';
+        // ADR 0877 F4 — the same return page the route uses (MKT-UX-2): the buyer
+        // lands on the marketplace with the order to read, not on the seller-
+        // onboarding page.
+        const q = `order=${encodeURIComponent(orderIdFor(scope.tenantId, packName))}&pack=${encodeURIComponent(packName)}`;
         const started = await createCheckout(scope.tenantId, packName, {
-          successUrl: `${base}/commerce-connect?purchase=success`,
-          cancelUrl: `${base}/commerce-connect?purchase=cancelled`,
+          successUrl: `${base}/marketplace?purchase=success&${q}`,
+          cancelUrl: `${base}/marketplace?purchase=cancelled&${q}`,
         });
         return { orderId: started.order.orderId, url: started.url, mode: started.mode };
       },

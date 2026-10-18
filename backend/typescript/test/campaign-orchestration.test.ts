@@ -1,8 +1,23 @@
 /**
  * Campaign Studio orchestration (ADR 0158) — the MarketingCampaign route (finalize
  * from a brief), the consistency-check + finalize nodes over stubbed surfaces, the
- * parent orchestration workflow (DAG validity, both channel spines), and the
- * Campaign Strategist agent.
+ * registered PARALLEL orchestration spine (RFC 0118), and the Campaign Strategist
+ * agent.
+ *
+ * Access: a cross-TENANT stranger is refused by the tenant-keyed read; a
+ * SAME-tenant non-member (second `test/login` into the tenant — zero scopes) is
+ * what witnesses the org-scope check (`hasOrgScope` in `loadCampaignScoped` and
+ * the list filter). Gap ids: CO-SP-5 (typed PATCH 400, validate-before-write),
+ * ORCH-1 (kernel-less finalize 409), CFP-1 (strategist tools).
+ *
+ * Sabotage: dropping the status allowlist reds CO-SP-5; dropping `hasOrgScope`
+ * from the scoped read reds the same-tenant non-member case; skipping the
+ * by-brief lookup in finalize reds the one-campaign-per-brief case.
+ *
+ * The sequential spine / `parallelFanOutEnabled` / `CAMPAIGN_ORCHESTRATION`
+ * env-override cases were cut in /grade-tests w31: no product code reads those
+ * exports (`features/index.ts` registers only `campaignOrchestrationParallel`,
+ * "sequential kill-switch retired").
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -16,7 +31,9 @@ import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { checkMappingCapability } from '../src/host/workflowDefinitionValidation.js';
 import { loadAgentsFromManifest } from '../src/packs/agentLoader.js';
 import { nodes as nodePack } from '../../../packs/feature.campaign-orchestration.nodes/index.mjs';
-import { campaignOrchestrationWorkflow, campaignOrchestrationParallel, parallelFanOutEnabled, CAMPAIGN_ORCHESTRATION, ORCHESTRATION_ID } from '../src/features/campaign-orchestration/orchestrationWorkflow.js';
+import { campaignOrchestrationParallel, ORCHESTRATION_ID } from '../src/features/campaign-orchestration/orchestrationWorkflow.js';
+import type { MarketingCampaign } from '../src/features/campaign-orchestration/types.js';
+import type { CampaignBrief } from '../src/features/campaign-brief/types.js';
 import { CHANNEL_WORKFLOW_IDS } from '../src/features/campaign-channels/channelWorkflows.js';
 import { setKernel } from '../src/features/campaign-brief/briefService.js';
 
@@ -36,17 +53,25 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T }
-interface Client { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res>; patch: (p: string, b?: unknown) => Promise<Res>; del: (p: string) => Promise<Res> }
+interface Res<T> { status: number; body: T }
+/** Error envelope the host error handler writes. */
+interface ErrBody { error: string; message: string }
+type CampaignRes = { campaign: MarketingCampaign } & Partial<ErrBody>;
+type CampaignsRes = { campaigns: MarketingCampaign[] } & Partial<ErrBody>;
+interface Client {
+  get: <T>(p: string) => Promise<Res<T>>;
+  post: <T>(p: string, b?: unknown) => Promise<Res<T>>;
+  patch: <T>(p: string, b?: unknown) => Promise<Res<T>>;
+}
 function client(): Client {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
+  const call = async <T>(method: string, path: string, body?: unknown): Promise<Res<T>> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    const out = (res.status === 204 ? undefined : await res.json().catch(() => undefined)) as T;
     return { status: res.status, body: out };
   };
-  return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), patch: (p, b) => call('PATCH', p, b), del: (p) => call('DELETE', p) };
+  return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), patch: (p, b) => call('PATCH', p, b) };
 }
 const uniqEmail = (): string => `cs-${Date.now()}-${n++}@acme.test`;
 async function ownerWithOrg(): Promise<{ owner: Client; orgId: string; tenantId: string }> {
@@ -55,7 +80,7 @@ async function ownerWithOrg(): Promise<{ owner: Client; orgId: string; tenantId:
   // kernel HTTP route — it's set by the orchestration workflow surface).
   const tenantId = `user:cs-${Date.now()}-${n++}`;
   expect((await owner.post('/host/openwop-app/test/login', { email: uniqEmail(), tenantId })).status).toBe(201);
-  const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await owner.post<{ orgId: string }>('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status).toBe(201);
   return { owner, orgId: org.body.orgId, tenantId };
 }
@@ -67,65 +92,75 @@ const FINALIZE_KERNEL = {
 
 describe('campaign-studio — finalize route', () => {
   it('404s when off', async () => {
-    const d = getToggleDefault('campaign-orchestration'); if (d) await saveConfig({ ...d, status: 'off' }, 'test');
-    const c = client(); await c.post('/host/openwop-app/test/login', { email: uniqEmail() });
-    expect((await c.get('/host/openwop-app/campaign-orchestration/campaigns')).status).toBe(404);
-    if (d) await saveConfig({ ...d, status: 'on' }, 'test');
+    const d = getToggleDefault('campaign-orchestration');
+    expect(d).toBeTruthy();
+    await saveConfig({ ...d!, status: 'off' }, 'test');
+    try {
+      const c = client(); await c.post('/host/openwop-app/test/login', { email: uniqEmail() });
+      const r = await c.get<ErrBody>('/host/openwop-app/campaign-orchestration/campaigns');
+      expect(r.status).toBe(404);
+      expect(r.body.error).toBe('not_found');
+    } finally {
+      // Restore even on failure — every later case needs the feature ON.
+      await saveConfig({ ...d!, status: 'on' }, 'test');
+    }
   });
 
   it('finalizes a brief into a campaign (one per brief) and lists it', async () => {
     const { owner, orgId, tenantId } = await ownerWithOrg();
-    const brief = await owner.post('/host/openwop-app/campaign-brief/briefs', { orgId, name: 'Q4', productName: 'FlashPick' });
+    const brief = await owner.post<{ brief: CampaignBrief }>('/host/openwop-app/campaign-brief/briefs', { orgId, name: 'Q4', productName: 'FlashPick' });
     const briefId = brief.body.brief.id;
     await owner.patch(`/host/openwop-app/campaign-brief/briefs/${briefId}`, { channels: [{ type: 'landing_page', enabled: true, config: {} }] });
     // ORCH-1: finalize now requires an approved messaging kernel — set it before finalizing.
     await setKernel(tenantId, briefId, FINALIZE_KERNEL);
 
-    const fin = await owner.post('/host/openwop-app/campaign-orchestration/finalize', { briefId });
+    const fin = await owner.post<CampaignRes>('/host/openwop-app/campaign-orchestration/finalize', { briefId });
     expect(fin.status, JSON.stringify(fin.body)).toBe(201);
     expect(fin.body.campaign.briefId).toBe(briefId);
     expect(fin.body.campaign.channels).toEqual(['landing_page']);
     const campaignId = fin.body.campaign.id;
 
     // Re-finalize → same campaign (upsert by briefId, no duplicate).
-    const fin2 = await owner.post('/host/openwop-app/campaign-orchestration/finalize', { briefId });
+    const fin2 = await owner.post<CampaignRes>('/host/openwop-app/campaign-orchestration/finalize', { briefId });
     expect(fin2.body.campaign.id).toBe(campaignId);
 
-    const list = await owner.get(`/host/openwop-app/campaign-orchestration/campaigns?orgId=${orgId}`);
-    expect(list.body.campaigns.map((c: any) => c.id)).toEqual([campaignId]);
+    const list = await owner.get<CampaignsRes>(`/host/openwop-app/campaign-orchestration/campaigns?orgId=${orgId}`);
+    expect(list.body.campaigns.map((c) => c.id)).toEqual([campaignId]);
   });
 
-  it('a stranger cannot read a foreign campaign (404)', async () => {
+  it('a cross-TENANT stranger cannot read a foreign campaign (404)', async () => {
     const { owner, orgId, tenantId } = await ownerWithOrg();
-    const brief = await owner.post('/host/openwop-app/campaign-brief/briefs', { orgId, name: 'Secret', productName: 'P' });
+    const brief = await owner.post<{ brief: CampaignBrief }>('/host/openwop-app/campaign-brief/briefs', { orgId, name: 'Secret', productName: 'P' });
     await setKernel(tenantId, brief.body.brief.id, FINALIZE_KERNEL);
-    const fin = await owner.post('/host/openwop-app/campaign-orchestration/finalize', { briefId: brief.body.brief.id });
+    const fin = await owner.post<CampaignRes>('/host/openwop-app/campaign-orchestration/finalize', { briefId: brief.body.brief.id });
     const stranger = client(); await stranger.post('/host/openwop-app/test/login', { email: uniqEmail() });
-    expect((await stranger.get(`/host/openwop-app/campaign-orchestration/campaigns/${fin.body.campaign.id}`)).status).toBe(404);
+    const r = await stranger.get<ErrBody>(`/host/openwop-app/campaign-orchestration/campaigns/${fin.body.campaign.id}`);
+    expect(r.status).toBe(404);
+    expect(r.body.error).toBe('not_found');
   });
 
   it('R2 CO-SP-5: PATCH with an invalid status is a typed 400 naming the allowlist — never a 200 no-op', async () => {
     const { owner, orgId, tenantId } = await ownerWithOrg();
-    const brief = await owner.post('/host/openwop-app/campaign-brief/briefs', { orgId, name: 'P5', productName: 'X' });
+    const brief = await owner.post<{ brief: CampaignBrief }>('/host/openwop-app/campaign-brief/briefs', { orgId, name: 'P5', productName: 'X' });
     await setKernel(tenantId, brief.body.brief.id, FINALIZE_KERNEL);
-    const fin = await owner.post('/host/openwop-app/campaign-orchestration/finalize', { briefId: brief.body.brief.id });
+    const fin = await owner.post<CampaignRes>('/host/openwop-app/campaign-orchestration/finalize', { briefId: brief.body.brief.id });
     const id = fin.body.campaign.id;
 
     // The old guard silently DROPPED an invalid status and returned 200 with
     // the unchanged campaign — an agent's repair loop got success-with-no-op.
-    const bad = await owner.patch(`/host/openwop-app/campaign-orchestration/campaigns/${id}`, { status: 'launched' });
+    const bad = await owner.patch<CampaignRes>(`/host/openwop-app/campaign-orchestration/campaigns/${id}`, { status: 'launched' });
     expect(bad.status).toBe(400);
     expect(bad.body.message).toMatch(/launched/);
     expect(bad.body.message).toMatch(/draft.*active.*paused/);
 
-    const badType = await owner.patch(`/host/openwop-app/campaign-orchestration/campaigns/${id}`, { status: 42 });
+    const badType = await owner.patch<CampaignRes>(`/host/openwop-app/campaign-orchestration/campaigns/${id}`, { status: 42 });
     expect(badType.status).toBe(400);
 
-    const badName = await owner.patch(`/host/openwop-app/campaign-orchestration/campaigns/${id}`, { name: '   ' });
+    const badName = await owner.patch<CampaignRes>(`/host/openwop-app/campaign-orchestration/campaigns/${id}`, { name: '   ' });
     expect(badName.status).toBe(400);
 
     // Polarity: a VALID patch still lands.
-    const ok = await owner.patch(`/host/openwop-app/campaign-orchestration/campaigns/${id}`, { status: 'paused', name: 'Renamed' });
+    const ok = await owner.patch<CampaignRes>(`/host/openwop-app/campaign-orchestration/campaigns/${id}`, { status: 'paused', name: 'Renamed' });
     expect(ok.status).toBe(200);
     expect(ok.body.campaign.status).toBe('paused');
     expect(ok.body.campaign.name).toBe('Renamed');
@@ -133,22 +168,22 @@ describe('campaign-studio — finalize route', () => {
     // Review fold-in: a COMBINED body validates whole before ANY write — the
     // 400 promises nothing changed, so the valid name must NOT have landed
     // beside the invalid status.
-    const mixed = await owner.patch(`/host/openwop-app/campaign-orchestration/campaigns/${id}`, { name: 'ShouldNotLand', status: 'bogus' });
+    const mixed = await owner.patch<CampaignRes>(`/host/openwop-app/campaign-orchestration/campaigns/${id}`, { name: 'ShouldNotLand', status: 'bogus' });
     expect(mixed.status).toBe(400);
-    const after = await owner.get(`/host/openwop-app/campaign-orchestration/campaigns?orgId=${orgId}`);
-    const row = after.body.campaigns.find((c: any) => c.id === id);
-    expect(row.name).toBe('Renamed');
-    expect(row.status).toBe('paused');
+    const after = await owner.get<CampaignsRes>(`/host/openwop-app/campaign-orchestration/campaigns?orgId=${orgId}`);
+    const row = after.body.campaigns.find((c) => c.id === id);
+    expect(row?.name).toBe('Renamed');
+    expect(row?.status).toBe('paused');
   });
 
   it('R2: the dispatches route answers over HTTP (empty ledger => designed empty, stranger => 404)', async () => {
     const { owner, orgId, tenantId } = await ownerWithOrg();
-    const brief = await owner.post('/host/openwop-app/campaign-brief/briefs', { orgId, name: 'D5', productName: 'X' });
+    const brief = await owner.post<{ brief: CampaignBrief }>('/host/openwop-app/campaign-brief/briefs', { orgId, name: 'D5', productName: 'X' });
     await setKernel(tenantId, brief.body.brief.id, FINALIZE_KERNEL);
-    const fin = await owner.post('/host/openwop-app/campaign-orchestration/finalize', { briefId: brief.body.brief.id });
+    const fin = await owner.post<CampaignRes>('/host/openwop-app/campaign-orchestration/finalize', { briefId: brief.body.brief.id });
     const id = fin.body.campaign.id;
 
-    const ok = await owner.get(`/host/openwop-app/campaign-orchestration/campaigns/${id}/dispatches`);
+    const ok = await owner.get<{ dispatches: unknown[] }>(`/host/openwop-app/campaign-orchestration/campaigns/${id}/dispatches`);
     expect(ok.status).toBe(200);
     expect(ok.body.dispatches).toEqual([]);
 
@@ -157,14 +192,44 @@ describe('campaign-studio — finalize route', () => {
     expect((await stranger.get(`/host/openwop-app/campaign-orchestration/campaigns/${id}/dispatches`)).status).toBe(404);
   });
 
+  it('a SAME-tenant non-member gets 404 on the campaign, its dispatches and its PATCH, and the list omits it', async () => {
+    const { owner, orgId, tenantId } = await ownerWithOrg();
+    const brief = await owner.post<{ brief: CampaignBrief }>('/host/openwop-app/campaign-brief/briefs', { orgId, name: 'Members only', productName: 'P' });
+    await setKernel(tenantId, brief.body.brief.id, FINALIZE_KERNEL);
+    const fin = await owner.post<CampaignRes>('/host/openwop-app/campaign-orchestration/finalize', { briefId: brief.body.brief.id });
+    expect(fin.status).toBe(201);
+    const id = fin.body.campaign.id;
+    // Positive control: the owner reads it.
+    expect((await owner.get<CampaignRes>(`/host/openwop-app/campaign-orchestration/campaigns/${id}`)).body.campaign.id).toBe(id);
+
+    // Same tenant, no org membership: the tenant-keyed read FINDS the row, so only
+    // the org-scope check can refuse it (a cross-tenant stranger never reaches it).
+    const peer = client();
+    expect((await peer.post('/host/openwop-app/test/login', { email: uniqEmail(), tenantId })).status).toBe(201);
+    const one = await peer.get<ErrBody>(`/host/openwop-app/campaign-orchestration/campaigns/${id}`);
+    expect(one.status).toBe(404);
+    expect(one.body.error).toBe('not_found');
+    const disp = await peer.get<ErrBody>(`/host/openwop-app/campaign-orchestration/campaigns/${id}/dispatches`);
+    expect(disp.status).toBe(404);
+    expect(disp.body.error).toBe('not_found');
+    const patch = await peer.patch<ErrBody>(`/host/openwop-app/campaign-orchestration/campaigns/${id}`, { status: 'paused' });
+    expect(patch.status).toBe(404);
+    const list = await peer.get<CampaignsRes>(`/host/openwop-app/campaign-orchestration/campaigns?orgId=${orgId}`);
+    expect(list.status).toBe(200);
+    expect(list.body.campaigns).toEqual([]);
+    // The refused PATCH changed nothing.
+    expect((await owner.get<CampaignRes>(`/host/openwop-app/campaign-orchestration/campaigns/${id}`)).body.campaign.status).toBe('draft');
+  });
+
   it('rejects finalizing a kernel-less brief with 409 (ORCH-1)', async () => {
     const { owner, orgId } = await ownerWithOrg();
-    const brief = await owner.post('/host/openwop-app/campaign-brief/briefs', { orgId, name: 'NoKernel', productName: 'P' });
+    const brief = await owner.post<{ brief: CampaignBrief }>('/host/openwop-app/campaign-brief/briefs', { orgId, name: 'NoKernel', productName: 'P' });
     // No setKernel — the brief has no messaging kernel.
-    const fin = await owner.post('/host/openwop-app/campaign-orchestration/finalize', { briefId: brief.body.brief.id });
+    const fin = await owner.post<CampaignRes>('/host/openwop-app/campaign-orchestration/finalize', { briefId: brief.body.brief.id });
     expect(fin.status).toBe(409);
+    expect(fin.body.error).toBe('conflict');
     // And it produced no campaign.
-    const list = await owner.get(`/host/openwop-app/campaign-orchestration/campaigns?orgId=${orgId}`);
+    const list = await owner.get<CampaignsRes>(`/host/openwop-app/campaign-orchestration/campaigns?orgId=${orgId}`);
     expect(list.body.campaigns.length).toBe(0);
   });
 });
@@ -179,15 +244,16 @@ describe('campaign-studio — nodes', () => {
     const drafts = [{ channel: 'landing_page', title: 'Pick faster with FlashPick' }, { channel: 'social_posts', content: 'unrelated text' }];
     const out = await nodePack['feature.campaign-orchestration.nodes.consistency-check']({ features, inputs: { briefId: 'b1', drafts } });
     expect(out.status).toBe('success');
-    const r = out.outputs?.report as Record<string, any>;
+    const r = out.outputs?.report as { score: number; divergences: Array<{ channel: string }> };
     expect(r.score).toBe(50); // 1 of 2 echoes "faster"
-    expect(r.divergences.length).toBe(1);
+    expect(r.divergences.map((d) => d.channel)).toEqual(['social_posts']);
   });
 
   it('consistency-check returns a neutral report with no drafts', async () => {
     const features = { 'campaign-brief': { getBrief: async () => ({ brief: { kernel: { headline: 'X' } } }) } };
     const out = await nodePack['feature.campaign-orchestration.nodes.consistency-check']({ features, inputs: { briefId: 'b1' } });
-    expect((out.outputs?.report as Record<string, unknown>).passesThreshold).toBe(true);
+    expect(out.status).toBe('success');
+    expect(out.outputs?.report).toMatchObject({ score: 100, divergences: [], passesThreshold: true, note: 'no drafts to compare' });
   });
 
   it('finalize creates the campaign via the surface', async () => {
@@ -207,13 +273,16 @@ describe('campaign-studio — nodes', () => {
     };
     const features = { 'campaign-orchestration': { finalizeFromBrief: async () => ({ found: true, campaign }) } };
     const out = await nodePack['feature.campaign-orchestration.nodes.finalize']({ features, inputs: { briefId: 'b1' } });
-    const artifact = out.outputs?.artifact as { artifactTypeId: string; payload: any; title: string };
+    const artifact = out.outputs?.artifact as {
+      artifactTypeId: string; title: string;
+      payload: { channels: Array<{ type: string }>; assets: Array<{ headline: string }>; funnel: Array<{ stage: string }> };
+    };
     expect(artifact.artifactTypeId).toBe('canvas.campaign');
     expect(artifact.title).toBe('Q4 Launch');
     // channel-vocab mapping: landing_page→content, email_sequence→email, social_posts→social
-    expect(artifact.payload.channels.map((c: any) => c.type)).toEqual(['content', 'email', 'social']);
+    expect(artifact.payload.channels.map((c) => c.type)).toEqual(['content', 'email', 'social']);
     expect(artifact.payload.assets[0].headline).toBe('Pick faster');
-    expect(artifact.payload.funnel.map((f: any) => f.stage)).toEqual(['awareness', 'conversion']);
+    expect(artifact.payload.funnel.map((f) => f.stage)).toEqual(['awareness', 'conversion']);
     // Validates against the ACTUAL canvas.campaign schema (the shared reconciliation contract).
     const { campaignSchema } = await import('../src/features/campaign-studio/artifactTypes.js');
     const { default: Ajv2020 } = await import('ajv/dist/2020.js');
@@ -229,50 +298,7 @@ describe('campaign-studio — nodes', () => {
   });
 });
 
-describe('campaign-studio — orchestration workflow', () => {
-  it('is a sequential validate→kernel→approve→5 channels→consistency→finalize spine', () => {
-    expect(campaignOrchestrationWorkflow.workflowId).toBe(ORCHESTRATION_ID);
-    const ids = campaignOrchestrationWorkflow.nodes.map((nd) => nd.nodeId);
-    expect(ids).toEqual(['validate', 'kernel', 'kernel-approve', 'sw-landing-page', 'sw-ad-variants', 'sw-email-sequence', 'sw-creative-briefs', 'sw-social-posts', 'production-plan', 'consistency', 'finalize']); // ADR 0356 P1 — the post-merge production slot
-    // The five channel nodes dispatch via core.subWorkflow, sequential.
-    const swNodes = campaignOrchestrationWorkflow.nodes.filter((nd) => nd.typeId === 'core.subWorkflow');
-    expect(swNodes).toHaveLength(5);
-    for (const sw of swNodes) {
-      expect((sw.config as Record<string, unknown>).inputMapping).toEqual({ briefId: 'briefId' });
-      expect((sw.config as Record<string, unknown>).onChildFailure).toBe('absorb');
-    }
-    // Linear chain of 9 edges; briefId is the shared variable.
-    expect(campaignOrchestrationWorkflow.edges).toHaveLength(10);
-    expect(campaignOrchestrationWorkflow.variables?.[0]?.name).toBe('briefId');
-    expect(campaignOrchestrationWorkflow.metadata?.parallelUpgrade).toBe('RFC-0118');
-  });
-
-  // ADR 0158 §P1.5 — RFC 0118 is Accepted and the host arm (#994) advertises
-  // dispatch.fanOutSupported:true, so the default DERIVES from the capability:
-  // parallel on this host, with OPENWOP_CAMPAIGN_FANOUT_PARALLEL as a two-way
-  // ops override ('false' = the kill-switch back to sequential).
-  it('defaults to the PARALLEL spine (derived from dispatchCapability)', () => {
-    expect(parallelFanOutEnabled()).toBe(true);
-    expect(CAMPAIGN_ORCHESTRATION).toHaveLength(1);
-    expect(CAMPAIGN_ORCHESTRATION[0]).toBe(campaignOrchestrationParallel);
-    expect(CAMPAIGN_ORCHESTRATION[0].metadata?.fanOut).toBe('parallel');
-  });
-
-  it('the env override is two-way: "false" forces sequential, "true" forces parallel', () => {
-    const prev = process.env.OPENWOP_CAMPAIGN_FANOUT_PARALLEL;
-    try {
-      process.env.OPENWOP_CAMPAIGN_FANOUT_PARALLEL = 'false';
-      expect(parallelFanOutEnabled()).toBe(false);
-      process.env.OPENWOP_CAMPAIGN_FANOUT_PARALLEL = 'true';
-      expect(parallelFanOutEnabled()).toBe(true);
-      delete process.env.OPENWOP_CAMPAIGN_FANOUT_PARALLEL;
-      expect(parallelFanOutEnabled()).toBe(true); // follows the capability
-    } finally {
-      if (prev === undefined) delete process.env.OPENWOP_CAMPAIGN_FANOUT_PARALLEL;
-      else process.env.OPENWOP_CAMPAIGN_FANOUT_PARALLEL = prev;
-    }
-  });
-
+describe('campaign-studio — orchestration workflow (the registered PARALLEL spine)', () => {
   it('the PARALLEL spine (RFC 0118) is supervisor → core.dispatch(parallel), same workflowId', () => {
     expect(campaignOrchestrationParallel.workflowId).toBe(ORCHESTRATION_ID); // same id → clean swap
     const ids = campaignOrchestrationParallel.nodes.map((nd) => nd.nodeId);

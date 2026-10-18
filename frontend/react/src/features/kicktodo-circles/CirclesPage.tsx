@@ -6,7 +6,7 @@
  * designed empty states.
  */
 import { Button } from '../../ui/Button.js';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
 import { UserIcon } from '../../ui/icons/index.js';
@@ -171,6 +171,11 @@ export function CirclesPage() {
     void reload();
   }, [reload]);
 
+  // KTACC-5 — one idempotency key per create intent (per enrollment), reused if
+  // the create is retried after a failure and dropped once it succeeds, so a
+  // double submit or a retried request can never make two circles.
+  const createKeys = useRef(new Map<string, string>());
+
   const onCreate = async () => {
     // A circle per enrollment: the next ACTIVE enrollment that doesn't have one
     // yet (screen-polish: the create path used to exist only inside the empty
@@ -180,7 +185,10 @@ export function CirclesPage() {
     setBusyKey('create');
     setActionError(false);
     try {
-      await createCircle(enrollment.id, 'partner', t('title'));
+      let key = createKeys.current.get(enrollment.id);
+      if (!key) { key = crypto.randomUUID(); createKeys.current.set(enrollment.id, key); }
+      await createCircle(enrollment.id, 'partner', t('title'), key);
+      createKeys.current.delete(enrollment.id);
       await reload();
     } catch {
       setActionError(true);
@@ -262,12 +270,12 @@ export function CirclesPage() {
 
       {/* KTX-1 — a load failure always carries its retry. */}
       {!anonymous && error && (
-        <Notice variant="error">
+        <Notice variant="error" announce={t('loadError')}>
           {t('loadError')}{' '}
           <Button variant="quiet" size="sm" onClick={() => void reload()}>{t('common:retry')}</Button>
         </Notice>
       )}
-      {!anonymous && actionError && <Notice variant="error">{t('actionError')}</Notice>}
+      {!anonymous && actionError && <Notice variant="error" announce={t('actionError')}>{t('actionError')}</Notice>}
       {!anonymous && !circles && !error && <StateCard loading title={t('title')} />}
 
       {!anonymous && circles && circles.length === 0 && !error && (

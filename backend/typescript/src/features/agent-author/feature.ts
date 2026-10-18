@@ -42,7 +42,7 @@ export const agentAuthorFeature: BackendFeature = {
     salt: 'agent-author',
   },
   requiredPacks: [
-    { name: 'feature.agent-author.nodes', version: '1.1.1' },
-    { name: 'vendor.openwop-app.agent-author.agents', version: '1.1.1' },
+    { name: 'feature.agent-author.nodes', version: '1.2.0' },
+    { name: 'vendor.openwop-app.agent-author.agents', version: '1.2.0' },
   ],
 };

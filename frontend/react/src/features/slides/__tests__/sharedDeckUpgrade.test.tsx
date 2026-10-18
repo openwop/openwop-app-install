@@ -7,6 +7,17 @@
  * the two places it was leaking — the counter and the jump strip — and pin the
  * analytics contract that must NOT change with them (frames are reported by
  * their real deck index, not the audience-facing position).
+ *
+ * /grade-tests w52 — PROTECTED (public share surface). The AUDIENCE projection
+ * (SL-G1 counter, SL-G2 jump strip) over a 5-slide deck with 2 hidden: witnessed
+ * by sabotage of `SharedDeckViewer.tsx` — counting skipped slides as visible,
+ * counting by raw index, labelling dots by position instead of slide name,
+ * drawing a dot per raw slide, a dot jump that ignores its target, and reporting
+ * the audience position instead of the deck index. Twins in
+ * `SharedDeckViewer.test.tsx` ("renders one frame at a time…" counter, "reports
+ * each reached frame ONCE…" index): both files are protected, so the overlap is
+ * kept; this file's 5-slide/2-hidden fixture is the one that separates the
+ * audience position from the deck index at every step.
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, fireEvent, cleanup, act } from '@testing-library/react';
@@ -53,6 +64,9 @@ describe('shared deck — the counter tells the truth (SL-G1)', () => {
       expect(container.textContent).not.toContain('HIDDEN B');
       await act(async () => { fireEvent.click(getByLabelText('Next')); });
     }
+    // …including after the last click (the loop above checks BEFORE each step).
+    expect(container.textContent).toContain('Three');
+    expect(container.textContent).not.toContain('HIDDEN');
   });
 });
 
@@ -86,6 +100,6 @@ describe('shared deck — the analytics contract is unchanged', () => {
     await act(async () => { fireEvent.click(getByLabelText('Next')); });
     // Audience positions 1,2,3 ⇒ deck indices 0,2,4. Reporting the friendly
     // position instead would silently corrupt every existing frame-view tally.
-    expect(bodies.map((b) => JSON.parse(b).frame)).toEqual([0, 2, 4]);
+    expect(bodies).toEqual(['{"frame":0}', '{"frame":2}', '{"frame":4}']);
   });
 });

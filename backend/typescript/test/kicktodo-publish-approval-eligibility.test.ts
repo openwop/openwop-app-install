@@ -49,9 +49,17 @@ const mintApproval = async () =>
     tenantId: wsTenant, proposal: 'Publish "Watercolor basics" v1', candidateId: `cand-${randomBytes(4).toString('hex')}`,
     challengeId: 'chal-1', challengeVersion: 1, submittedBy: submitterUserId,
   });
-const post = async (cookie: string, path: string): Promise<{ status: number; body: Record<string, unknown> }> => {
+/** The host error envelope (`middleware/errorEnvelope.ts`) — narrow, read-only. */
+interface DecisionBody { error?: string; message?: string; status?: string }
+const field = (raw: unknown, k: keyof DecisionBody): string | undefined => {
+  if (typeof raw !== 'object' || raw === null) return undefined;
+  const v: unknown = Reflect.get(raw, k);
+  return typeof v === 'string' ? v : undefined;
+};
+const asDecisionBody = (raw: unknown): DecisionBody => ({ error: field(raw, 'error'), message: field(raw, 'message'), status: field(raw, 'status') });
+const post = async (cookie: string, path: string): Promise<{ status: number; body: DecisionBody }> => {
   const res = await fetch(`${BASE}${path}`, { method: 'POST', headers: { cookie, 'content-type': 'application/json' }, body: '{}' });
-  return { status: res.status, body: (await res.json().catch(() => ({}))) as Record<string, unknown> };
+  return { status: res.status, body: asDecisionBody(await res.json().catch(() => ({}))) };
 };
 
 beforeAll(async () => {
@@ -73,7 +81,13 @@ beforeAll(async () => {
   submitterCookie = submitter.cookie;
   submitterUserId = submitter.userId;
 });
-afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
+afterAll(async () => {
+  await new Promise<void>((res) => server.close(() => res()));
+  for (const id of ['users', 'kicktodo-core', 'kicktodo-creator']) {
+    const d = getToggleDefault(id);
+    if (d) await saveConfig(d, 'test'); // restore the registry default
+  }
+});
 
 describe('ADR 0458 §2.2 correction — challenge-publish is a registered-handler kind', () => {
   it('the SLA expire rung may not auto-reject it (a system actor gets the overdue notification instead)', () => {
@@ -89,9 +103,12 @@ describe('KTFULL-B2 — challenge-publish decider eligibility (generic lane)', (
     const a = await mintApproval();
     const claim = await post(editorCookie, CLAIM(a.approvalId));
     expect(claim.status).toBe(403);
-    expect(String(claim.body.error ?? claim.body.code ?? '')).toContain('forbidden_scope');
+    expect(claim.body.error).toBe('forbidden_scope');
+    expect(claim.body.message).toBe('Deciding a challenge publication requires KickTodo manage authority.');
     const reject = await post(editorCookie, REJECT(a.approvalId));
     expect(reject.status).toBe(403);
+    expect(reject.body.error).toBe('forbidden_scope');
+    expect(reject.body.message).toBe('Deciding a challenge publication requires KickTodo manage authority.');
     expect((await getApproval(a.approvalId))?.status).toBe('pending');
   });
 
@@ -99,6 +116,8 @@ describe('KTFULL-B2 — challenge-publish decider eligibility (generic lane)', (
     const a = await mintApproval();
     const claim = await post(submitterCookie, CLAIM(a.approvalId));
     expect(claim.status).toBe(403);
+    expect(claim.body.error).toBe('forbidden');
+    expect(claim.body.message).toBe('A challenge publication must be decided by someone other than the submitter (separation of duties).');
     expect((await getApproval(a.approvalId))?.status).toBe('pending');
   });
 
@@ -112,7 +131,7 @@ describe('KTFULL-B2 — challenge-publish decider eligibility (generic lane)', (
     const a = await mintApproval();
     const claim = await post(adminCookie, CLAIM(a.approvalId));
     expect(claim.status).toBe(409);
-    expect(String(claim.body.error ?? claim.body.code ?? '')).toContain('conflict');
+    expect(claim.body.error).toBe('conflict');
     expect((await getApproval(a.approvalId))?.status).toBe('pending');
     const reject = await post(adminCookie, REJECT(a.approvalId));
     expect(reject.status).toBe(200);

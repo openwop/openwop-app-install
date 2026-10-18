@@ -2,9 +2,13 @@
  * ADR 0118 Phase 3b — UsageDashboardPage component coverage. The admin dashboard
  * loads the per-model token rollup into a table, shows an empty state, and gates on
  * the feature toggle. The client + feature-access are mocked → pure component test.
+ * Breaks if: model rows stop rendering their cells, the disabled card is skipped, or
+ * the org read runs while the feature is off (probes w24g1-ua-model-cell /
+ * -disabled-card / -orgs-gate). The genuine-empty state is pinned (with its
+ * no-error polarity) in rollupFailedAndStale.test.tsx — cut here in wave 24.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, cleanup } from '@testing-library/react';
+import { render, screen, cleanup, within } from '@testing-library/react';
 
 import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
 vi.mock('../../../client/usageAnalyticsClient.js', () => ({ listOrgs: vi.fn(), fetchUsageRollup: vi.fn() }));
@@ -32,12 +36,8 @@ describe('UsageDashboardPage (ADR 0118 Phase 3b)', () => {
     expect(await screen.findByText('opus')).toBeTruthy();
     expect(screen.getByText('gpt')).toBeTruthy();
     expect(screen.getByText('anthropic')).toBeTruthy();
-  });
-
-  it('shows an empty state when there is no usage', async () => {
-    mockRollup.mockResolvedValue([]);
-    render(<UsageDashboardPage />);
-    expect(await screen.findByText('No usage recorded yet.')).toBeTruthy();
+    // The token COUNT reaches its cell, formatted (the claim is the rollup, not the names).
+    expect(within(screen.getByText('opus').closest('tr')!).getByText('1,200')).toBeTruthy();
   });
 
   it('shows the disabled state when the toggle is off (no fetch)', async () => {
@@ -45,5 +45,8 @@ describe('UsageDashboardPage (ADR 0118 Phase 3b)', () => {
     render(<UsageDashboardPage />);
     expect(await screen.findByText('Usage analytics is off for this workspace.')).toBeTruthy();
     expect(mockRollup).not.toHaveBeenCalled();
+    // The REAL network gate: the org read is what `useOrgSelection` skips when off;
+    // the rollup check alone was double-guarded (sabotage w24g1-ua-orgs-gate: vacuous).
+    expect(mockOrgs).not.toHaveBeenCalled();
   });
 });

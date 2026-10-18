@@ -7,12 +7,13 @@
  * bundle`, …) arrive with their producers in ADR 0415.
  *
  * SSoT rule (CLAUDE.md AI-exchange): the `kicktodo.progress-evidence` schema
- * is TEST-PINNED to its producer — `kicktodoArtifactParity.test.ts` freezes a
+ * is TEST-PINNED to its producer — `kicktodo-artifact-parity.test.ts` freezes a
  * real snapshot and validates it against this schema, so drift between the
  * producer and the schema text is a red test, not a lie to a model.
  */
 
 import { registerArtifactType } from '../../host/artifactTypes.js';
+import { REVISION_LANES } from './replanService.js';
 
 export const PROGRESS_EVIDENCE_TYPE = 'kicktodo.progress-evidence';
 export const COMPLETION_CERTIFICATE_TYPE = 'kicktodo.completion-certificate';
@@ -105,10 +106,15 @@ export function registerKicktodoArtifactTypes(): void {
             type: 'object',
             required: ['lane'],
             properties: {
-              lane: { type: 'string', enum: ['schedule', 'substitute', 'recovery'] },
+              // KTAP-MOVE-1 — built from the service's lanes. A hand-kept list here
+              // missed `move` (ADR 0496), so every move revision failed
+              // `detectTypedArtifact` and its approval card showed raw JSON.
+              lane: { type: 'string', enum: [...REVISION_LANES] },
               daypart: { enum: ['morning', 'afternoon', 'evening', null] },
               cardId: { type: 'string' },
               alternativeId: { type: 'string' },
+              day: { type: 'integer', minimum: 1 },
+              toDate: { type: 'string', pattern: '^\\d{4}-\\d{2}-\\d{2}$' },
             },
           },
         },

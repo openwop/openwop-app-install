@@ -50,6 +50,7 @@ const InviteAcceptPublicPage = lazy(() => import('./orgs/InviteAcceptPage.js').t
 const BlogPage = lazy(() => import('./features/site/BlogPage.js').then((mm) => ({ default: mm.BlogPage })));
 const BlogPostPage = lazy(() => import('./features/site/BlogPostPage.js').then((mm) => ({ default: mm.BlogPostPage })));
 const PricingPage = lazy(() => import('./features/site/PricingPage.js').then((mm) => ({ default: mm.PricingPage })));
+const PrivacyPage = lazy(() => import('./PrivacyPage.js').then((mm) => ({ default: mm.PrivacyPage })));
 // ADR 0390 — the public podcast pages (`/pod/:orgId[/:showSlug[/:episodeSlug]]`)
 // in the bare PublicShell above the auth gate (published-only, org→tenant server-side).
 const PublicPodcastPage = lazy(() => import('./features/podcasts/PublicPodcastPage.js').then((mm) => ({ default: mm.PublicPodcastPage })));
@@ -95,7 +96,8 @@ import { matchSignToken } from './features/crm/signRoute.js';
 import { matchPublicPageSlug } from './features/site/publicPageRoute.js';
 import { matchBlogRoute } from './features/site/blogRoute.js';
 import { matchPricingRoute } from './features/site/pricingRoute.js';
-import { FRONTEND_FEATURES } from './features/registry.js';
+import { matchPrivacyRoute } from './features/site/privacyRoute.js';
+import { FRONTEND_FEATURES, lastKnownEntitlementFeatureIds } from './features/registry.js';
 import { config } from './client/config.js';
 import { matchDocsIndex, matchDocsSlug } from './features/docs/docsRoute.js';
 import { matchStoreOrgId } from './features/commerce/storeRoute.js';
@@ -116,6 +118,10 @@ import { EntitlementGuard } from './featureToggles/EntitlementGuard.js';
  * resolve unlocked anyway, so the fallback is belt-and-braces, not load-bearing.
  */
 const entitlementKeyOf = (f: FeatureRoute): string | undefined => f.ownerFeatureId ?? f.nav?.featureId;
+
+/** ADR 0873 D12 — the features whose online entitlement answers are kept as
+ *  last-known offline grants. Fixed for the build, so computed once. */
+const LAST_KNOWN_ENTITLEMENT = lastKnownEntitlementFeatureIds();
 import { Toaster } from './ui/toast.js';
 const WalkthroughOverlayHost = lazy(() => import('./walkthroughs/WalkthroughOverlayHost.js').then((m) => ({ default: m.WalkthroughOverlayHost })));
 const TutorialHint = lazy(() => import('./features/tutorials/TutorialHint.js').then((m) => ({ default: m.TutorialHint })));
@@ -254,6 +260,8 @@ export function App() {
   // page, same bare-PublicShell posture (published-only, org→tenant server-side).
   const blogRoute = matchBlogRoute(location.pathname);
   const pricingRoute = matchPricingRoute(location.pathname);
+  // The privacy disclosure is for visitors too: bare PublicShell, not the workspace sidebar.
+  const privacyRoute = matchPrivacyRoute(location.pathname);
   // ADR 0390 — the public podcast show/episode pages, same bare-PublicShell posture.
   const podcastView = matchPodcastView(location.pathname);
   // ADR 0544 P3 — `/verify/:token`, a SIBLING public path (never under
@@ -262,7 +270,7 @@ export function App() {
   const verifyToken = matchVerifyToken(location.pathname);
   // ADR 0630 — feature-declared public pages (`FrontendFeature.publicRoutes`) in the same bare-PublicShell posture; App.tsx imports only the registry, so a distribution that excludes a feature excludes its public page.
   const featurePublic = FRONTEND_FEATURES.flatMap((f) => f.publicRoutes ?? []).find((r) => r.match(location.pathname));
-  const showPublic = featurePublic !== undefined || verifyToken !== null || showFrontPage || publicPageSlug !== null || sharedToken !== null || storeOrgId !== null || presentRemoteToken !== null || fillFormId !== null || funnelView !== null || bookManage !== null || bookSlug !== null || signToken !== null || inviteAccept || blogRoute !== null || pricingRoute || podcastView !== null || docsSlug !== null || docsIndex;
+  const showPublic = featurePublic !== undefined || verifyToken !== null || showFrontPage || publicPageSlug !== null || sharedToken !== null || storeOrgId !== null || presentRemoteToken !== null || fillFormId !== null || funnelView !== null || bookManage !== null || bookSlug !== null || signToken !== null || inviteAccept || blogRoute !== null || pricingRoute || privacyRoute || podcastView !== null || docsSlug !== null || docsIndex;
 
   // ── ADR 0641 — the `site` tier ────────────────────────────────────────────
   // The third branch. `site` routes render in <SiteShell> (bare product chrome
@@ -386,12 +394,12 @@ export function App() {
     // is the correct answer rather than a missing one.
     return siteWrapsAppGate(siteRoute.auth) ? (
       <AppGate>
-        <FeatureAccessProvider>
+        <FeatureAccessProvider lastKnownFeatureIds={LAST_KNOWN_ENTITLEMENT}>
           <NavConfigProvider>{body}</NavConfigProvider>
         </FeatureAccessProvider>
       </AppGate>
     ) : (
-      <FeatureAccessProvider>
+      <FeatureAccessProvider lastKnownFeatureIds={LAST_KNOWN_ENTITLEMENT}>
         <NavConfigProvider>{body}</NavConfigProvider>
       </FeatureAccessProvider>
     );
@@ -406,6 +414,8 @@ export function App() {
           ? <Suspense fallback={<div className="u-p-4"><Skeleton /></div>}><PublicPodcastPage view={podcastView} /></Suspense>
           : pricingRoute
           ? <Suspense fallback={<div className="u-p-4"><Skeleton /></div>}><PricingPage /></Suspense>
+          : privacyRoute
+          ? <Suspense fallback={<div className="u-p-4"><Skeleton /></div>}><PrivacyPage /></Suspense>
           : featurePublic
           ? <Suspense fallback={<div className="u-p-4"><Skeleton /></div>}>{featurePublic.render()}</Suspense>
           : blogRoute
@@ -443,7 +453,7 @@ export function App() {
 
   return (
     <AppGate>
-    <FeatureAccessProvider>
+    <FeatureAccessProvider lastKnownFeatureIds={LAST_KNOWN_ENTITLEMENT}>
     <NavConfigProvider>
     <div className={chrome === 'chat' ? 'app-shell app-shell--ai' : 'app-shell'}>
       <a className="skip-link" href="#main-content">{t('skipToContent')}</a>
@@ -480,7 +490,7 @@ export function App() {
             <Route
               key={f.path}
               path={f.path}
-              element={entitlementKeyOf(f) ? <EntitlementGuard featureId={entitlementKeyOf(f)!}>{f.element}</EntitlementGuard> : f.element}
+              element={entitlementKeyOf(f) ? <EntitlementGuard featureId={entitlementKeyOf(f)!} offlineEntitlement={f.ownerOfflineEntitlement}>{f.element}</EntitlementGuard> : f.element}
             />
           ))}
           {/* Admin tier: a PATHLESS layout route — admin pages keep their
@@ -500,7 +510,7 @@ export function App() {
               <Route
                 key={f.path}
                 path={f.path}
-                element={entitlementKeyOf(f) ? <EntitlementGuard featureId={entitlementKeyOf(f)!}>{f.element}</EntitlementGuard> : f.element}
+                element={entitlementKeyOf(f) ? <EntitlementGuard featureId={entitlementKeyOf(f)!} offlineEntitlement={f.ownerOfflineEntitlement}>{f.element}</EntitlementGuard> : f.element}
               />
             ))}
           </Route>

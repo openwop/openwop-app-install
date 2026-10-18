@@ -12,15 +12,20 @@
  *   `.get`). No second managed-LLM dispatch hides behind a button any more.
  *
  * Both tools mirror their route's authorization VERBATIM (the same
- * `getConversationMeta` + `isVisibleToAsync` predicate). The READ tool denies with
- * ONE indistinguishable `not_found` (the route's IDOR-safe 404 posture) and fails
- * EMPTY of an acting user; the ACTION tool is owner-gated and fails TYPED.
+ * `getConversationMeta` + `isVisibleToAsync` predicate; the draft tool also the
+ * route's EDIT predicate, `ledgerAuthorityOf` — ADR 0896 D2, so a Viewer's or a
+ * removed member's chat cannot draft what their REST call could not). The READ tool
+ * denies with ONE indistinguishable `not_found` (the route's IDOR-safe 404 posture)
+ * and fails EMPTY of an acting user; the ACTION tool fails TYPED.
  */
 import { registerFeatureAgentTool } from '../../host/agentToolProvider.js';
 import { getConversationMeta } from '../../host/conversationStore.js';
 import { isVisibleToAsync } from '../../host/conversationVisibility.js';
-import { getLedger, saveLedger, validateLedgerInput } from './ledgerStore.js';
+import { getLedger, ledgerDigest, ledgerRevision, newLedgerId, validateLedgerInput, writeLedger } from './ledgerStore.js';
 import type { IntentLedger } from './types.js';
+import { assertTransition, ledgerAuthorityOf } from './authority.js';
+import { OpenwopError } from '../../types.js';
+import { assertKeepsInherited, missionInheritanceFor, withInheritedDefaults } from './inheritance.js';
 
 export const INTENT_LEDGER_GET_TOOL_ID = 'openwop:intent-ledger.get';
 export const INTENT_LEDGER_DRAFT_TOOL_ID = 'openwop:intent-ledger.draft-contract';
@@ -81,8 +86,13 @@ export function registerIntentLedgerAgentTools(): void {
             goal: ledger.goal,
             allowed: ledger.allowed,
             forbidden: ledger.forbidden,
+            // ADR 0896 D7 — the whole contract the agent is held to.
+            requireApproval: ledger.requireApproval,
             successCriteria: ledger.successCriteria,
+            ...(ledger.expiresAtRelMs !== undefined ? { expiresAtRelMs: ledger.expiresAtRelMs } : {}),
             status: ledger.status,
+            revision: ledgerRevision(ledger),
+            digest: ledgerDigest(ledger),
             ...(ledger.approvedBy ? { approvedBy: ledger.approvedBy } : {}),
           },
         }),
@@ -128,40 +138,51 @@ export function registerIntentLedgerAgentTools(): void {
       if (!conversationId) {
         return toolError('conversation_required', 'This turn is not bound to a conversation, so there is no mission to draft.');
       }
-      // requireOwner, verbatim (the /draft route predicate): visible + owner. Every
-      // deny is the same not_found (no existence leak) except the owner mismatch.
+      // The /draft route predicate: visible, then the EDIT authority (`workspace:write`
+      // + the owner — ADR 0896 D2). Every deny is the same not_found (no existence
+      // leak) except the authority refusal. IL2CD-6: the route also honours the
+      // wildcard operator credential; a tool turn never carries one, so the tool is
+      // never LOOSER than its route.
       const notFound = toolError('not_found', `No conversation found for "${conversationId}".`);
       const meta = await getConversationMeta(scope.tenantId, conversationId);
       if (!meta || !(await isVisibleToAsync(meta, scope.tenantId, scope.actingUserId))) return notFound;
-      if (meta.ownerUserId && meta.ownerUserId !== scope.actingUserId) {
-        return toolError('forbidden', 'Only the conversation owner may draft its mission contract.');
+      const authority = await ledgerAuthorityOf(scope.tenantId, meta, scope.actingUserId, scope.personalTenant ? { personalTenant: scope.personalTenant } : {});
+      if (!authority.mayEdit) {
+        return toolError('forbidden', 'Only the conversation owner, with write access to this workspace, may draft its mission contract.');
       }
       // Don't silently clobber a live contract — an approved mission must be
       // revoked by the owner before a new draft.
       const existing = await getLedger(scope.tenantId, conversationId);
-      if (existing?.status === 'approved') {
-        return toolError('conflict', 'An approved mission already governs this conversation — the owner must revoke it before drafting a new one.');
+      try { assertTransition(existing?.status, 'draft'); } catch (err) {
+        if (err instanceof OpenwopError) return toolError('conflict', 'An approved mission already governs this conversation — the owner must revoke it before drafting a new one.');
+        throw err;
       }
       // Closed-world validation: invalid model output is a TYPED defect fed back to
       // the loop (its ONE bounded repair), never success-with-empty.
+      // ADR 0856 D2 — in a project's conversation the draft starts from the team
+      // ledger and may only narrow it (a dropped restriction is a typed defect).
+      const inherited = await missionInheritanceFor(scope.tenantId, conversationId, scope.actingUserId);
       let fields;
       try {
-        fields = validateLedgerInput(input);
+        fields = validateLedgerInput(withInheritedDefaults(input, inherited));
+        assertKeepsInherited(fields, inherited);
       } catch (err) {
         return toolError('validation_error', err instanceof Error ? err.message : 'Invalid mission fields.');
       }
       // Persist a DRAFT only — proposedBy 'extractor' (the chat agent authored it);
       // approval stays an explicit human action.
-      const ledger: IntentLedger = {
-        ledgerId: existing?.ledgerId ?? `il-${Date.now().toString(36)}`,
+      // ADR 0896 D1 — a CAS write that bumps the revision, so an owner reviewing the
+      // previous draft cannot approve this one without seeing it.
+      const ledger = await writeLedger(existing, {
+        ledgerId: existing?.ledgerId ?? newLedgerId(),
         tenantId: scope.tenantId,
         conversationId,
         ...fields,
         status: 'draft',
         proposedBy: 'extractor',
         createdAt: existing?.createdAt ?? new Date().toISOString(),
-      };
-      await saveLedger(ledger);
+      } satisfies IntentLedger);
+      if (!ledger) return toolError('conflict', 'The mission changed while drafting — read it again with intent-ledger.get, then redraft.');
       return {
         content: JSON.stringify({
           drafted: true,
@@ -172,7 +193,9 @@ export function registerIntentLedgerAgentTools(): void {
             forbidden: ledger.forbidden,
             requireApproval: ledger.requireApproval,
             successCriteria: ledger.successCriteria,
+            ...(ledger.expiresAtRelMs !== undefined ? { expiresAtRelMs: ledger.expiresAtRelMs } : {}),
             status: ledger.status,
+            revision: ledgerRevision(ledger),
           },
           note: 'Draft saved. It is NOT active until the user reviews and Approves it in the Mission panel.',
         }),

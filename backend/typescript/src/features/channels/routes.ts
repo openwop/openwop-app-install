@@ -4,10 +4,13 @@
  */
 import type { Request } from 'express';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
-import { tenantOf } from '../featureRoute.js';
+import { tenantOf, callerHoldsTenantScope } from '../featureRoute.js';
 import { OpenwopError } from '../../types.js';
 import { encodeMessageCursor, decodeMessageCursor, MAX_MESSAGE_PAGE } from '../../host/messageCursor.js';
-import { addChannelAgent, addChannelMember, archiveChannel, assertChannelAccess, channelRoster, createChannel, getChannel, isChannelOwner, joinChannel, leaveChannel, listChannelsForViewer, listChannelMessages, postChannelMessage, removeChannelAgent, removeChannelMember, renameChannel, setChannelDescription, setChannelAgentPolicy, setChannelProject, resolveChannelCatchup } from './channelService.js';
+import { addChannelAgent, addChannelMember, archiveChannel, assertChannelAccess, canAccessChannel, channelPostRefusal, channelRoster, createChannel, getChannel, isChannelManager, isChannelOwner, joinChannel, leaveChannel, listChannelsForViewer, listChannelMessages, postChannelMessage, removeChannelAgent, removeChannelMember, renameChannel, setChannelDescription, setChannelAgentPolicy, setChannelPostingPolicy, setChannelProject, resolveChannelCatchup } from './channelService.js';
+import { channelAuthorityOf } from '../../host/channelAuthority.js';
+import { getConversationMeta } from '../../host/conversationStore.js';
+import type { SseChannel } from '../../host/sseChannel.js';
 import { startWorkflowRun } from '../../host/runStarter.js';
 import { CHANNEL_TURN_WORKFLOW_ID, CHANNEL_MANAGED_CREDENTIAL_REF } from './channelTurnWorkflow.js';
 import { resolveSubjectDisplays } from '../../host/subjectDisplay.js';
@@ -36,8 +39,40 @@ function caller(req: Request): string | undefined {
 /** ADR 0126 Phase 4 / RFC 0110 — channel presence is OFF by default. An operator opts in
  *  ONLY on a topology that can honor it (single-instance / sticky-session), which is also
  *  what flips the `channelPresence` capability advertisement (discovery). */
+/** ADR 0897 — how long a closed presence stream keeps its viewer present, so a
+ *  bounded close followed by the reader's reconnect is not seen as a leave. */
+const PRESENCE_LEAVE_GRACE_MS = 5_000;
+
 export function channelPresenceEnabled(): boolean {
   return process.env.OPENWOP_CHANNEL_PRESENCE_ENABLED === 'true';
+}
+
+/** ADR 0879 D5 — a held stream re-asks the open-time question while it lives: may
+ *  this caller still read this channel AND are they still in this workspace (every
+ *  identity spelling, `callerHoldsTenantScope`)? The gate used to run once, at open,
+ *  so a member removed from a private room — or from the workspace — kept receiving
+ *  frames for as long as the connection held. Runs before every frame and on a 15 s
+ *  tick (an idle room sends no frames); on refusal the stream closes, unwritten. */
+function makeAccessWatch(req: Request, sse: SseChannel, tenantId: string, channelId: string, caller: string | undefined): () => Promise<boolean> {
+  const stillAllowed = async (): Promise<boolean> => {
+    try {
+      const meta = await getConversationMeta(tenantId, channelId);
+      if (!meta || meta.type !== 'channel' || !canAccessChannel(meta, caller)) return false;
+      return await callerHoldsTenantScope(req, tenantId, 'workspace:read');
+    } catch {
+      return false;
+    }
+  };
+  const check = async (): Promise<boolean> => {
+    if (sse.closed) return false;
+    if (await stillAllowed()) return true;
+    sse.close();
+    return false;
+  };
+  const tick = setInterval(() => { void check(); }, 15_000);
+  tick.unref?.();
+  sse.onClose(() => clearInterval(tick));
+  return check;
 }
 
 export function registerChannelRoutes(deps: RouteDeps): void {
@@ -64,10 +99,16 @@ export function registerChannelRoutes(deps: RouteDeps): void {
   app.get(BASE, async (req, res, next) => {
     // ADR 0154 FU-4 — caller-scoped discovery: public channels + the caller's own
     // private memberships (never leaks other private channels), each `joined`-tagged.
-    try { await gate(req); res.json({ channels: await listChannelsForViewer(tenantOf(req), caller(req)) }); } catch (err) { next(err); }
+    // ADR 0879 D1 (grade-ux CH2UX-8) — `viewerCanCreate` lets the rail hide "New
+    // channel" from a Viewer instead of offering a button that 403s.
+    try {
+      await gate(req);
+      const [channels, authority] = await Promise.all([listChannelsForViewer(tenantOf(req), caller(req)), channelAuthorityOf(req)]);
+      res.json({ channels, viewerCanCreate: authority.canWrite });
+    } catch (err) { next(err); }
   });
   app.post(BASE, async (req, res, next) => {
-    try { await gate(req); res.status(201).json({ channel: await createChannel(tenantOf(req), caller(req), (req.body ?? {}) as Record<string, unknown>) }); } catch (err) { next(err); }
+    try { await gate(req); res.status(201).json({ channel: await createChannel(tenantOf(req), caller(req), (req.body ?? {}) as Record<string, unknown>, await channelAuthorityOf(req)) }); } catch (err) { next(err); }
   });
   // ADR 0154 FU-4 — self-join a PUBLIC channel (the caller adds themselves; NOT
   // owner-gated). Private channels 404-mask (no existence leak).
@@ -87,22 +128,39 @@ export function registerChannelRoutes(deps: RouteDeps): void {
       // ADR 0192 Phase-2 amendment — `viewerSubjectRef` lets the feed align the
       // caller's OWN posts (other humans also post role:'user'; without knowing
       // "me", their messages would render as yours).
-      res.json({ channel: { ...meta, viewerIsOwner: isChannelOwner(meta, c), roster: await channelRoster(tenantId, meta), ...(c ? { viewerSubjectRef: userRef(c) } : {}) } });
+      // ADR 0879 — server-computed manage/post flags: the owner OR a workspace admin
+      // manages (D3), only with `workspace:write` (D1); posting also honours the
+      // announcement policy (D8). The FE gates its affordances on these, never on a
+      // reconstructed role.
+      const authority = await channelAuthorityOf(req);
+      const viewerCanManage = isChannelManager(meta, c, authority) && authority.canWrite;
+      const viewerCanPost = authority.canWrite && channelPostRefusal(meta, c, authority) === null;
+      // `viewerCanWrite` (CH2UX-9) — the ROLE alone, so the client can tell a Viewer
+      // (reads only) from an Editor in an announcement channel (may still react).
+      res.json({ channel: { ...meta, viewerIsOwner: isChannelOwner(meta, c), viewerCanManage, viewerCanPost, viewerCanWrite: authority.canWrite, roster: await channelRoster(tenantId, meta), ...(c ? { viewerSubjectRef: userRef(c) } : {}) } });
     } catch (err) { next(err); }
   });
   app.patch(`${BASE}/:channelId`, async (req, res, next) => {
     try {
       await gate(req);
-      const b = (req.body ?? {}) as { name?: unknown; description?: unknown };
+      const b = (req.body ?? {}) as { name?: unknown; description?: unknown; postingPolicy?: unknown };
       // ADR 0192 D4 — rename and/or set the description (owner-gated in the service).
-      if (typeof b.name !== 'string' && typeof b.description !== 'string') {
-        throw new OpenwopError('validation_error', '`name` or `description` is required.', 400, { field: 'name' });
+      // ADR 0879 D8 — and/or the posting policy (an announcement channel).
+      if (typeof b.name !== 'string' && typeof b.description !== 'string' && b.postingPolicy === undefined) {
+        throw new OpenwopError('validation_error', '`name`, `description` or `postingPolicy` is required.', 400, { field: 'name' });
       }
+      if (b.postingPolicy !== undefined && b.postingPolicy !== 'everyone' && b.postingPolicy !== 'managers') {
+        throw new OpenwopError('validation_error', '`postingPolicy` MUST be "everyone" or "managers".', 400, { field: 'postingPolicy' });
+      }
+      const authority = await channelAuthorityOf(req);
       let channel = typeof b.name === 'string'
-        ? await renameChannel(tenantOf(req), req.params.channelId, caller(req), b.name)
+        ? await renameChannel(tenantOf(req), req.params.channelId, caller(req), authority, b.name)
         : undefined;
       if (typeof b.description === 'string') {
-        channel = await setChannelDescription(tenantOf(req), req.params.channelId, caller(req), b.description);
+        channel = await setChannelDescription(tenantOf(req), req.params.channelId, caller(req), authority, b.description);
+      }
+      if (b.postingPolicy === 'everyone' || b.postingPolicy === 'managers') {
+        channel = await setChannelPostingPolicy(tenantOf(req), req.params.channelId, caller(req), authority, b.postingPolicy);
       }
       res.json({ channel });
     } catch (err) { next(err); }
@@ -115,11 +173,11 @@ export function registerChannelRoutes(deps: RouteDeps): void {
       if (raw.projectId !== null && (typeof raw.projectId !== 'string' || raw.projectId.trim().length === 0)) {
         throw new OpenwopError('validation_error', '`projectId` must be a project id, or null to unbind.', 400, { field: 'projectId' });
       }
-      res.json({ channel: await setChannelProject(tenantOf(req), req.params.channelId, caller(req), raw.projectId === null ? null : raw.projectId.trim()) });
+      res.json({ channel: await setChannelProject(tenantOf(req), req.params.channelId, caller(req), await channelAuthorityOf(req), raw.projectId === null ? null : raw.projectId.trim()) });
     } catch (err) { next(err); }
   });
   app.post(`${BASE}/:channelId/archive`, async (req, res, next) => {
-    try { await gate(req); await archiveChannel(tenantOf(req), req.params.channelId, caller(req)); res.status(204).end(); } catch (err) { next(err); }
+    try { await gate(req); await archiveChannel(tenantOf(req), req.params.channelId, caller(req), await channelAuthorityOf(req)); res.status(204).end(); } catch (err) { next(err); }
   });
   // ADR 0126 Phase 2 — membership-gated post + read (the gate is in the service).
   app.get(`${BASE}/:channelId/messages`, async (req, res, next) => {
@@ -185,10 +243,14 @@ export function registerChannelRoutes(deps: RouteDeps): void {
       await gate(req);
       const tenantId = tenantOf(req);
       const channelId = req.params.channelId;
-      await assertChannelAccess(tenantId, channelId, caller(req)); // default-deny non-members (403/404)
+      const c = caller(req);
+      await assertChannelAccess(tenantId, channelId, c); // default-deny non-members (403/404)
       const sse = openSseChannel(req, res, { heartbeatMs: 15_000 });
+      const stillAllowed = makeAccessWatch(req, sse, tenantId, channelId, c);
       const unsub = await subscribeConversationMessages(channelId, (messageId) => {
-        if (!sse.closed) res.write(`event: channel.message\ndata: ${JSON.stringify({ messageId })}\n\n`);
+        void stillAllowed().then((ok) => {
+          if (ok && !sse.closed) res.write(`event: channel.message\ndata: ${JSON.stringify({ messageId })}\n\n`);
+        });
       });
       // If the client disconnected DURING the await, openSseChannel's teardown
       // already ran (and is idempotent — it won't re-run), so the onClose hook set
@@ -204,13 +266,13 @@ export function registerChannelRoutes(deps: RouteDeps): void {
       const channelId = req.params.channelId;
       const callerId = caller(req);
       const content = (req.body as { content?: unknown })?.content;
-      const result = await postChannelMessage(tenantId, channelId, callerId, content);
+      const result = await postChannelMessage(tenantId, channelId, callerId, content, await channelAuthorityOf(req));
       res.status(201).json({ messageId: result.messageId });
       // ADR 0154 Phase 4 — fire-and-forget agent turn for an addressed agent member.
       // Best-effort: never blocks or fails the human post (the helper never throws).
       // ADR 0192 D5 — dispatch reads the EXTRACTED text (an envelope post's text
       // parts), not the raw serialized content.
-      void dispatchChannelAgentTurns(deps, tenantId, channelId, result.messageId, result.text, callerId);
+      void dispatchChannelAgentTurns(deps, tenantId, channelId, result.messageId, result.text, callerId, req.personalTenant);
     } catch (err) { next(err); }
   });
   app.post(`${BASE}/:channelId/members`, async (req, res, next) => {
@@ -219,12 +281,13 @@ export function registerChannelRoutes(deps: RouteDeps): void {
       const b = (req.body ?? {}) as { userId?: unknown; agentId?: unknown };
       // ADR 0154 Phase 4 — an agent can be added as a member (then addressed to
       // dispatch a turn); a user member is the ADR 0126 path.
+      const authority = await channelAuthorityOf(req);
       if (typeof b.agentId === 'string') {
-        res.json({ channel: await addChannelAgent(tenantOf(req), req.params.channelId, caller(req), b.agentId) });
+        res.json({ channel: await addChannelAgent(tenantOf(req), req.params.channelId, caller(req), authority, b.agentId) });
         return;
       }
       if (typeof b.userId !== 'string') throw new OpenwopError('validation_error', '`userId` or `agentId` is required.', 400, { field: 'userId' });
-      res.json({ channel: await addChannelMember(tenantOf(req), req.params.channelId, caller(req), b.userId) });
+      res.json({ channel: await addChannelMember(tenantOf(req), req.params.channelId, caller(req), authority, b.userId) });
     } catch (err) { next(err); }
   });
   // ADR 0192 D3 — self-serve leave. MUST be registered BEFORE the
@@ -235,11 +298,11 @@ export function registerChannelRoutes(deps: RouteDeps): void {
     try { await gate(req); await leaveChannel(tenantOf(req), req.params.channelId, caller(req)); res.status(204).end(); } catch (err) { next(err); }
   });
   app.delete(`${BASE}/:channelId/members/:userId`, async (req, res, next) => {
-    try { await gate(req); res.json({ channel: await removeChannelMember(tenantOf(req), req.params.channelId, caller(req), req.params.userId) }); } catch (err) { next(err); }
+    try { await gate(req); res.json({ channel: await removeChannelMember(tenantOf(req), req.params.channelId, caller(req), await channelAuthorityOf(req), req.params.userId) }); } catch (err) { next(err); }
   });
   // ADR 0154 Phase 4 — remove an agent member (owner-gated).
   app.delete(`${BASE}/:channelId/agents/:agentId`, async (req, res, next) => {
-    try { await gate(req); res.json({ channel: await removeChannelAgent(tenantOf(req), req.params.channelId, caller(req), req.params.agentId) }); } catch (err) { next(err); }
+    try { await gate(req); res.json({ channel: await removeChannelAgent(tenantOf(req), req.params.channelId, caller(req), await channelAuthorityOf(req), req.params.agentId) }); } catch (err) { next(err); }
   });
   // ADR 0202 D1 — set an agent member's reply policy (owner-gated).
   app.put(`${BASE}/:channelId/agents/:agentId/policy`, async (req, res, next) => {
@@ -249,7 +312,7 @@ export function registerChannelRoutes(deps: RouteDeps): void {
       if (policy !== 'all' && policy !== 'mention') {
         throw new OpenwopError('validation_error', '`policy` MUST be "all" or "mention".', 400, { field: 'policy' });
       }
-      res.json({ channel: await setChannelAgentPolicy(tenantOf(req), req.params.channelId, caller(req), req.params.agentId, policy) });
+      res.json({ channel: await setChannelAgentPolicy(tenantOf(req), req.params.channelId, caller(req), await channelAuthorityOf(req), req.params.agentId, policy) });
     } catch (err) { next(err); }
   });
   // ADR 0202 D2 — AI catch-up: fire the channel-turn workflow WITHOUT a
@@ -262,7 +325,7 @@ export function registerChannelRoutes(deps: RouteDeps): void {
       await gate(req);
       const tenantId = tenantOf(req);
       const channelId = req.params.channelId;
-      const { agentId, task, unreadCount } = await resolveChannelCatchup(tenantId, channelId, caller(req));
+      const { agentId, task, unreadCount } = await resolveChannelCatchup(tenantId, channelId, caller(req), await channelAuthorityOf(req));
       const runId = await startWorkflowRun(deps, {
         tenantId,
         workflowId: CHANNEL_TURN_WORKFLOW_ID,
@@ -290,7 +353,12 @@ export function registerChannelRoutes(deps: RouteDeps): void {
         if (!sse.closed) res.write(`event: channel.presence\ndata: ${JSON.stringify(snap)}\n\n`);
       };
       const leave = joinPresence(channelId, ref, send);
-      sse.onClose(leave);
+      // ADR 0897 — the stream now ends every few minutes and the reader
+      // reconnects within ~1 s; leaving only after a grace keeps a reconnecting
+      // viewer from blinking out of everyone else's presence. The reconnect
+      // joins first, so the count never touches zero.
+      sse.onClose(() => { setTimeout(leave, PRESENCE_LEAVE_GRACE_MS).unref?.(); });
+      makeAccessWatch(req, sse, tenantOf(req), channelId, req.userId ?? req.principal?.principalId); // ADR 0879 D5 — the 15 s re-check
       send(snapshotOf(channelId)); // immediate first frame
     } catch (err) { next(err); }
   });

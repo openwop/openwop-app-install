@@ -11,6 +11,7 @@ import type { AddressInfo } from 'node:net';
 import { getSetCookies } from './headerCookies.js';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
+import { createMember } from '../src/host/accessControlService.js';
 
 const CH = '/host/openwop-app/channels';
 const SESS = '/host/openwop-app/chat/sessions';
@@ -47,6 +48,11 @@ async function login(name: string): Promise<{ c: Client; userId: string }> {
   const c = client();
   const r = await c.post('/host/openwop-app/test/login', { email: `adr0195-${name}-${Date.now()}-${n++}@acme.test`, displayName: `${name} P`, tenantId: TENANT });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
+  // ADR 0879 D1 — a co-tenant login gets no member row from the seam (it founds the
+  // workspace for the FIRST login only), and channel writes now ask the ROLE. Make
+  // every person a real Editor of the workspace, the production shape (idempotent: a
+  // founder keeps their owner row).
+  await createMember({ orgId: TENANT, tenantId: TENANT, displayName: name, subject: r.body.user.userId as string, roles: ['editor'] });
   return { c, userId: r.body.user.userId as string };
 }
 
@@ -84,7 +90,7 @@ describe('ADR 0195 D1 — edit (server-derived editedAt, channel-aware authz)', 
     expect(meta2.editedAt).toBe(meta1.editedAt); // carried forward, not re-stamped
   });
 
-  it('a non-author member cannot edit; the channel owner can', async () => {
+  it('a non-author member cannot edit; neither can the channel owner, who may delete', async () => {
     const { c: ownerC } = await login('owner');
     const { c: memberC } = await login('member');
     const id = await makeChannel(ownerC);
@@ -95,8 +101,10 @@ describe('ADR 0195 D1 — edit (server-derived editedAt, channel-aware authz)', 
     expect((await otherC.post(`${CH}/${id}/join`)).status).toBe(200);
     expect((await otherC.put(`${SESS}/${id}/messages/${mid}`, { content: 'tampered' })).status).toBe(403);
 
-    // The channel owner may moderate (edit) a member's message.
-    expect((await ownerC.put(`${SESS}/${id}/messages/${mid}`, { content: 'moderated' })).status).toBe(200);
+    // ADR 0879 D2 — the owner moderates by DELETE, never by rewriting a post that
+    // keeps its author's name (this used to assert 200).
+    expect((await ownerC.put(`${SESS}/${id}/messages/${mid}`, { content: 'moderated' })).status).toBe(403);
+    expect((await ownerC.del(`${SESS}/${id}/messages/${mid}`)).status).toBe(204);
   });
 
   it('a PUBLIC-channel author who never joined can edit + react to their own post (the visibility fix)', async () => {

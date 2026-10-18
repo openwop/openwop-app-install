@@ -109,7 +109,11 @@ export async function optIn(tenantId: string, ownerSubject: string, displayName:
 export async function optOut(tenantId: string, ownerSubject: string): Promise<void> {
   const row = await optIns.get(`${tenantId}::${ownerSubject}`);
   if (row && !row.revokedAt) {
-    await optIns.put({ ...row, revokedAt: nowIso() });
+    // KTENG-1 — the opt-in was the only consent to SHOW `displayName` (user free
+    // text). Withdrawing it drops the name too: every reader already skips a
+    // revoked row, so nothing needed it, and keeping it meant only a DSAR removed
+    // it. The row stays (opt-out history); a re-opt-in supplies a fresh name.
+    await optIns.put({ ...row, displayName: '', revokedAt: nowIso() });
     log.info('kicktodo_leaderboard_opt_out', { tenantId });
   }
 }
@@ -256,11 +260,11 @@ export async function evaluateAwards(ci: CheckIn): Promise<KicktodoAward[]> {
       enrollmentId: ci.enrollmentId,
       earnedAt: nowIso(),
     };
-    const key = `${award.tenantId}::${award.ownerSubject}::${award.awardId}`;
-    if (!(await awards.get(key))) {
-      await awards.put(award);
-      earned.push(award);
-    }
+    // KTENG-2 / KTE-3 — insert-once, not get-then-put. Two concurrent observers
+    // for the same check-in both read "absent" under get→put and both reported
+    // the award as newly earned, so `celebrateAwards` notified twice. The atomic
+    // insert has exactly one winner; only the winner reports (and so announces) it.
+    if (await awards.putIfAbsent(award)) earned.push(award);
   };
   const all = await listCheckIns(ci.tenantId, ci.enrollmentId);
   if (all.length >= 1) await put('first-check-in');

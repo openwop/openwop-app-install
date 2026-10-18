@@ -12,6 +12,9 @@
  */
 import { validateComponentTree, getCanvasComponent, type ComponentTreeError } from '../../host/canvasComponentCatalog.js';
 import { APP_BUILDER_CANVAS_TYPE } from './componentCatalog.js';
+import Ajv2020 from 'ajv/dist/2020.js';
+import type { ValidateFunction } from 'ajv';
+import { appBuilderSchema } from './artifactTypes.js';
 
 interface Node { type?: unknown; props?: Record<string, unknown>; children?: unknown; actions?: unknown; bindings?: unknown }
 interface ScreenIn { id?: unknown; components?: unknown; x?: unknown; y?: unknown }
@@ -179,6 +182,7 @@ export function validateAppDoc(doc: unknown): AppDocValidation {
   };
   validateFacets(d, errors, refs);
   crossRefFacets(d, warnings, refs);
+  unknownKeys(doc, errors);
 
   // Depth + node-count caps, enforced BEFORE the recursive catalog walk —
   // componentDefinitions roots count toward the SAME document budget.
@@ -296,6 +300,51 @@ export function validateAppDoc(doc: unknown): AppDocValidation {
   });
 
   return { errors, warnings };
+}
+
+/* ── ABR-GATES-1 — unknown keys, refused exactly where the emit schema refuses them ──
+ * The hand mirror above checks every value constraint, but it never refused an
+ * UNKNOWN key, which the artifact schema does at every level
+ * (`additionalProperties:false`). So a PATCH, a plugin write or a repair could
+ * persist a document the artifact path would refuse, and the extra key then
+ * rode into every export. The schema is compiled once and its
+ * `additionalProperties` verdicts are taken from it directly, so the set of
+ * allowed keys has one owner (artifactTypes.ts) and cannot drift.
+ *
+ * ONLY that keyword is taken. The schema's `required` lists are stricter than
+ * this validator on purpose: a screen with no `name` yet is a legal mid-edit
+ * state on the editor path (and the hand mirror owns value constraints with
+ * error messages the editor surfaces). MEASURED: running every schema keyword
+ * here failed 17 existing editor-path tests on `required`. */
+let schemaValidator: ValidateFunction | null = null;
+function compiledSchema(): ValidateFunction {
+  if (!schemaValidator) {
+    const ajv = new Ajv2020({ allErrors: true, strict: false });
+    schemaValidator = ajv.compile(appBuilderSchema());
+  }
+  return schemaValidator;
+}
+
+/** `/screens/0/components/1` → `screens[0].components[1]` (the hand mirror's form). */
+function toDotPath(instancePath: string): string {
+  return instancePath.split('/').slice(1)
+    .map((seg) => seg.replace(/~1/g, '/').replace(/~0/g, '~'))
+    .reduce((acc, seg) => (/^\d+$/.test(seg) ? `${acc}[${seg}]` : acc ? `${acc}.${seg}` : seg), '');
+}
+
+function unknownKeys(doc: unknown, errors: ComponentTreeError[]): void {
+  const validate = compiledSchema();
+  if (validate(doc)) return;
+  const seen = new Set<string>();
+  for (const e of validate.errors ?? []) {
+    if (e.keyword !== 'additionalProperties') continue;
+    const key = String((e.params as { additionalProperty?: unknown }).additionalProperty ?? '');
+    const base = toDotPath(e.instancePath);
+    const path = base ? `${base}.${key}` : key;
+    if (seen.has(path)) continue;
+    seen.add(path);
+    errors.push({ path, code: 'unknown_prop', message: `unknown field '${key.slice(0, 60)}' — the canvas.app-builder schema does not define it` });
+  }
 }
 
 /* ── ADR 0343 — the top-level facet validators (hard mirror + ref collection) ── */

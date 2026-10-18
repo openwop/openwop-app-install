@@ -27,7 +27,7 @@ import { isOwnPersonalWorkspace } from '../host/requestSubject.js';
 import { listReviews, getReview, type ReviewStatus, type ReviewAuthCtx } from '../host/reviewProjection.js';
 import { claimApproval, rejectApproval } from '../host/approvalDecision.js';
 import { requireInterruptDecider, resolveAndResume, reviewerOf, validateResumeValue } from './interrupts.js';
-import { callerHoldsTenantScope } from '../features/featureRoute.js';
+import { callerHoldsTenantScope, callerSubjectSpellings } from '../features/featureRoute.js';
 
 interface Deps {
   storage: Storage;
@@ -126,7 +126,7 @@ export function registerReviewRoutes(app: Express, deps: Deps): void {
         const bodyHash = (req.body as { expectedDefinitionHash?: unknown } | undefined)?.expectedDefinitionHash;
         // ADR 0862 D1 — the assistant-action sibling (a different hash over a different object).
         const contentHash = (req.body as { expectedContentHash?: unknown } | undefined)?.expectedContentHash;
-        const decideCtx = { tenantId: ctx.tenantId, ...(ctx.subjectRef ? { decidedBy: ctx.subjectRef } : {}), ...(noteOf(req) !== undefined ? { note: noteOf(req) } : {}), ...(typeof bodyHash === 'string' && bodyHash.trim().length > 0 ? { expectedDefinitionHash: bodyHash.trim() } : {}), ...(typeof contentHash === 'string' && contentHash.trim().length > 0 ? { expectedContentHash: contentHash.trim() } : {}), ...(isSuperadmin(req) ? { decidedBySuperadmin: true } : {}), ...(req.principal?.tenants?.includes('*') ? { decidedByWildcardOperator: true } : {}), ...(isOwnPersonalWorkspace(req) ? { decidedByPersonalOwner: true } : {}) };
+        const decideCtx = { tenantId: ctx.tenantId, ...(ctx.subjectRef ? { decidedBy: ctx.subjectRef } : {}), ...(noteOf(req) !== undefined ? { note: noteOf(req) } : {}), ...(typeof bodyHash === 'string' && bodyHash.trim().length > 0 ? { expectedDefinitionHash: bodyHash.trim() } : {}), ...(typeof contentHash === 'string' && contentHash.trim().length > 0 ? { expectedContentHash: contentHash.trim() } : {}), ...(isSuperadmin(req) ? { decidedBySuperadmin: true } : {}), ...(req.principal?.tenants?.includes('*') ? { decidedByWildcardOperator: true } : {}), ...(isOwnPersonalWorkspace(req) ? { decidedByPersonalOwner: true } : {}), decidedBySpellings: await callerSubjectSpellings(req) };
         const result = action === 'approve'
           ? await claimApproval(deps, decideCtx, review.approvalId)
           : await rejectApproval(deps, decideCtx, review.approvalId);

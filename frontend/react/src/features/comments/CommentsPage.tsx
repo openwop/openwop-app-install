@@ -46,6 +46,7 @@ const RESOURCE_TYPE_KEY: Record<ResourceType, string> = {
   canvas_document: 'resourceTypeCanvasDocument',
   priority_idea: 'resourceTypePriorityIdea',
   creative_brief: 'resourceTypeCreativeBrief',
+  canvas_slides: 'resourceTypeCanvasSlides',
 };
 const NO_RESOURCES_KEY: Record<ResourceType, string> = {
   cms_page: 'noResourcesCmsPage',
@@ -54,6 +55,7 @@ const NO_RESOURCES_KEY: Record<ResourceType, string> = {
   canvas_document: 'noResourcesCanvasDocument',
   priority_idea: 'noResourcesPriorityIdea',
   creative_brief: 'noResourcesCreativeBrief',
+  canvas_slides: 'noResourcesCanvasSlides',
 };
 /** Does this type have a resource picker on this page? */
 const isPickable = (rt: ResourceType): boolean => (RESOURCE_TYPES as readonly string[]).includes(rt);
@@ -246,6 +248,15 @@ export function CommentsPage(): JSX.Element {
                 <span className="chip chip--muted">{t(RESOURCE_TYPE_KEY[resourceType])}</span>
                 <code className="u-min-w-0">{resourceId}</code>
               </div>
+              {/* ADR 0886 D5 (SL2UX-4) — a slide thread links back to its slide:
+                  the editor honours `?frame=` and selects it. */}
+              {resourceType === 'canvas_slides' && resourceId ? (
+                <Button variant="secondary" size="sm" onClick={() => {
+                  const [deckId = '', slideId] = resourceId.split('#');
+                  const q = new URLSearchParams({ org: orgId, ...(slideId ? { frame: slideId } : {}) });
+                  navigate(`/slides/${encodeURIComponent(deckId)}?${q.toString()}`);
+                }}>{t('openSlide')}</Button>
+              ) : null}
               <Button variant="quiet" size="sm" onClick={() => { linkedId.current = ''; setResourceId(''); setResourceType('cms_page'); }}>{t('backToPicker')}</Button>
             </div>
           ) : (

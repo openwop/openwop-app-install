@@ -24,11 +24,12 @@ import { OpenwopError } from '../../types.js';
 import { fireSubscriptionInvoicePaid } from './subscriptionInvoiceHook.js';
 import {
   createStripeCheckoutSession, getStripeCheckoutSession, getStripeSubscription,
-  createStripeTenantCustomer, isPermanentStripeReadError, isMissingStripeCustomerError,
+  createStripeTenantCustomer, isPermanentStripeReadError, isMissingStripeCustomerError, STRIPE_API_VERSION,
 } from './stripeApi.js';
 import { registerKvAgeOut } from '../../host/kvAgeOut.js';
 import { recordLedgerCount } from '../../host/paywallFunnel.js';
 import { knownBundleIds, bundleFeatureIds, readBundleCatalog, isSellableBundleFeature } from '../../host/featureBundles.js';
+import { enableBundleForTenant } from '../../host/featureBundleActivation.js';
 import { displayablePlanLimits } from '../../host/planLimitsSeam.js';
 import { listToggleDefaults, getToggleDefault } from '../../host/featureToggles/registry.js';
 import { createLogger } from '../../observability/logger.js';
@@ -442,6 +443,83 @@ export function trialDaysFor(target: { plan: PlanTier } | { bundleId: string }):
   return trialDaysMap()['plan' in target ? `plan:${target.plan}` : `bundle:${target.bundleId}`];
 }
 
+// ── ADR 0890: checkout options (tax, promotion codes, no-card trials) ─────────
+/** Who computes tax on a checkout: nobody (the default), Stripe Tax on this
+ *  account, or Stripe Managed Payments as merchant of record. */
+export type CheckoutTaxMode = 'none' | 'automatic' | 'managed';
+/** Whether a trial checkout collects a card up front (the default) or only when
+ *  Stripe needs one. */
+export type TrialCardMode = 'required' | 'if_required';
+export interface CheckoutOptions { tax: CheckoutTaxMode; allowPromotionCodes: boolean; trialCard: TrialCardMode }
+
+/** One checkout-option env var: a JSON object keyed `plan:<tier>` / `bundle:<id>`
+ *  / `*` (every plan and bundle), or a bare value that means `*`. A value the
+ *  knob does not accept is dropped with a warn, so a typo falls back to the
+ *  default (today's session), never to a guessed mode.
+ *  OPENWOP_BILLING_CHECKOUT_TAX = {"bundle:crm":"managed","*":"automatic"} | automatic */
+const checkoutOptionCache = new Map<string, { raw: string | undefined; value: Record<string, unknown> }>();
+function checkoutOptionMap(envName: string, accepts: (v: unknown) => boolean): Record<string, unknown> {
+  const raw = process.env[envName];
+  const cached = checkoutOptionCache.get(envName);
+  if (cached && cached.raw === raw) return cached.value;
+  const value: Record<string, unknown> = {};
+  const trimmed = raw?.trim();
+  if (trimmed) {
+    let entries: [string, unknown][] = [];
+    if (trimmed.startsWith('{')) {
+      try { entries = Object.entries(JSON.parse(trimmed) as Record<string, unknown>); }
+      catch { log.warn(`${envName} is not valid JSON — default checkout`); }
+    } else {
+      entries = [['*', trimmed === 'true' ? true : trimmed === 'false' ? false : trimmed]];
+    }
+    for (const [key, v] of entries) {
+      if (accepts(v)) value[key] = v;
+      else log.warn('billing checkout option has a value this knob does not accept — ignored', { envName, key });
+    }
+  }
+  checkoutOptionCache.set(envName, { raw, value });
+  return value;
+}
+function checkoutOptionFor(envName: string, accepts: (v: unknown) => boolean, target: { plan: PlanTier } | { bundleId: string }): unknown {
+  const map = checkoutOptionMap(envName, accepts);
+  const key = 'plan' in target ? `plan:${target.plan}` : `bundle:${target.bundleId}`;
+  return key in map ? map[key] : map['*'];
+}
+const TAX_MODES: readonly unknown[] = ['none', 'automatic', 'managed'];
+const TRIAL_CARD_MODES: readonly unknown[] = ['required', 'if_required'];
+const isTaxMode = (v: unknown) => TAX_MODES.includes(v);
+const isTrialCardMode = (v: unknown) => TRIAL_CARD_MODES.includes(v);
+const isBool = (v: unknown) => typeof v === 'boolean';
+/** The checkout options for a plan tier or a bundle. Every knob unset ⇒
+ *  `{tax:'none', allowPromotionCodes:false, trialCard:'required'}`, which sends
+ *  exactly the session this host sent before ADR 0890. */
+export function checkoutOptionsFor(target: { plan: PlanTier } | { bundleId: string }): CheckoutOptions {
+  return {
+    tax: (checkoutOptionFor('OPENWOP_BILLING_CHECKOUT_TAX', isTaxMode, target) as CheckoutTaxMode | undefined) ?? 'none',
+    allowPromotionCodes: checkoutOptionFor('OPENWOP_BILLING_ALLOW_PROMOTION_CODES', isBool, target) === true,
+    trialCard: (checkoutOptionFor('OPENWOP_BILLING_TRIAL_CARD', isTrialCardMode, target) as TrialCardMode | undefined) ?? 'required',
+  };
+}
+/** Stripe GA'd `managed_payments` on Checkout Sessions in API version
+ *  `2026-04-22.dahlia` (it was a `2026-02-25.preview` before that). ADR 0890 open
+ *  question: Stripe's integration guide says basil or later works. This host pins
+ *  clover and does not change the pin, so it warns instead of guessing. */
+export const MANAGED_PAYMENTS_API_VERSION = '2026-04-22.dahlia';
+export function apiVersionPredatesManagedPayments(version: string): boolean {
+  return version.slice(0, 10) < MANAGED_PAYMENTS_API_VERSION.slice(0, 10);
+}
+/** ADR 0890 — the boot check: warn when a `managed` checkout is configured but
+ *  the pinned Stripe API version predates the version that GA'd it. Returns
+ *  whether it warned (tests). */
+export function warnCheckoutConfigAtBoot(apiVersion: string = STRIPE_API_VERSION): boolean {
+  const managed = Object.entries(checkoutOptionMap('OPENWOP_BILLING_CHECKOUT_TAX', isTaxMode)).filter(([, v]) => v === 'managed').map(([k]) => k);
+  if (managed.length === 0 || !apiVersionPredatesManagedPayments(apiVersion)) return false;
+  log.warn('billing: Managed Payments checkout is configured but the Stripe API version predates its GA — test it in a sandbox, or set OPENWOP_STRIPE_API_VERSION', {
+    apiVersion, managedPaymentsGaVersion: MANAGED_PAYMENTS_API_VERSION, keys: managed,
+  });
+  return true;
+}
+
 /** A bundle sold as a ONE-TIME unlock (`mode:'payment'`) rather than a recurring
  *  add-on subscription. Default = recurring. OPENWOP_BILLING_BUNDLE_ONETIME =
  *  ["<bundleId>", …]. A one-time grant has no Stripe subscription, so it never
@@ -631,11 +709,30 @@ async function mutateBundleGrant(tenantId: string, bundleId: string, fn: (g: Bun
       // rewrites the same state) is no transition and counts nothing.
       const transition = grantTransition(prev, grant);
       if (transition) await recordLedgerCount({ tenantId, metric: transition, product: `bundle:${bundleId}` });
+      // ADR 0892 Phase B D7 — a bundle that just became entitled is turned on for
+      // the workspace. After the grant is durable; never fails or reorders the event.
+      if (transition === 'grant-started') await activatePurchasedBundle(tenantId, bundleId);
       return true;
     }
   }
   log.error('bundle-entitlement CAS contention exhausted — throwing so the Stripe event claim releases and redelivery retries', { tenantId, bundleId });
   throw new Error('bundle-entitlement contention exhausted');
+}
+/**
+ * ADR 0892 Phase B D7 — turn a newly granted bundle ON for the tenant, through the
+ * same helper the store's Enable button uses. Best-effort by the money-truth rule:
+ * the grant is already durable, so a refusal (a killed or not-yet-entitled
+ * dependency) or a fault is logged and the webhook carries on. A lapse never
+ * reverses this: the plan gate locks the feature and no data is deleted (ADR 0820 §7).
+ */
+async function activatePurchasedBundle(tenantId: string, bundleId: string): Promise<void> {
+  try {
+    const r = await enableBundleForTenant(bundleId, tenantId, 'billing:bundle-grant');
+    if (r.refused) log.warn('billing: purchased bundle not turned on', { tenantId, bundleId, refused: r.refused });
+    else log.info('billing: purchased bundle turned on', { tenantId, bundleId, enabled: r.enabled, alreadyOn: r.alreadyOn });
+  } catch (err) {
+    log.error('billing: turning on a purchased bundle failed', { tenantId, bundleId, error: err instanceof Error ? err.message : String(err) });
+  }
 }
 /** Statuses of a subscription that was paying (or trialing) and can still recover. */
 const RECOVERABLE_GRANT_STATUSES = new Set(['past_due', 'unpaid', 'paused']);
@@ -1124,6 +1221,10 @@ export async function createCheckoutSession(
     const bundleOneTime = bundleId ? isOneTimeBundle(bundleId) : false;
     const isSub = kind === 'plan' || (kind === 'bundle' && !bundleOneTime);
     const metadata: Record<string, string> = { tenantId, kind, priceId, ...(bundleId ? { bundleId } : {}) };
+    // ADR 0890 — tax / promotion codes / no-card trial, for plans and bundles
+    // (token packs keep the pre-0890 session). Fulfilment is unchanged.
+    const planTier = kind === 'plan' ? planTierForPrice(priceId) : undefined;
+    const options = planTier ? checkoutOptionsFor({ plan: planTier }) : bundleId ? checkoutOptionsFor({ bundleId }) : undefined;
     const open = (customer: string) => createStripeCheckoutSession(stripeKey, {
       priceId,
       mode: isSub ? 'subscription' : 'payment',
@@ -1133,6 +1234,9 @@ export async function createCheckoutSession(
       metadata,
       ...(isSub ? { subscriptionMetadata: metadata } : {}),
       ...(isSub && trialDays ? { trialPeriodDays: trialDays } : {}),
+      ...(options && options.tax !== 'none' ? { tax: options.tax } : {}),
+      ...(options?.allowPromotionCodes ? { allowPromotionCodes: true } : {}),
+      ...(isSub && trialDays && options?.trialCard === 'if_required' ? { trialWithoutCard: true } : {}),
     });
     const customer = await ensureStripeCustomer(tenantId, stripeKey);
     let created: { id: string; url: string };

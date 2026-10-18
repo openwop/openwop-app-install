@@ -8,8 +8,15 @@
  * verified, display reads use the index; dedupe/cap/repoint reads keep the
  * exact scan (D4). `rawCard` writes a row the way pre-0872 code (or an old
  * revision during a deploy overlap) did: no `tenantId`, no marker.
+ *
+ * Red if createCard / a move stops stamping the tenant (probes w37g1-idx-create-stamp,
+ * -idx-move-stamp), a card is created without a board (-idx-board-required), the
+ * pre-reconcile stamping hook is unregistered (-idx-hook), verified reads stop using
+ * the index (-idx-indexed-read), an orphan is stamped/ignored instead of keeping the
+ * index unverified (-idx-orphan-stamped, -idx-skip-resets), or the exact read uses
+ * the index (-idx-exact-read).
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { reconcileTenantIndexesOnce } from '../src/host/tenantIndexAdoption.js';
@@ -37,6 +44,8 @@ beforeEach(async () => {
   initHostExtPersistence(storage);
   await __resetKanbanStore();
 });
+// The scan-count spy must not survive a failed assertion into the next case.
+afterEach(() => { vi.restoreAllMocks(); });
 
 async function rawCard(id: string, boardId: string, columnId = 'todo'): Promise<void> {
   const now = new Date(T0).toISOString();
@@ -87,7 +96,6 @@ describe('ADR 0872 — kanban card tenant index', () => {
     expect(withCards.cards).toHaveLength(2);
     await createCard({ boardId: b.id, columnId: b.columns[0].id, title: 'third' });
     expect(scans(), 'verified reads and sibling ordering never scan every tenant').toBe(0);
-    vi.restoreAllMocks();
   });
 
   it('D3: an orphan (unstampable) card keeps the index unverified, and reads keep scanning', async () => {
@@ -101,7 +109,7 @@ describe('ADR 0872 — kanban card tenant index', () => {
     const scans = countScans();
     expect(await listCards(b.id)).toHaveLength(1);
     expect(scans()).toBeGreaterThan(0);
-    vi.restoreAllMocks();
+    vi.restoreAllMocks(); // stop counting before the repair pass below
 
     // Once the orphan is gone, a later window verifies.
     await storage.kvDelete(`${SCAN_PREFIX}card-orphan`);

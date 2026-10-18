@@ -4,6 +4,12 @@
  * self-contained module): a cache HIT serves ranges without re-decoding, the
  * total byte budget evicts LRU, and no more than the configured number of
  * decodes run at once.
+ *
+ * Sabotage witnesses (w21 /grade-tests): dropping the `lru.set` reddens the hit +
+ * LRU cases; dropping either tenant re-check (hit or under-semaphore) reddens the
+ * foreign-tenant case; turning the recency bump into FIFO, or disabling eviction,
+ * reddens the LRU case; lifting the per-entry cap reddens the cap case; and a
+ * semaphore that always admits reddens the concurrency case.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
@@ -36,7 +42,10 @@ function counterDecode(size: number, counter: { n: number }): () => Promise<Deco
   };
 }
 
-const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+/** Let every already-scheduled microtask/immediate settle (no wall clock). */
+const drain = async (): Promise<void> => {
+  for (let i = 0; i < 5; i++) await new Promise<void>((r) => setImmediate(r));
+};
 
 describe('PODCAST-1 — decode-once LRU', () => {
   it('a cache hit serves without re-decoding (decode runs once for repeated ranges)', async () => {
@@ -55,9 +64,10 @@ describe('PODCAST-1 — decode-once LRU', () => {
   it('a foreign-tenant cache entry is not served (re-checks tenant on hit)', async () => {
     const counter = { n: 0 };
     await getOrDecodeAudio('tok', TENANT, counterDecode(64, counter));
-    // Another tenant asking for the same token key decodes for ITS decode fn
-    // (which would tenant-check and could return null in prod); here it returns
-    // a different-tenant buffer to prove the hit-path tenant guard fired.
+    // Another tenant asking for the same token key must NOT be served t1's
+    // cached buffer: it runs ITS OWN decode fn, which (like prod's tenant-checked
+    // decode) returns null → uniform 404. A served hit would be non-null and
+    // would leave the counter at 1.
     const other = await getOrDecodeAudio('tok', 't2', async () => {
       counter.n += 1;
       return null; // prod decode tenant-checks → null → uniform 404
@@ -71,14 +81,20 @@ describe('PODCAST-1 — decode-once LRU', () => {
     const ca = { n: 0 }; const cb = { n: 0 }; const cc = { n: 0 };
     await getOrDecodeAudio('A', TENANT, counterDecode(100, ca)); // resident 100 [A]
     await getOrDecodeAudio('B', TENANT, counterDecode(100, cb)); // resident 200 [A,B]
-    await getOrDecodeAudio('C', TENANT, counterDecode(100, cc)); // 300>250 → evict A → [B,C]
-    expect(__podcastAudioCacheStats().entries).toBe(2);
-    expect(__podcastAudioCacheStats().residentBytes).toBeLessThanOrEqual(250);
-    // C (newest) is still a hit; A (LRU) was evicted → its re-fetch decodes again.
-    await getOrDecodeAudio('C', TENANT, counterDecode(100, cc));
-    expect(cc.n).toBe(1); // C still cached — never re-decoded
+    // Touch A: a hit that must bump A to most-recent → [B,A]. Without this step
+    // FIFO and LRU evict the same entry and the case cannot tell them apart.
     await getOrDecodeAudio('A', TENANT, counterDecode(100, ca));
-    expect(ca.n).toBe(2); // A decoded twice (evicted between)
+    expect(ca.n).toBe(1);
+    await getOrDecodeAudio('C', TENANT, counterDecode(100, cc)); // 300>250 → evict B (LRU) → [A,C]
+    expect(__podcastAudioCacheStats().entries).toBe(2);
+    expect(__podcastAudioCacheStats().residentBytes).toBe(200);
+    // A (recently used) survived; C (newest) is a hit; B (LRU) was evicted.
+    await getOrDecodeAudio('A', TENANT, counterDecode(100, ca));
+    expect(ca.n).toBe(1); // A never re-decoded — FIFO would have evicted it
+    await getOrDecodeAudio('C', TENANT, counterDecode(100, cc));
+    expect(cc.n).toBe(1);
+    await getOrDecodeAudio('B', TENANT, counterDecode(100, cb));
+    expect(cb.n).toBe(2); // B decoded twice (evicted between)
   });
 
   it('an entry larger than the per-entry cap is never cached (streams per request)', async () => {
@@ -95,18 +111,29 @@ describe('PODCAST-1 — decode-concurrency semaphore', () => {
   it('caps concurrent decodes at the configured limit; all requests still resolve', async () => {
     process.env.OPENWOP_PODCAST_AUDIO_DECODE_CONCURRENCY = '2';
     let active = 0; let peak = 0;
-    const slowDecode = (): Promise<DecodedAudio | null> => (async () => {
+    // Each decode parks on a gate the test opens by hand — no wall clock.
+    const gates: Array<() => void> = [];
+    const gatedDecode = async (): Promise<DecodedAudio | null> => {
       active += 1; peak = Math.max(peak, active);
-      await sleep(25);
+      await new Promise<void>((r) => { gates.push(r); });
       active -= 1;
       return { buffer: Buffer.alloc(32, 1), contentType: 'audio/mpeg', tenantId: TENANT };
-    })();
+    };
     // Six DISTINCT tokens → all cold-cache → all decode; the semaphore must keep
     // no more than 2 in flight at once.
     const tokens = ['a', 'b', 'c', 'd', 'e', 'f'];
-    const results = await Promise.all(tokens.map((t) => getOrDecodeAudio(t, TENANT, () => slowDecode())));
+    const all = Promise.all(tokens.map((t) => getOrDecodeAudio(t, TENANT, gatedDecode)));
+    await drain();
+    expect(active).toBe(2); // exactly the limit admitted, four queued
+    expect(gates.length).toBe(2);
+    for (let released = 0; released < tokens.length; released++) {
+      expect(gates.length, 'a decode should be parked on its gate').toBeGreaterThan(0);
+      gates.shift()!();
+      await drain();
+      expect(active).toBeLessThanOrEqual(2);
+    }
+    const results = await all;
     expect(results.every((r) => r?.buffer.length === 32)).toBe(true);
-    expect(peak).toBeLessThanOrEqual(2);
-    expect(peak).toBeGreaterThan(0);
+    expect(peak).toBe(2);
   });
 });

@@ -18,18 +18,25 @@
  * Both arms are asserted throughout: a FAILED read must say unknown, and a
  * GENUINE zero must still say "none enrolled" — otherwise the fix rots into
  * "always claim unknown", which would destroy the real onboarding prompt.
+ *
+ * Sabotage-witnessed (wave 52): `setReadFailed(!secOk || !facOk)` turned into
+ * `&&` or `false`, a failed factor read mapped back to `[]`, the chip shown on a
+ * failed read, or the chip label swapped each turn a case red.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup, screen } from '@testing-library/react';
 
-const api = vi.hoisted(() => ({ getMySecurity: vi.fn() }));
+const api = vi.hoisted(() => ({ getMySecurity: vi.fn<typeof import('../../users/usersClient.js').getMySecurity>() }));
 vi.mock('../../users/usersClient.js', async (importOriginal) => {
   // Never enumerate a module mock — spread the real one and override the seam.
   const orig = await importOriginal<Record<string, unknown>>();
   return { ...orig, getMySecurity: api.getMySecurity };
 });
 
-const fb = vi.hoisted(() => ({ getCurrentUser: vi.fn(), listMfaFactors: vi.fn() }));
+const fb = vi.hoisted(() => ({
+  getCurrentUser: vi.fn<typeof import('../../../auth/firebase.js').getCurrentUser>(),
+  listMfaFactors: vi.fn<typeof import('../../../auth/firebase.js').listMfaFactors>(),
+}));
 vi.mock('../../../auth/firebase.js', async (importOriginal) => {
   const orig = await importOriginal<Record<string, unknown>>();
   return { ...orig, getCurrentUser: fb.getCurrentUser, listMfaFactors: fb.listMfaFactors };
@@ -38,9 +45,12 @@ vi.mock('../../../auth/firebase.js', async (importOriginal) => {
 import { SecurityPanel } from '../SecurityPanel.js';
 
 beforeEach(() => {
-  vi.clearAllMocks();
-  fb.getCurrentUser.mockReturnValue({ uid: 'u1' });
-  api.getMySecurity.mockResolvedValue({ mfaSessionVerified: true, ssoManaged: false });
+  api.getMySecurity.mockReset();
+  fb.getCurrentUser.mockReset();
+  fb.listMfaFactors.mockReset();
+  fb.getCurrentUser.mockReturnValue({ uid: 'u1', email: 'a@b.co', displayName: null, photoURL: null, providerIds: [] });
+  // A real MySecurity: `source` (not an `ssoManaged` flag — the panel derives that).
+  api.getMySecurity.mockResolvedValue({ source: 'oidc', mfaSessionVerified: true });
   fb.listMfaFactors.mockResolvedValue([]);
 });
 afterEach(cleanup);
@@ -60,7 +70,7 @@ describe('UX-SET-1 — a failed security read states nothing about MFA posture',
   it('EMPTY: an account that genuinely has no factors still says so', async () => {
     // The other arm — without it, "always claim unknown" would pass the test
     // above while destroying the real onboarding prompt.
-    api.getMySecurity.mockResolvedValue({ mfaSessionVerified: false, ssoManaged: false });
+    api.getMySecurity.mockResolvedValue({ source: 'oidc', mfaSessionVerified: false });
     fb.listMfaFactors.mockResolvedValue([]);
     render(<SecurityPanel />);
 
@@ -69,12 +79,15 @@ describe('UX-SET-1 — a failed security read states nothing about MFA posture',
   });
 
   it('ENROLLED: a real answer still renders the factors and the verified chip', async () => {
-    api.getMySecurity.mockResolvedValue({ mfaSessionVerified: true, ssoManaged: false });
+    api.getMySecurity.mockResolvedValue({ source: 'oidc', mfaSessionVerified: true });
     fb.listMfaFactors.mockResolvedValue([{ uid: 'f1', displayName: 'Phone', enrolledAt: null }]);
     render(<SecurityPanel />);
 
     expect(await screen.findByText('Phone')).toBeTruthy();
     expect(screen.queryByText(/unknown, not off/i)).toBeNull();
+    // The verified chip, by its label — and not the single-factor one.
+    expect(screen.getByText('2FA verified this session')).toBeTruthy();
+    expect(screen.queryByText(/Single-factor session/)).toBeNull();
   });
 
   it('FAILURE never renders the "you are covered" reassurance', async () => {

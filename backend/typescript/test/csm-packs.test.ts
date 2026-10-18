@@ -119,6 +119,8 @@ describe('feature.csm.nodes pack', () => {
       { factor: 'dealsSeen', weight: 0, value: 3 },
       { factor: 'tasksAttributed', weight: 0, value: 2 },
       { factor: 'tasksSeen', weight: 0, value: 2 },
+      // ADR 0882 D4 — a play's own tasks, reported and never scored.
+      { factor: 'playTasksOpen', weight: 0, value: 0 },
     ]);
   });
 
@@ -338,7 +340,7 @@ describe('examples/workflow-chain-packs/csm-ops', () => {
     expect(errors).toEqual([]);
     const mine = installed.find((p) => p.packName === 'core.openwop.workflows.csm-ops');
     expect(mine).toBeTruthy();
-    expect(mine!.chainIds.sort()).toEqual(['csm-ops.health-from-crm', 'csm-ops.renewal-risk']);
+    expect(mine!.chainIds.sort()).toEqual(['csm-ops.health-from-crm', 'csm-ops.red-account-rescue', 'csm-ops.renewal-risk', 'csm-ops.renewal-runway']);
     expect(getChain('csm-ops.health-from-crm')).not.toBeNull();
     expect(getChain('csm-ops.renewal-risk')).not.toBeNull();
     expect(listChains().some((c) => c.packName === 'core.openwop.workflows.csm-ops')).toBe(true);

@@ -13,6 +13,15 @@ import { test, expect } from '@playwright/test';
  * session is workspace-admin. A shared `org:*` tenant would mint a plain
  * member and still hit the gate. Requires the backend on :8080 with the test
  * seams — see e2e/support/session.ts.
+ *
+ * Sabotage-witnessed (wave 53): the trap's initial focus removed (cases 1-2 red —
+ * CreateBoardModal's `autoFocus` alone does NOT carry it, measured); the Tab wrap
+ * removed (case 2); focus restore removed and Escape not closing (case 3); the
+ * scrim's target check removed (case 4). jsdom twins in `ui/__tests__/ui.test.tsx`
+ * › Modal ("calls onClose on Escape", "calls onClose when the scrim is clicked but
+ * not the dialog body", "renders children in a labelled dialog") cover the
+ * handlers; these cases keep the halves only a browser has — real focus, real
+ * Tab order, real hit-testing on the portal scrim.
  */
 test.describe('ui/Modal (via Create-board)', () => {
   test.beforeEach(async ({ page }, testInfo) => {
@@ -31,11 +40,11 @@ test.describe('ui/Modal (via Create-board)', () => {
     await expect(dialog).toBeVisible();
     await expect(dialog).toHaveAttribute('aria-modal', 'true');
 
-    // useFocusTrap moved focus into the dialog (the name input autofocuses).
-    const focusInside = await page.evaluate(
+    // useFocusTrap moved focus into the dialog. Polled (web-first), not read once
+    // the instant the dialog became visible — the trap focuses in an effect.
+    await expect.poll(() => page.evaluate(
       () => document.querySelector('[role="dialog"]')?.contains(document.activeElement) ?? false,
-    );
-    expect(focusInside).toBe(true);
+    )).toBe(true);
   });
 
   test('traps Tab within the dialog', async ({ page }) => {
@@ -51,6 +60,15 @@ test.describe('ui/Modal (via Create-board)', () => {
         () => document.querySelector('[role="dialog"]')?.contains(document.activeElement) ?? false,
       );
       expect(inside, `focus left the dialog after ${i + 1} Tab(s)`).toBe(true);
+    }
+    // …and BACKWARDS: Shift+Tab wraps through a separate branch of the trap
+    // (first → last), which forward Tab never reaches.
+    for (let i = 0; i < 12; i++) {
+      await page.keyboard.press('Shift+Tab');
+      const inside = await page.evaluate(
+        () => document.querySelector('[role="dialog"]')?.contains(document.activeElement) ?? false,
+      );
+      expect(inside, `focus left the dialog after ${i + 1} Shift+Tab(s)`).toBe(true);
     }
   });
 

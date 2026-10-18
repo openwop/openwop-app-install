@@ -28,9 +28,11 @@ export const LESSON_BATCH_WORKFLOW_ID = 'openwop-app.kicktodo.lesson-batch';
 
 const AGENT_RUNNER_TYPE_ID = 'local.openwop-app.agent-runner';
 
-/** The MANAGED free credential the sim personas dispatch under (no BYOK, no
- *  conversation). */
-const SIM_CREDENTIAL_REF = 'managed:openwop-free';
+// XCH-SIM-4 — the sim personas dispatch on the run's FROZEN AI binding (ADR
+// 0706), like every other LLM node. They used to pin `managed:openwop-free`, but
+// each declares a return schema and the managed tier refuses any request that
+// carries a `responseSchema` (`callAIManaged` → host_capability_missing), so
+// every sim failed and the publication submit was never reached.
 
 /** The three sim personas the factory convenes against the validated plan
  *  (ADR 0458 §2.2 / ADR 0442 convene precedent). `port` names the input the
@@ -106,11 +108,13 @@ const challengeFactoryWorkflow: WorkflowDefinition = {
     // with no default so `seedRunVariables` leaves them writable (KTFULL-B4).
     { name: 'evidenceSummary' },
     { name: 'plan' },
-    // Optional model targeting for the plan-generate provider call — unset in
-    // production (the node defaults to the managed provider); the mock-AI test
-    // seam sets `provider:'mock'`.
+    // The run's frozen AI binding (ADR 0706): set by the Challenge Author's run
+    // tool from the creator's choice or the workspace default; the chain pins
+    // `anthropic`/`claude-sonnet-4-6` otherwise. The mock-AI test seam sets
+    // `provider:'mock'`.
     { name: 'provider' },
     { name: 'model' },
+    { name: 'credentialRef' },
     // P2 checkpoint cadence — 'batched' (default) | 'outline-only'. Declared with
     // no default so the run input flows; the checkpoint-plan node treats anything
     // other than 'outline-only' as 'batched'.
@@ -236,7 +240,7 @@ const challengeFactoryWorkflow: WorkflowDefinition = {
       // `offerTools:[]` REPLACES the offered catalog ⇒ a ZERO-tool surface (no
       // ADR 0315 baseline union), confining the sim without a racy stored override.
       config: { offerTools: [] as string[] },
-      inputs: { agentId: s.agentId, task: input('planBrief'), credentialRef: SIM_CREDENTIAL_REF },
+      inputs: { agentId: s.agentId, task: input('planBrief'), provider: input('provider'), model: input('model'), credentialRef: input('credentialRef') },
     })),
     {
       // Reads the three sims' structured `result` outputs (via the edges below)

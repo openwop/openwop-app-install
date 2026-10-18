@@ -66,6 +66,8 @@ export interface CanvasRecord {
   ownerSubject?: { kind: string; id: string };
   state: Record<string, unknown>;
   version: number;
+  /** ADR 0886 — may the caller write this canvas (GET only; absent ⇒ write). */
+  access?: 'read' | 'write';
 }
 
 export interface CanvasVersionRow { versionId: string; version: number; capturedBy: string; capturedAt: string }

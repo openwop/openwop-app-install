@@ -15,14 +15,15 @@
 import { describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import type { NodeCatalogEntry } from '../../palette/nodeCatalog.js';
 // The catalog normally loads over `fetch` from the host, which a unit test has
 // no access to; without it every typeId is "not installed" and deserialize
 // throws before any assertion runs (an incomplete fixture making the real
 // assertions unreachable). Only the LOOKUP is stubbed — the chain under test is
 // still read from disk, which is the whole point of this file.
-const stubEntry = (typeId: string) => ({
-  kind: typeId, typeId, label: typeId, description: '', category: 'action',
-  badge: 'X', accent: '', inputs: [], outputs: [],
+const stubEntry = (typeId: string): NodeCatalogEntry => ({
+  kind: typeId, typeId, label: typeId, description: '', category: 'integration',
+  badge: 'X', accent: '', inputs: [], outputs: [], configFields: [],
 });
 vi.mock('../../palette/catalogRegistry.js', () => ({
   catalogEntryByTypeId: (typeId: string) => stubEntry(typeId),
@@ -34,6 +35,7 @@ vi.mock('../../palette/catalogRegistry.js', () => ({
 
 import { serializeWorkflow } from '../serialize.js';
 import { fromCanonicalDefinition } from '../deserialize.js';
+import { useBuilderStore } from '../../store/builderStore.js';
 
 const REPO = join(import.meta.dirname, '..', '..', '..', '..', '..', '..');
 const PACK = join(REPO, 'examples', 'workflow-chain-packs', 'commerce', 'pack.json');
@@ -45,22 +47,24 @@ interface PackNode { id: string; typeId: string; config?: Record<string, unknown
  *  registers and persists them BARE, which is the shape this file models. */
 const bare = (typeId: string) => typeId.replace(/@[0-9]+\.[0-9]+\.[0-9]+$/, '');
 
-function loadChainNodes(): PackNode[] {
+/** The chain, parsed ONCE off disk. */
+const CHAIN = (() => {
   const pack = JSON.parse(readFileSync(PACK, 'utf8')) as {
     chains: { chainId: string; dag: { nodes: PackNode[]; edges: { from: string; to: string }[] } }[];
   };
   const chain = pack.chains.find((c) => c.chainId === CHAIN_ID);
   if (!chain) throw new Error(`${CHAIN_ID} not found in ${PACK}`);
-  return chain.dag.nodes.map((n) => ({ ...n, typeId: bare(n.typeId) }));
+  return chain;
+})();
+
+function loadChainNodes(): PackNode[] {
+  return CHAIN.dag.nodes.map((n) => ({ ...n, typeId: bare(n.typeId) }));
 }
 
 /** The chain as the host would persist it after `expandChain` — node ids are
  *  prefixed there, but the field SHAPE is what this test is about. */
 function storedDefinition() {
-  const pack = JSON.parse(readFileSync(PACK, 'utf8')) as {
-    chains: { chainId: string; dag: { nodes: PackNode[]; edges: { from: string; to: string }[] } }[];
-  };
-  const chain = pack.chains.find((c) => c.chainId === CHAIN_ID)!;
+  const chain = CHAIN;
   return {
     workflowId: 'wf.seed.commerce-post-purchase-thankyou',
     metadata: { name: 'Post-purchase thank-you' },
@@ -137,13 +141,20 @@ describe('a real shipped chain survives open → save', () => {
     }
   });
 
-  it('leaves `{{params.*}}` tokens untouched — the builder is not an expander', () => {
+  // Twin: the `order` node's INPUTS are also covered by "preserves every authored
+  // input" above; what only this case pins is that CONFIG tokens (the prompt's
+  // `{{params.tone}}`, the provider/model params) survive verbatim too.
+  it('leaves `{{params.*}}` tokens untouched in config AND inputs — the builder is not an expander', () => {
     // Path A freezes these at expansion; a builder save must never re-interpret
     // or blank them.
     const out = roundTrip(storedDefinition());
-    const order = (out.nodes as { nodeId: string; inputs?: Record<string, unknown> }[])
-      .find((n) => n.nodeId === 'order');
-    expect(order!.inputs).toEqual({ orgId: '{{params.orgId}}', orderId: '{{params.orderId}}' });
+    const nodes = out.nodes as { nodeId: string; config?: Record<string, unknown>; inputs?: Record<string, unknown> }[];
+    expect(nodes.find((n) => n.nodeId === 'order')!.inputs).toEqual({ orgId: '{{params.orgId}}', orderId: '{{params.orderId}}' });
+    expect(nodes.find((n) => n.nodeId === 'compose')!.config).toEqual({
+      systemPrompt: 'Write a short post-purchase thank-you email for this order (tone: {{params.tone}}). Ground every detail in the order data; never invent items or amounts.',
+      provider: '{{params.provider}}',
+      model: '{{params.model}}',
+    });
   });
 });
 
@@ -160,8 +171,7 @@ describe('a real shipped chain survives open → save', () => {
  * This drives the real path: loadFromSaved → snapshot → serializeWorkflow.
  */
 describe('the builder STORE preserves what the schema layer preserves', () => {
-  it('carries node inputs, variables and configurableSchema through load → snapshot → save', async () => {
-    const { useBuilderStore } = await import('../../store/builderStore.js');
+  it('carries node inputs, variables and configurableSchema through load → snapshot → save', () => {
     const stored = storedDefinition();
     const d = fromCanonicalDefinition(stored);
 

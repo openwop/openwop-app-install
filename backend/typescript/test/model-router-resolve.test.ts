@@ -1,5 +1,12 @@
 /**
- * ADR 0130 Phase 3a — resolveModelRoute (config + probe + routeTurn).
+ * ADR 0130 Phase 3a / ADR 0714 D1 / ADR 0820 §8.2 — resolveModelRoute (stored
+ * config + capability probe + routeTurn).
+ *
+ * Breaks if a tenant with no config, or a stored-but-disabled config, gets a
+ * route (the router's documented OFF posture), if an enabled config stops
+ * routing through its rules/fallback, or if an attachment turn whose stored
+ * fallback is non-vision is routed (or refused SILENTLY) instead of refused and
+ * logged.
  */
 import { describe, it, expect, beforeAll, vi } from 'vitest';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
@@ -12,6 +19,9 @@ import { modelRouterFeature } from '../src/features/model-router/feature.js';
 const T = 'mrr-tenant';
 const ORG = 'org-mrr';
 const T2 = 'mrr-tenant-nonvision';
+// Its OWN tenant: `setRouterConfig` PRESERVES `enabled`, so sharing `T` with the
+// enabled case below made this case order-dependent (red when shuffled after it).
+const T_OFF = 'mrr-tenant-off';
 const cfg = {
   rules: [{ when: { kind: 'tokensOver', threshold: 5000 }, target: { provider: 'anthropic', model: 'big' } }],
   fallback: { provider: 'anthropic', model: 'small' },
@@ -30,8 +40,9 @@ describe('resolveModelRoute', () => {
   });
 
   it('returns null when config exists but is not enabled', async () => {
-    await setRouterConfig(T, ORG, 'u1', cfg);
-    expect(await resolveModelRoute(T, ORG, { tokenEstimate: 9000 }, 0)).toBeNull();
+    const stored = await setRouterConfig(T_OFF, ORG, 'u1', cfg);
+    expect(stored.enabled).toBe(false); // the DEFAULT, not a leftover
+    expect(await resolveModelRoute(T_OFF, ORG, { tokenEstimate: 9000 }, 0)).toBeNull();
   });
 
   // ADR 0714 D1 — the END-TO-END refusal, through the REAL config store.
@@ -55,8 +66,9 @@ describe('resolveModelRoute', () => {
     // so capture THERE — a console spy sees nothing, which is how this witness first
     // reported a green on an empty capture.
     const lines: string[] = [];
-    const out = vi.spyOn(process.stdout, 'write').mockImplementation(((c: unknown) => { lines.push(String(c)); return true; }) as never);
-    const err = vi.spyOn(process.stderr, 'write').mockImplementation(((c: unknown) => { lines.push(String(c)); return true; }) as never);
+    const capture = (c: string | Uint8Array): boolean => { lines.push(String(c)); return true; };
+    const out = vi.spyOn(process.stdout, 'write').mockImplementation(capture);
+    const err = vi.spyOn(process.stderr, 'write').mockImplementation(capture);
     try {
       const d = await resolveModelRoute(T2, ORG, { hasAttachment: true, tokenEstimate: 100 }, 0);
       expect(d, 'never route an attachment turn to a target we just judged ineligible').toBeNull();

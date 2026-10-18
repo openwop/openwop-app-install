@@ -10,24 +10,31 @@
  *    completely different fixes. `source` was discarded outright.
  *  - REC-G1: prices rendered as a bare number plus a code, same as the sibling
  *    discovery console.
+ *
+ * What breaks it: the three empty outcomes collapsing into one sentence, the
+ * served-by line dropping or mislabelling the SOURCE, the preview resolving a
+ * slot other than the one picked, bare `price currency`.
+ * Sabotage-witnessed (round 1/2): the unconfigured / control / no-candidates
+ * arms, the localized slot label, the `source_<id>` label lookup, the variant
+ * fragment, the slot passed to `resolvePreview`, formatCurrency.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, waitFor, fireEvent, act } from '@testing-library/react';
-import type { ResolvePreview, RecoProduct } from '../recommendationsClient.js';
+import type { ResolvePreview, RecoProduct, Placement, RecoSlot, Org } from '../recommendationsClient.js';
 
-const listPlacements = vi.fn();
-const resolvePreview = vi.fn();
+const listPlacements = vi.fn<(orgId: string) => Promise<Placement[]>>();
+const resolvePreview = vi.fn<(orgId: string, params: { slot: RecoSlot; productId?: string; contactId?: string }) => Promise<ResolvePreview>>();
 
 import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
 vi.mock('../recommendationsClient.js', async (orig) => ({
   ...(await orig<Record<string, unknown>>()),
-  listOrgs: vi.fn(async () => [{ orgId: 'org-1', name: 'Acme' }]),
-  listPlacements: () => listPlacements(),
-  resolvePreview: (...a: unknown[]) => resolvePreview(...a),
-  createPlacement: vi.fn(async () => ({})),
+  listOrgs: vi.fn(async (): Promise<Org[]> => [{ orgId: 'org-1', name: 'Acme' }]),
+  listPlacements: (orgId: string) => listPlacements(orgId),
+  resolvePreview: (orgId: string, params: { slot: RecoSlot; productId?: string; contactId?: string }) => resolvePreview(orgId, params),
+  createPlacement: vi.fn(),
   deletePlacement: vi.fn(async () => {}),
-  updatePlacement: vi.fn(async () => ({})),
-  rebuildAffinity: vi.fn(async () => 0),
+  updatePlacement: vi.fn(),
+  rebuildAffinity: vi.fn(async () => ({ rows: 0, removed: 0 })),
 }));
 vi.mock('../../../ui/toast.js', () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
 // The real hook returns an OBJECT. Mocking it as `true` is what HID the live bug
@@ -56,7 +63,8 @@ async function runPreview(result: ResolvePreview): Promise<void> {
   await act(async () => {});
   await waitFor(() => expect(listPlacements).toHaveBeenCalled());
   fireEvent.click(screen.getByRole('button', { name: /^preview$/i }));
-  await waitFor(() => expect(resolvePreview).toHaveBeenCalled());
+  // The preview is for the PICKED slot (default `pdp`), in the selected store.
+  await waitFor(() => expect(resolvePreview).toHaveBeenCalledWith('org-1', { slot: 'pdp' }));
 }
 
 beforeEach(() => {
@@ -80,7 +88,6 @@ describe('REC-G2: the preview separates the three empty outcomes', () => {
 
   it('a CONTROL holdout says so — it is working as designed, not broken', async () => {
     await runPreview({ products: [], placementId: 'pl-1', source: 'bought_together', variant: 'control' });
-    expect(screen.queryByText(/no active placement matches/i)).toBeNull();
     // THE assertion, and it was missing. This test used to check only that the
     // UNCONFIGURED copy was absent plus `findByRole('status')` — and `ui/Notice`
     // gives EVERY non-assertive notice `role="status"`, so the no-candidates
@@ -90,30 +97,32 @@ describe('REC-G2: the preview separates the three empty outcomes', () => {
     // green. The control copy is now named in full.
     expect(await screen.findByText(CONTROL_COPY)).toBeTruthy();
     expect(screen.queryByText(NO_CANDIDATES_COPY)).toBeNull();
+    // Absences checked AFTER the result rendered (not while it was in flight).
+    expect(screen.queryByText(/no active placement matches/i)).toBeNull();
   });
 
   it('a matched placement with NO candidates is distinct from unconfigured', async () => {
     await runPreview({ products: [], placementId: 'pl-1', source: 'trending', variant: 'treatment' });
-    expect(screen.queryByText(/no active placement matches/i)).toBeNull();
     // The other side of the same collapse: this arm must not borrow the
     // holdout's meaning either.
     expect(await screen.findByText(NO_CANDIDATES_COPY)).toBeTruthy();
     expect(screen.queryByText(CONTROL_COPY)).toBeNull();
+    expect(screen.queryByText(/no active placement matches/i)).toBeNull();
   });
 });
 
 describe('REC-G2: a served preview says which source produced it', () => {
   it('names the source that actually served the results', async () => {
     await runPreview({ products: [product()], placementId: 'pl-1', source: 'bought_together', variant: 'treatment' });
-    expect(await screen.findByText(/served by/i)).toBeTruthy();
-    expect(screen.getByText(/treatment/i)).toBeTruthy();
+    // The SOURCE, by its localized label — the claim — plus the variant.
+    expect(await screen.findByText('Served by Frequently bought together · variant treatment')).toBeTruthy();
   });
 
   it('omits the line entirely when the server sent no source', async () => {
     await runPreview({ products: [product()] });
+    // Settle on the rendered product first — the missing metadata is not fatal.
+    expect(await screen.findByText(/Widget/)).toBeTruthy();
     expect(screen.queryByText(/served by/i)).toBeNull();
-    // The products still render — the missing metadata is not fatal.
-    expect(screen.getByText(/Widget/)).toBeTruthy();
   });
 });
 

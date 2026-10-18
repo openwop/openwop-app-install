@@ -263,6 +263,24 @@ export interface ResolvedExportImage {
   kind: 'png' | 'jpg' | 'gif';
   width: number;
   height: number;
+  /** ADR 0914 (Book AI P3) — the image's description for assistive tech. When
+   *  absent, the Markdown alt text is used. `decorative: true` writes an empty
+   *  description, which screen readers skip. */
+  altText?: { description?: string; title?: string; decorative?: boolean };
+}
+
+/** ADR 0914 (Book AI P10) — the CONTENT language of an export, which may differ
+ *  from the UI language. A BCP 47 tag; anything else is ignored (falls back to
+ *  `en`), so a bad value cannot break the XML. */
+export interface ExportLanguageOptions {
+  language?: string;
+  /** Right-to-left content: EPUB `dir` + `page-progression-direction`, DOCX bidi. */
+  direction?: 'ltr' | 'rtl';
+}
+const BCP47 = /^[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*$/;
+export function exportLanguage(opts: ExportLanguageOptions): { tag: string; rtl: boolean; explicit: boolean } {
+  const explicit = typeof opts.language === 'string' && BCP47.test(opts.language);
+  return { tag: explicit ? opts.language! : 'en', rtl: opts.direction === 'rtl', explicit };
 }
 
 /** Resolves a markdown image src to embeddable bytes, or null when the src is
@@ -317,7 +335,7 @@ function fitImage(width: number, height: number): { width: number; height: numbe
  * 4b-2) serializes ProseMirror JSON (a different SoT). Disjoint inputs, same
  * output format; this one owns markdown→DOCX (the ADR 0400 correction note).
  */
-export async function renderMarkdownToDocx(markdown: string, opts: { title?: string; resolveImage?: ExportImageResolver } = {}): Promise<Buffer> {
+export async function renderMarkdownToDocx(markdown: string, opts: { title?: string; resolveImage?: ExportImageResolver } & ExportLanguageOptions = {}): Promise<Buffer> {
   const {
     Document, Packer, Paragraph, TextRun, ExternalHyperlink, HeadingLevel, ImageRun,
     Table, TableRow, TableCell, WidthType, FootnoteReferenceRun,
@@ -375,7 +393,12 @@ export async function renderMarkdownToDocx(markdown: string, opts: { title?: str
           const resolved = opts.resolveImage ? await opts.resolveImage(src) : null;
           if (resolved) {
             const dims = fitImage(resolved.width, resolved.height);
-            push(new ImageRun({ data: resolved.data, type: resolved.kind, transformation: dims }));
+            // ADR 0914 (P3) — the description screen readers read (`wp:docPr descr`).
+            const description = resolved.altText?.decorative ? '' : (resolved.altText?.description ?? c.content ?? '');
+            push(new ImageRun({
+              data: resolved.data, type: resolved.kind, transformation: dims,
+              altText: { name: alt, description, ...(resolved.altText?.title ? { title: resolved.altText.title } : {}) },
+            }));
           } else {
             // External / unresolvable image: linked text, never fetched.
             push(new TextRun({ text: `[${alt}]`, italics: true }));
@@ -486,8 +509,14 @@ export async function renderMarkdownToDocx(markdown: string, opts: { title?: str
   const footnotes: Record<number, { children: InstanceType<typeof Paragraph>[] }> = {};
   for (const [id, paras] of footnoteParagraphs) footnotes[id] = { children: paras };
 
+  // ADR 0914 (P10) — the default run language (spellcheck + reading voice),
+  // only when the caller names one, so existing exports are byte-identical.
+  const lang = exportLanguage(opts);
   const doc = new Document({
     title: opts.title ?? 'Document',
+    ...(lang.explicit || lang.rtl ? {
+      styles: { default: { document: { run: { language: { value: lang.tag, ...(lang.rtl ? { bidirectional: lang.tag } : {}) }, ...(lang.rtl ? { rightToLeft: true } : {}) } } } },
+    } : {}),
     numbering: {
       config: [{
         reference: 'owp-ordered',
@@ -606,13 +635,19 @@ function pinZipTimestamps(zip: { files: Record<string, { date: Date }> }, isoish
   for (const entry of Object.values(zip.files)) entry.date = pinned;
 }
 
-export async function renderMarkdownToEpub(markdown: string, opts: { title?: string; identifier?: string; modifiedAt?: string; resolveImage?: ExportImageResolver } = {}): Promise<Buffer> {
+export async function renderMarkdownToEpub(markdown: string, opts: { title?: string; identifier?: string; modifiedAt?: string; resolveImage?: ExportImageResolver } & ExportLanguageOptions = {}): Promise<Buffer> {
   const { default: JSZip } = await import('jszip');
   const { default: temml } = await import('temml');
   const md = new MarkdownIt({ html: false, linkify: true, xhtmlOut: true });
   md.use(mathDollarPlugin(temml));
   const zip = new JSZip();
   const title = opts.title ?? 'Document';
+  // ADR 0914 (P10) — content language on the package, dc:language, and every
+  // XHTML root; `dir` + page progression for right-to-left books.
+  const lang = exportLanguage(opts);
+  // Only when the caller names a language (or rtl), so an existing export's
+  // bytes do not change; the package default stays `en` as before.
+  const htmlLang = (lang.explicit ? ` xml:lang="${xmlEscape(lang.tag)}" lang="${xmlEscape(lang.tag)}"` : '') + (lang.rtl ? ' dir="rtl"' : '');
   const identifier = opts.identifier ?? `urn:openwop:doc:${title.replace(/\W+/g, '-').toLowerCase()}`;
   // EPUB3 requires dcterms:modified; the version's own timestamp keeps the
   // bytes deterministic per immutable version (never a live clock read).
@@ -629,6 +664,7 @@ export async function renderMarkdownToEpub(markdown: string, opts: { title?: str
   const chapters = splitMarkdownChapters(markdown);
   const images: Array<{ path: string; mediaType: string }> = [];
   const seenImages = new Map<string, string>(); // src → zip path
+  const imageAlt = new Map<string, ResolvedExportImage['altText']>(); // ADR 0914 (P3)
 
   const embedImages = async (html: string): Promise<string> => {
     const srcs = [...html.matchAll(/<img[^>]*\bsrc="([^"]+)"[^>]*\/?>(?:<\/img>)?/g)];
@@ -647,10 +683,13 @@ export async function renderMarkdownToEpub(markdown: string, opts: { title?: str
           zip.file(`EPUB/${path}`, resolved.data);
           images.push({ path, mediaType });
           seenImages.set(src, path);
+          if (resolved.altText) imageAlt.set(src, resolved.altText);
         }
       }
+      const resolvedAlt = imageAlt.get(src);
+      const altOut = resolvedAlt?.decorative ? '' : (resolvedAlt?.description ?? alt);
       out = out.replace(tag, path
-        ? `<img src="${xmlEscape(path)}" alt="${xmlEscape(alt)}"/>`
+        ? `<img src="${xmlEscape(path)}" alt="${xmlEscape(altOut)}"/>`
         : `<a href="${xmlEscape(src)}">[${xmlEscape(alt)}]</a>`);
     }
     return out;
@@ -665,7 +704,7 @@ export async function renderMarkdownToEpub(markdown: string, opts: { title?: str
     // EPUB3 wants the `mathml` manifest property on content docs that carry it.
     chapterMeta.push({ id: `ch${i + 1}`, file, title: ch.title, hasMath: body.includes('<math') });
     zip.file(`EPUB/${file}`, `<?xml version="1.0" encoding="UTF-8"?>
-<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"${htmlLang}>
 <head><title>${xmlEscape(ch.title)}</title></head>
 <body>
 ${body}</body>
@@ -675,7 +714,7 @@ ${body}</body>
 
   const navItems = chapterMeta.map((c) => `      <li><a href="${c.file}">${xmlEscape(c.title)}</a></li>`).join('\n');
   zip.file('EPUB/nav.xhtml', `<?xml version="1.0" encoding="UTF-8"?>
-<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"${htmlLang}>
 <head><title>${xmlEscape(title)}</title></head>
 <body>
   <nav epub:type="toc" id="toc">
@@ -695,17 +734,17 @@ ${navItems}
   ].join('\n');
   const spine = chapterMeta.map((c) => `    <itemref idref="${c.id}"/>`).join('\n');
   zip.file('EPUB/content.opf', `<?xml version="1.0" encoding="UTF-8"?>
-<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="uid">
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="uid"${lang.explicit ? ` xml:lang="${xmlEscape(lang.tag)}"` : ''}${lang.rtl ? ' dir="rtl"' : ''}>
   <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
     <dc:identifier id="uid">${xmlEscape(identifier)}</dc:identifier>
     <dc:title>${xmlEscape(title)}</dc:title>
-    <dc:language>en</dc:language>
+    <dc:language>${xmlEscape(lang.tag)}</dc:language>
     <meta property="dcterms:modified">${xmlEscape(modified)}</meta>
   </metadata>
   <manifest>
 ${manifest}
   </manifest>
-  <spine>
+  <spine${lang.rtl ? ' page-progression-direction="rtl"' : ''}>
 ${spine}
   </spine>
 </package>

@@ -9,6 +9,11 @@
  *  - ORCH-G2: the dispatch ledger row carries the platform-side name, the DAILY
  *    BUDGET, the ad account and the dispatch time. All four were dropped,
  *    leaving an opaque platform id as the only fact about a live ad object.
+ *
+ * Sabotage: rendering the budget as `/100` reds the DAILY BUDGET case; dropping
+ * the campaignName span reds the platform-side-name case; rendering the
+ * account line unconditionally reds the missing-optional-fields case; editing
+ * the deleteBody disclosure reds the ORCH-G1 case.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 vi.mock('../CampaignLedgerSection.js', () => ({ CampaignLedgerSection: () => null })); // own tests: campaignLedgerSection.test.tsx
@@ -36,8 +41,10 @@ vi.mock('../../../ui/toast.js', () => ({ toast: { success: vi.fn(), error: vi.fn
 import { CampaignStudioPage } from '../CampaignStudioPage.js';
 
 const CAMPAIGN: MarketingCampaign = {
-  id: 'camp-1', name: 'Spring push', status: 'active', channels: ['ad_variants'], objective: 'Grow trials',
-} as MarketingCampaign;
+  id: 'camp-1', tenantId: 't1', orgId: 'org-1', briefId: 'brief-1', name: 'Spring push', status: 'active',
+  channels: ['ad_variants'], objective: 'Grow trials', personaIds: [], createdBy: 'u1',
+  createdAt: '2026-07-01T08:00:00.000Z', updatedAt: '2026-07-02T08:00:00.000Z',
+};
 
 const DISPATCH: AdDispatch = {
   platform: 'meta', platformCampaignId: 'mc-999', platformAdSetId: 'as-1', platformAdId: 'ad-1',
@@ -85,8 +92,11 @@ describe('ORCH-G2: the dispatch ledger shows the facts it already has', () => {
     } satisfies AdDispatch]);
     await openDetail();
     expect(await screen.findByText('gc-1')).toBeTruthy();
-    // No budget was recorded, so none is claimed.
+    // No budget was recorded, so none is claimed — and no account line renders
+    // with an empty value ("without blanks").
     expect(screen.queryByText(/Daily budget/)).toBeNull();
+    expect(screen.queryByText(/^Account\b/)).toBeNull();
+    expect(screen.queryByText(/undefined/)).toBeNull();
   });
 });
 
@@ -102,13 +112,8 @@ describe('ORCH-G1: deleting discloses what survives on the ad platform', () => {
     expect(text).toMatch(/removed there/i);
     // The reassurance about the brief is still there — this adds, not replaces.
     expect(text).toMatch(/brief it came from is untouched/i);
-  });
-
-  it('the confirm still states irreversibility', async () => {
-    render(<MemoryRouter><CampaignStudioPage /></MemoryRouter>);
-    await act(async () => {});
-    fireEvent.click(await screen.findByRole('button', { name: /delete/i }));
-    const dialog = await screen.findByRole('dialog');
+    // …and it still states irreversibility (folded in from a separate case that
+    // opened the same dialog to read the same string).
     expect(within(dialog).getByText(/cannot be undone/i)).toBeTruthy();
   });
 });

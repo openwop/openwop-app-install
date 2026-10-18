@@ -33,6 +33,7 @@ describe('copyToClipboard', () => {
     await expect(copyToClipboard('npm i -g @openwop/cli')).resolves.toEqual({ ok: true });
     expect(writeText).toHaveBeenCalledWith('npm i -g @openwop/cli');
     expect(toasts.success).toHaveBeenCalledTimes(1);
+    expect(toasts.success).toHaveBeenCalledWith('chrome:cliCommandCopied'); // the default message
     expect(toasts.error).not.toHaveBeenCalled();
   });
 
@@ -43,6 +44,7 @@ describe('copyToClipboard', () => {
     setClipboard(undefined);
     await expect(copyToClipboard('x')).resolves.toEqual({ ok: false, reason: 'unavailable' });
     expect(toasts.error).toHaveBeenCalledTimes(1);
+    expect(toasts.error).toHaveBeenCalledWith('chrome:copyFailedManual');
     expect(toasts.success).not.toHaveBeenCalled();
   });
 
@@ -50,20 +52,18 @@ describe('copyToClipboard', () => {
     setClipboard({});
     await expect(copyToClipboard('x')).resolves.toEqual({ ok: false, reason: 'unavailable' });
     expect(toasts.error).toHaveBeenCalledTimes(1);
+    expect(toasts.error).toHaveBeenCalledWith('chrome:copyFailedManual');
   });
 
   // SHAPE 2 — the write is REJECTED (permission denied, lost focus). The old
   // code caught it into an empty block with a comment saying so.
+  // Also the "never claims success on a failure" guarantee: a success toast fired
+  // before the write settles reds this case (w49 probe copy-success-early).
   it('says so when the write is rejected, instead of swallowing it', async () => {
     setClipboard({ writeText: vi.fn().mockRejectedValue(new Error('NotAllowedError')) });
     await expect(copyToClipboard('x')).resolves.toEqual({ ok: false, reason: 'rejected' });
     expect(toasts.error).toHaveBeenCalledTimes(1);
-    expect(toasts.success).not.toHaveBeenCalled();
-  });
-
-  it('never claims success on a failure', async () => {
-    setClipboard({ writeText: vi.fn().mockRejectedValue(new Error('nope')) });
-    await copyToClipboard('x', 'Copied!');
+    expect(toasts.error).toHaveBeenCalledWith('chrome:copyFailedManual');
     expect(toasts.success).not.toHaveBeenCalled();
   });
 
@@ -97,11 +97,13 @@ describe('suppressible success, non-suppressible failure', () => {
     setClipboard({ writeText: vi.fn().mockRejectedValue(new Error('denied')) });
     await expect(copyToClipboard('x', null)).resolves.toEqual({ ok: false, reason: 'rejected' });
     expect(toasts.error).toHaveBeenCalledTimes(1);
+    expect(toasts.error).toHaveBeenCalledWith('chrome:copyFailedManual');
   });
 
   it('STILL reports an absent clipboard when success is suppressed', async () => {
     setClipboard(undefined);
     await expect(copyToClipboard('x', null)).resolves.toEqual({ ok: false, reason: 'unavailable' });
     expect(toasts.error).toHaveBeenCalledTimes(1);
+    expect(toasts.error).toHaveBeenCalledWith('chrome:copyFailedManual');
   });
 });

@@ -2,6 +2,10 @@
  * CDP-1d — RFC 0128 purpose-propagation conformance seam route (the steward's CDP-1b legs).
  * `POST /host/sample/purpose-propagation/forward`: forward re-emits (never-widen), merge
  * intersects, `[]` is refused onward (dropped), unlabelled adds no constraint; flag-off ⇒ 404.
+ *
+ * Sabotage-witnessed (/grade-tests w38): widening the forward re-emit, a union instead of the
+ * merge intersection, dropping either `isNoOnwardUse` refusal, and removing the flag gate each
+ * turn the named leg red.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -22,13 +26,15 @@ afterAll(async () => {
 });
 
 const FWD = '/host/sample/purpose-propagation/forward';
-async function post(body: unknown): Promise<{ status: number; body: any }> {
+interface Onward { recordId?: string; surface: string; permittedPurposes?: string[] }
+interface SeamBody { onward: Onward[]; dropped: string[]; error?: string; message?: string }
+async function post(body: unknown): Promise<{ status: number; body: SeamBody }> {
   // ADR 0812 — the unversioned seam path negotiates major 2, where a credential-less
   // call is refused 401 (RFC 0200); the `/v1` twin minted an anon session.
   const res = await fetch(`${BASE}${FWD}`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer dev-token' }, body: JSON.stringify(body) });
-  return { status: res.status, body: await res.json().catch(() => undefined) };
+  return { status: res.status, body: (await res.json()) as SeamBody };
 }
-const labelsOf = (onward: any[], surface: string) => onward.find((o) => o.surface === surface)?.permittedPurposes;
+const labelsOf = (onward: Onward[], surface: string): string[] | undefined => onward.find((o) => o.surface === surface)?.permittedPurposes;
 
 describe('CDP-1d purpose-propagation seam (RFC 0128 CDP-1b legs)', () => {
   it('leg 1+2 — forward re-emits the grant on both surfaces; never widens', async () => {
@@ -37,7 +43,7 @@ describe('CDP-1d purpose-propagation seam (RFC 0128 CDP-1b legs)', () => {
     expect(labelsOf(r.body.onward, 'a2a')).toEqual(['analytics', 'marketing-email']);
     expect(labelsOf(r.body.onward, 'trigger')).toEqual(['analytics', 'marketing-email']);
     // ⊆ the input grant (never-widen): every onward purpose was in the input
-    for (const o of r.body.onward) for (const p of o.permittedPurposes) expect(['analytics', 'marketing-email']).toContain(p);
+    for (const o of r.body.onward) for (const p of o.permittedPurposes ?? []) expect(['analytics', 'marketing-email']).toContain(p);
     expect(r.body.dropped).toEqual([]);
   });
 
@@ -56,6 +62,7 @@ describe('CDP-1d purpose-propagation seam (RFC 0128 CDP-1b legs)', () => {
       { id: 'a', permittedPurposes: ['analytics', 'marketing-email'] },
       { id: 'b' }, // unlabelled = top element
     ] });
+    expect(r.status).toBe(200);
     expect(labelsOf(r.body.onward, 'trigger')).toEqual(['analytics', 'marketing-email']);
   });
 
@@ -64,22 +71,31 @@ describe('CDP-1d purpose-propagation seam (RFC 0128 CDP-1b legs)', () => {
       { id: 'blocked', permittedPurposes: [] },  // no onward use → dropped
       { id: 'twin' },                            // unlabelled → forwarded (positive control)
     ] });
+    expect(r.status).toBe(200);
     expect(r.body.dropped).toEqual(['blocked']);
     // non-arrival of `blocked` is evidence: it appears on NO onward surface
-    expect(r.body.onward.some((o: any) => o.recordId === 'blocked')).toBe(false);
-    expect(r.body.onward.some((o: any) => o.recordId === 'twin')).toBe(true);
+    expect(r.body.onward.some((o) => o.recordId === 'blocked')).toBe(false);
+    expect(r.body.onward.some((o) => o.recordId === 'twin')).toBe(true);
   });
 
   it('merge with a [] input is contagious — the derived output is refused', async () => {
     const r = await post({ mode: 'merge', records: [{ id: 'a', permittedPurposes: ['analytics'] }, { id: 'b', permittedPurposes: [] }] });
+    expect(r.status).toBe(200);
     expect(r.body.onward).toEqual([]);
     expect(r.body.dropped).toEqual(['a', 'b']);
   });
 
   it('guardrail — with the flag OFF the seam 404s (pre-impl soft-skip)', async () => {
     delete process.env.OPENWOP_CDP_PURPOSE_PROPAGATION_ENABLED;
-    const r = await post({ mode: 'forward', records: [{ id: 'x', permittedPurposes: ['analytics'] }] });
-    process.env.OPENWOP_CDP_PURPOSE_PROPAGATION_ENABLED = 'true';
+    let r: Awaited<ReturnType<typeof post>>;
+    try {
+      r = await post({ mode: 'forward', records: [{ id: 'x', permittedPurposes: ['analytics'] }] });
+    } finally {
+      process.env.OPENWOP_CDP_PURPOSE_PROPAGATION_ENABLED = 'true';
+    }
     expect(r.status).toBe(404);
+    // The seam's OWN refusal, not Express's unregistered-route 404.
+    expect(r.body.error).toBe('not_found');
+    expect(r.body.message).toContain('flag off');
   });
 });

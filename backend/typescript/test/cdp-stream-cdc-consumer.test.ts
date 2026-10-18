@@ -8,6 +8,16 @@
  * each start a run with the right envelope; the durable delivery event is content-free (SR-1);
  * a bad signature is rejected; the config route is admin-gated; the sources[] advert is
  * honest-off-gated; and a redelivered push is effectively-once (dedup).
+ *
+ * Sabotage-witnessed (/grade-tests w38): the replay window, the HMAC compare, the unauthorized
+ * return, the partition / `after` mapping, the consumer's own op check (asserted by ITS reason
+ * `invalid_payload`), the broker-coordinate dedup seed (the redelivery carries a DIFFERENT body),
+ * the SR-1 delivery payload, the flag-off advert, the provider's `readOnly`, and the inbound
+ * config route's owner gate each turn a case red.
+ *
+ * Double guard (honest ceiling): the flag-OFF case cannot tell the consumer's own
+ * `streamCdcIngestionEnabled()` refusal from `ingestExternalEvent`'s `isAcceptedIngestionSource`
+ * skip — both surface as `not_found` (w38 probe `cc-flag`).
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -153,7 +163,10 @@ describe('streaming consumer — a real broker push starts a run via ingestExter
     const now = Date.now();
     const raw = JSON.stringify({ source: 'change', change: { op: 'upsert', table: 't' } });
     const out = await handleInboundEvent(deps, { connectionId: changeConnId, rawBody: raw, body: JSON.parse(raw), headers: signPush(raw, now), now });
-    expect(out.status).toBe('rejected');
+    // The consumer's OWN refusal (`buildStreamIngress` → `invalid_payload`). `ingestExternalEvent`
+    // would also reject `upsert` (a double guard), but with a different reason — asserting the
+    // reason is what makes this case fail if the consumer's check is removed (w38 `cc-op`).
+    expect(out).toEqual({ status: 'rejected', reason: 'invalid_payload' });
   });
 
   it('a bad signature is rejected as unauthorized (never ingested)', async () => {
@@ -166,40 +179,75 @@ describe('streaming consumer — a real broker push starts a run via ingestExter
   it('a redelivered push (same broker coordinates) is effectively-once (§C-1 dedup)', async () => {
     const now = Date.now();
     const raw = JSON.stringify({ source: 'stream', stream: { topic: 'events', partition: 7, offset: '99001', message: { a: 1 } } });
-    const headers = signPush(raw, now);
-    const first = await handleInboundEvent(deps, { connectionId: streamConnId, rawBody: raw, body: JSON.parse(raw), headers, now });
-    expect(first.status).toBe('accepted');
-    if (first.status === 'accepted') expect(first.deduped).toBe(false);
-    const second = await handleInboundEvent(deps, { connectionId: streamConnId, rawBody: raw, body: JSON.parse(raw), headers, now });
-    expect(second.status).toBe('accepted');
-    if (second.status === 'accepted') expect(second.deduped).toBe(true);
+    const first = await handleInboundEvent(deps, { connectionId: streamConnId, rawBody: raw, body: JSON.parse(raw), headers: signPush(raw, now), now });
+    expect(first).toMatchObject({ status: 'accepted', deduped: false });
+    // Same coordinates, DIFFERENT body: the dedup key is the broker coordinates, not a body hash
+    // (an identical re-send could not tell those apart — w38 probe `cc-dedupseed`).
+    const raw2 = JSON.stringify({ source: 'stream', stream: { topic: 'events', partition: 7, offset: '99001', message: { a: 2 } } });
+    const second = await handleInboundEvent(deps, { connectionId: streamConnId, rawBody: raw2, body: JSON.parse(raw2), headers: signPush(raw2, now), now });
+    expect(second).toMatchObject({ status: 'accepted', deduped: true });
+    if (first.status === 'accepted' && second.status === 'accepted') expect(second.runId).toBe(first.runId);
   });
 
   it('flag OFF ⇒ the streaming provider refuses (neither wired nor advertised)', async () => {
-    delete process.env.OPENWOP_TRIGGER_STREAM_CDC_ENABLED;
     const now = Date.now();
     const raw = JSON.stringify({ source: 'stream', stream: { topic: 'events', partition: 0, offset: '1', message: {} } });
-    const out = await handleInboundEvent(deps, { connectionId: streamConnId, rawBody: raw, body: JSON.parse(raw), headers: signPush(raw, now), now });
-    process.env.OPENWOP_TRIGGER_STREAM_CDC_ENABLED = 'true';
+    delete process.env.OPENWOP_TRIGGER_STREAM_CDC_ENABLED;
+    let out: Awaited<ReturnType<typeof handleInboundEvent>>;
+    try {
+      out = await handleInboundEvent(deps, { connectionId: streamConnId, rawBody: raw, body: JSON.parse(raw), headers: signPush(raw, now), now });
+    } finally {
+      process.env.OPENWOP_TRIGGER_STREAM_CDC_ENABLED = 'true';
+    }
+    // Double guard (see header): either gate alone yields this.
     expect(out.status).toBe('not_found');
   });
 });
 
 describe('HTTP end-to-end — admin-gated config + unauthenticated signed public ingest', () => {
   let connId: string;
+  let cfgStatus: number;
 
-  it('the owner configures inbound on a streams connection (admin-gated authorizeManage passes)', async () => {
+  // Setup lives in beforeAll so no case depends on another case's order (shuffle-safe).
+  beforeAll(async () => {
     const created = await jf<{ connectionId: string; provider: string }>('/host/openwop-app/connections', {
       method: 'POST',
       body: JSON.stringify({ provider: STREAM_PROVIDER, kind: 'api_key', secret: 'broker-http', scope: 'user', displayName: 'Prod Kafka' }),
     });
-    expect(created.status).toBe(201);
     connId = created.body.connectionId;
     const cfg = await jf('/host/openwop-app/connections/' + connId + '/inbound', {
       method: 'PUT',
       body: JSON.stringify({ workflowId: WORKFLOW, signingSecret: SIGNING, source: 'stream' }),
     });
-    expect(cfg.status).toBe(201);
+    cfgStatus = cfg.status;
+  });
+
+  it('the owner configures inbound on a streams connection (admin-gated authorizeManage passes)', async () => {
+    expect(cfgStatus).toBe(201);
+    // Read back through the same gated route: the config landed as written.
+    const read = await jf<{ config: { workflowId?: string; streamSource?: string; enabled: boolean } | null }>('/host/openwop-app/connections/' + connId + '/inbound');
+    expect(read.status).toBe(200);
+    expect(read.body.config).toMatchObject({ workflowId: WORKFLOW, streamSource: 'stream', enabled: true });
+  });
+
+  it('a different caller cannot (re)configure the owner\'s inbound — 403, config unchanged', async () => {
+    // A second, distinct bearer principal (`bearer:cdc-intr`): configured for this case only.
+    const prior = process.env.OPENWOP_API_KEYS;
+    process.env.OPENWOP_API_KEYS = 'dev-token:*,cdc-intruder-key:*';
+    let denied: { status: number; body: { error?: string; message?: string } };
+    try {
+      denied = await jf<{ error?: string; message?: string }>('/host/openwop-app/connections/' + connId + '/inbound', {
+        method: 'PUT',
+        headers: { authorization: 'Bearer cdc-intruder-key' },
+        body: JSON.stringify({ workflowId: 'openwop-app.other', signingSecret: 'intruder-signing-secret-000', source: 'change' }),
+      });
+    } finally {
+      if (prior === undefined) delete process.env.OPENWOP_API_KEYS; else process.env.OPENWOP_API_KEYS = prior;
+    }
+    expect(denied.status).toBe(403);
+    expect(denied.body.message).toBe('Only the connecting user may manage this connection.');
+    const read = await jf<{ config: { workflowId?: string; streamSource?: string } | null }>('/host/openwop-app/connections/' + connId + '/inbound');
+    expect(read.body.config).toMatchObject({ workflowId: WORKFLOW, streamSource: 'stream' });
   });
 
   it('a signed broker push to the PUBLIC ingest route (no auth header) → 202 accepted', async () => {
@@ -234,8 +282,12 @@ describe('honest-off advert flip (RFC 0127 G4 closure)', () => {
     expect(on.body.triggerBridge.ingestion?.externalSources).toEqual(expect.arrayContaining(['stream', 'change']));
 
     delete process.env.OPENWOP_TRIGGER_STREAM_CDC_ENABLED;
-    const off = await jf<{ triggerBridge: { sources: string[]; ingestion?: { externalSources?: string[] } } }>('/.well-known/openwop');
-    process.env.OPENWOP_TRIGGER_STREAM_CDC_ENABLED = 'true';
+    let off: { status: number; body: { triggerBridge: { sources: string[]; ingestion?: { externalSources?: string[] } } } };
+    try {
+      off = await jf<{ triggerBridge: { sources: string[]; ingestion?: { externalSources?: string[] } } }>('/.well-known/openwop');
+    } finally {
+      process.env.OPENWOP_TRIGGER_STREAM_CDC_ENABLED = 'true';
+    }
     expect(off.body.triggerBridge.sources).not.toContain('stream');
     expect(off.body.triggerBridge.sources).not.toContain('change');
     expect(off.body.triggerBridge.ingestion?.externalSources).not.toContain('stream');

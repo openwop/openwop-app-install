@@ -91,6 +91,7 @@ describe('the golden journey (ADR 0342 §Phase 8 / OP-07)', () => {
     // The editor gate rejects a hard violation (closed world).
     const bad = await user.patch(AB(orgId, `/canvases/${canvasId}`), { state: { ...doc, screens: [{ id: 'x', name: 'X', components: [{ type: 'holo-deck' }] }] } });
     expect(bad.status).toBe(422);
+    expect(JSON.stringify(bad.body)).toContain('holo-deck');
 
     // 5. Export: preflight names what the target drops; openapi ships; hash returned (ADR 0348).
     const exp = await user.post(AB(orgId, `/canvases/${canvasId}/export`), { target: 'react-tailwind' });
@@ -101,6 +102,9 @@ describe('the golden journey (ADR 0342 §Phase 8 / OP-07)', () => {
     expect(preflightCodes).toContain('operations_not_generated');
     const dl = await fetch(`${BASE}${exp.body.serveUrl}`);
     expect(dl.status).toBe(200);
+    // A 200 alone would also be an SPA fallback — the body must be the ZIP.
+    const zip = Buffer.from(await dl.arrayBuffer());
+    expect(zip.subarray(0, 2).toString('latin1')).toBe('PK');
     // strict mode refuses to drop declared semantics.
     expect((await user.post(AB(orgId, `/canvases/${canvasId}/export`), { target: 'react-tailwind', strict: true })).status).toBe(422);
 
@@ -113,7 +117,8 @@ describe('the golden journey (ADR 0342 §Phase 8 / OP-07)', () => {
     // 7. Version history captured the save (ADR 0305 E).
     const versions = await user.get(AB(orgId, `/canvases/${canvasId}/versions`));
     expect(versions.status).toBe(200);
-    expect((versions.body.versions ?? versions.body ?? []).length).toBeGreaterThan(0);
+    expect(versions.body.versions).toHaveLength(1);
+    expect(versions.body.versions[0].version).toBe(2); // the save at step 4 (blank v1 → v2)
 
     // 8. The public share serves the SANITIZED projection (ADR 0345 3a).
     const link = await user.post(`/host/openwop-app/sharing/orgs/${encodeURIComponent(orgId)}/links`, { resourceType: 'app_builder_canvas', resourceId: canvasId });

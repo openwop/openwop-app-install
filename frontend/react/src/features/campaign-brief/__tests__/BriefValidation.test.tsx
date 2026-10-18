@@ -10,6 +10,12 @@
  *    screen that is a different document — the Review panel reads live form state
  *    while Validate answered about the stored one, so two panels on one screen
  *    could disagree. When the form is dirty the action saves first and says so.
+ *
+ * Wave 30 (grade-tests): the valid case asserts the success copy (an "invalid, 0
+ * issues" render used to pass it); the detail's `findCampaignForBrief` read is
+ * mocked (it was a live fetch — allowlist line retired); the fixture is a full
+ * typed row (no casts). Sabotage-witnessed: one row per issue, the section jump +
+ * focus, the unknown-field fallback, save-first when dirty, no save when clean.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, waitFor, fireEvent, act, within } from '@testing-library/react';
@@ -30,6 +36,9 @@ vi.mock('../campaignBriefClient.js', async (orig) => {
     listPersonas: vi.fn(async () => []),
     listOrgs: vi.fn(async () => [{ orgId: 'org-1', name: 'Acme' }]),
     listBrands: vi.fn(async () => []),
+    findCampaignForBrief: vi.fn(async () => null),
+    deleteBrief: vi.fn(async () => {}),
+    duplicateBrief: vi.fn(async () => { throw new Error('duplicate not exercised here'); }),
   };
 });
 vi.mock('../../../ui/toast.js', () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
@@ -42,8 +51,8 @@ const BRIEF: CampaignBrief = {
   // R2 CB-SP-13 — the fixture used 'email' (not a real channel enum; the real
   // one is 'email_sequence'), forced past the compiler with the cast, which
   // would mask an enum-keyed regression.
-  channels: [{ type: 'email_sequence', enabled: false }] as CampaignBrief['channels'],
-  messaging: { primaryValueProp: '', proofPoints: [], ctaStrategy: '' } as CampaignBrief['messaging'],
+  channels: [{ type: 'email_sequence', enabled: false, config: {} }],
+  messaging: { primaryValueProp: '', toneOverride: '', proofPoints: [], ctaStrategy: '' },
   status: 'draft', kernelStale: false, createdBy: 'u', createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
 };
 
@@ -114,7 +123,9 @@ describe('brief validation summary', () => {
     validateBriefById.mockResolvedValue({ valid: true, issues: [], enabledChannels: ['email_sequence'] } satisfies ValidationResult);
     const summary = await openAndValidate();
     expect(within(summary).queryAllByRole('listitem')).toHaveLength(0);
-    expect(summary.textContent ?? '').not.toBe('');
+    // The success copy itself, not merely "some text" (an invalid-with-0-issues
+    // render also has text).
+    expect(within(summary).getByText(/Ready to generate/)).toBeTruthy();
   });
 });
 

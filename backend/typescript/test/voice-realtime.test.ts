@@ -7,7 +7,7 @@
  * provider selection — is verifiable without a real key. (The live provider call itself is
  * verify-with-key.)
  */
-import { describe, expect, it, beforeAll, afterAll } from 'vitest';
+import { describe, expect, it, beforeAll, afterAll, beforeEach } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
@@ -32,6 +32,9 @@ import { createUser } from '../src/features/users/usersService.js';
 import { composeChatContext, TOOL_GROUNDED_COMMITMENTS } from '../src/host/chatContext.js';
 import { hostExtStorage } from '../src/host/hostExtPersistence.js';
 import { subscribeConversationMessages } from '../src/host/chatMessageBus.js';
+import type { VoiceAuthoritySnapshot } from '../src/features/voice/voiceAuthority.js';
+/** ADR 0893 D4 — a live call holds its opener's authority snapshot; this one passes every check while `voice` is ON. */
+const ALLOW_AUTHORITY: VoiceAuthoritySnapshot = { tenantId: 'default', toggleSubject: { tenantId: 'default' }, lane: 'wildcard', scopeEscape: true };
 
 let BASE: string;
 let server: http.Server;
@@ -77,22 +80,22 @@ describe('ADR 0141 RT-1 — realtime session bootstrap', () => {
 
   it('400s with a clear error when the provider is set but its BYOK key is missing', async () => {
     await setVoice('on');
-    await put(`${RT}/config`, { provider: 'openai-realtime', credentialRef: 'rt-missing' });
+    // ADR 0893 D3 — on Gemini: an OpenAI tenant is now refused before key resolution.
+    await put(`${RT}/config`, { provider: 'gemini-live', credentialRef: 'rt-missing' });
     const res = await post(`${RT}/session`, {});
     expect(res.status).toBe(400);
     expect((await res.json() as { error?: string }).error).toBe('credential_unavailable');
   });
 
-  it('mints an OpenAI Realtime session (WebRTC) when configured + key present', async () => {
+  it('ADR 0893 D3 — never mints an OpenAI client secret for the browser: OpenAI opens through the sideband', async () => {
     await setVoice('on');
     await setSecret('rt-openai-key', 'sk-test', { tenantId: 'default' });
     await put(`${RT}/config`, { provider: 'openai-realtime', credentialRef: 'rt-openai-key' });
     const res = await post(`${RT}/session`, {});
-    expect(res.status).toBe(200);
-    const j = await res.json() as { realtime: { provider: string; token: string; connect: { kind: string } } };
-    expect(j.realtime.provider).toBe('openai-realtime');
-    expect(j.realtime.token).toBe('ek_test_openai');
-    expect(j.realtime.connect.kind).toBe('webrtc');
+    expect(res.status).toBe(409);
+    const j = await res.json() as { error: string };
+    expect(j.error).toBe('realtime_use_sideband');
+    expect(JSON.stringify(j)).not.toContain('ek_test_openai');
   });
 
   it('mints a Gemini Live session (WebSocket) when selected', async () => {
@@ -229,7 +232,8 @@ describe('ADR 0141 RT-7 follow-up — #578 wire-name round-trip (sanitize out, r
 });
 
 describe('ADR 0141 RT-4 — OpenAI sideband (host-owned session: tools + transcript audit)', () => {
-  const session: SidebandSession = { callId: 'rtc_host_owned', tenantId: 'default', agentId: 'no-such-agent', conversationId: 'conv-1' };
+  beforeEach(async () => { await setVoice('on'); }); // ADR 0893 D4 — the sideband re-checks the toggle
+  const session: SidebandSession = { callId: 'rtc_host_owned', tenantId: 'default', authority: ALLOW_AUTHORITY, agentId: 'no-such-agent', conversationId: 'conv-1' };
 
   it('runs a model tool call through the host policy stack — keyed on the HOST-owned call_id', async () => {
     // A function call the agent isn't allowed → default-deny, executed server-side (NOT relayed by
@@ -253,7 +257,7 @@ describe('ADR 0141 RT-4 — OpenAI sideband (host-owned session: tools + transcr
   it('real persistence skips (no throw) when the conversation does not exist', async () => {
     // The default persistTranscript guards with getChatSession → a missing conversation must not
     // throw (which would surface as an unhandled rejection in the live sideband loop).
-    const ghost: SidebandSession = { callId: 'rtc_ghost', tenantId: 'default', conversationId: 'does-not-exist' };
+    const ghost: SidebandSession = { callId: 'rtc_ghost', tenantId: 'default', authority: ALLOW_AUTHORITY, conversationId: 'does-not-exist' };
     await expect(handleSidebandEvent(ghost, { type: 'response.audio_transcript.done', transcript: 'hi' })).resolves.toEqual([]);
   });
 
@@ -268,7 +272,7 @@ describe('ADR 0141 RT-4 — OpenAI sideband (host-owned session: tools + transcr
     const frames: string[] = [];
     const unsub = await subscribeConversationMessages(conversationId, (messageId) => frames.push(messageId));
     try {
-      const live: SidebandSession = { callId: 'rtc_live', tenantId: 'default', conversationId };
+      const live: SidebandSession = { callId: 'rtc_live', tenantId: 'default', authority: ALLOW_AUTHORITY, conversationId };
       await handleSidebandEvent(live, { type: 'response.audio_transcript.done', transcript: 'Booked.' });
       // The publish is fire-and-forget over the host-ext pub/sub — let the microtasks drain.
       await new Promise((r) => setTimeout(r, 30));
@@ -332,7 +336,7 @@ describe('ADR 0141 RT-4 — OpenAI sideband (host-owned session: tools + transcr
 
     // Give the subscription a beat to attach, then drive a sideband transcript.
     await new Promise((r) => setTimeout(r, 100));
-    const live: SidebandSession = { callId: 'rtc_sse', tenantId: 'default', conversationId };
+    const live: SidebandSession = { callId: 'rtc_sse', tenantId: 'default', authority: ALLOW_AUTHORITY, conversationId };
     await handleSidebandEvent(live, { type: 'response.audio_transcript.done', transcript: 'Frame me.' });
 
     const frame = await Promise.race([
@@ -608,6 +612,7 @@ describe('ADR 0199 P2 — voice preamble (work snapshot)', () => {
 });
 
 describe('ADR 0304 D1 — spoken delegation (session-control tools, OpenAI sideband)', () => {
+  beforeEach(async () => { await setVoice('on'); }); // ADR 0893 D4 — the sideband re-checks the toggle
   const HOME = { agentId: 'host:iris', instructions: 'You are Iris.', tools: [{ type: 'function', name: 'existing_tool' }], voice: 'iris-voice' };
   const REX = { agentId: 'host:rex', instructions: 'You are Rex.', tools: [{ type: 'function', name: 'rex_tool' }], voice: 'rex-voice' };
   const delegable = [{ agentId: 'host:rex', persona: 'Rex' }];
@@ -616,7 +621,7 @@ describe('ADR 0304 D1 — spoken delegation (session-control tools, OpenAI sideb
 
   function freshSession(callId: string): SidebandSession {
     armDelegation(callId, HOME);
-    return { callId, tenantId: 'default', agentId: 'host:iris', boundAgentId: 'host:iris' };
+    return { callId, tenantId: 'default', agentId: 'host:iris', boundAgentId: 'host:iris', authority: ALLOW_AUTHORITY };
   }
 
   it('delegates: session.update to the TARGET (voice + instructions + ITS tools), floor rebinds, one-shot armed', async () => {
@@ -686,7 +691,7 @@ describe('ADR 0304 D1 — spoken delegation (session-control tools, OpenAI sideb
   });
 
   it('delegation is unavailable when the mint never armed it (Gemini / unscoped sessions)', async () => {
-    const s: SidebandSession = { callId: 'rtc_unarmed', tenantId: 'default', agentId: 'host:iris' };
+    const s: SidebandSession = { callId: 'rtc_unarmed', tenantId: 'default', authority: ALLOW_AUTHORITY, agentId: 'host:iris' };
     const out = await handleSidebandEvent(s, { type: 'response.function_call_arguments.done', name: DELEGATE_TOOL, call_id: 'fc_x', arguments: JSON.stringify({ agentId: 'host:rex', question: 'Q?' }) }, noPersist);
     expect(JSON.stringify(out[0])).toContain('[unavailable]');
   });
@@ -712,7 +717,7 @@ describe('ADR 0304 D1 — spoken delegation (session-control tools, OpenAI sideb
     const conversationId = 'conv-delegated-attr';
     const now = new Date().toISOString();
     await storage.createChatSession({ sessionId: conversationId, tenantId: 'default', title: 'Voice', createdAt: now, updatedAt: now, messageCount: 0 });
-    const s: SidebandSession = { callId: 'rtc_attr', tenantId: 'default', agentId: 'host:iris', conversationId, boundAgentId: 'host:rex', boundPersona: 'Rex' };
+    const s: SidebandSession = { callId: 'rtc_attr', tenantId: 'default', authority: ALLOW_AUTHORITY, agentId: 'host:iris', conversationId, boundAgentId: 'host:rex', boundPersona: 'Rex' };
     await handleSidebandEvent(s, { type: 'response.audio_transcript.done', transcript: 'Pipeline looks strong.' });
     const msgs = await storage.listChatSessionMessages(conversationId);
     expect(JSON.parse(msgs[0]?.meta ?? '{}')).toMatchObject({ source: 'voice-realtime', agentId: 'host:rex', agentPersona: 'Rex' });

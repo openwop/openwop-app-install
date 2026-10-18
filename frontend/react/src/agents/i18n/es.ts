@@ -107,6 +107,9 @@ export const messages = {
   recurringSkipFeatureDisabled: 'la función propietaria de esta programación está desactivada en este espacio de trabajo',
   recurringSkipPlanLapsed: 'tu plan ya no incluye la función propietaria de esta programación',
   recurringSkipActorInactive: 'la persona en cuyo nombre se ejecuta ha sido desactivada',
+  recurringSkipAgentPaused: 'el agente con el que se ejecuta está en pausa; reanude el agente para reanudar esto',
+  recurringSkipPolicyDenied: 'el agente no tiene permitido ejecutar este flujo de trabajo (está en su lista de prohibidos)',
+  recurringSkipAwaitingApproval: 'está esperando aprobación: este flujo de trabajo requiere aprobación para este agente',
   recurringCadenceExhausted: 'No volverá a activarse: ninguna hora futura coincide con esta cadencia',
   recurringSkipUnknown: 'no se registró ningún motivo',
   recurringSkipUnrecognized: 'se registró un motivo, pero esta aplicación no lo reconoce',
@@ -177,6 +180,7 @@ export const messages = {
   portfolioRoleFallback: 'rol',
   portfolioLocalDefault: 'Workflow local: asignado a este agente.',
   portfolioLocalOnly: 'Solo local: regístrelo en el host antes de que pueda ejecutarse desde un tablero o una programación.',
+  portfolioAvailabilityUnknown: 'No se pudo comprobar si este workflow está registrado en el host. Ejecutar ahora lo intentará de todos modos.',
   portfolioDemoChip: 'Demo',
   portfolioDemoExplain: 'Workflow de ejemplo: sus pasos de IA devuelven una salida de demostración predefinida, no IA real.',
   portfolioDemoUnavailable: 'No se puede ejecutar en este despliegue: los pasos de demostración están desactivados para los espacios de trabajo con sesión iniciada.',
@@ -385,6 +389,7 @@ export const messages = {
 
   // Profile panel
   profileSaved: 'Perfil guardado.',
+  agentChangedReload: 'Alguien cambió este agente después de que lo abrieras. Recarga para ver su cambio y vuelve a hacer tu edición.',
   profileLoading: 'Cargando perfil…',
   // Guardrails (ADR 0493)
   guardrailsHeading: 'Salvaguardas',
@@ -474,6 +479,7 @@ export const messages = {
   viewerCannotCreateTitle: 'No puede crear agentes aquí',
   viewerCannotCreateBody: 'Tiene acceso de lectura a este espacio de trabajo. Crear o bifurcar un agente requiere acceso de edición; pídalo a un administrador del espacio de trabajo.',
   rosterEmptyViewerBody: 'Aún no hay agentes. Añadir uno requiere acceso de edición a este espacio de trabajo; pídalo a un administrador.',
+  viewerPanelReadOnly: 'Puede ver este agente. Cambiarlo requiere acceso de edición a este espacio de trabajo; pídalo a un administrador.',
   dashCreateFromTemplate: 'Crear a partir de una plantilla',
   dashLoadingDemo: 'Cargando…',
   dashLoadExample: 'Cargar agentes de ejemplo',
@@ -653,6 +659,7 @@ export const messages = {
   wsTabInstructions: 'Instrucciones',
   wsTabKnowledge: 'Conocimiento',
   wsTabMemory: 'Memoria',
+  wsTabEvals: 'Evaluaciones',
   wsTabIntegrations: 'Integraciones',
   wsTabActivity: 'Actividad',
   wsUpdatePinError: 'No se pudo actualizar el anclaje.',

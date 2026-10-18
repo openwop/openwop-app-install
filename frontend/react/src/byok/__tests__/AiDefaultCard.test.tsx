@@ -2,19 +2,31 @@
  * AiDefaultCard (ADR 0110 Phase 3) — the "Default AI provider for media" form.
  * byokClient is mocked. Covers: the empty-state (no stored keys), the save flow
  * (provider+model+ref → setAiDefault), and the audio-capability guidance.
+ *
+ * Sabotage that turns these red (AiDefaultCard.tsx): the empty-state branch, the
+ * save payload, the audio warning, a failed read not flagged, `!loadFailed` dropped
+ * from `canSave` (the failed-read case fills model + key first so ONLY that gate can
+ * keep Save disabled), the opt-in default / load / save echo.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/react';
 
 vi.mock('../lib/byokClient.js', () => ({
-  getAiDefault: vi.fn().mockResolvedValue(null),
-  setAiDefault: vi.fn().mockResolvedValue({ provider: 'google', model: 'gemini-2.0-flash', credentialRef: 'g:prod' }),
-  clearAiDefault: vi.fn().mockResolvedValue(undefined),
+  getAiDefault: vi.fn(),
+  setAiDefault: vi.fn(),
+  clearAiDefault: vi.fn(),
 }));
-import { getAiDefault, setAiDefault } from '../lib/byokClient.js';
+import { clearAiDefault, getAiDefault, setAiDefault } from '../lib/byokClient.js';
 import { AiDefaultCard } from '../AiDefaultCard.js';
 
-beforeEach(() => { vi.mocked(getAiDefault).mockClear(); vi.mocked(setAiDefault).mockClear(); });
+const saveButton = (): HTMLButtonElement => screen.getByRole<HTMLButtonElement>('button', { name: 'Save default' });
+
+beforeEach(() => {
+  // mockReset, not mockClear: a queued `…Once` must not leak into the next case.
+  vi.mocked(getAiDefault).mockReset().mockResolvedValue(null);
+  vi.mocked(setAiDefault).mockReset().mockResolvedValue({ provider: 'google', model: 'gemini-2.0-flash', credentialRef: 'g:prod' });
+  vi.mocked(clearAiDefault).mockReset().mockResolvedValue(undefined);
+});
 afterEach(cleanup);
 
 describe('AiDefaultCard (ADR 0110)', () => {
@@ -28,7 +40,7 @@ describe('AiDefaultCard (ADR 0110)', () => {
     render(<AiDefaultCard refs={['g:prod']} />);
     await waitFor(() => expect(getAiDefault).toHaveBeenCalled());
     // Save is disabled until model + key are set
-    const save = screen.getByText('Save default') as HTMLButtonElement;
+    const save = saveButton();
     expect(save.disabled).toBe(true);
     fireEvent.change(screen.getByLabelText('Model'), { target: { value: 'gemini-2.0-flash' } });
     fireEvent.change(screen.getByLabelText('API key to use'), { target: { value: 'g:prod' } });
@@ -38,8 +50,9 @@ describe('AiDefaultCard (ADR 0110)', () => {
     await waitFor(() => expect(setAiDefault).toHaveBeenCalledWith({ provider: 'google', model: 'gemini-2.0-flash', credentialRef: 'g:prod', preferForText: false }));
   });
 
-  it('warns that audio needs Google when a vision-only provider is picked', () => {
+  it('warns that audio needs Google when a vision-only provider is picked', async () => {
     render(<AiDefaultCard refs={['c:prod']} />);
+    await waitFor(() => expect(getAiDefault).toHaveBeenCalled());
     expect(screen.queryByText(/Audio transcription needs Google/i)).toBeNull(); // google default → no warn
     fireEvent.change(screen.getByLabelText('Provider'), { target: { value: 'anthropic' } });
     expect(screen.getByText(/Audio transcription needs Google/i)).toBeTruthy();
@@ -49,8 +62,11 @@ describe('AiDefaultCard (ADR 0110)', () => {
     vi.mocked(getAiDefault).mockRejectedValueOnce(new Error('boom'));
     render(<AiDefaultCard refs={['g:prod']} />);
     expect(await screen.findByText(/couldn’t load the current default/)).toBeTruthy();
-    // Nothing to save against an unknown state.
-    expect((screen.getByText('Save default') as HTMLButtonElement).disabled).toBe(true);
+    // Nothing to save against an unknown state. Fill model AND key first: with them
+    // empty, Save is disabled for that reason alone and this assertion proved nothing.
+    fireEvent.change(screen.getByLabelText('Model'), { target: { value: 'gemini-2.0-flash' } });
+    fireEvent.change(screen.getByLabelText('API key to use'), { target: { value: 'g:prod' } });
+    expect(saveButton().disabled).toBe(true);
   });
 
   describe('ADR 0821 D5 — "use this key for background AI"', () => {
@@ -80,7 +96,7 @@ describe('AiDefaultCard (ADR 0110)', () => {
       fireEvent.change(screen.getByLabelText('Model'), { target: { value: 'gemini-2.0-flash' } });
       fireEvent.change(screen.getByLabelText('API key to use'), { target: { value: 'g:prod' } });
       fireEvent.click(screen.getByRole('switch', { name: SWITCH }));
-      fireEvent.click(screen.getByText('Save default'));
+      fireEvent.click(saveButton());
       await waitFor(() => expect(setAiDefault).toHaveBeenCalledWith({ provider: 'google', model: 'gemini-2.0-flash', credentialRef: 'g:prod', preferForText: true }));
       expect((screen.getByRole('switch', { name: SWITCH }) as HTMLInputElement).checked).toBe(true);
     });

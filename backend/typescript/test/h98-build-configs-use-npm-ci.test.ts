@@ -33,11 +33,15 @@ function tree(files: Record<string, string>): string {
   return root;
 }
 
+// Load headroom: ~1s quiet, but 39s in the 2026-10-15 slot 95r' merge train at load1
+// ~17 (and >15s in 95r), past the 15s testTimeout. CPU contention, not a regression.
+const REAL_REPO_TIMEOUT_MS = 120_000;
+
 describe('check-build-installs — the real repo', () => {
   it('is clean: no build config runs `npm install`', () => {
     const { findings } = scan();
     expect(findings).toEqual([]);
-  });
+  }, REAL_REPO_TIMEOUT_MS);
 
   it('actually READ the build configs — a clean scan of nothing must not pass', () => {
     const { files, missing } = scan();
@@ -46,7 +50,7 @@ describe('check-build-installs — the real repo', () => {
     expect(missing).toEqual([]);
     for (const req of REQUIRED) expect(files).toContain(req);
     expect(files.length).toBeGreaterThanOrEqual(REQUIRED.length);
-  });
+  }, REAL_REPO_TIMEOUT_MS);
 });
 
 describe('check-build-installs — the finding arm', () => {

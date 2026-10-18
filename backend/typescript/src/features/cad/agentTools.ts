@@ -37,7 +37,7 @@ import { resolveFeatureToggle } from '../../host/agentToolKit.js';
 import { listOrgs, resolveEffectiveAccess } from '../../host/accessControlService.js';
 import type { BundleScope } from '../../host/inMemorySurfaces.js';
 import { getNodeRegistry } from '../../executor/nodeRegistry.js';
-import { createCanvasForTenant, updateCanvasForTenant, getCanvasForCaller } from '../../host/canvasSurface.js';
+import { createCanvasForTenant, updateCanvasForTenant, getCanvasForCaller, canvasWriteAllowed } from '../../host/canvasSurface.js';
 import { resolveFocusedId } from '../../host/conversationFocus.js';
 import { validateCadDoc, CAD_SOLID_KINDS } from './validateCadDoc.js';
 
@@ -227,6 +227,10 @@ export function registerCadAgentTools(): void {
         const existing = await getCanvasForCaller(scope.tenantId, canvasId, { subject: scope.actingUserId });
         if (!existing || existing.canvasTypeId !== CAD_CANVAS_TYPE) {
           return toolError('not_found', `CAD model '${canvasId}' not found in this workspace.`);
+        }
+        // ADR 0886 D1 — WRITE on the owner, decided in the owner's org.
+        if (!(await canvasWriteAllowed(scope.tenantId, existing, { subject: scope.actingUserId }))) {
+          return toolError('forbidden_scope', 'The user can read this CAD model but cannot edit it — tell them.');
         }
         const baseVersion = Number(input.baseVersion);
         if (!Number.isInteger(baseVersion) || baseVersion < 1) {

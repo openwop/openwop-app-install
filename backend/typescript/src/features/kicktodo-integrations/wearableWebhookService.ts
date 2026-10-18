@@ -15,7 +15,9 @@
  *   no existence leak). Idempotent via the kernel's occurrence→check-in.
  */
 import { DurableCollection } from '../../host/hostExtPersistence.js';
+import { registerKvAgeOut } from '../../host/kvAgeOut.js';
 import { createLogger } from '../../observability/logger.js';
+import { KICKTODO_REVOKED_ROW_RETENTION_DAYS } from '../kicktodo-core/types.js';
 import { hashToken, mintToken } from '../../host/capabilityToken.js';
 import { resolveOne } from '../../host/featureToggles/service.js';
 import { resolveConnectionCredential } from '../connections/connectionsService.js';
@@ -42,6 +44,34 @@ const registrations = new DurableCollection<WebhookReg>(
   (r) => r.tenantId, // tenant-index → bounded revocation (grade-data 0462-D1)
 );
 
+/**
+ * KTINT-4 (KickTodo wave 4C) — the ONE-live-token CLAIM per (tenant, provider):
+ * the current token's hash, taken by CAS. Rotation used to be revoke-then-put, so
+ * two concurrent registrations each revoked nothing and each put a live token —
+ * two live capabilities for one pair, the second never revocable by a re-register
+ * that only knew of one. Same shape as the invite one-live index (KTCORE-3).
+ * Content-free (tenant + provider + hash).
+ */
+const currentToken = new DurableCollection<{ tenantId: string; provider: string; tokenHash: string }>(
+  'kicktodo-wearable-webhook-current',
+  (r) => `${r.tenantId}::${r.provider}`,
+);
+
+// KTINT-4 — revoked webhook tokens were never purged (one per rotation). A revoked
+// token already 404s exactly like an unknown one; past the window it is reclaimed
+// through the (tenant-indexed) collection, so its index marker goes with it.
+registerKvAgeOut({
+  id: 'kicktodo-wearable-webhook:revoked',
+  prefix: 'hostext:kicktodo-wearable-webhook:',
+  ttlDays: KICKTODO_REVOKED_ROW_RETENTION_DAYS,
+  timestampField: 'revokedAt',
+  acceptIndexed: true,
+});
+
+export class WebhookConflictError extends Error {
+  constructor() { super('Concurrent webhook registrations — retry.'); }
+}
+
 export class WebhookDeniedError extends Error {} // → uniform 404
 export class WebhookUnauthorizedError extends Error {} // → 401
 
@@ -52,13 +82,46 @@ export async function registerWearableWebhook(tenantId: string, provider: string
   if (!wearableProviderConfigured() || !getWearableAdapter(provider)) {
     throw new WebhookDeniedError(`Wearable provider '${provider}' is not configured.`);
   }
-  // grade-data 0462-D1 — ROTATE: revoke any prior active token for this
-  // (tenant, provider) before minting, so re-registration replaces rather than
-  // accumulates un-revocable capabilities (one live webhook token per pair).
-  await revokeWearableWebhook(tenantId, provider);
-  const { raw } = mintToken('ktwear');
-  await registrations.put({ tokenHash: hashToken(raw), tenantId, provider, createdAt: nowIso() });
-  return raw;
+  // grade-data 0462-D1 — ROTATE: re-registration replaces rather than accumulates
+  // un-revocable capabilities (one live webhook token per pair).
+  //
+  // KTINT-4 — atomically: claim the pair's CURRENT pointer by CAS first, write
+  // the token row only AFTER winning, then revoke every live token for the pair
+  // that the pointer does not name (the previous one, any minted before the
+  // pointer existed, and ours if a later registration already superseded us).
+  // The pointer only ever moves to a hash whose row is written after the move,
+  // so a token the pointer has left is never current again: re-reading it per
+  // row makes every interleaving end with exactly the pointer's token live.
+  const key = `${tenantId}::${provider}`;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const prior = await currentToken.get(key);
+    const { raw, hash } = mintToken('ktwear');
+    if (!(await currentToken.compareAndSwap(prior, { tenantId, provider, tokenHash: hash }))) continue;
+    await registrations.put({ tokenHash: hash, tenantId, provider, createdAt: nowIso() });
+    await revokeSupersededTokens(tenantId, provider);
+    return raw;
+  }
+  throw new WebhookConflictError();
+}
+
+/** Revoke the pair's live tokens other than the one the CURRENT pointer names,
+ *  re-reading the pointer before each revoke. Bounded tenant-slice read. */
+async function revokeSupersededTokens(tenantId: string, provider: string): Promise<void> {
+  const key = `${tenantId}::${provider}`;
+  for (const r of await registrations.listForTenantIndexed(tenantId)) {
+    if (r.provider !== provider || r.revokedAt) continue;
+    if ((await currentToken.get(key))?.tokenHash === r.tokenHash) continue;
+    await revokeRow(r);
+  }
+}
+
+/** CAS revoke of one token row (a concurrent revoke of the same row converges). */
+async function revokeRow(r: WebhookReg): Promise<void> {
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const cur = attempt === 0 ? r : await registrations.get(r.tokenHash);
+    if (!cur || cur.revokedAt) return;
+    if (await registrations.compareAndSwap(cur, { ...cur, revokedAt: nowIso() })) return;
+  }
 }
 
 /** Revoke the tenant's active webhook token(s) for a provider — an operator/tenant
@@ -67,7 +130,7 @@ export async function registerWearableWebhook(tenantId: string, provider: string
 export async function revokeWearableWebhook(tenantId: string, provider: string): Promise<void> {
   if (!tenantId || !provider) return;
   for (const r of (await registrations.listForTenantIndexed(tenantId)).filter((x) => x.provider === provider && !x.revokedAt)) {
-    await registrations.put({ ...r, revokedAt: nowIso() });
+    await revokeRow(r);
   }
 }
 
@@ -111,4 +174,8 @@ export async function ingestWearableWebhook(rawToken: string, push: WearablePush
 /** Test-only reset. */
 export async function __resetWearableWebhooks(): Promise<void> {
   await registrations.__clear();
+  await currentToken.__clear();
 }
+
+/** Test seam. */
+export const __test = { registrations, currentToken };

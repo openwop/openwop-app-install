@@ -33,6 +33,21 @@ export interface TicketMessage {
   at: string;
 }
 
+/** ADR 0878 D3 — where a reply to this ticket goes. Routing only — never PII
+ *  (the address lives in `requester`). Absent ⇒ the ticket has no reply channel
+ *  (a form or manual ticket): a reply is recorded, never sent. */
+export type TicketReplyChannel = { kind: 'whatsapp'; connectionId: string } | { kind: 'widget' };
+
+/** ADR 0878 D3/D4 — the customer's channel identity, captured at intake and never
+ *  caller-supplied. PII: erased under DSAR (D4) and projected out of every
+ *  surface except the member HTTP read (`projectTicketForAgent`). */
+export interface TicketRequester {
+  /** E.164 (`normalizeWaNumber`) — never Twilio's raw `whatsapp:+E164`. */
+  phone?: string;
+  /** Lower-cased. */
+  email?: string;
+}
+
 export interface Ticket {
   ticketId: string;
   tenantId: string;
@@ -42,7 +57,10 @@ export interface Ticket {
   priority: TicketPriority;
   channel: TicketChannel;
   contactId?: string;
+  /** ADR 0878 D5 — an org MEMBER ROW's `subject` holding `workspace:write` in `orgId`. */
   assigneeMemberId?: string;
+  replyChannel?: TicketReplyChannel;
+  requester?: TicketRequester;
   slaDueAt?: string;
   messages: TicketMessage[];
   createdBy: string;

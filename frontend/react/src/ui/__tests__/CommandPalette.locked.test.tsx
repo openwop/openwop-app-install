@@ -3,6 +3,9 @@
  * it: the lock names that bundle, and activating it opens the store's detail panel
  * (`/marketplace/bundles?bundle=<id>`) instead of the bare store. The feature →
  * bundle lookup is data (the catalog read), loaded once.
+ *
+ * No `useEffectiveAccess` mock: the palette's lock comes from `useFeatureLocked`
+ * (mocked below), and nothing on the rendered path calls the access hook.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
@@ -33,10 +36,6 @@ vi.mock('../../featureToggles/FeatureAccessContext.js', () => ({
   // `okrs` is locked but no bundle sells it in this catalog.
   useFeatureLocked: () => (id?: string) => id === 'crm' || id === 'okrs',
 }));
-vi.mock('../../client/useEffectiveAccess.js', () => ({
-  useEffectiveAccess: () => ({ roles: ['admin'], scopes: [], basis: 'member' }),
-  isAdminCaller: () => false,
-}));
 
 import { CommandPalette } from '../CommandPalette.js';
 
@@ -60,7 +59,13 @@ describe('CommandPalette — locked command (ADR 0419)', () => {
     await waitFor(() => expect(screen.getByRole('img', { name: 'Locked — unlock with CRM Suite' })).toBeTruthy());
     fireEvent.click(screen.getByRole('option', { name: /CRM/ }));
     expect(screen.getByTestId('where').textContent).toBe('/marketplace/bundles?bundle=crm');
-    // One catalog read for the whole list.
+    // One catalog read for the whole list. The count is CUMULATIVE for this file
+    // (the lookup is cached per session in module state), so it stays 1 in either
+    // case order. It is a DOUBLE guard: `pending ??=` (featureToggles/lockedTargets.ts)
+    // and `catalogP ??=` (features/marketplace/lockedUpsell.ts) each keep it at 1
+    // alone, so breaking either one alone stays green here (w49 probe locked-once was
+    // vacuous for exactly this reason). The shared session cache is witnessed by
+    // lockedUpsell.test.ts "N callers share one read of each endpoint".
     expect(fetchFeatureBundles).toHaveBeenCalledTimes(1);
   });
 

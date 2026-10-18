@@ -51,7 +51,9 @@ export function registerHostEventStreamRoutes(app: Express, deps: { storage: Sto
       const authenticated = callerSubject(req) !== undefined;
       const tenantId = tenantOf(req);
       const lastEventId = req.header('last-event-id') ?? null;
-      const channel = openSseChannel(req, res, { heartbeatMs: 15_000 });
+      // ADR 0876: a WIRE channel (RFC 0236 `hostEvents`), never refused for the front door.
+      // ADR 0897 / RFC 0247: bounded only for a consumer that sent `resumable=true`.
+      const channel = openSseChannel(req, res, { heartbeatMs: 15_000, frontDoor: 'allow', boundWhen: 'resumable' });
       if (!authenticated) return;
       const detach = attachHostEventSubscriber(tenantId, (frame) => { if (!channel.closed) res.write(frame); }, lastEventId);
       channel.onClose(detach);

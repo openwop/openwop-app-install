@@ -7,11 +7,24 @@
  *   - the READ tool fails EMPTY (no candidates) without authority;
  *   - the ACTION tool returns a typed error (`acting_user_required` /
  *     `forbidden`) without authority, and starts a run WITH it.
+ *
+ * NO NETWORK (w41 grade-tests ruling 5): a started factory run executes in the
+ * background (`startWorkflowRun` → `setImmediate(executeRun)`) and its second node
+ * (`core.web.search`) would egress through the SSRF-guarded undici dispatcher — NOT
+ * the global `fetch`, so a `fetch` stub would not intercept it. MEASURED: this
+ * harness registers no pack nodes, so every started run fails at `research-frame`
+ * and never searches. As insurance the search endpoint is still pointed at a
+ * LOOPBACK stub (`OPENWOP_WEBSEARCH_BASE_URL` + `OPENWOP_WEBHOOK_ALLOW_PRIVATE`)
+ * that answers 503 (a durable search then refuses, ADR 0502, before any LLM node),
+ * and the create-and-run case asserts the stub saw NO request. Every dispatching
+ * case waits for its runs to settle (`settle`) so no run outlives its case.
  */
+import { getDefaultModel, listSelectableProviderIds } from '../src/providers/catalog.js';
+import http from 'node:http';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
 import { setEventLogBackend } from '../src/executor/eventLog.js';
 import { setSuspendBackend } from '../src/executor/suspendManager.js';
@@ -21,12 +34,12 @@ import { createHostAdapterSuite } from '../src/host/index.js';
 import { loadWorkflowChainPacks, defaultWorkflowChainPackRoots, _resetChainRegistryForTest } from '../src/host/workflowChainPackLoader.js';
 import { _resetChainBackedWorkflowsForTest } from '../src/host/chainBackedWorkflows.js';
 import { registerLegacyDefsChainBacked } from '../src/features/index.js';
-import { createCandidate } from '../src/features/kicktodo-creator/creatorService.js';
+import { createCandidate, getCandidate, listCandidates } from '../src/features/kicktodo-creator/creatorService.js';
 import { kicktodoCreatorBuiltinWorkflows } from '../src/features/kicktodo-creator/builtinWorkflows.js';
 import { runCandidatesTool, runFactoryRunTool, type ToolScope } from '../src/features/kicktodo-creator/agentTools.js';
 import { createTurnRunDispatchCollector } from '../src/host/turnRunDispatch.js';
 import { randomBytes } from 'node:crypto';
-import { configureSecretResolver, setSecret, clearTenantSecretCache } from '../src/byok/secretResolver.js';
+import { configureSecretResolver, setSecret, removeSecret, clearTenantSecretCache } from '../src/byok/secretResolver.js';
 import { configureKmsClient, createLocalAesKmsClient } from '../src/byok/kmsEncryption.js';
 import { setHeadlessAiDefault, clearHeadlessAiDefault, resolveIgnitionAiBinding } from '../src/host/headlessAi.js';
 
@@ -50,12 +63,50 @@ const MGR = 'user:kt-manager';
 const SHARED = 'tenant-kt-shared';
 const PARTICIPANT = 'user:kt-participant';
 
+/** The loopback search stub: every request the factory's search node makes lands
+ *  here (and nowhere else) and is refused with a 503. */
+const searchHits: string[] = [];
+let searchStub: http.Server;
+const ENV_KEYS = ['OPENWOP_WEBSEARCH_API_KEY', 'OPENWOP_WEBSEARCH_BASE_URL', 'OPENWOP_WEBHOOK_ALLOW_PRIVATE'] as const;
+const savedEnv = new Map<string, string | undefined>(ENV_KEYS.map((k) => [k, process.env[k]]));
+
+/** A tool result's JSON content as a plain record — no cast (w41 typing rule). */
+function contentOf(r: { content: string }): Record<string, unknown> {
+  const v: unknown = JSON.parse(r.content);
+  if (typeof v !== 'object' || v === null || Array.isArray(v)) throw new Error(`tool content is not an object: ${r.content}`);
+  return { ...v };
+}
+/** The object rows of an untyped array field. */
+function rowsOf(v: unknown): Array<Record<string, unknown>> {
+  return Array.isArray(v) ? v.filter((x: unknown): x is Record<string, unknown> => typeof x === 'object' && x !== null && !Array.isArray(x)) : [];
+}
+
+/** Runs this file started; each case drains its own before it ends. */
+const started: string[] = [];
+const TERMINAL = new Set(['completed', 'failed', 'cancelled']);
+async function settle(): Promise<void> {
+  for (const runId of started.splice(0)) {
+    await vi.waitFor(async () => {
+      expect(TERMINAL.has((await storage.getRun(runId))?.status ?? '')).toBe(true);
+    }, { timeout: 15_000, interval: 25 });
+  }
+}
+
 beforeAll(async () => {
   // Boot parity (src/index.ts): the factory is registered CHAIN-BACKED — the
   // chain packs load through the real loader and the boot registrar binds the
   // same-id definitions. ADR 0706's run tool reads the chain's pinned
   // provider/model from that definition's `variables[]`, which the raw legacy
   // def this harness used to register never carried.
+  searchStub = http.createServer((req, res) => {
+    searchHits.push(req.url ?? '');
+    res.writeHead(503, { 'content-type': 'application/json' });
+    res.end('{"error":"search stub refuses"}');
+  });
+  await new Promise<void>((resolve) => searchStub.listen(0, '127.0.0.1', () => resolve()));
+  const addr = searchStub.address();
+  process.env.OPENWOP_WEBSEARCH_BASE_URL = `http://127.0.0.1:${addr && typeof addr === 'object' ? addr.port : 0}/search`;
+  process.env.OPENWOP_WEBHOOK_ALLOW_PRIVATE = 'true';
   _resetChainRegistryForTest();
   _resetChainBackedWorkflowsForTest();
   const { errors } = loadWorkflowChainPacks({ roots: defaultWorkflowChainPackRoots() });
@@ -65,32 +116,47 @@ beforeAll(async () => {
   // fail-closed on demo sources), so the dispatch cases need one configured.
   process.env.OPENWOP_WEBSEARCH_API_KEY = 'test-search-key';
   // ADR 0706 — and it refuses without a Secrets Vault key for the provider it
-  // resolved (the chain's pinned `anthropic` here, no workspace default), so the
+  // resolved (the host catalog default, `anthropic` here, no workspace default), so the
   // dispatch cases need that too. The 2026-07-29 run died at `extract-claims`
   // for exactly this; now it never starts.
   await setSecret('anthropic', 'test-anthropic-key', { tenantId: MGR });
 });
-afterAll(() => { delete process.env.OPENWOP_WEBSEARCH_API_KEY; });
+afterEach(async () => { await settle(); });
+afterAll(async () => {
+  await settle();
+  for (const [k, v] of savedEnv) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+  await new Promise<void>((resolve) => searchStub.close(() => resolve()));
+});
 
 describe('openwop:kicktodo.candidates (READ) — fail EMPTY without authority', () => {
   it('a system turn (no acting user) reads nothing', async () => {
+    // The tenant MUST hold a candidate, or "reads nothing" holds with no guard at all.
+    await createCandidate({ tenantId: MGR, createdBy: MGR, topic: 'System-turn control', audience: 'beginners', transformation: '', durationDaysTarget: 14, dailyMinutesTarget: 15 });
+    const owner = contentOf(await runCandidatesTool({}, { tenantId: MGR, actingUserId: MGR }));
+    expect(rowsOf(owner.candidates).map((c) => c.topic)).toContain('System-turn control'); // positive control
     const r = await runCandidatesTool({}, { tenantId: MGR });
-    expect(JSON.parse(r.content)).toEqual({ candidates: [] });
+    expect(contentOf(r)).toEqual({ candidates: [] });
   });
 
   it('a non-manage participant reads nothing', async () => {
     await createCandidate({ tenantId: SHARED, createdBy: 'user:owner', topic: 'Watercolor basics', audience: 'beginners', transformation: '', durationDaysTarget: 14, dailyMinutesTarget: 15 });
     const scope: ToolScope = { tenantId: SHARED, actingUserId: PARTICIPANT };
     const r = await runCandidatesTool({}, scope);
-    expect(JSON.parse(r.content)).toEqual({ candidates: [] });
+    expect(contentOf(r)).toEqual({ candidates: [] });
   });
 
-  it('a manager reads their workspace candidates with stage + draft binding', async () => {
-    await createCandidate({ tenantId: MGR, createdBy: MGR, topic: 'Watercolor basics', audience: 'beginners', transformation: '', durationDaysTarget: 14, dailyMinutesTarget: 15 });
+  it('a manager reads their workspace candidates with stage + dossier state', async () => {
+    const created = await createCandidate({ tenantId: MGR, createdBy: MGR, topic: 'Manager read', audience: 'beginners', transformation: '', durationDaysTarget: 14, dailyMinutesTarget: 15 });
     const r = await runCandidatesTool({}, { tenantId: MGR, actingUserId: MGR });
-    const body = JSON.parse(r.content) as { candidates: Array<{ topic: string; state: string }> };
-    expect(body.candidates.length).toBeGreaterThanOrEqual(1);
-    expect(body.candidates[0]).toMatchObject({ state: 'intake' });
+    const body = contentOf(r);
+    // Found by id, not by position: other cases add MGR candidates in any order.
+    expect(rowsOf(body.candidates).find((c) => c.id === created.id)).toEqual({
+      id: created.id, topic: 'Manager read', audience: 'beginners',
+      // XCH-CA-2 — the agreed intake is read back, so the agent never re-asks it.
+      transformation: '', durationDaysTarget: 14, dailyMinutesTarget: 15,
+      state: 'intake', riskTier: 'general',
+      hasDossier: false, sourceCount: 0, unsupportedClaimIds: [],
+    });
   });
 });
 
@@ -98,27 +164,86 @@ describe('openwop:kicktodo.factory.run (ACTION) — typed error without authorit
   it('no acting user ⇒ acting_user_required', async () => {
     const r = await runFactoryRunTool(deps, { topic: 'Watercolor basics' }, { tenantId: MGR });
     expect(r.isError).toBe(true);
-    expect(JSON.parse(r.content)).toMatchObject({ error: 'acting_user_required' });
+    expect(contentOf(r)).toMatchObject({ error: 'acting_user_required' });
   });
 
   it('a non-manage participant ⇒ forbidden', async () => {
     const r = await runFactoryRunTool(deps, { topic: 'Watercolor basics' }, { tenantId: SHARED, actingUserId: PARTICIPANT });
     expect(r.isError).toBe(true);
-    expect(JSON.parse(r.content)).toMatchObject({ error: 'forbidden' });
+    expect(contentOf(r)).toMatchObject({ error: 'forbidden' });
   });
 
   it('a manager can create-and-run: returns a runId + candidateId', async () => {
+    const hitsBefore = searchHits.length;
     const r = await runFactoryRunTool(deps, { topic: 'Watercolor basics', audience: 'beginners' }, { tenantId: MGR, actingUserId: MGR });
     expect(r.isError).toBeUndefined();
-    const body = JSON.parse(r.content) as { runId: string; candidateId: string };
-    expect(body.runId).toBeTruthy();
-    expect(body.candidateId).toMatch(/^cand:/);
+    const body = contentOf(r);
+    const runId = String(body.runId);
+    const candidateId = String(body.candidateId);
+    started.push(runId);
+    expect(candidateId).toMatch(/^cand:/);
+    // The run and the candidate are REAL, persisted, and bound to each other.
+    const rec = await storage.getRun(runId);
+    expect(rec?.workflowId).toBe('openwop-app.kicktodo.challenge-factory');
+    expect(rec?.inputs).toMatchObject({ candidateId, topic: 'Watercolor basics', audience: 'beginners', authorSubject: MGR });
+    expect((await getCandidate(MGR, candidateId))?.topic).toBe('Watercolor basics');
+    // …and it performs NO search egress. MEASURED (w41): this harness registers no
+    // pack nodes, so the run fails at its first node (`research-frame`: node module
+    // not registered) before `core.web.search`. Were that to change, the search
+    // would land on the loopback stub (never the network) and this line goes red to
+    // say the file now drives egress.
+    await settle();
+    expect((await storage.getRun(runId))?.status).toBe('failed');
+    expect(searchHits.length).toBe(hitsBefore);
+  });
+
+  // KTFAC-1 — no per-CALL id reaches a tool, so the chat TURN's run id is the
+  // stable key: a retried call in the same turn converges on ONE candidate (red
+  // when the tool stops passing the run-keyed idempotency key). A new turn is a
+  // new ask and mints fresh.
+  it('a retried factory.run in the SAME turn reuses its candidate; a new turn does not', async () => {
+    const scope = { tenantId: MGR, actingUserId: MGR, runId: 'turn-kt4b-1' };
+    const input = { topic: 'Retry-safe sketching', audience: 'beginners' };
+    const first = contentOf(await runFactoryRunTool(deps, input, scope));
+    const retry = contentOf(await runFactoryRunTool(deps, input, scope));
+    const nextTurn = contentOf(await runFactoryRunTool(deps, input, { ...scope, runId: 'turn-kt4b-2' }));
+    started.push(String(first.runId), String(retry.runId), String(nextTurn.runId));
+    expect(retry.candidateId).toBe(first.candidateId);
+    expect(nextTurn.candidateId).not.toBe(first.candidateId);
+    expect((await listCandidates(MGR)).filter((c) => c.topic === 'Retry-safe sketching')).toHaveLength(2);
+  });
+
+  // XCH-CA-1 / XCH-CA-2 — what the intake collects reaches the candidate, and the
+  // cadence the creator chose reaches the run (it used to be dropped for
+  // hard-coded defaults and an unset cadence).
+  it('carries the intake (transformation, duration, daily minutes) to the candidate and the cadence to the run', async () => {
+    const r = await runFactoryRunTool(deps, {
+      topic: 'Watercolor basics', audience: 'beginners', transformation: 'Paint a finished landscape from a photo',
+      durationDays: 21, dailyMinutes: 30, checkpointEvery: 'outline-only',
+    }, { tenantId: MGR, actingUserId: MGR });
+    expect(r.isError).toBeUndefined();
+    const body = contentOf(r);
+    started.push(String(body.runId));
+    expect(body.checkpointEvery).toBe('outline-only');
+    const cand = await getCandidate(MGR, String(body.candidateId));
+    expect(cand).toMatchObject({ transformation: 'Paint a finished landscape from a photo', durationDaysTarget: 21, dailyMinutesTarget: 30 });
+    expect((await storage.getRun(String(body.runId)))?.inputs).toMatchObject({ checkpointEvery: 'outline-only' });
+  });
+
+  it('out-of-bounds intake or an unknown cadence ⇒ validation_error, nothing created', async () => {
+    const before = (await listCandidates(MGR)).length;
+    for (const bad of [{ durationDays: 2 }, { durationDays: 61 }, { dailyMinutes: 4 }, { dailyMinutes: 12.5 }, { checkpointEvery: 'every-lesson' }]) {
+      const r = await runFactoryRunTool(deps, { topic: 'Watercolor basics', ...bad }, { tenantId: MGR, actingUserId: MGR });
+      expect(r.isError, JSON.stringify(bad)).toBe(true);
+      expect(contentOf(r)).toMatchObject({ error: 'validation_error' });
+    }
+    expect((await listCandidates(MGR)).length).toBe(before);
   });
 
   it('neither a candidateId nor a topic ⇒ validation_error', async () => {
     const r = await runFactoryRunTool(deps, {}, { tenantId: MGR, actingUserId: MGR });
     expect(r.isError).toBe(true);
-    expect(JSON.parse(r.content)).toMatchObject({ error: 'validation_error' });
+    expect(contentOf(r)).toMatchObject({ error: 'validation_error' });
   });
 
   // 2026-07-25 incident: the tool dispatched a REAL run, the agent narrated "the
@@ -134,7 +259,8 @@ describe('openwop:kicktodo.factory.run (ACTION) — typed error without authorit
       { tenantId: MGR, actingUserId: MGR, conversationId: 'conv:kt-1', onRunDispatched: collector.sink },
     );
     expect(r.isError).toBeUndefined();
-    const { runId } = JSON.parse(r.content) as { runId: string };
+    const runId = String(contentOf(r).runId);
+    started.push(runId);
     // The workflow identity rides the dispatch so the bubble/rail render a real
     // title instead of a blank header (code-review fix).
     expect(collector.drain()).toEqual([{
@@ -153,7 +279,8 @@ describe('openwop:kicktodo.factory.run (ACTION) — typed error without authorit
     const saved = process.env.OPENWOP_WEBSEARCH_API_KEY;
     delete process.env.OPENWOP_WEBSEARCH_API_KEY;
     try {
-      const before = JSON.parse((await runCandidatesTool({}, { tenantId: MGR, actingUserId: MGR })).content) as { candidates: unknown[] };
+      const hitsBefore = searchHits.length;
+      const before = rowsOf(contentOf(await runCandidatesTool({}, { tenantId: MGR, actingUserId: MGR })).candidates);
       const collector = createTurnRunDispatchCollector();
       const r = await runFactoryRunTool(
         deps,
@@ -161,11 +288,12 @@ describe('openwop:kicktodo.factory.run (ACTION) — typed error without authorit
         { tenantId: MGR, actingUserId: MGR, conversationId: 'conv:kt-2', onRunDispatched: collector.sink },
       );
       expect(r.isError).toBe(true);
-      expect(JSON.parse(r.content)).toMatchObject({ error: 'research_adapter_unconfigured' });
-      // No run recorded, and no candidate burned by the refused call.
+      expect(contentOf(r)).toMatchObject({ error: 'research_adapter_unconfigured' });
+      // No run recorded, no search egress, and no candidate burned by the refused call.
       expect(collector.drain()).toEqual([]);
-      const after = JSON.parse((await runCandidatesTool({}, { tenantId: MGR, actingUserId: MGR })).content) as { candidates: unknown[] };
-      expect(after.candidates.length).toBe(before.candidates.length);
+      expect(searchHits.length).toBe(hitsBefore);
+      const after = rowsOf(contentOf(await runCandidatesTool({}, { tenantId: MGR, actingUserId: MGR })).candidates);
+      expect(after.length).toBe(before.length);
     } finally {
       if (saved !== undefined) process.env.OPENWOP_WEBSEARCH_API_KEY = saved;
     }
@@ -179,6 +307,7 @@ describe('openwop:kicktodo.factory.run (ACTION) — typed error without authorit
       { tenantId: MGR, actingUserId: MGR, onRunDispatched: collector.sink },
     );
     expect(r.isError).toBeUndefined();
+    started.push(String(contentOf(r).runId));
     expect(collector.drain()).toEqual([]);
   });
 });
@@ -197,11 +326,13 @@ describe('openwop:kicktodo.factory.run — ADR 0706 provider binding + pre-fligh
   const T = 'user:kt-manager-0706';
   const scope: ToolScope = { tenantId: T, actingUserId: T };
   const candidateCount = async (): Promise<number> =>
-    (JSON.parse((await runCandidatesTool({}, scope)).content) as { candidates: unknown[] }).candidates.length;
+    rowsOf(contentOf(await runCandidatesTool({}, scope)).candidates).length;
   const run = async (input: Record<string, unknown>) => {
     const collector = createTurnRunDispatchCollector();
     const r = await runFactoryRunTool(deps, input, { ...scope, conversationId: 'conv:kt-0706', onRunDispatched: collector.sink });
-    return { r, body: JSON.parse(r.content) as Record<string, unknown>, dispatched: collector.drain() };
+    const body = contentOf(r);
+    if (typeof body.runId === 'string') started.push(body.runId);
+    return { r, body, dispatched: collector.drain() };
   };
 
   beforeAll(async () => {
@@ -220,8 +351,8 @@ describe('openwop:kicktodo.factory.run — ADR 0706 provider binding + pre-fligh
     // from the catalog, never left empty for the node to guess.
     const chosen = await resolveIgnitionAiBinding(T, { provider: 'openai' });
     expect(chosen).toMatchObject({ provider: 'openai', source: 'creator' });
-    expect(chosen!.model.length).toBeGreaterThan(0);
-    expect(chosen!.credentialRef).toBeUndefined();
+    expect(chosen?.model.length).toBeGreaterThan(0);
+    expect(chosen).not.toHaveProperty('credentialRef');
   });
 
   it('a Gemini workspace default resolves and is STAMPED on the run: inputs + configurable carry the BOUND ref, not the first prefixed one', async () => {
@@ -230,28 +361,33 @@ describe('openwop:kicktodo.factory.run — ADR 0706 provider binding + pre-fligh
     expect(r.isError, r.content).toBeUndefined();
     expect(body).toMatchObject({ provider: 'google', model: 'gemini-3.1-flash-lite' });
     expect(dispatched).toHaveLength(1);
-    const rec = (await storage.getRun(body.runId as string))!;
-    expect(rec.inputs).toMatchObject({ provider: 'google', model: 'gemini-3.1-flash-lite', credentialRef: 'google:two' });
-    expect(rec.configurable).toEqual({ credentialRefs: ['google:two'] });
+    const rec = await storage.getRun(String(body.runId));
+    expect(rec?.inputs).toMatchObject({ provider: 'google', model: 'gemini-3.1-flash-lite', credentialRef: 'google:two' });
+    expect(rec?.configurable).toEqual({ credentialRefs: ['google:two'] });
   });
 
   it('a creator-named provider with NO ref pins the ladder\'s pick explicitly (the same rung the dispatcher would take)', async () => {
     const { r, body } = await run({ topic: 'Trail running', provider: 'google' });
     expect(r.isError, r.content).toBeUndefined();
-    const rec = (await storage.getRun(body.runId as string))!;
+    const rec = await storage.getRun(String(body.runId));
     // No exact `google` ref exists, so the prefix rung picks the FIRST in vault
     // order — and that pick is frozen on the run, so dispatch cannot re-pick.
-    expect(rec.inputs).toMatchObject({ provider: 'google', credentialRef: 'google:one' });
-    expect(rec.configurable).toEqual({ credentialRefs: ['google:one'] });
+    expect(rec?.inputs).toMatchObject({ provider: 'google', credentialRef: 'google:one' });
+    expect(rec?.configurable).toEqual({ credentialRefs: ['google:one'] });
   });
 
-  it('no workspace default ⇒ the chain\'s pinned provider (read from the definition), with its vault key pinned', async () => {
+  // ADR 0903 — the chain no longer pins a vendor; with no creator choice and no
+  // ADR 0110 default the factory uses the host default (no chat binding here ⇒
+  // the catalog's recommended provider + model, never a stale pack constant).
+  it('no workspace default ⇒ the host catalog default (the chain pins none), with its vault key pinned', async () => {
     await setSecret('anthropic', 'test-anthropic-key', { tenantId: T });
     const { r, body } = await run({ topic: 'Watercolor basics' });
     expect(r.isError, r.content).toBeUndefined();
-    const rec = (await storage.getRun(body.runId as string))!;
-    expect(rec.inputs).toMatchObject({ provider: 'anthropic', model: 'claude-sonnet-4-6', credentialRef: 'anthropic' });
-    expect(rec.configurable).toEqual({ credentialRefs: ['anthropic'] });
+    const rec = await storage.getRun(String(body.runId));
+    const first = listSelectableProviderIds()[0]!;
+    expect(first, 'fixture guard: the catalog leads with the provider this case keys').toBe('anthropic');
+    expect(rec?.inputs).toMatchObject({ provider: first, model: getDefaultModel(first), credentialRef: 'anthropic' });
+    expect(rec?.configurable).toEqual({ credentialRefs: ['anthropic'] });
   });
 
   it('missing key for the resolved provider ⇒ ai_credential_missing BEFORE a candidate exists, nothing dispatched', async () => {
@@ -277,9 +413,9 @@ describe('openwop:kicktodo.factory.run — ADR 0706 provider binding + pre-fligh
     await setHeadlessAiDefault({ tenantId: T }, { provider: 'google', model: 'gemini-3.1-flash-lite', credentialRef: 'google:two' }, new Date().toISOString());
     const { r, body } = await run({ topic: 'Sourdough from scratch', provider: 'google' });
     expect(r.isError, r.content).toBeUndefined();
-    const rec = (await storage.getRun(body.runId as string))!;
-    expect(rec.inputs).toMatchObject({ provider: 'google', model: 'gemini-3.1-flash-lite', credentialRef: 'google:two' });
-    expect(rec.configurable).toEqual({ credentialRefs: ['google:two'] });
+    const rec = await storage.getRun(String(body.runId));
+    expect(rec?.inputs).toMatchObject({ provider: 'google', model: 'gemini-3.1-flash-lite', credentialRef: 'google:two' });
+    expect(rec?.configurable).toEqual({ credentialRefs: ['google:two'] });
   });
 
   it('a managed ref ⇒ ai_provider_unsupported (the managed tier refuses responseSchema), nothing created', async () => {
@@ -319,6 +455,10 @@ describe('openwop:kicktodo.factory.run — ADR 0706 provider binding + pre-fligh
     } finally {
       configureKmsClient(kmsClient);
       clearTenantSecretCache(T);
+      // w41 (shuffle seed 222): the undecryptable `openai` ref leaked into the
+      // "missing key" case when it ran later (ref_unresolvable instead of
+      // no_default_credential). Remove it so the shared tenant is order-free.
+      await removeSecret('openai', { tenantId: T });
     }
   });
 
@@ -336,6 +476,73 @@ describe('openwop:kicktodo.factory.run — ADR 0706 provider binding + pre-fligh
     expect(r.isError).toBe(true);
     expect(body).toMatchObject({ error: 'ai_provider_unsupported', provider: 'openwop-free' });
     expect(dispatched).toEqual([]);
+    expect(await candidateCount()).toBe(before);
+  });
+});
+
+// KTF-LB-1 / XCH-CA-5 / XCH-LB-6 — lesson images are opt-in on the run tool,
+// run on their own image binding (never the chat provider), and are
+// pre-flighted with the same "nothing was created" contract as the AI leg.
+// Sabotage: dropping `...image.inputs` from the run inputs reds the stamping
+// case; dropping the pre-flight starts a run in the no-key case.
+describe('openwop:kicktodo.factory.run — lesson images (KTF-LB-1 / XCH-LB-6)', () => {
+  const T = 'user:kt-manager-media';
+  const scope: ToolScope = { tenantId: T, actingUserId: T };
+  const candidateCount = async (): Promise<number> =>
+    rowsOf(contentOf(await runCandidatesTool({}, scope)).candidates).length;
+  const run = async (input: Record<string, unknown>) => {
+    const r = await runFactoryRunTool(deps, input, scope);
+    const body = contentOf(r);
+    if (typeof body.runId === 'string') started.push(body.runId);
+    return { r, body };
+  };
+
+  beforeAll(async () => {
+    await setSecret('anthropic', 'test-anthropic-key', { tenantId: T });
+  });
+
+  it('generateMedia without an image key ⇒ image_credential_missing, nothing created', async () => {
+    const before = await candidateCount();
+    const { r, body } = await run({ topic: 'Sketching daily', generateMedia: true });
+    expect(r.isError).toBe(true);
+    expect(body).toMatchObject({ error: 'image_credential_missing', provider: 'openai' });
+    expect(await candidateCount()).toBe(before);
+  });
+
+  it('generateMedia with an image key stamps the image binding beside the chat binding, both refs registered', async () => {
+    await setSecret('openai', 'test-openai-key', { tenantId: T });
+    try {
+      const { r, body } = await run({ topic: 'Sketching daily', generateMedia: true });
+      expect(r.isError, r.content).toBeUndefined();
+      expect(body).toMatchObject({ generateMedia: true, imageProvider: 'openai', provider: 'anthropic' });
+      const rec = await storage.getRun(String(body.runId));
+      expect(rec?.inputs).toMatchObject({ provider: 'anthropic', credentialRef: 'anthropic', generateMedia: true, imageProvider: 'openai', imageCredentialRef: 'openai' });
+      expect(rec?.configurable).toEqual({ credentialRefs: ['anthropic', 'openai'] });
+    } finally {
+      await removeSecret('openai', { tenantId: T });
+    }
+  });
+
+  it('without generateMedia the run carries no image inputs', async () => {
+    const { r, body } = await run({ topic: 'Sketching daily' });
+    expect(r.isError, r.content).toBeUndefined();
+    expect(body.generateMedia).toBe(false);
+    const rec = await storage.getRun(String(body.runId));
+    expect(rec?.inputs).not.toHaveProperty('generateMedia');
+    expect(rec?.inputs).not.toHaveProperty('imageCredentialRef');
+  });
+
+  it('imageProvider without generateMedia, an unknown imageProvider, or a non-boolean generateMedia ⇒ validation_error, nothing created', async () => {
+    const before = await candidateCount();
+    for (const input of [
+      { topic: 'Sketching daily', imageProvider: 'openai' },
+      { topic: 'Sketching daily', generateMedia: true, imageProvider: 'mock' },
+      { topic: 'Sketching daily', generateMedia: 'yes' },
+    ]) {
+      const { r, body } = await run(input);
+      expect(r.isError, JSON.stringify(input)).toBe(true);
+      expect(body).toMatchObject({ error: 'validation_error' });
+    }
     expect(await candidateCount()).toBe(before);
   });
 });

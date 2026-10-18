@@ -3,8 +3,15 @@
  * surface over HTTP:
  *   - create / list / get / update / delete a brief (org-scoped)
  *   - validate → enabledChannels + completeness issues
- *   - editing a brief that has a kernel marks it stale
+ *   - R2 CB-SP-3: the budget currency stores only ISO-4217-shaped codes
  *   - IDOR: a co-tenant member without read in the org gets 404
+ * (Kernel staleness on edit is pinned in campaign-brief-kernel.test.ts
+ * "STILL demotes when a protected field genuinely changes".)
+ *
+ * Wave 30 (grade-tests): the IDOR stranger is a SAME-tenant user with no org
+ * membership (it used to be a personal-tenant stranger, refused by the tenant key
+ * before the org gate ran — sabotaging the gate stayed green), with the owner's
+ * read as the positive control. Response bodies are typed (no `any`).
  */
 
 import http from 'node:http';
@@ -14,6 +21,8 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
+import { createOrg } from '../src/host/accessControlService.js';
+import type { CampaignBrief, BriefValidationResult } from '../src/features/campaign-brief/types.js';
 
 let BASE: string;
 let server: http.Server;
@@ -30,14 +39,16 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T }
+/** The response bodies this file reads (each route fills a subset). */
+interface Body extends Partial<BriefValidationResult> { brief?: CampaignBrief; briefs?: CampaignBrief[]; orgId?: string; user?: { userId: string } }
+interface Res<T = Body> { status: number; body: T }
 interface Client { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res>; patch: (p: string, b?: unknown) => Promise<Res>; del: (p: string) => Promise<Res> }
 function client(): Client {
   let cookie = '';
   const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    const out = (res.status === 204 ? {} : await res.json().catch(() => ({}))) as Body;
     return { status: res.status, body: out };
   };
   return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), patch: (p, b) => call('PATCH', p, b), del: (p) => call('DELETE', p) };
@@ -50,7 +61,7 @@ async function ownerWithOrg(): Promise<{ owner: Client; orgId: string }> {
   expect(r.status).toBe(201);
   const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status).toBe(201);
-  return { owner, orgId: org.body.orgId };
+  return { owner, orgId: org.body.orgId! };
 }
 
 const B = '/host/openwop-app/campaign-brief/briefs';
@@ -60,35 +71,35 @@ describe('campaign-brief briefs — CRUD + validate', () => {
     const { owner, orgId } = await ownerWithOrg();
     const r = await owner.post(B, { orgId, name: 'Q4 Launch', productName: 'FlashPick' });
     expect(r.status, JSON.stringify(r.body)).toBe(201);
-    expect(r.body.brief.channels).toHaveLength(5);
-    expect(r.body.brief.channels.every((c: any) => c.enabled === false)).toBe(true);
-    expect(r.body.brief.status).toBe('draft');
+    expect(r.body.brief!.channels).toHaveLength(5);
+    expect(r.body.brief!.channels.every((c) => c.enabled === false)).toBe(true);
+    expect(r.body.brief!.status).toBe('draft');
   });
 
   it('R2 CB-SP-3: budget currency stores only ISO-4217-shaped codes — a malformed code is dropped, never the budget', async () => {
     const { owner, orgId } = await ownerWithOrg();
     const created = await owner.post(B, { orgId, name: 'Camp', productName: 'FlashPick' });
-    const id = created.body.brief.id;
+    const id = created.body.brief!.id;
     // The old sanitizer kept any <=8-char string ("DOLLARS") from agent/workflow
     // writes; money renders downstream key off this code.
     const bad = await owner.patch(`${B}/${id}`, { budget: { totalMinor: 5000, currency: 'DOLLARS' } });
     expect(bad.status).toBe(200);
-    expect(bad.body.brief.budget.totalMinor).toBe(5000); // the budget survives
-    expect(bad.body.brief.budget.currency).toBeUndefined(); // the junk code does not
+    expect(bad.body.brief!.budget!.totalMinor).toBe(5000); // the budget survives
+    expect(bad.body.brief!.budget!.currency).toBeUndefined(); // the junk code does not
     const good = await owner.patch(`${B}/${id}`, { budget: { totalMinor: 5000, currency: 'jpy' } });
-    expect(good.body.brief.budget.currency).toBe('JPY'); // shaped codes normalize + store
+    expect(good.body.brief!.budget!.currency).toBe('JPY'); // shaped codes normalize + store
   });
 
   it('validate reports completeness issues and the enabled channel set', async () => {
     const { owner, orgId } = await ownerWithOrg();
     const created = await owner.post(B, { orgId, name: 'Camp', productName: 'FlashPick' });
-    const id = created.body.brief.id;
+    const id = created.body.brief!.id;
     // Incomplete: no persona, no value prop, no enabled channel.
     let v = await owner.post(`${B}/${id}/validate`);
     expect(v.status).toBe(200);
     expect(v.body.valid).toBe(false);
     expect(v.body.enabledChannels).toEqual([]);
-    expect(v.body.issues.map((i: any) => i.field)).toEqual(expect.arrayContaining(['personaIds', 'messaging.primaryValueProp', 'channels']));
+    expect(v.body.issues!.map((i) => i.field)).toEqual(expect.arrayContaining(['personaIds', 'messaging.primaryValueProp', 'channels']));
 
     // Complete it.
     await owner.patch(`${B}/${id}`, {
@@ -107,9 +118,9 @@ describe('campaign-brief briefs — CRUD + validate', () => {
   it('lists, gets, and deletes a brief', async () => {
     const { owner, orgId } = await ownerWithOrg();
     const created = await owner.post(B, { orgId, name: 'L', productName: 'P' });
-    const id = created.body.brief.id;
-    expect((await owner.get(`${B}?orgId=${orgId}`)).body.briefs.map((b: any) => b.id)).toContain(id);
-    expect((await owner.get(`${B}/${id}`)).body.brief.name).toBe('L');
+    const id = created.body.brief!.id;
+    expect((await owner.get(`${B}?orgId=${orgId}`)).body.briefs!.map((b) => b.id)).toContain(id);
+    expect((await owner.get(`${B}/${id}`)).body.brief!.name).toBe('L');
     expect((await owner.del(`${B}/${id}`)).status).toBe(200);
     expect((await owner.get(`${B}/${id}`)).status).toBe(404);
   });
@@ -117,12 +128,22 @@ describe('campaign-brief briefs — CRUD + validate', () => {
 
 describe('campaign-brief briefs — isolation', () => {
   it('a member without read in the brief org gets a uniform 404', async () => {
-    const { owner, orgId } = await ownerWithOrg();
-    const created = await owner.post(B, { orgId, name: 'Secret', productName: 'P' });
-    const id = created.body.brief.id;
+    // ONE explicit tenant for owner + stranger: the stranger is a co-tenant user
+    // with no membership in the org, so the ORG gate (not the tenant key) refuses.
+    const tenantId = `cb-brief-iso-${Date.now()}-${n++}`;
+    const owner = client();
+    const who = await owner.post('/host/openwop-app/test/login', { email: uniqEmail(), tenantId });
+    expect(who.status).toBe(201);
+    const ownerId = who.body.user!.userId;
+    const org = await createOrg({ tenantId, createdBy: ownerId, name: 'Acme', ownerSubject: ownerId });
+    const created = await owner.post(B, { orgId: org.orgId, name: 'Secret', productName: 'P' });
+    expect(created.status, JSON.stringify(created.body)).toBe(201);
+    const id = created.body.brief!.id;
+    expect((await owner.get(`${B}/${id}`)).status).toBe(200); // positive control
     const stranger = client();
-    await stranger.post('/host/openwop-app/test/login', { email: uniqEmail() });
+    expect((await stranger.post('/host/openwop-app/test/login', { email: uniqEmail(), tenantId })).status).toBe(201);
     expect((await stranger.get(`${B}/${id}`)).status).toBe(404);
     expect((await stranger.del(`${B}/${id}`)).status).toBe(404);
+    expect((await owner.get(`${B}/${id}`)).status).toBe(200); // the refused delete did not land
   });
 });

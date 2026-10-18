@@ -28,7 +28,7 @@ describe('changedTopLevelKeys', () => {
     expect(changedTopLevelKeys({}, { added: true })).toEqual(['added']);
   });
 
-  it('ignores key order (deep equality, not reference)', () => {
+  it('a re-ordered nested object counts as changed (coarse by design, JSON.stringify)', () => {
     const a = { meta: { x: 1, y: 2 } };
     const b = { meta: { y: 2, x: 1 } };
     // JSON.stringify is order-sensitive on objects, so re-ordered keys DO differ;

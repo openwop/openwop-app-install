@@ -8,7 +8,12 @@
  *   • RunAuditPage:  "Host does not advertise openwop-audit-log-integrity."
  *   • RunOpsPanel:   "Host does not advertise the … profile; verification unavailable."
  * Both are definitive claims about the HOST, made when we merely failed to ASK
- * it. On an audit-integrity surface that is the worst thing to be wrong about:
+ * it.
+ *
+ * SCOPE (corrected w49 grade pass): this file drives `RunAuditPage` ONLY. The
+ * same fix in `RunOpsPanel` (`RunOpsPanel.tsx`, its `capsFailed` line) has NO
+ * behavioural test here or anywhere else — an earlier header implied both were
+ * covered. That gap is a tracker row, not something this file asserts. On an audit-integrity surface that is the worst thing to be wrong about:
  * an operator checking whether their audit log is tamper-evident is told their
  * host cannot do it, and may go reconfigure something that was working.
  *
@@ -21,10 +26,16 @@
  * catch threw it away. The fix keeps it null and flags the failure separately.
  *
  * Both arms asserted: a failed read says unknown, and a host that genuinely
- * lacks the profile still gets the real explainer.
+ * lacks the profile still gets the real explainer. Absence is asserted only
+ * after a signal that renders POST-load (the explainer, the failure notice, or
+ * the "Re-verify" button, which mounts only when `auditProfile === true`) —
+ * never after the heading, which is on screen before the read settles.
+ *
+ * What turns it red: the caps catch routed to `setAuditProfile(false)`; the
+ * profile check misreading a present profile; Retry that never re-reads.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, cleanup, screen } from '@testing-library/react';
+import { render, cleanup, screen, fireEvent, waitFor } from '@testing-library/react';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 
 const api = vi.hoisted(() => ({ getCapabilities: vi.fn(), pollEvents: vi.fn(), getSdkClient: vi.fn() }));
@@ -75,7 +86,9 @@ describe('UX-RUN-1 — a failed capability read never claims the host lacks audi
   it('PRESENT: a host that advertises the profile shows neither message', async () => {
     api.getCapabilities.mockResolvedValue(WITH_PROFILE);
     view();
-    await screen.findByRole('heading', { level: 1 });
+    // Post-load signal: the verify action bar renders only when the profile read
+    // RESOLVED true. The heading is first-paint and would assert while loading.
+    await screen.findByRole('button', { name: 'Re-verify' });
     expect(screen.queryByText(/Host does not advertise/i)).toBeNull();
     expect(screen.queryByText(/Couldn't check this host's audit-integrity support/i)).toBeNull();
   });
@@ -84,6 +97,13 @@ describe('UX-RUN-1 — a failed capability read never claims the host lacks audi
     api.getCapabilities.mockRejectedValue(new Error('caps_503'));
     view();
     await screen.findByText(/Couldn't check this host's audit-integrity support/i);
-    expect(screen.getByRole('button', { name: /retry/i })).toBeTruthy();
+    // The retry must actually RE-ASK the host and recover, not just exist.
+    api.getCapabilities.mockResolvedValue(WITH_PROFILE);
+    fireEvent.click(screen.getByRole('button', { name: /retry/i }));
+    await screen.findByRole('button', { name: 'Re-verify' });
+    expect(api.getCapabilities).toHaveBeenCalledTimes(2);
+    await waitFor(() =>
+      expect(screen.queryByText(/Couldn't check this host's audit-integrity support/i)).toBeNull());
+    expect(screen.queryByText(/Host does not advertise/i)).toBeNull();
   });
 });

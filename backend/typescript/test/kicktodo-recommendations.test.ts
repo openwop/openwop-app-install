@@ -6,6 +6,12 @@
  *    the rest; anything in flight or completed is never recommended;
  *  - the pure ranker orders by reason then title, so two reads agree;
  *  - another participant's enrollments never move the caller's list.
+ *
+ * Sabotage witnesses (w41 /grade-tests): next-depth rank, the in-flight
+ * exclusion, the unlabeled-is-starter rule, the owner filter in
+ * `listEnrollmentsFor`, and the title tie-break (pure fixture ids sort OPPOSITE
+ * to their titles, so an id-only order cannot pass). Each store-backed case
+ * owns its participant, so the file is order-independent.
  */
 import { beforeAll, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
@@ -16,7 +22,6 @@ import { enroll, __clearEnrollGuards, __test as coreStore } from '../src/feature
 import { rankRecommendations, recommendedChallengesFor } from '../src/features/kicktodo-core/recommendationService.js';
 
 const T = 'tenant-reco';
-const ME = 'user:reco-me';
 const OTHER = 'user:reco-other';
 const ids: Record<string, string> = {};
 
@@ -38,23 +43,24 @@ beforeAll(async () => {
 });
 
 describe('rankRecommendations (pure)', () => {
+  // Ids deliberately anti-correlated with titles (c4 = 'Aye' … c1 = 'Dee').
   const catalog = [
-    { id: 'c3', version: 1, title: 'Cee', depthLevel: 'advanced' as const },
-    { id: 'c1', version: 1, title: 'Aye', depthLevel: 'beginner' as const },
-    { id: 'c2', version: 1, title: 'Bee', depthLevel: 'intermediate' as const },
-    { id: 'c4', version: 1, title: 'Dee' },
+    { id: 'c2', version: 1, title: 'Cee', depthLevel: 'advanced' as const },
+    { id: 'c4', version: 1, title: 'Aye', depthLevel: 'beginner' as const },
+    { id: 'c3', version: 1, title: 'Bee', depthLevel: 'intermediate' as const },
+    { id: 'c1', version: 1, title: 'Dee' },
   ];
   it('newcomer: starters first (beginner, unlabeled), the rest as more, titles alphabetical within a reason', () => {
     const out = rankRecommendations({ catalog, excludeIds: new Set(), deepestCompleted: null, deepestInFlight: null, hasAnyEnrollment: false, limit: 10 });
-    expect(out.map((r) => [r.id, r.reason])).toEqual([['c1', 'starter'], ['c4', 'starter'], ['c2', 'more'], ['c3', 'more']]);
+    expect(out.map((r) => [r.id, r.reason])).toEqual([['c4', 'starter'], ['c1', 'starter'], ['c3', 'more'], ['c2', 'more']]);
   });
   it('completed beginner: next-depth before same-depth before more; excluded ids never appear; limit applies', () => {
-    const out = rankRecommendations({ catalog, excludeIds: new Set(['c1']), deepestCompleted: 'beginner', deepestInFlight: null, hasAnyEnrollment: true, limit: 2 });
-    expect(out.map((r) => [r.id, r.reason])).toEqual([['c2', 'next-depth'], ['c3', 'more']]);
-    expect(out.some((r) => r.id === 'c1')).toBe(false);
+    const out = rankRecommendations({ catalog, excludeIds: new Set(['c4']), deepestCompleted: 'beginner', deepestInFlight: null, hasAnyEnrollment: true, limit: 2 });
+    expect(out.map((r) => [r.id, r.reason])).toEqual([['c3', 'next-depth'], ['c2', 'more']]);
+    expect(out.some((r) => r.id === 'c4')).toBe(false);
   });
   it('in flight only (nothing completed): same-depth is the anchor, no next-depth', () => {
-    const out = rankRecommendations({ catalog, excludeIds: new Set(['c2']), deepestCompleted: null, deepestInFlight: 'intermediate', hasAnyEnrollment: true, limit: 10 });
+    const out = rankRecommendations({ catalog, excludeIds: new Set(['c3']), deepestCompleted: null, deepestInFlight: 'intermediate', hasAnyEnrollment: true, limit: 10 });
     expect(out.map((r) => r.reason)).toEqual(['more', 'more', 'more']);
   });
 });
@@ -62,13 +68,14 @@ describe('rankRecommendations (pure)', () => {
 describe('recommendedChallengesFor (store-backed, self-data only)', () => {
   it('a newcomer sees starters; another participant’s enrollments do not change it', async () => {
     await enroll({ tenantId: T, ownerSubject: OTHER, challengeId: ids['Marathon Base']!, challengeVersion: 1, timezone: 'UTC' });
-    const out = await recommendedChallengesFor(T, ME);
+    const out = await recommendedChallengesFor(T, 'user:reco-newcomer');
     expect(out).toHaveLength(3);
     expect(out.map((r) => r.title)).toEqual(['Morning Movement', 'Sleep Reset', 'Unlabeled Habit']);
     expect(out.every((r) => r.reason === 'starter')).toBe(true);
   });
 
   it('after completing a beginner challenge, intermediate is next-depth and the finished one is excluded', async () => {
+    const ME = 'user:reco-completer';
     const { enrollment } = await enroll({ tenantId: T, ownerSubject: ME, challengeId: ids['Sleep Reset']!, challengeVersion: 1, timezone: 'UTC' });
     // In flight: excluded, and with nothing completed the anchor is same-depth.
     const inFlight = await recommendedChallengesFor(T, ME, 10);

@@ -17,7 +17,7 @@
  */
 import { registerFeatureAgentTool } from '../../host/agentToolProvider.js';
 import { resolveOne } from '../../host/featureToggles/service.js';
-import { getTicket, listTickets } from './tickets.js';
+import { getTicket, listTickets, projectTicketForAgent } from './tickets.js';
 import { TICKET_STATUSES } from './ticketTypes.js';
 import { setStatus } from './tickets.js';
 import { orgScopeGranted } from './routes.js';
@@ -110,7 +110,9 @@ export function registerServiceDeskAgentTools(): void {
       // Read gate on the ticket's OWN org. An unreadable ticket returns the SAME
       // `{ ticket: null }` as an unknown id (no existence leak).
       const loaded = await loadTicketForTool(scope.tenantId, scope.actingUserId, String(input.ticketId ?? ''), 'workspace:read');
-      return { content: JSON.stringify({ ticket: loaded.ok ? loaded.ticket : null }) };
+      // ADR 0878 D1/D3 — never the requester's address: model context needs the
+      // thread and the channel KIND, not the customer's phone or email.
+      return { content: JSON.stringify({ ticket: loaded.ok ? projectTicketForAgent(loaded.ticket) : null }) };
     },
   });
 
@@ -120,7 +122,7 @@ export function registerServiceDeskAgentTools(): void {
     def: {
       name: SD_DRAFT_TOOL_ID,
       description:
-        'DRAFT a reply to a support ticket for HUMAN APPROVAL — this never sends. The draft lands in the approvals inbox; on approval it is appended to the ticket as the outbound reply and channel delivery fires via the workspace automation binding.',
+        'DRAFT a reply to a support ticket for HUMAN APPROVAL — this never sends. The draft lands in the approvals inbox; on approval it is appended to the ticket and delivered on the ticket\'s own reply channel (WhatsApp, or the website chat). A ticket whose `replyChannel` is `none` (a form or manual ticket) is recorded but NOT sent — say so to the user instead of implying the customer was answered.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -145,7 +147,13 @@ export function registerServiceDeskAgentTools(): void {
       const { enqueueActionWithApproval } = await import('../assistant/actionApproval.js');
       const action = await enqueueActionWithApproval(scope.tenantId, {
         kind: 'servicedesk.reply',
-        payload: { ticketId: ticket.ticketId, orgId: ticket.orgId, channel: ticket.channel },
+        // `replyChannel` is on the CARD (ADR 0878, grade-ux SD2UX-2): the approver must
+        // see whether approving sends a WhatsApp, posts to the website chat, or saves a
+        // reply that goes nowhere.
+        payload: { ticketId: ticket.ticketId, orgId: ticket.orgId, channel: ticket.channel, replyChannel: ticket.replyChannel?.kind ?? 'none' },
+        // ADR 0878 D6 — the TICKET's org (server-derived, never model input): the
+        // approval is that org's to see and decide, not the whole tenant's.
+        orgId: ticket.orgId,
         draft: String(input.reply ?? ''),
         riskLevel: 'medium',
         reason: `Support reply to "${ticket.subject.slice(0, 80)}"`,

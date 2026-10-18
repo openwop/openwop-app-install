@@ -19,9 +19,9 @@ import { describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-const stubEntry = (typeId: string) => ({
-  kind: typeId, typeId, label: typeId, description: '', category: 'action',
-  badge: 'X', accent: '', inputs: [], outputs: [],
+const stubEntry = (typeId: string): NodeCatalogEntry => ({
+  kind: typeId, typeId, label: typeId, description: '', category: 'integration',
+  badge: 'X', accent: '', inputs: [], outputs: [], configFields: [],
 });
 vi.mock('../../palette/catalogRegistry.js', () => ({
   catalogEntryByTypeId: (t: string) => stubEntry(t),
@@ -32,13 +32,40 @@ vi.mock('../../palette/catalogRegistry.js', () => ({
 }));
 
 import { buildChainPackManifest as buildPinned, ChainExportVersionError, CHAIN_EXPORT_ENGINES } from '../chainPackManifest.js';
+import type { ChainPackManifest } from '../chainPackManifest.js';
 import type { SavedWorkflow, BuilderNode } from '../workflow.js';
+import type { NodeCatalogEntry } from '../../palette/nodeCatalog.js';
 
 /** Every type installed at 1.0.0 — the ADR 0525 suites below are about params,
  *  lengths and names, not versions; the ADR 0766 suite at the end owns those. */
 const buildChainPackManifest = (snap: SavedWorkflow) => buildPinned(snap, () => '1.0.0');
 
 const REPO = join(import.meta.dirname, '..', '..', '..', '..', '..', '..');
+
+/** The constraints come from the SCHEMAS this export is judged by, read off disk
+ *  (repo-root `schemas/`, resolved from this file) — never a hand copy. */
+interface StringRule { pattern?: string; maxLength?: number }
+const V1_MANIFEST = JSON.parse(
+  readFileSync(join(REPO, 'schemas', 'workflow-chain-pack-manifest.schema.json'), 'utf8'),
+) as { properties: { name: StringRule; description: StringRule } };
+const V2_IDS = JSON.parse(
+  readFileSync(join(REPO, 'schemas', 'v2', 'ids.schema.json'), 'utf8'),
+) as { $defs: { chainId: StringRule } };
+function rule(r: StringRule, key: 'pattern' | 'maxLength'): string | number {
+  const v = r[key];
+  if (v === undefined) throw new Error(`schema rule ${key} missing`);
+  return v;
+}
+
+/** `required` of a chain's derived `parameters`, read with runtime narrowing. */
+function requiredOf(m: ChainPackManifest): string[] | undefined {
+  const req: unknown = m.chains[0]!.parameters.required;
+  return Array.isArray(req) && req.every((x): x is string => typeof x === 'string') ? req : undefined;
+}
+function propertyNamesOf(m: ChainPackManifest): string[] {
+  const props: unknown = m.chains[0]!.parameters.properties;
+  return props && typeof props === 'object' ? Object.keys(props) : [];
+}
 
 const node = (id: string, over: Partial<BuilderNode> = {}): BuilderNode => ({
   id, kind: 'core.noop', name: id, position: { x: 0, y: 0 }, config: {}, ...over,
@@ -64,25 +91,29 @@ describe('parameters are DERIVED from the tokens actually present', () => {
     const tokened = chain.dag.nodes.filter((n) =>
       JSON.stringify(n.inputs ?? {}).includes('{{params.'));
     expect(tokened.length, 'the reference chain no longer authors {{params.*}} in inputs').toBeGreaterThan(0);
+    // …and the exporter declares those REAL tokens. (Twin of shippedChainRoundTrip's
+    // "FIXTURE GUARD" — that one guards the round trip; this one the export.)
+    const m = buildChainPackManifest(wf(tokened.map((n, i) => node(`n${i}`, { inputs: n.inputs ?? {} }))));
+    expect(requiredOf(m)).toEqual(expect.arrayContaining(['orderId', 'orgId', 'recipientEmail', 'emailSubject']));
   });
 
   it('finds a token authored in `inputs` — not just `config`', () => {
     // The ADR 0523 regression, one surface along: exporting `inputs` widened the
     // fabrication exposure from `config` to `inputs.to` (an email recipient).
     const m = buildChainPackManifest(wf([node('a', { inputs: { to: '{{params.recipientEmail}}' } })]));
-    expect(m.chains[0]!.parameters).toMatchObject({ required: ['recipientEmail'] });
+    expect(requiredOf(m)).toEqual(['recipientEmail']);
   });
 
   it('finds a token NESTED inside an object or array', () => {
     const m = buildChainPackManifest(wf([
       node('a', { config: { headers: [{ value: '{{params.apiKey}}' }] } }),
     ]));
-    expect((m.chains[0]!.parameters as { required?: string[] }).required).toEqual(['apiKey']);
+    expect(requiredOf(m)).toEqual(['apiKey']);
   });
 
   it('finds the whitespace form `{{ params.x }}`', () => {
     const m = buildChainPackManifest(wf([node('a', { config: { q: '{{ params.spaced }}' } })]));
-    expect((m.chains[0]!.parameters as { required?: string[] }).required).toEqual(['spaced']);
+    expect(requiredOf(m)).toEqual(['spaced']);
   });
 
   it('emits `parameters: {}` and plain-language copy when there are NO tokens', () => {
@@ -107,9 +138,8 @@ describe('parameters are DERIVED from the tokens actually present', () => {
     // a fabrication the user never sees. This is the property the whole
     // derivation exists for.
     const m = buildChainPackManifest(wf([node('a', { inputs: { to: '{{params.who}}' } })]));
-    const params = m.chains[0]!.parameters as { required?: string[]; properties?: Record<string, unknown> };
-    expect(params.required?.length ?? 0).toBeGreaterThan(0);
-    expect(Object.keys(params.properties ?? {})).toEqual(params.required);
+    expect(requiredOf(m)).toEqual(['who']);
+    expect(propertyNamesOf(m)).toEqual(['who']);
   });
 
   it('deduplicates and sorts a token used twice', () => {
@@ -117,7 +147,7 @@ describe('parameters are DERIVED from the tokens actually present', () => {
       node('a', { config: { x: '{{params.z}}' }, inputs: { y: '{{params.a}}' } }),
       node('b', { config: { x: '{{params.z}}' } }),
     ]));
-    expect((m.chains[0]!.parameters as { required?: string[] }).required).toEqual(['a', 'z']);
+    expect(requiredOf(m)).toEqual(['a', 'z']);
   });
 });
 
@@ -151,8 +181,10 @@ describe('every length-constrained field stays inside the schema', () => {
     // constraint in this file, and an invented constraint yields an invented
     // finding. Read the SSoT, not the intuition.
     const m = buildChainPackManifest(wf([node('a')], 'T'.repeat(2000)));
-    expect(m.name.length, 'pack name exceeds maxLength 256').toBeLessThanOrEqual(256);
-    expect(m.description.length, 'pack description exceeds maxLength 1024').toBeLessThanOrEqual(1024);
+    expect(rule(V1_MANIFEST.properties.name, 'maxLength')).toBe(256);
+    expect(rule(V1_MANIFEST.properties.description, 'maxLength')).toBe(1024);
+    expect(m.name.length, 'pack name exceeds the schema maxLength').toBeLessThanOrEqual(V1_MANIFEST.properties.name.maxLength ?? 0);
+    expect(m.description.length, 'pack description exceeds the schema maxLength').toBeLessThanOrEqual(V1_MANIFEST.properties.description.maxLength ?? 0);
   });
 });
 
@@ -172,12 +204,12 @@ describe('the pack name survives hostile workflow names', () => {
     // draft asserted npm's 214 and a looser pattern — an invented constraint
     // produces an invented finding, so the assertion has to come from the SSoT.)
     expect(m.name, `slug escaped the manifest name pattern: ${m.name}`)
-      .toMatch(/^(core|vendor|community|private)\.[a-z][a-z0-9_-]*(\.[a-z][a-zA-Z0-9_-]*)+$/);
-    expect(m.name.length, `slug exceeds maxLength 256: ${m.name.length}`).toBeLessThanOrEqual(256);
+      .toMatch(new RegExp(String(rule(V1_MANIFEST.properties.name, 'pattern'))));
+    expect(m.name.length, `slug exceeds maxLength: ${m.name.length}`).toBeLessThanOrEqual(Number(rule(V1_MANIFEST.properties.name, 'maxLength')));
     // ADR 0766 — a pinned export is judged by the v2 schema, whose chainId is
     // `^[A-Za-z0-9._~:-]{1,128}$` (ids.schema.json). A 216-char chainId loaded on
     // v1 and is refused on v2.
-    expect(m.chains[0]!.chainId).toMatch(/^[A-Za-z0-9._~:-]{1,128}$/);
+    expect(m.chains[0]!.chainId).toMatch(new RegExp(String(rule(V2_IDS.$defs.chainId, 'pattern'))));
   });
 });
 
@@ -186,14 +218,14 @@ describe('ADR 0766 (NP-V2-8) — an export is publishable under RFC 0177', () =>
     const versions: Record<string, string> = { 'core.noop': '1.4.2', 'core.delay': '2.0.1' };
     const m = buildPinned(wf([node('a'), node('b', { kind: 'core.delay' })]), (t) => versions[t]);
     const refs = m.chains[0]!.dag.nodes.map((n) => n.typeId);
-    expect(refs.length).toBe(2);
-    for (const ref of refs) expect(ref, `unpinned reference: ${ref}`).toMatch(/^[a-z][a-zA-Z0-9._-]*@\d+\.\d+\.\d+$/);
-    expect(refs).toContain('core.noop@1.4.2');
+    // Each type at ITS OWN reported version — not just "some exact pin".
+    expect(refs).toEqual(['core.noop@1.4.2', 'core.delay@2.0.1']);
   });
 
   it('declares the v2 engine range with an explicit upper bound — not `^1.0.0`', () => {
     const m = buildChainPackManifest(wf([node('a')]));
-    expect(m.engines.openwop).toBe(CHAIN_EXPORT_ENGINES);
+    expect(m.engines.openwop).toBe('>=1.0.0 <3.0.0');
+    expect(CHAIN_EXPORT_ENGINES).toBe('>=1.0.0 <3.0.0');
     expect(m.engines.openwop).toMatch(/^>=\d+(\.\d+){0,2} <\d+\.0\.0$/);
   });
 

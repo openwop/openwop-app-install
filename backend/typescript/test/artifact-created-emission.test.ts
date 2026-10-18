@@ -39,6 +39,9 @@ let server: http.Server;
 let templateBoundId = '';
 let templateUnboundId = '';
 
+// Load headroom: this boot took ~30s and hit the 30s hookTimeout in two merge trains
+// on 2026-10-15 at load1 13-17 (slot 95r/95r'); it passes quiet. A timeout here is
+// CPU contention, not a regression, so the budget sits well above the measured worst.
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
@@ -78,10 +81,11 @@ beforeAll(async () => {
     promptBody: 'Write a one-pager about {{topic}}.', createdBy: 'g8-probe',
   });
   templateUnboundId = unbound.templateId;
-});
+}, 120_000);
 
 afterAll(async () => {
-  await new Promise<void>((r) => server.close(() => r()));
+  // A failed boot leaves `server` unset; do not add a second, misleading error.
+  if (server) await new Promise<void>((r) => server.close(() => r()));
 });
 
 async function jsonFetch<T = unknown>(path: string, init: RequestInit = {}): Promise<{ status: number; body: T }> {

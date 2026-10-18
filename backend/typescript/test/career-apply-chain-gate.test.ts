@@ -203,7 +203,9 @@ describe('WF-JS-2 — career.apply to the gate, through the expanded chain', () 
 
   it('with a matching grant, the SAME chain-started session proceeds — attributed to the grant', async () => {
     await createApplyGrant({
-      tenantId: T, orgId: 'org-apply', subjectId: CTX.subjectId, grantedBy: 'user:granter',
+      // ADR 0894 D7 — a grant authorises its GRANTOR's sessions: the person whose
+      // run drives the browser (`user:apply-e2e`) must be the one who issued it.
+      tenantId: T, orgId: 'org-apply', subjectId: CTX.subjectId, grantedBy: 'user:apply-e2e',
       campaignId: CTX.campaignId, maxSubmits: 5, maxPrepared: 3, ratePerHour: 4,
       tiers: ['A', 'B'], origins: [ORIGIN], resumePolicy: 'default',
       expiresAt: new Date(Date.now() + 86_400_000).toISOString(),

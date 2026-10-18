@@ -685,6 +685,7 @@ export function registerCmsRoutes(deps: RouteDeps): void {
               ...(typeof a.pageVersion === 'number' ? { pageVersion: a.pageVersion } : {}),
               ...(a.aiDraftedLocales ? { aiDraftedLocales: a.aiDraftedLocales } : {}),
               ...(a.liveReferenceSections ? { liveReferenceSections: a.liveReferenceSections } : {}),
+              ...(a.outdatedTranslationLocales ? { outdatedTranslationLocales: a.outdatedTranslationLocales } : {}),
               ...(awaitingAnotherApprover ? { awaitingAnotherApprover: true } : {}),
             }
           : null,

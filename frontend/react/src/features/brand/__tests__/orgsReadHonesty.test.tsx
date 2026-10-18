@@ -9,11 +9,18 @@
  * shape: a failed read inviting a duplicate).
  *
  * Both polarities: a genuinely org-less tenant still gets the real invitation.
+ * The failed read must also offer no create control (wave 51: a read-failure case
+ * checks that the empty state is ABSENT and the create path is gone, not only that
+ * an error string appears).
+ *
+ * Sabotage-witnessed (w52): `.catch(() => setOrgsFailed(true))` → `false` (case 1
+ * red); `setOrgsFailed(false)` → `true` on success (case 2 red).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup } from '@testing-library/react';
+import type * as C from '../brandClient.js';
 
-const api = vi.hoisted(() => ({ listBrands: vi.fn(), listOrgs: vi.fn() }));
+const api = vi.hoisted(() => ({ listBrands: vi.fn<typeof C.listBrands>(), listOrgs: vi.fn<typeof C.listOrgs>() }));
 vi.mock('../brandClient.js', async (orig) => {
   const actual = await orig<Record<string, unknown>>();
   return {
@@ -30,8 +37,8 @@ vi.mock('../brandClient.js', async (orig) => {
 import { BrandPage } from '../BrandPage.js';
 
 beforeEach(() => {
-  vi.clearAllMocks();
-  api.listBrands.mockResolvedValue([]);
+  api.listBrands.mockReset().mockResolvedValue([]);
+  api.listOrgs.mockReset();
 });
 afterEach(cleanup);
 
@@ -40,7 +47,12 @@ describe('BRAND-R2-1 — the no-org invitation never rides a failed read', () =>
     api.listOrgs.mockRejectedValue(new Error('orgs_500'));
     render(<BrandPage />);
     expect(await screen.findByText(/Could not load this/i)).toBeTruthy();
+    // The card is the ORGS failure, not a brands failure wearing the same title:
+    // the brands read was made and answered [].
+    expect(api.listBrands).toHaveBeenCalledTimes(1);
     expect(screen.queryByText('No organization yet')).toBeNull();
+    // No create path rides the failed read.
+    expect(screen.queryByRole('button', { name: /create|new brand/i })).toBeNull();
   });
 
   it('TRUTHFUL org-less tenant: still gets the real no-org invitation', async () => {

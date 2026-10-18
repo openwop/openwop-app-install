@@ -20,6 +20,13 @@ import { resolve } from 'node:path';
  * handles `.mjs` correctly. Only the CLI's bundled runtime does not, so the
  * cheapest place to learn about a rename is here, not in the deploy that
  * discovers it.
+ *
+ * `.js` is refused too: `frontend/react/package.json` is `"type": "module"`, so a
+ * `.js` hook there is an ES module and dies the same way (/grade-tests w50 probe
+ * `hp-js-dodge` was green before). And the hook list itself is pinned: dropping
+ * `prepare-hosting-shell.cjs` (ADR 0384 P4 — it renames dist/index.html so `/`
+ * falls through to the backend's document rewrite) breaks `/` on the next deploy
+ * while every other check stays green (`hp-shell-dropped`).
  */
 const ROOT = resolve(__dirname, '../../../..');
 
@@ -31,11 +38,18 @@ describe('firebase.json predeploy hooks', () => {
   const hooks = blocks.flatMap((b) => b?.predeploy ?? []);
 
   it('has hooks to check — an empty list would make the rule below vacuous', () => {
-    expect(hooks.length, 'no predeploy hooks found; this test would assert nothing').toBeGreaterThan(0);
+    // Both hooks, by name and in order: the wire-rewrite check, then the shell
+    // rename that `/` depends on. A missing one fails only at deploy time.
+    expect(hooks, 'firebase.json predeploy must run both hosting hooks').toEqual([
+      'node frontend/react/scripts/check-hosting-wire-rewrites.cjs',
+      'node frontend/react/scripts/prepare-hosting-shell.cjs',
+    ]);
   });
 
   it('every node-invoked hook is .cjs, never .mjs', () => {
-    const esm = hooks.filter((h) => /\bnode\b/.test(h) && /\.mjs(\s|$)/.test(h));
+    // Positive form: anything that is not `.cjs` (`.mjs`, or `.js` under a
+    // `"type": "module"` package) is loaded as ESM by the CLI's require().
+    const esm = hooks.filter((h) => /\bnode\b/.test(h) && !/^node\s+\S+\.cjs(\s|$)/.test(h.trim()));
     expect(
       esm,
       `these predeploy hooks are ES modules: ${esm.join(', ')}. The Firebase CLI require()s them and dies with `

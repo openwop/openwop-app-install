@@ -21,7 +21,6 @@ import { Panel } from '../../ui/layout.js';
 import { Button } from '../../ui/Button.js';
 import { StateCard } from '../../ui/StateCard.js';
 import { StatusBadge } from '../../ui/StatusBadge.js';
-import { Notice } from '../../ui/Notice.js';
 import { Skeleton } from '../../ui/Skeleton.js';
 import { DataTable, type DataColumn } from '../../ui/DataTable.js';
 import { ConfirmDialog } from '../../ui/ConfirmDialog.js';
@@ -39,21 +38,23 @@ export function JobListingsPage(): JSX.Element {
 
   const [listings, setListings] = useState<JobListing[] | null>(null);
   const [isPublic, setIsPublic] = useState<boolean | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  // EMPTY-ON-FAIL-6 (ADR 0779 D7) — a failed read is NOT "no listings". The catch
+  // used to set `listings` to [], so "No listings yet" rendered beside the error.
+  // The read keeps its own flag; the empty copy renders only after a successful read.
+  const [listingsFailed, setListingsFailed] = useState(false);
   const [confirming, setConfirming] = useState(false);
 
   const refresh = useCallback(async () => {
     if (!orgId) return;
     try {
-      setError(null);
       const [rows, vis] = await Promise.all([listListings(orgId), getListingsVisibility(orgId)]);
       setListings(rows);
       setIsPublic(vis.public);
+      setListingsFailed(false);
     } catch {
-      setError(t('loadFailed'));
-      setListings([]);
+      setListingsFailed(true);
     }
-  }, [orgId, t]);
+  }, [orgId]);
 
   useEffect(() => { void refresh(); }, [refresh]);
 
@@ -95,11 +96,10 @@ export function JobListingsPage(): JSX.Element {
         orgs={orgs} orgsFailed={orgsFailed} retry={retryOrgs}
         emptyBody={t('orgsEmptyClause')} failedBody={t('orgsFailedClause')} icon={<ShieldIcon />}
       >
-        {error ? <Notice variant="error">{error}</Notice> : null}
-
         <Panel title={t('visibilityTitle')}>
           {isPublic === null ? (
-            <Skeleton />
+            // The visibility read rides the same request; a failure is not "loading".
+            listingsFailed ? <p className="muted u-fs-12 u-m-0">{t('common:loadFailed')}</p> : <Skeleton />
           ) : (
             <div className="u-grid u-gap-3">
               {/* State first, action second: the user should read what is true
@@ -123,7 +123,14 @@ export function JobListingsPage(): JSX.Element {
         </Panel>
 
         <Panel title={t('listingsTitle')}>
-          {listings === null ? (
+          {listingsFailed ? (
+            <StateCard
+              announce
+              title={t('common:loadFailedTitle')}
+              body={t('common:loadFailedBody')}
+              action={<Button variant="secondary" size="sm" onClick={() => void refresh()}>{t('common:retry')}</Button>}
+            />
+          ) : listings === null ? (
             <Skeleton />
           ) : (
             <DataTable

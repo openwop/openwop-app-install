@@ -37,7 +37,7 @@ import type { Storage } from '../../storage/storage.js';
 import { createLogger } from '../../observability/logger.js';
 import { resolveOne } from '../../host/featureToggles/service.js';
 import { listEnrollmentsInTenant } from '../kicktodo-core/enrollmentService.js';
-import { sampleVerdict, SampleSubjectError } from './verifierSampleService.js';
+import { existingVerifierSample, sampleVerdict, SampleSubjectError } from './verifierSampleService.js';
 
 const log = createLogger('kicktodo.verifierSampleDaemon');
 
@@ -106,6 +106,11 @@ export async function processDueVerifierSamples(
       let taken = 0;
       for (const e of ordered) {
         if (taken >= target) break;
+        // Code-grade KTX-1 — an enrollment sampled in an earlier month is not a new
+        // sample. `sampleVerdict` returns the existing row idempotently, so counting
+        // it spent the whole budget on the same lowest ids every month after the
+        // first and minted (almost) nothing while logging that it had.
+        if (await existingVerifierSample(tenantId, e.id)) continue;
         try {
           await sampleVerdict(tenantId, { enrollmentId: e.id, submittedBy: VERIFIER_SAMPLER_SUBMITTER });
           taken += 1;

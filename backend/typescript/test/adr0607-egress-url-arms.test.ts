@@ -158,6 +158,9 @@ const DISPATCHER_SITES: Record<string, string> = {
   'features/kicktodo-integrations/calendarProviderAdapter.ts': 'own scheme + denied-host arms',
   'host/knowledgeSourceFetch.ts': 'routes through guardedEgressFetch (scheme arm is its step 2)',
   'host/brokeredEgress.ts': 'tenant egress-policy engine (assertEgressAllowed) in front of the dial',
+  // ADR 0875 D6 — the UCP buyer merchant fetch moved onto the pinned dispatcher (it
+  // used the global fetch, so a DNS name resolving private was dialed).
+  'features/commerce/ucpBuyer/ucpBuyerService.ts': 'normalizeMerchantUrl http(s)-only scheme arm + assertEgressAllowed per hop (redirects included) in front of the dial',
 
   // No caller-supplied URL reaches a dial in these.
   'host/connectionInjection.ts': 'pack-facing safeFetch — its OWN flag (safeFetchPrivateEgressAllowed), deliberately not the webhook one',

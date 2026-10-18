@@ -1,6 +1,10 @@
 /**
  * ADR 0768 P2 — the chat Workbench: its state hook (persistence, the artifact
  * fallback) and the pane (tabs, one close, the Run panel without its own header).
+ * Breaks if: one tenant restores another tenant's pane, an artifact tab is
+ * restored without its (session-local) id, the Run panel shows a second close,
+ * or the tablist loses arrow-key roving. Storage keys are pinned literals, never
+ * `workbenchKey()`. Sabotage-witnessed in /grade-tests wave 44 (w44g3-wb-*).
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, act, renderHook } from '@testing-library/react';
@@ -12,7 +16,9 @@ vi.mock('../../artifacts/ArtifactWorkbench.js', () => ({
   ),
 }));
 
-import { useWorkbench, workbenchKey } from '../useWorkbench.js';
+import { useWorkbench } from '../useWorkbench.js';
+
+const T1_KEY = 'openwop-app.chat.workbench:t1';
 import { Workbench } from '../Workbench.js';
 
 beforeEach(() => localStorage.clear());
@@ -21,16 +27,20 @@ describe('useWorkbench', () => {
   it('persists the Run tab per tenant and restores it', () => {
     const { result } = renderHook(() => useWorkbench('t1'));
     act(() => result.current.openRun());
-    expect(localStorage.getItem(workbenchKey('t1'))).toBe('run');
+    expect(localStorage.getItem(T1_KEY)).toBe('run');
     const again = renderHook(() => useWorkbench('t1'));
     expect(again.result.current.tab).toBe('run');
+    // Per tenant: another tenant starts closed and does not touch t1's entry.
+    const other = renderHook(() => useWorkbench('t2'));
+    expect(other.result.current.tab).toBeNull();
+    expect(localStorage.getItem(T1_KEY)).toBe('run');
   });
 
   it('never restores an artifact tab (the id is session-local)', () => {
     const { result } = renderHook(() => useWorkbench('t1'));
     act(() => result.current.openArtifact({ artifactId: 'a1' }));
     expect(result.current.tab).toBe('artifact');
-    expect(localStorage.getItem(workbenchKey('t1'))).toBeNull();
+    expect(localStorage.getItem(T1_KEY)).toBeNull();
   });
 
   it('closing an artifact falls back to Run only when there are runs', () => {
@@ -87,5 +97,6 @@ describe('Workbench pane', () => {
     render(<Workbench tab="run" onSelectTab={onSelectTab} onClose={vi.fn()} isMobile={false} runProps={runProps} artifact={{ artifactId: 'a' }} onCloseArtifact={vi.fn()} />);
     fireEvent.keyDown(screen.getByRole('tablist'), { key: 'ArrowRight' });
     expect(onSelectTab).toHaveBeenCalledWith('artifact');
+    expect(document.activeElement?.id).toBe('workbench-tab-artifact'); // roving focus follows
   });
 });

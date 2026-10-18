@@ -1,6 +1,6 @@
 # ADR 0858 — The v2 discovery document projects every family this host serves
 
-Status: Accepted (P2 + P3 slices 1–3 implemented; P4 a2a/mcp host work implemented, both families still ledgered as behaviour gaps)
+Status: Accepted (P2 + P3 slices 1–3 implemented; P4 a2a/mcp host work implemented, both families still ledgered as behaviour gaps; P4 `multiAgent` enabled in production at executionModel version 5, 2026-10-12)
 
 > **Renumbered 0854 → 0858 (2026-10-07).** This ADR was first committed as 0854,
 > nine minutes after a peer session's
@@ -912,3 +912,311 @@ Seven deliberate breakages each failed it:
 > ancestry, and a control (a dispatched child keeps its parent). Reverting
 > each fix reds its leg with the lane's own message (`seq 4`,
 > `cause: core.subWorkflow`). An always-`null` route reds the control.
+
+## P4 rollout note: enabling `multiAgent` in production, one phase at a time (2026-10-12)
+
+**The user's decision (release queue, 2026-10-11 13:26Z):** turn on the
+multi-agent execution model in production in **stages**. Each phase gets its
+own env slot, and each slot is followed by a certify cut once the new revision
+drains. This note is the prerequisite the queue named. It replaces the approval
+relayed at ~02:10Z. 28 was to write it; 8f took it over on 2026-10-12, after 28
+had left.
+
+**Why production reads `inapplicable` today.** The v2 advert derives
+`multiAgent.executionModel.version` from the five runtime gates
+(`host/multiAgentPhases.ts`, P4 slice 2). Production sets none of
+`OPENWOP_MULTI_AGENT_EXECUTION_MODEL[_PHASE_2..5]`. Its version is therefore 0,
+and the family is not advertised. Both scenarios it would open are
+`inapplicable`, and that is honest
+(`v2-dispatch-loop.test.ts:51`, `v2-run-fork-ancestry.test.ts:55`). The local
+conformance lane forces all five gates on, and runs both scenarios for real.
+
+**The prerequisite raised at 14:15Z is already met.** The concern was ADR 0725's
+admitted `runOrchestrator.decided` baseline line: a default plan of
+`next-worker` with `nextWorkerIds: []`, which would red `v2-dispatch-loop` once
+the family was advertised. The P4 slice 2 correction above (#4678) replaced that
+plan with a single `terminate`. The baseline line remains only for the
+forward-compat `noop` kind. Read on `b74be9547`: `bootstrap/nodes.ts`'s
+default plan is `[{ kind: 'terminate', reason: 'goal-reached' }]`. Every gate
+since #4678 has run both scenarios as applicable in its conformance lane, and
+they pass. That evidence comes from the lane, not from production. R1 and R3
+below are where production confirms it.
+
+### What reaches live traffic
+
+Two definitions reach `core.dispatch` in production:
+- the campaign-orchestration chain (`examples/workflow-chain-packs/campaign-orchestration`);
+- `feature.campaign-journeys.nodes`.
+
+Both carry explicit plans. Neither plan states a `confidence`. The supervisor
+does not call a model (`SUPERVISOR_CALLS_LIVE_MODEL = false`).
+
+| Slot | Env flag set to `true` | Advertised version | Runtime change on live traffic | Conformance row that should move |
+|---|---|---|---|---|
+| R1 | `OPENWOP_MULTI_AGENT_EXECUTION_MODEL` | 1 | `core.dispatch` also appends `core.workflowChain.event` handoff records. These are additive events; no dispatch decision changes. | `v2-dispatch-loop` inapplicable → pass (its iteration leg stays inapplicable) |
+| R2 | `…_PHASE_2` | 2 | Escalation happens only when a decision **states** `confidence` below the floor. A missing value means "no opinion" (`nodes.ts`), so the live plans never escalate. `OPENWOP_MULTI_AGENT_CONFIDENCE_FLOOR` stays unset, which gives the spec floor of 0.5. | none expected |
+| R3 | `…_PHASE_3` | 3 | `GET /runs/:runId/ancestry` is served instead of a 404. It is tenant-scoped through `loadReadableRun`, like every other run read. Trace propagation is already unconditional. | `v2-run-fork-ancestry` inapplicable → pass |
+| R4 | `…_PHASE_4` | 4 | A replay fork that diverges at a refusal records `replay.divergedAtRefusal` (`executor/executor.ts`). Live non-fork runs are untouched. | none expected |
+| R5 | `…_PHASE_5` | 5 | `runOrchestrator.decided` carries `iteration`. It is persisted in a run variable and re-emitted verbatim on replay. | `v2-dispatch-loop`'s iteration leg inapplicable → pass |
+
+Level 6 stays unclaimed (P4 slice 2), so R5 is the last slot.
+
+> **CORRECTION 2026-10-12 — this table was incomplete in two ways, both found
+> before the affected cut.**
+>
+> 1. **R3 also moves a `v2-subworkflow-linkage` leg.** The table named only
+>    `v2-run-fork-ancestry`. `v2-subworkflow-linkage`'s getRunAncestry leg is
+>    gated on the same `ancestryEndpointSupported`, so it moves too
+>    (`it.v2-subworkflow-linkage.getrunancestry-…` → executed-pass, recorded
+>    as `requirement.sub-workflow.ancestry-parent-link`). The R3 smoke was
+>    diffed by id against the R2 bundle. That diff found the leg, and the
+>    amended three-row prediction was pre-registered with the coordinator
+>    before 36b.
+> 2. **R4 and R5 add advert fields the table did not list.** R4 adds
+>    `replayDeterminism {llmCacheKeyRecipe, refusalDivergenceEmission}`, and R5
+>    adds `statefulResume: true`. Only major-1 scenarios read these fields.
+>    `v2-profiles.ts` and `spec/v2/profiles.json` read neither, so no major-2
+>    row or profile could move. Both were checked before each slot's DONE.
+>
+> **The method that caught both:** derive a slot's prediction from the
+> suite's code and a scoped smoke diffed against the previous cut's
+> `results.requirements[]`. The scenario a note names is not enough. A gate
+> read by one scenario is often read by others.
+
+### How each slot runs
+
+1. **Book the slot** with the release coordinator. Never run one during a
+   train merge, a deploy, or a cut (`update-env.sh` refuses while a cut holds
+   its lock).
+2. **Set the flag:** `scripts/update-env.sh OPENWOP_MULTI_AGENT_EXECUTION_MODEL…=true`.
+   Each slot adds ONE flag and leaves the earlier ones set. The script verifies
+   that the new revision is Ready, still carries the same `OPENWOP_BUILD_COMMIT`,
+   and holds every value, then shifts 100% of traffic to it by name.
+3. **Check the advert** before the cut. `/.well-known/openwop` →
+   `multiAgent.executionModel.version` MUST equal the slot's version. A higher
+   or lower reading means the ladder and the env disagree, so stop.
+4. **Cut** once every superseded revision reads `instance_count` active = 0.
+   Pass: the expected row moves to `pass` and no other row changes.
+
+### Stop rule and rollback
+
+**Any new `fail`, or any row other than the expected one changing, stops the
+rollout at that slot.**
+
+To roll back, set the slot's flag to `false` through `update-env.sh`. Every gate
+compares against `=== 'true'`, so `false` is equivalent to unset. The previous
+revision is also kept as a by-name rollback target.
+
+Stopping part-way is a valid end state. The ladder advertises the highest
+contiguous phase, so a host left at R2 truthfully claims version 2.
+
+### Rollout outcome (2026-10-12): complete, no rollbacks
+
+All five slots ran. Every cut matched its pre-registered prediction, judged
+by disposition per id with detail text ignored. Production ends on
+`00939-wgr` (`b74be9547`, all five flags) and advertises
+`multiAgent.executionModel.version: 5`.
+
+| Slot | Revision | Applied | Cut bundle | Totals (pass/fail/skip/inapplicable/blocked) | Ids moved |
+|---|---|---|---|---|---|
+| baseline (31) | `00934-n88` | n/a | `b182c8aebd31` | 426/0/11/368/0 | 0 vs v0.4.0 |
+| R1 (33) | `00935-9lp` | ~02:05Z | `a12981e577b5` | 429/0/11/365/0 | `v2-dispatch-loop` scenario + 2 rows (it.* → `multi-agent.decision-recorded-well-formed`, `supervisor-loop-terminates`) |
+| R2 (34) | `00936-w7f` | ~02:30Z | `43b6ab71a36b` | 429/0/11/365/0 | 0 |
+| R3 (36) | `00937-4x5` | ~03:37Z | `76b1c62be91f` | 432/0/11/362/0 | `v2-run-fork-ancestry`, `0040.fork-has-no-ancestry-parent`, linkage leg → `sub-workflow.ancestry-parent-link` |
+| R4 (38) | `00938-b8x` | 04:43Z | `68022f600e15` | 432/0/11/362/0 | 0 |
+| R5 (39) | `00939-wgr` | 06:15Z | `315df5abc5f1` | 433/0/11/361/0 | iteration leg → `multi-agent.decision-iteration-monotonic` |
+
+- **Net change:** 426 → 433 pass, and 0 fail in every cut. Eleven ids moved,
+  all inside `v2-dispatch-loop`, `v2-run-fork-ancestry` and
+  `v2-subworkflow-linkage`. `claimedProfiles` did not change.
+
+  > **CORRECTION 2026-10-12 (found by openwop-app-67 after the 40b cut) —
+  > "did not change" was true of the CERTIFIED set only.** Every R-cut also
+  > listed `openwop-conformance-seams-v2` with `certified: false` and
+  > `witnessCount: 0`. Baseline 31 and 40b do not list it. Multi-agent did not
+  > cause it. `spec/v2/profiles.json` gives seams-v2 the predicate
+  > `metadata: ["conformance"]`, and any discovery `conformance` key satisfies
+  > that. This host's discovery `conformance` object only appears once the
+  > commit has published evidence, and it then carries `certificationBundleUrl`
+  > and nothing else. So a commit's first cut does not claim seams-v2, and its
+  > re-cuts do. All five R-cuts were re-cuts of `b74be9547`. MEASURED from the
+  > R2 bundle `43b6ab71a36b`: `discovery.document.conformance` has the single
+  > key `certificationBundleUrl`. This is a suite-side predicate defect,
+  > because a bundle pointer reads as a seams claim, and it is raised with the
+  > corpus steward. The original sentence came from 67's row diffs. Those
+  > compared `results.requirements[]` and never looked at `claimedProfiles`,
+  > which is the same blind spot as the R3 miss above.
+- **Each cut ran alone:** the coordinator (openwop-app-67) cut each slot after
+  the previous revision's `instance_count` reached 0, so only the slot's own
+  revision was alive during its cut.
+- **Live traffic:** the R2 smoke and logs on `00936-w7f` showed no escalation,
+  as predicted, because live campaign plans state no `confidence`.
+- **Ownership:** 8f ran the slots, under the user's staged decision
+  (2026-10-11 13:26Z) and its "proceed" on 2026-10-12.
+
+## P4: RFC 0242 adoption with the suite pin to 2.46.2 (2026-10-12)
+
+RFC 0242 (`Accepted`) fixes the two `negotiation.decided` defects that P4
+reported. A record had no seat for the version that was asked for, so a
+downgrade read as a normal accept. A runless (inbound) negotiation also had no
+log to land on. Suite 2.46.0 ships it, and this host pins 2.46.2.
+
+**The three-part test.** The wire shape is locked (`additive`: one optional
+property, one reserved host-event type). The RFC places no gate on
+advertisement. What this host honours is listed below.
+
+- **§A — `requested`: ADOPTED.** `negotiationDecidedPayload` carries
+  `requested`, and all three emitters set it to the version they named:
+  - the MCP client's opening revision (`mcpClient.ts`);
+  - the A2A client's requested version (`a2aSurface.ts`);
+  - the MCP invoke seam's forced revision (`mcpInvokeSeam.ts`).
+
+  A downgrade now reads as `accepted` with `version` ≠ `requested` (§A.3).
+  Witness: `test/adr0858-negotiation-decided.test.ts`. Every record must carry
+  `requested`, and the MCP downgrade case asserts the version / requested split.
+- **§B.3 — listing `negotiation.decided` in `hostEvents`: NOT TRIGGERED.** The
+  RFC defines "serves either protocol inbound" by the advert: `a2a.agentCardUrl`,
+  `mcp.serverUrls` or `mcp.serverMount`. Both v2 records are still WITHHELD
+  (`V2_PROJECT_A2A` / `V2_PROJECT_MCP` false; see "P4 slice" above), so
+  `v2-negotiation-decided-inbound` reads `inapplicable` here, in production and
+  in the local lane.
+- **§B.2 — runless negotiations as durable host events: OWED.** Production
+  does serve both protocols inbound (`OPENWOP_A2A_SERVER_ENABLED` and
+  `OPENWOP_MCP_SERVER_ENABLED` are `true`) without advertising them at v2. Its
+  inbound negotiations happen before any run exists, and they are still not
+  recorded. This gap predates the pin: RFC 0242 gives the existing "every
+  outcome MUST emit" a way to be met, and this host has not taken it yet. It
+  is not claimed anywhere, and no scenario can witness it while the records
+  are withheld. **Projecting either v2 record makes §B.2 and §B.3 mandatory,
+  with §B.3 witnessed unaided.** The projection PR must therefore ship the host
+  event and the `hostEvents` entry with it, following the reference
+  implementation (openwop-examples `rfc0242/inbound-negotiation-record`).
+
+**Expected effect on the next cut.** The prod cut gains new ids, all
+`inapplicable`:
+- `v2-negotiation-decided-inbound`, because no inbound facet is advertised;
+- the `0242.requested.*` legs, because no a2a/mcp facet is advertised.
+
+`openwop-conformance-seams-v2` also leaves `claimedProfiles` (2.46.2 derives it
+from `conformance.seamsProfile` only; see the correction under "Rollout
+outcome"). The certified set is unchanged.
+
+> **Outcome (2026-10-13): the paragraph above predicted the wrong cut.** The
+> `9627e75ec` cut (45c) matched the row prediction exactly, 433 / 0 / 11 / 369
+> / 0. It was a first cut, though, and a first cut never claimed seams-v2 even
+> before 2.46.2: discovery carries `conformance.certificationBundleUrl` only
+> after a cut has run. So "leaves `claimedProfiles`" was not observable there.
+> **What actually witnesses the fix is a re-cut.** On `e5359a513`, the first
+> cut (48c, 00:04Z) and the re-cut (48d, 00:14Z) both claim discovery-core and
+> core-standard only, and 48d is row-identical to 45c. The control is the
+> 2.45.30 re-cut of `b74be9547` (10-12, 03:32Z). Its discovery `conformance`
+> block was identical (the bundle URL only, no `seamsProfile`), and it claimed
+> `openwop-conformance-seams-v2`. Same input, different suite. Corpus evidence:
+> openwop #1978.
+>
+> 48c also had two `executed-fail` rows, `0083.trigger-delivery.dedup` and
+> `v2-trigger-bridge-delivery`. Both trace to one 500 on `trigger-ingest` at
+> 00:00:33Z, a transient Cloud KMS gRPC `CANCELLED` thrown from the
+> `@google-cloud/kms` client. Both passed in 48d. An unhandled KMS cancellation
+> becomes a 500 on the ingest route, which is a host robustness gap, not a
+> suite defect.
+
+## P4: suite pin to 2.46.3, the multiAgent claims-check rulings (2026-10-13)
+
+Suite 2.46.3 (openwop #1976/#1977) carries the rulings that P4 and ADR 0812
+asked for. Three rules about the `multiAgent.executionModel` advert live in
+prose and schema descriptions; the schema cannot enforce them without a major
+change (COMPATIBILITY.md §2.4). The suite now checks them against discovery as
+claims-check rows (`v2-multi-agent-advertisement`):
+
+- `version` ≥ 3 advertises `crossHostCausation` with a non-empty `hostId`;
+- `version` ≥ 4 advertises `replayDeterminism` with
+  `refusalDivergenceEmission: true`;
+- `confidenceEscalationInterruptKind`, when present, is `clarification` or
+  `approval`.
+
+**This host passes all three as advertised at version 5, and needs no code
+change.** Production advertises `hostId: "openwop-workflow-engine"`,
+`refusalDivergenceEmission: true` and the kind `clarification`. A fourth row,
+`auth.subject-link-key-advertised` (`v2-auth-subject-link-key`), applies only
+when both the `saml` and `scim` lanes are advertised. This host advertises
+`api-key`, `session`, `anonymous` and `oidc`, so the row is `inapplicable`.
+
+**Prediction for the post-pin cut, MEASURED.** A scoped run of the two new
+scenarios against `api.openwop.dev` with the 2.46.3 CLI (read-only discovery
+legs) gave `executed-pass` 4 and `inapplicable` 2:
+- `executed-pass`: the three `multiAgent.*` ids and the
+  `v2-multi-agent-advertisement` scenario row;
+- `inapplicable`: the auth id and its scenario row.
+
+Tests that carry a requirement id get no `it.*` row, so the full cut should read
+**437 / 0 / 11 / 371 / 0** (+6 rows), with every existing row and
+`claimedProfiles` unchanged. It also restores a passing `check-cut-gates`
+record in the corpus. Once `main` moved to 2.46.3, every 2.46.2 bundle failed
+Witness and Front door, because it has no rows for the two new scenario files.
+
+**Not covered: fan-out.** RFC 0118 / 0126 `fanOutPolicy` and
+`nextWorkerInputs` have no v2 advertisement seat. Adding one needs a new RFC in
+`../openwop`, not a host change. The pin changes only description text in the
+three re-synced schemas (`capabilities`, `dispatch-config`,
+`orchestrator-decision`).
+
+## P4: the v2 `agents.fanOut` seat (RFC 0243) and the suite pin to 2.46.4 (2026-10-13)
+
+RFC 0243 (`Active`, wire locked, no advertisement gate) gives the v1 fan-out
+descriptor its v2 seat: `agents.fanOut` = {`joinModes`, `onChildFailureModes`,
+`maxFanOut?`, `perItemInput?`}. It must sit beside `agents.dispatch: true`.
+**Absent, a host accepts `sequential` and `reject` only.** That made this host
+non-conformant on the day 2.46.4 shipped. It runs RFC 0118 parallel fan-out
+(`bootstrap/nodes.ts`, `host/dispatchFanOut.ts`; the campaign-orchestration
+workflow uses it), and the "P4 slice 2" projection above withheld the
+descriptor because it had no seat.
+
+**The three-part test.** The shape is locked. The RFC gates nothing on
+advertisement. The host honours every member, because each one is read from
+`dispatchCapability()` by the code that enforces it:
+
+| Member | Advertised | Enforced by |
+|---|---|---|
+| `joinModes` | `['wait-all']` | `fanOutAdmissionRefusal` at load and at createRun |
+| `onChildFailureModes` | `['collect', 'absorb']` | the same |
+| `maxFanOut` | `16` | `runParallelFanOut`'s `effectiveConcurrency` clamp (`HOST_MAX_FAN_OUT`) |
+| `perItemInput` | `true` | the `nextWorkerInputs` gate in `bootstrap/nodes.ts` (`perItemInputSupported()`) |
+
+The short-circuit modes (`quorum`, `first`, `race`) and `fail-fast` stay
+unadvertised. They need mid-run child cancellation, which
+`subWorkflowDispatcher` does not have (ENG-9).
+
+**The refusal, both halves.**
+- **At load:** `checkMappingCapability` already refused an unadmitted mode.
+  Its `details.requiredCapability` now names the seat:
+  `agents.fanOut.joinModes`, `agents.fanOut.onChildFailureModes`, or
+  `agents.fanOut` from `validateDispatchFanOutConfig`.
+- **At createRun:** `assertDispatchFanOutAdmitted` runs in `POST /runs`
+  beside `capabilityGatedTypeIdRefusal`, before any run exists. A readable
+  workflow that pins an unadmitted fan-out answers `400 validation_error` with
+  the seat. Two kinds of workflow reach this point: a stored definition
+  predating a narrower advert, and a conformance fixture (fixtures load without
+  registration validation, `host/index.ts`). The fixture
+  `conformance-dispatch-fanout-race` (parallel + `race` / `collect`) is
+  vendored at v2.46.4 and advertised, because both its node types resolve.
+  It is what the suite drives.
+
+**Why the pin cannot ship without the guard.** Before this change, the pin
+alone advertises the race fixture, `GET` reads it, and `POST /runs` starts a
+run. `0243.unadmitted-fan-out-refused` would then be `executed-fail`, not
+`inapplicable`.
+
+Witness: `test/rfc0243-fan-out-seat.test.ts`, which covers:
+- the facet equals `dispatchCapability()` and is schema-valid against the
+  vendored v2 `agents` seat;
+- both load refusals name their seat;
+- the fixture is advertised and readable;
+- `POST /runs` answers 400 / `agents.fanOut.joinModes` with no run listed.
+
+**Sabotage-proved:** with the guard commented out of `POST /runs`, the
+createRun case fails (1 failed / 6 passed); restored, 7/7.
+
+**Not measured: G2.** Nothing in v2 yet checks that waves never drop a child,
+or the `nextWorkerInputs` refusal without `perItemInput`. The two claims above
+rest on the code paths named in the table, not on a suite leg.

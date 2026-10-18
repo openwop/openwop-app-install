@@ -78,7 +78,7 @@ export const documentsFeature: BackendFeature = {
     salt: 'documents',
   },
   requiredPacks: [
-    { name: 'feature.documents.nodes', version: '1.3.3' }, // 1.3.3 = ADR 0838 DOCWF2-6: generate-from-template prose no longer claims a :fork converges; 1.3.1 = review F3: prose corrected — resume/replay converges, a :fork deliberately mints its own document (1.3.0 = WF-DOC-1/-4: deterministic generate ids; generate-from-template + render declared role:"side-effect"; 1.2.0 = ADR 0400 export formats)
+    { name: 'feature.documents.nodes', version: '1.4.0' }, // 1.4.0 = ADR 0903: no hard-coded AI vendor (the host fills a missing provider/model); 1.3.3 = ADR 0838 DOCWF2-6: generate-from-template prose no longer claims a :fork converges; 1.3.1 = review F3: prose corrected — resume/replay converges, a :fork deliberately mints its own document (1.3.0 = WF-DOC-1/-4: deterministic generate ids; generate-from-template + render declared role:"side-effect"; 1.2.0 = ADR 0400 export formats)
     { name: 'vendor.openwop-app.documents.agents', version: '1.1.0' }, // 1.1.0 = ADR 0838 D5: document-author allowlists openwop:documents.revise
   ],
 };

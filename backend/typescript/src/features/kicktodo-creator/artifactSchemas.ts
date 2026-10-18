@@ -8,8 +8,49 @@
  */
 
 import { registerArtifactType } from '../../host/artifactTypes.js';
+import { LESSON_JSON_SCHEMA } from './lessonAssembly.js';
 
 export const CHALLENGE_PLAN_TYPE = 'kicktodo.challenge-plan';
+
+/** XCH-GATE-1 / XCH-LB-3 — what a lesson checkpoint gate shows its approver:
+ *  each built lesson beside the plan row it was built from, with its image when
+ *  media was generated. Produced by the `lesson-batch-build` node and routed to
+ *  gate-0..3 through the run bag. Each lesson's shape is LESSON_JSON_SCHEMA (the
+ *  SSoT the node validates against) plus the two facets the gate adds. */
+export const CHALLENGE_LESSON_BATCH_TYPE = 'kicktodo.challenge-lesson-batch';
+
+export const CHALLENGE_LESSON_BATCH_SCHEMA = {
+  $schema: 'https://json-schema.org/draft/2020-12/schema',
+  type: 'object',
+  additionalProperties: false,
+  required: ['lessons', 'count', 'mediaCount'],
+  properties: {
+    lessons: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: [...LESSON_JSON_SCHEMA.required, 'plan'],
+        properties: {
+          ...LESSON_JSON_SCHEMA.properties,
+          mediaAssetId: { type: 'string', minLength: 1 },
+          plan: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['title', 'actionInstruction', 'userFacingWhy'],
+            properties: {
+              title: { type: 'string' },
+              actionInstruction: { type: 'string' },
+              userFacingWhy: { type: 'string' },
+            },
+          },
+        },
+      },
+    },
+    count: { type: 'integer', minimum: 0 },
+    mediaCount: { type: 'integer', minimum: 0 },
+  },
+} as const;
 
 export function registerKicktodoCreatorArtifactTypes(): void {
   registerArtifactType({
@@ -58,6 +99,14 @@ export function registerKicktodoCreatorArtifactTypes(): void {
         },
       },
     },
+    export: ['json'],
+    registrationSource: 'host',
+  });
+
+  registerArtifactType({
+    artifactTypeId: CHALLENGE_LESSON_BATCH_TYPE,
+    title: 'KickTodo lesson checkpoint',
+    schema: CHALLENGE_LESSON_BATCH_SCHEMA as unknown as Record<string, unknown>,
     export: ['json'],
     registrationSource: 'host',
   });

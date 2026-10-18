@@ -4,9 +4,12 @@
  * anonymous visitor. This is the boundary the public shell was missing (the
  * authed shell already had one), which is why the pricing '*' crash blanked the
  * whole page instead of showing a card.
+ *
+ * Sabotage that turns it red: remove the <ErrorBoundary> around `{children}` in
+ * PublicShell (render throws), or move it outside <main> (the card leaves the shell).
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { render, screen, cleanup } from '@testing-library/react';
+import { render, screen, cleanup, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { PublicShell } from '../PublicShell.js';
 
@@ -29,15 +32,16 @@ describe('PublicShell error boundary (C1)', () => {
 
     // If the boundary were absent, this render() would THROW (the crash would
     // propagate) — so a successful render is itself the containment assertion.
-    const { container } = render(
+    render(
       <MemoryRouter>
         <PublicShell><Boom /></PublicShell>
       </MemoryRouter>,
     );
 
-    // The crash surfaced as the boundary's error card, not a blank page.
-    expect(screen.getByText('kaboom-public-crash')).toBeTruthy();
-    // The shell chrome (brand link in the header) survived the content crash.
-    expect(container.querySelector('.public-shell-brand')).toBeTruthy();
+    // The crash surfaced as the boundary's error card INSIDE the shell's main region.
+    const msg = screen.getByText('kaboom-public-crash');
+    expect(msg.closest('main')).toBe(screen.getByRole('main'));
+    // The shell chrome (header with its menu disclosure) survived the content crash.
+    expect(within(screen.getByRole('banner')).getByRole('button', { name: 'Menu' })).toBeTruthy();
   });
 });

@@ -18,6 +18,15 @@
  * — and the documented reason would still "read" as satisfied. These legs pin the
  * mechanism that actually carries it. `analytics:identity-link`
  * (`identityLinkService.ts:41`) has the identical shape and is covered too.
+ *
+ * w35 (grade-tests): the legs that read SOURCE TEXT (the constructor's argument
+ * count, the interface block) now read STORED ROWS instead. The first of them
+ * failed on a harmless improvement (declaring `tenantOf: r => r.tenantId`); the
+ * invariant is that every stored row carries its tenant and a purge reaches all
+ * of them, whatever the collection declares.
+ * Sabotage witnesses: the purge's content probe returning undefined (legs 1, 2,
+ * 5), a purge that ignores the tenant (legs 1, 5), the stored field written as
+ * another tenant (leg 3), the docblock reverted (leg 4).
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
@@ -26,12 +35,22 @@ import { fileURLToPath } from 'node:url';
 import { openStorage } from '../src/storage/index.js';
 import { initHostExtPersistence, purgeTenantHostExt } from '../src/host/hostExtPersistence.js';
 import { recordNav, navReport } from '../src/features/analytics/navTelemetryService.js';
+import { linkSession, contactForSession } from '../src/features/analytics/identityLinkService.js';
+import type { Storage } from '../src/storage/storage.js';
 
 const SRC = join(dirname(fileURLToPath(import.meta.url)), '..', 'src');
 
+let storage: Storage;
 beforeEach(async () => {
-  initHostExtPersistence(await openStorage('memory://'));
+  storage = await openStorage('memory://');
+  initHostExtPersistence(storage);
 });
+
+/** Every nav-count row as STORED (raw JSON), not as the report projects it. */
+async function storedNavRows(): Promise<Array<{ key: string; row: { tenantId?: unknown } }>> {
+  return (await storage.kvList('hostext:analytics:nav-counts:'))
+    .map(({ key, value }) => ({ key, row: JSON.parse(value) as { tenantId?: unknown } }));
+}
 
 describe('WF-ANL-10 — teardown reaches nav-counts, and the FIELD is what carries it', () => {
   it('a tenant purge removes that tenant\'s rows and leaves another tenant intact', async () => {
@@ -45,31 +64,30 @@ describe('WF-ANL-10 — teardown reaches nav-counts, and the FIELD is what carri
     expect((await navReport('tenant-b')).rows.length, 'a purge must not cross tenants').toBeGreaterThan(0);
   });
 
-  it('the collection declares NO tenantOf — so the content probe, not the key, is the mechanism', () => {
-    const src = readFileSync(join(SRC, 'features', 'analytics', 'navTelemetryService.ts'), 'utf8');
-    const decl = /new DurableCollection<NavCountRow>\(([\s\S]*?)\n\);/.exec(src)?.[1] ?? '';
-    expect(decl.length, 'the declaration must be located, or this leg is vacuous').toBeGreaterThan(10);
-    // name + idOf only: a 3rd/4th argument would mean validate/tenantOf.
-    const args = decl.split('\n').filter((l) => l.trim().length > 0);
-    expect(args.length, `expected name+idOf only, got:\n${decl}`).toBe(2);
-    expect(decl).not.toMatch(/tenantOf/);
+  it('a purge reaches EVERY row the tenant wrote, old weeks included (read back from the raw store)', async () => {
+    // `navReport` only reads the recent weeks, so it cannot show an old week was
+    // swept. Whatever the collection declares (a content probe today, a tenantOf
+    // tomorrow), no stored row of the purged tenant may survive.
+    await recordNav('tenant-a', '/runs', 'sidebar', new Date('2020-01-08T00:00:00.000Z'));
+    await recordNav('tenant-a', '/crm', 'palette', new Date('2021-06-15T00:00:00.000Z'));
+    await recordNav('tenant-a', '/runs', 'hub');
+    await recordNav('tenant-b', '/runs', 'hub', new Date('2020-01-08T00:00:00.000Z'));
+    expect((await storedNavRows()).filter((r) => r.row.tenantId === 'tenant-a'), 'seed').toHaveLength(3);
+
+    await purgeTenantHostExt('tenant-a');
+
+    const left = await storedNavRows();
+    expect(left.filter((r) => r.row.tenantId === 'tenant-a' || r.key.includes('tenant-a'))).toEqual([]);
+    expect(left.map((r) => r.row.tenantId)).toEqual(['tenant-b']);
   });
 
-  it('...and the row carries the `tenantId` FIELD the probe reads (drop it and teardown stops)', async () => {
+  it('...and every STORED row carries the `tenantId` FIELD the probe reads (drop it and teardown stops)', async () => {
     await recordNav('tenant-c', '/x', 'palette');
-    expect((await navReport('tenant-c')).rows.length).toBeGreaterThan(0);
-    // The probe reads `tenantId` off the stored JSON, so it must be IN the row —
-    // asserted at the source of truth: the row type and the key builder both name it.
-    const svc = readFileSync(join(SRC, 'features', 'analytics', 'navTelemetryService.ts'), 'utf8');
-    // ANCHORED to the interface BLOCK. A first draft used
-    // /interface NavCountRow[\s\S]*?tenantId: string/, and sabotage proved it
-    // vacuous: renaming the field left the leg green because the lazy match found
-    // a `tenantId` further down the file. Slice the block, then assert inside it.
-    const open = svc.indexOf('interface NavCountRow {');
-    expect(open, 'the row interface must be located').toBeGreaterThan(-1);
-    const block = svc.slice(open, svc.indexOf('\n}', open));
-    expect(block.length, 'a non-empty block, or this leg is vacuous').toBeGreaterThan(20);
-    expect(block, 'the probe reads `tenantId` off the stored row BY NAME').toMatch(/\btenantId\b\s*:\s*string/);
+    await recordNav('tenant-c', '/y', 'sidebar');
+    const rows = await storedNavRows();
+    expect(rows, 'the seed must be stored').toHaveLength(2);
+    // The content probe reads `tenantId` off the stored JSON BY NAME.
+    for (const { row } of rows) expect(row.tenantId).toBe('tenant-c');
   });
 
   it('the docblock no longer credits the key prefix (the corrected claim)', () => {
@@ -77,5 +95,18 @@ describe('WF-ANL-10 — teardown reaches nav-counts, and the FIELD is what carri
     const head = src.slice(0, src.indexOf('*/'));
     expect(head, 'the stale mechanism claim must be gone').not.toMatch(/key embeds the tenant id first/);
     expect(head, 'and the real one named').toMatch(/tenantId` FIELD|content probe|jsonTenantId/);
+  });
+
+  it('analytics:identity-link has the same shape: a purge removes that tenant\'s links and keeps another tenant\'s', async () => {
+    expect(await linkSession('tenant-a', 'vk-sess-a1', 'contact-a', 'form-submit')).not.toBeNull();
+    expect(await linkSession('tenant-b', 'vk-sess-b1', 'contact-b', 'email-click')).not.toBeNull();
+    expect(await contactForSession('tenant-a', 'vk-sess-a1'), 'seed').toBe('contact-a');
+
+    await purgeTenantHostExt('tenant-a');
+
+    expect(await contactForSession('tenant-a', 'vk-sess-a1')).toBeNull();
+    expect(await contactForSession('tenant-b', 'vk-sess-b1'), 'a purge must not cross tenants').toBe('contact-b');
+    const raw = await storage.kvList('hostext:analytics:identity-link:');
+    expect(raw.map(({ value }) => (JSON.parse(value) as { tenantId: string }).tenantId)).toEqual(['tenant-b']);
   });
 });

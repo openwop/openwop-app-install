@@ -77,7 +77,6 @@ const RunComparePage = lazy(() => import('../runs/RunComparePage.js').then((m) =
 const CapabilitiesPanel = lazy(() => import('../discovery/CapabilitiesPanel.js').then((m) => ({ default: m.CapabilitiesPanel })));
 const BuilderTab = lazy(() => import('../builder/BuilderTab.js').then((m) => ({ default: m.BuilderTab })));
 const WorkflowsDashboard = lazy(() => import('../builder/WorkflowsDashboard.js').then((m) => ({ default: m.WorkflowsDashboard })));
-const PrivacyPage = lazy(() => import('../PrivacyPage.js').then((m) => ({ default: m.PrivacyPage })));
 const CliPage = lazy(() => import('../CliPage.js').then((m) => ({ default: m.CliPage })));
 const PromptLibraryPage = lazy(() => import('../prompts/PromptLibraryPage.js').then((m) => ({ default: m.PromptLibraryPage })));
 const KeysPage = lazy(() => import('../byok/KeysPage.js').then((m) => ({ default: m.KeysPage })));
@@ -181,7 +180,9 @@ const CORE_FEATURES: FeatureRoute[] = [
   // NOTE: the /inbox (Notifications) route migrated to the feature registry
   // (features/notifications/routes.tsx) per ADR 0010 — nav-gated on the
   // `notifications` toggle. Composed via featureRoutes() below, not here.
-  { path: '/privacy', element: <PrivacyPage />, tier: 'workspace', archetype: 'narrow-form', chrome: 'narrow' },
+  // `/privacy` is NOT a workspace route: App.tsx renders it in the bare
+  // PublicShell (features/site/privacyRoute.ts), so a visitor reading the policy
+  // never lands in the signed-in sidebar.
 
   // ── admin (platform/console — one flat rail inside <AdminLayout>) ──────
   {

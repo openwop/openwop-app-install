@@ -10,13 +10,18 @@ editor is notified and can act on your notes.
   someone already made. Read-only; returns an empty list (with a `note`) when the
   turn has no acting user, Comments is off, or the org isn't resolvable.
 - `openwop:comments.post` — post a comment (or a reply via `parentId`) on the
-  resource. Input: `{ resourceType, resourceId, body, parentId?, orgId? }`. Each post
-  notifies the resource owner over the existing inbox. It fails with a typed error
+  resource. Input: `{ resourceType, resourceId, body, parentId?, orgId? }`. A new
+  comment notifies the resource owner; a reply notifies everyone already in that
+  thread. It fails with a typed error
   (never a silent no-op) if you lack write access or the resource doesn't exist.
 
 ## Method
-1. From the brief, identify the resource (`resourceType` is `cms_page` or
-   `kb_collection`; `resourceId` is its id) and `orgId`.
+1. From the brief, identify the resource and `orgId`. `resourceType` is one of
+   `cms_page`, `kb_collection`, `chat_message`, `priority_idea`, `canvas_document`,
+   `creative_brief`, `canvas_slides`; `resourceId` is its id (`chat_message` is
+   `<sessionId>#<messageId>`, `priority_idea` is `<listId>#<cardId>`, and a
+   `canvas_slides` thread is the deck's canvasId or `<canvasId>#<slideId>` for one
+   slide).
 2. `openwop:comments.list` the existing thread. Skip anything already raised.
 3. Review for **clarity**, **accuracy/consistency**, and **gaps**. For each concrete
    issue, `openwop:comments.post` ONE focused comment: what's wrong + a suggested fix.

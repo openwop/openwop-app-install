@@ -28,6 +28,7 @@ import {
   ingestWearableMetric,
   ConsentRequiredError,
   FeedDeniedError,
+  __test as integrationStores,
 } from '../src/features/kicktodo-integrations/integrationService.js';
 
 const T = 'tenant-integrations';
@@ -59,6 +60,11 @@ describe('the tokenized ICS feed (P1)', () => {
     await grantConsent(T, OWNER, 'calendar-project');
     const token = await mintFeedToken(T, OWNER);
     expect(token).toMatch(/^ktfeed_/);
+    // Stored HASHED: the raw token is never a key nor anywhere in a stored row.
+    expect(await integrationStores.feeds.get(token)).toBeNull();
+    const rows = await integrationStores.feeds.list();
+    expect(rows.filter((f) => f.ownerSubject === OWNER)).toHaveLength(1);
+    expect(JSON.stringify(rows)).not.toContain(token);
 
     const ics = await renderFeed(token);
     expect(ics).toContain('BEGIN:VCALENDAR');
@@ -69,20 +75,45 @@ describe('the tokenized ICS feed (P1)', () => {
     // Unknown token → uniform denial.
     await expect(renderFeed('ktfeed_nope')).rejects.toBeInstanceOf(FeedDeniedError);
 
-    // Consent revocation kills the live token immediately.
+    // Consent revocation kills the live token immediately…
     await revokeConsent(T, OWNER, 'calendar-project');
+    await expect(renderFeed(token)).rejects.toBeInstanceOf(FeedDeniedError);
+    // …and it is the TOKEN that died, not only the consent: re-consenting does not
+    // resurrect it (renderFeed's own consent re-check would pass now). A fresh mint works.
+    await grantConsent(T, OWNER, 'calendar-project');
+    await expect(renderFeed(token)).rejects.toBeInstanceOf(FeedDeniedError);
+    await expect(renderFeed(await mintFeedToken(T, OWNER))).resolves.toContain('BEGIN:VCALENDAR');
+    await revokeConsent(T, OWNER, 'calendar-project');
+  });
+
+  it('renderFeed re-checks consent itself — a live token whose consent is no longer live is denied', async () => {
+    // The DOUBLE GUARD's second half. `revokeConsent` writes the consent row FIRST and
+    // then sweeps the feed tokens; if that sweep fails part-way, a live token outlives
+    // its consent. Simulate exactly that state (consent revoked, token NOT revoked) so
+    // the per-render re-check is the only thing standing.
+    const owner = 'user:int-recheck';
+    await grantConsent(T, owner, 'calendar-project');
+    const token = await mintFeedToken(T, owner);
+    await expect(renderFeed(token)).resolves.toContain('BEGIN:VCALENDAR'); // positive control
+    const consent = await integrationStores.consents.get(`${T}::${owner}::calendar-project`);
+    if (!consent) throw new Error('precondition: the consent row exists');
+    await integrationStores.consents.put({ ...consent, revokedAt: '2026-01-01T00:00:00.000Z' });
     await expect(renderFeed(token)).rejects.toBeInstanceOf(FeedDeniedError);
   });
 
   it('the operator kill-switch holds for already-minted feeds (toggle OFF → uniform denial)', async () => {
-    await grantConsent(T, OWNER, 'calendar-project');
-    const token = await mintFeedToken(T, OWNER);
+    const owner = 'user:int-killswitch';
+    await grantConsent(T, owner, 'calendar-project');
+    const token = await mintFeedToken(T, owner);
     await expect(renderFeed(token)).resolves.toContain('BEGIN:VCALENDAR');
 
     const d = kicktodoIntegrationsFeature.toggleDefault!;
-    await saveConfig({ ...d, status: 'off' }, 'test');
-    await expect(renderFeed(token)).rejects.toBeInstanceOf(FeedDeniedError); // fail-closed
-    await saveConfig({ ...d, status: 'on' }, 'test');
+    try {
+      await saveConfig({ ...d, status: 'off' }, 'test');
+      await expect(renderFeed(token)).rejects.toBeInstanceOf(FeedDeniedError); // fail-closed
+    } finally {
+      await saveConfig({ ...d, status: 'on' }, 'test');
+    }
     await expect(renderFeed(token)).resolves.toContain('BEGIN:VCALENDAR'); // re-enable restores
   });
 });

@@ -37,12 +37,9 @@
 import { createHash } from 'node:crypto';
 
 
-/** DEBT-3 — pack-local mirror of the providers.json SSoT default (the
- *  anthropic `recommended: true` model; src/providers/catalog.ts
- *  getDefaultModel). ctx.callAI REQUIRES an explicit model and standalone
- *  .mjs packs cannot import the catalog, so the default lives in this ONE
- *  greppable constant — the /refresh-model-catalog sweep updates it. */
-const DEFAULT_MODEL = 'claude-sonnet-4-6';
+/** ADR 0903 — no hard-coded vendor: an episode profile's model id names the
+ *  model; with none, the host fills provider + model from the run's choice,
+ *  else the workspace's active AI binding, else the catalog default. */
 
 function ensurePodcasts(ctx) {
   const pod = ctx.features && ctx.features.podcasts;
@@ -117,12 +114,15 @@ const episodeMissing = (episodeId) => ({
 });
 
 /** Derive the LLM provider from a model id (the EpisodeProfile stores model ids;
- *  the host routes provider internally — RFC 0091 Unresolved Q2). Defaults anthropic. */
+ *  the host routes provider internally — RFC 0091 Unresolved Q2). An id this
+ *  cannot place returns undefined and the host's run default applies (ADR 0903). */
 function providerForModel(model) {
   const m = (model ?? '').toLowerCase();
+  if (!m) return undefined;
   if (m.startsWith('gpt') || m.startsWith('o1') || m.startsWith('o3')) return 'openai';
   if (m.startsWith('gemini')) return 'google';
-  return 'anthropic';
+  if (m.startsWith('claude')) return 'anthropic';
+  return undefined;
 }
 
 /** Resolve { episode, episodeProfile, speakerProfile } for a run, or nulls. */
@@ -161,7 +161,7 @@ export async function outline(ctx) {
   const { episode, episodeProfile } = await resolveConfig(ctx, pod, episodeId);
   if (!episode) return episodeMissing(episodeId);
   const context = strInput(ctx, 'context');
-  const model = episodeProfile?.outlineModel || DEFAULT_MODEL;
+  const model = episodeProfile?.outlineModel || undefined;
   const segmentCount = episodeProfile?.segmentCount || 5;
   const briefing = episodeProfile?.defaultBriefing || episode.briefing || '';
   const systemPrompt =
@@ -192,7 +192,7 @@ export async function outline(ctx) {
     // content: '' }` to echo the failed turn. On THIS path `''` is the only value
     // that case can ever have (the repair fires precisely because the model
     // returned nothing), and an empty non-final assistant message reaches the wire
-    // unfiltered — `providerForModel` defaults to `anthropic`, which rejects it.
+    // unfiltered — and the provider then (Anthropic, before ADR 0903) rejected it.
     // The result was that the advertised `podcast_outline_empty` typed failure was
     // replaced by a raw provider error: `failEpisode` never ran, nothing reached
     // `episode.error`, and the operator saw a 400 that never named the cause. The
@@ -224,7 +224,7 @@ export async function transcript(ctx) {
   const outlineText = strInput(ctx, 'outline');
   const speakers = speakerProfile?.speakers ?? [{ name: 'Host', voiceId: '' }];
   const segmentCount = episodeProfile?.segmentCount || 5;
-  const model = episodeProfile?.transcriptModel || DEFAULT_MODEL;
+  const model = episodeProfile?.transcriptModel || undefined;
   const cast = speakers
     .map((s) => `- ${s.name}${s.personality ? ` (${s.personality})` : ''}${s.backstory ? ` — ${s.backstory}` : ''}`)
     .join('\n');

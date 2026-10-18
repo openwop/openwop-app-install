@@ -4,7 +4,15 @@
  * every published child page (the dynamic Pages group, fetched from the
  * `/public/host-site/pages` nav list). Asserts: closed by default; the button
  * toggles `aria-expanded`; the panel groups curated + dynamic links; a curated
- * page (Compare) is NOT duplicated into the dynamic group; Escape closes it.
+ * page (Compare) is NOT duplicated into the dynamic group; Escape closes it; page-owned
+ * actions portal into the header / the disclosure.
+ *
+ * The nav-list and docs probes are cached ONCE per module (`pagesProbe`/`docsProbe`).
+ * Every case stubs the same payload, so case order does not matter.
+ *
+ * Sabotage that turns it red: render the panel un-hidden; ignore Escape; drop `compare`
+ * from the curated slugs (duplicate); always curate White label; promote Compare to the
+ * primary nav; render PublicHeaderActions / PublicMenuActions inline instead of portalling.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, cleanup, fireEvent, within } from '@testing-library/react';
@@ -61,6 +69,7 @@ describe('PublicShell hamburger menu (ADR 0486)', () => {
 
     const panel = document.getElementById(btn.getAttribute('aria-controls')!)!;
     expect(panel).toBeTruthy();
+    expect(panel.hidden).toBe(false);
     // Curated "main functionality" group.
     expect(within(panel).getByText('Product')).toBeTruthy();
     expect(within(panel).getByText('Features')).toBeTruthy();
@@ -105,8 +114,8 @@ describe('PublicShell hamburger menu (ADR 0486)', () => {
     );
 
     const action = await screen.findByRole('link', { name: 'Open app' });
-    expect(action.closest('.public-shell-header')).toBeTruthy();
-    expect(action.closest('#public-main')).toBeNull();
+    expect(action.closest('header')).toBe(screen.getByRole('banner'));
+    expect(action.closest('main')).toBeNull();
   });
 
   it('places lower-frequency page actions inside the navigation disclosure', async () => {
@@ -120,7 +129,8 @@ describe('PublicShell hamburger menu (ADR 0486)', () => {
     expect(screen.queryByRole('link', { name: 'Edit this page' })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Menu' }));
     const action = await screen.findByRole('link', { name: 'Edit this page' });
-    expect(action.closest('.public-menu__panel')).toBeTruthy();
-    expect(action.closest('.public-shell-header')).toBeTruthy();
+    const panelId = screen.getByRole('button', { name: 'Menu' }).getAttribute('aria-controls')!;
+    expect(action.closest(`[id="${panelId}"]`)).toBeTruthy();
+    expect(action.closest('header')).toBe(screen.getByRole('banner'));
   });
 });

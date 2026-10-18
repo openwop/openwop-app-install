@@ -8,6 +8,7 @@ import { describe, expect, it } from 'vitest';
 import { render, screen, cleanup } from '@testing-library/react';
 import { afterEach } from 'vitest';
 import { PropertyField } from '../PropertyForm.js';
+import type { CanvasPropDef } from '../types.js';
 
 afterEach(cleanup);
 
@@ -17,7 +18,9 @@ const CATALOG: Record<string, string> = {
 };
 const tt = (key: string, opts: { defaultValue: string }): string => CATALOG[key] ?? opts.defaultValue;
 
-const DEF = { name: 'tone', type: 'enum', label: 'tone', options: ['default', 'muted'] };
+// The code label differs from the prop NAME on purpose (w46g2-pfl-legacy-label):
+// with label === name, a render of `p.name` instead of `p.label` was invisible.
+const DEF: CanvasPropDef = { name: 'tone', type: 'enum', label: 'Tone colour', options: ['default', 'muted'] };
 
 describe('ADR 0340 — PropertyField label keys', () => {
   it('resolves prop_/opt_ keys through the type translator, falling back to code labels', () => {
@@ -29,7 +32,8 @@ describe('ADR 0340 — PropertyField label keys', () => {
 
   it('renders the legacy English labels when no translator is supplied', () => {
     render(<PropertyField def={DEF} value="muted" frames={[]} docState={{}} orgId="o" onChange={() => {}} onChangeText={() => {}} />);
-    expect(screen.getByText('tone')).toBeTruthy();
+    expect(screen.getByText('Tone colour')).toBeTruthy();
+    expect(screen.queryByText('tone')).toBeNull();
     expect(screen.getByRole('option', { name: 'muted' })).toBeTruthy();
   });
 });

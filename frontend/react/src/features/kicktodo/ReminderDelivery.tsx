@@ -25,7 +25,8 @@ export function ReminderDelivery(): JSX.Element | null {
   const enablePush = useNotificationStore((s) => s.enablePush);
   // null = not read yet; 'failed' = the consent read failed (stated, never hidden).
   const [consented, setConsented] = useState<boolean | null | 'failed'>(null);
-  const [busy, setBusy] = useState(false);
+  // PT-3 — WHICH action is in flight, so only its button reports aria-busy.
+  const [busy, setBusy] = useState<null | 'allow' | 'device' | 'stop'>(null);
   const [actionFailed, setActionFailed] = useState(false);
 
   const read = useCallback(async () => {
@@ -39,7 +40,7 @@ export function ReminderDelivery(): JSX.Element | null {
   useEffect(() => { void read(); void syncPushStatus(); }, [read, syncPushStatus]);
 
   const onAllow = async () => {
-    setBusy(true);
+    setBusy('allow');
     setActionFailed(false);
     try {
       // Subscribe FIRST: `pushManager.subscribe()` must run inside the click's
@@ -52,24 +53,30 @@ export function ReminderDelivery(): JSX.Element | null {
     } catch {
       setActionFailed(true);
     } finally {
-      setBusy(false);
+      setBusy(null);
     }
   };
   const onDeviceOnly = async () => {
-    setBusy(true);
+    setBusy('device');
     setActionFailed(false);
+    // PT-3 — a THROWN subscribe (not just a refused one) is a stated failure,
+    // never an unhandled rejection.
     try { if (!(await enablePush())) setActionFailed(true); }
-    finally { setBusy(false); }
+    catch { setActionFailed(true); }
+    finally { setBusy(null); }
   };
   const onStop = async () => {
-    setBusy(true);
+    setBusy('stop');
     setActionFailed(false);
     try { await revokeConsent(REMINDER_CONSENT); await read(); }
     catch { setActionFailed(true); }
-    finally { setBusy(false); }
+    finally { setBusy(null); }
   };
 
-  if (consented === null) return null;
+  // PT-3 — the read in flight is SAID, not rendered as nothing.
+  if (consented === null) {
+    return <p className="muted u-fs-13" aria-busy="true">{t('reminderDelivery_checking')}</p>;
+  }
   const onDevice = pushStatus === 'subscribed';
   const canSubscribe = pushStatus === 'available';
 
@@ -77,7 +84,8 @@ export function ReminderDelivery(): JSX.Element | null {
     <>
       {consented === 'failed' ? (
         <p className="muted u-fs-13">
-          <span className="chip chip--muted">{t('reminderDelivery_unavailable')}</span>
+          <span className="chip chip--muted">{t('reminderDelivery_unavailable')}</span>{' '}
+          <Button variant="quiet" size="sm" onClick={() => { setConsented(null); void read(); }}>{t('common:retry')}</Button>
         </p>
       ) : consented ? (
         <p className="muted u-fs-13">
@@ -85,18 +93,18 @@ export function ReminderDelivery(): JSX.Element | null {
             {onDevice ? t('reminderDelivery_onDevice') : t('reminderDelivery_inboxOnly')}
           </span>{' '}
           {!onDevice && canSubscribe && (
-            <Button variant="quiet" size="sm" disabled={busy} onClick={() => void onDeviceOnly()}>
+            <Button variant="quiet" size="sm" disabled={busy !== null} loading={busy === 'device'} onClick={() => void onDeviceOnly()}>
               {t('reminderDelivery_addDevice')}
             </Button>
           )}
-          <Button variant="quiet" size="sm" disabled={busy} onClick={() => void onStop()}>
+          <Button variant="quiet" size="sm" disabled={busy !== null} loading={busy === 'stop'} onClick={() => void onStop()}>
             {t('reminderDelivery_stop')}
           </Button>
         </p>
       ) : (
         <p className="muted u-fs-13">
           {t('reminderDelivery_off')}{' '}
-          <Button variant="secondary" size="sm" disabled={busy} onClick={() => void onAllow()}>
+          <Button variant="secondary" size="sm" disabled={busy !== null} loading={busy === 'allow'} onClick={() => void onAllow()}>
             {t('reminderDelivery_allow')}
           </Button>
         </p>

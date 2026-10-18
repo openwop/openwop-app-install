@@ -92,7 +92,7 @@ export function registerSlidesEditorRoutes(deps: RouteDeps): void {
           if (!isSlidesExportFormat(body.format)) {
             throw new OpenwopError('validation_error', `\`format\` must be one of: ${SLIDES_EXPORT_FORMATS.join(', ')}.`, 400, { field: 'format' });
           }
-          const canvas = await loadCanvas(tenantId, req.params.canvasId, user.userId);
+          const canvas = await loadCanvas(tenantId, req.params.canvasId, user.userId, 'read');
           const startedAt = Date.now();
           const result = await exportSlides(tenantId, canvas.state, body.format);
           log.info('deck_exported', { tenantId, format: body.format, bytes: result.sizeBytes, ms: Date.now() - startedAt });

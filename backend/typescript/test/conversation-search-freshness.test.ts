@@ -14,12 +14,10 @@
  * folds `updatedAt` into the freshness key, so a re-query re-indexes. Born-red on
  * the pre-fix `messageCount`-only watermark.
  */
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
-import { saveConfig } from '../src/host/featureToggles/service.js';
-import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 
 let server: http.Server;
 let BASE: string;
@@ -60,10 +58,15 @@ beforeAll(async () => {
   process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
-  const d = getToggleDefault('conversation-search');
-  if (d) await saveConfig({ ...d, status: 'on' }, 'test');
+  // conversation-search is ALWAYS-ON (no toggle — ADR 0820 §8.6), so nothing to enable.
+  vi.useFakeTimers({ toFake: ['Date'], shouldAdvanceTime: true });
 });
-afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
+afterAll(async () => {
+  vi.useRealTimers();
+  await new Promise<void>((res) => server.close(() => res()));
+});
+/** Step the clock so the next mutation's `updatedAt` cannot equal the prior stamp. */
+const stepClock = (): void => { vi.setSystemTime(Date.now() + 1000); };
 
 describe('CSC-1 — search freshness tracks in-place edit + tombstone-delete', () => {
   it('an EDIT drops the old text from the index and picks up the new text', async () => {
@@ -72,6 +75,7 @@ describe('CSC-1 — search freshness tracks in-place edit + tombstone-delete', (
     // Baseline (non-vacuous): the original text is indexed + matches.
     expect(msgHits(await search('aardvarkoriginal'), s), 'baseline: original text indexed').toBe(1);
 
+    stepClock();
     const put = await jsonFetch(`/host/openwop-app/chat/sessions/${s}/messages/${mid}`, {
       method: 'PUT', body: JSON.stringify({ content: 'bluejayupdated forecast text' }),
     });
@@ -89,13 +93,39 @@ describe('CSC-1 — search freshness tracks in-place edit + tombstone-delete', (
     await appendMsg(s, 'assistant', 'acknowledged'); // a sibling so the conv isn't empty post-tombstone
     expect(msgHits(await search('crocodileconfidential'), s), 'baseline: content indexed').toBe(1);
 
+    stepClock();
     const del = await jsonFetch(`/host/openwop-app/chat/sessions/${s}/messages/${mid}`, { method: 'DELETE' });
-    expect([200, 204]).toContain(del.status);
+    expect(del.status, 'tombstone-delete succeeds').toBe(204);
 
     // The deleted content must NO LONGER match (born-red: tombstone keeps count ⇒ stale).
     expect(msgHits(await search('crocodileconfidential'), s), 'deleted content must not remain searchable').toBe(0);
     // …and the tombstone must not be indexed as its literal `{"deleted":true}` sentinel
     // (a "deleted" query must not surface the tombstoned row).
     expect(msgHits(await search('deleted'), s), 'the tombstone sentinel must not be searchable').toBe(0);
+  });
+
+  /**
+   * BLOCKED-ON-PRODUCT (/grade-tests wave 24, filed to grade-code): the watermark is
+   * `${messageCount}:${updatedAt}` with millisecond wall-clock `updatedAt`, so two edits
+   * stamped in the SAME millisecond leave the signature unchanged and the second edit
+   * is never re-indexed (its text unsearchable, the first edit's text still matching).
+   * `it.fails` asserts the CORRECT outcome; it flips red when the watermark is fixed.
+   */
+  it.fails('a second edit in the SAME millisecond is still re-indexed (same-ms watermark collision)', async () => {
+    const s = await newSession('Same-ms freshness');
+    const mid = await appendMsg(s, 'user', 'gecko original');
+    stepClock();
+    const T = Date.now();
+    try {
+      vi.useFakeTimers({ toFake: ['Date'] }); // frozen: both edits stamp exactly T
+      vi.setSystemTime(T);
+      await jsonFetch(`/host/openwop-app/chat/sessions/${s}/messages/${mid}`, { method: 'PUT', body: JSON.stringify({ content: 'gecko firstedit' }) });
+      expect(msgHits(await search('firstedit'), s), 'precondition: first edit indexed').toBe(1);
+      await jsonFetch(`/host/openwop-app/chat/sessions/${s}/messages/${mid}`, { method: 'PUT', body: JSON.stringify({ content: 'gecko secondedit' }) });
+      expect(msgHits(await search('secondedit'), s), 'second same-ms edit must be searchable').toBe(1);
+    } finally {
+      vi.useFakeTimers({ toFake: ['Date'], shouldAdvanceTime: true });
+      vi.setSystemTime(T + 5000);
+    }
   });
 });

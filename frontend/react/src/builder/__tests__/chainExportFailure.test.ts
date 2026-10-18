@@ -1,6 +1,9 @@
 /**
  * grade-ux U-3/U-8, grade-code C-14 — the one mapping both chain-export actions
  * use to turn a failure into author-facing words and a node to select.
+ * Breaks it: naming nodes by kind instead of their canvas label, dropping the
+ * selection of the first offender, blaming nodes when the catalog never loaded,
+ * or losing a SerializeError's own node.
  */
 import { describe, expect, it } from 'vitest';
 import { chainExportFailure } from '../builderShellHelpers.js';

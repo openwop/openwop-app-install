@@ -1,16 +1,23 @@
 /**
- * XCH-TL-1 — the grade-pass findings on the team-ledger tools, each pinned.
- * (Original header of the shared harness follows.)
- * ADR 0831 P3 — the team-ledger agent tools, on a real app.
+ * XCH-TL-1 (ADR 0831 P3) — the grade-pass findings on the team-ledger agent
+ * tools, each pinned. The model is told the truth: invalid input is REFUSED with
+ * a typed error it can repair, never silently rewritten and reported as success.
  *
- *   - both are registered builtins (and NOT on the default-on baseline: the
- *     chief-of-staff pack allowlists them);
- *   - no acting user ⇒ a typed failure, never an empty success;
- *   - the tool shares the route's predicate: a stranger and a toggle-OFF tenant
- *     get the same `not_found`; a viewer can read but `propose` is `forbidden`;
- *   - `propose` only proposes: the version does not move, the author is the
- *     agent, the source is the run; the owner then accepts it over HTTP;
- *   - invalid patches come back as typed tool errors.
+ *   - HIGH: `baseVersion` is required and range-checked, never filled in, so the
+ *     stale-base guard on accept still holds for an agent's proposal;
+ *   - MEDIUM: over-long, non-string, secret-shaped, empty and too-many items are
+ *     refused; `[]` still clears a list on purpose;
+ *   - MEDIUM: the tool echoes the STORED patch (deduped), and `decisionDocumentIds`
+ *     REPLACES the list on accept;
+ *   - LOW: a visible project with no ledger is `no_ledger`, distinct from `not_found`;
+ *   - LOW: the owner's queue is bounded — the 51st proposal is a `conflict` and is not stored.
+ *
+ * Sabotage-witnessed (w29): the baseVersion range check, filling a missing
+ * baseVersion, the stale guard, the length / secret / list-cap / empty-item
+ * checks, echoing the input instead of the stored patch, merging instead of
+ * replacing decision ids, no_ledger collapsed into not_found, the pending cap
+ * off by one, and tool errors losing `isError` — each turns its case red.
+ * Cited by docs/steward/LLM-EXCHANGE-AUDIT.md (XCH-TL-1).
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -19,8 +26,9 @@ import { getSetCookies } from './headerCookies.js';
 import { createApp } from '../src/index.js';
 import { createAgentToolProvider } from '../src/host/agentToolProvider.js';
 import { TEAM_LEDGER_GET_TOOL_ID, TEAM_LEDGER_PROPOSE_TOOL_ID } from '../src/features/team-intent-ledger/agentTools.js';
-import { getDelta, getLedger, proposeDelta, LEDGER_LIMITS } from '../src/features/team-intent-ledger/ledgerStore.js';
+import { getLedger, listDeltas, proposeDelta, LEDGER_LIMITS } from '../src/features/team-intent-ledger/ledgerStore.js';
 import { createDocument } from '../src/features/documents/documentsService.js';
+import type { LedgerState, TeamLedger } from '../src/features/team-intent-ledger/types.js';
 
 let BASE: string;
 let server: http.Server;
@@ -36,13 +44,15 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T }
+/** The response fields this file reads, typed against the real records (an absent field fails the case). */
+interface Body { ledger: TeamLedger; state: LedgerState; user: { userId: string }; orgId: string; id: string }
+interface Res { status: number; body: Body }
 function client() {
   let cookie = '';
   const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]!; }
-    return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) };
+    return { status: res.status, body: (res.status === 204 ? undefined : await res.json().catch(() => undefined)) as Body };
   };
   return { get: (p: string) => call('GET', p), post: (p: string, b?: unknown) => call('POST', p, b), patch: (p: string, b?: unknown) => call('PATCH', p, b) };
 }
@@ -51,8 +61,8 @@ const email = (who: string): string => `${who}-${Date.now()}-${n++}@acme.test`;
 async function setup() {
   const tenantId = `org:tlt-${Date.now()}-${n++}`;
   const owner = client();
-  const ownerId = (await owner.post('/host/openwop-app/test/login', { email: email('tlt-owner'), tenantId })).body.user.userId as string;
-  const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'ToolCo' })).body.orgId as string;
+  const ownerId = (await owner.post('/host/openwop-app/test/login', { email: email('tlt-owner'), tenantId })).body.user.userId;
+  const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'ToolCo' })).body.orgId;
   const proj = (await owner.post('/host/openwop-app/projects', { orgId, name: 'Launch' })).body as { id: string };
   await owner.patch(`/host/openwop-app/projects/${proj.id}`, { charter: { goal: 'Ship the launch', objectives: ['EU live'] } });
   const L = `/host/openwop-app/team-ledger/projects/${proj.id}`;
@@ -62,7 +72,9 @@ async function setup() {
 
 const call = (tenantId: string, scope: { actingUserId?: string; agentProfileId?: string }, name: string, input: Record<string, unknown>) =>
   createAgentToolProvider({ tenantId, runId: 'run-tlt-1', ...scope }).executeTool({ name, input });
-const parse = (r: { content: string }) => JSON.parse(r.content) as Record<string, any>;
+/** A tool result's JSON: the success fields this file reads, or a typed error. */
+interface ToolOut { error?: string; message?: string; deltaId: string; patch: Record<string, unknown> }
+const parse = (r: { content: string }): ToolOut => JSON.parse(r.content) as ToolOut;
 
 describe('XCH-TL-1 — grade-pass fixes', () => {
   const P = TEAM_LEDGER_PROPOSE_TOOL_ID;
@@ -89,12 +101,14 @@ describe('XCH-TL-1 — grade-pass fixes', () => {
   it('MEDIUM — refuses instead of rewriting (long, non-string, secret-shaped, empty, too many objectives)', async () => {
     const s = await setup();
     const p = (patch: Record<string, unknown>) => ({ projectId: s.projectId, patch, why: 'w', baseVersion: 1 });
-    expect((await err(s.tenantId, s.ownerId, p({ inScope: ['x'.repeat(LEDGER_LIMITS.line + 1)] }))).error).toBe('validation_error');
+    // Spaced text: an unbroken 300-char blob would ALSO trip the secret-shaped check, masking the length check.
+    const long = (max: number) => 'word '.repeat(Math.ceil(max / 5) + 1).trim();
+    expect((await err(s.tenantId, s.ownerId, p({ inScope: [long(LEDGER_LIMITS.line)] }))).message).toMatch(/the limit is 300/);
     expect((await err(s.tenantId, s.ownerId, p({ inScope: [{}] }))).error).toBe('validation_error');
     expect((await err(s.tenantId, s.ownerId, p({ inScope: [`key sk-ant-${'a'.repeat(40)}`] }))).message).toMatch(/secret-shaped/);
     expect((await err(s.tenantId, s.ownerId, p({ inScope: [''] }))).error).toBe('validation_error');
     expect((await err(s.tenantId, s.ownerId, p({ objectives: Array.from({ length: LEDGER_LIMITS.objectives + 1 }, (_, i) => `o${i}`) }))).message).toMatch(/limit is 20/);
-    expect((await err(s.tenantId, s.ownerId, p({ goal: 'g'.repeat(LEDGER_LIMITS.goal + 1) }))).error).toBe('validation_error');
+    expect((await err(s.tenantId, s.ownerId, p({ goal: long(LEDGER_LIMITS.goal) }))).message).toMatch(/the limit is 200/);
     // An explicitly empty list is still allowed: it clears the list on purpose.
     const cleared = parse(await call(s.tenantId, { actingUserId: s.ownerId }, P, p({ openQuestions: [] })));
     expect(cleared.patch).toEqual({ openQuestions: [] });
@@ -102,10 +116,11 @@ describe('XCH-TL-1 — grade-pass fixes', () => {
 
   it('MEDIUM — the stored patch is echoed, and decisionDocumentIds REPLACES the list', async () => {
     const s = await setup();
-    const d1 = await createDocument({ tenantId: s.tenantId, orgId: s.orgId, title: 'Decision — A', kind: 'decision-record', format: 'markdown', createdBy: s.ownerId } as never);
-    const d2 = await createDocument({ tenantId: s.tenantId, orgId: s.orgId, title: 'Decision — B', kind: 'decision-record', format: 'markdown', createdBy: s.ownerId } as never);
+    const d1 = await createDocument({ tenantId: s.tenantId, orgId: s.orgId, title: 'Decision — A', kind: 'decision-record', format: 'markdown', provenance: { producedBy: { kind: 'user', id: s.ownerId } }, createdBy: s.ownerId });
+    const d2 = await createDocument({ tenantId: s.tenantId, orgId: s.orgId, title: 'Decision — B', kind: 'decision-record', format: 'markdown', provenance: { producedBy: { kind: 'user', id: s.ownerId } }, createdBy: s.ownerId });
     expect((await s.owner.post(`${s.L}/write`, { patch: { decisionDocumentIds: [d1.documentId] }, why: 'first' })).status).toBe(200);
-    const r = parse(await call(s.tenantId, { actingUserId: s.ownerId }, P, { projectId: s.projectId, patch: { decisionDocumentIds: [d2.documentId] }, why: 'second', baseVersion: 2 }));
+    // Sent with a duplicate; stored deduped — the echo must be what was STORED, not what was sent.
+    const r = parse(await call(s.tenantId, { actingUserId: s.ownerId }, P, { projectId: s.projectId, patch: { decisionDocumentIds: [d2.documentId, d2.documentId] }, why: 'second', baseVersion: 2 }));
     expect(r.patch).toEqual({ decisionDocumentIds: [d2.documentId] });
     expect((await s.owner.post(`${s.L}/deltas/${r.deltaId}/accept`)).status).toBe(200);
     expect((await s.owner.get(s.L)).body.state.decisionDocumentIds).toEqual([d2.documentId]); // replaced, as the description now says
@@ -114,8 +129,8 @@ describe('XCH-TL-1 — grade-pass fixes', () => {
   it('LOW — a visible project with no ledger is `no_ledger`, distinct from not_found', async () => {
     const tenantId = `org:tlg-${Date.now()}-${n++}`;
     const owner = client();
-    const ownerId = (await owner.post('/host/openwop-app/test/login', { email: email('tlg-owner'), tenantId })).body.user.userId as string;
-    const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'NoLedgerCo' })).body.orgId as string;
+    const ownerId = (await owner.post('/host/openwop-app/test/login', { email: email('tlg-owner'), tenantId })).body.user.userId;
+    const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'NoLedgerCo' })).body.orgId;
     const proj = (await owner.post('/host/openwop-app/projects', { orgId, name: 'Bare' })).body as { id: string };
     const g = await call(tenantId, { actingUserId: ownerId }, TEAM_LEDGER_GET_TOOL_ID, { projectId: proj.id });
     expect(parse(g).error).toBe('no_ledger');
@@ -130,6 +145,7 @@ describe('XCH-TL-1 — grade-pass fixes', () => {
     }
     const e = await err(s.tenantId, s.ownerId, { projectId: s.projectId, patch: { inScope: ['one more'] }, why: 'w', baseVersion: 1 });
     expect(e.error).toBe('conflict');
-    expect(await getDelta(s.tenantId, 'tld_none')).toBeNull();
+    // Refused, not stored: the queue still holds exactly the cap.
+    expect((await listDeltas(s.tenantId, ledger.ledgerId)).filter((d) => d.status === 'proposed')).toHaveLength(LEDGER_LIMITS.pending);
   });
 });

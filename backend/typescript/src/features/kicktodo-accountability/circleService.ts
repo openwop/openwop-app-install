@@ -15,10 +15,12 @@
  *    untouched and never accepts a client-supplied tenant (test-enforced).
  */
 
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { createLogger } from '../../observability/logger.js';
 import { ensureConversationMeta } from '../../host/conversationStore.js';
+import { registerKvAgeOut } from '../../host/kvAgeOut.js';
+import { KICKTODO_REVOKED_ROW_RETENTION_DAYS } from '../kicktodo-core/types.js';
 
 const log = createLogger('kicktodo.circles');
 
@@ -68,6 +70,19 @@ const grants = new DurableCollection<AccountabilityGrant>(
   (g) => `${g.tenantId}::${g.circleId}::${g.granteeSubject}`,
 );
 
+// KTACC-6 (KickTodo wave 4C) — revoked grants were kept forever. A revoked grant
+// reads exactly like an absent one (`liveGrant` / `grantAcceptable` /
+// `acceptGrant` all refuse both), so past the window it is reclaimed on the
+// default-on kvAgeOut lane. Keyed on `revokedAt`, which only `revokeGrant` sets;
+// live and invited grants carry none and are skipped. A re-invite writes a FRESH
+// row without it, so a re-joined member is never aged out.
+registerKvAgeOut({
+  id: 'kicktodo-grants:revoked',
+  prefix: 'hostext:kicktodo-grants:',
+  ttlDays: KICKTODO_REVOKED_ROW_RETENTION_DAYS,
+  timestampField: 'revokedAt',
+});
+
 const nowIso = (): string => new Date().toISOString();
 
 export class CircleDeniedError extends Error {
@@ -82,8 +97,15 @@ export async function createCircle(input: {
   enrollmentId: string;
   ownerSubject: string;
   name: string;
+  /** KTACC-5 — a client idempotency key (the `Idempotency-Key` header). Present ⇒
+   *  the circle id is DERIVED from (tenant, owner, key) and created by CAS, so a
+   *  double submit returns the first circle instead of minting a second. Absent ⇒
+   *  a fresh random id, exactly as before. */
+  idempotencyKey?: string;
 }): Promise<AccountabilityCircle> {
-  const id = `circle:${randomUUID()}`;
+  const id = input.idempotencyKey
+    ? idempotentCircleId(input.tenantId, input.ownerSubject, input.idempotencyKey)
+    : `circle:${randomUUID()}`;
   // The circle's conversation is deterministic per circle and lives with the
   // ONE conversation owner under the OWNING tenant.
   const conversationId = `subjc-circle-${id.slice(7, 31)}`;
@@ -97,7 +119,19 @@ export async function createCircle(input: {
     conversationId,
     createdAt: nowIso(),
   };
-  await circles.put(circle);
+  if (input.idempotencyKey) {
+    // Only the CAS winner proceeds to the side rows; a replay returns the
+    // stored circle (and converges its idempotent side rows below).
+    if (!(await circles.compareAndSwap(null, circle))) {
+      const existing = await circles.get(`${input.tenantId}::${id}`);
+      if (!existing) throw new CircleDeniedError(); // vanished between CAS and read
+      await circleIndex.put({ circleId: id, tenantId: existing.tenantId });
+      await ensureConversationMeta(existing.tenantId, existing.conversationId, { type: 'group', ownerUserId: existing.ownerSubject });
+      return existing;
+    }
+  } else {
+    await circles.put(circle);
+  }
   await circleIndex.put({ circleId: id, tenantId: input.tenantId });
   // OWNED, not unowned: `isVisibleTo` treats an ownerless conversation as
   // tenant-visible (the legacy posture) — a circle chat must be invisible to
@@ -118,6 +152,14 @@ export async function createCircle(input: {
   });
   log.info('kicktodo_circle_created', { circleId: id, type: input.type });
   return circle;
+}
+
+/** KTACC-5 — `circle:<uuid-shaped digest>`: the same shape as a random id, so
+ *  the `conversationId` slice and every id consumer are unchanged. The owner is
+ *  in the digest, so one caller's key can never resolve to another's circle. */
+function idempotentCircleId(tenantId: string, ownerSubject: string, key: string): string {
+  const h = createHash('sha256').update(`kicktodo-circle|${tenantId}|${ownerSubject}|${key}`).digest('hex');
+  return `circle:${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20, 32)}`;
 }
 
 /** LIVE grant check — the single authorization primitive. */
@@ -168,6 +210,10 @@ export async function resolveCircleByOpaqueId(circleId: string): Promise<Account
 }
 
 export class GrantError extends Error {}
+/** KTA-3 — a grant row kept moving under four consecutive transition CASes. */
+export class GrantConflictError extends Error {
+  constructor() { super('Concurrent grant updates — retry.'); }
+}
 
 /** Invite: the OWNER names an opaque grantee subject + a scope subset. The
  *  invitation payload IS the disclosure (scopes visible before acceptance). */
@@ -202,12 +248,36 @@ export async function inviteToCircle(
 export async function acceptGrant(circleId: string, granteeSubject: string): Promise<AccountabilityGrant> {
   const ptr = await circleIndex.get(circleId);
   if (!ptr) throw new CircleDeniedError();
+  // KTA-3 — every grant transition is a CAS against the row it read. The old
+  // get-then-put let an accept that read `invited` land AFTER a concurrent
+  // revoke and write `active` over it: the owner was told access was gone,
+  // and the grantee kept it. A lost CAS re-reads, so the accept now sees the
+  // revoke and is refused.
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const g = await grants.get(`${ptr.tenantId}::${circleId}::${granteeSubject}`);
+    if (!g || g.state === 'revoked') throw new CircleDeniedError();
+    if (g.state === 'active') return g;
+    const next: AccountabilityGrant = { ...g, state: 'active', acceptedAt: nowIso() };
+    if (await grants.compareAndSwap(g, next)) return next;
+  }
+  throw new GrantConflictError();
+}
+
+/** KT-COHORT-FULL-GRANT-1 — true when {@link acceptGrant} would succeed (the
+ *  grant exists and is not revoked), WITHOUT accepting it. `joinCohort` checks
+ *  this before claiming a seat, so a full cohort never activates a grant. */
+export async function grantAcceptable(circleId: string, granteeSubject: string): Promise<boolean> {
+  const ptr = await circleIndex.get(circleId);
+  if (!ptr) return false;
   const g = await grants.get(`${ptr.tenantId}::${circleId}::${granteeSubject}`);
-  if (!g || g.state === 'revoked') throw new CircleDeniedError();
-  if (g.state === 'active') return g;
-  const next: AccountabilityGrant = { ...g, state: 'active', acceptedAt: nowIso() };
-  await grants.put(next);
-  return next;
+  return g !== null && g.state !== 'revoked';
+}
+
+/** KTCOM-4 — whether ANY grant row (invited / active / revoked) exists for the
+ *  subject in this circle. The seat reconcile repairs only a buyer the paid
+ *  observer never reached, so an owner's revocation is never overridden. */
+export async function grantRowExists(tenantId: string, circleId: string, subject: string): Promise<boolean> {
+  return (await grants.get(`${tenantId}::${circleId}::${subject}`)) !== null;
 }
 
 /** Revoke: the OWNER (or the grantee themself, leaving) — immediate. */
@@ -220,13 +290,20 @@ export async function revokeGrant(
   const c = await circles.get(`${tenantId}::${circleId}`);
   if (!c) throw new CircleDeniedError();
   if (actorSubject !== c.ownerSubject && actorSubject !== granteeSubject) throw new CircleDeniedError();
-  const g = await grants.get(`${tenantId}::${circleId}::${granteeSubject}`);
-  if (!g) throw new CircleDeniedError();
-  if (g.state === 'revoked') return g;
-  const next: AccountabilityGrant = { ...g, state: 'revoked', revokedAt: nowIso() };
-  await grants.put(next);
-  log.info('kicktodo_grant_revoked', { circleId, grantee: granteeSubject });
-  return next;
+  // KTA-3 — CAS, re-read on loss (see acceptGrant): a revoke that read
+  // `invited` must not be overwritten by — nor overwrite — a concurrent accept
+  // without seeing it.
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const g = await grants.get(`${tenantId}::${circleId}::${granteeSubject}`);
+    if (!g) throw new CircleDeniedError();
+    if (g.state === 'revoked') return g;
+    const next: AccountabilityGrant = { ...g, state: 'revoked', revokedAt: nowIso() };
+    if (await grants.compareAndSwap(g, next)) {
+      log.info('kicktodo_grant_revoked', { circleId, grantee: granteeSubject });
+      return next;
+    }
+  }
+  throw new GrantConflictError();
 }
 
 export async function listGrants(tenantId: string, circleId: string, actorSubject: string): Promise<AccountabilityGrant[]> {
@@ -248,6 +325,118 @@ export async function listCirclesOwnedBy(tenantId: string, ownerSubject: string)
   return rows.filter((c) => c.ownerSubject === ownerSubject).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
 }
 
+// ── KTACC-2 (KickTodo wave 4C) — circle end-of-life on the owner's erasure ──
+/**
+ * The name a handed-over circle carries. `name` is free text the departing owner
+ * typed (`createCircle`), so it must not outlive their erasure; the route's own
+ * default ("My circle") would read as the HEIR's possessive, hence a neutral one.
+ */
+export const HANDED_OVER_CIRCLE_NAME = 'Accountability circle';
+
+export type CircleHandover =
+  | { circleId: string; outcome: 'transferred'; newOwner: string }
+  | { circleId: string; outcome: 'dissolved'; memberSubjects: string[] };
+
+/** A member's join instant: when they accepted (an invite is not a join), else
+ *  when they were invited — the owner's own self-grant is accepted at creation. */
+const joinedAt = (g: AccountabilityGrant): string => g.acceptedAt ?? g.invitedAt;
+
+function isLiveMember(g: AccountabilityGrant, nowMs: number): boolean {
+  if (g.state !== 'active' || g.revokedAt) return false;
+  return !(g.expiresAt && Date.parse(g.expiresAt) < nowMs);
+}
+
+/**
+ * KTACC-2 — decided by the product owner 2026-10-17: a circle SURVIVES its owner's
+ * erasure. Ownership passes to the LONGEST-STANDING remaining live member (earliest
+ * join; ties broken by subject so the choice is deterministic across replays and
+ * instances). With no live member left the circle DISSOLVES: its pointer, row and
+ * every grant are deleted here, and the returned `dissolved` outcome tells the
+ * caller (compliance.ts) to drop the cohort/seat/hold/session children this module
+ * does not own.
+ *
+ * What the departing owner leaves behind is rewritten, never kept: the circle's
+ * `ownerSubject` and free-text `name`, and `grantorSubject` on every grant they
+ * issued (all of them — only the owner may invite). Their OWN self-grant is left
+ * for `eraseSubjectGrants`, which deletes it in the same eraser pass.
+ *
+ * RACE-SAFE: every write is a CAS against the row read. The heir's grant is CASed
+ * FIRST (promoting it to the owner's full scopes, the `createCircle` invariant), so
+ * a concurrent revoke of the heir makes the promotion lose and the loop re-picks.
+ * The circle CAS then refuses if another handover already moved it. And if the
+ * heir disappears right after (their own concurrent erasure), the loop treats THEM
+ * as departing and hands over again — so the circle never settles on an owner
+ * with no grant. Idempotent: a circle no longer owned by `departingSubject`
+ * returns null.
+ */
+export async function handOverCircle(
+  tenantId: string,
+  circleId: string,
+  departingSubject: string,
+): Promise<CircleHandover | null> {
+  if (!tenantId || !circleId || !departingSubject) return null;
+  const key = `${tenantId}::${circleId}`;
+  let departing = departingSubject;
+  let outcome: CircleHandover | null = null;
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const c = await circles.get(key);
+    if (!c || c.tenantId !== tenantId || c.ownerSubject !== departing) return outcome;
+    const all = await grants.listByPrefix(`${tenantId}::${circleId}::`);
+    const now = Date.now();
+    const heirs = all
+      .filter((g) => g.granteeSubject !== departing && isLiveMember(g, now))
+      .sort((a, b) => joinedAt(a).localeCompare(joinedAt(b)) || a.granteeSubject.localeCompare(b.granteeSubject));
+    if (heirs.length === 0) return await dissolveCircle(c, all);
+    const heir = heirs[0];
+    const promoted: AccountabilityGrant = {
+      ...heir,
+      scopes: [...GRANT_SCOPES],
+      grantorSubject: heir.grantorSubject === departing ? heir.granteeSubject : heir.grantorSubject,
+    };
+    if (!(await grants.compareAndSwap(heir, promoted))) continue;
+    if (!(await circles.compareAndSwap(c, { ...c, ownerSubject: heir.granteeSubject, name: HANDED_OVER_CIRCLE_NAME }))) continue;
+    // Every other grant the departing owner issued now names the heir as grantor.
+    for (const g of all) {
+      if (g.grantorSubject !== departing || g.granteeSubject === departing || g.granteeSubject === heir.granteeSubject) continue;
+      await rewriteGrantor(`${tenantId}::${circleId}::${g.granteeSubject}`, departing, heir.granteeSubject);
+    }
+    log.info('kicktodo_circle_handed_over', { circleId });
+    outcome = { circleId, outcome: 'transferred', newOwner: heir.granteeSubject };
+    if (await liveGrant(tenantId, circleId, heir.granteeSubject)) return outcome;
+    departing = heir.granteeSubject; // the heir vanished concurrently — hand over again
+  }
+  throw new GrantConflictError();
+}
+
+async function rewriteGrantor(grantKey: string, from: string, to: string): Promise<void> {
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const g = await grants.get(grantKey);
+    if (!g || g.grantorSubject !== from) return;
+    if (await grants.compareAndSwap(g, { ...g, grantorSubject: to })) return;
+  }
+  throw new GrantConflictError();
+}
+
+/** No live member is left: delete the pointer FIRST (so no accept/join can land on
+ *  a circle being removed), then the row, then every grant. A crash part-way leaves
+ *  the row still owned by the departing subject, so a re-run of the eraser finishes. */
+async function dissolveCircle(c: AccountabilityCircle, all: AccountabilityGrant[]): Promise<CircleHandover> {
+  // The pointer is keyed by circle id alone; delete it only when it names THIS
+  // tenant's circle (never another tenant's row under a colliding id).
+  if ((await circleIndex.get(c.id))?.tenantId === c.tenantId) await circleIndex.delete(c.id);
+  await circles.delete(`${c.tenantId}::${c.id}`);
+  for (const g of all) await grants.delete(`${g.tenantId}::${g.circleId}::${g.granteeSubject}`);
+  log.info('kicktodo_circle_dissolved', { circleId: c.id });
+  return { circleId: c.id, outcome: 'dissolved', memberSubjects: [...new Set(all.map((g) => g.granteeSubject))] };
+}
+
+/** KTA-11 — the circles in this tenant anchored to one enrollment (a circle is
+ *  always anchored to its OWNER's own enrollment — the create route checks it). */
+export async function circlesAnchoredTo(tenantId: string, enrollmentId: string): Promise<AccountabilityCircle[]> {
+  if (!tenantId || !enrollmentId) return [];
+  return (await circles.listByPrefix(`${tenantId}::`)).filter((c) => c.tenantId === tenantId && c.enrollmentId === enrollmentId);
+}
+
 // ── ADR 0458 Phase 0 — compliance (subject erasure) ──
 /**
  * DSAR erasure: delete every grant in this tenant where the subject is EITHER the
@@ -255,9 +444,11 @@ export async function listCirclesOwnedBy(tenantId: string, ownerSubject: string)
  * effect as `revokeGrant`, minus the row-kept-for-history posture — a DSAR removes
  * the row): a grantee's access ends, and a grant the subject issued to others is
  * withdrawn. The circle rows themselves are shared PRODUCT resources (the ADR 0419
- * "a circle is a product resource, never workspace membership" framing) keyed by an
- * opaque owner subject (ADR 0426 — never PII), so they are retained like a published
- * challenge; erasure removes the subject's MEMBERSHIP, not other members' circle.
+ * "a circle is a product resource, never workspace membership" framing), so they are
+ * retained; erasure removes the subject's MEMBERSHIP, not other members' circle.
+ * KTACC-2: a circle the subject OWNS is handed over (or dissolved) by
+ * `handOverCircle` BEFORE this runs, so the grants the owner issued have already
+ * been re-attributed to the heir and survive this grantor match.
  * Idempotent; fail-closed on a falsy tenant/subject. Returns the count removed.
  */
 export async function eraseSubjectGrants(tenantId: string, subjectKey: string): Promise<number> {

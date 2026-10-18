@@ -53,7 +53,9 @@ export function SellerListingsCard(): JSX.Element {
   // Fail-closed on the AFFORDANCE, but a failed access READ is not "you lack
   // permission": `accessFailed` says we could not check rather than silently
   // deleting the button (the UX-DOC-3 distinction).
-  const [canWrite, setCanWrite] = useState(false);
+  // MPL-2-INFLIGHT-1 — `null` while the access read is in flight: the actions stay
+  // hidden (fail-closed), but no read-only notice is shown to an editor yet.
+  const [canWrite, setCanWrite] = useState<boolean | null>(null);
   const [accessFailed, setAccessFailed] = useState(false);
   useEffect(() => {
     void getEffectiveAccess()
@@ -192,7 +194,7 @@ export function SellerListingsCard(): JSX.Element {
           <div className="action-bar u-gap-2">
             <label className="u-grid u-gap-1 u-text-sm">
               <span className="muted">{t('priceLabel')}</span>
-              <input type="number" min="1" step="1" value={price} onChange={(e) => setPrice(e.target.value)} />
+              <input type="number" min="0.01" max="1000000" step="0.01" value={price} onChange={(e) => setPrice(e.target.value)} />
             </label>
             <label className="u-grid u-gap-1 u-text-sm">
               <span className="muted">{t('currencyLabel')}</span>
@@ -229,7 +231,7 @@ export function SellerListingsCard(): JSX.Element {
             leaving a form with no button. `accessFailed` distinguishes "we could
             not check" from "you are not allowed"; both hide Save, only one is a
             statement about the user. */}
-        {!canWrite ? (
+        {canWrite === false ? (
           <Notice variant="info">{accessFailed ? t('accessUnknownNotice') : t('readOnlyNotice')}</Notice>
         ) : null}
         <p className="u-m-0 u-text-sm muted">{t('nativePaidHint')}</p>

@@ -24,7 +24,7 @@ import { OpenwopError } from '../../types.js';
 import {
   getSeller, startOnboarding, syncSellerFromStripe,
   createCheckout, getOrder, listPaidListings, listOrdersFor,
-  getApplicationFeePct, setApplicationFeePct, listPayouts, sellerStats,
+  getApplicationFeePct, setApplicationFeePct, getStorefrontFeePct, setStorefrontFeePct, listPayouts, sellerStats,
   dissolveListing, setListingState,
   upsertPaidListing, releaseOwnListing, listOwnListings, getPaidListing,
   getSeller as getSellerAccount, orderIdFor, type ListingLane,
@@ -410,6 +410,11 @@ export function registerCommerceConnectRoutes(deps: RouteDeps): void {
     try {
       requireSuperadmin(req, 'Commerce Connect fee config');
       const scope = optionalString(req.query.tenantId) ?? '__global__';
+      // ADR 0877 Q1 — `?lane=storefront` reads the separate storefront fee (0–15%, 2%).
+      if (optionalString(req.query.lane) === 'storefront') {
+        res.json({ key: scope, lane: 'storefront', applicationFeePct: await getStorefrontFeePct(scope) });
+        return;
+      }
       res.json({ key: scope, applicationFeePct: await getApplicationFeePct(scope === '__global__' ? '' : scope) });
     } catch (err) { next(err); }
   });
@@ -417,11 +422,12 @@ export function registerCommerceConnectRoutes(deps: RouteDeps): void {
     try {
       requireSuperadmin(req, 'Commerce Connect fee config');
       // ADR 0575 — a prospective money write is attributable: audit it.
-      const body = (req.body ?? {}) as { tenantId?: unknown; applicationFeePct?: unknown };
+      const body = (req.body ?? {}) as { tenantId?: unknown; applicationFeePct?: unknown; lane?: unknown };
       const key = optionalString(body.tenantId) ?? '__global__';
       const pct = typeof body.applicationFeePct === 'number' ? body.applicationFeePct : NaN;
-      const out = await setApplicationFeePct(key, pct);
-      await appendAudit('__host__', 'commerce-connect.fee-config-changed', { scope: key, applicationFeePct: pct });
+      const storefront = optionalString(body.lane) === 'storefront';
+      const out = storefront ? { ...(await setStorefrontFeePct(key, pct)), lane: 'storefront' } : await setApplicationFeePct(key, pct);
+      await appendAudit('__host__', 'commerce-connect.fee-config-changed', { scope: key, applicationFeePct: pct, ...(storefront ? { lane: 'storefront' } : {}) });
       res.json(out);
     } catch (err) { next(err); }
   });

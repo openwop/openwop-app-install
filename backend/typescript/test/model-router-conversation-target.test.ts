@@ -10,9 +10,22 @@
  *  - the bump is SAME-provider only (providers.json classDefaults), group +
  *    reasoning only, and never fires when a stamp/override chose the model
  *  - tool-loop eligibility judges the RESOLVED provider (stamp/override aware)
- *  - a real board-group exchange dispatches the bumped model end-to-end
+ *  - a real board-group exchange stamps the BUMPED model end-to-end: the
+ *    server-derived tier (ConversationMeta.type + the agent's modelClass) reaches
+ *    the resolver on the exchange path, not just in a unit call
+ *
+ * Breaks if a group room's reasoning-class agent answers on the run's cheap
+ * model again, if the bump crosses providers or overrides a stamp/override, or
+ * if the tool loop judges eligibility on the raw run inputs.
+ *
+ * The end-to-end case needs a dispatchable provider WITH a reasoning class
+ * default. The only keyless one is `mock`, which has none in providers.json, so
+ * this file stubs `getClassDefault` for `mock` ONLY (catalog data, not the
+ * mechanism — every other provider reads the real catalog). Without the stub the
+ * bump is a no-op on `mock` and the case could not tell a bump from no bump —
+ * which is exactly how the previous version of it passed vacuously.
  */
-import { describe, expect, it, beforeAll, afterAll } from 'vitest';
+import { describe, expect, it, beforeAll, afterAll, vi } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
@@ -24,6 +37,16 @@ import { getAgentRegistry } from '../src/executor/agentRegistry.js';
 import { __clearAgentIdentityCache } from '../src/host/agentIdentity.js';
 import type { RunRecord } from '../src/types.js';
 import type { ResolvedAgentManifest } from '../src/executor/agentRegistry.js';
+
+const { MOCK_REASONER } = vi.hoisted(() => ({ MOCK_REASONER: 'mock-reasoner' }));
+vi.mock('../src/providers/catalog.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/providers/catalog.js')>();
+  return {
+    ...actual,
+    getClassDefault: (providerId: string, modelClass: string): string | null =>
+      providerId === 'mock' && modelClass === 'reasoning' ? MOCK_REASONER : actual.getClassDefault(providerId, modelClass),
+  };
+});
 
 let server: http.Server;
 let BASE: string;
@@ -48,8 +71,11 @@ describe('resolveConversationModelTarget — precedence + the same-provider bump
   const inputs = { provider: 'anthropic', model: 'claude-haiku-4-5' };
 
   it('group + reasoning + no stamp/override → bumps to the provider OWN class default', () => {
+    const want = getClassDefault('anthropic', 'reasoning'); // providers.json classDefaults
+    expect(want).not.toBeNull();
+    expect(want).not.toBe(inputs.model); // or the bump would be indistinguishable from no bump
     const t = resolveConversationModelTarget({ runInputs: inputs, metadata: {}, tier: GROUP_REASONING });
-    expect(t).toEqual({ provider: 'anthropic', model: 'claude-opus-5-5' }); // classDefaults
+    expect(t).toEqual({ provider: 'anthropic', model: want });
   });
 
   it('the bump NEVER crosses providers (google stays google)', () => {
@@ -71,19 +97,26 @@ describe('resolveConversationModelTarget — precedence + the same-provider bump
       override: { model: 'claude-haiku-4-5' }, tier: GROUP_REASONING,
     });
     expect(t.model).toBe('claude-haiku-4-5');
+    // Override ALONE (no stamp) beats the bump too — the leg where the override is
+    // the only thing that says "the model was chosen".
+    const o = resolveConversationModelTarget({ runInputs: inputs, metadata: {}, override: { model: 'claude-haiku-4-5' }, tier: GROUP_REASONING });
+    expect(o).toEqual({ provider: 'anthropic', model: 'claude-haiku-4-5' });
   });
 
   it('no bump outside group rooms, for non-reasoning agents, or unknown providers', () => {
     expect(resolveConversationModelTarget({ runInputs: inputs, metadata: {}, tier: { conversationType: 'agent', agentModelClass: 'reasoning' } }).model).toBe('claude-haiku-4-5');
     expect(resolveConversationModelTarget({ runInputs: inputs, metadata: {}, tier: { conversationType: 'group', agentModelClass: 'chat' } }).model).toBe('claude-haiku-4-5');
-    expect(resolveConversationModelTarget({ runInputs: { provider: 'mock', model: 'mock-1' }, metadata: {}, tier: GROUP_REASONING }).model).toBe('mock-1');
+    expect(resolveConversationModelTarget({ runInputs: { provider: 'no-such-provider', model: 'x-1' }, metadata: {}, tier: GROUP_REASONING }).model).toBe('x-1');
   });
 });
 
 describe('CS-GB-1 — tool-loop eligibility judges the RESOLVED provider', () => {
-  const agent = { agentId: 'a', persona: 'p', modelClass: 'chat', systemPrompt: 's', toolAllowlist: [], packName: 'x', packVersion: '1' } as unknown as ResolvedAgentManifest;
-  const run = (provider: string, metadata?: Record<string, unknown>): RunRecord =>
-    ({ runId: 'r', tenantId: TENANT, workflowId: 'w', status: 'waiting_input', inputs: { provider, model: 'm', credentialRef: 'byok-x' }, metadata: metadata ?? {}, configurable: {}, createdAt: '', updatedAt: '' } as unknown as RunRecord);
+  const agent: ResolvedAgentManifest = { agentId: 'a', persona: 'p', modelClass: 'chat', systemPrompt: 's', toolAllowlist: [], packName: 'x', packVersion: '1' };
+  const run = (provider: string, metadata?: Record<string, unknown>): RunRecord => ({
+    runId: 'r', tenantId: TENANT, workflowId: 'w', status: 'waiting-input',
+    inputs: { provider, model: 'm', credentialRef: 'byok-x' }, metadata: metadata ?? {}, configurable: {},
+    createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
+  });
 
   it('an in-chat override to a non-tool-calling provider disables the loop (and vice versa)', () => {
     expect(conversationToolTurnEligible(run('anthropic'), agent)).toBe(true);
@@ -98,7 +131,7 @@ describe('CS-GB-1 — tool-loop eligibility judges the RESOLVED provider', () =>
 });
 
 describe('CS-GB-2 — a board-group exchange dispatches the resolved model end-to-end', () => {
-  it("a group conversation's reasoning agent turn carries the bump through provenance (mock provider = no classDefaults = passthrough)", async () => {
+  it("a group conversation's reasoning agent turn carries the bump through provenance", async () => {
     // Register a reasoning-class agent + a group-typed conversation.
     getAgentRegistry().register({
       agentId: 'probe.csgb.reasoner', persona: 'Board Reasoner', modelClass: 'reasoning',
@@ -108,32 +141,30 @@ describe('CS-GB-2 — a board-group exchange dispatches the resolved model end-t
     await ensureConversationMeta(TENANT, 'conv-csgb-group', { type: 'group' });
 
     const workflowId = 'openwop-app.csgb.board-test';
-    await fetch(`${BASE}/host/openwop-app/workflows`, {
+    const reg = await fetch(`${BASE}/host/openwop-app/workflows`, {
       method: 'POST', headers: H, body: JSON.stringify({ workflowId, nodes: [{ nodeId: 'gate', typeId: 'core.conversationGate', config: { prompt: 'x' } }], edges: [] }),
     });
+    expect(reg.ok).toBe(true);
     const create = await fetch(`${BASE}/runs`, {
       method: 'POST', headers: H,
       body: JSON.stringify({ workflowId, inputs: { provider: 'mock', model: 'mock-1' }, tenantId: TENANT, metadata: { chatSessionId: 'conv-csgb-group' } }),
     });
     expect(create.status).toBe(201);
     const { runId } = await create.json() as { runId: string };
-    for (let i = 0; i < 60; i++) {
-      await new Promise((r) => setTimeout(r, 20));
+    await vi.waitFor(async () => {
       const s = await (await fetch(`${BASE}/runs/${runId}`, { headers: H })).json() as { status: string };
-      if (s.status.startsWith('waiting')) break;
-    }
+      expect(s.status).toBe('waiting-input');
+    }, { timeout: 5000, interval: 20 });
     const ex = await fetch(`${BASE}/runs/${runId}/interrupts/gate`, {
       method: 'POST', headers: H,
       body: JSON.stringify({ resumeValue: { operation: 'exchange', turn: { content: '@probe.csgb.reasoner what next?', to: 'probe.csgb.reasoner' } } }),
     });
     expect(ex.status).toBe(200);
-    // mock has no classDefaults → the dispatched/provenance model stays mock-1
-    // (proves the bump is catalog-driven and never invents a model).
-    const bundle = await (await fetch(`${BASE}/runs/${runId}/debug-bundle`, { headers: H })).json() as { events?: Array<{ type?: string; payload?: { turn?: { agent?: { model?: { model?: string; provider?: string } } } } }> };
-    const agentTurn = (bundle.events ?? []).find((e) => e.type === 'conversation.exchanged' && e.payload?.turn?.agent?.model);
-    if (agentTurn) {
-      expect(agentTurn.payload?.turn?.agent?.model?.model).toBe('mock-1');
-      expect(agentTurn.payload?.turn?.agent?.model?.provider).toBe('mock');
-    }
+    const bundle = await (await fetch(`${BASE}/runs/${runId}/debug-bundle`, { headers: H })).json() as { events?: Array<{ type?: string; payload?: { turn?: { role?: string; agent?: { agentId?: string; model?: { model?: string; provider?: string } } } } }> };
+    const agentTurns = (bundle.events ?? []).filter((e) => e.type === 'conversation.exchanged' && e.payload?.turn?.role === 'agent');
+    // Exactly the one answer, attributed to the reasoner, stamped with the BUMPED
+    // model on the run's OWN provider (mock-1 → the stubbed class default).
+    expect(agentTurns).toHaveLength(1);
+    expect(agentTurns[0]!.payload?.turn?.agent).toEqual({ agentId: 'probe.csgb.reasoner', model: { provider: 'mock', model: MOCK_REASONER } });
   });
 });

@@ -108,6 +108,9 @@ export const messages = {
   recurringSkipFeatureDisabled: 'la fonctionnalité propriétaire de cette planification est désactivée pour cet espace de travail',
   recurringSkipPlanLapsed: 'votre forfait n’inclut plus la fonctionnalité propriétaire de cette planification',
   recurringSkipActorInactive: 'la personne au nom de laquelle elle s’exécute a été désactivée',
+  recurringSkipAgentPaused: 'l’agent qui l’exécute est en pause — réactivez l’agent pour la reprendre',
+  recurringSkipPolicyDenied: 'l’agent n’a pas le droit d’exécuter ce workflow (il figure dans sa liste d’interdits)',
+  recurringSkipAwaitingApproval: 'elle attend une approbation — ce workflow exige une approbation pour cet agent',
   recurringCadenceExhausted: 'Ne se déclenchera plus — aucune date future ne correspond à cette cadence',
   recurringSkipUnknown: 'aucune raison n\'a été enregistrée',
   recurringSkipUnrecognized: 'une raison a été enregistrée, mais cette application ne la reconnaît pas',
@@ -178,6 +181,7 @@ export const messages = {
   portfolioRoleFallback: 'rôle',
   portfolioLocalDefault: 'Workflow local — attribué à cet agent.',
   portfolioLocalOnly: 'Local uniquement — enregistrez-le sur l’hôte avant qu’il puisse s’exécuter depuis un tableau ou une planification.',
+  portfolioAvailabilityUnknown: 'Impossible de vérifier si ce workflow est enregistré sur l’hôte. Exécuter maintenant essaiera quand même.',
   portfolioDemoChip: 'Démo',
   portfolioDemoExplain: 'Workflow d’exemple — ses étapes d’IA renvoient une sortie de démonstration prédéfinie, pas une vraie IA.',
   portfolioDemoUnavailable: 'Impossible de l’exécuter sur ce déploiement : les étapes de démonstration sont désactivées pour les espaces de travail connectés.',
@@ -386,6 +390,7 @@ export const messages = {
 
   // Profile panel
   profileSaved: 'Profil enregistré.',
+  agentChangedReload: 'Quelqu’un a modifié cet agent après votre ouverture. Rechargez pour voir sa modification, puis refaites la vôtre.',
   profileLoading: 'Chargement du profil…',
   // Guardrails (ADR 0493)
   guardrailsHeading: 'Garde-fous',
@@ -475,6 +480,7 @@ export const messages = {
   viewerCannotCreateTitle: 'Vous ne pouvez pas créer d’agents ici',
   viewerCannotCreateBody: 'Vous avez un accès en lecture à cet espace de travail. Créer ou dupliquer un agent nécessite un accès en modification — demandez à un administrateur de l’espace.',
   rosterEmptyViewerBody: 'Aucun agent pour l’instant. En ajouter un nécessite un accès en modification à cet espace de travail — demandez à un administrateur.',
+  viewerPanelReadOnly: 'Vous pouvez consulter cet agent. Le modifier nécessite un accès en modification à cet espace de travail — demandez à un administrateur.',
   dashCreateFromTemplate: 'Créer à partir d’un modèle',
   dashLoadingDemo: 'Chargement…',
   dashLoadExample: 'Charger des agents d’exemple',
@@ -654,6 +660,7 @@ export const messages = {
   wsTabInstructions: 'Instructions',
   wsTabKnowledge: 'Connaissances',
   wsTabMemory: 'Mémoire',
+  wsTabEvals: 'Évaluations',
   wsTabIntegrations: 'Intégrations',
   wsTabActivity: 'Activité',
   wsUpdatePinError: 'Impossible de mettre à jour l’épinglage.',

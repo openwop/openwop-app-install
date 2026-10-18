@@ -28,7 +28,7 @@ import { initInMemorySurfaces } from '../src/host/inMemorySurfaces.js';
 import { DurableCollection, initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { openStorage } from '../src/storage/index.js';
 import type { Storage } from '../src/storage/storage.js';
-import { createOrg } from '../src/host/accessControlService.js';
+import { createOrg, createMember } from '../src/host/accessControlService.js';
 import { hostExtStorage } from '../src/host/hostExtPersistence.js';
 import { __runKvAgeOutOnce } from '../src/host/kvAgeOut.js';
 import { eraseSubject } from '../src/host/subjectErasure.js';
@@ -90,8 +90,11 @@ beforeAll(async () => {
   initInMemorySurfaces({ dataDir: mkdtempSync(join(tmpdir(), 'openwop-shareer-')) });
   storage = await openStorage('memory://');
   initHostExtPersistence(storage);
-  const org = await createOrg({ tenantId: T, createdBy: 'alice', name: 'Org' });
+  // ADR 0887 D1 — a link is re-checked against its publisher on every read, so the
+  // actors that mint here hold REAL memberships (a bare actor's link is dark).
+  const org = await createOrg({ tenantId: T, createdBy: 'alice', name: 'Org', ownerSubject: 'alice' });
   ORG = org.orgId;
+  for (const subject of ['bob', 'carol']) await createMember({ tenantId: T, orgId: ORG, subject, displayName: subject, roles: ['editor'] });
 });
 
 describe('SHARE-2 — erasing a subject REVOKES the links they minted', () => {
@@ -353,12 +356,12 @@ describe('SHARE-UX-1 — the owner list marks an ORPHANED link instead of fallin
   it('flags resourceMissing once the underlying resource is gone, and not before', async () => {
     await seedConversation('conv-orphan');
     const link = await createLink(T, ORG, 'alice', { resourceType: 'conversation', resourceId: 'conv-orphan' });
-    const before = (await listLinks(T, ORG)).find((l) => l.tokenHash === link.tokenHash);
+    const before = (await listLinks(T, ORG, 'alice')).find((l) => l.tokenHash === link.tokenHash);
     expect(before?.cardTitle).toBeTruthy();
     expect(before?.resourceMissing).toBeUndefined();
 
     await hostExtStorage().deleteChatSession(T, 'conv-orphan');
-    const after = (await listLinks(T, ORG)).find((l) => l.tokenHash === link.tokenHash);
+    const after = (await listLinks(T, ORG, 'alice')).find((l) => l.tokenHash === link.tokenHash);
     expect(after?.cardTitle).toBeUndefined();
     expect(after?.resourceMissing, 'an orphaned row must not read as a healthy one').toBe(true);
   });

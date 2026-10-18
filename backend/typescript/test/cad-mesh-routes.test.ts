@@ -5,6 +5,16 @@
  * (STL/GLB → capability URL that actually serves the bytes), mesh-meta read
  * (cross-tenant 404 — no existence leak), and the `mesh` solid kind in the
  * editor validator (assetRef required; mesh-only fields rejected elsewhere).
+ *
+ * /grade-tests w34: the two size guards (route base64 cap, decoded-bytes cap)
+ * both answer 413, so each leg asserts its OWN message; canvases are counted
+ * through `listCanvasesForTenant` (the editor has no list route — a GET there
+ * 404s and made "leaves no canvas behind" read 0 === 0); a SAME-tenant
+ * non-member (second `test/login` into the owner's tenantId, zero scopes) is
+ * refused 403 on all four org-scoped routes. Sabotage-witnessed: both caps,
+ * codec→422, content addressing, the mesh tenant guard, the org-scope
+ * predicate, GLB bytes, mesh pose, the BOM approx disclosure and both editor
+ * validator rules.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -15,7 +25,8 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
-import { emitCanonicalStl, parseStl } from '../src/features/cad/meshCodec.js';
+import { emitCanonicalStl, parseGltf, parseStl } from '../src/features/cad/meshCodec.js';
+import { listCanvasesForTenant } from '../src/host/canvasSurface.js';
 
 let BASE: string;
 let server: http.Server;
@@ -67,6 +78,11 @@ async function orgOwner() {
   return { c, orgId: String(org.body.orgId), tenantId };
 }
 
+/** CAD canvases in a tenant, read from the store (there is no list ROUTE). */
+async function cadCanvasCount(tenantId: string): Promise<number> {
+  return (await listCanvasesForTenant(tenantId)).filter((r) => r.canvasTypeId === 'canvas.cad').length;
+}
+
 const CAD = (orgId: string) => `/host/openwop-app/cad/orgs/${encodeURIComponent(orgId)}`;
 
 /** A 2-triangle canonical mesh, base64. */
@@ -111,8 +127,17 @@ describe('CAD mesh interchange (ADR 0388 P1)', () => {
     const garbage = Buffer.from('not a mesh at all, definitely not').toString('base64');
     const bad = await c.post(`${CAD(orgId)}/canvases/import`, { contentBase64: garbage });
     expect(bad.status).toBe(422);
-    const huge = 'A'.repeat(6 * 1024 * 1024); // > the 4 MB decoded cap, < the 8 MB parser envelope
-    expect((await c.post(`${CAD(orgId)}/canvases/import`, { contentBase64: huge })).status).toBe(413);
+    expect((bad.body as { details?: { code?: string } }).details?.code).toBe('malformed');
+    // Route guard: base64 length > ⌈4 MiB·4/3⌉ + 1024 = 5,593,430 chars.
+    const huge = 'A'.repeat(6 * 1024 * 1024); // < the 8 MB parser envelope
+    const hugeRes = await c.post(`${CAD(orgId)}/canvases/import`, { contentBase64: huge });
+    expect(hugeRes.status).toBe(413);
+    expect(String(hugeRes.body.message)).toMatch(/mesh too large/);
+    // Decoded guard: 5,593,428 chars passes the route cap but decodes to
+    // 4,195,071 bytes > 4 MiB (4,194,304) — hand-derived.
+    const justOver = await c.post(`${CAD(orgId)}/canvases/import`, { contentBase64: 'A'.repeat(5_593_428) });
+    expect(justOver.status).toBe(413);
+    expect(String(justOver.body.message)).toMatch(/Mesh exceeds the 4 MB cap/);
   });
 
   /**
@@ -136,9 +161,8 @@ describe('CAD mesh interchange (ADR 0388 P1)', () => {
    * second leg reds and they must bring the guard's route coverage with it.
    */
   it('the server parses STL ONLY — a glTF payload is refused, never dereferenced', async () => {
-    const { c, orgId } = await orgOwner();
-    const before = await c.get(`${CAD(orgId)}/canvases`);
-    const beforeCount = Array.isArray(before.body?.items) ? before.body.items.length : 0;
+    const { c, orgId, tenantId } = await orgOwner();
+    const beforeCount = await cadCanvasCount(tenantId);
 
     const external = JSON.stringify({
       asset: { version: '2.0' },
@@ -154,9 +178,10 @@ describe('CAD mesh interchange (ADR 0388 P1)', () => {
     expect((res.body as { details?: { code?: string } }).details?.code,
       'refused by the STL parser — the server never interpreted the glTF, so the URI was never seen')
       .toBe('malformed');
-    const after = await c.get(`${CAD(orgId)}/canvases`);
-    expect(Array.isArray(after.body?.items) ? after.body.items.length : 0,
-      'a refused import leaves no canvas behind').toBe(beforeCount);
+    expect(await cadCanvasCount(tenantId), 'a refused import leaves no canvas behind').toBe(beforeCount);
+    // Positive control for the counter: an accepted import adds exactly one.
+    expect((await c.post(`${CAD(orgId)}/canvases/import`, { contentBase64: MESH_B64 })).status).toBe(201);
+    expect(await cadCanvasCount(tenantId)).toBe(beforeCount + 1);
   });
 
   it('STRUCTURAL: the server-side glTF/OBJ parsers have no production caller — wiring one must bring route coverage', () => {
@@ -197,7 +222,9 @@ describe('CAD mesh interchange (ADR 0388 P1)', () => {
     const glb = await c.post(`${CAD(orgId)}/canvases/${canvasId}/export`, { format: 'gltf' });
     expect(glb.status).toBe(201);
     expect(String(glb.body.filename)).toMatch(/\.glb$/);
-    expect((await c.fetchRaw(String(glb.body.url))).status).toBe(200);
+    const glbRaw = await c.fetchRaw(String(glb.body.url));
+    expect(glbRaw.status).toBe(200);
+    expect(parseGltf(new Uint8Array(await glbRaw.arrayBuffer())).triangleCount).toBe(12); // the same box
 
     expect((await c.post(`${CAD(orgId)}/canvases/${canvasId}/export`, { format: 'step' })).status).toBe(400);
   });
@@ -206,10 +233,27 @@ describe('CAD mesh interchange (ADR 0388 P1)', () => {
     const { c, orgId } = await orgOwner();
     const imp = await c.post(`${CAD(orgId)}/canvases/import`, { contentBase64: MESH_B64, name: 'Ref' });
     const canvasId = String(imp.body.canvasId);
+    const assetRef = (imp.body.mesh as { meshId: string }).meshId;
+    // Pose the mesh (scale 2, moved to x=100) and add a parametric box beside it.
+    const patched = await c.patch(`${CAD(orgId)}/canvases/${canvasId}`, {
+      state: {
+        name: 'Ref', units: 'mm',
+        solids: [
+          { kind: 'mesh', assetRef, x: 100, y: 0, z: 0, scale: 2 },
+          { kind: 'box', x: 0, y: 0, z: 0, width: 10, height: 10, depth: 10 },
+        ],
+      },
+      baseVersion: (imp.body as { version?: number }).version ?? 1,
+    });
+    expect(patched.status).toBe(200);
     const stl = await c.post(`${CAD(orgId)}/canvases/${canvasId}/export`, { format: 'stl' });
     expect(stl.status).toBe(201);
     const raw = await c.fetchRaw(String(stl.body.url));
-    expect(parseStl(new Uint8Array(await raw.arrayBuffer())).triangleCount).toBe(2);
+    const parsed = parseStl(new Uint8Array(await raw.arrayBuffer()));
+    expect(parsed.triangleCount).toBe(14); // 2 mesh + 12 box
+    // Mesh first (doc order): (0,0,0)·2 + (100,0,0) = x 100; (10,0,0)·2 + 100 = x 120.
+    expect(parsed.positions[0]).toBeCloseTo(100, 4);
+    expect(parsed.positions[3]).toBeCloseTo(120, 4);
   });
 
   it('BOM route (ADR 0388 P2): rows incl. a flagged mesh row; CSV capability URL serves', async () => {
@@ -248,6 +292,25 @@ describe('CAD mesh interchange (ADR 0388 P1)', () => {
     expect((await b.c.get(`${CAD(b.orgId)}/meshes/${encodeURIComponent(meshId)}`)).status).toBe(404);
   });
 
+  it('a same-tenant non-member is refused 403 on import, mesh meta, export and BOM', async () => {
+    const owner = await orgOwner();
+    const imp = await owner.c.post(`${CAD(owner.orgId)}/canvases/import`, { contentBase64: MESH_B64, name: 'Owned' });
+    expect(imp.status).toBe(201);
+    const canvasId = String(imp.body.canvasId);
+    const meshId = (imp.body.mesh as { meshId: string }).meshId;
+    // A second login into the OWNER'S tenant: authenticated, same tenant, no
+    // org membership — so the org-scope predicate (not a tenant guard) decides.
+    const stranger = client();
+    const login = await stranger.post('/host/openwop-app/test/login', { email: `cadm-stranger-${n++}@acme.test`, tenantId: owner.tenantId });
+    expect(login.status).toBe(201);
+    const before = await cadCanvasCount(owner.tenantId);
+    expect((await stranger.post(`${CAD(owner.orgId)}/canvases/import`, { contentBase64: MESH_B64, name: 'Nope' })).status).toBe(403);
+    expect((await stranger.get(`${CAD(owner.orgId)}/meshes/${encodeURIComponent(meshId)}`)).status).toBe(403);
+    expect((await stranger.post(`${CAD(owner.orgId)}/canvases/${canvasId}/export`, { format: 'stl' })).status).toBe(403);
+    expect((await stranger.post(`${CAD(owner.orgId)}/canvases/${canvasId}/bom`, {})).status).toBe(403);
+    expect(await cadCanvasCount(owner.tenantId)).toBe(before);
+  });
+
   it('editor validator: mesh requires assetRef; mesh-only fields rejected on other kinds', async () => {
     const { c, orgId } = await orgOwner();
     const created = await c.post(`${CAD(orgId)}/canvases`, { name: 'V' });
@@ -258,9 +321,13 @@ describe('CAD mesh interchange (ADR 0388 P1)', () => {
       state: { name: 'V', units: 'mm', solids: [{ kind: 'mesh' }] }, baseVersion: version,
     });
     expect(res1.status).toBe(422);
+    expect((res1.body as { details?: { errors?: Array<{ path: string }> } }).details?.errors?.map((e) => e.path)).toEqual(['solids[0].assetRef']);
     const res2 = await c.patch(`${CAD(orgId)}/canvases/${canvasId}`, {
       state: { name: 'V', units: 'mm', solids: [{ kind: 'box', width: 10, assetRef: 'x' }] }, baseVersion: version,
     });
     expect(res2.status).toBe(422);
+    expect((res2.body as { details?: { errors?: Array<{ path: string; message: string }> } }).details?.errors).toEqual([
+      { path: 'solids[0].assetRef', message: "'assetRef' is only valid on a mesh solid" },
+    ]);
   });
 });

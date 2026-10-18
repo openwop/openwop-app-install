@@ -1,4 +1,10 @@
-/** CollabPresence cluster (ADR 0359 Phase 4) — presentational states. */
+/**
+ * CollabPresence cluster (ADR 0359 Phase 4 / D5) — the visible answer to "who
+ * else is here, and is the room live". Breaks: more than 4 stacked avatars, a
+ * missing or wrong `+N` overflow, the peer names dropped from the group label,
+ * a dropped socket still showing "Live" (the chip, the dot, or — RTCU-5 below —
+ * the accessible name).
+ */
 import { describe, it, expect } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import { CollabPresence } from '../CollabPresence.js';

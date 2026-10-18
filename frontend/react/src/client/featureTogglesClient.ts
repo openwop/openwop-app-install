@@ -107,17 +107,30 @@ async function asJson<T>(res: Response, ctx: string): Promise<T> {
 /** ADR 0419 — the caller's plan/bundle entitlements (billing-owned). `allowedFeatures`
  *  is `'*'` (unrestricted — billing off or an all-access plan) or the allowlist of
  *  entitled feature ids. 404 when the billing feature is off ⇒ unrestricted. Feeds the
- *  feature-access `locked` signal (toggle on, but the plan/bundles don't include it). */
+ *  feature-access `locked` signal (toggle on, but the plan/bundles don't include it).
+ *  Throws `ToggleAdminError` on any other non-OK status, and rejects on a network failure. */
 export async function fetchEntitlements(): Promise<'*' | string[]> {
   const res = await fetch(`${config.baseUrl}/host/openwop-app/billing/entitlements`, fetchOpts({ headers: authedHeaders() }));
-  if (!res.ok) return '*'; // billing off / not resolvable ⇒ unrestricted (nothing locked)
+  if (res.status === 404) return '*'; // billing off ⇒ unrestricted (nothing locked)
+  // ADR 0873 D12 — any other failure is NOT an answer: the caller still degrades
+  // it to '*' for presentation, but must not record it as a last-known offline
+  // grant, and a 401/403 deletes the grants it holds. So it throws with the status.
+  if (!res.ok) throw new ToggleAdminError(`fetchEntitlements returned ${res.status}`, res.status);
   const body = (await res.json()) as { allowedFeatures?: '*' | string[] };
   return body.allowedFeatures ?? '*';
 }
 
-export async function fetchAssignments(): Promise<ResolvedAssignment[]> {
+/** Who the assignments were resolved FOR: the ACTIVE tenant (not `/me`'s home
+ *  tenant) and the principal. ADR 0873 D12 keys last-known offline grants on it.
+ *  Absent from a backend older than D12. */
+export interface AssignmentsCaller {
+  tenantId: string;
+  principalId?: string;
+}
+
+export async function fetchAssignments(): Promise<{ assignments: ResolvedAssignment[]; caller?: AssignmentsCaller }> {
   const res = await fetch(`${base}/assignments`, fetchOpts({ headers: authedHeaders() }));
-  return (await asJson<{ assignments: ResolvedAssignment[] }>(res, 'fetchAssignments')).assignments;
+  return asJson<{ assignments: ResolvedAssignment[]; caller?: AssignmentsCaller }>(res, 'fetchAssignments');
 }
 
 /** Admin: every effective toggle config (superadmin only). */

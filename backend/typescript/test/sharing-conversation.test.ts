@@ -18,7 +18,7 @@ import { join } from 'node:path';
 import { initInMemorySurfaces } from '../src/host/inMemorySurfaces.js';
 import { initHostExtPersistence, hostExtStorage } from '../src/host/hostExtPersistence.js';
 import { openStorage } from '../src/storage/index.js';
-import { createOrg } from '../src/host/accessControlService.js';
+import { createOrg, createMember } from '../src/host/accessControlService.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { registerToggleDefault } from '../src/host/featureToggles/registry.js';
 import { sharingFeature } from '../src/features/sharing/feature.js';
@@ -35,7 +35,10 @@ beforeAll(async () => {
     registerToggleDefault(sharingFeature.toggleDefault); // no app boot in a service test
     await saveConfig({ ...sharingFeature.toggleDefault, status: 'on' }, 'test');
   }
-  await createOrg({ tenantId: T, createdBy: 'u1', name: 'Org', orgId: ORG });
+  // ADR 0887 D1 — a link is re-checked against its publisher on every read, so the
+  // actors that mint here hold REAL memberships (a bare actor's link is dark).
+  await createOrg({ tenantId: T, createdBy: 'u1', name: 'Org', orgId: ORG, ownerSubject: 'u1' });
+  for (const subject of ['alice', 'bob']) await createMember({ tenantId: T, orgId: ORG, subject, displayName: subject, roles: ['editor'] });
   // In the PAST, not "now": since 5c72bce4c a same-ms append is stamped head + 1 ms
   // (chatMessageOrder.ts), so with `now` the second message lands 1 ms in the
   // future, and a link minted in that same millisecond snapshots it out

@@ -29,6 +29,14 @@
  * held open on a deferred and the assertion is on the RESPONSE: an awaited handler
  * cannot have answered yet; a `void`ed one already has.
  *
+ * w32 (grade-tests): the KB reads below go through `KB_MAINTENANCE_CALLER`. The
+ * default caller hides a managed collection whose owning feature is refused for the
+ * tenant (G8 `managedPlanAllows`) — and the closed-beta case reads WHILE the tenant
+ * resolves `production` off, so a stranded document read back as `null` and the
+ * born-red witness passed with the gate restored in `removeVendor` (probe
+ * w32g1-kb-remove-gated: vacuous). The D6 window now also waits until the mocked KB
+ * write has actually been REACHED before it starts timing.
+ *
  * @see docs/adr/0643-kb-reindex-orchestration-write-surface-lifecycle-events.md (D6)
  */
 
@@ -38,18 +46,20 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest
 import { getSetCookies } from './headerCookies.js';
 
 /** A latch the mocked KB writes park on. `null` ⇒ pass straight through. */
-const latch = vi.hoisted(() => ({ p: null as Promise<void> | null, fail: null as string | null, loseListing: false }));
+const latch = vi.hoisted(() => ({ p: null as Promise<void> | null, fail: null as string | null, loseListing: false, reached: null as (() => void) | null }));
 
 vi.mock('../src/features/kb/kbService.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/features/kb/kbService.js')>();
   return {
     ...actual,
     upsertDocument: async (...args: Parameters<typeof actual.upsertDocument>) => {
+      latch.reached?.();
       if (latch.p) await latch.p;
       if (latch.fail) throw new Error(latch.fail);
       return actual.upsertDocument(...args);
     },
     deleteDocument: async (...args: Parameters<typeof actual.deleteDocument>) => {
+      latch.reached?.();
       if (latch.p) await latch.p;
       if (latch.fail) throw new Error(latch.fail);
       return actual.deleteDocument(...args);
@@ -72,7 +82,11 @@ vi.mock('../src/features/production/productionService.js', async (importOriginal
 const { createApp } = await import('../src/index.js');
 const { saveConfig } = await import('../src/host/featureToggles/service.js');
 const { getToggleDefault } = await import('../src/host/featureToggles/registry.js');
-const { getDocument, listDocuments, getCollection } = await import('../src/features/kb/kbService.js');
+const kb = await import('../src/features/kb/kbService.js');
+// Retention reads: see the header — the default caller hides a refused managed collection.
+const getDocument = (t: string, o: string, c: string, d: string) => kb.getDocument(t, o, c, d, kb.KB_MAINTENANCE_CALLER);
+const getCollection = (t: string, o: string, c: string) => kb.getCollection(t, o, c, kb.KB_MAINTENANCE_CALLER);
+const listDocuments = (t: string, o: string, c: string) => kb.listDocuments(t, o, c, kb.KB_MAINTENANCE_CALLER);
 const { deleteVendor, getVendor } = await import('../src/features/production/productionService.js');
 const { createMember } = await import('../src/host/accessControlService.js');
 
@@ -91,16 +105,22 @@ beforeAll(async () => {
   if (u) await saveConfig({ ...u, status: 'on' }, 'test');
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
-afterEach(() => { latch.p = null; latch.fail = null; latch.loseListing = false; });
+afterEach(async () => {
+  latch.p = null; latch.fail = null; latch.loseListing = false; latch.reached = null;
+  // A case that failed mid-way must not strand `beta`/`off` for the next one.
+  await setProduction({ status: 'on', betaCohort: [] });
+});
 
-interface Res<T = any> { status: number; body: T }
+/** The response fields this file reads — no `any`. */
+interface Body { vendorId?: string; orgId?: string; user?: { userId: string }; vendors?: number; removedOrphans?: number; failures?: number; complete?: boolean }
+interface Res { status: number; body: Body }
 interface Client { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown, method?: string) => Promise<Res>; del: (p: string) => Promise<Res> }
 function client(): Client {
   let cookie = '';
   const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    const out = res.status === 204 ? {} : ((await res.json().catch(() => ({}))) as Body);
     return { status: res.status, body: out };
   };
   return { get: (p) => call('GET', p), post: (p, b, m) => call(m ?? 'POST', p, b), del: (p) => call('DELETE', p) };
@@ -119,10 +139,10 @@ const setProduction = async (patch: Record<string, unknown>): Promise<void> => {
 async function workspace(): Promise<{ owner: Client; orgId: string; tenantId: string; userId: string }> {
   const tenantId = `org:kbc5-${Date.now()}-${n++}`;
   const owner = client();
-  const userId = (await owner.post('/host/openwop-app/test/login', { email: uniqEmail('own'), tenantId })).body.user.userId;
+  const userId = (await owner.post('/host/openwop-app/test/login', { email: uniqEmail('own'), tenantId })).body.user!.userId;
   const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
-  return { owner, orgId: org.body.orgId, tenantId, userId };
+  return { owner, orgId: org.body.orgId!, tenantId, userId };
 }
 
 /** A logged-in user with the `profiles` toggle on — for the two profiles D6 sites. */
@@ -131,7 +151,7 @@ async function profilesUser(): Promise<{ c: Client; tenantId: string; userId: st
   if (def) await saveConfig({ ...def, status: 'on' }, 'test');
   const tenantId = `org:kbc5p-${Date.now()}-${n++}`;
   const c = client();
-  const userId = (await c.post('/host/openwop-app/test/login', { email: uniqEmail('prof'), tenantId })).body.user.userId;
+  const userId = (await c.post('/host/openwop-app/test/login', { email: uniqEmail('prof'), tenantId })).body.user!.userId;
   return { c, tenantId, userId };
 }
 
@@ -143,9 +163,31 @@ async function indexedVendor(w: Awaited<ReturnType<typeof workspace>>, name = 'B
     capabilities: [{ name: 'Brand design', category: 'design' }],
   });
   expect(created.status, JSON.stringify(created.body)).toBe(201);
-  const vendorId: string = created.body.vendorId;
+  const vendorId: string = created.body.vendorId!;
   expect(await getDocument(w.tenantId, w.orgId, COLLECTION(w.orgId), DOC_ID(vendorId)), 'the vendor must actually be mirrored first').toBeTruthy();
   return vendorId;
+}
+
+/**
+ * Hold the KB write open, wait until the handler has actually REACHED it, then
+ * assert the response has NOT been produced yet. The 250 ms window is an honest
+ * ceiling: there is no hook to await "the response would have been sent", and a
+ * `void`ed write answers well inside it (in-memory awaits only). Under load the
+ * window can only false-PASS, never false-fail.
+ */
+async function blocksOnKb(fire: () => Promise<Res>): Promise<Res> {
+  let release!: () => void;
+  latch.p = new Promise<void>((r) => { release = r; });
+  const reached = new Promise<void>((r) => { latch.reached = r; });
+  let answered = false;
+  const inflight = fire().then((r) => { answered = true; return r; });
+  await reached;
+  latch.reached = null;
+  await new Promise((r) => setTimeout(r, 250));
+  expect(answered, 'the response was produced while the KB write was still pending — the write is DETACHED').toBe(false);
+  release();
+  latch.p = null;
+  return inflight;
 }
 
 describe('KBC-5(i) — vendor removal is NOT gated on the production toggle', () => {
@@ -172,7 +214,7 @@ describe('KBC-5(i) — vendor removal is NOT gated on the production toggle', ()
     await setProduction({ status: 'on' });
     // No collection exists yet for a brand-new org until the first index.
     const created = await w.owner.post(P(w.orgId, '/vendors'), { name: 'Ghost' });
-    const vendorId: string = created.body.vendorId;
+    const vendorId: string = created.body.vendorId!;
     expect((await w.owner.del(P(w.orgId, `/vendors/${vendorId}`))).status).toBe(204);
     expect((await w.owner.del(P(w.orgId, `/vendors/${vendorId}`))).status, 'second delete 404s on the vendor row, not on the KB').toBe(404);
   });
@@ -185,7 +227,7 @@ describe('KBC-5(ii) — backfillProductionKb is reachable, and reconciles both d
     await setProduction({ status: 'beta', betaCohort: [w.userId] });
     const created = await w.owner.post(P(w.orgId, '/vendors'), { name: 'Predates', type: 'agency' });
     expect(created.status, JSON.stringify(created.body)).toBe(201);
-    const vendorId: string = created.body.vendorId;
+    const vendorId: string = created.body.vendorId!;
     expect(await getCollection(w.tenantId, w.orgId, COLLECTION(w.orgId))).toBeNull();
 
     await setProduction({ status: 'on', betaCohort: [] });
@@ -216,7 +258,7 @@ describe('KBC-5(ii) — backfillProductionKb is reachable, and reconciles both d
     await setProduction({ status: 'on' });
 
     const viewerC = client();
-    const viewerId = (await viewerC.post('/host/openwop-app/test/login', { email: uniqEmail('view'), tenantId: w.tenantId })).body.user.userId;
+    const viewerId = (await viewerC.post('/host/openwop-app/test/login', { email: uniqEmail('view'), tenantId: w.tenantId })).body.user!.userId;
     await createMember({ tenantId: w.tenantId, orgId: w.orgId, subject: viewerId, displayName: 'V', roles: ['viewer'] });
     expect((await viewerC.post(P(w.orgId, '/reindex-kb'))).status, 'a viewer cannot drive the sweep').toBe(403);
 
@@ -227,25 +269,10 @@ describe('KBC-5(ii) — backfillProductionKb is reachable, and reconciles both d
 });
 
 describe('ADR 0643 D6 — the derived-index write is AWAITED, not detached', () => {
-  /** Hold the KB write open, then assert the response has NOT been produced yet. */
-  async function assertHandlerBlocksOnKb(fire: () => Promise<Res>): Promise<Res> {
-    let release!: () => void;
-    latch.p = new Promise<void>((r) => { release = r; });
-    let answered = false;
-    const inflight = fire().then((r) => { answered = true; return r; });
-    // Generous: the handler only has to reach the held KB call, which is a handful
-    // of in-memory awaits away. A `void`ed write answers in well under this.
-    await new Promise((r) => setTimeout(r, 250));
-    expect(answered, 'the response was produced while the KB write was still pending — the write is DETACHED').toBe(false);
-    release();
-    latch.p = null;
-    return inflight;
-  }
-
   it('DELETE /vendors/:id blocks on the KB removal (KBC-5(iii) — the lane a dropped continuation strands)', async () => {
     const w = await workspace();
     const vendorId = await indexedVendor(w, 'Awaited Delete');
-    const res = await assertHandlerBlocksOnKb(() => w.owner.del(P(w.orgId, `/vendors/${vendorId}`)));
+    const res = await blocksOnKb(() => w.owner.del(P(w.orgId, `/vendors/${vendorId}`)));
     expect(res.status).toBe(204);
     expect(await getDocument(w.tenantId, w.orgId, COLLECTION(w.orgId), DOC_ID(vendorId))).toBeNull();
   });
@@ -255,9 +282,9 @@ describe('ADR 0643 D6 — the derived-index write is AWAITED, not detached', () 
     await setProduction({ status: 'on' });
     // Pre-create the managed collection so the held call is the vendor upsert itself.
     await indexedVendor(w, 'Seed');
-    const res = await assertHandlerBlocksOnKb(() => w.owner.post(P(w.orgId, '/vendors'), { name: 'Awaited Create', type: 'agency' }));
+    const res = await blocksOnKb(() => w.owner.post(P(w.orgId, '/vendors'), { name: 'Awaited Create', type: 'agency' }));
     expect(res.status, JSON.stringify(res.body)).toBe(201);
-    expect(await getDocument(w.tenantId, w.orgId, COLLECTION(w.orgId), DOC_ID(res.body.vendorId))).toBeTruthy();
+    expect(await getDocument(w.tenantId, w.orgId, COLLECTION(w.orgId), DOC_ID(res.body.vendorId!))).toBeTruthy();
   });
 
   it("the ADR's measured claim: awaiting cannot fail the mutation — a KB throw is swallowed inside", async () => {
@@ -268,7 +295,7 @@ describe('ADR 0643 D6 — the derived-index write is AWAITED, not detached', () 
     latch.fail = 'kb exploded (simulating the assertNoLiveReindex 409 and every other KB failure)';
     const created = await w.owner.post(P(w.orgId, '/vendors'), { name: 'Survives KB failure', type: 'agency' });
     expect(created.status, JSON.stringify(created.body)).toBe(201);
-    const vendorId: string = created.body.vendorId;
+    const vendorId: string = created.body.vendorId!;
     expect((await w.owner.del(P(w.orgId, `/vendors/${vendorId}`))).status, 'the DELETE lane too').toBe(204);
     latch.fail = null;
   });
@@ -333,18 +360,6 @@ describe('the sweep decides DELETE from a non-lossy read, and never reports a pa
  * them turns a test red rather than passing on the strength of a comment.
  */
 describe('ADR 0643 D6 — the remaining four converted sites are awaited too (6/6)', () => {
-  async function blocksOnKb(fire: () => Promise<Res>): Promise<Res> {
-    let release!: () => void;
-    latch.p = new Promise<void>((r) => { release = r; });
-    let answered = false;
-    const inflight = fire().then((r) => { answered = true; return r; });
-    await new Promise((r) => setTimeout(r, 250));
-    expect(answered, 'the response was produced while the KB write was still pending — DETACHED').toBe(false);
-    release();
-    latch.p = null;
-    return inflight;
-  }
-
   it('production PATCH /vendors/:id blocks on the KB re-sync', async () => {
     const w = await workspace();
     const vendorId = await indexedVendor(w, 'Patchable');

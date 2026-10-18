@@ -1,59 +1,64 @@
+/**
+ * ADR 0139 Phase 2 — the menu-config client's read honesty and its concurrency
+ * guard. A failed read must REJECT (the provider turns that into a distinct
+ * degraded state) rather than coerce "unknown" to an empty bundle; the tenant
+ * ETag from a read must ride the next tenant PUT as `If-Match` so concurrent
+ * workspace edits fail instead of clobbering; and a failed reload (possibly after
+ * an identity/tenant change) must drop the previous context's validator.
+ */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { getMenuConfig, putTenantMenuConfig } from '../menuConfigClient.js';
 
 afterEach(() => vi.unstubAllGlobals());
 
+/** A real Response — no laundered fetch fixtures. */
+const res = (status: number, body: unknown, etag?: string): Response =>
+  new Response(JSON.stringify(body), { status, headers: etag ? { etag, 'content-type': 'application/json' } : { 'content-type': 'application/json' } });
+const bundle = () => ({ tenant: { items: {}, headers: [] }, user: { items: {}, headers: [] } });
+
 describe('menu config client read honesty', () => {
   it('rejects a failed read instead of coercing unknown state to an empty bundle', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => ({
-      ok: false,
-      status: 503,
-      headers: new Headers(),
-      json: async () => ({ error: 'unavailable', message: 'try later' }),
-    } as unknown as Response)));
+    vi.stubGlobal('fetch', vi.fn(async () => res(503, { error: 'unavailable', message: 'try later' })));
 
     await expect(getMenuConfig()).rejects.toThrow('unavailable: try later');
   });
 
   it('returns a legitimate empty bundle when the server answers successfully', async () => {
-    const bundle = { tenant: { items: {}, headers: [] }, user: { items: {}, headers: [] } };
-    vi.stubGlobal('fetch', vi.fn(async () => ({
-      ok: true,
-      status: 200,
-      headers: new Headers({ etag: '"v1"' }),
-      json: async () => bundle,
-    } as unknown as Response)));
+    vi.stubGlobal('fetch', vi.fn(async () => res(200, bundle(), '"v1"')));
 
-    await expect(getMenuConfig()).resolves.toEqual(bundle);
+    await expect(getMenuConfig()).resolves.toEqual(bundle());
   });
 
   it('round-trips the tenant ETag so concurrent workspace edits fail instead of clobbering', async () => {
-    const bundle = { tenant: { items: {}, headers: [] }, user: { items: {}, headers: [] } };
-    const fetchMock = vi.fn()
-      .mockResolvedValueOnce({ ok: true, status: 200, headers: new Headers({ etag: '"v7"' }), json: async () => bundle } as unknown as Response)
-      .mockResolvedValueOnce({ ok: true, status: 200, headers: new Headers({ etag: '"v8"' }), json: async () => ({ config: bundle.tenant }) } as unknown as Response);
+    const b = bundle();
+    const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => res(200, {}))
+      .mockResolvedValueOnce(res(200, b, '"v7"'))
+      .mockResolvedValueOnce(res(200, { config: b.tenant }, '"v8"'));
     vi.stubGlobal('fetch', fetchMock);
 
     await getMenuConfig();
-    await putTenantMenuConfig(bundle.tenant);
+    await putTenantMenuConfig(b.tenant);
 
-    const init = fetchMock.mock.calls[1]?.[1] as RequestInit;
-    expect(init.headers).toMatchObject({ 'if-match': '"v7"' });
+    const [url, init] = fetchMock.mock.calls[1] ?? [];
+    expect(url).toMatch(/\/host\/openwop-app\/menu-config\/tenant$/);
+    expect(init?.method).toBe('PUT');
+    expect(init?.headers).toMatchObject({ 'if-match': '"v7"' });
   });
 
   it('discards a prior tenant ETag when a later reload fails', async () => {
-    const bundle = { tenant: { items: {}, headers: [] }, user: { items: {}, headers: [] } };
-    const fetchMock = vi.fn()
-      .mockResolvedValueOnce({ ok: true, status: 200, headers: new Headers({ etag: '"old-context"' }), json: async () => bundle } as unknown as Response)
-      .mockResolvedValueOnce({ ok: false, status: 503, headers: new Headers(), json: async () => ({ error: 'unavailable' }) } as unknown as Response)
-      .mockResolvedValueOnce({ ok: true, status: 200, headers: new Headers({ etag: '"new-context"' }), json: async () => ({ config: bundle.tenant }) } as unknown as Response);
+    const b = bundle();
+    const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => res(200, {}))
+      .mockResolvedValueOnce(res(200, b, '"old-context"'))
+      .mockResolvedValueOnce(res(503, { error: 'unavailable' }))
+      .mockResolvedValueOnce(res(200, { config: b.tenant }, '"new-context"'));
     vi.stubGlobal('fetch', fetchMock);
 
     await getMenuConfig();
     await expect(getMenuConfig()).rejects.toThrow('unavailable');
-    await putTenantMenuConfig(bundle.tenant);
+    await putTenantMenuConfig(b.tenant);
 
-    const init = fetchMock.mock.calls[2]?.[1] as RequestInit;
-    expect(init.headers).not.toHaveProperty('if-match');
+    const init = fetchMock.mock.calls[2]?.[1];
+    expect(init?.method).toBe('PUT');
+    expect(init?.headers).not.toHaveProperty('if-match');
   });
 });

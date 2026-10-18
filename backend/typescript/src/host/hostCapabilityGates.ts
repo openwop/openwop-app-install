@@ -150,6 +150,7 @@ export const EXECUTOR_CTX_POLICY: Readonly<Record<string, CtxKeyPolicy>> = {
   nodeAgent: { kind: 'run-context', why: 'authoring-time agent pin' },
   configurable: { kind: 'run-context', why: 'run configurable' },
   triggerData: { kind: 'run-context', why: 'trigger payload' },
+  workflowId: { kind: 'run-context', why: 'ADR 0775 P3e — agent-runner checks the never list of its agent' },
   attempt: { kind: 'run-context', why: 'retry counter' },
   trustBoundary: { kind: 'run-context', why: 'RFC 0020 trust marker' },
   compaction: { kind: 'run-context', why: 'ADR 0099 frozen decision' },
@@ -157,6 +158,8 @@ export const EXECUTOR_CTX_POLICY: Readonly<Record<string, CtxKeyPolicy>> = {
   secrets: { kind: 'run-context', why: 'the run’s own secrets view' },
   userId: { kind: 'run-context', why: 'launch-studio principal (the tenant)' },
   actingUserId: { kind: 'run-context', why: 'ADR 0024 durable principal' },
+  orgScopeSubject: { kind: 'run-context', why: 'ADR 0832 D3 / ADR 0879 D7 — the reserved run.metadata narrowing subject (the person who CAUSED a run that acts for nobody); read by the run-lane conversation write gate; grants nothing' },
+  personalTenant: { kind: 'run-context', why: 'ADR 0627 D3 / ADR 0879 D7 — the reserved run.metadata owner personal tenant; the implicit personal-owner short-circuit of a req-less tenant gate; grants nothing outside that tenant' },
   interactiveSession: { kind: 'run-context', why: 'ADR 0189 interactivity flag' },
   variables: { kind: 'run-context', why: 'the run variable bag' },
   // ── gated capabilities ──

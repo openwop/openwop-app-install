@@ -34,7 +34,7 @@
   /* ── Typography ──────────────────────────────────────────────────────
    * Pair with a matching font `<link>` via `VITE_BRAND_FONTS_HREF`
    * (build-time HTML) so the families are actually loaded. */
-  /* --serif: "Instrument Serif", "Times New Roman", serif; */ /* headings + wordmark */
+  /* --serif: "Bricolage Grotesque", ui-sans-serif, sans-serif; */ /* headings + wordmark */
   /* --sans:  "Geist", ui-sans-serif, system-ui, sans-serif; */ /* body + UI */
   /* --mono:  "Geist Mono", ui-monospace, "SF Mono", Menlo, monospace; */ /* code */
 

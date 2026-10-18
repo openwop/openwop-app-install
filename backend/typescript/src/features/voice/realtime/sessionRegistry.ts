@@ -64,6 +64,10 @@ interface SessionRecord {
   /** ADR 0324 — the conversation the session runs inside, bound at mint AFTER the
    *  route's existence+visibility gate (ADR 0309 scope parity with chat). */
   conversationId: string | undefined;
+  /** ADR 0893 D2 — the opener's `callerSubject(req)`. `/tool-call` answers only a
+   *  caller presenting the same subject; a row minted before D2 carries none and
+   *  answers no subject-bearing caller. */
+  subject?: string;
   expiresAt: number;
 }
 
@@ -114,7 +118,7 @@ function sweep(now: number): void {
 export function issueRealtimeSession(
   tenantId: string,
   agentId: string | undefined,
-  binding?: { userId?: string | undefined; conversationId?: string | undefined; personalTenant?: string | undefined },
+  binding?: { userId?: string | undefined; conversationId?: string | undefined; personalTenant?: string | undefined; subject?: string | undefined },
 ): string {
   const now = Date.now();
   sweepTenantDurable(tenantId, now); // G2 — reap this tenant's expired durable rows
@@ -124,7 +128,7 @@ export function issueRealtimeSession(
     if (oldest) { sessions.delete(oldest); clearRealtimeSessionTools(oldest); }
   }
   const id = `rts_${randomUUID()}`;
-  const record: SessionRecord = { hostSessionId: id, tenantId, agentId, userId: binding?.userId, conversationId: binding?.conversationId, ...(binding?.personalTenant ? { personalTenant: binding.personalTenant } : {}), expiresAt: now + TTL_MS };
+  const record: SessionRecord = { hostSessionId: id, tenantId, agentId, userId: binding?.userId, conversationId: binding?.conversationId, ...(binding?.personalTenant ? { personalTenant: binding.personalTenant } : {}), ...(binding?.subject ? { subject: binding.subject } : {}), expiresAt: now + TTL_MS };
   sessions.set(id, record);
   void durable.put(record).catch((err: unknown) => {
     log.warn('realtime_session_persist_failed', { hostSessionId: id, error: err instanceof Error ? err.message : String(err) });
@@ -138,7 +142,7 @@ export function issueRealtimeSession(
 export async function resolveRealtimeSession(
   hostSessionId: string,
   tenantId: string,
-): Promise<{ agentId: string | undefined; userId: string | undefined; conversationId: string | undefined; personalTenant?: string | undefined } | null> {
+): Promise<{ agentId: string | undefined; userId: string | undefined; conversationId: string | undefined; personalTenant?: string | undefined; subject?: string | undefined } | null> {
   let r = sessions.get(hostSessionId);
   if (!r) {
     const row = await durable.get(hostSessionId).catch(() => null);
@@ -152,7 +156,7 @@ export async function resolveRealtimeSession(
     return null;
   }
   if (r.tenantId !== tenantId) return null; // a forged/cross-tenant id is rejected
-  return { agentId: r.agentId, userId: r.userId, conversationId: r.conversationId, ...(r.personalTenant ? { personalTenant: r.personalTenant } : {}) };
+  return { agentId: r.agentId, userId: r.userId, conversationId: r.conversationId, ...(r.personalTenant ? { personalTenant: r.personalTenant } : {}), ...(r.subject ? { subject: r.subject } : {}) };
 }
 
 /** End a session (best-effort cleanup; TTL expiry is the backstop). */

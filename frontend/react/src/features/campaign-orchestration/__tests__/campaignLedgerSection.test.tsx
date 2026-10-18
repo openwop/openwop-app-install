@@ -5,13 +5,16 @@
  *   - an unlinked campaign offers "Set up", which creates-or-returns the
  *     project and then renders its ledger; a failed setup is said;
  *   - a failed read is said, never shown as "no ledger".
+ *
+ * Always on since 836a81994 (no toggle — the old feature-access mock is gone).
+ * Sabotage: dropping `await refresh()` after setup reds the Set-up case; mapping
+ * a failed read to `none` reds the failed-read case; a swallowed setup error
+ * reds the failed-setup case; reading the wrong project id reds the linked case.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup, screen, fireEvent, waitFor } from '@testing-library/react';
-import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
 
 const h = vi.hoisted(() => ({
-  enabled: true,
   getCampaign: vi.fn(),
   ensureCampaignProject: vi.fn(),
   getProject: vi.fn(),
@@ -21,12 +24,10 @@ vi.mock('../../projects/projectsClient.js', async (orig) => ({ ...(await orig<Re
 vi.mock('../../projects/ProjectLedgerTab.js', () => ({
   ProjectLedgerTab: ({ project, canWrite }: { project: { id: string }; canWrite: boolean }) => <div data-testid="ledger">{`ledger:${project.id}:${String(canWrite)}`}</div>,
 }));
-vi.mock('../../../featureToggles/FeatureAccessContext.js', () => ({ useFeatureAccess: () => makeFeatureAccess({ enabled: h.enabled }) }));
 
 import { CampaignLedgerSection } from '../CampaignLedgerSection.js';
 
 beforeEach(() => {
-  h.enabled = true;
   for (const f of [h.getCampaign, h.ensureCampaignProject, h.getProject]) f.mockReset();
   h.getProject.mockImplementation(async (id: string) => ({ id, canWrite: true }));
 });

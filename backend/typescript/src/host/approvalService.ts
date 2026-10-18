@@ -100,6 +100,11 @@ export interface PendingApproval {
    *  and fail agent-runner validation). Additive; absent for classic
    *  proposals whose workflows need no inputs. */
   configurable?: Record<string, unknown>;
+  /** ADR 0775 P3b — a run proposal filed by a SCHEDULE slot whose workflow is on
+   *  the agent's `hitl` list. Approving it fires that job through the daemon's
+   *  own recipe (`fireJob`), so the run carries the job's inputs and attribution
+   *  exactly as an unheld fire would. Additive. */
+  scheduleJobId?: string;
   /** Discriminator for renderers; absent ⇒ 'run-proposal' (back-compat). The
    *  union derives from the `APPROVAL_KINDS` tuple above (single source of truth). */
   kind?: ApprovalKind;
@@ -315,6 +320,13 @@ export interface PendingApproval {
    *  reviewer is told their approval does not freeze what those sections show.
    *  Derived at queue AND repin time, like `aiDraftedLocales`. */
   liveReferenceSections?: Array<{ sectionId: string; type: string }>;
+  /** ADR 0861 D6 addendum (ADR 0859 OQ-1, owner decision 2026-10-11) —
+   *  `content-publish` only: the configured locales with at least one OUTDATED
+   *  section translation at the pinned version. INFORMATION for the reviewer, never
+   *  a block on the decision. Derived at queue AND repin time from
+   *  `pageTranslationStatus` — the SAME function the editor's translation status
+   *  reads — so the card and the editor cannot disagree. */
+  outdatedTranslationLocales?: string[];
   /** Campaign gap plan §5B B3 — when `kind: 'campaign-spend'`, this approval
    *  gates a live ad-platform spend action (dispatch or budget-set) that met the
    *  tenant's `adSpend.approvalThresholdMinor`. `rosterId`/`persona`/`workflowId`
@@ -488,6 +500,7 @@ export async function createApproval(input: {
   cardTitle?: string;
   conversationId?: string;
   configurable?: Record<string, unknown>;
+  scheduleJobId?: string;
   proposal: string;
   /** Multi-approver / quorum policy (ADR 0070). Omit for the single-decision gate. */
   policy?: ApprovalPolicy;
@@ -504,6 +517,7 @@ export async function createApproval(input: {
     cardId: input.cardId,
     cardTitle: input.cardTitle,
     proposal: input.proposal,
+    ...(input.scheduleJobId ? { scheduleJobId: input.scheduleJobId } : {}),
     ...(input.policy ? { policy: input.policy } : {}),
     status: 'pending',
     createdAt: nowIso(),
@@ -530,6 +544,10 @@ export async function createAssistantActionApproval(input: {
    *  pseudo-id that resolved to no RosterEntry (the parallel-architecture bug). */
   rosterId: string;
   persona: string;
+  /** ADR 0878 D6 — the org the action belongs to (a support reply's ticket org).
+   *  Drives `APPROVAL_AUDIENCE['assistant-action']`'s `orgScopeWhenOrg`; absent ⇒
+   *  tenant-wide, exactly as before. */
+  orgId?: string;
 }): Promise<PendingApproval> {
   const approval: PendingApproval = {
     approvalId: `appr:${randomUUID()}`,
@@ -538,6 +556,7 @@ export async function createAssistantActionApproval(input: {
     persona: input.persona,
     workflowId: '',
     actionId: input.actionId,
+    ...(input.orgId ? { orgId: input.orgId } : {}),
     kind: 'assistant-action',
     proposal: input.proposal,
     status: 'pending',
@@ -595,7 +614,11 @@ export type AssistantActionApprovalHandler = (
   approvalId: string,
   outcome: 'approved' | 'rejected',
   /** ADR 0862 D1 — the content hash the approver's card displayed; required on approve. */
-  opts: { decidedByUserId?: string; note?: string; expectedContentHash?: string },
+  opts: {
+    decidedByUserId?: string; note?: string; expectedContentHash?: string;
+    /** ADR 0878 D6 — who is deciding, for an org-scoped action's check. */
+    decider?: { spellings: string[]; isOperator?: boolean; isPersonalOwner?: boolean };
+  },
 ) => Promise<AssistantActionDecision | null>;
 
 let actionApprovalHandler: AssistantActionApprovalHandler | null = null;
@@ -692,9 +715,13 @@ export async function createCommunityApproval(input: {
   proposal: string;
   refId: string;
   submittedBy: string;
+  /** KTENG-3 / KTX-5 — a caller that has already CLAIMED a durable row naming
+   *  this approval passes the id it claimed, so the row and the approval agree.
+   *  Omitted ⇒ a fresh random id (unchanged behaviour). */
+  approvalId?: string;
 }): Promise<PendingApproval> {
   const approval: PendingApproval = {
-    approvalId: `appr:${randomUUID()}`,
+    approvalId: input.approvalId ?? `appr:${randomUUID()}`,
     tenantId: input.tenantId,
     rosterId: 'host:kicktodo-community',
     persona: 'KickTodo Community',
@@ -716,9 +743,18 @@ export async function createConnectSellerApproval(input: {
   tenantId: string;
   proposal: string;
   submittedBy: string;
+  /** KTM-3 — a caller-derived DETERMINISTIC id makes the create idempotent: the
+   *  first create wins (insert-if-absent) and every later create with the same id
+   *  returns that row instead of minting a second inbox card. Omitted ⇒ a random
+   *  id, unchanged. */
+  approvalId?: string;
 }): Promise<PendingApproval> {
+  if (input.approvalId !== undefined) {
+    const prior = await approvals.get(input.approvalId);
+    if (prior) return prior;
+  }
   const approval: PendingApproval = {
-    approvalId: `appr:${randomUUID()}`,
+    approvalId: input.approvalId ?? `appr:${randomUUID()}`,
     tenantId: input.tenantId,
     rosterId: 'host:kicktodo-commerce',
     persona: 'KickTodo Commerce',
@@ -729,7 +765,15 @@ export async function createConnectSellerApproval(input: {
     status: 'pending',
     createdAt: nowIso(),
   };
-  await approvals.put(approval);
+  if (input.approvalId !== undefined) {
+    if (!(await approvals.compareAndSwap(null, approval))) {
+      const winner = await approvals.get(approval.approvalId);
+      if (winner) return winner; // a concurrent create with the same id won
+      throw new Error(`connect-seller approval ${approval.approvalId} could not be created.`);
+    }
+  } else {
+    await approvals.put(approval);
+  }
   await indexApproval(approval);
   return approval;
 }
@@ -935,7 +979,9 @@ export type ApprovalEligibilityCheck = (
   tenantId: string,
   decidedBy: string | undefined,
   approval: PendingApproval,
-  opts?: { isOperator?: boolean; isPersonalOwner?: boolean },
+  /** `spellings` (ADR 0878): every spelling of the decider, for a kind whose check is
+   *  a membership lookup — one human can be keyed two ways (`callerSubjectSpellings`). */
+  opts?: { isOperator?: boolean; isPersonalOwner?: boolean; spellings?: string[] },
 ) => Promise<void>;
 
 const eligibilityChecks = new Map<string, ApprovalEligibilityCheck>();
@@ -952,7 +998,7 @@ export async function assertApprovalEligibility(
   tenantId: string,
   decidedBy: string | undefined,
   approval: PendingApproval,
-  opts?: { isOperator?: boolean; isPersonalOwner?: boolean },
+  opts?: { isOperator?: boolean; isPersonalOwner?: boolean; spellings?: string[] },
 ): Promise<void> {
   const check = approval.kind ? eligibilityChecks.get(approval.kind) : undefined;
   if (check) await check(tenantId, decidedBy, approval, opts);
@@ -1125,6 +1171,34 @@ async function applyApprovalRedactorsForSubject(
     if (changed) { await approvals.put(next); touched += 1; }
   }
   return touched;
+}
+
+/**
+ * ADR 0878 D4 — redact ONE approval's free-text `proposal` (it quotes the drafted
+ * action) and cancel it if still pending, so the held action can never execute for
+ * an erased requester. For a caller that already knows which approval carries the
+ * erased person's words (the service-desk eraser follows a ticket's drafted
+ * replies) — the kind redactors match on subject refs, and a support reply's
+ * proposal carries none. Idempotent. Returns true when the row changed.
+ */
+export async function redactApprovalProposal(
+  tenantId: string,
+  approvalId: string,
+  /** KTFAC-3 (KickTodo wave 4C) — `cancelPending: false` redacts the text only, for
+   *  a card whose action must still be decidable after the quoted author is erased
+   *  (a challenge publish: the challenge is authored content and stays). Default
+   *  true — the ADR 0878 D4 behaviour, unchanged for existing callers. */
+  opts: { cancelPending?: boolean } = {},
+): Promise<boolean> {
+  const a = await approvals.get(approvalId);
+  if (!a || a.tenantId !== tenantId) return false;
+  const cancel = opts.cancelPending ?? true;
+  const status: ApprovalStatus = cancel && a.status === 'pending' ? 'rejected' : a.status;
+  if (a.proposal === ERASED_SUBJECT_SENTINEL && status === a.status) return false;
+  const next: PendingApproval = { ...a, proposal: ERASED_SUBJECT_SENTINEL, status };
+  await approvals.put(next);
+  await indexApproval(next, a.status);
+  return true;
 }
 
 /**
@@ -1443,6 +1517,8 @@ export async function createContentApproval(input: {
   submitterCauses?: string[];
   /** ADR 0859 D5 — see `PendingApproval.liveReferenceSections`. */
   liveReferenceSections?: Array<{ sectionId: string; type: string }>;
+  /** ADR 0861 D6 addendum — see `PendingApproval.outdatedTranslationLocales`. */
+  outdatedTranslationLocales?: string[];
   /** ADR 0859 D2 — a DETERMINISTIC id for this review cycle. Given, the row is
    *  created with `compareAndSwap(null, …)` and a lost race returns the winner's
    *  row with `created: false` (use `createContentApprovalOnce` to see that). */
@@ -1480,6 +1556,7 @@ export async function createContentApprovalOnce(
     ...(input.submitters && input.submitters.length > 0 ? { submitters: [...new Set(input.submitters)] } : {}),
     ...(input.submitterCauses && input.submitterCauses.length > 0 ? { submitterCauses: [...new Set(input.submitterCauses)] } : {}),
     ...(input.liveReferenceSections && input.liveReferenceSections.length > 0 ? { liveReferenceSections: input.liveReferenceSections } : {}),
+    ...(input.outdatedTranslationLocales && input.outdatedTranslationLocales.length > 0 ? { outdatedTranslationLocales: input.outdatedTranslationLocales } : {}),
     proposal: input.proposal,
     ...(input.policy ? { policy: input.policy } : {}),
     status: 'pending',
@@ -1558,6 +1635,37 @@ export function registerChallengePublishApprovalHandler(fn: ChallengePublishAppr
 
 export function getChallengePublishApprovalHandler(): ChallengePublishApprovalHandler | null {
   return challengePublishApprovalHandler;
+}
+
+/**
+ * KickTodo sign-off kinds — `community-profile`, `community-review`,
+ * `metrics-verifier-sample`, `connect-seller`. Each is a governance sign-off whose
+ * decision IS the act (or, for the last two, the record a feature reads back), not
+ * a run. All four used to fall through the run-proposal finalizer, which resolves
+ * the proposing roster entry first — and their approvals name host personas
+ * (`host:kicktodo-community`, `host:kicktodo-commerce`) that are not roster rows.
+ * So every APPROVE from the reviews inbox 404'd ("Proposing agent no longer
+ * exists") while REJECT resolved the row without touching the profile or review it
+ * was about: the moderation loop never closed. Same trap as challenge-publish and
+ * commerce-spend; same cure. The owning kicktodo-* feature registers the handler at
+ * boot (core owns the hook; the feature depends on core, never the reverse).
+ */
+export type KicktodoSignoffKind = 'community-profile' | 'community-review' | 'metrics-verifier-sample' | 'connect-seller';
+export type KicktodoSignoffApprovalHandler = (
+  tenantId: string,
+  approvalId: string,
+  outcome: 'approved' | 'rejected',
+  opts: { decidedByUserId?: string; note?: string },
+) => Promise<{ approval: PendingApproval; changed: boolean } | null>;
+
+const kicktodoSignoffHandlers = new Map<KicktodoSignoffKind, KicktodoSignoffApprovalHandler>();
+
+export function registerKicktodoSignoffApprovalHandler(kind: KicktodoSignoffKind, fn: KicktodoSignoffApprovalHandler): void {
+  kicktodoSignoffHandlers.set(kind, fn);
+}
+
+export function getKicktodoSignoffApprovalHandler(kind: KicktodoSignoffKind): KicktodoSignoffApprovalHandler | null {
+  return kicktodoSignoffHandlers.get(kind) ?? null;
 }
 
 /**
@@ -2289,6 +2397,12 @@ export async function hasPendingApprovalForCard(tenantId: string, cardId: string
   return (await listApprovals(tenantId, 'pending')).some((a) => a.cardId === cardId);
 }
 
+/** ADR 0775 P3b — true when a schedule slot already filed a pending approval
+ *  for this job, so later slots do not pile up duplicates. */
+export async function hasPendingApprovalForJob(tenantId: string, jobId: string): Promise<boolean> {
+  return (await listApprovals(tenantId, 'pending')).some((a) => a.scheduleJobId === jobId);
+}
+
 /** True when this CMS page already has a pending content-publish approval —
  *  used by `submit` to avoid fanning out duplicate approvals (ADR 0066). */
 export async function hasPendingApprovalForPage(tenantId: string, pageId: string): Promise<boolean> {
@@ -2342,6 +2456,8 @@ export async function repinContentApproval(
     submitterCauses?: string[];
     /** ADR 0859 D5 — REPLACES the disclosure (clears it when `[]`), like `aiDraftedLocales`. */
     liveReferenceSections?: Array<{ sectionId: string; type: string }>;
+    /** ADR 0861 D6 addendum — REPLACES (clears when `[]`), like `aiDraftedLocales`. */
+    outdatedTranslationLocales?: string[];
   },
 ): Promise<PendingApproval | null> {
   return withApprovalLock(approvalId, async () => {
@@ -2363,6 +2479,10 @@ export async function repinContentApproval(
   if (patch.liveReferenceSections !== undefined) {
     if (patch.liveReferenceSections.length > 0) next.liveReferenceSections = patch.liveReferenceSections;
     else delete next.liveReferenceSections;
+  }
+  if (patch.outdatedTranslationLocales !== undefined) {
+    if (patch.outdatedTranslationLocales.length > 0) next.outdatedTranslationLocales = patch.outdatedTranslationLocales;
+    else delete next.outdatedTranslationLocales;
   }
   if (patch.submitters && patch.submitters.length > 0) {
     next.submitters = [...new Set([...(cur.submitters ?? []), ...patch.submitters])];

@@ -1,6 +1,10 @@
 /**
  * ADR 0130 Phase 5 (cost-router) — the composite
  * `difficultyAtLeast` condition + the pure `classifyDifficulty` heuristic.
+ *
+ * Breaks if a token-tier boundary (500 / 4000) moves, if the attachment bump is
+ * lost or uncapped, if `difficultyAtLeast` stops being an at-least (>=)
+ * comparison, or if the validator accepts a level outside low | medium | high.
  */
 import { describe, it, expect } from 'vitest';
 import {
@@ -12,7 +16,9 @@ import {
 } from '../src/features/model-router/routeTurn.js';
 import { validateRouterConfig } from '../src/features/model-router/configService.js';
 
-const probe: CapabilityProbe = (p) => (p === 'anthropic' ? ['vision', 'tools'] : ['tools']);
+// ADR 0714 D3 — the canonical RFC 0031 §C id; these turns are text-only, so
+// eligibility is a no-op here, but a fixture must never re-teach the stale `vision`.
+const probe: CapabilityProbe = (p) => (p === 'anthropic' ? ['vision-input', 'tools'] : ['tools']);
 
 describe('classifyDifficulty — token tiers + bumps', () => {
   const f = (o: TurnFeatures) => classifyDifficulty(o);

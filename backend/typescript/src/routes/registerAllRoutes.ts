@@ -82,6 +82,7 @@ import { registerAdminVaultRoutes } from './adminVault.js';
 import { registerBreakGlassRoutes } from './authBreakGlass.js';
 import { registerWorkflowRoutes } from './workflows.js';
 import { registerWorkflowDebugRoutes } from './workflowDebug.js';
+import { registerAgentEvalRoutes } from './agentEvals.js';
 import { registerWorkflowEvalRoutes } from './workflowEvals.js';
 import { registerWorkflowBudgetRoutes } from './workflowBudgets.js';
 import { registerNodeCatalogRoute } from './nodeCatalog.js';
@@ -270,6 +271,8 @@ const ROUTE_MODULES: RouteModule[] = [
   { name: 'workflowDebug', register: ({ app, hostSuite, storage }) => registerWorkflowDebugRoutes(app, { hostSuite, storage }) },
   // ADR 0477 — workflow evaluations (eval sets, assertion runs, results).
   { name: 'workflowEvals', register: ({ app, hostSuite, storage }) => registerWorkflowEvalRoutes(app, { hostSuite, storage }) },
+  // ADR 0889 — agent eval suites (RFC 0081/0244). Runs are `POST /runs {mode:"eval"}`.
+  { name: 'agentEvals', register: ({ app, storage }) => registerAgentEvalRoutes(app, { storage }) },
   // ADR 0482 §3 — per-workflow daily budgets (owner-gated GET/PUT).
   { name: 'workflowBudgets', register: ({ app }) => registerWorkflowBudgetRoutes(app) },
   // ADR 0478 §2 — inject storage for the email approval-delivery lane (boot

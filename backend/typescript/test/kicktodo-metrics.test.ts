@@ -8,14 +8,19 @@
  *  - no participant identity ever appears in a metrics payload
  *  - verifier quality counts RESOLVED samples only and always reports its
  *    denominator; sampling is idempotent
+ *
+ * Sabotages that turn this red (w41 probes): the k-floor threshold, the north
+ * star's ACTIVE filter, recording a verdict not read from the judge, refusing
+ * absent/unjudged enrollments, the one-sample-per-enrollment read, and counting
+ * pending approvals as resolved.
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { registerGoalVerifier } from '../src/features/goals/goalVerifiers.js';
-import { resolveApproval } from '../src/host/approvalService.js';
+import { listApprovals, resolveApproval } from '../src/host/approvalService.js';
 import { createDraft, publishChallenge } from '../src/features/kicktodo-core/challengeService.js';
-import { enroll, __clearEnrollGuards } from '../src/features/kicktodo-core/enrollmentService.js';
+import { enroll, abandonEnrollment, __clearEnrollGuards } from '../src/features/kicktodo-core/enrollmentService.js';
 import { todayFor, submitCheckIn, __clearCheckInObservers } from '../src/features/kicktodo-core/todayService.js';
 import { evaluateEnrollment } from '../src/features/kicktodo-core/progressService.js';
 import { activationMetrics, engagementMetrics, K_FLOOR } from '../src/features/kicktodo-metrics/metricsService.js';
@@ -68,11 +73,16 @@ describe('k-floor + the north star (P1)', () => {
     const engagement = await engagementMetrics(T);
     expect(engagement.weeklyMeaningfulProgress.value).toBe(K_FLOOR);
     expect(engagement.weeklyMeaningfulProgress.contributors).toBe(K_FLOOR);
+  });
 
-    // No check-ins ⇒ nobody is making meaningful progress, but the cell still renders.
-    const fresh = 'tenant-metrics-idle';
-    initHostExtPersistence(await openStorage('memory://'));
-    void fresh;
+  it('the north star EXCLUDES a non-active enrollment even with a recent check-in', async () => {
+    const ids = await seedParticipants(K_FLOOR + 1, true);
+    // The last participant checked in today, then abandoned: not "meaningful progress".
+    const abandoned = await abandonEnrollment(T, ids[K_FLOOR]!, `user:m-${K_FLOOR}`);
+    expect(abandoned?.state).toBe('abandoned');
+    const engagement = await engagementMetrics(T);
+    expect(engagement.weeklyMeaningfulProgress.contributors).toBe(K_FLOOR + 1); // population
+    expect(engagement.weeklyMeaningfulProgress.value).toBe(K_FLOOR);            // active only
   });
 
   it('never leaks a participant identity into a metrics payload', async () => {
@@ -132,4 +142,24 @@ describe('verifier sampling (P3)', () => {
     expect(graded.falsePositives).toBe(0);
     expect(graded.disagreementRate).toBe(1);
   });
+
+  it('KTENG-3 / KTX-5 — two CONCURRENT samplers of one enrollment raise ONE approval', async () => {
+    // Breaks if `sampleVerdict` goes back to check → createCommunityApproval → put
+    // (sabotage-witnessed: two pending `metrics-verifier-sample` approvals, one of
+    // them pointing at a sample row the second `put` overwrote).
+    const [enrollmentId] = await seedParticipants(1, true);
+    await evaluateEnrollment(T, enrollmentId!, 'user:m-0');
+
+    const [a, b] = await Promise.all([
+      sampleVerdict(T, { enrollmentId: enrollmentId!, submittedBy: 'user:admin' }),
+      sampleVerdict(T, { enrollmentId: enrollmentId!, submittedBy: 'user:admin' }),
+    ]);
+
+    const raised = (await listApprovals(T)).filter((x) => x.kind === 'metrics-verifier-sample');
+    expect(raised.map((x) => x.approvalId), 'racing samplers each raised a human-review card').toHaveLength(1);
+    expect(a.approvalId).toBe(raised[0]!.approvalId);
+    expect(b.approvalId).toBe(raised[0]!.approvalId);
+    expect((await verifierQuality(T)).sampled).toBe(1);
+  });
 });
+

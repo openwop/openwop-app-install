@@ -4,9 +4,18 @@
  * progressive load, the FP-4 independent-settle (a providers failure must NOT blank
  * the separately-fetched connections), the org-share gate (only offered to a caller
  * who holds `host:connections:manage`), and the revoke + create mutation flows.
+ *
+ * Wave 52: the "hides the org-share scope" case settles the ACCESS read before
+ * asserting absence (`canManageOrg` starts false, so an absence check made while
+ * `getEffectiveAccess` is in flight passed for the wrong reason); the create case
+ * checks the secret leaves the DOM; a declined confirm revokes nothing; a refused
+ * write shows the exact shared forbidden copy.
+ * Sabotage that turns it red: granting org-share without the scope, keeping the
+ * secret after save, dropping the revoke confirm, or printing the server's 403
+ * sentence.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, cleanup, act } from '@testing-library/react';
 
 vi.mock('../connectionsClient.js', () => ({
   listProviders: vi.fn(),
@@ -19,7 +28,7 @@ vi.mock('../connectionsClient.js', () => ({
 vi.mock('../../../client/accessClient.js', () => ({ getEffectiveAccess: vi.fn() }));
 vi.mock('../../../ui/toast.js', () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
 // ADR 0780 — the write-access hook reads this; a test sets the caller's role.
-const accessState = vi.hoisted(() => ({ value: { access: { basis: 'member', scopes: ['workspace:write'] as string[] }, resolved: true } }));
+const accessState = vi.hoisted((): { value: { access: EffectiveAccess; resolved: boolean } } => ({ value: { access: { roles: [], basis: 'member', scopes: ['workspace:write'] }, resolved: true } }));
 vi.mock('../../../client/useEffectiveAccess.js', async (importOriginal) => {
   const real = await importOriginal<typeof import('../../../client/useEffectiveAccess.js')>();
   return { ...real, useEffectiveAccessState: () => accessState.value };
@@ -46,6 +55,9 @@ const conn = (over: Partial<Connection> = {}): Connection =>
   ({ connectionId: 'c1', provider: 'servicenow', kind: 'api_key', displayName: 'My ServiceNow', status: 'active', scopes: [], connectedAt: '2026-06-22T00:00:00Z', userId: 'user:me', ...over });
 
 const ADMIN_ACCESS: EffectiveAccess = { roles: ['admin'], scopes: ['host:connections:manage'], basis: 'member' };
+const MEMBER_ACCESS: EffectiveAccess = { roles: [], scopes: [], basis: 'member' };
+const FORBIDDEN_COPY = "You don't have permission to do that here. Ask an admin of this workspace for access.";
+const settle = (): Promise<void> => act(async () => { for (let i = 0; i < 5; i += 1) await new Promise<void>((r) => { setImmediate(r); }); });
 
 /** A WORKSPACE row: neither `userId` nor `orgId` (omitted, not `undefined`). */
 const workspaceConn = (over: Partial<Connection> = {}): Connection => {
@@ -55,11 +67,12 @@ const workspaceConn = (over: Partial<Connection> = {}): Connection => {
 
 beforeEach(() => {
   mProviders.mockReset(); mConnections.mockReset(); mCreate.mockReset(); mRevoke.mockReset(); mAccess.mockReset();
-  mAccess.mockResolvedValue({ scopes: [] });
-  accessState.value = { access: { basis: 'member', scopes: ['workspace:write'] }, resolved: true };
+  mAccess.mockResolvedValue({ ...MEMBER_ACCESS });
+  accessState.value = { access: { roles: [], basis: 'member', scopes: ['workspace:write'] }, resolved: true };
   vi.mocked(toast.error).mockReset();
+  vi.spyOn(window, 'confirm').mockReturnValue(true);
 });
-afterEach(cleanup);
+afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 describe('ConnectionsManager (FP-2)', () => {
   it('loads providers + connections and renders a connection row', async () => {
@@ -67,8 +80,7 @@ describe('ConnectionsManager (FP-2)', () => {
     mConnections.mockResolvedValue([conn()]);
     render(<ConnectionsManager />);
     await waitFor(() => expect(screen.getByText('My ServiceNow')).toBeTruthy());
-    expect(mProviders).toHaveBeenCalled();
-    expect(mConnections).toHaveBeenCalled();
+    expect(screen.getByText('Connect')).toBeTruthy(); // the providers half landed too
   });
 
   it('surfaces independent retryable error states when both reads fail', async () => {
@@ -78,6 +90,9 @@ describe('ConnectionsManager (FP-2)', () => {
     await waitFor(() => expect(screen.getByText('Providers could not be loaded')).toBeTruthy());
     expect(screen.getByText('Connections could not be loaded')).toBeTruthy();
     expect(screen.getAllByRole('button', { name: 'Retry' })).toHaveLength(2);
+    // A failed read is not "nothing here": no empty state, no connect form.
+    expect(screen.queryByText('No connections yet')).toBeNull();
+    expect(screen.queryByText('Connect')).toBeNull();
   });
 
   it('FP-4: a providers failure does NOT blank the connections list (independent settle)', async () => {
@@ -92,7 +107,7 @@ describe('ConnectionsManager (FP-2)', () => {
   it('offers the org-share scope ONLY to a caller with host:connections:manage', async () => {
     mProviders.mockResolvedValue([prov()]);
     mConnections.mockResolvedValue([]);
-    mAccess.mockResolvedValue({ scopes: ['host:connections:manage'] });
+    mAccess.mockResolvedValue({ ...MEMBER_ACCESS, scopes: ['host:connections:manage'] });
     render(<ConnectionsManager />);
     await waitFor(() => expect(screen.getByText('Shared with')).toBeTruthy());
   });
@@ -101,15 +116,18 @@ describe('ConnectionsManager (FP-2)', () => {
     mProviders.mockResolvedValue([prov()]);
     mConnections.mockResolvedValue([]);
     render(<ConnectionsManager />);
-    await waitFor(() => expect(mProviders).toHaveBeenCalled());
+    // Settle the access read itself — `canManageOrg` starts false, so absence
+    // asserted before it lands proves nothing.
+    await waitFor(() => expect(mAccess).toHaveBeenCalled());
+    await act(async () => { await mAccess.mock.results[0]!.value; });
+    await settle();
+    expect(screen.getByText('Connect')).toBeTruthy(); // positive control: the form is up
     expect(screen.queryByText('Shared with')).toBeNull();
   });
 
   it('revokes a connection', async () => {
     // The destructive action is confirm()-gated (XC-1); without a mounted
-    // <ConfirmRoot> it falls back to window.confirm — accept it.
-    const origConfirm = window.confirm;
-    window.confirm = () => true;
+    // <ConfirmRoot> it falls back to window.confirm — accepted in beforeEach.
     mProviders.mockResolvedValue([prov()]);
     mConnections.mockResolvedValue([conn()]);
     mRevoke.mockResolvedValue(undefined);
@@ -117,7 +135,20 @@ describe('ConnectionsManager (FP-2)', () => {
     await waitFor(() => expect(screen.getByText('My ServiceNow')).toBeTruthy());
     fireEvent.click(screen.getByLabelText(/revoke/i));
     await waitFor(() => expect(mRevoke).toHaveBeenCalledWith('c1'));
-    window.confirm = origConfirm;
+  });
+
+  it('a declined revoke confirm revokes nothing (XC-1)', async () => {
+    vi.mocked(window.confirm).mockReturnValue(false);
+    mProviders.mockResolvedValue([prov()]);
+    mConnections.mockResolvedValue([conn()]);
+    mRevoke.mockResolvedValue(undefined);
+    render(<ConnectionsManager />);
+    await waitFor(() => expect(screen.getByText('My ServiceNow')).toBeTruthy());
+    fireEvent.click(screen.getByLabelText('Revoke My ServiceNow'));
+    await settle();
+    expect(window.confirm).toHaveBeenCalledTimes(1);
+    expect(mRevoke).not.toHaveBeenCalled();
+    expect(screen.getByText('My ServiceNow')).toBeTruthy();
   });
 
   it('creates a connection from the secret form (secret trimmed, scoped to the user by default)', async () => {
@@ -132,10 +163,12 @@ describe('ConnectionsManager (FP-2)', () => {
     await waitFor(() => expect(mCreate).toHaveBeenCalledWith(
       expect.objectContaining({ provider: 'servicenow', secret: 'super-secret', scope: 'user' }),
     ));
+    // The secret is write-only: it leaves the DOM once the connection is made.
+    await waitFor(() => expect(secret.value).toBe(''));
   });
 
   it('ADR 0780: a Viewer is not offered the connect controls — one read-only notice instead', async () => {
-    accessState.value = { access: { basis: 'member', scopes: ['workspace:read'] }, resolved: true };
+    accessState.value = { access: { roles: [], basis: 'member', scopes: ['workspace:read'] }, resolved: true };
     mProviders.mockResolvedValue([prov(), prov({ id: 'slack', label: 'Slack', kind: 'oauth2', oauthConfigured: true })]);
     mConnections.mockResolvedValue([conn()]);
     render(<ConnectionsManager />);
@@ -167,8 +200,6 @@ describe('ConnectionsManager (FP-2)', () => {
   });
 
   it('ADR 0780: a refused write says so (common:error_forbidden), not "Revoke failed."', async () => {
-    const origConfirm = window.confirm;
-    window.confirm = () => true;
     mProviders.mockResolvedValue([prov()]);
     mConnections.mockResolvedValue([conn()]);
     mRevoke.mockRejectedValue(new ApiError({ status: 403, statusText: 'Forbidden', url: '/x', body: { error: 'forbidden', message: 'Only the connecting user may manage this connection.' } }));
@@ -176,10 +207,7 @@ describe('ConnectionsManager (FP-2)', () => {
     await waitFor(() => expect(screen.getByText('My ServiceNow')).toBeTruthy());
     fireEvent.click(screen.getByLabelText('Revoke My ServiceNow'));
     await waitFor(() => expect(vi.mocked(toast.error)).toHaveBeenCalled());
-    const said = String(vi.mocked(toast.error).mock.calls[0]?.[0]);
-    expect(said).not.toBe('Revoke failed.');
-    expect(said).not.toContain('Only the connecting user');
-    window.confirm = origConfirm;
+    expect(vi.mocked(toast.error).mock.calls[0]?.[0]).toBe(FORBIDDEN_COPY);
   });
 
   it('ADR 0780: status is a localized label and a needs-reconsent oauth row offers Reconnect in place', async () => {
@@ -192,8 +220,6 @@ describe('ConnectionsManager (FP-2)', () => {
   });
 
   it('CONNUX-6: revoking the LAST row lands focus on the list heading, not <body>', async () => {
-    const origConfirm = window.confirm;
-    window.confirm = () => true;
     mProviders.mockResolvedValue([prov()]);
     mConnections.mockResolvedValueOnce([conn()]).mockResolvedValue([]);
     mRevoke.mockResolvedValue(undefined);
@@ -202,7 +228,6 @@ describe('ConnectionsManager (FP-2)', () => {
     fireEvent.click(screen.getByLabelText('Revoke My ServiceNow'));
     await waitFor(() => expect(screen.getByText('No connections yet')).toBeTruthy());
     await waitFor(() => expect(document.activeElement?.tagName).toBe('H2'));
-    window.confirm = origConfirm;
   });
 
   it('CONNUX-6: an in-flight row action is aria-disabled, never natively disabled (focus stays put)', async () => {

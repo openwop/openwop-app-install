@@ -1,0 +1,246 @@
+{
+  "suiteId": "vendor.openwop-app.agent-author.evals.agent-author",
+  "version": "1.0.0",
+  "targetAgentId": "vendor.openwop-app.agent-author.agents.agent-author",
+  "modes": [
+    "golden"
+  ],
+  "thresholds": {
+    "passScore": 1
+  },
+  "tasks": [
+    {
+      "taskId": "create-research-agent",
+      "input": {
+        "request": "Create a research agent called Scout that summarises competitor news for me every week."
+      },
+      "expected": {
+        "kind": "golden",
+        "match": {
+          "strategy": "contains",
+          "value": "disabled"
+        },
+        "trajectory": {
+          "match": "in-order",
+          "calls": [
+            {
+              "tool": "openwop:feature.agent-author.nodes.get",
+              "args": {},
+              "argsMatch": "exact"
+            },
+            {
+              "tool": "openwop:feature.agent-author.nodes.validate"
+            },
+            {
+              "tool": "openwop:feature.agent-author.nodes.persist"
+            }
+          ]
+        }
+      },
+      "fixtures": {
+        "onMiss": "fail",
+        "toolResponses": [
+          {
+            "tool": "openwop:feature.agent-author.nodes.get",
+            "args": {},
+            "argsMatch": "exact",
+            "response": {
+              "agents": [
+                {
+                  "agentId": "core.openwop.agents.deep-research.default",
+                  "label": "Deep Research",
+                  "description": "Researches a topic across sources and writes a cited summary."
+                },
+                {
+                  "agentId": "core.openwop.agents.classifier.default",
+                  "label": "Classifier",
+                  "description": "Sorts items into labelled categories."
+                }
+              ],
+              "workflows": [],
+              "roster": [
+                {
+                  "persona": "Iris",
+                  "agentId": "core.openwop.agents.classifier.default"
+                }
+              ],
+              "autonomyLevels": [
+                "auto",
+                "guided",
+                "review"
+              ]
+            }
+          },
+          {
+            "tool": "openwop:feature.agent-author.nodes.draft",
+            "response": {
+              "ok": true,
+              "errors": [],
+              "draft": {
+                "persona": "Scout",
+                "agentId": "core.openwop.agents.deep-research.default",
+                "description": "Summarises competitor news every week.",
+                "roleKey": "researcher",
+                "autonomyLevel": "review"
+              }
+            }
+          },
+          {
+            "tool": "openwop:feature.agent-author.nodes.validate",
+            "response": {
+              "ok": true
+            }
+          },
+          {
+            "tool": "openwop:feature.agent-author.nodes.persist",
+            "response": {
+              "rosterId": "roster-scout",
+              "persona": "Scout",
+              "enabled": false
+            }
+          }
+        ]
+      }
+    },
+    {
+      "taskId": "draft-mode-on-request",
+      "input": {
+        "request": "Draft a research agent called Scout for competitor news, but don't create it. I want to review and finish it in the wizard myself."
+      },
+      "expected": {
+        "kind": "golden",
+        "match": {
+          "strategy": "contains",
+          "value": "/agents/new"
+        },
+        "trajectory": {
+          "match": "in-order",
+          "calls": [
+            {
+              "tool": "openwop:feature.agent-author.nodes.get",
+              "args": {},
+              "argsMatch": "exact"
+            },
+            {
+              "tool": "openwop:feature.agent-author.nodes.persist",
+              "args": {
+                "mode": "draft"
+              },
+              "argsMatch": "subset"
+            }
+          ]
+        }
+      },
+      "fixtures": {
+        "onMiss": "fail",
+        "toolResponses": [
+          {
+            "tool": "openwop:feature.agent-author.nodes.get",
+            "args": {},
+            "argsMatch": "exact",
+            "response": {
+              "agents": [
+                {
+                  "agentId": "core.openwop.agents.deep-research.default",
+                  "label": "Deep Research",
+                  "description": "Researches a topic across sources and writes a cited summary."
+                }
+              ],
+              "workflows": [],
+              "roster": [],
+              "autonomyLevels": [
+                "auto",
+                "guided",
+                "review"
+              ]
+            }
+          },
+          {
+            "tool": "openwop:feature.agent-author.nodes.draft",
+            "response": {
+              "ok": true,
+              "errors": [],
+              "draft": {
+                "persona": "Scout",
+                "agentId": "core.openwop.agents.deep-research.default",
+                "description": "Competitor news research.",
+                "autonomyLevel": "review"
+              }
+            }
+          },
+          {
+            "tool": "openwop:feature.agent-author.nodes.validate",
+            "response": {
+              "ok": true
+            }
+          },
+          {
+            "tool": "openwop:feature.agent-author.nodes.persist",
+            "args": {
+              "mode": "draft"
+            },
+            "argsMatch": "subset",
+            "response": {
+              "stashed": true,
+              "persona": "Scout",
+              "wizardPath": "/agents/new"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "taskId": "closed-world-no-fit",
+      "input": {
+        "request": "Create an agent that trades stocks in my brokerage account."
+      },
+      "expected": {
+        "kind": "trajectory",
+        "trajectory": {
+          "match": "in-order",
+          "calls": [
+            {
+              "tool": "openwop:feature.agent-author.nodes.get",
+              "args": {},
+              "argsMatch": "exact"
+            }
+          ],
+          "forbidden": [
+            "openwop:feature.agent-author.nodes.persist"
+          ]
+        }
+      },
+      "fixtures": {
+        "onMiss": "fail",
+        "toolResponses": [
+          {
+            "tool": "openwop:feature.agent-author.nodes.get",
+            "args": {},
+            "argsMatch": "exact",
+            "response": {
+              "agents": [
+                {
+                  "agentId": "core.openwop.agents.deep-research.default",
+                  "label": "Deep Research",
+                  "description": "Researches a topic across sources and writes a cited summary."
+                },
+                {
+                  "agentId": "core.openwop.agents.classifier.default",
+                  "label": "Classifier",
+                  "description": "Sorts items into labelled categories."
+                }
+              ],
+              "workflows": [],
+              "roster": [],
+              "autonomyLevels": [
+                "auto",
+                "guided",
+                "review"
+              ]
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

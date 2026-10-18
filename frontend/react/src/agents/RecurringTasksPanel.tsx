@@ -52,6 +52,9 @@ const SKIP_REASON_KEY: Record<Exclude<NonNullable<AssistantLoop['lastSkipReason'
   'feature-disabled': 'recurringSkipFeatureDisabled',
   'plan-lapsed': 'recurringSkipPlanLapsed',
   'actor-inactive': 'recurringSkipActorInactive',
+  'agent-paused': 'recurringSkipAgentPaused',
+  'policy-denied': 'recurringSkipPolicyDenied',
+  'awaiting-approval': 'recurringSkipAwaitingApproval',
 };
 
 /**
@@ -89,14 +92,18 @@ export function RecurringTasksPanel(): JSX.Element {
   const [loops, setLoops] = useState<AssistantLoop[] | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // RTP-EMPTY-1 (ADR 0779 D7) — a failed READ is not an empty list. The read used to
+  // set `loops` to [] on failure, so "No recurring tasks configured." rendered beside
+  // the error. `error` also carries write failures, so the read keeps its own flag.
+  const [readFailed, setReadFailed] = useState(false);
   // ADR 0787 — enabling/pausing a loop is a workspace WRITE (the route gates it);
   // a Viewer sees the loops and their state, not a button that 403s.
   const canWrite = useScopeWriteAccess('workspace:write');
 
   const load = useCallback(() => {
     void listLoops()
-      .then((l) => { setLoops(l); setError(null); })
-      .catch((e: unknown) => { setLoops([]); setError(writeErrorMessage(t, e)); });
+      .then((l) => { setLoops(l); setReadFailed(false); setError(null); })
+      .catch((e: unknown) => { setLoops([]); setReadFailed(true); setError(writeErrorMessage(t, e)); });
   }, [t]);
 
   useEffect(() => { load(); }, [load]);
@@ -194,7 +201,7 @@ export function RecurringTasksPanel(): JSX.Element {
             ) : null}
           </li>
         ))}
-        {loops !== null && loops.length === 0 ? <li className="muted">{t('recurringEmpty')}</li> : null}
+        {loops !== null && loops.length === 0 && !readFailed ? <li className="muted">{t('recurringEmpty')}</li> : null}
       </ul>
     </article>
   );

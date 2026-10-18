@@ -231,7 +231,7 @@ export function ChallengeDetailPage() {
         <Link className="btn-ghost btn-sm" to="/discover">{t('backToDiscover')}</Link>
       </div>
 
-      {error === 'load' && <Notice variant="error">{t('loadChallengesError')}</Notice>}
+      {error === 'load' && <Notice variant="error" announce={t('loadChallengesError')}>{t('loadChallengesError')}</Notice>}
       {neg === undefined && !error && <StateCard loading title={t('discoverTitle')} />}
       {neg === null && !error && <StateCard title={t('challengeNotFoundTitle')} body={t('challengeNotFoundBody')}
         action={<Link className="btn-accent-solid" to="/discover">{t('backToDiscover')}</Link>} />}
@@ -377,8 +377,8 @@ export function ChallengeDetailPage() {
                       {busy ? t('enrolling') : t('previewAndStart')}
                     </Button>
                   )}
-                  {error === 'enroll' && <Notice variant="error">{t('enrollError')}</Notice>}
-                  {error === 'invite' && <Notice variant="error">{t('inviteError')}</Notice>}
+                  {error === 'enroll' && <Notice variant="error" announce={t('enrollError')}>{t('enrollError')}</Notice>}
+                  {error === 'invite' && <Notice variant="error" announce={t('inviteError')}>{t('inviteError')}</Notice>}
                   {inviteUrl && !inviteCopied && (
                     <Notice variant="info">{t('inviteLinkFallback')} <code>{inviteUrl}</code></Notice>
                   )}

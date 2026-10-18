@@ -8,6 +8,18 @@
  * re-enters the model context on the next round. Drives runAgentDispatchLive
  * with injected mocks (no real provider) — the same pattern as
  * agent-dispatch-tool-loop.test.ts.
+ *
+ * Sabotage that turns it red (wave 22 probes): dropping `req.compaction` at the
+ * `runChatToolLoop` call or `decision: opts.compaction` at the tool-result
+ * boundary in `agentDispatch.ts` reds the lossless + lossy cases; defaulting a
+ * decision there reds the no-decision case; not forwarding `toolName` reds the
+ * per-tool exemption case.
+ *
+ * Not here: `mode: 'off'`. On this path it is double-guarded
+ * (`applyToolResultTransform`'s off-guard AND the kernel's own `off` return), so
+ * a dispatch-level case cannot fail (probe w22g1-ad-off-guard was vacuous). The
+ * kernel guard is witnessed by `tool-output-compaction-kernel.test.ts`
+ * `mode "off" is identity`.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { getAgentRegistry } from '../src/executor/agentRegistry.js';
@@ -95,13 +107,15 @@ describe('runAgentDispatchLive — req.compaction at the tool-result boundary', 
     // lossless deleting a field. `lossless` now minifies and nothing else, so
     // `tags` MUST survive — an empty array is a statement, not noise.
     expect(msg).toContain('"tags"');
-    expect(msg.length).toBeLessThan(fencedRaw(VERBOSE).length); // minification shrinks inside the fence
+    // Exact bytes: lossless is whitespace deletion; on this fixture (no literal a
+    // re-serialiser would rewrite) that equals `JSON.stringify(JSON.parse(..))`.
+    expect(msg).toBe(fencedRaw('{"items":[{"id":1,"tags":[],"note":null},{"id":2,"tags":[],"note":""}]}'));
   });
 
   it('lossy still drops the empty field, and names it (ADR 0604)', async () => {
     const msg = await runAndCaptureToolResult({ mode: 'lossy', head: 5, tail: 5 });
-    expect(msg).toContain('_emptied'); // the disclosure reaches the model with the payload
-    expect(msg.length).toBeLessThan(fencedRaw(VERBOSE).length);
+    // The disclosure reaches the model with the payload — exact bytes.
+    expect(msg).toBe(fencedRaw('{"items":[{"id":1,"_emptied":["tags","note"]},{"id":2,"_emptied":["tags","note"]}]}'));
   });
 
   it('leaves the tool result raw when no compaction decision is supplied', async () => {
@@ -112,11 +126,6 @@ describe('runAgentDispatchLive — req.compaction at the tool-result boundary', 
 
   it('honors a per-tool exemption (byte-exact) even with a live decision', async () => {
     const msg = await runAndCaptureToolResult({ mode: 'lossless', exemptTools: ['list'] });
-    expect(msg).toBe(fencedRaw(VERBOSE));
-  });
-
-  it('mode "off" leaves the tool result raw', async () => {
-    const msg = await runAndCaptureToolResult({ mode: 'off' });
     expect(msg).toBe(fencedRaw(VERBOSE));
   });
 });

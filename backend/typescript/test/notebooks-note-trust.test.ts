@@ -20,6 +20,11 @@
  * `host/subjectMemory.ts`). The durable projection's `contentTrust` is asserted
  * alongside it because that is what the wire returns.
  *
+ * What reds it (sabotage-witnessed, /grade-tests wave 20): the route's origin
+ * mapping (`routes.ts`), either arm of `ORIGIN_TRUST`, the surface's hard-coded
+ * `'third-party'`, and the recall-row `MEMORY_UNTRUSTED_TAG` itself (independently
+ * of the durable `contentTrust`).
+ *
  * @see docs/adr/0601-notebooks-trust-boundary-and-mcp-authz.md
  */
 
@@ -54,7 +59,10 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T }
+type NoteRow = { content: string; contentTrust: 'trusted' | 'untrusted' };
+/** The JSON shapes this file reads (all optional: a failed call must fail an assertion). */
+interface Body { tenantId?: string; user?: { tenantId?: string }; orgId?: string; notebook?: { id: string }; notes?: NoteRow[] }
+interface Res { status: number; body: Body }
 interface Client { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res> }
 function client(): Client {
   let cookie = '';
@@ -66,7 +74,7 @@ function client(): Client {
     });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
     const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
-    return { status: res.status, body: out };
+    return { status: res.status, body: (out ?? {}) as Body };
   };
   return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b) };
 }
@@ -82,7 +90,15 @@ async function ownerWithNotebook(who: string): Promise<{ c: Client; tenantId: st
   const org = await c.post('/host/openwop-app/orgs', { name: 'Acme' });
   const nb = await c.post(NB, { name: `Trust ${n}`, orgId: org.body.orgId });
   expect(nb.status, JSON.stringify(nb.body)).toBe(201);
-  return { c, tenantId, notebookId: nb.body.notebook.id };
+  return { c, tenantId: tenantId!, notebookId: nb.body.notebook!.id };
+}
+
+/** The saved note row whose content contains `needle` — asserted present, so a
+ *  missing row is a named failure rather than a TypeError on `.contentTrust`. */
+function savedNote(body: Body, needle: string): NoteRow {
+  const saved = (body.notes ?? []).find((x) => x.content.includes(needle));
+  expect(saved, JSON.stringify(body.notes)).toBeTruthy();
+  return saved!;
 }
 
 /** The tags on the RECALL row whose content matches `text` — the rows dispatch
@@ -103,8 +119,7 @@ describe('ADR 0601 / NBC-2 — a note copied out of an untrusted source is FENCE
     expect(add.status, JSON.stringify(add.body)).toBe(201);
 
     // The durable projection the wire returns.
-    const saved = add.body.notes.find((x: any) => x.content.includes('evil.example'));
-    expect(saved, JSON.stringify(add.body.notes)).toBeTruthy();
+    const saved = savedNote(add.body, 'evil.example');
     expect(saved.contentTrust).toBe('untrusted');
 
     // The mechanism that actually fences: the recall row's tag.
@@ -119,7 +134,7 @@ describe('ADR 0601 / NBC-2 — a note copied out of an untrusted source is FENCE
 
     const add = await c.post(`${NB}/${notebookId}/notes`, { text: TEXT });
     expect(add.status, JSON.stringify(add.body)).toBe(201);
-    const saved = add.body.notes.find((x: any) => x.content.includes('declares no provenance'));
+    const saved = savedNote(add.body, 'declares no provenance');
     expect(saved.contentTrust).toBe('untrusted');
 
     const tagSets = await recallTagsFor(tenantId, notebookId, 'declares no provenance');
@@ -133,7 +148,7 @@ describe('ADR 0601 / NBC-2 — a note copied out of an untrusted source is FENCE
 
     const add = await c.post(`${NB}/${notebookId}/notes`, { text: TEXT, origin: 'trusted' });
     expect(add.status, JSON.stringify(add.body)).toBe(201);
-    const saved = add.body.notes.find((x: any) => x.content.includes('bogus origin'));
+    const saved = savedNote(add.body, 'bogus origin');
     expect(saved.contentTrust).toBe('untrusted');
 
     const tagSets = await recallTagsFor(tenantId, notebookId, 'bogus origin');
@@ -152,7 +167,7 @@ describe('ADR 0601 / NBC-2 — a note copied out of an untrusted source is FENCE
     const MCP_TEXT = 'Content handed in by an external MCP client (ADR 0087 §73: untrusted).';
 
     // The exact seam the `mcp-create-note` node calls: ctx.features.notebooks.addNote.
-    const surface = buildNotebooksSurface({ tenantId } as never);
+    const surface = buildNotebooksSurface({ tenantId });
     const created = await surface.addNote!({
       notebookId,
       content: MCP_TEXT,
@@ -174,7 +189,7 @@ describe('ADR 0601 / NBC-2 — a note copied out of an untrusted source is FENCE
 
     const add = await c.post(`${NB}/${notebookId}/notes`, { text: TEXT, origin: 'authored' });
     expect(add.status, JSON.stringify(add.body)).toBe(201);
-    const saved = add.body.notes.find((x: any) => x.content.includes('My own synthesis'));
+    const saved = savedNote(add.body, 'My own synthesis');
     expect(saved.contentTrust).toBe('trusted');
 
     const tagSets = await recallTagsFor(tenantId, notebookId, 'My own synthesis');

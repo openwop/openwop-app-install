@@ -5,22 +5,30 @@
  *   - the server's "not an approver" (422) is said plainly; no button when the
  *     viewer cannot decide;
  *   - a failed people-load is said (not shown as nobody to pick) and Cancel + reopen retries.
+ *
+ * Sabotages that turn it red (probed w28): the note read dropped; the handoff not
+ * kept after send; send enabled without an intent; blank lines sent; the 422
+ * mapped to the generic error; the button shown to a non-decider; the people
+ * failure swallowed or never reset on close.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup, screen, fireEvent, waitFor } from '@testing-library/react';
-import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
+import type { getReviewHandoff, handOffReview, ReviewHandoff as Handoff } from '../reviewHandoffClient.js';
+import type { loadOrgMembers } from '../../../orgs/orgMembers.js';
+import type { OrgMember } from '../../../client/accessClient.js';
 
-const h = vi.hoisted(() => ({ enabled: true, get: vi.fn(), post: vi.fn() }));
+const h = vi.hoisted(() => ({ get: vi.fn<typeof getReviewHandoff>(), post: vi.fn<typeof handOffReview>() }));
 vi.mock('../reviewHandoffClient.js', () => ({ getReviewHandoff: h.get, handOffReview: h.post }));
-vi.mock('../../../featureToggles/FeatureAccessContext.js', () => ({ useFeatureAccess: () => makeFeatureAccess({ enabled: h.enabled }) }));
-const members = vi.hoisted(() => ({ load: vi.fn() }));
+const members = vi.hoisted(() => ({ load: vi.fn<typeof loadOrgMembers>() }));
 vi.mock('../../../orgs/orgMembers.js', () => ({ loadOrgMembers: members.load }));
 
 import { ReviewHandoff } from '../ReviewHandoff.js';
+import { ReviewRequestError } from '../reviewClient.js';
 
-const HANDOFF = { reviewId: 'r1', to: 'user-bob', by: 'user-al', at: '', note: { v: 1, intent: 'Legal sign-off on EU copy', decisions: [], openQuestions: ['GDPR line final?'], tried: [], producedBy: 'human' } };
+const BOB: OrgMember = { memberId: 'm1', orgId: 'o1', tenantId: 't1', subject: 'user-bob', displayName: 'Bob', roles: ['editor'], teamIds: [], createdAt: '2026-10-05T00:00:00Z', updatedAt: '2026-10-05T00:00:00Z' };
+const HANDOFF: Handoff = { reviewId: 'r1', to: 'user-bob', by: 'user-al', at: '', note: { v: 1, intent: 'Legal sign-off on EU copy', decisions: [], openQuestions: ['GDPR line final?'], tried: [], producedBy: 'human' } };
 
-beforeEach(() => { h.enabled = true; h.get.mockReset(); h.post.mockReset(); h.get.mockResolvedValue(null); members.load.mockReset(); members.load.mockResolvedValue([{ memberId: 'm1', subject: 'user-bob', displayName: 'Bob' }]); });
+beforeEach(() => { h.get.mockReset(); h.post.mockReset(); h.get.mockResolvedValue(null); members.load.mockReset(); members.load.mockResolvedValue([BOB]); });
 afterEach(cleanup);
 
 describe('ReviewHandoff', () => {
@@ -47,7 +55,7 @@ describe('ReviewHandoff', () => {
   });
 
   it('says plainly when the person is not an approver; no button for a non-decider', async () => {
-    h.post.mockRejectedValue(Object.assign(new Error('x'), { status: 422 }));
+    h.post.mockRejectedValue(new ReviewRequestError('validation_error: That person is not an approver for this request.', 'validation_error', 422));
     render(<ReviewHandoff reviewId="r1" canHandOff />);
     fireEvent.click(await screen.findByRole('button', { name: 'Ask someone else to decide' }));
     await waitFor(() => expect(screen.getByRole('option', { name: 'Bob' })).toBeTruthy());
@@ -56,8 +64,9 @@ describe('ReviewHandoff', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Hand off' }));
     expect((await screen.findAllByText("That person isn't an approver for this request.")).length).toBeGreaterThan(0);
     cleanup();
+    h.get.mockClear();
     render(<ReviewHandoff reviewId="r1" canHandOff={false} />);
-    await waitFor(() => expect(h.get).toHaveBeenCalled());
+    await waitFor(() => expect(h.get).toHaveBeenCalledWith('r1')); // THIS mount's load, not the first one's
     expect(screen.queryByRole('button', { name: 'Ask someone else to decide' })).toBeNull();
   });
 

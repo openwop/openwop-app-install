@@ -9,25 +9,38 @@
  *  - PD-G3: the rules table rendered NOTHING when empty — no loading state, no
  *    empty state — while collections got both. A merch rule hides products from
  *    shoppers, so "are there any?" has to be answerable.
+ *
+ * PROTECTED (failure honesty — a FAILED rules read never reads as "no rules";
+ * money display). What breaks it: bare `price currency`, a silent 12-row or
+ * 3-value cap, a disclosure that fires when everything fits, the cap shown as
+ * the total, a failed read rendering "shoppers see everything".
+ * Sabotage-witnessed (round 1/2): formatCurrency, PRODUCT_CAP slice + its
+ * disclosure condition, FACET_CAP slice + its disclosure condition, the real
+ * `total`, the hiddenByRules line (and its position outside the non-empty
+ * branch), the rules empty/failed branches, the search-failure clear + retry.
+ * Every "says nothing" case settles on rendered rows FIRST — an absence checked
+ * while the search is in flight cannot fail (round 1: `pd-quiet-total`,
+ * `pd-facet-disclose` were vacuous that way / via a regex that never matched
+ * the real copy).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, waitFor, fireEvent, act, within } from '@testing-library/react';
-import type { SearchProduct, Facet } from '../discoveryClient.js';
+import type { SearchProduct, Facet, SearchResponse, MerchRule, Collection, Org } from '../discoveryClient.js';
 
-const listCollections = vi.fn();
-const listRules = vi.fn();
-const search = vi.fn();
+const listCollections = vi.fn<(orgId: string) => Promise<Collection[]>>();
+const listRules = vi.fn<(orgId: string) => Promise<MerchRule[]>>();
+const search = vi.fn<(orgId: string, q: string) => Promise<SearchResponse>>();
 
 import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
 vi.mock('../discoveryClient.js', async (orig) => ({
   ...(await orig<Record<string, unknown>>()),
-  listOrgs: vi.fn(async () => [{ orgId: 'org-1', name: 'Acme' }]),
-  listCollections: () => listCollections(),
-  listRules: () => listRules(),
-  search: (...a: unknown[]) => search(...a),
-  createCollection: vi.fn(async () => ({})),
+  listOrgs: vi.fn(async (): Promise<Org[]> => [{ orgId: 'org-1', name: 'Acme' }]),
+  listCollections: (orgId: string) => listCollections(orgId),
+  listRules: (orgId: string) => listRules(orgId),
+  search: (orgId: string, q: string) => search(orgId, q),
+  createCollection: vi.fn(),
   deleteCollection: vi.fn(async () => {}),
-  createRule: vi.fn(async () => ({})),
+  createRule: vi.fn(),
   deleteRule: vi.fn(async () => {}),
 }));
 vi.mock('../../../ui/toast.js', () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
@@ -86,31 +99,56 @@ describe('PD-G1: preview prices are formatted money', () => {
 
 describe('PD-G2: truncation is disclosed', () => {
   it('says how many of how many when the list is capped', async () => {
-    search.mockResolvedValue({ products: products(40), facets: [], total: 40, truncated: false });
+    search.mockResolvedValue({ products: products(40), facets: [], total: 40, truncated: false, hiddenByRules: 0 });
     await runSearch();
-    expect(await screen.findByText(/first 12 of 40/i)).toBeTruthy();
+    expect(await screen.findByText('Showing the first 12 of 40 matches.')).toBeTruthy();
+    // …and the list really stopped at 12 (PRODUCT_CAP): rows 0–11, not row 12.
+    const list = screen.getByText('Product 0 — $1,299.50').closest('ul') as HTMLElement;
+    expect(within(list).getAllByRole('listitem')).toHaveLength(12);
+    expect(screen.getByText('Product 11 — $1,299.50')).toBeTruthy();
+    expect(screen.queryByText(/^Product 12 —/)).toBeNull();
   });
 
   it('says NOTHING when the whole result set fits', async () => {
-    search.mockResolvedValue({ products: products(5), facets: [], total: 5, truncated: false });
+    search.mockResolvedValue({ products: products(5), facets: [], total: 5, truncated: false, hiddenByRules: 0 });
     await runSearch();
-    expect(screen.queryByText(/first 12 of/i)).toBeNull();
+    // Settle on the LAST row first — absence before the result renders proves nothing.
+    expect(await screen.findByText('Product 4 — $1,299.50')).toBeTruthy();
+    expect(screen.queryByText(/Showing the first/i)).toBeNull();
   });
 
   it('discloses the per-facet cap when a facet has more values', async () => {
-    search.mockResolvedValue({ products: products(1), facets: [facet(9)], total: 1, truncated: false });
+    search.mockResolvedValue({ products: products(1), facets: [facet(9)], total: 1, truncated: false, hiddenByRules: 0 });
     await runSearch();
-    expect(await screen.findByText(/top 3 of 9 values per facet/i)).toBeTruthy(); // review M2 — say of HOW MANY
+    expect(await screen.findByText('Top 3 of 9 values per facet.')).toBeTruthy(); // review M2 — say of HOW MANY
+    // …and the facet really stopped at 3 (FACET_CAP): cat0–cat2 shown, cat3 not.
+    expect(screen.getByText('Category: cat0 (1,000)')).toBeTruthy();
+    expect(screen.getByText('Category: cat2 (1,002)')).toBeTruthy();
+    expect(screen.queryByText(/Category: cat3/)).toBeNull();
   });
 
   it('says nothing about facets when every facet fits', async () => {
-    search.mockResolvedValue({ products: products(1), facets: [facet(2)], total: 1, truncated: false });
+    search.mockResolvedValue({ products: products(1), facets: [facet(2)], total: 1, truncated: false, hiddenByRules: 0 });
     await runSearch();
-    expect(screen.queryByText(/top 3 values per facet/i)).toBeNull();
+    // Settle on the rendered facet chips first, then the (real-copy) line is absent.
+    expect(await screen.findByText('Category: cat1 (1,001)')).toBeTruthy();
+    expect(screen.queryByText(/values per facet/i)).toBeNull();
   });
 });
 
 describe('PD-G3: the rules table has a loading and an empty state', () => {
+  it('while the rules read is in flight the table shows a loading placeholder, never the empty state', async () => {
+    // Both store-scoped reads held open: collections + rules each render their
+    // skeleton (two "Loading…" statuses) and neither "no rules" line appears.
+    listCollections.mockReturnValue(new Promise<Collection[]>(() => {}));
+    listRules.mockReturnValue(new Promise<MerchRule[]>(() => {}));
+    await view();
+    await waitFor(() => expect(listRules).toHaveBeenCalledWith('org-1'));
+    expect(screen.getAllByRole('status', { name: 'Loading…' })).toHaveLength(2);
+    expect(screen.queryByText(/no merch rules/i)).toBeNull();
+    expect(screen.queryByText(/shoppers see everything/i)).toBeNull();
+  });
+
   it('an empty rule set SAYS it is empty, and what that means', async () => {
     await view();
     // Previously this region rendered nothing at all.

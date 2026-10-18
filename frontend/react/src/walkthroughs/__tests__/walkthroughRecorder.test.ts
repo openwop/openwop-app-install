@@ -3,6 +3,12 @@
  * clicked element maps to its registered actionId (Tier-1), an unregistered
  * one records a describe-only stub (Tier-2), input VALUES are never captured
  * (PII), and the recorder's own chrome is ignored.
+ *
+ * w51 r2 (/grade-tests): the PII case also drives an UNREGISTERED input — the Tier-2
+ * path is the only one that builds a `describe` from the live element, so it is
+ * where a typed value could leak (the Tier-1-only case could not fail: probe
+ * rc-pii-tier2 was vacuous). De-dupe behaviour is outside this header's claims
+ * (REC-DEDUPE-1 is a grade-code row).
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { registerWalkthroughAction, findWalkthroughActionForElement, __resetWalkthroughRegistryForTests } from '../actionRegistry.js';
@@ -82,6 +88,20 @@ describe('tour recorder', () => {
     expect(rec?.steps).toEqual([{ actionId: 'demo.name.fill', route: '/demo', verb: 'fill' }]);
     // The value must not appear anywhere in the recording.
     expect(JSON.stringify(rec)).not.toContain('secret');
+
+    // Tier-2: an UNREGISTERED field inside an anchored region records a describe
+    // stub built from the element — and still never what was typed.
+    const form = document.createElement('div');
+    form.setAttribute('data-walkthrough', 'form');
+    const other = document.createElement('input');
+    form.appendChild(other);
+    document.body.appendChild(form);
+    startRecording();
+    other.value = 'my secret name';
+    other.dispatchEvent(new Event('change', { bubbles: true }));
+    const rec2 = stopRecording();
+    expect(rec2?.steps).toEqual([{ route: '/demo', verb: 'fill', describe: 'input · [data-walkthrough=form]' }]);
+    expect(JSON.stringify(rec2)).not.toContain('secret');
   });
 
   it('drops an unmatched click on a NON-interactive element (route-focus/text noise)', () => {

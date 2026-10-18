@@ -7,18 +7,25 @@
  * Covers:
  *  - `attachCampaignAssets` stamps a `campaign` usage-ref (id + label) on each
  *    asset and records the ids on `campaign.assetIds`;
- *  - the UNION semantics (a second attach ADDS without dropping earlier ids) and
- *    `syncUsageRefs` reconciliation via a second campaign (a dropped asset no
- *    longer refs THAT campaign);
+ *  - the UNION semantics (a second attach ADDS without dropping earlier ids, and
+ *    a re-attached id is not duplicated);
+ *  - refs are per (asset, campaign): an asset attached to two campaigns carries
+ *    one ref for each;
  *  - `deleteCampaign` cascades — the asset's campaign refs are cleared;
  *  - cross-tenant isolation — a foreign tenant's identical asset id is untouched;
  *  - the surface `attachAssets` op resolves by campaignId and by briefId, and
  *    returns `{ found: false }` for neither.
+ *
+ * Sabotage-witnessed (/grade-tests w30): replacing instead of unioning, dropping
+ * the dedupe, the ref label, the delete-time `clearUsageForRef`, a tenant-blind
+ * asset scan in `syncUsageRefs`, and the briefId resolver each turn a case red.
+ * Tenant isolation reads the RAW usage rows: `listUsageForAsset` re-filters by
+ * tenant itself, so it could never show a leaked row.
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
-import { __resetMedia, createAsset, listUsageForAsset } from '../src/features/media/mediaService.js';
+import { __listUsageRefs, __resetMedia, createAsset, listUsageForAsset } from '../src/features/media/mediaService.js';
 import { createBrief } from '../src/features/campaign-brief/briefService.js';
 import {
   __clearCampaigns,
@@ -83,17 +90,20 @@ describe('CS-DATA-5 — attachCampaignAssets', () => {
     const campaign = await mkCampaign('tA', 'o1', 'C');
 
     await attachCampaignAssets('tA', campaign.id, [a1.assetId]);
-    const after = await attachCampaignAssets('tA', campaign.id, [a1.assetId, a2.assetId]);
-    // Stable order, no duplicate a1.
+    // The second attach names ONLY a2: a replace would drop a1.
+    const unioned = await attachCampaignAssets('tA', campaign.id, [a2.assetId]);
+    expect(unioned?.assetIds).toEqual([a1.assetId, a2.assetId]);
+    // Re-attaching an existing id adds nothing (stable order, no duplicate a1).
+    const after = await attachCampaignAssets('tA', campaign.id, [a1.assetId]);
     expect(after?.assetIds).toEqual([a1.assetId, a2.assetId]);
+    expect((await getCampaign('tA', campaign.id))?.assetIds).toEqual([a1.assetId, a2.assetId]);
     // Both assets now ref the campaign.
     expect(await listUsageForAsset('tA', 'o1', a1.assetId)).toHaveLength(1);
     expect(await listUsageForAsset('tA', 'o1', a2.assetId)).toHaveLength(1);
   });
 
-  it('syncUsageRefs reconciles per campaign — a reduced set on ANOTHER campaign drops the stale ref', async () => {
-    // attachCampaignAssets UNIONS within one campaign, so removal is proven via
-    // the reconcile keyed by (asset, campaign): a1 belongs to c1 only, a2 to both.
+  it('refs are per campaign — an asset attached to two campaigns carries one ref for each', async () => {
+    // a1 belongs to c1 only, a2 to both.
     const a1 = await mkAsset('tA', 'o1', 'tok-1');
     const a2 = await mkAsset('tA', 'o1', 'tok-2');
     const c1 = await mkCampaign('tA', 'o1', 'C1');
@@ -135,8 +145,12 @@ describe('CS-DATA-5 — attachCampaignAssets', () => {
     await attachCampaignAssets('tA', campaign.id, [aA.assetId]);
 
     expect(await listUsageForAsset('tA', 'o1', aA.assetId)).toHaveLength(1);
-    // tenant B's asset is untouched.
+    // tenant B's asset is untouched — read the RAW rows: `listUsageForAsset`
+    // filters by tenant itself, so it would hide a row written under tA's id.
     expect(await listUsageForAsset('tB', 'o1', aB.assetId)).toEqual([]);
+    const raw = await __listUsageRefs();
+    expect(raw.filter((u) => u.assetId === aB.assetId)).toEqual([]);
+    expect(raw.filter((u) => u.assetId === aA.assetId)).toHaveLength(1); // positive control
   });
 });
 

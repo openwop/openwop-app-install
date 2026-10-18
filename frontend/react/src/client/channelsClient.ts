@@ -13,13 +13,29 @@ async function http<T>(path: string, init: RequestInit = {}): Promise<T> {
   });
   const body = (await res.json().catch(() => ({}))) as unknown;
   if (!res.ok) {
-    const err = body as { error?: string; message?: string };
-    throw new Error(`${err.error ?? 'http_error'}: ${err.message ?? `HTTP ${res.status}`}`);
+    const err = body as { error?: string; message?: string; details?: Record<string, unknown> };
+    throw new ChannelRequestError(res.status, err.error ?? 'http_error', err.message ?? `HTTP ${res.status}`, err.details);
   }
   return body as T;
 }
 
-export interface ChannelDescriptor { name: string; description?: string; visibility: 'public' | 'private'; archived?: boolean; /** ADR 0852 D5 */ boundProjectId?: string }
+/** CH2UX-5 — a refused channel request keeps its status, envelope code and
+ *  `details` so the surface can say WHY (a read-only role, an announcement
+ *  channel, a person who left the workspace) instead of one generic error.
+ *  The message keeps the historical `code: message` shape. */
+export class ChannelRequestError extends Error {
+  constructor(
+    readonly status: number,
+    readonly code: string,
+    serverMessage: string,
+    readonly details: Record<string, unknown> | undefined,
+  ) {
+    super(`${code}: ${serverMessage}`);
+    this.name = 'ChannelRequestError';
+  }
+}
+
+export interface ChannelDescriptor { name: string; description?: string; visibility: 'public' | 'private'; archived?: boolean; /** ADR 0852 D5 */ boundProjectId?: string; /** ADR 0879 D8 — `managers` = an announcement channel */ postingPolicy?: 'everyone' | 'managers' }
 export interface ChannelSummary { conversationId: string; channel?: ChannelDescriptor }
 export interface ChannelMember { subjectRef: string; role: 'owner' | 'member'; addedAt?: string }
 /** ADR 0192 D2 — a roster row with the display identity RESOLVED server-side
@@ -45,6 +61,14 @@ export interface ChannelDetail {
   conversationId: string;
   ownerUserId?: string;
   viewerIsOwner?: boolean;
+  /** ADR 0879 — server-computed: the viewer may manage this channel (the owner, or
+   *  a workspace admin who can see it, holding `workspace:write`) and may post in it
+   *  (write role + access + the announcement policy). Gate affordances on these. */
+  viewerCanManage?: boolean;
+  viewerCanPost?: boolean;
+  /** ADR 0879 D1 — the viewer's ROLE allows writing (`workspace:write`), apart from
+   *  this channel's posting policy: tells a Viewer from an Editor in an announcement. */
+  viewerCanWrite?: boolean;
   viewerSubjectRef?: string;
   channel?: ChannelDescriptor;
   participants?: ChannelMember[];
@@ -75,6 +99,13 @@ export async function listJoinableChannels(): Promise<ChannelListEntry[]> {
   return (await http<{ channels: ChannelListEntry[] }>(BASE)).channels ?? [];
 }
 
+/** ADR 0879 D1 (CH2UX-8) — may the viewer create channels here (`workspace:write`)?
+ *  Read off the discovery list the server already computes it beside. An older
+ *  server that does not send the flag answers `true` (the server still decides). */
+export async function canCreateChannels(): Promise<boolean> {
+  return (await http<{ viewerCanCreate?: boolean }>(BASE)).viewerCanCreate !== false;
+}
+
 /** Self-join a public channel (ADR 0154 FU-4). */
 export async function joinChannel(channelId: string): Promise<ChannelSummary> {
   return (await http<{ channel: ChannelSummary }>(`${BASE}/${encodeURIComponent(channelId)}/join`, { method: 'POST' })).channel;
@@ -101,6 +132,11 @@ export async function getChannel(channelId: string): Promise<ChannelDetail> {
  *  the FE only gates the UI for clarity. */
 export async function renameChannel(channelId: string, name: string): Promise<ChannelSummary> {
   return (await http<{ channel: ChannelSummary }>(`${BASE}/${encodeURIComponent(channelId)}`, { method: 'PATCH', body: JSON.stringify({ name }) })).channel;
+}
+
+/** ADR 0879 D8 — who may post: everyone, or only managers (an announcement channel). */
+export async function setChannelPostingPolicy(channelId: string, postingPolicy: 'everyone' | 'managers'): Promise<ChannelSummary> {
+  return (await http<{ channel: ChannelSummary }>(`${BASE}/${encodeURIComponent(channelId)}`, { method: 'PATCH', body: JSON.stringify({ postingPolicy }) })).channel;
 }
 
 /** Set/clear a channel's description (owner-only; empty string clears) — ADR 0192 D4. */
@@ -147,6 +183,9 @@ export interface ChannelScheduledPost {
   enabled: boolean;
   nextRunAt?: string;
   lastRunAt?: string;
+  /** ADR 0879 D7 — the last fire failed; `conversation_write_refused` = its reply
+   *  could not be posted (the owner must see why, not a silent drop). */
+  lastError?: { code: string; message: string };
 }
 
 const schedBase = (channelId: string): string => `/host/openwop-app/scheduled-chats/channels/${encodeURIComponent(channelId)}/chats`;
@@ -216,6 +255,10 @@ export interface PresenceSnapshot {
   connected: boolean;
 }
 
+/** ADR 0897 — a stream that lived this long ended by the host's bound (or a
+ *  platform timeout), not because the endpoint is broken. */
+const HEALTHY_STREAM_MS = 10_000;
+
 /** ADR 0126 Phase 4 / RFC 0110 — subscribe to a channel's EPHEMERAL presence SSE. The
  *  open connection itself marks the caller present; closing it (the returned unsubscribe)
  *  marks them gone. Silent when the feature is off (404 ⇒ the host emits no presence, so
@@ -229,6 +272,7 @@ export function subscribeChannelPresence(channelId: string, onSnapshot: (s: Pres
   // Last server-sent presence, retained across reconnects so the connected/disconnected
   // toggle keeps the last-known present/typing rather than flashing empty.
   let last: { conversationId: string; present: string[]; typing: string[] } = { conversationId: channelId, present: [], typing: [] };
+  let cleanEnd = false;
   // Abortable backoff sleep — resolves early on unsubscribe so teardown isn't blocked.
   const sleep = (ms: number): Promise<void> => new Promise<void>((resolve) => {
     const t = setTimeout(resolve, ms);
@@ -249,6 +293,7 @@ export function subscribeChannelPresence(channelId: string, onSnapshot: (s: Pres
         if (res.status === 403 || res.status === 404 || res.status === 405) return; // presence denied/not enabled — terminal
         if (res.ok && res.body) {
           attempt = 0; // a successful connect resets the backoff
+          const openedAt = Date.now();
           for await (const frame of readSseFrames(res.body, sub.signal)) {
             if (frame.event === 'channel.presence') {
               try {
@@ -259,12 +304,17 @@ export function subscribeChannelPresence(channelId: string, onSnapshot: (s: Pres
             }
           }
           // stream ended (server closed / network) → fall through to backoff + reconnect
+          // ADR 0897 — the host ends every stream after a few minutes and keeps the
+          // viewer present through a short grace, so a clean end of a healthy stream
+          // reconnects without flashing the "reconnecting" cue.
+          cleanEnd = Date.now() - openedAt >= HEALTHY_STREAM_MS;
         }
       } catch { /* aborted / network — fall through to backoff (or exit if aborted) */ }
       if (sub.signal.aborted) break;
       // The stream dropped (or the connect failed): surface "disconnected" before backoff so
       // the UI can show a reconnecting cue while we retry.
-      onSnapshot({ ...last, connected: false });
+      if (!cleanEnd) onSnapshot({ ...last, connected: false });
+      cleanEnd = false;
       attempt += 1;
       const cap = Math.min(30_000, 1000 * 2 ** Math.min(attempt - 1, 5)); // 1s → capped at 30s
       await sleep(cap / 2 + Math.random() * (cap / 2)); // full jitter over [cap/2, cap]
@@ -282,6 +332,7 @@ export function subscribeChannelMessages(channelId: string, onMessage: (messageI
   const sub = new AbortController();
   const url = `${config.sseBaseUrl}/host/openwop-app/channels/${encodeURIComponent(channelId)}/stream`;
   let attempt = 0;
+  let connectedBefore = false;
   const sleep = (ms: number): Promise<void> => new Promise<void>((resolve) => {
     const t = setTimeout(resolve, ms);
     sub.signal.addEventListener('abort', () => { clearTimeout(t); resolve(); }, { once: true });
@@ -297,6 +348,11 @@ export function subscribeChannelMessages(channelId: string, onMessage: (messageI
         if (res.status === 403 || res.status === 404 || res.status === 405) { onTerminal?.(res.status); return; } // not a member / unavailable — terminal
         if (res.ok && res.body) {
           attempt = 0; // a successful connect resets the backoff
+          // ADR 0897 — the stream has no replay, and the host ends it every few
+          // minutes: a message posted in the reconnect gap sent no frame, so a
+          // REconnect refreshes the thread once (the durable store is the truth).
+          if (connectedBefore) onMessage();
+          connectedBefore = true;
           for await (const frame of readSseFrames(res.body, sub.signal)) {
             if (frame.event === 'channel.message') {
               // GC-CHAT-2 — surface the frame's messageId (edit/delete/reaction

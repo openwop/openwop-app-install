@@ -17,6 +17,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
+import { PageHeader } from '../../ui/PageHeader.js';
 import { Button } from '../../ui/Button.js';
 import { Notice } from '../../ui/Notice.js';
 import { StateCard } from '../../ui/StateCard.js';
@@ -128,10 +129,7 @@ export function AdminPaidChallengesPage(): JSX.Element {
       <div className="action-bar">
         <Link className="btn-ghost btn-sm" to="/admin/kicktodo/commerce">{t('paidBackToCommerce')}</Link>
       </div>
-      <header className="page-header">
-        <h1 className="page-header__title">{t('paidTitle')}</h1>
-        <p className="page-header__lede">{t('paidLede')}</p>
-      </header>
+      <PageHeader title={t('paidTitle')} lede={t('paidLede')} />
 
       <section ref={linksRegionRef} tabIndex={-1} aria-label={t('paidLinksRegion')}>
       {linksFailed && <StateCard announce title={t('paidLoadError')} body={t('paidLinksFailedBody')} action={<Button variant="secondary" onClick={() => void loadLinks()}>{t('retry')}</Button>} />}

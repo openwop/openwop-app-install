@@ -25,6 +25,8 @@
 
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import * as strategyService from '../src/features/strategy/strategyService.js';
+import { buildStrategySurface } from '../src/features/strategy/surface.js';
+import { getDocument } from '../src/features/kb/kbService.js';
 import { bootPlanningApp, makeClient, enableToggle, uniqEmail, type Client } from './planningHarness.js';
 
 let BASE = '';
@@ -171,7 +173,6 @@ describe('ADR 0597 §Correction 1 — the run/agent surface scopes to the run\'s
 
   it('getStrategyContext withholds an org the RUN OWNER cannot read, and still projects the one they can', async () => {
     const { tenantId, memberId, near, far, strategyId } = await linkedAcrossOrgs();
-    const { buildStrategySurface } = await import('../src/features/strategy/surface.js');
 
     const surface = buildStrategySurface({ tenantId, actingUserId: memberId });
     const out = as<CtxOut>(await surface.getStrategyContext({ priorityListId: near.listId }));
@@ -184,7 +185,6 @@ describe('ADR 0597 §Correction 1 — the run/agent surface scopes to the run\'s
 
   it('getHealth withholds the same org from the same run owner', async () => {
     const { tenantId, memberId, strategyId } = await linkedAcrossOrgs();
-    const { buildStrategySurface } = await import('../src/features/strategy/surface.js');
 
     const rows = as<HealthOut>(await buildStrategySurface({ tenantId, actingUserId: memberId }).getHealth({}));
     const row = rows.strategies.find((r) => r.id === strategyId);
@@ -194,7 +194,6 @@ describe('ADR 0597 §Correction 1 — the run/agent surface scopes to the run\'s
 
   it('a SYSTEM run (no acting human — what a cadence fire is) still sees the whole tenant', async () => {
     const { tenantId, near, far, strategyId } = await linkedAcrossOrgs();
-    const { buildStrategySurface } = await import('../src/features/strategy/surface.js');
 
     // The fallback the narrowing above must NOT have eaten. `registerJob` in
     // cadence.ts carries no `metadata.actingUserId`, so every scheduled
@@ -210,7 +209,6 @@ describe('ADR 0597 §Correction 1 — the run/agent surface scopes to the run\'s
 
   it('the OWNER of both orgs, driving a run, still sees both — the narrowing is a gate, not a blanket', async () => {
     const { tenantId, ownerId, near, far, strategyId } = await linkedAcrossOrgs();
-    const { buildStrategySurface } = await import('../src/features/strategy/surface.js');
 
     const out = as<CtxOut>(await buildStrategySurface({ tenantId, actingUserId: ownerId }).getStrategyContext({ priorityListId: near.listId }));
     const listIds = out.strategies.find((e) => e.id === strategyId)!.linkedPriorities.map((p) => p.listId);
@@ -230,15 +228,31 @@ describe('SPC-3 — from-idea writes, so it must gate on write', () => {
     const writable = await scheduledIdea(owner, orgA, 'A-board', 'Org-A idea');
     const s = (await owner.post(S, { orgId: orgA, title: 'Promoting plan', scope: 'workspace' })).body;
 
+    type IdeaRow = { card: { id: string }; status?: { columnId: string } };
+    const ideaOf = async (listId: string, cardId: string): Promise<IdeaRow | undefined> =>
+      ((await owner.get(`${PM}/lists/${listId}/ideas`)).body.ideas as IdeaRow[]).find((i) => i.card.id === cardId);
+    // The intake overlay is NOT on the ideas listing — it has its own read. (The
+    // earlier version read `intake.promotedTo` off the listing, where it is
+    // always undefined, so its "still unpromoted" half could never fail.)
+    const promotedTo = async (listId: string, cardId: string): Promise<unknown> =>
+      (await owner.get(`${PM}/lists/${listId}/ideas/${cardId}/intake`)).body.intake?.promotedTo;
+    const laneBefore = (await ideaOf(readOnly.listId, readOnly.cardId))?.status?.columnId;
+    expect(laneBefore, 'fixture: the idea has a lane to compare against').toBeTruthy();
+
     const refused = await member.post(`${S}/${s.id}/initiatives/from-idea`, { listId: readOnly.listId, cardId: readOnly.cardId });
     expect(refused.status, JSON.stringify(refused.body)).toBe(403);
-    // Nothing was written: the idea is still unpromoted and still where it was.
-    const ideasB = (await owner.get(`${PM}/lists/${readOnly.listId}/ideas`)).body.ideas as Array<{ card: { id: string }; intake?: { promotedTo?: unknown } }>;
-    expect(ideasB.find((i) => i.card.id === readOnly.cardId)?.intake?.promotedTo).toBeFalsy();
+    // Nothing was written: the idea is still unpromoted AND still where it was
+    // (both writes the route performs — the intake stamp and the lane move).
+    expect(await promotedTo(readOnly.listId, readOnly.cardId), 'the refused call still stamped the intake').toBeFalsy();
+    expect((await ideaOf(readOnly.listId, readOnly.cardId))?.status?.columnId, 'the refused call still moved the card').toBe(laneBefore);
 
-    // Positive control: the same call on a board the member CAN write succeeds.
+    // Positive control: the same call on a board the member CAN write succeeds —
+    // and actually promotes (the stamp the refusal must not leave).
+    const writableLaneBefore = (await ideaOf(writable.listId, writable.cardId))?.status?.columnId;
     const ok = await member.post(`${S}/${s.id}/initiatives/from-idea`, { listId: writable.listId, cardId: writable.cardId });
     expect(ok.status, JSON.stringify(ok.body)).toBe(201);
+    expect(await promotedTo(writable.listId, writable.cardId), 'the positive control promoted nothing').toBeTruthy();
+    expect((await ideaOf(writable.listId, writable.cardId))?.status?.columnId, 'the positive control did not move the card').not.toBe(writableLaneBefore);
   });
 });
 
@@ -258,6 +272,7 @@ describe('SPC-4 — relocating a strategy is gated on the DESTINATION, like crea
     // A nonexistent destination is refused too — `updateStrategy` used to take
     // any string at all.
     expect((await member.patch(`${S}/${s.id}`, { orgId: 'org:does-not-exist' })).status).toBe(403);
+    expect((await member.get(`${S}/${s.id}`)).body.orgId, 'a fabricated destination landed anyway').toBe(orgA);
 
     // Positive control: the OWNER holds write in org B, so the same move works.
     const moved = await owner.patch(`${S}/${s.id}`, { orgId: orgB });
@@ -275,7 +290,6 @@ describe('SPC-4 — relocating a strategy is gated on the DESTINATION, like crea
   it('evicts the strategy from the OLD org Strategy KB when it moves', async () => {
     const { owner, orgA, orgB } = await twoOrgTenant();
     const s = (await owner.post(S, { orgId: orgA, title: 'Indexed plan', scope: 'org' })).body;
-    const { getDocument } = await import('../src/features/kb/kbService.js');
     const tid = s.tenantId as string;
     const colOf = (orgId: string) => `mgd-strategy-${orgId}`;
 
@@ -304,7 +318,6 @@ describe('ADR 0597 §Correction 10 — the PRIVATIZING relocation variant, claim
   it('a move that also goes private leaves NO shared copy in either org', async () => {
     const { owner, orgA, orgB } = await twoOrgTenant();
     const s = (await owner.post(S, { orgId: orgA, title: 'Going private', scope: 'org' })).body;
-    const { getDocument } = await import('../src/features/kb/kbService.js');
     const tid = s.tenantId as string;
     const colOf = (orgId: string) => `mgd-strategy-${orgId}`;
 

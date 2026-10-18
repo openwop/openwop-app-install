@@ -27,7 +27,10 @@ import { formatDateTime, formatDate } from '../i18n/format.js';
 
 type Payload = Record<string, unknown>;
 
-const SCALAR_LABELS: Record<string, string> = { to: 'to', subject: 'subject', eventId: 'event', ticketId: 'ticket' };
+const SCALAR_LABELS: Record<string, string> = { to: 'to', subject: 'subject', eventId: 'event', ticketId: 'ticket', replyChannel: 'replyVia' };
+/** ADR 0878 (SD2UX-2) — a support reply's destination, in words; `none` says that
+ *  approving sends nothing. */
+const REPLY_VIA: Record<string, string> = { whatsapp: 'replyViaWhatsapp', widget: 'replyViaWidget', none: 'replyViaNone' };
 const EVENT_LABELS: Record<string, string> = {
   summary: 'title', start: 'starts', end: 'ends', attendees: 'guests', location: 'location', description: 'details',
 };
@@ -92,6 +95,7 @@ function Fields({ payload }: { payload: Payload }): JSX.Element | null {
     if (v === undefined) continue;
     if (k === 'event') nested(v, EVENT_LABELS, k);
     else if (k === 'patch') nested(v, PATCH_LABELS, k);
+    else if (k === 'replyChannel' && typeof v === 'string' && REPLY_VIA[v]) rows.push({ key: k, label: t('replyVia'), value: t(REPLY_VIA[v]!) });
     else rows.push({ key: k, label: SCALAR_LABELS[k] ? t(SCALAR_LABELS[k]!) : k, value: k === 'to' ? people(v) : text(v) });
   }
   if (rows.length === 0) return null;

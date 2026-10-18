@@ -242,7 +242,7 @@ export function corsMiddleware(): RequestHandler {
         // preflight, which is exactly why this class hides.
         res.set('Access-Control-Allow-Headers', ALLOWED_REQUEST_HEADERS.join(', '));
         res.set('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
-        res.set('Access-Control-Expose-Headers', 'Capabilities-Etag, ETag');
+        res.set('Access-Control-Expose-Headers', 'ETag');
         res.set('Access-Control-Max-Age', '600');
       }
     }

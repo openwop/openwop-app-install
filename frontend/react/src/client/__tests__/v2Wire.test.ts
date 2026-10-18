@@ -1,9 +1,24 @@
-import { describe, it, expect, vi } from 'vitest';
+/**
+ * ADR 0647 — the ONE seam between the major-2 wire and the v1-shaped SPA:
+ * tenant-bound ids (identity.md §5, ADR 0629) unbound inbound and bound +
+ * RFC 0184 ~-projected outbound (ADR 0726, ADR 0814); all five bound-id kinds
+ * (ADR 0723, parity read from the vendored schemas/v2); the `vendor.openwop-app`
+ * carry box (ADR 0725); and this host's error codes (ADR 0647, openwop#1698).
+ *
+ * Breaks it: a tenant-bound id left in SPA state, a bare id sent on a major-2
+ * path, a percent-encoded path the /api rewrite decodes, a boxed key that
+ * overrides a seated one, or a host code the SPA branches on arriving
+ * namespaced or aliased. The remembered wire tenant is module state, reset in
+ * beforeEach so every case starts unbound.
+ */
+import { beforeEach, describe, it, expect, vi } from 'vitest';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fromWireRunId, unbindRunIds, isRunIdKey, normalizeErrorCode, isNotFoundCode, bindRunId, bindRunIdValue, projectBoundId, toWireRunId, rememberWireTenant, resetWireTenant } from '../v2Wire.js';
 
 describe('v2Wire — the one seam between the major-2 wire and the v1-shaped SPA', () => {
+  beforeEach(() => { resetWireTenant(); });
+
   it('strips the tenant segment from a tenant-bound run id and leaves a bare id alone', () => {
     expect(fromWireRunId('default/8f2f3fcf-8cf9-4dd4-84b9-e3f18ef43cc5')).toBe('8f2f3fcf-8cf9-4dd4-84b9-e3f18ef43cc5');
     expect(fromWireRunId('8f2f3fcf-8cf9-4dd4-84b9-e3f18ef43cc5')).toBe('8f2f3fcf-8cf9-4dd4-84b9-e3f18ef43cc5');
@@ -125,7 +140,6 @@ describe('v2Wire — the one seam between the major-2 wire and the v1-shaped SPA
   });
 
   it('binds a bare id to the tenant the wire last told us, without a lookup', async () => {
-    resetWireTenant();
     fromWireRunId('acme/aaaaaaaaaaaaaaaaaaaa'); // remembers `acme`
     const loader = vi.fn(async () => ({ active: 'should-not-be-called' }));
     expect(await bindRunIdValue('bbbbbbbbbbbbbbbbbbbb', loader)).toBe('acme/bbbbbbbbbbbbbbbbbbbb');
@@ -133,7 +147,6 @@ describe('v2Wire — the one seam between the major-2 wire and the v1-shaped SPA
   });
 
   it('resolves the tenant ONCE from the host when nothing has told us yet, then reuses it', async () => {
-    resetWireTenant();
     const loader = vi.fn(async () => ({ active: 'org-1' }));
     expect(await bindRunIdValue('bbbbbbbbbbbbbbbbbbbb', loader)).toBe('org-1/bbbbbbbbbbbbbbbbbbbb');
     expect(await bindRunIdValue('cccccccccccccccccccc', loader)).toBe('org-1/cccccccccccccccccccc');
@@ -141,7 +154,6 @@ describe('v2Wire — the one seam between the major-2 wire and the v1-shaped SPA
   });
 
   it('a workspace switch re-binds: rememberWireTenant wins over the cached value', async () => {
-    resetWireTenant();
     rememberWireTenant('org-1');
     rememberWireTenant('org-2');
     expect(await bindRunIdValue('bbbbbbbbbbbbbbbbbbbb', async () => ({ active: 'x' }))).toBe('org-2/bbbbbbbbbbbbbbbbbbbb');

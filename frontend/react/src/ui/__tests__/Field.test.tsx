@@ -4,6 +4,11 @@ import { TextField, TextareaField, SelectField, Field, CheckboxField } from '../
 
 afterEach(cleanup);
 
+/** The text of every element `aria-describedby` points at, in order. */
+const describedTexts = (el: HTMLElement): string[] =>
+  (el.getAttribute('aria-describedby') ?? '').split(' ').filter(Boolean)
+    .map((id) => document.getElementById(id)?.textContent ?? `<missing #${id}>`);
+
 /**
  * Proves the Field primitive's accessibility contract — the wiring every
  * hand-rolled label/input in the app was missing
@@ -19,16 +24,17 @@ describe('Field primitive accessibility wiring', () => {
   it('wires help text via aria-describedby', () => {
     render(<TextField label="Email" help="We never share it" value="" onChange={() => {}} />);
     const input = screen.getByLabelText('Email');
-    const describedBy = input.getAttribute('aria-describedby');
-    expect(describedBy).toBeTruthy();
-    expect(document.getElementById(describedBy!.split(' ')[0]!)?.textContent).toContain('never share');
+    expect(describedTexts(input)).toEqual(['We never share it']);
   });
 
-  it('sets aria-invalid and an alert when error is present', () => {
-    render(<TextField label="Token" error="Required" value="" onChange={() => {}} />);
+  it('sets aria-invalid and an alert when error is present, and describes the control by help + error', () => {
+    render(<TextField label="Token" help="From your dashboard" error="Required" value="" onChange={() => {}} />);
     const input = screen.getByLabelText('Token');
     expect(input.getAttribute('aria-invalid')).toBe('true');
     expect(screen.getByRole('alert').textContent).toBe('Required');
+    // The error is wired into aria-describedby too (after the help), so a screen
+    // reader reads it when the control takes focus — not only once as an alert.
+    expect(describedTexts(input)).toEqual(['From your dashboard', 'Required']);
   });
 
   it('marks required fields with aria-required', () => {

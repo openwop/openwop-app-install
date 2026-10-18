@@ -13,7 +13,7 @@ import { renderHook, waitFor, act } from '@testing-library/react';
 import * as Y from 'yjs';
 import { Awareness, applyAwarenessUpdate, encodeAwarenessUpdate } from 'y-protocols/awareness';
 import { collabConnectionAnnouncement, collabGuestSuffix, presenceSelfName, useCollabPresence } from '../useCollabPresence.js';
-import type { CollabState } from '../useCollab.js';
+import type { CollabSession } from '../useCollab.js';
 
 const cleanup: (() => void)[] = [];
 afterEach(() => { for (const fn of cleanup.splice(0)) fn(); });
@@ -21,22 +21,30 @@ beforeEach(() => { vi.useRealTimers(); });
 
 /** Two awareness instances that mirror each other (bidirectional relay). */
 function linkedAwareness(): { local: Awareness; remote: Awareness } {
-  const dA = new Y.Doc(); const dB = new Y.Doc();
-  const local = new Awareness(dA); const remote = new Awareness(dB);
-  const relay = (from: Awareness, to: Awareness) => ({ added, updated, removed }: { added: number[]; updated: number[]; removed: number[] }) => {
-    const changed = [...added, ...updated, ...removed];
-    if (changed.length > 0) applyAwarenessUpdate(to, encodeAwarenessUpdate(from, changed), 'relay');
-  };
-  const lToR = relay(local, remote); const rToL = relay(remote, local);
-  local.on('update', lToR); remote.on('update', rToL);
-  cleanup.push(() => { local.destroy(); remote.destroy(); });
+  const [local, remote] = meshAwareness(2) as [Awareness, Awareness];
   return { local, remote };
 }
 
-function session(awareness: Awareness): CollabState {
+/** N awareness instances, each relaying its OWN changes to every other one. */
+function meshAwareness(n: number): Awareness[] {
+  const nodes = Array.from({ length: n }, () => new Awareness(new Y.Doc()));
+  for (const from of nodes) {
+    from.on('update', ({ added, updated, removed }: { added: number[]; updated: number[]; removed: number[] }, origin: unknown) => {
+      if (origin === 'relay') return; // only originate, never re-broadcast
+      const changed = [...added, ...updated, ...removed];
+      if (changed.length === 0) return;
+      const update = encodeAwarenessUpdate(from, changed);
+      for (const to of nodes) if (to !== from) applyAwarenessUpdate(to, update, 'relay');
+    });
+  }
+  cleanup.push(() => { for (const a of nodes) a.destroy(); });
+  return nodes;
+}
+
+function session(awareness: Awareness): CollabSession {
   return {
-    enabled: true, ydoc: awareness.doc, awareness, synced: true, connected: true,
-    claimSeed: vi.fn().mockResolvedValue(false),
+    enabled: true, ydoc: awareness.doc, awareness, synced: true, connected: true, failed: false,
+    claimSeed: vi.fn(async () => false),
   };
 }
 
@@ -57,39 +65,57 @@ describe('useCollabPresence', () => {
   });
 
   it('publishes own identity + throttled selection into awareness', async () => {
-    const { local, remote } = linkedAwareness();
-    const collab = session(local);
-    renderHook(() => useCollabPresence({
-      collab, selfName: 'Me', sel: { col: 'shapes', idx: 0 }, frame: 0,
-    }));
-    await waitFor(() => {
-      const state = remote.getStates().get(local.clientID) as Record<string, unknown> | undefined;
-      expect((state?.user as { name?: string } | undefined)?.name).toBe('Me');
-      expect(state?.sel).toEqual({ col: 'shapes', idx: 0 });
-    });
+    vi.useFakeTimers();
+    try {
+      const { local, remote } = linkedAwareness();
+      const collab = session(local);
+      renderHook(() => useCollabPresence({
+        collab, selfName: 'Me', sel: { col: 'shapes', idx: 0 }, frame: 0,
+      }));
+      const peerView = (): Record<string, unknown> | undefined => remote.getStates().get(local.clientID) as Record<string, unknown> | undefined;
+      // Identity is published at once; the selection waits out the 150 ms throttle.
+      expect((peerView()?.user as { name?: string } | undefined)?.name).toBe('Me');
+      await act(async () => { await vi.advanceTimersByTimeAsync(149); });
+      expect(peerView()?.sel).toBeUndefined();
+      await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+      expect(peerView()?.sel).toEqual({ col: 'shapes', idx: 0 });
+      expect(peerView()?.frame).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('coalesces join/leave into ONE polite batch (no initial-snapshot announcement)', async () => {
-    const { local, remote } = linkedAwareness();
-    // A peer present BEFORE mount — context, never announced.
-    remote.setLocalStateField('user', { name: 'Early' });
-    const collab = session(local);
-    const batches: { joined: string[]; left: string[] }[] = [];
-    const { result } = renderHook(() => useCollabPresence({
-      collab, selfName: 'Me', sel: null, frame: null,
-      onPeersChanged: (b) => batches.push(b),
-    }));
-    await waitFor(() => expect(result.current.peers.length).toBe(1));
-    expect(batches).toEqual([]); // initial snapshot silent
-    // A rename/selection change is NOT a join — still silent.
-    act(() => { remote.setLocalStateField('sel', { col: 'shapes', idx: 1 }); });
-    await waitFor(() => expect(result.current.peers[0]?.sel).toEqual({ col: 'shapes', idx: 1 }));
-    expect(batches).toEqual([]);
-    // A real leave lands as one coalesced batch after the window.
-    act(() => { remote.setLocalState(null); });
-    await waitFor(() => expect(result.current.peers.length).toBe(0));
-    await waitFor(() => expect(batches.length).toBe(1), { timeout: 4000 });
-    expect(batches[0]).toEqual({ joined: [], left: ['Early'] });
+    vi.useFakeTimers();
+    try {
+      const [local, early, late] = meshAwareness(3) as [Awareness, Awareness, Awareness];
+      // A peer present BEFORE mount — context, never announced.
+      early.setLocalStateField('user', { name: 'Early' });
+      const collab = session(local);
+      const batches: { joined: string[]; left: string[] }[] = [];
+      const { result } = renderHook(() => useCollabPresence({
+        collab, selfName: 'Me', sel: null, frame: null,
+        onPeersChanged: (b) => batches.push(b),
+      }));
+      expect(result.current.peers.map((p) => p.name)).toEqual(['Early']);
+      // A selection change is NOT a join — still silent after a full window.
+      act(() => { early.setLocalStateField('sel', { col: 'shapes', idx: 1 }); });
+      expect(result.current.peers[0]?.sel).toEqual({ col: 'shapes', idx: 1 });
+      await act(async () => { await vi.advanceTimersByTimeAsync(2500); });
+      expect(batches).toEqual([]); // initial snapshot + selection: silent
+      // A join and a leave inside ONE 2 s window → exactly one batch, at the window's end.
+      act(() => { late.setLocalStateField('user', { name: 'Late' }); });
+      act(() => { early.setLocalState(null); });
+      expect(result.current.peers.map((p) => p.name)).toEqual(['Late']);
+      await act(async () => { await vi.advanceTimersByTimeAsync(1999); });
+      expect(batches).toEqual([]);
+      await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+      expect(batches).toEqual([{ joined: ['Late'], left: ['Early'] }]);
+      await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+      expect(batches).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

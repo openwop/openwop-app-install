@@ -198,7 +198,8 @@ export const messages = {
   verifyReferences: 'Referencias de verificación',
   verifyReferencesBody: 'Cada hecho anterior está vinculado a un registro. Estas referencias permiten al sistema del remitente demostrar a cuál; por sí solas no significan nada.',
   verifyFooter: 'Solo hechos. Este sistema no certifica nada subjetivo: ni puntuación de idoneidad ni valoración de la persona candidata.',
-  loadFailed: 'No se pudieron cargar las autorizaciones.',
+  grantsUnknownTitle: 'No se pudo comprobar tu autorización de postulación automática',
+  grantsUnknownBody: 'No se pudieron leer tus autorizaciones, así que no podemos saber si se está enviando algo en tu nombre. Vuelve a intentarlo antes de confiar en esta página.',
   issueFailed: 'No se pudo emitir la autorización: {{message}}',
   revokeFailed: 'No se pudo revocar la autorización.',
 } as const;

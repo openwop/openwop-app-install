@@ -6,10 +6,24 @@
  *   - structural: a malformed candidate is rejected with errors (no throw)
  *   - RFC 0022 §C gate: a core.dispatch mapping node is refused when the host
  *     does not advertise `agents.dispatchMapping` (shared validator path)
- *   - persist registers a valid candidate through the shared registry
+ *   - persist registers a valid candidate through the shared registry, lets a
+ *     tenant overwrite its OWN workflow, and refuses another tenant's (B1/HIGH-2)
+ *
+ * Gap ids: ADR 0596 / `WFAWF-13` (the surface-gated leg used to `return`, then
+ * `skip`, because the bare unit env registers no surface-gated node — it now
+ * declares one in a temp pack, so the leg always runs).
+ *
+ * Sabotage witnesses (grade-tests w18): `findUnknownTypeIds` bypassed on the
+ * validate door and on the persist door; the legal set widened from runnable to
+ * catalog-wide; the empty-`nodes` guard removed; validate's catch reporting ok;
+ * the RFC 0022 §C gate disabled; the durable register skipped; the CAS made
+ * unconditional (self-overwrite 409s); the foreign-owner guard disabled.
  */
 
 import { afterAll, beforeAll, afterEach, describe, expect, it } from 'vitest';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { resolveDefaultPackDir } from '../src/packs/registryInstaller.js';
 import { ensureNodesRegistered } from '../src/bootstrap/nodes.js';
 import {
   validateAuthoredWorkflow,
@@ -17,20 +31,34 @@ import {
   buildAuthoringCatalog,
 } from '../src/features/workflow-author/workflowAuthorService.js';
 import { getRegisteredWorkflow } from '../src/host/workflowsRegistry.js';
-import { OpenwopError } from '../src/types.js';
 import { setCapabilityOverlay, resetCapabilityOverlay } from '../src/host/capabilityOverlay.js';
 import { openStorage } from '../src/storage/index.js';
 import { initHostExtPersistence, __resetHostExtPersistence } from '../src/host/hostExtPersistence.js';
 
 const TENANT = 'ws-svc';
+// A pack-declared node whose typeId prefix maps to `host.mcp`
+// (`bootstrap/hostSurfaceMap.ts`), which this bare unit env does not advertise —
+// so the catalog lists it but withholds it for a missing host surface.
+const OFFMENU_PACK = 'vendor.test.wfau-offmenu';
+const OFFMENU_TYPE = 'core.openwop.mcp.wfau-offmenu-fixture';
+let offMenuDir = '';
 
 beforeAll(async () => {
   // Populate the in-process node registry so `core.noop` is a legal catalog typeId.
   ensureNodesRegistered();
   // persist now records tenant ownership (ADR 0163) → needs a wired kv store.
   initHostExtPersistence(await openStorage('memory://'));
+  offMenuDir = join(resolveDefaultPackDir(), OFFMENU_PACK);
+  mkdirSync(offMenuDir, { recursive: true });
+  writeFileSync(join(offMenuDir, 'pack.json'), JSON.stringify({
+    name: OFFMENU_PACK, version: '1.0.0', kind: 'node',
+    nodes: [{ typeId: OFFMENU_TYPE, version: '1.0.0', label: 'Off-menu fixture' }],
+  }));
 });
-afterAll(() => __resetHostExtPersistence());
+afterAll(() => {
+  rmSync(offMenuDir, { recursive: true, force: true });
+  __resetHostExtPersistence();
+});
 afterEach(() => resetCapabilityOverlay());
 
 const noopWorkflow = (id: string) => ({
@@ -54,16 +82,11 @@ describe('workflow-author service — closed-world typeIds', () => {
     expect(v.errors.join(' ')).toMatch(/Unknown node typeId 'totally\.made\.up\.node'/);
   });
 
-  it('the live catalog actually contains core.noop', () => {
-    const cat = buildAuthoringCatalog();
-    expect(cat.nodes.some((n) => n.typeId === 'core.noop')).toBe(true);
-  });
-
-  it('rejects a node this host cannot run (missing host surface) — closed-world honesty', (ctx) => {
+  it('rejects a node this host cannot run (missing host surface) — closed-world honesty', () => {
     // A node withheld from the authoring menu *only* for a missing host surface
     // is NOT a legal typeId (it would register a workflow that fails at run).
     const cat = buildAuthoringCatalog();
-    const offMenu = cat.excluded.find((e) => /missing host surface/.test(e.reason));
+    const offMenu = cat.excluded.find((e) => e.typeId === OFFMENU_TYPE && /missing host surface/.test(e.reason));
     // ADR 0673 D4 (`WFAWF-13`) — this used to `return` when no surface-gated node was
     // present, so a probe that ran NOTHING reported PASSED. Two changes make it honest:
     //
@@ -73,9 +96,11 @@ describe('workflow-author service — closed-world typeIds', () => {
     //      report instead of counted as a pass.
     //
     // MEASURED at HEAD: this bare unit environment registers no surface-gated node, so the
-    // leg has genuinely had nothing to assert — which is exactly what the silent return hid.
-    expect(cat.nodes.length, 'the catalog must load SOMETHING — an empty one is a broken fixture, not an empty case').toBeGreaterThan(0);
-    if (!offMenu) ctx.skip();
+    // leg had genuinely had nothing to assert — which is exactly what the silent return hid.
+    // grade-tests w18: the skip is gone. The file now DECLARES a surface-gated node (the
+    // temp pack in `beforeAll`), so the leg always runs, and its absence is a red.
+    expect(cat.nodes.some((n) => n.typeId === 'core.noop'), 'the catalog must load the local registry').toBe(true);
+    expect(offMenu, `${OFFMENU_TYPE} must be withheld for a missing host surface`).toBeDefined();
     const v = validateAuthoredWorkflow({
       workflowId: 'authored.unrunnable',
       nodes: [{ nodeId: 'n1', typeId: offMenu!.typeId }],
@@ -89,12 +114,13 @@ describe('workflow-author service — structural validation (no throw)', () => {
   it('rejects a candidate with no nodes', () => {
     const v = validateAuthoredWorkflow({ workflowId: 'authored.empty', nodes: [] });
     expect(v.ok).toBe(false);
-    expect(v.errors.length).toBeGreaterThan(0);
+    expect(v.errors.join(' ')).toMatch(/`nodes` MUST be a non-empty array/);
   });
 
   it('rejects a non-object candidate', () => {
     const v = validateAuthoredWorkflow('not an object');
     expect(v.ok).toBe(false);
+    expect(v.errors).toEqual(['Request body MUST be a JSON object.']);
   });
 });
 
@@ -122,15 +148,17 @@ describe('workflow-author service — persist', () => {
   it('throws on an out-of-catalog typeId (never registers an unrunnable graph)', async () => {
     await expect(
       persistAuthoredWorkflow({ workflowId: 'authored.persist-bad', nodes: [{ nodeId: 'n1', typeId: 'made.up' }] }, { tenantId: TENANT }),
-    ).rejects.toThrow(OpenwopError);
+    ).rejects.toMatchObject({ code: 'validation_error', details: { unknownTypeIds: ['made.up'] } });
     expect(getRegisteredWorkflow('authored.persist-bad')).toBeUndefined();
   });
 
   it('the same tenant may overwrite its OWN workflow (autosave)', async () => {
     const id = 'authored.persist-self';
     await persistAuthoredWorkflow(noopWorkflow(id), { tenantId: TENANT });
-    const out = await persistAuthoredWorkflow(noopWorkflow(id), { tenantId: TENANT });
-    expect(out.workflowId).toBe(id);
+    const revised = { ...noopWorkflow(id), nodes: [...noopWorkflow(id).nodes, { nodeId: 'n2', typeId: 'core.noop' }] };
+    const out = await persistAuthoredWorkflow(revised, { tenantId: TENANT });
+    expect(out).toMatchObject({ workflowId: id, nodeCount: 2 });
+    expect(getRegisteredWorkflow(id)?.nodes.map((n) => n.nodeId), 'the overwrite LANDED').toEqual(['n1', 'n2']);
   });
 
   it('another tenant CANNOT overwrite a workflow this tenant authored (typed conflict)', async () => {

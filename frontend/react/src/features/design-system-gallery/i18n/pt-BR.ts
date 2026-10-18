@@ -93,7 +93,7 @@ export const messages = {
   videoVoice: 'Voz',
   videoVoiceBody: 'Fale com quem assiste como “você”, em frases de até 18 palavras. Calorosa e curiosa, nunca atrevida. Sem linguagem de especificação nem siglas sem explicação. Um único narrador para todos os filmes. Não comece uma frase com um nome falado que comece com “A”.',
   videoType: 'Quadro e tipografia',
-  videoTypeBody: '1920×1080 a 30 quadros por segundo, margem esquerda de 160px. Serif para os cartões de título, sans para o corpo, mono para os rótulos. Linha de abertura 120px, título de cena 76px, linha do cartão final 160px, corpo 23–36px, rótulos 20–26px. Nada que precise ser lido fica abaixo de 20px.',
+  videoTypeBody: '1920×1080 a 30 quadros por segundo, margem esquerda de 160px. Bricolage Grotesque para os cartões de título, Geist para o corpo, mono para os rótulos. Linha de abertura 120px, título de cena 76px, linha do cartão final 160px, corpo 23–36px, rótulos 20–26px. Nada que precise ser lido fica abaixo de 20px.',
   videoMotion: 'Movimento',
   videoMotionBody: 'Cada tempo tem um movimento que explica algo. Um movimento principal por vez, com entrada e saída suaves, sem quique. As revelações levam de 0,4 a 0,8 segundo e ficam tempo suficiente para ler duas vezes.',
   videoSound: 'Som',

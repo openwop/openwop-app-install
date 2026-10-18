@@ -9,23 +9,33 @@
  *    claimed "no strategies to align" after the toast faded. Failure is its own
  *    state with a retry. Both polarities: failure copy on a rejected read,
  *    designed-empty copy only on a genuine [].
+ *
+ * Tracker rows: docs/steward/UX_UPGRADE-strategy.md R3-A / R3-B; the blocked-save
+ * copy's pluralization is ADR 0598 SPU-9 (this file's first case is its witness —
+ * strategyR4 no longer repeats it).
+ *
+ * Sabotage-witnessed (grade-tests w19, probes w19g5-r3-*, w19g5-r4-plural-one-r3):
+ * zeroing the blank count, filtering rows out of the payload, mapping the modal's
+ * failed read to `[]`, a no-op Retry, the wrong empty copy, and the `_one` copy
+ * reverting to "item(s) have" each turn a case red.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { fireEvent, render, screen, cleanup, waitFor, act } from '@testing-library/react';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
+import type * as Client from '../strategyClient.js';
 import type { Strategy } from '../strategyClient.js';
 
-const getStrategy = vi.fn();
-const listStrategies = vi.fn();
-const listProjects = vi.fn();
-const updateStrategy = vi.fn();
+const getStrategy = vi.fn<typeof Client.getStrategy>();
+const listStrategies = vi.fn<typeof Client.listStrategies>();
+const listProjects = vi.fn<typeof Client.listProjects>();
+const updateStrategy = vi.fn<typeof Client.updateStrategy>();
 
 vi.mock('../strategyClient.js', async (orig) => ({
   ...(await orig<Record<string, unknown>>()),
-  getStrategy: () => getStrategy(),
-  listStrategies: (...a: unknown[]) => listStrategies(...a),
+  getStrategy: (id: string) => getStrategy(id),
+  listStrategies: (...a: Parameters<typeof Client.listStrategies>) => listStrategies(...a),
   listProjects: () => listProjects(),
-  updateStrategy: (...a: unknown[]) => updateStrategy(...a),
+  updateStrategy: (...a: Parameters<typeof Client.updateStrategy>) => updateStrategy(...a),
   getStrategyDetailContext: vi.fn(async () => null),
   replaceLinks: vi.fn(async () => ({})),
   // ADR 0661 — unnamed by this factory, so the REAL one ran and fetched
@@ -67,7 +77,7 @@ beforeEach(() => {
   getStrategy.mockResolvedValue(structuredClone(STRATEGY));
   listStrategies.mockResolvedValue([]);
   listProjects.mockResolvedValue([]);
-  updateStrategy.mockResolvedValue({});
+  updateStrategy.mockResolvedValue(structuredClone(STRATEGY));
 });
 afterEach(cleanup);
 
@@ -88,9 +98,9 @@ describe('R3-A: a cleared title blocks the save instead of silently deleting the
     await screen.findByDisplayValue('Grow pipeline');
     fireEvent.click(screen.getByRole('button', { name: /^save$/i }));
     await waitFor(() => expect(updateStrategy).toHaveBeenCalled());
-    const payload = updateStrategy.mock.calls[0]![1] as { objectives: { id: string; keyResults: unknown[] }[] };
-    expect(payload.objectives.map((o) => o.id)).toEqual(['o1', 'o2']);
-    expect(payload.objectives[0]!.keyResults).toHaveLength(1);
+    const payload = updateStrategy.mock.calls[0]![1];
+    expect(payload.objectives?.map((o) => o.id)).toEqual(['o1', 'o2']);
+    expect(payload.objectives?.[0]!.keyResults).toHaveLength(1);
     expect(screen.queryByText(/an empty title/i)).toBeNull();
   });
 });

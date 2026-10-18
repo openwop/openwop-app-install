@@ -24,6 +24,8 @@
  * `OrgSelectionState` skipping its zero-org branch each turn a case red. The
  * Contacts case now proves the tab RENDERED (it passed on a blank page before)
  * and its reads are stubbed (they were live fetches, ADR 0661).
+ * Re-witnessed w52 (w52g2-crm-*): the retry case now also proves the retried
+ * read reached the org-gated companies read for `o1`.
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, cleanup, act, fireEvent, waitFor } from '@testing-library/react';
@@ -97,6 +99,10 @@ describe('a failed org read is not "no organizations"', () => {
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Try again' })); });
     expect(listOrgs).toHaveBeenCalledTimes(2);
     expect(document.body.textContent).not.toContain('Could not load your organizations');
+    // The positive half: the retried read reached the org-gated content — the
+    // companies read started for the org the retry loaded (a blank page fails).
+    await waitFor(() => expect(listCompanies).toHaveBeenCalled());
+    expect(listCompanies.mock.calls[0]?.[0]).toBe('o1');
   });
 
   it('a tenant that genuinely has no organizations gets the zero-organization card', async () => {

@@ -14,20 +14,28 @@
  *
  * The repo's own gate cannot catch these: `check-failed-read-sentinels.mjs` deliberately
  * does not count the `try {} catch { setX([]) }` await form (its docblock, note 2).
+ *
+ * Sabotage-witnessed (grade-tests w19, probes w19g5-pr-*): inverting each catch's
+ * flag, the `orgsUnavailable`/`noOrgs` switch, the Retry handler, `setError(null)`
+ * on success, the `!listFailed` gate on the raw error Notice, the empty-state
+ * branch, and each template-copy string turns its case red. The `/^loading/i`
+ * absence is held structurally by the ternary order (`listFailed ?` first) — no
+ * single edit reaches it; it stays as a regression guard, not a witnessed claim.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, waitFor, act, fireEvent } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { currentAnnouncements } from '../../../ui/announce.js';
+import type * as Client from '../strategyClient.js';
 import type { Strategy } from '../strategyClient.js';
 
-const listStrategies = vi.fn();
-const getStrategyHealth = vi.fn();
-const listOrgs = vi.fn();
+const listStrategies = vi.fn<typeof Client.listStrategies>();
+const getStrategyHealth = vi.fn<typeof Client.getStrategyHealth>();
+const listOrgs = vi.fn<typeof Client.listOrgs>();
 
 vi.mock('../strategyClient.js', async (orig) => ({
   ...(await orig<Record<string, unknown>>()),
-  listStrategies: (...a: unknown[]) => listStrategies(...a),
+  listStrategies: (...a: Parameters<typeof Client.listStrategies>) => listStrategies(...a),
   getStrategyHealth: () => getStrategyHealth(),
   listOrgs: () => listOrgs(),
 }));
@@ -35,11 +43,12 @@ vi.mock('../../../ui/toast.js', () => ({ toast: { success: vi.fn(), error: vi.fn
 
 import { StrategyPage } from '../StrategyPage.js';
 
-const STRATEGY = {
+// Complete fixture, no cast — `as unknown as Strategy` hid a missing required `period`.
+const STRATEGY: Strategy = {
   id: 's1', tenantId: 't', orgId: 'org-1', title: 'Grow revenue', scope: 'org',
-  planningHorizon: 'annual', status: 'active', objectives: [], initiatives: [], links: [],
+  planningHorizon: 'annual', period: { label: '2026' }, status: 'active', objectives: [], initiatives: [], links: [],
   createdBy: 'u', createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
-} as unknown as Strategy;
+};
 
 const view = async (): Promise<void> => {
   render(<MemoryRouter><StrategyPage /></MemoryRouter>);
@@ -50,7 +59,7 @@ const view = async (): Promise<void> => {
 beforeEach(() => {
   for (const m of [listStrategies, getStrategyHealth, listOrgs]) m.mockReset();
   listStrategies.mockResolvedValue([STRATEGY]);
-  getStrategyHealth.mockResolvedValue([{ id: 's1', health: 'off-track' }]);
+  getStrategyHealth.mockResolvedValue([{ id: 's1', title: 'Grow revenue', health: 'off-track' }]);
   listOrgs.mockResolvedValue([{ orgId: 'org-1', name: 'Acme' }]);
 });
 afterEach(cleanup);
@@ -67,6 +76,9 @@ describe('STR2-B1 — a blank health column is a claim', () => {
 
   it('says nothing when the rollup loads (the negative control)', async () => {
     await view();
+    // Post-settle anchor: the health chip exists only once the rollup RESOLVED into
+    // the map, so the absence below cannot pass on a read that has not landed yet.
+    expect(await screen.findByText('Off track')).toBeTruthy();
     expect(screen.queryByText(/could not load the health rollup/i)).toBeNull();
   });
 });
@@ -96,6 +108,9 @@ describe('STR2-M1 — a failed list is not an empty portfolio, and not a spinner
     listStrategies.mockRejectedValue(new Error('list 500'));
     await view();
     expect(await screen.findByText(/could not load your strategies/i)).toBeTruthy();
+    // The failure StateCard owns the screen: the raw server error is NOT also raised
+    // as a second (assertive) Notice on top of it.
+    expect(screen.queryByText('list 500')).toBeNull();
     // The catch set the error and left `strategies === null`, so the page rendered the
     // error Notice AND `<StateCard loading />` at the same time, forever.
     expect(screen.queryByText(/^loading/i)).toBeNull();
@@ -133,12 +148,15 @@ describe('STR2-M1 — a failed list is not an empty portfolio, and not a spinner
     expect(await screen.findByText('Grow revenue')).toBeTruthy();
     expect(screen.queryByText(/could not load your strategies/i)).toBeNull();
     expect(screen.queryByText('list 500')).toBeNull();
+    // Flush passive effects first: a negative read right after findBy would pass before a late announcement lands.
+    await act(async () => {});
     expect(currentAnnouncements().assertive).toBe(assertiveBefore);
   });
 
   it('an empty portfolio still shows its empty state (the negative control)', async () => {
     listStrategies.mockResolvedValue([]);
     await view();
+    expect(await screen.findByText('No strategies yet')).toBeTruthy();
     expect(screen.queryByText(/could not load your strategies/i)).toBeNull();
   });
 });

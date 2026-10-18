@@ -58,11 +58,11 @@ function copy(text: string): void {
 
 export function PublishingPage(): JSX.Element {
   const { t } = useTranslation(['publishing', 'cms']);
-  const [pages, setPages] = useState<CmsPageRef[] | null>(null);
+  /** The page list WITH the scope it was read for. See `pages` below. */
+  const [loadedPages, setLoadedPages] = useState<{ orgId: string; list: CmsPageRef[] } | null>(null);
   // §4.5 picker search (DESIGN.md rule 13) — view-only; selection resolves
   // against the full list.
   const [query, setQuery] = useState('');
-  const visiblePages = (pages ?? []).filter((p) => !query.trim() || p.title.toLowerCase().includes(query.trim().toLowerCase()) || p.slug.toLowerCase().includes(query.trim().toLowerCase()));
   const [assets, setAssets] = useState<MediaAssetRef[]>([]);
   const [seo, setSeo] = useState<PageSeo>(EMPTY_SEO);
   // The loaded/last-saved SEO baseline — `seo` diverges on edit, matches again
@@ -125,11 +125,21 @@ export function PublishingPage(): JSX.Element {
     // switched — `active` goes false on cleanup, so a stale list never clobbers
     // the current org's view (which would then 404 on a page click).
     let active = true;
-    setPages(null);
-    void listPages(orgId).then((p) => { if (active) setPages(p); }).catch((e) => { if (active) setError(e instanceof Error ? e.message : t('loadPagesFailed')); });
+    void listPages(orgId).then((p) => { if (active) setLoadedPages({ orgId, list: p }); }).catch((e) => { if (active) setError(e instanceof Error ? e.message : t('loadPagesFailed')); });
     void listMediaAssets(orgId).then((a) => { if (active) setAssets(a); }).catch(() => { if (active) setAssets([]); });
     return () => { active = false; };
   }, [orgId, t]);
+
+  /** The loaded list, only while it belongs to the CURRENT scope. Clearing it in
+   *  the load effect (`setPages(null)`) was one render too late: on the render
+   *  where `orgId` changes, the previous scope's list is still in state, so the
+   *  SEO effect below read the old scope's open page under the NEW `orgId` —
+   *  MEASURED in a gate as `getSeo('org:one', 'page:host-site-home')`, when a
+   *  `?org=host-site` deep link fell back to the first workspace and was then
+   *  restored once the superadmin probe settled. Deriving it makes that mixed
+   *  pair unrepresentable. */
+  const pages = loadedPages && loadedPages.orgId === orgId ? loadedPages.list : null;
+  const visiblePages = (pages ?? []).filter((p) => !query.trim() || p.title.toLowerCase().includes(query.trim().toLowerCase()) || p.slug.toLowerCase().includes(query.trim().toLowerCase()));
 
   /** The open page, resolved from the URL against the loaded list. A `?page=`
    *  naming nothing in this org reads as "none selected" — the same validity

@@ -1,8 +1,11 @@
 /**
- * Grade pass 2026-07-10 — CanvasPresentPage wiring (the pure presentNav math
- * is covered separately): keyboard nav across skip flags, build-step
- * advancing, the empty-deck designed state, blanking announcement, and the
- * kiosk auto-advance timer.
+ * Grade pass 2026-07-10 — CanvasPresentPage wiring, ADR 0328 Phase 4 (nav, skip
+ * flags, B/W blanking, kiosk auto-advance/loop) and Phase 5 (build steps). The
+ * pure presentNav math is covered in presentNav.test.ts. Breaks: a skipped
+ * slide presented, a blank screen never announced (or not cleared by nav), a
+ * kiosk that never advances or never loops, build blocks shown all at once (or
+ * the next slide reached before the builds), and a malformed doc rendering
+ * "1 / 0" over a blank stage instead of going through the editor's coercion.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, fireEvent, act, waitFor } from '@testing-library/react';
@@ -107,12 +110,19 @@ describe('CanvasPresentPage', () => {
     ] };
     const r = mount();
     await screen.findByText('First block');
-    // Step 0: block 2 hidden.
-    expect(r.container.querySelectorAll('.canvas-slides__blk--pending').length).toBe(2);
+    // Same flush as the first case: the key handler is attached in an effect,
+    // and a key dispatched before it lands is silently dropped under load.
+    await act(async () => {});
+    const pending = (): string[] => [...r.container.querySelectorAll('.canvas-slides__blk--pending')].map((el) => (el.textContent ?? '').trim());
+    // Step 0: both blocks pending (the build marker the slides renderer sets).
+    expect(pending()).toEqual(['First block', 'Second block']);
     fireEvent.keyDown(window, { key: 'ArrowRight' });
-    expect(r.container.querySelectorAll('.canvas-slides__blk--pending').length).toBe(1);
+    // Step 1: the FIRST block revealed, the second still pending; same slide.
+    expect(pending()).toEqual(['Second block']);
+    expect(r.container.textContent).not.toContain('The end');
     fireEvent.keyDown(window, { key: 'ArrowRight' });
-    expect(r.container.querySelectorAll('.canvas-slides__blk--pending').length).toBe(0);
+    expect(pending()).toEqual([]);
+    expect(r.container.textContent).not.toContain('The end');
     fireEvent.keyDown(window, { key: 'ArrowRight' });
     expect(r.container.textContent).toContain('The end');
   });
@@ -154,6 +164,12 @@ describe('CanvasPresentPage — the screen-reader deck outline (SLU-1)', () => {
       .querySelectorAll('li[aria-current="true"]').length).toBe(1);
   });
 
+  // DOUBLE GUARD (recorded, /grade-tests w46): this passes through
+  // slidesDefinition's coerceSlide, which names every unnamed slide (its title,
+  // else 'Slide N'), so the page's own `t('frameN')` fallback in outlineLabel is
+  // unreachable through the real definition. The probe that holds this case is on
+  // the shared piece (coerceSlide's 'Slide N' default); the page fallback is a
+  // second, defensive guard for a definition that does not name frames.
   it('a frame with no name of its own still reads by a label, never blank', async () => {
     state.record = {
       canvasId: 'c1', canvasTypeId: 'canvas.slides', name: 'Deck', version: 1,

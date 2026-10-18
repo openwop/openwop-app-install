@@ -35,6 +35,16 @@
  * unseen, because this lane is opt-in (`OPENWOP_CI_E2E_ROUTES=1`). It now asserts
  * the mechanism the product uses — and pins the retired one as ABSENT, so the two
  * cannot both come back.
+ *
+ * WHERE IT RUNS (w53): NOT in the default `npm run ci` e2e pass — every block skips
+ * without OPENWOP_E2E_ROUTES=1. Its only runner is `scripts/e2e-routes.sh` (via
+ * `npm run test:e2e:full`, or `npm run ci` with OPENWOP_CI_E2E_ROUTES=1).
+ * `npm run test:e2e:routes` does NOT include this spec (a tracked script drift).
+ *
+ * Breaks it (w53 probes): `announce(…, { assertive: false })` for error toasts;
+ * `copyToClipboard` reporting failure unconditionally; the payout Notice losing its
+ * `announce` or not rendering; `resolveCanvasOrg` guessing `orgs[0]`; the picker not
+ * writing `?org=`.
  */
 import { test, expect, type BrowserContext } from '@playwright/test';
 import { login, API } from './support/session.js';
@@ -74,7 +84,7 @@ test.describe('an action DELIVERS its announcement, not just its pixels', () => 
   });
   test.afterAll(async () => { await ctx?.close(); });
 
-  test('a failed copy reaches an ALERT region, not only the screen', async () => {
+  test('a failed copy reaches the ASSERTIVE shell region, not only the screen', async () => {
     const page = await ctx.newPage();
     try {
       await page.addInitScript(stubClipboard('unavailable'));
@@ -169,14 +179,25 @@ test.describe('a failed READ announces, on a surface where silence costs money',
 
       await page.goto('/admin/kicktodo/commerce');
 
-      // Visible to sighted users…
-      const notice = page.getByText(/payout|ledger|could not|unavailable/i).first();
-      await expect(notice).toBeVisible();
+      // The failure copy itself (`kicktodo-admin:payoutReadFailed`), never a broad
+      // regex: the section HEADING says "payout" whether or not anything failed, and
+      // the round-1 form (`/payout|ledger|could not|unavailable/i.first()` plus a
+      // polite region that was merely non-empty) stayed green with the Notice
+      // deleted outright (w53 probes `ann-payout-notice-gone`, `ann-payout-announce`).
+      const FAILED = /Some payout data could not be loaded/;
+
+      // Visible to sighted users, inside the page (the live region sits OUTSIDE
+      // <main>, so this cannot be satisfied by the announcement alone)…
+      await expect(page.locator('main').getByText(FAILED)).toBeVisible();
 
       // …AND delivered to the shell's polite region. Without the second half a
       // sighted user sees "we could not read the ledger" and a screen-reader
       // user sees a page that looks complete.
-      await expect(page.locator('[data-owp-live="polite"]').first()).not.toBeEmpty();
+      await expect(page.locator('[data-owp-live="polite"]')).toContainText(FAILED);
+
+      // The money claim the page exists to keep: an unread ledger never says
+      // "No payout runs yet." (UX-KTA-1).
+      await expect(page.getByText('No payout runs yet.')).toHaveCount(0);
     } finally {
       await page.close();
     }
@@ -202,6 +223,12 @@ test.describe('a failed READ announces, on a surface where silence costs money',
  * ordering is itself the property under test: it must ASK before it reads, not
  * read wrongly and report a failure.
  */
+// TWIN (w53): both cases below are also pinned in jsdom by
+// `src/canvas/__tests__/CanvasEditorPage.org.test.tsx` — "asks for nothing when the
+// link omits the org and several are possible" and "opens the chosen org after the
+// picker is used" (both went red under the same sabotages, w53 probes
+// `ann-picker-UNIT` / `ann-pick-url-UNIT`). Kept (protected incident witness, #2718):
+// this is the only run against a real `/orgs` list and the real route wiring.
 test.describe('a lossy canvas link asks which workspace, instead of guessing', () => {
   test.skip(!ENABLED, 'Set OPENWOP_E2E_ROUTES=1 + a backend with the test seams.');
   test.describe.configure({ timeout: 60_000 });

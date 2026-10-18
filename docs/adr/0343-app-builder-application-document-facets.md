@@ -119,6 +119,17 @@ collection-review wire shape are ADR 0342's flagged RFC watch-items, not this AD
    canvas-editor factory: with every facet additive, v1→v1 is the identity, and
    a factory hook with only identity behavior is a consumer-less surface (the
    ADR 0307 rule). Wiring lands with the first real migration.
+
+   > **CORRECTED 2026-10-13 (grade-tests wave 36): "a pure, tested v1
+   > mechanism" is no longer true; it is untested.** `migrateAppDoc` still has
+   > no production caller (`git grep` finds only `migrations.ts` itself and a
+   > comment in `artifactTypes.ts`), and with `MIGRATIONS = {}` it is the
+   > identity on every input. Its three cases in `appDocFacets.test.ts` could
+   > not detect any shipped defect, so they were cut as a dead subject. The
+   > module is untested scaffold until the first real migration lands, and
+   > that migration MUST arrive with its own fixture AND the canvas-editor
+   > wiring in the same change, so its test guards a reachable path. The
+   > decision recorded above (identity v1, wiring deferred) is unchanged.
 5. **The capability-manifest honesty suite exposed real parity gaps** the
    uniform "all targets support everything" assumption hid: `react-tailwind`,
    `react-styled`, `react-native`, `flutter`, and `nextjs` do NOT carry

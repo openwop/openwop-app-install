@@ -13,6 +13,11 @@ import {
  * well-known `endpoints` map is the negotiation. This client used to hard-code
  * `/v1/index.json`. These tests assert the URLs actually requested, since a
  * mocked client would hide exactly that.
+ *
+ * Sabotage that turns it red: prefer the flat aliases over v2; drop the flat fallback;
+ * guess a path with no endpoints map; skip `{name}`; drop the v2 renames
+ * (signingScheme, versionDeprecated, sbomUrl); trust a yanked `latest`; compare
+ * versions as strings; rank a prerelease above its release.
  */
 const WELL_KNOWN = {
   endpoints: {
@@ -65,7 +70,9 @@ describe('registry paths are resolved through endpoints.v2, never constructed', 
         name: 'core.x', latest: '1.0.0',
         versions: [{
           version: '1.0.0', manifestUrl: '/v2/packs/core.x/-/1.0.0.json', tarballUrl: 't', signatureUrl: 's',
-          sbomUrl: '/v2/packs/core.x/-/1.0.0.sbom.json', signingScheme: 'ed25519-canonical-json',
+          // NOT the manifest's `.sbom.json` sibling: a client that ignored the v2 link and
+          // derived the v1 sibling would land elsewhere.
+          sbomUrl: '/v2/sbom/core.x/1.0.0.cdx.json', signingScheme: 'ed25519-canonical-json',
           signingKeyId: 'k', integrity: 'sha256-x', versionDeprecated: true, yanked: false,
         }],
       },
@@ -76,12 +83,16 @@ describe('registry paths are resolved through endpoints.v2, never constructed', 
     expect(v.signingMethod).toBe('ed25519-canonical-json');
     expect(v.deprecated).toBe(true);
     expect(v.publishedAt).toBeUndefined();
-    expect(sbomUrlFor(v)).toMatch(/\/v2\/packs\/core\.x\/-\/1\.0\.0\.sbom\.json$/);
+    expect(sbomUrlFor(v)).toMatch(/\/v2\/sbom\/core\.x\/1\.0\.0\.cdx\.json$/);
   });
 });
 
 describe('RFC 0222 — a yanked version is never presented as latest', () => {
-  const rec = (version: string, yanked = false) => ({ version, yanked } as PackVersionRecord);
+  const rec = (version: string, yanked = false): PackVersionRecord => ({
+    version, yanked, deprecated: false,
+    manifestUrl: `/v2/packs/p/-/${version}.json`, tarballUrl: 't', signatureUrl: 's',
+    signingMethod: 'ed25519-canonical-json', signingKeyId: 'k', integrity: 'sha256-x',
+  });
 
   it('keeps the named latest when it is not yanked', () => {
     expect(latestInstallable({ latest: '1.2.0', versions: [rec('1.0.0'), rec('1.2.0')] })?.version).toBe('1.2.0');
@@ -93,7 +104,9 @@ describe('RFC 0222 — a yanked version is never presented as latest', () => {
   });
 
   it('a release outranks its own prerelease', () => {
-    expect(latestInstallable({ latest: 'x', versions: [rec('1.0.0'), rec('1.0.0-rc.1')] })?.version).toBe('1.0.0');
+    // Prerelease FIRST: `reduce` keeps the first element unless the comparison says the
+    // release is greater, so the release-first order could not show a broken comparison.
+    expect(latestInstallable({ latest: 'x', versions: [rec('1.0.0-rc.1'), rec('1.0.0')] })?.version).toBe('1.0.0');
   });
 
   it('is undefined when every version is yanked — there is nothing to install', () => {

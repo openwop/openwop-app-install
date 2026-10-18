@@ -64,14 +64,24 @@ function probes(routes: readonly { method: string; path: string }[]): Probe[] {
   }));
 }
 
-async function call(cookie: string, p: Probe): Promise<{ status: number; body: any }> {
+/** The error envelope fields this sweep reads (`OpenwopError` → `{ error, code? }`). */
+interface RefusalBody { error?: string; code?: string }
+function asRefusal(v: unknown): RefusalBody | undefined {
+  if (!v || typeof v !== 'object') return undefined;
+  return {
+    ...('error' in v && typeof v.error === 'string' ? { error: v.error } : {}),
+    ...('code' in v && typeof v.code === 'string' ? { code: v.code } : {}),
+  };
+}
+
+async function call(cookie: string, p: Probe): Promise<{ status: number; body: RefusalBody | undefined }> {
   const sendsBody = p.method !== 'GET' && p.method !== 'DELETE';
   const res = await fetch(`${BASE}${p.path}`, {
     method: p.method,
     headers: { cookie, ...(sendsBody ? { 'content-type': 'application/json' } : {}) },
     ...(sendsBody ? { body: '{}' } : {}),
   });
-  return { status: res.status, body: await res.json().catch(() => undefined) };
+  return { status: res.status, body: asRefusal(await res.json().catch(() => undefined)) };
 }
 
 const CREATOR = probes(KICKTODO_CREATOR_ROUTES);
@@ -86,7 +96,7 @@ beforeAll(async () => {
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
   // The toggles MUST be on: a `feature_disabled` refusal would make every
   // assertion below pass while proving nothing about the scope check.
-  for (const id of ['users', 'kicktodo-core', 'kicktodo-creator', 'kicktodo-metrics']) {
+  for (const id of ['users', 'kicktodo-core', 'kicktodo-creator', 'kicktodo-metrics', 'kicktodo-engagement']) {
     const d = getToggleDefault(id);
     if (d) await saveConfig({ ...d, status: 'on' }, 'test');
   }
@@ -119,6 +129,16 @@ describe('KTFULL-B15 — EVERY Metrics route refuses an editor with forbidden_sc
     const r = await call(editorCookie, p);
     expect(r.status, `${p.key} must be privileged`).toBe(403);
     expect(r.body?.error ?? r.body?.code, `${p.key} must refuse on SCOPE`).toContain('forbidden_scope');
+  });
+});
+
+describe('code-grade KTE-1 — the engagement effectiveness read is an operator read', () => {
+  const EFFECTIVENESS: Probe = { key: 'GET effectiveness', method: 'GET', path: '/host/openwop-app/kicktodo/engagement/effectiveness' };
+  it('an editor is refused on scope; an admin reaches it', async () => {
+    const refused = await call(editorCookie, EFFECTIVENESS);
+    expect(refused.status).toBe(403);
+    expect(refused.body?.error ?? refused.body?.code).toContain('forbidden_scope');
+    expect((await call(adminCookie, EFFECTIVENESS)).status).toBe(200);
   });
 });
 

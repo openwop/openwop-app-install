@@ -32,7 +32,14 @@ const read = (p: string): string => readFileSync(join(SRC, p), 'utf8');
  * reports a regression that is not there — and, worse, would go green if
  * someone "fixed" it by deleting the real announcement. Accept `=` or `:`.
  */
-const announced = (p: string): number => (read(p).match(/<Notice[^>]*\bannounce\s*[:=]/g) ?? []).length;
+//
+// The tag body is `(?:=>|[^>])*`, not `[^>]*`: a plain `[^>]*` stopped at the `>`
+// of any arrow-function prop (`onDismiss={() => …}`) written BEFORE `announce`, so
+// a second announced Notice spelled that way was invisible to the count (w49
+// probe `nst-arrow` planted one and stayed green). `\b` keeps `<NoticeFoo` out.
+const NOTICE_TAG = String.raw`<Notice\b(?:=>|[^>])*`;
+const announced = (p: string): number =>
+  (read(p).match(new RegExp(String.raw`${NOTICE_TAG}\bannounce\s*[:=]`, 'g')) ?? []).length;
 
 const TRANCHE = [
   'PrivacyPage.tsx',
@@ -108,7 +115,7 @@ describe('Notice sweep tranche 1 — exactly one announcement per page', () => {
     // assert no file in the tranche pairs them, so a future refactor that widens
     // the type still trips here.
     for (const p of TRANCHE) {
-      for (const el of read(p).match(/<Notice[^>]*>/g) ?? []) {
+      for (const el of read(p).match(new RegExp(`${NOTICE_TAG}>`, 'g')) ?? []) {
         if (/\bannounce=/.test(el)) expect(el, `${p}: ${el}`).not.toMatch(/\bid=/);
       }
     }

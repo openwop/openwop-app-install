@@ -18,7 +18,7 @@
  * @see src/host/workforceService.ts
  */
 
-import type { Express, Request } from 'express';
+import type { Express, Request, Response } from 'express';
 import { OpenwopError } from '../types.js';
 import type { Storage } from '../storage/storage.js';
 import {
@@ -31,17 +31,20 @@ import {
   searchWorkforceTrace,
   setWorkforceStatus,
   SHOWCASE_TENANT,
+  workforceEtag,
 } from '../host/workforceService.js';
-import type { WorkforceStatus } from '../host/workforce.js';
+import type { Workforce, WorkforceStatus } from '../host/workforce.js';
 import {
   getMigrationJourney,
+  migrationEtag,
   patchMigrationJourney,
   type MigrationJourneyPatch,
 } from '../host/migrationService.js';
-import { MIGRATION_STAGE_KEYS, type MigrationStageKey, type StageStatus } from '../host/migrationJourney.js';
+import { MIGRATION_STAGE_KEYS, type MigrationJourney, type MigrationStageKey, type StageStatus } from '../host/migrationJourney.js';
 import { evalSuiteEnabled, runWorkforceLiveShadowEval } from '../host/workforceEval.js';
 import { demoMode } from '../host/demoMode.js';
 import { requireTenantWrite } from '../features/featureRoute.js';
+import { etagHeader, parseIfMatch } from '../host/entityVersion.js';
 
 const WORKFORCE_STATUSES: readonly WorkforceStatus[] = ['shadow', 'piloting', 'production'];
 
@@ -119,6 +122,20 @@ async function dashboardRuns(
   return { runs: own, source: 'tenant' };
 }
 
+/** ADR 0775 P4 — a workforce / journey read carries its version as an `ETag`
+ *  header and an `etag` body field, which a later PATCH may send as `If-Match`. */
+function sendWorkforce(res: Response, wf: Workforce): void {
+  const etag = workforceEtag(wf);
+  res.setHeader('ETag', etagHeader(etag));
+  res.json({ ...wf, etag });
+}
+
+function sendJourney(res: Response, journey: MigrationJourney): void {
+  const etag = migrationEtag(journey);
+  res.setHeader('ETag', etagHeader(etag));
+  res.json({ ...journey, etag });
+}
+
 export function registerWorkforceRoutes(app: Express, deps: Deps): void {
   app.get('/host/openwop-app/workforces', async (req, res, next) => {
     try {
@@ -136,7 +153,7 @@ export function registerWorkforceRoutes(app: Express, deps: Deps): void {
           workforceId: req.params.workforceId,
         });
       }
-      res.json(wf);
+      sendWorkforce(res, wf);
     } catch (err) {
       next(err);
     }
@@ -210,8 +227,15 @@ export function registerWorkforceRoutes(app: Express, deps: Deps): void {
           );
         }
       }
-      const updated = await setWorkforceStatus(tenantOf(req), req.params.workforceId, status as WorkforceStatus);
-      res.json(updated);
+      const updated = await setWorkforceStatus(tenantOf(req), req.params.workforceId, status as WorkforceStatus, {
+        ifMatch: parseIfMatch(req.header('If-Match')),
+      });
+      if (!updated) {
+        throw new OpenwopError('not_found', `Workforce \`${req.params.workforceId}\` not found.`, 404, {
+          workforceId: req.params.workforceId,
+        });
+      }
+      sendWorkforce(res, updated);
     } catch (err) {
       next(err);
     }
@@ -226,7 +250,7 @@ export function registerWorkforceRoutes(app: Express, deps: Deps): void {
           workforceId: req.params.workforceId,
         });
       }
-      res.json(await getMigrationJourney(tenantOf(req), req.params.workforceId));
+      sendJourney(res, await getMigrationJourney(tenantOf(req), req.params.workforceId));
     } catch (err) {
       next(err);
     }
@@ -241,7 +265,12 @@ export function registerWorkforceRoutes(app: Express, deps: Deps): void {
           workforceId: req.params.workforceId,
         });
       }
-      res.json(await patchMigrationJourney(tenantOf(req), req.params.workforceId, parseMigrationPatch(req.body)));
+      sendJourney(
+        res,
+        await patchMigrationJourney(tenantOf(req), req.params.workforceId, parseMigrationPatch(req.body), {
+          ifMatch: parseIfMatch(req.header('If-Match')),
+        }),
+      );
     } catch (err) {
       next(err);
     }
@@ -304,7 +333,7 @@ export function registerWorkforceRoutes(app: Express, deps: Deps): void {
           workforceId: req.params.workforceId,
         });
       }
-      const summary = await runWorkforceLiveShadowEval(deps.storage, tenantOf(req), req.params.workforceId, Date.now());
+      const summary = await runWorkforceLiveShadowEval(deps.storage, tenantOf(req), wf, Date.now());
       res.status(200).json(summary);
     } catch (err) {
       next(err);

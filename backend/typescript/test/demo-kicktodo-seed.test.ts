@@ -7,8 +7,14 @@
  * broken install. These tests pin the three properties that make the seeder
  * safe to run against a real tenant: it is idempotent, it is toggle-gated, and
  * `clear()` is surgical.
+ *
+ * Sabotages that turn these red (w41 probes): dropping the published-row
+ * `continue` (idempotence), the toggle check, the `isDemo` filter or the
+ * demo-ACTOR filter in clear() (surgical), versioning a retired lineage with
+ * createDraft instead of createDraftVersion (round trip), the live-state filter
+ * on the re-seed enrollment check, and swallowing an untyped enroll error.
  */
-import { beforeAll, describe, expect, it, vi } from 'vitest';
+import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -17,10 +23,10 @@ import { initInMemorySurfaces } from '../src/host/inMemorySurfaces.js';
 import { openStorage } from '../src/storage/index.js';
 import { countDemoKicktodo, seedDemoKicktodo, clearDemoKicktodo } from '../src/host/demoKicktodoSeed.js';
 import {
-  createDraft, createDraftVersion, publishChallenge, listPublished, getLatest, ChallengeValidationError,
+  createDraft, createDraftVersion, publishChallenge, listPublished, getLatest, ChallengeValidationError, listChallengeVersions,
 } from '../src/features/kicktodo-core/challengeService.js';
 import {
-  listEnrollmentsFor, registerEnrollGuard, __clearEnrollGuards,
+  enroll, listEnrollmentsFor, registerEnrollGuard, __clearEnrollGuards,
 } from '../src/features/kicktodo-core/enrollmentService.js';
 import { KICKTODO_DEMO_CHALLENGES, KICKTODO_DEMO_PREFIX, KICKTODO_DEMO_ACTOR } from '../src/host/seed-data/kicktodoDemo.js';
 
@@ -35,6 +41,11 @@ beforeAll(async () => {
   storage = await openStorage('memory://');
   initHostExtPersistence(storage);
   initInMemorySurfaces({ dataDir: mkdtempSync(join(tmpdir(), 'owp-kicktodo-seed-')) });
+});
+// Every case owns its toggle + guard state (shuffle-safe).
+beforeEach(() => {
+  toggleOn = true;
+  __clearEnrollGuards();
 });
 
 describe('demo-kicktodo', () => {
@@ -64,12 +75,16 @@ describe('demo-kicktodo', () => {
 
   it('is toggle-gated: reports skipped rather than seeding when kicktodo-core is off', async () => {
     toggleOn = false;
-    const t = 'kt-seed-off';
-    const r = await seedDemoKicktodo(t);
-    expect(r.created).toBe(0);
-    expect(String(r.details?.skipped ?? '')).toContain('kicktodo-core');
-    expect(await countDemoKicktodo(t)).toBe(0);
-    toggleOn = true;
+    try {
+      const t = 'kt-seed-off';
+      const r = await seedDemoKicktodo(t);
+      expect(r.created).toBe(0);
+      expect(r.details?.skipped).toBe('kicktodo-core toggle off');
+      toggleOn = true; // read back with the toggle ON: nothing was written while it was off
+      expect(await countDemoKicktodo(t)).toBe(0);
+    } finally {
+      toggleOn = true;
+    }
   });
 
   it('clear() is SURGICAL — an operator-authored challenge survives', async () => {
@@ -82,6 +97,17 @@ describe('demo-kicktodo', () => {
       activities: [{ stableActivityId: 'a1', day: 1, title: 'x', instructions: 'y', evidencePolicy: 'attestation' }],
     });
     await publishChallenge(t, mine.id, mine.version);
+    // A REAL participant enrolled in a demo challenge keeps their pinned version
+    // (PRD §13) — clear() abandons only the demo ACTOR's enrollments.
+    // DOUBLE GUARD (w41 r2): this is held by TWO checks — clear()'s actor filter
+    // (`e.ownerSubject !== KICKTODO_DEMO_ACTOR`, demoKicktodoSeed.ts) AND
+    // abandonEnrollment's owner check (`e.ownerSubject !== actingSubject`,
+    // enrollmentService.ts), since clear() always acts AS the demo actor. Removing
+    // either alone stays green here (w41g4-seed-actor-only-r2 was vacuous); the
+    // owner check is witnessed by kicktodo-core.test.ts "uniform 404: a foreign
+    // participant cannot see or mutate my enrollment" (w41g4-abandon-owner-r3).
+    const demoId = `${KICKTODO_DEMO_PREFIX}${KICKTODO_DEMO_CHALLENGES[0]!.slug}`;
+    const { enrollment: real } = await enroll({ tenantId: t, ownerSubject: 'user:real-participant', challengeId: demoId, challengeVersion: 1, timezone: 'UTC' });
 
     const cleared = await clearDemoKicktodo(t);
     // `cleared` counts every demo entity removed: N retired challenges + the
@@ -90,6 +116,9 @@ describe('demo-kicktodo', () => {
     expect(cleared.details?.abandoned).toBe(1);
     expect(cleared.cleared).toBe(KICKTODO_DEMO_CHALLENGES.length + 1);
     expect(await countDemoKicktodo(t)).toBe(0);
+    const realAfter = (await listEnrollmentsFor(t, 'user:real-participant')).find((e) => e.id === real.id);
+    expect(realAfter?.state, 'a real participant on a demo challenge is never abandoned').toBe('active');
+    expect(realAfter?.challengeVersion).toBe(1);
 
     const left = await listPublished(t);
     expect(left.map((c) => c.id), 'the operator-authored challenge must survive').toContain(mine.id);
@@ -139,7 +168,6 @@ describe('demo-kicktodo', () => {
   });
 
   it('enroll(): a TYPED refusal is reported as enrolled:0; anything else is RETHROWN, never swallowed', async () => {
-    toggleOn = true;
     try {
       registerEnrollGuard(async () => ({ ok: false, reason: 'capacity' }));
       const refused = await seedDemoKicktodo('kt-seed-refused');
@@ -168,5 +196,37 @@ describe('demo-kicktodo', () => {
     expect(v2?.version).toBe(2);
     expect(v2?.status).toBe('draft');
     expect((await getLatest(t, 'chal:cdv'))?.version).toBe(2);
+  });
+
+  /**
+   * KTSEED-3 (KickTodo wave 4C) — each clear/seed cycle used to leave the retired
+   * version AND the demo actor's abandoned enrollment behind forever (two cycles ⇒
+   * three versions and two abandoned rows per tenant). The re-seed now prunes its
+   * own residue, and only its own: a version a REAL participant still pins is kept.
+   * Breaks if `pruneDemoResidue` is not called, or prunes a pinned version
+   * (sabotage-witnessed: drop the `pinned.has(...)` guard → the real participant's
+   * v1 disappears).
+   */
+  it('KTSEED-3 — repeated clear/seed cycles do not accumulate retired versions or abandoned enrollments', async () => {
+    toggleOn = true;
+    const t = 'kt-seed-residue';
+    await seedDemoKicktodo(t);
+    const pinnedId = `${KICKTODO_DEMO_PREFIX}${KICKTODO_DEMO_CHALLENGES[0]!.slug}`;
+    // A real participant pins v1 of the first demo challenge.
+    await enroll({ tenantId: t, ownerSubject: 'user:real-pinned', challengeId: pinnedId, challengeVersion: 1, timezone: 'UTC' });
+    for (let cycle = 0; cycle < 2; cycle += 1) {
+      await clearDemoKicktodo(t);
+      await seedDemoKicktodo(t);
+    }
+    const actorRows = await listEnrollmentsFor(t, KICKTODO_DEMO_ACTOR);
+    expect(actorRows.map((e) => e.state), 'only the live demo enrollment is left').toEqual(['active']);
+    for (const c of KICKTODO_DEMO_CHALLENGES) {
+      const id = `${KICKTODO_DEMO_PREFIX}${c.slug}`;
+      const versions = (await listChallengeVersions(t, id)).map((v) => `${v.version}:${v.status}`);
+      expect(versions, c.slug).toEqual(id === pinnedId ? ['1:retired', '3:published'] : ['3:published']);
+    }
+    // Idempotent: one more seed changes nothing.
+    await seedDemoKicktodo(t);
+    expect((await listChallengeVersions(t, pinnedId)).map((v) => v.version)).toEqual([1, 3]);
   });
 });

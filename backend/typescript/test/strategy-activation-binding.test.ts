@@ -17,7 +17,14 @@
  *   STR3WF-4  The approval carried no proposer, so the submitter cleared their own
  *             gate even when another approver existed.
  *
- * Every refusal carries a matched positive control.
+ * The later describes are ADR 0845 D1–D8 (the run lane, the decide-exit binding, the
+ * writer ratchet, CAS, separation of duties) plus STR3WF-8, STR3CD-3 and STR3CD-6.
+ *
+ * Every refusal carries a matched positive control. /grade-tests wave 19 witnessed each
+ * leg by sabotage: e.g. reducing the run surface's `canRead` to `isShared` reds STR3WF-1
+ * and the D1 sweep; returning `null` from `canonicalDecider` reds the via-key leg (its
+ * issuer assertion), not just the unit case; dropping the stale-card reject in
+ * `queueStrategyActivationIfGated` reds the re-submit leg.
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -27,11 +34,18 @@ import { fileURLToPath } from 'node:url';
 import { buildStrategySurface, SURFACE_VERB_ACCESS } from '../src/features/strategy/surface.js';
 import { getStrategy, updateStrategy } from '../src/features/strategy/strategyService.js';
 import { canonicalDecider } from '../src/features/strategy/activationApproval.js';
-import { registerDelegationLookup } from '../src/host/delegatedSubject.js';
 import { createMember, createOrg, hasDistinctScopeHolder } from '../src/host/accessControlService.js';
 import { createStrategyActivationApproval, getApproval } from '../src/host/approvalService.js';
 import { nodes as strategyNodes } from '../../../packs/feature.strategy.nodes/index.mjs';
 import { bootPlanningApp, makeClient, enableToggle, uniqEmail, type Client } from './planningHarness.js';
+
+type ActivationCard = {
+  approvalId: string; tenantId: string; kind: string; strategyId: string;
+  strategySnapshot?: { objectives: Array<{ title: string }> }; strategyContentDigest?: string;
+};
+type Ref = { id: string };
+type CheckInOut = { checkIn: { status?: string } | null; reason?: string };
+type NodeOut = { status: string; error?: { code: string } };
 
 let BASE = '';
 let closeApp: () => Promise<void>;
@@ -66,10 +80,10 @@ async function ownerWithOrg(): Promise<{ owner: Client; ownerId: string; orgId: 
   return { owner, ownerId: u.userId, orgId: org.body.orgId, tenantId };
 }
 
-async function pendingActivation(c: Client, strategyId: string): Promise<any | undefined> {
+async function pendingActivation(c: Client, strategyId: string): Promise<ActivationCard | undefined> {
   const inbox = await c.get(`${APPROVALS}?status=pending`);
   expect(inbox.status).toBe(200);
-  return (inbox.body.items as any[]).find((a) => a.kind === 'strategy-activation' && a.strategyId === strategyId);
+  return (inbox.body.items as ActivationCard[]).find((a) => a.kind === 'strategy-activation' && a.strategyId === strategyId);
 }
 
 async function withGate<T>(fn: () => Promise<T>): Promise<T> {
@@ -78,7 +92,7 @@ async function withGate<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 /** Activate with the gate OFF, so the fixture starts from an approved, live strategy. */
-async function liveStrategy(owner: Client, orgId: string, objectiveTitle: string): Promise<any> {
+async function liveStrategy(owner: Client, orgId: string, objectiveTitle: string): Promise<{ id: string }> {
   await enableToggle('strategy-approval-gate', 'off');
   const s = (await owner.post(S, { orgId, title: 'Live', objectives: [{ title: objectiveTitle, keyResults: [] }] })).body;
   const r = await owner.patch(`${S}/${s.id}`, { status: 'active' });
@@ -149,7 +163,7 @@ describe('STR3WF-4 — the submitter cannot clear their own gate when another ap
     await withGate(async () => {
       const s = (await owner.post(S, { orgId, title: 'Mine' })).body;
       await owner.patch(`${S}/${s.id}`, { status: 'active' });
-      const appr = await pendingActivation(owner, s.id);
+      const appr = (await pendingActivation(owner, s.id))!;
       expect(appr).toBeTruthy();
       const self = await owner.post(`${APPROVALS}/${appr.approvalId}/claim`);
       expect(self.status, `self-approval cleared the gate: ${JSON.stringify(self.body)}`).toBe(403);
@@ -166,7 +180,7 @@ describe('STR3WF-4 — the submitter cannot clear their own gate when another ap
     await withGate(async () => {
       const s = (await owner.post(S, { orgId, title: 'Solo' })).body;
       await owner.patch(`${S}/${s.id}`, { status: 'active' });
-      const appr = await pendingActivation(owner, s.id);
+      const appr = (await pendingActivation(owner, s.id))!;
       expect((await owner.post(`${APPROVALS}/${appr.approvalId}/claim`)).status).toBe(200);
       expect((await owner.get(`${S}/${s.id}`)).body.status).toBe('active');
     });
@@ -189,28 +203,29 @@ describe('STR3WF-1 — a human-started run is held to its starter\'s access', ()
   it('lists and reads only the starter\'s readable strategies', async () => {
     const { tenantId, memberId, a, b } = await twoOrgs();
     const surface = buildStrategySurface({ tenantId, actingUserId: memberId });
-    const ids = ((await surface.listStrategies({})) as any).strategies.map((s: any) => s.id);
+    const ids = ((await surface.listStrategies({})) as { strategies: Ref[] }).strategies.map((s) => s.id);
     expect(ids, 'positive control: org-A strategy').toContain(a.id);
     expect(ids, 'org-B strategy listed to an org-A-only run').not.toContain(b.id);
-    expect(((await surface.getStrategy({ id: a.id })) as any).strategy?.title).toBe('A plan');
-    expect(((await surface.getStrategy({ id: b.id })) as any).strategy, 'org-B objectives read by an org-A-only run').toBeNull();
-    const health = ((await surface.getHealth({})) as any).strategies.map((s: any) => s.strategyId ?? s.id);
+    expect(((await surface.getStrategy({ id: a.id })) as { strategy: { title: string } | null }).strategy?.title).toBe('A plan');
+    expect(((await surface.getStrategy({ id: b.id })) as { strategy: unknown }).strategy, 'org-B objectives read by an org-A-only run').toBeNull();
+    const health = ((await surface.getHealth({})) as { strategies: Ref[] }).strategies.map((s) => s.id);
+    expect(health, 'positive control: org-A strategy in the health rollup').toContain(a.id);
     expect(health).not.toContain(b.id);
   });
 
   it('cannot write a check-in into a strategy the starter cannot write', async () => {
     const { tenantId, memberId, a, b } = await twoOrgs();
     const surface = buildStrategySurface({ tenantId, actingUserId: memberId });
-    const ok = (await surface.checkIn({ strategyId: a.id, krId: a.objectives[0].keyResults[0].id, value: 3 })) as any;
+    const ok = (await surface.checkIn({ strategyId: a.id, krId: a.objectives[0].keyResults[0].id, value: 3 })) as CheckInOut;
     expect(ok.checkIn, 'positive control: org-A check-in').toBeTruthy();
-    const denied = (await surface.checkIn({ strategyId: b.id, krId: b.objectives[0].keyResults[0].id, value: 3 })) as any;
+    const denied = (await surface.checkIn({ strategyId: b.id, krId: b.objectives[0].keyResults[0].id, value: 3 })) as CheckInOut;
     expect(denied.checkIn, 'org-A-only run wrote a check-in into org B').toBeNull();
   });
 
   it('MATCHED CONTROL — an actorless (scheduled) run keeps the tenant-trusted shared view', async () => {
     const { tenantId, a, b } = await twoOrgs();
     const surface = buildStrategySurface({ tenantId });
-    const ids = ((await surface.listStrategies({})) as any).strategies.map((s: any) => s.id);
+    const ids = ((await surface.listStrategies({})) as { strategies: Ref[] }).strategies.map((s) => s.id);
     expect(ids).toEqual(expect.arrayContaining([a.id, b.id]));
   });
 });
@@ -241,8 +256,8 @@ describe('ADR 0845 D2 — the approval binds to the content shown, at the decide
     await withGate(async () => {
       const s = (await owner.post(S, { orgId, title: 'Bound', objectives: [{ title: 'Shown', keyResults: [] }] })).body;
       await owner.patch(`${S}/${s.id}`, { status: 'active' });
-      const appr = await pendingActivation(owner, s.id);
-      expect(appr.strategySnapshot.objectives[0].title, 'the card carries what is approved').toBe('Shown');
+      const appr = (await pendingActivation(owner, s.id))!;
+      expect(appr.strategySnapshot!.objectives[0]!.title, 'the card carries what is approved').toBe('Shown');
       expect(appr.strategyContentDigest).toMatch(/^[0-9a-f]{64}$/);
       // A direct service write — the shape of the NEXT writer that forgets the withdraw.
       await updateStrategy(appr.tenantId, s.id, { objectives: [{ title: 'Swapped in', keyResults: [] }] }, 'test');
@@ -258,7 +273,7 @@ describe('ADR 0845 D2 — the approval binds to the content shown, at the decide
     await withGate(async () => {
       const s = (await owner.post(S, { orgId, title: 'Bound', objectives: [{ title: 'Shown', keyResults: [] }] })).body;
       await owner.patch(`${S}/${s.id}`, { status: 'active' });
-      const appr = await pendingActivation(owner, s.id);
+      const appr = (await pendingActivation(owner, s.id))!;
       await updateStrategy(appr.tenantId, s.id, { summary: 'a note' }, 'test');
       expect((await owner.post(`${APPROVALS}/${appr.approvalId}/claim`)).status).toBe(200);
       expect((await owner.get(`${S}/${s.id}`)).body.status).toBe('active');
@@ -270,14 +285,16 @@ describe('ADR 0845 D2 — the approval binds to the content shown, at the decide
     await withGate(async () => {
       const s = (await owner.post(S, { orgId, title: 'Resubmit', objectives: [{ title: 'v1', keyResults: [] }] })).body;
       await owner.patch(`${S}/${s.id}`, { status: 'active' });
-      const first = await pendingActivation(owner, s.id);
+      const first = (await pendingActivation(owner, s.id))!;
       await owner.patch(`${S}/${s.id}`, { status: 'active' });
-      expect((await pendingActivation(owner, s.id)).approvalId, 'identical re-submit minted a new card').toBe(first.approvalId);
+      expect((await pendingActivation(owner, s.id))?.approvalId, 'identical re-submit minted a new card').toBe(first.approvalId);
       await updateStrategy(first.tenantId, s.id, { objectives: [{ title: 'v2', keyResults: [] }] }, 'test');
       await owner.patch(`${S}/${s.id}`, { status: 'active' });
-      const second = await pendingActivation(owner, s.id);
+      const second = (await pendingActivation(owner, s.id))!;
       expect(second.approvalId).not.toBe(first.approvalId);
-      expect(second.strategySnapshot.objectives[0].title).toBe('v2');
+      expect(second.strategySnapshot!.objectives[0]!.title).toBe('v2');
+      // "Replaces" — the stale card is CLOSED, not left pending beside the new one.
+      expect((await getApproval(first.approvalId))?.status, 'the stale card is still pending beside its replacement').toBe('rejected');
     });
   });
 });
@@ -305,7 +322,12 @@ describe('ADR 0845 D5 — separation of duties survives a delegated key and a sh
     await withGate(async () => {
       const s = (await owner.post(S, { orgId, title: 'Via key' })).body;
       await owner.patch(`${S}/${s.id}`, { status: 'active' });
-      const appr = await pendingActivation(owner, s.id);
+      const appr = (await pendingActivation(owner, s.id))!;
+      // The key must resolve to its ISSUER (the recorded submitter). Without this the 403
+      // below can come from the fail-closed `null` arm with no mapping at all.
+      const submitter = (await getApproval(appr.approvalId))?.strategyRequestedBy;
+      expect(submitter).toBeTruthy();
+      expect(await canonicalDecider(tenantId, `apikey:${key.body.key.keyId}`), 'the key did not resolve to its issuer').toBe(submitter);
       const viaKey = await fetch(`${BASE}${APPROVALS}/${appr.approvalId}/claim`, {
         method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${key.body.token}` }, body: '{}',
       });
@@ -316,12 +338,20 @@ describe('ADR 0845 D5 — separation of duties survives a delegated key and a sh
     });
   });
 
+  // A REAL key through the real lookup (`apiKeyService.ts` registers it at load). A fake
+  // `registerDelegationLookup` here replaced the process-global lookup for good and made the
+  // via-key leg above order-dependent (it 403'd `forbidden_scope` under shuffle).
   it('canonicalDecider maps a key to its issuer, and fails closed on a foreign or unknown key', async () => {
-    registerDelegationLookup(async (id) => (id === 'k1' ? { issuer: 'user:alice', tenantId: 't-sod' } as any : null));
-    expect(await canonicalDecider('t-sod', 'user:bob')).toBe('user:bob');
-    expect(await canonicalDecider('t-sod', 'apikey:k1')).toBe('user:alice');
-    expect(await canonicalDecider('t-other', 'apikey:k1')).toBeNull();
-    expect(await canonicalDecider('t-sod', 'apikey:nope')).toBeNull();
+    const { owner, tenantId } = await ownerWithOrg();
+    const key = await owner.post('/host/openwop-app/developer-keys', { name: 'canon', scopes: ['*'] });
+    expect(key.status, JSON.stringify(key.body)).toBe(201);
+    const keyId = key.body.key.keyId as string;
+    const issuer = key.body.key.createdBy as string;
+    expect(issuer).toBeTruthy();
+    expect(await canonicalDecider(tenantId, 'user:bob')).toBe('user:bob');
+    expect(await canonicalDecider(tenantId, `apikey:${keyId}`)).toBe(issuer);
+    expect(await canonicalDecider(`${tenantId}-other`, `apikey:${keyId}`)).toBeNull();
+    expect(await canonicalDecider(tenantId, 'apikey:dk:nope')).toBeNull();
   });
 
   it('org-scoped distinct holder counts a shared workspace\'s SUB-org admins (no root-only skip)', async () => {
@@ -343,21 +373,24 @@ describe('ADR 0845 D1 — run lane: proposal bar, sync bar, typed node failure, 
     await addMember(owner, orgA, mu.userId, ['editor']);
     await addMember(owner, orgB, mu.userId, ['viewer']);
     await enableToggle('strategy-approval-gate', 'off');
-    const b = (await owner.post(S, { orgId: orgB, title: 'B', scope: 'org', objectives: [{ title: 'o', keyResults: [{ title: 'kr' }] }] })).body;
+    // A SOURCED KR: without a `measure.source` the sync write is refused by `appendCheckIn`'s
+    // own source guard too, so `canWrite` would not be the only thing refusing it.
+    const b = (await owner.post(S, { orgId: orgB, title: 'B', scope: 'org', objectives: [{ title: 'o', keyResults: [{ title: 'kr', measure: { kind: 'numeric', source: { kind: 'crm-deal-total', orgId: orgB } } }] }] })).body;
     const krId = b.objectives[0].keyResults[0].id;
     const surface = buildStrategySurface({ tenantId, actingUserId: mu.userId });
-    const proposed = (await surface.checkIn({ strategyId: b.id, krId, value: 1 })) as any;
+    const proposed = (await surface.checkIn({ strategyId: b.id, krId, value: 1 })) as CheckInOut;
     expect(proposed.checkIn?.status, 'a viewer could not even propose').toBe('proposed');
-    const sync = (await surface.checkIn({ strategyId: b.id, krId, value: 1, mode: 'sync' })) as any;
+    const sync = (await surface.checkIn({ strategyId: b.id, krId, value: 1, mode: 'sync' })) as CheckInOut;
     expect(sync.checkIn).toBeNull();
     expect(sync.reason).toBe('forbidden');
   });
 
   it('the check-in node fails typed when nothing was recorded (no success-with-null)', async () => {
     const ctx = { inputs: { strategyId: 's', krId: 'k', value: 1 }, features: { strategy: { listStrategies: async () => ({ strategies: [] }), checkIn: async () => ({ checkIn: null, reason: 'forbidden' }) } } };
-    const out = await (strategyNodes as any)['feature.strategy.nodes.check-in'](ctx);
+    const node = (strategyNodes as Record<string, (c: unknown) => Promise<NodeOut>>)['feature.strategy.nodes.check-in']!;
+    const out = await node(ctx);
     expect(out.status).toBe('error');
-    expect(out.error.code).toBe('forbidden');
+    expect(out.error?.code).toBe('forbidden');
   });
 
   it('every surface verb is classified (a new verb fails until gated)', () => {
@@ -443,20 +476,23 @@ describe('ADR 0845 D8 / STR3CD-6 — a metric source must be an org the writer c
     const byOwner = await owner.post(S, { orgId: orgA, title: 'Cross', objectives: [{ title: 'o', keyResults: [kr(orgB)] }] });
     expect(byOwner.status, JSON.stringify(byOwner.body)).toBe(201);
     // Editing a KR whose source someone else configured does not lock the editor out.
-    const keep = await m.patch(`${S}/${byOwner.body.id}`, { objectives: byOwner.body.objectives.map((o: any) => ({ ...o, title: 'renamed' })) });
+    const keep = await m.patch(`${S}/${byOwner.body.id}`, { objectives: (byOwner.body.objectives as Array<{ title: string }>).map((o) => ({ ...o, title: 'renamed' })) });
     expect(keep.status, JSON.stringify(keep.body)).toBe(200);
   });
 });
 
 describe('ADR 0845 D2 — legacy rows and resolved rows', () => {
-  it('a legacy row (no digest) falls back to the status compare and still activates', async () => {
+  it('#4507 — a legacy row (no digest) is refused and closed, never activated', async () => {
     const { owner, orgId, tenantId } = await ownerWithOrg();
     await withGate(async () => {
       const s = (await owner.post(S, { orgId, title: 'Legacy' })).body;
       const appr = await createStrategyActivationApproval({ tenantId, orgId, strategyId: s.id, strategyTitle: s.title, strategyFromStatus: 'draft', proposal: 'legacy' });
+      expect(appr.strategyContentDigest, 'the fixture is a legacy row').toBeUndefined();
       const claim = await owner.post(`${APPROVALS}/${appr.approvalId}/claim`);
-      expect(claim.status, JSON.stringify(claim.body)).toBe(200);
-      expect((await owner.get(`${S}/${s.id}`)).body.status).toBe('active');
+      expect(claim.status, JSON.stringify(claim.body)).toBe(409);
+      expect(JSON.stringify(claim.body)).toContain('unbound_legacy');
+      expect((await owner.get(`${S}/${s.id}`)).body.status).toBe('draft');
+      expect((await getApproval(appr.approvalId))?.status).toBe('rejected');
     });
   });
 
@@ -465,7 +501,7 @@ describe('ADR 0845 D2 — legacy rows and resolved rows', () => {
     await withGate(async () => {
       const s = (await owner.post(S, { orgId, title: 'Strip', objectives: [{ title: 'o', keyResults: [] }] })).body;
       await owner.patch(`${S}/${s.id}`, { status: 'active' });
-      const appr = await pendingActivation(owner, s.id);
+      const appr = (await pendingActivation(owner, s.id))!;
       expect(appr.strategySnapshot).toBeTruthy();
       expect((await owner.post(`${APPROVALS}/${appr.approvalId}/claim`)).status).toBe(200);
       const row = await getApproval(appr.approvalId);

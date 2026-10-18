@@ -41,7 +41,8 @@ describe('payout events → seller payout records', () => {
     await handleConnectEvent({ event: payoutEvent('b', acct, { id: 'po_a' }) });
     const rows = await listPayouts('sp1');
     expect(rows.filter((p) => p.payoutId === 'po_a')).toHaveLength(1);
-    expect(rows.find((p) => p.payoutId === 'po_a')!.amountMajorUnits).toBeCloseTo(123.45);
+    // EXACT: 12345 minor → 123.45 major is integral arithmetic; toBeCloseTo would hide drift.
+    expect(rows.find((p) => p.payoutId === 'po_a')).toMatchObject({ amountMajorUnits: 123.45, status: 'paid', arrivalDate: new Date(1_800_000_000 * 1000).toISOString() });
 
     await handleConnectEvent({ event: { ...payoutEvent('c', acct), type: 'payout.failed' } });
     expect((await listPayouts('sp1')).find((p) => p.payoutId === 'po_c')!.status).toBe('failed');
@@ -53,6 +54,9 @@ describe('payout events → seller payout records', () => {
     const acct = (await getSeller('sp2'))!.stripeAccountId;
     await saveConfig({ id: 'commerce-connect', label: 'x', description: 'test', category: 'Admin', status: 'off', bucketUnit: 'tenant', salt: 'commerce-connect' }, 'test');
     try {
+      // Control: the toggle really is OFF for this tenant — a pure STATE event is dropped…
+      expect((await handleConnectEvent({ event: { id: 'evt_state_off', type: 'account.updated', account: acct, data: { object: { charges_enabled: true, payouts_enabled: true, country: 'US', capabilities: {} } } } })).handled).toBe(false);
+      // …while the MONEY record still lands.
       expect((await handleConnectEvent({ event: payoutEvent('t', acct) })).handled).toBe(true);
       expect(await listPayouts('sp2')).toHaveLength(1);
     } finally {

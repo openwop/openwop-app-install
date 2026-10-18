@@ -56,6 +56,9 @@ describe('ADR 0720 — `enabled` is the MASTER switch, not "any lever on"', () =
     const c = contextEconomy();
     expect(c.transcriptBudget, 'the lever is genuinely on').toBe(true);
     expect(c.enabled, '`enabled` describes the MASTER env var, not the union').toBe(false);
+    // THE RULE that follows (formerly its own "leg 6"): to answer "is anything
+    // transforming context?", read the LEVERS — `enabled` alone would say no.
+    expect(leverValues().some(Boolean), 'so read the LEVERS, never `enabled`').toBe(true);
   });
 
   it('leg 3: every lever behaves that way, not just the transcript one', () => {
@@ -79,14 +82,5 @@ describe('ADR 0720 — `enabled` is the MASTER switch, not "any lever on"', () =
     expect(c.transcriptBudget).toBe(false);
     expect(c.enabled, 'the master is still what `enabled` reports').toBe(true);
     expect([c.providerCache, c.toolDiet, c.memoryBudget, c.transport]).toEqual([true, true, true, true]);
-  });
-
-  it('leg 6 (the ANSWER to "is anything happening?"): read the LEVERS, never `enabled`', () => {
-    // The practical consequence of legs 2-3, stated as the rule a caller should follow.
-    process.env.OPENWOP_CONTEXT_ECONOMY_TRANSCRIPT = '1';
-    const c = contextEconomy();
-    const anythingActive = leverValues().some(Boolean);
-    expect(anythingActive, 'something IS transforming context').toBe(true);
-    expect(c.enabled, 'and `enabled` alone would not have told you').toBe(false);
   });
 });

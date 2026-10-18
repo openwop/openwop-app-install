@@ -20,7 +20,9 @@
  *      binding's (possibly adaptive-thinking, 24-token-starved) chat model.
  *
  * RED witness: pins 2, 4 and 5 fail against the pre-change callers (they always
- * called `dispatchManagedChat`).
+ * called `dispatchManagedChat`). Wave 25 probes: dropping `modelClass:'quick'`, the
+ * featureId, the ATC-2 signal, the actingSubject spread, the opt-in check, the
+ * unresolved-key fall-through, or adding a managed retry on BYOK error each red a case.
  */
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -39,6 +41,7 @@ import { generateTitle } from '../src/features/chat-autotitle/titleGenerator.js'
 import { llmExtractFacts } from '../src/features/memory-auto-extract/memoryExtractor.js';
 
 const NOW = '2026-10-05T00:00:00.000Z';
+const PREV_EPHEMERAL = process.env.OPENWOP_BYOK_EPHEMERAL;
 const T = 'tnt:d5-background';
 const BOUND_MODEL = 'gemini-3.8-flash';
 
@@ -70,7 +73,11 @@ beforeEach(async () => {
   await setSecret('gem', 'KEY', { tenantId: T });
 });
 afterEach(() => { vi.restoreAllMocks(); });
-afterAll(async () => { await clearAllSecrets(); process.env.OPENWOP_BYOK_EPHEMERAL = ''; });
+afterAll(async () => {
+  await clearAllSecrets();
+  if (PREV_EPHEMERAL === undefined) delete process.env.OPENWOP_BYOK_EPHEMERAL;
+  else process.env.OPENWOP_BYOK_EPHEMERAL = PREV_EPHEMERAL;
+});
 
 const bind = (preferForText?: boolean) => setHeadlessAiDefault(
   { tenantId: T },
@@ -92,7 +99,9 @@ describe('ADR 0821 D5 — chat auto-title honours the BYOK text opt-in', () => {
 
   it('no BYOK binding at all: managed, attributed (the common tenant)', async () => {
     expect(await generateTitle(T, 'plan a trip', 'sure')).toBe('Managed Title');
+    expect(vi.mocked(dispatchManagedChat)).toHaveBeenCalledTimes(1);
     expect(vi.mocked(dispatchManagedChat).mock.calls[0]![0]).toMatchObject({ featureId: 'chat-autotitle' });
+    expect(googleCalls()).toEqual([]);
   });
 
   it('opt-in ON + usable key: the tenant key is called on its quick model, managed is never reached', async () => {
@@ -118,7 +127,7 @@ describe('ADR 0821 D5 — chat auto-title honours the BYOK text opt-in', () => {
     await bind(true);
     googleStatus = 401;
     await expect(generateTitle(T, 'plan a trip', 'sure')).resolves.toBeNull();
-    expect(googleCalls().length).toBeGreaterThanOrEqual(1);
+    expect(googleCalls(), 'the tenant key was tried exactly once').toHaveLength(1);
     expect(vi.mocked(dispatchManagedChat)).not.toHaveBeenCalled();
   });
 });
@@ -128,6 +137,7 @@ describe('ADR 0821 D5 — memory extraction honours the BYOK text opt-in', () =>
     await bind(false);
     vi.mocked(dispatchManagedChat).mockResolvedValueOnce({ provider: 'openwop-free', model: 'openwop-free', completion: 'Prefers dark mode' });
     expect(await llmExtractFacts(T, 'I like dark mode', 'user:alice')).toEqual(['Prefers dark mode']);
+    expect(vi.mocked(dispatchManagedChat)).toHaveBeenCalledTimes(1);
     expect(vi.mocked(dispatchManagedChat).mock.calls[0]![0]).toMatchObject({ tenantId: T, featureId: 'memory-auto-extract', actingSubject: 'user:alice' });
     expect(googleCalls()).toEqual([]);
   });
@@ -144,8 +154,11 @@ describe('ADR 0821 D5 — memory extraction honours the BYOK text opt-in', () =>
   it('opt-in ON but the key no longer resolves: falls back to managed, metered to the subject', async () => {
     await bind(true);
     await removeSecret('gem', { tenantId: T });
-    vi.mocked(dispatchManagedChat).mockResolvedValueOnce({ provider: 'openwop-free', model: 'openwop-free', completion: 'NONE' });
-    expect(await llmExtractFacts(T, 'hello', 'user:alice')).toEqual([]);
+    // A REAL fact, so the managed completion is shown to flow through — 'NONE' → [] was
+    // indistinguishable from the error/no-op result.
+    vi.mocked(dispatchManagedChat).mockResolvedValueOnce({ provider: 'openwop-free', model: 'openwop-free', completion: 'Works at Acme' });
+    expect(await llmExtractFacts(T, 'hello', 'user:alice')).toEqual(['Works at Acme']);
+    expect(googleCalls()).toEqual([]);
     expect(vi.mocked(dispatchManagedChat).mock.calls[0]![0]).toMatchObject({ featureId: 'memory-auto-extract', actingSubject: 'user:alice' });
   });
 
@@ -153,6 +166,7 @@ describe('ADR 0821 D5 — memory extraction honours the BYOK text opt-in', () =>
     await bind(true);
     googleStatus = 401;
     await expect(llmExtractFacts(T, 'I like dark mode', 'user:alice')).resolves.toEqual([]);
+    expect(googleCalls(), 'the tenant key was tried — the [] is its failure, not a skipped dispatch').toHaveLength(1);
     expect(vi.mocked(dispatchManagedChat)).not.toHaveBeenCalled();
   });
 });

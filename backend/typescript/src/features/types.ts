@@ -47,6 +47,15 @@ export interface FeatureSurfaceDef {
 export interface BackendFeature {
   /** Feature id — matches the toggle id and the `feature.<id>.*` pack namespace. */
   id: string;
+  /**
+   * ADR 0915 — paths this feature serves WITHOUT a session (a capability-token
+   * surface: the token in the request is the credential). Each must sit
+   * strictly below `/host/openwop-app/<id>/`; anything else throws at boot.
+   * The owning routes authenticate the token themselves and answer a uniform
+   * 404 for an unknown or revoked one. Example (Book AI beta readers):
+   * `['/host/openwop-app/bookai-author-suite/reader']`.
+   */
+  publicPaths?: readonly string[];
   /** Mount the feature's HTTP routes. Mirrors a core `register*Routes(deps)`. */
   registerRoutes: (deps: RouteDeps) => void;
   /** The toggle's default config, registered into the toggle registry at boot. */

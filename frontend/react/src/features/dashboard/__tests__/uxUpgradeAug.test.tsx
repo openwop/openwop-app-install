@@ -10,12 +10,13 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
 import { render, screen, fireEvent, cleanup, waitFor, within } from '@testing-library/react';
 
-const getLayout = vi.fn();
-const putLayout = vi.fn();
+type DashClient = typeof import('../dashboardClient.js');
+const getLayout = vi.fn<DashClient['getLayout']>();
+const putLayout = vi.fn<DashClient['putLayout']>();
 import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
 vi.mock('../dashboardClient.js', () => ({
-  getLayout: () => getLayout(),
-  putLayout: (...a: unknown[]) => putLayout(...a),
+  getLayout: (signal?: AbortSignal) => getLayout(signal),
+  putLayout: (tiles: Parameters<DashClient['putLayout']>[0]) => putLayout(tiles),
 }));
 vi.mock('../../../ui/confirm.js', () => ({ confirm: vi.fn() }));
 vi.mock('../../../featureToggles/FeatureAccessContext.js', () => ({
@@ -33,11 +34,11 @@ const { DashboardPage } = await import('../DashboardPage.js');
 
 const announced = (): string => document.querySelector('[aria-live="polite"]')?.textContent ?? '';
 
-afterEach(() => { cleanup(); vi.clearAllMocks(); });
+afterEach(() => { cleanup(); getLayout.mockReset(); putLayout.mockReset(); });
 
 async function renderPage() {
   getLayout.mockResolvedValue(null);
-  putLayout.mockResolvedValue({});
+  putLayout.mockImplementation(async (tiles) => ({ tenantId: 't1', subject: 'u1', tiles, updatedAt: '2026-08-01T00:00:00.000Z' }));
   const view = render(<MemoryRouter><DashboardPage /></MemoryRouter>);
   await screen.findByRole('button', { name: /customize/i });
   return view;
@@ -49,9 +50,20 @@ async function renderCustomizing() {
 }
 
 describe('greeting lede', () => {
-  it('greets by time of day (no name — falls back to the plain form)', async () => {
-    await renderPage();
-    expect(document.body.textContent).toMatch(/good (morning|afternoon|evening)\./i);
+  // Only Date is faked (timers stay real, so findBy* still polls). LOCAL-time
+  // constructors, so getHours() is 9 / 20 in any TZ — and under CLOCKSHIFT.
+  it.each([
+    [9, /Good morning\./],
+    [20, /Good evening\./],
+  ])('greets by time of day at %i:00 (no name — falls back to the plain form)', async (hour, expected) => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(new Date(2026, 9, 15, hour, 0, 0));
+      await renderPage();
+      expect(document.body.textContent).toMatch(expected);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -154,12 +166,16 @@ describe('DASH-1 (round 2) — move-to-top/bottom closes the keyboard O(n) tail'
   it('ADR 0846 grade-ux DSHUX-6 — removing a tile keeps focus on the next tile, not <body>', async () => {
     const { container } = await renderCustomizing();
     const before = Array.from(container.querySelectorAll('section.dash-tile'));
+    expect(before.length).toBeGreaterThan(2);
     const removes = screen.getAllByRole('button', { name: /remove tile/i });
-    fireEvent.click(removes[0]!);
+    // Remove a MIDDLE tile: only there do "next" and "previous" differ (removing
+    // the first made the direction unprobeable — w50g1-ux-removefocus-dir).
+    fireEvent.click(removes[1]!);
     await waitFor(() => {
       const active = document.activeElement as HTMLButtonElement | null;
       expect(active?.tagName).toBe('BUTTON');
-      expect(before[1]!.contains(active!)).toBe(true); // the former second tile, now first
+      expect(before[2]!.contains(active!)).toBe(true); // the NEXT tile
+      expect(before[0]!.contains(active!)).toBe(false); // not the previous one
     });
   });
 

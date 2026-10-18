@@ -8,8 +8,9 @@
  * §2.5.7: the single-pointer equivalent IS the mechanism; no drag). A future,
  * incomplete day offers "Move…" → a bounded date choice → the PURE preview
  * (same validator + guards as apply — it can never paint a move the server
- * would bounce) → the §5.5 compare → confirm. Refusals render the server's
- * verbatim message.
+ * would bounce) → the §5.5 compare → confirm. Refusals render LOCALIZED copy
+ * keyed by the refusal's reason/status (PT-4) — never the server's English
+ * message, which on a non-JSON failure is a bare `revision request failed: 500`.
  *
  * ADR 0496 D5 — the external-calendar disclosure renders ONLY store-backed
  * states (transport + the caller's calendar consents): connected / revoked /
@@ -23,12 +24,14 @@ import { StateCard } from '../../ui/StateCard.js';
 import { Notice } from '../../ui/Notice.js';
 import { PageHeader } from '../../ui/PageHeader.js';
 import { CalendarIcon } from '../../ui/icons/index.js';
+import { TextField } from '../../ui/Field.js';
 import {
   applyRevision,
   getPlan,
   listChallengesForLocale,
   previewRevision,
   RevisionRefusedError,
+  type MoveRefusalReason,
   type PlanChange,
   type PlanItem,
 } from '../../client/kicktodoClient.js';
@@ -84,6 +87,10 @@ export function PlanPage(): JSX.Element {
   const [error, setError] = useState(false);
   // Challenge-view labels — best-effort catalog titles (the ProgressPage posture).
   const [titleOf, setTitleOf] = useState<Map<string, string>>(new Map());
+  // PT-2 — a failed title read is stated in the view that uses it, never
+  // silently rendered as raw challenge ids.
+  const [titlesUnknown, setTitlesUnknown] = useState(false);
+  const [titlesSequence, setTitlesSequence] = useState(0);
   // ADR 0496 D4 — the move flow.
   const [move, setMove] = useState<MoveDraft | null>(null);
   const [toDate, setToDate] = useState('');
@@ -95,6 +102,13 @@ export function PlanPage(): JSX.Element {
   // The move panel opens away from its trigger — focus must follow (WCAG 2.4.3).
   const moveDateRef = useRef<HTMLInputElement | null>(null);
   useEffect(() => { if (move) moveDateRef.current?.focus(); }, [move]);
+  // PT-5 — and focus must COME BACK when the panel closes (cancel or confirm,
+  // WCAG 2.4.3): to the same item's Move trigger if it is still rendered (after
+  // a confirm the plan re-reads and the item may have left the window), else to
+  // the page title. Rows re-mount on every render, so the trigger is found by
+  // its data key, never held as an element ref.
+  const pendingFocusKey = useRef<string | null>(null);
+  const titleRef = useRef<HTMLHeadingElement | null>(null);
 
   const { from, to } = view === 'calendar'
     ? monthWindow(monthOffset)
@@ -110,10 +124,12 @@ export function PlanPage(): JSX.Element {
   useEffect(() => { void reload(); }, [reload]);
 
   useEffect(() => {
+    let current = true;
     void listChallengesForLocale(i18n.language)
-      .then((c) => setTitleOf(new Map(c.map((n) => [n.challenge.id, n.challenge.title]))))
-      .catch(() => setTitleOf(new Map()));
-  }, [i18n.language]);
+      .then((c) => { if (current) { setTitleOf(new Map(c.map((n) => [n.challenge.id, n.challenge.title]))); setTitlesUnknown(false); } })
+      .catch(() => { if (current) { setTitleOf(new Map()); setTitlesUnknown(true); } });
+    return () => { current = false; };
+  }, [i18n.language, titlesSequence]);
 
   useEffect(() => {
     // D5 — disclose only what the server backs; a failed read is stated, and
@@ -139,7 +155,34 @@ export function PlanPage(): JSX.Element {
     setPreview(null);
     setMoveError(null);
   };
-  const cancelMove = (): void => { setMove(null); setPreview(null); setMoveError(null); };
+  const cancelMove = (): void => {
+    if (move) pendingFocusKey.current = `${move.enrollmentId}:${move.day}`;
+    setMove(null); setPreview(null); setMoveError(null);
+  };
+  useEffect(() => {
+    const key = pendingFocusKey.current;
+    if (move || key === null || (!items && !error)) return;
+    pendingFocusKey.current = null;
+    const trigger = [...document.querySelectorAll<HTMLElement>('[data-move-key]')].find((el) => el.dataset.moveKey === key);
+    (trigger ?? titleRef.current)?.focus();
+  }, [move, items, error]);
+
+  /** PT-4 — literal keys per reason (the KTUX-9 rule: check-i18n must see them). */
+  const refusalCopy = (err: unknown): string => {
+    if (!(err instanceof RevisionRefusedError)) return t('planMoveError');
+    const reason: MoveRefusalReason | undefined = err.reason;
+    switch (reason) {
+      case 'window': return t('planMoveRefusedWindow');
+      case 'past-day': return t('planMoveRefusedPastDay');
+      case 'checked-in': return t('planMoveRefusedCheckedIn');
+      case 'bad-date':
+      case 'bad-day': return t('planMoveRefusedBadDate');
+      case 'not-found':
+      case 'not-owner': return t('planMoveRefusedInactive');
+      default:
+        return err.status === 403 || err.status === 404 ? t('planMoveRefusedInactive') : t('planMoveError');
+    }
+  };
 
   const onPreview = async (): Promise<void> => {
     if (!move || !toDate) return;
@@ -149,7 +192,7 @@ export function PlanPage(): JSX.Element {
       setPreview(await previewRevision(move.enrollmentId, [{ lane: 'move', day: move.day, toDate }]));
     } catch (err) {
       setPreview(null);
-      setMoveError(err instanceof RevisionRefusedError ? err.message : t('planMoveError'));
+      setMoveError(refusalCopy(err));
     } finally {
       setMoveBusy(false);
     }
@@ -164,7 +207,7 @@ export function PlanPage(): JSX.Element {
       cancelMove();
       await reload();
     } catch (err) {
-      setMoveError(err instanceof RevisionRefusedError ? err.message : t('planMoveError'));
+      setMoveError(refusalCopy(err));
     } finally {
       setMoveBusy(false);
     }
@@ -177,7 +220,7 @@ export function PlanPage(): JSX.Element {
       <span className="muted u-fs-13"> · {t('planDayN', { day: it.day })}</span>
       {showDate && <span className="muted u-fs-13"> · {formatDate(it.dateLocal, { dateStyle: 'medium' })}</span>}
       {!it.completed && it.dateLocal > today && (
-        <Button variant="quiet" size="sm"
+        <Button variant="quiet" size="sm" data-move-key={`${it.enrollmentId}:${it.day}`}
           aria-label={t('planMoveAria', { title: it.title, day: it.day })}
           onClick={() => startMove(it)}>
           {t('planMove')}
@@ -198,6 +241,7 @@ export function PlanPage(): JSX.Element {
   return (
     <div className="page" data-walkthrough="kicktodo-plan.page">
       <PageHeader
+        titleRef={titleRef}
         title={t('planTitle')}
         lede={t('planLede')}
         actions={items && items.length > 0 ? (
@@ -246,7 +290,7 @@ export function PlanPage(): JSX.Element {
       )}
 
       {error && (
-        <Notice variant="error">
+        <Notice variant="error" announce={t('planError')}>
           {t('planError')}{' '}
           <Button variant="quiet" size="sm" onClick={() => void reload()}>{t('common:retry')}</Button>
         </Notice>
@@ -280,8 +324,8 @@ export function PlanPage(): JSX.Element {
             <span className="muted">{formatDate(move.fromDate, { dateStyle: 'medium' })}</span>
           </p>
           <form className="kt-inline-form" onSubmit={(e) => { e.preventDefault(); void onPreview(); }}>
-            <label className="u-fs-13" htmlFor="kt-move-date">{t('planMoveToLabel')}</label>
-            <input id="kt-move-date" ref={moveDateRef} type="date" value={toDate} min={today}
+            {/* PT-6 — the shared `ui/Field` primitive owns the label↔control wiring. */}
+            <TextField label={t('planMoveToLabel')} className="u-fs-13" ref={moveDateRef} type="date" value={toDate} min={today}
               onChange={(e) => { setToDate(e.target.value); setPreview(null); }} required />
             {moveError && <Notice variant="error">{moveError}</Notice>}
             {/* The §5.5 compare — the server's dry-run rows, lines verbatim. */}
@@ -392,6 +436,12 @@ export function PlanPage(): JSX.Element {
       {/* ── Challenge: the same window grouped per enrollment ── */}
       {items && items.length > 0 && view === 'challenge' && (
         <>
+          {titlesUnknown && (
+            <Notice variant="warning" announce={t('planNamesUnknown')}>
+              {t('planNamesUnknown')}{' '}
+              <Button variant="quiet" size="sm" onClick={() => setTitlesSequence((n) => n + 1)}>{t('common:retry')}</Button>
+            </Notice>
+          )}
           {Object.entries(byEnrollment).map(([enrollmentId, rows]) => (
             <section key={enrollmentId} className="surface-card" aria-label={titleOf.get(rows[0]!.challengeId) ?? rows[0]!.challengeId}>
               <h2 className="kt-progress-title">{titleOf.get(rows[0]!.challengeId) ?? rows[0]!.challengeId}</h2>

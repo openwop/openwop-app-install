@@ -4,6 +4,13 @@
  * Each `describe` names the defect it pins (S1–S5, B1 of the architect pass).
  * Every one was RED on `origin/main` @ a767ee948 before the fix landed; the
  * evidence is recorded in the ADR's implementation record.
+ *
+ * grade-tests w28: fixtures are typed (no laundering casts); the platform floor is
+ * restored in `finally` so D2/D5 is order-independent under shuffle; FW2-CD-1's "no ask
+ * in the owner's ledger" is asserted on a FRESH conversation (an existing approved row is
+ * kept verbatim, so it could not fail) with an owner-run positive control; FW2-CD-4 has an
+ * in-case positive control. Sabotages that turn each block red are in the w28 probe set
+ * (e.g. drop `actsAsOwner` from the ledger-write loop → FW2-CD-1 reds).
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
@@ -123,19 +130,28 @@ describe('S4 — off-host and arbitrary fan-out tools are held in safe mode', ()
   });
 });
 
-const agent = (allow: string[]): ResolvedAgentManifest =>
-  ({ agentId: 'adr0834-agent', persona: 'P', toolAllowlist: allow } as unknown as ResolvedAgentManifest);
-const chatRun = (runId: string, actingUserId: string, chatSessionId: string): RunRecord =>
-  ({ runId, tenantId: 't-0834', inputs: { credentialRef: 'managed:openwop-free' }, metadata: { actingUserId, chatSessionId } } as unknown as RunRecord);
+const agent = (allow: string[]): ResolvedAgentManifest => ({
+  agentId: 'adr0834-agent', persona: 'P', modelClass: 'chat', systemPrompt: 'sp', toolAllowlist: allow,
+  packName: 'test.adr0834', packVersion: '0.0.1',
+});
+const FIXED_AT = '2026-01-01T00:00:00.000Z';
+const chatRun = (runId: string, actingUserId: string, chatSessionId: string): RunRecord => ({
+  runId, workflowId: 'adr0834.chat', tenantId: 't-0834', status: 'running',
+  inputs: { credentialRef: 'managed:openwop-free' }, metadata: { actingUserId, chatSessionId }, configurable: {},
+  createdAt: FIXED_AT, updatedAt: FIXED_AT,
+});
+/** The managed lane never reaches the BYOK adapter, so no provider policy is ever read. */
+const noPolicies: ProviderPolicyResolver = { resolveForRun: async () => [] };
 
-async function chatTurn(r: RunRecord, call: string, extra: Record<string, unknown>): Promise<void> {
+type TurnExtra = Pick<Parameters<typeof runConversationAgentToolTurn>[0], 'permissionMode' | 'callerPrincipal'>;
+async function chatTurn(r: RunRecord, call: string, extra: TurnExtra): Promise<void> {
   managedRound = 0; MANAGED_CALL.name = call; executed.length = 0;
   await runConversationAgentToolTurn({
     run: r, agent: agent([call]), systemPrompt: 'sp', history: [{ role: 'user', content: 'run it' }],
     runId: r.runId, nodeId: 'n', conversationId: `${r.runId}:n:0`,
-    policyResolver: (() => undefined) as unknown as ProviderPolicyResolver,
+    policyResolver: noPolicies,
     ...extra,
-  } as Parameters<typeof runConversationAgentToolTurn>[0]);
+  });
 }
 
 describe('S1 — bypass needs the authority of the principal the tools act as', () => {
@@ -164,14 +180,14 @@ describe('S3 — the anonymous widget lane is under the firewall', () => {
       return round === 1 ? { content: '', toolCalls: [{ id: 'a1', name: PROBE_READ, input: {} }] } : { content: 'ok', toolCalls: [] };
     };
     const turn = await runAnonReadTurn({
-      storage, tenantId: 't-0834-anon', agent: { agentId: 'anon-agent', persona: 'P', systemPrompt: 'sp' } as never,
+      storage, tenantId: 't-0834-anon', agent: { agentId: 'anon-agent', persona: 'P', systemPrompt: 'sp' },
       grant: { read: [PROBE_READ], write: [] },
       surfaceSessionKey: 'w:s0834', fencedUserMessage: 'hi', callAIWithTools,
     });
     expect(executed).toEqual([]);
     const reasons = (await storage.listEvents(turn.runId))
       .filter((e) => e.type === 'authorization.decided')
-      .map((e) => (e.payload as { reason: string }).reason);
+      .map((e) => { const pl: unknown = e.payload; return typeof pl === 'object' && pl !== null && 'reason' in pl ? String(pl.reason) : ''; });
     expect(reasons).not.toContain('anon-not-granted');
     expect(reasons).toContain('anon-firewall-denied');
   });
@@ -228,11 +244,13 @@ describe('D2/D5 — voice: the client-set card answers only the user\'s own ask'
     __clearAgentIdentityCache();
   });
   afterAll(async () => { await setPlatformRules([]); });
-  const call = (name: string, extra: Record<string, unknown> = {}) => executeRealtimeToolCall({
-    tenantId: 't-0834-v2', agentId: VOICE_AGENT2, sessionId: `vs-${Math.random()}`, name, args: {},
+  let voiceSeq = 0;
+  const call = (name: string, extra: { userApproved?: boolean; conversationId?: string } = {}) => executeRealtimeToolCall({
+    tenantId: 't-0834-v2', agentId: VOICE_AGENT2, sessionId: `vs-${++voiceSeq}`, name, args: {},
     actingUserId: 'owner-1', ...extra,
   });
   it('control: userApproved answers the safe-mode baseline ask', async () => {
+    await setPlatformRules([]); // order-independent: never inherit a floor from a sibling case
     executed.length = 0;
     expect((await call(CODE_EXEC)).status).toBe('requires_approval');
     expect((await call(CODE_EXEC, { userApproved: true })).status).toBe('ok');
@@ -240,9 +258,13 @@ describe('D2/D5 — voice: the client-set card answers only the user\'s own ask'
   });
   it('userApproved does NOT answer a platform-floor ask', async () => {
     await setPlatformRules([policy('require-approval')]);
-    executed.length = 0;
-    expect((await call(PROBE_READ, { userApproved: true })).status).toBe('requires_approval');
-    expect(executed).toEqual([]);
+    try {
+      executed.length = 0;
+      expect((await call(PROBE_READ, { userApproved: true })).status).toBe('requires_approval');
+      expect(executed).toEqual([]);
+    } finally {
+      await setPlatformRules([]); // restore even on failure — siblings must not inherit the floor
+    }
   });
   it('a held voice call lands in the conversation ledger as pending', async () => {
     await setPlatformRules([]);
@@ -279,14 +301,28 @@ describe('FW2-CD-1 — a run acting as someone else does not spend the owner\'s 
     await chatTurn(chatRun('r-cd1b', 'forker-2', 'sess-owned'), CODE_EXEC, {});
     expect(executed).toEqual([]);
     expect((await listToolApprovals('t-0834', 'sess-owned')).map((r) => r.status)).toEqual(['approved']);
+    // "writes no ask into the owner's ledger" — on a conversation with NO prior row (an
+    // existing approved row is kept verbatim by the ledger, so it could not show a leaked ask).
+    await ensureConversationMeta('t-0834', 'sess-owned-2', { type: 'agent', ownerUserId: 'owner-1' });
+    await chatTurn(chatRun('r-cd1c', 'forker-2', 'sess-owned-2'), CODE_EXEC, {});
+    expect(executed).toEqual([]);
+    expect(await listToolApprovals('t-0834', 'sess-owned-2')).toEqual([]);
+    // positive control: the OWNER's own held call in a fresh conversation DOES land as pending.
+    await ensureConversationMeta('t-0834', 'sess-owned-3', { type: 'agent', ownerUserId: 'owner-1' });
+    await chatTurn(chatRun('r-cd1d', 'owner-1', 'sess-owned-3'), CODE_EXEC, {});
+    expect(executed).toEqual([]);
+    expect(await listToolApprovals('t-0834', 'sess-owned-3')).toEqual([expect.objectContaining({ toolName: CODE_EXEC, status: 'pending' })]);
   });
 });
 
 describe('FW2-CD-4 — an expired mission keeps the agent from acting', () => {
   it('an EXPIRED intent ledger narrows to nothing (it used to fall back to every tool)', async () => {
+    // positive control: with no ledger the same read tool RUNS on this lane.
+    await chatTurn(chatRun('r-cd4-ctl', 'owner-1', 'sess-unexpired'), PROBE_READ, {});
+    expect(executed).toEqual([PROBE_READ]);
     await saveLedger({
       ledgerId: 'l-exp', tenantId: 't-0834', conversationId: 'sess-expired', goal: 'g', allowed: [PROBE_READ], forbidden: [],
-      requireApproval: [], successCriteria: [], status: 'expired', proposedBy: 'user', createdAt: new Date().toISOString(),
+      requireApproval: [], successCriteria: [], status: 'expired', proposedBy: 'user', createdAt: FIXED_AT,
     });
     await chatTurn(chatRun('r-cd4', 'owner-1', 'sess-expired'), PROBE_READ, {});
     expect(executed).toEqual([]);

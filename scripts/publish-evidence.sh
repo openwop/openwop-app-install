@@ -159,6 +159,7 @@ WORK="$(mktemp -d)"
 TUNNEL_PID=""
 LOW_SCOPE_KEY_ID=""
 LOCK_GEN=""
+UNPUBLISHED=""
 cleanup() {
   [ -n "$TUNNEL_PID" ] && kill "$TUNNEL_PID" 2>/dev/null
   # Release OUR lock only: the generation match means a lock someone broke and
@@ -175,6 +176,18 @@ cleanup() {
   if [ -n "$LOW_SCOPE_KEY_ID" ]; then
     code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 -X DELETE -H "Authorization: Bearer $OPENWOP_API_KEY" "$BASE/api/host/openwop-app/developer-keys/$LOW_SCOPE_KEY_ID" || true)"
     echo "low-scope key revoked: $code"
+  fi
+  # A bundle the suite WROTE but this script did not upload (auth expired at
+  # `gcloud storage cp`, a verify refusal, the host stopped serving) is the only
+  # record of what that run saw, and the rm below would destroy it. Keep it:
+  # 2026-10-14 cut 74c built a `certified: none` bundle, the upload then died on
+  # an expired gcloud token, and the rows that explained NONE were lost.
+  # NOT a certification artifact — it was never verified into the bucket.
+  if [ -n "$UNPUBLISHED" ] && [ -s "$UNPUBLISHED" ]; then
+    KEEP_DIR="${OPENWOP_REJECTED_EVIDENCE_DIR:-$HOME/.cache/openwop-app/rejected-evidence}"
+    keep="$KEEP_DIR/${COMMIT:-unknown}-$(basename "$UNPUBLISHED" .json).unpublished.json"
+    mkdir -p "$KEEP_DIR" && cp "$UNPUBLISHED" "$keep" \
+      && echo "  kept the UNPUBLISHED bundle for diagnosis: $keep (not a certification artifact)" >&2
   fi
   rm -rf "$WORK"
 }
@@ -391,6 +404,25 @@ webhook_ids() {
 BEFORE="$(webhook_ids)" || die "could not list webhook subscriptions (is the client key valid?)"
 BEFORE_N="$(printf '%s' "$BEFORE" | grep -c .)"
 
+# Trigger subscriptions are swept twice: here, BEFORE the suite, and again after
+# the run (§ 7). The end sweep alone hands a crashed run's subscriptions to the
+# next cut — 2026-10-14 cut 74c died at the upload and left 10, which the next
+# cut then ran beside. The filter and the kept set are the same both times.
+trigger_sweep_ids() {
+  curl -sS --max-time 30 -H "Authorization: Bearer $OPENWOP_API_KEY" -H 'OpenWOP-Version: 2' "$BASE/api/trigger-subscriptions" > "$WORK/triggers.json" || return 1
+  node "$HELPERS" trigger-sweep-ids < "$WORK/triggers.json"
+}
+sweep_trigger_subs() {
+  local label="$1" ids seg code tdeleted=0 tfailed=0
+  ids="$(trigger_sweep_ids)" || ids=""
+  for seg in $ids; do
+    code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 -X DELETE -H "Authorization: Bearer $OPENWOP_API_KEY" -H 'OpenWOP-Version: 2' "$BASE/api/host/openwop-app/trigger-subscriptions/$seg")"
+    case "$code" in 2*) tdeleted=$((tdeleted+1)) ;; *) tfailed=$((tfailed+1)) ;; esac
+  done
+  echo "$label: swept=$(printf '%s' "$ids" | grep -c .) deleted=$tdeleted failed=$tfailed (paused and OPENWOP_EVIDENCE_KEEP_TRIGGER_SUBS kept)"
+}
+sweep_trigger_subs "trigger subscriptions (before the suite: a crashed earlier cut's leftovers)"
+
 # ── 5. the tunnel ───────────────────────────────────────────────────────────
 PORT="$(node -e 'const s=require("net").createServer().listen(0,"127.0.0.1",()=>{process.stdout.write(String(s.address().port));s.close()})')"
 cloudflared tunnel --no-autoupdate --url "http://127.0.0.1:$PORT" > "$WORK/tunnel.log" 2>&1 &
@@ -447,6 +479,7 @@ for m in "${MAJORS[@]}"; do
       && echo "  kept the REFUSED bundle for diagnosis: $KEEP_DIR/$COMMIT-major-$m.rejected.json (not a certification artifact)"
   fi
   [ -s "$OUT" ] || die "major $m: the suite wrote no bundle (exit $cut_exit)"
+  UNPUBLISHED="$OUT"
   assert_still_serving "major $m, after the suite"
   echo "  suite exit $cut_exit (non-zero = some rows are not passes; the bundle records which)"
 
@@ -466,6 +499,7 @@ for m in "${MAJORS[@]}"; do
     || die "major $m: upload to $DEST failed"
   echo "  uploaded → $DEST  (sha256 $(shasum -a 256 "$OUT" | cut -c1-12))"
   published+=("$m")
+  UNPUBLISHED=""
 done
 
 # ── 7. leave the conformance tenant as we found it ──────────────────────────
@@ -488,17 +522,8 @@ echo "webhook subscriptions: before=$BEFORE_N after-run=$AFTER_N deleted=$delete
 # Kept: anything PAUSED (a person parked it) and OPENWOP_EVIDENCE_KEEP_TRIGGER_SUBS
 # (comma-separated ids). Non-fatal, like the webhook sweep: evidence is already
 # uploaded, and a host without the route answers 404 per id.
-trigger_sweep_ids() {
-  curl -sS --max-time 30 -H "Authorization: Bearer $OPENWOP_API_KEY" -H 'OpenWOP-Version: 2' "$BASE/api/trigger-subscriptions" > "$WORK/triggers.json" || return 1
-  node "$HELPERS" trigger-sweep-ids < "$WORK/triggers.json"
-}
-TSWEEP="$(trigger_sweep_ids)" || TSWEEP=""
-tdeleted=0; tfailed=0
-for seg in $TSWEEP; do
-  code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 -X DELETE -H "Authorization: Bearer $OPENWOP_API_KEY" -H 'OpenWOP-Version: 2' "$BASE/api/host/openwop-app/trigger-subscriptions/$seg")"
-  case "$code" in 2*) tdeleted=$((tdeleted+1)) ;; *) tfailed=$((tfailed+1)) ;; esac
-done
-echo "trigger subscriptions: swept=$(printf '%s' "$TSWEEP" | grep -c .) deleted=$tdeleted failed=$tfailed (paused and OPENWOP_EVIDENCE_KEEP_TRIGGER_SUBS kept)"
+# (sweep_trigger_subs is defined, and first run, before the suite — § 4.)
+sweep_trigger_subs "trigger subscriptions"
 
 # ── 8. is it served? ────────────────────────────────────────────────────────
 # The host re-reads a withheld key at most every 60 s, so allow a little over

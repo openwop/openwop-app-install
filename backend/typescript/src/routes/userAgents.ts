@@ -18,11 +18,13 @@
  * promote it to `/v1/agents` POST.
  */
 
+import { broadcastAgentEviction } from '../host/agentRegistryEviction.js';
 import type { Express } from 'express';
 import { randomUUID } from 'node:crypto';
 import type { Storage } from '../storage/storage.js';
 import type { UserAgentRecord } from '../types.js';
 import { OpenwopError } from '../types.js';
+import { CAS_RETRIES, entityEtag, etagHeader, parseIfMatch, staleWriteError } from '../host/entityVersion.js';
 import { getAgentRegistry } from '../executor/agentRegistry.js';
 import { createLogger } from '../observability/logger.js';
 import {
@@ -33,6 +35,7 @@ import {
 } from '../host/idempotentResponse.js';
 import { idempotencyOutcomeOf, recordIdempotencyClaim } from '../observability/metricSeams.js';
 import { requireTenantWrite } from '../features/featureRoute.js';
+import { deleteCaptureSetting } from '../host/evals/toolBoundary.js';
 
 const log = createLogger('routes.userAgents');
 
@@ -257,32 +260,47 @@ export function registerUserAgentRoutes(app: Express, deps: Deps): void {
       // ADR 0379 P1 — tenant is in the storage predicate: a cross-tenant id is
       // null here, so the old 403 forbidden_tenant branch is unreachable and
       // the uniform 404 (no existence oracle) is the only denial.
-      const record = await storage.getUserAgent(tenantId, agentId);
-      if (!record) {
-        throw new OpenwopError(
-          'not_found',
-          `User-authored agent ${agentId} not found. Pack-installed agents are not editable through this route.`,
-          404,
-        );
-      }
       const patch = validatePatch(req.body as CreateBody);
-      const updated: UserAgentRecord = {
-        ...record,
-        ...(patch.label !== undefined ? { label: patch.label } : {}),
-        ...(patch.description !== undefined ? { description: patch.description } : {}),
-        ...(patch.modelClass !== undefined ? { modelClass: patch.modelClass } : {}),
-        ...(patch.systemPrompt !== undefined ? { systemPrompt: patch.systemPrompt } : {}),
-        ...(patch.toolAllowlist !== undefined ? { toolAllowlist: patch.toolAllowlist } : {}),
-        ...(patch.memoryShape !== undefined ? { memoryShape: patch.memoryShape } : {}),
-        ...(patch.confidenceThreshold !== undefined
-          ? { confidenceThreshold: patch.confidenceThreshold }
-          : {}),
-      };
-      await storage.updateUserAgent(tenantId, updated);
+      const ifMatch = parseIfMatch(req.header('If-Match'));
+      // ADR 0775 P4 (`ARWF-11`) — compare-and-swap against the row that was read.
+      // A lost swap re-reads and re-applies the patch (a concurrent edit to another
+      // field is kept); with `If-Match`, a version that moved is refused instead.
+      let updated: UserAgentRecord | null = null;
+      for (let attempt = 0; attempt < CAS_RETRIES && !updated; attempt += 1) {
+        const record = await storage.getUserAgent(tenantId, agentId);
+        if (!record) {
+          throw new OpenwopError(
+            'not_found',
+            `User-authored agent ${agentId} not found. Pack-installed agents are not editable through this route.`,
+            404,
+          );
+        }
+        if (ifMatch !== undefined && userAgentEtag(record) !== ifMatch) {
+          throw staleWriteError('agent', userAgentEtag(record));
+        }
+        const next: UserAgentRecord = {
+          ...record,
+          ...(patch.label !== undefined ? { label: patch.label } : {}),
+          ...(patch.description !== undefined ? { description: patch.description } : {}),
+          ...(patch.modelClass !== undefined ? { modelClass: patch.modelClass } : {}),
+          ...(patch.systemPrompt !== undefined ? { systemPrompt: patch.systemPrompt } : {}),
+          ...(patch.toolAllowlist !== undefined ? { toolAllowlist: patch.toolAllowlist } : {}),
+          ...(patch.memoryShape !== undefined ? { memoryShape: patch.memoryShape } : {}),
+          ...(patch.confidenceThreshold !== undefined
+            ? { confidenceThreshold: patch.confidenceThreshold }
+            : {}),
+        };
+        if (await storage.updateUserAgent(tenantId, next, record)) updated = next;
+      }
+      if (!updated) throw staleWriteError('agent', undefined);
       // Re-register so the in-process registry (GET /v1/agents, the chat `@`
       // picker, the chat-responder system prompt) reflects the edit at once.
       registerUserAgent(updated);
+      // ADR 0775 P3d — other instances drop their copy and re-read the edit.
+      await broadcastAgentEviction(tenantId, updated.agentId);
+      res.setHeader('ETag', etagHeader(userAgentEtag(updated)));
       res.json({
+        etag: userAgentEtag(updated),
         agentId: updated.agentId,
         persona: updated.persona,
         label: updated.label ?? updated.persona,
@@ -326,6 +344,11 @@ export function registerUserAgentRoutes(app: Express, deps: Deps): void {
       // registry — possible if the storage row outlived an earlier
       // partial-load), so calling it on a missing entry is safe.
       getAgentRegistry().remove(agentId, tenantId);
+      // ADR 0775 P3d — and on every other instance (architect H2).
+      await broadcastAgentEviction(tenantId, agentId);
+      // ADR 0889 EVD-5 — the agent's eval-capture opt-in leaves with it, so a
+      // re-created agent of the same (deterministic) id starts with capture OFF.
+      if (removed) await deleteCaptureSetting(tenantId, agentId);
       res.status(removed ? 204 : 404).end();
     } catch (err) {
       next(err);
@@ -658,4 +681,19 @@ function slugify(name: string): string {
   const s = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
   if (s.length === 0) return `agent-${randomUUID().slice(0, 8)}`;
   return s;
+}
+
+/** A user-authored agent's content version (ADR 0775 P4): its editable fields.
+ *  `createdAt` is fixed, and the storage row carries no `updatedAt`. */
+export function userAgentEtag(record: UserAgentRecord): string {
+  return entityEtag({
+    persona: record.persona,
+    label: record.label ?? null,
+    description: record.description ?? null,
+    modelClass: record.modelClass,
+    systemPrompt: record.systemPrompt,
+    toolAllowlist: record.toolAllowlist,
+    memoryShape: record.memoryShape,
+    confidenceThreshold: record.confidenceThreshold ?? null,
+  });
 }

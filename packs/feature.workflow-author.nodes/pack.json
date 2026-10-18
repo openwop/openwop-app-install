@@ -1,6 +1,6 @@
 {
   "name": "feature.workflow-author.nodes",
-  "version": "1.0.6",
+  "version": "1.1.0",
   "kind": "node",
   "description": "AI Workflow Author node pack — the meta-workflow building blocks that author OTHER workflows over the ctx.features['workflow-author'] surface. draft (LLM authors a graph from the live node catalog), validate (re-check against the closed-world catalog + registration contract), persist (register the validated WorkflowDefinition). Wired draft→validate→persist they are the workflow-builder brain.",
   "author": "OpenWOP App",

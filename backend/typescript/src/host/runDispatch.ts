@@ -22,6 +22,7 @@ import { executeRun, emitTerminalFailure } from '../executor/executor.js';
 import { getEventLog } from '../executor/eventLog.js';
 import { createLogger } from '../observability/logger.js';
 import { ATTRIBUTION_KEYS } from './agentRunActivityIndex.js';
+import { CALLER_LINKAGE_KEYS } from './runLinkage.js';
 import { unwindOnDispatchTerminal } from './compensationRuntime.js';
 
 const log = createLogger('run-dispatch');
@@ -72,7 +73,12 @@ const log = createLogger('run-dispatch');
 // whose org memberships bound an actorless run, so a caller who could set it
 // would choose that bound. It is stamped from `startWorkflowRun`'s explicit
 // parameter (or the sub-workflow dispatcher, from the parent row), or not at all.
-const RESERVED_RUN_METADATA_KEYS = ['definitionRevision', 'definitionResolvedFrom', 'launchResolved', 'costUsd', 'costTokens', 'costByNode', 'debug', 'eval', 'redriveOf', 'onlineEvalScored', 'compaction', 'personalTenant', 'owner', 'traceContext', 'nodePinMismatches', 'teamLedger', 'orgScopeSubject'] as const;
+// `intentLedger` / `intentLedgerApprovals` (ADR 0896 D3) are the mission-contract
+// stamps: each carries the run's TTL anchor (`resolvedAt`), so a caller who could
+// supply one would choose when an approved mission expires — a far-future anchor
+// never expires, a past one ends the mission at once. Only the conversation tool
+// gate writes them (`storage.updateRun`, not a strip site); `:fork` copies them.
+const RESERVED_RUN_METADATA_KEYS = ['definitionRevision', 'definitionResolvedFrom', 'launchResolved', 'costUsd', 'costTokens', 'costByNode', 'debug', 'eval', 'redriveOf', 'onlineEvalScored', 'compaction', 'personalTenant', 'owner', 'traceContext', 'nodePinMismatches', 'teamLedger', 'orgScopeSubject', 'intentLedger', 'intentLedgerApprovals'] as const;
 /**
  * The run-attribution blocks (`heartbeat`/`schedule`/`kanban`/`approval`) are
  * host-written: the scheduler, the kanban trigger, the heartbeat and approval
@@ -89,10 +95,12 @@ const RESERVED_RUN_METADATA_KEYS = ['definitionRevision', 'definitionResolvedFro
  *  `ATTRIBUTION_KEYS`, which also drives the agent-activity index. */
 const CAMPAIGN_ATTRIBUTION_KEYS = ['campaignOrchestration', 'campaignChannel'] as const;
 
+// ADR 0902 D2 — and the task-deck parent linkage (`runLinkage.ts`).
 export function stripCallerAttribution(metadata: Record<string, unknown>): Record<string, unknown> {
   const out = { ...metadata };
   for (const k of ATTRIBUTION_KEYS) delete out[k];
   for (const k of CAMPAIGN_ATTRIBUTION_KEYS) delete out[k];
+  for (const k of CALLER_LINKAGE_KEYS) delete out[k];
   return out;
 }
 

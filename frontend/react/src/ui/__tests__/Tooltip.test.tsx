@@ -13,6 +13,14 @@ describe('Tooltip', () => {
     expect(link.getAttribute('aria-describedby')).toBe(tip.id);
     fireEvent.keyDown(link, { key: 'Escape' });
     expect(screen.queryByRole('tooltip')).toBeNull();
+    // HOVER is the other half of the title — it was never driven (w49 probe
+    // `tip-hover`). The handlers sit on the anchor span that wraps the child.
+    const anchor = link.parentElement as HTMLElement;
+    fireEvent.mouseEnter(anchor);
+    const hovered = screen.getByRole('tooltip', { name: 'Library' });
+    expect(link.getAttribute('aria-describedby')).toBe(hovered.id);
+    fireEvent.mouseLeave(anchor);
+    expect(screen.queryByRole('tooltip')).toBeNull();
   });
 
   it('does not alter the child when disabled', () => {

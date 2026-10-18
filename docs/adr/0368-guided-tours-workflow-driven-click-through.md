@@ -18,7 +18,7 @@ Status: implemented (Phases 1–6, 2026-07-15/16). P6d shipped as a READ-only
 | 2 player core | #1848 | perform/resolve loop, HITL wait, needs-update honesty, sessionStorage re-attach |
 | 3 player chrome | #1849 | scrim/cutout, gliding cursor, caption bar, reduced-motion, a11y |
 | 4 reference tour + /test Play | #1852 + #1853 | Campaign Studio brief tour (real HITL + checkpoint), data-tour anchors, coverage pin, entry-budget hotfix |
-| 5 progress + headless replay | (this PR) | progress rows + resume-or-restart + completed chip, TOUR_E2E replay harness |
+| 5 progress + headless replay | (this PR) | progress rows + resume-or-restart + completed chip, TOUR_E2E replay harness (harness deleted 2026-10-17, see the correction under Phase 5 coverage) |
 | 6 record-mode + Tour Author + ctx surface | 6a #1872 · 6b #1873 · 6c #1875 · 6d (this PR) | 6a recorder engine (registry reverse-lookup, anti-rot, no input values); 6b record→transient-draft→promote MVP (no AI); 6c `tours.register-draft` agent tool driven through the ONE chat (composerSeed handoff) — LLM enriches narration/HITL/checkpoints. 6d **READ-only `ctx.features.guidedTours`** (`listTours` + tenant-level `tourProgress`) — the honest replacement for `ctx.guidedTours.launch` (a run can't launch a tour; it CAN read tour state to gate a branch) |
 Date: 2026-07-15
 Feature: `guided-tours` (new feature package + toggle)
@@ -144,6 +144,8 @@ registration resolves EXACTLY that set (missing or orphan both fail); (3) the
 opt-in `TOUR_E2E` replay runs the real tour, the true cross-half guard (the
 registry actually resolves them at runtime). Backend pins WHAT is referenced,
 FE pins the registry HAS them, e2e pins they RESOLVE live.
+
+> **CORRECTED 2026-10-17 (/grade-tests wave 53):** `frontend/react/e2e/walkthrough-replay.spec.ts` (the opt-in `TOUR_E2E` replay) is DELETED. Nothing ever set `TOUR_E2E`, and it could not have passed: it enabled a `guided-tours` toggle renamed `walkthroughs` in #1898, doubled the `/host/openwop-app` prefix on two API paths, and logged in as a non-owner on the admin-tier `/test` page (measured red at its first assertion with `TOUR_E2E=1`). No test plays a seeded walkthrough end to end through the player, so the "true cross-half guard" above does not exist (tracked as `WALK-REPLAY-1`).
 
 ### Data model
 

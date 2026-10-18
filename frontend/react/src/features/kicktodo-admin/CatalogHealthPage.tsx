@@ -13,6 +13,7 @@ import { Button } from '../../ui/Button.js';
 import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
+import { PageHeader } from '../../ui/PageHeader.js';
 import { StateCard } from '../../ui/StateCard.js';
 import { Notice } from '../../ui/Notice.js';
 import { getFactory, type FactoryMetrics } from '../../client/kicktodoMetricsClient.js';
@@ -71,14 +72,11 @@ export function CatalogHealthPage(): JSX.Element {
       <div className="action-bar">
         <Link className="btn-ghost btn-sm" to="/admin/kicktodo">{t('backToConsole')}</Link>
       </div>
-      <header className="page-header">
-        <h1 className="page-header__title">{t('catalogTitle')}</h1>
-        <p className="page-header__lede">{t('catalogLede')}</p>
-      </header>
+      <PageHeader title={t('catalogTitle')} lede={t('catalogLede')} />
 
       {error && (
         <>
-          <Notice variant="error">{t('catalogError')}</Notice>
+          <Notice variant="error" announce={t('catalogError')}>{t('catalogError')}</Notice>
           <div className="action-bar">
             <Button variant="quiet" size="sm" onClick={() => void reload()}>{t('retry')}</Button>
           </div>

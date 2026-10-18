@@ -6,14 +6,23 @@
  * validation with structured error feedback — all gated exactly like the HTTP
  * editor path (toggle, acting user, org RBAC). Boots the REAL app (the ADR 0308
  * D2 registration seam is what's under test), so the CFP-1 tripwire
- * (agent-allowlist-resolution.test.ts) can see the ids resolve.
+ * (agent-allowlist-resolution.test.ts) can see the ids resolve — that tripwire,
+ * not this file, owns "the ids are in builtinAgentToolIds()" (wave 30 cut the
+ * duplicate case here: un-registering the tools reds both files).
+ *
+ * Sabotage witnesses (wave 30): dropping the acting-user gate, the toggle, the
+ * org-scope check (same-tenant non-member `u-2`), the render node's enum /
+ * name / channels gates, the closed-world `validateCampaignDoc` gate (an
+ * out-of-range funnel x only it catches), the baseVersion guard, the CAS
+ * expectedVersion, the run idempotency key, the agent provenance, or the
+ * get-design type pin / tenant scope / acting-user empty each reds its case.
  */
 import http from 'node:http';
 import { readFileSync } from 'node:fs';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
-import { createAgentToolProvider, builtinAgentToolIds } from '../src/host/agentToolProvider.js';
+import { createAgentToolProvider } from '../src/host/agentToolProvider.js';
 import {
   CAMPAIGN_STUDIO_RENDER_TOOL_ID,
   CAMPAIGN_STUDIO_GET_DESIGN_TOOL_ID,
@@ -69,13 +78,6 @@ describe('CFP-1 — the agents pack rides the real registered tools', () => {
     );
   });
 
-  it('both tools register into the builtin surface (the CFP-1 resolution the tripwire pins)', () => {
-    const ids = builtinAgentToolIds();
-    for (const id of [CAMPAIGN_STUDIO_RENDER_TOOL_ID, CAMPAIGN_STUDIO_GET_DESIGN_TOOL_ID]) {
-      expect(ids).toContain(id);
-    }
-  });
-
   it('the prompt names the real tools and teaches the error-feedback protocol', () => {
     expect(prompt).toContain(CAMPAIGN_STUDIO_RENDER_TOOL_ID);
     expect(prompt).toContain(CAMPAIGN_STUDIO_GET_DESIGN_TOOL_ID);
@@ -97,10 +99,13 @@ describe('CFP-1 — render tool: gates, repair-loop errors, persistence', () => 
 
   it('fails closed when the toggle is off (structured, not a throw)', async () => {
     await setCampaignStudio('off');
-    const out = await provider({ actingUserId: 'u-1' }).executeTool({ name: CAMPAIGN_STUDIO_RENDER_TOOL_ID, input: { campaign: VALID_CAMPAIGN } });
-    expect(out.isError).toBe(true);
-    expect(JSON.parse(out.content)).toMatchObject({ error: 'feature_disabled' });
-    await setCampaignStudio('on');
+    try {
+      const out = await provider({ actingUserId: 'u-1' }).executeTool({ name: CAMPAIGN_STUDIO_RENDER_TOOL_ID, input: { campaign: VALID_CAMPAIGN } });
+      expect(out.isError).toBe(true);
+      expect(JSON.parse(out.content)).toMatchObject({ error: 'feature_disabled' });
+    } finally {
+      await setCampaignStudio('on');
+    }
   });
 
   it('rejects invalid model input as a typed error the model can act on, never success-with-empty', async () => {
@@ -113,14 +118,49 @@ describe('CFP-1 — render tool: gates, repair-loop errors, persistence', () => 
       input: { campaign: { name: 'Empty' } },
     });
     expect(noChannels.isError).toBe(true);
-    expect(JSON.parse(noChannels.content)).toMatchObject({ error: 'validation_error' });
+    // The message must be the node's OWN channels gate — a crash inside the node
+    // is also mapped to `validation_error` by the tool's catch, so the code alone
+    // cannot tell the gate from a TypeError (wave 30 probe w30g2-sat-nochan).
+    const nc = JSON.parse(noChannels.content) as { error: string; message: string };
+    expect(nc.error).toBe('validation_error');
+    expect(nc.message).toMatch(/^`channels` is required/);
 
     const noName = await provider({ actingUserId: 'u-1' }).executeTool({
       name: CAMPAIGN_STUDIO_RENDER_TOOL_ID,
       input: { campaign: { channels: [{ name: 'X', type: 'email' }] } },
     });
     expect(noName.isError).toBe(true);
-    expect(JSON.parse(noName.content)).toMatchObject({ error: 'validation_error' });
+    const nn = JSON.parse(noName.content) as { error: string; message: string };
+    expect(nn.error).toBe('validation_error');
+    expect(nn.message).toMatch(/^`name` is required/);
+
+    // The closed-world gate AFTER the node: the node keeps any finite board x,
+    // so an out-of-range one reaches validateCampaignDoc — a typed, repairable
+    // `campaign_validation_failed` naming the path, never a saved canvas.
+    const offBoard = await provider({ actingUserId: 'u-1' }).executeTool({
+      name: CAMPAIGN_STUDIO_RENDER_TOOL_ID,
+      input: { campaign: { ...VALID_CAMPAIGN, funnel: [{ stage: 'awareness', x: 5000 }] } },
+    });
+    expect(offBoard.isError).toBe(true);
+    const ob = JSON.parse(offBoard.content) as { error: string; errors: Array<{ path: string }>; canvasId?: string };
+    expect(ob.error).toBe('campaign_validation_failed');
+    expect(ob.errors.map((e) => e.path)).toEqual(['funnel[0].x']);
+    expect(ob.canvasId).toBeUndefined();
+  });
+
+  it('org RBAC: a same-tenant user with no org membership is refused (forbidden_scope), never served', async () => {
+    // `u-2` is authenticated in the SAME tenant but holds no member row in the
+    // org, so the shared resolveEffectiveAccess predicate grants no scopes.
+    const out = await provider({ actingUserId: 'u-2' }).executeTool({ name: CAMPAIGN_STUDIO_RENDER_TOOL_ID, input: { campaign: VALID_CAMPAIGN } });
+    expect(out.isError).toBe(true);
+    expect(JSON.parse(out.content)).toMatchObject({ error: 'forbidden_scope' });
+
+    const created = JSON.parse((await provider({ actingUserId: 'u-1' }).executeTool({ name: CAMPAIGN_STUDIO_RENDER_TOOL_ID, input: { campaign: VALID_CAMPAIGN } })).content) as { canvasId: string };
+    const asMember = await provider({ actingUserId: 'u-1' }).executeTool({ name: CAMPAIGN_STUDIO_GET_DESIGN_TOOL_ID, input: { canvasId: created.canvasId } });
+    expect(asMember.isError).toBeFalsy(); // positive control: the owner reads it
+    const asStranger = await provider({ actingUserId: 'u-2' }).executeTool({ name: CAMPAIGN_STUDIO_GET_DESIGN_TOOL_ID, input: { canvasId: created.canvasId } });
+    expect(asStranger.isError).toBe(true);
+    expect(JSON.parse(asStranger.content)).toMatchObject({ error: 'forbidden_scope' });
   });
 
   it('R2 CS-SP-2 — an unknown channel type / funnel stage is a TYPED failure the model can repair, never a silent substitution', async () => {
@@ -189,6 +229,7 @@ describe('CFP-1 — render tool: gates, repair-loop errors, persistence', () => 
     })).content) as { canvasId: string; version: number };
     expect(ok.canvasId).toBe(created.canvasId);
     expect(ok.version).toBeGreaterThan(created.version);
+    expect((((await getCanvasForTenant(TENANT, created.canvasId))?.state) as { name: string }).name).toBe('Spring launch v2');
 
     const stale = await p.executeTool({
       name: CAMPAIGN_STUDIO_RENDER_TOOL_ID,
@@ -196,6 +237,8 @@ describe('CFP-1 — render tool: gates, repair-loop errors, persistence', () => 
     });
     expect(stale.isError).toBe(true);
     expect(JSON.parse(stale.content)).toMatchObject({ error: 'canvas_version_conflict' });
+    // The stale write never clobbered the fresh one.
+    expect((((await getCanvasForTenant(TENANT, created.canvasId))?.state) as { name: string }).name).toBe('Spring launch v2');
   });
 
   it('update without baseVersion is rejected with guidance toward get-design', async () => {
@@ -203,7 +246,12 @@ describe('CFP-1 — render tool: gates, repair-loop errors, persistence', () => 
     const created = JSON.parse((await p.executeTool({ name: CAMPAIGN_STUDIO_RENDER_TOOL_ID, input: { campaign: VALID_CAMPAIGN } })).content) as { canvasId: string };
     const out = await p.executeTool({ name: CAMPAIGN_STUDIO_RENDER_TOOL_ID, input: { campaign: VALID_CAMPAIGN, canvasId: created.canvasId } });
     expect(out.isError).toBe(true);
-    expect(JSON.parse(out.content).message).toContain('get-design');
+    // The baseVersion guard's own typed error — the version-conflict message also
+    // names get-design, so the code + `baseVersion` are what tell them apart.
+    const res = JSON.parse(out.content) as { error: string; message: string };
+    expect(res.error).toBe('validation_error');
+    expect(res.message).toContain('baseVersion');
+    expect(res.message).toContain('get-design');
   });
 
   it('stamps producedBy provenance metadata (agent when agentProfileId, else user); owner stays the human', async () => {
@@ -220,12 +268,24 @@ describe('CFP-1 — render tool: gates, repair-loop errors, persistence', () => 
 describe('CFP-1 — get-design: the campaign-state read path', () => {
   it('reads the current campaign + CAS version; cross-type and missing ids are not found', async () => {
     const p = provider({ actingUserId: 'u-1' });
-    const created = JSON.parse((await p.executeTool({ name: CAMPAIGN_STUDIO_RENDER_TOOL_ID, input: { campaign: VALID_CAMPAIGN } })).content) as { canvasId: string };
+    const created = JSON.parse((await p.executeTool({ name: CAMPAIGN_STUDIO_RENDER_TOOL_ID, input: { campaign: VALID_CAMPAIGN } })).content) as { canvasId: string; version: number };
     const out = await p.executeTool({ name: CAMPAIGN_STUDIO_GET_DESIGN_TOOL_ID, input: { canvasId: created.canvasId } });
     expect(out.isError).toBeFalsy();
     const res = JSON.parse(out.content) as { canvasId: string; version: number; campaign: { name: string } };
+    expect(res.canvasId).toBe(created.canvasId);
     expect(res.campaign.name).toBe('Spring launch');
-    expect(res.version).toBeGreaterThanOrEqual(1);
+    expect(res.version).toBe(created.version);
+
+    // Cross-type: a REAL slides canvas the same user owns, in the same tenant.
+    const slides = await createCanvasForTenant(TENANT, {
+      canvasTypeId: 'canvas.slides',
+      name: 'Deck',
+      ownerSubject: { kind: 'user', id: 'u-1' },
+      initialState: { title: 'Deck', slides: [] },
+    });
+    const crossType = await p.executeTool({ name: CAMPAIGN_STUDIO_GET_DESIGN_TOOL_ID, input: { canvasId: slides.canvasId } });
+    expect(crossType.isError).toBe(true);
+    expect(JSON.parse(crossType.content)).toMatchObject({ error: 'not_found' });
 
     const missing = await p.executeTool({ name: CAMPAIGN_STUDIO_GET_DESIGN_TOOL_ID, input: { canvasId: 'canvas-nope' } });
     expect(missing.isError).toBe(true);
@@ -242,7 +302,7 @@ describe('CFP-1 — get-design: the campaign-state read path', () => {
     const foreign = await createCanvasForTenant('other-tenant', {
       canvasTypeId: 'canvas.campaign',
       name: 'Foreign',
-      initialState: { name: 'Foreign', channels: [{ name: 'C', type: 'email' }] } as never,
+      initialState: { name: 'Foreign', channels: [{ name: 'C', type: 'email' }] },
     });
     const out = await provider({ actingUserId: 'u-1' }).executeTool({ name: CAMPAIGN_STUDIO_GET_DESIGN_TOOL_ID, input: { canvasId: foreign.canvasId } });
     expect(out.isError).toBe(true);

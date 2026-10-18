@@ -15,7 +15,15 @@
  *  - managed creative-brief creation is idempotent + counts failures (CB-CODE-5);
  *  - iteration ops (unknown op fails; a valid op transforms the prompt);
  *  - persona lens + competitor block reach the prompt;
- *  - QA v2 findings ride the quality report.
+ *  - QA v2 findings (near-dups, readability) ride the quality report; the
+ *    claim-level factCheck finding is pinned by QA-CODE-2 (wave 30: dropping
+ *    claim extraction reds that case + the pure extractor case — the QA v2
+ *    case's old factCheck line was also satisfied by the unconditional
+ *    "No citations" issue, so it was removed rather than kept as a non-witness).
+ *
+ * Note: QA-CODE-6's per-platform loop is satisfied by construction (the
+ * system prompt interpolates every PLATFORM_LIMITS key); the failable part is
+ * the hand-written 'TikTok' platform list.
  */
 import { describe, expect, it } from 'vitest';
 import {
@@ -44,7 +52,8 @@ describe('limits table + validators', () => {
     expect(PLATFORM_LIMITS.google).toEqual({ headline: 30, description: 90 });
     const findings = validateAdVariants({ platformSets: [{ platform: 'Google', variants: [{ headline: 'x'.repeat(31), description: 'ok' }] }] });
     expect(findings).toEqual([{ platform: 'google', set: 0, index: 0, field: 'headline', length: 31, limit: 30 }]);
-    expect(validateSocialPosts({ posts: [{ platform: 'twitter', content: 'x'.repeat(281) }] })).toHaveLength(1);
+    expect(validateSocialPosts({ posts: [{ platform: 'twitter', content: 'x'.repeat(281) }] }))
+      .toEqual([{ platform: 'twitter', index: 0, field: 'content', length: 281, limit: 280 }]);
   });
 
   it('duplicate same-platform sets: each finding names ITS set (QA-CODE-1)', () => {
@@ -135,7 +144,7 @@ describe('generate node enforcement', () => {
     expect(prompt).toContain('COMPETITORS: differentiate against AcmePick');
   });
 
-  it('QA v2: unsupported claims + near-dups ride the report', async () => {
+  it('QA v2: near-dups + readability of THIS draft ride the report', async () => {
     const draft = {
       platformSets: [{ platform: 'google', variants: [
         { headline: 'We are 40% faster', description: 'pick faster with robots' },
@@ -145,10 +154,10 @@ describe('generate node enforcement', () => {
     const out = await channelNodes['feature.campaign-channels.nodes.generate']({
       features: { 'campaign-brief': briefFeature() }, callAI: async () => ({ data: draft }), inputs: { briefId: 'b1', channel: 'ad_variants' },
     });
-    const report = out.outputs!.qualityReport as { issues: Array<{ dimension: string }>; readability: { band: string } };
-    expect(report.issues.some((i) => i.dimension === 'factCheck')).toBe(true);
-    expect(report.issues.some((i) => i.dimension === 'variety')).toBe(true);
-    expect(['easy', 'standard', 'technical']).toContain(report.readability.band);
+    const report = out.outputs!.qualityReport as { issues: Array<{ dimension: string; pairs?: unknown }>; readability: { band: string; score: number } };
+    expect(report.issues.find((i) => i.dimension === 'variety')?.pairs).toEqual([{ a: 0, b: 1, similarity: expect.any(Number) }]);
+    // The band OF THIS DRAFT (ad_variants score the whole draft JSON), not just "some band".
+    expect(report.readability).toEqual(readabilityBand(JSON.stringify(out.outputs!.draft)));
   });
 
   it('QA-CODE-2: a [src_N] in ONE field does not suppress uncited claims in ANOTHER', async () => {

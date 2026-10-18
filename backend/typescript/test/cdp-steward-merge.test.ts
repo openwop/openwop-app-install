@@ -3,6 +3,11 @@
  * as a contact-merge approval; on APPROVE the registered CRM handler performs the
  * deterministic merge (a human dispositions it — never an auto-merge); on REJECT
  * nothing merges. Missing decider → forbidden.
+ *
+ * Sabotage-witnessed (/grade-tests w38): merging on any changed flip reds the REJECT case;
+ * merging on `rejected` instead of `approved` reds both; dropping the decider check reds case 3.
+ * `createApp` is deliberate: "registers a handler" is a boot-WIRING claim (the CRM feature
+ * registers it), so a unit-level registration would not prove it (cost ceiling).
  */
 import { beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
@@ -49,7 +54,13 @@ describe('CDP-B steward merge', () => {
   it('requires a signed-in decider (no auto-decide)', async () => {
     const handler = getContactMergeApprovalHandler()!;
     const tenantId = `org:stew3-${Date.now()}`;
-    const { approval } = await propose(tenantId);
-    await expect(handler(tenantId, approval.approvalId, 'approved', {})).rejects.toMatchObject({ code: 'forbidden_scope' });
+    const { source, approval } = await propose(tenantId);
+    await expect(handler(tenantId, approval.approvalId, 'approved', {})).rejects.toMatchObject({
+      code: 'forbidden_scope',
+      message: 'A signed-in member is required to decide a merge.',
+    });
+    // Refused BEFORE any side effect: the approval is still open and nothing merged.
+    expect((await getApproval(approval.approvalId))!.status).toBe('pending');
+    expect((await getContact(source.contactId))!.mergedInto).toBeUndefined();
   });
 });

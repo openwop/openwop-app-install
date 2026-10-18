@@ -7,6 +7,10 @@
  * *fine* — the broken link vanished from the UI and reappeared as a validation
  * error later, on a screen that showed nothing wrong. Surfacing the dangling id
  * is the same posture as surfacing the links; it is not enforcement.
+ *
+ * Sabotage-witnessed (w52): inverting the dangling filter (cases 1-3 red);
+ * keeping instead of dropping the toggled id (case 2); warning on an EMPTY link
+ * list (case 4 — the only case that guards that boundary).
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, cleanup, fireEvent } from '@testing-library/react';
@@ -35,7 +39,10 @@ const view = (achievements: unknown, onChange = vi.fn()): ReturnType<typeof vi.f
 describe('CO-G1 — a dangling outcome link is surfaced', () => {
   it('names the missing outcome instead of silently dropping it from view', () => {
     view([{ achievementId: 'achievement-1', observableEvidence: 'ran it', outcomeIds: ['outcome-1', 'outcome-deleted'] }]);
-    expect(document.body.textContent).toContain('outcome-deleted');
+    // The warning itself — a status line naming the id and the consequence.
+    const warning = screen.getByRole('status');
+    expect(warning.textContent).toContain('outcome-deleted');
+    expect(warning.textContent).toContain('no longer exists');
     // The link that still resolves stays an ordinary, checked checkbox.
     expect((screen.getByRole('checkbox') as HTMLInputElement).checked).toBe(true);
   });

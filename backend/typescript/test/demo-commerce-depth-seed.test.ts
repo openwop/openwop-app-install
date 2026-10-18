@@ -18,11 +18,12 @@ import { seedDemoPeople } from '../src/host/demoPeopleSeed.js';
 import { seedDemoMedia } from '../src/host/demoMediaSeed.js';
 import { seedDemoCrm } from '../src/host/demoCrmSeed.js';
 import { seedDemoCommerceDepth, clearDemoCommerceDepth, countDemoCommerceDepth } from '../src/host/demoCommerceDepthSeed.js';
-import { listProducts, listOrders, listCoupons } from '../src/features/commerce/commerceService.js';
+import { listProducts, listOrders, listCoupons, listStockMovements } from '../src/features/commerce/commerceService.js';
+import { listAffiliates } from '../src/features/commerce/affiliate.js';
 import { listProductSubscriptions } from '../src/features/commerce/subscriptions.js';
 import { listQuotes } from '../src/features/commerce/quotes.js';
 import { listPriceLists } from '../src/features/commerce/pricing.js';
-import { SOLSTICE_CATALOG, SOLSTICE_QUOTES } from '../src/host/seed-data/solsticeDemo.js';
+import { SOLSTICE_AFFILIATES, SOLSTICE_CATALOG, SOLSTICE_QUOTES } from '../src/host/seed-data/solsticeDemo.js';
 
 const ACTOR = 'demo:commerce-depth';
 const refundStore = new DurableCollection<{ refundLedgerId: string; tenantId: string }>('commerce:refund', (r) => r.refundLedgerId, undefined, (r) => r.tenantId);
@@ -64,6 +65,13 @@ describe('demo-commerce-depth seeder', () => {
     expect(quotes).toHaveLength(SOLSTICE_QUOTES.length);
     expect(quotes.some((q) => q.status === 'converted')).toBe(true);
 
+    // Affiliates (2, by code).
+    const affCodes = new Set(SOLSTICE_AFFILIATES.map((a) => a.code));
+    expect(affCodes.size).toBe(2);
+    expect((await listAffiliates(tenantId, orgId)).filter((a) => affCodes.has(a.code))).toHaveLength(2);
+    const productIds = new Set(products.map((p) => p.productId));
+    expect((await listStockMovements(tenantId, orgId)).some((m) => productIds.has(m.productId))).toBe(true); // orders moved stock
+
     // Idempotent re-seed.
     const before = await countDemoCommerceDepth(tenantId);
     const second = await seedDemoCommerceDepth(tenantId);
@@ -80,6 +88,8 @@ describe('demo-commerce-depth seeder', () => {
     expect((await listProductSubscriptions(tenantId, orgId)).filter((s) => s.createdBy === ACTOR)).toHaveLength(0);
     expect((await listQuotes(tenantId, orgId)).filter((q) => q.createdBy === ACTOR)).toHaveLength(0);
     expect((await refundStore.listForTenantIndexed(tenantId)).length).toBe(0);
+    expect((await listAffiliates(tenantId, orgId)).filter((a) => affCodes.has(a.code))).toHaveLength(0);
+    expect((await listStockMovements(tenantId, orgId)).filter((m) => productIds.has(m.productId))).toHaveLength(0); // no stock-movement orphans
 
     // Round-trips.
     const third = await seedDemoCommerceDepth(tenantId);

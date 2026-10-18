@@ -44,9 +44,10 @@ import { createLogger } from '../observability/logger.js';
 import { resolveOne } from './featureToggles/service.js';
 import {
   createDraft, createDraftVersion, publishChallenge, retireChallenge, listPublished, getLatest,
+  listChallengeVersions, deleteRetiredVersion,
 } from '../features/kicktodo-core/challengeService.js';
 import {
-  enroll, listEnrollmentsInTenant, abandonEnrollment,
+  enroll, listEnrollmentsInTenant, abandonEnrollment, deleteAbandonedEnrollment,
   EnrollDeniedError, ChallengeNotEnrollableError,
 } from '../features/kicktodo-core/enrollmentService.js';
 import {
@@ -162,8 +163,41 @@ export async function seedDemoKicktodo(
     }
   }
 
-  log.info('demo_kicktodo_seeded', { tenantId, challenges: publishedIds.length, enrolled });
+  const pruned = await pruneDemoResidue(tenantId);
+
+  log.info('demo_kicktodo_seeded', { tenantId, challenges: publishedIds.length, enrolled, ...pruned });
   return { created, details: { challenges: publishedIds.length, enrolled } };
+}
+
+/**
+ * KTSEED-3 (KickTodo wave 4C) — every clear/seed cycle left two rows behind for
+ * good: the RETIRED version the re-seed versioned past, and the demo actor's
+ * ABANDONED enrollment on it. This runs at the end of every seed() and removes
+ * exactly those, and nothing a real person can depend on:
+ *  - only the demo ACTOR's abandoned enrollments on demo challenges (a real
+ *    participant's enrollment, live or not, is never touched);
+ *  - only RETIRED demo versions that are NOT the lineage's latest (the latest
+ *    retired row is how the next seed knows to create a new version) and that NO
+ *    enrollment of anyone still pins — the "keeps their pinned version" promise.
+ * Idempotent: a tenant with no residue changes nothing.
+ */
+async function pruneDemoResidue(tenantId: string): Promise<{ prunedEnrollments: number; prunedVersions: number }> {
+  let prunedEnrollments = 0;
+  let prunedVersions = 0;
+  for (const e of await listEnrollmentsInTenant(tenantId)) {
+    if (!isDemo(e.challengeId) || e.ownerSubject !== KICKTODO_DEMO_ACTOR || e.state !== 'abandoned') continue;
+    if (await deleteAbandonedEnrollment(tenantId, e.id, KICKTODO_DEMO_ACTOR)) prunedEnrollments += 1;
+  }
+  const pinned = new Set((await listEnrollmentsInTenant(tenantId)).map((e) => `${e.challengeId}::v${e.challengeVersion}`));
+  for (const c of KICKTODO_DEMO_CHALLENGES) {
+    const versions = await listChallengeVersions(tenantId, idFor(c.slug));
+    const latest = versions[versions.length - 1];
+    for (const v of versions) {
+      if (v === latest || v.status !== 'retired' || pinned.has(`${v.id}::v${v.version}`)) continue;
+      if (await deleteRetiredVersion(tenantId, v.id, v.version)) prunedVersions += 1;
+    }
+  }
+  return { prunedEnrollments, prunedVersions };
 }
 
 export async function clearDemoKicktodo(

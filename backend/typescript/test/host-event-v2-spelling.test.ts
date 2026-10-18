@@ -15,6 +15,8 @@ import type { AddressInfo } from 'node:net';
 import type { Express } from 'express';
 import { getSetCookies } from './headerCookies.js';
 import { createApp } from '../src/index.js';
+import { saveConfig } from '../src/host/featureToggles/service.js';
+import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import type { Storage } from '../src/storage/storage.js';
 import type { RunRecord } from '../src/types.js';
 import { deliverHostExtEvent } from '../src/routes/webhooks.js';
@@ -34,6 +36,8 @@ beforeAll(async () => {
   delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
   app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   storage = app.locals.storage as Storage;
+  // ADR 0892: CRM is opt-in; the binding fixture emits a CRM event.
+  { const d = getToggleDefault('crm'); if (d) await saveConfig({ ...d, status: 'on' }, 'test'); }
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
   const wellKnown = (await (await fetch(`${BASE}/.well-known/openwop`)).json()) as { fixtures?: string[] };
   workflowId = wellKnown.fixtures?.[0] ?? 'openwop-app.uppercase';

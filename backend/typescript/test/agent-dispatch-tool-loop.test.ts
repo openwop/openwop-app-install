@@ -214,4 +214,84 @@ describe('runAgentDispatchLive — tool loop (A1)', () => {
     expect(content).toContain('END_UNTRUSTED_CONTENT');
     expect(content.match(/\bEND UNTRUSTED CONTENT\b/g)?.length).toBe(1);
   });
+
+  // XCH-DISP-1 — the tools round carries no `responseSchema` and real tools
+  // adapters return the final answer as text, so a handoff agent's structured
+  // return must be recovered from that text, then judged by §D as usual.
+  describe('a handoff agent with a return schema on the tool path (XCH-DISP-1)', () => {
+    function registerHandoff(): void {
+      getAgentRegistry().register({
+        agentId: 'tool.handoff',
+        persona: 'Composer',
+        modelClass: 'research',
+        systemPrompt: 'Read, then return the revision JSON.',
+        packName: 'test',
+        packVersion: '0',
+        toolAllowlist: ['search'],
+        confidence: { defaultThreshold: 0.5 },
+        handoff: {
+          returnSchema: { type: 'object', required: ['commands'], properties: { commands: { type: 'array' } } },
+          validateReturn: (v: unknown) => (v && typeof v === 'object' && Array.isArray((v as { commands?: unknown }).commands)
+            ? { ok: true } : { ok: false, errors: 'missing commands array' }),
+        },
+      });
+    }
+    const seenSystem: string[] = [];
+    const loop = (finalText: string) => {
+      let round = 0;
+      return async (req: AiToolCallRequest): Promise<AiToolCallResult> => {
+        seenSystem.push(req.systemPrompt ?? '');
+        round += 1;
+        if (round === 1) return { toolCalls: [{ id: 'c1', name: 'search', input: { query: 'state' } }], finishReason: 'tool-call' };
+        return { content: finalText, toolCalls: [], finishReason: 'stop' };
+      };
+    };
+    const executeTool: LiveDispatchDeps['executeTool'] = async () => ({ content: '{}' });
+
+    it('a fenced JSON final answer becomes the validated structured result', async () => {
+      registerHandoff();
+      const res = await runAgentDispatchLive(
+        { agentId: 'tool.handoff', task: 't', availableTools: ['search'] },
+        { callAI: callAINever, callAIWithTools: loop('Here it is:\n```json\n{"commands":[{"lane":"recovery"}]}\n```'), executeTool, resolveTool: resolveSearch },
+      );
+      expect(res.status).toBe('completed');
+      expect(res.result).toEqual({ commands: [{ lane: 'recovery' }] });
+      // The contract reached the model, generated from the SAME schema §D judges.
+      expect(seenSystem[0]).toContain('## Return contract');
+      expect(seenSystem[0]).toContain('"required":["commands"]');
+    });
+
+    it('JSON that parses but violates the schema is a typed return_schema_violation, never success', async () => {
+      registerHandoff();
+      const res = await runAgentDispatchLive(
+        { agentId: 'tool.handoff', task: 't', availableTools: ['search'] },
+        { callAI: callAINever, callAIWithTools: loop('{"lanes":[]}'), executeTool, resolveTool: resolveSearch },
+      );
+      expect(res.status).toBe('failed');
+      expect(res.error?.code).toBe('return_schema_violation');
+      expect(res.result).toBeUndefined();
+    });
+
+    it('an agent with NO return schema is unchanged: verbatim system prompt, text result even when the text is JSON', async () => {
+      register(['search']);
+      seenSystem.length = 0;
+      const res = await runAgentDispatchLive(
+        { agentId: 'tool.agent', task: 't', availableTools: ['search'] },
+        { callAI: callAINever, callAIWithTools: loop('{"commands":[]}'), executeTool, resolveTool: resolveSearch },
+      );
+      expect(res.status).toBe('completed');
+      expect(seenSystem[0]).toBe('Use tools to answer.');
+      expect(res.result).toEqual({ content: '{"commands":[]}' });
+    });
+
+    it('a prose final answer is still a return_schema_violation — recovery never invents a result', async () => {
+      registerHandoff();
+      const res = await runAgentDispatchLive(
+        { agentId: 'tool.handoff', task: 't', availableTools: ['search'] },
+        { callAI: callAINever, callAIWithTools: loop('I moved your rest day.'), executeTool, resolveTool: resolveSearch },
+      );
+      expect(res.status).toBe('failed');
+      expect(res.error?.code).toBe('return_schema_violation');
+    });
+  });
 });

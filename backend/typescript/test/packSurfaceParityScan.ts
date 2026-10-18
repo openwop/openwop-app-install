@@ -137,6 +137,13 @@ function classifyMethod(fn: ts.ArrowFunction | ts.FunctionExpression | ts.Method
   return { readable: !opaque, keys: [...keys] };
 }
 
+/** Wrappers that hand back the surface literal they are given, with each method's
+ *  `args` forwarded unchanged (a subject the caller omits may be DEFAULTED, which
+ *  adds no key the pack sends). Without this the wrapped surfaces leave the scan's
+ *  population silently — ADR 0901 (DEC-1) wrapped all nine KickTodo surfaces and
+ *  the denominators fell by 61 call sites. Adding a name here is a review. */
+const SURFACE_WRAPPERS = new Set(['bindKicktodoSurface']);
+
 function surfaceMethods(surfaces: ReturnType<typeof registeredSurfaces>): SurfaceMethod[] {
   const out: SurfaceMethod[] = [];
   for (const s of surfaces) {
@@ -149,7 +156,15 @@ function surfaceMethods(surfaces: ReturnType<typeof registeredSurfaces>): Surfac
     if (!builder) continue;
     const returns: ts.ObjectLiteralExpression[] = [];
     const visit = (n: ts.Node): void => {
-      if (ts.isReturnStatement(n) && n.expression) { const u = unwrap(n.expression); if (ts.isObjectLiteralExpression(u)) returns.push(u); }
+      if (ts.isReturnStatement(n) && n.expression) {
+        const u = unwrap(n.expression);
+        if (ts.isObjectLiteralExpression(u)) returns.push(u);
+        // A reviewed pass-through wrapper (`return bindKicktodoSurface(id, scope, {…}, specs)`):
+        // its literal IS the surface, so the scan keeps reading the methods' keys.
+        else if (ts.isCallExpression(u) && ts.isIdentifier(u.expression) && SURFACE_WRAPPERS.has(u.expression.text)) {
+          for (const a of u.arguments) { const ua = unwrap(a); if (ts.isObjectLiteralExpression(ua)) returns.push(ua); }
+        }
+      }
       if (ts.isArrowFunction(n) && n.body && !ts.isBlock(n.body)) { const u = unwrap(n.body); if (ts.isObjectLiteralExpression(u)) returns.push(u); }
       ts.forEachChild(n, visit);
     };

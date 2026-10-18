@@ -17,6 +17,8 @@ export const messages = {
   rtSave: "Salvar",
   rtSaving: "Salvando…",
   rtSaved: "Configurações de voz em tempo real salvas.",
+  rtLoadFailed: "Não foi possível carregar as configurações atuais de voz em tempo real, então elas não podem ser alteradas aqui agora.",
+  rtRetry: "Tentar novamente",
 
   // Provedor de IA padrão para mídia (ADR 0110)
   aiDefaultTitle: 'Provedor de IA padrão para mídia',
@@ -138,7 +140,6 @@ export const messages = {
   unscoped: 'Sem escopo',
   noKeysTitle: 'Nenhuma chave de API ainda',
   noKeysBody: 'Adicione uma chave para permitir que o chat e os nós de workflow chamem um provedor em seu nome. As chaves são criptografadas em repouso; os nós as referenciam pelo rótulo.',
-  addFirstKey: 'Adicione sua primeira chave',
   keyCount_one: '{{count}} chave',
   keyCount_other: '{{count}} chaves',
   addProviderKey: 'Adicionar chave do {{provider}}',

@@ -9,9 +9,10 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, cleanup, screen, act } from '@testing-library/react';
 
-const getPipelineReport = vi.fn();
+type CrmReports = typeof import('../../crm/crmReportsClient.js');
+const getPipelineReport = vi.fn<CrmReports['getPipelineReport']>();
 vi.mock('../../crm/crmReportsClient.js', () => ({
-  getPipelineReport: (...a: unknown[]) => getPipelineReport(...a),
+  getPipelineReport: (...a: Parameters<CrmReports['getPipelineReport']>) => getPipelineReport(...a),
 }));
 vi.mock('../useDashboardOrg.js', () => ({
   useDashboardOrg: () => ({ orgId: 'o1', loading: false, error: false }),
@@ -19,13 +20,14 @@ vi.mock('../useDashboardOrg.js', () => ({
 
 import PipelineTrendTile from '../tiles/PipelineTrendTile.js';
 import { __resetSharedReads } from '../sharedRead.js';
+import type { PipelineReport, PipelineSnapshot } from '../../crm/crmReportsClient.js';
 
-const snap = (week: string, weighted: number) => ({
+const snap = (week: string, weighted: number): PipelineSnapshot => ({
   isoWeek: week, at: `${week}T00:00:00Z`,
   perStage: [{ stageId: 's1', name: 'Open', probability: 0.5, count: 2, sum: weighted * 2, weightedSum: weighted }],
 });
 
-const report = (currencies: string[] | undefined) => ({
+const report = (currencies: string[] | undefined): PipelineReport => ({
   funnel: [], perStage: [], totals: { openCount: 0, wonCount: 0, lostCount: 0, winRate: null },
   aging: [], conversions: [],
   snapshots: [snap('2026-W31', 1000), snap('2026-W32', 1500)],
@@ -64,7 +66,8 @@ describe('pipeline trend tile — currency honesty', () => {
 
 describe('pipeline trend tile — ADR 0846 D4 withheld history', () => {
   it('a territory-scoped viewer is told why there is no trend, not "no snapshots yet"', async () => {
-    getPipelineReport.mockResolvedValue({ ...report(['EUR']), snapshots: [], snapshotsWithheld: true });
+    const withheld: PipelineReport = { ...report(['EUR']), snapshots: [], snapshotsWithheld: true };
+    getPipelineReport.mockResolvedValue(withheld);
     await mount();
     expect(screen.getByText(/outside your territories/i)).toBeTruthy();
     expect(screen.queryByText(/No pipeline snapshots yet/i)).toBeNull();

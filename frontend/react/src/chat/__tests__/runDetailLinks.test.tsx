@@ -2,6 +2,10 @@
  * DESIGN.md §4.5 rule 17 / ADR 0844 D4 — no link a viewer cannot follow.
  * `/runs/:runId` is admin-tier, so a member's chat run surfaces must not link
  * there: the run id stays as text, and "Open run" actions are absent.
+ *
+ * What breaks it: rendering `OpenRunLink` / the bubble's run-id link without the
+ * `useCanOpenRunDetail` check, or telling a member to "Open the run" in the
+ * graph-cache-miss copy.
  */
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { render, cleanup, screen } from '@testing-library/react';
@@ -14,17 +18,17 @@ vi.mock('../../client/useEffectiveAccess.js', () => ({
   isAdminCaller: () => admin,
 }));
 
-const { WorkflowCompletionCard } = await import('../WorkflowCompletionCard.js');
-const { WorkflowRunBubble } = await import('../WorkflowRunBubble.js');
+import { WorkflowCompletionCard } from '../WorkflowCompletionCard.js';
+import { WorkflowRunBubble } from '../WorkflowRunBubble.js';
 
 function runState(over: Partial<WorkflowRunState> = {}): WorkflowRunState {
   return {
     slug: 'wf', workflowName: 'Weekly variance', workflowId: 'wf-1',
     runId: 'run-abc', status: 'completed', totalNodes: 3,
     completedNodeIds: ['a'], nodeOutputs: {}, failedNodeIds: [],
-    startedAt: Date.now(),
+    currentNodeName: null, nodeNames: {}, startedAt: '2026-10-08T00:00:00.000Z',
     ...over,
-  } as WorkflowRunState;
+  };
 }
 
 function runLinks(): HTMLAnchorElement[] {
@@ -50,7 +54,7 @@ describe('chat run links follow the /runs/:runId admin tier', () => {
   });
 
   it('run bubble: a member sees the run id as text, not a link', () => {
-    const message = { id: 'm1', role: 'assistant', content: '', workflowRun: runState({ status: 'running' }) } as unknown as ChatMessage;
+    const message: ChatMessage = { id: 'm1', role: 'workflow_run', content: '', createdAt: '2026-10-08T00:00:00.000Z', workflowRun: runState({ status: 'running' }) };
 
     admin = true;
     render(<MemoryRouter><WorkflowRunBubble message={message} /></MemoryRouter>);

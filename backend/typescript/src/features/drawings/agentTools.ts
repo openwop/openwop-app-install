@@ -30,7 +30,7 @@ import { resolveFeatureToggle } from '../../host/agentToolKit.js';
 import { listOrgs, resolveEffectiveAccess } from '../../host/accessControlService.js';
 import type { BundleScope } from '../../host/inMemorySurfaces.js';
 import { getNodeRegistry } from '../../executor/nodeRegistry.js';
-import { createCanvasForTenant, updateCanvasForTenant, getCanvasForCaller } from '../../host/canvasSurface.js';
+import { createCanvasForTenant, updateCanvasForTenant, getCanvasForCaller, canvasWriteAllowed } from '../../host/canvasSurface.js';
 import { validateDrawingDoc, DRAWING_SHAPE_KINDS } from './validateDrawingDoc.js';
 
 export const DRAWINGS_GET_DESIGN_TOOL_ID = 'openwop:drawings.get-design';
@@ -215,6 +215,10 @@ export function registerDrawingsAgentTools(): void {
         const existing = await getCanvasForCaller(scope.tenantId, canvasId, { subject: scope.actingUserId });
         if (!existing || existing.canvasTypeId !== DRAWING_CANVAS_TYPE) {
           return toolError('not_found', `Drawing '${canvasId}' not found in this workspace.`);
+        }
+        // ADR 0886 D1 — WRITE on the owner, decided in the owner's org.
+        if (!(await canvasWriteAllowed(scope.tenantId, existing, { subject: scope.actingUserId }))) {
+          return toolError('forbidden_scope', 'The user can read this drawing but cannot edit it — tell them.');
         }
         const baseVersion = Number(input.baseVersion);
         if (!Number.isInteger(baseVersion) || baseVersion < 1) {

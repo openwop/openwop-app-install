@@ -155,6 +155,7 @@ export function subscribeVoiceTranscripts(conversationId: string, onMessage: () 
   const sub = new AbortController();
   const url = `${config.sseBaseUrl}/host/openwop-app/voice/realtime/messages/stream?conversationId=${encodeURIComponent(conversationId)}`;
   let attempt = 0;
+  let connectedBefore = false;
   const sleep = (ms: number): Promise<void> => new Promise<void>((resolve) => {
     const t = setTimeout(resolve, ms);
     sub.signal.addEventListener('abort', () => { clearTimeout(t); resolve(); }, { once: true });
@@ -171,6 +172,10 @@ export function subscribeVoiceTranscripts(conversationId: string, onMessage: () 
         if (res.status === 401 || res.status === 403 || res.status === 404 || res.status === 405) return;
         if (res.ok && res.body) {
           attempt = 0; // a successful connect resets the backoff
+          // ADR 0897 — no replay on this stream, and the host ends it every few
+          // minutes: a REconnect reloads once to cover a message in the gap.
+          if (connectedBefore) onMessage();
+          connectedBefore = true;
           for await (const frame of readSseFrames(res.body, sub.signal)) {
             if (frame.event === 'chat.message') onMessage();
           }
@@ -219,14 +224,18 @@ export async function setRealtimeConfig(input: RealtimeConfig): Promise<Realtime
 }
 
 /** A7 (ADR 0467 follow-on) — resolve a HELD sideband tool call from the chat
- *  card. `gone` = already resolved or the call ended (404). */
-export async function resolveHeldVoiceApproval(callId: string, fcId: string, approve: boolean): Promise<'executed' | 'denied' | 'gone'> {
+ *  card. `gone` = already resolved or the call ended (404); `forbidden` = still
+ *  pending, but this caller may not answer it (403). */
+export async function resolveHeldVoiceApproval(callId: string, fcId: string, approve: boolean): Promise<'executed' | 'denied' | 'gone' | 'forbidden'> {
   const res = await fetch(`${config.baseUrl}/host/openwop-app/voice/realtime/held-approvals/resolve`, fetchOpts({
     method: 'POST',
     headers: { ...authedHeaders(), 'content-type': 'application/json' },
     body: JSON.stringify({ callId, fcId, approve }),
   }));
-  if (res.status === 404 || res.status === 403) return 'gone';
+  if (res.status === 404) return 'gone';
+  // VOX2UX-6 — a 403 is NOT "gone": the approval is still pending, and this caller
+  // may not answer it (not the person on the call, or lacks `approvals:respond`).
+  if (res.status === 403) return 'forbidden';
   if (!res.ok) throw new Error(`resolve held approval: HTTP ${res.status}`);
   const j = await res.json() as { status?: string };
   return j.status === 'executed' ? 'executed' : 'denied';

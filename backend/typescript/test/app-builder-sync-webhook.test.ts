@@ -71,16 +71,20 @@ const AB = (orgId: string) => `/host/openwop-app/app-builder/orgs/${encodeURICom
 const HOOK = (webhookId: string) => `/host/openwop-app/app-builder-sync/webhook/${encodeURIComponent(webhookId)}`;
 
 let n = 0;
-async function boundCanvas(): Promise<{ owner: Client; orgId: string; canvasId: string; tenantId: string; webhookId: string; secret: string }> {
+// Each binding gets its OWN repo, so a case reads only its own GitHub calls: an
+// `applied` outcome fires an un-awaited post-apply refresh that can append to
+// the shared `ghCalls` after the case that caused it has finished.
+async function boundCanvas(): Promise<{ owner: Client; orgId: string; canvasId: string; tenantId: string; webhookId: string; secret: string; repo: string }> {
   const tenantId = `org:test-ab-hook-${Date.now()}-${n++}`;
   const owner = client();
   await owner.post('/host/openwop-app/test/login', { email: `own-${Date.now()}-${n++}@acme.test`, tenantId });
   const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status).toBe(201);
   const canvas = await createCanvasForTenant(tenantId, { canvasTypeId: 'canvas.app-builder', name: 'S', initialState: STATE });
-  const bound = await owner.put(`${AB(org.body.orgId)}/canvases/${canvas.canvasId}/sync-binding`, { owner: 'octo', repo: 'my-app', branch: 'main', target: 'html-css' });
+  const repo = `my-app-${n++}`;
+  const bound = await owner.put(`${AB(org.body.orgId)}/canvases/${canvas.canvasId}/sync-binding`, { owner: 'octo', repo, branch: 'main', target: 'html-css' });
   expect(bound.status, JSON.stringify(bound.body)).toBe(201);
-  return { owner, orgId: org.body.orgId, canvasId: canvas.canvasId, tenantId, webhookId: bound.body.binding.webhookId, secret: bound.body.webhookSecret };
+  return { owner, orgId: org.body.orgId, canvasId: canvas.canvasId, tenantId, webhookId: bound.body.binding.webhookId, secret: bound.body.webhookSecret, repo };
 }
 
 let d = 0;
@@ -95,6 +99,9 @@ async function sendHook(webhookId: string, secret: string | null, payload: unkno
   const res = await fetch(`${BASE}${HOOK(webhookId)}`, { method: 'POST', headers, body: raw });
   return { status: res.status, body: await res.json().catch(() => undefined) };
 }
+
+/** The GitHub calls made for ONE binding's repo. */
+const callsFor = (repo: string): GhCall[] => ghCalls.filter((c) => c.url.includes(`/repos/octo/${repo}/`));
 
 const b64 = (v: unknown): string => Buffer.from(JSON.stringify(v), 'utf8').toString('base64');
 
@@ -118,8 +125,15 @@ const pushPayload = (over?: Record<string, unknown>) => ({
 
 describe('inbound webhook — auth + routing gates', () => {
   it('401s a bad/absent signature; 404s an unknown webhook id; acks ping', async () => {
-    const { webhookId, secret } = await boundCanvas();
+    const { webhookId, secret, tenantId, canvasId } = await boundCanvas();
     expect((await sendHook(webhookId, 'wrong-secret', pushPayload())).status).toBe(401);
+    // The realistic cross-tenant forgery: ANOTHER binding's genuine secret. The
+    // tenant comes from the stored binding, so it must not verify here.
+    const other = await boundCanvas();
+    const forged = await sendHook(webhookId, other.secret, pushPayload());
+    expect(forged.status).toBe(401);
+    expect(forged.body).toMatchObject({ outcome: 'bad_signature' });
+    expect((await getCanvasForTenant(tenantId, canvasId))!.version).toBe(1);
     expect((await sendHook(webhookId, null, pushPayload())).status).toBe(401);
     expect((await sendHook('does-not-exist', secret, pushPayload())).status).toBe(404);
     const ping = await sendHook(webhookId, secret, { zen: 'Design for failure.' }, { event: 'ping' });
@@ -137,14 +151,13 @@ describe('inbound webhook — auth + routing gates', () => {
 
 describe('inbound webhook — idempotency (the ADR Phase 2 gate)', () => {
   it('skips our own echo (actor marker + matching version), no GitHub reads', async () => {
-    const { webhookId, secret } = await boundCanvas();
-    ghCalls.length = 0;
+    const { webhookId, secret, repo } = await boundCanvas();
     const res = await sendHook(webhookId, secret, pushPayload({
       head_commit: { id: 'b'.repeat(40), message: 'Sync from OpenWOP App Builder\n\n[openwop-sync] model-version=1' },
     }));
     expect(res.status).toBe(200);
     expect(res.body.outcome).toBe('skipped_self');
-    expect(ghCalls.length).toBe(0); // ack'd and dropped — no build, no fetch
+    expect(callsFor(repo)).toEqual([]); // ack'd and dropped — no build, no fetch
   });
 
   it('a REDELIVERED webhook (same delivery id) is a no-op duplicate ack', async () => {
@@ -164,6 +177,22 @@ describe('inbound webhook — idempotency (the ADR Phase 2 gate)', () => {
 });
 
 describe('inbound webhook — apply + fail-closed rejections', () => {
+  // `x-github-delivery` is NOT covered by the HMAC, so a captured signed push can
+  // be replayed under a fresh delivery id. Dedup cannot see it; the basis check
+  // must (the canvas moved past the repo's manifest when the first copy applied).
+  it('a replayed signed push under a NEW delivery id cannot re-apply (basis check fails closed)', async () => {
+    const { webhookId, secret, tenantId, canvasId } = await boundCanvas();
+    const model = { name: 'FromGit', screens: [{ id: 'home', name: 'Home', isInitial: true, components: [] }] };
+    repoResponder(model, { modelVersion: 1, paths: [] });
+    const first = await sendHook(webhookId, secret, pushPayload(), { delivery: `dlv-replay-a-${Date.now()}` });
+    expect(first.body.outcome).toBe('applied');
+    const applied = await getCanvasForTenant(tenantId, canvasId);
+    const replay = await sendHook(webhookId, secret, pushPayload(), { delivery: `dlv-replay-b-${Date.now()}` });
+    expect(replay.status).toBe(200);
+    expect(replay.body.outcome).toBe('fallback_basis');
+    expect((await getCanvasForTenant(tenantId, canvasId))!.version).toBe(applied!.version);
+  });
+
   it('APPLIES a valid pushed model through the governed CAS write', async () => {
     const { webhookId, secret, tenantId, canvasId } = await boundCanvas();
     const model = { name: 'FromGit', screens: [{ id: 'home', name: 'Home', isInitial: true, components: [] }] };
@@ -177,7 +206,7 @@ describe('inbound webhook — apply + fail-closed rejections', () => {
   });
 
   it('basis mismatch (canvas moved past the repo) → fallback branch, canvas untouched', async () => {
-    const { webhookId, secret, tenantId, canvasId } = await boundCanvas();
+    const { webhookId, secret, tenantId, canvasId, repo } = await boundCanvas();
     const model = { name: 'Clobber', screens: [{ id: 'home', name: 'Home', isInitial: true, components: [] }] };
     repoResponder(model, { modelVersion: 99, paths: [] }); // stale basis
     const res = await sendHook(webhookId, secret, pushPayload());
@@ -186,7 +215,7 @@ describe('inbound webhook — apply + fail-closed rejections', () => {
     expect(typeof res.body.fallbackBranch).toBe('string');
     expect(res.body.fallbackBranch).toMatch(/^openwop-sync-\d+$/);
     // the fallback ref points at the pushed commit; the canvas is untouched
-    const refCreate = ghCalls.find((c) => c.method === 'POST' && c.url.endsWith('/git/refs'));
+    const refCreate = callsFor(repo).find((c) => c.method === 'POST' && c.url.endsWith('/git/refs'));
     expect(refCreate?.body?.sha).toBe('a'.repeat(40));
     const canvas = await getCanvasForTenant(tenantId, canvasId);
     expect((canvas!.state as { name: string }).name).toBe('S');
@@ -249,10 +278,10 @@ describe('ADR 0835 — inbound sync hardening (AB2-CD-4/6/7/8)', () => {
   });
 
   it("reads the repo with the BINDING org's credential", async () => {
-    const { webhookId, secret, orgId } = await boundCanvas();
+    const { webhookId, secret, orgId, repo } = await boundCanvas();
     repoResponder({ name: 'FromGit', screens: [{ id: 'home', name: 'Home', isInitial: true, components: [] }] }, { modelVersion: 1, paths: [] });
     await sendHook(webhookId, secret, pushPayload());
-    const reads = ghCalls.filter((c) => c.method === 'GET');
+    const reads = callsFor(repo).filter((c) => c.method === 'GET');
     expect(reads.length).toBeGreaterThan(0);
     expect(reads.every((c) => c.orgId === orgId)).toBe(true);
   });

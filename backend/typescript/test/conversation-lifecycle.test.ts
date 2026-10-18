@@ -80,7 +80,7 @@ describe('conversation deletion cleans sidecars (ADR 0288 P2)', () => {
         allowed: [], forbidden: [], requireApproval: [], successCriteria: [], status: 'draft', proposedBy: 'extractor',
         createdAt: new Date().toISOString(),
       });
-      await createComment({ tenantId: T, orgId: 'org-1', resourceType: 'chat_message', resourceId: `${sessionId}#${msg}`, body: 'a note', authorId: 'u1' , caller: { subject: 'u1' }});
+      await createComment({ tenantId: T, orgId: 'org-1', resourceType: 'chat_message', resourceId: `${sessionId}#${msg}`, body: 'a note', authorId: 'u1', caller: PREAUTHORIZED_CALLER }); // ADR 0881 D1 — 'u1' is not this conversation's owner; this case tests the prune, not the gate
     }
 
     const del = await jsonFetch(`/host/openwop-app/chat/sessions/${doomed.sessionId}`, { method: 'DELETE' });

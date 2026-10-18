@@ -741,5 +741,20 @@ out="$(claim '#4' 'true')"
 check "$(printf '%s' "$out" | grep -c '^rc=0')" "1" "an unreadable owner is treated as stale, not as a permanent block"
 rm -rf "$TL"
 
+# The lock is per CLONE: a train with a custom OPENWOP_TRAIN_DIR must still see a
+# train running from the default dir. It used to lock "${TRAIN}.lock", so a
+# custom dir minted its own lock and two trains ran at once (2026-10-14, slot 74).
+echo "== merge-train lock is per clone, not per train dir =="
+TC="$(mktemp -d)"
+git init -q "$TC/repo" && mkdir -p "$TC/repo/scripts/lib"
+cp "$ROOT/scripts/merge-train.sh" "$TC/repo/scripts/"; cp "$ROOT/scripts/lib/train-lock.sh" "$TC/repo/scripts/lib/"
+sleep 30 & HOLDER=$!
+mkdir "$TC/repo-train.lock"; printf '%s\n%s\n%s\n' "$HOLDER" "#70" "2026-10-14T00:00:00Z" > "$TC/repo-train.lock/owner"
+rc=0; ( cd "$TC/repo" && env -u OPENWOP_TRAIN_LOCK OPENWOP_TRAIN_DIR="$TC/repo-train74" bash scripts/merge-train.sh --dry-run 4242 ) >"$TC/out" 2>&1 || rc=$?
+check "$rc" "3" "a train with a CUSTOM train dir is refused (exit 3) while the default-dir train runs"
+grep -q "pid $HOLDER, PRs #70" "$TC/out" && ok "  ...naming the running train" || bad "  ...naming the running train: $(tail -2 "$TC/out")"
+kill "$HOLDER" 2>/dev/null; wait "$HOLDER" 2>/dev/null || true
+rm -rf "$TC"
+
 echo "== gate tooling: $PASS passed, $FAIL failed =="
 [ "$FAIL" -eq 0 ] || exit 1

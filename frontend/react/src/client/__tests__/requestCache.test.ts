@@ -3,6 +3,11 @@
  * rate-limit fix (client/requestCache.ts). Verifies the two properties the fix
  * relies on: concurrent identical reads collapse to ONE loader call, and a
  * rejected load is never cached (so a 429 storm self-heals).
+ *
+ * #927 (the load-time 429 wall). Breaks it: N identical reads in one burst, a
+ * TTL that never expires, an invalidate() that does not force a re-fetch, or a
+ * rejected load pinned in the cache. Tenant-change invalidation is pinned in
+ * tenantChange.test.ts.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cachedRead, invalidate, clearRequestCache } from '../requestCache.js';

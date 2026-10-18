@@ -35,6 +35,7 @@ import { OpenwopError } from '../types.js';
 import { DurableCollection } from './hostExtPersistence.js';
 import { onWorkflowForked } from './workflowsRegistry.js';
 import { casRepoint, repointList } from './forkRepoint.js';
+import { CAS_RETRIES, entityEtag, staleWriteError } from './entityVersion.js';
 
 /** The manifest/deployment a roster member instantiates (a trimmed
  *  AgentRef — RFC 0002). `version` XOR `channel` per RFC 0082 §A. */
@@ -303,12 +304,43 @@ export async function updateRosterEntry(
     heartbeatIntervalMs?: number;
     autonomyLevel?: 'auto' | 'guided' | 'review';
   },
+  opts: { ifMatch?: string } = {},
 ): Promise<RosterEntry | null> {
-  const entry = await getRosterEntry(tenantId, rosterId); // ADR 0379 P1 — fail-closed
-  if (!entry) return null;
+  // ADR 0775 P4 (`ARWF-11`) — read, check the caller's version, apply, then
+  // compare-and-swap against the row that was read. A lost swap re-reads and
+  // re-applies the patch, so a concurrent write (another field's PATCH, a
+  // heartbeat stamp) is kept rather than overwritten; with `ifMatch` the re-read
+  // version no longer matches and the write is refused instead.
+  for (let attempt = 0; attempt < CAS_RETRIES; attempt += 1) {
+    const current = await getRosterEntry(tenantId, rosterId); // ADR 0379 P1 — fail-closed
+    if (!current) return null;
+    if (opts.ifMatch !== undefined && rosterEtag(current) !== opts.ifMatch) {
+      throw staleWriteError('agent', rosterEtag(current));
+    }
+    const entry = applyRosterPatch(structuredClone(current), patch, patch.persona !== undefined ? await listRoster(tenantId) : []);
+    if (await roster.compareAndSwap(current, entry)) {
+      await bumpRosterVersion();
+      return entry;
+    }
+  }
+  throw staleWriteError('agent', undefined);
+}
+
+/** The roster row's content version (ADR 0775 P4). `lastHeartbeatAt` is an
+ *  activity stamp, not an edit, so it does not change the version. */
+export function rosterEtag(entry: RosterEntry): string {
+  return entityEtag(entry, ['lastHeartbeatAt']);
+}
+
+function applyRosterPatch(
+  entry: RosterEntry,
+  patch: Parameters<typeof updateRosterEntry>[2],
+  siblingsList: readonly RosterEntry[],
+): RosterEntry {
+  const rosterId = entry.rosterId;
   if (patch.persona !== undefined && personaKey(patch.persona) !== personaKey(entry.persona)) {
     // ADR 0414 M3-2 — collision-checked mention handle on the rename path.
-    const siblings = await listRoster(tenantId);
+    const siblings = siblingsList;
     if (siblings.some((s) => s.rosterId !== rosterId && personaKey(s.persona) === personaKey(patch.persona as string))) {
       throw new PersonaCollisionError(patch.persona);
     }
@@ -335,8 +367,6 @@ export async function updateRosterEntry(
     else delete entry.autonomyLevel;
   }
   entry.updatedAt = nowIso();
-  await roster.put(entry);
-  await bumpRosterVersion();
   return entry;
 }
 
@@ -345,12 +375,19 @@ export async function updateRosterEntry(
  *  Does not touch `updatedAt` — a heartbeat is an activity marker, not an
  *  edit to the agent's definition. */
 export async function recordHeartbeat(tenantId: string, rosterId: string): Promise<RosterEntry | null> {
-  const entry = await getRosterEntry(tenantId, rosterId); // ADR 0379 P1 — fail-closed
-  if (!entry) return null;
-  entry.lastHeartbeatAt = nowIso();
-  await roster.put(entry);
-  await bumpRosterVersion();
-  return entry;
+  // ADR 0775 P4 (`ARWF-11`) — compare-and-swap, so a pause (or any edit) that
+  // lands between this read and write is re-read and kept, never overwritten
+  // with the pre-pause row.
+  for (let attempt = 0; attempt < CAS_RETRIES; attempt += 1) {
+    const current = await getRosterEntry(tenantId, rosterId); // ADR 0379 P1 — fail-closed
+    if (!current) return null;
+    const entry = { ...current, lastHeartbeatAt: nowIso() };
+    if (await roster.compareAndSwap(current, entry)) {
+      await bumpRosterVersion();
+      return entry;
+    }
+  }
+  throw staleWriteError('agent', undefined);
 }
 
 export async function deleteRosterEntry(tenantId: string, rosterId: string): Promise<boolean> {

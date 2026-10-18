@@ -1,0 +1,108 @@
+{
+  "name": "core.openwop.workflows.agent-eval-regression-gate",
+  "version": "1.0.0",
+  "kind": "workflow-chain",
+  "description": "Run an agent's eval suite inside the app and stop for a person when it does not clear (ADR 0889 WF-EV-11). One `feature.evals.nodes.run-suite` node runs the suite (optionally against a baseline eval run, for a regression verdict); when the suite fails or regresses, an approval gate asks a reviewer to accept the result or reject it. Resolves on hosts that ship the evals feature and node pack (the OpenWOP reference app).",
+  "author": "openwop",
+  "license": "Apache-2.0",
+  "engines": {
+    "openwop": ">=1.0.0 <3.0.0"
+  },
+  "keywords": [
+    "Agents",
+    "Evals",
+    "Governance"
+  ],
+  "chains": [
+    {
+      "chainId": "agents.eval-regression-gate",
+      "version": "1.0.0",
+      "label": "Agent eval regression gate",
+      "description": "Run an eval suite against an agent and wait for the scorecard. If the suite passes and did not regress, the run ends; otherwise a reviewer sees the result and accepts or rejects it. With no parameters it evaluates the Agent Author against the suite its pack ships. To compare against an earlier eval run, start the run with a `baselineRunId` input: it reaches the eval node from the run's inputs, so a copy made without one never carries an empty value. The eval run spends model calls on every task and trial, and it needs a signed-in person behind the run.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "suiteRef": {
+            "type": "string",
+            "default": "vendor.openwop-app.agent-author.evals.agent-author@1.0.0",
+            "description": "The eval suite, <suiteId>@<version>. The agent's Evals tab lists them. Defaults to the suite the Agent Author pack ships."
+          },
+          "agentId": {
+            "type": "string",
+            "default": "vendor.openwop-app.agent-author.agents.agent-author",
+            "description": "The agent to evaluate. Defaults to the Agent Author, the target of the default suite."
+          }
+        }
+      },
+      "capabilities": [
+        "side-effectful"
+      ],
+      "dag": {
+        "nodes": [
+          {
+            "id": "eval",
+            "typeId": "feature.evals.nodes.run-suite@1.0.0",
+            "name": "Run the eval suite",
+            "position": {
+              "x": 0,
+              "y": 0
+            },
+            "config": {},
+            "inputs": {
+              "suiteRef": "{{params.suiteRef}}",
+              "agentId": "{{params.agentId}}"
+            }
+          },
+          {
+            "id": "cleared",
+            "typeId": "core.flow.noop@1.0.0",
+            "name": "Cleared: passed, no regression",
+            "position": {
+              "x": 260,
+              "y": -100
+            },
+            "config": {},
+            "inputs": {}
+          },
+          {
+            "id": "review",
+            "typeId": "core.chat.approvalGate@1.1.0",
+            "name": "Review the failed or regressed eval",
+            "position": {
+              "x": 260,
+              "y": 100
+            },
+            "config": {
+              "title": "This agent did not clear its eval gate",
+              "prompt": "The eval suite failed or regressed against its baseline. Open the eval run from the agent's Evals tab to see which tasks failed. Approve to accept the result anyway, or reject it.",
+              "actions": [
+                "approve",
+                "reject"
+              ]
+            },
+            "inputs": {}
+          }
+        ],
+        "edges": [
+          {
+            "from": "eval",
+            "to": "cleared",
+            "condition": {
+              "type": "truthy",
+              "left": "ok"
+            }
+          },
+          {
+            "from": "eval",
+            "to": "review",
+            "condition": {
+              "type": "falsy",
+              "left": "ok"
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

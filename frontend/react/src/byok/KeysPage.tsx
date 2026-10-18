@@ -44,22 +44,16 @@ import { CredentialList, type CredentialEntry } from './CredentialViews.js';
 import { byokErrorMessage, deleteConflictOf, useByokWriteAccess, type DeleteConflict } from './lib/byokWriteAccess.js';
 import { confirm } from '../ui/confirm.js';
 import { SubscriptionCredentialCard } from './SubscriptionCredentialCard.js';
+import { isCardOwnedRef, parseCredentialRef, WEB_SEARCH_REF } from './lib/credentialRef.js';
 
-/** The bare credentialRef the host's web-research surface resolves for a
- *  BYOK search key (ADR 0101 Phase 3 — `resolveSecret('web-search')`). NOT a
- *  `provider:label` ref, so it gets a dedicated card, not a provider tile. */
-const WEB_SEARCH_REF = 'web-search';
-
-/** Split a credentialRef like `anthropic:prod` into provider+label.
- *  Refs without a colon are treated as legacy: provider unknown. */
+/** KEYS-REF-1 — refs are grouped by the provider they NAME, by the backend's own
+ *  rule (`lib/credentialRef.ts`): `byok:google` (the wizard's shape, ADR 0517) and
+ *  `google:prod` both list under Google. A ref naming no listed provider lands in
+ *  the unscoped bucket — never counted and then shown nowhere. The web-search key
+ *  (ADR 0101 P3) and subscription / managed refs are owned by their own cards. */
+const BYOK_PROVIDER_IDS: readonly string[] = PROVIDERS.filter((p) => !p.managed && !p.hidden).map((p) => p.id);
 function parseRef(ref: string): CredentialEntry {
-  const colon = ref.indexOf(':');
-  if (colon < 0) return { ref, providerId: null, label: null };
-  return {
-    ref,
-    providerId: ref.slice(0, colon),
-    label: ref.slice(colon + 1) || null,
-  };
+  return parseCredentialRef(ref, BYOK_PROVIDER_IDS);
 }
 
 const LEGACY = '__legacy__';
@@ -144,9 +138,9 @@ export function KeysPage(): JSX.Element {
     [],
   );
 
-  // Exclude the web-search key from the "unscoped/legacy" warning list — it's a
-  // deliberate bare ref owned by the dedicated Web-search card below (ADR 0101 P3).
-  const legacy = (refs !== null ? grouped.get(LEGACY) ?? [] : []).filter((e) => e.ref !== WEB_SEARCH_REF);
+  // Exclude card-owned refs from the "unscoped/legacy" warning list: the web-search
+  // key (ADR 0101 P3, its own card below) and subscription / managed refs.
+  const legacy = (refs !== null ? grouped.get(LEGACY) ?? [] : []).filter((e) => !isCardOwnedRef(e.ref));
   const webSearchConfigured = (refs ?? []).includes(WEB_SEARCH_REF);
   const totalKeys = entries.length;
   const loading = refs === null;
@@ -288,10 +282,14 @@ export function KeysPage(): JSX.Element {
           </div>
         )}
 
-        {/* Whole-page zero-key state — a fresh tenant lands on one CTA. Hidden
-            once the CTA is clicked: the provider sections below then render the
-            add form (previously `adding` mounted nothing at zero keys — the
-            "Add your first key" button was a visible no-op). */}
+        {/* Whole-page zero-key state — a fresh tenant lands here. Hidden once a
+            provider is chosen: the provider sections below then render the add
+            form (previously `adding` mounted nothing at zero keys — the
+            "Add your first key" button was a visible no-op).
+            One button PER provider: a single "Add your first key" opened only
+            the first provider's form (Anthropic), and the other sections stay
+            hidden until a key exists, so a fresh workspace could not add a
+            Google or OpenAI key from this screen at all (2026-10-17). */}
         {readOk && totalKeys === 0 && adding === null && (
           <div className="surface-card">
             <StateCard
@@ -299,9 +297,13 @@ export function KeysPage(): JSX.Element {
               title={t('noKeysTitle')}
               body={canManage ? t('noKeysBody') : t('readOnlyNotice')}
               {...(canManage ? { action: (
-                <Button variant="primary" onClick={() => setAdding(byokProviders[0]?.id ?? null)}>
-                  <span className="u-iflex u-gap-1"><PlusIcon size={15} aria-hidden /> {t('addFirstKey')}</span>
-                </Button>
+                <div className="u-flex u-gap-2 u-flex-wrap u-justify-center">
+                  {byokProviders.map((p, i) => (
+                    <Button key={p.id} variant={i === 0 ? 'primary' : 'secondary'} onClick={() => setAdding(p.id)}>
+                      <span className="u-iflex u-gap-1"><PlusIcon size={15} aria-hidden /> {t('addProviderKey', { provider: p.label })}</span>
+                    </Button>
+                  ))}
+                </div>
               ) } : {})}
             />
           </div>

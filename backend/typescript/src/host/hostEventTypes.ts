@@ -120,6 +120,10 @@ const EMITTED: readonly string[] = [
   // features/cms/cmsService.ts
   'host.cms.page.submitted', 'host.cms.page.published', 'host.cms.page.rejected', 'host.cms.page.archived',
   'host.cms.page.unpublished', 'host.cms.page.restored',
+  // features/comments/commentsService.ts — ADR 0881 D8 (never for a restricted target).
+  'host.comments.comment.created', 'host.comments.comment.resolved',
+  // features/csm/accountsService.ts — ADR 0882 D5 (the playbook trigger).
+  'host.csm.account.health-changed',
   // features/commerce/telemetry.ts
   'host.commerce.order.created', 'host.commerce.order.paid', 'host.commerce.order.refunded', 'host.commerce.order.canceled',
   'host.commerce.order.fulfillment-updated', 'host.commerce.inventory.low-stock',
@@ -143,7 +147,7 @@ const EMITTED: readonly string[] = [
   'openwop-app.servicedesk.ticket-sla-breached', // features/service-desk/sla.ts
   'openwop-app.whatsapp.health-degraded', // features/whatsapp/health.ts
   // features/service-desk/tickets.ts — `ticketMutated(verb: 'created' | 'message-appended' | 'status-changed' | 'assigned')`.
-  ...family('host.servicedesk', { ticket: ['created', 'message-appended', 'status-changed', 'assigned'] }),
+  ...family('host.servicedesk', { ticket: ['created', 'message-appended', 'status-changed', 'priority-changed', 'assigned'] }),
   // features/whatsapp/compliance.ts — `kind` is 'opt-in' | 'opt-out'.
   ...family('host.whatsapp', { consent: ['opt-in', 'opt-out'] }),
   // features/app-builder/syncWebhook.ts — every outcome `conclude()` is called with, `_` → `-`.

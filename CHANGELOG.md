@@ -18,6 +18,89 @@ Commits by the `/cut-app-release` skill; required upgrade stops are tracked in
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-10-18
+
+Eight days since v0.4.0 (255 merged PRs; ADRs up to 0915). Rolling-safe, no
+required stop, no breaking config.
+
+### Added
+
+- **Turning a bundle on is a workspace action, and buying one turns it on (ADR 0892
+  Phase B).** On the feature store, a workspace owner or admin can enable an
+  entitled bundle for their own workspace, or turn it off, from the bundle's card.
+  Enabling also turns on what the bundle depends on. It is refused when the plan
+  does not cover the bundle (the card offers the purchase) or when the host has
+  switched part of it off. A verified bundle purchase now turns the bundle on for
+  the buyer's workspace. Before this, a buyer received an entitlement and the
+  features stayed hidden. Global toggle state stays super-admin only.
+- **No hard-coded AI vendor (ADR 0903).** A run's AI provider and model come from
+  the run's own choice, then the workspace's AI setting, then the catalog default,
+  fixed once at run start so replay stays deterministic. Feature packs and the
+  bundled chain packs no longer default to Anthropic; `core.openwop.ai` 1.5.0 makes
+  `provider`/`model` optional. A sub-workflow child inherits the parent's choice
+  and the host's provider policy.
+- **Provider failures say what they are, and structured output is native where
+  the vendor supports it (ADR 0911, ADR 0912).** A rejected key, model or request
+  fails at once with its own code; a rate limit is not retried a second time; a
+  5xx or timeout backs off and retries, and a run that ends on one fails with
+  that code instead of "did not emit valid JSON". Gemini calls ask for JSON with
+  a response schema and OpenAI calls use `json_schema`; a retry names what was
+  wrong; an unescaped quote is repaired when the result then parses; an
+  unparsable reply leaves a short, scrubbed excerpt on the retry event. New knob:
+  `OPENWOP_PROVIDER_RETRY_BACKOFF_MS` (default 1000, 0 disables).
+- **Seams for white-label features (ADRs 0913–0915).** `from-chain` takes an
+  optional `subject` label, and `eraseWorkflowSubject` deletes exactly that
+  subject's workflows and their runs (through the workflow index, refusing under
+  a legal hold). A feature can register a document kind that is deleted, not
+  anonymized, on its owner's erasure. `baseVersionId: null` makes a document's
+  first save a checked one. The Markdown editor takes a content `lang`; the EPUB
+  and DOCX writers take `language`/`direction`, and DOCX images carry alt text. A
+  backend feature can declare public paths strictly inside its own namespace.
+- **Agent evaluations (ADR 0889).** `mode:"eval"` runs, an eval-suite store,
+  RFC 0244 graders (trajectory, trials, regression, efficiency, output) and an
+  Agent Evals tab with capture-to-case.
+- **Approval and session authority (ADRs 0894, 0896).** Approvers approve what
+  they saw, with one decider per approval and a per-approval expiry; sessions bind
+  to their opener and org, and one-shot approvals are verified.
+- **Commerce (ADRs 0877, 0890).** Checkout tax, promotion codes and no-card
+  trials. A storefront takes live money only on the operator's own account or the
+  tenant's own Stripe Connect account; every other tenant is demo.
+- **Support desk (ADR 0878)**, per-slide comments (ADR 0886), comment mentions and
+  edit-own (ADR 0881), the team-ledger GitHub check (ADR 0855), and the offline
+  service-worker engine (ADR 0873).
+- **Table storage conforms to its declared schema (ADR 0909, RFC 0228 G4)**, and
+  streams are bounded server-side with readers resuming (ADR 0897).
+
+### Changed
+
+- **CRM is an opt-in bundle (ADR 0892).** The `crm` toggle now defaults **off**,
+  so a fresh white-label install no longer shows the CRM group. Analytics stays
+  on and its nav item moved to the Marketing group. Enable CRM in Admin → Feature
+  toggles (globally or per workspace).
+- **Strategy, Priority matrix and Advisory board are opt-in too (ADR 0892,
+  superseding ADR 0229).** They now default **off**. Enable them in Admin →
+  Feature toggles.
+- **KicktoDo surfaces bind to the run's person (ADR 0901)**, and a coach turn can
+  only create work for that person.
+- The display face is Bricolage Grotesque (ADR 0883).
+
+#### Upgrading from 0.4.0
+
+- **Required stop:** no. Rolling-safe: back up, deploy, check `/readiness`
+  reports `version: "0.5.0"`.
+- **Schema migrations:** Postgres 48 / SQLite 50 delete webhook subscriptions
+  registered under the retired OpenWOP major 1 (and their pending deliveries).
+  Those already received nothing; delivered history stays.
+- **App migration 23** (`grandfather-crm-on-for-existing-users`) keeps CRM **on**
+  for an install that already uses it: it writes an enabled `crm` toggle row when
+  none exists and the database has CRM contacts or an enabled CRM dependent
+  (commerce, csm, email, territories, job-search, …). An install with a saved
+  `crm` row, or with no CRM data, is unchanged.
+- **App migration 24** (`grandfather-planning-on-for-existing-users`) does the same
+  per feature for `strategy`, `priority-matrix` and `advisory-board`: an install with
+  data for one of them and no saved row keeps that one on.
+- New optional env: `OPENWOP_PROVIDER_RETRY_BACKOFF_MS`.
+
 ## [0.4.0] — 2026-10-10
 
 One day since v0.3.0 (2026-10-09): 80 commits and four new architecture decision

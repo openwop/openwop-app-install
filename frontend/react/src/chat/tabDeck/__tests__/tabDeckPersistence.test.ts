@@ -1,7 +1,15 @@
+/**
+ * ADR 0140 P6 (security) — persisted multi-tab working set. Per-user isolation is
+ * two layers: the storage key carries the subject (`openwop-app.chat.tabdeck:<uid>`)
+ * AND the envelope's `subject` must match the reader. Plus tamper repair: version
+ * gate, malformed/duplicate tabs dropped, ghost active → most-recent, `seq` repaired,
+ * clamp to HARD_MAX_TABS keeping pinned + most-recent in display order. Breaks if
+ * either isolation layer, a repair, or the logged-out no-op is lost.
+ */
 import { describe, it, expect, beforeEach } from 'vitest';
 import { sanitizeTabDeck, loadTabDeck, saveTabDeck } from '../tabDeckPersistence.js';
 import { HARD_MAX_TABS, type TabDeckState } from '../tabDeckModel.js';
-import { LS_TABDECK_VERSION, tabDeckKey } from '../../lib/storageKeys.js';
+import { LS_TABDECK_VERSION } from '../../lib/storageKeys.js';
 
 const SUBJECT = 'user-1';
 const tab = (id: string, pinned = false, seq = 1) => ({ sessionId: id, pinned, lastActiveSeq: seq });
@@ -55,7 +63,11 @@ describe('sanitizeTabDeck — validation + repair', () => {
     tabs[0] = tab('pinned-old', true, 0); // pinned but oldest — must survive the clamp
     const out = sanitizeTabDeck(env({ tabs, activeSessionId: 't1', seq: 100 }), SUBJECT)!;
     expect(out.tabs.length).toBe(HARD_MAX_TABS);
-    expect(out.tabs.some((t) => t.sessionId === 'pinned-old')).toBe(true);
+    // Kept: the pinned (oldest) tab + the 23 most-recent (t6..t28); t1..t5 dropped.
+    // Display order is preserved among the kept.
+    expect(out.tabs.map((t) => t.sessionId)).toEqual(
+      ['pinned-old', ...Array.from({ length: HARD_MAX_TABS - 1 }, (_, i) => `t${i + 6}`)],
+    );
   });
 
   it('treats corrupt / non-object payloads as null', () => {
@@ -69,10 +81,23 @@ describe('load / save round-trip', () => {
   it('saves under the per-user key and loads it back', () => {
     const state: TabDeckState = { tabs: [tab('a', false, 1)], activeSessionId: 'a', seq: 1 };
     saveTabDeck(state, SUBJECT);
-    expect(localStorage.getItem(tabDeckKey(SUBJECT))).toBeTruthy();
+    // Literal key (never computed with tabDeckKey, which is under test).
+    expect(localStorage.length).toBe(1);
+    expect(localStorage.getItem('openwop-app.chat.tabdeck:user-1')).not.toBeNull();
     expect(loadTabDeck(SUBJECT)).toEqual(state);
     // A different user reads nothing from the same browser.
     expect(loadTabDeck('user-2')).toBeNull();
+  });
+
+  it('a second user saves under their OWN key and neither overwrites the other', () => {
+    const one: TabDeckState = { tabs: [tab('a', false, 1)], activeSessionId: 'a', seq: 1 };
+    const two: TabDeckState = { tabs: [tab('z', false, 1)], activeSessionId: 'z', seq: 1 };
+    saveTabDeck(one, SUBJECT);
+    saveTabDeck(two, 'user-2');
+    expect(localStorage.length).toBe(2);
+    expect(localStorage.getItem('openwop-app.chat.tabdeck:user-2')).not.toBeNull();
+    expect(loadTabDeck(SUBJECT)).toEqual(one);
+    expect(loadTabDeck('user-2')).toEqual(two);
   });
 
   it('save is a no-op when logged out (subject null)', () => {

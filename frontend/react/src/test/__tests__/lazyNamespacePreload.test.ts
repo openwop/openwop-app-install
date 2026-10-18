@@ -1,3 +1,19 @@
+/**
+ * `assertNamespacesPopulated` — the frontend test-setup guard (called from
+ * `src/test/i18n-setup.ts`) that every lazy i18n namespace a suite preloads actually
+ * registered COPY. Without it a missing namespace surfaces later as "unable to find
+ * text", which reads like a render bug in whatever component was under test.
+ *
+ * It counts KEYS rather than asking `hasResourceBundle`, because an empty bundle is
+ * "registered" and still renders raw keys (case 3).
+ *
+ * Sabotage (wave 51 probes): a constant key count, dropping the non-object guard,
+ * reporting only the first namespace, or a message without the downstream symptom
+ * each red a case. The "passes" arm (no throw when all are populated) is ALSO enforced
+ * by every frontend suite: `i18n-setup.ts` calls this at setup, so breaking the early
+ * return reds the setup itself before any case runs (probe w51g1-ln-early: suite
+ * error, not a case red). Case 1 owns the claim; the setup is its loudest consumer.
+ */
 import { describe, expect, it } from 'vitest';
 
 import {

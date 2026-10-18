@@ -1,11 +1,11 @@
 /**
- * InteractiveViewer — tap-through navigation + the audit-gap-#4 transitions.
+ * InteractiveViewer (ADR 0310) — tap-through navigation + the audit-gap-#4 transitions.
  * A fake Renderer stamps a data-cv-nav button so the delegated click path is
  * exercised; transitions apply on TAP navigation (the flow gesture, keyed by
  * the connector) and not on tab-strip navigation (chrome).
  */
 import { describe, it, expect, vi } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, cleanup } from '@testing-library/react';
 import { InteractiveViewer } from '../InteractiveViewer.js';
 import { NAV_ATTR } from '../dnd.js';
 
@@ -89,13 +89,22 @@ describe('InteractiveViewer transitions (audit gap #4)', () => {
   it('"none" (or no transitionFor) swaps instantly with no animation class', () => {
     const { container } = setup(() => 'none');
     fireEvent.click(screen.getByRole('button', { name: 'Go next' }));
+    // It DID navigate (else "no class" would pass for the wrong reason)…
+    expect(screen.getByRole('tab', { name: 'Next' }).getAttribute('aria-selected')).toBe('true');
     expect(container.querySelector('[class*="cv-viewer__framebox--t-"]')).toBeNull();
+    cleanup();
+    // …and with no transitionFor at all.
+    const bare = setup();
+    fireEvent.click(screen.getByRole('button', { name: 'Go next' }));
+    expect(screen.getByRole('tab', { name: 'Next' }).getAttribute('aria-selected')).toBe('true');
+    expect(bare.container.querySelector('[class*="cv-viewer__framebox--t-"]')).toBeNull();
   });
 
   it('tab-strip navigation stays instant (chrome, not a flow tap)', () => {
     const transitionFor = vi.fn(() => 'push');
     const { container } = setup(transitionFor);
     fireEvent.click(screen.getByRole('tab', { name: 'Next' }));
+    expect(screen.getByRole('tab', { name: 'Next' }).getAttribute('aria-selected')).toBe('true'); // it navigated
     expect(transitionFor).not.toHaveBeenCalled();
     expect(container.querySelector('[class*="cv-viewer__framebox--t-"]')).toBeNull();
   });

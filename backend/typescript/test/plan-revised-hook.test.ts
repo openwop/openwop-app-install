@@ -45,12 +45,18 @@ describe('plan-revised hook (ENG-15(b))', () => {
   });
 
   it('awaits async listeners, so a caller can sequence on the projection', async () => {
-    let done = false;
-    registerPlanRevisedListener(async () => {
-      await new Promise((r) => setTimeout(r, 5));
-      done = true;
-    });
-    await emitPlanRevised(EV);
-    expect(done).toBe(true);
+    // A held promise, not a timer: the emit must stay pending for as long as the
+    // listener does, and settle only after it. Sabotage `await fn(ev)` → `fn(ev)`
+    // and the emit settles while the listener is still held (first expect reds).
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    registerPlanRevisedListener(() => held);
+    let settled = false;
+    const emitted = emitPlanRevised(EV).then(() => { settled = true; });
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+    expect(settled, 'emit settled before its async listener finished').toBe(false);
+    release();
+    await emitted;
+    expect(settled).toBe(true);
   });
 });

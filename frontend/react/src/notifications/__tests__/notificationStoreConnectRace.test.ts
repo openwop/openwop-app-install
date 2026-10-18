@@ -10,6 +10,12 @@
  * per-tenant stream cap (the 2026-07-14 `notifications/stream` 429 incident).
  * These tests pin the epoch guard: after any interleaving, at most ONE
  * subscription is live and `disconnect()` closes it.
+ *
+ * DOUBLE GUARD: `connect()` also closes any prior `_sseCleanup` before storing
+ * its own (belt-and-braces). With the epoch bail removed, that second guard
+ * still leaves ONE live subscription in case 1 — so a live-count alone cannot
+ * witness the epoch guard there. Case 1 therefore also asserts the stale
+ * connect never SUBSCRIBED at all (the subscribe call count).
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
@@ -30,16 +36,22 @@ vi.mock('../notificationsClient.js', () => ({
   markAllNotificationsRead: vi.fn(async () => undefined),
   markNotificationRead: vi.fn(async () => undefined),
   markNotificationUnread: vi.fn(async () => undefined),
-  getPreferences: vi.fn(async () => null),
+  archiveReadNotifications: vi.fn(async () => ({ updated: 0 })),
+  bulkReadNotifications: vi.fn(async () => ({ updated: 0 })),
+  // The real client never returns null (it falls back to defaults).
+  getPreferences: vi.fn(async () => defaultPreferences()),
   putPreferences: vi.fn(async () => undefined),
 }));
 
 import { useNotificationStore } from '../notificationStore.js';
+import { subscribeToNotifications } from '../notificationsClient.js';
+import { defaultPreferences } from '../types.js';
 
 describe('notificationStore connect/disconnect race (orphaned-stream guard)', () => {
   beforeEach(() => {
     resolvers.length = 0;
     liveSubscriptions = 0;
+    vi.mocked(subscribeToNotifications).mockClear();
     // Reset the singleton's lifecycle slice between cases.
     useNotificationStore.setState({ connectionStatus: 'disconnected', _sseCleanup: null, loading: false, error: null });
   });
@@ -55,6 +67,8 @@ describe('notificationStore connect/disconnect race (orphaned-stream guard)', ()
     await Promise.all([first, second]);
 
     expect(liveSubscriptions).toBe(1); // pre-fix: 2 (one orphaned forever)
+    // The stale connect bailed BEFORE subscribing (not subscribed-then-closed).
+    expect(subscribeToNotifications).toHaveBeenCalledTimes(1);
     expect(s().connectionStatus).toBe('connected');
 
     s().disconnect();                  // …and the survivor is actually closable

@@ -15,14 +15,18 @@ import { createRef } from 'react';
 
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (k: string) => k }) }));
 // The recorder hook touches MediaRecorder; stub it so ChatInput mounts in jsdom.
-const recorderState = { isSupported: false, isRecording: false };
 vi.mock('../hooks/useAudioRecorder.js', () => ({
-  useAudioRecorder: () => ({
-    isSupported: recorderState.isSupported,
-    isRecording: recorderState.isRecording,
-    error: null, start: vi.fn(), stop: vi.fn(), cancel: vi.fn(),
-  }),
+  useAudioRecorder: () => ({ isSupported: false, isRecording: false, error: null, start: vi.fn(), stop: vi.fn(), cancel: vi.fn() }),
   blobToBase64: vi.fn(),
+}));
+// ChatInput's mount-time readers (picker directories, the workflow mention
+// cache) are not under test; mock them so nothing fetches.
+vi.mock('../AgentMentionAutocomplete.js', () => ({ AgentMentionAutocomplete: () => null }));
+vi.mock('../SlashAutocomplete.js', () => ({ SlashAutocomplete: () => null }));
+vi.mock('../BoardMentionAutocomplete.js', () => ({ BoardMentionAutocomplete: () => null }));
+vi.mock('../lib/workflowMentions.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../lib/workflowMentions.js')>()),
+  refreshWorkflowMentionCache: vi.fn(async () => undefined),
 }));
 
 import { SelectionRewriteOverlay } from '../SelectionRewrite.js';

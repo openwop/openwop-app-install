@@ -33,6 +33,10 @@ export interface VoiceAudioGraph {
 }
 export interface RealtimeCallbacks {
   onStatus?: (s: 'connecting' | 'live' | 'ended' | 'error') => void;
+  /** VOX2UX-1 — the call ended WITHOUT the user ending it (the host hung up a
+   *  revoked call, or the connection failed). The client has already released
+   *  the mic and audio; the hook resets and tells the user. */
+  onRemoteEnded?: () => void;
   /** RT-9c — live transcript updates. `turnId` is stable across a turn's
    *  interim (`final=false`) + settled (`final=true`) emissions so the consumer
    *  UPSERTS one streaming bubble. */
@@ -72,6 +76,10 @@ async function bridgeToolCallRaw(agentId: string | undefined, sessionId: string,
       headers: { ...authedHeaders(), 'content-type': 'application/json' },
       body: JSON.stringify({ ...(agentId ? { agentId } : {}), sessionId, name, arguments: args, callId, ...(userApproved ? { userApproved: true } : {}) }),
     });
+    // VOX2UX-8 (ADR 0893 D1/D2) — 401/403 means this call no longer has (or never had)
+    // authority to act: the session is not this caller's, or the caller lost the scope.
+    // That is terminal for the call, not a per-tool refusal to read aloud.
+    if (res.status === 401 || res.status === 403) return { status: 'revoked' };
     return await res.json() as BridgeOutcome;
   } catch (err) {
     return { status: 'denied', reason: `Tool call failed: ${err instanceof Error ? err.message : String(err)}` };
@@ -100,6 +108,11 @@ function approvalReasonOf(reason: string | undefined): string | undefined {
  *  plain text mapping. */
 async function bridgeToolCall(cb: RealtimeCallbacks, agentId: string | undefined, sessionId: string, name: string, args: Record<string, unknown>, callId: string): Promise<string> {
   const outcome = await bridgeToolCallRaw(agentId, sessionId, name, args, callId);
+  if (outcome.status === 'revoked') {
+    // Gemini has no host sideband to hang up, so the client ends the call itself.
+    queueMicrotask(() => cb.onRemoteEnded?.());
+    return 'Not permitted: this call no longer has permission to act. The call is ending.';
+  }
   if (outcome.status === 'requires_approval' && cb.onApprovalRequired) {
     const reason = approvalReasonOf(outcome.reason);
     return cb.onApprovalRequired({
@@ -163,7 +176,31 @@ export async function startOpenAiRealtime(ctx: RealtimeCtx, cb: RealtimeCallback
   }
   await pc.setRemoteDescription({ type: 'answer', sdp: answer.sdp });
   cb.onStatus?.('live');
-  return { stop: () => { try { pc.close(); void analysisCtx.close(); } catch { /* ignore */ } mic.getTracks().forEach((t) => t.stop()); cb.onStatus?.('ended'); } };
+  let released = false;
+  const release = (): void => {
+    if (released) return;
+    released = true;
+    try { pc.close(); void analysisCtx.close(); } catch { /* ignore */ }
+    mic.getTracks().forEach((t) => t.stop());
+  };
+  // VOX2UX-1 (ADR 0893 D4) — nothing watched the connection after it opened, so a
+  // call the host hung up (a revoked opener) kept "In conversation" with a live mic
+  // until the user clicked End. `failed`/`closed` end it now; `disconnected` gets a
+  // short grace period first (it can recover on a network blip).
+  let graceTimer: ReturnType<typeof setTimeout> | null = null;
+  const endFromRemote = (): void => {
+    if (released) return;
+    release();
+    cb.onStatus?.('ended');
+    cb.onRemoteEnded?.();
+  };
+  pc.onconnectionstatechange = () => {
+    const st = pc.connectionState;
+    if (graceTimer) { clearTimeout(graceTimer); graceTimer = null; }
+    if (st === 'failed' || st === 'closed') endFromRemote();
+    else if (st === 'disconnected') graceTimer = setTimeout(() => { if (pc.connectionState !== 'connected') endFromRemote(); }, 5_000);
+  };
+  return { stop: () => { if (graceTimer) clearTimeout(graceTimer); release(); cb.onStatus?.('ended'); } };
 }
 
 /** Accumulates Gemini Live's INCREMENTAL transcription fragments into whole turns

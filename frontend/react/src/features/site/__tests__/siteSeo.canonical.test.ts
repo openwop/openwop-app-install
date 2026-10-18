@@ -4,6 +4,11 @@
  * `og:url`. Pins that applySeo applies BOTH and that the undo restores the
  * head (the SPA swaps pages client-side — a leaked canonical from the previous
  * page would be worse than none).
+ *
+ * Sabotages that red it (/grade-tests w50): canonical applied for an empty URL,
+ * og:url not mirroring the canonical, the existing-link restore dropped, the
+ * existing-meta restore writing the new value back, the created link's removal
+ * dropped.
  */
 import { describe, it, expect, afterEach } from 'vitest';
 import { applySeo } from '../siteSeo.js';
@@ -39,10 +44,13 @@ describe('applySeo canonical (R2-G6)', () => {
     const undoA = applySeo(page('https://app.example/p/a'));
     const undoB = applySeo(page('https://app.example/p/b'));
     expect(q().link?.getAttribute('href')).toBe('https://app.example/p/b');
+    expect(q().og?.getAttribute('content')).toBe('https://app.example/p/b');
     undoB();
     expect(q().link?.getAttribute('href')).toBe('https://app.example/p/a');
+    expect(q().og?.getAttribute('content'), 'the og:url mirror is restored too').toBe('https://app.example/p/a');
     undoA();
     expect(q().link).toBeNull();
+    expect(q().og).toBeNull();
   });
 
   it('an empty canonicalUrl applies nothing (never an empty href claim)', () => {

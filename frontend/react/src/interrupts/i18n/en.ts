@@ -17,6 +17,8 @@ export const messages = {
   actionReject: 'Reject',
   rejectConfirmTitle: 'Reject this and fail the run?',
   rejectConfirmBody: 'Rejecting ends the run here. Anything it already spent — a query, a model call, your review — is not recovered, and it cannot be un-rejected.',
+  cuRejectConfirmTitle: 'Reject this action and end the browser session?',
+  cuRejectConfirmBody: 'The browser agent will not take this action, and the session ends here. Anything it already did on the site stays done.',
   actionRequestChanges: 'Request changes',
   actionDefer: 'Defer',
   actionEscalate: 'Escalate',

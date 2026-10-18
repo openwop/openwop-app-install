@@ -157,7 +157,12 @@ bg_lane_start() { # bg_lane_start <name> <fn>
   local name="$1" fn="$2" log
   if [ "${OPENWOP_CI_SERIAL_LANES:-0}" = 1 ]; then "$fn"; return; fi
   log="$(mktemp "${TMPDIR:-/tmp}/owp-ci-lane-$name.XXXXXX")"
-  ( "$fn" ) > "$log" 2>&1 < /dev/null &
+  # The lane times itself (ADR 0880 step 4): once Tracegate shrinks the vitest
+  # lanes, a background lane can become the critical path, and the join line
+  # below says which one and by how much.
+  # An EXIT trap, never `"$fn" || rc=$?`: a `||` would switch off `set -e` inside
+  # the lane, and a lane that failed mid-way would then report green.
+  ( _s=$(date +%s); trap 'echo "  (background lane '"$name"' ran $(( $(date +%s) - _s ))s)"' EXIT; "$fn" ) > "$log" 2>&1 < /dev/null &
   BG_LANES="$BG_LANES $name:$!:$log"
   echo "  running in the background: $name (pid $!, log $log)"
 }
@@ -168,10 +173,17 @@ bg_lane_join() { # bg_lane_join <name>
     else rest="$rest $e"; fi
   done
   [ -n "${pid:-}" ] || return 0   # serial mode: it already ran in line
+  local t0; t0=$(date +%s)
   wait "$pid" || rc=$?
   BG_LANES="$rest"
   cat "$log"; rm -f "$log"
+  echo "  (the gate waited $(( $(date +%s) - t0 ))s for background lane $1 at this join)"
   [ "$rc" -eq 0 ] || { echo "background lane '$1' FAILED (exit $rc)"; exit "$rc"; }
+}
+bg_lanes_live() { # print the names of background lanes still running
+  local e pid out=""
+  for e in $BG_LANES; do pid="${e#*:}"; pid="${pid%%:*}"; kill -0 "$pid" 2>/dev/null && out="$out ${e%%:*}"; done
+  echo "${out# }"
 }
 bg_lanes_kill() {
   local e pid
@@ -462,6 +474,23 @@ run_selftests() {
   echo
   echo "▶ guard: the contention detector actually fires (preflight-suite)"
   bash "$ROOT/scripts/test-preflight-suite.sh"
+  echo
+  echo "▶ Tracegate: the predictor reuses only what it may, and runs what it must (ADR 0880)"
+  node "$ROOT/scripts/test-tracegate.mjs"
+  echo
+  echo "▶ payload ratchet: a subset run never judges an admission stale (ADR 0702 × ADR 0880)"
+  node --test "$ROOT/scripts/test-audit-event-payloads.mjs"
+  echo
+  echo "▶ merge-train: a red train bisects itself and lands the green PRs (ADR 0880 P0)"
+  bash "$ROOT/scripts/test-merge-train-bisect.sh"
+  echo
+  echo "▶ /qualify-live runner: outcomes stay honest and keys rotate (loopback fake host, no key, no spend)"
+  # build-whitelabel-zip.sh strips .claude/ (steward meta) but ships this script, so a white-label tree has no skill to test.
+  if [ -f "$ROOT/.claude/skills/qualify-live/qualify.test.mjs" ]; then
+    node --test "$ROOT/.claude/skills/qualify-live/qualify.test.mjs"
+  else
+    echo "qualify-live selftest skipped: .claude/ not in this tree (white-label bundle)"
+  fi
 }
 bg_lane_start selftests run_selftests
 
@@ -566,6 +595,94 @@ bash "$ROOT/scripts/test-cli-route-coverage.sh"
 step "frontend: lint + build + unit-test types — background result (ADR 0863 D7)"
 bg_lane_join frontend-static
 
+# ── ADR 0880 — Tracegate: run only the test files a change can affect ────────
+# Every recorded run deposits per-file FOOTPRINTS (functions executed, modules
+# loaded, repo files read) in a ledger shared by every worktree. A file whose
+# footprint is untouched since its last green run can reuse that verdict.
+#   shadow   (until a lane clears the entry bar) run EVERYTHING; print what could
+#            have been reused, and log any file predicted reusable that FAILED.
+#   enforce  run only the files that need it, plus a random 5% AUDIT of reuses.
+#            An audited file that fails is a MISS and suspends enforcement for
+#            that lane for 14 days, by itself.
+# OPENWOP_TRACEGATE=off|shadow|enforce|auto (default auto; per lane:
+# OPENWOP_TRACEGATE_BACKEND / _FRONTEND). `node scripts/tracegate.mjs status`
+# shows the ledger and the entry bar. NOTHING here can turn a red lane green:
+# if Tracegate itself fails, the lane runs whole and records nothing.
+TG="$ROOT/scripts/tracegate.mjs"
+CI_HEAD_AT_START="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || echo none)"
+TG_MISSES=() # filled by tg_end from the lane's report (tg_recheck_misses)
+tg_begin() { # tg_begin <lane> → TG_LANE TG_MODE TG_RUN TG_ARGS
+  TG_LANE="$1"; TG_RUN=""; TG_ARGS=()
+  TG_MODE="$(node "$TG" mode --lane "$1" 2>/dev/null || echo off)"
+  [ "$TG_MODE" = off ] && return 0
+  TG_RUN="$(mktemp -d "${TMPDIR:-/tmp}/owp-tracegate-$1.XXXXXX")"
+  if ! node "$TG" select --lane "$1" --run "$TG_RUN" --mode "$TG_MODE"; then
+    printf '\033[33mtracegate: selection failed — running the whole %s lane, recording nothing.\033[0m\n' "$1"
+    rm -rf "$TG_RUN"; TG_RUN=""; TG_MODE=off; return 0
+  fi
+  if [ "$TG_MODE" = enforce ]; then
+    while IFS= read -r f; do [ -n "$f" ] && TG_ARGS+=("$f"); done < "$TG_RUN/selected.txt"
+  fi
+}
+tg_end() { # report now (cheap, prints in place); ingest in the BACKGROUND
+  [ -n "$TG_RUN" ] || return 0
+  node "$TG" report --lane "$TG_LANE" --run "$TG_RUN" || echo "tracegate: report failed (ignored)"
+  # Mapping and hashing thousands of footprints takes minutes (55 s for the
+  # frontend's 999 files) and nothing downstream needs it, so it is joined at the
+  # very end. It never fails the gate. If the gate goes red first, the EXIT trap
+  # kills it and nothing is recorded — `report` above has already dropped the
+  # footprints of any file that failed, which is the part that matters.
+  TG_MISSES=()
+  if [ -f "$TG_RUN/misses.txt" ]; then while IFS= read -r f; do [ -n "$f" ] && TG_MISSES+=("$f"); done < "$TG_RUN/misses.txt"; fi
+  eval "TG_INGEST_RUN_${TG_LANE}=\"\$TG_RUN\""
+  bg_lane_start "tracegate-$TG_LANE" "tg_ingest_$TG_LANE"
+}
+tg_ingest() { # tg_ingest <lane> <run dir> — attribute footprints only to an unmoved tree (H101)
+  if tree_unchanged; then
+    node "$TG" ingest --lane "$1" --run "$2" --expect-head "$CI_HEAD_AT_START" || echo "tracegate: ingest failed (ignored)"
+  else
+    echo "tracegate: the tree changed during this gate — no footprints recorded (H101)."
+  fi
+  rm -rf "$2"
+  return 0
+}
+tg_ingest_backend() { tg_ingest backend "$TG_INGEST_RUN_backend"; }
+tg_ingest_frontend() { tg_ingest frontend "$TG_INGEST_RUN_frontend"; }
+# A MISS is a file predicted reusable that FAILED, and it suspends the lane for
+# 14 days. A load flake used to count as one: slot 77 (2026-10-14) lost the
+# frontend lane to "Failed to fetch dynamically imported module" at load 11.8 in
+# a file that passed 3/3 alone at the same tree. So each miss is re-run ONCE,
+# alone, at this tree. A footprint hole is a deterministic function of the tree,
+# so it fails again and stays a MISS. One that passes is triaged a flake (the
+# ledger says so). The gate stays RED either way: the file did fail here.
+tg_recheck_misses() { # tg_recheck_misses <lane> <lane dir> [VAR=value…] — after tg_end, lane red
+  local ln="$1" dir="$2" f rel h log; shift 2
+  [ "${#TG_MISSES[@]}" -gt 0 ] || return 0
+  h="$(git -C "$ROOT" rev-parse HEAD | cut -c1-12)" # the ledger's head key
+  for f in "${TG_MISSES[@]}"; do
+    rel="${f#"$dir"/}"
+    echo "tracegate ($ln): re-running the MISS $rel alone at $h …"
+    log="$(mktemp "${TMPDIR:-/tmp}/owp-tg-recheck.XXXXXX")"
+    if ( cd "$ROOT/$dir" && env ${@+"$@"} npm run test -- "$rel" ) > "$log" 2>&1; then
+      node "$TG" triage --lane "$ln" --file "$f" --head "$h" --verdict flake || true
+      echo "tracegate ($ln): $rel PASSED alone at this tree, so it was a flake, not a footprint hole; it does not suspend the lane. The gate is still red: fix or quarantine the flake."
+    else
+      printf '\033[31mtracegate (%s): %s FAILS alone at this tree too, so it is a real MISS (a recorder hole, P0). The lane stays suspended. Log: %s\033[0m\n' "$ln" "$rel" "$log"
+    fi
+  done
+  TG_MISSES=()
+}
+# Run a lane's vitest under Tracegate. bash 3.2 (macOS) + `set -u` rejects an
+# empty "${arr[@]}", hence the ${arr[@]+…} form.
+tg_vitest() { # tg_vitest <lane dir> [VAR=value…] — runs `npm run test` with the selection
+  local dir="$1"; shift
+  if [ "$TG_MODE" = enforce ] && [ "${#TG_ARGS[@]}" -eq 0 ]; then
+    echo "tracegate: every $TG_LANE verdict is reusable at this tree — no file needs to run."
+    return 0
+  fi
+  ( cd "$ROOT/$dir" && env "$@" OPENWOP_TRACEGATE_RECORD="$TG_RUN" npm run test -- ${TG_ARGS[@]+"${TG_ARGS[@]}"} )
+}
+
 step "backend: vitest (OPENWOP_SKIP_TESTCONTAINERS=1, as in CI)"
 # ADR 0702 — the event-payload recorder rides ALONG with this run. The samples
 # are free: this lane already exercises every emit path, and the recorder is one
@@ -573,7 +690,22 @@ step "backend: vitest (OPENWOP_SKIP_TESTCONTAINERS=1, as in CI)"
 # Building a second lane to produce the same events would have cost 20 minutes
 # and measured slightly different code.
 OPENWOP_PAYLOAD_AUDIT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/owp-payload-audit.XXXXXX")"
-( cd "$ROOT/backend/typescript" && OPENWOP_SKIP_TESTCONTAINERS=1 OPENWOP_PAYLOAD_AUDIT="$OPENWOP_PAYLOAD_AUDIT_DIR" npm run test )
+# ADR 0880 — under enforce, the payload recorder sees only the files that ran.
+# A subset cannot invent a NEW violating type: what it can miss lives in code no
+# selected file executes, i.e. unchanged code.
+# CORRECTED 2026-10-14: this used to say a subset "cannot invent a red". It can,
+# through the STALE check: a type sampled valid by a file that ran, whose only
+# violating emitter was reused, reads as fixed. Slot 71 went red that way on
+# `runOrchestrator.decided`. So under enforce the stale check is skipped
+# (`--no-stale`, below) and a FULL run judges it: the gate runs the lane full
+# when its last complete full run is > 24 h old (ADR 0880 D5 correction; the
+# daemon nightly that was meant to do this had never completed).
+tg_begin backend
+BE_TG_MODE="$TG_MODE"
+be_rc=0
+tg_vitest backend/typescript OPENWOP_SKIP_TESTCONTAINERS=1 OPENWOP_PAYLOAD_AUDIT="$OPENWOP_PAYLOAD_AUDIT_DIR" || be_rc=$?
+tg_end
+[ "$be_rc" -eq 0 ] || { tg_recheck_misses backend backend/typescript OPENWOP_SKIP_TESTCONTAINERS=1; echo "backend vitest FAILED (exit $be_rc)"; exit "$be_rc"; }
 
 step "deploy gates + contention detector: background result (ADR 0863 D6)"
 bg_lane_join selftests
@@ -591,7 +723,9 @@ bg_lane_join selftests
 # Shrink-only by TYPE (not by count — the count moves with test ordering, and a
 # gate that moves for unrelated reasons is one people re-baseline on reflex).
 step "backend: event-payload conformance ratchet (ADR 0702)"
-OPENWOP_PAYLOAD_AUDIT="$OPENWOP_PAYLOAD_AUDIT_DIR" node "$ROOT/scripts/audit-event-payloads.mjs" --ratchet 2>&1 | tail -20
+PA_ARGS=(--ratchet)
+[ "$BE_TG_MODE" = enforce ] && PA_ARGS+=(--no-stale) # a subset cannot prove staleness (see the backend vitest step)
+OPENWOP_PAYLOAD_AUDIT="$OPENWOP_PAYLOAD_AUDIT_DIR" node "$ROOT/scripts/audit-event-payloads.mjs" "${PA_ARGS[@]}" 2>&1 | tail -20
 pa_rc="${PIPESTATUS[0]}"
 # ADR 0730 / Phase F — `OPENWOP_PAYLOAD_AUDIT_KEEP=1` preserves the sample set
 # instead of deleting it. The ratchet only needs a verdict, but the SAMPLES
@@ -608,6 +742,9 @@ fi
 # `| tail` MASKS the exit code — this repo has been bitten by that at least three
 # times — so the status is captured from PIPESTATUS and re-raised explicitly.
 [ "$pa_rc" -eq 0 ] || { echo "event-payload ratchet FAILED (exit $pa_rc)"; exit "$pa_rc"; }
+# ADR 0880 — a FULL backend run whose stale check just passed is the backstop's
+# evidence; without it the next gate runs the lane full again.
+if [ "$BE_TG_MODE" = shadow ]; then node "$TG" full-done --lane backend || echo "tracegate: full-done failed (ignored)"; fi
 
 # ADR 0812 P3c — the TARGET MAJOR 1 lane that used to run here is gone with
 # major 1. It ran the full suite at major 1, where every `v2-*` scenario records
@@ -639,10 +776,42 @@ step "frontend: vitest"
 # already running, so the stale-entry check below costs no extra run. The guard
 # appends one line per allowed call; the checker aggregates after.
 LIVE_FETCH_AUDIT="$(mktemp "${TMPDIR:-/tmp}/owp-live-fetch-audit.XXXXXX")"
-( cd "$ROOT/frontend/react" && OPENWOP_LIVE_FETCH_AUDIT="$LIVE_FETCH_AUDIT" npm run test )
+tg_begin frontend
+FE_TG_MODE="$TG_MODE"
+fe_rc=0
+# The frontend suite shares the machine with whatever background lane is still
+# live here: conformance-m2 (~450 s, started just before this step) and the
+# backend Tracegate ingest. Slot 77 (2026-10-14) went red three times on three
+# DIFFERENT async UI tests (each 3/3 green alone), all with frontend vitest at
+# full width beside conformance-m2. The same tree went green with
+# OPENWOP_CI_SERIAL_LANES=1 at similar load. So while a background lane is live
+# the suite runs narrower instead of losing the overlap altogether. The overlap
+# is old (ADR 0863 D6); Tracegate made the backend lane short enough that it now
+# lands on the frontend run's start.
+FE_CAP=()
+FE_BG_LIVE="$(bg_lanes_live)"
+if [ -n "$FE_BG_LIVE" ]; then
+  FE_CAP=(VITEST_MAX_WORKERS="${OPENWOP_CI_FE_WORKERS_BESIDE_BG:-4}")
+  echo "frontend vitest: capped at ${OPENWOP_CI_FE_WORKERS_BESIDE_BG:-4} workers while background lane(s) run: $FE_BG_LIVE (OPENWOP_CI_FE_WORKERS_BESIDE_BG sets it; OPENWOP_CI_SERIAL_LANES=1 removes the overlap)"
+fi
+FE_T0=$(date +%s)
+tg_vitest frontend/react OPENWOP_LIVE_FETCH_AUDIT="$LIVE_FETCH_AUDIT" ${FE_CAP[@]+"${FE_CAP[@]}"} || fe_rc=$?
+FE_SECS=$(( $(date +%s) - FE_T0 ))
+echo "  (frontend vitest ran ${FE_SECS}s${FE_BG_LIVE:+ with a worker cap, beside: $FE_BG_LIVE})"
+tg_end
+[ "$fe_rc" -eq 0 ] || { tg_recheck_misses frontend frontend/react; echo "frontend vitest FAILED (exit $fe_rc)"; exit "$fe_rc"; }
 
 step "frontend: live-fetch allowlist has no STALE entries (ADR 0661 phase 2)"
-node "$ROOT/scripts/check-live-fetch-stale.mjs" "$LIVE_FETCH_AUDIT"
+if [ "$FE_TG_MODE" = enforce ]; then
+  # A stale entry is an allowlisted fetch NO test makes — provable only from a
+  # FULL run. Under enforce only a subset ran, so judging here would red every
+  # gate. A FULL run judges it: the gate runs the lane full when its last
+  # complete full run is > 24 h old (ADR 0880 D5 correction).
+  echo "↷ skipped: Tracegate ran a subset of the frontend lane; a full run checks stale entries (one runs in a gate once the last is > 24 h old)."
+else
+  node "$ROOT/scripts/check-live-fetch-stale.mjs" "$LIVE_FETCH_AUDIT"
+  if [ "$FE_TG_MODE" = shadow ]; then node "$TG" full-done --lane frontend || echo "tracegate: full-done failed (ignored)"; fi
+fi
 rm -f "$LIVE_FETCH_AUDIT"
 
 # ── E2E PROMOTION (ADR 0509 Phase 3) ──────────────────────────────────────────
@@ -1203,6 +1372,11 @@ if [ "${OPENWOP_CI_RELEASE_CONFORMANCE:-0}" = "1" ]; then
 else
   skip "release-artifact conformance (set OPENWOP_CI_RELEASE_CONFORMANCE=1; needs Docker — 1 remaining, dispositioned: webhook-signed-delivery pins a 127.0.0.1 subscriber the container cannot reach, ADR 0550 P2)"
 fi
+
+# ADR 0880 — collect the background Tracegate ingests (they never fail the gate).
+step "tracegate: footprints recorded (background result)"
+bg_lane_join tracegate-backend
+bg_lane_join tracegate-frontend
 
 # H101 — the LAST thing the gate does is check it tested one tree. A green whose
 # inputs moved underneath it is worse than a red: it is a claim about a commit

@@ -33,6 +33,14 @@
  *    key a price of that catalog) are shape-checked; a bad shape or a name that is not
  *    a real plan / bundle / price is an ERROR.
  *
+ * ADR 0890 — `OPENWOP_BILLING_CHECKOUT_TAX` (`none`|`automatic`|`managed`),
+ * `OPENWOP_BILLING_ALLOW_PROMOTION_CODES` (boolean) and `OPENWOP_BILLING_TRIAL_CARD`
+ * (`required`|`if_required`): each a bare value (= every plan and bundle) or an object
+ * keyed `"*"`/`"plan:<tier>"`/`"bundle:<id>"`. A value the host does not accept, or a key
+ * naming no paid plan / bundle, is an ERROR (the host ignores it). WARNs: `managed` with a
+ * pinned `OPENWOP_STRIPE_API_VERSION` older than `2026-04-22` (the host warns at boot too),
+ * and `if_required` on a plan/bundle with no trial (no effect).
+ *
  * ADR 0821 D7 — `OPENWOP_BILLING_TOKEN_PACK_PRICES` (`{"<priceId>": tokens > 0}`) and its
  * optional display copy `OPENWOP_BILLING_TOKEN_PACK_DISPLAY`
  * (`{"<priceId>":{"price":"$5","label":"Starter"}}`): a display key that is not a configured
@@ -51,6 +59,8 @@ const KEYS = [
   'OPENWOP_BILLING_PLAN_PRICES', 'OPENWOP_BILLING_STANDALONE_BUNDLES', 'OPENWOP_BILLING_TRIAL_DAYS',
   'OPENWOP_BILLING_PAST_DUE_GRACE_DAYS', 'OPENWOP_BILLING_BUNDLE_PRICE_CADENCE', 'OPENWOP_BILLING_PLAN_PRICE_CADENCE',
   'OPENWOP_BILLING_BUNDLE_ONETIME', 'OPENWOP_BILLING_TOKEN_PACK_PRICES', 'OPENWOP_BILLING_TOKEN_PACK_DISPLAY',
+  'OPENWOP_BILLING_CHECKOUT_TAX', 'OPENWOP_BILLING_ALLOW_PROMOTION_CODES', 'OPENWOP_BILLING_TRIAL_CARD',
+  'OPENWOP_STRIPE_API_VERSION',
 ];
 const PLAN_TIERS = ['free', 'pro', 'team', 'enterprise'];
 
@@ -227,6 +237,41 @@ if (tokenPackDisplay !== undefined) {
 }
 for (const priceId of Object.keys(packPrices)) {
   if (!packDisplayed.has(priceId)) warns.push(`token pack '${priceId}' has no OPENWOP_BILLING_TOKEN_PACK_DISPLAY price (the store lists its credits with no buy button)`);
+}
+
+// ── ADR 0890 — checkout options (tax, promotion codes, no-card trials) ──
+/** Same rules as the host: an object, or a bare value meaning `*`. */
+function parseOption(name, raw) {
+  const t = raw?.trim();
+  if (!t) return undefined;
+  if (!t.startsWith('{')) return { '*': t === 'true' ? true : t === 'false' ? false : t };
+  const v = parse(name, t);
+  if (!isObj(v)) { errors.push(`${name} must be a bare value or a JSON object keyed "*" / "plan:<tier>" / "bundle:<id>"`); return undefined; }
+  return v;
+}
+function checkOption(name, accepts, describe) {
+  const map = parseOption(name, env[name]);
+  if (!map) return {};
+  for (const [key, v] of Object.entries(map)) {
+    if (!accepts(v)) errors.push(`${name}['${key}'] must be ${describe} (got ${JSON.stringify(v)}; the host ignores it)`);
+    if (key === '*') continue;
+    const [kind, id] = [key.slice(0, key.indexOf(':')), key.slice(key.indexOf(':') + 1)];
+    if (kind === 'plan') { if (!PLAN_TIERS.includes(id) || id === 'free') errors.push(`${name} key '${key}' names no paid plan tier (pro, team, enterprise)`); }
+    else if (kind === 'bundle') { if (!bundles[id]) errors.push(`${name} key '${key}' names no bundle`); }
+    else errors.push(`${name} key '${key}' must be "*" or start with "plan:" or "bundle:"`);
+  }
+  return map;
+}
+const taxOpt = checkOption('OPENWOP_BILLING_CHECKOUT_TAX', (v) => ['none', 'automatic', 'managed'].includes(v), '"none", "automatic" or "managed"');
+checkOption('OPENWOP_BILLING_ALLOW_PROMOTION_CODES', (v) => typeof v === 'boolean', 'true or false');
+const cardOpt = checkOption('OPENWOP_BILLING_TRIAL_CARD', (v) => ['required', 'if_required'].includes(v), '"required" or "if_required"');
+const apiVersion = env.OPENWOP_STRIPE_API_VERSION || '2025-12-15.clover';
+const managedKeys = Object.entries(taxOpt).filter(([, v]) => v === 'managed').map(([k]) => k);
+if (managedKeys.length && apiVersion.slice(0, 10) < '2026-04-22') {
+  warns.push(`OPENWOP_BILLING_CHECKOUT_TAX is "managed" for ${managedKeys.join(', ')} but the Stripe API version is ${apiVersion} (Managed Payments GA'd in 2026-04-22.dahlia) — test a checkout in a sandbox first (ADR 0890)`);
+}
+for (const [key, v] of Object.entries(cardOpt)) {
+  if (v === 'if_required' && key !== '*' && isObj(trialDays) && !(key in trialDays)) warns.push(`OPENWOP_BILLING_TRIAL_CARD key '${key}' is "if_required" but has no OPENWOP_BILLING_TRIAL_DAYS entry — it has no effect`);
 }
 
 for (const w of warns) console.log(`WARN  ${w}`);

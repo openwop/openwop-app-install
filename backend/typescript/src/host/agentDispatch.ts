@@ -40,6 +40,7 @@ import { effectiveToolAllowlist, resolveAgentToolAllowlistOverride } from './age
 import { applyToolResultTransform } from './toolResultTransform.js';
 import { toModelToolResult } from './toModelToolResult.js';
 import { acceptEnvelope, loadEnvelopePayloadSchema } from './envelopeAcceptor.js';
+import { tryLenientParse } from './envelopeReliabilityEmit.js';
 import type { CompactionDecision } from '../executor/types.js';
 import { neutralizeUntrusted, fenceUntrustedItems, defangUntrustedFence } from './untrustedContent.js';
 // Value import, but cycle-safe: agentKnowledgeComposition imports ONLY types
@@ -353,8 +354,9 @@ export interface AgentMemoryPort {
    *  `contentTrust:'untrusted'` (from the `MEMORY_UNTRUSTED_TAG` tag) ⇒ the
    *  caller MUST fence the entry, never inject it as agent-trusted. */
   read(scope: string, query?: string): Promise<ReadonlyArray<{ content: string; contentTrust?: 'trusted' | 'untrusted' }>>;
-  /** Append a durable entry to the scope. */
-  write(scope: string, entry: { content: string; tags?: string[] }): Promise<void>;
+  /** Append a durable entry to the scope. An `id` makes the write an upsert of
+   *  that entry (a re-executed run node rewrites its own summary). */
+  write(scope: string, entry: { content: string; tags?: string[]; id?: string }): Promise<void>;
 }
 
 /** A read-only retrieval over an agent's bound knowledge (ADR 0038). Returns the
@@ -423,6 +425,12 @@ export interface LiveDispatchDeps {
   memory?: AgentMemoryPort;
   /** Tenant-scoped memory scope (CTI-1) for this agent's `memoryRef`. */
   memoryScope?: string;
+  /** ADR 0775 P3e — how the RUN lane writes its turn summary. `id` upserts one
+   *  entry per run node, so a crash-resume re-execution does not add a second;
+   *  `skip` (a replay/fork re-executing history) writes nothing; `untrusted` tags
+   *  the summary so recall fences it, because a run's task may be a webhook or
+   *  event payload nobody vetted. Absent ⇒ the chat lane's behaviour. */
+  memoryWrite?: { id?: string; skip?: boolean; untrusted?: boolean };
   /** Per-agent knowledge retrieval (ADR 0038). When present, the live turn
    *  retrieves from the agent's bound KB collections (cited docs) for the task
    *  text and injects the top chunks — with their source titles — into the
@@ -774,12 +782,16 @@ async function persistTurnSummary(
   consumedUntrusted: boolean,
 ): Promise<void> {
   if (!memoryEnabled(agent, deps)) return;
+  if (deps.memoryWrite?.skip) return;
   try {
     // If the turn consumed UNTRUSTED knowledge, its result may echo it — mark the
     // summary derived-from-untrusted so recall FENCES it next run, never recalling
     // it as trusted (ADR 0038 §C review fix — no second-order launder via output).
-    const tags = consumedUntrusted ? [agent.agentId, MEMORY_UNTRUSTED_TAG] : [agent.agentId];
-    await deps.memory.write(deps.memoryScope, { content: summarizeForMemory(req.task, result), tags });
+    const tags = consumedUntrusted || deps.memoryWrite?.untrusted ? [agent.agentId, MEMORY_UNTRUSTED_TAG] : [agent.agentId];
+    await deps.memory.write(deps.memoryScope, {
+      content: summarizeForMemory(req.task, result), tags,
+      ...(deps.memoryWrite?.id ? { id: deps.memoryWrite.id } : {}),
+    });
   } catch (err) {
     // Best-effort memory write — don't fail the turn, but surface it (ENG-4).
     log.warn('agent_memory_write_failed', { error: err instanceof Error ? err.message : String(err) });
@@ -1447,6 +1459,18 @@ export function appendSourcesFooter(text: string, citations: ReadonlyArray<{ url
 }
 
 /**
+ * XCH-DISP-1 — the tools round has no structured-output mode, so a handoff agent
+ * with a return schema is told its contract in the system prompt, generated at
+ * call time from the SAME schema §D validates against (never a hand-kept copy).
+ * Without it the model only knew the shape if its prompt happened to restate it.
+ */
+function withReturnContract(agent: ResolvedAgentManifest): string {
+  const schema = agent.handoff?.returnSchema;
+  if (!schema) return agent.systemPrompt;
+  return `${agent.systemPrompt}\n\n## Return contract\nWhen you have finished using tools, reply with ONE JSON object and nothing else, conforming EXACTLY to this JSON Schema (it is validated before anything uses it):\n${JSON.stringify(schema)}`;
+}
+
+/**
  * A bounded observe→act loop for a tool-using agent turn. Each round offers the
  * §A14-filtered tools to the model; for every tool the model calls the host:
  *   - refuses a call outside the allowlist (`agent.toolReturned{status:'forbidden'}`);
@@ -1487,7 +1511,7 @@ async function runToolLoop(
       // ADR 0680 D3 — attribute the compaction savings telemetry.
       tenantId: deps.tenantId,
       provider, model, credentialRef,
-      systemPrompt: agent.systemPrompt,
+      systemPrompt: withReturnContract(agent),
       messages: initial.messages,
       tools,
       agentId: agent.agentId,
@@ -1547,7 +1571,18 @@ async function runToolLoop(
     });
   }
 
-  const lastData = loop.finalData;
+  // XCH-DISP-1 — a tool-using turn is never sent a `responseSchema` (the tools
+  // round has no structured-output mode), and the real tools adapters return the
+  // final answer as TEXT, never `data`. So for a handoff agent with a return
+  // schema (the KickTodo Replan Composer, the convened specialists) `finalData`
+  // was always undefined and §D validation failed every live turn. Recover the
+  // structured return from the final text with the same lenient parse the
+  // single-call structured path uses; §D below still judges it.
+  let lastData = loop.finalData;
+  if (lastData === undefined && agent.handoff?.returnSchema && loop.finalText) {
+    const parsed = tryLenientParse(loop.finalText);
+    if (parsed && parsed.data !== null && typeof parsed.data === 'object') lastData = parsed.data;
+  }
   const result = agent.handoff?.returnSchema ? lastData : { content: loop.finalText };
   const confidence = confidenceFromData(lastData) ?? (typeof req.simulateConfidence === 'number' ? req.simulateConfidence : 1);
 

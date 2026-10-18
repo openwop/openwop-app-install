@@ -44,7 +44,13 @@ describe('date-bomb sweep — the clock is really shifted', () => {
     expect(skewDays).toBeGreaterThan(DAYS - 1);
   });
 
+  // Outside the lane the shim must NOT be installed — a leaked shift would be "a second
+  // date bomb" in every normal run. (This case used to assert `ARMED === false` under
+  // `skipIf(ARMED)`, a tautology: wave 51 probe w51g1-cs-leak put clock-shift.ts in
+  // setupFiles unconditionally and it stayed green.)
   it.skipIf(ARMED)('is inert outside the sweep', () => {
-    expect(ARMED).toBe(false);
+    const skewDays = Math.abs(Date.now() - realEpochMs()) / 86_400_000;
+    expect(skewDays).toBeLessThan(1);
+    expect(Math.abs(new Date().getTime() - realEpochMs()) / 86_400_000).toBeLessThan(1);
   });
 });

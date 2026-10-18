@@ -45,6 +45,9 @@ describe('demo app-builder seed (ADR 0337 P3)', () => {
     if (t) await saveConfig({ ...t, status: 'off' }, 'test');
     const res = await seedDemoAppBuilder(TENANT);
     expect(res.created).toBe(0);
+    // `countDemoAppBuilder` reads 0 whenever the toggle is off, so it cannot
+    // witness the skip while off — turn it back on, then count.
+    if (t) await saveConfig({ ...t, status: 'on' }, 'test');
     expect(await countDemoAppBuilder(TENANT)).toBe(0);
   });
 });

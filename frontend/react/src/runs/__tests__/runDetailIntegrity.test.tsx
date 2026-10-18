@@ -12,10 +12,19 @@
  *
  * Each leg drives the real control through the rendered page, and each has a
  * positive control so "never does anything" cannot pass it.
+ *
+ * DOUBLE GUARD (recorded, w49): "cancel, once" is held by TWO independent
+ * guards — `onCancel`'s `cancelBusy` early return AND the button's
+ * `disabled={… || cancelBusy}`. Removing either one alone stays green BY DESIGN
+ * (the other still holds); the shared piece both read is `cancelBusy`, so the
+ * probe that witnesses this leg never sets it.
+ *
+ * Waits are drains / real conditions, never wall-clock sleeps.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import { MemoryRouter, Routes, Route, useNavigate } from 'react-router-dom';
+import type { RunEventDoc, RunSnapshot, RunStatus } from '@openwop/openwop';
 import { messages as streamsEn } from '../../streams/i18n/en.js';
 import { messages as en } from '../i18n/en.js';
 
@@ -51,16 +60,28 @@ vi.mock('../../workflows/workflowsClient.js', async (importOriginal) => {
 // (`/.well-known/openwop`), which the four sibling files here are allowlisted
 // for. This file stubs it instead of joining that shrink-only list: the read is
 // refused deterministically, so no leg can depend on a race with the network.
-vi.stubGlobal('fetch', (() => Promise.reject(new Error('no network in unit tests'))) as never);
+vi.stubGlobal('fetch', vi.fn<typeof fetch>(() => Promise.reject(new Error('no network in unit tests'))));
 const { RunDetailPage } = await import('../RunDetailPage.js');
 
-const snapshot = (runId: string, status: string, workflowId: string) => ({
-  runId, status, workflowId, createdAt: '2026-08-01T00:00:00Z', updatedAt: '2026-08-01T00:00:00Z',
+const snapshot = (runId: string, status: RunStatus, workflowId: string): RunSnapshot => ({
+  runId, status, workflowId,
+  owner: { tenant: 't1', subject: { issuer: 'urn:openwop:test', subjectId: 'u1', tenant: 't1', lane: 'session', kind: 'user' } },
+  eventLogSchemaVersion: 3,
 });
+const EVENT: RunEventDoc = {
+  eventId: 'e1', sequence: 1, type: 'node.started', nodeId: 'charge', runId: 'r1',
+  timestamp: '2026-08-01T00:00:01Z', schemaVersion: 1, payload: {},
+};
+
+/** Let any queued confirm → fork / cancel chain run to completion (microtasks
+ *  + React commits) — a drain, not a wall-clock sleep. */
+async function drain(): Promise<void> {
+  for (let i = 0; i < 5; i++) await act(async () => { await Promise.resolve(); });
+}
 
 beforeEach(() => {
   vi.clearAllMocks();
-  api.pollEvents.mockResolvedValue({ events: [{ eventId: 'e1', sequence: 1, type: 'node.started', runId: 'r1' }] });
+  api.pollEvents.mockResolvedValue({ events: [EVENT] });
   api.subscribeToRun.mockReturnValue({ close: () => {} });
 });
 afterEach(() => cleanup());
@@ -107,7 +128,7 @@ describe('RRUX-3 — one fork per click', () => {
     fireEvent.click(btn);
     fireEvent.click(btn);
     // Let any second confirm/fork chain settle before asserting it never ran.
-    await act(async () => { await new Promise((r) => setTimeout(r, 20)); });
+    await drain();
     expect(api.forkRun).toHaveBeenCalledTimes(1);
   });
 });
@@ -128,9 +149,9 @@ describe('RRUX-3 (grade-code M1) — no second fork while the page is leaving', 
       const btn = await screen.findByTitle(streamsEn.forkTitle);
       fireEvent.click(btn);
       await waitFor(() => expect(api.forkRun).toHaveBeenCalledTimes(1));
-      await act(async () => { await new Promise((r) => setTimeout(r, 10)); });
+      await drain();
       fireEvent.click(btn);
-      await act(async () => { await new Promise((r) => setTimeout(r, 20)); });
+      await drain();
       expect(api.forkRun).toHaveBeenCalledTimes(1);
     } finally {
       Object.defineProperty(window, 'location', { configurable: true, value: loc });
@@ -147,7 +168,7 @@ describe('RRUX-3 (grade-code M1) — no second fork while the page is leaving', 
     const btn = await screen.findByTitle(streamsEn.forkTitle);
     fireEvent.click(btn);
     await waitFor(() => expect(confirmFn).toHaveBeenCalledTimes(1));
-    await act(async () => { await new Promise((r) => setTimeout(r, 10)); });
+    await drain();
     fireEvent.click(btn);
     await waitFor(() => expect(api.forkRun).toHaveBeenCalledTimes(1));
   });
@@ -158,7 +179,9 @@ describe('RRUX-4 — cancel asks first', () => {
     api.getRun.mockResolvedValue(snapshot('r1', 'running', 'wf1'));
     confirmFn.mockResolvedValue(false);
     mount('/runs/r1');
-    fireEvent.click(await screen.findByRole('button', { name: en.cancelRun }));
+    // The button is first-paint but DISABLED until the snapshot lands.
+    await screen.findAllByText('wf1');
+    fireEvent.click(screen.getByRole('button', { name: en.cancelRun }));
     await waitFor(() => expect(confirmFn).toHaveBeenCalled());
     expect(api.cancelRun).not.toHaveBeenCalled();
   });
@@ -166,10 +189,18 @@ describe('RRUX-4 — cancel asks first', () => {
   it('POSITIVE CONTROL: accepting cancels, once', async () => {
     api.getRun.mockResolvedValue(snapshot('r1', 'running', 'wf1'));
     confirmFn.mockResolvedValue(true);
-    api.cancelRun.mockResolvedValue(undefined);
+    // In flight for the rest of the case, so a second click lands mid-request.
+    api.cancelRun.mockReturnValue(new Promise(() => { /* in flight */ }));
     mount('/runs/r1');
-    fireEvent.click(await screen.findByRole('button', { name: en.cancelRun }));
+    await screen.findAllByText('wf1');
+    const btn = screen.getByRole('button', { name: en.cancelRun });
+    fireEvent.click(btn);
     await waitFor(() => expect(api.cancelRun).toHaveBeenCalledTimes(1));
     expect(api.cancelRun.mock.calls[0]![0]).toBe('r1');
+    // "once": a second click while the cancel is in flight does nothing (held by
+    // the double guard named in the header).
+    fireEvent.click(btn);
+    await drain();
+    expect(api.cancelRun).toHaveBeenCalledTimes(1);
   });
 });

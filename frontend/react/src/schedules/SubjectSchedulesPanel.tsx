@@ -104,13 +104,16 @@ export interface SubjectScheduleRow {
  *  A `Record` so a new reason code on the wire is a compile-time prompt here;
  *  the runtime arm below covers the wire (an unknown code must neither
  *  fabricate a diagnosis nor go silent — the WF-COS-4 round-2 lesson). */
-const SKIP_REASON_KEY: Record<'budget' | 'workflow-unresolved' | 'dispatch-error' | 'feature-disabled' | 'plan-lapsed' | 'actor-inactive', string> = {
+const SKIP_REASON_KEY: Record<'budget' | 'workflow-unresolved' | 'dispatch-error' | 'feature-disabled' | 'plan-lapsed' | 'actor-inactive' | 'agent-paused' | 'policy-denied' | 'awaiting-approval', string> = {
   budget: 'agents:recurringSkipBudget',
   'workflow-unresolved': 'agents:recurringSkipUnresolved',
   'dispatch-error': 'agents:recurringSkipDispatch',
   'feature-disabled': 'agents:recurringSkipFeatureDisabled',
   'plan-lapsed': 'agents:recurringSkipPlanLapsed',
   'actor-inactive': 'agents:recurringSkipActorInactive',
+  'agent-paused': 'agents:recurringSkipAgentPaused',
+  'policy-denied': 'agents:recurringSkipPolicyDenied',
+  'awaiting-approval': 'agents:recurringSkipAwaitingApproval',
 };
 /** ADR 0787 D6 — the cadence has no FURTHER slot inside the horizon. Not a
  *  "did not run" (that fire may well have run): it is rendered as its own chip,

@@ -3,6 +3,9 @@
  *  - CONSENT GATE: no linked CRM Contact ⇒ NO event (the D3 privacy floor);
  *  - PII BOUNDARY: the opaque subject NEVER enters the payload — only the opaque
  *    contactId + non-PII props; and the emit is deterministic (dedupe).
+ *
+ * Sabotages that turn this red (w41 probes): removing the Gate 0 return,
+ * putting `ownerSubject` in the payload, a non-deterministic dedupe key.
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';

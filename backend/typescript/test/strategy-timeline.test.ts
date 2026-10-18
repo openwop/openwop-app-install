@@ -4,8 +4,23 @@
  *   - GET /strategy/:id/timeline: initiatives + linked idea schedules with slip
  *     flags computed at read (overdue, dependencyLate)
  *   - GET score-history: the B4 trail + the "why ranked here" breakdown
- *   - PlanningSession.rationale set at create, PATCHable
+ *   - PlanningSession.rationale set at create, PATCHable, '' clears
+ *   - decision records (ADR 0233 §C8): documents-gated 409, the Document holds the
+ *     decision text, and the strategy links it canonically
+ *
+ * Dates are pinned far in the past (2020) or far in the future (2099) because the
+ * timeline reads the WALL clock (`timeline.ts` `todayIso`); a near-future date is a
+ * date bomb (the 2030 `found` initiative went red under the +1 year clock shift).
+ *
+ * Sabotage (grade-tests w19, each witnessed red): each of the four initiative
+ * validators, the `overdue` / `dependencyLate` computations, the idea-schedule join,
+ * the portfolio route, `priorPriority` on the score row, the weighted breakdown,
+ * session rationale create / patch / clear, the documents gate, the decision text
+ * requirement, the version write and the canonical link.
  */
+interface Item { id: string; kind: string; title: string; overdue?: boolean; dependencyLate?: string[]; source: { strategyId: string } }
+interface Criterion { id: string }
+interface BreakdownRow { weight: number; score: number; weighted: number }
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { bootPlanningApp, makeClient, enableToggle, type Client } from './planningHarness.js';
@@ -36,10 +51,18 @@ async function login(): Promise<{ c: ReturnType<typeof client>; orgId: string }>
 describe('initiative dates + dependencies (ADR 0234 §C6)', () => {
   it('validates dates and dependsOn membership', async () => {
     const { c, orgId } = await login();
-    expect((await c.post(S, { orgId, title: 'Bad', initiatives: [{ title: 'X', startDate: 'not-a-date' }] })).status).toBe(400);
-    expect((await c.post(S, { orgId, title: 'Bad', initiatives: [{ title: 'X', startDate: '2027-02-01', endDate: '2027-01-01' }] })).status).toBe(400);
-    expect((await c.post(S, { orgId, title: 'Bad', initiatives: [{ id: 'a', title: 'A', dependsOn: ['ghost'] }] })).status).toBe(400);
-    expect((await c.post(S, { orgId, title: 'Bad', initiatives: [{ id: 'a', title: 'A', dependsOn: ['a'] }] })).status).toBe(400);
+    // Each line must fail for ITS rule, not "some 400" — the message names the rule.
+    for (const [initiatives, rule] of [
+      [[{ title: 'X', startDate: 'not-a-date' }], /YYYY-MM-DD/],
+      [[{ title: 'X', startDate: '2099-02-01', endDate: '2099-01-01' }], /must not precede/],
+      [[{ id: 'a', title: 'A', dependsOn: ['ghost'] }], /unknown initiative id: ghost/],
+      [[{ id: 'a', title: 'A', dependsOn: ['a'] }], /cannot depend on itself/],
+    ] as const) {
+      const r = await c.post(S, { orgId, title: 'Bad', initiatives });
+      expect(r.status, String(rule)).toBe(400);
+      expect(r.body.error).toBe('validation_error');
+      expect(r.body.message).toMatch(rule);
+    }
   });
 
   it('projects the timeline with overdue + dependencyLate flags', async () => {
@@ -47,8 +70,8 @@ describe('initiative dates + dependencies (ADR 0234 §C6)', () => {
     const s = (await c.post(S, {
       orgId, title: 'Dated plan',
       initiatives: [
-        { id: 'found', title: 'Foundation', startDate: '2020-01-01', endDate: '2030-06-30' },
-        { id: 'launch', title: 'Launch', startDate: '2030-01-01', endDate: '2030-12-31', dependsOn: ['found'] },
+        { id: 'found', title: 'Foundation', startDate: '2020-01-01', endDate: '2099-06-30' },
+        { id: 'launch', title: 'Launch', startDate: '2099-01-01', endDate: '2099-12-31', dependsOn: ['found'] },
         { id: 'past', title: 'Overdue thing', startDate: '2020-01-01', endDate: '2020-06-30' },
       ],
     })).body;
@@ -56,25 +79,24 @@ describe('initiative dates + dependencies (ADR 0234 §C6)', () => {
 
     const tl = await c.get(`${S}/${s.id}/timeline`);
     expect(tl.status, JSON.stringify(tl.body)).toBe(200);
-    interface TlRow { id: string; overdue?: boolean; dependencyLate?: string[] }
-    const byId = new Map<string, TlRow>((tl.body.items as TlRow[]).map((i) => [i.id, i]));
+    const byId = new Map<string, Item>((tl.body.items as Item[]).map((i) => [i.id, i]));
     expect(byId.get('past')?.overdue).toBe(true);                   // ended 2020, not done
     expect(byId.get('launch')?.dependencyLate).toEqual(['found']);  // found ends after launch starts
-    expect(byId.get('found')?.overdue).toBeUndefined();             // ends 2030
+    expect(byId.get('found')?.overdue).toBeUndefined();             // ends 2099
 
     // Linked idea schedules join the projection.
     const listId = (await c.post(`${PM}/lists`, { orgId, name: 'Bets', presetId: 'weighted' })).body.id;
     await c.post(`${PM}/lists/${listId}/ideas`, { title: 'Dated idea' });
     const cardId = (await c.get(`${PM}/lists/${listId}/ideas`)).body.ideas[0].card.id;
-    await c.put(`${PM}/lists/${listId}/ideas/${cardId}/schedule`, { targetDate: '2031-03-01' });
+    await c.put(`${PM}/lists/${listId}/ideas/${cardId}/schedule`, { targetDate: '2099-03-01' });
     await c.put(`${S}/${s.id}/links`, { links: [{ kind: 'priority-idea', listId, cardId }] });
     const tl2 = await c.get(`${S}/${s.id}/timeline`);
-    expect(tl2.body.items.some((i: any) => i.kind === 'idea-schedule' && i.title === 'Dated idea')).toBe(true);
+    expect((tl2.body.items as Item[]).some((i) => i.kind === 'idea-schedule' && i.title === 'Dated idea')).toBe(true);
 
     // The portfolio variant includes this strategy's items.
     const port = await c.get(`${S}/timeline`);
     expect(port.status).toBe(200);
-    expect(port.body.items.some((i: any) => i.source.strategyId === s.id)).toBe(true);
+    expect((port.body.items as Item[]).some((i) => i.source.strategyId === s.id)).toBe(true);
   });
 });
 
@@ -84,13 +106,12 @@ describe('score history + breakdown + session rationale (ADR 0234 §C7)', () => 
     const listId = (await c.post(`${PM}/lists`, { orgId, name: 'Scored', presetId: 'weighted' })).body.id;
     await c.post(`${PM}/lists/${listId}/ideas`, { title: 'Scored idea' });
     const cardId = (await c.get(`${PM}/lists/${listId}/ideas`)).body.ideas[0].card.id;
-    const list = (await c.get(`${PM}/lists/${listId}/ideas`)).body;
-    void list;
 
     // Score twice → two history rows with prior/new priorities.
-    const criteria = (await c.get(`${PM}/lists`)).body.lists.find((l: any) => l.id === listId).criteriaSet.criteria;
-    const scoresA: Record<string, number> = Object.fromEntries(criteria.map((cr: any) => [cr.id, 4]));
-    const scoresB: Record<string, number> = Object.fromEntries(criteria.map((cr: any) => [cr.id, 8]));
+    const criteria = ((await c.get(`${PM}/lists`)).body.lists as Array<{ id: string; criteriaSet: { criteria: Criterion[] } }>)
+      .find((l) => l.id === listId)!.criteriaSet.criteria;
+    const scoresA: Record<string, number> = Object.fromEntries(criteria.map((cr) => [cr.id, 4]));
+    const scoresB: Record<string, number> = Object.fromEntries(criteria.map((cr) => [cr.id, 8]));
     await c.put(`${PM}/lists/${listId}/ideas/${cardId}/scores`, { scores: scoresA });
     await c.put(`${PM}/lists/${listId}/ideas/${cardId}/scores`, { scores: scoresB });
 
@@ -100,7 +121,7 @@ describe('score history + breakdown + session rationale (ADR 0234 §C7)', () => 
     expect(hist.body.history[1].priorPriority).toBe(hist.body.history[0].newPriority);
     // The "why ranked here" breakdown: every criterion carries weight + weighted component.
     expect(hist.body.breakdown).toHaveLength(criteria.length);
-    for (const b of hist.body.breakdown) {
+    for (const b of hist.body.breakdown as BreakdownRow[]) {
       expect(b.weight).toBeGreaterThan(0);
       expect(b.score).toBe(8);
       expect(b.weighted).toBe(8 * b.weight);
@@ -112,6 +133,9 @@ describe('score history + breakdown + session rationale (ADR 0234 §C7)', () => 
     expect(session.rationale).toBe('Q3 focus: EU.');
     const patched = (await c.patch(`${PM}/lists/${listId}/sessions/${session.id}`, { rationale: 'Revised: EU + churn.' })).body;
     expect(patched.rationale).toBe('Revised: EU + churn.');
+    const cleared = (await c.patch(`${PM}/lists/${listId}/sessions/${session.id}`, { rationale: '' })).body;
+    expect(cleared.id).toBe(session.id);
+    expect(cleared.rationale).toBeUndefined();
   });
 });
 
@@ -133,7 +157,13 @@ describe('decision records (ADR 0233 §C8)', () => {
       });
       expect(r.status, JSON.stringify(r.body)).toBe(201);
       expect(r.body.documentId).toBeTruthy();
-      expect(r.body.strategy.links.some((l: any) => l.kind === 'document' && l.documentId === r.body.documentId)).toBe(true);
+      expect((r.body.strategy.links as Array<{ kind: string; documentId?: string }>).some((l) => l.kind === 'document' && l.documentId === r.body.documentId)).toBe(true);
+      // The Document IS the record: it must hold the decision, not just exist.
+      const doc = await c.get(`/host/openwop-app/documents/orgs/${orgId}/documents/${r.body.documentId}`);
+      expect(doc.status, JSON.stringify(doc.body)).toBe(200);
+      expect(doc.body.kind).toBe('decision-record');
+      expect(doc.body.currentVersion?.content).toContain('We enter the EU in Q1.');
+      expect(doc.body.currentVersion?.content).toContain('Largest under-served segment.');
       expect((await c.post(`${S}/${s.id}/decisions`, { title: 'No decision text' })).status).toBe(400);
     } finally {
       await enableToggle('documents', 'off');

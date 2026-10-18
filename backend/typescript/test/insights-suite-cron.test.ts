@@ -7,6 +7,19 @@
  *
  * Runs in demo mode so the dev-token principal resolves to the tenant owner
  * (workspace:write) and the toggle is enabled — letting the request reach the cron guard.
+ * The dev-token acts on tenant `default` (the squat case proves it: its job id only
+ * collides because it embeds `default`), so the row reads below use `getConfig('default')`.
+ *
+ * Every malformed-cron case carries a valid `planSource.projectId`: without one the
+ * planSource guard returns the same `400 invalid_request` and the cron guard is never
+ * reached (/grade-tests w20 probe: disabling the cron guard left the old cases green).
+ * With one, `registerJob → validateCadence` still refuses the cron by value — but AFTER
+ * `configs.put` — so the cron guard's own contribution is "refused before the row is
+ * written", which is what these cases assert.
+ *
+ * Sabotage-witnessed: disabling the cron guard, the timezone guard, the planSource guard,
+ * the squat pre-flight, the config write, the job's `featureId`, or the `projectId` input
+ * each reds the case named for it.
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -47,15 +60,22 @@ const putConfig = (bodyObj: Record<string, unknown>) =>
 
 describe('ADR 0081 §6 — cron validation at PUT /config', () => {
   it('rejects a malformed cron with 400 invalid_request', async () => {
-    const res = await putConfig({ principalUserId: 'u-ceo', scheduleCron: 'not a cron' });
+    const before = await getConfig('default');
+    const res = await putConfig({ principalUserId: 'u-ceo', businessUnits: ['TX'], scheduleCron: 'not a cron', planSource: { projectId: 'p' } });
     expect(res.status).toBe(400);
-    const body = await res.json() as { error?: string };
+    const body = await res.json() as { error?: string; message?: string };
     expect(body.error).toBe('invalid_request');
+    expect(body.message).toBe('scheduleCron is not a valid 5-field cron expression.');
+    expect(await getConfig('default'), 'a refused cron must not leave a row behind').toEqual(before);
   });
 
   it('rejects an out-of-range cron field with 400', async () => {
-    const res = await putConfig({ principalUserId: 'u-ceo', scheduleCron: '99 * * * *' });
+    const before = await getConfig('default');
+    const res = await putConfig({ principalUserId: 'u-ceo', businessUnits: ['TX'], scheduleCron: '99 * * * *', planSource: { projectId: 'p' } });
     expect(res.status).toBe(400);
+    const body = await res.json() as { error?: string; message?: string };
+    expect(body.message).toBe('scheduleCron is not a valid 5-field cron expression.');
+    expect(await getConfig('default'), 'a refused cron must not leave a row behind').toEqual(before);
   });
 
   it('accepts a valid cron with 200 and persists it', async () => {
@@ -63,11 +83,20 @@ describe('ADR 0081 §6 — cron validation at PUT /config', () => {
     expect(res.status).toBe(200);
     const body = await res.json() as { config?: { scheduleCron?: string } };
     expect(body.config?.scheduleCron).toBe('0 6 * * 2');
+    // The response echoes its input whether or not the write ran — read the row back.
+    const stored = await getConfig('default');
+    expect(stored?.principalUserId).toBe('u-ceo');
+    expect(stored?.scheduleCron).toBe('0 6 * * 2');
+    expect((await listJobs()).find((j) => j.ownerUserId === 'u-ceo')?.cronExpr).toBe('0 6 * * 2');
   });
 
   it('accepts an absent cron (schedule simply not configured) with 200', async () => {
-    const res = await putConfig({ principalUserId: 'u-ceo', businessUnits: ['TX'] });
+    const res = await putConfig({ principalUserId: 'u-nocron', businessUnits: ['TX'] });
     expect(res.status).toBe(200);
+    const body = await res.json() as { config?: { principalUserId?: string; scheduleCron?: string } };
+    expect(body.config?.principalUserId).toBe('u-nocron');
+    expect(body.config?.scheduleCron).toBeUndefined();
+    expect((await listJobs()).some((j) => j.ownerUserId === 'u-nocron'), 'no cron ⇒ no job armed').toBe(false);
   });
 });
 

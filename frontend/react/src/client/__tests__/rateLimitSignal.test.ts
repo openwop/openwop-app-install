@@ -42,21 +42,33 @@ describe('noteRateLimited', () => {
 
 describe('installRateLimitObserver', () => {
   it('wraps window.fetch once, forwards untouched, returns the same response, and notes same-origin 429s only', async () => {
-    const calls: unknown[][] = [];
-    const r429 = res(429, '4');
-    const fetchImpl = vi.fn(async (...args: unknown[]) => { calls.push(args); return r429; });
-    const win = { fetch: fetchImpl, location: { href: 'https://app.test/x', origin: 'https://app.test' } } as unknown as Window;
-    installRateLimitObserver(win);
-    installRateLimitObserver(win); // idempotent
-    const before = Date.now();
-    const out = await win.fetch('/api/v1/runs', { method: 'GET' });
-    expect(out).toBe(r429);
-    expect(calls).toEqual([['/api/v1/runs', { method: 'GET' }]]);
-    const s = getRateLimitState();
-    expect(s && s.untilMs >= before + 4_000).toBe(true);
+    // The real jsdom window (no laundered stub): its own location decides
+    // same-origin. window.fetch is restored in `finally`.
+    const orig = window.fetch;
+    try {
+      const calls: Array<[RequestInfo | URL, RequestInit | undefined]> = [];
+      const r429 = res(429, '4');
+      window.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => { calls.push([input, init]); return r429; });
+      installRateLimitObserver(window);
+      const wrapped = window.fetch;
+      installRateLimitObserver(window); // idempotent
+      expect(window.fetch, 'a second install must not wrap the wrapper').toBe(wrapped);
+      const before = Date.now();
+      const out = await window.fetch('/api/v1/runs', { method: 'GET' });
+      const after = Date.now();
+      expect(out).toBe(r429);
+      expect(calls).toEqual([['/api/v1/runs', { method: 'GET' }]]);
+      const s = getRateLimitState();
+      // Retry-After: 4 — bounded on BOTH sides, so the 5 s default cannot pass for it.
+      expect(s).not.toBeNull();
+      expect(s!.untilMs).toBeGreaterThanOrEqual(before + 4_000);
+      expect(s!.untilMs).toBeLessThanOrEqual(after + 4_000);
 
-    _resetRateLimitSignal();
-    await win.fetch('https://elsewhere.example/thing');
-    expect(getRateLimitState(), 'a foreign origin 429 is not this app being limited').toBeNull();
+      _resetRateLimitSignal();
+      await window.fetch('https://elsewhere.example/thing');
+      expect(getRateLimitState(), 'a foreign origin 429 is not this app being limited').toBeNull();
+    } finally {
+      window.fetch = orig;
+    }
   });
 });

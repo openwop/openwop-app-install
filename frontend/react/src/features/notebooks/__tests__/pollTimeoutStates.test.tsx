@@ -28,29 +28,38 @@
  *  5. evidence clears it: a recheck that finds the result removes the card.
  *
  * The pollers recurse through `window.setTimeout`, so these drive fake timers.
+ *
+ * Sabotage witnesses: wave-20 probes `w20g5-poll-*` (give-up write, per-panel suppression,
+ * PANEL_STALL_KINDS, recheck count / error flag / announce, auto-clear, the stall store, identity
+ * predicate, run link, liveRef reset, onSettled at the cap, a toast at the cap).
+ * Double guard (recorded): removing `clearStall` from the "recheck landed" branch stays green —
+ * the M3a auto-clear effect re-derives the same verdict from the `setSources(fresh)` the recheck
+ * already made (probe w20g5-poll-recheck-landed); the M3a case witnesses that effect.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { StrictMode } from 'react';
 import { render, screen, cleanup, fireEvent, act } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
+import type * as Client from '../notebooksClient.js';
 
-const listSources = vi.fn();
-const listNotes = vi.fn();
-const listTransformations = vi.fn();
-const addYoutubeSource = vi.fn();
-const applyTransformation = vi.fn();
-const summarizeSource = vi.fn();
+const listSources = vi.fn<typeof Client.listSources>();
+const listNotes = vi.fn<typeof Client.listNotes>();
+const listTransformations = vi.fn<typeof Client.listTransformations>();
+const addYoutubeSource = vi.fn<typeof Client.addYoutubeSource>();
+const applyTransformation = vi.fn<typeof Client.applyTransformation>();
+const summarizeSource = vi.fn<typeof Client.summarizeSource>();
 const toastError = vi.fn();
 const toastSuccess = vi.fn();
+const toastInfo = vi.fn();
 
 vi.mock('../notebooksClient.js', async (orig) => ({
   ...(await orig<Record<string, unknown>>()),
-  listSources: (...a: unknown[]) => listSources(...a),
-  listNotes: (...a: unknown[]) => listNotes(...a),
-  listTransformations: (...a: unknown[]) => listTransformations(...a),
-  addYoutubeSource: (...a: unknown[]) => addYoutubeSource(...a),
-  applyTransformation: (...a: unknown[]) => applyTransformation(...a),
-  summarizeSource: (...a: unknown[]) => summarizeSource(...a),
+  listSources: (...a: Parameters<typeof Client.listSources>) => listSources(...a),
+  listNotes: (...a: Parameters<typeof Client.listNotes>) => listNotes(...a),
+  listTransformations: (...a: Parameters<typeof Client.listTransformations>) => listTransformations(...a),
+  addYoutubeSource: (...a: Parameters<typeof Client.addYoutubeSource>) => addYoutubeSource(...a),
+  applyTransformation: (...a: Parameters<typeof Client.applyTransformation>) => applyTransformation(...a),
+  summarizeSource: (...a: Parameters<typeof Client.summarizeSource>) => summarizeSource(...a),
   searchNotebook: vi.fn(async () => ({ hits: [], citations: [] })),
   addNote: vi.fn(async () => []),
   addSource: vi.fn(async () => ({ documentId: 'd1' })),
@@ -59,7 +68,7 @@ vi.mock('../notebooksClient.js', async (orig) => ({
   ensureNotebook: vi.fn(async () => NOTEBOOK_FIXTURE),
 }));
 
-const NOTEBOOK_FIXTURE = {
+const NOTEBOOK_FIXTURE: Client.Notebook = {
   id: 'nb1', tenantId: 't1', orgId: 'o1', name: 'Research', collectionId: 'col1',
   createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
 };
@@ -71,14 +80,14 @@ const announceSpy = vi.fn();
 vi.mock('../../../ui/announce.js', () => ({ announce: (...a: unknown[]) => announceSpy(...a) }));
 
 vi.mock('../../../ui/toast.js', () => ({
-  toast: { success: (...a: unknown[]) => toastSuccess(...a), error: (...a: unknown[]) => toastError(...a), info: vi.fn() },
+  toast: { success: (...a: unknown[]) => toastSuccess(...a), error: (...a: unknown[]) => toastError(...a), info: (...a: unknown[]) => toastInfo(...a) },
 }));
 
 import { ProjectSourcesPanel, __clearNotebookStalls } from '../NotebooksPage.js';
 
-const source = (id: string, over: Record<string, unknown> = {}) => ({
-  documentId: id, title: `Source ${id}`, contextLevel: 'full', chunkCount: 1,
-  hasSummary: false, ...over,
+const source = (id: string, over: Partial<Client.NotebookSource> = {}): Client.NotebookSource => ({
+  documentId: id, title: `Source ${id}`, source: { kind: 'text' }, chunkCount: 1,
+  createdAt: '2026-01-01T00:00:00.000Z', contextLevel: 'full', hasSummary: false, ...over,
 });
 
 const renderWorkspace = async () => {
@@ -99,6 +108,9 @@ beforeEach(() => {
   // previous test's card.
   __clearNotebookStalls();
   announceSpy.mockClear();
+  // `mockReset`, not just `clearAllMocks`: an unconsumed `mockResolvedValueOnce` must not leak
+  // into the next case (clearAllMocks keeps implementations, Once queue included).
+  for (const m of [listSources, listNotes, listTransformations, addYoutubeSource, applyTransformation, summarizeSource, toastError, toastSuccess, toastInfo]) m.mockReset();
   vi.useFakeTimers({ shouldAdvanceTime: true });
   listSources.mockResolvedValue([]);
   listNotes.mockResolvedValue([]);
@@ -134,7 +146,8 @@ describe('NBU-6 — an ingest poll that gives up states itself and suppresses th
     // Without this the absence assertion above passes for the wrong reason — e.g.
     // if the empty card were deleted outright, or the copy renamed.
     await renderWorkspace();
-    expect(screen.getByText('No sources yet')).toBeTruthy();
+    // `findBy`: the composer mounts before the list read resolves (seed-dependent race, wave 20).
+    expect(await screen.findByText('No sources yet')).toBeTruthy();
     expect(screen.queryByText('Still waiting for that source')).toBeNull();
   });
 
@@ -161,8 +174,9 @@ describe('NBU-6 — an ingest poll that gives up states itself and suppresses th
     // A repeated identical ERROR toast coalesces without inserting a DOM node and
     // is excluded from `announce()`, so the second identical failure would be
     // silent to a screen reader. The give-up must not ride that channel.
-    const errorArgs = toastError.mock.calls.map((c) => String(c[0]));
-    expect(errorArgs.filter((m) => /waiting|stopped checking/i.test(m))).toEqual([]);
+    // …nor in any other toast lane (an `info` toast vanishes just the same).
+    const toastArgs = [...toastError.mock.calls, ...toastInfo.mock.calls].map((c) => String(c[0]));
+    expect(toastArgs.filter((m) => /waiting|stopped checking/i.test(m))).toEqual([]);
   });
 });
 
@@ -223,7 +237,7 @@ describe('NBU-6 — the transform poll gives up the same way', () => {
   it('CONTROL: with nothing stalled, "No transformations yet" still renders', async () => {
     listSources.mockResolvedValue([source('d1')]);
     await renderWorkspace();
-    expect(screen.getByText('No transformations yet')).toBeTruthy();
+    expect(await screen.findByText('No transformations yet')).toBeTruthy();
     expect(screen.queryByText('Still waiting for that transformation')).toBeNull();
   });
 });

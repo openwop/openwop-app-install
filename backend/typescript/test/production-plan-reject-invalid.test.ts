@@ -13,12 +13,23 @@
  * change a plan's MEANING become a typed `OpenwopError('validation_error')` that
  * blocks `plans.put`. A legitimately-sparse-but-well-formed plan (empty
  * recommendations, absent optionals) still persists.
+ *
+ * w32 (grade-tests) — each rejection now asserts the typed 422 AND which rule
+ * fired (`details.errors`), so a refusal from a different guard cannot stand in
+ * for the one a case names; T6 also carries the PROD2-R2 upper-casing leg that
+ * used to live in `production-surface-authz.test.ts`.
  */
+
+/** The typed PIC-2 refusal, naming the rule that fired. */
+const rejected = (rule: string) => ({
+  code: 'validation_error',
+  httpStatus: 422,
+  details: { errors: [expect.stringContaining(rule)] },
+});
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { savePlan, __resetProduction } from '../src/features/production/productionService.js';
+import { savePlan, listPlans, __resetProduction } from '../src/features/production/productionService.js';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { openStorage } from '../src/storage/index.js';
-import { OpenwopError } from '../src/types.js';
 
 const TENANT = 'user:pic2-tenant';
 const ORG = 'org-pic2';
@@ -35,7 +46,6 @@ afterEach(async () => {
 
 /** Count plan rows visible to the tenant/org (proves nothing was persisted). */
 async function planCount(): Promise<number> {
-  const { listPlans } = await import('../src/features/production/productionService.js');
   return (await listPlans(TENANT, ORG)).length;
 }
 
@@ -43,7 +53,7 @@ describe('PIC-2 — savePlan rejects semantically-invalid model output (typed fa
   it('T1 — non-array `recommendations` is a typed failure, NOT succeed-with-empty (P2)', async () => {
     await expect(
       savePlan({ tenantId: TENANT, orgId: ORG, strategySummary: 'a strategy', recommendations: 'not-an-array' }),
-    ).rejects.toBeInstanceOf(OpenwopError);
+    ).rejects.toMatchObject(rejected('recommendations must be an array'));
     expect(await planCount(), 'a rejected plan must leave NO durable row').toBe(0);
   });
 
@@ -55,7 +65,7 @@ describe('PIC-2 — savePlan rejects semantically-invalid model output (typed fa
         strategySummary: 'a strategy',
         recommendations: [{ assetType: 'video', executionRoute: 'martian', rationale: 'because' }],
       }),
-    ).rejects.toBeInstanceOf(OpenwopError);
+    ).rejects.toMatchObject(rejected("executionRoute 'martian'"));
     expect(await planCount()).toBe(0);
   });
 
@@ -63,7 +73,7 @@ describe('PIC-2 — savePlan rejects semantically-invalid model output (typed fa
     // `[42]` / `[null]` would otherwise become a full `asset / internal / $0` rec.
     await expect(
       savePlan({ tenantId: TENANT, orgId: ORG, strategySummary: 'a strategy', recommendations: [42] }),
-    ).rejects.toBeInstanceOf(OpenwopError);
+    ).rejects.toMatchObject(rejected('recommendations[0] must be an object'));
     expect(await planCount()).toBe(0);
   });
 
@@ -80,13 +90,14 @@ describe('PIC-2 — savePlan rejects semantically-invalid model output (typed fa
       ],
     });
     expect(plan.recommendations).toHaveLength(1);
+    expect(plan.recommendations[0]!.matchingVendors ?? [], 'the hallucinated vendor is dropped').toEqual([]);
     expect(await planCount()).toBe(1);
   });
 
   it('T4 — a blank strategySummary is rejected (the one required content field)', async () => {
     await expect(
       savePlan({ tenantId: TENANT, orgId: ORG, strategySummary: '   ', recommendations: [] }),
-    ).rejects.toBeInstanceOf(OpenwopError);
+    ).rejects.toMatchObject(rejected('strategySummary is required'));
     expect(await planCount()).toBe(0);
   });
 
@@ -103,10 +114,13 @@ describe('PIC-2 — savePlan rejects semantically-invalid model output (typed fa
       strategySummary: 'x',
       recommendations: [
         { assetType: 'landing', executionRoute: 'agency', rationale: 'r', budget: { min: 1, max: 2, currency: 'dollars' } },
+        { assetType: 'video', executionRoute: 'internal', rationale: 'r', budget: { min: 1, max: 2, currency: 'eur' } },
       ],
     });
     // currency 'dollars' is COSMETIC → normalised to USD + persisted (not rejected).
     expect(plan.recommendations[0]!.budget.currency).toBe('USD');
+    // …and a real ISO code is kept, upper-cased (PROD2-R2 — `Intl.NumberFormat` needs it).
+    expect(plan.recommendations[1]!.budget.currency).toBe('EUR');
     expect(await planCount()).toBe(1);
   });
 });

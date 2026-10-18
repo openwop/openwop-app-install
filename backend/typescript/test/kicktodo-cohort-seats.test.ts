@@ -6,8 +6,9 @@
  *  - an expired hold is reaped lazily and frees the seat
  *  - a paid order CONSUMES a live hold (no double increment) and is idempotent
  *  - paid-but-full FAILS CLOSED (no silent oversell) — the caller flags refund
- *  - a refund BEFORE start releases the seat; after start it does not resell,
- *    and neither deletes history
+ *  - a refund BEFORE start releases the seat AND revokes access; after start it
+ *    does not resell and does NOT strip access (ARCH-H4: access and the seat move
+ *    together, or neither moves)
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
@@ -102,11 +103,14 @@ describe('confirm + refund (P3)', () => {
     await confirmSeat(T, before, 'user:buyer-a');
     expect((await releaseSeat(T, before, 'user:buyer-a', '2098-12-01')).released).toBe(true);
     expect((await getCohortDetail(T, before))!.seatsTaken).toBe(1); // back to the coach only
+    expect(await liveGrant(T, before, 'user:buyer-a')).toBeNull();   // access went with the seat
 
     const started = await makeCohort(2, '2020-01-01');
     await confirmSeat(T, started, 'user:buyer-c');
     const after = await releaseSeat(T, started, 'user:buyer-c', '2026-07-19');
     expect(after.released).toBe(false);                                  // no mid-cohort backfill
     expect((await getCohortDetail(T, started))!.seatsTaken).toBe(2);
+    // ARCH-H4 — a mid-cohort refund must NOT strip access while keeping the seat spent.
+    expect(await liveGrant(T, started, 'user:buyer-c')).toBeTruthy();
   });
 });

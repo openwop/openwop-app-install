@@ -5,17 +5,32 @@
  * ephemeral run-overlay reducer. Drives the zustand store directly via
  * `.getState()` (stores expose getState outside React).
  */
-import { describe, it, expect, beforeEach } from 'vitest';
-import { useBuilderStore } from '../builderStore.js';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import type { RunEventDoc } from '@openwop/openwop';
+import { cancelPendingBackendSync, useBuilderStore } from '../builderStore.js';
 import type { SavedWorkflow } from '../../schema/workflow.js';
 
 const emptyWf: SavedWorkflow = {
-  id: 'wf-test', name: 'Test', version: '1.0.0', nodes: [], edges: [], createdAt: 'now', updatedAt: 'now',
+  id: 'wf-test', name: 'Test', version: '1.0.0', nodes: [], edges: [],
+  createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
 };
 const s = () => useBuilderStore.getState();
 
+/** A real `RunEventDoc` (no `as never`): only the fields under test vary. */
+let seq = 0;
+function ev(p: Pick<RunEventDoc, 'runId' | 'type'> & Partial<RunEventDoc>): RunEventDoc {
+  return { eventId: `ev-${seq}`, payload: null, timestamp: '2026-01-01T00:00:00.000Z', sequence: seq++, schemaVersion: 1, ...p };
+}
+
 beforeEach(() => {
+  localStorage.clear();
   s().loadFromSaved(emptyWf);
+});
+
+// Every mutation arms a real 1.5 s debounced backend sync; never let it outlive the case.
+afterEach(() => {
+  cancelPendingBackendSync();
+  localStorage.clear();
 });
 
 describe('builderStore — moveNodes', () => {
@@ -76,10 +91,14 @@ describe('builderStore — group clone', () => {
     const b = s().addNode('uppercase', { x: 100, y: 0 });
     s().cloneNodes([a, b]);
     expect(s().nodes).toHaveLength(4);
+    // The clones: same kinds, each at +32/+32 from its source.
+    const clones = s().nodes.slice(2);
+    expect(clones.map((n) => [n.kind, n.position])).toEqual([
+      ['noop', { x: 32, y: 32 }],
+      ['uppercase', { x: 132, y: 32 }],
+    ]);
     // The new selection is exactly the two clones (not the sources).
-    expect(s().selectedNodeIds).toHaveLength(2);
-    expect(s().selectedNodeIds).not.toContain(a);
-    expect(s().selectedNodeIds).not.toContain(b);
+    expect(s().selectedNodeIds).toEqual(clones.map((n) => n.id));
     // One undo removes both clones.
     s().undo();
     expect(s().nodes).toHaveLength(2);
@@ -158,17 +177,17 @@ describe('builderStore — run overlay', () => {
     expect(s().overlay?.runStatus).toBe('running');
 
     // node.started → 'running' on the mapped builder node.
-    s().applyRunEvent({ runId: 'run-1', type: 'node.started', nodeId: 'be_a' } as never);
+    s().applyRunEvent(ev({ runId: 'run-1', type: 'node.started', nodeId: 'be_a' }));
     expect(s().overlay?.nodeStatus[a]).toBe('running');
-    s().applyRunEvent({ runId: 'run-1', type: 'node.completed', nodeId: 'be_a' } as never);
+    s().applyRunEvent(ev({ runId: 'run-1', type: 'node.completed', nodeId: 'be_a' }));
     expect(s().overlay?.nodeStatus[a]).toBe('completed');
 
     // run.completed updates the banner status.
-    s().applyRunEvent({ runId: 'run-1', type: 'run.completed' } as never);
+    s().applyRunEvent(ev({ runId: 'run-1', type: 'run.completed' }));
     expect(s().overlay?.runStatus).toBe('completed');
 
     // An event for a different run is ignored.
-    s().applyRunEvent({ runId: 'other', type: 'run.failed' } as never);
+    s().applyRunEvent(ev({ runId: 'other', type: 'run.failed' }));
     expect(s().overlay?.runStatus).toBe('completed');
   });
 

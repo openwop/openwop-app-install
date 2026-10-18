@@ -7,6 +7,12 @@
  * and returns typed errors on invalid input (never success-with-empty);
  * `openwop:interactive-artifacts.get` reads back tenant-checked and fails
  * EMPTY without an acting user.
+ *
+ * Red if render stops refusing an anonymous caller (`w27g2-iaat-render-auth`), the key
+ * loses its tenant or determinism (`iaat-key-*`), validation errors stop being typed, or
+ * get drops either guard — the acting-user check (`iaat-get-auth-r2`) or the record
+ * tenant re-check (`iaat-get-tenant-r2`). The get case reads a key that REALLY EXISTS,
+ * because `getRunArtifact` resolves by key alone: on a missing key both guards are moot.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -72,8 +78,21 @@ describe('interactive-artifacts agent tools (CFP-1 / A10)', () => {
   });
 
   it('get fails EMPTY without an acting user and on cross-tenant keys', async () => {
-    const anon = await provider().executeTool({ name: INTERACTIVE_ARTIFACTS_GET_TOOL_ID, input: { artifactKey: 'chat-viz:conv-1:render:x' } });
-    expect(JSON.parse(anon.content).artifact).toBeNull();
+    // Its own artifact (own conversation + content), so the case stands alone under shuffle.
+    const owner = provider({ actingUserId: 'u-1', conversationId: 'conv-get' });
+    const made = await owner.executeTool({ name: INTERACTIVE_ARTIFACTS_RENDER_TOOL_ID, input: { kind: 'mermaid', source: 'graph TD; G-->H' } });
+    expect(made.isError, made.content).toBeFalsy();
+    const artifactKey = JSON.parse(made.content).artifactKey as string;
+    expect(artifactKey).toContain(`chat-viz:${TENANT}:conv-get`);
+    const get = (p: ReturnType<typeof createAgentToolProvider>) =>
+      p.executeTool({ name: INTERACTIVE_ARTIFACTS_GET_TOOL_ID, input: { artifactKey } }).then((r) => JSON.parse(r.content));
+
+    // positive control: the owner (same tenant, acting user) reads it
+    expect((await get(owner)).artifact?.content).toContain('G-->H');
+    // same tenant, NO acting user, a key that exists → empty
+    expect(await get(provider())).toEqual({ artifact: null });
+    // another tenant, authenticated, the same real key → empty (the record's tenant re-check)
+    expect(await get(createAgentToolProvider({ tenantId: 'tenant-other', actingUserId: 'u-2' }))).toEqual({ artifact: null });
   });
 
   // DATA-1 — the synthetic runId carries the tenant, so two tenants rendering

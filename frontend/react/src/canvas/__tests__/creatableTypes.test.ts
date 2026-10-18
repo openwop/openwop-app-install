@@ -17,6 +17,27 @@ import { documentDefinition } from '../../features/document-editor/definition.js
 
 const DEFINITIONS = [slidesDefinition, drawingsDefinition, cadDefinition, campaignStudioDefinition, appBuilderDefinition, documentDefinition] as const;
 
+/** Every first-party canvas definition module, discovered — the hand list above
+ *  could not notice a NEW definition with no gallery row (w46). */
+const definitionModules = import.meta.glob<Record<string, unknown>>('../../features/*/definition.tsx', { eager: true });
+function discoveredCanvasTypeIds(): Set<string> {
+  const ids = new Set<string>();
+  for (const mod of Object.values(definitionModules)) {
+    for (const exp of Object.values(mod)) {
+      if (!exp || typeof exp !== 'object' || !('canvasTypeId' in exp)) continue;
+      const id = (exp as { canvasTypeId: unknown }).canvasTypeId;
+      if (typeof id === 'string' && id.startsWith('canvas.')) ids.add(id);
+    }
+  }
+  return ids;
+}
+
+/** Named, asserted exemptions — first-party types deliberately absent from the
+ *  creation gallery. Adding one is a decision; it must be written here. */
+const NOT_CREATABLE: ReadonlyMap<string, string> = new Map([
+  ['canvas.challenge-outline', 'created per-candidate by the backend ensure route, never from the gallery (ADR 0458 §2.3)'],
+]);
+
 describe('creatableTypes registry ↔ feature definitions', () => {
   it('pins every registry row to its real definition (id, toggle, base path, editor path)', () => {
     for (const def of DEFINITIONS) {
@@ -29,9 +50,23 @@ describe('creatableTypes registry ↔ feature definitions', () => {
   });
 
   it('has no orphan rows (a row whose definition was removed/renamed)', () => {
-    const ids = new Set(DEFINITIONS.map((d) => d.canvasTypeId));
+    const ids = new Set<string>(DEFINITIONS.map((d) => d.canvasTypeId));
     for (const row of CREATABLE_CANVAS_TYPES) {
       expect(ids.has(row.canvasTypeId), `registry row ${row.canvasTypeId} has no definition`).toBe(true);
+    }
+  });
+
+  it('every discovered first-party definition has a row, except the named exemptions', () => {
+    const discovered = discoveredCanvasTypeIds();
+    // Non-vacuity floor: the glob really found the definitions (7 today).
+    expect(discovered.size).toBeGreaterThanOrEqual(7);
+    const rows = new Set(CREATABLE_CANVAS_TYPES.map((r) => r.canvasTypeId));
+    const missing = [...discovered].filter((id) => !rows.has(id) && !NOT_CREATABLE.has(id));
+    expect(missing).toEqual([]);
+    // Every exemption is real (a discovered type) and really has no row.
+    for (const id of NOT_CREATABLE.keys()) {
+      expect(discovered.has(id), `exemption ${id} names no definition`).toBe(true);
+      expect(rows.has(id), `exempt ${id} has a gallery row`).toBe(false);
     }
   });
 

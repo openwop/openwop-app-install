@@ -78,6 +78,11 @@ export interface MarkdownEditorProps {
   /** Fewer toolbar buttons + no Preview tab (e.g. small board-card fields). */
   compact?: boolean | undefined;
   ariaLabel?: string | undefined;
+  /** ADR 0914 (Book AI P9) — the CONTENT language (BCP 47), which may differ
+   *  from the UI language. Applied to the textarea and the rendered preview
+   *  only, so the browser spellchecks and screen readers pronounce the text in
+   *  its own language while the toolbar and footer stay in the UI language. */
+  lang?: string | undefined;
 }
 
 export function MarkdownEditor({
@@ -90,6 +95,7 @@ export function MarkdownEditor({
   autosaveKey,
   compact = false,
   ariaLabel,
+  lang,
 }: MarkdownEditorProps): JSX.Element {
   const { t } = useTranslation('ui');
   const ref = useRef<HTMLTextAreaElement>(null);
@@ -265,6 +271,7 @@ export function MarkdownEditor({
           rows={rows}
           placeholder={placeholder}
           aria-label={ariaLabel}
+          lang={lang}
           className="ui-input mdeditor-textarea"
           style={{ fontFamily: monospace ? 'var(--mono, monospace)' : 'inherit' }}
         />
@@ -273,7 +280,7 @@ export function MarkdownEditor({
           className="surface-card mdeditor-preview"
           style={{ minHeight: `${rows * 1.4}em` }}
         >
-          {value.trim() ? <Markdown>{value}</Markdown> : <span className="muted">{t('mdNothingToPreview')}</span>}
+          {value.trim() ? (lang ? <div lang={lang}><Markdown>{value}</Markdown></div> : <Markdown>{value}</Markdown>) : <span className="muted">{t('mdNothingToPreview')}</span>}
         </div>
       )}
 

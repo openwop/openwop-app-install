@@ -69,7 +69,9 @@ export async function sweepSegmentEntries(storage: Storage, now: number = Date.n
       if (!(await mayUse(seg.tenantId))) continue;
       // Fire-once across the fleet: only one instance processes a segment per slot.
       const claim = await storage.claimOnce(`cdp:segment-entry:${seg.tenantId}:${seg.segmentId}:${slot}`, new Date(now).toISOString());
-      if (!claim) continue;
+      // `claimOnce` returns `{ claimed, existing }` — always truthy, so the gate is
+      // `.claimed` (W35-CDP-CLAIM-1: `!claim` never skipped, and every instance emitted).
+      if (!claim.claimed) continue;
       const members = await resolveSegmentMembers(seg.tenantId, seg.segmentId);
       const currentIds = members.map((c) => c.contactId);
       const prior = await snapshots.get(snapKey(seg.tenantId, seg.segmentId));

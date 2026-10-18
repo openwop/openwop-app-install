@@ -8,24 +8,25 @@
  * symptom: the UI shows the edit as applied, the server never took it, and the
  * user finds out on the next load, if ever.
  *
- * W-1  DashboardPage — the debounced layout save swallowed its failure. One
- *      notice per failure EPISODE (a drag re-fires the debounce), cleared by
- *      the next success.
+ * W-1  DashboardPage — the debounced layout save swallowed its failure. Now ONE
+ *      standing Notice (no toast — the Notice is already an assertive region,
+ *      and a toast beside it double-announced: grade-ux DASHW-10), cleared by
+ *      the next SUCCESSFUL save. (This header used to describe a per-episode
+ *      toast; that lane was removed — corrected /grade-tests w50.)
  * W-2  PersonalNoteTile — the SHARPER half. The save failure was routed into
  *      the same `error` flag the READ uses, and that flag swaps the whole tile
  *      for a one-line message — so a failed save REPLACED the textarea and took
  *      the user's unsaved text off screen with no way back. Losing sight of
  *      unsaved work is worse than the silence this set out to fix.
  */
+import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { StrictMode } from 'react';
 import { render, screen, cleanup, act, fireEvent } from '@testing-library/react';
 
 const { putNote, getNote } = vi.hoisted(() => ({ putNote: vi.fn(), getNote: vi.fn() }));
-vi.mock('../dashboardClient.js', async (orig) => ({
-  ...(await orig<typeof import('../dashboardClient.js')>()),
-  putNote, getNote,
-}));
+// The ONE dashboardClient mock (putNote/getNote/getLayout/putLayout) is below,
+// beside W-1. It used to be registered twice; the second silently won.
 
 const { toastError } = vi.hoisted(() => ({ toastError: vi.fn() }));
 vi.mock('../../../ui/toast.js', async (orig) => ({
@@ -60,7 +61,7 @@ describe('W-2 · a failed note save keeps the text on screen', () => {
     expect(still!.value).toBe('my work plus more');
   });
 
-  it('tells the user, inline and via a toast', async () => {
+  it('tells the user, inline (one channel — no toast)', async () => {
     vi.useFakeTimers();
     putNote.mockRejectedValue(new Error('offline'));
     await act(async () => { render(<PersonalNoteTile compact={false} />); });
@@ -112,7 +113,9 @@ describe('W-2 · a failed note save keeps the text on screen', () => {
     getNote.mockRejectedValue(new Error('offline'));
     await act(async () => { render(<PersonalNoteTile compact={false} />); });
     await act(async () => { await Promise.resolve(); });
-    // Nothing was ever loaded, so there is no unsaved work to protect.
+    // Nothing was ever loaded, so there is no unsaved work to protect. Assert the
+    // settled ERROR copy first — "no textbox" alone is also true while loading.
+    expect(await screen.findByText(/could not load/i)).toBeTruthy();
     expect(screen.queryByRole('textbox')).toBeNull();
   });
 });
@@ -137,6 +140,10 @@ vi.mock('../../../featureToggles/FeatureAccessContext.js', () => ({
   useFeatureVisible: () => () => true,
   useFeatureLocked: () => () => false,
   useAllFeatureAccess: () => ({ loading: false, resolved: true }),
+
+  // Every export the page's tiles import (continue-working reads per-type access);
+  // without it that tile threw into its ErrorBoundary on every render.
+  useFeatureAccess: () => makeFeatureAccess({ enabled: true }),
 }));
 vi.mock('../../../client/useEffectiveAccess.js', () => ({
   useEffectiveAccessState: () => ({ access: null, resolved: true }),
@@ -207,10 +214,10 @@ vi.mock('../../priority-matrix/priorityMatrixClient.js', async (importOriginal) 
 
 import { DashboardPage } from '../DashboardPage.js';
 
-describe('W-1 · a failed layout save does not go quiet after one toast', () => {
+describe('W-1 · a failed layout save keeps a standing notice until a save succeeds', () => {
   beforeEach(() => { getLayout.mockResolvedValue(null); });
 
-  it('keeps a STANDING surface, not just a ~5s toast', async () => {
+  it('keeps a STANDING surface (not a toast), cleared by the next successful save', async () => {
     // The first cut clicked "Customize" and guarded on `putLayout` having been
     // called — but entering customize mode never calls persist(), and the guard
     // let it pass anyway. /grade-code sabotage-proved it: deleting the standing
@@ -231,5 +238,14 @@ describe('W-1 · a failed layout save does not go quiet after one toast', () => 
 
     expect(putLayout, 'the edit must actually reach a save for this to test anything').toHaveBeenCalled();
     expect(screen.getByText(/isn’t saving/i)).toBeTruthy();
+
+    // …and it CLEARS on the next successful save (the header's claim; a banner
+    // that only a reload removes pins one blip to the home screen — DASHW-13).
+    putLayout.mockResolvedValue({});
+    const again = screen.getAllByRole('button').filter((b) => /make wide|make compact|remove/i.test(b.getAttribute('aria-label') ?? ''));
+    fireEvent.click(again[0]!);
+    await act(async () => { vi.advanceTimersByTime(2000); await Promise.resolve(); });
+    expect(putLayout).toHaveBeenCalledTimes(2);
+    expect(screen.queryByText(/isn’t saving/i)).toBeNull();
   });
 });

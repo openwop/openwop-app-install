@@ -10,9 +10,11 @@
  * created agent lands DISABLED for human review).
  */
 
-/** Pack-local mirror of the providers.json SSoT default (see the workflow-
- *  author pack's DEBT-3 note — the /refresh-model-catalog sweep updates it). */
-const DEFAULT_MODEL = 'claude-sonnet-4-6';
+/** ADR 0903 — no hard-coded vendor. A call passes the provider/model the node
+ *  was given (a chain param frozen at instantiation, or a node input) and leaves
+ *  the rest to the host: `ctx.callAI` fills a missing provider/model from the
+ *  run's choice (`configurable.ai`), else the workspace's active AI binding, else
+ *  the catalog default — resolved once at run start (host/runAiDefault.ts). */
 
 const str = (v) => (typeof v === 'string' && v.trim() ? v.trim() : '');
 
@@ -98,8 +100,10 @@ export async function draft(ctx) {
   if (!intent) {
     return { status: 'failed', error: { code: 'intent_required', message: 'A non-empty `intent` input is required.' } };
   }
-  const provider = str(i.provider) || 'anthropic';
-  const model = str(i.model) || DEFAULT_MODEL;
+  const provider = str(i.provider) || undefined;
+  const model = str(i.model) || undefined;
+  // ADR 0903 — the host may fill the model; record the one that actually ran.
+  let usedModel = model;
   const maxAttempts = typeof i.maxAttempts === 'number' && i.maxAttempts > 0 ? Math.min(Math.floor(i.maxAttempts), 5) : 2;
 
   const catalog = await aa.getCatalog();
@@ -119,6 +123,7 @@ export async function draft(ctx) {
       messages: [{ role: 'user', content: userMessage }],
       responseSchema: DRAFT_RESPONSE_SCHEMA,
     });
+    if (ai && typeof ai.model === 'string' && ai.model) usedModel = ai.model;
     const candidate = (ai && ai.data && typeof ai.data === 'object') ? ai.data : tryParseJson(ai && ai.content);
     lastDraft = candidate ?? {};
     const v = await aa.validateDraft({ draft: lastDraft });
@@ -137,7 +142,7 @@ export async function draft(ctx) {
       error: { code: 'validation_error', message: `Agent draft failed validation after ${attempts} attempt(s): ${(lastValidation.errors || []).join(' ')}` },
     };
   }
-  return { status: 'success', outputs: { draft: lastDraft, attempts, model } };
+  return { status: 'success', outputs: { draft: lastDraft, attempts, model: usedModel } };
 }
 
 /** validate — closed-world re-check of a candidate draft. Read-only. */

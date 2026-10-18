@@ -21,7 +21,7 @@
  *
  * The fix is `featureToggles/__testing__/makeFeatureAccess`, typed as the hook's
  * own return type. This file pins that the corpus uses it (or spells out all
- * seven fields deliberately), and pins the factory's own shape so the module
+ * eight fields deliberately), and pins the factory's own shape so the module
  * cannot quietly start answering with six.
  *
  * SCOPE is inline mock LITERALS. A mock that returns a variable
@@ -33,7 +33,9 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join, relative } from 'node:path';
+import { renderHook } from '@testing-library/react';
 import { makeFeatureAccess } from '../__testing__/makeFeatureAccess.js';
+import { useFeatureAccess } from '../FeatureAccessContext.js';
 
 const SRC = join(process.cwd(), 'src');
 
@@ -70,7 +72,10 @@ function walk(dir: string, out: string[] = []): string[] {
  */
 const MOCKS = [
   /useFeatureAccess: *(?:vi\.fn\()?(?:\([^)]*\))? *=> *\(\{([^{}]*)\}/g,
-  /useFeatureAccess\.mock(?:ReturnValue|Implementation)\((?:\([^)]*\) *=> *)?\(?\{([^{}]*)\}/g,
+  // `.mockReturnValue` / `.mockImplementation`, their `…Once` forms, on the
+  // bare mock or through `vi.mocked(useFeatureAccess)`. (Wave 50: the `Once`
+  // and `vi.mocked` forms used to escape this pattern.)
+  /(?:useFeatureAccess|vi\.mocked\(useFeatureAccess\))\.mock(?:ReturnValue|Implementation)(?:Once)?\((?:\([^)]*\) *=> *)?\(?\{([^{}]*)\}/g,
 ];
 const KEY = /(?:^|,)\s*([A-Za-z_$][\w$]*)\s*:/g;
 
@@ -80,6 +85,21 @@ function keysOf(body: string): Set<string> {
   return out;
 }
 
+/** Every readable mock literal in `src`: the fields each one is missing. */
+function literalsIn(src: string): string[][] {
+  const out: string[][] = [];
+  for (const pat of MOCKS) {
+    for (const m of src.matchAll(pat)) {
+      const keys = keysOf(m[1] as string);
+      if (keys.size === 0) continue; // not an object literal we can read
+      out.push(FIELDS.filter((f) => !keys.has(f)));
+    }
+  }
+  return out;
+}
+
+const SELF = join('featureToggles', '__tests__', 'featureAccessMockShape.test.ts');
+
 describe('the useFeatureAccess mock shape', () => {
   it('the factory returns exactly the eight fields the hook returns', () => {
     // If a field is added to `FeatureAccess`, `tsc` reds the factory. This is the
@@ -87,6 +107,10 @@ describe('the useFeatureAccess mock shape', () => {
     // call sites answering `undefined` again, and `tsc` would not care because
     // the return type is what it is declared to be at the boundary.
     expect(Object.keys(makeFeatureAccess()).sort()).toEqual([...FIELDS].sort());
+    // …and the other side is READ, not copied: the real hook's own answer (no
+    // provider ⇒ the default context, no fetch) has exactly the factory's keys.
+    const { result } = renderHook(() => useFeatureAccess('any-feature'));
+    expect(Object.keys(result.current).sort()).toEqual(Object.keys(makeFeatureAccess()).sort());
   });
 
   it('derives an internally consistent shape rather than a contradictory one', () => {
@@ -105,35 +129,62 @@ describe('the useFeatureAccess mock shape', () => {
   });
 
   it('no test hand-rolls a partial return value', () => {
+    // Planted violations, one per form the scan must read — so a pattern that
+    // stops matching a form reds HERE, not silently in the corpus below.
+    const planted = [
+      "useFeatureAccess: () => ({ enabled: true }),",
+      "useFeatureAccess: vi.fn(() => ({ enabled: true })),",
+      "useFeatureAccess.mockReturnValue({ enabled: true });",
+      "useFeatureAccess.mockReturnValueOnce({ enabled: true });",
+      "useFeatureAccess.mockImplementation((id) => ({ enabled: id === 'crm' }));",
+      "useFeatureAccess.mockImplementationOnce(() => ({ enabled: true }));",
+      "vi.mocked(useFeatureAccess).mockReturnValue({ enabled: true });",
+      "vi.mocked(useFeatureAccess).mockReturnValueOnce({ enabled: true });",
+    ];
+    for (const src of planted) {
+      const found = literalsIn(src);
+      expect(found, src).toHaveLength(1);
+      expect(found[0], src).toContain('loading');
+    }
+
     const offenders: string[] = [];
     for (const file of walk(SRC)) {
       const rel = relative(SRC, file);
       if (rel.startsWith(join('featureToggles', '__testing__'))) continue;
       if (rel === join('featureToggles', 'FeatureAccessContext.tsx')) continue;
-      if (rel === join('featureToggles', '__tests__', 'featureAccessMockShape.test.ts')) continue;
+      if (rel === SELF) continue;
       const src = readFileSync(file, 'utf8');
       if (!src.includes('useFeatureAccess')) continue;
-      for (const pat of MOCKS) {
-        for (const m of src.matchAll(pat)) {
-          const keys = keysOf(m[1] as string);
-          if (keys.size === 0) continue; // not an object literal we can read
-          const missing = FIELDS.filter((f) => !keys.has(f));
-          if (missing.length > 0) offenders.push(`${rel}: missing ${missing.join(', ')}`);
-        }
+      for (const missing of literalsIn(src)) {
+        if (missing.length > 0) offenders.push(`${rel}: missing ${missing.join(', ')}`);
       }
     }
     expect(offenders, 'use featureToggles/__testing__/makeFeatureAccess').toEqual([]);
   });
 
-  it('the scan actually finds mocks (a broken walk would assert nothing)', () => {
+  it('the scan actually READS mocks (a broken walk or pattern would assert nothing)', () => {
     // Without this the assertion above degenerates to "no offenders among zero
-    // files inspected" the moment the walk or the regex drifts — passing by
+    // literals inspected" the moment the walk or a pattern drifts — passing by
     // describing nothing, which is the exact silence this file exists to end.
-    let seen = 0;
+    // Floors are MEASURED (wave 50, e3c2492be): 128 files call the factory, and
+    // the patterns read 20 full eight-field literals outside this file. A drop
+    // below either means the walk or a pattern broke — or a mass migration, in
+    // which case lower the floor in the same PR and say why.
+    // Wave 52 (420fe1891): 20 → 14 literals. Six wave files replaced their
+    // hand-written literal with makeFeatureAccess (dealers failedReads and
+    // writePathHonesty, podcasts and webinars orgsFailedNotEmpty, webinars
+    // formBinding, sales-commissions statements). The drop was counted per file
+    // with an independent re-implementation of MOCKS, and no pattern broke.
+    let adopters = 0;
+    let literals = 0;
     for (const file of walk(SRC)) {
+      const rel = relative(SRC, file);
       const src = readFileSync(file, 'utf8');
-      if (src.includes('makeFeatureAccess(')) seen += 1;
+      if (src.includes('makeFeatureAccess(')) adopters += 1;
+      if (rel === SELF) continue;
+      literals += literalsIn(src).length;
     }
-    expect(seen, 'no adopter found — the factory or the walk moved').toBeGreaterThanOrEqual(40);
+    expect(adopters, 'no adopter found — the factory or the walk moved').toBeGreaterThanOrEqual(127);
+    expect(literals, 'the mock patterns read nothing — a pattern broke').toBeGreaterThanOrEqual(14);
   });
 });

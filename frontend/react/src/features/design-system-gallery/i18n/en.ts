@@ -95,7 +95,7 @@ export const messages = {
   videoVoice: 'Voice',
   videoVoiceBody: 'Speak to the viewer as “you”, in sentences of 18 words or fewer. Warm and curious, never cheeky. No specification language or unexplained acronyms. One narrator for every film. Do not open a sentence with a spoken name that starts with “A”.',
   videoType: 'Frame and type',
-  videoTypeBody: '1920×1080 at 30 frames per second, 160px left margin. Serif for headline cards, sans for body, mono for labels. Opening line 120px, scene title 76px, end-card line 160px, body 23–36px, labels 20–26px. Nothing a viewer must read is below 20px.',
+  videoTypeBody: '1920×1080 at 30 frames per second, 160px left margin. Bricolage Grotesque for headline cards, Geist for body, mono for labels. Opening line 120px, scene title 76px, end-card line 160px, body 23–36px, labels 20–26px. Nothing a viewer must read is below 20px.',
   videoMotion: 'Motion',
   videoMotionBody: 'Every beat has movement that explains something. One primary movement at a time, eased in and out, with no bounce. Reveals take 0.4–0.8 seconds and hold long enough to read twice.',
   videoSound: 'Sound',

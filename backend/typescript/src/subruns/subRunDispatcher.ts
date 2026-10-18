@@ -48,8 +48,16 @@ export function resolveInternalToken(): string {
   const explicit = process.env.OPENWOP_INTERNAL_TOKEN;
   if (explicit && explicit.length > 0) return explicit;
   const apiKeys = process.env.OPENWOP_API_KEYS ?? process.env.OPENWOP_API_KEY;
-  const firstKey = apiKeys?.split(',').map((s) => s.trim()).find((s) => s.length > 0);
-  if (firstKey) return firstKey;
+  const firstEntry = apiKeys?.split(',').map((s) => s.trim()).find((s) => s.length > 0);
+  // ADR 0902 (TD2CD-1) — an entry is `<key>` or `<key>:<tenant>` (ADR 0561, split
+  // on the LAST colon by `readKeyTenants`). Presenting the whole entry sent
+  // `k1:*` as the bearer, which matches no key, so every HTTP sub-run on such a
+  // deploy was unauthenticated. Present the key itself.
+  if (firstEntry) {
+    const sep = firstEntry.lastIndexOf(':');
+    const key = sep > 0 ? firstEntry.slice(0, sep).trim() : firstEntry;
+    if (key.length > 0) return key;
+  }
   // Fail closed ONLY when the deploy explicitly enforces bearer auth
   // (OPENWOP_AUTH_ENFORCE_BEARER=true) — there a guessable literal is a real
   // hole and a real service principal MUST be provisioned. A plain

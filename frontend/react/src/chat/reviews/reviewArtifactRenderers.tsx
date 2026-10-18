@@ -14,6 +14,8 @@ import type { ComponentType } from 'react';
 import { useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { ReviewAsset } from './reviewClient.js';
+import { LessonBatchReview } from './LessonBatchReview.js';
+import { ChallengePlanReview } from './ChallengePlanReview.js';
 
 export interface ReviewArtifactRendererProps {
   asset: ReviewAsset;
@@ -90,3 +92,9 @@ function PlanRevisionReview({ asset }: ReviewArtifactRendererProps): JSX.Element
 }
 
 registerReviewArtifactRenderer('kicktodo.plan-revision', PlanRevisionReview);
+
+// XCH-GATE-1 / XCH-LB-3 — the Challenge Factory lesson checkpoint.
+registerReviewArtifactRenderer('kicktodo.challenge-lesson-batch', LessonBatchReview);
+
+// XCH-GATE-1 (outline half) — the Challenge Factory outline approval.
+registerReviewArtifactRenderer('kicktodo.challenge-plan', ChallengePlanReview);

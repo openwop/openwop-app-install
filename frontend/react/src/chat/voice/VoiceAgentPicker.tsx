@@ -63,10 +63,21 @@ export function VoiceAgentPicker({ conversationId, onPick, onClose }: {
   const { t } = useTranslation('chat');
   const [roster, setRoster] = useState<RosterEntry[] | null>(null);
   const [boards, setBoards] = useState<AdvisoryBoard[] | null>(null);
+  // EMPTY-ON-FAIL-3 (ADR 0779 D7) — a failed roster read is NOT "No agents yet". The
+  // catch used to set the roster to [], so "No agents yet — Create an agent…" rendered
+  // from a read that never came back. The failure is now its own state (checked
+  // before loading and empty); boards and the generic assistant stay usable beside it.
+  const [rosterError, setRosterError] = useState<string | null>(null);
+  const [rosterAttempt, setRosterAttempt] = useState(0);
   useEffect(() => {
     let live = true;
+    setRosterError(null);
     listRoster().then((r) => { if (live) setRoster(r.filter((e) => e.enabled !== false)); })
-      .catch(() => { if (live) setRoster([]); });
+      .catch((e: unknown) => { if (live) { setRoster([]); setRosterError(e instanceof Error ? e.message : String(e)); } });
+    return () => { live = false; };
+  }, [rosterAttempt]);
+  useEffect(() => {
+    let live = true;
     // Boards are optional company: a 404 (feature off) or error just hides the section.
     listBoards().then((b) => { if (live) setBoards(b); })
       .catch(() => { if (live) setBoards([]); });
@@ -82,9 +93,18 @@ export function VoiceAgentPicker({ conversationId, onPick, onClose }: {
     <Modal label={t('voicePickerTitle')} onClose={onClose} showClose>
       <h2 className="u-mt-0 u-flex u-items-center u-gap-2"><MicIcon size={18} aria-hidden /> {t('voicePickerTitle')}</h2>
       <p className="muted u-fs-13">{t('voicePickerLede')}</p>
+      {rosterError !== null ? (
+        <StateCard
+          announce
+          icon={<BotIcon size={20} />}
+          title={t('couldNotLoadAgents', { error: rosterError })}
+          action={<Button variant="secondary" size="sm" onClick={() => { setRoster(null); setRosterAttempt((n) => n + 1); }}>{t('common:retry')}</Button>}
+        />
+      ) : null}
       {roster === null || boards === null ? (
         <Skeleton />
       ) : roster.length === 0 && boards.length === 0 ? (
+        rosterError !== null ? null :
         <StateCard icon={<BotIcon size={20} />} title={t('voicePickerNoneTitle')} body={t('voicePickerNoneBody')} />
       ) : (
         <>

@@ -9,7 +9,7 @@ import { describe, it, expect } from 'vitest';
 import { computeRuns } from '../ChallengeDetailPage.js';
 import type { ChallengeActivity } from '../../../client/kicktodoClient.js';
 
-const act = (day: number, title: string, minutes = 20, evidence = 'note'): ChallengeActivity => ({
+const act = (day: number, title: string, minutes = 20, evidence: ChallengeActivity['evidencePolicy'] = 'note'): ChallengeActivity => ({
   stableActivityId: `a-${day}-${title}`,
   day,
   title,

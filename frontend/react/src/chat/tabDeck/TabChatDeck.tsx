@@ -532,6 +532,10 @@ export function TabChatDeck({ config, byokStored, onReconfigureBYOK }: {
 
   // Deep-link `?agent=<id>` → open a NEW tab scoped to that agent (ADR 0140 G3). There's
   // no "the tab for agent X" (multiple tabs can mention one agent), so always open fresh.
+  // ADR 0896 IL2UX-2 — EXCEPT when the link also names `?conversation=`: then the agent
+  // scopes THAT conversation's tab (the `?conversation=` effect above opens/focuses it).
+  // A fresh tab would be a different conversation, so whatever the agent does for "this
+  // conversation" (e.g. drafting its mission contract) would land on the wrong one.
   // One-shot + clears the param.
   const didAgentLinkRef = useRef(false);
   useEffect(() => {
@@ -539,9 +543,10 @@ export function TabChatDeck({ config, byokStored, onReconfigureBYOK }: {
     const wantedAgent = searchParams.get('agent');
     if (!wantedAgent) return;
     didAgentLinkRef.current = true;
-    const id = crypto.randomUUID();
+    const wantedConversation = searchParams.get('conversation');
+    const id = wantedConversation ?? crypto.randomUUID();
     setAgentScopes((prev) => ({ ...prev, [id]: wantedAgent }));
-    openTab(id, streamingRef.current);
+    if (!wantedConversation) openTab(id, streamingRef.current);
     const next = new URLSearchParams(searchParams);
     next.delete('agent');
     setSearchParams(next, { replace: true });

@@ -6,9 +6,17 @@
  * the BRAND-R2-1 shape — recurred on BOTH campaign-connectors and
  * campaign-intel. One test file pins the shape on both pages (the cluster
  * shares the pattern; the fix is byte-identical).
+ *
+ * Honest ceiling (CC-NOORG-LOADING-1, grade-code): both pages start with
+ * `orgs = []` and no loading state (CampaignConnectorsPage.tsx:45,
+ * CampaignIntelPage.tsx:79), so "No organization yet" is ALSO what the first
+ * paint shows before `listOrgs` answers. The TRUTHFUL cases therefore wait for
+ * the read to settle before asserting, but cannot tell "loaded empty" from
+ * "still loading" until that row is fixed. The FAILED cases are the load-bearing
+ * ones (sabotage: drop `setOrgsFailed(true)` or the `orgsFailed ?` branch).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, cleanup, screen } from '@testing-library/react';
+import { render, cleanup, screen, waitFor, act } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 
 const cc = vi.hoisted(() => ({ listOrgs: vi.fn(), getKpi: vi.fn() }));
@@ -42,34 +50,45 @@ beforeEach(() => {
 });
 afterEach(cleanup);
 
+/** Let the resolved orgs read reach state (5 macrotask turns). */
+async function settle(): Promise<void> {
+  await act(async () => { for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r)); });
+}
+
 describe('CC-R2-1 — campaign-connectors', () => {
-  it('FAILED orgs read shows the load-failure card, not the no-org claim', async () => {
+  it('FAILED orgs read shows the load-failure card, not the no-org claim (CampaignConnectorsPage)', async () => {
     cc.listOrgs.mockRejectedValue(new Error('orgs_500'));
     render(<MemoryRouter><CampaignConnectorsPage /></MemoryRouter>);
     expect(await screen.findByText(/Could not load this/i)).toBeTruthy();
     expect(screen.queryByText(/no organization/i)).toBeNull();
   });
 
-  it('TRUTHFUL org-less tenant still gets the real no-org state', async () => {
+  it('TRUTHFUL org-less tenant still gets the real no-org state (CampaignConnectorsPage)', async () => {
     cc.listOrgs.mockResolvedValue([]);
     render(<MemoryRouter><CampaignConnectorsPage /></MemoryRouter>);
-    expect(await screen.findByText(/organization/i, { selector: '.state-card__title' })).toBeTruthy();
+    // Ceiling CC-NOORG-LOADING-1: wait for the read to answer before asserting.
+    await waitFor(() => expect(cc.listOrgs).toHaveBeenCalledTimes(1));
+    await settle();
+    expect(screen.getByText('No organization yet', { selector: '.state-card__title' })).toBeTruthy();
     expect(screen.queryByText(/Could not load this/i)).toBeNull();
   });
 });
 
 describe('CI-R2-1 — campaign-intel', () => {
-  it('FAILED orgs read shows the load-failure card, not the no-org claim', async () => {
+  it('FAILED orgs read shows the load-failure card, not the no-org claim (CampaignIntelPage)', async () => {
     ci.listOrgs.mockRejectedValue(new Error('orgs_500'));
     render(<MemoryRouter><CampaignIntelPage /></MemoryRouter>);
     expect(await screen.findByText(/Could not load this/i)).toBeTruthy();
     expect(screen.queryByText(/no organization/i)).toBeNull();
   });
 
-  it('TRUTHFUL org-less tenant still gets the real no-org state', async () => {
+  it('TRUTHFUL org-less tenant still gets the real no-org state (CampaignIntelPage)', async () => {
     ci.listOrgs.mockResolvedValue([]);
     render(<MemoryRouter><CampaignIntelPage /></MemoryRouter>);
-    expect(await screen.findByText(/organization/i, { selector: '.state-card__title' })).toBeTruthy();
+    // Ceiling CC-NOORG-LOADING-1: wait for the read to answer before asserting.
+    await waitFor(() => expect(ci.listOrgs).toHaveBeenCalledTimes(1));
+    await settle();
+    expect(screen.getByText('No organization yet', { selector: '.state-card__title' })).toBeTruthy();
     expect(screen.queryByText(/Could not load this/i)).toBeNull();
   });
 });

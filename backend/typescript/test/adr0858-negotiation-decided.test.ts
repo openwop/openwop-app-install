@@ -147,6 +147,8 @@ function assertContentFree(payloads: Array<Record<string, unknown>>, peerUrl: st
   const origin = new URL(peerUrl).origin;
   for (const p of payloads) {
     expect(validatePayload(p)).toEqual([]);
+    // RFC 0242 §A.2 — every exchange here names a version, so `requested` MUST be set.
+    expect(typeof p['requested'], `RFC 0242 §A.2: requested missing on ${JSON.stringify(p)}`).toBe('string');
     expect(p['peerDigest']).toBe(createHash('sha256').update(origin, 'utf8').digest('hex'));
     const flat = JSON.stringify(p);
     expect(flat).not.toContain(new URL(peerUrl).host);
@@ -168,7 +170,7 @@ describe('A2A — the client records every outcome (switch ON: the v2 floor bind
       expect(r.json['negotiatedVersion']).toBe('1.0');
       const events = await decided(runIdOf(r.json));
       assertContentFree(events, peer.url);
-      expect(events.at(-1)).toMatchObject({ protocol: 'a2a', outcome: 'accepted', version: '1.0', reason: 'ok', floor: '1.0' });
+      expect(events.at(-1)).toMatchObject({ protocol: 'a2a', outcome: 'accepted', version: '1.0', requested: '1.0', reason: 'ok', floor: '1.0' });
     } finally { await peer.stop(); }
   });
 
@@ -300,7 +302,7 @@ describe('MCP — the client records every outcome', () => {
       expect(r.status, JSON.stringify(r.json)).toBe(200);
       const events = await decided(runIdOf(r.json));
       assertContentFree(events, peer.url);
-      expect(events.at(-1)).toMatchObject({ protocol: 'mcp', outcome: 'accepted', version: MCP_CURRENT_VERSION, reason: 'ok', floor: mcpMinimumRevision() });
+      expect(events.at(-1)).toMatchObject({ protocol: 'mcp', outcome: 'accepted', version: MCP_CURRENT_VERSION, requested: MCP_CURRENT_VERSION, reason: 'ok', floor: mcpMinimumRevision() });
     } finally { await peer.stop(); }
   });
 
@@ -312,7 +314,8 @@ describe('MCP — the client records every outcome', () => {
       expect(r.json['negotiatedVersion']).toBe(MCP_LEGACY_VERSION);
       const events = await decided(runIdOf(r.json));
       assertContentFree(events, peer.url);
-      expect(events.at(-1)).toMatchObject({ outcome: 'accepted', version: MCP_LEGACY_VERSION });
+      // RFC 0242 §A.3 — the downgrade is VISIBLE: accepted, with version ≠ requested.
+      expect(events.at(-1)).toMatchObject({ outcome: 'accepted', version: MCP_LEGACY_VERSION, requested: MCP_CURRENT_VERSION });
     } finally { await peer.stop(); }
   });
 

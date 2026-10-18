@@ -16,6 +16,7 @@
  * boards/schedules/approvals keyed to the same `rosterId`.
  */
 
+import { broadcastAgentEviction } from './agentRegistryEviction.js';
 import { deleteRosterEntry, getRosterEntry, listRoster } from './rosterService.js';
 import { getAgentRegistry } from '../executor/agentRegistry.js';
 import { agentStorageId } from '../executor/agentIdAliases.js';
@@ -166,6 +167,8 @@ export async function deleteRosterMemberCascade(
       chatAgentRetired = true;
       chatAgentDeleted = await storage.deleteUserAgent(tenantId, chatAgentId);
       getAgentRegistry().remove(chatAgentId, tenantId);
+      // ADR 0775 P3d — and on every other instance (architect H2).
+      await broadcastAgentEviction(tenantId, chatAgentId);
     }
   }
 

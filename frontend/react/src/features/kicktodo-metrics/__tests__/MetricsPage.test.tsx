@@ -13,15 +13,28 @@
  * (the engagement page test recorded exactly that bug).
  */
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { render, screen, cleanup, waitFor, within } from '@testing-library/react';
+import { render, screen, cleanup, waitFor, within, fireEvent } from '@testing-library/react';
+import { messages as commonEn } from '../../../i18n/locales/en/common.js';
 import type { ActivationMetrics, EngagementMetrics, FactoryMetrics, VerifierQuality } from '../../../client/kicktodoMetricsClient.js';
 
-const state = {
+interface MetricsState {
+  activation: ActivationMetrics;
+  engagement: EngagementMetrics;
+  factory: FactoryMetrics;
+  verifier: VerifierQuality;
+  fail: boolean;
+  /** When set, getActivation waits on this promise (the batching case). */
+  holdActivation: Promise<void> | null;
+}
+
+const UNGRADED: VerifierQuality = { sampled: 0, resolved: 0, agreed: 0, falsePositives: 0, falseNegatives: 0, disagreementRate: null };
+
+const state: MetricsState = {
   activation: {
     daysToFirstCompletedActionP50: { value: 2, contributors: 12 },
     enrollmentsStarted: 30,
     enrollmentsWithAnyCompletion: { value: 18, contributors: 30 },
-  } as ActivationMetrics,
+  },
   engagement: {
     weeklyMeaningfulProgress: { value: 9, contributors: 30 },
     retentionD7: { value: 0.5, contributors: 30 },
@@ -29,14 +42,20 @@ const state = {
     completionRate: { value: 0.25, contributors: 30 },
     abandonmentRate: { value: 0.1, contributors: 30 },
     recoveryRate7d: { value: null, contributors: 4, withheldReason: 'below-k-floor' },
-  } as EngagementMetrics,
-  factory: { candidatesByState: { planned: 2, published: 3 }, publishRate: { value: 0.6, contributors: 5 } } as FactoryMetrics,
-  verifier: { sampled: 0, resolved: 0, agreed: 0, falsePositives: 0, falseNegatives: 0, disagreementRate: null } as VerifierQuality,
+  },
+  factory: { candidatesByState: { planned: 2, published: 3 }, publishRate: { value: 0.6, contributors: 5 } },
+  verifier: { ...UNGRADED },
   fail: false,
+  holdActivation: null,
 };
 
 vi.mock('../../../client/kicktodoMetricsClient.js', () => ({
-  getActivation: vi.fn(async () => { if (state.fail) throw new Error('503'); return state.activation; }),
+  // A failed read throws, as the real client's `get` does on a non-2xx.
+  getActivation: vi.fn(async () => {
+    if (state.holdActivation) await state.holdActivation;
+    if (state.fail) throw new Error('metrics request failed: 503');
+    return state.activation;
+  }),
   getEngagement: vi.fn(async () => state.engagement),
   getFactory: vi.fn(async () => state.factory),
   getVerifierQuality: vi.fn(async () => state.verifier),
@@ -46,7 +65,13 @@ import { MetricsPage } from '../MetricsPage.js';
 import { getActivation, getEngagement, getFactory, getVerifierQuality } from '../../../client/kicktodoMetricsClient.js';
 import { messages as en } from '../i18n/en.js';
 
-afterEach(() => { cleanup(); state.fail = false; vi.clearAllMocks(); });
+afterEach(() => {
+  cleanup();
+  state.fail = false;
+  state.holdActivation = null;
+  state.verifier = { ...UNGRADED }; // case 3 replaces it; never leak across cases
+  vi.clearAllMocks();
+});
 
 describe('MetricsPage (ADR 0432 P4)', () => {
   it('a withheld cell says why and renders NO value; every shown rate carries its contributor count', async () => {
@@ -80,7 +105,14 @@ describe('MetricsPage (ADR 0432 P4)', () => {
   });
 
   it('loads once per read (one batched load, not four sequential fetches)', async () => {
+    // Hold the FIRST read open: a batched load has already issued the other three;
+    // a sequential one would still be waiting on activation.
+    let release!: () => void;
+    state.holdActivation = new Promise<void>((r) => { release = r; });
     render(<MetricsPage />);
+    await waitFor(() => expect(vi.mocked(getActivation)).toHaveBeenCalledTimes(1));
+    for (const fn of [getEngagement, getFactory, getVerifierQuality]) expect(vi.mocked(fn)).toHaveBeenCalledTimes(1);
+    release();
     await waitFor(() => expect(screen.getByText(en.mNorthStar)).toBeTruthy());
     for (const fn of [getActivation, getEngagement, getFactory, getVerifierQuality]) expect(vi.mocked(fn)).toHaveBeenCalledTimes(1);
   });
@@ -101,5 +133,18 @@ describe('MetricsPage (ADR 0432 P4)', () => {
     await waitFor(() => expect(screen.getByText(en.loadError)).toBeTruthy());
     expect(screen.queryByText(en.emptyTitle)).toBeNull();
     expect(screen.queryByText(en.withheld)).toBeNull();
+  });
+
+  // CS-4 — the failure offers its way back. Breaks it: dropping the Retry button,
+  // or a Retry that does not re-run the batched read (sabotage-witnessed: the
+  // onClick reduced to a no-op turns this red at the table assertion).
+  it('a failed read offers Retry, which re-runs the load and shows the tables', async () => {
+    state.fail = true;
+    render(<MetricsPage />);
+    await waitFor(() => expect(screen.getByText(en.loadError)).toBeTruthy());
+    state.fail = false;
+    fireEvent.click(screen.getByRole('button', { name: commonEn.retry }));
+    await waitFor(() => expect(screen.getByText(en.mPublishRate)).toBeTruthy());
+    expect(screen.queryByText(en.loadError)).toBeNull();
   });
 });

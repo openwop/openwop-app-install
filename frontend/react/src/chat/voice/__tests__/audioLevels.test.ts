@@ -1,3 +1,11 @@
+/**
+ * Live-voice audio math (ADR 0141 RT-8 waveform, RT-9a resample). Breaks if:
+ * `resamplePcm` stops interpolating or emits the wrong length (Gemini Live takes
+ * 16 kHz input only — the capture runs at the mic's native rate, so wrong samples
+ * garble or reject every utterance); or the waveform flattens / flickers.
+ * Expected values are independent literals, never the helpers' own output.
+ * Sabotage-witnessed in /grade-tests wave 44 (w44g3-al-*).
+ */
 import { describe, it, expect } from 'vitest';
 import { computeRms, perceptualLevel, followEnvelope, pushLevel, resamplePcm } from '../audioLevels.js';
 
@@ -8,8 +16,7 @@ describe('audioLevels (ADR 0141 RT-8) — pure waveform math', () => {
     const sine = new Float32Array(512);
     for (let i = 0; i < sine.length; i += 1) sine[i] = 0.5 * Math.sin((i / sine.length) * Math.PI * 8);
     const rms = computeRms(sine);
-    expect(rms).toBeGreaterThan(0.3);
-    expect(rms).toBeLessThan(0.4);
+    expect(rms).toBeCloseTo(0.35355, 4); // 0.5 / √2
     expect(computeRms(new Float32Array(0))).toBe(0);
   });
 
@@ -24,8 +31,7 @@ describe('audioLevels (ADR 0141 RT-8) — pure waveform math', () => {
   it('followEnvelope: fast attack (jumps up instantly), slow release (decays gradually)', () => {
     expect(followEnvelope(0.1, 0.9)).toBe(0.9); // attack: next >= prev → snap
     const decayed = followEnvelope(0.9, 0);
-    expect(decayed).toBeLessThan(0.9);
-    expect(decayed).toBeGreaterThan(0.7); // one frame retains most of the peak
+    expect(decayed).toBeCloseTo(0.765, 6); // 0.9 × 0.85: one frame retains most of the peak
     // Repeated silence converges toward 0.
     let lv = 0.9;
     for (let i = 0; i < 60; i += 1) lv = followEnvelope(lv, 0);
@@ -61,5 +67,10 @@ describe('resamplePcm (RT-9a) — native-rate capture → Gemini\u2019s required
     // A linear ramp resampled linearly is still (approximately) the same ramp.
     for (let i = 1; i < y.length; i += 1) expect((y[i] ?? 0) >= (y[i - 1] ?? 0)).toBe(true);
     expect(y[0]).toBeCloseTo(0, 5);
+    // Between-sample values: output o sits at input position o × 44100/16000 =
+    // o × 2.75625, and x[i] = i/440, so the interpolated value is o × 2.75625 / 440.
+    // (Nearest-neighbour would give floor(pos)/440 instead.)
+    expect(y[1]).toBeCloseTo(2.75625 / 440, 6);
+    expect(y[159]).toBeCloseTo((159 * 2.75625) / 440, 6);
   });
 });

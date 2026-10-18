@@ -1,8 +1,8 @@
 /**
  * feature.kicktodo.nodes — KickTodo participant-loop nodes (ADR 0414 P4).
- * All role:"action": the engine records outputs; replay/fork read the recorded
- * result rather than re-running (no duplicate enrollments/cards/verdicts on
- * replay — the PRD §8.7 rule, inherited from the seam). Pure-JS, Node-20
+ * role:"action" earns NO replay serving (nothing in the executor reads it); the
+ * seven non-convergent writers declare role:"side-effect" in pack.json so a fork
+ * is served the recorded outcome (KT-PACK-REPLAY-1, pack 1.32.0). Pure-JS, Node-20
  * stdlib only. Every node composes ctx.features['kicktodo-core'] (ADR 0014);
  * authorization/validation/CAS stay in the host services.
  */
@@ -154,14 +154,29 @@ function summarizeDossier(dossier) {
  *  `evidenceClaims` bag variable the creator surface derives (never re-derived
  *  here). Empty ⇒ an explicit marker, so a model is told there is nothing to
  *  cite rather than left to guess. */
-function renderEvidenceClaims(claims) {
+function renderEvidenceClaims(claims, omittedClaims = 0) {
   const list = Array.isArray(claims) ? claims.filter((c) => c && typeof c.claimId === 'string') : [];
-  if (list.length === 0) return 'EVIDENCE: none recorded — make no factual claims beyond the day\'s own instruction; claimRefs must be [].';
-  const lines = list.map((c) => {
+  // XCH-LB-5 — the brief's caps are disclosed, never silent.
+  const omitted = Number.isInteger(omittedClaims) && omittedClaims > 0
+    ? `\n(${omittedClaims} further recorded claim(s) were left out of this brief by its size cap; they cannot be cited.)`
+    : '';
+  if (list.length === 0) return `EVIDENCE: none recorded — make no factual claims beyond the day's own instruction; claimRefs must be [].${omitted}`;
+  const line = (c) => {
     const srcs = (Array.isArray(c.sources) ? c.sources : []).map((sc) => `${str(sc.title) || str(sc.domain)} <${str(sc.url)}>`).join('; ');
-    return `[${c.claimId}]${c.supported === false ? ' (UNSUPPORTED — do not rely on it)' : ''} ${str(c.text)}${srcs ? ` — ${srcs}` : ''}`;
-  });
-  return `EVIDENCE (cite by claimId; only these ids are valid):\n${lines.join('\n')}`;
+    const more = Number.isInteger(c.sourcesOmitted) && c.sourcesOmitted > 0 ? ` (+${c.sourcesOmitted} more source(s) not listed)` : '';
+    const cut = Number.isInteger(c.textOmittedChars) && c.textOmittedChars > 0 ? ` [claim text shortened; ${c.textOmittedChars} characters not shown]` : '';
+    return `[${c.claimId}] ${str(c.text)}${cut}${srcs ? ` — ${srcs}` : ''}${more}`;
+  };
+  // KTF-EV-3 — only SUPPORTED claims are offered as citable. Unsupported ones
+  // are listed apart, as a warning, because the validator rejects them; listing
+  // them under "only these ids are valid" wasted a repair round.
+  const citable = list.filter((c) => c.supported !== false);
+  const warn = list.filter((c) => c.supported === false);
+  const parts = [citable.length > 0
+    ? `EVIDENCE (cite by claimId; ONLY these ids are valid):\n${citable.map(line).join('\n')}`
+    : 'EVIDENCE: no claim is supported — make no factual claims beyond the day\'s own instruction; claimRefs must be [].'];
+  if (warn.length > 0) parts.push(`UNSUPPORTED (recorded but NOT backed by their sources — do not rely on them and NEVER cite these ids):\n${warn.map(line).join('\n')}`);
+  return parts.join('\n\n') + omitted;
 }
 
 /** The ids a lesson may cite: SUPPORTED claims only (re-grade KTF-EV-1) — an
@@ -192,12 +207,14 @@ export async function evidenceGraph(ctx) {
   // the plan, the lessons and the skeptic are grounded on. Derived by the
   // creator surface from the recorded dossier (the SSoT), never by this node.
   let evidenceClaims = [];
+  let omittedClaims = 0;
   if (typeof k.evidenceClaims === 'function') {
     const ec = await k.evidenceClaims({ candidateId: str(i.candidateId) });
     evidenceClaims = ec && Array.isArray(ec.claims) ? ec.claims : [];
+    omittedClaims = ec && Number.isInteger(ec.omittedClaims) ? ec.omittedClaims : 0;
   }
   if (ctx.variables) ctx.variables.set('evidenceClaims', evidenceClaims);
-  return { status: 'success', outputs: { candidate: out.candidate, unsupportedClaimIds: out.candidate.dossier?.unsupportedClaimIds ?? [], evidenceClaims } };
+  return { status: 'success', outputs: { candidate: out.candidate, unsupportedClaimIds: out.candidate.dossier?.unsupportedClaimIds ?? [], evidenceClaims, omittedClaims } };
 }
 
 /**
@@ -221,7 +238,52 @@ export async function evidenceGraph(ctx) {
  * re-derives every hash from `(url, title)` and re-points citations, so a claim
  * citing an invented hash lands in `unsupportedClaimIds` rather than passing.
  */
+/** XCH-CE-2 / ADR 0903 — the factory no longer pins an AI vendor. Its chain's
+ *  `provider`/`model` params carry no default (the pin ADR 0505 kept was removed
+ *  on the user's decision, 2026-10-17): unset, a run uses its own choice, else
+ *  the workspace's AI setting, else the host catalog default, fixed for the run. */
+
+/** XCH-CE-1 — how much of one fetched source a model reads. A longer source is
+ *  cut here, and the cut is DISCLOSED: to the model in the prompt, and to the
+ *  dossier as `truncatedSourceHashes`, so a partial read never poses as a full one. */
+const SOURCE_READ_CHARS = 6000;
+
+/** The excerpt a verifier reads, with the same disclosed cut as extraction. */
+function sourceExcerpt(text) {
+  return text.length > SOURCE_READ_CHARS
+    ? `${text.slice(0, SOURCE_READ_CHARS)}\n[TRUNCATED — the first ${SOURCE_READ_CHARS} of ${text.length} characters; if the deciding passage is not shown, answer \`unverifiable\`]`
+    : text;
+}
+
+/** KTF-RS-2 — how many claim/source pairs claim-verify judges at once. */
+const CLAIM_VERIFY_CONCURRENCY = 4;
+
+// ── XCH-CE-3 — typed AI-call failures ──
+// A dispatcher throw (`envelope_invalid` after the host's retries, a BYOK or
+// budget refusal, a provider outage) used to escape the four factory LLM nodes
+// untyped. Every callAI in them goes through `callAIGuarded`, and each node is
+// wrapped by `withTypedAiFailure`, so the run records the provider's own code.
+class FactoryAiCallError extends Error {
+  constructor(err) {
+    super(err instanceof Error ? err.message : String(err));
+    this.code = err && typeof err.code === 'string' && err.code ? err.code : 'ai_call_failed';
+  }
+}
+async function callAIGuarded(ctx, req) {
+  try { return await ctx.callAI(req); } catch (err) { throw new FactoryAiCallError(err); }
+}
+async function withTypedAiFailure(run) {
+  try { return await run(); } catch (err) {
+    if (err instanceof FactoryAiCallError) return { status: 'failed', error: { code: err.code, message: `The AI call failed: ${err.message}` } };
+    throw err;
+  }
+}
+
 export async function claimExtract(ctx) {
+  return withTypedAiFailure(() => claimExtractImpl(ctx));
+}
+
+async function claimExtractImpl(ctx) {
   const k = ensureCreator(ctx);
   if (typeof ctx.callAI !== 'function') {
     return { status: 'failed', error: { code: 'capability_missing', message: 'host does not expose ctx.callAI' } };
@@ -242,7 +304,10 @@ export async function claimExtract(ctx) {
   const readable = sources
     .map((sc) => ({ hash: str(sc && sc.hash), title: str(sc && sc.title), url: str(sc && sc.url) }))
     .filter((sc) => sc.hash && byUrl.has(sc.url))
-    .map((sc) => ({ ...sc, text: byUrl.get(sc.url).slice(0, 6000) }));
+    .map((sc) => {
+      const full = byUrl.get(sc.url);
+      return { ...sc, text: full.slice(0, SOURCE_READ_CHARS), fullLength: full.length, truncated: full.length > SOURCE_READ_CHARS };
+    });
 
   if (readable.length === 0) {
     // FAIL CLOSED. Zero readable sources means any "claims" would be the model's
@@ -273,13 +338,17 @@ export async function claimExtract(ctx) {
 
   const userParts = [];
   if (questions.length > 0) userParts.push(`RESEARCH QUESTIONS:\n${questions.map((q) => `- ${str(q)}`).join('\n')}`);
-  userParts.push(readable.map((sc) => `SOURCE hash=${sc.hash}\nTITLE: ${sc.title}\nCONTENT:\n${sc.text}`).join('\n\n---\n\n'));
+  userParts.push(readable.map((sc) => `SOURCE hash=${sc.hash}\nTITLE: ${sc.title}\n`
+    + (sc.truncated
+      ? `CONTENT (TRUNCATED — the first ${SOURCE_READ_CHARS} of ${sc.fullLength} characters; do not infer what the rest says):\n`
+      : 'CONTENT:\n')
+    + sc.text).join('\n\n---\n\n'));
 
   const known = new Set(readable.map((sc) => sc.hash));
   const call = async (messages) => {
-    const ai = await ctx.callAI({
-      provider: str(i.provider) || 'anthropic',
-      model: str(i.model) || 'claude-sonnet-4-6',
+    const ai = await callAIGuarded(ctx, {
+      provider: str(i.provider) || undefined,
+      model: str(i.model) || undefined,
       ...(str(i.credentialRef) ? { credentialRef: str(i.credentialRef) } : {}),
       systemPrompt,
       messages,
@@ -348,6 +417,8 @@ export async function claimExtract(ctx) {
       // rest as found-but-unread instead of recording them as if they backed
       // something. Many authoritative publishers refuse a server-side fetch.
       readSourceHashes: readable.map((sc) => sc.hash),
+      // XCH-CE-1 — of those, which were read only in part.
+      truncatedSourceHashes: readable.filter((sc) => sc.truncated).map((sc) => sc.hash),
     },
   };
 }
@@ -377,6 +448,10 @@ nodes['feature.kicktodo.nodes.claim-extract'] = claimExtract;
  * a single verdict would throw away the most useful product of judging twice.
  */
 export async function claimVerify(ctx) {
+  return withTypedAiFailure(() => claimVerifyImpl(ctx));
+}
+
+async function claimVerifyImpl(ctx) {
   const k = ensureCreator(ctx);
   if (typeof ctx.callAI !== 'function') {
     return { status: 'failed', error: { code: 'capability_missing', message: 'host does not expose ctx.callAI' } };
@@ -426,49 +501,89 @@ export async function claimVerify(ctx) {
         + 'Answer `supports` ONLY if the source states or directly entails the claim, and quote the exact deciding passage. '
         + 'If the source is about something else answer `unrelated`; if it says the opposite answer `contradicts`; '
         + 'if it is too vague or truncated to tell answer `unverifiable`. Do NOT use knowledge outside the source.';
-    const ai = await ctx.callAI({
-      provider: str(i.provider) || 'anthropic',
-      model: str(i.model) || 'claude-sonnet-4-6',
-      ...(str(i.credentialRef) ? { credentialRef: str(i.credentialRef) } : {}),
-      systemPrompt,
-      messages: [{ role: 'user', content: `CLAIM:\n${claimText}\n\nSOURCE:\n${sourceText}` }],
-      temperature: 0,
-      ...(verdictSchema ? { responseSchema: verdictSchema } : {}),
-    });
-    const data = ai && typeof ai === 'object' ? ai.data : undefined;
-    const verdict = str(data && data.verdict);
+    const ask = async (messages) => {
+      const ai = await callAIGuarded(ctx, {
+        provider: str(i.provider) || undefined,
+        model: str(i.model) || undefined,
+        ...(str(i.credentialRef) ? { credentialRef: str(i.credentialRef) } : {}),
+        systemPrompt,
+        messages,
+        temperature: 0,
+        ...(verdictSchema ? { responseSchema: verdictSchema } : {}),
+      });
+      return ai && typeof ai === 'object' ? ai.data : undefined;
+    };
     const allowed = ['supports', 'contradicts', 'unrelated', 'unverifiable'];
-    // An unparseable judgement is `unverifiable`, never `supports`: failing OPEN
-    // here would let a broken response carry a claim through the gate.
-    if (!allowed.includes(verdict)) return { verdict: 'unverifiable' };
-    const span = str(data && data.span);
-    // `supports` without a quoted passage is not auditable — downgrade rather than
-    // record an unfalsifiable pass.
-    if (verdict === 'supports' && !span) return { verdict: 'unverifiable' };
+    /** The defect in one judgement, or null when it is usable. */
+    const defectOf = (data) => {
+      const v = str(data && data.verdict);
+      if (!allowed.includes(v)) return `\`verdict\` must be one of ${allowed.join(', ')}`;
+      if (v === 'supports' && !str(data && data.span)) return 'a `supports` verdict must quote the deciding passage in `span`';
+      return null;
+    };
+    const base = [{ role: 'user', content: `CLAIM:\n${claimText}\n\nSOURCE:\n${sourceText}` }];
+    let data = await ask(base);
+    const defect = defectOf(data);
+    if (defect) {
+      // XCH-CV-1 — ONE bounded error-fed repair before downgrading, so a
+      // formatting slip does not silently lose a pair the model could judge.
+      data = await ask([
+        ...base,
+        { role: 'assistant', content: JSON.stringify(data ?? null) },
+        { role: 'user', content: `Your previous judgement was INVALID: ${defect}. Return the corrected JSON object only.` },
+      ]);
+    }
+    // Still unusable ⇒ `unverifiable`, never `supports`: failing OPEN here would
+    // let a broken response carry a claim through the gate, and a `supports`
+    // without a quoted passage is not auditable.
+    if (defectOf(data)) return { verdict: 'unverifiable' };
+    const verdict = str(data.verdict);
+    const span = str(data.span);
     return { verdict, ...(span ? { span } : {}) };
   };
 
+  // Which pairs are judged is decided FIRST, in claim/source order, so the
+  // ceiling and the counts are the same however the judgements interleave.
   let pairs = 0, skipped = 0, secondOpinions = 0;
-  const out = [];
-  for (const cl of claims) {
-    const support = [];
+  const plan = claims.map((cl) => {
+    const jobs = [];
     for (const h of (Array.isArray(cl.sourceHashes) ? cl.sourceHashes : [])) {
       const hash = str(h);
       const text = textByHash.get(hash);
       if (!text) { skipped++; continue; }          // nothing read ⇒ nothing to judge
       if (pairs >= maxPairs) { skipped++; continue; }
       pairs++;
-      const first = await judge(str(cl.text), text.slice(0, 6000), false);
-      const entry = { sourceHash: hash, ...first };
+      jobs.push({ hash, claimText: str(cl.text), excerpt: sourceExcerpt(text) });
+    }
+    return { cl, jobs };
+  });
+  // KTF-RS-2 — the pairs are judged with bounded concurrency rather than one
+  // at a time; results land back in their planned slots, so the output order
+  // (and therefore replay) does not depend on which call returned first.
+  const flat = plan.flatMap((p) => p.jobs);
+  const results = new Array(flat.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < flat.length) {
+      const k = next++;
+      const job = flat[k];
+      const first = await judge(job.claimText, job.excerpt, false);
+      const entry = { sourceHash: job.hash, ...first };
       if (first.verdict === 'supports') {
         secondOpinions++;
-        const second = await judge(str(cl.text), text.slice(0, 6000), true);
+        const second = await judge(job.claimText, job.excerpt, true);
         entry.secondOpinion = second.verdict;
       }
-      support.push(entry);
+      results[k] = entry;
     }
-    out.push({ ...cl, support });
-  }
+  };
+  await Promise.all(Array.from({ length: Math.min(CLAIM_VERIFY_CONCURRENCY, flat.length) }, worker));
+  let cursor = 0;
+  const out = plan.map(({ cl, jobs }) => {
+    const support = results.slice(cursor, cursor + jobs.length);
+    cursor += jobs.length;
+    return { ...cl, support };
+  });
 
   const supported = out.filter((cl) => (cl.support ?? []).some(
     (sp) => sp.verdict === 'supports' && (sp.secondOpinion === undefined || sp.secondOpinion === 'supports')));
@@ -574,7 +689,7 @@ nodes['feature.kicktodo.nodes.entitlement-check'] = entitlementCheck;
 
 // ADR 0451 P4 — resolve (or lazily mint) the referrer's affiliate code for a
 // PAID challenge, so a workflow can build the `?ref=` invite link. Idempotent;
-// `code: null` for a free challenge. role:action (records the resolved code).
+// `code: null` for a free challenge. role:action — resolve-or-mint converges.
 export async function referralCode(ctx) {
   const k = ensureCommerceAdapter(ctx);
   if (typeof k.referralCode !== 'function') {
@@ -704,30 +819,32 @@ nodes['feature.kicktodo.nodes.challenge-reviews'] = challengeReviews;
 // TYPED failure, never success-with-empty. No ctx.callAI ⇒ fail closed
 // (capability_missing) — the stub posture.
 
-// Fallback shape when the host predates the `planSchema` surface op (XCH-KT-1) —
-// the live path fetches the authoritative JSON schema from the creator surface
-// instead, so the shape the model sees cannot drift from `validatePlan`.
-const PLAN_SHAPE_GUIDANCE = {
-  type: 'object',
-  description: 'A KickTodo challenge plan draft. The host validates authoritatively after generation.',
-};
+// XCH-PG-1 — no fallback shape. The plan schema comes ONLY from the creator
+// surface (`planSchema`, the SSoT shared with `validatePlan`); a host without
+// that op fails closed (`capability_missing`) rather than prompting the model
+// with a hand-kept copy that nothing pins to the validator.
 
-const PLAN_FALLBACK_SHAPE_PROSE =
-  '{\n'
-  + '  "title": string,\n'
-  + '  "promise": string,            // what the participant will be able to do\n'
-  + '  "audience": string,\n'
-  + '  "durationDays": integer,      // 3..60\n'
-  + '  "dailyMinutesBudget": integer,// 5..120\n'
-  + '  "outcomes":     [{ "outcomeId": string, "measurableOutcome": string, "method": string }],\n'
-  + '  "achievements": [{ "achievementId": string, "observableEvidence": string, "outcomeIds": [string] }],\n'
-  + '  "days":         [{ "day": integer, "stableActivityId": kebab-string, "title": string,\n'
-  + '                     "actionInstruction": string, "userFacingWhy": string, "estimatedMinutes": integer,\n'
-  + '                     "achievementIds": [string],\n'
-  + '                     "evidencePolicy": "attestation"|"note"|"photo"|"measurement" }]\n'
-  + '}';
+/** The creator's agreed intake for a candidate, rendered for the plan prompt —
+ *  or null when there is no candidate, no `getCandidate` op, or nothing agreed.
+ *  The validator's bounds still decide; this tells the model what was asked for. */
+async function candidateTargets(k, candidateId) {
+  if (!candidateId || typeof k.getCandidate !== 'function') return null;
+  const out = await k.getCandidate({ candidateId });
+  const c = out && typeof out === 'object' ? out.candidate : null;
+  if (!c || typeof c !== 'object') return null;
+  const lines = [];
+  if (str(c.transformation)) lines.push(`- transformation (what a participant can do at the end): ${str(c.transformation)}`);
+  if (Number.isInteger(c.durationDaysTarget)) lines.push(`- durationDays: ${c.durationDaysTarget}`);
+  if (Number.isInteger(c.dailyMinutesTarget)) lines.push(`- dailyMinutesBudget: ${c.dailyMinutesTarget}`);
+  if (lines.length === 0) return null;
+  return `TARGETS the creator agreed (honour them unless the EVIDENCE cannot support them; never inflate the transformation):\n${lines.join('\n')}`;
+}
 
 export async function planGenerate(ctx) {
+  return withTypedAiFailure(() => planGenerateImpl(ctx));
+}
+
+async function planGenerateImpl(ctx) {
   const k = ensureCreator(ctx);
   if (typeof ctx.callAI !== 'function') {
     return { status: 'failed', error: { code: 'capability_missing', message: 'host does not expose ctx.callAI' } };
@@ -747,29 +864,49 @@ export async function planGenerate(ctx) {
     const out = await k.planSchema({});
     if (out && typeof out.schema === 'object' && out.schema !== null) planSchema = out.schema;
   }
-  const shapeSection = planSchema
-    ? 'produce ONE ChallengePlan as strict JSON conforming EXACTLY to this JSON Schema (the host validates authoritatively):\n' + JSON.stringify(planSchema) + '\n'
-    : 'produce ONE ChallengePlan as strict JSON with EXACTLY these fields:\n' + PLAN_FALLBACK_SHAPE_PROSE + '\n';
+  if (!planSchema) {
+    return { status: 'failed', error: { code: 'capability_missing', message: 'host creator surface does not serve `planSchema`; the plan shape is never prompted from a copy.' } };
+  }
+  const shapeSection =
+    'produce ONE ChallengePlan as strict JSON conforming EXACTLY to this JSON Schema (the host validates authoritatively):\n' + JSON.stringify(planSchema) + '\n';
   const systemPrompt =
-    'You are a challenge-plan author. From the TOPIC, AUDIENCE and EVIDENCE SUMMARY, '
+    'You are a challenge-plan author. From the TOPIC, AUDIENCE, any TARGETS the creator agreed, the RESEARCH OVERVIEW and the EVIDENCE, '
     + shapeSection
     + 'HARD RULES the deterministic validator enforces: every achievement\'s outcomeIds MUST reference declared outcomes; every day\'s achievementIds MUST reference declared achievements; every outcome needs BOTH a measurable statement AND a method; every day\'s claimRefs MUST name only claimIds listed in the EVIDENCE (an empty array is correct when the day states no fact beyond its own instruction). Ground every factual statement ONLY in the provided evidence and never promise a transformation the evidence does not support. Reply with the JSON object only.';
   const userParts = [`TOPIC:\n${topic}`];
   if (audience) userParts.push(`AUDIENCE:\n${audience}`);
-  if (str(i.evidenceSummary)) userParts.push(`EVIDENCE SUMMARY:\n${str(i.evidenceSummary)}`);
+  // XCH-PG-2 — read the candidate the creator agreed in intake (transformation,
+  // duration, daily minutes) so the plan is authored against it, not guessed.
+  const targets = await candidateTargets(k, str(i.candidateId));
+  if (targets) userParts.push(targets);
+  // KTF-PG-2 — the prose summary is an overview, not citable evidence: the
+  // ids below are the only thing claimRefs may name.
+  if (str(i.evidenceSummary)) userParts.push(`RESEARCH OVERVIEW (prose; NOT citable — cite only EVIDENCE ids):\n${str(i.evidenceSummary)}`);
   // ADR 0458 §2.2 (correction) — the structured evidence with ids: what
   // `claimRefs` must cite, validated closed-world against the dossier below.
-  userParts.push(renderEvidenceClaims(i.evidenceClaims));
+  // XCH-PGC-1 — read before write: a caller that passes no `evidenceClaims`
+  // (the standalone plan-generation chain, a `/` picker run) gets the SAME
+  // dossier claims `validatePlan` checks against, read from the creator surface
+  // (the SSoT), so the prompt can never say "none recorded" while the validator
+  // judges against a dossier the model never saw.
+  let evidenceClaims = i.evidenceClaims;
+  let omittedClaims = 0;
+  if (!Array.isArray(evidenceClaims) && str(i.candidateId) && typeof k.evidenceClaims === 'function') {
+    const ec = await k.evidenceClaims({ candidateId: str(i.candidateId) });
+    evidenceClaims = ec && Array.isArray(ec.claims) ? ec.claims : [];
+    omittedClaims = ec && Number.isInteger(ec.omittedClaims) ? ec.omittedClaims : 0;
+  }
+  userParts.push(renderEvidenceClaims(evidenceClaims, omittedClaims));
 
   const call = async (messages) => {
-    const ai = await ctx.callAI({
-      provider: str(i.provider) || 'anthropic',
-      model: str(i.model) || 'claude-sonnet-4-6',
+    const ai = await callAIGuarded(ctx, {
+      provider: str(i.provider) || undefined,
+      model: str(i.model) || undefined,
       ...(str(i.credentialRef) ? { credentialRef: str(i.credentialRef) } : {}),
       systemPrompt,
       messages,
       temperature: 0,
-      responseSchema: planSchema ?? PLAN_SHAPE_GUIDANCE,
+      responseSchema: planSchema,
     });
     return ai && typeof ai === 'object' ? ai.data : undefined;
   };
@@ -800,7 +937,11 @@ export async function planGenerate(ctx) {
   }
   // KTFULL-B4 — hand the VALIDATED plan to the decompose step.
   if (ctx.variables) ctx.variables.set('plan', plan);
-  return { status: 'success', outputs: { plan } };
+  // XCH-GATE-1 (outline half) — the outline gate's preview is this node's edge
+  // output. Carrying the validated plan as a typed `kicktodo.challenge-plan`
+  // artifact makes the gate show an outline, not a JSON dump of it.
+  const artifact = { artifactTypeId: 'kicktodo.challenge-plan', title: str(plan && plan.title) || 'Challenge outline', payload: plan };
+  return { status: 'success', outputs: { plan, artifact } };
 }
 
 nodes['feature.kicktodo.nodes.plan-generate'] = planGenerate;
@@ -1138,13 +1279,6 @@ nodes['feature.kicktodo.nodes.checkpoint-plan'] = checkpointPlan;
 // leg (the exact reach the standalone lesson-media-persist node uses). No
 // ctx.callAI ⇒ fail closed (capability_missing) — the stub posture.
 
-/** Older-host fallback only: the live shape is the creator surface's `lessonSchema`
- *  (ADR 0458 §2.2 correction), fetched per batch so prompt + validator agree. */
-const LESSON_SHAPE_GUIDANCE = {
-  type: 'object',
-  description: 'A participant-facing lesson for ONE challenge day. The node validates authoritatively after generation.',
-};
-
 /** Closed-world validator for one enriched lesson (the node owns this shape — there
  *  is no host lesson SSoT; a lesson is node output shown at the checkpoint gate,
  *  never durable domain state). Lists EVERY defect for the one bounded repair. */
@@ -1172,29 +1306,21 @@ function lessonDefects(lesson, expectedDay, known) {
 }
 
 async function enrichLessonDay(ctx, rawDay, dayNum, i, evidence) {
-  const shapeSection = evidence.schema
-    ? `Return ONE lesson as strict JSON conforming EXACTLY to this JSON Schema (the node validates authoritatively):\n${JSON.stringify(evidence.schema)}\n`
-    : 'Return STRICT JSON with EXACTLY these fields and no others:\n'
-      + '{\n'
-      + `  "day": ${dayNum},                 // echo this integer exactly\n`
-      + '  "title": string,\n'
-      + '  "body": string,                    // the teaching content (>= 40 chars)\n'
-      + '  "steps": [string, ...],            // >= 1 concrete step the participant does today\n'
-      + '  "claimRefs": [string, ...]         // claimIds from the EVIDENCE the body relies on; [] when none\n'
-      + '}\n';
+  const shapeSection =
+    `Return ONE lesson as strict JSON conforming EXACTLY to this JSON Schema (the node validates authoritatively):\n${JSON.stringify(evidence.schema)}\n`;
   const systemPrompt =
     `You expand ONE challenge-plan day (day ${dayNum}) into a participant-facing lesson. `
     + shapeSection
     + 'HARD RULES the validator enforces: `day` echoes the day number; every factual statement in `body` is backed by a claim in the EVIDENCE and that claim\'s id is listed in `claimRefs`; `claimRefs` may contain ONLY ids the EVIDENCE lists (an empty array when the lesson states nothing beyond the day\'s own instruction and rationale). Never invent facts, sources, statistics, or outcomes the EVIDENCE does not support. Reply with the JSON object only.';
   const call = async (messages) => {
-    const ai = await ctx.callAI({
-      provider: str(i.provider) || 'anthropic',
-      model: str(i.model) || 'claude-sonnet-4-6',
+    const ai = await callAIGuarded(ctx, {
+      provider: str(i.provider) || undefined,
+      model: str(i.model) || undefined,
       ...(str(i.credentialRef) ? { credentialRef: str(i.credentialRef) } : {}),
       systemPrompt,
       messages,
       temperature: 0,
-      responseSchema: evidence.schema ?? LESSON_SHAPE_GUIDANCE,
+      responseSchema: evidence.schema,
     });
     return ai && typeof ai === 'object' ? ai.data : undefined;
   };
@@ -1219,7 +1345,24 @@ async function enrichLessonDay(ctx, rawDay, dayNum, i, evidence) {
   return { lesson: { day: lesson.day, title: lesson.title, body: lesson.body, steps: lesson.steps, claimRefs: [...lesson.claimRefs] } };
 }
 
+/** XCH-BLIND-2 — the image prompt is built from the VALIDATED lesson (never the
+ *  raw day payload), in one fixed template, so what is drawn is what the
+ *  approver reads at the gate. A validated lesson always has a non-empty title,
+ *  so the prompt is never empty. Bounded well under the host's 4,000-char cap. */
+export function lessonImagePrompt(lesson) {
+  const steps = Array.isArray(lesson.steps) ? lesson.steps.slice(0, 3).map((s) => `- ${s.trim()}`).join('\n') : '';
+  return [
+    `A clear, friendly illustration for a daily challenge lesson titled "${lesson.title.trim()}".`,
+    steps ? `It should depict someone doing these steps:\n${steps}` : '',
+    'No text, letters, logos or real people in the image.',
+  ].filter(Boolean).join('\n').slice(0, 2000);
+}
+
 export async function lessonBatchBuild(ctx) {
+  return withTypedAiFailure(() => lessonBatchBuildImpl(ctx));
+}
+
+async function lessonBatchBuildImpl(ctx) {
   if (typeof ctx.callAI !== 'function') {
     return { status: 'failed', error: { code: 'capability_missing', message: 'host does not expose ctx.callAI' } };
   }
@@ -1239,6 +1382,11 @@ export async function lessonBatchBuild(ctx) {
   if (creatorSurface && typeof creatorSurface.lessonSchema === 'function') {
     const out = await creatorSurface.lessonSchema({});
     if (out && typeof out.schema === 'object' && out.schema !== null) schema = out.schema;
+  }
+  // XCH-LB-4 — no prose fallback: the lesson shape comes only from the creator
+  // surface (`lessonSchema`, the SSoT); `lessonDefects` is pinned to it by test.
+  if (!schema) {
+    return { status: 'failed', error: { code: 'capability_missing', message: 'host creator surface does not serve `lessonSchema`; the lesson shape is never prompted from a copy.' } };
   }
   const evidence = { schema, rendered: renderEvidenceClaims(i.evidenceClaims), known: knownClaimIds(i.evidenceClaims) };
 
@@ -1262,6 +1410,7 @@ export async function lessonBatchBuild(ctx) {
   }
 
   const lessons = [];
+  const planRows = [];
   let mediaCount = 0;
   for (const rawDay of days) {
     const dayNum = num(rawDay && rawDay.day, NaN);
@@ -1274,30 +1423,70 @@ export async function lessonBatchBuild(ctx) {
     }
     let mediaAssetId = null;
     if (generateMedia && gen) {
-      const prompt = [str(rawDay.title), str(rawDay.actionInstruction), str(rawDay.userFacingWhy)].filter(Boolean).join('\n').slice(0, 2000);
-      if (prompt) {
-        const r = await gen.call(ctx, {
-          prompt,
-          n: 1,
-          ...(str(i.provider) ? { provider: str(i.provider) } : {}),
-          ...(str(i.model) ? { model: str(i.model) } : {}),
-        });
-        const images = r && Array.isArray(r.images) ? r.images : [];
-        const url = images[0] && typeof images[0].url === 'string' ? images[0].url : '';
-        if (url) {
-          const res = await persistLessonMedia(ctx, media, creator, { candidateId, day: dayNum, url, kind: 'image' });
-          if (!res.ok) return { status: 'failed', error: res.error };
-          mediaAssetId = res.assetId;
-          mediaCount += 1;
-        }
+      // XCH-LB-6 — the image leg has its OWN binding (`imageProvider` /
+      // `imageModel` / `imageCredentialRef`). The run's chat provider/model
+      // (`anthropic` / `claude-sonnet-4-6`) is never an image provider, so
+      // forwarding it made every media request fail host_capability_missing.
+      // Absent ⇒ the host's image default.
+      const r = await gen.call(ctx, {
+        prompt: lessonImagePrompt(lesson),
+        n: 1,
+        ...(str(i.imageProvider) ? { provider: str(i.imageProvider) } : {}),
+        ...(str(i.imageModel) ? { model: str(i.imageModel) } : {}),
+        ...(str(i.imageCredentialRef) ? { credentialRef: str(i.imageCredentialRef) } : {}),
+      });
+      const images = r && Array.isArray(r.images) ? r.images : [];
+      const url = images[0] && typeof images[0].url === 'string' ? images[0].url : '';
+      // XCH-LB-7 — media was requested, so an empty result is a typed failure,
+      // never a media-less lesson that reads as built (the honest-off rule).
+      if (!url) {
+        return { status: 'failed', error: { code: 'media_generation_empty', message: `Image generation returned no image for day ${dayNum} although media was requested.` } };
       }
+      const res = await persistLessonMedia(ctx, media, creator, { candidateId, day: dayNum, url, kind: 'image' });
+      if (!res.ok) return { status: 'failed', error: res.error };
+      mediaAssetId = res.assetId;
+      mediaCount += 1;
     }
     lessons.push({ ...lesson, ...(mediaAssetId ? { mediaAssetId } : {}) });
+    planRows.push({ title: str(rawDay.title), actionInstruction: str(rawDay.actionInstruction), userFacingWhy: str(rawDay.userFacingWhy) });
+  }
+  // XCH-GATE-1 / XCH-LB-3 — what the checkpoint gate shows its approver: each
+  // lesson beside the plan row it was built from. A typed artifact envelope in
+  // the run bag; the parent's build-N outputMapping lifts it to lessonBatchN
+  // and gate-N takes it as its `artifact` input (the gate preview + the card).
+  if (ctx.variables) {
+    const first = lessons[0].day;
+    const last = lessons[lessons.length - 1].day;
+    ctx.variables.set('lessonBatch', {
+      artifactTypeId: 'kicktodo.challenge-lesson-batch',
+      title: first === last ? `Lesson for day ${first}` : `Lessons for days ${first}–${last}`,
+      payload: { lessons: lessons.map((l, n) => ({ ...l, plan: planRows[n] })), count: lessons.length, mediaCount },
+    });
   }
   return { status: 'success', outputs: { lessons, count: lessons.length, mediaCount } };
 }
 
 nodes['feature.kicktodo.nodes.lesson-batch-build'] = lessonBatchBuild;
+
+// ── Lesson checkpoint preview (XCH-GATE-1) ──
+// The executor stores a gate's EDGE inputs as its preview artifact, and
+// core.subWorkflow's outputs are only {childRunId, childStatus}. This pure node
+// sits between build-N and gate-N and puts the batch the child produced (lifted
+// to the parent bag as lessonBatchN by build-N's outputMapping) on the edge as
+// a typed `kicktodo.challenge-lesson-batch` artifact envelope, so the approver
+// sees the lessons. A completed build with no batch fails typed: a checkpoint
+// must never ask someone to approve content it cannot show.
+export async function lessonBatchPreview(ctx) {
+  const env = (ctx.inputs ?? {}).lessonBatch;
+  const ok = env && typeof env === 'object' && env.artifactTypeId === 'kicktodo.challenge-lesson-batch'
+    && env.payload && typeof env.payload === 'object' && Array.isArray(env.payload.lessons);
+  if (!ok) {
+    return { status: 'failed', error: { code: 'lesson_batch_missing', message: 'The lesson batch the checkpoint gate must show was not produced; refusing to raise a gate over content it cannot show.' } };
+  }
+  return { status: 'success', outputs: { artifact: env } };
+}
+
+nodes['feature.kicktodo.nodes.lesson-batch-preview'] = lessonBatchPreview;
 
 // ── Sim collect (ADR 0458 P2, pack v1.18.0) ──
 //
@@ -1519,6 +1708,21 @@ nodes['feature.kicktodo.nodes.session-reminder'] = sessionReminder;
 // it passes the revision through UNCHANGED. Bounded to ONE round (ADR 0463 OQ3):
 // it never re-clarifies. Mirrors the enqueue-action a2ui pattern.
 
+/** XCH-RC-3 — why a clarification answer is not one the form offered, or null. */
+export function clarificationAnswerDefect(field, answer) {
+  if (answer === undefined || answer === null || answer === '') return `No answer was given for \`${str(field.id)}\`.`;
+  if (field.type === 'date') {
+    return typeof answer === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(answer) && !Number.isNaN(Date.parse(`${answer}T00:00:00Z`))
+      ? null
+      : `\`${str(field.id)}\` must be a date (YYYY-MM-DD).`;
+  }
+  if (Array.isArray(field.options)) {
+    const offered = field.options.map((o) => (o && typeof o === 'object' ? o.value : o));
+    return offered.some((v) => v === answer) ? null : `\`${str(field.id)}\` must be one of the offered options.`;
+  }
+  return null;
+}
+
 export async function replanClarify(ctx) {
   const i = ctx.inputs ?? {};
   const revision = i.revision && typeof i.revision === 'object' && !Array.isArray(i.revision) ? i.revision : null;
@@ -1531,6 +1735,13 @@ export async function replanClarify(ctx) {
   const field = clarification && clarification.field && typeof clarification.field === 'object' && !Array.isArray(clarification.field)
     ? clarification.field
     : null;
+
+  // XCH-RC-3 — ASK XOR ACT (ADR 0463): a revision carrying commands AND a
+  // clarification is ambiguous. Dropping the commands (the old behaviour) acted
+  // on an answer to a question the composer had already answered itself.
+  if (clarification && Array.isArray(revision.commands) && revision.commands.length > 0) {
+    return { status: 'failed', error: { code: 'revision_ambiguous', message: 'The composed revision both asks a question and proposes changes; it must do exactly one (ADR 0463 ASK XOR ACT).' } };
+  }
 
   // ASK arm — only in a real executor run (ctx.suspend present) with a
   // well-formed clarification field. Anything else degrades to passthrough.
@@ -1559,8 +1770,16 @@ export async function replanClarify(ctx) {
     });
     // Fold the participant's answer into the pending command's single unfilled
     // slot; the completed command is the sole entry of the applied revision.
+    const answer = values ? values[field.id] : undefined;
+    // XCH-RC-3 — the answer is checked against what was offered before it
+    // fills the command: a value outside `field.options` (or a malformed date)
+    // is a typed failure, never a command built from an unoffered value.
+    const answerDefect = clarificationAnswerDefect(field, answer);
+    if (answerDefect) {
+      return { status: 'failed', error: { code: 'clarification_answer_invalid', message: answerDefect } };
+    }
     const pending = clarification.pendingCommand && typeof clarification.pendingCommand === 'object' ? clarification.pendingCommand : {};
-    const filled = { ...pending, [str(field.id)]: values ? values[field.id] : undefined };
+    const filled = { ...pending, [str(field.id)]: answer };
     return {
       status: 'success',
       outputs: { result: { commands: [filled], rationale: revision.rationale } },
@@ -1578,8 +1797,8 @@ nodes['feature.kicktodo.nodes.replan-clarify'] = replanClarify;
 // ── Surface-parity sweep (NODE-PACK-AUDIT NP-KT-1, pack v1.22.0) ──
 //
 // Thin wrappers closing the 17 surface methods no node reached (the 2026-06-23
-// read-coverage remediation pattern): reads are role:"read", the three writes
-// (set-schedule-preference, create-candidate, propose-plan-change) role:"action".
+// read-coverage remediation pattern): reads are role:"read"; set-schedule-preference
+// converges (action); create-candidate + propose-plan-change mint ids (side-effect).
 // Authorization/validation stay in the host services; nodes only marshal
 // ctx.inputs → surface args and shape { status, outputs }.
 
@@ -1640,6 +1859,10 @@ export async function createCandidate(ctx) {
     transformation: str(i.transformation),
     ...(typeof i.durationDaysTarget === 'number' ? { durationDaysTarget: i.durationDaysTarget } : {}),
     ...(typeof i.dailyMinutesTarget === 'number' ? { dailyMinutesTarget: i.dailyMinutesTarget } : {}),
+    // KTFAC-1 — the surface keys the candidate on the run + this node, so a
+    // retried node returns the SAME candidate and two create nodes in one run
+    // with identical inputs still get distinct ones.
+    ...(str(ctx.nodeId) ? { nodeId: str(ctx.nodeId) } : {}),
   });
   return { status: 'success', outputs: { candidate: out.candidate } };
 }
@@ -1693,6 +1916,8 @@ export async function proposePlanChange(ctx) {
     circleId: str(i.circleId),
     coachSubject: str(i.coachSubject),
     note: str(i.note),
+    // KTA-4 — the surface keys a replayed propose on the run + this node.
+    ...(str(ctx.nodeId) ? { nodeId: str(ctx.nodeId) } : {}),
   });
   return { status: 'success', outputs: { proposal: out.proposal } };
 }

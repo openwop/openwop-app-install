@@ -6,13 +6,14 @@
 
 import type { Request, Response, NextFunction, Express } from 'express';
 import { OpenwopError } from '../../types.js';
-import { linkCohortProduct, reserveSeat, seatAvailability, SeatLinkError } from './seatService.js';
+import { linkCohortProduct, reconcileSeatOrders, reserveSeat, seatAvailability, SeatLinkError, SeatLinkConflictError } from './seatService.js';
 import { CohortFullForHoldError } from '../kicktodo-accountability/cohortService.js';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
 import { callerSubject, tenantOf } from '../../host/requestSubject.js';
 import { requireKicktodoManage, requireFeatureEnabled } from '../featureRoute.js';
 import {
   linkChallengeProduct,
+  LinkConflictError,
   getLinkByProduct,
   productForChallenge,
   listEntitlementsFor,
@@ -21,7 +22,6 @@ import {
   LinkError,
   listChallengeLinks,
   unlinkChallengeProduct,
-  relinkConflict,
 } from './entitlementService.js';
 import { ensureAffiliateForSubject, referralEarningsForSubject } from './subjectAffiliateBridge.js';
 import { requestSellerOnboarding, sellerRequestStatus, SellerRequestError } from './sellerRequestService.js';
@@ -38,8 +38,10 @@ import {
   listPayoutRuns,
   PayoutRunError,
   SharePolicyError,
+  SharePolicyConflictError,
   type ShareLedgerRow,
 } from './shareLedgerService.js';
+import { registerKicktodoSignoffApprovals, resolveOnlySignoffHandler } from '../kicktodo-core/signoffApprovals.js';
 
 /** ADR 0445 P3 — payout-run gate: manage authority AND the commerce-connect
  *  feature live (the matrix rule: payout ACTIONS are additionally gated on the
@@ -136,6 +138,7 @@ export const KICKTODO_COMMERCE_ROUTES: ReadonlyArray<{ method: 'get' | 'post' | 
       try {
         res.json(await linkCohortProduct(tenantOf(req), subjectOf(req), { productId: b.productId, circleId: b.circleId }));
       } catch (err) {
+        if (err instanceof SeatLinkConflictError) throw new OpenwopError('conflict', err.message, 409, { existing: err.existing });
         if (err instanceof SeatLinkError) throw new OpenwopError('not_found', 'Not found.', 404);
         throw err;
       }
@@ -155,13 +158,13 @@ export const KICKTODO_COMMERCE_ROUTES: ReadonlyArray<{ method: 'get' | 'post' | 
       }
       // Refuse a SILENT relink: a product already selling a DIFFERENT challenge version
       // is a decision the operator must make explicitly (`replace: true`), not a side
-      // effect of a second link call. Re-linking the same version is idempotent.
-      const existing = await getLinkByProduct(tenantOf(req), b.productId);
-      const conflict = relinkConflict(existing, { challengeId: b.challengeId, challengeVersion: b.challengeVersion, replace: b.replace === true });
-      if (conflict) throw new OpenwopError('conflict', conflict, 409, { existing });
+      // effect of a second link call. Re-linking the same version is idempotent. The
+      // check and the write are one CAS inside linkChallengeProduct (A-18), so two
+      // concurrent calls cannot both pass it.
       try {
-        res.json(await linkChallengeProduct(tenantOf(req), b.productId, b.challengeId, b.challengeVersion, subjectOf(req)));
+        res.json(await linkChallengeProduct(tenantOf(req), b.productId, b.challengeId, b.challengeVersion, subjectOf(req), { replace: b.replace === true }));
       } catch (err) {
+        if (err instanceof LinkConflictError) throw new OpenwopError('conflict', err.message, 409, { existing: err.existing });
         if (err instanceof LinkError) throw new OpenwopError('conflict', err.message, 409);
         throw err;
       }
@@ -266,7 +269,9 @@ export const KICKTODO_COMMERCE_ROUTES: ReadonlyArray<{ method: 'get' | 'post' | 
       // ADR 0445 P1 — shares ride the same best-effort observers, so the same
       // operator entry repairs a stranded share row.
       const shareRepair = await reconcileShares(tenantOf(req));
-      res.json({ ...entitlementRepair, ...shareRepair });
+      // KTCOM-4 — and seats: the same best-effort order observers drive them.
+      const seatRepair = await reconcileSeatOrders(tenantOf(req));
+      res.json({ ...entitlementRepair, ...shareRepair, ...seatRepair });
     },
   },
   {
@@ -292,6 +297,7 @@ export const KICKTODO_COMMERCE_ROUTES: ReadonlyArray<{ method: 'get' | 'post' | 
         res.json({ policy: await setSharePolicy(tenantOf(req), b.shareBps, subjectOf(req)) });
       } catch (err) {
         if (err instanceof SharePolicyError) throw new OpenwopError('validation_error', err.message, 400);
+        if (err instanceof SharePolicyConflictError) throw new OpenwopError('conflict', err.message, 409);
         throw err;
       }
     },
@@ -374,6 +380,7 @@ export const KICKTODO_COMMERCE_ROUTES: ReadonlyArray<{ method: 'get' | 'post' | 
         res.json({ approvalId: row.approvalId });
       } catch (err) {
         if (err instanceof SellerRequestError) {
+          if (err.code === 'conflict') throw new OpenwopError('conflict', err.message, 409);
           throw new OpenwopError(err.code === 'forbidden' ? 'forbidden_scope' : 'validation_error', err.message, err.code === 'forbidden' ? 403 : 400);
         }
         throw err;
@@ -428,6 +435,9 @@ export const KICKTODO_COMMERCE_ROUTES: ReadonlyArray<{ method: 'get' | 'post' | 
 ];
 
 export function registerKicktodoCommerceRoutes(deps: RouteDeps): void {
+  // Code-grade KTY-1 — the generic decision lane can decide `connect-seller` (it used to
+  // 404 on the host persona through the run-proposal finalizer).
+  registerKicktodoSignoffApprovals('connect-seller', resolveOnlySignoffHandler('connect-seller'), { separateFrom: (a) => [a.connectSeller?.submittedBy] });
   const app: Express = deps.app;
   const wrap = (h: Handler) => async (req: Request, res: Response, next: NextFunction) => {
     try {

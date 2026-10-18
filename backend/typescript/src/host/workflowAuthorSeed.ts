@@ -5,7 +5,7 @@
  * builder) without needing a configured AI provider.
  *
  * Built ENTIRELY from deterministic demo catalog nodes (`local.sample.demo.mock-ai`,
- * `core.approvalGate`) — the same posture as `exampleWorkflows.ts` — so every
+ * `core.approvalGate`) — the demo-catalog posture — so every
  * seeded workflow runs end-to-end with NO BYOK and replays deterministically.
  * Each carries `metadata.showcase = true` + `metadata.authoring` provenance so
  * the UI can badge it illustrative (never passes synthetic output off as a real
@@ -55,7 +55,6 @@
  * @see docs/adr/0072-ai-workflow-authoring.md
  * @see docs/adr/0596-workflow-author-honesty-and-durable-writes.md (§ R2 — WFAWF-6)
  * @see src/host/demoWalkthroughsSeed.ts — the owned-in-tree-def seed pattern this mirrors
- * @see src/host/exampleWorkflows.ts — the deterministic-node posture this mirrors
  */
 
 import type { WorkflowDefinition } from '../executor/types.js';

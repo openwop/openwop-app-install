@@ -88,7 +88,8 @@ describe('UsersPage — own row (USERS-UX-14 / ADR 0621 D7)', () => {
     // its own live region (one region per message) — assert BOTH halves.
     // An ERROR notice announces assertively (the variant, observed as behavior).
     await screen.findByText(/your own account from here/);
-    expect(currentAnnouncements().assertive).toMatch(/your own account from here/);
+    // The announcement comes from a passive effect that can flush after findBy sees the DOM; wait for it.
+    await waitFor(() => expect(currentAnnouncements().assertive).toMatch(/your own account from here/));
     expect(screen.queryByText(/nope/)).toBeNull();
   });
 
@@ -102,7 +103,7 @@ describe('UsersPage — own row (USERS-UX-14 / ADR 0621 D7)', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Disable Bob Builder' }));
     await screen.findByText(/Only an owner of this workspace/);
     // A WARNING notice: announced politely, never on the assertive channel.
-    expect(currentAnnouncements().polite).toMatch(/Only an owner of this workspace/);
+    await waitFor(() => expect(currentAnnouncements().polite).toMatch(/Only an owner of this workspace/));
     expect(currentAnnouncements().assertive).not.toMatch(/Only an owner of this workspace/);
     expect(screen.queryByText(/nope/)).toBeNull();
   });
@@ -161,7 +162,7 @@ describe('UsersPage — Delete (USERS-UX-15)', () => {
     expect(confirmSpy.mock.calls[0]?.[0]).toBe('Delete user "Bob Builder"?');
     await screen.findByText(/under legal hold, so user data cannot be erased/);
     // A WARNING notice: announced politely, never on the assertive channel.
-    expect(currentAnnouncements().polite).toMatch(/under legal hold, so user data cannot be erased/);
+    await waitFor(() => expect(currentAnnouncements().polite).toMatch(/under legal hold, so user data cannot be erased/));
     expect(currentAnnouncements().assertive).not.toMatch(/under legal hold, so user data cannot be erased/);
     // The raw server prose never reaches the page.
     expect(screen.queryByText(/legal hold \(audit\)/)).toBeNull();

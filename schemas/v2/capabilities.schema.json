@@ -561,6 +561,11 @@
           "type": "integer",
           "minimum": 1,
           "description": "RFC 0094 §H. Maximum REST request body size (bytes) the host accepts. Optional v1 field per `capabilities.md` §3 (previously documented as reserved — the closed `limits` object made advertising it a schema-validation failure). Hosts that advertise it MUST enforce it."
+        },
+        "maxStreamAgeSec": {
+          "type": "integer",
+          "minimum": 15,
+          "description": "RFC 0247. The longest, in seconds, this host holds a live `streamRunEvents` or `streamHostEvents` stream that the consumer opened with `resumable=true`. Only for such a stream, a host advertising this facet MAY end it before the run's terminal event (a bounded close) once it has been open 15 seconds, and MUST end it by this age. It MUST end at a frame boundary, MUST flush any pending batch first, and SHOULD first send an SSE `retry:` field (milliseconds). A host MUST NOT end an opted-in stream early unless it advertises this facet, and MUST NOT end a stream opened without `resumable=true` early whatever it advertises (events.md §Resuming with `Last-Event-ID`). A bounded close is never a terminal signal; only the terminal event is. A consumer that sent `resumable=true` MUST treat any close without the terminal event (a bounded close, a network drop, an intermediary's timeout) as non-terminal, and MUST reconnect with `resumable=true` and `Last-Event-ID` set to the last `id:` it received (no header if it received none). It SHOULD wait the `retry:` delay, or its own default of about one second, and SHOULD back off when reconnects fail or close without a frame. A consumer MUST handle such a close whether or not this facet is advertised. On `hostEvents` the consumer resumes from the last durable event's `id:`; ephemeral events missed in the gap are not redelivered (events.md §Host events)."
         }
       },
       "allOf": [
@@ -599,7 +604,7 @@
         }
       ],
       "description": "core/capabilities.md#limits — witness: witnessable-gated; maturity stable/none",
-      "x-openwop-seeded-from": "v1"
+      "x-openwop-facets-from": "spec/v2/facets/limits.schema.json"
     },
     "envelopeStrictness": {
       "type": "object",
@@ -2612,7 +2617,7 @@
                   "pattern": "^x-host-[a-z][a-z0-9-]*-[a-z][a-z0-9-]*$"
                 }
               ],
-              "description": "RFC 0044 — the literal `interrupt.kind` the host emits when escalating a below-floor confidence decision per RFC 0039 §A. `clarification` and `approval` are the canonical values matching the clarify-OR-approval choice in RFC 0039 §A; vendor-extension kinds use the canonical host-extension namespace `^x-host-<host>-<kind>$` per `spec/v1/host-extensions.md` §\"Canonical prefixes\". When advertised, hosts MUST emit an interrupt of the advertised kind on every confidence-escalation event AND the host's downstream `interrupt.md` mapping determines the `waiting-*` terminal status. Absent: conformance assumes the host uses one of the two canonical kinds (the relaxed assertion accepts either). Hosts using vendor kinds MUST also publish a non-normative kind-mapping document per RFC 0044 §C."
+              "description": "RFC 0044 — the literal `interrupt.kind` the host emits when escalating a below-floor confidence decision per RFC 0039 §A. `clarification` and `approval` are the canonical values matching the clarify-OR-approval choice in RFC 0039 §A; at v2 the value MUST be one of them (`execution.md` §multiAgent, level 2). The v2 interrupt `kind` is closed, so an `x-host-` value promises an interrupt the payload schema rejects; the pattern remains only so a v1-era document validates, and is removed at 3.0. When advertised, hosts MUST emit an interrupt of the advertised kind on every confidence-escalation event AND the host's downstream `interrupt.md` mapping determines the `waiting-*` terminal status. Absent: conformance assumes the host uses one of the two canonical kinds (the relaxed assertion accepts either)."
             },
             "crossChildMemoryConcurrency": {
               "type": "string",
@@ -2624,7 +2629,7 @@
             },
             "crossHostCausation": {
               "type": "object",
-              "description": "RFC 0040 §D — Phase 3 cross-host causation linking. When advertised, the host honors the cross-host `causationId` extension (a `causationHostId` field on event payloads pointing at the originating host), W3C `traceparent` propagation across MCP + A2A composition boundaries, and (when `ancestryEndpointSupported: true`) the `GET /runs/{runId}/ancestry` cross-host parent-chain endpoint. Hosts advertising `version: 3` MUST advertise this sub-block with a stable `hostId`.",
+              "description": "RFC 0040 §D — Phase 3 cross-host causation linking. When advertised, the host honors the cross-host `causationId` extension (a `causationHostId` field on event payloads pointing at the originating host), W3C `traceparent` propagation across MCP + A2A composition boundaries, and (when `ancestryEndpointSupported: true`) the `GET /runs/{runId}/ancestry` cross-host parent-chain endpoint. Hosts advertising `version` 3 or higher MUST advertise this sub-block with a non-empty, stable `hostId`.",
               "additionalProperties": false,
               "properties": {
                 "hostId": {
@@ -2640,7 +2645,7 @@
             },
             "replayDeterminism": {
               "type": "object",
-              "description": "RFC 0041 §D — Phase 4 replay determinism. When advertised, the host honors the LLM cache-key recipe in `replay.md` §\"LLM cache-key recipe\" as NORMATIVE (graduated from informative for version >= 4), emits `replay.divergedAtRefusal` events + fails with `replay_diverged_at_refusal` on refusal-divergence (RFC 0041 §B), and guarantees observable-output-sequence determinism per RFC 0041 §C. Hosts advertising `version: 4` MUST advertise this sub-block.",
+              "description": "RFC 0041 §D — Phase 4 replay determinism. When advertised, the host honors the LLM cache-key recipe in `replay.md` §\"LLM cache-key recipe\" as NORMATIVE (graduated from informative for version >= 4), emits `replay.divergedAtRefusal` events + fails with `replay_diverged_at_refusal` on refusal-divergence (RFC 0041 §B), and guarantees observable-output-sequence determinism per RFC 0041 §C. Hosts advertising `version` 4 or higher MUST advertise this sub-block.",
               "additionalProperties": false,
               "properties": {
                 "llmCacheKeyRecipe": {
@@ -2657,7 +2662,7 @@
                 },
                 "refusalDivergenceEmission": {
                   "type": "boolean",
-                  "description": "Host emits `replay.divergedAtRefusal` events + fails replay with `error.code: replay_diverged_at_refusal` per RFC 0041 §B. Hosts advertising `version: 4` MUST set this to `true`."
+                  "description": "Host emits `replay.divergedAtRefusal` events + fails replay with `error.code: replay_diverged_at_refusal` per RFC 0041 §B. Hosts advertising `version` 4 or higher MUST set this to `true`."
                 }
               }
             },
@@ -3277,7 +3282,7 @@
         },
         "evalSuite": {
           "type": "object",
-          "description": "RFC 0081. The host runs portable `agent-eval-suite.schema.json` suites as eval runs (`mode: eval` on `createRun`, runs.md) and terminates each with an `eval-summary.schema.json` scorecard as the run's output. Hosts that omit this block reject `mode: eval` (runs.md). A host advertising this MUST execute each task as a child agent invocation, reusing the `agent.invocation-*` bracket and the `agent.*` and `provider.usage` events, score it, and MUST emit exactly one `eval.started`, one `eval.scored` per task after that task's terminal `agent.decided`, and one `eval.completed` before `run.completed`. When a task carries `fixtures`, the host MUST inject `fixtures.toolResponses` in place of live tool calls and seed `fixtures.memorySeed` into the agent's read snapshot before the invocation; `live-shadow` alone ignores fixtures. Seeded memory is tenant-scoped and redacted like any memory write. The `eval.*` events and the summary are content-free (SECURITY invariant `eval-summary-no-content-leak`) and are recorded facts: a replay re-reads a score, never re-judges. An eval run, its suite, fixtures and summary are scoped to the caller's owner triple; a suite or summary MUST NOT be readable across tenants. A human MAY override an auto-score with an annotation on its `eval.scored` event. Composes per-task cost (`provider.usage`) and the regression baseline diff.",
+          "description": "RFC 0081. The host runs portable `agent-eval-suite.schema.json` suites as eval runs (`mode: eval` on `createRun`, runs.md) and terminates each with an `eval-summary.schema.json` scorecard as the run's output. Hosts that omit this block reject `mode: eval` (runs.md). A host advertising this MUST execute each task as a child agent invocation, reusing the `agent.invocation-*` bracket and the `agent.*` and `provider.usage` events, score it, and MUST emit exactly one `eval.started`, one `eval.scored` per task after that task's terminal `agent.decided`, and one `eval.completed` before `run.completed`. When a task carries `fixtures`, the host MUST inject `fixtures.toolResponses` in place of live tool calls and seed `fixtures.memorySeed` into the agent's read snapshot before the invocation; `live-shadow` alone ignores fixtures. Seeded memory is tenant-scoped and redacted like any memory write. The `eval.*` events and the summary are content-free (SECURITY invariant `eval-summary-no-content-leak`) and are recorded facts: a replay re-reads a score, never re-judges. An eval run, its suite, fixtures and summary are scoped to the caller's owner triple; a suite or summary MUST NOT be readable across tenants. A human MAY override an auto-score with an annotation on its `eval.scored` event. Composes per-task cost (`provider.usage`) and the regression baseline diff. RFC 0244: a suite that uses `expected.trajectory` or `kind: \"trajectory\"`, `trials.count` > 1 (or above `trials.maxTrials`), `fixtures.onMiss` or `toolResponses[].args` on a host that does not advertise the matching member (`trajectory`, `trials`, `fixtureMatching`) MUST be refused at run-create with `400 validation_error` naming the field; the host MUST NOT grade it as if the field were absent. Each trial is a recorded fact; per-task efficiency counts (`toolCallCount`, `modelCallCount`, tokens) are reported, never gated.",
           "additionalProperties": false,
           "properties": {
             "modes": {
@@ -3304,6 +3309,37 @@
               "type": "number",
               "minimum": 0,
               "description": "MAY. Host ceiling on total eval-run cost; composes RFC 0084 budget enforcement when advertised."
+            },
+            "trajectory": {
+              "type": "boolean",
+              "description": "RFC 0244 §A. `true`: the host grades `expected.trajectory` and `kind: \"trajectory\"` with the four match modes, `forbidden`, `argsMatch` and `includeDelegates`, and reports the per-task `trajectory` counts."
+            },
+            "trials": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "maxTrials"
+              ],
+              "description": "RFC 0244 §B. Presence: the host runs `trials.count` > 1, emits `eval.scored` once per task per trial with `trialIndex` and `eval.started.trialCount`, and computes the per-task `trials` block and `trialStats` by the normative formulas. A host value agrees with a formula when |host − formula| ≤ 1e-9 · max(1, |formula|); hosts MUST agree to within that tolerance, and need not reproduce any particular float evaluation order.",
+              "properties": {
+                "maxTrials": {
+                  "type": "integer",
+                  "minimum": 2,
+                  "description": "The largest `trials.count` the host runs; a suite above it is refused at run-create with `400 validation_error`."
+                }
+              }
+            },
+            "fixtureMatching": {
+              "type": "boolean",
+              "description": "RFC 0244 §D. `true`: the host honours `toolResponses[].args` / `argsMatch` (first unconsumed match) and `fixtures.onMiss`, and reports `fixtureMissCount`."
+            },
+            "fixtureErrors": {
+              "type": "boolean",
+              "description": "RFC 0245 §B/§C. `true`: a `toolResponses[]` entry with `isError: true` is returned to the agent as a tool error and recorded as `agent.tool-returned` with `error` and no `outcome` (plus `status: \"error\"` under tool hooks); it is not a fixture miss and is never retried live. A suite carrying `isError: true` on a host that does not advertise this MUST be refused with `400 validation_error`."
+            },
+            "regressionVerdict": {
+              "type": "boolean",
+              "description": "RFC 0244 §F. `true`: in `regression` mode the host reports `regression.verdict`, `method`, `alpha` and `pairedTaskCount`, pairing tasks by `taskId`."
             }
           }
         },
@@ -3399,6 +3435,54 @@
           "type": "boolean",
           "default": false,
           "description": "RFC 0022. When `true`, the host honors `inputMapping` / `outputMapping` / `perWorkerInputMappings` / `perWorkerOutputMappings` on `DispatchConfig` — building child inputs from parent variables before dispatch and harvesting child variables into parent variables on completion. Implies (but does NOT require) `agents.dispatch: true`. Hosts that set `agents.dispatch: true` but omit / `false` this flag MUST refuse workflows that carry non-empty mapping fields at registration with `validation_error` + `details.requiredCapability: 'agents.dispatchMapping'`."
+        },
+        "fanOut": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "joinModes",
+            "onChildFailureModes"
+          ],
+          "description": "RFC 0243. OPTIONAL. Present, the host accepts `fanOutPolicy: 'parallel'` on a `core.dispatch` node (`dispatch-config.schema.json`) and joins its children per `joinPolicy`. Absent, it accepts `sequential` and `reject` only. A host MUST NOT advertise `fanOut` without `agents.dispatch: true`. `joinModes` lists the `joinPolicy.mode` values it implements and `onChildFailureModes` the `joinPolicy.onChildFailure` values. `maxFanOut` is its breadth ceiling: the effective concurrency is `min(config.maxConcurrency ?? ∞, maxFanOut ?? ∞)`, children beyond it are dispatched in waves and none is dropped, and absent means no stated ceiling. `perItemInput: true` means it honors `NextWorkerDecision.nextWorkerInputs` (`orchestrator-decision.schema.json`); without it, a non-empty `nextWorkerInputs` MUST fail the dispatch node with `validation_error` and dispatch no child. A host MUST refuse a workflow whose `core.dispatch` node pins what this facet does not admit (`parallel` with `fanOut` absent, a `joinPolicy.mode` outside `joinModes`, a `joinPolicy.onChildFailure` outside `onChildFailureModes`) with `validation_error`, and `details.requiredCapability` names the seat it lacks: `agents.fanOut`, `agents.fanOut.joinModes` or `agents.fanOut.onChildFailureModes`. It MUST refuse when it loads the workflow. If such a workflow is nonetheless readable (`getWorkflow` returns it), `createRun` naming it MUST return `400 validation_error` with that `details.requiredCapability` and create no run.",
+          "properties": {
+            "joinModes": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {
+                "enum": [
+                  "wait-all",
+                  "quorum",
+                  "first",
+                  "race"
+                ]
+              },
+              "description": "The `joinPolicy.mode` values the host implements."
+            },
+            "onChildFailureModes": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {
+                "enum": [
+                  "collect",
+                  "fail-fast",
+                  "absorb"
+                ]
+              },
+              "description": "The `joinPolicy.onChildFailure` values the host implements."
+            },
+            "maxFanOut": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "The host's ceiling on children in flight at once for one dispatch node."
+            },
+            "perItemInput": {
+              "type": "boolean",
+              "default": false,
+              "description": "When `true`, the host honors `NextWorkerDecision.nextWorkerInputs`."
+            }
+          }
         },
         "reasoning": {
           "type": "object",

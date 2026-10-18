@@ -10,6 +10,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { confirm } from '../../ui/confirm.js';
 import { toast } from '../../ui/toast.js';
+import { useFormat } from '../../i18n/useFormat.js';
 import {
   payOrder, refundOrder, partialRefundOrder, cancelOrder, advanceFulfillment,
   CommerceApiError, type Order,
@@ -23,6 +24,11 @@ export function actionError(e: unknown, t: (k: string) => string): void {
     toast.info(t(status === 'rejected' ? 'approvalRejected' : 'approvalParked'));
     return;
   }
+  // ADR 0875 — the trust refusals carry a typed `details.code`; say what it means in
+  // the operator's language instead of echoing the server's English.
+  const code = e instanceof CommerceApiError ? (e.details as { code?: string } | undefined)?.code : undefined;
+  if (code === 'live_payment_required') { toast.info(t('livePaymentRequired')); return; }
+  if (code === 'payment_intent_unbound' || code === 'payment_intent_mismatch') { toast.error(t('paymentIntentUnbound')); return; }
   toast.error((e instanceof Error && e.message) || t('actionFailed'));
 }
 
@@ -72,6 +78,9 @@ export function nextFulfillment(o: Order): string | null {
  *  makes the request idempotent (a double-click won't double-refund). */
 function PartialRefundControl({ orgId, order, onDone }: { orgId: string; order: Order; onDone: (fn: () => Promise<unknown>) => void }): JSX.Element {
   const { t } = useTranslation('commerce');
+  // CM-REFUND-FMT-1 — the same money formatter as the rest of the page ("$99.50",
+  // not a raw "99.5 USD").
+  const fmt = useFormat();
   const [open, setOpen] = useState(false);
   const [amount, setAmount] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
@@ -89,7 +98,7 @@ function PartialRefundControl({ orgId, order, onDone }: { orgId: string; order: 
     // be undone, so it gets the same guard, naming the amount.
     void (async () => {
       const ok = await confirm({
-        title: t('partialRefundConfirmTitle', { amount: `${amt} ${order.currency}` }),
+        title: t('partialRefundConfirmTitle', { amount: fmt.currency(amt, order.currency) }),
         body: t('partialRefundConfirmBody'),
         danger: true,
         confirmLabel: t('refund'),
@@ -105,7 +114,7 @@ function PartialRefundControl({ orgId, order, onDone }: { orgId: string; order: 
     <span className="action-bar u-gap-1 u-items-center">
       <input ref={inputRef} type="number" min="0" max={remaining} step="0.01" inputMode="decimal" className="u-w-auto" aria-label={t('partialRefundAmount')} placeholder="0.00" value={amount}
         onChange={(e) => setAmount(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') submit(); if (e.key === 'Escape') { setOpen(false); setAmount(''); } }} />
-      <span className="u-text-sm muted">{t('refundRemaining', { amount: `${remaining} ${order.currency}` })}</span>
+      <span className="u-text-sm muted">{t('refundRemaining', { amount: fmt.currency(remaining, order.currency) })}</span>
       <Button variant="secondary" onClick={submit} disabled={!valid}>{t('apply')}</Button>
       <Button variant="secondary" onClick={() => { setOpen(false); setAmount(''); }}>{t('cancel')}</Button>
     </span>

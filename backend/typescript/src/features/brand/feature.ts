@@ -26,6 +26,7 @@ import { registerBrandAgentTools } from './agentTools.js';
 import { setAdsComplianceChecker } from '../../host/adsAdapter.js';
 import { buildAdsComplianceChecker } from './brandService.js';
 import { buildBrandSurface } from './surface.js';
+import { registerBrandErasure } from './erasure.js';
 
 export const brandFeature: BackendFeature = {
   id: 'brand',
@@ -36,6 +37,9 @@ export const brandFeature: BackendFeature = {
     // predicate. Before this the pack allowlisted raw node typeIds that project
     // into no conversational tool, so the Steward was toothless (ADR 0308 seam).
     registerBrandAgentTools();
+    // ADR 0891 D8 — the person fields brand holds (creator, editors, audit actor,
+    // font attestation) are erased in place; the brands themselves are org config.
+    registerBrandErasure();
     // ADR 0354 P1 — brand-compliance enforcement at the ads-dispatch edge. The
     // brief→brand resolution composes campaign-brief lazily (no static cycle).
     setAdsComplianceChecker(buildAdsComplianceChecker(async (tenantId, briefId) => {
@@ -46,8 +50,8 @@ export const brandFeature: BackendFeature = {
   },
   surface: { id: 'brand', build: buildBrandSurface },
   requiredPacks: [
-    { name: 'feature.brand.nodes', version: '1.2.1' },
-    { name: 'vendor.openwop-app.brand.agents', version: '1.0.2' },
+    { name: 'feature.brand.nodes', version: '1.4.0' },
+    { name: 'vendor.openwop-app.brand.agents', version: '1.0.3' },
   ],
   // ADR 0170: NO `toggleDefault` — brand is always-on/core (like cms/connections
   // per ADR 0027 / ADR 0024 §Correction). RBAC stays enforced in routes.ts.

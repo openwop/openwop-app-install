@@ -28,6 +28,7 @@ import { vendorPath } from '../middleware/protocolVersion.js';
 import { projectV2RunIds } from '../host/v2Ids.js';
 import { projectRunSnapshot } from './runs.js';
 import { createLogger } from '../observability/logger.js';
+import { mayReadRunPayload, withoutEventPayload, withoutRunPayload } from '../host/runPayloadAccess.js';
 
 const log = createLogger('routes.streams');
 
@@ -49,8 +50,12 @@ export function registerStreamRoutes(app: Express, deps: Deps): void {
   // segment keeps them distinct regardless of order.
   app.get(['/runs/:runId/events/token', vendorPath('/runs/:runId/events/token')], async (req, res, next) => {
     try {
-      await loadReadableRun(req, storage, req.params.runId);
-      res.json({ streamToken: mintRunStreamToken(req.params.runId) });
+      const run = await loadReadableRun(req, storage, req.params.runId);
+      // #4543 — the token carries what THIS caller may read: the stream it opens
+      // arrives cross-origin on a fresh anonymous session, where the caller's
+      // identity is no longer there to check.
+      const grant = (await mayReadRunPayload(req, run)) ? 'full' : 'redacted';
+      res.json({ streamToken: mintRunStreamToken(req.params.runId, Date.now(), grant) });
     } catch (err) {
       next(err);
     }
@@ -79,8 +84,12 @@ export function registerStreamRoutes(app: Express, deps: Deps): void {
       // Found from a peer host's live witness (myndhyve-1 `efcf`, 2026-09-05);
       // no `v2-*` conformance scenario covers SSE, so 55/56 green hid it.
       const wireTenant = (req as { tenantId?: string }).tenantId ?? 'default';
+      // #4543 — a member who neither started the run nor administers the
+      // workspace watches it move without its payload. Applied at the same
+      // choke, so replay, live, gap, batch and the JSON sibling all inherit it.
+      const fullPayload = await mayReadRunPayload(req, run);
       const onWire = (ev: EventRecord): EventRecord =>
-        projectV2RunIds(ev, wireTenant) as EventRecord;
+        projectV2RunIds(fullPayload ? ev : withoutEventPayload(ev), wireTenant) as EventRecord;
 
       // Stream-mode validation runs BEFORE content negotiation so that
       // bad streamMode values 400 regardless of Accept header. Otherwise
@@ -102,7 +111,7 @@ export function registerStreamRoutes(app: Express, deps: Deps): void {
       if (acceptHeader.includes('application/json') && !acceptHeader.includes('text/event-stream')) {
         const allEvents = await storage.listEvents(run.runId, { fromSeq: -1, limit: 100_000, contract });
         const isComplete = ['completed', 'failed', 'cancelled'].includes(run.status);
-        res.status(200).json({ events: allEvents, isComplete });
+        res.status(200).json({ events: fullPayload ? allEvents : allEvents.map(withoutEventPayload), isComplete });
         return;
       }
 
@@ -150,7 +159,11 @@ export function registerStreamRoutes(app: Express, deps: Deps): void {
 
       // Shared SSE lifecycle (host/sseChannel): canonical headers (incl.
       // X-Accel-Buffering), 15s heartbeat, per-tenant connection cap, teardown.
-      const channel = openSseChannel(req, res, { heartbeatMs: 15_000 });
+      // ADR 0876: a WIRE channel — `runs.md` keeps `eventsUrl` on the request's
+      // origin, so it is never refused for arriving through the front door.
+      // ADR 0897 / RFC 0247: bounded only for a consumer that sent
+      // `resumable=true`; every other stream is held open to the terminal event.
+      const channel = openSseChannel(req, res, { heartbeatMs: 15_000, frontDoor: 'allow', boundWhen: 'resumable' });
 
       // Aggregation buffer for `?bufferMs=N`. When set, events
       // accumulate here between flushes; on each tick (or on terminal)
@@ -195,7 +208,8 @@ export function registerStreamRoutes(app: Express, deps: Deps): void {
           const fresh = await storage.getRun(run.runId);
           if (res.writableEnded) return;
           if (!fresh) throw new Error(`run ${run.runId} vanished between the event and its snapshot`);
-          const snap = projectV2RunIds(projectRunSnapshot(fresh), wireTenant);
+          const projected = projectRunSnapshot(fresh);
+          const snap = projectV2RunIds(fullPayload ? projected : withoutRunPayload(projected), wireTenant);
           res.write(`id: ${seq}\nevent: state.snapshot\ndata: ${JSON.stringify(snap)}\n\n`);
         }).catch((err: unknown) => {
           // MEASURED 2026-09-05 on production: this writer failed on EVERY run while
@@ -212,7 +226,9 @@ export function registerStreamRoutes(app: Express, deps: Deps): void {
         });
       };
       const deliverOnce = (ev: EventRecord): void => {
-        if (ev.sequence <= deliveredThrough) return;
+        // A closed stream delivers nothing, so the watermark must not move:
+        // the consumer resumes from the last `id:` it actually received.
+        if (channel.closed || ev.sequence <= deliveredThrough) return;
         deliveredThrough = ev.sequence;
         if (valuesSnapshots) {
           if (passesModeFilter(ev, ['updates'])) queueSnapshot(ev.sequence);
@@ -295,6 +311,8 @@ export function registerStreamRoutes(app: Express, deps: Deps): void {
       // Route-specific teardown — run once by the channel on client disconnect
       // or channel.close().
       const routeTeardown = (): void => {
+        // `events.md`: a batch MUST flush on close — a bounded close included.
+        if (bufferMs > 0) flushBatch();
         if (aggTick) clearInterval(aggTick);
         unsubscribe();
         void unsubTicks().catch(() => undefined); // CS-WF-4 — release the bus sub

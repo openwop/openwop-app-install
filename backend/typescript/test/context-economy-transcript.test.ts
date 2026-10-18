@@ -1,5 +1,16 @@
 /**
  * ADR 0148 Phase 3 (A1) — token-budgeted transcript windowing.
+ *
+ * Guards: `windowTranscript` keeps a CONTIGUOUS newest suffix — at most
+ * `keepLastTurns` turns, within `maxChars` accumulated newest-first, stopping at
+ * the first turn that overflows (an older small turn is never packed in past a
+ * gap) — returned in chronological order, with an honest `omittedCount`; always
+ * admits the newest turn; never mutates its input. `transcriptBudgetConfig` reads
+ * its two env knobs (defaults 20 / 24000, invalid ⇒ default).
+ *
+ * Sabotage (grade-tests w28): `break`→`continue`, dropping the reverse, an
+ * off-by-one turn cap, a zero omittedCount, starving the newest turn, or mutating
+ * the input each turn a case red.
  */
 import { describe, it, expect, afterEach } from 'vitest';
 import { windowTranscript, transcriptBudgetConfig } from '../src/host/transcriptBudget.js';
@@ -30,11 +41,12 @@ describe('windowTranscript', () => {
   });
 
   it('enforces the char budget (newest-first), preserving order', () => {
-    const turns = mk(10, 100); // 100 chars each
+    const turns: Turn[] = [10, 100, 200, 50, 100].map((len, id) => ({ id, text: 'x'.repeat(len) }));
     const { kept, omittedCount } = windowTranscript(turns, { keepLastTurns: 20, maxChars: 250 }, sizeOf);
-    // 250 / 100 => admit turns 9 (100), 8 (200); turn 7 (300>250) stops.
-    expect(kept.map((t) => t.id)).toEqual([8, 9]);
-    expect(omittedCount).toBe(8);
+    // Newest-first: turn 4 (100), turn 3 (150); turn 2 (350>250) STOPS — turn 1
+    // (would total 250) is NOT admitted past the gap. Kept in chronological order.
+    expect(kept.map((t) => t.id)).toEqual([3, 4]);
+    expect(omittedCount).toBe(3);
   });
 
   it('always admits at least the single most-recent turn even if it alone exceeds maxChars', () => {

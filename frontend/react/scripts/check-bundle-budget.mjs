@@ -14,6 +14,7 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { gzipSync } from 'node:zlib';
 import { join } from 'node:path';
+import { NAMED_CHUNKS } from './chunkNames.mjs';
 
 const ASSETS = 'dist/assets';
 // Entry chunk gzip ceiling. After overlay + route lazy-loading the entry is
@@ -257,7 +258,15 @@ const ASSETS = 'dist/assets';
 // it once a session exists, which put the store and its client on every page's
 // first load, public pages included. It is now a dynamic import inside that
 // effect. Measured against main + the white-label nav entry (#4576).
-const ENTRY_GZIP_BUDGET = 132 * 1024;
+// ═══ 2026-10-12: LOWERED 132 -> 129 kB (ADR 0874 P1, D4). ═══
+// Async chunks are now `c-[hash].js` (scripts/chunkNames.mjs), which shortens the
+// entry's preload filename table. MEASURED on ecf3dbd70 + this change: 127.1 kB
+// gzip, exactly the ADR's E6 prediction (130.9 -> 127.1 on 942d52c10). D4 sets the ceiling to measured + 1 kB, rounded
+// up, so the reclaimed bytes are not left as slack for the next regression.
+// ADR 0874 P2 (`modulePreload: false`, -7.2 kB) was MEASURED and REJECTED
+// (2026-10-12): it adds one network round trip to the first visit of every route
+// (+~600 ms on Fast 3G, +~175 ms on Fast 4G). Do not reach for it to buy headroom.
+const ENTRY_GZIP_BUDGET = 129 * 1024;
 
 /**
  * WARN BAND. Above this fraction of a budget the check still PASSES but says so loudly.
@@ -474,6 +483,24 @@ try {
 } catch {
   console.error(`check-bundle-budget: ${ASSETS} not found — run \`vite build\` first.`);
   process.exit(1);
+}
+
+// ADR 0874 D2 — overrides match by `<name>-` prefix, and only chunks listed in
+// chunkNames.mjs keep a readable name; every other async chunk is `c-[hash].js`.
+// A budget key missing from that list would silently match nothing and fall back
+// to the global ceiling, so refuse it here, and refuse a key that matches no
+// built chunk (a renamed or removed chunk leaves a dead override behind).
+for (const name of Object.keys(PER_CHUNK_GZIP_BUDGET)) {
+  if (!NAMED_CHUNKS.includes(name)) {
+    console.error(`✗ check-bundle-budget: PER_CHUNK_GZIP_BUDGET key "${name}" is not in NAMED_CHUNKS (scripts/chunkNames.mjs), so its chunk is built as c-[hash].js and the override can never match. Add it there.`);
+    process.exit(1);
+  }
+  // A named distribution can drop a chunk's only importers (see below), so the
+  // dead-override check is a default-build fact only.
+  if ((process.env.OPENWOP_DISTRIBUTION ?? 'default') === 'default' && !files.some((f) => (name === 'i18n' ? /^i18n-[A-Za-z0-9_-]{8}\.js$/.test(f) : f.startsWith(`${name}-`)))) {
+    console.error(`✗ check-bundle-budget: PER_CHUNK_GZIP_BUDGET key "${name}" matches no built chunk in ${ASSETS}. Remove the dead override or fix the chunk name.`);
+    process.exit(1);
+  }
 }
 
 function gzipBytes(path) {

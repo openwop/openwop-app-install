@@ -13,6 +13,12 @@
  * personal-workspace owner is untouched; the ADR 0049 assignee carve-out still
  * lets a viewer who was assigned a card progress it.
  *
+ * Red if the legacy-board write gate or the board-create gate is dropped
+ * (probes w37g1-rt-board-write-gate, -rt-create-write-gate), the assignee
+ * carve-out closes or widens to content edits (-rt-assignee-carveout,
+ * -rt-assignee-content), ownership becomes a tenant-SHAPE test (-rt-kscd3), or a
+ * non-holder may claim a role card (-rt-kscd4).
+ *
  * @see docs/adr/0774-kanban-stack-claim-integrity.md
  */
 
@@ -40,10 +46,14 @@ afterAll(async () => {
   await new Promise<void>((res) => server.close(() => res()));
 });
 
-interface Res<T = any> { status: number; body: T }
+interface Res<T = unknown> { status: number; body: T }
+interface ErrBody { error?: string; message?: string }
+interface BoardBody { id: string }
+interface CardBody { id: string; title?: string; columnId?: string; assigneeId?: string; assigneeRole?: string; lastRunId?: string }
+interface BoardDetail { board: { name: string }; cards: CardBody[] }
 function client() {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
+  const call = async <T = unknown>(method: string, path: string, body?: unknown): Promise<Res<T>> => {
     const res = await fetch(`${BASE}${path}`, {
       method,
       headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) },
@@ -53,21 +63,22 @@ function client() {
     const single = res.headers.get('set-cookie');
     const setCookies: string[] = typeof h.getSetCookie === 'function' ? h.getSetCookie() : single ? [single] : [];
     for (const sc of setCookies) { const m = /(__session=[^;]+)/.exec(sc); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    // JSON response bodies are typed by each call site's view (`T`).
+    const out = (res.status === 204 ? undefined : await res.json().catch(() => undefined)) as T;
     return { status: res.status, body: out };
   };
   return {
-    get: (p: string) => call('GET', p),
-    post: (p: string, b?: unknown) => call('POST', p, b),
-    patch: (p: string, b?: unknown) => call('PATCH', p, b),
-    del: (p: string) => call('DELETE', p),
+    get: <T = unknown>(p: string) => call<T>('GET', p),
+    post: <T = unknown>(p: string, b?: unknown) => call<T>('POST', p, b),
+    patch: <T = unknown>(p: string, b?: unknown) => call<T>('PATCH', p, b),
+    del: <T = unknown>(p: string) => call<T>('DELETE', p),
   };
 }
 type Client = ReturnType<typeof client>;
 
 let n = 0;
 async function signup(c: Client): Promise<{ userId: string }> {
-  const r = await c.post('/host/openwop-app/test/login', { email: `kbw-${Date.now()}-${n++}@acme.test` });
+  const r = await c.post<{ user: { userId: string } }>('/host/openwop-app/test/login', { email: `kbw-${Date.now()}-${n++}@acme.test` });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return r.body.user;
 }
@@ -79,7 +90,7 @@ const WS = '/host/openwop-app/workspaces';
 async function sharedWorkspaceWith(role: 'viewer' | 'editor'): Promise<{ owner: Client; member: Client; memberId: string; ws: string }> {
   const owner = client();
   await signup(owner);
-  const ws = (await owner.post(WS, { name: `Acme ${n}` })).body.workspaceId as string;
+  const ws = (await owner.post<{ workspaceId: string }>(WS, { name: `Acme ${n}` })).body.workspaceId;
   expect((await owner.post(`${WS}/${encodeURIComponent(ws)}/switch`)).status).toBe(200);
   const member = client();
   const m = await signup(member);
@@ -92,42 +103,42 @@ async function sharedWorkspaceWith(role: 'viewer' | 'editor'): Promise<{ owner: 
 describe('ADR 0774 D5 — a viewer can read a legacy board but not write it', () => {
   it('refuses every write with 403 and starts no run; the board and card are unchanged', async () => {
     const { owner, member: viewer } = await sharedWorkspaceWith('viewer');
-    const board = (await owner.post(`${K}/boards`, {
+    const board = (await owner.post<BoardBody>(`${K}/boards`, {
       name: 'Ops',
       columns: [{ id: 'todo', name: 'To Do' }, { id: 'go', name: 'Go', triggerWorkflowId: 'wf-anything' }, { id: 'done', name: 'Done', terminal: true }],
     })).body;
     expect(board.id).toBeTruthy();
-    const card = (await owner.post(`${K}/boards/${board.id}/cards`, { title: 'Keep me', columnId: 'todo' })).body;
+    const card = (await owner.post<CardBody>(`${K}/boards/${board.id}/cards`, { title: 'Keep me', columnId: 'todo' })).body;
 
     // Visibility is unchanged.
     expect((await viewer.get(`${K}/boards/${board.id}`)).status).toBe(200);
 
     const refused = await Promise.all([
-      viewer.post(`${K}/boards`, { name: 'Mine now' }),
-      viewer.post(`${K}/boards/${board.id}/cards`, { title: 'Injected', columnId: 'todo' }),
-      viewer.patch(`${K}/boards/${board.id}`, { name: 'Renamed' }),
-      viewer.patch(`${K}/cards/${card.id}`, { title: 'Defaced' }),
-      viewer.patch(`${K}/cards/${card.id}`, { workflowId: 'wf-anything', columnId: 'go' }),
-      viewer.del(`${K}/cards/${card.id}`),
-      viewer.del(`${K}/boards/${board.id}`),
+      viewer.post<ErrBody>(`${K}/boards`, { name: 'Mine now' }),
+      viewer.post<ErrBody>(`${K}/boards/${board.id}/cards`, { title: 'Injected', columnId: 'todo' }),
+      viewer.patch<ErrBody>(`${K}/boards/${board.id}`, { name: 'Renamed' }),
+      viewer.patch<ErrBody>(`${K}/cards/${card.id}`, { title: 'Defaced' }),
+      viewer.patch<ErrBody>(`${K}/cards/${card.id}`, { workflowId: 'wf-anything', columnId: 'go' }),
+      viewer.del<ErrBody>(`${K}/cards/${card.id}`),
+      viewer.del<ErrBody>(`${K}/boards/${board.id}`),
     ]);
     for (const r of refused) {
       expect(r.status, JSON.stringify(r.body)).toBe(403);
-      expect(r.body?.error ?? r.body?.code).toBe('forbidden_scope');
+      expect(r.body).toMatchObject({ error: 'forbidden_scope', message: 'Missing required scope: workspace:write' });
     }
 
-    const after = (await owner.get(`${K}/boards/${board.id}`)).body;
+    const after = (await owner.get<BoardDetail>(`${K}/boards/${board.id}`)).body;
     expect(after.board.name).toBe('Ops');
-    const kept = after.cards.find((c: { id: string }) => c.id === card.id);
+    const kept = after.cards.find((c) => c.id === card.id);
     expect(kept).toMatchObject({ title: 'Keep me', columnId: 'todo' });
-    expect(kept.lastRunId).toBeUndefined();
-    expect(after.cards.map((c: { title: string }) => c.title)).not.toContain('Injected');
+    expect(kept?.lastRunId).toBeUndefined();
+    expect(after.cards.map((c) => c.title)).not.toContain('Injected');
   });
 
   it('an editor still writes (the gate is authority, not a lockout)', async () => {
     const { owner, member: editor } = await sharedWorkspaceWith('editor');
-    const board = (await owner.post(`${K}/boards`, { name: 'Shared' })).body;
-    const made = await editor.post(`${K}/boards/${board.id}/cards`, { title: 'Editor card', columnId: 'todo' });
+    const board = (await owner.post<BoardBody>(`${K}/boards`, { name: 'Shared' })).body;
+    const made = await editor.post<CardBody>(`${K}/boards/${board.id}/cards`, { title: 'Editor card', columnId: 'todo' });
     expect(made.status, JSON.stringify(made.body)).toBe(201);
     expect((await editor.patch(`${K}/cards/${made.body.id}`, { columnId: 'doing' })).status).toBe(200);
     expect((await editor.post(`${K}/boards`, { name: 'Editor board' })).status).toBe(201);
@@ -136,20 +147,25 @@ describe('ADR 0774 D5 — a viewer can read a legacy board but not write it', ()
   it('the personal-workspace owner is untouched', async () => {
     const solo = client();
     await signup(solo);
-    const board = await solo.post(`${K}/boards`, { name: 'Solo' });
+    const board = await solo.post<BoardBody>(`${K}/boards`, { name: 'Solo' });
     expect(board.status, JSON.stringify(board.body)).toBe(201);
     expect((await solo.post(`${K}/boards/${board.body.id}/cards`, { title: 'Mine', columnId: 'todo' })).status).toBe(201);
   });
 
   it('a viewer ASSIGNED a card may still progress it (ADR 0049 carve-out), but not edit it', async () => {
     const { owner, member: viewer, memberId } = await sharedWorkspaceWith('viewer');
-    const board = (await owner.post(`${K}/boards`, { name: 'Assigned' })).body;
-    const card = (await owner.post(`${K}/boards/${board.id}/cards`, { title: 'Yours', columnId: 'todo' })).body;
+    const board = (await owner.post<BoardBody>(`${K}/boards`, { name: 'Assigned' })).body;
+    const card = (await owner.post<CardBody>(`${K}/boards/${board.id}/cards`, { title: 'Yours', columnId: 'todo' })).body;
     expect((await owner.post(`${K}/cards/${card.id}/assign`, { assigneeId: memberId })).status).toBe(200);
 
-    const moved = await viewer.patch(`${K}/cards/${card.id}`, { columnId: 'done' });
+    const moved = await viewer.patch<{ card: CardBody }>(`${K}/cards/${card.id}`, { columnId: 'done' });
     expect(moved.status, JSON.stringify(moved.body)).toBe(200);
-    expect((await viewer.patch(`${K}/cards/${card.id}`, { title: 'Nope' })).status).toBe(403);
+    expect(moved.body.card.columnId).toBe('done');
+    const edit = await viewer.patch<ErrBody>(`${K}/cards/${card.id}`, { title: 'Nope' });
+    expect(edit.status).toBe(403);
+    expect(edit.body).toMatchObject({ error: 'forbidden', message: 'As the assignee you can move this card, but only the board members can edit its content.' });
+    const after = (await owner.get<BoardDetail>(`${K}/boards/${board.id}`)).body.cards.find((c) => c.id === card.id);
+    expect(after?.title).toBe('Yours');
   });
 });
 
@@ -157,7 +173,7 @@ describe('ADR 0774 D4 — a role-addressed card is claimed exactly once', () => 
   it('two concurrent claimers: one 200, one 409, and the card names the winner', async () => {
     const owner = client();
     await signup(owner);
-    const ws = (await owner.post(WS, { name: 'Claims' })).body.workspaceId as string;
+    const ws = (await owner.post<{ workspaceId: string }>(WS, { name: 'Claims' })).body.workspaceId;
     await owner.post(`${WS}/${encodeURIComponent(ws)}/switch`);
     const a = client(); const ua = await signup(a);
     const b = client(); const ub = await signup(b);
@@ -165,20 +181,25 @@ describe('ADR 0774 D4 — a role-addressed card is claimed exactly once', () => 
       expect((await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(ws)}/members`, { displayName: u.userId, subject: u.userId, roles: ['editor'] })).status).toBe(201);
       await c.post(`${WS}/${encodeURIComponent(ws)}/switch`);
     }
-    const board = (await owner.post(`${K}/boards`, { name: 'Queue' })).body;
-    const card = (await owner.post(`${K}/boards/${board.id}/cards`, { title: 'First come', columnId: 'todo' })).body;
+    const board = (await owner.post<BoardBody>(`${K}/boards`, { name: 'Queue' })).body;
+    const card = (await owner.post<CardBody>(`${K}/boards/${board.id}/cards`, { title: 'First come', columnId: 'todo' })).body;
     expect((await owner.post(`${K}/cards/${card.id}/assign`, { assigneeRole: 'editor' })).status).toBe(200);
 
     const [ra, rb] = await Promise.all([a.post(`${K}/cards/${card.id}/claim`), b.post(`${K}/cards/${card.id}/claim`)]);
     const statuses = [ra.status, rb.status].sort();
     // Both may also resolve sequentially; then the loser sees the snapshot
     // check (400) instead of the CAS (409). Either way exactly one wins.
+    // Honest ceiling: the route offers no hook between its snapshot check and
+    // the CAS, so this cannot FORCE the race (probe w37g1-rt-claim-cas stays green
+    // when requests serialize). The fresh-read precondition itself is witnessed in
+    // kanban-stack-claim-heartbeat "refuses, and writes nothing, when the card
+    // changed after the caller's snapshot".
     expect(statuses[0]).toBe(200);
     expect([400, 409]).toContain(statuses[1]);
     const winner = ra.status === 200 ? ua.userId : ub.userId;
-    const after = (await owner.get(`${K}/boards/${board.id}`)).body.cards.find((c: { id: string }) => c.id === card.id);
-    expect(after.assigneeId).toBe(winner);
-    expect(after.assigneeRole).toBeUndefined();
+    const after = (await owner.get<BoardDetail>(`${K}/boards/${board.id}`)).body.cards.find((c) => c.id === card.id);
+    expect(after?.assigneeId).toBe(winner);
+    expect(after?.assigneeRole).toBeUndefined();
   });
 });
 
@@ -186,9 +207,9 @@ describe('grade-code fixes inside the ADR 0774 cut (routes)', () => {
   it('KSCD-3 — a viewer invited into someone ELSE\'s personal workspace does not inherit its owner\'s write', async () => {
     const owner = client();
     await signup(owner);
-    const personal = (await owner.get('/host/openwop-app/me/workspaces')).body.personal as string;
+    const personal = (await owner.get<{ personal: string }>('/host/openwop-app/me/workspaces')).body.personal;
     expect(personal).toMatch(/^user:/);
-    const board = await owner.post(`${K}/boards`, { name: 'My own' });
+    const board = await owner.post<BoardBody>(`${K}/boards`, { name: 'My own' });
     expect(board.status, JSON.stringify(board.body)).toBe(201); // the owner's shortcut still holds
 
     const guest = client();
@@ -198,26 +219,30 @@ describe('grade-code fixes inside the ADR 0774 cut (routes)', () => {
     expect((await guest.post(`${WS}/${encodeURIComponent(personal)}/switch`)).status).toBe(200);
 
     // The tenant has a personal SHAPE; the guest is not its owner.
-    const refused = await guest.post(`${K}/boards/${board.body.id}/cards`, { title: 'Injected', columnId: 'todo' });
+    const refused = await guest.post<ErrBody>(`${K}/boards/${board.body.id}/cards`, { title: 'Injected', columnId: 'todo' });
     expect(refused.status, JSON.stringify(refused.body)).toBe(403);
-    expect((await guest.post(`${K}/boards`, { name: 'Squat' })).status).toBe(403);
+    expect(refused.body).toMatchObject({ error: 'forbidden_scope' });
+    const squat = await guest.post<ErrBody>(`${K}/boards`, { name: 'Squat' });
+    expect(squat.status).toBe(403);
+    expect(squat.body).toMatchObject({ error: 'forbidden_scope' });
   });
 
   it('KSCD-4 — a viewer cannot claim a role card addressed to a role they do not hold (and so cannot then trigger it)', async () => {
     const { owner, member: viewer } = await sharedWorkspaceWith('viewer');
-    const board = (await owner.post(`${K}/boards`, {
+    const board = (await owner.post<BoardBody>(`${K}/boards`, {
       name: 'Roles',
       columns: [{ id: 'todo', name: 'To Do' }, { id: 'go', name: 'Go', triggerWorkflowId: 'wf-anything' }, { id: 'done', name: 'Done', terminal: true }],
     })).body;
-    const card = (await owner.post(`${K}/boards/${board.id}/cards`, { title: 'For editors', columnId: 'todo' })).body;
+    const card = (await owner.post<CardBody>(`${K}/boards/${board.id}/cards`, { title: 'For editors', columnId: 'todo' })).body;
     expect((await owner.post(`${K}/cards/${card.id}/assign`, { assigneeRole: 'editor' })).status).toBe(200);
 
-    const claim = await viewer.post(`${K}/cards/${card.id}/claim`);
+    const claim = await viewer.post<ErrBody>(`${K}/cards/${card.id}/claim`);
     expect(claim.status, JSON.stringify(claim.body)).toBe(403);
+    expect(claim.body).toMatchObject({ error: 'forbidden', message: 'Only a holder of the role this task is addressed to can claim it.' });
     // Not the assignee, so the carve-out stays shut too.
     expect((await viewer.patch(`${K}/cards/${card.id}`, { columnId: 'go' })).status).toBe(403);
-    const after = (await owner.get(`${K}/boards/${board.id}`)).body.cards.find((c: { id: string }) => c.id === card.id);
+    const after = (await owner.get<BoardDetail>(`${K}/boards/${board.id}`)).body.cards.find((c) => c.id === card.id);
     expect(after).toMatchObject({ columnId: 'todo', assigneeRole: 'editor' });
-    expect(after.lastRunId).toBeUndefined();
+    expect(after?.lastRunId).toBeUndefined();
   });
 });

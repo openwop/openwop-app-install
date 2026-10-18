@@ -31,11 +31,14 @@ vi.mock('../../../featureToggles/FeatureAccessContext.js', async (orig) => ({
 }));
 
 import { ScheduledChatsPage } from '../ScheduledChatsPage.js';
+import type { ScheduledChat } from '../../../client/scheduledChatsClient.js';
 
 const ORG = { orgId: 'o1', name: 'Acme' };
-const CHAT = {
-  scheduledChatId: 's1', agentId: 'a1', cron: '0 9 * * *', enabled: true,
-  prompt: 'daily standup', timezone: 'UTC',
+// Typed as the real `ScheduledChat`: this used to carry `scheduledChatId`/`cron`/
+// `timezone`, none of which exist, so the row key and schedule cell were undefined.
+const CHAT: ScheduledChat = {
+  chatId: 's1', agentId: 'a1', prompt: 'daily standup', conversationId: 'cv1',
+  cronExpr: '0 9 * * *', enabled: true,
 };
 
 const mount = async (): Promise<void> => {
@@ -73,6 +76,8 @@ describe('a failed ORGANIZATION read is not a loading schedule', () => {
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Try again' })); });
     expect(listOrgs).toHaveBeenCalledTimes(2);
     expect(document.body.textContent).not.toContain(FAILED);
+    // …and the schedule actually rendered (the real `cronExpr`), not a skeleton.
+    expect(document.body.textContent).toContain('0 9 * * *');
   });
 
   it('read SUCCEEDS with []: the real zero-organization state, not a failure and not a skeleton', async () => {
@@ -87,12 +92,8 @@ describe('a failed ORGANIZATION read is not a loading schedule', () => {
     expect(listScheduledChats).not.toHaveBeenCalled();
   });
 
-  it('an organization with genuinely no scheduled chats still reads as empty', async () => {
-    // The failure mode of this fix: a real empty state replaced by an org claim.
-    listScheduledChats.mockResolvedValue([]);
-    await mount();
-    expect(document.body.textContent).toContain('No scheduled chats yet.');
-    expect(document.body.textContent).not.toContain(FAILED);
-    expect(document.body.textContent).not.toContain('No organizations');
-  });
+  // CUT (wave 26): "an organization with genuinely no scheduled chats still reads as
+  // empty" — covered by `ScheduledChatsPage.test.tsx` › "shows the empty state"
+  // (probe w26g3-sco-rows-empty-cover red); its negatives only fail if the org read
+  // breaks, which the cases above own.
 });

@@ -14,13 +14,20 @@
  * lost is the ADVANCE WARNING: the operator clicks Off and learns by server
  * rejection instead of by disclosure. So this fix DISCLOSES, and deliberately
  * does not block — blocking would be a UI claim stronger than the truth.
+ *
+ * Sabotage that turns it red: `setConsoleFailed(!con.ok)` → `false` (case 1);
+ * re-throwing the projection failure (case 2: the panel blanks); always showing
+ * the Notice (cases 3–4); a retry button that does not call `load` (case 5).
+ * Every absence is asserted only after the "Required by email" note — the FT-G1
+ * disclosure's subject — proves the projection settled.
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, cleanup, act, fireEvent } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 
 const { listToggleConfigs, listFeatureConsole } = vi.hoisted(() => ({
-  listToggleConfigs: vi.fn(), listFeatureConsole: vi.fn(),
+  listToggleConfigs: vi.fn<() => Promise<ToggleConfig[]>>(),
+  listFeatureConsole: vi.fn<() => Promise<FeatureConsoleEntry[]>>(),
 }));
 vi.mock('../../client/featureTogglesClient.js', async (orig) => ({
   ...(await orig<typeof import('../../client/featureTogglesClient.js')>()),
@@ -28,9 +35,10 @@ vi.mock('../../client/featureTogglesClient.js', async (orig) => ({
 }));
 
 import { FeatureTogglePanel } from '../FeatureTogglePanel.js';
+import type { FeatureConsoleEntry, ToggleConfig } from '../../client/featureTogglesClient.js';
 
-const CONFIG = { id: 'crm', label: 'CRM', status: 'on' as const, rollout: 100, variants: [] };
-const ENTRY = {
+const CONFIG: ToggleConfig = { id: 'crm', label: 'CRM', status: 'on', bucketUnit: 'user', salt: 's', variants: [] };
+const ENTRY: FeatureConsoleEntry = {
   id: 'crm', dependsOn: [], dependents: ['email'], blockedByDependents: ['email'],
   recommends: [], recommendedOff: [], packs: [],
 };
@@ -52,7 +60,10 @@ describe('FT-G1 — a missing projection says so', () => {
   it('discloses that dependency information is missing', async () => {
     listFeatureConsole.mockRejectedValue(new Error('503'));
     await mount();
-    expect(document.body.textContent).toContain('dependency information could not be loaded');
+    expect(await screen.findByText(/dependency information could not be loaded/)).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Try again' })).toBeTruthy();
+    // What the disclosure is FOR: the "required by" note is gone.
+    expect(screen.queryByText(/Required by email/)).toBeNull();
   });
 
   it('does NOT block the panel — the server is the authority', async () => {
@@ -60,12 +71,14 @@ describe('FT-G1 — a missing projection says so', () => {
     // enforced server-side either way.
     listFeatureConsole.mockRejectedValue(new Error('503'));
     await mount();
-    expect(document.body.textContent).toContain('CRM');
+    await screen.findByText(/dependency information could not be loaded/);
+    expect(screen.getByText('CRM')).toBeTruthy();
   });
 
   it('says nothing when the projection loads', async () => {
     // The failure mode of this fix is warning on every healthy page load.
     await mount();
+    expect(await screen.findByText(/Required by email/)).toBeTruthy(); // settled
     expect(document.body.textContent).not.toContain('dependency information could not be loaded');
   });
 
@@ -74,13 +87,16 @@ describe('FT-G1 — a missing projection says so', () => {
     // answer, and it must not trigger the warning.
     listFeatureConsole.mockResolvedValue([]);
     await mount();
+    await screen.findByText('CRM'); // settled
+    expect(screen.queryByText(/Required by/)).toBeNull(); // empty really is "no dependents"
     expect(document.body.textContent).not.toContain('dependency information could not be loaded');
   });
 
   it('the retry clears the warning', async () => {
     listFeatureConsole.mockRejectedValueOnce(new Error('503')).mockResolvedValueOnce([ENTRY]);
     await mount();
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Try again' })); });
+    await act(async () => { fireEvent.click(await screen.findByRole('button', { name: 'Try again' })); });
+    expect(await screen.findByText(/Required by email/)).toBeTruthy(); // the retry's read landed
     expect(document.body.textContent).not.toContain('dependency information could not be loaded');
   });
 });

@@ -160,5 +160,5 @@ export function registerToolCatalogRoutes(app: Express, deps: Deps): void {
     } catch (err) { next(err); }
   });
 
-  log.info('tool-catalog routes registered (GET /v1/tools, GET /v1/tools/:toolId — RFC 0078 §B, mcp source)');
+  log.info('tool-catalog routes registered (GET /tools, GET /tools/:toolId — RFC 0078 §B, mcp source)');
 }

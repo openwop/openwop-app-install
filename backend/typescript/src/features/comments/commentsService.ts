@@ -25,6 +25,14 @@ import { getList as getPriorityList, listRankedIdeas } from '../priority-matrix/
 import { getCollection } from '../kb/kbService.js';
 import { hostExtStorage } from '../../host/hostExtPersistence.js';
 import { getCanvasForTenant } from '../../host/canvasSurface.js';
+import { getConversationMeta } from '../../host/conversationStore.js';
+import { isVisibleToAsync } from '../../host/conversationVisibility.js';
+import { listMembers } from '../../host/accessControlService.js';
+import { emitHostEvent, type HostEventOrigin } from '../../host/hostEventDispatcher.js';
+import type { ToggleSubject } from '../../host/featureToggles/types.js';
+import { createLogger } from '../../observability/logger.js';
+
+const log = createLogger('features.comments');
 
 // ADR 0081 P5 — a comment's `body` is author free-text (may name/quote people); declare
 // it for log-masking (ADR 0077). `authorId` is an opaque principal id (RFC 0048), not PII.
@@ -37,8 +45,8 @@ declarePiiFields('comments.comment', ['body']);
 // messageId is the opaque UI anchor. v1 is INTRA-TENANT (a chat session is
 // tenant-private, unlike the org-shared cms/kb resources); cross-tenant comments on
 // a SHARED session (RFC 0122 share grant) are a follow-up (see ADR).
-export type ResourceType = 'cms_page' | 'kb_collection' | 'chat_message' | 'priority_idea' | 'canvas_document' | 'creative_brief';
-export const RESOURCE_TYPES: readonly ResourceType[] = ['cms_page', 'kb_collection', 'chat_message', 'priority_idea', 'canvas_document', 'creative_brief'];
+export type ResourceType = 'cms_page' | 'kb_collection' | 'chat_message' | 'priority_idea' | 'canvas_document' | 'creative_brief' | 'canvas_slides';
+export const RESOURCE_TYPES: readonly ResourceType[] = ['cms_page', 'kb_collection', 'chat_message', 'priority_idea', 'canvas_document', 'creative_brief', 'canvas_slides'];
 
 export type CommentStatus = 'open' | 'resolved';
 
@@ -55,103 +63,128 @@ export interface Comment {
    *  a human-authored row (where `authorId` already is that principal). */
   onBehalfOf?: string;
   status: CommentStatus;
+  /** ADR 0881 D5 — the org members this comment @mentioned AND notified (a member who
+   *  could not see the target is never stored here; see `unnotifiedMentions`). */
+  mentions?: string[];
+  /** ADR 0881 D6 — who resolved it and when; cleared on reopen. `resolvedBy` is
+   *  `agent:<runId>` on the workflow lane, with the human in `resolvedOnBehalfOf`. */
+  resolvedBy?: string;
+  resolvedOnBehalfOf?: string;
+  resolvedAt?: string;
+  /** ADR 0881 D6 — set when the author changed the body. */
+  editedAt?: string;
   createdAt: string;
   updatedAt: string;
 }
 
-const MAX = { body: 4000 } as const;
+const MAX = { body: 4000, mentions: 20, participants: 50 } as const;
 
-/** A commentable resource: validate it is in (tenant, org) and yield the title +
- *  owner used for the notification emit. Returns null when not in this org (the
- *  caller maps that to a uniform 404 — no cross-org existence leak). */
-interface CommentTarget {
-  /** `caller` (ADR 0643 R3 Blocker 2) — the commenting principal; a subject-bindable
-   *  target (a KB collection) resolves it so a non-member's comment cannot 404-probe
-   *  or surface a private corpus's name in a thread title. */
-  validate(tenantId: string, orgId: string, resourceId: string, caller?: SubjectCaller): Promise<{ title: string; ownerId: string } | null>;
+/**
+ * ADR 0881 D1/D2 — the caller as the comments lanes know it. Feature-local on purpose:
+ * it extends the shared `SubjectCaller` without widening it.
+ *
+ *  - `subject` — the canonical user (HTTP `resolveCallerUser`; tool/workflow
+ *    `actingUserId`). Every subject-bound resolver reads it.
+ *  - `principal` — the DOOR's spelling, `req.userId ?? principalId`, which is how a
+ *    conversation stamps its owner and participants. For an unbound OIDC session it is
+ *    `oidc:<sub>` while `subject` is `user:<hash>` (the ADR's correction H4), so the
+ *    conversation predicate is asked with this, never with `subject`.
+ *  - `toggle` — the owning-feature entitlement subject (HTTP `toggleSubjectOf(req)`,
+ *    which carries the cohort principal and the operator's `planExempt`).
+ */
+export interface CommentCaller extends SubjectCaller {
+  principal?: string;
+  toggle?: Omit<ToggleSubject, 'tenantId'>;
 }
 
-/** `resolveOne('priority-matrix')` for the `priority_idea` target (toggle + plan, ADR 0819). */
-async function priorityMatrixAllowed(tenantId: string, caller: SubjectCaller | undefined): Promise<boolean> {
-  try {
-    return Boolean((await resolveOne('priority-matrix', { tenantId, ...(caller?.subject ? { userId: caller.subject } : {}) }))?.enabled);
-  } catch {
-    return false;
-  }
+/** The caller a RECIPIENT is checked as (ADR 0881 D3): one id, every spelling. */
+function recipientCaller(userId: string): CommentCaller {
+  return { subject: userId, principal: userId, toggle: { userId } };
+}
+
+/** A resolved commentable target. `restricted` (ADR 0881 D8) = its visibility is
+ *  narrower than the org (a private conversation, a subject-bound corpus, a
+ *  project-owned canvas or list): no host event is emitted for it. `archived` (D1) = a
+ *  read-only target that refuses new comments. */
+export interface ResolvedTarget { title: string; ownerId: string; restricted: boolean; archived?: boolean }
+
+/** A commentable resource: validate it is in (tenant, org) and visible to the caller,
+ *  and yield the title + owner used for the notification emit. Returns null when not
+ *  (the caller maps that to a uniform 404 — no existence leak). */
+interface CommentTarget {
+  /** ADR 0881 D2 — the feature that OWNS this resource type. Its entitlement (toggle +
+   *  plan) is checked in ONE place, `resolveCommentTarget`, before `validate` runs.
+   *  `null` = always on: `cms` and `kb` have no toggle (ALWAYS-ON, ADR 0027) and chat is
+   *  core. A non-null id MUST be a registered toggle (`comments-adr0881.test.ts` D2). */
+  featureId: string | null;
+  validate(tenantId: string, orgId: string, resourceId: string, caller: CommentCaller): Promise<ResolvedTarget | null>;
 }
 
 const TARGETS: Record<ResourceType, CommentTarget> = {
   // ADR 0353 P4 — threaded review comments on a creative brief.
   creative_brief: {
+    featureId: 'creative-briefs',
     async validate(tenantId, orgId, resourceId) {
       const b = await getCreativeBrief(tenantId, orgId, resourceId);
-      return b ? { title: b.title, ownerId: b.createdBy } : null;
+      return b ? { title: b.title, ownerId: b.createdBy, restricted: false } : null;
     },
   },
   cms_page: {
+    featureId: null,
     async validate(tenantId, orgId, resourceId) {
       const p = await getPage(tenantId, orgId, resourceId);
-      return p ? { title: p.title, ownerId: p.createdBy } : null;
+      return p ? { title: p.title, ownerId: p.createdBy, restricted: false } : null;
     },
   },
   kb_collection: {
+    featureId: null,
     async validate(tenantId, orgId, resourceId, caller) {
-      const c = await getCollection(tenantId, orgId, resourceId, caller ?? { subject: undefined }); // KBC-1 / R3 Blocker 2 — the commenter's principal, fail-closed when absent
-      return c ? { title: c.name, ownerId: c.createdBy } : null;
+      const c = await getCollection(tenantId, orgId, resourceId, caller); // KBC-1 / R3 Blocker 2 — the commenter's principal, fail-closed when absent
+      return c ? { title: c.name, ownerId: c.createdBy, restricted: Boolean(c.boundSubject) } : null;
     },
   },
-  // A chat message: resourceId is `${sessionId}#${messageId}`. Validated by TENANT
-  // ownership (`getChatSession` returns null outside the caller's tenant ⇒ uniform
-  // 404, no cross-tenant existence leak); the messageId is opaque here (the UI
-  // anchors on it). Chat sessions carry no org/owner field, so `ownerId` is empty
-  // (a chat is tenant-private — no distinct resource owner to notify).
+  // A chat message: resourceId is `${sessionId}#${messageId}`; the messageId is the
+  // opaque UI anchor. ADR 0881 D1 — a conversation is owner/participant-private, so the
+  // thread is exactly as visible as the conversation: the session must EXIST (the
+  // visibility predicate answers `true` for a null meta, so existence is checked first)
+  // AND be visible through `isVisibleToAsync`, the predicate the chat routes use. Before
+  // this, any tenant member read and wrote the threads on another person's private chat.
+  // Chat sessions carry no org field; the `_orgId` stays unused (`CMWF-4`, open).
   chat_message: {
-    async validate(tenantId, _orgId, resourceId) {
+    featureId: null,
+    async validate(tenantId, _orgId, resourceId, caller) {
       const sessionId = resourceId.split('#')[0] ?? '';
       if (!sessionId) return null;
       const session = await hostExtStorage().getChatSession(tenantId, sessionId);
-      return session ? { title: session.title || 'Conversation', ownerId: '' } : null;
+      if (!session) return null;
+      const meta = await getConversationMeta(tenantId, sessionId);
+      if (!caller.preAuthorized && !(await isVisibleToAsync(meta, tenantId, caller.principal ?? caller.subject))) return null;
+      const archived = meta?.type === 'channel' && meta.channel?.archived === true;
+      return { title: session.title || 'Conversation', ownerId: '', restricted: true, ...(archived ? { archived } : {}) };
     },
   },
   // A priority idea (ADR 0232): resourceId is `${listId}#${cardId}`. Validated by
-  // the LIST's tenant + org (the aggregate root — the ADR 0021 "one map entry"
-  // extension contract); the card lives on the list's kanban board.
+  // the LIST's tenant + org (the aggregate root); the card lives on the list's board.
+  // The ADR 0820 §8.1 entitlement check now rides `featureId` (ADR 0881 D2).
   priority_idea: {
+    featureId: 'priority-matrix',
     async validate(tenantId, orgId, resourceId, caller) {
       const [listId, cardId] = resourceId.split('#');
       if (!listId || !cardId) return null;
-      // ADR 0820 §8.1 (core-audit §2b.6(iii)) — the idea and its list are
-      // priority-matrix data (Planning & Strategy), read here under the `comments`
-      // gate. A tenant refused `priority-matrix` gets NOT FOUND — the uniform `null`
-      // every lane maps to its own refusal — never a throw. Fail-closed on a resolver error.
-      if (!(await priorityMatrixAllowed(tenantId, caller))) return null;
       const list = await getPriorityList(tenantId, listId);
       if (!list || list.orgId !== orgId) return null;
-      // ADR 0842 D8 — a project-bound list is membership-scoped (ADR 0610 D3′). This
-      // validator checked tenant + org only and ignored the caller it is handed, so a
-      // non-member org viewer could open a thread on a PRIVATE project's idea and got the
-      // idea's title as the target. The KBC-1 rule: `preAuthorized` passes, an absent
-      // subject is refused, `null` from the seam falls through.
+      // ADR 0842 D8 — a project-bound list is membership-scoped (ADR 0610 D3′).
       if (list.projectId && !(await subjectReadAllowed(tenantId, { kind: 'project', id: list.projectId }, caller))) return null;
       const idea = (await listRankedIdeas(tenantId, listId)).find((r) => r.card.id === cardId);
-      return idea ? { title: idea.card.title, ownerId: idea.card.createdBy ?? list.createdBy } : null;
+      return idea ? { title: idea.card.title, ownerId: idea.card.createdBy ?? list.createdBy, restricted: Boolean(list.projectId) } : null;
     },
   },
   // A rich-text document canvas (ADR 0334): resourceId is the canvasId for a
   // whole-canvas thread, OR `${canvasId}#${threadId}` for an inline range-anchored
-  // thread (ADR 0334 6b — the chat_message/priority_idea composite-id precedent).
-  // Both validate the SAME canvas: split on '#' and take the canvasId portion
-  // (a bare canvasId has no '#', so `split('#')[0]` is backward-compatible).
-  // Validated by TENANT ownership + type (getCanvasForTenant returns null outside
-  // the caller's tenant ⇒ uniform 404; a wrong-type canvas is rejected). Canvases
-  // are tenant-scoped in host.canvas (org rides ownerSubject), so `orgId` is not
-  // the partition key here; ownerId is empty (no distinct row owner on the view).
-  // ADR 0659 D9 — org is NOT derivable here (`ownerSubject` is optional and a
-  // `kind:'user'` subject has no org resolver), so tenant stays the partition. The real
-  // gate is the SAME seam `kb_collection` uses: when the canvas carries an
-  // `ownerSubject`, the thread resolves only for a caller who may READ that subject.
-  // Additive — an owner-less canvas keeps its previous behaviour exactly.
+  // thread. Tenant-partitioned (org rides `ownerSubject`); ADR 0659 D9 — an owned
+  // canvas resolves only for a caller who may READ that subject.
   canvas_document: {
+    featureId: 'document-editor',
     async validate(tenantId, _orgId, resourceId, caller) {
       const canvasId = resourceId.split('#')[0] ?? '';
       const c = await getCanvasForTenant(tenantId, canvasId);
@@ -159,10 +192,43 @@ const TARGETS: Record<ResourceType, CommentTarget> = {
       if (c.ownerSubject && !(await subjectReadAllowed(tenantId, c.ownerSubject, caller))) return null;
       const st = c.state && typeof c.state === 'object' && !Array.isArray(c.state) ? (c.state as Record<string, unknown>) : {};
       const title = typeof st.title === 'string' && st.title ? st.title : (c.name || 'Document');
-      return { title, ownerId: '' };
+      return { title, ownerId: '', restricted: Boolean(c.ownerSubject) };
+    },
+  },
+  // A slide deck (ADR 0886 D5): resourceId is the canvasId for a whole-deck
+  // thread, OR `${canvasId}#${slideId}` for ONE slide. Same rules as
+  // `canvas_document` — tenant-partitioned, an owned deck needs READ on its owner
+  // subject — plus the slide must still be IN the deck: a deleted slide's thread
+  // resolves to nothing (the panel's gone-state), never to whatever slide now
+  // sits at that position. Slide ids are kept stable across edits (the editor's
+  // own ids; the Slide Designer render tool preserves them, ADR 0886 D5).
+  canvas_slides: {
+    featureId: 'slides',
+    async validate(tenantId, _orgId, resourceId, caller) {
+      const parts = resourceId.split('#');
+      if (parts.length > 2) return null;
+      const [canvasId = '', slideId] = parts;
+      const c = await getCanvasForTenant(tenantId, canvasId);
+      if (!c || c.canvasTypeId !== 'canvas.slides') return null;
+      if (c.ownerSubject && !(await subjectReadAllowed(tenantId, c.ownerSubject, caller))) return null;
+      const st = c.state && typeof c.state === 'object' && !Array.isArray(c.state) ? (c.state as Record<string, unknown>) : {};
+      const deckTitle = typeof st.title === 'string' && st.title ? st.title : (c.name || 'Slide deck');
+      let title = deckTitle;
+      if (slideId !== undefined) {
+        const slides = Array.isArray(st.slides) ? (st.slides as unknown[]) : [];
+        const slide = slides.find((x) => x && typeof x === 'object' && (x as { id?: unknown }).id === slideId) as { name?: unknown } | undefined;
+        if (!slide) return null;
+        if (typeof slide.name === 'string' && slide.name) title = `${deckTitle} — ${slide.name}`;
+      }
+      return { title, ownerId: '', restricted: Boolean(c.ownerSubject) };
     },
   },
 };
+
+/** Test-only: the owning feature each target declares (the drift guard reads the SAME values the gate reads). */
+export function __targetFeatureIds(): Record<ResourceType, string | null> {
+  return Object.fromEntries(RESOURCE_TYPES.map((t) => [t, TARGETS[t].featureId])) as Record<ResourceType, string | null>;
+}
 
 // GOV-1: `tenantOf` arms the tenant secondary index (bounded retention-purge scan).
 const comments = new DurableCollection<Comment>('comments:thread', (c) => c.commentId, undefined, (c) => c.tenantId);
@@ -210,9 +276,28 @@ async function rowsForTenant(tenantId: string): Promise<Comment[]> {
  * direction a forgotten gate must fail in.
  */
 async function resolveCommentTarget(
-  tenantId: string, orgId: string, resourceType: ResourceType, resourceId: string, caller: SubjectCaller,
-): Promise<{ title: string; ownerId: string } | null> {
-  return TARGETS[resourceType].validate(tenantId, orgId, resourceId, caller);
+  tenantId: string, orgId: string, resourceType: ResourceType, resourceId: string, caller: CommentCaller,
+): Promise<ResolvedTarget | null> {
+  const target = TARGETS[resourceType];
+  if (!(await ownerEntitled(tenantId, target.featureId, caller))) return null;
+  return target.validate(tenantId, orgId, resourceId, caller);
+}
+
+/**
+ * ADR 0881 D2 — the owning feature's entitlement (toggle + plan, `resolveOne`), the
+ * ADR 0820 §8.1 rule generalised from `priority_idea` to every target. A tenant refused
+ * the owning feature gets the uniform `null`, never a throw; a resolver error fails
+ * closed. Before this, a paywalled feature's threads and resource titles stayed
+ * reachable through `comments`.
+ */
+async function ownerEntitled(tenantId: string, featureId: string | null, caller: CommentCaller): Promise<boolean> {
+  if (featureId === null) return true;
+  const toggle = caller.toggle ?? (caller.subject ? { userId: caller.subject } : {});
+  try {
+    return Boolean((await resolveOne(featureId, { tenantId, ...toggle }))?.enabled);
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -222,7 +307,7 @@ async function resolveCommentTarget(
  * workflow surface) and MUST NOT distinguish the two causes.
  */
 export async function listThread(
-  tenantId: string, orgId: string, resourceType: ResourceType, resourceId: string, caller: SubjectCaller,
+  tenantId: string, orgId: string, resourceType: ResourceType, resourceId: string, caller: CommentCaller,
 ): Promise<Comment[] | null> {
   // Fail-closed FIRST: an unscoped read must never reach a resolver (which would hand an
   // empty tenantId to another feature's store). Caught by `comments-bounded-reads`.
@@ -240,16 +325,121 @@ export async function listThread(
  * returns, and it runs BEFORE any author/admin guard — otherwise `updateComment`'s 403
  * would still distinguish "exists, not yours" from "absent", which is the oracle D1 closes.
  */
-export async function getComment(tenantId: string, orgId: string, commentId: string, caller: SubjectCaller): Promise<Comment | null> {
+export async function getComment(tenantId: string, orgId: string, commentId: string, caller: CommentCaller): Promise<Comment | null> {
   const c = await comments.get(commentId);
   if (!c || c.tenantId !== tenantId || c.orgId !== orgId) return null;
   if (!(await resolveCommentTarget(tenantId, orgId, c.resourceType, c.resourceId, caller))) return null;
   return c;
 }
 
-/** What a fresh comment needs delivered (Phase 2 notification emit). `parentAuthorId`
- *  is set only for a reply, and only when it differs from the new comment's author. */
-export interface CommentNotifyTargets { resourceTitle: string; ownerId: string; parentAuthorId?: string }
+// ── notification planning (ADR 0881 D3/D4/D5) ──
+
+export type CommentNotifyType = 'comment.added' | 'comment.reply' | 'comment.mention' | 'comment.resolved';
+
+/** One addressed notification. */
+export interface CommentRecipient { userId: string; type: CommentNotifyType }
+
+/** What a write needs delivered: the target's title + who, already filtered. */
+export interface CommentNotifyPlan {
+  resourceTitle: string;
+  recipients: CommentRecipient[];
+  /** Who DID the thing — the author for a new comment, the resolver for a resolution
+   *  (`CM2CD-7`: it used to be the comment's author on a "resolved" notification). */
+  actorId: string;
+}
+
+/** Highest wins when one person is on several lists (D4): one notification per person. */
+const NOTIFY_PRECEDENCE: Record<CommentNotifyType, number> = { 'comment.mention': 4, 'comment.reply': 3, 'comment.resolved': 2, 'comment.added': 1 };
+
+/** The HUMAN a row speaks for: its `onBehalfOf`, else a non-agent author. An
+ *  `agent:<runId>` with no human behind it is nobody to notify (`CM2WF-6`). */
+function humanOf(c: Pick<Comment, 'authorId' | 'onBehalfOf'>): string | undefined {
+  if (c.onBehalfOf) return c.onBehalfOf;
+  return c.authorId.startsWith('agent:') ? undefined : c.authorId;
+}
+
+/**
+ * ADR 0881 D3 — THE recipient filter. A candidate is notified only when they are a
+ * human, not the actor, a member of the comment's org (matched on `member.subject`, the
+ * key member rows are written under — never `resolveEffectiveAccess`, which grants owner
+ * to an unknown subject in demo mode), AND can still resolve the target themselves
+ * (visibility + owning-feature entitlement). Before this, a person removed from the org
+ * was told a private page's title through the inbox. Drops are silent by design (an
+ * unreachable recipient is not the writer's error) and logged as a count only.
+ */
+async function deliverable(
+  tenantId: string, orgId: string, resourceType: ResourceType, resourceId: string,
+  candidates: readonly CommentRecipient[], actors: ReadonlySet<string>, members: ReadonlySet<string>,
+  /** `CM2CD-1` — ids `splitMentions` already resolved the target for, in this write. */
+  verified: ReadonlySet<string> = new Set(),
+): Promise<CommentRecipient[]> {
+  const best = new Map<string, CommentNotifyType>();
+  for (const c of candidates) {
+    if (!c.userId || c.userId.startsWith('agent:') || actors.has(c.userId)) continue;
+    const prev = best.get(c.userId);
+    if (!prev || NOTIFY_PRECEDENCE[c.type] > NOTIFY_PRECEDENCE[prev]) best.set(c.userId, c.type);
+  }
+  const out: CommentRecipient[] = [];
+  let dropped = 0;
+  for (const [userId, type] of best) {
+    if (members.has(userId) && (verified.has(userId) || (await resolveCommentTarget(tenantId, orgId, resourceType, resourceId, recipientCaller(userId))))) {
+      out.push({ userId, type });
+    } else {
+      dropped += 1;
+    }
+  }
+  if (dropped > 0) log.debug('comment_notify_recipients_dropped', { tenantId, resourceType, dropped });
+  return out;
+}
+
+async function orgMemberSubjects(tenantId: string, orgId: string): Promise<Set<string>> {
+  return new Set((await listMembers(tenantId, orgId)).map((m) => m.subject).filter((x): x is string => typeof x === 'string' && x.length > 0));
+}
+
+/**
+ * ADR 0881 D5 — validate a mention list. Every id MUST be a member of the comment's
+ * org (the channels S3 lesson: never accept any string as a person) — a non-member is a
+ * 400 and nothing is written. Members who cannot see the target are split out: they
+ * are neither stored nor notified, and the author is told who (`unnotifiedMentions`).
+ */
+async function splitMentions(
+  tenantId: string, orgId: string, resourceType: ResourceType, resourceId: string,
+  raw: unknown, members: ReadonlySet<string>, actors: ReadonlySet<string>,
+): Promise<{ notified: string[]; unnotified: string[] }> {
+  if (raw === undefined || raw === null) return { notified: [], unnotified: [] };
+  if (!Array.isArray(raw) || raw.some((m) => typeof m !== 'string' || !m)) {
+    throw new OpenwopError('validation_error', '`mentions` MUST be an array of member ids.', 400, { field: 'mentions' });
+  }
+  const ids = [...new Set(raw as string[])].filter((m) => !actors.has(m));
+  if (ids.length > MAX.mentions) {
+    throw new OpenwopError('validation_error', `At most ${MAX.mentions} people can be mentioned in one comment.`, 400, { field: 'mentions' });
+  }
+  if (ids.some((m) => !members.has(m))) {
+    throw new OpenwopError('validation_error', 'Only members of this organization can be mentioned.', 400, { field: 'mentions' });
+  }
+  const notified: string[] = [];
+  const unnotified: string[] = [];
+  for (const m of ids) {
+    if (await resolveCommentTarget(tenantId, orgId, resourceType, resourceId, recipientCaller(m))) notified.push(m); else unnotified.push(m);
+  }
+  return { notified, unnotified };
+}
+
+/** ADR 0881 D8 — a comment host event, ids only. Never for a RESTRICTED target: a
+ *  private conversation, a bound corpus, an owned canvas or list — the webhook fan-out is
+ *  tenant-wide and a binding's run acts for nobody, so the activity is itself the leak. */
+async function emitCommentEvent(verb: 'created' | 'resolved', c: Comment, target: ResolvedTarget, origin?: HostEventOrigin): Promise<void> {
+  if (target.restricted) return;
+  await emitHostEvent({
+    type: `host.comments.comment.${verb}`,
+    tenantId: c.tenantId,
+    payload: {
+      orgId: c.orgId, resourceType: c.resourceType, resourceId: c.resourceId, commentId: c.commentId,
+      ...(c.parentId ? { parentId: c.parentId } : {}),
+    },
+    ...(origin ? { origin } : {}),
+  });
+}
 
 // ── writes ──
 export async function createComment(input: {
@@ -257,85 +447,159 @@ export async function createComment(input: {
   /** Provenance — WHO WROTE IT. On the workflow lane this is `agent:${runId}`. */
   authorId: string;
   /** ADR 0659 D1 — authorization: WHOSE ACCESS DECIDES. Never derived from `authorId`. */
-  caller: SubjectCaller;
+  caller: CommentCaller;
   /** ADR 0659 D10 — the human principal a run acted for, so erasure reaches
    *  agent-authored rows (`authorId` is `agent:${runId}` and matches no subject key). */
   onBehalfOf?: string;
-}): Promise<{ comment: Comment; notify: CommentNotifyTargets }> {
+  /** ADR 0881 D5 — HTTP lane only (the chat tool and the node do not pass it). */
+  mentions?: unknown;
+  /** ADR 0617 D1a — the emitting run, from the workflow surface. */
+  origin?: HostEventOrigin;
+}): Promise<{ comment: Comment; notify: CommentNotifyPlan; unnotifiedMentions: string[] }> {
   if (!isResourceType(input.resourceType)) {
     throw new OpenwopError('validation_error', `\`resourceType\` MUST be one of: ${RESOURCE_TYPES.join(', ')}.`, 400, { field: 'resourceType' });
   }
+  const resourceType = input.resourceType;
   const resourceId = typeof input.resourceId === 'string' ? input.resourceId.trim() : '';
   if (!resourceId) throw new OpenwopError('validation_error', '`resourceId` is required.', 400, { field: 'resourceId' });
   const body = cleanString(input.body, MAX.body);
   if (!body) throw new OpenwopError('validation_error', '`body` is required and MUST be a non-empty string.', 400, { field: 'body' });
 
-  // The resource MUST exist in THIS (tenant, org) — cross-org/tenant id 404s — and be
-  // readable by the CALLER (ADR 0643 R3 Blocker 2, corrected by ADR 0659 D1: this used to
-  // pass the AUTHOR, which refused every agent-authored comment on a bound corpus).
-  const target = await resolveCommentTarget(input.tenantId, input.orgId, input.resourceType, resourceId, input.caller);
+  // The resource MUST exist in THIS (tenant, org), be readable by the CALLER (ADR 0659
+  // D1) and its owning feature be usable (ADR 0881 D2) — every miss is the same 404.
+  const target = await resolveCommentTarget(input.tenantId, input.orgId, resourceType, resourceId, input.caller);
   if (!target) throw new OpenwopError('not_found', 'Resource not found in this organization.', 404, { resourceId });
+  // ADR 0881 D1 — an archived channel is read-only; its threads take no new comments.
+  if (target.archived) throw new OpenwopError('conflict', 'This channel is archived, so its threads are read-only.', 409, { resourceId });
 
   // A reply's parent MUST be a live comment on the SAME thread (a root comment —
   // single-level threading in v1; a reply-to-reply re-parents to the root).
-  let parentId: string | undefined;
-  let parentAuthorId: string | undefined;
+  let parent: Comment | undefined;
   if (input.parentId != null && input.parentId !== '') {
     const pid = typeof input.parentId === 'string' ? input.parentId : '';
-    const parent = pid ? await comments.get(pid) : null;
-    if (!parent || parent.tenantId !== input.tenantId || parent.orgId !== input.orgId
-      || parent.resourceType !== input.resourceType || parent.resourceId !== resourceId) {
+    const p = pid ? await comments.get(pid) : null;
+    if (!p || p.tenantId !== input.tenantId || p.orgId !== input.orgId
+      || p.resourceType !== resourceType || p.resourceId !== resourceId) {
       throw new OpenwopError('validation_error', '`parentId` does not reference a comment on this thread.', 400, { field: 'parentId' });
     }
-    parentId = parent.parentId ?? parent.commentId; // flatten reply-to-reply to the root
-    parentAuthorId = parent.authorId !== input.authorId ? parent.authorId : undefined;
+    parent = p.parentId ? ((await comments.get(p.parentId)) ?? p) : p; // flatten reply-to-reply to the root
   }
+
+  const actors = new Set([input.authorId, ...(input.onBehalfOf ? [input.onBehalfOf] : [])]);
+  // `CM2CD-1` — the member list is read only when someone could be told: a mention, a
+  // reply (there is always a thread author), or a root on a resource with an owner.
+  const mayNotify = input.mentions !== undefined || parent !== undefined || Boolean(target.ownerId);
+  const members = mayNotify ? await orgMemberSubjects(input.tenantId, input.orgId) : new Set<string>();
+  const mentioned = await splitMentions(input.tenantId, input.orgId, resourceType, resourceId, input.mentions, members, actors);
 
   const now = new Date().toISOString();
   const comment: Comment = {
     commentId: `cmt:${randomUUID()}`,
     tenantId: input.tenantId, orgId: input.orgId,
-    resourceType: input.resourceType, resourceId,
-    ...(parentId ? { parentId } : {}),
+    resourceType, resourceId,
+    ...(parent ? { parentId: parent.commentId } : {}),
     body, authorId: input.authorId,
     ...(input.onBehalfOf ? { onBehalfOf: input.onBehalfOf } : {}),
+    ...(mentioned.notified.length ? { mentions: mentioned.notified } : {}),
     status: 'open', createdAt: now, updatedAt: now,
   };
   await comments.put(comment);
-  return {
-    comment,
-    notify: { resourceTitle: target.title, ownerId: target.ownerId, ...(parentAuthorId ? { parentAuthorId } : {}) },
-  };
+
+  // ADR 0881 D4 — a root tells the resource owner; a reply tells EVERYONE in the
+  // thread (the root's author + every earlier replier, capped); mentions tell the
+  // mentioned. One notification per person, highest precedence wins, all through D3.
+  const candidates: CommentRecipient[] = mentioned.notified.map((userId) => ({ userId, type: 'comment.mention' as const }));
+  if (parent) {
+    const thread = (await rowsForTenant(input.tenantId))
+      .filter((c) => c.orgId === input.orgId && (c.commentId === parent.commentId || c.parentId === parent.commentId) && c.commentId !== comment.commentId)
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    const people = [...new Set(thread.map(humanOf).filter((x): x is string => Boolean(x)))].slice(0, MAX.participants);
+    for (const userId of people) candidates.push({ userId, type: 'comment.reply' });
+  } else if (target.ownerId) {
+    candidates.push({ userId: target.ownerId, type: 'comment.added' });
+  }
+  const recipients = candidates.length
+    ? await deliverable(input.tenantId, input.orgId, resourceType, resourceId, candidates, actors, members, new Set(mentioned.notified))
+    : [];
+  await emitCommentEvent('created', comment, target, input.origin);
+  return { comment, notify: { resourceTitle: target.title, recipients, actorId: input.authorId }, unnotifiedMentions: mentioned.unnotified };
 }
 
-/** Edit own body and/or flip open↔resolved. Body edits are author-only; resolve/
- *  reopen is any member's (passed `canResolve`). Returns null when not found. */
+/** The outcome of an update: the row, plus what to deliver (ADR 0881 D5/D6). */
+export interface CommentUpdate { comment: Comment; notify: CommentNotifyPlan; unnotifiedMentions: string[] }
+
+/** Edit own body (with optional new mentions) and/or flip open↔resolved. Body edits are
+ *  author-only; resolve/reopen is any member's. Returns null when not found. */
 export async function updateComment(
-  tenantId: string, orgId: string, commentId: string, actorId: string,
-  patch: { body?: unknown; status?: unknown },
-  caller: SubjectCaller,
-): Promise<Comment | null> {
+  tenantId: string, orgId: string, commentId: string,
+  actor: { id: string; onBehalfOf?: string },
+  patch: { body?: unknown; status?: unknown; mentions?: unknown },
+  caller: CommentCaller,
+  origin?: HostEventOrigin,
+): Promise<CommentUpdate | null> {
   const existing = await getComment(tenantId, orgId, commentId, caller); // D1 — gate BEFORE the author guard
   if (!existing) return null;
+  const target = await resolveCommentTarget(tenantId, orgId, existing.resourceType, existing.resourceId, caller);
+  if (!target) return null; // raced away between the two reads — the same uniform null
   const next: Comment = { ...existing };
+  const now = new Date().toISOString();
+  const actors = new Set([actor.id, ...(actor.onBehalfOf ? [actor.onBehalfOf] : [])]);
+  const candidates: CommentRecipient[] = [];
+  let unnotifiedMentions: string[] = [];
+  let members: Set<string> | null = null;
+  let verified = new Set<string>();
 
+  if (patch.mentions !== undefined && patch.body === undefined) {
+    throw new OpenwopError('validation_error', '`mentions` can only change together with `body`.', 400, { field: 'mentions' });
+  }
   if (patch.body !== undefined) {
-    if (existing.authorId !== actorId) {
+    if (existing.authorId !== actor.id) {
       throw new OpenwopError('forbidden_scope', 'Only the author may edit a comment body.', 403, { commentId });
     }
+    // `CM2CD-4` — an archived channel's threads are read-only for edits too, not
+    // only for new comments (an edit can add mentions, which notify).
+    if (target.archived) throw new OpenwopError('conflict', 'This channel is archived, so its threads are read-only.', 409, { commentId });
     const body = cleanString(patch.body, MAX.body);
     if (!body) throw new OpenwopError('validation_error', '`body` MUST be a non-empty string.', 400, { field: 'body' });
-    next.body = body;
+    if (body !== existing.body) { next.body = body; next.editedAt = now; }
+    if (patch.mentions !== undefined) {
+      members = await orgMemberSubjects(tenantId, orgId);
+      const split = await splitMentions(tenantId, orgId, existing.resourceType, existing.resourceId, patch.mentions, members, actors);
+      unnotifiedMentions = split.unnotified;
+      verified = new Set(split.notified);
+      // Edits never re-notify: only people not already on the row hear about it.
+      const already = new Set(existing.mentions ?? []);
+      for (const m of split.notified) if (!already.has(m)) candidates.push({ userId: m, type: 'comment.mention' });
+      if (split.notified.length) next.mentions = split.notified; else delete next.mentions;
+    }
   }
+  let resolvedNow = false;
   if (patch.status !== undefined) {
     if (patch.status !== 'open' && patch.status !== 'resolved') {
       throw new OpenwopError('validation_error', "`status` MUST be 'open' or 'resolved'.", 400, { field: 'status' });
     }
-    next.status = patch.status;
+    // D6 — stamps move only on a real transition; a re-resolve is a no-op.
+    if (patch.status !== existing.status) {
+      next.status = patch.status;
+      if (patch.status === 'resolved') {
+        resolvedNow = true;
+        next.resolvedBy = actor.id;
+        if (actor.onBehalfOf) next.resolvedOnBehalfOf = actor.onBehalfOf; else delete next.resolvedOnBehalfOf;
+        next.resolvedAt = now;
+        const author = humanOf(existing);
+        if (author) candidates.push({ userId: author, type: 'comment.resolved' });
+      } else {
+        delete next.resolvedBy; delete next.resolvedOnBehalfOf; delete next.resolvedAt;
+      }
+    }
   }
-  next.updatedAt = new Date().toISOString();
+  next.updatedAt = now;
   await comments.put(next);
-  return next;
+  const recipients = candidates.length
+    ? await deliverable(tenantId, orgId, existing.resourceType, existing.resourceId, candidates, actors, members ?? await orgMemberSubjects(tenantId, orgId), verified)
+    : [];
+  if (resolvedNow) await emitCommentEvent('resolved', next, target, origin);
+  return { comment: next, notify: { resourceTitle: target.title, recipients, actorId: actor.id }, unnotifiedMentions };
 }
 
 /**
@@ -385,7 +649,7 @@ export async function pruneThreadsForResourceAndComposites(
 
 export async function deleteComment(
   tenantId: string, orgId: string, commentId: string, actor: { userId: string; isAdmin: boolean },
-  caller: SubjectCaller,
+  caller: CommentCaller,
 ): Promise<boolean> {
   const existing = await getComment(tenantId, orgId, commentId, caller); // D1 — gate BEFORE the actor guard
   if (!existing) return false;
@@ -407,7 +671,6 @@ export async function deleteComment(
   return comments.delete(commentId);
 }
 
-/** Test-only: clear the comment store. */
 // ADR 0081 P5 — time-based retention (ADR 0077 seam). Delete this tenant's comment
 // threads NOT touched within the window — age on `updatedAt` (an active thread keeps
 // being touched; a year-dormant thread's free-text body is the stale PII). No-op on a
@@ -438,7 +701,17 @@ export async function deleteSubjectComments(tenantId: string, subjectKey: string
   // CMNT-3 — indexed, not a full-collection scan. Erasure runs once per resolved
   // subject key, so the old `list()` was N tenant-wide scans per DSAR.
   for (const c of await rowsForTenant(tenantId)) {
-    if (c.authorId === subjectKey || c.onBehalfOf === subjectKey) { await comments.delete(c.commentId); removed += 1; } // D10
+    if (c.authorId === subjectKey || c.onBehalfOf === subjectKey) { await comments.delete(c.commentId); removed += 1; continue; } // D10
+    // ADR 0881 D10 — the person-shaped fields on OTHER people's rows: a mention of the
+    // subject and a resolution by them. The row stays (it is the author's speech).
+    const mentions = c.mentions?.filter((m) => m !== subjectKey);
+    const resolvedBySubject = c.resolvedBy === subjectKey || c.resolvedOnBehalfOf === subjectKey;
+    if ((c.mentions && mentions && mentions.length !== c.mentions.length) || resolvedBySubject) {
+      const next: Comment = { ...c };
+      if (mentions && mentions.length) next.mentions = mentions; else delete next.mentions;
+      if (resolvedBySubject) { delete next.resolvedBy; delete next.resolvedOnBehalfOf; }
+      await comments.put(next);
+    }
   }
   return removed;
 }
@@ -446,4 +719,5 @@ export async function deleteSubjectComments(tenantId: string, subjectKey: string
 const commentsEraser = async (tenantId: string, subjectKey: string): Promise<void> => { await deleteSubjectComments(tenantId, subjectKey); };
 registerSubjectEraser(commentsEraser);
 
+/** Test-only: clear the comment store. */
 export async function __resetCommentsStore(): Promise<void> { await comments.__clear(); }

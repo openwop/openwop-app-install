@@ -2,9 +2,11 @@
  * ADR 0853 D2 — the message action is WIRED: with `onRecordDecision`, every
  * message (own and others') in a multi-party feed carries "Record as decision"
  * and clicking it hands that message over; without it, no button.
+ * Breaks if MessageFeed drops the handler from the own or the others' action set,
+ * or the bubble hands over a different message (w44 rb-feed/rb-own/rb-other/rb-message/rb-gated).
  */
 import { render, screen, fireEvent, cleanup } from '@testing-library/react';
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (k: string) => k }) }));
 
@@ -12,12 +14,14 @@ import { MessageFeed } from '../../MessageFeed.js';
 import type { ChatMessage } from '../../types.js';
 
 const msg = (id: string, role: ChatMessage['role'], content: string, over: Partial<ChatMessage> = {}): ChatMessage =>
-  ({ id, role, content, createdAt: '2026-10-07T00:00:00.000Z', ...over } as ChatMessage);
+  ({ id, role, content, createdAt: '2026-10-07T00:00:00.000Z', ...over });
 const actions = { onToggleReaction: () => {}, onEdit: () => {}, onDelete: () => {} };
 const directory = new Map([['user:alice', { displayName: 'Alice', kind: 'user' as const }], ['user:bob', { displayName: 'Bob', kind: 'user' as const }]]);
 const base = { tenantId: 't', onResolveInterrupt: vi.fn(), onOpenWorkflowProgress: vi.fn(), focusedWorkflowMessageId: null };
 
+const realScrollIntoView = window.HTMLElement.prototype.scrollIntoView;
 beforeEach(() => { cleanup(); window.HTMLElement.prototype.scrollIntoView = vi.fn(); });
+afterEach(() => { cleanup(); window.HTMLElement.prototype.scrollIntoView = realScrollIntoView; });
 
 describe('Record as decision — the message action', () => {
   it("is on others' and own messages and hands over the clicked message", () => {
@@ -29,7 +33,9 @@ describe('Record as decision — the message action', () => {
     const buttons = screen.getAllByText('recordAsDecision');
     expect(buttons).toHaveLength(2);
     fireEvent.click(buttons[0]!);
-    expect(onRecord).toHaveBeenCalledWith(expect.objectContaining({ id: 'm1' }));
+    expect(onRecord).toHaveBeenLastCalledWith(expect.objectContaining({ id: 'm1' }));
+    fireEvent.click(buttons[1]!); // the viewer's OWN message
+    expect(onRecord).toHaveBeenLastCalledWith(expect.objectContaining({ id: 'm2' }));
   });
 
   it('no button without the handler', () => {

@@ -5,20 +5,30 @@
  *     plan-lapsed; a member never even asks the door;
  *   - Billing's "Your data" lists the exportable features (admin only) and a
  *     click downloads one through the client.
+ *
+ * DOUBLE GUARD (named, by design): ExportDataButton hides from a non-manager
+ * twice — its effect never asks the door, AND its render returns null. Removing
+ * either alone stays green (wave 52 `de-lockedmember`); the shared piece both read,
+ * `useScopeWriteAccess(BILLING_MANAGE_SCOPE)`, is what the member cases witness.
+ * Absence is asserted only after a settle signal (a positive control rendered from
+ * the same list, the lock prompt's own copy, the page's member text plus the lazy
+ * chunk) — never while a read or chunk is still pending.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, cleanup, fireEvent, waitFor, within, act } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
+import type { ExportableFeature, listExportableFeatures, downloadFeatureExport } from '../dataExportClient.js';
+import type { Subscription, TokenBalance, AiCreditMeter } from '../billingClient.js';
 
 const access = vi.hoisted(() => ({ current: { access: { basis: 'member', scopes: [] as string[] }, resolved: true } }));
-const api = vi.hoisted(() => ({ listExportableFeatures: vi.fn(), downloadFeatureExport: vi.fn() }));
+const api = vi.hoisted(() => ({ listExportableFeatures: vi.fn<typeof listExportableFeatures>(), downloadFeatureExport: vi.fn<typeof downloadFeatureExport>() }));
 vi.mock('../dataExportClient.js', () => api);
 vi.mock('../billingClient.js', async (orig) => ({
   ...(await orig<Record<string, unknown>>()),
-  getSubscription: vi.fn(async () => ({ tenantId: 't', planTier: 'free', status: 'none' })),
-  getBalance: vi.fn(async () => ({ tenantId: 't', purchasedTokensTotal: 0, totalAvailable: 0 })),
-  getAiCredits: vi.fn(async () => ({ freeDaily: null, monthly: null, balanceCredits: 0, windowDays: 30, topFeatures: [], otherCredits: 0 })),
+  getSubscription: vi.fn(async (): Promise<Subscription> => ({ tenantId: 't', planTier: 'free', status: 'none' })),
+  getBalance: vi.fn(async (): Promise<TokenBalance> => ({ tenantId: 't', purchasedTokensTotal: 0, totalAvailable: 0 })),
+  getAiCredits: vi.fn(async (): Promise<AiCreditMeter> => ({ freeDaily: null, monthly: null, balanceCredits: 0, windowDays: 30, topFeatures: [], otherCredits: 0 })),
 }));
 vi.mock('../../../featureToggles/FeatureAccessContext.js', () => ({
   useFeatureAccess: () => makeFeatureAccess({ enabled: true, loading: false }),
@@ -43,7 +53,7 @@ import { BillingPage } from '../BillingPage.js';
 
 const ADMIN = { access: { basis: 'member', scopes: ['workspace:write', 'host:billing:manage'] }, resolved: true };
 const EDITOR = { access: { basis: 'member', scopes: ['workspace:read', 'workspace:write'] }, resolved: true };
-const LIST = [
+const LIST: ExportableFeature[] = [
   { featureId: 'funnels', label: 'Funnels', access: 'plan-lapsed' },
   { featureId: 'crm', label: 'CRM', access: 'entitled' },
 ];
@@ -56,6 +66,11 @@ beforeEach(() => {
 });
 afterEach(cleanup);
 
+/** Let a synchronous mount effect (and anything it started) settle. */
+const drain = async (): Promise<void> => {
+  await act(async () => { for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r)); });
+};
+
 describe('locked page — Export your data', () => {
   it('an ADMIN on a plan-lapsed feature with an exporter sees the button, and it downloads', async () => {
     render(<ExportDataButton featureId="funnels" />);
@@ -66,21 +81,24 @@ describe('locked page — Export your data', () => {
   it('a MEMBER (no host:billing:manage) never sees it and the door is never asked', async () => {
     access.current = EDITOR;
     render(<ExportDataButton featureId="funnels" />);
-    await new Promise((r) => setTimeout(r, 20));
+    await drain();
     expect(screen.queryByRole('button', { name: 'Export your data' })).toBeNull();
     expect(api.listExportableFeatures).not.toHaveBeenCalled();
   });
 
   it('a feature with no registered exporter shows nothing', async () => {
-    render(<ExportDataButton featureId="slides" />);
-    await waitFor(() => expect(api.listExportableFeatures).toHaveBeenCalled());
-    expect(screen.queryByRole('button', { name: 'Export your data' })).toBeNull();
+    // Positive control from the SAME list: funnels shows once the list has resolved.
+    render(<><ExportDataButton featureId="funnels" /><ExportDataButton featureId="slides" /></>);
+    expect(await screen.findAllByRole('button', { name: 'Export your data' })).toHaveLength(1);
+    await drain();
+    expect(screen.getAllByRole('button', { name: 'Export your data' })).toHaveLength(1);
   });
 
   it('a feature that is not plan-lapsed (entitled) shows nothing on a lock page', async () => {
-    render(<ExportDataButton featureId="crm" />);
-    await waitFor(() => expect(api.listExportableFeatures).toHaveBeenCalled());
-    expect(screen.queryByRole('button', { name: 'Export your data' })).toBeNull();
+    render(<><ExportDataButton featureId="funnels" /><ExportDataButton featureId="crm" /></>);
+    expect(await screen.findAllByRole('button', { name: 'Export your data' })).toHaveLength(1);
+    await drain();
+    expect(screen.getAllByRole('button', { name: 'Export your data' })).toHaveLength(1);
   });
 });
 
@@ -93,7 +111,9 @@ describe('LockedState (the plan-lock page) mounts the export button', () => {
   it('a MEMBER on the same lock gets no button', async () => {
     access.current = EDITOR;
     render(<MemoryRouter><LockedState featureId="funnels" /></MemoryRouter>);
-    await new Promise((r) => setTimeout(r, 30));
+    // The lock prompt (same lazy module as the button) has rendered the bundle name.
+    expect((await screen.findAllByText(/Marketing/)).length).toBeGreaterThan(0);
+    await drain();
     expect(screen.queryByRole('button', { name: 'Export your data' })).toBeNull();
   });
 });
@@ -104,8 +124,11 @@ describe('Billing — Your data', () => {
   it('an ADMIN sees the exportable features, the paused one marked, and each downloads', async () => {
     at();
     expect(await screen.findByRole('heading', { name: 'Your data' })).toBeTruthy();
-    expect(screen.getByText('Funnels')).toBeTruthy();
-    expect(screen.getByText('Paused — plan')).toBeTruthy();
+    // The paused marker sits on the plan-lapsed row (Funnels), not the entitled one (CRM).
+    const funnelsRow = screen.getByText('Funnels').closest('li')!;
+    const crmRow = screen.getByText('CRM').closest('li')!;
+    expect(within(funnelsRow).getByText('Paused — plan')).toBeTruthy();
+    expect(within(crmRow).queryByText('Paused — plan')).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Export your CRM data' }));
     await waitFor(() => expect(api.downloadFeatureExport).toHaveBeenCalledWith('crm'));
   });
@@ -113,7 +136,11 @@ describe('Billing — Your data', () => {
   it('a MEMBER gets no "Your data" panel', async () => {
     access.current = EDITOR;
     at();
-    await new Promise((r) => setTimeout(r, 20));
+    expect(await screen.findByText('Only workspace owners and admins can manage billing.')).toBeTruthy();
+    await act(async () => {
+      await import('../YourDataPanel.js');
+      for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+    });
     expect(screen.queryByRole('heading', { name: 'Your data' })).toBeNull();
     expect(api.listExportableFeatures).not.toHaveBeenCalled();
   });

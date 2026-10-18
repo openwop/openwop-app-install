@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 import type { RunEventDoc } from '@openwop/openwop';
+import type { BYOKActiveConfig } from '../../../byok/lib/useBYOKConfig.js';
 
 /**
  * Integration harness for useChatSession's run lifecycle (frontend
@@ -30,12 +31,16 @@ vi.mock('../../../client/streamsClient.js', () => ({
     // Distinct object per call so the hook's identity guard (only the live
     // registration self-heals) can tell re-subscriptions apart.
     const sub = { close: closeSpy };
-    captured = { runId, onEvent: opts.onEvent, onTimeout: opts.onTimeout, onError: opts.onError, sub };
+    captured = {
+      runId, onEvent: opts.onEvent, sub,
+      ...(opts.onTimeout ? { onTimeout: opts.onTimeout } : {}),
+      ...(opts.onError ? { onError: opts.onError } : {}),
+    };
     return sub;
   },
 }));
 vi.mock('../../../client/runsClient.js', () => ({
-  createRun: vi.fn(() => Promise.resolve({ runId: 'run-1' })),
+  createRun: vi.fn(() => Promise.resolve({ runId: 'run-1', status: 'running', eventsUrl: '/v1/runs/run-1/events' })),
   cancelRun: vi.fn(() => Promise.resolve()),
   getRun: vi.fn(() => Promise.resolve({ status: 'running' })),
   // The reconcile backfill (workflowRunSubscription) re-polls the log on
@@ -91,10 +96,11 @@ vi.mock('../../../client/chatSessionsClient.js', () => ({
 // exercised, not mocked away.
 // `vi.hoisted` so the factory below (hoisted above imports) can reference these
 // eagerly as property values — a plain `const` would not be initialized yet.
+type Transport = typeof import('../../conversationTransport.js');
 const { openConversationSessionMock, sendConversationTurnMock, fetchTurnsMock } = vi.hoisted(() => ({
-  openConversationSessionMock: vi.fn(() => Promise.resolve({ runId: 'conv-run-1', nodeId: 'gate' })),
-  sendConversationTurnMock: vi.fn(() => Promise.resolve({ turns: [], lastSeq: 1 })),
-  fetchTurnsMock: vi.fn(() => Promise.resolve({ turns: [], lastSeq: 0 })),
+  openConversationSessionMock: vi.fn<Transport['openConversationSession']>(() => Promise.resolve({ runId: 'conv-run-1', nodeId: 'gate' })),
+  sendConversationTurnMock: vi.fn<Transport['sendConversationTurn']>(() => Promise.resolve({ turns: [], lastSeq: 1 })),
+  fetchTurnsMock: vi.fn<Transport['fetchTurns']>(() => Promise.resolve({ turns: [], lastSeq: 0 })),
 }));
 vi.mock('../../conversationTransport.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../conversationTransport.js')>();
@@ -109,12 +115,12 @@ vi.mock('../../conversationTransport.js', async (importOriginal) => {
 import { useChatSession } from '../useChatSession.js';
 import { createRun, cancelRun, pollEvents } from '../../../client/runsClient.js';
 import { getWorkflowRunInputs } from '../../../workflows/workflowsClient.js';
-import { stageSlashInputs } from '../../lib/slashInputs.js';
+import { stageSlashInputs, takeStagedSlashInputs } from '../../lib/slashInputs.js';
 import { getActiveConfig } from '../../../byok/lib/byokClient.js';
 import { listOpenInterrupts } from '../../../client/interruptsClient.js';
 import { createChatSession, appendChatMessage, listChatSessionMessagesPage, updateChatMessage, getSessionFeedback } from '../../../client/chatSessionsClient.js';
 
-const CONFIG = { provider: 'demo', model: 'demo-model', credentialRef: 'managed:demo' };
+const CONFIG: BYOKActiveConfig = { provider: 'demo', model: 'demo-model', credentialRef: 'managed:demo' };
 
 let seq = 0;
 function evt(type: string, payload: unknown): RunEventDoc {
@@ -128,12 +134,35 @@ beforeEach(() => {
   subscribeCount = 0;
   seq = 0;
   closeSpy.mockClear();
-  vi.mocked(pollEvents).mockClear();
+  // Order independence (verified under --sequence.shuffle): mockClear keeps any
+  // unconsumed `mockResolvedValueOnce` queued by an earlier case, which then
+  // answers a LATER case's call. Reset every per-case-overridden mock to its
+  // default instead, and drain any staged slash inputs.
+  takeStagedSlashInputs('');
+  vi.mocked(pollEvents).mockReset();
   vi.mocked(pollEvents).mockResolvedValue({ events: [], runId: 'run-1', lastSequence: seq, status: 'running', isTerminal: true });
-  vi.mocked(createRun).mockClear();
-  vi.mocked(cancelRun).mockClear();
-  openConversationSessionMock.mockClear();
-  sendConversationTurnMock.mockClear();
+  vi.mocked(createRun).mockReset();
+  vi.mocked(createRun).mockResolvedValue({ runId: 'run-1', status: 'running', eventsUrl: '/v1/runs/run-1/events' });
+  vi.mocked(cancelRun).mockReset();
+  vi.mocked(cancelRun).mockResolvedValue(undefined);
+  vi.mocked(getWorkflowRunInputs).mockReset();
+  vi.mocked(getWorkflowRunInputs).mockRejectedValue(new Error('no stored definition'));
+  vi.mocked(getActiveConfig).mockReset();
+  vi.mocked(listOpenInterrupts).mockReset();
+  vi.mocked(listOpenInterrupts).mockResolvedValue([]);
+  vi.mocked(listChatSessionMessagesPage).mockReset();
+  vi.mocked(listChatSessionMessagesPage).mockResolvedValue({ messages: [], nextCursor: null });
+  vi.mocked(getSessionFeedback).mockReset();
+  vi.mocked(getSessionFeedback).mockResolvedValue({});
+  vi.mocked(updateChatMessage).mockReset();
+  vi.mocked(updateChatMessage).mockResolvedValue(undefined);
+  loadWorkflowMock.mockReset();
+  loadWorkflowMock.mockResolvedValue(null);
+  registerWorkflowMock.mockClear();
+  fetchRegisteredWorkflowMock.mockClear();
+  openConversationSessionMock.mockReset();
+  openConversationSessionMock.mockResolvedValue({ runId: 'conv-run-1', nodeId: 'gate' });
+  sendConversationTurnMock.mockReset();
   // Default = a realistic SYNCHRONOUS exchange: the reply's authoritative agent
   // turn is on the wire. The hook now classifies sync-vs-async by the presence of
   // a new agent turn (not `lastSeq > cursor`), so an exchange MUST carry its agent
@@ -146,7 +175,8 @@ beforeEach(() => {
     ],
     lastSeq: 2,
   });
-  fetchTurnsMock.mockClear();
+  fetchTurnsMock.mockReset();
+  fetchTurnsMock.mockResolvedValue({ turns: [], lastSeq: 0 });
   vi.mocked(createChatSession).mockClear();
   vi.mocked(appendChatMessage).mockClear();
 });
@@ -166,11 +196,11 @@ describe('useChatSession conversation send lifecycle (integration)', () => {
       .mockResolvedValueOnce({ turns: [
         { messageId: 'c:1:user', role: 'user', turnIndex: 1, from: 'user', content: 'hello', ts: 0 },
         { messageId: 'c:2:agent', role: 'agent', turnIndex: 2, from: 'assistant', content: 'hi', ts: 0 },
-      ], lastSeq: 2 } as never)
+      ], lastSeq: 2 })
       .mockResolvedValueOnce({ turns: [
         { messageId: 'c:3:user', role: 'user', turnIndex: 3, from: 'user', content: 'again', ts: 0 },
         { messageId: 'c:4:agent', role: 'agent', turnIndex: 4, from: 'assistant', content: 'sure', ts: 0 },
-      ], lastSeq: 4 } as never);
+      ], lastSeq: 4 });
     const { result } = renderHook(() => useChatSession());
     await act(async () => { await result.current.send('hello', CONFIG); });
 
@@ -193,7 +223,7 @@ describe('useChatSession conversation send lifecycle (integration)', () => {
         { messageId: 'c:2:agent', role: 'agent', turnIndex: 2, from: 'assistant', content: 'hello back', ts: 0 },
       ],
       lastSeq: 2,
-    } as never);
+    });
     const { result } = renderHook(() => useChatSession());
     await act(async () => { await result.current.send('hi', CONFIG); });
 
@@ -211,18 +241,18 @@ describe('useChatSession conversation send lifecycle (integration)', () => {
     sendConversationTurnMock.mockResolvedValueOnce({
       turns: [{ messageId: 'c:1:user', role: 'user', turnIndex: 1, from: 'user', content: 'hi', ts: 0 }],
       lastSeq: 1,
-    } as never);
+    });
     vi.mocked(pollEvents).mockResolvedValue({
-      events: [{ type: 'conversation.exchanged', sequence: 3, payload: { turn: { role: 'agent' } } }],
+      events: [{ eventId: 'e-poll-3', runId: 'conv-run-1', type: 'conversation.exchanged', payload: { turn: { role: 'agent' } }, timestamp: '2026-01-01T00:00:00Z', sequence: 3, schemaVersion: 3 }],
       runId: 'conv-run-1', lastSequence: 3, status: 'running', isTerminal: false,
-    } as never);
+    });
     fetchTurnsMock.mockResolvedValueOnce({
       turns: [
         { messageId: 'c:1:user', role: 'user', turnIndex: 1, from: 'user', content: 'hi', ts: 0 },
         { messageId: 'c:2:agent', role: 'agent', turnIndex: 2, from: 'assistant', content: 'polled reply', ts: 0 },
       ],
       lastSeq: 3,
-    } as never);
+    });
     const { result } = renderHook(() => useChatSession());
     await act(async () => {
       const sending = result.current.send('hi', CONFIG);
@@ -245,7 +275,7 @@ describe('useChatSession conversation send lifecycle (integration)', () => {
         { messageId: 'c:2:agent', role: 'agent', turnIndex: 2, from: 'assistant', content: 'hello back', ts: 0 },
       ],
       lastSeq: 2,
-    } as never);
+    });
     const { result } = renderHook(() => useChatSession());
     await act(async () => {
       await result.current.send('hi', CONFIG);
@@ -278,11 +308,14 @@ describe('useChatSession conversation send lifecycle (integration)', () => {
     // The store returns the settled row + a NEW server-persisted voice turn.
     vi.mocked(listChatSessionMessagesPage).mockResolvedValueOnce({
       messages: [
-        { messageId: 'voice-tx_s1_u0', role: 'user', content: JSON.stringify({ role: 'user', content: 'settled turn' }), createdAt: '2026-01-01T00:00:01Z' },
-        { messageId: 'srv-new-1', role: 'assistant', content: JSON.stringify({ role: 'assistant', content: 'server-side voice reply' }), createdAt: '2026-01-01T00:00:02Z' },
+        { sessionId: sessionId, meta: null, messageId: 'voice-tx_s1_u0', role: 'user', content: JSON.stringify({ role: 'user', content: 'settled turn' }), createdAt: '2026-01-01T00:00:01Z' },
+        { sessionId: sessionId, meta: null, messageId: 'srv-new-1', role: 'assistant', content: JSON.stringify({ role: 'assistant', content: 'server-side voice reply' }), createdAt: '2026-01-01T00:00:02Z' },
+        // The STORE already holds a (stale) settled copy of the streaming bubble's id:
+        // only the isStreaming guard keeps it from overwriting the live text.
+        { sessionId: sessionId, meta: null, messageId: 'voice-tx_s1_a0', role: 'assistant', content: JSON.stringify({ role: 'assistant', content: 'stale server copy' }), createdAt: '2026-01-01T00:00:01Z' },
       ],
       nextCursor: null,
-    } as never);
+    });
     await act(async () => { await result.current.refreshNewestMessages(sessionId); });
     const after = result.current.session.messages;
     // Existing order preserved; the new row APPENDED (never re-sorted/removed).
@@ -307,7 +340,7 @@ describe('useChatSession conversation send lifecycle (integration)', () => {
     vi.mocked(listChatSessionMessagesPage).mockResolvedValueOnce({
       messages: [
         {
-          messageId: rowId, role: 'user',
+          sessionId: sessionId, messageId: rowId, role: 'user',
           content: JSON.stringify({ role: 'user', content: 'will be tombstoned' }),
           createdAt: '2026-01-01T00:00:01Z',
           meta: JSON.stringify({ deletedAt: '2026-01-01T00:00:05Z', deletedBy: 'user:mod' }),
@@ -315,7 +348,7 @@ describe('useChatSession conversation send lifecycle (integration)', () => {
         },
       ],
       nextCursor: null,
-    } as never);
+    });
     await act(async () => { await result.current.refreshNewestMessages(sessionId); });
     const row = result.current.session.messages.find((m) => m.id === rowId);
     expect(row?.meta?.deletedAt).toBe('2026-01-01T00:00:05Z');
@@ -337,19 +370,19 @@ describe('useChatSession conversation send lifecycle (integration)', () => {
     vi.mocked(listChatSessionMessagesPage)
       .mockResolvedValueOnce({
         messages: [
-          { messageId: newId, role: 'user', content: JSON.stringify({ role: 'user', content: 'recent message' }), createdAt: '2026-01-01T00:01:00Z' },
+          { sessionId: sessionId, meta: null, messageId: newId, role: 'user', content: JSON.stringify({ role: 'user', content: 'recent message' }), createdAt: '2026-01-01T00:01:00Z' },
         ],
         nextCursor: '2026-01-01T00:00:01Z~cursor-1',
-      } as never)
+      })
       // Page 2 (walked) carries the tombstoned target + an off-screen row that
       // must NOT be appended (it belongs to pagination, not the feed tail).
       .mockResolvedValueOnce({
         messages: [
-          { messageId: 'offscreen-old', role: 'user', content: JSON.stringify({ role: 'user', content: 'never loaded' }), createdAt: '2026-01-01T00:00:00Z' },
-          { messageId: oldId, role: 'user', content: JSON.stringify({ role: 'user', content: 'ancient message' }), createdAt: '2026-01-01T00:00:01Z', meta: JSON.stringify({ deletedAt: '2026-01-01T00:02:00Z' }) },
+          { sessionId: sessionId, meta: null, messageId: 'offscreen-old', role: 'user', content: JSON.stringify({ role: 'user', content: 'never loaded' }), createdAt: '2026-01-01T00:00:00Z' },
+          { sessionId: sessionId, messageId: oldId, role: 'user', content: JSON.stringify({ role: 'user', content: 'ancient message' }), createdAt: '2026-01-01T00:00:01Z', meta: JSON.stringify({ deletedAt: '2026-01-01T00:02:00Z' }) },
         ],
         nextCursor: null,
-      } as never);
+      });
     await act(async () => { await result.current.refreshNewestMessages(sessionId, [oldId]); });
     const msgs = result.current.session.messages;
     // The old on-screen row adopted the tombstone from the WALKED page…
@@ -394,15 +427,15 @@ describe('useChatSession conversation send lifecycle (integration)', () => {
     sendConversationTurnMock.mockResolvedValueOnce({ turns: [
       { messageId: 'a:1:user', role: 'user', turnIndex: 1, from: 'user', content: 'A-prompt', ts: 0 },
       { messageId: 'a:2:agent', role: 'agent', turnIndex: 2, from: 'assistant', content: 'A-reply', ts: 0 },
-    ], lastSeq: 2 } as never);
+    ], lastSeq: 2 });
     await act(async () => { await result.current.send('A-prompt', CONFIG); });
     expect(openConversationSessionMock).toHaveBeenCalledTimes(1);
 
     // Switch to a different saved conversation (its own backend history).
     vi.mocked(listChatSessionMessagesPage).mockResolvedValueOnce({
-      messages: [{ messageId: 'b_old', role: 'user', content: JSON.stringify({ role: 'user', content: 'B-history', createdAt: '2026-01-01T00:00:00Z' }), createdAt: '2026-01-01T00:00:00Z' }],
+      messages: [{ sessionId: 'session-B', meta: null, messageId: 'b_old', role: 'user', content: JSON.stringify({ role: 'user', content: 'B-history', createdAt: '2026-01-01T00:00:00Z' }), createdAt: '2026-01-01T00:00:00Z' }],
       nextCursor: null,
-    } as never);
+    });
     await act(async () => { await result.current.loadSessionFromBackend('session-B'); });
     expect(result.current.session.messages.map((m) => m.content)).toEqual(['B-history']);
 
@@ -411,7 +444,7 @@ describe('useChatSession conversation send lifecycle (integration)', () => {
     sendConversationTurnMock.mockResolvedValueOnce({ turns: [
       { messageId: 'b:1:user', role: 'user', turnIndex: 1, from: 'user', content: 'B-prompt', ts: 0 },
       { messageId: 'b:2:agent', role: 'agent', turnIndex: 2, from: 'assistant', content: 'B-reply', ts: 0 },
-    ], lastSeq: 2 } as never);
+    ], lastSeq: 2 });
     await act(async () => { await result.current.send('B-prompt', CONFIG); });
     expect(openConversationSessionMock).toHaveBeenCalledTimes(2); // fresh run for B
     const contents = result.current.session.messages.map((m) => (typeof m.content === 'string' ? m.content : ''));
@@ -444,10 +477,10 @@ describe('useChatSession conversation send lifecycle (integration)', () => {
     const { result } = renderHook(() => useChatSession());
     // The reopened chat reports its backing conversation run id.
     vi.mocked(listChatSessionMessagesPage).mockResolvedValueOnce({
-      messages: [{ messageId: 'm1', role: 'user', content: JSON.stringify({ role: 'user', content: 'earlier', createdAt: '2026-01-01T00:00:00Z' }), createdAt: '2026-01-01T00:00:00Z' }],
+      messages: [{ sessionId: 'sess-X', meta: null, messageId: 'm1', role: 'user', content: JSON.stringify({ role: 'user', content: 'earlier', createdAt: '2026-01-01T00:00:00Z' }), createdAt: '2026-01-01T00:00:00Z' }],
       nextCursor: null,
       conversationRunId: 'conv-run-restored',
-    } as never);
+    });
     await act(async () => { await result.current.loadSessionFromBackend('sess-X'); });
     expect(result.current.session.conversationRunId).toBe('conv-run-restored');
 
@@ -456,7 +489,7 @@ describe('useChatSession conversation send lifecycle (integration)', () => {
     sendConversationTurnMock.mockResolvedValueOnce({ turns: [
       { messageId: 'x:3:user', role: 'user', turnIndex: 3, from: 'user', content: 'more', ts: 0 },
       { messageId: 'x:4:agent', role: 'agent', turnIndex: 4, from: 'assistant', content: 'continued', ts: 0 },
-    ], lastSeq: 4 } as never);
+    ], lastSeq: 4 });
     await act(async () => { await result.current.send('more', CONFIG); });
     expect(openConversationSessionMock).not.toHaveBeenCalled();
     expect(result.current.session.messages.find((m) => m.role === 'assistant')?.content).toBe('continued');
@@ -470,17 +503,19 @@ describe('useChatSession conversation send lifecycle (integration)', () => {
       .mockResolvedValueOnce({ turns: [
         { messageId: 'r:1:user', role: 'user', turnIndex: 1, from: 'user', content: 'q', ts: 0 },
         { messageId: 'r:2:agent', role: 'agent', turnIndex: 2, from: 'assistant', content: 'first answer', ts: 0 },
-      ], lastSeq: 2 } as never)
+      ], lastSeq: 2 })
       .mockResolvedValueOnce({ turns: [
         { messageId: 'r:3:user', role: 'user', turnIndex: 3, from: 'user', content: 'q', ts: 0 },
         { messageId: 'r:4:agent', role: 'agent', turnIndex: 4, from: 'assistant', content: 'second answer', ts: 0 },
-      ], lastSeq: 4 } as never);
+      ], lastSeq: 4 });
     const { result } = renderHook(() => useChatSession());
     await act(async () => { await result.current.send('q', CONFIG); });
     const assistantId = result.current.session.messages.find((m) => m.role === 'assistant')!.id;
 
     await act(async () => { await result.current.regenerate(assistantId, CONFIG); });
     expect(sendConversationTurnMock).toHaveBeenCalledTimes(2); // re-sent
+    // …with the PRIOR user prompt, not some other text.
+    expect(sendConversationTurnMock.mock.calls[1]![2].content).toBe('q');
     const contents = result.current.session.messages.map((m) => m.content);
     // Append, not replace: the original answer is PRESERVED alongside the retry.
     expect(contents).toContain('first answer');
@@ -489,10 +524,10 @@ describe('useChatSession conversation send lifecycle (integration)', () => {
 
   it('restores the caller feedback onto messages on reopen (ADR 0102 Phase 3)', async () => {
     vi.mocked(listChatSessionMessagesPage).mockResolvedValueOnce({
-      messages: [{ messageId: 'a1', role: 'assistant', content: JSON.stringify({ role: 'assistant', content: 'hi', createdAt: '2026-01-01T00:00:00Z' }), createdAt: '2026-01-01T00:00:00Z' }],
+      messages: [{ sessionId: 'sess-fb', meta: null, messageId: 'a1', role: 'assistant', content: JSON.stringify({ role: 'assistant', content: 'hi', createdAt: '2026-01-01T00:00:00Z' }), createdAt: '2026-01-01T00:00:00Z' }],
       nextCursor: null,
-    } as never);
-    vi.mocked(getSessionFeedback).mockResolvedValueOnce({ a1: 'up' } as never);
+    });
+    vi.mocked(getSessionFeedback).mockResolvedValueOnce({ a1: 'up' });
     const { result } = renderHook(() => useChatSession());
     await act(async () => {
       await result.current.loadSessionFromBackend('sess-fb');
@@ -506,11 +541,11 @@ describe('useChatSession conversation send lifecycle (integration)', () => {
     // A non-advancing lastSeq means the POST acked before the reply was emitted
     // (it rides the SSE past the CDN ceiling). The hook waits for the stream's
     // `conversation.exchanged`(role:agent) settle signal, then refetches + merges.
-    sendConversationTurnMock.mockResolvedValueOnce({ turns: [], lastSeq: 0 } as never);
+    sendConversationTurnMock.mockResolvedValueOnce({ turns: [], lastSeq: 0 });
     fetchTurnsMock.mockResolvedValueOnce({
       turns: [{ messageId: 'c:2:agent', role: 'agent', turnIndex: 2, from: 'assistant', content: 'async reply', ts: 0 }],
       lastSeq: 2,
-    } as never);
+    });
     const { result } = renderHook(() => useChatSession());
     await act(async () => {
       const p = result.current.send('hi', CONFIG);
@@ -532,11 +567,11 @@ describe('useChatSession conversation send lifecycle (integration)', () => {
     // merged an EMPTY turn set, and advanced the cursor past the chunks — silently
     // dropping the advisor's reply. The fix keys on a real new agent turn, so this
     // must still settle on the SSE signal and tail the authoritative reply.
-    sendConversationTurnMock.mockResolvedValueOnce({ turns: [], lastSeq: 7 } as never);
+    sendConversationTurnMock.mockResolvedValueOnce({ turns: [], lastSeq: 7 });
     fetchTurnsMock.mockResolvedValueOnce({
       turns: [{ messageId: 'c:2:agent', role: 'agent', turnIndex: 2, from: 'assistant', content: 'advisor reply', ts: 0 }],
       lastSeq: 9,
-    } as never);
+    });
     const { result } = renderHook(() => useChatSession());
     await act(async () => {
       const p = result.current.send('what is our top priority?', CONFIG);
@@ -615,9 +650,11 @@ describe('useChatSession workflow_run lifecycle (integration)', () => {
         { name: 'credentialRef', type: 'string', required: false },
       ]);
       vi.mocked(getActiveConfig).mockResolvedValueOnce(env);
-      const { result } = renderHook(() => useChatSession());
+      const { result, unmount } = renderHook(() => useChatSession());
       await act(async () => { await result.current.runWorkflowMention(MENTION, 'x'); });
+      expect(vi.mocked(createRun)).toHaveBeenCalledOnce(); // the run DID start (positive control)
       expect(vi.mocked(createRun).mock.calls[0]![0].configurable).toBeUndefined();
+      unmount();
     }
   });
 
@@ -643,6 +680,9 @@ describe('useChatSession workflow_run lifecycle (integration)', () => {
     const { result } = renderHook(() => useChatSession());
     await act(async () => { await result.current.runWorkflowMention(MENTION, 'tides'); });
     expect(vi.mocked(createRun)).not.toHaveBeenCalled();
+    // …and the refusal is SAID in the thread, naming the missing fields.
+    const refusal = result.current.session.messages.find((m) => m.role === 'system');
+    expect(refusal?.content).toContain('Workflow "Uppercase" needs Topic, Audience before it can run.');
   });
 
   it('ADR 0768 B2 — a form value wins over trailing text for the single required input', async () => {
@@ -664,7 +704,7 @@ describe('useChatSession workflow_run lifecycle (integration)', () => {
     await act(async () => {
       await captured!.onEvent(evt('node.started', { nodeId: 'upper_0' }));
     });
-    let run = wfRun(result) as { workflowRun?: { runningNodeIds?: string[]; currentNodeName?: string } };
+    let run = wfRun(result) as { workflowRun?: { runningNodeIds?: string[]; currentNodeName?: string; completedNodeIds?: string[] } };
     expect(run.workflowRun?.runningNodeIds).toContain('upper_0');
 
     await act(async () => {
@@ -699,8 +739,8 @@ describe('useChatSession workflow_run lifecycle (integration)', () => {
 
     // The run suspends at a HITL gate with an open interrupt.
     vi.mocked(listOpenInterrupts).mockResolvedValueOnce([
-      { interruptId: 'i1', runId: 'run-1', nodeId: 'gate_1', kind: 'approval', createdAt: '2026-01-01T00:00:00Z' },
-    ] as never);
+      { interruptId: 'i1', nodeId: 'gate_1', kind: 'approval', data: null, createdAt: '2026-01-01T00:00:00Z' },
+    ]);
     await act(async () => {
       await captured!.onEvent(evt('node.suspended', { nodeId: 'gate_1' }));
       await new Promise((r) => setTimeout(r, 0));
@@ -723,14 +763,14 @@ describe('useChatSession workflow_run lifecycle (integration)', () => {
     // Reopen a saved chat whose persisted thread holds a SUSPENDED workflow_run.
     vi.mocked(listChatSessionMessagesPage).mockResolvedValueOnce({
       messages: [{
-        messageId: 'wf_x', role: 'workflow_run', createdAt: '2026-01-01T00:00:00Z',
+        sessionId: 'sess-wf', meta: null, messageId: 'wf_x', role: 'workflow_run', createdAt: '2026-01-01T00:00:00Z',
         content: JSON.stringify({
           role: 'workflow_run', content: '/x', createdAt: '2026-01-01T00:00:00Z',
           workflowRun: { slug: 'x', runId: 'run-9', status: 'running', completedNodeIds: [], failedNodeIds: [], nodeOutputs: {}, nodeNames: {}, totalNodes: 1, startedAt: '2026-01-01T00:00:00Z' },
         }),
       }],
       nextCursor: null,
-    } as never);
+    });
     await act(async () => {
       await result.current.loadSessionFromBackend('sess-wf');
       await new Promise((r) => setTimeout(r, 0)); // let reconcile + re-subscribe fire
@@ -908,7 +948,8 @@ describe('useChatSession workflow_run lifecycle (integration)', () => {
     const gone = { ...MENTION, displayName: 'Gone', slug: 'gone', workflowId: 'wf_gone1' };
     await act(async () => { await result.current.runWorkflowMention(gone); });
     expect(vi.mocked(createRun)).not.toHaveBeenCalled();
-    expect(result.current.session.messages.some((m) => m.role === 'system')).toBe(true);
+    expect(result.current.session.messages.find((m) => m.role === 'system')?.content)
+      .toBe('Workflow "Gone" was deleted. Pick another from the dashboard or remove the mention.');
   });
 });
 

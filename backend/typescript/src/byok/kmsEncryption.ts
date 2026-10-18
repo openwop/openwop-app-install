@@ -33,6 +33,7 @@
 import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
 import { createLogger } from '../observability/logger.js';
 import { matchNonGcpKmsBackend } from './kmsBackends.js';
+import { OpenwopError } from '../types.js';
 
 const log = createLogger('byok.kmsEncryption');
 
@@ -102,6 +103,49 @@ function requireKmsClient(): KmsClient {
   return configuredClient;
 }
 
+/** gRPC status codes a Cloud KMS call can fail with transiently: 1 CANCELLED,
+ *  14 UNAVAILABLE. MEASURED 2026-10-13 00:00:33Z on 00945-fgt: one signed
+ *  trigger-ingest POST got `1 CANCELLED: CANCELLED` from the key-decrypt and
+ *  answered an unhandled 500, failing a certification cut that passed minutes
+ *  later on the same build. */
+const TRANSIENT_GRPC_CODES = new Set([1, 14]);
+/** Advertised `Retry-After` (seconds) when a transient KMS failure survives the retry. */
+export const KMS_UNAVAILABLE_RETRY_AFTER_S = 1;
+
+export function isTransientKmsError(err: unknown): boolean {
+  const code = (err as { code?: unknown } | null)?.code;
+  return typeof code === 'number' && TRANSIENT_GRPC_CODES.has(code);
+}
+
+/**
+ * Run a KMS operation with ONE in-process retry on a transient gRPC failure.
+ * Encrypt/decrypt are side-effect free, so a retry is safe. A transient failure
+ * that survives the retry becomes a retriable `503 service_unavailable` with
+ * `Retry-After` (v2 errors.md) instead of an unhandled 500; any other error
+ * passes through unchanged.
+ */
+export async function withKmsTransientRetry<T>(op: string, fn: () => Promise<T>, backoffMs = 100): Promise<T> {
+  try {
+    return await fn();
+  } catch (first) {
+    if (!isTransientKmsError(first)) throw first;
+    log.warn('kms_transient_retry', { op, code: (first as { code: number }).code });
+    await new Promise((r) => setTimeout(r, backoffMs));
+    try {
+      return await fn();
+    } catch (second) {
+      if (!isTransientKmsError(second)) throw second;
+      log.error('kms_transient_unavailable', { op, code: (second as { code: number }).code });
+      throw new OpenwopError(
+        'service_unavailable',
+        'The key-management service is temporarily unavailable; retry.',
+        503,
+        { retryAfterSeconds: KMS_UNAVAILABLE_RETRY_AFTER_S },
+      );
+    }
+  }
+}
+
 /**
  * Create a Google Cloud KMS client bound to a specific key.
  * Used at boot when OPENWOP_BYOK_KMS_KEY is set.
@@ -166,14 +210,14 @@ export function createGoogleCloudKmsClient(keyName: string): KmsClient {
     preflight: async () => { await getClient(); },
     async encrypt(plaintextDek) {
       const client = await getClient();
-      const [resp] = await client.encrypt({ name: keyName, plaintext: plaintextDek });
+      const [resp] = await withKmsTransientRetry('encrypt', () => client.encrypt({ name: keyName, plaintext: plaintextDek }));
       const cipher = resp.ciphertext;
       if (!cipher) throw new Error('KMS encrypt returned empty ciphertext');
       return Buffer.from(cipher as Uint8Array);
     },
     async decrypt(wrappedDek) {
       const client = await getClient();
-      const [resp] = await client.decrypt({ name: keyName, ciphertext: wrappedDek });
+      const [resp] = await withKmsTransientRetry('decrypt', () => client.decrypt({ name: keyName, ciphertext: wrappedDek }));
       const plain = resp.plaintext;
       if (!plain) throw new Error('KMS decrypt returned empty plaintext');
       return Buffer.from(plain as Uint8Array);

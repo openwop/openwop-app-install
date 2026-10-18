@@ -41,6 +41,8 @@ import type { HostAdapterSuite } from './index.js';
 import { executeRun, emitTerminalFailure, RUN_DISPATCH_LEASE_MS } from '../executor/executor.js';
 import { forkDispatchOptions } from '../executor/forkInterrupts.js';
 import { getInstanceId } from './instanceId.js';
+import { evalProgressAnchor, isAgentEvalRun } from './evals/agentEvalRun.js';
+import { resumeAgentEvalRun } from './evals/resumeEvalRun.js';
 import { RunLogClosedError } from '../storage/runLogClosure.js';
 import { createLogger } from '../observability/logger.js';
 import { recordDispatchRecovery, recordOutboxBacklog } from '../observability/metricSeams.js';
@@ -189,11 +191,17 @@ export async function sweepOrphanedRuns(
     }
     // A run still orphaned this long after creation is presumed genuinely stuck;
     // fail it terminally rather than re-dispatch it on every sweep forever.
-    if (Date.parse(run.createdAt) < abandonBefore) {
+    // ADR 0889 grade remediation (WF-EV-3) — an eval run is aged from its last
+    // RECORDED trial, not its creation: each segment is bounded by the run-duration
+    // ceiling and a resume never re-runs a recorded trial, so a long suite that is
+    // still making progress resumes, while a crash loop that records nothing is
+    // still abandoned by this same ceiling.
+    const ageAnchor = isAgentEvalRun(run) ? evalProgressAnchor(run) : run.createdAt;
+    if (Date.parse(ageAnchor) < abandonBefore) {
       log.error('abandoning chronically-orphaned run (exceeded re-dispatch ceiling)', {
         runId: run.runId,
         status: run.status,
-        ageMs: now - Date.parse(run.createdAt),
+        ageMs: now - Date.parse(ageAnchor),
       });
       try {
         // RFC 0151 §B — a resumed run that had already committed effects must
@@ -223,6 +231,16 @@ export async function sweepOrphanedRuns(
       // means "this intent was given up on", which is the thing worth alerting
       // on; the `lane` label is what tells an operator which mechanism gave up.
       recordDispatchRecovery('orphan', 'dead');
+      continue;
+    }
+    // ADR 0889 A1 — an eval run has no workflow; it resumes in its own runner,
+    // which skips every trial it already recorded (a recorded fact is never
+    // re-run or re-judged). `claimOrphanedRuns` above stamped this instance as
+    // the owner, so the runner's lease renewals succeed.
+    if (isAgentEvalRun(run)) {
+      redispatched++;
+      recordDispatchRecovery('orphan', 'dispatched');
+      setImmediate(() => { void resumeAgentEvalRun(storage, run, hostSuite.providerPolicyResolver); });
       continue;
     }
     // ADR 0474 — a pinned run recovers against the EXACT definition it ran.

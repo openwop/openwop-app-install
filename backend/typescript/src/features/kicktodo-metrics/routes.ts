@@ -11,6 +11,7 @@ import { callerSubject, tenantOf } from '../../host/requestSubject.js';
 import { requireKicktodoManage, requireString } from '../featureRoute.js';
 import { activationMetrics, engagementMetrics, factoryMetrics } from './metricsService.js';
 import { sampleVerdict, SampleSubjectError, verifierQuality } from './verifierSampleService.js';
+import { registerKicktodoSignoffApprovals, resolveOnlySignoffHandler } from '../kicktodo-core/signoffApprovals.js';
 
 export const KICKTODO_METRICS_PREFIX = '/host/openwop-app/kicktodo/metrics';
 
@@ -94,6 +95,9 @@ export const KICKTODO_METRICS_ROUTES: ReadonlyArray<{ method: 'get' | 'post'; pa
 ];
 
 export function registerKicktodoMetricsRoutes(deps: RouteDeps): void {
+  // Code-grade KTY-1 — the generic decision lane can decide `metrics-verifier-sample` (it used to
+  // 404 on the host persona through the run-proposal finalizer).
+  registerKicktodoSignoffApprovals('metrics-verifier-sample', resolveOnlySignoffHandler('metrics-verifier-sample'), { separateFrom: () => [] });
   const app: Express = deps.app;
   const wrap = (h: Handler) => async (req: Request, res: Response, next: NextFunction) => {
     try {

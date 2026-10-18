@@ -22,28 +22,28 @@ vi.mock('../../../ui/announce.js', () => ({
 
 const { InteractiveDrawing } = await import('../InteractiveDrawing.js');
 
-const DOC = {
+const DOC: DrawingDoc = {
+  title: 'Scene',
   shapes: [
     { kind: 'rect', x: 40, y: 40, width: 120, height: 80 },
     { kind: 'circle', cx: 260, cy: 120, r: 40 },
   ],
   width: 360,
   height: 360,
-} as unknown as DrawingDoc;
+};
 
 type Props = Parameters<typeof InteractiveDrawing>[0];
-const props = (idxs: number[]): Props =>
-  ({
-    doc: DOC,
-    selection: idxs.length ? { col: 'shapes', idx: idxs[0] } : null,
-    selectedIndices: () => idxs,
-    onSelect: () => {},
-    onClearSelection: () => {},
-    onSetSelection: () => {},
-    patchElement: () => {},
-    patchElements: () => {},
-    deleteElements: () => 0,
-  }) as unknown as Props;
+const props = (idxs: number[]): Props => ({
+  doc: DOC,
+  selection: idxs[0] !== undefined ? { col: 'shapes', idx: idxs[0] } : null,
+  selectedIndices: () => idxs,
+  onSelect: () => {},
+  onClearSelection: () => {},
+  onSetSelection: () => {},
+  patchElement: () => {},
+  patchElements: () => {},
+  deleteElements: () => 0,
+});
 
 beforeEach(() => announce.mockClear());
 afterEach(cleanup);
@@ -58,20 +58,23 @@ describe('DRU-2 — selection is announced to assistive tech', () => {
     const { rerender } = render(<InteractiveDrawing {...props([])} />);
     expect(announce).not.toHaveBeenCalled();
     rerender(<InteractiveDrawing {...props([0])} />);
-    expect(announce).toHaveBeenCalledWith(expect.stringContaining('Rectangle'));
+    expect(announce).toHaveBeenCalledTimes(1);
+    expect(announce).toHaveBeenCalledWith('Rectangle selected');
   });
 
   it('announces the COUNT for a multi-selection', () => {
     const { rerender } = render(<InteractiveDrawing {...props([0])} />);
     announce.mockClear();
     rerender(<InteractiveDrawing {...props([0, 1])} />);
-    expect(announce).toHaveBeenCalledWith(expect.stringContaining('2'));
+    expect(announce).toHaveBeenCalledTimes(1);
+    expect(announce).toHaveBeenCalledWith('2 selected');
   });
 
   it('re-announces when the selection moves to a DIFFERENT shape of the same-or-other kind', () => {
     const { rerender } = render(<InteractiveDrawing {...props([0])} />);
     announce.mockClear();
     rerender(<InteractiveDrawing {...props([1])} />);
-    expect(announce).toHaveBeenCalledWith(expect.stringContaining('Circle'));
+    expect(announce).toHaveBeenCalledTimes(1);
+    expect(announce).toHaveBeenCalledWith('Circle selected');
   });
 });

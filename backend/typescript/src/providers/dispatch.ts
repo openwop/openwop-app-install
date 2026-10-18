@@ -21,6 +21,7 @@ import { createLogger } from '../observability/logger.js';
 import { isLoopbackHttpUrl } from '../aiProviders/copilotSubscription.js';
 import { cacheableAnthropicSystem, extractAnthropicCacheTokens } from './promptCaching.js';
 import { isAdaptiveThinkingOnly } from './catalog.js';
+import { toGeminiSchema, geminiSchemaViolations } from './geminiSchema.js';
 
 const log = createLogger('providers.dispatch');
 
@@ -58,6 +59,15 @@ export interface DispatchRequest {
   maxTokens?: number;
   /** Enable provider-native web search for this turn. */
   webSearch?: boolean;
+  /** ADR 0912 (Book AI P22) — the JSON Schema a structured-output call must
+   *  match. When set, Google is asked for `application/json` with a native
+   *  `responseSchema` (the Gemini projection), and OpenAI for
+   *  `response_format: json_schema`. Each falls back one rung on a 400 that
+   *  names an invalid argument (Google: schema → mime only; OpenAI:
+   *  json_schema → json_object → none), so a schema a vendor cannot take still
+   *  gets the prompt hint the caller already sent. Other providers ignore it.
+   *  The caller still validates the reply; this only makes a valid one likelier. */
+  jsonSchema?: unknown;
   /** `compat` provider ONLY (RFC 0108 / ADR 0121): the per-connection OpenAI-
    *  compatible endpoint base URL (e.g. `http://ollama.internal:11434/v1`).
    *  Operator/tenant configuration resolved from the connection at dispatch
@@ -144,6 +154,10 @@ export interface DispatchResult {
   refusal?: RefusalSignal;
   /** Normalized citations from a web-search-enabled turn. Empty when search wasn't used. */
   citations?: readonly Citation[];
+  /** ADR 0912 — how a `jsonSchema` request was honoured: `schema` (Google
+   *  native responseSchema), `mime` (Google JSON mode only), `json_schema` /
+   *  `json_object` (OpenAI), or `prompt` (no native mode; the prompt hint). */
+  structuredMode?: 'schema' | 'mime' | 'json_schema' | 'json_object' | 'prompt';
 }
 
 /**
@@ -470,7 +484,11 @@ async function dispatchAnthropic(req: DispatchRequest): Promise<DispatchResult> 
 // https://platform.openai.com/docs/api-reference/chat/streaming
 
 async function dispatchOpenAI(req: DispatchRequest): Promise<DispatchResult> {
-  const res = await fetchWith429Retry(() => fetch('https://api.openai.com/v1/chat/completions', {
+  // ADR 0912 — native structured output, one rung down per invalid-argument 400.
+  const formats: Array<'json_schema' | 'json_object' | 'prompt'> = req.jsonSchema === undefined
+    ? ['prompt']
+    : isObjectSchema(req.jsonSchema) ? ['json_schema', 'json_object', 'prompt'] : ['json_object', 'prompt'];
+  const send = (format: 'json_schema' | 'json_object' | 'prompt') => fetchWith429Retry(() => fetch('https://api.openai.com/v1/chat/completions', {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
@@ -482,9 +500,24 @@ async function dispatchOpenAI(req: DispatchRequest): Promise<DispatchResult> {
       stream: true,
       stream_options: { include_usage: true },
       messages: req.messages.map((m) => ({ role: m.role, content: contentToOpenAIBlocks(m.content) })),
+      ...(format === 'json_schema' ? { response_format: { type: 'json_schema', json_schema: { name: 'response', schema: req.jsonSchema, strict: false } } }
+        : format === 'json_object' ? { response_format: { type: 'json_object' } }
+          : {}),
     }),
     ...(req.signal ? { signal: req.signal } : {}),
   }), req.signal);
+  let f = 0;
+  let res = await send(formats[f]!);
+  while (!res.ok && res.status === 400 && f + 1 < formats.length) {
+    const errText = await res.text().catch(() => '');
+    if (!/response_format|json_schema|json_object|invalid_request_error/i.test(errText)) {
+      throw new Error(`openai_400: ${errText.slice(0, ERR_BODY_MAX)}`);
+    }
+    f += 1;
+    log.warn('openai_response_format_rejected_trying_next', { model: req.model, next: formats[f] });
+    res = await send(formats[f]!);
+  }
+  const structuredMode = req.jsonSchema === undefined ? undefined : formats[f]!;
   if (!res.ok) {
     throw await providerHttpError('openai', res);
   }
@@ -572,7 +605,12 @@ async function dispatchOpenAI(req: DispatchRequest): Promise<DispatchResult> {
     usage: { inputTokens, outputTokens, ...(cachedReadTokens != null ? { cachedReadTokens } : {}) },
     ...(finishReason ? { finishReason } : {}),
     ...(refusal ? { refusal } : {}),
+    ...(structuredMode ? { structuredMode } : {}),
   };
+}
+
+function isObjectSchema(schema: unknown): boolean {
+  return !!schema && typeof schema === 'object' && (schema as { type?: unknown }).type === 'object';
 }
 
 // ── MiniMax (OpenAI-compatible chat completions) ─────────────────────
@@ -974,6 +1012,16 @@ async function dispatchGoogle(req: DispatchRequest): Promise<DispatchResult> {
     ? ['none']
     : thinkingEnabled ? ['includeThoughts', 'none'] : ['budget0', 'levelMinimal', 'none'];
   const memoKey = `${req.model}|${thinkingEnabled ? 'on' : 'off'}`;
+  // ADR 0912 (Book AI P22) — native JSON. Grounding tools and controlled
+  // generation do not combine, so a web-search turn keeps the prompt hint. A
+  // schema the Gemini projection cannot express faithfully (a free-form member,
+  // a keyword outside the subset) goes as JSON mode without a schema.
+  let jsonMode: 'schema' | 'mime' | 'none' = 'none';
+  let responseSchema: unknown;
+  if (req.jsonSchema !== undefined && !req.webSearch) {
+    responseSchema = toGeminiSchema(req.jsonSchema);
+    jsonMode = geminiSchemaViolations(responseSchema, { path: 'responseSchema' }).length === 0 ? 'schema' : 'mime';
+  }
   const buildBody = (shape: GoogleThinkingShape): string => JSON.stringify({
         contents: conversation.map((m) => ({
           role: m.role === 'assistant' ? 'model' : m.role,
@@ -986,6 +1034,8 @@ async function dispatchGoogle(req: DispatchRequest): Promise<DispatchResult> {
         ...(req.webSearch ? { tools: [{ googleSearch: {} }] } : {}),
         generationConfig: {
           maxOutputTokens: req.maxTokens ?? ((thinkingEnabled || (shape === 'none' && isReasoningModel)) ? 8192 : 4096),
+          ...(jsonMode !== 'none' ? { responseMimeType: 'application/json' } : {}),
+          ...(jsonMode === 'schema' ? { responseSchema } : {}),
           ...(shape === 'budget0' ? { thinkingConfig: { thinkingBudget: 0 } }
             : shape === 'levelMinimal' ? { thinkingConfig: { thinkingLevel: 'minimal' } }
               : shape === 'includeThoughts' ? { thinkingConfig: { includeThoughts: true } }
@@ -1001,8 +1051,17 @@ async function dispatchGoogle(req: DispatchRequest): Promise<DispatchResult> {
   const memoShape = googleThinkingShapeMemo.get(memoKey);
   let rung = memoShape ? Math.max(0, ladder.indexOf(memoShape)) : 0;
   let res = await send(ladder[rung]!);
-  while (!res.ok && res.status === 400 && ladder[rung] !== 'none') {
+  while (!res.ok && res.status === 400 && (ladder[rung] !== 'none' || jsonMode === 'schema')) {
     const errText = await res.text().catch(() => '');
+    // ADR 0912 — a native responseSchema is the likelier invalid argument, so
+    // it is dropped (same thinking rung) before the thinking ladder advances;
+    // otherwise a schema 400 would walk every rung and memoise the wrong one.
+    if (/INVALID_ARGUMENT/.test(errText) && jsonMode === 'schema') {
+      jsonMode = 'mime';
+      log.warn('google_response_schema_rejected_retrying_json_mode', { model: req.model });
+      res = await send(ladder[rung]!);
+      continue;
+    }
     if (!/INVALID_ARGUMENT/.test(errText) || rung + 1 >= ladder.length) {
       throw new Error(`google_400: ${errText.slice(0, ERR_BODY_MAX)}`);
     }
@@ -1167,6 +1226,7 @@ async function dispatchGoogle(req: DispatchRequest): Promise<DispatchResult> {
     ...(safetyCategory ? { safetyCategory } : {}),
     ...(citations.length > 0 ? { citations } : {}),
     ...(refusal ? { refusal } : {}),
+    ...(req.jsonSchema !== undefined ? { structuredMode: jsonMode === 'none' ? 'prompt' as const : jsonMode } : {}),
   };
 }
 

@@ -28,7 +28,7 @@ import type { RunRecord } from '../types.js';
 import { OpenwopError } from '../types.js';
 import { fireBeforeCanvasStateWrite, fireAfterCanvasStateWrite, fireCanvasDeleted } from './canvasLifecycle.js';
 import type { Subject } from './subject.js';
-import { subjectReadAllowed, type SubjectCaller } from './subjectAccess.js';
+import { subjectReadAllowed, subjectWriteAllowed, type SubjectCaller } from './subjectAccess.js';
 import { registerSubjectEraser } from './subjectErasure.js';
 import { ERASED, subjectKeyForms } from './subjectErasureRedaction.js';
 
@@ -302,6 +302,32 @@ export async function canvasReadAllowed(
   return subjectReadAllowed(tenantId, canvas.ownerSubject, caller);
 }
 
+/**
+ * ADR 0886 D1 — THE canvas WRITE predicate, the twin of {@link canvasReadAllowed}
+ * and shared by every write lane (the editor factory, `ctx.canvas`, the agent
+ * tools, the ui-plugin RPC, share-link mint, the collab doors). An org-owned
+ * canvas keeps the caller's org/tenant write gate as the whole rule; an owned
+ * one needs WRITE on its owner subject, decided in that subject's org.
+ * `test/adr0886-canvas-write-gate-ratchet.test.ts` pins every writer to a gate.
+ */
+export async function canvasWriteAllowed(
+  tenantId: string,
+  canvas: Pick<CanvasRecordView, 'ownerSubject'>,
+  caller: SubjectCaller,
+): Promise<boolean> {
+  if (!canvas.ownerSubject) return true;
+  return subjectWriteAllowed(tenantId, canvas.ownerSubject, caller);
+}
+
+/** `getCanvasForTenant` + {@link canvasWriteAllowed}: `null` for missing AND for
+ *  refused (a lane that must tell "readable but not writable" apart uses the two
+ *  predicates directly, as the editor factory does). */
+export async function getCanvasForWriter(tenantId: string, canvasId: string, caller: SubjectCaller): Promise<CanvasRecordView | null> {
+  const canvas = await getCanvasForTenant(tenantId, canvasId);
+  if (!canvas) return null;
+  return (await canvasWriteAllowed(tenantId, canvas, caller)) ? canvas : null;
+}
+
 /** `getCanvasForTenant` + {@link canvasReadAllowed}: `null` for missing AND for
  *  refused, so callers answer both with the same uniform not-found (no
  *  existence leak). The caller-facing way to load a canvas. */
@@ -381,10 +407,6 @@ export async function listCanvasesForCaller(tenantId: string, caller: SubjectCal
 export async function createCanvasForTenant(tenantId: string, args: {
   canvasTypeId: string; name?: string; projectId?: string; ownerSubject?: Subject; initialState?: Json; metadata?: Json; idempotencyKey?: string;
 }): Promise<CanvasRecordView> {
-  if (args.idempotencyKey) {
-    const cached = await idemGet<CanvasRecordView>(`${tenantId}::ct:${args.idempotencyKey}`);
-    if (cached) return cached;
-  }
   const now = new Date().toISOString();
   const canvas: Canvas = {
     canvasId: `canvas-${randomUUID()}`,
@@ -399,9 +421,10 @@ export async function createCanvasForTenant(tenantId: string, args: {
     createdAt: now,
     updatedAt: now,
   };
-  await canvases.put(canvas);
   const view: CanvasRecordView = { canvasId: canvas.canvasId, canvasTypeId: canvas.canvasTypeId, ...(canvas.name ? { name: canvas.name } : {}), ...(canvas.projectId ? { projectId: canvas.projectId } : {}), ...(canvas.ownerSubject ? { ownerSubject: canvas.ownerSubject } : {}), state: canvas.state, version: canvas.version, ...(canvas.metadata !== undefined ? { metadata: canvas.metadata } : {}) };
-  if (args.idempotencyKey) return idemPut(`${tenantId}::ct:${args.idempotencyKey}`, view);
+  // CANVAS-IDEM-ORPHAN-1: claim the key, THEN write the row (see idemCreate).
+  if (args.idempotencyKey) return idemCreate(`${tenantId}::ct:${args.idempotencyKey}`, args.idempotencyKey, canvas, view);
+  await canvases.put(canvas);
   return view;
 }
 
@@ -572,6 +595,76 @@ async function idemPut<T>(key: string, result: T): Promise<T> {
   return winner ? (winner.result as T) : result;
 }
 
+// CANVAS-IDEM-ORPHAN-1 — an idempotent CREATE claims its key BEFORE it writes the
+// canvas row. It used to write the row first and settle the key after (`idemPut`),
+// so the loser of a same-key race returned the winner's canvas and left its OWN row
+// behind: listed in the tenant, referenced by nothing. Now only the claim's winner
+// writes a row, and a failed write releases the claim, so a failed create still
+// caches nothing ("cache-after-success" above).
+//
+// The id stays a random uuid on purpose. An id derived from the key would be REUSED
+// after a delete, and everything keyed by canvasId (share links, comments, collab,
+// versions) is cleaned only by best-effort `onCanvasDeleted` hooks — a lagging hook
+// would attach stale data to the new canvas.
+//
+// The claim lands before the row, so a caller that finds a FRESH claim (younger than
+// IDEM_INFLIGHT_GRACE_MS) whose row is not there yet is looking at an in-flight
+// winner: it waits briefly for the row, and answers `idempotency_in_flight` (409 +
+// Retry-After, `idempotency.md` §"Concurrent duplicates") if the row never lands. A claim OLDER than the grace with no row is ABANDONED — its winner died
+// between claim and write (a revision retiring mid-request does this on every
+// deploy), or the canvas was deleted within the idem TTL. The next caller takes it
+// over with a CAS on the stale claim's exact value (so exactly one taker) and writes
+// its own row. So a same-key retry after a delete makes a NEW canvas with a new id,
+// where it used to replay the dead id. A same-key create with a different body still
+// replays the first result while that canvas exists.
+const IDEM_INFLIGHT_GRACE_MS = 30_000;
+const IDEM_INFLIGHT_WAIT_MS = 2_000;
+async function awaitCanvasRow(canvasId: string): Promise<boolean> {
+  const deadline = Date.now() + IDEM_INFLIGHT_WAIT_MS;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 25));
+    if (await canvases.get(canvasId)) return true;
+  }
+  return false;
+}
+async function idemCreate<T extends { canvasId: string }>(key: string, idempotencyKey: string, canvas: Canvas, result: T): Promise<T> {
+  const tenantId = key.split('::')[0] ?? '';
+  const claim = (): IdemRow => ({ key, tenantId, result: result as unknown as Json, createdAt: new Date().toISOString() });
+  const writeOwnRow = async (claimRow: IdemRow): Promise<T> => {
+    try {
+      await canvases.put(canvas);
+    } catch (err) {
+      // Release only OUR claim: a CAS back to absent is not available, so check it is
+      // still ours before deleting.
+      const current = await _idemRows.get(key).catch(() => null);
+      if (current && current.createdAt === claimRow.createdAt && (current.result as { canvasId?: unknown }).canvasId === canvas.canvasId) {
+        await _idemRows.delete(key).catch(() => false);
+      }
+      throw err;
+    }
+    return result;
+  };
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const existing = await _idemRows.get(key);
+    if (!existing) {
+      const row = claim();
+      if (await _idemRows.compareAndSwap(null, row)) return writeOwnRow(row);
+      continue; // lost the claim: read the winner's on the next pass
+    }
+    const view = existing.result as unknown as T;
+    if (await canvases.get(view.canvasId)) return view;
+    if (Date.now() - Date.parse(existing.createdAt) <= IDEM_INFLIGHT_GRACE_MS) {
+      if (await awaitCanvasRow(view.canvasId)) return view;
+      if (!(await _idemRows.get(key))) continue; // the winner's write failed and released the claim
+      throw new OpenwopError('idempotency_in_flight', 'A request with this idempotency key is still creating the canvas; retry after it completes.', 409, { idempotencyKey, retryAfter: 1 });
+    }
+    const row = claim();
+    if (await _idemRows.compareAndSwap(existing, row)) return writeOwnRow(row);
+    // another caller took the abandoned claim over first: read theirs on the next pass
+  }
+  throw new OpenwopError('idempotency_in_flight', 'The canvas create did not settle; retry.', 409, { idempotencyKey, retryAfter: 1 });
+}
+
 const IDEM_DAY_MS = 24 * 60 * 60 * 1000;
 const IDEM_TTL_MS_DEFAULT = 14 * IDEM_DAY_MS;
 const IDEM_SWEEP_DELETE_CAP = 500;
@@ -623,8 +716,8 @@ export async function sweepExpiredCanvasIdem(now: number = Date.now()): Promise<
 // (versions by key prefix, canvases by their tenant field); fail-closed on
 // falsy input.
 
-/** DSAR eraser — anonymize `capturedBy` on the subject's version snapshots and
- *  their user-kind canvas `ownerSubject`, tenant-wide. */
+/** DSAR eraser — anonymize `capturedBy` on the subject's version snapshots,
+ *  their user-kind canvas `ownerSubject` and `metadata.producedBy`, tenant-wide. */
 export async function eraseSubjectCanvas(tenantId: string, subjectKey: string): Promise<void> {
   if (!tenantId || !subjectKey) return;
   const { forms } = subjectKeyForms(subjectKey);
@@ -632,12 +725,23 @@ export async function eraseSubjectCanvas(tenantId: string, subjectKey: string): 
   for (const v of await canvasVersions.listByPrefix(`${tenantId}:`)) {
     if (forms.has(v.capturedBy)) await canvasVersions.put({ ...v, capturedBy: ERASED });
   }
-  // Canvas ownership — the tenant's canvases whose owner IS the erased subject.
+  // Canvas ownership — the tenant's canvases whose owner IS the erased subject —
+  // and (ADR 0886 D4) the agent tools' provenance stamp `metadata.producedBy`
+  // (slides / drawings / cad / campaign-studio / app-builder write
+  // `{kind:'user', id}` when no agent profile drove the turn). One put per row.
   for (const c of await canvases.list()) {
     if (c.tenantId !== tenantId) continue;
-    if (c.ownerSubject && c.ownerSubject.kind === 'user' && forms.has(c.ownerSubject.id)) {
-      await canvases.put({ ...c, ownerSubject: { kind: 'user', id: ERASED }, updatedAt: new Date().toISOString() });
-    }
+    const ownerHit = Boolean(c.ownerSubject && c.ownerSubject.kind === 'user' && forms.has(c.ownerSubject.id));
+    const meta = c.metadata && typeof c.metadata === 'object' && !Array.isArray(c.metadata) ? (c.metadata as Record<string, unknown>) : null;
+    const pb = meta?.producedBy as { kind?: unknown; id?: unknown } | undefined;
+    const producedHit = Boolean(pb && typeof pb === 'object' && pb.kind === 'user' && typeof pb.id === 'string' && forms.has(pb.id));
+    if (!ownerHit && !producedHit) continue;
+    await canvases.put({
+      ...c,
+      ...(ownerHit ? { ownerSubject: { kind: 'user' as const, id: ERASED } } : {}),
+      ...(producedHit && meta ? { metadata: { ...meta, producedBy: { kind: 'user', id: ERASED } } as Json } : {}),
+      updatedAt: new Date().toISOString(),
+    });
   }
 }
 
@@ -698,7 +802,9 @@ const runCanvasRefusal = (code: string, message: string, extra: Record<string, u
  *      configured operator key's run is the tenant's own principal here too;
  *   5. a subject-owned canvas needs a person who may read it
  *      (`canvasReadAllowed`, shared with the editor + chat tools) — refused as
- *      the SAME `canvas_not_found` a missing id answers.
+ *      the SAME `canvas_not_found` a missing id answers;
+ *   6. ADR 0886 D1 — a WRITE additionally needs `canvasWriteAllowed` (write on
+ *      the owner subject, in its own org), `forbidden_scope`.
  */
 export async function assertCanvasRunAccess(
   scope: BundleScope,
@@ -723,6 +829,11 @@ export async function assertCanvasRunAccess(
   }
   if (!(await canvasReadAllowed(scope.tenantId, canvas, { subject: person }))) {
     throw runCanvasRefusal('canvas_not_found', `canvas ${canvas.canvasId} not found`);
+  }
+  // ADR 0886 D1 — a write needs WRITE on the owner subject (its own org), not
+  // the run person's tenant-wide write plus read.
+  if (need === 'write' && !(await canvasWriteAllowed(scope.tenantId, canvas, { subject: person }))) {
+    throw new OpenwopError('forbidden_scope', 'Missing required scope: workspace:write on the canvas owner', 403, { requiredScope: 'workspace:write' });
   }
 }
 
@@ -779,10 +890,6 @@ export function createCanvasSurface(scope: BundleScope): CanvasSurface {
       // B17 on a canvas that does not exist yet: tenant-owned, so steps 2–4 apply.
       await assertCanvasRunAccess(scope, { canvasId: '(new)', canvasTypeId }, 'write');
       assertCanvasStateValid(canvasTypeId, ((initialState as Json) ?? {}));
-      if (idempotencyKey) {
-        const cached = await idemGet<{ canvasId: string; canvasTypeId: string; name?: string; projectId?: string; createdAt: string }>(idem(`c:${idempotencyKey}`));
-        if (cached) return cached;
-      }
       const now = new Date().toISOString();
       const canvas: Canvas = {
         canvasId: `canvas-${randomUUID()}`,
@@ -796,9 +903,10 @@ export function createCanvasSurface(scope: BundleScope): CanvasSurface {
         createdAt: now,
         updatedAt: now,
       };
-      await canvases.put(canvas);
       const out = { canvasId: canvas.canvasId, canvasTypeId, ...(name ? { name } : {}), ...(projectId ? { projectId } : {}), createdAt: now };
-      if (idempotencyKey) return idemPut(idem(`c:${idempotencyKey}`), out);
+      // CANVAS-IDEM-ORPHAN-1: claim the key, THEN write the row (see idemCreate).
+      if (idempotencyKey) return idemCreate(idem(`c:${idempotencyKey}`), idempotencyKey, canvas, out);
+      await canvases.put(canvas);
       return out;
     },
 

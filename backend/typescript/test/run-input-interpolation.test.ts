@@ -1,6 +1,12 @@
 /**
  * Run-time `{{inputs.NAME}}` interpolation from the per-run variable bag
  * (Phase 1 of the reusable-workflow-templates redesign, ADR 0163 follow-on).
+ *
+ * Guards what reaches a model prompt: every token resolved (global, not first-only),
+ * values coerced, objects/arrays recursed, and a missing variable collapsing to ''
+ * instead of leaking a literal `{{inputs.x}}`. Red under: dropping the regex `g` flag,
+ * returning the token for a missing value, shallow recursion, or a shallow
+ * `hasInputTokens` (probes w32g3-interp-*).
  */
 import { describe, it, expect } from 'vitest';
 import { interpolateRunInputs, hasInputTokens } from '../src/executor/runInputInterpolation.js';

@@ -50,7 +50,7 @@ export const productionFeature: BackendFeature = {
     salt: 'production',
   },
   requiredPacks: [
-    { name: 'feature.production.nodes', version: '1.1.2' },
+    { name: 'feature.production.nodes', version: '1.2.0' },
     { name: 'vendor.openwop-app.production.agents', version: '1.0.2' },
   ],
 };

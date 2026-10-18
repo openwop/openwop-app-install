@@ -1,6 +1,6 @@
 {
   "name": "feature.campaign-channels.nodes",
-  "version": "1.12.1",
+  "version": "1.13.0",
   "kind": "node",
   "description": "Campaign Studio channel-generation node pack. One parameterized `generate` node turns a brief's messaging kernel into a channel deliverable (landing page / ad variants / email sequence / creative briefs / social posts) — grounded in the KB (kb.rag citations) + brand voice (ctx.features.brand) via the run-scoped provider — plus a `content.quality.check` node. Drives the five channel child workflows the orchestration fans out.",
   "author": "OpenWOP App",

@@ -1,6 +1,6 @@
 {
   "name": "feature.app-builder.nodes",
-  "version": "1.9.3",
+  "version": "1.10.1",
   "description": "App-builder canvas producer node pack (+ code export and a canvas-to-work proposal adapter). The `render` node emits a typed `canvas.app-builder` artifact — a structured app design { name, screens[], connectors[] } with a component tree per screen — that renders inline in the chat artifact workbench. The `export` node generates framework-native source (React/Vue/HTML) from an app design → a downloadable Media-asset token via ctx.features['app-builder'].export. The proposal adapter reads an existing canvas and emits generic Kanban work inputs; core Kanban owns the board write. Constrained typed JSON, never executable code; replay-safe.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",

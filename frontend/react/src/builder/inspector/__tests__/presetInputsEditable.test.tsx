@@ -14,8 +14,15 @@
  *   2. a structural value (an RFC 0124 variable ref) is NOT text-editable,
  *      because retyping `{{topic}}` would turn a live reference into a literal.
  */
-import { describe, expect, it, beforeEach, afterEach } from 'vitest';
+import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest';
 import { render, screen, fireEvent, cleanup } from '@testing-library/react';
+
+// The node inspector's model-capability hint reads host discovery; answer it
+// locally so the file never issues a live fetch (ADR 0661).
+vi.mock('../../../client/runsClient.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../client/runsClient.js')>()),
+  getCapabilities: vi.fn(async () => ({})),
+}));
 import { Inspector } from '../Inspector.js';
 import { useBuilderStore } from '../../store/builderStore.js';
 
@@ -35,8 +42,7 @@ function seed(inputs: Record<string, unknown>) {
   return id;
 }
 
-const inputsOf = () =>
-  (useBuilderStore.getState().nodes[0] as unknown as { inputs?: Record<string, unknown> }).inputs;
+const inputsOf = () => useBuilderStore.getState().nodes[0]?.inputs;
 
 describe('preset inputs — editable (ADR 0524 Phase E)', () => {
   afterEach(cleanup);

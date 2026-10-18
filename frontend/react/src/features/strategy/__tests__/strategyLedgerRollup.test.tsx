@@ -3,22 +3,29 @@
  *   - lists each readable project's ledger (version, open questions, waiting
  *     changes, goal) and links to its Ledger tab; a project with no ledger says so;
  *   - asks once for the de-duplicated ids (strategy links + initiatives), capped;
- *   - nothing when the toggle is off or no project is linked; a failed read is said.
+ *   - nothing when no project is linked; a failed read is said.
+ *
+ * There is no toggle path: the team ledger is always on since 836a81994, and the
+ * `useFeatureAccess` mock this file used to carry mocked a hook the component no
+ * longer calls (no case ever set it off).
+ *
+ * Sabotage-witnessed (grade-tests w19, probes w19g5-ru-*): dropping the Set
+ * de-dupe, raising the cap to 25, removing the empty-ids early return, mapping a
+ * failed read to `ready []`, and dropping the no-ledger line each turn a case red.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
-import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
+import type { getLedgerSummaries } from '../../projects/teamLedgerClient.js';
 
-const h = vi.hoisted(() => ({ enabled: true, getLedgerSummaries: vi.fn() }));
+const h = vi.hoisted(() => ({ getLedgerSummaries: vi.fn<typeof getLedgerSummaries>() }));
 vi.mock('../../projects/teamLedgerClient.js', async (orig) => ({ ...(await orig<Record<string, unknown>>()), getLedgerSummaries: h.getLedgerSummaries }));
-vi.mock('../../../featureToggles/FeatureAccessContext.js', () => ({ useFeatureAccess: () => makeFeatureAccess({ enabled: h.enabled }) }));
 
 import { StrategyLedgerRollup } from '../StrategyLedgerRollup.js';
 
 const at = (ids: string[]) => render(<MemoryRouter><StrategyLedgerRollup projectIds={ids} /></MemoryRouter>);
 
-beforeEach(() => { h.enabled = true; h.getLedgerSummaries.mockReset(); });
+beforeEach(() => { h.getLedgerSummaries.mockReset(); });
 afterEach(cleanup);
 
 describe('StrategyLedgerRollup', () => {

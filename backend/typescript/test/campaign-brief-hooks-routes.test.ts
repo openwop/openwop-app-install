@@ -5,6 +5,11 @@
  *   - GET /hooks?orgId (uniform 404 for non-members) + POST /hooks/:id/promote
  *     (transition lattice; workspace:write)
  *   - GET/DELETE /briefs/:id/targeting
+ *
+ * Wave 30 (grade-tests): the status-filtered list holds a candidate AND a tested
+ * hook (one hook could not show an ignored filter); the IDOR stranger's login is
+ * asserted (a failed login would also read as 404); bodies are typed.
+ * Sabotage-witnessed: the 409 guards, both org gates and the absent-pack 404.
  */
 
 import http from 'node:http';
@@ -19,6 +24,10 @@ import { persistAngles } from '../src/features/campaign-brief/angleService.js';
 import { emitCandidateHooks } from '../src/features/campaign-brief/hookBankService.js';
 import { persistTargetingPack } from '../src/features/campaign-brief/targetingService.js';
 import { createOrg } from '../src/host/accessControlService.js';
+import type { AdAngle } from '../src/features/campaign-brief/angleService.js';
+import type { Hook } from '../src/features/campaign-brief/hookBankService.js';
+import type { TargetingPack } from '../src/features/campaign-brief/targetingService.js';
+import type { CampaignBrief } from '../src/features/campaign-brief/types.js';
 
 let BASE: string;
 let server: http.Server;
@@ -37,14 +46,19 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T }
+/** The response bodies this file reads (each route fills a subset). */
+interface Body {
+  angles?: AdAngle[]; hooks?: Hook[]; hook?: Hook; packs?: TargetingPack[]; brief?: CampaignBrief;
+  user?: { userId: string }; details?: { citingAngleIds?: string[]; citingPlatforms?: string[] };
+}
+interface Res<T = Body> { status: number; body: T }
 interface Client { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res>; del: (p: string) => Promise<Res> }
 function client(): Client {
   let cookie = '';
   const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    const out = (res.status === 204 ? {} : await res.json().catch(() => ({}))) as Body;
     return { status: res.status, body: out };
   };
   return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), del: (p) => call('DELETE', p) };
@@ -61,10 +75,10 @@ async function ownerWithBrief(): Promise<{ owner: Client; orgId: string; briefId
   // ADR 0815 D1a — creating an org inside a SHARED tenant is owner-tier over HTTP,
   // and every test here shares the tenant; the org under test is minted directly,
   // owned by this caller (the shape `POST /orgs` produces for an owner).
-  const org = { body: await createOrg({ tenantId: TENANT, createdBy: who.body.user.userId, name: 'Acme', ownerSubject: who.body.user.userId }) };
+  const org = { body: await createOrg({ tenantId: TENANT, createdBy: who.body.user!.userId, name: 'Acme', ownerSubject: who.body.user!.userId }) };
   const brief = await owner.post(`${CB}/briefs`, { orgId: org.body.orgId, name: 'Q4', productName: 'FlashPick' });
   expect(brief.status, JSON.stringify(brief.body)).toBe(201);
-  return { owner, orgId: org.body.orgId, briefId: brief.body.brief.id };
+  return { owner, orgId: org.body.orgId, briefId: brief.body.brief!.id };
 }
 
 describe('angle routes + the evidence-cited 409 guard', () => {
@@ -76,13 +90,13 @@ describe('angle routes + the evidence-cited 409 guard', () => {
     const [angle] = await persistAngles(TENANT, orgId, briefId, 'test', [
       { claim: 'Worth it', positioningLens: 'value', proofRefs: [ev.id], hookVariants: [] },
     ]);
-    expect((await owner.get(`${CB}/briefs/${briefId}/angles`)).body.angles).toHaveLength(1);
+    expect((await owner.get(`${CB}/briefs/${briefId}/angles`)).body.angles!.map((a) => a.id)).toEqual([angle.id]);
 
     const blocked = await owner.del(`${CB}/briefs/${briefId}/voc/${ev.id}`);
     expect(blocked.status).toBe(409);
     // The error middleware redacts high-entropy strings (UUIDs) in details —
     // assert the citation count, not the raw id.
-    expect(blocked.body.details.citingAngleIds).toHaveLength(1);
+    expect(blocked.body.details!.citingAngleIds).toHaveLength(1);
 
     expect((await owner.del(`${CB}/briefs/${briefId}/angles/${angle.id}`)).status).toBe(204);
     expect((await owner.del(`${CB}/briefs/${briefId}/voc/${ev.id}`)).status).toBe(204);
@@ -96,7 +110,7 @@ describe('angle routes + the evidence-cited 409 guard', () => {
     await persistTargetingPack(TENANT, orgId, briefId, 'test', { platform: 'meta', audiences: ['ops'], interests: [], keywords: [], rationale: 'r', evidenceRefs: [ev.id] });
     const blocked = await owner.del(`${CB}/briefs/${briefId}/voc/${ev.id}`);
     expect(blocked.status).toBe(409);
-    expect(blocked.body.details.citingPlatforms).toEqual(['meta']);
+    expect(blocked.body.details!.citingPlatforms).toEqual(['meta']);
     expect((await owner.del(`${CB}/briefs/${briefId}/targeting/meta`)).status).toBe(204);
     expect((await owner.del(`${CB}/briefs/${briefId}/voc/${ev.id}`)).status).toBe(204);
   });
@@ -105,9 +119,16 @@ describe('angle routes + the evidence-cited 409 guard', () => {
 describe('hook-bank routes', () => {
   it('lists + promotes through the lattice; illegal transition is a 400-class error', async () => {
     const { owner, orgId } = await ownerWithBrief();
-    const { emitted } = await emitCandidateHooks(TENANT, orgId, 'angle-1', [{ text: 'Stop recounting bins', format: 'bold-claim' }], 'test');
-    const hookId = emitted[0].id;
-    expect((await owner.get(`${CB}/hooks?orgId=${orgId}&status=candidate`)).body.hooks).toHaveLength(1);
+    const { emitted } = await emitCandidateHooks(TENANT, orgId, 'angle-1', [
+      { text: 'Stop recounting bins', format: 'bold-claim' },
+      { text: 'Already proven line', format: 'question' },
+    ], 'test');
+    const hookId = emitted.find((h) => h.text === 'Stop recounting bins')!.id;
+    const provenId = emitted.find((h) => h.text === 'Already proven line')!.id;
+    expect((await owner.post(`${CB}/hooks/${provenId}/promote`, { orgId, status: 'tested' })).status).toBe(200);
+    // The status filter is honoured: two hooks in the org, ONE candidate.
+    expect((await owner.get(`${CB}/hooks?orgId=${orgId}&status=candidate`)).body.hooks!.map((h) => h.id)).toEqual([hookId]);
+    expect((await owner.get(`${CB}/hooks?orgId=${orgId}&status=tested`)).body.hooks!.map((h) => h.id)).toEqual([provenId]);
 
     const promoted = await owner.post(`${CB}/hooks/${hookId}/promote`, { orgId, status: 'tested', metricRef: 'perf:ad-7' });
     expect(promoted.status).toBe(200);
@@ -121,7 +142,7 @@ describe('hook-bank routes', () => {
     const { orgId } = await ownerWithBrief();
     const { emitted } = await emitCandidateHooks(TENANT, orgId, 'angle-1', [{ text: 'Private hook', format: 'question' }], 'test');
     const stranger = client();
-    await stranger.post('/host/openwop-app/test/login', { email: uniqEmail(), tenantId: TENANT });
+    expect((await stranger.post('/host/openwop-app/test/login', { email: uniqEmail(), tenantId: TENANT })).status).toBe(201);
     expect((await stranger.get(`${CB}/hooks?orgId=${orgId}`)).status).toBe(404);
     expect((await stranger.post(`${CB}/hooks/${emitted[0].id}/promote`, { orgId, status: 'tested' })).status).toBe(404);
   });
@@ -135,7 +156,7 @@ describe('targeting routes', () => {
     ]);
     await persistTargetingPack(TENANT, orgId, briefId, 'test', { platform: 'linkedin', audiences: ['ops'], interests: [], keywords: ['wms'], rationale: 'r', evidenceRefs: [ev.id] });
     const list = await owner.get(`${CB}/briefs/${briefId}/targeting`);
-    expect(list.body.packs.map((p: any) => p.platform)).toEqual(['linkedin']);
+    expect(list.body.packs!.map((p) => p.platform)).toEqual(['linkedin']);
     expect((await owner.del(`${CB}/briefs/${briefId}/targeting/tiktok`)).status).toBe(404);
     expect((await owner.del(`${CB}/briefs/${briefId}/targeting/not-a-platform`)).status).toBe(404);
   });

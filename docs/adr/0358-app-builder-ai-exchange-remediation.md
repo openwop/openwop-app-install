@@ -59,6 +59,92 @@ feature-registered-builtin seam — with catalog knowledge derived from
      (run-scoped deterministic `idempotencyKey`, the ADR 0308 GD-0308-1 rule)
      or update via **`surface.applyRepair`** — the ONE governed CAS write
      owner — returning `{ canvasId, version, screenCount, url }`.
+
+   > **CORRECTED 2026-10-13 (wave-36 grading, ABR-RENDER-1 / ABR-REPAIR-1 /
+   > ABR-GATES-1) — "one normalization gate" was a DATA-LOSS gate on the update
+   > path.** The render node rebuilt every document from a fixed field list
+   > (`{type, props, children}` per node; a fixed set of top-level keys), and
+   > the update half of this very decision CAS-wrote that copy. So the loop the
+   > agent prompt prescribes, get-design → render with `baseVersion`, erased
+   > `models`, `operations`, `stateVariables`, `authProfile`,
+   > `componentDefinitions`, `sharePolicy`, `envRequirements`, the design refs,
+   > and every node's `actions`/`bindings`/`hidden`/`locked` (the ADR 0343/0344
+   > facets, which all post-date this ADR and never reached the node), and it
+   > reported success. The governed repair node ran the same gate, so a repair
+   > did the same. Separately, the node DROPPED invalid values (a non-hex color,
+   > an out-of-enum trigger, an 11th sample row) before `validateAppDoc` ran, so
+   > the "violations return as structured errors" half above never fired for
+   > them; and `validateAppDoc` accepted unknown keys the artifact schema
+   > refuses, so the editor gate and the emit gate disagreed.
+   >
+   > **The decision now reads:** the render node NORMALIZES; it does not FILTER.
+   > - It starts from a deep copy of the whole document, so a facet survives
+   >   by construction, including one added after this note.
+   > - The only rewrites left are: slug an id that fails `ID_RE` (a valid id is
+   >   kept verbatim; slugging used to lowercase `Products`), then follow every
+   >   reference to a renamed id; snap and clamp finite layout coordinates;
+   >   collapse duplicate `(from, to)` connectors.
+   > - Nothing invalid is removed. It reaches `validateAppDoc` and comes back as
+   >   a typed `app_doc_invalid` that names the field. A connector to a missing
+   >   screen is kept, because the validator treats it as a legal mid-edit state.
+   >
+   > `validateAppDoc` takes the artifact schema's `additionalProperties` verdicts
+   > directly (`unknown_prop`), so the allowed-key set has one owner,
+   > `artifactTypes.ts`. It takes ONLY that keyword: the schema's `required`
+   > lists would refuse a screen with no name yet, a legal editor state, and
+   > running every keyword failed 17 existing editor-path tests (measured).
+   >
+   > The repair node:
+   > - validates its candidate through the same gate with the host surface;
+   > - feeds the first failure back once, the bounded repair;
+   > - fails `app_doc_invalid` on a second failure;
+   > - carries over any top-level facet the model omitted. Absent means
+   >   unchanged; to clear a facet the model emits it empty.
+   >
+   > Deepen still drops unknown keys, deliberately: it replaces a thin screen
+   > with fresh model output, so there is no user data in it to preserve.
+   >
+   > Witnesses: `src/features/app-builder/__tests__/renderPreservesFacets.test.ts`
+   > (19 of 22 red on `d812ae704`; the other three are guards) and two
+   > end-to-end tests in `test/app-builder-agent-tools.test.ts` (both red on
+   > `d812ae704`). Pack `feature.app-builder.nodes` 1.9.3 → 1.10.0. It is
+   > image-vendored and steward-attested, not registry-installed: production's
+   > `OPENWOP_INSTALL_PACKS` (57 entries, read 2026-10-13) does not name it, so a
+   > deploy ships it and no registry republish is needed.
+   >
+   > **The open gap, stated plainly:** a repair model that rewrites a node and
+   > omits that node's `actions` or `bindings` still loses them. Absent can only
+   > be read as "unchanged" at the top level, where keys are stable. Inside a
+   > tree that the model is allowed to restructure, there is no identity to
+   > carry them over by. The prompt now names those fields, which is the only
+   > lever at that depth.
+   >
+   > > **CORRECTED 2026-10-15 (ABR-REPAIR-2) — "the only lever at that depth"
+   > > was too strong. There is a structural lever, but only where the tree was
+   > > not restructured.** Components still carry no id, so the repair node
+   > > matches by position within a screen with the same id:
+   > > - **Same tree of types:** the screen was not restructured, so a position
+   > >   identifies the same component. Any `actions`, `bindings`, `hidden` or
+   > >   `locked` the model omitted is carried from that position. Emitting
+   > >   one empty (`[]`/`{}`) removes it.
+   > > - **Restructured:** positions shifted, and guessing would put an action
+   > >   on the wrong component. No guess is made. The candidate is refused
+   > >   when a non-empty `actions`/`bindings` value is missing from the screen
+   > >   and a component of the same type still omits that key, because that
+   > >   looks like a drop, not an edit. The refusal is fed back as the bounded
+   > >   repair, and if the retry still drops it the repair fails
+   > >   `app_doc_invalid`. A value that moved to another component, a removed
+   > >   component, or an edited value is not refused.
+   > >
+   > > What is left is narrower and no longer silent. A model that rewrites a
+   > > restructured screen's actions into a different non-empty value replaces
+   > > them, and the reviewer sees it at the approval gate. That is an edit,
+   > > which is what a repair is for.
+   > >
+   > > Witnesses: five `ABR-REPAIR-2` tests in `renderPreservesFacets.test.ts`
+   > > (the three preservation tests are red on `600cae4f6`; the two guards for
+   > > deliberate removal hold on both). Pack 1.10.0 → 1.10.1, still
+   > > image-vendored, so no registry republish.
 2. **Clean tool ids** (documents convention), retiring the node-typeId-shaped
    id. Zero migration cost: the old id never resolved, so any stored ADR 0104
    allowlist override naming it was already dead, and the node-projection

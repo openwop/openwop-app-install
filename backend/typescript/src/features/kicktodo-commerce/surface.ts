@@ -9,10 +9,21 @@ import { surfaceStr, type FeatureSurface } from '../../host/featureSurfaces.js';
 import { getEntitlement, isChallengePaid, productForChallenge } from './entitlementService.js';
 import { ensureAffiliateForSubject } from './subjectAffiliateBridge.js';
 import { seatAvailability as readSeatAvailability } from './seatService.js';
+import { bindKicktodoSurface, type KicktodoSurfaceSpecs } from '../kicktodo-core/surfaceBinding.js';
+
+/** ADR 0901 (DEC-1) — the run-principal spec per method (`surfaceBinding.ts`).
+ *  The buyer/referrer is the run's person, as each route takes `subjectOf(req)`;
+ *  no host job calls these. `isPaid` is a public catalog fact. */
+export const KICKTODO_COMMERCE_SURFACE_SPECS = {
+  seatAvailability: { subjectArg: 'buyerSubject', authority: 'none', personOnly: true },
+  isPaid: { authority: 'none' },
+  entitlement: { subjectArg: 'buyerSubject', authority: 'none', personOnly: true },
+  referralCode: { subjectArg: 'ownerSubject', authority: 'none', personOnly: true },
+} as const satisfies KicktodoSurfaceSpecs;
 
 export function buildKicktodoCommerceSurface(scope: BundleScope): FeatureSurface {
   const tenant = scope.tenantId;
-  return {
+  return bindKicktodoSurface('kicktodo-commerce', scope, {
     /** ADR 0431 P5 — seat availability for a cohort product (counts only). */
     seatAvailability: async (args) => ({
       availability: await readSeatAvailability(tenant, surfaceStr(args.buyerSubject), surfaceStr(args.productId)),
@@ -38,5 +49,5 @@ export function buildKicktodoCommerceSurface(scope: BundleScope): FeatureSurface
       const link = await ensureAffiliateForSubject(tenant, priceInfo.orgId, surfaceStr(args.ownerSubject));
       return { code: link.code };
     },
-  };
+  }, KICKTODO_COMMERCE_SURFACE_SPECS);
 }

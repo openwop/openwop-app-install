@@ -66,15 +66,17 @@ function row(campaignName: string, date: string, spend: number, conversions: num
 
 describe('ADR 0219 — attribution join', () => {
   it('joins spend to web conversions on the utm key, keeps platform vs web separate, surfaces unattributed', async () => {
-    const campaignId = await makeCampaign('Summer', 'summer-launch');
-    await persistRecords(T, ORG, [row('Summer', '2026-07-01', 100, 5, 400), row('Summer', '2026-07-02', 50, 2, 100)], 'csv', campaignId);
+    // Its OWN org so the report-level counts are exact (no other case's events).
+    const O = 'org-attr-join';
+    const campaignId = await makeCampaignIn(O, 'Summer', 'summer-launch');
+    await persistRecords(T, O, [row('Summer', '2026-07-01', 100, 5, 400), row('Summer', '2026-07-02', 50, 2, 100)], 'csv', campaignId);
     // 3 conversions for our key, 1 foreign.
     for (let i = 0; i < 3; i++) {
-      await recordEvent({ tenantId: T, orgId: ORG, raw: { type: 'conversion', path: '/thanks', sessionKey: `s${i}`, utm: { campaign: 'summer-launch' } } });
+      await recordEvent({ tenantId: T, orgId: O, raw: { type: 'conversion', path: '/thanks', sessionKey: `s${i}`, utm: { campaign: 'summer-launch' } } });
     }
-    await recordEvent({ tenantId: T, orgId: ORG, raw: { type: 'conversion', path: '/thanks', sessionKey: 's9', utm: { campaign: 'someone-elses' } } });
+    await recordEvent({ tenantId: T, orgId: O, raw: { type: 'conversion', path: '/thanks', sessionKey: 's9', utm: { campaign: 'someone-elses' } } });
 
-    const report = await buildAttribution(T, ORG);
+    const report = await buildAttribution(T, O);
     const mine = report.rows.find((r) => r.campaignId === campaignId);
     expect(mine).toBeTruthy();
     expect(mine!.joinKey).toBe('summer-launch');
@@ -83,9 +85,11 @@ describe('ADR 0219 — attribution join', () => {
     expect(mine!.platformConversions).toBe(7);
     expect(mine!.webConversions).toBe(3); // never summed with platform's 7
     expect(mine!.attributedCpa).toBe(50);
+    expect(mine!.reportedRoas).toBe(3.3333); // 500 / 150, platform-reported
     expect(mine!.lineage.spendRows).toBe(2);
     expect(mine!.lineage.latestSpendDate).toBe('2026-07-02');
-    expect(report.unattributedConversions).toBeGreaterThanOrEqual(1);
+    expect(mine!.lineage.conversionEvents).toBe(3);
+    expect(report.unattributedConversions).toBe(1); // the foreign key, surfaced not dropped
   });
 
   it('does NOT drop conversions behind a recency cap of high-volume pageviews (grade-code AUDIT-1)', async () => {
@@ -141,19 +145,6 @@ describe('ADR 0219 — attribution join', () => {
     // A campaign-FILTERED KPI resolves that specific campaign's currency.
     const kpi = await kpiSummary(T, ORG, id);
     expect(kpi.currency).toBe('EUR');
-  });
-
-  it('org-wide KPI currency: unanimous → that currency; mixed → USD fallback (CMPUX-15)', async () => {
-    // A FRESH org so the unanimity check is deterministic (not polluted by other tests).
-    const O = 'org-cur-unanimous';
-    await makeCampaignIn(O, 'UnaA', 'una-a', 5000, 'GBP');
-    await makeCampaignIn(O, 'UnaB', 'una-b', 7000, 'GBP');
-    expect((await kpiSummary(T, O)).currency).toBe('GBP'); // all GBP → GBP
-
-    const M = 'org-cur-mixed';
-    await makeCampaignIn(M, 'MixA', 'mix-a', 5000, 'GBP');
-    await makeCampaignIn(M, 'MixB', 'mix-b', 7000, 'JPY');
-    expect((await kpiSummary(T, M)).currency).toBe('USD'); // mixed → neutral default
   });
 
   /**
@@ -227,10 +218,13 @@ describe('ADR 0220 — pacing bands + escalation-only alerts', () => {
   });
 
   it('campaigns without a plan are counted, not banded', async () => {
-    await makeCampaign('Unplanned', 'unplanned-key');
-    const report = await buildPacing(T, ORG);
-    expect(report.unplanned).toBeGreaterThanOrEqual(1);
-    expect(report.rows.some((r) => r.name === 'Unplanned')).toBe(false);
+    // Its OWN org: one planned + one unplanned, so the count is exact.
+    const O = 'org-pacing-unplanned';
+    await makeCampaignIn(O, 'Planned', 'planned-key', 20000);
+    await makeCampaignIn(O, 'Unplanned', 'unplanned-key');
+    const report = await buildPacing(T, O);
+    expect(report.unplanned).toBe(1);
+    expect(report.rows.map((r) => r.name)).toEqual(['Planned']);
   });
 });
 

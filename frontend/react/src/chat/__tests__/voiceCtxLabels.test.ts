@@ -21,11 +21,13 @@ import { messages as es } from '../i18n/es.js';
 import { messages as fr } from '../i18n/fr.js';
 import { messages as ptBR } from '../i18n/pt-BR.js';
 
-const CATALOGS: Array<[string, Record<string, unknown>]> = [
-  ['en', en as unknown as Record<string, unknown>],
-  ['es', es as unknown as Record<string, unknown>],
-  ['fr', fr as unknown as Record<string, unknown>],
-  ['pt-BR', ptBR as unknown as Record<string, unknown>],
+// Indexed by a composed key, so each catalog is read as a plain map of its
+// own entries (no cast: `Object.entries` takes the catalog as it ships).
+const CATALOGS: ReadonlyArray<readonly [string, ReadonlyMap<string, unknown>]> = [
+  ['en', new Map(Object.entries(en))],
+  ['es', new Map(Object.entries(es))],
+  ['fr', new Map(Object.entries(fr))],
+  ['pt-BR', new Map(Object.entries(ptBR))],
 ];
 
 describe('M2 — the voice degradation-ledger label lookup', () => {
@@ -53,7 +55,7 @@ describe('M2 — the voice degradation-ledger label lookup', () => {
     for (const [locale, catalog] of CATALOGS) {
       for (const block of [...VOICE_CTX_BLOCKS, 'other']) {
         const key = `voiceCtxBlock_${block}`;
-        const value = catalog[key];
+        const value = catalog.get(key);
         expect(typeof value, `${locale} is missing "${key}"`).toBe('string');
         expect((value as string).length, `${locale}.${key} is empty`).toBeGreaterThan(0);
       }

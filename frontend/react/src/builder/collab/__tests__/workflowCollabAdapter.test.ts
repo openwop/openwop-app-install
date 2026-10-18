@@ -130,20 +130,33 @@ describe('adapter round-trip (the no-order-normalization pin)', () => {
     const peer = createCollabDocBinding<Dict>(b, WORKFLOW_COLLAB_SHAPE);
     flush();
     const peerDoc = peer.current();
-    peer.set({
-      ...peerDoc,
-      name: 'Renamed by peer',
-      nodes: [...(peerDoc.nodes as Dict[]), node('n_new', 400, 0) as unknown as Dict],
-    });
-    flush();
-    const store = useBuilderStore.getState();
-    expect(store.name).toBe('Renamed by peer');
-    expect(store.nodes.map((n) => n.id)).toEqual(['n_z', 'n_a', 'n_m', 'n_new']);
-    // No echo: the remote apply must not schedule a local push that rewrites
-    // the room (a rewrite would rebuild items and drop CRDT identity).
-    vi.advanceTimersByTime(400);
-    flush();
-    expect((peer.current().nodes as Dict[]).map((n) => n.id)).toEqual(['n_z', 'n_a', 'n_m', 'n_new']);
+    // Spy on the LOCAL binding's write verb: an echo is the adapter pushing the
+    // just-applied remote doc back through `binding.set`. (Asserting the peer's
+    // graph alone cannot see it: the echoed arrays are the binding's own
+    // materialized objects, so the reconcile writes nothing visible.)
+    const setSpy = vi.spyOn(binding, 'set');
+    try {
+      peer.set({
+        ...peerDoc,
+        name: 'Renamed by peer',
+        nodes: [...(peerDoc.nodes as Dict[]), { ...node('n_new', 400, 0) }],
+      });
+      flush();
+      const store = useBuilderStore.getState();
+      expect(store.name).toBe('Renamed by peer');
+      expect(store.nodes.map((n) => n.id)).toEqual(['n_z', 'n_a', 'n_m', 'n_new']);
+      // No echo: the remote apply must not schedule a local push.
+      vi.advanceTimersByTime(400);
+      flush();
+      expect(setSpy).not.toHaveBeenCalled();
+      expect((peer.current().nodes as Dict[]).map((n) => n.id)).toEqual(['n_z', 'n_a', 'n_m', 'n_new']);
+      // Positive control: a LOCAL edit does reach the spy after the debounce.
+      useBuilderStore.getState().updateNode('n_a', { name: 'local edit' });
+      vi.advanceTimersByTime(400);
+      expect(setSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      setSpy.mockRestore();
+    }
     peer.destroy();
   });
 });

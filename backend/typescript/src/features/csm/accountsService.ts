@@ -28,6 +28,9 @@ import { declarePiiFields } from '../../host/dataClassification.js';
 import { registerSubjectEraser } from '../../host/subjectErasure.js';
 import { registerRetentionPurger } from '../../host/retentionPurger.js';
 import { getCompany } from '../crm/crmEntitiesService.js';
+import { emitHostEvent, type HostEventOrigin } from '../../host/hostEventDispatcher.js';
+import { isWorkspaceMember, onMemberAuthorityLost } from '../../host/accessControlService.js';
+import { subjectKeyForms } from '../../host/subjectErasureRedaction.js';
 
 export interface CrmRef {
   orgId: string;
@@ -98,6 +101,13 @@ export interface Account {
   /** R2 CS-SP-2 — ISO 4217 code for `arr` (additive; absent = unitless). */
   arrCurrency?: string;
   owner?: string;
+  /**
+   * ADR 0882 D3 — the CS owner as a workspace MEMBER (a canonical `user:`
+   * subject, validated at write by {@link assertAssignableOwner}). Replaces the
+   * free-text `owner` for every new write: a member ref is what DSAR, removal and
+   * "Mine" can actually reach. Never projected onto the run lane (`surface.ts`).
+   */
+  ownerUserId?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -229,14 +239,59 @@ export function validateHealthFactors(raw: unknown): HealthFactor[] {
  * the caller 404s (CSM-7) instead of reporting success.
  */
 const CAS_ATTEMPTS = 4;
-async function mutate(accountId: string, apply: (existing: Account) => Account): Promise<Account | null> {
+async function mutate(accountId: string, apply: (existing: Account) => Account): Promise<{ before: Account; after: Account } | null> {
   for (let i = 0; i < CAS_ATTEMPTS; i += 1) {
     const existing = await store.get(accountId);
     if (!existing) return null; // deleted under us — never re-create it
     const next = apply(existing);
-    if (await store.compareAndSwap(existing, next)) return next;
+    // ADR 0882 D5 — return the row the WINNING swap replaced, so a caller's
+    // `previousScore` is never a stale pre-read from a lost attempt.
+    if (await store.compareAndSwap(existing, next)) return { before: existing, after: next };
   }
   throw new OpenwopError('conflict', 'The account changed while this update was being applied. Try again.', 409, { accountId });
+}
+
+/**
+ * ADR 0882 D5 — `host.csm.account.health-changed`, the trigger a playbook binds
+ * to (absorbs ADR 0568 §4). Emitted AFTER the write lands and only on a real
+ * transition of the stored score (number → number, unscored ↔ scored), never on a
+ * re-save of the same value. Ids and scores only (no names, no owner). `changedAt`
+ * is the landed row's `updatedAt`: the transition key a play dedupes on.
+ */
+export const CSM_HEALTH_CHANGED_EVENT = 'host.csm.account.health-changed';
+
+function emitHealthChanged(before: Account | undefined, after: Account, origin?: HostEventOrigin): void {
+  if (before?.healthScore === after.healthScore) return;
+  void emitHostEvent({
+    type: CSM_HEALTH_CHANGED_EVENT,
+    tenantId: after.tenantId,
+    payload: {
+      accountId: after.accountId,
+      ...(before?.healthScore !== undefined ? { previousScore: before.healthScore } : {}),
+      ...(after.healthScore !== undefined ? { healthScore: after.healthScore } : {}),
+      changedAt: after.updatedAt,
+    },
+    ...(origin ? { origin } : {}),
+  });
+}
+
+/**
+ * ADR 0882 D3 — who may own an account: a canonical `user:` subject that is a
+ * member of the workspace root. `selfSubjects` is the caller's own spellings, and
+ * the route passes it ONLY in the caller's own personal workspace (whose owner
+ * row is lazy, and an anon sandbox has none) — the service-desk "assign to me"
+ * precedent (ADR 0878 D5). A legacy `oidc:` member row is refused on purpose: a
+ * later login rekeys it with no hook, and an owner stored under the old spelling
+ * would then match nothing (removal, DSAR, "Mine").
+ */
+export async function assertAssignableOwner(tenantId: string, subject: unknown, selfSubjects: readonly string[] = []): Promise<string> {
+  if (typeof subject !== 'string' || !subject.trim()) {
+    throw new OpenwopError('validation_error', 'Field `ownerUserId` MUST be a member id.', 422, { field: 'ownerUserId', reason: 'invalid_owner' });
+  }
+  const s = subject.trim();
+  if (selfSubjects.includes(s)) return s;
+  if (s.startsWith('user:') && (await isWorkspaceMember(s, tenantId))) return s;
+  throw new OpenwopError('validation_error', 'That person cannot own this account: they are not a member of this workspace.', 422, { field: 'ownerUserId', reason: 'invalid_owner' });
 }
 
 export async function listAccounts(tenantId: string): Promise<Account[]> {
@@ -264,7 +319,7 @@ function cleanArrCurrency(v: unknown): string | undefined {
   return v.toUpperCase();
 }
 
-export async function createAccount(input: { tenantId: string; name: string; healthScore?: number; crmRef?: CrmRef; renewalDate?: string; arr?: number; arrCurrency?: string; owner?: string }): Promise<Account> {
+export async function createAccount(input: { tenantId: string; name: string; healthScore?: number; crmRef?: CrmRef; renewalDate?: string; arr?: number; arrCurrency?: string; owner?: string; ownerUserId?: string }): Promise<Account> {
   if (input.crmRef) await validateCrmRef(input.tenantId, input.crmRef);
   const renewalDate = cleanRenewalDate(input.renewalDate);
   const arr = cleanArr(input.arr);
@@ -282,10 +337,14 @@ export async function createAccount(input: { tenantId: string; name: string; hea
     ...(arr !== undefined ? { arr } : {}),
     ...(arr !== undefined && arrCurrency !== undefined ? { arrCurrency } : {}),
     ...(owner !== undefined ? { owner } : {}),
+    // ADR 0882 D3 — validated by the caller (`assertAssignableOwner`).
+    ...(input.ownerUserId !== undefined ? { ownerUserId: input.ownerUserId } : {}),
     createdAt: now,
     updatedAt: now,
   };
   await store.put(account);
+  // ADR 0882 D5 — a row born scored is an unscored → scored transition.
+  emitHealthChanged(undefined, account);
   return account;
 }
 
@@ -298,14 +357,14 @@ export async function createAccount(input: { tenantId: string; name: string; hea
  */
 export async function updateAccount(
   accountId: string,
-  patch: { name?: string; healthScore?: number | null; crmRef?: CrmRef | null; renewalDate?: string | null; arr?: number | null; arrCurrency?: string | null; owner?: string | null },
+  patch: { name?: string; healthScore?: number | null; crmRef?: CrmRef | null; renewalDate?: string | null; arr?: number | null; arrCurrency?: string | null; owner?: string | null; ownerUserId?: string | null },
 ): Promise<Account | null> {
   const preRead = await store.get(accountId);
   if (!preRead) return null;
   // Validated ONCE, outside the CAS retry: `validateCrmRef` is a CRM round-trip
   // and the tenant of a row never changes.
   if (patch.crmRef) await validateCrmRef(preRead.tenantId, patch.crmRef);
-  return mutate(accountId, (existing) => {
+  const landed = await mutate(accountId, (existing) => {
   const next: Account = { ...existing, updatedAt: new Date().toISOString() };
   if (patch.name !== undefined) next.name = cleanName(patch.name);
   if (patch.healthScore !== undefined) {
@@ -345,8 +404,16 @@ export async function updateAccount(
     const v = patch.owner === null ? undefined : cleanOwner(patch.owner);
     if (v === undefined) delete next.owner; else next.owner = v;
   }
+  // ADR 0882 D3 — validated by the route (`assertAssignableOwner`); null clears.
+  if (patch.ownerUserId !== undefined) {
+    if (patch.ownerUserId === null) delete next.ownerUserId;
+    else next.ownerUserId = patch.ownerUserId;
+  }
   return next;
   });
+  if (!landed) return null;
+  emitHealthChanged(landed.before, landed.after);
+  return landed.after;
 }
 
 /**
@@ -446,7 +513,7 @@ const CSM_STORE = 'csm:account';
 // matcher; introducing it here instead would be the same mistake one layer
 // over. `isPiiField('csm:account','owner')` is still true, so erasure /
 // retention / export are unaffected.
-declarePiiFields(CSM_STORE, ['owner'], { maskGloballyByFieldName: false });
+declarePiiFields(CSM_STORE, ['owner', 'ownerUserId'], { maskGloballyByFieldName: false });
 
 /** The redaction marker a DSAR leaves behind — the row keeps its shape, the
  *  person does not keep their attribution. */
@@ -454,19 +521,64 @@ const ERASED_OWNER = '[erased]';
 
 async function eraseCsmSubject(tenantId: string, subjectKey: string): Promise<void> {
   if (!tenantId || !subjectKey) return;
+  // ADR 0882 D3 — the member-ref owner is matched against every form of the
+  // subject key (the service-desk precedent); the legacy free-text `owner` keeps
+  // its exact match (ADR 0582 §13: a name never equals a key).
+  const { forms } = subjectKeyForms(subjectKey);
+  const hits = (a: Account): boolean => a.owner === subjectKey || (a.ownerUserId !== undefined && forms.has(a.ownerUserId));
   for (const a of await store.listForTenantIndexed(tenantId)) {
-    if (a.owner !== subjectKey) continue;
-    const next: Account = { ...a, owner: ERASED_OWNER, updatedAt: new Date().toISOString() };
-    // CAS, not put: a DSAR sweep racing a UI edit must not resurrect the old
-    // owner. A lost race means the row changed under us; the next sweep sees it.
-    if (!(await store.compareAndSwap(a, next))) {
-      const current = await store.get(a.accountId);
-      if (current && current.owner === subjectKey) {
-        await store.compareAndSwap(current, { ...current, owner: ERASED_OWNER, updatedAt: new Date().toISOString() });
-      }
-    }
+    if (!hits(a)) continue;
+    // CAS via `mutate`: a DSAR sweep racing a UI edit must not resurrect the old
+    // owner, and a lost race is retried against the fresh row.
+    await mutate(a.accountId, (current) => {
+      const next: Account = { ...current, updatedAt: new Date().toISOString() };
+      if (current.owner === subjectKey) next.owner = ERASED_OWNER;
+      if (current.ownerUserId !== undefined && forms.has(current.ownerUserId)) delete next.ownerUserId;
+      return next;
+    });
   }
 }
+
+/**
+ * ADR 0882 D3 — removed-member residue. When a person leaves the workspace ROOT,
+ * every account they owned is unassigned (exact match on the stored member
+ * subject — owners are canonical `user:` subjects, the spelling the removal
+ * reports). A demotion keeps the owner: ownership is attribution, not authority.
+ */
+/**
+ * CSM2CD-6 — close the check-then-write window on an owner assignment. The route
+ * proves membership BEFORE the write lands; a removal that runs in between finds
+ * no row to unassign yet, and the write then lands a removed person as owner.
+ * Re-checking AFTER the write, and unassigning if the person has gone, closes it
+ * from this side (the removal hook closes it from the other).
+ */
+export async function reconfirmOwner(accountId: string): Promise<boolean> {
+  const a = await store.get(accountId);
+  if (!a?.ownerUserId) return true;
+  if (await isWorkspaceMember(a.ownerUserId, a.tenantId)) return true;
+  await unassignOwnerOnRemoval(a.tenantId, a.ownerUserId);
+  return false;
+}
+
+export async function unassignOwnerOnRemoval(tenantId: string, subject: string): Promise<number> {
+  let n = 0;
+  for (const a of await store.listForTenantIndexed(tenantId)) {
+    if (a.ownerUserId !== subject) continue;
+    const landed = await mutate(a.accountId, (current) => {
+      if (current.ownerUserId !== subject) return current;
+      const next: Account = { ...current, updatedAt: new Date().toISOString() };
+      delete next.ownerUserId;
+      return next;
+    });
+    if (landed && landed.before.ownerUserId === subject) n += 1;
+  }
+  return n;
+}
+
+onMemberAuthorityLost('csm-account-owner', async (lost) => {
+  if (lost.reason !== 'removed' || lost.orgId !== lost.tenantId) return 0;
+  return unassignOwnerOnRemoval(lost.tenantId, lost.subject);
+});
 
 /**
  * Retention (ADR 0077) for `csm:account`. The row is NOT deleted: an account
@@ -482,6 +594,10 @@ registerRetentionPurger({
     if (classification !== 'confidential-pii') return 0;
     let redacted = 0;
     for (const a of await store.listForTenantIndexed(tenantId)) {
+      // CSM2CD-4 — the TYPED name only. `ownerUserId` is a live member reference,
+      // not an aged record of a person: removal (the authority-lost hook) and DSAR
+      // are what end it, and an age sweep would silently unassign people who are
+      // still here and still own the account.
       if (!a.owner || a.owner === ERASED_OWNER) continue;
       if (a.updatedAt >= cutoffIso) continue;
       if (await store.compareAndSwap(a, { ...a, owner: ERASED_OWNER })) redacted += 1;
@@ -544,11 +660,15 @@ export async function setAccountHealthForTenant(
     factors?: unknown;
     /** The company the factors were actually measured over (ADR 0582 §4). */
     computedForCompanyId?: string;
+    /** ADR 0882 D2 — the ORG they were measured in; both halves of crmRef must match. */
+    computedForOrgId?: string;
     /** Which arithmetic produced them (ADR 0582 §5). */
     method?: HealthMethod;
     /** Record a REFUSAL to score. Mutually exclusive with `factors`. */
     measureFailed?: { reason: string };
   },
+  /** ADR 0617 D1a — the emitting run, stamped on the health-changed event. */
+  origin?: HostEventOrigin,
 ): Promise<Account | null> {
   // Validate shape BEFORE the existence lookup — malformed input is rejected
   // fail-closed regardless of whether the account exists (also avoids doing a
@@ -631,17 +751,32 @@ export async function setAccountHealthForTenant(
     }
   }
   if (validatedFactors !== undefined) {
-    const measuredFor = patch.computedForCompanyId;
-    if (!measuredFor || measuredFor !== preRead.crmRef?.companyId) {
+    // ADR 0882 D2 (CSM2WF-3) — BOTH halves of the link. Comparing the company
+    // alone let a run measure org A's (empty) deal list for an account linked to
+    // org B's company and stamp a fabricated 100 as computed. And, like the
+    // link-gone path above, the refusal is RECORDED before it throws: the old
+    // company-only refusal threw without the marker, so the console never learned
+    // that measurement had stopped. A frozen pre-0882 workflow copy names no org
+    // at all; it is told how to recover rather than silently refused.
+    const measuredOrg = patch.computedForOrgId;
+    const measuredCompany = patch.computedForCompanyId;
+    let refusal: string | null = null;
+    if (!measuredOrg) {
+      refusal = 'Stopped measuring: this workflow copy predates ADR 0882 and does not name the CRM org it measured. Re-create it from the gallery (Compute Health From CRM 1.1.0).';
+    } else if (!measuredCompany || measuredCompany !== preRead.crmRef?.companyId || measuredOrg !== preRead.crmRef?.orgId) {
+      refusal = 'Stopped measuring: the computed set named a different CRM org or company than this account is linked to, so the score would describe a different customer.';
+    }
+    if (refusal) {
+      await setAccountHealthForTenant(tenantId, accountId, { measureFailed: { reason: refusal } }, origin);
       throw new OpenwopError(
         'validation_error',
-        'A computed health set MUST name the CRM company it measured, and it MUST be the company this account is linked to — otherwise the score describes a different customer.',
+        'A computed health set MUST name the CRM org and company it measured, and they MUST be the ones this account is linked to — otherwise the score describes a different customer. The refusal has been recorded on the account.',
         400,
-        { field: 'computedForCompanyId', accountId },
+        { field: measuredOrg ? 'computedForCompanyId' : 'computedForOrgId', accountId },
       );
     }
   }
-  return mutate(accountId, (existing) => {
+  const landed = await mutate(accountId, (existing) => {
   const next: Account = { ...existing, updatedAt: new Date().toISOString() };
   if (patch.name !== undefined) next.name = cleanName(patch.name);
   if (patch.healthScore !== undefined) next.healthScore = clampScore(patch.healthScore);
@@ -665,7 +800,38 @@ export async function setAccountHealthForTenant(
   }
   return next;
   });
+  if (!landed) return null;
+  emitHealthChanged(landed.before, landed.after, origin);
+  return landed.after;
 }
+
+/**
+ * ADR 0882 D6 — the renewal window (`renewals-due`). Accounts whose
+ * `renewalDate` falls on or before `asOf + days`, soonest first; an overdue one
+ * is included and flagged. Date-dependent by nature, so `asOf` is returned with
+ * the list: a reader (and a fork) can see which day was measured.
+ */
+export const MAX_RENEWAL_WINDOW_DAYS = 366;
+export async function listRenewalsDue(tenantId: string, days: number, now: Date = new Date()): Promise<{ asOf: string; accounts: Array<{ account: Account; overdue: boolean; daysUntil: number }> }> {
+  const window = Math.max(0, Math.min(MAX_RENEWAL_WINDOW_DAYS, Math.floor(days)));
+  const asOfDay = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+  const out: Array<{ account: Account; overdue: boolean; daysUntil: number }> = [];
+  for (const a of await store.listForTenantIndexed(tenantId)) {
+    if (!a.renewalDate) continue;
+    const t = Date.parse(a.renewalDate);
+    if (Number.isNaN(t)) continue;
+    const d = new Date(t);
+    const renewalDay = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+    const daysUntil = Math.round((renewalDay - asOfDay) / 86_400_000);
+    if (daysUntil > window) continue;
+    out.push({ account: a, overdue: daysUntil < 0, daysUntil });
+  }
+  out.sort((x, y) => x.daysUntil - y.daysUntil);
+  return { asOf: new Date(asOfDay).toISOString().slice(0, 10), accounts: out };
+}
+
+/** ADR 0882 D6 — at most this many accounts per play run (bounds the fan-out of one node). */
+export const MAX_PLAY_ACCOUNTS = 50;
 
 /** Test-only: clear all accounts. */
 export async function __resetCsmStore(): Promise<void> {

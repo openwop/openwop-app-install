@@ -1,6 +1,6 @@
 {
   "name": "vendor.openwop-app.service-desk.agents",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "kind": "node",
   "description": "Support Agent (ADR 0422) — triages the org's ticket queue through the EXISTING chat (no new chat surface): reads threads, sets workflow status, and DRAFTS replies that always route through the human approval inbox — the agent never sends to a customer. Pure-agent pack.",
   "author": "OpenWOP App",

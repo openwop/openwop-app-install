@@ -25,14 +25,14 @@ describe('ContractWorkspace', () => {
       dataSources: [{ id: 'customers', name: 'Customers', rows: [{ name: 'Ada' }] }],
     });
     const designSystem = screen.getByLabelText('Design system reference');
-    fireEvent.change(designSystem, { target: { value: 'ds_aurora' } });
+    fireEvent.change(designSystem, { target: { value: ' ds_aurora ' } });
     fireEvent.blur(designSystem);
     expect(doc.designSystemRef).toEqual({ id: 'ds_aurora' });
 
     fireEvent.change(screen.getByLabelText('Sign-in method'), { target: { value: 'sso' } });
     fireEvent.click(screen.getByRole('button', { name: 'Add role' }));
     fireEvent.click(screen.getByRole('button', { name: 'Add guard' }));
-    expect(doc.authProfile).toMatchObject({ kind: 'sso', roles: ['role_1'], guards: [{ screenId: 'home' }] });
+    expect(doc.authProfile).toEqual({ kind: 'sso', roles: ['role_1'], guards: [{ screenId: 'home' }] });
 
     fireEvent.click(screen.getByRole('button', { name: 'Add requirement' }));
     expect(doc.envRequirements).toEqual([{ key: 'NEW_ENV', purpose: 'Describe why this setting is needed', requiredFor: ['runtime'] }]);

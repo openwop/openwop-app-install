@@ -4,6 +4,11 @@
  * `basis:'none'` from membership — and until `/access/effective` projected
  * `superadmin`, the predicate hid the entry from the one caller every admin
  * route would have admitted.
+ *
+ * #3686 (superadmin projected into /access/effective). Breaks it: the Admin
+ * entry hidden from a pure superadmin, an owner/admin dropped from the
+ * predicate, or the superadmin flag leaking into `canManageOrgs` (org creation
+ * is a membership authority the backend still refuses a bare superadmin).
  */
 import { describe, expect, it } from 'vitest';
 import { canManageOrgs, isAdminCaller } from '../useEffectiveAccess.js';

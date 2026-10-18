@@ -11,7 +11,11 @@ import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { createSecretConnection } from '../src/features/connections/connectionsService.js';
-import { grantConsent } from '../src/features/kicktodo-integrations/integrationService.js';
+import { grantConsent, revokeConsent, putWearableRule } from '../src/features/kicktodo-integrations/integrationService.js';
+import { createDraft, publishChallenge } from '../src/features/kicktodo-core/challengeService.js';
+import { enroll } from '../src/features/kicktodo-core/enrollmentService.js';
+import { listCheckIns } from '../src/features/kicktodo-core/todayService.js';
+import { registerGoalVerifier } from '../src/features/goals/goalVerifiers.js';
 import { linkWearableProvider, __resetWearableLinks } from '../src/features/kicktodo-integrations/wearableLinkService.js';
 import { registerWearableAdapter, __resetWearableAdapters, type WearablePush } from '../src/features/kicktodo-integrations/wearableProviderAdapter.js';
 import {
@@ -25,7 +29,6 @@ import {
 
 let appServer: http.Server;
 const T = 'default';
-const SUBJECT = 'user:ww-owner';
 const SECRET = 'provider-signing-secret';
 
 /** A fake provider adapter: HMAC-SHA256 over the raw body, `userId` from the payload,
@@ -51,6 +54,7 @@ beforeAll(async () => {
   process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   await new Promise<void>((r) => { appServer = app.listen(0, '127.0.0.1', () => r()); });
+  registerGoalVerifier('kicktodo:progress-evidence', async () => ({ satisfied: false, confidence: 0, runId: 'r' }));
   const d = getToggleDefault('kicktodo-integrations');
   if (d) await saveConfig({ ...d, status: 'on' }, 'test');
   // The tenant's provider signing secret rides a tenant-scoped Connection.
@@ -62,13 +66,31 @@ afterEach(async () => {
   delete process.env.OPENWOP_WEARABLE_PROVIDER_ENABLED;
 });
 
-async function setupLive(): Promise<string> {
+/** Each case gets its OWN subject + provider account, so no case's enrollment,
+ *  rule or consent leaks into another's ingest count (shuffle-safe). */
+let seq = 0;
+interface Live { token: string; subject: string; providerUserId: string; enrollmentId: string }
+
+/** Live pipeline: adapter + webhook token, and a consented subject with an ACTIVE
+ *  enrollment whose day-1 action carries a `steps ≥ 5000` wearable rule — so a valid
+ *  push that reaches the kernel converts exactly ONE check-in (`ingested: 1`). */
+async function setupLive(fixed?: { subject: string; providerUserId: string }): Promise<Live> {
+  seq += 1;
+  const subject = fixed?.subject ?? `user:ww-owner-${seq}`;
+  const providerUserId = fixed?.providerUserId ?? `prov-user-${seq}`;
   process.env.OPENWOP_WEARABLE_PROVIDER_ENABLED = 'true';
   registerWearableAdapter('google', fakeAdapter); // 'google' is a built-in provider (for the Connection)
   const token = await registerWearableWebhook(T, 'google');
-  await grantConsent(T, SUBJECT, 'wearable-evidence');
-  await linkWearableProvider(T, SUBJECT, 'google', 'prov-user-1');
-  return token;
+  await grantConsent(T, subject, 'wearable-evidence');
+  await linkWearableProvider(T, subject, 'google', providerUserId);
+  const draft = await createDraft({
+    tenantId: T, title: `Walk ${seq}`, summary: 's', outcome: 'o', durationDays: 3,
+    activities: [{ stableActivityId: 'a1', day: 1, title: 'Walk', instructions: 'i', evidencePolicy: 'measurement' }],
+  });
+  await publishChallenge(T, draft.id, 1);
+  const { enrollment } = await enroll({ tenantId: T, ownerSubject: subject, challengeId: draft.id, challengeVersion: 1, timezone: 'UTC' });
+  await putWearableRule(T, subject, { enrollmentId: enrollment.id, stableActivityId: 'a1', metric: 'steps', threshold: 5000 });
+  return { token, subject, providerUserId, enrollmentId: enrollment.id };
 }
 
 describe('ADR 0462 P2 — wearable webhook (fail-closed pipeline)', () => {
@@ -77,8 +99,8 @@ describe('ADR 0462 P2 — wearable webhook (fail-closed pipeline)', () => {
   });
 
   it('rejects a BAD signature with 401 (verify runs first) — never reaches ingest', async () => {
-    const token = await setupLive();
-    const bad: WearablePush = { payload: { userId: 'prov-user-1', readings: [{ metric: 'steps', value: 9000 }] }, rawBody: '{}', headers: { 'x-kt-sig': 'deadbeef' } };
+    const { token, providerUserId } = await setupLive();
+    const bad: WearablePush = { payload: { userId: providerUserId, readings: [{ metric: 'steps', value: 9000 }] }, rawBody: '{}', headers: { 'x-kt-sig': 'deadbeef' } };
     await expect(ingestWearableWebhook(token, bad)).rejects.toThrow(WebhookUnauthorizedError);
   });
 
@@ -88,29 +110,46 @@ describe('ADR 0462 P2 — wearable webhook (fail-closed pipeline)', () => {
   });
 
   it('a VALID signed push for a linked+consented subject runs the pipeline to the kernel', async () => {
-    const token = await setupLive();
-    const out = await ingestWearableWebhook(token, sign({ userId: 'prov-user-1', readings: [{ metric: 'steps', value: 9000 }] }));
-    expect(out).toHaveProperty('ingested'); // reached ingest (0 is fine — no matching rule in this fixture)
-    expect(typeof out.ingested).toBe('number');
+    const { token, providerUserId } = await setupLive();
+    const out = await ingestWearableWebhook(token, sign({ userId: providerUserId, readings: [{ metric: 'steps', value: 9000 }] }));
+    // Reached ingest: the rule converted today's walk into exactly one check-in.
+    expect(out).toEqual({ ingested: 1 });
   });
 
   it('a valid push for an UNLINKED provider account is a silent 0 (no leak, no work)', async () => {
-    const token = await setupLive();
-    const out = await ingestWearableWebhook(token, sign({ userId: 'unknown-account', readings: [{ metric: 'steps', value: 1 }] }));
-    expect(out.ingested).toBe(0);
+    // A linked, consented subject WITH a matching rule exists alongside the unknown
+    // account (a fixed id, so a resolver that falls back to some subject would land
+    // on one that converts) — the unlinked push must reach nobody.
+    const { token, enrollmentId, providerUserId } = await setupLive({ subject: 'user:ww-ruled', providerUserId: 'prov-ruled' });
+    const out = await ingestWearableWebhook(token, sign({ userId: 'unknown-account', readings: [{ metric: 'steps', value: 9000 }] }));
+    expect(out).toEqual({ ingested: 0 });
+    expect(await listCheckIns(T, enrollmentId)).toEqual([]); // the ruled subject got nothing
+    // Positive control: the SAME push for the linked account converts, and lands.
+    expect(await ingestWearableWebhook(token, sign({ userId: providerUserId, readings: [{ metric: 'steps', value: 9000 }] }))).toEqual({ ingested: 1 });
+    expect(await listCheckIns(T, enrollmentId)).toHaveLength(1);
+  });
+
+  it('a valid push for a subject whose wearable-evidence consent was REVOKED is a silent 0', async () => {
+    const { token, subject, providerUserId } = await setupLive();
+    await revokeConsent(T, subject, 'wearable-evidence');
+    const out = await ingestWearableWebhook(token, sign({ userId: providerUserId, readings: [{ metric: 'steps', value: 9000 }] }));
+    expect(out).toEqual({ ingested: 0 });
+    // Positive control: re-consent and the same push converts.
+    await grantConsent(T, subject, 'wearable-evidence');
+    expect(await ingestWearableWebhook(token, sign({ userId: providerUserId, readings: [{ metric: 'steps', value: 9000 }] }))).toEqual({ ingested: 1 });
   });
 
   it('grade-data 0462-D1 — revoke invalidates the token (404 thereafter)', async () => {
-    const token = await setupLive();
+    const { token, providerUserId } = await setupLive();
     await revokeWearableWebhook(T, 'google');
-    await expect(ingestWearableWebhook(token, sign({ userId: 'prov-user-1', readings: [] }))).rejects.toThrow(WebhookDeniedError);
+    await expect(ingestWearableWebhook(token, sign({ userId: providerUserId, readings: [] }))).rejects.toThrow(WebhookDeniedError);
   });
 
   it('grade-data 0462-D1 — re-registration ROTATES: the old token 404s, only the new one works', async () => {
-    const oldToken = await setupLive();
+    const { token: oldToken, providerUserId } = await setupLive();
     const newToken = await registerWearableWebhook(T, 'google'); // rotate
-    await expect(ingestWearableWebhook(oldToken, sign({ userId: 'prov-user-1', readings: [] }))).rejects.toThrow(WebhookDeniedError);
-    // the new token is live (reaches the pipeline — returns an object, not a throw)
-    expect(await ingestWearableWebhook(newToken, sign({ userId: 'prov-user-1', readings: [] }))).toHaveProperty('ingested');
+    await expect(ingestWearableWebhook(oldToken, sign({ userId: providerUserId, readings: [] }))).rejects.toThrow(WebhookDeniedError);
+    // the new token is live (reaches the pipeline — an empty reading list ingests nothing)
+    expect(await ingestWearableWebhook(newToken, sign({ userId: providerUserId, readings: [] }))).toEqual({ ingested: 0 });
   });
 });

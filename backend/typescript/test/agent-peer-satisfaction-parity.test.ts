@@ -52,8 +52,12 @@ describe('the v2 agents family is satisfied exactly as it is advertised', () => 
     expect(hostSatisfies('agents')).toBe(true);
     expect(hostSatisfies('agents', ['orgChart', 'roster', 'manifestRuntime'])).toBe(true);
     // A facet the record does NOT carry is refused, whatever the family.
-    expect(record).not.toHaveProperty('evalSuite');
-    expect(hostSatisfies('agents', ['evalSuite'])).toBe(false);
+    // (ADR 0889 — `evalSuite` was this example until the host began serving it.)
+    expect(record).not.toHaveProperty('deployment');
+    expect(hostSatisfies('agents', ['deployment'])).toBe(false);
+    // ADR 0889 — eval suites are served, so the facet is advertised AND satisfied.
+    expect(record).toHaveProperty('evalSuite');
+    expect(hostSatisfies('agents', ['evalSuite'])).toBe(true);
     // memoryBackends is conditional (durable memory only): claimed iff advertised.
     expect(hostSatisfies('agents', ['memoryBackends'])).toBe(record !== undefined && 'memoryBackends' in record);
   });

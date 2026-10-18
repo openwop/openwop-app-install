@@ -26,6 +26,7 @@
 import { describe, it, expect } from 'vitest';
 import { serializeWorkflow } from '../serialize.js';
 import { fromCanonicalDefinition } from '../deserialize.js';
+import { definitionMetadataFor, stripBuilderOwnedKeys } from '../../persistence/definitionMetadata.js';
 import type { SavedWorkflow } from '../workflow.js';
 
 /** A definition in the shape the host actually persists (the 5-field node
@@ -69,39 +70,39 @@ const STORED_WALKTHROUGH: StoredDefinition = {
   ],
 };
 
-/** Rebuild the SavedWorkflow the builder holds after opening `def`, mirroring
- *  `backendStore.loadWorkflow`'s two-tier metadata split. */
+/** Rebuild the SavedWorkflow the builder holds after opening `def`, through the
+ *  product's own two-tier metadata split (`stripBuilderOwnedKeys`, the call
+ *  `backendStore.loadWorkflow` makes). grade-tests w47: this helper used to
+ *  RE-IMPLEMENT the split, so every metadata claim below tested the test. */
 function open(def: StoredDefinition): SavedWorkflow {
   const d = fromCanonicalDefinition(def);
-  const { name: _name, lifecycle: _lifecycle, ...carried } = def.metadata;
   return {
     id: def.workflowId,
     name: typeof def.metadata.name === 'string' ? def.metadata.name : def.workflowId,
     version: '1.0.0',
     nodes: d.nodes,
     edges: d.edges,
-    createdAt: 'now',
-    updatedAt: 'now',
-    metadata: carried,
+    createdAt: '2026-01-01T00:00:00.000Z',
+    updatedAt: '2026-01-01T00:00:00.000Z',
+    metadata: stripBuilderOwnedKeys(def.metadata),
   };
 }
 
-/** Mirror of `backendStore.mergeDefinitionMetadata` — the single seam where the
- *  builder-owned keys overlay the carried ones. */
+/** What `backendStore.saveWorkflow` POSTs: the serialized graph plus the ONE
+ *  metadata composer every writer uses (`definitionMetadataFor`). */
 function save(wf: SavedWorkflow): Record<string, unknown> {
-  // Spread into a fresh literal rather than `as Record<string, unknown>`:
-  // TS2352 rejects that conversion, and the compiler's own suggestion
-  // (`as unknown as`) is a banned pattern in this repo. The spread is
-  // cast-free and structurally identical.
+  // Spread into a fresh literal: cast-free and structurally identical.
   const def: Record<string, unknown> = { ...serializeWorkflow(wf) };
+  return { ...def, metadata: definitionMetadataFor(wf) };
+}
+
+/** A saved body re-read as the stored shape (the host persists what was POSTed). */
+function reload(out: Record<string, unknown>, workflowId: string): StoredDefinition {
   return {
-    ...def,
-    metadata: {
-      ...(wf.metadata ?? {}),
-      ...((def.metadata as Record<string, unknown> | undefined) ?? {}),
-      name: wf.name,
-      ...(wf.lifecycle ? { lifecycle: wf.lifecycle } : {}),
-    },
+    workflowId,
+    metadata: out.metadata as Record<string, unknown>,
+    nodes: out.nodes as StoredDefinition['nodes'],
+    edges: out.edges as StoredDefinition['edges'],
   };
 }
 
@@ -112,6 +113,8 @@ describe('ADR 0440 P1 — open→save is a fixed point for what the host stores'
     expect(ids).toEqual(['t1', 't2', 't3', 't4', 't5']);
   });
 
+  // Twin: serialize.test.ts "round-trips a serialized definition back…" covers the
+  // same endpoints from a builder-authored graph.
   it('preserves edge endpoints against the preserved ids', () => {
     const out = save(open(STORED_WALKTHROUGH));
     const edges = out.edges as Array<{ sourceNodeId: string; targetNodeId: string }>;
@@ -175,6 +178,15 @@ describe('ADR 0440 P1 — open→save is a fixed point for what the host stores'
     const out = save(open(STORED_WALKTHROUGH));
     const nodes = out.nodes as Array<{ irreversibleEffect?: boolean }>;
     expect(nodes[4]!.irreversibleEffect).toBe(true);
+    // An explicit `false` is ALSO a statement the author wrote ("I checked: this
+    // has an inverse") — the value a truthiness check would silently drop.
+    const saidFalse: StoredDefinition = {
+      ...STORED_WALKTHROUGH,
+      nodes: [{ nodeId: 't5', typeId: 'core.noop', irreversibleEffect: false }],
+      edges: [],
+    };
+    const outFalse = save(open(saidFalse)).nodes as Array<{ irreversibleEffect?: boolean }>;
+    expect(outFalse[0]!.irreversibleEffect).toBe(false);
   });
 
   it('does not INVENT either field on a node that declared neither', () => {
@@ -190,13 +202,7 @@ describe('ADR 0440 P1 — open→save is a fixed point for what the host stores'
 
   it('is STABLE — a second open→save changes nothing (true fixed point)', () => {
     const once = save(open(STORED_WALKTHROUGH));
-    const reloaded: StoredDefinition = {
-      workflowId: STORED_WALKTHROUGH.workflowId,
-      metadata: once.metadata as Record<string, unknown>,
-      nodes: once.nodes as StoredDefinition['nodes'],
-      edges: once.edges as StoredDefinition['edges'],
-    };
-    const twice = save(open(reloaded));
+    const twice = save(open(reload(once, STORED_WALKTHROUGH.workflowId)));
     expect(twice.nodes).toEqual(once.nodes);
     expect(twice.edges).toEqual(once.edges);
     expect((twice.metadata as Record<string, unknown>).walkthrough).toBe(true);
@@ -204,6 +210,8 @@ describe('ADR 0440 P1 — open→save is a fixed point for what the host stores'
 
   it('a RENAME still wins — builder-owned keys overlay the carried copy', () => {
     const opened = open(STORED_WALKTHROUGH);
+    // The stored name is stripped from the carried copy at load (one writer)…
+    expect(opened.metadata).toEqual({ walkthrough: true });
     const out = save({ ...opened, name: 'Renamed by the user' });
     expect((out.metadata as Record<string, unknown>).name).toBe('Renamed by the user');
     expect((out.metadata as Record<string, unknown>).walkthrough).toBe(true); // still carried
@@ -211,6 +219,7 @@ describe('ADR 0440 P1 — open→save is a fixed point for what the host stores'
 
   it('a lifecycle draft flag still round-trips (the ADR 0369 case this generalizes)', () => {
     const opened = open(STORED_WALKTHROUGH);
+    expect(opened.metadata).not.toHaveProperty('lifecycle');
     const out = save({ ...opened, lifecycle: { transient: true, generatedBy: 'workflow-builder' } });
     expect((out.metadata as Record<string, unknown>).lifecycle).toEqual({ transient: true, generatedBy: 'workflow-builder' });
   });
@@ -228,24 +237,27 @@ describe('ADR 0440 P1 — id fallback still guarantees wire validity', () => {
     const out = save(open(def));
     const id = (out.nodes as Array<{ nodeId: string }>)[0]!.nodeId;
     expect(id).toMatch(WIRE_NODE_ID);
-    expect(id).not.toBe('has spaces/and.dots');
+    expect(id).toBe('noop_0'); // the `<kind>_<index>` fallback
   });
 
   it('de-duplicates when a generated id would collide with a preserved one', () => {
     // The real collision: node A's PRESERVED id is exactly what the fallback
-    // would generate for node B (kind `core.noop` at index 1 → `core_noop_1`).
+    // mints for node B. The fallback is `<catalog kind>_<index>`, and the kind of
+    // `core.noop` is `noop` — so index 1 → `noop_1`. (grade-tests w47: this
+    // fixture used to preserve `core_noop_1`, which never collides, so the
+    // de-dup loop never ran.)
     const def = {
       ...STORED_WALKTHROUGH,
       nodes: [
-        { nodeId: 'core_noop_1', typeId: 'core.noop', config: {} },
+        { nodeId: 'noop_1', typeId: 'core.noop', config: {} },
         { nodeId: 'bad id!', typeId: 'core.noop', config: {} },
       ],
-      edges: [{ edgeId: 'e1', sourceNodeId: 'core_noop_1', targetNodeId: 'bad id!' }],
+      edges: [{ edgeId: 'e1', sourceNodeId: 'noop_1', targetNodeId: 'bad id!' }],
     };
     const out = save(open(def));
     const ids = (out.nodes as Array<{ nodeId: string }>).map((n) => n.nodeId);
-    expect(ids[0]).toBe('core_noop_1');          // preserved
-    expect(new Set(ids).size).toBe(ids.length);  // and the fallback stepped aside
+    expect(ids).toEqual(['noop_1', 'noop_1_2']); // preserved, and the fallback stepped aside
+    expect(new Set(ids).size).toBe(ids.length);
     for (const id of ids) expect(id).toMatch(WIRE_NODE_ID);
   });
 });
@@ -318,7 +330,7 @@ describe('NOTIF-UX-3 — open→save preserves run-time input bindings', () => {
   it('survives a SECOND round trip — the "open it twice" case users hit', () => {
     // The reported symptom was "opening and saving a repaired workflow re-breaks
     // it", i.e. the damage shows on the next cycle, not the first.
-    const once = save(open(STORED_PARAMETERISED)) as unknown as StoredDefinition;
+    const once = reload(save(open(STORED_PARAMETERISED)), STORED_PARAMETERISED.workflowId);
     const twice = byId(save(open(once)));
     expect(twice.order).toEqual({ orgId: '{{params.orgId}}', orderId: '{{params.orderId}}' });
   });
@@ -399,7 +411,7 @@ describe('ADR 0524 Phase E — an edited preset input survives serialize→deser
         return rest;
       }),
     };
-    const once = save(open(cleared)) as unknown as StoredDefinition;
+    const once = reload(save(open(cleared)), cleared.workflowId);
     const twice = inputsById(save(open(once)));
     const t1 = twice.t1;
     expect(t1 === undefined || Object.keys(t1).length === 0).toBe(true);

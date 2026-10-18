@@ -7,6 +7,12 @@
  *      static file — this is the drift tripwire the hand-written list needs);
  *   3. document-level validation: hard catalog errors vs soft cross-ref warnings;
  *   4. binding expansion unrolls + interpolates sample rows (escaped downstream).
+ *
+ * Sabotage witnesses (grade-tests w36): a missing mapper case, a muted warn
+ * sink, a catalog sentinel in the prompt, a trigger added to OR removed from
+ * CONNECTOR_TRIGGERS, MAX_SCREENS changed, a tool id dropped from the prompt,
+ * each validateAppDoc hard/soft check disabled, the brace escape and jsId
+ * slug removed, and expandBindings disabled — each reds its case.
  */
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
@@ -79,8 +85,12 @@ describe('prompt ↔ catalog INDEPENDENCE (the ADR 0358 tripwire)', () => {
   // connector vocabulary (trigger/transition enums + the screens cap) — the
   // one catalog fragment ADR 0358 left inline. Pin it to validateAppDoc.
   it('connector vocabulary + screens cap match validateAppDoc', () => {
-    for (const t of CONNECTOR_TRIGGERS) expect(prompt, `prompt must carry trigger '${t}'`).toContain(t);
-    for (const t of CONNECTOR_TRANSITIONS) expect(prompt, `prompt must carry transition '${t}'`).toContain(t);
+    // EXACT set equality, read from the prompt's own enum line — a bare
+    // toContain passed a value the validator had dropped (and `load`/`none`
+    // are ordinary prose words).
+    const enumOf = (field: string): string[] => (new RegExp(`"${field}":\\s*([a-z|]+)`).exec(prompt)?.[1] ?? '').split('|').filter(Boolean);
+    expect(enumOf('trigger').sort()).toEqual([...CONNECTOR_TRIGGERS].sort());
+    expect(enumOf('transition').sort()).toEqual([...CONNECTOR_TRANSITIONS].sort());
     expect(prompt, `prompt must carry the 1–${MAX_SCREENS} screens cap`).toContain(`1–${MAX_SCREENS}`);
   });
 
@@ -152,7 +162,7 @@ describe('validateAppDoc (hard errors vs soft cross-ref warnings)', () => {
 });
 
 describe('generated-code injection hardening (grade pass F2)', () => {
-  const hostile = {
+  const hostile: AppModel = {
     name: 'Evil', screens: [{ id: 'home', name: 'Home', isInitial: true, components: [
       { type: 'text', props: { text: '{alert(document.cookie)}' } },
       { type: 'text', props: { text: '{{ 7*7 }}' } },
@@ -161,7 +171,7 @@ describe('generated-code injection hardening (grade pass F2)', () => {
   };
   it('braces never survive as live JSX/Vue expressions in any web target', () => {
     for (const target of ['react-tailwind', 'react-styled', 'vue-tailwind', 'html-css', 'nextjs'] as const) {
-      const out = generate(target, hostile as AppModel);
+      const out = generate(target, hostile);
       const src = out.files.map((f) => f.content).join('\n');
       expect(src).not.toContain('{alert(document.cookie)}');
       expect(src).not.toContain('{{ 7*7 }}');
@@ -169,9 +179,9 @@ describe('generated-code injection hardening (grade pass F2)', () => {
     }
   });
   it('screen ids are slug-sanitized in every JS string interpolation', () => {
-    const evilId = { ...hostile, screens: [{ id: "x'); import('http", name: 'X', isInitial: true, components: [{ type: 'button', props: { label: 'Go', navigateTo: "x'); import('http" } }] }] };
+    const evilId: AppModel = { ...hostile, screens: [{ id: "x'); import('http", name: 'X', isInitial: true, components: [{ type: 'button', props: { label: 'Go', navigateTo: "x'); import('http" } }] }] };
     for (const target of ['react-tailwind', 'react-styled', 'vue-tailwind', 'nextjs'] as const) {
-      const src = generate(target, evilId as unknown as AppModel).files.map((f) => f.content).join('\n');
+      const src = generate(target, evilId).files.map((f) => f.content).join('\n');
       expect(src).not.toContain("x'); import('http");
     }
     // …and the validator hard-rejects such an id at the save path anyway.
@@ -179,9 +189,9 @@ describe('generated-code injection hardening (grade pass F2)', () => {
     expect(v.errors.some((e) => e.path.endsWith('.id'))).toBe(true);
   });
   it('comment/Dart contexts cannot be broken out of (RN + Flutter)', () => {
-    const evil = { ...hostile, screens: [{ id: 'a*/b', name: 'N\nline', isInitial: true, components: [{ type: 'button', props: { label: 'Go', navigateTo: 'a*/b' } }] }] };
+    const evil: AppModel = { ...hostile, screens: [{ id: 'a*/b', name: 'N\nline', isInitial: true, components: [{ type: 'button', props: { label: 'Go', navigateTo: 'a*/b' } }] }] };
     for (const target of ['react-native', 'flutter'] as const) {
-      const src = generate(target, evil as unknown as AppModel).files.map((f) => f.content).join('\n');
+      const src = generate(target, evil).files.map((f) => f.content).join('\n');
       expect(src).not.toContain('a*/b');
     }
   });

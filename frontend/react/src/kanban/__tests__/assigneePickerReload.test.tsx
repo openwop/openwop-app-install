@@ -12,8 +12,13 @@ vi.mock('../../orgs/orgMembers.js', () => ({ loadOrgMembers }));
 vi.mock('../kanbanClient.js', () => ({ assignCard: vi.fn() }));
 
 import { AssigneeControl } from '../AssigneeControl.js';
+import type { OrgMember } from '../../client/accessClient.js';
 
-const ADA = { memberId: 'm1', subject: 'user:ada', displayName: 'Ada Lovelace', roles: [] };
+// The loader's real element type — a production-shaped member, not a partial literal.
+const ADA: OrgMember = {
+  memberId: 'm1', orgId: 'o1', tenantId: 't1', subject: 'user:ada', displayName: 'Ada Lovelace',
+  roles: [], teamIds: [], createdAt: '2026-08-01T00:00:00Z', updatedAt: '2026-08-01T00:00:00Z',
+};
 afterEach(() => { cleanup(); loadOrgMembers.mockReset(); });
 
 describe('assignee picker — reopen failure', () => {

@@ -22,6 +22,7 @@ export const messages = {
   copied: 'Copied to clipboard',
   clientsTitle: 'Agent clients',
   clientsHint: 'Client credentials the external agents use to authenticate.',
+  liveRefusedNotice: 'This workspace takes live payments, so agents can browse your catalog and build carts, but checkout and payment are refused until AP2 mandates can be verified.',
   newClient: 'New client',
   noClients: 'No agent clients yet.',
   noClientsBody: 'Provision a client so an external AI agent can authenticate and shop your catalog.',

@@ -28,6 +28,7 @@ import {
 } from '../src/host/v2Ids.js';
 import { runOwnerV2, projectV2OwnerEcho, ANON_SUBJECT_ISSUER, SESSION_SUBJECT_ISSUER, LEGACY_SUBJECT_ISSUER, anonOwnerStamp } from '../src/host/runOwner.js';
 import { closeV2Snapshot } from '../src/host/v2Snapshot.js';
+import { runWireUrls } from '../src/host/runWireUrls.js';
 import { mintInterruptToken, verifyInterruptToken } from '../src/host/interruptToken.js';
 
 const UUID = '8a8bdcd3-5214-4b8b-8ccb-6ed1938b04ab';
@@ -63,13 +64,11 @@ describe('identity.md §5 — the tenant-bound run id is a reversible wire proje
     expect(toWireRunId(`default/${UUID}`, 'default')).toBe(`default/${UUID}`);
   });
 
-  it('projects runId keys anywhere in a body, and the create response URLs onto the v2 path key', () => {
+  it('projects runId keys anywhere in a body', () => {
     const body = projectV2RunIds(
       {
         runId: UUID,
         parentRunId: UUID,
-        eventsUrl: `http://h/v1/runs/${UUID}/events`,
-        statusUrl: `http://h/v1/runs/${UUID}`,
         events: [{ runId: UUID, type: 'run.started' }],
         variables: { note: UUID },
       },
@@ -77,18 +76,29 @@ describe('identity.md §5 — the tenant-bound run id is a reversible wire proje
     ) as Record<string, unknown>;
     expect(body['runId']).toBe(`default/${UUID}`);
     expect(body['parentRunId']).toBe(`default/${UUID}`);
-    // RFC 0184 §A.1 / ADR 0705 — these two asserted `%2F` until 2026-09-16, and
-    // that was correct until the corpus changed which spelling a host MUST EMIT.
-    // Kept as LITERALS rather than `projectBoundId(...)`: this is the unit-level
-    // oracle for the emitted spelling, and an expectation computed by the code
-    // under test would assert nothing. `-` is passthrough in the projection, so
-    // only the separator moves.
-    expect(body['eventsUrl']).toBe(`http://h/runs/default~2F${UUID}/events`);
-    expect(body['statusUrl']).toBe(`http://h/runs/default~2F${UUID}`);
     expect((body['events'] as Array<{ runId: string }>)[0]!.runId).toBe(`default/${UUID}`);
     // Keys, not values: a run id sitting in a caller-supplied bag under some
     // other key is not a `runId` field and MUST NOT be rewritten.
     expect((body['variables'] as { note: string }).note).toBe(UUID);
+  });
+
+  // ADR 0812 P4 slice 4 — the projector's legacy run-URL leg is deleted.
+  // A URL under `eventsUrl` / `statusUrl` is never rewritten, in either spelling.
+  it('leaves a legacy major-1 run URL byte-identical (the leg is gone)', () => {
+    const legacy = { eventsUrl: `http://h/v1/runs/${UUID}/events`, statusUrl: `http://h/v1/runs/${UUID}` };
+    expect(projectV2RunIds({ ...legacy }, 'default')).toEqual(legacy);
+  });
+
+  // ADR 0812 P4 slice 2b — `runWireUrls` mints the final spelling itself.
+  // Kept as LITERALS rather than `projectBoundId(...)`: this is the unit-level
+  // oracle for the emitted spelling (RFC 0184 §A.1 `~2F`, not `%2F`), and an
+  // expectation computed by the code under test would assert nothing.
+  it('runWireUrls mints the final bound form, and the projector leaves it untouched', () => {
+    const minted = runWireUrls('http://h', UUID, 'default');
+    expect(minted).toEqual({ statusUrl: `http://h/runs/default~2F${UUID}`, eventsUrl: `http://h/runs/default~2F${UUID}/events` });
+    // A second projection would re-escape `~` (the codec is not idempotent), so a
+    // fresh URL reaching the projector MUST pass through byte-identical.
+    expect(projectV2RunIds({ runId: UUID, ...minted }, 'default')).toEqual({ runId: `default/${UUID}`, ...minted });
   });
 });
 

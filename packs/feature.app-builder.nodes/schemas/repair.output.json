@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/feature.app-builder.nodes/1.9.3/repair.output.json",
+  "$id": "https://packs.openwop.dev/feature.app-builder.nodes/1.10.1/repair.output.json",
   "type": "object",
   "properties": {
     "artifact": {

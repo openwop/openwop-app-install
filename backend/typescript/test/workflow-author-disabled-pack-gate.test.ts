@@ -23,6 +23,11 @@
  * pack half scans `OPENWOP_PACK_DIR`. The suite's per-worker dir is empty, so
  * this file writes ONE synthetic manifest into it and removes it afterwards
  * (env outlives a file inside a vitest worker — see `test/setup/isolatePackDir.ts`).
+ *
+ * SABOTAGE (wave 18, probe-witnessed): deleting `await assertNoDisabledPacks(def, tenantId)`
+ * in `workflowAuthorService.ts` turns DOOR 1's refusal red; deleting it in
+ * `workflowComposeTool.ts` turns DOOR 2's refusal red; resolving a FIXED tenant in
+ * `assertNoDisabledPacks` turns both other-workspace cases red.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
@@ -36,6 +41,9 @@ import { openStorage } from '../src/storage/index.js';
 import { initHostExtPersistence, __resetHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { setDurableStorage } from '../src/host/durable/durableStore.js';
 import type { Storage } from '../src/storage/storage.js';
+import type { WorkflowDefinition } from '../src/executor/types.js';
+import { registerWorkflowProposeTool } from '../src/host/workflowComposeTool.js';
+import { createAgentToolProvider } from '../src/host/agentToolProvider.js';
 
 const PACK_NAME = 'synthetic.wfa-gate';
 const TYPE_ID = 'synthetic.wfa-gate.step';
@@ -82,8 +90,9 @@ describe('the fixture is real (a witness over a node nothing declares would pass
     expect(node?.packName).toBe(PACK_NAME);
     // THIS is why the disabled gate is a SEPARATE law: closed-world sees the
     // host-global catalog and says "legal" no matter what the tenant curated.
+    const probeDef: WorkflowDefinition = { workflowId: 'x', nodes: [{ nodeId: 'n1', typeId: TYPE_ID }] };
     expect(
-      findUnknownTypeIds({ workflowId: 'x', nodes: [{ nodeId: 'n1', typeId: TYPE_ID }] } as never),
+      findUnknownTypeIds(probeDef),
       'the closed-world check is host-global — it can never see tenant curation',
     ).toEqual([]);
   });
@@ -114,10 +123,10 @@ describe('DOOR 1 — `persistAuthoredWorkflow` honours the tenant disabled-pack 
 });
 
 describe('DOOR 2 — `openwop:workflows.propose` honours the same gate', () => {
-  const propose = async (definition: unknown, tenantId: string): Promise<{ content: string; isError?: boolean }> => {
-    const { registerWorkflowProposeTool } = await import('../src/host/workflowComposeTool.js');
-    const { createAgentToolProvider } = await import('../src/host/agentToolProvider.js');
+  beforeAll(() => {
     registerWorkflowProposeTool({ workflowCatalog: { getWorkflow: async (id) => getRegisteredWorkflowAsync(id) } });
+  });
+  const propose = async (definition: unknown, tenantId: string): Promise<{ content: string; isError?: boolean }> => {
     return createAgentToolProvider({ tenantId, actingUserId: 'u-1' }).executeTool({
       name: 'openwop:workflows.propose',
       input: { definition, summary: 'pack gate' },
@@ -130,6 +139,7 @@ describe('DOOR 2 — `openwop:workflows.propose` honours the same gate', () => {
     const out = await propose(def(id), T);
     expect(out.isError, 'the propose door must refuse a disabled pack too').toBe(true);
     expect(out.content).toMatch(/disabled/i);
+    expect(out.content, 'the refusal names the pack the workspace disabled').toContain(PACK_NAME);
     expect(await getRegisteredWorkflowAsync(id)).toBeNull();
   });
 

@@ -9,6 +9,7 @@ import { App } from './App.js';
 // self-resolves after 1.5 s if the chunk stalls, so it can never brick boot.
 import { i18nReady } from './i18n/index.js';
 import { installRateLimitObserver } from './client/rateLimitSignal.js';
+import { registerOfflineWorkerAtBoot } from './sw/bootRegistration.js';
 
 // ADR 0640 — observe 429s at the one seam every client module shares. Reads
 // status + Retry-After off responses; never alters a request or a body.
@@ -49,6 +50,11 @@ window.addEventListener('vite:preloadError', (event) => {
   event.preventDefault(); // we're handling it — suppress the default unhandled rejection
   window.location.reload();
 });
+
+// ADR 0873 D3 — register the ONE service worker at boot, only when this build
+// declares an offline table (a build-time constant) and never under the native
+// shell. A build that declares nothing registers nothing here.
+registerOfflineWorkerAtBoot();
 
 // Re-home legacy `openwop.sample.*` localStorage keys to `openwop-app.*` before
 // any module reads them, so returning users keep chat sessions / prompts / drafts.

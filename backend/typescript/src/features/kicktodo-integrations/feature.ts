@@ -44,6 +44,6 @@ export const kicktodoIntegrationsFeature: BackendFeature = {
   dependsOn: ['kicktodo-core'],
   // The pack's calendar-sync / remind-today / list-consents nodes consume this
   // surface — pin it here, not only transitively via kicktodo-core (NP-KT-3).
-  requiredPacks: [{ name: 'feature.kicktodo.nodes', version: '1.30.3' }],
+  requiredPacks: [{ name: 'feature.kicktodo.nodes', version: '1.37.0' }],
   surface: { id: 'kicktodo-integrations', build: buildKicktodoIntegrationsSurface }, // ADR 0421 P5
 };

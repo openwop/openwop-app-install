@@ -13,26 +13,28 @@ import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, fireEvent, cleanup } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 
-const getBriefingConfig = vi.fn();
-const putBriefingConfig = vi.fn();
+const getBriefingConfig = vi.fn<typeof import('../dashboardClient.js')['getBriefingConfig']>();
+const putBriefingConfig = vi.fn<typeof import('../dashboardClient.js')['putBriefingConfig']>();
 vi.mock('../dashboardClient.js', async (importOriginal) => ({
-  ...(await importOriginal<Record<string, unknown>>()),
-  getBriefingConfig: (...a: unknown[]) => getBriefingConfig(...a),
-  putBriefingConfig: (...a: unknown[]) => putBriefingConfig(...a),
+  ...(await importOriginal<typeof import('../dashboardClient.js')>()),
+  getBriefingConfig: () => getBriefingConfig(),
+  putBriefingConfig: (id: string) => putBriefingConfig(id),
 }));
 
-const getChatSession = vi.fn();
-const listChatSessionMessagesPage = vi.fn();
+type ChatClient = typeof import('../../../client/chatSessionsClient.js');
+const getChatSession = vi.fn<ChatClient['getChatSession']>();
+const listChatSessionMessagesPage = vi.fn<ChatClient['listChatSessionMessagesPage']>();
 vi.mock('../../../client/chatSessionsClient.js', async (importOriginal) => ({
-  ...(await importOriginal<Record<string, unknown>>()),
-  getChatSession: (...a: unknown[]) => getChatSession(...a),
-  listChatSessionMessagesPage: (...a: unknown[]) => listChatSessionMessagesPage(...a),
+  ...(await importOriginal<ChatClient>()),
+  getChatSession: (id: string) => getChatSession(id),
+  listChatSessionMessagesPage: (id: string, opts: { limit: number; before?: string }) => listChatSessionMessagesPage(id, opts),
 }));
 
-const listScheduledChats = vi.fn();
+type ScheduledClient = typeof import('../../../client/scheduledChatsClient.js');
+const listScheduledChats = vi.fn<ScheduledClient['listScheduledChats']>();
 vi.mock('../../../client/scheduledChatsClient.js', async (importOriginal) => ({
-  ...(await importOriginal<Record<string, unknown>>()),
-  listScheduledChats: (...a: unknown[]) => listScheduledChats(...a),
+  ...(await importOriginal<ScheduledClient>()),
+  listScheduledChats: (orgId: string) => listScheduledChats(orgId),
 }));
 
 vi.mock('../../../client/accessClient.js', () => ({
@@ -42,17 +44,29 @@ vi.mock('../../../client/accessClient.js', () => ({
 import { __resetDashboardOrgMemo } from '../useDashboardOrg.js';
 import { takeStagedComposerDraft } from '../../../chat/composerSeed.js';
 import AiBriefingTile from '../tiles/AiBriefingTile.js';
+import type { ChatMessagePersisted, ChatSessionHeader } from '../../../client/chatSessionsClient.js';
+import type { ScheduledChat } from '../../../client/scheduledChatsClient.js';
+import type { DashboardBriefingConfig } from '../dashboardClient.js';
 
 /** A persisted plain-text row (the agent-writer shape) with attribution meta. */
-const row = (id: string, role: string, content: string, meta?: Record<string, unknown>) => ({
+const row = (id: string, role: ChatMessagePersisted['role'], content: string, meta?: Record<string, unknown>): ChatMessagePersisted => ({
   messageId: id, sessionId: 'conv:1', role, content,
   meta: meta ? JSON.stringify(meta) : null, createdAt: '2026-08-15T08:00:00.000Z',
 });
+const page = (messages: ChatMessagePersisted[]) => ({ messages, nextCursor: null });
+const config = (conversationId: string): DashboardBriefingConfig => ({ conversationId, updatedAt: '2026-08-15T07:00:00.000Z' });
+const session = (sessionId: string, title = 'Briefing'): ChatSessionHeader => ({
+  sessionId, tenantId: 't1', title, createdAt: '2026-08-15T07:00:00.000Z', updatedAt: '2026-08-15T08:00:00.000Z', messageCount: 1,
+});
+const SCHEDULED: ScheduledChat[] = [
+  { chatId: 'c1', agentId: 'iris', prompt: 'daily summary', conversationId: 'conv:2', cronExpr: '0 8 * * *', enabled: true },
+];
 
 const renderTile = () => render(<MemoryRouter><AiBriefingTile compact={false} /></MemoryRouter>);
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  // mockReset, not clearAllMocks: a case's implementation must never answer the next case.
+  for (const m of [getBriefingConfig, putBriefingConfig, getChatSession, listChatSessionMessagesPage, listScheduledChats]) m.mockReset();
   __resetDashboardOrgMemo();
   takeStagedComposerDraft(); // drain residue
   listScheduledChats.mockResolvedValue([]);
@@ -61,14 +75,12 @@ afterEach(cleanup);
 
 describe('ADR 0577 — AI briefing tile', () => {
   it('renders the latest ASSISTANT turn (not the trailing user turn) with provenance + deep-link', async () => {
-    getBriefingConfig.mockResolvedValue({ conversationId: 'conv:1', updatedAt: 'x' });
-    getChatSession.mockResolvedValue({ sessionId: 'conv:1', title: 'Morning briefing' });
-    listChatSessionMessagesPage.mockResolvedValue({
-      messages: [
-        row('m1', 'assistant', 'Yesterday: 3 deals moved.', { agentPersona: 'Iris' }),
-        row('m2', 'user', 'thanks, look into deal 2'),
-      ],
-    });
+    getBriefingConfig.mockResolvedValue(config('conv:1'));
+    getChatSession.mockResolvedValue(session('conv:1', 'Morning briefing'));
+    listChatSessionMessagesPage.mockResolvedValue(page([
+      row('m1', 'assistant', 'Yesterday: 3 deals moved.', { agentPersona: 'Iris' }),
+      row('m2', 'user', 'thanks, look into deal 2'),
+    ]));
     renderTile();
     await screen.findByText(/3 deals moved/);
     expect(screen.queryByText(/look into deal 2/)).toBeNull(); // the user turn is NOT the briefing
@@ -78,20 +90,19 @@ describe('ADR 0577 — AI briefing tile', () => {
   });
 
   it('a failed message read shows the error state — never an empty briefing or the CTA', async () => {
-    getBriefingConfig.mockResolvedValue({ conversationId: 'conv:1', updatedAt: 'x' });
-    getChatSession.mockResolvedValue({ sessionId: 'conv:1' });
+    getBriefingConfig.mockResolvedValue(config('conv:1'));
+    getChatSession.mockResolvedValue(session('conv:1'));
     listChatSessionMessagesPage.mockRejectedValue(new Error('boom'));
     renderTile();
     await screen.findByText(/could not load/i);
     expect(screen.queryByText(/no scheduled agent chats/i)).toBeNull();
+    expect(screen.queryByRole('link', { name: /create a morning briefing/i })).toBeNull();
   });
 
   it('a deleted conversation shows the gone state and offers the re-pick picker', async () => {
-    getBriefingConfig.mockResolvedValue({ conversationId: 'conv:gone', updatedAt: 'x' });
+    getBriefingConfig.mockResolvedValue(config('conv:gone'));
     getChatSession.mockRejectedValue(new Error('not_found: chat_session "conv:gone" not found.')); // the client's real 404 shape
-    listScheduledChats.mockResolvedValue([
-      { chatId: 'c1', agentId: 'iris', prompt: 'daily summary', conversationId: 'conv:2', cronExpr: '0 8 * * *', enabled: true },
-    ]);
+    listScheduledChats.mockResolvedValue(SCHEDULED);
     renderTile();
     await screen.findByText(/no longer exists/i);
     // `findBy`, not `getBy`: the gone-state text comes from `getChatSession`
@@ -106,7 +117,7 @@ describe('ADR 0577 — AI briefing tile', () => {
   });
 
   it('ADR 0846 grade-ux — a NON-404 conversation failure is a failed read, not "gone"', async () => {
-    getBriefingConfig.mockResolvedValue({ conversationId: 'conv:1', updatedAt: 'x' });
+    getBriefingConfig.mockResolvedValue(config('conv:1'));
     getChatSession.mockRejectedValue(new Error('internal: HTTP 500'));
     renderTile();
     await screen.findByText(/could not load/i);
@@ -134,12 +145,10 @@ describe('ADR 0577 — AI briefing tile', () => {
 
   it('unconfigured with scheduled chats: picking one + Save persists the pointer and loads it', async () => {
     getBriefingConfig.mockResolvedValue(null);
-    putBriefingConfig.mockResolvedValue({ conversationId: 'conv:2', updatedAt: 'x' });
-    listScheduledChats.mockResolvedValue([
-      { chatId: 'c1', agentId: 'iris', prompt: 'daily summary', conversationId: 'conv:2', cronExpr: '0 8 * * *', enabled: true },
-    ]);
-    getChatSession.mockResolvedValue({ sessionId: 'conv:2' });
-    listChatSessionMessagesPage.mockResolvedValue({ messages: [row('m1', 'assistant', 'First briefing content.')] });
+    putBriefingConfig.mockResolvedValue(config('conv:2'));
+    listScheduledChats.mockResolvedValue(SCHEDULED);
+    getChatSession.mockResolvedValue(session('conv:2'));
+    listChatSessionMessagesPage.mockResolvedValue(page([row('m1', 'assistant', 'First briefing content.')]));
     renderTile();
     const select = await screen.findByLabelText(/show the latest update from/i);
     fireEvent.change(select, { target: { value: 'conv:2' } });
@@ -149,9 +158,9 @@ describe('ADR 0577 — AI briefing tile', () => {
   });
 
   it('configured but no assistant turn yet: the not-run-yet state with the open link', async () => {
-    getBriefingConfig.mockResolvedValue({ conversationId: 'conv:1', updatedAt: 'x' });
-    getChatSession.mockResolvedValue({ sessionId: 'conv:1' });
-    listChatSessionMessagesPage.mockResolvedValue({ messages: [row('m2', 'user', 'hello?')] });
+    getBriefingConfig.mockResolvedValue(config('conv:1'));
+    getChatSession.mockResolvedValue(session('conv:1'));
+    listChatSessionMessagesPage.mockResolvedValue(page([row('m2', 'user', 'hello?')]));
     renderTile();
     await screen.findByText(/has not produced an update yet/i);
     expect(screen.getByRole('link', { name: /open conversation/i })).toBeTruthy();

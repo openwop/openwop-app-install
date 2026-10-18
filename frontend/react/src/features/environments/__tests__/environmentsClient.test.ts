@@ -11,21 +11,26 @@
  *
  * These assert all THREE arms, including the plain-success one: pinning only the
  * gated arm would stay green if the client regressed to "always pending".
+ *
+ * DOUBLE GUARD (named, wave 52): `asPromotionOutcome` reads pending from
+ * `res.status === 202 || body.status === 'pending_approval'`. The real route
+ * always sends both together, so the 202 arm is pinned on its own by "a bare
+ * 202 …" below; the body arm is a BELT for a server that drops the status code
+ * and has no real wire shape of its own to test — removing only it stays green
+ * by design. Sabotage-witnessed: dropping the 202 arm, the `?? null`, the
+ * server-message detail, or rollback's union each turn a case red.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { promote, rollback } from '../environmentsClient.js';
+import { promote, rollback, type Environment } from '../environmentsClient.js';
 
 function mockStatus(status: number, body: unknown): void {
-  vi.stubGlobal('fetch', vi.fn(async () => ({
-    ok: status >= 200 && status < 300,
-    status,
-    json: async () => body,
-  } as unknown as Response)));
+  // A real Response — `ok` and `json()` come from the platform, not a hand copy.
+  vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })));
 }
 
 afterEach(() => { vi.unstubAllGlobals(); });
 
-const ENV = { environmentId: 'e1', name: 'staging', order: 1, protection: 'open', currentSnapshot: 'h1', createdAt: '', updatedAt: '' };
+const ENV: Environment = { environmentId: 'e1', name: 'staging', order: 1, protection: 'open', currentSnapshot: 'h1', createdAt: '2026-10-01T00:00:00.000Z', updatedAt: '2026-10-01T00:00:00.000Z' };
 
 describe('promote — the three server outcomes stay distinguishable', () => {
   it('201 with a moved pointer → applied, noop false', async () => {
@@ -52,6 +57,11 @@ describe('promote — the three server outcomes stay distinguishable', () => {
     expect('environment' in out).toBe(false);
   });
 
+  it('a bare 202 (no status field in the body) is still pending — the status code alone decides', async () => {
+    mockStatus(202, { approval: { approvalId: 'appr:only-status-code' } });
+    expect(await promote('dev')).toEqual({ status: 'pending_approval', approvalId: 'appr:only-status-code' });
+  });
+
   it('202 without an approval id still reports pending, not success', async () => {
     mockStatus(202, { status: 'pending_approval', approval: {} });
     expect(await promote('dev')).toEqual({ status: 'pending_approval', approvalId: null });
@@ -72,6 +82,6 @@ describe('rollback — same union (it shares sendPromotionOutcome)', () => {
   it('201 → applied', async () => {
     mockStatus(201, { environment: ENV, noop: false });
     const out = await rollback('prod', 'h9');
-    expect(out.status).toBe('applied');
+    expect(out).toEqual({ status: 'applied', environment: ENV, noop: false });
   });
 });

@@ -32,6 +32,24 @@ export default defineConfig({
   use: {
     baseURL: E2E_ORIGIN,
     trace: 'on-first-retry',
+    // E2E-ORDER-1 — the Google Fonts CDN never reaches a browser in this lane.
+    // `index.html` loads a RENDER-BLOCKING stylesheet from fonts.googleapis.com,
+    // so a request that HANGS (not one that fails) holds first paint and the
+    // `load` event for as long as it hangs. MEASURED 2026-10-18: with that one
+    // request stalled 45 s, `page.goto('/boards')` never reached "load" in 30 s
+    // and `main#main-content` became visible only at 45.4 s — the exact shape of
+    // the gate's "page never renders" reds (smoke /boards, viewport /agents and
+    // /inbox, keyboard Ctrl+K), each on a different spec. `localFonts.ts` fixed
+    // this in 2026-08 for the two visual specs only; the other ~25 still fetched
+    // the CDN on every page load. A resolver rule covers every context,
+    // `browser.newContext()` ones included: the hosts fail INSTANTLY
+    // (ERR_NAME_NOT_RESOLVED), the stylesheet errors and render proceeds on the
+    // fallback stack. `page.route` intercepts BEFORE resolution, so a spec that
+    // calls `serveFontsLocally(page)` still gets the vendored faces (measured:
+    // 8 faces loaded under this rule).
+    launchOptions: {
+      args: ['--host-resolver-rules=MAP fonts.googleapis.com ~NOTFOUND, MAP fonts.gstatic.com ~NOTFOUND'],
+    },
     // ADR 0375 — '/' shows the MARKETING front page to a first-time anonymous
     // visitor when a backend is reachable (the runtime pointer resolves
     // enabled). The e2e specs exercise the APP shell, so every default context

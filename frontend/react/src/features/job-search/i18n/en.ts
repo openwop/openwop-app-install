@@ -214,7 +214,8 @@ export const messages = {
   verifyReferences: 'Verification references',
   verifyReferencesBody: 'Each fact above is tied to a record. These references let the sender’s system prove which record — they mean nothing on their own.',
   verifyFooter: 'Facts only. This system does not attest anything subjective — no match score, no assessment of the candidate.',
-  loadFailed: 'Could not load grants.',
+  grantsUnknownTitle: 'Couldn’t check your auto-apply authority',
+  grantsUnknownBody: 'Your grants could not be read, so we cannot tell whether anything is being submitted on your behalf. Retry before relying on this page.',
   issueFailed: 'Could not issue the grant: {{message}}',
   revokeFailed: 'Could not revoke the grant.',
 } as const;

@@ -1,24 +1,20 @@
 /**
- * GRADING PROBE — "Campaign Studio console" (FEATURES.md ordinal 224, ADR 0200).
- * Evidence only. GREEN + CI-safe. Exercises the shared hub projector
- * `chrome/hubProjection.ts`.
+ * ADR 0200 Campaign Studio console (FEATURES.md ordinal 224) — the hub projector
+ * `chrome/hubProjection.ts` is TIER-AWARE for the campaigns console (CSCC-1, closed by
+ * #3493). Durable claim: (CSCP-1) every campaigns tab is workspace-tier, so admin and
+ * non-admin callers see the same four tabs; (CSCP-2) an admin-tier tab annotated into the
+ * campaigns hub is DROPPED for a non-admin and SHOWN for an admin; (CSCP-3) the hub
+ * discriminator and the toggle gate still apply.
  *
- * MID-GRADE CORRECTION: my first pass (vs the pre-#3493 base) filed `CSCC-1` — the
- * shared projector was tier-BLIND (the AHC-1/MHC-1/CDC-1 family), and this console
- * had no admin-gate second line. While that pass was parked on the load-gate,
- * #3493 ("tier-aware hub projection — one shared fix closes AHC-1/MHC-1/CDC-1")
- * merged, adding an `isAdmin` param + a `r.tier !== 'admin' || isAdmin` filter and
- * wiring `isAdmin = isAdminCaller(useEffectiveAccess())` into
- * `CampaignStudioHubPage.tsx:33-35`. So CSCC-1 is CLOSED on origin/main. This probe
- * is re-aimed to WITNESS the fix rather than report a stale gap.
+ * Origin: the ordinal-224 feature-grade probe (docs/steward/CODEBASE-ASSESSMENT.md); its
+ * first pass filed CSCC-1 against the pre-#3493 base and was re-aimed to witness the fix.
  *
- * CSCP-1 (the campaigns tabs are all workspace-tier): projected identically for an
- *     admin and a non-admin caller — workspace surfaces are visible to everyone.
- * CSCP-2 (the fix — tier-AWARE): a synthetic admin-tier tab annotated into hub
- *     'campaigns' is DROPPED for a non-admin caller and SHOWN for an admin — the
- *     projection is no longer tier-blind, so the future mis-scope CSCC-1 warned of
- *     can no longer fire.
- * CSCP-3 (control): the hub discriminator + visibility filters still apply.
+ * Sabotage that turns it red: drop the `r.tier !== 'admin' || isAdmin` filter (CSCP-2);
+ * make a campaigns route admin-tier (CSCP-1); make `inHub` match every hub (CSCP-3).
+ *
+ * DEDUPE CANDIDATE (needs a human ask — protected authz): CSCP-2/3 overlap
+ * `features/access-hub/__tests__/hubProjection.test.ts` ("drops the admin-tier tab for a
+ * non-admin caller", "filters by the hub discriminator"); CSCP-1 is unique.
  */
 import { describe, it, expect } from 'vitest';
 import { FEATURES } from '../features.js';
@@ -39,7 +35,7 @@ describe('ADR 0200 campaign console — tier-AWARE projection (CSCC-1 closed by 
   it('CSCP-1: the campaigns tabs are all workspace-tier → projected for admin AND non-admin alike', () => {
     const asNonAdmin = visibleHubRoutes(FEATURES, allVisible, false, 'campaigns');
     const asAdmin = visibleHubRoutes(FEATURES, allVisible, true, 'campaigns');
-    expect(asNonAdmin.length).toBeGreaterThan(0);
+    expect(asNonAdmin).toHaveLength(4); // Briefs, Campaigns, Performance, Intelligence (ADR 0200)
     expect(asNonAdmin.map(tabIdOf)).toEqual(asAdmin.map(tabIdOf)); // workspace tabs visible to everyone
     expect(asNonAdmin.map((t) => t.tier)).toEqual(asNonAdmin.map(() => 'workspace'));
   });

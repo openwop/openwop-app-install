@@ -4,9 +4,10 @@
  *    the operator in the intake config; never enumerable);
  *  - BOTH the `service-desk` toggle AND the `service-desk.widget` sub-toggle
  *    must be on — anything else is a 404 (no existence leak, fail-closed);
- *  - the visitor session is a server-minted HMAC token (`sdv1.<id>.<sig>`,
- *    OPENWOP_SESSION_SECRET) scoping the caller to ONE visitor thread — a
- *    forged/foreign token is a 404;
+ *  - the visitor session is a server-minted HMAC token (`sdv2.<id>.<sig>`, a
+ *    labelled sub-key of the house session secret, signed over the TENANT and
+ *    the visitor id — ADR 0878 D3a) scoping the caller to ONE visitor thread in
+ *    ONE tenant — a forged/foreign token is a 404;
  *  - every public read REDACTS internal notes (customer sees inbound/outbound
  *    only) and strips author/internal ids;
  *  - visitor input is untrusted DATA: length-capped, never interpreted; the
@@ -14,6 +15,7 @@
  *    middleware as every route).
  */
 import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
+import { readSessionSecret } from '../../middleware/cookieSession.js';
 import type { Response } from 'express';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
 import { DurableCollection } from '../../host/hostExtPersistence.js';
@@ -53,24 +55,38 @@ export async function tenantForIntakeKey(key: string): Promise<string | null> {
 
 // ── visitor session tokens ──────────────────────────────────────────────────
 
-function secret(): string {
-  return process.env.OPENWOP_SESSION_SECRET ?? '';
+/**
+ * ADR 0878 D3a (SD2-S3) — the key. This was `OPENWOP_SESSION_SECRET ?? ''`: unset,
+ * the HMAC key was the empty string and anyone could mint a valid token. Now a
+ * LABELLED sub-key of `readSessionSecret()` — the house resolver, which fails closed
+ * in production and uses the stable per-process fallback elsewhere — so a visitor
+ * token and a session cookie never share a key. Throws when the secret cannot be
+ * resolved; the routes answer that with the uniform 404.
+ */
+function visitorKey(): Buffer {
+  return createHmac('sha256', readSessionSecret()).update('service-desk-visitor/v2').digest();
 }
 
-function sign(visitorId: string): string {
-  return createHmac('sha256', secret()).update(`sd-visitor|${visitorId}`).digest('hex').slice(0, 32);
+/** Signed over the tenant as well as the id: a token minted on one tenant's widget
+ *  is not a session on another's. */
+function sign(tenantId: string, visitorId: string): string {
+  return createHmac('sha256', visitorKey()).update(`sd-visitor|${tenantId}|${visitorId}`).digest('hex').slice(0, 32);
 }
 
-export function mintVisitorToken(): { visitorId: string; token: string } {
+export function mintVisitorToken(tenantId: string): { visitorId: string; token: string } {
   const visitorId = randomUUID().replace(/-/g, '').slice(0, 20);
-  return { visitorId, token: `sdv1.${visitorId}.${sign(visitorId)}` };
+  return { visitorId, token: `sdv2.${visitorId}.${sign(tenantId, visitorId)}` };
 }
 
-export function verifyVisitorToken(token: unknown): string | null {
-  if (typeof token !== 'string') return null;
-  const m = /^sdv1\.([0-9a-f]{20})\.([0-9a-f]{32})$/.exec(token);
+/** The visitor id a token proves for THIS tenant, else null. An `sdv1` token (the
+ *  pre-ADR-0878 shape, tenant-unbound and possibly empty-keyed) never verifies. */
+export function verifyVisitorToken(token: unknown, tenantId: string): string | null {
+  if (typeof token !== 'string' || !tenantId) return null;
+  const m = /^sdv2\.([0-9a-f]{20})\.([0-9a-f]{32})$/.exec(token);
   if (!m) return null;
-  const expected = Buffer.from(sign(m[1]!));
+  let expectedSig: string;
+  try { expectedSig = sign(tenantId, m[1]!); } catch { return null; }
+  const expected = Buffer.from(expectedSig);
   const got = Buffer.from(m[2]!);
   if (expected.length !== got.length || !timingSafeEqual(expected, got)) return null;
   return m[1]!;
@@ -128,8 +144,13 @@ export function registerServiceDeskWidgetRoutes(deps: RouteDeps): void {
       const text = typeof body.body === 'string' ? body.body.trim().slice(0, MAX_BODY) : '';
       if (!text) { sendError(res, 422, 'validation_error', 'Field `body` is required.'); return; }
 
-      const known = verifyVisitorToken(body.visitorToken);
-      const session = known ? { visitorId: known, token: String(body.visitorToken) } : mintVisitorToken();
+      const known = verifyVisitorToken(body.visitorToken, tenantId);
+      let session: { visitorId: string; token: string };
+      try {
+        session = known ? { visitorId: known, token: String(body.visitorToken) } : mintVisitorToken(tenantId);
+      } catch {
+        notFound(res); return; // no session secret on this host — the uniform 404, never a 500
+      }
       const { ticket } = await createTicket({
         tenantId,
         orgId: cfg.defaultOrgId,
@@ -137,6 +158,7 @@ export function registerServiceDeskWidgetRoutes(deps: RouteDeps): void {
         channel: 'widget',
         ...(cfg.slaHoursByPriority ? { slaHoursByPriority: cfg.slaHoursByPriority } : {}),
         externalKey: `widget:${session.visitorId}`,
+        replyChannel: { kind: 'widget' }, // ADR 0878 D3 — a reply is read on this thread
         firstMessage: {
           // Content-position id: a network retry of the same POST dedupes; a
           // deliberate identical re-send appends (position advances).
@@ -156,7 +178,10 @@ export function registerServiceDeskWidgetRoutes(deps: RouteDeps): void {
     try {
       const tenantId = await tenantForIntakeKey(String(req.params.intakeKey ?? ''));
       if (!tenantId || !(await widgetEnabled(tenantId))) { notFound(res); return; }
-      const visitorId = verifyVisitorToken(req.query.token);
+      // The header keeps the token out of URLs and access logs; `?token=` stays for
+      // existing callers.
+      const headerToken = req.get('x-visitor-token');
+      const visitorId = verifyVisitorToken(headerToken ?? req.query.token, tenantId);
       if (!visitorId) { notFound(res); return; }
       const ticket = await getTicket(tenantId, ticketIdFor(tenantId, `widget:${visitorId}`));
       if (!ticket) { notFound(res); return; }

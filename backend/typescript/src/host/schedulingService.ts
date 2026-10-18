@@ -78,6 +78,14 @@ export type ScheduleSkipReason =
    *  deprovision or an admin's deactivate). Non-destructive: reactivating them
    *  resumes it. */
   | 'actor-inactive'
+  /** ADR 0775 P3 (`ARWF-7`) — the roster agent the job runs as is paused
+   *  (`enabled:false`). Non-destructive: resuming the agent resumes the job. */
+  | 'agent-paused'
+  /** ADR 0775 P3b — the workflow is on the agent's `permissions.never` list. */
+  | 'policy-denied'
+  /** ADR 0775 P3b — the workflow is on the agent's `hitl` list: this slot filed
+   *  (or found) a pending approval instead of running. Approving it runs the job. */
+  | 'awaiting-approval'
   | 'no-next-fire';
 
 export interface ScheduledJob {
@@ -1072,7 +1080,10 @@ export async function eraseSubjectSchedules(tenantId: string, subjectKey: string
       // credentials, ADR 0024 Phase D). That IS user-ownership for DSAR: such a job
       // MUST be disabled and its `actingUserId` scrubbed.
       const actsAsErasedUser = typeof job.metadata?.actingUserId === 'string' && forms.has(job.metadata.actingUserId);
-      const ownedByUser = (s?.kind === 'user' && forms.has(s.id)) || (job.ownerUserId !== undefined && forms.has(job.ownerUserId)) || actsAsErasedUser;
+      // ADR 0879 D7 — a feature job that fires FOR a person (a scheduled chat's
+      // creator, `metadata.orgScopeSubject`) is theirs for DSAR too.
+      const firesForErasedUser = typeof job.metadata?.orgScopeSubject === 'string' && forms.has(job.metadata.orgScopeSubject);
+      const ownedByUser = (s?.kind === 'user' && forms.has(s.id)) || (job.ownerUserId !== undefined && forms.has(job.ownerUserId)) || actsAsErasedUser || firesForErasedUser;
       if (!ownedByUser) return null;
       job.enabled = false;
       delete job.planPause; // ADR 0820 §7 — an erased person's job never auto-resumes
@@ -1085,6 +1096,9 @@ export async function eraseSubjectSchedules(tenantId: string, subjectKey: string
       // not a person id and is needed for the row to remain a coherent record).
       if (job.metadata && typeof job.metadata.actingUserId === 'string' && forms.has(job.metadata.actingUserId)) {
         job.metadata = { ...job.metadata, actingUserId: ERASED };
+      }
+      if (job.metadata && typeof job.metadata.orgScopeSubject === 'string' && forms.has(job.metadata.orgScopeSubject)) {
+        job.metadata = { ...job.metadata, orgScopeSubject: ERASED };
       }
       return job;
     });

@@ -125,6 +125,14 @@ export async function getEmailSettings(tenantId: string, orgId: string): Promise
   return row && row.tenantId === tenantId && row.orgId === orgId ? row : null;
 }
 
+/** ADR 0895 D1 — the tenant's configured senders (every org), for the chain lane's
+ *  sender binding. `root` is the workspace-root org's (`orgId === tenantId`). */
+export async function listVerifiedSenders(tenantId: string): Promise<{ all: string[]; root?: string }> {
+  const rows = (await settings.listForTenant(tenantId)).filter((r) => r.tenantId === tenantId && r.senderAddress.trim() !== '');
+  const root = rows.find((r) => r.orgId === tenantId)?.senderAddress.trim();
+  return { all: [...new Set(rows.map((r) => r.senderAddress.trim().toLowerCase()))], ...(root ? { root } : {}) };
+}
+
 const EMAIL_SHAPE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 export async function setSenderAddress(tenantId: string, orgId: string, senderAddress: string, updatedBy: string): Promise<EmailSettings> {
   const trimmed = senderAddress.trim();

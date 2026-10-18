@@ -7,7 +7,7 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { negotiateLocale } from '../src/host/i18n/locale.js';
+import { negotiateLocale, preferredLocale } from '../src/host/i18n/locale.js';
 import { resolveSection } from '../src/host/i18n/resolveSection.js';
 
 describe('negotiateLocale (RFC 0103 / i18n.md)', () => {
@@ -39,6 +39,22 @@ describe('negotiateLocale (RFC 0103 / i18n.md)', () => {
 
   it('is case-insensitive on the request tag', () => {
     expect(negotiateLocale('PT-br', supported, 'en')).toBe('pt-BR');
+  });
+});
+
+describe('preferredLocale — the q-ranked first concrete tag', () => {
+  it('ranks by q, keeps request order on ties, skips * and q=0', () => {
+    expect(preferredLocale('fr;q=0.9,en;q=0.8', 'en')).toBe('fr');
+    expect(preferredLocale('de;q=0.2, pt-BR', 'en')).toBe('pt-BR');
+    expect(preferredLocale('es, fr', 'en')).toBe('es');
+    expect(preferredLocale('*, fr;q=0.5', 'en')).toBe('fr');
+    expect(preferredLocale('fr;q=0', 'en')).toBe('en');
+  });
+  it('falls back on an absent, empty or wildcard-only header', () => {
+    expect(preferredLocale(undefined, 'en')).toBe('en');
+    expect(preferredLocale(null, 'en')).toBe('en');
+    expect(preferredLocale('', 'en')).toBe('en');
+    expect(preferredLocale('*', 'pt-BR')).toBe('pt-BR');
   });
 });
 

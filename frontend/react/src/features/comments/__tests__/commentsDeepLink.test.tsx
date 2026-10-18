@@ -30,7 +30,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup, screen, waitFor, fireEvent } from '@testing-library/react';
-import { MemoryRouter, Routes, Route, Link } from 'react-router-dom';
+import { MemoryRouter, Routes, Route, Link, useLocation } from 'react-router-dom';
 
 const access = vi.hoisted(() => ({ enabled: true }));
 import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
@@ -38,7 +38,12 @@ vi.mock('../../../featureToggles/FeatureAccessContext.js', () => ({
   useFeatureAccess: () => makeFeatureAccess({ enabled: access.enabled, status: 'on', isBeta: false, variant: null, loading: false }),
 }));
 
-const api = vi.hoisted(() => ({ listOrgs: vi.fn(), listThread: vi.fn(), postComment: vi.fn(), updateComment: vi.fn(), deleteComment: vi.fn() }));
+const api = vi.hoisted(() => {
+  const a = { listOrgs: vi.fn(), listThread: vi.fn(), postComment: vi.fn(), updateComment: vi.fn(), deleteComment: vi.fn() };
+  // ADR 0881 D7 — the panel reads through `readThread` ({comments, viewer}); it
+  // delegates to the `listThread` mock so every case below keeps driving one fn.
+  return { ...a, readThread: vi.fn(async (...args: unknown[]) => ({ comments: await (a.listThread as (...x: unknown[]) => Promise<unknown>)(...args), viewer: null })) };
+});
 vi.mock('../commentsClient.js', async (importOriginal) => {
   const orig = await importOriginal<typeof import('../commentsClient.js')>();
   return { ...orig, ...api };
@@ -82,6 +87,11 @@ function actionUrl(orgId: string, resourceType: string, resourceId: string): str
   return `/comments?${new URLSearchParams({ orgId, resourceType, resourceId }).toString()}`;
 }
 
+function LocationProbe(): JSX.Element {
+  const loc = useLocation();
+  return <div data-testid="location">{`${loc.pathname}${loc.search}`}</div>;
+}
+
 function view(search: string): void {
   render(<MemoryRouter initialEntries={[search]}><CommentsPage /></MemoryRouter>);
 }
@@ -113,6 +123,7 @@ describe('CMNT-1 — a notification actionUrl opens the thread it names, for eve
     { rt: 'canvas_document', id: 'cnv_7#thr_2' },
     { rt: 'priority_idea', id: 'lst_3#card_8' },
     { rt: 'creative_brief', id: 'brief_5' },
+    { rt: 'canvas_slides', id: 'cnv_9#slide-3' }, // ADR 0886 D5
   ];
 
   it('covers every type the backend registers (no type is silently untested)', () => {
@@ -171,6 +182,20 @@ describe('CMNT-1 — an unknown resourceType is named, not substituted', () => {
 });
 
 describe('CMNT-UX-4 — a SECOND notification while already on /comments re-seeds the page', () => {
+  it('a slide thread links back to its slide (ADR 0886 SL2UX-4)', async () => {
+    render(
+      <MemoryRouter initialEntries={[actionUrl(ORG.orgId, 'canvas_slides', 'cnv_9#slide-3')]}>
+        <Routes>
+          <Route path="/comments" element={<CommentsPage />} />
+          <Route path="/slides/:canvasId" element={<LocationProbe />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    fireEvent.click(await screen.findByRole('button', { name: 'Open the slide' }));
+    const at = await screen.findByTestId('location');
+    expect(at.textContent).toBe(`/slides/cnv_9?org=${ORG.orgId}&frame=slide-3`);
+  });
+
   it('following a second in-app link switches the thread', async () => {
     api.listThread.mockImplementation(async (_org: string, type: string, resourceId: string) =>
       [comment('cmt:x', `thread(${type},${resourceId})`)]);

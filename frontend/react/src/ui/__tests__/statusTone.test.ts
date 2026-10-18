@@ -3,7 +3,7 @@ import { statusTone } from '../StatusBadge.js';
 
 describe('statusTone', () => {
   it('passes through the CSS-defined status classes', () => {
-    for (const s of ['completed', 'failed', 'cancelled', 'running', 'paused', 'waiting-approval']) {
+    for (const s of ['completed', 'failed', 'cancelled', 'running', 'paused', 'waiting-approval', 'waiting-input']) {
       expect(statusTone(s)).toBe(s);
     }
   });
@@ -13,6 +13,11 @@ describe('statusTone', () => {
     expect(statusTone('error')).toBe('failed');
     expect(statusTone('waiting')).toBe('waiting-approval');
     expect(statusTone('in-progress')).toBe('waiting-approval');
+    // Every synonym the map carries, not four of twelve (w49 probe
+    // `tone-success-syn`: dropping 'success' stayed green). Literals, never derived.
+    for (const s of ['success', 'done', 'active']) expect(statusTone(s), s).toBe('completed');
+    for (const s of ['suspended', 'input-required', 'needs-reconsent', 'expired']) expect(statusTone(s), s).toBe('waiting-approval');
+    expect(statusTone('revoked')).toBe('cancelled');
   });
 
   it('is case-insensitive', () => {

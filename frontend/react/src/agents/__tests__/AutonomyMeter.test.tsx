@@ -1,3 +1,14 @@
+/**
+ * The autonomy gauge (roster + workspace header) — the canonical three-level
+ * autonomy vocabulary shared with /workforces (DESIGN.md §5.3; architect memo
+ * 2026-06-05: review → Supervised, guided → Guided, auto → Autonomous, absent ⇒
+ * auto, all three LIVE).
+ *
+ * What breaks it: a wrong level→dot mapping misstates how much an agent may do
+ * on its own; dropping `role="img"` + the localized `aria-label` leaves a screen
+ * reader announcing three empty bars (a bare <span> may not carry aria-label —
+ * aria-prohibited-attr); and hiding the visible label must keep that name.
+ */
 import { describe, it, expect, afterEach } from 'vitest';
 import { render, screen, cleanup } from '@testing-library/react';
 import { AutonomyMeter } from '../AutonomyMeter.js';

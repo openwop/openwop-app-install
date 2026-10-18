@@ -243,3 +243,19 @@ export async function eraseSubjectSessions(tenantId: string, subjectKey: string)
   }
   return removed;
 }
+
+/**
+ * KTACC-2 (KickTodo wave 4C) — a DISSOLVED circle's sessions: delete every session
+ * row of the circle and disarm its reminder job, whoever scheduled it. Bounded
+ * circle prefix; idempotent; fail-closed on a falsy tenant/circle.
+ */
+export async function dropDissolvedCircleSessions(tenantId: string, circleId: string): Promise<number> {
+  if (!tenantId || !circleId) return 0;
+  let removed = 0;
+  for (const s of await sessions.listByPrefix(`${tenantId}::${circleId}::`)) {
+    if (s.tenantId !== tenantId || s.circleId !== circleId) continue;
+    await setJobEnabled(sessionReminderJobId(tenantId, s.circleId, s.atIso), false).catch(() => undefined);
+    if (await sessions.delete(`${s.tenantId}::${s.circleId}::${s.atIso}`)) removed += 1;
+  }
+  return removed;
+}

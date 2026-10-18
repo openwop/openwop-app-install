@@ -25,29 +25,39 @@
  * Both arms are asserted throughout: a failed read says unknown, and a genuinely
  * empty ledger still says empty — otherwise the fix rots into "always unknown"
  * and the real all-clear is destroyed.
+ *
+ * Sabotage witnesses (w40 probes): ignoring a failed runs read, always-unknown
+ * runs, letting a policy failure blank the runs, dropping `policyFailed` from the
+ * Set CTA's disable gate (needs a TYPED rate — see below), ignoring a failed
+ * policy read, dropping the empty-input gate, disabling Open-run on a policy
+ * failure, or mis-scaling basis points to a percent each turn a case here red.
+ *
+ * w40 correction: both "Set CTA blocked on policy failure" cases used to assert
+ * `disabled` with an EMPTY rate input, so the ordinary `!policyInput.trim()`
+ * gate held the CTA disabled and removing the `policyFailed` block stayed green
+ * (probe w40g4-prh-setblock, vacuous). They now type a rate first.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup, screen, fireEvent } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { messages as en } from '../i18n/en.js';
+import type { PayoutRun, SharePolicy } from '../../../client/kicktodoSeatClient.js';
 
 const api = vi.hoisted(() => ({
-  getSharePolicy: vi.fn(), listPayoutRuns: vi.fn(), setSharePolicy: vi.fn(),
-  createPayoutRun: vi.fn(), confirmPayoutRun: vi.fn(), cancelPayoutRun: vi.fn(),
-  reconcileEntitlements: vi.fn(),
+  getSharePolicy: vi.fn<() => Promise<SharePolicy | null>>(),
+  listPayoutRuns: vi.fn<() => Promise<PayoutRun[]>>(),
+  setSharePolicy: vi.fn<(shareBps: number) => Promise<SharePolicy>>(),
+  createPayoutRun: vi.fn<() => Promise<PayoutRun | null>>(),
+  confirmPayoutRun: vi.fn<(runId: string, reference: string) => Promise<PayoutRun>>(),
+  cancelPayoutRun: vi.fn<(runId: string) => Promise<PayoutRun>>(),
 }));
 // Mock the path the component ACTUALLY imports — my first cut guessed
 // `../kicktodoAdminClient.js`, which does not exist, so the mock silently never
 // applied and two failure-arm tests "passed" for the wrong reason.
-import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
 vi.mock('../../../client/kicktodoSeatClient.js', async (importOriginal) => {
   const orig = await importOriginal<Record<string, unknown>>();
   return { ...orig, ...api };
 });
-
-vi.mock('../../../featureToggles/FeatureAccessContext.js', () => ({
-  useFeatureAccess: () => makeFeatureAccess({ enabled: true, status: 'on', isBeta: false, variant: null, loading: false }),
-}));
 
 import { AdminCommercePage } from '../AdminCommercePage.js';
 
@@ -57,9 +67,18 @@ function view(): void {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  api.getSharePolicy.mockResolvedValue({ shareBps: 1000 });
+  api.getSharePolicy.mockResolvedValue(POLICY);
   api.listPayoutRuns.mockResolvedValue([]);
 });
+
+// A NON-round rate (wave 39 lesson): 1234 bps = 12.34%, so a mis-scaled or
+// rounded conversion shows.
+const POLICY: SharePolicy = { shareBps: 1234, version: 1 };
+
+/** Type a rate so the ordinary empty-input gate is NOT what holds the CTA. */
+function typeRate(): void {
+  fireEvent.change(screen.getByLabelText(en.payoutPolicyLabel), { target: { value: '1500' } });
+}
 afterEach(cleanup);
 
 describe('UX-KTA-1 — an unread payout ledger never reads as an empty one', () => {
@@ -87,6 +106,7 @@ describe('UX-KTA-1 — a blind money write is blocked, not merely warned about',
     expect(await screen.findByText(en.payoutPolicyUnknown)).toBeTruthy();
     // It must not claim "no policy" either.
     expect(screen.queryByText(en.payoutPolicyNone)).toBeNull();
+    typeRate();
     // `getByRole('button', {name: /set/i})` was the matcher here. On a MONEY-WRITE
     // control a loose regex is the wrong tool twice over: it would silently start
     // matching some other "Reset"/"Settings" button a later pass adds, and it
@@ -107,11 +127,11 @@ describe('UX-KTA-1 — a blind money write is blocked, not merely warned about',
     // `payoutBusy || !policyInput.trim() || policyFailed`. Asserting it enabled
     // therefore requires actually typing a rate — otherwise the empty-input gate
     // keeps it disabled and the "unreadable" gate is indistinguishable from it.
-    api.getSharePolicy.mockResolvedValue({ shareBps: 1000 });
+    api.getSharePolicy.mockResolvedValue(POLICY);
     view();
-    // Post-settle anchor: the chip carries the RESOLVED rate, so it cannot paint
-    // before `getSharePolicy` answered.
-    expect(await screen.findByText(/Author share/i)).toBeTruthy();
+    // Post-settle anchor AND the rate itself: the chip carries the RESOLVED rate
+    // (1234 bps → 12.34%), so it cannot paint before `getSharePolicy` answered.
+    expect(await screen.findByText('Author share: 12.34%')).toBeTruthy();
     expect(screen.queryByText(en.payoutPolicyUnknown)).toBeNull();
 
     const cta = screen.getByRole('button', { name: en.payoutPolicySetCta }) as HTMLButtonElement;
@@ -161,9 +181,16 @@ describe('UX-KTA-1 — the gate blocks DERIVED writes only, never safe ones', ()
 
   it('POLICY FAILS: the Set-policy CTA is still blocked (the derived write)', async () => {
     // The positive half, asserted alongside so the pair reads as one rule.
+    // TWIN of "POLICY FAILS: the Set CTA is disabled so an unseen rate cannot be
+    // overwritten" (same gate, same probe w40g4-prh-setblock-r2); kept because this
+    // file is a protected money test and this case pairs the block with the
+    // createPayoutRun case above under the DERIVED-writes rule.
     api.getSharePolicy.mockRejectedValue(new Error('policy_500'));
     view();
     await screen.findByText(/unreadable/i);
+    typeRate();
+    // Safe write still enabled in the same state — the pair is one rule.
+    expect((screen.getByRole('button', { name: en.payoutRunCreateCta }) as HTMLButtonElement).disabled).toBe(false);
     expect((screen.getByRole('button', { name: en.payoutPolicySetCta }) as HTMLButtonElement).disabled).toBe(true);
   });
 });

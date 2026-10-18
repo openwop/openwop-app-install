@@ -9,7 +9,6 @@
  */
 import http from 'node:http';
 import { randomBytes } from 'node:crypto';
-import type { AddressInfo } from 'node:net';
 import { getSetCookies } from './headerCookies.js';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
@@ -18,9 +17,14 @@ import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { listApprovals, resolveApproval } from '../src/host/approvalService.js';
 import { registerProvider } from '../src/features/connections/providerRegistry.js';
 import { createSecretConnection } from '../src/features/connections/connectionsService.js';
-import { checkoutPurchase } from '../src/features/commerce/ucpBuyer/ucpBuyerService.js';
+import { checkoutPurchase, type UcpPurchase } from '../src/features/commerce/ucpBuyer/ucpBuyerService.js';
 import { configureKmsClient, createLocalAesKmsClient } from '../src/byok/kmsEncryption.js';
 
+function portOf(s: http.Server): number {
+  const a = s.address();
+  if (a === null || typeof a === 'string') throw new Error('server is not listening on a TCP port');
+  return a.port;
+}
 let BASE: string; let server: http.Server; let n = 0;
 let mcp: http.Server; let MCP_URL = ''; let checkoutMode: 'ok' | 'timeout' | 'badbody' = 'ok';
 let rest: http.Server; let REST_URL = ''; let restCheckout: 'httperr' | 'badbody' = 'httperr';
@@ -42,7 +46,7 @@ beforeAll(async () => {
   delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
   configureKmsClient(createLocalAesKmsClient(randomBytes(32), 'test/local-aes')); // signed-in secrets need KMS
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
+  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${portOf(server)}`; res(); }); });
   for (const id of ['users', 'commerce-ucp-buyer', 'connections']) { const d = getToggleDefault(id); if (d) await saveConfig({ ...d, status: 'on' }, 'test'); }
 
   // Mock UCP-over-MCP merchant: a JSON-RPC server whose tools/call dispatches on the tool
@@ -51,7 +55,7 @@ beforeAll(async () => {
   mcp = http.createServer((req, res) => {
     let raw = ''; req.on('data', (c) => (raw += c));
     req.on('end', () => {
-      const rpc = JSON.parse(raw) as { id: number; method: string; params: { name?: string; arguments?: Record<string, unknown> } };
+      const rpc: { id: number; method: string; params: { name?: string; arguments?: Record<string, unknown> } } = JSON.parse(raw);
       const tool = rpc.params?.name;
       if (rpc.method === 'tools/call' && tool === 'ucp.checkout' && checkoutMode === 'timeout') { return; /* never respond → client times out */ }
       if (rpc.method === 'tools/call' && tool === 'ucp.checkout' && checkoutMode === 'badbody') {
@@ -70,7 +74,7 @@ beforeAll(async () => {
       res.end(JSON.stringify({ jsonrpc: '2.0', id: rpc.id, result }));
     });
   });
-  await new Promise<void>((r) => { mcp.listen(0, '127.0.0.1', () => { MCP_URL = `http://127.0.0.1:${(mcp.address() as AddressInfo).port}/mcp`; r(); }); });
+  await new Promise<void>((r) => { mcp.listen(0, '127.0.0.1', () => { MCP_URL = `http://127.0.0.1:${portOf(mcp)}/mcp`; r(); }); });
 
   // Mock REST merchant — used ONLY to exercise the REST-side money-classification (the MCP
   // tests above cover the MCP side). `restCheckout` toggles the failure mode at /checkout.
@@ -84,7 +88,7 @@ beforeAll(async () => {
     }
     res.writeHead(404); res.end();
   });
-  await new Promise<void>((r) => { rest.listen(0, '127.0.0.1', () => { REST_URL = `http://127.0.0.1:${(rest.address() as AddressInfo).port}`; r(); }); });
+  await new Promise<void>((r) => { rest.listen(0, '127.0.0.1', () => { REST_URL = `http://127.0.0.1:${portOf(rest)}`; r(); }); });
   // Register the merchant as a reach:'mcp' provider + a WORKSPACE credential (resolves for
   // any acting user — the runless/agent posture).
   registerProvider({ id: 'mcpmerchant', label: 'MCP Merchant', kind: 'bearer', authFlow: 'none', reach: 'mcp', scopes: { read: [] }, refreshable: false, defaultScopes: [], consumerNodes: ['core.openwop.mcp'], mcpServer: { url: MCP_URL, transport: 'http' } });
@@ -99,71 +103,88 @@ afterAll(async () => {
   await new Promise<void>((r) => server.close(() => r()));
 });
 
-interface Res<T = any> { status: number; body: T }
-function client() {
+/** The host error envelope (`middleware/errorEnvelope.ts`). */
+interface ErrBody { error?: string; message?: string; details?: Record<string, unknown> }
+interface Res<T> { status: number; body: T }
+interface Client {
+  get: <T = ErrBody>(p: string) => Promise<Res<T>>;
+  post: <T = ErrBody>(p: string, b?: unknown) => Promise<Res<T>>;
+}
+function client(): Client {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
+  // The ONE deserialization boundary: `res.json()` is untyped, so each call site names the
+  // body it expects (the product's exported row type where one exists, else a narrow local
+  // interface). A 204 / non-JSON body reads as `null`.
+  const call = async <T,>(method: string, path: string, body?: unknown): Promise<Res<T>> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
-    for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    for (const sc of getSetCookies(res.headers)) { const m = /(__session=[^;]+)/.exec(sc); if (m) cookie = m[1]; }
+    const text = await res.text();
+    let out: T;
+    try { out = JSON.parse(text || 'null'); } catch { out = JSON.parse('null'); }
     return { status: res.status, body: out };
   };
-  return { get: (p: string) => call('GET', p), post: (p: string, b?: unknown) => call('POST', p, b) };
+  return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b) };
 }
-async function shopOwner(): Promise<{ owner: ReturnType<typeof client>; orgId: string; tenantId: string }> {
+/** Login + org bodies (the test-auth and orgs routes). */
+interface LoginBody extends ErrBody { user: { userId: string; tenantId: string } }
+interface OrgBody extends ErrBody { orgId: string }
+async function shopOwner(): Promise<{ owner: Client; orgId: string; tenantId: string }> {
   const owner = client();
-  const r = await owner.post('/host/openwop-app/test/login', { email: `mcp-${Date.now()}-${n++}@acme.test` });
-  const tenantId: string = r.body.user?.tenantId ?? '';
-  const org = await owner.post('/host/openwop-app/orgs', { name: 'Shop' });
+  const r = await owner.post<LoginBody>('/host/openwop-app/test/login', { email: `mcp-${Date.now()}-${n++}@acme.test` });
+  const tenantId: string = r.body.user.tenantId;
+  const org = await owner.post<OrgBody>('/host/openwop-app/orgs', { name: 'Shop' });
   // A workspace-scoped merchant credential for THIS tenant (resolves for any actor).
   await createSecretConnection({ tenantId, provider: 'mcpmerchant', kind: 'bearer', secret: 'mcp-token', scope: 'workspace' });
   return { owner, orgId: org.body.orgId, tenantId };
 }
+/** A merchant catalog hit as the buyer surfaces it (the merchant's own shape, passed through). */
+interface MerchantProduct { productId: string; name: string; price: number }
 const buyer = (orgId: string, s = ''): string => `/host/openwop-app/commerce/orgs/${encodeURIComponent(orgId)}/ucp-buyer${s}`;
 
 describe('ADR 0258 — UCP buyer over MCP', () => {
   it('discovers + searches an MCP merchant, then places a purchase through the money gate', async () => {
     const { owner, orgId, tenantId } = await shopOwner();
     checkoutMode = 'ok';
+    const placedBefore = placed.size; // `placed` is file-scoped — other cases may have placed first
     // Discover + search over MCP (no merchantUrl — a serverId).
-    const disco = await owner.post(buyer(orgId, '/discover'), { merchantServerId: 'mcpmerchant' });
+    const disco = await owner.post<{ discovery: Record<string, unknown> } & ErrBody>(buyer(orgId, '/discover'), { merchantServerId: 'mcpmerchant' });
     expect(disco.status, JSON.stringify(disco.body)).toBe(200);
     expect(disco.body.discovery.ucp).toBe('1.0');
-    const search = await owner.post(buyer(orgId, '/catalog-search'), { merchantServerId: 'mcpmerchant', q: 'widget' });
+    const search = await owner.post<{ catalog: { products: MerchantProduct[] } } & ErrBody>(buyer(orgId, '/catalog-search'), { merchantServerId: 'mcpmerchant', q: 'widget' });
     expect(search.body.catalog.products[0].productId).toBe('mcp-1');
 
     // Draft a purchase against the MCP merchant.
-    const draft = await owner.post(buyer(orgId, '/purchases'), { merchantServerId: 'mcpmerchant', intent: 'buy a widget', maxAmountMinor: 5000, currency: 'USD', lines: [{ externalProductId: 'mcp-1', name: 'MCP Widget', quantity: 1, unitPriceMinor: 1200 }] });
+    const draft = await owner.post<UcpPurchase & ErrBody>(buyer(orgId, '/purchases'), { merchantServerId: 'mcpmerchant', intent: 'buy a widget', maxAmountMinor: 5000, currency: 'USD', lines: [{ externalProductId: 'mcp-1', name: 'MCP Widget', quantity: 1, unitPriceMinor: 1200 }] });
     expect(draft.status).toBe(201);
     expect(draft.body.merchantServerId).toBe('mcpmerchant');
     const purchaseId = draft.body.purchaseId;
 
     // Checkout FIRST parks the ALWAYS approval (money gate is transport-agnostic).
-    const parked = await owner.post(buyer(orgId, `/purchases/${encodeURIComponent(purchaseId)}/checkout`));
+    const parked = await owner.post<UcpPurchase & ErrBody>(buyer(orgId, `/purchases/${encodeURIComponent(purchaseId)}/checkout`));
     expect(parked.status).toBe(409);
     expect(parked.body.details?.approvalStatus).toBe('pending');
-    expect(placed.size).toBe(0); // NOT placed — gate held it
+    expect(placed.size).toBe(placedBefore); // NOT placed — gate held it
 
     // Approve → checkout places over MCP.
     const appr = (await listApprovals(tenantId, 'pending')).find((a) => a.spendIdemKey === `ucp-buy:${purchaseId}`);
     expect(appr).toBeDefined();
     await resolveApproval(appr!.approvalId, { status: 'approved' });
-    const done = await owner.post(buyer(orgId, `/purchases/${encodeURIComponent(purchaseId)}/checkout`));
+    const done = await owner.post<UcpPurchase & ErrBody>(buyer(orgId, `/purchases/${encodeURIComponent(purchaseId)}/checkout`));
     expect(done.status, JSON.stringify(done.body)).toBe(200);
     expect(done.body.status).toBe('placed');
     expect(done.body.extOrderId).toMatch(/^mcp-ord-/);
-    expect(placed.size).toBe(1);
+    expect(placed.size).toBe(placedBefore + 1);
 
     // Track over MCP.
-    const track = await owner.post(buyer(orgId, `/purchases/${encodeURIComponent(purchaseId)}/track`));
+    const track = await owner.post<UcpPurchase & ErrBody>(buyer(orgId, `/purchases/${encodeURIComponent(purchaseId)}/track`));
     expect(track.body.extStatus).toBe('pending');
   });
 
   it('an MCP timeout at checkout ⇒ status "unknown" (never a blind-retryable "failed")', async () => {
     const { owner, orgId, tenantId } = await shopOwner();
-    const draft = await owner.post(buyer(orgId, '/purchases'), { merchantServerId: 'mcpmerchant', intent: 'buy', maxAmountMinor: 5000, currency: 'USD', lines: [{ externalProductId: 'mcp-1', name: 'W', quantity: 1, unitPriceMinor: 1000 }] });
+    const draft = await owner.post<UcpPurchase & ErrBody>(buyer(orgId, '/purchases'), { merchantServerId: 'mcpmerchant', intent: 'buy', maxAmountMinor: 5000, currency: 'USD', lines: [{ externalProductId: 'mcp-1', name: 'W', quantity: 1, unitPriceMinor: 1000 }] });
     const purchaseId = draft.body.purchaseId;
-    await owner.post(buyer(orgId, `/purchases/${encodeURIComponent(purchaseId)}/checkout`)); // park
+    await owner.post<UcpPurchase & ErrBody>(buyer(orgId, `/purchases/${encodeURIComponent(purchaseId)}/checkout`)); // park
     const appr = (await listApprovals(tenantId, 'pending')).find((a) => a.spendIdemKey === `ucp-buy:${purchaseId}`);
     await resolveApproval(appr!.approvalId, { status: 'approved' });
     // try/finally: this test deliberately induces a hang, and both knobs are FILE-scoped.
@@ -174,9 +195,9 @@ describe('ADR 0258 — UCP buyer over MCP', () => {
     checkoutMode = 'timeout';
     process.env.OPENWOP_UCP_BUYER_FETCH_TIMEOUT_MS = '300'; // only this test wants a short one
     try {
-      const timedOut = await owner.post(buyer(orgId, `/purchases/${encodeURIComponent(purchaseId)}/checkout`));
+      const timedOut = await owner.post<UcpPurchase & ErrBody>(buyer(orgId, `/purchases/${encodeURIComponent(purchaseId)}/checkout`));
       expect(timedOut.status).toBe(502);
-      const after = await owner.get(buyer(orgId, `/purchases/${encodeURIComponent(purchaseId)}`));
+      const after = await owner.get<UcpPurchase & ErrBody>(buyer(orgId, `/purchases/${encodeURIComponent(purchaseId)}`));
       expect(after.body.status).toBe('unknown'); // NOT 'failed' — a timeout is ambiguous
     } finally {
       checkoutMode = 'ok';
@@ -187,18 +208,21 @@ describe('ADR 0258 — UCP buyer over MCP', () => {
 
   it('an MCP post-send read failure (bad/garbled response) ⇒ "unknown", NOT "failed" (default-ambiguous)', async () => {
     const { owner, orgId, tenantId } = await shopOwner();
-    const draft = await owner.post(buyer(orgId, '/purchases'), { merchantServerId: 'mcpmerchant', intent: 'buy', maxAmountMinor: 5000, currency: 'USD', lines: [{ externalProductId: 'mcp-1', name: 'W', quantity: 1, unitPriceMinor: 1000 }] });
+    const draft = await owner.post<UcpPurchase & ErrBody>(buyer(orgId, '/purchases'), { merchantServerId: 'mcpmerchant', intent: 'buy', maxAmountMinor: 5000, currency: 'USD', lines: [{ externalProductId: 'mcp-1', name: 'W', quantity: 1, unitPriceMinor: 1000 }] });
     const purchaseId = draft.body.purchaseId;
-    await owner.post(buyer(orgId, `/purchases/${encodeURIComponent(purchaseId)}/checkout`)); // park
+    await owner.post<UcpPurchase & ErrBody>(buyer(orgId, `/purchases/${encodeURIComponent(purchaseId)}/checkout`)); // park
     const appr = (await listApprovals(tenantId, 'pending')).find((a) => a.spendIdemKey === `ucp-buy:${purchaseId}`);
     await resolveApproval(appr!.approvalId, { status: 'approved' });
     checkoutMode = 'badbody';
-    const failed = await owner.post(buyer(orgId, `/purchases/${encodeURIComponent(purchaseId)}/checkout`));
-    expect(failed.status).toBe(502);
-    const after = await owner.get(buyer(orgId, `/purchases/${encodeURIComponent(purchaseId)}`));
-    // A garbled reply is post-send: the merchant may already have placed → must block a blind retry.
-    expect(after.body.status).toBe('unknown');
-    checkoutMode = 'ok';
+    try {
+      const failed = await owner.post<UcpPurchase & ErrBody>(buyer(orgId, `/purchases/${encodeURIComponent(purchaseId)}/checkout`));
+      expect(failed.status).toBe(502);
+      const after = await owner.get<UcpPurchase & ErrBody>(buyer(orgId, `/purchases/${encodeURIComponent(purchaseId)}`));
+      // A garbled reply is post-send: the merchant may already have placed → must block a blind retry.
+      expect(after.body.status).toBe('unknown');
+    } finally {
+      checkoutMode = 'ok';
+    }
   });
 
   it('REST money-classification: a definitive HTTP status ⇒ "failed"; a garbled 200 body ⇒ "unknown"', async () => {
@@ -207,36 +231,43 @@ describe('ADR 0258 — UCP buyer over MCP', () => {
     // body = it answered and MAY have placed ⇒ ambiguous.
     const place = async (): Promise<string> => {
       const { owner, orgId, tenantId } = await shopOwner();
-      const draft = await owner.post(buyer(orgId, '/purchases'), { merchantUrl: REST_URL, intent: 'buy', maxAmountMinor: 5000, currency: 'USD', lines: [{ externalProductId: 'r-1', name: 'W', quantity: 1, unitPriceMinor: 1000 }] });
+      const draft = await owner.post<UcpPurchase & ErrBody>(buyer(orgId, '/purchases'), { merchantUrl: REST_URL, intent: 'buy', maxAmountMinor: 5000, currency: 'USD', lines: [{ externalProductId: 'r-1', name: 'W', quantity: 1, unitPriceMinor: 1000 }] });
       const purchaseId = draft.body.purchaseId;
-      await owner.post(buyer(orgId, `/purchases/${encodeURIComponent(purchaseId)}/checkout`)); // park
+      await owner.post<UcpPurchase & ErrBody>(buyer(orgId, `/purchases/${encodeURIComponent(purchaseId)}/checkout`)); // park
       const appr = (await listApprovals(tenantId, 'pending')).find((a) => a.spendIdemKey === `ucp-buy:${purchaseId}`);
       await resolveApproval(appr!.approvalId, { status: 'approved' });
-      const done = await owner.post(buyer(orgId, `/purchases/${encodeURIComponent(purchaseId)}/checkout`));
+      const done = await owner.post<UcpPurchase & ErrBody>(buyer(orgId, `/purchases/${encodeURIComponent(purchaseId)}/checkout`));
       expect(done.status).toBe(502);
-      return (await owner.get(buyer(orgId, `/purchases/${encodeURIComponent(purchaseId)}`))).body.status as string;
+      return (await owner.get<UcpPurchase & ErrBody>(buyer(orgId, `/purchases/${encodeURIComponent(purchaseId)}`))).body.status;
     };
-    restCheckout = 'httperr';
-    expect(await place()).toBe('failed'); // merchant returned 402 — definitive, safe to retry
-    restCheckout = 'badbody';
-    expect(await place()).toBe('unknown'); // 200 + garbled body — post-send, may have placed
-    restCheckout = 'httperr';
+    try {
+      restCheckout = 'httperr';
+      expect(await place()).toBe('failed'); // merchant returned 402 — definitive, safe to retry
+      restCheckout = 'badbody';
+      expect(await place()).toBe('unknown'); // 200 + garbled body — post-send, may have placed
+    } finally {
+      restCheckout = 'httperr';
+    }
   });
 
   // ── D2 confused-deputy on the money path (ADR 0258 §Identity) ─────────────────────────
+  // Double guard on the org-scoped denial: `actingUserOf` strips the 'agent' sentinel, AND
+  // the connections broker's `actingUserHasOrgUse` (selectAuthorizedConnection) refuses an
+  // actor with no org membership — so forwarding 'agent' as a user alone still denies
+  // (round-1 probe on actingUserOf was vacuous; the broker check is witnessed).
   // Drive the PURE AGENT path (the node-surface identity): `checkoutPurchase(..., {actor:'agent'})`
   // — no acting user — exactly as `surface.ts` ucpCheckout calls it. `actingUserOf` strips the
   // 'agent' sentinel so no `actingUserId` reaches the credential resolver.
-  async function agentPlace(owner: ReturnType<typeof client>, tenantId: string, orgId: string, serverId: string): Promise<{ threw: boolean; status: string }> {
-    const draft = await owner.post(buyer(orgId, '/purchases'), { merchantServerId: serverId, intent: 'buy', maxAmountMinor: 5000, currency: 'USD', lines: [{ externalProductId: 'x', name: 'W', quantity: 1, unitPriceMinor: 1000 }] });
-    const purchaseId = draft.body.purchaseId as string;
+  async function agentPlace(owner: Client, tenantId: string, orgId: string, serverId: string): Promise<{ threw: boolean; status: string }> {
+    const draft = await owner.post<UcpPurchase & ErrBody>(buyer(orgId, '/purchases'), { merchantServerId: serverId, intent: 'buy', maxAmountMinor: 5000, currency: 'USD', lines: [{ externalProductId: 'x', name: 'W', quantity: 1, unitPriceMinor: 1000 }] });
+    const purchaseId = draft.body.purchaseId;
     await checkoutPurchase(tenantId, orgId, purchaseId, { actor: 'agent' }).catch(() => undefined); // parks the ALWAYS approval
     const appr = (await listApprovals(tenantId, 'pending')).find((a) => a.spendIdemKey === `ucp-buy:${purchaseId}`);
     await resolveApproval(appr!.approvalId, { status: 'approved' });
     let threw = false;
     await checkoutPurchase(tenantId, orgId, purchaseId, { actor: 'agent' }).catch(() => { threw = true; });
-    const after = await owner.get(buyer(orgId, `/purchases/${encodeURIComponent(purchaseId)}`));
-    return { threw, status: after.body.status as string };
+    const after = await owner.get<UcpPurchase & ErrBody>(buyer(orgId, `/purchases/${encodeURIComponent(purchaseId)}`));
+    return { threw, status: after.body.status };
   }
 
   it('an autonomous AGENT cannot spend through an ORG-scoped merchant credential (confused-deputy denied, fail-closed)', async () => {
@@ -263,7 +294,7 @@ describe('ADR 0258 — UCP buyer over MCP', () => {
 
   it('rejects a draft that sets BOTH merchantUrl and merchantServerId', async () => {
     const { owner, orgId } = await shopOwner();
-    const bad = await owner.post(buyer(orgId, '/discover'), { merchantUrl: 'https://m.test', merchantServerId: 'mcpmerchant' });
+    const bad = await owner.post<{ discovery: Record<string, unknown> } & ErrBody>(buyer(orgId, '/discover'), { merchantUrl: 'https://m.test', merchantServerId: 'mcpmerchant' });
     expect(bad.status).toBe(400);
   });
 });

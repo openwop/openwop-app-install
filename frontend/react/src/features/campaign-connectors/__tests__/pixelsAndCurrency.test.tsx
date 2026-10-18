@@ -9,15 +9,25 @@
  *  - CC-G2: `kpi.currency` collapses "unanimously USD" and "mixed, here is a
  *    default" into the same string, so a EUR+GBP workspace read its spend and
  *    revenue in `$`.
+ *  - R2 CC-SP-1/2/6/12/13: a failed pixels/KPI read is a failure card (never an
+ *    empty state or a spinner), an unknown currency is unlabelled, an inactive
+ *    pixel is marked, `sent: 0` is not a success, Dispatch is disabled without a
+ *    wired (meta/tiktok) pixel, and the last-sync line renders.
+ *
+ * Sabotage that turns it red: drop `danger`, ignore the confirm result or swallow the
+ * remove error; drop either currency flag from `orgMoney` or the mixed notice, or label
+ * with a fixed currency; skip `setPixelsFailed`/`setKpiFailed`; hide the Inactive chip;
+ * toast success on `sent: 0`; count google as wired; hide the sync line.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, waitFor, fireEvent, act } from '@testing-library/react';
 import type { KpiSummary, PixelConfig } from '../campaignConnectorsClient.js';
+import type { ConfirmOptions } from '../../../ui/confirm.js';
 
 const getKpi = vi.fn();
 const listPixels = vi.fn();
 const removePixel = vi.fn();
-const confirmMock = vi.fn();
+const confirmMock = vi.fn<(o: ConfirmOptions) => Promise<boolean>>();
 // R2 review m4 — the new client fns must be EXPLICIT stubs: spreading
 // `...actual` left them as real jsdom fetches, so the new surfaces had zero
 // coverage while their tracker rows said done.
@@ -39,10 +49,11 @@ vi.mock('../campaignConnectorsClient.js', async (orig) => {
     dispatchConversions: (...a: unknown[]) => dispatchConversions(...a),
   };
 });
-vi.mock('../../../ui/confirm.js', () => ({ confirm: (o: unknown) => confirmMock(o) }));
+vi.mock('../../../ui/confirm.js', () => ({ confirm: (o: ConfirmOptions) => confirmMock(o) }));
 vi.mock('../../../ui/toast.js', () => ({ toast: { success: vi.fn(), error: vi.fn(), info: vi.fn(), warning: vi.fn() } }));
 
 import { CampaignConnectorsPage } from '../CampaignConnectorsPage.js';
+import { toast } from '../../../ui/toast.js';
 
 // R2 CC-SP-16 — full literals, no `as`-casts (a cast fixture hid `active`, so
 // SSoT drift never failed these tests).
@@ -70,6 +81,10 @@ beforeEach(() => {
   getSyncStatus.mockReset().mockResolvedValue([]);
   listConversions.mockReset().mockResolvedValue([]);
   dispatchConversions.mockReset().mockResolvedValue({ sent: 0 });
+  // The toast module mock is module-level: reset it so no case inherits another's calls.
+  vi.mocked(toast.success).mockReset();
+  vi.mocked(toast.info).mockReset();
+  vi.mocked(toast.error).mockReset();
 });
 afterEach(cleanup);
 
@@ -78,11 +93,13 @@ describe('CC-G1: removing a pixel is a disclosed, checked action', () => {
     await view();
     fireEvent.click(screen.getByRole('button', { name: /remove.*meta/i }));
     await waitFor(() => expect(confirmMock).toHaveBeenCalled());
-    const opts = confirmMock.mock.calls[0][0] as { title: string; body: string; danger?: boolean };
-    expect(opts.danger).toBe(true);
-    expect(opts.body).toMatch(/conversion tracking/i);
+    const opts = confirmMock.mock.calls[0]?.[0];
+    expect(opts?.danger).toBe(true);
+    expect(opts?.body).toMatch(/conversion tracking/i);
     // The irrecoverable part is stated, not implied.
-    expect(opts.body).toMatch(/not recovered/i);
+    expect(opts?.body).toMatch(/not recovered/i);
+    // Positive control for the decline case: an ACCEPTED confirm removes THIS pixel.
+    await waitFor(() => expect(removePixel).toHaveBeenCalledWith('org-1', 'meta'));
   });
 
   it('declining the confirm does NOT remove', async () => {
@@ -90,6 +107,8 @@ describe('CC-G1: removing a pixel is a disclosed, checked action', () => {
     await view();
     fireEvent.click(screen.getByRole('button', { name: /remove.*meta/i }));
     await waitFor(() => expect(confirmMock).toHaveBeenCalled());
+    // Let the declined confirm's continuation run before reading the negative.
+    await act(async () => {});
     expect(removePixel).not.toHaveBeenCalled();
   });
 
@@ -182,11 +201,10 @@ describe('R2 CC-SP-6/13 — the new surfaces have real coverage (review m4)', ()
     expect(await screen.findByText('1 conversion queued')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: /Dispatch to platforms/ }));
     await act(async () => {});
-    expect(dispatchConversions).toHaveBeenCalled();
+    expect(dispatchConversions).toHaveBeenCalledWith('org-1');
     // The old code toasted SUCCESS for zero sent — the failed-as-success family.
-    const { toast } = await import('../../../ui/toast.js');
-    expect((toast.info as ReturnType<typeof vi.fn>)).toHaveBeenCalled();
-    expect((toast.success as ReturnType<typeof vi.fn>)).not.toHaveBeenCalledWith(expect.stringMatching(/Dispatched 0/));
+    expect(vi.mocked(toast.info)).toHaveBeenCalledWith(expect.stringMatching(/Nothing was sent/));
+    expect(vi.mocked(toast.success)).not.toHaveBeenCalled();
   });
 
   it('the Dispatch button disables when no active pixel is on a WIRED platform', async () => {
@@ -204,6 +222,7 @@ describe('R2 CC-SP-6/13 — the new surfaces have real coverage (review m4)', ()
     getSyncStatus.mockResolvedValue([{ platform: 'meta', lastSyncAt: '2026-08-09T10:00:00.000Z' }]);
     render(<CampaignConnectorsPage />);
     await act(async () => {});
-    expect(await screen.findByText(/Last live sync:/)).toBeTruthy();
+    const line = await screen.findByText(/Last live sync:/);
+    expect(line.textContent).toMatch(/Meta/);
   });
 });

@@ -1,13 +1,23 @@
 /**
- * ADR 0130 Phase 2 — ModelRouterConfig validation + CRUD.
+ * ADR 0130 Phase 2 / ADR 0610 D4 (MRC-2) / CHAT-FIRST-PORT A8 — ModelRouterConfig
+ * validation + CRUD.
+ *
+ * Breaks if a malformed config (unknown rule kind, empty target, missing fallback
+ * model, non-array rules) is accepted or rejected for the wrong reason, if a
+ * routing target may name a non-routable provider (the write-time exfil
+ * allowlist), if a retired `intentIs` rule crashes a stored config instead of
+ * being dropped, if a new config is stored ENABLED, or if one (tenant, org)'s
+ * config or enable flag is visible under another tenant.
  */
 import { describe, it, expect, beforeAll } from 'vitest';
+import { OpenwopError } from '../src/types.js';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { openStorage } from '../src/storage/index.js';
 import { validateRouterConfig, setRouterConfig, getRouterConfig, setRouterEnabled } from '../src/features/model-router/configService.js';
 
 const T = 'mr-tenant';
 const ORG = 'org-mr';
+const OTHER = 'mr-other-tenant';
 const valid = {
   rules: [
     { when: { kind: 'tokensOver', threshold: 8000 }, target: { provider: 'anthropic', model: 'big' } },
@@ -18,6 +28,16 @@ const valid = {
 };
 
 beforeAll(async () => { initHostExtPersistence(await openStorage('memory://')); });
+
+/** The rejection `validateRouterConfig` raised — a typed OpenwopError, not any throw (a
+ *  TypeError from a missing guard would satisfy a bare `toThrow()`). */
+function rejection(input: unknown): OpenwopError {
+  try { validateRouterConfig(input); } catch (e) {
+    expect(e).toBeInstanceOf(OpenwopError);
+    return e as OpenwopError;
+  }
+  throw new Error('validateRouterConfig accepted an invalid config');
+}
 
 describe('ModelRouterConfig', () => {
   it('validates a well-formed config', () => {
@@ -45,23 +65,39 @@ describe('ModelRouterConfig', () => {
   it('accepts + rejects a conversationKind rule (ADR 0130 Phase 6)', () => {
     const ok = validateRouterConfig({ rules: [{ when: { kind: 'conversationKind', value: 'group' }, target: { provider: 'anthropic', model: 'b' } }], fallback: { provider: 'anthropic', model: 'b' } });
     expect(ok.rules[0]!.when).toEqual({ kind: 'conversationKind', value: 'group' });
-    expect(() => validateRouterConfig({ rules: [{ when: { kind: 'conversationKind', value: 'dm' }, target: { provider: 'anthropic', model: 'b' } }], fallback: { provider: 'anthropic', model: 'b' } })).toThrow();
+    expect(rejection({ rules: [{ when: { kind: 'conversationKind', value: 'dm' }, target: { provider: 'anthropic', model: 'b' } }], fallback: { provider: 'anthropic', model: 'b' } }))
+      .toMatchObject({ code: 'validation_error', httpStatus: 400, details: { field: 'when.value' } });
   });
 
   it('rejects a bad rule kind / missing target / missing fallback', () => {
-    expect(() => validateRouterConfig({ rules: [{ when: { kind: 'nope' }, target: { provider: 'anthropic', model: 'b' } }], fallback: { provider: 'anthropic', model: 'b' } })).toThrow();
-    expect(() => validateRouterConfig({ rules: [{ when: { kind: 'always' }, target: { provider: '', model: 'b' } }], fallback: { provider: 'anthropic', model: 'b' } })).toThrow();
-    expect(() => validateRouterConfig({ rules: [], fallback: { provider: 'anthropic' } })).toThrow();
-    expect(() => validateRouterConfig({ fallback: { provider: 'anthropic', model: 'b' } })).toThrow(); // missing rules
+    // Each leg names the guard that must refuse it (field + message), so a leg
+    // cannot pass on a DIFFERENT guard (the allowlist) or on a TypeError.
+    expect(rejection({ rules: [{ when: { kind: 'nope' }, target: { provider: 'anthropic', model: 'b' } }], fallback: { provider: 'anthropic', model: 'b' } }))
+      .toMatchObject({ code: 'validation_error', details: { field: 'when.kind' } });
+    expect(rejection({ rules: [{ when: { kind: 'always' }, target: { provider: '', model: 'b' } }], fallback: { provider: 'anthropic', model: 'b' } }))
+      .toMatchObject({ code: 'validation_error', details: { field: 'rules[0].target' }, message: expect.stringMatching(/MUST be \{ provider, model \}/) });
+    expect(rejection({ rules: [], fallback: { provider: 'anthropic' } }))
+      .toMatchObject({ code: 'validation_error', details: { field: 'fallback' }, message: expect.stringMatching(/MUST be \{ provider, model \}/) });
+    expect(rejection({ fallback: { provider: 'anthropic', model: 'b' } })) // missing rules
+      .toMatchObject({ code: 'validation_error', details: { field: 'rules' }, message: expect.stringMatching(/`rules` MUST be an array/) });
   });
 
   it('stores + reads the config; enable requires an existing config', async () => {
+    // A second tenant with its OWN config under the SAME org id, written first —
+    // so isolation is a read of an existing row, not a 404-on-missing.
+    await setRouterConfig(OTHER, ORG, 'u2', { rules: [], fallback: { provider: 'openai', model: 'other' } });
     const stored = await setRouterConfig(T, ORG, 'u1', valid);
     expect(stored.enabled).toBe(false); // default off
     expect((await getRouterConfig(T, ORG))!.config.rules).toHaveLength(2);
     const enabled = await setRouterEnabled(T, ORG, 'u1', true);
     expect(enabled.enabled).toBe(true);
-    expect(await getRouterConfig('other', ORG)).toBeNull(); // tenant isolation
+    expect((await getRouterConfig(T, ORG))!.enabled).toBe(true);
+    // Tenant isolation: the other tenant still reads its own config, un-enabled.
+    // (Regression fence, not a probe target: the key is composed literally as
+    // `${tenantId}:${orgId}` on both the put and the get, so no single edit can
+    // collapse tenants without breaking every read in this file.)
+    const other = await getRouterConfig(OTHER, ORG);
+    expect(other).toMatchObject({ tenantId: OTHER, enabled: false, config: { rules: [], fallback: { provider: 'openai', model: 'other' } } });
   });
 
   it('enable on a missing config 404s', async () => {

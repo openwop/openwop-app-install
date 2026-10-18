@@ -323,6 +323,33 @@ describe('Storage parity: runs lifecycle', () => {
     ]);
     expect(await s.listRunsByParent(`byparent-no-children-${name}`)).toEqual([]);
   });
+
+  // #4531 — the my-runs read: bounded scan, owner superset predicate, five columns.
+  it.each(backendNames)('%s: listRunSummaries filters inside a bounded scan and projects five columns', async (name) => {
+    const s = S(name);
+    const T = `summ-${name}`;
+    const at = (i: number) => new Date(Date.UTC(2026, 4, 18, 11, 0, i)).toISOString();
+    const own = { owner: { principal: 'p-alice', subject: { issuer: 'x', subjectId: 'p-alice', lane: 'api-key', kind: 'user' } } };
+    await s.insertRun(mkRun(`summ-1-${name}`, { tenantId: T, createdAt: at(1), metadata: { ...own, secret: 'no' } }));
+    await s.insertRun(mkRun(`summ-2-${name}`, { tenantId: T, createdAt: at(2), metadata: { actingUserId: 'user:alice' } }));
+    await s.insertRun(mkRun(`summ-3-${name}`, { tenantId: T, createdAt: at(3), metadata: { principalKind: 'anonymous', anonPrincipal: 'p-alice' } }));
+    await s.insertRun(mkRun(`summ-4-${name}`, { tenantId: T, createdAt: at(4), metadata: { actingUserId: 'user:bob' } }));
+    await s.insertRun(mkRun(`summ-5-${name}`, { tenantId: T, createdAt: at(5), metadata: {} }));
+    const owner = { principal: 'p-alice', subject: 'user:alice' };
+    const all = await s.listRunSummaries({ tenantId: T, owner, scanCap: 10, limit: 10 });
+    expect(all.runs.map((r) => r.runId)).toEqual([`run-summ-3-${name}`, `run-summ-2-${name}`, `run-summ-1-${name}`]);
+    expect(all.scanExhausted).toBe(false);
+    const first = all.runs[2]!;
+    expect(first).toEqual({ runId: `run-summ-1-${name}`, workflowId: `wf.summ-1-${name}`, status: 'pending', tenantId: T, createdAt: at(1), metadata: own });
+    // The inner LIMIT bounds the scan: the newest 2 rows hold none of alice's but #3.
+    const capped = await s.listRunSummaries({ tenantId: T, owner, scanCap: 2, limit: 10 });
+    expect(capped.runs).toEqual([]);
+    expect(capped.scanExhausted).toBe(true);
+    // No owner: every scanned row, newest first, outer limit applied.
+    const whole = await s.listRunSummaries({ tenantId: T, scanCap: 5, limit: 2 });
+    expect(whole.runs.map((r) => r.runId)).toEqual([`run-summ-5-${name}`, `run-summ-4-${name}`]);
+    expect(whole.scanExhausted).toBe(false);
+  });
 });
 
 describe('Storage parity: events monotonic sequence', () => {

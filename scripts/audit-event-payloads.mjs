@@ -7,6 +7,7 @@
  *   node scripts/audit-event-payloads.mjs --run     # run the backend suite, then audit
  *   node scripts/audit-event-payloads.mjs           # audit whatever samples exist
  *   node scripts/audit-event-payloads.mjs --json    # machine-readable
+ *   … --ratchet --no-stale                          # samples from a SUBSET run: never judge staleness
  *
  * THE NUMBER THIS EXISTS FOR IS THE DENOMINATOR, not the violation count.
  * A violation list is only as good as the sample set behind it, and the honest
@@ -352,7 +353,17 @@ if (args.has('--ratchet')) {
     for (const t of added) console.log(`      ${t}`);
     ratchetFail = 1;
   }
-  if (stale.length) {
+  // A stale admission is provable only from a FULL run. Under Tracegate enforce
+  // only a subset of files runs, so a type can be sampled (valid, from a file that
+  // ran) while the one file that still emits its violation was reused, not run.
+  // Calling that stale reds an unrelated gate and instructs a deletion that hides
+  // a real violation. MEASURED 2026-10-14 (slot 71): `runOrchestrator.decided`,
+  // whose violation only `dispatch-iteration-counter.test.ts` produces, read
+  // stale on a train that did not run that file. A FULL run judges it: the gate
+  // runs the lane full when its last complete full run is > 24 h old (ADR 0880).
+  if (stale.length && args.has('--no-stale')) {
+    console.log(`  ↷ not judged (subset run, --no-stale): ${stale.length} admission(s) not violated by the files that ran: ${stale.join(', ')}`);
+  } else if (stale.length) {
     console.log(`  ✗ STALE admissions — these validate now; delete them from ${baselineFile}:`);
     for (const t of stale) console.log(`      ${t}`);
     ratchetFail = 1;

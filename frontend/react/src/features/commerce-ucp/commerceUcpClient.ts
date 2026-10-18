@@ -28,8 +28,12 @@ const ucpBase = (orgId: string): string => `${root}/commerce/orgs/${encodeURICom
 export async function listOrgs(): Promise<Org[]> {
   return (await asJson<{ orgs: Org[] }>(await fetch(`${root}/orgs`, fetchOpts({ headers: authedHeaders() })), 'listOrgs')).orgs;
 }
-export async function listUcpClients(orgId: string): Promise<UcpClient[]> {
-  return (await asJson<{ clients: UcpClient[] }>(await fetch(`${ucpBase(orgId)}/clients`, fetchOpts({ headers: authedHeaders() })), 'listUcpClients')).clients;
+/** `refused_live` — this host takes live payments, so agent checkout/pay answer 409
+ *  `live_payment_required` (ADR 0875 D4); `demo` — the documented AP2 demo flow. */
+export type UcpSettlement = 'demo' | 'refused_live';
+export async function listUcpClients(orgId: string): Promise<{ clients: UcpClient[]; settlement: UcpSettlement }> {
+  const r = await asJson<{ clients: UcpClient[]; settlement?: UcpSettlement }>(await fetch(`${ucpBase(orgId)}/clients`, fetchOpts({ headers: authedHeaders() })), 'listUcpClients');
+  return { clients: r.clients, settlement: r.settlement === 'refused_live' ? 'refused_live' : 'demo' };
 }
 export async function provisionUcpClient(orgId: string, name: string, scopes: UcpScope[]): Promise<ProvisionedClient> {
   return asJson<ProvisionedClient>(await fetch(`${ucpBase(orgId)}/clients`, fetchOpts({ method: 'POST', headers: jsonHeaders(), body: JSON.stringify({ name, scopes }) })), 'provisionUcpClient');

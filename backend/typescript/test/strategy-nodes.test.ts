@@ -4,6 +4,17 @@
  * without a registry install. Confirms: read nodes pass through the surface;
  * create-board-memo writes to Documents; the documents-OFF + missing-input
  * degrade paths; and the capability error when the strategy surface is absent.
+ *
+ * Not here (covered elsewhere): the exported node SET is pinned both directions against
+ * pack.json by `pack-manifest-impl-parity.test.ts`; the analyst's allowlist is pinned to
+ * the exact five tool ids by `strategy-agent-tools.test.ts`. This file keeps the
+ * read-only regex, which is STRONGER than that exact set (a mutation id added to both
+ * the set and the manifest passes the set, not the regex).
+ *
+ * Sabotage witnesses (wave 19, `w19g3-nod-*`): dropping a read node's result, ignoring
+ * the get-strategy id or the get-context consumer ref, the memo's kind / content-derived
+ * idemBase / degrade markdown / input validation, the capability check, and a mutation
+ * tool in the allowlist each red the case that names them.
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { join } from 'node:path';
@@ -17,29 +28,18 @@ import { nodes } from '../../../packs/feature.strategy.nodes/index.mjs';
 const REPO_ROOT = join(fileURLToPath(new URL('.', import.meta.url)), '..', '..', '..');
 const AGENT_PACK = join(REPO_ROOT, 'packs', 'vendor.openwop-app.strategy.agents');
 
+let lastContextArgs: Record<string, unknown> | undefined;
 const strategySurface = {
   listStrategies: async () => ({ strategies: [{ id: 's1', title: 'North Star', scope: 'org', status: 'active', horizon: 'annual' }] }),
   getStrategy: async ({ id }: { id: string }) => ({ strategy: id === 's1' ? { id: 's1', title: 'North Star', objectives: [], links: [] } : null }),
-  getStrategyContext: async () => ({ strategies: [{ id: 's1', title: 'North Star', health: { health: 'at-risk' } }] }),
+  getStrategyContext: async (args: Record<string, unknown>) => {
+    lastContextArgs = args;
+    return { strategies: [{ id: 's1', title: 'North Star', health: { health: 'at-risk' } }] };
+  },
   getHealth: async () => ({ strategies: [{ id: 's1', title: 'North Star', health: 'at-risk', signals: { linkedProjectCount: 1 } }] }),
 };
 
 describe('feature.strategy.nodes', () => {
-  it('exposes exactly the ten declared nodes (v1.1 measurement loop + v1.2 decision draft)', () => {
-    expect(Object.keys(nodes).sort()).toEqual([
-      'feature.strategy.nodes.check-in',
-      'feature.strategy.nodes.create-board-memo',
-      'feature.strategy.nodes.get-context',
-      'feature.strategy.nodes.get-health',
-      'feature.strategy.nodes.get-strategy',
-      'feature.strategy.nodes.list-check-ins',
-      'feature.strategy.nodes.list-stale-krs',
-      'feature.strategy.nodes.list-strategies',
-      'feature.strategy.nodes.record-decision',
-      'feature.strategy.nodes.sync-metrics',
-    ]);
-  });
-
   it('list-strategies passes the surface result through', async () => {
     const r = await nodes['feature.strategy.nodes.list-strategies']({ features: { strategy: strategySurface } });
     expect(r).toEqual({ status: 'success', outputs: { strategies: [{ id: 's1', title: 'North Star', scope: 'org', status: 'active', horizon: 'annual' }] } });
@@ -57,8 +57,12 @@ describe('feature.strategy.nodes', () => {
   });
 
   it('get-context resolves by a consumer ref', async () => {
+    lastContextArgs = undefined;
     expect(await nodes['feature.strategy.nodes.get-context']({ features: { strategy: strategySurface }, inputs: { projectId: 'p1' } }))
       .toMatchObject({ status: 'success', outputs: { strategies: [{ id: 's1' }] } });
+    // The ref must REACH the surface — the mock ignores it, so the output alone cannot
+    // tell a forwarded ref from a dropped one (w19g3-nod-context-ref-dropped).
+    expect(lastContextArgs).toEqual({ projectId: 'p1' });
   });
 
   // CORRECTED (ADR 0676 D1). This test PINNED THE DEFECT: it stubbed the hand-rolled
@@ -112,17 +116,15 @@ describe('feature.strategy.nodes', () => {
 describe('vendor.openwop-app.strategy.agents — agent pack manifest', () => {
   beforeEach(() => getAgentRegistry()._resetForTest());
 
-  it('loads the strategy-analyst with its prompt + tool allowlist (memo node included)', () => {
+  it('loads the strategy-analyst with its prompt + tool allowlist (read-only: no strategy-mutation tool)', () => {
     const loaded = loadAgentsFromManifest(AGENT_PACK);
     expect(loaded.length).toBe(1);
     const a = loaded[0];
     expect(a.agentId).toBe('vendor.openwop-app.strategy.agents.strategy-analyst');
     expect(a.systemPromptRef).toBe('prompts/strategy-analyst.md');
     expect(a.systemPrompt.length).toBeGreaterThan(0);
-    // tool-allowlisted to its OWN nodes only (read + the Documents-writing memo node).
     const allow = a.toolAllowlist ?? [];
-    expect(allow).toContain('openwop:strategy.get-health');
-    expect(allow).toContain('openwop:strategy.create-board-memo');
+    expect(allow.length).toBeGreaterThan(0);
     // read-only-strategy invariant: NO strategy-mutation tool is allowlisted.
     expect(allow.some((tool: string) => /strategy\.(create-strategy|update|delete|replace-links)/.test(tool))).toBe(false);
     expect(getAgentRegistry().listAgentIds()).toContain(a.agentId);

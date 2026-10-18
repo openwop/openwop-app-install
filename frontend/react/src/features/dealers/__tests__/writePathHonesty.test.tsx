@@ -10,39 +10,50 @@
  *             product produces one — so the sales map plots nothing, forever
  *  - DLR2-B2  a registration whose review card never landed read "Awaiting review"
  *  - DLR2-M2  a failed DEALERS read left a skeleton shimmering with no retry
+ *
+ * Sabotage-witnessed (w52 /grade-tests, w52g2-wp-*): reactivate/suspend sending the
+ * wrong status, create dropping lat/lng, the half-location and range guards removed
+ * (create form and outlet detail), the no-coords create blocked, the outlet save
+ * dropping the coordinates or the prefill, the queue-failed chip falling back to
+ * "Awaiting review", and the dealers read failure shown as an empty directory or
+ * without a working Retry. Writes are asserted as the FULL call (org, target,
+ * body) — a toast is not the write.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, waitFor, act, fireEvent } from '@testing-library/react';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import type { Dealer, Outlet, Company, DealRegistration } from '../dealersClient.js';
 
-const getOutlet = vi.fn();
-const getDealer = vi.fn();
-const updateOutlet = vi.fn();
-const listDealers = vi.fn();
-const listCompanies = vi.fn();
-const listOutlets = vi.fn();
-const listRegistrations = vi.fn();
-const createOutlet = vi.fn();
-const updateDealer = vi.fn();
+import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
+
+type DealersApi = typeof import('../dealersClient.js');
+const getOutlet = vi.fn<DealersApi['getOutlet']>();
+const getDealer = vi.fn<DealersApi['getDealer']>();
+const updateOutlet = vi.fn<DealersApi['updateOutlet']>();
+const listDealers = vi.fn<DealersApi['listDealers']>();
+const listCompanies = vi.fn<DealersApi['listCompanies']>();
+const listOutlets = vi.fn<DealersApi['listOutlets']>();
+const listRegistrations = vi.fn<DealersApi['listRegistrations']>();
+const createOutlet = vi.fn<DealersApi['createOutlet']>();
+const updateDealer = vi.fn<DealersApi['updateDealer']>();
 
 vi.mock('../dealersClient.js', async (orig) => ({
-  ...(await orig<Record<string, unknown>>()),
+  ...(await orig<DealersApi>()),
   listOrgs: vi.fn(async () => [{ orgId: 'org-1', name: 'Acme' }]),
-  listDealers: () => listDealers(),
-  listCompanies: () => listCompanies(),
-  listOutlets: () => listOutlets(),
-  listRegistrations: () => listRegistrations(),
-  createOutlet: (...a: unknown[]) => createOutlet(...a),
-  updateDealer: (...a: unknown[]) => updateDealer(...a),
-  updateOutlet: (...a: unknown[]) => updateOutlet(...a),
-  getOutlet: () => getOutlet(),
-  getDealer: () => getDealer(),
-  createDealer: vi.fn(async () => ({})),
+  listDealers: (orgId: string) => listDealers(orgId),
+  listCompanies: (orgId: string) => listCompanies(orgId),
+  listOutlets: (orgId: string, dealerId: string) => listOutlets(orgId, dealerId),
+  listRegistrations: (orgId: string, dealerId?: string) => listRegistrations(orgId, dealerId),
+  createOutlet: (...a: Parameters<DealersApi['createOutlet']>) => createOutlet(...a),
+  updateDealer: (...a: Parameters<DealersApi['updateDealer']>) => updateDealer(...a),
+  updateOutlet: (...a: Parameters<DealersApi['updateOutlet']>) => updateOutlet(...a),
+  getOutlet: (orgId: string, outletId: string) => getOutlet(orgId, outletId),
+  getDealer: (orgId: string, dealerId: string) => getDealer(orgId, dealerId),
 }));
 vi.mock('../../../ui/toast.js', () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
-vi.mock('../../../featureToggles/FeatureAccessContext.js', () => ({
-  useFeatureAccess: () => ({ enabled: true, locked: false, loading: false, status: 'on' as const, isBeta: false, variant: null, entitled: true, resolutionFailed: false }),
+vi.mock('../../../featureToggles/FeatureAccessContext.js', async (orig) => ({
+  ...(await orig<typeof import('../../../featureToggles/FeatureAccessContext.js')>()),
+  useFeatureAccess: () => makeFeatureAccess(),
 }));
 
 import { DealersPage } from '../DealersPage.js';
@@ -52,6 +63,8 @@ const DEALER: Dealer = {
   dealerId: 'd1', companyId: 'c1', name: 'North Motors', tier: 'gold',
   status: 'active', updatedAt: '2026-07-01T00:00:00.000Z',
 };
+const OUTLET: Outlet = { outletId: 'o1', dealerId: 'd1', name: 'North Depot', status: 'active' };
+const COMPANY: Company = { companyId: 'c1', name: 'Acme Corp', tags: [] };
 const REG: DealRegistration = {
   regId: 'r1', dealerId: 'd1', dealTitle: 'Q4 fleet', companyName: 'Globex',
   status: 'pending', at: '2026-08-01T00:00:00.000Z',
@@ -65,14 +78,14 @@ const view = async (): Promise<void> => {
 
 beforeEach(() => {
   for (const m of [listDealers, listCompanies, listOutlets, listRegistrations, createOutlet, updateDealer, updateOutlet, getOutlet, getDealer]) m.mockReset();
-  getOutlet.mockResolvedValue({ outletId: 'o1', dealerId: 'd1', name: 'North Depot', status: 'active' } as Outlet);
+  getOutlet.mockResolvedValue(OUTLET);
   getDealer.mockResolvedValue(DEALER);
-  updateOutlet.mockResolvedValue({});
+  updateOutlet.mockResolvedValue({ ...OUTLET, lat: 51.5074, lng: -0.1278 });
   listDealers.mockResolvedValue([DEALER]);
-  listCompanies.mockResolvedValue([{ companyId: 'c1', name: 'Acme Corp' } as Company]);
-  listOutlets.mockResolvedValue([] as Outlet[]);
+  listCompanies.mockResolvedValue([COMPANY]);
+  listOutlets.mockResolvedValue([]);
   listRegistrations.mockResolvedValue([]);
-  createOutlet.mockResolvedValue({});
+  createOutlet.mockResolvedValue({ ...OUTLET, outletId: 'o2', name: 'Store A' });
   updateDealer.mockResolvedValue(DEALER);
 });
 afterEach(cleanup);
@@ -95,7 +108,7 @@ describe('DLR2-M4 — a suspension documented as reversible needs a reversal', (
     expect(screen.queryByRole('button', { name: /reactivate/i })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: /suspend/i }));
     await waitFor(() => expect(updateDealer).toHaveBeenCalled());
-    expect(updateDealer.mock.calls[0]![2]).toEqual({ status: 'suspended' });
+    expect(updateDealer.mock.calls[0]).toEqual(['org-1', 'd1', { status: 'suspended' }]);
   });
 });
 
@@ -110,7 +123,7 @@ describe('DLR2-B5 — an outlet that can never be plotted', () => {
     // The backend has accepted lat/lng on create since P1; the form never sent them,
     // and no other surface produces a coordinate — so every real tenant's sales map
     // was empty and its "N outlets are not on the map" line read "all of them".
-    expect(createOutlet.mock.calls[0]![2]).toMatchObject({ name: 'Store A', lat: 51.5074, lng: -0.1278 });
+    expect(createOutlet.mock.calls[0]).toEqual(['org-1', 'd1', { name: 'Store A', lat: 51.5074, lng: -0.1278 }]);
   });
 
   it('refuses HALF a location — one coordinate is not a place', async () => {
@@ -135,7 +148,8 @@ describe('DLR2-B5 — an outlet that can never be plotted', () => {
     fireEvent.change(screen.getByLabelText(/outlet name/i), { target: { value: 'Store D' } });
     fireEvent.click(screen.getAllByRole('button', { name: /^add$/i })[0]!);
     await waitFor(() => expect(createOutlet).toHaveBeenCalled());
-    expect(createOutlet.mock.calls[0]![2]).not.toHaveProperty('lat');
+    // Exact body: no lat/lng keys at all (not `null`, not `NaN`).
+    expect(createOutlet.mock.calls[0]).toEqual(['org-1', 'd1', { name: 'Store D' }]);
   });
 });
 
@@ -160,11 +174,11 @@ describe('review fold-in B3 — the capture never reached an EXISTING outlet', (
     fireEvent.change(screen.getByLabelText(/longitude/i), { target: { value: '-0.1278' } });
     fireEvent.click(screen.getByRole('button', { name: /save coordinates/i }));
     await waitFor(() => expect(updateOutlet).toHaveBeenCalled());
-    expect(updateOutlet.mock.calls[0]![2]).toEqual({ lat: 51.5074, lng: -0.1278 });
+    expect(updateOutlet.mock.calls[0]).toEqual(['org-1', 'o1', { lat: 51.5074, lng: -0.1278 }]);
   });
 
   it('prefills from the row, so saving is an edit and not a silent blanking', async () => {
-    getOutlet.mockResolvedValue({ outletId: 'o1', dealerId: 'd1', name: 'North Depot', status: 'active', lat: 10, lng: 20 } as Outlet);
+    getOutlet.mockResolvedValue({ ...OUTLET, lat: 10, lng: 20 });
     await outletView();
     expect((screen.getByLabelText(/latitude/i) as HTMLInputElement).value).toBe('10');
     expect((screen.getByLabelText(/longitude/i) as HTMLInputElement).value).toBe('20');
@@ -208,7 +222,8 @@ describe('DLR2-M2 — a failed dealers read shimmered forever', () => {
     expect(await screen.findByText(/could not load your dealers/i)).toBeTruthy();
     const retry = screen.getAllByRole('button', { name: /retry/i })[0]!;
     fireEvent.click(retry);
-    await waitFor(() => expect(listDealers.mock.calls.length).toBeGreaterThan(1));
+    await waitFor(() => expect(listDealers).toHaveBeenCalledTimes(2));
+    expect(listDealers.mock.calls).toEqual([['org-1'], ['org-1']]);
   });
 
   it('an empty directory is still an empty directory (the negative control)', async () => {

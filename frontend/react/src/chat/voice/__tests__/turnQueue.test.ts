@@ -1,4 +1,6 @@
-/** ADR 0304 P2 — the pure board-voice turn queue: which turns get spoken, in order. */
+/** ADR 0304 P2 — the pure board-voice turn queue: which turns get spoken, in order.
+ *  Breaks if: history is re-voiced, a user/streaming/errored/deleted/empty turn is
+ *  spoken, or a turn loses its speaker's voice. Sabotage-witnessed (w44g3-tq-*). */
 import { describe, expect, it } from 'vitest';
 import { collectSpeakableTurns } from '../turnQueue.js';
 import type { ChatMessage } from '../../types.js';

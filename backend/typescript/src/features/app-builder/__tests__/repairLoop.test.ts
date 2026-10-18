@@ -1,6 +1,13 @@
 /** ADR 0346 4d — the governed repair loop: nodes (repair/capture/apply-repair),
  *  the surface ops (getDesign / CAS applyRepair), and the registered
- *  app-builder.repair builtin's shape. */
+ *  app-builder.repair builtin's shape. (Facet carry-over and the candidate
+ *  gate added by #4756 / ABR-REPAIR-1 are pinned in renderPreservesFacets.)
+ *  Sabotage witnesses (grade-tests w36): CAS expectedVersion dropped, the
+ *  write-side validator disabled, getDesign's version, the repair basis, the
+ *  CURRENT APP read, a second model call on unparseable output, the approval
+ *  check, the apply basis, the audit primary role and capture's empty-input
+ *  rule — each reds its case. Each surface case owns its canvas, so the file
+ *  passes in any order (shuffle-verified). */
 import { describe, it, expect, beforeAll } from 'vitest';
 import { buildAppBuilderSurface } from '../surface.js';
 import { registerAppBuilderComponents } from '../componentCatalog.js';
@@ -28,25 +35,28 @@ beforeAll(async () => {
   registerAppBuilderComponents();
   registerAppBuilderArtifactType();
   loadArtifactTypePacks({ roots: [locateRepoDir(new URL('.', import.meta.url).pathname, 'packs', 'feature.app-builder.artifact-types/pack.json')] });
-  await __putCanvasForTest({ canvasId: 'cv1', tenantId: T, canvasTypeId: 'canvas.app-builder', state: app() as never, version: 3 });
+  // One canvas per case: the CAS case moves its canvas to v4, which must not
+  // leak into the read case under shuffle.
+  await __putCanvasForTest({ canvasId: 'cv-read', tenantId: T, canvasTypeId: 'canvas.app-builder', state: app(), version: 3 });
+  await __putCanvasForTest({ canvasId: 'cv-cas', tenantId: T, canvasTypeId: 'canvas.app-builder', state: app(), version: 3 });
 });
 
 describe('surface ops', () => {
-  const surface = buildAppBuilderSurface({ tenantId: T } as never);
+  const surface = buildAppBuilderSurface({ tenantId: T });
   it('getDesign returns the app + the CAS basis version, tenant-scoped', async () => {
-    const res = await surface.getDesign!({ canvasId: 'cv1' }) as { app: { name: string }; version: number };
+    const res = await surface.getDesign!({ canvasId: 'cv-read' }) as { app: { name: string }; version: number };
     expect(res.app.name).toBe('App');
     expect(res.version).toBe(3);
-    await expect(buildAppBuilderSurface({ tenantId: 'other' } as never).getDesign!({ canvasId: 'cv1' })).rejects.toThrow();
+    await expect(buildAppBuilderSurface({ tenantId: 'other' }).getDesign!({ canvasId: 'cv-read' })).rejects.toMatchObject({ code: 'not_found' });
   });
   it('applyRepair CAS-writes a valid doc; stale version 409s; invalid doc 422s', async () => {
     const repaired = app('App v2');
-    const out = await surface.applyRepair!({ canvasId: 'cv1', expectedVersion: 3, app: repaired }) as { newVersion: number };
+    const out = await surface.applyRepair!({ canvasId: 'cv-cas', expectedVersion: 3, app: repaired }) as { newVersion: number };
     expect(out.newVersion).toBe(4);
-    expect(((await getCanvasForTenant(T, 'cv1'))!.state as { name: string }).name).toBe('App v2');
-    await expect(surface.applyRepair!({ canvasId: 'cv1', expectedVersion: 3, app: repaired }))
+    expect(((await getCanvasForTenant(T, 'cv-cas'))!.state as { name: string }).name).toBe('App v2');
+    await expect(surface.applyRepair!({ canvasId: 'cv-cas', expectedVersion: 3, app: repaired }))
       .rejects.toMatchObject({ code: 'canvas_version_conflict' } satisfies Partial<OpenwopError>);
-    await expect(surface.applyRepair!({ canvasId: 'cv1', expectedVersion: 4, app: { name: 'X', screens: [{ id: 'a', name: 'A', components: [{ type: 'holo-deck' }] }] } }))
+    await expect(surface.applyRepair!({ canvasId: 'cv-cas', expectedVersion: 4, app: { name: 'X', screens: [{ id: 'a', name: 'A', components: [{ type: 'holo-deck' }] }] } }))
       .rejects.toMatchObject({ code: 'validation_error' });
   });
 });
@@ -63,12 +73,15 @@ describe('pack nodes', () => {
   it('repair reads via the surface, re-normalizes through the render gate, and carries the CAS basis', async () => {
     const { repair } = await pack();
     const fixed = { ...app('Fixed'), screens: [{ id: 'Home Screen!', name: 'Home', isInitial: true, components: [{ type: 'text', props: { text: 'fixed' } }] }] };
-    const features = { 'app-builder': { getDesign: async () => ({ app: app(), version: 7 }) } };
+    const features = { 'app-builder': { getDesign: async () => ({ app: app('CurrentDesignMarker'), version: 7 }) } };
+    const seen: unknown[] = [];
     const res = await repair({
       inputs: { canvasId: 'cv1', instructions: 'fix empty_screen' },
       config: {}, features,
-      callAI: async () => ({ content: JSON.stringify(fixed) }),
+      callAI: async (req) => { seen.push(req.messages); return { content: JSON.stringify(fixed) }; },
     });
+    // Read-before-write: the design the surface returned is what the model sees.
+    expect(JSON.stringify(seen[0])).toContain('CurrentDesignMarker');
     expect(res.outputs.baseVersion).toBe(7);
     expect(res.outputs.canvasId).toBe('cv1');
     const payload = res.outputs.artifact.payload as { screens: { id: string }[] };
@@ -90,6 +103,10 @@ describe('pack nodes', () => {
     const res = await applyDesignRepair({ inputs: { artifact: { artifactTypeId: 'canvas.app-builder', payload: app() }, canvasId: 'cv1', baseVersion: 8, approval: { action: 'approve' } }, features });
     expect(res.outputs.applied).toEqual({ canvasId: 'cv1', newVersion: 9 });
     expect(calls[0]).toMatchObject({ canvasId: 'cv1', expectedVersion: 8 });
+    // ADR 0835 D5: no approval → refused before the surface is called.
+    await expect(applyDesignRepair({ inputs: { artifact: { artifactTypeId: 'canvas.app-builder', payload: app() }, canvasId: 'cv1', baseVersion: 8 }, features }))
+      .rejects.toMatchObject({ code: 'approval_required' });
+    expect(calls).toHaveLength(1);
     await expect(applyDesignRepair({ inputs: { canvasId: 'cv1', baseVersion: 8, approval: { action: 'approve' } }, features })).rejects.toThrow(/artifact/);
   });
 });

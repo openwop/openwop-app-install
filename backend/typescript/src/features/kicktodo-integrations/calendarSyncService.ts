@@ -24,8 +24,9 @@
  */
 
 import { createLogger } from '../../observability/logger.js';
-import { registerJob, setJobEnabled } from '../../host/schedulingService.js';
+import { deleteJob, registerJob, setJobEnabled } from '../../host/schedulingService.js';
 import { getEnrollment } from '../kicktodo-core/enrollmentService.js';
+import { onEnrollmentAbandoned, onEnrollmentDeleted } from '../kicktodo-core/enrollmentLifecycle.js';
 import { liveConsent, ConsentRequiredError } from './integrationService.js';
 import { isCalendarTransportConfigured, CalendarUnavailableError } from './calendarWriteService.js';
 import { KICKTODO_CALENDAR_SYNC_WORKFLOW_ID } from './builtinWorkflows.js';
@@ -87,3 +88,15 @@ export async function setCalendarSyncEnabled(
   log.info('kicktodo_calendar_sync_enabled', { enrollmentId });
   return true;
 }
+
+// ── KTENR-4 (KickTodo wave 4C) — the sync job ends with its enrollment ──
+// An abandoned enrollment's daily sync job stayed armed (the node failed closed on
+// it every day); a DSAR-deleted one's stayed forever with the owner's subject in
+// its inputs. Abandon DISABLES it (the kept-armed-but-disabled posture above);
+// deletion removes it. Best-effort, keyed, idempotent.
+onEnrollmentAbandoned('kicktodo-integrations.calendar-sync-job', async ({ tenantId, enrollmentId }) => {
+  await setJobEnabled(calendarSyncJobId(tenantId, enrollmentId), false).catch(() => undefined);
+});
+onEnrollmentDeleted('kicktodo-integrations.calendar-sync-job', async ({ tenantId, enrollmentId }) => {
+  await deleteJob(calendarSyncJobId(tenantId, enrollmentId)).catch(() => undefined);
+});

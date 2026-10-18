@@ -9,6 +9,8 @@
  *   - the cap is honest: >25 lines label says "first 25" and only 25 create
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
+import type { Mock } from 'vitest';
+import type { ComponentProps } from 'react';
 import { render, cleanup, screen, fireEvent } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { KanbanBoardView } from '../KanbanBoardView.js';
@@ -18,11 +20,13 @@ const board: KanbanBoard = {
   id: 'b1', tenantId: 't1', name: 'Board',
   columns: [{ id: 'todo', name: 'To do' }],
   createdAt: '2026-08-01T00:00:00Z', updatedAt: '2026-08-01T00:00:00Z',
-} as KanbanBoard;
+};
 
 afterEach(cleanup);
 
-function openComposer(onCreateCard: ReturnType<typeof vi.fn>): HTMLInputElement {
+type CreateCard = NonNullable<ComponentProps<typeof KanbanBoardView>['onCreateCard']>;
+
+function openComposer(onCreateCard: Mock<CreateCard>): HTMLInputElement {
   render(
     <MemoryRouter>
       <KanbanBoardView board={board} cards={[]} onMoveCard={vi.fn()} onCreateCard={onCreateCard} />
@@ -38,7 +42,7 @@ const paste = (el: HTMLElement, text: string): void => {
 
 describe('KB-R2-4 — paste-multi-line', () => {
   it('single-line paste: no prompt (the default paste path)', () => {
-    const onCreateCard = vi.fn();
+    const onCreateCard = vi.fn<CreateCard>();
     const input = openComposer(onCreateCard);
     paste(input, 'just one task');
     expect(screen.queryByText(/Pasted/)).toBeNull();
@@ -46,7 +50,7 @@ describe('KB-R2-4 — paste-multi-line', () => {
   });
 
   it('multi-line paste prompts; Create makes one card per NON-EMPTY line, composer stays open', () => {
-    const onCreateCard = vi.fn();
+    const onCreateCard = vi.fn<CreateCard>();
     const input = openComposer(onCreateCard);
     paste(input, 'alpha\n\n  beta  \ngamma\n');
     expect(screen.getByText('Pasted 3 lines.')).toBeTruthy();
@@ -59,7 +63,7 @@ describe('KB-R2-4 — paste-multi-line', () => {
   });
 
   it('Keep as one line joins into the input and creates NOTHING', () => {
-    const onCreateCard = vi.fn();
+    const onCreateCard = vi.fn<CreateCard>();
     const input = openComposer(onCreateCard);
     paste(input, 'alpha\nbeta');
     fireEvent.click(screen.getByRole('button', { name: 'Keep as one line' }));
@@ -68,7 +72,7 @@ describe('KB-R2-4 — paste-multi-line', () => {
   });
 
   it('the cap is honest: 30 lines → "first 25" label, exactly 25 created', () => {
-    const onCreateCard = vi.fn();
+    const onCreateCard = vi.fn<CreateCard>();
     const input = openComposer(onCreateCard);
     paste(input, Array.from({ length: 30 }, (_, i) => `task ${i + 1}`).join('\n'));
     expect(screen.getByText('Pasted 30 lines.')).toBeTruthy();

@@ -7,33 +7,47 @@
  *    invalid id unreachable from the UI; the route now refuses one regardless.
  *  - WEB-G2: `formId` rode in the payload and the chip said only "Form bound".
  *    WHICH form is the entire point of the binding.
+ *  - R2 WB-SP-2 / WB-SP-11 / R3 WB-SP-9 (ADR 0404 §a): a push that sent nothing is
+ *    an ERROR toast and a partial one says both figures; a failed events read is
+ *    the failure card, never the "add a webinar" instruction; the lifecycle chip
+ *    is Upcoming/Past PER ROW; the via-connection chip shows only when set.
+ *
+ * The failed-FORMS-read case lives in `webinarForms.readFailure.test.tsx`
+ * (EMPTY-ON-FAIL-7) — this file's copy was cut in /grade-tests w52.
+ *
+ * Sabotage-witnessed (/grade-tests w52): option text from the id, a bind with
+ * the wrong form or org, no empty-forms branch, a wrong form title lookup, a
+ * success toast for a zero push / a partial push, no failed-events branch, an
+ * inverted lifecycle comparison, and a truncated connection id each turn a case red.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, cleanup, waitFor, fireEvent, act } from '@testing-library/react';
+import { render, screen, cleanup, waitFor, fireEvent, act, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
-import type { MarketingEvent } from '../webinarsClient.js';
+import type { MarketingEvent, OrgRef } from '../webinarsClient.js';
+import type { FormDef } from '../../forms/formsClient.js';
+import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
+import { toast } from '../../../ui/toast.js';
 
-const listWebinarEvents = vi.fn();
-const pushWebinarRegistrants = vi.fn();
-const bindWebinarForm = vi.fn();
-const listForms = vi.fn();
+type PushResult = { pushed: number; failed: number; failures: Array<{ email: string; reason: string }> };
+const listWebinarEvents = vi.fn<(orgId: string) => Promise<MarketingEvent[]>>();
+const pushWebinarRegistrants = vi.fn<(orgId: string, eventId: string) => Promise<PushResult>>();
+const bindWebinarForm = vi.fn<(orgId: string, eventId: string, formId: string) => Promise<void>>();
+const listForms = vi.fn<(orgId: string) => Promise<FormDef[]>>();
 
 vi.mock('../webinarsClient.js', async (orig) => ({
   ...(await orig<Record<string, unknown>>()),
-  listOrgs: vi.fn(async () => [{ orgId: 'org-1', name: 'Acme' }]),
-  listWebinarEvents: () => listWebinarEvents(),
-  bindWebinarForm: (...a: unknown[]) => bindWebinarForm(...a),
-  createWebinarEvent: vi.fn(async () => ({})),
-  syncWebinarEvent: vi.fn(async () => ({ outcome: 'synced' })),
-  pushWebinarRegistrants: (...a: unknown[]) => pushWebinarRegistrants(...a),
+  listOrgs: vi.fn(async (): Promise<OrgRef[]> => [{ orgId: 'org-1', name: 'Acme' }]),
+  listWebinarEvents: (orgId: string) => listWebinarEvents(orgId),
+  bindWebinarForm: (orgId: string, eventId: string, formId: string) => bindWebinarForm(orgId, eventId, formId),
+  pushWebinarRegistrants: (orgId: string, eventId: string) => pushWebinarRegistrants(orgId, eventId),
 }));
 vi.mock('../../forms/formsClient.js', async (orig) => ({
   ...(await orig<Record<string, unknown>>()),
-  listForms: (...a: unknown[]) => listForms(...a),
+  listForms: (orgId: string) => listForms(orgId),
 }));
 vi.mock('../../../ui/toast.js', () => ({ toast: { success: vi.fn(), error: vi.fn(), info: vi.fn() } }));
 vi.mock('../../../featureToggles/FeatureAccessContext.js', () => ({
-  useFeatureAccess: () => ({ enabled: true, locked: false, loading: false, status: 'on' as const, isBeta: false, variant: null, entitled: true, resolutionFailed: false }),
+  useFeatureAccess: () => makeFeatureAccess(),
 }));
 
 import { WebinarsPage } from '../WebinarsPage.js';
@@ -46,9 +60,9 @@ const event = (over: Partial<MarketingEvent> = {}): MarketingEvent => ({
   ...over,
 });
 
-const FORMS = [
-  { formId: 'form-a', orgId: 'org-1', title: 'Webinar signup', status: 'published', fields: [], createToContact: true, createdAt: '2026-01-01T00:00:00.000Z' },
-  { formId: 'form-b', orgId: 'org-1', title: 'Newsletter', status: 'published', fields: [], createToContact: true, createdAt: '2026-01-01T00:00:00.000Z' },
+const FORMS: FormDef[] = [
+  { formId: 'form-a', orgId: 'org-1', title: 'Webinar signup', status: 'published', fields: [], createToContact: true, createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z' },
+  { formId: 'form-b', orgId: 'org-1', title: 'Newsletter', status: 'published', fields: [], createToContact: true, createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z' },
 ];
 
 const view = async (): Promise<void> => {
@@ -59,9 +73,11 @@ const view = async (): Promise<void> => {
 
 beforeEach(() => {
   listWebinarEvents.mockReset(); bindWebinarForm.mockReset(); listForms.mockReset(); pushWebinarRegistrants.mockReset();
+  // The toast mock is module-level: reset it so one case's toasts never answer another's.
+  vi.mocked(toast.success).mockReset(); vi.mocked(toast.error).mockReset(); vi.mocked(toast.info).mockReset();
   listWebinarEvents.mockResolvedValue([event()]);
   listForms.mockResolvedValue(FORMS);
-  bindWebinarForm.mockResolvedValue({});
+  bindWebinarForm.mockResolvedValue(undefined);
 });
 afterEach(cleanup);
 
@@ -82,8 +98,9 @@ describe('WEB-G1: binding picks a real form instead of typing an id', () => {
     fireEvent.change(select, { target: { value: 'form-b' } });
     fireEvent.click(screen.getByRole('button', { name: /^link form$/i }));
     await waitFor(() => expect(bindWebinarForm).toHaveBeenCalled());
-    const args = bindWebinarForm.mock.calls[0];
-    expect(args).toContain('form-b');
+    // The exact binding: this org, this event, the id behind "Newsletter".
+    expect(bindWebinarForm).toHaveBeenCalledTimes(1);
+    expect(bindWebinarForm).toHaveBeenCalledWith('org-1', 'ev-1', 'form-b');
   });
 
   it('an organization with NO forms says so instead of offering an empty picker', async () => {
@@ -92,15 +109,6 @@ describe('WEB-G1: binding picks a real form instead of typing an id', () => {
     fireEvent.click(screen.getByRole('button', { name: /link registration form|change linked form/i }));
     expect(await screen.findByText('No forms in this organization yet — create one first.')).toBeTruthy();
     expect(screen.queryByRole('combobox', { name: /registration form/i })).toBeNull();
-  });
-
-  it('a failed forms read degrades to the empty message, not a broken dashboard', async () => {
-    listForms.mockRejectedValue(new Error('forms down'));
-    await view();
-    // The events list still renders — the binding affordance is what degrades.
-    expect(screen.getByText('Launch webinar')).toBeTruthy();
-    fireEvent.click(screen.getByRole('button', { name: /link registration form|change linked form/i }));
-    expect(await screen.findByText('No forms in this organization yet — create one first.')).toBeTruthy();
   });
 });
 
@@ -128,11 +136,12 @@ describe('R2 WB-SP-2 — pending registrant pushes are visible and drainable', (
     expect(await screen.findByText('2 registrations not on Zoom yet')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: /Push to Zoom/ }));
     await act(async () => {});
-    expect(pushWebinarRegistrants).toHaveBeenCalled();
+    expect(pushWebinarRegistrants).toHaveBeenCalledTimes(1);
+    expect(pushWebinarRegistrants).toHaveBeenCalledWith('org-1', 'ev-1');
     // Nothing pushed is a failure, with the reason translated to an action —
     // never a success toast (the campaign-connectors M2 lesson).
-    const { toast } = await import('../../../ui/toast.js');
-    expect((toast.error as ReturnType<typeof vi.fn>)).toHaveBeenCalledWith(expect.stringMatching(/Zoom isn't connected/));
+    expect(vi.mocked(toast.error)).toHaveBeenCalledWith(expect.stringMatching(/Zoom isn't connected/));
+    expect(vi.mocked(toast.success)).not.toHaveBeenCalled();
   });
 
   it('R2 WB-SP-11: the failed-events read renders the failure card, never the empty instruction', async () => {
@@ -152,8 +161,8 @@ describe('R2 review fold-in — the remaining push/chip branches', () => {
     await act(async () => {});
     fireEvent.click(await screen.findByRole('button', { name: /Push to Zoom/ }));
     await act(async () => {});
-    const { toast } = await import('../../../ui/toast.js');
-    expect((toast.success as ReturnType<typeof vi.fn>)).toHaveBeenCalledWith(expect.stringMatching(/Pushed 3 registrants/));
+    expect(pushWebinarRegistrants).toHaveBeenLastCalledWith('org-1', 'ev-1');
+    expect(vi.mocked(toast.success)).toHaveBeenCalledWith(expect.stringMatching(/Pushed 3 registrants/));
     unmount();
 
     pushWebinarRegistrants.mockResolvedValueOnce({ pushed: 2, failed: 1, failures: [{ email: 'a@x.test', reason: 'zoom_500' }] });
@@ -161,7 +170,8 @@ describe('R2 review fold-in — the remaining push/chip branches', () => {
     await act(async () => {});
     fireEvent.click(await screen.findByRole('button', { name: /Push to Zoom/ }));
     await act(async () => {});
-    expect((toast.info as ReturnType<typeof vi.fn>)).toHaveBeenCalledWith(expect.stringMatching(/Pushed 2; 1 failed/));
+    expect(vi.mocked(toast.info)).toHaveBeenCalledWith(expect.stringMatching(/Pushed 2; 1 failed/));
+    expect(vi.mocked(toast.success)).toHaveBeenCalledTimes(1); // only the full push succeeded
   });
 
   it('the lifecycle chip reads Upcoming for a future start and Past for an elapsed one, with a zone-labeled time', async () => {
@@ -173,8 +183,13 @@ describe('R2 review fold-in — the remaining push/chip branches', () => {
     ]);
     render(<MemoryRouter><WebinarsPage /></MemoryRouter>);
     await act(async () => {});
-    expect(await screen.findByText('Upcoming')).toBeTruthy();
-    expect(screen.getByText('Past')).toBeTruthy();
+    // PER ROW: one future and one past row would still show both words if the
+    // comparison were inverted, so each row's own chip is asserted.
+    const rowOf = async (title: string): Promise<HTMLElement> => (await screen.findByText(title)).closest('li')!;
+    expect(within(await rowOf('Future call')).getByText('Upcoming')).toBeTruthy();
+    expect(within(await rowOf('Future call')).queryByText('Past')).toBeNull();
+    expect(within(await rowOf('Past call')).getByText('Past')).toBeTruthy();
+    expect(within(await rowOf('Past call')).queryByText('Upcoming')).toBeNull();
   });
 });
 

@@ -53,4 +53,22 @@ describe('entitlement refresh on 403 (UI-ENT-1b)', () => {
     for (let i = 0; i < 50; i += 1) noteRequestStatus(403);
     expect(reload).toHaveBeenCalledTimes(1);
   });
+
+  it('reloads again once the cooldown window has passed (one reload per WINDOW, not one ever)', () => {
+    // Without this leg an infinite cooldown — a seam that fires once and is then
+    // dead for the session — passes the storm case above.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      const reload = vi.fn();
+      registerEntitlementReloader(reload);
+      noteRequestStatus(403);
+      noteRequestStatus(403);
+      expect(reload).toHaveBeenCalledTimes(1);
+      vi.setSystemTime(Date.now() + 10_001);
+      noteRequestStatus(403);
+      expect(reload).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

@@ -7,6 +7,11 @@ import { config, authedHeaders, fetchOpts } from '../../client/config.js';
 const orgBase = (orgId: string): string => `${config.baseUrl}/host/openwop-app/service-desk/orgs/${encodeURIComponent(orgId)}`;
 
 export interface TicketMessage { messageId: string; direction: 'inbound' | 'outbound' | 'internal'; body: string; author: string; at: string }
+/** ADR 0878 D3 — what happened to one outbound reply. `unknown` = a send that never
+ *  recorded its result (retryable). */
+export type DeliveryState = 'pending' | 'sent' | 'failed' | 'visible' | 'not_sent' | 'unknown';
+export interface Delivery { state: DeliveryState; at: string; attempts: number; code?: string; message?: string }
+export type TicketReplyChannel = { kind: 'whatsapp'; connectionId: string } | { kind: 'widget' };
 export interface Ticket {
   ticketId: string;
   subject: string;
@@ -16,11 +21,22 @@ export interface Ticket {
   contactId?: string;
   assigneeMemberId?: string;
   slaDueAt?: string;
+  /** ADR 0878 D3 — absent ⇒ a reply is recorded, never sent. */
+  replyChannel?: TicketReplyChannel;
+  /** ADR 0878 D3 — the customer's channel identity (member read only). */
+  requester?: { phone?: string; email?: string };
   messages: TicketMessage[];
   updatedAt: string;
   createdAt: string;
 }
-export interface IntakeConfig { defaultOrgId: string; slaHoursByPriority?: Record<string, number> }
+/** A ticket as the detail read returns it: plus each outbound reply's delivery. */
+export type TicketDetail = Ticket & { deliveries?: Record<string, Delivery> };
+export interface IntakeConfig { defaultOrgId: string; slaHoursByPriority?: Record<string, number>; publicIntakeKey?: string }
+/** ADR 0878 D2 — `here` = intake files into THIS org. Configured for another org,
+ *  the config itself is not returned (nor which org). */
+export interface IntakeStatus { configured: boolean; here: boolean; config: IntakeConfig | null }
+export type QueueView = 'all' | 'mine' | 'unassigned' | 'overdue';
+export interface Assignee { subject: string; displayName: string }
 
 /**
  * SD-G3 — same bug as the BI client: this read `error.message` from a body whose
@@ -41,23 +57,62 @@ async function asJson<T>(res: Response, ctx: string): Promise<T> {
   return (await res.json()) as T;
 }
 
-export async function listSupportTickets(orgId: string, status?: string): Promise<Ticket[]> {
-  const qs = status ? `?status=${encodeURIComponent(status)}` : '';
+export async function listSupportTickets(orgId: string, status?: string, view?: QueueView): Promise<Ticket[]> {
+  const params = new URLSearchParams();
+  if (status) params.set('status', status);
+  if (view && view !== 'all') params.set('view', view);
+  const qs = params.toString() ? `?${params.toString()}` : '';
   const res = await fetch(`${orgBase(orgId)}/tickets${qs}`, fetchOpts({ headers: authedHeaders() }));
   return (await asJson<{ tickets: Ticket[] }>(res, 'listSupportTickets')).tickets;
 }
 
-export async function getSupportTicket(orgId: string, ticketId: string): Promise<Ticket> {
+export async function getSupportTicket(orgId: string, ticketId: string): Promise<TicketDetail> {
   const res = await fetch(`${orgBase(orgId)}/tickets/${encodeURIComponent(ticketId)}`, fetchOpts({ headers: authedHeaders() }));
-  return (await asJson<{ ticket: Ticket }>(res, 'getSupportTicket')).ticket;
+  const out = await asJson<{ ticket: Ticket; deliveries?: Record<string, Delivery> }>(res, 'getSupportTicket');
+  return { ...out.ticket, deliveries: out.deliveries ?? {} };
 }
 
-export async function postTicketMessage(orgId: string, ticketId: string, body: string, direction: 'outbound' | 'internal'): Promise<Ticket> {
+/** Post a reply or internal note. The idempotency key makes a network retry of the
+ *  SAME send land once (the server namespaces it to the caller). */
+export async function postTicketMessage(orgId: string, ticketId: string, body: string, direction: 'outbound' | 'internal', idempotencyKey?: string): Promise<TicketDetail> {
   const res = await fetch(`${orgBase(orgId)}/tickets/${encodeURIComponent(ticketId)}/messages`, fetchOpts({
     method: 'POST', headers: { ...authedHeaders(), 'content-type': 'application/json' },
-    body: JSON.stringify({ body, direction }),
+    body: JSON.stringify({ body, direction, ...(idempotencyKey ? { idempotencyKey } : {}) }),
   }));
-  return (await asJson<{ ticket: Ticket }>(res, 'postTicketMessage')).ticket;
+  const out = await asJson<{ ticket: Ticket; deliveries?: Record<string, Delivery> }>(res, 'postTicketMessage');
+  return { ...out.ticket, deliveries: out.deliveries ?? {} };
+}
+
+/** ADR 0878 D3 — retry a `failed` / `unknown` delivery. */
+export async function retryDelivery(orgId: string, ticketId: string, messageId: string): Promise<Record<string, Delivery>> {
+  const res = await fetch(`${orgBase(orgId)}/tickets/${encodeURIComponent(ticketId)}/messages/${encodeURIComponent(messageId)}/retry`, fetchOpts({
+    method: 'POST', headers: authedHeaders(),
+  }));
+  return (await asJson<{ deliveries: Record<string, Delivery> }>(res, 'retryDelivery')).deliveries;
+}
+
+export async function setTicketPriority(orgId: string, ticketId: string, priority: Ticket['priority']): Promise<Ticket> {
+  const res = await fetch(`${orgBase(orgId)}/tickets/${encodeURIComponent(ticketId)}/priority`, fetchOpts({
+    method: 'POST', headers: { ...authedHeaders(), 'content-type': 'application/json' },
+    body: JSON.stringify({ priority }),
+  }));
+  return (await asJson<{ ticket: Ticket }>(res, 'setTicketPriority')).ticket;
+}
+
+/** Assign to a member (by subject), to yourself, or clear (`null`). */
+export async function assignTicket(orgId: string, ticketId: string, to: { subject: string } | 'self' | null): Promise<Ticket> {
+  const body = to === 'self' ? { assignToSelf: true } : to === null ? {} : { assigneeMemberId: to.subject };
+  const res = await fetch(`${orgBase(orgId)}/tickets/${encodeURIComponent(ticketId)}/assign`, fetchOpts({
+    method: 'POST', headers: { ...authedHeaders(), 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  }));
+  return (await asJson<{ ticket: Ticket }>(res, 'assignTicket')).ticket;
+}
+
+/** The org's members who can work a ticket, plus the caller's own spellings. */
+export async function listAssignees(orgId: string): Promise<{ assignees: Assignee[]; me: string[] }> {
+  const res = await fetch(`${orgBase(orgId)}/assignees`, fetchOpts({ headers: authedHeaders() }));
+  return asJson<{ assignees: Assignee[]; me: string[] }>(res, 'listAssignees');
 }
 
 export async function setTicketStatus(orgId: string, ticketId: string, status: string): Promise<Ticket> {
@@ -68,12 +123,13 @@ export async function setTicketStatus(orgId: string, ticketId: string, status: s
   return (await asJson<{ ticket: Ticket }>(res, 'setTicketStatus')).ticket;
 }
 
-export async function getIntakeConfig(orgId: string): Promise<IntakeConfig | null> {
+export async function getIntakeConfig(orgId: string): Promise<IntakeStatus> {
   const res = await fetch(`${orgBase(orgId)}/intake-config`, fetchOpts({ headers: authedHeaders() }));
-  return (await asJson<{ config: IntakeConfig | null }>(res, 'getIntakeConfig')).config;
+  const out = await asJson<Partial<IntakeStatus>>(res, 'getIntakeConfig');
+  return { configured: out.configured === true, here: out.here === true, config: out.config ?? null };
 }
 
 export async function setIntakeOrg(orgId: string): Promise<IntakeConfig> {
-  const res = await fetch(`${orgBase(orgId)}/intake-config`, fetchOpts({ method: 'PUT', headers: authedHeaders() }));
+  const res = await fetch(`${orgBase(orgId)}/intake-config`, fetchOpts({ method: 'PUT', headers: { ...authedHeaders(), 'content-type': 'application/json' }, body: '{}' }));
   return (await asJson<{ config: IntakeConfig }>(res, 'setIntakeOrg')).config;
 }

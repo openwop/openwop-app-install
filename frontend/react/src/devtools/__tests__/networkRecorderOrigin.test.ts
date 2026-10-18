@@ -1,9 +1,14 @@
 /**
- * Which traffic the recorder captures (ADR 0812). The backend is unversioned
- * (`/runs`, `/host/openwop-app/…`), so the old `path.startsWith('/v1/')` test
+ * Which traffic the recorder captures (ADR 0812; ADR 0196 Gate B). The backend is
+ * unversioned (`/runs`, `/host/openwop-app/…`), so the old `path.startsWith('/v1/')` test
  * matched nothing once v1 was withdrawn: a backend on its OWN origin was never
  * recorded. Same-origin traffic is backend traffic only behind `/api` or on
- * discovery; a third party that happens to use `/v1/` never is.
+ * discovery; a third party never is — whatever its path. That last half is a privacy
+ * guard (e.g. identitytoolkit carries Firebase ID tokens), and the ORIGIN check is its
+ * only guard for a third-party path that looks like ours (`/api/…`, `/.well-known/openwop`).
+ *
+ * Sabotage that turns it red: classifying a foreign origin as 'spa' or 'backend',
+ * dropping the backend-origin match, the discovery prefix, or the `/api/` path filter.
  */
 import { describe, it, expect, vi, beforeAll } from 'vitest';
 
@@ -36,6 +41,13 @@ describe('networkRecorder — origin and path filter', () => {
 
   it('never records a third party, /v1/ or not', async () => {
     await window.fetch('https://identitytoolkit.googleapis.com/v1/accounts:lookup');
-    expect(recorded('/v1/accounts:lookup')).toBe(false);
+    // Paths the SPA-origin path filter WOULD accept — only the origin check refuses these.
+    await window.fetch('https://identitytoolkit.googleapis.com/api/accounts');
+    await window.fetch('https://evil.example/.well-known/openwop');
+    // Positive control in this case: the recorder is live (it pushes before its await).
+    await window.fetch('http://backend.test/runs/r-3p-control');
+    expect(recorded('/runs/r-3p-control')).toBe(true);
+    const foreign = rec.listNetworkEntries().filter((e) => e.url.startsWith('https://'));
+    expect(foreign.map((e) => e.url)).toEqual([]);
   });
 });

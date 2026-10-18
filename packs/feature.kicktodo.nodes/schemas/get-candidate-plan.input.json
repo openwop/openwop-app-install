@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/feature.kicktodo.nodes/1.30.3/get-candidate-plan.input.json",
+  "$id": "https://packs.openwop.dev/feature.kicktodo.nodes/1.37.0/get-candidate-plan.input.json",
   "type": "object",
   "properties": {
     "candidateId": {

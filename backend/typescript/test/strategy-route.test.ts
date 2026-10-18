@@ -10,9 +10,20 @@
  *     the creator can
  *   - links: link a readable project (200), an unreadable project (403);
  *     context projection omits an unreadable linked entity
- *   - archive vs hard-delete: shared ⇒ archived; hard-delete shared ⇒ 400;
- *     hard-delete a user-scoped draft ⇒ 204
+ *   - archive vs hard-delete: shared ⇒ archived by default; an authorized
+ *     `?hard=true` ⇒ 204 for shared and user-scoped drafts alike
+ *
+ * Sabotage (grade-tests w19, each witnessed red): opening `canSubjectReadStrategy`
+ * (org read → true, user scope → true, workspace scope → false or → workspace:write),
+ * dropping `requireConfigAuthority` from PATCH or DELETE, dropping the link-target
+ * org check, `resolveProjectAccess` → always readable, ungating `GET /:id/context`,
+ * removing the list route's toggle check, and changing the create defaults.
  */
+interface Row { id: string }
+interface LinkedProject { id: string }
+interface LinkedPriority { cardId: string; listId: string; title?: string; rank?: number }
+interface CtxEntry { id: string; linkedProjects: LinkedProject[]; linkedPriorities: LinkedPriority[] }
+const ids = (rows: Row[]): string[] => rows.map((x) => x.id);
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { bootPlanningApp, makeClient, enableToggle, uniqEmail, type Client } from './planningHarness.js';
@@ -55,9 +66,12 @@ describe('strategy — toggle gating', () => {
   it('404s every route when the toggle is off, 200 once on', async () => {
     const { owner, orgId } = await ownerWithOrg(freshTenant());
     await enable('off');
-    expect((await owner.get(S)).status).toBe(404);
-    expect((await owner.post(S, { orgId, title: 'X' })).status).toBe(404);
-    await enable('on');
+    try {
+      expect((await owner.get(S)).status).toBe(404);
+      expect((await owner.post(S, { orgId, title: 'X' })).status).toBe(404);
+    } finally {
+      await enable('on'); // the toggle is process-global — never leave it off for later cases
+    }
     expect((await owner.get(S)).status).toBe(200);
   });
 });
@@ -77,14 +91,21 @@ describe('strategy — CRUD + defaults', () => {
     expect(got.body.title).toBe('North Star');
 
     const list = await owner.get(S);
-    expect(list.body.strategies.map((x: any) => x.id)).toContain(created.body.id);
+    expect(ids(list.body.strategies)).toContain(created.body.id);
   });
 
   it('rejects an unknown scope/horizon with validation_error', async () => {
     const { owner, orgId } = await ownerWithOrg(freshTenant());
-    expect((await owner.post(S, { orgId, title: 'Bad', scope: 'galaxy' })).status).toBe(400);
-    expect((await owner.post(S, { orgId, title: 'Bad', planningHorizon: 'fortnight' })).status).toBe(400);
-    expect((await owner.post(S, { orgId, title: '' })).status).toBe(400);
+    for (const [body, field] of [
+      [{ orgId, title: 'Bad', scope: 'galaxy' }, 'scope'],
+      [{ orgId, title: 'Bad', planningHorizon: 'fortnight' }, 'planningHorizon'],
+      [{ orgId, title: '' }, 'title'],
+    ] as const) {
+      const r = await owner.post(S, body);
+      expect(r.status, field).toBe(400);
+      expect(r.body.error, field).toBe('validation_error');
+      expect(r.body.details?.field, 'the 400 names the field it rejected').toBe(field);
+    }
   });
 });
 
@@ -99,7 +120,7 @@ describe('strategy — cross-org IDOR', () => {
 
     const sB = (await owner.post(S, { orgId: orgB, title: 'B-only', scope: 'org' })).body;
     expect((await member.get(`${S}/${sB.id}`)).status).toBe(404);
-    expect((await member.get(S)).body.strategies.map((x: any) => x.id)).not.toContain(sB.id);
+    expect(ids((await member.get(S)).body.strategies)).not.toContain(sB.id);
     // The tenant owner (scope in every org) can.
     expect((await owner.get(`${S}/${sB.id}`)).status).toBe(200);
   });
@@ -141,6 +162,10 @@ describe('strategy — config authority + archive/delete', () => {
     // editor may NOT flip scope (config authority) or archive
     expect((await member.patch(`${S}/${s.id}`, { scope: 'workspace' })).status).toBe(403);
     expect((await member.del(`${S}/${s.id}`)).status).toBe(403);
+    // …and the refused writes changed nothing (a handler that 403s AFTER writing must red)
+    const after = (await owner.get(`${S}/${s.id}`)).body;
+    expect(after.scope).toBe('org');
+    expect(after.status).not.toBe('archived');
     // creator/owner can
     expect((await owner.patch(`${S}/${s.id}`, { scope: 'workspace' })).body.scope).toBe('workspace');
   });
@@ -152,8 +177,8 @@ describe('strategy — config authority + archive/delete', () => {
     expect(archived.status).toBe(200);
     expect(archived.body.status).toBe('archived');
     // archived rows drop out of the default index but remain fetchable
-    expect((await owner.get(S)).body.strategies.map((x: any) => x.id)).not.toContain(shared.id);
-    expect((await owner.get(`${S}?includeArchived=true`)).body.strategies.map((x: any) => x.id)).toContain(shared.id);
+    expect(ids((await owner.get(S)).body.strategies)).not.toContain(shared.id);
+    expect(ids((await owner.get(`${S}?includeArchived=true`)).body.strategies)).toContain(shared.id);
     // hard-delete IS permitted for a shared strategy by a config-authority caller
     // (creator / org admin); soft-archive is just the no-`hard` default.
     expect((await owner.del(`${S}/${shared.id}?hard=true`)).status).toBe(204);
@@ -185,19 +210,21 @@ describe('strategy — links + context projection', () => {
     expect(linked.body.links).toHaveLength(1);
     // linking project B (unreadable to the member) → 403
     expect((await member.put(`${S}/${s.id}/links`, { links: [{ kind: 'project', projectId: projB.id }] })).status).toBe(403);
+    // the refused PUT left the links as they were
+    expect(((await member.get(`${S}/${s.id}`)).body.links as Array<{ projectId?: string }>).map((l) => l.projectId)).toEqual([projA.id]);
 
     // context for project A includes the strategy + the linked project
     const ctx = await member.get(`${S}/context?projectId=${projA.id}`);
     expect(ctx.status, JSON.stringify(ctx.body)).toBe(200);
     expect(ctx.body.strategies).toHaveLength(1);
-    expect(ctx.body.strategies[0].linkedProjects.map((p: any) => p.id)).toContain(projA.id);
+    expect(ids((ctx.body.strategies as CtxEntry[])[0]!.linkedProjects)).toContain(projA.id);
 
     // owner cross-links project B onto the same strategy; the member's context omits it
     expect((await owner.put(`${S}/${s.id}/links`, { links: [{ kind: 'project', projectId: projA.id }, { kind: 'project', projectId: projB.id }] })).status).toBe(200);
     const ctx2 = await member.get(`${S}/context?projectId=${projA.id}`);
-    const ids = ctx2.body.strategies[0].linkedProjects.map((p: any) => p.id);
-    expect(ids).toContain(projA.id);
-    expect(ids).not.toContain(projB.id); // unreadable → silently omitted
+    const linkedIds = ids((ctx2.body.strategies as CtxEntry[])[0]!.linkedProjects);
+    expect(linkedIds).toContain(projA.id);
+    expect(linkedIds).not.toContain(projB.id); // unreadable → silently omitted
   });
 
   it('a priority-idea link surfaces in GET /strategy/context?priorityListId (Phase 3 contract)', async () => {
@@ -217,13 +244,13 @@ describe('strategy — links + context projection', () => {
     // context by list → the strategy, with the idea under linkedPriorities
     const byList = await owner.get(`${S}/context?priorityListId=${encodeURIComponent(list.id)}`);
     expect(byList.status, JSON.stringify(byList.body)).toBe(200);
-    expect(byList.body.strategies.map((x: any) => x.id)).toContain(s.id);
-    const entry = byList.body.strategies.find((x: any) => x.id === s.id);
-    expect(entry.linkedPriorities.some((lp: any) => lp.cardId === cardId && lp.listId === list.id)).toBe(true);
+    expect(ids(byList.body.strategies)).toContain(s.id);
+    const entry = (byList.body.strategies as CtxEntry[]).find((x) => x.id === s.id)!;
+    expect(entry.linkedPriorities.some((lp) => lp.cardId === cardId && lp.listId === list.id)).toBe(true);
 
     // context by idea → same strategy
     const byIdea = await owner.get(`${S}/context?priorityListId=${encodeURIComponent(list.id)}&cardId=${encodeURIComponent(cardId)}`);
-    expect(byIdea.body.strategies.map((x: any) => x.id)).toContain(s.id);
+    expect(ids(byIdea.body.strategies)).toContain(s.id);
   });
 
   it('a private linked project (ADR 0054) is NOT leaked in context to a non-member org reader', async () => {
@@ -245,14 +272,17 @@ describe('strategy — links + context projection', () => {
 
     // the owner (project creator/writer) sees the project in context
     const ownerCtx = await owner.get(`${S}/context?projectId=${proj.id}`);
-    expect(ownerCtx.body.strategies[0].linkedProjects.map((p: any) => p.id)).toContain(proj.id);
+    expect(ids((ownerCtx.body.strategies as CtxEntry[])[0]!.linkedProjects)).toContain(proj.id);
 
     // the reader can read the workspace-scoped strategy, but the private project
     // (member-scoped) MUST be omitted from its linkedProjects — no name/health leak
     const readerCtx = await reader.get(`${S}/context?projectId=${proj.id}`);
     expect(readerCtx.status).toBe(200);
-    const entry = readerCtx.body.strategies.find((x: any) => x.id === s.id);
-    if (entry) expect(entry.linkedProjects.map((p: any) => p.id)).not.toContain(proj.id);
+    const entry = (readerCtx.body.strategies as CtxEntry[]).find((x) => x.id === s.id);
+    // POSITIVE CONTROL: the viewer (workspace:read) MUST see the workspace-scoped strategy —
+    // without it the no-leak check below never runs (it used to sit inside `if (entry)`).
+    expect(entry, 'the viewer must read the workspace-scoped strategy').toBeTruthy();
+    expect(ids(entry!.linkedProjects)).not.toContain(proj.id);
   });
 });
 
@@ -282,10 +312,10 @@ describe('strategy — GET /:id/context (strategy-gap A3)', () => {
     expect(ctx.status, JSON.stringify(ctx.body)).toBe(200);
     expect(ctx.body.strategy.id).toBe(s.id);
     expect(ctx.body.strategy.objectives[0].keyResults[0].title).toBe('ARR 10M');
-    const lp = ctx.body.strategy.linkedPriorities.find((x: any) => x.cardId === cardId);
+    const lp = (ctx.body.strategy as CtxEntry).linkedPriorities.find((x) => x.cardId === cardId);
     expect(lp?.title).toBe('Expand to EU');
     expect(lp?.rank).toBe(1); // resolved via listRankedIdeas — the score/rank the detail page renders
-    expect(ctx.body.strategy.linkedProjects.map((p: any) => p.id)).toContain(proj.id);
+    expect(ids((ctx.body.strategy as CtxEntry).linkedProjects)).toContain(proj.id);
   });
 
   it('is read-gated with a uniform 404 (no existence leak) like GET /:id', async () => {

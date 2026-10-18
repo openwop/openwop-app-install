@@ -11,8 +11,8 @@
  * fontkit, honoring OS/2 fsSelection USE_TYPO_METRICS (both faces set it;
  * typo == hhea for both). Per CSS Fonts 5 the overrides apply BEFORE
  * size-adjust, so each value = metric/upem ÷ size-adjust:
- *   Geist            upem 1000, asc 1005, desc 295, gap 0 → ÷1.06
- *   Instrument Serif upem 1000, asc  990, desc 310, gap 0 → ÷0.95
+ *   Geist               upem 1000, asc 1005, desc 295, gap 0 → ÷1.06
+ *   Bricolage Grotesque upem 1000, asc  930, desc 270, gap 0 → ÷0.99
  * Pinned by scripts/__tests__/fontMetrics.test.ts — re-subsetting the fonts
  * or editing these numbers without re-measuring turns that test red.
  * `size-adjust` itself remains a tuned approximation: its correct value is a
@@ -26,12 +26,15 @@
   descent-override: 27.83%;
   line-gap-override: 0%;
 }
+/* The display face is set at --weight-display (600), so its fallback is Arial
+ * BOLD: at that weight Bricolage's average advance (0.50 em at heading optical
+ * sizes) is within 1% of Arial Bold's (0.505 em), hence size-adjust 99%. */
 @font-face {
-  font-family: 'Instrument Serif Fallback';
-  src: local('Times New Roman'), local('Georgia');
-  size-adjust: 95%;
-  ascent-override: 104.21%;
-  descent-override: 32.63%;
+  font-family: 'Bricolage Grotesque Fallback';
+  src: local('Arial Bold'), local('Arial-BoldMT'), local('Arial');
+  size-adjust: 99%;
+  ascent-override: 93.94%;
+  descent-override: 27.27%;
   line-gap-override: 0%;
 }
 
@@ -139,7 +142,11 @@
    * §5.5 rule 4: lighter than a shadow, never competes with paper). */
   --surface-hi:   rgb(255 255 255 / 0.55);
 
-  --serif: "Instrument Serif", "Instrument Serif Fallback", "Times New Roman", serif;
+  /* `--serif` is the DISPLAY role (headings, greetings, figures), named for its
+   * history: operators override it by this name (brand.css, Appearance). Since
+   * ADR 0883 the stock face is the grotesk Bricolage Grotesque, replacing
+   * Instrument Serif, whose hairlines read as fragile on screen. */
+  --serif: "Bricolage Grotesque", "Bricolage Grotesque Fallback", ui-sans-serif, system-ui, sans-serif;
   --sans:  "Geist", "Geist Fallback", ui-sans-serif, system-ui, sans-serif;
   --mono:  "Geist Mono", ui-monospace, "SF Mono", Menlo, monospace;
 
@@ -160,6 +167,9 @@
   --weight-emphasis: 500;
   --weight-head: 600;
   --weight-marquee: 700;
+  /* The display role's weight (ADR 0883). Every `--serif` heading/figure rule
+   * uses it; the old face had ONE weight, so those rules said 400. */
+  --weight-display: 600;
 
   /* Leading — heads tight, UI body a hair tighter than the old generic 1.5,
    * prose looser. */

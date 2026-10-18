@@ -12,7 +12,7 @@
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { createAgentToolProvider, builtinAgentToolIds } from '../src/host/agentToolProvider.js';
 import { getChainBackedWorkflow } from '../src/host/chainBackedWorkflows.js';
@@ -63,6 +63,7 @@ beforeAll(async () => {
   enrollmentId = enrollment.id;
 });
 
+afterEach(() => { __clearCalendarTransport(); });
 afterAll(async () => { __clearCalendarTransport(); await new Promise<void>((res) => server.close(() => res())); });
 
 describe('G5(b) — the calendar-write lane is now ignitable', () => {
@@ -88,10 +89,14 @@ describe('G5(a) — openwop:kicktodo.integrations-status read tool', () => {
   });
 
   it('is honest-empty when the toggle is off', async () => {
-    await setIntegrations('off');
-    const out = await status({ actingUserId: OWNER });
-    expect(JSON.parse(out.content)).toMatchObject({ enabled: false, consents: [], wearableLinks: [] });
-    await setIntegrations('on');
+    await grantConsent(TENANT, OWNER, 'wearable-evidence'); // real state exists to hide
+    try {
+      await setIntegrations('off');
+      const out = await status({ actingUserId: OWNER });
+      expect(JSON.parse(out.content)).toMatchObject({ enabled: false, consents: [], wearableLinks: [] });
+    } finally {
+      await setIntegrations('on');
+    }
   });
 
   it("reports the acting user's OWN consents, wearable links, and transport readiness", async () => {
@@ -116,6 +121,12 @@ describe('G5(a) — openwop:kicktodo.integrations-status read tool', () => {
   });
 
   it('never leaks ANOTHER subject: the acting user sees only their own (empty) state', async () => {
+    // OWNER's state exists in this tenant regardless of case order (idempotent puts),
+    // so an over-reaching read would surface it to OTHER.
+    await setIntegrations('on');
+    await grantConsent(TENANT, OWNER, 'calendar-write');
+    await grantConsent(TENANT, OWNER, 'wearable-evidence');
+    await linkWearableProvider(TENANT, OWNER, 'fitbit', 'fitbit-user-1');
     const out = await status({ actingUserId: OTHER });
     const body = JSON.parse(out.content) as { consents: { consented: boolean }[]; wearableLinks: unknown[] };
     expect(body.consents.every((c) => c.consented === false)).toBe(true);
@@ -141,12 +152,13 @@ describe('G5(a) — calendar-sync schedule binding is opt-in and multiply gated'
   });
 
   it('with consent but NO transport, arming fails closed (lane ships gated-off)', async () => {
-    // OWNER already granted calendar-write above; no transport is registered.
+    await grantConsent(TENANT, OWNER, 'calendar-write'); // own precondition (shuffle-safe)
     __clearCalendarTransport();
     await expect(setCalendarSyncEnabled(TENANT, enrollmentId, OWNER, true)).rejects.toBeInstanceOf(CalendarUnavailableError);
   });
 
   it('with consent AND a transport, arming registers the per-enrollment daily job; disable flips it off', async () => {
+    await grantConsent(TENANT, OWNER, 'calendar-write'); // own precondition (shuffle-safe)
     registerCalendarTransport({ upsert: async () => {}, remove: async () => {} });
     expect(await setCalendarSyncEnabled(TENANT, enrollmentId, OWNER, true)).toBe(true);
 
@@ -159,6 +171,5 @@ describe('G5(a) — calendar-sync schedule binding is opt-in and multiply gated'
     expect(await setCalendarSyncEnabled(TENANT, enrollmentId, OWNER, false)).toBe(true);
     const disabled = (await listJobs(TENANT)).find((j) => j.jobId === jobId);
     expect(disabled?.enabled).toBe(false);
-    __clearCalendarTransport();
   });
 });

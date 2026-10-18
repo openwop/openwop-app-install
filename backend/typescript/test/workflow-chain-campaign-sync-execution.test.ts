@@ -1,64 +1,33 @@
 /**
- * campaign-sync workflow-chain pack — REAL execution (RFC 0013, ADR 0159/
- * 0220, campaign gap plan C2/C7).
+ * campaign-sync workflow-chain pack — REAL execution (RFC 0013, ADR 0159/0220,
+ * campaign gap plan C2/C7).
  *
- * Unlike every other pack in this session's assignment, NEITHER chain in
- * this pack touches `core.ai.chatCompletion` or any other AI node —
- * `feature.campaign-connectors.nodes.sync` and
- * `feature.campaign-intel.nodes.pacing-check` are both pure `ctx.features`
- * reads/writes over real data. Both chains therefore run through the REAL
- * executor to a genuine `completed` state — no honest-failure mode needed,
- * no mini-scheduler needed.
+ * Neither chain uses an AI node: `feature.campaign-connectors.nodes.sync` and
+ * `feature.campaign-intel.nodes.pacing-check` are `ctx.features` / `ctx.ads`
+ * reads and writes over real data, so both run through the REAL executor to a
+ * genuine `completed`.
  *
- * CHAINS CHOSEN: both of the pack's two chains, since each proves a
- * distinctly real, side-effectful outcome:
+ * 1. `campaign-sync.daily-metrics` — a fresh org has no dispatched campaign, so
+ *    `sync` reads the REAL (empty) `ctx.ads.listDispatches()` ledger and returns
+ *    the honest `outcome: 'no_dispatches'` (the HTTP-route twin is pinned in
+ *    `campaign-sync.test.ts`). `notify` (the in-app notifications node) then
+ *    delivers to the tenant: `emitted: true, audience: 'tenant'`. Its `title`
+ *    rides the node's declared `inputs`, which reach `ctx.inputs` through ADR
+ *    0237 / CHAINX-5 (an earlier header said declared inputs were stripped and
+ *    that `notify` degraded to `sent:false` — both stale, corrected w31).
+ * 2. `campaign-sync.pacing-check` — seeds a REAL campaign (a $100-budget brief
+ *    finalized via `POST …/campaign-orchestration/finalize`) and REAL spend ($150
+ *    via the CSV import route). `pace` reads both and reports `spentPct: 150`,
+ *    `band: 'over'`, and alerts once for that campaign.
  *
- * 1. `campaign-sync.daily-metrics` — with NO campaign ever dispatched to
- *    the platform in this fresh org, `sync` reads the REAL (empty)
- *    `ctx.ads.listDispatches()` ledger and returns the honest, graceful
- *    `outcome: 'no_dispatches'` (never a crash, never a fabricated
- *    "synced" result) — the documented contract
- *    `campaign-sync.test.ts`'s `ADR 0215 — sync route` describe block
- *    already pins at the HTTP-route layer; this test pins the SAME
- *    contract at the chain/executor layer. `notify` then runs for real
- *    too and gracefully degrades (`sent: false, error:
- *    'notification_not_connected'`) since no Expo push connection is
- *    configured — the same graceful-degrade shape
- *    `workflow-chain-exec-ops-execution.test.ts` documents for
- *    `calendar`/`finance` connectors.
+ * Sabotage: a non-empty dispatch ledger reds case 1's `no_dispatches`; refusing
+ * the notify title reds `emitted:true`; moving the `over` threshold above 150 %
+ * or failing the campaignId match in `buildPacing` reds case 2.
+ * The 25 ms × 80 run-settle poll is an honest ceiling (no settle hook).
  *
- * 2. `campaign-sync.pacing-check` — seeds a REAL campaign (a Campaign
- *    Brief with a $100 budget, finalized into a MarketingCampaign via
- *    `POST .../campaign-orchestration/finalize`) and REAL performance data
- *    exceeding that budget (a CSV import of $150 spend via
- *    `POST .../campaign-connectors/import` — no fake ad-platform server
- *    needed; the CSV-import path is itself a first-class, real ingestion
- *    route). The chain's `pace` node reads BOTH the real campaign (via
- *    `campaign-orchestration.listCampaigns`) and the real performance
- *    store (via `campaign-connectors.listRecords`) and correctly computes
- *    `spentPct: 150`, `band: 'over'`, and raises a real alert — proving
- *    the cross-feature READ + the escalation-alert logic against genuine
- *    seeded data end to end, not a structural/expansion-only check.
- *
- * NO BUGS FOUND in this pack: `sync`'s inputs (`orgId`, `platform`) and
- * `pace`'s input (`orgId`) are wired via the node's DAG-level `inputs`
- * field with `{{params.*}}` templates — per the discovery documented in
- * the content-pack execution test, a node's static `inputs` field is
- * STRIPPED at `expandChain`/`validateWorkflowDefinition` time and never
- * reaches `ctx.inputs`. But both `sync` and `pace` are SOURCE nodes (no
- * incoming edge in either chain), so the real executor's
- * `buildNodeInputs` + the single-key "Back-compat" unwrap
- * (`executor/executor.ts`) hands them `ctx.inputs` = the run's raw
- * top-level `inputs` payload directly — and since the chain's declared
- * parameter names (`orgId`, `platform`) are EXACTLY the keys these two
- * node implementations read (`packs/feature.campaign-connectors.nodes` /
- * `packs/feature.campaign-intel.nodes`, `const i = ctx.inputs ?? {}`),
- * the values arrive correctly by construction — no fix needed (this is
- * the SAME lucky-naming-match that makes `commerce.post-purchase-
- * thankyou`'s `order` node and `exec-ops`'s `pipeline`/`tasks` nodes work,
- * and the SAME class of defect `research.web-brief`'s `search` node had
- * when its param was misnamed `question` instead of `query` — see that
- * pack's execution test).
+ * Product note (grade-code, w31): the chain `sync` node re-implements
+ * `runMetricsSync`, so the chain path has no cooldown claim, campaign link or
+ * CONN-1 platform date — this file pins only the no_dispatches contract.
  */
 
 import http from 'node:http';
@@ -89,7 +58,15 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T }
+/** The union of response-body fields this file reads (each route returns a subset). */
+interface Body {
+  runId?: string; orgId?: string; status?: string; imported?: number;
+  brief?: { id: string };
+  campaign?: { id: string; name: string };
+  events?: BundleEvent[];
+  error?: { code: string; message: string };
+}
+interface Res { status: number; body: Body }
 interface Client { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res> }
 function client(): Client {
   let cookie = '';
@@ -101,7 +78,7 @@ function client(): Client {
     });
     const sc = getSetCookies(res.headers);
     for (const c of sc as string[]) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    const out = (res.status === 204 ? {} : await res.json().catch(() => ({}))) as Body;
     return { status: res.status, body: out };
   };
   return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b) };
@@ -115,7 +92,7 @@ async function ownerOrg(): Promise<{ owner: Client; orgId: string; tenantId: str
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
-  return { owner, orgId: org.body.orgId, tenantId };
+  return { owner, orgId: org.body.orgId as string, tenantId };
 }
 
 interface RunSnapshot { status: string; error?: { code: string; message: string } }
@@ -180,7 +157,7 @@ describe('campaign-sync.pacing-check — real executor, real over-budget alert',
       orgId, name: 'Summer Sale', budget: { totalMinor: 10000, currency: 'USD' },
     });
     expect(brief.status, JSON.stringify(brief.body)).toBe(201);
-    const briefId = brief.body.brief.id as string;
+    const briefId = brief.body.brief?.id as string;
     // ORCH-1: finalize requires an approved messaging kernel.
     await setKernel(tenantId, briefId, {
       headline: 'H', supportingStatement: 'S', proofPoints: ['p'], primaryCta: 'go', secondaryCta: 'see',
@@ -188,8 +165,8 @@ describe('campaign-sync.pacing-check — real executor, real over-budget alert',
     });
     const finalize = await owner.post('/host/openwop-app/campaign-orchestration/finalize', { briefId });
     expect(finalize.status, JSON.stringify(finalize.body)).toBe(201);
-    const campaignId = finalize.body.campaign.id as string;
-    const campaignName = finalize.body.campaign.name as string;
+    const campaignId = finalize.body.campaign?.id as string;
+    const campaignName = finalize.body.campaign?.name as string;
 
     // Real performance data — $150 spend against the $100 plan (over budget).
     const yesterday = new Date(Date.now() - 86_400_000).toISOString().slice(0, 10);

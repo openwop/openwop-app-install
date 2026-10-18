@@ -36,6 +36,7 @@
  * it here (tracked follow-up).
  */
 
+import { maybeCaptureExecuteTool } from './evals/toolBoundary.js';
 import { createAiProvidersAdapter, providerSupportsToolCalling, AiProviderError, CREDENTIAL_PROVIDERS } from '../aiProviders/aiProvidersHost.js';
 import { explicitRefNamesOtherProvider } from '../aiProviders/credentialRefLadder.js';
 import { createScopedAgentToolProvider, builtinAgentToolIds } from './agentToolProvider.js';
@@ -557,6 +558,8 @@ export async function runConversationAgentToolTurn(params: AgentToolTurnParams):
   // run-start freeze and stays replay-safe. Never re-resolved here: a live
   // toggle read at turn time is exactly what the freeze exists to prevent.
   const compaction = readCompactionDecision(run.metadata);
+  // ADR 0889 D9 — opt-in tool-boundary capture for eval cases (off ⇒ the same executor).
+  const chatExecuteTool = await maybeCaptureExecuteTool(toolProvider.executeTool, { tenantId: run.tenantId, runId, agentId: agent.agentId, segment: nodeId, lane: 'chat' });
 
   const runOnce = (model: string) => runChatToolLoop(
     {
@@ -576,7 +579,7 @@ export async function runConversationAgentToolTurn(params: AgentToolTurnParams):
       firewall, // decisions are logged by the hook itself (ADR 0834 D1)
       ...(onEvent ? { onEvent } : {}),
     },
-    { callAIWithTools, executeTool: toolProvider.executeTool },
+    { callAIWithTools, executeTool: chatExecuteTool },
   );
   // A class-bumped model that can't serve this key (429 quota / 404 preview
   // access) degrades to the tenant's own selection instead of failing the turn.

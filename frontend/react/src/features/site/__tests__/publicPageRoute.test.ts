@@ -32,6 +32,9 @@ describe('matchPublicPageSlug', () => {
   });
 
   it('returns null for the bare /p and /p/ paths', () => {
+    // DOUBLE GUARD (/grade-tests w50): an empty segment is refused by the
+    // capture's `+` AND by the decoded-slug shape, so dropping either alone is
+    // a no-op (probe w50g2-pp-bare); dropping both reds (w50g2-pp-bare-both-r2).
     expect(matchPublicPageSlug('/p')).toBeNull();
     expect(matchPublicPageSlug('/p/')).toBeNull();
   });

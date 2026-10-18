@@ -112,3 +112,20 @@ describe('claim-extract — fail-closed guarantees', () => {
     expect((out.error as { code: string }).code).toBe('capability_missing');
   });
 });
+
+// XCH-CE-1 — a source cut to the read window is DISCLOSED: to the model in the
+// prompt, and to the dossier as `truncatedSourceHashes`.
+describe('claim-extract — truncation is disclosed, never silent', () => {
+  it('marks a cut source in the prompt and reports its hash', async () => {
+    const SHORT = { hash: 'h2', title: 'Short note', url: 'https://b.example/short' };
+    const longPage = { ...PAGE, extractedText: `${PAGE.extractedText} ${'filler '.repeat(2000)}` };
+    const shortPage = { url: SHORT.url, extractedText: 'Short and complete.', status: 200 };
+    const ok = { claims: [{ claimId: 'c-1', text: 'A daily walk improved mood.', sourceHashes: ['h1'] }] };
+    const { ctx, calls } = ctxWith([ok], { sources: [SOURCE, SHORT], pages: [longPage, shortPage] });
+    const out = await claimExtract(ctx);
+    expect(out.status).toBe('success');
+    const prompt = JSON.stringify(calls[0]);
+    expect(prompt).toContain('CONTENT (TRUNCATED — the first 6000 of');
+    expect((out.outputs as { truncatedSourceHashes: string[] }).truncatedSourceHashes).toEqual(['h1']);
+  });
+});

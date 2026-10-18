@@ -31,7 +31,11 @@ const CLASSIFIED: Record<string, 'MODEL_FACING' | 'PROGRAMMATIC'> = {
   // Passes the provider INTO runChatToolLoop; never builds a model message.
   'host/conversationToolLoop.ts': 'PROGRAMMATIC',
   'host/agentRunnerNode.ts': 'PROGRAMMATIC',
-  'routes/agents.ts': 'PROGRAMMATIC',
+  // ADR 0889 D3 — the ad-hoc dispatch lane (moved from routes/agents.ts).
+  'host/liveDispatchLane.ts': 'PROGRAMMATIC',
+  // ADR 0889 D9 — wraps the executor to record the boundary; returns the inner
+  // result unchanged to the loop, which fences it.
+  'host/evals/toolBoundary.ts': 'PROGRAMMATIC',
   // Prose only (comments referencing the seam).
   'features/destination-sync/agentTools.ts': 'PROGRAMMATIC',
   'features/voice/realtime/delegation.ts': 'PROGRAMMATIC',

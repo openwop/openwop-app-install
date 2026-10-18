@@ -164,6 +164,12 @@ export interface PendingAction {
   draft: string;
   status: PendingActionStatus;
   sourceCommitmentId?: string;
+  /** ADR 0878 D6 — the org this action belongs to, when it is one org's business
+   *  (a `servicedesk.reply` carries its TICKET's org). Stamped at enqueue,
+   *  immutable after. Absent ⇒ a tenant-scoped action, exactly as before. For a
+   *  `servicedesk.reply` the AUTHORITATIVE org is still re-read from the ticket
+   *  at decide and execute time (rows from before this field carry none). */
+  orgId?: string;
   createdBy: 'assistant';
   approvedByUserId?: string;
   createdAt: string;
@@ -837,6 +843,7 @@ export async function enqueuePendingAction(
     sourceRefs?: SourceRef[];
     recipientDiff?: { before: string[]; after: string[] };
     derivedFromUntrusted?: boolean;
+    orgId?: string;
   },
 ): Promise<PendingAction> {
   const ts = now();
@@ -856,6 +863,7 @@ export async function enqueuePendingAction(
     createdAt: ts,
     updatedAt: ts,
     ...(input.sourceCommitmentId !== undefined ? { sourceCommitmentId: input.sourceCommitmentId } : {}),
+    ...(input.orgId ? { orgId: input.orgId } : {}),
     ...(input.riskLevel !== undefined ? { riskLevel: input.riskLevel } : {}),
     ...(input.requiredScopes !== undefined ? { requiredScopes: input.requiredScopes } : {}),
     ...(input.reason !== undefined ? { reason: input.reason } : {}),
@@ -928,7 +936,10 @@ export async function editPendingAction(
       updatedAt: ts,
       editedAt: ts,
       ...(patch.draft !== undefined ? { draft: patch.draft } : {}),
-      ...(patch.payload !== undefined ? { payload: patch.payload } : {}),
+      // ADR 0878 D6 — a support reply's payload names the TICKET it answers. An edit
+      // that re-pointed it at another org's ticket and was then approved would
+      // append (and deliver) there; the draft text is editable, its target is not.
+      ...(patch.payload !== undefined && existing.kind !== 'servicedesk.reply' ? { payload: patch.payload } : {}),
       ...(patch.recipientDiff !== undefined ? { recipientDiff: patch.recipientDiff } : {}),
       ...(patch.editedByUserId !== undefined ? { editedByUserId: patch.editedByUserId } : {}),
     };

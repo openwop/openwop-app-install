@@ -31,6 +31,10 @@ import { quoteTaxAndShipping } from './taxShipping.js';
 import { validateProductCustomFields, __clearProductFieldDefs } from './productFields.js';
 import { recordEvent } from '../analytics/analyticsService.js';
 import { registerKvAgeOut } from '../../host/kvAgeOut.js';
+import { isAnonTenantId } from '../../host/requestSubject.js';
+import { resolveSecret } from '../../byok/secretResolver.js';
+import { STRIPE_KEY_REF } from '../billing/billingService.js';
+import type { OrderSettlementStamp } from '../commerce-connect/storefrontSettlement.js';
 
 export { recordCommerceAction } from './telemetry.js';
 
@@ -93,6 +97,9 @@ function cleanParcel(weightRaw: unknown, dimsRaw: unknown): { weightGrams?: numb
   }
   return out;
 }
+
+/** ADR 0875 D7 — the largest whole quantity one order or quote line may carry. */
+export const MAX_LINE_QUANTITY = 10_000;
 
 function assertCap(count: number, label: string): void {
   if (count >= MAX.perOrg) throw new OpenwopError('validation_error', `This org has the maximum ${MAX.perOrg} ${label}.`, 409, { max: MAX.perOrg });
@@ -208,10 +215,13 @@ async function assertCommerceGate(input: {
 /** C3 — the quote SEND gate: the negotiation-side commitment moment. Rides the
  *  ONE assertCommerceGate machinery (order threshold), keyed per (quote, version)
  *  so a revised quote re-gates. */
-export async function assertQuoteSendGate(q: { tenantId: string; orgId: string; quoteId: string; version: number; total: number; currency: string }): Promise<void> {
+export async function assertQuoteSendGate(q: { tenantId: string; orgId: string; quoteId: string; version: number; total: number; currency: string; lines?: readonly { productId: string; quantity: number; unitPrice: number }[] }): Promise<void> {
+  // ADR 0875 D8 — the key binds the CONTENT, not just the version: revising a draft
+  // does not bump `version`, so a `v1` key let an approval for T send the quote at 10T.
+  const content = createHash('sha256').update(JSON.stringify([q.total, q.currency, (q.lines ?? []).map((l) => [l.productId, l.quantity, l.unitPrice])])).digest('hex').slice(0, 16);
   await assertCommerceGate({
     tenantId: q.tenantId, orgId: q.orgId, kind: 'order',
-    gateKey: `commerce-quote-send:${q.quoteId}:v${q.version}`,
+    gateKey: `commerce-quote-send:${q.quoteId}:v${q.version}:${content}`,
     totalMajor: q.total, currency: q.currency,
     proposal: `Send quote (v${q.version}) — ${q.total} ${q.currency}`,
   });
@@ -467,7 +477,7 @@ export async function createProduct(input: { tenantId: string; orgId: string; cr
     productId: `prod:${randomUUID()}`, tenantId: input.tenantId, orgId: input.orgId,
     type, name: cleanStr(input.name, MAX.name, 'Untitled product'),
     ...(optStr(input.description, MAX.desc) ? { description: optStr(input.description, MAX.desc) } : {}),
-    price: nonNeg(input.price) ?? 0, currency: currencyOf(input.currency),
+    price: quantizeMoney(nonNeg(input.price) ?? 0, currencyOf(input.currency)), currency: currencyOf(input.currency), // ADR 0875 D7
     ...(nonNeg(input.cost) !== undefined ? { cost: nonNeg(input.cost) } : {}),
     imageAssetTokens: cleanTokens(input.imageAssetTokens),
     downloadAssetTokens: type === 'digital' ? cleanTokens(input.downloadAssetTokens) : [],
@@ -495,7 +505,7 @@ export async function updateProduct(tenantId: string, orgId: string, productId: 
   const next: Product = { ...p, updatedAt: nowIso() };
   if (patch.name !== undefined) next.name = cleanStr(patch.name, MAX.name, p.name);
   if (patch.description !== undefined) { if (patch.description === null) delete next.description; else next.description = optStr(patch.description, MAX.desc); }
-  if (nonNeg(patch.price) !== undefined) next.price = nonNeg(patch.price)!;
+  if (nonNeg(patch.price) !== undefined) next.price = quantizeMoney(nonNeg(patch.price)!, patch.currency !== undefined ? currencyOf(patch.currency) : next.currency); // ADR 0875 D7
   if (patch.cost !== undefined) { if (patch.cost === null) delete next.cost; else if (nonNeg(patch.cost) !== undefined) next.cost = nonNeg(patch.cost); }
   if (patch.kind !== undefined) { if (patch.kind === 'bundle') { next.kind = 'bundle'; next.components = cleanComponents(patch.components ?? p.components); } else { delete next.kind; delete next.components; } }
   else if (patch.components !== undefined && next.kind === 'bundle') next.components = cleanComponents(patch.components);
@@ -620,6 +630,15 @@ export interface Order {
   pmSaveRequested?: true;
   status: OrderStatus; fulfillmentStatus: FulfillmentStatus;
   paymentIntentId?: string;          // externally-supplied (demo-mode); no capture fn
+  /** ADR 0875 — when the pending→paid CAS landed (the one-click window runs from here; `updatedAt` moves on every later edit). */
+  paidAt?: string;
+  /** ADR 0877 M5 — the settlement lane this order was opened on (platform account,
+   *  the tenant's Connect account, or demo). Read to decide what a later step on
+   *  the SAME purchase may do (a one-click child must ride its parent's lane; an
+   *  offline payment is accepted only on a demo-lane order). Never a money-routing
+   *  input: refunds read the destination from the Stripe intent. Absent ⇒ a
+   *  pre-0877 row (every live one of those was the platform lane). */
+  settlement?: OrderSettlementStamp;
   refundId?: string;                 // D4 — the Stripe refund id, on the order (grade-code B3)
   /** R2 CM-P2-B3 — WHICH lane refunded. `'none'` = the state was flipped but NO money
    *  was returned (a demo/manual order, or a caller that resolved no Stripe key). This
@@ -861,8 +880,12 @@ export async function deleteOrder(tenantId: string, orgId: string, orderId: stri
  *  when the tenant sets `commerce.orderApprovalThresholdMinor`, an at/over-threshold
  *  agent order parks a `commerce-spend` approval instead of creating (B3). Operator
  *  data-entry through the REST routes never sets it. */
-async function createOrderInner(input: { tenantId: string; orgId: string; createdBy: string; contactId?: string; couponCode?: string; affiliateCode?: string; funnelRef?: { funnelId?: unknown; stepId?: unknown }; parentOrderId?: string; pmSaveRequested?: boolean; lines: { productId: string; quantity: number; /** INTERNAL (quote conversion, C3): honor a negotiated snapshot price instead of resolving. Route callers never populate this. */ unitPriceOverride?: number; /** ADR 0296 — line provenance; ROUTE-derived (from the separate `bumps` array / the one-click path), never client-marked. */ origin?: 'bump' | 'upsell' }[]; requireApprovalOverThreshold?: boolean; shippingAddress?: { name?: unknown; line1?: unknown; line2?: unknown; city?: unknown; region?: unknown; postalCode?: unknown; country?: unknown } }): Promise<Order> {
-  assertCap((await listOrders(input.tenantId, input.orgId)).length, 'orders');
+async function createOrderInner(input: { tenantId: string; orgId: string; createdBy: string; contactId?: string; /** ADR 0875 D1 — `false` on the PUBLIC lanes: the contact came from a typed email nobody verified, so it is LINKED (CRM, receipt) but never used to price, to unlock an exclusive assortment, or to target a promotion. Default `true` (every authenticated lane). */ buyerVerified?: boolean; /** ADR 0875 D7 — the public storefront sells only ACTIVE products (operator lanes may still order an archived one). */ activeOnly?: boolean; couponCode?: string; affiliateCode?: string; funnelRef?: { funnelId?: unknown; stepId?: unknown }; parentOrderId?: string; pmSaveRequested?: boolean; /** ADR 0877 M5 — ROUTE-derived from `resolveStorefrontSettlement`, never client input. */ settlement?: OrderSettlementStamp; lines: { productId: string; quantity: number; /** INTERNAL (quote conversion, C3): honor a negotiated snapshot price instead of resolving. Route callers never populate this. */ unitPriceOverride?: number; /** ADR 0296 — line provenance; ROUTE-derived (from the separate `bumps` array / the one-click path), never client-marked. */ origin?: 'bump' | 'upsell' }[]; requireApprovalOverThreshold?: boolean; shippingAddress?: { name?: unknown; line1?: unknown; line2?: unknown; city?: unknown; region?: unknown; postalCode?: unknown; country?: unknown } }): Promise<Order> {
+  // ADR 0875 D7 — the cap counts LIVE orders. Counting canceled rows let ~5000
+  // abandoned public checkouts disable a store for good.
+  assertCap((await listOrders(input.tenantId, input.orgId)).filter((o) => o.status !== 'canceled').length, 'orders');
+  // ADR 0875 D1 — the identity pricing may trust (see `buyerVerified`).
+  const pricingContactId = input.buyerVerified === false ? undefined : input.contactId;
   const items: OrderItem[] = [];
   let subtotal = 0;
   let currency = 'USD';
@@ -875,10 +898,16 @@ async function createOrderInner(input: { tenantId: string; orgId: string; create
   // a bundle line reserves its COMPONENTS (all-or-nothing in the CAS block below).
   const reservations: { productId: string; quantity: number; name: string }[] = [];
   for (const line of (input.lines ?? []).slice(0, MAX.items)) {
-    const qty = nonNeg(line?.quantity) ?? 0;
-    if (qty <= 0) continue;
+    // ADR 0875 D7 — a quantity is a whole number of units. `nonNeg` admitted 0.01,
+    // which priced a whole digital product at a hundredth and fulfilled it in full;
+    // a zero line used to be skipped silently.
+    const qty = line?.quantity;
+    if (typeof qty !== 'number' || !Number.isInteger(qty) || qty < 1 || qty > MAX_LINE_QUANTITY) {
+      throw new OpenwopError('validation_error', `Each line quantity must be a whole number from 1 to ${MAX_LINE_QUANTITY}.`, 400, { field: 'quantity', productId: line?.productId });
+    }
     const product = await getProduct(input.tenantId, input.orgId, String(line.productId));
     if (!product) throw new OpenwopError('validation_error', `Product not found: ${line.productId}`, 400, { productId: line.productId });
+    if (input.activeOnly && product.active === false) throw new OpenwopError('validation_error', `Product not found: ${line.productId}`, 400, { productId: line.productId });
     // Multi-currency polish: an order is single-currency — reject a mixed-currency cart
     // rather than silently coercing (there's no FX in Phase 1; that's an operator concern).
     if (items.length > 0 && product.currency !== currency) {
@@ -886,8 +915,8 @@ async function createOrderInner(input: { tenantId: string; orgId: string; create
     }
     // D3 — account-native assortment: a buyer with an exclusive-assortment list may
     // only buy products that list carries (ONE resolver; anonymous buyers unaffected).
-    if (input.contactId) {
-      const sellable = await resolveSellable(input.tenantId, input.orgId, product.productId, { contactId: input.contactId });
+    if (pricingContactId) {
+      const sellable = await resolveSellable(input.tenantId, input.orgId, product.productId, { contactId: pricingContactId });
       if (!sellable.sellable) {
         throw new OpenwopError('validation_error', `'${product.name}' is not in this account's assortment.`, 409, { code: 'not_sellable', productId: product.productId });
       }
@@ -897,7 +926,7 @@ async function createOrderInner(input: { tenantId: string; orgId: string; create
     const override = typeof line.unitPriceOverride === 'number' && Number.isFinite(line.unitPriceOverride) && line.unitPriceOverride >= 0 ? line.unitPriceOverride : undefined;
     const resolved = override !== undefined
       ? { price: override, currency: product.currency, source: 'quote' }
-      : await resolvePrice(input.tenantId, input.orgId, product, { buyer: { ...(input.contactId ? { contactId: input.contactId } : {}) } });
+      : await resolvePrice(input.tenantId, input.orgId, product, { buyer: { ...(pricingContactId ? { contactId: pricingContactId } : {}) } });
     const item: OrderItem = { productId: product.productId, name: product.name, unitPrice: resolved.price, quantity: qty, ...(resolved.source !== 'default' ? { priceSource: resolved.source } : {}), ...(line.origin === 'bump' || line.origin === 'upsell' ? { origin: line.origin } : {}) };
     if (product.kind === 'bundle' && product.components && product.components.length > 0) {
       // MERCH-D — a bundle line reserves its COMPONENTS (not itself), and its line total
@@ -907,7 +936,7 @@ async function createOrderInner(input: { tenantId: string; orgId: string; create
         const cp = await getProduct(input.tenantId, input.orgId, c.productId);
         if (!cp) throw new OpenwopError('validation_error', `Bundle '${product.name}' references a missing component.`, 400, { productId: c.productId, code: 'bundle_component_missing' });
         if (cp.kind === 'bundle') throw new OpenwopError('validation_error', 'Nested bundles are not supported.', 400, { productId: c.productId, code: 'nested_bundle' });
-        const cprice = (await resolvePrice(input.tenantId, input.orgId, cp, { buyer: { ...(input.contactId ? { contactId: input.contactId } : {}) } })).price;
+        const cprice = (await resolvePrice(input.tenantId, input.orgId, cp, { buyer: { ...(pricingContactId ? { contactId: pricingContactId } : {}) } })).price;
         comps.push({ productId: cp.productId, quantity: c.quantity, price: cprice, name: cp.name });
       }
       const lineTotal = resolved.price * qty;
@@ -950,7 +979,7 @@ async function createOrderInner(input: { tenantId: string; orgId: string; create
     const promo = await computeOrderPromotions({
       tenantId: input.tenantId, orgId: input.orgId, currency,
       subtotalAfterCoupon: Math.max(0, subtotal - discount),
-      ...(input.contactId ? { contactId: input.contactId } : {}),
+      ...(pricingContactId ? { contactId: pricingContactId } : {}),
       items: items.map((i) => ({ productId: i.productId, unitPrice: i.unitPrice, quantity: i.quantity })),
     });
     if (promo.discount > 0) discount = Math.min(subtotal, quantizeMoney(discount + promo.discount, currency));
@@ -1049,6 +1078,7 @@ async function createOrderInner(input: { tenantId: string; orgId: string; create
     // ADR 0296 — one-click child linkage + the consent-to-save marker.
     ...(typeof input.parentOrderId === 'string' && input.parentOrderId.trim() ? { parentOrderId: input.parentOrderId.trim().slice(0, 100) } : {}),
     ...(input.pmSaveRequested === true ? { pmSaveRequested: true as const } : {}),
+    ...(input.settlement ? { settlement: input.settlement.kind === 'connect' && input.settlement.destinationAccountId ? { kind: 'connect' as const, destinationAccountId: input.settlement.destinationAccountId } : { kind: input.settlement.kind } } : {}),
     status: 'pending', fulfillmentStatus: 'pending',
     reservationExpiresAt: new Date(Date.now() + RESERVATION_TTL_MS).toISOString(),
     createdBy: input.createdBy, createdAt: ts, updatedAt: ts,
@@ -1222,15 +1252,72 @@ async function notifyObservers(list: OrderObserver[], order: Order, what: string
   }
 }
 
+/**
+ * ADR 0875 D3 — a PaymentIntent pays (and is refunded against) only the order it was
+ * created FOR. Every intent this host mints carries `metadata.{orderId,tenantId,orgId}`
+ * (the checkout session's `payment_intent_data[metadata]`, the off-session one-click
+ * intent). The status/amount/currency check alone let an editor mark an order paid with
+ * ANOTHER tenant's same-amount `pi_` on the shared platform account — then refund it.
+ */
+function assertIntentBelongsTo(intent: { metadata?: Record<string, string> }, o: Order, paymentIntentId: string): void {
+  const m = intent.metadata ?? {};
+  if (m.orderId !== o.orderId || m.tenantId !== o.tenantId || m.orgId !== o.orgId) {
+    throw new OpenwopError('validation_error', 'That payment was not made for this order.', 409, { code: 'payment_intent_mismatch', paymentIntentId });
+  }
+}
+
+/** ADR 0875 D3 (architect H3) — the money EXIT re-checks the binding: a stored id may
+ *  predate the writer check (a pre-0875 UCP `/pay` or operator `/pay`). An unbound id
+ *  is refused BEFORE any claim, so nothing wedges; the operator refunds it in Stripe. */
+async function assertRefundableIntent(stripeKey: string, o: Order): Promise<{ reverseTransfer: boolean; refundApplicationFee: boolean }> {
+  // ADR 0877 (architect H2) — a subscription cycle order carries the paid INVOICE id
+  // (`in_…`, the `invoice.paid` bridge), not an intent; reading it as one 404s at
+  // Stripe and surfaced as a raw 502. Refuse it as what it is, before any claim.
+  if ((o.paymentIntentId ?? '').startsWith('in_')) {
+    throw new OpenwopError('validation_error', 'This order was paid by a subscription invoice — refund it in Stripe directly.', 409, { code: 'refund_in_stripe', orderId: o.orderId });
+  }
+  const intent = await getStripePaymentIntent(stripeKey, o.paymentIntentId ?? '');
+  const m = intent.metadata ?? {};
+  if (m.orderId !== o.orderId || m.tenantId !== o.tenantId || m.orgId !== o.orgId) {
+    throw new OpenwopError('validation_error', 'The payment on this order was not made for it — refund it in Stripe directly.', 409, { code: 'payment_intent_unbound', orderId: o.orderId });
+  }
+  // ADR 0877 D3 — a destination charge (a Connect tenant's sale) is refunded from
+  // the platform balance unless the transfer is reversed: the seller funds its own
+  // refund. Q5 (user decision 2026-10-12): the platform RETURNS its application fee
+  // too (Stripe prorates it on a partial refund) — a DELIBERATE divergence from the
+  // pack marketplace, whose refunds keep the fee (`commerce-connect/adminOps.ts`).
+  const connect = !!intent.transferDestination;
+  return { reverseTransfer: connect, refundApplicationFee: connect };
+}
+const isProviderIntent = (id: string | undefined): id is string => !!id && !id.startsWith('demo:') && !id.startsWith('manual:') && !id.startsWith('evt:');
+
+/** ADR 0875 D7 (architect M3) — the ONE resolver for "may this tenant's storefront take
+ *  live money on the platform Stripe account". An `anon:` demo tenant never can: a live
+ *  session there would take a stranger's card onto the operator's account for a store
+ *  nobody owns (the commerce-connect GEN-CC-1 posture). */
+export async function liveStripeKeyFor(tenantId: string): Promise<string | null> {
+  if (isAnonTenantId(tenantId)) return null;
+  return resolveSecret(STRIPE_KEY_REF);
+}
+
 export async function markAsPaid(
   tenantId: string, orgId: string, orderId: string, paymentIntentId: string,
   opts: { stripeKey?: string | null; actor?: string } = {},
 ): Promise<Order | null> {
   const o = await getOrder(tenantId, orgId, orderId);
   if (!o) return null;
+  // ADR 0875 (grade-code COM2CD-1) — Stripe delivers BOTH `checkout.session.completed`
+  // and `payment_intent.succeeded` for one live order, each carrying the same intent.
+  // The second arrival used to 409 here, which the webhook logged as "operator refund
+  // may be needed" on EVERY live order and skipped the saved-card capture. The same
+  // intent on an already-paid order is that re-delivery: answer it idempotently.
+  if (o.status === 'paid' && o.paymentIntentId === cleanStr(paymentIntentId, MAX.short)) return o;
   if (o.status !== 'pending') throw new OpenwopError('validation_error', `Only a pending order can be marked paid (is '${o.status}').`, 409, { status: o.status });
   if (opts.stripeKey) {
     const intent = await getStripePaymentIntent(opts.stripeKey, paymentIntentId);
+    // ADR 0875 D3 — FIRST: the refusals below would otherwise tell the caller another
+    // tenant's intent status, currency and exact amount (grade-code COM2CD-3).
+    assertIntentBelongsTo(intent, o, paymentIntentId);
     if (intent.status !== 'succeeded') {
       throw new OpenwopError('validation_error', `Payment intent is '${intent.status}', not succeeded — the order stays pending.`, 409, { paymentIntentId, intentStatus: intent.status });
     }
@@ -1245,7 +1332,8 @@ export async function markAsPaid(
   // CAS pending→paid (grade-code B4): a concurrent cancel/sweep must not be able to
   // cancel an order this call is flipping paid. A lost CAS means someone moved it —
   // re-read and honour the terminal state (idempotent for a re-delivered webhook).
-  const next = await casOrder(o, (cur) => ({ ...cur, status: 'paid', paymentIntentId: cleanStr(paymentIntentId, MAX.short), updatedAt: nowIso() }));
+  const paidTs = nowIso();
+  const next = await casOrder(o, (cur) => ({ ...cur, status: 'paid', paymentIntentId: cleanStr(paymentIntentId, MAX.short), paidAt: paidTs, updatedAt: paidTs }));
   if (next) await notifyObservers(orderPaidObservers, next, 'paid');
   if (!next) {
     const fresh = await getOrder(tenantId, orgId, orderId);
@@ -1395,6 +1483,7 @@ export async function refundOrder(tenantId: string, orgId: string, orderId: stri
     totalMajor: chargeTotal, currency: o.currency, orderId,
     proposal: `Refund order ${orderId} — ${chargeTotal} ${o.currency}`,
   });
+  const binding = opts.stripeKey && isProviderIntent(o.paymentIntentId) ? await assertRefundableIntent(opts.stripeKey, o) : { reverseTransfer: false, refundApplicationFee: false };
   // CAS paid/fulfilled→refunding FIRST (grade-code B3): claim the transition before
   // touching Stripe so two concurrent refunds can't both issue a refund. The loser
   // sees `refunding`/`refunded` and stops.
@@ -1425,7 +1514,7 @@ export async function refundOrder(tenantId: string, orgId: string, orderId: stri
   const stripeKey = opts.stripeKey ?? null;
   if (stripeKey && o.paymentIntentId && !o.paymentIntentId.startsWith('demo:') && !o.paymentIntentId.startsWith('manual:') && !o.paymentIntentId.startsWith('evt:')) {
     try {
-      const r = await createStripeRefund(stripeKey, o.paymentIntentId, { idempotencyKey: `commerce-refund:${orderId}` });
+      const r = await createStripeRefund(stripeKey, o.paymentIntentId, { idempotencyKey: `commerce-refund:${orderId}`, ...(binding.reverseTransfer ? { reverseTransfer: true } : {}), ...(binding.refundApplicationFee ? { refundApplicationFee: true } : {}) });
       refundProvider = 'stripe'; refundId = r.id;
     } catch (err) {
       // "Already refunded" at Stripe is success on a retry; anything else releases.
@@ -1513,13 +1602,7 @@ export async function partialRefundOrder(
   if (amt > remaining) {
     throw new OpenwopError('validation_error', `Partial refund ${amt} exceeds the ${remaining} ${o.currency} remaining on order ${orderId}.`, 409, { remaining, currency: o.currency });
   }
-  // Per-request approval — each partial refund is its own spend event.
-  await assertCommerceGate({
-    tenantId, orgId, kind: 'refund',
-    gateKey: `commerce-refund:${orderId}:${refundKey}`,
-    totalMajor: amt, currency: o.currency, orderId,
-    proposal: `Partial refund order ${orderId} — ${amt} ${o.currency} (${refundKey})`,
-  });
+  const binding = opts.stripeKey && isProviderIntent(o.paymentIntentId) ? await assertRefundableIntent(opts.stripeKey, o) : { reverseTransfer: false, refundApplicationFee: false };
   // ATOMIC CLAIM (grade-code HIGH-1): insert-if-absent the ledger row via CAS. This is
   // the idempotency anchor — two concurrent calls with the SAME refundKey can't both
   // proceed (the loser returns idempotently), so the cumulative total is folded exactly
@@ -1541,6 +1624,28 @@ export async function partialRefundOrder(
   let refundProvider: 'stripe' | 'none' = 'none';
   let refundId: string | undefined;
   try {
+    // ADR 0875 D8 (+ architect H1) — the approval gate judges the CUMULATIVE refund,
+    // read AFTER this call's claim landed: what is already refunded plus every claim
+    // still in flight, this one included. Gating each slice on its own amount let N
+    // refunds just under the threshold skip sign-off; reading before the claim let N
+    // concurrent ones each see zero. Of any two racing claims the later reader sees
+    // both. A refusal throws into the catch below, which releases the claim. The key
+    // carries the cumulative figure, so an approval is never reused at a different one.
+    // Accepted cost (grade-code COM2CD-6): once the cumulative crosses the threshold,
+    // EVERY further slice needs a sign-off, and a crashed claim counts until its lease
+    // (REFUND_CLAIM_LEASE_MS) expires — over-asking is the safe direction for money.
+    // Every surviving claim — pending, applied, or parked for a human — counts (a
+    // failed claim is DELETED, so it does not). `o` was read before the claim, so its
+    // `refundedAmount` can be stale; the ledger and a fresh order read cannot both be.
+    const claimedTotal = (await listOrderRefunds(tenantId, orgId, orderId)).reduce((sum, r) => sum + r.amount, 0);
+    const freshRefunded = (await getOrder(tenantId, orgId, orderId))?.refundedAmount ?? 0;
+    const cumulative = quantizeMoney(Math.max(claimedTotal, freshRefunded + amt), o.currency);
+    await assertCommerceGate({
+      tenantId, orgId, kind: 'refund',
+      gateKey: `commerce-refund:${orderId}:${refundKey}:${toStripeMinorUnits(cumulative, o.currency)}`,
+      totalMajor: cumulative, currency: o.currency, orderId,
+      proposal: `Partial refund order ${orderId} — ${amt} ${o.currency} (${refundKey}; ${cumulative} ${o.currency} refunded in total)`,
+    });
     // REAL partial money back when possible. The Stripe refund carries a deterministic
     // idempotency key so a retry after a crash is a no-op, not a second charge-back; a
     // genuine over-refund across concurrent DIFFERENT keys is rejected by Stripe here.
@@ -1549,6 +1654,8 @@ export async function partialRefundOrder(
       const r = await createStripeRefund(stripeKey, o.paymentIntentId, {
         amountMinor: toStripeMinorUnits(amt, o.currency),
         idempotencyKey: `commerce-partial-refund:${orderId}:${refundKey}`,
+        ...(binding.reverseTransfer ? { reverseTransfer: true } : {}),
+        ...(binding.refundApplicationFee ? { refundApplicationFee: true } : {}),
       });
       refundProvider = 'stripe'; refundId = r.id;
     }
@@ -1835,20 +1942,31 @@ export async function __resetCommerce(): Promise<void> {
 
 // ── ADR 0296 P2 — saved payment methods (consent-to-save for one-click) ──────
 // Stripe holds the instrument; this row holds ONLY the references + the consent
-// timestamp. Keyed per (tenant, org, contact); a contact deletion prunes it via
-// the crmRecordLifecycle seam (registered in feature.ts).
+// timestamp. A contact deletion prunes it via the crmRecordLifecycle seam
+// (registered in feature.ts).
+//
+// ADR 0875 D2 (architect B1) — keyed per SOURCE ORDER, not per contact. A guest's
+// contact is whatever their typed email resolves to, so a contact-keyed row let an
+// attacker who checked out with the victim's email reach the victim's saved card
+// through their OWN valid one-click token. One-click now reads only the row captured
+// from the very purchase it follows. Pre-0875 contact-keyed rows are never read
+// (fail closed); erasure still finds them by `contactId`.
 export interface SavedPaymentMethod {
-  id: string; // `${tenantId}:${orgId}:${contactId}`
+  id: string; // `${tenantId}:${orgId}:order:${sourceOrderId}` (pre-0875: `${tenantId}:${orgId}:${contactId}`)
   tenantId: string; orgId: string; contactId: string;
+  sourceOrderId?: string;
   stripeCustomerId: string;
   paymentMethodId: string;
   consentAt: string;
 }
 const savedPms = new DurableCollection<SavedPaymentMethod>('commerce:saved-pm', (r) => r.id, undefined, (r) => r.tenantId);
 
-export async function getSavedPaymentMethod(tenantId: string, orgId: string, contactId: string): Promise<SavedPaymentMethod | null> {
-  const row = await savedPms.get(`${tenantId}:${orgId}:${contactId}`);
-  return row && row.tenantId === tenantId ? row : null;
+const savedPmKey = (tenantId: string, orgId: string, orderId: string): string => `${tenantId}:${orgId}:order:${orderId}`;
+
+/** The saved method captured from THIS paid order (ADR 0875 D2), or null. */
+export async function getSavedPaymentMethodForOrder(tenantId: string, orgId: string, orderId: string): Promise<SavedPaymentMethod | null> {
+  const row = await savedPms.get(savedPmKey(tenantId, orgId, orderId));
+  return row && row.tenantId === tenantId && row.orgId === orgId && row.sourceOrderId === orderId ? row : null;
 }
 
 export async function deleteSavedPaymentMethodsForContact(tenantId: string, contactId: string): Promise<number> {
@@ -1933,8 +2051,8 @@ export async function captureSavedPmFromPaidIntent(order: Order, intent: { custo
     const pm = typeof intent.payment_method === 'string' ? intent.payment_method : '';
     if (!customer || !pm) return false;
     await savedPms.put({
-      id: `${order.tenantId}:${order.orgId}:${order.contactId}`,
-      tenantId: order.tenantId, orgId: order.orgId, contactId: order.contactId,
+      id: savedPmKey(order.tenantId, order.orgId, order.orderId),
+      tenantId: order.tenantId, orgId: order.orgId, contactId: order.contactId, sourceOrderId: order.orderId,
       stripeCustomerId: customer, paymentMethodId: pm, consentAt: new Date().toISOString(),
     });
     return true;

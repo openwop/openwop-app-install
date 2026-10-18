@@ -7,6 +7,10 @@
  * MODEL-EMITTED text (production plan budgets, validated only as a <=8-char
  * string). `guardDate` in the same module already documents the rule: "a throw
  * inside a render unmounts the React tree… a white screen is not recoverable".
+ *
+ * Sabotage (wave 51 probes): rethrowing from the fallback, dropping the code from it,
+ * or always falling back each red a case. Expectations are literals (en default
+ * locale), never computed with the formatter under test.
  */
 import { describe, it, expect } from 'vitest';
 import { formatCurrency } from '../format.js';
@@ -15,15 +19,14 @@ describe('formatCurrency is guarded', () => {
   it('falls back to a plain amount + code instead of throwing', () => {
     for (const bad of ['dollars', '$', 'US$', 'EUROS', '']) {
       expect(() => formatCurrency(6000, bad)).not.toThrow();
-      expect(formatCurrency(6000, bad)).toContain('6,000');
+      // The amount AND the code the caller passed — "dollars" must still say dollars.
+      expect(formatCurrency(6000, bad)).toBe(`6,000 ${bad}`);
     }
   });
 
   it('still formats a REAL currency properly (the control)', () => {
     // Without this, "never throws" is satisfied by a function that always
     // returns the fallback and never localizes anything.
-    const usd = formatCurrency(6000, 'USD');
-    expect(usd).toContain('$');
-    expect(usd).not.toBe('6,000 USD');
+    expect(formatCurrency(6000, 'USD')).toBe('$6,000.00');
   });
 });

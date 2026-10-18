@@ -1,3 +1,10 @@
+/**
+ * Boardroom turn planner + convene cohort (ADR 0043 Phase 5A / ADR 0040 inc. 2;
+ * ADR 0054 D6). Pure, so the ORDER is pinned with literals. Breaks if the chair is
+ * rotated as an advisor, round-robin stops rotating, a synthesis turn runs without
+ * a chair, a non-positive round count plans zero rounds, or the convene cohort
+ * drops/duplicates the moderator or ignores the cost cap (w44 bc-* probes).
+ */
 import { describe, it, expect } from 'vitest';
 import { planBoardroomTurns, orderConveneCohort, type BoardroomTurnPolicy } from '../boardroomCadence.js';
 
@@ -43,7 +50,10 @@ describe('planBoardroomTurns', () => {
       { chairAgentId: null, advisorAgentIds: ['a', 'b'] },
       policy({ synthesize: true }),
     );
-    expect(turns.every((t) => t.kind === 'advisor')).toBe(true);
+    expect(turns).toEqual([
+      { agentId: 'a', kind: 'advisor', round: 0 },
+      { agentId: 'b', kind: 'advisor', round: 0 },
+    ]);
   });
 
   it('rotates the starting advisor each round under round-robin', () => {
@@ -82,6 +92,11 @@ describe('planBoardroomTurns', () => {
       policy({ rounds: 0 }),
     );
     expect(turns).toEqual([{ agentId: 'a', kind: 'advisor', round: 0 }]);
+    // `0 || 1` already yields 1; only a NEGATIVE count reaches the Math.max clamp.
+    expect(planBoardroomTurns(
+      { chairAgentId: 'chair', advisorAgentIds: ['a'] },
+      policy({ rounds: -2 }),
+    )).toEqual([{ agentId: 'a', kind: 'advisor', round: 0 }]);
   });
 });
 

@@ -21,11 +21,21 @@
  * on the ADR 0381 subject-erasure seam (unlike the REST `written` ledger, which is
  * deliberately off-seam as non-personal).
  *
- * Known residual (ADR 0466): `create_event` is not idempotent by a client id, so a
- * concurrent double-sync for the same `(subject, externalId)` can double-create + orphan
- * a Google event (the map is written immediately after create to minimize the window).
- * A CAS placeholder is the hardening follow-on if the lane goes live. Ships gated-off
- * behind `OPENWOP_CALENDAR_MCP_ENABLED` — a live write needs real Google OAuth creds.
+ * Concurrency (ENG-15(b) + KTINT-3): a create is serialized by a CAS claim row
+ * (`pending:<ms>:<uuid>`), the mapping lands only by CAS over that claim, and a claim
+ * older than `CLAIM_STALE_MS` may be retaken, so a crashed writer never wedges sync.
+ *
+ * RESIDUAL (KTINT-3, NOT closed): a crash AFTER `create_event` succeeded but BEFORE
+ * the mapping CAS leaves a real Google event that only the lost process knew the id
+ * of. When the claim expires the next sync creates a second event, and the first is
+ * orphaned on the user's calendar. It cannot be found again: `create_event` takes no
+ * client id and exposes no `extendedProperties` (ADR 0466 § Known residual), so the
+ * event carries no marker of ours. Matching it by `list_events`/`search_events` on
+ * (title, date) could adopt — and later update or DELETE — an event the user made
+ * themselves, which is worse than a duplicate. The window is one network round trip
+ * after a successful create; closing it needs a provider-side idempotency key.
+ * Ships gated-off behind `OPENWOP_CALENDAR_MCP_ENABLED` — a live write needs real
+ * Google OAuth creds.
  */
 import { DurableCollection, hostExtStorage } from '../../host/hostExtPersistence.js';
 import { makeMcpClient, McpError } from '../../host/mcpClient.js';
@@ -44,8 +54,28 @@ const DEFAULT_TIMEOUT_MS = 20_000;
 const CALENDAR_MCP_PROVIDER = 'google';
 
 /** Marks a row as a CLAIM, not a real mapping — a writer is mid-`create_event`.
- *  A `remove()` or a read must never treat it as a Google event id. */
+ *  A `remove()` or a read must never treat it as a Google event id.
+ *  Shape: `pending:<claimedAtMs>:<uuid>` (KTINT-3 — the time makes a claim EXPIRE). */
 const PENDING_PREFIX = 'pending:';
+
+/** KTINT-3 — a claim older than this belongs to a writer that crashed between its
+ *  claim and its final write; another writer may RETAKE it. Far above the create
+ *  call's own `DEFAULT_TIMEOUT_MS`, so a live creator has always either finished or
+ *  timed out (and released) long before its claim can be retaken. */
+const CLAIM_STALE_MS = 5 * 60_000;
+
+function newClaimId(): string {
+  return `${PENDING_PREFIX}${Date.now()}:${randomUUID()}`;
+}
+
+/** True iff `googleEventId` is a claim that has expired. A claim with no parsable
+ *  time is the pre-KTINT-3 `pending:<uuid>` shape, which could only be left behind
+ *  by a crash (nothing ever retook it) — treated as expired so it stops wedging. */
+function isStaleClaim(googleEventId: string): boolean {
+  if (!googleEventId.startsWith(PENDING_PREFIX)) return false;
+  const ms = Number(googleEventId.slice(PENDING_PREFIX.length).split(':')[0]);
+  return !Number.isFinite(ms) || ms <= 0 || Date.now() - ms > CLAIM_STALE_MS;
+}
 
 /** Durable map row: our deterministic externalId ⇄ Google's server-assigned event id. */
 interface CalendarEventMap {
@@ -134,13 +164,20 @@ export const calendarMcpTransport: CalendarTransport = {
   async upsert(externalId, event, ctx) {
     const client = mcpClientFor(ctx);
     const key = mapKey(ctx, externalId);
-    const existing = await eventMap.get(key);
+    let existing = await eventMap.get(key);
+    /** KTINT-3 — the expired claim this writer will retake by CAS (null = none). */
+    let staleClaim: CalendarEventMap | null = null;
 
     // A PENDING claim means another writer is mid-`create_event`. Its id is not a
     // Google event id, so sending it to `update_event` would be a bogus call.
-    // Yield and let the caller's next sync converge on the winner's real id.
+    // Yield and let the caller's next sync converge on the winner's real id —
+    // UNLESS the claim has expired (KTINT-3): its writer crashed, and before this
+    // every later sync of this externalId failed `create_in_progress` forever.
     if (existing?.googleEventId.startsWith(PENDING_PREFIX)) {
-      throw new Error('calendar_mcp_create_in_progress');
+      if (!isStaleClaim(existing.googleEventId)) throw new Error('calendar_mcp_create_in_progress');
+      log.warn('kicktodo_calendar_mcp_stale_claim_retaken', { externalId });
+      staleClaim = existing;
+      existing = null;
     }
 
     if (existing) {
@@ -172,11 +209,14 @@ export const calendarMcpTransport: CalendarTransport = {
     // is insert-only-if-absent, backed by the storage `kvCompareAndSwap` atomic —
     // a real cross-instance guard, not a local lock. The loser of the race does
     // NOT create a duplicate; it re-reads the winner's row and updates in place.
+    //
+    // KTINT-3 — an EXPIRED claim is retaken by a CAS on the exact stale row, so two
+    // writers retaking the same stale claim still have exactly one winner.
     const claim: CalendarEventMap = {
       tenantId: ctx.tenantId, ownerSubject: ctx.ownerSubject, externalId,
-      googleEventId: `${PENDING_PREFIX}${randomUUID()}`,
+      googleEventId: newClaimId(),
     };
-    if (!(await eventMap.compareAndSwap(null, claim))) {
+    if (!(await eventMap.compareAndSwap(staleClaim, claim))) {
       // Someone else claimed it between our read and now. Re-read and update
       // through their id rather than creating a second event.
       const winner = await eventMap.get(key);
@@ -201,10 +241,27 @@ export const calendarMcpTransport: CalendarTransport = {
     } catch (err) {
       // Release the claim so a retry can proceed. Leaving a placeholder behind
       // would wedge this externalId forever on the `create_in_progress` branch.
-      await eventMap.delete(key).catch(() => undefined);
+      // Only OUR claim: if it was retaken meanwhile, the row is the retaker's.
+      const current = await eventMap.get(key).catch(() => null);
+      if (current?.googleEventId === claim.googleEventId) await eventMap.delete(key).catch(() => undefined);
       throw err;
     }
-    await eventMap.put({ tenantId: ctx.tenantId, ownerSubject: ctx.ownerSubject, externalId, googleEventId });
+    // KTINT-3 — the mapping lands only over OUR claim (CAS), never a blind put. A
+    // blind put overwrote whatever stood there: a retaker's claim (whose own event
+    // then orphaned) or a `remove()` that had dropped our claim (resurrecting an
+    // event the user removed). If the claim is gone, the event we just created has
+    // no owner, so delete it now — while its id is still in hand — rather than
+    // leave it on the user's real calendar with nothing able to find it again.
+    const real: CalendarEventMap = { tenantId: ctx.tenantId, ownerSubject: ctx.ownerSubject, externalId, googleEventId };
+    if (!(await eventMap.compareAndSwap(claim, real))) {
+      log.warn('kicktodo_calendar_mcp_claim_lost', { externalId });
+      try {
+        await client.invokeTool(CALENDAR_MCP_PROVIDER, 'delete_event', { eventId: googleEventId }, { timeoutMs: DEFAULT_TIMEOUT_MS });
+      } catch (err) {
+        log.warn('kicktodo_calendar_mcp_claim_lost_cleanup_failed', { externalId, error: err instanceof Error ? err.message : String(err) });
+      }
+      throw new Error('calendar_mcp_claim_lost');
+    }
   },
 
   async remove(externalId, ctx) {
@@ -213,8 +270,8 @@ export const calendarMcpTransport: CalendarTransport = {
     if (!existing) return; // no mapping ⇒ already removed (idempotent no-op)
     // A PENDING claim names no real event yet, so there is nothing to delete
     // remotely. Drop the claim so the externalId is not wedged; if a creator is
-    // still in flight its final `put` re-adds a real row, and the next remove
-    // deletes it properly. Calling `delete_event` with the placeholder would be
+    // still in flight its final CAS (KTINT-3) then fails, and it deletes the event
+    // it just created itself. Calling `delete_event` with the placeholder would be
     // a bogus id.
     if (existing.googleEventId.startsWith(PENDING_PREFIX)) {
       await eventMap.delete(key);
@@ -261,3 +318,5 @@ export async function __clearCalendarEventMap(): Promise<void> { await eventMap.
 export async function __getCalendarEventMap(tenantId: string, ownerSubject: string, externalId: string): Promise<CalendarEventMap | null> {
   return eventMap.get(`${tenantId}::${ownerSubject}::${externalId}`);
 }
+/** Test-only: plant a map row (KTINT-3 seeds a crashed writer's claim with it). */
+export async function __putCalendarEventMap(row: CalendarEventMap): Promise<void> { await eventMap.put(row); }

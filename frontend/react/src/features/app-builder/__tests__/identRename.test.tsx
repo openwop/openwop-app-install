@@ -37,7 +37,7 @@ describe('AB-G3 — state-variable id renames', () => {
     const input = rename('Variable id', 'my var');
     expect(input.getAttribute('aria-invalid')).toBe('true');
     // Announced, not merely coloured.
-    expect(screen.getByRole('alert').textContent).toContain('generated identifier');
+    expect(screen.getByRole('alert').textContent).toBe('A letter or "_" then letters, digits or "_" — it becomes a generated identifier. Saving fails until this is fixed.');
   });
 
   it('flags a duplicate on the SECOND row, not the first', () => {
@@ -51,14 +51,16 @@ describe('AB-G3 — state-variable id renames', () => {
     // original would point at a value they did not touch.
     expect(inputs[0]!.getAttribute('aria-invalid')).toBeNull();
     expect(inputs[1]!.getAttribute('aria-invalid')).toBe('true');
-    expect(screen.getByRole('alert').textContent).toContain('unique');
+    expect(screen.getByRole('alert').textContent).toBe('Already used above — names must be unique. Saving fails until this is fixed.');
   });
 
   it('leaves a valid rename alone', () => {
-    mount({ name: 'A', screens: [], stateVariables: [{ id: 'count', type: 'number', initial: 0 }] });
+    const { doc } = mount({ name: 'A', screens: [], stateVariables: [{ id: 'count', type: 'number', initial: 0 }] });
     const input = rename('Variable id', 'itemCount_2');
     expect(input.getAttribute('aria-invalid')).toBeNull();
     expect(screen.queryByRole('alert')).toBeNull();
+    // The rename LANDED — an unflagged edit that silently did not commit would pass the two lines above.
+    expect(doc.stateVariables).toEqual([{ id: 'itemCount_2', type: 'number', initial: 0 }]);
   });
 
   it('accepts a leading underscore — the server rule allows it', () => {
@@ -101,7 +103,9 @@ describe('AB-G3 — model field-name renames', () => {
       name: 'A', screens: [],
       models: [
         { id: 'order', name: 'Order', fields: [{ name: 'total', type: 'number' }] },
-        { id: 'invoice', name: 'Invoice', fields: [{ name: 'total', type: 'number' }] },
+        // `total` at index 1 here: a check over ALL models' fields would see an
+        // earlier `total` (order.fields[0]) and flag it — at index 0 it could not.
+        { id: 'invoice', name: 'Invoice', fields: [{ name: 'sku', type: 'string' }, { name: 'total', type: 'number' }] },
       ],
     });
     for (const input of screen.getAllByLabelText('Field name')) {

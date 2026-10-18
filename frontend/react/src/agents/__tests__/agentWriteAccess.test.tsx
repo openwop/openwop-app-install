@@ -13,6 +13,9 @@ import { MemoryRouter } from 'react-router-dom';
 import { canWriteAgents, isWriteRefusal, writeErrorMessage } from '../agentWriteAccess.js';
 import { ApiError } from '../../client/errorEnvelope.js';
 
+type AccessState = { access: { roles: string[]; scopes: string[]; basis: string }; resolved: boolean };
+const VIEWER: AccessState = { access: { roles: ['viewer'], scopes: ['workspace:read'], basis: 'member' }, resolved: true };
+const EDITOR: AccessState = { access: { roles: ['editor'], scopes: ['workspace:read', 'workspace:write'], basis: 'member' }, resolved: true };
 const { access } = vi.hoisted(() => ({
   access: { current: { access: { roles: ['viewer'], scopes: ['workspace:read'], basis: 'member' }, resolved: true } as { access: { roles: string[]; scopes: string[]; basis: string }; resolved: boolean } },
 }));
@@ -23,7 +26,7 @@ vi.mock('../../client/useEffectiveAccess.js', async (orig) => ({
 
 import { AgentCreateWizard } from '../AgentCreateWizard.js';
 
-afterEach(cleanup);
+afterEach(() => { cleanup(); access.current = VIEWER; });
 
 describe('canWriteAgents — fail-open presentation', () => {
   it('hides only for a resolved member without workspace:write', () => {
@@ -51,9 +54,17 @@ describe('writeErrorMessage — a refusal reads as a permission line, never as a
 
 describe('the create wizard refuses a viewer at the door (grade-ux ARUX-1)', () => {
   it('a viewer sees why, and no wizard step', () => {
-    access.current = { access: { roles: ['viewer'], scopes: ['workspace:read'], basis: 'member' }, resolved: true };
+    access.current = VIEWER;
     render(<MemoryRouter><AgentCreateWizard /></MemoryRouter>);
     expect(screen.getByText(/can't create agents here/i)).toBeTruthy();
+    expect(screen.queryByText('Pick a role')).toBeNull();
     expect(screen.queryByRole('button', { name: /next/i })).toBeNull();
+  });
+
+  it('positive control — an editor gets the wizard and no refusal card', () => {
+    access.current = EDITOR;
+    render(<MemoryRouter><AgentCreateWizard /></MemoryRouter>);
+    expect(screen.getByText('Pick a role')).toBeTruthy();
+    expect(screen.queryByText(/can't create agents here/i)).toBeNull();
   });
 });

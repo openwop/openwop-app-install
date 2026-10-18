@@ -45,6 +45,9 @@ import { analyzeThemeContrast, type ContrastReport } from './theme/analyze.js';
 import { numStr, parseColorToRgb, rgbToHex } from './theme/oklch.js';
 import { BRAND_PRESETS, FONT_PAIRINGS } from './defaults.js';
 
+/** The pairing the app ships with; choosing it clears the override (never stored). */
+const DEFAULT_PAIRING_ID = 'editorial';
+
 type Id = PublicBrandIdentity;
 type ThemeIn = NonNullable<Id['theme']>;
 
@@ -183,20 +186,30 @@ export function AppearancePanel(): JSX.Element {
 
   const patchTheme = useCallback((t: Partial<ThemeIn>) => patch({ theme: t }), [patch]);
 
+  // ADR 0883 correction — the default pairing is NOT stored. Copying its fonts into
+  // the override froze them: when the default changed (Instrument Serif →
+  // Bricolage), a host that had once picked "Editorial (default)" kept the old face.
+  // With no typography override the app follows its build-time default.
+  const clearTypography = useCallback(() => {
+    setId((prev) => { const { typography: _drop, ...rest } = prev; return rest; });
+  }, []);
+
   const applyPreset = useCallback((presetId: string) => {
     const preset = BRAND_PRESETS.find((p) => p.id === presetId);
     if (!preset) return;
     const pairing = FONT_PAIRINGS.find((f) => f.id === preset.fontPairing);
     patch({
       theme: { accentSeed: preset.accent, ...(preset.neutralSeed ? { neutralSeed: preset.neutralSeed } : {}) },
-      ...(pairing ? { typography: { serif: pairing.serif, sans: pairing.sans, mono: pairing.mono, fontsHref: pairing.fontsHref } } : {}),
+      ...(pairing && pairing.id !== DEFAULT_PAIRING_ID ? { typography: { serif: pairing.serif, sans: pairing.sans, mono: pairing.mono, fontsHref: pairing.fontsHref } } : {}),
     });
-  }, [patch]);
+    if (pairing?.id === DEFAULT_PAIRING_ID) clearTypography();
+  }, [patch, clearTypography]);
 
   const applyPairing = useCallback((pairingId: string) => {
+    if (pairingId === DEFAULT_PAIRING_ID) { clearTypography(); return; }
     const f = FONT_PAIRINGS.find((p) => p.id === pairingId);
     if (f) patch({ typography: { serif: f.serif, sans: f.sans, mono: f.mono, fontsHref: f.fontsHref } });
-  }, [patch]);
+  }, [patch, clearTypography]);
 
   // The generator runs live for the preview (this whole panel is lazy-chunked).
   const gen: GeneratedTheme = useMemo(() => generateTheme(toThemeInputs(id.theme)), [id.theme]);
@@ -388,7 +401,7 @@ export function AppearancePanel(): JSX.Element {
             </div>
             <Field label={t('fontPairingLabel')}>
               {(p) => (
-                <select {...p} value={FONT_PAIRINGS.find((f) => f.serif === id.typography?.serif)?.id ?? ''} onChange={(e) => applyPairing(e.target.value)}>
+                <select {...p} value={id.typography?.serif ? (FONT_PAIRINGS.find((f) => f.serif === id.typography?.serif)?.id ?? '') : DEFAULT_PAIRING_ID} onChange={(e) => applyPairing(e.target.value)}>
                   <option value="">{t('fontCustom')}</option>
                   {FONT_PAIRINGS.map((f) => <option key={f.id} value={f.id}>{f.name}</option>)}
                 </select>

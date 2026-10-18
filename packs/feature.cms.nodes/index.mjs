@@ -19,12 +19,11 @@
  * re-querying or re-generating. Pure-JS, Node-20 stdlib only.
  */
 
-/** DEBT-3 — pack-local mirror of the providers.json SSoT default (the
- *  anthropic `recommended: true` model; src/providers/catalog.ts
- *  getDefaultModel). ctx.callAI REQUIRES an explicit model and standalone
- *  .mjs packs cannot import the catalog, so the default lives in this ONE
- *  greppable constant — the /refresh-model-catalog sweep updates it. */
-const DEFAULT_MODEL = 'claude-sonnet-4-6';
+/** ADR 0903 — no hard-coded vendor. A call passes the provider/model the node
+ *  was given (a chain param frozen at instantiation, or a node input) and leaves
+ *  the rest to the host: `ctx.callAI` fills a missing provider/model from the
+ *  run's choice (`configurable.ai`), else the workspace's active AI binding, else
+ *  the catalog default — resolved once at run start (host/runAiDefault.ts). */
 
 /** Resolve the CMS feature surface, or fail with the canonical capability error
  *  (workflow-register should refuse a workflow needing it on a host that doesn't
@@ -129,8 +128,8 @@ export async function translateSection(ctx) {
     `Return ONLY the translated JSON with the same keys and structure:\n\n${JSON.stringify(data, null, 2)}`;
   const call = async (messages) => {
     const ai = await ctx.callAI({
-      provider: str(i.provider) || 'anthropic',
-      model: str(i.model) || DEFAULT_MODEL,
+      provider: str(i.provider) || undefined,
+      model: str(i.model) || undefined,
       systemPrompt: SYSTEM_PROMPT,
       messages,
       ...(i.maxTokens ? { maxTokens: Number(i.maxTokens) } : {}),

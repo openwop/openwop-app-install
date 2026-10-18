@@ -21,8 +21,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, act, fireEvent } from '@testing-library/react';
 
+type RosterClient = typeof import('../rosterClient.js');
 const { getAgentProfile, putAgentProfile, listStoredRefs } = vi.hoisted(() => ({
-  getAgentProfile: vi.fn(), putAgentProfile: vi.fn(), listStoredRefs: vi.fn(),
+  getAgentProfile: vi.fn<RosterClient['getAgentProfile']>(),
+  putAgentProfile: vi.fn<RosterClient['putAgentProfile']>(),
+  listStoredRefs: vi.fn<typeof import('../../byok/lib/byokClient.js')['listStoredRefs']>(),
 }));
 vi.mock('../rosterClient.js', async (orig) => ({
   ...(await orig<typeof import('../rosterClient.js')>()),
@@ -34,9 +37,15 @@ vi.mock('../../byok/lib/byokClient.js', async (orig) => ({
 }));
 
 import { AgentVoicePanel } from '../AgentVoicePanel.js';
+import type { AgentProfile } from '../rosterClient.js';
 
 // A BYOK provider, so the credential-ref picker actually renders.
-const PROFILE = { configParameters: { voice: { provider: 'elevenlabs', voiceId: 'v1', credentialRef: '' } } };
+const PROFILE: AgentProfile = {
+  profileId: 'p-1', tenantId: 't1', roleKey: 'custom',
+  autonomy: { level: 'review', specLevel: 'draft-only' },
+  configParameters: { voice: { provider: 'elevenlabs', voiceId: 'v1', credentialRef: '' } },
+  createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z',
+};
 
 const mount = async (): Promise<void> => {
   render(<AgentVoicePanel rosterId="agent-1" />);
@@ -48,7 +57,9 @@ const NO_KEYS = /No keys stored yet/i;
 
 afterEach(cleanup);
 beforeEach(() => {
-  vi.clearAllMocks();
+  // reset, not clear: a clear keeps queued `mockResolvedValueOnce` values and
+  // the previous case's implementation, which would answer this case's read.
+  vi.resetAllMocks();
   getAgentProfile.mockResolvedValue(PROFILE);
 });
 
@@ -75,9 +86,10 @@ describe('FRGATE-5 — "no keys" vs "keys unknown"', () => {
     listStoredRefs.mockRejectedValue(new Error('503'));
     await mount();
 
-    const select = screen.getAllByRole('combobox').at(-1) as HTMLSelectElement | undefined;
-    expect(select).toBeTruthy();
-    expect(select?.disabled).toBe(false);
+    expect(screen.getByText(UNKNOWN)).toBeTruthy(); // the failure state, not loading
+    const select = screen.getByLabelText('API key (BYOK)') as HTMLSelectElement;
+    expect(select.tagName).toBe('SELECT');
+    expect(select.disabled).toBe(false);
   });
 
   it('retry RE-RUNS only the key read and recovers', async () => {
@@ -90,6 +102,9 @@ describe('FRGATE-5 — "no keys" vs "keys unknown"', () => {
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: /try again|retry/i })); });
 
     expect(screen.queryByText(UNKNOWN)).toBeNull();
+    // Recovered: the key the retry read is now offered, and no "none yet" line.
+    expect(screen.getByRole('option', { name: 'byok:eleven' })).toBeTruthy();
+    expect(screen.queryByText(NO_KEYS)).toBeNull();
     // Only the refs read re-runs: re-reading the profile would discard edits the
     // user made to provider/voiceId since load.
     expect(getAgentProfile.mock.calls.length).toBe(profileCalls);

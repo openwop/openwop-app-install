@@ -40,8 +40,12 @@ import { resolveRequestTimeoutMs } from '../middleware/requestTimeout.js';
 export type IdempotentEndpoint = 'POST:/v1/runs' | 'POST:/v1/host/openwop-app/agents' | 'POST:/host/events/test';  // ADR 0812 KEEP: a PERSISTED idempotency-key namespace (primary key + request digest), not a URL
 
 /** Every endpoint in the union, for tests and the lane tripwire. */
+/** The `POST /runs` ledger namespace, named once so other lanes claiming the SAME
+ *  ledger (ADR 0889 EVD-7 in-app eval creates) reference it, not a second literal. */
+export const RUNS_IDEMPOTENT_ENDPOINT = 'POST:/v1/runs' satisfies IdempotentEndpoint;  // ADR 0812 KEEP: a PERSISTED idempotency-key namespace (primary key + request digest), not a URL
+
 export const IDEMPOTENT_ENDPOINTS: readonly IdempotentEndpoint[] = [
-  'POST:/v1/runs',
+  RUNS_IDEMPOTENT_ENDPOINT,
   'POST:/v1/host/openwop-app/agents',  // ADR 0812 KEEP: a PERSISTED idempotency-key namespace (primary key + request digest), not a URL
   'POST:/host/events/test',  // RFC 0241 §B.5 (ADR 0825): `emitTestHostEvent`
 ];
@@ -54,7 +58,7 @@ export const IDEMPOTENT_ENDPOINTS: readonly IdempotentEndpoint[] = [
  * digest and be served a response computed under the old semantics.
  */
 const REQUEST_VERSION: Record<IdempotentEndpoint, string> = {
-  'POST:/v1/runs': 'v1',
+  'POST:/v1/runs': 'v1',  // ADR 0812 KEEP: a PERSISTED idempotency-key namespace (primary key + request digest), not a URL
   'POST:/v1/host/openwop-app/agents': 'v1',  // ADR 0812 KEEP: a PERSISTED idempotency-key namespace (primary key + request digest), not a URL
   'POST:/host/events/test': 'v1',
 };

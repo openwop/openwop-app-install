@@ -13,20 +13,23 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
 
+import type { JobListing } from '../jobSearchClient.js';
+
 vi.mock('../../../ui/toast.js', () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
 
-const listings = [
+const listings: JobListing[] = [
   { listingId: 'a', title: 'Staff Backend Engineer', companyName: 'Northwind', location: 'Austin, TX', remote: false, sourceBoard: 'greenhouse', sourceUrl: null },
   { listingId: 'b', title: 'Platform Engineer', companyName: 'Harbor', location: null, remote: true, sourceBoard: 'lever', sourceUrl: null },
   { listingId: 'c', title: 'Principal Engineer', companyName: 'Meridian', location: 'Chicago, IL', remote: false, sourceBoard: 'ashby', sourceUrl: null },
 ];
-const setVisibility = vi.fn(async () => undefined);
+type Client = typeof import('../jobSearchClient.js');
+const setVisibility = vi.hoisted(() => vi.fn<Client['setListingsVisibility']>(async () => undefined));
 
 vi.mock('../jobSearchClient.js', () => ({
   listOrgs: vi.fn(async () => [{ orgId: 'org-1', name: 'Acme' }]),
-  listListings: vi.fn(async () => listings),
+  listListings: vi.fn(async (): Promise<JobListing[]> => listings),
   getListingsVisibility: vi.fn(async () => ({ public: false })),
-  setListingsVisibility: (...args: unknown[]) => setVisibility(...(args as [])),
+  setListingsVisibility: setVisibility,
 }));
 
 import { JobListingsPage } from '../JobListingsPage.js';
@@ -67,6 +70,8 @@ describe('the publish gate', () => {
     fireEvent.click(await screen.findByRole('button', { name: /publish listings/i }));
     fireEvent.click(screen.getByRole('button', { name: /^publish$/i }));
     await waitFor(() => expect(setVisibility).toHaveBeenCalledWith('org-1', true));
+    // …and the page now states the NEW state (the write landed).
+    expect(await screen.findByText('Published — anyone with the link can read these listings')).toBeTruthy();
   });
 
   it('cancelling leaves the workspace private', async () => {

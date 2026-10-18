@@ -8,6 +8,7 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { bootPlanningApp, makeClient, enableToggle, uniqEmail, type Client } from './planningHarness.js';
+import { createBoard } from '../src/host/kanbanService.js';
 
 let BASE = '';
 let closeApp: () => Promise<void>;
@@ -105,5 +106,30 @@ describe('ADR 0534 — the ranking route', () => {
     const anon = client();
     const res = await anon.get(RANKING(boardId));
     expect(res.body.ranked, 'an anon tenant must not read an owned board').toEqual([]);
+  });
+
+  it('#4496 — an anonymous owner ranks their own PROJECT board (the seam gets a caller)', async () => {
+    // ADR 0839: the subject-access seam refuses an absent caller. A project-owned
+    // board is membership-scoped, so the route must hand the seam the anon
+    // session's principal; `req.userId` is undefined for an anonymous session.
+    await enableToggle('work-selection', 'on');
+    await enableToggle('projects', 'on');
+    const anon = client();
+    const orgId = (await anon.post('/host/openwop-app/orgs', { name: 'Anon org' })).body?.orgId as string;
+    const project = await anon.post('/host/openwop-app/projects', { orgId, name: 'Anon project' });
+    expect(project.status, JSON.stringify(project.body)).toBe(201);
+    // The kanban create route does not bind a board to a project; seed the
+    // project-owned board through the service, as the project surfaces do.
+    const board = await createBoard({
+      tenantId: project.body.tenantId,
+      name: 'Project board',
+      ownerSubject: { kind: 'project', id: project.body.id },
+      columns: [{ id: 'todo', name: 'To Do' }, { id: 'working', name: 'Working' }, { id: 'done', name: 'Done', terminal: true }],
+    });
+    expect((await anon.post(`/host/openwop-app/kanban/boards/${board.id}/cards`, { title: 'anon card', columnId: 'todo' })).status).toBe(201);
+
+    const res = await anon.get(RANKING(board.id));
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect((res.body.ranked as Array<{ title: string }>).map((r) => r.title)).toEqual(['anon card']);
   });
 });

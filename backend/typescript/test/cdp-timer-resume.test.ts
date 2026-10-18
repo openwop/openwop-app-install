@@ -2,6 +2,11 @@
  * CDP-E — self-advancing timer (ADR 0267). Unit coverage for the replay-critical
  * pieces: the deadline is FROZEN from the persisted createdAt (deterministic on
  * :fork), and the sweep resumes each due timer exactly once (CAS-guarded).
+ *
+ * Sabotage-witnessed (/grade-tests w38): a wall-clock duration deadline, ignoring `until`,
+ * dropping the timer-kind check, sweeping resolved rows, ignoring a lost CAS, sweeping before the
+ * deadline, `<` → `<=` at the deadline, and a resolvedAt not frozen to the sweep's `now` each turn
+ * a case red.
  */
 import { describe, expect, it, vi } from 'vitest';
 import type { InterruptRecord } from '../src/types.js';
@@ -9,7 +14,7 @@ import type { Storage } from '../src/storage/storage.js';
 import { timerDeadlineMs, sweepDueTimers } from '../src/executor/timerResume.js';
 
 function timer(data: Record<string, unknown>, createdAt: string, over?: Partial<InterruptRecord>): InterruptRecord {
-  return {
+  const rec: InterruptRecord = {
     interruptId: `it-${Math.random().toString(36).slice(2)}`,
     runId: 'run-1',
     nodeId: 'wait-1',
@@ -19,7 +24,8 @@ function timer(data: Record<string, unknown>, createdAt: string, over?: Partial<
     createdAt,
     expiresAt: new Date(Date.parse(createdAt) + 86_400_000).toISOString(),
     ...over,
-  } as InterruptRecord;
+  };
+  return rec;
 }
 
 const T0 = '2026-07-05T00:00:00.000Z';
@@ -28,9 +34,16 @@ const t0 = Date.parse(T0);
 describe('CDP-E timerDeadlineMs — frozen, replay-stable', () => {
   it('duration: deadline = createdAt + seconds (independent of wall-clock)', () => {
     const itp = timer({ kind: 'duration', seconds: 3600 }, T0);
-    expect(timerDeadlineMs(itp)).toBe(t0 + 3600 * 1000);
-    // recomputing later (a :fork replay) yields the SAME deadline — no wall-clock drift
-    expect(timerDeadlineMs(itp)).toBe(t0 + 3600 * 1000);
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(t0);
+      expect(timerDeadlineMs(itp)).toBe(Date.parse('2026-07-05T01:00:00.000Z'));
+      // Recomputed 30 days later (a :fork replay) — the SAME deadline, no wall-clock drift.
+      vi.setSystemTime(t0 + 30 * 86_400_000);
+      expect(timerDeadlineMs(itp)).toBe(Date.parse('2026-07-05T01:00:00.000Z'));
+    } finally {
+      vi.useRealTimers();
+    }
   });
   it('until: deadline = the absolute persisted timestamp', () => {
     const itp = timer({ kind: 'until', timestamp: '2026-07-06T12:00:00.000Z' }, T0);
@@ -43,21 +56,28 @@ describe('CDP-E timerDeadlineMs — frozen, replay-stable', () => {
 });
 
 describe('CDP-E sweepDueTimers — resumes each due timer exactly once', () => {
+  // The sweep reads exactly these two Storage methods; a full Storage stub would be noise, so the
+  // typed Pick is widened at ONE documented cast (honest ceiling — no `unknown` laundering).
   function stubStorage(open: InterruptRecord[], won: (id: string) => boolean): Storage {
-    return {
+    const stub: Pick<Storage, 'listOpenInterruptsAll' | 'resolveInterrupt'> = {
       listOpenInterruptsAll: vi.fn(async () => open),
       resolveInterrupt: vi.fn(async (id: string) => won(id)),
-    } as unknown as Storage;
+    };
+    return stub as Storage;
   }
 
   it('resumes a due timer and marks it resolved', async () => {
     const due = timer({ kind: 'duration', seconds: 60 }, T0);
     const resume = vi.fn(async () => {});
     const storage = stubStorage([due], () => true);
-    const n = await sweepDueTimers(storage, resume, t0 + 61_000);
+    // Swept at EXACTLY the deadline (createdAt + 60 s): due is `now >= deadline`.
+    const n = await sweepDueTimers(storage, resume, t0 + 60_000);
     expect(n).toBe(1);
     expect(resume).toHaveBeenCalledOnce();
+    expect(resume).toHaveBeenCalledWith(due);
     expect(storage.resolveInterrupt).toHaveBeenCalledOnce();
+    // resolvedAt is the sweep's frozen `now`, never wall-clock at wake.
+    expect(storage.resolveInterrupt).toHaveBeenCalledWith(due.interruptId, { elapsed: true, reason: 'timer' }, '2026-07-05T00:01:00.000Z');
   });
 
   it('skips a timer whose deadline has not elapsed', async () => {

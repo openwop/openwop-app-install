@@ -76,7 +76,8 @@ describe('consent erasure — what the operator is told', () => {
     expect(receipt).toBeTruthy();
     expect(screen.getByText(/all 4 feature store/i)).toBeTruthy();
     // Spoken once, by the receipt.
-    expect(currentAnnouncements().polite).toMatch(/erasure completed for "subj-42"/i);
+    // The announcement comes from a passive effect that can flush after findBy sees the DOM; wait for it.
+    await waitFor(() => expect(currentAnnouncements().polite).toMatch(/erasure completed for "subj-42"/i));
     expect(toastSuccess).not.toHaveBeenCalled();
     expect(toastError).not.toHaveBeenCalled();
   });
@@ -90,7 +91,7 @@ describe('consent erasure — what the operator is told', () => {
     // The green success path must NOT fire — that was the whole defect. What
     // is spoken is the partial sentence, never the completed one.
     expect(toastSuccess).not.toHaveBeenCalled();
-    expect(currentAnnouncements().polite).toMatch(/partial erasure of "subj-42"/i);
+    await waitFor(() => expect(currentAnnouncements().polite).toMatch(/partial erasure of "subj-42"/i));
     expect(currentAnnouncements().polite).not.toMatch(/erasure completed/i);
   });
 
@@ -112,7 +113,7 @@ describe('consent erasure — what the operator is told', () => {
     expect(screen.getByText(/home workspace/i)).toBeTruthy();
     // The green path must NOT fire — that is the lie this branch removes.
     expect(toastSuccess).not.toHaveBeenCalled();
-    expect(currentAnnouncements().polite).toMatch(/found NOTHING to erase/i);
+    await waitFor(() => expect(currentAnnouncements().polite).toMatch(/found NOTHING to erase/i));
     expect(currentAnnouncements().polite).not.toMatch(/erasure completed/i);
     // And never the "all N feature store(s) reported success" sentence.
     expect(screen.queryByText(/reported success/i)).toBeNull();
@@ -124,7 +125,7 @@ describe('consent erasure — what the operator is told', () => {
     expect(await screen.findByText(/reported success/i)).toBeTruthy();
     // foundNothing:false must not route to the zero-row branch.
     expect(screen.queryByText(/found NOTHING/i)).toBeNull();
-    expect(currentAnnouncements().polite).toMatch(/erasure completed/i);
+    await waitFor(() => expect(currentAnnouncements().polite).toMatch(/erasure completed/i));
   });
 
   it('CONS-G2: the confirm discloses the cascade and that it cannot be undone', async () => {

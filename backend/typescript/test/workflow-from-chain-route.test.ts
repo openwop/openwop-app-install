@@ -11,6 +11,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createApp } from '../src/index.js';
+import { resolveFrozenAiDefault, withRunAiDefault } from '../src/host/runAiDefault.js';
 
 let server: http.Server;
 let PORT: number;
@@ -167,7 +168,7 @@ describe('from-chain: a blank copy still mints a RUNNABLE workflow', () => {
     expect(r.status, 'copying a template must not require a form').toBe(201);
   });
 
-  it('THE INCIDENT ASSERTION: the minted AI node carries a concrete provider', async () => {
+  it('THE INCIDENT ASSERTION: a call from the minted AI node dispatches with a concrete provider', async () => {
     const c = await cookie();
     const created = await fetch(url('/workflows/from-chain'), {
       method: 'POST', headers: { 'content-type': 'application/json', cookie: c },
@@ -180,11 +181,17 @@ describe('from-chain: a blank copy still mints a RUNNABLE workflow', () => {
     const def = (await got.json()) as { nodes?: Array<{ typeId: string; config?: Record<string, unknown> }> };
     const ai = (def.nodes ?? []).filter((n) => n.typeId === 'core.ai.chatCompletion');
     expect(ai.length, 'fixture guard: no AI node in the minted definition').toBeGreaterThan(0);
+    // ADR 0903 D7 — the copy pins no vendor; the run's AI default, frozen at run
+    // start, fills it at the call (D3). Before ADR 0903 an absent provider reached
+    // dispatch as `Provider "undefined"`; now it must resolve to a real one.
+    const runDefault = await resolveFrozenAiDefault('from-chain-incident');
+    expect(runDefault, 'the host catalog offers a default provider').not.toBeNull();
     for (const n of ai) {
-      // Before the fix these were absent entirely and dispatch reported
-      // `Provider "undefined"`. A blank copy must still be runnable.
-      expect(String(n.config?.provider)).toBe('anthropic');
-      expect(String(n.config?.model)).not.toMatch(/undefined|\{\{/);
+      expect(n.config?.provider, 'no vendor is pinned (ADR 0903 D7)').toBeUndefined();
+      expect(String(n.config?.model ?? '')).not.toMatch(/undefined|\{\{/);
+      const d = withRunAiDefault({ provider: n.config?.provider as string | undefined, model: n.config?.model as string | undefined }, runDefault);
+      expect(d.provider).toBe(runDefault!.provider);
+      expect(typeof d.model === 'string' && d.model.length > 0).toBe(true);
     }
   });
 });

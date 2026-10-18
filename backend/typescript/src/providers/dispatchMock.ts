@@ -18,6 +18,7 @@
  */
 
 import type { DispatchRequest, DispatchResult } from './dispatch.js';
+import type { ToolsRoundResult } from './dispatchAnthropicTools.js';
 
 export interface MockBehavior {
   /** Provider-stop-reason string (raw — normalized downstream).
@@ -43,6 +44,13 @@ export interface MockBehavior {
    *  upstream error; `mapDispatchErrors` classifies it). Exercises the
    *  node-retry + invocation-log failure-recording paths. */
   errorCode?: string;
+  /** ADR 0889 D6 — a TOOL ROUND: the tool calls the model "makes" this round.
+   *  Consumed only by `dispatchMockToolsRound` (the tool-calling path); an
+   *  entry with `toolCalls` answers the round with `finishReason: 'tool_use'`,
+   *  and an entry without it ends the loop with `content`. This is what lets a
+   *  chat tool loop or a live agent dispatch run real tool rounds in CI with no
+   *  provider key. */
+  toolCalls?: ReadonlyArray<{ name: string; input?: Record<string, unknown> }>;
 }
 
 export type MockProgram = readonly MockBehavior[];
@@ -257,5 +265,43 @@ export async function dispatchMock(req: DispatchRequest & { nodeId?: string }): 
     },
     ...(behavior.stopReason ? { finishReason: behavior.stopReason } : {}),
     ...(behavior.refusalText ? { blockReason: 'refusal' } : {}),
+  };
+}
+
+/**
+ * ADR 0889 D6 — the tool-calling twin of `dispatchMock`. Consumes the next
+ * program entry for `nodeId` and returns the shared `ToolsRoundResult` shape:
+ * the entry's `toolCalls` as `toolUses` (ids are deterministic per program
+ * cursor, so a fork replays identical ids), or a final text round. An exhausted
+ * program ends the loop with an empty completion — a misaligned test surfaces
+ * as "expected N rounds, got N+1", never a hang.
+ */
+export async function dispatchMockToolsRound(req: {
+  nodeId?: string;
+  messages: ReadonlyArray<{ role: string; content: unknown }>;
+  maxTokens?: number;
+}): Promise<ToolsRoundResult> {
+  const nodeId = req.nodeId ?? '';
+  const state = programs.get(nodeId);
+  if (state) {
+    state.lastReceivedMaxTokens = req.maxTokens ?? null;
+    state.receivedMaxTokens.push(req.maxTokens ?? null);
+    state.lastReceivedMessages = req.messages.map((m) => ({ role: m.role, content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content) }));
+  }
+  const at = state?.cursor ?? 0;
+  const behavior: MockBehavior =
+    state !== undefined && state.cursor < state.program.length
+      ? state.program[state.cursor++]!
+      : {};
+  if (behavior.errorCode) {
+    throw Object.assign(new Error(`mock programmed failure (${behavior.errorCode})`), { code: behavior.errorCode });
+  }
+  const calls = behavior.toolCalls ?? [];
+  return {
+    text: behavior.content ?? '',
+    toolUses: calls.map((c, i) => ({ id: `mock-call-${at}-${i}`, name: c.name, input: { ...(c.input ?? {}) } })),
+    finishReason: calls.length > 0 ? 'tool_use' : (behavior.stopReason ?? 'end_turn'),
+    inputTokens: behavior.inputTokens ?? 100,
+    outputTokens: behavior.outputTokens ?? 50,
   };
 }

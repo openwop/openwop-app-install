@@ -8,9 +8,9 @@ import {
   registerCommandSource, getContributedCommands, subscribeCommandSources,
   __resetCommandSources, type ContributedCommand,
 } from '../commandContributions.js';
+import { BoxesIcon } from '../icons/index.js';
 
-const StubIcon = (() => null) as unknown as ContributedCommand['icon'];
-const cmd = (id: string): ContributedCommand => ({ id, label: id, hint: '', group: 'g', icon: StubIcon, run: () => {} });
+const cmd = (id: string): ContributedCommand => ({ id, label: id, hint: '', group: 'g', icon: BoxesIcon, run: () => {} });
 
 describe('commandContributions', () => {
   beforeEach(() => __resetCommandSources());

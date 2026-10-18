@@ -36,6 +36,10 @@ import { resolveAgentIdentity } from '../../../host/agentIdentity.js';
 import { RealtimeProviderError, type RealtimeProviderId, type RealtimeToolDecl } from './types.js';
 import { sendError } from '../../../middleware/errorEnvelope.js';
 import { resolveTenantWorkflow } from '../../../host/resolveLaunchDefinition.js';
+import { requireVoiceTurn, snapshotVoiceAuthority } from '../voiceAuthority.js';
+import { requireProtocolScope } from '../../../host/protocolAuthorization.js';
+import { callerSubject } from '../../../host/requestSubject.js';
+import { budgetInstructions } from './instructionBudget.js';
 
 const log = createLogger('features.voice.realtime');
 const OPENAI_BASE = (process.env.OPENAI_BASE_URL ?? 'https://api.openai.com').replace(/\/$/, '');
@@ -119,18 +123,9 @@ async function composeRealtimeInstructions(
     degraded.push('preamble');
     return '';
   });
-  const blocks = [ctx.systemPrompt, SPOKEN_MODE_ADDENDUM, preamble, transcript].filter((b) => b.length > 0);
-  let instructions = blocks.join('\n\n');
-  // Size guard: providers cap instruction payloads; keep a hard ceiling and
-  // shed the TRANSCRIPT first (oldest context, already elision-tolerant).
-  const MAX_INSTRUCTIONS_CHARS = 24_000;
-  if (instructions.length > MAX_INSTRUCTIONS_CHARS) {
-    const withoutTranscript = [ctx.systemPrompt, SPOKEN_MODE_ADDENDUM, preamble].filter((b) => b.length > 0).join('\n\n');
-    const room = MAX_INSTRUCTIONS_CHARS - withoutTranscript.length - 2;
-    instructions = room > 200
-      ? `${withoutTranscript}\n\n${transcript.slice(-room)}`
-      : withoutTranscript.slice(0, MAX_INSTRUCTIONS_CHARS);
-  }
+  // ADR 0893 D8 (architect H6/M7) — size guard by whole blocks, never a character
+  // cut across a fence; the transcript digest (other members' words) is fenced.
+  const instructions = budgetInstructions({ systemPrompt: ctx.systemPrompt, addendum: SPOKEN_MODE_ADDENDUM, preamble, transcript });
   return { instructions, seedTurns, degraded, conveneRefusal: ctx.conveneRefusal };
 }
 
@@ -151,6 +146,10 @@ async function scopedConversationIdOf(
   const exists = await storage.getChatSession(tenantId, conversationId).catch(() => null);
   if (!exists) return undefined;
   const meta = await getConversationMeta(tenantId, conversationId).catch(() => null);
+  // ADR 0879 (architect H3) — a voice transcript never lands in a CHANNEL: the
+  // sideband appends outside the channel's post gate (role, announcement policy),
+  // so a Viewer could otherwise speak into a public room. Unscoped, not refused.
+  if (meta?.type === 'channel') return undefined;
   const visible = await isVisibleToAsync(meta, tenantId, callerUserId).catch(() => false);
   return visible ? conversationId : undefined;
 }
@@ -179,13 +178,20 @@ export function registerRealtimeRoutes(deps: RouteDeps): void {
   // Open a realtime session: mint the ephemeral token + return the browser config.
   app.post(`${BASE}/session`, async (req, res, next) => {
     try {
-      await requireFeatureEnabled(req, 'voice', 'Voice mode');
+      await requireVoiceTurn(req); // ADR 0893 D1
       const tenantId = tenantOf(req);
       const config = await getRealtimeConfig(tenantId);
 
       // Not configured → tell the FE to use the walkie-talkie fallback (expected, not an error).
       if (config.provider === 'off') {
         res.status(200).json({ realtime: null });
+        return;
+      }
+      // ADR 0893 D3 — an OpenAI session is opened ONLY through the host-mediated sideband
+      // (…/openai/connect). Minting here handed the browser a client secret on the tenant's
+      // key: a session with no host tool gate, no transcript and no audit.
+      if (config.provider === 'openai-realtime') {
+        sendError(res, 409, 'realtime_use_sideband', 'OpenAI Realtime sessions open through the host sideband (POST …/voice/realtime/openai/connect).', { provider: config.provider });
         return;
       }
       if (!config.credentialRef) {
@@ -255,6 +261,8 @@ export function registerRealtimeRoutes(deps: RouteDeps): void {
           ...(scopedConversationId ? { conversationId: scopedConversationId } : {}),
           // ADR 0627 D3 (review S2) — the opener's personal tenant, host-bound at mint.
           ...(callerUser && personalTenantOf(req) ? { personalTenant: personalTenantOf(req) } : {}),
+          // ADR 0893 D2 — the opener's subject; …/tool-call answers only this caller.
+          ...(callerSubject(req) ? { subject: callerSubject(req) } : {}),
         });
         // RTV-4: audit the ephemeral-token mint (no key material; provider + agent only).
         log.info('realtime_session_created', { tenantId, provider: config.provider, agentId, hostSessionId });
@@ -279,7 +287,7 @@ export function registerRealtimeRoutes(deps: RouteDeps): void {
   // retiring the firewall-bypass + no-audit findings for the OpenAI path.
   app.post(`${BASE}/openai/connect`, async (req, res, next) => {
     try {
-      await requireFeatureEnabled(req, 'voice', 'Voice mode');
+      await requireVoiceTurn(req); // ADR 0893 D1
       const tenantId = tenantOf(req);
       const config = await getRealtimeConfig(tenantId);
       if (config.provider !== 'openai-realtime') {
@@ -403,6 +411,9 @@ export function registerRealtimeRoutes(deps: RouteDeps): void {
         ...(scopedConversationId ? { conversationId: scopedConversationId } : {}),
         ...(callerUser ? { userId: callerUser.userId } : {}),
         ...(callerUser && personalTenantOf(req) ? { personalTenant: personalTenantOf(req) } : {}),
+        // ADR 0893 D4 — the opener's authority, re-asked before every tool call,
+        // delegation and transcript write for the life of the call.
+        authority: snapshotVoiceAuthority(req),
       };
       openSideband(session, apiKey, sessionConfig);
       res.status(200).json({ sessionId: callId, sdp: answer, ...(routeDegraded.length > 0 ? { degraded: routeDegraded } : {}) });
@@ -447,7 +458,7 @@ export function registerRealtimeRoutes(deps: RouteDeps): void {
   // turn uses, and returns the result for the browser to send back into the realtime session.
   app.post(`${BASE}/tool-call`, async (req, res, next) => {
     try {
-      await requireFeatureEnabled(req, 'voice', 'Voice mode');
+      await requireVoiceTurn(req); // ADR 0893 D1 — before the session lookup (no id oracle)
       const tenantId = tenantOf(req);
       const body = (req.body ?? {}) as { sessionId?: unknown; callId?: unknown; name?: unknown; arguments?: unknown; userApproved?: unknown };
       const name = optionalString(body.name);
@@ -459,7 +470,9 @@ export function registerRealtimeRoutes(deps: RouteDeps): void {
       // uses the host id as the firewall seen-set key — it can't be rotated to reset
       // composition state within a conversation.
       const resolved = hostSessionId ? await resolveRealtimeSession(hostSessionId, tenantId) : null;
-      if (!resolved || !hostSessionId) {
+      // ADR 0893 D2 — the session answers only its OPENER (same subject). One refusal for
+      // unknown / other tenant / other caller, so the id is no oracle.
+      if (!resolved || !hostSessionId || resolved.subject !== callerSubject(req)) {
         throw new OpenwopError('forbidden', 'A valid realtime session (from POST /session) is required.', 403, {});
       }
       const args = (body.arguments && typeof body.arguments === 'object') ? body.arguments as Record<string, unknown> : {};
@@ -488,6 +501,9 @@ export function registerRealtimeRoutes(deps: RouteDeps): void {
   app.post(`${BASE}/held-approvals/resolve`, async (req, res, next) => {
     try {
       await requireFeatureEnabled(req, 'voice', 'Voice mode');
+      // ADR 0893 M4 — answering a held call is the voice twin of resolving a run's
+      // interrupt, which a typed turn does under `approvals:respond`.
+      await requireProtocolScope(req, 'approvals:respond');
       const user = await resolveCallerUser(req);
       const body = (req.body ?? {}) as { callId?: unknown; fcId?: unknown; approve?: unknown };
       if (typeof body.callId !== 'string' || !body.callId || typeof body.fcId !== 'string' || !body.fcId || typeof body.approve !== 'boolean') {

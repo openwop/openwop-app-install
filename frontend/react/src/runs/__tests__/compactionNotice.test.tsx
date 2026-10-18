@@ -13,10 +13,19 @@
  * markers are present AND must be absent when they are not. A disclosure that
  * always renders is noise, and a test that only checks the positive case cannot
  * tell the two apart.
+ *
+ * Sabotages that turn it red (w22 probes): `+=` → `=` in the elided sum; `> 0` →
+ * `>= 0` in hasCompactionMarkers; descend into `_emptied`; drop the cycle `seen`
+ * set; accept a negative `_elided`; drop the row-count / field-name text; drop
+ * the `return null`; `variant="error"`; default `announce` to true or ignore it;
+ * drop `<CompactionNotice` from RunTimeline or `announce` from RunStepInspector.
  */
 import { describe, it, expect, afterEach } from 'vitest';
-import { render, screen, cleanup } from '@testing-library/react';
+import { render, screen, cleanup, fireEvent, within } from '@testing-library/react';
+import type { RunEventDoc } from '@openwop/openwop';
 import { CompactionNotice, findCompactionMarkers, hasCompactionMarkers } from '../CompactionNotice.js';
+import { RunStepInspector } from '../RunStepInspector.js';
+import { RunTimeline } from '../RunTimeline.js';
 import { announce, currentAnnouncements } from '../../ui/announce.js';
 
 afterEach(cleanup);
@@ -26,8 +35,9 @@ describe('findCompactionMarkers', () => {
     const payload = {
       items: [{ id: 1 }, { _elided: 137 }, { id: 200 }],
       nested: { rows: [{ a: 1 }, { _elided: 4 }], _emptied: ['tags', 'note'] },
+      more: { _emptied: ['tags', 'extra'] }, // a repeat is listed once, first-seen order kept
     };
-    expect(findCompactionMarkers(payload)).toEqual({ elidedRows: 141, emptiedFields: ['tags', 'note'] });
+    expect(findCompactionMarkers(payload)).toEqual({ elidedRows: 141, emptiedFields: ['tags', 'note', 'extra'] });
   });
 
   it('reports NOTHING for an ordinary payload (the negative polarity)', () => {
@@ -38,19 +48,26 @@ describe('findCompactionMarkers', () => {
   it('does not count the disclosure list itself as payload', () => {
     // `_emptied` holds KEY NAMES. Walking into it would be counting the notice's
     // own words, inflating the very number the notice exists to state honestly.
-    expect(findCompactionMarkers({ _emptied: ['a', 'b'], keep: 1 }).elidedRows).toBe(0);
+    // A hostile shape (run payloads are untrusted): an object INSIDE the disclosure
+    // list must not be walked. With real kernel output (`_emptied` is all strings)
+    // the skip is unobservable — w22 fe-skip-emptied was vacuous on ['a','b'].
+    expect(findCompactionMarkers({ _emptied: ['a', { _elided: 9 }], keep: 1 })).toEqual({ elidedRows: 0, emptiedFields: ['a'] });
   });
 
   it('is total — a cycle, a primitive or a hostile shape never throws', () => {
-    const cyclic: Record<string, unknown> = { a: 1 };
+    // The cycle carries a marker, so a missing `seen` set is observable: the
+    // depth bound alone stops the walk, but only after counting it 65 times.
+    const cyclic: Record<string, unknown> = { _elided: 5 };
     cyclic.self = cyclic;
-    expect(() => findCompactionMarkers(cyclic)).not.toThrow();
+    expect(findCompactionMarkers(cyclic).elidedRows).toBe(5);
     expect(() => findCompactionMarkers(null)).not.toThrow();
     expect(() => findCompactionMarkers('a string')).not.toThrow();
     // A non-numeric / negative `_elided` is not a real marker and must not
     // manufacture a disclosure out of ordinary data.
     expect(hasCompactionMarkers(findCompactionMarkers({ _elided: 'not a number' }))).toBe(false);
     expect(hasCompactionMarkers(findCompactionMarkers({ _elided: 0 }))).toBe(false);
+    // A negative count must not SUBTRACT from real markers.
+    expect(findCompactionMarkers({ items: [{ _elided: 5 }, { _elided: -3 }, { _elided: 'x' }] }).elidedRows).toBe(5);
   });
 });
 
@@ -115,7 +132,10 @@ describe('CompactionNotice', () => {
  * `politeMsg`, so N marker-carrying events in a segment collapse to a single
  * orphaned count — from whichever event rendered last. Rendering one component
  * on its own can observe neither: it is one notice, and it is not inside a
- * disclosure. Both are asserted here, at the multiplicity the real surface has.
+ * disclosure. Both are asserted below: the default is silent (so N notices in a
+ * segment leave the single polite channel untouched — a separate N-notice case
+ * was cut in w22 as the same break), and the real RunTimeline collapsed
+ * disclosure is rendered in the last block.
  */
 describe('announcement is scoped to the surface the operator opened (M10)', () => {
   const markers = { elidedRows: 137, emptiedFields: ['tags'] };
@@ -133,36 +153,38 @@ describe('announcement is scoped to the surface the operator opened (M10)', () =
     render(<CompactionNotice markers={markers} announce />);
     expect(currentAnnouncements().polite).toContain('137');
   });
-
-  it('N silent notices leave the single polite channel free for the opened one', () => {
-    // The collapse the isolated test could not observe: three notices, one
-    // channel. With all three announcing, the operator hears one number and
-    // cannot tell which event it belongs to.
-    announce('', { assertive: false });
-    render(
-      <details>
-        <summary>payload</summary>
-        <CompactionNotice markers={{ elidedRows: 1, emptiedFields: [] }} />
-        <CompactionNotice markers={{ elidedRows: 2, emptiedFields: [] }} />
-        <CompactionNotice markers={{ elidedRows: 3, emptiedFields: [] }} />
-      </details>,
-    );
-    expect(currentAnnouncements().polite).toBe('');
-  });
 });
 
+/**
+ * The two render paths, RENDERED — these replace a source grep that could not
+ * see whether the opened surface announces (w22 fe-inspector-announce, vacuous).
+ */
 describe('the render paths actually call the disclosure', () => {
-  it('both raw-payload renderers wire it in', async () => {
-    // A component nobody renders discloses nothing. These two files are the ONLY
-    // places `ev.payload` reaches a `<pre>`; a third would need this row too.
-    const { readFileSync } = await import('node:fs');
-    const { join } = await import('node:path');
-    const dir = join(process.cwd(), 'src/runs');
-    const inspector = readFileSync(join(dir, 'RunStepInspector.tsx'), 'utf8');
-    const timeline = readFileSync(join(dir, 'RunTimeline.tsx'), 'utf8');
-    for (const [name, src] of [['RunStepInspector', inspector], ['RunTimeline', timeline]] as const) {
-      expect(src, `${name} still renders a raw payload`).toContain('JSON.stringify(ev.payload');
-      expect(src, `${name} renders a raw payload without disclosing compaction`).toContain('<CompactionNotice');
-    }
+  const elided: RunEventDoc = {
+    eventId: 'e3', runId: 'r1', schemaVersion: 1, sequence: 3, type: 'node.completed', nodeId: 'lister',
+    timestamp: '2026-09-01T00:00:03.000Z',
+    payload: { items: [{ id: 1 }, { _elided: 137 }, { id: 200 }] },
+  };
+
+  it('RunStepInspector (the expanded surface) discloses AND announces', () => {
+    announce('', { assertive: false });
+    render(<RunStepInspector events={[elided]} seq={3} />);
+    expect(screen.getByText(/137 rows were removed/)).toBeTruthy();
+    expect(currentAnnouncements().polite).toContain('137');
+  });
+
+  it('RunTimeline (the collapsed payload) discloses SILENTLY', () => {
+    announce('', { assertive: false });
+    const events: RunEventDoc[] = [
+      { eventId: 'e1', runId: 'r1', schemaVersion: 1, sequence: 1, type: 'run.started', timestamp: '2026-09-01T00:00:01.000Z', payload: {} },
+      { eventId: 'e2', runId: 'r1', schemaVersion: 1, sequence: 2, type: 'node.started', nodeId: 'lister', timestamp: '2026-09-01T00:00:02.000Z', payload: {} },
+      elided,
+    ];
+    const { container } = render(<RunTimeline events={events} readState="ready" />);
+    fireEvent.click(screen.getByRole('button', { name: /lister/ }));
+    const details = container.querySelector('details');
+    expect(details).not.toBeNull();
+    expect(within(details as HTMLElement).getByText(/137 rows were removed/)).toBeTruthy();
+    expect(currentAnnouncements().polite).toBe('');
   });
 });

@@ -30,6 +30,14 @@ async function cardFor(policy: EvidencePolicy, owner: string): Promise<string> {
   return today.enrollments.at(-1)!.actions[0]!.occurrence.cardId;
 }
 
+/** A refusal is the TYPED evidence error naming the policy that was not met — a
+ *  note refused under the photo rule (or vice versa) is a different defect. */
+async function refusedAs(attempt: Promise<unknown>, policy: EvidencePolicy): Promise<void> {
+  const err = await attempt.then(() => null, (e: unknown) => e);
+  expect(err).toBeInstanceOf(EvidenceRequiredError);
+  expect(err).toMatchObject({ policy });
+}
+
 beforeEach(async () => {
   initHostExtPersistence(await openStorage('memory://'));
   registerGoalVerifier('kicktodo:progress-evidence', async () => ({ satisfied: false, confidence: 0, runId: 'r' }));
@@ -48,8 +56,8 @@ describe('the evidence-policy matrix (KTFULL-B6)', () => {
   it('note: an empty or whitespace-only note is REFUSED; real text is accepted', async () => {
     const owner = 'user:ev-note';
     const card = await cardFor('note', owner);
-    await expect(submitCheckIn(T, owner, card, {})).rejects.toBeInstanceOf(EvidenceRequiredError);
-    await expect(submitCheckIn(T, owner, card, { note: '   ' })).rejects.toBeInstanceOf(EvidenceRequiredError);
+    await refusedAs(submitCheckIn(T, owner, card, {}), 'note');
+    await refusedAs(submitCheckIn(T, owner, card, { note: '   ' }), 'note');
     // …and nothing was written by the refused attempts.
     expect(await listCheckIns(T, (await todayFor(T, owner)).enrollments.at(-1)!.enrollmentId)).toHaveLength(0);
     expect((await submitCheckIn(T, owner, card, { note: 'Did it' })).note).toBe('Did it');
@@ -58,23 +66,23 @@ describe('the evidence-policy matrix (KTFULL-B6)', () => {
   it('photo: refused without a media reference', async () => {
     const owner = 'user:ev-photo';
     const card = await cardFor('photo', owner);
-    await expect(submitCheckIn(T, owner, card, {})).rejects.toBeInstanceOf(EvidenceRequiredError);
+    await refusedAs(submitCheckIn(T, owner, card, {}), 'photo');
     expect((await submitCheckIn(T, owner, card, { note: 'media:abc123' })).note).toBe('media:abc123');
   });
 
   it('measurement: refused without a finite number — a NOTE is not a measurement', async () => {
     const owner = 'user:ev-measure';
     const card = await cardFor('measurement', owner);
-    await expect(submitCheckIn(T, owner, card, {})).rejects.toBeInstanceOf(EvidenceRequiredError);
-    await expect(submitCheckIn(T, owner, card, { note: 'about 5k' })).rejects.toBeInstanceOf(EvidenceRequiredError);
-    await expect(submitCheckIn(T, owner, card, { measuredValue: Number.NaN })).rejects.toBeInstanceOf(EvidenceRequiredError);
+    await refusedAs(submitCheckIn(T, owner, card, {}), 'measurement');
+    await refusedAs(submitCheckIn(T, owner, card, { note: 'about 5k' }), 'measurement');
+    await refusedAs(submitCheckIn(T, owner, card, { measuredValue: Number.NaN }), 'measurement');
     expect((await submitCheckIn(T, owner, card, { measuredValue: 5 })).measuredValue).toBe(5);
   });
 
   it('a refusal leaves the card INCOMPLETE — no completion is credited without evidence', async () => {
     const owner = 'user:ev-nocredit';
     const card = await cardFor('measurement', owner);
-    await expect(submitCheckIn(T, owner, card, {})).rejects.toBeInstanceOf(EvidenceRequiredError);
+    await refusedAs(submitCheckIn(T, owner, card, {}), 'measurement');
     const today = await todayFor(T, owner);
     const action = today.enrollments.at(-1)!.actions.find((a) => a.occurrence.cardId === card);
     expect(action?.card?.completed).toBe(false);

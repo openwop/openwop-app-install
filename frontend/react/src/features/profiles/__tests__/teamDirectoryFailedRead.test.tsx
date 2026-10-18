@@ -32,10 +32,10 @@ import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, cleanup, act, fireEvent } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 
-import type { Profile } from '../profilesClient.js';
+import type { Profile, TeamDirectory } from '../profilesClient.js';
 import type { MyIdentity } from '../useMyIdentity.js';
 
-const { listProfiles, endorseSkill, unendorseSkill, PROFILE } = vi.hoisted(() => {
+const { listProfiles, endorseSkill, unendorseSkill, shareProfileWithWorkspace, PROFILE, dirMeta } = vi.hoisted(() => {
   /** Complete against the real shape — a thin fixture renders no row and every
    *  assertion then fails for a reason unrelated to the defect.
    *  `displayName`, NOT `preferredName` — the card reads the former and falls
@@ -51,13 +51,20 @@ const { listProfiles, endorseSkill, unendorseSkill, PROFILE } = vi.hoisted(() =>
   };
   return {
     PROFILE,
+    /** ADR 0888 D1 — which directory the page is shown (home unless a case says). */
+    dirMeta: { current: { scope: 'home' } as Omit<TeamDirectory, 'profiles'> },
     listProfiles: vi.fn<() => Promise<Profile[]>>(),
+    shareProfileWithWorkspace: vi.fn<() => Promise<Profile>>(),
     endorseSkill: vi.fn<(userId: string, skill: string) => Promise<Profile>>(),
     unendorseSkill: vi.fn<(userId: string, skill: string) => Promise<Profile>>(),
   };
 });
 vi.mock('../profilesClient.js', async (orig) => ({
   ...(await orig<typeof import('../profilesClient.js')>()),
+  // TeamPage reads the directory WITH its scope; the cases drive the rows through
+  // `listProfiles` (a plain wrapper, so `resetAllMocks` cannot strip it).
+  getTeamDirectory: async (): Promise<TeamDirectory> => ({ ...dirMeta.current, profiles: await listProfiles() }),
+  shareProfileWithWorkspace,
   listProfiles,
   endorseSkill,
   unendorseSkill,
@@ -83,6 +90,7 @@ beforeEach(() => {
   announce('');
   announce('', { assertive: true });
   listProfiles.mockResolvedValue([PROFILE]);
+  dirMeta.current = { scope: 'home' };
 });
 
 describe('a failed directory read is not an empty directory', () => {
@@ -202,5 +210,34 @@ describe('the endorse chip (PROF-UX-9 / 16 / 17)', () => {
     await mountWithLive();
     const flag = document.querySelector('.teampage-flag');
     expect(flag?.querySelector('.sr-only')?.textContent).toBe('Email verified');
+  });
+});
+
+describe('ADR 0888 D1 — a shared workspace says who it lists and offers the one control', () => {
+  it('an empty workspace directory does not say "as teammates fill them in" — it says why and offers to share', async () => {
+    dirMeta.current = { scope: 'workspace', workspaceId: 'ws:1', workspaceName: 'Acme', sharedByMe: false };
+    listProfiles.mockResolvedValue([]);
+    shareProfileWithWorkspace.mockResolvedValue(PROFILE);
+    await mount();
+    expect(document.body.textContent).toContain('Nobody has shared a profile here yet');
+    expect(document.body.textContent).not.toContain('Profiles appear here as teammates fill them in');
+    // PROF2UX-1 — it says WHERE and WHAT before you share.
+    expect(document.body.textContent).toContain('Members of Acme will see your name, photo, title, bio, location');
+    fireEvent.click(screen.getByRole('button', { name: 'Share my profile here' }));
+    await act(async () => {});
+    expect(shareProfileWithWorkspace).toHaveBeenCalledTimes(1);
+    expect(listProfiles).toHaveBeenCalledTimes(2); // re-read: the server decides who is listed
+  });
+
+  it('in a workspace a skill is shown without an endorse control', async () => {
+    dirMeta.current = { scope: 'workspace', workspaceId: 'ws:1', sharedByMe: true };
+    await mount();
+    expect(document.body.textContent).toContain('Ada Lovelace');
+    expect(screen.queryByRole('button', { name: /maths/ })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Stop sharing here' })).toBeTruthy();
+    // Said once, in the card — not once per person (PROF2UX-4/-11).
+    expect(document.body.textContent?.split('Endorsing isn’t available in shared workspaces yet.').length).toBe(2);
+    // Already shared: no disclosure asking for consent again.
+    expect(document.body.textContent).not.toContain('will see your name');
   });
 });

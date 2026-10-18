@@ -14,7 +14,7 @@ describe('ChartRenderer', () => {
     const svg = container.querySelector('svg');
     expect(svg).not.toBeNull();
     expect(container.querySelectorAll('rect').length).toBe(2);
-    expect(svg!.textContent).toContain('A');
+    expect([...svg!.querySelectorAll('text')].map((t) => t.textContent)).toEqual(['A', 'B']);
   });
 
   it('renders a line chart as a polyline', () => {
@@ -31,10 +31,12 @@ describe('ChartRenderer', () => {
   it('DEGRADES to raw for an unsupported chartType', () => {
     const { container } = render(<ChartRenderer content={spec({ chartType: 'radar', data: { datasets: [{ data: [1] }] } })} />);
     expect(container.querySelector('svg')).toBeNull();
+    expect(container.querySelector('pre')?.textContent).toContain('"radar"');
   });
 
   it('never innerHTMLs — a script-ish label is inert SVG text', () => {
     const { container } = render(<ChartRenderer content={spec({ chartType: 'bar', data: { labels: ['<script>x</script>'], datasets: [{ data: [1] }] } })} />);
     expect(container.querySelector('script')).toBeNull(); // escaped, not a real node
+    expect(container.querySelector('svg text')?.textContent).toBe('<script>x</script>'); // kept as literal text
   });
 });

@@ -15,7 +15,7 @@
  * The alternative was making ~112 existing assertions await their namespace.
  * That would push a bundling concern onto every test author forever, and tests
  * do not measure bundle size — so the catalogs are preloaded here instead. The
- * SPLIT is verified by `i18nNamespaceSplit.test.ts` + the bundle budget, not by
+ * SPLIT is verified by `namespaceSplit.test.ts` + the bundle budget, not by
  * making the suite live with it.
  */
 import '../i18n/index.js';

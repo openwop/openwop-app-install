@@ -19,105 +19,21 @@
  * So a discovery field would have been host-invented wire surface — advertising
  * something the governing RFC declined to mint.
  *
- * These tests pin BOTH halves: that the bundle carries a recomputable
+ * These tests pinned BOTH halves: that the bundle carries a recomputable
  * derivation, and that the discovery document does NOT carry it.
+ *
+ * CORRECTED 2026-10-16 (ADR 0812 P4 slice 3) — the BUNDLE half is deleted with
+ * the in-process emitter (`conformance/certify.ts`) it exercised. That emitter's
+ * bundle v2 has not been built since ADR 0869 and was served by nothing, so its
+ * `recoveryBound` reached no reader. The published derivation now rides the
+ * suite CLI's signed v3 cut: the `0158.bound-is-derived` row's
+ * `evidence.recoveryBounds`, which the host supplies through the durability seam
+ * (`routes/durabilitySeam.ts`, pinned by `rfc0158-durability-seam.test.ts`).
+ * The discovery half below is unchanged and still binding.
  */
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import {
-  OUTBOX_LEASE_MS,
-  POLL_INTERVAL_MS,
-  ORPHAN_SWEEP_EVERY_N_TICKS,
-} from '../src/host/runDispatchSweeper.js';
-import { RUN_DISPATCH_LEASE_MS } from '../src/executor/executor.js';
-import { recoveryBoundTerms, declaredRecoveryBoundMs } from '../src/host/recoveryBound.js';
-import { assembleCertification, type AssembleInput } from '../conformance/certify.js';
-
-/** The shape `run.ts` emits, built from the live module exactly as it does. */
-function liveRecoveryBound() {
-  return {
-    terms: { ...recoveryBoundTerms() },
-    classes: {
-      unleased: declaredRecoveryBoundMs('unleased'),
-      leased: declaredRecoveryBoundMs('leased'),
-    },
-  };
-}
-
-function assemble(over: Partial<AssembleInput> = {}) {
-  return assembleCertification({
-    document: { capabilities: {} },
-    discoveryUrl: 'http://127.0.0.1:9/.well-known/openwop',
-    states: new Map(),
-    ledger: [],
-    suiteVersion: '0.0.0-test',
-    hostName: 'openwop-workflow-engine',
-    hostVersion: '0.1.0',
-    requireBehavior: false,
-    optedOut: [],
-    now: '2026-01-01T00:00:00.000Z',
-    recoveryBound: liveRecoveryBound(),
-    ...over,
-  });
-}
-
-describe('ADR 0585 P2 — the bound reaches the evidence bundle', () => {
-  it('the bundle carries the recovery bound', () => {
-    const { bundle } = assemble();
-    expect(bundle.recoveryBound).toBeDefined();
-  });
-
-  // The load-bearing property. RFC 0158 asks for "the per-class arithmetic, not
-  // a single total ... where a reader can RECOMPUTE it". A bundle carrying only
-  // totals satisfies "published" and fails the actual requirement, so this
-  // recomputes each class from the terms the bundle itself ships.
-  it('a reader can RECOMPUTE each class from the terms in the bundle alone', () => {
-    const { bundle } = assemble();
-    const { terms, classes } = bundle.recoveryBound!;
-
-    // unleased: the outbox lane owns it (#3461) — lease + one tick.
-    expect(classes.unleased).toBe(OUTBOX_LEASE_MS + POLL_INTERVAL_MS);
-    // leased: the dispatch lease must lapse, then a sweep of the ORPHAN lane,
-    // whose cadence is the product and not POLL_INTERVAL_MS alone.
-    expect(classes.leased).toBe(RUN_DISPATCH_LEASE_MS + terms.orphanSweepIntervalMs);
-    // ...and the term the bundle ships for that cadence is itself the product.
-    expect(terms.orphanSweepIntervalMs).toBe(POLL_INTERVAL_MS * ORPHAN_SWEEP_EVERY_N_TICKS);
-  });
-
-  it('the bundle agrees with the live module — no restated literal', () => {
-    const { bundle } = assemble();
-    expect(bundle.recoveryBound!.classes.unleased).toBe(declaredRecoveryBoundMs('unleased'));
-    expect(bundle.recoveryBound!.classes.leased).toBe(declaredRecoveryBoundMs('leased'));
-    expect(bundle.recoveryBound!.terms).toEqual({ ...recoveryBoundTerms() });
-  });
-
-  // NON-VACUITY FLOOR. Every assertion above is a relation, and relations all
-  // hold trivially between zeroes/NaN — an import resolving to `undefined` would
-  // make the recomputation `NaN === NaN`... which is false, but a zeroed constant
-  // would pass silently. This is the H97 undefined-import floor.
-  it('the published numbers are positive finite milliseconds', () => {
-    const { classes, terms } = assemble().bundle.recoveryBound!;
-    for (const [k, v] of [...Object.entries(classes), ...Object.entries(terms)]) {
-      expect(Number.isFinite(v), `${k} must be finite`).toBe(true);
-      expect(v, `${k} must be positive`).toBeGreaterThan(0);
-    }
-  });
-
-  it('omitting it is possible — the field is optional, not fabricated when absent', () => {
-    // A caller that cannot derive a bound must publish NOTHING rather than a
-    // zero or a placeholder. RFC 0148 §A: absence is evidence of nothing; a
-    // fabricated zero would be evidence of something false.
-    const { bundle } = assemble({ recoveryBound: undefined });
-    expect('recoveryBound' in bundle).toBe(false);
-  });
-
-  it('the bundle still passes the suite\'s own consumer verifier', () => {
-    // The added field must not make the emitter produce a document its own
-    // verifier rejects — that would be an emitter defect, not evidence.
-    expect(assemble().selfAudit).toEqual([]);
-  });
-});
 
 describe('ADR 0585 P2 — the bound must NOT become a discovery field', () => {
   const DISCOVERY = resolve(import.meta.dirname, '..', 'src', 'routes', 'discovery.ts');

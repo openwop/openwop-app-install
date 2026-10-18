@@ -8,8 +8,8 @@ import { describe, it, expect } from 'vitest';
 import { detectBoardMention } from '../lib/agentMentions.js';
 
 describe('detectBoardMention', () => {
-  it('matches `@@<handle>` and captures the trailing question', () => {
-    expect(detectBoardMention('@@timeless what should we prioritize?')).toEqual({ handle: 'timeless', trailing: 'what should we prioritize?' });
+  it('matches `@@<handle>` (lower-cased) and captures the trailing question', () => {
+    expect(detectBoardMention('@@Timeless what should we prioritize?')).toEqual({ handle: 'timeless', trailing: 'what should we prioritize?' });
   });
   it('matches a bare `@@<handle>` with no trailing text', () => {
     expect(detectBoardMention('@@founders')).toEqual({ handle: 'founders', trailing: null });

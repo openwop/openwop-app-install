@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, fireEvent, cleanup } from '@testing-library/react';
 import { A2uiSurfaceCard } from '../A2uiSurfaceCard.js';
-import { A2UI_V09_CATALOG_ID } from '../v09/profile.js';
+import { A2UI_V09_CATALOG_ID, parseV09Payload } from '../v09/profile.js';
 import { foldSurface, setAt, getAt } from '../v09/fold.js';
 import { a2uiInterruptCard } from '../interruptBridge.js';
 import type { CardProps } from '../../registry/types.js';
@@ -29,6 +29,13 @@ const POSITIVE = {
   ],
 };
 
+/** Fold a fixture through the real profile parse (no cast; the fixture must be profile-valid). */
+function folded(p: unknown) {
+  const r = parseV09Payload(p);
+  if (!r.ok) throw new Error(r.reason);
+  return foldSurface([r.payload]);
+}
+
 function renderCard(p: unknown) {
   const onAction = vi.fn().mockResolvedValue(undefined);
   render(<A2uiSurfaceCard payload={p} cardType="ui.a2ui-surface" context={ctx} onAction={onAction} />);
@@ -37,19 +44,29 @@ function renderCard(p: unknown) {
 
 describe('the v0.9 fold', () => {
   it('upserts components by id, sets and removes data at a JSON Pointer, and ignores messages before createSurface', () => {
-    const s = foldSurface([{ ...POSITIVE, messages: [
+    const s = folded({ ...POSITIVE, messages: [
       { version: 'v0.9', updateDataModel: { surfaceId: SID, value: { ignored: true } } },
       ...POSITIVE.messages,
       { version: 'v0.9', updateComponents: { surfaceId: SID, components: [{ id: 'h', component: 'Text', text: 'Renamed' }] } },
       { version: 'v0.9', updateDataModel: { surfaceId: SID, path: '/a~1b', value: 1 } },
-    ] } as never]);
+    ] });
     expect(s.renderable).toBe(true);
     expect((s.components.get('h') as { text: string }).text).toBe('Renamed');
     expect(s.dataModel).toEqual({ name: '', 'a/b': 1 });
     expect(getAt(setAt({ x: { y: 1 } }, '/x/y', undefined), '/x')).toEqual({});
+    // A fold with no createSurface ignores its messages (createSurface itself resets
+    // the model, so only a never-created fold can show the guard).
+    const orphan = folded({ ...POSITIVE, messages: [{ version: 'v0.9', updateDataModel: { surfaceId: SID, value: { ignored: true } } }] });
+    expect(orphan.live).toBe(false);
+    expect(orphan.dataModel).toEqual({});
   });
   it('never walks the prototype chain', () => {
-    expect(setAt({}, '/__proto__/polluted', true)).toEqual({});
+    const r = setAt({}, '/__proto__/polluted', true) as Record<string, unknown>;
+    expect(r).toEqual({});
+    // toEqual ignores prototypes: assert the result was not RE-prototyped either.
+    expect(r.polluted).toBeUndefined();
+    expect(Object.getPrototypeOf(r)).toBe(Object.prototype);
+    expect(setAt({}, '/constructor/prototype/x', 1)).toEqual({});
     expect(({} as Record<string, unknown>).polluted).toBeUndefined();
   });
 });
@@ -115,7 +132,7 @@ describe('the v0.9 renderer', () => {
       { id: 'root', component: 'Image', url: 'https://evil.example/x.png' },
     ] } }] });
     expect(screen.queryByRole('img')).toBeNull();
-    expect(screen.getByText(/could not be rendered safely/)).toBeTruthy();
+    expect(screen.getByText(/could not be rendered safely: the component "Image" is not in the A2UI v0\.9 profile/)).toBeTruthy();
   });
 
   it('chips are named, pressed toggles inside the labelled group; a bound ISO date seeds the native input; a `constructor` id is just an id', () => {

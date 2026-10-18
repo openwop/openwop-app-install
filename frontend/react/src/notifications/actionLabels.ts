@@ -24,6 +24,8 @@ const ACTION_LABEL_KEYS: Record<string, string> = {
   'campaign.pacing':           'actionViewCampaign',
   'comment.added':             'actionViewComment',
   'comment.reply':             'actionViewComment',
+  'comment.mention':           'actionViewComment',
+  'comment.resolved':          'actionViewComment',
   'task.assigned':             'actionViewCard',
   'chat.channel_post':         'actionOpenChannel',
   'agent.deliverable':         'actionViewDeliverable',

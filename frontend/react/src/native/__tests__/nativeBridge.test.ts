@@ -1,3 +1,23 @@
+/**
+ * nativeBridge (ADR 0181 Phase A) — the web app's optional native-shell bridge.
+ *
+ * Guards the module's two design rules: detection is FEATURE-BASED (a recognised
+ * `kind` on `window.openwopNative`, else plain browser), and it NEVER throws — a
+ * broken shell degrades to no-op / `false` so the browser notifier keeps working.
+ * Also: notify returns the shell's OWN answer (true AND false), the badge count is
+ * floored and clamped (negative / NaN / Infinity → 0), and activation clicks are
+ * forwarded and unsubscribable.
+ *
+ * DOUBLE GUARD (by design, not a gap): `if (!api?.notify) return false` is backed by
+ * notify's try/catch — calling a missing member throws and the catch also yields
+ * `false`, so removing the guard alone cannot turn any case red (w53 probe
+ * `nb-notify-guard`). The observable rule ("a shell without notify → false") is
+ * still asserted.
+ *
+ * Breaks it: dropping the `kind` check, returning `true` regardless of the shell's
+ * answer, rethrowing from any catch, `Math.round` / no clamp on the badge, or not
+ * forwarding the shell's unsubscribe.
+ */
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import {
   isNativeShell,
@@ -16,7 +36,9 @@ function installShell(api: NativeShellApi): void {
 }
 
 afterEach(() => {
-  window.openwopNative = undefined;
+  // Remove the member, as in a plain browser tab, rather than set it to
+  // undefined (which exactOptionalPropertyTypes rejects).
+  delete window.openwopNative;
   vi.restoreAllMocks();
 });
 
@@ -44,7 +66,8 @@ describe('nativeBridge — plain browser (no shell injected)', () => {
 describe('nativeBridge — malformed / partial injection', () => {
   it('treats an object without a valid kind as not-native', () => {
     // A shell that injects an unrecognised discriminator must be rejected.
-    window.openwopNative = { kind: 'bogus' as NativeShellApi['kind'] };
+    // Written WITHOUT a cast: the malformed value is exactly what the type forbids.
+    Reflect.set(window, 'openwopNative', { kind: 'bogus' });
     expect(isNativeShell()).toBe(false);
     expect(nativeShellKind()).toBeNull();
   });
@@ -69,6 +92,15 @@ describe('nativeBridge — native shell present', () => {
     );
   });
 
+  it('returns false when the shell reports the notification NOT shown', async () => {
+    // The other polarity: without it a bridge that ignores the shell's answer and
+    // always returns true passes the case above (w53 probe `nb-notify-result`).
+    const notify = vi.fn<NonNullable<NativeShellApi['notify']>>().mockResolvedValue(false);
+    installShell({ kind: 'electron', notify });
+    await expect(nativeNotify({ title: 'Run done', body: 'Finished' })).resolves.toBe(false);
+    expect(notify).toHaveBeenCalledTimes(1);
+  });
+
   it('reports the shell kind', () => {
     installShell({ kind: 'ios' });
     expect(isNativeShell()).toBe(true);
@@ -81,9 +113,14 @@ describe('nativeBridge — native shell present', () => {
     setNativeBadgeCount(4.9);
     setNativeBadgeCount(-2);
     setNativeBadgeCount(0);
+    setNativeBadgeCount(Number.NaN);
+    setNativeBadgeCount(Number.POSITIVE_INFINITY);
     expect(setBadgeCount).toHaveBeenNthCalledWith(1, 4);
     expect(setBadgeCount).toHaveBeenNthCalledWith(2, 0); // negative clears
     expect(setBadgeCount).toHaveBeenNthCalledWith(3, 0);
+    expect(setBadgeCount).toHaveBeenNthCalledWith(4, 0); // NaN is not a count
+    expect(setBadgeCount).toHaveBeenNthCalledWith(5, 0); // nor is Infinity
+    expect(setBadgeCount).toHaveBeenCalledTimes(5);
   });
 
   it('subscribes to activation and forwards the carried path', () => {

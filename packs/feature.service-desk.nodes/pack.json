@@ -1,15 +1,52 @@
 {
   "name": "feature.service-desk.nodes",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "kind": "node",
-  "description": "Service-desk ticket reads over ctx.features['service-desk'] (ADR 0422): list the org queue and read one ticket incl. its thread, so SLA/escalation workflows can branch on ticket state. Writes stay on the approval lane (draft-reply) and the reply-approved event binding — never a node. role:action (recorded).",
+  "description": "Service-desk ticket reads over ctx.features['service-desk'] (ADR 0422): list the org queue and read one ticket incl. its thread, so SLA/escalation workflows can branch on ticket state — plus notify-team (ADR 0878 D8), the addressed notification to a ticket's assignee or its org's writers (never a tenant broadcast). Customer-facing writes stay on the approval lane (draft-reply) and the service's own delivery — never a node. role:action (recorded).",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
-  "keywords": ["feature", "service-desk", "tickets", "support"],
-  "engines": { "openwop": ">=1.0.0 <3.0.0" },
-  "nodes": [
-    { "typeId": "feature.service-desk.nodes.list-tickets", "version": "1.0.0", "label": "Service Desk: List Tickets", "description": "Lists the org's tickets (id/subject/status/priority/channel/message count) over ctx.features['service-desk'].listTickets. Inputs: { orgId, status? }. Output: { tickets }. Tenant-guarded read.", "category": "integration", "role": "action", "capabilities": [] },
-    { "typeId": "feature.service-desk.nodes.get-ticket", "version": "1.0.0", "label": "Service Desk: Get Ticket", "description": "Reads one ticket incl. the message thread over ctx.features['service-desk'].getTicket. Inputs: { ticketId }. Output: { ticket | null }. Tenant-guarded read.", "category": "integration", "role": "action", "capabilities": [] }
+  "keywords": [
+    "feature",
+    "service-desk",
+    "tickets",
+    "support"
   ],
-  "runtime": { "language": "javascript", "format": "esm", "entry": "./index.mjs", "minRuntimeVersion": "node>=20" }
+  "engines": {
+    "openwop": ">=1.0.0 <3.0.0"
+  },
+  "nodes": [
+    {
+      "typeId": "feature.service-desk.nodes.list-tickets",
+      "version": "1.0.0",
+      "label": "Service Desk: List Tickets",
+      "description": "Lists the org's tickets (id/subject/status/priority/channel/message count) over ctx.features['service-desk'].listTickets. Inputs: { orgId, status? }. Output: { tickets }. Tenant-guarded read.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.service-desk.nodes.get-ticket",
+      "version": "1.0.0",
+      "label": "Service Desk: Get Ticket",
+      "description": "Reads one ticket incl. the message thread over ctx.features['service-desk'].getTicket. Inputs: { ticketId, event? } — an event-bound chain routes `trigger.payload` to `event` and an empty `ticketId` falls back to `event.ticketId` (ADR 0878 D8). A ticket that is absent or outside the run person's orgs is a typed `ticket_unavailable` failure, never success-with-null. Output: { ticket } (the requester's address is never included).",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.service-desk.nodes.notify-team",
+      "version": "1.0.0",
+      "label": "Service Desk: Notify Ticket Team",
+      "description": "Notifies the people who work one ticket — its assignee, else every member of the ticket's org with write access — over ctx.features['service-desk'].notifyTicketTeam (ADR 0878 D8). Inputs: { ticketId, event?, title?, message }. Output: { notified }. Never a tenant broadcast; the run person must be able to read the ticket's org.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    }
+  ],
+  "runtime": {
+    "language": "javascript",
+    "format": "esm",
+    "entry": "./index.mjs",
+    "minRuntimeVersion": "node>=20"
+  }
 }

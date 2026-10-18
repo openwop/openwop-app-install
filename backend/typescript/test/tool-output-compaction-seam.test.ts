@@ -8,6 +8,18 @@
  *     :fork-copied value wins on replay — never re-resolved);
  *   - applyToolResultTransform compacts with a live decision, is identity
  *     without one, and fail-opens to identity when the kernel throws.
+ *
+ * Sabotages that turn it red (w22 probes): drop the contributor's toggle check
+ * or its `derivedFromRun` early return; make `stampRunStartContext` overwrite
+ * existing keys or start from `{}`; drop the seam's `!ctx.decision` / `off`
+ * short-circuit or its try/catch; skip `stampRunStartContext` in
+ * `insertRunWithStartContext` or stamp under the wrong tenant; register the
+ * toggle default under an id other than the decision's `TOGGLE_ID`.
+ *
+ * The identity cases register a transform that ALWAYS rewrites, over an
+ * INDENTED payload: with the feature's own decision-guarded transform over a
+ * minified payload, both the seam's guard and the kernel are identity anyway,
+ * so a removed guard stayed green (w22 probes seam-guard-*, vacuous).
  */
 import { describe, it, expect, beforeEach, beforeAll, afterAll } from 'vitest';
 import { openSqliteStorage } from '../src/storage/sqlite/index.js';
@@ -31,6 +43,7 @@ import { saveConfig, __clearToggleStore } from '../src/host/featureToggles/servi
 import { insertRunWithStartContext } from '../src/host/runInsert.js';
 
 const TENANT = 'tenant-a';
+type RunFixture = Parameters<typeof insertRunWithStartContext>[1];
 const storage = openSqliteStorage(':memory:');
 
 async function setToggle(status: 'on' | 'off'): Promise<void> {
@@ -110,17 +123,24 @@ describe('replay / fork — decision read verbatim, never re-resolved', () => {
    * honestly, because it is a claim about `stampRunStartContext` itself.
    */
   it('stampRunStartContext never overwrites an already-frozen decision (safety net)', async () => {
-    await setToggle('off'); // contributor would now resolve to "nothing"
+    // Toggle ON, so the contributor DOES resolve `{ mode: 'lossless' }` — there
+    // is something to overwrite. (With the toggle OFF the contributor returned
+    // `{}` and an always-overwrite merge stayed green: w22 seam-no-overwrite.)
+    await setToggle('on');
     registerRunStartContributor(resolveCompactionDecision);
-    // A metadata blob that already carries a frozen lossless decision.
-    const preStamped = { source: 'api', [COMPACTION_METADATA_KEY]: { mode: 'lossless' as const } };
+    expect(await resolveCompactionDecision({ tenantId: TENANT })).toEqual({ [COMPACTION_METADATA_KEY]: { mode: 'lossless' } });
+    // A blob frozen OFF must not be upgraded by the live toggle.
+    const preStamped = { source: 'api', [COMPACTION_METADATA_KEY]: { mode: 'off' as const } };
     const out = await stampRunStartContext(preStamped, { tenantId: TENANT });
-    expect(readCompactionDecision(out)).toEqual({ mode: 'lossless' });
+    expect(readCompactionDecision(out)).toEqual({ mode: 'off' });
+    expect(out.source).toBe('api');
   });
 });
 
 describe('applyToolResultTransform (the typed tool-result seam)', () => {
   const payload = JSON.stringify({ items: [{ id: 1, tags: [], note: null }, { id: 2, tags: [], note: '' }] });
+  /** Indented, so any lossless pass that RAN would shrink it — identity is observable. */
+  const indented = JSON.stringify(JSON.parse(payload), null, 2);
 
   beforeEach(() => {
     registerToolResultTransform((content, ctx) => compactToolOutput(content, ctx.decision!));
@@ -130,7 +150,6 @@ describe('applyToolResultTransform (the typed tool-result seam)', () => {
     // ADR 0604 (TOCC-3) — the fixture is indented, so `lossless` (minify-only)
     // still shrinks it; what it must NOT do is delete `tags`. The old assertion
     // here was `not.toContain('"tags"')`, pinning the lossy-in-lossless defect.
-    const indented = JSON.stringify(JSON.parse(payload), null, 2);
     const out = applyToolResultTransform(indented, { decision: { mode: 'lossless' }, toolName: 'list' });
     expect(out.length).toBeLessThan(indented.length);
     expect(out).toContain('"tags"');
@@ -148,37 +167,44 @@ describe('applyToolResultTransform (the typed tool-result seam)', () => {
   });
 
   it('is identity with no decision', () => {
-    expect(applyToolResultTransform(payload, {})).toBe(payload);
+    registerToolResultTransform(() => 'TRANSFORMED'); // reached only if the seam fails to short-circuit
+    expect(applyToolResultTransform(indented, {})).toBe(indented);
   });
 
   it('is identity with mode "off"', () => {
-    expect(applyToolResultTransform(payload, { decision: { mode: 'off' } })).toBe(payload);
+    registerToolResultTransform(() => 'TRANSFORMED');
+    expect(applyToolResultTransform(indented, { decision: { mode: 'off' } })).toBe(indented);
   });
 
   it('fail-opens to identity when the registered transform throws', () => {
     registerToolResultTransform(() => {
       throw new Error('boom');
     });
-    expect(applyToolResultTransform(payload, { decision: { mode: 'lossless' } })).toBe(payload);
+    expect(applyToolResultTransform(indented, { decision: { mode: 'lossless' } })).toBe(indented);
   });
 
   it('default (no feature registered) is identity', () => {
     __resetToolResultTransform();
-    expect(applyToolResultTransform(payload, { decision: { mode: 'lossless' } })).toBe(payload);
+    expect(applyToolResultTransform(indented, { decision: { mode: 'lossless' } })).toBe(indented);
   });
 });
 
 describe('insertRunWithStartContext (the single run-insert owner)', () => {
   it('derives the tenant from the run and freezes the decision into run.metadata', async () => {
-    await setToggle('on');
+    // ON for THIS tenant only — a stamp resolved under any other tenant would
+    // read the global OFF and freeze nothing (w22 seam-insert-tenant).
+    await saveConfig(
+      { ...toolOutputCompactionFeature.toggleDefault!, status: 'off', tenantOverrides: { [TENANT]: { status: 'on' } } },
+      'test',
+    );
     registerRunStartContributor(resolveCompactionDecision);
-    const run = {
+    const run: RunFixture = {
       runId: 'run-1',
       workflowId: 'wf-1',
       tenantId: TENANT,
-      status: 'pending' as const,
+      status: 'pending',
       inputs: null,
-      metadata: { source: 'test' } as Record<string, unknown>,
+      metadata: { source: 'test' },
       configurable: {},
       createdAt: '2026-06-20T00:00:00Z',
       updatedAt: '2026-06-20T00:00:00Z',
@@ -186,19 +212,19 @@ describe('insertRunWithStartContext (the single run-insert owner)', () => {
     await insertRunWithStartContext(storage, run);
     const stored = await storage.getRun('run-1');
     expect(readCompactionDecision(stored?.metadata)).toEqual({ mode: 'lossless' });
-    expect((stored?.metadata as Record<string, unknown>).source).toBe('test');
+    expect(stored?.metadata).toMatchObject({ source: 'test' });
   });
 
   it('stamps nothing when the toggle is OFF (run stored uncompacted)', async () => {
     await setToggle('off');
     registerRunStartContributor(resolveCompactionDecision);
-    const run = {
+    const run: RunFixture = {
       runId: 'run-2',
       workflowId: 'wf-1',
       tenantId: TENANT,
-      status: 'pending' as const,
+      status: 'pending',
       inputs: null,
-      metadata: {} as Record<string, unknown>,
+      metadata: {},
       configurable: {},
       createdAt: '2026-06-20T00:00:00Z',
       updatedAt: '2026-06-20T00:00:00Z',

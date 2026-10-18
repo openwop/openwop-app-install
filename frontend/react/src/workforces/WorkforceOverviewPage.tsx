@@ -35,7 +35,7 @@ import {
   type WorkforceStatus,
 } from '../client/workforcesClient.js';
 import { formatCurrency, formatDate, formatDurationMs, formatNumber, formatPercent } from '../i18n/format.js';
-import { useAgentWriteAccess, writeErrorMessage } from '../agents/agentWriteAccess.js';
+import { isStaleWrite, useAgentWriteAccess, writeErrorMessage } from '../agents/agentWriteAccess.js';
 
 function pct(n: number): string {
   return formatPercent(n, { minimumFractionDigits: 1, maximumFractionDigits: 1 });
@@ -94,10 +94,12 @@ export function WorkforceOverviewPage(): JSX.Element {
     setCutoverBusy(true);
     setCutoverError(null);
     try {
-      const updated = await updateWorkforceStatus(workforceId, status);
+      const updated = await updateWorkforceStatus(workforceId, status, { ifMatch: wf?.etag });
       setWf(updated);
     } catch (e: unknown) {
-      setCutoverError(writeErrorMessage(e, t('common:error_forbidden')));
+      setCutoverError(writeErrorMessage(e, t('common:error_forbidden'), t('workforceChangedReload')));
+      // ADR 0775 P4 — show the status the other editor chose, so a retry is decided against it.
+      if (isStaleWrite(e)) await getWorkforce(workforceId).then((w) => { if (w) setWf(w); }).catch(() => undefined);
     } finally {
       setCutoverBusy(false);
     }

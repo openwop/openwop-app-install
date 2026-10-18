@@ -9,6 +9,12 @@
  * Boots `createApp`, so billing's `registerRoutes` performs the registration (and
  * the tenant entitlement check) exactly as in production. Each test uses its own
  * tenant: verdicts are cached per (feature, tenant) for a minute.
+ *
+ * Sabotage witnesses (w35): billing's `registerEntitlementEndedAtSource` call
+ * removed, `Math.max` → `Math.min` over the covering ends, the past-due grace
+ * dropped from a past_due end, never-paid grants counted, an unknown past_due
+ * end treated as known, and a canceled plan's end shifted by a second each red
+ * the leg that claims it.
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';

@@ -1,8 +1,8 @@
 {
   "name": "core.openwop.workflows.commerce",
-  "version": "1.1.1",
+  "version": "1.4.0",
   "kind": "workflow-chain",
-  "description": "Real-work workflow pack (RFC 0013, ADR 0152) \u2014 the Commerce operations cluster (ecommerce gap plan \u00a75C C8): Post-Purchase Thank-You, Low-Stock Reorder Draft, and the Order Exception Digest. Designed to bind to the ADR 0221 host events (host.commerce.order.paid, host.commerce.inventory.low-stock \u2014 create a host-event binding to enroll; ADR 0208) or the schedule trigger. Every outbound send rides the governed email-send integration node (drafts/approval per the tenant's actionPolicy \u2014 ADR 0033) and the ONE notification seam; order data flows through feature.commerce.nodes over ctx.features.commerce, so the ADR 0221 audit rows + spend thresholds apply by construction. Enrollment state = the run itself; a binding fires one run per event.",
+  "description": "Real-work workflow pack (RFC 0013, ADR 0152) — the Commerce operations cluster (ecommerce gap plan §5C C8): Post-Purchase Thank-You, Low-Stock Reorder Draft, and the Order Exception Digest. Designed to bind to the ADR 0221 host events (host.commerce.order.paid, host.commerce.inventory.low-stock — create a host-event binding to enroll; ADR 0208) or the schedule trigger. Every outbound send rides the governed email-send integration node (drafts/approval per the tenant's actionPolicy — ADR 0033) and the ONE notification seam; order data flows through feature.commerce.nodes over ctx.features.commerce, so the ADR 0221 audit rows + spend thresholds apply by construction. Enrollment state = the run itself; a binding fires one run per event.",
   "author": "openwop",
   "license": "Apache-2.0",
   "engines": {
@@ -14,13 +14,17 @@
   "chains": [
     {
       "chainId": "commerce.post-purchase-thankyou",
-      "version": "1.0.1",
+      "version": "1.2.0",
       "label": "Post-Purchase Thank-You",
-      "description": "On order paid (bind to host.commerce.order.paid): read the order, AI-compose a grounded thank-you, human sign-off, then the governed email-send (compose output flows to send via the edge \u2014 the corpus convention; the tenant actionPolicy decides draft-vs-send, the ADR 0193 ledger dedups re-fires).",
+      "description": "On order paid (bind to host.commerce.order.paid): the trigger payload's orderId reaches the order read (a manual run passes `orderId` instead), AI-compose a grounded thank-you, human sign-off, then the governed email-send to `recipientEmail`. ADR 0875 D11: the recipient is still a fixed address (the order's own contact needs a gate-safe recipient lane — follow-up COM2WF-9); re-fires are deduped only by the email-send idempotency key.",
       "parameters": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["orgId", "recipientEmail", "senderEmail"],
+        "required": [
+          "orgId",
+          "recipientEmail",
+          "senderEmail"
+        ],
         "properties": {
           "orgId": {
             "type": "string",
@@ -29,18 +33,39 @@
           "orderId": {
             "type": "string",
             "default": "",
-            "description": "The paid order (from the trigger payload when event-bound)."
+            "description": "The paid order for a MANUAL run. An event-bound run reads it from the trigger payload instead (ADR 0875 D11)."
           },
           "tone": {
             "type": "string",
             "default": "warm, brief, no upsell",
             "description": "Voice for the thank-you note."
           },
-          "provider": { "type": "string", "default": "anthropic", "description": "AI provider id for this chain's LLM nodes. Frozen into this chain's AI nodes when the workflow is created (ADR 0498 — a concrete provider is what keeps replay deterministic). Override at instantiation to use a different vendor or your own BYOK provider; whichever you pick, the workspace needs a key for it — the workflow will not fall back to another provider on its own." },
-          "model": { "type": "string", "default": "claude-sonnet-4-6", "description": "Model id for this chain's LLM nodes. Must be advertised by `provider` in the host catalog; override at instantiation." },
-          "senderEmail": { "type": "string", "description": "Verified sender address these emails are sent from." },
-          "recipientEmail": { "type": "string", "description": "The address this email is sent to." },
-          "emailSubject": { "type": "string", "default": "Thank you for your order", "description": "Subject line for the sent email." }
+          "provider": {
+            "type": "string",
+            "description": "AI provider id for this chain's model-calling nodes. Set it to fix a provider into those nodes when the workflow is created. Leave it unset and each run uses the run's chosen provider, else the workspace's AI setting, else the host's catalog default (ADR 0903); whichever is chosen is recorded on the run, so a replay or fork uses the same one. The workspace needs a key for the provider that runs."
+          },
+          "model": {
+            "type": "string",
+            "description": "Model id for this chain's model-calling nodes. Must be offered by the provider in the host catalog. Leave it unset to use the provider's model from the same choice (ADR 0903)."
+          },
+          "senderEmail": {
+            "type": "string",
+            "description": "Verified sender address these emails are sent from."
+          },
+          "recipientEmail": {
+            "type": "string",
+            "description": "The address this email is sent to."
+          },
+          "emailSubject": {
+            "type": "string",
+            "default": "Thank you for your order",
+            "description": "Subject line for the sent email."
+          },
+          "triggerEventName": {
+            "type": "string",
+            "default": "openwop-app.commerce-order-paid",
+            "description": "The host event this chain ignites on. The event belongs to the INSTALLING HOST, not the pack (ADR 0683) — defaulted to this host's v2 name for it; bind the workflow to that event to enroll."
+          }
         }
       },
       "capabilities": [
@@ -48,6 +73,19 @@
       ],
       "dag": {
         "nodes": [
+          {
+            "id": "trigger",
+            "typeId": "core.trigger.event@1.0.0",
+            "name": "Order paid",
+            "position": {
+              "x": -320,
+              "y": 0
+            },
+            "config": {
+              "eventName": "{{params.triggerEventName}}"
+            },
+            "inputs": {}
+          },
           {
             "id": "order",
             "typeId": "feature.commerce.nodes.get-order@1.0.0",
@@ -88,7 +126,10 @@
             "config": {
               "title": "Approve this thank-you email before it is sent",
               "artifactType": "email.body",
-              "actions": ["approve", "reject"]
+              "actions": [
+                "approve",
+                "reject"
+              ]
             },
             "inputs": {}
           },
@@ -122,6 +163,10 @@
         ],
         "edges": [
           {
+            "from": "trigger.payload",
+            "to": "order.event"
+          },
+          {
             "from": "order",
             "to": "compose"
           },
@@ -132,12 +177,18 @@
           {
             "from": "signoff.artifact",
             "to": "send.text",
-            "condition": { "type": "truthy", "left": "approved" }
+            "condition": {
+              "type": "truthy",
+              "left": "approved"
+            }
           },
           {
             "from": "signoff",
             "to": "gate-reject",
-            "condition": { "type": "falsy", "left": "approved" }
+            "condition": {
+              "type": "falsy",
+              "left": "approved"
+            }
           }
         ]
       },
@@ -150,13 +201,17 @@
     },
     {
       "chainId": "commerce.low-stock-reorder",
-      "version": "1.0.1",
+      "version": "1.2.0",
       "label": "Low-Stock Reorder Draft",
-      "description": "On a low-stock crossing (bind to host.commerce.inventory.low-stock): read catalog context, draft a supplier reorder email, hold it at a purchasing sign-off gate, then send + notify the owner (draft content flows to the send/notify nodes via edges \u2014 the corpus convention). Never mutates inventory.",
+      "description": "On a low-stock crossing (bind to host.commerce.inventory.low-stock): read THAT product (from the trigger payload, or `productId` on a manual run), draft a supplier reorder email, hold it at a purchasing sign-off gate, then the governed send + an owner notification carrying the draft. Never mutates inventory.",
       "parameters": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["orgId", "recipientEmail", "senderEmail"],
+        "required": [
+          "orgId",
+          "recipientEmail",
+          "senderEmail"
+        ],
         "properties": {
           "orgId": {
             "type": "string",
@@ -165,18 +220,39 @@
           "productId": {
             "type": "string",
             "default": "",
-            "description": "The low product (from the trigger payload when event-bound)."
+            "description": "The low-stock product for a MANUAL run. An event-bound run reads it from the trigger payload instead (ADR 0875 D11)."
           },
           "supplierHint": {
             "type": "string",
             "default": "",
             "description": "Optional supplier name/email to address the draft to."
           },
-          "provider": { "type": "string", "default": "anthropic", "description": "AI provider id for this chain's LLM nodes. Frozen into this chain's AI nodes when the workflow is created (ADR 0498 — a concrete provider is what keeps replay deterministic). Override at instantiation to use a different vendor or your own BYOK provider; whichever you pick, the workspace needs a key for it — the workflow will not fall back to another provider on its own." },
-          "model": { "type": "string", "default": "claude-sonnet-4-6", "description": "Model id for this chain's LLM nodes. Must be advertised by `provider` in the host catalog; override at instantiation." },
-          "senderEmail": { "type": "string", "description": "Verified sender address these emails are sent from." },
-          "recipientEmail": { "type": "string", "description": "The address this email is sent to." },
-          "emailSubject": { "type": "string", "default": "Reorder request", "description": "Subject line for the sent email." }
+          "provider": {
+            "type": "string",
+            "description": "AI provider id for this chain's model-calling nodes. Set it to fix a provider into those nodes when the workflow is created. Leave it unset and each run uses the run's chosen provider, else the workspace's AI setting, else the host's catalog default (ADR 0903); whichever is chosen is recorded on the run, so a replay or fork uses the same one. The workspace needs a key for the provider that runs."
+          },
+          "model": {
+            "type": "string",
+            "description": "Model id for this chain's model-calling nodes. Must be offered by the provider in the host catalog. Leave it unset to use the provider's model from the same choice (ADR 0903)."
+          },
+          "senderEmail": {
+            "type": "string",
+            "description": "Verified sender address these emails are sent from."
+          },
+          "recipientEmail": {
+            "type": "string",
+            "description": "The address this email is sent to."
+          },
+          "emailSubject": {
+            "type": "string",
+            "default": "Reorder request",
+            "description": "Subject line for the sent email."
+          },
+          "triggerEventName": {
+            "type": "string",
+            "default": "openwop-app.commerce-inventory-low-stock",
+            "description": "The host event this chain ignites on. The event belongs to the INSTALLING HOST, not the pack (ADR 0683) — defaulted to this host's v2 name for it; bind the workflow to that event to enroll."
+          }
         }
       },
       "capabilities": [
@@ -185,9 +261,22 @@
       "dag": {
         "nodes": [
           {
+            "id": "trigger",
+            "typeId": "core.trigger.event@1.0.0",
+            "name": "Low stock",
+            "position": {
+              "x": -320,
+              "y": 0
+            },
+            "config": {
+              "eventName": "{{params.triggerEventName}}"
+            },
+            "inputs": {}
+          },
+          {
             "id": "catalog",
-            "typeId": "feature.commerce.nodes.list-products@1.0.0",
-            "name": "Catalog context",
+            "typeId": "feature.commerce.nodes.get-product@1.0.0",
+            "name": "The low-stock product",
             "position": {
               "x": 0,
               "y": 0
@@ -207,7 +296,7 @@
               "y": 0
             },
             "config": {
-              "systemPrompt": "Draft a concise supplier reorder email for the low-stock product {{params.productId}} (supplier hint: {{params.supplierHint}}). Include current stock and a sensible reorder quantity based on the catalog data; flag assumptions.",
+              "systemPrompt": "Draft a concise supplier reorder email for the low-stock product in the input (supplier hint: {{params.supplierHint}}). Include its current stock and a sensible reorder quantity based on that product data; flag assumptions.",
               "provider": "{{params.provider}}",
               "model": "{{params.model}}"
             },
@@ -222,7 +311,10 @@
               "y": 0
             },
             "config": {
-              "actions": ["approve", "reject"]
+              "actions": [
+                "approve",
+                "reject"
+              ]
             },
             "inputs": {}
           },
@@ -236,6 +328,21 @@
             },
             "config": {},
             "inputs": {}
+          },
+          {
+            "id": "notify",
+            "typeId": "feature.notifications.nodes.notify@1.0.0",
+            "name": "Notify owner",
+            "position": {
+              "x": 960,
+              "y": 140
+            },
+            "config": {
+              "audience": "tenant"
+            },
+            "inputs": {
+              "title": "Low-Stock Reorder Draft"
+            }
           },
           {
             "id": "send",
@@ -252,20 +359,13 @@
               "to": "{{params.recipientEmail}}",
               "subject": "{{params.emailSubject}}"
             }
-          },
-          {
-            "id": "notify",
-            "typeId": "feature.notifications.nodes.notify@1.0.0",
-            "name": "Notify owner",
-            "position": {
-              "x": 960,
-              "y": 140
-            },
-            "config": { "audience": "tenant" },
-            "inputs": { "title": "Low-Stock Reorder Draft" }
           }
         ],
         "edges": [
+          {
+            "from": "trigger.payload",
+            "to": "catalog.event"
+          },
           {
             "from": "catalog",
             "to": "draft"
@@ -277,17 +377,26 @@
           {
             "from": "approve.artifact",
             "to": "send.text",
-            "condition": { "type": "truthy", "left": "approved" }
+            "condition": {
+              "type": "truthy",
+              "left": "approved"
+            }
           },
           {
-            "from": "approve",
-            "to": "notify",
-            "condition": { "type": "truthy", "left": "approved" }
+            "from": "approve.artifact",
+            "to": "notify.message",
+            "condition": {
+              "type": "truthy",
+              "left": "approved"
+            }
           },
           {
             "from": "approve",
             "to": "gate-reject",
-            "condition": { "type": "falsy", "left": "approved" }
+            "condition": {
+              "type": "falsy",
+              "left": "approved"
+            }
           }
         ]
       },
@@ -300,9 +409,9 @@
     },
     {
       "chainId": "commerce.order-exception-digest",
-      "version": "1.0.1",
+      "version": "1.1.0",
       "label": "Order Exception Digest",
-      "description": "On a schedule (pair with core.trigger.schedule): list orders, AI-summarize the exceptions \u2014 paid-but-unfulfilled beyond the SLA, aging pending reservations \u2014 and push the summary to the operations inbox (the digest node's output flows to the notification via the edge, the corpus convention). Read-only; escalation stays human.",
+      "description": "On a schedule (pair with core.trigger.schedule): list orders, AI-summarize the exceptions — paid-but-unfulfilled beyond the SLA, aging pending reservations — and push the summary to the operations inbox (the digest node's output flows to the notification via the edge, the corpus convention). Read-only; escalation stays human.",
       "parameters": {
         "type": "object",
         "additionalProperties": false,
@@ -319,8 +428,14 @@
             "default": "3",
             "description": "Paid-but-unfulfilled SLA in days before an order counts as an exception."
           },
-          "provider": { "type": "string", "default": "anthropic", "description": "AI provider id for this chain's LLM nodes. Frozen into this chain's AI nodes when the workflow is created (ADR 0498 — a concrete provider is what keeps replay deterministic). Override at instantiation to use a different vendor or your own BYOK provider; whichever you pick, the workspace needs a key for it — the workflow will not fall back to another provider on its own." },
-          "model": { "type": "string", "default": "claude-sonnet-4-6", "description": "Model id for this chain's LLM nodes. Must be advertised by `provider` in the host catalog; override at instantiation." }
+          "provider": {
+            "type": "string",
+            "description": "AI provider id for this chain's model-calling nodes. Set it to fix a provider into those nodes when the workflow is created. Leave it unset and each run uses the run's chosen provider, else the workspace's AI setting, else the host's catalog default (ADR 0903); whichever is chosen is recorded on the run, so a replay or fork uses the same one. The workspace needs a key for the provider that runs."
+          },
+          "model": {
+            "type": "string",
+            "description": "Model id for this chain's model-calling nodes. Must be offered by the provider in the host catalog. Leave it unset to use the provider's model from the same choice (ADR 0903)."
+          }
         }
       },
       "capabilities": [],
@@ -362,8 +477,12 @@
               "x": 640,
               "y": 0
             },
-            "config": { "audience": "tenant" },
-            "inputs": { "title": "Order Exception Digest" }
+            "config": {
+              "audience": "tenant"
+            },
+            "inputs": {
+              "title": "Order Exception Digest"
+            }
           }
         ],
         "edges": [
@@ -372,8 +491,8 @@
             "to": "digest"
           },
           {
-            "from": "digest",
-            "to": "notify"
+            "from": "digest.content",
+            "to": "notify.message"
           }
         ]
       },

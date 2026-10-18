@@ -503,6 +503,8 @@ export const messages = {
   localeOutdatedTag: 'obsolète',
   translationOutdatedChip: 'Obsolète',
   translationOutdatedHint: 'Le texte de base couvert par cette traduction a changé après sa rédaction. Mettez la traduction à jour, ou marquez-la comme à jour si elle reste correcte.',
+  translationUnknownChip: 'Non confirmée',
+  translationUnknownHint: 'Rien ne confirme que cette traduction correspond au texte de base : ce peut être une copie de la base encore à traduire. Traduisez-la, ou marquez-la à jour si elle est déjà correcte.',
   confirmSourceAction: 'Marquer comme à jour',
   translationOutdatedSummary: 'Traductions obsolètes : {{list}}',
   translationOutdatedSummaryItem_one: '{{language}} : {{count}} section',

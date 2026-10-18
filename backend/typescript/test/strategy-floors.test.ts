@@ -6,11 +6,26 @@
  *   D2 plan blocks: initiative plan sums surface in /strategy/health signals
  *   D3 parent lens: write-time validation (self / grandparent / cross-org),
  *      health rows carry parentStrategyId; CSV objective import
+ *
+ * Sabotage witnesses (grade-tests w19, `w19g2-fl-*`): budget line, compare diff,
+ * plan-of-record clear, agent stamp, scenario cap, CAS→blind put (via a hook
+ * that FORCES the read→swap window), plan sums, parent checks (incl. cross-org),
+ * CSV merge/skip, and every arm of the scenario approval gate — each turns a
+ * case red.
  */
 
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+/** Typed reads of the shared bodies (the harness body is untyped). */
+const scenariosOf = (body: { scenarios: ResolvedScenario[] }): ResolvedScenario[] => body.scenarios;
+const approvalsOf = (body: { items: PendingApproval[] }): PendingApproval[] => body.items;
+
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { bootPlanningApp, makeClient, enableToggle, type Client } from './planningHarness.js';
 import { buildPriorityMatrixSurface } from '../src/features/priority-matrix/surface.js';
+import { DurableCollection } from '../src/host/hostExtPersistence.js';
+import type { ResolvedScenario } from '../src/features/priority-matrix/scenarios.js';
+import type { RankedIdea } from '../src/features/priority-matrix/priorityMatrixService.js';
+import type { PendingApproval } from '../src/host/approvalService.js';
+import type { Strategy, StrategyHealthRow } from '../src/features/strategy/types.js';
 
 let BASE = '';
 let closeApp: () => Promise<void>;
@@ -42,7 +57,7 @@ describe('D1 — planning-session scenarios', () => {
     const listId = (await c.post(`${PM}/lists`, { orgId, name: 'Bets', presetId: 'weighted' })).body.id;
     for (const t of ['Alpha', 'Beta', 'Gamma']) await c.post(`${PM}/lists/${listId}/ideas`, { title: t });
     const ideas = (await c.get(`${PM}/lists/${listId}/ideas`)).body.ideas;
-    const idOf = (t: string): string => ideas.find((r: any) => r.card.title === t).card.id;
+    const idOf = (t: string): string => (ideas as RankedIdea[]).find((r) => r.card.title === t)!.card.id;
     // Estimated values: Alpha 100, Beta 80, Gamma 50 (ranks are score-equal ⇒ stable ordering).
     await c.patch(`${PM}/lists/${listId}/ideas/${idOf('Alpha')}/intake`, { estimatedValue: 100 });
     await c.patch(`${PM}/lists/${listId}/ideas/${idOf('Beta')}/intake`, { estimatedValue: 80 });
@@ -61,11 +76,13 @@ describe('D1 — planning-session scenarios', () => {
 
     const resolved = await c.get(`${PM}/lists/${listId}/sessions/${sessionId}/scenarios`);
     expect(resolved.status).toBe(200);
-    const tight = resolved.body.scenarios.find((s: any) => s.scenarioId === b.body.scenarioId);
+    const tight = scenariosOf(resolved.body).find((s) => s.scenarioId === b.body.scenarioId)!;
     expect(tight.aboveLine.length + tight.belowLine.length).toBe(3);
     expect(tight.belowLine.length).toBeGreaterThan(0);
-    expect(tight.belowLine.every((x: any) => x.droppedBy === 'maxBudget')).toBe(true);
+    expect(tight.belowLine.every((x) => x.droppedBy === 'maxBudget')).toBe(true);
     expect(tight.totalEstimatedValue).toBeLessThanOrEqual(150);
+    // The total IS the above-line sum (not just "some number under the cap").
+    expect(tight.totalEstimatedValue).toBe(tight.aboveLine.reduce((t, x) => t + (x.estimatedValue ?? 0), 0));
 
     const cmp = await c.get(`${PM}/lists/${listId}/sessions/${sessionId}/scenarios/compare?a=${a.body.scenarioId}&b=${b.body.scenarioId}`);
     expect(cmp.status).toBe(200);
@@ -76,7 +93,7 @@ describe('D1 — planning-session scenarios', () => {
     expect((await c.post(`${PM}/lists/${listId}/sessions/${sessionId}/scenarios/${b.body.scenarioId}/select`)).body.planOfRecord).toBe(true);
     await c.post(`${PM}/lists/${listId}/sessions/${sessionId}/scenarios/${a.body.scenarioId}/select`);
     const after = await c.get(`${PM}/lists/${listId}/sessions/${sessionId}/scenarios`);
-    const pors = after.body.scenarios.filter((s: any) => s.planOfRecord);
+    const pors = scenariosOf(after.body).filter((s) => s.planOfRecord);
     expect(pors).toHaveLength(1);
     expect(pors[0].scenarioId).toBe(a.body.scenarioId);
 
@@ -94,19 +111,51 @@ describe('D1 — planning-session scenarios', () => {
     const listId = (await c.post(`${PM}/lists`, { orgId, name: 'Race', presetId: 'weighted' })).body.id;
     await c.post(`${PM}/lists/${listId}/ideas`, { title: 'Only' });
     const sessionId = (await c.post(`${PM}/lists/${listId}/sessions`, { mode: 'top-n', n: 1 })).body.id;
+    const add = (name: string) => c.post(`${PM}/lists/${listId}/sessions/${sessionId}/scenarios`, { name, selection: { mode: 'top-n', n: 1 } });
 
-    // Six concurrent adds — a naive read-modify-write would lose most to the
-    // last writer; the CAS retry loop must land all six (cap is 8).
-    const adds = await Promise.all(Array.from({ length: 6 }, (_, i) =>
-      c.post(`${PM}/lists/${listId}/sessions/${sessionId}/scenarios`, { name: `S${i}`, selection: { mode: 'top-n', n: 1 } }),
-    ));
-    expect(adds.every((r) => r.status === 201)).toBe(true);
-    const resolved = await c.get(`${PM}/lists/${listId}/sessions/${sessionId}/scenarios`);
-    expect(resolved.body.scenarios).toHaveLength(6);
-    // The cap is enforced against the FRESH row inside the mutator: a 7th+8th
-    // fit, a 9th is refused.
-    for (let i = 6; i < 8; i++) expect((await c.post(`${PM}/lists/${listId}/sessions/${sessionId}/scenarios`, { name: `S${i}`, selection: { mode: 'top-n', n: 1 } })).status).toBe(201);
-    expect((await c.post(`${PM}/lists/${listId}/sessions/${sessionId}/scenarios`, { name: 'over', selection: { mode: 'top-n', n: 1 } })).status).toBe(400);
+    // FORCE the window. HTTP requests from one client barely interleave on the
+    // in-memory store, so six "concurrent" POSTs never actually raced (a blind
+    // `put` in place of the CAS stayed green — w19g2-fl-cas). This hook sits
+    // BETWEEN the outer add's read and its swap: the first time the session row
+    // is about to be swapped, a competing add lands first. A CAS writer then
+    // fails its swap, re-reads and re-applies; a blind writer overwrites the
+    // competitor with its stale copy. The hook sits on BOTH write primitives so
+    // a writer that skipped the CAS still meets the competitor — and loses it.
+    const realCas = DurableCollection.prototype.compareAndSwap;
+    const realPut = DurableCollection.prototype.put;
+    let fired = 0;
+    let competitor: { status: number } | undefined;
+    const raceOnce = async (row: unknown): Promise<void> => {
+      if (fired === 0 && (row as { id?: string } | null)?.id === sessionId) {
+        fired += 1; // disarm BEFORE the competing write, whose own write passes straight through
+        competitor = await add('Inner');
+      }
+    };
+    const casSpy = vi.spyOn(DurableCollection.prototype, 'compareAndSwap').mockImplementation(async function (this: DurableCollection<unknown>, expected: unknown, next: unknown) {
+      await raceOnce(next);
+      return realCas.call(this, expected, next);
+    });
+    const putSpy = vi.spyOn(DurableCollection.prototype, 'put').mockImplementation(async function (this: DurableCollection<unknown>, item: unknown) {
+      await raceOnce(item);
+      return realPut.call(this, item);
+    });
+    let outer: { status: number };
+    try {
+      outer = await add('Outer');
+    } finally {
+      casSpy.mockRestore();
+      putSpy.mockRestore();
+    }
+    expect(fired, 'the race window was never opened — the case would prove nothing').toBe(1);
+    expect(competitor?.status).toBe(201);
+    expect(outer.status).toBe(201);
+    const names = scenariosOf((await c.get(`${PM}/lists/${listId}/sessions/${sessionId}/scenarios`)).body).map((x) => x.name).sort();
+    expect(names, 'a write that returned 201 was lost to the other writer').toEqual(['Inner', 'Outer']);
+
+    // The cap is enforced against the FRESH row inside the mutator: fill to 8, a 9th is refused.
+    for (let i = 2; i < 8; i++) expect((await add(`S${i}`)).status).toBe(201);
+    expect((await add('over')).status).toBe(400);
+    expect(scenariosOf((await c.get(`${PM}/lists/${listId}/sessions/${sessionId}/scenarios`)).body)).toHaveLength(8);
   });
 });
 
@@ -124,13 +173,12 @@ describe('D2 — initiative plan sums in health', () => {
     expect(s.id, JSON.stringify(s)).toBeTruthy();
     expect((await c.post(S, { orgId, title: 'Bad', initiatives: [{ title: 'X', plan: { budgetAmount: -5 } }] })).status).toBe(400);
 
-    const health = await c.get(`${S}/health`);
-    const row = health.body.strategies.find((x: any) => x.id === s.id);
-    expect(row.signals.budgetPlanned).toBe(150000);
-    expect(row.signals.budgetActual).toBe(25000);
-    expect(row.signals.capacityPlanned).toBe(60);
-    expect(row.signals.capacityActual).toBe(10);
-    expect(row.signals.budgetCurrency).toBe('USD');
+    const row = ((await c.get(`${S}/health`)).body.strategies as StrategyHealthRow[]).find((x) => x.id === s.id)!;
+    expect(row.signals?.budgetPlanned).toBe(150000);
+    expect(row.signals?.budgetActual).toBe(25000);
+    expect(row.signals?.capacityPlanned).toBe(60);
+    expect(row.signals?.capacityActual).toBe(10);
+    expect(row.signals?.budgetCurrency).toBe('USD');
   });
 });
 
@@ -146,9 +194,18 @@ describe('D3 — parent lens + CSV import', () => {
     expect((await c.post(S, { orgId, title: 'Grandchild', parentStrategyId: child.id })).status).toBe(400);
     expect((await c.patch(`${S}/${parent.id}`, { parentStrategyId: parent.id })).status).toBe(400);
     expect((await c.post(S, { orgId, title: 'Orphan', parentStrategyId: 'ghost' })).status).toBe(404);
+    // Cross-org: a parent in ANOTHER org of the same tenant is refused (the
+    // claim in this file's header that no case used to assert — w19g2-fl-crossorg-parent).
+    const otherOrg = (await c.post('/host/openwop-app/orgs', { name: 'Elsewhere' })).body.orgId as string;
+    const crossOrg = await c.post(S, { orgId: otherOrg, title: 'Foreign child', parentStrategyId: parent.id });
+    expect(crossOrg.status, JSON.stringify(crossOrg.body)).toBe(400);
+    // (`details` ids are redacted on the wire, so the refusal is named by its message.)
+    expect(JSON.stringify(crossOrg.body)).toMatch(/must belong to the same organization/i);
+    // Positive control for that refusal: the same parent from its OWN org is accepted.
+    expect((await c.post(S, { orgId, title: 'Sibling child', parentStrategyId: parent.id })).status).toBe(201);
 
-    const health = await c.get(`${S}/health`);
-    expect(health.body.strategies.find((x: any) => x.id === child.id).parentStrategyId).toBe(parent.id);
+    const healthRows = (await c.get(`${S}/health`)).body.strategies as StrategyHealthRow[];
+    expect(healthRows.find((x) => x.id === child.id)?.parentStrategyId).toBe(parent.id);
     // Clearing via null.
     expect((await c.patch(`${S}/${child.id}`, { parentStrategyId: null })).body.parentStrategyId).toBeUndefined();
   });
@@ -167,9 +224,9 @@ describe('D3 — parent lens + CSV import', () => {
     expect(r.status, JSON.stringify(r.body)).toBe(200);
     expect(r.body.imported).toBe(3);
     expect(r.body.skipped).toHaveLength(1);
-    const titles = r.body.strategy.objectives.map((o: any) => o.title);
-    expect(titles).toEqual(['Grow ARR', 'Delight customers']); // merged, not duplicated
-    expect(r.body.strategy.objectives[0].keyResults.map((k: any) => k.title)).toEqual(['ARR to 10M', 'Churn under 3%']);
+    const imported = r.body.strategy as Strategy;
+    expect(imported.objectives.map((o) => o.title)).toEqual(['Grow ARR', 'Delight customers']); // merged, not duplicated
+    expect(imported.objectives[0]!.keyResults.map((k) => k.title)).toEqual(['ARR to 10M', 'Churn under 3%']);
     expect((await c.post(`${S}/${s.id}/import-objectives`, { csv: '' })).status).toBe(400);
   });
 });
@@ -196,10 +253,10 @@ describe('D3 — scenario select ↔ shared approval', () => {
     // A plain human-added scenario — must NOT create an approval.
     const human = (await c.post(`${PM}/lists/${listId}/sessions/${sessionId}/scenarios`, { name: 'Mine', selection: { mode: 'top-n', n: 1 } })).body;
 
-    const items = (await c.get(`${APPR}?status=pending`)).body.items.filter((a: any) => a.kind === 'pm-scenario-select');
+    const items = approvalsOf((await c.get(`${APPR}?status=pending`)).body).filter((a) => a.kind === 'pm-scenario-select');
     expect(items).toHaveLength(1);
-    expect(items[0].scenarioSelect.scenarioId).toBe(proposed.scenario.scenarioId);
-    expect(items.some((a: any) => a.scenarioSelect?.scenarioId === human.scenarioId)).toBe(false);
+    expect(items[0]?.scenarioSelect?.scenarioId).toBe(proposed.scenario.scenarioId);
+    expect(items.some((a) => a.scenarioSelect?.scenarioId === human.scenarioId)).toBe(false);
   });
 
   it('page select of an agent scenario resolves the approval; a second select 409s', async () => {
@@ -213,8 +270,8 @@ describe('D3 — scenario select ↔ shared approval', () => {
     expect(sel.body.planOfRecord).toBe(true);
 
     // The shared approval left the pending inbox (recorded approved).
-    expect((await c.get(`${APPR}?status=pending`)).body.items.filter((a: any) => a.scenarioSelect?.scenarioId === scenarioId)).toHaveLength(0);
-    expect((await c.get(`${APPR}?status=approved`)).body.items.some((a: any) => a.scenarioSelect?.scenarioId === scenarioId)).toBe(true);
+    expect(approvalsOf((await c.get(`${APPR}?status=pending`)).body).filter((a) => a.scenarioSelect?.scenarioId === scenarioId)).toHaveLength(0);
+    expect(approvalsOf((await c.get(`${APPR}?status=approved`)).body).some((a) => a.scenarioSelect?.scenarioId === scenarioId)).toBe(true);
 
     // A second page select can no longer mint a decision (already decided).
     expect((await c.post(`${PM}/lists/${listId}/sessions/${sessionId}/scenarios/${scenarioId}/select`)).status).toBe(409);
@@ -226,12 +283,12 @@ describe('D3 — scenario select ↔ shared approval', () => {
     const proposed = JSON.parse(JSON.stringify(await surface.proposeScenario({ listId, sessionId, name: 'Analyst pick', selection: { mode: 'top-n', n: 2 } })));
     const scenarioId = proposed.scenario.scenarioId;
 
-    const row = (await c.get(`${APPR}?status=pending`)).body.items.find((a: any) => a.scenarioSelect?.scenarioId === scenarioId);
-    expect((await c.post(`${APPR}/${row.approvalId}/claim`)).status).toBe(200);
+    const row = approvalsOf((await c.get(`${APPR}?status=pending`)).body).find((a) => a.scenarioSelect?.scenarioId === scenarioId);
+    expect((await c.post(`${APPR}/${row!.approvalId}/claim`)).status).toBe(200);
 
     // The scenario reflects the inbox decision — ONE durable record.
     const after = await c.get(`${PM}/lists/${listId}/sessions/${sessionId}/scenarios`);
-    expect(after.body.scenarios.find((s: any) => s.scenarioId === scenarioId).planOfRecord).toBe(true);
+    expect(scenariosOf(after.body).find((s) => s.scenarioId === scenarioId)?.planOfRecord).toBe(true);
 
     // The page select refuses (same record, already decided).
     expect((await c.post(`${PM}/lists/${listId}/sessions/${sessionId}/scenarios/${scenarioId}/select`)).status).toBe(409);
@@ -258,16 +315,16 @@ describe('ADR 0590 — scenario reject seam (reject / 403 / compensating reopen)
     const surface = buildPriorityMatrixSurface({ tenantId });
     const proposed = JSON.parse(JSON.stringify(await surface.proposeScenario({ listId, sessionId, name: 'Analyst pick', selection: { mode: 'top-n', n: 2 } })));
     const scenarioId = proposed.scenario.scenarioId as string;
-    const row = (await c.get(`${APPR}?status=pending`)).body.items.find((a: any) => a.scenarioSelect?.scenarioId === scenarioId);
-    return { c, tenantId, listId, sessionId, scenarioId, approvalId: row.approvalId };
+    const row = approvalsOf((await c.get(`${APPR}?status=pending`)).body).find((a) => a.scenarioSelect?.scenarioId === scenarioId);
+    return { c, tenantId, listId, sessionId, scenarioId, approvalId: row!.approvalId };
   }
 
   it('INBOX reject: scenario stays un-adopted, GET /scenarios surfaces approvalStatus, page select 409s with the decided message', async () => {
     const { c, listId, sessionId, scenarioId, approvalId } = await agentProposed();
     expect((await c.post(`${APPR}/${approvalId}/reject`)).status).toBe(200);
 
-    const after = (await c.get(`${PM}/lists/${listId}/sessions/${sessionId}/scenarios`)).body.scenarios;
-    const s = after.find((x: any) => x.scenarioId === scenarioId);
+    const after = scenariosOf((await c.get(`${PM}/lists/${listId}/sessions/${sessionId}/scenarios`)).body);
+    const s = after.find((x) => x.scenarioId === scenarioId)!;
     expect(s.planOfRecord).toBeUndefined();
     expect(s.approvalStatus).toBe('rejected');
 
@@ -286,7 +343,12 @@ describe('ADR 0590 — scenario reject seam (reject / 403 / compensating reopen)
     expect((await c.post(`${APPR}/${approvalId}/claim`)).status).toBe(409);
     // A human scenario (no approval) has nothing to reject — typed refusal.
     const human = (await c.post(`${PM}/lists/${listId}/sessions/${sessionId}/scenarios`, { name: 'Mine', selection: { mode: 'top-n', n: 1 } })).body;
-    expect((await c.post(`${PM}/lists/${listId}/sessions/${sessionId}/scenarios/${human.scenarioId}/reject`)).status).toBe(409);
+    const humanReject = await c.post(`${PM}/lists/${listId}/sessions/${sessionId}/scenarios/${human.scenarioId}/reject`);
+    expect(humanReject.status).toBe(409);
+    // The 409 must be the HUMAN-scenario refusal, not the approval lookup's
+    // "already been decided" — both produce 409, so the status alone could not
+    // tell the guards apart (w19g2-fl-human-reject).
+    expect(JSON.stringify(humanReject.body)).toMatch(/human scenario has no approval/i);
   });
 
   it('403 arm: a signed-in member WITHOUT workspace:write in the list org cannot decide (either outcome)', async () => {
@@ -300,9 +362,9 @@ describe('ADR 0590 — scenario reject seam (reject / 403 / compensating reopen)
     expect((await stranger.post(`${APPR}/${approvalId}/claim`)).status).toBe(403);
     expect((await stranger.post(`${APPR}/${approvalId}/reject`)).status).toBe(403);
     // The no-existence-leak LIST gate also hides the row from the non-decider…
-    expect((await stranger.get(`${APPR}?status=pending`)).body.items.some((a: any) => a.approvalId === approvalId)).toBe(false);
+    expect(approvalsOf((await stranger.get(`${APPR}?status=pending`)).body).some((a) => a.approvalId === approvalId)).toBe(false);
     // …while the OWNER still sees it pending — the refusals decided nothing.
-    const stillPending = (await c.get(`${APPR}?status=pending`)).body.items.some((a: any) => a.approvalId === approvalId);
+    const stillPending = approvalsOf((await c.get(`${APPR}?status=pending`)).body).some((a) => a.approvalId === approvalId);
     expect(stillPending).toBe(true);
   });
 
@@ -313,9 +375,10 @@ describe('ADR 0590 — scenario reject seam (reject / 403 / compensating reopen)
     // effect cannot apply.
     expect((await c.del(`${PM}/lists/${listId}`)).status).toBe(204);
     const claim = await c.post(`${APPR}/${approvalId}/claim`);
-    expect(claim.status).toBeGreaterThanOrEqual(400);
+    // The select's own typed failure (the session is gone ⇒ not_found), not any 4xx/5xx.
+    expect(claim.status, JSON.stringify(claim.body)).toBe(404);
     // The ADR 0066 HIGH-1 pattern: resolve-then-compensate — the row is PENDING again.
-    const pending = (await c.get(`${APPR}?status=pending`)).body.items.some((a: any) => a.approvalId === approvalId);
+    const pending = approvalsOf((await c.get(`${APPR}?status=pending`)).body).some((a) => a.approvalId === approvalId);
     expect(pending, 'the approval must be re-opened, not stranded decided with no effect').toBe(true);
   });
 });
@@ -346,15 +409,15 @@ describe('PMXWF-6 — fork-minted duplicate proposals collapse (content-keyed, p
     const second = JSON.parse(JSON.stringify(await surface.proposeScenario({ listId, sessionId, ...args })));
     expect(second.scenario.scenarioId).toBe(first.scenario.scenarioId);
 
-    const scenarios = (await c.get(`${PM}/lists/${listId}/sessions/${sessionId}/scenarios`)).body.scenarios;
-    expect(scenarios.filter((s: any) => s.name === 'Fork pick')).toHaveLength(1);
-    const pending = (await c.get(`${APPR}?status=pending`)).body.items.filter((a: any) => a.kind === 'pm-scenario-select');
+    const scenarios = scenariosOf((await c.get(`${PM}/lists/${listId}/sessions/${sessionId}/scenarios`)).body);
+    expect(scenarios.filter((s) => s.name === 'Fork pick')).toHaveLength(1);
+    const pending = approvalsOf((await c.get(`${APPR}?status=pending`)).body).filter((a) => a.kind === 'pm-scenario-select');
     expect(pending).toHaveLength(1);
 
     // 2) a DIFFERENT proposal still mints (dedup is content-keyed, not lane-keyed).
     await surface.proposeScenario({ listId, sessionId, name: 'Other pick', selection: { mode: 'top-n', n: 1 } });
-    expect((await c.get(`${PM}/lists/${listId}/sessions/${sessionId}/scenarios`)).body.scenarios).toHaveLength(2);
-    expect((await c.get(`${APPR}?status=pending`)).body.items.filter((a: any) => a.kind === 'pm-scenario-select')).toHaveLength(2);
+    expect(scenariosOf((await c.get(`${PM}/lists/${listId}/sessions/${sessionId}/scenarios`)).body)).toHaveLength(2);
+    expect(approvalsOf((await c.get(`${APPR}?status=pending`)).body).filter((a) => a.kind === 'pm-scenario-select')).toHaveLength(2);
   });
 
   it('3) after the approval is DECIDED, an identical re-propose is a fresh ask (finality never resurrected)', async () => {
@@ -365,12 +428,12 @@ describe('PMXWF-6 — fork-minted duplicate proposals collapse (content-keyed, p
     const surface = buildPriorityMatrixSurface({ tenantId });
 
     const first = JSON.parse(JSON.stringify(await surface.proposeScenario({ listId, sessionId, ...args })));
-    const row = (await c.get(`${APPR}?status=pending`)).body.items.find((a: any) => a.scenarioSelect?.scenarioId === first.scenario.scenarioId);
-    expect((await c.post(`${APPR}/${row.approvalId}/reject`)).status).toBe(200);
+    const row = approvalsOf((await c.get(`${APPR}?status=pending`)).body).find((a) => a.scenarioSelect?.scenarioId === first.scenario.scenarioId);
+    expect((await c.post(`${APPR}/${row!.approvalId}/reject`)).status).toBe(200);
 
     const again = JSON.parse(JSON.stringify(await surface.proposeScenario({ listId, sessionId, ...args })));
     expect(again.scenario.scenarioId).not.toBe(first.scenario.scenarioId);
-    expect((await c.get(`${APPR}?status=pending`)).body.items.filter((a: any) => a.kind === 'pm-scenario-select')).toHaveLength(1);
+    expect(approvalsOf((await c.get(`${APPR}?status=pending`)).body).filter((a) => a.kind === 'pm-scenario-select')).toHaveLength(1);
   });
 
   it('4) the HUMAN lane is untouched: two same-named human adds mint two scenarios', async () => {
@@ -381,6 +444,6 @@ describe('PMXWF-6 — fork-minted duplicate proposals collapse (content-keyed, p
     for (let i = 0; i < 2; i++) {
       expect((await c.post(`${PM}/lists/${listId}/sessions/${sessionId}/scenarios`, { name: 'Mine', selection: { mode: 'top-n', n: 1 } })).status).toBe(201);
     }
-    expect((await c.get(`${PM}/lists/${listId}/sessions/${sessionId}/scenarios`)).body.scenarios).toHaveLength(2);
+    expect(scenariosOf((await c.get(`${PM}/lists/${listId}/sessions/${sessionId}/scenarios`)).body)).toHaveLength(2);
   });
 });

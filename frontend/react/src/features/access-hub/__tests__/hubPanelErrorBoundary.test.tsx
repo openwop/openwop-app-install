@@ -18,6 +18,11 @@
  *    measured class was six panel sites across five files, including the very page
  *    cited as the correct precedent. A behavioural leg on one console cannot see a new
  *    console shipping without a boundary.
+ *
+ * Probes (`w27g2-heb-*`): the resetKey reset removed, a reset on every update, a
+ * panel site left unguarded, a pathname key, and a CONSTANT key (`heb-constant-key-r2`).
+ * Ceiling: the structural legs are per FILE, not per site — a regex cannot pair each
+ * <Suspense> with its own boundary.
  */
 import { describe, it, expect } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
@@ -119,8 +124,11 @@ describe('ADR 0715 D1 — the POPULATION: every console panel is guarded', () =>
     // from `App.tsx`.
     for (const f of PANEL_FILES) {
       const src = code(readFileSync(join(SRC, f), 'utf8'));
-      expect(src, `${f} must not key a panel boundary on the pathname`).not.toMatch(/<ErrorBoundary[^>]*resetKey=\{location\.pathname\}/);
-      expect(src, `${f} must pass a resetKey`).toMatch(/<ErrorBoundary[^>]*resetKey=/);
+      expect(src, `${f} must not key a panel boundary on the pathname`).not.toMatch(/<ErrorBoundary[^>]*resetKey=\{[^}]*pathname[^}]*\}/);
+      expect(src, `${f} must pass a resetKey EXPRESSION`).toMatch(/<ErrorBoundary[^>]*resetKey=\{/);
+      // A CONSTANT key is the same wedge as a pathname key (leg 2 is exactly that):
+      // a string attribute, a string literal in braces, or a template with no `${…}`.
+      expect(src, `${f} must not key a panel boundary on a constant string`).not.toMatch(/<ErrorBoundary[^>]*resetKey=(?:["']|\{\s*["']|\{\s*`[^`$]*`\s*\})/);
     }
   });
 });

@@ -13,6 +13,8 @@ import type { ChallengeEnrollment } from '../src/features/kicktodo-core/types.js
 import {
   eraseIntegrationsSubject, __test,
 } from '../src/features/kicktodo-integrations/integrationService.js';
+import { linkWearableProvider, listWearableLinksForSubject } from '../src/features/kicktodo-integrations/wearableLinkService.js';
+import { __putWearableLivenessForTest, listStaleWearableStreams } from '../src/features/kicktodo-integrations/wearableLivenessService.js';
 
 const T = 'tenant-A';
 const T2 = 'tenant-B';
@@ -67,14 +69,23 @@ describe('ADR 0458 P0 — integrations subject erasure', () => {
     await eraseIntegrationsSubject(T, A);
     await eraseIntegrationsSubject(T, A);
     expect(await consentCount(T, A)).toBe(0);
+    // The falsy guard is only observable against rows whose subject IS empty
+    // (malformed/legacy): an unguarded '' would delete exactly those.
+    await seed(T, '', 'enr-blank', 'hash-blank');
     await eraseIntegrationsSubject(T, '');
+    expect(await consentCount(T, '')).toBe(2);
+    expect(await __test.feeds.get('hash-blank')).not.toBeNull();
+    expect(await __test.rules.get(`${T}::enr-blank::act`)).not.toBeNull();
     expect(await consentCount(T, B)).toBe(2);
   });
 
   it('runs from the host fan-out (registered at module load)', async () => {
     await eraseSubject(T, A);
     expect(await consentCount(T, A)).toBe(0);
+    expect(await __test.feeds.get('hash-A')).toBeNull();
+    expect(await __test.rules.get(`${T}::enr-A::act`)).toBeNull();
     expect(await consentCount(T, B)).toBe(2);
+    expect(await consentCount(T2, A)).toBe(2);
   });
 });
 
@@ -97,11 +108,6 @@ describe('ADR 0458 P0 — integrations subject erasure', () => {
  */
 describe('PROBE-0462-2 (executable) — DSAR reaches wearable link + liveness', () => {
   it('erases the subject\'s link and liveness rows, leaving another subject intact', async () => {
-    const { linkWearableProvider, listWearableLinksForSubject } =
-      await import('../src/features/kicktodo-integrations/wearableLinkService.js');
-    const { __putWearableLivenessForTest, listStaleWearableStreams } =
-      await import('../src/features/kicktodo-integrations/wearableLivenessService.js');
-
     for (const s of [A, B]) {
       await __test.consents.put({ tenantId: T, ownerSubject: s, kind: 'wearable-evidence', grantedAt: '2026-01-01T00:00:00.000Z' });
       await linkWearableProvider(T, s, 'fitbit', `pu-${s}`);

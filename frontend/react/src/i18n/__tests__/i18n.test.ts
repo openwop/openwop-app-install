@@ -1,3 +1,17 @@
+/**
+ * The i18n runtime layer: the `format.ts` Intl wrappers (locale grouping, currency,
+ * MINOR-unit currency by the currency's own decimals — money), locale negotiation
+ * (`locales.ts`: base-language fallback, RTL by base language), pseudo-localization's
+ * interpolation-token guard, and the ADR 0329 / ADR 0490 catalog split (only `en`
+ * eager; lazy pt-BR has exact key parity with en and real translations).
+ *
+ * Sabotage (wave 51 probes): a bare `/100`-style fixed decimal count, dropping the
+ * base-language match, RTL on the full tag, an unguarded `{{token}}`, or a pt-BR key
+ * removed/untranslated each red a case. NOT witnessed by design: `resolveLocale`'s
+ * exact-tag branch — every supported locale has a unique base language, so the base
+ * match returns the same answer (probe w51g1-i18n-exact-branch; a redundant product
+ * branch, not a test gap).
+ */
 import { describe, it, expect, beforeEach } from 'vitest';
 import {
   formatNumber, formatCurrency, formatCurrencyMinor, formatPercent, formatList,
@@ -46,7 +60,7 @@ describe('Intl formatting layer', () => {
     expect(formatCurrencyMinor(123456, 'USD')).toBe('$1,234.56'); // 2 dp
     expect(formatCurrencyMinor(123456, 'JPY')).toBe('¥123,456');  // 0 dp — /100 would be 100x wrong
     // 3-dp currency (BHD): 123456 minor = 123.456
-    expect(formatCurrencyMinor(123456, 'BHD')).toMatch(/123\.456/);
+    expect(formatCurrencyMinor(123456, 'BHD')).toBe('BHD\u00a0123.456');
   });
   it('formats percent from a 0-1 ratio', () => {
     expect(formatPercent(0.42)).toBe('42%');
@@ -93,16 +107,18 @@ describe('catalogs', () => {
   // ADR 0329 — only `en` is eager; every other locale (pt-BR included) loads
   // through the lazy per-locale path, so these tests exercise that loader.
   it('aggregates en eagerly across all namespaces; pt-BR is lazy-only', () => {
-    expect(NAMESPACES.length).toBeGreaterThan(40);
+    // 132 namespaces MEASURED 2026-10-16 (e3c2492be) — the floor is the truth, not 40.
+    expect(NAMESPACES.length).toBeGreaterThanOrEqual(132);
     expect(Object.keys(resourcesByLocale)).toEqual(['en']);
   });
   it('lazy pt-BR has exact key parity with en in every namespace (no fallback leak)', async () => {
     const en = resourcesByLocale.en;
+    if (!en) throw new Error('the eager en catalog is missing');
     const pt = await fullLocale('pt-BR');
     expect(pt).not.toBeNull();
-    for (const ns of Object.keys(en)) {
+    for (const [ns, messages] of Object.entries(en)) {
       expect(Object.keys(pt![ns] ?? {}).sort(), `namespace '${ns}' parity`)
-        .toEqual(Object.keys(en[ns]).sort());
+        .toEqual(Object.keys(messages).sort());
     }
   });
   it('lazy pt-BR actually translates the shared vocabulary (not copied)', async () => {

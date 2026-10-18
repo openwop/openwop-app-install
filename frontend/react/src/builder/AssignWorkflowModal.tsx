@@ -17,7 +17,7 @@ import { useTranslation } from 'react-i18next';
 import { Modal } from '../ui/Modal.js';
 import { SelectField } from '../ui/Field.js';
 import { toast } from '../ui/toast.js';
-import { listRoster, updateRosterEntry, type RosterEntry } from '../agents/rosterClient.js';
+import { appendRosterWorkflow, listRoster, type RosterEntry } from '../agents/rosterClient.js';
 import { listProjects, updateWorkflows, type Project } from '../features/projects/projectsClient.js';
 
 interface Props {
@@ -78,7 +78,7 @@ export function AssignWorkflowModal({ workflow, onClose }: Props): JSX.Element {
         if (entry.workflows.includes(workflow.id)) {
           toast.info(t('assignAlready', { name: workflow.name, target: targetName }));
         } else {
-          await updateRosterEntry(entry.rosterId, { workflows: [...entry.workflows, workflow.id] });
+          await appendRosterWorkflow(entry, workflow.id);
           toast.success(t('assignSuccess', { name: workflow.name, target: targetName }));
         }
       } else {

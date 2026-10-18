@@ -6,7 +6,19 @@
  *     one 404);
  *   - "Record" from a suggestion marks it recorded (with the document) and takes
  *     it off the open list; recording a closed one is a 404 and writes nothing;
- *   - erasure (a person-suggested text, a decider) and the project-delete cascade.
+ *   - erasure (a person-suggested text, a decider) and the project-delete cascade
+ *     (only that project's suggestions).
+ *
+ * Sabotage-witnessed (/grade-tests w29): idempotency, the 50 cap, the write gate
+ * on dismiss, the closed / other-project checks, the open-only list, the
+ * open-check before a record writes, the erasure fields and the cascade's
+ * project scope each red their case. Fixture notes: the long text is SPACED and
+ * starts with the secret — an unbroken 2000-char blob is itself secret-shaped
+ * (scrubbed to a short marker, so truncation never ran) and a secret placed past
+ * the bound was cut by truncation (so the scrub never mattered); probes
+ * w29g3-sg-truncate / sg-scrub-VAC were vacuous. The "foreign" suggestion lives
+ * on another project in the SAME tenant (a cross-tenant one is refused by the
+ * tenant read first, which never exercised the project check).
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -34,12 +46,18 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
+/** The fields these legs read off a response. Each leg asserts the status first. */
+interface ResBody {
+  user?: { userId: string }; orgId?: string; id?: string; documentId?: string;
+  suggestions?: Array<{ suggestionId: string }>; suggestion?: unknown;
+}
 function client() {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown) => {
+  const call = async (method: string, path: string, body?: unknown): Promise<{ status: number; body: ResBody }> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]!; }
-    return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) as any };
+    const parsed = res.status === 204 ? undefined : ((await res.json().catch(() => undefined)) as ResBody | undefined);
+    return { status: res.status, body: parsed ?? {} };
   };
   return { get: (p: string) => call('GET', p), post: (p: string, b?: unknown) => call('POST', p, b) };
 }
@@ -48,15 +66,22 @@ const email = (who: string): string => `${who}-${Date.now()}-${n++}@acme.test`;
 async function setup() {
   const tenantId = `org:sg-${Date.now()}-${n++}`;
   const owner = client();
-  const ownerId = (await owner.post('/host/openwop-app/test/login', { email: email('sg-owner'), tenantId })).body.user.userId as string;
-  const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'SuggCo' })).body.orgId as string;
-  const proj = (await owner.post('/host/openwop-app/projects', { orgId, name: 'Launch' })).body as { id: string };
+  const ownerId = (await owner.post('/host/openwop-app/test/login', { email: email('sg-owner'), tenantId })).body.user!.userId;
+  const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'SuggCo' })).body.orgId!;
+  const proj = { id: (await owner.post('/host/openwop-app/projects', { orgId, name: 'Launch' })).body.id! };
   const L = `/host/openwop-app/team-ledger/projects/${proj.id}`;
   expect((await owner.post(L)).status).toBe(201);
   const viewer = client();
-  const viewerId = (await viewer.post('/host/openwop-app/test/login', { email: email('sg-viewer'), tenantId })).body.user.userId as string;
+  const viewerId = (await viewer.post('/host/openwop-app/test/login', { email: email('sg-viewer'), tenantId })).body.user!.userId;
   await createMember({ tenantId, orgId, subject: viewerId, displayName: 'V', roles: ['viewer'] });
   return { tenantId, orgId, owner, ownerId, viewer, viewerId, projectId: proj.id, L };
+}
+/** A second project (with a ledger) in the SAME tenant and org. */
+async function sibling(s: Awaited<ReturnType<typeof setup>>): Promise<{ tenantId: string; projectId: string }> {
+  const r = await s.owner.post('/host/openwop-app/projects', { orgId: s.orgId, name: 'Other' });
+  expect(r.status).toBeLessThan(300);
+  expect((await s.owner.post(`/host/openwop-app/team-ledger/projects/${r.body.id!}`)).status).toBe(201);
+  return { tenantId: s.tenantId, projectId: r.body.id! };
 }
 const suggest = (s: { tenantId: string; projectId: string }, ref: string, over: Record<string, unknown> = {}) =>
   createSuggestion({ tenantId: s.tenantId, projectId: s.projectId, title: 'Ship EU first', text: 'We agreed to ship the EU first.', source: { kind: 'message', ref, link: '/chat?conversation=c1' }, suggestedBy: { kind: 'agent', id: 'suggester' }, ...over });
@@ -66,12 +91,18 @@ describe('ADR 0853 D1 — suggestions', () => {
     const s = await setup();
     const a = await suggest(s, 'm1');
     expect(await suggest(s, 'm1')).toEqual(a);
-    const long = await suggest(s, 'm-long', { text: `${'x'.repeat(2000)} sk-ant-${'k'.repeat(48)}` });
-    expect(long!.text.length).toBeLessThanOrEqual(SUGGESTION_LIMITS.text);
-    expect(long!.text).not.toMatch(/sk-ant-k{20}/);
-    const evil = await suggest(s, 'm-evil', { source: { kind: 'message', ref: 'm-evil', link: 'javascript:alert(1)' } });
-    expect(evil!.source.link).toBeUndefined();
-    for (let i = 0; i < SUGGESTION_LIMITS.open - 3; i++) expect(await suggest(s, `fill-${i}`)).not.toBeNull();
+    // Spaced (an unbroken blob is itself secret-shaped) and secret FIRST (so the bound cannot hide it).
+    const long = await suggest(s, 'm-long', { text: `use sk-ant-${'k'.repeat(48)} ${'lorem ipsum '.repeat(200)}` });
+    expect(long!.text).toHaveLength(SUGGESTION_LIMITS.text);
+    expect(long!.text.endsWith('…')).toBe(true);
+    expect(long!.text).not.toMatch(/sk-ant-/);
+    expect(long!.text.startsWith('use [REDACTED:secret-shaped] lorem ipsum')).toBe(true);
+    expect(a!.source.link).toBe('/chat?conversation=c1');
+    for (const [i, link] of ['javascript:alert(1)', '//evil.example', 'http://plain.example', 'data:text/html,x'].entries()) {
+      const evil = await suggest(s, `m-evil-${i}`, { source: { kind: 'message', ref: `m-evil-${i}`, link } });
+      expect(evil!.source.link, link).toBeUndefined();
+    }
+    for (let i = 0; i < SUGGESTION_LIMITS.open - 6; i++) expect(await suggest(s, `fill-${i}`)).not.toBeNull();
     expect(await suggest(s, 'one-too-many')).toBeNull();
   });
 
@@ -80,15 +111,19 @@ describe('ADR 0853 D1 — suggestions', () => {
     const a = (await suggest(s, 'm1'))!;
     const list = await s.viewer.get(`${s.L}/suggestions`);
     expect(list.status).toBe(200);
-    expect(list.body.suggestions.map((x: any) => x.suggestionId)).toEqual([a.suggestionId]);
+    expect(list.body.suggestions!.map((x) => x.suggestionId)).toEqual([a.suggestionId]);
     expect((await s.viewer.post(`${s.L}/suggestions/${a.suggestionId}/dismiss`)).status).toBe(403);
     const d = await s.owner.post(`${s.L}/suggestions/${a.suggestionId}/dismiss`);
     expect(d.status).toBe(200);
     expect(d.body.suggestion).toMatchObject({ status: 'dismissed', decidedBy: s.ownerId });
     expect((await s.owner.post(`${s.L}/suggestions/${a.suggestionId}/dismiss`)).status).toBe(404);
-    const other = await setup();
-    const b = (await suggest(other, 'm2'))!;
+    // Another project of the SAME tenant: refused by the project check, and left open.
+    const b = (await suggest(await sibling(s), 'm2'))!;
     expect((await s.owner.post(`${s.L}/suggestions/${b.suggestionId}/dismiss`)).status).toBe(404);
+    expect((await getSuggestion(s.tenantId, b.suggestionId))!.status).toBe('open');
+    // Another tenant's: refused by the tenant read.
+    const c = (await suggest(await setup(), 'm3'))!;
+    expect((await s.owner.post(`${s.L}/suggestions/${c.suggestionId}/dismiss`)).status).toBe(404);
     expect((await s.owner.get(`${s.L}/suggestions`)).body.suggestions).toEqual([]);
   });
 
@@ -116,8 +151,11 @@ describe('ADR 0853 D1 — suggestions', () => {
     await eraseSuggestionSubject(s.tenantId, `user:${s.ownerId}`);
     expect((await getSuggestion(s.tenantId, theirs.suggestionId))!.decidedBy).toBe(ERASED);
     expect((await getSuggestion(s.tenantId, theirs.suggestionId))!.text).not.toBe(ERASED); // an agent's text is not the person's
+    const other = await sibling(s);
+    await suggest(other, 'p3');
     expect(await countSuggestionsForProject(s.tenantId, s.projectId)).toBe(2);
     expect(await deleteSuggestionsForProject(s.tenantId, s.projectId)).toBe(2);
     expect(await countSuggestionsForProject(s.tenantId, s.projectId)).toBe(0);
+    expect(await countSuggestionsForProject(s.tenantId, other.projectId)).toBe(1); // only THIS project's
   });
 });

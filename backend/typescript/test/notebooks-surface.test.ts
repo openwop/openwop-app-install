@@ -7,10 +7,13 @@
  *   (b) a PRIVATE (visibility:'private') notebook is INVISIBLE to the surface —
  *       the subjectless-run org-visibility filter (the strategy isShared precedent),
  *   (c) a foreign-tenant scope sees nothing (CTI-1).
+ *
+ * Sabotage witnesses (w20g5-*): drop the `visibility !== 'org'` filter ⇒ (b); `topK` not passed
+ * through `surfaceOptCount` on search / ask ⇒ (d); a surface bound to the wrong tenant ⇒ (c);
+ * `getSource` leaking a row for an unresolved notebook ⇒ (b)+(c); contextLevel ⇒ (a).
  */
 
-import http from 'node:http';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { buildHostSurfaceBundle } from '../src/host/inMemorySurfaces.js';
 import { createNotebook, addSource } from '../src/features/notebooks/notebooksService.js';
@@ -18,13 +21,12 @@ import { setProjectVisibility } from '../src/features/projects/projectsService.j
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 
-let server: http.Server;
-
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
-  const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', res); });
+  // createApp boots the composer that registers `ctx.features.notebooks` — the wiring this file
+  // exercises. No HTTP is needed, so the app is never listened on.
+  await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   // notebooks + kb must be ON: the surface is toggle-gated at the seam, and a
   // notebook's sources/search ride a KB collection.
   for (const id of ['notebooks', 'kb']) {
@@ -32,7 +34,6 @@ beforeAll(async () => {
     if (d) await saveConfig({ ...d, status: 'on' }, 'test');
   }
 });
-afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
 // The surface contract returns Record<string, unknown>; a JSON round-trip narrows
 // it to the test's expected shape without a type assertion.
@@ -161,11 +162,20 @@ describe('ctx.features.notebooks surface', () => {
     const tenantId = 'nb-surf-c';
     const orgId = 'org-c';
     const nb = await createNotebook(tenantId, orgId, 'actor', { name: 'Owned' });
-    await addSource(tenantId, nb.id, 'actor', { title: 'Mine', text: 'Tenant C only.' });
+    const src = await addSource(tenantId, nb.id, 'actor', { title: 'Mine', text: 'Tenant C only.' });
+
+    // CONTROL: the owning tenant's scope DOES see the notebook, the source and the search hit — so
+    // the empties below are about the scope, not about a notebook that serves nothing.
+    const own = notebooksSurface(tenantId);
+    expect(as<SourcesOut>(await own.listSources!({ notebookId: nb.id })).sources.map((s) => s.documentId)).toEqual([src.documentId]);
+    expect(as<SourceOut>(await own.getSource!({ notebookId: nb.id, sourceId: src.documentId })).source?.title).toBe('Mine');
+    expect(as<SearchOut>(await own.searchNotebook!({ notebookId: nb.id, query: 'tenant' })).hits.map((h) => h.documentId)).toContain(src.documentId);
 
     const foreign = notebooksSurface('nb-surf-other');
     expect(as<SourcesOut>(await foreign.listSources!({ notebookId: nb.id })).sources).toHaveLength(0);
-    expect(as<SourceOut>(await foreign.getSource!({ notebookId: nb.id, sourceId: 'whatever' })).source).toBeNull();
-    expect(as<SearchOut>(await foreign.searchNotebook!({ notebookId: nb.id, query: 'mine' })).hits).toHaveLength(0);
+    // The REAL source id — a ghost id would be null in any tenant and prove nothing.
+    expect(as<SourceOut>(await foreign.getSource!({ notebookId: nb.id, sourceId: src.documentId })).source).toBeNull();
+    expect(as<SearchOut>(await foreign.searchNotebook!({ notebookId: nb.id, query: 'tenant' })).hits).toHaveLength(0);
+    expect(as<LevelsOut>(await foreign.getContextLevels!({ notebookId: nb.id })).levels).toHaveLength(0);
   });
 });

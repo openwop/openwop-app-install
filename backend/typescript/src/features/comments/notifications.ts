@@ -20,12 +20,9 @@
 
 import { getNotificationEmitter } from '../../notifications/emitter.js';
 import { createLogger } from '../../observability/logger.js';
-import type { Comment, CommentNotifyTargets } from './commentsService.js';
+import type { Comment, CommentNotifyPlan, CommentNotifyType } from './commentsService.js';
 
 const log = createLogger('features.comments');
-
-/** Feature-owned notification types — namespaced strings, no core-union edit. */
-const COMMENT_NOTIF = { added: 'comment.added', reply: 'comment.reply' } as const;
 
 /** A SPA deep-link to the comment thread (the FE CommentsPage reads these params). */
 export function threadActionUrl(c: Pick<Comment, 'orgId' | 'resourceType' | 'resourceId'>): string {
@@ -33,52 +30,53 @@ export function threadActionUrl(c: Pick<Comment, 'orgId' | 'resourceType' | 'res
   return `/comments?${q.toString()}`;
 }
 
-/**
- * Emit one tenant-scoped notification for a freshly-created comment (best-effort —
- * a notification failure MUST NOT fail the comment write). A reply notifies the
- * parent author (`comment.reply`); a top-level comment notifies the resource owner
- * (`comment.added`). Self-activity (owner comments on own resource / reply to self)
- * emits nothing.
- */
-export async function emitCommentNotification(comment: Comment, notify: CommentNotifyTargets): Promise<void> {
-  const isReply = comment.parentId != null;
-  const recipient = isReply ? notify.parentAuthorId : (notify.ownerId !== comment.authorId ? notify.ownerId : undefined);
-  if (!recipient) return; // nothing new to tell (self-activity)
+/** Feature-owned notification copy — namespaced string types, no core-union edit. */
+const COPY: Record<CommentNotifyType, { title: string; message: (title: string) => string }> = {
+  'comment.added': { title: 'New comment', message: (t) => `A new comment was added on “${t}”.` },
+  'comment.reply': { title: 'New reply', message: (t) => `A new reply was posted on “${t}”.` },
+  'comment.mention': { title: 'You were mentioned', message: (t) => `You were mentioned in a comment on “${t}”.` },
+  'comment.resolved': { title: 'Comment resolved', message: (t) => `Your comment on “${t}” was resolved.` },
+};
 
-  const type = isReply ? COMMENT_NOTIF.reply : COMMENT_NOTIF.added;
-  try {
-    await getNotificationEmitter().emit({
-      tenantId: comment.tenantId,
-      recipientUserId: recipient,      // C11 — addressed to the owner / parent-author, never broadcast tenant-wide
-      type,
-      priority: 'normal',
-      title: isReply ? 'New reply' : 'New comment',
-      message: `${isReply ? 'A new reply was posted' : 'A new comment was added'} on “${notify.resourceTitle}”.`,
-      actionUrl: threadActionUrl(comment),
-      metadata: {
+/**
+ * Deliver a write's notification plan (ADR 0881 D3/D4). The plan's recipients were
+ * already filtered by the service (`deliverable`: a human, not the actor, an org
+ * member, able to see the target), so this only addresses and emits — one row per
+ * recipient, never a tenant-wide broadcast (C11).
+ *
+ * Best-effort: the comment write already succeeded and must not be rolled back for a
+ * notifications outage — but NEVER SILENT (CMNT-9 / WF-CMNT-7).
+ */
+export async function emitCommentNotification(comment: Comment, plan: CommentNotifyPlan): Promise<void> {
+  for (const r of plan.recipients) {
+    const copy = COPY[r.type];
+    try {
+      await getNotificationEmitter().emit({
+        tenantId: comment.tenantId,
+        recipientUserId: r.userId,
+        type: r.type,
+        priority: 'normal',
+        title: copy.title,
+        message: copy.message(plan.resourceTitle),
+        actionUrl: threadActionUrl(comment),
+        metadata: {
+          commentId: comment.commentId,
+          orgId: comment.orgId,
+          resourceType: comment.resourceType,
+          resourceId: comment.resourceId,
+          recipientId: r.userId,        // mirrored in metadata for the FE presentation map
+          actorId: plan.actorId,       // CM2CD-7 — the resolver on a resolution, the author otherwise
+        },
+      });
+    } catch (err) {
+      log.warn('comment_notify_failed', {
         commentId: comment.commentId,
-        orgId: comment.orgId,
+        tenantId: comment.tenantId,
         resourceType: comment.resourceType,
-        resourceId: comment.resourceId,
-        recipientId: recipient,        // mirrored in metadata for the FE presentation map
-        actorId: comment.authorId,
-      },
-    });
-  } catch (err) {
-    // CMNT-9 / WF-CMNT-7 — best-effort (the comment write already succeeded and
-    // must not be rolled back for a notifications outage) but NEVER SILENT. This
-    // was a bare `catch { }` in a feature that imported no logger at all, so a
-    // notifications outage dropped every comment notification with no counter,
-    // no log line and no trace: the only way to notice was a user asking why
-    // they were never told. The repo convention for exactly this trade is one
-    // file over — `cms/cmsService.ts` "Best-effort … but never silent (CMSGAP-2)".
-    log.warn('comment_notify_failed', {
-      commentId: comment.commentId,
-      tenantId: comment.tenantId,
-      resourceType: comment.resourceType,
-      type,
-      error: err instanceof Error ? err.message : String(err),
-    });
+        type: r.type,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 }
 

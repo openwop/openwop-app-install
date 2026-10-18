@@ -50,6 +50,9 @@ describe('CRM-3 — CSM account depth', () => {
     await createAccount({ tenantId: T, name: 'Acme', arr: 90000, renewalDate: '2027-06-01', owner: 'user:cs' });
     const surface = buildCsmSurface({ tenantId: T });
     const out = await surface.listAccounts!({}) as { accounts: Array<Record<string, unknown>> };
-    expect(out.accounts[0]).toMatchObject({ arr: 90000, renewalDate: '2027-06-01', owner: 'user:cs' });
+    expect(out.accounts[0]).toMatchObject({ arr: 90000, renewalDate: '2027-06-01' });
+    // ADR 0882 (CSM2CD-5) — the owner is a person: read outputs are recorded in
+    // the run-event log and reach model context, so the run lane never carries it.
+    expect(out.accounts[0]).not.toHaveProperty('owner');
   });
 });

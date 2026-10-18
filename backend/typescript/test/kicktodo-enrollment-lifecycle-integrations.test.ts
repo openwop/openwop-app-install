@@ -39,8 +39,13 @@ describe('onEnrollmentDeleted → wearable-rule cleanup', () => {
   });
 
   it('is idempotent — a second fire matches nothing and does not throw', async () => {
-    await fireEnrollmentDeleted({ tenantId: TENANT, enrollmentId: 'enr-1' });
-    await fireEnrollmentDeleted({ tenantId: TENANT, enrollmentId: 'enr-1' });
-    expect(await integrations.rules.list()).toEqual([]);
+    await integrations.rules.put({ tenantId: TENANT, enrollmentId: 'enr-1', stableActivityId: 'walk-d2', metric: 'steps', threshold: 5000, createdAt: '2026-01-01T00:00:00.000Z' });
+    await integrations.rules.put({ tenantId: TENANT, enrollmentId: 'enr-2', stableActivityId: 'walk-d2', metric: 'steps', threshold: 5000, createdAt: '2026-01-01T00:00:00.000Z' });
+    // The handler ran both times (fireEnrollmentDeleted counts handlers that did
+    // NOT throw — it swallows, so a throwing re-run would show as 0, not a throw).
+    expect(await fireEnrollmentDeleted({ tenantId: TENANT, enrollmentId: 'enr-1' })).toBe(1); // the one subscriber (integrations' wearable-rules)
+    expect(await fireEnrollmentDeleted({ tenantId: TENANT, enrollmentId: 'enr-1' })).toBe(1); // the one subscriber (integrations' wearable-rules)
+    // …and the repeat removed nothing else: enr-2's rule survives.
+    expect((await integrations.rules.list()).map((r) => `${r.tenantId}::${r.enrollmentId}`)).toEqual([`${TENANT}::enr-2`]);
   });
 });

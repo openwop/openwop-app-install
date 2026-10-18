@@ -4,6 +4,12 @@
  *
  * ── Why this file exists ────────────────────────────────────────────────────
  *
+ * > **CORRECTED (/grade-tests w20):** the next paragraph describes PROBE-DOC-4 as it
+ * > was WHEN THIS FILE WAS WRITTEN. ADR 0599 §4 then un-narrowed it to the whole class
+ * > (a required-binding table over every node type, with an anti-vacuity floor), so it is
+ * > no longer "vacuously green" — probe w20g1-m-binding reds it. The "8 files / 790
+ * > lines" count is likewise a historical measurement, not the current suite.
+ *
  * `insights-suite-meta.test.ts` already carries a probe written for exactly this
  * class — `PROBE-DOC-4`, "connectedness is not runnability" — added after
  * `weekly-variance.render` shipped with no inputs and died `not_found` behind a
@@ -42,17 +48,16 @@
  * @see docs/adr/0599-insights-suite-honest-then-runnable.md §4
  */
 
-import http from 'node:http';
-import type { AddressInfo } from 'node:net';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { buildFeatureSurfaces } from '../src/host/featureSurfaces.js';
 import { loadWorkflowChainPacks, defaultWorkflowChainPackRoots, getChain, _resetChainRegistryForTest } from '../src/host/workflowChainPackLoader.js';
 import { getNodeRegistry } from '../src/executor/nodeRegistry.js';
+import { buildGraph, buildNodeInputs, freshSnapshot } from '../src/executor/scheduler.js';
 import { resolveDeclaredInputs, buildNodeCtxInputs } from '../src/executor/nodeCtxInputs.js';
 import { interpolateRunInputs, hasInputTokens } from '../src/executor/runInputInterpolation.js';
 import { ensureLocalPacksMounted } from '../src/bootstrap/mountLocalPacks.js';
@@ -66,13 +71,12 @@ import type { NodeContext, WorkflowDefinition } from '../src/executor/types.js';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, '..', '..', '..');
 
-let server: http.Server;
 type NodeResult = { status: string; outputs?: Record<string, unknown>; error?: { code?: string; message?: string } };
 
 /* ── Stubs: the three things that are NOT this feature's logic ───────────── */
 
 const AI_CONTENT = 'Ten years of steady, generous work. Thank you, and congratulations.';
-const aiStub = async (): Promise<NodeResult> => ({
+const aiStub = async (_ctx: NodeContext): Promise<NodeResult> => ({
   status: 'success',
   outputs: { content: AI_CONTENT, usage: {}, finishReason: 'stop', model: 'stub' },
 });
@@ -121,22 +125,28 @@ function connectorsStub(): NonNullable<NodeContext['connectors']> {
   };
 }
 
-const knowledgeStub = {
+const knowledgeStub: NonNullable<NodeContext['knowledge']> = {
   async retrieve() {
     return { chunks: [{ id: 'k1', text: 'We say thank you plainly and name the specific work.', relevanceScore: 0.9 }], totalCandidates: 1 };
   },
-} as unknown as NodeContext['knowledge'];
+};
 
 /**
  * Resolve a node the way the RUNTIME does — through the registry, whose miss path
  * runs `packs/tarballLoader` → `host/packTrust.classifyPackDir`. "The pack has
  * tests" is not "the pack is reachable in production".
  */
-async function nodeImpl(typeId: string): Promise<(ctx: unknown) => Promise<NodeResult>> {
+async function nodeImpl(typeId: string): Promise<(ctx: NodeContext) => Promise<NodeResult>> {
   if (typeId === 'core.ai.chatCompletion') return aiStub;
   const mod = await getNodeRegistry().resolve(typeId);
   expect(mod, `${typeId} did not resolve through the trust-gated pack lane`).toBeTruthy();
-  return (ctx) => mod!.execute(ctx as NodeContext) as Promise<NodeResult>;
+  return async (ctx) => {
+    const out = await mod!.execute(ctx);
+    if (out.status === 'failure') return { status: out.status, error: out.error };
+    if (out.status === 'suspended') return { status: out.status };
+    const o = out.outputs;
+    return { status: out.status, outputs: o && typeof o === 'object' && !Array.isArray(o) ? o as Record<string, unknown> : {} };
+  };
 }
 
 /* ── The harness ─────────────────────────────────────────────────────────── */
@@ -173,36 +183,49 @@ async function runDefinition(
     tenantId, runId,
     ...(opts.systemRun ? {} : { actingUserId: 'u-ceo' }),
   });
-  const outputs = new Map<string, Record<string, unknown>>();
+  // The executor's OWN wiring (`scheduler.ts`): topological order, `buildNodeInputs`
+  // port semantics (a source node gets `{input: <launch inputs>}`, unwrapped by
+  // `buildNodeCtxInputs`), then the declared-input merge. (/grade-tests w20: this used to
+  // be a hand-copied port loop that had already drifted from `buildNodeInputs`.)
+  const graph = buildGraph(def);
+  const snapshot = freshSnapshot(def);
+  const byId = new Map(def.nodes.map((n) => [n.nodeId, n]));
   const results: Record<string, StepResult> = {};
-  for (const node of def.nodes) {
-    const inputsByPort: Record<string, unknown> = {};
-    for (const e of def.edges ?? []) {
-      if (e.targetNodeId !== node.nodeId) continue;
-      const src = outputs.get(e.sourceNodeId);
-      if (src === undefined) continue;
-      const sourcePort = e.sourceOutput ?? 'output';
-      inputsByPort[e.targetInput ?? 'input'] = Object.prototype.hasOwnProperty.call(src, sourcePort) ? src[sourcePort] : src;
-    }
+  const emitted: Array<{ type: string; payload: unknown }> = [];
+  for (const nodeId of snapshot.order) {
+    const node = byId.get(nodeId)!;
+    const inputsByPort = buildNodeInputs(nodeId, graph, snapshot, variableBag);
     const impl = await nodeImpl(node.typeId);
-    const result = await impl({
+    const ctx: NodeContext = {
       runId,
       nodeId: node.nodeId,
       tenantId,
       inputs: buildNodeCtxInputs(inputsByPort, resolveDeclaredInputs(node.inputs, variableBag)),
       config: hasInputTokens(node.config) ? interpolateRunInputs(node.config ?? {}, variableBag) : (node.config ?? {}),
+      configurable: {},
+      attempt: 1,
+      secrets: {},
+      // Run events are not under test; record them so a node that emits is visible here.
+      emit: async (type, payload) => { emitted.push({ type, payload }); return { eventId: `ev-${emitted.length}`, sequence: emitted.length }; },
       features,
       connectors: broker,
       knowledge: knowledgeStub,
-    });
+    };
+    const result = await impl(ctx);
     const step: StepResult = { status: result.status, outputs: result.outputs ?? {}, ...(result.error ? { error: result.error } : {}) };
     results[shortId(node.nodeId)] = step;
     if (result.status === 'suspended' && node.typeId === 'core.approvalGate') {
-      outputs.set(node.nodeId, { approved: true, decision: 'approve' });
+      snapshot.nodeState.set(nodeId, 'completed');
+      snapshot.nodeOutputs.set(nodeId, { approved: true, decision: 'approve' });
       continue;
     }
+    // HARNESS FACT, not a product claim: the walk stops at the first non-success node,
+    // so every `expect(r.notify).toBeUndefined()` after a failed node below holds by
+    // construction here. The executor's own downstream-halt (`all_success`) is the
+    // scheduler suite's claim; what THESE cases assert is the node's typed failure.
     if (result.status !== 'success') break;
-    outputs.set(node.nodeId, result.outputs ?? {});
+    snapshot.nodeState.set(nodeId, 'completed');
+    snapshot.nodeOutputs.set(nodeId, result.outputs ?? {});
   }
   return results;
 }
@@ -248,8 +271,9 @@ function firstFailure(results: Record<string, StepResult>): string | null {
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
-  const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { void (server.address() as AddressInfo); res(); }); });
+  // No listener: no case fetches. `createApp` is still needed — feature surfaces,
+  // toggle defaults and host-ext storage are what `buildFeatureSurfaces` reads.
+  await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   for (const id of ['insights-suite', 'notifications']) {
     const d = getToggleDefault(id);
     if (d) await saveConfig({ ...d, status: 'on' }, 'test');
@@ -259,7 +283,6 @@ beforeAll(async () => {
   expect(errors).toEqual([]);
   ensureLocalPacksMounted();
 });
-afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
 describe('PROBE-IS-0 — the insights node pack is REACHABLE through the trust gate', () => {
   it('is dispatchable and both nodes resolve through the registry, not a direct import', async () => {
@@ -280,16 +303,17 @@ describe('PROBE-IS-1 — every insights chain RUNS to its terminal notify (ISC-1
     expect(firstFailure(r), 'a node failed — the chain cannot produce an insight').toBeNull();
     // The source node must have actually reached the broker with a real query.
     expect(r.query?.status).toBe('success');
-    expect(Number(r.query?.outputs.rowCount)).toBeGreaterThan(0);
+    expect(Number(r.query?.outputs.rowCount)).toBe(4);
     // The compute node must have received DATA, not just the upstream envelope.
     expect(r.compute?.status).toBe('success');
-    expect(Object.keys(r.compute?.outputs.variances as Record<string, unknown>).length).toBeGreaterThan(0);
+    expect(Object.keys(r.compute?.outputs.variances as Record<string, unknown>).sort()).toEqual(['labor', 'margin', 'sales', 'shrink']);
     expect(r.compute?.outputs.verdict).toBe('off_plan'); // sales −5%, labor +10% in the fixture
     // The terminal was reached AND the notification actually emitted.
     expect(r.notify?.status).toBe('success');
     expect(r.notify?.outputs.emitted, `notify refused: ${String(r.notify?.outputs.reason)}`).toBe(true);
     const inbox = await __hostExtStorage()!.listNotifications({ tenantId, limit: 20 });
-    expect(inbox.length).toBeGreaterThan(0);
+    expect(inbox).toHaveLength(1);
+    expect(inbox[0]!.title).toBe('Weekly variance (Actual vs Plan)');
   });
 
   it('talent-prep: Workday → 9-box score → notify, with a score derived from the pulled rows', async () => {
@@ -355,6 +379,10 @@ describe('PROBE-IS-2 — no chain reports a verdict it did not compute (ISC-2 / 
     // Same chains, same launch — only the upstream data is gone.
     const emptyBroker = brokerReturning({ data: [], rows: [] });
 
+    // DOUBLE GUARD (honest ceiling, /grade-tests w20): zero rows trip BOTH aggregate
+    // guards with the same code, so deleting either one alone stays green here. Which
+    // guard refused is pinned by its message at node level (`insights-suite.test.ts` ›
+    // "FAILS CLOSED on zero evaluable metrics"). The talent half below is single-guarded.
     const wv = await runWithBroker(WEEKLY_VARIANCE_ID, emptyBroker, tenantId);
     expect(wv.compute?.status, 'zero financial rows must NOT produce a verdict').toBe('failure');
     expect(wv.compute?.error?.code).toBe('insufficient_data');
@@ -586,7 +614,10 @@ describe('PROBE-IS-10 — who the notification reaches, what it says, and where 
     const r = await runDefinition(buildInsightsMetaWorkflow(WEEKLY_VARIANCE_ID), maximalLaunch(WEEKLY_VARIANCE_ID), tenantId);
     expect(r.notify?.outputs.emitted).toBe(true);
     const inbox = await __hostExtStorage()!.listNotifications({ tenantId, limit: 20 });
+    expect(inbox).toHaveLength(1);
+    // A broadcast is NEITHER a user nor a role target.
     expect(inbox[0]!.recipientUserId).toBeUndefined();
+    expect(inbox[0]!.recipientRole).toBeUndefined();
     // …but it STILL gets the deep link, which is the half that was pure loss.
     expect(inbox[0]!.actionUrl).toMatch(/^\/runs\//);
   });

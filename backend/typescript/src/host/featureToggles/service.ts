@@ -286,6 +286,39 @@ export async function enableTenantOverride(
 }
 
 /**
+ * The CAS twin of {@link enableTenantOverride}: turn a feature OFF for one tenant
+ * via a per-tenant override (ADR 0892 Phase B — a workspace turning a bundle off).
+ * Same compare-and-swap loop for the same reason: the row is shared by every
+ * tenant. The caller runs the per-tenant disable-lock first
+ * ({@link tenantDisableBlockers}); this writes only. Returns:
+ *   'disabled'    — an override was written this call
+ *   'already-off' — already off for the tenant (killed, global off, or an override)
+ *   'unknown'     — no such toggle (graduated/removed feature)
+ */
+export async function disableTenantOverride(
+  id: string,
+  tenantId: string,
+  actor: string,
+): Promise<'disabled' | 'already-off' | 'unknown'> {
+  const MAX_TRIES = 6;
+  for (let attempt = 0; attempt < MAX_TRIES; attempt += 1) {
+    const effective = await getEffectiveConfig(id);
+    if (!effective) return 'unknown';
+    if (!resolveConfig(effective, { tenantId }).enabled) return 'already-off';
+    const stored = await store.get(id);
+    const base = stored ?? effective;
+    const next: ToggleConfig = {
+      ...base,
+      tenantOverrides: { ...base.tenantOverrides, [tenantId]: { status: 'off' } },
+      updatedAt: new Date().toISOString(),
+      updatedBy: actor,
+    };
+    if (await store.compareAndSwap(stored, next)) return 'disabled';
+  }
+  throw new Error(`disableTenantOverride: CAS contention on toggle '${id}' after ${MAX_TRIES} attempts`);
+}
+
+/**
  * Strip a tenant's per-tenant overrides from EVERY stored toggle config
  * (ADR 0292 lifecycle fix). Toggle configs are keyed by toggle id, not tenant,
  * so `purgeTenantHostExt`'s tenant-owned-row walk can't reach the nested
@@ -366,6 +399,28 @@ export async function computeDisableBlockers(next: ToggleConfig): Promise<Disabl
       const depOnT = dep ? statusForTenant(dep, t) !== 'off' : true;
       const nextOffT = statusForTenant(next, t) === 'off';
       if (depOnT && nextOffT) out.push({ dependentId, tenantId: t });
+    }
+  }
+  return out;
+}
+
+/**
+ * The ADR 0194 disable-lock for ONE tenant turning a SET of features off at once
+ * (ADR 0892 Phase B D5). Simulates a per-tenant `off` override on each id and runs
+ * {@link computeDisableBlockers}, keeping only this tenant's scope. A dependent
+ * that is itself in `ids` is not a blocker (it goes off in the same change), and
+ * the global scope is never this tenant's doing, so it is dropped. Ids with no
+ * toggle are skipped. Empty ⇒ allowed.
+ */
+export async function tenantDisableBlockers(ids: readonly string[], tenantId: string): Promise<DisableBlocker[]> {
+  const leaving = new Set(ids);
+  const out: DisableBlocker[] = [];
+  for (const id of ids) {
+    const effective = await getEffectiveConfig(id);
+    if (!effective) continue;
+    const next: ToggleConfig = { ...effective, tenantOverrides: { ...effective.tenantOverrides, [tenantId]: { status: 'off' } } };
+    for (const b of await computeDisableBlockers(next)) {
+      if (b.tenantId === tenantId && !leaving.has(b.dependentId) && !out.some((o) => o.dependentId === b.dependentId)) out.push(b);
     }
   }
   return out;

@@ -23,6 +23,7 @@ import {
   resolveCircleConversation,
   CircleDeniedError,
   GrantError,
+  GrantConflictError,
   GRANT_SCOPES,
   type CircleType,
   type GrantScope,
@@ -42,8 +43,10 @@ import {
   reconcileProposalCard,
   CohortError,
   CohortFullError,
+  ProposalBusyError,
   reconcileSeats,
   releaseRevokedSeat,
+  unindexRevokedGrantee,
   dryRunProposal,
 } from './cohortService.js';
 import { resolveCircleByOpaqueId } from './circleService.js';
@@ -64,9 +67,19 @@ async function gate(req: Request): Promise<void> {
 
 const CIRCLE_TYPES: ReadonlySet<string> = new Set(['partner', 'circle', 'cohort', 'coach']);
 
+/** KTACC-5 / KTA-4 — the client idempotency key: the standard `Idempotency-Key`
+ *  header, else a body `idempotencyKey` (the commerce GEN-2d shape). Bounded so a
+ *  hostile client cannot bloat the derived id's input. Absent → undefined. */
+function idempotencyKeyOf(req: Request, body: Record<string, unknown>): string | undefined {
+  const raw = req.get('idempotency-key') ?? (typeof body.idempotencyKey === 'string' ? body.idempotencyKey : undefined);
+  return typeof raw === 'string' && raw.length > 0 && raw.length <= 128 ? raw : undefined;
+}
+
 function mapDenied(err: unknown): never {
   if (err instanceof CircleDeniedError) throw new OpenwopError('not_found', err.message, 404);
   if (err instanceof GrantError) throw new OpenwopError('validation_error', err.message, 422);
+  if (err instanceof GrantConflictError) throw new OpenwopError('conflict', err.message, 409);
+  if (err instanceof ProposalBusyError) throw new OpenwopError('conflict', err.message, 409);
   throw err;
 }
 
@@ -84,12 +97,17 @@ export const KICKTODO_CIRCLES_ROUTES: ReadonlyArray<{ method: 'get' | 'post'; pa
       // The circle is anchored to the CALLER'S OWN enrollment (uniform 404 otherwise).
       const e = await getEnrollment(tenantOf(req), b.enrollmentId);
       if (!e || e.ownerSubject !== subject) throw new OpenwopError('not_found', 'Enrollment not found.', 404);
+      // KTACC-5 — optional client idempotency key (the commerce GEN-2d shape:
+      // `Idempotency-Key` header, else body `idempotencyKey`; bounded). Absent ⇒
+      // a fresh circle per call, unchanged.
+      const idempotencyKey = idempotencyKeyOf(req, b);
       res.json(await createCircle({
         tenantId: tenantOf(req),
         type: b.type as CircleType,
         enrollmentId: b.enrollmentId,
         ownerSubject: subject,
         name: typeof b.name === 'string' && b.name.trim() ? b.name.slice(0, 120) : 'My circle',
+        ...(idempotencyKey ? { idempotencyKey } : {}),
       }));
     },
   },
@@ -219,6 +237,9 @@ export const KICKTODO_CIRCLES_ROUTES: ReadonlyArray<{ method: 'get' | 'post'; pa
         // logs a transient reconcile failure internally, so the committed
         // revoke response is never turned into a 500.
         await releaseRevokedSeat(tenantOf(req), req.params.id, b.granteeSubject);
+        // KTACC-4 — the coach-caseload pointer goes with the grant (best-effort,
+        // same posture as the seat heal: the revoke has already committed).
+        await unindexRevokedGrantee(b.granteeSubject, req.params.id, tenantOf(req)).catch(() => undefined);
         res.json(result);
       } catch (err) {
         mapDenied(err);
@@ -357,6 +378,9 @@ export const KICKTODO_CIRCLES_ROUTES: ReadonlyArray<{ method: 'get' | 'post'; pa
     handler: async (req, res) => {
       await gate(req);
       const b = (req.body ?? {}) as Record<string, unknown>;
+      // KTA-4 — optional client idempotency key (header, else body); absent ⇒ a
+      // fresh proposal per call, unchanged.
+      const idempotencyKey = idempotencyKeyOf(req, b);
       try {
         res.json(await proposePlanChange(
           req.params.id,
@@ -367,6 +391,7 @@ export const KICKTODO_CIRCLES_ROUTES: ReadonlyArray<{ method: 'get' | 'post'; pa
           // "no changes", which the seam treats as an honest no-op. Passing `[]` for an
           // absent field would make every legacy-shaped request look applyable.
           Array.isArray(b.commands) ? b.commands : undefined,
+          idempotencyKey ? { idempotencyKey } : {},
         ));
       } catch (err) {
         if (err instanceof CohortError) throw new OpenwopError('validation_error', err.message, 422);

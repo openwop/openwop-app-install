@@ -19,7 +19,7 @@ import { loadArtifactTypePacks } from '../src/host/artifactTypePackLoader.js';
 import { getPackCanvasType } from '../src/host/canvasPackTypes.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
-import { createCanvasForTenant } from '../src/host/canvasSurface.js';
+import { createCanvasForTenant, getCanvasForTenant } from '../src/host/canvasSurface.js';
 import { collabCanvasType } from '../src/host/collab/collabRegistry.js';
 import { createMember } from '../src/host/accessControlService.js';
 
@@ -93,13 +93,15 @@ afterAll(async () => {
   else process.env.OPENWOP_PACK_DIR = prevPackDir;
 });
 
-interface Res<T = any> { status: number; body: T }
-function client(): { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res>; patch: (p: string, b?: unknown) => Promise<Res>; del: (p: string) => Promise<Res> } {
+interface Res<T> { status: number; body: T }
+interface ErrBody { error: string; message: string }
+type Call = <T>(p: string, b?: unknown) => Promise<Res<T>>;
+function client(): { get: Call; post: Call; patch: Call; del: Call } {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
+  const call = async <T>(method: string, path: string, body?: unknown): Promise<Res<T>> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
-    for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]!; }
+    const out: T = res.status === 204 ? JSON.parse('null') : await res.json().catch(() => undefined);
     return { status: res.status, body: out };
   };
   return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), patch: (p, b) => call('PATCH', p, b), del: (p) => call('DELETE', p) };
@@ -109,9 +111,9 @@ let n = 0;
 async function orgOwner(): Promise<{ c: ReturnType<typeof client>; orgId: string; tenantId: string }> {
   const tenantId = `org:test-cvpack-${Date.now()}-${n++}`;
   const c = client();
-  const r = await c.post('/host/openwop-app/test/login', { email: `cvp-${Date.now()}-${n++}@acme.test`, tenantId });
+  const r = await c.post<unknown>('/host/openwop-app/test/login', { email: `cvp-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(r.status).toBe(201);
-  const org = await c.post('/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await c.post<{ orgId: string }>('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status).toBe(201);
   return { c, orgId: org.body.orgId, tenantId };
 }
@@ -130,7 +132,7 @@ describe('canvas packs (ADR 0310 Phase D)', () => {
 
   it('serves the catalog with the editor hints for the pack type', async () => {
     const { c, orgId } = await orgOwner();
-    const cat = await c.get(`${BASEP(orgId)}/catalog`);
+    const cat = await c.get<{ canvasTypeId: string; editor: { collections: { adders: { label: string }[] }[] } }>(`${BASEP(orgId)}/catalog`);
     expect(cat.status).toBe(200);
     expect(cat.body.canvasTypeId).toBe(TYPE);
     expect(cat.body.editor.collections).toHaveLength(1);
@@ -141,25 +143,36 @@ describe('canvas packs (ADR 0310 Phase D)', () => {
     const { c, orgId, tenantId } = await orgOwner();
     const canvas = await createCanvasForTenant(tenantId, { canvasTypeId: TYPE, name: 'G', initialState: deck });
 
-    const badEnum = await c.patch(`${BASEP(orgId)}/canvases/${canvas.canvasId}`, { state: { items: [{ text: 'x', priority: 'urgent' }] }, expectedVersion: 1 });
-    expect(badEnum.status).toBe(422);
-    const unknownField = await c.patch(`${BASEP(orgId)}/canvases/${canvas.canvasId}`, { state: { items: [{ text: 'x', script: 'alert(1)' }] }, expectedVersion: 1 });
-    expect(unknownField.status).toBe(422);
-    const empty = await c.patch(`${BASEP(orgId)}/canvases/${canvas.canvasId}`, { state: { items: [] }, expectedVersion: 1 });
-    expect(empty.status).toBe(422); // minItems 1
+    // Each bad state is valid except ONE property (title is optional in the schema).
+    const refuse = async (state: unknown, why: RegExp): Promise<void> => {
+      const r = await c.patch<ErrBody>(`${BASEP(orgId)}/canvases/${canvas.canvasId}`, { state, expectedVersion: 1 });
+      expect(r.status, JSON.stringify(r.body)).toBe(422);
+      expect(r.body.error).toBe('validation_error');
+      expect(r.body.message).toMatch(why);
+    };
+    await refuse({ items: [{ text: 'x', priority: 'urgent' }] }, /allowed values|enum/);
+    await refuse({ items: [{ text: 'x', script: 'alert(1)' }] }, /additional/);
+    await refuse({ items: [] }, /fewer than 1|minItems/); // minItems 1
+    expect((await getCanvasForTenant(tenantId, canvas.canvasId))?.version).toBe(1); // nothing landed
 
-    const save = await c.patch(`${BASEP(orgId)}/canvases/${canvas.canvasId}`, { state: { ...deck, items: [...deck.items, { text: 'Bread' }] }, expectedVersion: 1 });
+    const next = { ...deck, items: [...deck.items, { text: 'Bread' }] };
+    const save = await c.patch<{ newVersion: number }>(`${BASEP(orgId)}/canvases/${canvas.canvasId}`, { state: next, expectedVersion: 1 });
     expect(save.status, JSON.stringify(save.body)).toBe(200);
     expect(save.body.newVersion).toBe(2);
+    expect((await getCanvasForTenant(tenantId, canvas.canvasId))?.state).toEqual(next);
 
-    const del = await c.del(`${BASEP(orgId)}/canvases/${canvas.canvasId}`);
+    const del = await c.del<undefined>(`${BASEP(orgId)}/canvases/${canvas.canvasId}`);
     expect(del.status).toBe(204);
+    expect(await getCanvasForTenant(tenantId, canvas.canvasId)).toBeNull();
   });
 
   it('pins the type: a slides canvas is a uniform 404 on the pack routes', async () => {
     const { c, orgId, tenantId } = await orgOwner();
     const foreign = await createCanvasForTenant(tenantId, { canvasTypeId: 'canvas.slides', name: 'S', initialState: { title: 'S', slides: [{ layout: 'title' }] } });
-    expect((await c.get(`${BASEP(orgId)}/canvases/${foreign.canvasId}`)).status).toBe(404);
+    const res = await c.get<ErrBody>(`${BASEP(orgId)}/canvases/${foreign.canvasId}`);
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('not_found');
+    expect(res.body.message).toMatch(/^canvas '.+' not found$/); // the id itself is redacted by the error sanitizer
   });
 
   it('a pack claiming a HOST canvas type cannot poison its catalog (code-review HIGH)', async () => {
@@ -171,21 +184,21 @@ describe('canvas packs (ADR 0310 Phase D)', () => {
     expect(slidesCatalog.some((c) => c.type === 'evil-widget')).toBe(false);
     // ...and no editor routes exist under the pack namespace for the host id.
     const { c, orgId } = await orgOwner();
-    const res = await c.get(`/host/openwop-app/canvas-packs/canvas.slides/orgs/${encodeURIComponent(orgId)}/catalog`);
+    const res = await c.get<unknown>(`/host/openwop-app/canvas-packs/canvas.slides/orgs/${encodeURIComponent(orgId)}/catalog`);
     expect(res.status).toBe(404);
   });
 
   // ADR 0314 — the Documents creation gallery enumerates pack types + creates blanks.
   it('lists the served pack types (title from the artifact type) and never the evil claim', async () => {
     const { c, orgId } = await orgOwner();
-    const r = await c.get(`/host/openwop-app/canvas-packs/orgs/${encodeURIComponent(orgId)}/types`);
+    const r = await c.get<{ types: { canvasTypeId: string; title: string }[] }>(`/host/openwop-app/canvas-packs/orgs/${encodeURIComponent(orgId)}/types`);
     expect(r.status, JSON.stringify(r.body)).toBe(200);
     expect(r.body.types).toEqual([{ canvasTypeId: TYPE, title: 'Checklist' }]);
   });
 
   it('POST /canvases derives a blank from the editor hints that the PACK SCHEMA accepts', async () => {
     const { c, orgId } = await orgOwner();
-    const r = await c.post(`${BASEP(orgId)}/canvases`, { name: 'Groceries' });
+    const r = await c.post<{ canvasTypeId: string; state: { title: string; items: unknown[] } }>(`${BASEP(orgId)}/canvases`, { name: 'Groceries' });
     expect(r.status, JSON.stringify(r.body)).toBe(201);
     expect(r.body.canvasTypeId).toBe(TYPE);
     // docNameKey='title' seeds the name; `items` min=1 floor seeds the first
@@ -228,6 +241,13 @@ describe('canvas packs (ADR 0310 Phase D)', () => {
  *  (b) **The ADR 0610 read gate.** Pack canvases register through the same chassis as
  *      first-party types, so they inherit the subject-access gate in `loadCanvas` — but
  *      that inheritance was, again, asserted for other types only.
+ *
+ * TWINS (kept on purpose — both files are protected): (a) ≡
+ * `canvas-pack-negative-invariants.test.ts` › "the loaded pack type is ABSENT from the
+ * collab registry" (which adds the ticket-mint 404); (b) ≡ that file's "a non-member
+ * org viewer is REFUSED at the pack-canvas read door" (which adds the project-door and
+ * versions-door legs). Probes w47g1-pe-collab/ni-collab and pe-readgate/ni-readgate
+ * red both.
  */
 describe('CPKC-2 — the pack-canvas trust boundary, asserted negatively', () => {
   it('(a) a pack canvas type is ABSENT from the collab registry — no live room for an untrusted shape', () => {
@@ -240,23 +260,24 @@ describe('CPKC-2 — the pack-canvas trust boundary, asserted negatively', () =>
 
   it('(b) a project non-member gets a uniform 404 on an owner-subject pack canvas (ADR 0610)', async () => {
     const { c, orgId, tenantId } = await orgOwner();
-    const projectId = String((await c.post('/host/openwop-app/projects', { orgId, name: 'Secret' })).body.id);
-    expect((await c.patch(`/host/openwop-app/projects/${projectId}/visibility`, { visibility: 'private' })).body.visibility).toBe('private');
+    const projectId = (await c.post<{ id: string }>('/host/openwop-app/projects', { orgId, name: 'Secret' })).body.id;
+    expect((await c.patch<{ visibility: string }>(`/host/openwop-app/projects/${projectId}/visibility`, { visibility: 'private' })).body.visibility).toBe('private');
     const canvas = await createCanvasForTenant(tenantId, {
       canvasTypeId: TYPE, name: 'Secret checklist',
       ownerSubject: { kind: 'project', id: projectId },
       initialState: { items: [{ text: 'Buy milk' }] },
     });
     // The owner (a project member) reads it — the gate must not over-refuse.
-    expect((await c.get(`${BASEP(orgId)}/canvases/${canvas.canvasId}`)).status).toBe(200);
+    expect((await c.get<unknown>(`${BASEP(orgId)}/canvases/${canvas.canvasId}`)).status).toBe(200);
 
     // A second user in the SAME tenant + org, with viewer rights but NOT a project member.
     const b = client();
-    const rb = await b.post('/host/openwop-app/test/login', { email: `cvp-nm-${Date.now()}@acme.test`, tenantId });
+    const rb = await b.post<{ user: { userId: string } }>('/host/openwop-app/test/login', { email: `cvp-nm-${Date.now()}@acme.test`, tenantId });
     expect(rb.status).toBe(201);
-    await createMember({ tenantId, orgId, subject: String(rb.body.user.userId), displayName: 'B', roles: ['viewer'] });
-    const denied = await b.get(`${BASEP(orgId)}/canvases/${canvas.canvasId}`);
+    await createMember({ tenantId, orgId, subject: rb.body.user.userId, displayName: 'B', roles: ['viewer'] });
+    const denied = await b.get<ErrBody>(`${BASEP(orgId)}/canvases/${canvas.canvasId}`);
     expect(denied.status, 'org scope alone must not admit a private project canvas').toBe(404);
+    expect(denied.body.error).toBe('not_found');
     expect(JSON.stringify(denied.body ?? {}), 'no existence leak').not.toContain('Secret checklist');
   }, 60_000);
 });

@@ -204,7 +204,12 @@ export async function importSellers(rows: Partial<SellerAccount>[]): Promise<{ s
 /** ADR 0576 — the reconciliation invariant: every accountIndex row must agree
  *  with its seller row. Divergence is an INCIDENT (logged + flagged), never a
  *  self-heal — a silently 'repaired' binding is exactly the rewrite this ADR
- *  forbids. Invoked from the daily sweep; exported for tests. */
+ *  forbids.
+ *
+ *  CORRECTED (ADR 0877 D7 / WF-MKT-14): this said "Invoked from the daily sweep".
+ *  There is no sweep — nothing in `src/` calls this (re-measured 2026-10-12); it
+ *  is an operator/test check. Scheduling it is a follow-up, and until then the
+ *  write-time create-only CAS (`bindSellerAccount`) is the only guard that runs. */
 export async function reconcileSellerBindings(): Promise<{ checked: number; divergent: number }> {
   let checked = 0;
   let divergent = 0;

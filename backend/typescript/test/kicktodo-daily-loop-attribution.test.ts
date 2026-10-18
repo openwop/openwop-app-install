@@ -7,13 +7,17 @@
  *   - it enables no cadence (heartbeat stays off),
  *   - and it must NEVER mirror the participant's daily occurrences onto
  *     KickBot's board — the participant board is the single completion truth.
+ *
+ * Sabotage witnesses (w41 /grade-tests): dropping the rosterId/agentId stamp,
+ * a non-off KickBot heartbeat, materializing onto KickBot's board, and letting
+ * the create-CAS loser continue to arm its own job (the forced race below).
  */
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { registerGoalVerifier } from '../src/features/goals/goalVerifiers.js';
 import { createDraft, publishChallenge } from '../src/features/kicktodo-core/challengeService.js';
-import { enroll, __clearEnrollGuards } from '../src/features/kicktodo-core/enrollmentService.js';
+import { enroll, __clearEnrollGuards, __test as coreStore } from '../src/features/kicktodo-core/enrollmentService.js';
 import { kickbotBoardId, KICKBOT_AGENT_ID } from '../src/features/kicktodo-core/kickbotService.js';
 import { continuationJobId } from '../src/features/goals/goalsService.js';
 import { getJob, listJobsByRoster, scheduleSubject } from '../src/host/schedulingService.js';
@@ -21,6 +25,7 @@ import { getBoard, listCards } from '../src/host/kanbanService.js';
 import { getRosterEntry } from '../src/host/rosterService.js';
 
 const T = 'tenant-daily-attr';
+const DAILY_LOOP = 'openwop-app.kicktodo.daily-loop';
 const OWNER = 'user:attr-owner';
 
 async function published(): Promise<string> {
@@ -38,6 +43,10 @@ beforeEach(async () => {
   __clearEnrollGuards();
 });
 
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
 describe('daily-loop schedule attribution (ADR 0442 P2)', () => {
   it('attributes the continuation job to KickBot (rosterId + agentId)', async () => {
     const { enrollment } = await enroll({ tenantId: T, ownerSubject: OWNER, challengeId: await published(), challengeVersion: 1, timezone: 'UTC' });
@@ -49,9 +58,10 @@ describe('daily-loop schedule attribution (ADR 0442 P2)', () => {
 
   it("shows under KickBot's Schedules tab query (listJobsByRoster) with an agent subject", async () => {
     await enroll({ tenantId: T, ownerSubject: OWNER, challengeId: await published(), challengeVersion: 1, timezone: 'UTC' });
-    const jobs = await listJobsByRoster(T, 'host:kickbot');
-    expect(jobs.some((j) => j.workflowId === 'openwop-app.kicktodo.daily-loop')).toBe(true);
-    expect(scheduleSubject(jobs[0]!)).toEqual({ kind: 'agent', id: 'host:kickbot' });
+    const daily = (await listJobsByRoster(T, 'host:kickbot')).find((j) => j.workflowId === DAILY_LOOP);
+    expect(daily).toBeDefined();
+    if (!daily) return;
+    expect(scheduleSubject(daily)).toEqual({ kind: 'agent', id: 'host:kickbot' });
   });
 
   it('enables NO cadence — KickBot heartbeat is still explicitly off after enroll', async () => {
@@ -68,13 +78,35 @@ describe('daily-loop schedule attribution (ADR 0442 P2)', () => {
     expect(await listCards(kickbotBoardId(T))).toHaveLength(0);
   });
 
-  it('is idempotent — a re-enroll re-stamps the SAME literal, no duplicate job', async () => {
+  it('is idempotent — two CONCURRENT first enrolls arm exactly ONE daily-loop job (forced race)', async () => {
     const challengeId = await published();
-    const first = await enroll({ tenantId: T, ownerSubject: OWNER, challengeId, challengeVersion: 1, timezone: 'UTC' });
-    await enroll({ tenantId: T, ownerSubject: OWNER, challengeId, challengeVersion: 1, timezone: 'UTC' });
-    const jobs = await listJobsByRoster(T, 'host:kickbot');
-    const daily = jobs.filter((j) => j.jobId === continuationJobId(T, first.enrollment.goalId));
+    // Hold every create-CAS (expected === null) until BOTH callers have passed the
+    // `prior` read and built their own goal, so the loser path really runs. The
+    // count below is over ALL daily-loop jobs — never filtered by the id the
+    // code derives, which could not see a second job under a different goal.
+    const store = coreStore.enrollments;
+    const realCas = store.compareAndSwap.bind(store);
+    let arrivals = 0;
+    let release: () => void = () => {};
+    const bothArrived = new Promise<void>((resolve) => { release = resolve; });
+    vi.spyOn(store, 'compareAndSwap').mockImplementation(async (expected, next) => {
+      if (expected === null) {
+        arrivals += 1;
+        if (arrivals >= 2) release();
+        await Promise.race([bothArrived, new Promise<void>((resolve) => setTimeout(resolve, 2_000))]);
+      }
+      return realCas(expected, next);
+    });
+    const [a, b] = await Promise.all([
+      enroll({ tenantId: T, ownerSubject: OWNER, challengeId, challengeVersion: 1, timezone: 'UTC' }),
+      enroll({ tenantId: T, ownerSubject: OWNER, challengeId, challengeVersion: 1, timezone: 'UTC' }),
+    ]);
+    expect(arrivals).toBe(2); // the race was real
+    expect(a.enrollment.id).toBe(b.enrollment.id);
+    expect(a.enrollment.goalId).toBe(b.enrollment.goalId); // the loser returns the winner's row
+    const daily = (await listJobsByRoster(T, 'host:kickbot')).filter((j) => j.workflowId === DAILY_LOOP);
     expect(daily).toHaveLength(1);
+    expect(daily[0]!.jobId).toBe(continuationJobId(T, a.enrollment.goalId));
     expect(daily[0]!.rosterId).toBe('host:kickbot');
   });
 });

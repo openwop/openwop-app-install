@@ -63,6 +63,7 @@ describe('CadMaterialWidget', () => {
     const { onChange } = view('gold');
     fireEvent.change(screen.getByRole('combobox'), { target: { value: '' } });
     // `setFieldOn` deletes the key on '' — an out-of-enum '' must never persist.
+    expect(onChange).toHaveBeenCalledTimes(1);
     expect(onChange).toHaveBeenCalledWith('');
   });
 });

@@ -8,18 +8,20 @@
  * plus a 403 in the console on every dashboard load.
  */
 import { describe, it, expect } from 'vitest';
+import { lazy } from 'react';
 import { resolveTiles, type ResolveInput } from '../resolveTiles.js';
 import type { DashboardTileDef } from '../tileTypes.js';
 
-const def = (over: Partial<DashboardTileDef> & { id: string }): DashboardTileDef =>
-  ({
-    label: over.id, labelKey: over.id, descriptionKey: over.id,
-    icon: (() => null) as unknown as DashboardTileDef['icon'],
-    category: 'Work', requiredTier: 'workspace',
-    defaultEnabled: true, defaultOrder: 10, defaultSize: 'half', resizable: true,
-    component: (() => null) as unknown as DashboardTileDef['component'],
-    ...over,
-  }) as DashboardTileDef;
+// Typed fixture, no laundering casts: a real lazy component and a real icon component.
+const stub = lazy(async () => ({ default: () => null }));
+const def = (over: Partial<DashboardTileDef> & { id: string }): DashboardTileDef => ({
+  label: over.id, labelKey: over.id, descriptionKey: over.id,
+  icon: () => null,
+  category: 'Work', requiredTier: 'workspace',
+  defaultEnabled: true, defaultOrder: 10, defaultSize: 'half', resizable: true,
+  component: stub,
+  ...over,
+});
 
 const base = (over: Partial<ResolveInput>): ResolveInput => ({
   registry: [], saved: null, toggleEnabled: () => true, isAdmin: false, ...over,

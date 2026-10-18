@@ -51,10 +51,15 @@ import {
   stripEndorsementsBy,
 } from '../src/features/profiles/profilesService.js';
 import { buildProfilesSurface } from '../src/features/profiles/surface.js';
+import { createUser } from '../src/features/users/usersService.js';
+import { registerSessionAuthority, __resetSessionAuthority } from '../src/host/sessionAuthority.js';
 
 const T = 'org:prof-erase-t1';
 const T2 = 'org:prof-erase-t2';
-const ALICE = 'user:pe-alice';
+// A REAL user of T: the surface read below goes through the home directory, which
+// skips ORPHAN profiles (ADR 0888 PROF2CD-4). The endorsers stay bare ids — an
+// endorser never needs a row.
+let ALICE: string;
 const BOB = 'user:pe-bob';
 const CAROL = 'user:pe-carol';
 let storage: Storage;
@@ -76,6 +81,7 @@ beforeEach(async () => {
   delivered = [];
   initHostEventDispatcher({ storage, hostSuite, deliverWebhooks: async (e) => { delivered.push(e); }, startRun: async () => null });
   // Alice has a skill; Bob (with an own row) and Carol (NO own row) endorse it.
+  ALICE = (await createUser({ tenantId: T, principalId: 'oidc:pe-alice', source: 'oidc' })).userId;
   await getOrCreateProfile(T, ALICE);
   await setOwnSkills(T, ALICE, [{ name: 'TypeScript', proficiency: 4 }, { name: 'Go', proficiency: 2 }]);
   await getOrCreateProfile(T, BOB);
@@ -85,7 +91,7 @@ beforeEach(async () => {
   await drain();
   delivered = [];
 });
-afterEach(() => { vi.restoreAllMocks(); __resetHostEventDispatcher(); __resetHostExtPersistence(); });
+afterEach(() => { vi.restoreAllMocks(); __resetSessionAuthority(); __resetHostEventDispatcher(); __resetHostExtPersistence(); });
 
 const endorsers = async (tenantId: string, userId: string, skill: string): Promise<string[]> =>
   (await getProfile(tenantId, userId))!.skills.find((s) => s.name === skill)!.endorsements;
@@ -97,7 +103,10 @@ describe('erase the ENDORSER → the target loses the endorsement', () => {
     expect(await getProfile(T, BOB)).toBeNull();
     expect(await endorsers(T, ALICE, 'TypeScript')).toEqual([CAROL]);
     expect(await endorsers(T, ALICE, 'Go')).toEqual([]);
-    const surface = buildProfilesSurface({ tenantId: T });
+    // ADR 0888 D3 — the surface needs a live acting member of T.
+    registerSessionAuthority(async () => ({ status: 'active', sessionEpoch: 0 }));
+    const actor = (await createUser({ tenantId: T, principalId: 'oidc:pe-actor', source: 'oidc' })).userId;
+    const surface = buildProfilesSurface({ tenantId: T, actingUserId: actor });
     const one = await surface.getProfile!({ userId: ALICE }) as { profile: { skills: Array<{ name: string; endorsements: { count: number; endorserUserIds: string[] } }> } };
     expect(one.profile.skills.find((s) => s.name === 'TypeScript')!.endorsements).toEqual({ count: 1, endorserUserIds: [CAROL] });
     // Silent: no endorsement.removed / profile.updated fan-out for the strip.

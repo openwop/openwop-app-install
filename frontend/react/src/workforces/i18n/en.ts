@@ -72,6 +72,7 @@ export const messages = {
   proveFirstOverride: '— a human still steps in on',
   proveFirstOverrideTail: 'of runs',
   viewerReadOnly: 'You can view this workforce. Changing its migration or cut-over needs edit access to this workspace — ask a workspace admin.',
+  workforceChangedReload: 'Someone changed this workforce after you opened it. Their change is now shown — check it, then make your change again.',
   showcaseReadOnly:
     'Showcase data — autonomy controls are read-only here. Run your own workforce to manage it.',
   advanceTo: 'Advance to {{label}} →',

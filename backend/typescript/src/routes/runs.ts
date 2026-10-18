@@ -12,6 +12,7 @@
  */
 
 import { takeIdempotencyHold } from '../host/idempotencyHold.js';
+import { assertDispatchFanOutAdmitted } from '../host/workflowDefinitionValidation.js';
 import { randomUUID } from 'node:crypto';
 import type { Express, Response } from 'express';
 import type {
@@ -39,6 +40,7 @@ import { emitTerminalFailure, executeRun, snapshotFromEventPrefix, type Serializ
 import { forkDispatchOptions } from '../executor/forkInterrupts.js';
 import { requestRunPause, clearRunPause, abortRunForPause, type RunPauseRequest } from '../executor/runLifecycle.js';
 import { buildRunRecord, dispatchRunInBackground, stripCallerAttribution } from '../host/runDispatch.js';
+import { CALLER_LINKAGE_KEYS } from '../host/runLinkage.js';
 import { ownerStampFromRequest, runOwner, runOwnerV2, type RunOwnerBlock, type RunOwnerBlockV2 } from '../host/runOwner.js';
 import { insertRunWithStartContext } from '../host/runInsert.js';
 import { traceContextFromHeaders } from '../host/traceContext.js';
@@ -53,6 +55,9 @@ import {
 } from '../host/authorityContext.js';
 import { resolveRunDefinition } from '../host/resolveRunDefinition.js';
 import { resolveLaunchWorkflow } from '../host/resolveLaunchDefinition.js';
+import { createAgentEvalRun, callerFromRequest } from '../host/evals/createEvalRun.js';
+import { requireAgentEvalsEnabled } from '../host/evals/access.js';
+import { isAgentEvalRun } from '../host/evals/agentEvalRun.js';
 import { withRunLimit } from '../host/runLimitSeam.js';
 import { launchSubjectOf } from '../features/featureRoute.js';
 import { approvalGatesWithGroupRole, validateApproverResolvability } from '../host/approverResolution.js';
@@ -78,6 +83,7 @@ import { cancelRunAndCascade, isTerminalRunStatus } from '../host/runCancel.js';
 import { isManagedCredentialRef, MANAGED_DEFAULTING_TYPE_IDS } from '../providers/managedProvider.js';
 import { managedAnonSignInRequired } from '../host/deployPosture.js';
 import { requireProtocolScope, requireKeyLaneScope, holdsProtocolScope } from '../host/protocolAuthorization.js';
+import { mayReadRunPayload, runPayloadReader, withoutEventPayload, withoutRunPayload } from '../host/runPayloadAccess.js';
 import { decideTokenProjector } from './interrupts.js';
 import { dataResidencyEnabled, dataResidencyRegions, residencyRegionAdmissible, readResidencyRegion } from '../features/cdp/dataResidency.js';
 import { loadReadableRun, loadOwnedRun } from '../host/runAccess.js';
@@ -90,6 +96,7 @@ import {
   redactKey,
   type IdempotentEndpoint,
 } from '../host/idempotentResponse.js';
+import { remintRunWireUrls, runWireUrls } from '../host/runWireUrls.js';
 import { idempotencyOutcomeOf, recordIdempotencyClaim } from '../observability/metricSeams.js';
 import { scrubSecretShaped } from '../host/redactSecrets.js';
 import { sendError } from '../middleware/errorEnvelope.js';
@@ -103,7 +110,7 @@ const RESUME_START_WAIT_MS = 10_000;
 const log = createLogger('routes.runs');
 
 /** ADR 0549 P0 — this route's entry in the ledger's closed endpoint union. */
-const RUNS_ENDPOINT: IdempotentEndpoint = 'POST:/v1/runs';
+const RUNS_ENDPOINT: IdempotentEndpoint = 'POST:/v1/runs';  // ADR 0812 KEEP: the persisted idempotency-key namespace (see idempotentResponse.ts)
 
 /* ADR 0549 P0 — the process-local `idempotencyBodyHashes` Map and this module's
  * private `hashRequestBody` are GONE, along with the comment that licensed
@@ -202,7 +209,10 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
           { capability: 'agents.evalSuite' },
         );
       }
-      if (!body || typeof body !== 'object' || !body.workflowId) {
+      // `spec/v2/core/runs.md` — `workflowId` is REQUIRED unless `mode: eval`
+      // (ADR 0889: the eval branch below needs `evalSuiteRef` + `agentId` instead).
+      const isEvalCreate = !!body && typeof body === 'object' && (body as { mode?: unknown }).mode === 'eval';
+      if (!body || typeof body !== 'object' || (!body.workflowId && !isEvalCreate)) {
         throw new OpenwopError('invalid_request', 'workflowId is required', 400);
       }
       // `inputs`, when present, is the per-run variable map — `inputs[name]` seeds the
@@ -341,6 +351,141 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
         if (!scope) throw new OpenwopError('forbidden_scope', `scope ${body.scopeId} not in tenant ${tenantId}`, 403);
       }
 
+      // ADR 0889 D1 — the claim is shared by the workflow branch AND the eval
+      // branch (one ledger, one release in the `finally`); it is a closure so
+      // both see the same hoisted heldKey/heldClaimToken/heldTenantId.
+      const claimCreateIdempotency = async (): Promise<{ idempotencyKey: string | undefined; replied: boolean }> => {
+        // Idempotency-Key handling per spec/v1/idempotency.md: atomic
+        // claim → first caller proceeds, concurrent callers either get
+        // the cached response (final) or 409 (still in flight). Body
+        // hash check per `idempotency.md §Layer 1`: same key + different
+        // body MUST return 409 idempotency_key_mismatch.
+        //
+        // ADR 0549 P0 — the claim is keyed (tenantId, endpoint, key), NOT the raw
+        // header. `tenantId` here is the AUTHORIZED tenant: it has already passed
+        // the `forbidden_tenant` check above, so it cannot be steered by the
+        // request. Keying on the raw header alone let tenant B replay tenant A's
+        // cached response, and let any caller collide with the daemons'
+        // fire-once mutex keys.
+        const idempotencyKey = req.header('idempotency-key') ?? undefined;
+        // ADR 0549 P1 — set once this caller WINS a claim, cleared once the
+        // response is committed. While it is set, the `finally` below owes the
+        // key a release: without that, an exception between claim and commit
+        // stranded the row `pending` and 409-locked the caller forever.
+        if (idempotencyKey) {
+          heldKey = idempotencyKey;
+          heldTenantId = tenantId;
+          const claim = await storage.claimIdempotentResponse({
+            tenantId,
+            endpoint: RUNS_ENDPOINT,
+            key: idempotencyKey,
+            requestDigest: canonicalRequestDigest(req.body, RUNS_ENDPOINT),
+            createdAt: new Date().toISOString(),
+            leaseMs: idempotencyLeaseMs(),
+          });
+          // ADR 0556 P1 — the ledger counters ADR 0549 P2 deferred here. Emitted
+          // at the CLAIM, before any branch returns, so every outcome is counted
+          // exactly once including the two that leave via a thrown 409.
+          recordIdempotencyClaim(RUNS_ENDPOINT, idempotencyOutcomeOf(claim));
+          if (claim.outcome === 'claimed') {
+            heldClaimToken = claim.claimToken;
+            // RFC 0213 §B witness (seams-v2 `armIdempotencyHold`, test seams only):
+            // keep THIS claim in flight for the armed window, so a concurrent
+            // same-key create meets the production in-flight branch below.
+            const holdMs = takeIdempotencyHold(tenantId, idempotencyKey);
+            if (holdMs !== undefined) await new Promise((r) => setTimeout(r, holdMs));
+          }
+          if (claim.outcome === 'mismatch') {
+            throw new OpenwopError(
+              // The canonical spelling (`idempotency.md` v1.5 §Layer 1, SP-03).
+              // This PR originally left the old `idempotency_key_replay_mismatch`
+              // in place on purpose — the rename is a wire-visible contract
+              // decision and did not belong inside an atomicity change. It landed
+              // as H63 (`92a3141e6`) while this branch was in flight, so the
+              // revert has served its purpose and the canonical name is adopted
+              // here rather than re-introduced.
+              'idempotency_key_mismatch',
+              'Idempotency-Key was previously used with a different request body.',
+              409,
+              { idempotencyKey },
+            );
+          }
+          if (claim.outcome === 'replay') {
+            // Per `rest-endpoints.md` POST /v1/runs response headers:
+            // cache-served responses MUST carry `openwop-Idempotent-Replay:
+            // true` so the client distinguishes a replayed response from
+            // a fresh one (same runId, same status — header is the only
+            // observable signal).
+            //
+            // Served through `res.json`, NOT `res.send(raw)`. The stored body is the
+            // handler's response BEFORE the major-2 projection (`protocolVersion.ts`
+            // wraps `res.json` to tenant-bind run ids and reshape the envelope), so
+            // `send`-ing the raw string skipped it: the ORIGINAL answered
+            // `runId: "default/<uuid>"` and the REPLAY answered `"<uuid>"`, which a
+            // v2 client (and the 2.38.0 suite's `v2-idempotency-in-flight`) reads as
+            // TWO runs for one key — RFC 0213 §B / idempotency.md Concurrency.
+            // Major 1 is unaffected: its `res.json` leaves the body as it was.
+            res.status(claim.responseStatus).set('openwop-Idempotent-Replay', 'true');
+            let replayBody: unknown;
+            try {
+              replayBody = JSON.parse(claim.responseBody);
+            } catch {
+              // A stored body this host did not write as JSON: return it verbatim
+              // rather than inventing one (the pre-fix behaviour).
+              res.type('application/json').send(claim.responseBody);
+              return { idempotencyKey, replied: true };
+            }
+            // ADR 0812 P4 slice 4: links are re-minted, so a pre-slice-2b row does
+            // not hand back its stored `/v1/runs/<bare>` (410) links.
+            res.json(remintRunWireUrls(replayBody, requestOrigin(req), (req as { tenantId?: string }).tenantId ?? 'default'));
+            return { idempotencyKey, replied: true };
+          }
+          if (claim.outcome === 'in-flight') {
+            // Concurrent request still in flight. Per `idempotency.md` we
+            // don't speculatively wait — return 409 and let the caller retry.
+            // ADR 0744 — retry timing ALSO rides `Retry-After` (v2 `errors.md`
+            // §Retry timing): the v2 negotiator strips `details.retryAfter`, so
+            // without the header a major-2 loser learned nothing about when.
+            res.setHeader('Retry-After', String(IDEMPOTENCY_IN_FLIGHT_RETRY_AFTER_S));
+            throw new OpenwopError(
+              'idempotency_in_flight',
+              'A request with this Idempotency-Key is currently in flight; retry after it completes.',
+              409,
+              { idempotencyKey, retryAfter: IDEMPOTENCY_IN_FLIGHT_RETRY_AFTER_S },
+            );
+          }
+        }
+
+        // ADR 0482 §5 — daily hard cap. Review M1: checked AFTER the
+        // idempotency-cache hit path — an Idempotency-Key retry of a run that
+        // already created must return the cached 201 (idempotency.md), never a
+        // 429 minted by the run's own spend. FAIL-OPEN inside the helper (a
+        // budget-store outage never blocks production); debug/eval/redrive
+        // lanes have their own routes and are deliberately not checked.
+        return { idempotencyKey, replied: false };
+      };
+
+      // ADR 0889 D1 — `mode: "eval"` (RFC 0081 §B). Past the tenant/scope checks
+      // and inside the SAME idempotency claim; it never resolves a workflow (the
+      // run's `workflowId` is the synthetic `eval:<suite>@<version>`).
+      if ((body as { mode?: unknown }).mode === 'eval') {
+        // Review H1 — `evals` toggle + plan, before the idempotency claim (no ledger row on refusal).
+        await requireAgentEvalsEnabled({ tenantId, userId: principal.principalId });
+        const { idempotencyKey: evalKey, replied: evalReplied } = await claimCreateIdempotency();
+        if (evalReplied) return;
+        const created = await createAgentEvalRun({
+          caller: callerFromRequest(req, principal.principalId),
+          storage, hostSuite, body: body as unknown as Record<string, unknown>, tenantId,
+          ...(evalKey && heldClaimToken ? { idempotency: { key: evalKey, claimToken: heldClaimToken, endpoint: RUNS_ENDPOINT } } : {}),
+        });
+        if (evalKey && heldClaimToken) heldClaimToken = undefined;
+        reserveConcurrentSlot(req, created.runId);
+        res.status(201).json(created);
+        return;
+      }
+      // Past the eval branch every create names a workflow (re-narrowed for the checker).
+      if (!body.workflowId) throw new OpenwopError('invalid_request', 'workflowId is required', 400);
+
       // ADR 0474 P1b — production launches run the PUBLISHED revision once one
       // exists; `metadata.launch === 'draft'` (host-local convention — the
       // builder's test-run) opts back into the head. Substitution happens
@@ -383,6 +528,9 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
       if (wf) {
         const refusal = capabilityGatedTypeIdRefusal(wf.definition.nodes);
         if (refusal) throw refusal;
+        // RFC 0243 — a readable workflow whose core.dispatch node pins a fan-out
+        // agents.fanOut does not admit: 400 validation_error naming the seat, no run.
+        assertDispatchFanOutAdmitted(wf.definition.nodes);
         // ADR 0504 — a run-start REFUSAL was built here and deliberately NOT
         // shipped. Measured first: `seedWorkflows.ts` expands every chain with
         // `{}`, so 114 of 169 seeded chains carry unfilled required params.
@@ -533,111 +681,9 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
         );
       }
 
-      // Idempotency-Key handling per spec/v1/idempotency.md: atomic
-      // claim → first caller proceeds, concurrent callers either get
-      // the cached response (final) or 409 (still in flight). Body
-      // hash check per `idempotency.md §Layer 1`: same key + different
-      // body MUST return 409 idempotency_key_mismatch.
-      //
-      // ADR 0549 P0 — the claim is keyed (tenantId, endpoint, key), NOT the raw
-      // header. `tenantId` here is the AUTHORIZED tenant: it has already passed
-      // the `forbidden_tenant` check above, so it cannot be steered by the
-      // request. Keying on the raw header alone let tenant B replay tenant A's
-      // cached response, and let any caller collide with the daemons'
-      // fire-once mutex keys.
-      const idempotencyKey = req.header('idempotency-key') ?? undefined;
-      // ADR 0549 P1 — set once this caller WINS a claim, cleared once the
-      // response is committed. While it is set, the `finally` below owes the
-      // key a release: without that, an exception between claim and commit
-      // stranded the row `pending` and 409-locked the caller forever.
-      if (idempotencyKey) {
-        heldKey = idempotencyKey;
-        heldTenantId = tenantId;
-        const claim = await storage.claimIdempotentResponse({
-          tenantId,
-          endpoint: RUNS_ENDPOINT,
-          key: idempotencyKey,
-          requestDigest: canonicalRequestDigest(req.body, RUNS_ENDPOINT),
-          createdAt: new Date().toISOString(),
-          leaseMs: idempotencyLeaseMs(),
-        });
-        // ADR 0556 P1 — the ledger counters ADR 0549 P2 deferred here. Emitted
-        // at the CLAIM, before any branch returns, so every outcome is counted
-        // exactly once including the two that leave via a thrown 409.
-        recordIdempotencyClaim(RUNS_ENDPOINT, idempotencyOutcomeOf(claim));
-        if (claim.outcome === 'claimed') {
-          heldClaimToken = claim.claimToken;
-          // RFC 0213 §B witness (seams-v2 `armIdempotencyHold`, test seams only):
-          // keep THIS claim in flight for the armed window, so a concurrent
-          // same-key create meets the production in-flight branch below.
-          const holdMs = takeIdempotencyHold(tenantId, idempotencyKey);
-          if (holdMs !== undefined) await new Promise((r) => setTimeout(r, holdMs));
-        }
-        if (claim.outcome === 'mismatch') {
-          throw new OpenwopError(
-            // The canonical spelling (`idempotency.md` v1.5 §Layer 1, SP-03).
-            // This PR originally left the old `idempotency_key_replay_mismatch`
-            // in place on purpose — the rename is a wire-visible contract
-            // decision and did not belong inside an atomicity change. It landed
-            // as H63 (`92a3141e6`) while this branch was in flight, so the
-            // revert has served its purpose and the canonical name is adopted
-            // here rather than re-introduced.
-            'idempotency_key_mismatch',
-            'Idempotency-Key was previously used with a different request body.',
-            409,
-            { idempotencyKey },
-          );
-        }
-        if (claim.outcome === 'replay') {
-          // Per `rest-endpoints.md` POST /v1/runs response headers:
-          // cache-served responses MUST carry `openwop-Idempotent-Replay:
-          // true` so the client distinguishes a replayed response from
-          // a fresh one (same runId, same status — header is the only
-          // observable signal).
-          //
-          // Served through `res.json`, NOT `res.send(raw)`. The stored body is the
-          // handler's response BEFORE the major-2 projection (`protocolVersion.ts`
-          // wraps `res.json` to tenant-bind run ids and reshape the envelope), so
-          // `send`-ing the raw string skipped it: the ORIGINAL answered
-          // `runId: "default/<uuid>"` and the REPLAY answered `"<uuid>"`, which a
-          // v2 client (and the 2.38.0 suite's `v2-idempotency-in-flight`) reads as
-          // TWO runs for one key — RFC 0213 §B / idempotency.md Concurrency.
-          // Major 1 is unaffected: its `res.json` leaves the body as it was.
-          res.status(claim.responseStatus).set('openwop-Idempotent-Replay', 'true');
-          let replayBody: unknown;
-          try {
-            replayBody = JSON.parse(claim.responseBody);
-          } catch {
-            // A stored body this host did not write as JSON: return it verbatim
-            // rather than inventing one (the pre-fix behaviour).
-            res.type('application/json').send(claim.responseBody);
-            return;
-          }
-          res.json(replayBody);
-          return;
-        }
-        if (claim.outcome === 'in-flight') {
-          // Concurrent request still in flight. Per `idempotency.md` we
-          // don't speculatively wait — return 409 and let the caller retry.
-          // ADR 0744 — retry timing ALSO rides `Retry-After` (v2 `errors.md`
-          // §Retry timing): the v2 negotiator strips `details.retryAfter`, so
-          // without the header a major-2 loser learned nothing about when.
-          res.setHeader('Retry-After', String(IDEMPOTENCY_IN_FLIGHT_RETRY_AFTER_S));
-          throw new OpenwopError(
-            'idempotency_in_flight',
-            'A request with this Idempotency-Key is currently in flight; retry after it completes.',
-            409,
-            { idempotencyKey, retryAfter: IDEMPOTENCY_IN_FLIGHT_RETRY_AFTER_S },
-          );
-        }
-      }
+      const { idempotencyKey, replied: idempotentReplied } = await claimCreateIdempotency();
+      if (idempotentReplied) return;
 
-      // ADR 0482 §5 — daily hard cap. Review M1: checked AFTER the
-      // idempotency-cache hit path — an Idempotency-Key retry of a run that
-      // already created must return the cached 201 (idempotency.md), never a
-      // 429 minted by the run's own spend. FAIL-OPEN inside the helper (a
-      // budget-store outage never blocks production); debug/eval/redrive
-      // lanes have their own routes and are deliberately not checked.
       if (await workflowBudgetExhausted(tenantId, body.workflowId)) {
         throw new OpenwopError(
           'rate_limited',
@@ -697,6 +743,14 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
       // ADR 0474 P1b (review F5) — stamped AFTER the build so the reserved-key
       // strip has run and a client value can never pose as the host's resolution.
       run.metadata = { ...(run.metadata ?? {}), launchResolved: wf.launchResolved };
+      // ADR 0902 D2 — the task-deck parent linkage is host-written. The ONE HTTP
+      // caller allowed to supply it is the sub-run dispatcher, which presents the
+      // wildcard service credential (`resolveInternalToken`); its parent must be a
+      // run of this tenant. Everyone else had it stripped above.
+      {
+        const linkage = await admittedLinkage(storage, principal, tenantId, body.metadata);
+        if (linkage) run.metadata = { ...run.metadata, ...linkage };
+      }
       // RFC 0207 — the W3C trace context this run was CREATED under, persisted
       // so an outbound MCP request or A2A message made LATER (the executor runs
       // on `setImmediate`, and the durable path is redelivered by a timer
@@ -717,8 +771,7 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
       const response: CreateRunResponse = {
         runId,
         status: 'pending',
-        eventsUrl: `${requestOrigin(req)}/v1/runs/${runId}/events`,
-        statusUrl: `${requestOrigin(req)}/v1/runs/${runId}`,
+        ...runWireUrls(requestOrigin(req), runId, (req as { tenantId?: string }).tenantId ?? 'default'),
       };
       // ADR 0551 P1 — `enqueueDispatch` makes the 201 below honest: the run row
       // and the dispatch-outbox row commit together, so a process death between
@@ -893,7 +946,12 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
         // steward A-grade wire test pins). One ledger scan for the page, and the
         // page is single-tenant by construction.
         const compensation = await resolveCompensationStatuses(tenantId, rows.map((r) => r.runId));
-        const runs = rows.map((r) => closeV2Snapshot(projectRunSnapshot(r, compensation.get(r.runId))));
+        // #4543 — a member who is not an admin reads only their own runs' payload.
+        const mayReadPayload = await runPayloadReader(req, tenantId);
+        const runs = rows.map((r) => {
+          const snap = closeV2Snapshot(projectRunSnapshot(r, compensation.get(r.runId)));
+          return mayReadPayload(r) ? snap : withoutRunPayload(snap);
+        });
         const last = rows[rows.length - 1];
         const nextCursor = rows.length === limit && last !== undefined
           ? mintRunListCursor({ createdAt: last.createdAt, runId: last.runId })
@@ -935,7 +993,15 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
           compensation.set(runId, status);
         }
       }
-      res.json({ runs: runs.map((r) => projectRunSnapshot(r, compensation.get(r.runId))) });
+      // #4543 — decided per tenant bucket, like the compensation rollup above.
+      const readers = new Map<string, (run: RunRecord) => boolean>();
+      for (const tid of byTenant.keys()) readers.set(tid, await runPayloadReader(req, tid));
+      res.json({
+        runs: runs.map((r) => {
+          const snap = projectRunSnapshot(r, compensation.get(r.runId));
+          return readers.get(r.tenantId)?.(r) ? snap : withoutRunPayload(snap);
+        }),
+      });
     } catch (err) {
       next(err);
     }
@@ -990,13 +1056,18 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
       const compB = runA.tenantId === runB.tenantId
         ? compA
         : await resolveCompensationStatuses(runB.tenantId, [runB.runId]);
+      // #4543 — the diff compares the same snapshots the reads return.
+      const readerA = await runPayloadReader(req, runA.tenantId);
+      const readerB = runA.tenantId === runB.tenantId ? readerA : await runPayloadReader(req, runB.tenantId);
+      const snapA = projectRunSnapshot(runA, compA.get(runA.runId));
+      const snapB = projectRunSnapshot(runB, compB.get(runB.runId));
       const diff = computeRunDiff(
         runId,
         against,
         eventsA,
         eventsB,
-        projectRunSnapshot(runA, compA.get(runA.runId)),
-        projectRunSnapshot(runB, compB.get(runB.runId)),
+        readerA(runA) ? snapA : withoutRunPayload(snapA),
+        readerB(runB) ? snapB : withoutRunPayload(snapB),
       );
       res.json(diff);
     } catch (err) {
@@ -1019,6 +1090,21 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
     } catch (err) {
       next(err);
     }
+  });
+
+  // ADR 0889 D5 / A5 — RFC 0081 §B `GET /runs/{runId}/eval-summary`. The SAME
+  // read gate as `GET /runs/:runId` (scope seam + tenant ownership). 404 for a
+  // run that is not an eval run; 409 while it is not terminal-completed.
+  app.get('/runs/:runId/eval-summary', async (req, res, next) => {
+    try {
+      const run = await loadReadableRun(req, storage, req.params.runId);
+      if (!isAgentEvalRun(run)) throw new OpenwopError('not_found', 'Run is not an eval run.', 404, { runId: run.runId });
+      const summary = (run.metadata ?? {}).evalSummary;
+      if (run.status !== 'completed' || !summary) {
+        throw new OpenwopError('conflict', `The eval run is ${run.status}; its summary exists only once it completes.`, 409, { runId: run.runId, status: run.status });
+      }
+      res.json(summary);
+    } catch (err) { next(err); }
   });
 
   app.get('/runs/:runId', async (req, res, next) => {
@@ -1046,7 +1132,9 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
       await hydrateRunVariables(run.runId);
       await hydrateRunChannels(run.runId);
       const compensation = await resolveCompensationStatuses(run.tenantId, [run.runId]);
-      const snapshot = projectRunSnapshot(run, compensation.get(run.runId));
+      // #4543 — a member who is not an admin reads only their own run's payload.
+      const projected = projectRunSnapshot(run, compensation.get(run.runId));
+      const snapshot = (await runPayloadReader(req, run.tenantId))(run) ? projected : withoutRunPayload(projected);
       // Surface the current open interrupt (if any) for waiting-*
       // runs per `interrupt.md §Signed-token callback`. The first
       // open interrupt's token + callbackUrl is the externally-
@@ -1089,7 +1177,7 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
             ...(mayResolve
               ? {
                   interruptToken: first.token,
-                  callbackUrl: `${req.protocol}://${req.get('host')}/v1/interrupts/${encodeURIComponent(first.token)}`,
+                  callbackUrl: `${req.protocol}://${req.get('host')}/interrupts/${encodeURIComponent(first.token)}`,
                 }
               : {}),
             data: first.data,
@@ -1620,6 +1708,11 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
     try {
       const runId = (req.params as Record<string, string>)['0'];
       const run = await loadOwnedRun(req, storage, runId, 'runs:cancel');
+      // ADR 0889 A2 — an eval run has no workflow to pause (its workflowId is the
+      // synthetic `eval:<suite>@<version>`); re-evaluate with a new eval run.
+      if (isAgentEvalRun(run)) {
+        throw new OpenwopError('conflict', 'An eval run cannot be paused; start a new eval run (with configurable.baselineRunId to compare).', 409, { runId: run.runId, reason: 'eval_run_not_forkable' });
+      }
       const body = (req.body ?? {}) as { reason?: unknown; drainPolicy?: unknown };
       const drainPolicy = body.drainPolicy === undefined ? 'drain-current-node' : body.drainPolicy;
       if (drainPolicy !== 'immediate' && drainPolicy !== 'drain-current-node') {
@@ -1670,6 +1763,11 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
     try {
       const runId = (req.params as Record<string, string>)['0'];
       const run = await loadOwnedRun(req, storage, runId, 'runs:cancel');
+      // ADR 0889 A2 — an eval run has no workflow to resume (its workflowId is the
+      // synthetic `eval:<suite>@<version>`); re-evaluate with a new eval run.
+      if (isAgentEvalRun(run)) {
+        throw new OpenwopError('conflict', 'An eval run cannot be resumed; start a new eval run (with configurable.baselineRunId to compare).', 409, { runId: run.runId, reason: 'eval_run_not_forkable' });
+      }
       const body = (req.body ?? {}) as { reason?: unknown };
       if (body.reason !== undefined && typeof body.reason !== 'string') {
         sendError(res, 400, 'validation_error', 'reason must be a string.', { field: 'reason' }); return;
@@ -1729,6 +1827,11 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
       // gate only — the forked run still inherits sourceRun.tenantId (now provably
       // the caller's), so :fork replay/determinism is unchanged.
       const sourceRun = await loadOwnedRun(req, storage, runId, 'runs:create');
+      // ADR 0889 A2 — an eval run has no workflow to fork (its workflowId is the
+      // synthetic `eval:<suite>@<version>`); re-evaluate with a new eval run.
+      if (isAgentEvalRun(sourceRun)) {
+        throw new OpenwopError('conflict', 'An eval run cannot be forked; start a new eval run (with configurable.baselineRunId to compare).', 409, { runId: sourceRun.runId, reason: 'eval_run_not_forkable' });
+      }
       // Partial on the wire: `fromSeq` is omittable for replay mode (see
       // the replay-mode default below), so don't pretend the inbound body
       // already satisfies the full ForkRunRequest shape.
@@ -2070,7 +2173,7 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
         fromSeq,
         mode: body.mode,
         status: 'pending',
-        eventsUrl: `${requestOrigin(req)}/v1/runs/${newRunId}/events`,
+        eventsUrl: runWireUrls(requestOrigin(req), newRunId, (req as { tenantId?: string }).tenantId ?? 'default').eventsUrl,
       };
       res.status(201).json(response);
 
@@ -2139,7 +2242,9 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
       // first event is sequence 0 must not be skipped by an absent cursor.
       const afterRaw = req.query.afterSequence;
       const afterSequence = afterRaw === undefined ? -1 : (Number(afterRaw) || 0);
-      const events = await storage.listEvents(run.runId, { fromSeq: afterSequence, limit });
+      const listed = await storage.listEvents(run.runId, { fromSeq: afterSequence, limit });
+      // #4543 — the same payload rule as the snapshot and the SSE stream.
+      const events = (await mayReadRunPayload(req, run)) ? listed : listed.map(withoutEventPayload);
       // §Poll: the highest sequence in the log at the time of the response,
       // −1 when the log is empty. A cursor past the end therefore still
       // answers 200 with an empty `events` array — never a 4xx.
@@ -2177,6 +2282,13 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
   app.get(['/runs/:runId/debug-bundle', vendorPath('/runs/:runId/debug-bundle')], async (req, res, next) => {
     try {
       const run = await loadReadableRun(req, storage, req.params.runId);
+      // #4543 — the bundle is the full event log, payloads included, exported
+      // for triage: the run's owner and the workspace's admins only. Refused
+      // rather than redacted, because a bundle without payloads is not a debug
+      // bundle. The member may still see the run exists, so 403 leaks nothing.
+      if (!(await mayReadRunPayload(req, run))) {
+        throw new OpenwopError('forbidden', 'Only the run owner or a workspace admin can export its debug bundle.', 403);
+      }
       const allEvents = await storage.listEvents(run.runId, { fromSeq: -1, limit: 100_000 });
       const cap = req.query.maxEvents !== undefined ? Number(req.query.maxEvents) : Number.POSITIVE_INFINITY;
       const events = Number.isFinite(cap) && cap >= 0 ? allEvents.slice(0, cap) : allEvents;
@@ -2610,4 +2722,28 @@ function computeRunDiff(
     a, b, divergedAtSeq, eventDiffs, stateDiff,
     ...(truncated ? { truncated: true } : {}),
   };
+}
+
+/** ADR 0902 D2 — the linkage keys a wildcard (service) caller may set on a new
+ *  run: only when its named parent is a run of the same tenant. Returns the
+ *  admitted keys, or `undefined` (a member's value is never admitted). */
+async function admittedLinkage(
+  storage: Storage,
+  principal: { tenants?: readonly string[] },
+  tenantId: string,
+  metadata: unknown,
+): Promise<Record<string, string> | undefined> {
+  if (principal.tenants?.includes('*') !== true) return undefined;
+  if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) return undefined;
+  const md = metadata as Record<string, unknown>;
+  const parentRunId = md['parentRunId'];
+  if (typeof parentRunId !== 'string' || parentRunId.length === 0) return undefined;
+  const parent = await storage.getRun(parentRunId);
+  if (!parent || parent.tenantId !== tenantId) return undefined;
+  const out: Record<string, string> = { parentRunId };
+  for (const k of CALLER_LINKAGE_KEYS) {
+    const v = md[k];
+    if (k !== 'parentRunId' && typeof v === 'string' && v.length > 0) out[k] = v;
+  }
+  return out;
 }

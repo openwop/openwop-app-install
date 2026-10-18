@@ -22,22 +22,27 @@
  * Both polarities, because an absence-only assertion is vacuous.
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
-import { render, screen, cleanup, act } from '@testing-library/react';
+import { render, screen, cleanup, act, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
+import type * as SeatClient from '../../../client/kicktodoSeatClient.js';
+import type * as KickTodoClient from '../../../client/kicktodoClient.js';
+import type { CreatorRevenueRow } from '../../../client/kicktodoSeatClient.js';
 
+// Typed to the real client signatures, so a fixture that drifts from the
+// production shape is a compile error, not a silently-passing render.
+// (`earningsCsvUrl` is a string const in the client, kept from the original.)
 const seat = vi.hoisted(() => ({
-  getMyRevenue: vi.fn(),
-  getMyEarnings: vi.fn(),
-  getReferralEarnings: vi.fn(),
-  getSellerOnboardingStatus: vi.fn(),
-  requestSellerOnboarding: vi.fn(),
-  earningsCsvUrl: vi.fn(() => '/csv'),
+  getMyRevenue: vi.fn<typeof SeatClient.getMyRevenue>(),
+  getMyEarnings: vi.fn<typeof SeatClient.getMyEarnings>(),
+  getReferralEarnings: vi.fn<typeof SeatClient.getReferralEarnings>(),
+  getSellerOnboardingStatus: vi.fn<typeof SeatClient.getSellerOnboardingStatus>(),
+  requestSellerOnboarding: vi.fn<typeof SeatClient.requestSellerOnboarding>(),
 }));
 vi.mock('../../../client/kicktodoSeatClient.js', async (orig) => ({
   ...(await orig<typeof import('../../../client/kicktodoSeatClient.js')>()),
   ...seat,
 }));
-const kt = vi.hoisted(() => ({ listChallenges: vi.fn() }));
+const kt = vi.hoisted(() => ({ listChallenges: vi.fn<typeof KickTodoClient.listChallenges>() }));
 vi.mock('../../../client/kicktodoClient.js', async (orig) => ({
   ...(await orig<typeof import('../../../client/kicktodoClient.js')>()),
   ...kt,
@@ -46,8 +51,8 @@ vi.mock('../../../client/kicktodoClient.js', async (orig) => ({
 import { CreatorInsightsPage } from '../CreatorInsightsPage.js';
 
 const REVENUE = [{
-  productId: 'p1', title: 'Course', activeEntitlements: 3, revokedEntitlements: 0,
-}];
+  productId: 'p1', challengeId: 'chal:1', challengeVersion: 1, activeEntitlements: 3, revokedEntitlements: 0,
+}] satisfies CreatorRevenueRow[];
 
 const mount = async (): Promise<void> => {
   render(<MemoryRouter><CreatorInsightsPage /></MemoryRouter>);
@@ -56,6 +61,9 @@ const mount = async (): Promise<void> => {
 
 const NOTHING_YET = /Nothing accrued yet/i;
 const UNKNOWN = /could.{0,3}n.{0,3}t be read|is unknown/i;
+// The page-level failure notice (earningsLoadError) — distinct from UNKNOWN.
+const LOAD_ERROR = /couldn.t load right now/i;
+const ONBOARDING = { name: 'Request payout onboarding' } as const;
 
 afterEach(cleanup);
 beforeEach(() => {
@@ -65,7 +73,9 @@ beforeEach(() => {
   // false. (An incomplete fixture is how this kind of test goes silently vacuous.)
   seat.getMyRevenue.mockResolvedValue(REVENUE);
   seat.getSellerOnboardingStatus.mockResolvedValue({ request: 'none', seller: null });
-  seat.getReferralEarnings.mockResolvedValue(null);
+  // No referral code: the client THROWS on a non-OK read and the page catches
+  // it to null — the production path (the client never resolves null).
+  seat.getReferralEarnings.mockRejectedValue(new Error('404'));
   kt.listChallenges.mockResolvedValue([]);
 });
 
@@ -78,14 +88,17 @@ describe('CI-R2-1 — a failed earnings read is unknown, not zero', () => {
     expect(screen.getByText(UNKNOWN)).toBeTruthy();
     // …and the false claim is gone.
     expect(screen.queryByText(NOTHING_YET)).toBeNull();
+    // The page-level failure notice is stated too.
+    expect(screen.getByText(LOAD_ERROR)).toBeTruthy();
   });
 
   it('earnings read SUCCEEDS with no totals: "Nothing accrued yet" is TRUE and stays', async () => {
-    seat.getMyEarnings.mockResolvedValue({ totals: [] });
+    seat.getMyEarnings.mockResolvedValue({ rows: [], totals: [] });
     await mount();
 
     expect(screen.getByText(NOTHING_YET)).toBeTruthy();
     expect(screen.queryByText(UNKNOWN)).toBeNull();
+    expect(screen.queryByText(LOAD_ERROR)).toBeNull();
   });
 
   it('the failed read does not blank the section — onboarding stays reachable', async () => {
@@ -96,7 +109,8 @@ describe('CI-R2-1 — a failed earnings read is unknown, not zero', () => {
     await mount();
 
     const section = screen.getByLabelText(/earnings/i);
-    expect(section.textContent?.trim().length ?? 0).toBeGreaterThan(0);
     expect(section.textContent).toMatch(UNKNOWN);
+    // The onboarding control itself is still inside the section.
+    expect(within(section).getByRole('button', ONBOARDING)).toBeTruthy();
   });
 });

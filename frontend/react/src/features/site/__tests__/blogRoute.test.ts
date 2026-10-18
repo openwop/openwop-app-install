@@ -4,6 +4,11 @@
  * BEFORE the bare post so `/blog/tag/x` is never read as a post named "tag";
  * decode percent-encoded segments (author ids carry `:`); never throw on
  * malformed encoding; and keep the strict slug shape on a decoded post slug.
+ *
+ * The archive-before-post ORDER is structural, not testable: the post charset
+ * has no `/`, so a two-segment path can never match as a post in either order.
+ * (A "prefers the archive" case was cut in /grade-tests w50: probe
+ * w50g2-br-facet-set reddened it only together with the archives case below.)
  */
 import { describe, it, expect } from 'vitest';
 import { matchBlogRoute } from '../blogRoute.js';
@@ -23,11 +28,6 @@ describe('matchBlogRoute', () => {
   it('matches a single post', () => {
     expect(matchBlogRoute('/blog/hello-world')).toEqual({ kind: 'post', slug: 'hello-world' });
     expect(matchBlogRoute('/blog/my%2Dpost')).toEqual({ kind: 'post', slug: 'my-post' });
-  });
-
-  it('prefers the archive over a post named like a facet segment', () => {
-    // Two-segment archive wins; it never resolves as a post whose slug is "tag".
-    expect(matchBlogRoute('/blog/tag/x')).toEqual({ kind: 'tag', value: 'x' });
   });
 
   it('returns null (not a throw) for malformed percent-encoding', () => {

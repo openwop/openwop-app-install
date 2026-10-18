@@ -11,6 +11,18 @@
  *     text for a subject with a bound collection, and '' for a subject with none
  *     (the self-gating + shared-fence invariant — unit level, no live model).
  *
+ * The DELETE→conversation cascade (WF-PRJ-1) is witnessed in
+ * `notebooks-delete-cascade-reachability.test.ts` (CONTROL: count, session and
+ * meta all gone); the pack-FILE allowlist in `notebooks-podcasts-agent-tools`.
+ *
+ * Sabotage witnesses (grade-tests wave 20): a client/foreign `ownerSubject` or
+ * the KB researcher in place of the notebook analyst reds case 1; dropping the
+ * `'none'` half of `requireNotebook` reds case 2's co-tenant leg (a cross-tenant
+ * caller is double-guarded by the tenant-scoped `getProject`); a wrong pack
+ * persona or an extra allowlisted tool reds the pack case; a KB leg that drops
+ * `contentTrust` reds the compose case, and so does removing its no-binding
+ * early return (a subject with MEMORY but no collection must still compose '').
+ *
  * @see docs/adr/0084-research-notebooks.md
  */
 
@@ -21,12 +33,16 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
-import { getConversationMeta } from '../src/host/conversationStore.js';
+import { getConversationMeta, subjectConversationId } from '../src/host/conversationStore.js';
 import { getAgentRegistry } from '../src/executor/agentRegistry.js';
 import { projectSubject } from '../src/features/projects/projectsService.js';
 import { composeKnowledgeForSubject } from '../src/host/agentKnowledgeComposition.js';
 import { setSubjectKnowledge } from '../src/host/subjectKnowledge.js';
 import { createCollection, ingestDocument } from '../src/features/kb/kbService.js';
+import { addSubjectNote } from '../src/host/subjectMemory.js';
+import {
+  NOTEBOOKS_ASK_TOOL_ID, NOTEBOOKS_SEARCH_TOOL_ID, NOTEBOOKS_WRITE_TRANSFORMATION_TOOL_ID,
+} from '../src/features/notebooks/agentTools.js';
 
 let BASE: string;
 let server: http.Server;
@@ -46,27 +62,33 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T }
-interface Client { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res>; del: (p: string) => Promise<Res> }
+interface Res<T> { status: number; body: T }
+interface LoginBody { user: { userId: string; tenantId: string } }
+interface OrgBody { orgId: string }
+interface CreatedBody { notebook: { id: string } }
+interface ChatBody { conversationId: string }
+interface Client {
+  post: <T = unknown>(p: string, b?: unknown) => Promise<Res<T>>;
+}
 function client(): Client {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
+  const call = async <T>(method: string, path: string, body?: unknown): Promise<Res<T>> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
-    for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
-    return { status: res.status, body: out };
+    for (const ck of getSetCookies(res.headers)) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
+    const decoded: unknown = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    return { status: res.status, body: decoded as T };
   };
-  return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), del: (p) => call('DELETE', p) };
+  return { post: <T = unknown>(p: string, b?: unknown) => call<T>('POST', p, b) };
 }
 
 const uniqEmail = (who: string): string => `${who}-${Date.now()}-${n++}@acme.test`;
 async function ownerWithOrg(who: string): Promise<{ c: Client; orgId: string; tenantId: string }> {
   const c = client();
-  const login = await c.post('/host/openwop-app/test/login', { email: uniqEmail(who) });
+  const login = await c.post<LoginBody>('/host/openwop-app/test/login', { email: uniqEmail(who) });
   expect(login.status, JSON.stringify(login.body)).toBe(201);
-  const org = await c.post('/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await c.post<OrgBody>('/host/openwop-app/orgs', { name: 'Acme' });
   // The login response carries the resolved tenant for the cookie session.
-  return { c, orgId: org.body.orgId, tenantId: login.body.user.tenantId as string };
+  return { c, orgId: org.body.orgId, tenantId: login.body.user.tenantId };
 }
 
 const NB = '/host/openwop-app/notebooks';
@@ -74,11 +96,11 @@ const NB = '/host/openwop-app/notebooks';
 describe('notebooks — grounded chat ensure (ADR 0084 Phase 2)', () => {
   it('POST /:id/chat returns a conversationId whose ownerSubject is project:<notebookId> (idempotent)', async () => {
     const { c, orgId, tenantId } = await ownerWithOrg('nbchat-owner');
-    const id = (await c.post(NB, { orgId, name: 'Grounded notebook' })).body.notebook.id as string;
+    const id = (await c.post<CreatedBody>(NB, { orgId, name: 'Grounded notebook' })).body.notebook.id;
 
-    const open = await c.post(`${NB}/${id}/chat`);
+    const open = await c.post<ChatBody>(`${NB}/${id}/chat`);
     expect(open.status, JSON.stringify(open.body)).toBe(201);
-    const conversationId = open.body.conversationId as string;
+    const conversationId = open.body.conversationId;
     expect(conversationId).toBeTruthy();
 
     // ownerSubject SERVER-SET to the notebook's project subject — the grounding key.
@@ -91,70 +113,48 @@ describe('notebooks — grounded chat ensure (ADR 0084 Phase 2)', () => {
     expect((meta?.participants ?? []).some((p) => p.subjectRef === 'agent:vendor.openwop-app.kb.agents.researcher')).toBe(false);
 
     // Idempotent: re-opening returns the SAME deterministic conversation id.
-    const reopen = await c.post(`${NB}/${id}/chat`);
+    const reopen = await c.post<ChatBody>(`${NB}/${id}/chat`);
     expect(reopen.status).toBe(201);
     expect(reopen.body.conversationId).toBe(conversationId);
   });
 
   it('a different tenant / non-member caller is denied (uniform 404 — the IDOR guard)', async () => {
     const a = await ownerWithOrg('nbchat-a');
-    const id = (await a.c.post(NB, { orgId: a.orgId, name: 'A-notebook' })).body.notebook.id as string;
+    const id = (await a.c.post<CreatedBody>(NB, { orgId: a.orgId, name: 'A-notebook' })).body.notebook.id;
 
+    // Cross-TENANT: double-guarded (the tenant-scoped getProject already reads null).
     const stranger = await ownerWithOrg('nbchat-stranger');
     expect((await stranger.c.post(`${NB}/${id}/chat`)).status).toBe(404);
-  });
+    expect(await getConversationMeta(a.tenantId, subjectConversationId(a.tenantId, projectSubject(id))), 'no group chat was minted').toBeNull();
 
-  it('DELETE /notebooks/:id cascades the group conversation like the projects door (WF-PRJ-1)', async () => {
-    // A notebook IS a project (`facet:'notebook'`) with a group conversation at
-    // the SAME deterministic id. `DELETE /projects/:id` cascades that conversation
-    // via `deleteConversationCompletely`; this door used to skip it, orphaning the
-    // session + messages + meta under a deleted project — retained, unreachable
-    // chat data with no delete path short of tenant teardown.
-    const CHAT = '/host/openwop-app/chat/sessions';
-    const { c, orgId, tenantId } = await ownerWithOrg('nbdel-owner');
-    const id = (await c.post(NB, { orgId, name: 'Doomed notebook' })).body.notebook.id as string;
-    const conversationId = (await c.post(`${NB}/${id}/chat`)).body.conversationId as string;
-    expect(conversationId).toBeTruthy();
-    const msg = await c.post(`${CHAT}/${conversationId}/messages`, { messageId: `m-nbdel-${n++}`, role: 'user', content: 'to be destroyed with the notebook' });
-    expect(msg.status, JSON.stringify(msg.body)).toBe(201);
-
-    const del = await c.del(`${NB}/${id}`);
-    expect(del.status, JSON.stringify(del.body)).toBe(200);
-    expect(del.body.deleted).toBe(true);
-    expect(del.body.conversationsDeleted).toBe(1);
-
-    // The conversation row, its messages, AND the meta are gone — not orphaned.
-    expect((await c.get(`${CHAT}/${conversationId}`)).status).toBe(404);
-    expect((await c.get(`${CHAT}/${conversationId}/messages`)).status).toBe(404);
-    expect(await getConversationMeta(tenantId, conversationId)).toBeNull();
+    // A CO-TENANT with no org membership reaches the `'none'` access branch itself.
+    const tenantId = `t-nbchat-co-${Date.now()}-${n++}`;
+    const owner = client();
+    expect((await owner.post('/host/openwop-app/test/login', { email: uniqEmail('nbchat-co-owner'), tenantId })).status).toBe(201);
+    const orgId = (await owner.post<OrgBody>('/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
+    const coId = (await owner.post<CreatedBody>(NB, { orgId, name: 'Co-tenant notebook' })).body.notebook.id;
+    const outsider = client();
+    expect((await outsider.post('/host/openwop-app/test/login', { email: uniqEmail('nbchat-outsider'), tenantId })).status).toBe(201);
+    expect((await outsider.post(`${NB}/${coId}/chat`)).status).toBe(404);
+    expect(await getConversationMeta(tenantId, subjectConversationId(tenantId, projectSubject(coId))), 'a denied open must not mint the room').toBeNull();
   });
 });
 
 describe('vendor.openwop-app.notebooks.agents.researcher — Research Analyst pack (ADR 0084 Phase 4)', () => {
-  it('is loaded into the agent registry at boot, scoped to RESEARCH/research', async () => {
+  it('is loaded into the agent registry at boot: RESEARCH/research, notebook prompt, exactly the notebooks chat tools', async () => {
     const agent = await getAgentRegistry().resolve('vendor.openwop-app.notebooks.agents.researcher');
     expect(agent).not.toBeNull();
     expect(agent!.persona).toBe('RESEARCH');
     expect(agent!.modelClass).toBe('research');
     // The system prompt resolved from prompts/notebook-researcher.md (DISTINCT from
     // the KB researcher — notebook-scoped wording).
-    expect(agent!.systemPrompt).toContain('notebook');
-  });
-
-  it('is tool-allowlisted to the notebooks feature chat tools only (CFP-1 — registered, resolvable ids)', async () => {
-    const agent = await getAgentRegistry().resolve('vendor.openwop-app.notebooks.agents.researcher');
-    const allow = (agent!.toolAllowlist ?? []) as string[];
-    // CFP-1: the allowlist now names the feature's REGISTERED chat tools
-    // (registerFeatureAgentTool), not the raw node typeIds that resolved to nothing
-    // at dispatch. ask/search ground; write-transformation authors + persists a Document.
-    expect(allow).toContain('openwop:notebooks.ask');
-    expect(allow).toContain('openwop:notebooks.search');
-    expect(allow).toContain('openwop:notebooks.write-transformation');
-    // No tool outside the notebooks feature surface — in particular, no kb nodes, and
-    // NOT the raw node typeIds (which no conversational-tool provider resolves).
-    expect(allow.every((t) => t.startsWith('openwop:notebooks.'))).toBe(true);
-    expect(allow).not.toContain('openwop:feature.notebooks.nodes.read-source');
-    expect(allow).not.toContain('openwop:feature.notebooks.nodes.store-summary');
+    expect(agent!.systemPrompt).toContain('inside a single research notebook');
+    // CFP-1: the REGISTRY-resolved allowlist is exactly the feature's registered chat
+    // tools (the pack FILE is pinned in notebooks-podcasts-agent-tools.test.ts) — no
+    // kb node, no raw node typeId.
+    expect([...(agent!.toolAllowlist ?? [])].sort()).toEqual(
+      [NOTEBOOKS_ASK_TOOL_ID, NOTEBOOKS_SEARCH_TOOL_ID, NOTEBOOKS_WRITE_TRANSFORMATION_TOOL_ID].sort(),
+    );
   });
 });
 
@@ -164,8 +164,10 @@ describe('composeKnowledgeForSubject — shared composition (ADR 0084 Phase 2)',
     const orgId = `org-${Date.now()}`;
     const subject = projectSubject(`nb-${Date.now()}`);
 
-    // No binding ⇒ self-gating: empty.
-    expect(await composeKnowledgeForSubject(tenantId, subject, 'anything')).toBe('');
+    // No binding ⇒ self-gating: empty — even though the subject HAS memory that
+    // matches the query (without the gate the memory leg would compose it).
+    await addSubjectNote(tenantId, subject, 'Photosynthesis memory fact: chloroplasts capture light.');
+    expect(await composeKnowledgeForSubject(tenantId, subject, 'how does photosynthesis work')).toBe('');
 
     // Bind a KB collection with an UNTRUSTED source (notebook sources are fenced).
     const col = await createCollection(tenantId, orgId, 'tester', { name: 'Sources' });
@@ -175,8 +177,11 @@ describe('composeKnowledgeForSubject — shared composition (ADR 0084 Phase 2)',
 
     const block = await composeKnowledgeForSubject(tenantId, subject, 'how does photosynthesis work', { topK: 6 });
     expect(block.length).toBeGreaterThan(0);
-    // The source text is present, and (being untrusted) it is wrapped in the fence.
-    expect(block.toLowerCase()).toContain('photosynthesis');
-    expect(block).toContain('BEGIN UNTRUSTED CONTENT');
+    // The source text sits INSIDE the untrusted fence.
+    const fenceAt = block.indexOf('BEGIN UNTRUSTED CONTENT');
+    expect(fenceAt).toBeGreaterThanOrEqual(0);
+    const fenceEnd = block.indexOf('\nEND UNTRUSTED CONTENT', fenceAt);
+    expect(fenceEnd).toBeGreaterThan(fenceAt);
+    expect(block.slice(fenceAt, fenceEnd)).toContain('chemical energy');
   });
 });

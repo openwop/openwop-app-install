@@ -147,3 +147,24 @@ export async function subjectReadAllowed(tenantId: string, subject: Subject, cal
   const level = await resolveSubjectAccess(tenantId, subject, caller.subject);
   return level === null || levelSatisfies(level, 'read');
 }
+
+/**
+ * ADR 0886 D1 — may `caller` WRITE a resource owned by `subject`?
+ *
+ * The write twin of {@link subjectReadAllowed}, with the same no-subject refusal
+ * (and for the same measured reason). A resolver's `'write'` is decided in the
+ * SUBJECT's org — a project's org for `kind:'project'` (`levelFor`, ADR 0054),
+ * a board's for `kind:'board'` — never in whatever org a request path names.
+ * Before this, every canvas write lane asked the READ question, so a person who
+ * held write in org A and only read in the project's org B wrote B's canvases
+ * through org A's door.
+ *
+ * `null` keeps its meaning: the kind is not membership-scoped, so the caller's
+ * own org/tenant gate was the whole rule.
+ */
+export async function subjectWriteAllowed(tenantId: string, subject: Subject, caller: SubjectCaller | undefined): Promise<boolean> {
+  if (caller?.preAuthorized) return true;
+  if (caller?.subject === undefined) return false;
+  const level = await resolveSubjectAccess(tenantId, subject, caller.subject);
+  return level === null || levelSatisfies(level, 'write');
+}

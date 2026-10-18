@@ -16,7 +16,7 @@ import { openStorage } from '../src/storage/index.js';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { createDraft, publishChallenge } from '../src/features/kicktodo-core/challengeService.js';
 import { enroll, __clearEnrollGuards } from '../src/features/kicktodo-core/enrollmentService.js';
-import { todayFor, __clearCheckInObservers } from '../src/features/kicktodo-core/todayService.js';
+import { todayFor, journalFor, __clearCheckInObservers } from '../src/features/kicktodo-core/todayService.js';
 import { runLogCheckinTool } from '../src/features/kicktodo-core/agentTools.js';
 import type { EvidencePolicy } from '../src/features/kicktodo-core/types.js';
 
@@ -32,7 +32,12 @@ async function cardFor(policy: EvidencePolicy, owner: string, title = 'Morning r
   const today = await todayFor(T, owner);
   return today.enrollments.at(-1)!.actions[0]!.occurrence.cardId;
 }
-const parse = (r: { content: string }) => JSON.parse(r.content) as Record<string, unknown>;
+const parse = (r: { content: string }): Record<string, unknown> => {
+  const v: Record<string, unknown> = JSON.parse(r.content);
+  return v;
+};
+/** The route's uniform not-found text — identical for a foreign and an absent card. */
+const NOT_FOUND = { error: 'not_found', message: 'That action was not found on your Today view.' };
 
 beforeEach(async () => {
   initHostExtPersistence(await openStorage('memory://'));
@@ -44,26 +49,26 @@ describe('openwop:kicktodo.log-checkin (WRITE) — fail-closed + own-data-only',
   it('a system turn (no acting user) is refused — acting_user_required', async () => {
     const r = await runLogCheckinTool({ cardId: 'anything' }, { tenantId: T });
     expect(r.isError).toBe(true);
-    expect(parse(r)).toMatchObject({ error: 'acting_user_required' });
+    expect(parse(r)).toEqual({ error: 'acting_user_required' });
   });
 
   it('a missing cardId is a validation_error (read `today` first, pass the exact id)', async () => {
     const r = await runLogCheckinTool({}, { tenantId: T, actingUserId: 'user:lc-1' });
     expect(r.isError).toBe(true);
-    expect(parse(r)).toMatchObject({ error: 'validation_error' });
+    expect(parse(r)).toMatchObject({ error: 'validation_error', message: expect.stringMatching(/^Pass the EXACT `cardId`/) });
   });
 
   it('a bogus / absent card is a uniform not_found (no existence leak)', async () => {
     const r = await runLogCheckinTool({ cardId: 'occ:does-not-exist' }, { tenantId: T, actingUserId: 'user:lc-1' });
     expect(r.isError).toBe(true);
-    expect(parse(r)).toMatchObject({ error: 'not_found' });
+    expect(parse(r)).toEqual(NOT_FOUND);
   });
 
   it('ANOTHER user\'s card is not_found for the caller (owner-check == the route)', async () => {
     const card = await cardFor('attestation', 'user:lc-owner');
     const r = await runLogCheckinTool({ cardId: card }, { tenantId: T, actingUserId: 'user:lc-intruder' });
     expect(r.isError).toBe(true);
-    expect(parse(r)).toMatchObject({ error: 'not_found' });
+    expect(parse(r)).toEqual(NOT_FOUND);
   });
 
   it('happy path: records the own check-in, echoes the card TITLE, and is idempotent', async () => {
@@ -76,6 +81,10 @@ describe('openwop:kicktodo.log-checkin (WRITE) — fail-closed + own-data-only',
     const again = await runLogCheckinTool({ cardId: card, note: 'again' }, { tenantId: T, actingUserId: owner });
     expect(again.isError).toBeUndefined();
     expect(parse(again)).toMatchObject({ recorded: true, note: 'felt great' }); // first evidence wins
+    // Persisted, not just echoed: the journal holds exactly ONE entry for the card,
+    // carrying the FIRST note.
+    const entries = (await journalFor(T, owner)).filter((j) => j.cardId === card);
+    expect(entries.map((j) => j.note)).toEqual(['felt great']);
   });
 
   it('a note-policy action refuses an empty note as validation_error, accepts real text', async () => {

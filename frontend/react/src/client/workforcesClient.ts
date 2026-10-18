@@ -44,6 +44,8 @@ export interface Workforce {
    *  telemetry — its metrics only ever come from real runs. Drives the honest
    *  empty state so we never promise "Load demo data" where it can't help. */
   historyRunCount?: number;
+  /** ADR 0775 P4 — this tenant's version of the workforce; send it back as `ifMatch`. */
+  etag?: string;
 }
 
 /** Where dashboard data came from: the caller's own real runs, or the
@@ -78,6 +80,11 @@ async function asJson<T>(res: Response, ctx: string): Promise<T> {
   return (await res.json()) as T;
 }
 
+/** ADR 0775 P4 — a write sends the version it was built from; a moved version
+ *  is refused with `409` `details.reason: 'stale_write'` instead of overwriting. */
+const jsonHeadersIfMatch = (ifMatch: string | undefined): HeadersInit =>
+  authedHeaders({ 'content-type': 'application/json', ...(ifMatch !== undefined ? { 'If-Match': `"${ifMatch}"` } : {}) });
+
 /** List workforce definitions. Empty array when none seeded. */
 export async function listWorkforces(): Promise<Workforce[]> {
   const res = await fetch(base, fetchOpts({ headers: authedHeaders() }));
@@ -99,10 +106,14 @@ export async function getWorkforceMetrics(workforceId: string): Promise<Workforc
 
 /** Cut over: change a workforce's status (MG-6). Production is gated server-side
  *  on autonomy graduation — a 409 surfaces as a thrown Error with the host's message. */
-export async function updateWorkforceStatus(workforceId: string, status: WorkforceStatus): Promise<Workforce> {
+export async function updateWorkforceStatus(
+  workforceId: string,
+  status: WorkforceStatus,
+  opts: { ifMatch?: string | undefined } = {},
+): Promise<Workforce> {
   const res = await fetch(`${base}/${encodeURIComponent(workforceId)}`, fetchOpts({
     method: 'PATCH',
-    headers: { ...authedHeaders(), 'content-type': 'application/json' },
+    headers: jsonHeadersIfMatch(opts.ifMatch),
     body: JSON.stringify({ status }),
   }));
   return asJson<Workforce>(res, 'updateWorkforceStatus');
@@ -121,6 +132,8 @@ export interface MigrationJourney {
   dataManifest: { dataSources: string; sensitivity: string; approvalModel: string } | null;
   boundaries: { auto: string[]; review: string[] } | null;
   updatedAt: string;
+  /** ADR 0775 P4 — the journey's version; send it back as `ifMatch`. */
+  etag?: string;
 }
 export interface MigrationJourneyPatch {
   target?: MigrationJourney['target'];
@@ -134,10 +147,14 @@ export async function getMigrationJourney(workforceId: string): Promise<Migratio
   return asJson<MigrationJourney>(res, 'getMigrationJourney');
 }
 
-export async function patchMigrationJourney(workforceId: string, patch: MigrationJourneyPatch): Promise<MigrationJourney> {
+export async function patchMigrationJourney(
+  workforceId: string,
+  patch: MigrationJourneyPatch,
+  opts: { ifMatch?: string | undefined } = {},
+): Promise<MigrationJourney> {
   const res = await fetch(`${base}/${encodeURIComponent(workforceId)}/migration`, fetchOpts({
     method: 'PATCH',
-    headers: { ...authedHeaders(), 'content-type': 'application/json' },
+    headers: jsonHeadersIfMatch(opts.ifMatch),
     body: JSON.stringify(patch),
   }));
   return asJson<MigrationJourney>(res, 'patchMigrationJourney');

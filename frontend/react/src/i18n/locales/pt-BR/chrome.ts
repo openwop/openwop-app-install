@@ -222,6 +222,9 @@ export const messages = {
   navLocked: 'Bloqueado — desbloqueie na loja de recursos',
   lockedFeatureTitle: 'Este recurso precisa de um upgrade',
   lockedFeatureNoStoreBody: 'Ele não faz parte do seu plano atual e no momento não está disponível para compra. Peça a uma pessoa administradora do espaço de trabalho que o ative.',
+  offlineEntitlementTitle: 'Você está offline',
+  offlineEntitlementBody: 'Esta página precisa de conexão para confirmar que o seu espaço de trabalho pode usá-la. Ela abrirá assim que você voltar a ficar online.',
+  offlineEntitlementRetry: 'Tentar novamente',
   navTelemetryDisclosure: 'Este espaço registra contagens anônimas de navegação — quais páginas são abertas, por qual menu e quais recursos bloqueados são vistos ou abertos — para orientar sua estrutura. Nenhuma atividade individual é armazenada.',
   navTelemetryDismiss: 'Fechar o aviso de telemetria',
 } as const;

@@ -17,13 +17,19 @@ vi.mock('../lib/workflowMentions.js', async (importOriginal) => ({
 
 import { ChatInput } from '../ChatInput.js';
 
-beforeAll(() => { (URL as unknown as { createObjectURL: () => string }).createObjectURL = () => 'blob:x'; (URL as unknown as { revokeObjectURL: () => void }).revokeObjectURL = () => undefined; });
+// jsdom ships no object URLs; the image chip's preview needs one.
+beforeAll(() => {
+  Object.defineProperty(URL, 'createObjectURL', { value: (): string => 'blob:x', configurable: true, writable: true });
+  Object.defineProperty(URL, 'revokeObjectURL', { value: (): void => undefined, configurable: true, writable: true });
+});
 afterEach(cleanup);
 
-const attachImage = (container: HTMLElement) => {
-  const input = container.querySelector('input[type="file"]') as HTMLInputElement;
-  fireEvent.change(input, { target: { files: [new File(['x'], 'shot.png', { type: 'image/png' })] } });
+const attach = (container: HTMLElement, file: File): void => {
+  const input = container.querySelector('input[type="file"]');
+  if (!(input instanceof HTMLInputElement)) throw new Error('no file input');
+  fireEvent.change(input, { target: { files: [file] } });
 };
+const attachImage = (container: HTMLElement): void => attach(container, new File(['x'], 'shot.png', { type: 'image/png' }));
 
 describe('unreadable attachment note (ADR 0768 D2)', () => {
   it('shows visible text when the answering model cannot read an attached image', async () => {
@@ -37,5 +43,12 @@ describe('unreadable attachment note (ADR 0768 D2)', () => {
     attachImage(container);
     await waitFor(() => expect(screen.getByText('shot.png')).toBeTruthy());
     expect(screen.queryByText('attachUnreadableNote')).toBeNull();
+  });
+
+  it('shows visible text when the answering model cannot read an attached PDF', async () => {
+    const { container } = render(<ChatInput onSend={vi.fn()} supportsImageInput supportsPdfInput={false} />);
+    attach(container, new File(['%PDF-1.4'], 'doc.pdf', { type: 'application/pdf' }));
+    await waitFor(() => expect(screen.getByText('doc.pdf')).toBeTruthy());
+    expect(screen.getByText('attachUnreadableNote')).toBeTruthy();
   });
 });

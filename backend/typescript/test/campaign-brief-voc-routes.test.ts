@@ -3,6 +3,10 @@
  *   - GET /briefs/:id/voc lists evidence (sentiment/theme query filters)
  *   - DELETE /briefs/:id/voc/:evidenceId curates (workspace:write), 404 on a miss
  *   - IDOR: a stranger gets a uniform 404 on both
+ *
+ * Wave 30 (grade-tests): the co-tenant stranger's login is asserted (a failed login
+ * would also read as 404); bodies are typed. Sabotage-witnessed: the route's
+ * sentiment-enum guard, the delete miss 404 and the org read gate.
  */
 
 import http from 'node:http';
@@ -14,6 +18,8 @@ import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { persistVocEvidence } from '../src/features/campaign-brief/vocService.js';
 import { createOrg } from '../src/host/accessControlService.js';
+import type { VocEvidence } from '../src/features/campaign-brief/vocService.js';
+import type { CampaignBrief } from '../src/features/campaign-brief/types.js';
 
 let BASE: string;
 let server: http.Server;
@@ -32,14 +38,16 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T }
+/** The response bodies this file reads (each route fills a subset). */
+interface Body { evidence?: VocEvidence[]; brief?: CampaignBrief; user?: { userId: string } }
+interface Res<T = Body> { status: number; body: T }
 interface Client { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res>; del: (p: string) => Promise<Res> }
 function client(): Client {
   let cookie = '';
   const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    const out = (res.status === 204 ? {} : await res.json().catch(() => ({}))) as Body;
     return { status: res.status, body: out };
   };
   return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), del: (p) => call('DELETE', p) };
@@ -56,10 +64,10 @@ async function ownerWithBrief(): Promise<{ owner: Client; orgId: string; briefId
   // ADR 0815 D1a — creating an org inside a SHARED tenant is owner-tier over HTTP,
   // and every test here shares the tenant; the org under test is minted directly,
   // owned by this caller (the shape `POST /orgs` produces for an owner).
-  const org = { body: await createOrg({ tenantId: TENANT, createdBy: who.body.user.userId, name: 'Acme', ownerSubject: who.body.user.userId }) };
+  const org = { body: await createOrg({ tenantId: TENANT, createdBy: who.body.user!.userId, name: 'Acme', ownerSubject: who.body.user!.userId }) };
   const brief = await owner.post(B, { orgId: org.body.orgId, name: 'Q4', productName: 'FlashPick' });
   expect(brief.status, JSON.stringify(brief.body)).toBe(201);
-  return { owner, orgId: org.body.orgId, briefId: brief.body.brief.id };
+  return { owner, orgId: org.body.orgId, briefId: brief.body.brief!.id };
 }
 
 describe('campaign-brief VOC routes', () => {
@@ -71,7 +79,7 @@ describe('campaign-brief VOC routes', () => {
     ]);
     expect((await owner.get(`${B}/${briefId}/voc`)).body.evidence).toHaveLength(2);
     const pains = await owner.get(`${B}/${briefId}/voc?sentiment=pain`);
-    expect(pains.body.evidence.map((e: any) => e.theme)).toEqual(['time waste']);
+    expect(pains.body.evidence!.map((e) => e.theme)).toEqual(['time waste']);
     expect((await owner.get(`${B}/${briefId}/voc?theme=auto`)).body.evidence).toHaveLength(1);
     expect((await owner.get(`${B}/${briefId}/voc?sentiment=bogus`)).body.evidence).toHaveLength(2);
   });
@@ -92,7 +100,7 @@ describe('campaign-brief VOC routes', () => {
       { quote: 'private customer words', sourceRef: REF, theme: 'secret', sentiment: 'pain' },
     ]);
     const stranger = client();
-    await stranger.post('/host/openwop-app/test/login', { email: uniqEmail(), tenantId: TENANT });
+    expect((await stranger.post('/host/openwop-app/test/login', { email: uniqEmail(), tenantId: TENANT })).status).toBe(201);
     expect((await stranger.get(`${B}/${briefId}/voc`)).status).toBe(404);
     expect((await stranger.del(`${B}/${briefId}/voc/${row.id}`)).status).toBe(404);
   });

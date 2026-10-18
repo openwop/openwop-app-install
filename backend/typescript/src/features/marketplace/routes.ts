@@ -4,6 +4,8 @@
  * — 404 when off). Three faces, each with its own authority tier:
  *
  *   GET  /listings                                  browse (toggle + authed caller)
+ *   GET  /feature-bundles                           bundle catalog + this workspace's activation (toggle + authed)
+ *   POST /feature-bundles/:bundleId/enable|disable  turn a bundle on/off here (toggle + workspace admin, ADR 0892)
  *   DEL  /packs/:packName[?purge=true]              tombstone / purge (toggle + SUPERADMIN)
  *   POST /packs/:packName/restore                   restore a removed pack (toggle + SUPERADMIN)
  *   GET  /pack-enablement                           workspace's disabled packs (toggle + authed)
@@ -24,7 +26,6 @@ import type { RouteDeps } from '../../routes/registerAllRoutes.js';
 import { authorizeOrgScope, requireFeatureEnabled, requireString, optionalString, requireTenantWrite, callerHoldsTenantScope } from '../featureRoute.js';
 import { resolveListingPricing } from './listingPricingHook.js';
 import { requireSuperadmin, isSuperadmin } from '../../host/superadmin.js';
-import { resolveCallerUser } from '../users/usersGuards.js';
 import { resolveEffectiveAccess } from '../../host/accessControlService.js';
 import { resolveDefaultPackDir, isSafePackName } from '../../packs/registryInstaller.js';
 import { assertInstallable, installFromConfiguredRegistry, translateInstallError, PACK_SEMVER_RE } from '../../packs/installLane.js';
@@ -37,6 +38,12 @@ import { listReviews, ratingSummary, upsertReview, deleteReview } from './review
 // Importing the service also registers the host/packVisibility resolver (ADR 0194 P3).
 import { disabledPacks, disablePack, enablePack } from './packEnablementService.js';
 import { featureBundleCatalog } from './bundleCatalog.js';
+import {
+  bundleActivationState, disableBundleForTenant, enableBundleForTenant, isKnownBundle,
+  type BundleActivationState, type BundleRefusal,
+} from '../../host/featureBundleActivation.js';
+import { isAnonTenantId } from '../../host/requestSubject.js';
+import { isAnonymous, resolveCallerUser } from '../users/usersGuards.js';
 import { tenantOf } from '../featureRoute.js';
 import { isTombstoned, tombstonePack, restorePack } from '../../host/packTombstones.js';
 import { listRegisteredWorkflows } from '../../host/workflowsRegistry.js';
@@ -124,6 +131,48 @@ async function viewerCapabilities(req: Request): Promise<{ canCurate: boolean; c
   };
 }
 
+/**
+ * ADR 0892 Phase B D1 — may this caller turn bundles on/off for the ACTIVE
+ * workspace? An owner/admin there (`host:members:manage`; a personal workspace's
+ * owner holds it), or the host operator. Never an anonymous session or an `anon:`
+ * sandbox (folded away on sign-in, so never a durable workspace).
+ */
+async function canManageBundles(req: Request): Promise<boolean> {
+  const tenantId = tenantOf(req);
+  if (isAnonymous(req) || isAnonTenantId(tenantId)) return false;
+  return isSuperadmin(req) || callerHoldsTenantScope(req, tenantId, 'host:members:manage');
+}
+
+/** The gate both bundle write routes share: toggle, signed in, authority, known bundle. */
+async function authorizeBundleWrite(req: Request): Promise<{ tenantId: string; actor: string; bundleId: string }> {
+  await requireFeatureEnabled(req, FEATURE.toggleId, FEATURE.label);
+  const user = await resolveCallerUser(req);
+  if (!(await canManageBundles(req))) {
+    throw new OpenwopError('forbidden_scope', 'Only a workspace owner or admin can turn feature bundles on or off.', 403, { requiredScope: 'host:members:manage' });
+  }
+  const bundleId = requireString(req.params.bundleId, 'bundleId');
+  if (!isKnownBundle(bundleId)) throw new OpenwopError('not_found', 'No such feature bundle.', 404, { bundleId });
+  return { tenantId: tenantOf(req), actor: user.userId, bundleId };
+}
+
+/** The helper's typed refusal → the route's envelope (D2/D3/D5). */
+function refusalError(bundleId: string, refused: BundleRefusal): OpenwopError {
+  switch (refused.reason) {
+    case 'unknown_bundle':
+      return new OpenwopError('not_found', 'No such feature bundle.', 404, { bundleId });
+    case 'bundle_not_entitled':
+      return new OpenwopError('bundle_not_entitled', 'Your plan does not include this bundle yet.', 402, {
+        reason: 'bundle_not_entitled', bundleId, missing: refused.missing, bundles: refused.bundles,
+      });
+    case 'feature_killed':
+      return new OpenwopError('feature_killed', 'Part of this bundle is switched off on this host.', 409, { reason: 'feature_killed', bundleId, ids: refused.ids });
+    case 'disable_blocked':
+      return new OpenwopError('disable_blocked', 'Other features in this workspace still need this bundle.', 409, {
+        reason: 'disable_blocked', bundleId, dependents: refused.dependents,
+      });
+  }
+}
+
 export function registerMarketplaceRoutes(deps: RouteDeps): void {
   const { app } = deps;
   const authz = (req: Request, scope: Scope) => authorizeOrgScope(req, FEATURE, scope);
@@ -160,11 +209,55 @@ export function registerMarketplaceRoutes(deps: RouteDeps): void {
   // caller); the projection is host-global (compiled registry + the vendored
   // bundles.json), never tenant data. There is deliberately NO write twin:
   // a distribution manifest becomes real only via a repo PR + the gated build.
+  //
+  // ADR 0892 Phase B — the catalog stays host-global; the response ADDS this
+  // workspace's per-bundle `activation` (enabled / available / locked) and whether
+  // the caller may change it. A fault reading the state is disclosed
+  // (`activationDegraded`), never rendered as "available".
   app.get(`${BASE}/feature-bundles`, async (req, res, next) => {
     try {
       await requireFeatureEnabled(req, FEATURE.toggleId, FEATURE.label);
       await resolveCallerUser(req);
-      res.json(featureBundleCatalog());
+      const catalog = featureBundleCatalog();
+      const tenantId = tenantOf(req);
+      let activation: Record<string, BundleActivationState> | undefined;
+      try {
+        const states = await Promise.all(catalog.bundles.map(async (b) => [b.id, await bundleActivationState(b.id, tenantId)] as const));
+        activation = Object.fromEntries(states);
+      } catch (err) {
+        log.warn('marketplace_bundle_activation_unresolved', { error: err instanceof Error ? err.message : String(err) });
+      }
+      res.json({
+        ...catalog,
+        ...(activation ? { activation } : { activationDegraded: true }),
+        viewer: { canManageBundles: await canManageBundles(req) },
+      });
+    } catch (err) { next(err); }
+  });
+
+  // ── ADR 0892 Phase B: turn a bundle on / off for THIS workspace ──
+  // A workspace owner/admin (`host:members:manage`, which a personal workspace's
+  // owner holds) in the ACTIVE tenant only; the tenant never comes from the body.
+  // Enable is refused unless the plan covers the whole closure (402) and nothing in
+  // it is killed (409); disable is refused while a feature outside the bundle still
+  // needs it (409). The helper decides; this maps its typed refusal to an envelope.
+  app.post(`${BASE}/feature-bundles/:bundleId/enable`, async (req, res, next) => {
+    try {
+      const { tenantId, actor, bundleId } = await authorizeBundleWrite(req);
+      const r = await enableBundleForTenant(bundleId, tenantId, actor);
+      if (r.refused) throw refusalError(bundleId, r.refused);
+      log.info('marketplace_bundle_enabled', { bundleId, enabled: r.enabled.length, alreadyOn: r.alreadyOn.length });
+      res.json({ bundleId, status: 'enabled', enabled: r.enabled, alreadyOn: r.alreadyOn, skipped: r.skipped });
+    } catch (err) { next(err); }
+  });
+
+  app.post(`${BASE}/feature-bundles/:bundleId/disable`, async (req, res, next) => {
+    try {
+      const { tenantId, actor, bundleId } = await authorizeBundleWrite(req);
+      const r = await disableBundleForTenant(bundleId, tenantId, actor);
+      if (r.refused) throw refusalError(bundleId, r.refused);
+      log.info('marketplace_bundle_disabled', { bundleId, disabled: r.disabled.length, alreadyOff: r.alreadyOff.length });
+      res.json({ bundleId, status: 'available', disabled: r.disabled, alreadyOff: r.alreadyOff, skipped: r.skipped });
     } catch (err) { next(err); }
   });
 

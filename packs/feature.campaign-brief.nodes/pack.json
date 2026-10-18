@@ -1,6 +1,6 @@
 {
   "name": "feature.campaign-brief.nodes",
-  "version": "1.5.2",
+  "version": "1.6.0",
   "kind": "node",
   "description": "Personas & Campaign Brief node pack \u2014 validate a brief (compute the enabled channel set) and generate the messaging kernel (the shared strategic foundation every channel echoes), grounding it in the knowledge base (kb.rag) + brand voice (ctx.features.brand) via the run-scoped provider. Drives the Campaign Studio orchestration.",
   "author": "OpenWOP App",

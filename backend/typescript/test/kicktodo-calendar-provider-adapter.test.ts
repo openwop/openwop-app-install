@@ -3,12 +3,20 @@
  * connection-backed). Mock-tested: a real Google write needs live OAuth creds this
  * env can't provide, so we pin the adapter's SHAPE against a loopback endpoint +
  * a seeded user-scoped Connection.
+ *
+ * COST CEILING: `createApp()` is booted because the Connections broker's secret
+ * resolver is wired there (every connections test in this suite does the same —
+ * e.g. `connection-acting-user-alias.test.ts`); it is not served or listened on.
+ *
+ * Sabotages that turn this red (w41 probes): the ENABLE-flag honesty gate, the
+ * owner-credential lookup (actingUserId) and its fail-closed throw, the
+ * google all-day `end` date, the sha1 event-id derivation, the unmodelled
+ * provider's not-configured throw, and the SSRF private-host / plain-http refusals.
  */
 import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
 import http from 'node:http';
 import { createHash } from 'node:crypto';
 import type { AddressInfo } from 'node:net';
-import type { AddressInfo as AppAddr } from 'node:net';
 import { createApp } from '../src/index.js';
 import { createSecretConnection } from '../src/features/connections/connectionsService.js';
 import {
@@ -20,8 +28,12 @@ import {
 import { isCalendarTransportConfigured, __clearCalendarTransport } from '../src/features/kicktodo-integrations/calendarWriteService.js';
 
 let server: http.Server;
-let appServer: http.Server;
 let PORT = 0;
+const PRIOR_DSN = process.env.OPENWOP_STORAGE_DSN;
+const PRIOR_SESSION_SECRET = process.env.OPENWOP_SESSION_SECRET;
+function restoreEnv(key: string, value: string | undefined): void {
+  if (value === undefined) delete process.env[key]; else process.env[key] = value;
+}
 const seen: Array<{ method: string; url: string; auth: string; body: string }> = [];
 
 const TENANT = 'tenant-cal';
@@ -32,24 +44,26 @@ beforeAll(async () => {
   // Full app boot wires the secret resolver + surfaces the Connections layer needs.
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
-  const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((r) => { appServer = app.listen(0, '127.0.0.1', () => r()); });
-  void (appServer.address() as AppAddr);
+  await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   server = http.createServer((req, res) => {
     let raw = '';
     req.on('data', (c) => { raw += c; });
     req.on('end', () => {
-      seen.push({ method: req.method ?? '', url: req.url ?? '', auth: (req.headers.authorization as string) ?? '', body: raw });
+      seen.push({ method: req.method ?? '', url: req.url ?? '', auth: req.headers.authorization ?? '', body: raw });
       res.writeHead(200); res.end('{}');
     });
   });
-  await new Promise<void>((r) => { server.listen(0, '127.0.0.1', () => { PORT = (server.address() as AddressInfo).port; r(); }); });
+  await new Promise<void>((r) => { server.listen(0, '127.0.0.1', () => r()); });
+  const addr: AddressInfo | string | null = server.address();
+  if (!addr || typeof addr === 'string') throw new Error('mock calendar has no TCP address');
+  PORT = addr.port;
   // A user-scoped `google` Connection for the owner (calendar-write is per-participant).
   await createSecretConnection({ tenantId: TENANT, provider: 'google', kind: 'bearer', secret: 'owner-cal-token', scope: 'user', userId: OWNER });
 });
 afterAll(async () => {
   await new Promise<void>((r) => server.close(() => r()));
-  await new Promise<void>((r) => appServer.close(() => r()));
+  restoreEnv('OPENWOP_STORAGE_DSN', PRIOR_DSN);
+  restoreEnv('OPENWOP_SESSION_SECRET', PRIOR_SESSION_SECRET);
 });
 afterEach(() => {
   seen.length = 0;
@@ -125,6 +139,24 @@ describe('the connection-backed transport', () => {
     process.env.OPENWOP_CALENDAR_PROVIDER = 'some-unmodelled-provider';
     await expect(
       calendarProviderTransport.upsert('e|d|a', { dateLocal: '2026-07-21', title: 't' }, { tenantId: TENANT, ownerSubject: OWNER }),
-    ).rejects.toThrow('calendar_provider_not_configured');
+    ).rejects.toThrow(/^calendar_provider_not_configured$/);
+    expect(seen).toHaveLength(0);
+  });
+
+  it('SSRF: refuses a loopback endpoint unless private egress is explicitly allowed — never reaches the network', async () => {
+    process.env.OPENWOP_CALENDAR_PROVIDER_ENDPOINT = `http://127.0.0.1:${PORT}/cal`;
+    // NO OPENWOP_WEBHOOK_ALLOW_PRIVATE — the default posture.
+    await expect(
+      calendarProviderTransport.upsert('e|d|a', { dateLocal: '2026-07-21', title: 't' }, { tenantId: TENANT, ownerSubject: OWNER }),
+    ).rejects.toThrow(/^calendar_provider_blocked$/);
+    expect(seen).toHaveLength(0);
+  });
+
+  it('refuses plain http to a public host (https only without the private-egress opt-in)', async () => {
+    process.env.OPENWOP_CALENDAR_PROVIDER_ENDPOINT = 'http://calendar.example.com/cal';
+    await expect(
+      calendarProviderTransport.upsert('e|d|a', { dateLocal: '2026-07-21', title: 't' }, { tenantId: TENANT, ownerSubject: OWNER }),
+    ).rejects.toThrow(/^calendar_provider_insecure$/);
+    expect(seen).toHaveLength(0);
   });
 });

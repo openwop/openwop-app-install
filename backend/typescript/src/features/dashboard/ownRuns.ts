@@ -18,16 +18,19 @@
  *   - The row is a five-field projection. Inputs, variables, configurable and
  *     error text never leave the server on this path.
  *
- * There is no owner column to index, so ownership is decided in JS over a
- * BOUNDED newest-first scan of the existing `(tenant_id, created_at DESC)`
- * index (`listRuns` keyset pages): one page of `limit` rows in the personal
- * workspace, at most five pages of 200 in a shared one — never O(tenant). `truncated` says when older owned runs may exist that
- * were not reached, so the tiles can keep their "sample, not the whole period"
- * honesty (`runsWindow.ts`).
+ * There is no owner column to index, so the read is a BOUNDED newest-first scan
+ * of the `(tenant_id, created_at DESC)` index done in the database (#4531,
+ * `Storage.listRunSummaries`): the inner LIMIT caps the scan at
+ * `OWN_RUNS_SCAN_CAP` rows (the personal workspace scans exactly `limit`), the
+ * owner predicate runs outside it, and only five columns plus the owner keys of
+ * `metadata` come back — never O(tenant), never a full row. The store's
+ * predicate is a superset; `runOwner` re-decides each row exactly here, so the
+ * SQL can only over-fetch, never grant. `truncated` says when older owned runs
+ * may exist that were not reached, so the tiles can keep their "sample, not the
+ * whole period" honesty (`runsWindow.ts`).
  */
 import type { Storage } from '../../storage/storage.js';
-import type { RunRecord } from '../../types.js';
-import { opaquePrincipal, runOwner } from '../../host/runOwner.js';
+import { isRunOwnedBy, opaquePrincipal } from '../../host/runOwner.js';
 
 export interface OwnRunRow {
   runId: string;
@@ -39,47 +42,33 @@ export interface OwnRunRow {
 
 /** The tiles' window (`RUN_WINDOW` frontend-side, one v2 page). */
 export const OWN_RUNS_MAX = 100;
-const SCAN_PAGE = 200;
-/** Rows examined before giving up — bounds a shared workspace with many
- *  other people's runs to five indexed pages. */
+/** Rows examined before giving up — the store's inner LIMIT in a shared
+ *  workspace with many other people's runs. */
 export const OWN_RUNS_SCAN_CAP = 1000;
-
-function slim(r: RunRecord): OwnRunRow {
-  return {
-    runId: r.runId,
-    workflowId: r.workflowId,
-    status: r.status,
-    startedAt: r.createdAt,
-    ...(r.completedAt ? { completedAt: r.completedAt } : {}),
-  };
-}
 
 export async function listOwnRuns(
   storage: Storage,
   args: { tenantId: string; subject: string; wholeTenant: boolean; limit: number },
 ): Promise<{ runs: OwnRunRow[]; truncated: boolean }> {
   const principal = opaquePrincipal(args.subject);
-  const owned = (r: RunRecord): boolean => args.wholeTenant || runOwner(r)?.principal === principal;
-  // Every row is owned in the personal workspace, so read exactly the window —
-  // the same one indexed page `GET /runs` reads. Only a shared workspace scans.
-  const pageSize = args.wholeTenant ? args.limit : SCAN_PAGE;
-  const out: OwnRunRow[] = [];
-  let scanned = 0;
-  let before: { createdAt: string; runId: string } | undefined;
-  for (;;) {
-    const page = await storage.listRuns({ tenantId: args.tenantId, limit: pageSize, ...(before ? { before } : {}) });
-    for (const r of page) {
-      scanned += 1;
-      if (!owned(r)) continue;
-      out.push(slim(r));
-      // A full window: older owned runs may exist beyond it.
-      if (out.length >= args.limit) return { runs: out, truncated: true };
-    }
-    const last = page[page.length - 1];
-    // The list ended: every owned run there is has been seen.
-    if (page.length < pageSize || last === undefined) return { runs: out, truncated: false };
-    // The scan budget ran out before the list did.
-    if (scanned >= OWN_RUNS_SCAN_CAP) return { runs: out, truncated: true };
-    before = { createdAt: last.createdAt, runId: last.runId };
-  }
+  // Every row is owned in the personal workspace, so scan exactly the window.
+  const scanCap = args.wholeTenant ? args.limit : OWN_RUNS_SCAN_CAP;
+  const { runs, scanExhausted } = await storage.listRunSummaries({
+    tenantId: args.tenantId,
+    ...(args.wholeTenant ? {} : { owner: { principal, subject: args.subject } }),
+    scanCap,
+    limit: args.limit + 1, // one past the window: says whether older owned runs exist
+  });
+  const owned = runs.filter((r) => args.wholeTenant || isRunOwnedBy(r, args.subject));
+  return {
+    runs: owned.slice(0, args.limit).map((r) => ({
+      runId: r.runId,
+      workflowId: r.workflowId,
+      status: r.status,
+      startedAt: r.createdAt,
+      ...(r.completedAt ? { completedAt: r.completedAt } : {}),
+    })),
+    // A full window, or a scan that stopped before the tenant's oldest run.
+    truncated: runs.length > args.limit || scanExhausted,
+  };
 }

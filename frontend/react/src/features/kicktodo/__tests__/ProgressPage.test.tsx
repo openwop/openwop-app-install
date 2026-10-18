@@ -1,10 +1,21 @@
+/**
+ * KickTodo Progress (ADR 0436 §5.6, 6e4a137e1 "make Progress evidence-led").
+ * Every figure states its basis ("4 of 10 required actions"); an UNKNOWN plan
+ * basis is stated, never rendered as 0% / an empty meter; a failed read is an
+ * ANNOUNCED failure with a working retry, never the empty "browse challenges"
+ * state (failed ≠ empty). Breaks if: the catalog title, meter basis, narrative
+ * or next-step link drift; `hasPlanBasis` admits a zero total; the catch maps
+ * to rows; retry stops re-reading; or the failure card stops announcing.
+ */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
+import type { Enrollment, NegotiatedChallenge, ProgressView } from '../../../client/kicktodoClient.js';
+import type { listChallengesForLocale, listEnrollmentsWithProgress } from '../../../client/kicktodoClient.js';
 
 const kt = vi.hoisted(() => ({
-  listEnrollmentsWithProgress: vi.fn(),
-  listChallengesForLocale: vi.fn(),
+  listEnrollmentsWithProgress: vi.fn<typeof listEnrollmentsWithProgress>(),
+  listChallengesForLocale: vi.fn<typeof listChallengesForLocale>(),
 }));
 
 vi.mock('../../../client/kicktodoClient.js', async (importOriginal) => ({
@@ -14,8 +25,9 @@ vi.mock('../../../client/kicktodoClient.js', async (importOriginal) => ({
 
 import { ProgressPage } from '../ProgressPage.js';
 import { messages as en } from '../i18n/en.js';
+import { announce, currentAnnouncements } from '../../../ui/announce.js';
 
-const progress = (overrides: Record<string, unknown> = {}) => ({
+const progress = (overrides: Partial<ProgressView> = {}): ProgressView => ({
   enrollmentId: 'enroll-focus',
   state: 'active',
   goalState: null,
@@ -28,15 +40,28 @@ const progress = (overrides: Record<string, unknown> = {}) => ({
   recovery: { offered: 0, completed: 0 },
   ...overrides,
 });
+const enrollment: Enrollment = {
+  id: 'enroll-focus', challengeId: 'focus', challengeVersion: 1, state: 'active', goalId: 'goal-focus',
+  planRevision: 1, timezone: 'UTC', startDateLocal: '2026-09-01',
+};
+const catalog: NegotiatedChallenge[] = [{
+  challenge: {
+    id: 'focus', version: 1, status: 'published', title: 'Focus gently', summary: 'Protect one block.', outcome: 'A focus rhythm.',
+    durationDays: 14, activities: [],
+  },
+  servedLocale: 'en',
+  exactLocale: true,
+}];
 
 const mount = () => render(<MemoryRouter><ProgressPage /></MemoryRouter>);
 
 afterEach(cleanup);
 beforeEach(() => {
   vi.clearAllMocks();
-  kt.listChallengesForLocale.mockResolvedValue([{ challenge: { id: 'focus', title: 'Focus gently' } }]);
+  announce('');
+  kt.listChallengesForLocale.mockResolvedValue(catalog);
   kt.listEnrollmentsWithProgress.mockResolvedValue({
-    enrollments: [{ id: 'enroll-focus', challengeId: 'focus' }],
+    enrollments: [enrollment],
     progress: { 'enroll-focus': progress() },
   });
 });
@@ -56,7 +81,7 @@ describe('Progress — evidence-led journey', () => {
 
   it('states an unknown plan basis instead of fabricating zero progress', async () => {
     kt.listEnrollmentsWithProgress.mockResolvedValue({
-      enrollments: [{ id: 'enroll-focus', challengeId: 'focus' }],
+      enrollments: [enrollment],
       progress: { 'enroll-focus': progress({ totalRequiredActivities: 0, completedActivities: 0 }) },
     });
 
@@ -75,8 +100,13 @@ describe('Progress — evidence-led journey', () => {
     mount();
 
     expect(await screen.findByText(en.progressLoadErrorBody)).toBeTruthy();
+    // Announced through the ONE global live region (StateCard `announce`).
+    // The announcement comes from a passive effect that can flush after findBy sees the DOM; wait for it.
+    await waitFor(() => expect(currentAnnouncements().polite).toContain(en.progressLoadError));
+    expect(screen.queryByRole('link', { name: en.browseChallenges })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: en.progressRetry }));
     await waitFor(() => expect(kt.listEnrollmentsWithProgress).toHaveBeenCalledTimes(2));
     expect(await screen.findByRole('link', { name: en.browseChallenges })).toBeTruthy();
+    expect(screen.queryByText(en.progressLoadErrorBody)).toBeNull();
   });
 });

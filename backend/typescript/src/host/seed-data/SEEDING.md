@@ -22,9 +22,10 @@ host-extension stores.
 
 > **Host-global vs per-tenant.** `featurePages.json` (like the system home page) seeds **host-global** content into the reserved system-site org (`host-site`, ADR 0027) — shared across the whole deployment, not per tenant. Its seeder's `clear()` is a deliberate no-op (clearing per-tenant would remove the public page for everyone), and it's published via the normal CMS publish transition (not a raw status write). After editing `featurePages.json`, bump `SEED_VERSION` in `../featuresPage.ts` so a redeploy refreshes the live page — but only while it has never been hand-edited in the CMS (a human edit freezes it).
 
-> The runnable workflow definitions a persona's portfolio points at live in
-> `../exampleWorkflows.ts` (executable node graphs, not brand content). Their
-> human-facing `name`/`purpose` strings can be edited there.
+> The runnable workflow definitions a persona's portfolio points at are the
+> `tmpl.*` Work-Twin templates, shipped as a workflow-chain pack (ADR 0775 P2),
+> not brand content. Their human-facing names live in the frontend's
+> `agents/roleTemplates.ts`.
 
 ## To re-brand the example content
 

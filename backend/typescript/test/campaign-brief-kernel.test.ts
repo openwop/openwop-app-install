@@ -2,8 +2,16 @@
  * Campaign Brief — context assembler + surface + kernel node (ADR 0156 Phase 3).
  * Pure assembler unit tests + surface tenant-isolation + the kernel node over a
  * stubbed 3-surface ctx (campaign-brief + brand + kb) and a stub ctx.callAI.
+ * BRIEF-1 (order-insensitive protected-field diff) and R2 CB-SP-9 (model output
+ * alone never advances status) are sabotage-witnessed regression pins here.
+ *
+ * Wave 30 (grade-tests): fixtures are full typed rows (no casts); the node set is
+ * pinned to the pack MANIFEST (module ↔ pack.json parity), not a hand list. Two
+ * product defects are pinned as `it.fails` (CB-SEEDS-1, CB-KERNEL-1) — each flips
+ * red when the product is fixed.
  */
 import { beforeEach, describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { openSqliteStorage } from '../src/storage/sqlite/index.js';
@@ -22,11 +30,16 @@ function as<T>(v: unknown): T { return JSON.parse(JSON.stringify(v)); }
 
 describe('briefContext.assembleBriefContextText (pure)', () => {
   it('composes product, audience (buyer-stage guidance), and messaging', () => {
-    const brief = {
-      name: 'Q4', objective: 'Leads', productName: 'FlashPick', productDescription: 'Grocery automation', industryVertical: 'Grocery',
+    const brief: CampaignBrief = {
+      id: 'b1', tenantId: TENANT, orgId: 'o1', name: 'Q4', objective: 'Leads', personaIds: ['p1'],
+      productName: 'FlashPick', productDescription: 'Grocery automation', industryVertical: 'Grocery',
+      channels: [], status: 'draft', kernelStale: false, createdBy: 'u1', createdAt: '2026-07-01T00:00:00Z', updatedAt: '2026-07-01T00:00:00Z',
       messaging: { primaryValueProp: 'Pick faster', toneOverride: '', proofPoints: ['40% faster'], ctaStrategy: 'Demo' },
-    } as unknown as CampaignBrief;
-    const personas = [{ name: 'Ops Director', role: 'Ops', buyerStage: 'product_aware', painPoints: ['labor'], objections: ['cost'], goals: ['save'], demographics: 'Mid-market' }] as unknown as Persona[];
+    };
+    const personas: Persona[] = [{
+      id: 'p1', tenantId: TENANT, orgId: 'o1', name: 'Ops Director', role: 'Ops', buyerStage: 'product_aware', painPoints: ['labor'],
+      objections: ['cost'], goals: ['save'], demographics: 'Mid-market', createdBy: 'u1', createdAt: '2026-07-01T00:00:00Z', updatedAt: '2026-07-01T00:00:00Z',
+    }];
     const text = assembleBriefContextText(brief, personas);
     expect(text).toContain('# Campaign: Q4');
     expect(text).toContain('FlashPick');
@@ -63,21 +76,11 @@ describe('campaign-brief surface', () => {
 
 describe('feature.campaign-brief.nodes — node pack', () => {
   it('exports the full ADR 0156/0356/0403 node set', () => {
-    expect(Object.keys(nodePack).sort()).toEqual([
-      'feature.campaign-brief.nodes.build-targeting',
-      'feature.campaign-brief.nodes.extract-seeds',
-      'feature.campaign-brief.nodes.extract-voc',
-      'feature.campaign-brief.nodes.generate-angles',
-      'feature.campaign-brief.nodes.generate-kernel',
-      'feature.campaign-brief.nodes.get-brief',
-      'feature.campaign-brief.nodes.get-targeting-pack',
-      'feature.campaign-brief.nodes.list-angles',
-      'feature.campaign-brief.nodes.list-briefs',
-      'feature.campaign-brief.nodes.list-hooks',
-      'feature.campaign-brief.nodes.list-personas',
-      'feature.campaign-brief.nodes.list-targeting-packs',
-      'feature.campaign-brief.nodes.validate',
-    ]);
+    // Module ↔ manifest parity: every declared node has a handler and vice versa.
+    const manifest = JSON.parse(readFileSync(join(REPO_ROOT, 'packs', 'feature.campaign-brief.nodes', 'pack.json'), 'utf8')) as { nodes: Array<{ typeId: string }> };
+    const declared = manifest.nodes.map((n) => n.typeId).sort();
+    expect(declared).toHaveLength(13);
+    expect(Object.keys(nodePack).sort()).toEqual(declared);
   });
 
   it('fails closed with host_capability_missing when the surface is absent', async () => {
@@ -115,6 +118,46 @@ describe('feature.campaign-brief.nodes — node pack', () => {
     const out = await nodePack['feature.campaign-brief.nodes.generate-kernel']({ features, callAI: async () => ({}), inputs: { briefId: 'nope' } });
     expect(out.status).toBe('failed');
     expect(out.error?.code).toBe('brief_not_found');
+  });
+});
+
+// CB-SEEDS-1 (BLOCKED-ON-PRODUCT, wave 30) — extract-seeds returns
+// `status:'success'` with `proposals: {}` when the model returns NOTHING: invalid
+// model output reported as success-with-empty (CLAUDE.md non-negotiable). Correct:
+// a typed failure (ideally after ONE error-fed repair, the extract-voc pattern).
+// Fix direction: in packs/feature.campaign-brief.nodes/index.mjs extractBriefSeeds,
+// return `{ status:'failed', error:{ code:'generation_empty' } }` when `data` is not
+// an object; then drop `.fails`.
+describe('CB-SEEDS-1 — extract-seeds never reports an empty model reply as success', () => {
+  it.fails('an empty model reply is a typed failure', async () => {
+    const callAI = async () => ({ data: undefined });
+    const kb = { rag: async () => ({ augmentedPrompt: '[0] FlashPick buyers are ops directors.', citations: [{ documentId: 'd1' }], coverage: 'ok' }) };
+    const out = await nodePack['feature.campaign-brief.nodes.extract-seeds']({ features: { kb }, callAI, inputs: { orgId: 'o1', collectionId: 'c1' } });
+    expect(out.status).toBe('failed');
+    expect(out.error?.code).toBeTruthy();
+  });
+});
+
+// CB-KERNEL-1 (BLOCKED-ON-PRODUCT, wave 30) — surface.setKernel persists
+// `args.kernel as MessagingKernel` with NO validation, so any surface caller can
+// write a malformed kernel onto the brief (and it advances status when the brief
+// validates). Model output must reach durable state only through closed-world
+// validation. Correct: a typed 422 and the stored brief untouched. Fix direction:
+// validate the kernel shape (string headline/supportingStatement/primaryCta/tone,
+// string[] proofPoints, bounded lengths) in surface.setKernel / briefService.setKernel;
+// then drop `.fails`.
+describe('CB-KERNEL-1 — the kernel write is closed-world', () => {
+  beforeEach(async () => {
+    initHostExtPersistence(openSqliteStorage(':memory:'));
+    await __clearBriefs();
+  });
+
+  it.fails('a malformed kernel is refused and never persisted', async () => {
+    const brief = await createBrief(TENANT, 'o1', 'u1', { name: 'Camp', productName: 'FlashPick' });
+    const surface = buildCampaignBriefSurface({ tenantId: TENANT });
+    await expect(surface.setKernel!({ briefId: brief.id, kernel: { headline: 42, proofPoints: 'not-an-array' } }))
+      .rejects.toMatchObject({ code: 'validation_error' });
+    expect((await getBrief(TENANT, brief.id))!.kernel).toBeUndefined();
   });
 });
 
@@ -193,6 +236,11 @@ describe('vendor.openwop-app.campaign-brief.agents — agent pack', () => {
     // CFP-1: the Strategist now carries the REAL registered agent tools
     // (`openwop:campaign-brief.<verb>`) — `generate-kernel` ignites the
     // messaging-kernel builtin workflow (assemble → callAI → setKernel → human gate).
-    expect(loaded[0].toolAllowlist).toContain('openwop:campaign-brief.generate-kernel');
+    expect([...(loaded[0].toolAllowlist ?? [])].sort()).toEqual([
+      'openwop:campaign-brief.generate-kernel',
+      'openwop:campaign-brief.get-brief',
+      'openwop:campaign-brief.research.run',
+      'openwop:campaign-brief.validate',
+    ]);
   });
 });

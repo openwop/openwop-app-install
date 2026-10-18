@@ -14,6 +14,14 @@
  *
  * Found the hard way — ADR 0519's new collection cells rendered `updatedAt` and
  * crashed the Email hub in an unrelated existing test.
+ *
+ * DOUBLE GUARD, named: `guardDate` checks `isDatable` first AND wraps the format in a
+ * try/catch. For every fixture here the first guard decides, so removing the catch alone
+ * stays green (wave 51 probe w51g1-ff-guard-catch) — the catch is defence in depth for an
+ * Intl throw on a datable value, which no known input produces. Removing `isDatable` reds
+ * the `null` case (`new Date(null)` is the epoch, which formats without throwing).
+ * Sabotage: unguard any formatter → its `survives undefined` case reds; a wrong date
+ * reds `still formats a real date normally` (UTC-pinned literals).
  */
 import { describe, it, expect } from 'vitest';
 import {
@@ -35,14 +43,18 @@ describe('date formatters degrade instead of throwing', () => {
       expect(() => formatDateTime(v)).not.toThrow();
       expect(() => formatRelativeTime(v)).not.toThrow();
       expect(formatDate(v)).toBe(UNDATED);
+      expect(formatTime(v)).toBe(UNDATED);
+      expect(formatDateTime(v)).toBe(UNDATED);
       expect(formatRelativeTime(v)).toBe(UNDATED);
     });
   }
 
   it('still formats a real date normally', () => {
     const iso = '2026-06-18T12:00:00Z';
-    expect(formatDate(iso)).not.toBe(UNDATED);
-    expect(formatDateTime(iso)).not.toBe(UNDATED);
+    // UTC-pinned so the literal holds in every machine timezone.
+    expect(formatDate(iso, { dateStyle: 'medium', timeZone: 'UTC' })).toBe('Jun 18, 2026');
+    expect(formatDateTime(iso, { dateStyle: 'medium', timeStyle: 'short', timeZone: 'UTC' })).toMatch(/^Jun 18, 2026, 12:00\sPM$/u);
+    expect(formatTime(iso, { timeStyle: 'short', timeZone: 'UTC' })).toMatch(/^12:00\sPM$/u);
     expect(formatRelativeTime(iso, '2026-06-18T12:02:00Z')).toBe('2 minutes ago');
   });
 

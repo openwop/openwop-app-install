@@ -22,13 +22,17 @@ const T = 'ws:rekey';
 
 beforeAll(async () => {
   initHostExtPersistence(await openStorage('memory://'));
+  // ADR 0887 D1 — `T` is a shared `ws:` workspace, where membership of its ROOT is
+  // what presence means; the links' publisher must hold it or their links are dark.
+  const { createOrg } = await import('../src/host/accessControlService.js');
+  await createOrg({ tenantId: T, orgId: T, name: 'Rekey WS', createdBy: 'user:owner', ownerSubject: 'user:owner' });
 });
 
 describe('rekeySharingAtRest', () => {
   it('re-keys legacy rows, keeps public resolution working, and is idempotent by shape', async () => {
     const { rekeySharingAtRest, _frameViewCountForToken } = await import('../src/features/sharing/sharingService.js');
     const { createOrg } = await import('../src/host/accessControlService.js');
-    const org = await createOrg({ tenantId: T, name: 'Rekey Org', createdBy: 'user:owner' });
+    const org = await createOrg({ tenantId: T, name: 'Rekey Org', createdBy: 'user:owner', ownerSubject: 'user:owner' }); // ADR 0887 D1 — the publisher is a real member
 
     // Seed a LEGACY raw-keyed row exactly as pre-0448 code stored it.
     const raw = 'legacyRawToken_abc123';
@@ -69,7 +73,7 @@ describe('rekeySharingAtRest', () => {
     // the stored hash as the public token must double-hash and MISS.
     const { resolveShared } = await import('../src/features/sharing/sharingService.js');
     const { createOrg } = await import('../src/host/accessControlService.js');
-    const org = await createOrg({ tenantId: T, name: 'Hash Org', createdBy: 'user:owner' });
+    const org = await createOrg({ tenantId: T, name: 'Hash Org', createdBy: 'user:owner', ownerSubject: 'user:owner' }); // ADR 0887 D1 — the publisher is a real member
     const raw = 'shr_publicRawToken123';
     const store = new DurableCollection<Record<string, unknown>>('sharing:link', (l) => String(l.tokenHash), undefined, (l) => String(l.tenantId));
     await store.put({
@@ -101,7 +105,7 @@ describe('rekeySharingAtRest', () => {
   it('grade fix #3 — a legacy link resolves via the LAZY on-read migration even before the boot pass runs', async () => {
     const { resolveShared } = await import('../src/features/sharing/sharingService.js');
     const { createOrg } = await import('../src/host/accessControlService.js');
-    const org = await createOrg({ tenantId: T, name: 'Lazy Org', createdBy: 'user:owner' });
+    const org = await createOrg({ tenantId: T, name: 'Lazy Org', createdBy: 'user:owner', ownerSubject: 'user:owner' }); // ADR 0887 D1 — the publisher is a real member
     const raw = 'legacyLazyToken_zzz9';
     const legacy = new DurableCollection<Record<string, unknown>>('sharing:link', (l) => String(l.token), undefined, (l) => String(l.tenantId));
     await legacy.put({

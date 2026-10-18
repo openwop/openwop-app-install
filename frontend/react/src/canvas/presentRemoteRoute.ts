@@ -2,7 +2,7 @@
  * ADR 0328 Phase 4 — the public phone-remote route matcher (`/present-remote/:token`),
  * a pure function like the share viewer's `matchSharedToken` so the precedence
  * (App.tsx renders it in the bare PublicShell above AppGate) is unit-testable.
- * The token is dotted (`v1.<claims>.<exp>.<sig>` — base64url segments), so the
+ * The token is dotted (`v2.<claims>.<exp>.<sig>` — base64url segments), so the
  * charset admits `.` alongside base64url; anchored to never over-match.
  */
 

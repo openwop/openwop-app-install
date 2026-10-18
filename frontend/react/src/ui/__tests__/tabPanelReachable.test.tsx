@@ -13,8 +13,6 @@
 import { render, screen, cleanup, fireEvent } from '@testing-library/react';
 import { describe, it, expect, afterEach, vi } from 'vitest';
 
-vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (k: string) => k }) }));
-
 import { Tabs, TabPanel } from '../Tabs.js';
 
 afterEach(cleanup);

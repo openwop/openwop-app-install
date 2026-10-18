@@ -100,9 +100,18 @@ export function registerFeatureToggleRoutes(app: Express): void {
   // "not enabled" state and to gate nav. Only toggle ids + the caller's own
   // resolved status/variant/bindings are exposed; cohorts, per-tenant overrides,
   // and other tenants' assignments never appear here (that's the admin surface).
+  //
+  // `caller` echoes the subject these were resolved FOR: the ACTIVE tenant (a
+  // switched-into `ws:` workspace, not the home tenant `/me` reports) and the
+  // principal. The SPA keys ADR 0873 D12 last-known offline grants on it, so the
+  // key cannot drift from the answer it records. It is the caller's own identity.
   app.get(`${BASE}/assignments`, async (req, res, next) => {
     try {
-      res.json({ assignments: await resolveAssignments(subjectOf(req)) });
+      const subject = subjectOf(req);
+      res.json({
+        assignments: await resolveAssignments(subject),
+        caller: { tenantId: subject.tenantId, ...(subject.userId ? { principalId: subject.userId } : {}) },
+      });
     } catch (err) {
       next(err);
     }

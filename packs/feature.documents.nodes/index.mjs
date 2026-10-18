@@ -20,12 +20,11 @@
  * emitted (RFC 0071 / ADR 0055 — see the correction note at the emit site).
  */
 
-/** DEBT-3 — pack-local mirror of the providers.json SSoT default (the
- *  anthropic `recommended: true` model; src/providers/catalog.ts
- *  getDefaultModel). ctx.callAI REQUIRES an explicit model and standalone
- *  .mjs packs cannot import the catalog, so the default lives in this ONE
- *  greppable constant — the /refresh-model-catalog sweep updates it. */
-const DEFAULT_MODEL = 'claude-sonnet-4-6';
+/** ADR 0903 — no hard-coded vendor. A call passes the provider/model the node
+ *  was given (a chain param frozen at instantiation, or a node input) and leaves
+ *  the rest to the host: `ctx.callAI` fills a missing provider/model from the
+ *  run's choice (`configurable.ai`), else the workspace's active AI binding, else
+ *  the catalog default — resolved once at run start (host/runAiDefault.ts). */
 
 function ensureDocuments(ctx) {
   const documents = ctx.features && ctx.features.documents;
@@ -96,8 +95,8 @@ export async function generateFromTemplate(ctx) {
 
   // 2) Draft the content with the run-scoped provider.
   const ai = await ctx.callAI({
-    provider: str(i.provider) || 'anthropic',
-    model: str(i.model) || DEFAULT_MODEL,
+    provider: str(i.provider) || undefined,
+    model: str(i.model) || undefined,
     systemPrompt: 'You are a precise business-document author. Produce the requested document in clean Markdown. Output only the document body.',
     messages: [{ role: 'user', content: asm.augmentedPrompt }],
     ...(asm.outputSchema ? { responseSchema: asm.outputSchema } : {}),

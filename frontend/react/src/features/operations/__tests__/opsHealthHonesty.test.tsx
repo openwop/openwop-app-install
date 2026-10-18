@@ -20,30 +20,54 @@
  *
  * Every panel asserts BOTH arms: the failure says failed, and a genuine
  * empty/healthy answer still says empty/healthy.
+ *
+ * w52: fetch-free — the outbox and SLO reads (the page's 3rd and 4th) are mocked
+ * too (they used to fetch live, hence a live-fetch allowlist line); the
+ * "genuinely empty queue" arm now asserts the empty state itself (deleting it
+ * was invisible in round 1); the 403 arm asserts EXACTLY one operator-only card.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { GlobalLiveRegion } from '../../../ui/announce.js';
 
-const api = vi.hoisted(() => ({ getHealthSummary: vi.fn(), getDlqSummary: vi.fn(), replayDlqMessage: vi.fn() }));
+type Client = typeof import('../../../client/operationsClient.js');
+const api = vi.hoisted(() => ({
+  getHealthSummary: vi.fn<Client['getHealthSummary']>(), getDlqSummary: vi.fn<Client['getDlqSummary']>(),
+  getOutboxSummary: vi.fn<Client['getOutboxSummary']>(), getSloSummary: vi.fn<Client['getSloSummary']>(),
+  replayDlqMessage: vi.fn<Client['replayDlqMessage']>(),
+}));
 vi.mock('../../../client/operationsClient.js', async (importOriginal) => {
   const orig = await importOriginal<Record<string, unknown>>();
   return { ...orig, ...api };
 });
 
 import { OperationsHubPage } from '../OperationsHubPage.js';
-import { OperationsRequestError } from '../../../client/operationsClient.js';
+import { OperationsRequestError, type DlqSummary, type HealthSummary, type OutboxSummary, type SloSummary } from '../../../client/operationsClient.js';
 import { messages as en } from '../i18n/en.js';
 
-const HEALTH = {
-  status: 'ready' as const, version: '1.0.0',
+const HEALTH: HealthSummary = {
+  status: 'ready', version: '1.0.0',
   checks: { config: { ok: true }, storage: { ok: true } },
   sse: { totalStreams: 0, keys: 0, max: 10, top: [] },
   rateLimits: { ipReqsPerMin: 60, sessionRunsPerMin: 1, sessionRunsPerDay: 1, sessionConcurrent: 1, ipRunsPerDay: 1, mcpPrincipalReqsPerMin: 1 },
   daemon: {}, perInstance: false, fetchedAt: '2026-07-25T00:00:00Z',
 };
-const DLQ = { subjects: [], backend: 'durable' as const, perInstance: false, pointInTime: true, fetchedAt: '2026-07-25T00:00:00Z' };
+const DLQ: DlqSummary = { subjects: [], backend: 'durable', perInstance: false, pointInTime: true, fetchedAt: '2026-07-25T00:00:00Z' };
+const OUTBOX: OutboxSummary = {
+  counts: { pending: 0, dead: 0 }, oldestPendingCreatedAt: null, oldestPendingAgeS: null,
+  dead: [], deadSample: { limit: 20, truncated: false }, perInstance: false, fetchedAt: '2026-07-25T00:00:00Z',
+};
+const SLO: SloSummary = {
+  source: 'local-scrape',
+  window: { kind: 'process_uptime', startedAt: '2026-07-25T00:00:00Z', seconds: 3600 },
+  perInstance: true,
+  series: { count: 1, limit: 20_000, overflowed: false },
+  rows: [],
+  alerts: [],
+  runbookDoc: 'docs/runbooks/slo-alerts.md',
+  fetchedAt: '2026-07-25T00:00:00Z',
+};
 
 /** The hub renders <Link>s, so it needs a Router in scope. */
 function renderHub(): void {
@@ -73,6 +97,8 @@ beforeEach(() => {
   vi.clearAllMocks();
   api.getHealthSummary.mockResolvedValue(HEALTH);
   api.getDlqSummary.mockResolvedValue(DLQ);
+  api.getOutboxSummary.mockResolvedValue(OUTBOX);
+  api.getSloSummary.mockResolvedValue(SLO);
 });
 afterEach(cleanup);
 
@@ -161,7 +187,7 @@ describe('UX-OPS-1 — one read failing never speaks for the other panel', () =>
     renderHub();
     await page().findByText(/v1\.0\.0/); // health rendered
     // Exactly one operator-only card — the DLQ one, not both panels.
-    expect(page().getAllByText(/operator/i).length).toBeGreaterThan(0);
+    expect(page().getAllByText(en.operatorOnlyTitle)).toHaveLength(1);
     expect(page().queryByText(/Health check unavailable/i)).toBeNull();
   });
 
@@ -172,6 +198,8 @@ describe('UX-OPS-1 — one read failing never speaks for the other panel', () =>
     expect(await page().findByText(/v1\.0\.0/)).toBeTruthy();
     expect(page().queryByText(/Dead-letter queue unavailable/i)).toBeNull();
     expect(page().queryByText(/Health check unavailable/i)).toBeNull();
+    // The accurate all-clear itself — not merely the absence of a failure.
+    expect(page().getByText(en.dlqEmpty)).toBeTruthy();
   });
 
   it('HEALTH FAILS: says unavailable rather than spinning, and does not claim degraded', async () => {

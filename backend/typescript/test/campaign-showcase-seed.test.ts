@@ -8,11 +8,20 @@
  *     budget optimizer ranks the two platforms);
  *   - it is toggle-gated (skips 'toggle-off' — never flips toggles), idempotent,
  *     and clears cleanly without touching user-authored data.
+ *
+ * Sabotage-witnessed (/grade-tests w30): the toggle gate, the already-seeded
+ * check, the fill-if-absent retrofit, the persona-stamp dedupe, the unstamp on
+ * clear, and the created-by filter on the campaign clear (a USER-authored brief
+ * + campaign must survive) each turn a case red.
+ * Ceiling: the perf-row clear is DOUBLE-GUARDED — `deleteCampaign` fires the
+ * `perf-records-by-campaign` delete hook, which prunes the same rows, so the
+ * seeder's own `deleteRecordsByCampaign` cannot be witnessed alone (probe
+ * w30g3-ss-perf-clear vacuous by design).
  */
 import http from 'node:http';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
-import { saveConfig } from '../src/host/featureToggles/service.js';
+import { getStoredConfig, saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { __hostExtStorage } from '../src/host/hostExtPersistence.js';
 import {
@@ -24,9 +33,9 @@ import {
 import { listBrands, updateBrand } from '../src/features/brand/brandService.js';
 import { scoreComplianceDeterministic } from '../src/features/brand/scoring.js';
 import { listPersonas } from '../src/features/campaign-brief/personaService.js';
-import { listBriefs, updateBrief, validateBrief } from '../src/features/campaign-brief/briefService.js';
+import { createBrief, listBriefs, setKernel, updateBrief, validateBrief } from '../src/features/campaign-brief/briefService.js';
 import { listBriefs as listCreativeBriefs } from '../src/features/creative-briefs/creativeBriefsService.js';
-import { listCampaigns } from '../src/features/campaign-orchestration/campaignService.js';
+import { finalizeFromBrief, listCampaigns } from '../src/features/campaign-orchestration/campaignService.js';
 import { listRecords, kpiSummary } from '../src/features/campaign-connectors/performanceService.js';
 import { listAssets, selectAssets, updateAsset } from '../src/features/media/mediaService.js';
 import { seedDemoPeople } from '../src/host/demoPeopleSeed.js';
@@ -70,6 +79,10 @@ describe('campaign showcase seeder', () => {
     expect(r.skipped).toBe('toggle-off');
     expect(r.created).toBe(0);
     expect(await countCampaignShowcase(TENANT)).toBe(0);
+    // It never flips the server-authoritative toggles to get its way.
+    for (const id of GATED_TOGGLES) {
+      if (getToggleDefault(id)) expect((await getStoredConfig(id))?.status, id).toBe('off');
+    }
   });
 
   it('seeds brand → personas → confirmed brief + kernel → campaign → performance, readable by the intel surfaces', async () => {
@@ -176,6 +189,11 @@ describe('campaign showcase seeder', () => {
     expect(again.skipped).toBe('already-seeded');
     expect(again.created).toBe(0);
     expect(again.retrofitted).toEqual({ compliancePolicy: 0, groundingPolicy: 0, competitors: 0, assetPersonaStamps: 0 });
+    // …and COUNTED: still exactly one of each seeded entity.
+    expect((await listCampaigns(TENANT)).filter((c) => c.createdBy === CAMPAIGN_SHOWCASE_SEED_ACTOR)).toHaveLength(1);
+    expect((await listBriefs(TENANT)).filter((b) => b.createdBy === CAMPAIGN_SHOWCASE_SEED_ACTOR)).toHaveLength(1);
+    expect((await listPersonas(TENANT)).filter((p) => p.createdBy === CAMPAIGN_SHOWCASE_SEED_ACTOR)).toHaveLength(2);
+    expect((await listBrands(TENANT)).filter((b) => b.createdBy === CAMPAIGN_SHOWCASE_SEED_ACTOR)).toHaveLength(1);
 
     // FU-CODE-3 — the already-seeded RETROFIT leg: strip the SEED-1/SEED-3
     // additions (the state of a tenant seeded before they shipped), then
@@ -215,10 +233,18 @@ describe('campaign showcase seeder', () => {
     // scrubs the stamped persona ids off the demo assets (no orphan refs to
     // deleted personas — the facet's other fields survive).
     expect(await countCampaignShowcase(TENANT)).toBeGreaterThan(0);
+    // User-authored data in the same tenant + org must survive the clear.
+    const userBrief = await createBrief(TENANT, campaign.orgId, 'user-1', {
+      name: 'My own launch', productName: 'Mine', channels: [{ type: 'landing_page', enabled: true, config: {} }],
+    });
+    await setKernel(TENANT, userBrief.id, brief.kernel!);
+    const userCampaign = await finalizeFromBrief(TENANT, userBrief, 'user-1');
     const cleared = await clearCampaignShowcase(TENANT, storage);
     expect(cleared.details).toMatchObject({ brand: 1, personas: 2, briefs: 1, campaigns: 1, performanceRows: 28, creativeBriefs: 1, assetPersonaUnstamps: expectedStamps });
     expect(await countCampaignShowcase(TENANT)).toBe(0);
     expect(await listRecords(TENANT, campaign.orgId, campaign.id)).toHaveLength(0);
+    expect((await listBriefs(TENANT)).map((b) => b.id)).toContain(userBrief.id);
+    expect((await listCampaigns(TENANT)).map((c) => c.id)).toContain(userCampaign.id);
     const deletedIds = new Set([homePersona.id, officePersona.id]);
     for (const a of await listAssets(TENANT, orgId)) {
       expect(a.marketing?.personaIds?.some((id) => deletedIds.has(id)) ?? false).toBe(false);

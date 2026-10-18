@@ -4,6 +4,11 @@
  * capability is pinned as genuinely absent. When Phase 6 teaches a generator a
  * new capability, the matching claim flips here IN THE SAME CHANGE — a manifest
  * that leads (or trails) implementation fails this suite.
+ *
+ * Sabotage witnesses (grade-tests w36): flipping a target's themeColors /
+ * responsive claim, dropping expandBindings from generate(), blanking one
+ * target's navigateTo mapping, claiming an actionKind, and changing the
+ * source-address grammar — each reds the matching case.
  */
 import { describe, it, expect } from 'vitest';
 import { generate, EXPORT_TARGETS, type AppModel } from '../export/generators.js';
@@ -34,6 +39,19 @@ const app = (extra: Record<string, unknown> = {}): AppModel =>
 const allSource = (target: (typeof EXPORT_TARGETS)[number], extra: Record<string, unknown> = {}): string =>
   generate(target, app(extra)).files.map((f) => f.content).join('\n');
 
+/** The same app with the button's navigateTo removed — every generator lists
+ *  every screen in its shell, so the bare presence of 'next' proves nothing;
+ *  the navigateTo claim is the EXTRA occurrences it adds. */
+const withoutNavigate = (target: (typeof EXPORT_TARGETS)[number]): string => {
+  const base = app();
+  const screens = base.screens.map((s) => ({
+    ...s,
+    components: (s.components ?? []).map((c) => (c.type === 'button' ? { ...c, props: { label: 'Go' } } : c)),
+  }));
+  return generate(target, { ...base, screens }).files.map((f) => f.content).join('\n');
+};
+const occurrences = (src: string, needle: string): number => src.split(needle).length - 1;
+
 describe('every export target has a manifest, and vice versa', () => {
   it('manifest keys === EXPORT_TARGETS', () => {
     expect(Object.keys(GENERATOR_CAPABILITIES).sort()).toEqual([...EXPORT_TARGETS].sort());
@@ -47,7 +65,7 @@ describe.each(EXPORT_TARGETS.map((t) => [t] as const))('manifest honesty — %s'
 
   it('navigateToProp: the target screen id reaches the generated source', () => {
     expect(m.navigateToProp).toBe(true);
-    expect(src).toContain('next');
+    expect(occurrences(src, 'next')).toBeGreaterThan(occurrences(withoutNavigate(target), 'next'));
   });
   it('sampleDataUnroll: bound sample rows are interpolated into output', () => {
     expect(m.sampleDataUnroll).toBe(true);

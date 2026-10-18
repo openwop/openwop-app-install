@@ -9,40 +9,74 @@
  *
  * UPU-2: the page hosting these cards also hosts the isolation self-test — the surface an
  * operator would use to decide whether the sandbox works. A host-side throw in a plugin
- * card must not take that with it.
+ * card must not take that with it. Witnessed by rendering the REAL `UiPluginsPage` with a
+ * plugin card that throws: drop the page's card-scoped `ErrorBoundary` and the throw
+ * escapes `render()` (no source-text reading, no re-test of `ErrorBoundary` itself).
  */
-import { render, screen, cleanup, waitFor } from '@testing-library/react';
-import { readFileSync } from 'node:fs';
-import { join, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
-
-const here = dirname(fileURLToPath(import.meta.url));
+import { render, screen, cleanup, waitFor, act } from '@testing-library/react';
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
+import type { ServedPlugin } from '../pluginClient.js';
+import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
 
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (k: string) => k }) }));
 
-import { PluginFrame } from '../PluginFrame.js';
-import { ErrorBoundary } from '../../../ui/ErrorBoundary.js';
-
-const plugin = {
+const plugin: ServedPlugin = {
+  packName: 'community.openwop.demo',
+  packVersion: '1.0.0',
   pluginId: 'demo.plugin',
+  surface: 'artifact-viewer',
   tier: 'community',
-  entry: 'entry.mjs',
   hostApi: [],
-} as never;
+  entryPath: '/host/openwop-app/ui-plugin/packs/community.openwop.demo/plugins/demo.plugin/entry',
+  framePath: '/host/ui-plugins/community.openwop.demo/demo.plugin/frame',
+  rpcPath: '/host/ui-plugins/community.openwop.demo/demo.plugin/rpc',
+};
 
-afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks(); });
-beforeEach(() => { vi.useFakeTimers({ shouldAdvanceTime: true }); });
+/** UPU-2 only: the plugin card throws on render. Off for UPU-1, which mounts the real PluginFrame. */
+const card = vi.hoisted(() => ({ boom: false }));
+vi.mock('../PluginFrame.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../PluginFrame.js')>();
+  const PluginFrame: typeof actual.PluginFrame = (props) => {
+    if (card.boom) throw new Error('host-side render throw');
+    return actual.PluginFrame(props);
+  };
+  return { ...actual, PluginFrame };
+});
+vi.mock('../pluginClient.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../pluginClient.js')>();
+  return {
+    ...actual,
+    listPlugins: async () => ({ isolation: 'cross-origin-iframe', plugins: [plugin] }),
+    ensureDemoArtifact: async () => ({ artifactId: 'a1', version: '1' }),
+  };
+});
+vi.mock('../../../featureToggles/FeatureAccessContext.js', () => ({ useFeatureAccess: () => makeFeatureAccess({ enabled: true }) }));
+
+import { PluginFrame } from '../PluginFrame.js';
+import { config } from '../../../client/config.js';
+import { UiPluginsPage } from '../UiPluginsPage.js';
+
+afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
+beforeEach(() => { card.boom = false; vi.useFakeTimers({ shouldAdvanceTime: true }); });
 
 describe('UPU-1 — the entry fetch is bounded', () => {
   it('a fetch that never settles becomes a TIMED-OUT error, not an eternal spinner', async () => {
     // A fetch that resolves only when aborted — the hung-host shape.
-    vi.stubGlobal('fetch', (_u: string, init?: { signal?: AbortSignal }) => new Promise((_res, rej) => {
+    const urls: string[] = [];
+    vi.stubGlobal('fetch', (u: string, init?: { signal?: AbortSignal }) => new Promise((_res, rej) => {
+      urls.push(u);
       init?.signal?.addEventListener('abort', () => rej(new DOMException('aborted', 'AbortError')));
     }));
     render(<PluginFrame plugin={plugin} artifactId="a1" title="t" loadingLabel="loading" errorLabel="failed" />);
+    // The literal host frame document, NOT `frameUrl(plugin)`: that is the function
+    // under test, so comparing against it moved with any sabotage of it (w33 pb-frameurl).
+    expect(urls).toEqual([`${config.baseUrl}${plugin.framePath}`]);
+    // Just short of the 15 s bound: still loading, no error yet.
+    await act(() => vi.advanceTimersByTimeAsync(14_000));
     expect(screen.queryByRole('alert'), 'still loading before the bound elapses').toBeNull();
-    vi.advanceTimersByTime(16_000);
+    expect(screen.getByRole('status').textContent).toBe('loading');
+    // Past the bound: the load fails, and says it timed out.
+    await act(() => vi.advanceTimersByTimeAsync(2_000));
     await waitFor(() => { expect(screen.queryByRole('alert')).not.toBeNull(); });
     expect(screen.getByRole('alert').textContent, 'a timeout must say so, not masquerade as a network error')
       .toMatch(/timed out/i);
@@ -59,32 +93,14 @@ describe('UPU-1 — the entry fetch is bounded', () => {
 });
 
 describe('UPU-2 — a plugin card fails alone', () => {
-  /**
-   * WIRING, not mechanism. The leg below proves `ErrorBoundary` catches — which it always
-   * did; that is not what was broken. What was missing is the PAGE putting one around the
-   * plugin hosts, and a component-level test passes identically before and after that
-   * change (it did, on the first cut of this file). So the wiring gets its own assertion.
-   */
-  it('the page wraps the plugin hosts in a card-scoped boundary keyed on the plugin', () => {
-    const page = readFileSync(join(here, '..', 'UiPluginsPage.tsx'), 'utf8');
-    const block = page.slice(page.indexOf("viewer.tier === 'trusted'") - 600);
-    expect(block, 'without this the whole page — incl. the isolation self-test — is replaced')
-      .toContain('<ErrorBoundary');
-    expect(block).toContain('resetKey={viewer.pluginId}');
-    // and the boundary must be OUTSIDE both hosts, not around one branch only
-    expect(block.indexOf('<ErrorBoundary')).toBeLessThan(block.indexOf('<TrustedPluginHost'));
-    expect(block.indexOf('<ErrorBoundary')).toBeLessThan(block.indexOf('<PluginFrame'));
-  });
-
-  it('a host-side throw is caught by a card-scoped boundary, leaving its siblings mounted', () => {
-    const Boom = (): JSX.Element => { throw new Error('host-side render throw'); };
+  it('a throwing plugin card leaves the page — incl. the isolation self-test — mounted', async () => {
+    card.boom = true;
     vi.spyOn(console, 'error').mockImplementation(() => {});
-    render(
-      <div>
-        <p>isolation self-test</p>
-        <ErrorBoundary resetKey="demo.plugin" label="ui-plugin viewer demo.plugin"><Boom /></ErrorBoundary>
-      </div>,
-    );
-    expect(screen.queryByText('isolation self-test'), 'the page survives the card').not.toBeNull();
+    render(<UiPluginsPage />);
+    // The card's own boundary fallback names the plugin and carries the throw...
+    expect(await screen.findByText('host-side render throw')).toBeTruthy();
+    // ...while the self-test the operator judges the sandbox with is still there.
+    expect(screen.getByText('selfTestTitle')).toBeTruthy();
+    expect(screen.getByText('installedLabel')).toBeTruthy();
   });
 });

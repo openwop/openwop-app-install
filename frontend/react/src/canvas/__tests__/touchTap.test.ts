@@ -54,6 +54,12 @@ describe('touchTap', () => {
       ['move', 1, 100 + TAP_SLOP_PX + 1, 100, 5], // finger 1 dragged past slop
       ['up', 2, 300, 100, 20], ['up', 1, 120, 100, 22],
     ])).toBe(0);
+    // The slop is a DISTANCE from the finger's own down — a purely vertical drag disqualifies too.
+    expect(gesture([
+      ['down', 1, 100, 100, 0], ['down', 2, 300, 100, 3],
+      ['move', 2, 300, 100 + TAP_SLOP_PX + 1, 5],
+      ['up', 2, 300, 113, 20], ['up', 1, 100, 100, 22],
+    ])).toBe(0);
   });
 
   it('sub-slop wobble does NOT disqualify', () => {

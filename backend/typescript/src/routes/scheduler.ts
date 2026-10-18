@@ -66,6 +66,7 @@ import { scheduledJobReadable } from '../host/scheduledJobReadGates.js';
 import { keyDeclarationPermits } from '../host/protocolAuthorization.js';
 import { callerHoldsTenantScope, callerSubjectSpellings, requireTenantWrite } from '../features/featureRoute.js';
 import { resolveCallerUser } from '../features/users/usersGuards.js';
+import { CALLER_LINKAGE_KEYS } from '../host/runLinkage.js';
 
 interface Deps {
   storage: Storage;
@@ -87,7 +88,12 @@ function tenantOf(req: Request): string {
  */
 // `disabledReason` — ADR 0815 D4: the member-removed pause marker is server-owned,
 // so a client cannot clear it and then re-enable the job as the ex-member.
-const RESERVED_JOB_METADATA_KEYS = new Set(['actingUserId', 'heartbeat', 'schedule', 'kanban', 'approval', 'assistantLoop', 'disabledReason']);
+// ADR 0879 D7 — `orgScopeSubject` (the human a feature-created job fires for, e.g. a
+// scheduled chat's creator) is host-written and becomes the run's narrowing subject.
+// ADR 0902 D2 (architect A1) — plus the task-deck parent linkage: a job's metadata
+// rides onto every run it fires (`scheduleDaemon.ts`), so a caller-set linkage
+// would plant a card in another member's deck on each fire.
+const RESERVED_JOB_METADATA_KEYS = new Set<string>(['actingUserId', 'heartbeat', 'schedule', 'kanban', 'approval', 'assistantLoop', 'disabledReason', 'orgScopeSubject', 'personalTenant', ...CALLER_LINKAGE_KEYS]);
 
 function clientMetadata(raw: Record<string, unknown>): Record<string, unknown> {
   return Object.fromEntries(Object.entries(raw).filter(([k]) => !RESERVED_JOB_METADATA_KEYS.has(k)));

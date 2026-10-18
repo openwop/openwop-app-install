@@ -6,12 +6,16 @@
  * The public-read GATE over that entity (toggle + publicRead + status) is
  * covered by `entities-public-read.test.ts`; here we assert the record itself
  * via `getSystemEntity` (toggle-independent), keyed by the stable creatorSubject.
+ *
+ * (The subject is `kicktodo-community`'s creator profile; the file keeps its
+ * historical name.) The P4 case is the PII pin: adding the creator subject to the
+ * projected values reds it (w41 probe pk-pii).
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { resolveApproval } from '../src/host/approvalService.js';
-import { upsertProfile, submitProfile, applyProfileDecision, reconcileCreatorProfileProjections, publicProfileByHandle } from '../src/features/kicktodo-community/communityService.js';
+import { upsertProfile, submitProfile, applyProfileDecision, reconcileCreatorProfileProjections, publicProfileByHandle, ProfileInvalidError } from '../src/features/kicktodo-community/communityService.js';
 import { CREATOR_PROFILE_TYPE } from '../src/features/kicktodo-community/creatorProfileProjection.js';
 import { getSystemEntity, deleteSystemEntity } from '../src/features/entities/entitiesService.js';
 
@@ -23,7 +27,7 @@ const projection = () => getSystemEntity(T, CREATOR_PROFILE_TYPE, CREATOR);
 
 async function approve(): Promise<void> {
   const pending = await submitProfile(T, CREATOR);
-  await resolveApproval(pending.approvalId!, { status: 'approved' });
+  await resolveApproval(pending.approvalId ?? '', { status: 'approved' });
   await applyProfileDecision(T, CREATOR, MOD, true);
 }
 
@@ -39,7 +43,8 @@ describe('creator profile → kernel projection (ADR 0453 P1)', () => {
     await approve();
     const rec = await projection();
     expect(rec).not.toBeNull();
-    expect(rec?.status).not.toBe('draft'); // live ⇒ public-read-eligible
+    // LIVE is stored as an ABSENT status (EntityRecord.status is only ever 'draft').
+    expect(rec?.status).toBeUndefined(); // live ⇒ public-read-eligible
     expect(rec?.values.handle).toBe('nova-codes');
     expect(rec?.values.display_name).toBe('Nova');
     expect(rec?.values.bio).toBe('I build challenges');
@@ -62,7 +67,7 @@ describe('creator profile → kernel projection (ADR 0453 P1)', () => {
   it('a rejected decision leaves no projection', async () => {
     await upsertProfile(T, CREATOR, { handle: 'nova-codes', displayName: 'Nova', bio: 'b', links: [] });
     const pending = await submitProfile(T, CREATOR);
-    await resolveApproval(pending.approvalId!, { status: 'rejected' });
+    await resolveApproval(pending.approvalId ?? '', { status: 'rejected' });
     await applyProfileDecision(T, CREATOR, MOD, false);
     expect(await projection()).toBeNull();
   });
@@ -108,17 +113,16 @@ describe('creator profile → kernel projection (ADR 0453 P1)', () => {
     await upsertProfile(T, CREATOR, { handle: 'nova-codes', displayName: 'Nova', bio: 'public bio', links: ['https://x.test'] });
     await approve();
     const rec = await projection();
-    expect(rec).not.toBeNull();
-    expect(Object.keys(rec!.values).sort()).toEqual(['bio', 'display_name', 'handle']); // exactly the public scalars
-    expect(JSON.stringify(rec!.values)).not.toContain(CREATOR); // the opaque subject is never in the body
-    expect(rec!.values.handle).toBe('nova-codes'); // the PUBLIC identity is the handle
+    expect(Object.keys(rec?.values ?? {}).sort()).toEqual(['bio', 'display_name', 'handle']); // exactly the public scalars
+    expect(JSON.stringify(rec?.values)).not.toContain(CREATOR); // the opaque subject is never in the body
+    expect(rec?.values.handle).toBe('nova-codes'); // the PUBLIC identity is the handle
   });
 
   it('ADR 0453 P2 — an invalid overlay locale is rejected', async () => {
     await expect(upsertProfile(T, CREATOR, {
       handle: 'nova-codes', displayName: 'Nova', bio: 'b', links: [],
       localizations: { 'not a locale!': { bio: 'x' } },
-    })).rejects.toThrow();
+    })).rejects.toThrow(new ProfileInvalidError('Invalid overlay locale `not a locale!`.'));
   });
 
   it('ADR 0453 P3 — reconcile re-derives a missing projection for an approved profile (backfill / DATA-LEV-3 heal)', async () => {
@@ -133,7 +137,7 @@ describe('creator profile → kernel projection (ADR 0453 P1)', () => {
 
     // The reconcile sweep re-derives it from the write-model (idempotent).
     const n = await reconcileCreatorProfileProjections();
-    expect(n).toBeGreaterThanOrEqual(1);
+    expect(n).toBe(1); // fresh storage per case ⇒ exactly this one profile
     expect((await projection())?.values.display_name).toBe('Nova');
   });
 });

@@ -14,10 +14,14 @@
  * @see docs/adr/0138-live-voice-mode.md
  */
 import { randomUUID } from 'node:crypto';
-import { AiProviderError, createAiProvidersAdapter } from '../../aiProviders/aiProvidersHost.js';
+import { AiProviderError, CREDENTIAL_PROVIDERS, createAiProvidersAdapter } from '../../aiProviders/aiProvidersHost.js';
+import { explicitRefNamesOtherProvider } from '../../aiProviders/credentialRefLadder.js';
+import { resolveSecret } from '../../byok/secretResolver.js';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
 import { OpenwopError } from '../../types.js';
-import { tenantOf, requireFeatureEnabled, optionalString } from '../featureRoute.js';
+import { tenantOf, optionalString } from '../featureRoute.js';
+import { callerSubject } from '../../host/requestSubject.js';
+import { requireVoiceTurn } from './voiceAuthority.js';
 import { appendStreamChunk, closeSessionBuffers, closeStreamBuffer, openStreamBuffer, wireStreamAudioResolver } from './voiceBuffers.js';
 import { advanceVoiceSession, closeVoiceSession, createVoiceSession, getOpenVoiceSession, resolveAgentVoice } from './voiceSession.js';
 import { getRealtimeConfig, walkieProviderCredential } from './realtime/config.js';
@@ -27,6 +31,21 @@ import { sendError } from '../../middleware/errorEnvelope.js';
 const BASE = '/host/openwop-app/voice/session';
 /** Host default voice when an agent has no `agentProfile.configParameters.voice.voiceId` (P3). */
 const DEFAULT_VOICE_ID = 'default';
+
+/**
+ * ADR 0893 D6 — the adapter's `secrets` view for ONE server-chosen
+ * `{provider, credentialRef}` pair. The walkie adapter used to be built with
+ * `secrets: {}`, and `resolveCredential` reads only that view, so the ADR 0322 BYOK
+ * key never resolved (STT/TTS on the tenant key was dead). The ref is resolved here,
+ * tenant-scoped, and only when it is not named for another vendor (ADR 0779 D6 —
+ * a mis-paired key is never even read). Mirrors `conversationToolLoop.ts`.
+ */
+async function secretsFor(tenantId: string, provider: string | undefined, credentialRef: string | undefined): Promise<Record<string, string>> {
+  if (!provider || !credentialRef) return {};
+  if (explicitRefNamesOtherProvider(provider, credentialRef, CREDENTIAL_PROVIDERS) !== null) return {};
+  const value = await resolveSecret(credentialRef, { tenantId });
+  return value ? { [credentialRef]: value } : {};
+}
 
 export function registerVoiceRoutes(deps: RouteDeps): void {
   const { app } = deps;
@@ -39,7 +58,7 @@ export function registerVoiceRoutes(deps: RouteDeps): void {
   // always-on `realtimeVoice` advertisement — ADR 0138 finding #3).
   app.post(BASE, async (req, res, next) => {
     try {
-      await requireFeatureEnabled(req, 'voice', 'Voice mode');
+      await requireVoiceTurn(req); // ADR 0893 D1
       const tenantId = tenantOf(req);
       const body = (req.body ?? {}) as { conversationId?: unknown; agentId?: unknown; mimeType?: unknown };
       const sessionId = randomUUID();
@@ -48,6 +67,7 @@ export function registerVoiceRoutes(deps: RouteDeps): void {
         sessionId,
         ...(optionalString(body.conversationId) ? { conversationId: optionalString(body.conversationId) } : {}),
         ...(optionalString(body.agentId) ? { agentId: optionalString(body.agentId) } : {}),
+        ...(callerSubject(req) ? { subject: callerSubject(req) } : {}), // ADR 0893 M5
         streamRef,
       });
       res.status(201).json({ session, transport: { kind: 'http-chunked', appendPath: `${BASE}/${session.sessionId}/audio`, commitPath: `${BASE}/${session.sessionId}/commit` } });
@@ -57,9 +77,9 @@ export function registerVoiceRoutes(deps: RouteDeps): void {
   // Append one base64 audio chunk to the current utterance (tenant + budget guarded).
   app.post(`${BASE}/:sessionId/audio`, async (req, res, next) => {
     try {
-      await requireFeatureEnabled(req, 'voice', 'Voice mode');
+      await requireVoiceTurn(req); // ADR 0893 D1
       const tenantId = tenantOf(req);
-      const session = await getOpenVoiceSession(tenantId, req.params.sessionId);
+      const session = await getOpenVoiceSession(tenantId, req.params.sessionId, callerSubject(req));
       const bytes = appendStreamChunk(session.streamRef, tenantId, (req.body as { audioChunk?: unknown })?.audioChunk);
       res.status(202).json({ streamRef: session.streamRef, bytes });
     } catch (err) { next(err); }
@@ -70,19 +90,20 @@ export function registerVoiceRoutes(deps: RouteDeps): void {
   // rotate the session to a fresh utterance handle so the full-duplex loop continues.
   app.post(`${BASE}/:sessionId/commit`, async (req, res, next) => {
     try {
-      await requireFeatureEnabled(req, 'voice', 'Voice mode');
+      await requireVoiceTurn(req); // ADR 0893 D1
       const tenantId = tenantOf(req);
-      const session = await getOpenVoiceSession(tenantId, req.params.sessionId);
+      const session = await getOpenVoiceSession(tenantId, req.params.sessionId, callerSubject(req));
       if (!deps.hostSuite) throw new OpenwopError('host_capability_missing', 'aiProviders adapter not wired.', 503, {});
 
       const events: Array<{ type: string; payload: unknown }> = [];
       let seq = 0;
+      const sttPair = walkieProviderCredential(await getRealtimeConfig(tenantId));
       const adapter = createAiProvidersAdapter({
         runId: `voice:${session.sessionId}`,
         nodeId: 'voice.turn',
         tenantId,
         attempt: 1,
-        secrets: {},
+        secrets: await secretsFor(tenantId, sttPair?.provider, sttPair?.credentialRef), // ADR 0893 D6
         policyResolver: deps.hostSuite.providerPolicyResolver,
         emit: async (type, payload) => { seq += 1; events.push({ type, payload }); return { eventId: `voice-evt-${seq}`, sequence: seq }; },
       });
@@ -92,13 +113,20 @@ export function registerVoiceRoutes(deps: RouteDeps): void {
       // transcribe on the tenant's OWN realtime-voice credential (the Gemini/OpenAI
       // key they already configured). Absent → callTranscriber falls to the managed
       // path and honestly reports `transcription_unsupported`.
-      const sttCred = walkieProviderCredential(await getRealtimeConfig(tenantId));
+      // ADR 0893 D6 (architect H4) — the managed STT path is Gemini-shaped (it defaults to
+      // a Gemini model id) and this host's catalog names no OpenAI audio-input model, so
+      // an OpenAI realtime key cannot transcribe here. Say so, instead of sending a
+      // Gemini model id to OpenAI and answering a 502 (`VOX2-F2`).
+      if (sttPair && sttPair.provider !== 'google' && process.env.OPENWOP_VOICE_MOCK !== 'true') {
+        sendError(res, 400, 'transcription_unsupported', `Walkie transcription is not wired for the ${sttPair.provider} realtime key on this host. Use real-time voice, or set a Gemini key for the realtime voice provider.`, { provider: sttPair.provider });
+        return;
+      }
       let result;
       try {
         result = await adapter.callTranscriber({
           audio: { streamRef: session.streamRef },
           ...(optionalString(body.languageCode) ? { languageCode: optionalString(body.languageCode) } : {}),
-          ...(sttCred ? { provider: sttCred.provider, credentialRef: sttCred.credentialRef } : {}),
+          ...(sttPair ? { provider: sttPair.provider, credentialRef: sttPair.credentialRef } : {}),
         });
       } catch (err) {
         if (err instanceof AiProviderError) {
@@ -125,11 +153,13 @@ export function registerVoiceRoutes(deps: RouteDeps): void {
   // The reply is barge-in-cancellable (§F).
   app.post(`${BASE}/:sessionId/speak`, async (req, res, next) => {
     try {
-      await requireFeatureEnabled(req, 'voice', 'Voice mode');
+      await requireVoiceTurn(req); // ADR 0893 D1
       const tenantId = tenantOf(req);
-      const session = await getOpenVoiceSession(tenantId, req.params.sessionId);
+      const session = await getOpenVoiceSession(tenantId, req.params.sessionId, callerSubject(req));
       if (!deps.hostSuite) throw new OpenwopError('host_capability_missing', 'aiProviders adapter not wired.', 503, {});
-      const body = (req.body ?? {}) as { text?: unknown; voiceId?: unknown; provider?: unknown; credentialRef?: unknown; agentId?: unknown };
+      // ADR 0893 D6 — `provider` / `credentialRef` are NOT read from the body (the FE never
+      // sent them): a caller-named ref would point any vault secret at a TTS vendor.
+      const body = (req.body ?? {}) as { text?: unknown; voiceId?: unknown; agentId?: unknown };
       const text = (req.body as { text?: unknown })?.text;
       if (typeof text !== 'string' || text.trim().length === 0) {
         throw new OpenwopError('validation_error', '`text` (the reply to speak) is required.', 400, { field: 'text' });
@@ -152,10 +182,16 @@ export function registerVoiceRoutes(deps: RouteDeps): void {
       // so a non-Google default voiceId is safe. Absent → honest speech_synthesis_unsupported.
       const ttsCred = walkieProviderCredential(await getRealtimeConfig(tenantId));
       // W1: a non-managed provider (ElevenLabs/OpenAI/Google) needs a BYOK credentialRef, or
-      // callSpeechSynthesizer fails honestly with `speech_synthesis_unsupported`. Resolved
-      // tenant-scoped (secretResolver) — a client can only reference its own tenant's secrets.
-      const provider = (agentAuthoritative ? agentVoice?.provider : optionalString(body.provider)) ?? ttsCred?.provider;
-      const credentialRef = (agentAuthoritative ? agentVoice?.credentialRef : optionalString(body.credentialRef)) ?? ttsCred?.credentialRef;
+      // callSpeechSynthesizer fails honestly with `speech_synthesis_unsupported`.
+      // ADR 0893 D6 (architect H3) — provider and ref are ONE pair: the agent's own when it
+      // names a provider, else the tenant realtime pair. Never a mix: an agent voice of
+      // `{provider:'elevenlabs'}` with no ref must not be paired with the tenant's
+      // Gemini/OpenAI key, which would then be sent to ElevenLabs.
+      const pair = agentAuthoritative && agentVoice?.provider
+        ? { provider: agentVoice.provider, credentialRef: agentVoice.credentialRef }
+        : { provider: ttsCred?.provider, credentialRef: ttsCred?.credentialRef };
+      const provider = pair.provider;
+      const credentialRef = pair.credentialRef;
       // Voice mocks key on their own flag, NOT the conformance-seam flag prod keeps on
       // (else prod TTS is silently mocked — see geminiLive.ts header / ADR 0141 correction).
       const useMock = process.env.OPENWOP_VOICE_MOCK === 'true';
@@ -169,7 +205,7 @@ export function registerVoiceRoutes(deps: RouteDeps): void {
         nodeId: 'voice.speak',
         tenantId,
         attempt: 1,
-        secrets: {},
+        secrets: useMock ? {} : await secretsFor(tenantId, provider, credentialRef), // ADR 0893 D6
         policyResolver: deps.hostSuite.providerPolicyResolver,
         emit: async (type, payload) => { seq += 1; events.push({ type, payload }); return { eventId: `voice-evt-${seq}`, sequence: seq }; },
       });
@@ -218,9 +254,9 @@ export function registerVoiceRoutes(deps: RouteDeps): void {
   // scoped to the product session.
   app.post(`${BASE}/:sessionId/barge-in`, async (req, res, next) => {
     try {
-      await requireFeatureEnabled(req, 'voice', 'Voice mode');
+      await requireVoiceTurn(req); // ADR 0893 D1
       const tenantId = tenantOf(req);
-      const session = await getOpenVoiceSession(tenantId, req.params.sessionId);
+      const session = await getOpenVoiceSession(tenantId, req.params.sessionId, callerSubject(req));
       const cancelledTurn = cancelSpeak(session.sessionId);
       const atMs = typeof (req.body as { atMs?: unknown })?.atMs === 'number' ? (req.body as { atMs: number }).atMs : 0;
       const events = [
@@ -234,11 +270,17 @@ export function registerVoiceRoutes(deps: RouteDeps): void {
   // End the session: GC its buffers + the session record.
   app.delete(`${BASE}/:sessionId`, async (req, res, next) => {
     try {
-      await requireFeatureEnabled(req, 'voice', 'Voice mode');
+      await requireVoiceTurn(req); // ADR 0893 D1
       const tenantId = tenantOf(req);
-      closeSessionBuffers(req.params.sessionId);
-      dropSpeak(req.params.sessionId);
-      await closeVoiceSession(tenantId, req.params.sessionId);
+      // ADR 0893 D7 — tenant- and opener-bound: only the caller's OWN session is ended.
+      // A miss is an idempotent 204 that touches nothing (it used to drop buffers and the
+      // barge-in turn by raw id, before any tenant check).
+      const session = await getOpenVoiceSession(tenantId, req.params.sessionId, callerSubject(req)).catch(() => null);
+      if (session) {
+        closeSessionBuffers(session.sessionId);
+        dropSpeak(session.sessionId);
+        await closeVoiceSession(tenantId, session.sessionId);
+      }
       res.status(204).end();
     } catch (err) { next(err); }
   });

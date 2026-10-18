@@ -17,14 +17,14 @@
 
 import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { createBoard, createCard, deleteCard, getBoard, getCard, updateCardFields } from '../../host/kanbanService.js';
-import { armContinuation, createGoal, transitionGoal } from '../goals/goalsService.js';
-import { registerJob, setJobEnabled } from '../../host/schedulingService.js';
+import { armContinuation, continuationJobId, createGoal, transitionGoal } from '../goals/goalsService.js';
+import { deleteJob, registerJob, setJobEnabled } from '../../host/schedulingService.js';
 import { getNotificationEmitter } from '../../notifications/emitter.js';
 import { isNotificationMuted } from '../../host/notificationPolicy.js';
 import { emitKicktodoLifecycle } from './lifecycleEvents.js';
 import { createLogger } from '../../observability/logger.js';
 import { getChallenge } from './challengeService.js';
-import { fireEnrollmentDeleted } from './enrollmentLifecycle.js';
+import { fireEnrollmentAbandoned, fireEnrollmentDeleted } from './enrollmentLifecycle.js';
 import { ensureKickBot, KICKBOT_AGENT_ID } from './kickbotService.js';
 import {
   dueDaysOn,
@@ -59,7 +59,24 @@ const enrollments = new DurableCollection<ChallengeEnrollment>(
 /** Keyed `${tenant}::${enrollmentId}::${localDate}::${stableActivityId}::r${rev}`
  *  — Today's read is a bounded per-enrollment/day prefix scan; the row also
  *  point-resolves by its deterministic `cardId` via a second index-free get
- *  (cardId embeds the same tuple). */
+ *  (cardId embeds the same tuple).
+ *
+ *  KTENR-3 (KickTodo wave 4C) — GROWTH CEILING, recorded instead of a purge. These
+ *  rows are never aged out on purpose: a terminal occurrence is the participant's
+ *  completion history (its card + evidence hang off it), and they are erased with
+ *  the enrollment on DSAR (`deleteEnrollmentRow`). What bounds them, per
+ *  enrollment, is the key itself — at most ONE row per (date, activity, revision):
+ *    rows ≤ A + R·D + M
+ *  where A = the pinned version's activity count (`validate` caps it at 500, and
+ *  each materializes only on its own due date, `materializeOccurrences`), R = the
+ *  number of plan revisions applied (`applyPlanRevision`; each re-materializes only
+ *  TODAY, so it adds at most D = the activities due on one date), and M = collapsed
+ *  recovery occurrences (one per `recovery::<firstMissedDate>`, so at most one per
+ *  challenge day; `durationDays` ≤ 366). A 366-day, 500-activity challenge with no
+ *  replans is ≤ 866 rows; each replan adds at most that day's due count. R is the
+ *  only unbounded term, and it is human-paced (a participant or coach action per
+ *  revision). If R ever becomes machine-driven, bound it there — a purge here would
+ *  delete completion history. */
 const occurrences = new DurableCollection<KickTodoActionOccurrence>(
   'kicktodo-occurrences',
   (o) => `${o.tenantId}::${o.enrollmentId}::${o.occurrenceDateLocal}::${o.stableActivityId}::r${o.planRevision}`,
@@ -93,6 +110,15 @@ export class SubstitutionDeniedError extends Error {
   constructor(public readonly reason: 'occurrence-not-found' | 'superseded' | 'not-owner' | 'unknown-alternative' | 'evidence-policy-mismatch') {
     super('That substitution is not available.'); // uniform message — no existence leak
   }
+}
+
+/** KTC-10 — the create-CAS lost, yet no winning row exists (it was removed
+ *  between the CAS and the re-read — an erasure or a concurrent delete). There
+ *  is no enrollment to converge onto and this attempt's goal is already
+ *  abandoned, so the caller retries rather than being handed a row that was
+ *  never stored. */
+export class EnrollConflictError extends Error {
+  constructor() { super('The enrollment changed while it was being created — retry.'); }
 }
 
 export class ChallengeNotEnrollableError extends Error {
@@ -242,6 +268,10 @@ export async function enroll(input: EnrollInput): Promise<{ enrollment: Challeng
       await materializeOccurrences(input.tenantId, id);
       return { enrollment: winner, challenge };
     }
+    // KTC-10 — lost with NO winner. Falling through (the old shape) materialized
+    // occurrences for a row that does not exist, armed a continuation on the goal
+    // abandoned two lines up, and returned an enrollment that was never stored.
+    throw new EnrollConflictError();
   }
   await materializeOccurrences(input.tenantId, id);
 
@@ -641,6 +671,29 @@ export async function setDayOverride(
   return await getEnrollment(tenantId, enrollId);
 }
 
+/** KT-REPLAN-HALFAPPLY-1 — every refusal `substituteOccurrence` can raise, as a
+ *  READ-ONLY check, shared verbatim by the apply lane and the replan pre-flight
+ *  (one guard path, so the pre-flight can never pass what apply refuses — the
+ *  `assertDayMoveAllowed` pattern). Throws `SubstitutionDeniedError`. */
+export async function assertSubstitutionAllowed(
+  tenantId: string,
+  actingSubject: string,
+  cardId: string,
+  alternativeId: string,
+): Promise<{ occ: KickTodoActionOccurrence; enrollment: ChallengeEnrollment; activity: ChallengeActivity; alt: NonNullable<ChallengeActivity['alternatives']>[number] }> {
+  const occ = await occurrenceByCard(tenantId, cardId);
+  if (!occ) throw new SubstitutionDeniedError('occurrence-not-found');
+  if (occ.supersededByRevision !== undefined) throw new SubstitutionDeniedError('superseded');
+  const e = await getEnrollment(tenantId, occ.enrollmentId);
+  if (!e || e.ownerSubject !== actingSubject) throw new SubstitutionDeniedError('not-owner');
+  const challenge = await getChallenge(tenantId, e.challengeId, e.challengeVersion);
+  const activity: ChallengeActivity | undefined = challenge?.activities.find((a) => a.stableActivityId === occ.stableActivityId);
+  const alt = activity?.alternatives?.find((x) => x.stableActivityId === alternativeId);
+  if (!activity || !alt) throw new SubstitutionDeniedError('unknown-alternative');
+  if (alt.evidencePolicy !== activity.evidencePolicy) throw new SubstitutionDeniedError('evidence-policy-mismatch');
+  return { occ, enrollment: e, activity, alt };
+}
+
 /** ADR 0429 P1 — apply a publisher-declared substitution to a LIVE occurrence.
  *  The occurrence key and cardId are unchanged (they embed the PARENT activity
  *  id), so the card, any later check-in, and the frozen evidence snapshot all
@@ -653,16 +706,7 @@ export async function substituteOccurrence(
   cardId: string,
   alternativeId: string,
 ): Promise<KickTodoActionOccurrence> {
-  const occ = await occurrenceByCard(tenantId, cardId);
-  if (!occ) throw new SubstitutionDeniedError('occurrence-not-found');
-  if (occ.supersededByRevision !== undefined) throw new SubstitutionDeniedError('superseded');
-  const e = await getEnrollment(tenantId, occ.enrollmentId);
-  if (!e || e.ownerSubject !== actingSubject) throw new SubstitutionDeniedError('not-owner');
-  const challenge = await getChallenge(tenantId, e.challengeId, e.challengeVersion);
-  const activity: ChallengeActivity | undefined = challenge?.activities.find((a) => a.stableActivityId === occ.stableActivityId);
-  const alt = activity?.alternatives?.find((x) => x.stableActivityId === alternativeId);
-  if (!activity || !alt) throw new SubstitutionDeniedError('unknown-alternative');
-  if (alt.evidencePolicy !== activity.evidencePolicy) throw new SubstitutionDeniedError('evidence-policy-mismatch');
+  const { occ, enrollment: e, activity, alt } = await assertSubstitutionAllowed(tenantId, actingSubject, cardId, alternativeId);
   if (occ.substitutedActivityId === alternativeId) return occ; // idempotent
 
   const next: KickTodoActionOccurrence = { ...occ, substitutedActivityId: alternativeId };
@@ -740,6 +784,14 @@ export async function abandonEnrollment(tenantId: string, enrollId: string, acti
   // not resurrect a stale row; the loser re-reads.
   if (!(await enrollments.compareAndSwap(e, next))) return await getEnrollment(tenantId, enrollId);
   await transitionGoal(tenantId, e.goalId, 'abandon', actingSubject);
+  // KTENR-4 (KickTodo wave 4C) — the goal transition above disarms the daily loop;
+  // the opt-in REMINDER job is ours and stayed armed (the remind node skipped the
+  // non-active enrollment, so it fired a run a day for nothing). Disable it — the
+  // same kept-but-disabled posture `setSchedulePreference(null)` uses. Best-effort:
+  // the abandon has already committed.
+  await setJobEnabled(reminderJobId(tenantId, enrollId), false).catch(() => undefined);
+  // KTENR-4 / KTINT-1 — let packages core never imports stop acting for it too.
+  await fireEnrollmentAbandoned({ tenantId, enrollmentId: enrollId, ownerSubject: e.ownerSubject });
   return next;
 }
 
@@ -757,7 +809,30 @@ async function deleteEnrollmentRow(tenantId: string, e: ChallengeEnrollment): Pr
     await occurrences.delete(OCCURRENCE_KEY(o));
   }
   await enrollments.delete(`${tenantId}::${e.id}`);
-  await fireEnrollmentDeleted({ tenantId, enrollmentId: e.id });
+  // KTENR-4 (KickTodo wave 4C) — the enrollment's scheduler jobs carry its id and
+  // `ownerSubject` in their inputs and kept firing (as no-ops) forever. The
+  // reminder job is ours: delete it. The daily-loop job belongs to the goal, so it
+  // is DISABLED, not deleted (the goals owner keeps its own job lifecycle). Both
+  // best-effort: the row is already gone and a scheduler hiccup must not fail a DSAR.
+  await deleteJob(reminderJobId(tenantId, e.id)).catch(() => undefined);
+  await setJobEnabled(continuationJobId(tenantId, e.goalId), false).catch(() => undefined);
+  await fireEnrollmentDeleted({ tenantId, enrollmentId: e.id, ownerSubject: e.ownerSubject });
+}
+
+/**
+ * KTSEED-3 (KickTodo wave 4C) — delete ONE enrollment the owner has already
+ * ABANDONED, through the single delete path (occurrences, scheduler jobs, the
+ * lifecycle signal) plus its frozen evidence snapshots. Refuses anything not
+ * abandoned or not the owner's, so it can never end a live participation.
+ * Returns true when it deleted. Used by the demo seeder to drop its own residue.
+ */
+export async function deleteAbandonedEnrollment(tenantId: string, enrollId: string, ownerSubject: string): Promise<boolean> {
+  const e = await getEnrollment(tenantId, enrollId);
+  if (!e || e.ownerSubject !== ownerSubject || e.state !== 'abandoned') return false;
+  await deleteEnrollmentRow(tenantId, e);
+  const { eraseEvidenceForEnrollments } = await import('./progressService.js');
+  await eraseEvidenceForEnrollments(tenantId, [e.id]);
+  return true;
 }
 
 /**
@@ -768,9 +843,10 @@ async function deleteEnrollmentRow(tenantId: string, e: ChallengeEnrollment): Pr
  *
  * Bounded, idempotent, fail-closed on a falsy tenant/subject. Deliberately does
  * NOT touch the participant's Kanban board/cards (host-owned — the kanban feature
- * erases those) nor the scheduler's reminder/daily jobs (host-owned; the remind /
- * materialize / evaluate nodes already self-skip a missing enrollment, so a stale
- * job is an inert no-op, never a fired notification).
+ * erases those). KTENR-4: the enrollment's scheduler jobs ARE now retired, in
+ * `deleteEnrollmentRow` (the reminder job deleted, the goal's daily loop disabled,
+ * and integrations' calendar-sync job via the delete signal) — the nodes self-skip
+ * a missing enrollment, but a stale job still fired a run a day forever.
  */
 export async function eraseSubjectEnrollments(tenantId: string, subjectKey: string): Promise<string[]> {
   if (!tenantId || !subjectKey) return [];
@@ -781,6 +857,21 @@ export async function eraseSubjectEnrollments(tenantId: string, subjectKey: stri
     ids.push(e.id);
   }
   return ids;
+}
+
+/** KTENR-2 / KTX-D2 — rewrite ONE enrollment's `ownerSubject` from→to by CAS, in
+ *  place (the row key and the `enr:` id are left alone: re-keying would move every
+ *  occurrence, card and evidence row hanging off it). Refuses unless the stored
+ *  owner is exactly `fromSubject`. Used only by the explicit fold backfill. */
+export async function rewriteEnrollmentOwner(
+  tenantId: string,
+  enrollId: string,
+  fromSubject: string,
+  toSubject: string,
+): Promise<boolean> {
+  const e = await getEnrollment(tenantId, enrollId);
+  if (!e || e.ownerSubject !== fromSubject || !toSubject || fromSubject === toSubject) return false;
+  return enrollments.compareAndSwap(e, { ...e, ownerSubject: toSubject });
 }
 
 /** Test seam. */

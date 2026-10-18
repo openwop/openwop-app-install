@@ -1,7 +1,9 @@
 /**
  * Escape closes the palette wherever focus is, including before focus has
  * reached the search input. The e2e "Escape closes the palette" went red
- * under load because the only Escape handler was on the input.
+ * under load because the only Escape handler was on the input (bcfd3c629).
+ * Both cases ride the ONE window listener: case 2 pins that an Escape typed in
+ * the input still bubbles to it.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
@@ -15,10 +17,6 @@ vi.mock('../../featureToggles/FeatureAccessContext.js', () => ({
   useFeatureVisible: () => () => true,
   useFeatureBadge: () => () => null,
   useFeatureLocked: () => () => false,
-}));
-vi.mock('../../client/useEffectiveAccess.js', () => ({
-  useEffectiveAccess: () => ({ roles: ['viewer'], scopes: ['workspace:read'], basis: 'member' }),
-  isAdminCaller: () => false,
 }));
 
 afterEach(cleanup);

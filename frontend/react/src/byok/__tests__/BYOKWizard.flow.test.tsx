@@ -10,6 +10,10 @@
  *  - focus lands on each new step's heading (UX ADM-4).
  * The child pickers are stubbed: this pins the ORCHESTRATION, which is what a
  * redesign of the layout touches.
+ *
+ * Sabotage that turns these red (BYOKWizard.tsx): no recommended pre-select, no
+ * focus move, Back to the wrong step, a fresh ref instead of the stored one, the
+ * managed / subscription short-circuits removed, the `managed:` sentinel dropped.
  */
 import { render, screen, fireEvent, cleanup } from '@testing-library/react';
 import { describe, it, expect, vi, afterEach } from 'vitest';
@@ -87,7 +91,9 @@ describe('BYOKWizard flow (pinned before the C1 refresh)', () => {
     render(<BYOKWizard onComplete={onComplete} />);
     fireEvent.click(screen.getByText('pick-managed'));
     await vi.waitFor(() => expect(onComplete).toHaveBeenCalledTimes(1));
-    expect(onComplete.mock.calls[0]![0]).toMatchObject({ provider: 'demo' });
+    // The `managed:<id>` sentinel is what routes the backend to the server-held key;
+    // a bare provider id would be looked up as a tenant BYOK secret and fail.
+    expect(onComplete).toHaveBeenCalledWith({ provider: 'demo', model: 'demo-model', credentialRef: 'managed:demo' });
     expect(screen.queryByText(/^target:/)).toBeNull();
   });
 
@@ -96,7 +102,8 @@ describe('BYOKWizard flow (pinned before the C1 refresh)', () => {
     render(<BYOKWizard onComplete={onComplete} />);
     fireEvent.click(screen.getByText('pick-copilot'));
     await vi.waitFor(() => expect(onComplete).toHaveBeenCalledTimes(1));
-    expect(onComplete.mock.calls[0]![0]).toMatchObject({ provider: 'copilot' });
+    // Literals, not the imported constants: the binding the host accepts is exactly this.
+    expect(onComplete).toHaveBeenCalledWith({ provider: 'copilot', model: 'default', credentialRef: 'subscription:github.copilot' });
     expect(screen.queryByText('step:model')).toBeNull();
   });
 });

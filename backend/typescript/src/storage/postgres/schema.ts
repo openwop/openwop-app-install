@@ -64,7 +64,7 @@ export const MIGRATIONS: Record<number, (client: Queryable) => Promise<void>> = 
       -- status sits between tenant_id and created_at — so at ~4k runs/tenant
       -- it degraded to a 35s bitmap+sort on Cloud SQL and blew the 30s
       -- statement timeout (the 2026-07-14 silent-board incident: every
-      -- GET /v1/runs/:id 500ed inside its child-run scan). The ordered index
+      -- run-snapshot read 500ed inside its child-run scan). The ordered index
       -- turns it into an early-terminating LIMIT walk. (Applied to prod live
       -- via CREATE INDEX CONCURRENTLY the same day; IF NOT EXISTS makes this
       -- a no-op there.)
@@ -1025,6 +1025,21 @@ export const MIGRATIONS: Record<number, (client: Queryable) => Promise<void>> = 
     // BACKFILL; `ADD COLUMN` with no DEFAULT takes no table rewrite.
     await client.query(`
       ALTER TABLE invocation_log ADD COLUMN IF NOT EXISTS presented_key TEXT;
+    `);
+  },
+  48: async (client) => {
+    // ADR 0812 P3d — drop the subscriptions registered under the RETIRED major 1
+    // (`protocol_major` 1, or NULL, which mig 42 defined to read as 1). Decision 2
+    // already makes them receive nothing (`enqueueDelivery` skips them and logs
+    // `webhook_v1_subscription_not_delivered`), so a row here is a subscription
+    // that looks registered and never fires. Same shape as an unsubscribe
+    // (`deleteWebhook`, WHD-16): PENDING deliveries go with the row, delivered
+    // and dead rows stay as history. One query string = one implicit transaction.
+    // MEASURED 2026-10-16 on app.openwop.dev: 0 such rows (1 subscription, major 2).
+    await client.query(`
+      DELETE FROM webhook_deliveries WHERE status = 'pending' AND subscription_id IN
+        (SELECT subscription_id FROM webhooks WHERE protocol_major IS NULL OR protocol_major = 1);
+      DELETE FROM webhooks WHERE protocol_major IS NULL OR protocol_major = 1;
     `);
   },
 };

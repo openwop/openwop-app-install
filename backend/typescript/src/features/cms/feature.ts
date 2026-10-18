@@ -39,7 +39,7 @@ export const cmsFeature: BackendFeature = {
   // agents tool-allowlisted to those nodes. Declared here so featurePackRefs()
   // installs them at boot (Phase 0) and the eager agent loader registers them.
   requiredPacks: [
-    { name: 'feature.cms.nodes', version: '1.5.1' },
+    { name: 'feature.cms.nodes', version: '1.6.0' },
     { name: 'vendor.openwop-app.cms.agents', version: '1.1.2' },
   ],
   registerRoutes: (deps) => {

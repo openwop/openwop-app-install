@@ -46,6 +46,16 @@ export function StorefrontPage({ orgId }: { orgId: string }): JSX.Element {
   const [cart, setCart] = useState<Record<string, CartLine>>({});
   const [checkingOut, setCheckingOut] = useState(false);
   const params = useMemo(() => new URLSearchParams(window.location.search), []);
+  // ADR 0875 D2 (grade-ux COM2UX-6) — `oc` is the one-click capability for THIS
+  // purchase; nothing here uses it, and left in the address bar it rides along on
+  // every copied or shared order link. Drop it from the visible URL once landed.
+  useEffect(() => {
+    if (!params.has('oc')) return;
+    const next = new URLSearchParams(window.location.search);
+    next.delete('oc');
+    const qs = next.toString();
+    window.history.replaceState(window.history.state, '', `${window.location.pathname}${qs ? `?${qs}` : ''}${window.location.hash}`);
+  }, [params]);
 
   useEffect(() => {
     // grade-code H2: an active flag so the LAST click wins, not the last response.
@@ -138,7 +148,7 @@ export function StorefrontPage({ orgId }: { orgId: string }): JSX.Element {
 
       {cartCount > 0 ? (
         checkingOut
-          ? <CheckoutForm orgId={orgId} cart={cart} total={cartTotal} currency={currency} onPlaced={() => setCart({})} onBack={() => setCheckingOut(false)} />
+          ? <CheckoutForm orgId={orgId} cart={cart} total={cartTotal} currency={currency} onPlaced={() => setCart({})} onBack={() => setCheckingOut(false)} onDropLine={(id) => setCart((c) => { const next = { ...c }; delete next[id]; return next; })} />
           : (
             <div className="surface-card u-p-4 action-bar u-justify-between u-items-center">
               <strong>{t('cartSummary', { count: cartCount, total: fmt.currency(cartTotal, currency) })}</strong>
@@ -150,7 +160,7 @@ export function StorefrontPage({ orgId }: { orgId: string }): JSX.Element {
   );
 }
 
-function CheckoutForm({ orgId, cart, total, currency, onBack, onPlaced }: { orgId: string; cart: Record<string, CartLine>; total: number; currency: string; onBack: () => void; onPlaced: () => void }): JSX.Element {
+function CheckoutForm({ orgId, cart, total, currency, onBack, onPlaced, onDropLine }: { orgId: string; cart: Record<string, CartLine>; total: number; currency: string; onBack: () => void; onPlaced: () => void; onDropLine: (productId: string) => void }): JSX.Element {
   const { t } = useTranslation('commerce');
   const fmt = useFormat();
   const [email, setEmail] = useState('');
@@ -158,6 +168,9 @@ function CheckoutForm({ orgId, cart, total, currency, onBack, onPlaced }: { orgI
   const [coupon, setCoupon] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  /** ADR 0875 D7 (grade-ux COM2UX-3) — the line the server refused, so the shopper can
+   *  see WHICH item is gone and remove it, instead of retrying into the same refusal. */
+  const [badLine, setBadLine] = useState<string | null>(null);
   const [demoOrder, setDemoOrder] = useState<string | null>(null);
   const [demoCharge, setDemoCharge] = useState<{ charge: number; currency: string } | null>(null);
   // GEN-2d — one idempotency key per checkout-form mount: a double-tap or a network
@@ -193,8 +206,28 @@ function CheckoutForm({ orgId, cart, total, currency, onBack, onPlaced }: { orgI
           lines: Object.entries(cart).map(([productId, l]) => ({ productId, quantity: l.qty })),
         }),
       }));
-      const body = await res.json().catch(() => ({} as Record<string, unknown>)) as { mode?: string; checkoutUrl?: string; orderId?: string; message?: string; charge?: number; currency?: string };
-      if (!res.ok) { setError(body.message || t('checkoutFailed')); return; }
+      const body = await res.json().catch(() => ({} as Record<string, unknown>)) as { mode?: string; checkoutUrl?: string; orderId?: string; message?: string; charge?: number; currency?: string; details?: { productId?: unknown; field?: unknown } };
+      if (!res.ok) {
+        // Map the refusal to the shopper's language; the server's English message
+        // names internal ids (`Product not found: prod:…`).
+        // The error envelope entropy-scrubs ids (`prod:<redacted:high-entropy>`), so the
+        // refused line is found by re-reading what the store still sells.
+        if (body.details?.productId !== undefined) {
+          // A failed re-read identifies nothing, so it falls through to the generic
+          // message rather than guessing which line went away.
+          let listed: { productId: string }[] | undefined;
+          try {
+            const r = await fetch(`${root}/public-store/${encodeURIComponent(orgId)}/products`, fetchOpts({}));
+            if (r.ok) listed = ((await r.json()) as { products?: { productId: string }[] }).products;
+          } catch { listed = undefined; }
+          const gone = listed ? Object.keys(cart).find((id) => !listed!.some((p) => p.productId === id)) : undefined;
+          if (gone) { setBadLine(gone); setError(t('lineUnavailable', { name: cart[gone]!.name })); return; }
+        }
+        if (body.details?.field === 'couponCode') { setError(t('couponInvalid')); return; }
+        if (body.details?.field === 'quantity') { setError(t('quantityInvalid')); return; }
+        setError(t('checkoutFailed'));
+        return;
+      }
       if (body.mode === 'live' && body.checkoutUrl) { onPlaced(); window.location.href = body.checkoutUrl; return; }
       // grade-code LOW: clear the cart on a demo placement so it can't be re-submitted.
       onPlaced();
@@ -229,6 +262,17 @@ function CheckoutForm({ orgId, cart, total, currency, onBack, onPlaced }: { orgI
         <Button variant="secondary" onClick={onBack}>{t('back')}</Button>
       </div>
       <p className="u-m-0 u-text-sm muted">{t('taxShippingNote')}</p>
+      <ul className="u-grid u-gap-1 u-m-0 u-p-0 storefront-cart-lines" aria-label={t('cartLinesLabel')}>
+        {Object.entries(cart).map(([productId, l]) => (
+          <li key={productId} className="action-bar u-justify-between u-items-center u-gap-2">
+            <span>{l.name} × {l.qty}{badLine === productId ? <> <span className="chip chip--warning">{t('lineUnavailableChip')}</span></> : null}</span>
+            <span className="action-bar u-gap-1 u-items-center">
+              <span>{fmt.currency(l.price * l.qty, l.currency)}</span>
+              <Button variant="secondary" aria-label={t('removeLine', { name: l.name })} onClick={() => { onDropLine(productId); if (badLine === productId) { setBadLine(null); setError(''); } }}>{t('remove')}</Button>
+            </span>
+          </li>
+        ))}
+      </ul>
       {error ? <Notice variant="error">{error}</Notice> : null}
       <Field label={t('fieldEmail')} required>{(w) => <input {...w} type="email" value={email} onChange={(e) => setEmail(e.target.value)} maxLength={320} autoFocus />}</Field>
       <Field label={t('fieldName')}>{(w) => <input {...w} value={name} onChange={(e) => setName(e.target.value)} maxLength={200} />}</Field>

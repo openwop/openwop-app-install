@@ -14,6 +14,7 @@
  */
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
 import { requireFeatureEnabled } from '../featureRoute.js';
+import { callerSubject } from '../../host/requestSubject.js';
 import { readBoardRanking } from './agentTools.js';
 import { WORK_SELECTION_TOGGLE } from './service.js';
 
@@ -30,8 +31,10 @@ export function registerWorkSelectionRoutes(deps: RouteDeps): void {
 
       // The SAME predicate the surface and the agent tool use (ADR 0308), so the
       // three cannot drift about who may see a board. Tenant comes from the
-      // request principal, never from a parameter.
-      const ranked = await readBoardRanking(req.tenantId, req.params.boardId ?? '', Date.now(), req.userId);
+      // request principal, never from a parameter. The caller is the RBAC
+      // subject every other door hands the seam (#4496): an anonymous session
+      // has no `userId`, and the seam refuses an absent caller.
+      const ranked = await readBoardRanking(req.tenantId, req.params.boardId ?? '', Date.now(), callerSubject(req));
       res.json({ ranked });
     } catch (err) {
       next(err);

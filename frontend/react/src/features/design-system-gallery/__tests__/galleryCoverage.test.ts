@@ -5,8 +5,9 @@
  * primitive is supposed to have a captured specimen (rendered + snapshotted + run
  * through the axe matrix). Nothing asserted that the captured set == the `ui/`
  * primitive set, so ~17 of ~32 primitives were uncaptured AND a NEW `ui/` primitive
- * shipped uncaptured with green CI (`dsg-grade-probe.test.tsx`'s own docblock names
- * this absence and explicitly does NOT witness it).
+ * shipped uncaptured with green CI (the former `dsg-grade-probe.test.tsx` docblock named
+ * this absence and did NOT witness it; that scratch probe was deleted in /grade-tests
+ * wave 52 — it never read GalleryPage, and the import scan below carries its no-fork claim).
  *
  * This is a SOURCE-SCAN, SHRINK-ONLY ratchet (the orgscope / teardown-reachability
  * pattern): it auto-enumerates `ui/*.tsx` (so a new primitive appears WITHOUT a test
@@ -115,15 +116,18 @@ describe('DSGC-01 — design-system gallery coverage ratchet', () => {
     const primitives = uiPrimitiveModules();
     const captured = galleryCapturedModules();
 
-    // A floor: the ui/ primitive set is large. A glob that silently found nothing
-    // would pass the equality above with an empty baseline — this refuses that.
-    expect(primitives.length, 'the ui/ primitive enumeration must be non-trivial').toBeGreaterThan(25);
-    // The gallery import scan must actually resolve modules.
-    expect(captured.length, 'the gallery must import real ui/ primitives').toBeGreaterThan(10);
-    // A known-CAPTURED primitive must NOT be in the baseline (else the ratchet is slack).
-    expect(UNCAPTURED_BASELINE).not.toContain('Button');
-    // A known-UNCAPTURED primitive must be captured by the ratchet.
-    expect(UNCAPTURED_BASELINE).toContain('Modal');
+    // Floors = the MEASURED truth (wave 52, e3c2492be): 38 ui/*.tsx minus 4 EXCLUDED
+    // = 34 primitives; GalleryPage imports 17 ui/ modules (16 specimens + ToasterView).
+    // A scan that silently matches only part of the set reds here, not just one that
+    // matches nothing.
+    expect(primitives.length, 'the ui/ primitive enumeration must find every primitive').toBeGreaterThanOrEqual(34);
+    // The gallery import scan must actually resolve every captured module.
+    expect(captured.length, 'the gallery must import real ui/ primitives').toBeGreaterThanOrEqual(17);
+    // Both sides of the scan are seen, on the COMPUTED sets (not the baseline constant):
+    // a known-captured primitive is captured, a known-uncaptured one is enumerated but not captured.
+    expect(captured).toContain('Button');
+    expect(primitives).toContain('Modal');
+    expect(captured).not.toContain('Modal');
   });
 
   it('every EXCLUDED entry names a real ui/ file (no dead exclusion padding the baseline down)', () => {
@@ -154,19 +158,20 @@ describe('DSGC-01 — design-system gallery coverage ratchet', () => {
  * section without extending the capture list reds.
  */
 describe('DSGC-02 — every rendered gallery section is in the e2e snapshot list', () => {
-  const galleryIds = (): string[] => {
-    const src = readFileSync(GALLERY, 'utf8');
-    return [...src.matchAll(/<Section\s+id="([^"]+)"/g)].map((m) => m[1]!).sort();
-  };
-  const specIds = (): string[] => {
-    const spec = readFileSync(join(HERE, '..', '..', '..', '..', 'e2e', 'design-system.spec.ts'), 'utf8');
+  // Bound: only a literal `<Section id="…">` is seen; an `id={…}` expression would escape.
+  const galleryIds = (src: string = readFileSync(GALLERY, 'utf8')): string[] =>
+    [...src.matchAll(/<Section\s+id="([^"]+)"/g)].map((m) => m[1]!).sort();
+  const specIds = (
+    spec: string = readFileSync(join(HERE, '..', '..', '..', '..', 'e2e', 'design-system.spec.ts'), 'utf8'),
+  ): string[] => {
     const block = /const SECTIONS = \[([\s\S]*?)\] as const;/.exec(spec)?.[1] ?? '';
     return [...block.matchAll(/'([^']+)'/g)].map((m) => m[1]!).sort();
   };
 
   it('both lists are non-empty (a broken scan must not pass as agreement)', () => {
-    expect(galleryIds().length, 'the <Section id="…"> scan found nothing').toBeGreaterThan(5);
-    expect(specIds().length, 'the SECTIONS array scan found nothing').toBeGreaterThan(5);
+    // Floors = the MEASURED truth (wave 52, e3c2492be): 16 <Section id> in GalleryPage, 16 SECTIONS entries.
+    expect(galleryIds().length, 'the <Section id="…"> scan lost sections').toBeGreaterThanOrEqual(16);
+    expect(specIds().length, 'the SECTIONS array scan lost entries').toBeGreaterThanOrEqual(16);
   });
 
   it('the e2e capture list EQUALS the set of sections the page renders', () => {
@@ -174,10 +179,8 @@ describe('DSGC-02 — every rendered gallery section is in the e2e snapshot list
   });
 
   it('control: the detectors see a planted section / entry (so equality is a measurement)', () => {
-    const planted = `<Section id="brand-new" title={t('x')}>`;
-    expect([...planted.matchAll(/<Section\s+id="([^"]+)"/g)].map((m) => m[1])).toEqual(['brand-new']);
-    const plantedSpec = "const SECTIONS = [\n  'only-one',\n] as const;";
-    const block = /const SECTIONS = \[([\s\S]*?)\] as const;/.exec(plantedSpec)?.[1] ?? '';
-    expect([...block.matchAll(/'([^']+)'/g)].map((m) => m[1])).toEqual(['only-one']);
+    // Calls the SAME scanners the equality case uses (not a re-typed copy of their regexes).
+    expect(galleryIds(`<Section id="brand-new" title={t('x')}>\n<Section id="also" title={t('y')}>`)).toEqual(['also', 'brand-new']);
+    expect(specIds("const SECTIONS = [\n  'only-one', 'two',\n] as const;")).toEqual(['only-one', 'two']);
   });
 });

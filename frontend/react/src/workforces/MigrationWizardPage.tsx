@@ -31,7 +31,7 @@ import {
   type WorkforceStatus,
 } from '../client/workforcesClient.js';
 import { formatPercent } from '../i18n/format.js';
-import { useAgentWriteAccess, writeErrorMessage } from '../agents/agentWriteAccess.js';
+import { isStaleWrite, useAgentWriteAccess, writeErrorMessage } from '../agents/agentWriteAccess.js';
 
 const STAGES: { key: MigrationStageKey; titleKey: string; blurbKey: string; rfcGated?: boolean }[] = [
   { key: 'target', titleKey: 'stageTargetTitle', blurbKey: 'stageTargetBlurb' },
@@ -112,11 +112,13 @@ export function MigrationWizardPage(): JSX.Element {
     setBusy(true);
     setStageError(null);
     try {
-      const updated = await patchMigrationJourney(workforceId, patch);
+      const updated = await patchMigrationJourney(workforceId, patch, { ifMatch: journey?.etag });
       setJourney(updated);
       if (advance) setActive((a) => Math.min(a + 1, STAGES.length - 1));
     } catch (e: unknown) {
-      setStageError(writeErrorMessage(e, t('common:error_forbidden')));
+      setStageError(writeErrorMessage(e, t('common:error_forbidden'), t('workforceChangedReload')));
+      // ADR 0775 P4 — load the other editor's journey; the typed form is kept for the retry.
+      if (isStaleWrite(e)) await getMigrationJourney(workforceId).then(setJourney).catch(() => undefined);
     } finally {
       setBusy(false);
     }
@@ -320,9 +322,12 @@ export function MigrationWizardPage(): JSX.Element {
                     title={gatedOut ? t('cutOverGatedTitle') : undefined}
                     onClick={() => {
                       setBusy(true); setStageError(null);
-                      updateWorkforceStatus(workforceId, s as WorkforceStatus)
+                      updateWorkforceStatus(workforceId, s as WorkforceStatus, { ifMatch: wf?.etag })
                         .then((u) => { setWf(u); if (u.status === 'production') void markDone('cut-over', false); })
-                        .catch((e: unknown) => setStageError(writeErrorMessage(e, t('common:error_forbidden'))))
+                        .catch(async (e: unknown) => {
+                          setStageError(writeErrorMessage(e, t('common:error_forbidden'), t('workforceChangedReload')));
+                          if (isStaleWrite(e)) await getWorkforce(workforceId).then((w) => { if (w) setWf(w); }).catch(() => undefined);
+                        })
                         .finally(() => setBusy(false));
                     }}
                   ><ArrowRightIcon size={13} /> {t('cutOverTo', { status: s })}</Button>

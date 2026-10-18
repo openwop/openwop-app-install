@@ -54,7 +54,10 @@ export const strategyFeature: BackendFeature = {
     description:
       'Define, manage, and communicate company strategy as an executive portfolio: narrative rationale + OKR-compatible objectives and key results + initiatives, with a planning horizon (quarter / half-year / annual / multi-year / custom), owner / accountable executive, and status / confidence / risk. Strategies link to projects, Priority Matrix lists and ideas, and advisory boards, and project a compact strategy context packet into those surfaces. Scopeable to a user (private draft), the workspace, or one organization.',
     category: 'Leadership',
-    status: 'on',
+    // ADR 0892 — opt-in like CRM: OFF by default so a white-label install starts lean
+    // (supersedes ADR 0229's default-on). App migration 24 keeps it on for an
+    // install that already has data for it.
+    status: 'off',
     bucketUnit: 'tenant',
     salt: 'strategy',
   },

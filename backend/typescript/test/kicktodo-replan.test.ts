@@ -16,6 +16,13 @@
  *  5. the replan builtin end-to-end through the REAL approval gate + resume: an
  *     APPROVE applies the commands (the enrollment mutates); a REJECT fails the run
  *     typed and mutates NOTHING.
+ *
+ * Sabotage witnesses (w41 /grade-tests, 14 probes): the shared predicate's owner
+ * check, the tool's acting-user + authority guards and its seeded ownerSubject,
+ * the op's authority-first check, the empty-list no-op, the ONE re-materialize,
+ * the failing index, the closed-world lane switch (both here and in the schema
+ * parity table), the plan-revised lanes, the move window + clear-on-natural-date,
+ * and the approve→reject edge condition.
  */
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -24,6 +31,8 @@ import { readFileSync } from 'node:fs';
 import { beforeAll, beforeEach, describe, expect, it, afterAll } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
 import type { RunRecord } from '../src/types.js';
+import type { NodeContext, NodeOutcome } from '../src/executor/types.js';
+import type { ChallengeActivity } from '../src/features/kicktodo-core/types.js';
 import { setEventLogBackend } from '../src/executor/eventLog.js';
 import { setSuspendBackend } from '../src/executor/suspendManager.js';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
@@ -49,7 +58,9 @@ import { buildKicktodoCoreSurface } from '../src/features/kicktodo-core/surface.
 import { runReplanTool } from '../src/features/kicktodo-core/agentTools.js';
 import { kicktodoBuiltinWorkflows, KICKTODO_REPLAN_WORKFLOW_ID } from '../src/features/kicktodo-core/builtinWorkflows.js';
 
-type NodeFn = (ctx: Record<string, unknown>) => Promise<{ status: string; outputs?: Record<string, unknown>; error?: unknown }>;
+/** A pack node at the host boundary: `import()` of the .mjs is untyped, so the
+ *  registry's own executor signature is the declared contract (no cast). */
+type NodeFn = (ctx: NodeContext) => Promise<NodeOutcome>;
 
 // ADR 0734: registerFeatureSurface() mutates a module-level registry this file
 // dirtied and never cleaned up. Hygiene — leave the registry as we found it.
@@ -71,15 +82,17 @@ setChatStorage(storage);
 const hostSuite = createHostAdapterSuite({ storage });
 const deps = { storage, hostSuite };
 
-const ACTIVITY = { stableActivityId: 'run', day: 1, title: 'Run 5k', instructions: 'Run', evidencePolicy: 'attestation' as const };
+const ACTIVITY: ChallengeActivity = { stableActivityId: 'run', day: 1, title: 'Run 5k', instructions: 'Run', evidencePolicy: 'attestation' };
 
 let packNodes: Record<string, NodeFn>;
 let approvalGateFn: NodeFn;
 
 beforeAll(async () => {
   ensureNodesRegistered();
-  packNodes = ((await import(packUrl)) as { nodes: Record<string, NodeFn> }).nodes;
-  approvalGateFn = ((await import(chatUrl)) as { approvalGate: NodeFn }).approvalGate;
+  const pack: { nodes: Record<string, NodeFn> } = await import(packUrl);
+  const chat: { approvalGate: NodeFn } = await import(chatUrl);
+  packNodes = pack.nodes;
+  approvalGateFn = chat.approvalGate;
   // The kicktodo-core feature surface is what the apply node composes; register it
   // and enable the toggle so the run-scoped surface is not gated off.
   registerFeatureSurface('kicktodo-core', buildKicktodoCoreSurface);
@@ -94,7 +107,7 @@ beforeEach(() => {
 });
 
 async function publishChallengeWith(tenant: string): Promise<string> {
-  const draft = await createDraft({ tenantId: tenant, title: 'Replan', summary: 's', outcome: 'o', durationDays: 5, activities: [ACTIVITY] as never });
+  const draft = await createDraft({ tenantId: tenant, title: 'Replan', summary: 's', outcome: 'o', durationDays: 5, activities: [ACTIVITY] });
   await publishChallenge(tenant, draft.id, 1);
   return draft.id;
 }
@@ -186,7 +199,7 @@ describe('applyRevisionCommands (ADR 0459 P1 — closed-world, owner-checked)', 
     const OWNER = 'user:apply-badlane';
     const enrollmentId = await enrollParticipant(T, OWNER);
     await expect(applyRevisionCommands(T, { enrollmentId, subject: OWNER, commands: [{ lane: 'evidence-policy' }] }))
-      .rejects.toMatchObject({ code: 'validation_error' });
+      .rejects.toMatchObject({ code: 'validation_error', message: expect.stringContaining('unknown lane `evidence-policy`') });
   });
 
   it('a failing command surfaces its INDEX (the second command is a bad substitution)', async () => {
@@ -199,8 +212,12 @@ describe('applyRevisionCommands (ADR 0459 P1 — closed-world, owner-checked)', 
         commands: [{ lane: 'schedule', daypart: 'morning' }, { lane: 'substitute', cardId: 'kicktodo:enr:nope:2026-01-01:x:r1', alternativeId: 'nope' }],
       });
     } catch (err) { caught = err; }
+    // The lane's own refusal (SubstitutionDeniedError), wrapped with ITS index.
     expect(caught).toBeInstanceOf(RevisionCommandError);
-    expect((caught as RevisionCommandError).failedIndex).toBe(1);
+    if (!(caught instanceof RevisionCommandError)) return;
+    expect(caught.failedIndex).toBe(1);
+    expect(caught.code).toBe('validation_error');
+    expect(caught.message).toBe('Command 1 (substitute) failed: That substitution is not available.');
   });
 
   it('a foreign subject is refused BEFORE anything runs (forbidden)', async () => {
@@ -224,7 +241,7 @@ describe('the move lane + previewRevisionCommands (ADR 0496 D1/D2)', () => {
   async function enrollWithDay3(owner: string): Promise<string> {
     const draft = await createDraft({
       tenantId: T, title: 'Move', summary: 's', outcome: 'o', durationDays: 5,
-      activities: [ACTIVITY, { stableActivityId: 'read', day: 3, title: 'Read', instructions: 'r', evidencePolicy: 'attestation' }] as never,
+      activities: [ACTIVITY, { stableActivityId: 'read', day: 3, title: 'Read', instructions: 'r', evidencePolicy: 'attestation' }],
     });
     await publishChallenge(T, draft.id, 1);
     const { enrollment } = await enroll({ tenantId: T, ownerSubject: owner, challengeId: draft.id, challengeVersion: 1, timezone: 'UTC' });
@@ -283,8 +300,7 @@ describe('the move lane + previewRevisionCommands (ADR 0496 D1/D2)', () => {
         await applyRevisionCommands(T, { enrollmentId, subject: OWNER, commands: [{ lane: 'move', day: 3, toDate }] });
       } catch (err) { caught = err; }
       expect(caught).toBeInstanceOf(RevisionCommandError);
-      expect((caught as RevisionCommandError).failedIndex).toBe(0);
-      expect((caught as RevisionCommandError).message).toContain('window');
+      expect(caught).toMatchObject({ failedIndex: 0, message: expect.stringContaining('window') });
     }
     expect((await getEnrollment(T, enrollmentId))?.schedulePreference?.dayOverrides).toBeUndefined();
   });
@@ -299,8 +315,7 @@ describe('the move lane + previewRevisionCommands (ADR 0496 D1/D2)', () => {
       await previewRevisionCommands(T, { enrollmentId, subject: OWNER, commands: [{ lane: 'move', day: 3, toDate: isoShift(-1) }] });
     } catch (err) { caught = err; }
     expect(caught).toBeInstanceOf(RevisionCommandError);
-    expect((caught as RevisionCommandError).failedIndex).toBe(0);
-    expect((caught as RevisionCommandError).message).toContain('window');
+    expect(caught).toMatchObject({ failedIndex: 0, message: expect.stringContaining('window') });
     // A valid move previews with before/after dates — and NOTHING mutated.
     const toDate = isoShift(6);
     const { changes } = await previewRevisionCommands(T, { enrollmentId, subject: OWNER, commands: [{ lane: 'move', day: 3, toDate }] });
@@ -368,15 +383,15 @@ describe('the replan builtin: approve applies, reject fails typed and mutates no
     await enableTenantOverride('kicktodo-core', 'tenant-e2e', 'test');
     // STUB the composer (agent-runner) — no model in a unit test; it returns the
     // structured revision the gate then shows and the apply node consumes.
-    getNodeRegistry().register({ typeId: 'local.openwop-app.agent-runner', version: '1.0.0', execute: async () => ({ status: 'success', outputs: { result: REVISION } }) as never });
+    getNodeRegistry().register({ typeId: 'local.openwop-app.agent-runner', version: '1.0.0', execute: async (): Promise<NodeOutcome> => ({ status: 'success', outputs: { result: REVISION } }) });
     // The REAL approval gate + the REAL enrich + apply pack nodes.
-    getNodeRegistry().register({ typeId: 'core.chat.approvalGate', version: '1.0.0', execute: (ctx) => approvalGateFn(ctx as never) as never });
-    getNodeRegistry().register({ typeId: 'feature.kicktodo.nodes.enrich-plan-revision', version: '1.0.0', execute: (ctx) => packNodes['feature.kicktodo.nodes.enrich-plan-revision']!(ctx as never) as never });
+    getNodeRegistry().register({ typeId: 'core.chat.approvalGate', version: '1.0.0', execute: (ctx) => approvalGateFn(ctx) });
+    getNodeRegistry().register({ typeId: 'feature.kicktodo.nodes.enrich-plan-revision', version: '1.0.0', execute: (ctx) => packNodes['feature.kicktodo.nodes.enrich-plan-revision']!(ctx) });
     // ADR 0463 (#2343) — the clarify leg sits between compose and enrich; with no
     // `clarification` on the composed revision it passes through unchanged, which
     // is exactly this suite's path (the composer mock fills all slots).
-    getNodeRegistry().register({ typeId: 'feature.kicktodo.nodes.replan-clarify', version: '1.0.0', execute: (ctx) => packNodes['feature.kicktodo.nodes.replan-clarify']!(ctx as never) as never });
-    getNodeRegistry().register({ typeId: 'feature.kicktodo.nodes.apply-revision-commands', version: '1.0.0', execute: (ctx) => packNodes['feature.kicktodo.nodes.apply-revision-commands']!(ctx as never) as never });
+    getNodeRegistry().register({ typeId: 'feature.kicktodo.nodes.replan-clarify', version: '1.0.0', execute: (ctx) => packNodes['feature.kicktodo.nodes.replan-clarify']!(ctx) });
+    getNodeRegistry().register({ typeId: 'feature.kicktodo.nodes.apply-revision-commands', version: '1.0.0', execute: (ctx) => packNodes['feature.kicktodo.nodes.apply-revision-commands']!(ctx) });
     registerHostWorkflow(wf);
   });
 

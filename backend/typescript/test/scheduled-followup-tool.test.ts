@@ -1,15 +1,34 @@
 /**
  * ADR 0309 — `openwop:tasks.schedule-followup`: the one-shot follow-through
  * tool + the D1 one-shot scheduling primitive it rides.
+ *
+ * Guards (witnessing sabotage, /grade-tests w25 g2):
+ *  - D1: the `'once'` sentinel is OPT-IN (GC-R2 — a typo'd cron + firstFireAtMs never
+ *    becomes a one-shot; dropping the `=== ONE_SHOT_CRON` test reds) and a parseable
+ *    cadence's own next fire wins over firstFireAtMs (preferring it reds). The spend of a
+ *    fired one-shot is `adr0787-schedule-cadence.test.ts`'s ("a spent one-shot …").
+ *  - D2: fail-closed without acting user / conversation / agent (authz); GC-R3 naive
+ *    timestamps refused; lead-time + horizon bounds; the job binds THIS conversation,
+ *    is owned by the acting user, and dispatches on the HOST-OWNED managed credential
+ *    (a BYOK ref reds); a retry re-puts the SAME deterministic job (a salted id reds);
+ *    the per-user pending cap.
+ *  - ADR 0701 boot order: after a real boot the turn-workflow is registered — the chain
+ *    packs load before the feature seeds (moved here from scheduled-agent-chats.test.ts,
+ *    whose old case pinned the silent-swallow hazard instead of the boot order).
+ *  - D3: the P0 scaffold forbids pointing the user at an unconfirmed place (the
+ *    three-paths sentence is `kanban-add-todo-tool.test.ts`'s).
+ * Registration through `feature.ts` is witnessed by every D2 case (an unregistered tool
+ * schedules nothing).
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
-import { createAgentToolProvider, builtinAgentToolIds } from '../src/host/agentToolProvider.js';
+import { createAgentToolProvider } from '../src/host/agentToolProvider.js';
 import { SCHEDULE_FOLLOWUP_TOOL_ID, MAX_PENDING_FOLLOWUPS_PER_USER } from '../src/features/scheduled-agent-chats/agentTools.js';
 import { SCHEDULED_CHAT_TURN_WORKFLOW_ID } from '../src/features/scheduled-agent-chats/scheduledChatTurnWorkflow.js';
-import { getJob, registerJob, markJobFired, listJobsForSubject, MAX_FUTURE_HORIZON_DAYS } from '../src/host/schedulingService.js';
+import { getJob, registerJob, listJobsForSubject, MAX_FUTURE_HORIZON_DAYS } from '../src/host/schedulingService.js';
+import { getChainBackedWorkflow } from '../src/host/chainBackedWorkflows.js';
 import { TOOL_GROUNDED_COMMITMENTS } from '../src/host/chatContext.js';
 
 const TENANT = 'default';
@@ -30,19 +49,18 @@ function runTool(input: Record<string, unknown>, scope: { actingUserId?: string;
 const FULL_SCOPE = { actingUserId: 'u-fut', agentProfileId: 'host:iris', conversationId: 'conv-fut' };
 const inOneHour = (): string => new Date(Date.now() + 3_600_000).toISOString();
 
-describe('ADR 0309 D1 — one-shot scheduling primitive', () => {
-  it("cronExpr 'once' + firstFireAtMs fires exactly once, then the job is SPENT (row retained)", async () => {
-    const at = Date.now() + 3_600_000;
-    const r = await registerJob({ jobId: 'once-test-1', tenantId: TENANT, cronExpr: 'once', firstFireAtMs: at, workflowId: 'wf-x' });
-    expect(r.ok).toBe(true);
-    if (!r.ok) return;
-    expect(r.job.nextFireAt).toBe(at);
-    await markJobFired('once-test-1', 1, 'run-1', at);
-    const spent = await getJob('once-test-1');
-    expect(spent?.nextFireAt).toBeUndefined(); // never fires again
-    expect(spent?.lastRunAt).toBeTruthy();     // but the row survives for the Schedules tab
+describe('ADR 0701 — boot registers the scheduled-chat turn-workflow', () => {
+  it('chain packs load BEFORE the feature seeds, so the turn-workflow resolves after boot', () => {
+    // `registerChainBackedWorkflow` swallows a missing chain into a logged error, so a boot
+    // reorder (seed before `loadWorkflowChainPacks`) would leave every scheduled chat
+    // firing at nothing. This is the boot, not a unit: the definition must be there.
+    const def = getChainBackedWorkflow(SCHEDULED_CHAT_TURN_WORKFLOW_ID);
+    expect(def, 'the feature-seeded turn-workflow is registered after createApp').toBeTruthy();
+    expect(def!.nodes.map((n) => n.typeId)).toEqual(['local.openwop-app.agent-runner']);
   });
+});
 
+describe('ADR 0309 D1 — one-shot scheduling primitive', () => {
   it('GC-R2: a TYPO\u2019d cron + firstFireAtMs never becomes a surprise one-shot \u2014 the sentinel is opt-in', async () => {
     // CORRECTED (ADR 0787 D6): an ENABLED typo is now REFUSED at write
     // (`invalid_cron`) instead of stored inert behind a 201 — the GC-R2 property
@@ -66,10 +84,6 @@ describe('ADR 0309 D1 — one-shot scheduling primitive', () => {
 });
 
 describe('ADR 0309 D2 — the schedule-followup tool', () => {
-  it('registers as a builtin', () => {
-    expect(builtinAgentToolIds()).toContain(SCHEDULE_FOLLOWUP_TOOL_ID);
-  });
-
   it('fails closed without acting user / conversation / agent', async () => {
     for (const [scope, code] of [
       [{ agentProfileId: 'a', conversationId: 'c' }, 'acting_user_required'],
@@ -121,11 +135,14 @@ describe('ADR 0309 D2 — the schedule-followup tool', () => {
     expect(job?.ownerSubject).toEqual({ kind: 'user', id: 'u-fut' });
     expect(job?.configurable).toMatchObject({ agentId: 'host:iris', conversationId: 'conv-fut', credentialRef: 'managed:openwop-free' });
     expect(job?.metadata).toMatchObject({ tool: SCHEDULE_FOLLOWUP_TOOL_ID, actingUserId: 'u-fut' });
-    // Identical retry re-puts the SAME job (no double-schedule).
+    // Identical retry re-puts the SAME job (no double-schedule): same id, and the user's
+    // follow-up count does not move (counted before/after — other cases also schedule for u-fut).
+    const followupsOfUser = async () => (await listJobsForSubject(TENANT, { kind: 'user', id: 'u-fut' }))
+      .filter((j) => j.metadata?.['tool'] === SCHEDULE_FOLLOWUP_TOOL_ID).length;
+    const before = await followupsOfUser();
     const retry = await runTool(input, FULL_SCOPE);
     expect((JSON.parse(retry.content) as { jobId: string }).jobId).toBe(payload.jobId);
-    const mine = await listJobsForSubject(TENANT, { kind: 'user', id: 'u-fut' });
-    expect(mine.filter((j) => j.jobId === payload.jobId)).toHaveLength(1);
+    expect(await followupsOfUser()).toBe(before);
   });
 
   it('caps pending follow-ups per user', async () => {
@@ -142,7 +159,8 @@ describe('ADR 0309 D2 — the schedule-followup tool', () => {
 
 describe('ADR 0309 D3 — the P0 carve-out', () => {
   it('the scaffold now permits promised work that a scheduling tool actually scheduled', () => {
-    expect(TOOL_GROUNDED_COMMITMENTS).toContain('SCHEDULE it with a scheduling tool');
+    // The three-paths sentence ('SCHEDULE it with a scheduling tool') is pinned by
+    // kanban-add-todo-tool.test.ts; this file owns the no-unconfirmed-place rule.
     expect(TOOL_GROUNDED_COMMITMENTS).toContain('Never tell the user to check a place');
   });
 });

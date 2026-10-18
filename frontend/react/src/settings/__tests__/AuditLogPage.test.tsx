@@ -9,15 +9,26 @@
  * — runs under test. (A module-level vi.fn returning a naked rejected promise
  * also trips the runner's unhandled-rejection tracking on every test after
  * the first; fetch-level stubbing sidesteps that entirely.)
+ *
+ * Sabotage that turns it red: request another path; render the raw outcome enum; let
+ * `loadFailed` outrank `forbidden`; key the superadmin state on 401; drop the error
+ * Notice; skip the failed-read card or its Retry; drop the empty card.
+ *
+ * Twins (protected, kept): DEF-1 "403 …" and AU-G1 "a 403 still gets …" both settle on
+ * the superadmin card — DEF-1 owns its BODY + the still-offered export, AU-G1 owns the
+ * failed-read card's absence. DEF-1 "empty result" and AU-G1 "a genuinely empty log"
+ * both reach the empty card — DEF-1 owns its BODY + no Retry, AU-G1 owns the failed
+ * card's absence.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { render, screen, cleanup } from '@testing-library/react';
+import { render, screen, cleanup, fireEvent } from '@testing-library/react';
 import { AuditLogPage } from '../AuditLogPage.js';
+import type { AuditRecord } from '../../client/governanceClient.js';
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
 }
-const ROW = {
+const ROW: AuditRecord = {
   timestamp: '2026-07-03T12:00:00.000Z',
   principalId: 'user-1',
   action: 'assistant.dispatch',
@@ -29,9 +40,14 @@ afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 describe('AuditLogPage states (DEF-1)', () => {
   it('renders audit rows from the governance route', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(200, { items: [ROW] })));
+    const fn = vi.fn(async (_url: string): Promise<Response> => jsonResponse(200, { items: [ROW] }));
+    vi.stubGlobal('fetch', fn);
     render(<AuditLogPage />);
     expect(await screen.findByText('assistant.dispatch')).toBeTruthy();
+    const url = new URL(fn.mock.calls[0]![0], 'http://localhost');
+    expect(url.pathname).toBe('/host/openwop-app/governance/audit');
+    expect(url.searchParams.get('actionPrefix')).toBe('');
+    expect(url.searchParams.get('limit')).toBe('100');
     expect(screen.getByText('user-1')).toBeTruthy();
     // Outcome chips are localized (§4.5 kit) — the raw 'success' enum renders as its label.
     expect(screen.getByText('Success')).toBeTruthy();
@@ -41,6 +57,9 @@ describe('AuditLogPage states (DEF-1)', () => {
     vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(403, { error: { code: 'forbidden' } })));
     render(<AuditLogPage />);
     expect(await screen.findByText('Superadmin access required')).toBeTruthy();
+    expect(screen.getByText(/The audit log is a governance surface/)).toBeTruthy();
+    // ADR 0416 P3 — the chain export is tenant-admin authority, still offered here.
+    expect(screen.getByRole('button', { name: 'Export JSONL' })).toBeTruthy();
     expect(screen.queryByText('assistant.dispatch')).toBeNull();
   });
 
@@ -48,6 +67,8 @@ describe('AuditLogPage states (DEF-1)', () => {
     vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(200, { items: [] })));
     render(<AuditLogPage />);
     expect(await screen.findByText('No audited actions match')).toBeTruthy();
+    expect(screen.getByText(/Try clearing the prefix filter or raising the row limit/)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull();
   });
 
   it('a network failure surfaces as an error notice', async () => {
@@ -69,11 +90,16 @@ describe('AuditLogPage states (DEF-1)', () => {
  * their filter.
  */
 describe('AU-G1 — a failed read is not an empty audit log', () => {
-  it('does not tell the operator to adjust their filter', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('network down'); }));
+  it('does not tell the operator to adjust their filter — it says the read failed, and Retry re-reads', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (): Promise<Response> => { throw new Error('network down'); }));
     render(<AuditLogPage />);
     expect(await screen.findByText('Could not load the audit log')).toBeTruthy();
+    expect(screen.getByText('network down')).toBeTruthy();
     expect(screen.queryByText('No audited actions match')).toBeNull();
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(200, { items: [ROW] })));
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    expect(await screen.findByText('assistant.dispatch')).toBeTruthy();
+    expect(screen.queryByText('Could not load the audit log')).toBeNull();
   });
 
   it('a genuinely empty log still gets its designed empty state', async () => {

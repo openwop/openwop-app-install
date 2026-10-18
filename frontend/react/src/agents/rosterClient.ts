@@ -10,7 +10,7 @@
  */
 
 import { authedHeaders, config, fetchOpts } from '../client/config.js';
-import { apiErrorFrom } from '../client/errorEnvelope.js';
+import { ApiError, apiErrorFrom } from '../client/errorEnvelope.js';
 import { cachedRead } from '../client/requestCache.js';
 import { client } from '../client/runsClient.js';
 
@@ -22,6 +22,9 @@ export interface RosterAgentRef {
 
 export interface RosterEntry {
   rosterId: string;
+  /** ADR 0775 P4 — content version; echo it as `ifMatch` on an edit built from
+   *  this copy. Ignores the heartbeat stamp. */
+  etag?: string;
   persona: string;
   agentRef: RosterAgentRef;
   workflows: string[];
@@ -66,6 +69,8 @@ export type AgentRosterLevel = 'auto' | 'guided' | 'review';
  */
 export interface AgentProfile {
   profileId: string;
+  /** ADR 0775 P4 — content version; echo it as `ifMatch` on the next save. */
+  etag?: string;
   tenantId: string;
   roleKey: string;
   /** AST-UX-2 — the CORE capabilities activated on this agent (ADR 0031 /
@@ -110,10 +115,13 @@ export interface AgentProfile {
 export interface AgentProfileInput {
   roleKey: string;
   department?: AgentProfile['department'];
-  configParameters?: Record<string, unknown>;
-  permissions?: { read: string[]; write: string[]; never: string[] };
+  /** `null` clears (the PUT merges, ADR 0775 P4). */
+  configParameters?: Record<string, unknown> | null;
+  /** `null` clears (the PUT merges, ADR 0775 P4). */
+  permissions?: { read: string[]; write: string[]; never: string[] } | null;
   hitl?: string[];
-  escalation?: { contacts: string[]; triggers: string[] };
+  /** `null` clears (the PUT merges, ADR 0775 P4). */
+  escalation?: { contacts: string[]; triggers: string[] } | null;
   channels?: { approval?: string; delivery?: string };
   adminControls?: string[];
   riskCompliance?: string[];
@@ -135,10 +143,13 @@ export async function getAgentProfile(rosterId: string): Promise<AgentProfile | 
   return (await res.json()) as AgentProfile;
 }
 
-/** Create-or-replace the agent profile (PUT is a full replace). Returns the
- *  persisted profile, including the derived enforced `autonomy.level`. */
-export async function putAgentProfile(rosterId: string, input: AgentProfileInput): Promise<AgentProfile> {
-  const res = await fetch(profileUrl(rosterId), fetchOpts({ method: 'PUT', headers: jsonHeaders(), body: JSON.stringify(input) }));
+/** Save the agent profile. ADR 0775 P4: the PUT MERGES — an omitted field keeps
+ *  its stored value; send `null` (or `[]` for a list) to clear one. Pass the
+ *  profile's `etag` as `ifMatch` so an edit made elsewhere since it was loaded is
+ *  refused rather than overwritten. Returns the persisted profile. */
+export async function putAgentProfile(rosterId: string, input: AgentProfileInput, opts: { ifMatch?: string | undefined } = {}): Promise<AgentProfile> {
+  const headers = jsonHeadersIfMatch(opts.ifMatch);
+  const res = await fetch(profileUrl(rosterId), fetchOpts({ method: 'PUT', headers, body: JSON.stringify(input) }));
   // ADR 0775 D1 — a typed `ApiError` (status + the server's message) so a
   // refusal is classified by STATUS, never by sniffing the message text.
   if (!res.ok) throw await apiErrorFrom(res, `putAgentProfile failed (${res.status})`);
@@ -157,6 +168,9 @@ export interface ResponsibilityView { department: OrgDepartment; members: OrgMem
 const rosterBase = `${config.baseUrl}/host/openwop-app/roster`;
 const orgBase = `${config.baseUrl}/host/openwop-app/org-chart`;
 const jsonHeaders = (): HeadersInit => authedHeaders({ 'content-type': 'application/json' });
+/** JSON headers plus `If-Match` when a version is given (ADR 0775 P4). */
+const jsonHeadersIfMatch = (ifMatch: string | undefined): HeadersInit =>
+  authedHeaders({ 'content-type': 'application/json', ...(ifMatch !== undefined ? { 'If-Match': `"${ifMatch}"` } : {}) });
 
 /** The named agents. Advisor-subject agents (ADR 0040) are excluded by default —
  *  they live only in the Board of Advisors feature; pass `includeAdvisors` to get
@@ -194,13 +208,33 @@ export async function createRosterEntry(input: {
   return (await res.json()) as RosterEntry;
 }
 
+/** ADR 0775 P4 — pass `ifMatch` (the entry's `etag` as read) when the patch was
+ *  built from a copy of the entry, e.g. a whole workflow list. If the agent
+ *  changed since, the server refuses (`isStaleWrite`) instead of overwriting. */
 export async function updateRosterEntry(
   rosterId: string,
   patch: { persona?: string; workflows?: string[]; enabled?: boolean; label?: string; description?: string; avatarUrl?: string | null; heartbeatIntervalMs?: number; autonomyLevel?: 'auto' | 'guided' | 'review' },
+  opts: { ifMatch?: string | undefined } = {},
 ): Promise<RosterEntry> {
-  const res = await fetch(`${rosterBase}/${encodeURIComponent(rosterId)}`, fetchOpts({ method: 'PATCH', headers: jsonHeaders(), body: JSON.stringify(patch) }));
-  if (!res.ok) throw new Error(`updateRosterEntry returned ${res.status}`);
+  const headers = jsonHeadersIfMatch(opts.ifMatch);
+  const res = await fetch(`${rosterBase}/${encodeURIComponent(rosterId)}`, fetchOpts({ method: 'PATCH', headers, body: JSON.stringify(patch) }));
+  if (!res.ok) throw await apiErrorFrom(res, `updateRosterEntry returned ${res.status}`);
   return (await res.json()) as RosterEntry;
+}
+
+/** Append a workflow to an agent's portfolio without dropping one added since
+ *  `entry` was read (ADR 0775 P4): the write carries the entry's version, and a
+ *  stale-version refusal re-reads the agent and appends to its current list.
+ *  Returns the saved entry, or the fresh one when the workflow was already there. */
+export async function appendRosterWorkflow(entry: RosterEntry, workflowId: string): Promise<RosterEntry> {
+  try {
+    return await updateRosterEntry(entry.rosterId, { workflows: [...entry.workflows, workflowId] }, { ifMatch: entry.etag });
+  } catch (err) {
+    if (!(err instanceof ApiError && err.status === 409 && err.reason === 'stale_write')) throw err;
+    const fresh = await getRosterEntry(entry.rosterId);
+    if (fresh.workflows.includes(workflowId)) return fresh;
+    return updateRosterEntry(fresh.rosterId, { workflows: [...fresh.workflows, workflowId] }, { ifMatch: fresh.etag });
+  }
 }
 
 export async function deleteRosterEntry(rosterId: string): Promise<void> {

@@ -4,6 +4,12 @@
  *  2. the shared component catalog enforces CLOSED-WORLD validation — an unknown
  *     component type / prop, or children under a non-container, are rejected
  *     (the R4 single-catalog promise), and the prompt schema is deterministic.
+ *
+ * Sabotage witnesses (grade-tests w36): schema `minItems:1` → 0, top-level
+ * `additionalProperties:false` → true, component `required:['type']` removed,
+ * and in canvasComponentCatalog the unknown-type / unknown-prop / enum /
+ * non-container checks disabled and the prompt sort shuffled — each reds the
+ * matching case below.
  */
 import { describe, it, expect, beforeAll } from 'vitest';
 import { registerAppBuilderArtifactType } from '../artifactTypes.js';
@@ -37,7 +43,9 @@ describe('canvas.app-builder artifact type', () => {
     expect(validateArtifact('canvas.app-builder', validApp)).toMatchObject({ registered: true, valid: true });
   });
   it('rejects an app with no screens', () => {
-    expect(validateArtifact('canvas.app-builder', { name: 'X', screens: [] }).valid).toBe(false);
+    const v = validateArtifact('canvas.app-builder', { name: 'X', screens: [] });
+    expect(v.valid).toBe(false);
+    expect(JSON.stringify(v.errors)).toContain('/screens'); // refused for the empty screens, not another reason
   });
   it('rejects unknown top-level keys (closed schema)', () => {
     expect(validateArtifact('canvas.app-builder', { ...validApp, script: 'x' }).valid).toBe(false);
@@ -52,11 +60,15 @@ describe('app-builder component catalog (closed-world)', () => {
   beforeAll(() => { __resetCanvasCatalogs(); registerAppBuilderComponents(); });
 
   it('exposes the catalog for the palette + a deterministic prompt schema', () => {
-    expect(listCanvasComponents(APP_BUILDER_CANVAS_TYPE).length).toBeGreaterThan(8);
     const a = catalogPromptSchema(APP_BUILDER_CANVAS_TYPE);
     const b = catalogPromptSchema(APP_BUILDER_CANVAS_TYPE);
-    expect(a).toBe(b); // stable/sorted
-    expect(a).toContain('button');
+    expect(a).toBe(b); // stable
+    // One line per registered component, in sorted order (derived from the
+    // text itself, so a deterministic-but-unsorted output is caught too).
+    const types = a.split('\n').map((l) => l.slice(2).split(/[ —]/)[0]!);
+    expect(types).toHaveLength(listCanvasComponents(APP_BUILDER_CANVAS_TYPE).length);
+    expect(types).toEqual([...types].sort((x, y) => x.localeCompare(y)));
+    expect(types).toContain('button');
   });
   it('passes a valid component tree', () => {
     const errs = validateComponentTree(APP_BUILDER_CANVAS_TYPE, validApp.screens[0]!.components);

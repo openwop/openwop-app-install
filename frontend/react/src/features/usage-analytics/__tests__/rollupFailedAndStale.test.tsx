@@ -24,6 +24,17 @@
  *
  * Both polarities are asserted throughout — an "absent" assertion on its own is
  * vacuous, since a component that rendered nothing at all would satisfy it.
+ *
+ * Breaks if: the failed rollup falls back to the table/empty branch, Retry stops
+ * re-running the read, or the sequence token stops guarding the write (probes
+ * w24g1-ua-failed-state / -retry-noop / -seq-guard, /grade-tests wave 24).
+ *
+ * Cut in wave 24: the "UA-G1 must not regress" block. Its unpriced case was a weaker
+ * duplicate of unpricedCost.test.tsx (its `$0.00` absence survived restoring the old
+ * render, which prints `$NaN`); its UA-R2-4 case could not fail — `unpricedCount` is
+ * derived from `rows ?? []`, so while `rows === null` the `rows !== null &&` guard
+ * is a structurally redundant double guard (sabotage w24g1-ua-warning-null-guard:
+ * vacuous). Honest ceiling recorded; the warning itself is pinned in unpricedCost.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup, screen, waitFor, fireEvent, act } from '@testing-library/react';
@@ -34,7 +45,7 @@ vi.mock('../../../featureToggles/FeatureAccessContext.js', () => ({
 }));
 vi.mock('../../../client/usageAnalyticsClient.js', () => ({ listOrgs: vi.fn(), fetchUsageRollup: vi.fn() }));
 
-import { listOrgs, fetchUsageRollup } from '../../../client/usageAnalyticsClient.js';
+import { listOrgs, fetchUsageRollup, type UsageRollupRow } from '../../../client/usageAnalyticsClient.js';
 import { UsageDashboardPage } from '../UsageDashboardPage.js';
 
 const mockOrgs = vi.mocked(listOrgs);
@@ -43,9 +54,10 @@ const mockRollup = vi.mocked(fetchUsageRollup);
 const ORG_A = { orgId: 'org-a', name: 'Alpha' };
 const ORG_B = { orgId: 'org-b', name: 'Beta' };
 
-const row = (over: Partial<Record<string, unknown>> = {}) => ({
+const row = (over: Partial<UsageRollupRow> = {}): UsageRollupRow => ({
   provider: 'anthropic', model: 'claude-opus-5',
-  inputTokens: 1000, outputTokens: 500, calls: 3, costUsd: 1.25, ...over,
+  inputTokens: 1000, outputTokens: 500, calls: 3, costUsd: 1.25,
+  updatedAt: '2026-01-01T00:00:00.000Z', ...over,
 });
 
 beforeEach(() => { mockOrgs.mockReset(); mockRollup.mockReset(); });
@@ -98,10 +110,10 @@ describe('UA-R2-2 — a stale org response cannot overwrite a newer one', () => 
   it('A resolving AFTER B does not render A under B', async () => {
     mockOrgs.mockResolvedValue([ORG_A, ORG_B]);
 
-    let resolveA: (v: unknown[]) => void = () => {};
-    const slowA = new Promise<unknown[]>((res) => { resolveA = res; });
+    let resolveA: (v: UsageRollupRow[]) => void = () => {};
+    const slowA = new Promise<UsageRollupRow[]>((res) => { resolveA = res; });
     mockRollup.mockImplementation((id: string) =>
-      (id === 'org-a' ? slowA : Promise.resolve([row({ model: 'beta-model' })])) as never);
+      (id === 'org-a' ? slowA : Promise.resolve([row({ model: 'beta-model' })])));
 
     render(<UsageDashboardPage />);
     // A is selected first (auto-selected) and its read is still in flight.
@@ -116,28 +128,5 @@ describe('UA-R2-2 — a stale org response cannot overwrite a newer one', () => 
 
     expect(screen.queryByText('alpha-model')).toBeNull();
     expect(screen.getByText('beta-model')).toBeTruthy();
-  });
-});
-
-describe('UA-G1 must not regress under the restructure', () => {
-  it('an unpriced model still reads as unknown, never $0.00', async () => {
-    mockOrgs.mockResolvedValue([ORG_A]);
-    mockRollup.mockResolvedValue([row({ model: 'unpriced-model', costUsd: undefined })]);
-    render(<UsageDashboardPage />);
-
-    await waitFor(() => expect(screen.getByText('unpriced-model')).toBeTruthy());
-    expect(screen.queryByText('$0.00')).toBeNull();
-    // And the page says the spend picture is incomplete.
-    expect(screen.getByText(/no rate on file/i)).toBeTruthy();
-  });
-
-  it('UA-R2-4 — the incomplete-cost warning is silent before the rows load', async () => {
-    mockOrgs.mockResolvedValue([ORG_A]);
-    mockRollup.mockRejectedValue(new Error('boom'));
-    render(<UsageDashboardPage />);
-
-    await waitFor(() => expect(screen.getByText('Usage could not be loaded')).toBeTruthy());
-    // A page that never loaded has nothing to be "incomplete" about.
-    expect(screen.queryByText(/no rate on file/i)).toBeNull();
   });
 });

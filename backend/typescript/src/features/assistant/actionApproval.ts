@@ -51,6 +51,8 @@ import { ensureAssistantAgent } from './capability.js';
 import { onRosterMemberDeleted } from '../../host/rosterLifecycle.js';
 import { ASSISTANT_WRITE_SCOPE, hasAssistantWriteAuthority } from './writeAuthority.js';
 import { createLogger } from '../../observability/logger.js';
+import { resolveEffectiveAccess } from '../../host/accessControlService.js';
+import { approvalRecipients, registerApprovalOrgResolver } from '../../host/approvalAudience.js';
 
 const log = createLogger('features.assistant.approval');
 
@@ -62,6 +64,49 @@ function summarize(action: PendingAction): string {
       : undefined;
   const draftHead = action.draft.length > 80 ? `${action.draft.slice(0, 77)}…` : action.draft;
   return `${action.kind}: "${draftHead}"${to ? ` → ${to}` : ''}`;
+}
+
+/** Who is deciding / viewing, as the request saw them (ADR 0878 D6). */
+export interface ActionActor {
+  /** Every spelling of the person (`callerSubjectSpellings`); one is enough to match. */
+  spellings: string[];
+  isOperator?: boolean;
+  isPersonalOwner?: boolean;
+}
+
+/**
+ * ADR 0878 D6 — the org an action belongs to, or undefined for a tenant-scoped
+ * action. A `servicedesk.reply` belongs to its TICKET's org, re-read here — never
+ * `payload.orgId` (tool-written) — so a row enqueued before `orgId` existed is
+ * judged the same way. A ticket that no longer exists falls back to the stamp.
+ */
+export async function orgOfAction(tenantId: string, action: Pick<PendingAction, 'kind' | 'payload' | 'orgId'>): Promise<string | undefined> {
+  if (action.kind === 'servicedesk.reply') {
+    const id = (action.payload as { ticketId?: unknown }).ticketId;
+    if (typeof id === 'string' && id) {
+      const { getTicket } = await import('../service-desk/tickets.js');
+      const t = await getTicket(tenantId, id);
+      if (t) return t.orgId;
+    }
+  }
+  return action.orgId;
+}
+
+/**
+ * ADR 0878 D6 (SD2-S6) — may this person see / decide / edit this action? A
+ * tenant-scoped action: yes (the caller already passed the tenant write gate). An
+ * org's action — a support reply — needs `workspace:write` IN that org: it used
+ * to be visible to, and decidable by, every editor in the tenant. The operator and
+ * personal-owner exits are the request-level ones the approval gate already honours.
+ */
+export async function mayActOnAction(tenantId: string, action: Pick<PendingAction, 'kind' | 'payload' | 'orgId'>, actor: ActionActor): Promise<boolean> {
+  const orgId = await orgOfAction(tenantId, action);
+  if (!orgId) return true;
+  if (actor.isOperator || actor.isPersonalOwner) return true;
+  for (const subject of actor.spellings) {
+    if ((await resolveEffectiveAccess(tenantId, { subject, orgId })).scopes.includes(ASSISTANT_WRITE_SCOPE)) return true;
+  }
+  return false;
 }
 
 /** Enqueue a draft action onto the single approval loop. */
@@ -102,43 +147,58 @@ export async function enqueueActionWithApproval(
       { code: 'forbidden', status: 403 },
     );
   }
-  const action = await enqueuePendingAction(tenantId, input);
+  // ADR 0878 D6 — a support reply's org is its TICKET's, read here (never the
+  // caller's say-so): it decides who sees the approval and who may decide it.
+  const orgId = input.kind === 'servicedesk.reply' ? await orgOfAction(tenantId, { kind: input.kind, payload: input.payload }) : input.orgId;
+  const action = await enqueuePendingAction(tenantId, { ...input, ...(orgId ? { orgId } : {}) });
   const approval = await createAssistantActionApproval({
     tenantId,
     actionId: action.actionId,
     proposal: summarize(action),
     rosterId: agent.rosterId,
     persona: agent.persona,
+    ...(action.orgId ? { orgId: action.orgId } : {}),
   });
   await setPendingActionApproval(tenantId, action.actionId, approval.approvalId);
   // Notifications (ADR 0010) — the inbox/bell is how the principal learns
   // something waits on them. Best-effort, like every notification emit.
-  try {
-    await getNotificationEmitter().emit({
-      tenantId,
-      type: 'openwop-app.workflow.approval-needed',
-      priority: action.derivedFromUntrusted || action.riskLevel === 'high' ? 'high' : 'normal',
-      title: 'The assistant drafted an action for your approval',
-      // notify.ts discipline: draft text may derive from untrusted connected
-      // content (and free text can embed leaked credentials) — redact before
-      // it is persisted + Web-Pushed.
-      message: sanitizeFreeText(summarize(action)),
-      // Deep-link to this specific pending approval on /inbox (ADR 0336 Rec
-      // Phase 3): the emit carries the approvalId but not its own (not-yet-
-      // issued) notificationId, so ?approval= is the resolvable key.
-      actionUrl: `/inbox?approval=${encodeURIComponent(approval.approvalId)}`,
-      metadata: stripSecretsFromPersisted({ actionId: action.actionId, approvalId: approval.approvalId, kind: action.kind }),
-    });
-  } catch (err) {
-    // WF-COS-8 — best-effort, but NOT silent. THIS notification is how the
-    // principal learns an action is waiting on them; losing it strands the draft
-    // in the inbox with nobody told, which is invisible AND user-affecting.
-    log.warn('assistant_approval_notification_failed', {
-      tenantId,
-      actionId: action.actionId,
-      approvalId: approval.approvalId,
-      error: err instanceof Error ? err.message : String(err),
-    });
+  // ADR 0878 D6 — an org's action is announced to that org's deciders, never the
+  // tenant: the summary quotes the draft, and a support reply's draft answers a
+  // customer thread other orgs must not read. Nobody to address ⇒ nobody told
+  // (logged), never a fallback broadcast.
+  const addressed = action.orgId ? await approvalRecipients(tenantId, approval) : { addressed: false, refs: [] as string[] };
+  if (addressed.addressed && addressed.refs.length === 0) {
+    log.info('assistant_approval_no_org_recipients', { tenantId, actionId: action.actionId });
+  }
+  for (const recipientUserId of addressed.addressed ? addressed.refs : [undefined]) {
+    try {
+      await getNotificationEmitter().emit({
+        tenantId,
+        ...(recipientUserId ? { recipientUserId } : {}),
+        type: 'openwop-app.workflow.approval-needed',
+        priority: action.derivedFromUntrusted || action.riskLevel === 'high' ? 'high' : 'normal',
+        title: 'The assistant drafted an action for your approval',
+        // notify.ts discipline: draft text may derive from untrusted connected
+        // content (and free text can embed leaked credentials) — redact before
+        // it is persisted + Web-Pushed.
+        message: sanitizeFreeText(summarize(action)),
+        // Deep-link to this specific pending approval on /inbox (ADR 0336 Rec
+        // Phase 3): the emit carries the approvalId but not its own (not-yet-
+        // issued) notificationId, so ?approval= is the resolvable key.
+        actionUrl: `/inbox?approval=${encodeURIComponent(approval.approvalId)}`,
+        metadata: stripSecretsFromPersisted({ actionId: action.actionId, approvalId: approval.approvalId, kind: action.kind }),
+      });
+    } catch (err) {
+      // WF-COS-8 — best-effort, but NOT silent. THIS notification is how the
+      // principal learns an action is waiting on them; losing it strands the draft
+      // in the inbox with nobody told, which is invisible AND user-affecting.
+      log.warn('assistant_approval_notification_failed', {
+        tenantId,
+        actionId: action.actionId,
+        approvalId: approval.approvalId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
   return { ...action, approvalId: approval.approvalId };
 }
@@ -168,11 +228,24 @@ export async function decideActionViaApproval(
   tenantId: string,
   approvalId: string,
   outcome: 'approved' | 'rejected',
-  opts: { decidedByUserId?: string; note?: string; expectedContentHash?: string } = {},
+  opts: { decidedByUserId?: string; note?: string; expectedContentHash?: string; decider?: ActionActor } = {},
 ): Promise<AssistantActionDecision | null> {
   const approval = await getApproval(approvalId);
   if (!approval || approval.tenantId !== tenantId || !approval.actionId) return null;
   const actionId = approval.actionId;
+
+  // ADR 0878 D6 (pre-code Blocker 1) — the org check lives HERE, in the one function
+  // every decide lane reaches. Eligibility (`assertApprovalEligibility`) runs on the
+  // generic lanes only; the assistant's own approve/reject route calls this directly
+  // and never reached it. A reject is a decision about the org's reply too. Refused
+  // BEFORE the CAS: nothing is consumed.
+  {
+    const current = await getPendingAction(tenantId, actionId);
+    const actor: ActionActor = opts.decider ?? { spellings: opts.decidedByUserId ? [opts.decidedByUserId] : [] };
+    if (current && !(await mayActOnAction(tenantId, current, actor))) {
+      throw new OpenwopError('forbidden_scope', 'Deciding this action requires write access in the organization it belongs to.', 403, { requiredScope: ASSISTANT_WRITE_SCOPE, actionId });
+    }
+  }
 
   // ADR 0862 D1 — the hash is REQUIRED here, in the one decision function every lane
   // reaches (`/approvals/:id/claim`, `/reviews/:id/actions/approve`, the assistant route).
@@ -299,7 +372,9 @@ const CARD_FIELDS: Record<PendingActionKind, readonly CardField[]> = {
   'email.send': [{ field: 'to', mode: 'scalar' }, { field: 'subject', mode: 'scalar' }],
   'calendar.invite': [{ field: 'to', mode: 'scalar' }, { field: 'event', mode: 'passthrough' }],
   'calendar.reschedule': [{ field: 'eventId', mode: 'scalar' }, { field: 'patch', mode: 'passthrough' }],
-  'servicedesk.reply': [{ field: 'ticketId', mode: 'scalar' }],
+  // ADR 0878 (SD2UX-2) — WHERE the reply goes (`whatsapp` / `widget` / `none`), so an
+  // approver can see that approving a `none` reply sends nothing.
+  'servicedesk.reply': [{ field: 'ticketId', mode: 'scalar' }, { field: 'replyChannel', mode: 'scalar' }],
   nudge: [{ field: 'to', mode: 'scalar' }],
 };
 
@@ -392,6 +467,12 @@ export function registerAssistantActionApproval(deps?: StartRunDeps): void {
         { requiredScope: ASSISTANT_WRITE_SCOPE, actionId: approval.actionId },
       );
     }
+    // ADR 0878 D6 — and an org's action needs write in THAT org. The decide core
+    // repeats this for the lane that never reaches eligibility (the assistant route).
+    const action = approval.actionId ? await getPendingAction(tenantId, approval.actionId) : null;
+    if (action && !(await mayActOnAction(tenantId, action, { spellings: opts?.spellings?.length ? opts.spellings : [decidedBy] }))) {
+      throw new OpenwopError('forbidden_scope', 'Deciding this action requires write access in the organization it belongs to.', 403, { requiredScope: ASSISTANT_WRITE_SCOPE, actionId: approval.actionId });
+    }
   });
   // UX_UPGRADE-assistant R2 (AST2-M2) — deleting the assistant agent used to
   // STRAND every action waiting on it. `deleteRosterMemberCascade` hard-deletes
@@ -435,6 +516,13 @@ export function registerAssistantActionApproval(deps?: StartRunDeps): void {
     }
   });
   registerAssistantActionApprovalHandler(decideActionViaApproval);
+  // ADR 0878 (grade-code SD2CD-3) — a support-reply approval created before rows
+  // carried `orgId` is still that org's: recover it approval → action → ticket.
+  registerApprovalOrgResolver('assistant-action', async (tenantId, a) => {
+    if (!a.actionId) return undefined;
+    const action = await getPendingAction(tenantId, a.actionId);
+    return action ? orgOfAction(tenantId, action) : undefined;
+  });
   registerAssistantActionProjector(async (tenantId, actionId, viewer) => {
     const action = await getPendingAction(tenantId, actionId);
     if (!action) return null;
@@ -444,6 +532,10 @@ export function registerAssistantActionApproval(deps?: StartRunDeps): void {
     // and `/reviews`. Same predicate as the decide gate, same two request-level exits.
     // An internal caller (no viewer) reads the full card.
     if (viewer && !viewer.isOperator && !viewer.isPersonalOwner && !(await hasAssistantWriteAuthority(tenantId, viewer.subject))) {
+      return { actionId: action.actionId, kind: action.kind, status: action.status, withheld: true };
+    }
+    // ADR 0878 D6 — and an org's action is that org's to read.
+    if (viewer && !(await mayActOnAction(tenantId, action, { spellings: viewer.subject ? [viewer.subject] : [], ...(viewer.isOperator ? { isOperator: true } : {}), ...(viewer.isPersonalOwner ? { isPersonalOwner: true } : {}) }))) {
       return { actionId: action.actionId, kind: action.kind, status: action.status, withheld: true };
     }
     return projectActionCard(action);

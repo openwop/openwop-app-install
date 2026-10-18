@@ -10,15 +10,18 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup, screen, fireEvent } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
+import type { ComponentProps } from 'react';
+import type { EmbeddedChatPanel } from '../../../chat/EmbeddedChatPanel.js';
 
 const access = vi.hoisted(() => ({ useFeatureAccess: vi.fn() }));
 import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
 vi.mock('../../../featureToggles/FeatureAccessContext.js', () => ({
   useFeatureAccess: access.useFeatureAccess,
 }));
-const embedded = vi.hoisted(() => ({ props: [] as Array<Record<string, unknown>> }));
+type EmbeddedProps = ComponentProps<typeof EmbeddedChatPanel>;
+const embedded = vi.hoisted(() => ({ props: [] as EmbeddedProps[] }));
 vi.mock('../../../chat/EmbeddedChatPanel.js', () => ({
-  EmbeddedChatPanel: (p: Record<string, unknown>) => { embedded.props.push(p); return <div data-testid="embedded-chat" />; },
+  EmbeddedChatPanel: (p: EmbeddedProps) => { embedded.props.push(p); return <div data-testid="embedded-chat" />; },
 }));
 
 import { CadAssistExtras } from '../CadAssistExtras.js';
@@ -36,12 +39,15 @@ describe('ADR 0515 — CAD assist entry', () => {
   it('toggle OFF: renders nothing (self-gating polarity)', () => {
     access.useFeatureAccess.mockReturnValue(makeFeatureAccess({ enabled: false, loading: false }));
     view();
+    // The slot gates on the CAD feature itself, not on some other toggle.
+    expect(access.useFeatureAccess).toHaveBeenCalledWith('cad');
     expect(screen.queryByRole('button', { name: /CAD Modeler/i })).toBeNull();
   });
 
   it('toggle ON: opens the drawer; the SHARED chat mounts scoped to the CAD Modeler', async () => {
     access.useFeatureAccess.mockReturnValue(makeFeatureAccess({ enabled: true, loading: false }));
     view();
+    expect(access.useFeatureAccess).toHaveBeenCalledWith('cad');
     fireEvent.click(screen.getByRole('button', { name: /Ask the CAD Modeler/i }));
     expect(screen.getByRole('region', { name: 'CAD Modeler' })).toBeTruthy();
     expect(await screen.findByTestId('embedded-chat')).toBeTruthy();
@@ -55,11 +61,12 @@ describe('ADR 0515 — CAD assist entry', () => {
     view();
     fireEvent.click(screen.getByRole('button', { name: /Ask the CAD Modeler/i }));
     await screen.findByTestId('embedded-chat');
-    const renderEmptyState = embedded.props[0]?.renderEmptyState as (onPick: (t: string) => void) => JSX.Element;
+    const renderEmptyState = embedded.props[0]?.renderEmptyState;
+    expect(renderEmptyState).toBeTypeOf('function');
     const picked: string[] = [];
-    render(<MemoryRouter>{renderEmptyState((t) => picked.push(t))}</MemoryRouter>);
+    render(<MemoryRouter>{renderEmptyState!((t) => { picked.push(t); })}</MemoryRouter>);
     const example = screen.getAllByRole('button', { name: /cv-cad-42/ });
-    expect(example.length).toBeGreaterThanOrEqual(3); // every example names THIS canvas
+    expect(example).toHaveLength(3); // every example names THIS canvas
     fireEvent.click(example[0]!);
     expect(picked[0]).toContain('cv-cad-42');
   });

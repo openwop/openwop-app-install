@@ -1,3 +1,10 @@
+/**
+ * ADR 0139 — per-browser section-collapse state for both nav rails, in the
+ * `openwop.nav.expanded` cookie (inverted 2026-07-06: the cookie lists EXPANDED
+ * ids, sections are collapsed by default, only 'Workspace' opens on a fresh
+ * browser). Guards: the default seed, ignoring the legacy collapsed-ids cookie,
+ * an explicit empty set sticking, toggle round-trips, and value encoding.
+ */
 import { describe, it, expect, beforeEach } from 'vitest';
 import { readExpandedHeaders, writeExpandedHeaders, toggleExpandedHeader } from '../navCollapseCookie.js';
 
@@ -43,7 +50,9 @@ describe('navCollapseCookie', () => {
   });
 
   it('encodes ids safely (round-trips an id with separators)', () => {
-    writeExpandedHeaders(new Set(['Access & data']));
-    expect(readExpandedHeaders()).toEqual(new Set(['Access & data']));
+    // `;` is the cookie-attribute separator: written raw it would truncate the
+    // value (w35: the '&'-only fixture could not tell encoded from raw).
+    writeExpandedHeaders(new Set(['Access & data', 'A; B']));
+    expect(readExpandedHeaders()).toEqual(new Set(['Access & data', 'A; B']));
   });
 });

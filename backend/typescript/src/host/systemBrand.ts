@@ -21,6 +21,7 @@
  */
 import { createLogger } from '../observability/logger.js';
 import { ensureBrand, getBrand, updateBrand, type BrandInput } from '../features/brand/brandService.js';
+import { OpenwopError } from '../types.js';
 import { SYSTEM_SITE_TENANT, SYSTEM_SITE_ORG, ensureSystemSiteOrg } from './systemSite.js';
 import type { Brand } from '../features/brand/types.js';
 
@@ -77,8 +78,54 @@ export async function getAppBrand(): Promise<Brand> {
  */
 export async function editAppBrand(input: BrandInput, actor: string): Promise<Brand> {
   await ensureSystemBrand();
-  const next = await updateBrand(SYSTEM_SITE_TENANT, SYSTEM_BRAND_ID, input);
+  // ADR 0891 D9 — the audit row names the super-admin who made the edit (it said
+  // `editor`). The brand eraser scrubs these rows on every DSAR (D8).
+  const next = await updateBrand(SYSTEM_SITE_TENANT, SYSTEM_BRAND_ID, input, actor);
   if (!next) throw new Error('app brand missing after ensure');
   log.info('app_brand_edited', { actor });
   return next;
+}
+
+/**
+ * ADR 0883 correction — the typography the Appearance editor stored when a super
+ * admin picked "Editorial (default)" (or the "Clay (default)" preset) before the
+ * default display face changed. The editor copied the DEFAULT pairing into the
+ * override, so the old face stayed live after the default moved to Bricolage
+ * Grotesque (app.openwop.dev, 2026-10-14). Matched EXACTLY: an operator who chose
+ * Instrument Serif any other way keeps it.
+ */
+export const LEGACY_DEFAULT_TYPOGRAPHY = Object.freeze({
+  serif: '"Instrument Serif", "Times New Roman", serif',
+  sans: '"Geist", ui-sans-serif, system-ui, sans-serif',
+  mono: '"Geist Mono", ui-monospace, "SF Mono", Menlo, monospace',
+  fontsHref: 'https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@300;400;500;600;700&family=Geist+Mono:wght@400;500&display=swap',
+});
+
+function isLegacyDefaultTypography(t: Record<string, unknown> | undefined): boolean {
+  if (!t) return false;
+  const keys = Object.keys(t).filter((k) => t[k] !== undefined);
+  const legacy = LEGACY_DEFAULT_TYPOGRAPHY as Record<string, string>;
+  return keys.length === Object.keys(legacy).length && keys.every((k) => t[k] === legacy[k]);
+}
+
+/**
+ * Drop a frozen copy of the legacy default typography from the app brand, so the
+ * app follows its shipped face again. Every other identity field is kept. The
+ * write is a CAS on `updatedAt`, so a super admin's concurrent edit wins and is
+ * never clobbered; a second boot finds nothing to do. Idempotent.
+ */
+export async function clearLegacyDefaultTypography(): Promise<{ cleared: boolean; reason: 'cleared' | 'absent' | 'operator-choice' | 'concurrent-edit' }> {
+  const brand = await getAppBrand();
+  const identity = brand.identity as (Record<string, unknown> & { typography?: Record<string, unknown> }) | undefined;
+  if (!identity?.typography) return { cleared: false, reason: 'absent' };
+  if (!isLegacyDefaultTypography(identity.typography)) return { cleared: false, reason: 'operator-choice' };
+  const { typography: _legacy, ...rest } = identity;
+  try {
+    await updateBrand(SYSTEM_SITE_TENANT, SYSTEM_BRAND_ID, { identity: rest, expectedUpdatedAt: brand.updatedAt }, SYSTEM_ACTOR);
+  } catch (err) {
+    if (err instanceof OpenwopError && err.httpStatus === 409) return { cleared: false, reason: 'concurrent-edit' };
+    throw err;
+  }
+  log.info('app_brand_legacy_typography_cleared', { brandId: SYSTEM_BRAND_ID });
+  return { cleared: true, reason: 'cleared' };
 }

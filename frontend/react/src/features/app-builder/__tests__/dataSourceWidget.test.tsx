@@ -11,9 +11,10 @@ import type { PropertyWidgetProps } from '../../../canvas/types.js';
 
 const Widget = appBuilderDefinition.propertyWidgets!.dataSource!;
 
-function props(over: Partial<PropertyWidgetProps> = {}): PropertyWidgetProps {
+function props(over: { value?: unknown; docState?: Record<string, unknown> } = {}): PropertyWidgetProps {
   return {
     id: 'prop-bind',
+    orgId: 'o1', // required by PropertyWidgetProps — the old Partial<> spread hid its absence
     def: { name: 'bind', type: 'dataSource', label: 'Data source' },
     value: '',
     onChange: vi.fn(),
@@ -27,8 +28,7 @@ function props(over: Partial<PropertyWidgetProps> = {}): PropertyWidgetProps {
 describe('DataSourceRefWidget', () => {
   it('lists the doc dataSources as options', () => {
     render(<Widget {...props()} />);
-    expect(screen.getByRole('option', { name: 'Orders' })).toBeTruthy();
-    expect(screen.getByRole('option', { name: 'Users' })).toBeTruthy();
+    expect(screen.getAllByRole('option').map((o) => o.textContent)).toEqual(['—', 'Orders', 'Users']);
   });
 
   it('emits the chosen source id (a string, declarative)', () => {
@@ -47,7 +47,7 @@ describe('DataSourceRefWidget', () => {
 
   it('shows an empty-state placeholder when the doc has no sources', () => {
     render(<Widget {...props({ docState: {} })} />);
-    // only the placeholder option, no source options
-    expect(screen.getAllByRole('option')).toHaveLength(1);
+    // only the placeholder option, and it SAYS there are none (not a bare '—')
+    expect(screen.getAllByRole('option').map((o) => o.textContent)).toEqual(['No data sources yet']);
   });
 });

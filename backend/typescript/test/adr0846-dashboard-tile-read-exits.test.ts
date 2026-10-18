@@ -55,7 +55,6 @@ const terr = (orgId: string): string => `/host/openwop-app/territories/orgs/${en
 const crm = (orgId: string): string => `/host/openwop-app/crm/orgs/${encodeURIComponent(orgId)}`;
 const bi = (orgId: string): string => `/host/openwop-app/bi/orgs/${encodeURIComponent(orgId)}`;
 const sched = (orgId: string, suffix = ''): string => `/host/openwop-app/scheduled-chats/orgs/${encodeURIComponent(orgId)}/chats${suffix}`;
-const CH = '/host/openwop-app/channels';
 const SCHED_JOBS = '/host/openwop-app/scheduler/jobs';
 
 async function members(): Promise<{ owner: Client; rep: Client; repId: string; ownerId: string; tenantId: string; orgId: string }> {
@@ -142,8 +141,12 @@ describe('ADR 0846 D4 — the pipeline report withholds org-wide history from a 
 describe('ADR 0846 D1 — a scheduled chat is managed only by someone who can see its conversation', () => {
   it('list hides, and get/pause/delete 404, a schedule bound to a private conversation; the owner keeps it', async () => {
     const m = await members();
-    const priv = (await m.owner.post(CH, { name: `a0846p-${n++}`, visibility: 'private', agentIds: ['a0846.agent'] })).body.channel.conversationId as string;
-    const pub = (await m.owner.post(CH, { name: `a0846o-${n++}`, visibility: 'public', agentIds: ['a0846.agent'] })).body.channel.conversationId as string;
+    // ADR 0879 D7 — an ORG schedule can no longer target a channel (channel posts are
+    // scheduled from the channel's own owner-gated lane), so the private/visible pair is
+    // now the owner's own conversation (hidden from the rep) and a DM WITH the rep.
+    const priv = (await m.owner.post('/host/openwop-app/chat/sessions', { title: `a0846p-${n++}` })).body.sessionId as string;
+    const pub = (await m.owner.post('/host/openwop-app/chat/conversations/open', { type: 'person', subjectRef: `user:${m.repId}` })).body.sessionId as string;
+    expect(priv && pub).toBeTruthy();
     const hidden = await m.owner.post(sched(m.orgId), { agentId: 'a0846.agent', prompt: 'secret-standing-instruction', conversationId: priv, cronExpr: '0 9 * * *' });
     expect(hidden.status, hidden.text).toBe(201);
     const open = await m.owner.post(sched(m.orgId), { agentId: 'a0846.agent', prompt: 'public digest', conversationId: pub, cronExpr: '0 9 * * *' });

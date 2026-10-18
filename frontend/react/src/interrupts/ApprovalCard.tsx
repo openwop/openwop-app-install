@@ -7,7 +7,7 @@ import { Notice } from '../ui/index.js';
 import { decideErrorMessage } from './decideErrorMessage.js';
 import { useReviewStatusByRunNode } from '../chat/reviews/reviewStatusStore.js';
 import { confirm } from '../ui/confirm.js';
-import { GateEvidence } from '../chat/reviews/GateEvidence.js';
+import { GateEvidence, isBrowserActionGate } from '../chat/reviews/GateEvidence.js';
 
 interface Props {
   runId: string;
@@ -76,9 +76,13 @@ export function ApprovalCard({ runId, nodeId, data, onResolved }: Props) {
     // deliberately NOT gated: it continues a run the user asked for, and a
     // confirm on the common path is the kind of friction people learn to click
     // through, which would weaken this one.
+    // ADR 0894 — a browser-action gate's reject ends the browser SESSION, not
+    // the run (the decide node records the denial and the run completes), so
+    // the generic "fail the run" copy would misdescribe it.
+    const browserGate = isBrowserActionGate(data);
     if (action === 'reject' && !(await confirm({
-      title: t('rejectConfirmTitle'),
-      body: t('rejectConfirmBody'),
+      title: t(browserGate ? 'cuRejectConfirmTitle' : 'rejectConfirmTitle'),
+      body: t(browserGate ? 'cuRejectConfirmBody' : 'rejectConfirmBody'),
       danger: true,
       confirmLabel: t('actionReject'),
     }))) return;

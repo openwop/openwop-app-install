@@ -54,7 +54,8 @@ const DIRECT_CATALOG_READS: Record<string, [number, string]> = {
   'features/kicktodo-creator/routes.ts': [1, 'isForeignOwned is checked before the read'],
   'features/workflow-author/routes.ts': [1, 'fixed host id (WORKFLOW_AUTHOR_META_ID)'],
   'features/creative-briefs/routes.ts': [1, 'fixed host id (CREATIVE_BRIEFS_REEL_ID)'],
-  'features/kicktodo-creator/agentTools.ts': [1, 'fixed host id (CHALLENGE_FACTORY_WORKFLOW_ID)'],
+  // ADR 0903 D7 — agentTools.ts no longer reads the Challenge Factory definition
+  // (it read the chain's pinned AI defaults, which are gone), so its entry shrank away.
   'host/workflowComposeTool.ts': [1, 'id-COLLISION check on a draft being composed; executes nothing (row 16 author lane)'],
 };
 
@@ -62,7 +63,6 @@ const DIRECT_CATALOG_READS: Record<string, [number, string]> = {
 const FIXED_ID_FILES = [
   'features/workflow-author/routes.ts',
   'features/creative-briefs/routes.ts',
-  'features/kicktodo-creator/agentTools.ts',
 ];
 
 /** file → [pinned call count, how the definition it runs is resolved]. */
@@ -85,6 +85,7 @@ const RUN_MINTERS: Record<string, [number, string]> = {
   'host/workforceService.ts': [1, 'seeds historical records for host-defined workforces; executes nothing'],
   'host/workforceEval.ts': [1, 'eval record under the fixed EVAL_SUITE_ID; executes no workflow definition'],
   'host/anonymousActor.ts': [1, 'synthetic anon-surface run, no workflow definition'],
+  'host/evals/createEvalRun.ts': [1, 'ADR 0889 eval run under the synthetic eval:<suite> workflowId; drives an agent resolved by resolveAgentForTenant, executes no workflow definition'],
   'routes/artifactTypeSeam.ts': [1, 'test seam with its own inline definition'],
   'routes/compensationSeam.ts': [2, 'test seam with its own inline definition'],
   'routes/effectSeamFireSeam.ts': [1, 'test seam with its own inline definition'],

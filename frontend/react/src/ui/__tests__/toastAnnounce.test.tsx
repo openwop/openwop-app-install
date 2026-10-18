@@ -19,8 +19,8 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { render, cleanup, screen, act, within, fireEvent } from '@testing-library/react';
-import { GlobalLiveRegion } from '../announce.js';
-import { toast, dismiss } from '../toast.js';
+import { GlobalLiveRegion, announce } from '../announce.js';
+import { toast, dismiss, getToasts } from '../toast.js';
 // The view directly: `Toaster` lazy-loads it, and these assertions are synchronous.
 import { ToasterView as Toaster } from '../ToasterView.js';
 
@@ -43,7 +43,14 @@ const assertive = (): string => document.querySelector('[data-owp-live="assertiv
 const region = (): ReturnType<typeof within> =>
   within(screen.getByRole('region', { name: 'Notifications' }));
 
-beforeEach(() => { /* fresh document per test */ });
+// The toast store and the announcer are MODULE-LEVEL, and an error toast never
+// times out — so without this every case inherited the earlier cases' stacked
+// errors and spoken text, and passed under shuffle by care, not by isolation.
+beforeEach(() => {
+  for (const t of getToasts()) dismiss(t.id);
+  announce('');
+  announce('', { assertive: true });
+});
 afterEach(cleanup);
 
 describe('toast — announcement', () => {
@@ -167,7 +174,8 @@ describe('toast — timing is adjustable (WCAG 2.2.1)', () => {
     vi.useFakeTimers();
     mount();
     act(() => { toast.error('Sticky'); });
-    // Errors persist, so earlier tests' toasts may still be stacked: take this one's.
+    // Scoped to this toast's own card (the store is reset per case, but the close
+    // button must be this toast's, not the "Dismiss all" control).
     const close = within(region().getByText('Sticky').closest('.toast') as HTMLElement).getByRole('button');
     act(() => { close.focus(); });
     act(() => { fireEvent.click(close); });
@@ -184,7 +192,10 @@ describe('toast — persistent errors cannot wall off the page', () => {
     act(() => { ['E1', 'E2', 'E3', 'E4', 'E5'].forEach((m) => toast.error(m)); });
     const r = region();
     expect(r.queryByText('E1')).toBeNull(); // oldest waits its turn
-    expect(r.getByText('E5')).toBeTruthy();
+    // EXACTLY the newest four — E1 absent alone could not tell 3 visible from 4
+    // (w49 probe `ta-max`: MAX_VISIBLE = 3 stayed green).
+    for (const m of ['E2', 'E3', 'E4', 'E5']) expect(r.getByText(m)).toBeTruthy();
+    expect(document.querySelectorAll('.toast-stack .toast')).toHaveLength(4);
     act(() => { fireEvent.click(r.getByRole('button', { name: /Dismiss all/ })); });
     expect(screen.getByRole('region', { name: 'Notifications' }).textContent).toBe('');
   });

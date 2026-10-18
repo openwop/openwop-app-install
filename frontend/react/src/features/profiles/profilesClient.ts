@@ -58,9 +58,13 @@ export interface ProfileAvailability {
   hoursPerWeek?: number;
   status?: AvailabilityStatus;
 }
-export interface Profile {
+/**
+ * ADR 0888 D2 — what a PEER sees (the directory, `GET /:userId`, an endorse
+ * response): an allowlist. No pins, no knowledge pointers, no share list, no
+ * tenant id — those are the owner's, on {@link Profile}.
+ */
+export interface TeamProfile {
   userId: string;
-  tenantId: string;
   /** ADR 0320 — what agents should call you (preferred/first name). */
   preferredName?: string;
   jobTitle?: string;
@@ -73,27 +77,47 @@ export interface Profile {
   equipment: string[];
   availability?: ProfileAvailability;
   interests: string[];
-  /** ADR 0025 — the user's assigned-workflow portfolio (workflow ids). */
+  /** ADR 0025 — the user's assigned-workflow portfolio (workflow ids). Empty in a
+   *  shared-workspace view: home-tenant workflow ids do not resolve there. */
   workflows: string[];
-  /** Roster member ids pinned to the sidebar (ADR 0023). */
-  pinnedAgentIds: string[];
-  /** Roster member ids pinned to the AI-chat welcome "hand it to an agent" row. */
-  pinnedChatAgentIds?: string[];
   completeness: number;
-  /**
-   * ADR 0624 D4 / PROF-UX-14 — what the meter is missing, ordered by weight
-   * desc, so the SPA can say what to do NEXT. SELF-ONLY: served by the `/me`
-   * lane routes (`GET`/`PATCH /me`, avatar, portfolio, skills, workflows, pins)
-   * and NEVER by `/team` or `GET /:userId` — hence optional on this shared
-   * type; the meter caption renders nothing when absent. `field` is one of
-   * `COMPLETENESS_FIELD_IDS` (typed loosely so a newer backend's id degrades
-   * to the raw-id fallback instead of a type hole).
-   */
-  completenessMissing?: Array<{ field: CompletenessFieldId | (string & Record<never, never>); weight: number }>;
   emailVerified?: boolean;
   displayName?: string;
   createdAt: string;
   updatedAt: string;
+}
+
+/** The OWNER's profile (the `/me` lane): the team view plus what only they see. */
+export interface Profile extends TeamProfile {
+  tenantId: string;
+  /** Roster member ids pinned to the sidebar (ADR 0023). */
+  pinnedAgentIds: string[];
+  /** Roster member ids pinned to the AI-chat welcome "hand it to an agent" row. */
+  pinnedChatAgentIds?: string[];
+  /** ADR 0888 D1 — the workspaces whose directory lists this profile. */
+  sharedWorkspaceIds?: string[];
+  /**
+   * ADR 0624 D4 / PROF-UX-14 — what the meter is missing, ordered by weight
+   * desc, so the SPA can say what to do NEXT. SELF-ONLY: served by the `/me`
+   * lane routes and NEVER by `/team` or `GET /:userId`. `field` is one of
+   * `COMPLETENESS_FIELD_IDS` (typed loosely so a newer backend's id degrades
+   * to the raw-id fallback instead of a type hole).
+   */
+  completenessMissing?: Array<{ field: CompletenessFieldId | (string & Record<never, never>); weight: number }>;
+}
+
+/** ADR 0888 D1 — the directory and which one it is: the reader's home tenant, or
+ *  a shared workspace that lists only the people who shared their profile with it. */
+export interface TeamDirectory {
+  scope: 'home' | 'workspace';
+  workspaceId?: string;
+  /** Workspace scope: its display name, so the page says WHERE a share publishes. */
+  workspaceName?: string;
+  /** Workspace scope: whether the reader's own profile is shared here. */
+  sharedByMe?: boolean;
+  /** Workspace scope: the directory hit its cap. */
+  truncated?: boolean;
+  profiles: TeamProfile[];
 }
 
 const base = `${config.baseUrl}/host/openwop-app/profiles`;
@@ -183,15 +207,33 @@ export async function updateMyProfile(patch: ProfilePatch): Promise<Profile> {
   return asJson<Profile>(res, 'updateMyProfile');
 }
 
-export async function listProfiles(): Promise<Profile[]> {
+/** ADR 0888 D1 — the directory WITH its scope (the `/team` page needs to say
+ *  which one it is showing). */
+export async function getTeamDirectory(): Promise<TeamDirectory> {
   const res = await fetch(base, fetchOpts({ headers: authedHeaders() }));
-  const body = await asJson<{ profiles: Profile[] }>(res, 'listProfiles');
-  return body.profiles;
+  const body = await asJson<TeamDirectory>(res, 'listProfiles');
+  return { ...body, scope: body.scope === 'workspace' ? 'workspace' : 'home' };
 }
 
-export async function getProfile(userId: string): Promise<Profile> {
+export async function listProfiles(): Promise<TeamProfile[]> {
+  return (await getTeamDirectory()).profiles;
+}
+
+export async function getProfile(userId: string): Promise<TeamProfile> {
   const res = await fetch(`${base}/${encodeURIComponent(userId)}`, fetchOpts({ headers: authedHeaders() }));
-  return asJson<Profile>(res, 'getProfile');
+  return asJson<TeamProfile>(res, 'getProfile');
+}
+
+/** ADR 0888 D1 — list MY profile in the active workspace's directory. */
+export async function shareProfileWithWorkspace(): Promise<Profile> {
+  const res = await fetch(`${base}/me/workspace-share`, fetchOpts({ method: 'PUT', headers: authedHeaders() }));
+  return asJson<Profile>(res, 'shareProfileWithWorkspace');
+}
+
+/** ADR 0888 D1 — stop listing MY profile in one workspace's directory. */
+export async function stopSharingProfile(workspaceId: string): Promise<Profile> {
+  const res = await fetch(`${base}/me/workspace-share/${encodeURIComponent(workspaceId)}`, fetchOpts({ method: 'DELETE', headers: authedHeaders() }));
+  return asJson<Profile>(res, 'stopSharingProfile');
 }
 
 export async function setMySkills(skills: { name: string; proficiency: number }[]): Promise<Profile> {
@@ -246,14 +288,14 @@ export async function removePortfolio(token: string): Promise<Profile> {
   return asJson<Profile>(res, 'removePortfolio');
 }
 
-export async function endorseSkill(userId: string, skill: string): Promise<Profile> {
+export async function endorseSkill(userId: string, skill: string): Promise<TeamProfile> {
   const res = await fetch(`${base}/${encodeURIComponent(userId)}/skills/${encodeURIComponent(skill)}/endorse`, fetchOpts({ method: 'POST', headers: authedHeaders() }));
-  return asJson<Profile>(res, 'endorseSkill');
+  return asJson<TeamProfile>(res, 'endorseSkill');
 }
 
-export async function unendorseSkill(userId: string, skill: string): Promise<Profile> {
+export async function unendorseSkill(userId: string, skill: string): Promise<TeamProfile> {
   const res = await fetch(`${base}/${encodeURIComponent(userId)}/skills/${encodeURIComponent(skill)}/endorse`, fetchOpts({ method: 'DELETE', headers: authedHeaders() }));
-  return asJson<Profile>(res, 'unendorseSkill');
+  return asJson<TeamProfile>(res, 'unendorseSkill');
 }
 
 /** Upload an image to the media surface and return its stored token. */

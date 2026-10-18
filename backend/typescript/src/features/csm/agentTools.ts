@@ -54,6 +54,39 @@ async function csmEnabled(tenantId: string, actingUserId: string | undefined): P
   return Boolean(assignment?.enabled);
 }
 
+export const CSM_RENEWALS_DUE_TOOL_ID = 'openwop:feature.csm.nodes.renewals-due';
+
+/**
+ * The route predicate both tools share (CSMWF-1 / ADR 0645 D1): toggle, then FAIL
+ * EMPTY without a human, then entitlement + `workspace:read` in the tenant. Returns
+ * a ToolResult to send back, or null when the caller may read.
+ */
+async function gateRead(scope: BundleScope, empty: Record<string, unknown>): Promise<ToolResult | null> {
+  if (!(await csmEnabled(scope.tenantId, scope.actingUserId))) {
+    return toolError('feature_disabled', 'CSM is not enabled for this workspace — tell the user you cannot read customer-success accounts here.');
+  }
+  // FAIL EMPTY — a scheduled/system turn with no human principal must not
+  // enumerate a workspace's accounts.
+  if (!scope.actingUserId) return { content: JSON.stringify(empty) };
+  // CSMWF-1 / ADR 0645 D1 — SHARE THE ROUTE'S PREDICATE. `GET /accounts`
+  // gates on `workspace:read`; this tool used to gate on the toggle alone and
+  // then do a tenant-wide `listAccounts`, so a member with no `workspace:read`
+  // was refused by the route and handed the whole account book through chat.
+  // `assertTenantScope` is the same predicate `requireTenantScope` wraps for the
+  // HTTP lane. Sharing the DATA adapter (`buildCsmSurface`) is not sharing the
+  // ACCESS predicate — conflating the two is what hid this.
+  try {
+    await checkTenantEntitlement(scope.tenantId, TOGGLE_ID);
+    await assertTenantScope(scope.tenantId, scope.actingUserId, 'workspace:read', {
+      ...(scope.personalTenant ? { personalTenant: scope.personalTenant } : {}),
+    });
+  } catch (err) {
+    if (err instanceof OpenwopError) return toolError(err.code, err.message, err.details ?? undefined);
+    return toolFailLog(csmLog, 'openwop:csm', err);
+  }
+  return null;
+}
+
 export function registerCsmAgentTools(): void {
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
@@ -73,31 +106,8 @@ export function registerCsmAgentTools(): void {
       },
     },
     async run(input, scope: BundleScope): Promise<ToolResult> {
-      if (!(await csmEnabled(scope.tenantId, scope.actingUserId))) {
-        return toolError('feature_disabled', 'CSM is not enabled for this workspace — tell the user you cannot read customer-success accounts here.');
-      }
-      // FAIL EMPTY — a scheduled/system turn with no human principal must not
-      // enumerate a workspace's accounts.
-      if (!scope.actingUserId) return { content: JSON.stringify({ accounts: [] }) };
-      // CSMWF-1 / ADR 0645 D1 — SHARE THE ROUTE'S PREDICATE. `GET /accounts`
-      // gates on `workspace:read` (`routes.ts:150`); this tool used to gate on
-      // the toggle alone and then do a tenant-wide `listAccounts`, so a member
-      // with no `workspace:read` was refused by the route and handed the whole
-      // account book — ARR, renewal dates, owner attribution — through chat.
-      // `assertTenantScope` is the same predicate `requireTenantScope` wraps for
-      // the HTTP lane, and the sibling `crm/agentTools.ts` already calls it.
-      // `read`, not `write`: this tool only reads, and over-gating would refuse
-      // legitimate readers. Sharing the DATA adapter (`buildCsmSurface`) is not
-      // sharing the ACCESS predicate — conflating the two is what hid this.
-      try {
-        await checkTenantEntitlement(scope.tenantId, TOGGLE_ID);
-        await assertTenantScope(scope.tenantId, scope.actingUserId, 'workspace:read', {
-          ...(scope.personalTenant ? { personalTenant: scope.personalTenant } : {}),
-        });
-      } catch (err) {
-        if (err instanceof OpenwopError) return toolError(err.code, err.message, err.details ?? undefined);
-        return toolFailLog(csmLog, 'openwop:csm', err);
-      }
+      const refused = await gateRead(scope, { accounts: [] });
+      if (refused) return refused;
       const accountId = str(input.accountId);
       try {
         const surface = buildCsmSurface(scope);
@@ -106,6 +116,38 @@ export function registerCsmAgentTools(): void {
       } catch (err) {
         if (err instanceof OpenwopError) return toolError(err.code, err.message, err.details ?? undefined);
         return toolFailLog(csmLog, 'openwop:csm', err); // CFPT-6
+      }
+    },
+  });
+
+  // ADR 0882 D8 — the renewal window, for "what renews this quarter?". Same
+  // predicate, same fail-empty, same adapter as the nodes and the route.
+  registerFeatureAgentTool({
+    contentTrust: 'untrusted',
+    effect: 'read',
+    def: {
+      name: CSM_RENEWALS_DUE_TOOL_ID,
+      description:
+        'List customer-success accounts whose renewal date falls within `days` (default 90, max 366), soonest first; '
+        + 'overdue renewals are included with `overdue: true`. Returns { asOf, days, accounts }. Read-only — it does not '
+        + 'create tasks (the Renewal Runway play on the CSM page does).',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          days: { type: 'number', description: 'Optional look-ahead window in days (0–366). Default 90.' },
+        },
+        additionalProperties: false,
+      },
+    },
+    async run(input, scope: BundleScope): Promise<ToolResult> {
+      const refused = await gateRead(scope, { accounts: [] });
+      if (refused) return refused;
+      try {
+        const surface = buildCsmSurface(scope);
+        return { content: JSON.stringify(await surface.listRenewalsDue!({ ...(input.days !== undefined ? { days: input.days } : {}) })) };
+      } catch (err) {
+        if (err instanceof OpenwopError) return toolError(err.code, err.message, err.details ?? undefined);
+        return toolFailLog(csmLog, 'openwop:csm', err);
       }
     },
   });

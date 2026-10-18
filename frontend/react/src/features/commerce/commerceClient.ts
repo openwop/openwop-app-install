@@ -143,3 +143,14 @@ export const createQuoteShareLink = (orgId: string, quoteId: string): Promise<{ 
 
 /** The public storefront path for an org (link out from the admin). */
 export const storefrontPath = (orgId: string): string => `/store/${encodeURIComponent(orgId)}`;
+
+/** ADR 0877 D6 — which lane this store's checkout settles on. `demo` means no card
+ *  is charged; `reason` says why (and so what the owner can do about it). */
+export type PaymentsDemoReason = 'no_key' | 'anon' | 'connect_required' | 'connect_incomplete' | 'connect_disabled' | 'connect_region';
+export interface PaymentsReadiness {
+  settlement: 'platform' | 'connect' | 'demo';
+  reason?: PaymentsDemoReason;
+  applicationFeePct?: number;
+  connectAvailable: boolean;
+}
+export const getPaymentsReadiness = (orgId: string): Promise<PaymentsReadiness> => get(`${orgBase(orgId)}/payments`, 'getPaymentsReadiness');

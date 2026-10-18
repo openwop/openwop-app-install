@@ -200,6 +200,21 @@ export interface Storage {
     limit?: number;
     before?: { createdAt: string; runId: string };
   }): Promise<readonly RunRecord[]>;
+  /** #4531 — the home tiles' "my runs" read, done in the database. Scans at most
+   *  `scanCap` of the tenant's newest runs (`created_at DESC, run_id DESC` on the
+   *  tenant index — the BOUNDED inner LIMIT; a bare jsonb predicate under the outer
+   *  LIMIT would scan the whole tenant when the caller owns few runs), keeps the rows
+   *  whose owner MAY be `owner` (stamp principal, anon principal, or legacy
+   *  `actingUserId` — a superset the caller re-checks exactly with `runOwner`), and
+   *  returns at most `limit` of them as five columns plus the four owner keys of
+   *  `metadata`. No `owner` ⇒ every scanned row. `scanExhausted` is true when the
+   *  tenant has runs older than the scan reached. */
+  listRunSummaries(filter: {
+    tenantId: string;
+    owner?: { principal: string; subject: string };
+    scanCap: number;
+    limit: number;
+  }): Promise<{ runs: readonly RunSummaryRow[]; scanExhausted: boolean }>;
   /** Child runs of a parent (snapshot `childRuns` + the cancel cascade) —
    *  served by the parent_run_id index so it never scans the tenant's runs
    *  (the O(tenant) listRuns+filter it replaced blew the 30s statement
@@ -1256,6 +1271,13 @@ export interface Storage {
    *  (ADR 0067) — append can't (the messageId is unique). Does NOT touch
    *  `message_count` (no new message). */
   updateChatMessageContent(sessionId: string, messageId: string, content: string, meta: string | null): Promise<boolean>;
+  /** ADR 0879 D6 — DSAR: in ONE tenant-scoped write, every message of a session in
+   *  `tenantId` whose `author_subject` is in `authorRefs` becomes the ADR 0195
+   *  tombstone (`{"deleted":true}`, meta `{"deletedAt":<at>,"erased":true}`) and its
+   *  author becomes `replacementAuthor`; each touched session's `updated_at` moves
+   *  to `at`, so the search index (watermarked on `messageCount:updatedAt`)
+   *  re-indexes. Returns the number of messages rewritten. Idempotent. */
+  redactChatMessagesByAuthor(tenantId: string, authorRefs: readonly string[], replacementAuthor: string, at: string): Promise<number>;
   /** The `author_subject` of a single message (for the edit-authz gate, ADR 0102
    *  Phase 2), or `undefined` if no such message exists. A present row with a null
    *  author returns `{ authorSubject: null }` (legacy/anon ⇒ owner-writable). */
@@ -1391,8 +1413,13 @@ export interface Storage {
    *  in the WHERE predicate, so a silent cross-tenant move is impossible; the
    *  ONE legitimate tenant move (the boot `_anon` → `default` legacy migration
    *  in `loadUserAgentsIntoRegistry`) passes the OLD tenant explicitly and
-   *  writes the new one from the record. Returns true when a row matched. */
-  updateUserAgent(expectedTenantId: string, record: UserAgentRecord): Promise<boolean>;
+   *  writes the new one from the record. Returns true when a row matched.
+   *
+   *  ADR 0775 P4 (`ARWF-11`) — with `expected`, the update is a compare-and-swap:
+   *  it matches only while every editable column still equals `expected`'s value
+   *  (null-safe), so a concurrent edit makes it return false instead of being
+   *  overwritten. */
+  updateUserAgent(expectedTenantId: string, record: UserAgentRecord, expected?: UserAgentRecord): Promise<boolean>;
 
   // ── messaging relay-gateway (demo host-extension; NON-normative) ──
   // Device tokens are persisted as a SHA-256 hash only (see RelayDeviceRecord).
@@ -1569,4 +1596,17 @@ export interface Storage {
 
   // ── lifecycle ──
   close(): Promise<void>;
+}
+
+/** #4531 — the five columns `listRunSummaries` returns, plus the owner keys of
+ *  `metadata` (`owner`, `anonPrincipal`, `principalKind`, `actingUserId`) that
+ *  `runOwner` reads. Never inputs, variables, configurable or error text. */
+export interface RunSummaryRow {
+  runId: string;
+  workflowId: string;
+  status: string;
+  createdAt: string;
+  completedAt?: string;
+  tenantId: string;
+  metadata: Record<string, unknown>;
 }

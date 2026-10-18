@@ -40,135 +40,184 @@ function str(v, max) {
   return max && t.length > max ? t.slice(0, max) : t;
 }
 
-/** Normalize one component node (recursive). Keeps only { type, props?, children? }
- *  — the closed canvas.app-builder shape; unknown keys are dropped. */
+/** Normalize one component node (recursive). ABR-RENDER-1: every field is
+ *  CARRIED — `hidden`/`locked` (ADR 0344), `actions`/`bindings` (ADR 0343) and
+ *  any key the model invented. This used to rebuild the node from
+ *  { type, props, children }, which erased a user's actions and bindings on
+ *  every get-design → render round trip. Closed-world is the validator's job
+ *  (validateAppDoc refuses unknown keys and bad values as typed errors); a
+ *  normalizer that drops what it does not recognise reports success over
+ *  data it destroyed. Only `type` is normalized (trimmed; required). */
 function normalizeComponent(raw, depth) {
   if (depth > 20) throw fail('component tree too deep (max 20)');
-  if (!raw || typeof raw !== 'object') throw fail('component is not an object');
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw fail('component is not an object');
   const type = str(raw.type, 80);
   if (!type) throw fail('every component needs a string `type`');
-  const out = { type };
-  if (raw.props && typeof raw.props === 'object' && !Array.isArray(raw.props)) out.props = raw.props;
-  if (Array.isArray(raw.children) && raw.children.length) {
-    out.children = raw.children.slice(0, 200).map((c) => normalizeComponent(c, depth + 1));
-  }
+  const out = { ...raw, type };
+  if (Array.isArray(raw.children)) out.children = raw.children.map((c) => normalizeComponent(c, depth + 1));
+  return out;
+}
+
+/** deepen's normalizer. deepen REPLACES a thin screen's tree with fresh model
+ *  output, so there is no user data in it to preserve, and its contract is
+ *  keep-the-original on any doubt. A key outside the component schema is the
+ *  model inventing a field: it is removed here, and on a host with the surface
+ *  the validator still judges every value. */
+const COMPONENT_KEYS = ['type', 'props', 'children', 'hidden', 'locked', 'actions', 'bindings'];
+function freshComponent(raw, depth) {
+  const node = normalizeComponent(raw, depth);
+  const out = {};
+  for (const k of COMPONENT_KEYS) if (node[k] !== undefined) out[k] = node[k];
+  if (Array.isArray(out.children)) out.children = out.children.map((c) => freshComponent(c, depth + 1));
   return out;
 }
 
 // Grade data-F6: normalize ids to the editor's slug rule (ID_RE in
 // validateAppDoc) — an AI id like "Home Screen" is schema-valid but would seed
 // a canvas whose EVERY save 422s. Slugified + deduped here so chat renders and
-// editor seeds always produce an editable doc; connector/navigateTo refs are
-// remapped by the caller via the returned mapping.
+// editor seeds always produce an editable doc; references are remapped by the
+// caller via the returned mapping. ABR-RENDER-1: an id that ALREADY satisfies
+// ID_RE is kept verbatim. Slugging lowercased it, so an editor id like
+// `Products` became `products` and every binding that named it broke.
+const ID_RE = /^(?=.*[A-Za-z0-9])[A-Za-z0-9._-]{1,80}$/;
+const POS_BOUND = 100000;
 function slugId(raw, fallback) {
   const v = typeof raw === 'string' ? raw.trim() : '';
+  if (ID_RE.test(v)) return v;
   const slug = v.toLowerCase().replace(/[^a-z0-9._-]+/g, '-').replace(/^[-.]+|[-.]+$/g, '').slice(0, 80);
   return /[a-z0-9]/.test(slug) ? slug : fallback;
 }
 
-// Grade data-F1: pass the ADR 0323 layout through — the plan node EMITS x/y
-// (Phase 4); dropping them here silently discarded every AI layout.
-const POS_BOUND = 100000;
-function finiteNum(v) { return typeof v === 'number' && Number.isFinite(v) ? Math.max(-POS_BOUND, Math.min(POS_BOUND, Math.round(v))) : undefined; }
-
 function normalizeScreen(raw, index, usedIds) {
-  if (!raw || typeof raw !== 'object') throw fail(`screen ${index} is not an object`);
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw fail(`screen ${index} is not an object`);
   let id = slugId(raw.id, `screen-${index + 1}`);
   while (usedIds.has(id)) id = `${id.slice(0, 70)}-${index + 1}`;
   usedIds.add(id);
-  const name = str(raw.name, 120) ?? id;
-  const out = { id, name };
-  const route = str(raw.route, 200); if (route) out.route = route;
-  if (raw.isInitial === true) out.isInitial = true;
-  const x = finiteNum(raw.x); if (x !== undefined) out.x = x;
-  const y = finiteNum(raw.y); if (y !== undefined) out.y = y;
-  if (Array.isArray(raw.components)) out.components = raw.components.slice(0, 200).map((c) => normalizeComponent(c, 0));
+  // Every other field is carried as-is (ABR-RENDER-1); validateAppDoc bounds
+  // x/y, route and name. The only fill is a missing name (= the id).
+  const out = { ...raw, id, name: str(raw.name) ?? id };
+  // Grade data-F1 (ADR 0323): a finite position is snapped to a whole pixel
+  // and clamped to the canvas bound, a layout normalization the plan node
+  // relies on. Anything that is not a finite number is left for validateAppDoc
+  // to refuse, rather than silently removed.
+  for (const axis of ['x', 'y']) {
+    if (typeof out[axis] === 'number' && Number.isFinite(out[axis])) out[axis] = Math.max(-POS_BOUND, Math.min(POS_BOUND, Math.round(out[axis])));
+  }
+  if (Array.isArray(raw.components)) out.components = raw.components.map((c) => normalizeComponent(c, 0));
   return out;
+}
+
+/** Rewrite every reference to a renamed screen or data source, so a slugged id
+ *  never strands the thing that pointed at it: navigateTo, list.bind, action
+ *  targets, `source.<id>` binding paths, auth guards and share overrides. */
+function remapRefs(payload, screenMap, sourceMap) {
+  const scr = (v) => (typeof v === 'string' && screenMap.has(v) ? screenMap.get(v) : v);
+  const followup = (f) => {
+    if (f && typeof f === 'object' && typeof f.navigate === 'string') f.navigate = scr(f.navigate);
+  };
+  const node = (n, depth = 0) => {
+    if (!n || typeof n !== 'object' || depth > 25) return;
+    if (n.props && typeof n.props === 'object') {
+      if (typeof n.props.navigateTo === 'string') n.props.navigateTo = scr(n.props.navigateTo);
+      if (n.type === 'list' && typeof n.props.bind === 'string' && sourceMap.has(n.props.bind)) n.props.bind = sourceMap.get(n.props.bind);
+    }
+    if (Array.isArray(n.actions)) {
+      for (const a of n.actions) {
+        if (!a || typeof a !== 'object') continue;
+        if (a.kind === 'navigate' && typeof a.to === 'string') a.to = scr(a.to);
+        followup(a.onSuccess);
+        followup(a.onError);
+      }
+    }
+    if (n.bindings && typeof n.bindings === 'object') {
+      for (const b of Object.values(n.bindings)) {
+        if (!b || typeof b !== 'object' || typeof b.path !== 'string') continue;
+        const m = /^source\.([^.]+)(.*)$/.exec(b.path);
+        if (m && sourceMap.has(m[1])) b.path = `source.${sourceMap.get(m[1])}${m[2]}`;
+      }
+    }
+    if (Array.isArray(n.children)) n.children.forEach((c) => node(c, depth + 1));
+  };
+  for (const s of payload.screens) (s.components ?? []).forEach((c) => node(c));
+  for (const def of Array.isArray(payload.componentDefinitions) ? payload.componentDefinitions : []) node(def?.root);
+  for (const g of Array.isArray(payload.authProfile?.guards) ? payload.authProfile.guards : []) {
+    if (!g || typeof g !== 'object') continue;
+    g.screenId = scr(g.screenId);
+    g.redirectTo = scr(g.redirectTo);
+  }
+  const per = payload.sharePolicy?.perSource;
+  if (per && typeof per === 'object' && !Array.isArray(per)) {
+    for (const [k, v] of Object.entries(per)) {
+      if (sourceMap.has(k) && sourceMap.get(k) !== k) { delete per[k]; per[sourceMap.get(k)] = v; }
+    }
+  }
 }
 
 export async function render(ctx) {
   const i = ctx.inputs ?? {};
   const appIn = (i.app && typeof i.app === 'object') ? i.app : safeParse(i.source) ?? i;
 
-  const name = str(appIn.name, 200);
+  const name = str(appIn.name);
   if (!name) throw fail('`name` is required (the app name)');
   const screensIn = Array.isArray(appIn.screens) ? appIn.screens : null;
   if (!screensIn || screensIn.length === 0) throw fail('`screens` is required — a non-empty array');
   if (screensIn.length > 60) throw fail('an app may have at most 60 screens');
 
+  // ABR-RENDER-1 / ABR-REPAIR-1: the payload STARTS as a deep copy of the whole
+  // document, so models, operations, stateVariables, authProfile,
+  // componentDefinitions, sharePolicy, envRequirements, design refs and any
+  // future facet survive by construction. It used to be rebuilt from a fixed
+  // field list, and renderCore CAS-wrote the result, so a get-design → render
+  // update erased the user's data model under a green success.
+  //
+  // Half 2: nothing below drops an INVALID value either (a non-hex color, an
+  // out-of-enum trigger, an 11th sample row). It reaches validateAppDoc, which
+  // fails it as a typed error the caller can repair. The deep copy also keeps
+  // the caller's (or the run snapshot's) object from being mutated.
+  const payload = JSON.parse(JSON.stringify(appIn));
+  delete payload.source;
+  payload.name = name;
+
   const usedIds = new Set();
-  const idMap = new Map(); // original id -> normalized id (for connector/nav remap)
-  const payload = { name, screens: screensIn.map((raw, idx) => {
+  const screenMap = new Map(); // original id -> normalized id
+  payload.screens = screensIn.map((raw, idx) => {
     const before = typeof raw?.id === 'string' ? raw.id.trim() : '';
-    const scr = normalizeScreen(raw, idx, usedIds);
-    if (before) idMap.set(before, scr.id);
+    const scr = normalizeScreen(JSON.parse(JSON.stringify(raw ?? null)), idx, usedIds);
+    if (before && before !== scr.id) screenMap.set(before, scr.id);
     return scr;
-  }) };
-  // Remap navigateTo props that referenced pre-normalization ids.
-  const remapNav = (node) => {
-    if (!node || typeof node !== 'object') return;
-    if (node.props && typeof node.props.navigateTo === 'string' && idMap.has(node.props.navigateTo)) {
-      node.props.navigateTo = idMap.get(node.props.navigateTo);
+  });
+
+  const sourceMap = new Map();
+  if (Array.isArray(payload.dataSources)) {
+    const usedSources = new Set();
+    for (const d of payload.dataSources) {
+      if (!d || typeof d !== 'object' || typeof d.id !== 'string') continue;
+      let id = slugId(d.id, d.id);
+      while (usedSources.has(id) && id !== d.id) id = `${id.slice(0, 70)}-2`;
+      usedSources.add(id);
+      if (id !== d.id) { sourceMap.set(d.id, id); d.id = id; }
     }
-    if (Array.isArray(node.children)) node.children.forEach(remapNav);
-  };
-  for (const scr of payload.screens) (scr.components ?? []).forEach(remapNav);
-  const description = str(appIn.description, 2000); if (description) payload.description = description;
-  if (typeof appIn.theme === 'string' && ['default', 'light', 'dark'].includes(appIn.theme)) payload.theme = appIn.theme;
-  // Grade F3 — themeColors + dataSources are REAL schema fields the node was
-  // silently stripping (the dead-on-the-wire class): the audit's theme check
-  // and the plan's grounded colors need them to survive this seam.
-  const HEX6 = /^#[0-9a-fA-F]{6}$/;
-  const tc = appIn.themeColors && typeof appIn.themeColors === 'object' ? appIn.themeColors : null;
-  if (tc) {
-    const out = {};
-    if (typeof tc.primary === 'string' && HEX6.test(tc.primary)) out.primary = tc.primary;
-    if (typeof tc.secondary === 'string' && HEX6.test(tc.secondary)) out.secondary = tc.secondary;
-    if (Object.keys(out).length) payload.themeColors = out;
-  }
-  if (Array.isArray(appIn.dataSources)) {
-    const sources = [];
-    for (const d of appIn.dataSources.slice(0, 20)) {
-      const id = slugId(d?.id, '');
-      if (!id) continue;
-      const src = { id };
-      const dn = str(d?.name, 120); if (dn) src.name = dn;
-      if (Array.isArray(d?.fields)) src.fields = d.fields.filter((f) => typeof f === 'string' && f).slice(0, 20).map((f) => f.slice(0, 60));
-      if (Array.isArray(d?.rows)) src.rows = d.rows.filter((r) => r && typeof r === 'object' && !Array.isArray(r)).slice(0, 10);
-      sources.push(src);
-    }
-    if (sources.length) payload.dataSources = sources;
   }
 
-  if (Array.isArray(appIn.connectors)) {
-    const screenIds = new Set(payload.screens.map((s) => s.id));
-    const connectors = [];
+  if (Array.isArray(payload.connectors)) {
+    // Remap endpoints to the slugged ids and collapse exact duplicate
+    // (from, to) pairs, the editor's own dedupe rule (grade data-F8). A
+    // connector to a missing screen is KEPT: validateAppDoc reports it as a
+    // warning, because it is a legitimate mid-edit state, and dropping it
+    // would erase a user's edge on an update.
     const seenPair = new Set();
-    const EDGE_SIDES = ['top', 'right', 'bottom', 'left'];
-    const TRANSITIONS = ['push', 'replace', 'modal', 'fade', 'slide', 'none'];
-    const ROUTING = ['bezier', 'orthogonal', 'straight', 'step'];
-    for (const c of appIn.connectors.slice(0, 200)) {
-      const from = idMap.get(str(c?.from, 80)) ?? str(c?.from, 80);
-      const to = idMap.get(str(c?.to, 80)) ?? str(c?.to, 80);
-      // Drop connectors that don't reference real screens (no dangling edges),
-      // and collapse duplicate (from,to) pairs — the editor's dedupe rule
-      // (grade data-F8: the two producers previously disagreed).
-      if (!from || !to || !screenIds.has(from) || !screenIds.has(to)) continue;
-      if (seenPair.has(`${from}\u0000${to}`)) continue;
-      seenPair.add(`${from}\u0000${to}`);
-      const conn = { from, to };
-      if (typeof c.trigger === 'string' && ['click', 'submit', 'load'].includes(c.trigger)) conn.trigger = c.trigger;
-      const label = str(c.label, 120); if (label) conn.label = label;
-      // Grade data-F1: the ADR 0323 presentation fields now survive the node.
-      if (typeof c.transition === 'string' && TRANSITIONS.includes(c.transition)) conn.transition = c.transition;
-      if (typeof c.sourceEdge === 'string' && EDGE_SIDES.includes(c.sourceEdge)) conn.sourceEdge = c.sourceEdge;
-      if (typeof c.targetEdge === 'string' && EDGE_SIDES.includes(c.targetEdge)) conn.targetEdge = c.targetEdge;
-      if (typeof c.routingStyle === 'string' && ROUTING.includes(c.routingStyle)) conn.routingStyle = c.routingStyle;
-      if (c.animated === true) conn.animated = true;
-      connectors.push(conn);
-    }
-    if (connectors.length) payload.connectors = connectors;
+    payload.connectors = payload.connectors.filter((c) => {
+      if (!c || typeof c !== 'object') return true;
+      if (typeof c.from === 'string') c.from = screenMap.get(c.from.trim()) ?? c.from;
+      if (typeof c.to === 'string') c.to = screenMap.get(c.to.trim()) ?? c.to;
+      if (typeof c.from !== 'string' || typeof c.to !== 'string') return true;
+      const key = `${c.from}\u0000${c.to}`;
+      if (seenPair.has(key)) return false;
+      seenPair.add(key);
+      return true;
+    });
   }
+  remapRefs(payload, screenMap, sourceMap);
 
   // XCH-APPB-3: an out-of-catalog component FAILS here instead of persisting
   // via the artifact path and 422ing on the user's first editor save.
@@ -382,7 +431,7 @@ async function tryAiJson(ctx, systemPrompt, userText, opts = {}) {
     });
     const parsed = readParsed(result);
     if (!parsed) return { error: 'malformed JSON from the model' };
-    const contractErrors = typeof opts.validate === 'function' ? (opts.validate(parsed) ?? []) : [];
+    const contractErrors = typeof opts.validate === 'function' ? ((await opts.validate(parsed)) ?? []) : [];
     if (!contractErrors.length) return { data: parsed };
     // ONE bounded contract repair: feed the exact errors back, deterministic.
     const retry = await ctx.callAI({
@@ -395,10 +444,10 @@ async function tryAiJson(ctx, systemPrompt, userText, opts = {}) {
       ],
     });
     const repaired = readParsed(retry);
-    const repairedErrors = repaired && typeof opts.validate === 'function' ? (opts.validate(repaired) ?? []) : (repaired ? [] : ['unparseable repair']);
+    const repairedErrors = repaired && typeof opts.validate === 'function' ? ((await opts.validate(repaired)) ?? []) : (repaired ? [] : ['unparseable repair']);
     return repaired && !repairedErrors.length
       ? { data: repaired }
-      : { error: `model output failed the contract after one repair (${contractErrors.join('; ')})` };
+      : { error: `model output failed the contract after one repair (${(repairedErrors.length ? repairedErrors : contractErrors).join('; ')})` };
   } catch (err) {
     // NEVER swallow the engine's suspension signal; soft-fail everything else
     // with the error code so warnings are diagnosable (byok vs provider vs 429).
@@ -446,11 +495,94 @@ export const DEEPEN_RESPONSE_SCHEMA = {
 export const REPAIR_RESPONSE_SCHEMA = {
   type: 'object',
   required: ['name', 'screens'],
+  // ABR-REPAIR-1: every top-level facet of canvas.app-builder is listed, so a
+  // provider that honours the schema strictly does not strip the data model,
+  // operations or auth design from the repaired document.
   properties: {
     name: { type: 'string' }, description: { type: 'string' }, theme: { type: 'string' },
     themeColors: { type: 'object' }, screens: { type: 'array' }, connectors: { type: 'array' },
+    dataSources: { type: 'array' }, schemaVersion: { type: 'integer' },
+    designSystemRef: { type: 'object' }, brandRef: { type: 'object' },
+    stateVariables: { type: 'array' }, models: { type: 'array' }, operations: { type: 'array' },
+    authProfile: { type: 'object' }, envRequirements: { type: 'array' },
+    componentDefinitions: { type: 'array' }, sharePolicy: { type: 'object' },
   },
 };
+
+/** The top-level facets a repair carries over when the model omits them. */
+const REPAIR_CARRIED_FACETS = Object.keys(REPAIR_RESPONSE_SCHEMA.properties).filter((k) => k !== 'name' && k !== 'screens');
+
+/* ABR-REPAIR-2: the per-component half of ABR-REPAIR-1. A repair that omits a
+ * component's actions or bindings used to erase them. Components carry no id
+ * (the schema refuses one), so a component can only be matched by position:
+ * - same screen id AND the same tree of types → the screen was not
+ *   restructured, so an omitted facet is carried from the same position;
+ * - restructured → no guess (a shifted index would put a delete action on the
+ *   wrong button). An action or binding the candidate dropped is a gate error
+ *   fed back to the model, and a typed failure if the retry drops it again.
+ * Emitting a facet empty ([] / {}) or removing the component removes it. */
+const NODE_FACETS = ['actions', 'bindings', 'hidden', 'locked'];
+const LOSSY_NODE_FACETS = ['actions', 'bindings'];
+
+function treeShape(nodes) {
+  return Array.isArray(nodes) ? nodes.map((n) => [n && typeof n === 'object' ? n.type : null, treeShape(n?.children)]) : null;
+}
+
+function carryNodeFacets(orig, cand) {
+  orig.forEach((o, i) => {
+    const c = cand[i];
+    if (!o || typeof o !== 'object' || !c || typeof c !== 'object') return;
+    for (const k of NODE_FACETS) if (c[k] === undefined && o[k] !== undefined) c[k] = JSON.parse(JSON.stringify(o[k]));
+    if (Array.isArray(o.children) && Array.isArray(c.children)) carryNodeFacets(o.children, c.children);
+  });
+}
+
+/** Key-order-independent JSON, so a model that reorders keys has not "changed" a value. */
+function stableJson(v) {
+  if (Array.isArray(v)) return `[${v.map(stableJson).join(',')}]`;
+  if (v && typeof v === 'object') return `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${stableJson(v[k])}`).join(',')}}`;
+  return JSON.stringify(v);
+}
+
+function flatNodes(nodes, out = []) {
+  if (!Array.isArray(nodes)) return out;
+  for (const n of nodes) {
+    if (!n || typeof n !== 'object') continue;
+    out.push(n);
+    flatNodes(n.children, out);
+  }
+  return out;
+}
+
+const hasContent = (v) => (Array.isArray(v) ? v.length > 0 : !!v && typeof v === 'object' && Object.keys(v).length > 0);
+
+/** Carry omitted component facets into the candidate's unrestructured screens
+ *  (mutates `candScreens`) and return the facets a restructured screen lost. */
+function reconcileNodeFacets(origScreens, candScreens) {
+  const lost = [];
+  if (!Array.isArray(origScreens) || !Array.isArray(candScreens)) return lost;
+  const byId = new Map(origScreens.filter((s) => s && typeof s.id === 'string').map((s) => [s.id, s]));
+  candScreens.forEach((cs, si) => {
+    const os = cs && typeof cs.id === 'string' ? byId.get(cs.id) : undefined;
+    if (!os || !Array.isArray(os.components)) return;
+    if (!Array.isArray(cs.components)) return; // omitted components: render keeps none, nothing to align
+    if (stableJson(treeShape(os.components)) === stableJson(treeShape(cs.components))) {
+      carryNodeFacets(os.components, cs.components);
+      return;
+    }
+    const cand = flatNodes(cs.components);
+    for (const o of flatNodes(os.components)) {
+      for (const k of LOSSY_NODE_FACETS) {
+        if (!hasContent(o[k])) continue;
+        const want = stableJson(o[k]);
+        if (cand.some((c) => c[k] !== undefined && stableJson(c[k]) === want)) continue; // kept (possibly moved)
+        if (!cand.some((c) => c.type === o.type && c[k] === undefined)) continue; // edited or deliberately removed
+        lost.push(`screens[${si}].components: a '${o.type}' component lost its ${k} ${want.slice(0, 160)} — re-emit ${k} on that component, or set it to ${Array.isArray(o[k]) ? '[]' : '{}'} to remove it deliberately`);
+      }
+    }
+  });
+  return lost;
+}
 
 /**
  * research (ADR 0325 P1) — ONE call producing personas + brand voice + visual
@@ -544,7 +676,7 @@ export async function deepen(ctx) {
     const list = Array.isArray(parsed) ? parsed : (parsed && Array.isArray(parsed.components) ? parsed.components : null);
     if (!list || !list.length) continue; // soft-fail: keep the original screen
     try {
-      payload.screens[i] = { ...scr, components: list.slice(0, 200).map((c) => normalizeComponent(c, 0)) };
+      payload.screens[i] = { ...scr, components: list.slice(0, 200).map((c) => freshComponent(c, 0)) };
       deepened.push(scr.id);
     } catch { /* normalization rejected the AI output — keep the original */ }
   }
@@ -697,16 +829,53 @@ export async function repair(ctx) {
   const instructions = str(ctx.inputs?.instructions, 4000);
   if (!instructions) throw fail('`instructions` is required (what to repair — finding codes or a description)');
   const { app, version } = await surface.getDesign({ canvasId });
+  // ABR-REPAIR-1: a facet the model leaves out is UNCHANGED, not deleted. It
+  // used to be deleted, so a repair of one button erased the data model.
+  // To clear a facet the model emits it empty ([] or {}).
+  const carryOver = (candidate) => {
+    const out = { ...candidate };
+    if (app && typeof app === 'object') {
+      for (const k of REPAIR_CARRIED_FACETS) if (out[k] === undefined && app[k] !== undefined) out[k] = app[k];
+    }
+    if (Array.isArray(out.screens)) out.screens = JSON.parse(JSON.stringify(out.screens));
+    const lost = reconcileNodeFacets(app?.screens, out.screens);
+    return { out, lost };
+  };
+  // The candidate goes through the SAME render gate as the design chain, WITH
+  // the host surface, so closed-world validation runs here. The first failure
+  // is fed back to the model once (the bounded repair); a second failure is
+  // a typed failure, never a success carrying a document the write will refuse.
+  let rendered = null;
+  let gateRejected = false;
+  const gate = async (parsed) => {
+    const { out, lost } = carryOver(parsed);
+    if (lost.length) {
+      rendered = null;
+      gateRejected = true;
+      return lost.slice(0, 5);
+    }
+    try {
+      rendered = await render({ ...ctx, inputs: { app: out } });
+      gateRejected = false;
+      return [];
+    } catch (e) {
+      rendered = null;
+      gateRejected = true;
+      const detail = (e?.details?.errors ?? []).slice(0, 5).map((x) => `${x.path}: ${x.message}`);
+      return detail.length ? detail : [String(e?.message ?? e)];
+    }
+  };
   const attempt = await tryAiJson(
     ctx,
-    `You are an app architect performing a GOVERNED REPAIR of an existing app design. Output ONLY the FULL corrected app JSON (raw JSON, no prose, no code fences) in the SAME shape as the input — { "name", "description", "theme", "themeColors", "screens": [...], "connectors": [...] } — changing ONLY what the repair instructions require and preserving everything else (ids, routes, positions, content). Use ONLY these component types: ${await liveTypeList(ctx)}.`,
+    `You are an app architect performing a GOVERNED REPAIR of an existing app design. Output ONLY the FULL corrected app JSON (raw JSON, no prose, no code fences) in the SAME shape as the input — every top-level field it has (name, description, theme, themeColors, screens, connectors, dataSources, stateVariables, models, operations, authProfile, envRequirements, componentDefinitions, sharePolicy, designSystemRef, brandRef, schemaVersion) and every component field (type, props, children, actions, bindings, hidden, locked) — changing ONLY what the repair instructions require and preserving everything else (ids, routes, positions, content, data model, bindings). To remove a component's actions or bindings, emit them empty ([] or {}) rather than leaving them out. Use ONLY these component types: ${await liveTypeList(ctx)}.`,
     `CURRENT APP:\n${JSON.stringify(app)}\n\nREPAIR INSTRUCTIONS / FINDINGS:\n${instructions}`,
-    { responseSchema: REPAIR_RESPONSE_SCHEMA },
+    { responseSchema: REPAIR_RESPONSE_SCHEMA, validate: gate },
   );
-  if (!attempt.data) throw fail(`repair failed: ${attempt.error ?? 'unexpected model output'}`);
-  // The SAME normalization gate the design chain uses (render safe-parses,
-  // slug-normalizes ids, remaps navigation, strips unknown fields).
-  const rendered = await render({ inputs: { app: attempt.data } });
+  if (!attempt.data || !rendered) {
+    // app_doc_invalid when the model answered but the candidate failed the
+    // closed-world gate twice; validation_error when the AI call itself failed.
+    throw Object.assign(fail(`repair failed: ${attempt.error ?? 'unexpected model output'}`), { code: gateRejected ? 'app_doc_invalid' : 'validation_error' });
+  }
   return { status: 'success', outputs: {
     artifact: rendered.outputs.artifact,
     canvasId,

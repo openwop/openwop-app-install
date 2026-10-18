@@ -83,9 +83,12 @@ describe('CanvasSurfaceShell (ADR 0361)', () => {
     // A keydown originating in a text field never triggers verbs (inTextContext).
     const input = document.createElement('input');
     document.body.appendChild(input);
-    fireEvent.keyDown(input, { key: 'd', metaKey: true });
-    expect(verbRuns).toBe(1);
-    input.remove();
+    try {
+      fireEvent.keyDown(input, { key: 'd', metaKey: true });
+      expect(verbRuns).toBe(1);
+    } finally {
+      input.remove();
+    }
   });
 
   it('? opens the shortcuts cheatsheet listing the type verb via typeT', () => {

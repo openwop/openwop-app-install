@@ -2,6 +2,7 @@
  * `observability/saturationProbe.ts` — the pool-wait and event-loop-lag signals
  * EVID-3 could not be decided without.
  */
+import os from 'node:os';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   callerSignature, createLagWindow, createPoolPressureWindow, eventLoopLagLine, startEventLoopLagProbe, startPoolPressureProbe, type PoolGauges,
@@ -200,10 +201,27 @@ describe('event-loop lag — WHAT the process did during the worst stall (EVID-6
   }
 
   it('a stall spent running JavaScript shows CPU', async () => {
-    const a = await accountOf(() => { const until = Date.now() + 400; while (Date.now() < until) { /* spin */ } });
-    expect(a.stallMs).toBeGreaterThanOrEqual(300);
-    // Generous: a loaded machine can preempt the spin, but it cannot make it free.
-    expect(a.cpuMs).toBeGreaterThanOrEqual(a.stallMs * 0.4);
+    // The property under test is ATTRIBUTION: the probe's cpuMs must cover the
+    // CPU the spin actually got. It used to assert cpuMs >= 0.4 × stallMs, a
+    // fixed share of wall time that the OS, not the probe, decides. Under gate
+    // load (8 cores, load 17–50) the spin got 94–151 ms of a ~400 ms stall, and
+    // the test went red twice on 2026-10-10 with the probe correct (#4687). So
+    // measure the spin's own CPU and require the probe to account for it.
+    let spinCpuMs = 0;
+    const a = await accountOf(() => {
+      const before = process.cpuUsage();
+      const until = Date.now() + 400; while (Date.now() < until) { /* spin */ }
+      const d = process.cpuUsage(before);
+      spinCpuMs = (d.user + d.system) / 1000;
+    });
+    const load = `loadavg ${os.loadavg().map((n) => n.toFixed(1)).join('/')} on ${os.cpus().length} cpus`;
+    expect(a.stallMs, load).toBeGreaterThanOrEqual(300);
+    // Non-vacuity: however loaded, a 400 ms spin gets SOME CPU (measured floor 94 ms at load ~17).
+    expect(spinCpuMs, `spin got ${spinCpuMs.toFixed(1)} ms CPU; ${load}`).toBeGreaterThan(20);
+    // The probe's window contains the spin, so it must report at least the spin's CPU
+    // (minus rounding; the probe rounds to whole ms).
+    expect(a.cpuMs, `probe cpuMs ${a.cpuMs} < spin's own ${spinCpuMs.toFixed(1)} ms; ${load}`)
+      .toBeGreaterThanOrEqual(Math.floor(spinCpuMs) - 1);
   });
 
   it('a stall inside a blocking call shows the loop busy and almost no CPU', async () => {

@@ -13,7 +13,11 @@
  *
  * Positive controls: the lapsed workspace's OWNER and ADMIN are served; an
  * entitled workspace is served AND can still write (so the lapsed 403s are the
- * plan, not a broken route).
+ * plan, not a broken route). The lapsed 403s assert the PLAN refusal body
+ * (`entitlementGuard.ts`), so a scope 403 cannot stand in for them (w35).
+ * Sabotage witnesses (w35): the door refusing plan-lapsed, the door serving a
+ * toggled-off feature, the admin scope removed, and the no-exporter 404 skipped
+ * each red the legs that claim them.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -51,6 +55,11 @@ const post = (path: string, cookie: string, body: unknown) =>
 async function workspace(name: string, tag: string): Promise<string> {
   const ws = await createWorkspace({ name, ownerSubject: who(`${tag}-owner`) });
   const id = ws.orgId ?? ws.tenantId;
+  // `createWorkspace` seeds its owner row under the RAW principal, but a test-seam
+  // session acts as `userIdFor(tenant, principal)`. Without this row the "owner"
+  // was a non-member, bounced to their personal tenant — and the owner leg passed
+  // on THAT tenant's empty export (measured w35).
+  await createMember({ orgId: id, tenantId: id, displayName: 'owner', subject: userIdFor(id, who(`${tag}-owner`)), roles: ['owner'] });
   for (const role of ['admin', 'editor', 'viewer'] as const) {
     await createMember({ orgId: id, tenantId: id, displayName: role, subject: userIdFor(id, who(`${tag}-${role}`)), roles: [role] });
   }
@@ -87,6 +96,14 @@ afterAll(async () => {
   await new Promise<void>((res) => server.close(() => res()));
 });
 
+const PLAN_REFUSAL = 'does not include this feature';
+async function expectCrmPlanRefusal(res: Response): Promise<void> {
+  const text = await res.text();
+  expect(res.status, text).toBe(403);
+  expect(text).toContain(PLAN_REFUSAL);
+  expect(text).toContain('"feature":"crm"');
+}
+
 interface ExportBody { featureId: string; readOnly: boolean; access: string; sections: { contacts: Array<{ name: string; email?: string }> } }
 
 describe('ADR 0820 §7 — a lapsed workspace can still EXPORT its CRM data', () => {
@@ -104,19 +121,22 @@ describe('ADR 0820 §7 — a lapsed workspace can still EXPORT its CRM data', ()
   });
 
   it('the lapsed workspace\'s OWNER is served too', async () => {
-    expect((await get(`${EXPORT}/crm`, await login(who('l-owner'), LAPSED))).status).toBe(200);
+    const res = await get(`${EXPORT}/crm`, await login(who('l-owner'), LAPSED));
+    expect(res.status).toBe(200);
+    const body = await res.json() as ExportBody;
+    expect(body.access).toBe('plan-lapsed');
+    expect(body.sections.contacts.map((c) => c.email)).toEqual(['ada@lapsed.test']);
   });
 
   it('…while the CRM write route still refuses the same admin (403), and nothing was written', async () => {
     const cookie = await login(who('l-admin'), LAPSED);
-    const write = await post('/host/openwop-app/crm/contacts', cookie, { name: 'Should Not Land' });
-    expect(write.status).toBe(403);
+    await expectCrmPlanRefusal(await post('/host/openwop-app/crm/contacts', cookie, { name: 'Should Not Land' }));
     const after = await (await get(`${EXPORT}/crm`, cookie)).json() as ExportBody;
     expect(after.sections.contacts.map((c) => c.name)).toEqual(['Ada Lovelace']);
   });
 
   it('…and the normal CRM read route still refuses (403): the export is not a back door to the feature', async () => {
-    expect((await get('/host/openwop-app/crm/contacts', await login(who('l-admin'), LAPSED))).status).toBe(403);
+    await expectCrmPlanRefusal(await get('/host/openwop-app/crm/contacts', await login(who('l-admin'), LAPSED)));
   });
 
   it('POSITIVE: an entitled workspace exports (access entitled) AND can still write — the lapsed 403s are the plan', async () => {
@@ -150,12 +170,15 @@ describe('ADR 0820 §7 — export authz: workspace admins and owners only', () =
     // Under `sharedWorkspace: true` a NON-member is bounced to their own personal
     // tenant by the ADR 0015 re-check (`authTestSeam.ts`), so the outcome is a
     // refusal or THEIR OWN empty export — never this workspace's data.
+    // Measured w35: under `sharedWorkspace: true` the non-member is bounced to
+    // their own personal tenant (ADR 0015 re-check), which exports its OWN
+    // (empty, plan-lapsed) CRM data — never this workspace's.
     const res = await get(`${EXPORT}/crm`, await login(who('outsider'), LAPSED));
-    if (res.status === 200) {
-      expect(JSON.stringify(await res.json())).not.toContain('ada@lapsed.test');
-    } else {
-      expect(res.status).toBe(403);
-    }
+    expect(res.status).toBe(200);
+    const body = await res.json() as ExportBody;
+    expect(body).toMatchObject({ featureId: 'crm', access: 'plan-lapsed' });
+    expect(body.sections.contacts).toEqual([]);
+    expect(JSON.stringify(body)).not.toContain('ada@lapsed.test');
   });
 
   it('the discovery list is admin-only too, and names crm for an admin', async () => {
@@ -179,6 +202,6 @@ describe('ADR 0820 §7 — the export only widens the PLAN refusal', () => {
 
   it('the export route is GET-only: there is no write verb on it', async () => {
     const res = await post(`${EXPORT}/crm`, await login(who('l-admin'), LAPSED), { sections: {} });
-    expect([404, 405]).toContain(res.status);
+    expect(res.status).toBe(404); // no route answers a POST here (measured w35)
   });
 });

@@ -15,6 +15,13 @@ import '../src/features/kicktodo-engagement/engagementService.js';
 import '../src/features/kicktodo-community/communityService.js';
 import '../src/features/kicktodo-integrations/integrationService.js';
 import '../src/features/kicktodo-creator/publishService.js';
+// …and the three packages whose erasers register at FEATURE BOOT, not module
+// load (`register*Compliance()` from feature.ts). Without these the "full"
+// fan-out silently omitted kicktodo-core — the eraser that deletes enrollments.
+import { registerKicktodoCoreCompliance } from '../src/features/kicktodo-core/compliance.js';
+import { registerKicktodoAccountabilityCompliance } from '../src/features/kicktodo-accountability/compliance.js';
+import { registerKicktodoCommerceCompliance } from '../src/features/kicktodo-commerce/compliance.js';
+import { registeredSubjectEraserIds } from '../src/host/subjectErasure.js';
 import { __test } from '../src/features/kicktodo-organizations/orgProgramService.js';
 
 const T = 'tenant-A';
@@ -23,6 +30,9 @@ const A = 'user:alice';
 
 beforeEach(async () => {
   initHostExtPersistence(await openStorage('memory://'));
+  registerKicktodoCoreCompliance(); // idempotent — the seam dedupes by reference
+  registerKicktodoAccountabilityCompliance();
+  registerKicktodoCommerceCompliance();
   await __test.libraries.put({ tenantId: T, orgId: ORG, entries: [{ challengeId: 'c1', version: 1, addedBy: A, addedAt: '2026-01-01T00:00:00.000Z' }], updatedAt: '2026-01-01T00:00:00.000Z' });
   await __test.cohortLinks.put({ tenantId: T, orgId: ORG, circleId: 'circ-1', linkedBy: A, linkedAt: '2026-01-01T00:00:00.000Z' });
   await __test.brandRefs.put({ tenantId: T, orgId: ORG, brandProfileId: 'bp-1', updatedAt: '2026-01-01T00:00:00.000Z' });
@@ -30,11 +40,16 @@ beforeEach(async () => {
 
 describe('ADR 0458 P0 — organizations rows survive subject erasure (no eraser)', () => {
   it('a full subject-erasure fan-out leaves org library/cohort/brand rows intact', async () => {
+    // The fan-out really is the full KickTodo set (precondition, not assumed).
+    expect(registeredSubjectEraserIds()).toEqual(expect.arrayContaining([
+      'kicktodoCoreEraser', 'kicktodoAccountabilityEraser', 'kicktodoCommerceEraser',
+      'eraseEngagementSubject', 'eraseCommunitySubject', 'eraseIntegrationsSubject', 'eraseCreatorSubject',
+    ]));
     await eraseSubject(T, A);
     const lib = await __test.libraries.get(`${T}::${ORG}`);
     expect(lib).not.toBeNull();
     expect(lib?.entries[0]?.addedBy).toBe(A); // attribution preserved (a governance record)
-    expect(await __test.cohortLinks.get(`${T}::${ORG}::circ-1`)).not.toBeNull();
-    expect(await __test.brandRefs.get(`${T}::${ORG}`)).not.toBeNull();
+    expect(await __test.cohortLinks.get(`${T}::${ORG}::circ-1`)).toEqual({ tenantId: T, orgId: ORG, circleId: 'circ-1', linkedBy: A, linkedAt: '2026-01-01T00:00:00.000Z' });
+    expect(await __test.brandRefs.get(`${T}::${ORG}`)).toEqual({ tenantId: T, orgId: ORG, brandProfileId: 'bp-1', updatedAt: '2026-01-01T00:00:00.000Z' });
   });
 });

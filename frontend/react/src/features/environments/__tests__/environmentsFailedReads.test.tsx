@@ -27,7 +27,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
-import { GlobalLiveRegion } from '../../../ui/announce.js';
+import { GlobalLiveRegion, announce } from '../../../ui/announce.js';
+import type { Environment } from '../environmentsClient.js';
 
 const access = vi.hoisted(() => ({ enabled: true }));
 import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
@@ -36,10 +37,10 @@ vi.mock('../../../featureToggles/FeatureAccessContext.js', () => ({
 }));
 
 const api = vi.hoisted(() => ({
-  listEnvironments: vi.fn(),
-  listSnapshots: vi.fn(),
-  listPromotions: vi.fn(),
-  ensureChain: vi.fn(),
+  listEnvironments: vi.fn<typeof import('../environmentsClient.js').listEnvironments>(),
+  listSnapshots: vi.fn<typeof import('../environmentsClient.js').listSnapshots>(),
+  listPromotions: vi.fn<typeof import('../environmentsClient.js').listPromotions>(),
+  ensureChain: vi.fn<typeof import('../environmentsClient.js').ensureChain>(),
 }));
 vi.mock('../environmentsClient.js', async (importOriginal) => {
   const orig = await importOriginal<typeof import('../environmentsClient.js')>();
@@ -80,19 +81,26 @@ function politeRegion(): HTMLElement {
   return el as HTMLElement;
 }
 
-const ENV = {
+const ENV: Environment = {
   environmentId: 'env_1',
   name: 'dev',
   order: 0,
-  protection: 'open' as const,
+  protection: 'open',
   currentSnapshot: 'abc123def456789',
-  drift: { drifted: false },
+  createdAt: '2026-10-01T00:00:00.000Z',
+  updatedAt: '2026-10-01T00:00:00.000Z',
+  drift: { drifted: false, liveHash: 'abc123def456789' },
 };
+const SNAP = ENV.currentSnapshot ?? '';
 
 beforeEach(() => {
   vi.clearAllMocks();
   access.enabled = true;
-  api.listEnvironments.mockResolvedValue({ environments: [], appVersion: null, domains: [] });
+  // The live region's text is MODULE state: clear it so an earlier case's
+  // announcement can never satisfy (or break) this case's assertion.
+  announce('');
+  announce('', { assertive: true });
+  api.listEnvironments.mockResolvedValue({ environments: [], appVersion: '0.4.0', domains: [] });
   api.listSnapshots.mockResolvedValue([]);
   api.listPromotions.mockResolvedValue([]);
 });
@@ -106,7 +114,7 @@ describe('HV-4 — an unreachable environments endpoint never offers to create a
     expect(await page().findByText(en.loadFailedTitle)).toBeTruthy();
     // The server's own words survive to the user — a bare "something went wrong"
     // gives an operator nothing to act on.
-    expect(screen.getByText(new RegExp('environments_500'))).toBeTruthy();
+    expect(page().getByText(/environments_500/)).toBeTruthy();
     expect(screen.getByRole('button', { name: en.retry })).toBeTruthy();
 
     // The claim a failed read cannot make, and the write it must not offer.
@@ -159,13 +167,13 @@ describe('HV-4 — an unreachable environments endpoint never offers to create a
   });
 
   it('HEALTHY: real environments render, and neither designed state appears', async () => {
-    api.listEnvironments.mockResolvedValue({ environments: [ENV], appVersion: null, domains: [] });
+    api.listEnvironments.mockResolvedValue({ environments: [ENV], appVersion: '0.4.0', domains: [] });
     view();
 
     // Match the snapshot hash, not the env name — "dev" also appears in the
     // promotion source/target selects, so `findByText('dev')` matches three
     // nodes and throws for a reason unrelated to what this test is about.
-    expect(await screen.findByText(ENV.currentSnapshot.slice(0, 12))).toBeTruthy();
+    expect(await screen.findByText(SNAP.slice(0, 12))).toBeTruthy();
     expect(page().queryByText(en.loadFailedTitle)).toBeNull();
     expect(screen.queryByText(en.emptyTitle)).toBeNull();
   });

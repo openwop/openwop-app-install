@@ -20,35 +20,46 @@
  * `ctx.user.tenantId` → B stops seeing A's product.
  */
 import http from 'node:http';
-import type { AddressInfo } from 'node:net';
+import { getSetCookies } from './headerCookies.js';
+import type { Product } from '../src/features/commerce/commerceService.js';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 
+function portOf(s: http.Server): number {
+  const a = s.address();
+  if (a === null || typeof a === 'string') throw new Error('server is not listening on a TCP port');
+  return a.port;
+}
 let BASE = '';
 let server: http.Server;
 let n = 0;
 
-interface Res<T = Record<string, any>> { status: number; body: T }
-
-function client() {
-  let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<Res<any>> => {
-    const res = await fetch(`${BASE}${path}`, {
-      method,
-      headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) },
-      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
-    });
-    const h = res.headers as Headers & { getSetCookie?: () => string[] };
-    const single = res.headers.get('set-cookie');
-    const setCookies: string[] = typeof h.getSetCookie === 'function' ? h.getSetCookie() : single ? [single] : [];
-    for (const sc of setCookies) { const m = /(__session=[^;]+)/.exec(sc); if (m) cookie = m[1]!; }
-    return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) };
-  };
-  return { get: (p: string) => call('GET', p), post: (p: string, b?: unknown) => call('POST', p, b) };
+/** The host error envelope (`middleware/errorEnvelope.ts`). */
+interface ErrBody { error?: string; message?: string; details?: Record<string, unknown> }
+interface Res<T> { status: number; body: T }
+interface Client {
+  get: <T = ErrBody>(p: string) => Promise<Res<T>>;
+  post: <T = ErrBody>(p: string, b?: unknown) => Promise<Res<T>>;
 }
-type Client = ReturnType<typeof client>;
+function client(): Client {
+  let cookie = '';
+  // The ONE deserialization boundary: `res.json()` is untyped, so each call site names the
+  // body it expects (the product's exported row type where one exists, else a narrow local
+  // interface). A 204 / non-JSON body reads as `null`.
+  const call = async <T,>(method: string, path: string, body?: unknown): Promise<Res<T>> => {
+    const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
+    for (const sc of getSetCookies(res.headers)) { const m = /(__session=[^;]+)/.exec(sc); if (m) cookie = m[1]; }
+    const text = await res.text();
+    let out: T;
+    try { out = JSON.parse(text || 'null'); } catch { out = JSON.parse('null'); }
+    return { status: res.status, body: out };
+  };
+  return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b) };
+}
+interface WorkspaceBody extends ErrBody { workspaceId: string }
+interface InviteBody extends ErrBody { token?: string }
 
 async function signIn(c: Client, email: string): Promise<void> {
   const r = await c.post('/host/openwop-app/test/login', { email });
@@ -58,18 +69,18 @@ async function signIn(c: Client, email: string): Promise<void> {
 /** A REAL `ws:` shared workspace, created + switched into through the routes — the
  *  switch is what makes active !== personal. The workspace root is itself an org. */
 async function sharedWorkspace(c: Client): Promise<string> {
-  const ws = await c.post('/host/openwop-app/workspaces', { name: `Commerce WS ${n++}` });
+  const ws = await c.post<WorkspaceBody>('/host/openwop-app/workspaces', { name: `Commerce WS ${n++}` });
   expect(ws.status, JSON.stringify(ws.body)).toBe(201);
   expect(ws.body.workspaceId, 'must be a real shared workspace').toMatch(/^ws:/);
   const sw = await c.post(`/host/openwop-app/workspaces/${encodeURIComponent(ws.body.workspaceId)}/switch`);
   expect(sw.status, JSON.stringify(sw.body)).toBe(200);
-  return ws.body.workspaceId as string;
+  return ws.body.workspaceId;
 }
 
 /** Invite a second human into the workspace root org and have them accept — the real
  *  two-member path (the workspace root IS an org, orgId === tenantId === ws). */
 async function joinAsMember(owner: Client, ws: string, joiner: Client, email: string, role: string): Promise<void> {
-  const invite = await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(ws)}/invites`, { email, role });
+  const invite = await owner.post<InviteBody>(`/host/openwop-app/orgs/${encodeURIComponent(ws)}/invites`, { email, role });
   expect(invite.status, JSON.stringify(invite.body)).toBe(201);
   expect(invite.body.token, 'the dev/test invite path must expose the token').toBeTruthy();
   await signIn(joiner, email);
@@ -89,7 +100,7 @@ beforeAll(async () => {
   delete process.env.OPENWOP_DEMO_MODE; // the de-facto-owner bypass would make gates vacuous
   delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
+  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${portOf(server)}`; res(); }); });
   for (const id of ['users', 'orgs', 'commerce']) {
     const d = getToggleDefault(id);
     if (d) await saveConfig({ ...d, status: 'on' }, 'test');
@@ -109,16 +120,16 @@ describe('GC-5 — commerce routes act in the tenant the gate authorized', () =>
     const b = client();
     await joinAsMember(a, ws, b, `commerce-b-${n++}@acme.test`, 'editor');
 
-    const created = await a.post(productsPath(ws), { name: 'Blue Widget', type: 'physical', price: 1999 });
+    const created = await a.post<Product & ErrBody>(productsPath(ws), { name: 'Blue Widget', type: 'physical', price: 1999 });
     expect(created.status, JSON.stringify(created.body)).toBe(201);
     expect(created.body.productId).toBeTruthy();
 
-    const list = await b.get(productsPath(ws));
+    const list = await b.get<{ products?: Product[] } & ErrBody>(productsPath(ws));
     expect(list.status, JSON.stringify(list.body)).toBe(200);
     // Before the fix B read their OWN home-tenant partition, so this list was empty
     // no matter what A had written — every member held a private invisible copy.
     expect(
-      (list.body.products ?? []).map((p: { productId: string }) => p.productId),
+      (list.body.products ?? []).map((p) => p.productId),
       'member B must see the org product A created, not a private copy',
     ).toContain(created.body.productId);
   });

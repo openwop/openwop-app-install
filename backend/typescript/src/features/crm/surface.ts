@@ -57,6 +57,7 @@ import {
   parseStage,
   recordContactTriageResult,
 } from './contactsService.js';
+import { isWorkspaceMember } from '../../host/accessControlService.js';
 import { convertContact as svcConvertContact } from './convertService.js';
 import { createBookingLink as svcCreateBookingLink, type BookingLinkStatus } from './entities/bookingLinks.js';
 import { assertBookingOwnerEligible } from './bookingService.js';
@@ -429,13 +430,24 @@ export function buildCrmSurface(scope: BundleScope): FeatureSurface {
     /** Idempotent by `taskId` (ADR 0162). */
     createTask: async (args) => {
       const orgId = requireStr(args.orgId, 'orgId');
-      await assertLinkVisible(orgId, { ...(optStr(args.dealId) ? { dealId: optStr(args.dealId) } : {}) });
+      // ADR 0882 D4 (CSMWF-7) — a task can name the company it is about (visible
+      // to the run's person, existing in this org) and a member assignee. The
+      // member check is THIS lane's: the org route and the demo seed still write
+      // free-text assignees (recorded residue, not claimed closed).
+      const companyId = optStr(args.companyId);
+      const assignee = optStr(args.assignee);
+      if (assignee && !(await isWorkspaceMember(assignee, tenantId))) {
+        throw new OpenwopError('validation_error', 'That person cannot be assigned: they are not a member of this workspace.', 422, { field: 'assignee', reason: 'invalid_assignee' });
+      }
+      await assertLinkVisible(orgId, { ...(optStr(args.dealId) ? { dealId: optStr(args.dealId) } : {}), ...(companyId ? { companyId } : {}) });
       const task = await crmCreateTask({
         tenantId,
         orgId,
         title: requireStr(args.title, 'title'),
         ...(optStr(args.dueDate) ? { dueDate: optStr(args.dueDate) } : {}),
         ...(optStr(args.dealId) ? { dealId: optStr(args.dealId) } : {}),
+        ...(companyId ? { companyId } : {}),
+        ...(assignee ? { assignee } : {}),
         createdBy: actor,
         validators: linkValidators(orgId),
         ...(optStr(args.taskId) ? { taskId: optStr(args.taskId) } : {}),

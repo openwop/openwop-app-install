@@ -28,7 +28,7 @@ import {
 import { listSeedTemplates } from './seedTemplates.js';
 import { markdownToHtml } from './render.js';
 import { listArtifactTypes } from '../../host/artifactTypes.js';
-import { getCanvasForTenant, deleteCanvasForTenant, listCanvasesForCaller, getCanvasForCaller } from '../../host/canvasSurface.js';
+import { getCanvasForTenant, deleteCanvasForTenant, listCanvasesForCaller, getCanvasForCaller, canvasWriteAllowed } from '../../host/canvasSurface.js';
 
 const FEATURE = { toggleId: 'documents', label: 'Documents & Templates' };
 const ORG = '/host/openwop-app/documents/orgs/:orgId';
@@ -139,6 +139,10 @@ export function registerDocumentsRoutes(deps: RouteDeps): void {
       // (uniform 404 — same as absent).
       const canvas = await getCanvasForCaller(tenantId, req.params.canvasId, { subject: user.userId });
       if (!canvas) throw new OpenwopError('not_found', `canvas '${req.params.canvasId}' not found`, 404);
+      // ADR 0886 D1 — deleting is a write on the owner, decided in its own org.
+      if (!(await canvasWriteAllowed(tenantId, canvas, { subject: user.userId }))) {
+        throw new OpenwopError('forbidden_scope', 'Missing required scope: workspace:write on the canvas owner', 403, { requiredScope: 'workspace:write' });
+      }
       // WF-SHARE-3 — the share-link purge that used to sit here (a hand-kept
       // `canvas.app-builder` → `app_builder_canvas` mapping) is GONE: it rides
       // `onCanvasDeleted`, fired by `deleteCanvasForTenant` below, so every
@@ -294,7 +298,9 @@ export function registerDocumentsRoutes(deps: RouteDeps): void {
         ...(optionalString(body.idempotencyKey) ? { idempotencyKey: optionalString(body.idempotencyKey)! } : {}),
         // ADR 0838 D5 — a checked save: two people saving at once get `409
         // stale_base` instead of one silently burying the other's version.
-        ...(body.baseVersionId !== undefined ? { baseVersionId: requireString(body.baseVersionId, 'baseVersionId') } : {}),
+        // ADR 0913 D5 — `null` is the checked first save ("no version yet").
+        ...(body.baseVersionId === null ? { baseVersionId: null }
+          : body.baseVersionId !== undefined ? { baseVersionId: requireString(body.baseVersionId, 'baseVersionId') } : {}),
       });
       res.status(201).json(version);
     } catch (err) { next(err); }

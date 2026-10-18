@@ -8,6 +8,17 @@
  * acting user, notebook/org access. Reads fail EMPTY; actions fail TYPED and
  * ignite the real workflow run through the owner. Boots the REAL app (the ADR
  * 0308 D2 registration seam is what's under test).
+ *
+ * Toggle state is GLOBAL and both features default OFF, so `beforeAll` turns both on
+ * and every case that turns one off restores it in `finally` — each case passes alone
+ * and in any order (wave 20 found five that passed only because an earlier case had
+ * left a toggle on).
+ *
+ * What reds it (sabotage-witnessed, /grade-tests wave 20): each guard in both tools'
+ * `run` (acting user, toggle, access/not-found, template, profile), the dispatch
+ * workflow id, the ignition dedupe, the shared `surfaceOptCount` topK rule and its
+ * control, the SSoT-generated topK prose, the agent pack allowlist, and the podcasts
+ * tool registration.
  */
 import http from 'node:http';
 import { readFileSync } from 'node:fs';
@@ -31,6 +42,8 @@ import { createSpeakerProfile, createEpisodeProfile } from '../src/features/podc
 const TENANT = 'default';
 const ORG = 'default';
 const USER = 'u-1';
+const OTHER = 'u-other';
+const OTHER_ORG = 'org-other';
 
 let server: http.Server;
 beforeAll(async () => {
@@ -39,6 +52,11 @@ beforeAll(async () => {
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { void (server.address() as AddressInfo); res(); }); });
   await createOrg({ tenantId: TENANT, createdBy: USER, name: 'Acme', ownerSubject: USER, orgId: ORG });
+  // A SECOND org in the same tenant that USER is not a member of — the home of a
+  // notebook that EXISTS but USER cannot read (the no-access leg below).
+  await createOrg({ tenantId: TENANT, createdBy: OTHER, name: 'Other', ownerSubject: OTHER, orgId: OTHER_ORG });
+  await setToggle('notebooks', 'on');
+  await setToggle('podcasts', 'on');
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
@@ -111,24 +129,38 @@ describe('notebooks read tools fail EMPTY (never success-with-empty as data)', (
     // real no-match search returns. The describe block's own title says
     // "never success-with-empty as data"; without a note it WAS data.
     expect(parse(out.content)).toMatchObject({ hits: [], citations: [] });
-    expect(parse(out.content).note, 'the model is told this is not an answer').toMatch(/not a statement|no notebook was/i);
+    // The ACTING-USER note specifically: the looser /not a statement|no notebook was/
+    // also matched the not-found note, so dropping this guard stayed green (wave 20).
+    expect(parse(out.content).note, 'the model is told this is not an answer').toMatch(/human-initiated turn/i);
   });
   it('ask: toggle off → empty even with an acting user', async () => {
     await setToggle('notebooks', 'off');
-    const out = await provider({ actingUserId: USER }).executeTool({ name: NOTEBOOKS_ASK_TOOL_ID, input: { query: 'x', notebookId: 'nb-x' } });
-    // Re-enable BEFORE asserting: this line used to run after the expect, so a
-    // failing assertion left the toggle off and cascaded into the next case.
-    await setToggle('notebooks', 'on');
+    let out: { content: string };
+    try {
+      out = await provider({ actingUserId: USER }).executeTool({ name: NOTEBOOKS_ASK_TOOL_ID, input: { query: 'x', notebookId: 'nb-x' } });
+    } finally {
+      // Re-enable BEFORE asserting (and even if the call throws), so a failure here
+      // can never leave the toggle off for the next case.
+      await setToggle('notebooks', 'on');
+    }
     const parsed = parse(out.content);
     expect(parsed).toMatchObject({ augmentedPrompt: '', citations: [], contexts: [] });
     expect(parsed.note, 'NBK2-M1 — an empty augmentedPrompt with no note reads as "the sources say nothing"').toMatch(/not enabled/i);
   });
   it('search: acting user but no access to the notebook → empty (no existence leak)', async () => {
-    const out = await provider({ actingUserId: USER }).executeTool({ name: NOTEBOOKS_SEARCH_TOOL_ID, input: { query: 'x', notebookId: 'nb-nonexistent' } });
-    const denied = parse(out.content);
+    // A notebook that EXISTS, in an org USER is not a member of. (This case used to
+    // search `nb-nonexistent`, which proves not-FOUND: the access check was then
+    // double-guarded by `getNotebook` returning null, and dropping it stayed green.)
+    const foreign = await createNotebook(TENANT, OTHER_ORG, OTHER, { name: 'Hidden' });
+    await addSource(TENANT, foreign.id, OTHER, { title: 'Secret', text: 'Transformers secret findings.' });
+    const p = provider({ actingUserId: USER });
+    const denied = parse((await p.executeTool({ name: NOTEBOOKS_SEARCH_TOOL_ID, input: { query: 'transformers', notebookId: foreign.id } })).content);
     expect(denied).toMatchObject({ hits: [], citations: [] });
-    // One note for denied AND missing — the existence non-leak, preserved.
     expect(denied.note).toMatch(/not found or not accessible/i);
+    // One note for denied AND missing — the existence non-leak: a model cannot tell
+    // "exists but hidden" from "does not exist".
+    const missing = parse((await p.executeTool({ name: NOTEBOOKS_SEARCH_TOOL_ID, input: { query: 'transformers', notebookId: 'nb-nonexistent' } })).content);
+    expect(missing.note).toBe(denied.note);
   });
 });
 
@@ -140,10 +172,13 @@ describe('notebooks write-transformation gates + ignites the real run', () => {
   });
   it('fails closed when the toggle is off', async () => {
     await setToggle('notebooks', 'off');
-    const out = await provider({ actingUserId: USER }).executeTool({ name: NOTEBOOKS_WRITE_TRANSFORMATION_TOOL_ID, input: { templateId: 'summary', sourceId: 's', notebookId: 'nb' } });
-    expect(out.isError).toBe(true);
-    expect(parse(out.content)).toMatchObject({ error: 'feature_disabled' });
-    await setToggle('notebooks', 'on');
+    try {
+      const out = await provider({ actingUserId: USER }).executeTool({ name: NOTEBOOKS_WRITE_TRANSFORMATION_TOOL_ID, input: { templateId: 'summary', sourceId: 's', notebookId: 'nb' } });
+      expect(out.isError).toBe(true);
+      expect(parse(out.content)).toMatchObject({ error: 'feature_disabled' });
+    } finally {
+      await setToggle('notebooks', 'on');
+    }
   });
   it('unknown notebook → not_found (shares the route access predicate)', async () => {
     const out = await provider({ actingUserId: USER }).executeTool({ name: NOTEBOOKS_WRITE_TRANSFORMATION_TOOL_ID, input: { templateId: 'summary', sourceId: 's', notebookId: 'nb-nope' } });
@@ -157,7 +192,8 @@ describe('notebooks write-transformation gates + ignites the real run', () => {
     const p = provider({ actingUserId: USER });
 
     const search = parse((await p.executeTool({ name: NOTEBOOKS_SEARCH_TOOL_ID, input: { query: 'transformers', notebookId: nb.id } })).content);
-    expect(Array.isArray(search.hits)).toBe(true);
+    // Grounded: the source IS among the citations (any array used to pass).
+    expect((search.citations as Array<{ documentId: string }>).map((c) => c.documentId)).toContain(source.documentId);
 
     const out = await p.executeTool({ name: NOTEBOOKS_WRITE_TRANSFORMATION_TOOL_ID, input: { templateId: 'summary', sourceId: source.documentId, notebookId: nb.id } });
     expect(out.isError).toBeFalsy();
@@ -205,26 +241,35 @@ describe('notebooks write-transformation gates + ignites the real run', () => {
 
 describe('podcasts.list read tool', () => {
   it('no acting user → empty collections', async () => {
-    await setToggle('podcasts', 'on');
+    // TRIPLE GUARD — CONFIRMED CEILING (wave 20 reprobe `pa-pod-list-noactor-combo`):
+    // (1) the tool's own `!scope.actingUserId`, (2) `resolveOrgScope`'s
+    // `acting_user_required`, (3) `resolveEffectiveAccess(subject: undefined)` → no
+    // scope → `forbidden_scope`; (2) and (3) are mapped to this same empty result.
+    // Removing (1)+(2) TOGETHER stayed green here (guard 3 holds) and redded only the
+    // produce tool's `requires a human-initiated turn` case, which witnesses (2).
     const out = await provider().executeTool({ name: PODCASTS_LIST_TOOL_ID, input: {} });
     expect(out.isError).toBeFalsy();
     expect(parse(out.content)).toEqual({ episodeProfiles: [], speakerProfiles: [], shows: [], episodes: [] });
   });
   it('acting user + access → the org building blocks', async () => {
-    await createSpeakerProfile(TENANT, ORG, { name: 'Duo', speakers: [{ name: 'A', voiceId: 'v1' }, { name: 'B', voiceId: 'v2' }] });
+    const created = await createSpeakerProfile(TENANT, ORG, { name: 'Duo', speakers: [{ name: 'A', voiceId: 'v1' }, { name: 'B', voiceId: 'v2' }] });
     const out = await provider({ actingUserId: USER }).executeTool({ name: PODCASTS_LIST_TOOL_ID, input: { orgId: ORG } });
-    const res = parse(out.content) as { speakerProfiles: unknown[] };
-    expect(res.speakerProfiles.length).toBeGreaterThanOrEqual(1);
+    const res = parse(out.content) as { speakerProfiles: Array<{ id: string }> };
+    // THIS case's profile (other cases create profiles in the same shared org).
+    expect(res.speakerProfiles.map((p) => p.id)).toContain(created.id);
   });
 });
 
 describe('podcasts.produce gates + ignites the real generation run', () => {
   it('fails closed when the toggle is off', async () => {
     await setToggle('podcasts', 'off');
-    const out = await provider({ actingUserId: USER }).executeTool({ name: PODCASTS_PRODUCE_TOOL_ID, input: { notebookId: 'nb', episodeProfileId: 'ep' } });
-    expect(out.isError).toBe(true);
-    expect(parse(out.content)).toMatchObject({ error: 'feature_disabled' });
-    await setToggle('podcasts', 'on');
+    try {
+      const out = await provider({ actingUserId: USER }).executeTool({ name: PODCASTS_PRODUCE_TOOL_ID, input: { notebookId: 'nb', episodeProfileId: 'ep' } });
+      expect(out.isError).toBe(true);
+      expect(parse(out.content)).toMatchObject({ error: 'feature_disabled' });
+    } finally {
+      await setToggle('podcasts', 'on');
+    }
   });
   it('requires a human-initiated turn', async () => {
     const out = await provider().executeTool({ name: PODCASTS_PRODUCE_TOOL_ID, input: { notebookId: 'nb', episodeProfileId: 'ep' } });
@@ -251,6 +296,9 @@ describe('podcasts.produce gates + ignites the real generation run', () => {
     expect(typeof res.episodeId).toBe('string');
     expect(typeof res.runId).toBe('string');
     expect(res.status).toBe('queued');
+    // The episode row the run generates INTO exists, bound to this notebook + profile.
+    const listed = parse((await provider({ actingUserId: USER }).executeTool({ name: PODCASTS_LIST_TOOL_ID, input: { orgId: ORG } })).content) as { episodes: Array<{ id: string; notebookId: string; episodeProfileId: string }> };
+    expect(listed.episodes.find((e) => e.id === res.episodeId)).toMatchObject({ notebookId: nb.id, episodeProfileId: ep.id });
   });
   it('a duplicate produce inside the window reuses the run — no second run, no orphan episode (HIGH-1)', async () => {
     await setToggle('notebooks', 'on');

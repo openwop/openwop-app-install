@@ -18,6 +18,12 @@
  *     200-node/300-edge graph stay under DELIBERATELY GENEROUS absolute
  *     ceilings (≥10× local headroom, absorbing CI variance): the ratchet
  *     catches accidental O(n²) regressions, not millisecond drift.
+ *
+ * Sabotage that turns it red: cloning every node in updateNode / moveNodes
+ * (`: n` → `: { ...n }`), unwrapping BaseNode's `memo`, or a 130 ms stall in
+ * updateNode. CEILING (honest, recorded): cases 4-6 read the wall clock — they
+ * are a coarse ratchet by design and can only flake under extreme machine load;
+ * do not tighten them.
  */
 import { describe, expect, it, beforeEach } from 'vitest';
 import { useBuilderStore } from '../store/builderStore.js';
@@ -47,14 +53,14 @@ function bigGraph(): { nodes: BuilderNode[]; edges: BuilderEdge[] } {
       name: `Step ${i}`,
       position: { x: (i % 20) * 180, y: Math.floor(i / 20) * 120 },
       config: { index: i, note: `node ${i}` },
-    } as BuilderNode);
+    });
   }
   // Acyclic by construction (serialize topo-sorts): a forward chain plus
   // forward skip edges.
   for (let i = 0; i < CANVAS_PERF_BUDGET.edges; i += 1) {
     const from = i < CANVAS_PERF_BUDGET.nodes - 1 ? i : (i - (CANVAS_PERF_BUDGET.nodes - 1)) % (CANVAS_PERF_BUDGET.nodes - 2);
     const to = i < CANVAS_PERF_BUDGET.nodes - 1 ? i + 1 : from + 2;
-    edges.push({ id: `e_${i}`, source: `n_${from}`, sourcePort: 'out', target: `n_${to}`, targetPort: 'in' } as BuilderEdge);
+    edges.push({ id: `e_${i}`, source: `n_${from}`, sourcePort: 'out', target: `n_${to}`, targetPort: 'in' });
   }
   return { nodes, edges };
 }
@@ -102,7 +108,7 @@ describe('canvas perf budget (ADR 0483 / B5)', () => {
   it('MEMO: BaseNode stays a memoized component', () => {
     // React.memo components carry the react.memo symbol — a refactor that
     // unwraps the memo re-renders all 200 nodes per keystroke.
-    expect((BaseNode as unknown as { $$typeof?: symbol }).$$typeof?.toString()).toContain('react.memo');
+    expect(BaseNode.$$typeof.toString()).toContain('react.memo');
   });
 
   it(`CEILING: serializing ${CANVAS_PERF_BUDGET.nodes} nodes stays under ${CANVAS_PERF_BUDGET.serializeMs}ms`, () => {

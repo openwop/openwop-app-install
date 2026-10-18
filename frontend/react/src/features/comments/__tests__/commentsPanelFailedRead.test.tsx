@@ -19,7 +19,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup, screen, waitFor, fireEvent, act } from '@testing-library/react';
 
-const api = vi.hoisted(() => ({ listThread: vi.fn(), postComment: vi.fn(), updateComment: vi.fn(), deleteComment: vi.fn() }));
+const api = vi.hoisted(() => {
+  const a = { listThread: vi.fn(), postComment: vi.fn(), updateComment: vi.fn(), deleteComment: vi.fn() };
+  // ADR 0881 D7 — the panel reads through `readThread` ({comments, viewer}); it
+  // delegates to the `listThread` mock so every case below keeps driving one fn.
+  return { ...a, readThread: vi.fn(async (...args: unknown[]) => ({ comments: await (a.listThread as (...x: unknown[]) => Promise<unknown>)(...args), viewer: null })) };
+});
 vi.mock('../commentsClient.js', async (importOriginal) => {
   const orig = await importOriginal<typeof import('../commentsClient.js')>();
   return { ...orig, ...api };

@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://packs.openwop.dev/feature.evals.nodes/1.1.0/run-suite.output.json",
+  "title": "EvalsRunSuiteOutput",
+  "type": "object",
+  "required": ["evalRunId", "status", "passed", "regressed", "ok"],
+  "properties": {
+    "evalRunId": { "type": "string" },
+    "status": { "type": "string", "const": "completed" },
+    "passed": { "type": "boolean", "description": "The suite's own pass rule (RFC 0244 §B)." },
+    "regressed": { "type": "boolean", "description": "True only when a baseline was given and the verdict is `regressed`." },
+    "ok": { "type": "boolean", "description": "The gate: passed and not regressed. Branch on this." },
+    "aggregateScore": { "type": "number" },
+    "passedCount": { "type": "number" },
+    "taskCount": { "type": "number" },
+    "verdict": { "type": ["string", "null"], "description": "The regression verdict, or null without a baseline." }
+  },
+  "additionalProperties": false
+}

@@ -9,11 +9,12 @@ import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { getSetCookies } from './headerCookies.js';
-// @ts-ignore — the shipped SDK is plain ESM.
+// Typed by the ambient declaration in test/feature-packs.d.ts (the SDK is plain ESM).
 import { createCdpClient } from '../sdk/cdpCollectSdk.mjs';
 
+interface Init { method?: string; headers: Record<string, string>; body?: string }
 function mockFetch(status: number, body: unknown) {
-  return vi.fn(async () => ({ status, ok: status >= 200 && status < 300, json: async () => body }));
+  return vi.fn(async (_url: string, _init: Init) => ({ status, ok: status >= 200 && status < 300, json: async () => body }));
 }
 
 describe('CDP-G createCdpClient', () => {
@@ -22,28 +23,16 @@ describe('CDP-G createCdpClient', () => {
     const cdp = createCdpClient({ baseUrl: 'https://app.test/', token: 'owk_abc', fetchImpl: f });
     const r = await cdp.collect('signup', { orderId: 'o1' });
     expect(r.status).toBe(201);
-    const [calledUrl, init] = (f as any).mock.calls[0];
+    const [calledUrl, init] = f.mock.calls[0]!;
     expect(calledUrl).toBe('https://app.test/host/openwop-app/cdp/collect');
     expect(init.method).toBe('POST');
     expect(init.headers.authorization).toBe('Bearer owk_abc');
-    expect(JSON.parse(init.body)).toEqual({ eventType: 'signup', payload: { orderId: 'o1' } });
-  });
-
-  it('collectBatch POSTs the events array to the batch endpoint', async () => {
-    const f = mockFetch(200, { accepted: 2, rejected: 0, results: [] });
-    const cdp = createCdpClient({ baseUrl: 'https://app.test', token: 'owk_abc', fetchImpl: f });
-    const events = [{ eventType: 'signup', payload: { orderId: 'o1' } }, { eventType: 'view', payload: { p: 1 } }];
-    const r = await cdp.collectBatch(events);
-    expect(r.status).toBe(200);
-    const [calledUrl, init] = (f as any).mock.calls[0];
-    expect(calledUrl).toBe('https://app.test/host/openwop-app/cdp/collect/batch');
-    expect(init.method).toBe('POST');
-    expect(JSON.parse(init.body)).toEqual({ events });
+    expect(JSON.parse(init.body ?? '')).toEqual({ eventType: 'signup', payload: { orderId: 'o1' } });
   });
 
   it('resolveIdentity returns the record, or null on a 404 miss', async () => {
     const hit = createCdpClient({ baseUrl: 'https://app.test', token: 't', fetchImpl: mockFetch(200, { contact: { contactId: 'crm:1' } }) });
-    expect((await hit.resolveIdentity('email', 'a@x.test')).contact.contactId).toBe('crm:1');
+    expect(await hit.resolveIdentity('email', 'a@x.test')).toEqual({ contact: { contactId: 'crm:1' } });
     const miss = createCdpClient({ baseUrl: 'https://app.test', token: 't', fetchImpl: mockFetch(404, { error: 'not_found' }) });
     expect(await miss.resolveIdentity('email', 'none@x.test')).toBeNull();
   });
@@ -83,23 +72,32 @@ describe('CDP-G createCdpClient against a host that has retired v1', () => {
 
   // The SDK authenticates with a bearer key in production; the session cookie
   // stands in for it here. What is under test is the PATH the SDK addresses.
-  const withSession: typeof fetch = (input, init) => fetch(input, { ...init, headers: { ...(init?.headers as Record<string, string>), cookie } });
+  const withSession = (input: string, init: Init) => fetch(input, { ...init, headers: { ...init.headers, cookie } });
 
   it('every method reaches its route (no 410), and collect/resolve round-trip', async () => {
     const seen: string[] = [];
-    const cdp = createCdpClient({ baseUrl: base, fetchImpl: ((i: string, init: RequestInit) => { seen.push(String(i)); return withSession(i, init); }) as typeof fetch });
+    const cdp = createCdpClient({ baseUrl: base, fetchImpl: (i, init) => { seen.push(i); return withSession(i, init); } });
 
     const reg = await cdp.registerSchema('signup', { type: 'object', required: ['orderId'], properties: { orderId: { type: 'string' } } });
     expect(reg.status, JSON.stringify(reg.body)).toBeLessThan(300);
     const one = await cdp.collect('signup', { orderId: 'o1', email: 'sdk-a@x.test' });
     expect(one.status, JSON.stringify(one.body)).toBe(201);
+    expect((one.body as { hasSchema?: boolean }).hasSchema).toBe(true); // the registered schema took effect
+    // (also the collectBatch path+body witness: the former mock-only case is subsumed here)
     const batch = await cdp.collectBatch([{ eventType: 'signup', payload: { orderId: 'o2' } }]);
-    expect(batch.status, JSON.stringify(batch.body)).toBeLessThan(300);
+    expect(batch.status, JSON.stringify(batch.body)).toBe(200);
+    expect((batch.body as { accepted?: number }).accepted).toBe(1);
     // A miss resolves to null (404), never a 410 body passed through as a record.
     const miss = await cdp.resolveIdentity('email', 'nobody@x.test');
     expect(miss).toBeNull();
 
-    expect(seen.length).toBe(4);
-    for (const u of seen) expect(u, 'the SDK must not address the retired /v1 space').not.toContain('/v1/');
+    // Exact paths: a 404 miss is indistinguishable from a wrong path, and the
+    // retired `/v1/host/…` spelling is the defect this case was written for.
+    expect(seen).toEqual([
+      `${base}/host/openwop-app/cdp/event-schemas`,
+      `${base}/host/openwop-app/cdp/collect`,
+      `${base}/host/openwop-app/cdp/collect/batch`,
+      `${base}/host/openwop-app/cdp/identity/resolve?type=email&value=nobody%40x.test`,
+    ]);
   });
 });

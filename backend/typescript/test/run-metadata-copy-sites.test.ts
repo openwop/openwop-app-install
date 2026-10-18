@@ -197,6 +197,10 @@ const CLASSIFIED: Record<string, { source: MetadataSource; why: string }> = {
     source: 'FRESH',
     why: 'Bare `storage.insertRun` for a synthesised eval row; its metadata is composed in place.',
   },
+  'host/evals/createEvalRun.ts': {
+    source: 'FRESH',
+    why: 'ADR 0889 eval run: metadata (`eval`, tags, caller metadata) is composed here from the request and the resolved suite; a baseline run is referenced by id, never copied.',
+  },
   'host/anonymousActor.ts': {
     source: 'FRESH',
     why:

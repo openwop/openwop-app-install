@@ -22,7 +22,8 @@ import type { User } from '../../users/usersService.js';
 import { getOrg } from '../../../host/accessControlService.js';
 import { resolveToggle } from '../../../host/featureToggles/service.js';
 import { ownerPublicRuntimeLapsed } from '../../../host/publicLapse.js';
-import { listProducts, getProduct, getCart, setCartItem, clearCart, checkoutCart, getOrder, markAsPaid, cancelOrder } from '../commerceService.js';
+import { listProducts, getProduct, getCart, setCartItem, clearCart, checkoutCart, getOrder, markAsPaid, cancelOrder, liveStripeKeyFor } from '../commerceService.js';
+import type { Order } from '../commerceService.js';
 import type { Product } from '../commerceService.js';
 import { resolveAp2Payment } from './ap2.js';
 import {
@@ -47,6 +48,27 @@ async function resolveMerchant(orgId: string): Promise<{ tenantId: string; orgId
   // ADR 0820 §7 — the owner-lapse policy (off unless the grace knob is set); same uniform 404.
   if (await ownerPublicRuntimeLapsed(UCP_TOGGLE, org.tenantId)) throw new OpenwopError('not_found', 'Merchant not found.', 404, {});
   return { tenantId: org.tenantId, orgId, merchantName: org.name };
+}
+
+/**
+ * ADR 0875 D4 — on a host whose platform Stripe key is LIVE, UCP cannot settle: the AP2
+ * mandate is not cryptographically verified (ADR 0178 says so) and a bare
+ * `payment_intent_id` is not checked at all, so "demo-mode, no money moves" stops being
+ * true the moment real goods are released. Checkout is refused too, rather than minting
+ * pending orders nobody can pay that hold stock. Demo hosts keep the documented flow.
+ */
+async function assertDemoSettlement(tenantId: string): Promise<void> {
+  if (await liveStripeKeyFor(tenantId).catch(() => null)) {
+    throw new OpenwopError('validation_error', 'This merchant takes live payments; UCP agent checkout is not available until AP2 mandates are verified.', 409, { code: 'live_payment_required' });
+  }
+}
+
+/** ADR 0875 D4 — a UCP client reaches only the orders IT created (checkout stamps
+ *  `createdBy` = the client's subject). Anything else is the uniform 404. */
+async function ownOrder(m: { tenantId: string; orgId: string }, principal: UcpPrincipal, orderId: string): Promise<Order> {
+  const order = await getOrder(m.tenantId, m.orgId, orderId);
+  if (!order || order.createdBy !== principal.subject) throw new OpenwopError('not_found', 'Order not found.', 404, {});
+  return order;
 }
 
 /** Authenticate a UCP bearer for the org and require a scope, else 401/403 (fail-closed). */
@@ -76,7 +98,13 @@ export function registerCommerceUcpRoutes(deps: RouteDeps): void {
 
   // ── ADMIN (authed) — UCP agent client provisioning ──────────────────────────
   app.get(`${ADMIN_BASE}/clients`, async (req, res, next) => {
-    try { const ctx = await authz(req, 'workspace:read'); res.json({ clients: await listClients(ctx.tenantId, ctx.orgId) }); } catch (err) { next(err); }
+    try {
+      const ctx = await authz(req, 'workspace:read');
+      // ADR 0875 D4 (grade-ux COM2UX-1) — tell the operator what an agent will meet:
+      // on a live-payments host checkout and pay are refused, and the page says so.
+      const settlement = (await liveStripeKeyFor(ctx.tenantId).catch(() => null)) ? 'refused_live' : 'demo';
+      res.json({ clients: await listClients(ctx.tenantId, ctx.orgId), settlement });
+    } catch (err) { next(err); }
   });
   app.post(`${ADMIN_BASE}/clients`, async (req, res, next) => {
     try {
@@ -176,6 +204,7 @@ export function registerCommerceUcpRoutes(deps: RouteDeps): void {
     try {
       const m = await resolveMerchant(req.params.orgId);
       const principal = await requireUcpScope(req, m.tenantId, m.orgId, 'checkout:write');
+      await assertDemoSettlement(m.tenantId);
       const b = (req.body ?? {}) as Record<string, unknown>;
       const couponCode = typeof b.coupon_code === 'string' ? b.coupon_code : undefined;
       // B3 (gap plan §5B): UCP is an AGENT path — an at/over-threshold checkout parks
@@ -189,10 +218,8 @@ export function registerCommerceUcpRoutes(deps: RouteDeps): void {
   app.get(`${UCP_BASE}/orders/:orderId`, async (req, res, next) => {
     try {
       const m = await resolveMerchant(req.params.orgId);
-      await requireUcpScope(req, m.tenantId, m.orgId, 'orders:read');
-      const order = await getOrder(m.tenantId, m.orgId, req.params.orderId);
-      if (!order) throw new OpenwopError('not_found', 'Order not found.', 404, {});
-      res.json(toUcpOrder(order));
+      const principal = await requireUcpScope(req, m.tenantId, m.orgId, 'orders:read');
+      res.json(toUcpOrder(await ownOrder(m, principal, req.params.orderId)));
     } catch (err) { next(err); }
   });
 
@@ -202,9 +229,9 @@ export function registerCommerceUcpRoutes(deps: RouteDeps): void {
   app.post(`${UCP_BASE}/orders/:orderId/pay`, async (req, res, next) => {
     try {
       const m = await resolveMerchant(req.params.orgId);
-      await requireUcpScope(req, m.tenantId, m.orgId, 'checkout:write');
-      const order = await getOrder(m.tenantId, m.orgId, req.params.orderId);
-      if (!order) throw new OpenwopError('not_found', 'Order not found.', 404, {});
+      const principal = await requireUcpScope(req, m.tenantId, m.orgId, 'checkout:write');
+      const order = await ownOrder(m, principal, req.params.orderId);
+      await assertDemoSettlement(m.tenantId);
       const { paymentIntentId, mode, warnings } = resolveAp2Payment((req.body ?? {}) as Record<string, unknown>, order);
       const paid = await markAsPaid(m.tenantId, m.orgId, order.orderId, paymentIntentId);
       if (!paid) throw new OpenwopError('not_found', 'Order not found.', 404, {});
@@ -216,7 +243,8 @@ export function registerCommerceUcpRoutes(deps: RouteDeps): void {
   app.post(`${UCP_BASE}/orders/:orderId/cancel`, async (req, res, next) => {
     try {
       const m = await resolveMerchant(req.params.orgId);
-      await requireUcpScope(req, m.tenantId, m.orgId, 'checkout:write');
+      const principal = await requireUcpScope(req, m.tenantId, m.orgId, 'checkout:write');
+      await ownOrder(m, principal, req.params.orderId);
       const canceled = await cancelOrder(m.tenantId, m.orgId, req.params.orderId);
       if (!canceled) throw new OpenwopError('not_found', 'Order not found.', 404, {});
       res.json(toUcpOrder(canceled));

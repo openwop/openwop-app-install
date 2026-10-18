@@ -9,6 +9,7 @@
  */
 
 import { DurableCollection } from './hostExtPersistence.js';
+import { CAS_RETRIES, entityEtag, staleWriteError } from './entityVersion.js';
 import {
   MIGRATION_STAGE_KEYS,
   type MigrationBoundaries,
@@ -50,23 +51,42 @@ export interface MigrationJourneyPatch {
   stageStatus?: Partial<Record<MigrationStageKey, StageStatus>>;
 }
 
-/** Merge-patch the (tenant-scoped) journey (only provided fields change). Creates it on first patch. */
+/** Merge-patch the (tenant-scoped) journey (only provided fields change). Creates it on first patch.
+ *
+ *  ADR 0775 P4 follow-up (`ARWF-11`, workforce PATCH) — a compare-and-swap
+ *  against the row that was read (or its absence), re-applied on a lost swap.
+ *  Before, two stage saves racing on different `stageStatus` keys each merged
+ *  into the same read copy and the second `put` dropped the first. `ifMatch`
+ *  refuses the write when the journey moved since the caller loaded it. */
 export async function patchMigrationJourney(
   tenantId: string,
   workforceId: string,
   patch: MigrationJourneyPatch,
+  opts: { ifMatch?: string } = {},
 ): Promise<MigrationJourney> {
-  const cur = await getMigrationJourney(tenantId, workforceId);
-  const updated: MigrationJourney = {
-    ...cur,
-    ...(patch.target !== undefined ? { target: patch.target } : {}),
-    ...(patch.dataManifest !== undefined ? { dataManifest: patch.dataManifest } : {}),
-    ...(patch.boundaries !== undefined ? { boundaries: patch.boundaries } : {}),
-    stageStatus: { ...cur.stageStatus, ...(patch.stageStatus ?? {}) },
-    updatedAt: nowIso(),
-  };
-  await journeys.put(updated);
-  return updated;
+  for (let attempt = 0; attempt < CAS_RETRIES; attempt += 1) {
+    const stored = await journeys.get(key(tenantId, workforceId));
+    const cur = stored ?? emptyJourney(tenantId, workforceId);
+    if (opts.ifMatch !== undefined && migrationEtag(cur) !== opts.ifMatch) {
+      throw staleWriteError('migration journey', migrationEtag(cur));
+    }
+    const updated: MigrationJourney = {
+      ...cur,
+      ...(patch.target !== undefined ? { target: patch.target } : {}),
+      ...(patch.dataManifest !== undefined ? { dataManifest: patch.dataManifest } : {}),
+      ...(patch.boundaries !== undefined ? { boundaries: patch.boundaries } : {}),
+      stageStatus: { ...cur.stageStatus, ...(patch.stageStatus ?? {}) },
+      updatedAt: nowIso(),
+    };
+    if (await journeys.compareAndSwap(stored ?? null, updated)) return updated;
+  }
+  throw staleWriteError('migration journey', undefined);
+}
+
+/** A journey's content version (ADR 0775 P4). `updatedAt` is excluded: an
+ *  unsaved journey is minted with a fresh stamp on every read. */
+export function migrationEtag(journey: MigrationJourney): string {
+  return entityEtag(journey, ['updatedAt']);
 }
 
 /** Test-only: drop the persisted journeys. */

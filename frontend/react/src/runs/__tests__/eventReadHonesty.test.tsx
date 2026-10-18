@@ -12,11 +12,20 @@
  * Every case here asserts BOTH polarities on purpose: a guard that suppresses
  * the empty state unconditionally would pass a one-sided test and destroy the
  * real "this run produced nothing" answer.
+ *
+ * What turns it red: the loader's catch marking the read 'ready'; the card
+ * rendering the failure for a successful read; the snapshot failure skipping
+ * the failed state; Retry not re-reading; a view that lets the failed FLAG
+ * outrank events it already holds (last describe — built with a real failed
+ * read plus a live SSE event, the only state that claim is about).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { announce, currentAnnouncements } from '../../ui/announce.js';
-import { render, cleanup, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, cleanup, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
+import type { RunEventDoc, RunSnapshot } from '@openwop/openwop';
+
+type SubscribeOpts = { onEvent: (ev: RunEventDoc) => void };
 
 const api = vi.hoisted(() => ({
   getRun: vi.fn(),
@@ -42,12 +51,17 @@ vi.mock('../../workflows/workflowsClient.js', async (importOriginal) => {
   return { ...orig, getRunRevision: vi.fn(async () => null) };
 });
 
+// ADR 0661 — refuse the SDK discovery read deterministically (the
+// `runDetailIntegrity.test.tsx` precedent) instead of riding a live fetch.
+vi.stubGlobal('fetch', vi.fn<typeof fetch>(() => Promise.reject(new Error('no network in unit tests'))));
 const { RunDetailPage } = await import('../RunDetailPage.js');
 
-const SNAPSHOT = {
+const SNAPSHOT: RunSnapshot = {
   runId: 'r1', status: 'completed', workflowId: 'wf1',
-  createdAt: '2026-08-01T00:00:00Z', updatedAt: '2026-08-01T00:00:00Z',
+  owner: { tenant: 't1', subject: { issuer: 'urn:openwop:test', subjectId: 'u1', tenant: 't1', lane: 'session', kind: 'user' } },
+  eventLogSchemaVersion: 3,
 };
+let sseHandler: SubscribeOpts['onEvent'] | null = null;
 
 function view(): void {
   render(
@@ -66,7 +80,11 @@ beforeEach(() => {
   vi.clearAllMocks();
   api.getRun.mockResolvedValue(SNAPSHOT);
   api.pollEvents.mockResolvedValue({ events: [] });
-  api.subscribeToRun.mockReturnValue({ close: () => {} });
+  sseHandler = null;
+  api.subscribeToRun.mockImplementation((_id: string, opts: SubscribeOpts) => {
+    sseHandler = opts.onEvent;
+    return { close: () => {} };
+  });
   interrupts.listOpenInterrupts.mockResolvedValue([]);
   announce('', { assertive: true });
 });
@@ -186,7 +204,12 @@ describe('run detail — a failed run is announced assertively', () => {
 
   it('a COMPLETED run announces nothing assertively (the polarity)', async () => {
     view();
-    await screen.findByText('r1');
+    // Post-load signals: the event read settled AND the snapshot rendered (its
+    // workflow id). The `<h1>` run id is first-paint and would assert while loading.
+    await screen.findByText(/No events yet/i);
+    await screen.findAllByText('wf1');
+    // Flush passive effects first: a negative read right after findBy would pass before a late announcement lands.
+    await act(async () => {});
     expect(currentAnnouncements().assertive).toBe('');
   });
 });
@@ -204,25 +227,31 @@ describe('run detail — a failed run is announced assertively', () => {
  * one: each VIEW's own `events.length === 0` branch. So that is what these two
  * cases measure — through the views, not through the deleted line.
  */
-const EV = {
+const EV: RunEventDoc = {
   runId: 'r1', eventId: 'e1', sequence: 1, nodeId: 'compute', type: 'node.completed',
-  ts: '2026-08-01T00:00:00Z', payload: { outputs: { verdict: 'off_plan' } },
-} as never;
+  timestamp: '2026-08-01T00:00:00Z', schemaVersion: 1, payload: { outputs: { verdict: 'off_plan' } },
+};
+
+/** The state the claim is about: the event READ failed, and then an event
+ *  arrived over SSE — so the page holds events AND `readState === 'failed'`. */
+async function failedReadThenLiveEvent(): Promise<void> {
+  api.pollEvents.mockRejectedValue(new Error('boom'));
+  view();
+  await screen.findByText(/Couldn’t load this run’s events/i);
+  expect(sseHandler).not.toBeNull();
+  await act(async () => { sseHandler!(EV); });
+}
 
 describe('events in hand outrank the read flag — held by the VIEWS, not by a guard inside the card', () => {
   it('TIMELINE: a failed refresh over a log we already have still renders the events', async () => {
-    api.pollEvents.mockResolvedValue({ events: [EV] });
-    view();
-    await screen.findByText('r1');
-    await waitFor(() => expect(screen.queryByText(/No events yet/i)).toBeNull());
+    await failedReadThenLiveEvent();
+    await waitFor(() => expect(screen.getByText(/compute/)).toBeTruthy());
     expect(screen.queryByText(/Couldn’t load this run’s events/i)).toBeNull();
-    expect(screen.getByText(/compute/)).toBeTruthy();
+    expect(screen.queryByText(/No events yet/i)).toBeNull();
   });
 
   it('LOG: the same, on the other view (the two must not drift)', async () => {
-    api.pollEvents.mockResolvedValue({ events: [EV] });
-    view();
-    await screen.findByText('r1');
+    await failedReadThenLiveEvent();
     showLogView();
     await screen.findByText(/node\.completed/);
     expect(screen.queryByText(/Couldn’t load this run’s events/i)).toBeNull();

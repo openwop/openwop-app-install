@@ -24,7 +24,7 @@ import { MarkdownEditor } from '../ui/MarkdownEditor.js';
 import { Markdown } from '../ui/Markdown.js';
 import { StructuredPromptEditor } from './StructuredPromptEditor.js';
 import { AgentGuardrailsPanel } from './AgentGuardrailsPanel.js';
-import { writeErrorMessage } from './agentWriteAccess.js';
+import { useAgentWriteAccess, writeErrorMessage } from './agentWriteAccess.js';
 
 export function AgentInstructionsPanel({ entry, onChanged }: { entry: RosterEntry; onChanged: () => void }): JSX.Element {
   const { t } = useTranslation('agents');
@@ -36,6 +36,9 @@ export function AgentInstructionsPanel({ entry, onChanged }: { entry: RosterEntr
   // CTA would dead-end on an empty form. Only genuinely-installed pack agents
   // are forkable.
   const isForkable = !isUserAuthored && !agentId.startsWith('host:');
+  // ADR 0775 P3 (`ARUX-18`) — a viewer reads this panel; it is not offered an
+  // editor whose save the server refuses after the typing is done.
+  const canWrite = useAgentWriteAccess();
 
   const [description, setDescription] = useState(entry.description ?? '');
   const [systemPrompt, setSystemPrompt] = useState('');
@@ -82,11 +85,15 @@ export function AgentInstructionsPanel({ entry, onChanged }: { entry: RosterEntr
     <div className="agentinstr-root">
       {error ? <Notice variant="error">{error}</Notice> : null}
       {notice ? <Notice variant="success" announce={notice}>{notice}</Notice> : null}
+      {!canWrite ? <p className="muted u-fs-13 u-m-0">{t('viewerPanelReadOnly')}</p> : null}
 
       <div className="u-block u-fw-600 u-mb-1">{t('instrWhatThisDoes')}</div>
       <p className="muted u-fs-13 u-mt-0">
         {t('instrDescriptionHint', { persona: entry.persona })}
       </p>
+      {!canWrite ? (
+        entry.description ? <div className="surface-card agentinstr-saved-card"><Markdown>{entry.description}</Markdown></div> : null
+      ) : (<>
       <MarkdownEditor
         value={description}
         onChange={setDescription}
@@ -99,13 +106,14 @@ export function AgentInstructionsPanel({ entry, onChanged }: { entry: RosterEntr
       <div className="agentinstr-save-row">
         <Button variant="primary" onClick={() => void onSaveDescription()} disabled={saving}>{t('instrSaveDescription')}</Button>
       </div>
+      </>)}
 
       <div className="u-block u-fw-600 u-mb-1">{t('instrInstructions')}</div>
       <p className="muted u-fs-13 u-mt-0">
         {t('instrInstructionsHint', { persona: entry.persona })}
       </p>
 
-      {isUserAuthored ? (
+      {!canWrite ? null : isUserAuthored ? (
         <>
           <p className="muted u-fs-12 u-mt-0">
             {t('instrSecurityNote')}

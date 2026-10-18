@@ -32,13 +32,15 @@ export const commentsFeature: BackendFeature = {
       await pruneThreadsForDeletedResources(tenantId, 'chat_message', messageIds.map((m) => `${conversationId}#${m}`));
     });
     // ADR 0334 DATA-1 / 6b — a deleted canvas.document has no reachable comment
-    // surface left; prune its threads (gated on the type — other canvas types
-    // carry no comments today). This cascades BOTH the whole-canvas thread
+    // surface left; prune its threads (gated on the type — only documents and
+    // slide decks carry comments). This cascades BOTH the whole-canvas thread
     // (resourceId === canvasId) AND every inline range-anchored thread
     // (resourceId === `${canvasId}#${threadId}`), whose threadIds die with the doc.
     onCanvasDeleted('comments', async ({ tenantId, canvasId, canvasTypeId }) => {
-      if (canvasTypeId !== 'canvas.document') return;
-      await pruneThreadsForResourceAndComposites(tenantId, 'canvas_document', canvasId);
+      // ADR 0886 D5 — slide decks carry per-slide threads (`${canvasId}#${slideId}`).
+      const resourceType = canvasTypeId === 'canvas.document' ? 'canvas_document' : canvasTypeId === 'canvas.slides' ? 'canvas_slides' : null;
+      if (!resourceType) return;
+      await pruneThreadsForResourceAndComposites(tenantId, resourceType, canvasId);
     });
   },
   // Face 2 (ADR 0014): `ctx.features.comments` — list/post/resolve for the
@@ -57,7 +59,7 @@ export const commentsFeature: BackendFeature = {
     // WF-CMNT-10 — bumped WITH the behavioural change. Node packs have no
     // version-aware precedence on the mount lane, so a fix at an unchanged
     // version is silently inert on a registry-installing host.
-    { name: 'feature.comments.nodes', version: '1.1.1' },
-    { name: 'vendor.openwop-app.comments.agents', version: '1.0.2' }, // CFP-1 real chat tools
+    { name: 'feature.comments.nodes', version: '1.2.1' }, // ADR 0881 D6 — `resolve` reclassified side-effect; ADR 0886 D5 names canvas_slides
+    { name: 'vendor.openwop-app.comments.agents', version: '1.0.4' }, // CFP-1 real chat tools; ADR 0881 D9 prompt names every type (ADR 0886 D5: seven)
   ],
 };

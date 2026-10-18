@@ -6,44 +6,55 @@
  * make the screen finishable AND abandonable — the coverage number comes from
  * the server rather than the UI, stopping early is stated as safe, and a refusal
  * is explained rather than reported as a failure.
+ *
+ * w52: fixtures are typed (`AnswerBankView`, `StoredAnswer`, `SaveAnswerResult`)
+ * with no casts. The done banner keys on the LOCAL count of listed questions
+ * answered (AnswerBankPage: `answered.size === view.questions.length`), not the
+ * server ratio — the case is titled for that and its ratio (0.9) is deliberately
+ * not 1, so the two readings are distinguishable.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
+import type { AnswerBankView, StandardQuestion, StoredAnswer } from '../jobSearchClient.js';
 
-const QUESTIONS = [
+const QUESTIONS: StandardQuestion[] = [
   { key: 'work-auth.legally-authorised', prompt: 'Are you legally allowed to work in the country you are applying in?', kind: 'boolean', why: 'Almost every application asks this, and it is required on all four boards.', core: true },
   { key: 'compensation.expectation', prompt: 'What compensation are you looking for?', kind: 'money', why: 'The question people most dread being asked repeatedly. Answer it once.', core: true },
   { key: 'links.linkedin', prompt: 'Your LinkedIn profile', kind: 'url', why: 'A required field on many forms, and trivially reusable.', core: false },
 ];
 
-const EMPTY_BANK = () => ({
+const EMPTY_BANK = (): AnswerBankView => ({
   questions: QUESTIONS,
   coreKeys: ['work-auth.legally-authorised', 'compensation.expectation'],
-  answers: [] as unknown[],
+  answers: [],
   coverage: { ratio: 0, totalCovered: 0, totalRequired: 21, totalDeclined: 1 },
 });
-const getBank = vi.fn(async () => EMPTY_BANK());
-const save = vi.fn(async () => ({ kind: 'saved' as const }));
+const ans = (questionKey: string, value: string): StoredAnswer => ({
+  questionKey, questionText: QUESTIONS.find((q) => q.key === questionKey)?.prompt ?? questionKey,
+  value, source: 'user', confirmedAt: '2026-10-01T00:00:00.000Z', usageCount: 0,
+});
 
-vi.mock('../jobSearchClient.js', () => ({
-  getAnswerBank: (...a: unknown[]) => getBank(...(a as [])),
-  saveAnswer: (...a: unknown[]) => save(...(a as [])),
+type Client = typeof import('../jobSearchClient.js');
+const { getBank, save } = vi.hoisted(() => ({
+  getBank: vi.fn<Client['getAnswerBank']>(),
+  save: vi.fn<Client['saveAnswer']>(),
 }));
+vi.mock('../jobSearchClient.js', () => ({ getAnswerBank: getBank, saveAnswer: save }));
 
 import { AnswerBankPage } from '../AnswerBankPage.js';
 
 describe('JSUX-AUTO-1 — the explicit done state', () => {
   beforeEach(() => {
     getBank.mockReset(); save.mockReset();
-    save.mockImplementation(async () => ({ kind: 'saved' as const }));
+    save.mockResolvedValue({ kind: 'saved' });
   });
   afterEach(cleanup);
 
-  it('at full coverage the wizard acknowledges completion and drops the stop-any-time note', async () => {
+  it('once every LISTED question is answered the wizard acknowledges completion and drops the stop-any-time note', async () => {
     getBank.mockImplementation(async () => ({
       ...EMPTY_BANK(),
-      answers: QUESTIONS.map((q) => ({ questionKey: q.key, value: 'x' })),
-      coverage: { ratio: 1, totalCovered: 21, totalRequired: 21, totalDeclined: 0 },
+      answers: QUESTIONS.map((q) => ans(q.key, 'x')),
+      coverage: { ratio: 0.9, totalCovered: 19, totalRequired: 21, totalDeclined: 0 },
     }));
     render(<AnswerBankPage />);
     await screen.findByText(/All questions answered/i);
@@ -53,7 +64,7 @@ describe('JSUX-AUTO-1 — the explicit done state', () => {
   it('below full coverage the stop-any-time note stays and no done banner shows', async () => {
     getBank.mockImplementation(async () => ({
       ...EMPTY_BANK(),
-      answers: [{ questionKey: QUESTIONS[0]!.key, value: 'x' }],
+      answers: [ans(QUESTIONS[0]!.key, 'x')],
       coverage: { ratio: 0.3, totalCovered: 6, totalRequired: 21, totalDeclined: 0 },
     }));
     render(<AnswerBankPage />);
@@ -70,7 +81,7 @@ describe('the answer-bank wizard', () => {
   beforeEach(() => {
     getBank.mockReset(); save.mockReset();
     getBank.mockImplementation(async () => EMPTY_BANK());
-    save.mockImplementation(async () => ({ kind: 'saved' as const }));
+    save.mockResolvedValue({ kind: 'saved' });
   });
   afterEach(cleanup);
 
@@ -86,7 +97,7 @@ describe('the answer-bank wizard', () => {
   it('shows the coverage number the SERVER computed, not one the UI invented', async () => {
     getBank.mockImplementation(async () => ({
       questions: QUESTIONS, coreKeys: [],
-      answers: [{ questionKey: 'compensation.expectation', questionText: 'q', value: '$180,000', source: 'user', confirmedAt: 'x', usageCount: 0 }],
+      answers: [ans('compensation.expectation', '$180,000')],
       coverage: { ratio: 0.67, totalCovered: 14, totalRequired: 21, totalDeclined: 1 },
     }));
     render(<AnswerBankPage />);
@@ -122,10 +133,10 @@ describe('the answer-bank wizard', () => {
   });
 
   it('explains a REFUSAL with the server’s reason, not as a save failure', async () => {
-    save.mockImplementation(async () => ({
+    save.mockResolvedValue({
       kind: 'refused', reason: 'special-category',
       message: 'This system does not store voluntary self-identification answers. Applications answer “decline to self-identify”.',
-    }) as never);
+    });
     render(<AnswerBankPage />);
     fireEvent.click(await screen.findByRole('button', { name: /^yes$/i }));
     expect(await screen.findByText(/does not store voluntary self-identification/i)).toBeTruthy();
@@ -133,7 +144,7 @@ describe('the answer-bank wizard', () => {
   });
 
   it('reports a transport failure as one — it did not reject the answer', async () => {
-    save.mockImplementation(async () => ({ kind: 'failed' }) as never);
+    save.mockResolvedValue({ kind: 'failed' });
     render(<AnswerBankPage />);
     fireEvent.click(await screen.findByRole('button', { name: /^yes$/i }));
     expect(await screen.findByText(/could not save that answer/i)).toBeTruthy();
@@ -153,7 +164,7 @@ describe('JSUX-A11Y-2 (R3) — selection is carried non-visually, not by variant
   it('the answered boolean carries aria-pressed=true and its sibling false', async () => {
     getBank.mockImplementation(async () => ({
       ...EMPTY_BANK(),
-      answers: [{ questionKey: 'work-auth.legally-authorised', value: 'Yes' }],
+      answers: [ans('work-auth.legally-authorised', 'Yes')],
     }));
     render(<AnswerBankPage />);
     const yes = await screen.findByRole('button', { name: 'Yes', pressed: true });

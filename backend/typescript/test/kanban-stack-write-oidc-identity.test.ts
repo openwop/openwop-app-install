@@ -27,7 +27,7 @@ import { createApp } from '../src/index.js';
 import { _resetOidcVerifier } from '../src/middleware/auth.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
-import { listMembers } from '../src/host/accessControlService.js';
+import { isWorkspaceMember, listMembers } from '../src/host/accessControlService.js';
 
 function b64url(buf: Buffer | string): string {
   return Buffer.from(buf).toString('base64').replace(/=+$/, '').replace(/\+/g, '-').replace(/\//g, '_');
@@ -85,11 +85,13 @@ afterAll(async () => {
   for (const k of ['OPENWOP_OIDC_ISSUER', 'OPENWOP_OIDC_AUDIENCE', 'OPENWOP_OIDC_JWKS_URL']) delete process.env[k];
 });
 
-interface Res<T = any> { status: number; body: T }
+interface Res<T = unknown> { status: number; body: T }
+interface ErrBody { error?: string; message?: string }
+type Call = <T = unknown>(p: string, b?: unknown) => Promise<Res<T>>;
 /** A bearer-carrying client with a cookie jar (the SPA shape: bearer + __session). */
-function client(token: string): { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res>; patch: (p: string, b?: unknown) => Promise<Res> } {
+function client(token: string): { get: Call; post: Call; patch: Call } {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
+  const call = async <T = unknown>(method: string, path: string, body?: unknown): Promise<Res<T>> => {
     const res = await fetch(`${BASE}${path}`, {
       method,
       headers: {
@@ -109,7 +111,8 @@ function client(token: string): { get: (p: string) => Promise<Res>; post: (p: st
       const m = /(__session=[^;]+)/.exec(sc);
       if (m) cookie = m[1];
     }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    // JSON response bodies are typed by each call site's view (`T`).
+    const out = (res.status === 204 ? undefined : await res.json().catch(() => undefined)) as T;
     return { status: res.status, body: out };
   };
   return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), patch: (p, b) => call('PATCH', p, b) };
@@ -130,8 +133,11 @@ async function oidcCaller(sub: string): Promise<{ c: ReturnType<typeof client>; 
 
 describe('ADR 0774 D5 — legacy oidc:<sub> callers are judged by their canonical identity', () => {
   it('the personal-workspace owner arriving as oidc:<sub> is admitted in their own workspace', async () => {
+    // Honest double guard: dropping the own-personal-workspace shortcut alone stays
+    // green (probe w37g1-oidc-own-personal) — /me/workspaces seeded the owner row under
+    // the CANONICAL spelling, which callerSubjectSpellings also tries (the outer guard).
     const { c } = await oidcCaller(`kst-owner-${Date.now()}`);
-    const board = await c.post(`${K}/boards`, { name: 'Mine' });
+    const board = await c.post<{ id: string }>(`${K}/boards`, { name: 'Mine' });
     expect(board.status, JSON.stringify(board.body)).toBe(201);
     expect((await c.post(`${K}/boards/${board.body.id}/cards`, { title: 'ok', columnId: 'todo' })).status).toBe(201);
   });
@@ -140,34 +146,59 @@ describe('ADR 0774 D5 — legacy oidc:<sub> callers are judged by their canonica
     const stamp = Date.now();
     const owner = await oidcCaller(`kst-wsowner-${stamp}`);
     const viewer = await oidcCaller(`kst-viewer-${stamp}`);
-    const ws = (await owner.c.post(WS, { name: `KST ${stamp}` })).body.workspaceId as string;
+    const ws = (await owner.c.post<{ workspaceId: string }>(WS, { name: `KST ${stamp}` })).body.workspaceId;
     expect((await owner.c.post(`${WS}/${encodeURIComponent(ws)}/switch`)).status).toBe(200);
     // MEASURED: a workspace created by an unbound OIDC caller records its OWNER
     // under the LEGACY spelling — so a gate that checked only the canonical
     // `user:<id>` would lock the owner out of their own workspace's boards.
     expect((await listMembers(ws, ws)).find((m) => m.roles.includes('owner'))?.subject).toBe(`oidc:kst-wsowner-${stamp}`);
-    const board = await owner.c.post(`${K}/boards`, { name: 'Shared' });
+    const board = await owner.c.post<{ id: string }>(`${K}/boards`, { name: 'Shared' });
     expect(board.status, JSON.stringify(board.body)).toBe(201);
 
     const add = await owner.c.post(`/host/openwop-app/orgs/${encodeURIComponent(ws)}/members`, { displayName: 'viewer', subject: `oidc:kst-viewer-${stamp}`, roles: ['viewer'] });
     expect(add.status, JSON.stringify(add.body)).toBe(201);
     expect((await viewer.c.post(`${WS}/${encodeURIComponent(ws)}/switch`)).status).toBe(200);
-    const refused = await viewer.c.post(`${K}/boards/${board.body.id}/cards`, { title: 'by the viewer', columnId: 'todo' });
+    const refused = await viewer.c.post<ErrBody>(`${K}/boards/${board.body.id}/cards`, { title: 'by the viewer', columnId: 'todo' });
     expect(refused.status, JSON.stringify(refused.body)).toBe(403);
+    expect(refused.body).toMatchObject({ error: 'forbidden_scope' });
   });
 
   it('an editor added by CANONICAL id is admitted once their bearer resolves user:<id> (bound)', async () => {
     const stamp = Date.now();
     const owner = await oidcCaller(`kst-wsowner2-${stamp}`);
     const editor = await oidcCaller(`kst-editor-${stamp}`);
-    const ws = (await owner.c.post(WS, { name: `KST2 ${stamp}` })).body.workspaceId as string;
+    const ws = (await owner.c.post<{ workspaceId: string }>(WS, { name: `KST2 ${stamp}` })).body.workspaceId;
     expect((await owner.c.post(`${WS}/${encodeURIComponent(ws)}/switch`)).status).toBe(200);
-    const board = (await owner.c.post(`${K}/boards`, { name: 'Shared 2' })).body;
+    const board = (await owner.c.post<{ id: string }>(`${K}/boards`, { name: 'Shared 2' })).body;
+    // Witnessed by dropping the spelling loop (w37g1-oidc-spellings). Keeping ONLY the
+    // raw spelling stays green (w37g1-oidc-raw-only): once bound, the raw subject IS the
+    // canonical id, so this case cannot separate the two spellings — the shared-workspace
+    // owner case above is the one that needs the legacy spelling.
     expect((await owner.c.post(`/host/openwop-app/orgs/${encodeURIComponent(ws)}/members`, { displayName: 'editor', subject: editor.canonical, roles: ['editor'] })).status).toBe(201);
     expect((await editor.c.post('/host/openwop-app/users/auth/oidc/bind')).status).toBe(200);
     const sw = await editor.c.post(`${WS}/${encodeURIComponent(ws)}/switch`);
     expect(sw.status, JSON.stringify(sw.body)).toBe(200);
     const made = await editor.c.post(`${K}/boards/${board.id}/cards`, { title: 'by the editor', columnId: 'todo' });
     expect(made.status, JSON.stringify(made.body)).toBe(201);
+  });
+});
+
+describe('ADR 0049 review fix #1 — self-assign on your OWN personal workspace needs no member row under your spelling', () => {
+  // Moved here from kanban-assignment-routes: the test-auth seam seeds an owner row
+  // for the session subject, so only an unbound OIDC caller (raw `oidc:<sub>`, owner
+  // row keyed canonical) reaches the `selfOnOwnWorkspace` branch at all.
+  it('an unbound oidc:<sub> owner can self-assign a card on their personal board', async () => {
+    const sub = `kst-self-${Date.now()}`;
+    const { c, personal } = await oidcCaller(sub);
+    const board = await c.post<{ id: string }>(`${K}/boards`, { name: 'Self' });
+    expect(board.status, JSON.stringify(board.body)).toBe(201);
+    const card = await c.post<{ id: string }>(`${K}/boards/${board.body.id}/cards`, { title: 'My task', columnId: 'todo' });
+    expect(card.status).toBe(201);
+    // Precondition: this caller's raw spelling has NO member row — the membership
+    // check alone would refuse it.
+    expect(await isWorkspaceMember(`oidc:${sub}`, personal)).toBe(false);
+    const assigned = await c.post<{ card: { assigneeId?: string } }>(`${K}/cards/${card.body.id}/assign`, { assigneeId: `oidc:${sub}` });
+    expect(assigned.status, JSON.stringify(assigned.body)).toBe(200);
+    expect(assigned.body.card.assigneeId).toBe(`oidc:${sub}`);
   });
 });

@@ -253,23 +253,53 @@ export async function resolveHeadlessAi(
   modality: HeadlessModality,
   options?: HeadlessAiOptions,
 ): Promise<HeadlessDispatch | null> {
+  return (await resolveHeadlessAiDescribed(tenantId, modality, options))?.dispatch ?? null;
+}
+
+/** Which ladder step resolved a headless dispatch (ADR 0821 D5 numbering). */
+export type HeadlessRoute = 'byok-preferred' | 'managed' | 'byok-default';
+
+/** A resolved headless dispatch plus WHO it calls — never the key (SR-1). */
+export interface DescribedHeadlessDispatch {
+  dispatch: HeadlessDispatch;
+  provider: string;
+  /** Absent on the managed step: the operator fixes that model, not this tenant. */
+  model?: string;
+  route: HeadlessRoute;
+}
+
+/**
+ * `resolveHeadlessAi` with the resolved provider/model/route attached (ADR 0889
+ * grade remediation AEV-2: an eval records which model JUDGED a trial, so a
+ * regression verdict can tell a judge change from an agent change). The ladder
+ * lives HERE, once; `resolveHeadlessAi` is this minus the description.
+ */
+export async function resolveHeadlessAiDescribed(
+  tenantId: string,
+  modality: HeadlessModality,
+  options?: HeadlessAiOptions,
+): Promise<DescribedHeadlessDispatch | null> {
   if (modality === 'text') {
     const preferred = await resolvePreferredByokText(tenantId, options?.modelClass);
     if (preferred) return preferred;
   }
   const managedProvider = managedUnderlyingProvider(MANAGED_FREE_REF);
   if (managedProvider && providerSupports(managedProvider, modality)) {
-    return async (messages, opts) => {
-      const r = await dispatchManagedChat({
-        userFacingProvider: managedProviderIdFromRef(MANAGED_FREE_REF),
-        tenantId,
-        ...(options?.featureId ? { featureId: options.featureId } : {}),
-        ...(options?.actingSubject ? { actingSubject: options.actingSubject } : {}),
-        messages: messages as ChatMessage[],
-        maxTokens: opts.maxTokens,
-        ...signalFor(opts),
-      });
-      return r.completion ?? '';
+    return {
+      provider: managedProvider,
+      route: 'managed',
+      dispatch: async (messages, opts) => {
+        const r = await dispatchManagedChat({
+          userFacingProvider: managedProviderIdFromRef(MANAGED_FREE_REF),
+          tenantId,
+          ...(options?.featureId ? { featureId: options.featureId } : {}),
+          ...(options?.actingSubject ? { actingSubject: options.actingSubject } : {}),
+          messages: messages as ChatMessage[],
+          maxTokens: opts.maxTokens,
+          ...signalFor(opts),
+        });
+        return r.completion ?? '';
+      },
     };
   }
   const def = await getHeadlessAiDefault(tenantId);
@@ -277,9 +307,14 @@ export async function resolveHeadlessAi(
     const apiKey = await resolveSecret(def.credentialRef, { tenantId });
     if (apiKey) {
       const { provider, model } = def;
-      return async (messages, opts) => {
-        const r = await dispatchChat({ provider: provider as ProviderId, model, apiKey, messages: messages as ChatMessage[], maxTokens: opts.maxTokens, ...signalFor(opts) });
-        return r.completion ?? '';
+      return {
+        provider,
+        model,
+        route: 'byok-default',
+        dispatch: async (messages, opts) => {
+          const r = await dispatchChat({ provider: provider as ProviderId, model, apiKey, messages: messages as ChatMessage[], maxTokens: opts.maxTokens, ...signalFor(opts) });
+          return r.completion ?? '';
+        },
       };
     }
     log.warn('headless_ai_default_ref_unresolved', { tenantId }); // ephemeral/expired — fall through to null
@@ -297,7 +332,7 @@ export async function resolveHeadlessAi(
  *  closure as-is — there is deliberately no managed retry: the tenant chose to pay
  *  with its own key, and silently drawing managed on its key's failure would bill
  *  the platform allowance for a call the tenant opted out of. */
-async function resolvePreferredByokText(tenantId: string, modelClass?: 'quick'): Promise<HeadlessDispatch | null> {
+async function resolvePreferredByokText(tenantId: string, modelClass?: 'quick'): Promise<DescribedHeadlessDispatch | null> {
   let def: HeadlessAiDefault | null;
   try {
     def = await getHeadlessAiDefault(tenantId);
@@ -316,9 +351,14 @@ async function resolvePreferredByokText(tenantId: string, modelClass?: 'quick'):
   // class default (providers.json — the SSoT `/refresh-model-catalog` maintains),
   // never a vendor id hard-coded in a caller.
   const model = (modelClass ? getClassDefault(provider, modelClass) : null) ?? def.model;
-  return async (messages, opts) => {
-    const r = await dispatchChat({ provider: provider as ProviderId, model, apiKey, messages: messages as ChatMessage[], maxTokens: opts.maxTokens, ...signalFor(opts) });
-    return r.completion ?? '';
+  return {
+    provider,
+    model,
+    route: 'byok-preferred',
+    dispatch: async (messages, opts) => {
+      const r = await dispatchChat({ provider: provider as ProviderId, model, apiKey, messages: messages as ChatMessage[], maxTokens: opts.maxTokens, ...signalFor(opts) });
+      return r.completion ?? '';
+    },
   };
 }
 

@@ -27,6 +27,7 @@ const ASKS: ReadonlyArray<readonly [string, string]> = [
   ['openwop:kicktodo.log-checkin', 'commits the participant\'s own non-reversible check-in (name set, ADR 0442)'],
   ['openwop:workflows.compose-and-run', 'runs a model-written workflow unreviewed — http/email nodes included (declared, ADR 0834)'],
   ['openwop:destination-sync.run', 'forwards model-supplied records to a peer host (declared, ADR 0834)'],
+  ['openwop:agent-evals.run', 'spends model calls on every task × trial of an eval suite (declared, ADR 0889)'],
 ];
 
 const OWN_GATE = 'reaches a human approval through its own mechanism (approvals inbox / reviews / editorial queue) — nothing leaves without it';
@@ -107,6 +108,8 @@ const NO_ASK_READ_EGRESS: ReadonlyArray<readonly [string, string]> = [
 const READS: readonly string[] = [
   'openwop:accessibility.alt-text.generate',
   'openwop:accessibility.check',
+  'openwop:agent-evals.get-summary',
+  'openwop:agent-evals.list-suites',
   'openwop:analytics.query',
   'openwop:app-builder.catalog',
   'openwop:app-builder.get-design',
@@ -182,6 +185,7 @@ const READS: readonly string[] = [
   'openwop:feature.crm.nodes.segment-vocabulary',
   'openwop:feature.crm.nodes.validate-segment',
   'openwop:feature.csm.nodes.health-read',
+  'openwop:feature.csm.nodes.renewals-due', // ADR 0882 D8 — a read (effect:'read'), same predicate as health-read',
   'openwop:feature.insights-suite.nodes.talent-score',
   'openwop:feature.insights-suite.nodes.variance-compute',
   'openwop:feature.workflow-author.nodes.draft',
@@ -198,6 +202,7 @@ const READS: readonly string[] = [
   'openwop:job-search.applications.read',
   'openwop:job-search.listings.read',
   'openwop:kicktodo.candidates',
+  'openwop:kicktodo.challenge-performance',
   'openwop:kicktodo.circles',
   'openwop:kicktodo.community-reviews',
   'openwop:kicktodo.engagement-summary',
@@ -235,8 +240,8 @@ const READS: readonly string[] = [
   'openwop:strategy.get-health',
   'openwop:strategy.get-strategy',
   'openwop:strategy.list-strategies',
-  'openwop:team-ledger.get',
   'openwop:tasks.deck',
+  'openwop:team-ledger.get',
   'openwop:territories.active-model',
   'openwop:territories.attainment',
   'openwop:territories.list-models',

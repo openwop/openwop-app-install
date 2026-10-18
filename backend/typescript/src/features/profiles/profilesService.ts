@@ -27,6 +27,7 @@ import { registerSubjectEraser } from '../../host/subjectErasure.js';
 import { registerExternalByteRefProvider, promoteToDurable, releaseByteRef } from '../media/mediaStorage.js';
 import { computeCompleteness, completenessMissing } from './completeness.js';
 import { emitProfileWrite, endorsementGiven, endorsementRemoved } from './emit.js';
+import { putShare, deleteShare, getShareRow } from './directory.js';
 
 // ADR 0081 P5 — a profile is descriptive person data: `bio` + `contact.location` are
 // free-text personal data (declare for log-masking, ADR 0077). `jobTitle`/`department`
@@ -105,6 +106,10 @@ export interface Profile {
    *  optional retrieval tuning. Mirrors `agentProfile.knowledge`. The descriptive
    *  Profile record holds only the pointers (ADR 0005 descriptive-only boundary);
    *  the documents + notes themselves live in KB + the `user:<id>` memory scope. */
+  /** ADR 0888 D1 — the workspaces this person chose to be listed in (owner-only,
+   *  never projected to peers). The SOURCE OF TRUTH for erasure; the
+   *  `profiles:ws-share` rows (`directory.ts`) are the bounded read index. */
+  sharedWorkspaceIds?: string[];
   knowledge?: {
     collectionIds?: string[];
     retrieval?: { topK?: number; sources?: ('kb' | 'memory')[] };
@@ -123,9 +128,10 @@ export interface ProfileViewSkill {
   endorsements: { count: number; endorsedByMe: boolean; endorserUserIds: string[] };
 }
 
-/** The shape returned to clients: the stored profile + derived fields surfaced
- *  from the identity/auth layer (NOT owned here). */
-export interface ProfileView extends Omit<Profile, 'skills'> {
+/** The OWNER's full row as a client view: the stored profile + derived fields
+ *  surfaced from the identity/auth layer (NOT owned here). Only the `/me` lane
+ *  serves this shape (`viewOwnProfile`); peers get {@link ProfileView}. */
+export interface FullProfileView extends Omit<Profile, 'skills'> {
   skills: ProfileViewSkill[];
   /** 0..100, weighted field completeness (derived). */
   completeness: number;
@@ -135,10 +141,26 @@ export interface ProfileView extends Omit<Profile, 'skills'> {
   displayName?: string;
 }
 
-/** ADR 0624 D4 — the OWNER's view: the team view plus the "what next" list the
+/**
+ * ADR 0888 D2 — the TEAM view: what a peer may see. An ALLOWLIST, so a field added
+ * to `Profile` later is private until someone adds it here on purpose. Left out:
+ * the owner's sidebar/chat pins, their private knowledge-collection pointers
+ * (ADR 0042), `sharedWorkspaceIds`, and the bookkeeping `tenantId`/`updatedBy` —
+ * all of which `viewProfile` used to spread to every co-member.
+ */
+export const TEAM_VIEW_FIELDS = [
+  'userId', 'preferredName', 'jobTitle', 'department', 'bio', 'contact',
+  'avatarAssetToken', 'portfolioAssetTokens', 'skills', 'equipment', 'availability',
+  'interests', 'growthInterests', 'workflows', 'completeness', 'emailVerified',
+  'displayName', 'createdAt', 'updatedAt',
+] as const satisfies readonly (keyof FullProfileView)[];
+
+export type ProfileView = Pick<FullProfileView, (typeof TEAM_VIEW_FIELDS)[number]>;
+
+/** ADR 0624 D4 — the OWNER's view: the full row plus the "what next" list the
  *  completeness meter captions. SELF-ONLY: served by the `/me` lane routes and
  *  never by `/team`, `GET /:userId` or the workflow surface. */
-export interface OwnProfileView extends ProfileView {
+export interface OwnProfileView extends FullProfileView {
   /** Weights not yet earned, heaviest first. */
   completenessMissing: Array<{ field: string; weight: number }>;
 }
@@ -185,18 +207,22 @@ export interface ViewProfileOpts {
   displayName?: string;
   /** The caller — decides `endorsements.endorsedByMe` (ADR 0624 D7). */
   viewerUserId?: string;
+  /** ADR 0888 D1/D2 — where the peer is reading from. In a shared `workspace`
+   *  the home-tenant `workflows` ids do not resolve and the endorser ids are
+   *  home-tenant people, so both are withheld (the count stays). */
+  scope?: 'home' | 'workspace';
 }
 
-/** Project a stored profile to its client view (derived + surfaced fields added;
- *  endorsements projected for the viewer — D7). Team-visible: carries NO
- *  `completenessMissing` (that is `viewOwnProfile`, self-only). */
-export function viewProfile(p: Profile, opts: ViewProfileOpts = {}): ProfileView {
+/** The full row as a view (derived + surfaced fields added; endorsements projected
+ *  for the viewer — D7). Internal: peers get `viewProfile`, the owner `viewOwnProfile`. */
+function fullView(p: Profile, opts: ViewProfileOpts): FullProfileView {
   const viewer = opts.viewerUserId;
+  const inWorkspace = opts.scope === 'workspace';
   return {
     ...p,
     skills: (p.skills ?? []).map((s) => {
       const ids = s.endorsements ?? [];
-      return { name: s.name, proficiency: s.proficiency, endorsements: { count: ids.length, endorsedByMe: viewer !== undefined && ids.includes(viewer), endorserUserIds: [...ids] } };
+      return { name: s.name, proficiency: s.proficiency, endorsements: { count: ids.length, endorsedByMe: !inWorkspace && viewer !== undefined && ids.includes(viewer), endorserUserIds: inWorkspace ? [] : [...ids] } };
     }),
     // Back-compat: rows stored before ADR 0025 lack `workflows` — normalize to [].
     workflows: p.workflows ?? [],
@@ -208,12 +234,24 @@ export function viewProfile(p: Profile, opts: ViewProfileOpts = {}): ProfileView
   };
 }
 
-/** ADR 0624 D4 — the owner's own view (`/me` lane ONLY): `viewProfile` +
+/** ADR 0888 D2 — the TEAM view of a profile (the ONE peer projector: the
+ *  directory, `GET /:userId` and the endorse response all serve it). Carries NO
+ *  `completenessMissing` (that is `viewOwnProfile`, self-only) and only the
+ *  {@link TEAM_VIEW_FIELDS} allowlist. */
+export function viewProfile(p: Profile, opts: ViewProfileOpts = {}): ProfileView {
+  const full = fullView(p, opts) as unknown as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+  for (const k of TEAM_VIEW_FIELDS) if (full[k] !== undefined) out[k] = full[k];
+  if (opts.scope === 'workspace') out.workflows = [];
+  return out as ProfileView;
+}
+
+/** ADR 0624 D4 — the owner's own view (`/me` lane ONLY): the full row +
  *  `completenessMissing` (weights not yet earned, heaviest first) so the meter
  *  can say what to do next. The viewer IS the owner, so `endorsedByMe` is always
  *  false here (no self-endorsement). */
-export function viewOwnProfile(p: Profile, opts: Omit<ViewProfileOpts, 'viewerUserId'> = {}): OwnProfileView {
-  return { ...viewProfile(p, { ...opts, viewerUserId: p.userId }), completenessMissing: completenessMissing(p) };
+export function viewOwnProfile(p: Profile, opts: Omit<ViewProfileOpts, 'viewerUserId' | 'scope'> = {}): OwnProfileView {
+  return { ...fullView(p, { ...opts, viewerUserId: p.userId }), completenessMissing: completenessMissing(p) };
 }
 
 /** The caller's own profile, lazily materialized on first read (a signed-in user
@@ -339,6 +377,44 @@ export async function setProfileKnowledge(
     updatedBy: userId,
   }));
   return updated!.profile; // ADR 0624 D3 — deliberately silent (ADR 0042: no `knowledge.bound`)
+}
+
+/** ADR 0888 D1 — opt in to (or out of) one workspace's directory. Self-only: the
+ *  route resolves the caller's own canonical `userId` and the `memberSubject`
+ *  that proved their root membership of `workspaceId`. Ordered so a mid-way
+ *  failure never lists someone who did not ask: sharing writes the profile (the
+ *  erasure source of truth) BEFORE the index row that makes them visible;
+ *  un-sharing deletes the index row FIRST. Idempotent both ways. Silent — a
+ *  directory preference, not a profile edit (no `profile.updated`). */
+export async function setWorkspaceShare(
+  tenantId: string,
+  userId: string,
+  workspaceId: string,
+  memberSubject: string,
+  shared: boolean,
+): Promise<Profile> {
+  if (!shared) await deleteShare(workspaceId, userId);
+  const updated = await casMutateProfile(tenantId, userId, (current) => {
+    const list = current.sharedWorkspaceIds ?? [];
+    if (shared === list.includes(workspaceId)) return 'unchanged';
+    const next = shared ? [...list, workspaceId] : list.filter((id) => id !== workspaceId);
+    return { ...current, sharedWorkspaceIds: next };
+  });
+  if (shared) {
+    // A repeat share keeps its place (the first `sharedAt`), refreshing only the
+    // subject that proved membership.
+    const prior = await getShareRow(workspaceId, userId);
+    await putShare({ workspaceId, userId, memberSubject, sharedAt: prior?.sharedAt ?? new Date().toISOString() });
+    // `PROF2CD-2` — a concurrent un-share can delete the row, update the profile,
+    // and then lose to the put above, leaving a row the profile does not list
+    // (and that the home eraser, which walks the profile's list, never reaches).
+    // Re-read the source of truth AFTER the put and withdraw the row if it no
+    // longer agrees. The un-share deletes the row first, so either order ends
+    // with row and profile in agreement.
+    const now = await getProfile(tenantId, userId);
+    if (!(now?.sharedWorkspaceIds ?? []).includes(workspaceId)) await deleteShare(workspaceId, userId);
+  }
+  return updated!.profile;
 }
 
 /** Remove one or more agents from EVERY profile's pinned list in this tenant —
@@ -680,7 +756,20 @@ registerRetentionPurger({
       // GRADE DATA-2: cascade to the Team Portfolio KB so retention doesn't orphan
       // a departed member's descriptive PII as a searchable doc. Best-effort import
       // (runtime-only use → the profiles↔kb-service cycle is safe).
-      async (id) => { await store.delete(id); await removeProfile(tenantId, id); });
+      async (id) => {
+        // ADR 0888 D4 — read the row BEFORE deleting it: the callback gets only an
+        // id, and the row is the only record of which avatar/portfolio tokens it
+        // held. Releasing them is what the DSAR eraser already does (review F1);
+        // without it a retention-purged face stayed served by its token URL.
+        const row = await store.get(id);
+        if (row && row.tenantId === tenantId) for (const ws of row.sharedWorkspaceIds ?? []) await deleteShare(ws, id);
+        const deleted = await store.delete(id);
+        await removeProfile(tenantId, id);
+        if (deleted && row && row.tenantId === tenantId) {
+          await releaseProfileByteRef(tenantId, row.avatarAssetToken);
+          for (const token of row.portfolioAssetTokens ?? []) await releaseProfileByteRef(tenantId, token);
+        }
+      });
   },
 });
 
@@ -703,6 +792,10 @@ export async function eraseProfileSubject(tenantId: string, subjectKey: string):
   const p = await store.get(subjectKey);
   let deleted = false;
   if (p && p.tenantId === tenantId) { // fail-closed, tenant-scoped
+    // ADR 0888 D1 — the workspace-directory index rows go FIRST, while the row
+    // that lists them still exists: an erased person must not stay listed in a
+    // workspace through an index whose source of truth is gone.
+    for (const ws of p.sharedWorkspaceIds ?? []) await deleteShare(ws, subjectKey);
     deleted = await store.delete(subjectKey);
     // Review F1 — erasing the row must also reclaim the promoted BYTES, or the
     // subject's face stays fetchable forever on the unauthenticated

@@ -11,7 +11,7 @@
 import { describe, it, expect } from 'vitest';
 import { createRequire } from 'node:module';
 import { buildSlidesDesignDefinition, SLIDES_DESIGN_WORKFLOW_ID } from '../designWorkflow.js';
-import { loadWorkflowChainPacks, defaultWorkflowChainPackRoots, _resetChainRegistryForTest } from '../../../host/workflowChainPackLoader.js';
+import { loadWorkflowChainPacks, defaultWorkflowChainPackRoots, _resetChainRegistryForTest, listChains } from '../../../host/workflowChainPackLoader.js';
 
 // ADR 0472 P4 — slides.design migrated to a chain pack; build the MIGRATED def.
 _resetChainRegistryForTest();
@@ -83,6 +83,24 @@ describe('slides.design chain shape (ADR 0328 P6)', () => {
   it('passes graph validation with the mid-chain gate (the toposort regression class)', () => {
     const order = topologicalOrder(d, buildGraph(d));
     expect(order.map(bare)).toEqual(['outline', 'outlineGate', 'draft', 'deepen', 'notes', 'audit', 'review']);
+  });
+});
+
+describe('slides.design replay + reachability witnesses (row 43, SLW2-1 / SLW2-2)', () => {
+  it('builds byte-identically twice — expansion + the outputRole post-processor are pure (replay/:fork)', () => {
+    const again = buildSlidesDesignDefinition();
+    expect(JSON.stringify(again)).toBe(JSON.stringify(slidesDesignWorkflowDefinition));
+    expect(again.workflowId).toBe(SLIDES_DESIGN_WORKFLOW_ID);
+  });
+
+  it('is a gallery chain: loaded by the real loader, not internal, and its node types are all known', () => {
+    const entry = listChains().find((e) => e.chain.chainId === SLIDES_DESIGN_WORKFLOW_ID);
+    expect(entry?.packName).toBe('core.openwop.workflows.slides-design');
+    // The `/workflow-chains` gallery omits `internal: true` chains (RFC 0135).
+    expect(entry?.chain.internal).not.toBe(true);
+    // Every node typeId the chain references exists in its pack namespace.
+    const typeIds = new Set((entry?.chain.dag.nodes ?? []).map((nd) => String(nd.typeId).split('@')[0]));
+    expect([...typeIds].sort()).toEqual(['core.approvalGate', 'feature.slides.nodes.audit', 'feature.slides.nodes.deepen', 'feature.slides.nodes.draft', 'feature.slides.nodes.notes', 'feature.slides.nodes.outline']);
   });
 });
 

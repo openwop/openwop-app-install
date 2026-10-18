@@ -84,7 +84,7 @@ import { lazy, Suspense, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button } from '../../ui/Button.js';
 import { Notice } from '../../ui/index.js';
-import { FileTextIcon, MailCheckIcon, SearchIcon } from '../../ui/icons/index.js';
+import { FileTextIcon, GlobeIcon, MailCheckIcon, SearchIcon } from '../../ui/icons/index.js';
 import { getArtifact, getArtifactRevision } from '../artifacts/artifactClient.js';
 import type { ReviewAsset } from './reviewClient.js';
 
@@ -104,12 +104,25 @@ export interface GateSendMessage {
   provider?: string;
 }
 
+/** ADR 0894 — the one browser action a computer-use `decide` node is asking
+ *  its opener about. `kind` is the host's CLOSED action vocabulary and `origin`
+ *  the site; `note` is the provider's description, page-derived and unverified,
+ *  so it is rendered apart from (and labelled differently to) the action. */
+export interface GateBrowserAction {
+  kind: string;
+  origin: string;
+  /** The full target URL — part of what the approval's digest binds (addendum 2). */
+  url?: string;
+  note?: string;
+}
+
 /** The evidence fields an approval interrupt's `data` may carry. */
 export interface GateEvidenceData {
   options?: readonly GateOption[];
   artifactId?: string;
   revisionId?: string;
   sendMessage?: GateSendMessage;
+  browserAction?: GateBrowserAction;
 }
 
 /**
@@ -133,6 +146,8 @@ const RECOGNIZED_GATE_KEYS: ReadonlySet<string> = new Set([
   'requiredApprovals', 'rejectionPolicy', 'approversList',
   'approverRefs', 'approverGroupRefs', 'approverRoleRefs', 'overrideScopes',
   'question', 'schema', 'resumeSchema',
+  // ADR 0894 — the computer-use decide gate (rendered below)
+  'computerUse', 'providerNote',
 ]);
 
 /** Narrow an interrupt's opaque `data` to the evidence fields, without casting. */
@@ -161,7 +176,19 @@ export function gateEvidenceOf(data: unknown): GateEvidenceData {
         ...(typeof raw.provider === 'string' ? { provider: raw.provider } : {}),
       }
     : undefined;
+  const cu = d.computerUse && typeof d.computerUse === 'object' && !Array.isArray(d.computerUse)
+    ? (d.computerUse as Record<string, unknown>)
+    : undefined;
+  const browserAction: GateBrowserAction | undefined = cu && typeof cu.kind === 'string'
+    ? {
+        kind: cu.kind,
+        origin: typeof cu.origin === 'string' ? cu.origin : '',
+        ...(typeof cu.url === 'string' && cu.url ? { url: cu.url } : {}),
+        ...(typeof d.providerNote === 'string' && d.providerNote ? { note: d.providerNote } : {}),
+      }
+    : undefined;
   return {
+    ...(browserAction ? { browserAction } : {}),
     ...(options && options.length > 0 ? { options } : {}),
     ...(typeof d.artifactId === 'string' ? { artifactId: d.artifactId } : {}),
     ...(typeof d.revisionId === 'string' ? { revisionId: d.revisionId } : {}),
@@ -173,7 +200,56 @@ export function gateEvidenceOf(data: unknown): GateEvidenceData {
  *  entirely rather than render a box that says nothing. */
 export function hasGateEvidence(data: unknown): boolean {
   const e = gateEvidenceOf(data);
-  return (e.options?.length ?? 0) > 0 || !!e.artifactId || !!e.sendMessage;
+  return (e.options?.length ?? 0) > 0 || !!e.artifactId || !!e.sendMessage || !!e.browserAction;
+}
+
+/** ADR 0894 — is this the computer-use decide gate? Its reject ends a browser
+ *  session (the run completes), so the cards confirm it with their own copy. */
+export function isBrowserActionGate(data: unknown): boolean {
+  return !!gateEvidenceOf(data).browserAction;
+}
+
+/** The translation key for a browser action's verb (closed vocabulary). */
+function browserActionKey(kind: string): string | null {
+  switch (kind) {
+    case 'submit': return 'cuActionSubmit';
+    case 'download': return 'cuActionDownload';
+    case 'navigate': return 'cuActionNavigate';
+    default: return null;
+  }
+}
+
+/** ADR 0894 — the browser action block: the verb + the site, then the
+ *  provider's unverified description apart from it, then who may decide. */
+function BrowserActionEvidence({ action }: { action: GateBrowserAction }): JSX.Element {
+  const { t } = useTranslation('chat');
+  const key = browserActionKey(action.kind);
+  const verb = key ? t(key) : t('cuActionOther', { kind: action.kind });
+  return (
+    <div className="approval-preview u-mbox-b2" data-testid="gate-evidence-browser">
+      <div className="approval-preview-head">
+        <span className="approval-preview-label u-iflex u-items-center u-gap-1-5">
+          <GlobeIcon size={13} aria-hidden /> {t('cuGateHeading')}
+        </span>
+      </div>
+      <div className="approval-preview-body u-flex u-flex-col u-gap-1-5">
+        <p className="u-fs-13 u-m-0">
+          {t('cuWantsTo', { action: verb })} <code>{action.origin}</code>
+        </p>
+        {action.url && action.url !== action.origin ? (
+          <p className="muted u-fs-12 u-m-0">
+            {t('cuTargetLabel')} <code className="u-break-all">{action.url}</code>
+          </p>
+        ) : null}
+        {action.note ? (
+          <Notice variant="warning">
+            <span className="u-fs-12"><strong>{t('cuProviderNoteHeading')}</strong> {action.note}</span>
+          </Notice>
+        ) : null}
+        <p className="muted u-fs-12 u-m-0">{t('cuOpenerOnly')}</p>
+      </div>
+    </div>
+  );
 }
 
 /**
@@ -198,6 +274,8 @@ export function GateEvidence({
   const { t } = useTranslation('chat');
   const evidence = gateEvidenceOf(data);
   const { artifactId, revisionId, sendMessage } = evidence;
+  // ADR 0894 — a browser action IS its evidence; there is no artifact to fetch.
+  const browserAction = evidence.browserAction;
   const inlineAssets: ReviewAsset[] = (evidence.options ?? []).map((o) => ({ label: o.label, content: o.content }));
 
   const [artifactAssets, setArtifactAssets] = useState<ReviewAsset[] | null>(null);
@@ -209,7 +287,7 @@ export function GateEvidence({
     let cancelled = false;
     // A send gate renders its envelope, so the gate-preview artifact (the node's
     // upstream PORT INPUTS, not the message) is never fetched or shown for it.
-    if (sendMessage || inlineAssets.length > 0 || !artifactId || !revisionId) return;
+    if (browserAction || sendMessage || inlineAssets.length > 0 || !artifactId || !revisionId) return;
     setLoading(true);
     setFailed(false);
     (async () => {
@@ -263,6 +341,8 @@ export function GateEvidence({
   const sendTo = sendMessage
     ? (Array.isArray(sendMessage.to) ? sendMessage.to.join(', ') : (sendMessage.to as string | undefined) ?? '')
     : '';
+
+  if (browserAction) return <BrowserActionEvidence action={browserAction} />;
 
   return (
     <div className="approval-preview u-mbox-b2" data-testid="gate-evidence">

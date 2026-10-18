@@ -21,6 +21,7 @@ import { loadOrgMembers } from '../../orgs/orgMembers.js';
 import { formatRelativeTime } from '../../i18n/format.js';
 import type { Project } from './projectsClient.js';
 import { DecisionSuggestionsSection } from './DecisionSuggestionsSection.js';
+import { PullRequestDriftCheck } from './PullRequestDriftCheck.js';
 import {
   acceptLedgerChange, createTeamLedger, getTeamLedger, listLedgerDeltas, markSeen, takeLegacySeenVersion,
   proposeLedgerChange, rejectLedgerChange, type LedgerDelta, type LedgerPatch, type LedgerState, type TeamLedger,
@@ -38,6 +39,7 @@ export function ProjectLedgerTab({ project, canWrite }: { project: Project; canW
   const [load, setLoad] = useState<Load>({ kind: 'loading' });
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [suggestionsKey, setSuggestionsKey] = useState(0);
   // People are shown by name, never by subject id; an unresolved id falls back to itself.
   const [names, setNames] = useState<Record<string, string>>({});
   // A failed directory read is SAID, not swallowed: every id below would otherwise
@@ -154,7 +156,8 @@ export function ProjectLedgerTab({ project, canWrite }: { project: Project; canW
       {queueFirst ? pendingSection : null}
 
       {/* ADR 0853 D1 — possible decisions from chat, inbound, approvals, meetings, drift. */}
-      <DecisionSuggestionsSection projectId={project.id} canWrite={canWrite} isOwner={isOwner} onRecorded={() => void refresh()} />
+      <DecisionSuggestionsSection key={suggestionsKey} projectId={project.id} canWrite={canWrite} isOwner={isOwner} onRecorded={() => void refresh()} />
+      {canWrite ? <PullRequestDriftCheck projectId={project.id} onChecked={() => setSuggestionsKey((k) => k + 1)} /> : null}
 
       {changedSince.length > 0 ? (
         <section className="surface-card" aria-labelledby="ledger-changed">
@@ -178,7 +181,7 @@ export function ProjectLedgerTab({ project, canWrite }: { project: Project; canW
         {/* ADR 0856 — the tool policy for this project's chats (shown when set). */}
         {state.toolPolicy?.forbidden.length ? <LedgerList label={t('ledgerToolsForbidden')} items={state.toolPolicy.forbidden} empty={t('ledgerNone')} /> : null}
         {state.toolPolicy?.requireApproval.length ? <LedgerList label={t('ledgerToolsApproval')} items={state.toolPolicy.requireApproval} empty={t('ledgerNone')} /> : null}
-        <p className="muted u-fs-12">{t('ledgerDecisionsCount', { count: state.decisionDocumentIds.length })} {t('ledgerGoalHint')}</p>
+        <p className="muted u-fs-12">{t('ledgerDecisionsCount', { count: state.decisionDocumentIds.length })} {t('ledgerGoalHint')} {t('ledgerNotesHint')}</p>
         {seen === null || seen < ledger.version ? (
           changedSince.length === 0 ? <Button variant="quiet" size="sm" onClick={() => void act(() => markSeen(project.id, ledger.version))}>{t('ledgerMarkSeen')}</Button> : null
         ) : null}

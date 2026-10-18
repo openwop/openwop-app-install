@@ -5,6 +5,15 @@
  * (owner/editor write, viewer read-only, cross-tenant fail-closed), and the plan
  * read + advisory status transition. Plan GENERATION is a workflow run (the
  * plan-generate node), out of scope for a route test.
+ *
+ * w32 (grade-tests): the plans case was titled "transitions a saved plan status"
+ * but never saved or transitioned one, so WHO may approve a plan had no HTTP
+ * witness; it now saves a plan and drives the approval as a viewer (403, still
+ * draft) and as the owner (approved, attributed). The "foreign companyId" case
+ * used a non-existent id, which proves 404-on-missing, not the org check — it now
+ * also uses a REAL company from a second org in the same tenant. The RBAC case
+ * adds a same-tenant non-member (a cross-tenant outsider is refused by the tenant
+ * lookup before membership is ever asked).
  */
 
 import http from 'node:http';
@@ -14,6 +23,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
+import { savePlan } from '../src/features/production/productionService.js';
 
 let BASE: string;
 let server: http.Server;
@@ -34,7 +44,20 @@ afterAll(async () => {
   await new Promise<void>((res) => server.close(() => res()));
 });
 
-interface Res<T = any> { status: number; body: T }
+type PriceRange = { capability: string; min: number; max: number; unit: string };
+interface VendorBody { vendorId: string; name: string; type: string; companyId?: string; notes?: string; contractStatus: string; priceRanges?: PriceRange[]; portfolioAssetTokens: string[] }
+/** The union of response bodies this file reads — no `any`. */
+interface Body extends Partial<VendorBody> {
+  error?: string;
+  message?: string;
+  orgId?: string;
+  status?: string;
+  updatedBy?: string;
+  user?: { userId: string };
+  vendors?: VendorBody[];
+  plans?: Array<{ planId: string; status: string }>;
+}
+interface Res { status: number; body: Body }
 interface Client {
   get: (p: string) => Promise<Res>;
   post: (p: string, b?: unknown) => Promise<Res>;
@@ -54,7 +77,7 @@ function client(): Client {
       const m = /(__session=[^;]+)/.exec(cRaw);
       if (m) cookie = m[1];
     }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    const out = res.status === 204 ? {} : ((await res.json().catch(() => ({}))) as Body);
     return { status: res.status, body: out };
   };
   return {
@@ -71,34 +94,37 @@ const uniqEmail = (who: string): string => `${who}-${Date.now()}-${n++}@acme.tes
 async function signup(c: Client, opts: { tenantId?: string } = {}): Promise<{ userId: string }> {
   const r = await c.post('/host/openwop-app/test/login', { email: uniqEmail('prod'), ...(opts.tenantId ? { tenantId: opts.tenantId } : {}) });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  return r.body.user;
+  return r.body.user!;
 }
 const enable = async (id: string, status: 'on' | 'off'): Promise<void> => {
   const def = getToggleDefault(id);
   if (def) await saveConfig({ ...def, status }, 'test');
 };
 
-async function ownerWithMember(role: string): Promise<{ owner: Client; member: Client; orgId: string }> {
+async function ownerWithMember(role: string): Promise<{ owner: Client; member: Client; orgId: string; tenantId: string; ownerUserId: string }> {
   const tenantId = `org:test-${Date.now()}-${n++}`;
   const owner = client();
-  await signup(owner, { tenantId });
+  const ownerUser = await signup(owner, { tenantId });
   const member = client();
   const memberUser = await signup(member, { tenantId });
   const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
-  const orgId = org.body.orgId;
+  const orgId = org.body.orgId!;
   const add = await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: memberUser.userId, roles: [role] });
   expect(add.status, JSON.stringify(add.body)).toBe(201);
-  return { owner, member, orgId };
+  return { owner, member, orgId, tenantId, ownerUserId: ownerUser.userId };
 }
 const p = (orgId: string, suffix = ''): string => `/host/openwop-app/production/orgs/${encodeURIComponent(orgId)}${suffix}`;
 
 describe('production — toggle gating', () => {
   it('404s when the production toggle is off', async () => {
     await enable('production', 'off');
-    const { owner, orgId } = await ownerWithMember('viewer');
-    expect((await owner.get(p(orgId, '/vendors'))).status).toBe(404);
-    await enable('production', 'on');
+    try {
+      const { owner, orgId } = await ownerWithMember('viewer');
+      expect((await owner.get(p(orgId, '/vendors'))).status).toBe(404);
+    } finally {
+      await enable('production', 'on');
+    }
   });
 });
 
@@ -116,10 +142,10 @@ describe('production — vendor CRUD (owner)', () => {
       contractStatus: 'preferred',
     });
     expect(created.status, JSON.stringify(created.body)).toBe(201);
-    const vendorId = created.body.vendorId;
+    const vendorId = created.body.vendorId!;
     expect(created.body.type).toBe('agency');
     // inverted price range is normalized min<=max
-    expect(created.body.priceRanges[0]).toMatchObject({ min: 2000, max: 5000 });
+    expect(created.body.priceRanges![0]).toMatchObject({ min: 2000, max: 5000 });
 
     expect((await owner.get(p(orgId, `/vendors/${vendorId}`))).body.name).toBe('Bright Studio');
     expect((await owner.get(p(orgId, '/vendors'))).body.vendors).toHaveLength(1);
@@ -139,10 +165,21 @@ describe('production — vendor CRUD (owner)', () => {
 
   it('rejects a foreign companyId reference (IDOR-safe)', async () => {
     await enable('production', 'on');
+    await enable('crm', 'on');
     const { owner, orgId } = await ownerWithMember('owner');
     const r = await owner.post(p(orgId, '/vendors'), { name: 'X', companyId: 'cmp:does-not-exist' });
     expect(r.status).toBe(400);
     expect(r.body.error).toBe('validation_error');
+
+    // A REAL company that belongs to ANOTHER org of the same tenant is foreign too.
+    const org2 = await owner.post('/host/openwop-app/orgs', { name: 'Other Org' });
+    expect(org2.status, JSON.stringify(org2.body)).toBe(201);
+    const company = await owner.post(`/host/openwop-app/crm/orgs/${encodeURIComponent(org2.body.orgId!)}/companies`, { name: 'Initech' });
+    expect(company.status, JSON.stringify(company.body)).toBe(201);
+    const cross = await owner.post(p(orgId, '/vendors'), { name: 'Y', companyId: company.body.companyId });
+    expect(cross.status, JSON.stringify(cross.body)).toBe(400);
+    expect(cross.body.error).toBe('validation_error');
+    expect((await owner.get(p(orgId, '/vendors'))).body.vendors, 'nothing was created').toEqual([]);
   });
 
   it('accepts a valid same-org companyId (composes CRM)', async () => {
@@ -160,11 +197,16 @@ describe('production — vendor CRUD (owner)', () => {
 describe('production — RBAC + isolation', () => {
   it('viewer reads but cannot write; a non-member/cross-tenant is fenced', async () => {
     await enable('production', 'on');
-    const { member, orgId } = await ownerWithMember('viewer');
+    const { member, orgId, tenantId } = await ownerWithMember('viewer');
     // viewer read OK
     expect((await member.get(p(orgId, '/vendors'))).status).toBe(200);
     // viewer write forbidden
     expect((await member.post(p(orgId, '/vendors'), { name: 'Nope' })).status).toBe(403);
+
+    // a signed-in user of the SAME tenant who is not a member of the org is refused
+    const nonMember = client();
+    await signup(nonMember, { tenantId });
+    expect((await nonMember.get(p(orgId, '/vendors'))).status, 'same-tenant non-member').toBe(403);
 
     // a user in another tenant cannot see the org at all (404, no existence leak)
     const outsider = client();
@@ -174,9 +216,9 @@ describe('production — RBAC + isolation', () => {
 });
 
 describe('production — plans (read + advisory status)', () => {
-  it('404s an unknown plan and transitions a saved plan status', async () => {
+  it('404s an unknown plan and transitions a saved plan status (owner approves; a viewer cannot)', async () => {
     await enable('production', 'on');
-    const { owner, orgId } = await ownerWithMember('owner');
+    const { owner, member: viewer, orgId, tenantId, ownerUserId } = await ownerWithMember('viewer');
     expect((await owner.get(p(orgId, '/plans'))).body.plans).toEqual([]);
     expect((await owner.get(p(orgId, '/plans/pln:nope'))).status).toBe(404);
     // invalid status rejected
@@ -185,6 +227,21 @@ describe('production — plans (read + advisory status)', () => {
     // unknown plan status transition → 404
     const missing = await owner.post(p(orgId, '/plans/pln:nope/status'), { status: 'approved' });
     expect(missing.status).toBe(404);
+
+    // A saved (generated) plan — generation is a workflow run, so seed it at the service.
+    await savePlan({ tenantId, orgId, planId: 'pln:route-approve', strategySummary: 'Launch plan', recommendations: [] });
+
+    // A read-only member can SEE the plan but cannot APPROVE it.
+    const denied = await viewer.post(p(orgId, '/plans/pln:route-approve/status'), { status: 'approved' });
+    expect(denied.status, JSON.stringify(denied.body)).toBe(403);
+    expect((await viewer.get(p(orgId, '/plans/pln:route-approve'))).body.status, 'still a draft').toBe('draft');
+
+    // The owner approves it, and the approval is attributed to them.
+    const approved = await owner.post(p(orgId, '/plans/pln:route-approve/status'), { status: 'approved' });
+    expect(approved.status, JSON.stringify(approved.body)).toBe(200);
+    expect(approved.body.status).toBe('approved');
+    expect(approved.body.updatedBy).toBe(ownerUserId);
+    expect((await owner.get(p(orgId, '/plans'))).body.plans?.map((pl) => [pl.planId, pl.status])).toEqual([['pln:route-approve', 'approved']]);
   });
 });
 
@@ -209,12 +266,12 @@ describe('PROD2-R1 — a caller who cannot SEE rates cannot WIPE them (route lev
       priceRanges: [{ capability: 'Copywriting', min: 100, max: 200, unit: 'per-hour' }],
     });
     expect(created.status, JSON.stringify(created.body)).toBe(201);
-    const vendorId = created.body.vendorId;
+    const vendorId = created.body.vendorId!;
 
     // The editor genuinely cannot see them — the precondition this rests on.
     const asEditor = await member.get(p(orgId, '/vendors'));
     expect(asEditor.status).toBe(200);
-    const seen = (asEditor.body.vendors as Array<Record<string, unknown>>).find((v) => v.vendorId === vendorId);
+    const seen = asEditor.body.vendors!.find((v) => v.vendorId === vendorId);
     expect(seen, 'the editor can read the vendor').toBeTruthy();
     expect('priceRanges' in seen!, 'the rates are redacted OUT for an editor').toBe(false);
 
@@ -223,7 +280,7 @@ describe('PROD2-R1 — a caller who cannot SEE rates cannot WIPE them (route lev
     expect(patched.status, JSON.stringify(patched.body)).toBe(200);
 
     const asOwner = await owner.get(p(orgId, '/vendors'));
-    const after = (asOwner.body.vendors as Array<Record<string, unknown>>).find((v) => v.vendorId === vendorId);
+    const after = asOwner.body.vendors!.find((v) => v.vendorId === vendorId);
     expect(after!.name).toBe('Rate Holder (renamed)');
     expect(after!.priceRanges, 'the rates survive the editor’s save').toHaveLength(1);
   });
@@ -236,11 +293,11 @@ describe('PROD2-R1 — a caller who cannot SEE rates cannot WIPE them (route lev
       name: 'Editable Rates', type: 'agency', contractStatus: 'active',
       priceRanges: [{ capability: 'Copywriting', min: 100, max: 200, unit: 'per-hour' }],
     });
-    const vendorId = created.body.vendorId;
+    const vendorId = created.body.vendorId!;
     const patched = await owner.patch(p(orgId, `/vendors/${vendorId}`), {
       priceRanges: [{ capability: 'Copywriting', min: 150, max: 250, unit: 'per-hour' }],
     });
     expect(patched.status, JSON.stringify(patched.body)).toBe(200);
-    expect(patched.body.priceRanges[0].min).toBe(150);
+    expect(patched.body.priceRanges![0]!.min).toBe(150);
   });
 });

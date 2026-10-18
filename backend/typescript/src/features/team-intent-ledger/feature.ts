@@ -37,11 +37,14 @@ import { inboundDecisionSource } from './inboundSource.js';
 import { onAnyRunTerminal } from '../../executor/runLifecycle.js';
 import { runDecisionsSource } from './runDecisionsSource.js';
 import { enqueueDriftCheck, startDriftWorker } from './driftCheck.js';
+import { registerDocumentVersionObserver } from '../../host/documentVersionObservers.js';
+import { notesDecisionSource } from './notesSource.js';
 import { registerHumanChatMessageObserver } from '../../host/humanChatMessageObservers.js';
 import { enqueueForSuggester, startDecisionSuggester } from './decisionSuggester.js';
 import { maybeResync } from './resync.js';
 import { registerConversationScopeContributor } from '../../host/conversationScopeContributors.js';
-import { teamLedgerScopeContributor } from './toolPolicy.js';
+import { teamLedgerMissionInheritance, teamLedgerScopeContributor } from './toolPolicy.js';
+import { registerMissionInheritanceProvider } from '../../host/missionDraftInheritance.js';
 
 const log = createLogger('features.team-intent-ledger');
 
@@ -69,6 +72,8 @@ export const teamIntentLedgerFeature: BackendFeature = {
     registerInboundMessageObserver(inboundDecisionSource);
     // ADR 0853 D6 — a project run that reports `decisions` (meeting extraction, or any workflow).
     onAnyRunTerminal('team-ledger-run-decisions', runDecisionsSource(deps.storage));
+    // ADR 0853 D7 — `Decision:` lines in a project's documents (meeting notes).
+    registerDocumentVersionObserver('team-ledger-notes', notesDecisionSource);
     // ADR 0855 D1 — the drift check: enqueue on the run-terminal seam, check on a bounded worker tick.
     onAnyRunTerminal('team-ledger-drift', async (runId, status) => { await enqueueDriftCheck(deps.storage, runId, status); });
     startDriftWorker(deps.storage);
@@ -76,6 +81,8 @@ export const teamIntentLedgerFeature: BackendFeature = {
     onLedgerChanged(async (ledger) => { await maybeResync(ledger); });
     // ADR 0856 D2 — the ledger's tool policy narrows its project's chats (narrow-only seam).
     registerConversationScopeContributor('team-intent-ledger', teamLedgerScopeContributor);
+    // ADR 0856 D2 — a mission drafted in those chats starts with the policy (drafting only).
+    registerMissionInheritanceProvider('team-intent-ledger', teamLedgerMissionInheritance);
     // ADR 0853 D3 — the suggester: enqueue in-request, classify on a bounded worker tick.
     registerHumanChatMessageObserver(async (m) => { await enqueueForSuggester(m); });
     startDecisionSuggester();

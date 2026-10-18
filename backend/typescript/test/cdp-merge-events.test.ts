@@ -2,6 +2,10 @@
  * CDP-B — merge-event audit (ADR 0264). Every contact merge records what it did:
  * the survivor fields it filled and the identifiers it absorbed (the substrate a
  * future unmerge replays).
+ *
+ * Sabotage that reds it (w38 probes): not filling a blank survivor email; dropping
+ * the captured fill or the absorbed identifiers from the event; recording the wrong
+ * survivor id.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -10,6 +14,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
+import type { MergeEvent } from '../src/features/crm/crmMergeEventsService.js';
 
 let BASE: string; let server: http.Server;
 beforeAll(async () => {
@@ -23,7 +28,7 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res { status: number; body: any }
+interface Res { status: number; body: unknown }
 function client() {
   let cookie = '';
   const call = async (m: string, p: string, b?: unknown): Promise<Res> => {
@@ -41,22 +46,25 @@ describe('CDP-B merge-event audit', () => {
   it('records the filled fields and absorbed identifiers of a merge', async () => {
     await enable('crm');
     const c = await owner();
-    const survivor = (await c.post('/host/openwop-app/crm/contacts', { name: 'S' })).body; // no email/company
-    const source = (await c.post('/host/openwop-app/crm/contacts', { name: 'D', email: 'd@x.test', company: 'Acme' })).body;
-    await c.post(`/host/openwop-app/crm/contacts/${source.contactId}/identifiers`, { type: 'loyalty', value: 'L9' });
+    const sRes = await c.post('/host/openwop-app/crm/contacts', { name: 'S' }); // no email/company
+    const dRes = await c.post('/host/openwop-app/crm/contacts', { name: 'D', email: 'd@x.test', company: 'Acme' });
+    expect([sRes.status, dRes.status]).toEqual([201, 201]);
+    const survivor = sRes.body as { contactId: string };
+    const source = dRes.body as { contactId: string };
+    expect((await c.post(`/host/openwop-app/crm/contacts/${source.contactId}/identifiers`, { type: 'loyalty', value: 'L9' })).status).toBe(201);
 
     const merged = await c.post(`/host/openwop-app/crm/contacts/${survivor.contactId}/merge`, { sourceContactId: source.contactId });
     expect(merged.status, JSON.stringify(merged.body)).toBe(200);
 
-    const events = (await c.get('/host/openwop-app/crm/merge-events')).body.events;
+    const events = ((await c.get('/host/openwop-app/crm/merge-events')).body as { events: MergeEvent[] }).events;
     expect(events.length).toBe(1);
-    const ev = events[0];
+    const ev = events[0]!;
     expect(ev.survivorId).toBe(survivor.contactId);
     expect(ev.sourceId).toBe(source.contactId);
     // survivor was blank → filled email + company from source
     expect(ev.filledFields.email).toBe('d@x.test');
     expect(ev.filledFields.company).toBe('Acme');
     // the source's loyalty id was absorbed
-    expect(ev.absorbedIdentifiers.some((i: any) => i.type === 'loyalty' && i.value === 'L9')).toBe(true);
+    expect(ev.absorbedIdentifiers).toContainEqual(expect.objectContaining({ type: 'loyalty', value: 'L9' }));
   });
 });

@@ -29,7 +29,7 @@ import type { Duplex } from 'node:stream';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { base64urlDecode, base64urlEncode, readSessionSecret, readCookie, COOKIE_NAME } from '../../middleware/cookieSession.js';
 import { credentialedOriginAllowed, originPolicy } from '../../middleware/cors.js';
-import { getCanvasForTenant, type CanvasRecordView } from '../canvasSurface.js';
+import { canvasWriteAllowed, getCanvasForTenant, type CanvasRecordView } from '../canvasSurface.js';
 import { resolveSubjectAccess, levelSatisfies } from '../subjectAccess.js';
 import { resolveCallerUser } from '../../features/users/usersGuards.js';
 import { resolveOne } from '../featureToggles/service.js';
@@ -37,6 +37,7 @@ import { DurableCollection } from '../hostExtPersistence.js';
 import { requireFeatureEnabled, toggleSubjectOf } from '../../features/featureRoute.js';
 import { tenantOf, isPersonalTenantId } from '../requestSubject.js';
 import { assertTenantScope } from '../accessControlService.js';
+import { requireWorkflowWrite } from '../workflowWriteAuthority.js';
 import { OpenwopError } from '../../types.js';
 import { createLogger } from '../../observability/logger.js';
 import { joinCollabRoom, initCollabFanout, pruneCollabSnapshot, startCollabUpdateSweep, startCollabLeaseHeartbeat, hasLiveRoomGlobal, hasCollabSnapshot, applyExternalState, notifyExternalCanvasWrite, listLiveRooms, setSeedClaimRestorer } from './collabRoom.js';
@@ -103,8 +104,10 @@ export async function deleteCollabSeedClaim(tenantId: string, roomId: string): P
  *  upgrade) is the SIBLING door of the REST `loadCanvas` choke, which ADR 0610
  *  gated on `resolveSubjectAccess`. A project/user-owned canvas is membership-scoped;
  *  the tenant + canvas-type + toggle gate is NOT sufficient. Consult the ONE
- *  `host/subjectAccess.ts` seam — READ minimum to JOIN a room (write is org-scoped
- *  per ADR 0054, so a `workspace:write` holder resolves 'write' ≥ 'read'). Null ⇒
+ *  `host/subjectAccess.ts` seam — READ is the VISIBILITY half (uniform 404). The
+ *  WRITE half is `assertCollabWrite` / the cookie-lane check (ADR 0886 D2: the
+ *  "write is org-scoped, so read suffices" assumption was false — the path org is
+ *  not the owner's org, and the canvas doors had no write check at all). Null ⇒
  *  not membership-scoped ⇒ the tenant gate stands. **`caller` MUST be the canonical
  *  `User.userId`** — which is ITSELF `user:<hash>` (`usersService.userIdFor`). The
  *  seam prefixes it ONCE MORE (`user:${User.userId}`) to match stored member refs +
@@ -115,6 +118,40 @@ async function collabCanvasReadable(tenantId: string, canvas: CanvasRecordView, 
   const level = await resolveSubjectAccess(tenantId, canvas.ownerSubject, caller);
   return level === null || levelSatisfies(level, 'read');
 }
+/** ADR 0886 D2 — the ticket/claim-seed doors' WRITE gate. A room is read-write
+ *  (its derive writes `host.canvas`), so joining one IS a write — the workflow
+ *  collab lane already says so (ADR 0770 D1). Two halves:
+ *   1. the caller holds `workspace:write` in the tenant (`requireWorkflowWrite`
+ *      — the request-shaped gate that classifies api keys, the tenant-owner
+ *      credential and the personal-owner short-circuit), and
+ *   2. WRITE on an owned canvas, decided in the OWNER's org (ADR 0886 D1).
+ *  A caller who can read but not write gets a DISTINCT 403
+ *  (`details.reason: 'collab_write_required'`) — they can read the canvas over
+ *  REST, so this leaks nothing — and `useCollab` falls back to the single-writer
+ *  editor on it instead of failing the whole surface. */
+async function assertCollabWrite(req: Parameters<typeof requireWorkflowWrite>[0], tenantId: string, canvas: CanvasRecordView, caller: string): Promise<void> {
+  const refuse = (): never => {
+    throw new OpenwopError('forbidden_scope', 'Live editing needs write access to this canvas.', 403, { requiredScope: 'workspace:write', reason: 'collab_write_required' });
+  };
+  // SL2CD-4 — only an AUTHORIZATION refusal becomes `collab_write_required`
+  // (which the editor treats as permanent and drops to single-writer on). A
+  // store outage or any other failure propagates as itself, so it is retried
+  // and seen, never misread as "you may not edit".
+  try {
+    await requireWorkflowWrite(req);
+  } catch (err) {
+    if (err instanceof OpenwopError && (err.httpStatus === 401 || err.httpStatus === 403)) {
+      log.info('collab join refused: no workspace:write', { tenantId, canvasId: canvas.canvasId });
+      refuse();
+    }
+    throw err;
+  }
+  if (!(await canvasWriteAllowed(tenantId, canvas, { subject: caller }))) {
+    log.info('collab join refused: no write on the canvas owner', { tenantId, canvasId: canvas.canvasId, ownerKind: canvas.ownerSubject?.kind ?? null });
+    refuse();
+  }
+}
+
 /** Fallback for tenant-less deletion paths (boot seeds): field-match scan of
  *  the tiny claims store. */
 export async function deleteCollabSeedClaimsAnyTenant(roomId: string): Promise<void> {
@@ -218,6 +255,10 @@ export const collaborationFeature: BackendFeature = {
           // un-stripped as the seam expects. Uniform 404.
           const caller = (await resolveCallerUser(req)).userId;
           if (!(await collabCanvasReadable(tenantId, canvas, caller))) throw new OpenwopError('not_found', 'canvas not found', 404, {});
+          // ADR 0886 D2 — the ticket lane's write decision is made HERE (the WS
+          // upgrade cannot re-ask it: the ticket's principalId is attribution,
+          // not a canonical user id), exactly as the workflow ticket does.
+          await assertCollabWrite(req, tenantId, canvas, caller);
           res.json({ ticket: mintCollabTicket(tenantId, canvasId, Date.now(), req.principal?.principalId) });
         } catch (err) { next(err); }
       })();
@@ -241,6 +282,8 @@ export const collaborationFeature: BackendFeature = {
           // ADR 0610 collab-lane / SLC-1 — same member gate as ticket-mint.
           const caller = (await resolveCallerUser(req)).userId;
           if (!(await collabCanvasReadable(tenantId, canvas, caller))) throw new OpenwopError('not_found', 'canvas not found', 404, {});
+          // ADR 0886 D2 — the seeder writes the room's first state.
+          await assertCollabWrite(req, tenantId, canvas, caller);
           const seed = await claimCollabSeed(tenantId, canvasId, req.principal?.principalId ?? tenantId);
           res.json({ seed });
         } catch (err) { next(err); }
@@ -460,6 +503,21 @@ async function authorizeAndUpgrade(
       ? ticketTenant.principalId
       : ('userId' in session ? session.userId : undefined);
     if (!(await collabCanvasReadable(session.tenantId, canvas, wsCaller))) return deny(socket, 404, 'not found');
+    // ADR 0886 D2 — the COOKIE lane joins with no mint in front of it, so the
+    // write decision is made here: the tenant write gate the workflow lane uses
+    // above (a personal-shaped active tenant is the caller's own), plus WRITE on
+    // an owned canvas. The ticket lane decided both at mint.
+    if (!ticketTenant && 'sid' in session) {
+      const subject = session.userId ?? session.subject;
+      if (!isPersonalTenantId(session.tenantId)) {
+        try {
+          await assertTenantScope(session.tenantId, subject, 'workspace:write');
+        } catch {
+          return deny(socket, 403, 'forbidden');
+        }
+      }
+      if (!(await canvasWriteAllowed(session.tenantId, canvas, { subject: wsCaller }))) return deny(socket, 403, 'forbidden');
+    }
     // 5. Per-tenant connection cap — increment-then-check (grade-pass CODE-5:
     //    the old read→compare→set-in-callback raced concurrent upgrades, which
     //    all read the same count and each wrote +1). The counter is claimed

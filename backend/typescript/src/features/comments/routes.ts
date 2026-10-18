@@ -8,18 +8,30 @@
 import type { Request } from 'express';
 import { OpenwopError } from '../../types.js';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
-import { authorizeOrgScope, requireString, optionalString } from '../featureRoute.js';
+import { authorizeOrgScope, requireString, optionalString, toggleSubjectOf } from '../featureRoute.js';
 import { resolveEffectiveAccess } from '../../host/accessControlService.js';
 import { PREAUTHORIZED_CALLER } from '../../host/subjectAccess.js';
 import {
   RESOURCE_TYPES, isResourceType,
-  listThread, createComment, updateComment, deleteComment,
+  listThread, createComment, updateComment, deleteComment, type CommentCaller,
 } from './commentsService.js';
 import { emitCommentNotification } from './notifications.js';
 
 const FEATURE = { toggleId: 'comments', label: 'Collaboration / Comments' };
 const ORG = '/host/openwop-app/comments/orgs/:orgId';
 type Scope = 'workspace:read' | 'workspace:write';
+
+/**
+ * ADR 0881 D1/D2 — the HTTP caller, every spelling it needs. `subject` is the canonical
+ * user (subject-bound resolvers); `principal` is the door's `req.userId ?? principalId`
+ * (how a conversation stamps its owner — an unbound OIDC session is `oidc:<sub>` there
+ * and `user:<hash>` in `subject`); `toggle` is the cohort/plan-exempt toggle subject.
+ */
+function httpCaller(req: Request, userId: string): CommentCaller {
+  const principal = req.userId ?? req.principal?.principalId;
+  const { tenantId: _t, ...toggle } = toggleSubjectOf(req);
+  return { subject: userId, ...(principal ? { principal } : {}), toggle };
+}
 
 export function registerCommentsRoutes(deps: RouteDeps): void {
   const { app } = deps;
@@ -36,9 +48,19 @@ export function registerCommentsRoutes(deps: RouteDeps): void {
       // ADR 0659 D1 — the READ lane carries the caller too. It used to call `listThread`
       // with no caller at all, so a member who could not see a subject-bound corpus read
       // its whole thread. `null` ⇒ the same 404 a missing resource gets (uniform).
-      const thread = await listThread(tenantId, orgId, resourceType, resourceId, { subject: user.userId });
+      const thread = await listThread(tenantId, orgId, resourceType, resourceId, httpCaller(req, user.userId));
       if (thread === null) throw new OpenwopError('not_found', 'Resource not found in this organization.', 404, { resourceId });
-      res.json({ comments: thread });
+      // ADR 0881 D7 — say what the caller may do, so the panel offers nothing that 403s.
+      // `canModerate` is the delete rule's own predicate (below).
+      const access = await resolveEffectiveAccess(tenantId, { subject: user.userId, orgId });
+      res.json({
+        comments: thread,
+        viewer: {
+          userId: user.userId,
+          canWrite: access.scopes.includes('workspace:write'),
+          canModerate: access.roles.includes('admin') || access.roles.includes('owner'),
+        },
+      });
     } catch (err) { next(err); }
   });
 
@@ -47,16 +69,20 @@ export function registerCommentsRoutes(deps: RouteDeps): void {
     try {
       const { user, orgId, tenantId } = await authz(req, 'workspace:write');
       const body = (req.body ?? {}) as Record<string, unknown>;
-      const { comment, notify } = await createComment({
+      const { comment, notify, unnotifiedMentions } = await createComment({
         tenantId, orgId,
         resourceType: body.resourceType, resourceId: body.resourceId,
         ...(body.parentId != null ? { parentId: body.parentId } : {}),
         // On the HTTP lane author and caller are the SAME principal — they are still
         // passed separately, because the day they diverge is the day the gate matters.
-        body: body.body, authorId: user.userId, caller: { subject: user.userId },
+        body: body.body, authorId: user.userId, caller: httpCaller(req, user.userId),
+        // ADR 0881 D5 — mentions ride the HTTP lane only.
+        ...(body.mentions !== undefined ? { mentions: body.mentions } : {}),
       });
       await emitCommentNotification(comment, notify);
-      res.status(201).json(comment);
+      // `unnotifiedMentions` — members mentioned who cannot open this resource, so were
+      // not told (D5). Only the author sees it; it is not stored on the row.
+      res.status(201).json({ ...comment, unnotifiedMentions });
     } catch (err) { next(err); }
   });
 
@@ -65,12 +91,14 @@ export function registerCommentsRoutes(deps: RouteDeps): void {
     try {
       const { user, orgId, tenantId } = await authz(req, 'workspace:write');
       const body = (req.body ?? {}) as Record<string, unknown>;
-      const patch: { body?: unknown; status?: unknown } = {};
+      const patch: { body?: unknown; status?: unknown; mentions?: unknown } = {};
       if (body.body !== undefined) patch.body = requireString(body.body, 'body');
       if (body.status !== undefined) patch.status = body.status;
-      const c = await updateComment(tenantId, orgId, req.params.commentId, user.userId, patch, { subject: user.userId });
-      if (!c) throw new OpenwopError('not_found', 'Comment not found.', 404, { commentId: req.params.commentId });
-      res.json(c);
+      if (body.mentions !== undefined) patch.mentions = body.mentions;
+      const r = await updateComment(tenantId, orgId, req.params.commentId, { id: user.userId }, patch, httpCaller(req, user.userId));
+      if (!r) throw new OpenwopError('not_found', 'Comment not found.', 404, { commentId: req.params.commentId });
+      await emitCommentNotification(r.comment, r.notify);
+      res.json({ ...r.comment, unnotifiedMentions: r.unnotifiedMentions });
     } catch (err) { next(err); }
   });
 
@@ -84,7 +112,7 @@ export function registerCommentsRoutes(deps: RouteDeps): void {
       // this door, so they moderate with PREAUTHORIZED_CALLER and do not lose the ability
       // to delete a comment on a bound resource they are not a member of. Visibility is
       // NOT widened: the admin receives the delete, never the thread.
-      const caller = isAdmin ? PREAUTHORIZED_CALLER : { subject: user.userId };
+      const caller: CommentCaller = isAdmin ? { ...PREAUTHORIZED_CALLER, toggle: httpCaller(req, user.userId).toggle } : httpCaller(req, user.userId);
       if (!(await deleteComment(tenantId, orgId, req.params.commentId, { userId: user.userId, isAdmin }, caller))) {
         throw new OpenwopError('not_found', 'Comment not found.', 404, { commentId: req.params.commentId });
       }

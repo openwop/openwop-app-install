@@ -104,6 +104,11 @@ describe('canvas version history (ADR 0305 Phase E)', () => {
     expect((await b.c.get(`${AB(b.orgId)}/canvases/${victim.canvasId}/versions`)).status).toBe(404);
     expect((await b.c.get(`${AB(b.orgId)}/canvases/${victim.canvasId}/versions/${vid}`)).status).toBe(404);
     expect((await b.c.post(`${AB(b.orgId)}/canvases/${victim.canvasId}/versions/${vid}/restore`)).status).toBe(404);
+    // The route's canvas lookup refuses B first, which masks the VERSION-level
+    // guard; read it directly so that guard can fail on its own (wave-36
+    // probe hi-idor-version), with a positive control for the owner.
+    expect(await getCanvasVersion(b.tenantId, victim.canvasId, vid)).toBeNull();
+    expect((await getCanvasVersion(a.tenantId, victim.canvasId, vid))?.versionId).toBe(vid);
   });
 
   it('a STALE save is a typed 409 (grade pass F1 — was a 500 through the envelope), and concurrent saves never lose an update (F5)', async () => {
@@ -116,6 +121,8 @@ describe('canvas version history (ADR 0305 Phase E)', () => {
     expect(stale.status, JSON.stringify(stale.body)).toBe(409);
     expect(stale.body.error).toBe('canvas_version_conflict');
     // CAS: two same-basis concurrent service-level writes — exactly one wins.
+    // Honest ceiling: nothing forces the two writes to interleave in the memory
+    // store, and a serialized loser fails the version check even without CAS.
     const results = await Promise.allSettled([
       updateCanvasForTenant(tenantId, canvas.canvasId, state('a'), { expectedVersion: 2 }),
       updateCanvasForTenant(tenantId, canvas.canvasId, state('b'), { expectedVersion: 2 }),
@@ -152,10 +159,15 @@ describe('canvas version history (ADR 0305 Phase E)', () => {
   it('snapshot dedup + cap: same-version capture is idempotent; history caps at 50', async () => {
     const tenantId = `org:test-ab-cap-${Date.now()}`;
     const canvas = await createCanvasForTenant(tenantId, { canvasTypeId: 'canvas.app-builder', name: 'C', initialState: state('x') });
-    // Same-version double capture → one row.
+    // Same-version double capture → one row, and the FIRST capture stands. The
+    // row id is derived from the version, so a re-capture would overwrite in
+    // place and the row count alone could never fail (wave-36 probe hi-dedup);
+    // the second writer's name tells a skipped retry from an overwrite.
     await snapshotCanvas({ tenantId, canvasId: canvas.canvasId, state: state('x'), version: 1 }, 'u', { force: true });
-    await snapshotCanvas({ tenantId, canvasId: canvas.canvasId, state: state('x'), version: 1 }, 'u', { force: true });
-    expect((await listCanvasVersions(tenantId, canvas.canvasId)).length).toBe(1);
+    await snapshotCanvas({ tenantId, canvasId: canvas.canvasId, state: state('x'), version: 1 }, 'retry-writer', { force: true });
+    const once = await listCanvasVersions(tenantId, canvas.canvasId);
+    expect(once.length).toBe(1);
+    expect(once[0]?.capturedBy).toBe('u');
     // 60 distinct versions → capped at 50, newest kept.
     for (let v = 2; v <= 61; v += 1) {
       await snapshotCanvas({ tenantId, canvasId: canvas.canvasId, state: state(`s${v}`), version: v }, 'u', { force: true });

@@ -12,6 +12,7 @@
 import type { ContentPart } from '../types.js';
 import { toast } from '../../ui/toast.js';
 import i18n from '../../i18n/index.js';
+import { channelErrorCopy } from './channelErrors.js';
 
 /** Mirrors the backend `MAX_POST_BYTES` (channelService, ADR 0192 D5). */
 const MAX_POST_BYTES = 256 * 1024;
@@ -60,14 +61,16 @@ export async function submitChannelPost(
     deps.markRead?.(sessionId);
     deps.refreshConversations?.();
     return true;
-  } catch {
+  } catch (e) {
     // A failed post (403/429/network) must surface — the composer has already
     // cleared, so ALSO write the text back into the draft store (best-effort;
     // the composer restores it on its next mount).
     if (deps.draftKey && body) {
       try { localStorage.setItem(deps.draftKey, body); } catch { /* quota/disabled */ }
     }
-    toast.error(i18n.t('chat:channelPostError'));
+    // CH2UX-5 — a refusal the person can act on says so (read-only role,
+    // announcement channel); everything else keeps the generic copy.
+    toast.error(channelErrorCopy(e, (k) => i18n.t(k), 'chat:channelPostError'));
     return false;
   }
 }

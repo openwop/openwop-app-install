@@ -1,8 +1,8 @@
 {
   "name": "vendor.openwop-app.agent-author.agents",
-  "version": "1.1.1",
+  "version": "1.2.0",
   "kind": "node",
-  "description": "Agent Author agent pack (ADR 0514) — a manifest agent whose tools are feature.agent-author.nodes over the ctx.features['agent-author'] surface. From the AI chat it reads the closed-world catalog (agents, workflows, roster, autonomy levels), drafts a roster-entry, validates it, and creates it through the SHARED wizard path — the created agent lands DISABLED for human review. Tool-allowlisted to the agent-author surface only.",
+  "description": "Agent Author agent pack (ADR 0514) — a manifest agent whose tools are feature.agent-author.nodes over the ctx.features['agent-author'] surface. From the AI chat it reads the closed-world catalog (agents, workflows, roster, autonomy levels), drafts a roster-entry, validates it, and creates it through the SHARED wizard path — the created agent lands DISABLED for human review. Tool-allowlisted to the agent-author surface plus, since v1.2.0 (ADR 0889 D8), the three agent-eval tools: it can list an agent's eval suites, start an eval run (a human approves it in safe mode) and read the scorecard. It also ships a replay-only regression eval suite for itself (evals/agent-author.json).",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
   "keywords": [
@@ -27,12 +27,16 @@
       "description": "Turns a natural-language description into a roster agent: reads the closed-world catalog (legal agent ids, workflow ids, existing personas), drafts a roster entry, validates it, and creates it through the same path the manual wizard uses — grounded via feature.agent-author.nodes over ctx.features['agent-author']. Never invents ids; the created agent lands DISABLED for the human to review and enable in its workspace (ADR 0514).",
       "modelClass": "research",
       "systemPromptRef": "prompts/agent-author.md",
+      "evalSuiteRef": "evals/agent-author.json",
       "toolAllowlist": [
         "openwop:schema.lookup",
         "openwop:feature.agent-author.nodes.get",
         "openwop:feature.agent-author.nodes.draft",
         "openwop:feature.agent-author.nodes.validate",
-        "openwop:feature.agent-author.nodes.persist"
+        "openwop:feature.agent-author.nodes.persist",
+        "openwop:agent-evals.list-suites",
+        "openwop:agent-evals.run",
+        "openwop:agent-evals.get-summary"
       ],
       "memoryShape": {
         "scratchpad": true,
