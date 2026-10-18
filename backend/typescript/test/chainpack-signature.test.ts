@@ -10,7 +10,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { __setUnpinnedChainPackWaiversForTests } from '../src/host/unpinnedChainPackAllowlist.js';
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { generateKeyPairSync, sign as edSign } from 'node:crypto';
+import { createHash, generateKeyPairSync, sign as edSign } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -141,5 +141,72 @@ describe('chain-pack signature posture (ADR 0427)', () => {
     const outcome = loadWorkflowChainPacks({ roots: [otherRoot] });
     expect(outcome.errors).toHaveLength(0);
     expect(getChain(chainIds[0])).not.toBeNull();
+  });
+});
+
+/** ADR 0713 OQ3 — a v2 registry install: pins kept (the v2 manifest shape), the
+ *  `{ keyId, scheme }` signing block, and the installer's marker hashing pack.json.
+ *  The v2 signature itself was verified at INSTALL time; at load the marker is the
+ *  attestation. */
+function plantV2Pack(root: string, suffix: string, opts: { marker?: boolean } = {}): { chainIds: string[]; name: string; version: string } {
+  const dir = join(root, `sigtest-v2-${suffix}`);
+  cpSync(EXAMPLE, dir, { recursive: true });
+  const manifestPath = join(dir, 'pack.json');
+  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as {
+    name: string; version: string; signing?: unknown; chains: Array<{ chainId: string }>;
+  };
+  manifest.name = `private.sigtest.v2.${suffix}`;
+  for (const c of manifest.chains) c.chainId = `sigtest-v2-${suffix}.${c.chainId}`;
+  manifest.signing = { keyId: 'openwop-team-1', scheme: 'ed25519-canonical-json' };
+  writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
+  if (opts.marker !== false) {
+    writeFileSync(join(dir, '.openwop-installed.json'), JSON.stringify({
+      name: manifest.name, version: manifest.version, integrity: 'sha256-fixture', publicKeyRef: 'openwop-team-1',
+      registry: 'https://packs.example.test', installedAt: new Date(0).toISOString(),
+      contentHashes: { 'pack.json': createHash('sha256').update(readFileSync(manifestPath)).digest('hex') },
+    }));
+  }
+  return { chainIds: manifest.chains.map((c) => c.chainId), name: manifest.name, version: manifest.version };
+}
+
+describe('v2 chain-pack signature posture at load (ADR 0713 OQ3, A-04)', () => {
+  // Sabotage (witnessed): routing the v2 shape back to `verifyPinned` reds the
+  // first case (`unsigned`); dropping the keyring revocation check from the v2
+  // branch reds the last.
+  it('flag set: a v2 install whose marker still matches loads (trusted, not `unsigned`)', () => {
+    process.env.OPENWOP_REQUIRE_CHAINPACK_SIGNATURES = 'true';
+    const { chainIds } = plantV2Pack(installRoot, 'ok');
+    const outcome = loadWorkflowChainPacks({ roots: [installRoot] });
+    expect(outcome.errors).toEqual([]);
+    expect(getChain(chainIds[0])).not.toBeNull();
+  });
+
+  it('flag set: a v2 install edited after its marker was written is refused', () => {
+    process.env.OPENWOP_REQUIRE_CHAINPACK_SIGNATURES = 'true';
+    const { chainIds } = plantV2Pack(installRoot, 'tampered');
+    const p = join(installRoot, 'sigtest-v2-tampered', 'pack.json');
+    writeFileSync(p, `${readFileSync(p, 'utf8')}\n`);
+    const outcome = loadWorkflowChainPacks({ roots: [installRoot] });
+    expect(outcome.errors.map((e) => e.code)).toContain('workflow_chain_pack_signature_failed');
+    expect(getChain(chainIds[0])).toBeNull();
+  });
+
+  it('flag set: a v2-shaped pack with no install marker is refused', () => {
+    process.env.OPENWOP_REQUIRE_CHAINPACK_SIGNATURES = 'true';
+    const { chainIds } = plantV2Pack(installRoot, 'unmarked', { marker: false });
+    const outcome = loadWorkflowChainPacks({ roots: [installRoot] });
+    expect(outcome.errors.map((e) => e.code)).toContain('workflow_chain_pack_signature_failed');
+    expect(getChain(chainIds[0])).toBeNull();
+  });
+
+  it('flag set: a keyring-REVOKED v2 version is refused even with a matching marker', () => {
+    process.env.OPENWOP_REQUIRE_CHAINPACK_SIGNATURES = 'true';
+    const { chainIds, name, version } = plantV2Pack(installRoot, 'revoked');
+    const revPath = join(keysDir, 'revocations.json');
+    writeFileSync(revPath, JSON.stringify([`${name}@${version}`]));
+    process.env.OPENWOP_TRUSTED_PACK_REVOCATIONS = revPath;
+    const outcome = loadWorkflowChainPacks({ roots: [installRoot] });
+    expect(outcome.errors.map((e) => e.code)).toContain('workflow_chain_pack_signature_revoked');
+    expect(getChain(chainIds[0])).toBeNull();
   });
 });

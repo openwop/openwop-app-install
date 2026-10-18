@@ -30,6 +30,19 @@ A release SHOULD be marked a required stop only when at least one holds:
 
 ## Version log
 
+### v0.5.1 — 2026-10-18
+- **Required stop:** no.
+- **Schema:** sqlite 50 / postgres 48 · **App migrations:** 24 (unchanged from 0.5.0).
+- Ten PRs since v0.5.0, no migrations, rolling-safe, no breaking config. New:
+  white-label adoption seams (field/recess brand tokens, feature nav translations,
+  wrong-vendor key detection, `OPENWOP_DEPLOY_BRANCH`), feature-surface
+  requirements in the node catalog, and a declared entry share for distributions.
+  Changed: nested params fold into chain expansion ids (flat ids unchanged).
+  Fixed: an email campaign sends the content it started with, and a template in
+  use cannot be deleted (ADR 0905 P0); revoked v2 chain packs no longer load. **Labelled a patch by the
+  maintainer's decision**; by ADR 0052 §D1 its feature content would be a minor.
+- [CHANGELOG §0.5.1](./CHANGELOG.md#051--2026-10-18)
+
 ### v0.5.0 — 2026-10-18
 - **Required stop:** no.
 - **Schema:** sqlite 50 / postgres 48 · **App migrations:** 24.

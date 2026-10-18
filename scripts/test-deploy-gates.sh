@@ -201,6 +201,14 @@ git -C "$REPO" checkout -q "$OLD"
 check "REFUSES a HEAD behind origin/main (the 2026-08-03 incident)" 1 "$(run_preflight)"
 git -C "$REPO" checkout -q main
 
+# ADR 0916 (P5) — a named release branch. `release` at OLD: HEAD=OLD passes under
+# OPENWOP_DEPLOY_BRANCH=release, and the default (main) still refuses it above.
+( cd "$REPO" && git push -q origin "$OLD:refs/heads/release" ) >/dev/null 2>&1
+git -C "$REPO" checkout -q "$OLD"; stamp_head
+check "PASSES a HEAD at the tip of OPENWOP_DEPLOY_BRANCH" 0 "$( cd "$REPO" && OPENWOP_DEPLOY_BRANCH=release BASE="$STUB" OPENWOP_DEPLOY_PROJECT= bash "$ROOT/scripts/preflight-deploy.sh" >/dev/null 2>&1; echo $? )"
+check "REFUSES a malformed OPENWOP_DEPLOY_BRANCH" 1 "$( cd "$REPO" && OPENWOP_DEPLOY_BRANCH='../x' BASE="$STUB" OPENWOP_DEPLOY_PROJECT= bash "$ROOT/scripts/preflight-deploy.sh" >/dev/null 2>&1; echo $? )"
+git -C "$REPO" checkout -q main; stamp_head
+
 echo "dirty" >> "$REPO/f"
 check "REFUSES a dirty tree" 1 "$(run_preflight)"
 git -C "$REPO" checkout -q -- f
@@ -775,6 +783,12 @@ else
 fi
 v2only_doc both
 check "  ...but a host still serving 1.x with those fields missing FAILS (the guard did not delete the check)" 1 "$(WV)"
+# The same 1.x document from a checkout that cannot build its expected document
+# (no stamp, no installed conformance package) must FAIL, not SKIP to green.
+check "  ...and FAILS CLOSED when the expected document cannot be built (no backend deps)" 1 "$( cd "$REPO" && OPENWOP_WIRE_CLAIMS_SIMULATE_NO_SUITE=1 OPENWOP_BUILD_META_DIR="$CLAIMS_META" node "$ROOT/scripts/check-wire-claims.mjs" "$STUB/api" >"$TMP/wv.out" 2>&1; echo $? )"
+grep -q 'cannot build the expected document' "$TMP/wv.out" && ok "  ...and says why (cannot build the expected document)" || bad "  ...expected the 'cannot build the expected document' line; got: $(tail -3 "$TMP/wv.out" | tr '\n' ' ')"
+v2only_doc v2only
+check "  ...while a v2-only host stays N/A under the same missing deps (no false red)" 0 "$( cd "$REPO" && OPENWOP_WIRE_CLAIMS_SIMULATE_NO_SUITE=1 OPENWOP_BUILD_META_DIR="$CLAIMS_META" node "$ROOT/scripts/check-wire-claims.mjs" "$STUB/api" >/dev/null 2>&1; echo $? )"
 cp "$TMP/doc.bak" "$DOC"
 
 echo "== deploy.sh + write-build-commit: the certify stamp (ADR 0550 P4) =="

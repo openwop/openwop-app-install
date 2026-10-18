@@ -45,6 +45,7 @@ import { byokErrorMessage, deleteConflictOf, useByokWriteAccess, type DeleteConf
 import { confirm } from '../ui/confirm.js';
 import { SubscriptionCredentialCard } from './SubscriptionCredentialCard.js';
 import { isCardOwnedRef, parseCredentialRef, WEB_SEARCH_REF } from './lib/credentialRef.js';
+import { detectProviderByKeyPrefix } from './keyPrefix.js';
 
 /** KEYS-REF-1 — refs are grouped by the provider they NAME, by the backend's own
  *  rule (`lib/credentialRef.ts`): `byok:google` (the wizard's shape, ADR 0517) and
@@ -65,6 +66,8 @@ export function KeysPage(): JSX.Element {
   const [refsUnreadable, setRefsUnreadable] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [adding, setAdding] = useState<string | null>(null);
+  // ADR 0916 (P8) — a key moved from the wrong card to the right one.
+  const [carriedKey, setCarriedKey] = useState('');
   // Which provider tile is acting as the active filter (null = show all).
   const [filter, setFilter] = useState<string | null>(null);
   // Pending destructive-confirm target (credentialRef) for the <Modal>.
@@ -354,10 +357,15 @@ export function KeysPage(): JSX.Element {
 
               {isAdding && (
                 <AddKeyForm
+                  key={p.id}
                   provider={p}
+                  providers={byokProviders}
+                  initialValue={carriedKey}
+                  onSwitchProvider={(id, v) => { setCarriedKey(v); setAdding(id); }}
                   existingLabels={list.map((e) => e.label ?? e.ref)}
-                  onCancel={() => setAdding(null)}
+                  onCancel={() => { setCarriedKey(''); setAdding(null); }}
                   onSaved={async (storedRef, masked) => {
+                    setCarriedKey('');
                     setAdding(null);
                     setMaskedByRef((prev) => ({ ...prev, [storedRef]: masked }));
                     await refresh();
@@ -522,10 +530,19 @@ function AddKeyForm({
   existingLabels,
   onCancel,
   onSaved,
+  providers = [],
+  initialValue = '',
+  onSwitchProvider,
 }: {
   provider: ProviderConfig;
   existingLabels: readonly string[];
   onCancel: () => void;
+  /** ADR 0916 (P8) — every BYOK card, to recognise a key pasted under the wrong one. */
+  providers?: readonly ProviderConfig[];
+  /** ADR 0916 (P8) — the key carried over when the user switched cards. */
+  initialValue?: string;
+  /** ADR 0916 (P8) — move the pasted key to the card it belongs to. */
+  onSwitchProvider?: (providerId: string, value: string) => void;
   /** Called after a successful store with the persisted credentialRef
    *  + the masked rendering the BE returned, so the page can surface
    *  the masked view on the corresponding list row. */
@@ -533,8 +550,11 @@ function AddKeyForm({
 }): JSX.Element {
   const { t } = useTranslation('byok');
   const [label, setLabel] = useState('');
-  const [value, setValue] = useState('');
+  const [value, setValue] = useState(initialValue);
   const [saving, setSaving] = useState(false);
+  // ADR 0916 (P8) — set once the user chose to keep a key under this card
+  // although its prefix says another vendor's.
+  const [keepHere, setKeepHere] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
   const credentialRef = useMemo(() => {
@@ -557,8 +577,20 @@ function AddKeyForm({
     return t('addKeyPrefixWarning', { provider: provider.label, prefix: provider.apiKeyPrefix });
   }, [provider.apiKeyPrefix, provider.label, value, t]);
 
+  // ADR 0916 (P8) — the card this key's prefix actually belongs to, when it is
+  // another one. A key saved under the wrong card fails at that vendor with a
+  // credential error that never says why, so saving needs an explicit choice.
+  const belongsTo = useMemo(() => {
+    const match = detectProviderByKeyPrefix(value, providers);
+    return match && match.id !== provider.id ? match : null;
+  }, [value, providers, provider.id]);
+
   async function onSubmit() {
     setErr(null);
+    if (belongsTo && !keepHere) {
+      setErr(t('addKeyChooseCard', { other: belongsTo.label, provider: provider.label }));
+      return;
+    }
     if (!label.trim()) {
       setErr(t('labelRequired'));
       return;
@@ -603,9 +635,23 @@ function AddKeyForm({
           autoComplete="off"
           {...(provider.apiKeyHelpText ? { help: provider.apiKeyHelpText } : {})}
         />
-        {prefixWarning && (
+        {belongsTo ? (
+          <Notice variant="warning">
+            <p className="u-m-0">{t('addKeyLooksLikeOther', { other: belongsTo.label, prefix: belongsTo.apiKeyPrefix ?? '' })}</p>
+            <div className="u-flex u-gap-2 u-flex-wrap u-mt-2">
+              {onSwitchProvider ? (
+                <Button size="sm" variant="primary" onClick={() => onSwitchProvider(belongsTo.id, value)}>
+                  {t('addKeySwitchTo', { other: belongsTo.label })}
+                </Button>
+              ) : null}
+              <Button size="sm" variant="secondary" aria-pressed={keepHere} onClick={() => setKeepHere(true)}>
+                {t('addKeyKeepHere', { provider: provider.label })}
+              </Button>
+            </div>
+          </Notice>
+        ) : prefixWarning ? (
           <Notice variant="warning">{prefixWarning}</Notice>
-        )}
+        ) : null}
         {provider.apiKeyConsoleUrl && (
           <div className="muted builder-inspector-help">
             <a href={provider.apiKeyConsoleUrl} target="_blank" rel="noopener noreferrer">

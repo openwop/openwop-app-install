@@ -497,11 +497,16 @@
 :root[data-contrast="more"] {
   --ink-3: var(--ink-2);
   --rule: var(--ink-3);
+  /* ADR 0916 — the two brand hooks follow the stronger values here too. */
+  --rule-control: var(--ink-3);
+  --ink-muted-recess: var(--ink-2);
 }
 @media (prefers-contrast: more) {
   :root {
     --ink-3: var(--ink-2);
     --rule: var(--ink-3);
+    --rule-control: var(--ink-3);
+    --ink-muted-recess: var(--ink-2);
   }
 }
 
@@ -1434,7 +1439,10 @@ input, textarea, select {
   padding: var(--space-2) var(--space-3);
   background: var(--paper);
   color: var(--ink);
-  border: 1px solid var(--rule);
+  /* ADR 0916 (Book AI P13) — a field's boundary is its own token, so a brand can
+   * lift it to WCAG 1.4.11's 3:1 without darkening every divider. Unset, it is
+   * `--rule`, exactly as before. */
+  border: 1px solid var(--rule-control, var(--rule));
   border-radius: var(--radius);
   width: 100%;
   transition: border-color .15s ease;
@@ -5511,6 +5519,10 @@ label.btn-ghost:focus-within, /* file-import affordance — <label class="btn-gh
   border-radius: var(--radius);
   padding: var(--space-2-5) var(--space-3);
 }
+/* ADR 0916 (Book AI P17) — a bare field caption on the recess fill reads
+ * `--ink-3` on `--paper-2`, which some brands put under 4.5:1. Same hook as
+ * `.chip--muted`; unset, the colour is unchanged. */
+.surface-inset label:not([class]) { color: var(--ink-muted-recess, var(--ink-3)); }
 /* .builder-inspector-field-label — the small mono label in the builder inspector
  * + prompt-library detail rows (Template ID / Ref / Kind). Was UNDEFINED, so the
  * labels rendered as plain body text. The app's editorial label register. */
@@ -5624,7 +5636,7 @@ a.btn.btn-sm { font-size: 12px; padding: var(--space-1) var(--space-2); }
 .chip--danger  { background: color-mix(in oklab, var(--color-danger) 14%, transparent);  color: var(--color-danger-text); }
 .chip--accent  { background: var(--clay-soft); color: var(--clay-text); }
 .chip--ai      { background: color-mix(in oklab, var(--color-ai) 12%, transparent); color: var(--color-ai-text); }
-.chip--muted   { background: var(--paper-2); color: var(--ink-3); }
+.chip--muted   { background: var(--paper-2); color: var(--ink-muted-recess, var(--ink-3)); }
 /* Interactive chips used as list controls (e.g. the Territories model selector,
    ADR 0272): a hover cue + a visible SELECTED state, so selection is not exposed
    only via aria-pressed. Static tag chips are unaffected (button.chip only). */

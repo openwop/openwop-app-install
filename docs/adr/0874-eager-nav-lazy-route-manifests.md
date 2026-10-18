@@ -207,6 +207,26 @@ same PR as each phase. Otherwise the reclaimed headroom becomes slack that absor
 the next regression unnoticed — the ledger's #4034 lesson. Expected ceilings: about
 129 kB after D2, about 121 kB after D3.
 
+> **AMENDED 2026-10-18 — a declared white-label entry share (user decision).** D4
+> calibrated the ceiling on the DEFAULT build. It left no room for a white-label
+> distribution's own registered features. Book AI keeps ~0.83 kB gzip in the
+> entry (route metadata and lazy loaders, plus an eager offline sign-out cleanup
+> that must run while offline). By the time it adopted v0.5.0, the host's own
+> entry had grown to 128.8 kB, so Book AI was 565 B over with no change of its
+> own.
+>
+> Three options were weighed: split ~0.7 kB more from the host (unknown effort; D3
+> was rejected), raise the ceiling for every build, or give distributions an
+> allowance. The user chose the **allowance**:
+> - A named distribution's `distributions/<name>.json` may declare
+>   `entryShareBytes` (gzip bytes, capped at **1024**) and an `entryShareReason`.
+> - Its entry budget is the host ceiling **plus** that share, and
+>   `check-bundle-budget.mjs` reports the two numbers separately.
+> - The default distribution cannot declare one, so the host's own ceiling, and
+>   this ratchet, are unchanged at 129 kB.
+>
+> Tests: `frontend/react/scripts/__tests__/entryShare.test.ts`.
+
 ### D5 — Considered and not adopted now: keys-only nav strings (≤ −2.6 kB)
 
 Removing the English `label`/`hint` fallbacks where `labelKey`/`hintKey` exist saves

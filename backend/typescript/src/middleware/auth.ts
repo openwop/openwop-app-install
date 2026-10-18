@@ -1203,8 +1203,11 @@ export function authMiddleware(): RequestHandler {
           tenants: keyTenants,
           token: bearerToken,
           // ADR 0601 — record the PROVENANCE, not just the id. `bearer:<first 8
-          // chars of the key>` is not an RBAC subject and can never match a
-          // member row (and it changes when the key rotates), so an authority
+          // chars of the key>` is not an RBAC subject and is not meant to match a
+          // member row (and it changes when the key rotates). CORRECTED (ADR 0910
+          // D0): it COULD — `POST /orgs` as an env key seeds the new org's owner
+          // row as this id; D0 makes that row grant nothing tenant-wide in a
+          // declared default workspace, as D1b already did for `ws:`. So an authority
           // resolver that only knows the id has no way to tell this lane apart
           // from an unknown stranger. It is an operator credential set in the
           // host's own environment.

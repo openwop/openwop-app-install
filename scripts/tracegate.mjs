@@ -76,7 +76,10 @@ export const ENTRY_BAR = { days: 14, observations: 20 };
 // caught every failure. The price is a weaker track record, so until the normal
 // 14-day bar would have been met the audit re-runs 20% of reused verdicts, not 5%.
 // The nightly full run on main stays the backstop.
-export const LANE_ENTRY = { backend: { days: 1, earlyAudit: 0.2 } };
+// FRONTEND FOLLOWS, same terms (ADR 0918, 2026-10-18, the user's decision): 102
+// clean observations over 5.4 days with 0 misses. Its shadow gates already showed
+// 97-100% of verdicts reusable while the whole lane ran every gate (5-8 min).
+export const LANE_ENTRY = { backend: { days: 1, earlyAudit: 0.2 }, frontend: { days: 1, earlyAudit: 0.2 } };
 export const AUDIT_RATE = 0.05;
 // A miss suspends enforcement for this long, whatever the lane's entry bar.
 export const MISS_SUSPEND_DAYS = 14;

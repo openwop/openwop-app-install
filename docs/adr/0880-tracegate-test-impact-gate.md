@@ -141,6 +141,11 @@ not know about would never run.
   > per lane, and two deliberate real-change probes that caught every failure (see
   > Validation). A miss still suspends either lane for 14 days. Code:
   > `LANE_ENTRY` / `barFor` in `scripts/tracegate.mjs`.
+  >
+  > > **CORRECTED 2026-10-18 (user decision, ADR 0918) — the FRONTEND lane enters
+  > > early too, on the same terms** (≥ 1 day, 20% audit until day 14). "The
+  > > frontend keeps the 14-day bar" above is no longer true. It rests on 102
+  > > observations over 5.4 days with 0 misses.
 
 Tracegate can never turn a red lane green: if `select` fails the lane runs
 whole and records nothing; `report` drops the footprints of every file that
@@ -176,6 +181,14 @@ Interactions handled explicitly:
   which is unchanged code;
 - the **date-bomb sweep** stays a full run (selection must not narrow it: that
   scope-miss is what it exists to catch).
+
+  > **SUPERSEDED 2026-10-18 by ADR 0918 D2.** Under enforce the sweep runs the
+  > frontend lane's selection. It runs whole in every FULL lane, which happens
+  > in a gate at least once every 24 h. The case this line raised is a bomb in
+  > an unchanged file entering the 365-day window. It is still caught, at most
+  > 24 h later and ~364 days before it goes off, and it reds an unrelated gate
+  > either way. A frontend `full-done` is now written only after the whole
+  > sweep passes (ADR 0918 D3).
 
 > **CORRECTED 2026-10-14 — two of these three were wrong, and the gate found it.**
 > (1) The payload ratchet *can* invent a red under a subset: its **stale** check.
@@ -274,7 +287,7 @@ each host owns its own log files.
 | i18n catalog values | per KEY looked up through the i18next store; direct table imports and whole reads keep the constant rule | audit + full run |
 | Node version, lockfile | yes (global) | — |
 | Environment variables | **no** — the gate's env is fixed by `ci.sh` | audit + nightly |
-| Wall clock (a date bomb) | **no** | footprints older than **72 h** are never reused; nightly refresh; date-bomb sweep stays full |
+| Wall clock (a date bomb) | **no** | footprints older than **72 h** are never reused; nightly refresh; date-bomb sweep runs whole in each daily FULL lane, selection otherwise (ADR 0918) |
 | Network, ports, other processes | **no** (tests are offline by guard) | audit + nightly |
 | Flaky tests | n/a | a flaky audit failure counts as a miss; `tracegate.mjs triage <file> flake` records the human/agent verdict, and a triaged flake does not suspend enforcement |
 

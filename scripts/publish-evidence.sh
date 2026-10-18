@@ -234,12 +234,15 @@ curl -sS --connect-timeout 5 --max-time 20 "$BASE/api/readiness?cb=$(date +%s%N)
   || die "could not read $BASE/api/readiness"
 COMMIT="$(node "$HELPERS" discovery-field build.commit < "$WORK/readiness.json")" || die "/api/readiness carries no build.commit"
 [[ "$COMMIT" =~ ^[0-9a-f]{40}$ ]] || die "the serving commit is '$COMMIT', not a full sha — an unstamped deploy has no key to publish under"
-git -C "$ROOT" fetch -q origin main || die "git fetch origin failed"
-TIP="$(git -C "$ROOT" rev-parse origin/main)"
+# ADR 0916 (P5) — the same release branch the deploy preflight checks.
+DEPLOY_BRANCH="${OPENWOP_DEPLOY_BRANCH:-main}"
+[[ "$DEPLOY_BRANCH" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$ && "$DEPLOY_BRANCH" != *..* ]] || die "OPENWOP_DEPLOY_BRANCH '$DEPLOY_BRANCH' is not a branch name"
+git -C "$ROOT" fetch -q origin "$DEPLOY_BRANCH" || die "git fetch origin failed"
+TIP="$(git -C "$ROOT" rev-parse "origin/$DEPLOY_BRANCH")"
 if [ "$COMMIT" != "$TIP" ] && [ "$ALLOW_ANY_COMMIT" -eq 0 ]; then
-  die "the serving commit ${COMMIT:0:12} is not origin/main's tip ${TIP:0:12}. Evidence is published for what is SERVING; if that is really what you want, pass --allow-any-commit."
+  die "the serving commit ${COMMIT:0:12} is not origin/$DEPLOY_BRANCH's tip ${TIP:0:12}. Evidence is published for what is SERVING; if that is really what you want, pass --allow-any-commit."
 fi
-echo "serving: ${COMMIT:0:12}  (origin/main ${TIP:0:12})"
+echo "serving: ${COMMIT:0:12}  (origin/$DEPLOY_BRANCH ${TIP:0:12})"
 
 # The commit is read ONCE, above, and every bundle is labelled with it. So it must
 # still be the serving commit when each major's suite has finished, and again just

@@ -14,6 +14,12 @@
  * → throwing red; feature lane mislabeled / dropped under `none` → feature red;
  * vendored-newer skip not recorded → non-strict red; bootAt stamped only on the
  * first run → bootAt red.
+ *
+ * ADR 0713 OQ1 (A-04): a boot that attempted installs and landed NONE logs ONE
+ * `error` (closed reasonCode), whether every install threw or every pin was
+ * refused before the network; a partial success or nothing attempted does not.
+ * Sabotage (witnessed): dropping the call on the all-refused early return reds
+ * the strict case; dropping the post-install call reds the all-throw case.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -38,6 +44,17 @@ vi.mock('../src/packs/registryInstaller.js', async (importOriginal) => {
     },
   };
 });
+const errorLog = vi.hoisted(() => vi.fn());
+vi.mock('../src/observability/logger.js', async (importOriginal) => {
+  const orig = await importOriginal<typeof import('../src/observability/logger.js')>();
+  return {
+    ...orig,
+    createLogger: (component: string) => {
+      const real = orig.createLogger(component);
+      return { ...real, error: (msg: string, fields?: Record<string, unknown>) => { errorLog(component, msg, fields); real.error(msg, fields); } };
+    },
+  };
+});
 vi.mock('../src/host/packTombstones.js', () => ({ isTombstoned: (n: string) => tombstoned.has(n) }));
 
 const { ensureRegistryPacksInstalled } = await import('../src/bootstrap/installRegistryPacks.js');
@@ -55,6 +72,7 @@ function balanced(): void {
 beforeEach(() => {
   packDir = mkdtempSync(join(tmpdir(), 'owp-boot-install-'));
   installed.length = 0;
+  errorLog.mockClear();
   throwFor.clear();
   tombstoned.clear();
   delete process.env.OPENWOP_STRICT_REGISTRY;
@@ -144,5 +162,38 @@ describe('ensureRegistryPacksInstalled (grade-code C-5)', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe('zero registry installs is ONE error (ADR 0713 OQ1, A-04)', () => {
+  const noneSucceeded = () => errorLog.mock.calls.filter((c) => c[1] === 'registry_install_none_succeeded');
+
+  it('every attempted install threw: one error, with the counts and the closed reasonCode', async () => {
+    process.env.OPENWOP_INSTALL_PACKS = 'core.a@1.0.0,core.b@1.0.0';
+    throwFor.set('core.a', { code: 'pack_signature_invalid' });
+    throwFor.set('core.b', {});
+    await ensureRegistryPacksInstalled();
+    expect(noneSucceeded()).toHaveLength(1);
+    expect(noneSucceeded()[0]![2]).toMatchObject({
+      reasonCode: 'registry_install_none_succeeded', attempted: 2, failed: 2, codes: ['install_failed', 'pack_signature_invalid'],
+    });
+  });
+
+  it('every pin refused before the network (strict drift): still one error', async () => {
+    process.env.OPENWOP_INSTALL_PACKS = 'core.a@1.0.0';
+    process.env.OPENWOP_STRICT_REGISTRY = 'true';
+    vendor('core.a', '1.2.0');
+    await ensureRegistryPacksInstalled();
+    expect(noneSucceeded()).toHaveLength(1);
+  });
+
+  it('CONTROL: one success among failures, or nothing attempted, logs no error', async () => {
+    process.env.OPENWOP_INSTALL_PACKS = 'core.a@1.0.0,core.b@1.0.0';
+    throwFor.set('core.a', {});
+    await ensureRegistryPacksInstalled();
+    expect(noneSucceeded()).toHaveLength(0);
+    process.env.OPENWOP_INSTALL_PACKS = 'none';
+    await ensureRegistryPacksInstalled();
+    expect(noneSucceeded()).toHaveLength(0);
   });
 });

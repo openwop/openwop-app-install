@@ -1283,6 +1283,33 @@ export function isSharedWorkspaceTenant(tenantId: string): boolean {
 }
 
 /**
+ * ADR 0910 D0 — the feature-declared default workspaces (`host-kicktodo`, ADR 0684)
+ * are multi-principal like a `ws:` workspace but not `ws:`-shaped, so every ADR 0815
+ * D1b rule keyed on {@link isSharedWorkspaceTenant} missed them: a sub-org `owner`
+ * row there contributed OWNER_SCOPES to the tenant-wide union (an env key could
+ * `POST /orgs` and pass `requireKicktodoManage` through the sub-org it seeded).
+ * Registered at boot from the same declarations `setDefaultWorkspaceTargets` gets.
+ */
+const membershipRootedDefaults = new Set<string>();
+
+/** ADR 0910 D0 — replace the declared default workspace ids (boot; tests). */
+export function registerMembershipRootedWorkspaces(ids: readonly string[]): void {
+  membershipRootedDefaults.clear();
+  for (const id of ids) membershipRootedDefaults.add(id);
+}
+
+/**
+ * ADR 0910 D0 — a workspace whose tenant-wide AUTHORITY is its root membership only:
+ * every `ws:` workspace and every declared default workspace. Used at the authority
+ * sites ONLY. {@link isSharedWorkspaceTenant} is deliberately left `ws:`-only: its
+ * notification callers would otherwise materialise every broadcast per participant
+ * in a default workspace, the full-roster fan-out ADR 0684 §6 forbids.
+ */
+export function isMembershipRootedWorkspace(tenantId: string): boolean {
+  return isSharedWorkspaceTenant(tenantId) || membershipRootedDefaults.has(tenantId);
+}
+
+/**
  * THE definition of a workspace root: an org whose id IS its tenant id.
  *
  * Everything below wraps this, and until the ADR 0684 correction nothing did —
@@ -1927,7 +1954,7 @@ async function subjectHasMembershipStrict(tenantId: string, subject: string): Pr
   // ADR 0815 D4 — in a shared workspace, being here IS holding the root row (the
   // `isWorkspaceMember` reading). Counting any row kept a member removed from the
   // workspace "present" through a leftover sub-org row: keys live, schedules firing.
-  const shared = isSharedWorkspaceTenant(tenantId);
+  const shared = isMembershipRootedWorkspace(tenantId); // ADR 0910 D0
   return (await members.list()).some((m) => m.tenantId === tenantId && m.subject === subject && (!shared || isWorkspaceRootMembership(m)));
 }
 
@@ -1968,7 +1995,7 @@ async function resolveEffectiveAccessDirect(
     // root Viewer who had minted a sub-org resolve as that sub-org's owner on
     // every tenant-level reader (developer-key admin, approvals SLA, promotion
     // approval, `/access/effective`).
-    const orgId = opts.orgId ?? (opts.memberId === undefined && isSharedWorkspaceTenant(tenantId) ? tenantId : undefined);
+    const orgId = opts.orgId ?? (opts.memberId === undefined && isMembershipRootedWorkspace(tenantId) ? tenantId : undefined); // ADR 0910 D0
     const isTarget = (m: OrgMember): boolean =>
       m.tenantId === tenantId &&
       (orgId === undefined || m.orgId === orgId) &&
@@ -2125,7 +2152,7 @@ export async function hasDistinctScopeHolder(
       if (m.tenantId !== tenantId || (m.subject !== undefined && excluded.has(m.subject))) continue;
       if (opts.orgId !== undefined) {
         if (m.orgId !== opts.orgId) continue;
-      } else if (isSharedWorkspaceTenant(tenantId) && !isWorkspaceRootMembership(m)) {
+      } else if (isMembershipRootedWorkspace(tenantId) && !isWorkspaceRootMembership(m)) { // ADR 0910 D0
         // ADR 0815 D1b — a sub-org role is not a workspace-wide decider.
         continue;
       }
@@ -2183,7 +2210,7 @@ async function resolveSubjectScopesUnionDirect(
     // ADR 0815 D1b — in a shared workspace only the ROOT membership is
     // tenant-wide; a sub-org row was a door (a Viewer minted a sub-org, owned it,
     // and the union handed them workspace management and `workspace:write`).
-    const shared = isSharedWorkspaceTenant(tenantId);
+    const shared = isMembershipRootedWorkspace(tenantId); // ADR 0910 D0 — default workspaces too
     const isMine = (m: OrgMember): boolean => m.tenantId === tenantId && m.subject === subject && (!shared || isWorkspaceRootMembership(m));
     // ADR 0866 — a partial answer from the index only narrows the union (fails
     // closed); an EMPTY one is confirmed against the full scan before it denies.

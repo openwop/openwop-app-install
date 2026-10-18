@@ -601,8 +601,13 @@ export function loadWorkflowChainPacks(opts: { roots: string[] }): ChainPackLoad
         const isV2Signing = !!rawSigning
           && typeof (rawSigning as { keyId?: unknown }).keyId === 'string'
           && typeof (rawSigning as { scheme?: unknown }).scheme === 'string';
+        // A-04 — the keyring's revocation list (OPENWOP_TRUSTED_PACK_REVOCATIONS) is a
+        // load-time verdict for BOTH shapes: `verifyPinned` checks it first for v1, and
+        // the v2 branch skipped it, so an operator-revoked v2 chain version still loaded.
         const verdict = isV2Signing
-          ? (verifyInstalledPack(join(root, entry)) === null ? 'trusted' as const : 'failed' as const)
+          ? (keyring.revoked.has(`${manifest.name}@${manifest.version}`)
+            ? 'revoked' as const
+            : verifyInstalledPack(join(root, entry)) === null ? 'trusted' as const : 'failed' as const)
           : verifyPinned(
             join(root, entry),
             { name: manifest.name, version: manifest.version, ...(signing ? { signing } : {}) },
@@ -1015,11 +1020,31 @@ export function reloadWorkflowChainPacks(): ChainPackLoadOutcome {
  *  store). Canonical = keys sorted, so `expandChain` stays pure + deterministic:
  *  same (chain, params) ⇒ same id ⇒ byte-identical definition. */
 function deterministicExpansionId(chain: WorkflowChain, params: Record<string, unknown>): string {
-  const canonical = JSON.stringify(params, Object.keys(params).sort());
+  // ADR 0917 (Book AI P14) — fold NESTED values in too. The old form,
+  // `JSON.stringify(params, Object.keys(params).sort())`, passed an ARRAY
+  // replacer, which is a key allowlist at EVERY depth: a nested object kept only
+  // keys that were also top-level param names, so `{target: {chapter: 3}}` and
+  // `{target: {chapter: 9}}` both hashed `{"target":{}}` and shared an id
+  // (RFC 0013's "fold the canonical params into the id" violated one level
+  // down). For FLAT params this is byte-identical to the old string, so every
+  // existing id whose params do not nest is unchanged.
+  const canonical = JSON.stringify(sortKeysDeep(params));
   return createHash('sha256')
     .update(`${chain.chainId}@${chain.version}:${canonical}`)
     .digest('hex')
     .slice(0, 12);
+}
+
+/** Recursively key-sorted copy (arrays keep their order; `undefined` members
+ *  drop exactly as `JSON.stringify` drops them). */
+function sortKeysDeep(v: unknown): unknown {
+  if (Array.isArray(v)) return v.map(sortKeysDeep);
+  if (v && typeof v === 'object' && (v as object).constructor === Object) {
+    const out: Record<string, unknown> = {};
+    for (const k of Object.keys(v as Record<string, unknown>).sort()) out[k] = sortKeysDeep((v as Record<string, unknown>)[k]);
+    return out;
+  }
+  return v;
 }
 
 function slug(s: string): string {

@@ -18,6 +18,67 @@ Commits by the `/cut-app-release` skill; required upgrade stops are tracked in
 
 ## [Unreleased]
 
+## [0.5.1] — 2026-10-18
+
+Ten PRs since v0.5.0. No migrations, rolling-safe, no required stop, no breaking
+config. **Versioning note:** this release carries new features, which ADR 0052
+§D1 would make a MINOR bump (0.6.0); it is labelled 0.5.1 by the maintainer's
+decision. Nothing in it changes a migration or a contract.
+
+### Added
+
+- **White-label adoption seams (ADR 0916).** Two brand tokens with unchanged
+  defaults: `--rule-control` (a text field's border) and `--ink-muted-recess`
+  (muted text on the recess fill), both lifted in More-contrast mode. A frontend
+  feature may ship its own nav-label translations (`navMessages`, keys under its
+  own id). The Keys page recognises a key pasted under the wrong vendor's card
+  and offers to move it. The deploy scripts take `OPENWOP_DEPLOY_BRANCH`
+  (default `main`) for a distribution whose release branch has another name.
+- **Feature-surface requirements in the node catalog (ADR 0917).** A pack node
+  may declare `x-requiresFeatureSurfaces`; the per-tenant node catalog marks it
+  missing while that feature is off, so the palette stops offering what a run
+  would refuse.
+- **A declared entry share for white-label distributions (ADR 0874
+  amendment).** `distributions/<name>.json` may declare `entryShareBytes`
+  (gzip, at most 1024) with an `entryShareReason`; that distribution's entry
+  budget is the host's 129 kB plus the share, reported separately. The default
+  build keeps 129 kB.
+
+### Changed
+
+- **Chain expansion ids fold nested parameter values (ADR 0917).** Two
+  expansions that differ only in a nested value no longer share an id. Ids for
+  flat parameters are unchanged; stored workflows and their runs keep theirs.
+- **Default workspaces are rooted in membership for authority (ADR 0910 P0).**
+- The frontend CI lane enters Tracegate early (ADR 0918).
+
+### Fixed
+
+- **An email campaign sends the content it started with (ADR 0905 P0).** A send
+  now pins the template's subject and body when it starts, so editing the
+  template while the campaign is sending no longer changes the rest of that send;
+  a resend re-pins. Deleting a template that a campaign not yet sent still
+  references is refused with `409 template_in_use` (naming the campaigns).
+- **Revoked v2 chain packs no longer load (ADR 0713 A-04).** The keyring's
+  revocation list now applies to v2 chain packs as it did to v1; a zero-install
+  boot names the error.
+- **`check-wire-claims` fails closed** when it cannot build its expected
+  document, instead of passing a 1.x host with the field missing.
+- A webhook delivery test no longer collides on a port (WHD-19).
+
+### Docs
+
+- ADRs 0904–0907: the MyndHyve port slate (RAG, email approval, custom-domain
+  certificates, ads).
+
+#### Upgrading from 0.5.0
+
+- **Required stop:** no. No schema or app migrations (sqlite 50 / postgres 48,
+  app 24, as 0.5.0). Back up, deploy, check `/readiness` reports
+  `version: "0.5.1"`.
+- New optional settings: `OPENWOP_DEPLOY_BRANCH` (deploy scripts), and the
+  distribution manifest keys `entryShareBytes` / `entryShareReason`.
+
 ## [0.5.0] — 2026-10-18
 
 Eight days since v0.4.0 (255 merged PRs; ADRs up to 0915). Rolling-safe, no

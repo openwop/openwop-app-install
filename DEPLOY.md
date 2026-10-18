@@ -1712,6 +1712,15 @@ Same source file, **6.3× larger gzip in the smaller build**. The mechanism is c
 Which half of the gate still means something on a named distribution:
 
 - **The ENTRY budget transfers and stays honest.** A slim build's entry chunk is a subset of the default's, so it should never exceed it — measured 124.6 kB (kicktodo) against 128.5 kB (default), same 130 kB ceiling. A slim build breaching the ENTRY budget is a real finding.
+  - **An adopter that ADDS its own features is not a subset (ADR 0874 amendment,
+    2026-10-18).** Its registered route metadata, and any code it must run at boot,
+    sits in the entry on top of the host's. Declare that share in the manifest
+    rather than raising the host ceiling:
+    `"entryShareBytes": 830, "entryShareReason": "route metadata + eager offline sign-out cleanup"`.
+    The cap is 1024 B gzip. The gate then reports `host 129.0 kB + '<name>' declared
+    entry share N B`, so the host's own number stays visible. The `default`
+    distribution cannot declare one. Measure the share before you declare it:
+    build with and without your features and compare.
 - **The non-entry 150 kB chunk ceiling does NOT transfer.** It was chosen relative to default-build chunk composition (see the comments in `frontend/react/scripts/check-bundle-budget.mjs`, which cite measured default-build weights such as `documentSchema` 146.3 kB and `wardley` 141.9 kB). Under a different composition those weights change, so a breach is not evidence of a size problem until you have measured the same chunk in the default build.
 
 **So the first diagnostic step for a distribution build that reds this gate is to build the DEFAULT distribution and measure the same chunk.** If default passes, it is a composition artifact, not a size regression.

@@ -778,6 +778,7 @@ step "frontend: vitest"
 LIVE_FETCH_AUDIT="$(mktemp "${TMPDIR:-/tmp}/owp-live-fetch-audit.XXXXXX")"
 tg_begin frontend
 FE_TG_MODE="$TG_MODE"
+FE_TG_ARGS=(${TG_ARGS[@]+"${TG_ARGS[@]}"}) # the date-bomb sweep re-runs this selection (ADR 0918)
 fe_rc=0
 # The frontend suite shares the machine with whatever background lane is still
 # live here: conformance-m2 (~450 s, started just before this step) and the
@@ -810,7 +811,9 @@ if [ "$FE_TG_MODE" = enforce ]; then
   echo "↷ skipped: Tracegate ran a subset of the frontend lane; a full run checks stale entries (one runs in a gate once the last is > 24 h old)."
 else
   node "$ROOT/scripts/check-live-fetch-stale.mjs" "$LIVE_FETCH_AUDIT"
-  if [ "$FE_TG_MODE" = shadow ]; then node "$TG" full-done --lane frontend || echo "tracegate: full-done failed (ignored)"; fi
+  # `full-done --lane frontend` is recorded AFTER the date-bomb sweep, not here
+  # (ADR 0918): it licenses the next 24 h of gates to sweep only their selection,
+  # so it must mean the WHOLE sweep passed too.
 fi
 rm -f "$LIVE_FETCH_AUDIT"
 
@@ -1265,8 +1268,24 @@ step "frontend: date-bomb sweep (clock advanced ${OPENWOP_CLOCKSHIFT_DAYS:-365} 
 # the machine shared one file, and a run killed mid-sweep left it behind, after
 # which every later gate died here with "mkstemp failed … File exists" — green
 # through 3,700 test files and red on a temp name (seen 2026-10-01).
+#
+# ADR 0918 — THE SWEEP FOLLOWS THE FRONTEND LANE'S SELECTION. Under enforce it
+# shifts the clock for the files Tracegate ran (must-run + audit), not all ~1,055.
+# A NEW bomb rides a changed test or changed code a test executes, so it is in
+# the selection. An UNCHANGED file whose bomb date drifts into the 365-day window
+# is caught the day it does: the lane runs FULL in a gate at least once every
+# 24 h, and the sweep runs whole with it, ~364 days before the bomb goes off.
+SWEEP_ARGS=()
+if [ "$FE_TG_MODE" = enforce ]; then SWEEP_ARGS=(${FE_TG_ARGS[@]+"${FE_TG_ARGS[@]}"}); fi
 SWEEP_JSON="$(mktemp "${TMPDIR:-/tmp}/owp-clockshift-sweep.XXXXXX")"
-if ! ( cd "$ROOT/frontend/react" && OPENWOP_CI_CLOCKSHIFT=1 npm run test -- --reporter=default --reporter=json --outputFile="$SWEEP_JSON" ); then
+if [ "$FE_TG_MODE" = enforce ] && [ "${#SWEEP_ARGS[@]}" -eq 0 ]; then
+  echo "date-bomb sweep: Tracegate selected no frontend file at this tree, so there is nothing to shift (the whole sweep runs with the next FULL frontend lane, ≤ 24 h)."
+elif [ "$FE_TG_MODE" = enforce ]; then
+  echo "date-bomb sweep: the frontend lane's selection — ${#SWEEP_ARGS[@]} file(s); the whole sweep runs with the next FULL lane (ADR 0918)."
+fi
+if [ "$FE_TG_MODE" = enforce ] && [ "${#SWEEP_ARGS[@]}" -eq 0 ]; then
+  :
+elif ! ( cd "$ROOT/frontend/react" && OPENWOP_CI_CLOCKSHIFT=1 npm run test -- --reporter=default --reporter=json --outputFile="$SWEEP_JSON" ${SWEEP_ARGS[@]+"${SWEEP_ARGS[@]}"} ); then
   sweep_failed="$(node -e '
     const r = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
     const root = process.argv[2] + "/";
@@ -1290,6 +1309,8 @@ if ! ( cd "$ROOT/frontend/react" && OPENWOP_CI_CLOCKSHIFT=1 npm run test -- --re
   done <<< "$sweep_failed"
 fi
 rm -f "$SWEEP_JSON"
+# The lane AND the whole sweep passed: only now may the next 24 h of gates enforce.
+if [ "$FE_TG_MODE" = shadow ]; then node "$TG" full-done --lane frontend || echo "tracegate: full-done failed (ignored)"; fi
 
 # NON-VACUITY FLOOR, and it runs unconditionally BECAUSE the sweep above now
 # does. A sweep that runs and asserts nothing is the next failure in this

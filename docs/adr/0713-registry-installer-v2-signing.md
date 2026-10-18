@@ -214,15 +214,57 @@ script against `origin/main`'s installer failed both with the exact production e
   continues; nothing alerts. Should a STRICT boot with zero successful installs fail
   readiness, or at least log `error`? (Recommend `error` + a readiness detail; failing
   boot would take the app down for a registry outage.)
+
+  > **CLOSED 2026-10-18 (A-04; the user agreed the recommendation with D-20).** The
+  > readiness half was already live: NP-V2 P7's `host/registryInstallStatus.ts` is
+  > reported as `checks.registryPacks` by `/readiness` (`routes/health.ts`) without
+  > deciding `ready`, and `scripts/verify-deploy.sh` refuses a revision reporting
+  > failures. What was missing was the single loud line: a boot that ATTEMPTED installs
+  > and landed none now logs `registry_install_none_succeeded` at `error` once, with a
+  > closed `reasonCode` (ADR 0900) a probe can count, from both exits of
+  > `bootstrap/installRegistryPacks.ts` (every install threw; every pin refused before
+  > the network). Boot continues. Nothing attempted is not an outage. Witness:
+  > `test/registry-install-boot.test.ts` (+3, sabotage-witnessed).
+
 - **OQ2** `scripts/check-registry-parity.sh` measures the v1 tree only (ADR 0663 already
   noted it); it should measure the resolved tree.
+
+  > **CLOSED 2026-09-18 (recorded 2026-10-18, A-04).** The script resolves
+  > `endpoints.v${HOST_MAJOR}.registryIndex` from `.well-known/openwop-registry.json` —
+  > the installer's own map — with no fallback to the flat aliases (its CORRECTED
+  > 2026-09-18 header). Residual: `HOST_MAJOR` comes from `OPENWOP_REGISTRY_TREE_MAJOR`
+  > (default 2), a second owner of the major, and the script has no test of its own.
+
 - **OQ3** Load-time `verifyPinned` (`host/packSignature.ts`) still reads v1 `signatureRef`
   and so reports every v2 chain install `unsigned`; with
   `OPENWOP_REQUIRE_CHAINPACK_SIGNATURES=true` they would be refused. Install-time
   verification (Phase 1) plus the install marker's content hashes are the current
   attestation; teaching load-time verification the v2 shape is the follow-up.
+
+  > **CLOSED for chain packs (`025a7af4a`, 2026-09-20), plus a gap closed 2026-10-18
+  > (A-04).** A v2 signing block (`keyId` + `scheme`) is judged by the install marker
+  > (`verifyInstalledPack`: the content hashes and whole-tree digest the installer wrote
+  > after verifying the Ed25519 signature and the ADR 0660 namespace), so a v2 install is
+  > `trusted` or `failed`, never `unsigned`. **That change skipped the keyring's
+  > revocation list** (`OPENWOP_TRUSTED_PACK_REVOCATIONS`), which `verifyPinned` checks
+  > first for v1: an operator-revoked v2 chain version still loaded, even under
+  > `OPENWOP_REQUIRE_CHAINPACK_SIGNATURES=true`. The v2 branch now returns `revoked`
+  > first. Witness: `test/chainpack-signature.test.ts` v2 block (+4: trusted, tampered,
+  > unmarked, revoked; sabotage-witnessed). Still open, recorded rather than changed:
+  > (a) for v1 the flag requires an operator-PINNED key; for v2 it accepts any key the
+  > registry served that passed namespace authorization — requiring the marker's key in
+  > the pinned keyring is stricter but would refuse every v2 chain unless production's
+  > keyring holds the registry key, so measure that first; (b) `features/ui-plugins/routes.ts`
+  > still reads the v1 `signatureRef`, so a registry v2 UI plugin lands `community`
+  > (sandboxed) — fail-closed, acceptable until a v2 UI plugin exists.
+
 - **OQ4** The corpus schema errata (v2 pack-manifest `Signing` → `{ keyId, scheme }`)
   belongs in `openwop`; the Phase 1b tripwire forces the host workaround out when it lands.
+
+  > **CLOSED (recorded 2026-10-18).** The errata landed in the corpus and the host
+  > workaround is gone: `037438cd0` routes v2-signed chain packs to the v2 schema and
+  > retires `manifestForCorpusSchema` (ADR 0713 / WHD-15).
+
 - **OQ5** A same-PACK-version tie-break cannot see a per-CHAIN version difference: the
   loader kept registry `approvals 1.0.4` (chains @1.0.0) over vendored `approvals 1.0.4`
   (chains @1.0.1). Either the registry publish flow must refuse a version the app
@@ -241,3 +283,13 @@ script against `origin/main`'s installer failed both with the exact production e
   > chain version in the lower-precedence root wins; a lower one does not). Sabotage
   > reddens 1. The registry-side half (refusing to publish a version the app already
   > vendors with different content) is not taken here.
+
+  > **D-20 — the registry-side half DECIDED 2026-10-18 by the user:** the registry
+  > publish refuses a same-version pack whose content differs from what the app
+  > vendors. It belongs in the registry repo's publish workflow, not here: this repo's
+  > `check-registry-parity.sh` VERSION COLLISION shape already compares in the other
+  > direction (the app's `examples/*-packs` against every published version, under
+  > `OPENWOP_CI_LIVE`), while the registry's `check-published-immutable.mjs` compares
+  > only against its own base ref and so cannot see a version the app vendored first —
+  > exactly the `approvals 1.0.4` incident. Handed to the registry owners as a brief
+  > (A-04); nothing in this repo changes for it.

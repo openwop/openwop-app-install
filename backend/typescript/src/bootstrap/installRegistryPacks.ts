@@ -15,7 +15,7 @@
  * locally-registered nodes when the registry is unreachable.
  */
 
-import { recordRegistryInstallFailure, recordRegistryInstallSkip, recordRegistryInstallSuccess, resetRegistryInstallStatus, setRegistryInstallAttempted } from '../host/registryInstallStatus.js';
+import { recordRegistryInstallFailure, recordRegistryInstallSkip, recordRegistryInstallSuccess, registryInstallStatus, resetRegistryInstallStatus, setRegistryInstallAttempted } from '../host/registryInstallStatus.js';
 import { resolve, join } from 'node:path';
 import { existsSync, readFileSync } from 'node:fs';
 import { createLogger } from '../observability/logger.js';
@@ -131,6 +131,7 @@ export async function ensureRegistryPacksInstalled(featurePacks: InstallTarget[]
   setRegistryInstallAttempted(targets.length + refused);
   if (targets.length === 0) {
     if (raw === 'none') log.info('registry pack install disabled (OPENWOP_INSTALL_PACKS=none); no missing feature packs');
+    logIfNoneInstalled(); // every pin was refused (below vendored / revoked)
     return;
   }
 
@@ -168,4 +169,22 @@ export async function ensureRegistryPacksInstalled(featurePacks: InstallTarget[]
       }
     }),
   );
+  logIfNoneInstalled();
+}
+
+/** ADR 0713 OQ1 — a boot that ATTEMPTED registry installs and landed none is an
+ *  outage of the registry lane, not N unrelated warnings: say it once, at error.
+ *  Boot continues (a registry outage must not take the app down — the user's call,
+ *  D-20); `/readiness` already reports the counts as `checks.registryPacks`
+ *  (`attempted` > 0 with `installed` 0) without failing readiness. Nothing
+ *  attempted (`OPENWOP_INSTALL_PACKS=none`, nothing missing) is not an outage. */
+function logIfNoneInstalled(): void {
+  const st = registryInstallStatus();
+  if (st.attempted === 0 || st.installed > 0) return;
+  log.error('registry_install_none_succeeded', {
+    reasonCode: 'registry_install_none_succeeded',
+    attempted: st.attempted,
+    failed: st.failed.length,
+    codes: [...new Set(st.failed.map((f) => f.code))].sort(),
+  });
 }

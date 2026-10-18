@@ -60,6 +60,7 @@ import { ensureNodePackResolverInstalled } from './bootstrap/nodePackResolver.js
 import { ensureAgentPackResolverInstalled } from './bootstrap/agentPackResolver.js';
 import { ensureFeatureDefaultOrgs } from './host/featureDefaultOrgs.js';
 import { setDefaultWorkspaceTargets } from './host/workspaceJoinLedger.js';
+import { registerMembershipRootedWorkspaces } from './host/accessControlService.js';
 import { ensureRegistryPacksInstalled } from './bootstrap/installRegistryPacks.js';
 import { featurePackRefs, featureDefaultOrgs } from './features/index.js';
 import { ensureLocalPacksMounted } from './bootstrap/mountLocalPacks.js';
@@ -515,6 +516,9 @@ export async function createApp(config: AppConfig): Promise<Express> {
   // boot rather than imported UP by the feature: `features/users/authRoutes.ts`
   // importing the registry is a cycle.
   setDefaultWorkspaceTargets(featureDefaultOrgs());
+  // ADR 0910 D0 — the same declarations make those workspaces membership-rooted for
+  // AUTHORITY (a sub-org row there grants nothing tenant-wide).
+  registerMembershipRootedWorkspaces(featureDefaultOrgs().map((o) => o.tenantId));
 
   // H21 / ADR 0553 — an operator-configured outbound MCP server
   // (`OPENWOP_MCP_SERVER_URL`) is registered as a curated `reach:'mcp'`

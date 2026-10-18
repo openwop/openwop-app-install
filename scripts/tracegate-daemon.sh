@@ -190,7 +190,10 @@ run_lane() {
     fi
     # A complete, green full run whose stale check passed spares a gate the
     # full lane for 24 h (ADR 0880 D5 correction). Anything less records nothing.
-    if [ $rc -eq 0 ] && [ "${stale:-0}" -eq 0 ] && [ "${pa:-0}" -eq 0 ]; then TG full-done --lane "$lane" | logpipe; fi
+    # NOT for the frontend (ADR 0918): its full-done also licenses gates to run
+    # the date-bomb sweep on their selection only, and this run does no sweep.
+    # The frontend's backstop is the gate's own FULL lane + whole sweep.
+    if [ "$lane" != frontend ] && [ $rc -eq 0 ] && [ "${stale:-0}" -eq 0 ] && [ "${pa:-0}" -eq 0 ]; then TG full-done --lane "$lane" | logpipe; fi
   fi
   printf '%s\t%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(git -C "$WORK" rev-parse --short=12 HEAD)" "$lane" "$([ $rc -eq 0 ] && echo green || echo RED)" >> "$NIGHTLY.lanes"
   rm -rf "$run"

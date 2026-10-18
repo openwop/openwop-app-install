@@ -217,7 +217,17 @@ describe('the connect-time connector — the arm that can see a PORT for a hostn
       setOrigins(`http://127.0.0.1:${port}`);
       const ok = await guardedEgressFetch(`http://127.0.0.1:${port}/`);
       expect(`${ok.status} ${await ok.text()}`).toBe('200 peer');
-      await expect(guardedEgressFetch(`http://127.0.0.1:${port + 1}/`)).rejects.toMatchObject({ code: 'OPENWOP_WEBHOOK_EGRESS_DENIED' });
+      // A second OS-assigned port, not `port + 1`: when the ephemeral range hands
+      // out 65535, `port + 1` is 65536 — an invalid URL that fails the parse
+      // before the allowlist is consulted, so the deny assertion flaked
+      // (#4917's train, 2026-10-17). A just-closed listener's port is valid
+      // and differs from `port`, so only the allowlist can refuse it.
+      const other = http.createServer();
+      await new Promise<void>((res) => other.listen(0, '127.0.0.1', () => res()));
+      const otherPort = (other.address() as AddressInfo).port;
+      await new Promise<void>((r) => other.close(() => r()));
+      expect(otherPort).not.toBe(port);
+      await expect(guardedEgressFetch(`http://127.0.0.1:${otherPort}/`)).rejects.toMatchObject({ code: 'OPENWOP_WEBHOOK_EGRESS_DENIED' });
       await expect(guardedEgressFetch(`http://localhost:${port}/`)).rejects.toMatchObject({ code: 'OPENWOP_WEBHOOK_EGRESS_DENIED' });
     } finally {
       await new Promise<void>((r) => lit.close(() => r()));

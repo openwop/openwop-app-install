@@ -79,7 +79,7 @@ import {
   type Scope,
   type EffectiveAccess,
   holdsOwnerRoleInTenant,
-  isSharedWorkspaceTenant,
+  isMembershipRootedWorkspace,
   isWorkspaceRootMembership,
   relationshipRoles,
   runMemberAuthorityLostHooks,
@@ -218,10 +218,12 @@ async function requireOrgCreate(req: Request): Promise<void> {
   if (req.principal?.tenants?.includes('*') === true || req.principal?.auth?.kind === 'env-key') return;
   const tenantId = tenantOf(req);
   // A strict read: a store error surfaces, it never reads as "no orgs yet".
-  if (!isSharedWorkspaceTenant(tenantId) && (await listOrgs(tenantId)).length === 0) return;
+  // ADR 0910 D0 — a declared default workspace (`host-kicktodo`) is membership-rooted
+  // like a `ws:` one: creating an org there needs the owner role on the ROOT row.
+  if (!isMembershipRootedWorkspace(tenantId) && (await listOrgs(tenantId)).length === 0) return;
   const subject = callerSubject(req);
   let own: EffectiveAccess = { roles: [], scopes: [], basis: 'none' };
-  if (subject && isSharedWorkspaceTenant(tenantId)) own = await callerTenantAccess(req);
+  if (subject && isMembershipRootedWorkspace(tenantId)) own = await callerTenantAccess(req);
   else if (subject && (await holdsOwnerRoleInTenant(tenantId, subject))) own = { roles: ['owner'], scopes: [], basis: 'member' };
   requireOwner(req, await actingAccess(req, own), 'create an organization here');
 }

@@ -100,6 +100,7 @@ import { kicktodoStudioFeature } from './kicktodo-studio/routes.js';
 import { kicktodoAdminFeature } from './kicktodo-admin/routes.js';
 import { kicktodoMetricsFeature } from './kicktodo-metrics/routes.js';
 import { kicktodoSeatsFeature } from './kicktodo-seats/routes.js';
+import { i18n } from '../i18n/index.js';
 // ADR 0084 correction — notebooks (Sources) + podcasts are surfaced as PROJECT tabs
 // (ProjectDetailPage), not standalone top-level nav destinations. Their feature
 // modules + i18n still ship (the panels are imported by the projects feature); only
@@ -129,6 +130,16 @@ export interface FrontendFeature {
    * feature module, so a distribution that excludes the feature drops its tab too.
    */
   agentWorkspaceTabs?: AgentWorkspaceTab[];
+  /**
+   * ADR 0916 (Book AI P16) — the feature's nav label/hint translations, per
+   * locale, merged into the `nav` namespace when the registry loads, so a
+   * route's `labelKey`/`hintKey` resolves on first render without the feature's
+   * page code (whose catalog arrives with its lazy chunk, after the sidebar
+   * paints). Keep it to the two or three nav strings: this ships in the entry
+   * chunk. Every key must start with `<feature id>.`, so a feature cannot
+   * overwrite a host nav string; `applyFeatureNavMessages` refuses anything else.
+   */
+  navMessages?: Readonly<Record<string, Readonly<Record<string, string>>>>;
 }
 
 /** A feature-contributed agent-workspace tab. `labelKey` is in the `agents` i18n namespace. */
@@ -148,6 +159,24 @@ export const FRONTEND_FEATURES: FrontendFeature[] = [crmFeature, cdpFeature, csm
   kicktodoMetricsFeature,
   kicktodoSeatsFeature, biFeature, serviceDeskFeature, showcaseFeature, claudeCodeFeature,
 ];
+
+/** ADR 0916 — merge each feature's `navMessages` into the `nav` namespace,
+ *  keeping only keys under the feature's own `<id>.` prefix (so a feature can
+ *  never overwrite a host nav string). This runs in the ENTRY chunk, so it is
+ *  deliberately minimal: the size limits (8 keys / 160 chars per locale) are a
+ *  test over the shipped features (`featureNavMessages.test.ts`), not code here. */
+export function applyFeatureNavMessages(
+  features: readonly Pick<FrontendFeature, 'id' | 'navMessages'>[],
+  add: (locale: string, messages: Record<string, string>) => void,
+): void {
+  for (const f of features) {
+    for (const [locale, messages] of Object.entries(f.navMessages ?? {})) {
+      add(locale, Object.fromEntries(Object.entries(messages).filter(([k]) => k.startsWith(`${f.id}.`))));
+    }
+  }
+}
+
+applyFeatureNavMessages(FRONTEND_FEATURES, (locale, messages) => i18n.addResourceBundle(locale, 'nav', messages, true, false));
 
 /** Flatten every feature's routes for the manifest. */
 export function featureRoutes(): FeatureRoute[] {

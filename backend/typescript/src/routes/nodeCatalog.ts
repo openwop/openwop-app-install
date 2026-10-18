@@ -14,7 +14,7 @@
 
 import type { Express } from 'express';
 import { OpenwopError } from '../types.js';
-import { buildNodeCatalog } from '../host/nodeCatalogBuilder.js';
+import { buildNodeCatalog, nodeCatalogForTenant } from '../host/nodeCatalogBuilder.js';
 import { resolveDisabledPacks } from '../host/packVisibility.js';
 import { tenantOf } from '../host/requestSubject.js';
 
@@ -25,9 +25,11 @@ export function registerNodeCatalogRoute(app: Express): void {
       // caller's workspace disabled (availability curation on the AUTHORING
       // surface only — runs/replay never consult this seam).
       const disabled = await resolveDisabledPacks(tenantOf(req));
-      const nodes = disabled.size === 0
+      const all = disabled.size === 0
         ? buildNodeCatalog()
         : buildNodeCatalog().filter((n) => !(n.packName && disabled.has(n.packName)));
+      // ADR 0917 — mark nodes whose feature surface this tenant has off.
+      const nodes = await nodeCatalogForTenant(tenantOf(req), all, req.userId);
       res.json({ nodes });
     } catch (err) {
       next(err instanceof OpenwopError ? err : new OpenwopError('internal_error', String(err), 500));

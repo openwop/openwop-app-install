@@ -25,6 +25,9 @@ export const LOG_REASON_CODES = [
   'kicktodo_org_required',
   'kicktodo_org_manage_required',
   'kicktodo_relation_denied',
+  // ADR 0713 OQ1 — every attempted registry pack install at boot failed
+  // (`bootstrap/installRegistryPacks.ts`).
+  'registry_install_none_succeeded',
 ] as const;
 
 export type LogReasonCode = (typeof LOG_REASON_CODES)[number];

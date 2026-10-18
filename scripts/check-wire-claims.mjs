@@ -126,6 +126,9 @@ const SUPPRESSION = (() => {
  * checkout produced a stamp, the document MUST carry it.
  */
 function expectedSuiteVersion() {
+  // Test seam (scripts/test-deploy-gates.sh): behave as a checkout with no
+  // stamp and no installed package, so the fail-closed arm below is witnessed.
+  if (process.env.OPENWOP_WIRE_CLAIMS_SIMULATE_NO_SUITE === '1') return null;
   // The shipped artifact first — `build-meta/corpus-suite.txt` is what was
   // COPYed into the image, so it is the value the running host could have read.
   try {
@@ -273,12 +276,19 @@ if (V2_ONLY) {
     failed++;
   }
 } else {
-  // Loud, not silent: a skip here is the check not running, and this program has
-  // already shipped one green that never ran.
-  console.log(`  ${'contractProvenance.suiteVersion'.padEnd(30)} SKIP     (no image stamp and no installed conformance package)`);
+  // FAIL CLOSED (found 2026-10-18 by the release manager). This used to print
+  // SKIP and let the run exit 0, so in a checkout without backend deps the
+  // check PASSED a host serving 1.x with the field missing — the deploy-gate
+  // case "…with those fields missing FAILS" went green-by-not-running. A check
+  // that cannot build its expected document has not checked anything; say so
+  // and fail. (A v2-only host never reaches here: the field is N/A above.)
+  console.log(`  ${'contractProvenance.suiteVersion'.padEnd(30)} UNCHECKED cannot build the expected document (no image stamp and no installed conformance package)`);
   if ((doc.contractProvenance ?? caps.contractProvenance) !== undefined) {
     console.log(`  ${''.padEnd(30)}          live advertises ${JSON.stringify(doc.contractProvenance ?? caps.contractProvenance)} — cannot verify from this checkout`);
   }
+  console.error('\n  Install the backend deps (`( cd backend/typescript && npx -y npm@10.9.8 ci )`) or run from a');
+  console.error('  stamped build, then re-run. This is not a pass.');
+  failed++;
 }
 
 // ── certification evidence (WHD-18 / ADR 0735; image mode removed, ADR 0812 P4) ──

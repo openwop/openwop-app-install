@@ -258,12 +258,16 @@ check('entry bar MET after 20 clean observations over 15 days → auto = enforce
 check('...and a lane past the default 14-day bar audits at the normal 5%', tg.entryBar('backend').auditRate === 0.05, JSON.stringify(tg.entryBar('backend')));
 fs.writeFileSync(path.join(ledger, shadow), 'at\tlane\tmode\thead\tfiles\tmust_run\treusable\taudited\trun_time_pct\tmisses\n' + rows.slice(-10).join('\n') + '\n');
 check('entry bar NOT met with 10 observations → auto = shadow', !tg.entryBar('backend').ok && tg.effectiveMode('backend') === 'shadow');
-// Early entry (backend only): 20 clean observations over 2 days.
+// Early entry (both lanes; frontend since ADR 0918): 20 clean observations over 2 days.
 const early = (laneName) => Array.from({ length: 20 }, (_, i) => [new Date(Date.now() - (2 - i * 0.09) * 86_400_000).toISOString(), laneName, 'shadow', 'x', 10, 1, 9, 0, '10.0', 0].join('\t'));
 fs.writeFileSync(path.join(ledger, shadow), 'at\tlane\tmode\thead\tfiles\tmust_run\treusable\taudited\trun_time_pct\tmisses\n' + [...early('backend'), ...early('frontend')].join('\n') + '\n');
 check('backend enters EARLY: 20 clean observations over 2 days → enforce', tg.entryBar('backend').ok && tg.effectiveMode('backend') === 'enforce', JSON.stringify(tg.entryBar('backend')));
 check('...auditing 20% until the 14-day bar would have been met', tg.entryBar('backend').auditRate === 0.2);
-check('frontend does NOT enter early on the same record', !tg.entryBar('frontend').ok && tg.effectiveMode('frontend') === 'shadow', JSON.stringify(tg.entryBar('frontend')));
+check('frontend enters EARLY on the same record, auditing 20% (ADR 0918)', tg.entryBar('frontend').ok && tg.effectiveMode('frontend') === 'enforce' && tg.entryBar('frontend').auditRate === 0.2, JSON.stringify(tg.entryBar('frontend')));
+// ...but not before the 1-day floor: 20 clean observations inside 12 hours.
+const sameDay = (laneName) => Array.from({ length: 20 }, (_, i) => [new Date(Date.now() - (0.5 - i * 0.02) * 86_400_000).toISOString(), laneName, 'shadow', 'x', 10, 1, 9, 0, '10.0', 0].join('\t'));
+fs.writeFileSync(path.join(ledger, shadow), 'at\tlane\tmode\thead\tfiles\tmust_run\treusable\taudited\trun_time_pct\tmisses\n' + [...early('backend'), ...sameDay('frontend')].join('\n') + '\n');
+check('frontend does NOT enter on 20 observations inside 12 hours (the 1-day floor)', !tg.entryBar('frontend').ok && tg.effectiveMode('frontend') === 'shadow', JSON.stringify(tg.entryBar('frontend')));
 // Full-run backstop: an enforce-eligible lane runs FULL when its last complete
 // full run is ≥ 24 h old, or was never recorded — and enforces again once one is.
 fs.writeFileSync(fullLog, 'at\tlane\thead\n' + fullRow('backend', 31) + '\n');

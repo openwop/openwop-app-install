@@ -84,6 +84,20 @@ export function registerFeatureSurface(id: string, build: FeatureSurfaceBuilder,
   builders.set(id, { build, policy });
 }
 
+/** ADR 0917 — of `ids`, the feature surfaces that are OFF for `tenantId`, by
+ *  the same resolver the seam's TOGGLE gate uses at run time (an always-on
+ *  feature with no toggle is never off). Lets the authoring catalog say what
+ *  the run would refuse with `host_capability_disabled`, before the run. */
+export async function disabledFeatureSurfacesFor(tenantId: string, ids: Iterable<string>, userId?: string): Promise<Set<string>> {
+  const off = new Set<string>();
+  for (const id of new Set(ids)) {
+    if (!getToggleDefault(id)) continue;
+    const a = await resolveOne(id, { tenantId, ...(userId ? { userId } : {}) });
+    if (!a || !a.enabled) off.add(id);
+  }
+  return off;
+}
+
 /** Build every registered feature surface for one run scope (called per run by
  *  `buildHostSurfaceBundle`). Each surface is gated at the seam (below): the
  *  feature toggle, so a node cannot read a feature its tenant disabled, and the

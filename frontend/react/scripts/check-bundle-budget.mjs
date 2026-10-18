@@ -13,7 +13,8 @@
  */
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { gzipSync } from 'node:zlib';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { NAMED_CHUNKS } from './chunkNames.mjs';
 
 const ASSETS = 'dist/assets';
@@ -267,6 +268,21 @@ const ASSETS = 'dist/assets';
 // (2026-10-12): it adds one network round trip to the first visit of every route
 // (+~600 ms on Fast 3G, +~175 ms on Fast 4G). Do not reach for it to buy headroom.
 const ENTRY_GZIP_BUDGET = 129 * 1024;
+
+/**
+ * ═══ 2026-10-18: a DECLARED white-label entry share (ADR 0874 amendment, user
+ * decision). ═══ The ceiling above is the HOST's own number, calibrated on the
+ * DEFAULT build, and it stays exactly as tight. A named distribution (a white-label
+ * adopter's `distributions/<name>.json`) may declare `entryShareBytes` — the gzip
+ * bytes its registered features must keep in the entry (route metadata, an eager
+ * sign-out cleanup) — with an `entryShareReason`. Its entry budget is then the host
+ * ceiling PLUS that share, capped at MAX_DISTRIBUTION_ENTRY_SHARE. The default
+ * distribution can never declare one, so host growth is still caught at 129 kB.
+ * Found when Book AI (0.83 kB of registered entry code) could not adopt v0.5.0:
+ * the host's own entry had grown to 128.8 kB, leaving it 565 B over with no change
+ * of its own.
+ */
+const MAX_DISTRIBUTION_ENTRY_SHARE = 1024;
 
 /**
  * WARN BAND. Above this fraction of a budget the check still PASSES but says so loudly.
@@ -525,6 +541,24 @@ let failed = false;
 const DISTRIBUTION = process.env.OPENWOP_DISTRIBUTION ?? 'default';
 const isNamedDistribution = DISTRIBUTION !== 'default';
 
+// The distribution's declared entry share (see MAX_DISTRIBUTION_ENTRY_SHARE).
+// `OPENWOP_DISTRIBUTIONS_DIR` is a test seam; the manifests live at the repo root.
+const DISTRIBUTIONS_DIR = process.env.OPENWOP_DISTRIBUTIONS_DIR
+  ?? join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'distributions');
+const entryShare = (() => {
+  let manifest;
+  try { manifest = JSON.parse(readFileSync(join(DISTRIBUTIONS_DIR, `${DISTRIBUTION}.json`), 'utf8')); } catch { return 0; }
+  const share = manifest?.entryShareBytes;
+  if (share === undefined) return 0;
+  const bad = (why) => { console.error(`✗ check-bundle-budget: distributions/${DISTRIBUTION}.json entryShareBytes ${why}`); process.exit(1); };
+  if (!isNamedDistribution) bad('is not allowed on the default distribution — the host ceiling is the host\'s own number.');
+  if (!Number.isInteger(share) || share <= 0) bad(`must be a positive integer of gzip bytes (got ${JSON.stringify(share)}).`);
+  if (share > MAX_DISTRIBUTION_ENTRY_SHARE) bad(`is ${share} B, over the ${MAX_DISTRIBUTION_ENTRY_SHARE} B cap. Move code out of the entry first.`);
+  if (typeof manifest.entryShareReason !== 'string' || manifest.entryShareReason.trim().length < 10) bad('needs an entryShareReason saying what must stay in the entry, and why.');
+  return share;
+})();
+const ENTRY_BUDGET = ENTRY_GZIP_BUDGET + entryShare;
+
 for (const f of files) {
   const path = join(ASSETS, f);
   const raw = statSync(path).size;
@@ -533,7 +567,7 @@ for (const f of files) {
   // `i18n` names ONE chunk (`i18n-<hash>.js`), not the lazy locale chunks that share
   // its prefix (`i18n-es-<hash>.js` …) — those stay on the global ceiling.
   const override = Object.entries(PER_CHUNK_GZIP_BUDGET).find(([name]) => (name === 'i18n' ? /^i18n-[A-Za-z0-9_-]{8}\.js$/.test(f) : f.startsWith(`${name}-`)))?.[1];
-  const budget = isEntry ? ENTRY_GZIP_BUDGET : (override ?? CHUNK_GZIP_BUDGET);
+  const budget = isEntry ? ENTRY_BUDGET : (override ?? CHUNK_GZIP_BUDGET);
   if (gz > budget) {
     failed = true;
     console.error(
@@ -572,7 +606,10 @@ if (entry) {
   const gz = gzipBytes(join(ASSETS, entry));
   // Print the HEADROOM, not just the size. The burn rate is what a reader needs, and
   // reconstructing it from historical logs is archaeology nobody does.
-  console.log(`✓ check-bundle-budget: entry chunk ${kib(gz)} gzip (budget ${kib(ENTRY_GZIP_BUDGET)}, ${ENTRY_GZIP_BUDGET - gz} B of headroom).`);
+  // A declared distribution share is reported SEPARATELY, so the host's own number
+  // is never hidden inside a bigger one.
+  const shareNote = entryShare > 0 ? ` = host ${kib(ENTRY_GZIP_BUDGET)} + '${DISTRIBUTION}' declared entry share ${entryShare} B` : '';
+  console.log(`✓ check-bundle-budget: entry chunk ${kib(gz)} gzip (budget ${kib(ENTRY_BUDGET)}${shareNote}, ${ENTRY_BUDGET - gz} B of headroom).`);
 } else {
   console.log('✓ check-bundle-budget: no entry chunk matched index-*.js (skipped).');
 }

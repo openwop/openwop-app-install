@@ -54,6 +54,12 @@ function bruteNextFire(cronExpr: string, afterMs: number, timezone: string, capM
   return null;
 }
 
+/** The oracle is deliberately the slow, independent minute-by-minute scan (one
+ *  `Intl` format per minute). Those cases take 8–12 s unloaded and crossed the
+ *  default 15 s on a loaded gate box (19.7 s, a full-gate red), so they carry their
+ *  own budget instead of a cheaper oracle that would share the jump's assumptions. */
+const BRUTE_FORCE_TIMEOUT_MS = 60_000;
+
 describe('ADR 0787 D6 — the jumping search never skips a match', () => {
   const ZONES = ['UTC', 'Antarctica/Troll', 'Australia/Lord_Howe', 'Asia/Kolkata', 'Asia/Kathmandu', 'Pacific/Chatham', 'America/New_York', 'Europe/London'];
   // Every 2026 DST edge these zones have, entered a day early.
@@ -68,7 +74,7 @@ describe('ADR 0787 D6 — the jumping search never skips a match', () => {
           expect(computeNextFire(cron, start, zone), `${cron} after ${new Date(start).toISOString()} in ${zone}`).toBe(bruteNextFire(cron, start, zone, 9 * DAY));
         }
       }
-    });
+    }, BRUTE_FORCE_TIMEOUT_MS);
   }
 
   it('matches for sparse monthly cadences across a DST month', () => {
@@ -79,7 +85,7 @@ describe('ADR 0787 D6 — the jumping search never skips a match', () => {
         }
       }
     }
-  });
+  }, BRUTE_FORCE_TIMEOUT_MS);
 });
 
 describe('ADR 0787 D6 — the horizon, honoured', () => {

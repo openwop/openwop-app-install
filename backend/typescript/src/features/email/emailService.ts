@@ -60,7 +60,29 @@ export interface Campaign {
    *  (one per brief, `getCampaignByBrief`) — the email campaign stays its own
    *  honest per-email-engagement row; this just enables a future intel join. */
   sourceBriefId?: string;
+  /** ADR 0905 D2 — what this send generation delivers, frozen at send start. Every
+   *  batch renders from it, never from the live template, so an edit made while a
+   *  campaign is `sending` cannot change the rest of the send. Re-pinned when a resend
+   *  opens a new generation. */
+  sendPin?: CampaignSendPin;
   createdBy: string; createdAt: string; updatedAt: string;
+}
+
+/** ADR 0905 D2 — the content a send generation is pinned to. It carries the bytes
+ *  themselves (P0 predates the immutable version rows of P1), and `contentHash` is the
+ *  sha256 of `subject`/`body`/`format`, the same hash a later approval pin compares. */
+export interface CampaignSendPin {
+  generation: number;
+  templateId: string;
+  templateName: string;
+  subject: string; body: string; format?: EmailBodyFormat;
+  contentHash: string;
+  pinnedAt: string;
+}
+
+/** ADR 0905 D1/D2 — sha256 over the three fields that decide the delivered bytes. */
+export function templateContentHash(t: { subject: string; body: string; format?: EmailBodyFormat }): string {
+  return createHash('sha256').update(JSON.stringify([t.subject, t.body, t.format ?? 'text'])).digest('hex');
 }
 
 export type SendStatus = 'sent' | 'failed' | 'skipped';
@@ -278,9 +300,27 @@ export async function updateTemplate(tenantId: string, orgId: string, templateId
   }
   throw new OpenwopError('conflict', 'Could not update the template (too many concurrent writes).', 409, { templateId });
 }
+/**
+ * ADR 0905 D1 — a template a campaign still needs cannot be deleted: 409
+ * `template_in_use` while any campaign that is not `sent` references it (a draft would
+ * 400 at send; an approval would point at nothing). A `sent` campaign does not hold the
+ * template — its delivered bytes are on its own `sendPin`.
+ *
+ * Residual, stated: the scan and the delete are not one transaction, so a campaign
+ * created in between can reference a deleted template. It then 400s at send
+ * (`Campaign template not found`); it can never send the wrong bytes, and a `sending`
+ * campaign is unaffected because it renders from its pin.
+ */
 export async function deleteTemplate(tenantId: string, orgId: string, templateId: string): Promise<boolean> {
   const existing = await getTemplate(tenantId, orgId, templateId);
-  return existing ? templates.delete(templateId) : false;
+  if (!existing) return false;
+  const holders = (await listCampaigns(tenantId, orgId)).filter((c) => c.templateId === templateId && c.status !== 'sent');
+  if (holders.length > 0) {
+    throw new OpenwopError('conflict', 'This template is used by a campaign that has not finished sending. Delete or finish those campaigns first.', 409, {
+      reason: 'template_in_use', templateId, campaignIds: holders.slice(0, 20).map((c) => c.campaignId),
+    });
+  }
+  return templates.delete(templateId);
 }
 
 /**
@@ -538,8 +578,13 @@ async function sendCampaignSerialized(
   if (campaign.status === 'sent' && !opts.resend) {
     throw new OpenwopError('conflict', 'Campaign already sent — pass `resend: true` to send it again.', 409, { campaignId, status: campaign.status });
   }
-  const template = await getTemplate(tenantId, orgId, campaign.templateId);
-  if (!template) throw new OpenwopError('validation_error', 'Campaign template not found.', 400, { templateId: campaign.templateId });
+  const generation = opts.resend ? (campaign.sendGeneration ?? 0) + 1 : (campaign.sendGeneration ?? 0);
+  // ADR 0905 D2 — a pin for THIS generation already exists on a continuation; only a
+  // first pass (or a resend, or a legacy `sending` row from before pins) reads the live
+  // template, and it is pinned below before anything is dispatched.
+  const existingPin = campaign.sendPin && campaign.sendPin.generation === generation ? campaign.sendPin : undefined;
+  const liveTemplate = existingPin ? null : await getTemplate(tenantId, orgId, campaign.templateId);
+  if (!existingPin && !liveTemplate) throw new OpenwopError('validation_error', 'Campaign template not found.', 400, { templateId: campaign.templateId });
 
   const provider = opts.provider ?? activeProvider();
   // LEAK-1: NEVER report a campaign `sent` when no real email transport is wired.
@@ -622,13 +667,19 @@ async function sendCampaignSerialized(
   // granted since round 1 stayed excluded forever), and pre-resend 'sent'
   // rows truncated any >1-batch resend (the first continuation saw an empty
   // pending and declared the campaign 'sent').
-  const generation = opts.resend ? (campaign.sendGeneration ?? 0) + 1 : (campaign.sendGeneration ?? 0);
   const priorTerminal = opts.resend
     ? new Set<string>()
     : new Set((await listSends(tenantId, campaignId))
         .filter((s) => (s.generation ?? 0) === generation && (s.status === 'sent' || s.status === 'skipped'))
         .map((s) => s.contactId));
   const pending = audience.filter((c) => !priorTerminal.has(c.contactId));
+
+  // ADR 0905 D2 — pin BEFORE the first dispatch and AFTER every refusal above, so a
+  // refused send leaves the campaign a `draft` rather than a `sending` that sent nothing.
+  // A CAS onto the row read at pass start: two instances starting the same draft agree
+  // on ONE pin (the loser adopts the winner's), and a pin is never overwritten.
+  const pin = existingPin ?? await pinSend(tenantId, orgId, campaign, generation, liveTemplate!);
+  const template = { name: pin.templateName, subject: pin.subject, body: pin.body, format: pin.format };
   const limit = Math.max(1, Math.floor(opts.limit ?? SEND_BATCH_DEFAULT));
   const batch = pending.slice(0, limit);
 
@@ -782,6 +833,23 @@ async function sendCampaignSerialized(
     throw new OpenwopError('conflict', 'The campaign was deleted while it was sending; the emails already dispatched in this pass were sent.', 409, { campaignId, reason: 'deleted_during_send' });
   }
   throw new OpenwopError('conflict', 'Could not record the send result (too many concurrent writes); re-run to continue.', 409, { campaignId });
+}
+
+async function pinSend(tenantId: string, orgId: string, campaign: Campaign, generation: number, live: EmailTemplate): Promise<CampaignSendPin> {
+  const fresh: CampaignSendPin = {
+    generation, templateId: live.templateId, templateName: live.name,
+    subject: live.subject, body: live.body, ...(live.format ? { format: live.format } : {}),
+    contentHash: templateContentHash(live), pinnedAt: new Date().toISOString(),
+  };
+  let current: Campaign | null = campaign;
+  for (let attempt = 0; attempt < 4 && current; attempt++) {
+    if (current.sendPin && current.sendPin.generation === generation) return current.sendPin;
+    const next: Campaign = { ...current, status: 'sending', sendPin: fresh, ...(generation ? { sendGeneration: generation } : {}), updatedAt: new Date().toISOString() };
+    if (await campaigns.compareAndSwap(current, next)) return fresh;
+    current = await getCampaign(tenantId, orgId, campaign.campaignId);
+  }
+  if (!current) throw new OpenwopError('not_found', 'Campaign not found.', 404, { campaignId: campaign.campaignId });
+  throw new OpenwopError('conflict', 'Could not start the send (too many concurrent writes); try again.', 409, { campaignId: campaign.campaignId });
 }
 
 /** Render a template with a contact's fields (pure — used by the render node). */

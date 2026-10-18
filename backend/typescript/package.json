@@ -1,6 +1,6 @@
 {
   "name": "@openwop/app-server",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "private": true,
   "description": "OpenWOP application backend — Cloud Run TypeScript host implementing the v1.1 wire contract.",
   "type": "module",

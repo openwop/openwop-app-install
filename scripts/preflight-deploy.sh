@@ -75,22 +75,29 @@ note() { printf '  %-9s %s\n' "$1" "$2"; }
 HEAD_SHA=$(git rev-parse HEAD 2>/dev/null) || { echo "preflight-deploy: not a git repo" >&2; exit 2; }
 echo "preflight: $(printf '%.12s' "$HEAD_SHA")  (base: $BASE)"
 
-# ── Gate 1: HEAD is origin/main's tip ──────────────────────────────────────
+# ── Gate 1: HEAD is the release branch's tip ───────────────────────────────
 # THE gate. Everything else is defence in depth.
-if ! git fetch -q origin main 2>/dev/null; then
+# ADR 0916 (Book AI P5) — the release branch is `OPENWOP_DEPLOY_BRANCH`
+# (deploy.env), default `main`. A white-label distribution whose release branch
+# has another name (e.g. `bookai/main`) could otherwise never pass this gate.
+DEPLOY_BRANCH="${OPENWOP_DEPLOY_BRANCH:-main}"
+if ! [[ "$DEPLOY_BRANCH" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$ ]] || [[ "$DEPLOY_BRANCH" == *..* ]]; then
+  note "CONFIG" "OPENWOP_DEPLOY_BRANCH '$DEPLOY_BRANCH' is not a branch name"
+  fail=1
+elif ! git fetch -q origin "$DEPLOY_BRANCH" 2>/dev/null; then
   note "FETCH" "could not reach origin — cannot prove HEAD is current"
   fail=1
 else
-  MAIN_SHA=$(git rev-parse origin/main)
+  MAIN_SHA=$(git rev-parse "origin/$DEPLOY_BRANCH")
   if [ "$HEAD_SHA" = "$MAIN_SHA" ]; then
-    note "OK" "HEAD is origin/main's tip"
+    note "OK" "HEAD is origin/$DEPLOY_BRANCH's tip"
   else
-    note "STALE" "HEAD is not origin/main ($(printf '%.12s' "$MAIN_SHA"))"
+    note "STALE" "HEAD is not origin/$DEPLOY_BRANCH ($(printf '%.12s' "$MAIN_SHA"))"
     if git merge-base --is-ancestor "$HEAD_SHA" "$MAIN_SHA" 2>/dev/null; then
       behind=$(git rev-list --count "$HEAD_SHA..$MAIN_SHA" 2>/dev/null || echo '?')
       echo "           you are $behind commit(s) BEHIND — deploying would revert them"
     else
-      echo "           HEAD has diverged from origin/main (unmerged work?)"
+      echo "           HEAD has diverged from origin/$DEPLOY_BRANCH (unmerged work?)"
     fi
     fail=1
   fi
@@ -301,7 +308,7 @@ if [ "$fail" -ne 0 ]; then
   echo
   echo "PREFLIGHT FAILED — do not deploy."
   echo "Deploys run from a CLEAN worktree at origin/main's tip (CLAUDE.md). Usually:"
-  echo "  git worktree add --detach /tmp/owp-deploy origin/main"
+  echo "  git worktree add --detach /tmp/owp-deploy origin/${OPENWOP_DEPLOY_BRANCH:-main}"
   exit 1
 fi
 

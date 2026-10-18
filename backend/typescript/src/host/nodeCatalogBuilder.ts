@@ -16,6 +16,7 @@ import { join } from 'node:path';
 import { getNodeRegistry } from '../executor/nodeRegistry.js';
 import { resolveDefaultPackDir } from '../packs/registryInstaller.js';
 import { requiredHostSurfacesFor } from '../bootstrap/hostSurfaceMap.js';
+import { registeredFeatureSurfaceIds, disabledFeatureSurfacesFor } from './featureSurfaces.js';
 import { listHostSurfaces } from '../bootstrap/hostSurfaceRegistry.js';
 import type { WorkflowDefinition } from '../executor/types.js';
 import { isTombstoned } from './packTombstones.js';
@@ -52,6 +53,13 @@ export interface CatalogNode {
   /** Subset of `requiresHostSurfaces` this host does NOT advertise. Empty means
    *  the node is runnable here. */
   missingHostSurfaces: string[];
+  /** ADR 0917 (Book AI P12) — the FEATURE surfaces (`ctx.features.<id>`) the
+   *  node reads, from the manifest's `x-requiresFeatureSurfaces`. Each also
+   *  appears in `requiresHostSurfaces` as `host.sample.<id>` (the capability the
+   *  seam's refusal names), and in `missingHostSurfaces` when this host does not
+   *  compose the feature, or (on the per-tenant catalog route) the tenant has
+   *  it off. */
+  requiresFeatureSurfaces?: string[];
   /** RFC 0031 §B — model-capability identifiers this NodeModule depends on. */
   requiredModelCapabilities?: string[];
   /** RFC 0031 §B — host-substitution coordinates when the active model can't
@@ -72,6 +80,8 @@ interface PackManifestNode {
   'x-paletteCategory'?: string;
   /** ADR 0782 — builder-port intent (RFC 0138 `x-` hatch); see CatalogNode.ports. */
   'x-ports'?: string;
+  /** ADR 0917 — feature surfaces the node reads (RFC 0138 `x-` hatch). */
+  'x-requiresFeatureSurfaces'?: unknown;
   role?: string;
   capabilities?: string[];
   requiredModelCapabilities?: string[];
@@ -133,7 +143,18 @@ export function buildNodeCatalog(): CatalogNode[] {
       }
       if (!Array.isArray(manifest.nodes)) continue;
       for (const n of manifest.nodes) {
-        const required = requiredHostSurfacesFor(n.typeId);
+        // ADR 0917 — a declared feature surface is a host surface named the way
+        // the seam's refusal names it (`host.sample.<id>`), missing when this
+        // host does not compose that feature at all.
+        const featureSurfaces = Array.isArray(n['x-requiresFeatureSurfaces'])
+          ? [...new Set((n['x-requiresFeatureSurfaces'] as unknown[]).filter((x): x is string => typeof x === 'string' && /^[a-z][a-z0-9-]{0,63}$/.test(x)))]
+          : [];
+        const required = [...requiredHostSurfacesFor(n.typeId), ...featureSurfaces.map((id) => `host.sample.${id}`)];
+        const composed = new Set(registeredFeatureSurfaceIds());
+        const missing = [
+          ...requiredHostSurfacesFor(n.typeId).filter((s) => !supported.has(s)),
+          ...featureSurfaces.filter((id) => !composed.has(id)).map((id) => `host.sample.${id}`),
+        ];
         nodes.push({
           typeId: n.typeId,
           // ADR 0766 — a pack row without a version must not mask the registered
@@ -152,8 +173,9 @@ export function buildNodeCatalog(): CatalogNode[] {
           inputSchema: readSchemaInline(packDir, entry, n.inputSchemaRef),
           outputSchema: readSchemaInline(packDir, entry, n.outputSchemaRef),
           ...(n['x-ports'] === 'single' ? { ports: 'single' as const } : {}),
-          requiresHostSurfaces: [...required],
-          missingHostSurfaces: required.filter((s) => !supported.has(s)),
+          requiresHostSurfaces: required,
+          missingHostSurfaces: missing,
+          ...(featureSurfaces.length > 0 ? { requiresFeatureSurfaces: featureSurfaces } : {}),
           ...(Array.isArray(n.requiredModelCapabilities) ? { requiredModelCapabilities: n.requiredModelCapabilities } : {}),
           ...(n.fallbackModel ? { fallbackModel: n.fallbackModel } : {}),
         });
@@ -262,6 +284,21 @@ export function requiredConfigKeyMap(): Map<string, string[]> {
 /** The `ExpandOptions.requiredConfigKeysFor` callback, catalog-backed. */
 export function requiredConfigKeysFor(typeId: string): readonly string[] {
   return requiredConfigKeyMap().get(typeId) ?? [];
+}
+
+/** ADR 0917 — the catalog as ONE tenant sees it: a node whose declared feature
+ *  surface is off for the tenant gains `host.sample.<id>` in
+ *  `missingHostSurfaces`, so the palette and the closed-world check stop
+ *  offering what the run would refuse. */
+export async function nodeCatalogForTenant(tenantId: string, catalog: readonly CatalogNode[] = buildNodeCatalog(), userId?: string): Promise<CatalogNode[]> {
+  const ids = catalog.flatMap((n) => n.requiresFeatureSurfaces ?? []);
+  if (ids.length === 0) return [...catalog];
+  const off = await disabledFeatureSurfacesFor(tenantId, ids, userId);
+  if (off.size === 0) return [...catalog];
+  return catalog.map((n) => {
+    const add = (n.requiresFeatureSurfaces ?? []).filter((id) => off.has(id)).map((id) => `host.sample.${id}`).filter((s) => !n.missingHostSurfaces.includes(s));
+    return add.length > 0 ? { ...n, missingHostSurfaces: [...n.missingHostSurfaces, ...add] } : n;
+  });
 }
 
 export function runnableNodeTypeIds(): Set<string> {
