@@ -158,6 +158,7 @@ export async function createAgentEvalRun(input: CreateEvalRunInput): Promise<Cre
   if (f.trials > 1 && !cap.trials) bad('trials.count', 'This host does not advertise agents.evalSuite.trials.');
   if (cap.trials && f.trials > cap.trials.maxTrials) bad('trials.count', `trials.count ${f.trials} exceeds this host's maxTrials ${MAX_TRIALS}.`);
   if (f.fixtureMatching && cap.fixtureMatching !== true) bad('tasks.fixtures', 'This host does not advertise agents.evalSuite.fixtureMatching.');
+  if (f.fixtureErrors && cap.fixtureErrors !== true) bad(firstIsErrorField(suite), 'This host does not advertise agents.evalSuite.fixtureErrors (RFC 0245 §C).');
 
   // Baseline (regression): an AGENT eval run of THIS tenant over the SAME suite id
   // (review L3 — pairing by taskId across different suites is a meaningless verdict).
@@ -316,4 +317,13 @@ export async function createAgentEvalRunOnce(
   } finally {
     if (held) await rest.storage.releaseIdempotentResponse({ tenantId: rest.tenantId, endpoint: RUNS_ENDPOINT, key, claimToken: held }).catch(() => undefined);
   }
+}
+
+/** RFC 0245 §C — the refusal names the field: the first `isError: true` entry. */
+function firstIsErrorField(suite: { tasks: ReadonlyArray<{ fixtures?: { toolResponses?: ReadonlyArray<{ isError?: boolean }> } }> }): string {
+  for (let i = 0; i < suite.tasks.length; i += 1) {
+    const j = (suite.tasks[i]!.fixtures?.toolResponses ?? []).findIndex((r) => r.isError === true);
+    if (j >= 0) return `tasks[${i}].fixtures.toolResponses[${j}].isError`;
+  }
+  return 'tasks.fixtures.toolResponses.isError';
 }

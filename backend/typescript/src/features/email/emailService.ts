@@ -25,6 +25,7 @@ import { deleteSubjectBounceCounts } from './bounceWebhooks.js';
 import { renderMarkdownBody } from './safeMarkdown.js';
 import { createLogger } from '../../observability/logger.js';
 import { vendorPublicBase } from '../featureRoute.js';
+import { resolveApproval } from '../../host/approvalService.js';
 
 const bridgeLog = createLogger('email.activityBridge');
 const svcLog = createLogger('email.service');
@@ -37,10 +38,61 @@ export interface EmailTemplate {
   name: string; subject: string; body: string; // body/subject: {{contact.name|email|company}}
   /** ADR 0256 — body authoring mode; absent ⇒ 'text' (back-compat). */
   format?: EmailBodyFormat;
+  /** ADR 0905 D1 — the current content version (1-based). Absent on a row written
+   *  before versioning; read through `templateVersionOf`, which treats it as 1. */
+  version?: number;
+  /** ADR 0905 D1 — `templateContentHash` of the current subject/body/format. */
+  contentHash?: string;
   createdBy: string; createdAt: string; updatedAt: string;
 }
 
-export type CampaignStatus = 'draft' | 'sending' | 'sent';
+/** ADR 0905 D1 — one immutable content version of a template. Never updated after
+ *  it is written; a restore writes a NEW version copying an old one. */
+export interface EmailTemplateVersion {
+  templateId: string; tenantId: string; orgId: string;
+  version: number;
+  subject: string; body: string; format?: EmailBodyFormat;
+  contentHash: string;
+  /** Set on a restore: the version this one copies. */
+  restoredFrom?: number;
+  createdBy: string; createdAt: string;
+}
+
+/** ADR 0905 D1 — a template's current version; a pre-versioning row is version 1. */
+export function templateVersionOf(t: Pick<EmailTemplate, 'version'>): number {
+  return typeof t.version === 'number' && t.version >= 1 ? t.version : 1;
+}
+
+/** ADR 0905 D3 — `in_review` / `approved` are the send-approval states. "Changes
+ *  requested" is a `draft` whose `review.outcome` says so (with the reviewer's note). */
+export type CampaignStatus = 'draft' | 'in_review' | 'approved' | 'sending' | 'sent';
+
+/** ADR 0905 D3 — what a send approval binds to. `audienceHash` hashes the audience
+ *  DEFINITION (stage, or segment id + the segment's `updatedAt`), never membership. */
+export interface CampaignApprovalPin {
+  templateId: string;
+  templateVersion: number;
+  contentHash: string;
+  senderAddress: string;
+  audienceHash: string;
+}
+
+/** ADR 0905 D3 — the campaign's current (or last) send-review cycle. The approval
+ *  ROW is the audit record; this mirror is what the send gate and the UI read. */
+export interface CampaignReview {
+  cycle: number;
+  approvalId: string;
+  pin: CampaignApprovalPin;
+  /** `sent` ⇒ approving this cycle authorises a RESEND (a new send generation). */
+  fromStatus: 'draft' | 'sent';
+  submittedBy?: string;
+  submittedAt: string;
+  /** Absent while `in_review`. `closed` = withdrawn, or invalidated by an edit. */
+  outcome?: 'approved' | 'changes_requested' | 'closed';
+  decidedBy?: string;
+  decidedAt?: string;
+  note?: string;
+}
 export interface CampaignStats { sent: number; failed: number; skipped: number }
 export interface Campaign {
   campaignId: string; tenantId: string; orgId: string;
@@ -65,6 +117,8 @@ export interface Campaign {
    *  campaign is `sending` cannot change the rest of the send. Re-pinned when a resend
    *  opens a new generation. */
   sendPin?: CampaignSendPin;
+  /** ADR 0905 D3 — the send-review cycle (absent until first submitted). */
+  review?: CampaignReview;
   createdBy: string; createdAt: string; updatedAt: string;
 }
 
@@ -74,6 +128,8 @@ export interface Campaign {
 export interface CampaignSendPin {
   generation: number;
   templateId: string;
+  /** ADR 0905 P1 — the template version these bytes are. */
+  templateVersion: number;
   templateName: string;
   subject: string; body: string; format?: EmailBodyFormat;
   contentHash: string;
@@ -101,6 +157,9 @@ export interface SendLog { sendId: string; tenantId: string; campaignId: string;
 // through `insertOwnedOrConflict` (an id another workspace holds is a 409, never a put).
 // `ensureTenantIndex` backfills legacy rows on the first indexed read — no migration.
 const templates = new DurableCollection<EmailTemplate>('email:template', (t) => t.templateId, undefined, (t) => t.tenantId);
+// ADR 0905 D1 — immutable template versions, keyed `${templateId}@${version}` so every
+// read is a point read (no tenant scan) and a version number can never hold two rows.
+const templateVersions = new DurableCollection<EmailTemplateVersion>('email:template-version', (v) => `${v.templateId}@${v.version}`, undefined, (v) => v.tenantId);
 const campaigns = new DurableCollection<Campaign>('email:campaign', (c) => c.campaignId, undefined, (c) => c.tenantId);
 // CRM-11 fold-in (B4) — `tenantOf` arms the `hostextidx:` TENANT SECONDARY INDEX,
 // so every read below is a bounded scan of ONE tenant's ledger instead of
@@ -120,6 +179,7 @@ declarePiiFields('email.sendlog', ['contactId'], { maskGloballyByFieldName: fals
 // `ts` is the event time). It was append-only forever.
 registerRetentionPurger({
   feature: 'email:sendlog',
+  dryRun: 'rows-by-age',
   async purge(tenantId, classification, cutoffIso) {
     if (!tenantId || classification !== 'confidential-pii') return 0;
     return purgeRowsByAge('email:sendlog', await sendLogs.listForTenantIndexed(tenantId), tenantId, cutoffIso,
@@ -138,6 +198,11 @@ export interface EmailSettings {
   tenantId: string; orgId: string;
   /** Verified sender address campaigns send from. Empty ⇒ sending unconfigured. */
   senderAddress: string;
+  /** ADR 0905 D3 — who besides the org's admins (`host:members:manage`) may approve a
+   *  campaign send: ADR 0075 accessControl role / group refs (the agency → client
+   *  review). Stamped onto each approval row at submit. Absent ⇒ admins only. */
+  approverRoleRefs?: string[];
+  approverGroupRefs?: string[];
   updatedBy: string; updatedAt: string;
 }
 const settings = new DurableCollection<EmailSettings>('email:settings', (s) => `${s.tenantId}::${s.orgId}`);
@@ -161,7 +226,30 @@ export async function setSenderAddress(tenantId: string, orgId: string, senderAd
   if (trimmed !== '' && !EMAIL_SHAPE.test(trimmed)) {
     throw new OpenwopError('validation_error', 'senderAddress must be a valid email address (or empty to unset).', 400, { field: 'senderAddress' });
   }
-  const row: EmailSettings = { tenantId, orgId, senderAddress: trimmed, updatedBy, updatedAt: new Date().toISOString() };
+  const prior = await getEmailSettings(tenantId, orgId);
+  const row: EmailSettings = {
+    ...(prior?.approverRoleRefs ? { approverRoleRefs: prior.approverRoleRefs } : {}),
+    ...(prior?.approverGroupRefs ? { approverGroupRefs: prior.approverGroupRefs } : {}),
+    tenantId, orgId, senderAddress: trimmed, updatedBy, updatedAt: new Date().toISOString(),
+  };
+  await settings.put(row);
+  // ADR 0905 D3 — the sender is part of what a send approval binds to.
+  if ((prior?.senderAddress ?? '') !== trimmed) await invalidateSendReviews(tenantId, orgId, () => true, 'the sender address changed');
+  return row;
+}
+
+/** ADR 0905 D3 — set the org's extra email approvers. The caller (the route) has
+ *  already required `host:members:manage` and validated that each ref resolves. */
+export async function setEmailApprovers(tenantId: string, orgId: string, refs: { roleRefs: string[]; groupRefs: string[] }, updatedBy: string): Promise<EmailSettings> {
+  const prior = await getEmailSettings(tenantId, orgId);
+  const roles = [...new Set(refs.roleRefs.filter(Boolean))];
+  const groups = [...new Set(refs.groupRefs.filter(Boolean))];
+  const row: EmailSettings = {
+    tenantId, orgId, senderAddress: prior?.senderAddress ?? '',
+    ...(roles.length ? { approverRoleRefs: roles } : {}),
+    ...(groups.length ? { approverGroupRefs: groups } : {}),
+    updatedBy, updatedAt: new Date().toISOString(),
+  };
   await settings.put(row);
   return row;
 }
@@ -284,21 +372,115 @@ export async function createTemplate(input: { tenantId: string; orgId: string; n
       tenantId: input.tenantId, orgId: input.orgId,
       name: input.name, subject: input.subject, body: input.body,
       ...(input.format === 'markdown' ? { format: 'markdown' as const } : {}),
+      version: 1, contentHash: templateContentHash({ subject: input.subject, body: input.body, ...(input.format === 'markdown' ? { format: 'markdown' as const } : {}) }),
       createdBy: input.createdBy, createdAt: now, updatedAt: now,
     };
   });
+  await ensureVersionRow(row, row.createdBy);
   return row;
 }
-export async function updateTemplate(tenantId: string, orgId: string, templateId: string, patch: { name?: string; subject?: string; body?: string; format?: EmailBodyFormat }): Promise<EmailTemplate | null> {
+
+const contentOf = (t: { subject: string; body: string; format?: EmailBodyFormat }): { subject: string; body: string; format?: EmailBodyFormat } =>
+  ({ subject: t.subject, body: t.body, ...(t.format === 'markdown' ? { format: 'markdown' as const } : {}) });
+
+/**
+ * ADR 0905 D1 — make sure the template's CURRENT version has its immutable row.
+ * Called after every version-bumping CAS and, crucially, BEFORE a version is
+ * superseded: a crash between the CAS and the row write (or a template from before
+ * versioning) is backfilled from the template row itself, so superseded content is
+ * never lost from history. `putIfAbsent` — an existing row is never rewritten.
+ */
+async function ensureVersionRow(t: EmailTemplate, createdBy: string, restoredFrom?: number): Promise<void> {
+  const version = templateVersionOf(t);
+  await templateVersions.putIfAbsent({
+    templateId: t.templateId, tenantId: t.tenantId, orgId: t.orgId, version,
+    ...contentOf(t), contentHash: t.contentHash ?? templateContentHash(t),
+    ...(restoredFrom ? { restoredFrom } : {}),
+    createdBy, createdAt: t.updatedAt,
+  });
+}
+
+/** ADR 0905 D1 — one version of a template this (tenant, org) owns, or null. The
+ *  current version falls back to the template row (see `ensureVersionRow`). */
+export async function getTemplateVersion(tenantId: string, orgId: string, templateId: string, version: number): Promise<EmailTemplateVersion | null> {
+  const tpl = await getTemplate(tenantId, orgId, templateId);
+  if (!tpl || !Number.isInteger(version) || version < 1 || version > templateVersionOf(tpl)) return null;
+  const row = await templateVersions.get(`${templateId}@${version}`);
+  if (row && row.tenantId === tenantId && row.orgId === orgId) return row;
+  if (version === templateVersionOf(tpl)) {
+    return { templateId, tenantId, orgId, version, ...contentOf(tpl), contentHash: tpl.contentHash ?? templateContentHash(tpl), createdBy: tpl.createdBy, createdAt: tpl.updatedAt };
+  }
+  return null;
+}
+
+const VERSION_LIST_CAP = 100;
+/** ADR 0905 D1 — the template's versions, newest first (point reads, at most 100).
+ *  A version with no row (written before versioning) is simply absent. */
+export async function listTemplateVersions(tenantId: string, orgId: string, templateId: string): Promise<EmailTemplateVersion[] | null> {
+  const tpl = await getTemplate(tenantId, orgId, templateId);
+  if (!tpl) return null;
+  const out: EmailTemplateVersion[] = [];
+  const top = templateVersionOf(tpl);
+  for (let v = top; v >= 1 && out.length < VERSION_LIST_CAP; v--) {
+    const row = await getTemplateVersion(tenantId, orgId, templateId, v);
+    if (row) out.push(row);
+  }
+  return out;
+}
+/**
+ * ADR 0905 D1 — update a template. A change to the delivered content (subject, body,
+ * format) bumps `version` and writes an immutable version row; a rename alone does
+ * not (the name is not delivered, and a new version would needlessly stale a review).
+ *
+ * `expectedVersion` (optional) is the editor's optimistic-concurrency token: a
+ * mismatch is 409 `version_conflict`, so of two editors saving from the same version
+ * exactly one wins. Without it the write is last-writer-wins (agents, seeds), still
+ * versioned.
+ */
+export async function updateTemplate(
+  tenantId: string, orgId: string, templateId: string,
+  patch: { name?: string; subject?: string; body?: string; format?: EmailBodyFormat },
+  opts: { expectedVersion?: number; actor?: string; restoredFrom?: number } = {},
+): Promise<EmailTemplate | null> {
   // ADR 0848 M6 — a CAS, not a read-then-put: a blind put after a concurrent delete
   // resurrected the row, and an id freed by that delete could be written over.
   for (let attempt = 0; attempt < 4; attempt++) {
     const existing = await getTemplate(tenantId, orgId, templateId);
     if (!existing) return null;
-    const next: EmailTemplate = { ...existing, ...patch, updatedAt: new Date().toISOString() };
-    if (await templates.compareAndSwap(existing, next)) return next;
+    const current = templateVersionOf(existing);
+    if (opts.expectedVersion !== undefined && opts.expectedVersion !== current) {
+      throw new OpenwopError('conflict', 'This template was changed by someone else. Reload it to see the latest version.', 409, {
+        reason: 'version_conflict', templateId, expectedVersion: opts.expectedVersion, currentVersion: current,
+      });
+    }
+    const merged: EmailTemplate = { ...existing, ...patch, updatedAt: new Date().toISOString() };
+    const hash = templateContentHash(merged);
+    const contentChanged = hash !== (existing.contentHash ?? templateContentHash(existing));
+    // Superseding the current version: its row must exist first (backfill), or a crash
+    // after an earlier CAS would lose that content from history.
+    if (contentChanged) await ensureVersionRow(existing, existing.createdBy);
+    const next: EmailTemplate = { ...merged, version: contentChanged ? current + 1 : current, contentHash: hash };
+    if (await templates.compareAndSwap(existing, next)) {
+      if (contentChanged) {
+        await ensureVersionRow(next, opts.actor ?? existing.createdBy, opts.restoredFrom);
+        // ADR 0905 D3 — the content a review approved is gone from the template.
+        await invalidateSendReviews(tenantId, orgId, (c) => c.templateId === templateId, 'the template changed');
+      }
+      return next;
+    }
   }
   throw new OpenwopError('conflict', 'Could not update the template (too many concurrent writes).', 409, { templateId });
+}
+
+/** ADR 0905 D1 — restore = a NEW version copying an old one's content. History is
+ *  never rewritten; a restore of the current content is a no-op. */
+export async function restoreTemplateVersion(
+  tenantId: string, orgId: string, templateId: string, version: number,
+  opts: { expectedVersion?: number; actor: string },
+): Promise<EmailTemplate | null> {
+  const old = await getTemplateVersion(tenantId, orgId, templateId, version);
+  if (!old) return null;
+  return updateTemplate(tenantId, orgId, templateId, { subject: old.subject, body: old.body, format: old.format ?? 'text' }, { ...opts, restoredFrom: version });
 }
 /**
  * ADR 0905 D1 — a template a campaign still needs cannot be deleted: 409
@@ -320,7 +502,14 @@ export async function deleteTemplate(tenantId: string, orgId: string, templateId
       reason: 'template_in_use', templateId, campaignIds: holders.slice(0, 20).map((c) => c.campaignId),
     });
   }
-  return templates.delete(templateId);
+  const deleted = await templates.delete(templateId);
+  // ADR 0905 D1 — versions go with the template unless a (sent) campaign still
+  // references it: what was sent stays auditable. Residual, stated: if that last
+  // campaign is deleted later, its template's version rows are left behind.
+  if (deleted && !(await listCampaigns(tenantId, orgId)).some((c) => c.templateId === templateId)) {
+    for (let v = templateVersionOf(existing); v >= 1; v--) await templateVersions.delete(`${templateId}@${v}`);
+  }
+  return deleted;
 }
 
 /**
@@ -383,7 +572,95 @@ export async function createCampaign(input: { tenantId: string; orgId: string; t
 }
 export async function deleteCampaign(tenantId: string, orgId: string, campaignId: string): Promise<boolean> {
   const existing = await getCampaign(tenantId, orgId, campaignId);
-  return existing ? campaigns.delete(campaignId) : false;
+  if (!existing) return false;
+  const deleted = await campaigns.delete(campaignId);
+  // ADR 0905 D3 — an open review of a deleted campaign must not linger in the inbox.
+  if (deleted && existing.status === 'in_review' && existing.review) await closeReviewRow(existing.review.approvalId, 'Closed automatically — the campaign was deleted.');
+  return deleted;
+}
+
+/**
+ * ADR 0905 D3 — CAS a campaign row through `mutate` (re-read and re-applied on a lost
+ * race). `mutate` returns null to leave the row unchanged. Null when the row is gone.
+ */
+export async function updateCampaignRow(tenantId: string, orgId: string, campaignId: string, mutate: (c: Campaign) => Campaign | null): Promise<{ before: Campaign; after: Campaign } | null> {
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const cur = await getCampaign(tenantId, orgId, campaignId);
+    if (!cur) return null;
+    const next = mutate(cur);
+    if (!next) return { before: cur, after: cur };
+    if (await campaigns.compareAndSwap(cur, { ...next, updatedAt: new Date().toISOString() })) return { before: cur, after: (await getCampaign(tenantId, orgId, campaignId)) ?? next };
+  }
+  throw new OpenwopError('conflict', 'Could not update the campaign (too many concurrent writes).', 409, { campaignId });
+}
+
+/** Resolve an open review row as overtaken (never as a human's rejection). */
+async function closeReviewRow(approvalId: string, note: string): Promise<void> {
+  try { await resolveApproval(approvalId, { status: 'rejected', note, chainOutcome: 'superseded' }); }
+  catch (e) { svcLog.warn('email_review_close_failed', { approvalId, error: e instanceof Error ? e.message : String(e) }); }
+}
+
+/**
+ * ADR 0905 D3 — an edit to what a review approved (template content, sender) returns
+ * every matching `in_review` / `approved` campaign to `draft` and closes its row. The
+ * audience is checked LAZILY instead (decide + send compare the live pin), because
+ * segments are CRM-owned and a cross-feature edit hook is not this feature's to add.
+ */
+export async function invalidateSendReviews(tenantId: string, orgId: string, matches: (c: Campaign) => boolean, why: string): Promise<number> {
+  let n = 0;
+  for (const c of await listCampaigns(tenantId, orgId)) {
+    if ((c.status !== 'in_review' && c.status !== 'approved') || !c.review || !matches(c)) continue;
+    if (await returnToDraft(tenantId, orgId, c.campaignId, c.review.approvalId, `Closed automatically — ${why}.`)) n += 1;
+  }
+  return n;
+}
+
+/** Move one reviewed campaign back to `draft` (outcome `closed`) and close its row. */
+export async function returnToDraft(tenantId: string, orgId: string, campaignId: string, approvalId: string, note: string): Promise<boolean> {
+  const moved = await updateCampaignRow(tenantId, orgId, campaignId, (cur) =>
+    (cur.status === 'in_review' || cur.status === 'approved') && cur.review?.approvalId === approvalId
+      ? { ...cur, status: 'draft', review: { ...cur.review, outcome: 'closed', note, decidedAt: new Date().toISOString() } }
+      : null);
+  const changed = !!moved && moved.before !== moved.after;
+  if (changed) await closeReviewRow(approvalId, note);
+  return changed;
+}
+
+/** ADR 0905 D4 — THE `email-approval-gate` predicate (one owner, every lane calls it).
+ *  Fails CLOSED: an unreadable toggle store refuses the unapproved send. The pure
+ *  toggle read (`resolveToggle`, not the `resolveOne` access resolver) is deliberate
+ *  and allowlisted in `feature-toggle-access-ratchet.test.ts`: OFF loosens a
+ *  restriction, so a paywalled read would fail OPEN on a lapsed plan (ADR 0819 §1). */
+export async function emailApprovalGateOn(tenantId: string): Promise<boolean> {
+  try { return (await resolveToggle('email-approval-gate', { tenantId }))?.enabled === true; }
+  catch (e) { svcLog.warn('email_approval_gate_unreadable', { tenantId, error: e instanceof Error ? e.message : String(e) }); return true; }
+}
+
+/** ADR 0905 D3 — the audience DEFINITION's hash (never its membership). */
+async function audienceHashOf(tenantId: string, campaign: Campaign): Promise<string> {
+  let def: unknown = { stage: campaign.audience.stage ?? null };
+  if (campaign.audience.segmentId) {
+    const seg = await getSegment(tenantId, campaign.audience.segmentId);
+    def = { segmentId: campaign.audience.segmentId, segmentUpdatedAt: seg?.updatedAt ?? 'missing' };
+  }
+  return createHash('sha256').update(JSON.stringify(def)).digest('hex');
+}
+
+/** ADR 0905 D3 — the pin the campaign WOULD be approved/sent under right now. Null
+ *  when the template is gone. */
+export async function liveApprovalPin(tenantId: string, orgId: string, campaign: Campaign): Promise<CampaignApprovalPin | null> {
+  const tpl = await getTemplate(tenantId, orgId, campaign.templateId);
+  if (!tpl) return null;
+  const sender = (await getEmailSettings(tenantId, orgId))?.senderAddress.trim() ?? '';
+  return {
+    templateId: tpl.templateId, templateVersion: templateVersionOf(tpl), contentHash: tpl.contentHash ?? templateContentHash(tpl),
+    senderAddress: sender.toLowerCase(), audienceHash: await audienceHashOf(tenantId, campaign),
+  };
+}
+
+export function samePin(a: CampaignApprovalPin | null | undefined, b: CampaignApprovalPin | null | undefined): boolean {
+  return !!a && !!b && a.templateId === b.templateId && a.templateVersion === b.templateVersion && a.contentHash === b.contentHash
+    && a.senderAddress === b.senderAddress && a.audienceHash === b.audienceHash;
 }
 export async function listSends(tenantId: string, campaignId: string): Promise<SendLog[]> {
   return (await sendLogs.listForTenantIndexed(tenantId)).filter((s) => s.tenantId === tenantId && s.campaignId === campaignId).sort((a, b) => b.ts.localeCompare(a.ts));
@@ -578,12 +855,14 @@ async function sendCampaignSerialized(
   if (campaign.status === 'sent' && !opts.resend) {
     throw new OpenwopError('conflict', 'Campaign already sent — pass `resend: true` to send it again.', 409, { campaignId, status: campaign.status });
   }
-  const generation = opts.resend ? (campaign.sendGeneration ?? 0) + 1 : (campaign.sendGeneration ?? 0);
+  const { resend, generation, approvedPin } = await assertSendAllowed(tenantId, orgId, campaign, opts.resend === true);
   // ADR 0905 D2 — a pin for THIS generation already exists on a continuation; only a
   // first pass (or a resend, or a legacy `sending` row from before pins) reads the live
   // template, and it is pinned below before anything is dispatched.
   const existingPin = campaign.sendPin && campaign.sendPin.generation === generation ? campaign.sendPin : undefined;
-  const liveTemplate = existingPin ? null : await getTemplate(tenantId, orgId, campaign.templateId);
+  // ADR 0905 D3 — an approved send pins from the APPROVED version row, not the live
+  // template: "approved bytes = sent bytes" is then structural, not a coincidence.
+  const liveTemplate = existingPin ? null : approvedPin ? await approvedTemplateAt(tenantId, orgId, campaign, approvedPin) : await getTemplate(tenantId, orgId, campaign.templateId);
   if (!existingPin && !liveTemplate) throw new OpenwopError('validation_error', 'Campaign template not found.', 400, { templateId: campaign.templateId });
 
   const provider = opts.provider ?? activeProvider();
@@ -667,7 +946,7 @@ async function sendCampaignSerialized(
   // granted since round 1 stayed excluded forever), and pre-resend 'sent'
   // rows truncated any >1-batch resend (the first continuation saw an empty
   // pending and declared the campaign 'sent').
-  const priorTerminal = opts.resend
+  const priorTerminal = resend
     ? new Set<string>()
     : new Set((await listSends(tenantId, campaignId))
         .filter((s) => (s.generation ?? 0) === generation && (s.status === 'sent' || s.status === 'skipped'))
@@ -835,9 +1114,44 @@ async function sendCampaignSerialized(
   throw new OpenwopError('conflict', 'Could not record the send result (too many concurrent writes); re-run to continue.', 409, { campaignId });
 }
 
+/**
+ * ADR 0905 D3/D4 — the approval gate, the ONE predicate. `sendCampaign` (the service
+ * every caller shares) runs it, so no lane can skip it; the send ROUTE also runs it
+ * first so an unapproved send is told "approval required" before any provider or
+ * credential question. A `sending` campaign that already holds this generation's pin
+ * is a CONTINUATION of a send that was authorised when it started (architect E4):
+ * refusing it would strand every in-flight send the moment the gate turns on.
+ */
+export async function assertSendAllowed(
+  tenantId: string, orgId: string, campaign: Campaign, resendRequested: boolean,
+): Promise<{ resend: boolean; generation: number; approvedPin?: CampaignApprovalPin }> {
+  // Approving a review opened on a SENT campaign authorises a resend.
+  const resend = resendRequested || (campaign.status === 'approved' && campaign.review?.fromStatus === 'sent');
+  const generation = resend ? (campaign.sendGeneration ?? 0) + 1 : (campaign.sendGeneration ?? 0);
+  const continuation = !resend && campaign.status === 'sending' && campaign.sendPin?.generation === generation;
+  if (continuation || !(await emailApprovalGateOn(tenantId))) return { resend, generation };
+  if (campaign.status !== 'approved' || !campaign.review || campaign.review.outcome !== 'approved') {
+    throw new OpenwopError('conflict', 'This workspace requires an approval before a campaign is sent. Submit it for review.', 409, { reason: 'approval_required', campaignId: campaign.campaignId, status: campaign.status });
+  }
+  const live = await liveApprovalPin(tenantId, orgId, campaign);
+  if (!samePin(live, campaign.review.pin)) {
+    await returnToDraft(tenantId, orgId, campaign.campaignId, campaign.review.approvalId, 'Closed automatically — the campaign changed after it was approved.');
+    throw new OpenwopError('conflict', 'The template, sender or audience changed after this campaign was approved. Submit it for review again.', 409, { reason: 'approval_stale', campaignId: campaign.campaignId });
+  }
+  return { resend, generation, approvedPin: campaign.review.pin };
+}
+
+/** The approved template version as an `EmailTemplate`-shaped row for `pinSend`. */
+async function approvedTemplateAt(tenantId: string, orgId: string, campaign: Campaign, pin: CampaignApprovalPin): Promise<EmailTemplate | null> {
+  const tpl = await getTemplate(tenantId, orgId, campaign.templateId);
+  const v = await getTemplateVersion(tenantId, orgId, campaign.templateId, pin.templateVersion);
+  if (!tpl || !v || v.contentHash !== pin.contentHash) return null;
+  return { ...tpl, subject: v.subject, body: v.body, ...(v.format ? { format: v.format } : {}), version: v.version, contentHash: v.contentHash };
+}
+
 async function pinSend(tenantId: string, orgId: string, campaign: Campaign, generation: number, live: EmailTemplate): Promise<CampaignSendPin> {
   const fresh: CampaignSendPin = {
-    generation, templateId: live.templateId, templateName: live.name,
+    generation, templateId: live.templateId, templateVersion: templateVersionOf(live), templateName: live.name,
     subject: live.subject, body: live.body, ...(live.format ? { format: live.format } : {}),
     contentHash: templateContentHash(live), pinnedAt: new Date().toISOString(),
   };
@@ -845,7 +1159,12 @@ async function pinSend(tenantId: string, orgId: string, campaign: Campaign, gene
   for (let attempt = 0; attempt < 4 && current; attempt++) {
     if (current.sendPin && current.sendPin.generation === generation) return current.sendPin;
     const next: Campaign = { ...current, status: 'sending', sendPin: fresh, ...(generation ? { sendGeneration: generation } : {}), updatedAt: new Date().toISOString() };
-    if (await campaigns.compareAndSwap(current, next)) return fresh;
+    if (await campaigns.compareAndSwap(current, next)) {
+      // ADR 0905 D3 — a direct send (gate OFF) of a campaign under review overtakes the
+      // review: close the row so no card is left asking about a sent campaign.
+      if (current.status === 'in_review' && current.review) await closeReviewRow(current.review.approvalId, 'Closed automatically — the campaign was sent without waiting for the review.');
+      return fresh;
+    }
     current = await getCampaign(tenantId, orgId, campaign.campaignId);
   }
   if (!current) throw new OpenwopError('not_found', 'Campaign not found.', 404, { campaignId: campaign.campaignId });
@@ -1006,4 +1325,4 @@ onCrmRecordUnmerged('email-sendlog-relink', async ({ tenantId, entity, sourceId,
 });
 
 /** Test-only: clear all email stores. */
-export async function __resetEmailStore(): Promise<void> { await templates.__clear(); await campaigns.__clear(); await sendLogs.__clear(); await settings.__clear(); }
+export async function __resetEmailStore(): Promise<void> { await templateVersions.__clear(); await templates.__clear(); await campaigns.__clear(); await sendLogs.__clear(); await settings.__clear(); }

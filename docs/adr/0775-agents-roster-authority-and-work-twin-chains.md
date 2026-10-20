@@ -261,6 +261,25 @@ the two pinned modules (`WORKFLOW_TEMPLATES` = 44, `EXAMPLE_WORKFLOWS` = 15), bo
 shrink-only. A new definition source fails the test, and so does a 45th template. This
 does not close `ARWF-1`. It stops it growing while P2 converts it.
 
+> **CORRECTED 2026-10-19 (row 5 workflow re-grade, `ARWF-17`).** Two parts of this
+> section are no longer accurate at `22bbffb04`.
+>
+> First, there are no "catalog sizes" left to pin. P2c and P2d deleted both modules, so
+> the shrink-only ceilings are now existence checks: the template catalog may not come
+> back, and `exampleWorkflows.ts` may not exist.
+>
+> Second, "a new definition source fails the test" holds only when that source is a
+> named identifier. The probe's regex captures `definition: <identifier> }`. MEASURED
+> by sabotage, each change reverted:
+> - `return { workflowId, definition: { …inline literal… } }` under a
+>   `startsWith` guard stays GREEN.
+> - `definition: SABO_DEFS[workflowId]!` stays GREEN.
+> - A named `const demoDef = getDemoDef(…)` goes red.
+>
+> No pinned definition exists today, so this is a blind spot, not a breach. It is the
+> same shape of blind spot that hid `ARWF-1` from the literal ladder. The cure is an
+> AST probe (`ARWF-17`).
+
 ### D7 — agent-author honours its toggle and the write authority (`ARWF-9`, architect B1)
 
 **Architect B1:** after D1, a viewer refused at `POST /roster` could still create a

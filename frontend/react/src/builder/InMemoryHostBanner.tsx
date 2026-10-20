@@ -24,6 +24,7 @@ import { useAuth } from '../auth/useAuth.js';
 import { InfoIcon, XIcon } from '../ui/icons/index.js';
 import { announce } from '../ui/announce.js';
 import { useDemoModeStatus } from '../client/useDemoMode.js';
+import { PRIVACY_HREF } from '../brand/privacyHref.js';
 
 const DISMISS_KEY = 'openwop:demo-banner:dismissed';
 
@@ -174,7 +175,7 @@ export function InMemoryHostBanner() {
     <BannerShell onDismiss={dismiss} dismissLabel={t('dismissNotice')} closeLabel={t('common:close')}>
       <strong>{t(demo ? 'demoSessionStrong' : 'hostNonDurableStrong')}</strong>{' '}
       {t(demo ? 'demoSessionBody' : 'hostNonDurableBody')}{' '}
-      {demo && <Link to="/privacy">{t('demoSessionPrivacyLink')}</Link>}
+      {demo && <Link to={PRIVACY_HREF}>{t('demoSessionPrivacyLink')}</Link>}
     </BannerShell>
   );
 }

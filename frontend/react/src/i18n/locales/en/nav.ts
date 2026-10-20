@@ -122,6 +122,8 @@ export const messages = {
   campaignConnectorsHint: 'Ad performance import & KPIs',
   campaignIntelLabel: 'Intelligence',
   campaignIntelHint: 'Budget & forecast recommendations',
+  campaignOpsLabel: 'Operations',
+  campaignOpsHint: 'Ask for, review and approve client page changes',
   campaignOrchestrationLabel: 'Campaigns',
   campaignOrchestrationHint: 'Run & manage marketing campaigns',
   chatWidgetLabel: 'Chat widgets',

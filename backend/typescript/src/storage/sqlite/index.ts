@@ -2150,6 +2150,16 @@ export function openSqliteStorage(dbPath: string): Storage {
       return Number(r.changes ?? 0);
     },
 
+    async countPrunableEngineRows(cutoffIso, cutoffMs) {
+      // The same predicates as the two prunes above, counted.
+      const terminalPlaceholders = TERMINAL_RUN_STATUSES.map(() => '?').join(',');
+      const runs = db.prepare(`SELECT COUNT(*) AS n FROM runs WHERE status IN (${terminalPlaceholders}) AND updated_at < ?`)
+        .get(...TERMINAL_RUN_STATUSES, cutoffIso) as { n: number };
+      const deliveries = db.prepare(`SELECT COUNT(*) AS n FROM webhook_deliveries WHERE status IN ('delivered','dead') AND updated_at < ?`)
+        .get(cutoffMs) as { n: number };
+      return { terminalRuns: Number(runs.n), webhookDeliveries: Number(deliveries.n) };
+    },
+
     async deleteAllTenantData(tenantId) {
       // ADR 0284 — introspection-complete teardown, the delete twin of
       // `reassignTenant` (the previous hand-kept 7-table list silently orphaned

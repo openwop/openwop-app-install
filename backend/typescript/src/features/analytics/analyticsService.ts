@@ -693,6 +693,7 @@ registerSubjectEraser(eraseSubjectAnalytics);
 // falsy tenant (fail-closed — never a cross-tenant/global purge).
 registerRetentionPurger({
   feature: 'analytics',
+  dryRun: 'rows-by-age',
   async purge(tenantId, classification, cutoffIso) {
     if (!tenantId || classification !== 'confidential-pii') return 0;
     // Analytics ages on `ts` (event time); map it onto the helper's `updatedAt` slot.

@@ -58,6 +58,7 @@ import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { getSetCookies } from './headerCookies.js';
 import { bareRunId } from './support/bareRunId.js';
+import { featureRequiredPacks } from '../src/features/packPins.js';
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '../../..');
 const PACK_DIR = join(REPO, 'packs/feature.crm.nodes');
@@ -172,7 +173,7 @@ describe('ADR 0627 D1 — pack shape: ADR 0525 schemas on the 14 writes; the fea
 
   it('the crm feature pins the pack at the manifest version and registers the surface', () => {
     expect(crmFeature.surface?.id).toBe('crm');
-    expect(crmFeature.requiredPacks?.find((p) => p.name === 'feature.crm.nodes')).toEqual({ name: 'feature.crm.nodes', version: manifest.version });
+    expect(featureRequiredPacks(crmFeature).find((p) => p.name === 'feature.crm.nodes')).toEqual({ name: 'feature.crm.nodes', version: manifest.version });
   });
 });
 

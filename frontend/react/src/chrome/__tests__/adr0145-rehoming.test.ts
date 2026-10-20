@@ -184,7 +184,7 @@ describe('ADR 0145 — re-graduated tabs gate on their toggle', () => {
     // an id no tab has, so it could never fail — w35 grade-tests.)
     const tabs = visibleHubRoutes(FEATURES, off, true, 'campaigns').map(tabIdOf);
     expect(tabs, 'a genuinely disabled feature IS dropped; the others survive in order')
-      .toEqual(['campaign-brief', 'campaigns', 'campaign-performance']);
+      .toEqual(['campaign-ops', 'campaign-brief', 'campaigns', 'campaign-performance']);
     // Positive control: enabled, the same tab IS projected.
     expect(visibleHubRoutes(FEATURES, all, true, 'campaigns').map(tabIdOf)).toContain('campaign-intelligence');
   });
@@ -242,9 +242,13 @@ describe('ADR 0145 — re-filed destinations', () => {
     expect(ch?.nav).toBeUndefined();
   });
 
-  it('Work patterns sits in the Operations group (admin-tier)', () => {
+  // CORRECTED 2026-10-18 (ADR 0930, grade-ux AWG2UX-1): ADR 0145 filed Work patterns
+  // under the admin "Operations" group. The patterns became each member's own, and an
+  // admin-tier route showed every non-admin an access-denied card over their own data,
+  // so it is a workspace route in the "Workspace" group now.
+  it('Work patterns is a workspace route in the Workspace group (ADR 0930)', () => {
     const wp = byPath('/work-patterns');
-    expect(wp?.tier).toBe('admin');
-    expect(wp?.nav?.group).toBe('Operations');
+    expect(wp?.tier).toBe('workspace');
+    expect(wp?.nav?.group).toBe('Workspace');
   });
 });

@@ -63,6 +63,8 @@ export const APPROVAL_KINDS = [
   'composed-workflow',
   'compensation-action',
   'claude-code-permission',
+  'campaign-change-set',
+  'email-campaign-send',
 ] as const;
 export type ApprovalKind = (typeof APPROVAL_KINDS)[number];
 
@@ -327,6 +329,30 @@ export interface PendingApproval {
    *  `pageTranslationStatus` — the SAME function the editor's translation status
    *  reads — so the card and the editor cannot disagree. */
   outdatedTranslationLocales?: string[];
+  /** ADR 0905 D3 — when `kind: 'email-campaign-send'`, this approval gates sending ONE
+   *  email campaign: this content (template version + hash), from this sender, to this
+   *  audience DEFINITION (never its membership — consent and suppression are evaluated
+   *  at send). `subject`/`body` are the pinned version's text, so the inbox card shows
+   *  exactly what is approved. Opaque to core; `features/email/sendApproval.ts` owns
+   *  the shape and the decide handler. Approver refs (ADR 0075) ride `policy` with
+   *  `requiredApprovals: 1`, so the quorum path stays inert and the handler checks
+   *  eligibility itself. `submitters` (above) records who asked. */
+  emailSend?: {
+    campaignId: string;
+    templateId: string;
+    templateVersion: number;
+    contentHash: string;
+    senderAddress: string;
+    audienceHash: string;
+    /** Display-only description of the audience (`stage: lead`, a segment name). */
+    audienceLabel: string;
+    templateName: string;
+    subject: string;
+    body: string;
+    format?: 'text' | 'markdown';
+    /** The recipient count at submit time — an ESTIMATE (membership resolves at send). */
+    estimatedRecipients?: number;
+  };
   /** Campaign gap plan §5B B3 — when `kind: 'campaign-spend'`, this approval
    *  gates a live ad-platform spend action (dispatch or budget-set) that met the
    *  tenant's `adSpend.approvalThresholdMinor`. `rosterId`/`persona`/`workflowId`
@@ -389,6 +415,17 @@ export interface PendingApproval {
    *  subject). The decide handler refuses self-approval when another approver
    *  exists. Absent on legacy rows. A data subject: redacted on erasure. */
   strategyRequestedBy?: string;
+  /** ADR 0924 D1 — `campaign-change-set`: the change set an approval names, and
+   *  ONLY that one. `orgId` carries the client org. Opaque to core; the
+   *  campaign-ops feature owns the checks (hash, request version, asset versions). */
+  changeSetId?: string;
+  changeSetHash?: string;
+  changeSetRequestId?: string;
+  changeSetRequestVersion?: number;
+  /** assetId → the source identity the change set was built against. */
+  changeSetSourceVersions?: Record<string, { version: number; contentHash: string }>;
+  /** The member who caused the proposal (separation of duties). A data subject. */
+  changeSetProposedBy?: string;
   /** The board card the proposal originated from (the "cited source"). */
   boardId?: string;
   cardId?: string;
@@ -1283,7 +1320,11 @@ for (const k of ['assistant-action', 'run-proposal', 'contact-merge', 'campaign-
 registerApprovalRedactor('content-publish', { idFields: ['submitters', 'submitterCauses'], textFields: [] });
 // ADR 0845 D5 — a strategy activation now records its SUBMITTER (a subject id) for the
 // separation-of-duties check; it is erased like every other subject ref.
+// ADR 0905 D3 — the submitters are subject ids; the pinned subject/body is template
+// copy (not subject data) and the approver refs are scrubbed with every `policy`.
+registerApprovalRedactor('email-campaign-send', { idFields: ['submitters'], textFields: [] });
 registerApprovalRedactor('strategy-activation', { idFields: ['strategyRequestedBy'], textFields: [] });
+registerApprovalRedactor('campaign-change-set', { idFields: ['changeSetProposedBy'], textFields: [] }); // ADR 0924
 // ADR 0473 — composed-workflow: the proposer is an AGENT (agentProfileId — not a
 // data subject), but the PROPOSAL originates from a human conversation:
 // `composedWorkflow.proposedByUserId` records that acting user (grade-data H1
@@ -1592,7 +1633,9 @@ export type ContentApprovalHandler = (
   tenantId: string,
   approvalId: string,
   outcome: 'approved' | 'rejected',
-  opts: { decidedByUserId?: string; note?: string },
+  /** `isSuperadmin`: computed at the HTTP boundary (`decidedBySuperadmin`). The
+   *  handler honours it ONLY for the reserved system-site org (MyndHyve B2). */
+  opts: { decidedByUserId?: string; note?: string; isSuperadmin?: boolean },
 ) => Promise<{ approval: PendingApproval; changed: boolean } | null>;
 
 let contentApprovalHandler: ContentApprovalHandler | null = null;
@@ -1604,6 +1647,85 @@ export function registerContentApprovalHandler(fn: ContentApprovalHandler): void
 export function getContentApprovalHandler(): ContentApprovalHandler | null {
   return contentApprovalHandler;
 }
+
+/**
+ * ADR 0905 D3 — create an `email-campaign-send` approval on a DETERMINISTIC id with
+ * `compareAndSwap(null, …)` (the `createContentApprovalOnce` shape): two submits racing
+ * on one campaign converge on one row, and the loser gets the winner's row back
+ * (`created: false`) to repin. Same queue, inbox and CAS resolve (ADR 0025 §4).
+ */
+export async function createEmailSendApprovalOnce(input: {
+  tenantId: string;
+  orgId: string;
+  approvalId: string;
+  emailSend: NonNullable<PendingApproval['emailSend']>;
+  proposal: string;
+  submitters: string[];
+  approverGroupRefs?: string[];
+  approverRoleRefs?: string[];
+}): Promise<{ approval: PendingApproval; created: boolean }> {
+  const refs = emailSendPolicy(input);
+  const approval: PendingApproval = {
+    approvalId: input.approvalId,
+    tenantId: input.tenantId,
+    rosterId: '', persona: '', workflowId: '',
+    kind: 'email-campaign-send',
+    orgId: input.orgId,
+    emailSend: input.emailSend,
+    ...(input.submitters.length > 0 ? { submitters: [...new Set(input.submitters)] } : {}),
+    proposal: input.proposal,
+    ...(refs ? { policy: refs } : {}),
+    status: 'pending',
+    createdAt: nowIso(),
+  };
+  if (await approvals.compareAndSwap(null, approval)) {
+    await indexApproval(approval);
+    return { approval, created: true };
+  }
+  const winner = await approvals.get(input.approvalId);
+  if (!winner) throw new OpenwopError('conflict', 'Could not create the review (concurrent write).', 409, { approvalId: input.approvalId });
+  if (winner.status === 'pending') await indexApproval(winner);
+  return { approval: winner, created: false };
+}
+
+/** ADR 0905 D3 — approver refs ride `policy` at `requiredApprovals: 1` (inert quorum). */
+function emailSendPolicy(input: { approverGroupRefs?: string[]; approverRoleRefs?: string[] }): ApprovalPolicy | undefined {
+  const groups = (input.approverGroupRefs ?? []).filter(Boolean);
+  const roles = (input.approverRoleRefs ?? []).filter(Boolean);
+  if (groups.length === 0 && roles.length === 0) return undefined;
+  return { requiredApprovals: 1, ...(groups.length ? { approverGroupRefs: groups } : {}), ...(roles.length ? { approverRoleRefs: roles } : {}) };
+}
+
+/** ADR 0905 D3 — re-point an OPEN `email-campaign-send` row at the campaign's current
+ *  pin (a resubmit). Submitters are UNIONED, never replaced (ADR 0859 D3); the
+ *  approver refs are re-stamped from the org's current setting. */
+export async function repinEmailSendApproval(
+  approvalId: string,
+  patch: { emailSend: NonNullable<PendingApproval['emailSend']>; proposal: string; submitters: string[]; approverGroupRefs?: string[]; approverRoleRefs?: string[] },
+): Promise<PendingApproval | null> {
+  return withApprovalLock(approvalId, async () => {
+    const cur = await approvals.get(approvalId);
+    if (!cur || cur.kind !== 'email-campaign-send' || cur.status !== 'pending') return null;
+    const submitters = [...new Set([...(cur.submitters ?? []), ...patch.submitters])];
+    const refs = emailSendPolicy(patch);
+    const { policy: _old, ...rest } = cur;
+    const next: PendingApproval = { ...rest, emailSend: patch.emailSend, proposal: patch.proposal, ...(submitters.length ? { submitters } : {}), ...(refs ? { policy: refs } : {}) };
+    if (!(await approvals.compareAndSwap(cur, next))) return null;
+    return next;
+  });
+}
+
+/** ADR 0905 D3 — the `email-campaign-send` decide handler, registered by the email
+ *  FEATURE at boot (core owns the hook; feature → core only). */
+export type EmailSendApprovalHandler = (
+  tenantId: string,
+  approvalId: string,
+  outcome: 'approved' | 'rejected',
+  opts: { decidedByUserId?: string; note?: string },
+) => Promise<{ approval: PendingApproval; changed: boolean } | null>;
+let emailSendApprovalHandler: EmailSendApprovalHandler | null = null;
+export function registerEmailSendApprovalHandler(fn: EmailSendApprovalHandler): void { emailSendApprovalHandler = fn; }
+export function getEmailSendApprovalHandler(): EmailSendApprovalHandler | null { return emailSendApprovalHandler; }
 
 /**
  * ADR 0458 §2.2 (correction, 2026-09-15) — the challenge-publish decision handler,
@@ -1951,6 +2073,71 @@ export function registerStrategyActivationApprovalHandler(fn: StrategyActivation
 
 export function getStrategyActivationApprovalHandler(): StrategyActivationApprovalHandler | null {
   return strategyActivationApprovalHandler;
+}
+
+// ── ADR 0924: campaign-ops change-set approval ─────────────────────────────────
+
+/** The decide handler the campaign-ops feature registers (core owns the hook). It
+ *  enforces every ADR 0924 D2 check — the hash the decider saw, the request and
+ *  asset versions, the client, separation of duties — before resolving. */
+export type CampaignChangeSetApprovalHandler = (
+  tenantId: string,
+  approvalId: string,
+  outcome: 'approved' | 'rejected',
+  opts: { decidedByUserId?: string; note?: string; expectedChangeSetHash?: string },
+) => Promise<{ approval: PendingApproval; changed: boolean } | null>;
+
+let campaignChangeSetApprovalHandler: CampaignChangeSetApprovalHandler | null = null;
+export function registerCampaignChangeSetApprovalHandler(fn: CampaignChangeSetApprovalHandler): void {
+  campaignChangeSetApprovalHandler = fn;
+}
+export function getCampaignChangeSetApprovalHandler(): CampaignChangeSetApprovalHandler | null {
+  return campaignChangeSetApprovalHandler;
+}
+
+/** ADR 0924 D1 — one row per change set (deterministic id, `compareAndSwap(null)`),
+ *  so a resubmit cannot open a second review and a new change set always opens a
+ *  new one. Returns the winner's row with `created: false` on a lost race. */
+export async function createChangeSetApprovalOnce(input: {
+  tenantId: string;
+  orgId: string;
+  approvalId: string;
+  changeSetId: string;
+  changeSetHash: string;
+  requestId: string;
+  requestVersion: number;
+  sourceVersions: Record<string, { version: number; contentHash: string }>;
+  proposedBy: string;
+  proposal: string;
+  policy?: ApprovalPolicy;
+}): Promise<{ approval: PendingApproval; created: boolean }> {
+  const approval: PendingApproval = {
+    approvalId: input.approvalId,
+    tenantId: input.tenantId,
+    rosterId: '',
+    persona: '',
+    workflowId: '',
+    kind: 'campaign-change-set',
+    orgId: input.orgId,
+    changeSetId: input.changeSetId,
+    changeSetHash: input.changeSetHash,
+    changeSetRequestId: input.requestId,
+    changeSetRequestVersion: input.requestVersion,
+    changeSetSourceVersions: input.sourceVersions,
+    changeSetProposedBy: input.proposedBy,
+    proposal: input.proposal,
+    ...(input.policy ? { policy: input.policy } : {}),
+    status: 'pending',
+    createdAt: nowIso(),
+  };
+  if (await approvals.compareAndSwap(null, approval)) {
+    await indexApproval(approval);
+    return { approval, created: true };
+  }
+  const winner = await approvals.get(input.approvalId);
+  if (!winner) throw new OpenwopError('conflict', 'Could not create the review (concurrent write).', 409, { approvalId: input.approvalId });
+  if (winner.status === 'pending') await indexApproval(winner);
+  return { approval: winner, created: false };
 }
 
 // ── CHAT-FIRST-PORT-AUDIT D3: strategy check-in + PM scenario-select gates ────

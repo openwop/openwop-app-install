@@ -67,8 +67,8 @@ export const analyticsFeature: BackendFeature = {
     salt: 'analytics',
   },
   requiredPacks: [
-    { name: 'feature.analytics.nodes', version: '1.1.2' }, // WF-ANL-1 config+inputs merge
-    { name: 'vendor.openwop-app.analytics.agents', version: '1.0.2' }, // CFP-1 real query tool
+    'feature.analytics.nodes', // WF-ANL-1 config+inputs merge
+    'vendor.openwop-app.analytics.agents', // CFP-1 real query tool
   ],
   // ADR 0194 Phase 5 — a SOFT dependency (advisory, not a lock): analytics works
   // better with Consent present, since the public beacon is consent-gated ONLY with Consent present (ADR 0020; permissive without it — ADR 0651 D4)

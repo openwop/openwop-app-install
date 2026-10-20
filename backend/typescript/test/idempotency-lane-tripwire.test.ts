@@ -65,6 +65,12 @@ const MUTEX_ALLOWLIST = new Set<string>([
   // key (never caller-supplied), so two instances or a redeploy send at most once a
   // week. Same hourly-poll shape as `features/crm/snapshotDaemon.ts`.
   'features/billing/funnelWeeklySummary.ts',
+  // ADR 0906 D5 — the custom-domain sweep. Its one claim shape is
+  // `custom-domain-recheck:<hostname>:<slot>` (and, from ADR 0906 P2,
+  // `custom-domain-edge:<hostname>:<slot>`): hostname from the domain row and a
+  // poll-slot number, both machine-generated, never caller-supplied. It fences N
+  // instances to one check per row per slot, the `cms/publishSweep.ts` shape.
+  'host/customDomainSweep.ts',
   // NOTE: the Storage interface and the two adapters are deliberately ABSENT.
   // They DECLARE and IMPLEMENT these methods (`async claimOnce(...)`) rather
   // than invoking them on a storage handle, so the call-site predicate does

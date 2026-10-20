@@ -749,6 +749,7 @@ export async function setEndorsement(
 // active user). No-op on a falsy tenant / non-PII classification (fail-closed).
 registerRetentionPurger({
   feature: 'profiles',
+  dryRun: 'rows-by-age',
   async purge(tenantId, classification, cutoffIso) {
     if (!tenantId || classification !== 'confidential-pii') return 0;
     return purgeRowsByAge('profiles', await store.listForTenantIndexed(tenantId), tenantId, cutoffIso,

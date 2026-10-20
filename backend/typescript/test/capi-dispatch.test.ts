@@ -90,9 +90,13 @@ describe('CAPI delivery transport (ADR 0297 D1 follow-on)', () => {
     expect((evt.custom_data as { value: number; currency: string }).value).toBe(120);
   });
 
-  it('reports unsupported (google) and no_connection (tiktok w/o a connection) honestly', async () => {
-    expect(await send({ platform: 'google' })).toEqual({ outcome: 'unsupported', platform: 'google' });
-    expect(await send({ platform: 'tiktok' })).toEqual({ outcome: 'no_connection' });
+  it('reports unverified senders (google, tiktok — ADR 0907 D2), unwired ones (linkedin) and a missing connection honestly', async () => {
+    expect(await send({ platform: 'google' })).toEqual({ outcome: 'unsupported', platform: 'google', reason: 'not_sandbox_verified' });
+    expect(await send({ platform: 'tiktok' })).toEqual({ outcome: 'unsupported', platform: 'tiktok', reason: 'not_sandbox_verified' });
+    expect(await send({ platform: 'linkedin' })).toEqual({ outcome: 'unsupported', platform: 'linkedin' });
+    process.env.OPENWOP_ADS_VERIFIED_SENDERS = 'tiktok';
+    try { expect(await send({ platform: 'tiktok' })).toEqual({ outcome: 'no_connection' }); }
+    finally { delete process.env.OPENWOP_ADS_VERIFIED_SENDERS; }
     expect(hits).toHaveLength(0);
   });
 

@@ -27,6 +27,7 @@ import { createDraft, publishChallenge } from '../src/features/kicktodo-core/cha
 import { enroll } from '../src/features/kicktodo-core/enrollmentService.js';
 import { freezeProgressEvidence } from '../src/features/kicktodo-core/progressService.js';
 import { kicktodoCoreFeature } from '../src/features/kicktodo-core/feature.js';
+import { featureRequiredPacks } from '../src/features/packPins.js';
 
 const REPO = join(import.meta.dirname, '..', '..', '..');
 const TENANT = 'tenant-parity';
@@ -123,7 +124,7 @@ describe('prompt discipline (tool-first, no hand-copied schemas)', () => {
 
 describe('pack pins', () => {
   it('feature.requiredPacks versions match the shipped pack.json versions', () => {
-    for (const pin of kicktodoCoreFeature.requiredPacks ?? []) {
+    for (const pin of featureRequiredPacks(kicktodoCoreFeature)) {
       const shipped: { version: string } = JSON.parse(readFileSync(join(REPO, 'packs', pin.name, 'pack.json'), 'utf8'));
       expect(shipped.version, pin.name).toBe(pin.version);
     }

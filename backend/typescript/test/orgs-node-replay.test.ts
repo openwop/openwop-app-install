@@ -62,6 +62,7 @@ import { __resetConnectionsStore, createSecretConnection } from '../src/features
 import { setSenderAddress } from '../src/features/email/emailService.js';
 import { listInvitations } from '../src/features/orgs/invitationsService.js';
 import { getSetCookies } from './headerCookies.js';
+import { featureRequiredPacks } from '../src/features/packPins.js';
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '../../..');
 const PACK_DIR = join(REPO, 'packs/feature.orgs.nodes');
@@ -130,7 +131,7 @@ describe('ADR 0622 D2 — pack shape: schemas with ADR 0525 $ids, closed ids-onl
 
   it('the orgs feature registers the surface and pins the pack at the manifest version', () => {
     expect(orgsFeature.surface?.id).toBe('orgs');
-    expect(orgsFeature.requiredPacks).toEqual([{ name: 'feature.orgs.nodes', version: manifest.version }]);
+    expect(featureRequiredPacks(orgsFeature)).toEqual([{ name: 'feature.orgs.nodes', version: manifest.version }]);
   });
 });
 

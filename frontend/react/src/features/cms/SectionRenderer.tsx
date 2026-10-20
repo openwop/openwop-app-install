@@ -23,6 +23,7 @@ import { assetUrl } from './cmsClient.js';
 import { headingSlug } from './headingSlug.js';
 import { HeadingText, stripHeadingEmphasis } from './headingEmphasis.js';
 import { parseProseBlocks } from './proseBlocks.js';
+import { ChatCard, PanelArt, PlanCard, ProgressBar, fraction, sectionStyleClass } from './sectionStyles.js';
 import { config, fetchOpts } from '../../client/config.js';
 import { Skeleton } from '../../ui/Skeleton.js';
 import { Button } from '../../ui/Button.js';
@@ -384,14 +385,14 @@ function HeroFilm(): JSX.Element {
  *  storage another way never loads a non-https source. The visible caption is
  *  the title (+ a YouTube link); the long description is screen-reader only. */
 const httpsOnly = (v: unknown): string => (/^https:\/\//i.test(str(v).trim()) ? str(v).trim() : '');
-function VideoSection({ d, eyebrow, heading }: { d: Record<string, unknown>; eyebrow?: string | undefined; heading?: string | undefined }): JSX.Element {
+function VideoSection({ d, eyebrow, heading, sx = '' }: { d: Record<string, unknown>; eyebrow?: string | undefined; heading?: string | undefined; sx?: string }): JSX.Element {
   const { t } = useTranslation('cms');
   const src = httpsOnly(d.src);
   const poster = httpsOnly(d.poster);
   const youtube = httpsOnly(d.youtubeUrl);
   const title = str(d.title);
   return (
-    <section className="cms-public-section fp-section">
+    <section className={`cms-public-section fp-section${sx}`}>
       <div className="fp-shell">
         <SectionHead eyebrow={eyebrow} heading={heading} lede={str(d.lede) || undefined} />
         {src && poster ? (
@@ -511,11 +512,11 @@ function DiveArt({ kind }: { kind: string }): JSX.Element | null {
   return null;
 }
 
-type HeroVisual = 'workflow' | 'journey' | 'run' | 'film' | 'image' | 'none';
+type HeroVisual = 'workflow' | 'journey' | 'run' | 'film' | 'image' | 'plan' | 'none';
 
 function resolveHeroVisual(d: Record<string, unknown>): HeroVisual {
   const authored = str(d.visual);
-  if (authored === 'workflow' || authored === 'journey' || authored === 'run' || authored === 'film' || authored === 'image' || authored === 'none') return authored;
+  if (authored === 'workflow' || authored === 'journey' || authored === 'run' || authored === 'film' || authored === 'image' || authored === 'plan' || authored === 'none') return authored;
   return str(d.imageToken) ? 'image' : 'workflow';
 }
 
@@ -555,6 +556,8 @@ function PublicSection({ section }: { section: Section }): JSX.Element {
   const d = section.data;
   const eyebrow = str(d.eyebrow) || undefined;
   const heading = str(d.heading) || undefined;
+  // ADR 0920 D1/D2 — tone + split head modifiers ('' when the section sets neither).
+  const sx = sectionStyleClass(d);
 
   switch (section.type) {
     case 'hero': {
@@ -567,9 +570,10 @@ function PublicSection({ section }: { section: Section }): JSX.Element {
           {str(d.ctaLabel) || str(d.ctaLabel2) ? (
             <div className="fp-hero__cta">
               <CtaLink label={str(d.ctaLabel)} url={str(d.ctaUrl)} primary />
-              <CtaLink label={str(d.ctaLabel2)} url={str(d.ctaUrl2)} />
+              <CtaLink label={str(d.ctaLabel2)} url={str(d.ctaUrl2)} icon={d.ctaIcon2 === 'play' ? <PlayIcon size={18} /> : undefined} />
             </div>
           ) : null}
+          {str(d.note) ? <p className="fp-hero__note">{str(d.note)}</p> : null}
         </>
       );
       // The run ledger is the hero's subject, not its backdrop: it sits IN the
@@ -577,6 +581,18 @@ function PublicSection({ section }: { section: Section }): JSX.Element {
       // behind it and disappearing below 900px like the other visuals.
       if (visual === 'film') return <FilmOrRunHero copy={copy} />;
       if (visual === 'run') return <RunHero copy={copy} />;
+      // ADR 0920 D3 — the example plan sits IN the grid beside the copy (the
+      // run-ledger model), and under it on a phone.
+      if (visual === 'plan') {
+        return (
+          <section className="cms-public-section fp-hero fp-hero--plan">
+            <div className="fp-shell fp-hero__grid">
+              <div className="fp-hero__copy">{copy}</div>
+              <PlanCard plan={d.plan} />
+            </div>
+          </section>
+        );
+      }
       return (
         <section className={`cms-public-section fp-hero fp-hero--${visual}`}>
           <HeroArtwork d={d} visual={visual} />
@@ -586,8 +602,22 @@ function PublicSection({ section }: { section: Section }): JSX.Element {
       }
 
     case 'richText':
+      // ADR 0920 D5 — with a `chat` picture the copy and the picture sit side by side.
+      if (d.visual === 'chat' && d.chat) {
+        return (
+          <section className={`cms-public-section fp-section fp-prose fp-prose--visual${sx}`}>
+            <div className="fp-shell fp-prose__split">
+              <div className="fp-prose__copy">
+                <SectionHead eyebrow={eyebrow} heading={heading} />
+                <div className="fp-prose__body"><RichText text={str(d.text)} className="fp-prose__p" /></div>
+              </div>
+              <ChatCard chat={d.chat} />
+            </div>
+          </section>
+        );
+      }
       return (
-        <section className="cms-public-section fp-section fp-prose">
+        <section className={`cms-public-section fp-section fp-prose${sx}`}>
           <div className="fp-shell fp-shell--narrow">
             <SectionHead eyebrow={eyebrow} heading={heading} />
             <div className="fp-prose__body"><RichText text={str(d.text)} className="fp-prose__p" /></div>
@@ -607,10 +637,10 @@ function PublicSection({ section }: { section: Section }): JSX.Element {
 
     case 'cta':
       return (
-        <section className="cms-public-section fp-section fp-cta">
+        <section className={`cms-public-section fp-section fp-cta${d.align === 'start' ? ' fp-cta--start' : ''}${sx}`}>
           <div className="fp-shell fp-cta__inner">
             {eyebrow ? <p className="fp-eyebrow fp-eyebrow--accent">{eyebrow}</p> : null}
-            {heading ? <h2 className="fp-cta__title"><HeadingText text={heading} /></h2> : null}
+            {heading ? <h2 id={headingSlug(stripHeadingEmphasis(heading))} className="fp-cta__title"><HeadingText text={heading} /></h2> : null}
             {str(d.subheading) ? <p className="fp-cta__lede">{str(d.subheading)}</p> : null}
             <div className="fp-cta__actions"><CtaLink label={str(d.label)} url={str(d.url)} primary /></div>
           </div>
@@ -618,14 +648,81 @@ function PublicSection({ section }: { section: Section }): JSX.Element {
       );
 
     case 'columns': {
-      const cols: { title?: string; text?: string; href?: string; icon?: string; optional?: boolean }[] = Array.isArray(d.columns) ? d.columns : [];
+      const cols: {
+        title?: string; text?: string; href?: string; icon?: string; optional?: boolean;
+        // ADR 0920 D4 item fields.
+        eyebrow?: string; progress?: number; badge?: string; future?: boolean; art?: string;
+        items?: { label?: string; meta?: string }[];
+      }[] = Array.isArray(d.columns) ? d.columns : [];
       const layout = str(d.layout) || 'cards';
+      // ADR 0920 D4 — an optional footnote under the grid.
+      const note = str(d.note) ? <p className="fp-cols__note">{str(d.note)}</p> : null;
+
+      if (layout === 'ruled' || layout === 'panels' || layout === 'progress' || layout === 'tiles') {
+        // Four parallel layouts that differ only in chrome (see global.css):
+        // ruled = a hairline over each column; panels = filled, with a small
+        // drawing; progress = a label line + bar; tiles = compact cards, four
+        // across, a badge, and a dashed `future` card.
+        return (
+          <section className={`cms-public-section fp-section fp-cols fp-cols--${layout}${sx}`}>
+            <div className="fp-shell">
+              <SectionHead eyebrow={eyebrow} heading={heading} lede={str(d.lede) || undefined} />
+              <ul className="fp-cols__grid">
+                {cols.map((c, i) => {
+                  const p = fraction(c.progress);
+                  return (
+                    <li key={i} className={`fp-col${c.future ? ' fp-col--future' : ''}`}>
+                      {layout === 'panels' ? <PanelArt kind={str(c.art)} /> : null}
+                      {str(c.eyebrow) ? <p className="fp-col__eyebrow">{str(c.eyebrow)}</p> : null}
+                      {layout === 'progress' && p !== null ? <ProgressBar value={p} /> : null}
+                      {str(c.title) || str(c.badge) ? (
+                        <h3 className="fp-col__title">
+                          {str(c.title)}
+                          {str(c.badge) ? <span className="fp-col__badge">{str(c.badge)}</span> : null}
+                        </h3>
+                      ) : null}
+                      {str(c.text) ? <p className="fp-col__text">{inlineMarkdown(str(c.text), `col-${i}`)}</p> : null}
+                    </li>
+                  );
+                })}
+              </ul>
+              {note}
+            </div>
+          </section>
+        );
+      }
+      if (layout === 'list') {
+        // Titled lists: each row a name and a short right-aligned meta ("14 days").
+        return (
+          <section className={`cms-public-section fp-section fp-cols fp-cols--list${sx}`}>
+            <div className="fp-shell">
+              <SectionHead eyebrow={eyebrow} heading={heading} lede={str(d.lede) || undefined} />
+              <div className="fp-cols__grid">
+                {cols.map((c, i) => (
+                  <div key={i} className="fp-col">
+                    {str(c.title) ? <h3 className="fp-col__title">{str(c.title)}</h3> : null}
+                    <ul className="fp-col__items">
+                      {(Array.isArray(c.items) ? c.items : []).filter((it) => str(it?.label)).map((it, j) => (
+                        <li key={j} className="fp-col__item">
+                          <span>{str(it.label)}</span>
+                          {str(it.meta) ? <span className="fp-col__meta">{str(it.meta)}</span> : null}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                ))}
+              </div>
+              {note}
+            </div>
+          </section>
+        );
+      }
 
       if (layout === 'stats') {
         // ADR 0762 — a heading/lede above the figures (optional: a bare stats
         // band still renders exactly as before).
         return (
-          <section className="cms-public-section fp-section fp-stats">
+          <section className={`cms-public-section fp-section fp-stats${sx}`}>
             <div className="fp-shell">
               <SectionHead eyebrow={eyebrow} heading={heading} lede={str(d.lede) || undefined} />
               <dl className="fp-stats__grid">
@@ -646,7 +743,7 @@ function PublicSection({ section }: { section: Section }): JSX.Element {
         // parallel promises — no numbering (they are not a sequence) and no
         // card chrome (they are one argument, not a menu).
         return (
-          <section className="cms-public-section fp-section fp-rows">
+          <section className={`cms-public-section fp-section fp-rows${sx}`}>
             <div className="fp-shell">
               <SectionHead eyebrow={eyebrow} heading={heading} lede={str(d.lede) || undefined} />
               <ul className="fp-rows__list">
@@ -663,13 +760,13 @@ function PublicSection({ section }: { section: Section }): JSX.Element {
       }
       if (layout === 'steps') {
         return (
-          <section className="cms-public-section fp-section fp-steps">
+          <section className={`cms-public-section fp-section fp-steps${d.numbers === 'circle' ? ' fp-steps--circle' : ''}${sx}`}>
             <div className="fp-shell">
               <SectionHead eyebrow={eyebrow} heading={heading} />
               <ol className="fp-steps__list">
                 {cols.map((c, i) => (
                   <li key={i} className="fp-step">
-                    <span className="fp-step__num">{pad2(i + 1)}</span>
+                    <span className="fp-step__num">{d.numbers === 'circle' ? i + 1 : pad2(i + 1)}</span>
                     <div className="fp-step__body">
                       {str(c.title) ? <h3 className="fp-step__title">{str(c.title)}</h3> : null}
                       <p className="fp-step__text">{inlineMarkdown(str(c.text), `step-${i}`)}</p>
@@ -685,7 +782,7 @@ function PublicSection({ section }: { section: Section }): JSX.Element {
         // ADR 0762 — example prompts: a short tag (title) over the prompt itself
         // (text), set as a quotation. Each card links where it can be typed.
         return (
-          <section className="cms-public-section fp-section fp-prompts">
+          <section className={`cms-public-section fp-section fp-prompts${sx}`}>
             <div className="fp-shell">
               <SectionHead eyebrow={eyebrow} heading={heading} lede={str(d.lede) || undefined} />
               <ul className="fp-prompts__grid">
@@ -712,7 +809,7 @@ function PublicSection({ section }: { section: Section }): JSX.Element {
         // ADR 0762 — deep dives: one numbered claim per row with a built-in
         // illustration beside it (DiveArt, by `icon` slug), sides alternating.
         return (
-          <section className="cms-public-section fp-section fp-dives">
+          <section className={`cms-public-section fp-section fp-dives${sx}`}>
             <div className="fp-shell">
               <SectionHead eyebrow={eyebrow} heading={heading} lede={str(d.lede) || undefined} />
               <ol className="fp-dives__list">
@@ -733,7 +830,7 @@ function PublicSection({ section }: { section: Section }): JSX.Element {
       }
       if (layout === 'showcase') {
         return (
-          <section className="cms-public-section fp-section fp-showcase">
+          <section className={`cms-public-section fp-section fp-showcase${sx}`}>
             <div className="fp-shell">
               <SectionHead eyebrow={eyebrow} heading={heading} lede={str(d.lede) || undefined} />
               <div className="fp-showcase__grid">
@@ -761,7 +858,7 @@ function PublicSection({ section }: { section: Section }): JSX.Element {
         );
       }
       return (
-        <section className="cms-public-section fp-section fp-cards">
+        <section className={`cms-public-section fp-section fp-cards${sx}`}>
           <div className="fp-shell">
             <SectionHead eyebrow={eyebrow} heading={heading} lede={str(d.lede) || undefined} />
             <div className="fp-cards__grid">
@@ -782,6 +879,7 @@ function PublicSection({ section }: { section: Section }): JSX.Element {
                 return <article key={i} className="fp-card">{cardInner}</article>;
               })}
             </div>
+            {note}
           </div>
         </section>
       );
@@ -795,7 +893,7 @@ function PublicSection({ section }: { section: Section }): JSX.Element {
         <section className="cms-public-section">
           <div className="fp-shell">
             {eyebrow ? <p className="fp-eyebrow">{eyebrow}</p> : null}
-            {heading ? <h2 className="fp-h2"><HeadingText text={heading} /></h2> : null}
+            {heading ? <h2 id={headingSlug(stripHeadingEmphasis(heading))} className="fp-h2"><HeadingText text={heading} /></h2> : null}
             <ProductGridSection storeOrgId={str(d.storeOrgId)} productIds={Array.isArray(d.productIds) ? (d.productIds as unknown[]).filter((x): x is string => typeof x === 'string') : []} />
           </div>
         </section>
@@ -843,7 +941,7 @@ function PublicSection({ section }: { section: Section }): JSX.Element {
         <section className="cms-public-section">
           <div className="fp-shell">
             {eyebrow ? <p className="fp-eyebrow">{eyebrow}</p> : null}
-            {heading ? <h2 className="fp-h2"><HeadingText text={heading} /></h2> : null}
+            {heading ? <h2 id={headingSlug(stripHeadingEmphasis(heading))} className="fp-h2"><HeadingText text={heading} /></h2> : null}
             <Suspense fallback={<div className="u-p-2" role="status"><Skeleton /></div>}>
               <LazyPublicFormRenderer formId={formId} hideTitle={Boolean(heading)} />
             </Suspense>
@@ -862,7 +960,7 @@ function PublicSection({ section }: { section: Section }): JSX.Element {
         <section className="cms-public-section">
           <div className="fp-shell">
             {eyebrow ? <p className="fp-eyebrow">{eyebrow}</p> : null}
-            {heading ? <h2 className="fp-h2"><HeadingText text={heading} /></h2> : null}
+            {heading ? <h2 id={headingSlug(stripHeadingEmphasis(heading))} className="fp-h2"><HeadingText text={heading} /></h2> : null}
             <EntityListSection
               tenantId={str(d.tenantId)} typeName={str(d.typeName)}
               titleField={str(d.titleField)} bodyField={str(d.bodyField) || undefined}
@@ -882,7 +980,7 @@ function PublicSection({ section }: { section: Section }): JSX.Element {
         <section className="cms-public-section">
           <div className="fp-shell">
             {eyebrow ? <p className="fp-eyebrow">{eyebrow}</p> : null}
-            {heading ? <h2 className="fp-h2"><HeadingText text={heading} /></h2> : null}
+            {heading ? <h2 id={headingSlug(stripHeadingEmphasis(heading))} className="fp-h2"><HeadingText text={heading} /></h2> : null}
             <EntityDetailSection
               tenantId={str(d.tenantId)} typeName={str(d.typeName)} entityId={str(d.entityId)}
               titleField={str(d.titleField)} bodyField={str(d.bodyField) || undefined}
@@ -974,7 +1072,7 @@ function PublicSection({ section }: { section: Section }): JSX.Element {
         .filter((it) => it.q && it.a);
       if (items.length === 0) return <section className="cms-public-section" />;
       return (
-        <section className="cms-public-section">
+        <section className={`cms-public-section${sx ? ` fp-section fp-faq-section${sx}` : ''}`}>
           <div className="fp-shell">
             <SectionHead eyebrow={eyebrow} heading={heading} lede={str(d.lede) || undefined} />
             <div className="fp-faq">
@@ -1012,7 +1110,7 @@ function PublicSection({ section }: { section: Section }): JSX.Element {
     }
 
     case 'video':
-      return <VideoSection d={d} eyebrow={eyebrow} heading={heading} />;
+      return <VideoSection d={d} eyebrow={eyebrow} heading={heading} sx={sx} />;
 
     case 'quotes': {
       // R2-G10 — attributed social proof. Real <figure>/<blockquote> semantics;
@@ -1025,7 +1123,7 @@ function PublicSection({ section }: { section: Section }): JSX.Element {
         .filter((it) => it.quote);
       if (items.length === 0) return <section className="cms-public-section" />;
       return (
-        <section className="cms-public-section">
+        <section className={`cms-public-section${sx ? ` fp-section${sx}` : ''}`}>
           <div className="fp-shell">
             <SectionHead eyebrow={eyebrow} heading={heading} lede={str(d.lede) || undefined} />
             <div className="fp-quotes">

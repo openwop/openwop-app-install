@@ -23,6 +23,7 @@ import { MenuIcon, XIcon } from '../ui/icons/index.js';
 import { getDocsNav } from '../features/docs/docsClient.js';
 import { SYSTEM_SITE_ORG } from '../features/cms/siteOrg.js';
 import { config, fetchOpts } from '../client/config.js';
+import { PRIVACY_HREF } from '../brand/privacyHref.js';
 
 /**
  * UX_UPGRADE-docs D-G4 — whether this deployment actually has published docs.
@@ -289,7 +290,7 @@ export function PublicShell({ children }: { children: ReactNode }): JSX.Element 
             <nav aria-label={t('footerNavLabel')}>
               <ul className="app-footer__links">
                 {flat.map((l) => <li key={l.to}><Link to={l.to}>{l.label}</Link></li>)}
-                <li><Link to="/privacy">{t('common:privacy')}</Link></li>
+                <li><Link to={PRIVACY_HREF}>{t('common:privacy')}</Link></li>
               </ul>
             </nav>
           </footer>

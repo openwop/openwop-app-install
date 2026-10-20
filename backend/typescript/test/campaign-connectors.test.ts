@@ -7,8 +7,8 @@
  * negative / clicks>impressions checks; mis-read decimal-comma locales or zero a garbage
  * metric; stop swapping an over-12 DD/MM date; keep a non-ISO currency; drop the
  * natural-key dedup; claim a known currency with no evidence; import under a tenant
- * other than the caller's; live-sync a CSV-only platform; change the `yesterday`
- * window; read the platform after a lost cooldown claim.
+ * other than the caller's; live-sync a CSV-only platform; skip a planned account; claim the cooldown
+ * before planning; read the platform after a lost cooldown claim.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -171,44 +171,62 @@ describe('campaign-connectors — routes + sync node', () => {
     expect(kpi.body).toMatchObject({ recordCount: 1, totals: { spend: 200, revenue: 1000 }, byPlatform: [{ platform: 'meta', spend: 200 }] });
   });
 
-  // ADR 0215 (C2): the sync node is honest-ON for the platforms with a live
-  // metrics reader (meta/google via ctx.ads) and stays structured-honest for the
-  // rest. Without ctx.ads the node fails host_capability_missing, never fakes.
-  it('sync node: live path for meta/google, connector_not_configured for the rest', async () => {
-    // SYNC-1: the node claims the cooldown ATOMICALLY via claimSync (was the
-    // non-atomic checkSyncCooldown read).
+  // ADR 0215 (C2) → ADR 0907 D3: the sync node asks the feature surface for a
+  // plan, reads each planned account through ctx.ads.getAccountMetrics, and
+  // hands the rows back to recordAccountRows. CSV-only platforms stay
+  // structured-honest; without ctx.ads the node fails host_capability_missing.
+  const PLAN = { platform: 'google', scope: 'dispatched', since: '2026-07-08', until: '2026-07-14', adAccountIds: ['123', '456'], ledger: [{ platformCampaignId: 'pc-1', campaignName: 'Promo' }] };
+  it('sync node: plans, reads every planned account, records the rows; connector_not_configured for the rest', async () => {
     const recorded: Array<Record<string, unknown>> = [];
-    const features = { 'campaign-connectors': { importCsv: async () => ({}), claimSync: async () => ({ blocked: false }), recordSyncedMetrics: async (a: Record<string, unknown>) => { recorded.push(a); return { imported: 1, deduped: 0 }; } } };
-    // CSV-only platform → structured honest-off, unchanged.
-    const off = await nodePack['feature.campaign-connectors.nodes.sync']({ features, inputs: { orgId: 'o1', platform: 'linkedin' } });
+    const features = { 'campaign-connectors': {
+      importCsv: async () => ({}), claimSync: async () => ({ blocked: false }),
+      planSync: async () => ({ outcome: 'plan', plan: PLAN }),
+      recordAccountRows: async (a: Record<string, unknown>) => { recorded.push(a); return { imported: 1, deduped: 0, campaigns: 1 }; },
+    } };
+    const off = await nodePack['feature.campaign-connectors.nodes.sync']({ features, inputs: { orgId: 'o1', platform: 'pinterest' } });
     expect(off.status).toBe('failed');
     expect(off.error?.code).toBe('connector_not_configured');
-    // Live platform without ctx.ads → capability-missing (no faking).
+    // ADR 0907 D2 — a reader the host has not verified maps to the same typed refusal.
+    const unverifiedFeatures = { 'campaign-connectors': { ...features['campaign-connectors'], planSync: async () => ({ outcome: 'not_verified', platform: 'linkedin' }) } };
+    const unverified = await nodePack['feature.campaign-connectors.nodes.sync']({ features: unverifiedFeatures, ads: { getAccountMetrics: async () => ({ outcome: 'ok', rows: [] }) }, inputs: { orgId: 'o1', platform: 'linkedin' } });
+    expect(unverified.status).toBe('failed');
+    expect(unverified.error?.code).toBe('connector_not_configured');
+    expect(unverified.error?.message).toMatch(/not been verified/);
     const noCtx = await nodePack['feature.campaign-connectors.nodes.sync']({ features, inputs: { orgId: 'o1', platform: 'google' } });
     expect(noCtx.status).toBe('failed');
     expect(noCtx.error?.code).toBe('host_capability_missing');
-    // Live platform with ctx.ads → pulls window:'yesterday' per dispatch and persists.
+
     const asked: Array<Record<string, unknown>> = [];
+    const row = { date: '2026-07-14', campaignId: 'pc-1', campaignName: 'Promo', impressions: 10, clicks: 2, spend: 3, conversions: 1, revenue: 9 };
     const ads = {
-      listDispatches: async () => [{ platform: 'google', platformCampaignId: 'pc-1', platformAdSetId: 'ag', platformAdId: 'ad', campaignName: 'Promo', adAccountId: '123', createdAt: '2026-07-01T00:00:00Z' }],
-      getMetrics: async (a: Record<string, unknown>) => { asked.push(a); return { outcome: 'ok', platform: 'google', metrics: { impressions: 10, clicks: 2, spend: 3, ctr: 0.2, cpc: 1.5 } }; },
+      getAccountMetrics: async (a: Record<string, unknown>) => {
+        asked.push(a);
+        return a.adAccountId === '456' ? { outcome: 'rate_limited', retryAfterS: 30 } : { outcome: 'ok', platform: 'google', rows: [row], pages: 1, truncated: false };
+      },
     };
     const ok = await nodePack['feature.campaign-connectors.nodes.sync']({ features, ads, inputs: { orgId: 'o1', platform: 'google' } });
     expect(ok.status, JSON.stringify(ok)).toBe('success');
-    expect(ok.outputs).toMatchObject({ outcome: 'synced', platform: 'google', campaigns: 1, imported: 1, failures: [] });
-    expect(asked).toEqual([{ platform: 'google', adAccountId: '123', campaignId: 'pc-1', window: 'yesterday' }]);
-    // The pulled metrics are what gets persisted, for this org + platform.
-    expect(recorded).toEqual([{ orgId: 'o1', platform: 'google', rows: [{ campaignName: 'Promo', adSet: 'dispatched', spend: 3, impressions: 10, clicks: 2 }] }]);
+    expect(ok.outputs).toMatchObject({ outcome: 'synced', platform: 'google', scope: 'dispatched', since: '2026-07-08', until: '2026-07-14', campaigns: 1, imported: 1, truncated: false,
+      failures: [{ adAccountId: '456', reason: 'rate_limited', retryAfterS: 30 }] });
+    expect(asked).toEqual([
+      { platform: 'google', adAccountId: '123', level: 'campaign', since: '2026-07-08', until: '2026-07-14' },
+      { platform: 'google', adAccountId: '456', level: 'campaign', since: '2026-07-08', until: '2026-07-14' },
+    ]);
+    expect(recorded).toEqual([{ orgId: 'o1', plan: PLAN, rows: [row] }]);
   });
 
-  // SYNC-1: a lost atomic claim short-circuits to cooldown before any platform read.
-  it('sync node: a blocked atomic claim returns cooldown and never hits the platform', async () => {
-    const asked: Array<Record<string, unknown>> = [];
-    const features = { 'campaign-connectors': { importCsv: async () => ({}), claimSync: async () => ({ blocked: true, retryAtIso: '2026-07-02T00:00:00Z' }), recordSyncedMetrics: async () => ({ imported: 0, deduped: 0 }) } };
-    const ads = { listDispatches: async () => { asked.push({ called: true }); return []; }, getMetrics: async () => ({ outcome: 'ok', platform: 'google', metrics: {} }) };
-    const out = await nodePack['feature.campaign-connectors.nodes.sync']({ features, ads, inputs: { orgId: 'o1', platform: 'google' } });
-    expect(out.status).toBe('success');
+  // CC-SP-14 + SYNC-1: plan first (a probe never claims), then a lost atomic
+  // claim short-circuits to cooldown before any platform read.
+  it('sync node: no_dispatches never claims; a blocked claim returns cooldown and never reads', async () => {
+    const asked: unknown[] = [];
+    let claims = 0;
+    const ads = { getAccountMetrics: async (a: unknown) => { asked.push(a); return { outcome: 'ok', rows: [] }; } };
+    const empty = { 'campaign-connectors': { importCsv: async () => ({}), claimSync: async () => { claims++; return { blocked: false }; }, planSync: async () => ({ outcome: 'no_dispatches' }), recordAccountRows: async () => ({}) } };
+    expect((await nodePack['feature.campaign-connectors.nodes.sync']({ features: empty, ads, inputs: { orgId: 'o1', platform: 'google' } })).outputs).toEqual({ outcome: 'no_dispatches' });
+    expect(claims).toBe(0);
+    const blocked = { 'campaign-connectors': { importCsv: async () => ({}), claimSync: async () => ({ blocked: true, retryAtIso: '2026-07-02T00:00:00Z' }), planSync: async () => ({ outcome: 'plan', plan: PLAN }), recordAccountRows: async () => ({}) } };
+    const out = await nodePack['feature.campaign-connectors.nodes.sync']({ features: blocked, ads, inputs: { orgId: 'o1', platform: 'google', syncScope: 'account' } });
     expect(out.outputs).toEqual({ outcome: 'cooldown', retryAtIso: '2026-07-02T00:00:00Z' });
-    expect(asked.length).toBe(0); // claim lost → no listDispatches, no getMetrics
+    expect(asked).toHaveLength(0);
   });
 });

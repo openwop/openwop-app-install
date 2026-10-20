@@ -2,7 +2,7 @@
  * ADR 0200 Campaign Studio console (FEATURES.md ordinal 224) — the hub projector
  * `chrome/hubProjection.ts` is TIER-AWARE for the campaigns console (CSCC-1, closed by
  * #3493). Durable claim: (CSCP-1) every campaigns tab is workspace-tier, so admin and
- * non-admin callers see the same four tabs; (CSCP-2) an admin-tier tab annotated into the
+ * non-admin callers see the same five tabs (Operations added by ADR 0926); (CSCP-2) an admin-tier tab annotated into the
  * campaigns hub is DROPPED for a non-admin and SHOWN for an admin; (CSCP-3) the hub
  * discriminator and the toggle gate still apply.
  *
@@ -35,7 +35,7 @@ describe('ADR 0200 campaign console — tier-AWARE projection (CSCC-1 closed by 
   it('CSCP-1: the campaigns tabs are all workspace-tier → projected for admin AND non-admin alike', () => {
     const asNonAdmin = visibleHubRoutes(FEATURES, allVisible, false, 'campaigns');
     const asAdmin = visibleHubRoutes(FEATURES, allVisible, true, 'campaigns');
-    expect(asNonAdmin).toHaveLength(4); // Briefs, Campaigns, Performance, Intelligence (ADR 0200)
+    expect(asNonAdmin).toHaveLength(5); // Operations (ADR 0926), Briefs, Campaigns, Performance, Intelligence (ADR 0200)
     expect(asNonAdmin.map(tabIdOf)).toEqual(asAdmin.map(tabIdOf)); // workspace tabs visible to everyone
     expect(asNonAdmin.map((t) => t.tier)).toEqual(asNonAdmin.map(() => 'workspace'));
   });

@@ -17,7 +17,7 @@ import { initHostExtPersistence, purgeTenantHostExt } from '../src/host/hostExtP
 import { getBoard, getCard, purgeTenantKanban } from '../src/host/kanbanService.js';
 import { getJob, registerJob } from '../src/host/schedulingService.js';
 import { registerGoalVerifier } from '../src/features/goals/goalVerifiers.js';
-import { getGoal, armContinuation, continuationJobId } from '../src/features/goals/goalsService.js';
+import { getGoal, continuationJobId } from '../src/features/goals/goalsService.js';
 import { createDraft, publishChallenge, getChallenge } from '../src/features/kicktodo-core/challengeService.js';
 import { enroll, getEnrollment } from '../src/features/kicktodo-core/enrollmentService.js';
 import { submitCheckIn, todayFor } from '../src/features/kicktodo-core/todayService.js';
@@ -44,7 +44,9 @@ async function buildGraph(tenant: string, who: string): Promise<Graph> {
   });
   await publishChallenge(tenant, draft.id, 1);
   const { enrollment } = await enroll({ tenantId: tenant, ownerSubject: `user:${who}`, challengeId: draft.id, challengeVersion: 1, timezone: 'UTC' });
-  await armContinuation(tenant, enrollment.goalId, { workflowId: 'openwop-app.kicktodo.daily-loop', cronExpr: '0 * * * *' });
+  // `enroll` arms the daily loop itself (with its per-fire inputs). Re-arming it
+  // here without them is what ADR 0908 D2 now refuses — it dropped the inputs.
+  expect(await getJob(continuationJobId(tenant, enrollment.goalId))).not.toBeNull();
   const today = await todayFor(tenant, `user:${who}`);
   const cardId = today.enrollments[0].actions[0].occurrence.cardId;
   await submitCheckIn(tenant, `user:${who}`, cardId, { note: 'done' });

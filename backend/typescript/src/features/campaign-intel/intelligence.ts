@@ -48,6 +48,9 @@ export function optimizeBudget(
   // Aggregate spend + revenue per platform.
   const byPlatform = new Map<string, { spend: number; revenue: number }>();
   for (const r of records) {
+    // A platform that cannot report revenue (ADR 0907 D3 `null`) is left out
+    // of the ROAS comparison rather than read as ROAS 0 and drained of budget.
+    if (r.revenue === null) continue;
     const p = byPlatform.get(r.platform) ?? { spend: 0, revenue: 0 };
     p.spend += r.spend; p.revenue += r.revenue;
     byPlatform.set(r.platform, p);
@@ -133,7 +136,7 @@ export function forecastCampaigns(
     const byDate = new Map<string, { date: string; spend: number; conversions: number; clicks: number; impressions: number }>();
     for (const r of recs) {
       const d = byDate.get(r.date) ?? { date: r.date, spend: 0, conversions: 0, clicks: 0, impressions: 0 };
-      d.spend += r.spend; d.conversions += r.conversions; d.clicks += r.clicks; d.impressions += r.impressions;
+      d.spend += r.spend; d.conversions += r.conversions ?? 0; d.clicks += r.clicks; d.impressions += r.impressions;
       byDate.set(r.date, d);
     }
     const sorted = [...byDate.values()].sort((a, b) => a.date.localeCompare(b.date));

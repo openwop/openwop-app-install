@@ -28,10 +28,10 @@ import { createHash } from 'node:crypto';
 import { blobListLimit, type BundleScope, type BlobSurface } from '../inMemorySurfaces.js';
 import { registerSurfaceAdapter, resolveBackendId } from '../surfaceBackends.js';
 import { BLOB_BOOT_CHECK_TENANT, blobBootRoundTrip } from './blobBootCheck.js';
+import { createGcpMetadataClient, gcpMetadata, type GcpMetadataClient } from '../gcpAdc.js';
 
 export const GCS_BACKEND_ID = 'gcs';
 const API = 'https://storage.googleapis.com';
-const METADATA = 'http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default';
 const MAX_PRESIGN_SECONDS = 7 * 24 * 3600;
 
 export interface GcsConfig {
@@ -82,18 +82,18 @@ export function rfc3986(s: string): string {
   return encodeURIComponent(s).replace(/[!'()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
 }
 
-/** Metadata-server access token, cached until a minute before it expires. */
-function metadataTokenProvider(fetchFn: typeof fetch, now: () => Date): () => Promise<string> {
-  let cached: { token: string; expiresAt: number } | null = null;
-  return async () => {
-    if (cached && cached.expiresAt > now().getTime()) return cached.token;
-    const res = await fetchFn(`${METADATA}/token`, { headers: { 'Metadata-Flavor': 'Google' } });
-    if (!res.ok) { await drainBody(res); throw new Error(`gcs blob: metadata token failed: HTTP ${res.status}`); }
-    const body = (await res.json()) as { access_token?: string; expires_in?: number };
-    if (!body.access_token) throw new Error('gcs blob: metadata token response had no access_token');
-    cached = { token: body.access_token, expiresAt: now().getTime() + Math.max(0, (body.expires_in ?? 0) - 60) * 1000 };
-    return cached.token;
-  };
+/** The metadata client: the shared one in production; one over the injected fetch in tests. */
+function metadataClient(deps: GcsBlobDeps, now: () => Date): GcpMetadataClient {
+  const injected = deps.fetch;
+  if (!injected) return gcpMetadata();
+  return createGcpMetadataClient({ fetchImpl: (url, init) => injected(url, init), now: () => now().getTime() });
+}
+
+/** Rethrow a metadata failure under this backend's message prefix. */
+async function viaMetadata<T>(what: string, read: () => Promise<T>): Promise<T> {
+  try { return await read(); } catch (err) {
+    throw new Error(`gcs blob: metadata ${what} failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
 }
 
 /** The V4 signed-URL pieces for one GET of `objectName` (GOOG4-RSA-SHA256). Pure; exported for tests. */
@@ -126,12 +126,11 @@ export function createGcsBlob(scope: BundleScope, deps: GcsBlobDeps = {}): BlobS
   const clock = deps.now ?? (() => new Date());
   const cfg = deps.config ?? loadGcsConfigFromEnv().config;
   if (!cfg) throw new Error('host.blob backend "gcs" selected but OPENWOP_BLOB_GCS_BUCKET is unset.');
-  const token = deps.token ?? metadataTokenProvider(fetchFn, clock);
+  const metadata = metadataClient(deps, clock);
+  const token = deps.token ?? (() => viaMetadata('token', () => metadata.accessToken()));
   const signerEmail = deps.signerEmail ?? (async () => {
     if (cfg.signerEmail) return cfg.signerEmail;
-    const res = await fetchFn(`${METADATA}/email`, { headers: { 'Metadata-Flavor': 'Google' } });
-    if (!res.ok) { await drainBody(res); throw new Error(`gcs blob: metadata email failed: HTTP ${res.status}`); }
-    return (await res.text()).trim();
+    return viaMetadata('email', () => metadata.metadataText('instance/service-accounts/default/email'));
   });
   const signBlob = deps.signBlob ?? (async (bytes: Buffer, email: string) => {
     const res = await fetchFn(`https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/${encodeURIComponent(email)}:signBlob`, {

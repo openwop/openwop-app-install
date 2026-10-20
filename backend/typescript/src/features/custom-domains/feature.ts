@@ -11,7 +11,7 @@
  */
 import type { BackendFeature } from '../types.js';
 import { registerCustomDomainsRoutes } from './routes.js';
-import { startCustomDomainSweep } from '../../host/customDomains.js';
+import { startCustomDomainSweep } from '../../host/customDomainSweep.js';
 
 export const customDomainsFeature: BackendFeature = {
   id: 'custom-domains',

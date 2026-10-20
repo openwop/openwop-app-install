@@ -61,14 +61,26 @@ function readOnDiskVersion(dir: string): string | null {
   catch { return null; }
 }
 
-export async function ensureRegistryPacksInstalled(featurePacks: InstallTarget[] = []): Promise<void> {
+/** ADR 0919 correction — feature packs by NAME, with the pin resolved only for a
+ *  pack that is actually absent on disk. Every `createApp()` boot calls this, so
+ *  resolving every pin here made every boot depend on every pin (a pin bump
+ *  re-ran ~1,165 test files under Tracegate). */
+export interface FeaturePackNames {
+  names: readonly string[];
+  resolve: (name: string) => InstallTarget;
+}
+
+export async function ensureRegistryPacksInstalled(featurePacksIn: InstallTarget[] | FeaturePackNames = []): Promise<void> {
   resetRegistryInstallStatus(0);
   const raw = process.env.OPENWOP_INSTALL_PACKS;
   const packDir = resolveDefaultPackDir();
 
   const envTargets = raw === 'none' ? [] : (raw ? parseInstallList(raw) : DEFAULT_PACKS);
-  // Feature-declared packs not already present on disk — always attempted.
-  const missingFeaturePacks = featurePacks.filter((p) => !existsSync(join(packDir, p.name)));
+  // Feature-declared packs not already present on disk — always attempted. The
+  // presence test is by NAME, so a pin is read only for a pack this boot installs.
+  const missingFeaturePacks = Array.isArray(featurePacksIn)
+    ? featurePacksIn.filter((p) => !existsSync(join(packDir, p.name)))
+    : featurePacksIn.names.filter((n) => !existsSync(join(packDir, n))).map((n) => featurePacksIn.resolve(n));
 
   // Dedupe by name@version (env list + missing feature packs).
   const seen = new Set<string>();

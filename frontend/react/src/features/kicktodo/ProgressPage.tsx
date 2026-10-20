@@ -110,24 +110,40 @@ function ProgressCard({ row }: { row: Row }) {
   const total = p?.totalRequiredActivities ?? 0;
   const remaining = Math.max(0, total - done);
   const pct = useMemo(() => (total > 0 ? Math.round((done / total) * 100) : null), [done, total]);
-  const completed = p?.state === 'completed' || p?.goalState === 'closed';
+  // ADR 0908 (`GL2UX-3`) — the goal is the outcome truth. `satisfied` is complete
+  // (there is no `closed` goal state; that comparison never matched). A goal past
+  // its limit or left has stopped the daily actions even while the enrollment row
+  // still reads active, and an escalated one waits on a person: both are said.
+  const completed = p?.state === 'completed' || p?.goalState === 'satisfied';
+  const ended = !completed && (p?.goalState === 'bound-exceeded' || p?.goalState === 'abandoned');
+  const escalated = !completed && !ended && p?.goalState === 'escalated';
   const hasPlanBasis = total > 0;
 
   return (
     <section className="surface-card kt-progress-card" aria-labelledby={`progress-${row.enrollmentId}`}>
       <header className="kt-progress-card__header">
         <div>
-          <p className="eyebrow">{completed ? t('progressJourneyComplete') : t('progressJourneyActive')}</p>
+          <p className="eyebrow">{completed ? t('progressJourneyComplete') : ended ? t('progressJourneyEnded') : t('progressJourneyActive')}</p>
         {/* Screen-polish: the One Thing's signature type treatment stays on
             the signature (ADR 0436 §4.3 one-signature discipline) — Progress
             cards use the plain title register. */}
           <h2 id={`progress-${row.enrollmentId}`} className="kt-progress-title">{row.title}</h2>
-          {p && <p className="muted u-m-0">{completed ? t('progressStatusComplete') : t('progressStatusActive', { current: p.currentDay, total: p.durationDays })}</p>}
+          {p && <p className="muted u-m-0">{completed ? t('progressStatusComplete') : ended ? t('progressStatusEnded') : escalated ? t('progressStatusEscalated') : t('progressStatusActive', { current: p.currentDay, total: p.durationDays })}</p>}
         </div>
         {completed
           ? <span className="chip chip--success">{t('progressCompleted')}</span>
-          : p && <span className="chip">{t('dayOf', { current: p.currentDay, total: p.durationDays })}</span>}
+          : ended
+            ? <span className="chip chip--muted">{t('progressEndedChip')}</span>
+            : escalated
+              ? <span className="chip chip--warning">{t('progressEscalatedChip')}</span>
+              : p && <span className="chip">{t('dayOf', { current: p.currentDay, total: p.durationDays })}</span>}
       </header>
+
+      {ended && (
+        <Notice variant="info">
+          {t('progressEndedBody')} <Link to="/discover">{t('browseChallenges')}</Link>
+        </Notice>
+      )}
 
       {p ? (
         <>

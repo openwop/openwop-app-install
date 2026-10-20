@@ -28,6 +28,9 @@ vi.mock('../campaignConnectorsClient.js', async (orig) => {
     getSyncStatus: vi.fn(async () => []),
     listPixels: vi.fn(async () => []),
     listConversions: vi.fn(async () => []),
+    getConnectorSettings: vi.fn(async () => ({ orgId: 'o', platform: 'meta', syncScope: 'dispatched', adAccountIds: [], updatedAt: '' })),
+    getPlatformStatus: vi.fn(async () => ({ liveSync: ['meta', 'google'], liveConversions: ['meta'] })),
+    getConversionHealth: vi.fn(async () => { throw new Error('not under test'); }),
   };
 });
 const ci = vi.hoisted(() => ({ listOrgs: vi.fn() }));

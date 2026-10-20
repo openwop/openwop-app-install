@@ -13,13 +13,33 @@
 import type { BackendFeature } from '../types.js';
 import { registerCampaignConnectorsRoutes } from './routes.js';
 import { buildCampaignConnectorsSurface } from './surface.js';
+import { registerCampaignConnectorsErasure } from './erasure.js';
+import { SCHEDULED_CONVERSIONS_TOGGLE } from './conversionDelivery.js';
 
 export const campaignConnectorsFeature: BackendFeature = {
   id: 'campaign-connectors',
-  registerRoutes: (deps) => registerCampaignConnectorsRoutes(deps),
+  registerRoutes: (deps) => {
+    // ADR 0907 D8 — the relay-queue DSAR eraser, registered unconditionally.
+    registerCampaignConnectorsErasure();
+    registerCampaignConnectorsRoutes(deps);
+  },
   surface: { id: 'campaign-connectors', build: buildCampaignConnectorsSurface },
+  // ADR 0907 D7 (lead amendment) — the SCHEDULED conversions delivery
+  // (`campaign-sync.conversions-dispatch`) is OFF until switched on per
+  // workspace: turning it on starts sending queued conversions to Meta (and to
+  // TikTok/Google once verified) every hour. The manual "Dispatch" action is
+  // the pre-existing ADR 0297 path and is not affected.
+  extraToggleDefaults: [{
+    id: SCHEDULED_CONVERSIONS_TOGGLE,
+    label: 'Scheduled conversion delivery',
+    description: 'Lets the hourly conversions-delivery chain send queued server-side conversions (Meta CAPI; TikTok and Google once verified) through the schedule owner\'s ad connections. Consent is re-checked per row at send, and events older than a platform\'s window are marked expired, never sent. Off until a workspace opts in. A sub-capability of Campaign Connectors.',
+    category: 'Marketing',
+    status: 'off',
+    bucketUnit: 'tenant',
+    salt: 'campaign-connectors-scheduled-conversions',
+  }],
   requiredPacks: [
-    { name: 'feature.campaign-connectors.nodes', version: '1.2.1' },
+    'feature.campaign-connectors.nodes',
   ],
   toggleDefault: {
     id: 'campaign-connectors',

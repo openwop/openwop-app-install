@@ -73,7 +73,7 @@ describe('Google Ads dispatch adapter (ADR 0167 Phase 2)', () => {
 
   const adapter = (runId: string, actingUserId = 'u1') =>
     makeAdsAdapter({ storage, tenantId: 'tg', runId, ...(actingUserId ? { actingUserId } : {}), orgId: 'tg' });
-  const args = (briefId: string) => ({ platform: 'google' as const, briefId, adAccountId: '123-456-7890', campaignName: 'Q3 Search', landingUrl: 'https://example.com/lp', copy: { headline: 'Pick faster', description: '40% faster checkout' }, dailyBudgetMinor: 5000 });
+  const args = (briefId: string) => ({ platform: 'google' as const, briefId, adAccountId: '123-456-7890', campaignName: 'Q3 Search', landingUrl: 'https://example.com/lp', copy: { headline: 'Pick faster', description: '40% faster checkout' }, dailyBudgetMinor: 5000, euPoliticalAdvertising: 'does_not_contain' as const });
   const create = (h: Hit) => (h.body.operations as Array<{ create: Record<string, any> }>)[0].create;
 
   it('creates budget→campaign→adGroup→ad :mutate ALL PAUSED, with Bearer + developer-token headers', async () => {
@@ -93,9 +93,11 @@ describe('Google Ads dispatch adapter (ADR 0167 Phase 2)', () => {
     // campaign / adGroup / adGroupAd creates are PAUSED (budget has no status).
     const statuses = mutates.filter((m) => /campaigns:|adGroups:|adGroupAds:/.test(m.path)).map((m) => create(m).status);
     expect(statuses).toEqual(['PAUSED', 'PAUSED', 'PAUSED']);
-    // The campaign carries the v18 SEARCH channel + explicit network settings (ADR 0223).
+    // The campaign carries the SEARCH channel + explicit network settings (ADR 0223).
     const campaignCreate = create(mutates.find((m) => /campaigns:mutate/.test(m.path))!);
     expect(campaignCreate.advertisingChannelType).toBe('SEARCH');
+    // …and the operator's EU political declaration, mapped to Google's enum (ADR 0907 P0).
+    expect(campaignCreate.containsEuPoliticalAdvertising).toBe('DOES_NOT_CONTAIN_EU_POLITICAL_ADVERTISING');
     expect(campaignCreate.networkSettings).toEqual({ targetGoogleSearch: true, targetSearchNetwork: true, targetContentNetwork: false, targetPartnerSearchNetwork: false });
     // The responsive search ad meets Google's minimums (≥3 headlines, ≥2 descriptions) + finalUrls.
     const adCreate = create(mutates.find((m) => /adGroupAds:mutate/.test(m.path))!);
@@ -126,6 +128,20 @@ describe('Google Ads dispatch adapter (ADR 0167 Phase 2)', () => {
     const { landingUrl: _omit, ...noUrl } = args('gbrief-NOURL');
     const out = await adapter('gr-1').publishAd(noUrl);
     expect(out).toEqual({ outcome: 'failed', error: 'missing_landing_url' });
+    expect(hits).toHaveLength(0);
+  });
+
+  it('fails closed missing_eu_political_declaration without the declaration — before any approval or call (ADR 0907 P0)', async () => {
+    const { euPoliticalAdvertising: _omit, ...undeclared } = args('gbrief-NOEU');
+    const out = await adapter('gr-1').publishAd(undeclared);
+    expect(out).toEqual({ outcome: 'failed', error: 'missing_eu_political_declaration' });
+    expect(hits).toHaveLength(0);
+    // A dry-run still previews, and shows the gap instead of inventing an attestation.
+    const preview = await adapter('gr-1').publishAd({ ...undeclared, dryRun: true });
+    expect(preview.outcome).toBe('preview');
+    if (preview.outcome !== 'preview') return;
+    const campaignStep = preview.plan.find((p) => /campaigns/.test(p.step))!;
+    expect(JSON.stringify(campaignStep.body)).toContain('operator declaration required');
     expect(hits).toHaveLength(0);
   });
 

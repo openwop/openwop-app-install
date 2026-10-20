@@ -37,7 +37,7 @@ export const codeExecFeature: BackendFeature = {
     salt: 'code-exec',
   },
   requiredPacks: [
-    { name: 'feature.code-exec.nodes', version: '1.1.1' },
-    { name: 'vendor.openwop-app.code-exec.agents', version: '1.0.1' }, // ADR 0114 Phase 6 — the Code Interpreter persona
+    'feature.code-exec.nodes',
+    'vendor.openwop-app.code-exec.agents', // ADR 0114 Phase 6 — the Code Interpreter persona
   ],
 };

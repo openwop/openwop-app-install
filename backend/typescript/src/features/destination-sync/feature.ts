@@ -38,5 +38,5 @@ export const destinationSyncFeature: BackendFeature = {
   dependsOn: ['cdp'],
   // Egress needs a BYOK Connection; purpose-propagation on onward sync needs Consent.
   recommends: ['connections', 'consent'],
-  requiredPacks: [{ name: 'feature.destination-sync.nodes', version: '1.0.1' }],
+  requiredPacks: ['feature.destination-sync.nodes'],
 };

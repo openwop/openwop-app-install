@@ -24,6 +24,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { MANIFEST_SIDE_EFFECT_FLOOR, MANIFEST_FAST_PATH_SERVED, MANIFEST_DECLARED_TYPE_IDS } from '../src/executor/sideEffectFloor.generated.js';
 import { isSideEffectingNode } from '../src/executor/sideEffects.js';
+import { pinnedPackRef } from '../src/features/packPins.js';
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 const PACK = JSON.parse(readFileSync(join(REPO, 'packs', 'feature.cms.nodes', 'pack.json'), 'utf8')) as {
@@ -64,6 +65,7 @@ describe('ADR 0668 D5 — CMS node replay classification', () => {
     expect(PACK.description, 'the blanket claim was false for half the pack').not.toContain('All role:action');
     expect(PACK.description).toContain('side-effect');
     const feature = readFileSync(join(REPO, 'backend', 'typescript', 'src', 'features', 'cms', 'feature.ts'), 'utf8');
-    expect(feature, 'a pin that lags the manifest runs a different pack').toContain(`{ name: 'feature.cms.nodes', version: '${PACK.version}' }`);
+    expect(feature, 'a pin that lags the manifest runs a different pack').toContain(`'feature.cms.nodes'`);
+    expect(pinnedPackRef('feature.cms.nodes').version, 'the pin (features/packPins.ts, ADR 0919) must match the manifest').toBe(PACK.version);
   });
 });

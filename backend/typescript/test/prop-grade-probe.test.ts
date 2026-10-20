@@ -36,7 +36,6 @@ const draft = (tenant: string, id: string): Proposal => ({
 
 describe('Proposals — tenant read guard (by execution)', () => {
   beforeEach(async () => {
-    process.env.OPENWOP_PROPOSALS_ACTIVATION = 'direct-rbac';
     initHostExtPersistence(openSqliteStorage(':memory:'));
     await __test.collection.__clear();
   });

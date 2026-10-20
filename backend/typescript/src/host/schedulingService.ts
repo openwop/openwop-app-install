@@ -86,6 +86,10 @@ export type ScheduleSkipReason =
   /** ADR 0775 P3b — the workflow is on the agent's `hitl` list: this slot filed
    *  (or found) a pending approval instead of running. Approving it runs the job. */
   | 'awaiting-approval'
+  /** ADR 0908 D8 — the goal this continuation serves is closed, missing, or past
+   *  an RFC 0058 bound (a fire gate refused it; the goal is closed by that path).
+   *  Disarmed with it, so this is normally the last skip the job records. */
+  | 'goal-closed'
   | 'no-next-fire';
 
 export interface ScheduledJob {

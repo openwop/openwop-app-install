@@ -21,6 +21,7 @@ import { registerCanvasErasure } from './canvasSurface.js';
 import { registerSchedulingErasure } from './schedulingService.js';
 import { registerTwinErasure } from './twinService.js';
 import { registerAccessControlErasure } from './accessControlService.js';
+import { registerOperatorAccessErasure } from './operatorAccess.js';
 import { registerWorkspaceJoinErasure } from './workspaceJoinLedger.js';
 import { registerConversationErasure } from './conversationStore.js';
 import { registerReadStateErasure } from './conversationReadState.js';
@@ -61,6 +62,7 @@ export function registerHostSubjectErasers(): void {
   registerSchedulingErasure();
   registerTwinErasure();
   registerAccessControlErasure();
+  registerOperatorAccessErasure(); // ADR 0910 — operator activation ledger
   // ADR 0684 §7 — the auto-join ledger is subject-keyed (ADR 0464 §2.1).
   registerWorkspaceJoinErasure();
   // ADR 0554 P1 — compensation obligations REDACT rather than delete: the row is

@@ -26,6 +26,7 @@ import { fileURLToPath } from 'node:url';
 import { join, dirname } from 'node:path';
 import { Ajv2020, type ValidateFunction } from 'ajv/dist/2020.js';
 import { kicktodoCoreFeature } from '../src/features/kicktodo-core/feature.js';
+import { featureRequiredPacks } from '../src/features/packPins.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(here, '../../..');
@@ -47,7 +48,7 @@ const readNodesPack = (): NodesPack => {
 };
 /** The version kicktodo-core pins for a pack (the replay-determinism SSoT). */
 const pinnedVersion = (name: string): string | undefined =>
-  (kicktodoCoreFeature.requiredPacks ?? []).find((p) => p.name === name)?.version;
+  featureRequiredPacks(kicktodoCoreFeature).find((p) => p.name === name)?.version;
 
 // ── 1. plan-revision return schema ────────────────────────────────────────
 describe('plan-revision return schema (ADR 0459 P1)', () => {

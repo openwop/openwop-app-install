@@ -256,9 +256,23 @@ export const KICKTODO_VERIFIER = 'kicktodo:progress-evidence';
 export function registerKicktodoGoalVerifier(): void {
   registerGoalVerifier(KICKTODO_VERIFIER, async ({ goal, evidence: ev }) => {
     // snapshotRef is `<tenant>|<enrollmentId>|<id>` (host-private encoding).
+    // ADR 0908 D3 — the ref is CALLER-supplied, so it is never the authority on
+    // where to read: evidence resolves only inside the GOAL's tenant, and only
+    // evidence of the enrollment this goal belongs to (same challenge content).
+    // Anything else is a failure, never a verdict — a person's other completed
+    // enrollment, or another tenant's, used to satisfy this goal.
     const [tenantId, enrollmentId, id] = ev.snapshotRef.split('|');
-    const snapshot = tenantId && enrollmentId && id ? await getEvidence(tenantId, enrollmentId, id) : null;
+    const goalTenant = goal.owner.tenant;
+    if (!tenantId || !enrollmentId || !id || tenantId !== goalTenant) {
+      throw new Error('progress-evidence ref does not belong to this goal');
+    }
+    const enrollment = await getEnrollment(goalTenant, enrollmentId);
+    if (!enrollment || enrollment.goalId !== goal.id) throw new Error('progress-evidence ref does not belong to this goal');
+    const snapshot = await getEvidence(goalTenant, enrollmentId, id);
     if (!snapshot) throw new Error(`progress-evidence snapshot not found for ref ${ev.snapshotRef}`);
+    if (snapshot.challengeContentHash !== enrollment.challengeContentHash) {
+      throw new Error('progress-evidence snapshot was frozen against different challenge content');
+    }
     // Integrity: the stored row must re-hash to the caller-supplied hash —
     // a tampered or mismatched snapshot is a FAILURE, never a verdict.
     const rehash = `sha256:${createHash('sha256').update(canonicalBody(snapshot)).digest('hex')}`;

@@ -14,6 +14,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { MANIFEST_SIDE_EFFECT_FLOOR, MANIFEST_FAST_PATH_SERVED } from '../src/executor/sideEffectFloor.generated.js';
 import { isSideEffectingNode } from '../src/executor/sideEffects.js';
+import { pinnedPackRef } from '../src/features/packPins.js';
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 const TYPE_ID = 'feature.code-exec.nodes.run';
@@ -39,7 +40,8 @@ describe('ADR 0686 D1 — a fork must not re-run sandboxed code', () => {
 
   it('leg 3: the feature pin moves in lockstep (RFC 0076 replay resolvability)', () => {
     const feature = readFileSync(join(REPO, 'backend', 'typescript', 'src', 'features', 'code-exec', 'feature.ts'), 'utf8');
-    expect(feature).toContain(`{ name: 'feature.code-exec.nodes', version: '${PACK.version}' }`);
+    expect(feature).toContain(`'feature.code-exec.nodes'`);
+    expect(pinnedPackRef('feature.code-exec.nodes').version, 'the pin (features/packPins.ts, ADR 0919) must match the manifest').toBe(PACK.version);
   });
 
   it('leg 4: the docblock no longer asserts a guarantee the manifest does not provide', () => {

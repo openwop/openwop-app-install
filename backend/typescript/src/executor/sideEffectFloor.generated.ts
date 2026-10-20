@@ -29,16 +29,16 @@
  * ADR 0572, not here: a build-only invariant forbids `src/` from referencing
  * it, and that guard matches the filename in ANY spelling, comments included.)
  *
- * Manifest census at generation time (753 distinct typeIds):
+ * Manifest census at generation time (757 distinct typeIds):
  *    305  action
- *    275  side-effect
+ *    279  side-effect
  *    112  pure
  *     36  read
  *     16  streaming-output
  *      9  gate
  *
- * Floor 347 = served 274 + held 73:
- *     28  held: ai-invocation-log
+ * Floor 351 = served 276 + held 75:
+ *     30  held: ai-invocation-log
  *     20  held: ai-opaque-not-logged
  *     24  held: deferred-role-semantics
  *      1  held: unresolved
@@ -293,6 +293,10 @@ export const MANIFEST_SIDE_EFFECT_FLOOR: ReadonlySet<string> = new Set([
   'feature.assistant.nodes.compose-briefing',
   'feature.assistant.nodes.enqueue-action',
   'feature.campaign-channels.nodes.publish-email-sequence',
+  'feature.campaign-connectors.nodes.dispatch-conversions',
+  'feature.campaign-ops.nodes.execute',
+  'feature.campaign-ops.nodes.interpret',
+  'feature.campaign-ops.nodes.propose',
   'feature.cms.nodes.submit-page',
   'feature.cms.nodes.translate-section',
   'feature.cms.nodes.update-section-draft',
@@ -594,6 +598,8 @@ export const MANIFEST_FAST_PATH_SERVED: ReadonlySet<string> = new Set([
   'feature.assistant.nodes.compose-briefing',
   'feature.assistant.nodes.enqueue-action',
   'feature.campaign-channels.nodes.publish-email-sequence',
+  'feature.campaign-connectors.nodes.dispatch-conversions',
+  'feature.campaign-ops.nodes.execute',
   'feature.cms.nodes.submit-page',
   'feature.cms.nodes.update-section-draft',
   'feature.code-exec.nodes.run',
@@ -1109,6 +1115,7 @@ export const MANIFEST_DECLARED_TYPE_IDS: ReadonlySet<string> = new Set([
   'feature.campaign-channels.nodes.publish-social-posts',
   'feature.campaign-channels.nodes.render-concepts',
   'feature.campaign-connectors.nodes.audience-sync',
+  'feature.campaign-connectors.nodes.dispatch-conversions',
   'feature.campaign-connectors.nodes.import-csv',
   'feature.campaign-connectors.nodes.sync',
   'feature.campaign-intel.nodes.attribution',
@@ -1123,6 +1130,9 @@ export const MANIFEST_DECLARED_TYPE_IDS: ReadonlySet<string> = new Set([
   'feature.campaign-journeys.nodes.segment-members',
   'feature.campaign-journeys.nodes.segment-winback-plan',
   'feature.campaign-journeys.nodes.split',
+  'feature.campaign-ops.nodes.execute',
+  'feature.campaign-ops.nodes.interpret',
+  'feature.campaign-ops.nodes.propose',
   'feature.campaign-orchestration.nodes.consistency-check',
   'feature.campaign-orchestration.nodes.finalize',
   'feature.campaign-orchestration.nodes.setup-check',

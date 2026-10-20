@@ -468,6 +468,7 @@ async function makeStorage(): Promise<Storage> {
     deleteAllTenantData: async () => ({ runs: 0, events: 0, interrupts: 0, workflows: 0, secrets: 0, notifications: 0, pushSubscriptions: 0, otherRows: 0, tablesCovered: 0 }),
     pruneTerminalRuns: async () => ({ runs: 0, childRows: 0 }),
     pruneWebhookDeliveries: async () => 0,
+    countPrunableEngineRows: async () => ({ terminalRuns: 0, webhookDeliveries: 0 }),
     incrementManagedUsage: async () => {},
     getManagedUsage: async () => ({ inputTokens: 0, outputTokens: 0 }),
     sumManagedUsageForTenant: async () => ({ inputTokens: 0, outputTokens: 0 }),

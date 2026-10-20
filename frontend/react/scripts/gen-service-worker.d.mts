@@ -3,6 +3,7 @@ import type { FeatureOffline } from '../src/sw/offlineTypes.js';
 export declare const PUSH_HANDLERS_PATH: string;
 export declare const OFFLINE_ENGINE_PATH: string;
 export declare const OFFLINE_PURGE_PATH: string;
+export declare const LEGACY_PURGE_PATH: string;
 export declare const OFFLINE_CACHE_PREFIX: string;
 export declare const SHELL_URL: string;
 export declare const DEFAULT_PRECACHE_MAX_KB: number;
@@ -29,7 +30,10 @@ export interface BundleItem {
   viteMetadata?: { importedCss?: Set<string>; importedAssets?: Set<string> };
 }
 
-export declare function generateServiceWorker(table?: OfflineTable | null): string;
+export interface LegacyCachePurge { names: string[]; prefixes: string[] }
+
+export declare function generateServiceWorker(table?: OfflineTable | null, options?: { legacyCachePurge?: LegacyCachePurge | null }): string;
+export declare function parseLegacyCachePurge(value: string | undefined): LegacyCachePurge;
 export declare function firebaseGlobToRegExpSource(glob: string): string;
 export declare function deriveNeverCache(hostingConfig: unknown, target?: string): NeverCacheRule[];
 export declare function findOfflineDeclarationFiles(registrySource: string, registryPath: string): { id: string; dir: string; file: string }[];

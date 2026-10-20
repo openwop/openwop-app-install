@@ -1,6 +1,6 @@
 /**
  * ADR 0399 Phase 3 — pack + surface pins:
- *  - feature.creative-briefs.nodes manifest ↔ feature.ts requiredPacks version
+ *  - feature.creative-briefs.nodes manifest ↔ the requiredPacks pin (features/packPins.ts, ADR 0919)
  *    (the crm.nodes three-place pin discipline);
  *  - the render node's hand-carried template-id vocabulary is TEST-PINNED to
  *    the live catalog (the promptCatalogParity rule — a model reading the
@@ -17,6 +17,7 @@ import { AD_LAYOUT_TEMPLATES } from '../src/features/creative-briefs/render/temp
 import { compositeHashOf } from '../src/features/creative-briefs/render/renderService.js';
 import { RENDERER_VERSION } from '../src/features/creative-briefs/render/renderCreative.js';
 import { BUNDLED_FONTS_VERSION } from '../src/features/creative-briefs/render/fonts.js';
+import { featureRequiredPacks } from '../src/features/packPins.js';
 
 const REPO_ROOT = join(__dirname, '..', '..', '..');
 const NODES_PACK = join(REPO_ROOT, 'packs', 'feature.creative-briefs.nodes', 'pack.json');
@@ -28,8 +29,8 @@ interface AgentsManifest { agents: Array<{ agentId: string; toolAllowlist: strin
 const manifest = JSON.parse(readFileSync(NODES_PACK, 'utf8')) as NodesManifest;
 
 describe('creative-briefs render pack pins (ADR 0399 P3)', () => {
-  it('feature.ts requiredPacks pin matches the pack manifest version', () => {
-    const pin = creativeBriefsFeature.requiredPacks?.find((p) => p.name === 'feature.creative-briefs.nodes');
+  it('the requiredPacks pin (packPins.ts) matches the pack manifest version', () => {
+    const pin = featureRequiredPacks(creativeBriefsFeature).find((p) => p.name === 'feature.creative-briefs.nodes');
     expect(pin).toBeTruthy();
     expect(pin?.version).toBe(manifest.version);
   });

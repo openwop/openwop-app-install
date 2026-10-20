@@ -69,7 +69,7 @@ export const salesCommissionsFeature: BackendFeature = {
     salt: 'sales-commissions',
   },
   requiredPacks: [
-    { name: 'feature.sales-commissions.nodes', version: '1.2.0' },
-    { name: 'vendor.openwop-app.sales-commissions.agents', version: '1.0.3' },
+    'feature.sales-commissions.nodes',
+    'vendor.openwop-app.sales-commissions.agents',
   ],
 };

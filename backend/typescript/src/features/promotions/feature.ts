@@ -56,8 +56,8 @@ export const promotionsFeature: BackendFeature = {
     salt: 'promotions',
   },
   requiredPacks: [
-    { name: 'feature.promotions.nodes', version: '1.0.1' },
-    { name: 'vendor.openwop-app.promotions.agents', version: '1.0.2' },
+    'feature.promotions.nodes',
+    'vendor.openwop-app.promotions.agents',
   ],
   dependsOn: ['commerce'],
   recommends: ['crm'],

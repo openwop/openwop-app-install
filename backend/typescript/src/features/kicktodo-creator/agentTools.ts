@@ -263,6 +263,22 @@ type FactoryImageResolution =
   | { inputs: { generateMedia: true; imageProvider: string; imageCredentialRef: string } }
   | { error: ToolResult };
 
+/** ADR 0910 D8 — the Factory's dedicated Vault ref for a provider. Kept apart from
+ *  the workspace's chat keys so the Factory never borrows whichever provider key
+ *  `pickCredentialRef` happens to list first, and chat never points at it. */
+export function factoryCredentialRef(provider: string): string {
+  return `kicktodo-factory:${provider}`;
+}
+
+/** ADR 0910 D8 — pick the Factory's key: an explicit ref wins (it was already
+ *  checked to name the provider); else the dedicated `kicktodo-factory:<provider>`
+ *  ref BY NAME when the Vault holds it; else the ordinary ladder, so a creator's
+ *  personal workspace without a dedicated ref keeps working. */
+export function pickFactoryCredentialRef(provider: string, explicit: string | undefined, refs: readonly string[]): ReturnType<typeof pickCredentialRef> {
+  if (!explicit && refs.includes(factoryCredentialRef(provider))) return pickCredentialRef(provider, factoryCredentialRef(provider), refs);
+  return pickCredentialRef(provider, explicit, refs);
+}
+
 /**
  * KTF-LB-1 / XCH-LB-6 — the lesson-image binding, or null when the creator did
  * not ask for images. The image leg never borrows the chat provider: image
@@ -288,7 +304,7 @@ async function resolveFactoryImage(tenantId: string, input: Record<string, unkno
     },
   });
   const refs = await listSecretRefs({ tenantId });
-  const pick = pickCredentialRef(provider, undefined, refs);
+  const pick = pickFactoryCredentialRef(provider, undefined, refs);
   if (pick.ref === null || isManagedRef(pick.ref)) return refuse(`there's no ${provider} API key in the Secrets Vault`);
   if (!(await resolveSecret(pick.ref, { tenantId }))) return refuse(`its key (${pick.ref}) can't be read right now`);
   return { inputs: { generateMedia: true, imageProvider: provider, imageCredentialRef: pick.ref } };
@@ -451,6 +467,7 @@ async function resolveFactoryAi(tenantId: string, input: Record<string, unknown>
     const ref = binding.credentialRef;
     const def = await getHeadlessAiDefault(tenantId);
     const ownsRef = refNamesProvider(ref, provider)
+      || ref === factoryCredentialRef(provider) // ADR 0910 D8
       || (def !== null && def.provider === provider && def.credentialRef === ref);
     if (!ownsRef) {
       return refuse('ref_not_for_provider', `the key it was asked to use (${ref}) isn't a ${provider} key`);
@@ -458,7 +475,7 @@ async function resolveFactoryAi(tenantId: string, input: Record<string, unknown>
   }
 
   const refs = await listSecretRefs({ tenantId });
-  const pick = pickCredentialRef(provider, binding?.credentialRef, refs);
+  const pick = pickFactoryCredentialRef(provider, binding?.credentialRef, refs);
   if (pick.ref === null) {
     return refuse(pick.reason, pick.reason === 'explicit_ref_unresolved'
       ? `the key it's set to use (${binding?.credentialRef}) isn't in the Secrets Vault any more`

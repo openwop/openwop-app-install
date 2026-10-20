@@ -133,6 +133,9 @@ describe('never a grant', () => {
       'host/knowledgeSurface.ts', // forwarded as SubjectCaller.orgScopeSubject
       'host/subjectAccess.ts', // SubjectCaller field (documented: never read by filterReadable)
       'host/runDispatch.ts', // reserved key
+      'features/goals/goalsService.ts', // ADR 0908 D2 (GL2CD-2): stamped: the minting person of a KEY-armed continuation (host-written job metadata, reserved from clients); narrows the fired run
+      'features/goals/access.ts', // doc of the causedBy narrowing subject above
+      'features/goals/surface.ts', // ADR 0908 D6 — the acting principal for the owner check only (narrows); create stamps ownership from the actor alone
       'host/runStarter.ts', // stamped from the explicit parameter
       'host/hostEventDispatcher.ts', // stamped: trigger author
       'host/workflowComposeTool.ts', // stamped: approver
@@ -158,6 +161,12 @@ describe('never a grant', () => {
       // caused it (tenant trust before); every authority predicate still runs for THAT person,
       // the personal-owner exit is the ACTOR's only, and OFF (shadow) leaves the call unchanged
       'features/kicktodo-core/surfaceBinding.ts',
+      // ADR 0921 D3 / ADR 0924 D2: NARROWS only — bindRunToClient checks the run's person
+      // (actingUserId ?? orgScopeSubject) on the EXACT client org via assertRunOrgScope
+      // ({cause}); absent ⇒ refused (no tenant trust). The recorded cause only REFUSES a
+      // self-approval (separation of duties), the cms precedent.
+      'features/campaign-ops/surface.ts',
+      'features/campaign-ops/runLauncher.ts', // stamped: the requester (change request) or the approver (execution), via startWorkflowRun's explicit parameter
       'features/entities/namespaceAccess.ts', // ADR 0847 D1: NARROWS only — the run's person must hold the tenant tier + the project namespace; absent ⇒ root tenant-trusted, project refused
       // ADR 0879 D7 — the run-lane conversation WRITE gate. Reviewed claim: it NARROWS. A
       // channel append with no person is REFUSED; with the stamped person it is allowed only

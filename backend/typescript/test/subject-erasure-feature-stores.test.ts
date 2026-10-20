@@ -791,6 +791,16 @@ const NON_COLLECTION_STORES = new Map<string, { eraser: string; why: string }>([
       + 'DSAR keyed by a contactId does not expand to that person\'s email, because '
       + 'resolveCrmSubjectKeys is one-directional email/phone -> contactId (CONS-11).',
   }],
+  ['campaign-connectors:conversion', {
+    eraser: 'src/features/campaign-connectors/erasure.ts',
+    why: 'ADR 0907 D8. A THIRD reason beside (a) and (b): a typed DurableCollection whose subject '
+      + 'fields are named `visitor` (the consent subjectKey) and `emailHash` (SHA-256 of the '
+      + 'visitor email), and neither name matches any signal above, so the walk passes it. '
+      + 'Before D8 no eraser reached it; only the opt-in age purger did, while a hashed email '
+      + 'is still personal data. The eraser deletes on an EXACT match of either field, or of '
+      + 'the hash of an email-shaped key. RESIDUAL, stated: an event already delivered to an '
+      + 'ad platform persists there under the platform\'s retention.',
+  }],
 ]);
 
 /**

@@ -1,0 +1,53 @@
+{
+  "name": "feature.campaign-ops.nodes",
+  "version": "1.0.0",
+  "kind": "node",
+  "description": "Campaign operations node pack (ADR 0923). The change planner: `interpret` turns an operator's change request into structured intents or asks about missing facts (never both), and `propose` turns those intents into constrained before/after edits on the request's assets, minting a hashed change set. Both validate through ctx.features['campaign-ops'], make one error-fed repair, and otherwise fail with a typed reason. `execute` carries out an approved change set and verifies it by read-back.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": [
+    "feature",
+    "campaign-studio",
+    "campaign-ops",
+    "agency",
+    "change-set"
+  ],
+  "engines": {
+    "openwop": ">=1.0.0 <3.0.0"
+  },
+  "nodes": [
+    {
+      "typeId": "feature.campaign-ops.nodes.interpret",
+      "version": "1.0.0",
+      "label": "Campaign ops: Interpret request",
+      "description": "Reads one change request and either states what it asks for as structured intents or asks the questions needed to know (which Thursday, which link). Stores the validated result on the request. Inputs: { orgId, requestId, version, provider?, model? }. Output: { status }.",
+      "category": "integration",
+      "role": "side-effect",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.campaign-ops.nodes.propose",
+      "version": "1.0.0",
+      "label": "Campaign ops: Propose change set",
+      "description": "Reads every editable field of the request's assets and proposes the smallest edits that carry out the request's intents, leaving unrelated content untouched. Mints one change set per request version. Inputs: { orgId, requestId, version, provider?, model? }. Output: { changeSetId?, noChanges?, skipped? }.",
+      "category": "integration",
+      "role": "side-effect",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.campaign-ops.nodes.execute",
+      "version": "1.0.0",
+      "label": "Campaign ops: Carry out approved change",
+      "description": "Writes an approved change set to its destinations one at a time, each guarded by the version it was approved against, and confirms each one only by reading the destination back. Steps end confirmed, conflicted or incomplete; nothing reports done unless every step is confirmed. Inputs: { orgId, approvalId }. Output: { jobId, status, outcome }.",
+      "category": "integration",
+      "role": "side-effect",
+      "capabilities": []
+    }
+  ],
+  "runtime": {
+    "language": "javascript",
+    "format": "esm",
+    "entry": "./index.mjs",
+    "minRuntimeVersion": "node>=20"
+  }
+}

@@ -37,8 +37,8 @@ export const discoveryFeature: BackendFeature = {
     salt: 'discovery',
   },
   requiredPacks: [
-    { name: 'feature.discovery.nodes', version: '1.0.1' },
-    { name: 'vendor.openwop-app.discovery.agents', version: '1.0.3' },
+    'feature.discovery.nodes',
+    'vendor.openwop-app.discovery.agents',
   ],
   dependsOn: ['commerce'],
 };

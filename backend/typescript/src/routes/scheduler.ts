@@ -63,9 +63,9 @@ import { getRosterEntry } from '../host/rosterService.js';
 import { callerSubject, personalTenantOf, isDurableCaller, isPersonalTenantId } from '../host/requestSubject.js';
 import { resolveSubjectAccess, type AccessLevel } from '../host/subjectAccess.js';
 import { scheduledJobReadable } from '../host/scheduledJobReadGates.js';
+import { isFeatureReservedJobId } from '../host/scheduledJobFireGates.js';
 import { keyDeclarationPermits } from '../host/protocolAuthorization.js';
-import { callerHoldsTenantScope, callerSubjectSpellings, requireTenantWrite } from '../features/featureRoute.js';
-import { resolveCallerUser } from '../features/users/usersGuards.js';
+import { callerHoldsTenantScope, callerOwnerSpellings, requireTenantWrite } from '../features/featureRoute.js';
 import { CALLER_LINKAGE_KEYS } from '../host/runLinkage.js';
 
 interface Deps {
@@ -93,7 +93,14 @@ function tenantOf(req: Request): string {
 // ADR 0902 D2 (architect A1) — plus the task-deck parent linkage: a job's metadata
 // rides onto every run it fires (`scheduleDaemon.ts`), so a caller-set linkage
 // would plant a card in another member's deck on each fire.
-const RESERVED_JOB_METADATA_KEYS = new Set<string>(['actingUserId', 'heartbeat', 'schedule', 'kanban', 'approval', 'assistantLoop', 'disabledReason', 'orgScopeSubject', 'personalTenant', ...CALLER_LINKAGE_KEYS]);
+// ADR 0908 D2 — `goalId`/`purpose` are feature markers a fire gate and the
+// feature-configured guard read: a client may neither forge nor drop them.
+// ADR 0921 D3 — the campaign-ops run stamp rides onto every run a job fires, so a
+// client may not set it on a job either (the same rule as `POST /runs`).
+const RESERVED_JOB_METADATA_KEYS = new Set<string>(['actingUserId', 'heartbeat', 'schedule', 'kanban', 'approval', 'assistantLoop', 'disabledReason', 'orgScopeSubject', 'personalTenant', 'goalId', 'purpose', 'openwop-app.campaignOps', ...CALLER_LINKAGE_KEYS]);
+
+/** ADR 0908 D2 — the refusal for a goal's continuation job, naming its owner. */
+const GOAL_JOB_MESSAGE = 'This schedule belongs to a standing goal. Pause, resume or re-arm it through the goal.';
 
 function clientMetadata(raw: Record<string, unknown>): Record<string, unknown> {
   return Object.fromEntries(Object.entries(raw).filter(([k]) => !RESERVED_JOB_METADATA_KEYS.has(k)));
@@ -105,33 +112,9 @@ function actingUserOf(req: Request): string | undefined {
   return req.userId ?? req.principal?.principalId;
 }
 
-/**
- * ADR 0787 D4 — every spelling THIS request's person is known by: the canonical
- * `user:<id>`, the raw subject, AND the auth principal (`oidc:<sub>`). The last
- * one is what `callerSubjectSpellings` leaves out for a BOUND session, and it is
- * exactly the spelling a schedule created before the bind carries forever. All
- * three are the same person's own identity — never another person's row, so no
- * cross-tenant or cross-IdP alias can creep in — and they are only ever compared
- * against rows in
- * the caller's PERSONAL tenant (the home tenant that principal was minted in).
- * The one lookup — the caller's own User row — is guarded by that same rule.
- */
-async function ownerSpellings(req: Request): Promise<string[]> {
-  const out = new Set(await callerSubjectSpellings(req));
-  if (req.principal?.auth?.kind !== 'subject') return [...out];
-  if (req.principal.principalId) out.add(req.principal.principalId);
-  // A BOUND cookie session presents `user:<id>` as its principal too, so the
-  // legacy spelling lives only on the caller's own User row — and is added only
-  // when that row's tenant IS the caller's personal tenant (the one place that
-  // principal was minted under this person's own IdP; ADR 0780 D2 as corrected).
-  try {
-    const user = await resolveCallerUser(req);
-    if (user.principalId && user.tenantId === personalTenantOf(req)) out.add(user.principalId);
-  } catch {
-    // No durable User row: the request's own spellings above are all there is.
-  }
-  return [...out];
-}
+// ADR 0908 D1 — `ownerSpellings` moved to `featureRoute.ts` (`callerOwnerSpellings`)
+// so goals matches a goal's owner by the same set.
+const ownerSpellings = callerOwnerSpellings;
 
 /** Does this request's credential permit `workspace:write` at all? An `owk_` key
  *  that declared a narrower set can only ever REMOVE authority — applied on every
@@ -151,7 +134,8 @@ function credentialPermitsWrite(req: Request): boolean {
 function isFeatureConfigured(job: ScheduledJob): boolean {
   const m = job.metadata ?? {};
   return job.configurable !== undefined || job.inputs !== undefined || job.featureId !== undefined
-    || m.assistantLoop !== undefined || m.purpose !== undefined || m.tool !== undefined;
+    || m.assistantLoop !== undefined || m.purpose !== undefined || m.tool !== undefined
+    || isFeatureReservedJobId(job.jobId);
 }
 
 /**
@@ -359,6 +343,12 @@ export function registerSchedulerRoutes(app: Express, deps: Deps): void {
       // retarget guard (replacing a feature-configured job would drop its
       // `configurable`/`inputs`/`featureId` by the other door). A cross-tenant id
       // still answers `jobid_conflict` from the store, with no existence oracle.
+      // ADR 0908 D2 — an id under a feature-reserved prefix (a goal's continuation)
+      // is minted by that feature only: refusing it here closes both the REPLACE
+      // of an armed job and the SQUAT of one not yet armed.
+      if (explicitJobId && isFeatureReservedJobId(jobId)) {
+        throw new OpenwopError('conflict', GOAL_JOB_MESSAGE, 409, { jobId, managedBy: 'goal' });
+      }
       if (explicitJobId) {
         const prior = await getJob(jobId);
         if (prior && prior.tenantId === tenantId) {
@@ -448,6 +438,13 @@ export function registerSchedulerRoutes(app: Express, deps: Deps): void {
         metadata?: unknown;
         timezone?: unknown;
       };
+      // ADR 0908 D2 — a feature-reserved job (a goal's continuation) is changed
+      // through its feature. Disabling only takes authority away, so it stays
+      // allowed here; enabling is the feature's resume (which checks the goal is
+      // still active), and nothing else is editable.
+      if (isFeatureReservedJobId(job.jobId) && !(body.enabled === false && body.cronExpr === undefined && body.workflowId === undefined && body.metadata === undefined && body.timezone === undefined)) {
+        throw new OpenwopError('conflict', GOAL_JOB_MESSAGE, 409, { jobId: job.jobId, managedBy: 'goal' });
+      }
       const patch: Parameters<typeof updateJob>[1] = {};
       if (body.enabled !== undefined) {
         if (typeof body.enabled !== 'boolean') {
@@ -540,6 +537,11 @@ export function registerSchedulerRoutes(app: Express, deps: Deps): void {
       // `actingUserId`; a job paused because that member left must be re-owned
       // before it runs as anyone.
       if (isPausedForRemovedMember(job)) throw new ActingMemberRemovedError(job.jobId, Boolean(job.featureId));
+      // ADR 0908 (`GL2CD-5`) — a paused goal continuation is not run by hand: its
+      // goal's resume is the one door that turns it back on.
+      if (isFeatureReservedJobId(job.jobId) && !job.enabled) {
+        throw new OpenwopError('conflict', GOAL_JOB_MESSAGE, 409, { jobId: job.jobId, managedBy: 'goal' });
+      }
       // §B.2 fire-once-per-tick: advance the deterministic clock once.
       const result = singleTick(req.params.jobId);
       const tick = currentTick();

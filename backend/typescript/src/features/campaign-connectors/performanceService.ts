@@ -75,6 +75,24 @@ export async function persistRecords(
   return { imported, deduped };
 }
 
+/** ADR 0907 D3 — before ADR 0907 a campaign-level synced row was labelled
+ *  `adSet:'dispatched'`; it is now `'(campaign)'`. When a re-pull lands a
+ *  campaign-level row, delete the legacy-labelled API row for the same
+ *  (platform, campaign, date), or both would count that day. CSV rows are
+ *  never touched. */
+export async function deleteLegacyDispatchedRows(
+  tenantId: string, orgId: string, rows: ReadonlyArray<{ platform: string; campaignName: string; date: string }>,
+): Promise<number> {
+  const wanted = new Set(rows.map((r) => naturalKey({ ...r, adSet: 'dispatched' })));
+  let removed = 0;
+  for (const rec of await records.listByPrefix(`${tenantId}::`)) {
+    if (rec.orgId !== orgId || rec.source !== 'api' || rec.adSet !== 'dispatched') continue;
+    if (!wanted.has(naturalKey(rec))) continue;
+    if (await records.delete(`${tenantId}::${rec.id}`)) removed += 1;
+  }
+  return removed;
+}
+
 /** Import a CSV blob: parse → map (autodetect unless overridden) → validate → persist. */
 export async function importCsv(
   tenantId: string, orgId: string, csv: string,
@@ -137,22 +155,39 @@ export async function kpiSummary(tenantId: string, orgId?: string, campaignId?: 
   const all = await listRecords(tenantId, orgId, campaignId);
   const recordCurrencies = new Set(all.map((r) => r.currency).filter((v): v is string => !!v));
   const { currency, mixed: currencyMixed, known: currencyKnown } = await resolveKpiCurrency(tenantId, recordCurrencies, orgId, campaignId);
-  const t = { spend: 0, impressions: 0, clicks: 0, conversions: 0, revenue: 0 };
-  const byPlat = new Map<AdPlatform, { spend: number; impressions: number; clicks: number; conversions: number; revenue: number }>();
+  // ADR 0907 D3 — a `null` conversions/revenue is UNREPORTED, not zero. Totals
+  // sum the reported values; each ratio divides by the spend/clicks of the rows
+  // that reported its numerator (`spendR`, `spendC`, `clicksC`), so a platform
+  // that cannot report revenue does not drag ROAS toward 0. `unreported`
+  // counts the rows left out, so a reader can say so.
+  type Acc = { spend: number; impressions: number; clicks: number; conversions: number; revenue: number; spendC: number; clicksC: number; spendR: number };
+  const zero = (): Acc => ({ spend: 0, impressions: 0, clicks: 0, conversions: 0, revenue: 0, spendC: 0, clicksC: 0, spendR: 0 });
+  const add = (a: Acc, r: CampaignPerformanceRecord): void => {
+    a.spend += r.spend; a.impressions += r.impressions; a.clicks += r.clicks;
+    if (r.conversions !== null) { a.conversions += r.conversions; a.spendC += r.spend; a.clicksC += r.clicks; }
+    if (r.revenue !== null) { a.revenue += r.revenue; a.spendR += r.spend; }
+  };
+  const t = zero();
+  const byPlat = new Map<AdPlatform, Acc>();
+  const unreported = { conversions: 0, revenue: 0 };
   let start = ''; let end = '';
   for (const r of all) {
-    t.spend += r.spend; t.impressions += r.impressions; t.clicks += r.clicks; t.conversions += r.conversions; t.revenue += r.revenue;
-    const p = byPlat.get(r.platform) ?? { spend: 0, impressions: 0, clicks: 0, conversions: 0, revenue: 0 };
-    p.spend += r.spend; p.impressions += r.impressions; p.clicks += r.clicks; p.conversions += r.conversions; p.revenue += r.revenue;
+    add(t, r);
+    const p = byPlat.get(r.platform) ?? zero();
+    add(p, r);
     byPlat.set(r.platform, p);
+    if (r.conversions === null) unreported.conversions += 1;
+    if (r.revenue === null) unreported.revenue += 1;
     if (!start || r.date < start) start = r.date;
     if (!end || r.date > end) end = r.date;
   }
   const div = (a: number, b: number): number => (b > 0 ? Number((a / b).toFixed(4)) : 0);
+  const pub = ({ spend, impressions, clicks, conversions, revenue }: Acc) => ({ spend, impressions, clicks, conversions, revenue });
   return {
-    totals: { ...t, ctr: div(t.clicks, t.impressions), cpc: div(t.spend, t.clicks), cvr: div(t.conversions, t.clicks), cpa: div(t.spend, t.conversions), roas: div(t.revenue, t.spend) },
-    byPlatform: [...byPlat.entries()].map(([platform, p]) => ({ platform, ...p, roas: div(p.revenue, p.spend) })).sort((a, b) => b.spend - a.spend),
+    totals: { ...pub(t), ctr: div(t.clicks, t.impressions), cpc: div(t.spend, t.clicks), cvr: div(t.conversions, t.clicksC), cpa: div(t.spendC, t.conversions), roas: div(t.revenue, t.spendR) },
+    byPlatform: [...byPlat.entries()].map(([platform, p]) => ({ platform, ...pub(p), roas: div(p.revenue, p.spendR) })).sort((a, b) => b.spend - a.spend),
     recordCount: all.length,
+    ...(unreported.conversions > 0 || unreported.revenue > 0 ? { unreported } : {}),
     dateRange: start ? { start, end } : null,
     currency,
     currencyMixed,

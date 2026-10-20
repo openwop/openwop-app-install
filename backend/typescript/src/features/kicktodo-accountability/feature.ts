@@ -36,7 +36,7 @@ export const kicktodoAccountabilityFeature: BackendFeature = {
   dependsOn: ['kicktodo-core'],
   surface: { id: 'kicktodo-accountability', build: buildKicktodoAccountabilitySurface },
   requiredPacks: [
-    { name: 'feature.kicktodo.nodes', version: '1.37.0' },
-    { name: 'vendor.openwop-app.kicktodo.agents', version: '1.9.4' },
+    'feature.kicktodo.nodes',
+    'vendor.openwop-app.kicktodo.agents',
   ],
 };

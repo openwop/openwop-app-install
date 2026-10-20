@@ -131,6 +131,7 @@ export async function collectEventBatch(tenantId: string, events: unknown): Prom
 // events past the window; age on `at`. No-op on falsy tenant / non-PII classification.
 registerRetentionPurger({
   feature: 'cdp',
+  dryRun: 'rows-by-age',
   async purge(tenantId, classification, cutoffIso) {
     if (!tenantId || classification !== 'confidential-pii') return 0;
     return purgeRowsByAge('cdp:collected-event', await store.listForTenantIndexed(tenantId), tenantId, cutoffIso,

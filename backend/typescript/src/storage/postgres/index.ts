@@ -2110,6 +2110,19 @@ export async function openPostgresStorage(options: PostgresStorageOptions | stri
       return r.rowCount ?? 0;
     },
 
+    async countPrunableEngineRows(cutoffIso, cutoffMs) {
+      // The same predicates as the two prunes above, counted.
+      const runs = await pool.query<{ n: string }>(
+        `SELECT COUNT(*) AS n FROM runs WHERE status = ANY($1::text[]) AND updated_at < $2`,
+        [[...TERMINAL_RUN_STATUSES], cutoffIso],
+      );
+      const deliveries = await pool.query<{ n: string }>(
+        `SELECT COUNT(*) AS n FROM webhook_deliveries WHERE status IN ('delivered','dead') AND updated_at < $1`,
+        [cutoffMs],
+      );
+      return { terminalRuns: Number(runs.rows[0]?.n ?? 0), webhookDeliveries: Number(deliveries.rows[0]?.n ?? 0) };
+    },
+
     async deleteAllTenantData(tenantId) {
       // ADR 0284 — introspection-complete teardown, the delete twin of
       // `reassignTenant` below (same doctrine: every `tenant_id` table is covered

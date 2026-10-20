@@ -113,7 +113,7 @@ export const commerceConnectFeature: BackendFeature = {
     // `scripts/check-pack-version-bump.mjs` exists to prevent. Every other
     // feature in the repo holds this invariant (measured: 113/113); nothing
     // enforces it mechanically yet.
-    { name: 'feature.commerce-connect.nodes', version: '1.0.2' },
+    'feature.commerce-connect.nodes',
   ],
   toggleDefault: {
     id: 'commerce-connect',

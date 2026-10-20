@@ -187,8 +187,10 @@ export async function buildAttribution(tenantId: string, orgId: string): Promise
     const joinKey = keyOf(campaign);
     const perf = records.filter((r) => (r.campaignId ? r.campaignId === campaign.id : r.campaignName === campaign.name));
     const spend = perf.reduce((s, r) => s + r.spend, 0);
-    const revenue = perf.reduce((s, r) => s + r.revenue, 0);
-    const platformConversions = perf.reduce((s, r) => s + r.conversions, 0);
+    // Platform-REPORTED totals: a row whose platform cannot report the value
+    // (ADR 0907 D3 `null`) contributes nothing rather than a fake 0.
+    const revenue = perf.reduce((s, r) => s + (r.revenue ?? 0), 0);
+    const platformConversions = perf.reduce((s, r) => s + (r.conversions ?? 0), 0);
     // Only the primary (first-by-id) campaign for this join key owns its web
     // conversions — a shared key attributes once, never per-campaign.
     const isPrimaryForKey = byKey.get(joinKey)?.[0] === campaign.id;

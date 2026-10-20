@@ -25,6 +25,7 @@ import { OpenwopError } from '../../types.js';
 import { BACKEND_FEATURES } from '../index.js';
 import { isParkedPackDirName } from '../../bootstrap/mountLocalPacks.js';
 import { classifyPackDir, type PackTrustTier } from '../../host/packTrust.js';
+import { featureRequiredPacks } from '../packPins.js';
 
 const MARKER = '.openwop-installed.json';
 
@@ -204,7 +205,7 @@ export function listListings(): Listing[] {
 function requiredByIndex(): Map<string, Set<string>> {
   const requiredBy = new Map<string, Set<string>>();
   for (const feature of BACKEND_FEATURES) {
-    for (const ref of feature.requiredPacks ?? []) {
+    for (const ref of featureRequiredPacks(feature)) {
       const key = `${ref.name}@${ref.version}`;
       if (!requiredBy.has(key)) requiredBy.set(key, new Set());
       requiredBy.get(key)!.add(feature.id);

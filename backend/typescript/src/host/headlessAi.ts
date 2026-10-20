@@ -460,9 +460,20 @@ export type HeadlessEmbedder = {
   /** Which model the closure will call — recorded on cache rows for mismatch detection. */
   model: string;
   provider: string;
-  /** Embed a batch (internally chunked ≤64 per call). Vectors are L2-normalized. */
-  embed: (texts: readonly string[]) => Promise<number[][]>;
+  /** Embed a batch (internally chunked ≤64 per call). Vectors are L2-normalized.
+   *  `inputType` (ADR 0904 D2) defaults to `document`; a search passes `query`. */
+  embed: (texts: readonly string[], inputType?: 'query' | 'document') => Promise<number[][]>;
+  /** ADR 0904 D2 — set when this provider's DOCUMENT-side vectors changed with the
+   *  query/document split (Google: it now sends `RETRIEVAL_DOCUMENT` where it sent no task
+   *  type). It joins the namespace signature and the vector-cache validity, so vectors
+   *  embedded before the split are never reused under it. Absent for providers whose
+   *  document side did not change (OpenAI has no input type; Cohere always indexed
+   *  `search_document`). */
+  embedVersion?: 'q1';
 };
+
+/** ADR 0904 D2 — which providers' document vectors changed with `inputType`. */
+const EMBED_VERSION: Record<string, 'q1' | undefined> = { google: 'q1' };
 
 const EMBED_BATCH = 64;
 
@@ -479,14 +490,16 @@ export async function resolveHeadlessEmbedder(tenantId: string, dimensions: numb
     return null;
   }
   const provider = def.provider;
+  const embedVersion = EMBED_VERSION[provider];
   return {
     model,
     provider,
-    embed: async (texts) => {
+    ...(embedVersion ? { embedVersion } : {}),
+    embed: async (texts, inputType = 'document') => {
       const out: number[][] = [];
       for (let i = 0; i < texts.length; i += EMBED_BATCH) {
         const batch = texts.slice(i, i + EMBED_BATCH);
-        const r = await dispatchEmbeddings({ provider, model, apiKey, texts: batch, dimensions });
+        const r = await dispatchEmbeddings({ provider, model, apiKey, texts: batch, dimensions, inputType });
         out.push(...r.vectors);
       }
       return out;
@@ -516,13 +529,15 @@ export async function resolveHeadlessEmbedderForSpec(
     return null;
   }
   const provider = spec.provider;
+  const embedVersion = EMBED_VERSION[provider];
   return {
     model,
     provider,
-    embed: async (texts) => {
+    ...(embedVersion ? { embedVersion } : {}),
+    embed: async (texts, inputType = 'document') => {
       const out: number[][] = [];
       for (let i = 0; i < texts.length; i += EMBED_BATCH) {
-        const r = await dispatchEmbeddings({ provider, model, apiKey, texts: texts.slice(i, i + EMBED_BATCH), dimensions });
+        const r = await dispatchEmbeddings({ provider, model, apiKey, texts: texts.slice(i, i + EMBED_BATCH), dimensions, inputType });
         out.push(...r.vectors);
       }
       return out;
@@ -544,7 +559,8 @@ export async function resolveHeadlessEmbedderMaybeTest(tenantId: string, dimensi
 export async function resolveHeadlessEmbedderForSpecMaybeTest(tenantId: string, spec: { provider: string; model?: string; credentialRef?: string }, dimensions: number): Promise<HeadlessEmbedder | null> {
   if (embedderOverride) {
     const base = await embedderOverride(tenantId, dimensions);
-    return base ? { ...base, provider: spec.provider, model: spec.model || EMBEDDING_MODELS[spec.provider] || base.model } : null;
+    const embedVersion = EMBED_VERSION[spec.provider];
+    return base ? { ...base, provider: spec.provider, model: spec.model || EMBEDDING_MODELS[spec.provider] || base.model, ...(embedVersion ? { embedVersion } : {}) } : null;
   }
   return resolveHeadlessEmbedderForSpec(tenantId, spec, dimensions);
 }

@@ -47,6 +47,9 @@ vi.mock('../campaignConnectorsClient.js', async (orig) => {
     getSyncStatus: (..._a: unknown[]) => getSyncStatus(),
     listConversions: (..._a: unknown[]) => listConversions(),
     dispatchConversions: (...a: unknown[]) => dispatchConversions(...a),
+    getConnectorSettings: vi.fn(async () => ({ orgId: 'org-1', platform: 'meta', syncScope: 'dispatched', adAccountIds: [], updatedAt: '' })),
+    getPlatformStatus: vi.fn(async () => ({ liveSync: ['meta', 'google'], liveConversions: ['meta'] })),
+    getConversionHealth: vi.fn(async () => { throw new Error('not under test'); }),
   };
 });
 vi.mock('../../../ui/confirm.js', () => ({ confirm: (o: ConfirmOptions) => confirmMock(o) }));
@@ -128,6 +131,16 @@ describe('CC-G2: KPI totals never claim a currency the workspace does not use', 
     await view();
     expect(screen.getAllByText(/£12,345/).length).toBeGreaterThan(0);
     expect(screen.queryByText(/more than one currency/i)).toBeNull();
+  });
+
+  it('ADR 0907 D3: records a platform could not report are NAMED, not shown as a silent zero', async () => {
+    getKpi.mockResolvedValue({ ...kpi('USD', false), unreported: { conversions: 0, revenue: 3 } });
+    await view();
+    expect(screen.getByText(/3 record\(s\) have no revenue/i)).toBeTruthy();
+    getKpi.mockResolvedValue(kpi('USD', false));
+    cleanup();
+    await view();
+    expect(screen.queryByText(/have no revenue/i)).toBeNull();
   });
 
   it('a MIXED workspace drops the symbol and explains why', async () => {

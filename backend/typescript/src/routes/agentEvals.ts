@@ -185,11 +185,12 @@ export function registerAgentEvalRoutes(app: Express, deps: { storage: Storage }
       // Review H3 — `wrapId` picks ONE turn/node of a multi-turn run; default is every call in order.
       const boundary = await listRunBoundary(tenantId, run.runId, typeof body.wrapId === 'string' ? { wrapId: body.wrapId } : {});
       if (boundary.length === 0) throw new OpenwopError('validation_error', 'That run has no captured tool calls (turn on capture for the agent, then run it again).', 400, { field: 'fromRunId', reason: 'nothing_captured' });
-      // AEV-6 (host stopgap) — the v2 fixture item has no error field, so a recorded
-      // FAILURE would replay to the agent as a success. Refuse rather than lie; pick
-      // another turn (`wrapId`) or run. Lifting this needs an RFC 0244 fixture field.
+      // AEV-6 — a recorded FAILURE must replay as a failure. With RFC 0245
+      // (`agents.evalSuite.fixtureErrors`, ADR 0929) it is promoted as an
+      // `isError: true` fixture entry. Without the advert the fixture item has no
+      // error field, so a failure would replay as a success: refuse rather than lie.
       const errored = boundary.filter((b) => b.isError);
-      if (errored.length > 0) {
+      if (errored.length > 0 && evalSuiteCapability().fixtureErrors !== true) {
         throw new OpenwopError('validation_error', `That run's calls include ${errored.length} failed tool call(s), which a fixture cannot replay as failures yet; promote another turn or run.`, 400, {
           field: 'fromRunId', reason: 'errored_call', params: { calls: errored.map((b) => ({ wrapId: b.wrapId, seq: b.seq, tool: b.tool })) },
         });

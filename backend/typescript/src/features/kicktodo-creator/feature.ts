@@ -46,5 +46,5 @@ export const kicktodoCreatorFeature: BackendFeature = {
   },
   dependsOn: ['kicktodo-core'],
   surface: { id: 'kicktodo-creator', build: buildKicktodoCreatorSurface },
-  requiredPacks: [{ name: 'feature.kicktodo.nodes', version: '1.37.0' }],
+  requiredPacks: ['feature.kicktodo.nodes'],
 };

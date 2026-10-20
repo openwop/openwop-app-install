@@ -88,7 +88,10 @@ const ALLOWED: Record<string, number> = {
   'features/consent/consentService.ts': 1,
   // Money / compliance truth: applies whatever the plan.
   'features/promotions/promotionsService.ts': 1,
-  'features/email/emailService.ts': 1,
+  // 1: the CRM merge relink (compliance truth, as above). 2 (ADR 0905 D4): the
+  // `email-approval-gate` read — OFF loosens a restriction (unapproved sends), so a
+  // paywalled read would fail OPEN on a lapsed plan (the territories/consent reason).
+  'features/email/emailService.ts': 2,
   // A tool gate whose every caller then applies the plan with its own message.
   'features/email/agentTools.ts': 1,
 };

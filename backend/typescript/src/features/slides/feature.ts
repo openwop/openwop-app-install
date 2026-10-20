@@ -53,7 +53,7 @@ export const slidesFeature: BackendFeature = {
   // while it is off.
   recommends: ['comments'],
   requiredPacks: [
-    { name: 'feature.slides.nodes', version: '1.1.3' },
-    { name: 'vendor.openwop-app.slides.agents', version: '1.1.2' },
+    'feature.slides.nodes',
+    'vendor.openwop-app.slides.agents',
   ],
 };

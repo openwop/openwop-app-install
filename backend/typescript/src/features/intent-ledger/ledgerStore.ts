@@ -57,6 +57,7 @@ const MAX_ITEMS = 50;
 const governs = (l: IntentLedger | null): boolean => l?.status === 'approved' || l?.status === 'expired';
 registerRetentionPurger({
   feature: 'intent-ledger',
+  dryRun: 'rows-by-age',
   async purge(tenantId, classification, cutoffIso) {
     if (!tenantId || classification !== 'confidential-pii') return 0;
     const rows = (await store.listByPrefix(`${tenantId}:`)).filter((l) => !governs(l));

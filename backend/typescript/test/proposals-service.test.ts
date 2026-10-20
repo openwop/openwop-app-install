@@ -6,8 +6,9 @@
  * read guard were never unit-tested directly. This drives `proposalsService`
  * against an in-memory sqlite `DurableCollection`.
  *
- * Activation is pinned to `direct-rbac` (the default), so `applyProposal`
- * installs inline and never reaches `createApproval` — the test stays pure.
+ * ADR 0938 — the writers take the row read (CAS on it), follow one transition
+ * table, and `applyProposal` installs only through a registered installer. The
+ * approval-gate branch and the hash-as-install ref are gone.
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -21,7 +22,9 @@ import {
   archiveProposal,
   applyProposal,
   putProposal,
-  MalformedForKindError,
+  registerProposalInstaller,
+  artifactDigestOf,
+  DEMO_PROPOSAL_ID,
   __test,
 } from '../src/features/proposals/proposalsService.js';
 import type { Proposal } from '../src/features/proposals/types.js';
@@ -43,18 +46,21 @@ const draft = (tenant: string, id: string, overrides: Partial<Proposal> = {}): P
 });
 
 describe('proposalsService (service layer, in-memory durable)', () => {
-  const prevActivation = process.env.OPENWOP_PROPOSALS_ACTIVATION;
-
   beforeEach(async () => {
-    process.env.OPENWOP_PROPOSALS_ACTIVATION = 'direct-rbac';
     initHostExtPersistence(openSqliteStorage(':memory:'));
     await __test.collection.__clear();
   });
 
   afterEach(() => {
-    if (prevActivation === undefined) delete process.env.OPENWOP_PROPOSALS_ACTIVATION;
-    else process.env.OPENWOP_PROPOSALS_ACTIVATION = prevActivation;
+    __test.installers.clear();
   });
+
+  const load = async (tenant: string, id: string): Promise<Proposal> => {
+    const p = await getProposal(tenant, id);
+    expect(p).not.toBeNull();
+    return p!;
+  };
+  const seen = (p: Proposal) => ({ revision: p.revision ?? 0, artifactDigest: artifactDigestOf(p.artifact) });
 
   it('putProposal → getProposal round-trips the inert record', async () => {
     await putProposal(draft(TENANT_A, 'p1'));
@@ -84,55 +90,78 @@ describe('proposalsService (service layer, in-memory durable)', () => {
     expect(await listProposals(TENANT_B)).toHaveLength(0);
   });
 
-  it('reviseProposal edits a draft → revised but never activates; terminal states are no-ops', async () => {
+  it('reviseProposal edits a draft → revised, bumps the revision, never activates; applied is terminal (409)', async () => {
     await putProposal(draft(TENANT_A, 'p1'));
-    const revised = await reviseProposal(TENANT_A, 'p1', { title: 'Tighter', rationale: 'why' });
-    expect(revised!.state).toBe('revised');
-    expect(revised!.title).toBe('Tighter');
-    expect(revised!.rationale).toBe('why');
-    expect(revised!.activation).toBeUndefined();
+    const revised = await reviseProposal(await load(TENANT_A, 'p1'), { title: 'Tighter', rationale: 'why' });
+    expect(revised.state).toBe('revised');
+    expect(revised.title).toBe('Tighter');
+    expect(revised.rationale).toBe('why');
+    expect(revised.revision).toBe(1);
+    expect(revised.activation).toBeUndefined();
 
-    // an applied proposal is terminal — revise is a no-op that returns it unchanged
     await putProposal(draft(TENANT_A, 'p2', { state: 'applied', activation: { approvalId: null, installedArtifactRef: 'ref' } }));
-    const noop = await reviseProposal(TENANT_A, 'p2', { title: 'no' });
-    expect(noop!.state).toBe('applied');
-    expect(noop!.title).not.toBe('no');
+    await expect(reviseProposal(await load(TENANT_A, 'p2'), { title: 'no' })).rejects.toMatchObject({ httpStatus: 409 });
+    expect((await load(TENANT_A, 'p2')).title).not.toBe('no');
   });
 
-  it('reject and archive transition state; foreign tenant → null', async () => {
+  it('reject and archive transition state; rejected may only be archived', async () => {
     await putProposal(draft(TENANT_A, 'p1'));
-    expect((await rejectProposal(TENANT_A, 'p1'))!.state).toBe('rejected');
-    await putProposal(draft(TENANT_A, 'p2'));
-    expect((await archiveProposal(TENANT_A, 'p2'))!.state).toBe('archived');
-
-    expect(await rejectProposal(TENANT_B, 'p1')).toBeNull();
-    expect(await archiveProposal(TENANT_B, 'p2')).toBeNull();
+    expect((await rejectProposal(await load(TENANT_A, 'p1'))).state).toBe('rejected');
+    await expect(reviseProposal(await load(TENANT_A, 'p1'), { title: 'x' })).rejects.toMatchObject({ httpStatus: 409 });
+    expect((await archiveProposal(await load(TENANT_A, 'p1'))).state).toBe('archived');
+    await expect(archiveProposal(await load(TENANT_A, 'p1'))).rejects.toMatchObject({ httpStatus: 409 });
   });
 
-  it('applyProposal (direct-rbac) installs the stored bytes verbatim and is deterministic', async () => {
+  it('a write over a row someone else changed is refused (CAS), and a stated revision must match', async () => {
     await putProposal(draft(TENANT_A, 'p1'));
-    const res = await applyProposal(TENANT_A, 'p1');
-    expect(res).not.toBeNull();
-    expect(res!.proposal.state).toBe('applied');
-    expect(res!.pendingApprovalId).toBeUndefined(); // no approval gate
-    expect(res!.installedArtifactRef).toMatch(/^installed:prompt-template:p1:/);
-
-    // proposal-no-resynthesis: re-applying the same stored bytes yields the same ref
-    const again = await applyProposal(TENANT_A, 'p1');
-    expect(again!.installedArtifactRef).toBe(res!.installedArtifactRef);
-
-    // and the applied state is persisted
-    const reread = await getProposal(TENANT_A, 'p1');
-    expect(reread!.state).toBe('applied');
-    expect(reread!.activation!.installedArtifactRef).toBe(res!.installedArtifactRef);
+    const read = await load(TENANT_A, 'p1');
+    await reviseProposal(read, { title: 'first' });
+    await expect(rejectProposal(read)).rejects.toMatchObject({ httpStatus: 409 }); // stale row
+    await expect(rejectProposal(await load(TENANT_A, 'p1'), 0)).rejects.toMatchObject({ httpStatus: 409 }); // stale revision
+    expect((await load(TENANT_A, 'p1')).state).toBe('revised');
   });
 
-  it('applyProposal rejects a malformed artifact for its kind', async () => {
-    await putProposal(draft(TENANT_A, 'bad', { artifact: {} })); // empty artifact
-    await expect(applyProposal(TENANT_A, 'bad')).rejects.toBeInstanceOf(MalformedForKindError);
+  it('applyProposal with no installer for the kind refuses and changes nothing (ADR 0938 D1)', async () => {
+    await putProposal(draft(TENANT_A, 'p1'));
+    const p = await load(TENANT_A, 'p1');
+    await expect(applyProposal(p, seen(p))).rejects.toMatchObject({ httpStatus: 409, details: { reason: 'proposal_not_installable' } });
+    const after = await load(TENANT_A, 'p1');
+    expect(after.state).toBe('draft');
+    expect(after.activation).toBeUndefined();
   });
 
-  it('applyProposal on a missing id returns null', async () => {
-    expect(await applyProposal(TENANT_A, 'nope')).toBeNull();
+  it('applyProposal installs the stored bytes verbatim through the registered installer', async () => {
+    const handed: Array<Record<string, unknown>> = [];
+    registerProposalInstaller('prompt-template', {
+      async install(_t, prop) { handed.push(prop.artifact); return { installedArtifactRef: 'tmpl:1' }; },
+    });
+    await putProposal(draft(TENANT_A, 'p1'));
+    const p = await load(TENANT_A, 'p1');
+    const res = await applyProposal(p, seen(p));
+    expect(res.installedArtifactRef).toBe('tmpl:1');
+    expect(handed).toEqual([p.artifact]); // proposal-no-resynthesis: the stored bytes, unchanged
+    const reread = await load(TENANT_A, 'p1');
+    expect(reread.state).toBe('applied');
+    expect(reread.activation).toEqual({ approvalId: null, installedArtifactRef: 'tmpl:1' });
+    await expect(applyProposal(reread, seen(reread))).rejects.toMatchObject({ httpStatus: 409 }); // terminal
+  });
+
+  it('applyProposal bound to a stale digest is refused before the installer runs', async () => {
+    let calls = 0;
+    registerProposalInstaller('prompt-template', { async install() { calls += 1; return { installedArtifactRef: 'x' }; } });
+    await putProposal(draft(TENANT_A, 'p1'));
+    const p = await load(TENANT_A, 'p1');
+    await expect(applyProposal(p, { revision: 0, artifactDigest: 'not-it' })).rejects.toMatchObject({ details: { reason: 'proposal_stale' } });
+    expect(calls).toBe(0);
+  });
+
+  it('the digest ignores key order (ADR 0938 A3)', () => {
+    expect(artifactDigestOf({ a: 1, b: { c: 2, d: 3 } })).toBe(artifactDigestOf({ b: { d: 3, c: 2 }, a: 1 }));
+  });
+
+  it('the seeded demo row is never served (ADR 0938 D8)', async () => {
+    await putProposal(draft(TENANT_A, DEMO_PROPOSAL_ID));
+    expect(await getProposal(TENANT_A, DEMO_PROPOSAL_ID)).toBeNull();
+    expect(await listProposals(TENANT_A)).toEqual([]);
   });
 });

@@ -1,6 +1,10 @@
 # ADR 0295 — Funnel B: custom domains + TLS for published content
 
 **Status:** implemented (host-side halves, 2026-07-06) — **P0 pinned: option A with the GCLB certificate map** (matches the existing GCP deployment; no second vendor; subdomains-first, apex via the DNS host's ALIAS). P1: `custom-domains` feature (hostname-PK rows — globally unique so no cross-tenant claim; `_openwop-verify.<host>` TXT ownership check with an injectable resolver; disable-don't-delete on a clean negative; resolver noise never demotes a live domain; 6h re-check sweep). P2: `middleware/customDomain.ts` — the fail-closed host guard (org-pinned, public-only allowlist: published pages/funnels + the storefront; authed app/protocol surface never serve on customer hostnames; platform origin byte-identical; `public-forms` excluded in v1 — no orgId in its path to pin). P3: per-domain fixed-window rate budget (`OPENWOP_CUSTOM_DOMAIN_REQS_PER_MIN`, default 600) + the DEPLOY.md operator recipe. The TLS/routing tier (cert map, LB) is OPERATOR INFRASTRUCTURE per the option-A design — deliberately not app code; certificate-map automation from the domain rows is the recorded follow-on.
+> **CORRECTED 2026-10-17 (ADR 0906):** the follow-on is taken by ADR 0906. Two claims above no longer hold:
+> - "The TLS/routing tier is operator infrastructure" is now true only of the one-time edge (`scripts/custom-domain-edge.sh`). Per-domain certificates come from the app through the `host/edgeCertificates/` port (P1). Under the default `manual` provider they are still issued by the operator.
+> - This ADR's P2 guard, described as "fail-closed", passed every host through when its lookup threw. ADR 0906 P0 closed that.
+> - Separately, no GCLB had ever been applied in production (ADR 0860 measurement; ADR 0384 correction).
 **Date:** 2026-07-06 · **Program:** [ADR 0293](0293-funnel-program.md) · **Closes:** FM-4
 (the ADR 0012 explicit deferral: "Custom domains + SSL + static export/deploy —
 Deferred (real hosting infra)")

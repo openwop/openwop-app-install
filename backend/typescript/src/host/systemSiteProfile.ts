@@ -15,9 +15,16 @@
  *
  * Copy rules: the PROTOCOL is open source, this app is not; none of the gated
  * assurance claims (openwop-site `check-claims.mjs`).
+ *
+ * ADR 0931 — a distribution replaces all of this with its own profile
+ * (`OPENWOP_SYSTEM_SITE_PROFILE`, `systemSiteConfig.ts`). A configured profile
+ * applies in or out of demo mode, because it is the distribution describing
+ * itself. A profile that is set but invalid yields `null` (the generic output),
+ * never the OpenWOP one.
  */
 import { demoMode } from './demoMode.js';
 import { SYSTEM_SITE_ORG } from './systemSite.js';
+import { configuredSiteProfile } from './systemSiteConfig.js';
 
 export const OPENWOP_SITE_URL = 'https://openwop.dev';
 
@@ -44,7 +51,17 @@ export interface SiteProfile {
 /** The profile for one page of the system site, or null (every other org, or
  *  a non-demo install) — the caller then renders exactly what it always did. */
 export function systemSiteProfile(orgId: string, slug: string, baseUrl: string, description: string): SiteProfile | null {
-  if (orgId !== SYSTEM_SITE_ORG || !demoMode()) return null;
+  if (orgId !== SYSTEM_SITE_ORG) return null;
+  const configured = configuredSiteProfile();
+  if (configured !== undefined) {
+    if (!configured) return null;
+    return {
+      siteName: configured.siteName,
+      organizationSameAs: configured.organizationSameAs,
+      pageBlocks: slug === 'home' ? configured.homeJsonLd : [],
+    };
+  }
+  if (!demoMode()) return null;
   const origin = baseUrl.replace(/\/+$/, '');
   const home = slug === 'home';
   return {
@@ -75,7 +92,10 @@ export function systemSiteProfile(orgId: string, slug: string, baseUrl: string, 
 /** The `/llms.txt` head for the system site: a title + one-paragraph
  *  definition before the docs listing, or null (generic head). */
 export function systemSiteLlmsPreamble(orgId: string): { title: string; summary: string; body: string } | null {
-  if (orgId !== SYSTEM_SITE_ORG || !demoMode()) return null;
+  if (orgId !== SYSTEM_SITE_ORG) return null;
+  const configured = configuredSiteProfile();
+  if (configured !== undefined) return configured?.llms ?? null;
+  if (!demoMode()) return null;
   return {
     title: 'OpenWOP reference app',
     summary: 'The reference app for OpenWOP, the open-source protocol for multi-agent workflow orchestration.',

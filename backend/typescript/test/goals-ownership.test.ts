@@ -11,6 +11,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
 import type { Storage } from '../src/storage/storage.js';
+import { buildRunRecord } from '../src/host/runDispatch.js';
 import { initHostExtPersistence, __resetHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { registerGoalVerifier, __clearGoalVerifiers } from '../src/features/goals/goalVerifiers.js';
 import {
@@ -55,6 +56,8 @@ describe('principal-owned goal mutations', () => {
   it('foreign principal: every mutation is null (uniform not-found); owner succeeds', async () => {
     registerGoalVerifier('own:v', async () => ({ satisfied: false, confidence: 0.5, runId: 'run-own' }));
     const id = await ownedGoal();
+    // ADR 0908 D5 — contributing runs must exist in the goal's tenant.
+    for (const runId of ['run:evil', 'run:surface']) await storage.insertRun(buildRunRecord({ runId, workflowId: 'wf', tenantId: TENANT }));
 
     // Foreign principal — all mutations indistinguishable from absent.
     expect(await updateGoal(TENANT, id, { objective: 'hijack' }, STRANGER)).toBeNull();
@@ -96,6 +99,12 @@ describe('principal-owned goal mutations', () => {
     expect(replayed?.replayed).toBe(true);
     expect(replayed?.verdict.runId).toBe('run-keep');
     expect((await getGoal(TENANT, id))?.objective).toBe('Edited objective');
+  });
+
+  it('a principal-owned goal accepts ANY spelling of its owner (ADR 0908 D1, GL2WF-10)', async () => {
+    const id = await ownedGoal();
+    expect(await transitionGoal(TENANT, id, 'pause', [STRANGER])).toBeNull();
+    expect((await transitionGoal(TENANT, id, 'pause', ['oidc:alice-sub', OWNER]))?.state).toBe('active');
   });
 
   it('principal-less goals keep tenant-only semantics', async () => {

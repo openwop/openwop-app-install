@@ -42,6 +42,7 @@ import { applyImport, buildExportBundle } from '../src/features/portability/port
 import { createOrg } from '../src/host/accessControlService.js';
 import { MANIFEST_SIDE_EFFECT_FLOOR, MANIFEST_FAST_PATH_SERVED, MANIFEST_DECLARED_TYPE_IDS } from '../src/executor/sideEffectFloor.generated.js';
 import { isSideEffectingNode } from '../src/executor/sideEffects.js';
+import { pinnedPackRef } from '../src/features/packPins.js';
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 const T = 'pl-vis-tenant';
@@ -215,7 +216,8 @@ describe('ADR 0694 D2 — the prompts nodes are honest reads', () => {
 
   it('leg 9: the feature pin equals the manifest version (RFC 0076 lockstep)', () => {
     const feature = readFileSync(join(REPO, 'backend', 'typescript', 'src', 'features', 'prompts', 'feature.ts'), 'utf8');
-    expect(feature).toContain(`{ name: 'feature.prompts.nodes', version: '${PM.version}' }`);
+    expect(feature).toContain(`'feature.prompts.nodes'`);
+    expect(pinnedPackRef('feature.prompts.nodes').version, 'the pin (features/packPins.ts, ADR 0919) must match the manifest').toBe(PM.version);
   });
 
   it('leg 10: the retired replay claim may appear only inside a correction that disowns it', () => {

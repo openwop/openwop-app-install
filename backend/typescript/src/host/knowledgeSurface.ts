@@ -63,7 +63,13 @@ export interface KnowledgeResultChunk {
   documentTitle: string;
   assetId: string;
   collectionId: string;
+  /** A calibrated relevance in [0,1] (ADR 0904 D4) — the value `scoreThreshold` and a
+   *  consumer's score floor apply to. Not an ordering key: chunks arrive ordered. */
   relevanceScore: number;
+  /** ADR 0904 D4 — the retrieval mode's raw score (cosine / RRF / rerank), for display. */
+  nativeScore?: number;
+  /** ADR 0904 D4 — 1-based position in the fair cross-collection (RRF) ordering. */
+  fusedRank?: number;
   /** Content-trust provenance (RFC 0021 / ADR 0038 §C). `'untrusted'` ⇒ the
    *  consumer MUST fence it (never inject as agent-trusted). Absent ⇒ trusted. */
   contentTrust?: 'trusted' | 'untrusted';

@@ -69,6 +69,7 @@ declarePiiFields('email.soft-bounce-count', ['email'], { maskGloballyByFieldName
 // ADR 0655 D9 (EM-17) — a soft-bounce streak is only meaningful while recent; age it out.
 registerRetentionPurger({
   feature: 'email:soft-bounce-count',
+  dryRun: 'rows-by-age',
   async purge(tenantId, classification, cutoffIso) {
     if (!tenantId || classification !== 'confidential-pii') return 0;
     return purgeRowsByAge('email:soft-bounce-count', await softCounts.listForTenantIndexed(tenantId), tenantId, cutoffIso,

@@ -17,7 +17,8 @@ import type { AddressInfo } from 'node:net';
 import { createApp } from '../src/index.js';
 import type { Storage } from '../src/storage/storage.js';
 import { makeAdsAdapter } from '../src/host/adsAdapter.js';
-import { brokeredPost } from '../src/host/brokeredEgress.js';
+import { brokeredPost, brokeredFetch } from '../src/host/brokeredEgress.js';
+import { registerProvider } from '../src/features/connections/providerRegistry.js';
 import { __resetConnectionsStore, createSecretConnection } from '../src/features/connections/connectionsService.js';
 import { storeMediaAsset } from '../src/host/inMemorySurfaces.js';
 
@@ -177,5 +178,21 @@ describe('TikTok Ads dispatch adapter (ADR 0167 Phase 3)', () => {
     const hit = hits.find((h) => h.path.endsWith('/campaign/create/'));
     expect(hit?.access).toBe('TT_TOKEN'); // the broker token wins; no EVIL variant survived the custom-name strip
     expect(hit?.extra).toBe('ok');         // a genuine custom header still passes
+  });
+
+  it('CRITICAL (ADR 0907 D4): the same guard holds on a GET — brokeredFetch with a custom auth header', async () => {
+    const base = process.env.OPENWOP_TIKTOK_ADS_API_BASE!;
+    // brokeredFetch pins the provider's apiHosts (brokeredPost does not); admit the fixture host.
+    registerProvider({ id: 'tiktok-ads', label: 'TikTok Ads', kind: 'oauth2', authFlow: 'manual', reach: 'openapi', scopes: { read: [] }, refreshable: true, defaultScopes: [], consumerNodes: [], apiHosts: ['127.0.0.1'] });
+    const r = await brokeredFetch(
+      { storage, tenantId: 'tt', runId: 'tr-1', actingUserId: 'u1', orgId: 'tt' },
+      { provider: 'tiktok-ads', method: 'GET', authScheme: 'raw', authHeaderName: 'access-token', url: `${base}/report/integrated/get/?x=1`, extraHeaders: { 'Access-Token': 'EVIL', 'ACCESS-TOKEN': 'EVIL2', Authorization: 'Bearer EVIL3', 'X-Custom': 'ok' } },
+    );
+    expect(r.outcome).toBe('sent');
+    const hit = hits.find((h) => h.path.startsWith('/report/integrated/get/'));
+    expect(hit?.method).toBe('GET');
+    expect(hit?.access).toBe('TT_TOKEN');
+    expect(hit?.auth).toBeUndefined(); // the token has ONE carrier; a smuggled Authorization is stripped too
+    expect(hit?.extra).toBe('ok');
   });
 });

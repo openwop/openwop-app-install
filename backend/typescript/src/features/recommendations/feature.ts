@@ -33,8 +33,8 @@ export const recommendationsFeature: BackendFeature = {
     salt: 'recommendations',
   },
   requiredPacks: [
-    { name: 'feature.recommendations.nodes', version: '1.0.1' },
-    { name: 'vendor.openwop-app.recommendations.agents', version: '1.0.2' },
+    'feature.recommendations.nodes',
+    'vendor.openwop-app.recommendations.agents',
   ],
   dependsOn: ['commerce'],
   // Frequently-bought-together reranking pulls the Priority Matrix weights (imports

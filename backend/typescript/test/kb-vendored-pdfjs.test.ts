@@ -116,13 +116,17 @@ describe('H61 — the KB does not parse with the pdf.js unpdf vendors', () => {
   });
 
   it('keeps `isEvalSupported: false` on the app-controlled getDocumentProxy call', () => {
-    const src = readFileSync(join(BACKEND, 'src', 'features', 'kb', 'kbService.ts'), 'utf8');
+    // ADR 0904 P2 — the call moved to the per-page parser; kbService hands it the proxy
+    // factory from `loadUnpdf()` (asserted below), so the patched pdf.js is still the one.
+    const src = readFileSync(join(BACKEND, 'src', 'features', 'kb', 'parsers', 'pdfPages.ts'), 'utf8');
+    const kb = readFileSync(join(BACKEND, 'src', 'features', 'kb', 'kbService.ts'), 'utf8');
+    expect(kb, 'the PDF lane must take its pdf.js from loadUnpdf()').toContain('extractPdfPages(await loadUnpdf(), buffer)');
     // Deliberately NOT a paren-balanced match: the first draft used a lazy
     // `\(([\s\S]*?)\)` and stopped at the `)` inside `new Uint8Array(buffer)`,
     // so it read the ARGUMENT rather than the call. A fixed window after the
     // call site is cruder and cannot be fooled that way.
     const at = src.indexOf('getDocumentProxy(');
-    expect(at, 'kbService no longer calls getDocumentProxy — re-point this assertion').toBeGreaterThan(-1);
+    expect(at, 'parsers/pdfPages.ts no longer calls getDocumentProxy — re-point this assertion').toBeGreaterThan(-1);
     const call = src.slice(at, at + 200);
     expect(
       call,

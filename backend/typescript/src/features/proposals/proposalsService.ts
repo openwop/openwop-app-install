@@ -1,21 +1,27 @@
 /**
- * Reviewable-learning proposals service (RFC 0096) — host-sample, best-effort.
+ * Reviewable-learning proposals service (RFC 0096) — host-sample.
  *
- * Persisted via a tenant-prefixed DurableCollection. The two SECURITY invariants
- * this service upholds:
- *   - `proposal-inert-until-applied` — a proposal is an inert record; only
- *     `apply()` transitions it to `applied` and installs anything.
- *   - `proposal-no-resynthesis` — `apply()` installs the byte image already
- *     stored on `proposal.artifact` VERBATIM. It imports nothing that could
- *     synthesize/regenerate the artifact (no LLM, no prompt, no agent call);
- *     the installed ref is a pure function of the stored bytes. Asserted by
- *     `test/proposals.test.ts`.
+ * Persisted via a tenant-prefixed DurableCollection. What this service upholds:
+ *   - `proposal-inert-until-applied` — a proposal is an inert record; nothing
+ *     here reaches a run.
+ *   - `proposal-no-resynthesis` — `apply()` hands the byte image already stored
+ *     on `proposal.artifact` to the kind's installer. It imports nothing that
+ *     could synthesize/regenerate the artifact (no LLM, no prompt, no agent).
+ *   - ADR 0938 D1 — `apply()` installs only through a registered installer. This
+ *     host registers NONE today (ADR 0938 D7 says what each kind would need), so
+ *     every apply is refused `proposal_not_installable`. Until 2026-10-19 it
+ *     returned an `installed:<kind>:<id>:<sha>` string and set `applied` while
+ *     installing nothing.
+ *   - ADR 0938 D4 — one transition table, and every write is a CAS on the row
+ *     read, with a per-row `revision`.
+ *   - ADR 0938 D5 — apply names the `{revision, artifactDigest}` its caller saw.
  */
 
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { DurableCollection } from '../../host/hostExtPersistence.js';
-import { createApproval } from '../../host/approvalService.js';
-import { PROPOSAL_KINDS, type Proposal, type ProposalKind, type ProposalState } from './types.js';
+import { canonicalJSON } from '../../host/jcs.js';
+import { OpenwopError } from '../../types.js';
+import type { Proposal, ProposalKind, ProposalState } from './types.js';
 
 // Row key is `${tenant}::${id}` so the collection is tenant-partitioned and a
 // prefix scan lists exactly one tenant's slice (no cross-tenant read).
@@ -29,138 +35,176 @@ const proposals = new DurableCollection<Proposal>('proposals', (p) => `${p.owner
 
 const nowIso = (): string => new Date().toISOString();
 
-/** Advertised activation mode (RFC 0096 §C). Default `direct-rbac`; `approval-gate`
- *  routes apply through an RFC 0051 approval before install. */
-export function activationMode(): 'direct-rbac' | 'approval-gate' {
-  return process.env.OPENWOP_PROPOSALS_ACTIVATION === 'approval-gate' ? 'approval-gate' : 'direct-rbac';
+/**
+ * ADR 0938 D8 — the id the deleted list-time seeder wrote into every workspace
+ * that listed (4 rows in prod, measured 2026-10-19). It cites a run that does not
+ * exist, so no read lane serves it: the rows stay in storage for the operator.
+ */
+export const DEMO_PROPOSAL_ID = 'demo-reviewable-learning';
+
+// ── ADR 0938 D1 — the installer seam ─────────────────────────────────────────
+
+export interface ProposalInstaller {
+  /** Install `proposal.artifact` verbatim; return a ref to what was really written. */
+  install(tenant: string, proposal: Proposal): Promise<{ installedArtifactRef: string }>;
 }
 
-function tenantKeyPrefix(tenant: string): string {
-  return `${tenant}::`;
+const installers = new Map<ProposalKind, ProposalInstaller>();
+
+/** Register the ONE installer for a kind. A kind with none cannot be applied. */
+export function registerProposalInstaller(kind: ProposalKind, installer: ProposalInstaller): void {
+  installers.set(kind, installer);
 }
+
+/** The kinds a proposal can actually be applied as on this host (ADR 0938 D3). */
+export function installableProposalKinds(): ProposalKind[] {
+  return [...installers.keys()].sort();
+}
+
+// ── ADR 0938 D4 — the transition table ───────────────────────────────────────
+
+export type ProposalAction = 'revise' | 'apply' | 'reject' | 'archive';
+
+const TRANSITIONS: Readonly<Record<ProposalState, Partial<Record<ProposalAction, ProposalState>>>> = {
+  draft: { revise: 'revised', apply: 'applied', reject: 'rejected', archive: 'archived' },
+  revised: { revise: 'revised', apply: 'applied', reject: 'rejected', archive: 'archived' },
+  rejected: { archive: 'archived' },
+  applied: {},
+  archived: {},
+};
+
+const PAST: Readonly<Record<ProposalAction, string>> = { revise: 'revised', apply: 'applied', reject: 'rejected', archive: 'archived' };
+
+function nextState(p: Proposal, action: ProposalAction): ProposalState {
+  const to = TRANSITIONS[p.state]?.[action];
+  if (!to) {
+    throw new OpenwopError('conflict', `This proposal is ${p.state}, so it cannot be ${PAST[action]}.`, 409, {
+      reason: 'proposal_state_conflict', state: p.state, action,
+    });
+  }
+  return to;
+}
+
+// ── ADR 0938 D5 — what a reviewer saw ────────────────────────────────────────
+
+export function revisionOf(p: Proposal): number {
+  return typeof p.revision === 'number' ? p.revision : 0;
+}
+
+/** sha256 (hex) of the artifact with keys sorted at every depth (RFC 8785), so a
+ *  storage backend that reorders keys cannot move it (ADR 0938 A3). */
+export function artifactDigestOf(artifact: Record<string, unknown>): string {
+  let bytes: string;
+  try {
+    bytes = canonicalJSON(artifact);
+  } catch {
+    // A stored artifact JCS refuses (a lone surrogate JSON.parse accepted before PATCH
+    // validated it) must not 500 every list it sits in (PROP2CD-1). Still a pure
+    // function of the stored bytes, in a separate domain so it never equals a JCS digest.
+    bytes = `raw:${JSON.stringify(artifact)}`;
+  }
+  return createHash('sha256').update(bytes).digest('hex');
+}
+
+/** The read projection: the stored row plus the two values a decision binds to. */
+export type ProposalView = Proposal & { revision: number; artifactDigest: string };
+
+export function viewOf(p: Proposal): ProposalView {
+  return { ...p, revision: revisionOf(p), artifactDigest: artifactDigestOf(p.artifact) };
+}
+
+function staleError(p: Proposal): OpenwopError {
+  return new OpenwopError('conflict', 'This proposal changed since it was read. Re-read it and decide again.', 409, {
+    reason: 'proposal_stale', revision: revisionOf(p), artifactDigest: artifactDigestOf(p.artifact),
+  });
+}
+
+function assertExpectedRevision(p: Proposal, expected: number | undefined): void {
+  if (expected !== undefined && expected !== revisionOf(p)) throw staleError(p);
+}
+
+/** CAS `next` over exactly the row read; a lost race is `proposal_stale`. */
+async function commit(read: Proposal, next: Proposal): Promise<Proposal> {
+  const written: Proposal = { ...next, revision: revisionOf(read) + 1, updatedAt: nowIso() };
+  if (!(await proposals.compareAndSwap(read, written))) {
+    const now = await proposals.get(`${read.owner.tenant}::${read.id}`);
+    throw staleError(now ?? read);
+  }
+  return written;
+}
+
+// ── reads ────────────────────────────────────────────────────────────────────
 
 export async function listProposals(
   tenant: string,
   filter?: { state?: ProposalState; kind?: ProposalKind },
 ): Promise<Proposal[]> {
-  const rows = await proposals.listByPrefix(tenantKeyPrefix(tenant));
+  const rows = await proposals.listByPrefix(`${tenant}::`);
   return rows
     .filter((p) => p.owner.tenant === tenant)
+    .filter((p) => p.id !== DEMO_PROPOSAL_ID)
     .filter((p) => (filter?.state ? p.state === filter.state : true))
     .filter((p) => (filter?.kind ? p.kind === filter.kind : true))
     .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
 }
 
 export async function getProposal(tenant: string, id: string): Promise<Proposal | null> {
+  if (id === DEMO_PROPOSAL_ID) return null;
   const p = await proposals.get(`${tenant}::${id}`);
   // Tenant guard: never serve a row whose owner.tenant differs from the caller.
   return p && p.owner.tenant === tenant ? p : null;
 }
 
-/** Revise a draft proposal. MUST NOT activate (no state→applied here). */
+// ── writes ───────────────────────────────────────────────────────────────────
+
+/** Revise a draft/revised proposal. MUST NOT activate. */
 export async function reviseProposal(
-  tenant: string,
-  id: string,
+  p: Proposal,
   patch: { title?: string; rationale?: string; artifact?: Record<string, unknown> },
-): Promise<Proposal | null> {
-  const p = await getProposal(tenant, id);
-  if (!p) return null;
-  if (p.state === 'applied' || p.state === 'archived') return p; // terminal — no-op
-  const next: Proposal = {
+  expectedRevision?: number,
+): Promise<Proposal> {
+  assertExpectedRevision(p, expectedRevision);
+  const state = nextState(p, 'revise');
+  return commit(p, {
     ...p,
     ...(patch.title !== undefined ? { title: patch.title } : {}),
     ...(patch.rationale !== undefined ? { rationale: patch.rationale } : {}),
     ...(patch.artifact !== undefined ? { artifact: patch.artifact } : {}),
-    state: 'revised',
-    updatedAt: nowIso(),
-  };
-  await proposals.put(next);
-  return next;
+    state,
+  });
 }
 
-export async function rejectProposal(tenant: string, id: string): Promise<Proposal | null> {
-  const p = await getProposal(tenant, id);
-  if (!p) return null;
-  const next: Proposal = { ...p, state: 'rejected', updatedAt: nowIso() };
-  await proposals.put(next);
-  return next;
+export async function rejectProposal(p: Proposal, expectedRevision?: number): Promise<Proposal> {
+  assertExpectedRevision(p, expectedRevision);
+  return commit(p, { ...p, state: nextState(p, 'reject') });
 }
 
-export async function archiveProposal(tenant: string, id: string): Promise<Proposal | null> {
-  const p = await getProposal(tenant, id);
-  if (!p) return null;
-  const next: Proposal = { ...p, state: 'archived', updatedAt: nowIso() };
-  await proposals.put(next);
-  return next;
-}
-
-/** Thrown when the stored artifact is not shaped for its kind (→ 422 at the route). */
-export class MalformedForKindError extends Error {
-  constructor(public readonly kind: ProposalKind) {
-    super(`Proposal artifact is malformed for kind \`${kind}\`.`);
-  }
+export async function archiveProposal(p: Proposal, expectedRevision?: number): Promise<Proposal> {
+  assertExpectedRevision(p, expectedRevision);
+  return commit(p, { ...p, state: nextState(p, 'archive') });
 }
 
 /**
- * `proposal-no-resynthesis`: the installed ref is a pure, deterministic function
- * of the bytes ALREADY on `proposal.artifact` — a JCS-ish stable hash. No
- * synthesizer is consulted; applying the same stored bytes twice yields the same
- * ref. (This module imports nothing that could regenerate the artifact.)
+ * Apply a proposal (ADR 0938 D1/D4/D5). The caller is scope-checked at the route.
+ * Order: state → binding → installer, so a refusal never depends on whether an
+ * installer exists. With no installer for the kind: 409 `proposal_not_installable`
+ * and the row is untouched.
  */
-function installedRefFor(p: Proposal): string {
-  const bytes = JSON.stringify(p.artifact);
-  const digest = createHash('sha256').update(bytes).digest('hex').slice(0, 16);
-  return `installed:${p.kind}:${p.id}:${digest}`;
-}
-
-/** Light per-kind shape check — a real host would validate against the pack/template schema. */
-function artifactWellFormed(p: Proposal): boolean {
-  if (!p.artifact || typeof p.artifact !== 'object' || Object.keys(p.artifact).length === 0) return false;
-  return PROPOSAL_KINDS.includes(p.kind);
-}
-
-export interface ApplyResult {
-  proposal: Proposal;
-  installedArtifactRef: string;
-  /** Set when `activation: approval-gate` — apply is pending an RFC 0051 release. */
-  pendingApprovalId?: string;
-}
-
-/**
- * Apply a proposal. Caller MUST already be scope-checked at the route (403).
- * Installs the stored byte image verbatim (no re-synthesis) and routes through
- * the advertised activation mode.
- */
-export async function applyProposal(tenant: string, id: string): Promise<ApplyResult | null> {
-  const p = await getProposal(tenant, id);
-  if (!p) return null;
-  if (!artifactWellFormed(p)) throw new MalformedForKindError(p.kind);
-
-  const installedArtifactRef = installedRefFor(p);
-
-  if (activationMode() === 'approval-gate') {
-    // RFC 0051: mint an approval; the proposal is NOT installed until released.
-    const appr = await createApproval({
-      tenantId: tenant,
-      rosterId: 'reviewable-learning',
-      persona: 'reviewable-learning',
-      workflowId: p.id,
-      proposal: `apply proposal ${p.id} (${p.kind})`,
+export async function applyProposal(
+  p: Proposal,
+  seen: { revision: number; artifactDigest: string },
+): Promise<{ proposal: Proposal; installedArtifactRef: string }> {
+  nextState(p, 'apply');
+  if (seen.revision !== revisionOf(p) || seen.artifactDigest !== artifactDigestOf(p.artifact)) throw staleError(p);
+  const installer = installers.get(p.kind);
+  if (!installer) {
+    throw new OpenwopError('conflict', `This host cannot install a \`${p.kind}\` proposal, so it cannot be applied. Nothing was changed.`, 409, {
+      reason: 'proposal_not_installable', kind: p.kind,
     });
-    const next: Proposal = { ...p, activation: { approvalId: appr.approvalId, installedArtifactRef }, updatedAt: nowIso() };
-    await proposals.put(next);
-    return { proposal: next, installedArtifactRef, pendingApprovalId: appr.approvalId };
   }
-
-  // direct-rbac: install inline.
-  const next: Proposal = {
-    ...p,
-    state: 'applied',
-    activation: { approvalId: null, installedArtifactRef },
-    updatedAt: nowIso(),
-  };
-  await proposals.put(next);
-  return { proposal: next, installedArtifactRef };
+  const { installedArtifactRef } = await installer.install(p.owner.tenant, p);
+  const applied = await commit(p, { ...p, state: 'applied', activation: { approvalId: null, installedArtifactRef } });
+  return { proposal: applied, installedArtifactRef };
 }
 
 /** Test/seed helper — upsert a proposal directly. */
@@ -169,22 +213,24 @@ export async function putProposal(p: Proposal): Promise<void> {
 }
 
 /**
- * The ONE real producer (RFC 0096) — a `workflow-chain-pack` proposal minted from
- * an ACCEPTED ambient-work-graph pattern.
+ * The ONE producer (RFC 0096) — a proposal minted from an ACCEPTED
+ * ambient-work-graph pattern.
  *
- * The signal is genuinely honest: the ambient-work-graph mined a recurring
- * tool-call pattern seen ≥3× (ADR 0137) and a HUMAN with workspace-write scope
- * explicitly ACCEPTED turning it into a workflow. That human-vetted accept is the
- * reviewable-learning signal — recorded here as a durable, INERT proposal the
- * workspace can revise / apply / reject / archive (so `openwop:proposals.list`'s
- * "check before proposing again" is now truthful, not vacuous).
+ * The signal is honest: the work graph found a recurring tool-call pattern in one
+ * person's own runs (ADR 0137, ADR 0930) and that person, holding `workspace:write`,
+ * ACCEPTED turning it into a workflow. That accept is recorded here as a durable,
+ * INERT proposal the workspace can read, revise, reject or archive, so
+ * `openwop:proposals.list`'s "check before proposing again" reads real history.
  *
- * DETERMINISTIC DEDUP: the proposal id is derived from the (already
- * hash-derived, tenant-scoped) `suggestionId`, so re-accepting the same
- * suggestion (accept is idempotent) NEVER spams a second proposal — an existing
- * row is returned untouched (its own revise/reject state is preserved). The
- * artifact is an inert byte image (the tool skeleton + its run evidence); apply
- * installs it verbatim (`proposal-no-resynthesis`).
+ * The artifact is the tool-name skeleton plus its occurrence count. It is NOT an
+ * RFC 0013 chain manifest (`PROP2WF-9`), and no installer would take it: the real
+ * "make it a workflow" path is the Workflow Architect hand-off the accept route
+ * returns. (The comment here used to say apply "installs it verbatim"; nothing ever
+ * did — ADR 0938 A7.)
+ *
+ * DETERMINISTIC DEDUP: the proposal id is derived from the (hash-derived,
+ * tenant-scoped) `suggestionId`, so re-accepting the same suggestion returns the
+ * existing row untouched (its own revise/reject state is preserved).
  */
 export async function createProposalFromAcceptedPattern(
   tenant: string,
@@ -212,8 +258,6 @@ export async function createProposalFromAcceptedPattern(
     rationale:
       `This tool pattern (${skeleton}) recurred across ${pattern.count} runs and was accepted for automation. `
       + 'Turning it into a workflow chain removes the repeated manual steps.',
-    // Inert byte image — the accepted skeleton + its run evidence. No synthesizer
-    // is consulted at apply; the stored bytes install verbatim.
     artifact: {
       toolSequence: pattern.toolSequence,
       occurrences: pattern.count,
@@ -222,6 +266,7 @@ export async function createProposalFromAcceptedPattern(
     provenance: { sourceRunIds: pattern.exampleRunIds },
     duplicateOf: null,
     owner: { tenant, ...(principal ? { principal } : {}) },
+    revision: 0,
     createdAt: nowIso(),
   };
   // Insert-only CAS (never a get→put): two concurrent accepts of the SAME
@@ -236,26 +281,4 @@ export async function createProposalFromAcceptedPattern(
   return proposal;
 }
 
-/**
- * Idempotently ensure a canonical demo draft exists for `tenant`, so the
- * conformance `proposal-reviewable-learning` behavioral leg is non-vacuous for
- * whatever tenant the driver authenticates as (it soft-skips on an empty list).
- * Fixed id ⇒ at most one demo row per tenant.
- */
-export async function ensureDemoProposal(tenant: string): Promise<void> {
-  const id = 'demo-reviewable-learning';
-  if (await getProposal(tenant, id)) return;
-  await proposals.put({
-    id,
-    kind: 'prompt-template',
-    state: 'draft',
-    title: 'Tighten the weekly-summary prompt',
-    artifact: { template: 'Summarize {{week}} in <=5 bullets, no preamble.', variables: ['week'] },
-    provenance: { sourceRunIds: ['demo-run-1'] },
-    duplicateOf: null,
-    owner: { tenant },
-    createdAt: nowIso(),
-  });
-}
-
-export const __test = { collection: proposals, randomId: () => `prop:${randomUUID()}` };
+export const __test = { collection: proposals, installers };

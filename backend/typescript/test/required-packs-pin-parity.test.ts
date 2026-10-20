@@ -19,6 +19,7 @@ import { join, resolve } from 'node:path';
 import { BACKEND_FEATURES } from '../src/features/index.js';
 import type { BackendFeature } from '../src/features/types.js';
 import type { ToggleConfig, VariantBinding } from '../src/host/featureToggles/types.js';
+import { featureRequiredPacks } from '../src/features/packPins.js';
 
 const PACKS_DIR = resolve(__dirname, '../../../packs');
 
@@ -59,7 +60,7 @@ describe('requiredPacks pin ↔ pack.json version parity (every backend feature)
   it('finds the pinned corpus (non-empty)', () => { expect(pinned.length).toBeGreaterThan(20); });
 
   it.each(pinned.map((f) => [f.id, f] as const))('%s: every requiredPacks pin matches disk', (_id, f) => {
-    for (const ref of f.requiredPacks ?? []) {
+    for (const ref of featureRequiredPacks(f)) {
       const m = readManifest(ref.name);
       expect(m, `${f.id}: pinned pack \`${ref.name}\` must exist under packs/`).toBeTruthy();
       expect(m?.version, `${f.id}: pin ${ref.name}@${ref.version} must match pack.json (disk has ${m?.version})`)

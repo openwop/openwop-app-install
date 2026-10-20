@@ -14,6 +14,8 @@ export type ProposalKind = 'agent-pack' | 'workflow-chain-pack' | 'prompt-templa
 
 export const PROPOSAL_KINDS: readonly ProposalKind[] = ['agent-pack', 'workflow-chain-pack', 'prompt-template', 'automation'];
 
+export const PROPOSAL_STATES: readonly ProposalState[] = ['draft', 'revised', 'applied', 'rejected', 'archived'];
+
 /** RFC 0096 §B — lifecycle states. `apply` is the only state→`applied` transition. */
 export type ProposalState = 'draft' | 'revised' | 'applied' | 'rejected' | 'archived';
 
@@ -49,6 +51,9 @@ export interface Proposal {
   duplicateOf?: string | null;
   owner: ProposalOwner;
   activation?: ProposalActivation;
+  /** ADR 0938 D4 — bumped on every write; absent on rows written before it (read as 0).
+   *  Host bookkeeping, not an RFC 0096 field. */
+  revision?: number;
   createdAt: string;
   updatedAt?: string;
 }

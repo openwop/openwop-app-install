@@ -52,5 +52,5 @@ export const consentFeature: BackendFeature = {
   // registry install TARGET when the pack is absent from disk, so it MUST move
   // in the same commit as `pack.json`: a bumped pack.json against a stale pin
   // fetches the OLD content under the new version.
-  requiredPacks: [{ name: 'feature.consent.nodes', version: '1.2.1' }],
+  requiredPacks: ['feature.consent.nodes'],
 };

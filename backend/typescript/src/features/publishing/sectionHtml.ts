@@ -33,7 +33,7 @@
  * null — the prerender path falls back to serving the SPA shell (honest-off,
  * never a broken document).
  */
-import { isInternalHref } from '../../host/internalHref.js';
+import { isFragmentHref, isInternalHref } from '../../host/internalHref.js';
 import type { Section } from '../cms/cmsService.js';
 import type { ResolvedContentSection } from '../../host/contentDataSources.js';
 import { vendorPublicBase } from '../featureRoute.js';
@@ -54,6 +54,8 @@ export function escapeHtml(s: string): string {
  *  re-checked at this exit: a stored `"/\t/evil.com"` passed the old regex. */
 const isSafeHref = (url: string): boolean => /^(https?:|mailto:)/i.test(url.trim());
 const isInternal = (url: string): boolean => isInternalHref(url.trim());
+/** ADR 0920 D6 — a same-page fragment (`#faq`), the write-time `safeLink` grammar re-checked here. */
+const isFragment = (url: string): boolean => isFragmentHref(url.trim());
 
 const str = (v: unknown): string => (typeof v === 'string' ? v : '');
 const pad2 = (n: number): string => String(n).padStart(2, '0');
@@ -115,6 +117,7 @@ function paragraphsHtml(text: string): string {
 /** A guarded anchor, or the escaped label when the URL is unusable. */
 function anchorHtml(label: string, url: string): string {
   if (!label) return '';
+  if (isFragment(url)) return `<a href="${escapeHtml(url.trim())}">${escapeHtml(label)}</a>`;
   if (isInternal(url)) return `<a href="${escapeHtml(url)}">${escapeHtml(label)}</a>`;
   if (url && isSafeHref(url)) return `<a href="${escapeHtml(url)}" rel="noopener noreferrer">${escapeHtml(label)}</a>`;
   return escapeHtml(label);
@@ -149,6 +152,62 @@ export function headingSlug(text: string): string {
     .slice(0, 64) || 'section';
 }
 
+/** ADR 0920 D3 — the hero's example plan card as crawler text. Every string
+ *  the human card shows renders here (escaped), in reading order; the progress
+ *  bar itself is presentation, its `progressNote` is the text. The `bubble` is
+ *  the figure's caption (the SPA folds it into the figure's name). '' when absent. */
+function planFigureHtml(v: unknown): string {
+  if (v === null || typeof v !== 'object' || Array.isArray(v)) return '';
+  const p = v as Record<string, unknown>;
+  const para = (x: unknown, strong = false): string => (str(x) ? `<p>${strong ? `<strong>${escapeHtml(str(x))}</strong>` : escapeHtml(str(x))}</p>` : '');
+  const lines = (Array.isArray(p.lines) ? (p.lines as unknown[]) : [])
+    .map((l) => (l && typeof l === 'object' ? (l as Record<string, unknown>) : {}))
+    .filter((l) => str(l.label) || str(l.text))
+    .map((l) => `<li>${str(l.label) ? `<strong>${escapeHtml(str(l.label))}</strong> ` : ''}${escapeHtml(str(l.text))}</li>`);
+  const chips = (Array.isArray(p.chips) ? (p.chips as unknown[]) : []).map(str).filter(Boolean).map((c) => `<li>${escapeHtml(c)}</li>`);
+  const body = [
+    para(p.eyebrow), para(p.title, true), para(p.meta), para(p.progressNote),
+    para(p.stepEyebrow), para(p.stepTitle, true),
+    lines.length > 0 ? `<ul>${lines.join('')}</ul>` : '',
+    para(p.action),
+    chips.length > 0 ? `<ul>${chips.join('')}</ul>` : '',
+    para(p.note), para(p.initial),
+  ].filter(Boolean);
+  const bubble = str(p.bubble);
+  if (body.length === 0 && !bubble) return '';
+  return `<figure>\n${body.join('\n')}${bubble ? `\n<figcaption>${escapeHtml(bubble)}</figcaption>` : ''}\n</figure>`;
+}
+
+/** ADR 0920 D5 — a `richText` conversation picture as crawler text: the title
+ *  as the caption, then every message, the proposal and its two (inert) choices.
+ *  '' when absent. */
+function chatFigureHtml(v: unknown): string {
+  if (v === null || typeof v !== 'object' || Array.isArray(v)) return '';
+  const c = v as Record<string, unknown>;
+  const para = (x: unknown): string => (str(x) ? `<p>${escapeHtml(str(x))}</p>` : '');
+  const messages = (Array.isArray(c.messages) ? (c.messages as unknown[]) : [])
+    .map((m) => (m && typeof m === 'object' ? str((m as Record<string, unknown>).text) : ''))
+    .filter(Boolean)
+    .map((t) => `<li>${escapeHtml(t)}</li>`);
+  const pr = c.proposal && typeof c.proposal === 'object' && !Array.isArray(c.proposal) ? (c.proposal as Record<string, unknown>) : {};
+  const choices = [str(pr.accept), str(pr.decline)].filter(Boolean).map(escapeHtml);
+  const proposal = [
+    str(pr.label) || str(pr.text)
+      ? `<p>${str(pr.label) ? `<strong>${escapeHtml(str(pr.label))}</strong>` : ''}${str(pr.label) && str(pr.text) ? ' ' : ''}${escapeHtml(str(pr.text))}</p>`
+      : '',
+    choices.length > 0 ? `<p>${choices.join(' · ')}</p>` : '',
+  ].filter(Boolean);
+  const body = [
+    para(c.subtitle), para(c.badge),
+    messages.length > 0 ? `<ol>${messages.join('')}</ol>` : '',
+    ...proposal,
+    para(c.placeholder),
+  ].filter(Boolean);
+  const title = str(c.title);
+  if (body.length === 0 && !title) return '';
+  return `<figure>\n${title ? `<figcaption>${escapeHtml(title)}</figcaption>\n` : ''}${body.join('\n')}\n</figure>`;
+}
+
 /**
  * One section → semantic HTML, or null for an unknown/future type (the page
  * then falls back to the SPA shell — never a partial document).
@@ -173,12 +232,20 @@ export function sectionHtml(section: Section, opts: SectionHtmlOptions): string 
       if (sub) parts.push(`<p>${inlineMarkdownHtml(sub)}</p>`);
       const ctas = [anchorHtml(str(d.ctaLabel), str(d.ctaUrl)), anchorHtml(str(d.ctaLabel2), str(d.ctaUrl2))].filter(Boolean);
       if (ctas.length > 0) parts.push(`<p>${ctas.join(' ')}</p>`);
+      // ADR 0920 D3 — fine print, then the example plan card as real text.
+      const note = str(d.note);
+      if (note) parts.push(`<p><small>${escapeHtml(note)}</small></p>`);
+      const plan = planFigureHtml(d.plan);
+      if (plan) parts.push(plan);
       parts.push('</header>');
       return parts.join('\n');
     }
 
-    case 'richText':
-      return `<section>\n${head()}${paragraphsHtml(str(d.text))}\n</section>`;
+    case 'richText': {
+      // ADR 0920 D5 — the conversation picture renders as text after the copy.
+      const chat = chatFigureHtml(d.chat);
+      return `<section>\n${head()}${paragraphsHtml(str(d.text))}\n${chat ? `${chat}\n` : ''}</section>`;
+    }
 
     case 'image': {
       const token = str(d.token);
@@ -197,11 +264,13 @@ export function sectionHtml(section: Section, opts: SectionHtmlOptions): string 
     case 'columns': {
       const cols: { title?: unknown; text?: unknown; href?: unknown }[] = Array.isArray(d.columns) ? (d.columns as never[]) : [];
       const layout = str(d.layout) || 'cards';
+      // ADR 0920 D4 — a footnote under the grid (any layout).
+      const colNote = str(d.note) ? `<p><small>${escapeHtml(str(d.note))}</small></p>\n` : '';
       if (layout === 'stats') {
         const items = cols
           .map((c) => `<div><dt>${escapeHtml(str(c.title))}</dt><dd>${escapeHtml(str(c.text))}</dd></div>`)
           .join('\n');
-        return `<section>\n<dl>\n${items}\n</dl>\n</section>`;
+        return `<section>\n<dl>\n${items}\n</dl>\n${colNote}</section>`;
       }
       if (layout === 'steps') {
         const items = cols
@@ -210,24 +279,36 @@ export function sectionHtml(section: Section, opts: SectionHtmlOptions): string 
             return `<li>${pad2(i + 1)}. ${title ? `<h3>${escapeHtml(title)}</h3>` : ''}<p>${inlineMarkdownHtml(str(c.text))}</p></li>`;
           })
           .join('\n');
-        return `<section>\n${head()}<ol>\n${items}\n</ol>\n</section>`;
+        return `<section>\n${head()}<ol>\n${items}\n</ol>\n${colNote}</section>`;
       }
-      // cards (default layout) — also `showcase` and `rows`, whose difference
-      // from cards is visual only: a list of titled items either way.
+      // cards (default layout) — also `showcase`, `rows` and the ADR 0920
+      // `ruled`/`progress`/`list`/`tiles`/`panels`, whose difference from cards
+      // is visual only: a list of titled items either way. Item `eyebrow`,
+      // `badge` and `list` rows are text and render; `progress`, `future` and
+      // `art` are presentation and add nothing.
       const lede = str(d.lede);
       const items = cols
         .map((c) => {
+          const cc = c as { eyebrow?: unknown; badge?: unknown; items?: unknown };
           const title = str(c.title);
+          const eyebrowP = str(cc.eyebrow) ? `<p>${escapeHtml(str(cc.eyebrow))}</p>` : '';
+          const badgeP = str(cc.badge) ? `<p>${escapeHtml(str(cc.badge))}</p>` : '';
           const text = `<p>${inlineMarkdownHtml(str(c.text))}</p>`;
+          const rows = (Array.isArray(cc.items) ? (cc.items as unknown[]) : [])
+            .map((it) => it as { label?: unknown; meta?: unknown })
+            .filter((it) => str(it.label).length > 0)
+            .map((it) => `<li>${escapeHtml(str(it.label))}${str(it.meta) ? ` <small>${escapeHtml(str(it.meta))}</small>` : ''}</li>`);
+          const rowsUl = rows.length > 0 ? `<ul>${rows.join('')}</ul>` : '';
           const href = str(c.href);
-          const inner = `${title ? `<h3>${escapeHtml(title)}</h3>` : ''}${text}`;
+          const inner = `${eyebrowP}${title ? `<h3>${escapeHtml(title)}</h3>` : ''}${badgeP}${text}${rowsUl}`;
+          if (href && isFragment(href)) return `<li><a href="${escapeHtml(href.trim())}">${inner}</a></li>`;
           if (href && (isInternal(href) || isSafeHref(href))) {
             return `<li><a href="${escapeHtml(href)}"${isSafeHref(href) ? ' rel="noopener noreferrer"' : ''}>${inner}</a></li>`;
           }
           return `<li>${inner}</li>`;
         })
         .join('\n');
-      return `<section>\n${head()}${lede ? `<p>${inlineMarkdownHtml(lede)}</p>\n` : ''}<ul>\n${items}\n</ul>\n</section>`;
+      return `<section>\n${head()}${lede ? `<p>${inlineMarkdownHtml(lede)}</p>\n` : ''}<ul>\n${items}\n</ul>\n${colNote}</section>`;
     }
 
     // Deliberate degradation: the SPA resolves product references live via the

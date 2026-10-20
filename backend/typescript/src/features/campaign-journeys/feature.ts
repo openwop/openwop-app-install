@@ -18,7 +18,7 @@ export const campaignJourneysFeature: BackendFeature = {
   registerRoutes: (deps) => registerCampaignJourneysRoutes(deps),
   surface: { id: 'campaign-journeys', build: buildCampaignJourneysSurface },
   requiredPacks: [
-    { name: 'feature.campaign-journeys.nodes', version: '1.3.1' },
+    'feature.campaign-journeys.nodes',
   ],
   toggleDefault: {
     id: 'campaign-journeys',

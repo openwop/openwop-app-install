@@ -8,6 +8,7 @@
  */
 import { OpenwopError } from '../../../types.js';
 import { guardedEgressFetch } from '../../../host/webhookEgressGuard.js';
+import { GcpMetadataError, gcpMetadata } from '../../../host/gcpAdc.js';
 
 export interface DeployInput {
   /** Cloud Run service id (lowercase-kebab, validated). */
@@ -108,11 +109,12 @@ function gcpConfig(): { project: string; region: string } {
 /** Metadata-server access token — the host's OWN service identity on Cloud
  *  Run (no stored credentials; the operator grants roles/run.admin). */
 async function metadataToken(): Promise<string> {
-  const res = await fetch('http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token', {
-    headers: { 'Metadata-Flavor': 'Google' },
-  });
-  if (!res.ok) throw new OpenwopError('capability_not_provided', 'No GCP metadata identity available (not running on Cloud Run?).', 501, {});
-  return ((await res.json()) as { access_token: string }).access_token;
+  try {
+    return await gcpMetadata().accessToken();
+  } catch (err) {
+    if (err instanceof GcpMetadataError) throw new OpenwopError('capability_not_provided', 'No GCP metadata identity available (not running on Cloud Run?).', 501, {});
+    throw err;
+  }
 }
 
 export function makeCloudRunAdapter(): DeployAdapter {

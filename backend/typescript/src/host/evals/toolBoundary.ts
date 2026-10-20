@@ -226,6 +226,7 @@ registerKvAgeOut({ id: 'agent:tool-boundary', prefix: 'hostext:agent:tool-bounda
 registerKvAgeOut({ id: 'agent:tool-boundary-run', prefix: 'hostext:agent:tool-boundary-run:', ttlDays: TTL_DAYS, timestampField: 'lastAt' });
 registerRetentionPurger({
   feature: 'agent:tool-boundary',
+  dryRun: 'rows-by-age',
   async purge(tenantId, classification, cutoffIso) {
     // Tool inputs/results can quote a person: treat as the most sensitive class.
     if (!tenantId || classification !== 'confidential-pii') return 0;

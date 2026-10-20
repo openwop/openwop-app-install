@@ -6,6 +6,7 @@
  * operator tenant — PRD §9.2).
  */
 
+import { operatorSelfApprovalActivation } from '../../host/operatorAccess.js';
 import type { Request, Response, NextFunction, Express } from 'express';
 import { OpenwopError } from '../../types.js';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
@@ -427,7 +428,9 @@ export function registerKicktodoCreatorRoutes(deps: RouteDeps): void {
       throw new OpenwopError('forbidden_scope', 'Deciding a challenge publication requires KickTodo manage authority.', 403, { requiredScope: 'host:kicktodo:manage' });
     }
     const submitter = approval.challengePublish?.submittedBy;
-    if (submitter && decidedBy === submitter) {
+    // ADR 0910 D5 — the two-person rule is waived ONLY for a live operator
+    // activation (the owner's OQ2 decision); `completePublication` asks again.
+    if (submitter && decidedBy === submitter && !(await operatorSelfApprovalActivation(tenantId, decidedBy))) {
       throw new OpenwopError('forbidden', 'A challenge publication must be decided by someone other than the submitter (separation of duties).', 403, {});
     }
   });

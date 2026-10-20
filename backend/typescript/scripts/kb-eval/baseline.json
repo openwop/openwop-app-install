@@ -1,0 +1,230 @@
+{
+  "embedder": "local:local-hash-v1",
+  "corpus": {
+    "documents": 110,
+    "queries": 60,
+    "formats": {
+      "text": 78,
+      "docx": 16,
+      "pdf": 16
+    }
+  },
+  "single": {
+    "dense": {
+      "overall": {
+        "n": 60,
+        "recallAt5": 0.7417,
+        "mrr": 0.6649,
+        "ndcgAt10": 0.6826
+      },
+      "byLocale": {
+        "en": {
+          "n": 30,
+          "recallAt5": 0.6833,
+          "mrr": 0.6216,
+          "ndcgAt10": 0.6314
+        },
+        "es": {
+          "n": 10,
+          "recallAt5": 0.7,
+          "mrr": 0.6715,
+          "ndcgAt10": 0.6631
+        },
+        "fr": {
+          "n": 10,
+          "recallAt5": 0.7,
+          "mrr": 0.6199,
+          "ndcgAt10": 0.6618
+        },
+        "pt-BR": {
+          "n": 10,
+          "recallAt5": 1,
+          "mrr": 0.8333,
+          "ndcgAt10": 0.8762
+        }
+      },
+      "byKind": {
+        "exact-term": {
+          "n": 22,
+          "recallAt5": 0.9545,
+          "mrr": 0.8712,
+          "ndcgAt10": 0.8893
+        },
+        "keyword": {
+          "n": 19,
+          "recallAt5": 1,
+          "mrr": 0.8158,
+          "ndcgAt10": 0.8617
+        },
+        "paraphrase": {
+          "n": 19,
+          "recallAt5": 0.2368,
+          "mrr": 0.2753,
+          "ndcgAt10": 0.264
+        }
+      }
+    },
+    "hybrid": {
+      "overall": {
+        "n": 60,
+        "recallAt5": 0.85,
+        "mrr": 0.7626,
+        "ndcgAt10": 0.7909
+      },
+      "byLocale": {
+        "en": {
+          "n": 30,
+          "recallAt5": 0.8333,
+          "mrr": 0.7482,
+          "ndcgAt10": 0.7669
+        },
+        "es": {
+          "n": 10,
+          "recallAt5": 0.8,
+          "mrr": 0.6917,
+          "ndcgAt10": 0.7418
+        },
+        "fr": {
+          "n": 10,
+          "recallAt5": 0.8,
+          "mrr": 0.6893,
+          "ndcgAt10": 0.7395
+        },
+        "pt-BR": {
+          "n": 10,
+          "recallAt5": 1,
+          "mrr": 0.95,
+          "ndcgAt10": 0.9631
+        }
+      },
+      "byKind": {
+        "exact-term": {
+          "n": 22,
+          "recallAt5": 0.9773,
+          "mrr": 0.9545,
+          "ndcgAt10": 0.9539
+        },
+        "keyword": {
+          "n": 19,
+          "recallAt5": 1,
+          "mrr": 0.9211,
+          "ndcgAt10": 0.9432
+        },
+        "paraphrase": {
+          "n": 19,
+          "recallAt5": 0.5526,
+          "mrr": 0.3819,
+          "ndcgAt10": 0.4498
+        }
+      }
+    },
+    "hybrid+rerank": {
+      "overall": {
+        "n": 60,
+        "recallAt5": 0.825,
+        "mrr": 0.7985,
+        "ndcgAt10": 0.8151
+      },
+      "byLocale": {
+        "en": {
+          "n": 30,
+          "recallAt5": 0.7833,
+          "mrr": 0.7672,
+          "ndcgAt10": 0.7862
+        },
+        "es": {
+          "n": 10,
+          "recallAt5": 0.9,
+          "mrr": 0.82,
+          "ndcgAt10": 0.8387
+        },
+        "fr": {
+          "n": 10,
+          "recallAt5": 0.8,
+          "mrr": 0.8111,
+          "ndcgAt10": 0.8301
+        },
+        "pt-BR": {
+          "n": 10,
+          "recallAt5": 0.9,
+          "mrr": 0.8583,
+          "ndcgAt10": 0.8631
+        }
+      },
+      "byKind": {
+        "exact-term": {
+          "n": 22,
+          "recallAt5": 0.9773,
+          "mrr": 1,
+          "ndcgAt10": 0.9905
+        },
+        "keyword": {
+          "n": 19,
+          "recallAt5": 1,
+          "mrr": 0.9737,
+          "ndcgAt10": 0.9806
+        },
+        "paraphrase": {
+          "n": 19,
+          "recallAt5": 0.4737,
+          "mrr": 0.39,
+          "ndcgAt10": 0.4465
+        }
+      }
+    }
+  },
+  "multi": {
+    "overall": {
+      "n": 60,
+      "recallAt5": 0.7083,
+      "mrr": 0.635,
+      "ndcgAt10": 0.6543
+    },
+    "byLocale": {
+      "en": {
+        "n": 30,
+        "recallAt5": 0.5833,
+        "mrr": 0.546,
+        "ndcgAt10": 0.5613
+      },
+      "es": {
+        "n": 10,
+        "recallAt5": 0.8,
+        "mrr": 0.7085,
+        "ndcgAt10": 0.7262
+      },
+      "fr": {
+        "n": 10,
+        "recallAt5": 0.7,
+        "mrr": 0.6234,
+        "ndcgAt10": 0.6387
+      },
+      "pt-BR": {
+        "n": 10,
+        "recallAt5": 1,
+        "mrr": 0.84,
+        "ndcgAt10": 0.8774
+      }
+    },
+    "byKind": {
+      "exact-term": {
+        "n": 22,
+        "recallAt5": 0.8409,
+        "mrr": 0.8477,
+        "ndcgAt10": 0.8583
+      },
+      "keyword": {
+        "n": 19,
+        "recallAt5": 0.9737,
+        "mrr": 0.7632,
+        "ndcgAt10": 0.8176
+      },
+      "paraphrase": {
+        "n": 19,
+        "recallAt5": 0.2895,
+        "mrr": 0.2606,
+        "ndcgAt10": 0.2549
+      }
+    }
+  }
+}

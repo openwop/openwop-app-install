@@ -3,13 +3,29 @@
  * under /host/openwop-app/email/orgs/:orgId. No public surface.
  */
 import { authedHeaders, config, fetchOpts } from '../../client/config.js';
+import type { TextDiff } from '../../chat/artifacts/artifactClient.js';
 
 export interface Org { orgId: string; name: string }
 export type ContactStage = 'lead' | 'qualified' | 'customer' | 'churned';
 export const CONTACT_STAGES: readonly ContactStage[] = ['lead', 'qualified', 'customer', 'churned'];
 
 export type EmailBodyFormat = 'text' | 'markdown';
-export interface EmailTemplate { templateId: string; orgId: string; name: string; subject: string; body: string; format?: EmailBodyFormat; createdAt: string; updatedAt: string }
+export interface EmailTemplate { templateId: string; orgId: string; name: string; subject: string; body: string; format?: EmailBodyFormat; version?: number; contentHash?: string; createdAt: string; updatedAt: string }
+/** ADR 0905 D1 — one immutable content version of a template. */
+export interface EmailTemplateVersion { templateId: string; version: number; subject: string; body: string; format?: EmailBodyFormat; restoredFrom?: number; createdBy: string; createdAt: string }
+/** ADR 0905 D1 — the server-computed comparison of two versions (body via `host/textDiff`). */
+export interface EmailTemplateVersionDiff { from: number; to: number; subject: { from: string; to: string; changed: boolean }; body: TextDiff }
+/** ADR 0905 D1 — a save from a version someone else has since superseded (409 `version_conflict`). */
+export class TemplateVersionConflictError extends Error {
+  constructor(readonly currentVersion: number | undefined) { super('version_conflict'); }
+}
+/** A server refusal carrying its message (and `details.reason`) instead of a bare status. */
+async function failWithReason(res: Response, ctx: string): Promise<never> {
+  let body: { message?: string; details?: { reason?: string; currentVersion?: number } } = {};
+  try { body = (await res.json()) as typeof body; } catch { /* non-JSON */ }
+  if (res.status === 409 && body.details?.reason === 'version_conflict') throw new TemplateVersionConflictError(body.details.currentVersion);
+  throw new Error(body.message || `${ctx} returned ${res.status}`);
+}
 export interface CampaignStats { sent: number; failed: number; skipped: number }
 export interface Campaign { campaignId: string; orgId: string; templateId: string; audience: { stage?: ContactStage; segmentId?: string }; status: 'draft' | 'sending' | 'sent'; stats?: CampaignStats; createdAt: string; updatedAt: string }
 export interface SendLog { sendId: string; campaignId: string; contactId: string; status: 'sent' | 'failed' | 'skipped'; error?: string; ts: string }
@@ -56,9 +72,25 @@ export async function createTemplate(orgId: string, input: { name: string; subje
   const res = await fetch(`${base(orgId)}/templates`, fetchOpts({ method: 'POST', headers: jsonHeaders(), body: JSON.stringify(input) }));
   return asJson<EmailTemplate>(res, 'createTemplate');
 }
-export async function updateTemplate(orgId: string, templateId: string, patch: { name?: string; subject?: string; body?: string; format?: EmailBodyFormat }): Promise<EmailTemplate> {
+/** `expectedVersion` (ADR 0905 D1) makes the save fail with `TemplateVersionConflictError`
+ *  rather than overwrite a version someone else saved since this editor loaded. */
+export async function updateTemplate(orgId: string, templateId: string, patch: { name?: string; subject?: string; body?: string; format?: EmailBodyFormat; expectedVersion?: number }): Promise<EmailTemplate> {
   const res = await fetch(`${base(orgId)}/templates/${encodeURIComponent(templateId)}`, fetchOpts({ method: 'PATCH', headers: jsonHeaders(), body: JSON.stringify(patch) }));
-  return asJson<EmailTemplate>(res, 'updateTemplate');
+  if (!res.ok) return failWithReason(res, 'updateTemplate');
+  return (await res.json()) as EmailTemplate;
+}
+export async function listTemplateVersions(orgId: string, templateId: string): Promise<EmailTemplateVersion[]> {
+  const res = await fetch(`${base(orgId)}/templates/${encodeURIComponent(templateId)}/versions`, fetchOpts({ headers: authedHeaders() }));
+  return (await asJson<{ versions: EmailTemplateVersion[] }>(res, 'listTemplateVersions')).versions;
+}
+export async function diffTemplateVersion(orgId: string, templateId: string, version: number): Promise<EmailTemplateVersionDiff> {
+  const res = await fetch(`${base(orgId)}/templates/${encodeURIComponent(templateId)}/versions/${version}/diff`, fetchOpts({ headers: authedHeaders() }));
+  return asJson<EmailTemplateVersionDiff>(res, 'diffTemplateVersion');
+}
+export async function restoreTemplateVersion(orgId: string, templateId: string, version: number, expectedVersion: number | undefined): Promise<EmailTemplate> {
+  const res = await fetch(`${base(orgId)}/templates/${encodeURIComponent(templateId)}/versions/${version}/restore`, fetchOpts({ method: 'POST', headers: jsonHeaders(), body: JSON.stringify(expectedVersion ? { expectedVersion } : {}) }));
+  if (!res.ok) return failWithReason(res, 'restoreTemplateVersion');
+  return (await res.json()) as EmailTemplate;
 }
 /** ADR 0256 — server-authoritative safe-markdown preview (the same renderer that
  *  builds the sent HTML part), so the editor preview is what actually sends. */
@@ -68,7 +100,8 @@ export async function previewMarkdown(orgId: string, body: string): Promise<stri
 }
 export async function deleteTemplate(orgId: string, templateId: string): Promise<void> {
   const res = await fetch(`${base(orgId)}/templates/${encodeURIComponent(templateId)}`, fetchOpts({ method: 'DELETE', headers: authedHeaders() }));
-  if (!res.ok) throw new Error(`deleteTemplate returned ${res.status}`);
+  // ADR 0905 D1 — a 409 `template_in_use` carries a message the user can act on.
+  if (!res.ok) await failWithReason(res, 'deleteTemplate');
 }
 
 export async function listCampaigns(orgId: string): Promise<Campaign[]> {

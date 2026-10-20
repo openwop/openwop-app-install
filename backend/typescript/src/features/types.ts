@@ -109,8 +109,11 @@ export interface BackendFeature {
     /** Human label for the org row. */
     name: string;
   };
-  /** Packs this feature ships, installed via the existing pipeline (ADR §2.4). */
-  requiredPacks?: PackRef[];
+  /** Packs this feature ships, installed via the existing pipeline (ADR §2.4).
+   *  NAMES only: each one's version lives in `features/packPins.ts` (ADR 0919),
+   *  so a pin bump does not edit this descriptor, which every boot references.
+   *  Resolve with `featureRequiredPacks(feature)`. */
+  requiredPacks?: readonly string[];
   /**
    * Hard feature dependencies (ADR 0194) — ids of OTHER features this one needs to
    * function. Enforced as a DISABLE-LOCK: a depended-on feature cannot be turned

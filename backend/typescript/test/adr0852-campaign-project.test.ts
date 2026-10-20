@@ -163,5 +163,8 @@ describe('ADR 0852 P1 — campaign runs bind to the campaign project', () => {
   it("POST /runs's caller rule strips campaign attribution", () => {
     const out = stripCallerAttribution({ campaignOrchestration: { briefId: 'b' }, campaignChannel: { briefId: 'b' }, keep: 1 });
     expect(out).toEqual({ keep: 1 });
+    // ADR 0921 D3 — the campaign-ops run stamp names the approved run; a caller
+    // may not forge it (campaign-ops client-portal security review, 2026-10-19).
+    expect(stripCallerAttribution({ 'openwop-app.campaignOps': { approvalId: 'a', changeSetHash: 'h' }, keep: 1 })).toEqual({ keep: 1 });
   });
 });

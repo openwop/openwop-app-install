@@ -124,7 +124,7 @@ export const kicktodoCoreFeature: BackendFeature = {
     // ADR 0463 — nodes 1.21.0 (replan-clarify a2ui leg), agents 1.7.0 (the
     // plan-revision `clarification` arm). Pins move in lockstep.
     // ADR 0689 — nodes 1.28.0 (kickbot-coach-turn, the reminder-loop's second node).
-    { name: 'feature.kicktodo.nodes', version: '1.37.0' },
-    { name: 'vendor.openwop-app.kicktodo.agents', version: '1.9.4' },
+    'feature.kicktodo.nodes',
+    'vendor.openwop-app.kicktodo.agents',
   ],
 };

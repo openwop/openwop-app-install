@@ -13,6 +13,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
 import type { Storage } from '../src/storage/storage.js';
+import { buildRunRecord } from '../src/host/runDispatch.js';
 import type { StartRunDeps } from '../src/host/runStarter.js';
 import { initHostExtPersistence, __resetHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import {
@@ -134,6 +135,7 @@ describe('host.goals.evaluated / host.goals.closed', () => {
   it('cost bound crossed at bindContributingRun emits closed(bound-exceeded)', async () => {
     registerGoalVerifier('ev:cost', async () => ({ satisfied: false, confidence: 0, runId: 'r' }));
     const id = await makeGoal('ev:cost', { maxCostUsd: 1 });
+    for (const runId of ['run:cheap', 'run:pricey']) await storage.insertRun(buildRunRecord({ runId, workflowId: 'wf', tenantId: TENANT }));
     await bindContributingRun(TENANT, id, 'run:cheap', 0.4);
     expect(ofType('host.goals.closed')).toHaveLength(0);
     await bindContributingRun(TENANT, id, 'run:pricey', 0.8);

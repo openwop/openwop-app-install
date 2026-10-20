@@ -108,3 +108,31 @@ describe('PROPC-ERASURE-DSAR — proposals subject erasure', () => {
     expect((await getProposal(tenant, 'p1'))!.owner.principal, 'nothing erased on an empty key').toBe('user:erin');
   });
 });
+
+describe('ADR 0938 D9 — the eraser writes by CAS, so it cannot overwrite a concurrent revise', () => {
+  it('a revise that lands between the eraser\'s scan and its write survives, and the principal is still erased', async () => {
+    const { vi } = await import('vitest');
+    const { DurableCollection } = await import('../src/host/hostExtPersistence.js');
+    const { reviseProposal } = await import('../src/features/proposals/proposalsService.js');
+    const tenant = 'tenant-d9';
+    const base: Proposal = {
+      id: 'd9-1', kind: 'prompt-template', state: 'draft', title: 'Before',
+      artifact: { template: 'x' }, provenance: { sourceRunIds: ['r1'] }, duplicateOf: null,
+      owner: { tenant, principal: 'user:d9-subject' }, createdAt: new Date().toISOString(),
+    };
+    await putProposal(base);
+    const snapshot = (await getProposal(tenant, 'd9-1'))!;
+    // The revise lands AFTER the eraser's scan read `snapshot`.
+    await reviseProposal(snapshot, { title: 'Revised concurrently' });
+    const spy = vi.spyOn(DurableCollection.prototype, 'listByPrefix').mockResolvedValueOnce([snapshot] as never);
+    try {
+      const report = await eraseSubjectProposals(tenant, 'user:d9-subject');
+      expect(report.rowsTouched).toBe(1);
+    } finally {
+      spy.mockRestore();
+    }
+    const after = (await getProposal(tenant, 'd9-1'))!;
+    expect(after.title, 'the eraser overwrote a concurrent revise').toBe('Revised concurrently');
+    expect(after.owner.principal).toBe('erased:subject');
+  });
+});

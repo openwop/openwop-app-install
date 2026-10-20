@@ -1427,6 +1427,11 @@ export interface EmbeddingsRequest {
   texts: readonly string[];
   /** Requested vector width — MUST match the vector store's configured dims. */
   dimensions: number;
+  /** ADR 0904 D2 — what the text IS: a search query or a document being indexed.
+   *  Google sends `taskType` RETRIEVAL_QUERY / RETRIEVAL_DOCUMENT, Cohere `input_type`
+   *  search_query / search_document; OpenAI has no such input and ignores it.
+   *  Absent ⇒ `document` (every indexing caller predates the field). */
+  inputType?: 'query' | 'document';
   signal?: AbortSignal;
 }
 export interface EmbeddingsResult { vectors: number[][]; model: string }
@@ -1464,6 +1469,7 @@ async function dispatchGoogleEmbeddings(req: EmbeddingsRequest): Promise<Embeddi
       requests: req.texts.map((text) => ({
         model: `models/${req.model}`,
         content: { parts: [{ text }] },
+        taskType: req.inputType === 'query' ? 'RETRIEVAL_QUERY' : 'RETRIEVAL_DOCUMENT',
         outputDimensionality: req.dimensions,
       })),
     }),
@@ -1479,17 +1485,18 @@ async function dispatchGoogleEmbeddings(req: EmbeddingsRequest): Promise<Embeddi
 /** Providers with a real embeddings API (anthropic/minimax have none). */
 export const EMBEDDINGS_PROVIDERS: readonly string[] = ['openai', 'google', 'cohere'];
 
-/** ADR 0398 P3 — Cohere embeddings (`/v1/embed`). v3 models REQUIRE `input_type`; we
- *  index with `search_document` (the embedder is used for both indexing + querying, and a
- *  single input_type keeps one namespace comparable — a query-type refinement is a future
- *  follow-up). v3 has no native `dimensions` param, so we truncate the (Matryoshka-trained)
+/** ADR 0398 P3 — Cohere embeddings (`/v1/embed`). v3 models REQUIRE `input_type`.
+ *  Documents are indexed `search_document`; since ADR 0904 D2 a QUERY is embedded
+ *  `search_query` (it used `search_document` for both — the model is trained on the
+ *  asymmetric pair, so that cost recall). Document vectors are unchanged, so an indexed
+ *  Cohere collection keeps its vectors and its signature. v3 has no native `dimensions` param, so we truncate the (Matryoshka-trained)
  *  vector to the requested width and RE-normalize — one namespace = one width, like the
  *  other providers. */
 async function dispatchCohereEmbeddings(req: EmbeddingsRequest): Promise<EmbeddingsResult> {
   const res = await fetchWith429Retry(() => fetch('https://api.cohere.com/v1/embed', {
     method: 'POST',
     headers: { 'content-type': 'application/json', authorization: `Bearer ${req.apiKey}` },
-    body: JSON.stringify({ model: req.model, texts: req.texts, input_type: 'search_document', embedding_types: ['float'], truncate: 'END' }),
+    body: JSON.stringify({ model: req.model, texts: req.texts, input_type: req.inputType === 'query' ? 'search_query' : 'search_document', embedding_types: ['float'], truncate: 'END' }),
     ...(req.signal ? { signal: req.signal } : {}),
   }), req.signal);
   if (!res.ok) throw await providerHttpError('cohere', res);

@@ -175,21 +175,25 @@ const asPlatform = (raw: string | undefined, fallback: AdPlatform): AdPlatform =
   return (AD_PLATFORMS as readonly string[]).includes(s) ? (s as AdPlatform) : fallback;
 };
 
-/** Compute the derived metrics for one record (safe division). */
-export function computeDerived(r: { spend: number; impressions: number; clicks: number; conversions: number; revenue: number }): { ctr: number; cpc: number; cvr: number; cpa: number; roas: number } {
+/** Compute the derived metrics for one record (safe division). An unreported
+ *  (`null`, ADR 0907 D3) input yields 0 for the ratios built on it; the record
+ *  keeps the `null` itself, which is the field a reader must check. */
+export function computeDerived(r: { spend: number; impressions: number; clicks: number; conversions: number | null; revenue: number | null }): { ctr: number; cpc: number; cvr: number; cpa: number; roas: number } {
   const div = (a: number, b: number): number => (b > 0 ? Number((a / b).toFixed(4)) : 0);
   return {
     ctr: div(r.clicks, r.impressions),
     cpc: div(r.spend, r.clicks),
-    cvr: div(r.conversions, r.clicks),
-    cpa: div(r.spend, r.conversions),
-    roas: div(r.revenue, r.spend),
+    cvr: div(r.conversions ?? 0, r.clicks),
+    cpa: div(r.spend, r.conversions ?? 0),
+    roas: div(r.revenue ?? 0, r.spend),
   };
 }
 
 export interface ParsedRow {
   platform: AdPlatform; campaignName: string; adSet: string; date: string;
-  spend: number; impressions: number; clicks: number; conversions: number; revenue: number;
+  spend: number; impressions: number; clicks: number;
+  /** `null` = the source cannot report it (ADR 0907 D3); CSV rows are always numbers. */
+  conversions: number | null; revenue: number | null;
   ctr: number; cpc: number; cvr: number; cpa: number; roas: number;
   /** R2 CC-SP-7 — the account currency, when the export carried one. */
   currency?: string;

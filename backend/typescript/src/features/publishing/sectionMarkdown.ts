@@ -13,11 +13,43 @@
  * emitted verbatim (the CMS stores plain text/markdown-subset — no HTML to
  * escape), never wrapped in invented formatting.
  */
-import { isInternalHref } from '../../host/internalHref.js';
+import { isFragmentHref, isInternalHref } from '../../host/internalHref.js';
 import type { Section } from '../cms/cmsService.js';
 import { vendorPublicBase } from '../featureRoute.js';
 
 const str = (v: unknown): string => (typeof v === 'string' ? v : '');
+const obj = (v: unknown): Record<string, unknown> => (v !== null && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {});
+const arr = (v: unknown): unknown[] => (Array.isArray(v) ? v : []);
+
+/** ADR 0920 D3 — the hero's example plan card, every string in reading order. */
+function planMarkdown(v: unknown): string {
+  const p = obj(v);
+  const lines = arr(p.lines).map(obj).filter((l) => str(l.label) || str(l.text))
+    .map((l) => `- ${str(l.label) ? `**${str(l.label)}** ` : ''}${str(l.text)}`.trimEnd());
+  const chips = arr(p.chips).map(str).filter(Boolean);
+  return [
+    str(p.eyebrow) ? `*${str(p.eyebrow)}*` : '',
+    str(p.title) ? `**${str(p.title)}**` : '',
+    str(p.meta), str(p.progressNote), str(p.stepEyebrow),
+    str(p.stepTitle) ? `**${str(p.stepTitle)}**` : '',
+    lines.join('\n'), str(p.action), chips.join(' · '), str(p.note), str(p.initial), str(p.bubble),
+  ].filter(Boolean).join('\n\n');
+}
+
+/** ADR 0920 D5 — a `richText` conversation picture as a quoted exchange. */
+function chatMarkdown(v: unknown): string {
+  const c = obj(v);
+  const pr = obj(c.proposal);
+  const proposal = [str(pr.label) ? `**${str(pr.label)}**` : '', str(pr.text)].filter(Boolean).join(' ');
+  return [
+    str(c.title) ? `**${str(c.title)}**` : '',
+    str(c.subtitle), str(c.badge),
+    ...arr(c.messages).map(obj).map((m) => str(m.text)).filter(Boolean).map((t) => `> ${t}`),
+    proposal,
+    [str(pr.accept), str(pr.decline)].filter(Boolean).join(' · '),
+    str(c.placeholder),
+  ].filter(Boolean).join('\n\n');
+}
 
 /** One section → markdown, or null for an unknown/future type. */
 export function sectionMarkdown(section: Section, baseUrl: string): string | null {
@@ -41,10 +73,15 @@ export function sectionMarkdown(section: Section, baseUrl: string): string | nul
         str(d.ctaLabel2) && str(d.ctaUrl2) ? `[${str(d.ctaLabel2)}](${str(d.ctaUrl2)})` : '',
       ].filter(Boolean);
       if (ctas.length > 0) parts.push(ctas.join(' · '));
+      if (str(d.note)) parts.push(str(d.note));
+      const plan = planMarkdown(d.plan);
+      if (plan) parts.push(plan);
       return parts.join('\n\n');
     }
-    case 'richText':
-      return `${head()}${str(d.text)}`;
+    case 'richText': {
+      const chat = chatMarkdown(d.chat);
+      return `${head()}${str(d.text)}${chat ? `\n\n${chat}` : ''}`;
+    }
     case 'image': {
       const token = str(d.token);
       if (!token) return head().trim();
@@ -57,20 +94,25 @@ export function sectionMarkdown(section: Section, baseUrl: string): string | nul
       // ADR 0836 D7 — re-checked at this exit too (it relied on the write-time
       // `safeLink` alone), with the same predicates as the HTML renderer.
       const raw = str(d.url).trim();
-      const url = isInternalHref(raw) || /^(https?:|mailto:)/i.test(raw) ? raw : '';
+      const url = isInternalHref(raw) || isFragmentHref(raw) || /^(https?:|mailto:)/i.test(raw) ? raw : '';
       return `${head()}${str(d.subheading) ? `${str(d.subheading)}\n\n` : ''}${label && url ? `[${label}](${url})` : ''}`.trim();
     }
     case 'columns': {
       const cols = Array.isArray(d.columns) ? d.columns : [];
       const ordered = str(d.layout) === 'steps';
       const items = cols.map((c, i) => {
-        const cc = c as { title?: unknown; text?: unknown };
+        const cc = c as { title?: unknown; text?: unknown; eyebrow?: unknown; badge?: unknown; items?: unknown };
         const title = str(cc.title);
         const text = str(cc.text);
         const bullet = ordered ? `${i + 1}.` : '-';
-        return `${bullet} ${title ? `**${title}** — ` : ''}${text}`;
+        // ADR 0920 D4 — item label line + badge, and `list` rows nested under the item.
+        const pre = [str(cc.eyebrow), str(cc.badge)].filter(Boolean).map((x) => `*${x}* `).join('');
+        const rows = arr(cc.items).map(obj).filter((it) => str(it.label))
+          .map((it) => `\n   - ${str(it.label)}${str(it.meta) ? ` (${str(it.meta)})` : ''}`).join('');
+        return `${bullet} ${pre}${title ? `**${title}** — ` : ''}${text}${rows}`;
       });
-      return `${head()}${items.join('\n')}`;
+      const note = str(d.note);
+      return `${head()}${items.join('\n')}${note ? `\n\n${note}` : ''}`;
     }
     // Live-data sections: the markdown carries the section's own chrome and a
     // followable pointer — the data resolves client-side and is never baked

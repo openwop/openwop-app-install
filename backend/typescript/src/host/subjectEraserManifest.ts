@@ -194,11 +194,27 @@
  *      browser agent did; the opener and the apply subject are tombstoned and
  *      every free-text field (task, summaries, descriptions, errors) is dropped.
  */
+/*
+ *  +1 (2026-10-18, ADR 0930 D5/A1, feature loop row 52):
+ *    + `eraseAmbientWorkGraphSubject` — `ambient-work-graph:suggestions` holds a
+ *      person's behavioural profile (their repeated tool sequences, goal text and run
+ *      ids) and had no eraser. The rows are deleted, not redacted (the profile is the
+ *      person's, not org content), and an `erased` suppression row is written FIRST:
+ *      run records are exempt from erasure, so without it the next sweep would mine
+ *      the same runs back into the same rows.
+ */
+/*
+ *  +1 (2026-10-18, ADR 0921/0922 P0):
+ *    + `eraseCampaignOpsSubject` — `campaign-ops:client` and `campaign-ops:asset`
+ *      record `createdBy`. The rows are the agency's per-client configuration and
+ *      are kept; `createdBy` is tombstoned.
+ */
 export const EXPECTED_SUBJECT_ERASERS: ReadonlySet<string> = new Set([
   'commentsEraser',
   'consentSubjectEraser',
   'emailEraser',
   'eraseAgentDraftStashForSubject',
+  'eraseAmbientWorkGraphSubject',
   'eraseApprovalDelegations',
   'eraseApprovalHandoffSubject',
   'eraseApprovals',
@@ -206,6 +222,7 @@ export const EXPECTED_SUBJECT_ERASERS: ReadonlySet<string> = new Set([
   'eraseBuilderPairSubject',
   'eraseBrandSubject',
   'eraseCalendarMcpForSubject',
+  'eraseCampaignOpsSubject',
   'eraseCdpCollectedEvents',
   'eraseClaudeCodeSubjectKey',
   'eraseDeveloperKeysForSubject',
@@ -214,6 +231,7 @@ export const EXPECTED_SUBJECT_ERASERS: ReadonlySet<string> = new Set([
   'eraseCommerceConnectSubject',
   'eraseCommunitySubject',
   'eraseCompensation',
+  'eraseCampaignConversions', // ADR 0907 D8 (placed here, out of order, to stay clear of a neighbour's line)
   'eraseComputerUseSubject',
   'eraseConversationToolApprovalsSubject',
   'eraseCreatorSubject',
@@ -227,6 +245,8 @@ export const EXPECTED_SUBJECT_ERASERS: ReadonlySet<string> = new Set([
   'eraseEnvironmentsSubject',
   'eraseExtractionGrants',
   'eraseFormsSubject',
+  // ADR 0908 D7 — a person's standing goals.
+  'eraseGoalsForSubject',
   'eraseIntegrationsSubject',
   'eraseIntentLedgerSubject',
   'eraseKbSubject',
@@ -243,6 +263,8 @@ export const EXPECTED_SUBJECT_ERASERS: ReadonlySet<string> = new Set([
   'eraseScheduledChatsSubject',
   'eraseSharingSubject',
   'eraseSubjectAccessControl',
+  // ADR 0910 — `workspace-operator-activation` (host/operatorAccess.ts).
+  'eraseSubjectOperatorActivations',
   'eraseSubjectAgentTwinLinks',
   'eraseSubjectAnalytics',
   'eraseSubjectAnswers',

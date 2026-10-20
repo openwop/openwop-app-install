@@ -22,6 +22,7 @@ import { putSeo } from '../features/publishing/publishingService.js';
 import { assertOrgCapacity, createAsset, listAssets } from '../features/media/mediaService.js';
 import * as mediaStorage from '../features/media/mediaStorage.js';
 import { ensureSystemSiteOrg, SYSTEM_SITE_TENANT, SYSTEM_SITE_ORG } from './systemSite.js';
+import { systemSiteSeedEnabled } from './systemSiteConfig.js';
 import { ASSUMED_MODEL_PNG_BASE64, REAL_MODEL_PNG_BASE64 } from './seed-data/blog/launchPostDiagrams.js';
 
 const log = createLogger('host.systemSiteBlog');
@@ -96,6 +97,9 @@ async function ensureDiagramTokens(): Promise<DiagramTokens> {
 const seedMarker = new DurableCollection<{ id: string; version: number }>('systemsite:blog-seed', (r) => r.id);
 
 async function doEnsure(): Promise<void> {
+  // ADR 0931 — a distribution can turn this seed off. It then writes nothing;
+  // pages it wrote before stay as they are.
+  if (!systemSiteSeedEnabled('blog')) return;
   await ensureSystemSiteOrg();
   const marker = await seedMarker.get('seed');
   if (marker?.version === SEED_VERSION) return; // post current — nothing to do

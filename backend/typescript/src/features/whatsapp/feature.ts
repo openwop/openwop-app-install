@@ -76,7 +76,7 @@ export const whatsappFeature: BackendFeature = {
     salt: 'whatsapp',
   },
   requiredPacks: [
-    { name: 'feature.whatsapp.nodes', version: '1.0.1' }, // ADR 0394 P1 — the governed whatsapp.send node
-    { name: 'vendor.openwop-app.whatsapp.agents', version: '1.0.1' }, // ADR 0394 P2 — the scoped customer-service persona (Meta primary-functionality ban)
+    'feature.whatsapp.nodes', // ADR 0394 P1 — the governed whatsapp.send node
+    'vendor.openwop-app.whatsapp.agents', // ADR 0394 P2 — the scoped customer-service persona (Meta primary-functionality ban)
   ],
 };

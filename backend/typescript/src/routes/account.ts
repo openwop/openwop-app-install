@@ -11,6 +11,16 @@
  *     (ADR 0015 cascade) — BUT it refuses (409) if the caller is the sole
  *     owner of any shared workspace, so a delete never orphans a team
  *     workspace; the user transfers ownership first.
+ *   - the tenant's open Stripe subscriptions (plan + bundle add-ons) are
+ *     canceled FIRST (MyndHyve R2): if that fails the delete is refused (503)
+ *     and nothing is wiped, so a deleted account is never left being billed.
+ *
+ * What the account delegated in OTHER tenants (API keys, CLI logins, pairings)
+ * is revoked first too, as the admin erase route does (ADR 0833 D7).
+ *
+ * `host.users.user.erased` fires after the wipe when the caller's durable user
+ * row was removed by it (ADR 0617 D1 — the admin erase route's event, now also
+ * emitted for a self-delete).
  *
  * Firebase user revocation is the caller's responsibility — the SPA
  * follows the backend DELETE with `user.delete()` on the Firebase JS
@@ -31,7 +41,11 @@ import { eraseTenantOwnedUsage } from '../providers/managedProvider.js';
 import { OpenwopError } from '../types.js';
 import type { Storage } from '../storage/storage.js';
 import { createLogger } from '../observability/logger.js';
-import { clearTenantSecretCache } from '../byok/secretResolver.js';
+import { clearTenantSecretCache, resolveSecret } from '../byok/secretResolver.js';
+import { cancelTenantStripeSubscriptions, STRIPE_KEY_REF } from '../features/billing/billingService.js';
+import { bumpSessionEpoch, getUser, sessionEpochOf, type UserStatus } from '../features/users/usersService.js';
+import { userErased } from '../features/users/emit.js';
+import { notifySubjectErased } from '../host/delegatedSubject.js';
 import { purgeTenantHostExt } from '../host/hostExtPersistence.js';
 import { purgeTenantKanban } from '../host/kanbanService.js';
 import { purgeTenantDurableSurfaces } from '../host/durable/durableQueue.js';
@@ -54,6 +68,9 @@ const log = createLogger('routes.account');
 
 export function registerAccountRoutes(app: Express, deps: { storage: Storage }): void {
   app.delete('/host/openwop-app/account', async (req, res, next) => {
+    // Set once step (2) below has disabled the caller's row; the catch at the
+    // end re-enables it on ANY later failure (revocation or wipe).
+    let disabled: { userId: string; prevStatus: UserStatus; epoch: number } | null = null;
     try {
       // ADR 0015: "delete my account" wipes the caller's PERSONAL tenant — NOT
       // `req.tenantId`, which is the ACTIVE workspace and may be a shared `ws:`
@@ -123,6 +140,61 @@ export function registerAccountRoutes(app: Express, deps: { storage: Storage }):
           409,
           { held: true, reason: hold.reason, since: hold.createdAt },
         );
+      }
+
+      // ADR 0617 D1 — the durable user row this account owns, read BEFORE the
+      // wipe so the erased event below can name it. Only the caller's own row in
+      // their own personal tenant counts.
+      const ownUser = req.userId ? await getUser(req.userId) : null;
+      const erasedUser = ownUser && ownUser.tenantId === tenantId ? ownUser : null;
+
+      if (!erasedUser) {
+        // No durable user row of their own (an unbound caller, or a row homed
+        // elsewhere): there is no subject to revoke delegations for or to
+        // report erased. Logged so the gap is visible, not silent.
+        log.warn('account-delete: no own user row — delegations not revoked, no erased event', {
+          tenantId, hasUserId: Boolean(req.userId), rowTenantMatches: ownUser ? ownUser.tenantId === tenantId : null,
+        });
+      }
+
+      // ORDER (review of #5001). Every step that can refuse with "not deleted"
+      // runs BEFORE anything irreversible happens to the person's access:
+      //
+      //  1. Stripe: the open-subscription / missing-key precheck and the cancel.
+      //     A 503 here leaves the account exactly as it was. Retrying is safe:
+      //     each subscription is read first, so an ended one is not re-canceled.
+      //  2. Disable the row and bump the session epoch (ADR 0621 D2, as the
+      //     admin erase does), so no live session can mint a key or approve a
+      //     CLI login between the revocation and the wipe.
+      //  3. Revoke what the account delegated in other tenants (ADR 0833 D7).
+      //  4. The wipe.
+      //
+      // MyndHyve R2 — (1) stops the tenant's recurring charges before the wipe
+      // deletes the billing rows that name them. ONE Stripe client
+      // (`features/billing/stripeApi.ts`) via the billing service.
+      const billing = await cancelTenantStripeSubscriptions(tenantId, await resolveSecret(STRIPE_KEY_REF));
+
+      if (erasedUser) {
+        // (2) `prevStatus` is read from the row the swap LANDS on, not from the
+        // earlier read: an admin may have changed it during the Stripe calls.
+        let prevStatus: UserStatus = erasedUser.status;
+        const landed = await bumpSessionEpoch(erasedUser.userId, (row) => { prevStatus = row.status; return { ...row, status: 'disabled' }; });
+        if (landed) disabled = { userId: landed.userId, prevStatus, epoch: sessionEpochOf(landed) };
+        // (3) The wipe below reaches only the personal tenant, so `owk_` keys,
+        // approved-but-uncollected CLI logins and Claude Code pairings in other
+        // tenants would otherwise survive. Fail-closed; the reply says plainly
+        // that some revocations may already have happened.
+        try {
+          await notifySubjectErased({ userId: erasedUser.userId, principalId: erasedUser.principalId, homeTenant: tenantId });
+        } catch (err) {
+          log.error('account-delete: delegation revocation failed — delete stopped', { tenantId, error: err instanceof Error ? err.message : String(err) });
+          throw new OpenwopError(
+            'internal_error',
+            `Deleting your account did not finish. Some of your API keys or app connections may already be revoked${billing.canceled.length > 0 ? ', and your subscription has been canceled' : ''}. Sign in again and retry the delete.`,
+            500,
+            { stage: 'revoke_delegations', stripeSubscriptionsCanceled: billing.canceled.length },
+          );
+        }
       }
 
       // Wipe Postgres rows first (transactional). The KMS-wrapped DEKs
@@ -227,8 +299,17 @@ export function registerAccountRoutes(app: Express, deps: { storage: Storage }):
         // failing backend only in a server log made "named, never folded into the success
         // count" true inside the process and false at the API boundary: the caller was
         // told `{deleted:true}` either way.
-        payload: { ...counts, hostExtRows: hostExt.deleted, hostExtGhostRows: hostExt.ghostRows, hostExtCollections: hostExt.collections, membershipsRemoved, vectorRows: vectors.purged, vectorBackends: vectors.backends, vectorBackendsFailed: vectors.failed },
+        payload: { ...counts, hostExtRows: hostExt.deleted, hostExtGhostRows: hostExt.ghostRows, hostExtCollections: hostExt.collections, membershipsRemoved, vectorRows: vectors.purged, vectorBackends: vectors.backends, vectorBackendsFailed: vectors.failed, stripeSubscriptionsCanceled: billing.canceled.length, stripeSubscriptionsAlreadyEnded: billing.alreadyEnded.length, stripeSubscriptionsUnknown: billing.unknownToStripe.length },
       });
+
+      // ADR 0617 D1 — only when the wipe actually removed the row: an `erased`
+      // event for a row that still exists would be a false claim. Delivery is
+      // tenant-scoped (bindings and webhooks of `tenantId`), and the wipe above
+      // deleted this tenant's own, so today nothing outside the process
+      // receives it; it is emitted so the lifecycle stream has the transition.
+      if (erasedUser && !(await getUser(erasedUser.userId))) {
+        userErased({ userId: erasedUser.userId, tenantId, outcome: 'deleted' });
+      }
 
       log.info('account hard-delete', { tenantId, ...counts, ...hostExt, kanbanBoards: kanban.boards, kanbanCards: kanban.cards, durableSurfaceRows, vectorRows: vectors.purged, vectorBackends: vectors.backends, vectorBackendsFailed: vectors.failed, toggleOverridesPurged: toggleOverrides.length, membershipsRemoved, ownedWorkflowDefsDeleted: ownedDefs.defsDeleted, ownershipRowsDeleted: ownedDefs.ownershipRows, approvalIndexRowsPurged: approvalIx });
       res.json({
@@ -236,6 +317,7 @@ export function registerAccountRoutes(app: Express, deps: { storage: Storage }):
         ...counts,
         toggleOverridesPurged: toggleOverrides.length,
         membershipsRemoved,
+        stripeSubscriptionsCanceled: billing.canceled.length,
         // KB-2 R2 — `vectorBackendsFailed` non-empty means the delete is INCOMPLETE.
         // It is reported rather than folded into a bare `deleted:true` (see the audit
         // payload above); `deleted` stays true because the tenant's own rows ARE gone.
@@ -244,6 +326,18 @@ export function registerAccountRoutes(app: Express, deps: { storage: Storage }):
         vectorBackendsFailed: vectors.failed,
       });
     } catch (err) {
+      // Review of #5001 (M1): a failure anywhere after step (2) — revocation or
+      // the wipe — must not leave the row disabled, because a disabled row
+      // refuses even a fresh sign-in, so the person could never retry. Sessions
+      // stay ended (the epoch was bumped). Restored only if the row is still the
+      // one step (2) wrote; an admin's later change is left alone. A row the
+      // wipe already removed has nothing to restore: the next sign-in
+      // provisions a new one, and the delete can be retried.
+      if (disabled) {
+        const d = disabled;
+        await bumpSessionEpoch(d.userId, (row) => (row.status === 'disabled' && sessionEpochOf(row) === d.epoch ? { ...row, status: d.prevStatus } : row))
+          .catch((e) => log.error('account-delete: could not re-enable the row after a failed delete', { error: String(e) }));
+      }
       next(err);
     }
   });

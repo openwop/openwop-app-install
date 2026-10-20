@@ -75,6 +75,9 @@ export const messages = {
 
   // Section renderer
   optionalBadge: 'Optional',
+  planFigureLabel: 'Example plan',
+  planFigureLabelWithNote: 'Example plan. {{note}}',
+  planProgress: 'Progress',
   noImage: '(no image)',
   unknownSection: 'Unknown section.',
 
@@ -119,6 +122,7 @@ export const messages = {
   heroVisualFilm: 'Intro film (demo site only; elsewhere the run ledger)',
   heroVisualImage: 'Authored image',
   heroVisualNone: 'No visual',
+  heroVisualPlan: 'Example plan card',
 
   // Sections editor — richText
   richTextLabel: 'Text (markdown: **bold**, *italic*, `code`, [link](url))',
@@ -143,6 +147,11 @@ export const messages = {
   layoutStats: 'Stats (value + label)',
   layoutPrompts: 'Prompts (tag + example prompt)',
   layoutDives: 'Deep dives (claim + built-in illustration)',
+  layoutRuled: 'Ruled columns (hairline over each)',
+  layoutPanels: 'Panels (filled, small drawing)',
+  layoutProgress: 'Progress cards (label + bar)',
+  layoutTiles: 'Tiles (four across, badge)',
+  layoutList: 'Lists (title + named rows)',
   columnLinkLabel: 'Destination (optional)',
   columnLinkPlaceholder: '/agents or https://example.com',
   columnIconLabel: 'Icon (optional)',

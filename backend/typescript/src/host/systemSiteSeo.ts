@@ -23,6 +23,7 @@ import { ensureSystemSite, SYSTEM_SITE_TENANT, SYSTEM_SITE_ORG } from './systemS
 import { ensureFeaturesPage } from './featuresPage.js';
 import { ensureComparisonPage } from './comparisonPage.js';
 import { ensureMarketingContentPages } from './marketingContentPages.js';
+import { systemSiteSeedEnabled } from './systemSiteConfig.js';
 
 const log = createLogger('host.systemSiteSeo');
 const SYSTEM_ACTOR = 'system';
@@ -72,6 +73,9 @@ export const SYSTEM_SITE_PAGE_SEO: Readonly<Record<string, SystemPageSeo>> = {
 };
 
 async function doEnsure(): Promise<void> {
+  // ADR 0931 — a distribution can turn this seed off. It then writes nothing;
+  // records it wrote before stay as they are.
+  if (!systemSiteSeedEnabled('seo')) return;
   // The pages must exist before their SEO can (putSeo 404s an absent page).
   // Each ensure is idempotent + concurrency-collapsed, so racing the boot
   // seeders that also call them is free.

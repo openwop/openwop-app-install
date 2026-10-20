@@ -108,6 +108,7 @@ export const messages = {
   recurringSkipFeatureDisabled: 'la fonctionnalité propriétaire de cette planification est désactivée pour cet espace de travail',
   recurringSkipPlanLapsed: 'votre forfait n’inclut plus la fonctionnalité propriétaire de cette planification',
   recurringSkipActorInactive: 'la personne au nom de laquelle elle s’exécute a été désactivée',
+  recurringSkipGoalClosed: 'son objectif est terminé ou a dépassé une limite : plus rien ne s’exécutera pour lui',
   recurringSkipAgentPaused: 'l’agent qui l’exécute est en pause — réactivez l’agent pour la reprendre',
   recurringSkipPolicyDenied: 'l’agent n’a pas le droit d’exécuter ce workflow (il figure dans sa liste d’interdits)',
   recurringSkipAwaitingApproval: 'elle attend une approbation — ce workflow exige une approbation pour cet agent',

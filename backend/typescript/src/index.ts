@@ -62,7 +62,7 @@ import { ensureFeatureDefaultOrgs } from './host/featureDefaultOrgs.js';
 import { setDefaultWorkspaceTargets } from './host/workspaceJoinLedger.js';
 import { registerMembershipRootedWorkspaces } from './host/accessControlService.js';
 import { ensureRegistryPacksInstalled } from './bootstrap/installRegistryPacks.js';
-import { featurePackRefs, featureDefaultOrgs } from './features/index.js';
+import { featurePackNames, featureDefaultOrgs, pinnedPackRef } from './features/index.js';
 import { ensureLocalPacksMounted } from './bootstrap/mountLocalPacks.js';
 import { recordChainPackLoad } from './host/chainPackLoadStatus.js';
 import { loadPromptPacks, defaultPromptPackRoots } from './host/promptPackLoader.js';
@@ -505,7 +505,9 @@ export async function createApp(config: AppConfig): Promise<Express> {
   // always honored — even under the `none` short-circuit above — so a feature
   // that requires a registry-distributed pack gets it (ADR 0014 Phase 0; in-tree
   // packs already on disk from the local mount are skipped by the installer).
-  await ensureRegistryPacksInstalled(featurePackRefs());
+  // ADR 0919 correction — names + a resolver: a pin is read only for a pack this
+  // boot installs, so `createApp()` stops depending on every pin.
+  await ensureRegistryPacksInstalled({ names: featurePackNames(), resolve: pinnedPackRef });
 
   // ADR 0684 phase 1 — provision feature-declared default orgs + shared
   // workspaces. Same declare-here/consume-at-boot shape as the packs above, and
@@ -994,7 +996,7 @@ async function main(): Promise<void> {
   // hygiene) — starts when ANY half is enabled; each self-gates inside the
   // tick. The 0380 idempotency TTL defaults ON (cache hygiene, not user data),
   // so in practice the loop always starts unless explicitly disabled.
-  const retentionSweepDaemon = (process.env.OPENWOP_RETENTION_SWEEP_ENABLED === 'true' || defaultRetentionDays() > 0 || idempotencyTtlDays() > 0)
+  const retentionSweepDaemon = (process.env.OPENWOP_RETENTION_SWEEP_ENABLED === 'true' || process.env.OPENWOP_RETENTION_SWEEP_DRY_RUN === 'true' || defaultRetentionDays() > 0 || idempotencyTtlDays() > 0)
     ? startRetentionSweepDaemon({ storage })
     : null;
   // ADR 0107 Phase 3b / WF-KB-3 / KSWF-1 — a SyncSource's cadence fires as a

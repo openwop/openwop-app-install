@@ -159,6 +159,10 @@ export async function brokeredFetch(
     body?: string;
     contentType?: string;
     authScheme?: AuthScheme;
+    /** The header the credential goes in (default `authorization`) — the
+     *  brokeredPost option, for GET reads against a platform that authenticates
+     *  with a custom header (TikTok `Access-Token`, ADR 0907 D4). */
+    authHeaderName?: string;
     /** `'manual'` RETURNS a 3xx instead of erroring — for reading a pre-authenticated
      *  download `Location` (e.g. Box `/content`) WITHOUT following it. `'manual'` does
      *  NOT follow the redirect, so the credentialed request only ever reaches the
@@ -234,10 +238,13 @@ export async function brokeredFetch(
   // those from caller extras before merge (undici lowercases at send, so an
   // unstripped variant would survive as a SECOND auth header) — the same guard
   // brokeredPost applies. Everything else (e.g. `Prefer`, `SOAPAction`) passes.
+  // With a custom `authHeaderName`, BOTH that name and `authorization` are
+  // stripped: the credential has exactly one carrier, and it is the broker's.
+  const authName = (opts.authHeaderName ?? 'authorization').trim().toLowerCase();
   const safeExtra = Object.fromEntries(
     Object.entries(opts.extraHeaders ?? {}).filter(([k]) => {
       const n = k.trim().toLowerCase();
-      return n !== 'authorization' && n !== 'content-type';
+      return n !== 'authorization' && n !== authName && n !== 'content-type';
     }),
   );
 
@@ -247,7 +254,7 @@ export async function brokeredFetch(
       headers: {
         ...(opts.body !== undefined ? { 'content-type': opts.contentType ?? 'application/json; charset=utf-8' } : {}),
         ...safeExtra,
-        authorization: authHeader(opts.authScheme ?? 'bearer', resolved.secret),
+        [authName]: authHeader(opts.authScheme ?? 'bearer', resolved.secret),
       },
       ...(opts.body !== undefined ? { body: opts.body } : {}),
       dispatcher: webhookEgressDispatcher(),

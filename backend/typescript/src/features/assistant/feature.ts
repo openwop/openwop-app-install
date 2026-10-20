@@ -93,8 +93,8 @@ export const assistantFeature: BackendFeature = {
     // (the assistant:project store is retired). WF-COS-2/3 — bumped WITH the pack (1.3.0 -> 1.4.0). This pin is the
     // registry install TARGET, so a bumped pack with an unbumped pin fetches the
     // OLD content and the `role:"side-effect"` flip would never reach the host.
-    { name: 'feature.assistant.nodes', version: '2.0.1' },
-    { name: 'vendor.openwop-app.assistant.agents', version: '1.0.5' },
+    'feature.assistant.nodes',
+    'vendor.openwop-app.assistant.agents',
   ],
   // § Correction (2026-06-11) — graduated OFF the feature toggle. The Chief of
   // Staff is now a real roster agent (capability.ts) and its surfaces live on

@@ -39,6 +39,7 @@ import { describe, expect, it } from 'vitest';
 import { MANIFEST_SIDE_EFFECT_FLOOR, MANIFEST_FAST_PATH_SERVED } from '../src/executor/sideEffectFloor.generated.js';
 import { isSideEffectingNode } from '../src/executor/sideEffects.js';
 import { loadWorkflowChainPacks, getChain, expandChain, _resetChainRegistryForTest } from '../src/host/workflowChainPackLoader.js';
+import { pinnedPackRef } from '../src/features/packPins.js';
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 const MANIFEST = JSON.parse(readFileSync(join(REPO, 'packs', 'feature.csm.nodes', 'pack.json'), 'utf8')) as {
@@ -75,7 +76,8 @@ describe('ADR 0645 D3 — the CSM write node is classified, floored and served',
 
   it('leg 4: the feature pin equals the manifest version', () => {
     const feature = readFileSync(join(REPO, 'backend', 'typescript', 'src', 'features', 'csm', 'feature.ts'), 'utf8');
-    expect(feature).toContain(`{ name: 'feature.csm.nodes', version: '${MANIFEST.version}' }`);
+    expect(feature).toContain(`'feature.csm.nodes'`);
+    expect(pinnedPackRef('feature.csm.nodes').version, 'the pin (features/packPins.ts, ADR 0919) must match the manifest').toBe(MANIFEST.version);
   });
 
   it('leg 5 (CSMWF-6): expandChain is BYTE-IDENTICAL across two builds', () => {

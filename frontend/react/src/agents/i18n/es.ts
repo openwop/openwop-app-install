@@ -107,6 +107,7 @@ export const messages = {
   recurringSkipFeatureDisabled: 'la función propietaria de esta programación está desactivada en este espacio de trabajo',
   recurringSkipPlanLapsed: 'tu plan ya no incluye la función propietaria de esta programación',
   recurringSkipActorInactive: 'la persona en cuyo nombre se ejecuta ha sido desactivada',
+  recurringSkipGoalClosed: 'su objetivo terminó o superó un límite, así que no se ejecutará nada más para él',
   recurringSkipAgentPaused: 'el agente con el que se ejecuta está en pausa; reanude el agente para reanudar esto',
   recurringSkipPolicyDenied: 'el agente no tiene permitido ejecutar este flujo de trabajo (está en su lista de prohibidos)',
   recurringSkipAwaitingApproval: 'está esperando aprobación: este flujo de trabajo requiere aprobación para este agente',

@@ -21,7 +21,7 @@ import { exportCreativeBriefsData } from './dataExport.js';
 
 export const creativeBriefsFeature: BackendFeature = {
   id: 'creative-briefs',
-  requiredPacks: [{ name: 'feature.creative-briefs.nodes', version: '1.2.1' }], // NP-HOLE-CB-1; 1.1.0 = ADR 0399 render nodes; 1.2.0 = ADR 0411 P3 generate-reel
+  requiredPacks: ['feature.creative-briefs.nodes'], // NP-HOLE-CB-1; 1.1.0 = ADR 0399 render nodes; 1.2.0 = ADR 0411 P3 generate-reel
   registerRoutes: (deps) => {
     registerFeatureDataExporter('creative-briefs', exportCreativeBriefsData); // ADR 0820 §7 — read-only export, served after a plan lapse
     registerCreativeBriefsReelWorkflow(); // ADR 0472 P4 — reel migrated to a chain-backed workflow

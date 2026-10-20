@@ -22,6 +22,7 @@ import { openStorage } from '../src/storage/index.js';
 import { __resetIgnitionClaims, ignitionKey, claimIgnition, recordIgnitionRun } from '../src/host/ignitionGuard.js';
 import { createList, submitIdea, setIdeaScore, getSessionRow } from '../src/features/priority-matrix/priorityMatrixService.js';
 import { buildPriorityMatrixSurface } from '../src/features/priority-matrix/surface.js';
+import { pinnedPackRef } from '../src/features/packPins.js';
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 const NODE_ID = 'feature.priority-matrix.nodes.generate-agenda';
@@ -64,7 +65,8 @@ describe('ADR 0667 D3 — generate-agenda duplicates neither on replay nor on fo
     expect(isSideEffectingNode(NODE_ID)).toBe(true);
     // The feature pin must equal the manifest, or the host runs a different pack.
     const feature = readFileSync(join(REPO, 'backend', 'typescript', 'src', 'features', 'priority-matrix', 'feature.ts'), 'utf8');
-    expect(feature).toContain(`{ name: 'feature.priority-matrix.nodes', version: '${pack.version}' }`);
+    expect(feature).toContain(`'feature.priority-matrix.nodes'`);
+    expect(pinnedPackRef('feature.priority-matrix.nodes').version, 'the pin (features/packPins.ts, ADR 0919) must match the manifest').toBe(pack.version);
   });
 
   it('leg 2 (the FORK half): a re-execution with identical inputs returns the SAME session', async () => {

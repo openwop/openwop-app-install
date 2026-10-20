@@ -33,6 +33,7 @@ import { Button } from '../../ui/Button.js';
 import { Notice } from '../../ui/Notice.js';
 import { announce } from '../../ui/announce.js';
 import { recordChoice, useVisitorConsent } from './visitorConsent.js';
+import { PRIVACY_HREF } from '../../brand/privacyHref.js';
 
 
 export function VisitorConsentBanner({ orgId }: { orgId: string }): JSX.Element | null {
@@ -162,7 +163,7 @@ export function VisitorConsentBanner({ orgId }: { orgId: string }): JSX.Element 
         <h2 id={headingId} ref={headingRef} tabIndex={-1} className="visitor-consent__title">{t('consentTitle')}</h2>
         <p className="visitor-consent__body">
           {t(changing ? 'consentBodyChange' : 'consentBody')}{' '}
-          <a href="/privacy">{t('consentPrivacyLink')}</a>
+          <a href={PRIVACY_HREF}>{t('consentPrivacyLink')}</a>
         </p>
         {changing ? <p className="visitor-consent__state">{t(current ? 'consentStateOn' : 'consentStateOff')}</p> : null}
         {failed ? <Notice variant="error" announce={t('consentFailed')}>{t('consentFailed')}</Notice> : null}

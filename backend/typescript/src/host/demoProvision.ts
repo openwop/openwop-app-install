@@ -51,6 +51,8 @@ export const DEMO_FEATURE_TOGGLE_IDS: readonly string[] = [
   'campaign-orchestration',
   'campaign-connectors',
   'creative-briefs',
+  // Agency campaign operations (ADR 0927 D2) — seeded by `demo-agency-ops`
+  'campaign-ops',
   // Strategy / planning / success
   'strategy',
   'priority-matrix',

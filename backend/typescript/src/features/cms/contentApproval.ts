@@ -38,6 +38,7 @@ import { resolveOne } from '../../host/featureToggles/service.js';
 import { getOrg, hasDistinctScopeHolder, resolveEffectiveAccess } from '../../host/accessControlService.js';
 import { approvalRecipients } from '../../host/approvalAudience.js';
 import { canonicalDecider } from '../../host/delegatedSubject.js';
+import { selfApprovalBlockedCore } from '../../host/approvalSelfCheck.js';
 import { hasContentSectionResolver } from '../../host/contentDataSources.js';
 import { getNotificationEmitter } from '../../notifications/emitter.js';
 import { createLogger } from '../../observability/logger.js';
@@ -180,13 +181,14 @@ export async function isApprovalGateOn(tenantId: string): Promise<boolean> {
  * (CAS), then transition the page (`approve` → published, `reject` → draft).
  * Returns null when the approval is missing/cross-tenant or not a content
  * approval (the route maps that to 404). Throws `forbidden_scope` (403) when the
- * decider lacks `host:members:manage` in the page's org.
+ * decider lacks `host:members:manage` in the page's org; on the reserved system
+ * site a superadmin decides instead (MyndHyve B2).
  */
 async function decideContentPublish(
   tenantId: string,
   approvalId: string,
   outcome: 'approved' | 'rejected',
-  opts: { decidedByUserId?: string; note?: string },
+  opts: { decidedByUserId?: string; note?: string; isSuperadmin?: boolean },
 ): Promise<{ approval: PendingApproval; changed: boolean } | null> {
   const approval = await getApproval(approvalId);
   if (!approval || approval.tenantId !== tenantId || approval.kind !== 'content-publish') return null;
@@ -205,8 +207,15 @@ async function decideContentPublish(
     // Uniform not-found: never leak a cross-tenant/org approval's existence.
     return null;
   }
-  const access = await resolveEffectiveAccess(tenantId, { subject: decidedBy, orgId });
-  if (!access.scopes.includes('host:members:manage')) {
+  // MyndHyve B2 — the reserved system-site org has no members, so no one could
+  // hold `host:members:manage` there and its reviews were undecidable (403). Its
+  // authority is host-level: the superadmin that `requireCmsScope` admits to edit
+  // it (ADR 0027) decides its reviews too. Narrow on purpose: the reserved
+  // tenant AND org, and only for a superadmin; every real org is unchanged.
+  const systemSiteAuthority = opts.isSuperadmin === true
+    && tenantId === SYSTEM_SITE_TENANT && orgId === SYSTEM_SITE_ORG;
+  const access = systemSiteAuthority ? null : await resolveEffectiveAccess(tenantId, { subject: decidedBy, orgId });
+  if (access && !access.scopes.includes('host:members:manage')) {
     throw new OpenwopError('forbidden_scope', 'Missing required scope: host:members:manage', 403, {
       requiredScope: 'host:members:manage',
     });
@@ -632,21 +641,14 @@ async function notifyReviewDecided(approval: PendingApproval, outcome: 'approved
 export async function selfApprovalBlocked(tenantId: string, orgId: string, decidedBy: string, approval: PendingApproval): Promise<boolean> {
   if (approval.kind !== 'content-publish' || approval.status !== 'pending') return false;
   if (!(await liveEditGateActive(tenantId, orgId))) return false;
-  // Causes count here and nowhere else (they narrow; they are never notified).
-  const submitters = [...(approval.submitters ?? []), ...(approval.submitterCauses ?? [])];
-  if (submitters.length === 0) {
-    log.warn('cms_review_unbound_submitter', { tenantId, approvalId: approval.approvalId });
-    return false;
-  }
-  const decider = await canonicalDecider(tenantId, decidedBy);
-  const subs = await Promise.all(submitters.map((s) => canonicalDecider(tenantId, s)));
-  const isSubmitter = decider === null || subs.some((s) => s === null || s === decider);
-  if (!isSubmitter) return false;
-  // "Someone else can approve" means someone who is neither the decider nor ANY
-  // submitter (code grade CMSA2CD-3): two admins who both submitted must not each be
-  // refused for the other. Unresolvable submitters are excluded in their raw form.
-  const others = submitters.map((s, i) => subs[i] ?? s);
-  return hasDistinctScopeHolder(tenantId, 'host:members:manage', decider ?? decidedBy, { orgId, alsoExclude: others });
+  // ADR 0905 D3 — the identity comparison is hoisted to `host/approvalSelfCheck.ts` so
+  // `email-campaign-send` runs the same one. Causes count here and nowhere else (they
+  // narrow; they are never notified).
+  return selfApprovalBlockedCore({
+    tenantId, approvalId: approval.approvalId, decidedBy, logTag: 'cms_review',
+    submitters: [...(approval.submitters ?? []), ...(approval.submitterCauses ?? [])],
+    otherApproverExists: (decider, exclude) => hasDistinctScopeHolder(tenantId, 'host:members:manage', decider, { orgId, alsoExclude: exclude }),
+  });
 }
 
 /** The refusal form of `selfApprovalBlocked` — what the decide handler enforces. */

@@ -122,6 +122,7 @@ import { campaignBriefFeature } from './campaign-brief/feature.js';
 import { creativeBriefsFeature } from './creative-briefs/feature.js';
 import { campaignChannelsFeature } from './campaign-channels/feature.js';
 import { campaignOrchestrationFeature } from './campaign-orchestration/feature.js';
+import { campaignOpsFeature } from './campaign-ops/feature.js';
 import { campaignConnectorsFeature } from './campaign-connectors/feature.js';
 import { campaignIntelFeature } from './campaign-intel/feature.js';
 import { campaignJourneysFeature } from './campaign-journeys/feature.js';
@@ -169,6 +170,8 @@ import { notebookMcpToolWorkflows } from './notebooks/mcpToolsWorkflows.js';
 import { appBuilderMcpControlWorkflows } from './app-builder/mcpControlWorkflows.js';
 import { kicktodoAccountabilityBuiltinWorkflows } from './kicktodo-accountability/builtinWorkflows.js';
 import { registerFeaturePublicPaths } from '../middleware/auth.js';
+import { featureRequiredPacks } from './packPins.js';
+export { pinnedPackRef } from './packPins.js';
 
 const log = createLogger('features');
 
@@ -220,7 +223,7 @@ const RETIRED_TOGGLE_IDS = [
 ] as const;
 
 /** Every backend feature the app composes. Append a new feature here. */
-export const BACKEND_FEATURES: BackendFeature[] = [crmFeature, cdpFeature, destinationSyncFeature, developerKeysFeature, csmFeature, usersFeature, orgsFeature, profilesFeature, profileMemoryFeature, mediaFeature, cmsFeature, notificationsFeature, kbFeature, publishingFeature, sharingFeature, formsFeature, consentFeature, analyticsFeature, assistantFeature, connectionsFeature, emailFeature, commentsFeature, marketplaceFeature, agentKnowledgeFeature, advisoryBoardFeature, proposalsFeature, goalsFeature, portabilityFeature, twinRecallFeature, projectsFeature, documentsFeature, priorityMatrixFeature, strategyFeature, brandFeature, campaignBriefFeature, creativeBriefsFeature, campaignChannelsFeature, campaignOrchestrationFeature, campaignConnectorsFeature, campaignIntelFeature, campaignJourneysFeature, campaignsFeature, workflowAuthorFeature, builderPairFeature, agentAuthorFeature, insightsSuiteFeature, toolOutputCompactionFeature, notebooksFeature, podcastsFeature, knowledgeSyncFeature, conversationSearchFeature, codeExecFeature, promptsFeature, memoryAutoExtractFeature, scheduledAgentChatsFeature, channelsFeature, chatWidgetFeature, interactiveArtifactsFeature, slidesFeature, appBuilderFeature, campaignStudioFeature, drawingsFeature, cadFeature, documentEditorFeature, modelRouterFeature, conversationToolsFeature, taskDeckFeature, capabilityFirewallFeature, intentLedgerFeature, ambientWorkGraphFeature, chatExportFeature, evalsFeature, usageAnalyticsFeature, voiceFeature, navigationSettingsFeature, chatDeploymentFeature, multiTabChatFeature, chatAutotitleFeature, productionFeature, accessibilityFeature, billingFeature, commerceFeature, recommendationsFeature, promotionsFeature, discoveryFeature, funnelsFeature, customDomainsFeature, manualTestsFeature, developerToolsFeature, territoriesFeature, salesCommissionsFeature, dealersFeature, salesMapsFeature, uiPluginsFeature, canvasPacksFeature, heartbeatAdminFeature, runtimePostureFeature, collaborationFeature, workflowCollabFeature, walkthroughsFeature, tutorialsFeature, dashboardFeature, commerceConnectFeature, docsFeature, entitiesFeature, environmentsFeature, whatsappFeature, webinarsFeature, creativeVideoFeature, operationsFeature, settingsFeature, kicktodoCoreFeature, kicktodoCreatorFeature, biFeature, computerUseFeature, kicktodoCommerceFeature, kicktodoAccountabilityFeature, kicktodoIntegrationsFeature, kicktodoEngagementFeature, kicktodoCommunityFeature, kicktodoOrganizationsFeature, serviceDeskFeature, kicktodoMetricsFeature, workSelectionFeature, jobSearchFeature, claudeCodeFeature, structuredHandoffsFeature, teamIntentLedgerFeature, accessHubFeature];
+export const BACKEND_FEATURES: BackendFeature[] = [crmFeature, cdpFeature, destinationSyncFeature, developerKeysFeature, csmFeature, usersFeature, orgsFeature, profilesFeature, profileMemoryFeature, mediaFeature, cmsFeature, notificationsFeature, kbFeature, publishingFeature, sharingFeature, formsFeature, consentFeature, analyticsFeature, assistantFeature, connectionsFeature, emailFeature, commentsFeature, marketplaceFeature, agentKnowledgeFeature, advisoryBoardFeature, proposalsFeature, goalsFeature, portabilityFeature, twinRecallFeature, projectsFeature, documentsFeature, priorityMatrixFeature, strategyFeature, brandFeature, campaignBriefFeature, creativeBriefsFeature, campaignChannelsFeature, campaignOrchestrationFeature, campaignOpsFeature, campaignConnectorsFeature, campaignIntelFeature, campaignJourneysFeature, campaignsFeature, workflowAuthorFeature, builderPairFeature, agentAuthorFeature, insightsSuiteFeature, toolOutputCompactionFeature, notebooksFeature, podcastsFeature, knowledgeSyncFeature, conversationSearchFeature, codeExecFeature, promptsFeature, memoryAutoExtractFeature, scheduledAgentChatsFeature, channelsFeature, chatWidgetFeature, interactiveArtifactsFeature, slidesFeature, appBuilderFeature, campaignStudioFeature, drawingsFeature, cadFeature, documentEditorFeature, modelRouterFeature, conversationToolsFeature, taskDeckFeature, capabilityFirewallFeature, intentLedgerFeature, ambientWorkGraphFeature, chatExportFeature, evalsFeature, usageAnalyticsFeature, voiceFeature, navigationSettingsFeature, chatDeploymentFeature, multiTabChatFeature, chatAutotitleFeature, productionFeature, accessibilityFeature, billingFeature, commerceFeature, recommendationsFeature, promotionsFeature, discoveryFeature, funnelsFeature, customDomainsFeature, manualTestsFeature, developerToolsFeature, territoriesFeature, salesCommissionsFeature, dealersFeature, salesMapsFeature, uiPluginsFeature, canvasPacksFeature, heartbeatAdminFeature, runtimePostureFeature, collaborationFeature, workflowCollabFeature, walkthroughsFeature, tutorialsFeature, dashboardFeature, commerceConnectFeature, docsFeature, entitiesFeature, environmentsFeature, whatsappFeature, webinarsFeature, creativeVideoFeature, operationsFeature, settingsFeature, kicktodoCoreFeature, kicktodoCreatorFeature, biFeature, computerUseFeature, kicktodoCommerceFeature, kicktodoAccountabilityFeature, kicktodoIntegrationsFeature, kicktodoEngagementFeature, kicktodoCommunityFeature, kicktodoOrganizationsFeature, serviceDeskFeature, kicktodoMetricsFeature, workSelectionFeature, jobSearchFeature, claudeCodeFeature, structuredHandoffsFeature, teamIntentLedgerFeature, accessHubFeature];
 
 /**
  * ADR 0472 Phase 4 — DRAINED QUARANTINE (terminal state). This array held the builtin
@@ -356,7 +359,8 @@ export function registerBackendFeatures(deps: RouteDeps): void {
     // when empty, so a hot-reload that DROPS a dep clears the stale edge).
     registerFeatureDependencies(feature.id, feature.dependsOn ?? []);
     // ADR 0194 Phase 2 — pinned packs → the Plugins-console projection (same rule).
-    registerFeaturePacks(feature.id, feature.requiredPacks ?? []);
+    // ADR 0919 — a thunk: the pins are read when the console asks, not here.
+    registerFeaturePacks(feature.id, () => featureRequiredPacks(feature));
     // ADR 0194 Phase 5 — soft deps → console suggestions (advisory, never a lock).
     registerFeatureRecommends(feature.id, feature.recommends ?? []);
     // ADR 0915 — before the routes, so a bad declaration fails the boot.
@@ -393,12 +397,19 @@ export function registerBackendFeatures(deps: RouteDeps): void {
     .catch((err) => log.warn('retire_toggle_overrides_failed', { error: String(err) }));
 }
 
+/** ADR 0919 correction — the union of all features' required pack NAMES, for
+ *  the boot installer; it resolves a pin (`pinnedPackRef`) only for a pack it
+ *  must install, so a boot no longer reads `PACK_PINS`. */
+export function featurePackNames(): string[] {
+  return [...new Set(BACKEND_FEATURES.flatMap((f) => [...(f.requiredPacks ?? [])]))];
+}
+
 /** The union of all features' required packs (Phase 3/4: boot install set). */
 export function featurePackRefs(): PackRef[] {
   const seen = new Set<string>();
   const out: PackRef[] = [];
   for (const feature of BACKEND_FEATURES) {
-    for (const ref of feature.requiredPacks ?? []) {
+    for (const ref of featureRequiredPacks(feature)) {
       const key = `${ref.name}@${ref.version}`;
       if (seen.has(key)) continue;
       seen.add(key);

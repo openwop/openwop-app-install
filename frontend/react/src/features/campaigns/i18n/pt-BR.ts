@@ -6,6 +6,7 @@ export const messages = {
   title: 'Campaign Studio',
   lede: 'Planeje, execute, meça e otimize campanhas de marketing — briefs, orquestração, desempenho e inteligência em um só lugar.',
   tablistLabel: 'Seções do Campaign Studio',
+  'tab_campaign-ops': 'Operações',
   'tab_campaign-brief': 'Briefs',
   tab_campaigns: 'Campanhas',
   'tab_campaign-performance': 'Desempenho',

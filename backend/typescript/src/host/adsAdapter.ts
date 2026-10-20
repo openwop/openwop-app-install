@@ -45,6 +45,18 @@ import { DurableCollection } from './hostExtPersistence.js';
 import { getGovernancePolicy } from './governanceService.js';
 import { createCampaignSpendApproval, getApproval } from './approvalService.js';
 import { emitHostEvent } from './hostEventDispatcher.js';
+import {
+  ADS_API_VERSIONS, LINKEDIN_VERSION, metaApiBase, googleApiBase, tiktokApiBase, linkedinApiBase,
+  buildMetaConversionBody, buildTiktokConversionBody, adsReaderEnabled, buildTiktokReportUrl, buildLinkedinAnalyticsUrl,
+  buildGoogleClickConversionBody, adsSenderEnabled, GOOGLE_CONVERSION_ACTION_RE,
+  type AdPlatform, type AdsApiVersionPin, type ConversionBodyArgs, type GoogleConsent,
+} from './adsWire.js';
+
+// Re-exported so callers keep importing the ads surface from one module.
+export {
+  ADS_API_VERSIONS, LINKEDIN_VERSION, metaApiBase, googleApiBase, tiktokApiBase, linkedinApiBase,
+  buildMetaConversionBody, buildTiktokConversionBody, type AdPlatform, type AdsApiVersionPin,
+};
 
 const log = createLogger('connections.ads');
 
@@ -55,25 +67,6 @@ type Provenance = Parameters<typeof stampConnectionUse>[2];
  *  between the dispatch call and the preview's connection check. */
 const PLATFORM_PROVIDER: Record<AdPlatform, string> = { meta: 'meta-ads', google: 'google-ads', tiktok: 'tiktok-ads', linkedin: 'linkedin-ads' };
 
-/** Meta Marketing API base — hardcoded host (NEVER input-derived); test override only. */
-function metaApiBase(): string {
-  return (process.env.OPENWOP_META_API_BASE ?? 'https://graph.facebook.com/v21.0').replace(/\/+$/, '');
-}
-/** Google Ads API base — hardcoded host; test override only. */
-function googleApiBase(): string {
-  return (process.env.OPENWOP_GOOGLE_ADS_API_BASE ?? 'https://googleads.googleapis.com/v18').replace(/\/+$/, '');
-}
-/** TikTok Business API base — hardcoded host; test override only. */
-function tiktokApiBase(): string {
-  return (process.env.OPENWOP_TIKTOK_ADS_API_BASE ?? 'https://business-api.tiktok.com/open_api/v1.3').replace(/\/+$/, '');
-}
-/** LinkedIn Marketing API base — hardcoded host; test override only. Versioned REST
- *  lives under `/rest/*` with the `LinkedIn-Version` header (see LINKEDIN_VERSION). */
-function linkedinApiBase(): string {
-  return (process.env.OPENWOP_LINKEDIN_ADS_API_BASE ?? 'https://api.linkedin.com').replace(/\/+$/, '');
-}
-/** The LinkedIn versioned-REST month pin (every /rest/* call sends it). */
-const LINKEDIN_VERSION = '202506';
 /** Google Ads developer-token — an APP/manager-account-level credential (one per
  *  integration, NOT per-user BYOK), so it lives host-side as operator config, mirroring
  *  `OPENWOP_OAUTH_*_CLIENT_SECRET`. Read through this seam (not `process.env` at the call
@@ -82,7 +75,6 @@ function resolveDeveloperToken(_tenantId: string): string | undefined {
   return process.env.OPENWOP_GOOGLE_ADS_DEVELOPER_TOKEN?.trim() || undefined;
 }
 
-export type AdPlatform = 'meta' | 'google' | 'tiktok' | 'linkedin';
 
 export interface AdCopyVariant {
   headline: string;
@@ -140,6 +132,14 @@ export interface PublishAdArgs {
    *  platform requires one at activation — a human step). Validated only as a
    *  plain, size-bounded object. Spend-affecting → part of the idempotency key. */
   targeting?: Record<string, unknown>;
+  /** Google ONLY (ADR 0907 P0): the operator's EU political-advertising declaration
+   *  (`Campaign.containsEuPoliticalAdvertising`). Google refuses every campaign
+   *  create without it since 2026-04-01 (`EU_POLITICAL_ADVERTISING_DECLARATION_REQUIRED`).
+   *  It is a legal attestation, so the host NEVER defaults it: a LIVE Google
+   *  dispatch without it fails closed `missing_eu_political_declaration` before
+   *  any platform call; a dry-run shows the gap in its plan. Not creative-affecting,
+   *  so not part of the idempotency key. */
+  euPoliticalAdvertising?: 'contains' | 'does_not_contain';
   /** Preview mode (ADR 0167): build the exact create payloads and return them as a
    *  `plan` WITHOUT calling the platform — so a human can review precisely what would
    *  be created (status, budget, copy) before any real, money-spending dispatch.
@@ -578,9 +578,10 @@ const metaStrategy: PlatformStrategy = async (deps, args) => {
 // ── Google Ads (Phase 2; ADR 0223 production payloads) — budget → campaign →
 //    adGroup → ad, all PAUSED. `finalUrls` is MANDATORY on a responsive search ad, so
 //    dispatch (and the preview) fails closed `missing_landing_url` without a landing
-//    URL; the campaign carries the v18 SEARCH network settings. ─────────────────────
+//    URL; the campaign carries the SEARCH network settings. ─────────────────────
 const googleStrategy: PlatformStrategy = async (deps, args) => {
-  if (!args.landingUrl) return { kind: 'failed', error: 'missing_landing_url' }; // an ARG, not host config — finalUrls is mandatory (v18 RSA)
+  if (!args.landingUrl) return { kind: 'failed', error: 'missing_landing_url' }; // an ARG, not host config — finalUrls is mandatory (RSA)
+  if (!args.dryRun && !args.euPoliticalAdvertising) return { kind: 'failed', error: 'missing_eu_political_declaration' }; // an attestation — never defaulted
   const devToken = resolveDeveloperToken(deps.tenantId);
   // The developer-token is only needed for a real call; a dry-run preview makes none.
   if (!args.dryRun && !devToken) return { kind: 'failed', error: 'no_developer_token' }; // fail closed — never a blank header
@@ -621,10 +622,13 @@ const googleStrategy: PlatformStrategy = async (deps, args) => {
   const budget = await mutate('campaignBudgets', { name: `${args.campaignName} — Budget`, amountMicros: String((args.dailyBudgetMinor ?? 5000) * 10000), deliveryMethod: 'STANDARD' });
   if ('error' in budget) return fail(budget.error);
   created.push(budget.rn);
-  // 2) Campaign — PAUSED; v18 SEARCH channel + explicit network settings (Google
+  // 2) Campaign — PAUSED; SEARCH channel + explicit network settings (Google
   //    Search + search partners, no Display expansion — the documented RSA target).
   const campaign = await mutate('campaigns', {
     name: args.campaignName, status: 'PAUSED', advertisingChannelType: 'SEARCH', campaignBudget: budget.rn, manualCpc: {},
+    containsEuPoliticalAdvertising: args.euPoliticalAdvertising === 'contains' ? 'CONTAINS_EU_POLITICAL_ADVERTISING'
+      : args.euPoliticalAdvertising === 'does_not_contain' ? 'DOES_NOT_CONTAIN_EU_POLITICAL_ADVERTISING'
+        : '<operator declaration required: euPoliticalAdvertising>', // dry-run only — a live call without it failed closed above
     networkSettings: { targetGoogleSearch: true, targetSearchNetwork: true, targetContentNetwork: false, targetPartnerSearchNetwork: false },
   });
   if ('error' in campaign) return fail(campaign.error);
@@ -888,6 +892,258 @@ async function googleMetrics(deps: BrokeredEgressDeps, args: GetMetricsArgs): Pr
   return { outcome: 'ok', platform: 'google', metrics: { impressions: num(m.impressions), clicks: num(m.clicks), spend: num(m.costMicros ?? m.cost_micros) / 1e6, ctr: num(m.ctr), cpc: num(m.averageCpc ?? m.average_cpc) / 1e6 }, ...(googleDate ? { date: googleDate } : {}) };
 }
 
+// ── Read: account-scope daily metrics (ADR 0907 D3) ─────────────────────────────
+// The whole ad account (not one dispatched campaign), daily rows over a date
+// range, paged to exhaustion, with conversions + revenue. READ-ONLY.
+//
+// Host pinning: paging follows Meta's `after` CURSOR and Google's `pageToken`,
+// never the absolute `paging.next` URL a response carries, so a response can
+// never steer the broker's token to another host. A page cap stops a runaway
+// account; hitting it is reported (`truncated`), never a silent cut.
+export interface GetAccountMetricsArgs {
+  platform: AdPlatform;
+  adAccountId: string;
+  level: 'campaign' | 'adset';
+  /** Inclusive ISO dates (YYYY-MM-DD), in the ad account's timezone. */
+  since: string;
+  until: string;
+  /** Meta: which `actions[].action_type`s count as conversions (and whose
+   *  `action_values` count as revenue). Default ACCOUNT_DEFAULT_CONVERSION_ACTIONS. */
+  conversionActionTypes?: readonly string[];
+}
+export interface AccountMetricsRow {
+  date: string;
+  campaignId: string;
+  campaignName: string;
+  adSetId?: string;
+  adSetName?: string;
+  impressions: number;
+  clicks: number;
+  /** Major currency units. */
+  spend: number;
+  /** `null` when the platform cannot report it (ADR 0907 D3: never a fake 0). */
+  conversions: number | null;
+  /** Major currency units; `null` when the platform cannot report it. */
+  revenue: number | null;
+  /** ISO-4217 account currency, when the platform reports it. */
+  currency?: string;
+}
+export type GetAccountMetricsResult =
+  | { outcome: 'no_connection' }
+  | { outcome: 'unsupported'; platform: AdPlatform; reason?: 'not_sandbox_verified' }
+  | { outcome: 'failed'; error: string }
+  | { outcome: 'rate_limited'; retryAfterS?: number }
+  | { outcome: 'ok'; platform: AdPlatform; rows: AccountMetricsRow[]; pages: number; truncated: boolean };
+
+/** Meta's standard pixel conversions, used when a connection names none. */
+export const ACCOUNT_DEFAULT_CONVERSION_ACTIONS: readonly string[] = ['offsite_conversion.fb_pixel_purchase', 'lead', 'complete_registration'];
+/** Pages per account-metrics read. 50 × 500 Meta rows / 50 × 10k Google rows. */
+export const ACCOUNT_METRICS_MAX_PAGES = 50;
+
+const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
+
+function retryAfterSeconds(res: Response): number | undefined {
+  const raw = res.headers.get('retry-after');
+  if (!raw) return undefined;
+  const n = Number(raw);
+  if (Number.isFinite(n) && n >= 0) return Math.ceil(n);
+  const at = Date.parse(raw);
+  return Number.isFinite(at) ? Math.max(0, Math.ceil((at - Date.now()) / 1000)) : undefined;
+}
+
+type MetaAction = { action_type?: unknown; value?: unknown };
+function sumActions(list: unknown, types: ReadonlySet<string>): number {
+  if (!Array.isArray(list)) return 0;
+  let total = 0;
+  for (const a of list as MetaAction[]) if (typeof a.action_type === 'string' && types.has(a.action_type)) total += num(a.value);
+  return total;
+}
+
+async function metaAccountMetrics(deps: BrokeredEgressDeps, args: GetAccountMetricsArgs): Promise<GetAccountMetricsResult> {
+  const acct = `act_${args.adAccountId.replace(/^act_/, '').replace(/[^0-9]/g, '')}`;
+  const types = new Set(args.conversionActionTypes?.length ? args.conversionActionTypes : ACCOUNT_DEFAULT_CONVERSION_ACTIONS);
+  const fields = ['campaign_id', 'campaign_name', ...(args.level === 'adset' ? ['adset_id', 'adset_name'] : []), 'impressions', 'clicks', 'spend', 'actions', 'action_values', 'account_currency', 'date_start'].join(',');
+  const params = new URLSearchParams({
+    level: args.level, time_increment: '1', limit: '500', fields,
+    time_range: JSON.stringify({ since: args.since, until: args.until }),
+  });
+  const rows: AccountMetricsRow[] = [];
+  let after: string | undefined;
+  let pages = 0;
+  let provenance: Provenance | undefined;
+  for (;;) {
+    if (pages >= ACCOUNT_METRICS_MAX_PAGES) return { outcome: 'ok', platform: 'meta', rows, pages, truncated: true };
+    if (after) params.set('after', after);
+    const r = await brokeredFetch(deps, { provider: PLATFORM_PROVIDER.meta, url: `${metaApiBase()}/${acct}/insights?${params.toString()}`, method: 'GET' });
+    if (r.outcome === 'no_connection') return { outcome: 'no_connection' };
+    if (r.outcome !== 'sent') return { outcome: 'failed', error: r.outcome === 'request_failed' ? (r.timedOut ? 'timeout' : 'request_failed') : r.outcome };
+    if (r.res.status === 429) return { outcome: 'rate_limited', ...(retryAfterSeconds(r.res) !== undefined ? { retryAfterS: retryAfterSeconds(r.res) } : {}) };
+    let json: { data?: Array<Record<string, unknown>>; paging?: { cursors?: { after?: unknown }; next?: unknown }; error?: { message?: string; code?: number } };
+    try { json = (await r.res.json()) as typeof json; } catch { return { outcome: 'failed', error: 'bad_response' }; }
+    // Meta reports throttling as error code 17 / 80000-series inside a 400.
+    if (json.error && (json.error.code === 17 || json.error.code === 80000 || json.error.code === 80004)) return { outcome: 'rate_limited' };
+    if (!r.res.ok || json.error) return { outcome: 'failed', error: json.error?.message ?? `http_${r.res.status}` };
+    provenance = r.provenance;
+    pages += 1;
+    for (const row of json.data ?? []) {
+      const date = typeof row.date_start === 'string' && ISO_DAY.test(row.date_start) ? row.date_start : undefined;
+      if (!date || typeof row.campaign_id !== 'string') continue;
+      rows.push({
+        date, campaignId: row.campaign_id, campaignName: typeof row.campaign_name === 'string' ? row.campaign_name : row.campaign_id,
+        ...(typeof row.adset_id === 'string' ? { adSetId: row.adset_id, adSetName: typeof row.adset_name === 'string' ? row.adset_name : row.adset_id } : {}),
+        impressions: num(row.impressions), clicks: num(row.clicks), spend: num(row.spend),
+        conversions: sumActions(row.actions, types), revenue: sumActions(row.action_values, types),
+        ...(typeof row.account_currency === 'string' && /^[A-Z]{3}$/.test(row.account_currency) ? { currency: row.account_currency } : {}),
+      });
+    }
+    const next = json.paging?.cursors?.after;
+    // Meta keeps a cursor on the last page; `paging.next` is what says more exist.
+    if (typeof next !== 'string' || !next || !json.paging?.next) break;
+    after = next;
+  }
+  if (provenance) await stampConnectionUse(deps.storage, deps.runId, provenance).catch((e) => log.warn('ads account metrics connectionUse stamp failed', { error: e instanceof Error ? e.message : String(e) }));
+  return { outcome: 'ok', platform: 'meta', rows, pages, truncated: false };
+}
+
+async function googleAccountMetrics(deps: BrokeredEgressDeps, args: GetAccountMetricsArgs): Promise<GetAccountMetricsResult> {
+  const devToken = resolveDeveloperToken(deps.tenantId);
+  if (!devToken) return { outcome: 'failed', error: 'no_developer_token' };
+  const customerId = args.adAccountId.replace(/[^0-9]/g, '');
+  const resource = args.level === 'adset' ? 'ad_group' : 'campaign';
+  const select = ['campaign.id', 'campaign.name', ...(args.level === 'adset' ? ['ad_group.id', 'ad_group.name'] : []), 'segments.date',
+    'metrics.impressions', 'metrics.clicks', 'metrics.cost_micros', 'metrics.conversions', 'metrics.conversions_value', 'customer.currency_code'].join(', ');
+  // since/until are validated ISO days before reaching here (GAQL takes literals).
+  const query = `SELECT ${select} FROM ${resource} WHERE segments.date BETWEEN '${args.since}' AND '${args.until}'`;
+  const rows: AccountMetricsRow[] = [];
+  let pageToken: string | undefined;
+  let pages = 0;
+  let provenance: Provenance | undefined;
+  type GRow = { campaign?: Record<string, unknown>; adGroup?: Record<string, unknown>; segments?: Record<string, unknown>; metrics?: Record<string, unknown>; customer?: Record<string, unknown> };
+  for (;;) {
+    if (pages >= ACCOUNT_METRICS_MAX_PAGES) return { outcome: 'ok', platform: 'google', rows, pages, truncated: true };
+    const r = await brokeredPost(deps, {
+      provider: PLATFORM_PROVIDER.google, url: `${googleApiBase()}/customers/${customerId}/googleAds:search`,
+      body: JSON.stringify({ query, ...(pageToken ? { pageToken } : {}) }), extraHeaders: { 'developer-token': devToken },
+    });
+    if (r.outcome === 'no_connection') return { outcome: 'no_connection' };
+    if (r.outcome !== 'sent') return { outcome: 'failed', error: r.outcome === 'request_failed' ? (r.timedOut ? 'timeout' : 'request_failed') : r.outcome };
+    if (r.res.status === 429) return { outcome: 'rate_limited', ...(retryAfterSeconds(r.res) !== undefined ? { retryAfterS: retryAfterSeconds(r.res) } : {}) };
+    let json: { results?: GRow[]; nextPageToken?: unknown; error?: { message?: string; status?: string } };
+    try { json = (await r.res.json()) as typeof json; } catch { return { outcome: 'failed', error: 'bad_response' }; }
+    if (json.error?.status === 'RESOURCE_EXHAUSTED') return { outcome: 'rate_limited' };
+    if (!r.res.ok || json.error) return { outcome: 'failed', error: json.error?.message ?? `http_${r.res.status}` };
+    provenance = r.provenance;
+    pages += 1;
+    for (const g of json.results ?? []) {
+      const date = typeof g.segments?.date === 'string' && ISO_DAY.test(g.segments.date) ? g.segments.date : undefined;
+      const cid = g.campaign?.id !== undefined ? String(g.campaign.id) : undefined;
+      if (!date || !cid) continue;
+      const m = g.metrics ?? {};
+      const cur = g.customer?.currencyCode;
+      rows.push({
+        date, campaignId: cid, campaignName: typeof g.campaign?.name === 'string' ? g.campaign.name : cid,
+        ...(g.adGroup?.id !== undefined ? { adSetId: String(g.adGroup.id), adSetName: typeof g.adGroup.name === 'string' ? g.adGroup.name : String(g.adGroup.id) } : {}),
+        impressions: num(m.impressions), clicks: num(m.clicks), spend: num(m.costMicros) / 1e6,
+        conversions: num(m.conversions), revenue: num(m.conversionsValue),
+        ...(typeof cur === 'string' && /^[A-Z]{3}$/.test(cur) ? { currency: cur } : {}),
+      });
+    }
+    if (typeof json.nextPageToken !== 'string' || !json.nextPageToken) break;
+    pageToken = json.nextPageToken;
+  }
+  if (provenance) await stampConnectionUse(deps.storage, deps.runId, provenance).catch((e) => log.warn('ads account metrics connectionUse stamp failed', { error: e instanceof Error ? e.message : String(e) }));
+  return { outcome: 'ok', platform: 'google', rows, pages, truncated: false };
+}
+
+
+/** TikTok `report/integrated/get` page size (the documented maximum). */
+const TIKTOK_REPORT_PAGE_SIZE = 1000;
+/** LinkedIn adAnalytics returns at most this many elements and does not page. */
+export const LINKEDIN_ANALYTICS_MAX_ELEMENTS = 15000;
+
+/** TikTok BASIC report, campaign level, one row per (campaign, day). TikTok
+ *  reports conversions (`conversion` — the optimisation event) but no revenue
+ *  metric this reader can rely on, so revenue is `null` (ADR 0907 D3: never a
+ *  fake 0). Spend is in the advertiser's currency, major units. */
+async function tiktokAccountMetrics(deps: BrokeredEgressDeps, args: GetAccountMetricsArgs): Promise<GetAccountMetricsResult> {
+  const rows: AccountMetricsRow[] = [];
+  let page = 1;
+  let pages = 0;
+  let provenance: Provenance | undefined;
+  for (;;) {
+    if (pages >= ACCOUNT_METRICS_MAX_PAGES) return { outcome: 'ok', platform: 'tiktok', rows, pages, truncated: true };
+    const url = buildTiktokReportUrl(tiktokApiBase(), args, page, TIKTOK_REPORT_PAGE_SIZE);
+    const r = await brokeredFetch(deps, { provider: PLATFORM_PROVIDER.tiktok, url, method: 'GET', authScheme: 'raw', authHeaderName: 'access-token' });
+    if (r.outcome === 'no_connection') return { outcome: 'no_connection' };
+    if (r.outcome !== 'sent') return { outcome: 'failed', error: r.outcome === 'request_failed' ? (r.timedOut ? 'timeout' : 'request_failed') : r.outcome };
+    if (r.res.status === 429) return { outcome: 'rate_limited', ...(retryAfterSeconds(r.res) !== undefined ? { retryAfterS: retryAfterSeconds(r.res) } : {}) };
+    let json: { code?: number; message?: string; data?: { list?: Array<{ dimensions?: Record<string, unknown>; metrics?: Record<string, unknown> }>; page_info?: { total_page?: unknown } } };
+    try { json = (await r.res.json()) as typeof json; } catch { return { outcome: 'failed', error: 'bad_response' }; }
+    // TikTok answers 200 with a code; 40100 is its QPS limit.
+    if (json.code === 40100) return { outcome: 'rate_limited' };
+    if (!r.res.ok || json.code !== 0) return { outcome: 'failed', error: json.message ?? `code_${json.code ?? r.res.status}` };
+    provenance = r.provenance;
+    pages += 1;
+    for (const item of json.data?.list ?? []) {
+      const d = item.dimensions ?? {};
+      const m = item.metrics ?? {};
+      const day = typeof d.stat_time_day === 'string' ? d.stat_time_day.slice(0, 10) : '';
+      const cid = d.campaign_id ?? m.campaign_id;
+      if (!ISO_DAY.test(day) || (typeof cid !== 'string' && typeof cid !== 'number')) continue;
+      const campaignId = String(cid);
+      rows.push({
+        date: day, campaignId, campaignName: typeof m.campaign_name === 'string' && m.campaign_name ? m.campaign_name : campaignId,
+        ...(args.level === 'adset' && d.adgroup_id !== undefined ? { adSetId: String(d.adgroup_id), adSetName: typeof m.adgroup_name === 'string' ? m.adgroup_name : String(d.adgroup_id) } : {}),
+        impressions: num(m.impressions), clicks: num(m.clicks), spend: num(m.spend),
+        conversions: num(m.conversion), revenue: null,
+      });
+    }
+    const totalPage = num(json.data?.page_info?.total_page);
+    if (page >= totalPage) break;
+    page += 1;
+  }
+  if (provenance) await stampConnectionUse(deps.storage, deps.runId, provenance).catch((e) => log.warn('ads account metrics connectionUse stamp failed', { error: e instanceof Error ? e.message : String(e) }));
+  return { outcome: 'ok', platform: 'tiktok', rows, pages, truncated: false };
+}
+
+/** LinkedIn adAnalytics, CAMPAIGN pivot, DAILY granularity. `costInLocalCurrency`
+ *  is in MAJOR units (MyndHyve divided by 100 — its wart 10, not ported).
+ *  Conversions are `externalWebsiteConversions`, revenue
+ *  `conversionValueInLocalCurrency`. The endpoint does not page and caps the
+ *  response; hitting the cap is reported as `truncated`. Analytics rows carry
+ *  no campaign name, so the id stands in (a dispatched campaign keeps its
+ *  launch name downstream). Ad-set level has no LinkedIn equivalent here. */
+async function linkedinAccountMetrics(deps: BrokeredEgressDeps, args: GetAccountMetricsArgs): Promise<GetAccountMetricsResult> {
+  if (args.level !== 'campaign') return { outcome: 'unsupported', platform: 'linkedin' };
+  const r = await brokeredFetch(deps, {
+    provider: PLATFORM_PROVIDER.linkedin, url: buildLinkedinAnalyticsUrl(linkedinApiBase(), args), method: 'GET',
+    extraHeaders: { 'LinkedIn-Version': LINKEDIN_VERSION, 'X-Restli-Protocol-Version': '2.0.0' },
+  });
+  if (r.outcome === 'no_connection') return { outcome: 'no_connection' };
+  if (r.outcome !== 'sent') return { outcome: 'failed', error: r.outcome === 'request_failed' ? (r.timedOut ? 'timeout' : 'request_failed') : r.outcome };
+  if (r.res.status === 429) return { outcome: 'rate_limited', ...(retryAfterSeconds(r.res) !== undefined ? { retryAfterS: retryAfterSeconds(r.res) } : {}) };
+  let json: { elements?: Array<Record<string, unknown>>; message?: string };
+  try { json = (await r.res.json()) as typeof json; } catch { return { outcome: 'failed', error: 'bad_response' }; }
+  if (!r.res.ok) return { outcome: 'failed', error: json.message ?? `http_${r.res.status}` };
+  const rows: AccountMetricsRow[] = [];
+  const elements = json.elements ?? [];
+  for (const el of elements) {
+    const start = (el.dateRange as { start?: { year?: number; month?: number; day?: number } } | undefined)?.start;
+    if (!start?.year || !start.month || !start.day) continue;
+    const date = `${start.year}-${String(start.month).padStart(2, '0')}-${String(start.day).padStart(2, '0')}`;
+    const urn = Array.isArray(el.pivotValues) && typeof el.pivotValues[0] === 'string' ? el.pivotValues[0] : '';
+    const campaignId = urn.replace(/^urn:li:sponsoredCampaign:/, '');
+    if (!ISO_DAY.test(date) || !campaignId) continue;
+    rows.push({
+      date, campaignId, campaignName: `LinkedIn campaign ${campaignId}`,
+      impressions: num(el.impressions), clicks: num(el.clicks), spend: num(el.costInLocalCurrency),
+      conversions: num(el.externalWebsiteConversions), revenue: num(el.conversionValueInLocalCurrency),
+    });
+  }
+  await stampConnectionUse(deps.storage, deps.runId, r.provenance).catch((e) => log.warn('ads account metrics connectionUse stamp failed', { error: e instanceof Error ? e.message : String(e) }));
+  return { outcome: 'ok', platform: 'linkedin', rows, pages: 1, truncated: elements.length >= LINKEDIN_ANALYTICS_MAX_ELEMENTS };
+}
+
 // ── Mutate: campaign daily budget (ADR 0186 slice 4b) ────────────────────────────
 // The one LIVE-SPEND mutation. Safe by construction: `dryRun` DEFAULTS on at the node,
 // a budget-set is idempotent (PUT-like — re-applying the same value on replay/fork is a
@@ -969,20 +1225,18 @@ export type SyncAudienceResult =
   | { outcome: 'requires_approval'; approvalId: string }
   | { outcome: 'synced'; platform: AdPlatform; platformAudienceId: string; uploaded: number };
 
-export interface SendConversionArgs {
+export interface SendConversionArgs extends ConversionBodyArgs {
   platform: string;
-  pixelId: string;
-  eventId: string;
-  eventName: string;
-  eventTimeIso: string;
-  emailHash?: string;
-  value?: number;
-  currency?: string;
+  /** Google ONLY (ADR 0907 D5): the customer + conversion action resource
+   *  name, from the org's Google pixel config. */
+  google?: { customerId: string; conversionAction: string };
+  /** Google ONLY: EEA consent signals, mapped from the relay's consent state. */
+  consent?: GoogleConsent;
 }
 export type SendConversionResult =
   | { outcome: 'sent' }
   | { outcome: 'no_connection' }
-  | { outcome: 'unsupported'; platform: string }
+  | { outcome: 'unsupported'; platform: string; reason?: 'not_sandbox_verified' }
   | { outcome: 'failed'; error: string };
 
 export interface AdsAdapter {
@@ -1007,10 +1261,41 @@ export interface AdsAdapter {
    *  slice 4a). READ-ONLY; graceful `no_connection`; `unsupported` for a platform
    *  without a metrics reader (tiktok/linkedin today). Never throws. */
   getMetrics(args: GetMetricsArgs): Promise<GetMetricsResult>;
+  /** Account-scope daily metrics over a date range (ADR 0907 D3): every
+   *  campaign (or ad set) of the ad account, paged to exhaustion, with
+   *  conversions + revenue. READ-ONLY; behind the per-(tenant, platform)
+   *  circuit breaker; a platform 429 is `rate_limited`, never a failure that
+   *  looks like missing data. `unsupported` without a reader. Never throws. */
+  getAccountMetrics(args: GetAccountMetricsArgs): Promise<GetAccountMetricsResult>;
   /** Set a campaign's daily budget (ADR 0186 slice 4b) — the one live-spend mutation.
    *  `dryRun` returns a preview WITHOUT calling the platform. Idempotent + never
    *  unpauses; graceful `no_connection`; `unsupported` (tiktok/linkedin today). Never throws. */
   updateBudget(args: UpdateBudgetArgs): Promise<UpdateBudgetResult>;
+}
+
+/** ADR 0907 D5 — Google Ads `uploadClickConversions`, one row. Fails closed
+ *  without a conversion action, a click id or identifier, or the developer
+ *  token; a per-row `partialFailureError` is a failure, never a delivery. */
+async function sendGoogleConversion(deps: BrokeredEgressDeps, args: SendConversionArgs): Promise<SendConversionResult> {
+  const g = args.google;
+  if (!g || !GOOGLE_CONVERSION_ACTION_RE.test(g.conversionAction)) return { outcome: 'failed', error: 'no_conversion_action' };
+  if (!args.gclid && !args.gbraid && !args.wbraid && !args.emailHash && !args.phoneHashE164) return { outcome: 'failed', error: 'no_click_id_or_identifier' };
+  const devToken = resolveDeveloperToken(deps.tenantId);
+  if (!devToken) return { outcome: 'failed', error: 'no_developer_token' };
+  const customerId = g.customerId.replace(/[^0-9]/g, '');
+  const body = buildGoogleClickConversionBody({ ...args, conversionAction: g.conversionAction, consent: args.consent ?? { adUserData: 'DENIED', adPersonalization: 'DENIED' } });
+  const r = await brokeredPost(deps, { provider: PLATFORM_PROVIDER.google, url: `${googleApiBase()}/customers/${customerId}:uploadClickConversions`, body: JSON.stringify(body), extraHeaders: { 'developer-token': devToken } });
+  if (r.outcome === 'no_connection') return { outcome: 'no_connection' };
+  if (r.outcome !== 'sent') return { outcome: 'failed', error: r.outcome === 'request_failed' ? (r.timedOut ? 'timeout' : 'request_failed') : r.outcome };
+  let json: { results?: Array<Record<string, unknown>>; partialFailureError?: { message?: string }; error?: { message?: string } };
+  try { json = (await r.res.json()) as typeof json; } catch { return { outcome: 'failed', error: 'bad_response' }; }
+  if (!r.res.ok || json.error) return { outcome: 'failed', error: json.error?.message ?? `http_${r.res.status}` };
+  if (json.partialFailureError) return { outcome: 'failed', error: json.partialFailureError.message ?? 'partial_failure' };
+  // A rejected row under partialFailure comes back as an EMPTY result object.
+  const row = json.results?.[0];
+  if (!row || Object.keys(row).length === 0) return { outcome: 'failed', error: 'conversion_not_accepted' };
+  await stampConnectionUse(deps.storage, deps.runId, r.provenance).catch((e) => log.warn('ads conversion connectionUse stamp failed', { error: e instanceof Error ? e.message : String(e) }));
+  return { outcome: 'sent' };
 }
 
 export function makeAdsAdapter(deps: BrokeredEgressDeps): AdsAdapter {
@@ -1019,43 +1304,33 @@ export function makeAdsAdapter(deps: BrokeredEgressDeps): AdsAdapter {
       return listTenantDispatchRecords(deps.tenantId);
     },
     async sendConversion(args) {
-      // Only Meta CAPI + TikTok Events are wired; google/linkedin pixels stay
-      // client-side-only for conversions (documented `unsupported`).
-      if (args.platform !== 'meta' && args.platform !== 'tiktok') {
+      // Meta CAPI, TikTok Events and Google Ads click conversions are wired;
+      // LinkedIn conversions are ADR 0907 P5 (not built).
+      if (args.platform !== 'meta' && args.platform !== 'tiktok' && args.platform !== 'google') {
         return { outcome: 'unsupported', platform: args.platform };
       }
-      const eventTime = Math.floor(new Date(args.eventTimeIso).getTime() / 1000);
+      // ADR 0907 D2 — a sender not yet verified on the platform's test surface sends nothing.
+      if (!adsSenderEnabled(args.platform)) return { outcome: 'unsupported', platform: args.platform, reason: 'not_sandbox_verified' };
+      if (args.platform === 'google') return sendGoogleConversion(deps, args);
       const url = args.platform === 'meta'
         ? `${metaApiBase()}/${encodeURIComponent(args.pixelId)}/events`
         : `${tiktokApiBase()}/event/track/`;
-      const body = args.platform === 'meta'
-        ? {
-            data: [{
-              event_name: args.eventName,
-              event_time: eventTime,
-              event_id: args.eventId, // the platform-side dedup key
-              action_source: 'website',
-              user_data: { ...(args.emailHash ? { em: [args.emailHash] } : {}) },
-              ...(args.value !== undefined ? { custom_data: { value: args.value, ...(args.currency ? { currency: args.currency } : {}) } } : {}),
-            }],
-          }
-        : {
-            pixel_code: args.pixelId,
-            event: args.eventName,
-            event_id: args.eventId,
-            timestamp: args.eventTimeIso,
-            ...(args.emailHash ? { context: { user: { email: args.emailHash } } } : {}),
-            ...(args.value !== undefined ? { properties: { value: args.value, ...(args.currency ? { currency: args.currency } : {}) } } : {}),
-          };
-      const r = await brokeredPost(deps, { provider: PLATFORM_PROVIDER[args.platform], url, body: JSON.stringify(body) });
+      const body = args.platform === 'meta' ? buildMetaConversionBody(args) : buildTiktokConversionBody(args);
+      // TikTok reads a RAW `Access-Token` header (the publish path's shape), never
+      // `Authorization: Bearer` (ADR 0907 D1).
+      const r = await brokeredPost(deps, {
+        provider: PLATFORM_PROVIDER[args.platform], url, body: JSON.stringify(body),
+        ...(args.platform === 'tiktok' ? { authScheme: 'raw' as const, authHeaderName: 'access-token' } : {}),
+      });
       if (r.outcome === 'no_connection') return { outcome: 'no_connection' };
       if (r.outcome === 'insecure_base') return { outcome: 'failed', error: 'insecure_base' };
       if (r.outcome === 'request_failed') return { outcome: 'failed', error: r.timedOut ? 'timeout' : 'request_failed' };
-      if (!r.res.ok) {
-        let detail = `http_${r.res.status}`;
-        try { detail = ((await r.res.json()) as { error?: { message?: string }; message?: string }).error?.message ?? detail; } catch { /* keep status */ }
-        return { outcome: 'failed', error: detail };
-      }
+      let json: { code?: number; message?: string; error?: { message?: string } } | undefined;
+      try { json = (await r.res.json()) as typeof json; } catch { json = undefined; }
+      if (!r.res.ok) return { outcome: 'failed', error: json?.error?.message ?? json?.message ?? `http_${r.res.status}` };
+      // TikTok answers HTTP 200 with `{code, message}`; a non-zero code is a
+      // rejection, and reading it as delivered would mark the row sent forever.
+      if (args.platform === 'tiktok' && json?.code !== 0) return { outcome: 'failed', error: json?.message ?? `code_${json?.code ?? 'missing'}` };
       await stampConnectionUse(deps.storage, deps.runId, r.provenance).catch((e) => log.warn('ads conversion connectionUse stamp failed', { error: e instanceof Error ? e.message : String(e) }));
       return { outcome: 'sent' };
     },
@@ -1113,7 +1388,7 @@ export function makeAdsAdapter(deps: BrokeredEgressDeps): AdsAdapter {
       // Google Customer Match — user list create + the MEMBER UPLOAD (ADR 0217's
       // deferral, closed by ADR 0223): offlineUserDataJobs create (CUSTOMER_MATCH_
       // USER_LIST bound to the list) → :addOperations (hashed-email identifiers,
-      // ≤ 20 per operation per the v18 UserData limit) → :run. Hashes only.
+      // ≤ 20 per operation per the UserData limit) → :run. Hashes only.
       const devToken = resolveDeveloperToken(deps.tenantId);
       if (!devToken) return { outcome: 'failed', error: 'no_developer_token' };
       const customerId = args.adAccountId.replace(/[^0-9]/g, '');
@@ -1188,6 +1463,23 @@ export function makeAdsAdapter(deps: BrokeredEgressDeps): AdsAdapter {
       }
       return result;
     },
+    async getAccountMetrics(args) {
+      const reader = { meta: metaAccountMetrics, google: googleAccountMetrics, tiktok: tiktokAccountMetrics, linkedin: linkedinAccountMetrics }[args.platform];
+      if (!reader) return { outcome: 'unsupported', platform: args.platform };
+      // ADR 0907 D2 — a reader not yet exercised against the platform's test
+      // surface is never presented as working.
+      if (!adsReaderEnabled(args.platform)) return { outcome: 'unsupported', platform: args.platform, reason: 'not_sandbox_verified' };
+      if (!ISO_DAY.test(args.since) || !ISO_DAY.test(args.until) || args.since > args.until) return { outcome: 'failed', error: 'invalid_date_range' };
+      if (!/[0-9]/.test(args.adAccountId)) return { outcome: 'failed', error: 'invalid_ad_account' };
+      // ADR 0357 P6 breaker, extended to reads (ADR 0907 D3): an open circuit is
+      // a graceful refusal with no platform call.
+      const breakerKey = `ads:${args.platform}`;
+      if (circuitStatus(deps.tenantId, breakerKey) === 'open') return { outcome: 'failed', error: 'circuit_open' };
+      const out = await reader(deps, args);
+      if (out.outcome === 'ok') reportConnectionSuccess(deps.tenantId, breakerKey);
+      else if (out.outcome === 'rate_limited' || (out.outcome === 'failed' && isBreakerReportableFailure(out.error))) reportConnectionFailure(deps.tenantId, breakerKey);
+      return out;
+    },
     async getMetrics(args) {
       if (args.platform === 'meta') return metaMetrics(deps, args);
       if (args.platform === 'google') return googleMetrics(deps, args);
@@ -1207,6 +1499,11 @@ export function makeAdsAdapter(deps: BrokeredEgressDeps): AdsAdapter {
         if (args.platform === 'google' || args.platform === 'linkedin') return { outcome: 'failed', error: 'video_unsupported_platform' };
         if (!args.dryRun) return { outcome: 'failed', error: 'video_dispatch_live_pending' };
       }
+
+      // ADR 0907 P0 — Google's EU political declaration is checked HERE, before the
+      // spend gate, so a missing attestation never mints an approval a human then
+      // signs for a dispatch that cannot succeed. (The strategy re-checks.)
+      if (args.platform === 'google' && !args.dryRun && !args.euPoliticalAdvertising) return { outcome: 'failed', error: 'missing_eu_political_declaration' };
 
       // Fork-stable idempotency: a prior successful dispatch for this key short-circuits —
       // no second campaign on retry/sweeper/:fork. (Sequential/fork-safe; not CAS-guarded

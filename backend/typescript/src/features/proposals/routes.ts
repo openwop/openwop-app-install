@@ -13,12 +13,19 @@
  * materialized artifact is a pack-publish-class mutation) — an unseeded caller
  * resolves to zero scopes and is denied 403, satisfying the
  * `proposal-reviewable-learning` behavioral leg without an env toggle.
+ *
+ * ADR 0938 — reads need `workspace:read` (one predicate, shared with the agent
+ * tool), a list never writes (the demo seeder is deleted), filters are validated,
+ * every write follows the transition table by CAS, and `apply` names the
+ * `{revision, artifactDigest}` its caller saw. Since this host has no installer
+ * for any kind, apply always ends `409 proposal_not_installable`, and
+ * `agents.proposals` is no longer advertised (`discovery.ts`, D3).
  */
 
 import type { Request, Response, NextFunction } from 'express';
 import { OpenwopError } from '../../types.js';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
-import { callerSubject, tenantOf } from '../../host/requestSubject.js';
+import { callerSubject, personalTenantOf, tenantOf } from '../../host/requestSubject.js';
 import { resolveSubjectScopesUnion } from '../../host/accessControlService.js';
 import {
   listProposals,
@@ -27,10 +34,13 @@ import {
   rejectProposal,
   archiveProposal,
   applyProposal,
-  ensureDemoProposal,
-  MalformedForKindError,
+  viewOf,
+  artifactDigestOf,
+  type ProposalView,
 } from './proposalsService.js';
-import type { ProposalKind, ProposalState } from './types.js';
+import { assertCanReadProposals } from './access.js';
+import { PROPOSAL_KINDS, PROPOSAL_STATES, type Proposal, type ProposalKind, type ProposalState } from './types.js';
+import { JcsRefusal } from '../../host/jcs.js';
 
 const ID_PATTERN = /^[A-Za-z0-9_.:-]{1,128}$/;
 
@@ -40,6 +50,40 @@ function paramId(req: Request): string {
     throw new OpenwopError('validation_error', 'Invalid proposal id.', 400, { id });
   }
   return id;
+}
+
+/** ADR 0938 D6 — the read gate, the SAME predicate the agent tool calls. */
+async function assertCanRead(req: Request): Promise<void> {
+  await assertCanReadProposals(tenantOf(req), callerSubject(req), {
+    personalTenant: personalTenantOf(req),
+    wildcardOperator: req.principal?.tenants?.includes('*') === true,
+  });
+}
+
+async function loadProposal(req: Request): Promise<Proposal> {
+  const p = await getProposal(tenantOf(req), paramId(req));
+  if (!p) throw new OpenwopError('not_found', 'Proposal not found.', 404);
+  return p;
+}
+
+/** ADR 0938 D6 — a filter outside its enum is a 400, never an empty 200. */
+function enumQuery<T extends string>(req: Request, field: string, allowed: readonly T[]): T | undefined {
+  const raw = req.query[field];
+  if (raw === undefined) return undefined;
+  if (typeof raw !== 'string' || !(allowed as readonly string[]).includes(raw)) {
+    throw new OpenwopError('validation_error', `\`${field}\` must be one of: ${allowed.join(', ')}.`, 400, { field });
+  }
+  return raw as T;
+}
+
+/** ADR 0938 D5 — an optional `revision` on revise/reject/archive, checked when present. */
+function optionalRevision(body: unknown): number | undefined {
+  const r = (body as { revision?: unknown } | undefined)?.revision;
+  if (r === undefined) return undefined;
+  if (typeof r !== 'number' || !Number.isInteger(r) || r < 0) {
+    throw new OpenwopError('validation_error', '`revision` must be a non-negative integer.', 400, { field: 'revision' });
+  }
+  return r;
 }
 
 /**
@@ -54,8 +98,8 @@ function paramId(req: Request): string {
  * D2: when the row carries an `owner.principal` that is not the caller, refuse.
  * D3 exits, both deliberate — `host:members:manage` may act on any row (an admin
  * must be able to archive a departed member's proposal), and a row with NO
- * `owner.principal` (the demo seeder, `proposalsService.ts:256`) stays mutable by
- * any writer, because there is no owner to defer to and refusing would strand it.
+ * `owner.principal` stays mutable by any writer, because there is no owner to
+ * defer to and refusing would strand it.
  */
 async function assertCanMutate(req: Request, proposal: { owner?: { principal?: string } }): Promise<void> {
   const subject = callerSubject(req);
@@ -97,24 +141,22 @@ export function registerProposalsRoutes(deps: RouteDeps): void {
       }
     };
 
-  // List — seeds a canonical demo draft so the behavioral leg is non-vacuous.
   app.get(
     '/host/openwop-app/proposals',
     wrap(async (req, res) => {
-      const tenant = tenantOf(req);
-      await ensureDemoProposal(tenant);
-      const state = typeof req.query.state === 'string' ? (req.query.state as ProposalState) : undefined;
-      const kind = typeof req.query.kind === 'string' ? (req.query.kind as ProposalKind) : undefined;
-      res.json({ proposals: await listProposals(tenant, { state, kind }) });
+      await assertCanRead(req);
+      const state = enumQuery<ProposalState>(req, 'state', PROPOSAL_STATES);
+      const kind = enumQuery<ProposalKind>(req, 'kind', PROPOSAL_KINDS);
+      const proposals: ProposalView[] = (await listProposals(tenantOf(req), { state, kind })).map(viewOf);
+      res.json({ proposals });
     }),
   );
 
   app.get(
     '/host/openwop-app/proposals/:id',
     wrap(async (req, res) => {
-      const p = await getProposal(tenantOf(req), paramId(req));
-      if (!p) throw new OpenwopError('not_found', 'Proposal not found.', 404);
-      res.json(p);
+      await assertCanRead(req);
+      res.json(viewOf(await loadProposal(req)));
     }),
   );
 
@@ -122,50 +164,60 @@ export function registerProposalsRoutes(deps: RouteDeps): void {
   app.patch(
     '/host/openwop-app/proposals/:id',
     wrap(async (req, res) => {
+      await assertCanRead(req); // PROP2CD-3 — a non-reader learns nothing, not even existence
       const body = (req.body ?? {}) as { title?: unknown; rationale?: unknown; artifact?: unknown };
       const patch: { title?: string; rationale?: string; artifact?: Record<string, unknown> } = {};
-      if (typeof body.title === 'string') patch.title = body.title;
-      if (typeof body.rationale === 'string') patch.rationale = body.rationale;
-      if (body.artifact && typeof body.artifact === 'object') patch.artifact = body.artifact as Record<string, unknown>;
-      const existing = await getProposal(tenantOf(req), paramId(req));
-      if (!existing) throw new OpenwopError('not_found', 'Proposal not found.', 404);
+      for (const field of ['title', 'rationale'] as const) {
+        const v = body[field];
+        if (v === undefined) continue;
+        if (typeof v !== 'string') throw new OpenwopError('validation_error', `\`${field}\` must be a string.`, 400, { field });
+        patch[field] = v;
+      }
+      if (body.artifact !== undefined) {
+        if (!body.artifact || typeof body.artifact !== 'object' || Array.isArray(body.artifact) || Object.keys(body.artifact).length === 0) {
+          throw new OpenwopError('validation_error', '`artifact` must be a non-empty object.', 400, { field: 'artifact' });
+        }
+        patch.artifact = body.artifact as Record<string, unknown>;
+        try {
+          artifactDigestOf(patch.artifact); // the digest a reviewer will bind to must exist
+        } catch (err) {
+          if (err instanceof JcsRefusal) throw new OpenwopError('validation_error', '`artifact` is not valid JSON data.', 400, { field: 'artifact' });
+          throw err;
+        }
+      }
+      const revision = optionalRevision(req.body);
+      const existing = await loadProposal(req);
       await assertCanMutate(req, existing);
-      const p = await reviseProposal(tenantOf(req), paramId(req), patch);
-      if (!p) throw new OpenwopError('not_found', 'Proposal not found.', 404);
-      res.json(p);
+      res.json(viewOf(await reviseProposal(existing, patch, revision)));
     }),
   );
 
-  // Apply — scope-gated (403), installs the stored byte image (no re-synthesis).
+  // Apply — scope-gated (403), bound to what the caller saw, installer-only (ADR 0938).
   app.post(
     '/host/openwop-app/proposals/:id/apply',
     wrap(async (req, res) => {
+      await assertCanRead(req);
       await assertCanApply(req);
-      try {
-        const result = await applyProposal(tenantOf(req), paramId(req));
-        if (!result) throw new OpenwopError('not_found', 'Proposal not found.', 404);
-        res.json({
-          installedArtifactRef: result.installedArtifactRef,
-          ...(result.pendingApprovalId ? { pendingApprovalId: result.pendingApprovalId } : {}),
+      const existing = await loadProposal(req);
+      const body = (req.body ?? {}) as { revision?: unknown; artifactDigest?: unknown };
+      if (typeof body.revision !== 'number' || !Number.isInteger(body.revision) || typeof body.artifactDigest !== 'string') {
+        throw new OpenwopError('validation_error', 'Applying needs the `revision` and `artifactDigest` you reviewed (from GET).', 400, {
+          fields: ['revision', 'artifactDigest'],
         });
-      } catch (err) {
-        if (err instanceof MalformedForKindError) {
-          throw new OpenwopError('validation_error', err.message, 422, { kind: err.kind });
-        }
-        throw err;
       }
+      const result = await applyProposal(existing, { revision: body.revision, artifactDigest: body.artifactDigest });
+      res.json({ installedArtifactRef: result.installedArtifactRef, proposal: viewOf(result.proposal) });
     }),
   );
 
   app.post(
     '/host/openwop-app/proposals/:id/reject',
     wrap(async (req, res) => {
-      const existing = await getProposal(tenantOf(req), paramId(req));
-      if (!existing) throw new OpenwopError('not_found', 'Proposal not found.', 404);
+      await assertCanRead(req);
+      const revision = optionalRevision(req.body);
+      const existing = await loadProposal(req);
       await assertCanMutate(req, existing);
-      const p = await rejectProposal(tenantOf(req), paramId(req));
-      if (!p) throw new OpenwopError('not_found', 'Proposal not found.', 404);
-      res.json(p);
+      res.json(viewOf(await rejectProposal(existing, revision)));
     }),
   );
 
@@ -173,12 +225,11 @@ export function registerProposalsRoutes(deps: RouteDeps): void {
   app.delete(
     '/host/openwop-app/proposals/:id',
     wrap(async (req, res) => {
-      const existing = await getProposal(tenantOf(req), paramId(req));
-      if (!existing) throw new OpenwopError('not_found', 'Proposal not found.', 404);
+      await assertCanRead(req);
+      const revision = optionalRevision(req.body);
+      const existing = await loadProposal(req);
       await assertCanMutate(req, existing);
-      const p = await archiveProposal(tenantOf(req), paramId(req));
-      if (!p) throw new OpenwopError('not_found', 'Proposal not found.', 404);
-      res.json(p);
+      res.json(viewOf(await archiveProposal(existing, revision)));
     }),
   );
 }

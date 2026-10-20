@@ -29,6 +29,7 @@ import { countDemoAppBuilder, seedDemoAppBuilder, clearDemoAppBuilder } from './
 import { countDemoKicktodo, seedDemoKicktodo, clearDemoKicktodo } from './demoKicktodoSeed.js';
 import { countDemoWalkthroughs, seedDemoWalkthroughs, clearDemoWalkthroughs } from './demoWalkthroughsSeed.js';
 import { clearTutorialRows, countTutorialRows, seedTutorials } from '../features/tutorials/tutorialsService.js';
+import { clearAgencyOpsDemo, countAgencyOpsDemo, seedAgencyOpsDemo } from './demoAgencyOpsSeed.js';
 import { countDemoOpsPlanning, seedDemoOpsPlanning, clearDemoOpsPlanning } from './demoOpsPlanningSeed.js';
 import { countDemoDealers, seedDemoDealers, clearDemoDealers } from './demoDealersSeed.js';
 import { countDemoCommissions, seedDemoCommissions, clearDemoCommissions } from './demoSalesCommissionsSeed.js';
@@ -719,7 +720,17 @@ const demoKicktodoSeeder: ExampleDataSeeder = {
   clear: (tenantId) => clearDemoKicktodo(tenantId),
 };
 
-export const EXAMPLE_DATA_SEEDERS: readonly ExampleDataSeeder[] = [demoPeopleSeeder, demoMediaSeeder, agentsSeeder, advisorsSeeder, workforcesSeeder, demoCrmSeeder, demoTerritoriesSeeder, demoDealersSeeder, demoSalesCommissionsSeeder, demoSalesMapsSeeder, demoProductionSeeder, cmsHomepageSeeder, featurePagesSeeder, comparisonPageSeeder, marketingContentPagesSeeder, marketingLegalPagesSeeder, workflowAuthorSeeder, demoWalkthroughsSeeder, tutorialsSeeder, strategyShowcaseSeeder, campaignShowcaseSeeder, commerceShowcaseSeeder, demoCommerceDepthSeeder, demoMerchandisingSeeder, demoCdpSeeder, demoEntitiesSeeder, demoContentMarketingSeeder, demoOpsPlanningSeeder, demoAppBuilderSeeder, ucpReferenceMerchantSeeder, demoJobSearchSeeder, demoKicktodoSeeder];
+/** ADR 0927 D2 — the synthetic agency demo for campaign operations. */
+const demoAgencyOpsSeeder: ExampleDataSeeder = {
+  id: 'demo-agency-ops',
+  label: 'Agency campaign operations (synthetic)',
+  description: 'Two fictional clients of this agency workspace — Northwind Events and Bluefin Analytics, both labelled synthetic — each with one live webinar landing page registered as a campaign-operations asset, ready for a change request. Workspace owners and admins become admins of both clients. Skipped while the Campaign operations feature is off.',
+  count: (tenantId) => countAgencyOpsDemo(tenantId),
+  seed: (tenantId, storage) => seedAgencyOpsDemo(tenantId, storage),
+  clear: (tenantId) => clearAgencyOpsDemo(tenantId),
+};
+
+export const EXAMPLE_DATA_SEEDERS: readonly ExampleDataSeeder[] = [demoPeopleSeeder, demoMediaSeeder, agentsSeeder, advisorsSeeder, workforcesSeeder, demoCrmSeeder, demoTerritoriesSeeder, demoDealersSeeder, demoSalesCommissionsSeeder, demoSalesMapsSeeder, demoProductionSeeder, cmsHomepageSeeder, featurePagesSeeder, comparisonPageSeeder, marketingContentPagesSeeder, marketingLegalPagesSeeder, workflowAuthorSeeder, demoWalkthroughsSeeder, tutorialsSeeder, strategyShowcaseSeeder, campaignShowcaseSeeder, commerceShowcaseSeeder, demoCommerceDepthSeeder, demoMerchandisingSeeder, demoCdpSeeder, demoEntitiesSeeder, demoContentMarketingSeeder, demoOpsPlanningSeeder, demoAppBuilderSeeder, ucpReferenceMerchantSeeder, demoJobSearchSeeder, demoKicktodoSeeder, demoAgencyOpsSeeder];
 
 export interface ExampleDataStepStatus {
   id: string;

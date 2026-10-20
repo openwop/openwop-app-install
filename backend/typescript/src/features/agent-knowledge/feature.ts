@@ -57,5 +57,5 @@ export const agentKnowledgeFeature: BackendFeature = {
   // Face 3 (ADR 0014 Phase 2): the node pack over ctx.features.agentKnowledge —
   // `retrieve` (read) + `ingest` (KB-document write; ADR 0038 §B trigger→workflow
   // auto-ingest). No agent pack (this is agent infrastructure, not an AI surface).
-  requiredPacks: [{ name: 'feature.agent-knowledge.nodes', version: '1.5.1' }],
+  requiredPacks: ['feature.agent-knowledge.nodes'],
 };

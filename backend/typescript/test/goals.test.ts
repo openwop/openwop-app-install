@@ -12,6 +12,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
+import { registerGoalVerifier } from '../src/features/goals/goalVerifiers.js';
 
 let server: http.Server;
 let BASE: string;
@@ -20,6 +21,8 @@ const TOKEN = 'dev-token';
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_GOALS_ENABLED = 'true';
+  // ADR 0908 — create refuses a verifier ref nobody registered.
+  for (const ref of ['v:bounded', 'v:abandon']) registerGoalVerifier(ref, async () => ({ satisfied: false, confidence: 0, runId: 'r' }));
   const app = await createApp({
     port: 0,
     storageDsn: 'memory://',
@@ -68,7 +71,7 @@ describe('goals — standing-continuation seam (RFC 0097)', () => {
       method: 'POST',
       body: JSON.stringify({
         objective: 'bounded work',
-        completion: { check: 'verifier' },
+        completion: { check: 'verifier', verifierRef: 'v:bounded' },
         continuation: { mode: 'schedule' },
         bounds: { maxLoopIterations: 5 },
       }),
@@ -91,7 +94,7 @@ describe('goals — standing-continuation seam (RFC 0097)', () => {
   it('client lifecycle: abandon transitions to abandoned (not a judge verdict)', async () => {
     const created = await api<{ id: string }>('/host/openwop-app/goals', {
       method: 'POST',
-      body: JSON.stringify({ objective: 'to abandon', completion: { check: 'verifier' }, continuation: { mode: 'manual' }, bounds: { runTimeoutMs: 1000 } }),
+      body: JSON.stringify({ objective: 'to abandon', completion: { check: 'verifier', verifierRef: 'v:abandon' }, continuation: { mode: 'manual' }, bounds: { runTimeoutMs: 1000 } }),
     });
     const res = await api<{ state: string }>(`/host/openwop-app/goals/${created.body.id}/abandon`, { method: 'POST' });
     expect(res.status).toBe(200);

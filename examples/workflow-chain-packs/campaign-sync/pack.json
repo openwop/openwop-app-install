@@ -1,8 +1,8 @@
 {
   "name": "core.openwop.workflows.campaign-sync",
-  "version": "1.1.3",
+  "version": "1.4.0",
   "kind": "workflow-chain",
-  "description": "Campaign Studio metrics-sync chain (RFC 0013; campaign gap plan C2 on ADR 0159). Pulls yesterday's ad metrics for every dispatched campaign through the acting user's platform connection (ctx.ads, window-scoped so rows never double-count) into the unified performance store, then delivers a short sync summary as a notification. Schedule it daily on the ONE scheduler, or run it ad hoc — the 15-minute cooldown makes overlapping fires harmless. Also carries the daily budget-pacing check (ADR 0220).",
+  "description": "Campaign Studio metrics-sync chain (RFC 0013; campaign gap plan C2 on ADR 0159). Pulls a rolling 7-day look-back of daily ad metrics, with conversions and revenue, for the dispatched campaigns or the whole configured ad account through the acting user's platform connection (ctx.ads; each day's row is replaced on re-pull, so late conversions settle and nothing double-counts) into the unified performance store, then delivers a short sync summary as a notification. Schedule it daily on the ONE scheduler, or run it ad hoc — the 15-minute cooldown makes overlapping fires harmless. Also carries the daily budget-pacing check (ADR 0220). And the hourly conversions delivery (ADR 0907 D7): queued server-side conversions go to the live conversions APIs, consent re-checked per row at send.",
   "author": "openwop",
   "license": "Apache-2.0",
   "engines": {
@@ -15,9 +15,9 @@
   "chains": [
     {
       "chainId": "campaign-sync.daily-metrics",
-      "version": "1.0.1",
+      "version": "1.1.1",
       "label": "Daily Ad-Metrics Sync",
-      "description": "Pull yesterday's spend/impressions/clicks for every dispatched campaign on one ad platform (meta or google) into the performance store — per-campaign best-effort, deduped, cooldown-guarded — and notify with the result. Pair with a daily schedule for hands-off freshness (feeds the KPI cards, budget recommendations, and the attribution join).",
+      "description": "Pull the last 7 days of spend/impressions/clicks/conversions/revenue on one ad platform (meta or google) into the performance store — the dispatched campaigns, or every campaign of the configured ad accounts (connector settings, or the syncScope parameter) — per-account best-effort, deduped, cooldown-guarded — and notify with the result. Pair with a daily schedule for hands-off freshness (feeds the KPI cards, budget recommendations, and the attribution join).",
       "parameters": {
         "type": "object",
         "additionalProperties": false,
@@ -37,6 +37,14 @@
             ],
             "default": "meta",
             "description": "The ad platform to pull (the two with live metrics readers)."
+          },
+          "syncScope": {
+            "type": "string",
+            "enum": [
+              "dispatched",
+              "account"
+            ],
+            "description": "Override the org's connector setting for this run: only the campaigns this app launched, or every campaign of the configured ad accounts. Omit to use the setting."
           }
         }
       },
@@ -45,8 +53,8 @@
         "nodes": [
           {
             "id": "sync",
-            "typeId": "feature.campaign-connectors.nodes.sync@1.0.0",
-            "name": "Pull yesterday's metrics",
+            "typeId": "feature.campaign-connectors.nodes.sync@1.2.0",
+            "name": "Pull the 7-day metrics look-back",
             "position": {
               "x": 0,
               "y": 0
@@ -54,7 +62,8 @@
             "config": {},
             "inputs": {
               "orgId": "{{params.orgId}}",
-              "platform": "{{params.platform}}"
+              "platform": "{{params.platform}}",
+              "syncScope": "{{params.syncScope}}"
             }
           },
           {
@@ -65,8 +74,12 @@
               "x": 300,
               "y": 0
             },
-            "config": { "audience": "tenant" },
-            "inputs": { "title": "Daily Ad-Metrics Sync" }
+            "config": {
+              "audience": "tenant"
+            },
+            "inputs": {
+              "title": "Daily Ad-Metrics Sync"
+            }
           }
         ],
         "edges": [
@@ -79,7 +92,7 @@
       "outputs": {
         "outcome": {
           "type": "string",
-          "description": "synced | cooldown | no_dispatches."
+          "description": "synced | cooldown | no_dispatches | no_accounts."
         }
       }
     },
@@ -124,6 +137,66 @@
         "alerted": {
           "type": "array",
           "description": "Band escalations that raised a notification."
+        }
+      }
+    },
+    {
+      "chainId": "campaign-sync.conversions-dispatch",
+      "version": "1.0.0",
+      "label": "Hourly Conversions Delivery",
+      "description": "OFF until the workspace enables the `campaign-connectors.scheduled-conversions` toggle (an honest `disabled` no-op until then). Deliver the org's queued server-side conversions (Meta CAPI; TikTok and Google once verified) through the schedule owner's ad connections. Consent is re-checked per row at send — withdrawn consent drops the row, unreadable consent holds it. Pair with an HOURLY schedule: platforms accept events up to 7 days old, and an hourly run keeps the visitor's IP and user agent on the row for hours, not days (they are dropped once every platform has the event). A 15-minute cadence would be 96 runs per org per day, mostly empty. Events older than a platform's window are marked expired, never sent, so enabling it never flushes an old backlog.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "orgId"
+        ],
+        "properties": {
+          "orgId": {
+            "type": "string",
+            "description": "The org whose queued conversions are delivered."
+          }
+        }
+      },
+      "capabilities": [],
+      "dag": {
+        "nodes": [
+          {
+            "id": "deliver",
+            "typeId": "feature.campaign-connectors.nodes.dispatch-conversions@1.0.0",
+            "name": "Deliver queued conversions",
+            "position": {
+              "x": 0,
+              "y": 0
+            },
+            "config": {},
+            "inputs": {
+              "orgId": "{{params.orgId}}"
+            }
+          }
+        ],
+        "edges": []
+      },
+      "outputs": {
+        "outcome": {
+          "type": "string",
+          "description": "delivered | disabled."
+        },
+        "sent": {
+          "type": "number",
+          "description": "Rows every applicable platform now has."
+        },
+        "dropped": {
+          "type": "number",
+          "description": "Rows dropped because consent was withdrawn."
+        },
+        "held": {
+          "type": "number",
+          "description": "Rows held for the next run (consent unreadable or no visitor key)."
+        },
+        "expired": {
+          "type": "number",
+          "description": "Rows past every remaining platform's window — marked expired, not sent."
         }
       }
     }

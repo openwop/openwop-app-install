@@ -1,6 +1,6 @@
 # ADR 0907 — Ad metrics depth + server-side conversions: extend `campaign-connectors`, sandbox-verify, close CSG-CON-1
 
-**Status:** Accepted (2026-10-17) — plan only, no code. Architect-reviewed (§ Architect review). Live spend, vendor accounts and IAM wait on § Open decisions for David.
+**Status:** Accepted (2026-10-17). **Track 1 (P0–P5) implemented 2026-10-18** — see § Implementation record. Track 2 (P6 sandbox verification → honest-ON, P7 LinkedIn CAPI) waits on § Open decisions for David; until P6 the TikTok/LinkedIn readers and the TikTok/Google senders are built but `unsupported` (`not_sandbox_verified`), and scheduled delivery is behind an OFF-by-default sub-toggle.
 **Date:** 2026-10-17
 **Feature:** `campaign-connectors` (extends ADRs 0159, 0167, 0215, 0223, 0297, 0357). No new toggle.
 **Origin:** MyndHyve port, capability 4 of 4 — lowest priority (gap analysis 2026-10-17: "Ad metrics /
@@ -261,6 +261,71 @@ LinkedIn).
 
 **P7 — LinkedIn Conversions API (optional, net-new).** (S–M, 2–3 d) · David: **yes** — product scope (Q3)
 + LinkedIn access.
+
+## Implementation record
+
+Track 1 shipped as one ordered merge train: each phase is a PR whose branch contains the phases before it.
+Every reader and sender is tested against local fixture servers: no real ad platform was called and no
+real token was used.
+
+| Phase | PR | Commit | What landed |
+|---|---|---|---|
+| P0 + P1 | #4920 | merged `eec6dda99` | D0: the version table `host/adsWire.ts` `ADS_API_VERSIONS` (Google Ads v18 → **v26**, Meta Marketing API v21.0 → **v25.0**, LinkedIn 202506 → **202610**, TikTok v1.3 with a review-by date) and the 60-day tripwire `test/ads-api-version-tripwire.test.ts`. D1: TikTok `Access-Token` header, the Events API 2.0 body, and a 200 with a non-zero `code` treated as failure. D8: `eraseCampaignConversions` (manifest + census ledger). P1: `scripts/ads-sandbox-verify.mjs`, written and not run (test: `ads-sandbox-verify-script.test.ts`, fake servers). |
+| P2 | #4935 | merged `a0bb212e6` | D3: `getAccountMetrics` (Meta/Google, paged by cursor/`pageToken`, `truncated`, conversions + revenue, `rate_limited`, breaker on reads); connector settings (`dispatched` default / `account`); 7-day look-back with legacy-row replacement; resumable backfill ≤ 90 d. D9: chain `daily-metrics` 1.1.0, node pack 1.3.0. |
+| P3 | #4936 | merged `9722222e6` | D4: TikTok + LinkedIn readers, `unsupported` until `OPENWOP_ADS_VERIFIED_READERS`; `conversions`/`revenue` are `number \| null` end to end; `brokeredFetch` gains `authHeaderName`. |
+| P4 | #4937 | `7aa0b2599` | D5: Google `uploadClickConversions`; D6: IP/UA/fbc/fbp/ttclid/E.164 phone; `conversionDelivery.ts`; TikTok + Google senders `unsupported` until `OPENWOP_ADS_VERIFIED_SENDERS`. |
+| P5 | #4938 | `f5912902c`, `3bf83bd69`, `9343feb0a`, `0ca4db887` | D7: chain `campaign-sync.conversions-dispatch` + node `dispatch-conversions` (`side-effect` + `side-effectful`, served set + floor regenerated); consent re-checked at send; health route + card; the lead amendment (below). |
+
+**Corrections to the decisions above, from implementation (the reasoning trail is kept, not rewritten):**
+
+- **D0: the Meta premise was half right.** Marketing API v21.0 expired 2025-09-09, but Meta began
+  auto-upgrading expired versions on 2026-07-29. So v21 may not have been failing hard when this ADR was
+  written. It was bumped anyway, and the table marks its v25.0 sunset as `estimated` with a review-by date,
+  because Meta lists it as TBD.
+- **D0 found a second Google defect the ADR missed.** Since 2026-04-01 Google refuses any campaign create
+  that lacks `containsEuPoliticalAdvertising`, on every API version. `publishAd` now takes
+  `euPoliticalAdvertising`. It is never defaulted, because it is an attestation: a live Google dispatch
+  without it fails closed (`missing_eu_political_declaration`) before the spend gate. Passing it through
+  the `campaign-channels` publish node is a gap filed against that feature.
+- **D1 fixed the TikTok sender but did not switch it on.** Per D2, a sender with no sandbox transcript
+  stays `unsupported`. The fixed TikTok sender has never been exercised against TikTok, so P4 gated it
+  together with Google. Meta CAPI (ADR 0297) stays live.
+- **D3 shape:** account scope is a separate `getAccountMetrics` method, not an overload of `getMetrics`.
+  It has a different result union and its own `ADS_METHOD_FEATURE` gate entry.
+- **D3 `null`:** no Meta or Google column needed `null`. **TikTok revenue is `null`**, because no TikTok
+  revenue metric could be confirmed against documentation. The KPI computes ROAS/CPA only over reporting
+  rows and returns `unreported`. campaign-intel leaves null-revenue rows out of the optimizer; without
+  that, it cut TikTok's budget by 60% for "ROAS 0×", witnessed.
+- **D5 consent:** both Google signals map from the relay's marketing consent. A row exists only with
+  that consent, and P5 re-checks it at send.
+- **D7 placement:** the `marketingAllowedOrUnreadable` hoist landed in P5 with its second caller, not in P0.
+- **D7 lead amendment (2026-10-17).** Delivering Meta conversions hourly from deploy would be a
+  production behaviour change and could flush an old backlog, so:
+  - (a) scheduled delivery is OFF by default behind the `campaign-connectors.scheduled-conversions`
+    sub-toggle (`resolveOne`, AND-ed with the parent). While off, the run is a `disabled` no-op.
+  - (b) no event older than its platform's window is sent (Meta/TikTok 7 d, Google 90 d). It becomes
+    `expired` / `outside_platform_window`.
+  - (c) a row the manual ADR 0297 path already delivered is never re-sent, and a re-posted eventId stays
+    one row.
+- **Pack pins:** since ADR 0919 the node-pack versions this train bumps (1.3.0 → 1.4.0 → 1.5.0) live in
+  `features/packPins.ts`, not in `feature.ts`.
+- **No second compliance path:** ADR 0933 (campaign-ops content rules) owns ad-copy compliance. 0907
+  adds no rule and no gate. `publishAd` still asks only the existing `setAdsComplianceChecker` hook, and
+  the EU political declaration above is a Google API attestation, not a content rule.
+- **Seeded-chain ceiling:** `campaign-sync.conversions-dispatch :: orgId` is a declared +1 (124 → 125) in
+  `seeded-chain-unfilled-params.test.ts`. It is schedule-paired, there is no honest default org, and a
+  param-less copy fails closed with a typed `validation_error` (witnessed). a0's #5022 adds its own +2;
+  whichever lands second carries the sum.
+- **Gaps found, not fixed here:** `packs/vendor.myndhyve.ads-publish-{meta,google}` still pin `v21.0` /
+  `v18`. That is a second, signed ad-egress path, and the tripwire does not cover it. The vendored chain
+  and node packs are registry-pinned in production, so they need a registry publish to ship.
+
+**Track 2 is still open** (§ Open decisions for David):
+- **P6:** run `ads-sandbox-verify.mjs <platform> conversion|metrics|google-upload` on test accounts,
+  attach the transcripts here, then list the platforms in `OPENWOP_ADS_VERIFIED_READERS` /
+  `OPENWOP_ADS_VERIFIED_SENDERS`.
+- **P7:** LinkedIn CAPI.
+- Enabling `campaign-connectors.scheduled-conversions` per workspace is a separate product decision.
 
 ## Tests
 

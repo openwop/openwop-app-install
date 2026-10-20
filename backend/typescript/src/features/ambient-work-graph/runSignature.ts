@@ -2,13 +2,15 @@
  * ADR 0137 Phase 1 — the PURE run-signature + recurrence clustering.
  *
  * A run's signature is its agent + the consecutive-deduped ordered sequence of tool
- * NAMES (no args/content → privacy-safe). `clusterAndDetect` groups runs by exact
- * signature and emits a WorkflowSuggestion for each pattern seen ≥ minCount times. The
- * suggestionId is a deterministic hash of tenantId+signature so a re-sweep upserts the
- * same row (idempotent) rather than duplicating it.
+ * NAMES (no args/content → privacy-safe). `clusterAndDetect` groups ONE owner's runs by
+ * exact signature and emits a WorkflowSuggestion for each pattern seen ≥ minCount times
+ * (ADR 0930 D1 — clustering never crosses owners). The suggestionId is a deterministic
+ * hash of tenantId+owner+signature so a re-sweep upserts the same row (idempotent).
  *
  * @see docs/adr/0137-ambient-work-graph.md
+ * @see docs/adr/0930-ambient-work-graph-per-owner.md
  */
+import { createHash } from 'node:crypto';
 import type { RunSignatureInput, WorkflowSuggestion } from './types.js';
 
 const EXAMPLE_CAP = 10;
@@ -20,12 +22,6 @@ function dedupeConsecutive(names: readonly string[]): string[] {
   return out;
 }
 
-/** A stable, non-crypto string hash → base36 (deterministic suggestion id). */
-function stableHash(s: string): string {
-  let h = 5381;
-  for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) >>> 0;
-  return h.toString(36);
-}
 
 /** The work-pattern signature for one run, or null when it called no tools (nothing to
  *  cluster — a chat-only turn isn't a "workflow"). */
@@ -35,18 +31,23 @@ export function computeRunSignature(input: RunSignatureInput): { signature: stri
   return { signature: `${input.agentId ?? 'none'}|${toolSequence.join('>')}`, toolSequence };
 }
 
-export function suggestionIdFor(tenantId: string, signature: string): string {
-  return `ws-${stableHash(`${tenantId}:${signature}`)}`;
+/** ADR 0930 A7 — 96 bits of sha256. The store's keyspace is global, and the 32-bit djb2
+ *  this replaced made birthday collisions plausible once rows were per owner. */
+export function suggestionIdFor(tenantId: string, ownerKey: string, signature: string): string {
+  return `ws-${createHash('sha256').update(`${tenantId}\u0000${ownerKey}\u0000${signature}`, 'utf8').digest('hex').slice(0, 24)}`;
 }
 
-/** Group runs by exact signature; emit a suggestion per pattern seen ≥ minCount times. */
+/** Group ONE owner's runs by exact signature; emit a suggestion per pattern seen ≥
+ *  minCount times. Inputs under any other owner key are ignored, never merged. */
 export function clusterAndDetect(
   tenantId: string,
+  ownerKey: string,
   inputs: readonly RunSignatureInput[],
   opts: { minCount: number },
 ): WorkflowSuggestion[] {
   const groups = new Map<string, { toolSequence: string[]; runs: RunSignatureInput[] }>();
   for (const input of inputs) {
+    if (input.ownerKey !== ownerKey) continue;
     const sig = computeRunSignature(input);
     if (!sig) continue;
     const g = groups.get(sig.signature) ?? { toolSequence: sig.toolSequence, runs: [] };
@@ -59,8 +60,9 @@ export function clusterAndDetect(
     const sorted = [...g.runs].sort((a, b) => (a.createdAt < b.createdAt ? -1 : 1));
     const latest = sorted[sorted.length - 1]!;
     out.push({
-      suggestionId: suggestionIdFor(tenantId, signature),
+      suggestionId: suggestionIdFor(tenantId, ownerKey, signature),
       tenantId,
+      ownerPrincipal: ownerKey,
       signature,
       toolSequence: g.toolSequence,
       count: g.runs.length,

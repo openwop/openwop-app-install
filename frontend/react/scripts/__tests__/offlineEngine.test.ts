@@ -35,6 +35,7 @@ import {
   deriveNeverCache,
   firebaseGlobToRegExpSource,
   generateServiceWorker,
+  parseLegacyCachePurge,
   prepareOfflineBuild,
   type BundleItem,
   type OfflineTable,
@@ -518,5 +519,100 @@ describe('ADR 0873 D4–D7 — the engine, run against a simulated worker', () =
     await w.dispatch('/bookai/fonts/b.woff2');
     await w.dispatch('/bookai/fonts/c.woff2');
     expect(paths()).toEqual(['/bookai/fonts/b.woff2', '/bookai/fonts/c.woff2']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+describe('ADR 0873 D13 — VITE_SW_LEGACY_CACHE_PURGE, the caches a previous worker left', () => {
+  // What MyndHyve's Workbox worker (vite-plugin-pwa) left at its origin.
+  const MYNDHYVE = 'workbox-*,js-chunks-v4,google-fonts-stylesheets,google-fonts-webfonts,firebase-api,images';
+
+  /** Boot a worker with open window clients; records each client's navigate(). */
+  function bootWithWindows(source: string, caches: FakeCacheStorage, urls: string[]) {
+    const listeners: Record<string, ((e: unknown) => void)[]> = {};
+    const navigated: string[] = [];
+    let claimed = 0;
+    const windows = urls.map((url) => ({ url, navigate: async (to: string) => { navigated.push(to); return undefined; } }));
+    const self = {
+      location: new URL(ORIGIN),
+      addEventListener: (type: string, fn: (e: unknown) => void) => { (listeners[type] ??= []).push(fn); },
+      skipWaiting: () => undefined,
+      clients: {
+        claim: async () => { claimed += 1; },
+        matchAll: async (opts?: { type?: string }) => (opts?.type === 'window' ? windows : []),
+        openWindow: async () => undefined,
+      },
+      registration: { navigationPreload: { enable: async () => undefined, disable: async () => undefined }, showNotification: async () => undefined },
+    };
+    new Function('self', 'caches', 'fetch', 'console', 'Request', source)(self, caches, site(FILES), console, WorkerRequest);
+    async function activate() {
+      const waits: Promise<unknown>[] = [];
+      for (const fn of listeners.activate ?? []) fn({ waitUntil: (p: Promise<unknown>) => waits.push(p) });
+      await Promise.all(waits);
+    }
+    return { navigated, activate, claims: () => claimed };
+  }
+
+  it('unset or blank adds nothing: the worker text is byte-identical for every existing adopter', () => {
+    expect(parseLegacyCachePurge(undefined)).toEqual({ names: [], prefixes: [] });
+    expect(parseLegacyCachePurge(' , ')).toEqual({ names: [], prefixes: [] });
+    expect(generateServiceWorker(null, { legacyCachePurge: parseLegacyCachePurge('') })).toBe(generateServiceWorker());
+    expect(generateServiceWorker(tableFor('v1'), { legacyCachePurge: parseLegacyCachePurge(undefined) })).toBe(generateServiceWorker(tableFor('v1')));
+    expect(generateServiceWorker()).not.toContain('LEGACY_CACHE_PURGE');
+  });
+
+  it('parses names and trailing-* prefixes, trimmed, deduplicated and sorted', () => {
+    expect(parseLegacyCachePurge(` ${MYNDHYVE},images `)).toEqual({
+      names: ['firebase-api', 'google-fonts-stylesheets', 'google-fonts-webfonts', 'images', 'js-chunks-v4'],
+      prefixes: ['workbox-'],
+    });
+  });
+
+  it.each([
+    ['*', 'only a trailing *'],
+    ['work*box', 'only a trailing *'],
+    ['openwop-offline-shell-v1', 'own'],
+    ['openwop-*', 'own'],
+    ['o*', 'own'],
+  ])('refuses %j', (value, message) => {
+    expect(() => parseLegacyCachePurge(value)).toThrow(message);
+  });
+
+  it('deletes exactly the legacy caches, then reloads every open tab once', async () => {
+    const caches = new FakeCacheStorage();
+    for (const name of ['workbox-precache-v2-https://myndhyve.ai/', 'js-chunks-v4', 'images', 'images-v2', `${OFFLINE_CACHE_PREFIX}meta`, 'someone-elses-cache']) await caches.open(name);
+    const source = generateServiceWorker(null, { legacyCachePurge: parseLegacyCachePurge(MYNDHYVE) });
+    const w = bootWithWindows(source, caches, [`${ORIGIN}/`, `${ORIGIN}/dashboard?x=1`]);
+    await w.activate();
+    // The D11 purge still removes the worker's own offline caches; D13 removes the legacy ones; nothing else.
+    expect((await caches.keys()).sort()).toEqual(['images-v2', 'someone-elses-cache']);
+    expect(w.navigated).toEqual([`${ORIGIN}/`, `${ORIGIN}/dashboard?x=1`]);
+    expect(w.claims()).toBeGreaterThanOrEqual(2); // the push handlers' claim, and D13's before navigate()
+
+    // A second activation (the next deploy) finds nothing and reloads nobody.
+    const again = bootWithWindows(source, caches, [`${ORIGIN}/`]);
+    await again.activate();
+    expect(again.navigated).toEqual([]);
+  });
+
+  it('a browser that never ran the old app is never reloaded', async () => {
+    const caches = new FakeCacheStorage();
+    await caches.open('someone-elses-cache');
+    const w = bootWithWindows(generateServiceWorker(null, { legacyCachePurge: parseLegacyCachePurge(MYNDHYVE) }), caches, [`${ORIGIN}/`]);
+    await w.activate();
+    expect(w.navigated).toEqual([]);
+    expect(await caches.keys()).toEqual(['someone-elses-cache']);
+  });
+
+  it('runs beside the offline engine without touching its caches', async () => {
+    const caches = new FakeCacheStorage();
+    await caches.open('js-chunks-v4');
+    const source = generateServiceWorker(tableFor('v1'), { legacyCachePurge: parseLegacyCachePurge(MYNDHYVE) });
+    const w = bootWorker(source, site(FILES), caches);
+    await w.lifecycle('install');
+    await w.lifecycle('activate');
+    const names = await caches.keys();
+    expect(names).not.toContain('js-chunks-v4');
+    expect(names.some((n) => n.startsWith(`${OFFLINE_CACHE_PREFIX}shell-v1`))).toBe(true);
   });
 });

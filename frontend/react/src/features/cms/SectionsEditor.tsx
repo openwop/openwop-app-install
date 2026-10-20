@@ -249,6 +249,7 @@ function SectionFieldsBody({ section, assets, onChange, onPickMedia, baseData }:
               <option value="run">{t('heroVisualRun')}</option>
               <option value="film">{t('heroVisualFilm')}</option>
               <option value="image">{t('heroVisualImage')}</option>
+              <option value="plan">{t('heroVisualPlan')}</option>
               <option value="none">{t('heroVisualNone')}</option>
             </select>
           </label>
@@ -305,6 +306,12 @@ function SectionFieldsBody({ section, assets, onChange, onPickMedia, baseData }:
               <option value="stats">{t('layoutStats')}</option>
               <option value="prompts">{t('layoutPrompts')}</option>
               <option value="dives">{t('layoutDives')}</option>
+              {/* ADR 0920 D4 — listed so editing a section never overwrites a stored layout. */}
+              <option value="ruled">{t('layoutRuled')}</option>
+              <option value="panels">{t('layoutPanels')}</option>
+              <option value="progress">{t('layoutProgress')}</option>
+              <option value="tiles">{t('layoutTiles')}</option>
+              <option value="list">{t('layoutList')}</option>
             </select>
           </label>
           {cols.map((c, i) => (

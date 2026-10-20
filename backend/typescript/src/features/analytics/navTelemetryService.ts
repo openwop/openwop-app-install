@@ -89,6 +89,7 @@ export function isoWeekEnd(week: string): string | undefined {
 // malformed week label carries no age, so it is never deleted on a guess.
 registerRetentionPurger({
   feature: 'analytics-nav-counts',
+  dryRun: 'rows-by-age',
   async purge(tenantId, classification, cutoffIso) {
     if (!tenantId || classification !== 'internal') return 0;
     const rows = (await counts.listByPrefix(`${tenantId}::`)).filter((r) => isoWeekEnd(r.week) !== undefined);

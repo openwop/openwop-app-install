@@ -16,6 +16,23 @@ Built under `/goal` with `/architect` before each phase + `/code-review` (+`/ux-
 
 **Graduation (2026-06-24):** the toggle was **removed — always-on**; the suggestions page + on-demand “Scan now” are always available (tenant-scoped; tool-shape only). The **background sweep daemon stays separately env-gated** (`OPENWOP_WORKGRAPH_SWEEP_ENABLED`) — graduating the toggle does not start continuous mining. Id in `RETIRED_TOGGLE_IDS`. Historical toggle rationale retained.
 
+> **CORRECTED 2026-10-18 (ADR 0930, feature loop row 52).** Three claims in this ADR were
+> false after graduation, and one was false from the start:
+> - "opt-in" / "OFF by default": after the 2026-06-24 graduation there was no opt-in of any
+>   kind. The page and Scan were always-on with no control.
+> - "tenant-scoped" read as a privacy property, but it meant every MEMBER of a workspace. One
+>   tenant-wide row per pattern mixed several people's runs; any `workspace:read` holder read
+>   the tool sequences, agent ids, goal text and run ids, and any writer dismissed or accepted
+>   another person's pattern (7 probes RED on `ed18b10ad`).
+> - "accept calls `/workflow-author/draft`": accept seeds the builder's Pair thread (ADR 0773
+>   G-10e) and records an RFC 0096 proposal.
+> - The 32-bit `stableHash` id is replaced by a sha256 prefix.
+>
+> ADR 0930 makes the feature personal: per-owner mining, rows, reads and decisions; ownerless,
+> workload, anonymous, forked and redriven runs excluded; CAS writes with a transition table;
+> a personal pause that stops processing; a DSAR eraser with a durable tombstone. The text
+> below is kept as the original record.
+
 **Toggle (historical):** `ambient-work-graph` · default **OFF** · `bucketUnit: tenant` (a
 behavior-analytics surface a workspace explicitly opts into — privacy). When OFF, no run
 signatures are derived and no suggestions are produced.

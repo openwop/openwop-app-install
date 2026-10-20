@@ -35,6 +35,7 @@ import { describe, expect, it } from 'vitest';
 import { MANIFEST_SIDE_EFFECT_FLOOR, MANIFEST_FAST_PATH_SERVED } from '../src/executor/sideEffectFloor.generated.js';
 import { isSideEffectingNode } from '../src/executor/sideEffects.js';
 import { loadWorkflowChainPacks, getChain, expandChain, _resetChainRegistryForTest } from '../src/host/workflowChainPackLoader.js';
+import { pinnedPackRef } from '../src/features/packPins.js';
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 const PM = JSON.parse(readFileSync(join(REPO, 'packs', 'feature.priority-matrix.nodes', 'pack.json'), 'utf8')) as {
@@ -70,7 +71,8 @@ describe('ADR 0646 D1 — the intake chain\'s writer is classified, floored and 
 
   it('leg 4: the priority-matrix feature pin equals the manifest version', () => {
     const feature = readFileSync(join(REPO, 'backend', 'typescript', 'src', 'features', 'priority-matrix', 'feature.ts'), 'utf8');
-    expect(feature).toContain(`{ name: 'feature.priority-matrix.nodes', version: '${PM.version}' }`);
+    expect(feature).toContain(`'feature.priority-matrix.nodes'`);
+    expect(pinnedPackRef('feature.priority-matrix.nodes').version, 'the pin (features/packPins.ts, ADR 0919) must match the manifest').toBe(PM.version);
   });
 
   it('leg 5: expandChain of forms-intake.route-submission is BYTE-IDENTICAL across two builds', () => {

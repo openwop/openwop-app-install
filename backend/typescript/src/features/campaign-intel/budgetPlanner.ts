@@ -59,6 +59,9 @@ export interface BudgetPlan {
 function platformStats(records: CampaignPerformanceRecord[]): Map<string, { spend: number; conversions: number; clicks: number; days: Set<string> }> {
   const by = new Map<string, { spend: number; conversions: number; clicks: number; days: Set<string> }>();
   for (const r of records) {
+    // A row without conversion data (ADR 0907 D3 `null`) cannot inform CPA:
+    // counting its spend against zero conversions would inflate CPA.
+    if (r.conversions === null) continue;
     const p = by.get(r.platform) ?? { spend: 0, conversions: 0, clicks: 0, days: new Set<string>() };
     p.spend += r.spend; p.conversions += r.conversions; p.clicks += r.clicks; p.days.add(r.date);
     by.set(r.platform, p);
@@ -196,8 +199,8 @@ export function detectAnomalies(records: CampaignPerformanceRecord[]): Anomaly[]
     const byDate = new Map<string, CampaignPerformanceRecord>();
     for (const r of rows) {
       const d = byDate.get(r.date);
-      if (!d) byDate.set(r.date, { ...r });
-      else { d.spend += r.spend; d.conversions += r.conversions; d.clicks += r.clicks; d.impressions += r.impressions; }
+      if (!d) byDate.set(r.date, { ...r, conversions: r.conversions ?? 0 });
+      else { d.spend += r.spend; d.conversions = (d.conversions ?? 0) + (r.conversions ?? 0); d.clicks += r.clicks; d.impressions += r.impressions; }
     }
     const daily = [...byDate.values()];
     if (daily.length < MIN_POINTS) continue;
@@ -205,7 +208,7 @@ export function detectAnomalies(records: CampaignPerformanceRecord[]): Anomaly[]
     const metrics: Array<{ name: Anomaly['metric']; of: (r: CampaignPerformanceRecord) => number }> = [
       { name: 'spend', of: (r) => r.spend },
       { name: 'ctr', of: (r) => (r.impressions > 0 ? r.clicks / r.impressions : 0) },
-      { name: 'cpa', of: (r) => (r.conversions > 0 ? r.spend / r.conversions : 0) },
+      { name: 'cpa', of: (r) => (r.conversions !== null && r.conversions > 0 ? r.spend / r.conversions : 0) },
     ];
     const [platform, campaignName] = key.split('::') as [string, string];
     for (const m of metrics) {
@@ -213,7 +216,7 @@ export function detectAnomalies(records: CampaignPerformanceRecord[]): Anomaly[]
       // poisons the baseline (a mostly-0 series makes every real CPA day read
       // as a spike). Build the cpa series from converting days only, and
       // re-apply the min-N guard to the filtered series.
-      const days = m.name === 'cpa' ? sorted.filter((r) => r.conversions > 0) : sorted;
+      const days = m.name === 'cpa' ? sorted.filter((r) => r.conversions !== null && r.conversions > 0) : sorted;
       if (days.length < MIN_POINTS) continue;
       const values = days.map(m.of);
       const mean = values.reduce((s, v) => s + v, 0) / values.length;
@@ -237,7 +240,7 @@ export function funnelByPlatform(records: CampaignPerformanceRecord[]): Array<{ 
   const by = new Map<string, { impressions: number; clicks: number; conversions: number }>();
   for (const r of records) {
     const p = by.get(r.platform) ?? { impressions: 0, clicks: 0, conversions: 0 };
-    p.impressions += r.impressions; p.clicks += r.clicks; p.conversions += r.conversions;
+    p.impressions += r.impressions; p.clicks += r.clicks; p.conversions += r.conversions ?? 0;
     by.set(r.platform, p);
   }
   return [...by.entries()].map(([platform, v]) => ({ platform, ...v })).sort((a, b) => b.impressions - a.impressions);
@@ -249,6 +252,9 @@ export function topBottomPerformers(records: CampaignPerformanceRecord[], opts: 
   const limit = opts.limit ?? 5;
   const by = new Map<string, { platform: string; spend: number; revenue: number }>();
   for (const r of records) {
+    // ROAS needs revenue: a row whose platform cannot report it (ADR 0907 D3
+    // `null`) is left out of both sides instead of ranking as ROAS 0.
+    if (r.revenue === null) continue;
     const key = `${r.platform}::${r.campaignName}`;
     const p = by.get(key) ?? { platform: r.platform, spend: 0, revenue: 0 };
     p.spend += r.spend; p.revenue += r.revenue;

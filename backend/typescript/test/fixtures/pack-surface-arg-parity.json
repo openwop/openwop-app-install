@@ -1,14 +1,14 @@
 {
   "callSites": {
-    "literalNoSpread": 293,
+    "literalNoSpread": 295,
     "spread": 94,
     "nonLiteral": 19
   },
   "methods": {
-    "readable": 368,
+    "readable": 371,
     "opaque": 11
   },
-  "assertedPairs": 284,
+  "assertedPairs": 286,
   "opaqueMethods": [
     "accessibility.checkContent",
     "bi.runMetric",
@@ -49,7 +49,7 @@
     "feature.campaign-channels.nodes/index.mjs:147 spread → kb.rag",
     "feature.campaign-channels.nodes/index.mjs:308 spread → creative-briefs.create",
     "feature.campaign-channels.nodes/index.mjs:527 spread → email.createDraftCampaign",
-    "feature.campaign-connectors.nodes/index.mjs:28 spread → campaign-connectors.importCsv",
+    "feature.campaign-connectors.nodes/index.mjs:30 spread → campaign-connectors.importCsv",
     "feature.campaign-intel.nodes/index.mjs:30 spread → campaign-intel.optimizeBudget",
     "feature.campaign-intel.nodes/index.mjs:50 spread → campaign-intel.forecast",
     "feature.campaign-intel.nodes/index.mjs:90 spread → campaign-intel.planBudget",

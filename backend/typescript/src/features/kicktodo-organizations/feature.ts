@@ -22,7 +22,7 @@ export const kicktodoOrganizationsFeature: BackendFeature = {
     salt: 'kicktodo-organizations',
   },
   dependsOn: ['kicktodo-core', 'kicktodo-accountability'],
-  requiredPacks: [{ name: 'feature.kicktodo.nodes', version: '1.37.0' }],
+  requiredPacks: ['feature.kicktodo.nodes'],
   // ADR 0428 P5. ADR 0832 — `report` is owner-only at its HTTP door
   // (`host:org:manage`), so the seam's floor asks the same, not membership.
   surface: { id: 'kicktodo-organizations', build: buildKicktodoOrganizationsSurface, orgPolicy: { methodScopes: { report: 'host:org:manage' } } },

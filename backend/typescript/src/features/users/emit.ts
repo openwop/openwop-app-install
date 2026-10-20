@@ -1,14 +1,17 @@
 /**
  * Users lifecycle side-channel (ADR 0617 D1 / ADR 0208 §1) — four ids-only
- * account-lifecycle host events, each emitted from exactly ONE site and ONLY on
- * a state TRANSITION:
+ * account-lifecycle host events, each emitted ONLY on a state TRANSITION, from
+ * one site each except `erased`, which has two (the admin erase and the
+ * self-delete):
  *
  *   host.users.user.provisioned   `usersService.createUser` (new row only; the
  *                                 demo seed passes `{ silent: true }`)
  *   host.users.user.deactivated   `usersService.setUserStatus(id, 'disabled', …)`
  *                                 iff the row was not already disabled
  *   host.users.user.reactivated   same site, `'active'`, iff not already active
- *   host.users.user.erased        the erase route, AFTER `deleteUser` succeeds
+ *   host.users.user.erased        the erase route, AFTER `deleteUser` succeeds;
+ *                                 and `routes/account.ts` self-delete, AFTER
+ *                                 the wipe removed the caller's row (MyndHyve R2)
  *
  * PAYLOAD DISCIPLINE — the emitter's rule, not the dispatcher's. `stripPiiPayload`
  * only strips `email`/`phone`-shaped keys, so `userName` / `externalId` / a SAML
@@ -78,8 +81,9 @@ export function userReactivated(input: {
   });
 }
 
-/** Emitted ONLY after `deleteUser` succeeded — never on the `failed > 0`
- *  erasure throw (a "failed" `erased` event would be a false claim). */
+/** Emitted ONLY after the row is gone — `deleteUser` succeeded, or the
+ *  self-delete wipe removed it — never on a failed erase (a "failed" `erased`
+ *  event would be a false claim). */
 export function userErased(input: { userId: string; tenantId: string; outcome: 'deleted' }): void {
   void emitHostEvent({
     type: USER_ERASED_EVENT,

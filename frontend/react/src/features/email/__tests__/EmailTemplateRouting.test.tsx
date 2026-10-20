@@ -28,6 +28,8 @@ const client = vi.hoisted(() => ({
   updateTemplate: vi.fn(), deleteTemplate: vi.fn(), previewMarkdown: vi.fn(),
   listCampaigns: vi.fn(), createCampaign: vi.fn(), deleteCampaign: vi.fn(), sendCampaign: vi.fn(),
   listSends: vi.fn(), listSegments: vi.fn(),
+  listTemplateVersions: vi.fn(async () => []), diffTemplateVersion: vi.fn(), restoreTemplateVersion: vi.fn(),
+  TemplateVersionConflictError: class extends Error {},
   getEmailSettings: vi.fn(), putEmailSettings: vi.fn(), getProviderStatus: vi.fn(),
   CONTACT_STAGES: ['lead', 'qualified', 'customer', 'churned'] as const,
 }));

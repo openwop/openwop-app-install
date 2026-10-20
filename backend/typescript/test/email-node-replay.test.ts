@@ -19,6 +19,7 @@ import { MANIFEST_SIDE_EFFECT_FLOOR, MANIFEST_FAST_PATH_SERVED, MANIFEST_DECLARE
 import { isSideEffectingNode } from '../src/executor/sideEffects.js';
 import { loadWorkflowChainPacks, getChain, expandChain, _resetChainRegistryForTest } from '../src/host/workflowChainPackLoader.js';
 import { buildEmailSurface } from '../src/features/email/surface.js';
+import { pinnedPackRef } from '../src/features/packPins.js';
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 const PM = JSON.parse(readFileSync(join(REPO, 'packs', 'feature.email.nodes', 'pack.json'), 'utf8')) as {
@@ -44,7 +45,8 @@ describe('ADR 0655 D4 — feature.email.nodes are honest reads', () => {
   });
   it('leg 4: the email feature pin equals the manifest version', () => {
     const feature = readFileSync(join(REPO, 'backend', 'typescript', 'src', 'features', 'email', 'feature.ts'), 'utf8');
-    expect(feature).toContain(`{ name: 'feature.email.nodes', version: '${PM.version}' }`);
+    expect(feature).toContain(`'feature.email.nodes'`);
+    expect(pinnedPackRef('feature.email.nodes').version, 'the pin (features/packPins.ts, ADR 0919) must match the manifest').toBe(PM.version);
   });
   it('leg 5: expandChain of marketing.content-repurposing (the one consumer) is BYTE-IDENTICAL across two builds', () => {
     _resetChainRegistryForTest();

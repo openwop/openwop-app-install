@@ -1,6 +1,6 @@
 # ADR 0906 — Custom domains: automated edge certificates (Certificate Manager DNS authorization) behind a provider port
 
-**Status:** Accepted (2026-10-17) — plan only, no code. Architect-reviewed (§ Architect review). Live spend, vendor accounts and IAM wait on § Open decisions for David.
+**Status:** Accepted (2026-10-17). Track 1 (P0–P3) and P4a are **merged** (§ Implementation record). Track 2 decisions were recorded 2026-10-18 (§ Decisions recorded); live changes wait on the snapshot, a reviewed plan and an explicit go.
 **Date:** 2026-10-17
 **Feature:** `custom-domains` (extends ADR 0295; closes its "certificate-map automation from the domain
 rows is the recorded follow-on"). No new toggle.
@@ -278,6 +278,100 @@ the failing test is committed before the fix, so each PR shows the defect and it
    conditions are unsupported, whether to create a dedicated edge project.
 4. **DNS:** `pages.myndhyve.ai` lives at GoDaddy — the P5 cutover needs David to edit records.
 
+### Decisions recorded 2026-10-18 (David, relayed by the team lead)
+
+| # | Question | Decision |
+|---|---|---|
+| 1 | Spend | **Approved:** stand up the edge. |
+| 2 | Project | **`myndhyve-prod`**, for the MyndHyve-branded build. It **reuses** the existing certificate map `myndhyve-pages-certmap` and the static IP `myndhyve-pages-ip` (34.117.48.29), not a fresh edge. |
+| 3 | IAM grant (D7) | **Still open.** Nothing grants IAM until the conditions measurement and an explicit go. |
+| 4 | DNS | David edits GoDaddy himself. He is handed exact records when they are needed. |
+
+**Conditions (binding on every Track 2 step):**
+- **Scope.** This decision narrowly overrides "nothing targets `myndhyve-prod`" for the 0906 edge
+  resources ONLY. MyndHyve's Firestore, Functions, Hosting and repo stay untouched. openwop-app
+  deploys still go to `openwop-dev` through the release coordinator.
+- **Additive only.** Map entries, certificates, DNS authorizations, backends and host rules may be
+  ADDED. Nothing that exists today is deleted or replaced. That covers the existing map entries,
+  `pages-myndhyve-ai-cert` (expires 2026-12-30) and the current URL-map routes.
+  `pages.myndhyve.ai` keeps serving throughout. Baseline before any change:
+  `curl -sI https://pages.myndhyve.ai` → `HTTP/2 404` (272-byte HTML), measured 2026-10-18 21:12Z.
+- **D2 holds.** Every new certificate uses a `PER_PROJECT_RECORD` DNS authorization.
+- **Snapshot first.** A read-only snapshot of the `myndhyve-pages-*` load-balancer resources and of
+  the certificate map, entries, certificates and DNS authorizations is taken before any change (runbook
+  `MYNDHYVE-ARCHIVE-RUNBOOK.md` § B7, into `40-gcp-config/0906-pre-edge-<ts>/`).
+  *First attempt 2026-10-18 blocked:* the `admin@myndhyve.ai` gcloud credentials need interactive
+  re-authentication. No other account was tried and nothing was changed.
+- **Who applies.** No real (non-stub) gcloud change runs until the written plan and rollback are
+  approved. It then goes through the release coordinator, never from a build session.
+
+**Rollback design.** Every resource Track 2 adds is named by the deterministic `owp-cd-…` scheme
+(D4) or carries the `owp-edge-` prefix, and is listed in the plan before it is created. Rollback
+deletes exactly that list, in reverse order of creation: host rules first (restoring the URL map
+from the snapshot's `describe` export), then map entries, certificates, DNS authorizations, and
+finally any backend service or NEG. A pre-existing resource is never in the list. Because nothing
+existing is modified except by addition, the snapshot is the complete "before" state, and a
+rollback is verified by diffing a fresh `describe` against it.
+
+**Design constraints the plan must settle (found while preparing it, 2026-10-18):**
+1. **Host must survive to the backend.** `middleware/customDomain.ts` binds the org from `Host`.
+   The `myndhyve-prod` URL map must therefore reach `openwop-app-backend` (in `openwop-dev`)
+   without rewriting `Host`.
+   - Cross-project service referencing is the candidate: a serverless NEG and backend service in
+     `openwop-dev`, referenced from the `myndhyve-prod` URL map. It adds resources in `openwop-dev`
+     and needs `compute.loadBalancerServiceUser` there.
+   - An internet NEG to the `run.app` hostname is rejected: Cloud Run would need `Host` rewritten,
+     which breaks the binding.
+   - To verify against current GCP documentation before the plan relies on it.
+2. **Routing without replacing routes.** "Never replace current URL-map routes" means each
+   customer hostname is ADDED as its own host rule → the openwop backend. That is either an
+   operator step per domain or URL-map update rights for the app. The plan picks one.
+3. **Cross-project certificate rights.** The app's adapter runs as `openwop-dev`'s runtime
+   service account. Writing into `myndhyve-pages-certmap` needs
+   `OPENWOP_CUSTOM_DOMAIN_EDGE_PROJECT=myndhyve-prod` (supported since P1) plus decision 3.
+4. **`custom-domain-edge.sh apply` is not used here.** It creates a fresh edge, and the decision
+   reuses the existing one. The plan uses explicit, reviewed commands instead. The script stays the
+   recipe for a fresh deployment and requires an explicit project and map with no defaults.
+
+**Resolved later on 2026-10-18 (after the read-only snapshot).**
+- **The existing LB is classic** (`EXTERNAL`). Cross-project backend referencing, needed for
+  constraint 1, exists only on `EXTERNAL_MANAGED`, and 34.117.48.29:443 cannot carry a second
+  forwarding rule. Both projects are in organization 385453238580.
+- **Decision (the team lead, on David's "most sense for the app, reasonable cost"): Option B.**
+  - A NEW `EXTERNAL_MANAGED` LB in `myndhyve-prod` (`owp-edge-*`) with a NEW IP, reusing
+    `myndhyve-pages-certmap`. Fully additive; pages.myndhyve.ai is untouched.
+  - Constraint 2 dissolves, because the dedicated LB defaults to the openwop backend.
+  - The rejected Option M (an in-place classic → managed migration) kept the IP but modified live
+    resources.
+  - The classic LB is retired after P5 (`docs/steward/TODO.md` `CDE-1`).
+- **Decision 3 (IAM): a dedicated SA via impersonation.**
+  - `owp-custom-domains@openwop-dev` holds a custom role `owpCustomDomainsEdge` on
+    `myndhyve-prod`. It contains only the dnsauthorization, certificate and map-entry
+    create/get/delete/use permissions plus `operations.get`, conditioned to `owp-cd-*` names. The
+    condition is measured during apply before it is trusted.
+  - The runtime SA is NOT switched: its resource-level grants (secrets, keys) cannot be proved
+    complete read-only. It holds `serviceAccountTokenCreator` on the dedicated SA only.
+  - The adapter impersonates the dedicated SA (P4a, `OPENWOP_CUSTOM_DOMAIN_EDGE_SA`).
+- Plan, commands and rollback: `~/myndhyve-archive-20261017/40-gcp-config/0906-pre-edge-20261018T212237Z/PLAN-0906-edge.md`.
+
+### Implementation corrections (2026-10-18)
+
+Each records where the build overturned a detail above.
+- **D8 error code.** The 503 uses the existing envelope code `service_unavailable`, not a new
+  `temporarily_unavailable`.
+- **D8 platform set.** The set is defined as "cannot be a custom domain", not a hand list:
+  configured origins, `*.run.app`, `*.web.app`, `*.firebaseapp.com`, `localhost` and IP literals.
+  `addDomain` refuses the suffixes. MEASURED (read-only, `openwop-dev` request logs): prod requests
+  carry `Host` = a run.app name, never `app.openwop.dev`.
+- **D6 trusted proxy.** "Set `OPENWOP_TRUSTED_PROXY_CIDRS` to the Google front-end ranges" was a
+  no-op, because ADR 0851 already trusts them by default. The gap is the LB's own forwarding-rule IP,
+  which it appends to `X-Forwarded-For`. So the script appends that `/32`.
+- **D6 no defaults.** The script requires the project and the certificate map explicitly.
+- **X1 / D12.** The shared `host/gcpAdc.ts` belongs to ADR 0904 P1b. The 0906 adapter keeps a small
+  local token function, with a follow-up PR that moves it onto the helper.
+- **D1 unknown provider.** An unknown `OPENWOP_CUSTOM_DOMAIN_EDGE` value is "not ready" and makes
+  no calls. It is never silently treated as `manual`.
+
 ## Architect review (2026-10-17)
 
 `/architect`, Track A + Track B check. Independent adversarial review; findings verified in code and
@@ -297,3 +391,53 @@ Google's Certificate Manager docs, **folded into the decisions above**.
 non-GCP adopters keep `manual`. ADR 0424 / 0295 get correction notes when P2 lands.
 **RFC (Track B):** confirmed host-extension.
 **Verdict:** Accepted as a plan. P0–P3 merge with no new spend (provider defaults to `manual`); P4 (edge apply) and P5 (cutover) wait on David (spend, IAM, DNS).
+
+## Implementation record
+
+| Phase | PR | Merge | Notes |
+|---|---|---|---|
+| P0 fail closed, canonical host, leased sweep, add limits | #4919 | `215614765` | The sweep moved to `host/customDomainSweep.ts`, which is on the ADR 0549 mutex allowlist and runs under the ADR 0650 worker contract |
+| P1 provider port, adapters, ordered release, routes | #4930 | `007d11a0e` | local metadata token, `TODO(ADR 0904 P1b)` (follow-up moves it onto `host/gcpAdc.ts`) |
+| P2 lifecycle, notifications, UI | #4931 | `c90429b39` | `/browser` light and dark screenshots wait on a live edge |
+| P3 edge script, DEPLOY.md, 0295/0424 notes | #4921 | `c6c6385f2` | never run against GCP; requires an explicit project and map |
+| P4a adapter impersonates a dedicated SA | #4985 | `675ace362` | `OPENWOP_CUSTOM_DOMAIN_EDGE_SA` (decision 3) |
+| P4 stand up the edge | — | steps 1, 2, 4 applied 2026-10-18; step 3 applied by the release coordinator | See § P4 apply record. Step 3: `OPENWOP_TRUSTED_PROXY_CIDRS=34.149.148.86/32` on revision `openwop-app-backend-01007-nv4` (rollback target `01006-n52`). Step 5 (the adapter env) is run by the release coordinator after the deploy of `22bbffb04`, which carries P4a. Step 6 (the `edge-test.myndhyve.ai` evidence) follows. |
+| P5 MyndHyve cutover | — | — | Track 2: not started |
+
+### P4 apply record (2026-10-18; run by build-0906-domains on the lead's relayed go, David-approved)
+
+- **Before.** A read-only snapshot was taken:
+  `~/myndhyve-archive-20261017/40-gcp-config/0906-pre-edge-20261018T212237Z/`.
+- **Compute API.** `compute.googleapis.com` was NOT enabled on `openwop-dev`. Step 1's first attempt
+  stopped on `SERVICE_DISABLED` with nothing created. David approved enabling it at 21:53Z.
+  openwop-app-backend was unaffected: readiness 200, serving revision `01006-n52` at 100% before and
+  after.
+- **Step 1 (`openwop-dev`).** Created `owp-edge-neg` (serverless → openwop-app-backend) and
+  `owp-edge-backend` (`EXTERNAL_MANAGED`). `roles/compute.loadBalancerServiceUser` was granted on
+  that backend service only.
+- **Step 2 (`myndhyve-prod`).** Created:
+  - `owp-edge-ip` = **34.149.148.86**;
+  - `owp-edge-urlmap` → the cross-project backend;
+  - `owp-edge-https-proxy` (map `myndhyve-pages-certmap`);
+  - `owp-edge-https-fr` :443 and `owp-edge-http-fr` :80 (`EXTERNAL_MANAGED`), plus the
+    `owp-edge-http-redirect` URL map and the `owp-edge-http-proxy`.
+
+  Probes: `http://34.149.148.86/` → 301 to https. With SNI `pages.myndhyve.ai` forced onto the new
+  IP, `/api/readiness` → 200 from openwop-app-backend. That proves the cross-project data path,
+  with `Host` intact.
+- **Step 4.** Created SA `owp-custom-domains@openwop-dev`. The runtime SA got
+  `serviceAccountTokenCreator` on that SA only. Created the custom role `owpCustomDomainsEdge`
+  (12 permissions) on `myndhyve-prod` and bound it with condition `owp-cd-only`.
+- **Step 4b: the D7 measurement is now closed.** Certificate Manager **honours** the
+  `resource.name` condition. Acting as the SA:
+  - create, describe and delete of `owp-cd-probe-auth` (`PER_PROJECT_RECORD`) succeeded;
+  - `get` on `pages-myndhyve-ai-cert`, `pages-myndhyve-ai-entry` and `pages-myndhyve-ai-auth` was
+    each `PERMISSION_DENIED`.
+
+  The admin's temporary token-creator grant was removed, and no probe is left.
+  *Not yet exercised:* certificate and map-entry **create** by the SA. The step-6 evidence domain is
+  the first time those run.
+- **Invariants after every step.** pages.myndhyve.ai → `HTTP/2 404`, 272 bytes. The certificate
+  map held only `pages-myndhyve-ai-entry`. `myndhyve-pages-urlmap` default and fingerprint
+  `fAOhSG33QuU=` were unchanged. `myndhyve-pages-https-rule` (34.117.48.29, classic) and its proxy
+  were unchanged.

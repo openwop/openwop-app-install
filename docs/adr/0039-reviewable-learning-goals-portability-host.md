@@ -119,3 +119,13 @@ production tenant, not a gated-off gap. Architect-reviewed, now real:
 - **Tests** — real-export round-trip into a second tenant, inert-import
   assertions, idempotent re-import, per-item isolation
   (`test/portability.test.ts`, 10 total).
+
+> **CORRECTED 2026-10-19 (ADR 0938).** Three claims in this ADR were false for RFC 0096 and are
+> retired there: `apply` never installed anything (it returned `installed:<kind>:<id>:<sha>`, a hash of
+> the stored bytes, and set `applied`); the `approval-gate` mode minted an approval nothing released;
+> and the "lazy per-tenant demo seed on list" wrote a fabricated proposal (citing a non-existent run)
+> into every workspace that listed, which the agent tool then read as learning history — 4 such rows
+> in prod. ADR 0938 makes `apply` installer-only (none registered, so `409 proposal_not_installable`),
+> deletes the approval-gate branch and the seeder, and derives the `agents.proposals` advertisement
+> from the installer seam, so this host no longer advertises it. The open question "default
+> activation mode in production" is closed by that deletion.

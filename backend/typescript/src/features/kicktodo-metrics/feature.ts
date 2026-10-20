@@ -27,6 +27,6 @@ export const kicktodoMetricsFeature: BackendFeature = {
     salt: 'kicktodo-metrics',
   },
   dependsOn: ['kicktodo-core', 'kicktodo-creator', 'goals'],
-  requiredPacks: [{ name: 'feature.kicktodo.nodes', version: '1.37.0' }],
+  requiredPacks: ['feature.kicktodo.nodes'],
   surface: { id: 'kicktodo-metrics', build: buildKicktodoMetricsSurface },
 };

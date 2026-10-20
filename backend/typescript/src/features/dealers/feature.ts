@@ -56,7 +56,7 @@ export const dealersFeature: BackendFeature = {
   // Dealer-network + outlet records sit over CRM companies; works best with CRM on.
   recommends: ['crm'],
   requiredPacks: [
-    { name: 'feature.dealers.nodes', version: '1.0.1' },
-    { name: 'vendor.openwop-app.dealers.agents', version: '1.0.3' },
+    'feature.dealers.nodes',
+    'vendor.openwop-app.dealers.agents',
   ],
 };

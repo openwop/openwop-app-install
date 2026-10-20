@@ -69,6 +69,7 @@ export const ADS_METHOD_FEATURE: Record<keyof AdsAdapter, string> = {
   updateBudget: 'campaign-channels',
   listDispatches: 'campaign-connectors',
   getMetrics: 'campaign-connectors',
+  getAccountMetrics: 'campaign-connectors',
   syncAudience: 'campaign-connectors',
   sendConversion: 'campaign-connectors',
 };
@@ -88,6 +89,7 @@ export function gateAdsAdapter(adapter: AdsAdapter, scope: CapabilityGateScope):
     updateBudget: call('updateBudget'),
     listDispatches: call('listDispatches'),
     getMetrics: call('getMetrics'),
+    getAccountMetrics: call('getAccountMetrics'),
     syncAudience: call('syncAudience'),
     sendConversion: call('sendConversion'),
   };

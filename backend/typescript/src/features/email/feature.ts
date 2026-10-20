@@ -16,6 +16,7 @@ import { listVerifiedSenders } from './emailService.js';
 import { registerEmailFormsConsentSink } from './formsConsentSink.js';
 import { registerEmailAgentTools } from './agentTools.js';
 import { buildEmailSurface } from './surface.js';
+import { registerEmailSendApprovalGate } from './sendApproval.js';
 
 export const emailFeature: BackendFeature = {
   id: 'email',
@@ -31,6 +32,9 @@ export const emailFeature: BackendFeature = {
     // CFP-1 — the copywriter agent's REAL chat tools (get-campaign / save-draft),
     // gated like the routes; replaces the node-typeId allowlist the loop dropped.
     registerEmailAgentTools();
+    // ADR 0905 D3 — the `email-campaign-send` decide handler on the core approvals hook
+    // (the inbox claim/reject path dispatches here). Direction: feature → core only.
+    registerEmailSendApprovalGate();
   },
   // Face 2 (ADR 0014): `ctx.features.email` — a thin read surface (templates) that
   // backs the feature.email.nodes pack + the copywriter agent.
@@ -47,9 +51,22 @@ export const emailFeature: BackendFeature = {
     bucketUnit: 'tenant',
     salt: 'email',
   },
+  // ADR 0905 D4 — a sub-toggle (ADR 0404 §P4), AND-gated with `email`. The review queue
+  // is always available; this decides whether a campaign may be SENT without an
+  // approval. Default OFF: turning it on silently would block every live sender's next
+  // campaign. Same semantics as `cms-approval-gate`.
+  extraToggleDefaults: [{
+    id: 'email-approval-gate',
+    label: 'Email send approval gate',
+    description: 'Require an approval in the Approvals inbox before an email campaign is sent. Submitting a campaign for review always works; this toggle decides whether a campaign may be sent without one.',
+    category: 'Marketing',
+    status: 'off',
+    bucketUnit: 'tenant',
+    salt: 'email-approval-gate-v1',
+  }],
   requiredPacks: [
-    { name: 'feature.email.nodes', version: '1.2.1' },
-    { name: 'vendor.openwop-app.email.agents', version: '1.0.2' },
+    'feature.email.nodes',
+    'vendor.openwop-app.email.agents',
   ],
   // ADR 0194 — a hard dependency: campaigns resolve their audience live from CRM
   // contacts (`crmService`), so Email Marketing has no audience without CRM. The

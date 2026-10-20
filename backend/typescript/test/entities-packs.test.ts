@@ -7,6 +7,7 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join } from 'node:path';
+import { pinnedPackRef } from '../src/features/packPins.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const packDir = join(here, '..', '..', '..', 'packs', 'feature.entities.nodes');
@@ -33,12 +34,14 @@ describe('feature.entities.nodes pack', () => {
     for (const n of manifest.nodes) expect(n.role).toBe('action');
   });
 
-  it('feature.ts pins the same pack version (bump both together)', () => {
+  it('the feature requires the pack and its pin is the same version (bump both together)', () => {
     const featureSrc = readFileSync(
       join(here, '..', 'src', 'features', 'entities', 'feature.ts'),
       'utf8',
     );
-    expect(featureSrc).toContain("{ name: 'feature.entities.nodes', version: '1.1.1' }");
+    // ADR 0919: the descriptor names the pack; the version lives in packPins.ts.
+    expect(featureSrc).toContain("'feature.entities.nodes'");
+    expect(pinnedPackRef('feature.entities.nodes').version).toBe('1.1.1');
   });
 
   it('impl exports exactly the manifest nodes; executors drive the surface; create uses the ADR 0162 id', async () => {

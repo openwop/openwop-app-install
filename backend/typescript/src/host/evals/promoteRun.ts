@@ -22,7 +22,13 @@ export function buildTaskFromRun(opts: {
   expectedContains?: string;
 }): EvalTaskDef {
   const calls = opts.boundary.map((b) => ({ tool: b.tool, argsMatch: 'ignore' as const }));
-  const toolResponses = opts.boundary.map((b) => ({ tool: b.tool, args: b.input, argsMatch: 'exact' as const, response: parseResult(b.result) }));
+  // RFC 0245 §A (ADR 0929) — a recorded FAILURE is promoted as an `isError` entry,
+  // so the replay serves it as a tool error. The route only gets here with an
+  // errored row when this host advertises `agents.evalSuite.fixtureErrors`.
+  const toolResponses = opts.boundary.map((b) => ({
+    tool: b.tool, args: b.input, argsMatch: 'exact' as const, response: parseResult(b.result),
+    ...(b.isError ? { isError: true } : {}),
+  }));
   return {
     taskId: opts.taskId,
     input: opts.input ?? {},

@@ -42,8 +42,8 @@ export const formsFeature: BackendFeature = {
     salt: 'forms',
   },
   requiredPacks: [
-    { name: 'feature.forms.nodes', version: '1.2.1' }, // ADR 0584 §Correction: get-submission emits `flagged` + `route` (FORM-QUAR-1 / WF-FORM-5)
-    { name: 'vendor.openwop-app.forms.agents', version: '1.1.2' }, // ADR 0330 CRM-optional persona; CFP-1 real read tools
+    'feature.forms.nodes', // ADR 0584 §Correction: get-submission emits `flagged` + `route` (FORM-QUAR-1 / WF-FORM-5)
+    'vendor.openwop-app.forms.agents', // ADR 0330 CRM-optional persona; CFP-1 real read tools
   ],
   // ADR 0330 — no `dependsOn`: forms is a standalone capture primitive. The
   // CRM contact write is an optional destination registered by crm itself

@@ -21,6 +21,7 @@ import { MANIFEST_SIDE_EFFECT_FLOOR, MANIFEST_FAST_PATH_SERVED } from '../src/ex
 import { isSideEffectingNode } from '../src/executor/sideEffects.js';
 import { loadWorkflowChainPacks, getChain, expandChain, _resetChainRegistryForTest } from '../src/host/workflowChainPackLoader.js';
 import { analyticsFeature } from '../src/features/analytics/feature.js';
+import { featureRequiredPacks } from '../src/features/packPins.js';
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 const M = JSON.parse(readFileSync(join(REPO, 'packs', 'feature.analytics.nodes', 'pack.json'), 'utf8')) as {
@@ -55,7 +56,7 @@ describe('ADR 0651 — the analytics nodes are reads, and stay classified as rea
 
   it('leg 4: the feature pin equals the manifest version', () => {
     // The VALUE the host loads, not a spelling in feature.ts (grade-tests w8).
-    const pin = analyticsFeature.requiredPacks?.find((p) => p.name === 'feature.analytics.nodes');
+    const pin = featureRequiredPacks(analyticsFeature).find((p) => p.name === 'feature.analytics.nodes');
     expect(pin, 'the feature must require its node pack').toBeTruthy();
     expect(pin!.version).toBe(M.version);
   });

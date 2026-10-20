@@ -17,7 +17,7 @@
 
 import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { createBoard, createCard, deleteCard, getBoard, getCard, updateCardFields } from '../../host/kanbanService.js';
-import { armContinuation, continuationJobId, createGoal, transitionGoal } from '../goals/goalsService.js';
+import { MAX_OBJECTIVE_LENGTH, armContinuation, continuationJobId, createGoal, transitionGoal } from '../goals/goalsService.js';
 import { deleteJob, registerJob, setJobEnabled } from '../../host/schedulingService.js';
 import { getNotificationEmitter } from '../../notifications/emitter.js';
 import { isNotificationMuted } from '../../host/notificationPolicy.js';
@@ -227,7 +227,10 @@ export async function enroll(input: EnrollInput): Promise<{ enrollment: Challeng
   // One bounded goal per enrollment (ADR 0412 owner; principal-owned by the
   // participant; redaction-safe objective — the title is published content).
   const goal = await createGoal({
-    objective: `Complete challenge: ${challenge.title}`,
+    // ADR 0908 D9 (`GL2CD-3`) — the goal objective is capped; a challenge title has
+    // no cap of its own, so the descriptive objective is clipped to fit rather
+    // than failing every enrolment on a long title.
+    objective: `Complete challenge: ${challenge.title}`.slice(0, MAX_OBJECTIVE_LENGTH),
     completion: { check: 'verifier', verifierRef: KICKTODO_GOAL_VERIFIER_REF },
     continuation: { mode: 'schedule' },
     bounds: {

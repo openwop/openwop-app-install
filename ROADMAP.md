@@ -156,6 +156,7 @@ Each feature, when its turn comes, follows the same lifecycle. This roadmap only
 | 0905 | **Email: versioned templates + version-pinned send approval (MyndHyve port 2/4)** — immutable template versions with expected-version CAS, a campaign `sendPin` (mid-send edits can't change a send), the `email-campaign-send` kind on the ONE approvals queue (CMS pattern: repin, stale/closed 409, hoisted self-approval check, ADR 0075 org approver refs — no new scope), toggle `email-approval-gate`, agents submit but never approve/send; the commerce transactional seam hoisted to a 4-locale host template registry; opt-out subscription topics inside the consent seam. HMAC unsubscribe and SendGrid dynamic templates rejected. | `email-approval-gate` (new, OFF, tenant) | 0019, 0193, 0227, 0593, 0655, 0859, 0075 | `feature.email.nodes` 1.3.0 · `vendor.openwop-app.email.agents` 1.1.0 | 🔵 Accepted (plan, 2026-10-17) — host-ext, no RFC | Email marketing |
 | 0906 | **Custom domains: automated edge certificates (MyndHyve port 3/4)** — `EdgeCertificateProvider` port (`manual` default, `gcp-certificate-manager` adapter over REST/ADC): per-project DNS authorization after TXT ownership, Google-managed cert + map entry, idempotent resume-after-crash, ordered release, `claimOnce`-fenced status sweep, pending-claim expiry; one-time LB codified as `scripts/custom-domain-edge.sh`; middleware fail-closed fix on resolution errors. | — (`custom-domains` unchanged; operator env) | 0295, 0424, 0836, 0851 | — (no pack; not a run surface) | 🔵 Accepted (plan, 2026-10-17) — host-ext, no RFC; LB spend + IAM + DNS open for David | Landing pages / custom domains |
 | 0907 | **Ad metrics depth + server-side conversions (MyndHyve port 4/4)** — extends `campaign-connectors` (one ad-egress owner): retired Google Ads `v18` bumped + version-age tripwire, TikTok conversion auth/body fix, sandbox-verification harness, account-scope paged daily metrics with conversions/revenue + 7-day look-back + backfill, TikTok/LinkedIn readers (closes CSG-CON-1), Google `uploadClickConversions`, match-quality fields, hourly consent-rechecked dispatch chain, relay-row eraser. MyndHyve's `conversions-api`, dedup store and token store rejected. | — (`campaign-connectors` unchanged) | 0159, 0215, 0262, 0266, 0297, 0357 | `feature.campaign-connectors.nodes` 1.3.0 · `core.openwop.workflows.campaign-sync` 1.2.0 | 🔵 Accepted (plan, 2026-10-17) — host-ext, no RFC; sandbox ad accounts open for David | Ads / conversions |
+| 0939 | **Real-AI Work-Twins** — the 44 mock `tmpl.*` stay frozen `internal` replay archives; a new `work-twins` chain pack (structural reads → one `agent-runner` judgment step as the twin, `offerTools: []`, dispatch `returnSchema` + typed failures → notify; domain writes gated) instantiated per tenant+twin and bound by a member-scoped portfolio re-point, switched on per entry by a CI fixture suite; runner gaps G0 `context` input, G1 return schema/escalation, G2 citations, G5 model class + BYOK; CRM/analytics `any` outputs (G3). Pilot Ezra `daily-summary` + Ava `risk-digest`. | — (no new toggle) | 0032, 0775, 0190, 0472, 0789, 0477, 0480, 0482, 0903 | `vendor.openwop-app.workflows.work-twins` (new) · `feature.crm.nodes` / `feature.analytics.nodes` minor | 🔵 Planned (Proposed 2026-10-19) — host-ext, no RFC; usage measurement, migration, budgets, schedule default, gallery listing open for David | Enterprise Work-Twin suite |
 
 > **ADR-0003 (Canonical identity & session binding) was inserted** as a
 > foundational refinement of ADR-0002 — it makes `User.userId` the one subject
@@ -285,7 +286,7 @@ they need an upstream OpenWOP RFC in `../openwop/RFCS/` first; see
 | 0133 | **Run/task deck** (toggle `task-deck`, OFF, bucket `tenant`) — a **read-only projection** over runs + sub-runs (`subRunDispatcher`) bucketed `pending·running·blocked·delegated·completed·failed`; the **blocked** bucket reads the unified review (ADR 0068); one additive `run.metadata.parentRunId`/`delegatedBy` stamp groups children under parents. No tasks table ([[no-parallel-architecture]]). | ADR 0068, 0075, 0083, 0050, 0031 | 🟢 Done (ADR 0133 — all 4 phases, 2026-06-24; `ctx.tasks` deferred) | net-new (third-party competitive analysis `compare.md`, 2026-06-24) |
 | 0135 | **Capability Firewall** (toggle `capability-firewall`, OFF, bucket `tenant`) — composition-aware risk: a tenant rule set over RFC 0078 tool **classes** (safetyTier/egress) evaluated INSIDE `runChatToolLoop` against the *combination* of capabilities a run has exercised (read-drive + send-email ⇒ deny/approve). ANDs after ADR 0132/0102; verdict rides the existing forbidden/approval seam; rule set stamped in `run.metadata`. | ADR 0132, 0102, 0036, 0075, 0031; RFC 0078/0064 | 🟢 Implemented (ADR 0135) | net-new (innovation strategy `openwop_ai_chat_innovation_strategy.md`, 2026-06-24 — strongest novel bet) |
 | 0136 | **Intent Ledger** (toggle `intent-ledger`, OFF, bucket `tenant`) — a reviewable pre-flight mission contract (goal / allowed / forbidden / approvals / success-criteria / expiry) drafted only for complex/high-risk requests; **projects onto the ADR 0132 capability scope** (enforcement reused, not rebuilt) + adds success-criteria + a relative-TTL expiry + an authorized-vs-completed run summary. Resolved ledger stamped in `run.metadata`. | ADR 0132, 0036, 0075, 0130, 0135, 0031 | 🟢 Implemented (ADR 0136) | net-new (innovation strategy, 2026-06-24) |
-| 0137 | **Ambient Work Graph** (toggle `ambient-work-graph`, OFF, bucket `tenant`) — opt-in mining of completed runs into deterministic **run signatures** → clustering → recurrence → a `WorkflowSuggestion`; accepting hands the candidate to the ADR 0072 workflow-author draft. Read-only projection over the run store (no new run model, no new queue — sweep on the scheduler daemon). Privacy: opt-in + evidence drawer + dismiss. | ADR 0072, 0133, 0068, 0050 | 🟢 Implemented (ADR 0137) | net-new (innovation strategy, 2026-06-24) |
+| 0137 | **Ambient Work Graph** (always-on since 2026-06-24; the toggle was retired — *corrected 2026-10-18, ADR 0930*) — PERSONAL mining of the runs a person started (ADR 0930: per-owner rows, owner-only reads and decisions, a personal pause that stops processing, a DSAR eraser; it was tenant-wide until then) into deterministic **run signatures** → clustering → recurrence → a `WorkflowSuggestion`; accepting hands the candidate to the ADR 0072 workflow-author draft. Read-only projection over the run store (no new run model, no new queue — sweep on the scheduler daemon). Privacy: personal + pause + evidence + dismiss (ADR 0930; "opt-in" was never true after graduation). | ADR 0072, 0133, 0068, 0050, 0930 | 🟢 Implemented (ADR 0137, ADR 0930) | net-new (innovation strategy, 2026-06-24) |
 | 0138 | **Live voice mode** (toggle `voice`, **OFF**, bucket `tenant`) — productizes the ADR 0109 real-time-voice arm into a **full-duplex spoken** experience on the ONE chat: a `src/features/voice/` package wiring a **real streaming-STT path** for a live `streamRef` (flips the honest `transcription_unsupported`, `aiProvidersHost.ts:344`), the full-duplex turn loop (committed `turn_commit` → conversation turn → **streaming-TTS spoken reply** + barge-in), and a **voice affordance on `EmbeddedChatPanel`** (no new panel/mic — ADR 0073/0058) scoped to a `feature.voice.agents` persona. Provider-agnostic `StreamingTranscriber` + transport-behind-`streamRef` (both **open questions** per the 2026-06-24 product decision). §F continuous-ingress invariants + the ADR 0106 per-session budget. Makes the existing `aiProviders.realtimeVoice` advertisement non-vacuous on the **live** path (no advertisement change). | ADR 0001, 0005, 0014, 0024, 0058, 0073, 0085, 0086, 0106, 0109 · **RFC 0118 (Active — live transport host-internal per §E)** | 🟢 Done (ADR 0138 — implemented) | net-new (real-time-voice productization, 2026-06-24) |
 | 0149 | **Real-Work Workflow Library** — 20 substantive, multi-step `WorkflowDefinition`s (exec/CoS daily briefing & meeting prep, marketing campaign launch & ad-optimization loop, onboarding/offboarding, invoice→AP & close, account brief/renewal/RFP, incident triage) composing **existing primitives only**: `core.trigger.*` + the RFC 0052 scheduler daemon, shipped feature node packs (`feature.crm/kb/cms/email/forms/analytics.nodes`), `core.openwop.integration.*` outbound, RFC 0095 connection packs, `core.subWorkflow`/parallel edges/`core.approvalGate`. Pinned sibling pack to the ADR 0032 template catalog (NOT a new surface — [[build-on-orchestration-not-parallel-surfaces]]); demo-mode degrades to `mock-ai`+seed. Phase 1 lighthouse set (Lead Triage, Account Brief, Renewal Digest, RFP Assembly) needs **zero new connectors**; only Google/Meta Ads (#6) are net-new providers. **§Correction 2026-06-27:** the proper home is a **workflow(-chain) pack loader (RFC 0013)** — peer to node/agent/connection packs — which this host does not yet implement; an initial parallel pinned `lib.*` catalog + route was reverted. Landed: 3 connection packs (Google/Meta Ads, NetSuite). **Next:** architect the workflow-pack loader, then ship the 20 workflows as a signed workflow pack. | ADR 0032, 0058, 0133, 0010, 0137; RFC 0013/0052/0095 | 🟡 In progress (ADR 0149 — connection packs landed; workflow-pack loader is the next step, 2026-06-27) | net-new (real-work corpus vs. MyndHyve, 2026-06-27) |
 | 0150 | **AI chat permission mode (safe / bypass)** (**core-chat — NO toggle**, like ADR 0102/0117; **per-conversation** switch in the composer toolbar, **default `safe`**) — generalize the recurring "Run code?" HITL into a per-chat user-controlled mode: **safe** honors the capability-firewall's `require-approval` (the existing `interrupt.approval` card); **bypass** treats `require-approval`→`allow` (the user pre-authorizes via the toolbar), while `deny`/RBAC/budget/sandbox still bind. **Composes** the ADR 0135 firewall + ledger + interrupt primitive — NO new HITL system. Carried **per-exchange** (like `model`/`webSearch`, ADR 0101/0124) ⇒ replay-deterministic. Classifies code-exec (+ file-write, egress) `require-approval` so safe mode **restores the code-exec gate dropped on the builtin tool path (#957)**. | ADR 0135, 0114, 0146, 0101, 0124, 0067 · RFC 0005 (Accepted) | 🔵 Planned (ADR 0150 — generalizes the code-exec HITL) | net-new (permission-mode request, 2026-06-27) |
@@ -1077,3 +1078,164 @@ Items 1 and 2 can start in parallel. Item 3 depends on item 2 (it writes to the
 ledger). Item 4 depends on items 2 and 3, since drift is measured against a
 ledger that captures real decisions. Each item gets its own ADR, authored with
 `/architect` before implementation, following the per-feature workflow above.
+
+## Agency campaign operations program (ADRs 0921–0928, 0933, 0934)
+
+A net-new program (not a MyndHyve port) from the PRD
+`AGENCY-CAMPAIGN-OPS-PRD.md` (2026-10-17). It helps a marketing agency make
+client-approved campaign changes and shows which updates were actually verified.
+The first workflow changes a webinar date and registration link on one CMS
+landing page and one unsent email draft. It lives in the **Campaign Studio**
+family: a new `campaign-ops` feature package, `feature.campaign-ops.nodes`, the
+`campaign-ops` chain pack, and a `change-planner` agent in the existing
+`vendor.openwop-app.campaign-studio.agents` pack.
+
+**What already exists and must be reused (no parallel stores):** orgs and roles
+(`accessControl`, tenant = agency, org = client by owner decision 2026-10-18),
+the one approval queue (`host/approvalService`, a new `campaign-change-set`
+kind), the in-app CMS as the first destination (owner decision 2026-10-18; an
+external CMS is a later phase), ADR 0905 email template versions for the email
+draft, the connections broker with pinned per-client credentials, billing
+bundles and plan limits, ADR 0889 agent eval suites, and the example-data seeder
+registry.
+
+| Order | Item | Toggle | Depends on | Pack slug | Wire / RFC gate | Status |
+|---|---|---|---|---|---|---|
+| 1 | **Client accounts and isolation** ([ADR 0921](docs/adr/0921-campaign-ops-agency-client-accounts.md)) | `campaign-ops` | 0015, 0832 | `feature.campaign-ops.*` | Host extension | 🔵 Proposed |
+| 2 | **Asset registry and destinations** ([ADR 0922](docs/adr/0922-campaign-ops-asset-registry-and-destinations.md)) | `campaign-ops` | 0921, CMS 0009, email 0905 | `feature.campaign-ops.nodes` | Host extension | 🔵 Proposed (email half waits on ADR 0905 P1) |
+| 3 | **Change request and change set** ([ADR 0923](docs/adr/0923-campaign-ops-change-request-and-change-set.md)) | `campaign-ops` | 0921, 0922, 0463 | `feature.campaign-ops.nodes`, `vendor.openwop-app.campaign-studio.agents` | Host extension | 🔵 Proposed |
+| 4 | **Version-bound approval and client portal** ([ADR 0924](docs/adr/0924-campaign-ops-version-bound-approval-and-client-portal.md)) | `campaign-ops`, `campaign-ops-client-portal` | 0923, 0862, 0845 | `feature.campaign-ops.nodes` | Host extension (public portal under `/v1/host/openwop-app/public/…`) | 🔵 Proposed |
+| 5 | **Execution, read-back verification, resolution queue** ([ADR 0925](docs/adr/0925-campaign-ops-execution-verification-resolution.md)) | `campaign-ops` | 0922–0924 | `feature.campaign-ops.nodes` | Host extension | 🔵 Proposed |
+| 6 | **Operator inbox and preview-only onboarding** ([ADR 0926](docs/adr/0926-campaign-ops-operator-inbox-and-preview-onboarding.md)) | `campaign-ops` | 0921–0925, 0375 | — | Host extension | 🔵 Proposed |
+| 7 | **Scenario pack, demo tenant, model evaluation** ([ADR 0927](docs/adr/0927-campaign-ops-scenario-pack-demo-tenant-model-eval.md)) | — | 0921–0925, 0889 | eval suites in the change-planner pack | No RFC (test and seed infra) | 🔵 Proposed |
+| 8 | **Plans, metering, delivery cost** ([ADR 0928](docs/adr/0928-campaign-ops-plans-and-metering.md)) | — (bundle `agency-ops`) | 0921, 0925, 0419 | — | Host extension | 🔵 Proposed |
+| 9 | **Content rules on every change set** ([ADR 0933](docs/adr/0933-campaign-ops-content-rules.md)): MyndHyve trust, regulated-category and link rules ported, plus brand, cross-asset consistency and KB claim checks | `campaign-ops` | 0923, 0924, brand 0155 | `feature.campaign-ops.nodes.check-content` | Host extension | 🔵 Proposed (after the pipeline P0s) |
+| 10 | **Shared rate limits for public token surfaces** ([ADR 0934](docs/adr/0934-shared-rate-limit-for-public-token-surfaces.md)) | — | 0640 | — | Host extension | 🔵 Proposed (gates 0924 P1) |
+
+**Nov 2 demo slice** (the P0 rows of each ADR): one client in `live` mode, one
+landing page and one email draft, an ordinary change confirmed by read-back, a
+stale approval refused, and a partial failure (page confirmed, email already
+sent). Order: 0921 P0 → 0922 P0 (+P0b once ADR 0905 P1 merges) → 0923 P0 →
+0924 P0 → 0925 P0 → 0926 P0 → 0927 P0. ADR 0928 and the client portal (0924 P1)
+come after the demo, matching the PRD's priority tiers.
+
+**Later phases (recorded, not built):** a second destination (an external CMS
+such as WordPress or Webflow over the connections broker), external email
+platform drafts, recurring maintenance jobs, approved execution requested by
+other tools over an API or MCP, cross-client reporting for agency owners, and a
+standalone scenario pack for teams building marketing agents.
+
+## Campaign Studio program (ADRs 0941–0962)
+
+A net-new program (not a MyndHyve port), requested by the owner on 2026-10-19:
+finish Campaign Studio as the place an agency sets up campaigns for products,
+launches landing pages and funnels, runs ads with real budget control, tests
+everything, promotes winners, generates creative from real product assets,
+runs email, SMS and social, grades and routes leads, and reports to clients,
+all as OpenWOP workflows with a named agent on each step and as much or as
+little human review as each campaign needs. It builds on the agency campaign
+operations program above (agency = workspace, client = org) and on the
+in-flight MyndHyve ports 0904–0907.
+
+**Why this wins (the competitive thesis, ADR 0941).** A scan of about 40
+products (2026-10-19: Meta Advantage+, Google PMax and AI Max, TikTok
+Symphony, Smartly, Pencil, Typeface, Adobe GenStudio and Workfront,
+GoHighLevel, ClickFunnels, HubSpot Breeze, Salesforce Agentforce, Unbounce,
+Instapage, Optimizely, VWO, Statsig, Clarity, Contentsquare, Klaviyo, Braze,
+n8n, Gumloop, Ziflow and others) found the same five complaints everywhere:
+AI edits that ship without consent, spend you can see but not steer, creative
+that invents product details, no record of who or what approved a change, and
+rigid automations with one generic AI step that break across clients. None of
+them can replay or fork an agent run, none auto-promotes an A/B winner under
+honest statistics, and none governs many clients from one agency workspace.
+OpenWOP already has the primitives that fix each one: durable, replayable,
+forkable runs; a named, governed agent on each node of a workflow chain or
+kanban stack; role-routed human gates as real run steps; per-client-org
+tenancy; and an open protocol with MCP. Every block below uses them rather
+than standing up a parallel system.
+
+**What already exists and must be reused (no parallel stores):**
+`MarketingCampaign` (`campaign-orchestration`, the one campaign record),
+campaign-ops client accounts, assets, change sets and approvals (0921–0925),
+the one approvals queue and `core.approvalGate`, `host/variantAssignment.ts`
+bucketing, CMS page experiments, funnels, the commerce catalog (0410) and
+settlement resolver (0877), media and brand kits, creative briefs and video
+generation (0411), `host/adsAdapter.ts`, campaign-intel pacing, planner and
+intelligence, email (0905), `host/smsAdapter.ts`, forms, CRM lead scoring,
+triage and booking, analytics and consent, dashboards, sharing and capability
+tokens, comments, channels and presence, structured handoffs and the team
+ledger (0829–0856), the scheduler, kanban stacks (0311), workflow-chain packs
+with sub-chain nesting (RFC 0013 / RFC 0133), agent eval suites (0889) and the
+MCP server router.
+
+**Duplicates resolved before building (ADR 0941 P0).** Five "campaign"
+concepts converge on `MarketingCampaign.id`. Four compliance checkers converge
+on the one content-rules library (0933). Spend math stays in campaign-intel
+(reallocation becomes a gated action on `intelligence.ts`). The two approval
+lanes are bridged by one gate node (0942), never a third lane. The ads
+destination wraps `adsAdapter`.
+
+| Tier | Order | Item | Toggle | Depends on | Pack slug | Wire / RFC gate | Status |
+|---|---|---|---|---|---|---|---|
+| 0 Foundations | 1 | **Program charter + canonical campaign** ([ADR 0941](docs/adr/0941-campaign-studio-program-and-canonical-campaign.md)): `MarketingCampaign` as the one record, keyed by client org, created at ignition, linked to catalog products; campaign run tag and `CampaignGoal` | extends `campaign-orchestration` | 0158, 0410, 0852, 0921, 0922 | `feature.campaign-orchestration.nodes.campaign-context` | Host extension | 🔵 Proposed |
+| 0 | 2 | **Campaign autonomy policy** ([ADR 0942](docs/adr/0942-campaign-autonomy-policy.md)): per-campaign human review by action class and risk (auto, notify-after, approve by role, blocked), client default + campaign override, frozen at run start, one gate over both approval lanes, hard floors no preset can relax | `campaign-orchestration.autonomy` (sub-toggle, OFF, tenant) | 0941, 0075, 0198, 0478, 0924 | `feature.campaign-orchestration.nodes.autonomy-gate` | Host extension | 🔵 Proposed |
+| 0 | 3 | **Campaign agent team + per-node assignment** ([ADR 0943](docs/adr/0943-campaign-agent-team-and-node-assignment.md)): ten roles as agent manifests with eval suites, node-pinned agents honoured, per-client overrides frozen at run start, agents assignable on kanban cards | extends `campaign-ops` | 0941, 0942, 0889, 0829, 0311 | `vendor.openwop-app.campaign-studio.agents` | Host extension (portable node→agent binding needs an RFC 0013 revision; v1 binds host-side) | 🔵 Proposed |
+| 0 | 4 | **Client-scoped agent memory + context** ([ADR 0944](docs/adr/0944-client-scoped-agent-memory.md)): `memoryScope: 'per-org'`, one memory per client, the run path honours scope, frozen per-client context block | extends `campaign-ops` | 0921, 0941, 0943, 0041, 0442, 0904 | `feature.campaign-ops.nodes` | Host extension | 🔵 Proposed |
+| 1 Creative + pages | 5 | **Product-grounded creative + fidelity** ([ADR 0945](docs/adr/0945-product-grounded-creative-and-fidelity.md)): products depicted only from catalog images, a fidelity check against the source, provenance on every generated asset, AI-disclosure rules | `creative-briefs.product-grounded` (sub-toggle) | 0941, 0942, 0943, 0410 | `feature.creative-briefs.nodes`, `feature.creative-video.nodes` | Host extension | 🔵 Proposed |
+| 1 | 6 | **Creative variant factory** ([ADR 0946](docs/adr/0946-creative-variant-factory.md)): concept-diverse variant sets, one channel-spec table, brand locks in the renderer, pre-flight via content rules | `campaign-orchestration.variant-factory` (sub-toggle) | 0945, 0933 | chain `campaign-studio.variant-factory` | Host extension | 🔵 Proposed |
+| 1 | 7 | **Creative proofing + staged review** ([ADR 0947](docs/adr/0947-creative-proofing-and-staged-review.md)): pinned annotations, review stages as 0942 gates, AI checklist with human override, version compare, client review via the 0924 link | rides `comments` + 0946 | 0942, 0946, 0924 | chain `campaign-studio.creative-review` | Host extension | 🔵 Proposed |
+| 1 | 8 | **Funnel builder + blueprints** ([ADR 0948](docs/adr/0948-funnel-builder-and-blueprints.md)): funnels linked to the campaign, server-validated checkout offers, webinar and application steps, blueprints as chain packs, agent-generated draft funnels | extends `funnels` | 0941, 0942, 0943, 0933 | `feature.funnels.nodes`, `feature.cms.nodes` | Host extension (per-client settlement is an owner decision) | 🔵 Proposed |
+| 2 Channels | 9 | **Paid media operations + spend control** ([ADR 0952](docs/adr/0952-paid-media-operations-and-spend-control.md)): gated launch, pause always allowed, hard caps (platform ceiling + fail-closed watchdog), one approved reallocation plan, TikTok/LinkedIn writers, catalog feeds | extends `campaign-intel` | 0941, 0942, 0907 | `feature.campaign-intel.nodes`, `feature.campaign-connectors.nodes` | Host extension | 🔵 Proposed |
+| 2 | 10 | **Social publishing + scheduling** ([ADR 0953](docs/adr/0953-social-publishing-and-scheduling.md)): `socialAdapter` on brokered egress, scheduled one-shot jobs, content-hash-bound approval, cross-channel calendar | `social-publishing` (new, OFF, tenant, dependsOn `campaign-channels`) | 0941, 0942, 0945, 0933 | `feature.social-publishing.nodes` | Host extension | 🔵 Proposed |
+| 2 | 11 | **Lifecycle journeys (email + SMS)** ([ADR 0955](docs/adr/0955-lifecycle-journeys-email-sms.md)): one eligibility check per channel for every sender, strict SMS opt-in, inbound STOP, quiet hours as durable waits, explainable send-time rule, per-client sender circuit breaker | extends `campaign-journeys` (+ `campaign-journeys.sms`) | 0941, 0942, 0905, 0222, 0267; integrates with 0949 | `feature.campaign-journeys.nodes` | Host extension | 🔵 Proposed |
+| 2 | 12 | **Lead intelligence + qualification** ([ADR 0954](docs/adr/0954-lead-intelligence-and-qualification.md)): per-client versioned scoring models and A–F grades, an evidence-citing grading agent that never sets the grade, routing with round robin and capacity, speed-to-lead SLA, the Lead Concierge on the one chat | `crm.lead-intelligence` (sub-toggle) | 0941–0944, 0955, 0297, 0402 | `feature.crm.nodes`, `crm-ops` chain pack | Host extension (client binding for contacts is an owner decision) | 🔵 Proposed |
+| 3 Measure + optimize | 13 | **Unified experimentation engine** ([ADR 0949](docs/adr/0949-unified-experimentation-engine.md)): one model across pages, funnels, ads, email, social; Decide (pre-registered, sequential + FDR, CUPED, SRM) vs Optimize (Thompson, floors); frozen at run start | `experiments` (new, OFF, tenant, dependsOn `analytics`) | 0941, 0942, 0236, 0294, 0267, 0099 | `feature.experiments.*` | Host extension | 🔵 Proposed |
+| 3 | 14 | **Governed auto-promotion** ([ADR 0950](docs/adr/0950-governed-auto-promotion.md)): promotion chain with eight recorded gates, 50→90→100 ramp, holdout, veto window, auto-rollback, hash-chained decision log, replay to explain | `experiments.auto-promote` (sub-toggle) | 0949, 0942, 0933 | `feature.experiments.*` | Host extension | 🔵 Proposed |
+| 3 | 15 | **Consent-gated behavior analytics** ([ADR 0951](docs/adr/0951-consent-gated-behavior-analytics.md)): aggregate heat maps + masked session replay under strict opt-in, blob storage with budgets, DSAR, logged playback; insights agent files hypotheses | `analytics.heatmaps`, `analytics.session-replay` (sub-toggles, need `consent`) | 0860, 0857, 0464, 0949 | `feature.analytics.*` | Host extension | 🔵 Proposed |
+| 3 | 16 | **Attribution + incrementality** ([ADR 0956](docs/adr/0956-attribution-and-incrementality.md)): multi-touch models beside last-click, lift tests as 0949 experiments, offline conversions, one tracked-URL builder + UTM policy, AdMap, ROAS reconciliation | extends `campaign-intel` (+ `campaign-intel.multi-touch`) | 0907, 0949, 0952 | `feature.campaign-intel.*` | Host extension | 🔵 Proposed |
+| 4 Agency scale | 17 | **Vendor + guest collaboration** ([ADR 0958](docs/adr/0958-vendor-and-guest-collaboration.md)): no new principal kind; vendors use their own accounts with expiring per-resource grants checked on every use, grant-backed review links, inert asset intake until accepted, vendor cards on kanban | `campaign-ops.external-collab` (sub-toggle) | 0921, 0941, 0942, 0013, 0448, 0887 | `feature.campaign-ops.nodes` | Host extension (a conditional wire flag, avoided by this design) | 🔵 Proposed |
+| 4 | 18 | **Client reporting + portal** ([ADR 0957](docs/adr/0957-client-reporting-and-portal.md)): frozen, hashed report snapshots of metrics the app already computes, narratives whose numbers come only from placeholders, publish behind the 0942 gate, one client portal extending 0924 | `campaign-ops.client-reports` (sub-toggle) | 0921, 0924, 0934, 0942, 0958 | `feature.campaign-ops.nodes` | Host extension | 🔵 Proposed |
+| 4 | 19 | **Agency playbooks + governed rollout** ([ADR 0959](docs/adr/0959-agency-playbooks-and-governed-rollout.md)): versioned playbooks, layered per-client overrides that survive upgrades, diff, ringed rollout behind approval, rollback, pinning | `campaign-playbooks` (new, OFF, tenant) | 0921, 0923, 0924, 0941–0943, 0948, 0889 | `feature.campaign-playbooks.*` | Host extension | 🔵 Proposed |
+| 5 Capstone | 20 | **Campaign command center** ([ADR 0960](docs/adr/0960-campaign-command-center.md)): live run graph per campaign, who is on each step, gates and owners, spend vs cap, experiments, alerts, replay this decision, fork from here | extends `campaign-orchestration` | 0941–0943, 0926, 0831, 0855, 0949, 0952 | — | Host extension | 🔵 Proposed |
+| 5 | 21 | **Brief-to-launch autopilot** ([ADR 0961](docs/adr/0961-brief-to-launch-autopilot.md)): the top-level campaign chain of block sub-chains, a named agent per node, the 0942 autonomy dial, goals and budget, scheduled optimize and report runs, evals as the release gate | `campaign-autopilot` (new, OFF, tenant) | 0941–0960, 0889, 0927 | `feature.campaign-autopilot.*`, chain `core.openwop.workflows.campaign-autopilot` | Host extension; recommended RFC 0013 revision (node `agent` field) | 🔵 Proposed |
+| 5 | 22 | **Open agent interface (MCP)** ([ADR 0962](docs/adr/0962-campaign-studio-open-agent-interface.md)): Campaign Studio operations as read and request tools on the existing MCP server, every effect behind 0942 gates with named approvers, per-client scoping | rides `campaign-orchestration` (+ per-client `externalAgents`) | 0941–0944 | chain pack `campaign-studio.mcp` | Host extension (MCP); an A2A phase may need an RFC | 🔵 Proposed |
+
+### Build sequence
+
+Each tier needs the one before it; items inside a tier can run in parallel.
+
+1. **In flight now (prerequisites, not part of this program):** ADR 0904
+   search, 0905 email, 0906 and 0940 custom domains, 0907 ads, and the
+   campaign-ops pipeline 0921–0925 + 0933 + 0934.
+2. **Tier 0 — foundations.** 0941 first (one campaign record and the
+   duplicate consolidation), then 0942, 0943 and 0944 in parallel. 0942 is the
+   keystone: every later block declares its action class and is gated by it.
+3. **Tier 1 — creative and pages.** 0945 → 0946 → 0947 in order; 0948 in
+   parallel.
+4. **Tier 2 — channels.** 0952 and 0953 in parallel with 0955; 0954 after
+   0955 (it qualifies leads over SMS). 0955's email experiments integrate with
+   0949 when it lands.
+5. **Tier 3 — measure and optimize.** 0949 first, then 0950, 0951 and 0956
+   in parallel. 0950 also needs 0942.
+6. **Tier 4 — agency scale.** 0958 first (the external-collaborator model
+   0957's portal and 0947's client review use), then 0957 and 0959.
+7. **Tier 5 — capstone.** 0960, 0961 (it composes every block as a
+   sub-chain) and 0962. 0962's P0 hardening (named approvers on
+   every gate, no self-approval) lands with 0942.
+
+**One wire dependency.** Chain-pack manifests have no node `agent` field, so
+"a named agent per node" is bound host-side after expansion in v1 (0943). A
+portable binding needs an RFC 0013 revision in `../openwop` (author with
+`/prd`). It is recommended, not blocking.
+
+**Defects found while writing these ADRs (27 rows, with severity, in ADR
+0941; fix each ahead of the tier that needs it).** The `adsAdapter` spend gate allows the live write when the
+governance read fails (`adsAdapter.ts:348`), and
+`vendor.myndhyve.ads-publish-meta` publishes outside the gate; page and
+funnel A/B results show a live "significant" flag with no fixed horizon;
+`promoteExperiment` reads no results; with `consent` OFF, `isAllowed` permits
+everything; the agent-runner node ignores node-pinned agents and the run path
+ignores `memoryScope`; an MCP client can approve a gate on its own run when
+the gate names no approvers; funnel checkout accepts any product as an order
+bump; client-org checkouts settle to the agency's Connect account. Each is
+recorded in the owning ADR.

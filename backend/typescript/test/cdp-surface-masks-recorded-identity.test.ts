@@ -22,6 +22,7 @@ import { buildCdpSurface } from '../src/features/cdp/surface.js';
 import { maskGoldenRecord } from '../src/features/cdp/identityService.js';
 // @ts-expect-error — .mjs pack module has no type declarations (pure-JS node pack).
 import { resolveIdentity as resolveIdentityNode } from '../../../packs/feature.cdp.nodes/index.mjs';
+import { featureRequiredPacks } from '../src/features/packPins.js';
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -80,6 +81,6 @@ describe('CLNP-3 — the masked pack reaches a host that installs from the regis
     // A bumped pack whose `requiredPacks` pin was not bumped installs the OLD, unmasked
     // node on any host without the vendored copy — green here, leaking there.
     const manifest = JSON.parse(readFileSync(new URL('../../../packs/feature.cdp.nodes/pack.json', import.meta.url), 'utf8')) as { version: string };
-    expect(cdpFeature.requiredPacks).toContainEqual({ name: 'feature.cdp.nodes', version: manifest.version });
+    expect(featureRequiredPacks(cdpFeature)).toContainEqual({ name: 'feature.cdp.nodes', version: manifest.version });
   });
 });

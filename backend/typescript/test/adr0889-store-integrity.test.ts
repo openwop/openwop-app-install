@@ -29,7 +29,7 @@ import {
 import { createAgentEvalRun } from '../src/host/evals/createEvalRun.js';
 import { resumeAgentEvalRun } from '../src/host/evals/resumeEvalRun.js';
 import { AGENT_SUITE_KIND } from '../src/host/evals/agentEvalRun.js';
-import { resetRfc0244WireCache } from '../src/host/evals/evalCapability.js';
+import { resetRfc0244WireCache, resetRfc0245WireCache } from '../src/host/evals/evalCapability.js';
 import { maybeCaptureExecuteTool, setCaptureSetting } from '../src/host/evals/toolBoundary.js';
 import { OpenwopError, type RunRecord } from '../src/types.js';
 import type { Storage } from '../src/storage/storage.js';
@@ -265,8 +265,10 @@ describe('promote — typed reasons (AE-4) and the errored-call stopgap (AEV-6)'
     expect(nothing.status).toBe(400);
     expect(details(nothing)).toMatchObject({ field: 'fromRunId', reason: 'nothing_captured' });
 
-    // A run whose recorded calls include a FAILURE: the v2 fixture has no error
-    // field, so a replay would serve it as a success. Refused, naming the calls.
+    // A run whose recorded calls include a FAILURE. WITHOUT RFC 0245's advert the
+    // fixture has no error field, so a replay would serve it as a success: refused,
+    // naming the calls. (With the advert it is promoted as an isError entry: below.)
+    resetRfc0245WireCache(false);
     await setCaptureSetting(TENANT, AGENT, true);
     const run = await send('POST', '/runs', { workflowId: 'conformance-noop', inputs: { q: 'x' } });
     const id = storedId(String(run.json['runId']));
@@ -279,6 +281,15 @@ describe('promote — typed reasons (AE-4) and the errored-call stopgap (AEV-6)'
     expect((details(errored)['params'] as { calls: Array<Record<string, unknown>> }).calls).toEqual([expect.objectContaining({ tool: 'billing:refund', seq: 1 })]);
     // Nothing was appended.
     expect((await getEvalSuite(TENANT, 'test.acme.evals.promote@1.0.0'))!.suite.tasks).toHaveLength(1);
+
+    // ADR 0929 — with `agents.evalSuite.fixtureErrors` advertised, the same run is
+    // promoted, and the failure is kept a failure: an `isError: true` entry.
+    resetRfc0245WireCache();
+    const promoted = await send('POST', path, { fromRunId: String(run.json['runId']) });
+    expect(promoted.status, promoted.text.slice(0, 300)).toBe(201);
+    const tasks = (await getEvalSuite(TENANT, 'test.acme.evals.promote@1.0.0'))!.suite.tasks;
+    expect(tasks).toHaveLength(2);
+    expect(tasks[1]!.fixtures?.toolResponses?.map((r) => [r.tool, r.isError === true])).toEqual([['crm:lookup', false], ['billing:refund', true]]);
   });
 });
 

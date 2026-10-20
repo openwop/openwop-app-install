@@ -98,6 +98,17 @@ describe('WorkflowCard semantics (DSA-019)', () => {
     expect(onOpen).not.toHaveBeenCalled();
   });
 
+  // The open card must be raised above its siblings, or a later card's links
+  // and kebab paint through the popover (global.css `.workflow-card--menu-open`).
+  it('carries the menu-open modifier only while its menu is open', () => {
+    const closed = renderCard();
+    expect(closed.container.querySelector('.workflow-card')!.classList.contains('workflow-card--menu-open')).toBe(false);
+    closed.unmount();
+    const { container } = renderCard({ menuOpen: true });
+    expect(container.querySelector('[role=menu]')).not.toBeNull();
+    expect(container.querySelector('.workflow-card')!.classList.contains('workflow-card--menu-open')).toBe(true);
+  });
+
   it('rename mode swaps the title button for the rename input', () => {
     renderCard({ renaming: true });
     expect(screen.queryByRole('button', { name: /Lead enrichment/ })).toBeNull();

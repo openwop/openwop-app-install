@@ -139,6 +139,7 @@ registerSubjectEraser(identityLinkEraser);
 // read through the bounded `${tenantId}::` key prefix, classified like the event store.
 registerRetentionPurger({
   feature: 'analytics-identity-link',
+  dryRun: 'rows-by-age',
   async purge(tenantId, classification, cutoffIso) {
     if (!tenantId || classification !== 'confidential-pii') return 0;
     invalidateLinksSnapshot();

@@ -999,6 +999,10 @@ export interface Storage {
    *  `updated_at` (epoch ms) is older than `cutoffMs`. Pending/retrying rows are
    *  never touched. Returns rows deleted. */
   pruneWebhookDeliveries(cutoffMs: number): Promise<number>;
+  /** Retention dry run (`OPENWOP_RETENTION_SWEEP_DRY_RUN`): how many rows the two
+   *  prunes above WOULD delete at these cutoffs (terminal runs, not batched, and
+   *  terminal deliveries). Read-only. */
+  countPrunableEngineRows(cutoffIso: string, cutoffMs: number): Promise<{ terminalRuns: number; webhookDeliveries: number }>;
 
   // ── tenant hard delete (account deletion) ──
   /**

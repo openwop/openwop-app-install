@@ -462,6 +462,41 @@ red against the guard removed, and the result is recorded in the PR.
 | `test/adr0910-operator-notify.test.ts` | Activation notifies other listed superadmins only: zero notices to participants and to the actor. Witness: address the tenant → red. |
 | `test/subject-erasure-coverage.test.ts` | Passes with the new store classified. |
 
+> **P1 record (2026-10-18) — implemented, with corrections the code forced.**
+>
+> - **CORRECTION to D4 — eligibility must be re-read on the PERSONAL tenant, not the
+>   subject.** D4 calls `isListedSuperadminTenant(subject)`. A member subject is
+>   `User.userId` = `user:<sha256(tenant:principal)>` (`usersService.userIdFor`); the
+>   allowlist holds the PERSONAL tenant `user:<sha256(iss:sub)>`. They are different
+>   hashes, so as written the use-time check could never pass. The activation now records
+>   `eligibilityTenant` (the caller's `req.personalTenant`, verified listed at G1) and D4
+>   re-reads THAT, which keeps live de-listing.
+> - **D1, stricter than written.** `kicktodo-operator` is NOT added to `BuiltInRoleId`: it
+>   is `KICKTODO_OPERATOR_ROLE` in `host/operatorActivationLedger.ts`. The role validators
+>   only admit built-in and custom ids, and `scopesForRoles` ignores it, so a member or
+>   group row can never carry it — the refusal is structural, not a list of route checks.
+>   Listing it in `GET /roles` (marked `activationOnly`) moves to **P3**, with the SPA
+>   filter that keeps it out of role pickers; listing it before that filter exists would
+>   offer an unassignable role in the UI.
+> - **G1 tightened.** Eligibility is the caller's own PERSONAL tenant on the allowlist;
+>   `isListedSuperadmin(req)` alone also passes any member of a listed ACTIVE workspace.
+> - **D5.** `selfApproved` + `operatorActivationId` ride the publication record and the
+>   `kicktodo.publication.self-approved` audit row (awaited before the publish). The host
+>   approval record is NOT widened in P1 (`resolveApproval`'s outcome type is closed);
+>   its `decidedBy === submittedBy` already shows the self-decision.
+> - **D8.** `pickFactoryCredentialRef` prefers `kicktodo-factory:<provider>` by name and
+>   falls back to the ordinary ladder when the ref is absent, so a creator's personal
+>   workspace without the dedicated ref keeps working.
+> - **Not yet witnessed:** the G8 audit-failure leg (needs an audit fault seam) and the
+>   delegated-lane leg (`{ activations: false }` is in the code; an `owk_` key test needs
+>   the key-issuing harness). The D4 root-membership condition is defence in depth: under
+>   D0 a removed root row already empties the union before the activation is read.
+>
+> Test: `test/adr0910-operator-access.test.ts` (13, HTTP through a synthetic OIDC issuer
+> and a bound session) — D1 role shape; G1, G3, G4, G5, G6, G7; activation (8 h default,
+> viewer floor, manage granted, 409 on a second); revocation; use-time expiry with no
+> sweep; de-listing; root-membership loss; the D5 predicate; D8 preference + ratchet.
+
 ### P2 — D7 sweep + D10 readiness
 
 | File | Change |

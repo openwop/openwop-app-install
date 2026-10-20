@@ -332,9 +332,9 @@
       "digest": "43b962320feac55ee1a1b8d1c900e461a57a3a661b2aae3d94258bea3f3ca3b8"
     },
     "feature.campaign-connectors.nodes": {
-      "version": "1.2.1",
+      "version": "1.5.0",
       "files": 2,
-      "digest": "2159daec9029c3ae33fb5d120d78fb82515c15aa304d38d0e85412dd7792b6e5"
+      "digest": "2eaa6d22adbcad72b44a6a3523deb658b918f62b1ecaea622502719954d7739e"
     },
     "feature.campaign-intel.nodes": {
       "version": "1.2.0",
@@ -345,6 +345,11 @@
       "version": "1.3.1",
       "files": 2,
       "digest": "1cd4b7ccdfb0b23056375fec3d33f77bfb0823a01f4c887e645ce308d0d20d93"
+    },
+    "feature.campaign-ops.nodes": {
+      "version": "1.0.0",
+      "files": 2,
+      "digest": "6b4fb3866490602b76a33f8f26c7dc56434b32503daaeaccaffe2d30e2ecb455"
     },
     "feature.campaign-orchestration.nodes": {
       "version": "1.2.0",
@@ -967,9 +972,9 @@
       "digest": "006f4d730ee80264d07e285e9fbf6f393e525bad17871f8b2a48ea0e31a7d6d1"
     },
     "vendor.openwop-app.kb.agents": {
-      "version": "1.0.2",
+      "version": "1.0.3",
       "files": 2,
-      "digest": "c7fdefc157cad470d8bcb562713fc610bb5eaf0bb27b934ac9b36efb621d354b"
+      "digest": "3ac964cca2d59f3a809644e90f53716b24a8ab4408486822d1340b15b0d64097"
     },
     "vendor.openwop-app.kicktodo.agents": {
       "version": "1.9.4",

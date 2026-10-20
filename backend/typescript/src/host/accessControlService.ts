@@ -39,6 +39,7 @@
  * @see RFCS/0049 (RBAC scopes), RFCS/0087 §B (org position confers no authority)
  */
 
+import { KICKTODO_OPERATOR_ROLE, liveOperatorActivation } from './operatorActivationLedger.js';
 import { randomUUID, createHash } from 'node:crypto';
 import { DurableCollection, countOrgHostExtRows } from './hostExtPersistence.js';
 import { registerTenantIndexAdoption } from './tenantIndexAdoption.js';
@@ -1309,6 +1310,12 @@ export function isMembershipRootedWorkspace(tenantId: string): boolean {
   return isSharedWorkspaceTenant(tenantId) || membershipRootedDefaults.has(tenantId);
 }
 
+/** ADR 0910 — a feature-declared default workspace (not a `ws:` one): where an
+ *  operator activation can exist. A set lookup, so no other tenant pays a read. */
+export function isDeclaredDefaultWorkspace(tenantId: string): boolean {
+  return membershipRootedDefaults.has(tenantId);
+}
+
 /**
  * THE definition of a workspace root: an org whose id IS its tenant id.
  *
@@ -2188,7 +2195,9 @@ export async function resolveSubjectScopesUnion(
 ): Promise<{ scopes: Scope[]; basis: 'member' | 'none' }> {
   if (isDelegatedSubject(subject)) {
     return viaDelegation<{ scopes: Scope[]; basis: 'member' | 'none' }>('scopes-union', tenantId, subject, {
-      direct: (sub) => resolveSubjectScopesUnionDirect(tenantId, sub),
+      // ADR 0910 D4 — a key the operator issued never inherits an ACTIVATION: the
+      // key asked for less (ADR 0795 D1), and it must not outlive the 8 h window.
+      direct: (sub) => resolveSubjectScopesUnionDirect(tenantId, sub, { activations: false }),
       owner: () => ({ scopes: [...OWNER_SCOPES], basis: 'member' }),
       none: () => ({ scopes: [], basis: 'none' }),
       narrow: (issuer, scopes) => ({ scopes, basis: issuer.basis }),
@@ -2200,6 +2209,7 @@ export async function resolveSubjectScopesUnion(
 async function resolveSubjectScopesUnionDirect(
   tenantId: string,
   subject: string,
+  opts: { activations?: boolean } = {},
 ): Promise<{ scopes: Scope[]; basis: 'member' | 'none' }> {
   try {
     const [indexed, allGroups, allCustom] = await Promise.all([
@@ -2230,6 +2240,14 @@ async function resolveSubjectScopesUnionDirect(
         .flatMap((g) => g.roles);
       const roles = [...new Set([...m.roles, ...groupRoles])];
       for (const s of unionScopes(roles, customById)) scopeSet.add(s);
+    }
+    // ADR 0910 D4 — a live `kicktodo-operator` activation, checked at USE time on
+    // every resolution (expiry, revocation, de-listing and a removed root row all
+    // end it at the next request; nothing waits for the sweep). Only declared
+    // default workspaces pay the point read.
+    if (opts.activations !== false && isDeclaredDefaultWorkspace(tenantId) && mine.some(isWorkspaceRootMembership)) {
+      const live = await liveOperatorActivation(tenantId, subject);
+      if (live) for (const s of KICKTODO_OPERATOR_ROLE.scopes) scopeSet.add(s);
     }
     return { scopes: [...scopeSet], basis: 'member' };
   } catch (err) {

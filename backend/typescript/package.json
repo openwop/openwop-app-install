@@ -1,6 +1,6 @@
 {
   "name": "@openwop/app-server",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "private": true,
   "description": "OpenWOP application backend — Cloud Run TypeScript host implementing the v1.1 wire contract.",
   "type": "module",
@@ -18,6 +18,7 @@
     "test:conformance": "tsx conformance/run.ts",
     "test:conformance:durability": "tsx conformance/durabilityLane.ts",
     "eval:workflow-author": "node scripts/eval-workflow-author.mjs",
+    "kb:eval": "tsx scripts/kb-eval/run.ts",
     "seed:tenant": "tsx --env-file-if-exists=.env src/scripts/seedTenant.ts",
     "heartbeat:preflight": "tsx --env-file-if-exists=.env src/scripts/heartbeatPreflight.ts",
     "lint": "node node_modules/@typescript/native/bin/tsc --noEmit",
@@ -73,8 +74,8 @@
     "@google-cloud/kms": "^5.5.0"
   },
   "devDependencies": {
-    "@openwop/openwop-conformance": "^2.46.14",
-    "@openwop/spec-artifacts": "^2.46.14",
+    "@openwop/openwop-conformance": "^2.46.18",
+    "@openwop/spec-artifacts": "^2.46.18",
     "@testcontainers/postgresql": "^12.0.1",
     "@types/better-sqlite3": "^7.6.11",
     "@types/express": "^4.17.21",

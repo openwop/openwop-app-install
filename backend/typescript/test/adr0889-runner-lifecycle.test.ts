@@ -52,6 +52,7 @@ import { listRunBoundary, maybeCaptureExecuteTool, MAX_RESULT_CHARS, setCaptureS
 import type { Storage } from '../src/storage/storage.js';
 import type { TypedEvalJudge } from '../src/host/workflowEvalJudge.js';
 import { getTodaySpendUsd } from '../src/host/workflowBudgets.js';
+import { ManagedProviderError } from '../src/providers/managedProvider.js';
 
 let server: Server;
 let base = '';
@@ -588,6 +589,23 @@ describe('ADR 0482 — eval spend reaches the spend-day counter', () => {
     expect(judgeUsd).toBeGreaterThan(0);
     expect(r.metadata?.costUsd).toBeCloseTo(judgeUsd, 6);
     expect(await getTodaySpendUsd(TENANT, run.workflowId)).toBeCloseTo(judgeUsd, 6);
+  });
+
+  it('a tenant at its managed daily cap gets a typed failed eval run, never a silent success', async () => {
+    // REL-1 (2026-10-19): the tenant-wide daily bound on eval spend is the managed
+    // ladder (the spend-day counter is per workflow, and the eval lane is exempt from
+    // its hard cap by ADR 0482 §5). A capped dispatch must end the run failed + typed.
+    const suite = suiteOf('capped', [RUBRIC('t', ['a'])]);
+    const run = await evalRun(suite);
+    const dispatch = (async () => {
+      throw new ManagedProviderError('daily_limit_reached', 'Daily free-tier limit reached.');
+    }) as never;
+    expect(await runAgentEval({ storage, run, suite, judge: stubJudge().judge, dispatch })).toBeNull();
+    const r = await fresh(run.runId);
+    expect(r.status).toBe('failed');
+    expect(r.error?.code).toMatch(/eval_run_failed$/);
+    expect(r.error?.message).toContain('Daily free-tier limit reached');
+    expect(r.metadata?.evalSummary).toBeUndefined();
   });
 });
 

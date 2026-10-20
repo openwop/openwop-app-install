@@ -51,6 +51,6 @@ export const kicktodoCommunityFeature: BackendFeature = {
   // is the composition consequence ADR 0439 §1 describes. It rides the parity
   // ratchet with the other undeclared edges.
   dependsOn: ['kicktodo-core'],
-  requiredPacks: [{ name: 'feature.kicktodo.nodes', version: '1.37.0' }],
+  requiredPacks: ['feature.kicktodo.nodes'],
   surface: { id: 'kicktodo-community', build: buildKicktodoCommunitySurface }, // ADR 0426 P5
 };

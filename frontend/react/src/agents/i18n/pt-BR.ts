@@ -107,6 +107,7 @@ export const messages = {
   recurringSkipFeatureDisabled: 'o recurso dono deste agendamento está desativado neste espaço de trabalho',
   recurringSkipPlanLapsed: 'seu plano não inclui mais o recurso dono deste agendamento',
   recurringSkipActorInactive: 'a pessoa em nome de quem ele é executado foi desativada',
+  recurringSkipGoalClosed: 'a meta dele foi concluída ou passou de um limite, então nada mais será executado para ela',
   recurringSkipAgentPaused: 'o agente que o executa está pausado — retome o agente para retomar isto',
   recurringSkipPolicyDenied: 'o agente não tem permissão para executar este fluxo de trabalho (está na lista de proibidos)',
   recurringSkipAwaitingApproval: 'está aguardando aprovação — este fluxo de trabalho exige aprovação para este agente',

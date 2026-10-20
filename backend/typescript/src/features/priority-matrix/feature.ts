@@ -88,8 +88,8 @@ export const priorityMatrixFeature: BackendFeature = {
     salt: 'priority-matrix',
   },
   requiredPacks: [
-    { name: 'feature.priority-matrix.nodes', version: '1.5.1' },
-    { name: 'vendor.openwop-app.priority-matrix.agents', version: '1.0.2' },
+    'feature.priority-matrix.nodes',
+    'vendor.openwop-app.priority-matrix.agents',
   ],
   // ADR 0194 Phase 5 — a SOFT dependency (advisory, never a lock): the planning
   // agenda composes the Documents `board-agenda` kind (ADR 0053) when `documents`

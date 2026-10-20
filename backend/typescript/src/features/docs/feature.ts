@@ -25,8 +25,8 @@ export const docsFeature: BackendFeature = {
   // read through (never kbService directly).
   surface: { id: 'docs', build: buildDocsSurface },
   requiredPacks: [
-    { name: 'feature.docs.nodes', version: '1.0.1' },
-    { name: 'core.openwop.mcp', version: '1.1.3' },
+    'feature.docs.nodes',
+    'core.openwop.mcp',
   ],
   toggleDefault: {
     id: 'docs',

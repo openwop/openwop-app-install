@@ -7,7 +7,11 @@
  */
 
 import type { BackendFeature } from '../types.js';
+import { registerSubjectEraser } from '../../host/subjectErasure.js';
+import { registerScheduledJobFireGate } from '../../host/scheduledJobFireGates.js';
+import { GOALS_SURFACE_SCOPES } from './access.js';
 import { registerGoalsAgentTools } from './agentTools.js';
+import { GOAL_CONTINUATION_JOB_PREFIX, eraseGoalsForSubject, goalContinuationFireGate, ownsGoalContinuationJob } from './goalsService.js';
 import { registerGoalsRoutes } from './routes.js';
 import { buildGoalsSurface } from './surface.js';
 
@@ -16,8 +20,13 @@ export const goalsFeature: BackendFeature = {
   registerRoutes: (deps) => {
     registerGoalsRoutes(deps);
     registerGoalsAgentTools(); // XCH-HOLE-1 (Wave 4) — openwop:goals.list (ADR 0308 seam)
+    // ADR 0908 D7 — a person's goals are erased with them.
+    registerSubjectEraser(eraseGoalsForSubject);
+    // ADR 0908 D8 — bounds stop the continuation, not only the judge.
+    registerScheduledJobFireGate('goals', { owns: ownsGoalContinuationJob, gate: goalContinuationFireGate, refusal: 'dispatch-error', reservedJobIdPrefix: GOAL_CONTINUATION_JOB_PREFIX });
   },
   // ADR 0412 P1 — the `ctx.features.goals` consumption seam (create/get/
   // bindRun/evaluate); ADR 0414's enrollment saga is the first consumer.
-  surface: { id: 'goals', build: buildGoalsSurface },
+  // ADR 0908 D1 — each method asks the run's person the scope its HTTP door asks.
+  surface: { id: 'goals', build: buildGoalsSurface, orgPolicy: { tenantMethodScopes: GOALS_SURFACE_SCOPES } },
 };

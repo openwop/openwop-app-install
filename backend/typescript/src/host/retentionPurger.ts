@@ -14,6 +14,7 @@
  * caller (the sweep daemon) is responsible for the audit row — this seam stays pure.
  */
 
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { createLogger } from '../observability/logger.js';
 import type { DataClassification } from './dataClassification.js';
 import { getRetentionHold } from './retentionHold.js';
@@ -35,7 +36,20 @@ export interface RetentionPurger {
    * (fail-closed — never a global/cross-tenant purge).
    */
   purge(tenantId: string, classification: DataClassification, cutoffIso: string): Promise<number | PurgeOutcome>;
+  /**
+   * `'rows-by-age'` declares that EVERY row this purger removes goes through
+   * {@link purgeRowsByAge}'s delete callback, so a retention dry run
+   * (`OPENWOP_RETENTION_SWEEP_DRY_RUN`, {@link countRetained}) can run it in
+   * count-only mode. A purger that also deletes, redacts or releases anything
+   * outside that callback must NOT declare it; the dry run then reports it as
+   * not counted instead of running it.
+   */
+  dryRun?: 'rows-by-age';
 }
+
+/** A dry run's count-only scope: {@link purgeRowsByAge} adds matches here and
+ *  never calls its delete callback while one is active. */
+const dryRunScope = new AsyncLocalStorage<{ matched: number }>();
 
 const purgers: RetentionPurger[] = [];
 
@@ -64,6 +78,14 @@ export async function purgeRowsByAge<T>(
   del: (id: string) => Promise<unknown>,
 ): Promise<PurgeOutcome> {
   if (!tenantId) return { deleted: 0, failed: 0 }; // fail-closed (defense in depth)
+  const dry = dryRunScope.getStore();
+  if (dry) {
+    for (const row of rows) {
+      const { tenantId: rowTenant, updatedAt } = rowOf(row);
+      if (rowTenant === tenantId && updatedAt < cutoffIso) dry.matched += 1;
+    }
+    return { deleted: 0, failed: 0 };
+  }
   let deleted = 0;
   let failed = 0;
   for (const row of rows) {
@@ -123,6 +145,36 @@ export async function purgeRetained(
     }
   }
   return results;
+}
+
+/** One purger's dry-run line: `wouldDelete` when it can be counted, else
+ *  `counted: false` (it does not declare `dryRun: 'rows-by-age'`). */
+export interface DryRunCount { feature: string; counted: boolean; wouldDelete?: number; error?: string }
+
+/** The dry-run twin of {@link purgeRetained}: what each purger WOULD delete for
+ *  one (tenant, classification, cutoff), deleting nothing. A purger that does
+ *  not declare `dryRun: 'rows-by-age'` is NOT run. A tenant under legal hold is
+ *  reported as held, as the real sweep would skip it. */
+export async function countRetained(
+  tenantId: string,
+  classification: DataClassification,
+  cutoffIso: string,
+): Promise<DryRunCount[]> {
+  if (!tenantId) return [];
+  const hold = await getRetentionHold(tenantId);
+  if (hold) return [{ feature: 'legal-hold', counted: false, error: `legal_hold:${hold.reason}` }];
+  const out: DryRunCount[] = [];
+  for (const p of purgers) {
+    if (p.dryRun !== 'rows-by-age') { out.push({ feature: p.feature, counted: false }); continue; }
+    const scope = { matched: 0 };
+    try {
+      await dryRunScope.run(scope, () => p.purge(tenantId, classification, cutoffIso));
+      out.push({ feature: p.feature, counted: true, wouldDelete: scope.matched });
+    } catch (err) {
+      out.push({ feature: p.feature, counted: false, error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+  return out;
 }
 
 /** Test-only: clear registered purgers (mirrors `__resetSubjectErasers`). */

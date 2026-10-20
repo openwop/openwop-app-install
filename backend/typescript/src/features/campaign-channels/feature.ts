@@ -31,8 +31,8 @@ export const campaignChannelsFeature: BackendFeature = {
     registerCampaignChannelsAgentTools({ storage: deps.storage, hostSuite: deps.hostSuite });
   },
   requiredPacks: [
-    { name: 'feature.campaign-channels.nodes', version: '1.13.0' },
-    { name: 'vendor.openwop-app.campaign-channels.agents', version: '1.2.1' },
+    'feature.campaign-channels.nodes',
+    'vendor.openwop-app.campaign-channels.agents',
   ],
   toggleDefault: {
     id: 'campaign-channels',

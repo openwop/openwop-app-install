@@ -28,6 +28,9 @@ export interface ToolResponseFixture {
   response?: unknown;
   args?: unknown;
   argsMatch?: 'ignore' | 'exact' | 'subset';
+  /** RFC 0245 §A — the recorded call FAILED and `response` is its error payload.
+   *  Served as a tool error (never a success), not a miss, never retried live. */
+  isError?: boolean;
 }
 
 export interface EvalTaskDef {
@@ -228,8 +231,9 @@ function validateTask(t: unknown, i: number): EvalTaskDef {
       f.toolResponses.forEach((r, j) => {
         const rw = `${w}.fixtures.toolResponses[${j}]`;
         if (!isObj(r)) bad(rw, 'must be an object', shape(r));
-        closed(r, ['tool', 'response', 'args', 'argsMatch'], rw);
+        closed(r, ['tool', 'response', 'args', 'argsMatch', 'isError'], rw);
         str(r.tool, `${rw}.tool`);
+        if (r.isError !== undefined && typeof r.isError !== 'boolean') bad(`${rw}.isError`, 'must be a boolean (RFC 0245 §A)', shape(r.isError));
         if (r.argsMatch !== undefined && !ARGS_MATCH.has(r.argsMatch as string)) bad(`${rw}.argsMatch`, 'must be ignore | exact | subset', ...oneOf(r.argsMatch, ARGS_MATCH));
       });
     }
@@ -297,11 +301,13 @@ export function validateEvalSuite(body: unknown): AgentEvalSuite {
 }
 
 /** Which RFC 0244 features a suite uses — the run-create advert check (§G). */
-export function suiteFeatures(s: AgentEvalSuite): { trajectory: boolean; trials: number; fixtureMatching: boolean } {
+export function suiteFeatures(s: AgentEvalSuite): { trajectory: boolean; trials: number; fixtureMatching: boolean; fixtureErrors: boolean } {
   return {
     trajectory: s.tasks.some((t) => t.expected.trajectory !== undefined || t.expected.kind === 'trajectory'),
     trials: s.trials?.count ?? 1,
     fixtureMatching: s.tasks.some((t) => t.fixtures?.onMiss !== undefined || (t.fixtures?.toolResponses ?? []).some((r) => r.args !== undefined)),
+    // RFC 0245 §C — any `isError: true` entry needs `agents.evalSuite.fixtureErrors`.
+    fixtureErrors: s.tasks.some((t) => (t.fixtures?.toolResponses ?? []).some((r) => r.isError === true)),
   };
 }
 

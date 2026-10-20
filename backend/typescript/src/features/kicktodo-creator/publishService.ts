@@ -16,6 +16,8 @@
  * projection. Replay/retry safe: every transition is CAS or idempotent.
  */
 
+import { operatorSelfApprovalActivation } from '../../host/operatorAccess.js';
+import { appendAudit } from '../../host/auditChainService.js';
 import { createLogger } from '../../observability/logger.js';
 import {
   createChallengePublishApproval,
@@ -77,6 +79,10 @@ export interface PublicationRecord {
   rightsDecisions: RightsDecision[];
   completedBy?: string;
   completedAt?: string;
+  /** ADR 0910 D5 — the approver was the submitter, allowed by a live operator
+   *  activation (recorded with its id and an audit row). */
+  selfApproved?: true;
+  operatorActivationId?: string;
 }
 
 export type PublicationPhase = 'submitted' | 'completed';
@@ -360,7 +366,13 @@ export async function completePublication(
   if (!record) throw new PublicationGateError('publication', 'Nothing submitted for publication.');
   if (record.completedAt) return record; // idempotent — never re-publish
 
-  if (approver === record.submittedBy) throw new SeparationOfDutiesError();
+  // ADR 0910 D5 — the act RE-ASKS the self-approval predicate; it never trusts the
+  // eligibility pass. Without a live operator activation the two-person rule holds.
+  let operatorActivationId: string | null = null;
+  if (approver === record.submittedBy) {
+    operatorActivationId = await operatorSelfApprovalActivation(tenantId, approver);
+    if (!operatorActivationId) throw new SeparationOfDutiesError();
+  }
 
   const candidate = await getCandidate(tenantId, candidateId);
   if (!candidate) throw new PublicationGateError('candidate', 'Candidate not found.');
@@ -375,6 +387,12 @@ export async function completePublication(
     await resolveApproval(record.approvalId, { status: 'approved', decidedBy: approver, note: note ?? `approved by ${approver}` });
   }
 
+  if (operatorActivationId) {
+    // Audited BEFORE the publish: a failed append means nothing goes live.
+    await appendAudit(tenantId, 'kicktodo.publication.self-approved', {
+      approvalId: record.approvalId, candidateId, subject: approver, operatorActivationId,
+    });
+  }
   const published = await publishChallenge(tenantId, record.challengeId, record.challengeVersion);
   if (!published || published.status !== 'published') {
     throw new PublicationGateError('challenge', 'The challenge draft could not be published.');
@@ -383,7 +401,10 @@ export async function completePublication(
   const stored = await publications.get(`${tenantId}::${candidateId}`);
   if (!stored) throw new PublicationGateError('publication', 'Nothing submitted for publication.');
   if (stored.completedAt) return stored; // a racer completed first — idempotent
-  const next = { ...stored, completedBy: approver, completedAt: new Date().toISOString() };
+  const next: typeof stored = {
+    ...stored, completedBy: approver, completedAt: new Date().toISOString(),
+    ...(operatorActivationId ? { selfApproved: true as const, operatorActivationId } : {}),
+  };
   if (!(await publications.compareAndSwap(stored, next))) {
     const winner = await publications.get(`${tenantId}::${candidateId}`);
     if (winner) return winner;

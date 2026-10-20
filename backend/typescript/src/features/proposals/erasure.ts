@@ -28,6 +28,7 @@
 import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { declarePiiFields } from '../../host/dataClassification.js';
 import { registerSubjectEraser, type SubjectEraseReport } from '../../host/subjectErasure.js';
+import { createLogger } from '../../observability/logger.js';
 import type { Proposal } from './types.js';
 
 /** The shared tombstone `owner.principal` becomes — the SAME literal
@@ -35,6 +36,9 @@ import type { Proposal } from './types.js';
  *  one grep finds every tombstone in the app. Not `''` — an empty principal
  *  reads as "nobody set it", a different fact from "erased on request". */
 const ERASED_VALUE = 'erased:subject';
+
+const ERASE_CAS_ATTEMPTS = 5;
+const log = createLogger('proposals.erasure');
 
 // The SAME namespace + key + tenant functions as `proposalsService.ts` — this
 // module reads and writes the SAME rows. Declared here rather than exported from
@@ -62,16 +66,32 @@ declarePiiFields('proposals', ['owner'], { maskGloballyByFieldName: false });
 export async function eraseSubjectProposals(tenantId: string, subjectKey: string): Promise<SubjectEraseReport> {
   if (!tenantId || !subjectKey) return { rowsTouched: 0 };
   let touched = 0;
-  for (const p of await proposals.listByPrefix(`${tenantId}::`)) {
-    if (p.owner.tenant !== tenantId) continue; // defensive: the prefix scan is tenant-exact, but never write across it
-    if (p.owner.principal === undefined || p.owner.principal === ERASED_VALUE) continue; // no subject / already erased
-    if (p.owner.principal !== subjectKey) continue;
-    await proposals.put({
-      ...p,
-      owner: { ...p.owner, principal: ERASED_VALUE },
-      updatedAt: new Date().toISOString(),
-    });
-    touched += 1;
+  const exhausted: string[] = [];
+  for (const listed of await proposals.listByPrefix(`${tenantId}::`)) {
+    // ADR 0938 D9 — CAS on the row read, re-read and retried on a lost race: a blind
+    // put here would overwrite a revise that landed between the scan and the write.
+    let p: Proposal | null = listed;
+    let done = false;
+    for (let attempt = 0; attempt < ERASE_CAS_ATTEMPTS && p && !done; attempt++) {
+      if (p.owner.tenant !== tenantId) break; // defensive: the prefix scan is tenant-exact, but never write across it
+      if (p.owner.principal === undefined || p.owner.principal === ERASED_VALUE) break; // no subject / already erased
+      if (p.owner.principal !== subjectKey) break;
+      const next: Proposal = {
+        ...p,
+        owner: { ...p.owner, principal: ERASED_VALUE },
+        revision: (typeof p.revision === 'number' ? p.revision : 0) + 1,
+        updatedAt: new Date().toISOString(),
+      };
+      if (await proposals.compareAndSwap(p, next)) { touched += 1; done = true; break; }
+      p = await proposals.get(`${listed.owner.tenant}::${listed.id}`);
+    }
+    // PROP2CD-4 — an erasure that kept losing the race must not vanish silently.
+    if (!done && p && p.owner.principal === subjectKey) exhausted.push(listed.id);
+  }
+  if (exhausted.length > 0) {
+    // A throw is how the fan-out reports an incomplete eraser (`failedFeatures`).
+    log.error('proposals_erase_cas_exhausted', { tenantId, proposalIds: exhausted, attempts: ERASE_CAS_ATTEMPTS });
+    throw new Error(`proposals: ${exhausted.length} row(s) still name the subject after ${ERASE_CAS_ATTEMPTS} attempts`);
   }
   return { rowsTouched: touched };
 }

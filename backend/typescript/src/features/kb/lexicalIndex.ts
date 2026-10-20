@@ -12,11 +12,18 @@
  * tokens, IDs) that cosine over a 256-dim hash misses.
  */
 
-const TOKEN_RE = /[a-z0-9]+/g;
+const TOKEN_RE = /[\p{L}\p{N}]+/gu;
 
-/** Lowercase alphanumeric tokenizer — deterministic, locale-independent. */
+/** Lowercase letter/digit tokenizer — deterministic, locale-independent.
+ *
+ *  ADR 0904 P0 — Unicode-aware, with diacritics folded (NFKD, combining marks dropped).
+ *  It was `[a-z0-9]+`, so every accented word in the app's es/fr/pt-BR locales was cut
+ *  at the accent ("información" → `informaci` + `n`) and a query typed without the accent
+ *  could not match one typed with it. Folding makes `informacion` ≡ `información`.
+ *  Measured on the P0 eval corpus (`scripts/kb-eval`): hybrid+rerank MRR 0.788 → 0.802,
+ *  the mixed multi-collection lane recall@5 0.675 → 0.708. */
 export function tokenize(s: string): string[] {
-  return s.toLowerCase().match(TOKEN_RE) ?? [];
+  return s.normalize('NFKD').replace(/\p{M}+/gu, '').toLowerCase().match(TOKEN_RE) ?? [];
 }
 
 /** Okapi BM25 over a chunk corpus. Deterministic; ties broken by ascending id so

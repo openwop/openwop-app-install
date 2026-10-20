@@ -27,9 +27,11 @@ export interface CampaignPerformanceRecord {
   spend: number;
   impressions: number;
   clicks: number;
-  conversions: number;
-  revenue: number;
-  // Derived.
+  /** ADR 0907 D3 — `null` when the source cannot report it (e.g. TikTok
+   *  revenue). Never a placeholder `0`: a 0 here is a measured zero. */
+  conversions: number | null;
+  revenue: number | null;
+  // Derived (0 when an input is null — read `conversions`/`revenue` for truth).
   ctr: number;
   cpc: number;
   cvr: number;
@@ -83,4 +85,8 @@ export interface KpiSummary {
    *  guess, and the console renders unlabelled rather than claiming `$` with
    *  confidence. Absent (older backend) reads as known — unchanged behaviour. */
   currencyKnown?: boolean;
+  /** ADR 0907 D3 — how many records could not report conversions / revenue
+   *  (their platform has no such metric). Absent when every record reported
+   *  both. Totals exclude those rows; ratios use only the rows that reported. */
+  unreported?: { conversions: number; revenue: number };
 }

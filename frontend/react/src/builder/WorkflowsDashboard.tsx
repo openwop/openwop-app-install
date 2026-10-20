@@ -582,7 +582,7 @@ export function WorkflowsDashboard() {
             }
           />
         ) : (
-          <div className={viewMode === 'grid' ? 'workflows-grid' : 'surface-card list-view'} ref={gridRef}>
+          <div className={viewMode === 'grid' ? 'workflows-grid' : 'surface-card list-view workflows-list'} ref={gridRef}>
             {filtered.map((wf) => {
               const cardProps = {
                 wf,

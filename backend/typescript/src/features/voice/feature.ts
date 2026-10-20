@@ -50,6 +50,6 @@ export const voiceFeature: BackendFeature = {
   requiredPacks: [
     // The voice-tuned persona (ADR 0058 chat-drivability = agent + nodes). No NODE pack:
     // voice is ctx-method + transport plumbing, not workflow nodes (matrix row 4).
-    { name: 'vendor.openwop-app.voice.agents', version: '1.0.1' },
+    'vendor.openwop-app.voice.agents',
   ],
 };

@@ -1,6 +1,6 @@
 {
   "name": "vendor.openwop-app.kb.agents",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "kind": "node",
   "description": "Knowledge Base feature agent pack — a manifest agent shipped by the KB feature whose tools are the host RAG retrieval tools (openwop:knowledge.search + the openwop:core.rag.retriever-* retrievers). The first feature-bound agent: a feature ships an agent scoped to real conversational retrieval tools (agents[] + allowlist).",
   "author": "OpenWOP App",
@@ -16,7 +16,7 @@
       "agentId": "vendor.openwop-app.kb.agents.researcher",
       "persona": "RESEARCH",
       "label": "Knowledge Base Researcher",
-      "description": "Answers questions grounded in an org's Knowledge Base. Retrieves with openwop:knowledge.search (lexical) and the openwop:core.rag.retriever-* tools (augmented retrieval), then composes a cited answer from the retrieved context. Tools are allowlisted to the host retrieval surface only.",
+      "description": "Answers questions grounded in an org's Knowledge Base. Retrieves with openwop:knowledge.search (semantic + keyword retrieval) and the openwop:core.rag.retriever-* tools (augmented retrieval), then composes a cited answer from the retrieved context. Tools are allowlisted to the host retrieval surface only.",
       "modelClass": "research",
       "systemPromptRef": "prompts/kb-researcher.md",
       "toolAllowlist": [

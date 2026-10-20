@@ -19,7 +19,7 @@ export const creativeVideoFeature: BackendFeature = {
   id: 'creative-video',
   registerRoutes: (deps) => { registerVideoMediaCascade(); registerCreativeVideoRoutes(deps); },
   surface: { id: 'creative-video', build: buildCreativeVideoSurface },
-  requiredPacks: [{ name: 'feature.creative-video.nodes', version: '1.1.1' }],
+  requiredPacks: ['feature.creative-video.nodes'],
   recommends: ['media', 'connections'],
   toggleDefault: {
     id: 'creative-video',

@@ -6,17 +6,11 @@
  * not read back from Cloud Run.
  */
 import { derivePosture, type PostureRead } from './service.js';
+import { createGcpMetadataClient, gcpMetadata } from '../../host/gcpAdc.js';
 
-const MD = 'http://metadata.google.internal/computeMetadata/v1';
 const DEADLINE_MS = 3_000;
 
 type FetchLike = (url: string, init?: { headers?: Record<string, string>; signal?: AbortSignal }) => Promise<{ ok: boolean; status: number; json(): Promise<unknown>; text(): Promise<string> }>;
-
-async function md(fetchImpl: FetchLike, path: string): Promise<string> {
-  const r = await fetchImpl(`${MD}/${path}`, { headers: { 'Metadata-Flavor': 'Google' }, signal: AbortSignal.timeout(DEADLINE_MS) });
-  if (!r.ok) throw new Error(`metadata ${path} answered ${r.status}`);
-  return (await r.text()).trim();
-}
 
 export async function readLivePosture(opts: { env?: NodeJS.ProcessEnv; fetchImpl?: FetchLike; now?: () => Date } = {}): Promise<PostureRead> {
   const env = opts.env ?? process.env;
@@ -24,11 +18,10 @@ export async function readLivePosture(opts: { env?: NodeJS.ProcessEnv; fetchImpl
   const service = env.K_SERVICE;
   if (!service) return { available: false, reason: 'not running on Cloud Run (K_SERVICE is unset)' };
   try {
-    const project = await md(fetchImpl, 'project/project-id');
-    const region = (await md(fetchImpl, 'instance/region')).split('/').pop() ?? '';
-    const tokenBody = JSON.parse(await md(fetchImpl, 'instance/service-accounts/default/token')) as { access_token?: string };
-    if (!tokenBody.access_token) throw new Error('metadata token response carried no access_token');
-    const auth = { Authorization: `Bearer ${tokenBody.access_token}` };
+    const md = opts.fetchImpl ? createGcpMetadataClient({ fetchImpl }) : gcpMetadata();
+    const project = await md.metadataText('project/project-id', AbortSignal.timeout(DEADLINE_MS));
+    const region = (await md.metadataText('instance/region', AbortSignal.timeout(DEADLINE_MS))).split('/').pop() ?? '';
+    const auth = { Authorization: `Bearer ${await md.accessToken(AbortSignal.timeout(DEADLINE_MS))}` };
     const base = `https://run.googleapis.com/v2/projects/${project}/locations/${region}/services/${service}`;
     const svcRes = await fetchImpl(base, { headers: auth, signal: AbortSignal.timeout(DEADLINE_MS) });
     if (!svcRes.ok) throw new Error(`Cloud Run Admin API answered ${svcRes.status} for the service (does the runtime SA hold roles/run.viewer on it?)`);

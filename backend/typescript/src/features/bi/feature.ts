@@ -12,7 +12,7 @@ import { buildBiSurface } from './surface.js';
 export const biFeature: BackendFeature = {
   id: 'bi',
   requiredPacks: [
-    { name: 'feature.bi.nodes', version: '1.0.1' },
+    'feature.bi.nodes',
   ],
   registerRoutes: (deps) => {
     registerBiRoutes(deps);

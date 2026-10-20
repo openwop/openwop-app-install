@@ -26,6 +26,7 @@ const api = vi.hoisted(() => ({
   listOrgs: vi.fn<Client['listOrgs']>(), listSuggestions: vi.fn<Client['listSuggestions']>(),
   refreshSuggestions: vi.fn<Client['refreshSuggestions']>(),
   dismissSuggestion: vi.fn<Client['dismissSuggestion']>(), acceptSuggestion: vi.fn<Client['acceptSuggestion']>(),
+  getWorkGraphSettings: vi.fn<Client['getWorkGraphSettings']>(),
 }));
 const toastError = vi.hoisted(() => vi.fn());
 vi.mock('../workGraphClient.js', async (importOriginal) => {
@@ -61,6 +62,7 @@ beforeEach(() => {
   vi.resetAllMocks();
   api.listOrgs.mockResolvedValue([{ orgId: 'o1', name: 'Org One' }]);
   api.listSuggestions.mockResolvedValue([SUGGESTION]);
+  api.getWorkGraphSettings.mockResolvedValue({ paused: false });
 });
 afterEach(cleanup);
 

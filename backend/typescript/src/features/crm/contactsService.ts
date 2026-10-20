@@ -876,6 +876,7 @@ export async function tombstoneContact(contactId: string, tenantId: string, surv
 // classification (fail-closed — never a cross-tenant/global purge).
 registerRetentionPurger({
   feature: 'crm',
+  dryRun: 'rows-by-age',
   async purge(tenantId, classification, cutoffIso) {
     if (!tenantId || classification !== 'confidential-pii') return 0;
     return purgeRowsByAge('crm', await store.listForTenantIndexed(tenantId), tenantId, cutoffIso,

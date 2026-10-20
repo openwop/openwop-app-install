@@ -25,14 +25,28 @@ type PreferenceChannel = (typeof PREFERENCE_CHANNELS)[number];
 import { addSuppression, suppressionBlocksSend } from '../crm/suppressionService.js';
 import {
   listTemplates, getTemplate, createTemplate, updateTemplate, deleteTemplate, type EmailBodyFormat,
+  listTemplateVersions, getTemplateVersion, restoreTemplateVersion, templateVersionOf, emailApprovalGateOn, setEmailApprovers, assertSendAllowed,
   listCampaigns, getCampaign, createCampaign, deleteCampaign, listSends, sendCampaign, sendTestEmail,
   getEmailSettings, setSenderAddress,
 } from './emailService.js';
 import { recordClick, recordOpen, recordUnsubscribe, resolveUnsubscribeToken, siblingPreferencesToken, resolvePreferencesToken, engagementStats, listEngagement } from './engagementService.js';
 import { renderMarkdownPreview } from './safeMarkdown.js';
+import { diffText } from '../../host/textDiff.js';
+import { resolveEligibleApprovers } from '../../host/approverResolution.js';
+import { submitForReview, withdrawReview } from './sendApproval.js';
 
 /** ADR 0256 — narrow an untrusted body field to a known body format (else undefined). */
 const parseFormat = (v: unknown): EmailBodyFormat | undefined => (v === 'markdown' ? 'markdown' : v === 'text' ? 'text' : undefined);
+/** ADR 0905 D1 — the optimistic-concurrency token: `expectedVersion` in the body, or an
+ *  `If-Match` header (`"3"`, `3` or `W/"3"`). Absent ⇒ undefined (last writer wins);
+ *  present but not a positive integer ⇒ 400, never silently ignored. */
+function parseExpectedVersion(bodyValue: unknown, ifMatch: string | undefined): number | undefined {
+  const raw = bodyValue ?? (ifMatch ? ifMatch.replace(/^W\//, '').replace(/"/g, '').trim() : undefined);
+  if (raw === undefined || raw === null || raw === '') return undefined;
+  const n = typeof raw === 'number' ? raw : Number(raw);
+  if (!Number.isInteger(n) || n < 1) throw new OpenwopError('validation_error', '`expectedVersion` must be a positive integer.', 400, { field: 'expectedVersion' });
+  return n;
+}
 import { publicPageBundle, resolvePublicLocale, type PublicPageT, type PublicPageKey } from './publicPageStrings.js';
 import { setWebhookConfig, listWebhookConfigs, removeWebhookConfig, ingestBounceWebhook, isBounceProvider } from './bounceWebhooks.js';
 import { emailSendProviders } from '../../host/emailAdapter.js';
@@ -123,7 +137,12 @@ export function registerEmailRoutes(deps: RouteDeps): void {
         if (!(e instanceof OpenwopError && (e.httpStatus === 403 || e.httpStatus === 404))) log.warn('email_settings_canEdit_unresolved', { error: e instanceof Error ? e.message : String(e) });
         return false;
       });
-      res.json({ senderAddress: s?.senderAddress ?? '', configured: !!s?.senderAddress, canEdit });
+      res.json({
+        senderAddress: s?.senderAddress ?? '', configured: !!s?.senderAddress, canEdit,
+        // ADR 0905 D3/D4 — the org's extra send approvers + whether sends need approval.
+        approverRoleRefs: s?.approverRoleRefs ?? [], approverGroupRefs: s?.approverGroupRefs ?? [],
+        approvalGate: await emailApprovalGateOn(tenantId),
+      });
     } catch (err) { next(err); }
   });
   app.put(`${ORG}/settings`, async (req, res, next) => {
@@ -133,6 +152,32 @@ export function registerEmailRoutes(deps: RouteDeps): void {
       const senderAddress = typeof body.senderAddress === 'string' ? body.senderAddress : '';
       const s = await setSenderAddress(tenantId, orgId, senderAddress, user.userId);
       res.json({ senderAddress: s.senderAddress, configured: !!s.senderAddress });
+    } catch (err) { next(err); }
+  });
+
+  // ADR 0905 D3 — who besides the org's admins may approve a campaign send. Admin-only
+  // (an editor naming the `editor` role would approve their peers' sends — the E1 hole),
+  // and every ref must resolve now (ADR 0075 §D4 pre-flight: a named-but-broken approver
+  // is a config error, never a silently empty gate).
+  app.put(`${ORG}/settings/approvers`, async (req, res, next) => {
+    try {
+      const { user, orgId, tenantId } = await authz(req, 'host:members:manage');
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const list = (v: unknown, field: string): string[] => {
+        if (v === undefined) return [];
+        if (!Array.isArray(v) || v.some((x) => typeof x !== 'string' || x.trim() === '') || v.length > 20) {
+          throw new OpenwopError('validation_error', `\`${field}\` must be an array of at most 20 non-empty ids.`, 400, { field });
+        }
+        return (v as string[]).map((x) => x.trim());
+      };
+      const roleRefs = list(body.roleRefs, 'roleRefs');
+      const groupRefs = list(body.groupRefs, 'groupRefs');
+      if (roleRefs.length + groupRefs.length > 0) {
+        const r = await resolveEligibleApprovers({ approverRoleRefs: roleRefs, approverGroupRefs: groupRefs }, { tenantId, orgId }, { includeDelegates: false });
+        if (r.unresolved.length > 0) throw new OpenwopError('validation_error', 'Some approver roles or groups do not exist in this organization or have no members.', 400, { unresolved: r.unresolved });
+      }
+      const s = await setEmailApprovers(tenantId, orgId, { roleRefs, groupRefs }, user.userId);
+      res.json({ approverRoleRefs: s.approverRoleRefs ?? [], approverGroupRefs: s.approverGroupRefs ?? [] });
     } catch (err) { next(err); }
   });
 
@@ -232,7 +277,7 @@ export function registerEmailRoutes(deps: RouteDeps): void {
   });
   app.patch(`${ORG}/templates/:templateId`, async (req, res, next) => {
     try {
-      const { orgId, tenantId } = await authz(req, 'workspace:write');
+      const { user, orgId, tenantId } = await authz(req, 'workspace:write');
       const body = (req.body ?? {}) as Record<string, unknown>;
       const patch: { name?: string; subject?: string; body?: string; format?: EmailBodyFormat } = {};
       if (typeof body.name === 'string') patch.name = body.name;
@@ -240,8 +285,58 @@ export function registerEmailRoutes(deps: RouteDeps): void {
       if (typeof body.body === 'string') patch.body = body.body;
       const fmt = parseFormat(body.format);
       if (fmt) patch.format = fmt;
-      const t = await updateTemplate(tenantId, orgId, req.params.templateId, patch);
+      const expectedVersion = parseExpectedVersion(body.expectedVersion, req.get('if-match'));
+      const t = await updateTemplate(tenantId, orgId, req.params.templateId, patch, { ...(expectedVersion !== undefined ? { expectedVersion } : {}), actor: user.userId });
       if (!t) throw new OpenwopError('not_found', 'Template not found.', 404, { templateId: req.params.templateId });
+      res.json(t);
+    } catch (err) { next(err); }
+  });
+  // ADR 0905 D1 — immutable template versions: history, one version, a diff, restore.
+  // Host-extension routes (`/v1/host/openwop-app/*`) — non-normative, no RFC.
+  app.get(`${ORG}/templates/:templateId/versions`, async (req, res, next) => {
+    try {
+      const { orgId, tenantId } = await authz(req, 'workspace:read');
+      const versions = await listTemplateVersions(tenantId, orgId, req.params.templateId);
+      if (!versions) throw new OpenwopError('not_found', 'Template not found.', 404, { templateId: req.params.templateId });
+      res.json({ versions });
+    } catch (err) { next(err); }
+  });
+  app.get(`${ORG}/templates/:templateId/versions/:version`, async (req, res, next) => {
+    try {
+      const { orgId, tenantId } = await authz(req, 'workspace:read');
+      const v = await getTemplateVersion(tenantId, orgId, req.params.templateId, Number(req.params.version));
+      if (!v) throw new OpenwopError('not_found', 'Template version not found.', 404, { templateId: req.params.templateId, version: req.params.version });
+      res.json(v);
+    } catch (err) { next(err); }
+  });
+  // The diff is computed server-side by the ONE text differ (`host/textDiff.ts`, ADR 0069)
+  // and rendered by the shared `ArtifactDiffView`. `against` defaults to the current version.
+  app.get(`${ORG}/templates/:templateId/versions/:version/diff`, async (req, res, next) => {
+    try {
+      const { orgId, tenantId } = await authz(req, 'workspace:read');
+      const tpl = await getTemplate(tenantId, orgId, req.params.templateId);
+      if (!tpl) throw new OpenwopError('not_found', 'Template not found.', 404, { templateId: req.params.templateId });
+      const against = req.query.against === undefined ? templateVersionOf(tpl) : Number(req.query.against);
+      const [from, to] = await Promise.all([
+        getTemplateVersion(tenantId, orgId, tpl.templateId, Number(req.params.version)),
+        getTemplateVersion(tenantId, orgId, tpl.templateId, against),
+      ]);
+      if (!from || !to) throw new OpenwopError('not_found', 'Template version not found.', 404, { templateId: tpl.templateId });
+      res.json({
+        templateId: tpl.templateId, from: from.version, to: to.version,
+        subject: { from: from.subject, to: to.subject, changed: from.subject !== to.subject },
+        format: { from: from.format ?? 'text', to: to.format ?? 'text' },
+        body: diffText(from.body, to.body),
+      });
+    } catch (err) { next(err); }
+  });
+  app.post(`${ORG}/templates/:templateId/versions/:version/restore`, async (req, res, next) => {
+    try {
+      const { user, orgId, tenantId } = await authz(req, 'workspace:write');
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const expectedVersion = parseExpectedVersion(body.expectedVersion, req.get('if-match'));
+      const t = await restoreTemplateVersion(tenantId, orgId, req.params.templateId, Number(req.params.version), { ...(expectedVersion !== undefined ? { expectedVersion } : {}), actor: user.userId });
+      if (!t) throw new OpenwopError('not_found', 'Template version not found.', 404, { templateId: req.params.templateId, version: req.params.version });
       res.json(t);
     } catch (err) { next(err); }
   });
@@ -286,10 +381,28 @@ export function registerEmailRoutes(deps: RouteDeps): void {
       res.status(204).end();
     } catch (err) { next(err); }
   });
+  // ADR 0905 D3 — send review. Submit queues (or re-pins) the ONE `email-campaign-send`
+  // row; the decision happens in the shared Approvals inbox (`/approvals/:id/claim|reject`).
+  app.post(`${ORG}/campaigns/:campaignId/submit-review`, async (req, res, next) => {
+    try {
+      const { user, orgId, tenantId } = await authz(req, 'workspace:write');
+      const { campaign, approval } = await submitForReview(tenantId, orgId, req.params.campaignId, user.userId);
+      res.json({ campaign, approvalId: approval.approvalId });
+    } catch (err) { next(err); }
+  });
+  app.post(`${ORG}/campaigns/:campaignId/withdraw-review`, async (req, res, next) => {
+    try {
+      const { orgId, tenantId } = await authz(req, 'workspace:write');
+      res.json(await withdrawReview(tenantId, orgId, req.params.campaignId));
+    } catch (err) { next(err); }
+  });
   app.post(`${ORG}/campaigns/:campaignId/send`, async (req, res, next) => {
     try {
       const { user, orgId, tenantId } = await authz(req, 'workspace:write');
       const resend = (req.body ?? {} as Record<string, unknown>).resend === true;
+      // ADR 0905 D4 — "approval required" is the answer before any provider question.
+      const pre = await getCampaign(tenantId, orgId, req.params.campaignId);
+      if (pre && !(pre.status === 'sent' && !resend)) await assertSendAllowed(tenantId, orgId, pre, resend);
       // Order of honest failures: sender address unconfigured → 501
       // capability_not_provided (checked in sendCampaign, before the provider is
       // needed); no SendGrid connection for the acting user → 409

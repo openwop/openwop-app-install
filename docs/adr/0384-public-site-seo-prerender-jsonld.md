@@ -90,6 +90,17 @@ the missing pieces are an **HTML representation** and a **bot entry path**.
     custom domain **already reaches the backend** — the prerender middleware sits
     immediately after custom-domain resolution and needs no hosting rewrite.
 
+    > **CORRECTED 2026-10-17 (ADR 0906) — "already flow GCLB → Cloud Run" was
+    > false in production.** No external load balancer fronts `openwop-app-backend`
+    > (measured 2026-10-07, ADR 0860 § owner decisions: the only hop is the
+    > Firebase Hosting rewrite, which reaches Cloud Run with `Host: *.run.app`).
+    > The GCLB + certificate map was a manual recipe in `DEPLOY.md` that was
+    > never applied. The middleware ordering above is still right: when an edge
+    > does front the service, custom-domain requests reach the backend with their
+    > own `Host` and the prerender rewrite applies. ADR 0906 codifies that edge
+    > (`scripts/custom-domain-edge.sh`, operator-run) and the per-domain
+    > certificate lifecycle; until it is applied, no custom domain serves in prod.
+
 - **The public-route allowlist is the existing seam.** `PUBLIC_PATH_PREFIXES`
   (`middleware/auth.ts:86`, matched at `:424`) already carries
   `/v1/host/openwop-app/public` (added by ADR 0012). A new prerender route lives

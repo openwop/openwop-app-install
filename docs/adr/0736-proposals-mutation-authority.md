@@ -100,3 +100,9 @@ proposals. Recorded so the omission is a decision, not an oversight.
 |---|---|---|
 | D1/D2/D3 | `assertCanMutate` in `proposals/routes.ts`, applied to revise/reject/archive | `proposals-mutation-authority.test.ts` — born red |
 | D4 | reads unchanged | leg asserting a reader still lists/gets |
+
+> **CORRECTED 2026-10-19 (ADR 0938).** This ADR gated who may mutate a proposal but left the reads
+> ungated, the writes blind `get → put` with no transition table (an applied proposal could be
+> rejected; a rejected one applied), and `apply` bound to nothing the reviewer saw — so "the applied
+> thing need not be the reviewed thing" stayed true through the proposer's own revise. ADR 0938 D4–D6
+> close all three. The D1–D3 mutation gates here are unchanged.

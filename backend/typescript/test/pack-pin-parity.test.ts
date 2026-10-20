@@ -46,6 +46,7 @@ function packVersionsOnDisk(): Map<string, string> {
 function collectPins(diskVersions: Map<string, string>): Pin[] {
   const pins: Pin[] = [];
   const pinRe = /name:\s*['"]([a-z0-9.\-]+)['"]\s*,\s*version:\s*['"]([0-9][0-9a-z.\-]*)['"]/g;
+  const pinTableRe = /^\s*'([a-z0-9.\-]+)':\s*'([0-9][0-9a-z.\-]*)',?$/gm;
   const walk = (dir: string): void => {
     for (const entry of readdirSync(dir)) {
       const p = join(dir, entry);
@@ -57,6 +58,14 @@ function collectPins(diskVersions: Map<string, string>): Pin[] {
         for (const m of src.matchAll(pinRe)) {
           const [, name, version] = m;
           if (diskVersions.has(name)) pins.push({ file: relative(REPO_ROOT, p), pack: name, pinned: version });
+        }
+        // ADR 0919 — `requiredPacks` pins live in `features/packPins.ts` as
+        // `'<pack>': '<semver>',` lines, not `{ name, version }` literals.
+        if (entry === 'packPins.ts') {
+          for (const m of src.matchAll(pinTableRe)) {
+            const [, name, version] = m;
+            if (diskVersions.has(name)) pins.push({ file: relative(REPO_ROOT, p), pack: name, pinned: version });
+          }
         }
       }
     }

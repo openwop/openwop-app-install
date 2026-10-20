@@ -10,6 +10,11 @@
  * Sabotage-witnessed (/grade-tests w17): dropping the combining-mark strip, the
  * 64-char cap, the `section` fallback or the edge trim reds a parity case;
  * an un-slugged `<h2 id>` reds the anchor case.
+ *
+ * MyndHyve H1: the `cta` and `form` headings (and the other bare `fp-h2`
+ * headings) rendered outside `SectionHead` and had no id, while the prerender's
+ * `head()` gave them one, so a `#fragment` link to a CTA or a form worked for a
+ * crawler and not for a visitor. Dropping the id from either reds its case.
  */
 import { describe, it, expect, afterEach } from 'vitest';
 import { render, screen, cleanup } from '@testing-library/react';
@@ -43,5 +48,17 @@ describe('SectionHead anchor ids (R2-D10)', () => {
     );
     const h = screen.getByRole('heading', { name: 'How is pricing calculated?' });
     expect(h.id).toBe('how-is-pricing-calculated');
+  });
+
+  it.each([
+    ['cta', { heading: 'Become a *design partner*', label: 'Apply', url: '#design-partner-application' }],
+    ['form', { heading: 'Become a *design partner*', formId: 'form-1' }],
+  ] as const)('a %s heading carries the same slug id as the prerender (MyndHyve H1)', (type, data) => {
+    const { container } = render(
+      <MemoryRouter>
+        <RenderSection section={{ sectionId: 's1', type, data: { ...data } }} mode="public" />
+      </MemoryRouter>,
+    );
+    expect(container.querySelector('h2')?.id).toBe('become-a-design-partner');
   });
 });

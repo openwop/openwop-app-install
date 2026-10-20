@@ -162,3 +162,36 @@ was written for is the trap this repo keeps finding; 0733 adds explicit boundary
 for the new behaviour rather than relying on that file.
 
 The `msg` boundary, clause (a), and clause (c) are unchanged and still correct.
+
+## Addendum 2026-10-18 — a dry run before enabling the sweep (MyndHyve R7)
+
+A distribution turning the sweep on for the first time (MyndHyve, port
+recommendation R7) needs to see what it will delete first. There was no way to:
+the sweep either ran or did not. `OPENWOP_RETENTION_SWEEP_DRY_RUN=true` adds that
+mode. It is a mode of the ONE retention loop, not a second daemon.
+
+- **What it counts.** Every destructive leg of the tick: the governance purge
+  (per tenant × classification with a window), the ADR 0287 engine tables, the
+  ADR 0371 run sweep (candidates before its pin, hold and override checks, so an
+  upper bound) and the ADR 0372 anon-tenant teardown. It logs one
+  `retention_dry_run` line and one `retention_dry_run_slot` per slot that would
+  lose rows.
+- **What it does not do.** Delete a row, take a slot lease, write a completion
+  marker or write an audit row. The audit row is the tombstone of a purge
+  (Phase 3), and nothing was purged. It wins over
+  `OPENWOP_RETENTION_SWEEP_ENABLED`. The cache and ledger hygiene legs
+  (ADR 0380 TTLs and kv age-out, webhook secret retirement, proposal expiry)
+  run as they do with the sweep off.
+- **Counting a purger safely.** A purger opts in with `dryRun: 'rows-by-age'`,
+  a claim that every row it removes goes through `purgeRowsByAge`'s delete
+  callback. Under the dry run, `purgeRowsByAge` counts matches and never calls
+  the callback. A purger without the claim is NOT run and is listed as not
+  counted. 28 registrations make the claim. The nine that do not
+  (`approvals`, `commerce-ucp-buyer`, `kb`, `csm`, `media`, `job-search:orphans`,
+  `app-builder` canvas, the two kicktodo compliance purgers) delete, redact or
+  release outside that callback.
+- **Storage.** `countPrunableEngineRows(cutoffIso, cutoffMs)` counts with the
+  same predicates as `pruneTerminalRuns` and `pruneWebhookDeliveries`
+  (SQLite + Postgres).
+- Tests: `backend/typescript/test/retention-dry-run.test.ts` (with a
+  same-tick control that does delete).

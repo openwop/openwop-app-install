@@ -33,6 +33,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { MANIFEST_SIDE_EFFECT_FLOOR, MANIFEST_FAST_PATH_SERVED } from '../src/executor/sideEffectFloor.generated.js';
 import { isSideEffectingNode } from '../src/executor/sideEffects.js';
+import { pinnedPackRef } from '../src/features/packPins.js';
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 const PACK_DIR = join(REPO, 'packs', 'feature.kicktodo.nodes');
@@ -68,7 +69,8 @@ describe('KT-PACK-REPLAY-1 — KickTodo node replay classification', () => {
     expect(header).not.toContain('All role:"action"');
     for (const f of ['accountability', 'commerce', 'community', 'core', 'creator', 'engagement', 'integrations', 'metrics', 'organizations']) {
       const src = readFileSync(join(REPO, 'backend', 'typescript', 'src', 'features', `kicktodo-${f}`, 'feature.ts'), 'utf8');
-      expect(src, `kicktodo-${f} pin lags the manifest`).toContain(`{ name: 'feature.kicktodo.nodes', version: '${PACK.version}' }`);
+      expect(src, `kicktodo-${f} pin lags the manifest`).toContain(`'feature.kicktodo.nodes'`);
+      expect(pinnedPackRef('feature.kicktodo.nodes').version, 'the pin (features/packPins.ts, ADR 0919) must match the manifest').toBe(PACK.version);
     }
   });
 

@@ -67,6 +67,9 @@ export const messages = {
 
   // Section renderer
   optionalBadge: 'Opcional',
+  planFigureLabel: 'Plano de exemplo',
+  planFigureLabelWithNote: 'Plano de exemplo. {{note}}',
+  planProgress: 'Progresso',
   noImage: '(sem imagem)',
   unknownSection: 'Seção desconhecida.',
 
@@ -110,6 +113,7 @@ export const messages = {
   heroVisualFilm: 'Filme de introdução (só no site de demonstração; nos demais, o registro da execução)',
   heroVisualImage: 'Imagem escolhida',
   heroVisualNone: 'Sem visual',
+  heroVisualPlan: 'Cartão de plano de exemplo',
 
   // Sections editor — richText
   richTextLabel: 'Texto (markdown: **bold**, *italic*, `code`, [link](url))',
@@ -134,6 +138,11 @@ export const messages = {
   layoutStats: 'Estatísticas (valor + rótulo)',
   layoutPrompts: 'Prompts (etiqueta + prompt de exemplo)',
   layoutDives: 'Em detalhe (afirmação + ilustração integrada)',
+  layoutRuled: 'Colunas com linha (traço no topo)',
+  layoutPanels: 'Painéis (preenchidos, pequeno desenho)',
+  layoutProgress: 'Cartões de progresso (rótulo + barra)',
+  layoutTiles: 'Blocos (quatro por linha, selo)',
+  layoutList: 'Listas (título + linhas)',
   columnLinkLabel: 'Destino (opcional)',
   columnLinkPlaceholder: '/agents ou https://example.com',
   columnIconLabel: 'Ícone (opcional)',

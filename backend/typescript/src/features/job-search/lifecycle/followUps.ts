@@ -157,6 +157,7 @@ export async function completeFollowUp(tenantId: string, subjectId: string, deal
 // by `createdAt` — the answer bank already had this and these did not.
 registerRetentionPurger({
   feature: 'job-search:followup',
+  dryRun: 'rows-by-age',
   // The seam calls purge(tenantId, CLASSIFICATION, cutoffIso). The previous
   // binding named the second slot `cutoffIso`, so every sweep compared
   // timestamps against the classification STRING — and every ISO date sorts

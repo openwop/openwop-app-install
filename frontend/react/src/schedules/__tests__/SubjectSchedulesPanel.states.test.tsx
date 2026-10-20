@@ -181,6 +181,12 @@ describe('SubjectSchedulesPanel — ADR 0787 contract', () => {
     expect(screen.queryByText(/does not recognize it/i)).toBeNull();
   });
 
+  it('ADR 0908 D8 — goal-closed is a known reason that says nothing more will run', async () => {
+    renderWith([{ ...base, lastSkippedAt: new Date().toISOString(), lastSkipReason: 'goal-closed' }], {});
+    await waitFor(() => expect(screen.getByText(/nothing more will run for it/i)).toBeTruthy());
+    expect(screen.queryByText(/does not recognize it/i)).toBeNull();
+  });
+
   it('ADR 0820 §7 — a plan-lapsed job reads "Paused — plan lapsed" with a store link and no next-run promise', async () => {
     renderWith([{ ...base, lastSkippedAt: new Date().toISOString(), lastSkipReason: 'plan-lapsed', planLapsed: { featureId: 'crm' } }], {});
     await waitFor(() => expect(screen.getByText(/paused — plan lapsed/i)).toBeTruthy());

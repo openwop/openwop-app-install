@@ -111,6 +111,10 @@ declare module '*feature.campaign-channels.nodes/index.mjs' {
 declare module '*feature.campaign-orchestration.nodes/index.mjs' {
   export const nodes: Record<string, (ctx: unknown) => Promise<{ status: string; outputs?: Record<string, unknown>; error?: { code: string; message: string } }>>;
 }
+declare module '*feature.campaign-ops.nodes/index.mjs' {
+  export function fenceContent(text: string): string;
+  export const nodes: Record<string, (ctx: unknown) => Promise<{ status: string; outputs?: Record<string, unknown>; error?: { code: string; message: string } }>>;
+}
 declare module '*feature.campaign-connectors.nodes/index.mjs' {
   export const nodes: Record<string, (ctx: unknown) => Promise<{ status: string; outputs?: Record<string, unknown>; error?: { code: string; message: string } }>>;
 }

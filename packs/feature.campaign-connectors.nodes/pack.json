@@ -1,8 +1,8 @@
 {
   "name": "feature.campaign-connectors.nodes",
-  "version": "1.2.1",
+  "version": "1.5.0",
   "kind": "node",
-  "description": "Campaign Connectors node pack (sync honest-ON per the campaign gap plan C2) — `import-csv` (parse a platform CSV export onto the unified metric schema with dedup + computed fields) and `sync` (pull yesterday's metrics for every dispatched campaign through the Connections broker via ctx.ads — meta/google live; other platforms stay CSV-first with `connector_not_configured`). Over ctx.features['campaign-connectors'] + ctx.ads.",
+  "description": "Campaign Connectors node pack — `import-csv` (parse a platform CSV export onto the unified metric schema with dedup + computed fields) and `sync` (ADR 0907 D3: a 7-day look-back of daily campaign metrics with conversions and revenue, for the dispatched campaigns or the whole configured ad account, read through the Connections broker via ctx.ads.getAccountMetrics — meta/google live; other platforms stay CSV-first with `connector_not_configured`). `dispatch-conversions` (ADR 0907 D7) delivers the queued server-side conversions on a schedule, re-checking consent per row at send. Over ctx.features['campaign-connectors'] + ctx.ads.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
   "keywords": [
@@ -27,19 +27,31 @@
     },
     {
       "typeId": "feature.campaign-connectors.nodes.sync",
-      "version": "1.0.0",
+      "version": "1.2.0",
       "label": "Connectors: Sync (live)",
-      "description": "Pulls yesterday's metrics for every dispatched campaign of the platform through the acting user's connection (ctx.ads.getMetrics window 'yesterday'; 15-min cooldown; per-campaign best-effort). meta/google live; other platforms return `connector_not_configured` (CSV import is the path). Inputs: { orgId, platform }. Output: { outcome: 'synced'|'cooldown'|'no_dispatches', campaigns, imported, deduped, failures[] }.",
+      "description": "Pulls a rolling 7-day look-back of daily campaign metrics (spend, impressions, clicks, conversions, revenue) through the acting user's connection: the dispatched campaigns by default, or every campaign of the configured ad accounts when the org's connector settings (or the `syncScope` input) say `account`. Rows replace earlier pulls of the same day, so late conversions settle. 15-min cooldown; per-account best-effort; a page cap is reported as `truncated`. meta/google live; tiktok/linkedin readers exist but return `connector_not_configured` until the operator has verified them against the platform's test account (ADR 0907 D2); other platforms return `connector_not_configured`. Inputs: { orgId, platform, syncScope?: 'dispatched'|'account' }. Output: { outcome: 'synced'|'cooldown'|'no_dispatches'|'no_accounts', scope, since, until, campaigns, imported, deduped, failures[], truncated }.",
       "category": "integration",
       "role": "action",
       "capabilities": []
     },
     {
-      "typeId": "feature.campaign-connectors.nodes.audience-sync", "category": "integration",
+      "typeId": "feature.campaign-connectors.nodes.audience-sync",
+      "category": "integration",
       "version": "1.0.0",
       "role": "action",
       "label": "Sync Segment → Ad Audience",
       "description": "Uploads a CRM saved segment as a hashed platform custom audience (ADR 0217): consent-checked, suppression-subtracted, SHA-256-hashed members via ctx.ads.syncAudience — behind the ads-audience approval gate (default require-approval; PII-adjacent). Inputs: { segmentId, platform: meta|google, adAccountId, audienceName? }. Output: { platformAudienceId, uploaded, excluded }."
+    },
+    {
+      "typeId": "feature.campaign-connectors.nodes.dispatch-conversions",
+      "version": "1.0.0",
+      "label": "Connectors: Deliver conversions",
+      "description": "Delivers the org's queued server-side conversions to every live conversions API with an active pixel (Meta CAPI; TikTok Events and Google Ads uploads once verified on a test account). Runs as the run owner — their ad connections, and they must hold workspace:write in the org. Consent is re-checked per row at send: withdrawn ⇒ the row is dropped, unreadable ⇒ held for the next run. Resumable per row and per platform, so a retry never double-fires a platform. A replay fork serves the recorded outcome and sends nothing. Events older than a platform's window (Meta/TikTok 7 days, Google 90) are marked expired, never sent. OFF until the workspace enables the `campaign-connectors.scheduled-conversions` toggle (then `outcome: 'disabled'`, nothing read or sent). Inputs: { orgId }. Output: { outcome: 'delivered'|'disabled', sent, dropped, held, expired }.",
+      "category": "integration",
+      "role": "side-effect",
+      "capabilities": [
+        "side-effectful"
+      ]
     }
   ],
   "runtime": {

@@ -1,9 +1,11 @@
 /**
  * feature.campaign-connectors.nodes — CSV import + live sync (ADR 0159; sync
  * turned honest-ON by the campaign gap plan C2). import-csv composes
- * ctx.features['campaign-connectors'].importCsv; sync composes ctx.ads
- * (listDispatches + getMetrics, window 'yesterday') with the feature surface's
- * recordSyncedMetrics — the persist path that owns the 15-min cooldown + dedup.
+ * ctx.features['campaign-connectors'].importCsv. sync (1.1.0, ADR 0907 D3)
+ * asks the feature surface for a plan (which ad accounts, the 7-day look-back
+ * window, dispatched-only or whole-account), reads each account through
+ * ctx.ads.getAccountMetrics, and hands the rows back to the surface's
+ * recordAccountRows — the host owns planning, mapping, dedup and the cooldown.
  * Platforms without a live metrics reader (tiktok + the CSV-only set) still
  * fail structured with connector_not_configured. role:"action". Pure-JS,
  * Node-20 stdlib only.
@@ -39,43 +41,87 @@ export async function sync(ctx) {
   const platform = str(i.platform);
   const orgId = str(i.orgId);
   if (!orgId) return { status: 'failed', error: { code: 'validation_error', message: 'orgId is required.' } };
-  // Live pull exists for the platforms with a metrics reader (meta/google).
+  // Live pull exists for the platforms with an account metrics reader
+  // (meta/google; tiktok/linkedin once sandbox-verified — the host decides).
   // Everything else stays structured-honest (CSV import is the path).
-  if (platform !== 'meta' && platform !== 'google') {
-    return {
-      status: 'failed',
-      error: {
-        code: 'connector_not_configured',
-        message: `Live ${platform || 'ad-platform'} sync is not available — meta and google have live metrics readers; import a CSV export for the rest (ADR 0159).`,
-      },
-    };
+  const notConfigured = (why) => ({
+    status: 'failed',
+    error: { code: 'connector_not_configured', message: `Live ${platform || 'ad-platform'} sync is not available — ${why}; import a CSV export instead (ADR 0159).` },
+  });
+  if (!['meta', 'google', 'tiktok', 'linkedin'].includes(platform)) return notConfigured('this platform has no metrics reader');
+  if (!ctx.ads || typeof ctx.ads.getAccountMetrics !== 'function') {
+    return { status: 'failed', error: { code: 'host_capability_missing', message: 'ctx.ads.getAccountMetrics unavailable on this host (ADR 0907 D3).' } };
   }
-  if (!ctx.ads || typeof ctx.ads.listDispatches !== 'function' || typeof ctx.ads.getMetrics !== 'function') {
-    return { status: 'failed', error: { code: 'host_capability_missing', message: 'ctx.ads metrics surface unavailable on this host.' } };
+  if (typeof cc.claimSync !== 'function' || typeof cc.planSync !== 'function' || typeof cc.recordAccountRows !== 'function') {
+    return { status: 'failed', error: { code: 'host_capability_missing', message: 'campaign-connectors sync surface unavailable — update the feature (ADR 0907 D3).' } };
   }
-  if (typeof cc.claimSync !== 'function' || typeof cc.recordSyncedMetrics !== 'function') {
-    return { status: 'failed', error: { code: 'host_capability_missing', message: 'campaign-connectors sync surface unavailable — update the feature (C2/SYNC-1).' } };
+  const syncScope = i.syncScope === 'account' || i.syncScope === 'dispatched' ? i.syncScope : undefined;
+  // Plan BEFORE claiming the cooldown: a no_dispatches / no_accounts probe is a
+  // local read and must not consume the 15-minute window (R2 CC-SP-14).
+  const planned = await cc.planSync({ orgId, platform, syncScope }); // undefined = the org's setting
+  if (planned.outcome === 'no_dispatches' || planned.outcome === 'no_accounts') {
+    return { status: 'success', outputs: { outcome: planned.outcome } };
   }
-  // SYNC-1: ATOMICALLY claim the cooldown window before hitting the platform, so
-  // two concurrent runs of this chain can't both pass a non-atomic peek and
-  // double-submit reads. A lost claim reports cooldown (same shape as the peek).
+  if (planned.outcome === 'not_verified') return notConfigured('its reader has not been verified against the platform\'s test account yet (ADR 0907 D2)');
+  if (planned.outcome !== 'plan') {
+    return { status: 'failed', error: { code: 'validation_error', message: planned.error || 'sync plan unavailable' } };
+  }
+  // SYNC-1: ATOMICALLY claim the cooldown window before hitting the platform.
   const cooldown = await cc.claimSync({ orgId, platform });
   if (cooldown && cooldown.blocked) {
     return { status: 'success', outputs: { outcome: 'cooldown', retryAtIso: cooldown.retryAtIso } };
   }
-  const dispatches = (await ctx.ads.listDispatches()).filter(
-    (d) => d.platform === platform && typeof d.adAccountId === 'string' && d.adAccountId.length > 0,
-  );
-  if (dispatches.length === 0) return { status: 'success', outputs: { outcome: 'no_dispatches' } };
+  const plan = planned.plan;
   const rows = [];
   const failures = [];
-  for (const d of dispatches) {
-    const r = await ctx.ads.getMetrics({ platform, adAccountId: d.adAccountId, campaignId: d.platformCampaignId, window: 'yesterday' });
-    if (r.outcome !== 'ok') { failures.push({ platformCampaignId: d.platformCampaignId, reason: r.outcome === 'failed' ? r.error : r.outcome }); continue; }
-    rows.push({ campaignName: d.campaignName || d.platformCampaignId, adSet: 'dispatched', spend: r.metrics.spend, impressions: r.metrics.impressions, clicks: r.metrics.clicks });
+  let truncated = false;
+  for (const adAccountId of plan.adAccountIds) {
+    const r = await ctx.ads.getAccountMetrics({
+      platform, adAccountId, level: 'campaign', since: plan.since, until: plan.until,
+      ...(plan.conversionActionTypes ? { conversionActionTypes: plan.conversionActionTypes } : {}),
+    });
+    if (r.outcome !== 'ok') {
+      failures.push({ adAccountId, reason: r.outcome === 'failed' ? r.error : r.outcome, ...(r.outcome === 'rate_limited' && r.retryAfterS !== undefined ? { retryAfterS: r.retryAfterS } : {}) });
+      continue;
+    }
+    if (r.truncated) truncated = true;
+    rows.push(...r.rows);
   }
-  const persisted = rows.length > 0 ? await cc.recordSyncedMetrics({ orgId, platform, rows }) : { imported: 0, deduped: 0 };
-  return { status: 'success', outputs: { outcome: 'synced', platform, campaigns: rows.length, ...persisted, failures } };
+  const persisted = await cc.recordAccountRows({ orgId, plan, rows });
+  return {
+    status: 'success',
+    outputs: {
+      outcome: 'synced', platform, scope: plan.scope, since: plan.since, until: plan.until,
+      campaigns: persisted.campaigns ?? 0, imported: persisted.imported ?? 0, deduped: persisted.deduped ?? 0,
+      failures, truncated,
+    },
+  };
+}
+
+/**
+ * ADR 0907 D7 — deliver the org's queued server-side conversions (Meta CAPI,
+ * plus TikTok Events / Google Ads once verified). The host does the work
+ * (`deliverConversions`: run-owner identity, workspace:write, consent re-checked
+ * per row at send, per-row platform targets, resumable). role:"side-effect" +
+ * `side-effectful`: a REPLAY fork serves this node's recorded outcome and sends
+ * nothing; a BRANCH fork re-runs it, which sends only rows still queued.
+ */
+export async function dispatchConversions(ctx) {
+  const cc = ensureConnectors(ctx);
+  const orgId = str((ctx.inputs ?? {}).orgId);
+  if (!orgId) return { status: 'failed', error: { code: 'validation_error', message: 'orgId is required.' } };
+  if (typeof cc.deliverConversions !== 'function') {
+    return { status: 'failed', error: { code: 'host_capability_missing', message: 'campaign-connectors deliverConversions unavailable — update the feature (ADR 0907 D7).' } };
+  }
+  const out = await cc.deliverConversions({ orgId });
+  // Scheduled delivery is OFF until the workspace opts in (the
+  // `campaign-connectors.scheduled-conversions` toggle): an honest no-op.
+  if (out.outcome === 'disabled') return { status: 'success', outputs: { outcome: 'disabled', sent: 0, dropped: 0, held: 0, expired: 0 } };
+  if (out.outcome === 'no_acting_user') {
+    return { status: 'failed', error: { code: 'no_acting_user', message: 'Conversion delivery runs as a person (their ad connections and workspace access); this run has no acting user.' } };
+  }
+  if (out.outcome !== 'delivered') return { status: 'failed', error: { code: 'validation_error', message: out.error || 'delivery refused' } };
+  return { status: 'success', outputs: { outcome: 'delivered', sent: out.sent, dropped: out.dropped, held: out.held, expired: out.expired } };
 }
 
 export async function audienceSync(ctx) {
@@ -117,6 +163,7 @@ export const nodes = {
   'feature.campaign-connectors.nodes.import-csv': importCsv,
   'feature.campaign-connectors.nodes.sync': sync,
   'feature.campaign-connectors.nodes.audience-sync': audienceSync,
+  'feature.campaign-connectors.nodes.dispatch-conversions': dispatchConversions,
 };
 
 export default nodes;

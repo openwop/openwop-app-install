@@ -97,6 +97,7 @@ import { matchPublicPageSlug } from './features/site/publicPageRoute.js';
 import { matchBlogRoute } from './features/site/blogRoute.js';
 import { matchPricingRoute } from './features/site/pricingRoute.js';
 import { matchPrivacyRoute } from './features/site/privacyRoute.js';
+import { PRIVACY_HREF } from './brand/privacyHref.js';
 import { FRONTEND_FEATURES, lastKnownEntitlementFeatureIds } from './features/registry.js';
 import { config } from './client/config.js';
 import { matchDocsIndex, matchDocsSlug } from './features/docs/docsRoute.js';
@@ -527,7 +528,7 @@ export function App() {
         {chrome !== 'chat' && (
           <footer className="app-footer">
             {brand.footerText ? <>{brand.footerText} ·{' '}</> : null}
-            <Link to="/privacy">{t('footerPrivacy')}</Link>
+            <Link to={PRIVACY_HREF}>{t('footerPrivacy')}</Link>
           </footer>
         )}
       </div>

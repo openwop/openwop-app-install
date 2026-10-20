@@ -87,6 +87,7 @@ export function registerEnvironmentsErasure(): void {
   // feature declares no PII fields — opaque principal ids only).
   registerRetentionPurger({
     feature: 'environments',
+    dryRun: 'rows-by-age',
     async purge(tenantId, classification, cutoffIso) {
       if (!tenantId || classification !== 'internal') return 0;
       const pinned = new Set((await environments.list())

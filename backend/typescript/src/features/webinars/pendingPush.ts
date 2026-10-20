@@ -71,6 +71,7 @@ export async function pendingPushCounts(tenantId: string, orgId: string): Promis
 // enqueue age (the conversions-relay precedent — pixelService FM-D1-RET).
 registerRetentionPurger({
   feature: 'webinars-pending-push',
+  dryRun: 'rows-by-age',
   async purge(tenantId, classification, cutoffIso) {
     if (!tenantId || classification !== 'confidential-pii') return { deleted: 0, failed: 0 };
     return purgeRowsByAge('webinars-pending-push', await pending.listByPrefix(`${tenantId}:`), tenantId, cutoffIso,

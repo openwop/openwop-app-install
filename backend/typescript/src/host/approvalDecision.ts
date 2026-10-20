@@ -36,10 +36,12 @@ import {
   attachRunId,
   getAssistantActionApprovalHandler,
   getContentApprovalHandler,
+  getEmailSendApprovalHandler,
   getChallengePublishApprovalHandler,
   getKicktodoSignoffApprovalHandler,
   getAnonSurfaceWriteApprovalHandler,
   getStrategyActivationApprovalHandler,
+  getCampaignChangeSetApprovalHandler,
   getStrategyCheckInApprovalHandler,
   getScenarioSelectApprovalHandler,
   getContactMergeApprovalHandler,
@@ -106,6 +108,10 @@ export interface ApprovalDecisionCtx {
    *  from the HTTP body by both thin decide routes; REQUIRED for an assistant-action
    *  approve (the handler refuses without it). Ignored by every other kind. */
   expectedContentHash?: string;
+  /** ADR 0924 D2 — the change-set hash the decider DISPLAYED. A third sibling of
+   *  the two above, for the same reason: it hashes a different object. Required
+   *  for a `campaign-change-set` approve. Ignored by every other kind. */
+  expectedChangeSetHash?: string;
 }
 
 export interface ApprovalDecisionResult {
@@ -116,6 +122,8 @@ export interface ApprovalDecisionResult {
   runId?: string;
   pageId?: string;
   actionId?: string;
+  /** ADR 0924 — set for `campaign-change-set` decisions. */
+  changeSetId?: string;
   /** ADR 0230 §B3 — set for `strategy-activation` decisions. */
   strategyId?: string;
   /** ADR 0458 §2.2 (correction) — set for `challenge-publish` decisions: the
@@ -284,7 +292,7 @@ type FeatureApprovalHandler = (
   tenantId: string,
   approvalId: string,
   outcome: 'approved' | 'rejected',
-  opts: { decidedByUserId?: string; note?: string; isSuperadmin?: boolean; expectedDefinitionHash?: string },
+  opts: { decidedByUserId?: string; note?: string; isSuperadmin?: boolean; expectedDefinitionHash?: string; expectedChangeSetHash?: string },
 ) => Promise<{ approval: PendingApproval; changed: boolean } | null>;
 
 /** One feature kind's decision recipe — everything the shared dispatcher needs to
@@ -299,7 +307,7 @@ interface FeatureKindDispatch {
   /** Extra handler opts derived from the decision context —
    *  commerce-listing-publish threads `isSuperadmin`; composed-workflow
    *  threads `expectedDefinitionHash` (ADR 0473). */
-  handlerOpts?: (ctx: ApprovalDecisionCtx) => { isSuperadmin?: boolean; expectedDefinitionHash?: string };
+  handlerOpts?: (ctx: ApprovalDecisionCtx) => { isSuperadmin?: boolean; expectedDefinitionHash?: string; expectedChangeSetHash?: string };
   /** Extra result fields echoed to the caller (pageId / strategyId / the
    *  composed-workflow runId). Receives the DECIDED row (post-handler), so
    *  fields the handler attaches (`runId`) are visible. */
@@ -328,6 +336,16 @@ const KIND_DISPATCH = {
     notComposedLabel: 'CMS',
     audit: (a, o) => ({ action: o === 'approved' ? 'cms.page.published' : 'cms.page.rejected', resource: `cms-page:${a.pageId}`, payload: { ...baseAuditPayload(a), orgId: a.orgId } }),
     result: (a) => ({ pageId: a.pageId }),
+    // MyndHyve B2 — the handler lets a superadmin decide on the reserved system
+    // site only (ADR 0027 authority); every real org still needs the org scope.
+    handlerOpts: (ctx) => (ctx.decidedBySuperadmin ? { isSuperadmin: true } : {}),
+  },
+  // ADR 0905 D3 — email-campaign-send: the email handler moves the campaign to
+  // `approved` (approve) or back to a draft with the reviewer's note (reject).
+  'email-campaign-send': {
+    getHandler: getEmailSendApprovalHandler,
+    notComposedLabel: 'Email',
+    audit: (a, o) => ({ action: o === 'approved' ? 'email.campaign.send-approved' : 'email.campaign.send-rejected', resource: `email-campaign:${a.emailSend?.campaignId ?? a.approvalId}`, payload: { ...baseAuditPayload(a), orgId: a.orgId, templateVersion: a.emailSend?.templateVersion, contentHash: a.emailSend?.contentHash } }),
   },
   // ADR 0264 / CDP-B — contact-merge: the CRM handler merges (approve) / declines.
   'contact-merge': {
@@ -372,6 +390,15 @@ const KIND_DISPATCH = {
     getHandler: getCommissionStatementApprovalHandler,
     notComposedLabel: 'Sales Commissions',
     audit: (a, o) => ({ action: o === 'approved' ? 'commissions.statement.approved' : 'commissions.statement.rejected', resource: `commission-statement:${a.commissionStatement?.statementId ?? a.approvalId}`, payload: { ...baseAuditPayload(a), orgId: a.orgId } }),
+  },
+  // ADR 0924 — campaign-change-set: the campaign-ops handler checks the hash the
+  // decider saw and the request/asset versions, then starts the execution run.
+  'campaign-change-set': {
+    getHandler: getCampaignChangeSetApprovalHandler,
+    notComposedLabel: 'Campaign operations',
+    audit: (a, o) => ({ action: o === 'approved' ? 'campaign-ops.change-set.approved' : 'campaign-ops.change-set.rejected', resource: `campaign-change-set:${a.changeSetId}`, payload: { ...baseAuditPayload(a), orgId: a.orgId, changeSetHash: a.changeSetHash } }),
+    handlerOpts: (ctx) => (ctx.expectedChangeSetHash !== undefined ? { expectedChangeSetHash: ctx.expectedChangeSetHash } : {}),
+    result: (a) => ({ changeSetId: a.changeSetId }),
   },
   // ADR 0230 §B3 — strategy-activation: the strategy transition; echoes strategyId.
   'strategy-activation': {

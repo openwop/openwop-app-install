@@ -124,6 +124,7 @@ registerSubjectEraser(eraseSubjectCampaignDays);
 // seam passes (tenantId, CLASSIFICATION, cutoffIso) — the misbinding lesson).
 registerRetentionPurger({
   feature: 'job-search:campaign-day',
+  dryRun: 'rows-by-age',
   purge: async (tenantId, classification, cutoffIso) => {
     if (classification !== 'confidential-pii') return 0;
     const cutoffDay = cutoffIso.slice(0, 10); // UTC YYYY-MM-DD

@@ -24,6 +24,7 @@ import {
   type Section,
 } from '../features/cms/cmsService.js';
 import { ensureSystemSiteOrg, SYSTEM_SITE_TENANT, SYSTEM_SITE_ORG } from './systemSite.js';
+import { systemSiteSeedEnabled } from './systemSiteConfig.js';
 
 const log = createLogger('host.systemSiteDocs');
 
@@ -214,6 +215,9 @@ const DOCS: DocSeed[] = [
 const seedMarker = new DurableCollection<{ id: string; version: number }>('systemsite:docs-seed', (r) => r.id);
 
 async function doEnsure(): Promise<void> {
+  // ADR 0931 — a distribution can turn this seed off. It then writes nothing;
+  // pages it wrote before stay as they are.
+  if (!systemSiteSeedEnabled('docs')) return;
   await ensureSystemSiteOrg();
   const marker = await seedMarker.get('seed');
   if (marker?.version === SEED_VERSION) return; // corpus current — nothing to do

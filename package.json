@@ -18,7 +18,8 @@
     "test:e2e:full": "bash scripts/e2e-routes.sh",
     "build:distribution": "node scripts/gen-distribution.mjs && npm --prefix backend/typescript run build && npm --prefix frontend/react run build",
     "ci:distribution": "node scripts/gen-distribution.mjs --check && OPENWOP_DISTRIBUTION=slim-proof npm --prefix backend/typescript run build && OPENWOP_DISTRIBUTION=slim-proof npm --prefix frontend/react run build",
-    "packs:prune": "node scripts/prune-dangling-packs.mjs"
+    "packs:prune": "node scripts/prune-dangling-packs.mjs",
+    "demo:agency-ops:reset": "node scripts/demo-agency-ops-reset.mjs"
   },
   "devDependencies": {
     "playwright": "1.59.1"

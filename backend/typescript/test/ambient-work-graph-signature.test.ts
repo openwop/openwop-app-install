@@ -6,7 +6,7 @@ import { computeRunSignature, clusterAndDetect, suggestionIdFor } from '../src/f
 import type { RunSignatureInput } from '../src/features/ambient-work-graph/types.js';
 
 const run = (runId: string, toolNames: string[], extra: Partial<RunSignatureInput> = {}): RunSignatureInput =>
-  ({ runId, toolNames, agentId: 'researcher', createdAt: '2026-06-24T00:00:00Z', ...extra });
+  ({ runId, ownerKey: 'o', toolNames, agentId: 'researcher', createdAt: '2026-06-24T00:00:00Z', ...extra });
 
 describe('computeRunSignature', () => {
   it('agent + consecutive-deduped ordered tool names; deterministic', () => {
@@ -36,7 +36,7 @@ describe('clusterAndDetect', () => {
   ];
 
   it('emits a suggestion for a pattern at/over the threshold; not for rare ones', () => {
-    const out = clusterAndDetect('t', inputs, { minCount: 3 });
+    const out = clusterAndDetect('t', 'o', inputs, { minCount: 3 });
     expect(out).toHaveLength(1);
     expect(out[0]).toMatchObject({
       signature: 'researcher|kb.search>email.send', count: 3, toolSequence: ['kb.search', 'email.send'],
@@ -46,15 +46,24 @@ describe('clusterAndDetect', () => {
   });
 
   it('deterministic suggestionId (idempotent re-sweep)', () => {
-    const a = clusterAndDetect('t', inputs, { minCount: 3 })[0]!;
-    const b = clusterAndDetect('t', inputs, { minCount: 3 })[0]!;
+    const a = clusterAndDetect('t', 'o', inputs, { minCount: 3 })[0]!;
+    const b = clusterAndDetect('t', 'o', inputs, { minCount: 3 })[0]!;
     expect(a.suggestionId).toBe(b.suggestionId);
-    expect(a.suggestionId).toBe(suggestionIdFor('t', a.signature));
-    // tenant-separated
-    expect(suggestionIdFor('other', a.signature)).not.toBe(a.suggestionId);
+    expect(a.suggestionId).toBe(suggestionIdFor('t', 'o', a.signature));
+    // tenant- and owner-separated (ADR 0930 D1), and a 96-bit sha256 prefix (A7)
+    expect(suggestionIdFor('other', 'o', a.signature)).not.toBe(a.suggestionId);
+    expect(suggestionIdFor('t', 'someone-else', a.signature)).not.toBe(a.suggestionId);
+    expect(a.suggestionId).toMatch(/^ws-[0-9a-f]{24}$/);
+    expect(a.ownerPrincipal).toBe('o');
+  });
+
+  it('never clusters across owners (ADR 0930 D1)', () => {
+    const mixed = [...inputs.slice(0, 2), { ...inputs[2]!, ownerKey: 'p' }];
+    expect(clusterAndDetect('t', 'o', mixed, { minCount: 3 })).toHaveLength(0);
+    expect(clusterAndDetect('t', 'p', mixed, { minCount: 1 })).toHaveLength(1);
   });
 
   it('a lower threshold surfaces more patterns', () => {
-    expect(clusterAndDetect('t', inputs, { minCount: 1 })).toHaveLength(2);
+    expect(clusterAndDetect('t', 'o', inputs, { minCount: 1 })).toHaveLength(2);
   });
 });

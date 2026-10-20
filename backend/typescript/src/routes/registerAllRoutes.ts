@@ -100,6 +100,7 @@ import { registerMultiPartyConversationSeamRoutes } from './multiPartyConversati
 import { registerWorkforceRoutes } from './workforces.js';
 import { registerAccessControlRoutes } from './accessControl.js';
 import { registerWorkspaceTenancyRoutes } from './workspaces.js';
+import { registerOperatorAccessRoutes } from './operatorAccess.js';
 import { registerKanbanRoutes } from './kanban.js';
 import { registerAgentOpsRoutes } from './agentOps.js';
 import { registerApprovalRoutes } from './approvals.js';
@@ -398,6 +399,8 @@ const ROUTE_MODULES: RouteModule[] = [
   // Workspace lifecycle (ADR 0015 — workspace-as-tenant): list / create / switch.
   // Mounts after accessControl (the single owner of orgs/members/roles it builds on).
   { name: 'workspaces', register: ({ app }) => registerWorkspaceTenancyRoutes(app) },
+  // ADR 0910 D3 — just-in-time operator access on a system-owned default workspace.
+  { name: 'operatorAccess', register: ({ app }) => registerOperatorAccessRoutes(app) },
   // Kanban boards — sample host-extension (non-normative). The card→run
   // trigger is the RFCS/0086 "named workflow agents" demo surface.
   { name: 'kanban', register: ({ app, storage, hostSuite }) => registerKanbanRoutes(app, { storage, hostSuite }) },

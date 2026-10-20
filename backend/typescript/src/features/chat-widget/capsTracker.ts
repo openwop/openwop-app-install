@@ -58,6 +58,7 @@ const retentionStampFor = (day: string): string => {
 // and are simply skipped — active sessions self-heal on their next turn write.
 registerRetentionPurger({
   feature: 'chat-widget',
+  dryRun: 'rows-by-age',
   async purge(tenantId, classification, cutoffIso) {
     if (!tenantId || classification !== 'internal') return 0;
     const [s, d, w, a] = await Promise.all([

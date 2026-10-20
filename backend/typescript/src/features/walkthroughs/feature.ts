@@ -116,7 +116,7 @@ export function registerWalkthroughWorkflows(): void {
 
 export const walkthroughsFeature: BackendFeature = {
   id: 'walkthroughs',
-  requiredPacks: [{ name: 'feature.walkthroughs.nodes', version: '1.0.1' }], // NP-WALK-1 (ctx reads; the ui.walkthrough.* step nodes stay host-registered by design)
+  requiredPacks: ['feature.walkthroughs.nodes'], // NP-WALK-1 (ctx reads; the ui.walkthrough.* step nodes stay host-registered by design)
   // ADR 0368 P6d — the honest `ctx.features.walkthroughs` READ surface (no
   // launch; a run can read walkthrough state to gate a branch). Toggle-gated by the
   // feature registry (surface id = toggle id).

@@ -69,7 +69,6 @@ export const LEGACY_SILENT_READ_SITES = [
   ['discovery/CapabilitiesPanel.tsx', 'error', 1],
   ['features/advisory-board/AdvisoryBoardPage.tsx', 'error', 1],
   ['features/agent-knowledge/AgentMemoryTab.tsx', 'error', 1],
-  ['features/ambient-work-graph/WorkGraphPage.tsx', 'error', 1],
   ['features/app-builder/PublishModal.tsx', 'error', 1],
   ['features/app-builder/SyncModal.tsx', 'error', 1],
   ['features/bi/MetricsPage.tsx', 'error', 1],

@@ -11,8 +11,10 @@ import {
   buildOfflineTable,
   computePrecache,
   generateServiceWorker,
+  parseLegacyCachePurge,
   prepareOfflineBuild,
   resolveHostingConfigPath,
+  type LegacyCachePurge,
   type NeverCacheRule,
   type OfflineFeature,
 } from './scripts/gen-service-worker.mjs';
@@ -94,6 +96,18 @@ export default defineConfig(({ mode }) => {
   const pwaStartUrl = loadEnv(mode, __dirname, '').VITE_PWA_START_URL || '/';
 
   return {
+    // react-router 7's `exports` map names only its `dist/development` build, so a
+    // production bundle shipped the dev build: its warning strings and checks sat
+    // in the entry chunk of every page. The package ships `dist/production` beside
+    // it (the same code with the dev-only paths removed); point the two bare
+    // specifiers this app uses at it, in production builds only. Dev and vitest
+    // keep the development build and its warnings.
+    resolve: mode === 'production' ? {
+      alias: [
+        { find: /^react-router$/, replacement: resolve(__dirname, 'node_modules/react-router/dist/production/index.mjs') },
+        { find: /^react-router\/dom$/, replacement: resolve(__dirname, 'node_modules/react-router/dist/production/dom-export.mjs') },
+      ],
+    } : undefined,
     server: {
       port: 5173,
       strictPort: false,
@@ -154,13 +168,17 @@ export default defineConfig(({ mode }) => {
         // features' `offline.ts` declarations, derives the D4 never-cache set and
         // refuses a bad table before anything builds; `generateBundle` (post, so
         // `index.html` is in the bundle) derives the D6 precache and budget.
+        // `VITE_SW_LEGACY_CACHE_PURGE` (D13) is parsed in `config` too, so a bad
+        // value fails before the build.
         let offlineFeatures: OfflineFeature[] = [];
         let neverCache: NeverCacheRule[] = [];
+        let legacyCachePurge: LegacyCachePurge | null = null;
         return {
           name: 'openwop-service-worker',
           enforce: 'post' as const,
           async config() {
             const env = loadEnv(mode, __dirname, '');
+            legacyCachePurge = parseLegacyCachePurge(env.VITE_SW_LEGACY_CACHE_PURGE);
             ({ features: offlineFeatures, neverCache } = await prepareOfflineBuild({
               registrySource: composedRegistrySource ?? readFileSync(canonicalRegistry, 'utf8'),
               registryPath: canonicalRegistry,
@@ -176,12 +194,12 @@ export default defineConfig(({ mode }) => {
               if (req.url?.split('?')[0] !== '/sw.js') { next(); return; }
               res.setHeader('Content-Type', 'text/javascript; charset=utf-8');
               res.setHeader('Cache-Control', 'no-cache');
-              res.end(generateServiceWorker());
+              res.end(generateServiceWorker(null, { legacyCachePurge }));
             });
           },
           generateBundle(_options: unknown, bundle: Record<string, unknown>) {
             if (offlineFeatures.length === 0) {
-              this.emitFile({ type: 'asset', fileName: 'sw.js', source: generateServiceWorker() });
+              this.emitFile({ type: 'asset', fileName: 'sw.js', source: generateServiceWorker(null, { legacyCachePurge }) });
               return;
             }
             const budgetKb = Number(process.env.OPENWOP_SW_PRECACHE_MAX_KB ?? DEFAULT_PRECACHE_MAX_KB);
@@ -199,7 +217,7 @@ export default defineConfig(({ mode }) => {
             }
             if (result.errors.length > 0) this.error(`[sw] ADR 0873 precache refused:\n  - ${result.errors.join('\n  - ')}`);
             const table = buildOfflineTable({ features: offlineFeatures, neverCache, precache: result.precache, version: result.version });
-            this.emitFile({ type: 'asset', fileName: 'sw.js', source: generateServiceWorker(table) });
+            this.emitFile({ type: 'asset', fileName: 'sw.js', source: generateServiceWorker(table, { legacyCachePurge }) });
           },
         };
       })(),

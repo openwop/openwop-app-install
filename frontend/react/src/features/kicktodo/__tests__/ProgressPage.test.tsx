@@ -110,3 +110,28 @@ describe('Progress — evidence-led journey', () => {
     expect(screen.queryByText(en.progressLoadErrorBody)).toBeNull();
   });
 });
+
+describe('Progress — the goal is the outcome truth (ADR 0908, GL2UX-3)', () => {
+  it('a satisfied goal reads complete even before the enrollment row is projected', async () => {
+    kt.listEnrollmentsWithProgress.mockResolvedValue({ enrollments: [enrollment], progress: { 'enroll-focus': progress({ goalState: 'satisfied' }) } });
+    mount();
+    expect(await screen.findByText(en.progressCompleted)).toBeTruthy();
+  });
+
+  it('a goal past its limit says the journey ended and offers the next move', async () => {
+    kt.listEnrollmentsWithProgress.mockResolvedValue({ enrollments: [enrollment], progress: { 'enroll-focus': progress({ goalState: 'bound-exceeded' }) } });
+    mount();
+    expect(await screen.findByText(en.progressEndedChip)).toBeTruthy();
+    expect(screen.getByText(en.progressJourneyEnded)).toBeTruthy();
+    expect(screen.getByText(en.progressStatusEnded)).toBeTruthy();
+    expect(screen.queryByText(en.progressCompleted)).toBeNull();
+    expect(screen.getByRole('link', { name: en.browseChallenges }).getAttribute('href')).toBe('/discover');
+  });
+
+  it('an escalated goal says it waits on a review', async () => {
+    kt.listEnrollmentsWithProgress.mockResolvedValue({ enrollments: [enrollment], progress: { 'enroll-focus': progress({ goalState: 'escalated' }) } });
+    mount();
+    expect(await screen.findByText(en.progressEscalatedChip)).toBeTruthy();
+    expect(screen.getByText(en.progressStatusEscalated)).toBeTruthy();
+  });
+});

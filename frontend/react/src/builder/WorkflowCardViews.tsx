@@ -289,7 +289,7 @@ export function WorkflowCard({
   const { t } = useTranslation('builder');
 
   return (
-    <div className="workflow-card">
+    <div className={menuOpen ? 'workflow-card workflow-card--menu-open' : 'workflow-card'}>
       {/* DSA-019 (ADR 0510 Phase 1): the open action is a REAL <button> — the
           title stretched over the card via CSS (.workflow-card-open::after) —
           instead of a focusable aria-labelled generic <div> (ARIA naming is

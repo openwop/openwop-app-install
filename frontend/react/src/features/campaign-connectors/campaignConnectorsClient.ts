@@ -24,6 +24,9 @@ export interface KpiSummary {
    *  is then a guess and figures render unlabelled. Absent = known (older
    *  backend, unchanged behaviour). */
   currencyKnown?: boolean;
+  /** ADR 0907 D3 — records whose platform could not report conversions /
+   *  revenue. Totals leave them out; ratios use only the reporting rows. */
+  unreported?: { conversions: number; revenue: number };
 }
 export interface OrgRef { orgId: string; name: string }
 
@@ -45,21 +48,63 @@ async function asJson<T>(res: Response, ctx: string): Promise<T> {
 export async function importCsv(orgId: string, csv: string, defaultPlatform?: AdPlatform): Promise<ImportResult> {
   return asJson<ImportResult>(await fetch(`${base}/import`, fetchOpts({ method: 'POST', headers: jsonHeaders(), body: JSON.stringify({ orgId, csv, ...(defaultPlatform ? { defaultPlatform } : {}) }) })), 'importCsv');
 }
+export type LiveSyncPlatform = 'meta' | 'google' | 'tiktok' | 'linkedin';
+export type SyncScope = 'dispatched' | 'account';
+export interface SyncFailure { adAccountId?: string; platformCampaignId?: string; reason: string; retryAfterS?: number }
 export interface SyncResult {
-  outcome: 'synced' | 'cooldown' | 'no_dispatches';
+  outcome: 'synced' | 'cooldown' | 'no_dispatches' | 'no_accounts' | 'not_verified';
   retryAtIso?: string;
   platform?: string;
+  scope?: SyncScope;
+  /** ADR 0907 D3 — the look-back window that was pulled (inclusive). */
+  since?: string;
+  until?: string;
   date?: string;
   campaigns?: number;
   imported?: number;
   deduped?: number;
-  failures?: Array<{ platformCampaignId: string; reason: string }>;
+  failures?: SyncFailure[];
+  /** TRUE when an account hit the page cap; the rows read did land. */
+  truncated?: boolean;
 }
-/** C2 — live pull of yesterday's metrics for every dispatched campaign. 429 ⇒ cooldown. */
-export async function syncNow(orgId: string, platform: 'meta' | 'google'): Promise<SyncResult> {
+/** Live pull of the 7-day look-back per the org's connector settings. 429 ⇒ cooldown. */
+export async function syncNow(orgId: string, platform: LiveSyncPlatform): Promise<SyncResult> {
   const res = await fetch(`${base}/sync`, fetchOpts({ method: 'POST', headers: jsonHeaders(), body: JSON.stringify({ orgId, platform }) }));
   if (res.status === 429) return (await res.json()) as SyncResult;
   return asJson<SyncResult>(res, 'syncNow');
+}
+
+/** ADR 0907 D3 — per-(org, platform) sync settings. */
+export interface ConnectorSettings {
+  orgId: string;
+  platform: LiveSyncPlatform;
+  syncScope: SyncScope;
+  adAccountIds: string[];
+  conversionActionTypes?: string[];
+  updatedAt: string;
+}
+export async function getConnectorSettings(orgId: string, platform: LiveSyncPlatform): Promise<ConnectorSettings> {
+  return (await asJson<{ settings: ConnectorSettings }>(await fetch(`${base}/orgs/${encodeURIComponent(orgId)}/connector-settings/${platform}`, fetchOpts({ headers: authedHeaders() })), 'getConnectorSettings')).settings;
+}
+export async function saveConnectorSettings(orgId: string, platform: LiveSyncPlatform, input: { syncScope: SyncScope; adAccountIds: string[]; conversionActionTypes?: string[] | null }): Promise<ConnectorSettings> {
+  return (await asJson<{ settings: ConnectorSettings }>(await fetch(`${base}/orgs/${encodeURIComponent(orgId)}/connector-settings/${platform}`, fetchOpts({ method: 'PUT', headers: jsonHeaders(), body: JSON.stringify(input) })), 'saveConnectorSettings')).settings;
+}
+
+export interface BackfillResult {
+  outcome: 'progress' | 'done' | 'rate_limited' | 'busy' | 'no_dispatches' | 'no_accounts' | 'not_verified';
+  targetSince?: string;
+  remainingDays?: number;
+  windowsDone?: number;
+  imported?: number;
+  failures?: SyncFailure[];
+  truncated?: boolean;
+  retryAtIso?: string;
+}
+/** One step of a resumable backfill (≤ 90 days). 429 ⇒ busy / rate-limited, both carry a body. */
+export async function runBackfill(orgId: string, platform: LiveSyncPlatform, days: number): Promise<BackfillResult> {
+  const res = await fetch(`${base}/orgs/${encodeURIComponent(orgId)}/sync/backfill`, fetchOpts({ method: 'POST', headers: jsonHeaders(), body: JSON.stringify({ platform, days }) }));
+  if (res.status === 429) return (await res.json()) as BackfillResult;
+  return asJson<BackfillResult>(res, 'runBackfill');
 }
 
 export async function getKpi(orgId: string): Promise<KpiSummary> {
@@ -74,12 +119,17 @@ export const AD_PLATFORMS: ReadonlyArray<AdPlatform> = ['google', 'meta', 'linke
 // ── ADR 0297 D1 / FNL-UX-3 — pixel configs ──────────────────────────────────
 export const PIXEL_PLATFORMS = ['meta', 'google', 'tiktok'] as const;
 export type PixelPlatform = (typeof PIXEL_PLATFORMS)[number];
-export interface PixelConfig { platform: PixelPlatform; pixelId: string; active: boolean; updatedAt: string }
+export interface PixelConfig {
+  platform: PixelPlatform; pixelId: string; active: boolean; updatedAt: string;
+  /** Google ONLY (ADR 0907 D5): the Ads customer + event → conversion action map. */
+  googleCustomerId?: string;
+  conversionActions?: Record<string, string>;
+}
 
 export async function listPixels(orgId: string): Promise<PixelConfig[]> {
   return (await asJson<{ pixels: PixelConfig[] }>(await fetch(`${base}/orgs/${encodeURIComponent(orgId)}/pixels`, fetchOpts({ headers: authedHeaders() })), 'listPixels')).pixels;
 }
-export async function upsertPixel(orgId: string, input: { platform: PixelPlatform; pixelId: string; active?: boolean }): Promise<PixelConfig> {
+export async function upsertPixel(orgId: string, input: { platform: PixelPlatform; pixelId: string; active?: boolean; googleCustomerId?: string; conversionActions?: Record<string, string> | null }): Promise<PixelConfig> {
   return (await asJson<{ pixel: PixelConfig }>(await fetch(`${base}/orgs/${encodeURIComponent(orgId)}/pixels`, fetchOpts({ method: 'PUT', headers: jsonHeaders(), body: JSON.stringify(input) })), 'upsertPixel')).pixel;
 }
 export async function removePixel(orgId: string, platform: PixelPlatform): Promise<void> {
@@ -97,10 +147,37 @@ export async function getSyncStatus(orgId: string): Promise<Array<{ platform: st
 // waited forever, then the retention purge silently dropped user-submitted
 // data. This is the smallest wiring that makes the existing dispatch route
 // reachable from a real surface.
-export interface QueuedConversion { eventId: string; eventName: string; at: string; status: 'queued' | 'sent' }
+export interface QueuedConversion { eventId: string; eventName: string; at: string; status: 'queued' | 'sent' | 'expired' }
 export async function listConversions(orgId: string): Promise<QueuedConversion[]> {
   return (await asJson<{ conversions: QueuedConversion[] }>(await fetch(`${base}/orgs/${encodeURIComponent(orgId)}/conversions`, fetchOpts({ headers: authedHeaders() })), 'listConversions')).conversions;
 }
-export async function dispatchConversions(orgId: string): Promise<{ sent: number }> {
-  return asJson<{ sent: number }>(await fetch(`${base}/orgs/${encodeURIComponent(orgId)}/conversions/dispatch`, fetchOpts({ method: 'POST', headers: jsonHeaders() })), 'dispatchConversions');
+/** ADR 0907 D7 — `dropped`: consent withdrawn since intake; `held`: consent
+ *  unreadable (or no visitor key) right now, retried next run. */
+export interface DispatchResult { sent: number; dropped?: number; held?: number; expired?: number }
+export async function dispatchConversions(orgId: string): Promise<DispatchResult> {
+  return asJson<DispatchResult>(await fetch(`${base}/orgs/${encodeURIComponent(orgId)}/conversions/dispatch`, fetchOpts({ method: 'POST', headers: jsonHeaders() })), 'dispatchConversions');
+}
+
+/** ADR 0907 D7 — the conversions health card. */
+export interface ConversionHealth {
+  queued: number;
+  sent: number;
+  /** ADR 0907 D7 — older than every remaining platform's window; never sent. */
+  expired?: number;
+  /** The read hit its row bound: counts are a floor, not a total. */
+  capped: boolean;
+  platforms: Array<{ platform: PixelPlatform; configured: boolean; live: boolean; delivered: number; pending: number; lastError?: { error: string; at: string } }>;
+}
+export async function getConversionHealth(orgId: string): Promise<ConversionHealth> {
+  return asJson<ConversionHealth>(await fetch(`${base}/orgs/${encodeURIComponent(orgId)}/conversions/health`, fetchOpts({ headers: authedHeaders() })), 'getConversionHealth');
+}
+
+/** ADR 0907 D2 — what may run right now: the metrics readers and the
+ *  conversion senders (TikTok/LinkedIn readers and the TikTok/Google senders
+ *  only after the operator has verified them on a test account). */
+export interface PlatformStatus { liveSync: LiveSyncPlatform[]; liveConversions: PixelPlatform[] }
+export async function getPlatformStatus(): Promise<PlatformStatus> {
+  const body = await asJson<Partial<PlatformStatus>>(await fetch(`${base}/platforms`, fetchOpts({ headers: authedHeaders() })), 'getPlatformStatus');
+  // An older backend: the ADR 0215 readers and the ADR 0297 sender.
+  return { liveSync: body.liveSync ?? ['meta', 'google'], liveConversions: body.liveConversions ?? ['meta'] };
 }

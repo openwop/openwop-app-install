@@ -81,6 +81,7 @@ export const jobDigests = new DurableCollection<JobDigest>(
 // assessment's UNBOUNDED retention table.
 registerRetentionPurger({
   feature: 'job-search:digest',
+  dryRun: 'rows-by-age',
   purge: async (tenantId, classification, cutoffIso) =>
     classification !== 'internal' ? 0 : purgeRowsByAge(
       'job-search:digest',

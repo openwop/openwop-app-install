@@ -71,7 +71,7 @@ export const territoriesFeature: BackendFeature = {
   // and hierarchy attach to CRM accounts (ADR 0194 disable-lock).
   dependsOn: ['crm'],
   requiredPacks: [
-    { name: 'feature.territories.nodes', version: '1.2.1' },
-    { name: 'vendor.openwop-app.territories.agents', version: '1.0.3' },
+    'feature.territories.nodes',
+    'vendor.openwop-app.territories.agents',
   ],
 };

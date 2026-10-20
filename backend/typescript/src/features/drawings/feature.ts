@@ -34,7 +34,7 @@ export const drawingsFeature: BackendFeature = {
     salt: 'drawings',
   },
   requiredPacks: [
-    { name: 'feature.drawings.nodes', version: '1.0.1' },
-    { name: 'vendor.openwop-app.drawings.agents', version: '1.0.3' },
+    'feature.drawings.nodes',
+    'vendor.openwop-app.drawings.agents',
   ],
 };

@@ -1,0 +1,150 @@
+{
+  "name": "core.openwop.workflows.campaign-ops",
+  "version": "1.0.0",
+  "kind": "workflow-chain",
+  "description": "Agency campaign operations (ADR 0923): turn an operator's change request into a hashed change set of constrained edits on a client's landing page and email draft, for approval.",
+  "keywords": [
+    "campaign-studio",
+    "campaign-ops",
+    "agency",
+    "marketing"
+  ],
+  "engines": {
+    "openwop": ">=1.0.0 <3.0.0"
+  },
+  "chains": [
+    {
+      "chainId": "campaign-ops.change-request",
+      "version": "1.0.0",
+      "internal": true,
+      "label": "Campaign change request",
+      "description": "Interprets one change request for one client and proposes the edits. If facts are missing (which Thursday, which link) it asks and stops; once answered it runs again. Otherwise it reads each asset's editable fields and proposes the smallest edits that carry out the request, as a change set waiting for approval. Nothing is written to a page or an email here.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "orgId",
+          "requestId",
+          "version"
+        ],
+        "properties": {
+          "orgId": {
+            "type": "string",
+            "description": "The client organization the request belongs to."
+          },
+          "requestId": {
+            "type": "string",
+            "description": "The change request to work on."
+          },
+          "version": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "The request version to work on. An edited request has a newer version, and the older one is no longer worked on."
+          },
+          "provider": {
+            "type": "string",
+            "description": "AI provider id for this chain's model-calling nodes (for example anthropic, openai, google). Fixed into those nodes when the workflow is created. Leave unset to keep the nodes' own default."
+          },
+          "model": {
+            "type": "string",
+            "description": "Model id for this chain's model-calling nodes. Must be offered by `provider` in the host catalog. Set it together with `provider`."
+          }
+        }
+      },
+      "capabilities": [
+        "side-effectful"
+      ],
+      "dag": {
+        "nodes": [
+          {
+            "id": "interpret",
+            "typeId": "feature.campaign-ops.nodes.interpret@1.0.0",
+            "name": "Interpret request",
+            "position": {
+              "x": 0,
+              "y": 0
+            },
+            "config": {},
+            "inputs": {
+              "orgId": "{{params.orgId}}",
+              "requestId": "{{params.requestId}}",
+              "version": "{{params.version}}",
+              "provider": "{{params.provider}}",
+              "model": "{{params.model}}"
+            }
+          },
+          {
+            "id": "propose",
+            "typeId": "feature.campaign-ops.nodes.propose@1.0.0",
+            "name": "Propose change set",
+            "position": {
+              "x": 320,
+              "y": 0
+            },
+            "config": {},
+            "inputs": {
+              "orgId": "{{params.orgId}}",
+              "requestId": "{{params.requestId}}",
+              "version": "{{params.version}}",
+              "provider": "{{params.provider}}",
+              "model": "{{params.model}}"
+            }
+          }
+        ],
+        "edges": [
+          {
+            "from": "interpret",
+            "to": "propose"
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "campaign-ops.execute",
+      "version": "1.0.0",
+      "internal": true,
+      "label": "Carry out an approved campaign change",
+      "description": "Writes an approved change set to its client's page and email draft, one destination at a time, and checks each one by reading it back. Started only by the approval of that exact change set; a copy cannot carry out anything.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "orgId",
+          "approvalId"
+        ],
+        "properties": {
+          "orgId": {
+            "type": "string",
+            "description": "The client organization the change belongs to."
+          },
+          "approvalId": {
+            "type": "string",
+            "description": "The approval of the change set to carry out."
+          }
+        }
+      },
+      "capabilities": [
+        "side-effectful"
+      ],
+      "dag": {
+        "nodes": [
+          {
+            "id": "execute",
+            "typeId": "feature.campaign-ops.nodes.execute@1.0.0",
+            "name": "Carry out change",
+            "position": {
+              "x": 0,
+              "y": 0
+            },
+            "config": {},
+            "inputs": {
+              "orgId": "{{params.orgId}}",
+              "approvalId": "{{params.approvalId}}"
+            }
+          }
+        ],
+        "edges": []
+      }
+    }
+  ]
+}

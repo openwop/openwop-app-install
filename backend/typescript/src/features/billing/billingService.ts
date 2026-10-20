@@ -24,7 +24,7 @@ import { OpenwopError } from '../../types.js';
 import { fireSubscriptionInvoicePaid } from './subscriptionInvoiceHook.js';
 import {
   createStripeCheckoutSession, getStripeCheckoutSession, getStripeSubscription,
-  createStripeTenantCustomer, isPermanentStripeReadError, isMissingStripeCustomerError, STRIPE_API_VERSION,
+  createStripeTenantCustomer, cancelStripeSubscription, isPermanentStripeReadError, isMissingStripeCustomerError, STRIPE_API_VERSION,
 } from './stripeApi.js';
 import { registerKvAgeOut } from '../../host/kvAgeOut.js';
 import { recordLedgerCount } from '../../host/paywallFunnel.js';
@@ -1175,6 +1175,7 @@ function kindOfPrice(priceId: string): CheckoutKind | undefined {
 // webhook-event ledger above, this carries no dedup guarantee, so purging is safe.
 registerRetentionPurger({
   feature: 'billing:checkout',
+  dryRun: 'rows-by-age',
   async purge(tenantId, classification, cutoffIso) {
     if (!tenantId || classification !== 'internal') return 0;
     return purgeRowsByAge('billing:checkout', await checkouts.list(), tenantId, cutoffIso,
@@ -1418,6 +1419,117 @@ async function ensureStripeCustomer(tenantId: string, stripeKey: string): Promis
   await recordStripeCustomer(tenantId, customerId);
   return (await getSubscription(tenantId)).stripeCustomerId ?? customerId;
 }
+/** Subscriptions an account self-delete ended. A later webhook for one of these
+ *  (Stripe sends `customer.subscription.deleted` for the cancel itself) must not
+ *  write billing rows back for the erased tenant, which a re-signup to the same
+ *  `user:` tenant would then inherit.
+ *
+ *  NO PERSONAL DATA: a row is exactly `{ subscriptionId, at }`: Stripe's opaque
+ *  `sub_…` id and a timestamp. No tenant id, customer id, email or name. That is
+ *  also why it carries no `tenantId`: the marker has to OUTLIVE the tenant wipe
+ *  it guards (classified EXEMPT in `teardown-reachability-coverage.test.ts`).
+ *
+ *  Bounded: aged out after {@link ERASED_SUBSCRIPTION_TTL_DAYS}. Stripe retries
+ *  an undelivered webhook for up to 3 days in live mode; 30 days covers that
+ *  with a wide margin (a manual dashboard resend after that would at most
+ *  recreate a terminal, non-entitling `canceled` row). */
+const ERASED_SUBSCRIPTION_TTL_DAYS = 30;
+const erasedSubscriptions = new DurableCollection<{ subscriptionId: string; at: string }>('billing:erased-subscription', (r) => r.subscriptionId);
+registerKvAgeOut({ id: 'billing:erased-subscription', prefix: 'hostext:billing:erased-subscription:', ttlDays: ERASED_SUBSCRIPTION_TTL_DAYS, timestampField: 'at', hostGlobal: true });
+
+/** What {@link cancelTenantStripeSubscriptions} did, by Stripe subscription id. */
+export interface TenantBillingCancel {
+  /** Canceled at Stripe by this call. */
+  canceled: string[];
+  /** Already ended at Stripe (canceled or `incomplete_expired`): nothing to do. */
+  alreadyEnded: string[];
+  /** Stripe does not know the id for the configured key (a permanent 400/404
+   *  read). Nothing this key can cancel; reported so the caller can audit it. */
+  unknownToStripe: string[];
+}
+
+/**
+ * Account self-delete (MyndHyve R2) — stop every recurring charge the tenant
+ * holds BEFORE its billing rows are deleted. Without this the account-delete
+ * wipe removed the plan row and the bundle grants and left the Stripe
+ * subscriptions billing a customer whose account no longer exists, with no
+ * local row left to reconcile them from.
+ *
+ * Covers the plan subscription and every bundle add-on subscription that is
+ * still open locally. Each one is read at Stripe first, so an already-ended
+ * one is not canceled again. The cancel is immediate (Stripe's default: no
+ * proration and no refund); the account it paid for is being deleted.
+ *
+ * Fail-closed: a missing key while a subscription is open, or a transient
+ * Stripe failure, THROWS `service_unavailable` (503), so the caller deletes
+ * nothing and the person can retry. Money-truth rule: the Stripe state decides,
+ * never the local row alone.
+ */
+/** End the local plan row and any bundle grant that name a subscription Stripe
+ *  confirmed ended (the `refuseIfAlreadyLive` reconciliation shape). */
+async function endLocalSubscriptionRows(tenantId: string, subId: string): Promise<void> {
+  await mutateSubscription(tenantId, (row) => (row.stripeSubscriptionId === subId && isOpenStatus(row.status)
+    ? { ...row, status: 'canceled', endedSubscriptionIds: withEnded(row.endedSubscriptionIds, subId), updatedAt: nowIso() }
+    : null));
+  for (const [bundleId, g] of Object.entries((await getBundleEntitlements(tenantId)).bundles)) {
+    if (g.stripeSubscriptionId !== subId) continue;
+    await mutateBundleGrant(tenantId, bundleId, (cur) => (cur?.stripeSubscriptionId === subId
+      ? { ...cur, status: 'canceled', stripeStatus: 'canceled', endedSubscriptionIds: withEnded(cur.endedSubscriptionIds, subId), updatedAt: nowIso() }
+      : null));
+  }
+}
+
+export async function cancelTenantStripeSubscriptions(tenantId: string, stripeKey: string | null): Promise<TenantBillingCancel> {
+  const out: TenantBillingCancel = { canceled: [], alreadyEnded: [], unknownToStripe: [] };
+  const open = new Set<string>();
+  const sub = await getSubscription(tenantId);
+  if (sub.stripeSubscriptionId && isOpenStatus(sub.status)) open.add(sub.stripeSubscriptionId);
+  for (const g of Object.values((await getBundleEntitlements(tenantId)).bundles)) {
+    if (g.stripeSubscriptionId && isOpenStatus(g.stripeStatus ?? (g.status === 'active' ? 'active' : 'canceled'))) open.add(g.stripeSubscriptionId);
+  }
+  if (open.size === 0) return out;
+  if (!stripeKey) {
+    throw new OpenwopError('service_unavailable',
+      'Your subscription could not be canceled because billing is not configured right now, so your account was not deleted. Try again later or contact support.',
+      503, { billing: 'stripe_key_missing', openSubscriptions: open.size });
+  }
+  for (const subId of open) {
+    try {
+      const status = await statusInStripe(stripeKey, subId);
+      if (status === null) {
+        // Not marked and not ended locally: Stripe cannot confirm it ended, so
+        // its webhooks must keep syncing if this delete then fails.
+        log.warn('account-delete: subscription unknown to Stripe for this key — nothing to cancel', { tenantId, subscriptionId: subId });
+        out.unknownToStripe.push(subId);
+        continue;
+      }
+      if (isTerminalStatus(status)) {
+        out.alreadyEnded.push(subId);
+      } else {
+        await cancelStripeSubscription(stripeKey, subId);
+        out.canceled.push(subId);
+      }
+      // Stripe confirmed it ended. In the same step: end the LOCAL rows that
+      // name it, then mark it. The marker makes its `customer.subscription.*`
+      // webhook a no-op, so if a later step of the delete fails, nothing else
+      // would ever stop the local plan or grant entitling (money-truth).
+      await endLocalSubscriptionRows(tenantId, subId);
+      await erasedSubscriptions.put({ subscriptionId: subId, at: nowIso() });
+    } catch (err) {
+      log.error('account-delete: Stripe subscription cancel failed — account not deleted', {
+        tenantId, subscriptionId: subId, error: err instanceof Error ? err.message : String(err),
+      });
+      const done = out.canceled.length + out.alreadyEnded.length;
+      throw new OpenwopError('service_unavailable',
+        done > 0
+          ? `${done} of your ${open.size} subscriptions ${done === 1 ? 'is' : 'are'} now canceled, but another could not be canceled at Stripe, so your account was not deleted. Try again in a few minutes.`
+          : 'Your subscription could not be canceled at Stripe, so your account was not deleted. Try again in a few minutes.',
+        503, { billing: 'stripe_cancel_failed', canceled: out.canceled.length, alreadyEnded: out.alreadyEnded.length, open: open.size });
+    }
+  }
+  return out;
+}
+
 /** Record a customer on the plan row ONLY when it has none — never re-point. */
 async function recordStripeCustomer(tenantId: string, customerId: string): Promise<void> {
   await mutateSubscription(tenantId, (row) => (row.stripeCustomerId ? null : { ...row, stripeCustomerId: customerId, updatedAt: nowIso() }));
@@ -1614,6 +1726,10 @@ async function currentSubscription(obj: StripeObj, stripeKey: string | null): Pr
 
 async function applySubscriptionEvent(tenantId: string, type: string, payload: StripeObj, stripeKey: string | null): Promise<WebhookResult> {
   const subId = str(payload.id);
+  if (subId && await erasedSubscriptions.get(subId)) {
+    log.info('stripe webhook: subscription ended by an account self-delete — ignored', { subscriptionId: subId });
+    return { status: 'ignored' };
+  }
   const current = await currentSubscription(payload, stripeKey);
   if (!current || !subId) return { status: 'ignored' };
   const { sub, syncedAtMs } = current;
@@ -1982,6 +2098,7 @@ export async function __resetBilling(): Promise<void> {
   await subscriptions.__clear();
   await balances.__clear();
   await bundleEntitlements.__clear();
+  await erasedSubscriptions.__clear();
   await seenEvents.__clear();
   await checkouts.__clear();
   await billingCoupons.__clear();

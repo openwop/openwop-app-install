@@ -41,8 +41,8 @@ export const funnelsFeature: BackendFeature = {
     salt: 'funnels',
   },
   requiredPacks: [
-    { name: 'feature.funnels.nodes', version: '1.0.1' },
-    { name: 'vendor.openwop-app.funnels.agents', version: '1.0.2' },
+    'feature.funnels.nodes',
+    'vendor.openwop-app.funnels.agents',
   ],
   // Checkout/upsell steps ride commerce; step-event tracking is consent-gated
   // (imports `../consent`) — both advisory.

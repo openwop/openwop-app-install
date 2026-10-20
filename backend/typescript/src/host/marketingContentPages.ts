@@ -22,6 +22,7 @@ import {
 } from '../features/cms/cmsService.js';
 import { ensureSystemSite, SYSTEM_SITE_TENANT, SYSTEM_SITE_ORG } from './systemSite.js';
 import { demoMode } from './demoMode.js';
+import { systemSiteSeedEnabled } from './systemSiteConfig.js';
 
 const log = createLogger('host.marketingContentPages');
 
@@ -255,6 +256,9 @@ async function applyDefault(spec: PageSpec): Promise<void> {
 }
 
 async function doEnsure(): Promise<void> {
+  // ADR 0931 — a distribution can turn this seed off. It then writes nothing;
+  // pages it wrote before stay as they are.
+  if (!systemSiteSeedEnabled('marketing')) return;
   await ensureSystemSite();
   for (const spec of pages()) {
     const pageId = pageIdFor(spec.slug);

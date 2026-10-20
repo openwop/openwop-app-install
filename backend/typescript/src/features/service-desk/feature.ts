@@ -25,8 +25,8 @@ export const serviceDeskFeature: BackendFeature = {
   },
   surface: { id: 'service-desk', build: buildServiceDeskSurface },
   requiredPacks: [
-    { name: 'feature.service-desk.nodes', version: '1.1.0' },
-    { name: 'vendor.openwop-app.service-desk.agents', version: '1.0.2' },
+    'feature.service-desk.nodes',
+    'vendor.openwop-app.service-desk.agents',
   ],
   toggleDefault: {
     id: 'service-desk',

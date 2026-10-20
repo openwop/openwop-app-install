@@ -30,6 +30,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { compactToolOutput, EMPTIED_MARKER, ELIDED_MARKER } from '../src/features/tool-output-compaction/compact.js';
 import { toolOutputCompactionFeature } from '../src/features/tool-output-compaction/feature.js';
+import { featureRequiredPacks } from '../src/features/packPins.js';
 
 const PACK_DIR = join(process.cwd(), '../../packs/feature.tool-output-compaction.nodes');
 
@@ -114,7 +115,7 @@ describe('ADR 0604 H3 — the pack description matches the kernel it describes',
   it('the four version legs move together (pack, node, requiredPacks, and they are not 1.0.0)', () => {
     // H3's other half: a SEMANTIC change shipped under an unchanged version.
     expect(node.version, 'node version drifted from the pack version').toBe(manifest.version);
-    expect(toolOutputCompactionFeature.requiredPacks).toEqual([
+    expect(featureRequiredPacks(toolOutputCompactionFeature)).toEqual([
       { name: manifest.name, version: manifest.version },
     ]);
     expect(manifest.version, 'the drop-empty removal is a behaviour change; 1.0.0 no longer describes it')

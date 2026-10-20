@@ -55,7 +55,7 @@ export const entitiesFeature: BackendFeature = {
     });
   },
   surface: { id: 'entities', build: buildEntitiesSurface },
-  requiredPacks: [{ name: 'feature.entities.nodes', version: '1.1.1' }],
+  requiredPacks: ['feature.entities.nodes'],
   toggleDefault: {
     id: 'entities',
     label: 'Entities',

@@ -26,7 +26,7 @@ export const evalsFeature: BackendFeature = {
   // The id is the `evals` toggle id, so the seam gates the toggle too.
   surface: { id: 'evals', build: buildAgentEvalsSurface },
   requiredPacks: [
-    { name: 'feature.evals.nodes', version: '1.1.0' },
+    'feature.evals.nodes',
   ],
   toggleDefault: {
     id: 'evals',

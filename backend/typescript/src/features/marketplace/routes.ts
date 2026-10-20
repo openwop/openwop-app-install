@@ -113,7 +113,7 @@ const FEATURE = { toggleId: 'marketplace', label: 'Marketplace' };
 /** Feature ids whose `requiredPacks` pin `packName` at ANY version — what a
  *  revocation of it takes down (ADR 0826 /architect A6). */
 function featuresRequiring(packName: string): string[] {
-  return BACKEND_FEATURES.filter((f) => (f.requiredPacks ?? []).some((r) => r.name === packName)).map((f) => f.id).sort();
+  return BACKEND_FEATURES.filter((f) => (f.requiredPacks ?? []).includes(packName)).map((f) => f.id).sort();
 }
 const BASE = '/host/openwop-app/marketplace';
 const ORG = `${BASE}/orgs/:orgId`;

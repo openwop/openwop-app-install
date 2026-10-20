@@ -677,6 +677,7 @@ export async function deleteComment(
 // falsy tenant / non-PII classification (fail-closed).
 registerRetentionPurger({
   feature: 'comments',
+  dryRun: 'rows-by-age',
   async purge(tenantId, classification, cutoffIso) {
     if (!tenantId || classification !== 'confidential-pii') return 0;
     return purgeRowsByAge('comments', await comments.listForTenantIndexed(tenantId), tenantId, cutoffIso,

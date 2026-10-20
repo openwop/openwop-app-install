@@ -62,6 +62,7 @@ import { countTrialEfficiency, meanEfficiency, type Efficiency } from './efficie
 import { pairedRegressionVerdict, type RegressionResult } from './regressionVerdict.js';
 import { MAX_COST_USD_PER_SUITE, type AgentEvalSuite, type EvalTaskDef } from './suiteStore.js';
 import { SCRIPTED_AGENT_ID } from './fixtureSuites.js';
+import { deriveToolErrorCode } from '../toolHooks.js';
 
 const log = createLogger('host.evals.agentEvalRun');
 
@@ -227,7 +228,12 @@ export function fixtureInterceptor(task: EvalTaskDef, opts: { allowLive: boolean
       if (hit) {
         hit.consumed = true;
         const response = hit.response;
-        return { content: typeof response === 'string' ? response : JSON.stringify(response ?? null) };
+        const content = typeof response === 'string' ? response : JSON.stringify(response ?? null);
+        // RFC 0245 §B — a recorded FAILURE is served as a tool error, exactly as a
+        // live failing call returns (the same code derivation as the live lane).
+        // It was served, so it is not a miss, and it never reaches a live tool.
+        if (hit.isError === true) return { content, isError: true, errorCode: deriveToolErrorCode({ content }) };
+        return { content };
       }
       misses += 1;
       if (onMiss === 'live') return inner(call);
@@ -368,9 +374,15 @@ async function runScriptedTrial(ctx: AgentEvalContext, task: EvalTaskDef, trialI
     await push('agent.toolCalled', { agentId, toolName, callId, inputs });
     const t0 = Date.now();
     const out = await boundary({ name: toolName, input: inputs });
+    // RFC 0245 §B / §D — a served failure carries `error` (short fixed message,
+    // never the payload) and no `outcome`. A success stays as it was: this host
+    // never sets `outcome` on a tool return (WFAU-4; RFC 0064 §F optional), and
+    // ADR 0929 D2 (a placeholder outcome for a judge) was rejected.
     await push('agent.toolReturned', {
       agentId, toolName, callId, durationMs: Date.now() - t0,
-      ...(out.isError ? { status: 'error', error: { code: out.errorCode ?? 'tool_error', message: 'fixture miss' } } : { status: 'ok' }),
+      ...(out.isError
+        ? { status: 'error', error: { code: out.errorCode ?? 'tool_execution_failed', message: out.errorCode === 'fixture_miss' ? 'fixture miss' : 'tool error (recorded fixture)' } }
+        : { status: 'ok' }),
     });
   }
   const output = typeof input.output === 'string' ? input.output : JSON.stringify(input.output ?? '');

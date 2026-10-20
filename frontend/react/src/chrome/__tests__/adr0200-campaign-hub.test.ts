@@ -18,12 +18,13 @@ import { visibleHubRoutes, tabIdOf } from '../hubProjection.js';
  */
 const byPath = (p: string) => FEATURES.find((r) => r.path === p);
 const all = (): boolean => true;
-const CAMPAIGN_PATHS = ['/campaign-brief', '/campaigns', '/campaign-performance', '/campaign-intelligence'];
+const CAMPAIGN_PATHS = ['/campaign-ops', '/campaign-brief', '/campaigns', '/campaign-performance', '/campaign-intelligence'];
 
 describe('ADR 0200 — Campaign Studio console', () => {
-  it('projects exactly Briefs → Campaigns → Performance → Intelligence, in order', () => {
+  // ADR 0926 D1 — Operations is the FIRST tab.
+  it('projects exactly Operations → Briefs → Campaigns → Performance → Intelligence, in order', () => {
     expect(visibleHubRoutes(FEATURES, all, true, 'campaigns').map(tabIdOf)).toEqual([
-      'campaign-brief', 'campaigns', 'campaign-performance', 'campaign-intelligence',
+      'campaign-ops', 'campaign-brief', 'campaigns', 'campaign-performance', 'campaign-intelligence',
     ]);
   });
 
@@ -50,5 +51,6 @@ describe('ADR 0200 — Campaign Studio console', () => {
     const only = (keep: string) => (id?: string) => id === keep || id === 'campaigns';
     expect(visibleHubRoutes(FEATURES, only('campaign-brief'), true, 'campaigns').map(tabIdOf)).toEqual(['campaign-brief']);
     expect(visibleHubRoutes(FEATURES, only('campaign-intel'), true, 'campaigns').map(tabIdOf)).toEqual(['campaign-intelligence']);
+    expect(visibleHubRoutes(FEATURES, only('campaign-ops'), true, 'campaigns').map(tabIdOf)).toEqual(['campaign-ops']);
   });
 });

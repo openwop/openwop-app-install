@@ -30,6 +30,17 @@ A release SHOULD be marked a required stop only when at least one holds:
 
 ## Version log
 
+### v0.6.0 — 2026-10-20
+- **Required stop:** no.
+- **Schema:** sqlite 50 / postgres 48 · **App migrations:** 24 (unchanged from 0.5.1).
+- A MINOR release (ADR 0052 §D1), rolling-safe. New: campaign operations P0,
+  email approvals and versioned templates, ads conversions and metrics, knowledge
+  base retrieval, per-deployment custom-domain edges, system site profiles, CMS
+  section styles. Fixed: custom domains fail closed, proposals apply honestly, a self-deleted
+  account's subscriptions are canceled first, section anchors work.
+  **Removed:** `OPENWOP_PROPOSALS_ACTIVATION` (no working effect; ADR 0938 D2).
+- [CHANGELOG §0.6.0](./CHANGELOG.md#060--2026-10-20)
+
 ### v0.5.1 — 2026-10-18
 - **Required stop:** no.
 - **Schema:** sqlite 50 / postgres 48 · **App migrations:** 24 (unchanged from 0.5.0).

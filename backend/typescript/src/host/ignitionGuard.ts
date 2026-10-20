@@ -130,6 +130,7 @@ export async function __resetIgnitionClaims(): Promise<void> {
 // tenant and are skipped.
 registerRetentionPurger({
   feature: 'ignition-guard',
+  dryRun: 'rows-by-age',
   async purge(tenantId, classification, cutoffIso) {
     if (!tenantId || classification !== 'internal') return 0;
     return purgeRowsByAge(

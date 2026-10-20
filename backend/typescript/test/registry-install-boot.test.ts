@@ -147,6 +147,20 @@ describe('ensureRegistryPacksInstalled (grade-code C-5)', () => {
     balanced();
   });
 
+  it('ADR 0919 — by NAME: a pin is resolved only for a pack absent from disk', async () => {
+    process.env.OPENWOP_INSTALL_PACKS = 'none';
+    mkdirSync(join(packDir, 'feature.present.nodes'), { recursive: true });
+    const asked: string[] = [];
+    await ensureRegistryPacksInstalled({
+      names: ['feature.present.nodes', 'feature.absent.nodes'],
+      resolve: (name) => { asked.push(name); return { name, version: '2.3.4' }; },
+    });
+    expect(asked, 'a present pack must not read its pin').toEqual(['feature.absent.nodes']);
+    expect(installed).toContain('feature.absent.nodes@2.3.4');
+    expect(installed.some((i) => i.startsWith('feature.present.nodes'))).toBe(false);
+    balanced();
+  });
+
   it('stamps bootAt on each run (grade-data D-4)', async () => {
     // Two runs at two fixed instants: a stamp taken only on the FIRST run (or
     // never refreshed) cannot satisfy both. Fake Date only — the run is async I/O.

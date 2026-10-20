@@ -97,6 +97,8 @@ import { registerJob, deleteJob } from '../../host/schedulingService.js';
 // the sentence, not the choice: stating the difference is the honest form, and
 // "we import the same file" is not by itself an anti-drift property.
 import { fenceUntrustedBlock, neutralizeUntrusted } from '../../host/untrustedContent.js';
+import { extractDocxMarkdown } from './parsers/docx.js';
+import { extractPdfPages } from './parsers/pdfPages.js';
 
 const log = createLogger('features.kb');
 
@@ -501,6 +503,9 @@ export interface KnowledgeDocument {
   contentTrust?: 'trusted' | 'untrusted';
   /** The durable source of truth; chunks are re-derived from this. */
   text: string;
+  /** ADR 0904 P2 — for a PDF: the char offset in `text` where each page starts (index i ⇒
+   *  page i+1). Chunks map to the last page starting at or before them. Absent ⇒ no pages. */
+  pageOffsets?: number[];
   chunkCount: number;
   /** ADR 0351 Phase 3 — monotonic content revision; rows written before
    *  versioning (absent) read back as 1. Bumped ONLY by a stable-id upsert
@@ -521,7 +526,29 @@ export interface SearchHit {
   /** ADR 0398 P1 — the heading path (ancestor chain) of the chunk's section, from the
    *  structural chunker. Populates `KnowledgeResult.headingPath` for citation display. */
   headingPath: string[];
+  /** ADR 0904 P2 — the 1-based PDF page the chunk starts on; absent for page-less docs. */
+  pageNumber?: number;
+  /** ADR 0904 D4 — a CALIBRATED relevance in [0,1], comparable across collections and
+   *  modes (unlike `score`, whose scale is the mode's: cosine, RRF ≈0.03, local-rerank up
+   *  to ≈8, provider rerank 0–1). Chosen in order: a provider reranker's own relevance →
+   *  this chunk's dense cosine (clamped) when the dense channel matched it → its BM25
+   *  score saturated as s/(s+10) (keyword-only; see `bm25Relevance`). It is a THRESHOLD value
+   *  only — never an ordering key: hits are ordered by `score` within a collection and by
+   *  RRF across collections (`tenantRetrieve`). Within one collection two calibrations
+   *  can coexist (a dense-matched chunk vs a lexical-only one), which is why. */
+  relevance: number;
 }
+
+const clamp01 = (n: number): number => (Number.isFinite(n) ? Math.min(1, Math.max(0, n)) : 0);
+
+/** ADR 0904 D4 — BM25 onto [0,1] by SATURATION, `s / (s + K)`. The ADR first said "BM25
+ *  over the collection's top BM25"; measured, that pins every collection's best keyword
+ *  hit to exactly 1.0, so across collections the calibrated tie-break could not tell a
+ *  15-point exact match from a 5-point incidental one (multi-collection eval, keyword-only
+ *  lane: the right collection's answer landed 4th behind three 1.0s). Saturation keeps
+ *  the absolute strength: K=10 maps a weak 5 to 0.33, a strong 15 to 0.6, 25 to 0.71. */
+const BM25_SATURATION_K = 10;
+const bm25Relevance = (s: number): number => (s > 0 ? clamp01(s / (s + BM25_SATURATION_K)) : 0);
 
 const collections = new DurableCollection<KnowledgeCollection>('kb:collection', (c) => `${c.tenantId}:${c.orgId}:${c.collectionId}`);
 
@@ -609,7 +636,7 @@ const hydrateKey = (tenantId: string, orgId: string, collectionId: string): stri
  *  would let one tenant's rows collide with (and be purged by) another's. A row
  *  is valid only when BOTH `model` and `textHash` match; hydrate re-embeds the
  *  rest. Keeps provider cost at ~one embed per chunk per LIFETIME, not per process. */
-interface VecCacheRow { key: string; tenantId: string; model: string; textHash: string; vector: number[] }
+interface VecCacheRow { key: string; tenantId: string; model: string; textHash: string; vector: number[]; /** ADR 0904 D2 */ embedVersion?: string }
 const vecCache = new DurableCollection<VecCacheRow>('kb:veccache', (r) => r.key);
 
 const textHash = (text: string): string => createHash('sha256').update(text).digest('hex');
@@ -677,10 +704,14 @@ export async function listDocumentRevisions(tenantId: string, orgId: string, col
  *  than silently mixing chunk shapes in one namespace). v1 = the pre-0398 char-window
  *  splitter; v2 = the structure-first (heading-aware) chunker below. Collections
  *  ingested before this read back as v1 and re-chunk lazily on the next hydrate. */
-export const CHUNKER_VERSION = 2;
+export const CHUNKER_VERSION = 3;
+// v3 (ADR 0904 P2): a markdown table is never cut mid-table (an oversize one splits at
+// row boundaries with its header repeated), and chunks carry their PDF page. Text with
+// no table chunks exactly as v2 did, so its cached provider vectors stay valid.
 
-/** One chunk plus the heading path (ancestor chain) of the section it belongs to. */
-export interface StructuredChunk { text: string; headingPath: string[] }
+/** One chunk plus the heading path (ancestor chain) of the section it belongs to, and
+ *  (ADR 0904 P2) the 1-based page it starts on when the document has pages. */
+export interface StructuredChunk { text: string; headingPath: string[]; pageNumber?: number }
 
 /** A markdown section: a heading line + its body up to the next heading, with the
  *  heading-nesting path that names it (a level-2 under a level-1 → `[h1, h2]`). Text
@@ -690,11 +721,14 @@ interface DocSection { headingPath: string[]; body: string }
 /** Split CRLF-normalized text into sections at `^#{1,6}` headings. The heading line is
  *  KEPT in the section body (so its text is embedded/searchable); `headingPath` is the
  *  nesting chain to that heading. Deterministic. */
-function splitIntoSections(clean: string): DocSection[] {
+type HeadingStack = Array<{ level: number; title: string }>;
+function splitIntoSections(clean: string, carry?: { stack: HeadingStack }): DocSection[] {
   const sections: DocSection[] = [];
-  let stack: Array<{ level: number; title: string }> = [];
+  // ADR 0904 P2 — `carry` threads the heading stack across PAGES, so a section that runs
+  // onto the next page keeps its heading path there.
+  let stack: HeadingStack = carry ? [...carry.stack] : [];
   let cur: string[] = [];
-  let curPath: string[] = [];
+  let curPath: string[] = stack.map((st) => st.title);
   const flush = (): void => {
     const body = cur.join('\n').trim();
     if (body.length > 0) sections.push({ headingPath: [...curPath], body });
@@ -714,15 +748,87 @@ function splitIntoSections(clean: string): DocSection[] {
     }
   }
   flush();
+  if (carry) carry.stack = stack;
   return sections;
 }
 
 /** Today's char-window splitter, extracted — packs one section's body into overlapping
  *  windows with a paragraph/sentence-boundary preference. Deterministic. Overlap is
  *  applied only WITHIN this call, so it never crosses a heading boundary. */
-function windowSplit(sectionBody: string): string[] {
+/** ADR 0904 P2 — the [start, end) char ranges of markdown table blocks (runs of lines
+ *  starting with `|`) in `body`. */
+function tableRanges(body: string): Array<[number, number]> {
+  const out: Array<[number, number]> = [];
+  let at = 0;
+  let open: number | null = null;
+  let lastEnd = 0;
+  for (const line of body.split('\n')) {
+    const isRow = line.trimStart().startsWith('|');
+    if (isRow && open === null) open = at;
+    if (!isRow && open !== null) { out.push([open, lastEnd]); open = null; }
+    lastEnd = at + line.length;
+    at += line.length + 1;
+  }
+  if (open !== null) out.push([open, lastEnd]);
+  return out;
+}
+
+/** A table no longer than this is kept whole in one chunk (it may exceed `chunkChars`:
+ *  a half table is worse retrieval than a long chunk). Longer ones split by rows. */
+const TABLE_ATOMIC_MAX = MAX.chunkChars * 2;
+
+/** Split an oversize table at row boundaries, repeating its header (first two lines) on
+ *  every piece so each piece is a readable table on its own. */
+function splitTable(table: string): string[] {
+  const lines = table.split('\n');
+  const header = lines.slice(0, 2).join('\n');
+  const rows = lines.slice(2);
+  const out: string[] = [];
+  let cur: string[] = [];
+  const flush = (): void => {
+    if (cur.length === 0) return;
+    out.push(`${header}\n${cur.join('\n')}`);
+    cur = [];
+  };
+  for (const row of rows) {
+    if (cur.length > 0 && header.length + cur.join('\n').length + row.length + 2 > MAX.chunkChars) flush();
+    cur.push(row);
+  }
+  flush();
+  return out.length > 0 ? out : [table];
+}
+
+/** ADR 0904 P2 — `windowSplit`, table-aware: a body with no table splits exactly as
+ *  before; a table is never cut (the window ends before it or after it), and a table over
+ *  `TABLE_ATOMIC_MAX` becomes its own row-split pieces. */
+function splitSectionBody(sectionBody: string): string[] {
   const clean = sectionBody.trim();
+  const ranges = tableRanges(clean);
+  if (ranges.length === 0) return windowSplit(clean);
+  const out: string[] = [];
+  let from = 0;
+  for (const [start, end] of ranges) {
+    if (end - start <= TABLE_ATOMIC_MAX) continue; // small tables are handled inside windowSplit
+    out.push(...windowSplit(clean.slice(from, start), ranges, from));
+    out.push(...splitTable(clean.slice(start, end)));
+    from = end;
+  }
+  out.push(...windowSplit(clean.slice(from), ranges, from));
+  return out;
+}
+
+function windowSplit(sectionBody: string, tables: ReadonlyArray<[number, number]> = [], base = 0): string[] {
+  const raw = sectionBody;
+  const lead = raw.length - raw.trimStart().length;
+  const clean = raw.trim();
   if (clean.length === 0) return [];
+  // Table ranges re-expressed in THIS slice's coordinates (only the atomic-size ones).
+  const shift = base + lead;
+  const atomic = tables
+    .filter(([s0, e0]) => e0 - s0 <= TABLE_ATOMIC_MAX)
+    .map(([s0, e0]) => [s0 - shift, e0 - shift] as [number, number])
+    .filter(([s0, e0]) => e0 > 0 && s0 < clean.length);
+  const inside = (i: number): [number, number] | undefined => atomic.find(([s0, e0]) => s0 < i && i < e0);
   const out: string[] = [];
   let pos = 0;
   while (pos < clean.length) {
@@ -738,10 +844,18 @@ function windowSplit(sectionBody: string): string[] {
       const rel = para >= 0 ? para : sent >= 0 ? sent + 1 : space;
       if (rel >= 0) end = windowStart + rel + 1;
     }
+    // ADR 0904 P2 — never cut inside a table: end before it when there is text ahead of
+    // it in this window, else take the whole table.
+    const cut = inside(end);
+    if (cut) end = cut[0] > pos ? cut[0] : Math.min(cut[1], clean.length);
     const chunk = clean.slice(pos, end).trim();
     if (chunk.length > 0) out.push(chunk);
     if (end >= clean.length) break;
-    pos = Math.max(end - MAX.chunkOverlap, pos + 1); // non-regression guard: always advances
+    let next = Math.max(end - MAX.chunkOverlap, pos + 1); // non-regression guard: always advances
+    // An overlap that would start mid-table restarts after it (the table was emitted whole).
+    const into = inside(next);
+    if (into) next = Math.max(into[1], pos + 1);
+    pos = next;
   }
   return out;
 }
@@ -752,12 +866,29 @@ function windowSplit(sectionBody: string): string[] {
  *  the section only) so a chunk never straddles two unrelated headings and a heading is
  *  never orphaned from its body. Each chunk carries its section's `headingPath`.
  *  Deterministic: same text → same chunks (so hydrate re-chunk matches ingest). */
-export function chunkStructured(text: string): StructuredChunk[] {
+export function chunkStructured(text: string, pageOffsets?: readonly number[]): StructuredChunk[] {
+  const out: StructuredChunk[] = [];
+  // ADR 0904 P2 — a document with pages (a PDF) is chunked PAGE BY PAGE: a page boundary
+  // is a chunk boundary, like a heading, so every chunk sits on exactly one page and its
+  // citation is exact. The heading stack carries across pages.
+  if (pageOffsets && pageOffsets.length > 0) {
+    const carry = { stack: [] as HeadingStack };
+    for (let i = 0; i < pageOffsets.length; i++) {
+      const pageText = text.slice(pageOffsets[i], pageOffsets[i + 1] ?? text.length).replace(/\r\n/g, '\n').trim();
+      if (pageText.length === 0) continue;
+      for (const section of splitIntoSections(pageText, carry)) {
+        for (const piece of splitSectionBody(section.body)) {
+          if (out.length >= MAX.chunksPerDoc) return out;
+          out.push({ text: piece, headingPath: section.headingPath, pageNumber: i + 1 });
+        }
+      }
+    }
+    return out;
+  }
   const clean = text.replace(/\r\n/g, '\n').trim(); // CRLF FIRST — the heading regex is ^-anchored
   if (clean.length === 0) return [];
-  const out: StructuredChunk[] = [];
   for (const section of splitIntoSections(clean)) {
-    for (const piece of windowSplit(section.body)) {
+    for (const piece of splitSectionBody(section.body)) {
       if (out.length >= MAX.chunksPerDoc) return out; // cap total chunks per doc
       out.push({ text: piece, headingPath: section.headingPath });
     }
@@ -776,7 +907,7 @@ function vectorSurface(tenantId: string) {
   return buildHostSurfaceBundle({ tenantId }).db.vector;
 }
 
-interface ChunkRow { id: string; vector: number[]; metadata: { documentId: string; chunkIndex: number; title: string; text: string; contentTrust: 'trusted' | 'untrusted'; headingPath: string[] } }
+interface ChunkRow { id: string; vector: number[]; metadata: { documentId: string; chunkIndex: number; title: string; text: string; contentTrust: 'trusted' | 'untrusted'; headingPath: string[]; /** ADR 0904 P2 */ pageNumber?: number } }
 
 /** Build the chunk rows for one document (deterministic ids + vectors). Carries
  *  the document's content-trust onto every chunk (ADR 0038 §C) so retrieval +
@@ -787,10 +918,10 @@ function chunkRows(doc: KnowledgeDocument, enrich: 'off' | 'heading-path' = 'off
   // pgvector enforces OPENWOP_VECTOR_PG_DIM, so a fixed 256 hard-fails every
   // local-mode collection on a provider-sized deployment. Falls back to 256.
   const dims = effectiveEmbedDims();
-  return chunkStructured(doc.text).map((c, chunkIndex) => ({
+  return chunkStructured(doc.text, doc.pageOffsets).map((c, chunkIndex) => ({
     id: `${doc.documentId}:${chunkIndex}`,
     vector: embedText(enrich === 'heading-path' ? enrichWithPath(doc.title, c.headingPath, c.text) : c.text, dims),
-    metadata: { documentId: doc.documentId, chunkIndex, title: doc.title, text: c.text, contentTrust, headingPath: c.headingPath },
+    metadata: { documentId: doc.documentId, chunkIndex, title: doc.title, text: c.text, contentTrust, headingPath: c.headingPath, ...(c.pageNumber !== undefined ? { pageNumber: c.pageNumber } : {}) },
   }));
 }
 
@@ -829,9 +960,9 @@ async function reconcileChunkCounts(entries: Array<{ doc: KnowledgeDocument; new
  *  0113). Same ids + same durable text as `chunkRows`, so the two channels agree. */
 function chunkMetaRows(doc: KnowledgeDocument): Array<{ id: string; metadata: ChunkRow['metadata'] }> {
   const contentTrust = doc.contentTrust === 'untrusted' ? 'untrusted' : 'trusted';
-  return chunkStructured(doc.text).map((c, chunkIndex) => ({
+  return chunkStructured(doc.text, doc.pageOffsets).map((c, chunkIndex) => ({
     id: `${doc.documentId}:${chunkIndex}`,
-    metadata: { documentId: doc.documentId, chunkIndex, title: doc.title, text: c.text, contentTrust, headingPath: c.headingPath },
+    metadata: { documentId: doc.documentId, chunkIndex, title: doc.title, text: c.text, contentTrust, headingPath: c.headingPath, ...(c.pageNumber !== undefined ? { pageNumber: c.pageNumber } : {}) },
   }));
 }
 
@@ -943,7 +1074,7 @@ async function doHydrate(tenantId: string, orgId: string, collectionId: string):
     // mark hydrated — a later search retries (the key may have been configured).
     return { embedMode, model: 'unavailable', denseAvailable: false };
   }
-  const sig = `provider:${embedder.model}:${dims}:${enrich}:v${CHUNKER_VERSION}`;
+  const sig = signatureForEmbedder(embedder, dims, enrich);
   if (hydrated.get(key) === sig) return { embedMode, model: embedder.model, denseAvailable: true, embedder };
 
   const docs = await docsInCollection(tenantId, orgId, collectionId); // DEBT-2 — bounded org slice
@@ -982,7 +1113,10 @@ async function doHydrate(tenantId: string, orgId: string, collectionId: string):
     const hash = textHash(embedInput);
     const cacheKey = `${tenantId}:${m.id}`;
     const cached = cachedByKey.get(cacheKey);
-    if (cached && cached.model === embedder.model && cached.textHash === hash && cached.vector.length === dims) {
+    // ADR 0904 D2 (architect A1) — the embed VERSION is part of validity: a pre-split
+    // Google vector has the same model and text hash, so without it a `q1` rebuild would
+    // reuse every old vector and change nothing.
+    if (cached && cached.model === embedder.model && (cached.embedVersion ?? '') === (embedder.embedVersion ?? '') && cached.textHash === hash && cached.vector.length === dims) {
       rows.push({ id: m.id, vector: cached.vector, metadata: m.metadata });
     } else {
       missing.push({ idx: rows.length, text: embedInput, cacheKey, hash });
@@ -1026,7 +1160,7 @@ async function doHydrate(tenantId: string, orgId: string, collectionId: string):
       for (let i = 0; i < batch.length; i++) {
         const miss = batch[i]!;
         rows[miss.idx]!.vector = vectors[i]!;
-        await vecCache.put({ key: miss.cacheKey, tenantId, model: embedder.model, textHash: miss.hash, vector: vectors[i]! });
+        await vecCache.put({ key: miss.cacheKey, tenantId, model: embedder.model, ...(embedder.embedVersion ? { embedVersion: embedder.embedVersion } : {}), textHash: miss.hash, vector: vectors[i]! });
       }
       await recordEmbedUsage(tenantId, batchTokens);
       embedded += batch.length;
@@ -1059,6 +1193,74 @@ export async function listCollections(tenantId: string, orgId: string, caller?: 
   // KBC-1 — a LISTING is a read door too: the collection NAME of a private
   // project's corpus is itself the leak ADR 0608 D4 closed at the HTTP door.
   return filterReadable(tenantId, rows, caller);
+}
+
+/** ADR 0904 P0 — what retrieval a collection is ACTUALLY getting, per collection: which
+ *  embedder is in force (and whether it resolves), the mode, and whether the vectors on
+ *  disk match the configuration. Read from stored state + the resolver only — it never
+ *  hydrates, so asking costs no embedding spend. */
+export interface CollectionQuality {
+  collectionId: string;
+  name: string;
+  embedder: { mode: 'local' | 'provider'; provider: string; model: string; available: boolean; pinned: boolean };
+  dims: number;
+  retrievalMode: RetrievalMode;
+  rerank: 'none' | 'local' | 'connection';
+  enrichment: 'off' | 'heading-path';
+  documentCount: number;
+  chunkCount: number;
+  /** `current` = the serving vectors match the configuration; `unbuilt` = never indexed
+   *  (the first search builds it); `stale` = built under another embedder/width/chunker
+   *  (the next search or reindex rebuilds it); `reindexing` = a reindex job is building. */
+  indexState: 'current' | 'unbuilt' | 'stale' | 'reindexing';
+  expectedSignature: string | null;
+  servingSignature: string | null;
+}
+
+export async function collectionQuality(tenantId: string, orgId: string, caller?: SubjectCaller): Promise<CollectionQuality[]> {
+  const cols = await listCollections(tenantId, orgId, caller); // the gated listing — one read door
+  const dims = effectiveEmbedDims();
+  const out: CollectionQuality[] = [];
+  for (const col of cols) {
+    const embedMode = resolveEmbedderMode(col);
+    const enrich = enrichmentOf(col);
+    let embedder: CollectionQuality['embedder'];
+    let expectedSignature: string | null;
+    if (embedMode === 'local') {
+      embedder = { mode: 'local', provider: 'local', model: LOCAL_EMBEDDING_MODEL, available: true, pinned: !!col.embeddingSpec };
+      expectedSignature = signatureForResolved(false, LOCAL_EMBEDDING_MODEL, dims, enrich);
+    } else {
+      const resolved = col.embeddingSpec && col.embeddingSpec.provider !== 'local'
+        ? await resolveHeadlessEmbedderForSpecMaybeTest(tenantId, col.embeddingSpec, dims).catch(() => null)
+        : await resolveHeadlessEmbedderMaybeTest(tenantId, dims).catch(() => null);
+      embedder = resolved
+        ? { mode: 'provider', provider: resolved.provider, model: resolved.model, available: true, pinned: !!col.embeddingSpec }
+        : { mode: 'provider', provider: col.embeddingSpec?.provider ?? 'unresolved', model: col.embeddingSpec?.model ?? 'unavailable', available: false, pinned: !!col.embeddingSpec };
+      expectedSignature = resolved ? signatureForEmbedder(resolved, dims, enrich) : null;
+    }
+    const servingSignature = col.activeSignature ?? col.vectorSignature ?? null;
+    const mode = resolveRetrievalMode(col);
+    const indexState: CollectionQuality['indexState'] = col.pendingSignature
+      ? 'reindexing'
+      : servingSignature === null
+        ? 'unbuilt'
+        : expectedSignature !== null && servingSignature === expectedSignature ? 'current' : 'stale';
+    out.push({
+      collectionId: col.collectionId,
+      name: col.name,
+      embedder,
+      dims,
+      retrievalMode: mode,
+      rerank: mode === 'hybrid+rerank' ? (col.retrievalConfig?.rerank?.kind ?? 'local') : 'none',
+      enrichment: enrich,
+      documentCount: col.documentCount,
+      chunkCount: col.chunkCount,
+      indexState,
+      expectedSignature,
+      servingSignature,
+    });
+  }
+  return out;
 }
 
 /**
@@ -1439,7 +1641,7 @@ export async function ingestDocument(
     }
   }
 
-  const { text, source, derivedTitle } = await resolveSource(tenantId, input);
+  const { text, source, derivedTitle, pageOffsets } = await resolveSource(tenantId, input);
   const title = cleanString(input.title, MAX.title) || derivedTitle || 'Untitled';
 
   const doc: KnowledgeDocument = {
@@ -1460,6 +1662,9 @@ export async function ingestDocument(
     // KB upload with what notebooks/sync already do (RFC 0021 / ADR 0038 §C; ADR 0108 review).
     contentTrust: source.kind !== 'text' ? 'untrusted' : (internal.contentTrust === 'untrusted' ? 'untrusted' : 'trusted'),
     text,
+    // ADR 0904 P2 — set with `text` in the one place a document's text is written (an
+    // upsert is delete + ingest), so the two can never disagree.
+    ...(pageOffsets ? { pageOffsets } : {}),
     chunkCount: 0,
     ...(typeof internal.revision === 'number' && internal.revision > 1 ? { revision: internal.revision } : {}),
     createdBy: actor,
@@ -1751,7 +1956,8 @@ export async function searchDetailed(tenantId: string, orgId: string, collection
     embedding = { mode: 'local', model: status.model };
   } else if (status.denseAvailable && status.embedder) {
     try {
-      queryVector = (await status.embedder.embed([query]))[0] ?? null;
+      // ADR 0904 D2 — embedded AS A QUERY (Google RETRIEVAL_QUERY, Cohere search_query).
+      queryVector = (await status.embedder.embed([query], 'query'))[0] ?? null;
       embedding = { mode: 'provider', model: status.model };
     } catch {
       queryVector = null; // provider hiccup at query time — degrade, labeled
@@ -1778,6 +1984,8 @@ export async function searchDetailed(tenantId: string, orgId: string, collection
         score: f.score,
         contentTrust: m?.contentTrust === 'untrusted' ? 'untrusted' : 'trusted',
         headingPath: m?.headingPath ?? [],
+        ...(m?.pageNumber !== undefined ? { pageNumber: m.pageNumber } : {}),
+        relevance: bm25Relevance(f.score),
       };
     });
     return { hits: hits.slice(0, topK), embedding };
@@ -1797,6 +2005,8 @@ export async function searchDetailed(tenantId: string, orgId: string, collection
     score: m.score,
     contentTrust: m.metadata?.contentTrust === 'untrusted' ? 'untrusted' : 'trusted',
     headingPath: m.metadata?.headingPath ?? [],
+    ...(m.metadata?.pageNumber !== undefined ? { pageNumber: m.metadata.pageNumber } : {}),
+    relevance: clamp01(m.score),
   }));
   if (mode === 'dense') return { hits: denseHits.slice(0, topK), embedding };
 
@@ -1807,6 +2017,10 @@ export async function searchDetailed(tenantId: string, orgId: string, collection
   const corpus = await collectionChunks(tenantId, orgId, collectionId);
   const metaById = new Map(corpus.map((r) => [r.id, r.metadata]));
   const lexical = bm25Search(corpus.map((r) => ({ id: r.id, text: r.metadata.text })), query, HYBRID_CANDIDATES);
+  // ADR 0904 D4 — the calibrated relevance of each candidate: its dense cosine when the
+  // dense channel matched it, else its saturated BM25 (see `bm25Relevance`).
+  const denseRelevance = new Map(denseHits.map((h) => [h.chunkId, h.relevance]));
+  const lexicalRelevance = new Map(lexical.map((l) => [l.id, bm25Relevance(l.score)]));
   // Fuse into a WIDER candidate pool; truncation to top-k happens after the
   // optional rerank stage (so rerank can promote a candidate past the cut).
   const fused = rrfFuse([denseHits.map((h) => ({ id: h.chunkId })), lexical], DEFAULT_RRF_K, HYBRID_CANDIDATES);
@@ -1821,6 +2035,8 @@ export async function searchDetailed(tenantId: string, orgId: string, collection
       score: f.score,
       contentTrust: m?.contentTrust === 'untrusted' ? 'untrusted' : 'trusted',
       headingPath: m?.headingPath ?? [],
+      ...(m?.pageNumber !== undefined ? { pageNumber: m.pageNumber } : {}),
+      relevance: denseRelevance.get(f.id) ?? lexicalRelevance.get(f.id) ?? 0,
     };
   });
 
@@ -1837,7 +2053,8 @@ export async function searchDetailed(tenantId: string, orgId: string, collection
       const topN = rerankCfg.topN !== undefined ? Math.min(rerankCfg.topN, topK) : topK;
       const ranked = await connectionRerank(tenantId, query, candidates.map((c) => ({ id: c.chunkId, text: c.text })), topN);
       if (ranked !== null) {
-        return { hits: ranked.map((r) => ({ ...byId.get(r.id)!, score: r.score })), embedding, rerank: { requested: 'connection', applied: 'connection' } };
+        // A provider reranker returns a calibrated 0–1 relevance of its own — it wins (D4).
+        return { hits: ranked.map((r) => ({ ...byId.get(r.id)!, score: r.score, relevance: clamp01(r.score) })), embedding, rerank: { requested: 'connection', applied: 'connection' } };
       }
       const degraded = localRerank(query, candidates.map((c) => ({ id: c.chunkId, text: c.text, title: c.title })), topK);
       return { hits: degraded.map((r) => ({ ...byId.get(r.id)!, score: r.score })), embedding, rerank: { requested: 'connection', applied: 'local-degraded' } };
@@ -1913,21 +2130,36 @@ export async function tenantRetrieve(tenantId: string, args: KnowledgeRetrieveAr
         .catch(() => [] as Array<{ hit: SearchHit; collectionId: string }>),
     ),
   );
-  const scored = perCollection.flat();
-  scored.sort((a, b) => b.hit.score - a.hit.score);
+  // ADR 0904 D4 — FAIR cross-collection ordering. This sorted the concatenated hits by
+  // raw `score`, but each collection's score is on its MODE's scale (cosine ≈0–1, RRF
+  // ≈0.03, local rerank up to ≈8), so a `hybrid+rerank` collection outranked a `dense`
+  // one whatever the relevance. Now: Reciprocal-Rank-Fusion over each collection's own
+  // ranked list (ranks only — scale-free), ties broken by the calibrated relevance, then
+  // ids (deterministic). The threshold applies to the calibrated relevance, never to the
+  // mode-scaled score.
+  const fused = rrfFuse(
+    perCollection.map((list) => list.map(({ hit, collectionId }) => ({ id: JSON.stringify([collectionId, hit.chunkId]) }))),
+    DEFAULT_RRF_K,
+  );
+  const byKey = new Map(perCollection.flat().map((e) => [JSON.stringify([e.collectionId, e.hit.chunkId]), e]));
+  const scored = fused
+    .map((f) => ({ ...byKey.get(f.id)!, fusedScore: f.score }))
+    .sort((a, b) => b.fusedScore - a.fusedScore || b.hit.relevance - a.hit.relevance || (a.collectionId < b.collectionId ? -1 : a.collectionId > b.collectionId ? 1 : 0));
 
   const chunks: KnowledgeResult['chunks'] = scored
-    .filter(({ hit }) => hit.score >= scoreThreshold)
+    .filter(({ hit }) => hit.relevance >= scoreThreshold)
     .slice(0, resultLimit)
-    .map(({ hit, collectionId }) => ({
+    .map(({ hit, collectionId }, i) => ({
       chunkId: hit.chunkId,
       content: hit.text,
       headingPath: hit.headingPath, // ADR 0398 P1 — from the structural chunker (was hardcoded [])
-      pageNumber: null,
+      pageNumber: hit.pageNumber ?? null, // ADR 0904 P2 — real for PDFs (was hard-coded null)
       documentTitle: hit.title,
       assetId: hit.documentId,
       collectionId,
-      relevanceScore: hit.score,
+      relevanceScore: hit.relevance,
+      nativeScore: hit.score,
+      fusedRank: i + 1,
       contentTrust: hit.contentTrust,
     }));
 
@@ -1944,7 +2176,8 @@ export async function tenantRetrieve(tenantId: string, args: KnowledgeRetrieveAr
 
 /** ADR 0351 Phase 2 — deterministic retrieval-coverage classification. COUNT
  *  based (score scales differ across dense/BM25/RRF modes, so a global score
- *  floor would be arbitrary — callers who know their mode pass `minScore`):
+ *  floor would be arbitrary — a caller passes `minScore`, which since ADR 0904 D4
+ *  applies to the calibrated 0–1 `relevance`, not the mode's scale):
  *  `none` = 0 hits (nothing to ground on), `thin` = 1 hit, `ok` = ≥2 hits.
  *  Under groundingPolicy 'strict' a generator MUST fail closed on `none`. */
 export type RagCoverage = 'ok' | 'thin' | 'none';
@@ -2020,8 +2253,11 @@ export async function ragQuery(tenantId: string, orgId: string, collectionId: st
   const mode: RetrievalMode = col ? resolveRetrievalMode(col) : 'dense';
   const detailed = await searchDetailed(tenantId, orgId, collectionId, queryRaw, topKRaw, mode, caller);
   const embedding = detailed.embedding;
+  // ADR 0904 D4 — `minScore` applies to the CALIBRATED relevance. It compared the mode's
+  // raw score, so on a hybrid collection (RRF ≈0.03) any floor above that dropped every
+  // context and reported `coverage:'none'` — an empty-looking KB.
   const minScore = typeof opts?.minScore === 'number' && Number.isFinite(opts.minScore) ? opts.minScore : undefined;
-  const contexts = minScore !== undefined ? detailed.hits.filter((h) => h.score >= minScore) : detailed.hits;
+  const contexts = minScore !== undefined ? detailed.hits.filter((h) => h.relevance >= minScore) : detailed.hits;
   const coverage: RagCoverage = contexts.length === 0 ? 'none' : contexts.length === 1 ? 'thin' : 'ok';
   const seen = new Set<string>();
   const citations: Array<{ documentId: string; title: string }> = [];
@@ -2147,7 +2383,22 @@ export function loadUnpdf(): Promise<typeof import('unpdf')> {
  * is a separate pipeline. A corrupt-but-right-type file throws 422 (that one ingest
  * fails; callers isolate it). Returns the extracted text (capped at MAX.text downstream).
  */
-async function extractTextFromBytes(tenantId: string, buffer: Buffer, contentType: string): Promise<string> {
+/** ADR 0904 P2 — extracted text plus, for a PDF, where each page starts in it. */
+interface ExtractedText { text: string; pageOffsets?: number[] }
+
+/** The page offsets that still point INTO the stored (possibly `MAX.text`-truncated) text. */
+function pagesWithin(extracted: ExtractedText, stored: string): { pageOffsets?: number[] } {
+  if (!extracted.pageOffsets || extracted.pageOffsets.length === 0) return {};
+  const kept = extracted.pageOffsets.filter((o) => o < stored.length);
+  return kept.length > 0 ? { pageOffsets: kept } : {};
+}
+
+async function extractTextFromBytes(tenantId: string, buffer: Buffer, contentType: string): Promise<ExtractedText> {
+  return extractStructured(tenantId, buffer, contentType);
+}
+
+async function extractStructured(tenantId: string, buffer: Buffer, contentType: string): Promise<ExtractedText> {
+  const plain = (text: string): ExtractedText => ({ text });
   const mime = contentType.toLowerCase().split(';')[0]!.trim();
   // RTF arrives as text/rtf but is NOT plain text — route it to officeparser FIRST,
   // before the text/* catch-all below.
@@ -2166,7 +2417,7 @@ async function extractTextFromBytes(tenantId: string, buffer: Buffer, contentTyp
     try {
       const { parseOffice } = await import('officeparser');
       const parsed = await parseOffice(buffer);
-      return parsed.toText();
+      return plain(parsed.toText());
     } catch (err) {
       throw new OpenwopError(
         'validation_error',
@@ -2176,9 +2427,10 @@ async function extractTextFromBytes(tenantId: string, buffer: Buffer, contentTyp
       );
     }
   }
-  if (TEXT_MIME.test(mime)) return buffer.toString('utf8');
+  if (TEXT_MIME.test(mime)) return plain(buffer.toString('utf8'));
   if (mime === 'application/pdf') {
-    const { extractText, getDocumentProxy } = await loadUnpdf();
+    // ADR 0904 P2 — PER PAGE, so chunks carry a real `pageNumber`. The proxy still comes
+    // from `loadUnpdf()` (H61: the patched pdf.js) with eval off — see `extractPdfPages`.
     // H61 — `isEvalSupported` defaults to TRUE in pdf.js, i.e. the parser may
     // evaluate strings as JavaScript "to improve performance of PDF functions"
     // (unpdf's own typings say so). The bytes here are an authenticated user's
@@ -2186,14 +2438,11 @@ async function extractTextFromBytes(tenantId: string, buffer: Buffer, contentTyp
     // execution upon opening a malicious PDF" (CWE-79). Text extraction does
     // not need eval, so it stays off even on the patched pdf.js (loadUnpdf).
     // The officeparser PDF path is a second copy (pinned by its override).
-    const pdf = await getDocumentProxy(new Uint8Array(buffer), { isEvalSupported: false });
-    const { text } = await extractText(pdf, { mergePages: true });
-    return Array.isArray(text) ? text.join('\n') : text;
+    return extractPdfPages(await loadUnpdf(), buffer);
   }
   if (mime === DOCX_MIME) {
-    const mammoth = await import('mammoth');
-    const { value } = await mammoth.extractRawText({ buffer });
-    return value;
+    // ADR 0904 P2 — headings, tables and lists survive as markdown (was extractRawText).
+    return plain(await extractDocxMarkdown(buffer));
   }
   // Image OCR + audio transcription via the MANAGED multimodal provider (ADR 0108) — each
   // OFF by default behind its own env flag (they bill provider tokens). Off ⇒ 415 like any
@@ -2202,7 +2451,7 @@ async function extractTextFromBytes(tenantId: string, buffer: Buffer, contentTyp
     if (process.env.OPENWOP_KB_OCR_ENABLED !== 'true') {
       throw new OpenwopError('validation_error', `Image OCR is not enabled on this host (\`${contentType}\`).`, 415, { contentType });
     }
-    return mediaToTextViaLLM(tenantId, buffer, mime, 'image');
+    return plain(await mediaToTextViaLLM(tenantId, buffer, mime, 'image'));
   }
   if (AUDIO_MIME.has(mime)) {
     if (process.env.OPENWOP_KB_TRANSCRIBE_ENABLED !== 'true') {
@@ -2219,7 +2468,7 @@ async function extractTextFromBytes(tenantId: string, buffer: Buffer, contentTyp
     }
     const text = await mediaToTextViaLLM(tenantId, buffer, mime, 'audio');
     await recordMediaUsage(tenantId, 'stt', buffer.length);
-    return text;
+    return plain(text);
   }
   throw new OpenwopError(
     'validation_error',
@@ -2288,7 +2537,7 @@ async function mediaToTextViaLLM(tenantId: string, buffer: Buffer, mime: string,
 async function resolveSource(
   tenantId: string,
   input: { text?: unknown; mediaToken?: unknown; contentBase64?: unknown; contentType?: unknown; url?: unknown },
-): Promise<{ text: string; source: DocSource; derivedTitle?: string }> {
+): Promise<{ text: string; source: DocSource; derivedTitle?: string; pageOffsets?: number[] }> {
   // ADR 0351 P4 — URL ingest: fetch through the SSRF-guarded web-research
   // surface (readable extraction, body-capped). Web content is ALWAYS fenced
   // untrusted downstream (source.kind !== 'text' ⇒ untrusted in ingestDocument).
@@ -2323,9 +2572,9 @@ async function resolveSource(
       throw new OpenwopError('validation_error', `File exceeds the ${Math.round(uploadCap / (1024 * 1024))} MiB upload cap.`, 413, { maxBytes: uploadCap });
     }
     const extracted = await extractTextFromBytes(tenantId, Buffer.from(contentBase64, 'base64'), contentType);
-    const text = extracted.slice(0, MAX.text);
+    const text = extracted.text.slice(0, MAX.text);
     if (text.trim().length === 0) throw new OpenwopError('validation_error', 'No extractable text in the uploaded file.', 400, { contentType });
-    return { text, source: { kind: 'media' } };
+    return { text, source: { kind: 'media' }, ...pagesWithin(extracted, text) };
   }
   // NOT cleanString: a media token is a base64url capability credential that
   // legitimately looks secret-shaped, so `scrubSecretShaped` would redact it and
@@ -2341,9 +2590,9 @@ async function resolveSource(
     }
     // Extract per-MIME (text/* + PDF + DOCX) — same path as a direct upload.
     const extracted = await extractTextFromBytes(tenantId, Buffer.from(asset.contentBase64, 'base64'), asset.contentType);
-    const text = extracted.slice(0, MAX.text);
+    const text = extracted.text.slice(0, MAX.text);
     if (text.trim().length === 0) throw new OpenwopError('validation_error', 'The media asset has no extractable text.', 400, {});
-    return { text, source: { kind: 'media' } };
+    return { text, source: { kind: 'media' }, ...pagesWithin(extracted, text) };
   }
   const text = cleanString(input.text, MAX.text);
   if (text.trim().length === 0) {
@@ -2555,6 +2804,16 @@ function signatureForResolved(providerMode: boolean, model: string, dims: number
   return `${providerMode ? 'provider' : 'local'}:${model}:${dims}:${enrich}:v${CHUNKER_VERSION}`;
 }
 
+/** ADR 0904 D2 — the ONE signature for a provider-path namespace (hydrate, reindex and
+ *  the quality report all call it, so they cannot disagree). An `embedVersion` is
+ *  appended, so a provider whose document side changed gets a new namespace and is
+ *  re-embedded; every other signature is byte-identical to before, so OpenAI, Cohere and
+ *  local collections are not rebuilt. */
+function signatureForEmbedder(embedder: Pick<HeadlessEmbedder, 'model' | 'embedVersion'>, dims: number, enrich: 'off' | 'heading-path'): string {
+  const base = signatureForResolved(true, embedder.model, dims, enrich);
+  return embedder.embedVersion ? `${base}:${embedder.embedVersion}` : base;
+}
+
 /** The projected (wire-facing) job. `gen` is an internal concurrency token, so it is
  *  omitted alongside the routing keys — D1a changes no response shape. */
 export type ReindexJobView = Omit<ReindexJob, 'key' | 'tenantId' | 'orgId' | 'gen'>;
@@ -2634,13 +2893,12 @@ export async function startReindex(tenantId: string, orgId: string, collectionId
   const dims = effectiveEmbedDims();
   const enrich = enrichmentOf(col);
   const providerMode = spec.provider !== 'local';
-  let model = LOCAL_EMBEDDING_MODEL;
+  let toSig = signatureForResolved(false, LOCAL_EMBEDDING_MODEL, dims, enrich);
   if (providerMode) {
     const embedder = await resolveHeadlessEmbedderForSpecMaybeTest(tenantId, spec, dims);
     if (!embedder) throw new OpenwopError('validation_error', `No resolvable embeddings credential for provider '${spec.provider}'. Add its BYOK key first.`, 400, { provider: spec.provider });
-    model = embedder.model;
+    toSig = signatureForEmbedder(embedder, dims, enrich);
   }
-  const toSig = signatureForResolved(providerMode, model, dims, enrich);
   const fromSig = col.activeSignature ?? col.vectorSignature ?? '(none)';
   if (toSig === (col.activeSignature ?? col.vectorSignature)) {
     throw new OpenwopError('validation_error', 'The collection is already on this embedding spec.', 400, { toSig });

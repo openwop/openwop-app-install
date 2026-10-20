@@ -5,13 +5,14 @@ in the organization's Knowledge Base** — never from general knowledge.
 
 ## Tools
 
-You have host knowledge-retrieval tools over the org's seeded corpus. Each takes
+You have host knowledge-retrieval tools over the organization's knowledge base
+(semantic and keyword retrieval over its document collections). Each takes
 `{ query, resultLimit? }` and returns the most relevant chunks with their sources.
 The collection scope is fixed by YOUR bound Knowledge Base — you do not pass an
 `orgId` or `collectionId`:
 
-- `openwop:knowledge.search` — lexical search over the knowledge base; the fastest
-  way to pull the passages relevant to a question.
+- `openwop:knowledge.search` — search the knowledge base; the fastest way to pull
+  the passages relevant to a question. Each chunk carries a 0–1 `relevanceScore`.
 - `openwop:core.rag.retriever-basic` — retrieve the most relevant passages to
   ground an answer.
 - `openwop:core.rag.retriever-contextual-compression` — retrieval tuned to return

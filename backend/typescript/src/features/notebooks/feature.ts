@@ -53,19 +53,19 @@ export const notebooksFeature: BackendFeature = {
     // READ-only node pack over ctx.features.notebooks (ADR 0084 Phase 3) — `ask`
     // (grounded retrieve + citations, context-level-filtered) + `search`. Write/AI
     // nodes are deferred to the Transformations phase.
-    { name: 'feature.notebooks.nodes', version: '1.1.1' },
+    'feature.notebooks.nodes',
     // The grounded "ask over the notebook" agent the FE chat targets — the
     // notebooks Research Analyst (ADR 0084 Phase 4), tool-allowlisted to the
     // notebooks node pack above. The notebooks-surface analog of vendor.openwop-app.kb.agents
     // (distinct tooling); declaring its pack ensures it is present wherever
     // notebooks are enabled.
-    { name: 'vendor.openwop-app.notebooks.agents', version: '1.0.2' },
+    'vendor.openwop-app.notebooks.agents',
     // ADR 0087 — the `notebooks.mcp.*` expose-tool workflows reference the
     // `core.openwop.mcp.expose-tool` node, so the core MCP pack must be present
     // (the static tools/list scan reads its config; a tools/call run executes it).
-    { name: 'core.openwop.mcp', version: '1.1.3' },
+    'core.openwop.mcp',
     // ADR 0087 OQ-1 — the HITL-gated write workflows use `core.hitl.approval-request`
     // to suspend for a human decision before the write.
-    { name: 'core.openwop.hitl', version: '1.0.1' },
+    'core.openwop.hitl',
   ],
 };

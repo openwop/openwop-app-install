@@ -108,3 +108,26 @@ describe('every openwop:-prefixed tool id in agent packs resolves (XCH-AGT-1)', 
     expect(offenders, `phantom tool ids mentioned to models:\n${offenders.join('\n')}`).toEqual([]);
   });
 });
+
+/**
+ * ADR 0904 D11 — the knowledge tools' model-facing text is true in EVERY retrieval
+ * configuration. It said "lexical retrieval over the seeded corpus (deterministic, no
+ * network)", false under BYOK embeddings and false for everyone once an operator embedder
+ * is on (the query may leave the host to an embeddings API). One fixed string, not a
+ * per-tenant one, so the tool block stays byte-stable for prompt caching (ADR 0315).
+ * Sabotage: restore "lexical" in either description or the kb-researcher prompt ⇒ red.
+ */
+describe('ADR 0904 D11 — knowledge tool text tells the model the truth', () => {
+  it('the tool descriptions and the kb-researcher prompt never promise lexical / no network / a seeded corpus', async () => {
+    const { KNOWLEDGE_TOOL_DESCRIPTION, KNOWLEDGE_RETRIEVER_DESCRIPTION } = await import('../src/host/agentToolProvider.js');
+    for (const text of [KNOWLEDGE_TOOL_DESCRIPTION, KNOWLEDGE_RETRIEVER_DESCRIPTION]) {
+      expect(text).not.toMatch(/lexical|no network|deterministic|seeded corpus/i);
+      expect(text).toMatch(/semantic and keyword/);
+    }
+    const prompt = readFileSync(join(PACKS_DIR, 'vendor.openwop-app.kb.agents/prompts/kb-researcher.md'), 'utf8');
+    expect(prompt).not.toMatch(/lexical|seeded corpus/i);
+    const src = readFileSync(join(SRC_DIR, 'host/agentToolProvider.ts'), 'utf8');
+    expect(src, 'both tools use the shared constants').toMatch(/description:\s*\n?\s*KNOWLEDGE_TOOL_DESCRIPTION/);
+    expect(src).toMatch(/description:\s*\n?\s*KNOWLEDGE_RETRIEVER_DESCRIPTION/);
+  });
+});

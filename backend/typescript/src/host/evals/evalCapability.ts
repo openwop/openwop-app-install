@@ -40,6 +40,32 @@ export function resetRfc0244WireCache(force?: boolean): void {
   cached = force;
 }
 
+let cached0245: boolean | undefined;
+
+/**
+ * True iff the vendored v2 schemas carry RFC 0245: `toolResponses[].isError` in
+ * the suite schema and `agents.evalSuite.fixtureErrors` in capabilities. The v2
+ * `agents` record is closed, so advertising ahead of the schema sync would red
+ * this host's own certified cut (the ADR 0889 D7 rule).
+ */
+export function rfc0245WireAvailable(): boolean {
+  if (cached0245 !== undefined) return cached0245;
+  try {
+    const dir = locateRepoSchemasDir(dirname(fileURLToPath(import.meta.url)), 'ai-envelope.schema.json');
+    const suite = readFileSync(join(dir, 'v2', 'agent-eval-suite.schema.json'), 'utf8');
+    const caps = readFileSync(join(dir, 'v2', 'capabilities.schema.json'), 'utf8');
+    cached0245 = /"isError"/.test(suite) && /"fixtureErrors"/.test(caps);
+  } catch {
+    cached0245 = false;
+  }
+  return cached0245;
+}
+
+/** Test seam: re-read the vendored schemas (or force a value). */
+export function resetRfc0245WireCache(force?: boolean): void {
+  cached0245 = force;
+}
+
 let cachedGated: boolean | undefined;
 
 /**
@@ -72,6 +98,7 @@ export interface EvalSuiteCapability {
   trials?: { maxTrials: number };
   fixtureMatching?: true;
   regressionVerdict?: true;
+  fixtureErrors?: true;
 }
 
 export function evalSuiteCapability(): EvalSuiteCapability {
@@ -81,5 +108,9 @@ export function evalSuiteCapability(): EvalSuiteCapability {
     maxCostUsdPerSuite: MAX_COST_USD_PER_SUITE,
   };
   if (!rfc0244WireAvailable()) return base;
-  return { ...base, trajectory: true, trials: { maxTrials: MAX_TRIALS }, fixtureMatching: true, regressionVerdict: true };
+  return {
+    ...base, trajectory: true, trials: { maxTrials: MAX_TRIALS }, fixtureMatching: true, regressionVerdict: true,
+    // RFC 0245 §C (ADR 0929) — advertised only once the vendored schemas carry it.
+    ...(rfc0245WireAvailable() ? { fixtureErrors: true as const } : {}),
+  };
 }

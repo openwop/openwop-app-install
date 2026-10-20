@@ -31,5 +31,5 @@ export const orgsFeature: BackendFeature = {
     salt: 'orgs',
   },
   surface: { id: 'orgs', build: buildOrgsSurface },
-  requiredPacks: [{ name: 'feature.orgs.nodes', version: '1.0.1' }],
+  requiredPacks: ['feature.orgs.nodes'],
 };

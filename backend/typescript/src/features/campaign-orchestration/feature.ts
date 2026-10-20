@@ -41,8 +41,8 @@ export const campaignOrchestrationFeature: BackendFeature = {
   },
   surface: { id: 'campaign-orchestration', build: buildCampaignStudioSurface },
   requiredPacks: [
-    { name: 'feature.campaign-orchestration.nodes', version: '1.2.0' },
-    { name: 'vendor.openwop-app.campaign-orchestration.agents', version: '1.2.1' },
+    'feature.campaign-orchestration.nodes',
+    'vendor.openwop-app.campaign-orchestration.agents',
   ],
   toggleDefault: {
     id: 'campaign-orchestration',

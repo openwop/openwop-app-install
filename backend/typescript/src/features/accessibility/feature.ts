@@ -32,8 +32,8 @@ export const accessibilityFeature: BackendFeature = {
   // generateAltText (write). Auto-advertised at /.well-known as host.sample.accessibility.
   surface: { id: 'accessibility', build: buildAccessibilitySurface },
   requiredPacks: [
-    { name: 'feature.accessibility.nodes', version: '1.0.1' },
-    { name: 'vendor.openwop-app.accessibility.agents', version: '1.0.1' },
+    'feature.accessibility.nodes',
+    'vendor.openwop-app.accessibility.agents',
   ],
   toggleDefault: {
     id: 'accessibility',

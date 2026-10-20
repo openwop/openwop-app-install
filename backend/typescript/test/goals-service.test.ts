@@ -29,7 +29,7 @@ const TENANT_B = 'tenant-b';
 
 const baseInput = (tenant: string, objective = 'Keep the digest short'): CreateGoalInput => ({
   objective,
-  completion: { check: 'verifier' },
+  completion: { check: 'verifier', verifierRef: 'svc:v' },
   continuation: { mode: 'schedule' },
   bounds: { maxLoopIterations: 10 },
   owner: { tenant },

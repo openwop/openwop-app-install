@@ -138,6 +138,7 @@ const ORDER_IDEM_STALE_MS = 120_000; // > any createOrder; a pending claim older
 // reclaims storage. Key is tenant-prefixed ⇒ the scan is bounded to the tenant slice.
 registerRetentionPurger({
   feature: 'commerce:order-idem',
+  dryRun: 'rows-by-age',
   async purge(tenantId, classification, cutoffIso) {
     if (!tenantId || classification !== 'internal') return 0;
     return purgeRowsByAge('commerce:order-idem', await orderIdem.listByPrefix(`${tenantId}:`), tenantId, cutoffIso,

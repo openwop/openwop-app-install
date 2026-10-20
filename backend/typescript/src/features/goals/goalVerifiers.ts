@@ -11,6 +11,10 @@
  * lets a feature (e.g. KickTodo) supply its evaluator without a cross-feature
  * import.
  *
+ * Evidence contract (ADR 0908 D3): the evidence ref is CALLER-supplied. A
+ * verifier MUST resolve it only inside `goal.owner.tenant` and only to evidence
+ * bound to THIS goal; anything else is a thrown failure, never a verdict.
+ *
  * Fail-closed contract: an unregistered ref or a throwing/malformed verifier
  * NEVER completes a goal — `evaluateGoal` surfaces a typed error and leaves
  * the goal untouched (unlike the chat turn path, which fails open by design).

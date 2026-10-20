@@ -28,6 +28,10 @@
  * Product note (grade-code, w31): the chain `sync` node re-implements
  * `runMetricsSync`, so the chain path has no cooldown claim, campaign link or
  * CONN-1 platform date — this file pins only the no_dispatches contract.
+ * CORRECTED (ADR 0907 P1): no longer true. The node now asks the surface for
+ * the plan (`planSync`) and hands the rows back (`recordAccountRows`), the same
+ * two functions `runMetricsSync` uses, and it claims the cooldown. The
+ * conversions-dispatch chain (P4) is pinned in `ads-conversion-delivery.test.ts`.
  */
 
 import http from 'node:http';

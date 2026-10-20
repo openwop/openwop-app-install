@@ -93,7 +93,11 @@ const RESERVED_RUN_METADATA_KEYS = ['definitionRevision', 'definitionResolvedFro
 /** ADR 0852 D2 — campaign attribution, written by the campaign agent tools and
  *  read by the run → project binding; never accepted from a caller. Not part of
  *  `ATTRIBUTION_KEYS`, which also drives the agent-activity index. */
-const CAMPAIGN_ATTRIBUTION_KEYS = ['campaignOrchestration', 'campaignChannel'] as const;
+// ADR 0921 D3 / 0925 — `openwop-app.campaignOps` is the campaign-ops run stamp
+// (client, approval, approved change-set hash). Only the campaign-ops run starters
+// write it; the execute surface trusts it to name the approved run, so a caller
+// who could set it could carry out an approved change from a run of their own.
+const CAMPAIGN_ATTRIBUTION_KEYS = ['campaignOrchestration', 'campaignChannel', 'openwop-app.campaignOps'] as const;
 
 // ADR 0902 D2 — and the task-deck parent linkage (`runLinkage.ts`).
 export function stripCallerAttribution(metadata: Record<string, unknown>): Record<string, unknown> {

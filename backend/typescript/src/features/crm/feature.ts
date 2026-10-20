@@ -116,10 +116,10 @@ export const crmFeature: BackendFeature = {
     ],
   },
   requiredPacks: [
-    { name: 'feature.crm.nodes', version: '1.11.0' }, // v1.11.0 — ADR 0837 D7: get-contact + record-triage, triage 1.1.0 takes the run's variant; v1.10.0 — ADR 0627 D1/D5: 13 write nodes role:"side-effect" + schemas, gmail-sync connection pin + typed outcomes; v1.9.0 ADR 0265 CDP-C persist-segment
+    'feature.crm.nodes', // v1.11.0 — ADR 0837 D7: get-contact + record-triage, triage 1.1.0 takes the run's variant; v1.10.0 — ADR 0627 D1/D5: 13 write nodes role:"side-effect" + schemas, gmail-sync connection pin + typed outcomes; v1.9.0 ADR 0265 CDP-C persist-segment
 
     // Audit CRMGAP-FE-1b: the sales-ops agent must survive a requiredPacks-
     // filtered install (the CSM feature declares both packs; mirror it).
-    { name: 'vendor.openwop-app.crm.agents', version: '1.1.2' }, // v1.1.1 — CFP-1 real sales-ops + segment-author chat tools; v1.1.0 ADR 0265 CDP-C segment-author persona
+    'vendor.openwop-app.crm.agents', // v1.1.1 — CFP-1 real sales-ops + segment-author chat tools; v1.1.0 ADR 0265 CDP-C segment-author persona
   ],
 };

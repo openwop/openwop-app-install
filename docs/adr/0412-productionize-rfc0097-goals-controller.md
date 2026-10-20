@@ -2,6 +2,8 @@
 
 Status: **implemented** — all phases P0–P5 landed 2026-07-18 (phase record at the end of this file)
 
+> **ADR 0908 (2026-10-17) extends this ADR:** the authority this controller never checked — route/tool/surface scopes, the arm door, judge evidence binding, run binding, fixture scoping, the fire-time bound gate, DSAR erasure, closed-world create. Read it with this one.
+
 **Extends:** ADR 0039 (the `features/goals` owner) **in place** — no fork, no new feature, no new toggle.
 **Consumed by:** ADR 0414 (`kicktodo-core`) — one bounded goal per enrollment; and any future host feature that needs a durable judged outcome.
 **Rides RFCs:** 0097 (standing goals + judge continuation), 0090 (verifier/convergence), 0058 (bounds + budget), 0052 (scheduling continuation).

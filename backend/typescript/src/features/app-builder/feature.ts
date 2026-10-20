@@ -122,9 +122,9 @@ export const appBuilderFeature: BackendFeature = {
     },
   ],
   requiredPacks: [
-    { name: 'feature.app-builder.nodes', version: '1.10.1' }, // 1.10.1: repair carries omitted component actions/bindings/hidden/locked on an unrestructured screen and refuses a restructured screen's dropped ones (ABR-REPAIR-2). 1.10.0: render carries every document facet + invalid values reach validateAppDoc as typed failures; repair validates with one bounded retry and carries omitted facets (ABR-RENDER-1/ABR-REPAIR-1). 1.9.3: apply-repair refuses an unapproved candidate, deploy-app fails a refused deploy (ADR 0835 D1/D5). 1.9.1: node versions on capture/repair/apply-repair (ADR 0766 P2). 1.9.0 adds the canvas-to-generic-Kanban proposal adapter; core Kanban still owns materialization
-    { name: 'vendor.openwop-app.app-builder.agents', version: '1.3.2' }, // ADR 0358 C tool-first prompt; 1.3.1 adds nav-container guidance (5b exemplar pass)
-    { name: 'feature.app-builder.artifact-types', version: '1.1.1' }, // ADR 0346 4c/4d — app.research + app.audit (types ship WITH producers)
+    'feature.app-builder.nodes', // 1.10.1: repair carries omitted component actions/bindings/hidden/locked on an unrestructured screen and refuses a restructured screen's dropped ones (ABR-REPAIR-2). 1.10.0: render carries every document facet + invalid values reach validateAppDoc as typed failures; repair validates with one bounded retry and carries omitted facets (ABR-RENDER-1/ABR-REPAIR-1). 1.9.3: apply-repair refuses an unapproved candidate, deploy-app fails a refused deploy (ADR 0835 D1/D5). 1.9.1: node versions on capture/repair/apply-repair (ADR 0766 P2). 1.9.0 adds the canvas-to-generic-Kanban proposal adapter; core Kanban still owns materialization
+    'vendor.openwop-app.app-builder.agents', // ADR 0358 C tool-first prompt; 1.3.1 adds nav-container guidance (5b exemplar pass)
+    'feature.app-builder.artifact-types', // ADR 0346 4c/4d — app.research + app.audit (types ship WITH producers)
   ],
   // ADR 0305 Phase F — the PRD → plan → render → per-screen-review design chain
   // (restart-safe builtin, the ADR 0157/0072 seam; real BYOK AI, never mock).

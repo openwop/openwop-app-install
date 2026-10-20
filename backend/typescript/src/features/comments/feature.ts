@@ -59,7 +59,7 @@ export const commentsFeature: BackendFeature = {
     // WF-CMNT-10 — bumped WITH the behavioural change. Node packs have no
     // version-aware precedence on the mount lane, so a fix at an unchanged
     // version is silently inert on a registry-installing host.
-    { name: 'feature.comments.nodes', version: '1.2.1' }, // ADR 0881 D6 — `resolve` reclassified side-effect; ADR 0886 D5 names canvas_slides
-    { name: 'vendor.openwop-app.comments.agents', version: '1.0.4' }, // CFP-1 real chat tools; ADR 0881 D9 prompt names every type (ADR 0886 D5: seven)
+    'feature.comments.nodes', // ADR 0881 D6 — `resolve` reclassified side-effect; ADR 0886 D5 names canvas_slides
+    'vendor.openwop-app.comments.agents', // CFP-1 real chat tools; ADR 0881 D9 prompt names every type (ADR 0886 D5: seven)
   ],
 };

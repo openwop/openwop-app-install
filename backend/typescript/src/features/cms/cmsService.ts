@@ -41,7 +41,7 @@ import { subjectKeyForms } from '../../host/subjectErasureRedaction.js';
 import type { SubjectEraseReport } from '../../host/subjectErasure.js';
 import { eraseContentLanguageSettingsSubject } from '../../host/contentLocales.js';
 import { createLogger } from '../../observability/logger.js';
-import { isInternalHref } from '../../host/internalHref.js';
+import { isFragmentHref, isInternalHref } from '../../host/internalHref.js';
 
 const log = createLogger('feature.cms');
 
@@ -72,13 +72,127 @@ const MAX = {
   cell: 80,         // one comparison cell — a short authored status token, e.g. "✓" / "Leaders only" (ADR 0485)
   fieldKeys: 40,    // named fields a `fields` section may hold (ADR 0748)
   videoDescription: 1000, // a `video` section's screen-reader description + VideoObject description (ADR 0843)
+  // ADR 0920 — section styles. Every string is bounded like its neighbours.
+  heroNote: 200,    // fine print under the hero CTAs (D3)
+  sectionNote: 280, // a footnote under a `columns` grid (D4)
+  badge: 40,        // a short card badge (D4)
+  itemMeta: 40,     // a `list` row's right-aligned meta, e.g. "12 min" (D4)
+  listItems: 8,     // rows a `list`-layout card may hold (D4)
+  planText: 80,     // every hero `plan` string except `lines[].text` (D3)
+  planLine: 160,    // one hero `plan` line's text (D3)
+  planLines: 3,
+  planChips: 5,
+  chatText: 120,    // every `chat` string except a message body (D5)
+  chatMessage: 400, // one `chat` message's text (D5)
+  chatMessages: 6,
   perOrgPages: 2000,
 } as const;
 
 /** Section layout for `columns` — how the public renderer lays the items out. */
-const COLUMN_LAYOUTS = ['cards', 'steps', 'stats', 'showcase', 'rows', 'prompts', 'dives'] as const;
+const COLUMN_LAYOUTS = ['cards', 'steps', 'stats', 'showcase', 'rows', 'prompts', 'dives', 'ruled', 'progress', 'list', 'tiles', 'panels'] as const;
 /** Optional hero art direction. Absent preserves the original workflow motif. */
-const HERO_VISUALS = ['workflow', 'journey', 'run', 'film', 'image', 'none'] as const;
+const HERO_VISUALS = ['workflow', 'journey', 'run', 'film', 'image', 'none', 'plan'] as const;
+/** ADR 0920 D1 — a full-bleed section band, painted from tokens only. */
+const SECTION_TONES = ['default', 'muted', 'inverse', 'accent'] as const;
+/** ADR 0920 D2 — heading left / lede right on wide screens. */
+const SECTION_HEADS = ['stacked', 'split'] as const;
+/** ADR 0920 D3 — an icon on the hero's second CTA. */
+const HERO_CTA_ICONS = ['play'] as const;
+/** ADR 0920 D4 — a small drawing in place of a card icon (`panels`). */
+const COLUMN_ART = ['full-week', 'feed', 'solo'] as const;
+/** ADR 0920 D4 — `steps` numeral style. */
+const STEP_NUMBERS = ['circle'] as const;
+/** ADR 0920 D5 — a `richText` picture beside the copy. */
+const RICH_TEXT_VISUALS = ['chat'] as const;
+const CHAT_FROM = ['person', 'guide'] as const;
+/** ADR 0920 D6 — `cta` alignment. */
+const CTA_ALIGNS = ['center', 'start'] as const;
+
+/** A value from a CLOSED set, or undefined — an unknown value is DROPPED, never
+ *  thrown (ADR 0920: presentation options degrade to the stock look). */
+function pickEnum<T extends string>(set: readonly T[], v: unknown): T | undefined {
+  return typeof v === 'string' && (set as readonly string[]).includes(v) ? (v as T) : undefined;
+}
+
+/** A 0..1 fraction (progress bars), clamped; non-numbers and non-finite values dropped. */
+function unitFraction(v: unknown): number | undefined {
+  return typeof v === 'number' && Number.isFinite(v) ? Math.min(1, Math.max(0, v)) : undefined;
+}
+
+/** A plain object or undefined (arrays and scalars are not a nested field object). */
+function asObject(v: unknown): Record<string, unknown> | undefined {
+  return v !== null && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : undefined;
+}
+
+/** Copy only the defined entries — keeps the "absent ⇒ no key" shape of every builder. */
+function defined(o: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined));
+}
+
+/**
+ * ADR 0920 D3 — the hero's example plan card. CLOSED: only the named fields
+ * survive; every string is scrubbed and capped (80, `lines[].text` 160);
+ * `progress` is a clamped 0..1 fraction; `lines` ≤ 3 and `chips` ≤ 5, empty
+ * entries filtered. Undefined when nothing survives (so the key is omitted).
+ * A per-locale overlay replaces the object whole (shallow `resolveSection`).
+ */
+function cleanHeroPlan(v: unknown): Record<string, unknown> | undefined {
+  const p = asObject(v);
+  if (!p) return undefined;
+  const t = (x: unknown): string | undefined => optionalCleanString(x, MAX.planText);
+  const lines = (Array.isArray(p.lines) ? p.lines : []).slice(0, MAX.planLines).map((l) => {
+    const ll = asObject(l) ?? {};
+    return defined({ label: t(ll.label), text: optionalCleanString(ll.text, MAX.planLine) });
+  }).filter((l) => l.text !== undefined || l.label !== undefined);
+  const chips = (Array.isArray(p.chips) ? p.chips : []).slice(0, MAX.planChips)
+    .map((c) => (typeof c === 'string' ? cleanString(c, MAX.planText) : ''))
+    .filter((c) => c.length > 0);
+  const out = defined({
+    eyebrow: t(p.eyebrow),
+    title: t(p.title),
+    meta: t(p.meta),
+    progress: unitFraction(p.progress),
+    progressNote: t(p.progressNote),
+    stepEyebrow: t(p.stepEyebrow),
+    stepTitle: t(p.stepTitle),
+    lines: lines.length > 0 ? lines : undefined,
+    action: t(p.action),
+    chips: chips.length > 0 ? chips : undefined,
+    note: t(p.note),
+    initial: t(p.initial),
+    bubble: t(p.bubble),
+  });
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/**
+ * ADR 0920 D5 — a `richText` conversation picture. CLOSED: `title`, `subtitle`,
+ * `badge`, `placeholder` and every `proposal` string ≤ 120; each
+ * `messages[].text` ≤ 400; `messages` ≤ 6, each needs a known `from`
+ * (`person` | `guide`) AND text, or it is dropped. Undefined when nothing survives.
+ */
+function cleanChat(v: unknown): Record<string, unknown> | undefined {
+  const c = asObject(v);
+  if (!c) return undefined;
+  const t = (x: unknown): string | undefined => optionalCleanString(x, MAX.chatText);
+  const messages = (Array.isArray(c.messages) ? c.messages : []).slice(0, MAX.chatMessages).map((m) => {
+    const mm = asObject(m) ?? {};
+    return { from: pickEnum(CHAT_FROM, mm.from), text: typeof mm.text === 'string' ? cleanString(mm.text, MAX.chatMessage) : '' };
+  }).filter((m): m is { from: typeof CHAT_FROM[number]; text: string } => m.from !== undefined && m.text.length > 0);
+  const pr = asObject(c.proposal);
+  const proposal = pr
+    ? defined({ label: t(pr.label), text: t(pr.text), accept: t(pr.accept), decline: t(pr.decline) })
+    : undefined;
+  const out = defined({
+    title: t(c.title),
+    subtitle: t(c.subtitle),
+    badge: t(c.badge),
+    messages: messages.length > 0 ? messages : undefined,
+    proposal: proposal && Object.keys(proposal).length > 0 ? proposal : undefined,
+    placeholder: t(c.placeholder),
+  });
+  return Object.keys(out).length > 0 ? out : undefined;
+}
 
 export type PageStatus = 'draft' | 'in_review' | 'published' | 'archived';
 export const PAGE_STATUSES: PageStatus[] = ['draft', 'in_review', 'published', 'archived'];
@@ -415,12 +529,19 @@ function nowIso(): string {
 
 // ── Content sanitization ─────────────────────────────────────────────────────
 
-/** A CTA target: an internal app path (`/agents`) — a single leading slash, NOT
+/** A CTA target: a same-page fragment (`#faq`, ADR 0920 D6), an internal app path (`/agents`) — a single leading slash, NOT
  *  `//` or `/\` (both normalize to a protocol-relative EXTERNAL URL in a browser →
  *  open-redirect shape) — OR an EXPLICIT-scheme http(s)/mailto URL. `safeUrl`
  *  alone is too loose: it accepts protocol-relative `//host`, so require an
  *  explicit scheme on the non-internal branch. */
 function safeLink(v: unknown, max: number): string {
+  // ADR 0920 D6 — a same-page fragment (`#section-id`), returned unchanged. The
+  // grammar is closed (letter first, then [A-Za-z0-9_-], ≤ 80 after `#`), so a
+  // bare `#`, `#a b`, `#<x>` and `#javascript:…` all fall through and are refused.
+  // Tested on the RAW trimmed string, before the secret-shape scrub: that scrub
+  // redacts any 40+-char `[A-Za-z0-9_-]` run, which is exactly what a long
+  // heading anchor is (`headingSlug` ids run to 64 chars).
+  if (typeof v === 'string' && isFragmentHref(v.trim())) return v.trim();
   const s = (optionalCleanString(v, max) ?? '').trim();
   if (isInternalHref(s)) return s;
   if (s.startsWith('/')) return ''; // a `/…` that is not a safe internal path is never an external URL either
@@ -477,6 +598,16 @@ function buildSectionData(type: SectionType, d: Record<string, unknown>, partial
     return v ? { [k]: v } : {};
   };
   const has = (k: string): boolean => d[k] !== undefined;
+  // ADR 0920 D1/D2 — closed presentation enums. Present and known ⇒ kept; absent
+  // or unknown ⇒ no key at all (so a page that sets none is byte-identical).
+  const tone = (): Record<string, string> => {
+    const v = pickEnum(SECTION_TONES, d.tone);
+    return v ? { tone: v } : {};
+  };
+  const headStyle = (): Record<string, string> => {
+    const v = pickEnum(SECTION_HEADS, d.head);
+    return v ? { head: v } : {};
+  };
   switch (type) {
     case 'hero': {
       const heading = cleanString(d.heading, MAX.heading);
@@ -486,6 +617,10 @@ function buildSectionData(type: SectionType, d: Record<string, unknown>, partial
       const visual = HERO_VISUALS.includes(d.visual as typeof HERO_VISUALS[number])
         ? (d.visual as typeof HERO_VISUALS[number])
         : undefined;
+      // ADR 0920 D3 — the example plan card, fine print, and the 2nd-CTA icon.
+      const plan = cleanHeroPlan(d.plan);
+      const note = optionalCleanString(d.note, MAX.heroNote);
+      const ctaIcon2 = pickEnum(HERO_CTA_ICONS, d.ctaIcon2);
       return {
         ...opt('eyebrow', MAX.eyebrow),
         ...(heading ? { heading } : {}),
@@ -497,6 +632,9 @@ function buildSectionData(type: SectionType, d: Record<string, unknown>, partial
         ...(visual ? { visual } : {}),
         ...(cta1 ? { ctaLabel: cta1, ctaUrl: safeLink(d.ctaUrl, MAX.url) } : {}),
         ...(cta2 ? { ctaLabel2: cta2, ctaUrl2: safeLink(d.ctaUrl2, MAX.url) } : {}),
+        ...(ctaIcon2 ? { ctaIcon2 } : {}),
+        ...(note ? { note } : {}),
+        ...(plan ? { plan } : {}),
       };
     }
     case 'productGrid': {
@@ -597,10 +735,17 @@ function buildSectionData(type: SectionType, d: Record<string, unknown>, partial
     case 'richText': {
       // Stored as PLAIN TEXT / markdown — NOT raw HTML. The renderer treats it as
       // text, so there is no stored-XSS surface to sanitize. Bounded + scrubbed.
+      // ADR 0920 D5 — the conversation picture beside the copy.
+      const rtVisual = pickEnum(RICH_TEXT_VISUALS, d.visual);
+      const chat = cleanChat(d.chat);
       return {
         ...opt('eyebrow', MAX.eyebrow),
         ...opt('heading', MAX.heading),
         ...(!partial || has('text') ? { text: cleanString(d.text, MAX.markdown) } : {}),
+        ...tone(),
+        ...headStyle(),
+        ...(rtVisual ? { visual: rtVisual } : {}),
+        ...(chat ? { chat } : {}),
       };
     }
     case 'image': {
@@ -616,19 +761,22 @@ function buildSectionData(type: SectionType, d: Record<string, unknown>, partial
     case 'cta': {
       const label = cleanString(d.label, MAX.label);
       if (!partial && !label) throw new OpenwopError('validation_error', 'cta.label is required.', 400, {});
+      const align = pickEnum(CTA_ALIGNS, d.align); // ADR 0920 D6
       return {
         ...opt('eyebrow', MAX.eyebrow),
         ...opt('heading', MAX.heading),
         ...(optionalCleanString(d.subheading, MAX.text) ? { subheading: optionalCleanString(d.subheading, MAX.text) } : {}),
         ...(label ? { label } : {}),
         ...(!partial || has('url') ? { url: safeLink(d.url, MAX.url) } : {}),
+        ...tone(),
+        ...(align ? { align } : {}),
       };
     }
     case 'columns': {
       const cols = Array.isArray(d.columns) ? d.columns : [];
       const layout = COLUMN_LAYOUTS.includes(d.layout as typeof COLUMN_LAYOUTS[number]) ? (d.layout as string) : 'cards';
       const mapped = cols.slice(0, MAX.columns).map((c) => {
-        const cc = c as { title?: unknown; text?: unknown; href?: unknown; icon?: unknown; optional?: unknown };
+        const cc = c as { title?: unknown; text?: unknown; href?: unknown; icon?: unknown; optional?: unknown; eyebrow?: unknown; progress?: unknown; badge?: unknown; future?: unknown; art?: unknown; items?: unknown };
         const title = optionalCleanString(cc.title, MAX.label);
         // Optional per-card link target → the whole card renders as a link
         // (cards layout, #414). `safeLink` guards open-redirect / non-http(s).
@@ -637,20 +785,43 @@ function buildSectionData(type: SectionType, d: Record<string, unknown>, partial
         // renderer maps to a glyph (ICON_BY_SLUG), unknown slugs falling back to
         // the node motif. Bounded + cleaned; never interpreted server-side.
         const icon = optionalCleanString(cc.icon, MAX.slug);
+        // ADR 0920 D4 — per-item label line, progress bar, badge, "not yet"
+        // card, drawing, and `list` rows (name + right-aligned length).
+        const itemEyebrow = optionalCleanString(cc.eyebrow, MAX.eyebrow);
+        const progress = unitFraction(cc.progress);
+        const badge = optionalCleanString(cc.badge, MAX.badge);
+        const art = pickEnum(COLUMN_ART, cc.art);
+        const items = (Array.isArray(cc.items) ? cc.items : []).slice(0, MAX.listItems).map((it) => {
+          const ii = asObject(it) ?? {};
+          const meta = optionalCleanString(ii.meta, MAX.itemMeta);
+          return { label: typeof ii.label === 'string' ? cleanString(ii.label, MAX.label) : '', ...(meta ? { meta } : {}) };
+        }).filter((it) => it.label.length > 0);
         return {
           ...(title ? { title } : {}),
           text: cleanString(cc.text, MAX.text),
           ...(href ? { href } : {}),
           ...(icon ? { icon } : {}),
           ...(cc.optional === true ? { optional: true } : {}),
+          ...(itemEyebrow ? { eyebrow: itemEyebrow } : {}),
+          ...(progress !== undefined ? { progress } : {}),
+          ...(badge ? { badge } : {}),
+          ...(cc.future === true ? { future: true } : {}),
+          ...(art ? { art } : {}),
+          ...(items.length > 0 ? { items } : {}),
         };
       });
+      const colNote = optionalCleanString(d.note, MAX.sectionNote);
+      const numbers = pickEnum(STEP_NUMBERS, d.numbers);
       return {
         ...opt('eyebrow', MAX.eyebrow),
         ...opt('heading', MAX.heading),
         ...opt('lede', MAX.lede),
         ...(!partial || has('layout') ? { layout } : {}),
         ...(!partial || has('columns') ? { columns: mapped } : {}),
+        ...(colNote ? { note: colNote } : {}),
+        ...(numbers ? { numbers } : {}),
+        ...tone(),
+        ...headStyle(),
       };
     }
     case 'pricing': {
@@ -741,6 +912,8 @@ function buildSectionData(type: SectionType, d: Record<string, unknown>, partial
         ...opt('heading', MAX.heading),
         ...opt('lede', MAX.lede),
         ...(!partial || has('items') ? { items } : {}),
+        ...tone(),
+        ...headStyle(),
       };
     }
     case 'quotes': {
@@ -768,6 +941,7 @@ function buildSectionData(type: SectionType, d: Record<string, unknown>, partial
         ...opt('heading', MAX.heading),
         ...opt('lede', MAX.lede),
         ...(!partial || has('items') ? { items } : {}),
+        ...tone(),
       };
     }
     case 'video': {
@@ -805,6 +979,8 @@ function buildSectionData(type: SectionType, d: Record<string, unknown>, partial
         ...(length ? { length } : {}),
         ...(uploadDate ? { uploadDate } : {}),
         ...(youtubeUrl ? { youtubeUrl } : {}),
+        ...tone(),
+        ...headStyle(),
       };
     }
     case 'fields': {

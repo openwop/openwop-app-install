@@ -12,6 +12,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import { matchPrivacyRoute } from '../privacyRoute.js';
+import { privacyHref, PRIVACY_HREF } from '../../../brand/privacyHref.js';
 import { FEATURES } from '../../../chrome/features.js';
 
 describe('matchPrivacyRoute', () => {
@@ -29,5 +30,21 @@ describe('matchPrivacyRoute', () => {
 
   it('is not also a manifest route', () => {
     expect(FEATURES.some((f) => f.path === '/privacy')).toBe(false);
+  });
+});
+
+describe('VITE_BRAND_PRIVACY_URL — where the app links Privacy', () => {
+  it('unset, the links go to the built-in /privacy page', () => {
+    expect(PRIVACY_HREF).toBe('/privacy');
+    expect(privacyHref(undefined)).toBe('/privacy');
+    expect(privacyHref('  ')).toBe('/privacy');
+  });
+
+  it('an app path is honoured; anything else falls back', () => {
+    expect(privacyHref('/p/privacy')).toBe('/p/privacy');
+    expect(privacyHref(' /p/privacy ')).toBe('/p/privacy');
+    expect(privacyHref('https://example.com/privacy')).toBe('/privacy');
+    expect(privacyHref('//evil.example/privacy')).toBe('/privacy');
+    expect(privacyHref('javascript:alert(1)')).toBe('/privacy');
   });
 });

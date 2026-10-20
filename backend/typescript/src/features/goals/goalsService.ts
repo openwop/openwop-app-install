@@ -11,8 +11,9 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { DurableCollection } from '../../host/hostExtPersistence.js';
-import { registerJob, setJobEnabled } from '../../host/schedulingService.js';
+import { DurableCollection, hostExtStorage } from '../../host/hostExtPersistence.js';
+import { getJob, registerJob, setJobEnabled, type ScheduledJob, type ScheduleSkipReason } from '../../host/schedulingService.js';
+import { subjectKeyForms } from '../../host/subjectErasureRedaction.js';
 import { createLogger } from '../../observability/logger.js';
 import { emitGoalClosed, emitGoalEvaluated } from './goalEvents.js';
 import { resolveGoalVerifier } from './goalVerifiers.js';
@@ -44,10 +45,15 @@ const log = createLogger('goals.service');
 /** Bounded CAS retries for judge/binding writes (optimistic concurrency). */
 const CAS_ATTEMPTS = 4;
 
+export const GOAL_CONTINUATION_PURPOSE = 'goal-continuation';
+
 /** ADR 0412 P4 — the deterministic continuation-job id for one goal. */
 export function continuationJobId(tenant: string, goalId: string): string {
-  return `goal:${tenant}:${goalId}:continuation`;
+  return `${GOAL_CONTINUATION_JOB_PREFIX}${tenant}:${goalId}:continuation`;
 }
+
+/** ADR 0908 D2 — the id prefix only goals mints; the scheduler route refuses it. */
+export const GOAL_CONTINUATION_JOB_PREFIX = 'goal:';
 
 /** Best-effort disarm — a terminal/paused goal must leave NO active scheduled
  *  work under a retired identity. Never fails the transition that invoked it. */
@@ -67,18 +73,44 @@ export function requiresBounds(): boolean {
 /** Wire-projected list — every external consumer (routes, agent tool, surface)
  *  sees the strict `goal.schema.json` shape; host-private sidecar state never
  *  leaves the service. */
-export async function listGoals(tenant: string, state?: GoalState): Promise<Goal[]> {
+export async function listGoals(tenant: string, state?: GoalState, opts: { includeFixture?: boolean } = {}): Promise<Goal[]> {
   const rows = await goals.listByPrefix(`${tenant}::`);
   return rows
     .filter((g) => g.owner.tenant === tenant)
+    // ADR 0908 D4 — the conformance fixture is the harness's: only an operator
+    // credential is shown it (a row seeded into a real tenant before the fix is
+    // hidden from every person, the chat tool included).
+    .filter((g) => opts.includeFixture === true || !isFixtureGoal(g))
     .filter((g) => (state ? g.state === state : true))
     .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
     .map(toWireGoal);
 }
 
-export async function getGoal(tenant: string, id: string): Promise<Goal | null> {
+export async function getGoal(tenant: string, id: string, opts: { includeFixture?: boolean } = {}): Promise<Goal | null> {
   const row = await getGoalRow(tenant, id);
-  return row ? toWireGoal(row) : null;
+  if (!row || (isFixtureGoal(row) && opts.includeFixture !== true)) return null;
+  return toWireGoal(row);
+}
+
+/** ADR 0908 D4 — the one conformance fixture row (`ensureDemoGoal`). */
+export const FIXTURE_GOAL_ID = 'demo-standing-goal';
+export function isFixtureGoal(row: Pick<Goal, 'id'>): boolean {
+  return row.id === FIXTURE_GOAL_ID;
+}
+
+/** ADR 0908 (`GL2CD-9`) — may this principal act on this goal at all? The arm
+ *  route asks it FIRST, so its own refusals never reveal a goal the caller
+ *  cannot see. */
+export async function goalIsMutable(tenant: string, id: string, actingPrincipal: ActingPrincipal): Promise<boolean> {
+  return (await mutableRow(tenant, id, actingPrincipal)) !== null;
+}
+
+/** A row a mutation may act on: present, not the fixture, and not refused to
+ *  this principal. The fixture is never mutated by anyone (ADR 0908 D4). */
+async function mutableRow(tenant: string, id: string, actingPrincipal: ActingPrincipal): Promise<GoalRow | null> {
+  const row = await getGoalRow(tenant, id);
+  if (!row || isFixtureGoal(row) || principalDenied(row, actingPrincipal)) return null;
+  return row;
 }
 
 /** Internal row read (keeps the host sidecar) — service-private by convention. */
@@ -95,13 +127,19 @@ async function getGoalRow(tenant: string, id: string): Promise<GoalRow | null> {
  * wildcard conformance bearer) keep the prior tenant-only behavior. Run-scoped
  * surface callers are tenant-trusted (CTI-1) and pass no acting principal.
  */
-function principalDenied(row: GoalRow, actingPrincipal: string | undefined): boolean {
+/** Every spelling of the acting person (ADR 0908 D1 / `GL2WF-10`): routes pass
+ *  `callerOwnerSpellings(req)`; a service caller may pass one id. */
+export type ActingPrincipal = string | readonly string[] | undefined;
+
+function principalDenied(row: GoalRow, actingPrincipal: ActingPrincipal): boolean {
   const owner = row.owner.principal;
-  // An ABSENT acting principal is an internal tenant-trusted caller (the run
-  // surface; CTI-1). HTTP routes always pass `callerSubject(req)` — an
-  // unauthenticated request never reaches them — so a supplied-but-different
-  // principal is the only denial.
-  return typeof owner === 'string' && owner.length > 0 && actingPrincipal !== undefined && actingPrincipal !== owner;
+  // An ABSENT acting principal is an internal tenant-trusted caller (a system
+  // run with no person; CTI-1). HTTP routes always pass the caller's spellings,
+  // and the run surface passes the run's person (ADR 0908 D6), so a supplied
+  // set that does not name the owner is the only denial.
+  if (typeof owner !== 'string' || owner.length === 0 || actingPrincipal === undefined) return false;
+  const spellings = typeof actingPrincipal === 'string' ? [actingPrincipal] : actingPrincipal;
+  return !spellings.includes(owner);
 }
 
 /** Thrown when create is missing RFC 0058 bounds and `requiresBounds` is on (→ 422). */
@@ -118,6 +156,69 @@ export class JudgeOnlyStateError extends Error {
   }
 }
 
+/** ADR 0908 D9 — a create/update the host will not store. `status` is the HTTP
+ *  status the route maps it to: 422 for an unadvertised judge or mode, 400 for a
+ *  malformed field. */
+export class GoalInputError extends Error {
+  constructor(message: string, public readonly status: 400 | 422, public readonly field: string) {
+    super(message);
+  }
+}
+
+/** The judges and continuation modes this host ADVERTISES (`discovery.ts`
+ *  `agents.goals`) — create accepts nothing else (ADR 0908 D9). */
+export const HONOURED_JUDGES: ReadonlySet<string> = new Set(['verifier']);
+export const HONOURED_MODES: ReadonlySet<string> = new Set(['schedule', 'manual']);
+export const MAX_OBJECTIVE_LENGTH = 2000;
+const BOUND_KEYS: ReadonlySet<string> = new Set(['maxLoopIterations', 'runTimeoutMs', 'maxCostUsd']);
+
+export function validateObjective(objective: unknown): string {
+  if (typeof objective !== 'string' || objective.trim().length === 0) {
+    throw new GoalInputError('Field `objective` is required.', 400, 'objective');
+  }
+  if (objective.length > MAX_OBJECTIVE_LENGTH) {
+    throw new GoalInputError(`Field \`objective\` must be at most ${MAX_OBJECTIVE_LENGTH} characters.`, 400, 'objective');
+  }
+  return objective;
+}
+
+function validateBounds(bounds: GoalBounds | undefined): void {
+  if (bounds === undefined) return;
+  if (!bounds || typeof bounds !== 'object' || Array.isArray(bounds)) {
+    throw new GoalInputError('Field `bounds` must be an object.', 400, 'bounds');
+  }
+  for (const [k, v] of Object.entries(bounds)) {
+    if (!BOUND_KEYS.has(k)) throw new GoalInputError(`Unknown bound \`${k}\` (RFC 0058: maxLoopIterations, runTimeoutMs, maxCostUsd).`, 400, `bounds.${k}`);
+    const ok = k === 'maxCostUsd'
+      ? typeof v === 'number' && Number.isFinite(v) && v >= 0
+      : typeof v === 'number' && Number.isInteger(v) && v > 0;
+    if (!ok) throw new GoalInputError(`Bound \`${k}\` must be ${k === 'maxCostUsd' ? 'a non-negative number' : 'a positive integer'}.`, 400, `bounds.${k}`);
+  }
+}
+
+/**
+ * ADR 0908 D9 — one closed-world check for EVERY lane (route, run surface,
+ * KickTodo). The bounds-required check runs first, so the conformance leg that
+ * posts an unbounded `check: 'host'` goal still sees 422 for the right reason.
+ */
+export function validateGoalInput(input: CreateGoalInput): void {
+  if (requiresBounds() && !hasBounds(input.bounds)) throw new BoundsRequiredError();
+  validateObjective(input.objective);
+  if (!HONOURED_JUDGES.has(input.completion.check)) {
+    throw new GoalInputError(`\`completion.check: "${input.completion.check}"\` is not supported on this host — use \`"verifier"\` with a \`completion.verifierRef\`.`, 422, 'completion.check');
+  }
+  if (input.completion.check === 'verifier' && !input.completion.verifierRef) {
+    throw new GoalInputError('A verifier goal needs `completion.verifierRef` — without one it can never complete.', 400, 'completion.verifierRef');
+  }
+  if (!HONOURED_MODES.has(input.continuation.mode)) {
+    throw new GoalInputError(`\`continuation.mode: "${input.continuation.mode}"\` is not supported on this host — use \`"schedule"\` or \`"manual"\`.`, 422, 'continuation.mode');
+  }
+  if (input.continuation.armRef !== undefined) {
+    throw new GoalInputError('`continuation.armRef` is written by arming, never by the client.', 400, 'continuation.armRef');
+  }
+  validateBounds(input.bounds);
+}
+
 export interface CreateGoalInput {
   objective: string;
   completion: { check: 'verifier' | 'host'; verifierRef?: string };
@@ -127,14 +228,14 @@ export interface CreateGoalInput {
 }
 
 export async function createGoal(input: CreateGoalInput): Promise<Goal> {
-  if (requiresBounds() && !hasBounds(input.bounds)) throw new BoundsRequiredError();
+  validateGoalInput(input);
   const goal: Goal = {
     id: `goal:${randomUUID()}`,
     objective: input.objective,
     state: 'active',
     completion: { check: input.completion.check, ...(input.completion.verifierRef ? { verifierRef: input.completion.verifierRef } : {}) },
-    continuation: { mode: input.continuation.mode, ...(input.continuation.armRef ? { armRef: input.continuation.armRef } : {}) },
-    bounds: input.bounds ?? {},
+    continuation: { mode: input.continuation.mode },
+    bounds: input.bounds ? { ...input.bounds } : {},
     progress: { iterations: 0, contributingRunIds: [] },
     owner: { tenant: input.owner.tenant, ...(input.owner.workspace ? { workspace: input.owner.workspace } : {}), ...(input.owner.principal ? { principal: input.owner.principal } : {}) },
     createdAt: nowIso(),
@@ -155,16 +256,17 @@ export async function updateGoal(
   tenant: string,
   id: string,
   body: Record<string, unknown>,
-  actingPrincipal?: string,
+  actingPrincipal?: ActingPrincipal,
 ): Promise<Goal | null> {
   if (typeof body.state === 'string' && JUDGE_OWNED_STATES.has(body.state)) {
     throw new JudgeOnlyStateError(body.state);
   }
+  if (body.objective !== undefined) validateObjective(body.objective);
   // GOALS-1 (grade-gate fix): CAS, not last-write-wins — a client edit racing
   // the judge write must never clobber a just-persisted verdict/sidecar.
   for (let attempt = 0; attempt < CAS_ATTEMPTS; attempt++) {
-    const g = await getGoalRow(tenant, id);
-    if (!g || principalDenied(g, actingPrincipal)) return null;
+    const g = await mutableRow(tenant, id, actingPrincipal);
+    if (!g) return null;
     const next: GoalRow = {
       ...g,
       ...(typeof body.objective === 'string' ? { objective: body.objective } : {}),
@@ -180,7 +282,7 @@ export async function transitionGoal(
   tenant: string,
   id: string,
   action: 'pause' | 'resume' | 'abandon',
-  actingPrincipal?: string,
+  actingPrincipal?: ActingPrincipal,
 ): Promise<Goal | null> {
   // ADR 0412 P4 — pause/resume are REAL arming toggles now (the historical
   // "arming flag is a no-op" comment is retired): they enable/disable the
@@ -190,8 +292,15 @@ export async function transitionGoal(
   let g: GoalRow | null = null;
   let next: GoalRow | null = null;
   for (let attempt = 0; attempt < CAS_ATTEMPTS; attempt++) {
-    g = await getGoalRow(tenant, id);
-    if (!g || principalDenied(g, actingPrincipal)) return null;
+    g = await mutableRow(tenant, id, actingPrincipal);
+    if (!g) return null;
+    // ADR 0908 (`GL2CD-1`) — a client transition never overwrites a verdict.
+    // Pause/resume act only on an active goal; abandoning a goal that is
+    // already terminal is a no-op that returns it unchanged.
+    if (g.state !== 'active') {
+      if (action === 'abandon') return toWireGoal(g);
+      throw new GoalNotActiveError(g.state);
+    }
     const state: GoalState = action === 'abandon' ? 'abandoned' : 'active';
     next = { ...g, state, updatedAt: nowIso() };
     if (await goals.compareAndSwap(g, next)) break;
@@ -224,6 +333,14 @@ export class ContinuationModeError extends Error {
   }
 }
 
+/** Thrown when a route or run-surface arm would replace a continuation a
+ *  feature armed (→ 409; ADR 0908 D2). */
+export class FeatureArmedContinuationError extends Error {
+  constructor() {
+    super('This goal\'s continuation was set up by the feature that created the goal; change it there.');
+  }
+}
+
 /** Thrown when the scheduler refuses the continuation job (horizon/conflict → 422). */
 export class ScheduleRegistrationError extends Error {}
 
@@ -250,22 +367,39 @@ export async function armContinuation(
      *  a fixed literal is replay/rename-safe. */
     rosterId?: string;
     agentId?: string;
+    /** ADR 0908 D2 — the PERSON this continuation acts for, stamped as the job's
+     *  `metadata.actingUserId` so the ADR 0815 cascade, the actor-inactive skip
+     *  and the scheduler's subject eraser all see it. The route passes the
+     *  person behind the credential; KickTodo passes none (its job names the
+     *  participant in `inputs.ownerSubject`). */
+    actingUserId?: string;
+    /** The person behind a key-armed continuation: carried as the job's
+     *  narrowing-only `orgScopeSubject` (never a grant; ADR 0879 D7). */
+    causedBy?: string;
   },
-  actingPrincipal?: string,
+  actingPrincipal?: ActingPrincipal,
 ): Promise<Goal | null> {
-  const row = await getGoalRow(tenant, id);
-  if (!row || principalDenied(row, actingPrincipal)) return null;
+  const row = await mutableRow(tenant, id, actingPrincipal);
+  if (!row) return null;
   if (row.state !== 'active') throw new GoalNotActiveError(row.state);
   if (row.continuation.mode !== 'schedule') throw new ContinuationModeError(row.continuation.mode);
 
   const jobId = continuationJobId(tenant, id);
+  // ADR 0908 D2 (`GL2CD-8`) — a continuation a FEATURE armed (it seeded per-fire
+  // `inputs`) is replaced only by a caller that supplies inputs again (that
+  // feature's own re-arm); the route and the run surface never can, so neither
+  // can silently drop the inputs the ADR 0815 cascade keys on.
+  const prior = await getJob(jobId);
+  if (prior && prior.tenantId === tenant && prior.inputs !== undefined && input.inputs === undefined) {
+    throw new FeatureArmedContinuationError();
+  }
   const res = await registerJob({
     jobId,
     tenantId: tenant,
     cronExpr: input.cronExpr,
     workflowId: input.workflowId,
     enabled: true,
-    metadata: { goalId: id, purpose: 'goal-continuation' },
+    metadata: { goalId: id, purpose: GOAL_CONTINUATION_PURPOSE, ...(input.actingUserId !== undefined ? { actingUserId: input.actingUserId } : {}), ...(input.causedBy !== undefined ? { orgScopeSubject: input.causedBy } : {}) },
     // Per-fire inputs so the continuation workflow's declared variables are
     // seeded on every scheduled tick (not just when a live request supplies
     // them). Without this a `variables[]`-declaring loop runs blind.
@@ -313,6 +447,14 @@ export class VerifierUnavailableError extends Error {
  *  Fail-closed: a broken judge never completes a goal (typed failure, never
  *  success-with-empty). */
 export class VerifierFailedError extends Error {}
+
+/** ADR 0908 D5 — the run named as contributing does not exist in the goal's
+ *  tenant (→ 404; a foreign run is indistinguishable from an unknown one). */
+export class RunNotFoundError extends Error {
+  constructor(public readonly runId: string) {
+    super('Run not found.');
+  }
+}
 
 /** Thrown when a CAS write loses `CAS_ATTEMPTS` races in a row (→ 409). */
 export class ConcurrentGoalUpdateError extends Error {
@@ -373,21 +515,34 @@ export async function bindContributingRun(
   id: string,
   runId: string,
   costUsd?: number,
-  actingPrincipal?: string,
+  actingPrincipal?: ActingPrincipal,
 ): Promise<Goal | null> {
+  const visible = await mutableRow(tenant, id, actingPrincipal);
+  if (!visible) return null;
+  // `GL2CD-11` — a run already counted stays idempotent even after retention
+  // deleted it: the duplicate check precedes the lookup.
+  if ((visible.progress?.contributingRunIds ?? []).includes(runId)) return toWireGoal(visible);
+  // ADR 0908 D5 — a contributing run is a run of THIS goal's tenant (an unknown
+  // id and a foreign one are the same not-found), and the cost counted is never
+  // below what the host stamped on it (ADR 0476). A run still in flight has no
+  // stamp yet, so only the asserted cost counts for it (OQ-3).
+  const run = await hostExtStorage().getRun(runId);
+  if (!run || run.tenantId !== tenant) throw new RunNotFoundError(runId);
+  const stamped = typeof run.metadata?.costUsd === 'number' && Number.isFinite(run.metadata.costUsd) ? run.metadata.costUsd : 0;
+  const counted = Math.max(stamped, costUsd ?? 0);
   for (let attempt = 0; attempt < CAS_ATTEMPTS; attempt++) {
-    const row = await getGoalRow(tenant, id);
-    if (!row || principalDenied(row, actingPrincipal)) return null;
+    const row = await mutableRow(tenant, id, actingPrincipal);
+    if (!row) return null;
     const ids = row.progress?.contributingRunIds ?? [];
     if (ids.includes(runId)) return toWireGoal(row); // idempotent: cost counted once
-    const accumulated = (row.host?.accumulatedCostUsd ?? 0) + (costUsd ?? 0);
+    const accumulated = (row.host?.accumulatedCostUsd ?? 0) + counted;
     const costExceeded =
       row.state === 'active' && typeof row.bounds.maxCostUsd === 'number' && accumulated > row.bounds.maxCostUsd;
     const next: GoalRow = {
       ...row,
       state: costExceeded ? 'bound-exceeded' : row.state,
       progress: { iterations: row.progress?.iterations ?? 0, contributingRunIds: [...ids, runId] },
-      ...(costUsd !== undefined ? { host: { ...row.host, accumulatedCostUsd: accumulated } } : {}),
+      ...(counted > 0 || costUsd !== undefined ? { host: { ...row.host, accumulatedCostUsd: accumulated } } : {}),
       updatedAt: nowIso(),
     };
     if (await goals.compareAndSwap(row, next)) {
@@ -426,12 +581,12 @@ export async function evaluateGoal(
   tenant: string,
   id: string,
   evidence: GoalEvidence,
-  actingPrincipal?: string,
+  actingPrincipal?: ActingPrincipal,
 ): Promise<EvaluateGoalResult | null> {
-  const row = await getGoalRow(tenant, id);
   // Denial precedes the replay short-circuit: a foreign principal must not
-  // read the recorded verdict either.
-  if (!row || principalDenied(row, actingPrincipal)) return null;
+  // read the recorded verdict either. The fixture is never judged (D4).
+  const row = await mutableRow(tenant, id, actingPrincipal);
+  if (!row) return null;
 
   // Same-evidence re-evaluation (retry/replay) → recorded verdict, no re-judging.
   const recorded = row.completion.lastVerdict;
@@ -517,19 +672,71 @@ export async function evaluateGoal(
  *  `goal-standing-continuation` state-guard leg (soft-skips on empty list) is
  *  non-vacuous for whatever tenant the driver authenticates as. */
 export async function ensureDemoGoal(tenant: string): Promise<void> {
-  const id = 'demo-standing-goal';
-  if (await getGoal(tenant, id)) return;
+  // ADR 0908 D4 — only an operator credential reaches this (the route checks).
+  // Re-seeded when no longer `active`: a fixture flipped terminal would leave
+  // `?state=active` empty and the judge-only leg vacuous. No wall-clock bound,
+  // for the same reason; and nothing may mutate it (`mutableRow`).
+  const existing = await getGoalRow(tenant, FIXTURE_GOAL_ID);
+  if (existing?.state === 'active') return;
   await goals.put({
-    id,
+    id: FIXTURE_GOAL_ID,
     objective: 'Keep the weekly digest under 5 bullets',
     state: 'active',
     completion: { check: 'verifier' },
     continuation: { mode: 'schedule' },
-    bounds: { maxLoopIterations: 10, runTimeoutMs: 600_000 },
+    bounds: { maxLoopIterations: 10 },
     progress: { iterations: 0, contributingRunIds: [] },
     owner: { tenant },
     createdAt: nowIso(),
   });
+}
+
+/**
+ * ADR 0908 D8 — the fire-time bound gate for a goal's continuation job. The job
+ * is recognised by its server-owned id (`continuationJobId`; the scheduler route
+ * refuses a `goal:` id from any other door), never by client metadata. Refuses
+ * a missing or non-active goal; a goal past an RFC 0058 bound is closed through
+ * the judge's own path (`transitionBoundExceeded`: `bound-exceeded` + disarm +
+ * `host.goals.closed`). Iterations advance only at an evaluation, so for a goal
+ * nobody judges this enforces the wall-clock and cost bounds.
+ */
+export function ownsGoalContinuationJob(job: ScheduledJob): boolean {
+  const goalId = job.metadata?.goalId;
+  return typeof goalId === 'string' && job.jobId === continuationJobId(job.tenantId, goalId);
+}
+
+export async function goalContinuationFireGate(job: ScheduledJob, now: number = Date.now()): Promise<ScheduleSkipReason | null> {
+  const goalId = job.metadata?.goalId;
+  if (typeof goalId !== 'string') return 'goal-closed';
+  const row = await getGoalRow(job.tenantId, goalId);
+  if (!row || isFixtureGoal(row) || row.state !== 'active') {
+    // `GL2CD-7` — a job that outlived its goal (a failed best-effort disarm, an
+    // old armed fixture) is disarmed here too, so it stops recording a skip on
+    // every slot.
+    await disarmContinuation(job.tenantId, goalId, job.jobId);
+    return 'goal-closed';
+  }
+  if (breachedBound(row, now)) {
+    await transitionBoundExceeded(job.tenantId, goalId);
+    return 'goal-closed';
+  }
+  return null;
+}
+
+/**
+ * ADR 0908 D7 — a person's goals go with them on a DSAR: every goal in the
+ * tenant they own (any key form of the subject) is disarmed and deleted.
+ */
+export async function eraseGoalsForSubject(tenantId: string, subjectKey: string): Promise<{ rowsTouched: number }> {
+  if (!tenantId || !subjectKey) return { rowsTouched: 0 };
+  const { forms } = subjectKeyForms(subjectKey);
+  let rowsTouched = 0;
+  for (const row of await goals.listByPrefix(`${tenantId}::`)) {
+    if (row.owner.tenant !== tenantId || typeof row.owner.principal !== 'string' || !forms.has(row.owner.principal)) continue;
+    await disarmContinuation(tenantId, row.id, row.host?.armedJobRef);
+    if (await goals.delete(`${tenantId}::${row.id}`)) rowsTouched += 1;
+  }
+  return { rowsTouched };
 }
 
 export const __test = { collection: goals };

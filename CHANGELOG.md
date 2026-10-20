@@ -18,6 +18,109 @@ Commits by the `/cut-app-release` skill; required upgrade stops are tracked in
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-10-20
+
+PRs since v0.5.1. No schema or app migrations, rolling-safe, no required stop.
+A MINOR release under ADR 0052 §D1: it adds features (campaign operations, ads
+conversions, email approvals, per-deployment custom-domain edges, knowledge-base
+retrieval). One setting was removed (see Upgrading).
+
+### Added
+
+- **Campaign operations, P0 (ADRs 0921–0927).** Client accounts, an asset
+  registry and a CMS page adapter (#5015); change sets with version-bound
+  approval, verified execution, an operator inbox and a demo agency (#5022).
+- **A rate limit shared across instances for public token surfaces (ADR 0934
+  P0).** Hashed keys in a compare-and-set fixed window (#5026).
+- **Email approvals and versioned templates (ADR 0905).** Immutable template
+  versions with history, diff and restore (#4922); an `email-campaign-send`
+  approval kind and an email approval gate (#4928).
+- **Ads (ADR 0907).** Account-wide metrics with conversions, a 7-day look-back
+  and backfill (#4935); TikTok and LinkedIn metric readers, off until verified
+  against a sandbox (#4936); Google conversion uploads and relay match quality
+  (#4937); hourly conversions delivery, off by default, with consent re-checked
+  at send (#4938).
+- **Knowledge base retrieval (ADR 0904).** Fair cross-collection fusion,
+  calibrated relevance and a retrieval eval (#4926); query-aware embeddings on
+  BYOK providers (#4976); structure-preserving DOCX/PDF parsing with page
+  numbers and chunker v3 (#4978).
+- **Per-deployment custom-domain edge (ADR 0906).** An edge-certificate provider
+  port and adapters with ordered release (#4930); edge lifecycle,
+  notifications and an HTTPS UI (#4931); an operator script for the one-time
+  edge (#4921); the adapter impersonates a dedicated service account (#4985).
+- **System site profiles (ADR 0931).** A per-distribution site profile and
+  optional seeds (#5000).
+- **Ambient work graph (ADR 0930).** Patterns belong to the person who did the
+  work (#5011).
+- **Just-in-time kicktodo-operator activation (ADR 0910 P1)** with use-time
+  expiry and audited self-approval (#4969).
+- **CMS section styles (ADR 0920).** Tones, split heads, new column layouts,
+  plan and chat visuals (#4968).
+- `VITE_BRAND_PRIVACY_URL` for the app's Privacy links (#5003).
+- `OPENWOP_RETENTION_SWEEP_DRY_RUN` previews the retention sweep (#5002).
+- A build-time legacy cache purge for a replaced service worker (ADR 0873 D13,
+  #4999).
+- RFC 0245: a recorded tool error replays as an error; conformance pin 2.46.18
+  (ADR 0929, #4989).
+
+### Changed
+
+- Pack pins live in one table and resolve lazily (ADR 0919, #4971); `createApp`
+  resolves a pin only for a pack it installs (#4990).
+- One GCP metadata-server client (#4977); the approvals separation-of-duties
+  core moved to `host/approvalSelfCheck.ts` (#4941).
+- The frontend ships react-router's production build (−433 B entry gzip, #5024).
+- `bump-version` writes the lockfiles' root version, and the lockstep check
+  reads it (#4988).
+
+### Fixed
+
+- **Custom domains fail closed on lookup errors**, with one canonical host and a
+  leased sweep (ADR 0906 P0, #4919).
+- **Ads:** API versions un-retired, TikTok conversions fixed, relay rows erased,
+  sandbox harness (ADR 0907 P0/P1, #4920).
+- **Proposals apply honestly (ADR 0938).** A transition table with CAS, apply
+  bound to what the reviewer saw, and authorized reads. With no installer
+  registered, every apply is refused rather than reported as installed (#5019).
+- **Goals:** who may act on a goal, and what the judge may read (ADR 0908,
+  #4939).
+- The builder's workflow menu paints above other cards and is no longer clipped
+  in list view (#5034).
+- **Deleting your own account cancels its Stripe subscriptions first**, revokes
+  what it delegated in other workspaces (API keys, CLI logins, pairings) and
+  emits `host.users.user.erased`. If the cancel fails, nothing is deleted
+  (503) (#5001).
+- **A superadmin can decide reviews on the reserved system site.** That org has
+  no members, so its content reviews were undecidable (403). Every real org
+  still needs `host:members:manage` (ADR 0027, #5042).
+- Call-to-action, form, product-grid and entity section headings carry the same
+  anchor id as other headings, so in-page links to them work (#5045).
+
+### Docs
+
+- ADRs 0906 (decisions), 0921–0928, 0933–0934, 0938, 0939, 0940, and the
+  Campaign Studio program (ADRs 0941–0962).
+
+#### Upgrading from 0.5.1
+
+- **Required stop:** no. No schema or app migrations (sqlite 50 / postgres 48,
+  app 24, as 0.5.1). Back up, deploy, check `/readiness` reports
+  `version: "0.6.0"`.
+- **Removed:** `OPENWOP_PROPOSALS_ACTIVATION` (ADR 0938 D2). Its
+  `approval-gate` value only ever minted orphan approvals. If you set it, it now
+  has no effect; remove it.
+- **New optional settings**, all off or unset by default:
+  - `VITE_BRAND_PRIVACY_URL` (frontend build);
+  - `OPENWOP_RETENTION_SWEEP_DRY_RUN`;
+  - `OPENWOP_SYSTEM_SITE_PROFILE`, `OPENWOP_SYSTEM_SITE_SEEDS_DISABLED`;
+  - the custom-domain edge: `OPENWOP_CUSTOM_DOMAIN_EDGE`,
+    `OPENWOP_CUSTOM_DOMAIN_EDGE_PROJECT`, `OPENWOP_CUSTOM_DOMAIN_EDGE_SA`,
+    `OPENWOP_CUSTOM_DOMAIN_EDGE_HOSTNAME`, `OPENWOP_CUSTOM_DOMAIN_CERT_MAP`,
+    `OPENWOP_CUSTOM_DOMAIN_LB_IP`, `OPENWOP_CUSTOM_DOMAIN_EDGE_POLL_MS`
+    (see ADR 0906);
+  - ads: `OPENWOP_ADS_VERIFIED_READERS`, `OPENWOP_ADS_VERIFIED_SENDERS`, and the
+    `OPENWOP_ADS_SANDBOX` / `OPENWOP_SANDBOX_*` harness (ADR 0907).
+
 ## [0.5.1] — 2026-10-18
 
 Ten PRs since v0.5.0. No migrations, rolling-safe, no required stop, no breaking

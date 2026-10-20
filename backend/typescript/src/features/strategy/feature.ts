@@ -65,8 +65,8 @@ export const strategyFeature: BackendFeature = {
     // ADR 0080 — read nodes over ctx.features.strategy + a create-board-memo
     // write node (persists to Documents) + the Strategy Analyst agent that
     // tool-calls them through the existing chat (ADR 0058 chat-drivability).
-    { name: 'feature.strategy.nodes', version: '1.3.2' },
-    { name: 'vendor.openwop-app.strategy.agents', version: '1.0.2' },
+    'feature.strategy.nodes',
+    'vendor.openwop-app.strategy.agents',
   ],
   // ADR 0194 Phase 5 — a SOFT dependency (advisory, never a lock): the Strategy
   // Analyst drafts board memos as Documents `board-update` docs (ADR 0080) when

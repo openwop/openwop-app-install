@@ -6,7 +6,8 @@ import { beforeAll, describe, it, expect } from 'vitest';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { openStorage } from '../src/storage/index.js';
 import { sweepTenant, processDueSweeps } from '../src/features/ambient-work-graph/workGraphSweep.js';
-import { listSuggestions, setSuggestionStatus } from '../src/features/ambient-work-graph/suggestionStore.js';
+import { listSuggestions, decideSuggestion } from '../src/features/ambient-work-graph/suggestionStore.js';
+import { opaquePrincipal } from '../src/host/runOwner.js';
 import type { Storage } from '../src/storage/storage.js';
 import type { RunRecord } from '../src/types.js';
 
@@ -15,9 +16,14 @@ beforeAll(async () => {
   storage = await openStorage('memory://'); initHostExtPersistence(storage);
 });
 
+// ADR 0930 D2/C2 — only a run carrying the RFC 0165 owner stamp is mined, so every
+// seeded run has one (the shape `ownerStampFromRequest` writes for a session).
+const ACTOR = 'u-sweep';
+const OWNER_KEY = opaquePrincipal(ACTOR);
+const OWNER = { principal: OWNER_KEY, principalKind: 'user', subject: { issuer: 'urn:openwop-app:session', subjectId: OWNER_KEY, lane: 'api-key', kind: 'user' } };
 function runRec(runId: string, tenantId: string): RunRecord {
   return {
-    runId, workflowId: 'wf', tenantId, status: 'completed', inputs: {}, metadata: {}, configurable: {},
+    runId, workflowId: 'wf', tenantId, status: 'completed', inputs: {}, metadata: { owner: OWNER }, configurable: {},
     createdAt: '2026-06-24T00:00:00Z', updatedAt: '2026-06-24T00:00:00Z',
   };
 }
@@ -37,14 +43,14 @@ describe('sweepTenant + upsert (ADR 0137 P2)', () => {
     expect(n).toBe(1);
     const sugs = await listSuggestions('twg-det');
     expect(sugs).toHaveLength(1);
-    expect(sugs[0]).toMatchObject({ count: 3, toolSequence: ['kb.search', 'email.send'], status: 'suggested' });
+    expect(sugs[0]).toMatchObject({ count: 3, toolSequence: ['kb.search', 'email.send'], status: 'suggested', ownerPrincipal: OWNER_KEY });
   });
 
   it('re-sweep PRESERVES a dismissed status (no resurrection)', async () => {
     for (const i of [1, 2, 3]) await seedRun(`dis${i}`, 'twg-dis', ['kb.search', 'email.send']);
     await sweepTenant({ storage }, 'twg-dis');
     const sug = (await listSuggestions('twg-dis'))[0]!;
-    await setSuggestionStatus(sug.suggestionId, 'dismissed');
+    expect((await decideSuggestion(sug.suggestionId, 'twg-dis', OWNER_KEY, 'dismissed')).ok).toBe(true);
     await sweepTenant({ storage }, 'twg-dis'); // re-detect
     const after = (await listSuggestions('twg-dis')).find((s) => s.suggestionId === sug.suggestionId)!;
     expect(after.status).toBe('dismissed'); // stayed dismissed

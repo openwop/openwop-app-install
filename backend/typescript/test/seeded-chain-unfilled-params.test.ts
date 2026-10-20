@@ -122,8 +122,33 @@ import type { WorkflowDefinition } from '../src/executor/types.js';
  *  programmatically by the scheduler job's `configurable` (`kicktodo-core/agentTools.ts`
  *  convene, `kickbotCoachTurnService.ts` coach turn), never from the gallery (the chain
  *  is `internal: true`), and a param-less copy fails closed at the same typed
- *  `agentRunnerNode.ts` agentId refusal. A declared +1, not a silent raise. */
-const CEILING = 124;
+ *  `agentRunnerNode.ts` agentId refusal. A declared +1, not a silent raise.
+ *
+ *  124 → 125 (2026-10-19, ADR 0907 P5): `campaign-sync.conversions-dispatch` :: orgId.
+ *  It is a SCHEDULE-PAIRED chain (the hourly conversions delivery); the schedule that
+ *  runs it supplies `orgId`, and there is no honest default for "which org's queued
+ *  conversions". A param-less from-chain copy fails CLOSED at its only node:
+ *  `dispatch-conversions` returns a typed `validation_error` "orgId is required." before
+ *  any read or send. It also no-ops (`outcome:'disabled'`) until the workspace enables
+ *  the `campaign-connectors.scheduled-conversions` sub-toggle. Pinned by
+ *  `ads-conversion-delivery.test.ts`. A declared +1, not a silent raise.
+ *
+ *  125 → 126 (2026-10-19, ADR 0923 P0): `campaign-ops.change-request` :: orgId,
+ *  requestId, version. The campaign-ops request routes launch it chain-backed
+ *  SAME-ID through the run starter with all three as run inputs, for a request
+ *  the route has just created or edited; it is `internal: true`, so the gallery
+ *  does not offer it. There is no honest default for "which client, which request,
+ *  which version". A param-less copy fails closed at its first node: the surface
+ *  refuses an empty `orgId` (typed `validation_error`) before any model call. A
+ *  declared +1, not a silent raise.
+ *
+ *  126 → 127 (2026-10-19, ADR 0925 P0): `campaign-ops.execute` :: orgId, approvalId.
+ *  Started only by the `campaign-change-set` decide handler, with the approved
+ *  change-set hash pinned in the run stamp; `internal: true`. A param-less copy
+ *  cannot carry out anything: its one node's surface call refuses an empty `orgId`,
+ *  and refuses any run whose stamp does not name that approval and hash
+ *  (`not_the_approved_run`). A declared +1, not a silent raise. */
+const CEILING = 127;
 
 /** ADR 0507 — the EMBEDDED family, invisible until the detector was widened. These
  *  freeze to `''` rather than `undefined`, so the node SUCCEEDS on truncated input

@@ -274,6 +274,7 @@ registerSubjectEraser(eraseSubjectAnswers);
 // `updatedAt`, so a re-affirmed answer keeps itself alive.
 registerRetentionPurger({
   feature: 'job-search:answer',
+  dryRun: 'rows-by-age',
   // The seam calls purge(tenantId, CLASSIFICATION, cutoffIso). The previous
   // binding named the second slot `cutoffIso`, so every sweep compared
   // timestamps against the classification STRING — and every ISO date sorts

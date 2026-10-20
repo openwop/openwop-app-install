@@ -184,16 +184,20 @@ export interface FeaturePackRef {
  * imports feature modules to learn this). The admin Plugins-console projection
  * (service.ts `buildFeatureConsole`) joins these with on-disk pack presence.
  */
-const featurePacks = new Map<string, FeaturePackRef[]>();
+const featurePacks = new Map<string, readonly FeaturePackRef[] | (() => readonly FeaturePackRef[])>();
 
-/** Declare (or replace) a feature's required packs. Idempotent — last wins. */
-export function registerFeaturePacks(id: string, refs: readonly FeaturePackRef[]): void {
-  featurePacks.set(id, refs.map((r) => ({ name: r.name, version: r.version })));
+/** Declare (or replace) a feature's required packs. Idempotent — last wins.
+ *  Boot passes a THUNK (ADR 0919): the pins are resolved when the console asks,
+ *  not at registration, so a pin bump is invisible to code that never asks. */
+export function registerFeaturePacks(id: string, refs: readonly FeaturePackRef[] | (() => readonly FeaturePackRef[])): void {
+  featurePacks.set(id, typeof refs === 'function' ? refs : refs.map((r) => ({ name: r.name, version: r.version })));
 }
 
 /** The pinned pack refs a feature declares (empty if none). */
 export function getFeaturePacks(id: string): FeaturePackRef[] {
-  return featurePacks.get(id) ?? [];
+  const refs = featurePacks.get(id);
+  if (!refs) return [];
+  return (typeof refs === 'function' ? refs() : refs).map((r) => ({ name: r.name, version: r.version }));
 }
 
 /** Test-only: drop the per-feature pack registry. */

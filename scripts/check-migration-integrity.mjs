@@ -7,8 +7,9 @@
  *    with no gaps/dupes and `max key === LATEST_SCHEMA_VERSION` (a gap means a
  *    customer mid-version can't replay forward);
  *  - the app-migration `version`s are contiguous `1..N` (or empty), no dupes;
- *  - the app version is in LOCKSTEP across `/VERSION`, both `package.json`s, and
- *    `src/version.ts` `APP_VERSION` (ADR 0052 §D4 — one SSoT, propagated).
+ *  - the app version is in LOCKSTEP across `/VERSION`, both `package.json`s,
+ *    both lockfiles' root version, and `src/version.ts` `APP_VERSION`
+ *    (ADR 0052 §D4 — one SSoT, propagated).
  *
  * No deps; parses the sources textually (cheap + CI-safe).
  */
@@ -67,7 +68,15 @@ const versionFile = read('VERSION').trim();
 const be = JSON.parse(read('backend/typescript/package.json')).version;
 const fe = JSON.parse(read('frontend/react/package.json')).version;
 const code = /APP_VERSION\s*=\s*['"]([^'"]+)['"]/.exec(read('backend/typescript/src/version.ts'))?.[1];
-for (const [name, v] of [['package.json (backend)', be], ['package.json (frontend)', fe], ['src/version.ts', code]]) {
+// The lockfile ROOT mirrors too (2026-10-18): they sat at 0.4.0 through v0.5.0
+// and v0.5.1 because nothing bumped or checked them, so the next `npm install`
+// rewrote them into an unrelated PR. `bump-version.mjs` now writes them.
+const lockRoot = (rel) => { const j = JSON.parse(read(rel)); return { top: j.version, root: j.packages?.['']?.version }; };
+const beLock = lockRoot('backend/typescript/package-lock.json');
+const feLock = lockRoot('frontend/react/package-lock.json');
+for (const [name, v] of [['package.json (backend)', be], ['package.json (frontend)', fe], ['src/version.ts', code],
+  ['package-lock.json (backend) version', beLock.top], ['package-lock.json (backend) packages[""].version', beLock.root],
+  ['package-lock.json (frontend) version', feLock.top], ['package-lock.json (frontend) packages[""].version', feLock.root]]) {
   if (v !== versionFile) fail.push(`version lockstep: ${name} is ${v}, /VERSION is ${versionFile}`);
 }
 

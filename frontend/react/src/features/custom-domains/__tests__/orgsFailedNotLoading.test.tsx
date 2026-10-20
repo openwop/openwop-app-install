@@ -19,15 +19,15 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, cleanup, act, fireEvent } from '@testing-library/react';
 
-const { listOrgs, listDomains, useFeatureAccess } = vi.hoisted(() => ({
+const { listOrgs, listDomainPage, useFeatureAccess } = vi.hoisted(() => ({
   listOrgs: vi.fn<typeof import('../domainsClient.js').listOrgs>(),
-  listDomains: vi.fn<typeof import('../domainsClient.js').listDomains>(),
+  listDomainPage: vi.fn<typeof import('../domainsClient.js').listDomainPage>(),
   useFeatureAccess: vi.fn(() => makeFeatureAccess({ enabled: true, loading: false })),
 }));
 import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
 vi.mock('../domainsClient.js', async (orig) => ({
   ...(await orig<typeof import('../domainsClient.js')>()),
-  listOrgs, listDomains,
+  listOrgs, listDomainPage,
 }));
 vi.mock('../../../featureToggles/FeatureAccessContext.js', async (orig) => ({
   ...(await orig<typeof import('../../../featureToggles/FeatureAccessContext.js')>()),
@@ -58,13 +58,13 @@ afterEach(cleanup);
 beforeEach(() => {
   vi.clearAllMocks();
   listOrgs.mockReset();
-  listDomains.mockReset();
+  listDomainPage.mockReset();
   // Set in EVERY case: a toggle case that fails mid-way can no longer leak
   // "disabled" into the next one.
   useFeatureAccess.mockReset();
   useFeatureAccess.mockReturnValue(makeFeatureAccess({ enabled: true, loading: false }));
   listOrgs.mockResolvedValue([ORG]);
-  listDomains.mockResolvedValue([DOMAIN]);
+  listDomainPage.mockResolvedValue({ domains: [DOMAIN], edge: { provider: 'manual', ready: true } });
 });
 
 describe('a failed ORGANIZATION read is neither "no organizations" nor loading', () => {
@@ -83,7 +83,7 @@ describe('a failed ORGANIZATION read is neither "no organizations" nor loading',
     // The add-domain form is inside the org-state chain: with no org id there is
     // nothing for a submit to write to, so the affordance must not be offered.
     expect(screen.queryByRole('button', { name: 'Add domain' })).toBeNull();
-    expect(listDomains).not.toHaveBeenCalled();
+    expect(listDomainPage).not.toHaveBeenCalled();
   });
 
   it('the retry re-runs the organization read', async () => {
@@ -106,12 +106,12 @@ describe('a failed ORGANIZATION read is neither "no organizations" nor loading',
     expect(document.body.textContent).toContain('A custom domain belongs to an organization.');
     expect(document.body.textContent).not.toContain('Could not load your organizations');
     expect(document.querySelector('.skeleton')).toBeNull();
-    expect(listDomains).not.toHaveBeenCalled();
+    expect(listDomainPage).not.toHaveBeenCalled();
   });
 
   it('an organization with genuinely no domains still reads as empty', async () => {
     // The failure mode of this fix: a real empty state replaced by an error.
-    listDomains.mockResolvedValue([]);
+    listDomainPage.mockResolvedValue({ domains: [], edge: { provider: 'manual', ready: true } });
     await mount();
     expect(document.body.textContent).toContain('No domains yet');
     expect(document.body.textContent).not.toContain('Could not load your organizations');

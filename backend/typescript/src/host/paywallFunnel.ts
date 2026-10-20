@@ -101,6 +101,7 @@ registerKvAgeOut({ id: 'paywall:funnel-counts', prefix: 'hostext:paywall:funnel-
 // scans by day), so a tenant purge is a full scan + tenant filter, bounded by the TTL.
 registerRetentionPurger({
   feature: 'paywall:funnel-counts',
+  dryRun: 'rows-by-age',
   async purge(tenantId, classification, cutoffIso) {
     if (!tenantId || classification !== 'internal') return 0;
     return purgeRowsByAge('paywall:funnel-counts', await counts.list(), tenantId, cutoffIso,

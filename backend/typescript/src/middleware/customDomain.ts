@@ -10,12 +10,14 @@
  *   - the `:orgId` in the path MUST equal the domain's bound org — a customer
  *     domain can never read another org's content (uniform 404);
  *   - hosts that match no live domain pass through untouched (the platform
- *     origin behaves byte-identically).
+ *     origin behaves byte-identically);
+ *   - when the lookup itself FAILS, only a host that can never be a custom
+ *     domain passes through; any other host gets 503 (ADR 0906 D8).
  *
  * Mounted before auth: the surface it admits is anonymous-public by design.
  */
 import type { NextFunction, Request, Response } from 'express';
-import { resolveCustomHost } from '../host/customDomains.js';
+import { canonicalHost, isPlatformHost, resolveCustomHost } from '../host/customDomains.js';
 import { ownerPublicRuntimeLapsed } from '../host/publicLapse.js';
 import { sendError } from './errorEnvelope.js';
 import { vendorPath } from './protocolVersion.js';
@@ -110,10 +112,23 @@ function overDomainLimit(host: string, now: number): boolean {
 
 export function customDomainMiddleware() {
   return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    const host = canonicalHost(req.headers.host ?? '');
+    if (!host) { next(); return; }
+    let bound: Awaited<ReturnType<typeof resolveCustomHost>>;
     try {
-      const host = (req.headers.host ?? '').toLowerCase();
-      if (!host) { next(); return; }
-      const bound = await resolveCustomHost(host);
+      bound = await resolveCustomHost(host);
+    } catch {
+      // ADR 0906 D8 — FAIL CLOSED. This used to pass every host through, so
+      // during a store fault a customer hostname reached the full app surface
+      // (sign-in, the authed API, the protocol). Only a host that can never be
+      // a custom domain (the platform's own origins, `*.run.app`, localhost,
+      // IP literals) keeps serving; anything else is told to retry.
+      if (isPlatformHost(host)) { next(); return; }
+      res.setHeader('Retry-After', '30');
+      sendError(res, 503, 'service_unavailable', 'This site is temporarily unavailable. Try again shortly.');
+      return;
+    }
+    try {
       if (!bound) { next(); return; } // not a custom domain — untouched
       if (overDomainLimit(host, Date.now())) {
         // H27-b — `detail` was a NEW TOP-LEVEL key (`additionalProperties: false`
@@ -154,10 +169,10 @@ export function customDomainMiddleware() {
         return;
       }
       next();
-    } catch {
-      // A resolution hiccup must never take the PLATFORM origin down —
-      // pass through (custom-domain requests degrade to the normal gates).
-      next();
+    } catch (err) {
+      // The host IS a bound custom domain; a fault past the lookup (the lapse
+      // read) must not open the app surface on it either.
+      next(err);
     }
   };
 }

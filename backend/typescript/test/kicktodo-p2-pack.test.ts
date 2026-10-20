@@ -25,6 +25,7 @@ import { Ajv2020, type ValidateFunction } from 'ajv/dist/2020.js';
 import { kicktodoCoreFeature } from '../src/features/kicktodo-core/feature.js';
 import { LESSON_JSON_SCHEMA } from '../src/features/kicktodo-creator/lessonAssembly.js';
 import { CHALLENGE_LESSON_BATCH_SCHEMA, CHALLENGE_LESSON_BATCH_TYPE } from '../src/features/kicktodo-creator/artifactSchemas.js';
+import { featureRequiredPacks } from '../src/features/packPins.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(here, '../../..');
@@ -38,7 +39,7 @@ const compile = (schema: unknown): ValidateFunction => {
   return new Ajv2020({ strict: false }).compile(schema);
 };
 const pinnedVersion = (name: string): string | undefined =>
-  (kicktodoCoreFeature.requiredPacks ?? []).find((p) => p.name === name)?.version;
+  featureRequiredPacks(kicktodoCoreFeature).find((p) => p.name === name)?.version;
 interface AgentsPack { version: string; agents: Array<{ agentId: string; handoff?: { returnSchemaRef?: string } }> }
 interface NodesPack { version: string; nodes: Array<{ typeId: string; role?: string }> }
 interface AiPack { version: string }

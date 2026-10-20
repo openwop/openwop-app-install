@@ -30,10 +30,11 @@ import { useUnsavedChangesWarning } from '../../ui/useUnsavedChangesWarning.js';
 import { useFeatureAccess } from '../../featureToggles/FeatureAccessContext.js';
 import { GlobeIcon, LockIcon, SaveIcon, SendIcon, TrashIcon } from '../../ui/icons/index.js';
 import {
-  deleteTemplate, getTemplate, listOrgs, updateTemplate,
+  deleteTemplate, getTemplate, listOrgs, updateTemplate, restoreTemplateVersion, TemplateVersionConflictError,
   type EmailBodyFormat, type EmailTemplate,
 } from './emailClient.js';
 import { EmailBodyPreview } from './EmailBodyPreview.js';
+import { EmailTemplateVersionHistory } from './EmailTemplateVersionHistory.js';
 
 export function EmailTemplateDetailPage(): JSX.Element {
   const { t } = useTranslation('email');
@@ -58,6 +59,9 @@ export function EmailTemplateDetailPage(): JSX.Element {
   const [loadFailed, setLoadFailed] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  /** ADR 0905 D1 — a save was refused because someone saved a newer version since
+   *  this editor loaded. The edits stay on screen; the user reloads deliberately. */
+  const [conflict, setConflict] = useState(false);
 
   // Every edit goes through this, so `dirty` cannot drift from the edits it
   // guards — a per-control `setDirty(true)` would be one missed call away from
@@ -81,7 +85,7 @@ export function EmailTemplateDetailPage(): JSX.Element {
     setDraft(null); setNotFound(false); setLoadFailed(false);
     let live = true; // ignore a stale resolution if the org/template changed mid-flight
     void getTemplate(orgId, templateId)
-      .then((tpl) => { if (live) { setDraft(tpl); setDirty(false); } })
+      .then((tpl) => { if (live) { setDraft(tpl); setDirty(false); setConflict(false); } })
       .catch((e) => {
         if (!live) return;
         // A 404 IS the answer ("no such template here"), not a failure to read.
@@ -97,10 +101,34 @@ export function EmailTemplateDetailPage(): JSX.Element {
     try {
       const saved = await updateTemplate(orgId, draft.templateId, {
         name: draft.name, subject: draft.subject, body: draft.body, format: draft.format ?? 'text',
+        ...(draft.version ? { expectedVersion: draft.version } : {}),
       });
       setDraft(saved); setDirty(false);
       toast.success(t('templateSaved'));
-    } catch (e) { toast.error(e instanceof Error ? e.message : t('saveFailed')); }
+    } catch (e) {
+      if (e instanceof TemplateVersionConflictError) setConflict(true);
+      else toast.error(e instanceof Error ? e.message : t('saveFailed'));
+    }
+    finally { setBusy(false); }
+  }, [draft, orgId, t]);
+
+  const reloadLatest = useCallback(async () => {
+    if (!draft) return;
+    try { const tpl = await getTemplate(orgId, draft.templateId); setDraft(tpl); setDirty(false); setConflict(false); }
+    catch (e) { toast.error(e instanceof Error ? e.message : t('loadFailed')); }
+  }, [draft, orgId, t]);
+
+  const restore = useCallback(async (version: number) => {
+    if (!draft) return;
+    setBusy(true);
+    try {
+      const restored = await restoreTemplateVersion(orgId, draft.templateId, version, draft.version);
+      setDraft(restored); setDirty(false);
+      toast.success(t('versionRestored', { version }));
+    } catch (e) {
+      if (e instanceof TemplateVersionConflictError) setConflict(true);
+      else toast.error(e instanceof Error ? e.message : t('saveFailed'));
+    }
     finally { setBusy(false); }
   }, [draft, orgId, t]);
 
@@ -178,8 +206,15 @@ export function EmailTemplateDetailPage(): JSX.Element {
       <div className="surface-card u-gap-2">
         <div className="u-flex u-gap-2 u-items-center u-wrap">
           <h2 className="u-fs-16 u-m-0 u-flex-1">{t('editorHeading')}</h2>
+          {draft.version ? <span className="chip chip--muted">{t('versionChip', { version: draft.version })}</span> : null}
           {dirty ? <span className="chip chip--warning">{t('unsavedChanges')}</span> : null}
         </div>
+        {conflict ? (
+          <Notice variant="warning">
+            <strong>{t('versionConflictTitle')}</strong>{' '}{t('versionConflictBody')}{' '}
+            <Button variant="quiet" size="sm" onClick={() => void reloadLatest()}>{t('versionConflictReload')}</Button>
+          </Notice>
+        ) : null}
 
         <label className="u-label-sm">{t('editorNameLabel')}
           <input value={draft.name} onChange={(e) => edit({ name: e.target.value })} />
@@ -205,6 +240,9 @@ export function EmailTemplateDetailPage(): JSX.Element {
           </>
         ) : null}
       </div>
+
+      <EmailTemplateVersionHistory orgId={orgId} templateId={draft.templateId} currentVersion={draft.version ?? 1}
+        dirty={dirty} busy={busy} onRestore={restore} />
     </div>
   );
 }

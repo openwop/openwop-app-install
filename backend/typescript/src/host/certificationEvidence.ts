@@ -59,6 +59,7 @@ import { createHash, createPublicKey, verify as edVerify } from 'node:crypto';
 
 import { createLogger } from '../observability/logger.js';
 import { JcsRefusal, canonicalJSON, codeUnitCompare, parseIJson } from './jcs.js';
+import { GCP_METADATA_TOKEN_URL, GcpMetadataError, createGcpMetadataClient, gcpMetadata, type GcpMetadataClient } from './gcpAdc.js';
 
 const log = createLogger('host.certificationEvidence');
 
@@ -73,8 +74,8 @@ export const NEGATIVE_TTL_MS = 60_000;
 /** Far above any real bundle (the major-2 cut is ~95 kB) and far below anything that could hurt the instance. */
 export const MAX_BUNDLE_BYTES = 8 * 1024 * 1024;
 
-export const METADATA_TOKEN_URL =
-  'http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token';
+/** Re-exported from the one metadata client (ADR 0904 P1b) so test fakes keep their URL. */
+export const METADATA_TOKEN_URL = GCP_METADATA_TOKEN_URL;
 
 // ── configuration ───────────────────────────────────────────────────────────
 
@@ -417,11 +418,20 @@ export class CertificationEvidenceReader {
   private readonly deadlineMs: number;
   private readonly cache = new Map<string, Entry>();
   private readonly inflight = new Map<string, Promise<void>>();
-  private token: { readonly value: string; readonly expiresAt: number } | undefined;
+  private readonly metadata: GcpMetadataClient;
 
   constructor(opts: ReaderOptions = {}) {
     this.fetchImpl = opts.fetchImpl ?? ((url, init) => fetch(url, init));
     this.now = opts.now ?? Date.now;
+    // An injected fetch is a test's fake metadata server + GCS, so the token
+    // must come through it too; production shares the process-wide client.
+    const injected = opts.fetchImpl;
+    this.metadata = injected
+      ? createGcpMetadataClient({
+        fetchImpl: (url, init) => injected(url, { headers: init?.headers ?? {}, signal: init?.signal ?? new AbortController().signal }),
+        now: this.now,
+      })
+      : gcpMetadata();
     this.deadlineMs = opts.deadlineMs ?? FETCH_DEADLINE_MS;
   }
 
@@ -514,18 +524,12 @@ export class CertificationEvidenceReader {
   }
 
   private async accessToken(signal: AbortSignal): Promise<string> {
-    const now = this.now();
-    if (this.token !== undefined && this.token.expiresAt > now) return this.token.value;
-    const res = await this.fetchImpl(METADATA_TOKEN_URL, { headers: { 'Metadata-Flavor': 'Google' }, signal });
-    if (!res.ok) throw new TransportError(`metadata token: HTTP ${res.status}`);
-    const body = rec(await res.json());
-    const value = body?.['access_token'];
-    const expiresIn = body?.['expires_in'];
-    if (typeof value !== 'string' || value === '') throw new TransportError('metadata token: no access_token');
-    // Refresh a minute early so a token never expires between here and the read.
-    const ttlMs = typeof expiresIn === 'number' && expiresIn > 120 ? (expiresIn - 60) * 1000 : 60_000;
-    this.token = { value, expiresAt: now + ttlMs };
-    return value;
+    try {
+      return await this.metadata.accessToken(signal);
+    } catch (err) {
+      if (err instanceof GcpMetadataError) throw new TransportError(err.message);
+      throw err;
+    }
   }
 
   private async load(req: EnsureRequest, signal: AbortSignal): Promise<LoadOutcome> {
@@ -540,7 +544,7 @@ export class CertificationEvidenceReader {
     if (res.status === 401 || res.status === 403) {
       // The token is cached; a 401 may mean it was revoked early. Drop it so the
       // next refresh mints a fresh one rather than failing until expiry.
-      this.token = undefined;
+      this.metadata.invalidate();
     }
     if (!res.ok) return { kind: 'transport', detail: `object read: HTTP ${res.status}` };
     const bytes = await res.text();

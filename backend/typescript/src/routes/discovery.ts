@@ -63,7 +63,7 @@ import { triggerIngestionEnabled, streamCdcIngestionEnabled, inboundSigningEnabl
 import { TRIGGER_DEAD_LETTER_MAX_PAGE_SIZE, TRIGGER_DEAD_LETTER_RETENTION_DAYS } from '../host/triggerBridgeService.js';
 import { dataResidencyAdvertised, dataResidencyRegions } from '../features/cdp/dataResidency.js';
 import { anonymousActorAdvertised, anonymousActorCapability } from '../host/anonymousActor.js';
-import { activationMode as proposalsActivationMode } from '../features/proposals/proposalsService.js';
+import { installableProposalKinds } from '../features/proposals/proposalsService.js';
 import { evalSuiteCapability } from '../host/evals/evalCapability.js';
 import { requiresBounds as goalsRequiresBounds } from '../features/goals/goalsService.js';
 import { uiPluginsCapability, uiPluginOperationsServed } from '../host/uiPluginRpc.js';
@@ -905,21 +905,19 @@ export function agentsCapability(): Record<string, unknown> {
     // facets only once the vendored v2 schemas seat them (D7).
     evalSuite: { supported: true, ...evalSuiteCapability() },
     // RFC 0096 reviewable-learning proposals — host-sample seam under
-    // `/v1/host/openwop-app/proposals`. Advertised ONLY when
-    // `OPENWOP_PROPOSALS_ENABLED=true` (advertise/enforce parity). `apply`
-    // installs the stored byte image (no re-synthesis) and is fail-closed on
-    // `packs:publish` (proven non-vacuously by `proposal-reviewable-learning`).
-    // `rule` was dropped from the kind enum pre-Active; dup-detection not yet
-    // implemented (honest default-false).
-    ...(process.env.OPENWOP_PROPOSALS_ENABLED === 'true'
-      ? {
-          proposals: {
-            artifactKinds: ['agent-pack', 'workflow-chain-pack', 'prompt-template', 'automation'],
-            duplicationDetection: false,
-            activation: proposalsActivationMode(),
-          },
-        }
-      : {}),
+    // `/v1/host/openwop-app/proposals`. ADR 0938 D3: advertised only when
+    // `OPENWOP_PROPOSALS_ENABLED=true` AND some kind has a registered installer,
+    // with `artifactKinds` = exactly those kinds. This host registers none, so
+    // the block is absent on every deploy. Until 2026-10-19 it advertised all four
+    // kinds while `apply` installed nothing and returned a hash as if it had.
+    // `direct-rbac` is the only mode: the approval-gate branch had no release
+    // handler and is deleted (D2). Dup-detection not implemented (honest false).
+    ...((): Record<string, unknown> => {
+      const kinds = installableProposalKinds();
+      return process.env.OPENWOP_PROPOSALS_ENABLED === 'true' && kinds.length > 0
+        ? { proposals: { artifactKinds: kinds, duplicationDetection: false, activation: 'direct-rbac' } }
+        : {};
+    })(),
     // RFC 0097 standing goals — the ADR 0412 controller under
     // `/v1/host/openwop-app/goals`. Advertised when
     // `OPENWOP_GOALS_ENABLED=true`. HONESTY FLIP (ADR 0412 P5): every claim

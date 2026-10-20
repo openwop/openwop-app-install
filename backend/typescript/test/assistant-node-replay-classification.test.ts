@@ -41,6 +41,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { MANIFEST_SIDE_EFFECT_FLOOR, MANIFEST_FAST_PATH_SERVED } from '../src/executor/sideEffectFloor.generated.js';
 import { isSideEffectingNode } from '../src/executor/sideEffects.js';
+import { pinnedPackRef } from '../src/features/packPins.js';
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '../../..');
 const CLASSIFIED = ['feature.assistant.nodes.compose-briefing', 'feature.assistant.nodes.enqueue-action'] as const;
@@ -61,10 +62,12 @@ describe('WF-COS-2 — the two non-convergent assistant nodes are classified on 
     // bumped fetches the OLD content from the registry, so the flip above would
     // never reach a real host — green here, broken in production.
     const feature = readFileSync(join(REPO, 'backend/typescript/src/features/assistant/feature.ts'), 'utf8');
+    // ADR 0919: the descriptor names the pack; the version lives in packPins.ts.
+    expect(feature, 'feature.ts must still require feature.assistant.nodes').toContain(`'feature.assistant.nodes'`);
     expect(
-      feature.includes(`{ name: 'feature.assistant.nodes', version: '${pack.version}' }`),
-      `feature.ts must pin feature.assistant.nodes at ${pack.version} — the pin is the registry install target`,
-    ).toBe(true);
+      pinnedPackRef('feature.assistant.nodes').version,
+      `the pin must be ${pack.version} (features/packPins.ts) — the pin is the registry install target`,
+    ).toBe(pack.version);
   });
 
   it('leg 2: sideEffects.ts carries the explicit typeId pattern (independent of the manifest)', () => {

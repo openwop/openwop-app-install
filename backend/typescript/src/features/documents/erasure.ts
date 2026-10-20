@@ -176,6 +176,7 @@ export function registerDocumentsErasure(): void {
   // `content` field above).
   registerRetentionPurger({
     feature: 'documents',
+    dryRun: 'rows-by-age',
     async purge(tenantId, classification, cutoffIso) {
       if (!tenantId || classification !== 'confidential-pii') return 0;
       // ADR 0838 D2 — the APPROVED version is live too: it is what the public

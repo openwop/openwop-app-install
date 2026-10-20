@@ -94,7 +94,7 @@ describe('LinkedIn ads-dispatch adapter (ADR 0223)', () => {
     for (const h of hits) {
       expect(h.method).toBe('POST');
       expect(h.auth).toBe('Bearer LI_TOKEN');           // per-user OAuth, broker-resolved
-      expect(h.liVersion).toBe('202506');                // LinkedIn-Version month pin
+      expect(h.liVersion).toBe('202610');                // LinkedIn-Version month pin (ADR 0907 D0)
       expect(h.restli).toBe('2.0.0');                    // X-Restli-Protocol-Version
     }
     // Non-spending created states are LITERALS in the mapper.

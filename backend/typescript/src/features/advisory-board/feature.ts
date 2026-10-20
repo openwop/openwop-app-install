@@ -57,7 +57,7 @@ export const advisoryBoardFeature: BackendFeature = {
     registerShareableKbReconciler(reconcileSharedKbForSourceChange);
   },
   surface: { id: 'advisory-board', build: buildAdvisoryBoardSurface },
-  requiredPacks: [{ name: 'feature.advisory-board.nodes', version: '1.0.1' }],
+  requiredPacks: ['feature.advisory-board.nodes'],
   toggleDefault: {
     id: 'advisory-board',
     label: 'Board of Advisors',

@@ -72,10 +72,10 @@ export const jobSearchFeature: BackendFeature = {
   surface: { id: JOB_SEARCH_TOGGLE, build: buildJobSearchSurface },
   // ADR 0540 P4 — the pack now exists, so it is declared.
   requiredPacks: [
-    { name: 'feature.job-search.nodes', version: '1.1.1' },
+    'feature.job-search.nodes',
     // ADR 0543 P1 — the career persona is DATA. Nothing about it lives in host
     // source, and the heartbeat needs no change to run it.
-    { name: 'vendor.openwop-app.career-agent.agents', version: '1.0.1' },
+    'vendor.openwop-app.career-agent.agents',
   ],
   toggleDefault: {
     id: JOB_SEARCH_TOGGLE,

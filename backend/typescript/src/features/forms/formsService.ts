@@ -229,6 +229,7 @@ const submissions = new DurableCollection<Submission>('forms:submission', (s) =>
 declarePiiFields('forms.submission', ['values', 'meta']);
 registerRetentionPurger({
   feature: 'forms',
+  dryRun: 'rows-by-age',
   async purge(tenantId, classification, cutoffIso) {
     if (!tenantId || classification !== 'confidential-pii') return 0;
     const rows = await submissions.listForTenantIndexed(tenantId);

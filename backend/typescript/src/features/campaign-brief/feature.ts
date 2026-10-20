@@ -58,8 +58,8 @@ export const campaignBriefFeature: BackendFeature = {
   },
   surface: { id: 'campaign-brief', build: buildCampaignBriefSurface },
   requiredPacks: [
-    { name: 'feature.campaign-brief.nodes', version: '1.6.0' },
-    { name: 'vendor.openwop-app.campaign-brief.agents', version: '1.3.2' },
+    'feature.campaign-brief.nodes',
+    'vendor.openwop-app.campaign-brief.agents',
   ],
   toggleDefault: {
     id: 'campaign-brief',

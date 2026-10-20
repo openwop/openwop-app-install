@@ -24,8 +24,8 @@ export const interactiveArtifactsFeature: BackendFeature = {
   // producer, which now surfaces `artifactTypeId`), driven through the existing
   // chat by the Visualizer agent (ADR 0058) — no new chat surface.
   requiredPacks: [
-    { name: 'feature.interactive-artifacts.nodes', version: '1.0.1' },
-    { name: 'vendor.openwop-app.interactive-artifacts.agents', version: '1.0.2' },
+    'feature.interactive-artifacts.nodes',
+    'vendor.openwop-app.interactive-artifacts.agents',
   ],
   // No toggleDefault → always-on (ADR 0010/0024 graduation; toggle removed, gates open).
 };

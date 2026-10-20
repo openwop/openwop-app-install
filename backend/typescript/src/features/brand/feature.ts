@@ -50,8 +50,8 @@ export const brandFeature: BackendFeature = {
   },
   surface: { id: 'brand', build: buildBrandSurface },
   requiredPacks: [
-    { name: 'feature.brand.nodes', version: '1.4.0' },
-    { name: 'vendor.openwop-app.brand.agents', version: '1.0.3' },
+    'feature.brand.nodes',
+    'vendor.openwop-app.brand.agents',
   ],
   // ADR 0170: NO `toggleDefault` — brand is always-on/core (like cms/connections
   // per ADR 0027 / ADR 0024 §Correction). RBAC stays enforced in routes.ts.

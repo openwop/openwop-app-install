@@ -37,7 +37,7 @@ export const cadFeature: BackendFeature = {
     salt: 'cad',
   },
   requiredPacks: [
-    { name: 'feature.cad.nodes', version: '1.6.1' }, // R2 CAD2-B1 — render preserves rotation/metallic/roughness
-    { name: 'vendor.openwop-app.cad.agents', version: '1.5.2' }, // ADR 0388 P5 — +materials allowlist/prompt
+    'feature.cad.nodes', // R2 CAD2-B1 — render preserves rotation/metallic/roughness
+    'vendor.openwop-app.cad.agents', // ADR 0388 P5 — +materials allowlist/prompt
   ],
 };

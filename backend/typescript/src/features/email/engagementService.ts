@@ -158,6 +158,7 @@ declarePiiFields('email.engagement-token', ['email', 'contactId', 'claimedBySess
 
 registerRetentionPurger({
   feature: 'email:engagement-token',
+  dryRun: 'rows-by-age',
   async purge(tenantId, classification, cutoffIso) {
     if (!tenantId || classification !== 'confidential-pii') return 0;
     // ADR 0655 D7 (EMWF-16) — tenant-INDEXED, never the cross-tenant `list()` the eraser was fixed away from (EM-5b).
@@ -173,6 +174,7 @@ registerRetentionPurger({
 // consent/suppression record.
 registerRetentionPurger({
   feature: 'email:engagement',
+  dryRun: 'rows-by-age',
   async purge(tenantId, classification, cutoffIso) {
     if (!tenantId || classification !== 'confidential-pii') return 0;
     const ageable = (await events.listByPrefix(`${tenantId}::`)).filter((e) => e.kind === 'opened' || e.kind === 'clicked');

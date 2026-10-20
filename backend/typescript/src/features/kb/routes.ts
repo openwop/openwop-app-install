@@ -17,6 +17,7 @@ import {
   createCollection,
   deleteCollection,
   deleteDocument,
+  collectionQuality,
   getCollection,
   getDocument,
   ingestDocument,
@@ -111,6 +112,16 @@ export function registerKbRoutes(deps: RouteDeps): void {
   // cannot each forget it.
   app.use(`${BASE}/collections/:collectionId`, (req, _res, next) => {
     void assertCollectionSubjectReadable(req, req.params.collectionId).then(() => next(), next);
+  });
+
+  // ADR 0904 P0 — the retrieval actually in force per collection (embedder, mode, index
+  // freshness). `collectionQuality` reads through the gated `listCollections`, so a
+  // private project's collection is absent here exactly as it is from the listing.
+  app.get(`${BASE}/quality`, async (req, res, next) => {
+    try {
+      const { orgId, tenantId } = await requireOrgScope(req, 'workspace:read');
+      res.json({ collections: await collectionQuality(tenantId, orgId, kbCaller(req)) });
+    } catch (err) { next(err); }
   });
 
   // ── collections ──

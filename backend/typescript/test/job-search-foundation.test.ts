@@ -16,6 +16,7 @@ import { BACKEND_FEATURES } from '../src/features/index.js';
 import { jobSearchFeature } from '../src/features/job-search/feature.js';
 import { JOB_SEARCH_TOGGLE } from '../src/features/job-search/service.js';
 import { ACKNOWLEDGED_UNSEEDED } from '../src/host/seedCoverage.js';
+import { featureRequiredPacks } from '../src/features/packPins.js';
 
 interface Catalog { core: string[]; bundles: Record<string, { label?: string; features: string[] }> }
 const catalog = (): Catalog =>
@@ -65,7 +66,7 @@ describe('ADR 0539 — the job-search vertical is one gated, sellable thing', ()
     // must exist on disk, since a declared-but-missing pack fails validation at
     // boot — the phase-ordering trap this guards.
     const repoRoot = join(process.cwd(), '..', '..');
-    for (const p of jobSearchFeature.requiredPacks ?? []) {
+    for (const p of featureRequiredPacks(jobSearchFeature)) {
       expect(existsSync(join(repoRoot, 'packs', p.name)), `declared pack ${p.name} does not exist on disk`).toBe(true);
       const manifest = JSON.parse(readFileSync(join(repoRoot, 'packs', p.name, 'pack.json'), 'utf8')) as { name: string; version: string };
       expect(manifest.name).toBe(p.name);

@@ -8,3 +8,4 @@
 export function matchPrivacyRoute(pathname: string): boolean {
   return pathname === '/privacy' || pathname === '/privacy/';
 }
+

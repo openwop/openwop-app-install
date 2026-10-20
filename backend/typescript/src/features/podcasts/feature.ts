@@ -58,8 +58,8 @@ export const podcastsFeature: BackendFeature = {
   requiredPacks: [
     // The generation pipeline (outline / transcript / synthesize (RFC 0105) / mix /
     // select-content over ctx.features.{podcasts,notebooks,documents}).
-    { name: 'feature.podcasts.nodes', version: '1.2.0' },
+    'feature.podcasts.nodes',
     // The optional Podcast Producer agent (chat-drivability = agent + nodes, ADR 0058).
-    { name: 'vendor.openwop-app.podcasts.agents', version: '1.0.2' },
+    'vendor.openwop-app.podcasts.agents',
   ],
 };

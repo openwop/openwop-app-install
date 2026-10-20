@@ -321,3 +321,36 @@ parallel system, not a namespace collision.
 
 No RFC needed — all surfaces are non-normative `/v1/host/openwop-app/*` host
 extensions; the wire is untouched.
+
+## Correction (2026-10-20): the system site's reviews are decided by the same authority
+
+The 2026-07-05 collapse gave a superadmin host-level authority to edit the
+reserved `host-site` org through the ordinary CMS routes (`requireCmsScope`).
+It did not reach the review decision: `decideContentPublish`
+(`features/cms/contentApproval.ts`) still demanded `host:members:manage` in the
+page's org. The reserved org has no members, so no one could hold that scope, and
+`POST …/cms/orgs/host-site/pages/:pageId/approve` (or `/reject`) returned 403 to the
+superadmin who had just submitted the page. Forks had to publish through the
+admin `/publish` route instead (MyndHyve upstream proposal B2).
+
+The content-publish dispatch now threads `decidedBySuperadmin` to the handler as
+`isSuperadmin` (the `commerce-listing-publish` shape), and the handler skips the
+org-scope check only when the decider is a superadmin AND the approval is on the
+reserved tenant AND org. Every real org is unchanged. Any lane that reaches a
+system-site approval also needs `isSuperadmin`, because the flag is computed at
+each HTTP boundary (`cms/routes.ts`, `routes/approvals.ts`, `routes/reviews.ts`)
+and never read from a request body, so the argument does not depend on which lanes
+can reach the row. `isSuperadmin` is the same predicate `requireCmsScope` already
+uses to admit an editor here, so this grants no one a power they did not already
+have through `/publish`.
+
+Separation of duties is vacuous on the system site, and that is accepted, not
+changed: `liveEditGateActive` is false for `host:site`, so a superadmin may approve
+their own submission. That matches the system site being ungated and `/publish`
+being open to the same superadmin (security review, 2026-10-20).
+
+Witnesses in `test/cms-gate-bypasses.test.ts` ("MyndHyve B2"): approve publishes and
+reject returns to draft over HTTP; a non-superadmin gets 404; the handler refuses a
+superadmin flag in a real org and refuses a non-superadmin on the system site.
+Sabotage: dropping the tenant/org restriction, ignoring the flag, or removing the
+dispatch's `handlerOpts` each turns a case red.

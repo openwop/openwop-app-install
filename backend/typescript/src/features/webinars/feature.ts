@@ -47,7 +47,7 @@ export const webinarsFeature: BackendFeature = {
     });
   },
   surface: { id: 'webinars', build: buildWebinarsSurface },
-  requiredPacks: [{ name: 'feature.webinars.nodes', version: '1.0.2' }],
+  requiredPacks: ['feature.webinars.nodes'],
   recommends: ['crm', 'forms', 'connections'],
   toggleDefault: {
     id: 'webinars',

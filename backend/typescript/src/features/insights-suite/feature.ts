@@ -51,13 +51,13 @@ export const insightsSuiteFeature: BackendFeature = {
     // still produced "on_plan" and a blank rating still produced box 1. Absence
     // is now rejected before coercion; a zero PLAN is uncomparable, not on-plan;
     // and a row-derived rating is neither picked arbitrarily nor scale-guessed.
-    { name: 'feature.insights-suite.nodes', version: '1.2.1' },
+    'feature.insights-suite.nodes',
     // agents 1.1.0 — ADR 0600 §8 (ISC-12): the Financial agent's prompt and pack
     // description instructed the model to cite SQL provenance and a "data as-of"
     // timestamp that `variance-compute` does not emit, and to expect figures from
     // a scheduled run that has no path into a conversation. A model told to cite a
     // structurally absent thing does not go silent; it narrates a traceability
     // story it cannot back. Pinned to the node's real outputs by `PROBE-IS-11`.
-    { name: 'vendor.openwop-app.insights-suite.agents', version: '1.1.2' },
+    'vendor.openwop-app.insights-suite.agents',
   ],
 };

@@ -350,6 +350,34 @@ export async function callerSubjectSpellings(req: Request): Promise<string[]> {
 }
 
 /**
+ * ADR 0787 D4 — every spelling THIS request's person is known by: the canonical
+ * `user:<id>`, the raw subject, AND the auth principal (`oidc:<sub>`). The last
+ * one is what `callerSubjectSpellings` leaves out for a BOUND session, and it is
+ * exactly the spelling a schedule created before the bind carries forever. All
+ * three are the same person's own identity — never another person's row, so no
+ * cross-tenant or cross-IdP alias can creep in — and they are only ever compared
+ * against rows in
+ * the caller's PERSONAL tenant (the home tenant that principal was minted in).
+ * The one lookup — the caller's own User row — is guarded by that same rule.
+ */
+export async function callerOwnerSpellings(req: Request): Promise<string[]> {
+  const out = new Set(await callerSubjectSpellings(req));
+  if (req.principal?.auth?.kind !== 'subject') return [...out];
+  if (req.principal.principalId) out.add(req.principal.principalId);
+  // A BOUND cookie session presents `user:<id>` as its principal too, so the
+  // legacy spelling lives only on the caller's own User row — and is added only
+  // when that row's tenant IS the caller's personal tenant (the one place that
+  // principal was minted under this person's own IdP; ADR 0780 D2 as corrected).
+  try {
+    const user = await resolveCallerUser(req);
+    if (user.principalId && user.tenantId === personalTenantOf(req)) out.add(user.principalId);
+  } catch {
+    // No durable User row: the request's own spellings above are all there is.
+  }
+  return [...out];
+}
+
+/**
  * ADR 0775 D1 (from ADR 0774 D5) — does this caller hold `scope` in `tenantId`?
  * Unlike {@link requireTenantScope} it reads a credential by PROVENANCE and a
  * person by BOTH identity spellings. In order:

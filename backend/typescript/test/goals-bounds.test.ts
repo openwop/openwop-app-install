@@ -15,6 +15,8 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
+import { hostExtStorage } from '../src/host/hostExtPersistence.js';
+import { buildRunRecord } from '../src/host/runDispatch.js';
 import { registerGoalVerifier, __clearGoalVerifiers } from '../src/features/goals/goalVerifiers.js';
 
 let server: http.Server;
@@ -73,11 +75,21 @@ const evaluate = (id: string, hash: string) =>
     { method: 'POST', body: JSON.stringify({ snapshotRef: `ev:${hash}`, snapshotHash: hash }) },
   );
 
-const bindRun = (id: string, runId: string, costUsd?: number) =>
-  api<{ state: string }>(`/host/openwop-app/goals/${id}/runs`, {
+
+/** ADR 0908 D5 — a contributing run must be a real run of the goal's tenant. */
+async function seedRun(tenantId: string, runId: string): Promise<void> {
+  if (await hostExtStorage().getRun(runId)) return;
+  await hostExtStorage().insertRun(buildRunRecord({ runId, workflowId: 'wf', tenantId }));
+}
+
+const bindRun = async (id: string, runId: string, costUsd?: number) => {
+  const goal = await api<{ owner: { tenant: string } }>(`/host/openwop-app/goals/${encodeURIComponent(id)}`);
+  await seedRun(goal.body.owner.tenant, runId);
+  return api<{ state: string }>(`/host/openwop-app/goals/${id}/runs`, {
     method: 'POST',
     body: JSON.stringify({ runId, ...(costUsd !== undefined ? { costUsd } : {}) }),
   });
+};
 
 describe('iterations bound', () => {
   it('unsatisfied verdict landing on maxLoopIterations flips to bound-exceeded', async () => {

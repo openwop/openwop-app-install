@@ -45,7 +45,7 @@ export const workSelectionFeature: BackendFeature = {
   // ADR 0014 — `ctx.features['work-selection']`: preview only. Selection is host
   // policy the model observes, never authors.
   surface: { id: WORK_SELECTION_TOGGLE, build: buildWorkSelectionSurface },
-  requiredPacks: [{ name: 'feature.work-selection.nodes', version: '1.0.1' }],
+  requiredPacks: ['feature.work-selection.nodes'],
   toggleDefault: {
     id: WORK_SELECTION_TOGGLE,
     label: 'Ranked work selection',

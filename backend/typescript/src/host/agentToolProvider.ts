@@ -239,8 +239,23 @@ async function boundCollectionIds(scope: BundleScope): Promise<string[] | undefi
   }
 }
 
-/** `openwop:knowledge.search` — lexical RAG over the host's seeded corpus
- *  (deterministic, no network). The canonical first real agent tool. */
+/** `openwop:knowledge.search` — retrieval over the workspace's knowledge-base
+ *  collections (`tenantRetrieve`), or the seeded demo corpus when it has none. The
+ *  canonical first real agent tool.
+ *
+ *  ADR 0904 D11 — this said "lexical RAG… deterministic, no network", which was false
+ *  under BYOK embeddings and is false for every tenant once the operator embedder (D1)
+ *  is on: the query may be embedded by a provider over the network. The model-facing
+ *  text is now true in EVERY configuration rather than generated per tenant — one fixed
+ *  string keeps the tool block byte-stable for prompt caching (ADR 0315) — and is pinned
+ *  by `test/agent-prompt-tool-ids.test.ts`. */
+/** ADR 0904 D11 — the model-facing descriptions. True whatever embedder is configured
+ *  (local hash, BYOK, or the operator's): they never promise "lexical" or "no network". */
+export const KNOWLEDGE_TOOL_DESCRIPTION =
+  "Search this workspace's knowledge base (semantic and keyword retrieval over its document collections; a built-in demo corpus when it has none). Returns the most relevant chunks with their sources and a 0-1 relevanceScore. Use it to ground an answer in the knowledge base before responding.";
+export const KNOWLEDGE_RETRIEVER_DESCRIPTION =
+  "Retrieve the most relevant passages from this workspace's knowledge base (semantic and keyword retrieval over its document collections) to ground an answer. Returns the matching chunks and their sources.";
+
 const KNOWLEDGE_SEARCH: BuiltinTool = {
   // RFC 0137 §F1 — KB chunks carry per-chunk contentTrust — synced/ingested docs are untrusted
   contentTrust: 'untrusted',
@@ -248,7 +263,7 @@ const KNOWLEDGE_SEARCH: BuiltinTool = {
   def: {
     name: 'openwop:knowledge.search',
     description:
-      'Search the host knowledge base (lexical retrieval over the seeded corpus). Returns the most relevant chunks and their sources. Use it to ground an answer in the knowledge base before responding.',
+      KNOWLEDGE_TOOL_DESCRIPTION,
     inputSchema: {
       type: 'object',
       properties: {
@@ -348,12 +363,11 @@ const HTTP_FETCH: BuiltinTool = {
 };
 
 /** RAG retriever ids (`core.rag.retriever-basic`, `…retriever-contextual-compression`)
- *  that agent packs declare. The `core.openwop.rag` pack's retriever NODES need an
- *  embeddings provider + a vector DB this host does not implement (they throw
- *  HOST_CAPABILITY_MISSING). We back these ids with the host's WORKING lexical
- *  knowledge surface (the same retrieval behind `openwop:knowledge.search`) so a
- *  research agent's "retrieve from the KB" step actually returns grounded chunks
- *  — the honest available capability here (no vector store configured). */
+ *  that agent packs declare. The `core.openwop.rag` pack's retriever NODES throw
+ *  HOST_CAPABILITY_MISSING here; we back these ids with the host's knowledge surface
+ *  (the same retrieval behind `openwop:knowledge.search` — hybrid semantic + keyword
+ *  over the workspace's KB, ADR 0904 D11) so a research agent's "retrieve from the KB"
+ *  step actually returns grounded chunks. */
 function knowledgeRetrieverTool(name: string, effect: BuiltinTool['effect']): BuiltinTool {
   return {
     // RFC 0137 §F1 — retrieved corpus passages — same taint as knowledge.search
@@ -362,7 +376,7 @@ function knowledgeRetrieverTool(name: string, effect: BuiltinTool['effect']): Bu
     def: {
       name,
       description:
-        'Retrieve the most relevant passages from the host knowledge base (lexical retrieval over the seeded corpus) to ground an answer. Returns the matching chunks and their sources.',
+        KNOWLEDGE_RETRIEVER_DESCRIPTION,
       inputSchema: {
         type: 'object',
         properties: {

@@ -59,6 +59,12 @@ The activation slice, mock-first (the creative-video/computer-use discipline):
   never a guessed build.
 - **Custom hostnames**: the ADR 0295 GCLB certificate-map tier (operator
   infrastructure, per the memo) — not app code.
+  > **CORRECTED 2026-10-17 (ADR 0906 P1):** only the ONE-TIME edge (global IP,
+  > serverless NEG, URL map, HTTPS proxy, certificate map) stays operator
+  > infrastructure, now codified as `scripts/custom-domain-edge.sh`. The
+  > PER-DOMAIN certificate lifecycle (DNS authorization, managed certificate,
+  > map entry) moved into the app behind the `host/edgeCertificates/` provider
+  > port, active only when `OPENWOP_CUSTOM_DOMAIN_EDGE=gcp-certificate-manager`.
 - A cross-host-normative `deploy-adapter` PACK KIND remains RFC-first
   (0349:43-45); this slice is host-internal.
 

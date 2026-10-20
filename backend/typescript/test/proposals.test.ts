@@ -1,12 +1,12 @@
 /**
- * Reviewable-learning proposals (RFC 0096) — host-sample seam + invariants.
+ * Reviewable-learning proposals (RFC 0096) — host-sample seam.
  *
- * Covers the `proposal-reviewable-learning` behavioral leg (apply without scope
- * → 403) plus the two SECURITY invariants this host upholds:
- *   - `proposal-no-resynthesis` — apply installs the stored byte image verbatim;
- *     the installed ref is a deterministic function of `artifact` and applying
- *     twice yields an identical ref (no regeneration).
- *   - malformed-for-kind → 422 (the service rejects an empty artifact).
+ * Covers apply without scope → 403, and revise never activating. ADR 0938: the
+ * list no longer seeds a demo draft (it wrote a fabricated row into every
+ * workspace), so this file seeds its own row; the invariants that used to live
+ * here (a hash returned as an "installed" ref) are replaced by the installer
+ * tests in `proposals-service.test.ts` and the probes in
+ * `proposals-r2-probes.test.ts`.
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -14,7 +14,7 @@ import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
 import { createMember } from '../src/host/accessControlService.js';
-import { applyProposal, putProposal, MalformedForKindError } from '../src/features/proposals/proposalsService.js';
+import { putProposal } from '../src/features/proposals/proposalsService.js';
 import type { Proposal } from '../src/features/proposals/types.js';
 
 let server: http.Server;
@@ -44,6 +44,13 @@ beforeAll(async () => {
     orgId: 'default', tenantId: 'default', displayName: 'Dev bearer',
     subject: 'bearer:dev-toke', roles: ['editor'],
   });
+  const row: Proposal = {
+    id: 'seeded-draft', kind: 'prompt-template', state: 'draft',
+    artifact: { template: 'Summarize {{week}}.', variables: ['week'] },
+    provenance: { sourceRunIds: ['r1'] }, duplicateOf: null,
+    owner: { tenant: 'default' }, createdAt: new Date().toISOString(),
+  };
+  await putProposal(row);
 });
 
 afterAll(async () => {
@@ -60,13 +67,12 @@ async function api<T = unknown>(path: string, init: RequestInit = {}): Promise<{
 }
 
 describe('proposals — reviewable-learning seam (RFC 0096)', () => {
-  it('GET /proposals seeds a non-vacuous demo draft', async () => {
+  it('GET /proposals lists the tenant\'s drafts and seeds nothing (ADR 0938 D6)', async () => {
     const { status, body } = await api<{ proposals: Array<{ id: string; state: string }> }>(
       '/host/openwop-app/proposals?state=draft',
     );
     expect(status).toBe(200);
-    expect(body.proposals.length).toBeGreaterThan(0);
-    expect(body.proposals.every((p) => p.state === 'draft')).toBe(true);
+    expect(body.proposals.map((p) => p.id)).toEqual(['seeded-draft']);
   });
 
   it('apply without the packs:publish scope is denied 403 and installs nothing', async () => {
@@ -89,38 +95,5 @@ describe('proposals — reviewable-learning seam (RFC 0096)', () => {
     });
     expect(res.status).toBe(200);
     expect(res.body.state).toBe('revised');
-  });
-});
-
-describe('proposals — invariants (service-level)', () => {
-  const tenant = 'test-tenant-apply';
-  const base: Proposal = {
-    id: 'inv-1',
-    kind: 'prompt-template',
-    state: 'draft',
-    artifact: { template: 'Do {{x}}', variables: ['x'] },
-    provenance: { sourceRunIds: ['r1'] },
-    owner: { tenant },
-    createdAt: new Date('2026-01-01T00:00:00.000Z').toISOString(),
-  };
-
-  it('proposal-no-resynthesis: apply installs the stored bytes verbatim, deterministically', async () => {
-    await putProposal({ ...base });
-    const first = await applyProposal(tenant, base.id);
-    expect(first).not.toBeNull();
-    expect(first!.proposal.state).toBe('applied');
-    // The installed ref is a pure function of the stored artifact bytes.
-    expect(first!.installedArtifactRef).toBe(first!.proposal.activation?.installedArtifactRef);
-    // Re-applying the same stored bytes yields an identical ref (no regeneration).
-    await putProposal({ ...base }); // reset to draft
-    const second = await applyProposal(tenant, base.id);
-    expect(second!.installedArtifactRef).toBe(first!.installedArtifactRef);
-    // The artifact itself was never mutated by apply.
-    expect(second!.proposal.artifact).toEqual(base.artifact);
-  });
-
-  it('malformed-for-kind: an empty artifact is rejected', async () => {
-    await putProposal({ ...base, id: 'inv-empty', artifact: {} });
-    await expect(applyProposal(tenant, 'inv-empty')).rejects.toBeInstanceOf(MalformedForKindError);
   });
 });

@@ -22,7 +22,7 @@ import { defaultRetentionDays } from '../storage/runRetentionStamp.js';
 import { createLogger } from '../observability/logger.js';
 import { getInstanceId } from './instanceId.js';
 import { getGovernancePolicy, listGovernedTenants, type GovernancePolicy } from './governanceService.js';
-import { purgeRetained } from './retentionPurger.js';
+import { countRetained, purgeRetained, type DryRunCount } from './retentionPurger.js';
 import type { DataClassification } from './dataClassification.js';
 import { purgeTenantHostExt } from './hostExtPersistence.js';
 import { purgeTenantOverrides } from './featureToggles/service.js';
@@ -243,6 +243,39 @@ export async function pruneEngineTables(deps: RetentionSweepDeps, now: number = 
 }
 
 
+/** ADR 0372 — the abandoned `anon:*` tenants at this instant, or null when the
+ *  lifecycle is off (`OPENWOP_ANON_TENANT_RETENTION_DAYS` unset/0). Read-only:
+ *  shared by the teardown below and the retention dry run. */
+async function findAbandonedAnonTenants(
+  deps: RetentionSweepDeps,
+  now: number,
+): Promise<{ cutoffIso: string; abandoned: Array<{ tenantId: string; anchor: 'runs' | 'hostext' }> } | null> {
+  const days = retentionDaysEnv('OPENWOP_ANON_TENANT_RETENTION_DAYS');
+  if (days <= 0) return null;
+  const cutoffIso = new Date(now - days * 86_400_000).toISOString();
+  const activity = await deps.storage.listTenantActivity('anon:', 500);
+  // Grade-pass DATA-1 — the RUNLESS leg: tenants with hostext rows but zero
+  // runs (e.g. Studio provisioning on first touch) were permanently invisible
+  // to the run-anchored enumerator above. A runless tenant is abandoned only
+  // when BOTH its newest hostext write AND its newest chat touch predate the
+  // cutoff — an active chat-only tenant is never torn down.
+  const runAnchored = new Set(activity.map((t) => t.tenantId));
+  const hostextOnly = (await deps.storage.listHostExtTenantActivity('anon:', 500))
+    .filter((t) => !runAnchored.has(t.tenantId));
+  const abandoned: Array<{ tenantId: string; anchor: 'runs' | 'hostext' }> = [
+    ...activity
+      .filter((t) => {
+        const human = [t.lastHumanRunAt, t.lastChatAt].filter((x): x is string => x !== null).sort().pop() ?? null;
+        return human !== null ? human < cutoffIso : t.firstRunAt !== null && t.firstRunAt < cutoffIso;
+      })
+      .map((t) => ({ tenantId: t.tenantId, anchor: 'runs' as const })),
+    ...hostextOnly
+      .filter((t) => t.lastHostExtAt < cutoffIso && (t.lastChatAt === null || t.lastChatAt < cutoffIso))
+      .map((t) => ({ tenantId: t.tenantId, anchor: 'hostext' as const })),
+  ];
+  return { cutoffIso, abandoned };
+}
+
 /** Teardown steps that a test can substitute (the two run-INDEPENDENT purges).
  *  Defaults to the real module functions. */
 export interface AnonTeardownHooks {
@@ -277,29 +310,9 @@ export async function pruneAbandonedAnonTenants(
     purgeOwnedWorkflowDefs: (tenantId) => purgeTenantOwnedWorkflowDefs(tenantId, deleteRegisteredWorkflow),
   },
 ): Promise<number> {
-  const days = retentionDaysEnv('OPENWOP_ANON_TENANT_RETENTION_DAYS');
-  if (days <= 0) return 0;
-  const cutoffIso = new Date(now - days * 86_400_000).toISOString();
-  const activity = await deps.storage.listTenantActivity('anon:', 500);
-  // Grade-pass DATA-1 — the RUNLESS leg: tenants with hostext rows but zero
-  // runs (e.g. Studio provisioning on first touch) were permanently invisible
-  // to the run-anchored enumerator above. A runless tenant is abandoned only
-  // when BOTH its newest hostext write AND its newest chat touch predate the
-  // cutoff — an active chat-only tenant is never torn down.
-  const runAnchored = new Set(activity.map((t) => t.tenantId));
-  const hostextOnly = (await deps.storage.listHostExtTenantActivity('anon:', 500))
-    .filter((t) => !runAnchored.has(t.tenantId));
-  const abandoned: Array<{ tenantId: string; anchor: 'runs' | 'hostext' }> = [
-    ...activity
-      .filter((t) => {
-        const human = [t.lastHumanRunAt, t.lastChatAt].filter((x): x is string => x !== null).sort().pop() ?? null;
-        return human !== null ? human < cutoffIso : t.firstRunAt !== null && t.firstRunAt < cutoffIso;
-      })
-      .map((t) => ({ tenantId: t.tenantId, anchor: 'runs' as const })),
-    ...hostextOnly
-      .filter((t) => t.lastHostExtAt < cutoffIso && (t.lastChatAt === null || t.lastChatAt < cutoffIso))
-      .map((t) => ({ tenantId: t.tenantId, anchor: 'hostext' as const })),
-  ];
+  const found = await findAbandonedAnonTenants(deps, now);
+  if (!found) return 0;
+  const { cutoffIso, abandoned } = found;
   let torn = 0;
   let heldSkipped = 0;
   for (const t of abandoned) {
@@ -404,6 +417,93 @@ export async function pruneAbandonedAnonTenants(
   return torn;
 }
 
+/** MyndHyve R7 — `OPENWOP_RETENTION_SWEEP_DRY_RUN=true`: every user-data leg of
+ *  the tick REPORTS what it would delete instead of deleting. Read per tick. */
+export function retentionDryRun(): boolean {
+  return process.env.OPENWOP_RETENTION_SWEEP_DRY_RUN === 'true';
+}
+
+/** How many ADR 0371 run-retention candidates a dry run reads at most. */
+const DRY_RUN_RUN_SCAN = 1000;
+
+export interface RetentionDryRunReport {
+  /** ADR 0077 governance purge, per (tenant, classification) with a window. */
+  governance: Array<{ tenantId: string; classification: DataClassification; cutoffIso: string; purgers: DryRunCount[] }>;
+  /** ADR 0287 engine tables; null where the knob is off. */
+  engine: { terminalRuns: number | null; webhookDeliveries: number | null };
+  /** ADR 0371 run retention: runs past their stamped removal time, BEFORE the
+   *  sweeper's pin / legal-hold / override checks (so an upper bound). */
+  runRetention: { candidates: number; capped: boolean } | null;
+  /** ADR 0372 anon-tenant teardown candidates, and how many a hold would skip. */
+  anonTenants: { candidates: number; held: number } | null;
+}
+
+/**
+ * MyndHyve R7 — the retention dry run. Computes what the destructive legs of
+ * the tick would delete right now, and deletes NOTHING: no row, no lease, no
+ * completion marker, no audit row (the audit row is the tombstone of a purge,
+ * and nothing was purged). Each leg reports only when its own knob would run
+ * it, exactly as the real tick gates it. Exported pure for tests.
+ *
+ * A governance purger is counted only if it declares `dryRun: 'rows-by-age'`
+ * (every row it deletes goes through `purgeRowsByAge`); any other purger is
+ * listed with `counted: false`, never run.
+ */
+export async function reportRetentionDryRun(deps: RetentionSweepDeps, now: number = Date.now()): Promise<RetentionDryRunReport> {
+  const report: RetentionDryRunReport = { governance: [], engine: { terminalRuns: null, webhookDeliveries: null }, runRetention: null, anonTenants: null };
+  for (const tenantId of await listGovernedTenants()) {
+    if (!tenantId) continue;
+    const policy = await getGovernancePolicy(tenantId);
+    for (const { classification, defaultDays } of SWEPT) {
+      const days = windowDaysFor(policy, classification, defaultDays);
+      if (days == null) continue;
+      const cutoffIso = new Date(now - days * DAY_MS).toISOString();
+      report.governance.push({ tenantId, classification, cutoffIso, purgers: await countRetained(tenantId, classification, cutoffIso) });
+    }
+  }
+  const runDays = retentionDaysEnv('OPENWOP_RUN_RETENTION_DAYS');
+  const whDays = retentionDaysEnv('OPENWOP_WEBHOOK_DELIVERY_RETENTION_DAYS');
+  if (runDays > 0 || whDays > 0) {
+    const counts = await deps.storage.countPrunableEngineRows(
+      new Date(now - (runDays || 1) * DAY_MS).toISOString(), now - (whDays || 1) * DAY_MS);
+    report.engine = { terminalRuns: runDays > 0 ? counts.terminalRuns : null, webhookDeliveries: whDays > 0 ? counts.webhookDeliveries : null };
+  }
+  if (defaultRetentionDays() > 0) {
+    const candidates = await deps.storage.listRunsPastRemoval(new Date(now).toISOString(), DRY_RUN_RUN_SCAN);
+    report.runRetention = { candidates: candidates.length, capped: candidates.length >= DRY_RUN_RUN_SCAN };
+  }
+  const anon = await findAbandonedAnonTenants(deps, now);
+  if (anon) {
+    let held = 0;
+    for (const t of anon.abandoned) if (await getRetentionHold(t.tenantId)) held += 1;
+    report.anonTenants = { candidates: anon.abandoned.length, held };
+  }
+  return report;
+}
+
+/** One log line per dry run: totals per store, plus each slot that would delete. */
+function logRetentionDryRun(r: RetentionDryRunReport): void {
+  const wouldDelete: Record<string, number> = {};
+  const uncounted = new Set<string>();
+  for (const slot of r.governance) {
+    let slotTotal = 0;
+    for (const p of slot.purgers) {
+      if (p.counted) { wouldDelete[p.feature] = (wouldDelete[p.feature] ?? 0) + (p.wouldDelete ?? 0); slotTotal += p.wouldDelete ?? 0; } else uncounted.add(p.feature);
+    }
+    if (slotTotal > 0) {
+      log.info('retention_dry_run_slot', { tenantId: slot.tenantId, classification: slot.classification, cutoffIso: slot.cutoffIso, wouldDelete: slotTotal });
+    }
+  }
+  log.info('retention_dry_run', {
+    governanceSlots: r.governance.length,
+    wouldDeleteByStore: wouldDelete,
+    notCounted: [...uncounted].sort(),
+    engine: r.engine,
+    runRetention: r.runRetention,
+    anonTenants: r.anonTenants,
+  });
+}
+
 /** Start the polling retention sweep for the running server. The ONE retention
  *  loop (ADR 0077 + ADR 0371 — no parallel daemons): each half self-gates
  *  inside the tick — governance fan-out behind `OPENWOP_RETENTION_SWEEP_ENABLED`,
@@ -415,9 +515,11 @@ export function startRetentionSweepDaemon(deps: RetentionSweepDeps): RetentionSw
     if (running) return;
     running = true;
     try {
+      // MyndHyve R7 — under a dry run, every user-data leg below reports instead.
+      const dryRun = retentionDryRun();
       // ADR 0371 — run retention (self-idempotent: deleteRun races are
       // harmless; no lease). Its own quiet-window check lives inside.
-      if (defaultRetentionDays() > 0) {
+      if (defaultRetentionDays() > 0 && !dryRun) {
         await __runRetentionSweepOnce(deps.storage).catch((err) =>
           log.warn('run retention tick error', { error: err instanceof Error ? err.message : String(err) }));
         // ADR 0371 P4 / ADR 0369 GC — archived transient defs whose runs all
@@ -483,6 +585,11 @@ export function startRetentionSweepDaemon(deps: RetentionSweepDeps): RetentionSw
       // ADR 0871 — storage growth, once per UTC hour across instances (read-only).
       await runStorageGrowthGaugeOnce(deps.storage).catch((err) =>
         log.warn('storage growth gauge tick error', { error: err instanceof Error ? err.message : String(err) }));
+      if (dryRun) {
+        // Wins over OPENWOP_RETENTION_SWEEP_ENABLED: report, delete nothing.
+        logRetentionDryRun(await reportRetentionDryRun(deps));
+        return;
+      }
       if (process.env.OPENWOP_RETENTION_SWEEP_ENABLED !== 'true') return;
       await processRetentionSweep(deps);
       const pruneBefore = new Date(Date.now() - CLAIM_PRUNE_AGE_MS).toISOString();

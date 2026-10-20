@@ -41,6 +41,7 @@ import { startWorkflowRun } from './runStarter.js';
 import { createHash } from 'node:crypto';
 import { listJobsForDaemon, claimDueSlot, recordJobRun, recordJobSkipped, currentTick, scheduleSubject, isStalled, reviveStalledJob, jobActorIsInactive, resumeJobFromPlanPause, type ScheduledJob, type ScheduleSkipReason } from './schedulingService.js';
 import { WorkflowFeatureRefusedError } from './workflowFeatureGate.js';
+import { scheduledJobFireRefusal } from './scheduledJobFireGates.js';
 import { autonomousDispatchVerdict, jobAgentRef } from './autonomousDispatchPolicy.js';
 import { createApproval, hasPendingApprovalForJob } from './approvalService.js';
 import { subjectScope } from './subject.js';
@@ -140,6 +141,14 @@ export async function fireJob(
   if (await jobActorIsInactive(job)) {
     log.info('schedule fire dropped — the person it acts as is deactivated', { jobId: job.jobId, tenantId: job.tenantId });
     return skip(job.jobId, 'actor-inactive', now);
+  }
+  // ADR 0908 D8 — a feature's fire gate for a job it owns (a goal past its bound
+  // or closed). Before the agent verdict and the budget: a refused slot files no
+  // approval and spends nothing.
+  const gateRefusal = await scheduledJobFireRefusal(job, now);
+  if (gateRefusal !== null) {
+    log.info('schedule fire dropped — its owning feature refused it', { jobId: job.jobId, tenantId: job.tenantId, skipReason: gateRefusal });
+    return skip(job.jobId, gateRefusal, now);
   }
   // ADR 0775 P3 (`ARWF-7`) — never run a paused roster agent. A schedule, a
   // scheduled chat and a follow-up all fire through here; before this only the

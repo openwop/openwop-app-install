@@ -9,6 +9,7 @@ export const messages = {
   title: 'Campaign Studio',
   lede: 'Plan, run, measure and optimize marketing campaigns — briefs, orchestration, performance and intelligence in one place.',
   tablistLabel: 'Campaign Studio sections',
+  'tab_campaign-ops': 'Operations',
   'tab_campaign-brief': 'Briefs',
   tab_campaigns: 'Campaigns',
   'tab_campaign-performance': 'Performance',

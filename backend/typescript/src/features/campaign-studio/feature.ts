@@ -35,7 +35,7 @@ export const campaignStudioFeature: BackendFeature = {
     salt: 'campaign-studio',
   },
   requiredPacks: [
-    { name: 'feature.campaign-studio.nodes', version: '1.0.2' },
-    { name: 'vendor.openwop-app.campaign-studio.agents', version: '1.0.3' },
+    'feature.campaign-studio.nodes',
+    'vendor.openwop-app.campaign-studio.agents',
   ],
 };

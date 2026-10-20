@@ -31,6 +31,6 @@ export const mediaFeature: BackendFeature = {
     registerMediaAgentTools(); // XCH-HOLE-7 (round 3) — openwop:media.list (ADR 0308 seam)
   },
   requiredPacks: [
-    { name: 'feature.media.nodes', version: '1.0.1' },
+    'feature.media.nodes',
   ],
 };

@@ -1642,47 +1642,86 @@ Knobs: `OPENWOP_SEO_PRERENDER_TTL_S` (Cache-Control max-age, default 3600),
 `OPENWOP_PUBLIC_SITE_NAME` (og:site_name/JSON-LD override; defaults to the
 org's name).
 
-## Custom domains for published content (ADR 0295 — operator infra)
+**A white-label distribution's own site identity (ADR 0931).**
+`OPENWOP_SYSTEM_SITE_PROFILE` replaces the demo-gated OpenWOP self-description
+(og:site_name, Organization `sameAs`, home JSON-LD, the `/llms.txt` head). The
+value is inline JSON or a path to a JSON file:
+`{"siteName":"…","organizationSameAs":["https://…"],"homeJsonLd":[{"@type":"SoftwareApplication",…}],"llms":{"title":"…","summary":"…","body":"…"}}`
+(only `siteName` is required). An invalid value logs
+`system_site_profile_invalid` and the site renders with no profile, never
+OpenWOP's. `OPENWOP_SYSTEM_SITE_SEEDS_DISABLED` (comma list of `blog`, `docs`,
+`seo`, `marketing`) stops those built-in OpenWOP seeds writing; pages they
+already wrote are left alone. Unset, both change nothing.
 
-The app-side half (domain registration, `_openwop-verify.<host>` TXT ownership
-check, the org-pinned public-only host guard, per-domain rate limits) ships in
-the `custom-domains` feature. **TLS + routing for customer hostnames are the
-platform proxy tier — operator infrastructure, not app code.** The pinned
-reference recipe (ADR 0295 option A, GCLB certificate map):
+## Custom domains for published content (ADR 0295 + ADR 0906)
 
-1. Reserve a global IP + create the HTTPS load balancer fronting the existing
-   Cloud Run service (serverless NEG):
-   ```
-   gcloud compute addresses create owp-domains-ip --global
-   gcloud compute network-endpoint-groups create owp-backend-neg \
-     --region=us-central1 --network-endpoint-type=serverless \
-     --cloud-run-service=openwop-app-backend
-   ```
-2. Create a certificate map; add each verified customer hostname as a
-   managed-certificate map entry — `scripts/domain-cert-commands.sh` generates
-   (or with `RUN=1` executes) these commands for the hostnames shown LIVE on
-   the app's /domains page:
-   ```
-   gcloud certificate-manager maps create owp-domains-map
-   gcloud certificate-manager certificates create cert-<name> \
-     --domains=<customer-hostname>
-   gcloud certificate-manager maps entries create entry-<name> \
-     --map=owp-domains-map --hostname=<customer-hostname> \
-     --certificates=cert-<name>
-   ```
-3. Attach the map to the HTTPS proxy; point the customer's DNS at the LB IP
-   (subdomains: a `CNAME`/`A` to the IP; apex needs the DNS host's ALIAS).
-4. The tenant adds + verifies the hostname in the app (TXT record), the sweep
-   keeps re-checking (a lost record demotes the domain to `failed` —
-   disable-don't-delete). Requests arriving on the hostname reach ONLY that
-   org's public pages/funnels/storefront (`middleware/customDomain.ts`,
-   fail-closed) with a per-domain rate budget
-   (`OPENWOP_CUSTOM_DOMAIN_REQS_PER_MIN`, default 600).
+**Status on the reference deployment: the edge is NOT applied.** No external load
+balancer fronts `openwop-app-backend` (measured 2026-10-07, ADR 0860), so no
+customer hostname serves in prod today. Applying it costs money (ADR 0906 §
+Costs) and is the operator's call.
 
-The SPA's public page renderer is served from the platform origin; a customer
-domain fronting the full HTML site additionally routes `/` at the LB to the
-Firebase Hosting origin — that leg is deployment-specific and deliberately
-NOT baked into the app.
+Two halves:
+
+- **App side (always on with the `custom-domains` toggle).** Domain rows, the
+  `_openwop-verify.<host>` TXT ownership check, the leased re-check sweep, and
+  the org-pinned, public-only host guard (`middleware/customDomain.ts`). The
+  guard fails closed: if the domain lookup errors, only platform hosts keep
+  serving and customer hosts get `503` (ADR 0906 D8).
+- **Edge (one-time, operator-run).** A global external Application Load
+  Balancer in front of the Cloud Run service, holding a Certificate Manager map.
+  It is codified in `scripts/custom-domain-edge.sh`:
+
+  ```
+  scripts/custom-domain-edge.sh plan                       # prints every command; runs nothing
+  OPENWOP_EDGE_APPLY_PROJECT=<project> \
+    scripts/custom-domain-edge.sh apply                    # creates what is missing (idempotent)
+  scripts/custom-domain-edge.sh verify                     # fails on any missing resource or an empty listing
+  ```
+
+  It reads the project, region, service and account from `scripts/deploy.env`. The
+  certificate map name (`OPENWOP_CUSTOM_DOMAIN_CERT_MAP`) must also be set
+  explicitly. Nothing has a default, so the script can never fall back onto
+  another deployment's project or map.
+  `apply` reserves a global IP and creates:
+  - a serverless NEG on the service;
+  - an `EXTERNAL_MANAGED` backend service;
+  - a URL map;
+  - an HTTPS proxy holding the certificate map;
+  - an HTTP→HTTPS redirect;
+  - both forwarding rules.
+
+  It then appends the reserved IP as `/32` to `OPENWOP_TRUSTED_PROXY_CIDRS`
+  through `update-env.sh`. That step matters because the LB appends its
+  forwarding-rule IP to `X-Forwarded-For`. The Google front-end ranges are
+  already trusted by default (ADR 0851). Without it, every caller behind the LB
+  shares one rate-limit key. Cloud Run ingress stays `all`, because the Firebase
+  `/api` rewrite still reaches the service on its run.app URL.
+
+**Per-domain certificates.** Set by `OPENWOP_CUSTOM_DOMAIN_EDGE`:
+
+- `manual` (default) — the operator issues each certificate. For every domain
+  that shows ownership VERIFIED in the app, run
+  `scripts/custom-domain-edge.sh host <hostname>`. It prints the commands; it
+  does not run them. Certificates use **DNS authorization**
+  (`PER_PROJECT_RECORD`), not load-balancer authorization. That way a
+  certificate can go active before the customer moves traffic, and it works
+  behind a customer CDN. (This replaces the retired
+  `scripts/domain-cert-commands.sh`, which used load-balancer authorization.)
+- `gcp-certificate-manager` (ADR 0906 P1) — the app creates each domain's DNS
+  authorization, certificate and map entry itself once the TXT verifies, and
+  shows the customer the CNAME to add. It needs `OPENWOP_CUSTOM_DOMAIN_CERT_MAP`
+  (the map `apply` created) and a runtime service account allowed to manage
+  Certificate Manager resources in that map (ADR 0906 D7).
+
+**Customer DNS.**
+- Subdomains: a `CNAME` to the edge hostname.
+- Apex: an `A` record to the LB IP (never a `CNAME` at `@`).
+
+**Serving.** Requests on a verified hostname reach ONLY that org's public
+pages, funnels and storefront, with a per-domain budget
+(`OPENWOP_CUSTOM_DOMAIN_REQS_PER_MIN`, default 600). The re-check sweep
+(`OPENWOP_CUSTOM_DOMAIN_RECHECK_MS`, default 6 h) demotes a domain whose TXT
+record disappears to `failed`; the row is disabled, never deleted.
 
 ## Trusted (Tier-1) plugin packs
 
@@ -1747,6 +1786,16 @@ call time (no rebuild), all merge-updatable via `--update-env-vars`:
   `OPENWOP_WEBHOOK_DELIVERY_RETENTION_DAYS` — ADR 0287 engine retention
   (whole-run cascade incl. artifacts; hourly; audit-row tombstones). LIVE in
   prod since 2026-07-15 at 30/14 days. `0`/unset = off (fail-safe default).
+- `OPENWOP_RETENTION_SWEEP_DRY_RUN=true` — preview before you enable any of
+  the above. Each hourly tick logs `retention_dry_run` (would-delete counts
+  per store, engine tables, ADR 0371 run candidates, anon-tenant candidates)
+  plus one `retention_dry_run_slot` per tenant and classification that would
+  lose rows, and deletes NOTHING: no row, no lease, no audit row. It wins over
+  `OPENWOP_RETENTION_SWEEP_ENABLED`, and it also holds back the ADR 0371 run
+  sweep. A governance purger that cannot be counted safely is listed in
+  `notCounted` and not run. The cache and ledger hygiene (idempotency TTL,
+  kv age-out, webhook secret retirement) keeps running, as it does with the
+  sweep off. Read the counts, then unset it and set the real knobs.
 - `OPENWOP_WEBHOOK_SECRET_ROTATION_OVERLAP_S` (default `86400`, valid
   `60`–`604800`; anything else falls back to the default) and
   `OPENWOP_WEBHOOK_VERIFY_PER_TENANT_PER_MIN` (default `10`, per instance) —

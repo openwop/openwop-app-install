@@ -57,6 +57,7 @@ import { initHostEventDispatcher, type HostEventEnvelope } from '../src/host/hos
 import { registerWorkflow } from '../src/host/workflowsRegistry.js';
 import { createUser, getUser, sessionEpochOf, setUserStatus } from '../src/features/users/usersService.js';
 import { getSetCookies } from './headerCookies.js';
+import { featureRequiredPacks } from '../src/features/packPins.js';
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '../../..');
 const PACK_DIR = join(REPO, 'packs/feature.users.nodes');
@@ -125,7 +126,7 @@ describe('ADR 0617 D2 — pack shape: schemas with ADR 0525 $ids, and the featur
 
   it('the users feature registers the surface and pins the pack at the manifest version', () => {
     expect(usersFeature.surface?.id).toBe('users');
-    expect(usersFeature.requiredPacks).toEqual([{ name: 'feature.users.nodes', version: manifest.version }]);
+    expect(featureRequiredPacks(usersFeature)).toEqual([{ name: 'feature.users.nodes', version: manifest.version }]);
   });
 });
 

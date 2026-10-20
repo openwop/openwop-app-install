@@ -1,6 +1,6 @@
 # ADR 0873 — Web offline: one generated service worker, declared per feature, network-first
 
-Status: Accepted (P1, P2 and D12 implemented; P3 not started)
+Status: Accepted (P1, P2, D12 and D13 implemented; P3 not started)
 
 Date: 2026-10-11
 
@@ -303,6 +303,28 @@ makes an immediate takeover safe for tabs still running the old build.
   immediately given D10's `no-cache`.
 - **Never delete `sw.js`** (D2).
 
+**D13 — A distribution can purge the caches of the worker it replaces.** *(Added
+2026-10-18, MyndHyve cutover; amends D7 and D11.)*
+- **The gap.** D11 deletes only `openwop-offline-*`. A distribution that takes over
+  an origin that ran a different app inherits that app's registration at `/sw.js`,
+  and the update check installs this worker over it. MyndHyve's was a Workbox worker
+  (`vite-plugin-pwa`, `skipWaiting` + `clientsClaim`) that answers every navigation
+  from its precached `index.html`. So the first navigation after the cutover is
+  served the old build by the old worker, and its lazy chunks then hit the `**`
+  rewrite (`200 text/html`): a blank page. D7's immediate takeover replaces the
+  worker but not the page it already served, and the old caches stay forever.
+- **The change.** `VITE_SW_LEGACY_CACHE_PURGE` is a comma-separated list of cache
+  names, where a trailing `*` makes a prefix. When set, the generated worker gets
+  one more `activate` listener (`sw/legacy-purge.js`). It deletes the listed caches
+  and, only when it deleted one, claims the open tabs and reloads them onto the
+  network. A browser is reloaded at most once, because the caches are gone after;
+  one that never ran the old app is never reloaded.
+- **Default.** Unset, the worker text is byte-identical to before. The build refuses
+  a bare `*`, an inner `*`, and any entry that could match `openwop-offline-*`.
+- **Not unregister.** D8 still holds: the registration, and any push subscription,
+  survives. A previous app's OTHER worker URLs are the distribution's own concern
+  (a static stub at that URL, like D2's shim).
+
 ## Failure modes weighed
 
 | Failure | How this design behaves |
@@ -484,6 +506,10 @@ feature that declares `last-known`, so it runs with P3.
 `-fr`, `-es`) are dynamic imports off the entry, so the D6 shell does not precache
 them. Offline, a non-English user's strings depend on a chunk that is not cached.
 Not measured in a browser yet.
+
+| Phase | What landed | Witness |
+|---|---|---|
+| **D13** (2026-10-18) | `parseLegacyCachePurge` + `sw/legacy-purge.js`; the Vite plugin reads `VITE_SW_LEGACY_CACHE_PURGE` at config time and passes it to every `generateServiceWorker` call | `scripts/__tests__/offlineEngine.test.ts` (D13 block: unset is byte-identical with and without a table; parse and refusals; the worker RUN with open tabs deletes exactly the listed caches and reloads each tab once, a second activation reloads nobody, a browser without legacy caches is never reloaded, the engine's caches survive) |
 
 ## Open questions
 

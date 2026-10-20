@@ -102,5 +102,5 @@ export const usersFeature: BackendFeature = {
   // toggle gate; the surface's OWN gate is `assertTenantScope(host:members:manage)`
   // on the run's acting user (fail-closed without one).
   surface: { id: 'users', build: buildUsersSurface },
-  requiredPacks: [{ name: 'feature.users.nodes', version: '1.0.2' }],
+  requiredPacks: ['feature.users.nodes'],
 };

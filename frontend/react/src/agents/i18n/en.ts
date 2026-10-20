@@ -109,6 +109,7 @@ export const messages = {
   recurringSkipFeatureDisabled: 'the feature that owns this schedule is turned off for this workspace',
   recurringSkipPlanLapsed: 'your plan no longer includes the feature that owns this schedule',
   recurringSkipActorInactive: 'the person it runs as has been deactivated',
+  recurringSkipGoalClosed: 'its goal is finished or past a limit, so nothing more will run for it',
   recurringSkipAgentPaused: 'the agent it runs as is paused — resume the agent to resume this',
   recurringSkipPolicyDenied: 'the agent is not allowed to run this workflow (it is on its never list)',
   recurringSkipAwaitingApproval: 'it is waiting for approval — this workflow needs approval for this agent',

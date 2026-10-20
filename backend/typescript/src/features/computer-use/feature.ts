@@ -166,8 +166,8 @@ export const computerUseFeature: BackendFeature = {
     registerComputerUseAgentTools();
   },
   requiredPacks: [
-    { name: 'feature.computer-use.nodes', version: '1.1.2' }, // ADR 0894 D3 — decide raises its own approval
-    { name: 'vendor.openwop-app.computer-use.agents', version: '1.0.3' }, // CFP-1 status read tool; task/decide pruned to the governed run path
+    'feature.computer-use.nodes', // ADR 0894 D3 — decide raises its own approval
+    'vendor.openwop-app.computer-use.agents', // CFP-1 status read tool; task/decide pruned to the governed run path
   ],
   // ADR 0894 D1 — starting a browser session is a run's worth of authority:
   // the seam asks `runs:create` in the named org instead of `workspace:read`.

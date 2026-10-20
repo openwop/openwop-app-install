@@ -19,9 +19,11 @@ import {
   createProposalFromAcceptedPattern,
   reviseProposal,
   listProposals,
+  getProposal,
 } from '../src/features/proposals/proposalsService.js';
 import { upsertSuggestion } from '../src/features/ambient-work-graph/suggestionStore.js';
 import { suggestionIdFor } from '../src/features/ambient-work-graph/runSignature.js';
+import { opaquePrincipal } from '../src/host/runOwner.js';
 
 const T = 'proposals-producer';
 
@@ -53,7 +55,7 @@ describe('D5 — createProposalFromAcceptedPattern (the producer)', () => {
 
   it('is deterministically idempotent — re-accepting never spams a second proposal, and preserves a revise', async () => {
     // The workspace revises the draft; a re-accept must NOT clobber it.
-    const revised = await reviseProposal(T, 'wg:sug-abc', { title: 'My renamed workflow' });
+    const revised = await reviseProposal((await getProposal(T, 'wg:sug-abc'))!, { title: 'My renamed workflow' });
     expect(revised?.state).toBe('revised');
 
     const again = await createProposalFromAcceptedPattern(T, pattern, 'u-1');
@@ -83,15 +85,18 @@ describe('D5 — accepting an ambient-work-graph suggestion produces a proposal 
   it('accept → the response carries a proposalId and GET /proposals shows the workflow-chain-pack draft', async () => {
     await enable('users'); await enable('orgs');
     const c = client();
-    await c('POST', '/host/openwop-app/test/login', { email: 'd5-owner@test.dev', tenantId: T });
+    const who = await c('POST', '/host/openwop-app/test/login', { email: 'd5-owner@test.dev', tenantId: T });
+    // ADR 0930 D1 — a suggestion is its owner's; this caller's key is the opaque
+    // principal of their session subject (`ownership.ts` `callerOwnerKey`).
+    const ownerPrincipal = opaquePrincipal(who.body.user.userId as string);
     const org = await c('POST', '/host/openwop-app/orgs', { name: 'Acme' });
     const orgId = org.body.orgId;
 
     // Seed a recurring pattern the human is about to accept.
     const signature = 'search|draft|send';
-    const suggestionId = suggestionIdFor(T, signature);
+    const suggestionId = suggestionIdFor(T, ownerPrincipal, signature);
     await upsertSuggestion({
-      suggestionId, tenantId: T, signature,
+      suggestionId, tenantId: T, ownerPrincipal, signature,
       toolSequence: ['search', 'draft', 'send'], count: 3, exampleRunIds: ['run-1', 'run-2', 'run-3'],
       sampleGoal: 'Answer a support ticket', status: 'suggested',
       firstSeenAt: new Date().toISOString(), lastSeenAt: new Date().toISOString(),

@@ -32,8 +32,8 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
-import { SYSTEM_SITE_ORG } from '../src/host/systemSite.js';
-import { createContentApproval, getApproval, repinContentApproval, resolveApproval } from '../src/host/approvalService.js';
+import { SYSTEM_SITE_ORG, SYSTEM_SITE_TENANT } from '../src/host/systemSite.js';
+import { createContentApproval, findPendingContentApprovalForPage, getApproval, getContentApprovalHandler, repinContentApproval, resolveApproval } from '../src/host/approvalService.js';
 import { assertFlatErrorEnvelope } from './helpers/errorEnvelope.js';
 
 let BASE: string;
@@ -345,6 +345,76 @@ describe('CMS2-B1 fold-in — the reserved system-site org is not gated', () => 
     const pageId = await publishedPage(c, orgId);
     await setGate('on');
     expect((await c.patch(u(orgId, `/pages/${pageId}`), { title: 'x' })).status).toBe(409);
+  });
+});
+
+describe('MyndHyve B2 — a superadmin decides system-site reviews', () => {
+  // `decideContentPublish` required `host:members:manage` IN THE PAGE'S ORG, and the
+  // reserved system-site org has no members, so a superadmin who can edit, submit and
+  // publish there got 403 on approve and reject. The authority that edits the system
+  // site (ADR 0027, `requireCmsScope` → superadmin) now decides its reviews too.
+  async function asSuperadmin<T>(fn: (c: Client) => Promise<T>): Promise<T> {
+    const c = client();
+    await c.post('/host/openwop-app/test/login', { email: `sa-b2-${Date.now()}-${n++}@acme.test`, tenantId: `org:sysb2-${Date.now()}-${n++}` });
+    const who = await c.get('/host/openwop-app/me/workspaces');
+    expect(who.status, JSON.stringify(who.body)).toBe(200);
+    process.env.OPENWOP_SUPERADMIN_TENANTS = who.body.personal;
+    try { return await fn(c); } finally { delete process.env.OPENWOP_SUPERADMIN_TENANTS; }
+  }
+  async function submittedSystemPage(c: Client, title: string): Promise<string> {
+    const r = await c.post(u(SYSTEM_SITE_ORG, '/pages'), { title, sections: [{ type: 'hero', data: { heading: title } }] });
+    expect(r.status, JSON.stringify(r.body)).toBe(201);
+    const sub = await c.post(u(SYSTEM_SITE_ORG, `/pages/${r.body.pageId}/submit`));
+    expect(sub.status, JSON.stringify(sub.body)).toBe(200);
+    expect(sub.body.status).toBe('in_review');
+    return r.body.pageId;
+  }
+
+  it('approve publishes the page', async () => {
+    await asSuperadmin(async (c) => {
+      const pageId = await submittedSystemPage(c, `B2 approve ${n++}`);
+      const approve = await c.post(u(SYSTEM_SITE_ORG, `/pages/${pageId}/approve`));
+      expect(approve.status, JSON.stringify(approve.body)).toBe(200);
+      expect(approve.body.status).toBe('published');
+    });
+  });
+
+  it('reject returns the page to draft', async () => {
+    await asSuperadmin(async (c) => {
+      const pageId = await submittedSystemPage(c, `B2 reject ${n++}`);
+      const reject = await c.post(u(SYSTEM_SITE_ORG, `/pages/${pageId}/reject`), { note: 'not yet' });
+      expect(reject.status, JSON.stringify(reject.body)).toBe(200);
+      expect(reject.body.status).toBe('draft');
+    });
+  });
+
+  it('a non-superadmin still cannot see the system site, so cannot decide there', async () => {
+    const pageId = await asSuperadmin((c) => submittedSystemPage(c, `B2 hidden ${n++}`));
+    const { c } = await owner();
+    expect((await c.post(u(SYSTEM_SITE_ORG, `/pages/${pageId}/approve`))).status).toBe(404);
+  });
+
+  it('the superadmin allowance is the system site only: in a real org the handler still demands the org scope', async () => {
+    // HTTP alone cannot witness this: `requireCmsScope` hides a real org from a
+    // non-member superadmin before the handler runs. So call the handler with the
+    // flag set, as a future route that threads `decidedBySuperadmin` would.
+    const { c, orgId } = await owner();
+    const r = await c.post(u(orgId, '/pages'), { title: 'Real org', sections: [{ type: 'hero', data: { heading: 'a' } }] });
+    expect((await c.post(u(orgId, `/pages/${r.body.pageId}/submit`))).status).toBe(200);
+    const row = await pendingFor(c, r.body.pageId);
+    const approval = await getApproval(row!.approvalId);
+    await expect(getContentApprovalHandler()!(approval!.tenantId, approval!.approvalId, 'approved', {
+      decidedByUserId: 'user:not-a-member', isSuperadmin: true,
+    })).rejects.toMatchObject({ code: 'forbidden_scope' });
+    expect((await getApproval(row!.approvalId))?.status).toBe('pending');
+  });
+
+  it('on the system site the handler still refuses a decider who is not a superadmin', async () => {
+    const pageId = await asSuperadmin((c) => submittedSystemPage(c, `B2 flag ${n++}`));
+    const open = await findPendingContentApprovalForPage(SYSTEM_SITE_TENANT, pageId);
+    await expect(getContentApprovalHandler()!(SYSTEM_SITE_TENANT, open!.approvalId, 'approved', {
+      decidedByUserId: 'user:anyone',
+    })).rejects.toMatchObject({ code: 'forbidden_scope' });
   });
 });
 

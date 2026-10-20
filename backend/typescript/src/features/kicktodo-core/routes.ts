@@ -12,6 +12,7 @@
  * foreign resources (PRD §10.1).
  */
 
+import { GoalBoundExceededError, GoalNotActiveError, VerifierFailedError } from '../goals/goalsService.js';
 import type { Request, Response, NextFunction, Express } from 'express';
 import { publicChallengeCatalog } from './publicCatalogService.js';
 import { PUBLIC_EMBED_PREFIX } from '../../middleware/cors.js';
@@ -431,6 +432,10 @@ export const KICKTODO_ROUTES: ReadonlyArray<{ method: 'get' | 'post'; path: stri
         res.json(result);
       } catch (err) {
         if (err instanceof EnrollmentNotEvaluableError) throw new OpenwopError('conflict', err.message, 409);
+        // `GL2UX-9` — the goal owner's typed refusals, mapped as its own route maps them.
+        if (err instanceof GoalNotActiveError) throw new OpenwopError('conflict', err.message, 409, { state: err.state });
+        if (err instanceof VerifierFailedError) throw new OpenwopError('runner_unavailable', err.message, 502);
+        if (err instanceof GoalBoundExceededError) throw new OpenwopError('conflict', err.message, 409, { breach: err.breach });
         throw err;
       }
     },

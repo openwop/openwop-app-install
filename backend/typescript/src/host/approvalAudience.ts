@@ -39,6 +39,7 @@
 import type { ApprovalKind, PendingApproval } from './approvalService.js';
 import { resolveEffectiveAccess, listMembers, type EffectiveAccess } from './accessControlService.js';
 import { isSuperadminTenant } from './superadmin.js';
+import { isEligibleApprover, resolveEligibleApprovers } from './approverResolution.js';
 
 /** Who is entitled to see/be told about a row of this kind. */
 export type Audience =
@@ -53,6 +54,12 @@ export type Audience =
    *  are sometimes one org's business: an `assistant-action` drafting a support
    *  reply carries its ticket's org, every other assistant action carries none. */
   | { orgScopeWhenOrg: string }
+  /** ADR 0905 D3 — holders of `scope` in the row's org, PLUS the subjects the row's
+   *  `policy` approver refs (ADR 0075 groups/roles) resolve to. For a kind whose org
+   *  may name extra approvers (the agency → client email review): a named approver who
+   *  could decide but not see the card would be a gate with no visible door. Resolved
+   *  through the ONE approver resolver (`approverResolution`). */
+  | { orgScopeOrApproverRefs: string }
   /** Genuinely tenant-scoped. Stated per kind, never a default — see the ratchet below. */
   | null;
 
@@ -78,6 +85,10 @@ export const APPROVAL_AUDIENCE: Record<ApprovalKind, Audience> = {
   'dealer-registration': { orgScope: 'host:dealers:manage' },
   'territory-model-transition': { orgScope: 'host:territories:manage' },
   'commission-statement': { orgScope: 'host:commissions:manage' },
+  // ADR 0924 D4 — the client org's approvers (the `agency` policy).
+  'campaign-change-set': { orgScope: 'approvals:respond' },
+  // ADR 0905 D3 — org admins, plus the org's configured email approvers.
+  'email-campaign-send': { orgScopeOrApproverRefs: 'host:members:manage' },
 
   // ── not expressible as an org scope ───────────────────────────────────────
   'commerce-listing-publish': { superadminTenant: true },
@@ -133,6 +144,7 @@ type AudienceRow = Pick<PendingApproval, 'kind' | 'orgId' | 'policy'> & { action
  *  `!a.orgId ⇒ fail closed` for a tenant-scoped row (pre-code review L6). */
 async function resolvedAudience(tenantId: string, a: AudienceRow): Promise<{ audience: Exclude<Audience, { orgScopeWhenOrg: string }>; orgId: string | undefined }> {
   const declared = audienceOf(a.kind);
+  if (declared !== null && 'orgScopeOrApproverRefs' in declared) return { audience: declared, orgId: a.orgId };
   if (declared === null || !('orgScopeWhenOrg' in declared)) return { audience: declared, orgId: a.orgId };
   const orgId = a.orgId ?? (await orgResolvers.get(a.kind ?? '')?.(tenantId, a));
   return orgId ? { audience: { orgScope: declared.orgScopeWhenOrg }, orgId } : { audience: null, orgId: undefined };
@@ -165,7 +177,19 @@ export async function mayViewApproval(
     accessMemo?.set(key, pending);
   }
   const access = await pending;
+  if ('orgScopeOrApproverRefs' in audience) {
+    if ((access.scopes as readonly string[]).includes(audience.orgScopeOrApproverRefs)) return true;
+    return (await isEligibleApprover(subjectRef, approverRefsOf(a), { tenantId, orgId })).eligible;
+  }
   return (access.scopes as readonly string[]).includes(audience.orgScope);
+}
+
+/** The row's ADR 0075 group/role refs (explicit subject refs are not used here). */
+function approverRefsOf(a: AudienceRow): { approverGroupRefs?: string[]; approverRoleRefs?: string[] } {
+  return {
+    ...(a.policy?.approverGroupRefs ? { approverGroupRefs: a.policy.approverGroupRefs } : {}),
+    ...(a.policy?.approverRoleRefs ? { approverRoleRefs: a.policy.approverRoleRefs } : {}),
+  };
 }
 
 /**
@@ -195,6 +219,11 @@ export async function approvalRecipients(
   if (!resolvedOrg) return { addressed: true, refs: [] }; // fail closed, as both predicates do
   const members = await listMembers(tenantId, resolvedOrg);
   const refs: string[] = [];
+  const scope = 'orgScopeOrApproverRefs' in audience ? audience.orgScopeOrApproverRefs : audience.orgScope;
+  if ('orgScopeOrApproverRefs' in audience) {
+    const named = await resolveEligibleApprovers(approverRefsOf(a), { tenantId, orgId: resolvedOrg }, { includeDelegates: false });
+    if (!named.openGate) refs.push(...named.subjects);
+  }
   for (const m of members) {
     // `subject` is OPTIONAL: a descriptive member has no principal binding yet
     // (`accessControlService.ts:317-319`), so there is nobody to address. Skipping is the
@@ -203,7 +232,7 @@ export async function approvalRecipients(
     // as the redacted-broadcast case rather than as silence.
     if (!m.subject) continue;
     const access = await resolveEffectiveAccess(tenantId, { subject: m.subject, orgId: resolvedOrg });
-    if ((access.scopes as readonly string[]).includes(audience.orgScope)) refs.push(m.subject);
+    if ((access.scopes as readonly string[]).includes(scope) && !refs.includes(m.subject)) refs.push(m.subject);
   }
   return { addressed: true, refs };
 }

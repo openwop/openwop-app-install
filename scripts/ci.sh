@@ -446,6 +446,11 @@ step "gate tooling: the gate's own port/process helpers (GATE-5)"
 # found only by running the failure case, so those probes are assertions now.
 bash "$ROOT/scripts/test-gate-tooling.sh"
 
+step "custom-domain edge script: plan/apply/verify against a stub gcloud (ADR 0906 P3)"
+# Pure shell, no network: the real gcloud is never reached. `apply` creates billable
+# resources, so its confirmation guard and idempotence are asserted here, not trusted.
+bash "$ROOT/scripts/test-custom-domain-edge.sh" </dev/null
+
 step "deploy gates + contention detector: started in the BACKGROUND, joined after backend vitest (ADR 0863 D6)"
 # The deploy-gate suite: pure shell + fixture repos + a local stub, needing no build.
 # These two scripts are the last thing between a stale worktree and production;

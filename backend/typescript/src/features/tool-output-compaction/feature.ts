@@ -39,7 +39,7 @@ export const toolOutputCompactionFeature: BackendFeature = {
   // Phase 3 (ADR 0014) — `ctx.features['tool-output-compaction'].compact`, the
   // explicit mid-graph compaction surface the node pack delegates to.
   surface: { id: TOGGLE_ID, build: buildToolOutputCompactionSurface },
-  requiredPacks: [{ name: 'feature.tool-output-compaction.nodes', version: '1.2.1' }],
+  requiredPacks: ['feature.tool-output-compaction.nodes'],
   toggleDefault: {
     id: TOGGLE_ID,
     label: 'Tool-output compaction',

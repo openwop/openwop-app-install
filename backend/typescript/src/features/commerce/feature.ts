@@ -128,10 +128,10 @@ export const commerceFeature: BackendFeature = {
   // ADR 0875 D5 — the writers ask what their HTTP doors ask (COMMERCE_SURFACE_POLICY).
   surface: { id: 'commerce', build: buildCommerceSurface, orgPolicy: COMMERCE_SURFACE_POLICY },
   requiredPacks: [
-    { name: 'feature.commerce.nodes', version: '1.5.0' },
-    { name: 'vendor.openwop-app.commerce.agents', version: '1.2.2' },
-    { name: 'feature.commerce.buyer.nodes', version: '1.2.0' },
-    { name: 'vendor.openwop-app.commerce.buyer.agents', version: '1.0.4' },
+    'feature.commerce.nodes',
+    'vendor.openwop-app.commerce.agents',
+    'feature.commerce.buyer.nodes',
+    'vendor.openwop-app.commerce.buyer.agents',
   ],
   toggleDefault: {
     id: 'commerce',

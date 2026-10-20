@@ -31,6 +31,6 @@ export const kicktodoEngagementFeature: BackendFeature = {
     salt: 'kicktodo-engagement',
   },
   dependsOn: ['kicktodo-core'],
-  requiredPacks: [{ name: 'feature.kicktodo.nodes', version: '1.37.0' }],
+  requiredPacks: ['feature.kicktodo.nodes'],
   surface: { id: 'kicktodo-engagement', build: buildKicktodoEngagementSurface }, // ADR 0425 P5
 };

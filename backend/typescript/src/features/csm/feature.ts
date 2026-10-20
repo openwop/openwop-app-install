@@ -55,7 +55,7 @@ export const csmFeature: BackendFeature = {
     // factor breakdown is only interpretable with its `healthMethod`).
     // ADR 0882 — nodes 1.5.0 (health-set names its org; the three play nodes),
     // agents 1.3.0 (the renewals-due read tool).
-    { name: 'feature.csm.nodes', version: '1.5.0' },
-    { name: 'vendor.openwop-app.csm.agents', version: '1.3.0' },
+    'feature.csm.nodes',
+    'vendor.openwop-app.csm.agents',
   ],
 };
