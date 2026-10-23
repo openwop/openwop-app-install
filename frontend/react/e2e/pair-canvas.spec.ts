@@ -22,7 +22,22 @@ import { API } from './support/session.js';
  * E2/E4 never saw their Inspector field and main went red whenever the two
  * overlapped (2026-09-29). Each test now sets a PER-TENANT override for its own
  * personal tenant only — the global status is never written — and `afterAll`
- * removes exactly the overrides it added.
+ * removes exactly the overrides it added. (Serial mode is still required: every
+ * `setToggle` is a read-modify-write of that ONE row, so two of this file's own
+ * tests in parallel would lose each other's override. A red therefore skips the
+ * cases after it.)
+ *
+ * Sabotage that turns it red: ignoring the per-tenant override (OFF — the read
+ * is awaited and asserted, so the absence check cannot pass while toggles load);
+ * a ⌘⏎ that keeps nothing; ⌘. opening the prompt at the first node instead of
+ * the selected one (`Second step` is selected); "Fit to suggestion" ignoring
+ * which ops still wait; the status edge counting connections as steps (seeded
+ * 2 steps · 1 connection); a template chip misstating its size (pinned 1 step).
+ *
+ * CEILING (W54-PAIR-D4-1): both input-free fixture chains draw ONE step, so the
+ * Keep-all case cannot tell "one undo per gesture" (ADR 0773 D4) from "one undo
+ * per op". A two-step input-free fixture would reflow the pinned `/builder`
+ * gallery baseline (ci.sh, ADR 0626 P2), which this file must not force.
  */
 
 /** The personal tenant each request context logged into (the override key). */
@@ -77,7 +92,23 @@ async function openBuilder(page: Page, workflowId: string): Promise<void> {
 }
 
 const PAIR_TAB = { role: 'tab' as const, name: 'Pair' };
-const CREATE_WITH_AI = { role: 'button' as const, name: 'Create with AI' };
+
+/** Start waiting for the SPA's feature-assignment read BEFORE navigating; the
+ *  returned function resolves to `builder-pair`'s resolved `enabled`. Until that
+ *  read lands `useFeatureAccess` reports its fallback (off), so an absence
+ *  check made earlier would pass whatever the override says. */
+function awaitPairAssignment(page: Page): () => Promise<boolean | undefined> {
+  const res = page.waitForResponse((r) => r.url().endsWith('/host/openwop-app/feature-toggles/assignments') && r.request().method() === 'GET');
+  return async () => {
+    const body = (await (await res).json()) as { assignments: Array<{ id: string; enabled: boolean }> };
+    return body.assignments.find((a) => a.id === 'builder-pair')?.enabled;
+  };
+}
+
+/** Drop focus to nothing — the review shortcuts are canvas-or-nowhere scoped. */
+async function blurActive(page: Page): Promise<void> {
+  await page.evaluate(() => { const el = document.activeElement; if (el instanceof HTMLElement) el.blur(); });
+}
 
 test.describe('Pair Canvas (ADR 0773 G-10a)', () => {
   test.describe.configure({ mode: 'serial', timeout: 120_000 });
@@ -99,16 +130,18 @@ test.describe('Pair Canvas (ADR 0773 G-10a)', () => {
   // exists, so OFF means a builder with NO AI surface (the kill switch), not
   // "the old builder". The ON case below is the positive control for the Pair
   // tab selector; the rendered node is the control that this page is a builder.
-  test('OFF (kill switch): the builder renders with no Pair rail and no drawer', async ({ page }) => {
+  test('OFF (kill switch): the builder renders with no Pair rail', async ({ page }) => {
     const ctx = page.request;
     await loginPersonal(ctx, 'pair-e2e-off@example.com');
     await setToggle(ctx, 'off');
     const id = `wf.e2e.pair.off.${Date.now()}`;
     await seedWorkflow(ctx, id);
+    const pairEnabled = awaitPairAssignment(page);
     await openBuilder(page, id);
     await expect(page.locator('.builder-node').first()).toBeVisible();
+    // The default is ON; only this tenant's override turns it off.
+    expect(await pairEnabled(), 'the tenant override reached the resolver').toBe(false);
     await expect(page.getByRole(PAIR_TAB.role, { name: PAIR_TAB.name, exact: true })).toHaveCount(0);
-    await expect(page.getByRole(CREATE_WITH_AI.role, { name: CREATE_WITH_AI.name })).toHaveCount(0);
   });
 
   test('ON: Pair · Inspect rail replaces the drawer; a selected node offers Ask', async ({ page }) => {
@@ -117,15 +150,16 @@ test.describe('Pair Canvas (ADR 0773 G-10a)', () => {
     await setToggle(ctx, 'on');
     const id = `wf.e2e.pair.on.${Date.now()}`;
     await seedWorkflow(ctx, id);
+    const pairEnabled = awaitPairAssignment(page);
     await openBuilder(page, id);
+    expect(await pairEnabled(), 'CONTROL: the ON override resolves enabled').toBe(true);
     await expect(page.getByRole(PAIR_TAB.role, { name: PAIR_TAB.name, exact: true })).toBeVisible();
     await expect(page.getByRole('tab', { name: 'Inspect', exact: true })).toBeVisible();
-    await expect(page.getByRole(CREATE_WITH_AI.role, { name: CREATE_WITH_AI.name })).toHaveCount(0);
     await page.locator('.builder-node').first().click();
     await expect(page.locator('.pair-node-toolbar').getByRole('button', { name: 'Ask', exact: true }).first()).toBeVisible();
   });
 
-  test('ON, empty sheet: a template draws ghosts; Keep all lands them; one undo removes them', async ({ page }) => {
+  test('ON, empty sheet: a template draws a ghost; Keep all lands it; one undo removes it', async ({ page }) => {
     const ctx = page.request;
     await loginPersonal(ctx, 'pair-e2e-draft@example.com');
     await setToggle(ctx, 'on');
@@ -137,18 +171,19 @@ test.describe('Pair Canvas (ADR 0773 G-10a)', () => {
     await expect(templates.first(), 'no input-free template offered on the empty sheet').toBeVisible({ timeout: 15_000 });
     await templates.first().click();
 
-    // Ghosts, not nodes: nothing is written until the person keeps it.
+    // Ghosts, not nodes: nothing lands on the sheet until the person keeps it.
     const ghosts = page.locator('.builder-node--ghost');
     await expect(ghosts.first(), 'the template never drew as ghosts').toBeVisible({ timeout: 20_000 });
     const ghostCount = await ghosts.count();
-    expect(ghostCount).toBeGreaterThan(0);
+    expect(ghostCount, 'both input-free fixture templates draw ONE step').toBe(1);
     await expect(page.locator('.builder-node:not(.builder-node--ghost)')).toHaveCount(0);
 
     await page.getByRole('button', { name: 'Keep all' }).first().click();
     await expect(page.locator('.builder-node:not(.builder-node--ghost)')).toHaveCount(ghostCount, { timeout: 10_000 });
     await expect(ghosts).toHaveCount(0);
 
-    // One gesture, one undo step (ADR 0773 D4).
+    // One gesture, one undo step (ADR 0773 D4) — with ONE op this cannot tell a
+    // per-gesture undo from a per-op one: the W54-PAIR-D4-1 ceiling (header).
     await page.getByRole('button', { name: 'Undo', exact: true }).click();
     await expect(page.locator('.builder-node:not(.builder-node--ghost)')).toHaveCount(0, { timeout: 10_000 });
   });
@@ -168,7 +203,7 @@ test.describe('Pair Canvas (ADR 0773 G-10a)', () => {
     await page.keyboard.press('Enter');
     await expect(page.locator('.builder-node--ghost.is-focused'), 'a fresh suggestion focuses its first op').toHaveCount(1, { timeout: 20_000 });
     // The review shortcuts are canvas-scoped: focus on nothing, as after a click on the sheet.
-    await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+    await blurActive(page);
   }
   const MOD = process.platform === 'darwin' ? 'Meta' : 'Control';
 
@@ -204,9 +239,16 @@ test.describe('Pair Canvas (ADR 0773 G-10a)', () => {
     await setToggle(page.request, 'on');
     await page.goto(`/builder/${encodeURIComponent(`wf.e2e.pair.p11s.${Date.now()}`)}`, { waitUntil: 'domcontentloaded' });
     const chips = page.locator('.pair-first-draft__chains');
-    await expect(chips.getByRole('button').first(), 'a template chip shows how many steps it draws').toContainText(/\d+ steps?/, { timeout: 20_000 });
+    // Both input-free fixture chains have nodeCount 1.
+    await expect(chips.getByRole('button').first(), 'a template chip shows how many steps it draws').toContainText(/· 1 step(?!s)/, { timeout: 20_000 });
     await expect(chips.getByRole('link', { name: 'Browse all templates' })).toHaveAttribute('href', '/builder');
     await expect(page.locator('.pair-status')).toContainText('0 steps · 0 connections');
+    // A seeded sheet whose counts differ (2 nodes, 1 edge): steps and
+    // connections are each counted from their own collection.
+    const seeded = `wf.e2e.pair.p11s2.${Date.now()}`;
+    await seedWorkflow(page.request, seeded);
+    await openBuilder(page, seeded);
+    await expect(page.locator('.pair-status')).toContainText('2 steps · 1 connection');
   });
 
   test('P11: ⌘. with a node selected opens the prompt at that node', async ({ page }) => {
@@ -216,10 +258,11 @@ test.describe('Pair Canvas (ADR 0773 G-10a)', () => {
     const id = `wf.e2e.pair.p11i.${Date.now()}`;
     await seedWorkflow(ctx, id);
     await openBuilder(page, id);
-    await page.locator('.builder-node', { hasText: 'First step' }).click();
-    await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+    // The SECOND node, so "at the selected node" differs from "at the first node".
+    await page.locator('.builder-node', { hasText: 'Second step' }).click();
+    await blurActive(page);
     await page.keyboard.press(`${MOD}+.`);
-    await expect(page.locator('.pair-node-toolbar').getByLabel(/Ask about First step/)).toBeFocused({ timeout: 5_000 });
+    await expect(page.locator('.pair-node-toolbar').getByLabel(/Ask about Second step/)).toBeFocused({ timeout: 5_000 });
   });
   test('P11: the zoom menu offers "Fit to suggestion" only while changes wait', async ({ page }) => {
     await draftByKeyboard(page, 'pair-e2e-p11-fit@example.com');
@@ -230,10 +273,12 @@ test.describe('Pair Canvas (ADR 0773 G-10a)', () => {
     await fit.click();
     // Keep the change: nothing waits, so the entry is gone. (The review keys
     // are canvas-scoped, so leave the zoom button first.)
-    await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+    await blurActive(page);
     await page.keyboard.press(`${MOD}+Enter`);
     await expect(page.locator('.builder-node:not(.builder-node--ghost)')).toHaveCount(1, { timeout: 10_000 });
     await zoomMenu.click();
+    // Positive control: the menu is open before the entry's absence is read.
+    await expect(page.getByRole('menuitem', { name: /^Zoom to fit/ })).toBeVisible();
     await expect(page.getByRole('menuitem', { name: 'Fit to suggestion' })).toHaveCount(0);
   });
 });

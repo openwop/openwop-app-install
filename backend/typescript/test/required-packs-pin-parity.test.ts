@@ -12,6 +12,12 @@
  * toggle-variant binding with `ref.kind === 'node'` names a typeId some pack
  * declares, at the declared node version. Agent/prompt binding refs are out of
  * scope here (different version semantics; no drift observed in that class).
+ *
+ * Sabotages that red this file (8fw1g4 round 1): a requiredPacks pin one patch
+ * behind disk, and a node binding pinned at a version its pack does not declare.
+ * Both populations carry a non-empty floor so an empty `it.each` cannot read
+ * green: MEASURED on 7321e3612 (2026-10-18) — 77 features pin requiredPacks;
+ * 1 feature (`crm`) carries 2 node bindings.
  */
 import { describe, it, expect } from 'vitest';
 import { readdirSync, readFileSync, existsSync } from 'node:fs';
@@ -57,7 +63,8 @@ function nodeBindings(f: BackendFeature): VariantBinding[] {
 
 describe('requiredPacks pin ↔ pack.json version parity (every backend feature)', () => {
   const pinned = BACKEND_FEATURES.filter((f) => (f.requiredPacks ?? []).length > 0);
-  it('finds the pinned corpus (non-empty)', () => { expect(pinned.length).toBeGreaterThan(20); });
+  // Floor = measured 77 minus a margin (never a multiple of 10).
+  it('finds the pinned corpus (non-empty)', () => { expect(pinned.length).toBeGreaterThanOrEqual(73); });
 
   it.each(pinned.map((f) => [f.id, f] as const))('%s: every requiredPacks pin matches disk', (_id, f) => {
     for (const ref of featureRequiredPacks(f)) {
@@ -74,6 +81,13 @@ describe('toggle node-binding refs resolve to declared nodes at the pinned versi
   const bound = BACKEND_FEATURES
     .map((f) => [f.id, nodeBindings(f)] as const)
     .filter(([, bs]) => bs.length > 0);
+
+  // Without this, a binding that moved off `ref.kind === 'node'` would leave
+  // `it.each([])` with zero cases and the block green. Measured: 1 feature, 2 bindings.
+  it('finds the bound corpus (non-empty)', () => {
+    expect(bound.map(([id]) => id)).toContain('crm');
+    expect(bound.flatMap(([, bs]) => bs).length).toBeGreaterThanOrEqual(2);
+  });
 
   it.each(bound)('%s: every node binding resolves', (_id, bindings) => {
     for (const b of bindings) {

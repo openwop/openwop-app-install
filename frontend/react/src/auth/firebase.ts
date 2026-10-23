@@ -608,6 +608,13 @@ export async function completeMfaSignIn(code: string, factorUid?: string): Promi
   pendingMfaResolver = null;
 }
 
+/** ADR 0910 D11 — the SDK handles `auth/stepUp.ts` needs, kept out of this
+ *  entry-chunk module so the step-up code ships only with the admin page. */
+export async function stepUpContext(): Promise<{ auth: Auth | null; mod: AuthMod | null; stashMfa: (err: unknown) => boolean }> {
+  const a = await ensureInitAsync();
+  return { auth: a, mod: authMod, stashMfa: (err) => (a ? stashMfaChallenge(a, err) : false) };
+}
+
 /** Whether an MFA sign-in challenge is pending (for UI state restoration). */
 export function hasPendingMfaChallenge(): boolean {
   return pendingMfaResolver !== null;

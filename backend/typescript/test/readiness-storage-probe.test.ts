@@ -3,9 +3,16 @@
  * pool-exhausted / hung DB returns a fast 503 instead of hanging past
  * Cloud Run's external timeout. Exercises `storageProbeError` directly
  * with a kvGet that resolves, throws, and never settles.
+ *
+ * The timeout case runs on FAKE timers, so it asserts the probe settles at the
+ * configured 50 ms — not merely "within 5 s" (a probe that ignored the env and
+ * waited 50× longer passed the old wall-clock bound: 8fw1g3-rds-timeout-slow,
+ * vacuous in round 1). Sabotage-witnessed: the error message passthrough
+ * (rds-message), the timeout length (rds-timeout-slow-r2), success → null
+ * (rds-success).
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { storageProbeError } from '../src/routes/health.js';
 
 const savedTimeout = process.env.OPENWOP_READINESS_PROBE_TIMEOUT_MS;
@@ -38,14 +45,20 @@ describe('storageProbeError', () => {
   it('times out (does not hang) when the kv read never settles', async () => {
     // The probe reads OPENWOP_READINESS_PROBE_TIMEOUT_MS at call time (set to
     // 50ms in beforeEach), so a never-settling kvGet rejects with a timeout
-    // rather than hanging the request.
-    const started = Date.now();
-    const err = await storageProbeError({
-      kvGet: () => new Promise<string | null>(() => {}), // never resolves
-    });
-    expect(err).toMatch(/timed out/i);
-    // Resolves well under the default 5s ceiling (the test runner's own
-    // timeout would otherwise fail this if the probe truly hung).
-    expect(Date.now() - started).toBeLessThan(5_000);
+    // rather than hanging the request — at 50 ms, not later.
+    vi.useFakeTimers();
+    try {
+      let settled: string | null | undefined;
+      const pending = storageProbeError({
+        kvGet: () => new Promise<string | null>(() => {}), // never resolves
+      }).then((v) => { settled = v; });
+      await vi.advanceTimersByTimeAsync(49);
+      expect(settled, 'still pending 1 ms before the configured timeout').toBeUndefined();
+      await vi.advanceTimersByTimeAsync(1);
+      await pending;
+      expect(settled).toBe('storage probe timed out after 50ms');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

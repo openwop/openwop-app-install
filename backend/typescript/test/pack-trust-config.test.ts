@@ -25,12 +25,20 @@ import { locateRepoDir } from '../src/host/_repoPath.js';
 
 const FLAG = 'OPENWOP_PACK_TRUST_ALLOW_UNSIGNED';
 
-/** Config that ships or that an operator copies verbatim. */
+/** Config that ships or that an operator copies verbatim, and that exists in
+ *  EVERY checkout (this repo and the white-label zip). A missing file here is a
+ *  rename, which would silently drop it from the scan, so it is a red, not a
+ *  skip. (`docker-compose.yml` used to be listed; no such file exists here.) */
 const SHIPPED_CONFIG = [
   'Dockerfile',
-  'docker-compose.yml',
   'scripts/deploy.env.example',
   'backend/typescript/.env.example',
+];
+
+/** Config present in this repo but STRIPPED from the white-label zip by
+ *  `scripts/build-whitelabel-zip.sh` (real `.env*` files and `.github/`), so it
+ *  is scanned when present and skipped when absent. */
+const STEWARD_ONLY_CONFIG = [
   'frontend/react/.env.production',
   '.github/workflows/ci.yml',
 ];
@@ -39,8 +47,10 @@ describe('ADR 0555 P0 — the trust break-glass is not shipped enabled', () => {
   const repoRoot = dirname(locateRepoDir(dirname(fileURLToPath(import.meta.url)), 'packs', '.steward-manifest.json'));
 
   it('no shipped config file sets the flag', () => {
+    const missing = SHIPPED_CONFIG.filter((rel) => !existsSync(join(repoRoot, rel)));
+    expect(missing, 'a listed config file was renamed or removed: update SHIPPED_CONFIG').toEqual([]);
     const offenders: string[] = [];
-    for (const rel of SHIPPED_CONFIG) {
+    for (const rel of [...SHIPPED_CONFIG, ...STEWARD_ONLY_CONFIG]) {
       const abs = join(repoRoot, rel);
       if (!existsSync(abs)) continue;
       const text = readFileSync(abs, 'utf-8');
@@ -54,9 +64,12 @@ describe('ADR 0555 P0 — the trust break-glass is not shipped enabled', () => {
     expect(offenders, `${FLAG} must never be set in shipped config — it disables the ADR 0555 fail-closed policy`).toEqual([]);
   });
 
-  it('the flag is OFF in this process, so the suite exercises the real policy', () => {
-    // If a previous test file leaked it, every trust assertion after that point
-    // would pass for the wrong reason.
+  it('tripwire: the flag has not leaked into this worker from an earlier test file', () => {
+    // What this CAN see: a file that ran earlier in the same vitest worker and
+    // set the flag without restoring it (every trust assertion after that point
+    // would pass for the wrong reason). What it CANNOT see: a leak in another
+    // worker, or one by a file scheduled after this one. It is a tripwire, not
+    // a proof that every file restores the var.
     expect(process.env[FLAG]).not.toBe('true');
   });
 
@@ -68,6 +81,7 @@ describe('ADR 0555 P0 — the trust break-glass is not shipped enabled', () => {
     const manifestPath = join(repoRoot, 'packs', '.steward-manifest.json');
     expect(existsSync(manifestPath)).toBe(true);
     const parsed = JSON.parse(readFileSync(manifestPath, 'utf-8')) as { packs: Record<string, unknown> };
-    expect(Object.keys(parsed.packs).length).toBeGreaterThan(100);
+    // Floor = the measured count, 213 attested packs at 7321e3612 (2026-10-18).
+    expect(Object.keys(parsed.packs).length).toBeGreaterThanOrEqual(213);
   });
 });

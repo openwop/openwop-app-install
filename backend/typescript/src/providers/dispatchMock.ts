@@ -51,6 +51,17 @@ export interface MockBehavior {
    *  chat tool loop or a live agent dispatch run real tool rounds in CI with no
    *  provider key. */
   toolCalls?: ReadonlyArray<{ name: string; input?: Record<string, unknown> }>;
+  /** RFC 0248 — this reply reports NO usage (a provider that omitted it). */
+  noUsage?: boolean;
+  /** RFC 0248 §A.3 — the structured-output mode this reply claims, for a
+   *  `jsonSchema` request only (`native` reads as a JSON-schema format). */
+  structuredMode?: 'native' | 'prompt';
+  /** RFC 0248 §B.2 — report `min(outputTokens, the maxTokens this request
+   *  carried)`, as a real provider cannot exceed its budget, and serve an entry
+   *  whose `outputTokens` exceed that budget as TRUNCATED (`max_tokens`, a
+   *  partial reply), as the fixture contract requires. Opt-in, so the scenarios
+   *  that program fixed counts are unchanged. */
+  clampOutputToMaxTokens?: boolean;
 }
 
 export type MockProgram = readonly MockBehavior[];
@@ -58,6 +69,10 @@ export type MockProgram = readonly MockBehavior[];
 interface ProgramState {
   program: MockProgram;
   cursor: number;
+  /** ADR 0967 — scripted by a fixture node for its OWN run (`programMockForRun`),
+   *  not staged by a harness as a divergence injection. Replay must not treat
+   *  it as one. */
+  runScoped?: boolean;
   /** Records the maxTokens value the most recent call received — read
    *  by the conformance suite via `GET /v1/host/openwop-app/test/mock-ai/
    *  last-dispatch-budget` to verify RFC 0033 §B truncation-budget
@@ -91,6 +106,34 @@ const programs = new Map<string, ProgramState>();
  *  (and the seam route that now exposes it) is for — see its header. */
 export function programMock(nodeId: string, program: MockProgram): void {
   programs.set(nodeId, { program, cursor: 0, lastReceivedMaxTokens: null, lastReceivedMessages: null, receivedMaxTokens: [] });
+}
+
+/** ADR 0967 — the run-scoped key. NUL cannot occur in a run id or node id. */
+const runKey = (runId: string, nodeId: string): string => `${runId}\u0000${nodeId}`;
+/** ADR 0967 — run-scoped programs kept at once. They exist on a production host
+ *  (the callAI fixture opt-in), so the store is bounded: the oldest is dropped. */
+export const RUN_SCOPED_PROGRAM_CAP = 64;
+
+/**
+ * ADR 0967 — seed a program for ONE run's node. A fixture node calls this for
+ * its own run, so two concurrent runs of the same fixture (whose node ids are
+ * equal, possibly in different tenants) never read each other's script. A
+ * dispatch carrying `runId` reads this key before the node-only one.
+ */
+export function programMockForRun(runId: string, nodeId: string, program: MockProgram): void {
+  const key = runKey(runId, nodeId);
+  programs.delete(key);
+  programs.set(key, { program, cursor: 0, runScoped: true, lastReceivedMaxTokens: null, lastReceivedMessages: null, receivedMaxTokens: [] });
+  let scoped = 0;
+  for (const st of programs.values()) if (st.runScoped) scoped += 1;
+  for (const [k, st] of programs) {
+    if (scoped <= RUN_SCOPED_PROGRAM_CAP) break;
+    if (st.runScoped) { programs.delete(k); scoped -= 1; }
+  }
+}
+
+function stateFor(nodeId: string, runId?: string): ProgramState | undefined {
+  return (runId !== undefined ? programs.get(runKey(runId, nodeId)) : undefined) ?? programs.get(nodeId);
 }
 
 /**
@@ -140,9 +183,17 @@ export function resetMockPrograms(): void {
  *  the mock "MUST honor the program deterministically by attempt index"), so
  *  the invocation-log replay fallback must NOT short-circuit the dispatch —
  *  that is how the RFC 0041 §B refusal-divergence witness reaches the mock. */
-export function hasPendingMockProgram(nodeId: string): boolean {
-  const state = programs.get(nodeId);
+export function hasPendingMockProgram(nodeId: string, runId?: string): boolean {
+  const state = stateFor(nodeId, runId);
   return state !== undefined && state.cursor < state.program.length;
+}
+
+/** ADR 0967 — a pending program that IS a divergence injection: a run-scoped
+ *  fixture script is the run's own input, so replay reads the recorded
+ *  invocation instead of re-dispatching it. */
+export function hasPendingDivergenceProgram(nodeId: string, runId?: string): boolean {
+  const state = stateFor(nodeId, runId);
+  return state !== undefined && !state.runScoped && state.cursor < state.program.length;
 }
 
 /** Return the most-recent `maxTokens` passed to a mock dispatch for
@@ -156,8 +207,8 @@ export function lastReceivedMaxTokens(nodeId: string): number | null {
  *  composed system prompt + prior turns). `null` when no call has fired. */
 /** Every `maxTokens` a mock dispatch for `nodeId` received since its program
  *  was seeded, in call order. Empty when unseeded or no call has fired. */
-export function receivedMaxTokens(nodeId: string): ReadonlyArray<number | null> {
-  return programs.get(nodeId)?.receivedMaxTokens ?? [];
+export function receivedMaxTokens(nodeId: string, runId?: string): ReadonlyArray<number | null> {
+  return stateFor(nodeId, runId)?.receivedMaxTokens ?? [];
 }
 
 export function lastReceivedMessages(nodeId: string): ReadonlyArray<{ role: string; content: string }> | null {
@@ -174,7 +225,7 @@ const SCHEMA_HINT_MARKER = 'matches this schema, with no preamble or trailing te
  *  that routes `core.ai.structuredOutput` through the default mock (e.g.
  *  `conformance-phase4-nondet-tool`) dies in the retry loop. Synthesis is
  *  pure + input-deterministic, so replay/fork byte-stability holds. */
-function minimalInstance(schema: unknown): unknown {
+export function minimalInstance(schema: unknown): unknown {
   if (schema === null || typeof schema !== 'object') return null;
   const s = schema as { type?: unknown; enum?: unknown[]; const?: unknown; required?: unknown; properties?: Record<string, unknown> };
   if (s.const !== undefined) return s.const;
@@ -222,13 +273,13 @@ function defaultStructuredCompletion(messages: DispatchRequest['messages']): str
  *  from the next program entry. When the program is exhausted, returns
  *  an empty-stop completion (so a misaligned test surfaces as "expected
  *  N calls, got N+1" rather than a hang). */
-export async function dispatchMock(req: DispatchRequest & { nodeId?: string }): Promise<DispatchResult> {
+export async function dispatchMock(req: DispatchRequest & { nodeId?: string; runId?: string }): Promise<DispatchResult> {
   // The nodeId is not on the canonical DispatchRequest shape today —
   // `aiProvidersHost.ts` carries it on the AdapterScope and we extend
   // the dispatch request with it inline at the call site when the
   // provider is 'mock'. A real-provider adapter wouldn't see this.
   const nodeId = req.nodeId ?? '';
-  const state = programs.get(nodeId);
+  const state = stateFor(nodeId, req.runId);
   // Record the maxTokens for the §B truncation-budget assertion.
   if (state) {
     state.lastReceivedMaxTokens = req.maxTokens ?? null;
@@ -245,7 +296,11 @@ export async function dispatchMock(req: DispatchRequest & { nodeId?: string }): 
   if (behavior.errorCode) {
     throw Object.assign(new Error(`mock programmed failure (${behavior.errorCode})`), { code: behavior.errorCode });
   }
-  const completion = behavior.refusalText ?? behavior.content ?? defaultStructuredCompletion(req.messages);
+  // RFC 0248 fixture contract: a reply that would overrun this request's budget
+  // is cut off there, whatever the entry said it was.
+  const overBudget = behavior.clampOutputToMaxTokens === true && typeof req.maxTokens === 'number'
+    && (behavior.outputTokens ?? 50) > req.maxTokens;
+  const completion = overBudget ? '{"partial":' : (behavior.refusalText ?? behavior.content ?? defaultStructuredCompletion(req.messages));
   // ADR 0079 — stream the canned reply so the mock/test/demo path exercises the
   // streaming UI. Deterministic word-chunks; best-effort (a callback throw must
   // not fail the dispatch).
@@ -255,16 +310,25 @@ export async function dispatchMock(req: DispatchRequest & { nodeId?: string }): 
     }
   }
 
+  const scriptedOut = behavior.outputTokens ?? 50;
+  const outputTokens = behavior.clampOutputToMaxTokens && typeof req.maxTokens === 'number'
+    ? Math.min(scriptedOut, req.maxTokens)
+    : scriptedOut;
   return {
     provider: 'mock',
     model: req.model || 'mock-mini',
     completion,
-    usage: {
-      inputTokens: behavior.inputTokens ?? 100,
-      outputTokens: behavior.outputTokens ?? 50,
-    },
-    ...(behavior.stopReason ? { finishReason: behavior.stopReason } : {}),
+    ...(behavior.noUsage ? {} : {
+      usage: {
+        inputTokens: behavior.inputTokens ?? 100,
+        outputTokens,
+      },
+    }),
+    ...(overBudget ? { finishReason: 'max_tokens' as const } : behavior.stopReason ? { finishReason: behavior.stopReason } : {}),
     ...(behavior.refusalText ? { blockReason: 'refusal' } : {}),
+    ...(behavior.structuredMode && req.jsonSchema !== undefined
+      ? { structuredMode: behavior.structuredMode === 'native' ? 'json_schema' as const : 'prompt' as const }
+      : {}),
   };
 }
 

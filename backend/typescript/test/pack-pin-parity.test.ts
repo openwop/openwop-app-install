@@ -79,12 +79,14 @@ describe('pack pin ↔ disk version parity (NODE-PACK-AUDIT tripwire)', () => {
   const pins = collectPins(diskVersions);
 
   it('finds a plausible pin population (the scan itself must not rot)', () => {
-    // 121 pins existed when this tripwire landed (2026-07-22). A floor well
-    // below that tolerates refactors while still catching a regex/layout
-    // change that silently empties the scan — an empty sweep would pass the
-    // parity assertion below while checking nothing.
-    expect(diskVersions.size).toBeGreaterThan(100);
-    expect(pins.length).toBeGreaterThan(80);
+    // Floors = the measured counts at 1384e4185 (2026-10-22): 213 packs on
+    // disk, 120 pins (every `PACK_PINS` row in packPins.ts; 129 per-feature
+    // entries before ADR 0919 deduplicated them, 121 when this tripwire
+    // landed, 2026-07-22). A regex/layout change that silently empties or thins
+    // the scan is a red; an empty sweep would pass the parity assertion below
+    // while checking nothing.
+    expect(diskVersions.size).toBeGreaterThanOrEqual(213);
+    expect(pins.length).toBeGreaterThanOrEqual(120);
   });
 
   it('every feature pin matches the pack version on disk (replay resolvability, RFC 0076)', () => {
@@ -95,8 +97,11 @@ describe('pack pin ↔ disk version parity (NODE-PACK-AUDIT tripwire)', () => {
   });
 
   it('no two features pin the SAME pack at DIFFERENT versions', () => {
-    // Even if disk moved and every pin were stale together, split pins are a
-    // second, independent smell (two features cannot both be right).
+    // Twin: "every feature pin matches the pack version on disk" above. Pins are
+    // collected only for packs on disk, so two different pinned versions mean
+    // at least one differs from disk, and that case is already red: this one
+    // cannot fail ALONE. Kept (protected file) because its message names the
+    // split directly ("pinned at A AND B"), which the drift list does not.
     const byPack = new Map<string, Set<string>>();
     for (const p of pins) {
       byPack.set(p.pack, (byPack.get(p.pack) ?? new Set()).add(p.pinned));

@@ -515,9 +515,14 @@ step "frontend: lint + build + unit-test types — BACKGROUND, joined before bac
 # None writes what another reads (no tsc pass is incremental; lint writes
 # nothing), so the lane takes roughly the build's ~80 s.
 run_frontend_static() ( # a subshell: the serial fallback must not leave ci.sh in frontend/react
-  local dir rc=0 n p p1 p2 p3
+  local dir envd rc=0 n p p1 p2 p3
   dir="$(mktemp -d "${TMPDIR:-/tmp}/owp-ci-fe-static.XXXXXX")"
-  trap 'rm -rf "$dir"' EXIT
+  # Issue #5006: in an adopter bundle the budgeted build reads only a copy of
+  # `.env.production.example`, so the adopter's brand strings cannot red the
+  # host's entry ceiling (ADR 0874 D4, amended 2026-10-22). The full repo: empty,
+  # its own `.env.production`, unchanged.
+  envd="$(budget_env_dir "$ROOT" "$STEWARD_LANE_MODE")" || return 1
+  trap 'rm -rf "$dir" ${envd:+"$envd"}' EXIT
   trap 'exit 130' INT
   trap 'exit 143' TERM
   cd "$ROOT/frontend/react" || return 1
@@ -526,7 +531,12 @@ run_frontend_static() ( # a subshell: the serial fallback must not leave ci.sh i
     { echo "▶ frontend: $title"; npm "$@"; } > "$log" 2>&1 < /dev/null
   }
   fe_static_one "$dir/1" "lint (eslint, zero warnings)" run lint -- --max-warnings=0 & p1=$!
-  fe_static_one "$dir/2" "build (tsc + token/CSS checks + vite + bundle budget)" run build & p2=$!
+  if [ -n "$envd" ]; then
+    echo "frontend build: adopter bundle — budgeting the default build on .env.production.example, not this tree's .env.production (#5006)"
+    OPENWOP_VITE_ENV_DIR="$envd" fe_static_one "$dir/2" "build (tsc + token/CSS checks + vite + bundle budget; host-only env)" run build & p2=$!
+  else
+    fe_static_one "$dir/2" "build (tsc + token/CSS checks + vite + bundle budget)" run build & p2=$!
+  fi
   fe_static_one "$dir/3" "unit-test types (shrink-only ratchet — tests are excluded from the build's tsc)" run check:test-types & p3=$!
   for n in 1 2 3; do
     eval "p=\$p$n"
@@ -1354,6 +1364,12 @@ if [ "${OPENWOP_CI_LIVE:-0}" = "1" ]; then
   # pass — which is the defect being closed, not a style preference.
   step "backend: live storage-adapter parity (outbox / idempotency ledger / workspace CAS)"
   ( cd "$ROOT/backend/typescript" && OPENWOP_STORAGE_PARITY_LIVE=1 npm run test -- test/storage-adapter-parity-testcontainers.test.ts )
+  # Same H59 class, found by grade-tests (8f wave 1, 2026-10-18): the GOV-5
+  # multi-instance retention lease on real Postgres ran in NO lane — its header
+  # credited a "dedicated CI job" that is the disabled hosted workflow.
+  # OPENWOP_PG_RETENTION_LIVE=1 hard-requires Docker, like the specs above.
+  step "backend: live retention-sweep lease (GOV-5, real Postgres)"
+  ( cd "$ROOT/backend/typescript" && OPENWOP_PG_RETENTION_LIVE=1 npm run test -- test/retention-sweep-pg-concurrency.test.ts )
 else
   skip "backend live adapters + storage parity (set OPENWOP_CI_LIVE=1; needs Docker)"
 fi

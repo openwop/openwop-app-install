@@ -5,11 +5,13 @@
  * (component-level round trip — no HTTP, no backend). The refusal mapping is
  * exercised one level down too: the real `checkIn` against a stubbed `fetch`
  * returning the statuses `kicktodo-core/routes.ts` POST /check-ins actually
- * sends (422 EvidenceRequiredError, 409 superseded, 404 not found).
+ * sends (422 EvidenceRequiredError, 409 superseded, 404 not found — the
+ * `CheckInDeniedError` / `EvidenceRequiredError` mapping in that handler).
  *
  * Breaks if: the page stops re-reading Today after a successful check-in (the
  * Done state never appears); a 422 and a 409 collapse back into the one generic
- * "didn't save" (KTP-2); a superseded refusal stops refreshing Today; the
+ * "didn't save" (KTP-2); a superseded or gone (404) refusal stops refreshing
+ * Today or loses its own copy; the
  * client stops mapping status → refusal. (KTP-3's unmount guard has no test:
  * React 18 silently drops a state update on an unmounted component, so no
  * assertion can tell the guarded and unguarded versions apart.)
@@ -27,14 +29,12 @@ const kt = vi.hoisted(() => ({
   listChallenges: vi.fn<typeof listChallenges>(),
   checkIn: vi.fn<typeof checkIn>(),
 }));
-vi.mock('../../../client/kicktodoClient.js', async (importOriginal) => {
-  const real = await importOriginal<typeof import('../../../client/kicktodoClient.js')>();
-  // Keep the REAL checkIn reachable for the client-level cases below.
-  return { ...real, ...kt, realCheckIn: real.checkIn };
-});
+vi.mock('../../../client/kicktodoClient.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../client/kicktodoClient.js')>()),
+  ...kt,
+}));
 
 import { TodayPage } from '../TodayPage.js';
-import * as client from '../../../client/kicktodoClient.js';
 import { CheckInRefusedError } from '../../../client/kicktodoClient.js';
 import { messages as en } from '../i18n/en.js';
 
@@ -92,23 +92,40 @@ describe('KTP-2 — a refused check-in says why', () => {
     await waitFor(() => expect(kt.getToday).toHaveBeenCalledTimes(2));
   });
 
+  it('404 gone says the action left the plan AND refreshes Today', async () => {
+    kt.getToday.mockResolvedValue(todayWith(action(false)));
+    kt.checkIn.mockRejectedValue(new CheckInRefusedError('not-found', 404));
+    render(<MemoryRouter><TodayPage /></MemoryRouter>);
+    fireEvent.click(await screen.findByRole('button', { name: DONE_BUTTON }));
+    expect(await screen.findByText(en.todayCheckInGone)).toBeTruthy();
+    expect(screen.queryByText(en.todayActionError)).toBeNull();
+    await waitFor(() => expect(kt.getToday).toHaveBeenCalledTimes(2));
+  });
+
   it('an unclassified failure keeps the generic retry copy', async () => {
     kt.getToday.mockResolvedValue(todayWith(action(false)));
     kt.checkIn.mockRejectedValue(new TypeError('Failed to fetch'));
     render(<MemoryRouter><TodayPage /></MemoryRouter>);
     fireEvent.click(await screen.findByRole('button', { name: DONE_BUTTON }));
     expect(await screen.findByText(en.todayActionError)).toBeTruthy();
+    expect(screen.queryByText(en.todayCheckInEvidenceRequired)).toBeNull();
+    expect(screen.queryByText(en.todayCheckInSuperseded)).toBeNull();
+    expect(screen.queryByText(en.todayCheckInGone)).toBeNull();
   });
 });
 
 describe('KTP-2 — the client maps the route’s real statuses', () => {
-  const realCheckIn = (client as unknown as { realCheckIn: typeof checkIn }).realCheckIn;
+  // The REAL checkIn (the module mock replaces it for the page cases above).
+  const realCheckIn = async (cardId: string): Promise<void> => {
+    const real = await vi.importActual<typeof import('../../../client/kicktodoClient.js')>('../../../client/kicktodoClient.js');
+    return real.checkIn(cardId);
+  };
   for (const [status, refusal] of [[422, 'evidence-required'], [409, 'superseded'], [404, 'not-found'], [500, 'failed']] as const) {
     it(`${status} → ${refusal}`, async () => {
       vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ error: 'x', message: 'raw server text' }), { status })));
       const err = await realCheckIn('card-a').catch((e: unknown) => e);
       expect(err).toBeInstanceOf(CheckInRefusedError);
-      expect((err as CheckInRefusedError).refusal).toBe(refusal);
+      expect(err instanceof CheckInRefusedError ? err.refusal : undefined).toBe(refusal);
     });
   }
 });

@@ -13,9 +13,20 @@
  *        override grant counts as ONE quorum vote. Both paths emit
  *        `approval.overridden { principal, reason }` (reason REQUIRED) and
  *        write an audit entry.
+ *
+ * Sabotages that red this file (8fw1g4 round 1, 13 probes, all witnessed): the
+ * timeoutSec/timeoutMs ladder, the approval-kind filter, the deadline comparison,
+ * the resolve CAS (TOCTOU — two callers on one stale snapshot race without forcing:
+ * both reach the CAS before any await resolves), the reject value and decision, the
+ * sweep and its batched cursor, the bypass flag both ways, the override reason
+ * requirement, the override-block gate, and the audit `bypassedQuorum` flag.
+ *
+ * Isolation: one shared storage, so every case seeds its OWN run + gates, and the
+ * sweep cursors are reset before EVERY case (they are module-level; resetting only
+ * in the starvation case left them dirty for the periodic case under shuffle).
  */
 
-import { beforeAll, describe, expect, it } from 'vitest';
+import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -35,6 +46,7 @@ import {
   __awaitRunResumeChainForTests,
   __resolveAndResumeForTests,
 } from '../src/routes/interrupts.js';
+import { _resetSweepCursors } from '../src/executor/openInterruptSweep.js';
 import type { WorkflowDefinition } from '../src/executor/types.js';
 import type { InterruptRecord, RunRecord } from '../src/types.js';
 import { assertRejectTail } from './support/interruptResolvedDef.js';
@@ -85,6 +97,10 @@ beforeAll(() => {
     edges: [{ edgeId: 'e1', sourceNodeId: 'gate', targetNodeId: 'sink', triggerRule: 'all_success' }],
   };
   registerHostWorkflow(def);
+});
+
+beforeEach(() => {
+  _resetSweepCursors();
 });
 
 let seq = 0;
@@ -225,7 +241,9 @@ describe('rfc0093 §D.1 — gate timeout ⇒ auto-reject', () => {
     const live = await seedGate(run.runId, { timeoutSec: 3_600 });
 
     const swept = await sweepExpiredApprovalGates(storage);
-    expect(swept).toBeGreaterThanOrEqual(1);
+    // Every earlier case resolves its own overdue gates, so this case's gate is the
+    // only one due.
+    expect(swept).toBe(1);
     expect((await storage.getInterrupt(overdue.interruptId))?.resolvedAt).toBeTruthy();
     expect((await storage.getInterrupt(live.interruptId))?.resolvedAt).toBeUndefined();
   });
@@ -352,8 +370,6 @@ describe('rfc0093 §D — the periodic sweep cannot starve behind interrupts tha
   // backlog of never-expiring ones hid every newer gate forever. RFC 0223's
   // timeout rows passed here (small table) and failed on the prod database.
   it('a due gate is reached whether it is the newest or buried mid-backlog', async () => {
-    const { _resetSweepCursors } = await import('../src/executor/openInterruptSweep.js');
-    _resetSweepCursors();
     const run = await seedRun();
     const t0 = Date.parse('2020-01-01T00:00:00Z');
     const at = (ms: number) => new Date(t0 + ms).toISOString();

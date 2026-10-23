@@ -23,6 +23,11 @@
  * name is arguably correct product behaviour, and pinning it at publish time is
  * a ruling. What is NOT arguable is that it must be a NAME, escaped and
  * bounded — which is what this fix guarantees.
+ *
+ * Sabotage-witnessed (/grade-tests 8f wave 1): resolving the creator to the id
+ * instead of the display name (8fw1g3-byline-name) and dropping the XML escape
+ * (byline-escape-r2 — the escaped case pins the WHOLE escaped creator element).
+ * Responses are typed at each call site (no `any`).
  */
 
 import http from 'node:http';
@@ -48,42 +53,41 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
-interface Res<T = any> { status: number; body: T }
+interface Res<T> { status: number; body: T }
 interface Client {
-  get: (p: string) => Promise<Res>;
-  post: (p: string, b?: unknown) => Promise<Res>;
-  patch: (p: string, b?: unknown) => Promise<Res>;
+  get: <T>(p: string) => Promise<Res<T>>;
+  post: <T>(p: string, b?: unknown) => Promise<Res<T>>;
+  patch: <T>(p: string, b?: unknown) => Promise<Res<T>>;
 }
 function client(): Client {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
+  const call = async <T>(method: string, path: string, body?: unknown): Promise<Res<T>> => {
     const res = await fetch(`${BASE}${path}`, {
       method,
       headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) },
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
-    return { status: res.status, body: out };
+    const out: unknown = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    return { status: res.status, body: out as T };
   };
-  return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), patch: (p, b) => call('PATCH', p, b) };
+  return { get: <T>(p: string) => call<T>('GET', p), post: <T>(p: string, b?: unknown) => call<T>('POST', p, b), patch: <T>(p: string, b?: unknown) => call<T>('PATCH', p, b) };
 }
 
 let n = 0;
 async function ownerOrg(): Promise<{ c: Client; orgId: string; userId: string }> {
   const tenantId = `org:byline-${Date.now()}-${n++}`;
   const c = client();
-  const login = await c.post('/host/openwop-app/test/login', { email: `byline-${Date.now()}-${n++}@acme.test`, tenantId });
+  const login = await c.post<{ user: { userId: string } }>('/host/openwop-app/test/login', { email: `byline-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(login.status, JSON.stringify(login.body)).toBe(201);
-  const org = await c.post('/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await c.post<{ orgId: string }>('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
-  return { c, orgId: org.body.orgId as string, userId: login.body.user.userId as string };
+  return { c, orgId: org.body.orgId, userId: login.body.user.userId };
 }
 const cms = (orgId: string, s = ''): string => `/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}${s}`;
 
 async function publishPost(c: Client, orgId: string, title: string): Promise<void> {
-  const created = await c.post(cms(orgId, '/pages'), {
+  const created = await c.post<{ pageId: string }>(cms(orgId, '/pages'), {
     title, kind: 'post', sections: [{ type: 'richText', data: { body: 'Hello world.' } }],
   });
   expect(created.status, JSON.stringify(created.body)).toBe(201);
@@ -96,10 +100,10 @@ async function feed(orgId: string): Promise<string> {
   expect(res.status).toBe(200);
   return res.text();
 }
-async function blogList(orgId: string): Promise<any> {
+async function blogList(orgId: string): Promise<{ posts: Array<{ authorName?: string }> }> {
   const res = await fetch(`${BASE}/host/openwop-app/public/${encodeURIComponent(orgId)}/blog`);
   expect(res.status).toBe(200);
-  return res.json();
+  return (await res.json()) as { posts: Array<{ authorName?: string }> };
 }
 
 describe('CMSA-13 — the anonymous byline must be a NAME, never the internal principal', () => {
@@ -118,7 +122,7 @@ describe('CMSA-13 — the anonymous byline must be a NAME, never the internal pr
     expect(xml).not.toMatch(/<dc:creator>user:/);
 
     const list = await blogList(orgId);
-    expect(list.posts[0].authorName).toBe('Ada Lovelace');
+    expect(list.posts[0]?.authorName).toBe('Ada Lovelace');
   });
 
   it('with NO display name it degrades to a humanized id — still never the raw principal', async () => {
@@ -144,7 +148,8 @@ describe('CMSA-13 — the anonymous byline must be a NAME, never the internal pr
     await publishPost(c, orgId, 'Escaped post');
     const xml = await feed(orgId);
     expect(xml).not.toContain('<script>');
-    expect(xml).toContain('&lt;script&gt;');
+    // The WHOLE creator, escaped character for character.
+    expect(xml).toContain('<dc:creator>&lt;/dc:creator&gt;&lt;script&gt;alert(1)&lt;/script&gt;&lt;dc:creator&gt;</dc:creator>');
     // Exactly one creator element for the one post — the injection did not
     // manufacture a second.
     expect((xml.match(/<dc:creator>/g) ?? []).length).toBe(1);

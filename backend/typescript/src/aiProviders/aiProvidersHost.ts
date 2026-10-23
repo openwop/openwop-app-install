@@ -58,7 +58,7 @@ import { enterprisePosture } from '../host/deployPosture.js';
 import { subscriptionLoginDetected, subscriptionRequireDetectedLogin } from './subscriptionCliDetect.js';
 import type { AiProviderPolicy, ProviderPolicyResolver } from '../host/index.js';
 import { dispatchChat, type ChatMessage, type ProviderId } from '../providers/dispatch.js';
-import { dispatchMockToolsRound, hasPendingMockProgram } from '../providers/dispatchMock.js';
+import { dispatchMockToolsRound, hasPendingDivergenceProgram } from '../providers/dispatchMock.js';
 import { explicitRefNamesOtherProvider, pickCredentialRef } from './credentialRefLadder.js';
 import { dispatchAnthropicToolsRound, type ToolsRoundRequest, type ToolsRoundResult } from '../providers/dispatchAnthropicTools.js';
 import { dispatchOpenAIToolsRound, dispatchGoogleToolsRound, dispatchMiniMaxToolsRound } from '../providers/dispatchProviderTools.js';
@@ -349,6 +349,8 @@ export type AiProviderErrorCode =
   // truncation-retry-exhaustion terminal (unchanged).
   | 'envelope_invalid'
   | 'envelope_truncation_unrecoverable'
+  // RFC 0248 §B.5 — a malformed `ctx.callAI` `retry` policy (`details.field`).
+  | 'validation_error'
   | 'envelope_refusal'
   // RFC 0105 §C — speech-synthesis error codes. `speech_synthesis_unsupported`
   // = requested provider has no wired speech path; `speech_synthesis_failed`
@@ -624,6 +626,9 @@ async function callAI(scope: AdapterScope, req: AiCallRequest): Promise<AiCallRe
   // ADR 0903 — a node that names no provider/model gets the run's default, never a pack's hard-coded vendor.
   req = withRunAiDefault(req, scope.runAiDefault);
   assertModalitiesAdvertised(req);
+  // RFC 0248 §B.5 — before anything is dispatched or read from the log, so a
+  // malformed policy is refused the same way live and on replay.
+  const retryPolicy = parseRetryPolicy(req.retry);
   if (req.embeddingMode) {
     // A5 — real, self-contained deterministic embedding (feature hashing). No
     // external model/key; the input text is the first message's content.
@@ -743,7 +748,9 @@ async function callAI(scope: AdapterScope, req: AiCallRequest): Promise<AiCallRe
   // detector compares against), so the source-run invocation fallback is
   // skipped. Only the `mock` provider and only while an entry remains — every
   // other provider, and mock without a staged entry, replays deterministically.
-  const mockProgramPending = req.provider === 'mock' && hasPendingMockProgram(scope.nodeId);
+  // ADR 0967 — a fixture node's run-scoped script is that run's own input, not
+  // an injection, so it does not hold the replay off the recorded invocation.
+  const mockProgramPending = req.provider === 'mock' && hasPendingDivergenceProgram(scope.nodeId, scope.runId);
   if (!cached && scope.replayInvocationsFromRunId && !mockProgramPending) {
     // ADR 0549 P3 — `runId` is IN the §B preimage, so the source run's record
     // sits under a DIFFERENT identity. Recompute it rather than swapping the
@@ -823,13 +830,16 @@ async function callAI(scope: AdapterScope, req: AiCallRequest): Promise<AiCallRe
       }
     : undefined;
   let result: Awaited<ReturnType<typeof dispatchPlain>>;
+  const meter = newAttemptMeter();
   try {
     result = await wrapInSpan(scope, req.provider, req.model, async () => {
       if (req.responseSchema) {
-        return dispatchStructured(scope, req, credentialCleartext);
+        return dispatchStructured(scope, req, credentialCleartext, meter, retryPolicy);
       }
-      return dispatchPlain(scope, req, credentialCleartext, streamDelta);
+      return dispatchPlain(scope, req, credentialCleartext, streamDelta, meter);
     });
+    // RFC 0248 §A — recorded with the result, so a replay re-reads it (§A.5).
+    result = { ...result, attempts: attemptsRecord(meter, req.responseSchema !== undefined) };
   } catch (err) {
     // ADR 0326 P3a + GC-CHAT-3 — record the FAILED invocation at this
     // attempt's cache key so a replay/:fork reproduces the failure (attempt
@@ -1991,6 +2001,59 @@ function resolveCredential(
 
 // ── Dispatch ──────────────────────────────────────────────────────
 
+/** RFC 0248 §A — one call's provider attempts, counted where each request is
+ *  sent (`dispatchPlain`), so every loop and fallback is counted the same way. */
+interface AttemptMeter {
+  count: number;
+  outputTokens: number;
+  reportedAny: boolean;
+  usageComplete: boolean;
+  lastStructuredMode?: string;
+}
+
+function newAttemptMeter(): AttemptMeter {
+  return { count: 0, outputTokens: 0, reportedAny: false, usageComplete: true };
+}
+
+/** RFC 0248 §A.3 — `native` when the provider enforced the schema itself
+ *  (a JSON-schema response format or a forced tool call); `prompt` when the
+ *  schema rode the prompt, JSON-mode-only (`mime`, `json_object`) included. */
+function structuredOutputOf(mode: string | undefined): 'native' | 'prompt' {
+  return mode === 'schema' || mode === 'json_schema' || mode === 'tool' ? 'native' : 'prompt';
+}
+
+function attemptsRecord(meter: AttemptMeter, structured: boolean): NonNullable<AiCallResult['attempts']> {
+  return {
+    count: meter.count,
+    ...(meter.reportedAny ? { outputTokens: meter.outputTokens } : {}),
+    usageComplete: meter.usageComplete,
+    ...(structured ? { structuredOutput: structuredOutputOf(meter.lastStructuredMode) } : {}),
+  };
+}
+
+/** RFC 0248 §B — the caller's retry policy, validated. It only narrows. */
+interface RetryPolicy { maxAttempts: number; growMaxTokens: boolean }
+
+export function parseRetryPolicy(raw: unknown): RetryPolicy {
+  const none: RetryPolicy = { maxAttempts: Number.POSITIVE_INFINITY, growMaxTokens: true };
+  if (raw === undefined) return none;
+  const refuse = (field: string, why: string): never => {
+    throw new AiProviderError('validation_error', `ctx.callAI ${field} ${why} (RFC 0248 §B.5).`, { field });
+  };
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) refuse('retry', 'must be an object');
+  const { maxAttempts, growMaxTokens, ...rest } = raw as Record<string, unknown>;
+  const unknownKey = Object.keys(rest)[0];
+  if (unknownKey !== undefined) refuse(`retry.${unknownKey}`, 'is not a retry policy field');
+  if (maxAttempts !== undefined && (typeof maxAttempts !== 'number' || !Number.isInteger(maxAttempts) || maxAttempts < 1 || maxAttempts > 16)) {
+    refuse('retry.maxAttempts', 'must be an integer from 1 to 16');
+  }
+  if (growMaxTokens !== undefined && typeof growMaxTokens !== 'boolean') refuse('retry.growMaxTokens', 'must be a boolean');
+  return {
+    maxAttempts: typeof maxAttempts === 'number' ? maxAttempts : Number.POSITIVE_INFINITY,
+    growMaxTokens: growMaxTokens !== false,
+  };
+}
+
 async function dispatchPlain(
   scope: AdapterScope,
   req: AiCallRequest,
@@ -1999,9 +2062,12 @@ async function dispatchPlain(
   // ONLY from callAI's plain-text branch; the structured/NL-to-format callers
   // omit it (streaming a JSON body mid-parse-retry is noise, not progress).
   onDelta?: (delta: string) => Promise<void>,
+  meter?: AttemptMeter,
 ): Promise<AiCallResult> {
   const result = await mapDispatchErrors(req.provider, () =>
     runWithTimeout(scope, async (signal) => {
+      // RFC 0248 §A.1 — an attempt is a request sent to the provider.
+      if (meter) meter.count += 1;
       const raw = await dispatchChat({
         provider: req.provider as ProviderId,
         model: req.model,
@@ -2018,9 +2084,14 @@ async function dispatchPlain(
         // RFC 0032/0033 — the conformance-only `mock` provider reads
         // its pre-programmed response queue keyed by `nodeId`. Real
         // providers ignore this extension field. See `dispatchMock.ts`.
-        ...(req.provider === 'mock' ? { nodeId: scope.nodeId } : {}),
-      } as Parameters<typeof dispatchChat>[0]);
+        ...(req.provider === 'mock' ? { nodeId: scope.nodeId, runId: scope.runId } : {}),
+      } as Parameters<typeof dispatchChat>[0]).catch((err: unknown) => {
+        // RFC 0248 §A.2 — a request that failed reported no usage.
+        if (meter) meter.usageComplete = false;
+        throw err;
+      });
       if (raw.structuredMode) log.debug('structured_output_mode', { provider: req.provider, model: req.model, mode: raw.structuredMode });
+      if (meter) meter.lastStructuredMode = raw.structuredMode;
       return {
         content: raw.completion,
         usage: {
@@ -2041,6 +2112,9 @@ async function dispatchPlain(
   // up to STRUCTURED_OUTPUT_RETRIES + 1 times — emits one event per
   // attempt rather than collapsing N invocations into a single event.
   await emitProviderUsage(scope, req.provider, req.model, result.usage?.inputTokens, result.usage?.outputTokens, (result.usage?.cachedReadTokens ?? 0) > 0, result.usage?.cachedReadTokens, undefined);
+  if (meter) {
+    if (typeof result.usage?.outputTokens === 'number') { meter.outputTokens += result.usage.outputTokens; meter.reportedAny = true; } else meter.usageComplete = false;
+  }
   return result;
 }
 
@@ -2050,6 +2124,8 @@ async function dispatchStructured(
   scope: AdapterScope,
   req: AiCallRequest,
   apiKey: string,
+  meter: AttemptMeter = newAttemptMeter(),
+  policy: RetryPolicy = parseRetryPolicy(undefined),
 ): Promise<AiCallResult> {
   // Append a JSON-only instruction to the system prompt so the model
   // emits parseable output. Real production hosts use provider-native
@@ -2080,7 +2156,7 @@ async function dispatchStructured(
   // no truncation-budget-doubling). Operator circuit-breaker.
   const reliabilityCfg = getEnvelopeReliabilityConfig();
   if (!reliabilityCfg.endToEndEnabled) {
-    return dispatchStructuredLegacy(scope, req, apiKey, augmentedSystem);
+    return dispatchStructuredLegacy(scope, req, apiKey, augmentedSystem, meter, policy);
   }
 
   // Per-attempt state. `lastFailure` tracks the prior attempt's classified
@@ -2113,7 +2189,9 @@ async function dispatchStructured(
   // request makes a model that slipped once slip the same way again.
   let correction: string | null = null;
 
-  for (let attempt = 1; attempt <= reliabilityCfg.maxRetryAttempts; attempt++) {
+  // RFC 0248 §B.1 — the caller's cap narrows the host's own budget.
+  const maxAttempts = Math.min(reliabilityCfg.maxRetryAttempts, policy.maxAttempts);
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     // Emit envelope.retry.attempted BEFORE the second-and-subsequent calls
     // per RFC 0032 §B.1 normative text. The first attempt does NOT emit.
     if (attempt > 1 && lastFailureReason !== null) {
@@ -2140,7 +2218,7 @@ async function dispatchStructured(
 
     let raw: AiCallResult;
     try {
-      raw = await dispatchPlain(scope, enrichedReq, apiKey);
+      raw = await dispatchPlain(scope, enrichedReq, apiKey, undefined, meter);
     } catch (err) {
       // ADR 0911 (Book AI P19) — a provider refusal is not a parse error. A
       // credential/model/request rejection cannot succeed on retry, so it is
@@ -2155,7 +2233,7 @@ async function dispatchStructured(
       if (refusal === 'transient') {
         lastFailureReason = PROVIDER_ERROR_RETRY_REASON;
         lastFailureMessage = describeProviderRefusal(err, (t) => stripSecretsFromPersisted(sanitizeFreeText(t)));
-        if (attempt < reliabilityCfg.maxRetryAttempts) await sleepMs(providerRetryBackoffMs(attempt));
+        if (attempt < maxAttempts) await sleepMs(providerRetryBackoffMs(attempt));
         continue;
       }
       lastFailureReason = 'parse-error';
@@ -2235,8 +2313,10 @@ async function dispatchStructured(
       lastError = new Error(`response truncated at finish_reason=${raw.finishReason}`);
       lastFailureReason = 'truncation';
       lastFailureMessage = `finish_reason=${raw.finishReason}; tokens=${raw.usage?.outputTokens ?? 'unknown'}`;
-      const newBudget =
-        currentMaxTokens !== undefined
+      // RFC 0248 §B.2 — `growMaxTokens: false` keeps the request's budget.
+      const newBudget = !policy.growMaxTokens
+        ? currentMaxTokens
+        : currentMaxTokens !== undefined
           ? Math.min(currentMaxTokens * reliabilityCfg.truncationBudgetMultiplier, 64_000)
           : 4_000;
       currentMaxTokens = newBudget;
@@ -2315,6 +2395,8 @@ async function dispatchStructured(
     // refusing provider.
     && lastFailureReason !== PROVIDER_ERROR_RETRY_REASON
     && isNlResponse(lastResponseText)
+    // RFC 0248 §B.1 — the fallback is a provider request, so it fits in the cap.
+    && meter.count < policy.maxAttempts
   ) {
     const originalEnvelopeType = inferEnvelopeType(req.responseSchema) ?? 'structured-output';
     await scope.emit?.('envelope.nlToFormat.engaged',
@@ -2328,7 +2410,7 @@ async function dispatchStructured(
       .filter((s): s is string => Boolean(s))
       .join('\n\n');
     try {
-      const raw = await dispatchPlain(scope, { ...req, systemPrompt: coercedSystem }, apiKey);
+      const raw = await dispatchPlain(scope, { ...req, systemPrompt: coercedSystem }, apiKey, undefined, meter);
       const text = raw.content ?? '';
       const parsed = tryLenientParse(text);
       if (parsed !== null && validateAgainstSchema(parsed.data, req.responseSchema)) {
@@ -2347,7 +2429,7 @@ async function dispatchStructured(
   // and doesn't reach here.
   const finalReason: RetryReason = lastFailureReason ?? 'unknown';
   await scope.emit?.('envelope.retry.exhausted',
-    buildRetryExhaustedPayload(scope.nodeId, reliabilityCfg.maxRetryAttempts, finalReason, lastFailureMessage),
+    buildRetryExhaustedPayload(scope.nodeId, maxAttempts, finalReason, lastFailureMessage),
   ).catch((err) => {
     log.warn('envelope.retry.exhausted emit failed', { err: err instanceof Error ? err.message : String(err) });
   });
@@ -2366,8 +2448,8 @@ async function dispatchStructured(
       : 'envelope_invalid';
   const errorMessage =
     finalReason === 'truncation'
-      ? `Provider truncated the structured-output emission across ${reliabilityCfg.maxRetryAttempts} attempts; truncation-retry budget exhausted (RFC 0033 §B + §F).`
-      : `Provider did not emit valid JSON matching the response schema after ${reliabilityCfg.maxRetryAttempts} attempts.`;
+      ? `Provider truncated the structured-output emission across ${maxAttempts} attempts; truncation-retry budget exhausted (RFC 0033 §B + §F).`
+      : `Provider did not emit valid JSON matching the response schema after ${maxAttempts} attempts.`;
   throw new AiProviderError(errorCode, errorMessage, {
     lastError: lastError instanceof Error ? lastError.message : String(lastError),
     finalReason,
@@ -2387,19 +2469,23 @@ async function dispatchStructuredLegacy(
   req: AiCallRequest,
   apiKey: string,
   augmentedSystem: string,
+  meter: AttemptMeter = newAttemptMeter(),
+  policy: RetryPolicy = parseRetryPolicy(undefined),
 ): Promise<AiCallResult> {
   const enrichedReq: AiCallRequest = { ...req, systemPrompt: augmentedSystem };
   let lastError: unknown = null;
-  for (let attempt = 0; attempt <= STRUCTURED_OUTPUT_RETRIES; attempt++) {
+  // RFC 0248 §B.1 — the caller's cap narrows the legacy budget too.
+  const lastAttempt = Math.min(STRUCTURED_OUTPUT_RETRIES + 1, policy.maxAttempts) - 1;
+  for (let attempt = 0; attempt <= lastAttempt; attempt++) {
     let raw: AiCallResult;
     try {
-      raw = await dispatchPlain(scope, enrichedReq, apiKey);
+      raw = await dispatchPlain(scope, enrichedReq, apiKey, undefined, meter);
     } catch (err) {
       // ADR 0911 — same refusal rules as the end-to-end loop.
       const refusal = classifyProviderRefusal(err);
       if (refusal === 'fatal') throw err;
       lastError = err;
-      if (refusal === 'transient' && attempt < STRUCTURED_OUTPUT_RETRIES) await sleepMs(providerRetryBackoffMs(attempt + 1));
+      if (refusal === 'transient' && attempt < lastAttempt) await sleepMs(providerRetryBackoffMs(attempt + 1));
       continue;
     }
     const text = raw.content ?? '';
@@ -2416,7 +2502,7 @@ async function dispatchStructuredLegacy(
   if (classifyProviderRefusal(lastError) === 'transient' && lastError instanceof AiProviderError) throw lastError;
   throw new AiProviderError(
     'envelope_invalid',
-    `Provider did not emit valid JSON matching the response schema after ${STRUCTURED_OUTPUT_RETRIES + 1} attempts.`,
+    `Provider did not emit valid JSON matching the response schema after ${lastAttempt + 1} attempts.`,
     { lastError: lastError instanceof Error ? lastError.message : String(lastError) },
   );
 }

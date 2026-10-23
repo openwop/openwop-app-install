@@ -2,8 +2,15 @@
  * ADR 0077 Phase 2 — PII log masking.
  *
  * The logger masks the VALUES of PII-named fields (registry + heuristic), as a
- * correlation-preserving `pii_<hash>` token — fields only (the msg string is not
- * masked), composed AFTER the secret scrub, default ON. NOTE: masking is only as
+ * correlation-preserving `pii_<hash>` token, composed AFTER the secret scrub,
+ * default ON; since CLNP-4 an email in the `msg` string is masked too (the last
+ * case). The logger reads `OPENWOP_LOG_MASK_PII*` / the scrub flag ONCE at module
+ * load, so the logger cases assert the flags are not switched off in this
+ * process (a leaked `off` would otherwise read as a masking regression).
+ *
+ * Sabotages the cases are red against (probed, /grade-tests 8f w1): token
+ * length, the diamond `seen.delete`, the cycle guard, the heuristic flag, the
+ * logger's field mask, its msg mask, and its secret scrub. NOTE: masking is only as
  * complete as the loaded module graph (the registry is populated by feature
  * services' declarePiiFields side-effects), so this test imports them explicitly.
  */
@@ -90,10 +97,18 @@ describe('ADR 0077 §2 — logger integration', () => {
   });
 
   it('composes with the secret scrub — neither plaintext secret nor plaintext PII survives', () => {
+    for (const k of ['OPENWOP_LOG_MASK_PII', 'OPENWOP_LOG_MASK_PII_VALUES', 'OPENWOP_LOG_SCRUB']) expect(process.env[k]).not.toBe('off');
     const log = createLogger('test.pii');
-    const out = capture('stdout', () => log.info('weird', { email: 'sk-abcdEFGH1234567890ijkl' }));
-    expect(out).not.toContain('sk-abcdEFGH1234567890ijkl'); // secret scrubbed
-    expect(out).toMatch(/pii_/); // then PII-masked (email key)
+    // The secret sits under a NON-PII key, so only the scrub can remove it (under
+    // `email` the PII mask would replace it whole and hide a dropped scrub).
+    const out = capture('stdout', () => log.info('weird', { email: 'jane@acme.com', note: 'token sk-abcdEFGH1234567890ijkl here' }));
+    expect(out).not.toContain('sk-abcdEFGH1234567890ijkl');
+    const line = JSON.parse(out.trim().split('\n').pop()!) as { note: string; email: string };
+    // substring redaction: the secret is gone, the surrounding text is kept
+    expect(line.note).not.toContain('sk-abcdEFGH1234567890ijkl');
+    expect(line.note.startsWith('token ')).toBe(true);
+    expect(line.note.endsWith(' here')).toBe(true);
+    expect(line.email).toMatch(/^pii_[0-9a-f]{10}$/); // ...and the PII key still masked
   });
 
   it('masks an email in the msg string too — the same address cannot be masked in fields and verbatim in msg (CLNP-4)', () => {

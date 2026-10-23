@@ -179,6 +179,10 @@ function v2AiProvidersFamily(): Record<string, unknown> {
       // above (line 151 spreads the same call), so v2 says "is a self-hosted
       // class offered" and the identifiers stay discoverable.
       selfHosted: hostAdvertisedSelfHosted().length > 0,
+      // RFC 0248 (ADR 0966): every `ctx.callAI` result carries `attempts`, and
+      // the request's `retry` policy is honoured. Both are unconditional in
+      // `aiProvidersHost.ts`, so both flags are unconditionally true.
+      callAccounting: { attempts: true, retryPolicy: true },
     },
   };
 }

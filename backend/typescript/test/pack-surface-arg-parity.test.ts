@@ -74,6 +74,8 @@ const driftKey = (d: { kind?: string; pack: string; surfaceId: string; method: s
 
 describe('pack↔surface argument-key parity (ADR 0624 D2)', () => {
   const s = scan();
+  // Collection-time on purpose: `prior` is read here, so a missing fixture must
+  // fail the file before any case runs (it would throw ENOENT anyway).
   expect(existsSync(FIXTURE), `fixture missing: ${FIXTURE}`).toBe(true);
   const prior = JSON.parse(readFileSync(FIXTURE, 'utf8')) as Fixture;
   const count = (cls: CallClass) => s.calls.filter((c) => c.cls === cls).length;
@@ -95,10 +97,12 @@ describe('pack↔surface argument-key parity (ADR 0624 D2)', () => {
   const fixture = JSON.parse(readFileSync(FIXTURE, 'utf8')) as Fixture;
 
   it('anti-vacuity: the scan found a real corpus on BOTH sides, and the profiles pair is inside the asserted population', () => {
-    expect(s.surfaces).toBeGreaterThanOrEqual(40);
-    expect(s.methods.length).toBeGreaterThanOrEqual(150);
-    expect(observed.callSites.literalNoSpread).toBeGreaterThanOrEqual(100);
-    expect(observed.assertedPairs).toBeGreaterThanOrEqual(50);
+    // Floors = the measured populations at 7321e3612 (2026-10-18). The exact
+    // denominators are pinned by the next case; these name the shrink here.
+    expect(s.surfaces).toBeGreaterThanOrEqual(69);
+    expect(s.methods.length).toBeGreaterThanOrEqual(379);
+    expect(observed.callSites.literalNoSpread).toBeGreaterThanOrEqual(293);
+    expect(observed.assertedPairs).toBeGreaterThanOrEqual(284);
     const get = s.calls.find((c) => c.pack === 'feature.profiles.nodes' && c.method === 'getProfile');
     expect(get, 'feature.profiles.nodes.get → getProfile call site not found — the scan cannot see the UPWF-1 site').toBeTruthy();
     expect(get!.cls).toBe('literalNoSpread');

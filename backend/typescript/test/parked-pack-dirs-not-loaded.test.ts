@@ -12,10 +12,14 @@
  * pack itself was fixed.
  *
  * The per-worker `OPENWOP_PACK_DIR` (setup/isolatePackDir.ts) makes writing
- * into the pack dir safe here.
+ * into the pack dir safe here. That dir is shared by every later file in the
+ * same WORKER, so both fixture dirs are removed in `afterAll`.
+ *
+ * Witnessed: dropping the parked-name filter from the agent scan (probe
+ * 8fw1g1-pk-scan) turns the LIVE-manifest case red.
  */
-import { describe, it, expect, beforeAll } from 'vitest';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { isParkedPackDirName } from '../src/bootstrap/mountLocalPacks.js';
 import { loadAllLocalAgents } from '../src/bootstrap/agentPackResolver.js';
@@ -55,12 +59,18 @@ describe('parked pack dirs are recoverable, never loadable', () => {
   });
 
   describe('a live pack dir wins over its parked sibling', () => {
+    const created: string[] = [];
+    afterAll(() => {
+      for (const dir of created.splice(0)) rmSync(dir, { recursive: true, force: true });
+    });
+
     beforeAll(() => {
       const packDir = resolveDefaultPackDir();
       const live = join(packDir, PACK_NAME);
       // The parked name sorts AFTER the live dir — the order that made the
       // stale manifest overwrite the fresh one before the scanners filtered.
       const parked = join(packDir, `${PACK_NAME}.registry-0.9.0`);
+      created.push(live, parked);
       mkdirSync(live, { recursive: true });
       mkdirSync(parked, { recursive: true });
       writeFileSync(join(live, 'pack.json'), manifest('1.0.0', true));

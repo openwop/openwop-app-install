@@ -11,6 +11,13 @@
  * unconditionally and `OPENWOP_PROPOSALS_ENABLED` gates only the capability
  * advertisement (`discovery.ts:1872`). The `routes.ts` header claimed production
  * 404s these; it does not, and this ADR corrects it.
+ *
+ * Every refusal is asserted by its exact code + message, so a 403 from another
+ * gate cannot stand in; every allowed mutation is read back from the store.
+ * Sabotages each case is red against (probed, /grade-tests 8f w1): the write
+ * scope weakened to read, the reject / archive gate call removed, the
+ * not-proposer check removed, the proposer exit removed, the admin override
+ * removed.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -27,20 +34,31 @@ let ORIGIN = '';
 let WS = '';
 let n = 0;
 
-interface C { userId: string; get: (p: string) => Promise<any>; patch: (p: string, b?: unknown) => Promise<any>; del: (p: string) => Promise<any>; post: (p: string, b?: unknown) => Promise<any> }
+interface Res<T> { status: number; body: T }
+interface ErrBody { error: string; message: string; details?: Record<string, unknown> }
+interface C {
+  userId: string;
+  get: <T = ErrBody>(p: string) => Promise<Res<T>>;
+  patch: <T = ErrBody>(p: string, b?: unknown) => Promise<Res<T>>;
+  del: <T = ErrBody>(p: string) => Promise<Res<T>>;
+  post: <T = ErrBody>(p: string, b?: unknown) => Promise<Res<T>>;
+}
+/** The exact `assertCanMutate` refusals. */
+const NO_WRITE = { error: 'forbidden_scope', message: 'Changing a proposal requires the `workspace:write` scope.', details: { requiredScope: 'workspace:write' } };
+const NOT_PROPOSER = { error: 'forbidden', message: 'Only the proposer may change this proposal.', details: { reason: 'not-proposer' } };
 
 async function loginTo(tenantId: string, who: string): Promise<C> {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<{ status: number; body: any }> => {
+  const call = async <T>(method: string, path: string, body?: unknown): Promise<Res<T>> => {
     const res = await fetch(`${ORIGIN}${path}`, {
       method,
       headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) },
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) };
+    return { status: res.status, body: (res.status === 204 ? undefined : await res.json().catch(() => undefined)) as T };
   };
-  const r = await call('POST', '/host/openwop-app/test/login', { email: `${who}-${Date.now()}-${n++}@acme.test`, tenantId });
+  const r = await call<{ user: { userId: string } }>('POST', '/host/openwop-app/test/login', { email: `${who}-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return {
     userId: r.body.user.userId,
@@ -86,8 +104,13 @@ describe('ADR 0736 D1 — a caller without workspace:write cannot mutate', () =>
 
     const revise = await viewer.patch(`${P}/${id}`, { title: 'HIJACKED', artifact: { template: 'SWAPPED' } });
     expect(revise.status, `a viewer revised a proposal: ${JSON.stringify(revise.body)}`).toBe(403);
-    expect((await viewer.post(`${P}/${id}/reject`)).status).toBe(403);
-    expect((await viewer.del(`${P}/${id}`)).status).toBe(403);
+    expect(revise.body).toMatchObject(NO_WRITE);
+    const reject = await viewer.post(`${P}/${id}/reject`);
+    expect(reject.status).toBe(403);
+    expect(reject.body).toMatchObject(NO_WRITE);
+    const archive = await viewer.del(`${P}/${id}`);
+    expect(archive.status).toBe(403);
+    expect(archive.body).toMatchObject(NO_WRITE);
 
     const row = await getProposal(WS, id);
     expect(row?.artifact?.template, 'the refused revise must not have written').toBe('ORIGINAL');
@@ -105,7 +128,7 @@ describe('ADR 0736 D2 — a writer cannot mutate SOMEONE ELSE\'S proposal', () =
 
     const r = await other.patch(`${P}/${id}`, { artifact: { template: 'SWAPPED' } });
     expect(r.status, `another writer swapped the artifact: ${JSON.stringify(r.body)}`).toBe(403);
-    expect(JSON.stringify(r.body)).toContain('not-proposer');
+    expect(r.body).toMatchObject(NOT_PROPOSER);
     expect((await getProposal(WS, id))?.artifact?.template).toBe('ORIGINAL');
   });
 
@@ -126,6 +149,7 @@ describe('ADR 0736 D3 — the two deliberate exits', () => {
     const id = await seed(); // no principal — the demo-seeder shape
     const r = await writer.patch(`${P}/${id}`, { title: 'Adopted' });
     expect(r.status, `an ownerless proposal was stranded: ${JSON.stringify(r.body)}`).toBe(200);
+    expect((await getProposal(WS, id))?.title).toBe('Adopted'); // the write landed
   });
 
   it('host:members:manage overrides ownership (an admin must be able to archive a departed member\'s row)', async () => {
@@ -136,6 +160,7 @@ describe('ADR 0736 D3 — the two deliberate exits', () => {
     const id = await seed(departed.userId);
     const r = await admin.del(`${P}/${id}`);
     expect(r.status, `an admin could not archive a departed member's row: ${JSON.stringify(r.body)}`).toBe(200);
+    expect((await getProposal(WS, id))?.state).toBe('archived'); // the archive landed
   });
 });
 
@@ -145,7 +170,7 @@ describe('ADR 0736 D4 — reads stay open (the omission is a decision)', () => {
     const viewer = await loginTo(WS, 'reader');
     await createMember({ orgId: WS, tenantId: WS, displayName: 'R', subject: viewer.userId, roles: ['viewer'] });
     expect((await viewer.get(P)).status).toBe(200);
-    const one = await viewer.get(`${P}/${id}`);
+    const one = await viewer.get<Proposal>(`${P}/${id}`);
     expect(one.status).toBe(200);
     expect(one.body?.id).toBe(id);
   });
@@ -153,6 +178,8 @@ describe('ADR 0736 D4 — reads stay open (the omission is a decision)', () => {
   it('an unknown id is 404 for a writer — the gate did not turn a miss into a 403', async () => {
     const writer = await loginTo(WS, 'w404');
     await createMember({ orgId: WS, tenantId: WS, displayName: 'W4', subject: writer.userId, roles: ['editor'] });
-    expect((await writer.patch(`${P}/wg:no-such-row`, { title: 'x' })).status).toBe(404);
+    const r = await writer.patch(`${P}/wg:no-such-row`, { title: 'x' });
+    expect(r.status).toBe(404);
+    expect(r.body.error).toBe('not_found');
   });
 });

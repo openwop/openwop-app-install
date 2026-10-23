@@ -4,6 +4,16 @@
  * highest-priority (recency) entries are kept within budget, over-budget entries
  * are OMITTED WHOLE (never truncated), and ≥1 is always kept. Advert declares
  * `memory.injectionBudget: { supported: true, tokenCounter: "chars" }`.
+ *
+ * Round 2 (8fw1g4): the fixture used three identical 100-char `x` rows, which cannot
+ * tell newest from oldest — reversing the recency sort stayed green (probe
+ * mb-recency, vacuous). Rows now differ in letter AND size (oldest `a`×90, `b`×110,
+ * newest `c`×120): a 250 budget keeps exactly [c, b] newest-first; the oldest-first
+ * answer would be [a, b].
+ *
+ * Sabotages that red this file: the hard (`keepAtLeastOne: false`) memory policy,
+ * the recency sort direction, the soft default for other callers, the advertised
+ * `tokenCounter`, and the route not forwarding `tokenBudget`.
  */
 import { describe, expect, it, beforeAll, afterAll } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -25,18 +35,23 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-async function jsonGet<T = any>(path: string, extra: Record<string, string> = {}): Promise<{ status: number; body: T }> {
+interface MemoryListBody { entries: Array<{ content: string }> }
+interface DiscoveryBody { memory?: { injectionBudget?: { tokenCounter?: string } } }
+
+async function jsonGet<T>(path: string, extra: Record<string, string> = {}): Promise<{ status: number; body: T }> {
   const res = await fetch(`${BASE}${path}`, { headers: { authorization: `Bearer ${TOKEN}`, ...extra } });
   return { status: res.status, body: (await res.json()) as T };
 }
 
-/** Seed N recency-ordered rows of a fixed content size into the demo ref. */
+/** Seed N recency-ordered rows into the demo ref: row i is `letter(i)` × sizes[i]
+ *  (`a`, `b`, `c`, …), oldest first, so every row is distinguishable. */
+const letter = (i: number): string => String.fromCharCode(97 + i);
 async function seed(sizes: number[]): Promise<void> {
   await clearMemoryScope(TENANT, MEMORY_DEMO_REF);
   // Oldest first so the LAST seeded is newest; explicit createdAt pins order.
   for (const [i, size] of sizes.entries()) {
     await writeMemoryEntry(TENANT, MEMORY_DEMO_REF, {
-      content: 'x'.repeat(size),
+      content: letter(i).repeat(size),
       tags: ['rfc0113'],
       createdAt: new Date(Date.UTC(2026, 0, 1, 0, 0, i)).toISOString(),
     });
@@ -47,7 +62,7 @@ describe('RFC 0113 — injectionBudget advert', () => {
   it('declares memory.injectionBudget with an honest tokenCounter unit', async () => {
     // ADR 0812 P3c-0 — v2 spelling: the `memory` record sits at the closed v2 root and the
     // facet's PRESENCE is the claim (no `supported` flag).
-    const d = (await jsonGet('/.well-known/openwop', { 'OpenWOP-Version': '2' })).body as { memory?: { injectionBudget?: { tokenCounter?: string } } };
+    const d = (await jsonGet<DiscoveryBody>('/.well-known/openwop', { 'OpenWOP-Version': '2' })).body;
     const ib = d.memory?.injectionBudget;
     expect(ib, 'memory.injectionBudget is advertised').toBeDefined();
     expect(ib?.tokenCounter).toBe('chars'); // this host counts chars, not BPE tokens
@@ -56,13 +71,12 @@ describe('RFC 0113 — injectionBudget advert', () => {
 
 describe('RFC 0113 — listMemoryEntries tokenBudget (unit)', () => {
   it('keeps the newest entries within budget and OMITS the over-budget one whole', async () => {
-    await seed([100, 100, 100]); // 3 rows, newest last
+    await seed([90, 110, 120]); // a×90 (oldest), b×110, c×120 (newest)
     const all = await listMemoryEntries(TENANT, MEMORY_DEMO_REF);
-    expect(all.length).toBe(3); // recency: newest first
-    // budget 250 → newest two (100+100=200) fit; the third (would be 300) is dropped whole.
+    expect(all.map((r) => r.content)).toEqual(['c'.repeat(120), 'b'.repeat(110), 'a'.repeat(90)]); // recency: newest first
+    // budget 250 → newest two (120+110=230) fit; the oldest (would be 320) is dropped whole.
     const budgeted = await listMemoryEntries(TENANT, MEMORY_DEMO_REF, { tokenBudget: 250 });
-    expect(budgeted.length).toBe(2);
-    expect(budgeted.every((r) => r.content.length === 100)).toBe(true); // not truncated
+    expect(budgeted.map((r) => r.content)).toEqual(['c'.repeat(120), 'b'.repeat(110)]); // whole, newest first
   });
 
   /**
@@ -112,21 +126,22 @@ describe('RFC 0113 — listMemoryEntries tokenBudget (unit)', () => {
 
 describe('RFC 0113 — GET /host/openwop-app/memory?tokenBudget', () => {
   it('applies the budget over the wire (recency-ranked, whole entries)', async () => {
-    await seed([100, 100, 100]);
-    const full = await jsonGet('/host/openwop-app/memory');
-    expect((full.body.entries as unknown[]).length).toBe(3);
-    const budgeted = await jsonGet('/host/openwop-app/memory?tokenBudget=250');
+    await seed([90, 110, 120]);
+    const full = await jsonGet<MemoryListBody>('/host/openwop-app/memory');
+    expect(full.body.entries).toHaveLength(3);
+    const budgeted = await jsonGet<MemoryListBody>('/host/openwop-app/memory?tokenBudget=250');
     expect(budgeted.status).toBe(200);
-    expect((budgeted.body.entries as Array<{ content: string }>).length).toBe(2);
-    expect((budgeted.body.entries as Array<{ content: string }>).every((e) => e.content.length === 100)).toBe(true);
+    expect(budgeted.body.entries.map((e) => e.content)).toEqual(['c'.repeat(120), 'b'.repeat(110)]);
   });
 
   it('rank=recency is accepted; an unknown rank falls back to recency (graceful)', async () => {
-    await seed([10, 20]);
-    const r1 = await jsonGet('/host/openwop-app/memory?rank=recency');
+    await seed([10, 20]); // a×10 (older), b×20 (newer)
+    const newestFirst = ['b'.repeat(20), 'a'.repeat(10)];
+    const r1 = await jsonGet<MemoryListBody>('/host/openwop-app/memory?rank=recency');
     expect(r1.status).toBe(200);
-    const r2 = await jsonGet('/host/openwop-app/memory?rank=relevance'); // not offered → recency
+    expect(r1.body.entries.map((e) => e.content)).toEqual(newestFirst);
+    const r2 = await jsonGet<MemoryListBody>('/host/openwop-app/memory?rank=relevance'); // not offered → recency
     expect(r2.status).toBe(200);
-    expect((r2.body.entries as unknown[]).length).toBe(2);
+    expect(r2.body.entries.map((e) => e.content)).toEqual(newestFirst);
   });
 });

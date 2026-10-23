@@ -9,9 +9,17 @@
  *     one says nothing.
  *  4. "Make a workflow" is described by the share note: accepting shares the
  *     step pattern with the workspace.
+ *
+ * Sabotage-witnessed (wave 55/56 probes, each red here): the pause write
+ * inverted; Resume's reload dropped; Resume reloading BEFORE its PUT; a declined
+ * confirm proceeding anyway; the paused card gated on rows; the status filter
+ * kept while paused; the truncation notice dropped or always shown; a swallowed
+ * settings-read failure; the erased copy dropped; the 403 mapping moved to 401;
+ * dismiss focus landing on the PREVIOUS row; the route tier moved to admin; the
+ * share-note description dropped.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, cleanup, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, cleanup, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 
 type Client = typeof import('../workGraphClient.js');
@@ -25,9 +33,10 @@ vi.mock('../workGraphClient.js', async (importOriginal) => {
   const orig = await importOriginal<Record<string, unknown>>();
   return { ...orig, ...api };
 });
-const confirmMock = vi.hoisted(() => vi.fn<(o: { title: string; body?: unknown }) => Promise<boolean>>());
+const confirmMock = vi.hoisted(() => vi.fn<typeof import('../../../ui/confirm.js').confirm>());
 vi.mock('../../../ui/confirm.js', () => ({ confirm: confirmMock }));
-const toastMock = vi.hoisted(() => ({ error: vi.fn(), success: vi.fn() }));
+type Toast = typeof import('../../../ui/toast.js').toast;
+const toastMock = vi.hoisted(() => ({ error: vi.fn<Toast['error']>(), success: vi.fn<Toast['success']>() }));
 vi.mock('../../../ui/toast.js', async (importOriginal) => {
   const orig = await importOriginal<typeof import('../../../ui/toast.js')>();
   return { ...orig, toast: { ...orig.toast, ...toastMock } };
@@ -65,9 +74,13 @@ describe('ADR 0930 — personal work patterns', () => {
     expect(screen.queryByRole('button', { name: 'Scan now' })).toBeNull();
     api.listSuggestions.mockResolvedValue([SUGGESTION]);
     api.getWorkGraphSettings.mockResolvedValue({ paused: false }); // what the server says after the PUT
-    fireEvent.click(screen.getAllByRole('button', { name: 'Resume pattern detection' })[0]!);
+    fireEvent.click(screen.getByRole('button', { name: 'Resume pattern detection' }));
     await waitFor(() => expect(api.setWorkGraphPaused).toHaveBeenCalledWith('o1', false));
     expect(await screen.findByText(/Weekly digest/)).toBeTruthy();
+    // "writes BEFORE reloading": the second list read (the reload) follows the PUT.
+    // A reload fired before the PUT would read the still-paused server.
+    expect(api.listSuggestions).toHaveBeenCalledTimes(2);
+    expect(api.setWorkGraphPaused.mock.invocationCallOrder[0]!).toBeLessThan(api.listSuggestions.mock.invocationCallOrder[1]!);
   });
 
   it('pausing writes paused:true and clears the patterns on screen', async () => {
@@ -97,7 +110,9 @@ describe('ADR 0930 — personal work patterns', () => {
     api.refreshSuggestions.mockResolvedValue({ suggestions: [SUGGESTION], paused: false, scanned: 12, truncated: false });
     view();
     fireEvent.click(await screen.findByRole('button', { name: 'Scan now' }));
-    await waitFor(() => expect(api.refreshSuggestions).toHaveBeenCalled());
+    // Positive settle signal: the scan's own success toast has fired, so the
+    // truncation state has already been written when the absence is read.
+    await waitFor(() => expect(toastMock.success).toHaveBeenCalledWith('Scanned your recent runs'));
     expect(screen.queryByText(/most recent runs/)).toBeNull();
   });
 
@@ -112,9 +127,14 @@ describe('ADR 0930 — personal work patterns', () => {
     confirmMock.mockResolvedValue(false);
     view();
     fireEvent.click(await screen.findByRole('button', { name: 'Pause pattern detection' }));
-    await waitFor(() => expect(confirmMock).toHaveBeenCalled());
+    await waitFor(() => expect(confirmMock).toHaveBeenCalledTimes(1));
+    // Settle: let the awaited `false` resolve and any continuation run before
+    // reading the absences.
+    await act(async () => { for (let i = 0; i < 5; i += 1) await Promise.resolve(); });
     expect(api.setWorkGraphPaused).not.toHaveBeenCalled();
     expect(screen.getByText(/Weekly digest/)).toBeTruthy();
+    const pause = screen.getByRole('button', { name: 'Pause pattern detection' });
+    expect(pause.hasAttribute('disabled')).toBe(false);
   });
 
   it('AWG2UX-4: a failed settings read is a failed load, never "No patterns yet"', async () => {
@@ -141,11 +161,19 @@ describe('ADR 0930 — personal work patterns', () => {
   });
 
   it('AWG2UX-7: after a dismiss the keyboard lands on the next pattern', async () => {
-    api.listSuggestions.mockResolvedValue([SUGGESTION, { ...SUGGESTION, suggestionId: 'sg2', sampleGoal: 'Second pattern' }]);
+    // Three rows, dismissing the MIDDLE one: "next" (Third) and "previous"
+    // (Weekly digest) are different elements, so landing on the wrong one is red.
+    api.listSuggestions.mockResolvedValue([
+      SUGGESTION,
+      { ...SUGGESTION, suggestionId: 'sg2', sampleGoal: 'Second pattern' },
+      { ...SUGGESTION, suggestionId: 'sg3', sampleGoal: 'Third pattern' },
+    ]);
     api.dismissSuggestion.mockResolvedValue(undefined);
     view();
-    fireEvent.click(await screen.findByRole('button', { name: 'Dismiss: Weekly digest' }));
-    await waitFor(() => expect(document.activeElement?.getAttribute('aria-label')).toBe('Make a workflow: Second pattern'));
+    fireEvent.click(await screen.findByRole('button', { name: 'Dismiss: Second pattern' }));
+    await waitFor(() => expect(document.activeElement?.getAttribute('aria-label')).toBe('Make a workflow: Third pattern'));
+    expect(api.dismissSuggestion).toHaveBeenCalledWith('o1', 'sg2');
+    expect(screen.queryByText(/Second pattern/)).toBeNull();
   });
 
   it('AWG2UX-7: Scan says it is working while it reads', async () => {

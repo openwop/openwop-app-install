@@ -18,6 +18,20 @@
  *     `DurableCollection`, seeding the source tenant and asserting the fold moves
  *     both PK rows and index markers, dedups on collision, and leaves no
  *     `:${from}:` key behind.
+ *
+ * The full-boot index cases read the SOURCE index once BEFORE the fold. That is
+ * the production shape: the read runs `ensureTenantIndex`, which sets the
+ * fleet-wide backfill sentinel. Without it, the first post-fold indexed read
+ * backfilled the destination's markers from the (already re-keyed) content, so
+ * a fold that never moved a marker still passed mechanism A and B
+ * (8fw1g3-ra-idx-move went red only on the pure and collision cases in round
+ * 1). Mechanism B checks the PHYSICAL markers before any indexed read, because
+ * an indexed read self-heals a stale marker.
+ *
+ * Sabotage-witnessed (/grade-tests 8f wave 1, 8fw1g3-ra-*): the lookahead, the
+ * global flag, the lookbehind (ra-lookbehind-r2, the `xanon:` case), the marker
+ * projection drop, the content-only update, the collision dedup, and the marker
+ * move (ra-idx-move-r2).
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
@@ -57,6 +71,8 @@ describe('GEN-1b (pure) — rekeyTenantSegment', () => {
   it('does NOT rewrite a non-tenant segment that merely SHARES a prefix', () => {
     // `anon:sidABC2` is a different token → must not match `anon:sidABC`.
     expect(rekeyTenantSegment(`hostext:x:${FROM}2:y`, FROM, TO)).toBe(`hostext:x:${FROM}2:y`);
+    // …nor one that merely ENDS with it (`xanon:sidABC` is not `anon:sidABC`).
+    expect(rekeyTenantSegment(`hostext:x:x${FROM}:y`, FROM, TO)).toBe(`hostext:x:x${FROM}:y`);
   });
 
   it('leaves a subject-ref segment (user:<uid>) that is not the tenant untouched', () => {
@@ -144,9 +160,12 @@ describe('GEN-1b (full-boot) — reassignTenant moves tenant-embedded keys + mar
   it('mechanism A: a PK-embedded row is reachable under the destination via BOTH reads, no source key left', async () => {
     const own = ownership();
     await own.put({ id: `${FROM}:wf.x`, tenantId: FROM, wf: 'wf.x' });
+    // Production shape: the index is in use (backfill sentinel set) before the fold.
+    expect((await own.listForTenantIndexed(FROM)).map((r) => r.wf)).toEqual(['wf.x']);
 
     const res = await storage.reassignTenant(FROM, TO);
-    expect(res.hostExtKeysRekeyed).toBeGreaterThanOrEqual(1);
+    // Exactly the primary row and its tenant-index marker.
+    expect(res.hostExtKeysRekeyed).toBe(2);
 
     // Reachable via the prefix scan (listByPrefix) …
     expect((await own.listByPrefix(`${TO}:`)).map((r) => r.id)).toEqual([`${TO}:wf.x`]);
@@ -164,16 +183,19 @@ describe('GEN-1b (full-boot) — reassignTenant moves tenant-embedded keys + mar
   it('mechanism B: a random-id indexed row shows under the destination index after the fold', async () => {
     const d = docs();
     await d.put({ id: 'doc-1', tenantId: FROM, body: 'hi' });
+    // Production shape: the index is in use (backfill sentinel set) before the fold.
+    expect((await d.listForTenantIndexed(FROM)).map((r) => r.id)).toEqual(['doc-1']);
 
     await storage.reassignTenant(FROM, TO);
 
+    // Marker physically moved to the destination slice — read BEFORE any indexed
+    // read, which would self-heal a stale marker and hide a missed move.
+    expect(await storage.kvGet(`hostextidx:gen1b:doc:${TO}:doc-1`)).not.toBeNull();
+    expect(await storage.kvGet(`hostextidx:gen1b:doc:${FROM}:doc-1`)).toBeNull();
     // The primary key is unchanged (random id), but content + marker moved tenant.
     expect((await d.get('doc-1'))?.tenantId).toBe(TO);
     expect((await d.listForTenantIndexed(TO)).map((r) => r.id)).toEqual(['doc-1']);
     expect(await d.listForTenantIndexed(FROM)).toEqual([]);
-    // Marker physically moved to the destination slice.
-    expect(await storage.kvGet(`hostextidx:gen1b:doc:${TO}:doc-1`)).not.toBeNull();
-    expect(await storage.kvGet(`hostextidx:gen1b:doc:${FROM}:doc-1`)).toBeNull();
   });
 
   it('collision on a deterministic id dedups in the destination`s favour and counts the drop', async () => {

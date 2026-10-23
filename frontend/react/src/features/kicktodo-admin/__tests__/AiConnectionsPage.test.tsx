@@ -46,6 +46,8 @@ describe('AiConnectionsPage (KTD-4)', () => {
     await waitFor(() => expect(screen.getByText(en.connectionsError)).toBeTruthy());
     expect(screen.getByText(en.calendarUnknown)).toBeTruthy();
     expect(screen.queryByText(en.calendarAwaitingAdapter)).toBeNull();
+    // Only localized copy reaches the page — never the client's error text.
+    expect(document.body.textContent).not.toContain('calendar status failed');
     fireEvent.click(screen.getByRole('button', { name: en.retry }));
     await waitFor(() => expect(screen.getByText(en.calendarConnected)).toBeTruthy());
     expect(screen.queryByText(en.connectionsError)).toBeNull();

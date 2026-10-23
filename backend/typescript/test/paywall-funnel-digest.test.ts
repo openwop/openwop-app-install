@@ -14,10 +14,16 @@
  *
  * Unit-level: real memory storage (claimOnce + the durable collections), a mock
  * Stripe API for the live checkout leg.
+ *
+ * CEILING (claim 1): the `Promise.all` of four events is NOT forced to
+ * interleave, so the CAS-loser path is not proved concurrent here. It is
+ * witnessed by the sequential redeliveries that follow (probe 8fw1g1-pf-won:
+ * counting without the CAS win reds "counts ONCE"). The week-over-week read
+ * fakes only `Date`, so it does not depend on the wall clock or CLOCKSHIFT.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
 import type { Storage } from '../src/storage/storage.js';
 import { initHostExtPersistence, __resetHostExtPersistence } from '../src/host/hostExtPersistence.js';
@@ -34,6 +40,9 @@ let stripe: http.Server;
 let storage: Storage;
 const paid = new Set<string>();
 let seq = 0;
+
+const ENV_KEYS = ['OPENWOP_BILLING_BUNDLE_PRICES', 'OPENWOP_BILLING_PLAN_PRICES', 'OPENWOP_STRIPE_API_BASE', WEEKLY_SUMMARY_ENV, 'OPENWOP_SUPERADMIN_TENANTS'];
+const savedEnv = new Map(ENV_KEYS.map((k) => [k, process.env[k]]));
 
 const sum = (rs: PaywallCountRow[], metric: string, product?: string) =>
   rs.filter((r) => r.metric === metric && (!product || r.product === product)).reduce((n, r) => n + r.count, 0);
@@ -58,7 +67,10 @@ beforeAll(async () => {
   process.env.OPENWOP_STRIPE_API_BASE = `http://127.0.0.1:${(stripe.address() as AddressInfo).port}`;
 });
 afterAll(async () => {
-  for (const k of ['OPENWOP_BILLING_BUNDLE_PRICES', 'OPENWOP_BILLING_PLAN_PRICES', 'OPENWOP_STRIPE_API_BASE', WEEKLY_SUMMARY_ENV, 'OPENWOP_SUPERADMIN_TENANTS']) delete process.env[k];
+  for (const [key, value] of savedEnv) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
   await new Promise<void>((r) => stripe.close(() => r()));
 });
 beforeEach(async () => {
@@ -195,12 +207,22 @@ describe('weekly summary', () => {
   });
 
   it('reads the counts of the two weeks it compares', async () => {
-    const s = await createCheckoutSession(T, 'price_crm', KEY, urls);
-    expect(s.mode).toBe('live');
-    const wow = await weekOverWeek(new Date());
-    expect(wow.current.totals.checkoutsStarted).toBe(1);
-    expect(wow.previous.totals.checkoutsStarted).toBe(0);
-    expect(wow.change.checkoutsStarted).toBeNull(); // nothing to compare with
+    // Only `Date` is faked (the mock Stripe server still needs real timers): a
+    // fixed mid-week instant, so the checkout and the read share one week no
+    // matter when (or under which clock shift) the suite runs.
+    const WEDNESDAY = new Date('2026-10-14T12:00:00.000Z');
+    vi.useFakeTimers({ toFake: ['Date'], now: WEDNESDAY });
+    try {
+      const s = await createCheckoutSession(T, 'price_crm', KEY, urls);
+      expect(s.mode).toBe('live');
+      const wow = await weekOverWeek(new Date());
+      expect(wow.week).toBe('2026-W42');
+      expect(wow.current.totals.checkoutsStarted).toBe(1);
+      expect(wow.previous.totals.checkoutsStarted).toBe(0);
+      expect(wow.change.checkoutsStarted).toBeNull(); // nothing to compare with
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -213,8 +235,9 @@ describe('week-over-week arithmetic', () => {
   it('change = (now − before) ÷ before, null with no previous value', () => {
     const w = buildWeekOverWeek('2026-W41', report({ impressions: 120, clicks: 6, refusals: 3 }, [{ bundleId: 'crm', grantsStarted: 2, grantsEnded: 1 }]),
       report({ impressions: 100, clicks: 8, refusals: 0 }, [{ bundleId: 'agents', grantsStarted: 1, grantsEnded: 0 }]));
-    expect(w.change.impressions).toBe(0.2);
-    expect(w.change.clicks).toBe(-0.25);
+    // Computed floats: compared to a fixed precision, never with ===.
+    expect(w.change.impressions).toBeCloseTo(0.2, 6);
+    expect(w.change.clicks).toBeCloseTo(-0.25, 6);
     expect(w.change.refusals).toBeNull();
     expect(w.bundles).toEqual([
       { bundleId: 'agents', grantsStarted: 0, grantsEnded: 0, previousGrantsStarted: 1, previousGrantsEnded: 0 },

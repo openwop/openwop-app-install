@@ -8,6 +8,13 @@
  *
  * The planner is pure and the IO shell is thin by design: everything below runs
  * without a database.
+ *
+ * Sabotages that red this file (8fw1g4 round 1, 15 probes, all witnessed): the
+ * head-already-has-inputs guard, the declared-inputs veto, latest-revision-by-seq
+ * for the veto, source-by-seq, the source filter, the typeId guard, the nodeId map
+ * collapsing onto `n.id` (the cross-node contamination regression, ADR 0524
+ * §Correction), the structural no-nodeId throw, planAll's per-workflow scoping, and
+ * formatPlan's refusal lines.
  */
 import { describe, expect, it } from 'vitest';
 import {
@@ -237,7 +244,14 @@ describe('planRepair — what it DOES', () => {
   it('REFUSES when no source node exposes a nodeId, rather than repairing against nothing', () => {
     // The structural guard: if the identity field is ever renamed again, this
     // fails loudly instead of silently restoring the wrong values everywhere.
-    const bad = { workflowId: 'w', seq: 1, definition: { nodes: [{ typeId: 't', inputs: { q: 'x' } }] } };
+    // A deliberately MALFORMED stored row (no `nodeId`), which the typed
+    // `RepairRevision` cannot express — hence the one documented cast below.
+    interface MalformedRevision {
+      workflowId: string;
+      seq: number;
+      definition: { nodes: Array<{ typeId: string; inputs: Record<string, unknown> }> };
+    }
+    const bad: MalformedRevision = { workflowId: 'w', seq: 1, definition: { nodes: [{ typeId: 't', inputs: { q: 'x' } }] } };
     expect(() => planRepair(
       head('w', [node('a', 't')]),
       [bad as unknown as RepairRevision],

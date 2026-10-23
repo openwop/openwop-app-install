@@ -79,6 +79,24 @@ export interface AiCallRequest {
    *  batch/agent nodes don't write one durable event per token for no consumer.
    *  Ignored for structured-output / embedding calls (they never stream). */
   stream?: boolean;
+  /** RFC 0248 §B — a per-call retry policy. It narrows the host's own retry
+   *  loop and never widens it: `maxAttempts` (integer 1..16) caps the provider
+   *  requests this call may make (`1` turns host retries off), and
+   *  `growMaxTokens: false` keeps a truncation retry at the request's
+   *  `maxTokens`. A malformed value fails `validation_error`, `details.field`. */
+  retry?: { maxAttempts?: number; growMaxTokens?: boolean };
+}
+
+/** RFC 0248 §A — what one `ctx.callAI` call actually cost at the provider. */
+export interface AiCallAttempts {
+  /** Provider requests this call made: retries and the NL fallback included. */
+  count: number;
+  /** Output tokens summed over every attempt that reported usage. */
+  outputTokens?: number;
+  /** False when any attempt reported no usage (so `outputTokens` is a floor). */
+  usageComplete: boolean;
+  /** Only with `responseSchema`: the FINAL attempt's mode. */
+  structuredOutput?: 'native' | 'prompt';
 }
 
 /**
@@ -104,6 +122,9 @@ export interface AiCallResult {
   model?: string;
   /** SHA-256 hex of the credentialRef used (NEVER the cleartext key). */
   credentialRefHashed?: string;
+  /** RFC 0248 §A — every provider request this call made. `usage` keeps
+   *  describing the attempt whose output this result carries. */
+  attempts?: AiCallAttempts;
 }
 
 /**

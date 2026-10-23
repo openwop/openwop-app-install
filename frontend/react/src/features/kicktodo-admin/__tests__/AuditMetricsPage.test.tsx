@@ -9,7 +9,8 @@
  *
  * Breaks it (sabotage-witnessed): the `vq.sampled === 0` branch dropped (zeros
  * render as figures); `disagreementRate === null` rendered as a percentage; the
- * Retry button removed.
+ * Retry button removed; a figure shown under another figure's label (each value
+ * is read inside its own labelled tile).
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, cleanup, waitFor, fireEvent } from '@testing-library/react';
@@ -34,8 +35,14 @@ describe('AuditMetricsPage (KTD-4)', () => {
     api.getVerifierQuality.mockResolvedValue(SAMPLED);
     renderPage();
     await waitFor(() => expect(screen.getByText('27 / 30')).toBeTruthy());
-    expect(screen.getByText('2 / 30')).toBeTruthy();
-    expect(screen.getByText('1 / 30')).toBeTruthy();
+    // Each figure is read inside ITS labelled tile: false positives (2) and false
+    // negatives (1) differ, so a label/value swap between tiles goes red.
+    const tileValue = (label: string): string | null =>
+      screen.getByText(label).closest('.figure-tile')?.querySelector('.figure-tile__value')?.textContent ?? null;
+    expect(tileValue(en.figVerifierSampled)).toBe('40');
+    expect(tileValue(en.figVerifierAgreed)).toBe('27 / 30');
+    expect(tileValue(en.figVerifierFalsePos)).toBe('2 / 30');
+    expect(tileValue(en.figVerifierFalseNeg)).toBe('1 / 30');
     expect(screen.getByText('Disagreement rate: 10%')).toBeTruthy();
     expect(screen.queryByText(en.disagreementIndicative)).toBeNull();
     expect(screen.getByRole('link', { name: en.openAuditLog }).getAttribute('href')).toBe('/audit-log');

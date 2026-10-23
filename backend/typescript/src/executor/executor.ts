@@ -1282,7 +1282,12 @@ async function runOneNode(input: {
         err instanceof AiProviderError || err instanceof McpError || err instanceof ReplayEffectError || err instanceof CredentialGateError
           ? err.code
           : 'internal_error';
-      outcome = { status: 'failure', error: { code, message } };
+      // RFC 0248 §B.5 (ADR 0966) — a refused `ctx.callAI` retry policy names its
+      // field. Scoped to that one code, so no other failure event changes shape.
+      const details = err instanceof AiProviderError && err.code === 'validation_error' && Object.keys(err.details).length > 0
+        ? { details: err.details }
+        : {};
+      outcome = { status: 'failure', error: { code, message, ...details } };
     }
   } finally {
     span.end();

@@ -17,9 +17,14 @@
  * file, which is precisely the kind of coupling a comment cannot enforce.
  *
  * So: identical output over fixtures that exercise every branch of the walk.
+ * The fixture holds every entry KIND (file `f`, symlink `l`, fifo `o`) and
+ * every EXCLUDED name (`.openwop-installed.json`, `node_modules`, `.git`,
+ * `.DS_Store`), and case 2 asserts the fixture really does, so dropping an
+ * exclusion or a kind from either copy is a red (probe 8fw1g1-dig-mjs-nodemod).
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { execFileSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -40,9 +45,10 @@ afterEach(() => {
   rmSync(root, { recursive: true, force: true });
 });
 
-/** Every branch of the walk: nested dirs, a symlink, an excluded name, an
- *  empty dir, unicode + spaces in a filename, and a file whose bytes are not
- *  valid UTF-8 (so a copy that reads as text instead of bytes diverges). */
+/** Every branch of the walk: nested dirs, a symlink, every excluded name, an
+ *  empty dir, a fifo (the `o` kind), unicode + spaces in a filename, and a file
+ *  whose bytes are not valid UTF-8 (so a copy that reads as text instead of
+ *  bytes diverges). */
 function writeExhaustiveFixture(dir: string): void {
   mkdirSync(join(dir, 'lib', 'nested'), { recursive: true });
   mkdirSync(join(dir, 'empty-dir'), { recursive: true });
@@ -55,6 +61,14 @@ function writeExhaustiveFixture(dir: string): void {
   // Excluded by name — both copies must skip it, or the marker's own presence
   // would change the digest it is compared against.
   writeFileSync(join(dir, '.openwop-installed.json'), '{"contentHashes":{}}');
+  mkdirSync(join(dir, 'node_modules', 'dep'), { recursive: true });
+  writeFileSync(join(dir, 'node_modules', 'dep', 'index.js'), 'module.exports = 1;\n');
+  mkdirSync(join(dir, '.git'), { recursive: true });
+  writeFileSync(join(dir, '.git', 'HEAD'), 'ref: refs/heads/main\n');
+  writeFileSync(join(dir, '.DS_Store'), Buffer.from([0x00, 0x00, 0x00, 0x01]));
+  // Neither a file, a dir nor a link: the `o` (other) kind. mkfifo exists on
+  // macOS and Linux, the two platforms this suite runs on.
+  execFileSync('mkfifo', [join(dir, 'pipe')]);
   symlinkSync('./lib/a.mjs', join(dir, 'link-to-a.mjs'));
   symlinkSync('/nonexistent/target', join(dir, 'dangling-link'));
 }
@@ -69,7 +83,17 @@ describe('pack content digest — TS and .mjs implementations agree', () => {
     // Comparing only the fold would let two different walks agree by accident
     // on one fixture. Compare the intermediate structure too.
     writeExhaustiveFixture(root);
-    expect(mjsEntries(root)).toEqual(tsEntries(root));
+    const entries = tsEntries(root);
+    expect(mjsEntries(root)).toEqual(entries);
+
+    // Anti-vacuity for the FIXTURE: it must reach the `o` kind and must hold
+    // the excluded names, or the parity above proves nothing about them.
+    expect(entries.filter((e) => e.kind === 'o').map((e) => e.path)).toEqual(['pipe']);
+    expect(entries.some((e) => e.kind === 'l')).toBe(true);
+    const excludedSeen = entries.filter((e) =>
+      e.path === '.openwop-installed.json' || e.path === '.DS_Store'
+      || e.path.startsWith('node_modules/') || e.path.startsWith('.git/'));
+    expect(excludedSeen).toEqual([]);
   });
 
   it('agree that an empty directory has a stable digest', () => {

@@ -51,8 +51,11 @@ export function writeProbePack(body: string, opts: { readonly dirPrefix?: string
 }
 
 export interface RunProbeOptions {
-  /** Extra ctx surfaces the pack may call. `report` is always present. */
-  readonly ctx?: Partial<NodeContext>;
+  /** Extra ctx surfaces the pack may call. `report` is always present. The
+   *  broker grants ANY function the grant names, so a probe may add surfaces
+   *  that are not `NodeContext` members (`typed.get`, `forbidden.act`): the
+   *  index signature admits them, while real members stay type-checked. */
+  readonly ctx?: Partial<NodeContext> & { readonly [surface: string]: unknown };
   /** Grant keys beyond `report`. */
   readonly grant?: readonly string[];
   readonly wallClockMs?: number;

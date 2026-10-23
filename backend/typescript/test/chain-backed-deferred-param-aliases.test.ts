@@ -141,12 +141,24 @@ describe('PODWF-1 — the cure MERGES; it never replaces the metadata', () => {
     expect(declared.has('plan'), 'the produced variable survives the rewrite').toBe(true);
   });
 
-  it('the MCP-projection lane keeps its ADR 0087 gates AND its aliases', async () => {
+  // The whole feature graph, imported once OUTSIDE the 15 s test budget. Inside the
+  // test it took 12.7 s of transform cold beside other lanes and timed out there —
+  // one of the four 2026-10-19 daemon misses (#5138), green warm in 8.2 s.
+  let projection: {
+    registerMcpProjectionWorkflows: typeof import('../src/features/index.js').registerMcpProjectionWorkflows;
+    getChainBackedWorkflow: typeof import('../src/host/chainBackedWorkflows.js').getChainBackedWorkflow;
+  };
+  beforeAll(async () => {
+    const { registerMcpProjectionWorkflows } = await import('../src/features/index.js');
+    const { getChainBackedWorkflow } = await import('../src/host/chainBackedWorkflows.js');
+    projection = { registerMcpProjectionWorkflows, getChainBackedWorkflow };
+  }, 120_000);
+
+  it('the MCP-projection lane keeps its ADR 0087 gates AND its aliases', () => {
     // `registerMcpProjectionWorkflows` restored `src.metadata` with a REPLACE, which
     // deleted the alias map for 3 of the 4 sampled projections — making the fix above
     // structurally unreachable for that whole lane. It now merges.
-    const { registerMcpProjectionWorkflows } = await import('../src/features/index.js');
-    const { getChainBackedWorkflow } = await import('../src/host/chainBackedWorkflows.js');
+    const { registerMcpProjectionWorkflows, getChainBackedWorkflow } = projection;
     registerMcpProjectionWorkflows();
     const def = getChainBackedWorkflow('notebooks.mcp.search');
     expect(def, 'the projection must register').toBeTruthy();

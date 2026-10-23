@@ -112,6 +112,7 @@ import { startWorkGraphDaemon } from './features/ambient-work-graph/workGraphSwe
 import { backfillKnowledgeSyncJobs } from './features/knowledge-sync/knowledgeSyncService.js';
 import { startCrmSnapshotDaemon } from './features/crm/snapshotDaemon.js';
 import { startFunnelWeeklySummaryDaemon, weeklySummaryEnabled } from './features/billing/funnelWeeklySummary.js';
+import { startOperatorAccessSweepDaemon } from './host/operatorAccess.js';
 import { startVerifierSampleDaemon } from './features/kicktodo-metrics/verifierSampleDaemon.js';
 import { listCrmOrgScopes } from './features/crm/crmEntitiesService.js';
 import { startRetentionSweepDaemon, idempotencyTtlDays } from './host/retentionSweepDaemon.js';
@@ -1038,6 +1039,10 @@ async function main(): Promise<void> {
   const funnelWeeklySummaryDaemon = weeklySummaryEnabled()
     ? startFunnelWeeklySummaryDaemon({ storage })
     : null;
+  // ADR 0910 D7.3 — operator-access boot pass + hourly sweep: audits expiry and
+  // eligibility review, notifies the other superadmins, deletes ended rows. It
+  // decides no authority (D4 checks every activation at use time).
+  const operatorAccessSweepDaemon = startOperatorAccessSweepDaemon();
   // ADR 0432 P3 (chat-first-port G9) — the verifier-sample igniter: monthly,
   // mint a deterministic sample of goal verdicts as `metrics-verifier-sample`
   // approvals so the FP/FN metric has a denominator. Per-tenant kicktodo-metrics
@@ -1096,6 +1101,7 @@ async function main(): Promise<void> {
       workGraphDaemon?.stop();
       crmSnapshotDaemon?.stop();
       funnelWeeklySummaryDaemon?.stop();
+      operatorAccessSweepDaemon.stop();
       verifierSampleDaemon?.stop();
       // Flush buffered OTel spans before exit (DATA-4). Best-effort; don't
       // block shutdown if the exporter is wedged.

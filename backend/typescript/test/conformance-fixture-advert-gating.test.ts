@@ -60,11 +60,13 @@ function fixtures(): Array<{ file: string; doc: FixtureDoc }> {
 // ADR 0858 (2026-10-08): the storage probe is a reserved id with its own
 // switch (it touches only the run tenant's own storage), so it is not a member.
 // ADR 0909 (RFC 0228 G4): the table-schema probe stands on the same footing.
+// ADR 0967: so does the RFC 0248 fixture node, on its own opt-in.
 const needsConformanceNodes = (d: FixtureDoc): boolean =>
   (d.nodes ?? []).some(
     (n) =>
       n.typeId !== 'core.conformance.storage-probe' &&
       n.typeId !== 'core.conformance.table-schema-probe' &&
+      n.typeId !== 'conformance.callai.echo-attempts' &&
       ((n.typeId ?? '').startsWith('core.conformance.') || (n.typeId ?? '').startsWith('conformance.')),
   );
 

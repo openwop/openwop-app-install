@@ -30,6 +30,7 @@ import { conformanceNodesEnabled } from '../bootstrap/conformanceMockAgent.js';
 import { SUPERVISOR_CALLS_LIVE_MODEL } from '../bootstrap/nodes.js';
 import { implementedMemoryActions } from '../bootstrap/conformanceMemoryProbe.js';
 import { CONFORMANCE_STORAGE_PROBE_TYPE_ID } from '../bootstrap/conformanceStorageProbe.js';
+import { CALLAI_ECHO_ATTEMPTS_TYPE_ID } from '../bootstrap/conformanceCallAiFixture.js';
 import { CONFORMANCE_TABLE_SCHEMA_PROBE_FIXTURE, CONFORMANCE_TABLE_SCHEMA_PROBE_TYPE_ID } from '../bootstrap/conformanceTableSchemaProbe.js';
 import { v2AdvertisedStorageFamilies } from './storageFamilyAdvert.js';
 import { listFixtureSuiteIds, loadConformanceEvalSuites, registerScriptedEvalAgent } from './evals/fixtureSuites.js';
@@ -180,10 +181,15 @@ function fixtureNeedsConformanceNodes(def: WorkflowDefinition): boolean {
   // decides its fixture, via the resolvability check in `fixtureIsAdvertisable`.
   // RFC 0228 G4: `core.conformance.table-schema-probe` stands on the same footing
   // (`tableSchemaProbeEnabled()`).
+  // ADR 0967: so does `conformance.callai.echo-attempts` (RFC 0248), on its own
+  // opt-in (`callAiFixtureEnabled()`). Without this line the opt-in registered
+  // the node and the fixture was STILL withheld — measured on the m2 lane with
+  // conformance nodes off, the production gate.
   return (def.nodes ?? []).some(
     (n) =>
       n.typeId !== CONFORMANCE_STORAGE_PROBE_TYPE_ID &&
       n.typeId !== CONFORMANCE_TABLE_SCHEMA_PROBE_TYPE_ID &&
+      n.typeId !== CALLAI_ECHO_ATTEMPTS_TYPE_ID &&
       (n.typeId.startsWith('core.conformance.') || n.typeId.startsWith('conformance.')),
   );
 }

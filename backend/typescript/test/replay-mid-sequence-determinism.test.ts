@@ -16,6 +16,11 @@ import type { EventRecord } from '../src/types.js';
  * mechanism passed while the wiring was wrong, which is the failure mode this
  * codebase keeps finding. So this file tests the SEAM
  * (`detectAndRecordReplayDivergence`), where the cursors actually live.
+ *
+ * Sabotages that red this file (8fw1g4 round 1 + 2): reading the replay from 0,
+ * reading the source from `fromSeq` (exclusive cursor), dropping the append, and a
+ * SYMMETRIC cursor shift (both sides from `fromSeq`) that drops sequence 0 on a
+ * full replay — caught only by the full-replay case's seq-0-only divergence leg.
  */
 function ev(runId: string, seq: number, type: string, nodeId?: string): EventRecord {
   return {
@@ -148,5 +153,18 @@ describe('mid-sequence replay divergence detection compares like with like', () 
     );
     expect(result.diverged, 'an identical full replay must not diverge').toBe(false);
     expect(appender.appended).toEqual([]);
+
+    // …and sequence 0 is really COMPARED: a replay differing ONLY at seq 0 must
+    // diverge there. (An identical replay cannot tell a symmetric cursor shift
+    // that drops seq 0 on BOTH sides from a correct read.)
+    const differsAtZero = [ev('rep', 0, 'node.started', 'z'), ...full.slice(1)];
+    const appender2 = appenderSpy();
+    const atZero = await detectAndRecordReplayDivergence(
+      readerFor({ src: SOURCE, rep: differsAtZero }), appender2, 'src', 'rep', 0,
+    );
+    expect(atZero.diverged, 'a seq-0-only difference was not compared').toBe(true);
+    expect(atZero.index).toBe(0);
+    expect(atZero.expected).toBe('run.started@');
+    expect(atZero.actual).toBe('node.started@z');
   });
 });

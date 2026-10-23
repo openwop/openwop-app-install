@@ -2,6 +2,12 @@
  * ADR 0863 D8 — which backend vitest runs wait for a running gate's claim.
  * Only a FULL run outside a gate waits; everything an iterating session does
  * (a file, a `-t` pattern, watch mode) starts at once.
+ *
+ * Every branch is pinned by its exact reason string. Sabotage-witnessed
+ * (/grade-tests 8f wave 1): the in-gate env check (8fw1g3-qbg-ci), the
+ * unknown-field fallback (qbg-known), watch mode (qbg-watch) and the `-t` check
+ * (qbg-tpattern). The file-filter branch is deliberately NOT probed: breaking it
+ * would make the probe run itself wait on a live gate.
  */
 import { describe, expect, it } from 'vitest';
 import { createVitest } from 'vitest/node';

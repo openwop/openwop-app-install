@@ -15,6 +15,12 @@
  *  2. it NEVER gates `ready`. Search is optional — a host running non-research
  *     workflows is genuinely healthy without it, and 503-ing would be the dishonest
  *     inverse of the problem being fixed.
+ *
+ * Sabotage-witnessed (/grade-tests 8f wave 1): readiness gated on the search key
+ * (8fw1g3-rdw-gate), the key value leaking into the body (rdw-leak) and the
+ * source mislabelled (rdw-env). `MINIMAX_API_KEY` is set for the whole file and
+ * restored in `afterAll`. The arity case is a SHAPE pin (a defaulted param
+ * evades it); it is kept as a cheap tripwire and is not sabotage-probed.
  */
 
 import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
@@ -25,6 +31,7 @@ import { hostWebSearchKeyStatus } from '../src/host/webResearchSurface.js';
 
 let server: http.Server;
 let PORT: number;
+const savedManagedKey = process.env.MINIMAX_API_KEY;
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -39,7 +46,11 @@ beforeAll(async () => {
   server = await new Promise((res) => { const s = app.listen(0, '127.0.0.1', () => res(s)); });
   PORT = (server.address() as AddressInfo).port;
 });
-afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
+afterAll(async () => {
+  await new Promise<void>((res) => server.close(() => res()));
+  if (savedManagedKey === undefined) delete process.env.MINIMAX_API_KEY;
+  else process.env.MINIMAX_API_KEY = savedManagedKey;
+});
 afterEach(() => { delete process.env.OPENWOP_WEBSEARCH_API_KEY; });
 
 const readiness = async (): Promise<{ status: number; body: Record<string, unknown> }> => {

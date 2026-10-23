@@ -7,6 +7,9 @@
  * authority (`/access` at host:members:manage; each org's report at org-manager
  * authority, k-anon + consent re-verified per read). §3.3: this tier renders
  * server-authoritative facts and never mints roles — there is no write here.
+ * EXCEPT ADR 0910 D11: the Operator access panel (listed superadmins only) starts
+ * and ends the caller's OWN just-in-time operator activation — never a role grant
+ * and never for anyone else.
  */
 import { Button } from '../../ui/Button.js';
 import { useCallback, useEffect, useState } from 'react';
@@ -16,6 +19,7 @@ import { PageHeader } from '../../ui/PageHeader.js';
 import { StateCard } from '../../ui/StateCard.js';
 import { Notice } from '../../ui/Notice.js';
 import { getAdminPeople, type AdminPeopleView } from '../../client/kicktodoOrgClient.js';
+import { OperatorAccessPanel } from './OperatorAccessPanel.js';
 
 export function PeopleAccessPage(): JSX.Element {
   const { t } = useTranslation('kicktodo-admin');
@@ -104,6 +108,7 @@ export function PeopleAccessPage(): JSX.Element {
           </section>
         </>
       )}
+      <OperatorAccessPanel />
     </div>
   );
 }

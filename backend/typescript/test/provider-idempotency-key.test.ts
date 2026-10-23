@@ -1,9 +1,3 @@
-import { describe, expect, it } from 'vitest';
-
-import { providerIdempotencyKey } from '../src/host/providerIdempotencyKey.js';
-import { runWithEffectContext } from '../src/host/runEffectContext.js';
-import { resetLogicalInvocationOrdinals } from '../src/host/effectIdentity.js';
-
 /**
  * `idempotency.md` §"Layer 2: effect identity", Provider-key rule — a MUST that
  * became binding when this host started advertising `idempotency`:
@@ -14,7 +8,22 @@ import { resetLogicalInvocationOrdinals } from '../src/host/effectIdentity.js';
  *
  * The behaviour being replaced was `randomUUID()` per call on the STRIPE path,
  * so these tests are about money movement before they are about conformance.
+ *
+ * Decision record: ADR 0638 (layer-2 effect identity on outbound provider calls;
+ * `docs/adr/0638-layer2-effect-identity-outbound.md` cites this file). Each case
+ * resets the logical-invocation ordinals, so the file is order-independent.
+ * Sabotage-witnessed (/grade-tests 8f wave 1): the attempt entering the key
+ * (8fw1g3-pv-idem-attempt), the operation leaving it (pv-idem-op), the key
+ * grammar (pv-idem-grammar), a partial context (pv-idem-partial) and the
+ * no-run fallback (pv-idem-norun) each turn a case red.
  */
+
+import { describe, expect, it } from 'vitest';
+
+import { providerIdempotencyKey } from '../src/host/providerIdempotencyKey.js';
+import { runWithEffectContext } from '../src/host/runEffectContext.js';
+import { resetLogicalInvocationOrdinals } from '../src/host/effectIdentity.js';
+
 function ctx(attempt: number) {
   return { runId: 'run-1', tenantId: 't1', nodeId: 'charge', attempt, replaying: false } as const;
 }

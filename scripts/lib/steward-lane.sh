@@ -38,3 +38,28 @@ steward_lane() {
   echo "  detector in scripts/lib/steward-lane.sh rather than letting the gates skip." >&2
   return 2
 }
+
+# Issue #5006 (ADR 0874 D4, amended 2026-10-22) — which env files the BUDGETED
+# frontend build reads.
+#
+# `check-bundle-budget` judges the default build against the HOST's entry
+# ceiling. In an adopter bundle, Vite would also load the adopter's own
+# `frontend/react/.env.production`, compile its VITE_BRAND_* strings into the
+# entry, and red the gate on a build the adopter never ships (KickTodo: 175 B
+# over, 2026-10-19). So in a bundle the budgeted build reads a temp dir holding
+# only a copy of `.env.production.example`: host code only. The full repo keeps
+# its own `.env.production`, exactly as before.
+#
+# budget_env_dir <root> <take|skip> → prints nothing for `take` (build as today);
+#   for `skip` makes a temp dir, copies the example in as `.env.production`, and
+#   prints the dir (the caller exports it as OPENWOP_VITE_ENV_DIR and removes it).
+#   Returns 1 when a bundle has no example: refusing beats measuring brand bytes.
+budget_env_dir() {
+  local root="$1" mode="$2" ex d
+  [ "$mode" = skip ] || return 0
+  ex="$root/frontend/react/.env.production.example"
+  [ -f "$ex" ] || { echo "error: adopter bundle without $ex; the budgeted build has no host-only env to read." >&2; return 1; }
+  d="$(mktemp -d "${TMPDIR:-/tmp}/owp-budget-env.XXXXXX")" || return 1
+  cp "$ex" "$d/.env.production" || { rm -rf "$d"; return 1; }
+  echo "$d"
+}

@@ -227,6 +227,45 @@ the next regression unnoticed — the ledger's #4034 lesson. Expected ceilings: 
 >
 > Tests: `frontend/react/scripts/__tests__/entryShare.test.ts`.
 
+> **AMENDED 2026-10-22 — in an adopter bundle, the budgeted build reads no
+> adopter env (#5006, user decision via the release manager, option 2).** D4
+> calibrated the ceiling on the DEFAULT build, and the amendment above kept the
+> default distribution's ceiling at 129 kB with no share. Neither covered which
+> `.env*` files that build reads. In an adopter bundle `scripts/ci.sh` builds
+> the default distribution, and Vite loaded the adopter's own
+> `frontend/react/.env.production`, so its `VITE_BRAND_*` strings were
+> compiled into the entry. KickTodo's gate was 175 B over on a build it never
+> ships (it ships its own distribution, 5,450 B under). That made the ceiling
+> catch brand length instead of host growth, which is the one thing it exists
+> to catch.
+>
+> Three options were weighed:
+> 1. measure the adopter's declared distribution, where `entryShareBytes` already
+>    applies;
+> 2. build the budgeted default without the adopter's env;
+> 3. win back host headroom.
+>
+> The user chose **2**. In a bundle (detected by `scripts/lib/steward-lane.sh`),
+> `budget_env_dir` copies `.env.production.example` into a temp dir. `ci.sh`
+> passes that dir to the frontend build as `OPENWOP_VITE_ENV_DIR`, and
+> `vite.config.ts` uses it both as Vite's `envDir` and for every `loadEnv`.
+> A bundle with no example refuses rather than measuring brand bytes. The full
+> repo gets no override and still builds with its own `.env.production`, as
+> before.
+>
+> **Unchanged:** the 129.0 kB ceiling, the `entryShareBytes` rules (cap, reason,
+> refused on the default distribution) and this ratchet. Option 1 can still
+> follow as a second measurement.
+>
+> **Tests:**
+> - `scripts/test-gate-tooling.sh` § "budgeted frontend build env" checks the
+>   decision and the wiring, in seconds, in every gate.
+> - `scripts/test-adopter-budget-env.sh` makes four real builds. It shows an
+>   adopter-shaped tree measures the same entry bytes with a brand-heavy
+>   `.env.production` as with none, that the brand strings do grow the entry when
+>   loaded (so the equality is a real measurement), and that the full repo still
+>   inlines its own `.env.production`.
+
 ### D5 — Considered and not adopted now: keys-only nav strings (≤ −2.6 kB)
 
 Removing the English `label`/`hint` fallbacks where `labelKey`/`hintKey` exist saves

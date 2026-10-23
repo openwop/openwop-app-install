@@ -4,8 +4,23 @@
  * (`OPENWOP_RUN_RETENTION_DAYS > 0`), which is OPT-IN — so on a default host
  * ignored proposals never resolved and permanently pinned the transient cap.
  * This pins the fix at the DAEMON TICK level (the layer the unit test missed).
+ *
+ * DOUBLE GUARD, named: the expired draft is archived by the sweep itself AND, if
+ * the sweep resolved the approval but did not archive, by the same tick's
+ * crash-window reconcile pass (grade-data D3). So `archivedAt` alone cannot show
+ * WHICH pass archived it — round 1 of /grade-tests 8f w1 probed "the sweep skips
+ * its archive" vacuous. The case therefore asserts the tick's exact counters:
+ * `swept: 1, reconciled: 0` means the sweep archived it and the reconcile had
+ * nothing left to do.
+ *
+ * Time: `Date` (only) is faked and advanced to 1 s past the default 7-day TTL
+ * (no real-clock wait, no sub-millisecond TTL env), so an expiry check that is
+ * off by even a minute stays unexpired and reds the case.
+ *
+ * Sabotages it is red against (probed): the sweep nested back under the
+ * retention gate, the expiry compared with a margin, the sweep's archive removed.
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
 import { createHostAdapterSuite } from '../src/host/index.js';
 import type { Storage } from '../src/storage/storage.js';
@@ -57,23 +72,24 @@ afterAll(() => daemon.stop());
 
 describe('proposal sweep on the daemon tick (default posture — run retention OFF)', () => {
   it('an expired proposal resolves + archives on tickNow() with OPENWOP_RUN_RETENTION_DAYS unset', async () => {
-    process.env.OPENWOP_WORKFLOW_PROPOSAL_TTL_DAYS = '0.000000001';
-    let body: Record<string, unknown>;
+    delete process.env.OPENWOP_WORKFLOW_PROPOSAL_TTL_DAYS; // the default 7-day TTL
+    vi.useFakeTimers({ toFake: ['Date'] });
     try {
+      vi.setSystemTime(Date.now());
       const r = await runTool({ definition: { nodes: [{ nodeId: 'a', typeId: 'core.noop' }] } });
-      body = JSON.parse(r.content) as Record<string, unknown>;
-    } finally {
-      delete process.env.OPENWOP_WORKFLOW_PROPOSAL_TTL_DAYS;
-    }
-    await new Promise((res) => setTimeout(res, 10));
+      const body = JSON.parse(r.content) as { approvalId: string; workflowId: string };
+      expect((await getApproval(body.approvalId))?.status).toBe('pending');
 
-    await daemon.tickNow();
+      vi.setSystemTime(Date.now() + 7 * 86_400_000 + 1_000); // 1 s past expiry
+      await daemon.tickNow();
 
-    const approval = await getApproval(body.approvalId as string);
-    expect(approval?.status).toBe('rejected');
-    expect(approval?.note).toBe('expired');
-    expect(lifecycleOf(getRegisteredWorkflow(body.workflowId as string)!).archivedAt).toBeTruthy();
-    // The observability probe recorded the tick (grade-code C5).
-    expect(lastProposalSweep()?.swept).toBeGreaterThanOrEqual(1);
+      const approval = await getApproval(body.approvalId);
+      expect(approval?.status).toBe('rejected');
+      expect(approval?.note).toBe('expired');
+      expect(lifecycleOf(getRegisteredWorkflow(body.workflowId)!).archivedAt).toBeTruthy();
+      // The observability probe recorded the tick (grade-code C5) — and the SWEEP,
+      // not the reconcile pass, archived the draft (the double guard, above).
+      expect(lastProposalSweep()).toMatchObject({ swept: 1, scanned: 1, reconciled: 0 });
+    } finally { vi.useRealTimers(); }
   });
 });

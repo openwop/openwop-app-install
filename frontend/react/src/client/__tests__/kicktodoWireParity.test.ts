@@ -15,6 +15,13 @@
  *    field back to `string` fails `scripts/check-test-types.mjs` (tsc over the
  *    test files) — vitest itself does not evaluate these at runtime.
  *
+ * The pre-flight half: replanService's bare `Error` messages are read out of
+ * its source as a SET and must equal `['not-owner']` — a new or renamed bare
+ * reason at either throw site is red (sabotage: `throw new Error('not-active')`).
+ *
+ * The TYPES half is a ceiling for the vitest probe runner: it is enforced by the
+ * shrink-only `check:test-types` gate (scripts/ci.sh), not by this run.
+ *
  * Not pinnable here: the backend's `TodayView.enrollments[].state` is itself
  * declared `string` (todayService.ts) though it is always filled from an
  * `EnrollmentState`; the client types it as the union it carries.
@@ -60,7 +67,15 @@ describe('KTP-1 — kicktodo client unions match the backend declarations', () =
     const block = /class DayMoveDeniedError[\s\S]*?reason:([\s\S]*?)\)\s*\{/.exec(src('enrollmentService.ts'))?.[1] ?? '';
     const guard = literals(block);
     expect(guard).toContain('window');
-    expect(src('replanService.ts')).toContain("new Error('not-owner')");
+    // Every bare `Error` the revision pre-flight throws reaches the wire as the
+    // `Command N (move) failed: <message>` suffix (replanService.ts — the move
+    // lane's catch forwards `err.message` as the reason), so the set of bare-Error
+    // messages in replanService IS the client-visible pre-flight reason set.
+    // Measured 2026-10-22: two sites, both 'not-owner'. Ceiling: DELETING one of
+    // the two sites leaves the set unchanged (the other site still names it) —
+    // that change moves the refusal to a different code path, not to a new reason.
+    const bare = [...new Set([...src('replanService.ts').matchAll(/new Error\('([^']+)'\)/g)].map((m) => m[1]!))].sort();
+    expect(bare).toEqual(['not-owner']);
     expect([...MOVE_REFUSAL_REASONS].sort()).toEqual([...guard, 'not-owner'].sort());
   });
 

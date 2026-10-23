@@ -13,6 +13,12 @@
  * Born-red: with the pre-fix construction (no `tenantOf`), the purge leaves the
  * row and the first assertion fails. Discriminator (a prescribed fix can be an
  * attack): a SECOND tenant's proposal must survive the first tenant's purge.
+ *
+ * Contracts: RFC 0096 (proposals are tenant-owned records) and ADR 0284 (tenant
+ * teardown purges every hostext collection). Sabotage-witnessed (/grade-tests 8f
+ * wave 1): dropping the `tenantOf` resolver reds both cases
+ * (8fw1g3-propc-tenantof-r2); removing the per-row tenant check in the purge
+ * fan-out reds the second-tenant discriminators (8fw1g3-propc-fanout-r2).
  */
 import { beforeAll, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
@@ -68,9 +74,17 @@ describe('PROPC-ERASURE-TEARDOWN — purgeTenantHostExt reaches the proposals co
   });
 
   it('is idempotent: a second purge finds nothing and does not throw', async () => {
-    await putProposal(mkProposal(TENANT_A, 'p-a2'));
-    await purgeTenantHostExt(TENANT_A);
-    await purgeTenantHostExt(TENANT_A);
-    expect(await listProposals(TENANT_A)).toEqual([]);
+    // Its own tenant pair, so the counts below do not depend on case order.
+    const tenantC = 'org:proposals-erase-c';
+    const tenantD = 'org:proposals-erase-d';
+    await putProposal(mkProposal(tenantC, 'p-c1'));
+    await putProposal(mkProposal(tenantD, 'p-d1'));
+    const first = await purgeTenantHostExt(tenantC);
+    expect(first).toEqual({ deleted: 1, ghostRows: 0, collections: 1 }); // exactly C's one row
+    const second = await purgeTenantHostExt(tenantC);
+    expect(second).toEqual({ deleted: 0, ghostRows: 0, collections: 0 }); // nothing left to find
+    expect(await listProposals(tenantC)).toEqual([]);
+    // The neighbour survives both purges.
+    expect((await listProposals(tenantD)).map((p) => p.id)).toEqual(['p-d1']);
   });
 });

@@ -5,6 +5,16 @@
  *   - a real requester (the initiating human, else the NAMED workflow — never
  *     the bare literal "workflow")
  *   - the concrete asset(s) under review (bundled `options[]` + artifact binding)
+ *   - the conversation the run belongs to (ADR 0776)
+ *
+ * Round 2 (8fw1g4): the run fixture carried `status: 'waiting-interrupt'`, which is
+ * not a RunStatus — an `as RunRecord` cast hid it. The fixture is now typed with no
+ * cast and uses `waiting-approval` (the status an approval gate parks a run in).
+ *
+ * Sabotages that red this file (8fw1g4 round 1, 8 probes, all witnessed): dropping
+ * the metadata workflow name, the workflowId fallback label, the initiating-user
+ * requester, the bundled `options[]`, the artifact binding, and each ADR 0776
+ * conversation leg (run id, data, absent).
  */
 
 import { describe, it, expect } from 'vitest';
@@ -13,10 +23,10 @@ import type { InterruptRecord, RunRecord } from '../src/types.js';
 
 function run(over: Partial<RunRecord> = {}): RunRecord {
   return {
-    runId: 'run-1', workflowId: 'wf_1d219721', tenantId: 't1', status: 'waiting-interrupt',
+    runId: 'run-1', workflowId: 'wf_1d219721', tenantId: 't1', status: 'waiting-approval',
     inputs: {}, metadata: {}, configurable: {}, createdAt: '2026-06-19T00:00:00Z', updatedAt: '2026-06-19T00:00:00Z',
     ...over,
-  } as RunRecord;
+  };
 }
 function interrupt(data: unknown, over: Partial<InterruptRecord> = {}): InterruptRecord {
   return {

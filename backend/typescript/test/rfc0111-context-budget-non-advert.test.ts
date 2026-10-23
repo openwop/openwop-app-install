@@ -24,48 +24,55 @@
  * assertion of its own. Ship a supervisor that runs real model turns and leg 2
  * goes red — which is the signal to revisit the advert deliberately, with
  * `contextBudget`'s honesty conditions re-read, rather than to delete this file.
+ *
+ * Round 2 (8fw1g4): leg 1 could not fail. It read `multiAgentExecution` (the v1
+ * spelling) off a booted host whose default env advertises NO multi-agent family at
+ * all, so an injected `contextBudget` was invisible (probe cb-advert, vacuous). It now
+ * builds the v2 document with the family ON at v5 (as prod runs), asserts the family
+ * is present (positive control), then asserts the absence on it. No app boot.
+ *
+ * Sabotages that red this file: advertising `contextBudget` on the v2 multiAgent
+ * family, flipping SUPERVISOR_CALLS_LIVE_MODEL, a supervisor that reaches `callAI`,
+ * and a supervisor that does not echo its config plan.
  */
-import http from 'node:http';
-import type { AddressInfo } from 'node:net';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { ensureNodesRegistered, SUPERVISOR_CALLS_LIVE_MODEL } from '../src/bootstrap/nodes.js';
 import { getNodeRegistry } from '../src/executor/nodeRegistry.js';
 import type { NodeContext } from '../src/executor/types.js';
-import { createApp } from '../src/index.js';
+import { buildV2Advertisement } from '../src/routes/discovery.js';
+import type { AppConfig } from '../src/index.js';
 
-let BASE = '';
-let server: http.Server;
-
-beforeAll(async () => {
-  process.env.OPENWOP_STORAGE_DSN = 'memory://';
-  process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
-  const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 't', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((r) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; r(); }); });
-});
-afterAll(async () => { await new Promise<void>((r) => server.close(() => r())); });
-
-/** Every place a capability family can legally appear: RFC 0073 document root, plus
- *  the deprecated `capabilities` wrapper this host still mirrors for the v1.x window. */
-const surfaces = (doc: Record<string, unknown>): Record<string, unknown>[] => {
-  const wrapper = doc['capabilities'];
-  return [doc, ...(wrapper && typeof wrapper === 'object' ? [wrapper as Record<string, unknown>] : [])];
+const CONFIG: AppConfig = {
+  port: 0, storageDsn: 'memory://', serviceName: 't', serviceVersion: '0.0.1', enableConsoleTracer: false,
 };
 
-describe('RFC 0111 — contextBudget is withheld while the orchestrator is a mock', () => {
-  it('leg 1: /.well-known/openwop advertises NO contextBudget on any surface', async () => {
-    const res = await fetch(`${BASE}/.well-known/openwop`);
-    const doc = (await res.json()) as Record<string, unknown>;
+/** The multi-agent phase gates prod runs with (executionModel v5). */
+const PHASE_ENV = [
+  'OPENWOP_MULTI_AGENT_EXECUTION_MODEL',
+  'OPENWOP_MULTI_AGENT_EXECUTION_MODEL_PHASE_2',
+  'OPENWOP_MULTI_AGENT_EXECUTION_MODEL_PHASE_3',
+  'OPENWOP_MULTI_AGENT_EXECUTION_MODEL_PHASE_4',
+  'OPENWOP_MULTI_AGENT_EXECUTION_MODEL_PHASE_5',
+] as const;
 
-    for (const surface of surfaces(doc)) {
-      const mae = surface['multiAgentExecution'];
-      if (mae && typeof mae === 'object') {
-        const fields = mae as Record<string, unknown>;
-        expect(fields['contextBudget'], 'RFC 0111 §Scope — MUST NOT advertise contextBudget without real orchestrator model turns').toBeUndefined();
-        expect(fields['transcriptWindow'], 'RFC 0061 — same honesty condition as contextBudget').toBeUndefined();
+describe('RFC 0111 — contextBudget is withheld while the orchestrator is a mock', () => {
+  it('leg 1: the v2 advertisement (multiAgent family ON, v5) states NO contextBudget or transcriptWindow', () => {
+    const prev = PHASE_ENV.map((k) => [k, process.env[k]] as const);
+    for (const k of PHASE_ENV) process.env[k] = 'true';
+    try {
+      const doc = buildV2Advertisement(CONFIG);
+      // Positive control — without the family the absence below means nothing.
+      expect(doc['multiAgent'], 'the multiAgent family must be advertised for this leg to bite').toMatchObject({
+        executionModel: { version: 5 },
+      });
+      const text = JSON.stringify(doc);
+      expect(text, 'RFC 0111 §Scope — MUST NOT advertise contextBudget without real orchestrator model turns').not.toContain('contextBudget');
+      expect(text, 'RFC 0061 — same honesty condition as contextBudget').not.toContain('transcriptWindow');
+    } finally {
+      for (const [k, v] of prev) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
       }
-      // Dotted spellings, in case a future advert lands on the migration arm.
-      expect(surface['multiAgentExecution.contextBudget'], 'dotted spelling must not smuggle the advert in').toBeUndefined();
-      expect(surface['host.multiAgentExecution'], 'prefixed spelling must not smuggle the advert in').toBeUndefined();
     }
   });
 

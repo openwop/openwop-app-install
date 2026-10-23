@@ -5,29 +5,44 @@
  * operator-pinned key on a non-revoked version, and every failure path is
  * closed (unsigned / unknown key id / tampered manifest / revoked / missing
  * files → never 'trusted').
+ *
+ * The tampered-manifest case carries the GENUINE signature beside the altered
+ * pack.json, so only the tamper can fail it: a verifier that checked the
+ * in-memory manifest instead of the on-disk bytes goes red (probe
+ * 8fw1g1-sg-tamper-bytes; with a garbage sig.bin it was vacuous).
  */
-import { describe, it, expect, beforeAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { generateKeyPairSync, sign as edSign } from 'node:crypto';
-import { mkdtempSync, writeFileSync, mkdirSync } from 'node:fs';
+import { copyFileSync, mkdtempSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { verifySelfAttested, verifyPinned, type PinnedKeyring } from '../src/host/packSignature.js';
+import { verifySelfAttested, verifyPinned, loadPinnedKeyring, type PinnedKeyring } from '../src/host/packSignature.js';
 
 let packDir: string;
 let keyring: PinnedKeyring;
 let strangerKeyring: PinnedKeyring;
+const tempDirs: string[] = [];
+function tempDir(prefix: string): string {
+  const d = mkdtempSync(join(tmpdir(), prefix));
+  tempDirs.push(d);
+  return d;
+}
 const manifest = { name: 'vendor.demo', version: '1.0.0', signing: { publicKeyRef: 'pub.pem', signatureRef: 'sig.bin', keyId: 'openwop-team-1' } };
 
 beforeAll(() => {
   const { publicKey, privateKey } = generateKeyPairSync('ed25519');
   const stranger = generateKeyPairSync('ed25519');
-  packDir = mkdtempSync(join(tmpdir(), 'packsig-'));
+  packDir = tempDir('packsig-');
   const manifestBytes = Buffer.from(JSON.stringify(manifest));
   writeFileSync(join(packDir, 'pack.json'), manifestBytes);
   writeFileSync(join(packDir, 'pub.pem'), publicKey.export({ type: 'spki', format: 'pem' }));
   writeFileSync(join(packDir, 'sig.bin'), edSign(null, manifestBytes, privateKey));
   keyring = { keys: { 'openwop-team-1': publicKey.export({ type: 'spki', format: 'pem' }).toString() }, revoked: new Set() };
   strangerKeyring = { keys: { 'openwop-team-1': stranger.publicKey.export({ type: 'spki', format: 'pem' }).toString() }, revoked: new Set() };
+});
+
+afterAll(() => {
+  for (const d of tempDirs) rmSync(d, { recursive: true, force: true });
 });
 
 describe('verifyPinned (the ADR 0367 trust boundary)', () => {
@@ -49,24 +64,30 @@ describe('verifyPinned (the ADR 0367 trust boundary)', () => {
     expect(verifyPinned(packDir, manifest, revokedRing)).toBe('revoked');
   });
   it('a tampered manifest fails', () => {
-    const dir2 = mkdtempSync(join(tmpdir(), 'packsig-t-'));
-    mkdirSync(dir2, { recursive: true });
+    const dir2 = tempDir('packsig-t-');
+    // The on-disk pack.json is altered; the signature is the GENUINE one over
+    // the original bytes, and the caller passes the original manifest object.
+    // Only reading the tampered bytes from disk can fail this.
     writeFileSync(join(dir2, 'pack.json'), Buffer.from(JSON.stringify({ ...manifest, version: '6.6.6' })));
-    writeFileSync(join(dir2, 'sig.bin'), Buffer.from('not a real signature'));
+    copyFileSync(join(packDir, 'sig.bin'), join(dir2, 'sig.bin'));
     expect(verifyPinned(dir2, manifest, keyring)).toBe('failed');
+    // Positive control: the same genuine signature beside the ORIGINAL bytes passes.
+    copyFileSync(join(packDir, 'pack.json'), join(dir2, 'pack.json'));
+    expect(verifyPinned(dir2, manifest, keyring)).toBe('trusted');
   });
 });
 
 describe('loadPinnedKeyring failure semantics (grade pass 2026-07-14)', () => {
-  it('an unreadable revocation file fails CLOSED — empty keyring, not empty revocations', async () => {
-    const { loadPinnedKeyring } = await import('../src/host/packSignature.js');
-    const dir = mkdtempSync(join(tmpdir(), 'packsig-rev-'));
+  it('an unreadable revocation file fails CLOSED — empty keyring, not empty revocations', () => {
+    const dir = tempDir('packsig-rev-');
     const keysDir = join(dir, 'keys');
     mkdirSync(keysDir);
     writeFileSync(join(keysDir, 'k.pem'), keyring.keys['openwop-team-1'] ?? '');
     writeFileSync(join(keysDir, 'index.json'), JSON.stringify([{ keyId: 'openwop-team-1', file: 'k.pem' }]));
     const revPath = join(dir, 'revoked.json');
     writeFileSync(revPath, 'not json at all');
+    const savedKeysDir = process.env.OPENWOP_TRUSTED_PACK_KEYS_DIR;
+    const savedRevocations = process.env.OPENWOP_TRUSTED_PACK_REVOCATIONS;
     process.env.OPENWOP_TRUSTED_PACK_KEYS_DIR = keysDir;
     process.env.OPENWOP_TRUSTED_PACK_REVOCATIONS = revPath;
     try {
@@ -78,8 +99,10 @@ describe('loadPinnedKeyring failure semantics (grade pass 2026-07-14)', () => {
       expect(Object.keys(healthy.keys)).toHaveLength(1);
       expect(healthy.revoked.has('some.pack@1.0.0')).toBe(true);
     } finally {
-      delete process.env.OPENWOP_TRUSTED_PACK_KEYS_DIR;
-      delete process.env.OPENWOP_TRUSTED_PACK_REVOCATIONS;
+      if (savedKeysDir === undefined) delete process.env.OPENWOP_TRUSTED_PACK_KEYS_DIR;
+      else process.env.OPENWOP_TRUSTED_PACK_KEYS_DIR = savedKeysDir;
+      if (savedRevocations === undefined) delete process.env.OPENWOP_TRUSTED_PACK_REVOCATIONS;
+      else process.env.OPENWOP_TRUSTED_PACK_REVOCATIONS = savedRevocations;
     }
   });
 });

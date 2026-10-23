@@ -18,6 +18,66 @@ Commits by the `/cut-app-release` skill; required upgrade stops are tracked in
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-10-23
+
+PRs since v0.6.0. No schema or app migrations, rolling-safe, no required stop.
+A MINOR release under ADR 0052 §D1: it adds features (callAI attempt
+accounting and retry policy, the operator-access panel and sweep, an animated
+journey hero). It also carries two security fixes: a patched Node.js runtime and a
+sub-workflow interrupt guard.
+
+### Added
+
+- **callAI attempt accounting and a per-call retry policy (ADR 0966, RFC 0248).**
+  `ctx.callAI` reports every provider attempt it made (count, output tokens, usage
+  completeness, whether a reply was replayed) and honours a per-call `retry`
+  policy, capped (#5139). Advertised as `aiProviders.callAccounting` with the
+  conformance suite pinned to 2.46.19 (#5142). Certified in production: major-2
+  cut `f98d673d761f`, 468/0/11/372.
+- **`OPENWOP_CONFORMANCE_CALLAI_FIXTURE` (ADR 0967).** An operator opt-in, off by
+  default and ignored in the `auth` posture, that registers the one conformance
+  node witnessing RFC 0248. Without it, the advertised behaviour is real but
+  unwitnessed. Its mock scripts are scoped to the run, and a replay reads the
+  recorded attempts (#5147).
+- **Operator access for KickTodo (ADR 0910 P2–P3).** A boot and hourly
+  operator-access sweep with a readiness check (#4995), and an Operator access
+  panel with step-up re-authentication, MFA and a countdown (#4994).
+- **CMS journey hero animation.** The journey visual draws in, days pop and one
+  goal pulses; reduced motion is respected (#4993).
+
+### Fixed
+
+- **Secret redaction** keeps readable word slugs out of the opaque-blob rule, so
+  public URLs (such as blog canonical URLs) are no longer replaced with a
+  placeholder (#4992).
+- An adopter bundle's default frontend build is budgeted without its
+  `.env.production` (#5140).
+- Tracegate's daemon re-runs its own misses alone and keeps its logs (#5138).
+
+### Security
+
+- **Node.js 22.23.4 base image.** The backend image's digest-pinned `node:22-slim`
+  moves to the 2026-10-21 security release: CVE-2026-111497 (Brotli decoder
+  out-of-bounds write), CVE-2026-105482 and CVE-2026-106069 (TLS/DNS hostname
+  bypasses), four medium/low CVEs, and the CA store update for the compromised
+  eMudhra intermediate (#5146).
+- **Sub-workflow interrupts.** A child workflow's mirrored gate can no longer be
+  resolved through the parent run (#5127).
+- **Dependencies.** dompurify 3.4.17 (GHSA-cg2g-xh64-v4q7, critical; plus two
+  more) (#5143); markdown-it denial of service (#5130).
+
+#### Upgrading from 0.6.0
+
+- **No required stop.** Schema (sqlite 50 / postgres 48) and app migrations (24)
+  are unchanged, so a rolling deploy is safe.
+- **Rebuild your image.** The Node.js fix only reaches you when the backend image
+  is rebuilt from this release's `Dockerfile`. A running 0.6.0 image keeps the old
+  base. If you build from your own base image, move it to Node 22.23.4 or later
+  (or 24.22.1 / 26.12.1).
+- **No breaking config.** `OPENWOP_CONFORMANCE_CALLAI_FIXTURE` is new and off by
+  default. Leave it unset unless you publish conformance evidence.
+- After the upgrade, `/readiness` reports `version: "0.7.0"`.
+
 ## [0.6.0] — 2026-10-20
 
 PRs since v0.5.1. No schema or app migrations, rolling-safe, no required stop.

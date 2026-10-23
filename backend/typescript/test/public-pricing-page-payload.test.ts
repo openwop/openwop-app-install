@@ -8,12 +8,20 @@
  *    checkout key (an anonymous visitor cannot buy; the key is a store concern);
  *  - which bundles are sold SEPARATELY (no plan grants them — ADR 0820 §5).
  * Honest-when-unconfigured: no packs configured ⇒ `[]`, never a fabricated row.
+ *
+ * What turns it red (sabotage-witnessed, /grade-tests 8f wave 1): a label map
+ * that serves ids instead of names (8fw1g3-price-labels-r2 — the case narrows
+ * the plans so the tier lists are non-empty; with every tier at '*' the map is
+ * empty and the round-1 probe was vacuous), an unpriced pack advertised, a
+ * packKey leaked, the wrong order, a missing trial, a fabricated lapse grace,
+ * a lost standalone flag, and an unsafe contact link kept.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
+import { validateSection } from '../src/features/cms/cmsService.js';
 
 let PORT = 0; let server: http.Server;
 
@@ -33,6 +41,7 @@ afterEach(() => {
   delete process.env.OPENWOP_BILLING_PAST_DUE_GRACE_DAYS;
   delete process.env.OPENWOP_BILLING_PUBLIC_LAPSE_GRACE_DAYS;
   delete process.env.OPENWOP_BILLING_PLAN_PRICES;
+  delete process.env.OPENWOP_BILLING_PLAN_FEATURES;
 });
 
 function rawGet(path: string): Promise<{ status: number; body: string }> {
@@ -56,23 +65,23 @@ interface PricingBody {
 
 describe('public /pricing payload — feature names', () => {
   it('labels every tier feature id from the toggle registry (the store’s label source)', async () => {
+    // Narrow the plans so the tiers NAME feature ids (with the allowlist unset
+    // every tier is '*' and the label map is empty — nothing to check). No bundle
+    // is priced, so the only ids are the two below.
+    process.env.OPENWOP_BILLING_PLAN_FEATURES = JSON.stringify({ free: ['docs'], pro: ['docs', 'crm'], team: '*' });
     const res = await rawGet('/host/openwop-app/public/pricing');
     expect(res.status).toBe(200);
     const body = JSON.parse(res.body) as PricingBody;
-    expect(body.featureLabels).toBeDefined();
     const ids = new Set<string>();
     for (const t of body.tiers) if (Array.isArray(t.features)) for (const f of t.features) ids.add(f);
-    let checked = 0;
-    for (const id of ids) {
-      const reg = getToggleDefault(id)?.label;
-      if (!reg) continue;
-      expect(body.featureLabels![id]).toBe(reg);
-      checked++;
-    }
-    // Positive control: the label map is not vacuously satisfied.
-    if (ids.size > 0) expect(checked).toBeGreaterThan(0);
-    // Only ids the tiers or bundles name — not the whole registry.
-    for (const k of Object.keys(body.featureLabels!)) expect(typeof body.featureLabels![k]).toBe('string');
+    expect([...ids].sort()).toEqual(['crm', 'docs']); // fixture guard: the narrowing landed
+    // Literal names, cross-checked against the registry (the store's label source)
+    // so a renamed toggle fails here rather than silently re-pinning.
+    expect(getToggleDefault('crm')?.label).toBe('CRM');
+    expect(getToggleDefault('docs')?.label).toBe('Product documentation');
+    // Exactly the ids the tiers name — not the whole registry, not raw ids.
+    expect(body.featureLabels).toEqual({ crm: 'CRM', docs: 'Product documentation' });
+    expect(body.featureLabels).not.toHaveProperty('billing');
   });
 });
 
@@ -151,7 +160,6 @@ describe('public /bundle-pricing — sold separately', () => {
 
 describe('pricing CMS section — contactUrl (where an unpriced plan’s “Contact us” goes)', () => {
   it('keeps a safe internal or https contact link and drops an unsafe one', async () => {
-    const { validateSection } = await import('../src/features/cms/cmsService.js');
     const keep = validateSection({ type: 'pricing', data: { heading: 'Plans', contactUrl: '/p/contact' } });
     expect(keep.data.contactUrl).toBe('/p/contact');
     const ext = validateSection({ type: 'pricing', data: { contactUrl: 'https://example.com/sales' } });

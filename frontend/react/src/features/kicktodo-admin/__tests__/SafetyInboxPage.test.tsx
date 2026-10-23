@@ -17,6 +17,7 @@ import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/re
 import type * as ReviewClient from '../../../chat/reviews/reviewClient.js';
 import type { ReviewRequest } from '../../../chat/reviews/reviewClient.js';
 import { messages as en } from '../i18n/en.js';
+import { messages as chatEn } from '../../../chat/i18n/en.js';
 
 const listReviews = vi.fn<typeof ReviewClient.listReviews>();
 const decideReview = vi.fn<typeof ReviewClient.decideReview>();
@@ -24,7 +25,7 @@ vi.mock('../../../chat/reviews/reviewClient.js', async (importOriginal) => ({
   ...(await importOriginal<typeof ReviewClient>()),
   listReviews: (...a: Parameters<typeof ReviewClient.listReviews>) => listReviews(...a),
   decideReview: (...a: Parameters<typeof ReviewClient.decideReview>) => decideReview(...a),
-  getReview: vi.fn(),
+  getReview: vi.fn<typeof ReviewClient.getReview>(),
 }));
 vi.mock('../../../chat/reviews/ReviewHandoff.js', () => ({ ReviewHandoff: () => null }));
 vi.mock('../../../notifications/signalBus.js', () => ({ subscribeReviewSignal: () => () => {} }));
@@ -71,7 +72,7 @@ describe('SafetyInboxPage (KTD-4)', () => {
     decideReview.mockRejectedValue(new ReviewRequestError('conflict: already', 'conflict', 409));
     render(<SafetyInboxPage />);
     fireEvent.click(await screen.findByRole('button', { name: /Approve/ }));
-    expect(await screen.findByText(/resolved elsewhere/)).toBeTruthy();
+    expect(await screen.findByText(chatEn.reviewResolvedElsewhere)).toBeTruthy();
     expect(screen.queryByText(en.decisionRecorded)).toBeNull();
   });
 

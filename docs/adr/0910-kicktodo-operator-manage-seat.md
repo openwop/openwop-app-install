@@ -492,6 +492,23 @@ red against the guard removed, and the result is recorded in the PR.
 >   the key-issuing harness). The D4 root-membership condition is defence in depth: under
 >   D0 a removed root row already empties the union before the activation is read.
 >
+> **P3 record (2026-10-18).** `OperatorAccessPanel` on KickTodo People & access (listed
+> superadmins only): justification (≥ 10 chars), a 1/2/4/8 h duration, *Sign in again and
+> activate* — `reauthenticateForStepUp()` (`auth/stepUp.ts`, kept out of the entry chunk) re-authenticates in a popup with the person's
+> sign-in provider and returns a FORCED-fresh ID token, which the activation POST sends as
+> its bearer (set after `authedHeaders`, which would otherwise overwrite it); an MFA
+> challenge gets an authenticator-code step (`completeMfaSignIn` → `getFreshIdToken`).
+> `mfa_required` / `reauth_required` / `not_eligible` / `already_active` each render their
+> own state. A live activation shows minutes left, *Switch into the workspace* (the
+> `switchWorkspace` → `fireAuthChanged` → reload hand-off) and *End now*; the activation
+> list shows active / expired / ended early. Copy in en, es, fr, pt-BR.
+> **D1 listing — dropped, not deferred.** `GET /roles` does not list the operator role:
+> the SPA types every listed role id as a `BuiltInRoleId` and the view-as picker maps the
+> list directly, so listing an unassignable role would widen that type across every picker
+> to show something no one can choose. The role is visible where it matters — on this
+> panel. Email/password accounts cannot re-authenticate in a popup and are told to sign out
+> and back in (a fresh sign-in also satisfies G4).
+>
 > Test: `test/adr0910-operator-access.test.ts` (13, HTTP through a synthetic OIDC issuer
 > and a bound session) — D1 role shape; G1, G3, G4, G5, G6, G7; activation (8 h default,
 > viewer floor, manage granted, 409 on a second); revocation; use-time expiry with no
@@ -587,3 +604,30 @@ red against the guard removed, and the result is recorded in the PR.
 - [ ] P2 merged
 - [ ] P3 merged
 - [ ] P4 enacted on kicktodo.com and recorded here → `implemented`
+
+### Recovery review correction (2026-10-21, P3)
+
+The original panel selected any live workspace activation as the current person's
+own. It now matches the activation subject to the canonical backend-session user,
+so another operator remains history and cannot hide this person's activation form.
+If MFA succeeds but the subsequent activation request fails, retry restarts step-up:
+the successfully consumed MFA resolver cannot accept another code. Two interaction
+witnesses cover those paths; execution and the canonical gate remain pending.
+
+### Recovery review correction (2026-10-21, D7.3 / P2)
+
+The original sweep deleted by workspace/subject after reading and auditing an old
+activation. A concurrent reactivation could replace that row and then be deleted.
+The sweep now retires only the exact reviewed row through CAS. An inactive marker
+remains at the key, hidden from activation history and replaceable by the existing
+reactivation CAS; subject/tenant erasure still physically removes it. Retirement
+never revives when eligibility/membership returns. Only the winning sweep notifies
+and counts the transition.
+
+Audit remains first so a failed append leaves the ended row retryable. Concurrent
+replicas, or a crash after append and before retirement, can append duplicate
+records for the same activation id; this is at-least-once evidence, not exactly-once
+delivery. The earlier claim that the sweep records exactly once is corrected here.
+No committed audit is discarded and no failure is reported as an audited transition.
+Storage-boundary renewal, competing sweeps, reactivation and failed-audit witnesses
+are added; execution and canonical validation remain pending the serial slot.

@@ -1,3 +1,17 @@
+/**
+ * ADR 0867 / KB-2 — the pgvector vector adapter, in the default gate.
+ *
+ * The live path (`pgvector-live.test.ts`) runs only under `npm run ci:full`, so
+ * this file PINS THE LIVE SQL as exact literals — the tenant predicate above all.
+ * The fake runner below filters by its params and never reads the SQL, so the
+ * orchestration cases cannot see a dropped `WHERE tenant = …`; only the literal
+ * pins can (a cross-tenant read/delete through one shared table otherwise).
+ *
+ * Sabotages each case is red against (probed, /grade-tests 8f w1): the tenant
+ * predicate dropped from nearest / delete; the upsert no longer updating the
+ * embedding + metadata; the score reported as distance; the tenant param
+ * replaced; the dimension check loosened; the identifier guard widened.
+ */
 import { describe, expect, it } from 'vitest';
 import type { VectorSurface } from '../src/host/inMemorySurfaces.js';
 import {
@@ -11,15 +25,21 @@ describe('pgvector SQL builders (pins the live SQL — the unrunnable path)', ()
     expect(createTableSql('host_vectors', 3)).toContain('PRIMARY KEY (tenant, namespace, id)');
   });
   it('upsert uses ON CONFLICT', () => {
-    expect(upsertSql('host_vectors')).toContain('ON CONFLICT (tenant, namespace, id) DO UPDATE');
-    expect(upsertSql('host_vectors')).toContain('$4::vector');
+    expect(upsertSql('host_vectors')).toBe(
+      'INSERT INTO host_vectors (tenant, namespace, id, embedding, metadata) VALUES ($1, $2, $3, $4::vector, $5::jsonb) '
+      + 'ON CONFLICT (tenant, namespace, id) DO UPDATE SET embedding = EXCLUDED.embedding, metadata = EXCLUDED.metadata',
+    );
   });
   it('nearest uses the cosine distance operator, similarity score, ordered', () => {
-    const s = nearestSql('host_vectors');
-    expect(s).toContain('1 - (embedding <=> $1::vector) AS score');
-    expect(s).toContain('ORDER BY embedding <=> $1::vector LIMIT $4');
+    // exact: the tenant + namespace predicate is part of the pin
+    expect(nearestSql('host_vectors')).toBe(
+      'SELECT id, metadata, 1 - (embedding <=> $1::vector) AS score FROM host_vectors '
+      + 'WHERE tenant = $2 AND namespace = $3 ORDER BY embedding <=> $1::vector LIMIT $4',
+    );
   });
-  it('delete by id array', () => { expect(deleteSql('host_vectors')).toContain('id = ANY($3)'); });
+  it('delete by id array', () => {
+    expect(deleteSql('host_vectors')).toBe('DELETE FROM host_vectors WHERE tenant = $1 AND namespace = $2 AND id = ANY($3)');
+  });
   it('rejects unsafe table identifiers', () => { expect(() => createTableSql('a; DROP TABLE x', 3)).toThrow(/unsafe/); });
 });
 

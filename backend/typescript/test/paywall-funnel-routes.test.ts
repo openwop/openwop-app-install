@@ -11,10 +11,22 @@
  *      operator is served the same rows) and joins counts, the checkout ledger
  *      and live grants.
  *   4. Counting never throws, even when storage does.
+ *
+ * ADR 0820 §7. Every case seeds its OWN counts: `beforeEach` drops the buffer
+ * and the stored rows (`__resetPaywallFunnel`), so the file passes under
+ * `--sequence.shuffle`. The window cases freeze `Date` at one instant so the
+ * test's "today" and the route's cannot straddle UTC midnight.
+ *
+ * Sabotages each case is red against (probed, /grade-tests 8f w1): the guard's
+ * `notePaywallEvent` call removed or its surface hard-coded to `route`; the
+ * beacon's client-refusal filter or telemetry gate removed; `requireSuperadmin`
+ * dropped from either funnel route; a `60`-day window admitted; the window loop
+ * off by one; the flush / note catch rethrowing; the buffer not coalescing; the
+ * live-grants read dropped from the join.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/index.js';
 import { resolveOne, saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
@@ -25,6 +37,7 @@ import {
   type PaywallCountRow,
 } from '../src/host/paywallFunnel.js';
 import type { FunnelReport } from '../src/features/billing/funnelReport.js';
+import type { WeekOverWeek } from '../src/features/billing/funnelWeeklySummary.js';
 
 let server: http.Server;
 let BASE: string;
@@ -55,6 +68,18 @@ const toggle = async (id: string, status: 'on' | 'off') => {
   await saveConfig({ ...d, status }, 'test');
 };
 const rows = async (tenantId: string): Promise<PaywallCountRow[]> => (await listPaywallCounts(7)).filter((r) => r.tenantId === tenantId);
+/** The exact `requireSuperadmin(req, 'Paywall funnel')` refusal: a 403 from any other gate does not match. */
+const NOT_SUPERADMIN = { error: 'forbidden', message: 'Paywall funnel requires a superadmin principal.' };
+async function expectSuperadminRefusal(res: Response): Promise<void> {
+  expect(res.status).toBe(403);
+  expect(await res.json()).toMatchObject(NOT_SUPERADMIN);
+}
+/** Freeze `Date` (only) at the current instant for one case, so the test and the route share one "now". */
+async function atFrozenNow<T>(fn: () => Promise<T>): Promise<T> {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(new Date());
+  try { return await fn(); } finally { vi.useRealTimers(); }
+}
 const sum = (rs: PaywallCountRow[], metric: string, surface?: string) =>
   rs.filter((r) => r.metric === metric && (!surface || r.surface === surface)).reduce((n, r) => n + r.count, 0);
 
@@ -77,23 +102,32 @@ beforeAll(async () => {
     id: 'evt_funnel_paid', type: 'customer.subscription.created',
     data: { object: { id: 'sub_funnel_paid', status: 'active', metadata: { tenantId: PAID, bundleId: 'agents' }, items: { data: [{ price: { id: 'price_agents' } }] } } },
   });
+});
+
+beforeEach(async () => {
   await __resetPaywallFunnel();
 });
 
 afterAll(async () => {
+  await __resetPaywallFunnel();
   for (const k of ['OPENWOP_TEST_AUTH_ENABLED', 'OPENWOP_SUPERADMIN_TENANTS', 'OPENWOP_BILLING_BUNDLE_PRICES', 'OPENWOP_BILLING_PLAN_FEATURES']) delete process.env[k];
   await new Promise<void>((res) => server.close(() => res()));
 });
 
 const twinGrants = (cookie: string) => get(cookie, '/host/openwop-app/profiles/me/twin-grants');
+const beacon = (cookie: string, events: unknown) => post(cookie, '/host/openwop-app/analytics/paywall', { events });
+const sample = [
+  { metric: 'impression', featureId: 'twin-recall', surface: 'sidebar' },
+  { metric: 'impression', featureId: 'twin-recall', surface: 'locked-page' },
+  { metric: 'click', featureId: 'twin-recall', surface: 'sidebar' },
+];
 
 describe('strategy §8 — plan refusals are counted at the verdict', () => {
   it('a route plan 403 counts once per refusal under `route`; an entitled tenant adds nothing', async () => {
     expect((await twinGrants(free)).status).toBe(403);
     expect((await twinGrants(free)).status).toBe(403);
-    const served = await twinGrants(paid); // positive control
-    expect(served.status).not.toBe(403);
-    expect(served.status).toBeLessThan(500);
+    const served = await twinGrants(paid); // positive control: the entitled tenant is served
+    expect(served.status).toBe(200);
     const mine = await rows(FREE);
     expect(sum(mine, 'refusal', 'route')).toBe(2);
     expect(mine.find((r) => r.metric === 'refusal')).toMatchObject({ featureId: 'twin-recall', bundleId: 'agents' });
@@ -101,14 +135,17 @@ describe('strategy §8 — plan refusals are counted at the verdict', () => {
   });
 
   it('a resolveOne blockedBy:plan counts under `lane`', async () => {
-    const before = sum(await rows(FREE), 'refusal', 'lane');
     expect((await resolveOne('twin-recall', { tenantId: FREE }))?.blockedBy).toBe('plan');
     expect((await resolveOne('twin-recall', { tenantId: PAID }))?.enabled).toBe(true);
-    expect(sum(await rows(FREE), 'refusal', 'lane')).toBe(before + 1);
+    const mine = await rows(FREE);
+    expect(sum(mine, 'refusal', 'lane')).toBe(1);
+    expect(sum(mine, 'refusal', 'route')).toBe(0);
     expect(await rows(PAID)).toEqual([]);
   });
 
   it('counting never throws: bad input is refused, and a storage fault is swallowed', async () => {
+    // The ONE deliberate cast in this file: a getter that throws is not a value the
+    // type can describe, and it is exactly the hostile input the catch must swallow.
     const hostile = { get tenantId(): string { throw new Error('boom'); } } as unknown as Parameters<typeof notePaywallEvent>[0];
     expect(() => notePaywallEvent(hostile)).not.toThrow();
     expect(notePaywallEvent(hostile)).toBe(false);
@@ -132,21 +169,21 @@ describe('strategy §8 — plan refusals are counted at the verdict', () => {
 });
 
 describe('strategy §8 — the SPA paywall beacon rides nav telemetry', () => {
-  const beacon = (cookie: string, events: unknown) => post(cookie, '/host/openwop-app/analytics/paywall', { events });
-  const sample = [
-    { metric: 'impression', featureId: 'twin-recall', surface: 'sidebar' },
-    { metric: 'impression', featureId: 'twin-recall', surface: 'locked-page' },
-    { metric: 'click', featureId: 'twin-recall', surface: 'sidebar' },
-  ];
 
   it('telemetry OFF: 404, and nothing is stored', async () => {
+    // `toggle()` silently skips an unregistered id: without the toggle this case would test nothing.
+    expect(getToggleDefault('workspace-nav-telemetry')).toBeDefined();
     await toggle('workspace-nav-telemetry', 'off');
-    const res = await beacon(free, sample);
-    expect(res.status).toBe(404);
-    expect(sum(await rows(FREE), 'impression') + sum(await rows(FREE), 'click')).toBe(0);
+    try {
+      const res = await beacon(free, sample);
+      expect(res.status).toBe(404);
+      expect(await rows(FREE)).toEqual([]);
+    } finally { await toggle('workspace-nav-telemetry', 'on'); }
   });
 
   it('telemetry ON: impressions + clicks recorded for a tenant the plan refuses; a client refusal and junk are dropped', async () => {
+    expect((await twinGrants(free)).status).toBe(403);
+    expect((await twinGrants(free)).status).toBe(403); // 2 server refusals the client must not add to
     await toggle('workspace-nav-telemetry', 'on');
     const res = await beacon(free, [
       ...sample,
@@ -168,13 +205,15 @@ describe('strategy §8 — GET billing/admin/funnel (superadmin)', () => {
   const path = (days?: string) => `/host/openwop-app/billing/admin/funnel${days ? `?days=${days}` : ''}`;
 
   it('refuses a customer and serves the operator', async () => {
-    expect((await get(free, path('7'))).status).toBe(403);
-    expect((await get(paid, path('30'))).status).toBe(403);
+    await expectSuperadminRefusal(await get(free, path('7')));
+    await expectSuperadminRefusal(await get(paid, path('30')));
     const res = await get(operator, path('7'));
     expect(res.status).toBe(200);
+    expect((await res.json() as FunnelReport).days).toBe(7);
   });
 
-  it('serves 7, 30 and 90 days; rejects any other window', async () => {
+  it('serves 7, 30 and 90 days; rejects any other window', () => atFrozenNow(async () => {
+    for (const days of [7, 30]) expect((await (await get(operator, path(String(days)))).json() as FunnelReport).days).toBe(days);
     const r90 = await get(operator, path('90'));
     expect(r90.status).toBe(200);
     const body = await r90.json() as FunnelReport;
@@ -182,10 +221,14 @@ describe('strategy §8 — GET billing/admin/funnel (superadmin)', () => {
     // the window is 90 UTC days INCLUDING today: since = 00:00 of today − 89 days
     const today = new Date(new Date().toISOString().slice(0, 10) + 'T00:00:00.000Z').getTime();
     expect(body.since).toBe(new Date(today - 89 * 86_400_000).toISOString());
-    for (const bad of ['60', '0', 'abc', '91']) expect((await get(operator, path(bad))).status).toBe(400);
-  });
+    for (const bad of ['60', '0', 'abc', '91']) {
+      const r = await get(operator, path(bad));
+      expect(r.status).toBe(400);
+      expect(await r.json()).toMatchObject({ error: 'validation_error', message: '`days` must be 7, 30 or 90.' });
+    }
+  }));
 
-  it('a 90-day window counts a day-89 row and drops a day-90 row', async () => {
+  it('a 90-day window counts a day-89 row and drops a day-90 row', () => atFrozenNow(async () => {
     const counts = new DurableCollection<PaywallCountRow>('paywall:funnel-counts', (r) => `${r.day}::${r.tenantId}::${r.metric}::${r.product ?? r.featureId}::${r.surface}`);
     const dayAgo = (n: number) => new Date(Date.now() - n * 86_400_000).toISOString().slice(0, 10);
     const base = { tenantId: 't-old', featureId: '', bundleId: 'crm', surface: 'billing' as const, product: 'bundle:crm', updatedAt: new Date().toISOString() };
@@ -197,25 +240,31 @@ describe('strategy §8 — GET billing/admin/funnel (superadmin)', () => {
     const crm90 = r90.checkouts.find((c) => c.product === 'bundle:crm')!;
     expect(crm90).toMatchObject({ started: 2, completed: 1 });
     expect(r30.checkouts.find((c) => c.product === 'bundle:crm')).toBeUndefined();
-    for (const r of [dayAgo(89), dayAgo(90), dayAgo(45)]) await counts.delete(`${r}::t-old::checkout-started::bundle:crm::billing`).catch(() => undefined);
-    await counts.delete(`${dayAgo(45)}::t-old::checkout-completed::bundle:crm::billing`);
-  });
+    // (the seeded rows are dropped by the next case's `__resetPaywallFunnel`)
+  }));
 
   it('GET …/admin/funnel/weekly is superadmin-only: a customer is refused, the operator served', async () => {
     const weekly = '/host/openwop-app/billing/admin/funnel/weekly';
-    expect((await get(free, weekly)).status).toBe(403);
-    expect((await get(paid, weekly)).status).toBe(403);
+    await expectSuperadminRefusal(await get(free, weekly));
+    await expectSuperadminRefusal(await get(paid, weekly));
+    expect((await twinGrants(free)).status).toBe(403); // one refusal this week, none the week before
     const res = await get(operator, weekly);
     expect(res.status).toBe(200);
-    const body = await res.json() as { week: string; current: { totals: Record<string, number> }; previous: unknown; change: Record<string, unknown> };
+    const body = await res.json() as WeekOverWeek;
     expect(body.week).toMatch(/^\d{4}-W\d{2}$/);
-    expect(body.current.totals).toHaveProperty('grantsEnded');
-    expect(body.change).toHaveProperty('impressions');
+    expect(body.current.totals).toMatchObject({ refusals: 1, impressions: 0, clicks: 0 });
+    expect(body.previous.totals).toMatchObject({ refusals: 0 });
+    expect(body.change.refusals).toBeNull(); // previous is 0: no percentage invented
   });
 
   it('joins paywall counts, the checkout ledger and live grants per bundle', async () => {
     // The checkout ledger is billing's own `billing:checkout` (re-opened here the way
     // the demo seeders do): one live session started and paid, one started only, one demo.
+    expect((await twinGrants(free)).status).toBe(403);
+    expect((await twinGrants(free)).status).toBe(403);
+    expect((await resolveOne('twin-recall', { tenantId: FREE }))?.blockedBy).toBe('plan');
+    await toggle('workspace-nav-telemetry', 'on');
+    expect((await beacon(free, sample)).status).toBe(202);
     const ledger = new DurableCollection<Record<string, unknown>>('billing:checkout', (s) => String(s.sessionId));
     const now = new Date().toISOString();
     await ledger.put({ sessionId: 'cs_f1', url: '', priceId: 'price_agents', mode: 'live', createdAt: now, tenantId: FREE, kind: 'bundle', fulfilledAt: now });
@@ -228,7 +277,7 @@ describe('strategy §8 — GET billing/admin/funnel (superadmin)', () => {
       impressions: 2, clicks: 1, checkoutsStarted: 2, checkoutsCompleted: 1, activeGrants: 1,
       clickThroughRate: 0.5, checkoutCompletionRate: 0.5,
     });
-    expect(agents.refusals).toBeGreaterThanOrEqual(3); // 2 route + ≥1 lane
+    expect(agents.refusals).toBe(3); // 2 route + 1 lane, all seeded above
     expect(agents.refusedTenants).toBe(1); // only FREE was ever refused twin-recall
     expect(report.checkouts.find((c) => c.product === 'bundle:agents')).toMatchObject({ started: 2, completed: 1, demoStarted: 1 });
     const twin = report.features.find((f) => f.featureId === 'twin-recall')!;

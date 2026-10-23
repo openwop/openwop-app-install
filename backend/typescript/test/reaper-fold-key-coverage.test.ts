@@ -13,8 +13,14 @@
  * All exercise the REAL paths (`purgeTenantHostExt`, `storage.reassignTenant`,
  * `storage.deleteAllTenantData`, and the real budget writers/readers) so a
  * bucket-shape or field drift breaks the test.
+ *
+ * GEN-6's media counter is keyed on `todayUtc()`; that case fakes only `Date`
+ * (pinned to noon UTC on its `day`) so a write and its read can never straddle
+ * UTC midnight. Sabotage-witnessed (/grade-tests 8f wave 1, 8fw1g3-rk-*): the
+ * stale-marker sweep, the purge fan-out, the codeexec and imagegen content
+ * keys, and run_budget's teardown, move and collision rules.
  */
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
 import {
   initHostExtPersistence,
@@ -75,20 +81,28 @@ describe('GEN-1d — tenant teardown leaves no hostextidx marker residue', () =>
 describe('GEN-6 — codeexec/imagegen budgets are reaped on tenant teardown', () => {
   const day = '2026-07-16';
   it('deletes the folded/deleted tenant`s daily counters; a different tenant survives', async () => {
-    await recordCodeExec('user:aaa', day);
-    await recordCodeExec('user:aaa', day);
-    await recordMediaUsage('user:aaa', 'images', 3); // today-keyed (mediaBudget owns the day)
-    await recordCodeExec('user:bbb', day); // different tenant
-    expect((await checkCodeExecBudget('user:aaa', day)).used).toBe(2);
-    expect((await checkMediaBudget('user:aaa', 'images', 1)).used).toBe(3);
+    // mediaBudget keys on todayUtc(): pin the clock (Date only) so the write and
+    // the reads below share one UTC day.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date(`${day}T12:00:00.000Z`));
+    try {
+      await recordCodeExec('user:aaa', day);
+      await recordCodeExec('user:aaa', day);
+      await recordMediaUsage('user:aaa', 'images', 3); // today-keyed (mediaBudget owns the day)
+      await recordCodeExec('user:bbb', day); // different tenant
+      expect((await checkCodeExecBudget('user:aaa', day)).used).toBe(2);
+      expect((await checkMediaBudget('user:aaa', 'images', 1)).used).toBe(3);
 
-    await purgeTenantHostExt('user:aaa');
+      await purgeTenantHostExt('user:aaa');
 
-    // Reaped — the counters reset (the row is gone, not just the tenant field).
-    expect((await checkCodeExecBudget('user:aaa', day)).used).toBe(0);
-    expect((await checkMediaBudget('user:aaa', 'images', 1)).used).toBe(0);
-    // The other tenant is untouched.
-    expect((await checkCodeExecBudget('user:bbb', day)).used).toBe(1);
+      // Reaped — the counters reset (the row is gone, not just the tenant field).
+      expect((await checkCodeExecBudget('user:aaa', day)).used).toBe(0);
+      expect((await checkMediaBudget('user:aaa', 'images', 1)).used).toBe(0);
+      // The other tenant is untouched.
+      expect((await checkCodeExecBudget('user:bbb', day)).used).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

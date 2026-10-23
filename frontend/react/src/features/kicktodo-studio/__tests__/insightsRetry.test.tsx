@@ -1,11 +1,13 @@
 /**
  * CS-4 (KickTodo UX-ASSESSMENT) — Creator insights: a failed load offers a way
- * back (DESIGN.md §4.6), not a page reload. Retry re-runs the load and the
- * insights render.
+ * back (DESIGN.md §4.6), not a page reload, and the failed read is never shown
+ * as "No products yet". Retry re-runs the load and the insights render WITH the
+ * re-read rows: the products figure ("1 product") and the row's challenge id.
  *
- * Breaks it: dropping the Retry button, or a Retry that does not re-run `load`
- * (sabotage-witnessed: onClick reduced to a no-op turns the products figure
- * assertion red).
+ * Breaks it (sabotage-witnessed): dropping the Retry button, or a Retry that does
+ * not re-run `load` (onClick reduced to a no-op — the products figure never
+ * appears); a load that drops the rows it read (`setRows([])` — the products
+ * figure assertion goes red).
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, cleanup, waitFor, fireEvent } from '@testing-library/react';
@@ -54,10 +56,15 @@ describe('CreatorInsightsPage — failed load recovery (CS-4)', () => {
     render(<MemoryRouter><CreatorInsightsPage /></MemoryRouter>);
     await waitFor(() => expect(screen.getByText(en.insightsError)).toBeTruthy());
     expect(screen.queryByRole('region', { name: en.earningsHeading })).toBeNull();
+    expect(screen.queryByText(en.insightsEmptyTitle)).toBeNull();
 
     fireEvent.click(screen.getByRole('button', { name: commonEn.retry }));
     await waitFor(() => expect(screen.getByRole('region', { name: en.earningsHeading })).toBeTruthy());
     expect(screen.queryByText(en.insightsError)).toBeNull();
+    // The re-read rows render: the products figure and the row (literals, not computed).
+    expect(screen.getByText('1 product')).toBeTruthy();
+    expect(screen.getByText('chal:1 · v1')).toBeTruthy();
+    expect(screen.queryByText(en.insightsEmptyTitle)).toBeNull();
     expect(seat.getMyRevenue).toHaveBeenCalledTimes(2);
   });
 });

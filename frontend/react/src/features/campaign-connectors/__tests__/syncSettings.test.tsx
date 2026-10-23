@@ -8,24 +8,30 @@
  *  - the backfill refuses a day count outside 1–90 before calling, reports
  *    progress with a Continue action, and refreshes the KPI on progress/done.
  *
- * Sabotage that turns it red: render the form on a failed read; send
- * conversionActionTypes for google; drop the 1–90 guard; skip onSynced.
+ * Sabotage-witnessed (wave 55/56 probes, each red here): defaults rendered as
+ * saved on a failed read; conversionActionTypes hard-coded to null, or sent
+ * for google; the account list split on commas only; the card rendered with no
+ * live reader; either bound of the 1–90 guard moved; onSynced skipped on
+ * progress; Continue offered only on rate_limited.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, waitFor, fireEvent } from '@testing-library/react';
 import type { ConnectorSettings } from '../campaignConnectorsClient.js';
 
-const getConnectorSettings = vi.fn();
-const saveConnectorSettings = vi.fn();
-const runBackfill = vi.fn();
+type Client = typeof import('../campaignConnectorsClient.js');
+const { getConnectorSettings, saveConnectorSettings, runBackfill } = vi.hoisted(() => ({
+  getConnectorSettings: vi.fn<Client['getConnectorSettings']>(),
+  saveConnectorSettings: vi.fn<Client['saveConnectorSettings']>(),
+  runBackfill: vi.fn<Client['runBackfill']>(),
+}));
 
 vi.mock('../campaignConnectorsClient.js', async (orig) => {
   const actual = await orig<Record<string, unknown>>();
   return {
     ...actual,
-    getConnectorSettings: (...a: unknown[]) => getConnectorSettings(...a),
-    saveConnectorSettings: (...a: unknown[]) => saveConnectorSettings(...a),
-    runBackfill: (...a: unknown[]) => runBackfill(...a),
+    getConnectorSettings,
+    saveConnectorSettings,
+    runBackfill,
   };
 });
 
@@ -45,25 +51,39 @@ describe('SyncSettingsCard (ADR 0907 D3)', () => {
   it('a failed settings read says so and shows no form', async () => {
     getConnectorSettings.mockRejectedValue(new Error('boom'));
     render(<SyncSettingsCard orgId="org-1" platforms={LIVE} onSynced={() => {}} />);
-    expect(await screen.findByRole('alert')).toBeTruthy();
+    // The literal: the same alert slot also carries save/backfill errors.
+    expect((await screen.findByRole('alert')).textContent).toBe("Couldn't load the sync settings. Nothing shown here is a saved value.");
     expect(screen.queryByRole('button', { name: /save sync settings/i })).toBeNull();
   });
 
   it('saves the parsed account list and Meta action types; empty types clear to null', async () => {
     getConnectorSettings.mockResolvedValue(settings());
-    saveConnectorSettings.mockImplementation(async (_o: string, _p: string, input: Record<string, unknown>) => settings(input as Partial<ConnectorSettings>));
+    saveConnectorSettings.mockImplementation(async (_o, _p, input) => settings({
+      syncScope: input.syncScope, adAccountIds: input.adAccountIds,
+      ...(input.conversionActionTypes ? { conversionActionTypes: input.conversionActionTypes } : {}),
+    }));
     render(<SyncSettingsCard orgId="org-1" platforms={LIVE} onSynced={() => {}} />);
     const scope = await screen.findByLabelText(/campaigns to sync/i);
     fireEvent.change(scope, { target: { value: 'account' } });
     fireEvent.change(screen.getByLabelText(/ad account ids/i), { target: { value: 'act_1, act_2  act_3' } });
+    // Non-empty Meta action types are sent parsed.
+    fireEvent.change(screen.getByLabelText(/conversion action types/i), { target: { value: 'offsite_conversion.fb_pixel_purchase, lead' } });
     fireEvent.click(screen.getByRole('button', { name: /save sync settings/i }));
     await waitFor(() => expect(saveConnectorSettings).toHaveBeenCalledTimes(1));
-    expect(saveConnectorSettings).toHaveBeenCalledWith('org-1', 'meta', { syncScope: 'account', adAccountIds: ['act_1', 'act_2', 'act_3'], conversionActionTypes: null });
+    expect(saveConnectorSettings).toHaveBeenLastCalledWith('org-1', 'meta', {
+      syncScope: 'account', adAccountIds: ['act_1', 'act_2', 'act_3'],
+      conversionActionTypes: ['offsite_conversion.fb_pixel_purchase', 'lead'],
+    });
     expect(await screen.findByText(/sync settings saved/i)).toBeTruthy();
+    // Emptied, they clear back to the defaults with null.
+    fireEvent.change(screen.getByLabelText(/conversion action types/i), { target: { value: '' } });
+    fireEvent.click(screen.getByRole('button', { name: /save sync settings/i }));
+    await waitFor(() => expect(saveConnectorSettings).toHaveBeenCalledTimes(2));
+    expect(saveConnectorSettings).toHaveBeenLastCalledWith('org-1', 'meta', { syncScope: 'account', adAccountIds: ['act_1', 'act_2', 'act_3'], conversionActionTypes: null });
   });
 
   it('google never sends conversion action types', async () => {
-    getConnectorSettings.mockImplementation(async (_o: string, p: string) => settings({ platform: p as 'meta' | 'google' }));
+    getConnectorSettings.mockImplementation(async (_o, p) => settings({ platform: p }));
     saveConnectorSettings.mockImplementation(async () => settings({ platform: 'google' }));
     render(<SyncSettingsCard orgId="org-1" platforms={LIVE} onSynced={() => {}} />);
     fireEvent.change(await screen.findByLabelText(/^platform/i), { target: { value: 'google' } });
@@ -91,10 +111,15 @@ describe('SyncSettingsCard (ADR 0907 D3)', () => {
     const onSynced = vi.fn();
     render(<SyncSettingsCard orgId="org-1" platforms={LIVE} onSynced={onSynced} />);
     const days = await screen.findByLabelText(/days to backfill/i);
-    fireEvent.change(days, { target: { value: '120' } });
-    fireEvent.click(screen.getByRole('button', { name: /start backfill/i }));
-    expect(await screen.findByText(/from 1 to 90/i)).toBeTruthy();
-    expect(runBackfill).not.toHaveBeenCalled();
+    // Both bounds: 0 (below) and 120 (above) are refused without a call. The
+    // handler reaches runBackfill synchronously on the click, so the call
+    // absence is the per-bound discriminator (the alert from 0 persists).
+    for (const bad of ['0', '120']) {
+      fireEvent.change(days, { target: { value: bad } });
+      fireEvent.click(screen.getByRole('button', { name: /start backfill/i }));
+      expect(runBackfill).not.toHaveBeenCalled();
+      expect((await screen.findByRole('alert')).textContent).toBe('Enter a whole number of days from 1 to 90.');
+    }
 
     fireEvent.change(days, { target: { value: '30' } });
     fireEvent.click(screen.getByRole('button', { name: /start backfill/i }));

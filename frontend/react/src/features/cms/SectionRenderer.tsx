@@ -211,17 +211,39 @@ function HeroSchematic(): JSX.Element {
   );
 }
 
-/** A calm momentum path: one human-sized next step, then visible progress. */
+/** The journey motif's geometry (viewBox 0 0 560 250): a week's trail with one
+ *  missed day, the detour that recovers it, and the goal. */
+const JOURNEY_TRAIL = 'M30 190 C 90 190, 100 120, 150 120 S 220 170, 250 160 C 290 150, 300 70, 350 80 S 420 150, 460 120 S 510 60, 530 60';
+const JOURNEY_DETOUR = 'M250 160 C 262 205, 300 214, 318 196';
+const JOURNEY_DAYS: readonly { x: number; y: number; done: boolean }[] = [
+  { x: 30, y: 190, done: true },
+  { x: 150, y: 120, done: true },
+  { x: 250, y: 160, done: false },
+  { x: 350, y: 80, done: true },
+  { x: 460, y: 120, done: true },
+];
+
+/** A calm momentum path: done days, one missed day and its detour, then the goal.
+ *  Decoration only (aria-hidden). The markup is the FINISHED picture; the draw-in,
+ *  the node pops and the single goal pulse are CSS that runs only when neither
+ *  the OS nor the user's override asks for reduced motion, so a reduced-motion
+ *  visitor sees the final state, never a half-drawn one. */
 function HeroJourney(): JSX.Element {
   return (
-    <svg className="fp-hero__schematic fp-hero__journey" viewBox="0 0 420 260" aria-hidden="true" preserveAspectRatio="xMidYMid meet">
-      <path className="fp-journey__wash" d="M34 228 C92 178 104 205 156 151 S245 82 382 40" />
-      <path className="fp-journey__path" d="M34 228 C92 178 104 205 156 151 S245 82 382 40" />
-      <circle className="fp-journey__step" cx="35" cy="227" r="9" />
-      <circle className="fp-journey__step" cx="156" cy="151" r="9" />
-      <circle className="fp-journey__step" cx="272" cy="78" r="9" />
-      <circle className="fp-journey__goal" cx="382" cy="40" r="22" />
-      <path className="fp-journey__check" d="M371 40 l8 8 15-18" />
+    <svg className="fp-hero__schematic fp-hero__journey" viewBox="0 0 560 250" aria-hidden="true" focusable="false" preserveAspectRatio="xMidYMid meet">
+      <path className="fp-journey__wash" d={JOURNEY_TRAIL} />
+      <path className="fp-journey__path" d={JOURNEY_TRAIL} pathLength={1} />
+      <path className="fp-journey__detour" d={JOURNEY_DETOUR} />
+      {JOURNEY_DAYS.map((day, i) => (
+        <g key={`${day.x}-${day.y}`} className={`fp-journey__node fp-journey__node--${day.done ? 'done' : 'missed'} fp-journey__node--n${i + 1}`}>
+          <circle cx={day.x} cy={day.y} r={15} />
+          {day.done ? <path className="fp-journey__check" d={`M${day.x - 6} ${day.y} l4 4 8 -9`} /> : null}
+        </g>
+      ))}
+      <g className="fp-journey__node fp-journey__node--goal fp-journey__node--n6">
+        <circle cx={530} cy={60} r={17} />
+        <path className="fp-journey__flag" d="M524 70 V50 L537 55 L524 60 Z" />
+      </g>
     </svg>
   );
 }
@@ -593,10 +615,13 @@ function PublicSection({ section }: { section: Section }): JSX.Element {
           </section>
         );
       }
+      // The journey follows the copy in the DOM so a phone can show it UNDER the
+      // copy; on a wide screen it is absolutely placed either way.
       return (
         <section className={`cms-public-section fp-hero fp-hero--${visual}`}>
-          <HeroArtwork d={d} visual={visual} />
+          {visual === 'journey' ? null : <HeroArtwork d={d} visual={visual} />}
           <div className="fp-shell fp-hero__inner">{copy}</div>
+          {visual === 'journey' ? <HeroArtwork d={d} visual={visual} /> : null}
         </section>
       );
       }

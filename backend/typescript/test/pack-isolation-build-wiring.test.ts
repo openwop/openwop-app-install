@@ -25,7 +25,10 @@
  *
  * The `pack-trust-config.test.ts` Dockerfile pin is the precedent: read the
  * build input as text and assert the claim, because the artifact it produces is
- * not built here.
+ * not built here. That is this file's honest CEILING: it pins source text, not
+ * the built artifact. The text is read with comments STRIPPED and matched as
+ * whole anchored lines, so a commented-out call or a constant named only in a
+ * comment is a red (probe 8fw1g1-bw-build-commented was vacuous before).
  */
 
 import { describe, it, expect } from 'vitest';
@@ -47,19 +50,23 @@ const shared = (await import(
 const { ISOLATION_WORKER_BASENAME, ISOLATION_WORKER_ENTRY, isolationWorkerBuildOptions } = shared;
 
 const pkgRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
-const read = (rel: string): string => readFileSync(join(pkgRoot, rel), 'utf-8');
+/** Source text with block comments and whole-line `//` comments removed. A
+ *  trailing `// …` after code is kept (it could sit inside a string). */
+const stripComments = (src: string): string =>
+  src.replace(/\/\*[\s\S]*?\*\//g, '').split('\n').filter((l) => !l.trim().startsWith('//')).join('\n');
+const read = (rel: string): string => stripComments(readFileSync(join(pkgRoot, rel), 'utf-8'));
 
 describe('the production worker artifact is actually built', () => {
   it('`scripts/build.mjs` imports the shared options and calls it', () => {
     const build = read('scripts/build.mjs');
-    expect(build).toContain("from './lib/isolation-worker-build.mjs'");
-    expect(build).toMatch(/await build\(isolationWorkerBuildOptions\(pkgRoot\)\)/);
+    expect(build).toMatch(/^import \{ isolationWorkerBuildOptions \} from '\.\/lib\/isolation-worker-build\.mjs';$/m);
+    expect(build).toMatch(/^await build\(isolationWorkerBuildOptions\(pkgRoot\)\);$/m);
   });
 
   it('the dev/test lane resolves the SAME basename the build emits', () => {
     // Two constants, one value. A rename on either side without the other means
     // production builds `a` and dev looks for `b`, and only production breaks.
-    expect(read('src/host/isolation/workerEntry.ts')).toContain(`'${ISOLATION_WORKER_BASENAME}'`);
+    expect(read('src/host/isolation/workerEntry.ts')).toContain(`\nconst WORKER_BASENAME = '${ISOLATION_WORKER_BASENAME}';\n`);
     expect(isolationWorkerBuildOptions('/pkg').outfile).toBe(`/pkg/lib/${ISOLATION_WORKER_BASENAME}`);
   });
 

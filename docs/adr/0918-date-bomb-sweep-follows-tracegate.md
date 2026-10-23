@@ -1,6 +1,6 @@
 # ADR 0918 — The frontend lane enters Tracegate early, and the date-bomb sweep follows its selection
 
-Status: Accepted (user decision 2026-10-18) — implementation in this PR
+Status: implemented (#4962, train 147, 2026-10-18; P2 measured 2026-10-22)
 
 ## Context
 
@@ -110,11 +110,33 @@ recorded on a run that skipped or failed the whole sweep.
 | Phase | Change | Witness |
 |---|---|---|
 | P1 | D1 `LANE_ENTRY.frontend`; D2 sweep selection in `ci.sh`; D3 `full-done` order + daemon | `scripts/test-tracegate.mjs` (the old pin "frontend does NOT enter early" went red on the change; it now asserts early entry at 20% and the 1-day floor) |
-| P2 | Measure: frontend vitest + sweep minutes on the first 5 enforce gates vs the shadow gates above | gate logs |
+| P2 | Measure: frontend vitest + sweep minutes on the first 5 enforce gates vs the shadow gates above | gate logs: see Open questions (measured 2026-10-22) |
 
 ## Open questions
 
-- [ ] P2 measurement (above).
+- [x] P2 measurement (2026-10-22), from the gate logs of the first gates after
+  merge. Each figure is ci.sh's own "frontend vitest ran Ns" plus the step
+  offsets around the sweep:
+
+  | Gate | Frontend selection | Frontend vitest | Date-bomb sweep |
+  |---|---|---|---|
+  | 147 (the merging gate) | 213 of 1,056 (0 must-run + 213 audit) | 60 s | 44 s on 213 |
+  | 152 | 206 of 1,060 | 59 s | 44 s on 206 |
+  | 154, first gate (lockfile changed, so the lane ran whole) | 1,061 of 1,061 | 304 s | 216 s whole |
+  | 154, rebuilt on the moved main | 241 of 1,061 | 86 s | 58 s on 241 |
+  | 159 | 227 of 1,061 | 79 s | 61 s on 227 |
+
+  The shadow-era gates ran 5–8 min of frontend vitest plus 3.5–6 min of sweep.
+  Under enforce that is now about 1–1.5 min plus about 1 min. The ~20% early
+  audit is most of what still runs: 0–79 files were must-run on these gates.
+  The lane recorded 0 misses. The lockfile gate shows the floor: a global
+  input still runs everything, and the sweep goes whole with it.
+
+  **A consequence found 2026-10-22 (D3, as designed, at a cost):** the
+  daemon's nightly no longer writes a frontend `full-done`, because it runs no
+  sweep. So on a machine that gates rarely, the next gate after 24 h runs the
+  frontend lane FULL once, then enforces again. Giving the daemon the sweep
+  would remove that run, but it is not needed for correctness.
 - [ ] **The slow backend half, ADR TBD.** On the slow gates, 1,000–1,260 of
   2,640 backend files ran because the diff touched code every `createApp()` test
   evaluates at boot: 144 `features/index.ts` (1,043); 136 `bootstrap/nodes.ts`

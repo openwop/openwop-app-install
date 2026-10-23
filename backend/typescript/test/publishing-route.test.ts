@@ -4,6 +4,19 @@
  * PUBLIC, unauthenticated published-site surface (page-by-slug, sitemap, robots,
  * feed) — including the toggle gate that takes the site offline and the
  * published-only / noindex rules.
+ *
+ * The SEO write is a DOUBLE GUARD on a published page: the `workspace:write`
+ * scope gate AND the ADR 0836 D6 live-tier gate (admin). A viewer is refused by
+ * the first; with the first removed the second still refuses, so round 1's
+ * scope probe was vacuous (8fw1g3-pubr-rbac). The RBAC case now pins WHICH gate
+ * answered (no `live_tier` reason) and adds a DRAFT page, where the scope gate
+ * is the only one (8fw1g3-pubr-rbac-r2).
+ *
+ * Also sabotage-witnessed: the canonical-URL refusal (pubr-canonical-r2, now
+ * asserting the field), noindex kept out of the sitemap (pubr-noindex-sitemap-r2,
+ * with an indexable positive control) and the nav (pubr-noindex-nav),
+ * X-Forwarded-Host sanitising (pubr-xfh) and the description fallback
+ * (pubr-desc). Responses are typed at each call site.
  */
 
 import http from 'node:http';
@@ -31,21 +44,34 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T; text: string; contentType: string }
-interface Client { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res>; put: (p: string, b?: unknown) => Promise<Res>; snapshot: () => string }
+interface Res<T> { status: number; body: T; text: string; contentType: string }
+interface Client {
+  get: <T>(p: string) => Promise<Res<T>>;
+  post: <T>(p: string, b?: unknown) => Promise<Res<T>>;
+  put: <T>(p: string, b?: unknown) => Promise<Res<T>>;
+  snapshot: () => string;
+}
+interface SeoBody { seo: { metaTitle?: string; ogImageToken?: string; noindex?: boolean } | null }
+interface ErrBody { error: string; message: string; details?: Record<string, unknown> }
+interface PublicPageBody { title: string; seo: { title: string; description: string; canonicalUrl: string } }
 function client(initialCookie = ''): Client {
   let cookie = initialCookie;
-  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
+  const call = async <T>(method: string, path: string, body?: unknown): Promise<Res<T>> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     const sc = getSetCookies(res.headers);
     for (const ck of sc as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
     const contentType = res.headers.get('content-type') ?? '';
     const text = res.status === 204 ? '' : await res.text();
-    let parsed: any;
+    let parsed: unknown;
     try { parsed = text ? JSON.parse(text) : undefined; } catch { parsed = undefined; }
-    return { status: res.status, body: parsed, text, contentType };
+    return { status: res.status, body: parsed as T, text, contentType };
   };
-  return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), put: (p, b) => call('PUT', p, b), snapshot: () => cookie };
+  return {
+    get: <T>(p: string) => call<T>('GET', p),
+    post: <T>(p: string, b?: unknown) => call<T>('POST', p, b),
+    put: <T>(p: string, b?: unknown) => call<T>('PUT', p, b),
+    snapshot: () => cookie,
+  };
 }
 
 let n = 0;
@@ -53,7 +79,7 @@ const uniqEmail = (who: string): string => `${who}-${Date.now()}-${n++}@acme.tes
 // ADR 0026: real sign-in is Firebase OIDC; tests mint an authenticated user via
 // the env-gated auth test seam. Pass a shared `tenantId` to make co-tenant users.
 async function signup(c: Client, opts: { tenantId?: string } = {}): Promise<{ userId: string }> {
-  const r = await c.post('/host/openwop-app/test/login', { email: uniqEmail('pub'), ...(opts.tenantId ? { tenantId: opts.tenantId } : {}) });
+  const r = await c.post<{ user: { userId: string } }>('/host/openwop-app/test/login', { email: uniqEmail('pub'), ...(opts.tenantId ? { tenantId: opts.tenantId } : {}) });
   expect(r.status, r.text).toBe(201);
   return r.body.user;
 }
@@ -64,7 +90,7 @@ async function ownerWithMember(role: string): Promise<{ owner: Client; member: C
   await signup(owner, { tenantId });
   const member = client();
   const memberUser = await signup(member, { tenantId });
-  const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await owner.post<{ orgId: string }>('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, org.text).toBe(201);
   const orgId = org.body.orgId;
   const add = await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: memberUser.userId, roles: [role] });
@@ -75,7 +101,7 @@ async function ownerWithMember(role: string): Promise<{ owner: Client; member: C
 /** Create a page and publish it (owner has host:members:manage → direct publish). */
 async function publishedPage(owner: Client, orgId: string, title: string): Promise<{ pageId: string; slug: string }> {
   const cms = (s = ''): string => `/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}${s}`;
-  const created = await owner.post(cms('/pages'), { title, sections: [{ type: 'hero', data: { heading: 'Hello', subheading: 'A subheading used as the description fallback.' } }] });
+  const created = await owner.post<{ pageId: string; slug: string }>(cms('/pages'), { title, sections: [{ type: 'hero', data: { heading: 'Hello', subheading: 'A subheading used as the description fallback.' } }] });
   expect(created.status, created.text).toBe(201);
   const { pageId, slug } = created.body;
   const pub = await owner.post(cms(`/pages/${pageId}/publish`));
@@ -91,27 +117,52 @@ describe('publishing — authed SEO CRUD (RBAC)', () => {
     const { owner, member, orgId } = await ownerWithMember('viewer');
     const { pageId } = await publishedPage(owner, orgId, 'About Us');
 
-    const put = await owner.put(seoUrl(orgId, pageId), { metaTitle: 'About Acme', metaDescription: 'Who we are', noindex: false });
+    const put = await owner.put<SeoBody>(seoUrl(orgId, pageId), { metaTitle: 'About Acme', metaDescription: 'Who we are', noindex: false });
     expect(put.status, put.text).toBe(200);
-    expect(put.body.seo.metaTitle).toBe('About Acme');
+    expect(put.body.seo?.metaTitle).toBe('About Acme');
 
-    expect((await member.get(seoUrl(orgId, pageId))).body.seo.metaTitle).toBe('About Acme');
-    expect((await member.put(seoUrl(orgId, pageId), { metaTitle: 'nope' })).status).toBe(403);
+    expect((await member.get<SeoBody>(seoUrl(orgId, pageId))).body.seo?.metaTitle).toBe('About Acme');
+    // Published page: the SCOPE gate answers (no live-tier reason), and nothing landed.
+    const denied = await member.put<ErrBody>(seoUrl(orgId, pageId), { metaTitle: 'nope' });
+    expect(denied.status, denied.text).toBe(403);
+    expect(denied.body.error).toBe('forbidden_scope');
+    expect(denied.body.details?.reason).toBeUndefined();
+    expect((await owner.get<SeoBody>(seoUrl(orgId, pageId))).body.seo?.metaTitle).toBe('About Acme');
+
+    // DRAFT page: the live-tier gate does not apply, so the scope gate is the
+    // ONLY thing between a viewer and the write.
+    const draft = await owner.post<{ pageId: string }>(`/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}/pages`, { title: 'Draft About' });
+    expect(draft.status, draft.text).toBe(201);
+    const draftDenied = await member.put<ErrBody>(seoUrl(orgId, draft.body.pageId), { metaTitle: 'nope' });
+    expect(draftDenied.status, draftDenied.text).toBe(403);
+    expect(draftDenied.body.error).toBe('forbidden_scope');
+    expect((await owner.get<SeoBody>(seoUrl(orgId, draft.body.pageId))).body.seo?.metaTitle).toBeUndefined();
   });
 
   it('rejects a dangerous canonical URL and a page not in the org', async () => {
     const { owner, orgId } = await ownerWithMember('viewer');
     const { pageId } = await publishedPage(owner, orgId, 'Pricing');
-    expect((await owner.put(seoUrl(orgId, pageId), { canonicalUrl: 'javascript:alert(1)' })).status).toBe(400);
-    expect((await owner.get(seoUrl(orgId, 'no-such-page'))).status).toBe(404);
+    const bad = await owner.put<ErrBody>(seoUrl(orgId, pageId), { canonicalUrl: 'javascript:alert(1)' });
+    expect(bad.status, bad.text).toBe(400);
+    expect(bad.body.error).toBe('validation_error');
+    expect(bad.body.details?.field).toBe('canonicalUrl');
+    // A REAL page in a SECOND org of the same tenant is not reachable through org 1.
+    const org2 = await owner.post<{ orgId: string }>('/host/openwop-app/orgs', { name: 'Other Co' });
+    expect(org2.status, org2.text).toBe(201);
+    const foreign = await publishedPage(owner, org2.body.orgId, 'Foreign Page');
+    expect((await owner.get<SeoBody>(seoUrl(org2.body.orgId, foreign.pageId))).status).toBe(200); // positive control
+    const cross = await owner.get<ErrBody>(seoUrl(orgId, foreign.pageId));
+    expect(cross.status, cross.text).toBe(404);
+    expect(cross.body.message).toBe('Page not found.');
   });
 
   it('treats a whitespace-only ogImageToken as cleared (not a 400)', async () => {
     const { owner, orgId } = await ownerWithMember('viewer');
     const { pageId } = await publishedPage(owner, orgId, 'Whitespace');
-    const put = await owner.put(seoUrl(orgId, pageId), { ogImageToken: '   ', metaTitle: 'X' });
+    const put = await owner.put<SeoBody>(seoUrl(orgId, pageId), { ogImageToken: '   ', metaTitle: 'X' });
     expect(put.status, put.text).toBe(200);
-    expect(put.body.seo.ogImageToken).toBeUndefined();
+    expect(put.body.seo?.metaTitle).toBe('X'); // the write landed
+    expect(put.body.seo?.ogImageToken).toBeUndefined();
   });
 });
 
@@ -122,7 +173,7 @@ describe('publishing — public surface (unauthenticated)', () => {
     await owner.put(seoUrl(orgId, pageId), { metaTitle: 'Welcome', metaDescription: 'The home page.' });
 
     const anon = client(); // NO cookie — public surface skips auth
-    const r = await anon.get(pub(orgId, `/pages/${slug}`));
+    const r = await anon.get<PublicPageBody>(pub(orgId, `/pages/${slug}`));
     expect(r.status, r.text).toBe(200);
     expect(r.body.title).toBe('Welcome Home');
     expect(r.body.seo.title).toBe('Welcome');
@@ -134,7 +185,7 @@ describe('publishing — public surface (unauthenticated)', () => {
     const { owner, orgId } = await ownerWithMember('viewer');
     const { slug } = await publishedPage(owner, orgId, 'No Seo Page');
     const anon = client();
-    const r = await anon.get(pub(orgId, `/pages/${slug}`));
+    const r = await anon.get<PublicPageBody>(pub(orgId, `/pages/${slug}`));
     expect(r.status).toBe(200);
     expect(r.body.seo.description).toBe('A subheading used as the description fallback.');
   });
@@ -142,7 +193,9 @@ describe('publishing — public surface (unauthenticated)', () => {
   it('404s a draft (published-only) and an unknown slug', async () => {
     const { owner, orgId } = await ownerWithMember('viewer');
     const cms = (s = ''): string => `/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}${s}`;
-    const draft = await owner.post(cms('/pages'), { title: 'Secret Draft' });
+    const draft = await owner.post<{ slug: string }>(cms('/pages'), { title: 'Secret Draft' });
+    expect(draft.status, draft.text).toBe(201);
+    expect(draft.body.slug).toBe('secret-draft'); // the draft really exists under this slug
     const anon = client();
     expect((await anon.get(pub(orgId, `/pages/${draft.body.slug}`))).status).toBe(404);
     expect((await anon.get(pub(orgId, '/pages/does-not-exist'))).status).toBe(404);
@@ -182,9 +235,9 @@ describe('publishing — public surface (unauthenticated)', () => {
     const seo = await owner.put(seoUrl(orgId, hidden.pageId), { noindex: true });
     expect(seo.status, seo.text).toBe(200);
 
-    const res = await anon.get(pub(orgId, '/pages'));
+    const res = await anon.get<{ pages: Array<{ slug: string; title: string }> }>(pub(orgId, '/pages'));
     expect(res.status).toBe(200);
-    const pages = res.body.pages as { slug: string; title: string }[];
+    const pages = res.body.pages;
     const slugs = pages.map((p) => p.slug);
     expect(slugs).toContain(shown.slug);
     expect(slugs).not.toContain(hidden.slug);            // noindex → hidden from the menu
@@ -206,10 +259,14 @@ describe('publishing — public surface (unauthenticated)', () => {
   it('excludes a noindex page from the sitemap', async () => {
     const { owner, orgId } = await ownerWithMember('viewer');
     const { pageId, slug } = await publishedPage(owner, orgId, 'Hidden Page');
-    await owner.put(seoUrl(orgId, pageId), { noindex: true });
+    const shown = await publishedPage(owner, orgId, 'Indexed Page');
+    const put = await owner.put(seoUrl(orgId, pageId), { noindex: true });
+    expect(put.status, put.text).toBe(200);
     const anon = client();
     const sitemap = await anon.get(pub(orgId, '/sitemap.xml'));
-    expect(sitemap.text).not.toContain(`/pages/${slug}`);
+    expect(sitemap.status).toBe(200);
+    expect(sitemap.text).toContain(`/pages/${shown.slug}<`); // positive control: indexable page listed
+    expect(sitemap.text).not.toContain(`/pages/${slug}<`);
   });
 
   it('is always-on (ADR 0027): the per-page `published` status is the public gate, not a toggle', async () => {

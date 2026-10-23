@@ -18,20 +18,28 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import type { CaseloadRow } from '../../../client/kicktodoCirclesClient.js';
+import type * as CirclesClient from '../../../client/kicktodoCirclesClient.js';
+import type { UseAuth } from '../../../auth/useAuth.js';
+import type { AuthUser } from '../../../auth/firebase.js';
 
-const auth = vi.hoisted(() => ({ value: { user: null as null | { uid: string }, loading: false, isConfigured: true } }));
-vi.mock('../../../auth/useAuth.js', () => ({ useAuth: () => auth.value }));
+const SIGNED_OUT: UseAuth = {
+  user: null, loading: false, isConfigured: true,
+  signIn: { google: async () => {}, github: async () => {} }, signOut: async () => {},
+};
+const COACH: AuthUser = { uid: 'u1', email: 'coach@example.com', displayName: 'Coach', photoURL: null, providerIds: [] };
+const auth = vi.hoisted(() => ({ value: null as UseAuth | null }));
+vi.mock('../../../auth/useAuth.js', () => ({ useAuth: () => auth.value ?? SIGNED_OUT }));
 vi.mock('../../../auth/SignInButton.js', () => ({
   SignInButton: () => <button type="button">Sign in to KickTodo</button>,
 }));
 
 const { getCaseload, dryRunProposal } = vi.hoisted(() => ({
-  getCaseload: vi.fn(),
-  dryRunProposal: vi.fn(),
+  getCaseload: vi.fn<typeof CirclesClient.getCaseload>(),
+  dryRunProposal: vi.fn<typeof CirclesClient.dryRunProposal>(),
 }));
 vi.mock('../../../client/kicktodoCirclesClient.js', async (orig) => {
   const actual = await orig<typeof import('../../../client/kicktodoCirclesClient.js')>();
-  return { CoachRequestError: actual.CoachRequestError, getCaseload, dryRunProposal, createProposal: vi.fn() };
+  return { CoachRequestError: actual.CoachRequestError, getCaseload, dryRunProposal, createProposal: vi.fn<typeof CirclesClient.createProposal>() };
 });
 
 import { CoachConsolePage } from '../CoachConsolePage.js';
@@ -47,8 +55,9 @@ const row: CaseloadRow = {
 afterEach(() => {
   cleanup();
   vi.resetAllMocks();
-  auth.value = { user: null, loading: false, isConfigured: true };
+  auth.value = null;
 });
+const signIn = () => { auth.value = { ...SIGNED_OUT, user: COACH }; };
 
 function mount() {
   return render(<MemoryRouter><CoachConsolePage /></MemoryRouter>);
@@ -71,10 +80,12 @@ describe('CoachConsolePage states', () => {
   });
 
   it('a caseload load failure offers Retry, which re-reads and recovers', async () => {
-    auth.value = { user: { uid: 'u1' }, loading: false, isConfigured: true };
+    signIn();
     getCaseload.mockRejectedValueOnce(new Error('boom')).mockResolvedValueOnce([row]);
     mount();
     expect(await screen.findByText(en.coachLoadError)).toBeTruthy();
+    // A failed read is not "no one invited you yet".
+    expect(screen.queryByText(en.coachEmptyTitle)).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: common.retry }));
     expect(await screen.findByText('March Cohort')).toBeTruthy();
     expect(screen.queryByText(en.coachLoadError)).toBeNull();
@@ -82,13 +93,13 @@ describe('CoachConsolePage states', () => {
   });
 
   it.each([
-    ['an incomplete command, named by position', new CoachRequestError(400, 'validation_error', 'Command 0 (move) must carry exactly …', 0), en.coachPreviewInvalidCommand.replace('{{n}}', '1')],
-    ['a list-level validation failure', new CoachRequestError(400, 'validation_error', 'A revision carries at most 5 commands.', null), en.coachPreviewInvalid],
-    ['a lost coach grant', new CoachRequestError(404, 'not_found', 'Circle not found.', null), en.coachPreviewNoAccess],
-    ['a command outside the coach lanes', new CoachRequestError(422, 'validation_error', 'off lane', null), en.coachPreviewOffLane],
-    ['a rate limit', new CoachRequestError(429, 'rate_limited', 'slow down', null), common['error_rate-limited']],
-  ])('a refused dry run shows its reason: %s', async (_label, err, expected) => {
-    auth.value = { user: { uid: 'u1' }, loading: false, isConfigured: true };
+    ['an incomplete command, named by position', new CoachRequestError(400, 'validation_error', 'Command 0 (move) must carry exactly …', 0), 'Command 1 is incomplete. Check its fields and preview again.', 0],
+    ['a list-level validation failure', new CoachRequestError(400, 'validation_error', 'A revision carries at most 5 commands.', null), en.coachPreviewInvalid, 0],
+    ['a lost coach grant', new CoachRequestError(404, 'not_found', 'Circle not found.', null), en.coachPreviewNoAccess, 0],
+    ['a command outside the coach lanes', new CoachRequestError(422, 'validation_error', 'off lane', null), en.coachPreviewOffLane, 1],
+    ['a rate limit', new CoachRequestError(429, 'rate_limited', 'slow down', null), common['error_rate-limited'], 0],
+  ] as const)('a refused dry run shows its reason: %s', async (_label, err, expected, offLaneCount) => {
+    signIn();
     getCaseload.mockResolvedValue([row]);
     dryRunProposal.mockRejectedValueOnce(err);
     await openComposerAndPreview();
@@ -96,6 +107,6 @@ describe('CoachConsolePage states', () => {
     expect(alert).toBeTruthy();
     // Never the server's English text, and "outside the lanes" only when it is.
     expect(document.body.textContent).not.toContain(err.message);
-    if (expected !== en.coachPreviewOffLane) expect(screen.queryByText(en.coachPreviewOffLane)).toBeNull();
+    expect(screen.queryAllByText(en.coachPreviewOffLane)).toHaveLength(offLaneCount);
   });
 });

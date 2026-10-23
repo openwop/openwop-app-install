@@ -6,6 +6,19 @@
  * audits every purge (the tombstone), treats confidential-pii as OPT-IN (no default —
  * a configured `confidentialPiiDays` window is required; ADR 0081 P5 footgun fix),
  * leases so a second same-day sweep no-ops, and is best-effort across purgers.
+ *
+ * Sabotages that red this file (8fw1g4 round 1 + 2): an implicit 365 default for
+ * confidential-pii, a sweep for a classification with no window, dropping the
+ * start lease, never treating a claim as stale / treating a fresh one as stale, not
+ * recovering a crashed holder, NOT WRITING THE COMPLETION MARKER on the normal path
+ * (round-1 probe sw-donemark was vacuous: the crash-recovery case's own stale-branch
+ * `claimOnce(doneKey)` writes the marker; the lease case now re-ticks 3 h later,
+ * past STALE_CLAIM_MS, so only the normal-path marker keeps it from re-sweeping),
+ * the partial_failure outcome, the per-tenant id, and the cutoff arithmetic.
+ *
+ * Twin: "fails closed: purgeRetained no-ops on a blank tenant" is also asserted by
+ * retention-purgers.test.ts "fail-closed: a blank tenant purges nothing" (probe
+ * rp-blank-retained reds both). Kept: protected file.
  */
 
 import { describe, expect, it, beforeEach } from 'vitest';
@@ -26,7 +39,7 @@ beforeEach(async () => {
 });
 
 describe('ADR 0077 §3 — windowDaysFor', () => {
-  it('confidential-pii defaults to 365; internal has no default; config overrides', () => {
+  it("returns the configured window, else the caller's default; internal has no default", () => {
     expect(windowDaysFor(null, 'confidential-pii', 365)).toBe(365);
     expect(windowDaysFor(null, 'internal', null)).toBeNull();
     const policy = { tenantId: 't', retention: { confidentialPiiDays: 30, internalDays: 90 }, updatedAt: '' };
@@ -113,6 +126,13 @@ describe('ADR 0077 §3 — processRetentionSweep', () => {
     await processRetentionSweep({ storage }, now);
     await processRetentionSweep({ storage }, now); // same day slot → claim already taken
     expect(calls).toBe(1);
+    // 3 h later — SAME UTC day (`now` is ~17.8 h into its day) but past STALE_CLAIM_MS
+    // (2 h), so the start-claim now reads stale. Only the completion marker the first
+    // sweep wrote on its normal path keeps this from being "recovered" as a crash.
+    const HOUR = 3_600_000;
+    expect(Math.floor((now + 3 * HOUR) / DAY), 'fixture: the re-tick must stay in the same slot').toBe(Math.floor(now / DAY));
+    await processRetentionSweep({ storage }, now + 3 * HOUR);
+    expect(calls, 'a completed slot was re-swept: the normal path wrote no completion marker').toBe(1);
   });
 
   it('best-effort: a throwing purger is reported partial_failure, others still run', async () => {

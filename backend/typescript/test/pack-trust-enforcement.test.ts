@@ -17,6 +17,20 @@
  *      only then starts refusing. That is a real bypass which self-heals in
  *      seconds and is effectively unreproducible from a bug report, so it gets
  *      an explicit test rather than trust in the boot ordering comment.
+ *
+ *   3. PACKTRUST-COLD-1 (grade-code row, BLOCKED-ON-PRODUCT, pinned `it.fails`).
+ *      Case 2 only holds because index.ts orders `loadPackRevocations()` first.
+ *      The classifier itself fails OPEN on a cold cache:
+ *      `src/host/packRevocations.ts` `isPackRevoked()` (lines 157-160) reads an
+ *      empty, never-loaded cache as "nothing is revoked", so a revoked pack
+ *      classified before the load is `dispatchable: true`. This file used to
+ *      ASSERT that fail-open ("documents the bypass"), so a fail-closed fix would
+ *      have gone red. It is now an `it.fails` asserting the correct outcome
+ *      (`dispatchable === false` before the load). When the product fails closed
+ *      (fix-probe `8fw1g1-te-cold-fix-r2`: a never-loaded cache reads as
+ *      revoked), the `it.fails` goes red: flip it to `it`.
+ *
+ * Execute calls use a minimal typed `NodeContext` (`nodeCtx()`), never a cast.
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
@@ -32,6 +46,7 @@ import { locateRepoDir } from '../src/host/_repoPath.js';
 import { loadPackFromManifest } from '../src/packs/tarballLoader.js';
 import { loadAgentsFromManifest } from '../src/packs/agentLoader.js';
 import { getNodeRegistry } from '../src/executor/nodeRegistry.js';
+import type { NodeContext } from '../src/executor/types.js';
 import { classifyPackDir, __resetPackTrustCachesForTests } from '../src/host/packTrust.js';
 import {
   revokePack,
@@ -48,6 +63,21 @@ let sideEffectPath: string;
  *  cannot collide with another test in the same worker. */
 const TYPE_ID = 'community.test.enforcement.echo';
 const PACK_NAME = 'community.test.enforcement';
+
+/** The smallest real `NodeContext`: the fixture node and the refusal wrappers
+ *  read none of it, so every required member is present and inert. */
+function nodeCtx(): NodeContext {
+  return {
+    runId: 'run-trust-enforcement',
+    nodeId: 'n1',
+    tenantId: 't1',
+    inputs: {},
+    configurable: {},
+    attempt: 1,
+    secrets: {},
+    emit: async () => ({ eventId: 'e1', sequence: 1 }),
+  };
+}
 
 function writePack(dir: string, sideEffect: string): void {
   mkdirSync(dir, { recursive: true });
@@ -112,7 +142,7 @@ describe('ADR 0555 P0 — the loader refuses to IMPORT untrusted code', () => {
     expect(existsSync(sideEffectPath)).toBe(true);
     expect(mod?.typeId).toBe(TYPE_ID);
 
-    const out = await getNodeRegistry().get(TYPE_ID)!.execute({} as never);
+    const out = await getNodeRegistry().get(TYPE_ID)!.execute(nodeCtx());
     expect(out.status).toBe('success');
   });
 
@@ -129,7 +159,7 @@ describe('ADR 0555 P0 — the loader refuses to IMPORT untrusted code', () => {
     const mod = getNodeRegistry().get(TYPE_ID);
     expect(mod).not.toBeNull();
 
-    const out = await mod!.execute({} as never);
+    const out = await mod!.execute(nodeCtx());
     if (out.status !== 'failure') throw new Error(`expected a typed failure, got ${out.status}`);
     expect(out.error.code).toBe('pack_untrusted');
     expect(out.error.message).toContain('no_attestation');
@@ -143,7 +173,7 @@ describe('ADR 0555 P0 — the loader refuses to IMPORT untrusted code', () => {
     await loadPackFromManifest(packDir);
     expect(existsSync(sideEffectPath)).toBe(false);
 
-    const out = await getNodeRegistry().get(TYPE_ID)!.execute({} as never);
+    const out = await getNodeRegistry().get(TYPE_ID)!.execute(nodeCtx());
     if (out.status !== 'failure') throw new Error(`expected a typed failure, got ${out.status}`);
     expect(out.error.code).toBe('pack_revoked');
   });
@@ -199,17 +229,19 @@ describe('ADR 0555 P0 — revocation must not fail OPEN on a cold boot', () => {
     expect(classifyPackDir(packDir, { noCache: true }).tier).toBe('revoked');
   });
 
-  it('documents the bypass: classifying BEFORE the load would dispatch a revoked pack', async () => {
+  // PACKTRUST-COLD-1 (BLOCKED-ON-PRODUCT): `isPackRevoked()` in
+  // src/host/packRevocations.ts reads a never-loaded cache as "nothing is
+  // revoked". Until it fails closed this case FAILS, which `it.fails` records;
+  // fix-probe `8fw1g1-te-cold-fix-r2` turns it red. Then flip it to `it`.
+  it.fails('a revoked pack is NOT dispatchable even before loadPackRevocations runs (cold cache fails closed, PACKTRUST-COLD-1)', async () => {
     markTrusted(packDir);
     await revokePack({ packName: PACK_NAME, version: '1.0.0', by: 'test', reason: 'compromised' });
     __resetPackRevocationCacheForTests();
     __resetPackTrustCachesForTests();
 
-    // This asserts the FAILURE MODE, so that if someone moves
-    // `loadPackRevocations()` below the pack loaders in index.ts, the cost of
-    // that move is written down here in executable form rather than discovered
-    // in production. A revoked pack WOULD dispatch.
-    expect(classifyPackDir(packDir, { noCache: true }).dispatchable).toBe(true);
+    // The correct outcome on a cold cache: the durable row exists, so the pack
+    // must not dispatch even though the in-process cache has not been loaded.
+    expect(classifyPackDir(packDir, { noCache: true }).dispatchable).toBe(false);
 
     await loadPackRevocations();
     expect(classifyPackDir(packDir, { noCache: true }).dispatchable).toBe(false);
@@ -217,6 +249,9 @@ describe('ADR 0555 P0 — revocation must not fail OPEN on a cold boot', () => {
 });
 
 describe('ADR 0555 P0 — the shipped steward manifest matches the shipped packs', () => {
+  // Twin: "every attested pack in the manifest still classifies steward" below
+  // covers the tier of every pack. This case is kept (protected file) because it
+  // is the only one that also pins the REASON and `dispatchable` of a real pack.
   it('a real vendored pack classifies steward', () => {
     // Deliberately NOT a synthetic fixture. This asserts the property the whole
     // phase depends on: that the manifest committed in this repo agrees with

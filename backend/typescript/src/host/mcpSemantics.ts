@@ -33,6 +33,7 @@
  */
 
 import { assertApprovalSurfaceTrusted } from './a2uiSurfaceAdmission.js';
+import { assertNotSubWorkflowMirror } from './subWorkflowMirrorGuard.js';
 import { randomUUID } from 'node:crypto';
 import { insertRunWithStartContext } from './runInsert.js';
 import { resolveLaunchWorkflow } from './resolveLaunchDefinition.js';
@@ -309,8 +310,11 @@ export async function resumeInterrupt(
   // there would strand it (resolved, never resumed).
   try {
     await assertApprovalSurfaceTrusted(interrupt);
+    // A sub-workflow child's mirrored gate. `resolveAndResume` refuses it too; this
+    // check exists so the MCP caller is told WHY instead of "already resolved".
+    await assertNotSubWorkflowMirror(deps.storage, interrupt);
   } catch (err) {
-    return { kind: 'failed', runId: interrupt.runId, text: err instanceof Error ? err.message : 'approval blocked by untrusted content' };
+    return { kind: 'failed', runId: interrupt.runId, text: err instanceof Error ? err.message : 'approval blocked' };
   }
   // ADR 0778 D5 — a gate that needs a NAMED approver (a quorum, or a declared
   // ACL) is not decidable here: `requestState` carries no approver identity to

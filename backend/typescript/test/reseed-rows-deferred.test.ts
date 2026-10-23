@@ -17,12 +17,19 @@
  * SHIFTED so the derived ids do not match. That is the state no existing test
  * can produce, and every assertion below is about telling it apart from a fresh
  * install.
+ *
+ * Sabotages that red this file (8fw1g4 round 1 + 2): dropping the `wf.seed.`
+ * prefix filter, the alreadyDeferred / chainGone / inputBearing counters, a CAS
+ * that writes a non-deferred head (the idempotency case converts a real row),
+ * and making a chain-gone row fatal in migration 16.
  */
 import { describe, it, expect, beforeEach } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
 import type { Storage } from '../src/storage/storage.js';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
-import { reseedSeededRowsDeferred } from '../src/host/seedWorkflows.js';
+import { reseedSeededRowsDeferred, seedWorkflowId } from '../src/host/seedWorkflows.js';
+import { listChains, loadWorkflowChainPacks, defaultWorkflowChainPackRoots } from '../src/host/workflowChainPackLoader.js';
+import type { WorkflowDefinition } from '../src/executor/types.js';
 import { APP_MIGRATIONS, runAppMigrations, latestAppMigration } from '../src/host/appMigrations.js';
 
 const row = (workflowId: string, over: Record<string, unknown> = {}) => ({
@@ -34,6 +41,9 @@ const row = (workflowId: string, over: Record<string, unknown> = {}) => ({
     metadata: { name: workflowId, expansionMode: 'expansion-time', ...over },
   }),
 });
+
+/** Write one stored seed row (the shape `kvList('wfreg:')` hands back). */
+const put = (r: { key: string; value: string }): Promise<void> => storage.kvSet(r.key, r.value);
 
 let storage: Storage;
 beforeEach(async () => {
@@ -53,7 +63,7 @@ describe('PHBC-5 — the population comes from the ROWS', () => {
   it('SEES rows whose originating chain has left the corpus, and NAMES them', async () => {
     // The production state. Migration 14 counted these as "absent" and said
     // nothing; the whole defect is that silence.
-    await storage.kvSet(...Object.values(row('wf.seed.chain-that-no-longer-exists')) as [string, string]);
+    await put(row('wf.seed.chain-that-no-longer-exists'));
     const r = await reseedSeededRowsDeferred(storage);
     expect(r.total, 'the row exists and must be counted').toBe(1);
     expect(r.chainGone, 'a vanished chain must be named, never silently skipped')
@@ -65,9 +75,9 @@ describe('PHBC-5 — the population comes from the ROWS', () => {
     // Invariant 1 in the migration. A row falling through every branch is a
     // classifier bug, and the sum is what makes it loud.
     for (const id of ['wf.seed.a', 'wf.seed.b', 'wf.seed.c']) {
-      await storage.kvSet(...Object.values(row(id)) as [string, string]);
+      await put(row(id));
     }
-    await storage.kvSet(...Object.values(row('wf.seed.d', { expansionMode: 'deferred' })) as [string, string]);
+    await put(row('wf.seed.d', { expansionMode: 'deferred' }));
     const r = await reseedSeededRowsDeferred(storage);
     const accounted = r.alreadyDeferred + r.converted + r.chainGone.length + r.inputBearing.length + r.failed;
     expect(accounted, 'unaccounted rows mean the migration cannot claim to have seen the population')
@@ -75,7 +85,7 @@ describe('PHBC-5 — the population comes from the ROWS', () => {
   });
 
   it('leaves an already-deferred row alone', async () => {
-    await storage.kvSet(...Object.values(row('wf.seed.already', { expansionMode: 'deferred' })) as [string, string]);
+    await put(row('wf.seed.already', { expansionMode: 'deferred' }));
     const r = await reseedSeededRowsDeferred(storage);
     expect(r.alreadyDeferred).toBe(1);
     expect(r.converted).toBe(0);
@@ -84,7 +94,7 @@ describe('PHBC-5 — the population comes from the ROWS', () => {
   it('does NOT sweep in tenant-authored workflows', async () => {
     // `kvList('wfreg:')` returns EVERY registered workflow. A hand-authored one
     // must not be rewritten by a migration that was asked about seeded rows.
-    await storage.kvSet(...Object.values(row('wf.authored-by-a-human')) as [string, string]);
+    await put(row('wf.authored-by-a-human'));
     const r = await reseedSeededRowsDeferred(storage);
     expect(r.total, 'only the wf.seed.* namespace is this migration\'s business').toBe(0);
   });
@@ -110,12 +120,23 @@ describe('PHBC-5 — the population comes from the ROWS', () => {
   });
 
   it('is idempotent — a second run converts nothing new', async () => {
-    await storage.kvSet(...Object.values(row('wf.seed.gone-chain')) as [string, string]);
+    // A row whose chain IS loaded, so run 1 really CONVERTS it (a gone-chain row
+    // converts nothing on any run, which made this case pass whatever the CAS wrote).
+    if (listChains().length === 0) loadWorkflowChainPacks({ roots: defaultWorkflowChainPackRoots() });
+    const chain = listChains()[0]?.chain;
+    if (!chain) throw new Error('fixture: no chain is loaded — this case proves nothing');
+    const id = seedWorkflowId(chain.chainId);
+    await put(row(id));
     const first = await reseedSeededRowsDeferred(storage);
+    expect(first.total).toBe(1);
+    expect(first.converted, 'run 1 must convert the expansion-time row').toBe(1);
+    const stored = await storage.kvGet(`wfreg:${id}`);
+    const def: WorkflowDefinition = JSON.parse(stored ?? '{}');
+    expect(def.metadata?.expansionMode, 'the CAS must write a deferred head').toBe('deferred');
     const second = await reseedSeededRowsDeferred(storage);
-    expect(first.total, 'guard: 0 === 0 would satisfy idempotence vacuously').toBeGreaterThan(0);
-    expect(second.converted).toBe(0);
     expect(second.total).toBe(first.total);
+    expect(second.converted).toBe(0);
+    expect(second.alreadyDeferred, 'run 2 must see the converted row as already deferred').toBe(1);
   });
 });
 
@@ -127,7 +148,7 @@ describe('PHBC-5 — the migration must not turn a data problem into an outage',
     // `recordAppVersion` is unguarded at index.ts:187, and main()'s catch does
     // `process.exit(1)` — so that throw would have crashed every instance on
     // deploy while "fixing" a silent-no-op bug.
-    await storage.kvSet(...Object.values(row('wf.seed.chain-is-gone')) as [string, string]);
+    await put(row('wf.seed.chain-is-gone'));
     const only16 = APP_MIGRATIONS.filter((m) => m.version === 16);
     expect(only16, 'fixture guard: migration 16 must exist or this proves nothing').toHaveLength(1);
     await expect(

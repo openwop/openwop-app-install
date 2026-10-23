@@ -88,9 +88,11 @@ describe('GEN-AKM-1 — a manifest that CLAIMS the recorded-outcome mechanism mu
         /* a malformed pack is another test's problem */
       }
     }
-    expect(nodes).toBeGreaterThan(500);
+    // Floor = the measured count: 753 manifest nodes at 7321e3612 (2026-10-18).
+    expect(nodes).toBeGreaterThanOrEqual(753);
     // …and the regex it uses actually matches something in that corpus.
-    expect(claimingNodes().length).toBeGreaterThan(0);
+    // Measured: 1 claiming node (feature.assistant.nodes.log-decision).
+    expect(claimingNodes().length).toBeGreaterThanOrEqual(1);
   });
 
   it('every claiming node is in MANIFEST_FAST_PATH_SERVED, or is quarantined by name', () => {

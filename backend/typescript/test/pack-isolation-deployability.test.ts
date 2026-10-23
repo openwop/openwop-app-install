@@ -21,6 +21,9 @@
  *
  * The Dockerfile is read as TEXT, the `pack-trust-config.test.ts` precedent: the
  * artifact it describes is not built here, so the claim is pinned at its source.
+ * Each pin is a whole ANCHORED line (`^…$`m), so a commented-out instruction
+ * (`# RUN npm ci --omit=dev`) is a red, not a match. Pinning source text rather
+ * than the image is this file's honest ceiling for part 1.
  */
 
 import { describe, it, expect, afterEach } from 'vitest';
@@ -60,7 +63,7 @@ describe('the production IMAGE ships the isolation worker', () => {
     // `scripts/build.mjs` writes `lib/packIsolationWorker.mjs` (pinned by
     // `pack-isolation-build-wiring.test.ts`). This is the other half: that the
     // directory it lands in actually reaches the runtime image.
-    expect(dockerfile).toMatch(/COPY (--chown=node:node )?--from=builder \/app\/lib \.\/lib/);
+    expect(dockerfile).toMatch(/^COPY (--chown=node:node )?--from=builder \/app\/lib \.\/lib$/m);
   });
 
   it('the runtime stage installs PRODUCTION deps only — so the dev lane cannot be what production uses', () => {
@@ -68,15 +71,15 @@ describe('the production IMAGE ships the isolation worker', () => {
     // on-demand bundling lane is unreachable in production. If this ever became
     // a full install, a missing build artifact would be silently papered over by
     // the dev lane and the pin above would stop meaning anything.
-    expect(dockerfile).toMatch(/npm ci --omit=dev/);
+    expect(dockerfile).toMatch(/^RUN npm ci --omit=dev$/m);
   });
 
   it('the builder stage has the sources and scripts the worker build needs', () => {
     // The worker entry lives under `src/`, and the shared esbuild options under
     // `scripts/lib/`. A build context missing either fails the image build
     // rather than shipping a worker-less `lib/`, but only if both are copied.
-    expect(dockerfile).toMatch(/COPY backend\/typescript\/src \.\/src/);
-    expect(dockerfile).toMatch(/COPY backend\/typescript\/scripts \.\/scripts/);
+    expect(dockerfile).toMatch(/^COPY backend\/typescript\/src \.\/src$/m);
+    expect(dockerfile).toMatch(/^COPY backend\/typescript\/scripts \.\/scripts$/m);
   });
 });
 

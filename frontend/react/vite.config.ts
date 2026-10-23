@@ -34,6 +34,15 @@ import { chunkFileName } from './scripts/chunkNames.mjs';
 // renamed. Errors at config-resolution time so no broken bundle is
 // ever produced.
 
+// Issue #5006 (ADR 0874 D4, amended 2026-10-22) — where the `.env*` files are read.
+// Default: this directory, exactly as before. `scripts/ci.sh` sets
+// OPENWOP_VITE_ENV_DIR only in an ADOPTER bundle, pointing it at a temp copy of
+// `.env.production.example`, so the build `check-bundle-budget` measures holds
+// host code only and the adopter's own brand strings cannot red the host ceiling.
+// Every loadEnv below reads the same dir as Vite's own `envDir`, so the inlined
+// `import.meta.env` and the config-time reads cannot disagree.
+const envDir = process.env.OPENWOP_VITE_ENV_DIR ? resolve(process.env.OPENWOP_VITE_ENV_DIR) : __dirname;
+
 // ADR 0366 P1b — distribution registry alias: when OPENWOP_DISTRIBUTION names
 // a non-default manifest (scripts/gen-distribution.mjs runs in predev/prebuild
 // via package.json), the feature registry resolves to the GENERATED
@@ -81,7 +90,7 @@ const distributionPlugin = (() => {
 
 export default defineConfig(({ mode }) => {
   if (mode === 'production') {
-    const env = loadEnv(mode, __dirname, '');
+    const env = loadEnv(mode, envDir, '');
     const baseUrl = env.VITE_OPENWOP_BASE_URL;
     if (!baseUrl || baseUrl === DEV_FALLBACK_BASE_URL) {
       throw new Error(
@@ -93,9 +102,10 @@ export default defineConfig(({ mode }) => {
     }
   }
 
-  const pwaStartUrl = loadEnv(mode, __dirname, '').VITE_PWA_START_URL || '/';
+  const pwaStartUrl = loadEnv(mode, envDir, '').VITE_PWA_START_URL || '/';
 
   return {
+    envDir,
     // react-router 7's `exports` map names only its `dist/development` build, so a
     // production bundle shipped the dev build: its warning strings and checks sat
     // in the entry chunk of every page. The package ships `dist/production` beside
@@ -177,7 +187,7 @@ export default defineConfig(({ mode }) => {
           name: 'openwop-service-worker',
           enforce: 'post' as const,
           async config() {
-            const env = loadEnv(mode, __dirname, '');
+            const env = loadEnv(mode, envDir, '');
             legacyCachePurge = parseLegacyCachePurge(env.VITE_SW_LEGACY_CACHE_PURGE);
             ({ features: offlineFeatures, neverCache } = await prepareOfflineBuild({
               registrySource: composedRegistrySource ?? readFileSync(canonicalRegistry, 'utf8'),
@@ -232,7 +242,7 @@ export default defineConfig(({ mode }) => {
         transformIndexHtml: {
           order: 'pre' as const,
           handler(html: string) {
-            const brand = resolveBrandFromEnv(loadEnv(mode, __dirname, ''));
+            const brand = resolveBrandFromEnv(loadEnv(mode, envDir, ''));
             return html
               .replaceAll('{{BRAND_TITLE}}', brand.documentTitle)
               // An attribute value, so escape it (a fork's copy may hold quotes).
@@ -250,7 +260,7 @@ export default defineConfig(({ mode }) => {
         // with ITS identity — no hand-authored manifest. Build-only: in
         // `vite dev` the manifest link 404s harmlessly (install is a prod concern).
         generateBundle() {
-          const brand = resolveBrandFromEnv(loadEnv(mode, __dirname, ''));
+          const brand = resolveBrandFromEnv(loadEnv(mode, envDir, ''));
           // Icon MIME follows the mark's actual format — a fork pointing
           // VITE_BRAND_MARK_SRC at a PNG must not ship `image/svg+xml`.
           // `sizes: 'any'` is only meaningful for scalable (SVG) icons;

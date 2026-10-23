@@ -5,6 +5,12 @@
  * case) and asserts /readiness reports `degraded` + HTTP 503 with a
  * per-provider `checks` block, instead of silently looking healthy
  * until a user runs a workflow. /health stays a pure liveness probe.
+ *
+ * This is the verify-deploy signal (ADR 0052 §D4; `scripts/verify-deploy.sh`
+ * reads `/readiness`). Sabotage-witnessed (/grade-tests 8f wave 1): an
+ * unconfigured managed tier no longer counted (8fw1g3-rd-managed), the
+ * session-secret length check dropped (rd-secret-len) and the production-only
+ * gate widened (rd-secret-prod). Env the file changes is restored in `afterAll`.
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -15,6 +21,8 @@ import { sessionSecretConfigError } from '../src/middleware/auth.js';
 
 let server: http.Server;
 let BASE: string;
+const savedManagedKey = process.env.MINIMAX_API_KEY;
+const savedDisableCookies = process.env.OPENWOP_AUTH_DISABLE_COOKIES;
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -36,6 +44,10 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await new Promise<void>((res) => server.close(() => res()));
+  if (savedManagedKey === undefined) delete process.env.MINIMAX_API_KEY;
+  else process.env.MINIMAX_API_KEY = savedManagedKey;
+  if (savedDisableCookies === undefined) delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
+  else process.env.OPENWOP_AUTH_DISABLE_COOKIES = savedDisableCookies;
 });
 
 interface ReadinessBody {

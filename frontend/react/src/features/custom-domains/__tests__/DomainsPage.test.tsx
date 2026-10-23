@@ -10,6 +10,14 @@
  *    only where it can change something, force-remove only after 3 failed
  *    releases, a manual deployment as operator-managed, and an unready edge as
  *    a warning (never hidden).
+ *
+ * Sabotage-witnessed (wave 55/56 probes, each red here): the apex rule moved
+ * (3 labels); an apex with no LB IP falling back to a CNAME; the alternative
+ * dropped; the certificate record dropped; a manual provider treated as gcp;
+ * `active` added to, or `awaiting_dns` / `provisioning` removed from, the
+ * retryable set; retry called without the hostname; the force-remove threshold
+ * moved either way; Delete enabled while releasing; the unready-edge warning
+ * hidden; a raw issue code shown.
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, cleanup, act, fireEvent, within } from '@testing-library/react';
@@ -76,7 +84,12 @@ const mount = async (domains: CustomDomain[], edge: EdgeSummary | null): Promise
 };
 
 afterEach(cleanup);
-beforeEach(() => { vi.clearAllMocks(); });
+beforeEach(() => {
+  vi.clearAllMocks();
+  // Reset the client mocks' RETURNS too (clearAllMocks keeps a resolved value
+  // from one case into the next); useFeatureAccess / confirm keep their impls.
+  for (const m of [listOrgs, listDomainPage, retryDomain, forceRemoveDomain]) m.mockReset();
+});
 
 describe('DomainsPage — HTTPS axis', () => {
   it('manual: an operator-managed chip, no Check again, and the operator copy', async () => {
@@ -102,10 +115,16 @@ describe('DomainsPage — HTTPS axis', () => {
     expect(screen.queryByText('WEIRD_CODE')).toBeNull();
   });
 
-  it('an active certificate offers no Check again', async () => {
-    await mount([base('shop.example.com', { edge: { provider: 'gcp-certificate-manager', tls: 'active', checkedAt: '' } })], GCP);
+  it('an active certificate offers no Check again; a provisioning one does', async () => {
+    await mount([
+      base('shop.example.com', { edge: { provider: 'gcp-certificate-manager', tls: 'active', checkedAt: '' } }),
+      base('new.example.com', { edge: { provider: 'gcp-certificate-manager', tls: 'provisioning', checkedAt: '' } }),
+    ], GCP);
     expect(screen.getByText('Active')).toBeTruthy();
-    expect(screen.queryByRole('button', { name: /Check HTTPS again/ })).toBeNull();
+    // Positive signal first: the provisioning row offers it, so the absence
+    // below is about `active`, not about the button never rendering.
+    expect(screen.getByRole('button', { name: 'Check HTTPS again for new.example.com' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Check HTTPS again for shop.example.com' })).toBeNull();
   });
 
   it('force remove appears only after 3 failed releases', async () => {
@@ -134,5 +153,7 @@ describe('DomainsPage — HTTPS axis', () => {
     expect(d.getByText(CERT.value)).toBeTruthy();
     expect(d.getByText('edge.example.net')).toBeTruthy();
     expect(d.getAllByRole('button', { name: /^Copy the / })).toHaveLength(4); // 3 records + the A alternative
+    // awaiting_dns is retryable: the records were just shown, so Check again is offered.
+    expect(screen.getByRole('button', { name: 'Check HTTPS again for shop.example.com' })).toBeTruthy();
   });
 });

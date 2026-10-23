@@ -4,8 +4,11 @@
  *
  * Runs the REAL `check-bundle-budget.mjs` on a fixture `dist/` whose entry is
  * incompressible random bytes ~300 B over the host ceiling. Red under: the share
- * applying to the default distribution, no cap, a share without a reason, or the
- * report folding the share into one number.
+ * applying to the default distribution, no cap, a share without a reason (missing,
+ * whitespace-only or under 10 characters), a share reported but not added to the
+ * budget, an undeclared share, or the report folding the share into one number.
+ * Every exit-1 case asserts the MESSAGE, because every refusal path exits 1.
+ * Sabotage-witnessed: w55g1-es-* probes (round 1) and w55g1-es-*-r2 (round 2).
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { spawnSync } from 'node:child_process';
@@ -52,10 +55,15 @@ describe('declared distribution entry share (ADR 0874 amendment)', () => {
     const r = run('bookai', { entryShareBytes: 1024, entryShareReason: REASON });
     expect(r.code).toBe(0);
     expect(r.out).toMatch(/= host 129\.0 kB \+ 'bookai' declared entry share 1024 B/);
+    // The share is APPLIED, not only reported: 129 kB + 1024 B = 130.0 kB.
+    expect(r.out).toMatch(/\(budget 130\.0 kB =/);
   });
 
   it('a named distribution WITHOUT a declaration is held to the host ceiling too', () => {
-    expect(run('bookai', { bundles: [] }).code).toBe(1);
+    const r = run('bookai', { bundles: [] });
+    expect(r.code).toBe(1);
+    expect(r.out).toMatch(/over the ENTRY budget of 129\.0 kB/);
+    expect(r.out).not.toMatch(/declared entry share/);
   });
 
   it('the share is capped at 1 KiB', () => {
@@ -68,6 +76,12 @@ describe('declared distribution entry share (ADR 0874 amendment)', () => {
     const r = run('bookai', { entryShareBytes: 512 });
     expect(r.code).toBe(1);
     expect(r.out).toMatch(/needs an entryShareReason/);
+    // Present but empty of content, and present but too short (trimmed < 10), are refused the same way.
+    for (const entryShareReason of ['            ', '   short  ']) {
+      const bad = run('bookai', { entryShareBytes: 512, entryShareReason });
+      expect(bad.code).toBe(1);
+      expect(bad.out).toMatch(/needs an entryShareReason/);
+    }
   });
 
   it('the default distribution can never declare one', () => {
@@ -77,6 +91,9 @@ describe('declared distribution entry share (ADR 0874 amendment)', () => {
   });
 
   it('the share is not slack beyond itself: host ceiling + share + 200 B still fails', () => {
-    expect(run('bookai', { entryShareBytes: 512, entryShareReason: REASON }, HOST_CEILING + 512 + 200).code).toBe(1);
+    const r = run('bookai', { entryShareBytes: 512, entryShareReason: REASON }, HOST_CEILING + 512 + 200);
+    expect(r.code).toBe(1);
+    // 129 kB + 512 B = 132 608 B = 129.5 kB.
+    expect(r.out).toMatch(/over the ENTRY budget of 129\.5 kB/);
   });
 });

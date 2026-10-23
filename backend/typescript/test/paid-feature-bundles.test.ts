@@ -5,6 +5,11 @@
  * NEVER clobber the plan subscription; metadata + priceId + subId-reverse-lookup
  * correlation), resolveEntitlements' plan∪bundle union, and the bundle-checkout
  * route (bundleId-not-priceId; unpriced ⇒ 404). Isolated env — its own app boot.
+ *
+ * The gating cases assert the ENTITLEMENT refusal by its body (message + the
+ * gated `details.feature`), not just 403, so a role/org 403 cannot stand in for
+ * it; and after purchase each route's EXACT status, so a 500 cannot pass as
+ * "not 403". Every env var this file sets is saved and restored.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -22,6 +27,24 @@ import {
 let server: http.Server;
 let BASE: string;
 let cookie = '';
+
+const ENV_KEYS = [
+  'OPENWOP_STORAGE_DSN', 'OPENWOP_SESSION_SECRET', 'OPENWOP_TEST_AUTH_ENABLED', 'OPENWOP_AUTH_DISABLE_COOKIES',
+  'OPENWOP_BILLING_PLAN_PRICES', 'OPENWOP_BILLING_BUNDLE_PRICES', 'OPENWOP_BILLING_BUNDLE_ONETIME',
+  'OPENWOP_BILLING_BUNDLE_DISPLAY', 'OPENWOP_BILLING_PLAN_FEATURES',
+] as const;
+const savedEnv = new Map(ENV_KEYS.map((k) => [k, process.env[k]]));
+
+interface ErrorBody { error?: string; message?: string; details?: { feature?: string; plan?: string } }
+
+/** The entitlement guard's refusal (src/features/billing/entitlementGuard.ts),
+ *  told apart from any other 403 by its message and the gated feature. */
+async function expectEntitlementRefusal(res: Response, path: string, feature: string): Promise<void> {
+  expect(res.status, `${path} must 403 without entitlement`).toBe(403);
+  const body = (await res.json()) as ErrorBody;
+  expect(body.message, path).toBe('Your plan (free) does not include this feature.');
+  expect(body.details?.feature, path).toBe(feature);
+}
 
 // price_crm → the real 'crm' bundle; price_ghost → a non-existent bundle (must be dropped).
 beforeAll(async () => {
@@ -45,8 +68,7 @@ beforeAll(async () => {
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ email: 'buyer@acme.test', tenantId: 't-buyer' }),
   });
-  const h = login.headers as { getSetCookie?: () => string[] };
-  for (const c of (typeof h.getSetCookie === 'function' ? h.getSetCookie() : [])) {
+  for (const c of login.headers.getSetCookie()) {
     const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1];
   }
 });
@@ -54,12 +76,10 @@ afterAll(async () => {
   // Clean up every env var this file set — a leaked OPENWOP_BILLING_PLAN_FEATURES
   // would narrow plans for LATER test files in the same worker, making the
   // now-gated analytics/email 403 in unrelated suites (agents/strategy demo seeds).
-  delete process.env.OPENWOP_TEST_AUTH_ENABLED;
-  delete process.env.OPENWOP_BILLING_PLAN_PRICES;
-  delete process.env.OPENWOP_BILLING_BUNDLE_PRICES;
-  delete process.env.OPENWOP_BILLING_BUNDLE_ONETIME;
-  delete process.env.OPENWOP_BILLING_BUNDLE_DISPLAY;
-  delete process.env.OPENWOP_BILLING_PLAN_FEATURES;
+  for (const [key, value] of savedEnv) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
   await new Promise<void>((res) => server.close(() => res()));
 });
 beforeEach(async () => { await __resetBilling(); });
@@ -233,30 +253,32 @@ describe('ADR 0419 R2 — the CRM bundle is FULLY gated (crm+csm, every authz ch
     const orgId = (await (await authed('/host/openwop-app/orgs', { method: 'POST', body: JSON.stringify({ name: 'Acme' }) })).json() as { orgId: string }).orgId;
     // One representative AUTHENTICATED route per choke (entitlement fires at/after the
     // shared gate) — proves no sub-registrar was missed.
-    const routes: Array<[string, RequestInit?]> = [
-      ['/host/openwop-app/crm/contacts'],                                   // routes.ts requireEnabled
-      ['/host/openwop-app/crm/runs/none'],                                  // routes.ts runs (entitlement-first)
-      ['/host/openwop-app/crm/contacts/none/convert', { method: 'POST', body: JSON.stringify({ orgId }) }], // routes.ts convert (inline authz)
-      [`/host/openwop-app/crm/orgs/${orgId}/companies`],                    // orgRoutes authorize
-      [`/host/openwop-app/crm/orgs/${orgId}/sign-requests`],                // signRoutes authz
-      [`/host/openwop-app/crm/orgs/${orgId}/booking-links`],               // bookingRoutes authz
-      [`/host/openwop-app/crm/gmail-sync?orgId=${orgId}`],                  // gmailSyncRoutes helper
-      ['/host/openwop-app/csm/accounts'],                                   // csm requireEnabled
+    // [path, init, gated feature, exact status once owned]
+    const routes: Array<[string, RequestInit | undefined, string, number]> = [
+      ['/host/openwop-app/crm/contacts', undefined, 'crm', 200],                          // routes.ts requireEnabled
+      ['/host/openwop-app/crm/runs/none', undefined, 'crm', 404],                         // routes.ts runs (entitlement-first)
+      ['/host/openwop-app/crm/contacts/none/convert', { method: 'POST', body: JSON.stringify({ orgId }) }, 'crm', 404], // routes.ts convert (inline authz)
+      [`/host/openwop-app/crm/orgs/${orgId}/companies`, undefined, 'crm', 200],           // orgRoutes authorize
+      [`/host/openwop-app/crm/orgs/${orgId}/sign-requests`, undefined, 'crm', 200],       // signRoutes authz
+      [`/host/openwop-app/crm/orgs/${orgId}/booking-links`, undefined, 'crm', 200],      // bookingRoutes authz
+      [`/host/openwop-app/crm/gmail-sync?orgId=${orgId}`, undefined, 'crm', 200],         // gmailSyncRoutes helper
+      ['/host/openwop-app/csm/accounts', undefined, 'csm', 200],                          // csm requireEnabled
     ];
-    for (const [path, init] of routes) {
-      expect((await authed(path, init)).status, `${path} must 403 without entitlement`).toBe(403);
+    for (const [path, init, feature] of routes) {
+      await expectEntitlementRefusal(await authed(path, init), path, feature);
     }
     // Buy the CRM bundle (crm+csm+analytics+email union into allowedFeatures).
     await processStripeEvent('t-buyer', subEvent('evt_r2', 'customer.subscription.created', { metadata: { tenantId: 't-buyer', bundleId: 'crm' } }));
-    for (const [path, init] of routes) {
-      expect((await authed(path, init)).status, `${path} must NOT 403 once owned`).not.toBe(403);
-    }
+    // Each route's EXACT status once owned (one comparison, so a red shows them all).
+    const owned: Array<[string, number]> = [];
+    for (const [path, init] of routes) owned.push([path, (await authed(path, init)).status]);
+    expect(owned).toEqual(routes.map(([path, , , status]) => [path, status]));
   });
   it('a PUBLIC crm route (e-sign by recipient) is NOT gated on the operator plan (ADR 0176 exemption)', async () => {
-    // Unauthed public route, bogus token ⇒ 404, never a 401/403 plan error.
+    // Unauthed public route, bogus token ⇒ the route's own 404, never a 401/403
+    // plan error: the request REACHED the route.
     const res = await fetch(`${BASE}/host/openwop-app/public-sign/nonexistent-token`);
-    expect(res.status).not.toBe(403);
-    expect(res.status).not.toBe(401);
+    expect(res.status).toBe(404);
   });
 });
 
@@ -267,9 +289,10 @@ describe('ADR 0419 P3 — the entitlement gate BITES (analytics, a crm-bundle fe
     const org = await authed('/host/openwop-app/orgs', { method: 'POST', body: JSON.stringify({ name: 'Acme' }) });
     const orgId = (await org.json() as { orgId: string }).orgId;
     // Free plan (PLAN_FEATURES = {free:['billing']}) does NOT entitle analytics ⇒ 403.
-    expect((await authed(`/host/openwop-app/analytics/orgs/${orgId}/summary`)).status).toBe(403);
-    // Buy CRM (analytics ∈ crm bundle) ⇒ resolveEntitlements unions it in ⇒ no longer 403.
+    const path = `/host/openwop-app/analytics/orgs/${orgId}/summary`;
+    await expectEntitlementRefusal(await authed(path), path, 'analytics');
+    // Buy CRM (analytics ∈ crm bundle) ⇒ resolveEntitlements unions it in ⇒ the summary is served.
     await processStripeEvent('t-buyer', subEvent('evt_g1', 'customer.subscription.created', { metadata: { tenantId: 't-buyer', bundleId: 'crm' } }));
-    expect((await authed(`/host/openwop-app/analytics/orgs/${orgId}/summary`)).status).not.toBe(403);
+    expect((await authed(path)).status).toBe(200);
   });
 });

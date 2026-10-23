@@ -22,6 +22,14 @@
  * parallel resolves through the `__resolveAndResumeForTests` seam and
  * asserts every approval emits `node.completed` and the run reaches
  * `completed`.
+ *
+ * Events are compared as sorted ARRAYS (exact multiplicity), not Sets, so a
+ * double dispatch (a node completing twice, a second `run.completed`) is a red
+ * too, which is what the sequential case's "no extra events" promises.
+ *
+ * Witnessed: dropping the per-run chain from `resolveAndResume` (probe
+ * 8fw1g1-pr-chain) reds the concurrent case, so the four resolves DO race
+ * without it.
  */
 
 import { describe, expect, it, beforeAll } from 'vitest';
@@ -151,12 +159,12 @@ describe('parallel resume — race regression', () => {
     const completedIds = events
       .filter((e) => e.type === 'node.completed')
       .map((e) => e.nodeId);
-    expect(new Set(completedIds)).toEqual(new Set(['a1', 'a2', 'a3', 'a4', 'sink']));
-    expect(events.some((e) => e.type === 'run.completed')).toBe(true);
+    expect([...completedIds].sort()).toEqual(['a1', 'a2', 'a3', 'a4', 'sink']);
+    expect(events.filter((e) => e.type === 'run.completed')).toHaveLength(1);
 
-    // And the per-interrupt resolve event fired for each.
+    // And the per-interrupt resolve event fired exactly once for each.
     const resolved = events.filter((e) => e.type === 'interrupt.resolved').map((e) => e.nodeId);
-    expect(new Set(resolved)).toEqual(new Set(['a1', 'a2', 'a3', 'a4']));
+    expect([...resolved].sort()).toEqual(['a1', 'a2', 'a3', 'a4']);
 
     // Run record reflects terminal status.
     const finalRun = await storage.getRun(run.runId);
@@ -190,8 +198,8 @@ describe('parallel resume — race regression', () => {
     expect(open.length).toBe(2);
 
     // Sequential resolves — await each before issuing the next.
-    for (const it of open) {
-      await __resolveAndResumeForTests(storage, hostSuite, it.interruptId, { action: 'approve' });
+    for (const interrupt of open) {
+      await __resolveAndResumeForTests(storage, hostSuite, interrupt.interruptId, { action: 'approve' });
       await __awaitRunResumeChainForTests(run.runId);
     }
 
@@ -199,7 +207,9 @@ describe('parallel resume — race regression', () => {
     const completedIds = events
       .filter((e) => e.type === 'node.completed')
       .map((e) => e.nodeId);
-    expect(new Set(completedIds)).toEqual(new Set(['a1', 'a2', 'sink']));
-    expect(events.some((e) => e.type === 'run.completed')).toBe(true);
+    expect([...completedIds].sort()).toEqual(['a1', 'a2', 'sink']);
+    expect(events.filter((e) => e.type === 'run.completed')).toHaveLength(1);
+    const resolved = events.filter((e) => e.type === 'interrupt.resolved').map((e) => e.nodeId);
+    expect([...resolved].sort()).toEqual(['a1', 'a2']);
   });
 });

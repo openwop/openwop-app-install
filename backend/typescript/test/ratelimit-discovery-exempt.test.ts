@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
 
@@ -24,6 +24,12 @@ import { _resetRateLimitState } from '../src/middleware/rateLimit.js';
  * WHAT THIS MUST NOT DO is the other half, and it is why the third leg exists:
  * the exemption is scoped to GET/HEAD on that exact path. It must not become a
  * way to spend an unlimited budget on anything else.
+ *
+ * Each case starts from an empty bucket (`_resetRateLimitState` in
+ * `beforeEach`), so the legs are order-independent. Sabotage-witnessed
+ * (/grade-tests 8f wave 1): the discovery exemption (8fw1g3-rld-exempt), FORCE
+ * suspending it (rld-force), the method scope (rld-method) and the limiter
+ * itself for the control leg (rld-control).
  */
 let server: Server;
 let base: string;
@@ -40,8 +46,10 @@ beforeAll(async () => {
   server = await new Promise<Server>((r) => { const s = app.listen(0, '127.0.0.1', () => r(s)); });
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 });
+beforeEach(() => { _resetRateLimitState(); });
 afterAll(async () => {
   await new Promise<void>((r) => server.close(() => r()));
+  delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
   delete process.env.OPENWOP_RATELIMIT_IP_REQS_PER_MIN;
   delete process.env.OPENWOP_RATELIMIT_IP_READ_REQS_PER_MIN;
   delete process.env.OPENWOP_FORCE_RATE_LIMIT;

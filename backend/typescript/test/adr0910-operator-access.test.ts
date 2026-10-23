@@ -248,6 +248,8 @@ describe('D8 — the Factory names its own key', () => {
     };
     walk(src);
     expect(hits.length).toBeGreaterThan(0);
-    expect(hits.filter((h) => !h.startsWith('features/kicktodo-creator/'))).toEqual([]);
+    // Readiness only REPORTS whether the ref exists (D10); it never chooses or defaults one.
+    const REPORTS_ONLY = new Set(['features/kicktodo-core/readinessService.ts']);
+    expect(hits.filter((h) => !h.startsWith('features/kicktodo-creator/') && !REPORTS_ONLY.has(h))).toEqual([]);
   });
 });

@@ -629,6 +629,47 @@ else
 fi
 rm -rf "$SLT"
 
+echo "== budgeted frontend build env (#5006) =="
+# In an adopter bundle the build check-bundle-budget measures must read only a
+# copy of .env.production.example, never the adopter's own .env.production
+# (whose brand strings redded KickTodo's gate on a build it never ships). The
+# full repo must keep reading its own, exactly as before. The real-build
+# witness (entry bytes equal with and without brand strings) is
+# scripts/test-adopter-budget-env.sh; this block pins the decision and wiring.
+BET="$(mktemp -d)"
+mkdir -p "$BET/adopter/frontend/react" "$BET/bare/frontend/react"
+cp "$ROOT/frontend/react/.env.production.example" "$BET/adopter/frontend/react/.env.production.example"
+printf 'VITE_OPENWOP_BASE_URL=/api\nVITE_BRAND_PRODUCT_NAME=ZZBRANDHEAVYZZ\n' > "$BET/adopter/frontend/react/.env.production"
+check "$(budget_env_dir "$ROOT" take)" "" "full repo: no env override (the build reads its own .env.production, as today)"
+bed="$(budget_env_dir "$BET/adopter" skip)"; bed_rc=$?
+check "$bed_rc" 0 "adopter bundle: an env dir is made"
+if [ -n "$bed" ] && cmp -s "$bed/.env.production" "$ROOT/frontend/react/.env.production.example"; then
+  ok "adopter bundle: the budgeted env IS the example, byte for byte"
+else
+  bad "adopter bundle: the budgeted env is not a copy of .env.production.example"
+fi
+if [ -n "$bed" ] && ! grep -rq ZZBRANDHEAVYZZ "$bed"; then
+  ok "adopter bundle: the adopter's brand strings are not in the budgeted env"
+else
+  bad "adopter bundle: the adopter's .env.production leaked into the budgeted env"
+fi
+check "$(find "${bed:-/nonexistent}" -type f 2>/dev/null | wc -l | tr -d ' ')" 1 "adopter bundle: the env dir holds exactly one file (no .env/.env.local/.env.production.local)"
+[ -n "$bed" ] && rm -rf "$bed"
+budget_env_dir "$BET/bare" skip >/dev/null 2>&1; check "$?" 1 "adopter bundle with no .env.production.example REFUSES (never measures brand bytes)"
+# ci.sh passes the dir to the build as an env PREFIX on a shell function. That
+# form must reach the function's child processes, or the override is inert.
+bet_fn() { sh -c 'printf %s "${OPENWOP_VITE_ENV_DIR:-}"'; }
+check "$(OPENWOP_VITE_ENV_DIR=/probe bet_fn)" /probe "an env prefix on a shell function reaches its child process (ci.sh's form)"
+if grep -q 'budget_env_dir "\$ROOT" "\$STEWARD_LANE_MODE"' "$ROOT/scripts/ci.sh" \
+  && grep -q 'OPENWOP_VITE_ENV_DIR="\$envd" fe_static_one' "$ROOT/scripts/ci.sh" \
+  && grep -q 'process.env.OPENWOP_VITE_ENV_DIR' "$ROOT/frontend/react/vite.config.ts" \
+  && [ "$(grep -c "loadEnv(mode, __dirname" "$ROOT/frontend/react/vite.config.ts")" = 0 ]; then
+  ok "ci.sh hands the budgeted build the env dir, and every vite.config loadEnv reads it"
+else
+  bad "the #5006 wiring is broken (ci.sh call, the build's env prefix, or a vite.config loadEnv still on __dirname)"
+fi
+rm -rf "$BET"
+
 # GATE-EPIPE — piping a shell variable into a SHORT-CIRCUITING grep is a
 # false-negative generator under `set -o pipefail`, which every gate script sets.
 # `grep -q` exits the instant it matches, closing the pipe; the writer is still

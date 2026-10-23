@@ -15,6 +15,13 @@
  *
  * The one deliberate DIFFERENCE is asserted too: `trustBoundary` is widened to
  * `'untrusted'` under isolation and inherited from the run in-process.
+ *
+ * The in-process lane sets `OPENWOP_PACK_ISOLATION=off` EXPLICITLY. (It used to
+ * delete the var, which runs the DEFAULT `untrusted` mode: an operator-trusted
+ * pack stays in-process there too, so the label was right by accident.)
+ *
+ * CEILING: `settle()` polls the run status (25 ms × 160). The executor exposes
+ * no run-settled hook to await over HTTP, so the poll is the honest bound.
  */
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
@@ -42,7 +49,15 @@ let BASE: string;
 let packRoot: string;
 const H = { 'content-type': 'application/json', authorization: 'Bearer dev-token' };
 
-interface RunEvent { type?: string; nodeId?: string; payload?: Record<string, unknown> }
+/** The parts of a debug-bundle event this file reads. Every field is optional
+ *  because the bundle is parsed JSON, and an absent field must read as absent. */
+interface RunEventPayload {
+  from?: unknown;
+  hasSecrets?: unknown;
+  outputs?: { tenant?: unknown; trust?: unknown; marker?: unknown; answer?: unknown };
+  error?: { code?: string; message?: string };
+}
+interface RunEvent { type?: string; nodeId?: string; payload?: RunEventPayload }
 
 async function api<T = Record<string, unknown>>(path: string, init: RequestInit = {}): Promise<{ status: number; body: T }> {
   const res = await fetch(`${BASE}${path}`, { ...init, headers: { ...H, ...(init.headers ?? {}) } });
@@ -84,8 +99,7 @@ async function runNode(workflowId: string, typeId: string, inputs: Record<string
 /** Run `fn` with the isolation mode forced, restoring whatever was there. */
 async function withIsolation<T>(mode: 'fake' | 'off', fn: () => Promise<T>): Promise<T> {
   const prev = process.env.OPENWOP_PACK_ISOLATION;
-  if (mode === 'fake') process.env.OPENWOP_PACK_ISOLATION = 'fake';
-  else delete process.env.OPENWOP_PACK_ISOLATION;
+  process.env.OPENWOP_PACK_ISOLATION = mode;
   try {
     return await fn();
   } finally {
@@ -93,6 +107,12 @@ async function withIsolation<T>(mode: 'fake' | 'off', fn: () => Promise<T>): Pro
     else process.env.OPENWOP_PACK_ISOLATION = prev;
   }
 }
+
+const savedEnv = {
+  OPENWOP_STORAGE_DSN: process.env.OPENWOP_STORAGE_DSN,
+  OPENWOP_AUTH_DISABLE_COOKIES: process.env.OPENWOP_AUTH_DISABLE_COOKIES,
+  OPENWOP_PACK_ISOLATION: process.env.OPENWOP_PACK_ISOLATION,
+};
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -157,7 +177,10 @@ beforeAll(async () => {
 }, 60_000);
 
 afterAll(async () => {
-  delete process.env.OPENWOP_PACK_ISOLATION;
+  for (const [key, value] of Object.entries(savedEnv)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
   await new Promise<void>((res) => server.close(() => res()));
   rmSync(packRoot, { recursive: true, force: true });
 });
@@ -187,8 +210,7 @@ describe('success, both placements', () => {
     // `secrets` never crossed into the worker.
     expect(probe?.payload?.hasSecrets).toBe(false);
 
-    const completed = log.find((e) => e.type === 'node.completed');
-    const outputs = completed?.payload?.outputs as Record<string, unknown> | undefined;
+    const outputs = log.find((e) => e.type === 'node.completed')?.payload?.outputs;
     expect(outputs?.tenant).toBe('_anon');
     // The deliberate widening: isolated code always sees `untrusted` inputs.
     expect(outputs?.trust).toBe('untrusted');
@@ -203,7 +225,7 @@ describe('success, both placements', () => {
     expect(status).toBe('completed');
     const log = await events(runId);
     expect(log.find((e) => e.type === 'isolation.probe')?.payload?.from).toBe('pack');
-    const outputs = log.find((e) => e.type === 'node.completed')?.payload?.outputs as Record<string, unknown> | undefined;
+    const outputs = log.find((e) => e.type === 'node.completed')?.payload?.outputs;
     expect(outputs?.tenant).toBe('_anon');
     expect(outputs?.trust).toBe('trusted');
     expect(snapshotRunVariables(bareRunId(runId))?.iso_marker).toBe('set-by-pack');
@@ -215,17 +237,17 @@ describe('failure codes, both placements', () => {
     const { runId, status } = await withIsolation('fake', () => runNode('iso.e2e.boom.isolated', BOOM));
     expect(status).toBe('failed');
     const failed = (await events(runId)).find((e) => e.type === 'node.failed');
-    expect((failed?.payload?.error as { code?: string } | undefined)?.code).toBe('policy_denied');
+    expect(failed?.payload?.error?.code).toBe('policy_denied');
     // …and it came from the ISOLATED placement, not a silent in-process fallback.
-    expect((failed?.payload?.error as { message?: string } | undefined)?.message).toBe('denied by policy on untrusted');
+    expect(failed?.payload?.error?.message).toBe('denied by policy on untrusted');
   }, 30_000);
 
   it('IN-PROCESS: the same code, from the same pack', async () => {
     const { runId, status } = await withIsolation('off', () => runNode('iso.e2e.boom.inprocess', BOOM));
     expect(status).toBe('failed');
     const failed = (await events(runId)).find((e) => e.type === 'node.failed');
-    expect((failed?.payload?.error as { code?: string } | undefined)?.code).toBe('policy_denied');
-    expect((failed?.payload?.error as { message?: string } | undefined)?.message).toBe('denied by policy on trusted');
+    expect(failed?.payload?.error?.code).toBe('policy_denied');
+    expect(failed?.payload?.error?.message).toBe('denied by policy on trusted');
   }, 30_000);
 });
 
@@ -247,7 +269,7 @@ describe('suspend/resume, both placements', () => {
   it('ISOLATED: the run pauses, and resuming re-invokes with the resolution short-circuited inline', async () => {
     const { runId, finalStatus } = await withIsolation('fake', () => suspendAndResume('iso.e2e.pause.isolated'));
     expect(finalStatus).toBe('completed');
-    const outputs = (await events(runId)).find((e) => e.type === 'node.completed')?.payload?.outputs as Record<string, unknown> | undefined;
+    const outputs = (await events(runId)).find((e) => e.type === 'node.completed')?.payload?.outputs;
     expect(outputs?.answer).toEqual({ approved: true });
     expect(outputs?.trust).toBe('untrusted');
   }, 40_000);
@@ -255,7 +277,7 @@ describe('suspend/resume, both placements', () => {
   it('IN-PROCESS: the same pause and the same resumed answer', async () => {
     const { runId, finalStatus } = await withIsolation('off', () => suspendAndResume('iso.e2e.pause.inprocess'));
     expect(finalStatus).toBe('completed');
-    const outputs = (await events(runId)).find((e) => e.type === 'node.completed')?.payload?.outputs as Record<string, unknown> | undefined;
+    const outputs = (await events(runId)).find((e) => e.type === 'node.completed')?.payload?.outputs;
     expect(outputs?.answer).toEqual({ approved: true });
     expect(outputs?.trust).toBe('trusted');
   }, 40_000);

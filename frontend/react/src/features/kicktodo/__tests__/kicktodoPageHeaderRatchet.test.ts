@@ -11,8 +11,8 @@
  * hand-rolls the header turns this red, and so does converting a listed page
  * without deleting its entry (the list cannot rot into a silent allowance).
  *
- * Breaks it: re-introducing `<header className="page-header">` on any of the
- * twelve pages CS-3 converted (sabotage-witnessed on `AdminCommercePage.tsx`:
+ * Breaks it: re-introducing a hand-rolled `<header className="page-header">` (in
+ * any spelling HAND_ROLLED matches) on any page CS-3 converted (twelve at the time) (sabotage-witnessed on `AdminCommercePage.tsx`:
  * restoring its hand-rolled header turned the first case red).
  */
 import { describe, it, expect } from 'vitest';
@@ -20,6 +20,18 @@ import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
 
 const FEATURES = join(process.cwd(), 'src', 'features');
+
+/**
+ * A hand-rolled page header: a `<header …>` whose className (any quote style,
+ * `{'…'}` / template, any attribute order, multi-line, extra classes) carries the
+ * `page-header` class itself — not a `page-header__*` / `page-header-*` part.
+ * Widened 2026-10-22 (grade-tests w54) from the exact spelling
+ * `<header className="page-header"`, which `className="page-header kt-x"`,
+ * single quotes or an attribute before className dodged (probe
+ * w54g3-ph-spelling-dodge was vacuous). Measured on 75a3813fe: the widened scan
+ * finds EXACTLY the same five files as the old one — the baseline did not move.
+ */
+const HAND_ROLLED = /<header[^>]*className=\{?["'`][^"'`]*\bpage-header\b(?![_-])/;
 
 /** Hand-rolled headers still present, with why. Delete an entry when converting. */
 const REMAINING: Record<string, string> = {
@@ -50,7 +62,7 @@ function tsxFiles(dir: string): string[] {
 const handRolled = readdirSync(FEATURES)
   .filter((d) => d.startsWith('kicktodo'))
   .flatMap((d) => tsxFiles(join(FEATURES, d)))
-  .filter((f) => readFileSync(f, 'utf8').includes('<header className="page-header"'))
+  .filter((f) => HAND_ROLLED.test(readFileSync(f, 'utf8')))
   .map((f) => relative(FEATURES, f).split(sep).join('/'))
   .sort();
 

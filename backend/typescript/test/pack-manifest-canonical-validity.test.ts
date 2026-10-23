@@ -26,10 +26,13 @@
  */
 import { describe, expect, it } from 'vitest';
 import { readFileSync, existsSync, readdirSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { Ajv2020 } from 'ajv/dist/2020.js';
 
-const REPO = resolve(process.cwd(), '..', '..');
+// Resolved from this file, not `process.cwd()`, so the suite finds the repo no
+// matter which directory vitest was launched from.
+const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 const SCHEMAS = join(REPO, 'schemas');
 const PACKS = join(REPO, 'packs');
 

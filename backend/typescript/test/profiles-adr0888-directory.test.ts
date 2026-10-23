@@ -52,15 +52,22 @@ afterAll(async () => {
   await new Promise<void>((res) => server.close(() => res()));
 });
 
-interface Res { status: number; body: any } // eslint-disable-line @typescript-eslint/no-explicit-any -- JSON boundary of a test client
-async function call(cookie: string, method: string, path: string, body?: unknown): Promise<Res> {
+interface Res<T> { status: number; body: T }
+/** Narrow views of the JSON this file reads (the routes' bodies; a peer row is
+ *  kept as a record because the D2 case asserts which keys are ABSENT). */
+type PeerRow = Record<string, unknown> & { userId: string; jobTitle?: string; workflows?: unknown[]; skills?: Array<{ endorsements: unknown }> };
+interface DirectoryBody { scope: string; workspaceId?: string; sharedByMe: boolean; truncated: boolean; profiles: PeerRow[] }
+interface ShareBody { sharedWorkspaceIds: string[] }
+interface ErrBody { error: string; message: string; details?: Record<string, unknown> }
+async function call<T = unknown>(cookie: string, method: string, path: string, body?: unknown): Promise<Res<T>> {
   const res = await fetch(`${BASE}${path}`, {
     method,
     headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) },
     ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
   });
-  return { status: res.status, body: await res.json().catch(() => undefined) };
+  return { status: res.status, body: (await res.json().catch(() => undefined)) as T };
 }
+const dirOf = (cookie: string): Promise<Res<DirectoryBody>> => call<DirectoryBody>(cookie, 'GET', P);
 const P = '/host/openwop-app/profiles';
 
 interface Person { cookie: string; userId: string; tenantId: string }
@@ -93,43 +100,46 @@ async function team(): Promise<{ ws: string; alice: Person; bob: Person; aliceWs
   expect((await call(bob.cookie, 'PUT', `${P}/me/skills`, { skills: [{ name: 'Espresso', proficiency: 4 }] })).status).toBe(200);
   return { ws, alice, bob, aliceWs: await switchInto(alice, ws), bobWs: await switchInto(bob, ws) };
 }
-const ids = (r: Res): string[] => (r.body.profiles as Array<{ userId: string }>).map((p) => p.userId);
+const ids = (r: Res<DirectoryBody>): string[] => {
+  expect(r.status, JSON.stringify(r.body)).toBe(200);
+  return r.body.profiles.map((p) => p.userId);
+};
 
 describe('ADR 0888 D1 — a shared workspace lists the people who chose to be seen', () => {
   it('never lists a member who did not share, and lists a co-member who shared', async () => {
     const { alice, bob, aliceWs, bobWs, ws } = await team();
-    const before = await call(aliceWs, 'GET', P);
+    const before = await dirOf(aliceWs);
     expect(before.status).toBe(200);
     expect(before.body).toMatchObject({ scope: 'workspace', workspaceId: ws, sharedByMe: false, truncated: false });
     expect(ids(before)).not.toContain(bob.userId); // consent: no share, no listing
     expect((await call(aliceWs, 'GET', `${P}/${encodeURIComponent(bob.userId)}`)).status).toBe(404);
 
-    const share = await call(bobWs, 'PUT', `${P}/me/workspace-share`);
+    const share = await call<ShareBody>(bobWs, 'PUT', `${P}/me/workspace-share`);
     expect(share.status, JSON.stringify(share.body)).toBe(200);
     expect(share.body.sharedWorkspaceIds).toEqual([ws]);
 
-    const after = await call(aliceWs, 'GET', P);
+    const after = await dirOf(aliceWs);
     expect(ids(after)).toEqual([bob.userId]);
     const row = after.body.profiles[0];
     expect(row.jobTitle).toBe('Roaster');
     expect(row.workflows).toEqual([]); // home-tenant workflow ids do not resolve here
-    expect(row.skills[0].endorsements).toEqual({ count: 0, endorsedByMe: false, endorserUserIds: [] });
-    const one = await call(aliceWs, 'GET', `${P}/${encodeURIComponent(bob.userId)}`);
+    expect(row.skills?.[0]?.endorsements).toEqual({ count: 0, endorsedByMe: false, endorserUserIds: [] });
+    const one = await call<PeerRow>(aliceWs, 'GET', `${P}/${encodeURIComponent(bob.userId)}`);
     expect(one.status).toBe(200);
     expect(one.body.userId).toBe(bob.userId);
     // Bob's own directory says he is sharing; Alice's home directory is untouched.
-    expect((await call(bobWs, 'GET', P)).body.sharedByMe).toBe(true);
-    expect(ids(await call(alice.cookie, 'GET', P))).not.toContain(bob.userId);
+    expect((await dirOf(bobWs)).body.sharedByMe).toBe(true);
+    expect(ids(await dirOf(alice.cookie))).not.toContain(bob.userId);
   });
 
   it('un-sharing hides the person on the next read; the endpoint is self-only', async () => {
     const { bob, aliceWs, bobWs, ws } = await team();
     await call(bobWs, 'PUT', `${P}/me/workspace-share`);
-    expect(ids(await call(aliceWs, 'GET', P))).toContain(bob.userId);
-    const un = await call(bob.cookie, 'DELETE', `${P}/me/workspace-share/${encodeURIComponent(ws)}`);
+    expect(ids(await dirOf(aliceWs))).toContain(bob.userId);
+    const un = await call<ShareBody>(bob.cookie, 'DELETE', `${P}/me/workspace-share/${encodeURIComponent(ws)}`);
     expect(un.status).toBe(200);
     expect(un.body.sharedWorkspaceIds).toEqual([]);
-    expect(ids(await call(aliceWs, 'GET', P))).not.toContain(bob.userId);
+    expect(ids(await dirOf(aliceWs))).not.toContain(bob.userId);
   });
 
   it('a member who left the workspace disappears without any write', async () => {
@@ -137,7 +147,7 @@ describe('ADR 0888 D1 — a shared workspace lists the people who chose to be se
     await call(bobWs, 'PUT', `${P}/me/workspace-share`);
     const m = (await listMembers(ws, ws)).find((x) => x.subject === bob.userId)!;
     await deleteMember(m.memberId);
-    expect(ids(await call(aliceWs, 'GET', P))).not.toContain(bob.userId);
+    expect(ids(await dirOf(aliceWs))).not.toContain(bob.userId);
     expect((await call(aliceWs, 'GET', `${P}/${encodeURIComponent(bob.userId)}`)).status).toBe(404);
   });
 
@@ -149,11 +159,14 @@ describe('ADR 0888 D1 — a shared workspace lists the people who chose to be se
     const scanned: string[] = [];
     const orig = DurableCollection.prototype.list;
     const spy = vi.spyOn(DurableCollection.prototype, 'list').mockImplementation(function (this: DurableCollection<unknown>, ...args: unknown[]) {
+      // The ONE deliberate cast: `name` is a private constructor field of
+      // DurableCollection with no accessor, and the collection name is what this
+      // case is about.
       scanned.push((this as unknown as { name: string }).name);
       return (orig as (...a: unknown[]) => Promise<unknown[]>).apply(this, args);
     } as typeof orig);
     try {
-      expect(ids(await call(aliceWs, 'GET', P))).not.toContain(bob.userId);
+      expect(ids(await dirOf(aliceWs))).not.toContain(bob.userId);
       expect((await call(aliceWs, 'GET', `${P}/${encodeURIComponent(bob.userId)}`)).status).toBe(404);
     } finally {
       spy.mockRestore();
@@ -166,7 +179,7 @@ describe('ADR 0888 D1 — a shared workspace lists the people who chose to be se
     // Bob shared while his member row was keyed by his unbound principal; the bind
     // re-keyed it to his userId, so the stored subject no longer matches any row.
     await putShare({ workspaceId: ws, userId: bob.userId, memberSubject: 'oidc:pre-bind-bob', sharedAt: new Date().toISOString() });
-    expect(ids(await call(aliceWs, 'GET', P))).toContain(bob.userId);
+    expect(ids(await dirOf(aliceWs))).toContain(bob.userId);
   });
 
   it('two IdPs, one principal string: a share is never matched to a DIFFERENT person\'s member row', async () => {
@@ -177,7 +190,7 @@ describe('ADR 0888 D1 — a shared workspace lists the people who chose to be se
     // human from IdP B holds a root membership under the same raw string.
     await putShare({ workspaceId: ws, userId: x.userId, memberSubject: 'scim:jsmith', sharedAt: new Date().toISOString() });
     await createMember({ orgId: ws, tenantId: ws, displayName: 'J Smith (IdP B)', subject: 'scim:jsmith', roles: ['viewer'] });
-    expect(ids(await call(aliceWs, 'GET', P))).not.toContain(x.userId);
+    expect(ids(await dirOf(aliceWs))).not.toContain(x.userId);
     expect((await call(aliceWs, 'GET', `${P}/${encodeURIComponent(x.userId)}`)).status).toBe(404);
   });
 
@@ -193,7 +206,7 @@ describe('ADR 0888 D1 — a shared workspace lists the people who chose to be se
 
   it('sharing is refused outside a shared workspace (home tenant)', async () => {
     const p = await person('solo');
-    const r = await call(p.cookie, 'PUT', `${P}/me/workspace-share`);
+    const r = await call<ErrBody>(p.cookie, 'PUT', `${P}/me/workspace-share`);
     expect(r.status).toBe(409);
     expect(r.body.details).toMatchObject({ reason: 'not_in_a_shared_workspace' });
   });
@@ -201,7 +214,7 @@ describe('ADR 0888 D1 — a shared workspace lists the people who chose to be se
   it('endorsing from a workspace is refused (the write would escape that workspace\'s erasure)', async () => {
     const { bob, aliceWs, bobWs } = await team();
     await call(bobWs, 'PUT', `${P}/me/workspace-share`);
-    const r = await call(aliceWs, 'POST', `${P}/${encodeURIComponent(bob.userId)}/skills/Espresso/endorse`);
+    const r = await call<ErrBody>(aliceWs, 'POST', `${P}/${encodeURIComponent(bob.userId)}/skills/Espresso/endorse`);
     expect(r.status).toBe(409);
     expect(r.body.details).toMatchObject({ reason: 'endorse_unavailable_here' });
   });
@@ -216,9 +229,9 @@ describe('ADR 0888 D1 — a shared workspace lists the people who chose to be se
     await call(bob.cookie, 'PATCH', `${P}/me`, { jobTitle: 'Barista' });
     const aliceWs = await switchInto(alice, root);
     const bobWs = await switchInto(bob, root);
-    expect((await call(aliceWs, 'GET', P)).body).toMatchObject({ scope: 'workspace', workspaceId: root });
+    expect((await dirOf(aliceWs)).body).toMatchObject({ scope: 'workspace', workspaceId: root });
     await call(bobWs, 'PUT', `${P}/me/workspace-share`);
-    expect(ids(await call(aliceWs, 'GET', P))).toEqual([bob.userId]);
+    expect(ids(await dirOf(aliceWs))).toEqual([bob.userId]);
   });
 });
 
@@ -235,12 +248,12 @@ describe('ADR 0888 D2 — the peer view is an allowlist', () => {
     const bob = await login(`b-${n}@acme.test`);
     await createMember({ tenantId: T, orgId: T, subject: bob.userId, displayName: 'Bob', roles: ['viewer'] });
     await call(alice.cookie, 'PATCH', `${P}/me`, { jobTitle: 'Producer' });
-    const own = await call(alice.cookie, 'GET', `${P}/me`);
+    const own = await call<Record<string, unknown>>(alice.cookie, 'GET', `${P}/me`);
     for (const k of ['pinnedAgentIds', 'pinnedChatAgentIds', 'tenantId']) expect(k in own.body, `own view keeps ${k}`).toBe(true);
-    const one = await call(bob.cookie, 'GET', `${P}/${encodeURIComponent(alice.userId)}`);
+    const one = await call<PeerRow>(bob.cookie, 'GET', `${P}/${encodeURIComponent(alice.userId)}`);
     expect(one.status).toBe(200);
-    const dir = await call(bob.cookie, 'GET', P);
-    const row = (dir.body.profiles as Array<Record<string, unknown>>).find((p) => p.userId === alice.userId)!;
+    const dir = await dirOf(bob.cookie);
+    const row = dir.body.profiles.find((p) => p.userId === alice.userId)!;
     for (const view of [one.body, row]) {
       for (const k of ['pinnedAgentIds', 'pinnedChatAgentIds', 'knowledge', 'sharedWorkspaceIds', 'updatedBy', 'tenantId', 'completenessMissing']) {
         expect(k in view, k).toBe(false);
@@ -285,7 +298,7 @@ describe('ADR 0888 D3 — the run lane has the route\'s floor', () => {
     const { ws, alice, bob, bobWs, aliceWs } = await team();
     await call(bobWs, 'PUT', `${P}/me/workspace-share`);
     await call(aliceWs, 'PUT', `${P}/me/workspace-share`);
-    const route = ids(await call(aliceWs, 'GET', P)).sort();
+    const route = ids(await dirOf(aliceWs)).sort();
     const run = await buildProfilesSurface({ tenantId: ws, actingUserId: alice.userId }).listProfiles!({}) as { profiles: Array<Record<string, unknown>> };
     expect(run.profiles.map((p) => p.userId as string).sort()).toEqual(route);
     for (const p of run.profiles) {
@@ -303,9 +316,9 @@ describe('ADR 0888 — erasure and retention reach', () => {
   it('erasure removes the share (home-tenant eraser) and the workspace eraser removes its own row', async () => {
     const { ws, bob, aliceWs, bobWs } = await team();
     await call(bobWs, 'PUT', `${P}/me/workspace-share`);
-    expect(ids(await call(aliceWs, 'GET', P))).toContain(bob.userId);
+    expect(ids(await dirOf(aliceWs))).toContain(bob.userId);
     await eraseSubject(ws, bob.userId); // an erasure run IN the workspace
-    expect(ids(await call(aliceWs, 'GET', P))).not.toContain(bob.userId);
+    expect(ids(await dirOf(aliceWs))).not.toContain(bob.userId);
     expect(await __rawWorkspaceShares(ws)).toEqual([]);
 
     const t2 = await team();
@@ -313,7 +326,7 @@ describe('ADR 0888 — erasure and retention reach', () => {
     const { profileEraser } = await import('../src/features/profiles/profilesService.js');
     expect((await __rawWorkspaceShares(t2.ws)).map((r) => r.userId)).toEqual([t2.bob.userId]);
     await profileEraser(t2.bob.tenantId, t2.bob.userId); // the home-tenant eraser
-    expect(ids(await call(t2.aliceWs, 'GET', P))).not.toContain(t2.bob.userId);
+    expect(ids(await dirOf(t2.aliceWs))).not.toContain(t2.bob.userId);
     // The ROW is gone, not merely hidden by the read path (a dangling row still
     // holds the person's id and membership subject).
     expect(await __rawWorkspaceShares(t2.ws)).toEqual([]);
@@ -322,9 +335,9 @@ describe('ADR 0888 — erasure and retention reach', () => {
   it('retention reclaims the avatar bytes it un-references', async () => {
     const p = await person('rt');
     const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
-    const up = await call(p.cookie, 'POST', '/host/openwop-app/media/upload', { contentBase64: PNG, contentType: 'image/png', name: 'a.png' });
+    const up = await call<{ token: string }>(p.cookie, 'POST', '/host/openwop-app/media/upload', { contentBase64: PNG, contentType: 'image/png', name: 'a.png' });
     expect(up.status).toBe(201);
-    const token = up.body.token as string;
+    const token = up.body.token;
     expect((await call(p.cookie, 'PUT', `${P}/me/avatar`, { token })).status).toBe(200);
     const out = await purgeRetained(p.tenantId, 'confidential-pii', new Date(Date.now() + 60_000).toISOString());
     expect(out.find((r) => r.feature === 'profiles')?.deleted).toBe(1);
@@ -347,6 +360,10 @@ describe('ADR 0888 D5 — avatar types are the ones the exit renders inline', ()
 
 describe('SOUND on origin/main (kept as regression)', () => {
   it('an unauthenticated caller cannot read the directory', async () => {
-    expect([401, 403]).toContain((await call('', 'GET', P)).status);
+    const r = await call<ErrBody>('', 'GET', P);
+    // A cookie-less request on the host-extension space is minted an ANON session;
+    // `resolveRouteDirectory` → `resolveCallerUser` → `requireSignedIn` refuses it.
+    expect(r.status).toBe(401);
+    expect(r.body).toMatchObject({ error: 'sign_in_required', message: 'Sign in to access your account.' });
   });
 });

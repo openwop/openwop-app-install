@@ -1,14 +1,38 @@
 /**
  * Replay divergence detection (`src/executor/replayDivergence.ts`) +
- * an end-to-end replay round-trip proving the host honestly advertises
- * `capabilities.replay.supported` and re-executes deterministically.
+ * an end-to-end replay round-trip proving the host honestly advertises the v2
+ * `replay` family and re-executes deterministically (replay.md §"Failure surfaces").
+ *
+ * Sabotages that red this file (8fw1g4 round 1): the observable-type filter, the
+ * divergence index, the `type@nodeId` key, the truncation branch, the exclusive
+ * source cursor (`fromSeq - 1` → `fromSeq` makes every full replay "diverge"), and
+ * the advertised `modes`.
+ *
+ * The e2e absence check waits for the REAL settle signal: the fork route calls
+ * `detectAndRecordReplayDivergence` only after `executeRun` resolves, which is
+ * AFTER `run.completed` is visible — a bundle read at `run.completed` could race
+ * the append. The module is wrapped (pass-through) so the case awaits that call.
  */
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
-import { compareObservableSequences } from '../src/executor/replayDivergence.js';
+import { compareObservableSequences, type DivergenceResult } from '../src/executor/replayDivergence.js';
 import type { EventRecord } from '../src/types.js';
+
+// Every divergence detection the fork route starts — the real settle signal.
+const detections = vi.hoisted((): Array<Promise<DivergenceResult>> => []);
+vi.mock('../src/executor/replayDivergence.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../src/executor/replayDivergence.js')>();
+  return {
+    ...real,
+    detectAndRecordReplayDivergence: (...args: Parameters<typeof real.detectAndRecordReplayDivergence>) => {
+      const p = real.detectAndRecordReplayDivergence(...args);
+      detections.push(p);
+      return p;
+    },
+  };
+});
 
 function ev(seq: number, type: string, nodeId?: string): EventRecord {
   return {
@@ -90,14 +114,12 @@ describe('replay round-trip (end-to-end)', () => {
     });
     return { status: r.status, body: (await r.json()) as T };
   };
-  const waitTerminal = async (id: string): Promise<string> => {
-    for (let i = 0; i < 80; i++) {
-      await new Promise((r) => setTimeout(r, 25));
-      const s = (await jf<{ status: string }>(`/runs/${id}`)).body.status;
-      if (['completed', 'failed', 'cancelled'].includes(s)) return s;
-    }
-    return 'timeout';
-  };
+  // A run-settle poll on the real condition (the run status); no hook exists to await.
+  const waitTerminal = async (id: string): Promise<string> => vi.waitFor(async () => {
+    const s = (await jf<{ status: string }>(`/runs/${id}`)).body.status;
+    if (!['completed', 'failed', 'cancelled'].includes(s)) throw new Error(`run ${id} still ${s}`);
+    return s;
+  }, { timeout: 5000, interval: 25 });
 
   it('advertises the replay family honestly — supported, both modes, fork', async () => {
     // FLIPPED 2026-08-08 (ADR 0326 flip trigger). This previously asserted
@@ -121,8 +143,10 @@ describe('replay round-trip (end-to-end)', () => {
     // ADR 0812 P3c-0 — v2 spelling: the `replay` record sits at the closed v2 root and its
     // PRESENCE is the claim (no `supported`/`fork` flags; the fork endpoint IS the replay surface).
     const { body } = await jf<{ replay?: { status?: string; modes?: string[] } }>('/.well-known/openwop', { headers: { 'OpenWOP-Version': '2' } });
+    // Twin: `modes` is also asserted by v2-family-adverts.test.ts "replay.effectSeamsManifest
+    // names the route…" (probe div-advert-modes reds both). Kept: protected file.
     const replay = body.replay;
-    expect(replay?.status).toBeTruthy();
+    expect(replay?.status).toBe('experimental');
     expect(replay?.modes).toEqual(['replay', 'branch']);
   });
 
@@ -152,17 +176,15 @@ describe('replay round-trip (end-to-end)', () => {
     expect(fork.status).toBe(201);
     expect(await waitTerminal(fork.body.runId)).toBe('completed');
 
-    // divergence detection runs after completion; poll the bundle for it
-    let diverged = true;
-    for (let i = 0; i < 20; i++) {
-      await new Promise((r) => setTimeout(r, 25));
-      const bundle = (await jf<{ events?: { type: string }[] }>(`/runs/${fork.body.runId}/debug-bundle`)).body;
-      const evs = bundle.events ?? [];
-      if (evs.some((e) => e.type === 'run.completed')) {
-        diverged = evs.some((e) => e.type === 'replay.diverged');
-        break;
-      }
-    }
-    expect(diverged).toBe(false);
+    // Divergence detection runs AFTER completion: await the detection itself
+    // (started for this fork only — this file forks once), then read the log.
+    await vi.waitFor(() => { if (detections.length === 0) throw new Error('detection not started'); }, { timeout: 5000, interval: 10 });
+    expect(detections, 'exactly one replay fork was detected').toHaveLength(1);
+    const result = await detections[0];
+    expect(result?.diverged, `deterministic replay reported divergence: ${JSON.stringify(result)}`).toBe(false);
+    const bundle = (await jf<{ events?: { type: string }[] }>(`/runs/${fork.body.runId}/debug-bundle`)).body;
+    const evs = bundle.events ?? [];
+    expect(evs.some((e) => e.type === 'run.completed')).toBe(true);
+    expect(evs.some((e) => e.type === 'replay.diverged')).toBe(false);
   });
 });

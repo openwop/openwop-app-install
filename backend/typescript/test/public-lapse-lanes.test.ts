@@ -15,6 +15,20 @@
  * feature under test, so one lane's lapse cannot leak into another's result. The
  * grace start comes from a registered billing source (1 day ago = within grace,
  * 30 days ago = beyond a 14-day knob).
+ *
+ * Every HTTP lane is judged on its OWN shapes (measured at 7321e3612): "served"
+ * is the lane's normal answer (a 200 body, or for the storefront's fixture-less
+ * routes the route's OWN 400/404 — proof the request passed the store gate), and
+ * "unavailable" is the lane's exact lapse refusal (status + message). Anything
+ * else — a 500, an earlier validator's 400 — is an `other: …` outcome that fails
+ * BOTH expectations, so a broken lane can no longer read as correctly lapsed.
+ * The fixtures are seeded in `beforeAll`, so the lane blocks pass under shuffle.
+ *
+ * What turns it red (sabotage-witnessed, /grade-tests 8f wave 1): the shared
+ * lapse verdict (8fw1g3-lanes-core), and the lane wiring in docs, funnels,
+ * custom domains and the storefront (lanes-docs, lanes-funnel,
+ * lanes-customdomain, lanes-storefront), and a fault no longer serving
+ * (lanes-fault).
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -42,7 +56,9 @@ let server: http.Server;
 const refused = new Set<string>();
 let fault = false;
 
-interface Res { status: number; body: any }
+interface Res { status: number; body: unknown }
+const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null;
+const prop = (r: Res, k: string): unknown => (isRecord(r.body) ? r.body[k] : undefined);
 function client(withCookie = true) {
   let cookie = '';
   const call = async (method: string, path: string, body?: unknown, headers: Record<string, string> = {}): Promise<Res> => {
@@ -95,10 +111,12 @@ beforeAll(async () => {
 
   owner = client();
   const login = await owner.post('/host/openwop-app/test/login', { email: `lapse-${Date.now()}@acme.test` });
-  tenantId = login.body.user?.tenantId ?? '';
-  orgId = (await owner.post('/host/openwop-app/orgs', { name: 'Lapse Co' })).body.orgId;
-  expect(tenantId).not.toBe('');
-  expect(orgId).toBeTruthy();
+  const user = prop(login, 'user');
+  tenantId = isRecord(user) && typeof user.tenantId === 'string' ? user.tenantId : '';
+  const org = prop(await owner.post('/host/openwop-app/orgs', { name: 'Lapse Co' }), 'orgId');
+  orgId = typeof org === 'string' ? org : '';
+  if (!tenantId || !orgId) throw new Error(`setup: login/org failed (tenant=${tenantId}, org=${orgId})`);
+  await seedLaneFixtures();
 });
 afterAll(async () => {
   delete process.env.OPENWOP_TEST_AUTH_ENABLED;
@@ -121,11 +139,20 @@ async function arrange(featureId: string, s: Scenario): Promise<void> {
   registerEntitlementEndedAtSource(async () => endedAt);
 }
 
-type Outcome = 'served' | 'unavailable';
+type Outcome = 'served' | 'unavailable' | `other: ${string}`;
 interface Lane { name: string; featureId: string; probe: () => Promise<Outcome> }
 
+/** One lane's verdict from its OWN shapes; anything else is `other: …`. */
+function judge(r: Res, served: (r: Res) => boolean, unavailable: (r: Res) => boolean): Outcome {
+  if (served(r)) return 'served';
+  if (unavailable(r)) return 'unavailable';
+  return `other: ${r.status} ${JSON.stringify(r.body).slice(0, 200)}`;
+}
+const refusal = (status: number, message: string) => (r: Res): boolean => r.status === status && prop(r, 'message') === message;
+const storeBody = (r: Res): boolean => { const st = prop(r, 'store'); return r.status === 200 && Array.isArray(prop(r, 'products')) && isRecord(st) && st.name === 'Lapse Co'; };
+
 const store = (sfx: string): string => `/host/openwop-app/public-store/${encodeURIComponent(orgId)}${sfx}`;
-const storeLapsed = (r: Res): Outcome => (r.status === 404 && r.body?.message === 'Store not found.' ? 'unavailable' : 'served');
+const storeLapsed = refusal(404, 'Store not found.');
 
 let funnelSlug = '';
 let partnerToken = '';
@@ -133,26 +160,45 @@ let webinarSeq = 0;
 const PROVIDER_EVENT = 'lapse-777';
 
 const LANES: Lane[] = [
-  { name: 'storefront: product list', featureId: 'commerce', probe: async () => storeLapsed(await anon().get(store('/products'))) },
-  { name: 'storefront: product detail', featureId: 'commerce', probe: async () => storeLapsed(await anon().get(store('/products/no-such-product'))) },
-  { name: 'storefront: checkout', featureId: 'commerce', probe: async () => storeLapsed(await anon().post(store('/checkout'), {})) },
-  { name: 'storefront: one-click', featureId: 'commerce', probe: async () => storeLapsed(await anon().post(store('/orders/no-such-order/one-click'), { productId: 'p' })) },
-  { name: 'storefront: quote accept', featureId: 'commerce', probe: async () => storeLapsed(await anon().post(store('/quotes/no-such-quote/accept'), {})) },
+  // The storefront's fixture-less routes are SERVED when the route's own answer
+  // comes back (no such product/order, a missing field) — the store gate passed.
+  { name: 'storefront: product list', featureId: 'commerce', probe: async () => judge(await anon().get(store('/products')), storeBody, storeLapsed) },
+  { name: 'storefront: product detail', featureId: 'commerce', probe: async () => judge(await anon().get(store('/products/no-such-product')), refusal(404, 'Product not found.'), storeLapsed) },
+  { name: 'storefront: checkout', featureId: 'commerce', probe: async () => judge(await anon().post(store('/checkout'), {}), refusal(400, 'Field `email` is required and MUST be a non-empty string.'), storeLapsed) },
+  { name: 'storefront: one-click', featureId: 'commerce', probe: async () => judge(await anon().post(store('/orders/no-such-order/one-click'), { productId: 'p' }), refusal(404, 'Order not found.'), storeLapsed) },
+  { name: 'storefront: quote accept', featureId: 'commerce', probe: async () => judge(await anon().post(store('/quotes/no-such-quote/accept'), {}), refusal(400, 'Field `token` is required and MUST be a non-empty string.'), storeLapsed) },
   {
     name: 'UCP merchant discovery', featureId: 'commerce-ucp',
-    probe: async () => ((await anon().get(`/host/openwop-app/commerce/ucp/orgs/${encodeURIComponent(orgId)}/.well-known/ucp`)).status === 200 ? 'served' : 'unavailable'),
+    probe: async () => judge(
+      await anon().get(`/host/openwop-app/commerce/ucp/orgs/${encodeURIComponent(orgId)}/.well-known/ucp`),
+      (r) => { const m = prop(r, 'merchant'); return r.status === 200 && isRecord(m) && m.id === orgId; },
+      refusal(404, 'Merchant not found.'),
+    ),
   },
   {
     name: 'funnel runtime', featureId: 'funnels',
-    probe: async () => ((await anon().get(`/host/openwop-app/public/${encodeURIComponent(orgId)}/funnels/${funnelSlug}`)).status === 200 ? 'served' : 'unavailable'),
+    probe: async () => judge(
+      await anon().get(`/host/openwop-app/public/${encodeURIComponent(orgId)}/funnels/${funnelSlug}`),
+      (r) => { const f = prop(r, 'funnel'); return r.status === 200 && isRecord(f) && f.slug === 'lapse-path'; },
+      refusal(404, 'Funnel not found.'),
+    ),
   },
   {
+    // The lane's unavailable shape is an EMPTY list (it answers like the toggle).
     name: 'pixels', featureId: 'campaign-connectors',
-    probe: async () => (((await anon().get(`/host/openwop-app/public/${encodeURIComponent(orgId)}/pixels?vk=vis-1`)).body?.pixels ?? []).length > 0 ? 'served' : 'unavailable'),
+    probe: async () => judge(
+      await anon().get(`/host/openwop-app/public/${encodeURIComponent(orgId)}/pixels?vk=vis-1`),
+      (r) => { const px = prop(r, 'pixels'); return r.status === 200 && Array.isArray(px) && px.length === 1; },
+      (r) => { const px = prop(r, 'pixels'); return r.status === 200 && Array.isArray(px) && px.length === 0; },
+    ),
   },
   {
     name: 'conversions relay', featureId: 'campaign-connectors',
-    probe: async () => ((await anon().post(`/host/openwop-app/public/${encodeURIComponent(orgId)}/conversions`, { vk: 'vis-1', eventId: `e-${Date.now()}-${Math.random()}`, eventName: 'lead' })).body?.reason === 'not_enabled' ? 'unavailable' : 'served'),
+    probe: async () => judge(
+      await anon().post(`/host/openwop-app/public/${encodeURIComponent(orgId)}/conversions`, { vk: 'vis-1', eventId: `e-${Date.now()}-${Math.random()}`, eventName: 'lead' }),
+      (r) => r.status === 202 && typeof prop(r, 'eventId') === 'string' && prop(r, 'reason') === undefined,
+      (r) => r.status === 202 && prop(r, 'recorded') === false && prop(r, 'reason') === 'not_enabled',
+    ),
   },
   {
     name: 'webinar form sink', featureId: 'webinars',
@@ -168,49 +214,85 @@ const LANES: Lane[] = [
   },
   {
     name: 'dealer partner portal', featureId: 'dealers',
-    probe: async () => ((await anon().get(`/host/openwop-app/partner/${partnerToken}`)).status === 200 ? 'served' : 'unavailable'),
+    probe: async () => judge(
+      await anon().get(`/host/openwop-app/partner/${partnerToken}`),
+      (r) => { const d = prop(r, 'dealer'); return r.status === 200 && isRecord(d) && d.name === 'North Dealer'; },
+      refusal(404, 'Invalid partner link.'),
+    ),
   },
   {
     name: 'docs llms.txt', featureId: 'docs',
-    probe: async () => ((await anon().get(`/host/openwop-app/public/${encodeURIComponent(orgId)}/llms.txt`)).status === 200 ? 'served' : 'unavailable'),
+    probe: async () => judge(
+      await anon().get(`/host/openwop-app/public/${encodeURIComponent(orgId)}/llms.txt`),
+      (r) => r.status === 200 && typeof r.body === 'string' && r.body.startsWith('# Documentation'),
+      refusal(404, 'No documentation site here.'),
+    ),
   },
   {
     name: 'podcast show index', featureId: 'podcasts',
-    probe: async () => ((await anon().get(`/host/openwop-app/public/${encodeURIComponent(orgId)}/podcasts`)).status === 200 ? 'served' : 'unavailable'),
+    probe: async () => judge(
+      await anon().get(`/host/openwop-app/public/${encodeURIComponent(orgId)}/podcasts`),
+      (r) => r.status === 200 && Array.isArray(prop(r, 'shows')),
+      refusal(404, 'Not found.'),
+    ),
   },
   {
     name: 'custom-domain serving', featureId: 'custom-domains',
     // The middleware's own 404 is `Not found.`; the storefront behind it is unaffected
-    // (commerce is not refused), so a 200 means the bound host served.
-    probe: async () => ((await withHost(`/host/openwop-app/public-store/${encodeURIComponent(orgId)}/products`, 'shop.lapse-test.example')).status === 200 ? 'served' : 'unavailable'),
+    // (commerce is not refused), so the store body means the bound host served.
+    probe: async () => judge(
+      await withHost(`/host/openwop-app/public-store/${encodeURIComponent(orgId)}/products`, 'shop.lapse-test.example'),
+      storeBody,
+      refusal(404, 'Not found.'),
+    ),
   },
 ];
 
+/** Seeds a funnel, a pixel, a webinar binding, a partner link and a live custom
+ *  domain. Runs in `beforeAll` (not in a case), so a shuffled lane block never
+ *  runs against empty fixtures. Each step throws with the response on failure. */
+async function seedLaneFixtures(): Promise<void> {
+  const O = encodeURIComponent(orgId);
+  const need = (r: Res, status: number, what: string): void => { if (r.status !== status) throw new Error(`setup: ${what} → ${r.status} ${JSON.stringify(r.body)}`); };
+  const str = (v: unknown, what: string): string => { if (typeof v !== 'string' || !v) throw new Error(`setup: ${what} missing`); return v; };
+
+  const page = await owner.post(`/host/openwop-app/cms/orgs/${O}/pages`, { title: 'Lapse Landing' });
+  const pageId = str(prop(page, 'pageId'), 'pageId');
+  await owner.post(`/host/openwop-app/cms/orgs/${O}/pages/${pageId}/publish`);
+  const funnel = await owner.post(`/host/openwop-app/funnels/orgs/${O}/funnels`, { name: 'Lapse', slug: 'lapse-path', steps: [{ stepId: 'l1', kind: 'landing', pageId }] });
+  need(funnel, 201, 'create funnel');
+  const f = prop(funnel, 'funnel');
+  const funnelId = str(isRecord(f) ? f.funnelId : undefined, 'funnelId');
+  need(await owner.post(`/host/openwop-app/funnels/orgs/${O}/funnels/${funnelId}/publish`), 200, 'publish funnel');
+  funnelSlug = 'lapse-path';
+
+  await upsertPixel(tenantId, orgId, { platform: 'meta', pixelId: 'px-lapse' });
+
+  const ev = await upsertMarketingEvent({ tenantId, orgId, provider: 'zoom', providerEventId: PROVIDER_EVENT, title: 'Lapse webinar' });
+  await bindFormToEvent(tenantId, orgId, 'form:lapse', ev.eventId);
+
+  const D = `/host/openwop-app/dealers/orgs/${O}`;
+  const companyId = str(prop(await owner.post(`/host/openwop-app/crm/orgs/${O}/companies`, { name: 'Dealer Co' }), 'companyId'), 'companyId');
+  const dealerId = str(prop(await owner.post(`${D}/dealers`, { name: 'North Dealer', companyId, tier: 'Gold' }), 'dealerId'), 'dealerId');
+  const mint = await owner.post(`${D}/dealers/${dealerId}/portal-token`);
+  need(mint, 201, 'mint partner token');
+  partnerToken = str(prop(mint, 'token'), 'partner token');
+
+  const d = await addDomain({ tenantId, orgId, createdBy: 'test', hostname: 'shop.lapse-test.example' });
+  const live = await verifyDomain(tenantId, orgId, 'shop.lapse-test.example', async () => [[d.verificationToken]]);
+  if (live?.status !== 'live') throw new Error(`setup: custom domain is ${live?.status}`);
+  invalidateHostCache();
+}
+
 describe('ADR 0820 §7 — lane fixtures', () => {
-  it('seeds a funnel, a pixel, a webinar binding, a partner link and a live custom domain', async () => {
-    const page = await owner.post(`/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}/pages`, { title: 'Lapse Landing' });
-    await owner.post(`/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}/pages/${page.body.pageId}/publish`);
-    const funnel = await owner.post(`/host/openwop-app/funnels/orgs/${encodeURIComponent(orgId)}/funnels`, { name: 'Lapse', slug: 'lapse-path', steps: [{ stepId: 'l1', kind: 'landing', pageId: page.body.pageId }] });
-    expect(funnel.status, JSON.stringify(funnel.body)).toBe(201);
-    await owner.post(`/host/openwop-app/funnels/orgs/${encodeURIComponent(orgId)}/funnels/${funnel.body.funnel.funnelId}/publish`);
-    funnelSlug = 'lapse-path';
-
-    await upsertPixel(tenantId, orgId, { platform: 'meta', pixelId: 'px-lapse' });
-
-    const ev = await upsertMarketingEvent({ tenantId, orgId, provider: 'zoom', providerEventId: PROVIDER_EVENT, title: 'Lapse webinar' });
-    await bindFormToEvent(tenantId, orgId, 'form:lapse', ev.eventId);
-
-    const D = `/host/openwop-app/dealers/orgs/${encodeURIComponent(orgId)}`;
-    const companyId = (await owner.post(`/host/openwop-app/crm/orgs/${encodeURIComponent(orgId)}/companies`, { name: 'Dealer Co' })).body.companyId;
-    const dealerId = (await owner.post(`${D}/dealers`, { name: 'North Dealer', companyId, tier: 'Gold' })).body.dealerId;
-    const mint = await owner.post(`${D}/dealers/${dealerId}/portal-token`);
-    expect(mint.status, JSON.stringify(mint.body)).toBe(201);
-    partnerToken = mint.body.token;
-
-    const d = await addDomain({ tenantId, orgId, createdBy: 'test', hostname: 'shop.lapse-test.example' });
-    const live = await verifyDomain(tenantId, orgId, 'shop.lapse-test.example', async () => [[d.verificationToken]]);
-    expect(live?.status).toBe('live');
-    invalidateHostCache();
+  // Kept as a case (protected file: case count is preserved). The seeding moved to
+  // `beforeAll` so shuffle cannot run a lane before it; this case now witnesses
+  // that the seed produced the ids every lane reads.
+  it('seeds a funnel, a pixel, a webinar binding, a partner link and a live custom domain', () => {
+    expect(tenantId).not.toBe('');
+    expect(orgId).not.toBe('');
+    expect(funnelSlug).toBe('lapse-path');
+    expect(partnerToken).not.toBe('');
   });
 });
 
@@ -239,6 +321,7 @@ describe.each(LANES)('ADR 0820 §7 — $name', (lane) => {
 
 describe('ADR 0820 §7 — the storefront kill switch (gating-audit commerce #1)', () => {
   it('commerce toggle OFF ⇒ every public-store route answers the uniform 404; ON ⇒ served', async () => {
+    expect(funnelSlug, 'fixtures seeded in beforeAll').toBe('lapse-path');
     await arrange('commerce', 'unset');
     refused.clear();
     const storeLanes = LANES.filter((l) => l.featureId === 'commerce');

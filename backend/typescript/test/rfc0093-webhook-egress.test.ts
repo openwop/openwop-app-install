@@ -15,7 +15,14 @@
  *     (the same env contract as registration).
  *
  * Plus pure-predicate coverage of `isDeniedWebhookHost` (the single shared
- * denied-range predicate — registration + delivery use the same one).
+ * denied-range predicate — registration + delivery use the same one). Round 2
+ * (8fw1g4) added the ranges the table omitted, each with a just-outside control:
+ * CGNAT 100.64.0.0/10, fec0::/10, NAT64 64:ff9b::/96 (denied when the embedded v4
+ * is), `::`, the trailing-dot `localhost.`, and a bracketed IPv6 literal.
+ *
+ * Sabotages that red this file (8fw1g4 round 1): following a 302, dropping the
+ * pinned-resolution lookup guard, ignoring OPENWOP_WEBHOOK_ALLOW_PRIVATE, and the
+ * 172.16/12, fe80::/10 and `.localhost` branches of the predicate.
  */
 
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
@@ -175,6 +182,16 @@ describe('rfc0093 shared denied-range predicate', () => {
     ['8.8.8.8', false],
     ['172.32.0.1', false],
     ['2606:4700::6810:84e5', false],
+    ['100.64.0.1', true],
+    ['100.127.255.255', true],
+    ['100.128.0.1', false],
+    ['100.63.255.255', false],
+    ['fec0::1', true],
+    ['64:ff9b::a00:1', true],
+    ['64:ff9b::808:808', false],
+    ['::', true],
+    ['localhost.', true],
+    ['[::1]', true],
   ])('isDeniedWebhookHost(%s) === %s', (host, denied) => {
     expect(isDeniedWebhookHost(host)).toBe(denied);
   });

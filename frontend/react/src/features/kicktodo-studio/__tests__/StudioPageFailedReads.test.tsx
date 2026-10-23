@@ -16,7 +16,7 @@
  * in-flight peak goes to 10).
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { render, screen, cleanup, waitFor, fireEvent, within } from '@testing-library/react';
+import { render, screen, cleanup, waitFor, fireEvent, within, act } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import type * as StudioClient from '../../../client/kicktodoStudioClient.js';
 import type { FactoryCandidate, PublicationState } from '../../../client/kicktodoStudioClient.js';
@@ -60,6 +60,8 @@ describe('StudioPage — failed reads (CS-4 / KTF-FE-1)', () => {
 
     fireEvent.click(screen.getByRole('button', { name: commonEn.retry }));
     await waitFor(() => expect(screen.queryByText(en.loadError)).toBeNull());
+    // Positive signal first: the retry is showing the loading card.
+    expect(document.querySelector('.state-card[aria-busy="true"]')).not.toBeNull();
     // Mid-retry the failed read is not re-presented as "no candidates yet".
     expect(screen.queryByText(en.emptyTitle)).toBeNull();
 
@@ -83,7 +85,7 @@ describe('StudioPage — failed reads (CS-4 / KTF-FE-1)', () => {
     api.getPublication.mockResolvedValue(SUBMITTED);
     fireEvent.click(screen.getByRole('button', { name: commonEn.retry }));
     await waitFor(() => expect(within(rowOf('Morning Walks')).queryByText(en.publicationUnavailable)).toBeNull());
-    expect(within(rowOf('Morning Walks')).getByText(/^publication: /)).toBeTruthy();
+    expect(within(rowOf('Morning Walks')).getByText('publication: submitted')).toBeTruthy();
     // Recovering the publication reads does not reload (and unmount) the page.
     expect(api.listCandidates.mock.calls.length).toBe(listCalls);
   });
@@ -91,16 +93,26 @@ describe('StudioPage — failed reads (CS-4 / KTF-FE-1)', () => {
   it('bounds the per-candidate publication fan-out to 4 reads in flight (no batch endpoint exists)', async () => {
     const many = Array.from({ length: 10 }, (_, i) => cand(`cand:${i}`, `Topic ${i}`));
     api.listCandidates.mockResolvedValue(many);
+    // Every read is HELD until the test releases it — no wall clock.
+    const held: Array<() => void> = [];
     let inFlight = 0;
     let peak = 0;
-    api.getPublication.mockImplementation(async () => {
+    api.getPublication.mockImplementation(() => {
       inFlight += 1; peak = Math.max(peak, inFlight);
-      await new Promise((r) => setTimeout(r, 1));
-      inFlight -= 1;
-      return null;
+      return new Promise<PublicationState | null>((r) => { held.push(() => { inFlight -= 1; r(null); }); });
     });
     render(<MemoryRouter><StudioPage /></MemoryRouter>);
-    await waitFor(() => expect(screen.getByRole('link', { name: 'Topic 9' })).toBeTruthy());
+    await waitFor(() => expect(api.getPublication).toHaveBeenCalledTimes(4));
+    // With all four held, no fifth read starts however long we wait.
+    for (let i = 0; i < 5; i += 1) await act(() => Promise.resolve());
+    expect(api.getPublication).toHaveBeenCalledTimes(4);
+    // Releasing one read lets exactly the next one start, until all ten have run.
+    for (let released = 0; released < 10; released += 1) {
+      await waitFor(() => expect(held.length).toBeGreaterThan(0));
+      await act(async () => { held.shift()!(); });
+    }
+    await waitFor(() => expect(inFlight).toBe(0));
+    expect(screen.getByRole('link', { name: 'Topic 9' })).toBeTruthy();
     expect(api.getPublication).toHaveBeenCalledTimes(10);
     expect(peak).toBe(4);
   });

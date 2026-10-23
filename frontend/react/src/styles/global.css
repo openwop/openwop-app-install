@@ -9093,12 +9093,40 @@ button.teampage-skill-chip:not(:disabled):hover { background: var(--clay-soft); 
 .fp-hero__schematic .fp-wire { fill: none; stroke: var(--clay-rule); stroke-width: 1.25; }
 .fp-hero__schematic .fp-node { fill: var(--paper); stroke: var(--ink-3); stroke-width: 1.25; }
 .fp-hero__schematic .fp-node--accent { fill: var(--clay-soft); stroke: var(--clay); stroke-width: 1.5; }
-.fp-hero__journey { opacity: 0.72; }
-.fp-journey__wash { fill: none; stroke: var(--clay-wash); stroke-width: 28; stroke-linecap: round; }
-.fp-journey__path { fill: none; stroke: var(--clay); stroke-width: 2; stroke-linecap: round; }
-.fp-journey__step { fill: var(--paper); stroke: var(--clay); stroke-width: 2; }
-.fp-journey__goal { fill: var(--clay-strong); stroke: var(--clay-rule); stroke-width: 2; }
-.fp-journey__check { fill: none; stroke: var(--color-on-scrim); stroke-width: 4; stroke-linecap: round; stroke-linejoin: round; }
+/* Hero journey (visual: 'journey'). The rules below are the FINISHED picture —
+ * what a reduced-motion visitor sees. The motion lives only in the
+ * `fp-journey-motion` block: the trail draws in (~2.6 s), the days pop in
+ * sequence, the detour fades in after the missed day, and the goal pulses ONCE.
+ * Under 5 s and never looped, so no pause control is owed (WCAG 2.2.2). */
+.fp-hero__journey { opacity: 0.86; }
+.fp-journey__wash { fill: none; stroke: var(--clay-wash); stroke-width: 24; stroke-linecap: round; }
+.fp-journey__path { fill: none; stroke: var(--clay); stroke-width: 2.5; stroke-linecap: round; }
+.fp-journey__detour { fill: none; stroke: var(--ink-3); stroke-width: 2; stroke-dasharray: 6 7; stroke-linecap: round; }
+.fp-journey__node, .fp-journey__node circle { transform-box: fill-box; transform-origin: center; }
+.fp-journey__node--done circle { fill: var(--color-success); stroke: var(--paper); stroke-width: 3; }
+.fp-journey__node--missed circle { fill: var(--paper); stroke: var(--ink-3); stroke-width: 2; stroke-dasharray: 4 4; }
+.fp-journey__node--goal circle { fill: var(--clay-strong); stroke: var(--clay-rule); stroke-width: 2; }
+.fp-journey__check { fill: none; stroke: var(--color-on-scrim); stroke-width: 3; stroke-linecap: round; stroke-linejoin: round; }
+.fp-journey__flag { fill: var(--color-on-scrim); stroke: var(--color-on-scrim); stroke-width: 2; stroke-linejoin: round; }
+/* fp-journey-motion:start */
+@media (prefers-reduced-motion: no-preference) {
+  :root:not([data-reduce-motion="reduce"]) .fp-journey__path { stroke-dasharray: 1; stroke-dashoffset: 1; animation: fp-journey-draw 2.6s var(--ease-standard) 0.3s forwards; }
+  :root:not([data-reduce-motion="reduce"]) .fp-journey__wash { animation: fp-journey-fade 2.6s var(--ease-standard) 0.3s both; }
+  :root:not([data-reduce-motion="reduce"]) .fp-journey__detour { animation: fp-journey-fade 0.6s var(--ease-standard) 1.45s both; }
+  :root:not([data-reduce-motion="reduce"]) .fp-journey__node { animation: fp-journey-pop 0.45s var(--ease-enter) both; }
+  :root:not([data-reduce-motion="reduce"]) .fp-journey__node--n1 { animation-delay: 0.7s; }
+  :root:not([data-reduce-motion="reduce"]) .fp-journey__node--n2 { animation-delay: 1s; }
+  :root:not([data-reduce-motion="reduce"]) .fp-journey__node--n3 { animation-delay: 1.3s; }
+  :root:not([data-reduce-motion="reduce"]) .fp-journey__node--n4 { animation-delay: 1.6s; }
+  :root:not([data-reduce-motion="reduce"]) .fp-journey__node--n5 { animation-delay: 1.9s; }
+  :root:not([data-reduce-motion="reduce"]) .fp-journey__node--n6 { animation-delay: 2.2s; }
+  :root:not([data-reduce-motion="reduce"]) .fp-journey__node--goal circle { animation: fp-journey-pulse 1.2s ease-in-out 3.2s 1; }
+}
+/* fp-journey-motion:end */
+@keyframes fp-journey-draw { to { stroke-dashoffset: 0; } }
+@keyframes fp-journey-fade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes fp-journey-pop { from { opacity: 0; transform: scale(0.4); } 70% { opacity: 1; transform: scale(1.12); } to { opacity: 1; transform: none; } }
+@keyframes fp-journey-pulse { 0%, 100% { transform: none; } 50% { transform: scale(1.14); } }
 .fp-hero__image {
   position: absolute;
   inset-block: 0;
@@ -9133,6 +9161,9 @@ button.teampage-skill-chip:not(:disabled):hover { background: var(--clay-soft); 
 @media (max-width: 1024px) { .fp-hero { min-height: 520px; } .fp-hero__product { right: calc(var(--space-5) * -2); width: 46%; opacity: 0.72; } }
 @media (max-width: 900px) { .fp-hero { min-height: auto; } .fp-hero__product { display: none; } .fp-hero__inner { max-width: 760px; } .fp-hero__inner > .fp-eyebrow, .fp-hero__inner > .fp-hero__title, .fp-hero__inner > .fp-hero__lede, .fp-hero__inner > .fp-hero__cta { max-width: none; } }
 @media (max-width: 720px) { .fp-hero__schematic, .fp-hero__image { display: none; } }
+/* The journey's compact phone variant: in flow UNDER the copy (it follows it in
+ * the DOM) instead of hidden with the other backdrops. */
+@media (max-width: 720px) { .fp-hero--journey .fp-hero__journey { display: block; position: static; box-sizing: border-box; width: 100%; height: auto; max-height: 170px; margin-top: var(--space-6); padding-inline: var(--space-4); opacity: 1; } }
 
 /* ── Hero: the run ledger (visual: 'run') ───────────────────────────────────
  * The front page's one signature element: a run typeset as its event log,

@@ -6,6 +6,15 @@
  *   - the COMPLIANCE lanes that must NEVER apply it (unsubscribe, preferences,
  *     bounce, WhatsApp STOP/START, consent capture, consent-carrying form sinks).
  * The per-lane HTTP behaviour is in `public-lapse-lanes.test.ts`.
+ *
+ * What turns it red (sabotage-witnessed, /grade-tests 8f wave 1, 14 probes
+ * 8fw1g3-lapse-*): a negative/garbage knob read as a grace, a non-sellable
+ * feature lapsing, an off-by-one at the grace boundary, the grace not in days,
+ * the billing source losing to the observed clock, either fault branch darkening
+ * pages, re-entitlement not resetting the clock, the verdict cache or its TTL,
+ * the toggle check, a read while the policy is off, and either source pin.
+ * The toggle case restores the registry default in `finally` (saveConfig is
+ * global, not per-tenant).
  */
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
@@ -144,10 +153,14 @@ describe('ADR 0820 §7 — checkOwnerPublicAccess (toggle + lapse)', () => {
     if (!getToggleDefault(SELLABLE)) registerToggleDefault({ id: SELLABLE, status: 'on', bucketUnit: 'tenant', salt: SELLABLE });
     const d = getToggleDefault(SELLABLE);
     if (!d) throw new Error('docs toggle default missing');
-    await saveConfig({ ...d, status: 'off' }, 'test');
-    expect(await checkOwnerPublicAccess(SELLABLE, T)).toEqual({ serve: false, reason: 'toggle-off' });
-    await saveConfig({ ...d, status: 'on' }, 'test');
-    expect(await checkOwnerPublicAccess(SELLABLE, T)).toEqual({ serve: true, reason: 'policy-off' });
+    try {
+      await saveConfig({ ...d, status: 'off' }, 'test');
+      expect(await checkOwnerPublicAccess(SELLABLE, T)).toEqual({ serve: false, reason: 'toggle-off' });
+      await saveConfig({ ...d, status: 'on' }, 'test');
+      expect(await checkOwnerPublicAccess(SELLABLE, T)).toEqual({ serve: true, reason: 'policy-off' });
+    } finally {
+      await saveConfig({ ...d }, 'test'); // back to the registry default
+    }
   });
 });
 

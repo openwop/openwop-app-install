@@ -11,6 +11,7 @@
  *
  * Ceiling: layout and colour are CSS; jsdom sees only the hook classes, so those
  * class assertions are the claim, not incidental shape.
+ * Sabotage-witnessed: w55g1-ss-* (round 1), w55g1-ss-*-r2 (round 2).
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import { cleanup, render, screen, within } from '@testing-library/react';
@@ -79,6 +80,9 @@ describe('ADR 0920 — hero plan card', () => {
     view('hero', { heading: 'Big dreams', visual: 'plan', plan: PLAN, ctaLabel2: 'Watch the film', ctaUrl2: '#the-film', ctaIcon2: 'play', note: 'Early access: free.' });
     const link = screen.getByRole('link', { name: 'Watch the film' });
     expect(link.getAttribute('href')).toBe('#the-film');
+    // A plain same-page anchor, not the external-link branch.
+    expect(link.getAttribute('rel')).toBeNull();
+    expect(link.getAttribute('target')).toBeNull();
     expect(link.querySelector('.fp-btn__icon')?.getAttribute('aria-hidden')).toBe('true');
     expect(screen.getByText('Early access: free.')).toBeTruthy();
   });
@@ -104,7 +108,9 @@ describe('ADR 0920 — column layouts', () => {
   it('progress cards show the eyebrow and a decorative bar', () => {
     const { container } = view('columns', { layout: 'progress', columns: [{ eyebrow: 'WEEK 3 OF 8', title: 'Runs', text: 'Easy.', progress: 0.375 }] });
     expect(screen.getByText('WEEK 3 OF 8')).toBeTruthy();
-    expect((container.querySelector('.fp-progress__fill') as HTMLElement | null)?.style.inlineSize).toBe('38%');
+    expect(container.querySelector<HTMLElement>('.fp-progress__fill')?.style.inlineSize).toBe('38%');
+    // Decorative: the bar is hidden from assistive tech (the card's text carries the meaning).
+    expect(container.querySelector('.fp-progress')?.getAttribute('aria-hidden')).toBe('true');
   });
 
   it('lists render each row with its meta, and the section note', () => {
@@ -136,7 +142,11 @@ describe('ADR 0920 — richText chat picture', () => {
     });
     const fig = screen.getByRole('figure', { name: 'KickBot' });
     expect(within(fig).getByText('Wed → Thu')).toBeTruthy();
+    // The actions ARE rendered — as text — and are neither buttons nor links.
+    expect(within(fig).getByText('Approve')).toBeTruthy();
+    expect(within(fig).getByText('Keep my plan')).toBeTruthy();
     expect(within(fig).queryAllByRole('button')).toHaveLength(0);
+    expect(within(fig).queryAllByRole('link')).toHaveLength(0);
     expect(screen.getByText('Copy.')).toBeTruthy();
   });
 });

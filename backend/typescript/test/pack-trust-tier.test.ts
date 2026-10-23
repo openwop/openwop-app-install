@@ -10,6 +10,9 @@
  * dispatch; trusted built-ins unchanged") made falsifiable, one row each:
  *
  *   a  steward manifest digest matches            → steward         → dispatch
+ *      (NOT in this file: it needs the REAL committed manifest, so it lives in
+ *      `pack-trust-enforcement.test.ts` "every attested pack in the manifest
+ *      still classifies steward" and "a real vendored pack classifies steward")
  *   b  same pack, one byte changed, no marker     → untrusted       → REFUSED
  *   c  install marker present and verifying       → operator-trusted→ dispatch
  *   d  install marker present, a file mutated     → untrusted       → REFUSED
@@ -22,7 +25,8 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -103,8 +107,6 @@ function writeInstallMarker(dir: string, hashes: Record<string, string>): void {
   );
 }
 
-import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
 function sha256File(p: string): string {
   return createHash('sha256').update(readFileSync(p)).digest('hex');
 }
@@ -313,6 +315,10 @@ describe('ADR 0555 P0 — pack trust tiers', () => {
 
   // ── digest properties the tiers rest on ──────────────────────────────────
 
+  // Twins: these three digest cases overlap pack-content-digest-parity ("both
+  // track a change to ANY file", "both hash a symlink by its TARGET STRING").
+  // Kept (protected file) because they run on THIS file's realistic pack
+  // fixture, the one the tier cases above classify.
   it('the content digest changes when ANY file changes, including a non-entry one', () => {
     const before = packContentDigest(packDir);
     writeFileSync(join(packDir, 'lib', 'helper.mjs'), 'export const helper = 2;\n');
@@ -325,7 +331,6 @@ describe('ADR 0555 P0 — pack trust tiers', () => {
 
   it('replacing a file with a symlink changes the digest', () => {
     const before = packContentDigest(packDir);
-    const { symlinkSync, unlinkSync } = require('node:fs') as typeof import('node:fs');
     unlinkSync(join(packDir, 'lib', 'helper.mjs'));
     symlinkSync('/etc/hosts', join(packDir, 'lib', 'helper.mjs'));
     // Digesting the link TARGET's content would let a pack inherit an outside
@@ -336,9 +341,17 @@ describe('ADR 0555 P0 — pack trust tiers', () => {
   // ── the summary that feeds readiness ─────────────────────────────────────
 
   it('packTrustSummary counts what has been classified', () => {
+    // beforeEach clears the verdict cache, so this one classification (no
+    // marker, not in the steward manifest) is the ONLY verdict counted.
     classifyPackDir(packDir);
-    const s = packTrustSummary();
-    expect(s.untrusted).toBeGreaterThanOrEqual(1);
-    expect(typeof s.stewardManifestMissing).toBe('boolean');
+    expect(packTrustSummary()).toEqual({
+      steward: 0,
+      operatorTrusted: 0,
+      untrusted: 1,
+      revoked: 0,
+      breakGlassed: 0,
+      // The repo's committed manifest is found, so the policy is satisfiable.
+      stewardManifestMissing: false,
+    });
   });
 });

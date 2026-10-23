@@ -6,6 +6,11 @@
  * `prompts.etag-revalidation` as `executed-fail` under suite 2.45.16. It now
  * uses the shared `ifNoneMatchSatisfied` (the discovery + run routes'), and the
  * `304` carries the validator.
+ *
+ * Sabotages each case is red against (probed, /grade-tests 8f w1): the route
+ * back on a bare `===`, weak comparison dropped, `*` not honoured, the 304
+ * without its ETag. The template-list precondition runs INSIDE the cases (a
+ * failed assertion in `beforeAll` skips the cases instead of failing them).
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -16,7 +21,7 @@ import { issueApiKey } from '../src/features/developer-keys/apiKeyService.js';
 let server: http.Server;
 let BASE = '';
 let TOKEN = '';
-let PATH = '';
+let TEMPLATE_ID = '';
 const saved: Record<string, string | undefined> = {};
 
 beforeAll(async () => {
@@ -27,12 +32,19 @@ beforeAll(async () => {
     server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
   });
   TOKEN = (await issueApiKey({ tenantId: 'prompt-etag', name: 'etag', createdBy: 'user:etag', scopes: ['prompts:read'] })).token;
-  const list = await get('/prompts');
-  expect(list.status).toBe(200);
-  const items = ((await list.json()) as { items?: Array<{ templateId: string }> }).items ?? [];
-  expect(items.length, 'the host library lists at least one template').toBeGreaterThan(0);
-  PATH = `/prompts/${encodeURIComponent(items[0]!.templateId)}`;
 });
+
+/** The first listed template's path — the precondition, asserted inside a case. */
+async function templatePath(): Promise<string> {
+  if (!TEMPLATE_ID) {
+    const list = await get('/prompts');
+    expect(list.status).toBe(200);
+    const items = ((await list.json()) as { items?: Array<{ templateId: string }> }).items ?? [];
+    expect(items.length, 'the host library lists at least one template').toBeGreaterThan(0);
+    TEMPLATE_ID = items[0]!.templateId;
+  }
+  return `/prompts/${encodeURIComponent(TEMPLATE_ID)}`;
+}
 
 afterAll(async () => {
   await new Promise<void>((res) => server.close(() => res()));
@@ -45,6 +57,7 @@ function get(path: string, headers: Record<string, string> = {}): Promise<Respon
 
 describe('GET /prompts/{templateId} — If-None-Match revalidation', () => {
   it('answers 304, carrying the ETag, for the exact tag, a W/-weakened echo, a list and *', async () => {
+    const PATH = await templatePath();
     const first = await get(PATH);
     expect(first.status).toBe(200);
     const etag = first.headers.get('etag');
@@ -57,8 +70,10 @@ describe('GET /prompts/{templateId} — If-None-Match revalidation', () => {
   });
 
   it('a non-matching tag still answers 200 with the body', async () => {
+    const PATH = await templatePath();
     const res = await get(PATH, { 'if-none-match': '"0000000000000000"' });
     expect(res.status).toBe(200);
-    expect(((await res.json()) as { templateId?: string }).templateId).toBeTruthy();
+    expect(res.headers.get('etag')).toMatch(/^"[0-9a-f]{16}"$/);
+    expect(((await res.json()) as { templateId?: string }).templateId).toBe(TEMPLATE_ID);
   });
 });

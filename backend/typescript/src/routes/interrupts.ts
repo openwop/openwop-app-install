@@ -8,6 +8,7 @@
  * the suspended node's index + the resolved value as input.
  */
 
+import { assertNotSubWorkflowMirror } from '../host/subWorkflowMirrorGuard.js';
 import { notifyInterruptResolved } from '../host/interruptResolutionObservers.js';
 import { assertApprovalSurfaceTrusted } from '../host/a2uiSurfaceAdmission.js';
 import { timingSafeEqual } from 'node:crypto';
@@ -1544,6 +1545,11 @@ export async function resolveAndResume(
   // exercise. The fail-safe exits stay open — cancel the run, or let the gate's
   // own timeout auto-reject (that path writes the store directly, not via here).
   await assertApprovalSurfaceTrusted(interrupt);
+  // A sub-workflow child's gate mirrored onto its parent is not decidable here:
+  // resolving it would fabricate the child's completion (subWorkflowMirrorGuard.ts).
+  // Same choke point as the trust check above, so every human lane (and MCP, which
+  // resolves through here) shares it. Refused before any claim: nothing is consumed.
+  await assertNotSubWorkflowMirror(storage, interrupt);
   // RFC 0223 (interrupt.md §Rejection) — `timeout` is a RECORD-ONLY action the
   // host's own timer branch mints (approvalGateTimeout.ts writes the store
   // directly, never through here). A client that could post it would disguise

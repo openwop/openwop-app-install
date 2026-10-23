@@ -17,7 +17,19 @@
  *
  * The test also asserts that `envelopeAcceptor.ts` and `promptPackLoader.ts`
  * — the two consumers that hit this bug — successfully locate the
- * schemas directory at module load via the helper.
+ * schemas directory via the helper. envelopeAcceptor reads its schemas LAZILY
+ * (only the directory is resolved at module load), so a bare `import` could not
+ * see a helper that returned the WRONG directory (round-1 probe rp-return left
+ * that case green); the case now reads a schema through the acceptor's own
+ * loader.
+ *
+ * Sabotages that red this file (8fw1g4 round 1 + 2): returning the walk's
+ * current dir instead of the `schemas/` candidate, never throwing at the
+ * filesystem root, and ignoring the sentinel.
+ *
+ * Round 2 cut "locates the same schemas/ directory regardless of sentinel
+ * filename": no sabotage reds it without also redding case 1 (rp-return reds
+ * case 1; the sentinel-blind sabotage is caught by the throw case).
  */
 
 import { describe, expect, it } from 'vitest';
@@ -36,28 +48,25 @@ describe('host/_repoPath: locateRepoSchemasDir', () => {
     expect(existsSync(join(dir, 'ai-envelope.schema.json'))).toBe(true);
   });
 
-  it('locates the same schemas/ directory regardless of sentinel filename', () => {
-    const dir1 = locateRepoSchemasDir(__dirname, 'ai-envelope.schema.json');
-    const dir2 = locateRepoSchemasDir(__dirname, 'prompt-pack-manifest.schema.json');
-    expect(dir1).toBe(dir2);
-  });
-
   it('throws when the sentinel cannot be found anywhere in the parent chain', () => {
     expect(() =>
       locateRepoSchemasDir(__dirname, 'this-schema-cannot-possibly-exist.schema.json'),
     ).toThrow(/walked from .* to filesystem root/);
   });
 
-  it('envelopeAcceptor.ts loads its schema at module-load via the helper (no ENOENT)', async () => {
-    // This `import` runs envelopeAcceptor.ts's top-level
-    // `locateRepoSchemasDir(__dirname, 'ai-envelope.schema.json')`. If
-    // the bundled-tree bug regressed, this import would throw the
-    // walk-failed error from _repoPath.ts (the helper) OR an ENOENT
-    // from readFileSync (the old buggy fallback). Either is a regression.
-    await expect(import('../src/host/envelopeAcceptor.js')).resolves.toBeDefined();
+  it('envelopeAcceptor.ts resolves its schemas/ dir via the helper and reads a schema from it', async () => {
+    // The `import` runs envelopeAcceptor.ts's top-level
+    // `locateRepoSchemasDir(__dirname, 'ai-envelope.schema.json')` (a walk
+    // failure throws here). The schemas themselves are read lazily, so read one
+    // through the acceptor's own loader: a WRONG directory returns null.
+    const mod = await import('../src/host/envelopeAcceptor.js');
+    const schema = mod.loadEnvelopePayloadSchema('error');
+    expect(schema, 'the acceptor resolved a schemas/ dir it cannot read from').not.toBeNull();
+    expect(typeof schema?.['$schema']).toBe('string');
   });
 
   it('promptPackLoader.ts loads its schema at module-load via the helper (no ENOENT)', async () => {
-    await expect(import('../src/host/promptPackLoader.js')).resolves.toBeDefined();
+    const mod = await import('../src/host/promptPackLoader.js');
+    expect(typeof mod.loadPromptPacks).toBe('function');
   });
 });

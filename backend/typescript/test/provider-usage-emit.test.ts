@@ -21,6 +21,17 @@
  * retry loop produces one event per attempt rather than collapsing N
  * invocations into 1. The tool-calling and managed branches emit
  * after their single per-call dispatch, with no internal retry.
+ *
+ * Every case shares runId/nodeId/attempt; they stay independent because each
+ * sends different messages (the invocation-log cache key) and builds its own
+ * events array.
+ *
+ * What turns it red (sabotage-witnessed, /grade-tests 8f wave 1): no emit on
+ * the plain path (8fw1g3-pv-usage-plain), on the tools path (pv-usage-tools),
+ * the managed path emitting the REQUEST's provider/model instead of the managed
+ * pipeline's user-facing ids (pv-usage-managed-ids-r2 — the request names the
+ * hidden `minimax` precisely so that sabotage shows), a secret in the payload
+ * (pv-usage-leak), and a wrong total (pv-usage-total).
  */
 
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
@@ -292,16 +303,22 @@ describe('RFC 0026 — provider.usage emission via aiProvidersHost.dispatchPlain
       finishReason: 'stop',
     });
 
+    // The REQUEST names the hidden underlying provider/model, as a caller that
+    // knew the managed tier's internals would. The emitted ids must come from
+    // the managed pipeline's result, not from the request — with a request of
+    // `openwop-free` the two sources would be identical and the assertion
+    // below could not tell them apart.
     const adapter = createAiProvidersAdapter(scope);
     const res = await adapter.callAI({
-      provider: 'openwop-free',
-      model: 'openwop-free',
-      messages: [{ role: 'user', content: 'hi' }],
+      provider: 'minimax',
+      model: 'MiniMax-M2',
+      messages: [{ role: 'user', content: 'hi from the managed case' }],
       credentialRef: 'managed:openwop-free',
     });
 
     expect(res.content).toBe('hello from managed');
     expect(res.model).toBe('openwop-free');
+    expect(vi.mocked(dispatchManagedChat)).toHaveBeenCalledWith(expect.objectContaining({ userFacingProvider: 'openwop-free' }));
 
     const usageEvents = events.filter((e) => e.type === 'provider.usage');
     expect(

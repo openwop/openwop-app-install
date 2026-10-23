@@ -13,11 +13,17 @@
  * was green throughout, because every test starts from an empty database.
  *
  * Two guards:
- *  1. v1's DDL is pinned to a LITERAL list, so adding to it is a red test with
- *     a message that says what to do instead.
+ *  1. v1's DDL is pinned to a LITERAL list of objects AND to a SHA-256 of its
+ *     whole statement text (line comments stripped, whitespace collapsed), so
+ *     adding to it is a red test with a message that says what to do instead.
+ *     The object list alone could not see a COLUMN added to a v1 table (the v23
+ *     instance above), a `CREATE UNIQUE INDEX`, an `ALTER TABLE`, or DDL without
+ *     `IF NOT EXISTS` — /grade-tests 8f w1 probed the column case VACUOUS
+ *     against the list, which is why the hash exists.
  *  2. A long-lived DB (pg-mem, at v43, WITHOUT the table) gains it from the
  *     forward migrations and accepts the exact write retention was failing on.
  */
+import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { newDb } from 'pg-mem';
 import { LATEST_SCHEMA_VERSION, MIGRATIONS, applyMigrations, type Queryable } from '../src/storage/postgres/schema.js';
@@ -46,14 +52,23 @@ const V1_FROZEN = [
   'table workflows',
 ];
 
-async function v1Objects(): Promise<string[]> {
+/** SHA-256 of v1's statements with `--` comments stripped and whitespace
+ *  collapsed: editing a comment is free, any DDL change is not. Measured at
+ *  7321e3612 (/grade-tests 8f w1); it never changes, because v1 never changes. */
+const V1_DDL_SHA256 = '60c3466019ce260ef1719e8ce4af5dddf4abe11d627a3c3bc1866d5a05af0c4b';
+
+async function v1Sql(): Promise<string> {
   const sql: string[] = [];
   const recorder: Queryable = {
     async query(text: string) { sql.push(text); return { rows: [] }; },
   };
   await MIGRATIONS[1]!(recorder);
+  return sql.join('\n');
+}
+
+async function v1Objects(): Promise<string[]> {
   const found = new Set<string>();
-  for (const m of sql.join('\n').matchAll(/CREATE\s+(TABLE|INDEX)\s+IF\s+NOT\s+EXISTS\s+(\w+)/gi)) {
+  for (const m of (await v1Sql()).matchAll(/CREATE\s+(TABLE|INDEX)\s+IF\s+NOT\s+EXISTS\s+(\w+)/gi)) {
     found.add(`${m[1]!.toLowerCase()} ${m[2]}`);
   }
   return [...found].sort();
@@ -76,6 +91,12 @@ describe('postgres migrations — v1 is frozen', () => {
       actual,
       'Do NOT add DDL to MIGRATIONS[1]: no existing database re-runs it, so the object will exist in every test and be MISSING in production. Add a new numbered migration (CREATE … IF NOT EXISTS) instead.',
     ).toEqual(V1_FROZEN);
+    // ...and nothing ELSE changed inside it (a column, a constraint, an unprefixed CREATE).
+    const normalized = (await v1Sql()).replace(/--[^\n]*/g, '').replace(/\s+/g, ' ').trim();
+    expect(
+      createHash('sha256').update(normalized).digest('hex'),
+      'MIGRATIONS[1] changed. No existing database re-runs v1, so the change will exist in every test and be MISSING in production. Revert it and add a new numbered migration instead.',
+    ).toBe(V1_DDL_SHA256);
   });
 });
 

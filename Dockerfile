@@ -29,7 +29,7 @@
 #   cd backend/typescript && npm run dev
 
 # ── Builder stage ────────────────────────────────────────────────────────
-FROM node:22-slim@sha256:20b3a9e4bdfe6ee8cc7b14cc360fca2fb6d06f671e06aeb36feaa832364209dd AS builder
+FROM node:22-slim@sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d AS builder
 
 WORKDIR /app
 
@@ -75,7 +75,7 @@ COPY backend/typescript/scripts ./scripts
 RUN npm run build
 
 # ── Runtime stage ────────────────────────────────────────────────────────
-FROM node:22-slim@sha256:20b3a9e4bdfe6ee8cc7b14cc360fca2fb6d06f671e06aeb36feaa832364209dd AS runtime
+FROM node:22-slim@sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d AS runtime
 
 WORKDIR /app
 

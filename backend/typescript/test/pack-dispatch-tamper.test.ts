@@ -92,11 +92,29 @@ beforeEach(() => {
 
 describe('the grant is enumerated from the LIVE ctx', () => {
   it('names the callable surfaces and NEVER the data members or the never-brokered ones', () => {
-    const grant = enumerateCtxGrant(makeCtx());
-    expect(grant.has('emit')).toBe(true);
-    expect(grant.has('storage.kv.put')).toBe(true);
-    // `secrets` is a data member AND never-brokered; `inputs`/`configurable` are
-    // data. None of them may appear as a callable grant key.
+    // The live ctx plus the never-brokered FUNCTION surfaces (`variables.get/set`,
+    // `interrupt`, `suspend`) and a function smuggled under a DATA member
+    // (`config.hook`). Without functions there, the walk would never emit them
+    // anyway and the negatives below could not fail (round-1 probe
+    // 8fw1g1-dt-neverbrokered-secrets was vacuous for exactly that reason).
+    //
+    // CEILING: `secrets` is typed `Record<string, string>`, so a typed ctx cannot
+    // put a function under it; its NEVER_BROKERED entry is defence in depth for an
+    // untyped value and is not probed here. Probes aim at `variables`,
+    // `interrupt` and the ENVELOPE_DATA_MEMBERS skip instead.
+    const ctx: NodeContext = {
+      ...makeCtx(),
+      config: { hook: () => 1 },
+      variables: { get: () => undefined, set: () => undefined },
+      interrupt: async () => ({ resolved: true }),
+      suspend: async () => ({ resumed: true }),
+    };
+    const grant = enumerateCtxGrant(ctx);
+    expect([...grant].sort()).toEqual(['emit', 'storage.kv.put']);
+    // Spelled out, so a red names the leaked surface.
+    for (const key of ['variables.get', 'variables.set', 'interrupt', 'suspend', 'config.hook']) {
+      expect(grant.has(key), key).toBe(false);
+    }
     expect([...grant].some((k) => k.startsWith('secrets'))).toBe(false);
     expect([...grant].some((k) => k.startsWith('inputs'))).toBe(false);
     expect([...grant].some((k) => k.startsWith('configurable'))).toBe(false);

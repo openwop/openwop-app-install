@@ -115,7 +115,7 @@ export async function revokeOperatorAccess(workspaceId: string, subject: string,
   const key = `${workspaceId}::${subject}`;
   for (let attempt = 0; attempt < 5; attempt++) {
     const current = await operatorActivations.get(key);
-    if (!current || current.revokedAt) return false;
+    if (!current || current.revokedAt || current.retiredAt) return false;
     const revoked: OperatorActivation = { ...current, revokedAt: new Date().toISOString(), revokedBy: by };
     if (!(await operatorActivations.compareAndSwap(current, revoked))) continue;
     // Revocation REMOVES authority, so it lands first and is audited after (an
@@ -131,7 +131,7 @@ export async function revokeOperatorAccess(workspaceId: string, subject: string,
 export async function listOperatorActivations(workspaceId: string): Promise<OperatorActivation[]> {
   await assertOperatorTarget(workspaceId);
   return (await operatorActivations.listForTenantIndexed(workspaceId))
-    .filter((a) => a.workspaceId === workspaceId)
+    .filter((a) => a.workspaceId === workspaceId && !a.retiredAt)
     .sort((a, b) => b.activatedAt.localeCompare(a.activatedAt));
 }
 
@@ -168,6 +168,82 @@ async function notifyOtherSuperadmins(actorEligibilityTenant: string, event: 'ac
       log.warn('operator_access_notice_failed', { event, workspaceId: a.workspaceId, error: err instanceof Error ? err.message : String(err) });
     }
   }
+}
+
+export interface OperatorSweepOutcome { expired: number; delisted: number; memberless: number; cleaned: number }
+
+/**
+ * ADR 0910 D7.3 — the boot pass and hourly sweep. For each ledger row that is
+ * expired, de-listed, member-less or already revoked: write the matching audit row
+ * before retiring the exact reviewed row (a revoked row was already audited).
+ * Only the CAS winner notifies other listed superadmins (D6). Retained inactive
+ * markers prevent a stale sweep deleting a replacement activation. Bounded: it
+ * lists the ledger, never the roster. It decides NO authority — D4 already refuses every such row at use time;
+ * this is the access review and the expiry record.
+ */
+export async function sweepOperatorActivations(now = new Date()): Promise<OperatorSweepOutcome> {
+  const out: OperatorSweepOutcome = { expired: 0, delisted: 0, memberless: 0, cleaned: 0 };
+  for (const a of await operatorActivations.list()) {
+    if (a.retiredAt) continue;
+    if (a.revokedAt) {
+      if (!(await operatorActivations.compareAndSwap(a, { ...a, retiredAt: now.toISOString() }))) continue;
+      out.cleaned += 1;
+      continue;
+    }
+    let event: 'expired' | 'delisted' | 'memberless' | null = null;
+    if (Date.parse(a.expiresAt) <= now.getTime()) event = 'expired';
+    else if (!isActivationLive(a, now.getTime())) event = 'delisted';
+    else if (!(await listMembers(a.workspaceId, a.workspaceId)).some((m) => m.subject === a.subject)) event = 'memberless';
+    if (!event) continue;
+    if (event === 'expired') {
+      await appendAudit(a.workspaceId, 'security.operator-access-expired', { activationId: a.activationId, subject: a.subject, expiresAt: a.expiresAt });
+    } else {
+      await appendAudit(a.workspaceId, 'security.operator-access-revoked', {
+        activationId: a.activationId, subject: a.subject, by: event === 'delisted' ? 'eligibility-review' : 'membership-removed',
+      });
+    }
+    // Audit first keeps an audit failure retryable. Racing sweeps may record
+    // the same ended activation more than once, but only one retires/notifies;
+    // none may remove a newly activated replacement at this key.
+    if (!(await operatorActivations.compareAndSwap(a, { ...a, retiredAt: now.toISOString() }))) continue;
+    await notifyOtherSuperadmins(a.eligibilityTenant, event === 'expired' ? 'expired' : 'revoked', a);
+    out[event] += 1;
+  }
+  if (out.expired + out.delisted + out.memberless + out.cleaned > 0) log.info('operator_access_swept', { ...out });
+  return out;
+}
+
+export interface OperatorSweepDaemon { stop: () => void }
+const SWEEP_INTERVAL_MS = 60 * 60_000;
+
+/** The hourly sweep (the `startFunnelWeeklySummaryDaemon` shape: ±20% jitter,
+ *  unref'd, re-entrancy guarded). The boot pass is the caller's first `sweep`. */
+export function startOperatorAccessSweepDaemon(): OperatorSweepDaemon {
+  let running = false;
+  let stopped = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const tick = async (): Promise<void> => {
+    if (running) return;
+    running = true;
+    try { await sweepOperatorActivations(); } catch (err) {
+      log.warn('operator_access_sweep_error', { error: err instanceof Error ? err.message : String(err) });
+    } finally { running = false; }
+  };
+  const schedule = (): void => {
+    timer = setTimeout(() => { void tick().finally(() => { if (!stopped) schedule(); }); }, SWEEP_INTERVAL_MS * (0.8 + Math.random() * 0.4));
+    timer.unref?.();
+  };
+  void tick().finally(() => { if (!stopped) schedule(); }); // the boot pass (D7.3)
+  return { stop: () => { stopped = true; if (timer) clearTimeout(timer); } };
+}
+
+/** ADR 0910 D10 — counts for KickTodo readiness. */
+export async function operatorAccessCounts(workspaceId: string): Promise<{ eligible: number; live: number }> {
+  const rows = await operatorActivations.listForTenantIndexed(workspaceId);
+  return {
+    eligible: listedSuperadminTenants().filter((t) => !t.startsWith('anon:')).length,
+    live: rows.filter((a) => a.workspaceId === workspaceId && isActivationLive(a)).length,
+  };
 }
 
 /** DSAR — point-delete the subject's activation rows; the audit chain keeps the

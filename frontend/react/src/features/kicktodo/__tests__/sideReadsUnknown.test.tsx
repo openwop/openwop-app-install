@@ -110,6 +110,10 @@ describe('PT-2 — Today', () => {
     kt.listChallenges.mockRejectedValueOnce(new Error('503'));
     render(<MemoryRouter><TodayPage /></MemoryRouter>);
     expect(await screen.findByText(en.todayNamesUnknown)).toBeTruthy();
+    // The Retry re-reads the catalog, and the notice clears once it succeeds.
+    fireEvent.click(screen.getByRole('button', { name: RETRY }));
+    await waitFor(() => expect(screen.queryByText(en.todayNamesUnknown)).toBeNull());
+    expect(kt.listChallenges).toHaveBeenCalledTimes(2);
   });
 
   it('the enrolment welcome survives a failed enrolment-list read when Today confirms the id', async () => {
@@ -155,18 +159,23 @@ describe('PT-2 — Progress, Journal, Plan, Discover', () => {
   });
 
   it('Plan: the challenge view states a failed title read with a Retry that re-reads', async () => {
-    const d = new Date();
-    d.setDate(d.getDate() + 1);
-    const tomorrow = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-    kt.getPlan.mockResolvedValue([{ enrollmentId: 'enroll-focus', challengeId: 'chal:focus', dateLocal: tomorrow, day: 2, stableActivityId: 'a', title: 'Protect a focus block', completed: false }]);
-    kt.listChallengesForLocale.mockRejectedValueOnce(new Error('503'));
-    render(<MemoryRouter><PlanPage /></MemoryRouter>);
-    await screen.findByText('Protect a focus block');
-    fireEvent.click(screen.getByRole('button', { name: en.planView_challenge }));
-    expect(await screen.findByText(en.planNamesUnknown)).toBeTruthy();
-    fireEvent.click(screen.getByRole('button', { name: RETRY }));
-    expect(await screen.findByRole('heading', { name: 'Focus gently' })).toBeTruthy();
-    expect(screen.queryByText(en.planNamesUnknown)).toBeNull();
+    // Pin "today" (Date only — RTL's polling timers stay real) so the plan row is
+    // tomorrow by construction, not by a wall-clock computation racing midnight.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date(2026, 8, 20, 12, 0, 0));
+    try {
+      kt.getPlan.mockResolvedValue([{ enrollmentId: 'enroll-focus', challengeId: 'chal:focus', dateLocal: '2026-09-21', day: 2, stableActivityId: 'a', title: 'Protect a focus block', completed: false }]);
+      kt.listChallengesForLocale.mockRejectedValueOnce(new Error('503'));
+      render(<MemoryRouter><PlanPage /></MemoryRouter>);
+      await screen.findByText('Protect a focus block');
+      fireEvent.click(screen.getByRole('button', { name: en.planView_challenge }));
+      expect(await screen.findByText(en.planNamesUnknown)).toBeTruthy();
+      fireEvent.click(screen.getByRole('button', { name: RETRY }));
+      expect(await screen.findByRole('heading', { name: 'Focus gently' })).toBeTruthy();
+      expect(screen.queryByText(en.planNamesUnknown)).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('Discover: a failed enrolment read keeps the catalog and states the badge gap', async () => {
@@ -185,6 +194,12 @@ describe('PT-2 — Progress, Journal, Plan, Discover', () => {
     kt.listChallengesForLocale.mockRejectedValueOnce(new Error('503'));
     render(<MemoryRouter><DiscoverPage /></MemoryRouter>);
     expect(await screen.findByText(en.loadChallengesError)).toBeTruthy();
+    // Failed ≠ empty: the read failed, so "no challenges published" must not show.
+    // A DOUBLE guard in DiscoverPage — the catch writes only `error` (never
+    // `challenges=[]`), and the empty card renders only when `!error` — so no
+    // single edit makes this line red on its own (the catch→[] edit reds the
+    // `loadChallengesError` read above instead; w54g3-sr-discover-catch-to-empty-r2).
+    expect(screen.queryByText(en.discoverEmptyTitle)).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: RETRY }));
     expect(await screen.findByRole('heading', { name: 'Focus gently' })).toBeTruthy();
   });

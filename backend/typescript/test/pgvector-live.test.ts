@@ -4,8 +4,15 @@
  * one validation boundary the unit tests can't cover (the `<=>` cosine SQL and
  * fixed-dimension `vector(N)` column behaviour).
  *
- * Gated on Docker: skips locally when Docker is absent. The dedicated
- * `pgvector-live` CI job runs it on a Docker-capable runner. The Docker probe
+ * Gated on Docker: skips locally when Docker is absent, and does NOT run in the
+ * default gate (`npm run ci` sets OPENWOP_SKIP_TESTCONTAINERS=1). The only runner
+ * is `npm run ci:full` (OPENWOP_CI_LIVE=1, `scripts/ci.sh`), which sets
+ * OPENWOP_PGVECTOR_LIVE=1. (Hosted CI, which this header used to cite as "the
+ * dedicated `pgvector-live` CI job", is disabled.) The gate-lane twin is
+ * `pgvector-vector.test.ts`, which pins the SQL text, tenant predicate included.
+ * Order: `upsert is idempotent` and `delete removes by id` read the previous
+ * case's rows, so this file is not shuffle-safe (no Docker here to verify a
+ * rewrite; an honest ceiling, /grade-tests 8f w1). The Docker probe
  * is a TOP-LEVEL await so the `it.skipIf(...)` gate has the right value at
  * collection time (a beforeAll-set flag would still be false when skipIf reads it).
  */
@@ -29,7 +36,7 @@ async function isDockerReachable(): Promise<boolean> {
   }
 }
 
-// OPENWOP_PGVECTOR_LIVE=1 (set by the dedicated CI job) HARD-REQUIRES the live
+// OPENWOP_PGVECTOR_LIVE=1 (set by `npm run ci:full`'s live lane) HARD-REQUIRES the live
 // run: the probe is bypassed, so if Docker is genuinely unavailable the
 // container start throws and the job goes RED — a green job then MEANS the live
 // path was actually exercised, never a silent skip. Locally (flag unset) it

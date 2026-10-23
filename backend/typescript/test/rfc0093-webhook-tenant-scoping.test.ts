@@ -14,6 +14,16 @@
  *
  * Boots the full app (auth middleware included) so the membership gate runs
  * exactly as deployed.
+ *
+ * Honest ceiling (8fw1g4 round 2): through the ROUTES a foreign tenant scope is
+ * refused 403 by the MEMBERSHIP gate (`resolveWebhookTenant`) before the
+ * subscription-tenant check (`sub.tenantId !== tenantId` → 404) can run — the dev
+ * principal cannot be made a member of a second tenant here. That check is witnessed
+ * by the test-seam two-tenant case below, which is the conformance contract.
+ *
+ * Sabotages that red this file (8fw1g4 round 1): dropping the membership gate,
+ * fanning a delivery out to every tenant's subscriptions, and registering under a
+ * tenant other than the caller's.
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -110,7 +120,7 @@ describe('rfc0093 §A.3 — registration-time membership gate', () => {
     expect(reg.body.error).toBe('openwop-app.forbidden_tenant');
   });
 
-  it('a held subscription cannot be seen or unregistered through a foreign tenant scope', async () => {
+  it('a foreign tenant scope is refused 403 at the membership gate (list + unregister), and the subscription survives', async () => {
     const reg = await jsonFetch('/webhooks', {
       method: 'POST',
       body: JSON.stringify({ url: SAFE_URL, events: ['run.completed'] }),
@@ -118,10 +128,15 @@ describe('rfc0093 §A.3 — registration-time membership gate', () => {
     expect(reg.status).toBe(201);
     const webhookId = reg.body.webhookId as string;
     try {
-      const del = await jsonFetch(`/webhooks/${webhookId}?tenantId=foreign-${Date.now()}`, {
+      const foreign = `foreign-${Date.now()}`;
+      const seen = await jsonFetch(`/webhooks?tenantId=${foreign}`);
+      expect(seen.status).toBe(403); // never a 200 listing
+      expect(seen.body.error).toBe('openwop-app.forbidden_tenant');
+      const del = await jsonFetch(`/webhooks/${webhookId}?tenantId=${foreign}`, {
         method: 'DELETE',
       });
       expect(del.status).toBe(403); // not a member of that tenant — and never 204
+      expect(del.body.error).toBe('openwop-app.forbidden_tenant');
       // Still held in the caller's own scope.
       const list = await jsonFetch('/webhooks');
       const ids = (list.body.subscriptions as Array<{ webhookId: string }>).map((s) => s.webhookId);

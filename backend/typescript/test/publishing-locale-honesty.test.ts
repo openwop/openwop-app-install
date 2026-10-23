@@ -18,6 +18,18 @@
  * PUB2-B2 — `prerenderBlogIndex` hardcoded `locale: 'en'` directly beneath a
  * docstring promising "Honest head: no fabricated fields", while its route has
  * always advertised `Vary: Accept-Language`.
+ *
+ * Scope: this file covers `negotiatePublicLocale` (B1) and `buildHtmlDocument`'s
+ * lang/og:locale omission (B2's renderer half). The blog-index half of PUB2-B2
+ * (`prerenderBlogIndex` passing the negotiated locale) is covered by
+ * `cms-blog-locale-headers.test.ts`.
+ *
+ * The org is configured MULTI-locale (base `en`, plus `fr` and `de`) so the
+ * success path must actually negotiate: a function that answered `'en'` on
+ * every successful read used to pass (8fw1g3-loc-success-const, vacuous in
+ * round 1). Sabotage-witnessed: a failed read minting `'en'` (loc-null-r2),
+ * a constant success answer (loc-success-const-r2), a guessed `lang`
+ * (loc-lang) and a guessed `og:locale` (loc-oglocale).
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import http from 'node:http';
@@ -37,6 +49,7 @@ vi.mock('../src/host/contentLocales.js', async (importOriginal) => {
 
 import { createApp } from '../src/index.js';
 import { createOrg } from '../src/host/accessControlService.js';
+import { updateContentLanguageSettings } from '../src/host/contentLocales.js';
 import { negotiatePublicLocale } from '../src/features/publishing/publishingService.js';
 import { buildHtmlDocument } from '../src/features/publishing/prerenderService.js';
 
@@ -52,6 +65,7 @@ beforeAll(async () => {
   // reason. That is the control earning its place.
   const org = await createOrg({ tenantId: 'pub-r2', createdBy: 'pub-r2', name: 'Pub R2' });
   ORG = org.orgId;
+  await updateContentLanguageSettings('pub-r2', ORG, { baseLocale: 'en', supportedLocales: ['fr', 'de'] }, 'test');
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 beforeEach(() => { settingsFail.on = false; });
@@ -69,8 +83,7 @@ describe('PUB2-B1 — a failed negotiation yields no cache key, rather than a fa
     // that returns null always — which would disable the prerender memo for
     // every request on the host.
     const locale = await negotiatePublicLocale(ORG, 'fr-FR,fr;q=0.9');
-    expect(locale, 'a working read still produces a key').toBeTruthy();
-    expect(typeof locale).toBe('string');
+    expect(locale, 'a working read negotiates the visitor\'s language').toBe('fr');
   });
 
   it('two visitors with different Accept-Language never share one key', async () => {
@@ -80,14 +93,13 @@ describe('PUB2-B1 — a failed negotiation yields no cache key, rather than a fa
     settingsFail.on = false;
     const fr = await negotiatePublicLocale(ORG, 'fr-FR,fr;q=0.9');
     const de = await negotiatePublicLocale(ORG, 'de-DE,de;q=0.9');
-    // With a single-locale org both legitimately resolve to the base locale —
-    // that is correct segmentation, not collapse. What must never happen is a
-    // NON-null key minted from a FAILED read, so assert that directly:
+    // The org supports fr and de, so a working read gives each visitor their own key.
+    expect(fr).toBe('fr');
+    expect(de).toBe('de');
+    // And a FAILED read mints no key for either — the old code collapsed both to 'en'.
     settingsFail.on = true;
     expect(await negotiatePublicLocale(ORG, 'fr-FR'), 'no key from a failed read').toBeNull();
     expect(await negotiatePublicLocale(ORG, 'de-DE'), 'nor for the next visitor').toBeNull();
-    expect(fr).not.toBeNull();
-    expect(de).not.toBeNull();
   });
 });
 

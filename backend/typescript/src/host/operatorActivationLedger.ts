@@ -44,6 +44,8 @@ export interface OperatorActivation {
   expiresAt: string;
   revokedAt?: string;
   revokedBy?: string;
+  /** A swept activation remains as a CAS marker until reactivation or erasure. */
+  retiredAt?: string;
 }
 
 export const operatorActivations = new DurableCollection<OperatorActivation>(
@@ -57,6 +59,7 @@ export const operatorActivations = new DurableCollection<OperatorActivation>(
 export function isActivationLive(a: OperatorActivation | null | undefined, nowMs = Date.now()): a is OperatorActivation {
   return Boolean(a)
     && !a!.revokedAt
+    && !a!.retiredAt
     && Date.parse(a!.expiresAt) > nowMs
     && isListedSuperadminTenant(a!.eligibilityTenant); // eligibility re-read at USE time
 }

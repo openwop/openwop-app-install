@@ -31,6 +31,9 @@ import {
   type DispatchEnvelope,
   type HostCallResponse,
 } from '../src/host/packWorkerContract.js';
+import { dispatchPackNodeIsolated } from '../src/host/packIsolationDispatch.js';
+import { createFakeIsolationAdapter } from '../src/host/isolationAdapter.js';
+import type { NodeContext } from '../src/executor/types.js';
 
 function envelope(overrides: Partial<DispatchEnvelope> = {}): DispatchEnvelope {
   return {
@@ -96,10 +99,42 @@ describe('the envelope carries DATA, and never `secrets`', () => {
     expect(value).toBeUndefined();
   });
 
-  it('the envelope OBJECT itself never carries a secrets key', () => {
-    // Structural, so a future edit that "helpfully" threads secrets through the
-    // envelope type fails here rather than at a pack.
-    expect(Object.keys(envelope())).not.toContain('secrets');
+  it('the envelope OBJECT itself never carries a secrets key', async () => {
+    // Behavioural: the HOST builds the envelope from a ctx that DOES hold a
+    // cleartext secret, and an adapter captures exactly what would cross. (This
+    // used to inspect this file's own `envelope()` literal, which could not fail.)
+    const ctx: NodeContext = {
+      runId: 'run-runner-secrets', nodeId: 'n1', tenantId: 't1',
+      inputs: { value: 42 }, configurable: {}, attempt: 1,
+      secrets: { 'byok:x': 'sk-never-cross' },
+      emit: async () => ({ eventId: 'e1', sequence: 1 }),
+    };
+    const fake = createFakeIsolationAdapter();
+    const captured: DispatchEnvelope[] = [];
+    const outcome = await dispatchPackNodeIsolated({
+      ctx,
+      module: { typeId: 'community.test.runner.node', version: '1.0.0', execute: async () => ({ status: 'success', outputs: {} }) },
+      origin: {
+        packName: 'community.test.runner', packVersion: '1.0.0', packDir: '/x',
+        entryUrl: 'file:///x/index.mjs', typeId: 'community.test.runner.node',
+        // A trusted tier needs no guarantees, so the capturing adapter is admitted.
+        tier: 'operator-trusted', isolation: { eligible: true },
+      },
+      effectCtx: { runId: 'run-runner-secrets', replaying: false },
+      adapter: {
+        ...fake,
+        dispatch: async (env) => {
+          captured.push(env);
+          return { status: 'success', outputs: {}, variablesWrites: [] };
+        },
+      },
+    });
+    expect(outcome.status).toBe('success');
+    expect(captured).toHaveLength(1);
+    expect('secrets' in captured[0]!).toBe(false);
+    expect(JSON.stringify(captured[0])).not.toContain('sk-never-cross');
+    // Positive control: the captured envelope is the one built from THIS ctx.
+    expect(captured[0]?.runId).toBe('run-runner-secrets');
   });
 });
 
@@ -272,6 +307,7 @@ describe('protocol + serializability', () => {
   it('refuses an envelope whose protocol version it does not speak', async () => {
     const result = await run(
       async () => ({ status: 'success', outputs: {} }),
+      // The one deliberate cast: a protocol version the type cannot express is the input under test.
       { ...envelope(), protocol: 99 as unknown as typeof DISPATCH_PROTOCOL_VERSION },
     );
     expect(result.status === 'failure' && result.error.code).toBe('pack_isolation_protocol_unsupported');
@@ -371,8 +407,8 @@ describe('H82 — a replay-guard refusal survives the sandbox boundary as itself
       }),
     );
 
-    expect(result.status).toBe('failure');
+    if (result.status !== 'failure') throw new Error(`expected a failure, got ${result.status}`);
     // The whole point: NOT 'pack_node_error', NOT 'internal_error'.
-    expect((result as { error?: { code?: string } }).error?.code).toBe('replay_source_missing');
+    expect(result.error.code).toBe('replay_source_missing');
   });
 });

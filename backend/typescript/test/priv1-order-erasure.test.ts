@@ -6,8 +6,15 @@
  * matched directly as a contactId (the CRM-contact-erasure case); a subject keyed by a CDP
  * sessionKey now ALSO reaches its orders via the ADR 0381 subject-key resolver (PRIV-2 — the
  * identity graph is expanded UPFRONT, before the analytics eraser consumes the link).
+ *
+ * Sabotages each case is red against (probed, /grade-tests 8f w1): the anonymizer
+ * keeping the original fields (`...s`), the contact filter widened to any order,
+ * the already-anonymized skip removed (the re-run re-writes the row: caught by its
+ * unchanged `updatedAt` across a 1 s fake-clock gap), the resolver dropping the
+ * linked contact, and the session-key grammar admitting `:` (the namespace
+ * collision — a DOUBLE guard, see that case).
  */
-import { beforeAll, describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/index.js';
 import { createProduct, createOrder, getOrder } from '../src/features/commerce/commerceService.js';
 import { eraseSubject } from '../src/host/subjectErasure.js';
@@ -50,9 +57,16 @@ describe('PRIV-1 — commerce subject erasure anonymizes order shipping', () => 
     // a DIFFERENT subject's order is untouched
     expect((await getOrder(T, ORG, other.orderId))!.shippingAddress!.name).toBe('Bob Smith');
 
-    // idempotent: re-erasing finds the fields already redacted (no error, no change)
-    expect((await eraseSubject(T, 'contact-jane')).failed).toBe(0);
-    expect((await getOrder(T, ORG, order.orderId))!.shippingAddress!.line1).toBe('[redacted]');
+    // idempotent: re-erasing finds the fields already redacted (no error, no change).
+    // The row must not be re-written: its updatedAt survives a re-run 1 s later.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(Date.now() + 1_000);
+      expect((await eraseSubject(T, 'contact-jane')).failed).toBe(0);
+    } finally { vi.useRealTimers(); }
+    const again = await getOrder(T, ORG, order.orderId);
+    expect(again!.shippingAddress).toEqual({ line1: '[redacted]', region: 'IL', country: 'US' });
+    expect(again!.updatedAt).toBe(erased!.updatedAt);
   });
 
   // PRIV-2 (ADR 0381) — the decisive test the direct-match couldn't pass: an erasure keyed by
@@ -64,7 +78,8 @@ describe('PRIV-1 — commerce subject erasure anonymizes order shipping', () => 
     const order = await createOrder({ tenantId: T, orgId: ORG, createdBy: 'u', contactId: 'contact-linked', shippingAddress: fullAddress('Linked Lee'), lines: [{ productId, quantity: 1 }] });
 
     const res = await eraseSubject(T, 'sess-xyz'); // keyed by the SESSION, not the contactId
-    expect(res.keysResolved).toBeGreaterThanOrEqual(2); // {sess-xyz, contact-linked}
+    expect(res.keysResolved).toBe(2); // exactly {sess-xyz, contact-linked}
+    expect(res.failed).toBe(0);
 
     const erased = await getOrder(T, ORG, order.orderId);
     expect(erased!.shippingAddress!.name).toBeUndefined();      // resolved to contact-linked, then anonymized
@@ -84,7 +99,10 @@ describe('PRIV-1 — commerce subject erasure anonymizes order shipping', () => 
 
     await eraseSubject(T, 'crm:attacker'); // erase the ATTACKER's own subject
 
-    // The victim's order is untouched — the `crm:`-prefixed session key was dropped by the namespace guard.
+    // The victim's order is untouched. DOUBLE GUARD (ADR 0857 D1), named so a
+    // single-guard probe is not misread: `linkSession` refuses `crm:victim` as a
+    // session key (the writer's SESSION_KEY grammar), AND the resolver's hops
+    // re-check that same grammar. The probe breaks the shared regex both read.
     expect((await getOrder(T, ORG, victimOrder.orderId))!.shippingAddress!.name).toBe('Victim Vera');
   });
 });

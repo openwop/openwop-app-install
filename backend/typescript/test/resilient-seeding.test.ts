@@ -6,13 +6,22 @@
  *   2. the request-timeout resolver gives the seed routes the batch budget.
  *   3. `provisionDemoFeatures` enables the demo toggles PER-TENANT (never global),
  *      idempotently — the DG-SEED-7 fix that keeps seeders pure.
+ *
+ * Sabotages that red this file (8fw1g4 round 1 + 2): dropping `provision-demo`
+ * from the batch-route pattern, rewriting or un-guarding the `onStep` emit, a
+ * GLOBAL `status:'on'` write, an override write that replaces instead of merges,
+ * a blind CAS against a re-read (the SEED-RS-3 race case FORCES the interleaving
+ * that loses an update — an unforced `Promise.all` never interleaved, round-1
+ * probe rs-cas-race was vacuous), a purge that wipes every tenant, and a purge
+ * that runs for a falsy tenant.
  */
 import { beforeEach, describe, expect, it } from 'vitest';
+import type { Storage } from '../src/storage/storage.js';
 import type { Request } from 'express';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { openStorage } from '../src/storage/index.js';
 import { registerToggleDefault, __resetToggleDefaults } from '../src/host/featureToggles/registry.js';
-import { resolveOne, purgeTenantOverrides, __clearToggleStore } from '../src/host/featureToggles/service.js';
+import { resolveOne, purgeTenantOverrides, __clearToggleStore, enableTenantOverride, getStoredConfig } from '../src/host/featureToggles/service.js';
 import { runExampleDataSeed } from '../src/host/exampleDataSeeders.js';
 import type { StepResult } from '../src/host/exampleDataSeeders.js';
 import { provisionDemoFeatures } from '../src/host/demoProvision.js';
@@ -35,6 +44,8 @@ describe('ADR 0292 — request-timeout budget for seed routes', () => {
     }
   });
 
+  // Twin: the interrupt leg (LLM budget) is also asserted by request-timeout.test.ts
+  // "grants the LLM budget…" (probe rt-resolver reds both). Kept: protected file.
   it('keeps the tight default for ordinary routes and the LLM budget for interrupts', () => {
     expect(resolveTimeoutForRequest(asReq('GET', '/host/openwop-app/example-data/status'))).toBe(DEFAULT_REQUEST_TIMEOUT_MS);
     expect(resolveTimeoutForRequest(asReq('POST', '/runs/r1/interrupts/n1'))).toBe(DEFAULT_LLM_REQUEST_TIMEOUT_MS);
@@ -97,14 +108,56 @@ describe('ADR 0292 — provisionDemoFeatures (DG-SEED-7)', () => {
   });
 
   it('provisions concurrently without a lost update (SEED-RS-3 CAS)', async () => {
-    // Two tenants enabled against the SAME shared toggle rows at once — the old
-    // get→merge→save would clobber one; the CAS loop must land both.
-    const [a, b] = await Promise.all([
-      provisionDemoFeatures('race-a', 'test'),
-      provisionDemoFeatures('race-b', 'test'),
-    ]);
+    // FORCED interleaving (a plain Promise.all never interleaved — round-1 probe
+    // rs-cas-race was vacuous). Tenant A is held at its CAS CANDIDATE read of the
+    // shared `crm` row (the 3rd read of that key: getStoredConfig, getEffectiveConfig,
+    // then the `stored` read) until tenant B has fully enabled `crm`. A's CAS then
+    // carries a stale `expected`; it must LOSE and retry, never overwrite B.
+    const CRM_KEY = 'hostext:feature-toggle:crm';
+    const base = await openStorage('memory://');
+    let crmReads = 0;
+    let crmSwaps = 0;
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((r) => { release = r; });
+    let signalHeld: () => void = () => undefined;
+    const held = new Promise<void>((r) => { signalHeld = r; });
+    const fallback = (): Promise<void> => new Promise((r) => setTimeout(r, 2000));
+    const storage = new Proxy<Storage>(base, {
+      get(target, prop) {
+        if (prop === 'kvGet') {
+          return async (key: string): Promise<string | null> => {
+            // Read FIRST, then hold: A must leave with the pre-B snapshot.
+            const value = await target.kvGet(key);
+            if (key === CRM_KEY && ++crmReads === 3) {
+              signalHeld();
+              await Promise.race([gate, fallback()]);
+            }
+            return value;
+          };
+        }
+        if (prop === 'kvCompareAndSwap') {
+          return (key: string, expected: string | null, next: string) => {
+            if (key === CRM_KEY) crmSwaps += 1;
+            return target.kvCompareAndSwap(key, expected, next);
+          };
+        }
+        const v: unknown = Reflect.get(target, prop);
+        return typeof v === 'function' ? v.bind(target) : v;
+      },
+    });
+    initHostExtPersistence(storage);
+
+    const pendingA = provisionDemoFeatures('race-a', 'test');
+    await Promise.race([held, fallback()]);
+    expect(crmReads, 'the hold never fired — A did not reach its candidate read').toBe(3);
+    const b = await provisionDemoFeatures('race-b', 'test');
+    release();
+    const a = await pendingA;
+
     expect(a.enabled).toEqual(expect.arrayContaining(['crm', 'commerce']));
     expect(b.enabled).toEqual(expect.arrayContaining(['crm', 'commerce']));
+    // B's CAS, A's stale CAS (lost), A's retry — proves the window really opened.
+    expect(crmSwaps, "A's first CAS must lose to B's write and retry").toBe(3);
     // BOTH overrides survived (neither write was lost).
     expect((await resolveOne('crm', { tenantId: 'race-a' }))?.enabled).toBe(true);
     expect((await resolveOne('crm', { tenantId: 'race-b' }))?.enabled).toBe(true);
@@ -127,7 +180,14 @@ describe('ADR 0292 — provisionDemoFeatures (DG-SEED-7)', () => {
     expect((await resolveOne('crm', { tenantId: 'keep-t2' }))?.enabled).toBe(true);
     // Idempotent: a second purge finds nothing.
     expect(await purgeTenantOverrides('demo-t1')).toEqual([]);
-    // Fail-closed on a falsy tenant.
+  });
+
+  it('purgeTenantOverrides fails closed on a falsy tenant — an `\'\'` override survives', async () => {
+    // A row that really carries a '' override, so removing the `!tenantId` guard
+    // has something to strip (with none, the guard could never matter).
+    expect(await enableTenantOverride('crm', '', 'test')).toBe('enabled');
+    expect(Object.keys((await getStoredConfig('crm'))?.tenantOverrides ?? {})).toContain('');
     expect(await purgeTenantOverrides('')).toEqual([]);
+    expect(Object.keys((await getStoredConfig('crm'))?.tenantOverrides ?? {}), 'the falsy-tenant purge stripped a row').toContain('');
   });
 });

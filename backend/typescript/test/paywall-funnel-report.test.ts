@@ -1,6 +1,17 @@
 /**
- * Strategy §8 — the funnel ARITHMETIC (`buildFunnelReport`, pure, no I/O).
- * The route test (`paywall-funnel-routes.test.ts`) proves the reads feed it.
+ * ADR 0820 §7 / monetization strategy §8 — the funnel ARITHMETIC
+ * (`buildFunnelReport`, pure, no I/O). The route test
+ * (`paywall-funnel-routes.test.ts`) proves the reads feed it.
+ *
+ * Sabotages each case is red against (probed, /grade-tests 8f w1):
+ *   - `rate` dividing on `d >= 0` (a zero denominator reads as 0%/100%);
+ *   - the demo-checkout `continue` dropped (demo counted as started);
+ *   - `refusedTenants` reporting the refusal COUNT, or counting tenants over
+ *     every metric (the t3 impression-only row below makes that visible);
+ *   - the bundle roll-up assigning instead of summing; a grants-only bundle
+ *     dropped; a loose feature's `''` bundle not normalised to null.
+ * Not claimed here: the ledger-count path (b) and the `startedCounted` /
+ * `completedCounted` cutover (a grade-code gap, not this file's claim).
  */
 import { describe, expect, it } from 'vitest';
 import { buildFunnelReport, rate } from '../src/features/billing/funnelReport.js';
@@ -32,6 +43,8 @@ describe('strategy §8 — funnel arithmetic', () => {
         // a daemon re-checking ONE tenant every tick: many refusals, one tenant
         row({ metric: 'refusal', featureId: 'crm', count: 40, surface: 'lane' }),
         row({ metric: 'refusal', featureId: 'crm', count: 1, surface: 'route', tenantId: 't2' }),
+        // a tenant that only SAW the paywall: it must not count as a refused tenant
+        row({ metric: 'impression', featureId: 'crm', count: 1, surface: 'sidebar', tenantId: 't3' }),
         row({ metric: 'impression', featureId: 'crm-sign', count: 5, surface: 'palette' }),
         row({ metric: 'impression', featureId: 'loose', count: 1, bundleId: '' }),
       ],
@@ -46,15 +59,15 @@ describe('strategy §8 — funnel arithmetic', () => {
     });
 
     const crm = r.features.find((f) => f.featureId === 'crm')!;
-    expect(crm).toMatchObject({ bundleId: 'crm', impressions: 10, clicks: 3, refusals: 41, refusedTenants: 2 });
-    expect(crm.surfaces.sidebar).toEqual({ impressions: 8, clicks: 3, refusals: 0 });
+    expect(crm).toMatchObject({ bundleId: 'crm', impressions: 11, clicks: 3, refusals: 41, refusedTenants: 2 });
+    expect(crm.surfaces.sidebar).toEqual({ impressions: 9, clicks: 3, refusals: 0 });
     expect(crm.surfaces.lane).toEqual({ impressions: 0, clicks: 0, refusals: 40 });
     expect(r.features.find((f) => f.featureId === 'loose')?.bundleId).toBeNull();
 
     const b = r.bundles.find((x) => x.bundleId === 'crm')!;
     // two features of the same bundle roll up into it
-    expect(b).toMatchObject({ impressions: 15, clicks: 3, refusals: 41, refusedTenants: 2, checkoutsStarted: 2, checkoutsCompleted: 1, activeGrants: 4 });
-    expect(b.clickThroughRate).toBe(0.2);
+    expect(b).toMatchObject({ impressions: 16, clicks: 3, refusals: 41, refusedTenants: 2, checkoutsStarted: 2, checkoutsCompleted: 1, activeGrants: 4 });
+    expect(b.clickThroughRate).toBe(0.1875); // 3 / 16, by hand
     expect(b.checkoutCompletionRate).toBe(0.5);
     // a bundle with grants but no traffic still appears, with honest null rates
     const agents = r.bundles.find((x) => x.bundleId === 'agents')!;
@@ -63,7 +76,7 @@ describe('strategy §8 — funnel arithmetic', () => {
     // demo checkouts are reported apart and never counted as started
     expect(r.checkouts.find((c) => c.product === 'bundle:crm')).toEqual({ product: 'bundle:crm', kind: 'bundle', started: 2, completed: 1, demoStarted: 1 });
     expect(r.plans).toEqual([{ tier: 'pro', active: 2, checkoutsStarted: 1, checkoutsCompleted: 1 }]);
-    expect(r.totals).toEqual({ impressions: 16, clicks: 3, refusals: 41, checkoutsStarted: 4, checkoutsCompleted: 2, demoCheckouts: 1, grantsStarted: 0, grantsEnded: 0 });
+    expect(r.totals).toEqual({ impressions: 17, clicks: 3, refusals: 41, checkoutsStarted: 4, checkoutsCompleted: 2, demoCheckouts: 1, grantsStarted: 0, grantsEnded: 0 });
   });
 
   it('an empty window is an empty report, not an error', () => {

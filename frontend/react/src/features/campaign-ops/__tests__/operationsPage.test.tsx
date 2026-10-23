@@ -8,23 +8,39 @@
  *     a 403 / 409 shows the server's own words;
  *   - the change is shown before → after, with step reasons in plain words;
  *   - a failed clients read is said, never shown as "no clients".
+ *
+ * Sabotage-witnessed (wave 55/56 probes, each red here): the mode switch shown
+ * to non-admins; the banner shown for a live client; a failed read rendered as
+ * no clients; the duplicate flag or the override reason dropped; the change
+ * set's id approved instead of its hash; the server's words replaced by our
+ * fallback on a 403 or on a 409; unknown step reasons not mapped; splitChange's
+ * prefix scan disabled, or its suffix scan allowed to overlap the prefix.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup, screen, fireEvent, waitFor, within } from '@testing-library/react';
 
+type Client = typeof import('../campaignOpsClient.js');
 const h = vi.hoisted(() => ({
-  listClients: vi.fn(), updateClient: vi.fn(), listAssets: vi.fn(), listRequests: vi.fn(),
-  submitRequest: vi.fn(), answerQuestions: vi.fn(), reviseRequest: vi.fn(), listChangeSets: vi.fn(),
-  getChangeSetDiff: vi.fn(), requestApproval: vi.fn(), listJobs: vi.fn(), approveChangeSet: vi.fn(), rejectChangeSet: vi.fn(),
+  listClients: vi.fn<Client['listClients']>(), updateClient: vi.fn<Client['updateClient']>(),
+  listAssets: vi.fn<Client['listAssets']>(), listRequests: vi.fn<Client['listRequests']>(),
+  submitRequest: vi.fn<Client['submitRequest']>(), answerQuestions: vi.fn<Client['answerQuestions']>(),
+  reviseRequest: vi.fn<Client['reviseRequest']>(), listChangeSets: vi.fn<Client['listChangeSets']>(),
+  getChangeSetDiff: vi.fn<Client['getChangeSetDiff']>(), requestApproval: vi.fn<Client['requestApproval']>(),
+  listJobs: vi.fn<Client['listJobs']>(), approveChangeSet: vi.fn<Client['approveChangeSet']>(),
+  rejectChangeSet: vi.fn<Client['rejectChangeSet']>(),
 }));
 vi.mock('../campaignOpsClient.js', async (orig) => ({ ...(await orig<Record<string, unknown>>()), ...h }));
 
 import { OperationsPage, stepReasonKey } from '../OperationsPage.js';
 import { splitChange } from '../ChangeDiff.js';
-import { CampaignOpsError } from '../campaignOpsClient.js';
+import { CampaignOpsError, type ChangeRequest, type ChangeSet, type ClientAccount } from '../campaignOpsClient.js';
 
-const client = (mode: 'preview' | 'live') => ({ tenantId: 't', orgId: 'o1', displayName: 'Acme', status: 'active', mode, approvalPolicy: 'agency', createdAt: '', updatedAt: '' });
-const cs = { changeSetId: 'cs1', requestId: 'r1', requestVersion: 1, entries: [], hash: 'h-123', status: 'in_review', createdAt: '' };
+const client = (mode: 'preview' | 'live'): ClientAccount => ({ tenantId: 't', orgId: 'o1', displayName: 'Acme', status: 'active', mode, approvalPolicy: 'agency', createdAt: '', updatedAt: '' });
+const cs: ChangeSet = { changeSetId: 'cs1', requestId: 'r1', requestVersion: 1, entries: [], hash: 'h-123', status: 'in_review', createdAt: '' };
+const request = (status: ChangeRequest['status']): ChangeRequest => ({
+  requestId: 'r1', orgId: 'o1', version: 1, text: 'New headline', assetIds: ['a1'], answers: [], status,
+  createdAt: '2026-10-01T00:00:00.000Z', updatedAt: '2026-10-01T00:00:00.000Z',
+});
 
 beforeEach(() => {
   for (const f of Object.values(h)) f.mockReset();
@@ -58,22 +74,30 @@ describe('OperationsPage', () => {
   });
 
   it('a duplicate submit offers send anyway, which re-sends with the reason', async () => {
-    h.submitRequest.mockResolvedValueOnce({ request: {}, duplicate: true }).mockResolvedValueOnce({ request: {}, duplicate: false });
+    h.submitRequest.mockResolvedValueOnce({ request: request('duplicate'), duplicate: true }).mockResolvedValueOnce({ request: request('interpreting'), duplicate: false });
     render(<OperationsPage />);
     await screen.findByLabelText('Home page');
     fireEvent.change(screen.getByLabelText('Describe the change'), { target: { value: 'New headline' } });
     fireEvent.click(screen.getByRole('button', { name: 'Submit' }));
-    expect((await screen.findAllByText('This looks like a request you already made')).length).toBeGreaterThan(0);
+    await screen.findAllByText('This looks like a request you already made');
+    // The first submit carried no override.
+    expect(h.submitRequest.mock.calls[0]).toEqual(['o1', { text: 'New headline', assetIds: ['a1'] }]);
     fireEvent.change(screen.getByLabelText('Why send it again?'), { target: { value: 'client asked twice' } });
     fireEvent.click(screen.getByRole('button', { name: 'Send anyway' }));
     await waitFor(() => expect(h.submitRequest).toHaveBeenLastCalledWith('o1', { text: 'New headline', assetIds: ['a1'], overrideDuplicate: { reason: 'client asked twice' } }));
+    expect(h.submitRequest).toHaveBeenCalledTimes(2);
   });
 
   it('approves a change in review with its hash and shows the diff; a 403 shows the server words', async () => {
+    // The server's words DIFFER from our fallbacks (forbiddenSelfApproval /
+    // conflictReload), so showing a fallback instead is red.
+    const FORBIDDEN = 'Approver must be someone other than the requester (server).';
+    const CONFLICT = 'The page changed since this was prepared (server).';
     h.listChangeSets.mockResolvedValue([cs]);
     h.getChangeSetDiff.mockResolvedValue({ changeSet: cs, diff: [{ assetId: 'a1', label: 'Home page', fields: [{ field: 'hero.title', before: 'Spring sale', after: 'Summer sale' }] }] });
     h.requestApproval.mockResolvedValue({ changeSet: cs, approvalId: 'ap1' });
-    h.approveChangeSet.mockRejectedValue(new CampaignOpsError('You asked for this change, so someone else has to approve it.', 403, 'separation-of-duties'));
+    h.approveChangeSet.mockRejectedValueOnce(new CampaignOpsError(FORBIDDEN, 403, 'separation-of-duties'))
+      .mockRejectedValueOnce(new CampaignOpsError(CONFLICT, 409));
     render(<OperationsPage />);
     const review = await screen.findByRole('region', { name: /Waiting for review/ });
     await within(review).findByText('Field: hero.title');
@@ -81,7 +105,15 @@ describe('OperationsPage', () => {
     expect(review.querySelector('ins')?.textContent).toBe('ummer'); // the added span
     fireEvent.click(within(review).getByRole('button', { name: 'Approve' }));
     await waitFor(() => expect(h.approveChangeSet).toHaveBeenCalledWith('ap1', 'h-123'));
-    expect((await within(review).findAllByText('You asked for this change, so someone else has to approve it.')).length).toBeGreaterThan(0);
+    await within(review).findAllByText(FORBIDDEN);
+    expect(within(review).queryByText('You asked for this change, so someone else has to approve it.')).toBeNull();
+    // The 409 half: the server's words, not the generic reload copy.
+    const reviewAgain = await screen.findByRole('region', { name: /Waiting for review/ });
+    await waitFor(() => expect((within(reviewAgain).getByRole('button', { name: 'Approve' }) as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(within(reviewAgain).getByRole('button', { name: 'Approve' }));
+    await waitFor(() => expect(h.approveChangeSet).toHaveBeenCalledTimes(2));
+    await within(reviewAgain).findAllByText(CONFLICT);
+    expect(within(reviewAgain).queryByText('This change moved on since you opened it. The list has been refreshed.')).toBeNull();
   });
 
   it('a job needing attention lists each page with its reason in plain words', async () => {
@@ -96,6 +128,11 @@ describe('helpers', () => {
   it('splitChange isolates the changed span', () => {
     expect(splitChange('Spring sale now', 'Summer sale now')).toEqual({ prefix: 'S', removed: 'pring', added: 'ummer', suffix: ' sale now' });
     expect(splitChange('', 'New')).toEqual({ prefix: '', removed: '', added: 'New', suffix: '' });
+    // Overlap: the prefix scan claims both 'a's (start=2), so the suffix scan
+    // may claim nothing (end < max - start = 0). Worked by hand, not computed.
+    expect(splitChange('aa', 'aaa')).toEqual({ prefix: 'aa', removed: '', added: 'a', suffix: '' });
+    // start=3 ('abc'), max=3 → end bound 0: the tail 'abc' is removed, not shared.
+    expect(splitChange('abcabc', 'abc')).toEqual({ prefix: 'abc', removed: 'abc', added: '', suffix: '' });
   });
   it('stepReasonKey maps unknown reasons to a plain fallback', () => {
     expect(stepReasonKey('preview_only')).toBe('reason_preview_only');

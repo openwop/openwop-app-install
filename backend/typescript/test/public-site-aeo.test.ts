@@ -8,7 +8,13 @@
  *     (sameAs), never Article; the film it describes is the film the SPA embeds;
  *  D4 root `/robots.txt` + `/sitemap.xml` are real, public, and name public URLs;
  *  D5 root `/llms.txt` is public and opens with what the site IS;
- *  plus: CMS heading `*emphasis*` never reaches crawler HTML as asterisks.
+ *  plus: CMS heading `*emphasis*` never reaches crawler HTML as asterisks, and
+ *  the backend parser is the SAME regex as the SPA's (read from both files).
+ *
+ * What turns it red (sabotage-witnessed, /grade-tests 8f wave 1, probes
+ * 8fw1g3-aeo-*): the white-label profile gate, the canonical URL, a sitemap
+ * line, the single robots group, the root doors leaving the public allowlist,
+ * the seed clobbering a person's edit, and the emphasis regex / escaping / h1.
  */
 import http from 'node:http';
 import { protocolVersions } from '../src/middleware/protocolVersion.js';
@@ -27,6 +33,7 @@ import { HERO_FILM, systemSiteProfile } from '../src/host/systemSiteProfile.js';
 import { getSeo, putSeo, rootRobotsTxt, __resetPublicReadCaches } from '../src/features/publishing/publishingService.js';
 import { isPublicPath } from '../src/middleware/auth.js';
 import { sectionHtml } from '../src/features/publishing/sectionHtml.js';
+import type { Section } from '../src/features/cms/cmsService.js';
 import { parseHeadingEmphasis, stripHeadingEmphasis, headingEmphasisHtml } from '../src/features/publishing/headingEmphasis.js';
 
 let BASE = ''; let PORT = 0; let server: http.Server;
@@ -63,8 +70,9 @@ function get(path: string, ua = 'Mozilla/5.0'): Promise<{ status: number; body: 
   });
 }
 
-const jsonLd = (html: string): any[] =>
-  [...html.matchAll(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/g)].map((m) => JSON.parse(m[1]!));
+type LdBlock = Record<string, unknown>;
+const jsonLd = (html: string): LdBlock[] =>
+  [...html.matchAll(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/g)].map((m) => JSON.parse(m[1]!) as LdBlock);
 const canonical = (html: string): string | undefined => /<link rel="canonical" href="([^"]+)">/.exec(html)?.[1];
 
 describe('ADR 0824 D1/D3 — crawler document for the system site', () => {
@@ -83,7 +91,7 @@ describe('ADR 0824 D1/D3 — crawler document for the system site', () => {
     expect(types).toEqual(expect.arrayContaining(['Organization', 'WebSite', 'WebPage', 'SoftwareApplication', 'VideoObject']));
     expect(types).not.toContain('Article');
     const org = blocks.find((b) => b['@type'] === 'Organization');
-    expect(org.sameAs).toEqual(['https://openwop.dev', 'https://github.com/openwop']);
+    expect(org?.sameAs).toEqual(['https://openwop.dev', 'https://github.com/openwop']);
     const appBlock = blocks.find((b) => b['@type'] === 'SoftwareApplication');
     expect(appBlock).toMatchObject({ applicationCategory: 'DeveloperApplication', url: `${BASE}/`, isBasedOn: 'https://openwop.dev', offers: { price: '0' } });
     const video = blocks.find((b) => b['@type'] === 'VideoObject');
@@ -144,13 +152,16 @@ describe('ADR 0824 D2 — seeded page SEO', () => {
   it('writes the record as the system actor, and never clobbers a person’s edit', async () => {
     const pageId = 'page:host-site-features';
     expect((await getSeo(SYSTEM_SITE_TENANT, SYSTEM_SITE_ORG, pageId))?.updatedBy).toBe('system');
-    await putSeo(SYSTEM_SITE_TENANT, SYSTEM_SITE_ORG, pageId, 'user:editor', { metaTitle: 'Hand-written title' });
-    __resetSystemSiteSeoForTests();
-    await ensureSystemSiteSeo();
-    expect((await getSeo(SYSTEM_SITE_TENANT, SYSTEM_SITE_ORG, pageId))?.metaTitle).toBe('Hand-written title');
-    // restore for the other tests
-    await putSeo(SYSTEM_SITE_TENANT, SYSTEM_SITE_ORG, pageId, 'system', SYSTEM_SITE_PAGE_SEO[pageId]! as unknown as Record<string, unknown>);
-    __resetPublicReadCaches();
+    try {
+      await putSeo(SYSTEM_SITE_TENANT, SYSTEM_SITE_ORG, pageId, 'user:editor', { metaTitle: 'Hand-written title' });
+      __resetSystemSiteSeoForTests();
+      await ensureSystemSiteSeo();
+      expect((await getSeo(SYSTEM_SITE_TENANT, SYSTEM_SITE_ORG, pageId))?.metaTitle).toBe('Hand-written title');
+    } finally {
+      // restore for the other tests, even when an assertion above failed
+      await putSeo(SYSTEM_SITE_TENANT, SYSTEM_SITE_ORG, pageId, 'system', { ...SYSTEM_SITE_PAGE_SEO[pageId]! });
+      __resetPublicReadCaches();
+    }
   });
 });
 
@@ -197,7 +208,6 @@ describe('ADR 0824 D4/D5 — root robots.txt, sitemap.xml, llms.txt', () => {
     process.env.OPENWOP_PUBLIC_SITE_ORG_ID = SYSTEM_SITE_ORG;
     process.env.OPENWOP_DEMO_MODE = 'true';
     const res = await get('/llms.txt', 'ClaudeBot/1.0');
-    expect(res.status).not.toBe(401);
     expect(res.status).toBe(200);
     expect(res.body.startsWith('# OpenWOP reference app\n\n> The reference app for OpenWOP, the open-source protocol for multi-agent workflow orchestration.')).toBe(true);
     for (const link of ['https://openwop.dev', 'https://openwop.dev/llms.txt', 'https://openwop.dev/ai-tools/']) expect(res.body).toContain(link);
@@ -207,6 +217,12 @@ describe('ADR 0824 D4/D5 — root robots.txt, sitemap.xml, llms.txt', () => {
 
 describe('CMS heading *emphasis* in crawler HTML (mirror of the SPA parser)', () => {
   it('matches only tight single-asterisk runs', () => {
+    // Parity with the SPA parser, read from BOTH sources (never a hand copy).
+    const literal = (rel: string): string | undefined => /const EMPHASIS = (\/.+\/g);/.exec(readFileSync(join(__dirname, rel), 'utf8'))?.[1];
+    const backendRe = literal('../src/features/publishing/headingEmphasis.ts');
+    expect(backendRe, 'backend EMPHASIS literal found').toMatch(/^\//);
+    expect(literal('../../../frontend/react/src/features/cms/headingEmphasis.tsx')).toBe(backendRe);
+
     expect(parseHeadingEmphasis('watch, pause, and *rewind.*')).toEqual([
       { text: 'watch, pause, and ', em: false }, { text: 'rewind.', em: true },
     ]);
@@ -217,9 +233,11 @@ describe('CMS heading *emphasis* in crawler HTML (mirror of the SPA parser)', ()
   });
 
   it('hero h1 and section h2 render <em>, ids and text carry no asterisks', () => {
-    const hero = sectionHtml({ sectionId: 'h', type: 'hero', data: { heading: 'Pause and *rewind.*' } } as never, { assetBase: BASE })!;
+    const heroSection: Section = { sectionId: 'h', type: 'hero', data: { heading: 'Pause and *rewind.*' } };
+    const hero = sectionHtml(heroSection, { assetBase: BASE })!;
     expect(hero).toContain('<h1>Pause and <em>rewind.</em></h1>');
-    const rich = sectionHtml({ sectionId: 'r', type: 'richText', data: { heading: 'The *ledger*', text: 'x' } } as never, { assetBase: BASE })!;
+    const richSection: Section = { sectionId: 'r', type: 'richText', data: { heading: 'The *ledger*', text: 'x' } };
+    const rich = sectionHtml(richSection, { assetBase: BASE })!;
     expect(rich).toContain('>The <em>ledger</em></h2>');
     expect(rich).not.toMatch(/id="[^"]*\*/);
     expect(rich).toContain('id="the-ledger"');

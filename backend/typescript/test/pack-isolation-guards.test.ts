@@ -287,6 +287,12 @@ describe('ADR 0556 P3 authority across the boundary', () => {
 });
 
 describe('the worker runner is transport-agnostic', () => {
+  // Twins: pack-worker-runner "a granted top-level member and a granted nested
+  // surface both reach the transport" covers the hostCall routing, and
+  // pack-isolation-build-wiring "the bundled entry is the worker module, and it
+  // stays free of host imports" pins the no-host-imports half. Kept (protected
+  // file) as this suite's statement that the guards above need no host wiring
+  // beyond the broker; the `ctx` cast is the runner's own `PackNodeFn(ctx: unknown)`.
   it('runs with nothing but an envelope, a loader and a hostCall function', async () => {
     // No registry, no broker, no host imports. If this ever needs one, the
     // boundary has been broken.

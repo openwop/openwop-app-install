@@ -18,6 +18,7 @@ import { agentVisibleToTenant } from '../host/agentVisibility.js';
 import type { NodeContext, NodeModule, NodeOutcome } from '../executor/types.js';
 import { emitCost } from '../observability/costEmitter.js';
 import { createLogger } from '../observability/logger.js';
+import { registerCallAiFixtureNode } from './conformanceCallAiFixture.js';
 import { DurableCollection } from '../host/hostExtPersistence.js';
 import { invokeWithConnectionPrompt, resolveCapabilityWithPrompt } from '../host/connectionInterrupt.js';
 import { priorSend, recordSend } from '../host/emailSentLedger.js';
@@ -3582,6 +3583,9 @@ export function ensureNodesRegistered(): void {
   // RFC 0228 G4: the tableStorage schema probe, same footing (its own switch,
   // `tableSchemaProbeEnabled()`; it calls only the run tenant's own table).
   registerConformanceTableSchemaProbeNode();
+  // ADR 0967: the RFC 0248 fixture node, on its own operator opt-in
+  // (`OPENWOP_CONFORMANCE_CALLAI_FIXTURE`), refused in the auth posture.
+  registerCallAiFixtureNode();
   registry.register(delayNode);
   registry.register(failNode);
   registry.register(approvalGateNode);

@@ -7,6 +7,10 @@
  *   2. It is OFF unless `OPENWOP_TEST_SEAM_ENABLED=true` — §"Production safety"
  *      requires every `/host/sample/*` seam to 404 in production, and this
  *      one exposes per-run activity metadata.
+ *
+ * Sabotages that red this file (8fw1g4 round 1): answering a constant count,
+ * dropping the empty-runId 400, dropping the env gate, unmounting the
+ * host-namespaced path, and not recording the effect escape at the guard.
  */
 import { describe, expect, it, beforeAll, afterAll } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -54,28 +58,38 @@ describe('replay effect-count seam', () => {
     expect(res.body).toEqual({ runId: 'seam-run-1', effectCount: 2 });
   });
 
-  it('answers 0 for a run that fired nothing (and for an unknown run)', async () => {
+  it('answers 0 for an unknown run (the same branch as a run that fired nothing)', async () => {
+    __resetEffectCountsForTest();
     const res = await get('/host/sample/replay/effect-count?runId=never-existed');
     expect(res.status).toBe(200);
-    expect(res.body['effectCount']).toBe(0);
+    expect(res.body).toEqual({ runId: 'never-existed', effectCount: 0 });
   });
 
+  // Twin at the counter level: run-effect-context.test.ts "counts an effect that
+  // ESCAPED…". Kept here as the WIRE shape across two reads. Protected file.
   it('is monotonic non-decreasing for a runId', async () => {
     __resetEffectCountsForTest();
     runWithEffectContext({ runId: 'seam-run-2', replaying: false }, () => assertEffectAllowed('email'));
-    const first = (await get('/host/sample/replay/effect-count?runId=seam-run-2')).body['effectCount'] as number;
+    expect((await get('/host/sample/replay/effect-count?runId=seam-run-2')).body)
+      .toEqual({ runId: 'seam-run-2', effectCount: 1 });
     runWithEffectContext({ runId: 'seam-run-2', replaying: false }, () => assertEffectAllowed('email'));
-    const second = (await get('/host/sample/replay/effect-count?runId=seam-run-2')).body['effectCount'] as number;
-    expect(second).toBeGreaterThanOrEqual(first);
-    expect(second).toBe(2);
+    expect((await get('/host/sample/replay/effect-count?runId=seam-run-2')).body)
+      .toEqual({ runId: 'seam-run-2', effectCount: 2 });
   });
 
   it('rejects a missing runId rather than guessing', async () => {
-    expect((await get('/host/sample/replay/effect-count')).status).toBe(400);
+    const res = await get('/host/sample/replay/effect-count');
+    expect(res.status).toBe(400);
+    expect(res.body['error']).toBe('validation_error');
+    expect(String(res.body['message'])).toContain('runId');
   });
 
   it('is also mounted at the host-namespaced path', async () => {
-    expect((await get('/host/openwop-app/replay/effect-count?runId=x')).status).toBe(200);
+    __resetEffectCountsForTest();
+    runWithEffectContext({ runId: 'seam-run-ns', replaying: false }, () => assertEffectAllowed('notification'));
+    const res = await get('/host/openwop-app/replay/effect-count?runId=seam-run-ns');
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ runId: 'seam-run-ns', effectCount: 1 });
   });
 });
 

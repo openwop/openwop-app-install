@@ -30,6 +30,15 @@ A release SHOULD be marked a required stop only when at least one holds:
 
 ## Version log
 
+### v0.7.0 — 2026-10-23
+- **Required stop:** no.
+- **Schema:** sqlite 50 / postgres 48 · **App migrations:** 24 (unchanged from 0.6.0).
+- A MINOR release (ADR 0052 §D1), rolling-safe. New: callAI attempt accounting
+  and per-call retry policy (RFC 0248, certified in production), the KickTodo
+  operator-access panel and sweep, an animated CMS journey hero. Security: Node.js
+  22.23.4 base image (October 2026 Node.js security release; rebuild your image),
+  sub-workflow interrupt guard, dompurify and markdown-it advisories.
+
 ### v0.6.0 — 2026-10-20
 - **Required stop:** no.
 - **Schema:** sqlite 50 / postgres 48 · **App migrations:** 24 (unchanged from 0.5.1).

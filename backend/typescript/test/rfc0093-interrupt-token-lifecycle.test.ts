@@ -12,6 +12,14 @@
  * Drives the real express routes (`registerInterruptRoutes`) over an
  * in-memory storage backend, with interrupt rows inserted directly so the
  * lifecycle clock can be controlled.
+ *
+ * Sabotages that red this file (8fw1g4 round 1, 7 probes, all witnessed): the
+ * expiry check on GET and POST (410), treating a pre-migration row with no
+ * `expiresAt` as expired, letting an unresolved token outlive its terminal run,
+ * refusing to inspect a resolved interrupt, the 30-minute default TTL, the
+ * OPENWOP_INTERRUPT_TOKEN_TTL_SEC override, and the cap at the interrupt's own
+ * deadline. Clock: windows are relative to the real `Date.now()` and generous, so
+ * the +1-year OPENWOP_CI_CLOCKSHIFT run reads the same.
  */
 
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
@@ -80,7 +88,7 @@ async function seedInterrupt(
     runId,
     nodeId: 'gate',
     kind: 'clarification',
-    token: `tok-${seq}-${Math.random().toString(36).slice(2)}`,
+    token: `tok-${seq}`, // `seq` is unique per row; no randomness needed
     data: { prompt: 'go?' },
     createdAt: new Date().toISOString(),
     expiresAt: new Date(Date.now() + 60_000).toISOString(),

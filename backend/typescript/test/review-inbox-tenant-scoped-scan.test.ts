@@ -5,12 +5,38 @@
  * the 4-connection pool and timed out the roster/kanban/fleet reads on the same
  * page ("Loading your agents…", then "agent not found"). The inbox now asks the
  * store for this tenant's open interrupts in one query.
+ *
+ * DOUBLE GUARDS. Tenant: the SQL `r.tenant_id = ?` AND `listReviews`'
+ * `run.tenantId !== ctx.tenantId`. Terminal: the SQL `NOT IN (…)` AND
+ * `isTerminalRunStatus` in `listReviews`. The listReviews copies run only on the
+ * GLOBAL-SCAN FALLBACK (an adapter without `listOpenInterruptsForTenant`), which no
+ * case drove in round 1 (probes inbox-tenantcheck / inbox-terminalcheck were
+ * vacuous). Cases 2 and 5 now each add a fallback leg through `withoutTenantScan`,
+ * which witnesses the listReviews copy on its own.
+ *
+ * Sabotages that red this file (8fw1g4 round 1 + 2): the SQL tenant and terminal
+ * filters, falling back to the global scan when the tenant query exists, per-row
+ * `getRun` instead of the batch read, the listReviews tenant and terminal checks
+ * (fallback legs), and the canDecide reviewer match.
  */
 import { describe, expect, it, vi } from 'vitest';
+import type { Storage } from '../src/storage/storage.js';
 import { openSqliteStorage } from '../src/storage/sqlite/index.js';
 import { listReviews } from '../src/host/reviewProjection.js';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import type { InterruptRecord, RunRecord } from '../src/types.js';
+
+/** The same store as an adapter WITHOUT the tenant-scoped query, so `listReviews`
+ *  takes the global-scan fallback (every tenant's open interrupts). */
+function withoutTenantScan(storage: Storage): Storage {
+  return new Proxy<Storage>(storage, {
+    get(target, prop) {
+      if (prop === 'listOpenInterruptsForTenant') return undefined;
+      const v: unknown = Reflect.get(target, prop);
+      return typeof v === 'function' ? v.bind(target) : v;
+    },
+  });
+}
 
 let seq = 0;
 async function seed(storage: ReturnType<typeof openSqliteStorage>, tenantId: string, opts: { resolved?: boolean } = {}): Promise<string> {
@@ -61,6 +87,14 @@ describe('the pending inbox reads only its own tenant', () => {
     expect(getRun.mock.calls.filter(([id]) => String(id).startsWith('run-inbox-')).length).toBe(0);
     expect(getRunsByIds).toHaveBeenCalledTimes(1);
     expect(getRunsByIds.mock.calls[0]![0]).toEqual([mine.replace('int-', 'run-')]);
+
+    // Fallback leg: the global scan HANDS listReviews all 21 gates, so only its own
+    // tenant re-check keeps the 20 t-noise gates out.
+    const fallback = withoutTenantScan(storage);
+    expect(fallback.listOpenInterruptsForTenant, 'fixture: the fallback must be taken').toBeUndefined();
+    expect((await fallback.listOpenInterruptsAll(500)).length, 'fixture: the global scan must see the noise').toBeGreaterThanOrEqual(21);
+    const viaFallback = await listReviews(fallback, { tenantId: 't-mine' }, { status: 'pending' });
+    expect(viaFallback.map((r) => r.interruptId), 'another tenant\'s gate leaked through the fallback').toEqual([mine]);
     await storage.close();
   });
 
@@ -109,6 +143,13 @@ describe('the pending inbox reads only its own tenant', () => {
     expect((await storage.listOpenInterruptsForTenant!('t-term', 500)).map((i) => i.interruptId)).toEqual([live]);
     const items = await listReviews(storage, { tenantId: 't-term' }, { status: 'pending' });
     expect(items.map((r) => r.interruptId)).toEqual([live]);
+    // Fallback leg: the global scan does NOT exclude terminal runs, so only the
+    // listReviews check keeps the cancelled/failed gates out.
+    const fallback = withoutTenantScan(storage);
+    const scanned = (await fallback.listOpenInterruptsAll(500)).map((i) => i.interruptId);
+    expect(scanned, 'fixture: the global scan must hand back the terminal gates').toEqual(expect.arrayContaining([dead, failed]));
+    const viaFallback = await listReviews(fallback, { tenantId: 't-term' }, { status: 'pending' });
+    expect(viaFallback.map((r) => r.interruptId), 'a terminal run\'s gate was listed via the fallback').toEqual([live]);
     await storage.close();
   });
 });

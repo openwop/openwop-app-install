@@ -132,6 +132,41 @@ ensure_work_deps() {
 
 TG() { OPENWOP_TRACEGATE_ROOT="$WORK" node "$ROOT/scripts/tracegate.mjs" "$@"; }
 
+# recheck_misses <lane> <dir> <run> — the gate's tg_recheck_misses, for the daemon.
+# A MISS suspends the lane for 14 days. The gate re-runs each miss ONCE, alone, at
+# the same tree, and triages a pass as `flake`; the daemon did not, so a nightly
+# miss stayed untriaged and suspended enforcement for everyone (four on
+# 2026-10-19). Same rule here: a pass alone is triaged `flake`, a fail stays a
+# MISS, and every recheck keeps its log under $LEDGER/daemon-logs so the
+# Received diff can be read. Returns 3 if it yielded to a gate.
+recheck_misses() {
+  local lane="$1" dir="$2" run="$3" f rel h log vp
+  [ -s "$run/misses.txt" ] || return 0
+  h="$(git -C "$WORK" rev-parse HEAD | cut -c1-12)"
+  mkdir -p "$LEDGER/daemon-logs"
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    rel="${f#"$dir"/}"
+    if gate_live; then say "a gate appeared before re-checking $rel — yielding"; return 3; fi
+    log="$LEDGER/daemon-logs/$(date -u +%Y%m%dT%H%M%SZ)-recheck-$(basename "$rel").log"
+    say "re-running the MISS $rel alone at $h"
+    ( cd "$WORK/$dir" && exec taskpolicy -c utility nice -n 15 env OPENWOP_VITEST_NO_WAIT=1 \
+        $( [ "$lane" = backend ] && echo OPENWOP_SKIP_TESTCONTAINERS=1 ) node node_modules/vitest/vitest.mjs run --maxWorkers=1 "$rel" ) > "$log" 2>&1 &
+    vp=$!
+    while kill -0 "$vp" 2>/dev/null; do
+      if gate_live; then say "a gate appeared mid-recheck — killing pid $vp and yielding"; kill_tree "$vp"; wait "$vp" 2>/dev/null || true; return 3; fi
+      sleep 5
+    done
+    if wait "$vp"; then
+      TG triage --lane "$lane" --file "$f" --head "$h" --verdict flake | logpipe
+      say "$rel PASSED alone at $h: triaged flake (log $log)"
+    else
+      say "$rel FAILS alone at $h too: a real MISS (recorder hole, P0); the lane stays suspended. Log: $log"
+    fi
+  done < "$run/misses.txt"
+  return 0
+}
+
 # run_lane <lane> <mode> — select at the work HEAD, run in yielding batches, ingest.
 # Returns 3 if it yielded to a gate. Writes the full-run report when mode=shadow.
 run_lane() {
@@ -165,7 +200,14 @@ run_lane() {
       if gate_live; then say "a gate appeared mid-batch — killing our batch (pid $vp) and yielding"; kill_tree "$vp"; wait "$vp" 2>/dev/null || true; rm -rf "$run"; return 3; fi
       sleep 5
     done
-    wait "$vp" || rc=1
+    if ! wait "$vp"; then
+      rc=1
+      # Keep the red batch's output: without it a MISS cannot be read (2026-10-19:
+      # four nightly misses went untriaged because the run dir, logs included,
+      # was deleted). Under the ledger, beside daemon.log.
+      mkdir -p "$LEDGER/daemon-logs"
+      cp "$b/vitest.log" "$LEDGER/daemon-logs/$(date -u +%Y%m%dT%H%M%SZ)-$lane-batch$i.log" 2>/dev/null || true
+    fi
     TG ingest --lane "$lane" --run "$b" --expect-head "$(git -C "$WORK" rev-parse HEAD)" | logpipe
     # Merge this batch's verdicts into the run's for the report (shadow only).
     [ "$mode" = shadow ] && node -e '
@@ -177,6 +219,7 @@ run_lane() {
   done
   if [ "$mode" = shadow ]; then
     TG report --lane "$lane" --run "$run" | logpipe
+    recheck_misses "$lane" "$dir" "$run" || { rm -rf "$run"; return 3; }
     if [ "$lane" = frontend ]; then
       local stale=0
       ( cd "$WORK" && node scripts/check-live-fetch-stale.mjs "$run/live-fetch.audit" ) >> "$LOG" 2>&1 || stale=1

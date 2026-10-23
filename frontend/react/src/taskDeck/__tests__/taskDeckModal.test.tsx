@@ -5,25 +5,41 @@
  *  - A card in a chat session links to that conversation (`/chat?conversation=`).
  *  - A blocker with no conversation links to the Inbox; its wait reads by kind.
  *  - "Open run" (`/runs/:id`, admin-tier) renders ONLY for a caller who may open
- *    it (ADR 0844 D4: no link a viewer cannot follow).
+ *    it (ADR 0844 D4: no link a viewer cannot follow). The REAL `isAdminCaller`
+ *    decides, fed typed `EffectiveAccess` values; only the cached read is mocked.
  *  - `truncated` and a capped bucket ("showing N of M") are said, not hidden.
  *  - A deck with live work re-polls; a deck of finished work does not.
+ *
+ * Sabotage that turns it red: rendering "Open run" for every caller, or
+ * `isAdminCaller` no longer admitting the admin role; an unencoded run or
+ * conversation id; Inbox links for a timer wait; the raw interrupt kind as the
+ * wait text; hiding "Showing N of M" or the truncated note; no poll, a poll for
+ * blocked-only decks, or a second load while one is in flight (TD2CD-3/6);
+ * a `disabled` Refresh (TD2UX-1); an aria-label on the entry button (TD2UX-2);
+ * the tile leaving delegated work out (TD2UX-4); the raw client text or no
+ * announcement on a failed load (TD2UX-5); a cancelled run also showing a
+ * Failed chip (TD2UX-9).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import type { TaskCard, TaskDeck } from '../taskDeckClient.js';
+import type { EffectiveAccess } from '../../client/accessClient.js';
+import { announce, currentAnnouncements } from '../../ui/announce.js';
 
-const access = vi.hoisted(() => ({ admin: false }));
-const getTaskDeck = vi.fn();
+const MEMBER: EffectiveAccess = { roles: ['member'], scopes: ['runs:read'], basis: 'member' };
+/** Admitted ONLY by the `roles.includes('admin')` arm of the real predicate. */
+const ADMIN: EffectiveAccess = { roles: ['admin'], scopes: [], basis: 'member' };
+const access: { current: EffectiveAccess } = vi.hoisted(() => ({ current: { roles: [], scopes: [], basis: 'none' } }));
+const getTaskDeck = vi.fn<typeof import('../taskDeckClient.js')['getTaskDeck']>();
 
-vi.mock('../../client/useEffectiveAccess.js', () => ({
-  useEffectiveAccessState: () => ({ access: { admin: access.admin }, resolved: true }),
-  isAdminCaller: (a: { admin?: boolean }) => a.admin === true,
+vi.mock('../../client/useEffectiveAccess.js', async (orig) => ({
+  ...(await orig<typeof import('../../client/useEffectiveAccess.js')>()),
+  useEffectiveAccessState: () => ({ access: access.current, resolved: true }),
 }));
 vi.mock('../taskDeckClient.js', async (orig) => ({
   ...(await orig<typeof import('../taskDeckClient.js')>()),
-  getTaskDeck: (...a: unknown[]) => getTaskDeck(...a),
+  getTaskDeck: (conversationRunId?: string) => getTaskDeck(conversationRunId),
 }));
 
 const { default: TaskDeckModal } = await import('../TaskDeckModal.js');
@@ -40,20 +56,26 @@ const deckOf = (over: Partial<TaskDeck>): TaskDeck => ({
 });
 const open = () => render(<MemoryRouter><TaskDeckModal onClose={() => {}} /></MemoryRouter>);
 
-beforeEach(() => { getTaskDeck.mockReset(); });
-afterEach(() => { cleanup(); access.admin = false; vi.useRealTimers(); });
+beforeEach(() => {
+  getTaskDeck.mockReset();
+  access.current = MEMBER;
+  // ui/announce keeps module-level live-region text: start every case clean.
+  announce('');
+  announce('', { assertive: true });
+});
+afterEach(() => { cleanup(); vi.useRealTimers(); });
 
 describe('ADR 0902 D7 — links a viewer can follow', () => {
   it('a chat-session card opens its conversation; a member gets no admin-tier run link', async () => {
-    getTaskDeck.mockResolvedValue(deckOf({ buckets: { ...deckOf({}).buckets, running: [card({ conversationId: 's-42' })] }, counts: { ...deckOf({}).counts!, running: 1 } }));
+    getTaskDeck.mockResolvedValue(deckOf({ buckets: { ...deckOf({}).buckets, running: [card({ conversationId: 's 42' })] }, counts: { ...deckOf({}).counts!, running: 1 } }));
     open();
     const link = await screen.findByRole('link', { name: 'Open conversation' });
-    expect(link.getAttribute('href')).toBe('/chat?conversation=s-42');
+    expect(link.getAttribute('href')).toBe('/chat?conversation=s%2042');
     expect(screen.queryByRole('link', { name: 'Open run' })).toBeNull();
   });
 
   it('CONTROL: an admin also gets the run page link', async () => {
-    access.admin = true;
+    access.current = ADMIN;
     getTaskDeck.mockResolvedValue(deckOf({ buckets: { ...deckOf({}).buckets, running: [card({ runId: 'r 9' })] }, counts: { ...deckOf({}).counts!, running: 1 } }));
     open();
     const link = await screen.findByRole('link', { name: 'Open run' });
@@ -152,12 +174,19 @@ describe('ADR 0902 grade-ux fixes', () => {
     open();
     expect(await screen.findByText('Couldn’t load the run deck.')).toBeTruthy();
     expect(screen.queryByText(/returned 500/)).toBeNull();
+    // The error is also SPOKEN (assertively), as the sentence — never the raw text.
+    await waitFor(() => expect(currentAnnouncements().assertive).toContain('Couldn’t load the run deck.'));
+    expect(currentAnnouncements().assertive).not.toMatch(/returned 500/);
   });
 
   it('TD2UX-9: a cancelled run reads Cancelled, not Failed', async () => {
     getTaskDeck.mockResolvedValue(only('failed', card({ status: 'failed', cancelled: true })));
     open();
     expect(await screen.findByText('Cancelled')).toBeTruthy();
+    // "Failed" appears once: the bucket heading, never as the card's chip.
+    const failed = screen.getAllByText('Failed');
+    expect(failed).toHaveLength(1);
+    expect(failed[0]!.closest('h3')).not.toBeNull();
   });
 
   it('TD2UX-10: a timer wait gets no Inbox link (there is nothing there to act on)', async () => {

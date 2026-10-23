@@ -26,7 +26,7 @@
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 
-import { __resetPackDispatchRegistryForTests, peekDispatch } from '../src/host/packDispatchRegistry.js';
+import { __resetPackDispatchRegistryForTests } from '../src/host/packDispatchRegistry.js';
 import { createFakeIsolationAdapter } from '../src/host/isolationAdapter.js';
 import {
   CHILD_ADAPTER_ID,
@@ -39,7 +39,10 @@ import { isolationAdapterId, __resetIsolationAdaptersForTests, adapterFor, dispa
 import { ISOLATION_ADAPTER_UNAVAILABLE_CODE, ISOLATION_GUARANTEE_UNMET_CODE } from '../src/host/packWorkerContract.js';
 import { assertEffectAllowed, type RunEffectContext } from '../src/host/runEffectContext.js';
 import { currentAuthority, type AuthorityFacts } from '../src/host/authorityContext.js';
-import { runProbe, writeProbePack } from './support/isolatedPack.js';
+import type { NodeContext, NodeModule } from '../src/executor/types.js';
+import { runProbe, writeProbePack, type RunProbeOptions } from './support/isolatedPack.js';
+
+type ProbeCtx = NonNullable<RunProbeOptions['ctx']>;
 
 const entryBroken = vi.hoisted(() => ({ value: false }));
 vi.mock('../src/host/isolation/workerEntry.js', async (importOriginal) => {
@@ -98,7 +101,7 @@ describe('SERIALIZATION: the transport implements the contract, it does not appr
         typed: {
           get: async () => ({ d: new Date(0), m: new Map([['a', 1]]), s: new Set([1, 2]), b: Buffer.from('hi') }),
         },
-      } as never,
+      },
     });
     expect(run.result.status).toBe('success');
     expect(run.reported[0]).toEqual({
@@ -176,7 +179,7 @@ describe('ERROR CODES: policy meaning survives the boundary', () => {
         try { await ctx.forbidden.act(); return { status: 'success', outputs: { called: 'allowed' } }; }
         catch (err) { return { status: 'success', outputs: { called: 'denied', code: String(err && err.code) } }; }`),
       {
-        ctx: { forbidden: { act: async () => { touched += 1; return 1; } } } as never,
+        ctx: { forbidden: { act: async () => { touched += 1; return 1; } } },
         tamper: (e) => ({ ...e, capabilityGrant: [...e.capabilityGrant, 'forbidden.act'] }),
       },
     );
@@ -193,7 +196,7 @@ describe('ERROR CODES: policy meaning survives the boundary', () => {
 
 describe('GUARDS: the effect guard and the authority record survive the process boundary', () => {
   /** A ctx surface that behaves like a real guarded effect seam. */
-  function guardedCtx(): { ctx: Record<string, unknown>; state: { fired: number; authority: AuthorityFacts | undefined } } {
+  function guardedCtx(): { ctx: ProbeCtx; state: { fired: number; authority: AuthorityFacts | undefined } } {
     const state = { fired: 0, authority: undefined as AuthorityFacts | undefined };
     return {
       state,
@@ -221,7 +224,7 @@ describe('GUARDS: the effect guard and the authority record survive the process 
     const { ctx, state } = guardedCtx();
     const run = await runProbe(writeProbePack(CALLER), {
       grant: ['storage.kv.put'],
-      ctx: ctx as never,
+      ctx,
       authority: FACTS,
     });
     expect(run.result.status === 'success' && run.result.outputs).toEqual({ call: 'ok' });
@@ -245,7 +248,7 @@ describe('GUARDS: the effect guard and the authority record survive the process 
     const effectCtx: RunEffectContext = { runId: 'run-iso-probe', replaying: true };
     const run = await runProbe(writeProbePack(CALLER), {
       grant: ['storage.kv.put'],
-      ctx: ctx as never,
+      ctx,
       effectCtx,
       authority: FACTS,
     });
@@ -317,12 +320,24 @@ describe('GUARANTEES: a tier is REFUSED, never downgraded, when the adapter is t
     // The tests above prove the FUNCTION refuses. This one proves the dispatch
     // path CALLS it — without which the comparison could be deleted from the
     // only place it matters and every assertion above would stay green.
+    const ctx: NodeContext = {
+      runId: 'run-gate', nodeId: 'n-gate', tenantId: 't-gate',
+      inputs: {}, configurable: {}, attempt: 1, secrets: {},
+      emit: async () => ({ eventId: 'e-gate', sequence: 1 }),
+    };
+    const module: NodeModule = {
+      typeId: 'community.test.gate.node',
+      version: '1.0.0',
+      execute: async () => ({ status: 'success', outputs: {} }),
+    };
+    // Counts every dispatch the adapter receives: the gate must refuse before
+    // any envelope reaches it. (The old `peekDispatch('any')` check could not
+    // fail: 'any' is never a dispatch id, and the record is released anyway.)
+    const fake = createFakeIsolationAdapter();
+    let dispatched = 0;
     const outcome = await dispatchPackNodeIsolated({
-      ctx: {
-        runId: 'run-gate', nodeId: 'n-gate', tenantId: 't-gate',
-        inputs: {}, configurable: {}, attempt: 1, secrets: {},
-      } as never,
-      module: { execute: async () => ({ status: 'success', outputs: {} }) } as never,
+      ctx,
+      module,
       origin: {
         packName: 'community.test.gate', packVersion: '1.0.0', packDir: '/x',
         entryUrl: 'file:///x/index.mjs', typeId: 'community.test.gate.node',
@@ -330,13 +345,13 @@ describe('GUARANTEES: a tier is REFUSED, never downgraded, when the adapter is t
       },
       effectCtx: { runId: 'run-gate', replaying: false },
       // Enforces nothing — so the untrusted tier must be refused rather than run.
-      adapter: createFakeIsolationAdapter(),
+      adapter: { ...fake, dispatch: (envelope, broker) => { dispatched += 1; return fake.dispatch(envelope, broker); } },
     });
     expect(outcome.status).toBe('failure');
     expect(outcome.status === 'failure' && outcome.error.code).toBe(ISOLATION_GUARANTEE_UNMET_CODE);
-    // Refused BEFORE a dispatch record exists, so a rejected pack leaves no
-    // half-built state behind: nothing to leak, nothing to sweep.
-    expect(peekDispatch('any')).toBeNull();
+    // Refused BEFORE anything is dispatched, so a rejected pack leaves no
+    // half-built state behind and its code never ran.
+    expect(dispatched).toBe(0);
   });
 });
 
@@ -351,6 +366,10 @@ describe('SELECTION: `child` is the default, and an unavailable adapter REFUSES'
     expect(adapterFor(undefined, { OPENWOP_PACK_ISOLATION_ADAPTER: 'fake' }).id).toBe('fake-in-process');
   });
 
+  // Twin: pack-isolation-deployability "resolves an explicitly configured worker,
+  // then refuses once it is gone" proves the same refusal with a REAL deleted
+  // file. This case is kept (protected file) as the default-resolver lane: it
+  // reaches the refusal through `resolveWorkerEntry()` with no env override.
   it('a host with no worker artifact REFUSES the dispatch instead of running it somewhere weaker', async () => {
     entryBroken.value = true;
     const run = await runProbe(writeProbePack('return { status: "success", outputs: {} };'));

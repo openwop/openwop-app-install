@@ -5,6 +5,15 @@
  *   - 429 carries the canonical {error, message, details, Retry-After}
  *     envelope.
  *   - OPENWOP_RATELIMIT_DISABLED=true bypasses all checks.
+ *
+ * Decision records: ADR 0640 (the read/write tier split and FORCE overriding
+ * both) and the spec's rest-endpoints §429 envelope (`rate-limit-envelope`).
+ * Every knob this file sets is snapshotted at load and restored in `afterAll`.
+ *
+ * What turns it red (sabotage-witnessed, /grade-tests 8f wave 1, probes
+ * 8fw1g3-rl-*): the read floor, the tier split, FORCE, the SSE exemption's
+ * accept/path/exempt legs, the session key, the concurrent cap and its release,
+ * the DISABLED bypass, the loopback XFF handling and the IP scope.
  */
 
 import { beforeEach, afterAll, describe, expect, it } from 'vitest';
@@ -53,6 +62,13 @@ async function startApp(): Promise<{ port: number; close: () => Promise<void> }>
 
 let closeFn: () => Promise<void>;
 
+const KNOBS = [
+  'OPENWOP_FORCE_RATE_LIMIT', 'OPENWOP_RATELIMIT_DISABLED', 'OPENWOP_RATELIMIT_IP_READ_REQS_PER_MIN',
+  'OPENWOP_RATELIMIT_IP_REQS_PER_MIN', 'OPENWOP_RATELIMIT_IP_RUNS_PER_DAY', 'OPENWOP_RATELIMIT_SESSION_CONCURRENT',
+  'OPENWOP_RATELIMIT_SESSION_RUNS_PER_DAY', 'OPENWOP_RATELIMIT_SESSION_RUNS_PER_MIN', 'OPENWOP_RATELIMIT_TRUST_LOOPBACK',
+] as const;
+const savedKnobs = new Map<string, string | undefined>(KNOBS.map((k) => [k, process.env[k]]));
+
 describe('P0.4 rate limit', () => {
   beforeEach(async () => {
     _resetRateLimitState();
@@ -76,6 +92,11 @@ describe('P0.4 rate limit', () => {
 
   afterAll(async () => {
     if (closeFn) await closeFn();
+    for (const [k, v] of savedKnobs) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    _resetRateLimitState();
   });
 
   it('per-IP request limit returns 429 with retry-after', async () => {

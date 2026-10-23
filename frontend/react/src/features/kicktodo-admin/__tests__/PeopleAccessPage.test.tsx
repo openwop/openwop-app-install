@@ -27,6 +27,11 @@ const state = {
 vi.mock('../../../client/kicktodoOrgClient.js', () => ({
   getAdminPeople: () => state.getAdminPeople(),
 }));
+// ADR 0910 D11 — the page now hosts the Operator access panel; a non-superadmin
+// sees nothing of it, and this lens test must not make its live access read.
+vi.mock('../../../client/useEffectiveAccess.js', () => ({
+  useEffectiveAccessState: () => ({ access: { superadmin: false }, resolved: true }),
+}));
 
 import { PeopleAccessPage } from '../PeopleAccessPage.js';
 

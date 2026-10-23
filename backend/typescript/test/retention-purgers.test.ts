@@ -22,6 +22,24 @@
  * Importing each service module triggers its module-load purger registration; the test
  * seeds backdated rows through a DurableCollection over the SAME backend the purger reads,
  * then drives the host seam directly via `purgeRetained`.
+ *
+ * DOUBLE GUARD (tenant). A feature purger reads `store.listForTenantIndexed(tenantId)`
+ * AND `purgeRowsByAge` re-checks each row's tenant. "never crosses tenants" is held by
+ * BOTH, so sabotaging either one alone stays green by design (round-1 probe
+ * rp-tenantrow-feature: the primitive's copy removed, the feature read still held).
+ * The primitive's copy is witnessed on its own by the GOV-1 "only this tenant…" case;
+ * the crm purger's row source + mapping (the piece both guards read) is probed as one
+ * unit (8fw1g4-rp-tenant-both-r2).
+ *
+ * Ceiling (order): `boom-p5` and `partial-gov1` stay registered for the rest of the
+ * file (there is no single-purger unregister; `__resetRetentionPurgers` would also drop
+ * the module-load feature purgers). Every assertion selects its result by feature name
+ * and the extra purgers delete nothing real, so this is order-safe, not order-free.
+ *
+ * Sabotages that red this file (8fw1g4 round 1 + 2): the primitive's tenant/age
+ * filter, strict `<` at the cutoff, the crm classification check, purgeRetained's and
+ * purgeRowsByAge's blank-tenant guards, the per-row and per-feature catches, the
+ * `failed` surfacing, and crm deleting through anything but its own delete.
  */
 
 import { beforeEach, describe, expect, it } from 'vitest';
@@ -173,7 +191,10 @@ describe('GOV-1 — purgeRowsByAge resilience', () => {
 
   it('fail-closed on a blank tenant — deletes nothing', async () => {
     const deleted: string[] = [];
-    const out = await purgeRowsByAge('t', rows, '', cutoffIso, rowOf, async (id) => { deleted.push(id); });
+    // A row whose tenant IS blank, so a missing guard has something to match
+    // (`'' === ''`); with only non-blank rows the guard could never matter.
+    const withBlank = [...rows, { id: 'blank', tenantId: '', updatedAt: OLD }];
+    const out = await purgeRowsByAge('t', withBlank, '', cutoffIso, rowOf, async (id) => { deleted.push(id); });
     expect(deleted).toEqual([]);
     expect(out).toEqual({ deleted: 0, failed: 0 });
   });

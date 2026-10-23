@@ -1,6 +1,6 @@
 # ADR 0929 — RFC 0245 host witness: a recorded tool error replays as an error
 
-Status: Accepted (requested by ec via 67, user-approved 2026-10-18) — implementation in this PR; the suite pin waits on 2.46.18
+Status: implemented (#4989 `05048832b`, train 154, 2026-10-19; cut 154c matched the prediction; RFC 0245 `Accepted`)
 
 ## Context
 
@@ -117,11 +117,14 @@ the replay leg.
 | Phase | Change | Witness |
 |---|---|---|
 | P1 | D1–D4 | `test/rfc0245-fixture-errors.test.ts` (§A validation; §B boundary: typed error, no miss, no live retry; §C advert + listing + refusal naming the field; the replay leg end to end, judged as the conformance judge does; promotion), `test/adr0889-store-integrity.test.ts` (both sides of the promote rule) |
-| P2 | D5: pin 2.46.18, sync fixtures, KMS check | `vendored-fixture-parity-gate`, the m2 lane, the cut |
+| P2 | D5: pin 2.46.18, sync fixtures, KMS check | `vendored-fixture-parity-gate`, the m2 lane, the cut: **154c** on `3566445be`, bundle `333b89473c89`, served == bucket, 842 rows 459/0/11/372 |
 
 ## Open questions
 
-- [ ] P2 pin **2.46.18** once it installs from an empty folder (ec's signal, via 67).
-- [ ] The cut matching ec's prediction.
+- [x] P2 pin **2.46.18**: in #4989. Lockfile added 0 / removed 0, `@azure/core-rest-pipeline` intact, `kms-backend-preflight` green.
+- [x] The cut matching ec's prediction. **154c** (`3566445be`, suite 2.46.18,
+  bundle `333b89473c89`, served == bucket): 459/0/11/372, exactly the three
+  predicted RFC 0245 rows more than 151c and 141c, and no other row changed.
+  ec took the evidence, and RFC 0245 is `Accepted` in openwop.
 - [ ] RFC 0245 UQ 1: a registered tool-failure code would replace
   `tool_execution_failed`.

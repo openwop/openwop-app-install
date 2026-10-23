@@ -25,7 +25,8 @@ function nodePackDirs(): string[] {
 
 describe('pack manifest ↔ impl parity (every node pack)', () => {
   const dirs = nodePackDirs();
-  it('finds the corpus (non-empty)', () => { expect(dirs.length).toBeGreaterThan(10); });
+  // Floor = the measured count: 127 node packs at 7321e3612 (2026-10-18).
+  it('finds the corpus (non-empty)', () => { expect(dirs.length).toBeGreaterThanOrEqual(127); });
 
   it.each(dirs)('%s: pack.json nodes[] === index.mjs exports (both directions)', async (dir) => {
     const manifest = JSON.parse(readFileSync(join(PACKS_DIR, dir, 'pack.json'), 'utf8')) as

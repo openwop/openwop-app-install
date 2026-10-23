@@ -5,8 +5,19 @@
  * point — cross-tenant isolation via actual restricted LOGIN roles, including qualified
  * foreign reads, role resets, PUBLIC grants, and account erasure.
  *
- * Gated on Docker; OPENWOP_PG_SQL_LIVE=1 (set by the dedicated CI job)
- * hard-requires the run so a green job means validated, never a silent skip.
+ * Gated on Docker. It does NOT run in the default gate (`npm run ci` sets
+ * OPENWOP_SKIP_TESTCONTAINERS=1): the only runner is `npm run ci:full`
+ * (OPENWOP_CI_LIVE=1, `scripts/ci.sh`), which sets OPENWOP_PG_SQL_LIVE=1 to
+ * hard-require the run, so a green live lane means validated, never a silent
+ * skip. (Hosted CI, which this header used to cite as "the dedicated CI job", is
+ * disabled.) The isolation claims here — qualified foreign reads, SET ROLE,
+ * PUBLIC grants, SECURITY DEFINER, large objects — have NO gate-lane twin:
+ * `pg-sql.test.ts` pins only the issued statement sequence.
+ *
+ * Order: within one image's describe, the count assertions (`n === 3`) depend on
+ * the earlier cases' inserts into `t1.items`, so this file is NOT shuffle-safe.
+ * It is not restructured because this machine has no Docker to verify a rewrite
+ * (/grade-tests 8f w1: an honest ceiling, recorded).
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { PostgreSqlContainer, type StartedPostgreSqlContainer } from '@testcontainers/postgresql';

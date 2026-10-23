@@ -13,8 +13,17 @@
  * `idempotency`, so `ON CONFLICT` has nothing to conflict on and every racer "wins" — the
  * exact property under test only exists on a real engine. Hence: testcontainers.
  *
- * Gated on Docker; OPENWOP_PG_RETENTION_LIVE=1 (set by the dedicated CI job) hard-requires
- * the run so a green job means validated, never a silent skip.
+ * Gated on Docker; OPENWOP_PG_RETENTION_LIVE=1 hard-requires the run so a green job
+ * means validated, never a silent skip.
+ *
+ * CORRECTED 2026-10-18 (8fw1g4, /grade-tests): this said OPENWOP_PG_RETENTION_LIVE=1 was
+ * "set by the dedicated CI job". No such job exists: hosted CI is disabled (CLAUDE.md,
+ * "Local CI is THE gate"), and `npm run ci` sets OPENWOP_SKIP_TESTCONTAINERS=1, so the
+ * default gate SKIPS this file. It runs only where Docker is present and the
+ * `OPENWOP_CI_LIVE` block of `scripts/ci.sh` names it (`npm run ci:full`, added by the
+ * same change as this note). Before that it was the H59 class — a test that runs in no
+ * lane. Its "two concurrent sweeps" race is still unforced (two pool connections usually
+ * interleave; unverified here, this machine has no Docker).
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { PostgreSqlContainer, type StartedPostgreSqlContainer } from '@testcontainers/postgresql';
